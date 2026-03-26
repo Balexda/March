@@ -34,7 +34,7 @@ Not solving this means AI-assisted development remains limited to single-session
 
 March consists of five major components, delivered incrementally:
 
-**Spawn** — The sandboxed executor. Accepts a prompt, dispatches it to a headless AI session (initially Gemini) running inside a Docker container with no outbound internet access. The spawn writes its final output (response text and/or git patch) to a designated file location within the container. A deterministic extraction process retrieves the output.
+**Spawn** — The disposable, one-shot sandboxed executor. A spawn is a pure function: one input (the prompt and snapshotted context), one output (the result). It runs a headless AI session (initially Gemini) inside a Docker container with no outbound network access and no ability to write to disk outside the sandbox. The LLM must terminate before output extraction occurs — there is no concurrent access to results while the agent is running. A deterministic extraction process retrieves the output only after the spawn has fully stopped.
 
 **Hatchery** — The session profile manager. A non-LLM functional system that configures sandbox profiles: what base image to use, what files to mount, what tools are available, what permissions are granted. Profiles are declarative and version-controlled.
 
@@ -48,10 +48,10 @@ March consists of five major components, delivered incrementally:
 
 ## Design Considerations
 
-- **Sandbox integrity is the highest priority.** Spawns run in Docker containers with no outbound network access. Getting output out (structured response or git patch to a known file location) without granting broad access is the central sandboxing challenge. If the sandbox is compromised, running an LLM in yolo mode is catastrophically unsafe.
+- **Sandbox integrity is the highest priority.** A spawn is an isolated pure function: one input, one output, no side effects. Spawns run in Docker containers with no outbound network access and no write access outside the sandbox. The only data entering is the prompt and a snapshotted context; the only data leaving is the extracted result. The LLM must fully terminate before output extraction begins — there is no window where the agent and the extraction process access the sandbox concurrently. If this isolation model is compromised, running an LLM in yolo mode is catastrophically unsafe.
 - **Deterministic systems where possible.** Herald, Hatchery, and Brood are explicitly not LLM-powered. They are functional programs with predictable behavior. This reduces the surface area of non-deterministic decisions to Spawn (execution) and Legate (orchestration).
 - **tmux as the session substrate.** Building on patterns from agent-deck, sessions live in tmux, giving the operator the ability to SSH in and attach directly. Docker provides the isolation layer; tmux provides the observability and interactivity layer.
-- **Output extraction over network access.** Rather than giving spawns API access to push results, spawns write output to a designated location. A deterministic process (part of Herald/Brood) extracts and routes it. This inverts the trust model — the spawn never initiates outbound communication.
+- **Output extraction over network access.** Spawns never initiate outbound communication. Output is written to a designated location within the sandbox, and extraction occurs only after the LLM process has terminated. This is a sequential, non-concurrent handoff: run → stop → extract. The spawn cannot influence the extraction process because it is no longer running when extraction begins.
 - **SmithyCLI as the template for CLI and skill delivery.** The single-source, multi-agent template pattern from SmithyCLI (one markdown file deployed to agent-specific locations) carries forward. Each milestone ships skills that cover interactions with newly built components, accumulating into Legate's eventual behavior. The `march init` command bootstraps the environment, mirroring the `smithy init` model.
 - **Code review via GitHub.** Spawns produce patches or branches. Integration tooling (part of Brood or a dedicated component) takes spawn output and creates PRs or applies patches so the operator can review through standard GitHub workflows. Spawns do not get outside internet access, so this integration is handled by the deterministic infrastructure layer.
 - **Persistent state via Docker and tmux.** Running sessions in Docker containers and tmux sessions provides natural durability. State persists across interactions without requiring a separate persistence layer in the early milestones.
@@ -71,10 +71,11 @@ March consists of five major components, delivered incrementally:
 **Description**: Build the ability to dispatch a prompt to a sandboxed headless AI session and retrieve the response. This is the first usable component — a human can send work to an isolated executor and get output back safely.
 
 **Success Criteria**:
-- A prompt can be dispatched to a headless AI session running inside a Docker container with no outbound internet access.
-- The spawn writes its output (text response and/or git patch) to a designated file location.
-- A deterministic extraction process retrieves the output from the container.
-- The operator can verify that the spawn had no network access beyond what was explicitly granted.
+- A prompt and snapshotted context can be dispatched to a headless AI session running inside a Docker container with no outbound internet access and no write access outside the sandbox.
+- The spawn writes its output (text response and/or git patch) to a designated location within the sandbox.
+- The LLM process fully terminates before output extraction begins — no concurrent access.
+- A deterministic extraction process retrieves the output from the stopped container.
+- The operator can verify that the spawn had no network access and no disk access beyond the sandbox.
 - March CLI is scaffolded with `march init` deploying initial skills for spawn interaction.
 
 ### Milestone 2: Hatchery
