@@ -34,13 +34,13 @@ Not solving this means AI-assisted development remains limited to single-session
 
 March consists of five major components, delivered incrementally:
 
-**Spawn** — The disposable, one-shot sandboxed executor. A spawn is a pure function: one input (the prompt and snapshotted context), one output (the result). It runs a headless AI session (initially Gemini) inside a Docker container with no outbound network access and no ability to write to disk outside the sandbox. The LLM must terminate before output extraction occurs — there is no concurrent access to results while the agent is running. A deterministic extraction process retrieves the output only after the spawn has fully stopped.
+**Spawn** — The disposable, one-shot sandboxed executor. A spawn is a pure function: one input (the prompt and snapshotted context), one output (a structured JSON result). It runs a headless AI session (initially Gemini) inside a Docker container with no outbound network access and no ability to write to disk outside the sandbox. The LLM must terminate before output extraction occurs — there is no concurrent access to results while the agent is running. A deterministic extraction process retrieves the JSON output only after the spawn has fully stopped. The multi-backend interface is prompt in, structured JSON out — backends differ only in completion signaling, and the rest of the system never needs to know which backend ran.
 
-**Hatchery** — The session profile manager. A non-LLM functional system that configures sandbox profiles: what base image to use, what files to mount, what tools are available, what permissions are granted. Profiles are declarative and version-controlled.
+**Hatchery** — The session profile manager. A non-LLM functional system that configures sandbox profiles: what base image to use, what files to mount, what tools are available, what permissions are granted. Profiles are declarative, version-controlled, and initialized with opinionated defaults that `march init` materializes as editable files.
 
 **Brood** — The session lifecycle manager. A non-LLM functional system that interacts with the Hatchery to spin up, track, and tear down spawn sessions. Provides the operator with visibility into what's running, what's completed, and what needs attention.
 
-**Herald** — The event bus. A deterministic, non-LLM system that routes events (spawn completion, errors, escalations, status changes) between components. First-class clients are built from the outset rather than relying on message-passing heuristics.
+**Herald** — The event bus. A deterministic, non-LLM system that routes events (spawn completion, errors, escalations, status changes) between components. Consumes the structured JSON output format produced by spawns. First-class clients are built from the outset rather than relying on message-passing heuristics.
 
 **Legate** — The intelligent orchestrator. An LLM-powered interactive shell that owns the full March workflow — planning, dispatch, monitoring, escalation, and integration. Leverages an LLM (likely Claude Code) for reasoning. Much of its behavior is prototyped incrementally via smithy-style skills deployed with each preceding milestone.
 
@@ -56,13 +56,16 @@ March consists of five major components, delivered incrementally:
 - **Code review via GitHub.** Spawns produce patches or branches. Integration tooling (part of Brood or a dedicated component) takes spawn output and creates PRs or applies patches so the operator can review through standard GitHub workflows. Spawns do not get outside internet access, so this integration is handled by the deterministic infrastructure layer.
 - **Persistent state via Docker and tmux.** Running sessions in Docker containers and tmux sessions provides natural durability. State persists across interactions without requiring a separate persistence layer in the early milestones.
 
+## Decisions
+
+- **Spawn output format**: Structured JSON envelope, which may include a git patch as a payload field. This gives Herald a consistent format to consume regardless of content. The exact schema (required fields, optional payload types, metadata) will be defined during Milestone 1 specification.
+- **Hatchery profile approach**: Profiles lean heavily on opinionated defaults. `march init` materializes those defaults as editable files so the operator can see exactly what they're getting and adjust as needed. The exact schema (file format, field structure, override mechanics) will be defined during Milestone 2 specification.
+- **Multi-backend spawn interface**: The common abstraction is prompt in, structured JSON out. Backends differ only in completion signaling: Gemini and Codex use native headless mode with completion hooks that grab the patch and response; Claude uses prompt augmentation instructing it to write output to a designated location when finished, with external detection of completion. The rest of the system (Brood, Herald) sees only a stopped container with a JSON file at a known location — it never needs to know which backend ran.
+
 ## Open Questions
 
 - **Naming**: `march` vs `the-march` for the CLI binary and package name.
-- **Spawn output schema**: The output is structured JSON, which may include a git patch as a payload field. This gives Herald a consistent format to consume regardless of content. The exact schema (required fields, optional payload types, metadata) needs to be defined.
-- **Hatchery profile schema**: Profiles lean heavily on opinionated defaults. `march init` materializes those defaults as editable files so the operator can see exactly what they're getting and adjust as needed. The exact schema (file format, field structure, override mechanics) needs to be defined.
 - **Herald protocol**: What event format and transport does the Herald use? File-based events, Unix sockets, or something else within the Docker/tmux environment?
-- **Multi-backend spawn interface**: The common abstraction is prompt in, structured JSON out. Backends differ only in completion signaling: Gemini and Codex use native headless mode with completion hooks that grab the patch and response; Claude uses prompt augmentation instructing it to write output to a designated location when finished, with external detection of completion. The rest of the system (Brood, Herald) sees only a stopped container with a JSON file at a known location — it never needs to know which backend ran.
 
 ## Milestones
 
