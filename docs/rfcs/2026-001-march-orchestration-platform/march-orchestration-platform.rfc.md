@@ -60,7 +60,7 @@ March consists of five major components, delivered incrementally:
 
 - **Naming**: `march` vs `the-march` for the CLI binary and package name.
 - **Spawn output schema**: The output is structured JSON, which may include a git patch as a payload field. This gives Herald a consistent format to consume regardless of content. The exact schema (required fields, optional payload types, metadata) needs to be defined.
-- **Hatchery profile schema**: What does a declarative sandbox profile look like? How much flexibility is needed versus how much should be opinionated defaults?
+- **Hatchery profile schema**: Profiles lean heavily on opinionated defaults. `march init` materializes those defaults as editable files so the operator can see exactly what they're getting and adjust as needed. The exact schema (file format, field structure, override mechanics) needs to be defined.
 - **Herald protocol**: What event format and transport does the Herald use? File-based events, Unix sockets, or something else within the Docker/tmux environment?
 - **Multi-backend spawn interface**: What is the common abstraction that lets a spawn be backed by Gemini, Claude Code, or Codex without the rest of the system caring?
 
