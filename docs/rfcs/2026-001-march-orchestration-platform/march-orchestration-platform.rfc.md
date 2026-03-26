@@ -59,7 +59,7 @@ March consists of five major components, delivered incrementally:
 ## Open Questions
 
 - **Naming**: `march` vs `the-march` for the CLI binary and package name.
-- **Spawn output format**: Should spawns produce structured JSON responses, raw git patches, or both? What's the minimal contract between a spawn and the extraction process?
+- **Spawn output schema**: The output is structured JSON, which may include a git patch as a payload field. This gives Herald a consistent format to consume regardless of content. The exact schema (required fields, optional payload types, metadata) needs to be defined.
 - **Hatchery profile schema**: What does a declarative sandbox profile look like? How much flexibility is needed versus how much should be opinionated defaults?
 - **Herald protocol**: What event format and transport does the Herald use? File-based events, Unix sockets, or something else within the Docker/tmux environment?
 - **Multi-backend spawn interface**: What is the common abstraction that lets a spawn be backed by Gemini, Claude Code, or Codex without the rest of the system caring?
@@ -72,7 +72,7 @@ March consists of five major components, delivered incrementally:
 
 **Success Criteria**:
 - A prompt and snapshotted context can be dispatched to a headless AI session running inside a Docker container with no outbound internet access and no write access outside the sandbox.
-- The spawn writes its output (text response and/or git patch) to a designated location within the sandbox.
+- The spawn writes its output as structured JSON (which may include a git patch as a payload field) to a designated location within the sandbox.
 - The LLM process fully terminates before output extraction begins — no concurrent access.
 - A deterministic extraction process retrieves the output from the stopped container.
 - The operator can verify that the spawn had no network access and no disk access beyond the sandbox.
