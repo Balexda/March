@@ -28,7 +28,7 @@ Not solving this means AI-assisted development remains limited to single-session
 - **Model-agnostic orchestration**: Support multiple AI backends (Gemini for headless spawns, Claude Code for interactive sessions, others as needed) through a common interface.
 - **Deterministic coordination**: Build the event bus (Herald), session management (Brood), and profile configuration (Hatchery) as functional, non-LLM systems — reliable infrastructure, not vibed behavior.
 - **Incremental capability delivery**: Each milestone produces a usable component, with smithy-style skills deployed alongside to provide a pseudo-legate until the full orchestrator exists.
-- **Observable and attachable**: All sessions run in tmux containers that the operator can SSH into and attach to directly.
+- **Observable and attachable**: Interactive components (Legate, future session types) run in tmux sessions that the operator can SSH into and attach to directly. Spawns are headless and non-interactable but their status and output are observable via the March CLI.
 
 ## Proposal
 
@@ -51,7 +51,7 @@ March consists of five major components, delivered incrementally:
 - **Sandbox integrity is the highest priority.** A spawn is an isolated pure function: one input, one output, no side effects. Spawns run in Docker containers with no outbound network access and no write access outside the sandbox. The only data entering is the finalized prompt and a snapshot of a git worktree (copied into the container, not mounted); the only data leaving is the extracted result. The LLM must fully terminate before output extraction begins — there is no window where the agent and the extraction process access the sandbox concurrently. If this isolation model is compromised, running an LLM in yolo mode is catastrophically unsafe.
 - **Worktree-per-spawn isolation.** Each spawn gets its own git worktree and dedicated branch. The worktree is snapshotted into the Docker container so the LLM cannot modify the host filesystem. When a result comes back, the worktree provides a ready-made location to apply the patch and trigger code review. This also eliminates branch race conditions — concurrent spawns never compete for the same branch.
 - **Deterministic systems where possible.** Herald, Hatchery, and Brood are explicitly not LLM-powered. They are functional programs with predictable behavior. This reduces the surface area of non-deterministic decisions to Spawn (execution) and Legate (orchestration).
-- **tmux as the session substrate.** Building on patterns from agent-deck, sessions live in tmux, giving the operator the ability to SSH in and attach directly. Docker provides the isolation layer; tmux provides the observability and interactivity layer.
+- **tmux for interactive components, not spawns.** Spawns are headless and non-interactable — they run as pure Docker containers with no tmux session. tmux is the substrate for interactive components (Legate, and potentially future session types) where the operator needs to SSH in and attach directly. Building on patterns from agent-deck, tmux provides the observability and interactivity layer for components that benefit from it.
 - **Output extraction over network access.** Spawns never initiate outbound communication. Output is written to a designated location within the sandbox, and extraction occurs only after the LLM process has terminated. This is a sequential, non-concurrent handoff: run → stop → extract. The spawn cannot influence the extraction process because it is no longer running when extraction begins.
 - **SmithyCLI as the template for CLI and skill delivery.** The single-source, multi-agent template pattern from SmithyCLI (one markdown file deployed to agent-specific locations) carries forward. Each milestone ships skills that cover interactions with newly built components, accumulating into Legate's eventual behavior. The `march init` command bootstraps the environment, mirroring the `smithy init` model.
 - **Code review via GitHub.** Spawns produce patches or branches. Integration tooling (part of Brood or a dedicated component) takes spawn output and creates PRs or applies patches so the operator can review through standard GitHub workflows. Spawns do not get outside internet access, so this integration is handled by the deterministic infrastructure layer.
@@ -102,7 +102,7 @@ March consists of five major components, delivered incrementally:
 **Success Criteria**:
 - Multiple spawn sessions can be launched and tracked concurrently.
 - Session status (running, completed, failed, needs-attention) is visible via the March CLI.
-- The operator can SSH into the host and attach to any active session via tmux.
+- The operator can SSH into the host and attach to interactive sessions (e.g., Legate) via tmux. Spawn sessions are headless and observable via CLI only.
 - Sessions can be torn down cleanly, with output preserved.
 - Skills updated to cover Brood management. The accumulated skill set forms a functional pseudo-legate.
 - **MVP complete**: the system is usable for dispatching, configuring, and managing parallel sandboxed AI work.
