@@ -62,7 +62,7 @@ March consists of five major components, delivered incrementally:
 - **Spawn output schema**: The output is structured JSON, which may include a git patch as a payload field. This gives Herald a consistent format to consume regardless of content. The exact schema (required fields, optional payload types, metadata) needs to be defined.
 - **Hatchery profile schema**: Profiles lean heavily on opinionated defaults. `march init` materializes those defaults as editable files so the operator can see exactly what they're getting and adjust as needed. The exact schema (file format, field structure, override mechanics) needs to be defined.
 - **Herald protocol**: What event format and transport does the Herald use? File-based events, Unix sockets, or something else within the Docker/tmux environment?
-- **Multi-backend spawn interface**: What is the common abstraction that lets a spawn be backed by Gemini, Claude Code, or Codex without the rest of the system caring?
+- **Multi-backend spawn interface**: The common abstraction is prompt in, structured JSON out. Backends differ only in completion signaling: Gemini and Codex use native headless mode with completion hooks that grab the patch and response; Claude uses prompt augmentation instructing it to write output to a designated location when finished, with external detection of completion. The rest of the system (Brood, Herald) sees only a stopped container with a JSON file at a known location — it never needs to know which backend ran.
 
 ## Milestones
 
