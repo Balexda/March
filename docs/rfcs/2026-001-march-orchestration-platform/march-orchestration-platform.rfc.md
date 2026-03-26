@@ -72,17 +72,16 @@ March consists of five major components, delivered incrementally:
 
 ### Milestone 1: Spawn
 
-**Description**: Build the ability to dispatch a prompt to a sandboxed headless AI session and retrieve the response. This is the first usable component — a human can send work to an isolated executor and get output back safely.
+**Description**: Build the end-to-end spawn loop and the March CLI that drives it. This is the first usable component — a human can send work to an isolated executor and get a reviewable PR back. The CLI is the primary interface and is a first-class deliverable, not scaffolding.
 
 **Success Criteria**:
-- A git worktree and dedicated branch are created per spawn. The worktree is snapshotted (copied, not mounted) into a Docker container with no outbound internet access and no write access outside the sandbox.
-- A finalized prompt can be dispatched to a headless AI session running inside the container.
+- The March CLI is built with `march init` bootstrapping the working environment (deploying skills and prompts for spawn interaction, following the SmithyCLI pattern).
+- The CLI can dispatch a spawn: create a git worktree and dedicated branch, snapshot (copy, not mount) the worktree into a Docker container with no outbound internet access and no write access outside the sandbox, and pass a finalized prompt to a headless AI session.
 - The spawn writes its output as structured JSON (which may include a git patch as a payload field) to a designated location within the sandbox.
 - The LLM process fully terminates before output extraction begins — no concurrent access.
 - A deterministic extraction process retrieves the output from the stopped container.
 - The operator can verify that the spawn had no network access and no disk access beyond the sandbox.
-- The extracted patch can be applied to the spawn's worktree and branch, pushed, and used to create a GitHub PR for code review. This is the full loop: prompt in → sandbox execution → patch out → reviewable PR.
-- March CLI is scaffolded with `march init` deploying initial skills for spawn interaction.
+- The CLI completes the loop: applies the extracted patch to the spawn's worktree and branch, pushes, and creates a GitHub PR for code review. Full loop: prompt in → sandbox execution → patch out → reviewable PR.
 
 ### Milestone 2: Hatchery
 
