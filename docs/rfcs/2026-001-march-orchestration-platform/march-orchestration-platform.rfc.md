@@ -36,6 +36,16 @@ The initial operator is the author. Making March usable for other solo technical
 - **Incremental capability delivery**: Each milestone produces a usable component, with smithy-style skills deployed alongside to provide a pseudo-legate until the full orchestrator exists.
 - **Observable and attachable**: Interactive components (Legate, future session types) run in tmux sessions that the operator can SSH into and attach to directly. Spawns are headless and non-interactable but their status and output are observable via the March CLI.
 
+## Out of Scope
+
+The following are explicitly not part of this RFC:
+
+- **Multi-user / team collaboration** — March is for a solo operator. Shared workspaces, role-based access, and multi-tenant concerns are not addressed.
+- **Web UI** — March is CLI/TUI-first. A browser-based interface is not planned.
+- **Plugin / extension system** — Third-party extensibility is not a goal. The system is opinionated and internally composable, not a platform for others to extend.
+- **Automated CI/CD integration** — March produces PRs for code review. What happens after merge (CI pipelines, deployment) is outside March's scope.
+- **Local / self-hosted LLM backends** — While theoretically compatible, March does not target Ollama or similar local inference as a backend. The starting point is cloud-hosted headless Gemini.
+
 ## Proposal
 
 March consists of five major components, delivered incrementally:
