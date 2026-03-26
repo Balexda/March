@@ -22,6 +22,12 @@ The core problem is not "how do we use AI to write code" but **how do we make a 
 
 Not solving this means AI-assisted development remains limited to single-session, single-task interactions — leaving the economic potential of parallel AI work unrealized.
 
+## Personas
+
+**The Operator** — A solo technical operator who is hands-on with code and wants to scale their own output using AI workers. Comfortable with CLI tooling, git workflows, Docker, and SSH. Currently managing the chaos of multiple terminals, worktrees, agents, and approval loops manually. March exists to give this person a system instead of a pile of tools.
+
+The initial operator is the author. Making March usable for other solo technical operators is a secondary goal that follows naturally once the system works for the first user. Multi-user and team collaboration are not in scope.
+
 ## Goals
 
 - **Safe parallel execution**: Dispatch work to sandboxed AI sessions that cannot cause damage beyond their designated scope, with sandbox integrity treated as an existential requirement.
