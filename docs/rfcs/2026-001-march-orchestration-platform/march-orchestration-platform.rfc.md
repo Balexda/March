@@ -193,12 +193,16 @@ The spawn sandbox is the single most critical security boundary in March. An LLM
 
 ### A7. LLM API Key and Network Access
 
-**Threat**: The spawn needs an LLM API key to call Gemini/Claude/Codex. That key is inside the sandbox. If the sandbox has any network access (even restricted), the LLM could exfiltrate the key or use it for unintended purposes.
+**Threat**: The spawn needs an LLM API key and network access to its LLM backend in order to do work. That key is inside the sandbox. If the sandbox has network access, the LLM could exfiltrate the key or use it for unintended purposes.
+
+**Reality**: A spawn cannot function without reaching its LLM server. The initial backend is headless Gemini, and the sandbox must have the minimum network access required for headless Gemini to operate. A fully local LLM (e.g., Ollama) would not need this, but that is not the starting point.
 
 **Mitigations to evaluate**:
-- If using `--network=none`, the LLM must be accessed through a mechanism that does not require the container to make outbound calls (e.g., the LLM API is proxied through a host-side process that pipes input/output to the container via stdin/stdout or a Unix socket).
-- If a narrow network exception is required (e.g., firewall rule allowing only the LLM API endpoint), the API key exposure is accepted but scoped — and the key should be rotatable and usage-monitored.
-- Prefer the no-network approach where the host drives the LLM API call and injects the response, keeping the key entirely outside the container.
+- Grant the minimum network access headless Gemini requires — restrict outbound traffic via firewall rules to only the specific endpoints Gemini needs (IP-based, not DNS-based where possible).
+- Block all other outbound traffic. The spawn should not be able to reach arbitrary internet hosts.
+- The API key should be rotatable and usage-monitored. Consider per-spawn ephemeral keys if the backend supports it.
+- As additional backends are added, each backend's minimum network requirements should be documented and enforced individually in the Hatchery profile.
+- A host-side proxy approach (piping LLM traffic through a controlled proxy that the container reaches via a local socket) remains a future option to further reduce exposure, but is not required for Milestone 1.
 
 ### A8. Resource Exhaustion
 
