@@ -52,7 +52,7 @@ March consists of five major components, delivered incrementally:
 
 **Spawn** — The disposable, one-shot sandboxed executor. A spawn is a pure function: one input (a finalized prompt and a snapshotted worktree), one output (a structured JSON result). Each spawn gets its own git worktree and associated branch, which is then snapshotted into a Docker container — the container holds a copy, not a mount, so the LLM agent cannot modify the host. The worktree-per-spawn model also ensures no branch race conditions between concurrent spawns and provides a ready-made location to apply the resulting patch for code review. The container has no outbound network access and no ability to write to disk outside the sandbox. The LLM must terminate before output extraction occurs — there is no concurrent access to results while the agent is running. A deterministic extraction process retrieves the JSON output only after the spawn has fully stopped. The multi-backend interface is prompt in, structured JSON out — backends differ only in completion signaling, and the rest of the system never needs to know which backend ran.
 
-**Hatchery** — The session profile manager. A non-LLM functional system that configures sandbox profiles: what base image to use, what files to mount, what tools are available, what permissions are granted. Profiles are declarative, version-controlled, and initialized with opinionated defaults that `march init` materializes as editable files.
+**Hatchery** — The container profile manager. A non-LLM functional system that configures profiles for any containerized March component — not just spawns. Profiles define base image, file mounts, available tools, permissions, and security posture. Different roles get different security profiles: a spawn runs fully sandboxed with no approvals needed; a PR-management agent might have GitHub access but limited filesystem scope; Legate, Brood, and Herald may also deploy in Docker containers with their own profiles. Profiles are declarative, version-controlled, and initialized with opinionated defaults that `march init` materializes as editable files.
 
 **Brood** — The session lifecycle manager. A non-LLM functional system that interacts with the Hatchery to spin up, track, and tear down spawn sessions. Provides the operator with visibility into what's running, what's completed, and what needs attention.
 
@@ -88,7 +88,7 @@ March consists of five major components, delivered incrementally:
 
 ### Milestone 1: Spawn
 
-**Description**: Build the end-to-end spawn loop and the March CLI that drives it. This is the first usable component — a human can send work to an isolated executor and get a reviewable PR back. The CLI is the primary interface and is a first-class deliverable, not scaffolding.
+**Description**: Build the end-to-end spawn loop and the March CLI that drives it. This is the first usable component — a human can send work to an isolated executor and get a reviewable PR back. The CLI is the primary interface and is a first-class deliverable, not scaffolding. Container configuration is hardcoded/minimal in this milestone — Hatchery (Milestone 2) will later formalize it into declarative, editable profiles.
 
 **Success Criteria**:
 - The March CLI is built with `march init` bootstrapping the working environment (deploying skills and prompts for spawn interaction, following the SmithyCLI pattern).
@@ -102,12 +102,13 @@ March consists of five major components, delivered incrementally:
 
 ### Milestone 2: Hatchery
 
-**Description**: Build the session profile configuration system. The Hatchery is a non-LLM functional system that manages declarative sandbox profiles — base images, mounted files, available tools, and permissions.
+**Description**: Build the container profile configuration system. The Hatchery is a non-LLM functional system that manages declarative profiles for any containerized March component. Different roles require different security postures — from fully sandboxed spawns to more permissioned agents that handle PR management or orchestration. The Hatchery formalizes the hardcoded container configuration from Milestone 1 into a general-purpose, editable profile system.
 
 **Success Criteria**:
-- Sandbox profiles can be defined declaratively and version-controlled.
-- Profiles specify base image, file mounts, tool availability, and permission boundaries.
-- Spawn (Milestone 1) consumes Hatchery profiles to configure its containers.
+- Container profiles can be defined declaratively and version-controlled.
+- Profiles specify base image, file mounts, tool availability, network access, and security posture.
+- Multiple security profiles can coexist (e.g., fully sandboxed spawn vs. a more permissioned PR-management agent).
+- Spawn (Milestone 1) consumes Hatchery profiles to configure its containers, replacing the hardcoded configuration.
 - Profiles can be listed, inspected, and validated via the March CLI.
 - Skills updated to cover Hatchery interactions.
 
