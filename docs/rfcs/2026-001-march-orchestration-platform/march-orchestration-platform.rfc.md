@@ -230,3 +230,104 @@ The spawn sandbox is the single most critical security boundary in March. An LLM
 - Set container resource limits (CPU, memory, disk quota) via Docker.
 - Enforce a maximum execution time per spawn. Kill the container if it exceeds the limit.
 - Monitor resource consumption and surface it in spawn status reporting.
+
+---
+
+## Appendix B: Gemini CLI Headless Mode Validation
+
+The RFC assumes headless Gemini as the initial spawn backend. This appendix documents the capabilities that support this choice, based on Gemini CLI's current feature set.
+
+### B1. Headless Dispatch
+
+Gemini CLI supports non-interactive execution via the `--prompt` (or `-p`) flag:
+
+```bash
+gemini --prompt "Your task here" --approval-mode=yolo --output-format json
+```
+
+Headless mode activates automatically when:
+- The `--prompt` flag is provided
+- Running in a non-TTY environment (e.g., Docker, piped input)
+- Input is piped via stdin
+
+The `--approval-mode=yolo` flag auto-approves all tool executions, eliminating interactive prompts — this is exactly the execution model spawns need.
+
+### B2. Completion Signaling
+
+Gemini CLI blocks until completion and exits with standard exit codes:
+
+| Exit Code | Meaning |
+|-----------|---------|
+| `0` | Successful execution |
+| `1` | General error or API failure |
+| `42` | Invalid input |
+| `53` | Turn limit exceeded |
+
+No polling or completion hooks are needed — the process exits when done. This maps cleanly to the spawn model: launch container → process exits → extract output.
+
+### B3. Structured Output
+
+Three output formats are supported:
+
+- **`text`** (default) — human-readable response on stdout
+- **`json`** — single JSON object with response and stats:
+  ```json
+  {
+    "response": "...",
+    "stats": { "inputTokens": 1234, "outputTokens": 5678, "latencyMs": 1200 }
+  }
+  ```
+- **`stream-json`** — newline-delimited JSON events (`init`, `message`, `tool_use`, `tool_result`, `error`, `result`)
+
+The `json` format provides a natural foundation for the spawn output envelope. The spawn's prompt augmentation can instruct Gemini to include the git patch in its response, which the extraction process wraps into the structured JSON schema.
+
+### B4. Docker Sandbox Support
+
+Gemini CLI has native Docker sandbox support:
+
+```bash
+gemini --prompt "task" --sandbox=docker --approval-mode=yolo --output-format json
+```
+
+Additional sandbox options: `podman`, `runsc` (gVisor), `lxc`. Custom Dockerfiles can be placed at `.gemini/sandbox.Dockerfile`. Container resource limits can be set via the `SANDBOX_FLAGS` environment variable:
+
+```bash
+SANDBOX_FLAGS="--cpus=2 --memory=4g" gemini --prompt "task" --sandbox=docker
+```
+
+### B5. Spawn Integration Model
+
+The validated workflow for a Gemini-backed spawn:
+
+1. Create worktree and branch.
+2. Snapshot worktree into a Docker container.
+3. Inside the container, run:
+   ```bash
+   gemini --prompt "<finalized prompt>" \
+     --output-format json \
+     --approval-mode=yolo \
+     --sandbox=docker
+   ```
+4. Process exits (exit code 0 = success).
+5. Extract JSON output from stdout capture or designated file.
+6. Parse response, extract patch, apply to worktree, push, create PR.
+
+### B6. Known Limitations
+
+- **Timeout handling**: Past versions have had issues with MCP timeout enforcement (60s) and API defaults (5 min). Spawns should enforce their own external timeout via container kill.
+- **Double sandboxing**: Gemini's `--sandbox=docker` runs Docker-in-Docker. For spawns already running inside a Docker container, it may be simpler to omit Gemini's sandbox flag and rely on the outer container's isolation. This needs validation during Milestone 1.
+- **API key requirement**: `GEMINI_API_KEY` must be set in the container environment (see Appendix A, section A7 for security implications).
+
+### B7. Validation Status
+
+| Capability | Required | Supported | Notes |
+|-----------|----------|-----------|-------|
+| Headless dispatch | Yes | Yes | `--prompt` flag |
+| Auto-approve all actions | Yes | Yes | `--approval-mode=yolo` |
+| Structured JSON output | Yes | Yes | `--output-format json` |
+| Exit code on completion | Yes | Yes | Standard codes (0, 1, 42, 53) |
+| Docker execution | Yes | Yes | Native `--sandbox=docker` |
+| Resource limits | Yes | Yes | Via `SANDBOX_FLAGS` |
+| No interactive prompts | Yes | Yes | Automatic in non-TTY |
+
+**Conclusion**: Gemini CLI's headless mode validates the spawn backend assumptions in this RFC. No blocking gaps have been identified. The double-sandboxing question (B6) is the primary item to resolve during early Milestone 1 implementation.
