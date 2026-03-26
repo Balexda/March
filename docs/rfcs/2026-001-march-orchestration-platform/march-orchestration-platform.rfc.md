@@ -81,7 +81,7 @@ March consists of five major components, delivered incrementally:
 - The LLM process fully terminates before output extraction begins — no concurrent access.
 - A deterministic extraction process retrieves the output from the stopped container.
 - The operator can verify that the spawn had no network access and no disk access beyond the sandbox.
-- The extracted patch can be applied to the spawn's worktree and branch for code review.
+- The extracted patch can be applied to the spawn's worktree and branch, pushed, and used to create a GitHub PR for code review. This is the full loop: prompt in → sandbox execution → patch out → reviewable PR.
 - March CLI is scaffolded with `march init` deploying initial skills for spawn interaction.
 
 ### Milestone 2: Hatchery
@@ -116,7 +116,6 @@ March consists of five major components, delivered incrementally:
 - First-class Herald clients are available for Spawn, Hatchery, and Brood.
 - The operator can observe the event stream via the March CLI.
 - Components react to events without polling or direct coupling.
-- Integration tooling can take spawn output and create GitHub PRs or apply patches for code review.
 
 ### Milestone 5: Legate
 
