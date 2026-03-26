@@ -48,7 +48,7 @@ March consists of five major components, delivered incrementally:
 
 ## Design Considerations
 
-- **Sandbox integrity is the highest priority.** A spawn is an isolated pure function: one input, one output, no side effects. Spawns run in Docker containers with no outbound network access and no write access outside the sandbox. The only data entering is the finalized prompt and a snapshot of a git worktree (copied into the container, not mounted); the only data leaving is the extracted result. The LLM must fully terminate before output extraction begins — there is no window where the agent and the extraction process access the sandbox concurrently. If this isolation model is compromised, running an LLM in yolo mode is catastrophically unsafe.
+- **Sandbox integrity is the highest priority.** A spawn is an isolated pure function: one input, one output, no side effects. Spawns run in Docker containers with no outbound network access and no write access outside the sandbox. The only data entering is the finalized prompt and a snapshot of a git worktree (copied into the container, not mounted); the only data leaving is the extracted result. The LLM must fully terminate before output extraction begins — there is no window where the agent and the extraction process access the sandbox concurrently. If this isolation model is compromised, running an LLM in yolo mode is catastrophically unsafe. See **Appendix A: Spawn Sandbox Threat Model** for the enumerated attack surface.
 - **Worktree-per-spawn isolation.** Each spawn gets its own git worktree and dedicated branch. The worktree is snapshotted into the Docker container so the LLM cannot modify the host filesystem. When a result comes back, the worktree provides a ready-made location to apply the patch and trigger code review. This also eliminates branch race conditions — concurrent spawns never compete for the same branch.
 - **Deterministic systems where possible.** Herald, Hatchery, and Brood are explicitly not LLM-powered. They are functional programs with predictable behavior. This reduces the surface area of non-deterministic decisions to Spawn (execution) and Legate (orchestration).
 - **tmux for interactive components, not spawns.** Spawns are headless and non-interactable — they run as pure Docker containers with no tmux session. tmux is the substrate for interactive components (Legate, and potentially future session types) where the operator needs to SSH in and attach directly. Building on patterns from agent-deck, tmux provides the observability and interactivity layer for components that benefit from it.
@@ -81,6 +81,7 @@ March consists of five major components, delivered incrementally:
 - The LLM process fully terminates before output extraction begins — no concurrent access.
 - A deterministic extraction process retrieves the output from the stopped container.
 - The operator can verify that the spawn had no network access and no disk access beyond the sandbox.
+- The known attack surfaces enumerated in Appendix A have been evaluated and mitigated.
 - The CLI completes the loop: applies the extracted patch to the spawn's worktree and branch, pushes, and creates a GitHub PR for code review. Full loop: prompt in → sandbox execution → patch out → reviewable PR.
 
 ### Milestone 2: Hatchery
@@ -126,3 +127,84 @@ March consists of five major components, delivered incrementally:
 - It escalates decisions to the operator when intervention is needed.
 - It can coordinate multi-step workflows (plan → dispatch → review → integrate).
 - The accumulated smithy-style skills are integrated as core Legate capabilities.
+
+---
+
+## Appendix A: Spawn Sandbox Threat Model
+
+The spawn sandbox is the single most critical security boundary in March. An LLM running in yolo mode with a compromised sandbox can cause arbitrary damage. This appendix enumerates the known attack surfaces that Milestone 1 must evaluate and mitigate.
+
+### A1. Container Escape
+
+**Threat**: The LLM exploits a Docker runtime vulnerability to break out of the container and access the host.
+
+**Mitigations to evaluate**:
+- Run containers with minimal capabilities (`--cap-drop=ALL`).
+- Use a non-root user inside the container.
+- Consider a secondary isolation layer (e.g., gVisor, rootless Docker) if the threat model warrants it.
+- Keep the Docker runtime patched and up to date.
+
+### A2. Volume Mount Misconfiguration
+
+**Threat**: A misconfigured bind mount exposes host filesystem paths to the container, giving the LLM read or write access to host files.
+
+**Mitigations to evaluate**:
+- Spawns use a snapshot (copy), not a mount. Enforce this at the container creation layer — no bind mounts to host paths.
+- Validate container configuration at launch time to reject any bind mounts.
+- The Hatchery profile schema should make it structurally difficult to accidentally introduce a bind mount.
+
+### A3. Environment Variable Leakage
+
+**Threat**: Environment variables passed to the container expose secrets (API keys, tokens, host configuration) to the LLM.
+
+**Mitigations to evaluate**:
+- Explicitly whitelist environment variables passed to spawn containers. Default to passing nothing.
+- The LLM API key is a special case (see A7). No other secrets should enter the container.
+- Audit the container environment at launch time and log what was passed.
+
+### A4. DNS and Network Information Leakage
+
+**Threat**: Even with no outbound internet access, DNS queries can leak information about the host environment or be used as a covert data exfiltration channel.
+
+**Mitigations to evaluate**:
+- Use `--network=none` on spawn containers to disable all networking, including DNS.
+- If the LLM backend requires network access to reach an API (see A7), use a firewall or proxy that restricts traffic to a single allowed endpoint with no DNS resolution (IP-only).
+
+### A5. Snapshotted Context Contains Secrets
+
+**Threat**: The git worktree snapshot copied into the container includes files containing credentials, API keys, `.env` files, or other secrets that the LLM can read and potentially embed in its output.
+
+**Mitigations to evaluate**:
+- Apply a configurable exclusion list when snapshotting the worktree (e.g., strip `.env`, `.secrets`, credential files).
+- Respect `.gitignore` patterns during snapshot creation — if a file is not tracked, it should not be snapshotted.
+- Consider scanning the snapshot for known secret patterns before container launch.
+- The Hatchery profile should define what gets included in the snapshot, not just what gets excluded.
+
+### A6. Output Manipulation
+
+**Threat**: The LLM crafts its structured JSON output to exploit the extraction process — for example, including shell injection payloads in patch content, malformed JSON designed to crash the extractor, or patch content that modifies files outside the intended scope.
+
+**Mitigations to evaluate**:
+- The extraction process must treat all spawn output as untrusted input.
+- Validate JSON structure before processing.
+- Validate that git patches only touch files within the expected scope.
+- Apply patches in the worktree (an isolated branch) — never directly to main or shared branches.
+- The sequential handoff (LLM stopped before extraction) eliminates the risk of the LLM observing or interfering with extraction, but the output itself remains adversarial input.
+
+### A7. LLM API Key and Network Access
+
+**Threat**: The spawn needs an LLM API key to call Gemini/Claude/Codex. That key is inside the sandbox. If the sandbox has any network access (even restricted), the LLM could exfiltrate the key or use it for unintended purposes.
+
+**Mitigations to evaluate**:
+- If using `--network=none`, the LLM must be accessed through a mechanism that does not require the container to make outbound calls (e.g., the LLM API is proxied through a host-side process that pipes input/output to the container via stdin/stdout or a Unix socket).
+- If a narrow network exception is required (e.g., firewall rule allowing only the LLM API endpoint), the API key exposure is accepted but scoped — and the key should be rotatable and usage-monitored.
+- Prefer the no-network approach where the host drives the LLM API call and injects the response, keeping the key entirely outside the container.
+
+### A8. Resource Exhaustion
+
+**Threat**: The LLM agent consumes excessive CPU, memory, disk, or time — either through runaway behavior or deliberately, as a denial-of-service against the host.
+
+**Mitigations to evaluate**:
+- Set container resource limits (CPU, memory, disk quota) via Docker.
+- Enforce a maximum execution time per spawn. Kill the container if it exceeds the limit.
+- Monitor resource consumption and surface it in spawn status reporting.
