@@ -34,7 +34,7 @@ Not solving this means AI-assisted development remains limited to single-session
 
 March consists of five major components, delivered incrementally:
 
-**Spawn** — The disposable, one-shot sandboxed executor. A spawn is a pure function: one input (the prompt and snapshotted context), one output (a structured JSON result). It runs a headless AI session (initially Gemini) inside a Docker container with no outbound network access and no ability to write to disk outside the sandbox. The LLM must terminate before output extraction occurs — there is no concurrent access to results while the agent is running. A deterministic extraction process retrieves the JSON output only after the spawn has fully stopped. The multi-backend interface is prompt in, structured JSON out — backends differ only in completion signaling, and the rest of the system never needs to know which backend ran.
+**Spawn** — The disposable, one-shot sandboxed executor. A spawn is a pure function: one input (a finalized prompt and a snapshotted worktree), one output (a structured JSON result). Each spawn gets its own git worktree and associated branch, which is then snapshotted into a Docker container — the container holds a copy, not a mount, so the LLM agent cannot modify the host. The worktree-per-spawn model also ensures no branch race conditions between concurrent spawns and provides a ready-made location to apply the resulting patch for code review. The container has no outbound network access and no ability to write to disk outside the sandbox. The LLM must terminate before output extraction occurs — there is no concurrent access to results while the agent is running. A deterministic extraction process retrieves the JSON output only after the spawn has fully stopped. The multi-backend interface is prompt in, structured JSON out — backends differ only in completion signaling, and the rest of the system never needs to know which backend ran.
 
 **Hatchery** — The session profile manager. A non-LLM functional system that configures sandbox profiles: what base image to use, what files to mount, what tools are available, what permissions are granted. Profiles are declarative, version-controlled, and initialized with opinionated defaults that `march init` materializes as editable files.
 
@@ -48,7 +48,8 @@ March consists of five major components, delivered incrementally:
 
 ## Design Considerations
 
-- **Sandbox integrity is the highest priority.** A spawn is an isolated pure function: one input, one output, no side effects. Spawns run in Docker containers with no outbound network access and no write access outside the sandbox. The only data entering is the prompt and a snapshotted context; the only data leaving is the extracted result. The LLM must fully terminate before output extraction begins — there is no window where the agent and the extraction process access the sandbox concurrently. If this isolation model is compromised, running an LLM in yolo mode is catastrophically unsafe.
+- **Sandbox integrity is the highest priority.** A spawn is an isolated pure function: one input, one output, no side effects. Spawns run in Docker containers with no outbound network access and no write access outside the sandbox. The only data entering is the finalized prompt and a snapshot of a git worktree (copied into the container, not mounted); the only data leaving is the extracted result. The LLM must fully terminate before output extraction begins — there is no window where the agent and the extraction process access the sandbox concurrently. If this isolation model is compromised, running an LLM in yolo mode is catastrophically unsafe.
+- **Worktree-per-spawn isolation.** Each spawn gets its own git worktree and dedicated branch. The worktree is snapshotted into the Docker container so the LLM cannot modify the host filesystem. When a result comes back, the worktree provides a ready-made location to apply the patch and trigger code review. This also eliminates branch race conditions — concurrent spawns never compete for the same branch.
 - **Deterministic systems where possible.** Herald, Hatchery, and Brood are explicitly not LLM-powered. They are functional programs with predictable behavior. This reduces the surface area of non-deterministic decisions to Spawn (execution) and Legate (orchestration).
 - **tmux as the session substrate.** Building on patterns from agent-deck, sessions live in tmux, giving the operator the ability to SSH in and attach directly. Docker provides the isolation layer; tmux provides the observability and interactivity layer.
 - **Output extraction over network access.** Spawns never initiate outbound communication. Output is written to a designated location within the sandbox, and extraction occurs only after the LLM process has terminated. This is a sequential, non-concurrent handoff: run → stop → extract. The spawn cannot influence the extraction process because it is no longer running when extraction begins.
@@ -74,11 +75,13 @@ March consists of five major components, delivered incrementally:
 **Description**: Build the ability to dispatch a prompt to a sandboxed headless AI session and retrieve the response. This is the first usable component — a human can send work to an isolated executor and get output back safely.
 
 **Success Criteria**:
-- A prompt and snapshotted context can be dispatched to a headless AI session running inside a Docker container with no outbound internet access and no write access outside the sandbox.
+- A git worktree and dedicated branch are created per spawn. The worktree is snapshotted (copied, not mounted) into a Docker container with no outbound internet access and no write access outside the sandbox.
+- A finalized prompt can be dispatched to a headless AI session running inside the container.
 - The spawn writes its output as structured JSON (which may include a git patch as a payload field) to a designated location within the sandbox.
 - The LLM process fully terminates before output extraction begins — no concurrent access.
 - A deterministic extraction process retrieves the output from the stopped container.
 - The operator can verify that the spawn had no network access and no disk access beyond the sandbox.
+- The extracted patch can be applied to the spawn's worktree and branch for code review.
 - March CLI is scaffolded with `march init` deploying initial skills for spawn interaction.
 
 ### Milestone 2: Hatchery
