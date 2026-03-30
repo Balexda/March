@@ -18,7 +18,7 @@
 
 ### Feature 2: Spawn Dispatch
 
-**Description**: Dispatch a spawn from the CLI: create a git worktree and dedicated branch, snapshot the worktree into a Docker container with no outbound internet access and no host write access, and pass a finalized prompt to a headless AI session inside the container.
+**Description**: Dispatch a spawn from the CLI: create a git worktree and dedicated branch, snapshot the worktree into a Docker container with restricted outbound access (allowlisted to the LLM API endpoint only) and no host write access, and pass a finalized prompt to a headless AI session inside the container.
 
 **User-Facing Value**: The operator can send a task to an isolated, sandboxed AI executor with a single CLI command. Each spawn gets its own branch and container — no manual worktree or Docker management required.
 
