@@ -31,7 +31,7 @@ The initial operator is the author. Making March usable for other solo technical
 ## Goals
 
 - **Safe parallel execution**: Dispatch work to sandboxed AI sessions that cannot cause damage beyond their designated scope, with sandbox integrity treated as an existential requirement.
-- **Model-agnostic orchestration**: Support multiple AI backends (Gemini for headless spawns, Claude Code for interactive sessions, others as needed) through a common interface.
+- **Model-agnostic orchestration**: Support multiple AI backends through a common interface. Both Gemini CLI and Claude Code CLI are validated for headless spawn execution (see Appendices B and C); the operator selects per-spawn based on capability needs, cost model, or preference. Interactive components (Legate) may use any backend that supports conversational interaction.
 - **Deterministic coordination**: Build the event bus (Herald), session management (Brood), and profile configuration (Hatchery) as functional, non-LLM systems — reliable infrastructure, not vibed behavior.
 - **Incremental capability delivery**: Each milestone produces a usable component, with smithy-style skills deployed alongside to provide a pseudo-legate until the full orchestrator exists.
 - **Observable and attachable**: Interactive components (Legate, future session types) run in tmux sessions that the operator can SSH into and attach to directly. Spawns are headless and non-interactable but their status and output are observable via the March CLI.
@@ -44,7 +44,7 @@ The following are explicitly not part of this RFC:
 - **Web UI** — March is CLI/TUI-first. A browser-based interface is not planned.
 - **Plugin / extension system** — Third-party extensibility is not a goal. The system is opinionated and internally composable, not a platform for others to extend.
 - **Automated CI/CD integration** — March produces PRs for code review. What happens after merge (CI pipelines, deployment) is outside March's scope.
-- **Local / self-hosted LLM backends** — While theoretically compatible, March does not target Ollama or similar local inference as a backend. The starting point is cloud-hosted headless Gemini.
+- **Local / self-hosted LLM backends** — While theoretically compatible, March does not target Ollama or similar local inference as a backend. The starting backends are cloud-hosted Gemini CLI and Claude Code CLI (see Appendices B and C).
 
 ## Proposal
 
@@ -78,7 +78,7 @@ March consists of five major components, delivered incrementally:
 
 - **Spawn output format**: Structured JSON envelope, which may include a git patch as a payload field. This gives Herald a consistent format to consume regardless of content. The exact schema (required fields, optional payload types, metadata) will be defined during Milestone 1 specification.
 - **Hatchery profile approach**: Profiles lean heavily on opinionated defaults. `march init` materializes those defaults as editable files so the operator can see exactly what they're getting and adjust as needed. The exact schema (file format, field structure, override mechanics) will be defined during Milestone 2 specification.
-- **Multi-backend spawn interface**: The common abstraction is prompt in, structured JSON out. Backends differ only in completion signaling: Gemini and Codex use native headless mode with completion hooks that grab the patch and response; Claude uses prompt augmentation instructing it to write output to a designated location when finished, with external detection of completion. The rest of the system (Brood, Herald) sees only a stopped container with a JSON file at a known location — it never needs to know which backend ran.
+- **Multi-backend spawn interface**: The common abstraction is prompt in, structured JSON out. All validated backends (Gemini CLI, Claude Code CLI) support native headless mode with structured JSON output and process-exit completion signaling — no prompt augmentation or external completion detection is needed. Both use the same pattern: `<cli> -p "<prompt>" --output-format json` with backend-specific permission flags (`--approval-mode=yolo` for Gemini, `--dangerously-skip-permissions` for Claude Code). The rest of the system (Brood, Herald) sees only a stopped container with a JSON result — it never needs to know which backend ran. Authentication differs by backend: Gemini requires an API key, while Claude Code supports OAuth session tokens (compatible with Claude Max subscriptions for flat-rate, no-per-token cost). See Appendices B and C for detailed validation.
 
 ## Open Questions
 
@@ -177,7 +177,7 @@ The spawn sandbox is the single most critical security boundary in March. An LLM
 
 **Mitigations to evaluate**:
 - Explicitly whitelist environment variables passed to spawn containers. Default to passing nothing.
-- The LLM API key is a special case (see A7). No other secrets should enter the container.
+- LLM credentials (API keys or session tokens) are a special case (see A7). No other secrets should enter the container.
 - Audit the container environment at launch time and log what was passed.
 
 ### A4. DNS and Network Information Leakage
@@ -209,17 +209,22 @@ The spawn sandbox is the single most critical security boundary in March. An LLM
 - Apply patches in the worktree (an isolated branch) — never directly to main or shared branches.
 - The sequential handoff (LLM stopped before extraction) eliminates the risk of the LLM observing or interfering with extraction, but the output itself remains adversarial input.
 
-### A7. LLM API Key and Network Access
+### A7. LLM Credentials and Network Access
 
-**Threat**: The spawn needs an LLM API key and network access to its LLM backend in order to do work. That key is inside the sandbox. If the sandbox has network access, the LLM could exfiltrate the key or use it for unintended purposes.
+**Threat**: The spawn needs credentials and network access to reach its LLM backend. Those credentials are inside the sandbox. If the sandbox has network access, the LLM could exfiltrate credentials or use them for unintended purposes.
 
-**Reality**: A spawn cannot function without reaching its LLM server. The initial backend is headless Gemini, and the sandbox must have the minimum network access required for headless Gemini to operate. A fully local LLM (e.g., Ollama) would not need this, but that is not the starting point.
+**Reality**: A spawn cannot function without reaching its LLM server. The validated backends (Gemini CLI, Claude Code CLI) each require minimum network access to their respective API endpoints. A fully local LLM (e.g., Ollama) would not need this, but that is not the starting point.
+
+**Authentication models differ by backend**:
+- **API key auth** (Gemini, Anthropic API direct): A static API key (`GEMINI_API_KEY` or `ANTHROPIC_API_KEY`) is passed via environment variable. The key has broad access and is a high-value exfiltration target. Rotation and usage monitoring are essential mitigations.
+- **OAuth/session auth** (Claude Code with Claude Max): An OAuth session token is passed into the container, either by mounting `~/.claude/` read-only or by setting the session token as an environment variable. Session tokens are scoped, rotatable, and the underlying Claude Max subscription enforces its own rate limits — providing defense-in-depth that a raw API key does not. This model has security advantages for sandbox use: even if the token is exfiltrated, the subscription's rate limiting and session scoping bound the blast radius.
 
 **Mitigations to evaluate**:
-- Grant the minimum network access headless Gemini requires — restrict outbound traffic via firewall rules to only the specific endpoints Gemini needs (IP-based, not DNS-based where possible).
+- Restrict outbound traffic via firewall rules to only the specific endpoints the backend needs (IP-based, not DNS-based where possible). For Gemini: Gemini API endpoints. For Claude Code: `api.anthropic.com`.
 - Block all other outbound traffic. The spawn should not be able to reach arbitrary internet hosts.
-- The API key should be rotatable and usage-monitored. Consider per-spawn ephemeral keys if the backend supports it.
-- As additional backends are added, each backend's minimum network requirements should be documented and enforced individually in the Hatchery profile.
+- For API key backends: keys should be rotatable and usage-monitored. Consider per-spawn ephemeral keys if the backend supports it.
+- For OAuth/session backends: prefer short-lived or spawn-scoped sessions. Leverage the subscription's built-in rate limiting as a secondary control.
+- Each backend's minimum network requirements should be documented and enforced individually in the Hatchery profile.
 - A host-side proxy approach (piping LLM traffic through a controlled proxy that the container reaches via a local socket) remains a future option to further reduce exposure, but is not required for Milestone 1.
 
 ### A8. Resource Exhaustion
@@ -330,4 +335,133 @@ The validated workflow for a Gemini-backed spawn:
 | Resource limits | Yes | Yes | Via `SANDBOX_FLAGS` |
 | No interactive prompts | Yes | Yes | Automatic in non-TTY |
 
-**Conclusion**: Gemini CLI's headless mode validates the spawn backend assumptions in this RFC. No blocking gaps have been identified. The double-sandboxing question (B6) is the primary item to resolve during early Milestone 1 implementation.
+**Conclusion**: Gemini CLI's headless mode validates the spawn backend assumptions in this RFC. No blocking gaps have been identified. The double-sandboxing question (B6) is the primary item to resolve during early Milestone 1 implementation. See also Appendix C for validation of Claude Code CLI as a second headless backend.
+
+---
+
+## Appendix C: Claude Code CLI Headless Mode Validation
+
+Claude Code CLI supports headless execution with structured output, making it a validated spawn backend alongside Gemini CLI. Notably, Claude Code works with Claude Max subscriptions (flat-rate, no per-token cost), providing an alternative cost model for spawn execution. This appendix documents the capabilities that support this choice.
+
+### C1. Headless Dispatch
+
+Claude Code CLI supports non-interactive execution via the `-p` / `--print` flag:
+
+```bash
+claude -p "Your task here" --output-format json --dangerously-skip-permissions
+```
+
+Headless mode activates automatically when:
+- The `-p` / `--print` flag is provided
+- Running in a non-TTY environment (e.g., Docker, piped input)
+
+The `--dangerously-skip-permissions` flag auto-approves all tool executions, eliminating interactive prompts — equivalent to Gemini's `--approval-mode=yolo`.
+
+Additional flags relevant to spawn execution:
+- `--bare` — Minimal mode: skips hooks, LSP, plugin sync, auto-memory, background prefetches, and CLAUDE.md auto-discovery. Reduces startup overhead and attack surface.
+- `--no-session-persistence` — Disables session persistence; sessions are not saved to disk and cannot be resumed. Appropriate for ephemeral spawn containers.
+- `--model <model>` — Select specific models (e.g., `opus`, `sonnet`, or full model IDs like `claude-opus-4-6`). Allows the operator to match model capability to task complexity.
+- `--max-budget-usd <amount>` — Cap per-spawn cost (relevant for API key auth; Max subscriptions are flat-rate).
+
+### C2. Completion Signaling
+
+Claude Code CLI blocks until completion and exits with standard exit codes:
+
+| Exit Code | Meaning |
+|-----------|---------|
+| `0` | Successful execution |
+| `1` | Error (API failure, tool error, etc.) |
+
+No polling or completion hooks are needed — the process exits when done. This maps cleanly to the spawn model: launch container → process exits → extract output.
+
+### C3. Structured Output
+
+Three output formats are supported:
+
+- **`text`** (default) — human-readable response on stdout
+- **`json`** — single JSON object with rich metadata:
+  ```json
+  {
+    "type": "result",
+    "subtype": "success",
+    "is_error": false,
+    "result": "...",
+    "duration_ms": 5816,
+    "duration_api_ms": 5677,
+    "num_turns": 1,
+    "session_id": "...",
+    "total_cost_usd": 0.047,
+    "usage": {
+      "input_tokens": 3,
+      "output_tokens": 4
+    },
+    "modelUsage": { ... }
+  }
+  ```
+- **`stream-json`** — newline-delimited JSON events for real-time streaming
+
+The `json` format provides a richer envelope than Gemini's, including cost tracking, token usage, session ID, and duration metrics. The spawn's prompt augmentation can instruct Claude to include the git patch in its response, which the extraction process wraps into the structured spawn output schema.
+
+### C4. Docker and Container Support
+
+Claude Code CLI runs in Docker containers. Unlike Gemini, it does not have a native `--sandbox=docker` flag — the outer container managed by March provides the isolation layer directly.
+
+**Authentication in containers** — Claude Code requires credentials to reach the Claude API. Two models are supported:
+
+1. **API key auth**: Set `ANTHROPIC_API_KEY` as an environment variable. Standard per-token billing. Same security characteristics as Gemini's API key model (see A7).
+2. **OAuth/session auth (Claude Max)**: Mount the host's `~/.claude/` directory read-only into the container, or extract and pass only the session token via environment variable. This enables flat-rate spawn execution under a Claude Max subscription — no per-token costs regardless of spawn count or output length.
+
+**Network requirements**: The container must be able to reach `api.anthropic.com`. Restrict outbound traffic via firewall rules to only this endpoint (IP-based where possible), blocking all other outbound traffic.
+
+### C5. Spawn Integration Model
+
+The validated workflow for a Claude Code-backed spawn:
+
+1. Create worktree and branch.
+2. Snapshot worktree into a Docker container.
+3. Inside the container, run:
+   ```bash
+   claude -p "<finalized prompt>" \
+     --output-format json \
+     --dangerously-skip-permissions \
+     --bare \
+     --no-session-persistence \
+     --model sonnet
+   ```
+4. Process exits (exit code 0 = success).
+5. Extract JSON output from stdout capture.
+6. Parse result, extract patch, apply to worktree, push, create PR.
+
+### C6. Known Limitations
+
+- **Auth propagation**: Claude Code's OAuth session must be propagated into the container. The simplest approach (mounting `~/.claude/` read-only) exposes the full Claude config directory. A more surgical approach (extracting only the auth token) requires understanding the internal token storage format, which may change between releases.
+- **Max subscription rate limits**: Claude Max subscriptions have usage-based rate limits. Under heavy parallel spawn workloads, rate limiting may throttle concurrent spawns. The exact limits depend on the subscription tier and are not publicly documented as fixed numbers. Brood should detect rate-limit responses (HTTP 429) and implement backoff/queuing.
+- **No native sandboxing**: Unlike Gemini's `--sandbox=docker`, Claude Code relies entirely on the outer container for isolation. This is actually simpler — no double-sandboxing question to resolve (compare Gemini's B6).
+- **Startup overhead**: Claude Code's full initialization includes hooks, LSP, plugin sync, and CLAUDE.md discovery. The `--bare` flag mitigates this, but startup time should be benchmarked against Gemini for spawn-heavy workloads.
+
+### C7. Validation Status
+
+| Capability | Required | Supported | Notes |
+|-----------|----------|-----------|-------|
+| Headless dispatch | Yes | Yes | `-p` / `--print` flag |
+| Auto-approve all actions | Yes | Yes | `--dangerously-skip-permissions` |
+| Structured JSON output | Yes | Yes | `--output-format json` (richer than Gemini) |
+| Exit code on completion | Yes | Yes | Standard codes |
+| Docker execution | Yes | Yes | Runs in containers; no native sandbox flag needed |
+| Resource limits | Yes | Via Docker | Container-level limits via Docker (no CLI flag) |
+| No interactive prompts | Yes | Yes | Automatic with `-p` or non-TTY |
+| Model selection | Yes | Yes | `--model opus`, `--model sonnet`, etc. |
+| Subscription auth | No | Yes | Claude Max — flat-rate, no per-token cost |
+
+### C8. Agent SDK as Alternative Interface
+
+Beyond CLI wrapping, the Claude Agent SDK provides a programmatic alternative for spawn execution:
+
+- **TypeScript**: `@anthropic-ai/claude-code` — import and invoke Claude Code as a library
+- **Python**: `claude_code_sdk` — same capabilities, Python interface
+
+The Agent SDK gives finer-grained control over session lifecycle, tool availability, and output handling without parsing CLI output. However, it adds a runtime dependency (Node.js or Python) and is more complex to containerize than a single CLI binary.
+
+**Recommendation**: Start with CLI wrapping for Milestone 1 simplicity. The Agent SDK is a natural optimization path for Milestone 3 (Brood) when programmatic session management becomes more valuable.
+
+**Conclusion**: Claude Code CLI's headless mode fully validates the spawn backend requirements. The auth propagation question (C6) is the primary item to resolve during early Milestone 1 implementation. Claude Max subscription support provides a compelling cost model for high-volume spawn workloads — flat-rate execution regardless of token consumption.
