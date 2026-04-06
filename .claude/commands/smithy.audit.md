@@ -88,7 +88,7 @@ Use the checklist matching the artifact's extension. Each checklist defines what
 | **Feasibility** | Are there known technical risks, dependencies, or unknowns that could block milestones? Are constraints realistic? |
 | **Persona Clarity** | Are target personas identified? Is it clear who benefits and how? |
 | **Scope Boundaries** | Is it clear what is explicitly out of scope? Are there adjacent concerns that could cause scope creep? |
-
+| **Decisions vs Open Questions** | Are resolved items listed under Decisions (not Open Questions)? Do Open Questions contain only genuinely unresolved unknowns? |
 ## Audit Checklist (.features.md)
 
 | Category | What to check |
@@ -98,12 +98,12 @@ Use the checklist matching the artifact's extension. Each checklist defines what
 | **Overlap** | Are there features with unclear or overlapping boundaries? |
 | **Dependency Clarity** | Are inter-feature dependencies within the milestone evident, or are they hidden? |
 | **RFC Alignment** | Does the feature map align with the RFC's stated goals and success criteria for this milestone? |
-
 ## Audit Checklist (.spec.md)
 
 | Category | What to check |
 |----------|---------------|
 | **Story Completeness** | Does every user story have acceptance scenarios, priority justification, and an independent test? Are there obvious missing stories? |
+| **Priority Ordering** | Are user stories ordered by priority (all P1 first, then P2, then P3)? If any story appears out of priority order, flag it as a finding. |
 | **Requirement Traceability** | Does every FR trace to at least one user story? Are there user stories with no supporting requirements? |
 | **Cross-Document Consistency** | Do entities in data-model.md match Key Entities in the spec? Do contracts.md interfaces align with integration-related requirements? |
 | **Edge Case Coverage** | Are edge cases from the spec reflected in acceptance scenarios or requirements? Are there unaddressed failure modes? |
@@ -111,7 +111,6 @@ Use the checklist matching the artifact's extension. Each checklist defines what
 | **Contract Completeness** | Do all integration boundaries have defined inputs, outputs, and error conditions? Are there contracts implied by requirements but not documented? |
 | **Ambiguity & Risk** | Are there vague terms, unstated assumptions, or scope boundaries that could be interpreted multiple ways? |
 | **Staleness** | Does the spec still reflect the current codebase reality? Have upstream changes invalidated any assumptions? |
-
 ## Audit Checklist (.tasks.md)
 
 | Category | What to check |
@@ -122,7 +121,6 @@ Use the checklist matching the artifact's extension. Each checklist defines what
 | **Edge Case Coverage** | Are boundary conditions, error paths, and failure modes covered in the tasks? |
 | **FR Traceability** | Does every slice trace to at least one FR or acceptance scenario? Are any FRs unaddressed? |
 | **Dependency Order** | Is the recommended implementation sequence logical? Would reordering reduce risk or unblock parallel work? |
-
 ## Audit Checklist (.strike.md)
 
 | Category | What to check |
@@ -133,7 +131,6 @@ Use the checklist matching the artifact's extension. Each checklist defines what
 | **Data Model Presence** | Is a Data Model section present? If data changes are needed, are entities and relationships defined? |
 | **Contracts Presence** | Is a Contracts section present? If interface changes are needed, are they specified? |
 | **Success Criteria** | Are success criteria numbered, testable, and aligned with the requirements? |
-
 ---
 
 ## Read-Only Enforcement

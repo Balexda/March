@@ -28,39 +28,30 @@ This may be:
 **If a `.tasks.md` file already exists for the target user story** (i.e.,
 `<NN>-<story-slug>.tasks.md` is found in the spec folder):
 
-### 0a. Audit Scan
+### 0a–0b. Audit & Refinement Questions
 
-Read the existing tasks file alongside the source spec, data model, and
-contracts. Perform a structured audit:
+Use the **smithy-refine** sub-agent. Pass it:
 
-| Category | What to check |
-|----------|---------------|
-| **Slice Scoping** | Is each slice PR-sized? Does each have a standalone goal that delivers a working increment — not disconnected scaffolding? |
-| **Task Completeness** | Are tasks within each slice sufficient to achieve the slice goal? Are there missing steps (tests, docs, validation)? |
-| **FR Traceability** | Does every slice trace to at least one FR or acceptance scenario from the user story? Are any FRs unaddressed? |
-| **Dependency Order** | Is the recommended implementation sequence logical? Would reordering reduce risk or unblock parallel work? |
-| **Spec Alignment** | Do the slices fully cover the user story's acceptance scenarios? Has the spec changed since the tasks file was written? |
+- **Audit categories**:
 
-For each category, assess: **Sound**, **Weak**, or **Gap**.
+  | Category | What to check |
+  |----------|---------------|
+  | **Slice Scoping** | Is each slice PR-sized? Does each have a standalone goal that delivers a working increment — not disconnected scaffolding? |
+  | **Task Completeness** | Are tasks within each slice sufficient to achieve the slice goal? Are there missing steps (tests, docs, validation)? |
+  | **FR Traceability** | Does every slice trace to at least one FR or acceptance scenario from the user story? Are any FRs unaddressed? |
+  | **Dependency Order** | Is the recommended implementation sequence logical? Would reordering reduce risk or unblock parallel work? |
+  | **Spec Alignment** | Do the slices fully cover the user story's acceptance scenarios? Has the spec changed since the tasks file was written? |
 
-### 0b. Refinement Questions
-
-Present the audit findings as a summary table, then ask **up to 5 refinement
-questions** — one at a time, with a **recommended resolution** for each.
-
-Target the most impactful Weak/Gap categories first. For each question:
-
-- State the finding (what's wrong or missing).
-- Provide a recommended fix with reasoning.
-- The user can accept the recommendation or provide their own answer.
-- After each answer, acknowledge it and move to the next question.
-
-**STOP after each question and wait for the user to respond.**
+- **Target files**: the `.tasks.md` file alongside the source spec (`.spec.md`),
+  data model (`.data-model.md`), and contracts (`.contracts.md`).
+- **Context**: this is a task plan review for an existing user story decomposition.
 
 ### 0c. Apply Refinements
 
-After all questions are answered, update the existing tasks file to incorporate
-the refinements. Present the changes for user approval before writing.
+After the sub-agent returns its summary, update the existing tasks file on disk
+to incorporate the refinements. Present a summary of what changed — do not dump
+the full file contents into the terminal. **STOP and ask** the user to review
+the updated file at its path and let you know if further changes are needed.
 
 This phase runs INSTEAD of Phases 1-5 when a tasks file already exists. If more
 refinement is needed, the user can re-run the command (another pass through
@@ -78,8 +69,9 @@ Phase 0).
 3. Extract the target user story — its title, acceptance scenarios, priority,
    and any FRs that trace to it.
 4. Derive the **story slug** — a short kebab-case name from the user story
-   title (e.g., "User Story 4 — Cut: Slice a User Story into Tasks" →
-   `slice-story-into-tasks`).
+   title (e.g., "User Story 4: Slice a User Story into Tasks" →
+   `slice-story-into-tasks`). Older specs may use an em dash (`—`) instead
+   of a colon as the separator; accept both when parsing.
 5. Confirm the target to the user:
    - Spec folder path.
    - User story number and title.
@@ -100,6 +92,10 @@ Phase 0).
    - Which modules, files, and systems are affected by this user story.
    - Existing patterns, conventions, and test infrastructure relevant to the
      changes.
+   - Base your analysis on the codebase **as it exists now**. If this story
+     depends on functionality that another story would introduce, note the
+     dependency but do not plan to build it — assume it will be delivered
+     separately.
 2. Map each acceptance scenario to the code areas it will touch.
 3. Identify natural boundaries for PR-sized slices:
    - Look for layers (data, logic, interface) that can be delivered
@@ -109,32 +105,136 @@ Phase 0).
 
 ---
 
+## Phase 2.5: Consistency Scan
+
+Use the **smithy-scout** sub-agent. Pass it:
+
+- **Scope**: the code areas mapped to acceptance scenarios in Phase 2, plus the
+  spec artifacts (`.spec.md`, `.data-model.md`, `.contracts.md`)
+- **Depth**: medium
+- **Context**: task slicing for User Story `<N>`
+
+Handle the scout report as follows:
+
+- **Conflicts**: Fold into the clarification criteria for Phase 3 — slices
+  based on stale code understanding will produce wrong task boundaries.
+- **Warnings**: Proceed to Phase 3 but carry warnings as non-blocking context
+  for clarification. Mention them if they become relevant to a clarification
+  question, but do not force separate discussion of each warning.
+- **Clean**: Proceed directly to Phase 2.8 (or Phase 3 if not in agent mode) with no additional context.
+
+---
+
+## Phase 2.8: Approach Planning
+
+### Competing Plans
+
+Use competing **smithy-plan** sub-agents to generate the approach from multiple
+perspectives.
+
+### Competing Plan Lenses
+
+Dispatch 3 competing **smithy-plan** sub-agents in parallel. Each receives the
+same planning context, feature description, codebase file paths, and scout
+report — the only difference is the **additional planning directives** field.
+
+Use the following lens directives (one per sub-agent):
+
+#### Simplification
+
+> **Directive:** Actively seek unnecessary complexity, over-engineering, and
+> YAGNI violations. Propose simpler alternatives — fewer files, fewer
+> indirections, inline solutions over extracted utilities. Challenge
+> abstractions that don't earn their keep. In the Tradeoffs section, surface at
+> least one simpler alternative even if you ultimately recommend against it.
+> This directive biases your attention, not your coverage — still flag critical
+> robustness issues or separation concerns if you find them.
+
+#### Separation of Concerns
+
+> **Directive:** Actively seek mixed responsibilities, coupling between
+> unrelated concepts, and SRP violations. Propose cleaner module boundaries —
+> clear interfaces, single-purpose files, explicit dependency injection. In the
+> Tradeoffs section, surface at least one alternative with better separation
+> even if you ultimately recommend against it. This directive biases your
+> attention, not your coverage — still flag simplification opportunities or
+> robustness issues if you find them.
+
+#### Robustness
+
+> **Directive:** Actively seek error handling gaps, edge cases, failure modes,
+> and missing validation at system boundaries. Flag assumptions about external
+> state and unhandled error conditions. Prefer defensive design. In the
+> Tradeoffs section, surface at least one more defensive alternative even if
+> you ultimately recommend against it. This directive biases your attention,
+> not your coverage — still flag unnecessary complexity or separation concerns
+> if you find them.
+
+---
+
+Pass the quoted directive text above as the **Additional planning directives**
+field for the corresponding smithy-plan run.
+
+After all 3 return, dispatch the **smithy-reconcile** sub-agent. Pass it:
+
+- All 3 plan outputs, each labeled with its lens name (e.g.,
+  "**[Simplification]** …", "**[Separation of Concerns]** …",
+  "**[Robustness]** …")
+- The same context file paths
+- The planning context and feature description
+
+Use the reconciled plan as the basis for presenting the approach to the user.
+Pass each smithy-plan sub-agent:
+
+- **Planning context**: tasks artifact
+- **Feature/problem description**: the user story title, acceptance scenarios, priority, and traced FRs from Phase 1
+- **Codebase file paths**: the code areas mapped to acceptance scenarios during Phase 2, plus the spec artifacts (`.spec.md`, `.data-model.md`, `.contracts.md`)
+- **Scout report**: the scout report from Phase 2.5 (if it contained conflicts or warnings)
+- **Additional planning directives**: the lens directive from the competing-lenses section above (each run gets a different directive)
+
+Present the reconciled plan to the user as:
+
+1. **Summary** — What you understand the user story to deliver and the proposed slicing strategy.
+2. **Approach** — The reconciled approach for PR-sized slices and task ordering. Note any
+   items annotated with `[via <lens>]`.
+3. **Risks** — The reconciled risk assessment.
+4. **Conflicts** — If the reconciled plan contains unresolved conflicts between
+   approaches, present them with both options and the reconciler's
+   recommendation. Let the user decide.
+
+
+---
+
 ## Phase 3: Clarify
 
-Perform a structured ambiguity scan across these categories:
+Use the **smithy-clarify** sub-agent. Pass it:
 
-| Category | What to check |
-|----------|---------------|
-| **Slice Boundaries** | Are there multiple valid ways to split this work? Is the right granularity clear? |
-| **Implementation Order** | Are dependencies between slices obvious, or could reasonable people disagree? |
-| **Testing Strategy** | Is it clear how each slice should be tested? Are there integration test concerns? |
-| **Scope Edges** | Are there changes that could be in or out of scope? Adjacent refactors? |
-| **Technical Risk** | Are there unknowns, library limitations, or performance concerns? |
+- **Criteria**:
 
-For each category, assess: **Clear**, **Partial**, or **Missing**.
+  | Category | What to check |
+  |----------|---------------|
+  | **Slice Boundaries** | Are there multiple valid ways to split this work? Is the right granularity clear? |
+  | **Implementation Order** | Are dependencies between slices obvious, or could reasonable people disagree? |
+  | **Testing Strategy** | Is it clear how each slice should be tested? Are there integration test concerns? |
+  | **Scope Edges** | Are there changes that could be in or out of scope? Adjacent refactors? |
+  | **Technical Risk** | Are there unknowns, library limitations, or performance concerns? |
+  | **Inter-Story Boundaries** | Does this story depend on or overlap with other stories in the spec? Boundaries between stories are resolved at the spec level — note them but do not ask about them. |
 
-Then ask **up to 5 clarifying questions**, presented **one at a time**:
-
-- For each question, provide a **recommended answer** with reasoning.
-- The user can accept the recommendation or provide their own answer.
-- After each answer, acknowledge it and move to the next question.
-- If all categories are Clear, skip to Phase 4.
-
-**STOP after each question and wait for the user to respond.**
+- **Context**: this is a task plan; include the spec folder path and the three
+  spec artifacts (`.spec.md`, `.data-model.md`, `.contracts.md`) from Phase 1,
+  and the reconciled plan from Phase 2.8 if generated.
+- **Special instructions**: Inter-Story Boundaries should almost always be
+  **Clear** — the spec, data model, and contracts define story boundaries. Only
+  flag as Partial/Missing if the spec itself is ambiguous about which story owns
+  a piece of functionality. If all categories are Clear, skip to Phase 4.
 
 ---
 
 ## Phase 4: Slice
+
+**Title conventions**: Before writing, read the `smithy.titles` prompt for
+canonical title formats and check for repo-level overrides in the project's
+CLAUDE.md. Apply those conventions to all headings in this artifact.
 
 Draft the tasks file with this structure:
 
@@ -179,6 +279,16 @@ Recommended implementation sequence:
 1. **Slice N** — <why this comes first>
 2. **Slice M** — <why this follows>
 3. ...
+
+### Cross-Story Dependencies
+
+Direction must be either `depends on` or `depended upon by`.
+
+| Dependency | Direction | Notes |
+|------------|-----------|-------|
+| User Story <X>: <title> | depends on | <what this story needs from or provides to the other story> |
+
+_If no cross-story dependencies exist, state "None — this story is self-contained."_
 ```
 
 Guidelines for slicing:
@@ -194,9 +304,10 @@ Guidelines for slicing:
 
 ---
 
-## Phase 5: Review
+## Phase 5: Write & Review
 
-Present the complete tasks file to the user:
+Write the file to `specs/<folder>/<NN>-<story-slug>.tasks.md` (where `<NN>` is
+the zero-padded user story number), then present a summary to the user:
 
 1. Show a summary:
    - Number of slices with their titles.
@@ -204,10 +315,13 @@ Present the complete tasks file to the user:
    - The recommended implementation order.
    - Estimated complexity per slice (small / medium / large).
 2. Highlight any risks, open questions, or tradeoffs in the slicing.
-3. **STOP and wait for user approval before writing the file.**
+3. **Do NOT dump the full file contents into the terminal.** The file is on
+   disk — the user can review it in their editor.
+4. **STOP and ask**: "Review the tasks at `<path>` and let me know if you'd
+   like changes, or approve to finalize."
 
-Once approved, write the file to `specs/<folder>/<NN>-<story-slug>.tasks.md`
-where `<NN>` is the zero-padded user story number.
+If the user requests changes, incorporate them, update the file on disk, and
+ask again.
 
 ---
 
@@ -221,24 +335,22 @@ where `<NN>` is the zero-padded user story number.
 - **DO** keep slices PR-sized. If a slice feels too large, split it further.
 - **DO** use zero-padded two-digit numbering for the filename (`01-`, `02-`,
   ..., `99-`) for consistent sort order.
-- **DO** present clarifying questions one at a time with recommended answers.
+- **DO** internally generate all clarifying questions first, then present them one at a time with recommended answers.
 - **DO** read all three spec artifacts (spec, data model, contracts) before
   slicing — the data model and contracts inform implementation boundaries.
 - **DO** explore the codebase to ground slices in reality — don't slice in
   the abstract.
-
-<!-- audit-checklist-start -->
-## Audit Checklist (.tasks.md)
-
-| Category | What to check |
-|----------|---------------|
-| **Slice Scoping** | Is each slice PR-sized? Does each have a standalone goal that delivers a working increment — not disconnected scaffolding? |
-| **Task Completeness** | Are tasks within each slice sufficient to achieve the slice goal? Are there missing steps (tests, docs, validation)? |
-| **Testability** | Is it clear how each slice should be tested? Are integration test concerns addressed? |
-| **Edge Case Coverage** | Are boundary conditions, error paths, and failure modes covered in the tasks? |
-| **FR Traceability** | Does every slice trace to at least one FR or acceptance scenario? Are any FRs unaddressed? |
-| **Dependency Order** | Is the recommended implementation sequence logical? Would reordering reduce risk or unblock parallel work? |
-<!-- audit-checklist-end -->
+- **DO NOT** expand scope to include work belonging to other user stories in the
+  same spec. Your scope is the single assigned story — nothing more.
+- **DO NOT** ask whether to build functionality that belongs to another user
+  story. If your story references capabilities from another story, assume that
+  work will be done separately.
+- **DO** assume other stories in the same spec may be getting cut or forged in
+  parallel by other agents. Each agent owns exactly one story.
+- **DO** treat the codebase as it exists TODAY when analyzing. Do not account
+  for in-progress work from other stories.
+- **DO** note cross-story dependencies in the Dependency Order section (as
+  "Cross-Story Dependencies") without pulling that work into your slices.
 
 ---
 
