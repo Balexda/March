@@ -65,3 +65,12 @@
 **Scope Boundaries**:
 - Includes: Patch application to the spawn's worktree/branch, branch push to remote, GitHub PR creation with spawn metadata (prompt summary, backend used, execution stats), CLI output confirming the PR URL
 - Excludes: PR review workflows, merge automation, CI/CD integration, worktree cleanup after merge (M3 Brood)
+
+## Spec Progress
+
+- [x] Feature 1: March CLI Foundation → `specs/2026-04-05-001-march-cli-foundation/`
+- [ ] Feature 2: Spawn Dispatch
+- [ ] Feature 3: Multi-Backend Execution Interface
+- [ ] Feature 4: Spawn Sandbox Security
+- [ ] Feature 5: Spawn Output Extraction
+- [ ] Feature 6: PR Integration
