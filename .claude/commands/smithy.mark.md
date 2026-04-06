@@ -39,39 +39,138 @@ This may be:
 
 ---
 
+## Phase 1.5: Consistency Scan
+
+Use the **smithy-scout** sub-agent. Pass it:
+
+- **Scope**: the codebase files you explored during Phase 1, plus any files
+  referenced by the RFC or feature description
+- **Depth**: medium
+- **Context**: feature specification for this feature/RFC
+
+Handle the scout report as follows:
+
+- **Conflicts**: Fold into the clarification criteria for Phase 2 — specs
+  built on contradictory code state will produce incorrect requirements.
+- **Warnings**: Proceed to Phase 2 but carry warnings as non-blocking context
+  for clarification. Mention them if they become relevant to a clarification
+  question, but do not force separate discussion of each warning.
+- **Clean**: Proceed directly to Phase 1.8 (or Phase 2 if not in agent mode) with no additional context.
+
+---
+
+## Phase 1.8: Approach Planning
+
+### Competing Plans
+
+Use competing **smithy-plan** sub-agents to generate the approach from multiple
+perspectives.
+
+### Competing Plan Lenses
+
+Dispatch 3 competing **smithy-plan** sub-agents in parallel. Each receives the
+same planning context, feature description, codebase file paths, and scout
+report — the only difference is the **additional planning directives** field.
+
+Use the following lens directives (one per sub-agent):
+
+#### Scope Minimalism
+
+> **Directive:** Challenge scope creep. Propose tighter boundaries, question
+> optional requirements, and look for elements that can be deferred without
+> blocking the core artifact. Favor fewer entities, narrower stories, and
+> smaller milestones. In the Tradeoffs section, surface at least one narrower
+> alternative even if you ultimately recommend against it. This directive biases
+> your attention, not your coverage — still flag completeness gaps or coherence
+> issues if you find them.
+
+#### Completeness
+
+> **Directive:** Look for gaps in coverage: missing user stories, unstated
+> assumptions, edge cases in contracts, entities without clear ownership, and
+> milestones that skip necessary groundwork. Verify that every requirement
+> traces to a concrete artifact element. In the Tradeoffs section, surface at
+> least one more thorough alternative even if you ultimately recommend against
+> it. This directive biases your attention, not your coverage — still flag
+> scope bloat or coherence issues if you find them.
+
+#### Coherence
+
+> **Directive:** Look for inconsistencies between elements: stories that don't
+> trace to contracts, data model entities that overlap or have ambiguous
+> ownership, feature boundaries that create awkward cross-cutting dependencies,
+> and milestones whose ordering doesn't match their actual dependencies.
+> Propose cleaner groupings and sharper boundaries. In the Tradeoffs section,
+> surface at least one better-structured alternative even if you ultimately
+> recommend against it. This directive biases your attention, not your
+> coverage — still flag scope bloat or completeness gaps if you find them.
+
+---
+
+Pass the quoted directive text above as the **Additional planning directives**
+field for the corresponding smithy-plan run.
+
+After all 3 return, dispatch the **smithy-reconcile** sub-agent. Pass it:
+
+- All 3 plan outputs, each labeled with its lens name (e.g.,
+  "**[Scope Minimalism]** …", "**[Completeness]** …",
+  "**[Coherence]** …")
+- The same context file paths
+- The planning context and feature description
+
+Use the reconciled plan as the basis for presenting the approach to the user.
+Pass each smithy-plan sub-agent:
+
+- **Planning context**: spec artifact
+- **Feature/problem description**: the feature description or RFC path with extracted goals and constraints from intake
+- **Codebase file paths**: the relevant codebase files explored during Phase 1
+- **Scout report**: the scout report from Phase 1.5 (if it contained conflicts or warnings)
+- **Additional planning directives**: the lens directive from the competing-lenses section above (each run gets a different directive)
+
+Present the reconciled plan to the user as:
+
+1. **Summary** — What you understand the feature to be and the proposed specification structure.
+2. **Approach** — The reconciled approach for user stories, data model scope, and contract boundaries. Note any
+   items annotated with `[via <lens>]`.
+3. **Risks** — The reconciled risk assessment.
+4. **Conflicts** — If the reconciled plan contains unresolved conflicts between
+   approaches, present them with both options and the reconciler's
+   recommendation. Let the user decide.
+
+
+---
+
 ## Phase 2: Clarify
 
-Perform a structured ambiguity scan across these categories:
+Use the **smithy-clarify** sub-agent. Pass it:
 
-| Category | What to check |
-|----------|---------------|
-| **Functional Scope** | What's included vs. excluded? Are boundaries clear? |
-| **Domain & Data Model** | Are entities, ownership, and relationships defined? |
-| **Interaction & UX** | Are user-facing surfaces and flows clear? |
-| **Non-Functional Quality** | Performance, security, reliability expectations? |
-| **Integration** | External systems, APIs, dependencies? |
-| **Edge Cases** | Failure modes, concurrency, boundary conditions? |
-| **Constraints** | Technology, timeline, compatibility limits? |
-| **Terminology** | Are domain terms used consistently and unambiguously? |
+- **Criteria**:
 
-For each category, assess: **Clear**, **Partial**, or **Missing**.
+  | Category | What to check |
+  |----------|---------------|
+  | **Functional Scope** | What's included vs. excluded? Are boundaries clear? |
+  | **Domain & Data Model** | Are entities, ownership, and relationships defined? |
+  | **Interaction & UX** | Are user-facing surfaces and flows clear? |
+  | **Non-Functional Quality** | Performance, security, reliability expectations? |
+  | **Integration** | External systems, APIs, dependencies? |
+  | **Edge Cases** | Failure modes, concurrency, boundary conditions? |
+  | **Constraints** | Technology, timeline, compatibility limits? |
+  | **Terminology** | Are domain terms used consistently and unambiguously? |
 
-Then ask **up to 5 clarifying questions**, presented **one at a time**:
+- **Context**: this is a feature specification; include the feature description
+  or RFC path and relevant codebase paths from Phase 1, and the reconciled plan
+  from Phase 1.8 if generated.
+- **Special instructions**: if all categories are Clear, skip to Phase 3.
 
-- For each question, provide a **recommended answer** with reasoning.
-- Present alternatives as a short options table when applicable.
-- The user can accept the recommendation (e.g., "yes", "recommended", "sounds good")
-  or provide their own answer.
-- After each answer, acknowledge it and move to the next question.
-- If all categories are Clear, skip to Phase 3.
-
-Record all Q&A for inclusion in the Clarifications section of the spec.
-
-**STOP after each question and wait for the user to respond.**
+Record all Q&A and assumptions for inclusion in the Clarifications section of the spec.
 
 ---
 
 ## Phase 3: Specify
+
+**Title conventions**: Before writing, read the `smithy.titles` prompt for
+canonical title formats and check for repo-level overrides in the project's
+CLAUDE.md. Apply those conventions to all headings in this artifact.
 
 Draft the `<slug>.spec.md` file with this structure:
 
@@ -97,7 +196,7 @@ RFC → Milestone → Feature → User Story → Slice → Tasks
 
 ## User Scenarios & Testing *(mandatory)*
 
-### User Story 1 — <Title> (Priority: P<N>)
+### User Story 1: <Title> (Priority: P<N>)
 
 As a <persona>, I want <goal> so that <benefit>.
 
@@ -112,7 +211,7 @@ As a <persona>, I want <goal> so that <benefit>.
 
 ---
 
-### User Story N — ...
+### User Story N: ...
 
 ### Edge Cases
 
@@ -151,6 +250,8 @@ Guidelines for the spec:
 - User stories are numbered sequentially (User Story 1, 2, 3...) — this numbering
   is used by downstream commands to generate per-story task files.
 - Each user story has a priority (P1, P2, P3) with justification.
+- **User stories MUST be ordered by priority**: all P1 stories first, then P2, then P3.
+  Within the same priority level, order by dependency or natural workflow sequence.
 - Acceptance scenarios use Given/When/Then format.
 - Functional requirements are numbered FR-001, FR-002, etc.
 - Success criteria are measurable and testable.
@@ -288,9 +389,10 @@ Existing contracts remain unchanged.
 
 ---
 
-## Phase 6: Review
+## Phase 6: Write & Review
 
-Present the complete spec package to the user:
+Create the spec folder and write all three files to disk first, then present a
+summary to the user:
 
 1. Show a summary of what was produced:
    - Spec folder path and branch name.
@@ -298,9 +400,13 @@ Present the complete spec package to the user:
    - Key entities from the data model (if any).
    - Contracts/interfaces identified (if any).
 2. Highlight any remaining risks or open questions.
-3. **STOP and wait for user approval before writing files.**
+3. **Do NOT dump the full file contents into the terminal.** The files are on
+   disk — the user can review them in their editor.
+4. **STOP and ask**: "Review the files at `<path>` and let me know if you'd like
+   changes, or approve to finalize."
 
-Once approved, create the spec folder and write all three files.
+If the user requests changes, incorporate them, update the files on disk, and
+ask again.
 
 ---
 
@@ -309,43 +415,41 @@ Once approved, create the spec folder and write all three files.
 **If spec artifacts already exist for this feature** (detected by branch name
 matching a `specs/` folder, or by the user pointing to an existing spec):
 
-### 0a. Audit Scan
+### 0a–0b. Audit & Refinement Questions
 
-Read the existing spec, data model, and contracts files. Perform a structured
-audit across these categories:
+Use the **smithy-refine** sub-agent. Pass it:
 
-| Category | What to check |
-|----------|---------------|
-| **Story Completeness** | Does every user story have acceptance scenarios, priority justification, and an independent test? Are there obvious missing stories? |
-| **Requirement Traceability** | Does every FR trace to at least one user story? Are there user stories with no supporting requirements? |
-| **Cross-Document Consistency** | Do entities in data-model.md match Key Entities in the spec? Do contracts.md interfaces align with integration-related requirements? |
-| **Edge Case Coverage** | Are edge cases from the spec reflected in acceptance scenarios or requirements? Are there unaddressed failure modes? |
-| **Data Model Integrity** | Are relationships, state transitions, and validation rules internally consistent? Are there entities referenced but not defined, or defined but never referenced? |
-| **Contract Completeness** | Do all integration boundaries have defined inputs, outputs, and error conditions? Are there contracts implied by requirements but not documented? |
-| **Ambiguity & Risk** | Are there vague terms, unstated assumptions, or scope boundaries that could be interpreted multiple ways? |
-| **Staleness** | Does the spec still reflect the current codebase reality? Have upstream changes invalidated any assumptions? |
+- **Audit categories**:
 
-For each category, assess: **Sound**, **Weak**, or **Gap**.
+  | Category | What to check |
+  |----------|---------------|
+  | **Story Completeness** | Does every user story have acceptance scenarios, priority justification, and an independent test? Are there obvious missing stories? |
+  | **Priority Ordering** | Are user stories ordered by priority (all P1 first, then P2, then P3)? If priorities have changed since the last revision, do the story numbers still reflect the correct priority order? Flag any out-of-order stories. |
+  | **Requirement Traceability** | Does every FR trace to at least one user story? Are there user stories with no supporting requirements? |
+  | **Cross-Document Consistency** | Do entities in data-model.md match Key Entities in the spec? Do contracts.md interfaces align with integration-related requirements? |
+  | **Edge Case Coverage** | Are edge cases from the spec reflected in acceptance scenarios or requirements? Are there unaddressed failure modes? |
+  | **Data Model Integrity** | Are relationships, state transitions, and validation rules internally consistent? Are there entities referenced but not defined, or defined but never referenced? |
+  | **Contract Completeness** | Do all integration boundaries have defined inputs, outputs, and error conditions? Are there contracts implied by requirements but not documented? |
+  | **Ambiguity & Risk** | Are there vague terms, unstated assumptions, or scope boundaries that could be interpreted multiple ways? |
+  | **Staleness** | Does the spec still reflect the current codebase reality? Have upstream changes invalidated any assumptions? |
 
-### 0b. Refinement Questions
-
-Present the audit findings as a summary table, then ask **up to 5 refinement
-questions** — one at a time, with a **recommended resolution** for each.
-
-Questions should target the most impactful Weak/Gap categories first. For each:
-
-- State the finding (what's wrong or missing).
-- Provide a recommended fix or addition with reasoning.
-- The user can accept the recommendation or provide their own answer.
-- After each answer, acknowledge it and move to the next question.
-
-**STOP after each question and wait for the user to respond.**
+- **Target files**: the spec (`.spec.md`), data model (`.data-model.md`), and
+  contracts (`.contracts.md`) in the spec folder.
+- **Context**: this is a spec review for an existing feature specification.
 
 ### 0c. Apply Refinements
 
-After all questions are answered, update the existing spec, data-model, and/or
-contracts files to incorporate the refinements. Present the changes for user
-approval before writing.
+After the sub-agent returns its summary, update the existing spec, data-model,
+and/or contracts files on disk to incorporate the refinements. Present a summary
+of what changed — do not dump the full file contents into the terminal. **STOP
+and ask** the user to review the updated files at their paths and let you know
+if further changes are needed.
+
+**Priority re-ordering**: If any user story priorities changed during refinement,
+renumber and reorder the user stories so all P1 stories come first, then P2,
+then P3. Within the same priority level, preserve relative order. Update all
+story numbers (User Story 1, 2, 3...) to reflect the new order. Warn the user
+if existing `.tasks.md` files reference old story numbers that will change.
 
 This phase runs INSTEAD of Phases 1-6 when repeating the command. If more
 refinement is needed, the user can re-run the command again (another pass
@@ -364,25 +468,12 @@ through Phase 0).
 - **DO** keep specs anchored to user value — every requirement should trace to
   a user story.
 - **DO** number user stories sequentially — downstream commands depend on this.
-- **DO** present clarifying questions one at a time with recommended answers.
+- **DO** order user stories by priority (P1 first, then P2, then P3) and renumber
+  them when priorities change during refinement.
+- **DO** internally generate all clarifying questions first, then present them one at a time with recommended answers.
 - **DO** create the git branch and spec folder automatically.
 - **DO** write minimal placeholder files for data-model and contracts when they
   don't apply, rather than omitting them.
-
-<!-- audit-checklist-start -->
-## Audit Checklist (.spec.md)
-
-| Category | What to check |
-|----------|---------------|
-| **Story Completeness** | Does every user story have acceptance scenarios, priority justification, and an independent test? Are there obvious missing stories? |
-| **Requirement Traceability** | Does every FR trace to at least one user story? Are there user stories with no supporting requirements? |
-| **Cross-Document Consistency** | Do entities in data-model.md match Key Entities in the spec? Do contracts.md interfaces align with integration-related requirements? |
-| **Edge Case Coverage** | Are edge cases from the spec reflected in acceptance scenarios or requirements? Are there unaddressed failure modes? |
-| **Data Model Integrity** | Are relationships, state transitions, and validation rules internally consistent? Are there entities referenced but not defined, or defined but never referenced? |
-| **Contract Completeness** | Do all integration boundaries have defined inputs, outputs, and error conditions? Are there contracts implied by requirements but not documented? |
-| **Ambiguity & Risk** | Are there vague terms, unstated assumptions, or scope boundaries that could be interpreted multiple ways? |
-| **Staleness** | Does the spec still reflect the current codebase reality? Have upstream changes invalidated any assumptions? |
-<!-- audit-checklist-end -->
 
 ---
 

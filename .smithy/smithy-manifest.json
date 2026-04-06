@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "smithyVersion": "0.2.3",
+  "deployLocation": "repo",
+  "agents": [
+    "claude"
+  ],
+  "permissions": false,
+  "issueTemplates": false,
+  "files": {
+    "claude": [
+      ".claude/commands/smithy.audit.md",
+      ".claude/commands/smithy.cut.md",
+      ".claude/commands/smithy.fix.md",
+      ".claude/commands/smithy.forge.md",
+      ".claude/commands/smithy.ignite.md",
+      ".claude/commands/smithy.mark.md",
+      ".claude/commands/smithy.orders.md",
+      ".claude/commands/smithy.render.md",
+      ".claude/commands/smithy.strike.md",
+      ".claude/prompts/smithy.guidance.md",
+      ".claude/prompts/smithy.titles.md",
+      ".claude/agents/smithy.clarify.md",
+      ".claude/agents/smithy.implement.md",
+      ".claude/agents/smithy.maid.md",
+      ".claude/agents/smithy.plan.md",
+      ".claude/agents/smithy.reconcile.md",
+      ".claude/agents/smithy.refine.md",
+      ".claude/agents/smithy.review.md",
+      ".claude/agents/smithy.scout.md"
+    ]
+  }
+}

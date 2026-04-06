@@ -80,7 +80,9 @@ Parse the feature map to extract:
 ### For `.spec.md`
 
 Parse the spec to extract:
-- **User stories** — each `### User Story N — <Title>` section becomes a ticket.
+- **User stories** — each `### User Story N: <Title>` section becomes a ticket.
+  Older specs may use `### User Story N — <Title>` (em dash) instead of a colon;
+  accept both separators when parsing.
   Extract the title, priority, and acceptance scenarios.
 
 ### For `.tasks.md`
@@ -114,6 +116,10 @@ If no matches are found for any tickets, proceed without prompting.
 ---
 
 ## Phase 5: Create Tickets
+
+**Title conventions**: Before creating tickets, read the `smithy.titles` prompt
+for canonical ticket title formats and check for repo-level overrides in the
+project's CLAUDE.md. Apply those conventions to all issue titles.
 
 Create GitHub issues using the ticket mappings below. Use `--body-file` with a
 temporary file for issue bodies to avoid shell escaping problems.
@@ -242,8 +248,8 @@ search using the same `[Story]` title prefix used when creating story tickets:
 gh issue list --search "[Story] <story-title>" --state open --json number,title --limit 10
 ```
 
-Match by story title (the `<story-title>` from `### User Story N — <Title>` in
-the spec — the same title used in the `[Story] <story-title>` issue created by
+Match by story title (the `<story-title>` from `### User Story N: <Title>` —
+or `### User Story N — <Title>` in older specs — the same title used in the `[Story] <story-title>` issue created by
 the `.spec.md` mapping above). If found, reference it in the child ticket body.
 
 **Children**: One issue per slice.

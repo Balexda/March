@@ -24,16 +24,88 @@ Create a working branch automatically. Do not ask the user — just do it.
 
 ## Phase 2: Explore & Propose
 
-Read the relevant files in the codebase to understand the current architecture and where this feature fits.
+Read the relevant files in the codebase to understand the current architecture and where this feature fits. Note the file paths you discover — you will need them for planning.
 
-Then present to the user:
+### Competing Plans
+
+Use competing **smithy-plan** sub-agents to generate the approach from multiple
+perspectives.
+
+### Competing Plan Lenses
+
+Dispatch 3 competing **smithy-plan** sub-agents in parallel. Each receives the
+same planning context, feature description, codebase file paths, and scout
+report — the only difference is the **additional planning directives** field.
+
+Use the following lens directives (one per sub-agent):
+
+#### Simplification
+
+> **Directive:** Actively seek unnecessary complexity, over-engineering, and
+> YAGNI violations. Propose simpler alternatives — fewer files, fewer
+> indirections, inline solutions over extracted utilities. Challenge
+> abstractions that don't earn their keep. In the Tradeoffs section, surface at
+> least one simpler alternative even if you ultimately recommend against it.
+> This directive biases your attention, not your coverage — still flag critical
+> robustness issues or separation concerns if you find them.
+
+#### Separation of Concerns
+
+> **Directive:** Actively seek mixed responsibilities, coupling between
+> unrelated concepts, and SRP violations. Propose cleaner module boundaries —
+> clear interfaces, single-purpose files, explicit dependency injection. In the
+> Tradeoffs section, surface at least one alternative with better separation
+> even if you ultimately recommend against it. This directive biases your
+> attention, not your coverage — still flag simplification opportunities or
+> robustness issues if you find them.
+
+#### Robustness
+
+> **Directive:** Actively seek error handling gaps, edge cases, failure modes,
+> and missing validation at system boundaries. Flag assumptions about external
+> state and unhandled error conditions. Prefer defensive design. In the
+> Tradeoffs section, surface at least one more defensive alternative even if
+> you ultimately recommend against it. This directive biases your attention,
+> not your coverage — still flag unnecessary complexity or separation concerns
+> if you find them.
+
+---
+
+Pass the quoted directive text above as the **Additional planning directives**
+field for the corresponding smithy-plan run.
+
+After all 3 return, dispatch the **smithy-reconcile** sub-agent. Pass it:
+
+- All 3 plan outputs, each labeled with its lens name (e.g.,
+  "**[Simplification]** …", "**[Separation of Concerns]** …",
+  "**[Robustness]** …")
+- The same context file paths
+- The planning context and feature description
+
+Use the reconciled plan as the basis for presenting the approach to the user.
+Pass each smithy-plan sub-agent:
+
+- **Planning context**: strike document
+- **Feature/problem description**: the user's feature description from the input
+- **Codebase file paths**: the relevant files you discovered during exploration
+- **Additional planning directives**: the lens directive from the competing-lenses section above (each run gets a different directive)
+
+Present the reconciled plan to the user as:
 
 1. **Summary** — What you understand the feature to be.
-2. **Approach** — What files you'd change, what you'd add, and why.
-3. **Risks** — Anything that could go wrong or get complicated.
-4. **Clarifying Questions** — 2–4 questions about scope, edge cases, or preferences.
+2. **Approach** — The reconciled approach (file changes, rationale). Note any
+   items annotated with `[via <lens>]` — these are unique perspectives from
+   individual focus lenses.
+3. **Risks** — The reconciled risk assessment.
+4. **Conflicts** — If the reconciled plan contains unresolved conflicts between
+   approaches, present them with both options and the reconciler's
+   recommendation. Let the user decide.
 
-**STOP here and wait for the user to respond.** Do not proceed until the user answers.
+
+After presenting the plan, use the **smithy-clarify** sub-agent. Pass it:
+   - **Criteria**: Scope, Edge Cases, Preferences, Architecture Fit, Testing Strategy
+   - **Context**: this is a strike document; include the feature description and
+     the relevant file paths you discovered during exploration.
 
 ---
 
@@ -48,6 +120,10 @@ Do not proceed to implementation without clear approval.
 ---
 
 ## Phase 4: Strike Document
+
+**Title conventions**: Before writing, read the `smithy.titles` prompt for
+canonical title formats and check for repo-level overrides in the project's
+CLAUDE.md. Apply those conventions to all headings in this artifact.
 
 Once approved, write a single strike document to `specs/strikes/YYYY-MM-DD-<slug>.strike.md` with this format:
 
@@ -136,16 +212,3 @@ After writing the strike document, present a summary to the user:
 - **Do not skip the interactive phase.** Always explore, propose, and get approval before implementing.
 - **If scope grows too large** (more than ~5 tasks or touches many subsystems), tell the user this feature may be better suited for `smithy-ignite` and the full pipeline.
 - **Keep commits atomic.** Each commit should represent a logical, working change.
-
-<!-- audit-checklist-start -->
-## Audit Checklist (.strike.md)
-
-| Category | What to check |
-|----------|---------------|
-| **Requirement Completeness** | Are all functional requirements numbered and testable? Do they cover the full scope of the feature? |
-| **Slice Scoping** | Is the single slice PR-sized? Does it have a clear standalone goal and justification? |
-| **Validation Plan Coverage** | Does the validation plan have concrete steps that verify each requirement and success criterion? |
-| **Data Model Presence** | Is a Data Model section present? If data changes are needed, are entities and relationships defined? |
-| **Contracts Presence** | Is a Contracts section present? If interface changes are needed, are they specified? |
-| **Success Criteria** | Are success criteria numbered, testable, and aligned with the requirements? |
-<!-- audit-checklist-end -->
