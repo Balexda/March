@@ -24,7 +24,7 @@ Validation rules:
 - `deployLocation` must be `"user"`.
 - `agents` must be a non-empty array of strings.
 - Every agent in `agents` must have a corresponding key in `files`.
-- Every path in `files` must use forward slashes and be relative to `~/`.
+- Every path in `files` must use forward slashes and be relative to the user's home directory with no leading `~/` (e.g., `.claude/commands/march.spawn-dispatch.md`).
 
 ### 2) MarchSkill (deployed file)
 
@@ -60,8 +60,12 @@ Note: MarchSkill is not persisted as a separate entity — it is an internal con
    - Trigger: `march update` run with a newer CLI version
    - Effects: `marchVersion` updated, `files` mapping updated (new files added, stale files removed from disk and manifest), `agents` updated if new backends are added.
 
-3. `created` → `unchanged`
-   - Trigger: `march init` or `march update` run with the same version and no changes
+3. `created` → `rejected`
+   - Trigger: `march init` run when manifest already exists
+   - Effects: No changes. User directed to run `march update`.
+
+4. `created` → `unchanged`
+   - Trigger: `march update` run with the same version and no changes
    - Effects: No changes to manifest or deployed files.
 
 ## Identity & Uniqueness

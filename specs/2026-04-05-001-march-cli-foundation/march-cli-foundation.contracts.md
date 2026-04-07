@@ -38,8 +38,7 @@ march init [--yes]
 | Condition | Exit Code | Description |
 |-----------|-----------|-------------|
 | Home directory not writable | 1 | `~/.march/` or `~/.claude/` cannot be created. |
-| Manifest already exists (same version) | 0 | Idempotent — no changes made, success message printed. |
-| Manifest already exists (different version) | 0 | Treated as first init for a new version (existing manifest preserved with updated version). |
+| Manifest already exists | 1 | March is already installed. Prints message directing the user to run `march update` instead. |
 | Invalid environment | 1 | Unexpected filesystem errors during file creation. |
 
 ---
@@ -174,20 +173,27 @@ march --version
 
 #### Contract
 
-Feature 1 owns the top-level command dispatch table. The dispatch pattern is `march <noun> [<verb>] [options]`. Each milestone or feature owns its noun namespace:
+Feature 1 owns the top-level command dispatch table. The CLI has two command tiers:
 
-| Namespace | Owner | Description |
-|-----------|-------|-------------|
+**Setup commands** — Single-token commands that affect all of March, not scoped to a subsystem. Pattern: `march <command> [options]`.
+
+| Command | Owner | Description |
+|---------|-------|-------------|
 | `init` | Feature 1 | Bootstrap installation. |
 | `update` | Feature 1 | Upgrade installation. |
 | `help` | Feature 1 | Display help. |
 | `version` | Feature 1 | Display version. |
+
+**System commands** — Commands that target a specific March subsystem. Pattern: `march <system> <verb> [options]`. Each subsystem owns its verb namespace.
+
+| System | Owner | Description |
+|--------|-------|-------------|
 | `spawn` | Features 2-6 | Spawn operations (dispatch, status, output). Stub in Feature 1. |
 | `hatchery` | Milestone 2 | Container profile management. Reserved, not implemented. |
 | `brood` | Milestone 3 | Session lifecycle management. Reserved, not implemented. |
 | `herald` | Milestone 4 | Event bus operations. Reserved, not implemented. |
 
-Subcommands within a namespace are owned by the feature that implements them. The dispatch mechanism must support adding new nouns and verbs without modifying the core dispatch logic (implementation decision — not prescribed here).
+Verbs within a system namespace are owned by the feature that implements them (e.g., `march spawn dispatch` is owned by Feature 2). The dispatch mechanism must support adding new systems and verbs without modifying the core dispatch logic (implementation decision — not prescribed here).
 
 ---
 
@@ -209,7 +215,7 @@ The SmithyCLI pattern for March:
 | `claude` | `~/.claude/commands/` | `~/.claude/prompts/` | `~/.claude/agents/` |
 
 3. **File naming**: All deployed files use the prefix `march.` (e.g., `march.spawn-dispatch.md`). This prevents collisions with SmithyCLI or other tools sharing the same agent directories.
-4. **Tracking**: Every deployed file path is recorded in the manifest's `files.<agent>` array, relative to `~/`.
+4. **Tracking**: Every deployed file path is recorded in the manifest's `files.<agent>` array, relative to the user's home directory with no leading `~/` (e.g., `.claude/commands/march.spawn-dispatch.md`).
 5. **Removal**: During `march update`, files present in the old manifest's `files` but absent from the new deployment set are deleted. Files on disk not tracked by any manifest are never touched.
 
 #### M1 Skill Categories

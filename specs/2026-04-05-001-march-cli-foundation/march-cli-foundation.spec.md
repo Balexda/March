@@ -43,7 +43,7 @@ As an operator, I want to run `march init` so that my March environment is boots
 2. **Given** git is not installed on the system, **When** the operator runs `march init`, **Then** init completes successfully but prints a warning: "git not found — required for spawn operations."
 3. **Given** Docker is not installed on the system, **When** the operator runs `march init`, **Then** init completes successfully but prints a warning: "Docker not found — required for spawn operations."
 4. **Given** the home directory locations (`~/.march/`, `~/.claude/`) are not writable, **When** the operator runs `march init`, **Then** init fails with a clear error message and exits with code 1.
-5. **Given** an existing March installation from the same version, **When** the operator runs `march init` again, **Then** init is idempotent — no files are duplicated, the manifest is unchanged, and the command exits with code 0.
+5. **Given** an existing March installation (any version), **When** the operator runs `march init`, **Then** init prints a message that March is already installed and directs the user to run `march update`, and exits with code 1.
 
 ---
 
@@ -82,15 +82,19 @@ As an operator, I want to run `march update` so that my deployed skills and mani
 
 ### User Story 4: CLI Command Structure and Dispatch (Priority: P1)
 
-As an operator, I want a well-structured CLI with a `march <noun> <verb>` command pattern so that I have a consistent, discoverable interface for all March operations.
+As an operator, I want a well-structured CLI with two command tiers so that I have a consistent, discoverable interface for all March operations.
+
+The CLI has two command tiers:
+- **Setup commands**: Single-token commands that affect all of March (e.g., `march init`, `march update`, `march help`, `march version`). These are not scoped to a subsystem.
+- **System commands**: `march <system> <verb>` commands that target a specific March subsystem (e.g., `march spawn dispatch`, `march brood status`). The system noun identifies which subsystem (spawn, hatchery, brood, herald, legate), and the verb identifies the operation.
 
 **Why this priority**: The CLI is described as a "first-class deliverable, not scaffolding." The command structure is the surface that all subsequent features plug into.
 
-**Independent Test**: Run `march` with no arguments. Verify it prints usage information listing available commands. Run `march spawn`. Verify it prints "not yet implemented" and exits with code 1.
+**Independent Test**: Run `march` with no arguments. Verify it prints usage information listing available commands in both tiers. Run `march spawn`. Verify it prints "not yet implemented" and exits with code 1.
 
 **Acceptance Scenarios**:
 
-1. **Given** a working March installation, **When** the operator runs `march` with no arguments, **Then** usage information is printed to stdout listing available commands (`init`, `update`, `spawn`, `help`, `version`) and the command exits with code 2.
+1. **Given** a working March installation, **When** the operator runs `march` with no arguments, **Then** usage information is printed to stdout listing setup commands (`init`, `update`, `help`, `version`) and system namespaces (`spawn`) and the command exits with code 2.
 2. **Given** a working March installation, **When** the operator runs `march spawn`, **Then** a "not yet implemented" message is printed and the command exits with code 1.
 3. **Given** any valid command, **When** the operator runs `march <command> --help`, **Then** help text for that specific command is printed to stdout.
 4. **Given** an invalid command, **When** the operator runs `march nonexistent`, **Then** an error message is printed suggesting valid commands and the command exits with code 2.
@@ -143,11 +147,11 @@ As an operator, I want `march init` to check for git and Docker and warn me if t
 
 - **FR-001**: The `march init` command MUST create `~/.march/march-manifest.json` with the schema defined in the data model.
 - **FR-002**: The `march init` command MUST deploy skill files to agent-specific directories (`~/.claude/commands/`, `~/.claude/prompts/`) and record them in the manifest's `files` mapping.
-- **FR-003**: The `march init` command MUST be idempotent — repeated runs with the same version produce no changes.
+- **FR-003**: The `march init` command MUST detect an existing installation (manifest present) and direct the user to `march update` instead, exiting with code 1.
 - **FR-004**: The `march update` command MUST compare the installed version against the CLI version and redeploy files accordingly, removing stale files tracked in the old manifest but absent from the new deployment set.
 - **FR-005**: The `march update` command MUST preserve files on disk that are NOT tracked in the manifest (user customizations).
-- **FR-006**: The CLI MUST support a `march <noun> <verb>` command pattern with a dispatch mechanism that subsequent features can extend.
-- **FR-007**: The CLI MUST provide stub subcommands for `march spawn` that print "not yet implemented" and exit with code 1.
+- **FR-006**: The CLI MUST support two command tiers: (a) **setup commands** — single-token commands that affect all of March (`init`, `update`, `help`, `version`), and (b) **system commands** — `march <system> <verb>` commands that target a specific March subsystem (`spawn`, `hatchery`, `brood`, `herald`, `legate`). System commands MUST use the `march <system> <verb>` pattern with a dispatch mechanism that subsequent features can extend.
+- **FR-007**: The CLI MUST provide a stub for the `march spawn` system namespace that prints "not yet implemented" and exits with code 1.
 - **FR-008**: Every command MUST support a `--help` flag that prints usage information to stdout.
 - **FR-009**: The CLI MUST use exit codes consistently: 0 (success), 1 (error), 2 (usage error).
 - **FR-010**: The `march init` command MUST check for git and Docker on PATH and print warnings if either is missing, without failing.
@@ -157,7 +161,7 @@ As an operator, I want `march init` to check for git and Docker and warn me if t
 
 ### Key Entities
 
-- **MarchManifest**: Project-level configuration tracking deployed files, agent backends, and CLI version. Stored at `~/.march/march-manifest.json`.
+- **MarchManifest**: User-level configuration tracking deployed files, agent backends, and CLI version. Stored at `~/.march/march-manifest.json`.
 - **MarchSkill**: An individual skill/prompt source file with deployment targets per agent backend. Tracked in the manifest's `files` mapping.
 
 ## Assumptions
@@ -183,7 +187,7 @@ As an operator, I want `march init` to check for git and Docker and warn me if t
 ### Measurable Outcomes
 
 - **SC-001**: `march init` creates a valid manifest and deploys all expected skill files in under 5 seconds on a standard system.
-- **SC-002**: `march init` run twice in succession produces identical filesystem state (idempotency).
+- **SC-002**: `march init` run on an existing installation exits with code 1 and directs the user to `march update`.
 - **SC-003**: `march update` from version N to N+1 adds new files, removes stale files, and preserves untracked files.
 - **SC-004**: All CLI commands (`init`, `update`, `spawn`, `help`, `version`) respond to `--help` with usage information.
 - **SC-005**: Exit codes are consistent across all commands: 0 for success, 1 for errors, 2 for usage errors.
