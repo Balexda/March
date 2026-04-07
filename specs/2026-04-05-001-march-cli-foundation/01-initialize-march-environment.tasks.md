@@ -17,13 +17,13 @@
 
 ### Tasks
 
-- [ ] Initialize the TypeScript project following the SmithyCLI pattern: `package.json` with `name` (`@balexda/march`), `version` (`0.1.0`), `type: "module"`, `bin: { "march": "./dist/cli.js" }`, and scripts mirroring SmithyCLI: `"pretest": "tsup src/cli.ts --format esm --clean"`, `"test": "vitest run"`, `"build": "tsup src/cli.ts --format esm --clean"`, `"start": "node dist/cli.js"`, `"typecheck": "tsc --noEmit"`. Add `"files": ["dist", "src/templates"]` for publishing.
-- [ ] Add dev dependencies: `typescript`, `tsup`, `vitest`, `@types/node`. Add runtime dependencies: `commander` (CLI framework — consistent with SmithyCLI), `picocolors` (terminal output).
-- [ ] Add `tsconfig.json` targeting ESNext/NodeNext with strict mode enabled.
+- [x] Initialize the TypeScript project following the SmithyCLI pattern: `package.json` with `name` (`@balexda/march`), `version` (`0.1.0`), `type: "module"`, `bin: { "march": "./dist/cli.js" }`, and scripts mirroring SmithyCLI: `"pretest": "tsup src/cli.ts --format esm --clean"`, `"test": "vitest run"`, `"build": "tsup src/cli.ts --format esm --clean"`, `"start": "node dist/cli.js"`, `"typecheck": "tsc --noEmit"`. Add `"files": ["dist", "src/templates"]` for publishing.
+- [x] Add dev dependencies: `typescript`, `tsup`, `vitest`, `@types/node`. Add runtime dependencies: `commander` (CLI framework — consistent with SmithyCLI), `picocolors` (terminal output).
+- [x] Add `tsconfig.json` targeting ESNext/NodeNext with strict mode enabled.
 - [ ] Create `src/cli.ts` as the CLI entry point using `commander`: define a top-level `march` program with version `0.1.0`. Register an `init` command that prints "not yet implemented" and exits 1. If no command or an unrecognized command, print usage and exit 2. Accept `--yes` flag at the program level without error (no-op).
-- [ ] Define exit code constants (`SUCCESS = 0`, `ERROR = 1`, `USAGE_ERROR = 2`) in `src/exit-codes.ts`.
+- [x] Define exit code constants (`SUCCESS = 0`, `ERROR = 1`, `USAGE_ERROR = 2`) in `src/exit-codes.ts`.
 - [ ] Write tests using vitest: `march init` exits 1 with stub message; `march` (no args) exits 2 with usage hint; `march nonexistent` exits 2; `--yes` flag is accepted without error.
-- [ ] Add `.gitignore` entries for `node_modules/`, `dist/`, and build artifacts.
+- [x] Add `.gitignore` entries for `node_modules/`, `dist/`, and build artifacts.
 
 **PR Outcome**: A buildable, testable TypeScript project using tsup + vitest (matching SmithyCLI conventions) that produces a `march` CLI binary via commander. Running `march init` prints a stub message and exits 1. Running `march` with no args or an invalid command exits 2.
 

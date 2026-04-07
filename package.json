@@ -1,0 +1,29 @@
+{
+  "name": "@balexda/march",
+  "version": "0.1.0",
+  "type": "module",
+  "bin": {
+    "march": "./dist/cli.js"
+  },
+  "scripts": {
+    "pretest": "tsup src/cli.ts --format esm --clean",
+    "test": "vitest run",
+    "build": "tsup src/cli.ts --format esm --clean",
+    "start": "node dist/cli.js",
+    "typecheck": "tsc --noEmit"
+  },
+  "files": [
+    "dist",
+    "src/templates"
+  ],
+  "dependencies": {
+    "commander": "^13.1.0",
+    "picocolors": "^1.1.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.2",
+    "tsup": "^8.4.0",
+    "typescript": "^5.8.3",
+    "vitest": "^3.1.1"
+  }
+}
