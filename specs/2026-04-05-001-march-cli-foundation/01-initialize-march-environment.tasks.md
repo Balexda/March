@@ -35,17 +35,17 @@
 
 **Justification**: The manifest is the foundation of the March installation — every other command depends on it. The pre-flight guards prevent corrupted state and give clear error messages. This slice delivers a working `march init` that creates the manifest (without skills yet).
 
-**Addresses**: FR-001 (create manifest); FR-003 (detect existing install); FR-011 (fail if unwritable); Acceptance Scenarios 1.1 (partial — manifest only), 1.4, 1.5
+**Addresses**: FR-001 (create manifest); FR-003 (detect existing install); FR-011 (fail if unwritable); Acceptance Scenarios US1-1 (partial — manifest only), US1-4, US1-5
 
 ### Tasks
 
-- [ ] Define the `MarchManifest` TypeScript interface in `src/manifest.ts` matching the data model: `version` (number), `marchVersion` (string), `deployLocation` (string), `agents` (string[]), `files` (Record<string, string[]>). Add a factory function `createManifest(cliVersion: string): MarchManifest` that returns a manifest with `version: 1`, `deployLocation: "user"`, `agents: ["claude"]`, and `files: { claude: [] }`.
+- [ ] Define the `MarchManifest` TypeScript interface in `src/manifest.ts` matching the data model: `version` (number), `marchVersion` (string), `deployLocation` (string), `agents` (string[]), `files` (Record<string, string[]>). Add a factory function `createManifest(cliVersion: string): MarchManifest` that returns a manifest with `version: 1`, `marchVersion` set to the passed `cliVersion`, `deployLocation: "user"`, `agents: ["claude"]`, and `files: { claude: [] }`.
 - [ ] Implement `src/init.ts` with the init command handler. Accept a `homeDir` parameter (defaults to `os.homedir()`) to enable testing with temp directories. The handler orchestrates: (1) check for existing manifest, (2) check writability, (3) create dirs, (4) write manifest.
 - [ ] Implement the already-installed guard: if `~/.march/march-manifest.json` exists and contains valid JSON, print "March is already installed. Run `march update` to upgrade." to stdout and exit 1 (FR-003).
 - [ ] Implement corrupted manifest detection: if `~/.march/march-manifest.json` exists but is not valid JSON or fails schema validation, print a warning about the corrupted manifest and exit 1 with a message suggesting manual removal and re-init.
-- [ ] Implement writability pre-checks: before creating anything, attempt to create `~/.march/` and `~/.claude/` directories (using `fs.mkdir` with `recursive: true`). If either fails due to permissions, print a clear error naming the unwritable directory and exit 1 (FR-011).
+- [ ] Implement writability pre-checks: before creating anything, create `~/.march/` and `~/.claude/` directories if they don't exist (using `fs.mkdir` with `recursive: true`), then explicitly verify write permission on each directory using `fs.access` with `fs.constants.W_OK`. This two-step check is necessary because `mkdir` with `recursive: true` succeeds silently on pre-existing read-only directories. If directory creation fails or the writability check fails, print a clear error naming the unwritable directory and exit 1 (FR-011).
 - [ ] On successful pre-checks, write `~/.march/march-manifest.json` with the manifest JSON (pretty-printed with 2-space indent). Print a success message to stdout listing what was created.
-- [ ] Wire the init handler into `src/main.ts` dispatch, replacing the stub from Slice 1.
+- [ ] Wire the init handler into `src/cli.ts` dispatch, replacing the stub from Slice 1.
 - [ ] Write tests against a temporary HOME directory: (a) clean install creates manifest with correct schema and field values, (b) already-installed guard triggers on existing valid manifest (exit 1, correct message), (c) corrupted manifest detected (exit 1, warning), (d) unwritable directory fails with clear error (exit 1).
 
 **PR Outcome**: `march init` creates `~/.march/march-manifest.json` on a clean system, or fails clearly if already installed or if directories are unwritable. No skill files deployed yet.
@@ -58,11 +58,11 @@
 
 **Justification**: Skill deployment is the primary deliverable of the init command — without it, the CLI has no agent integration. Writing the manifest after skills are deployed ensures consistency.
 
-**Addresses**: FR-002 (deploy skills, record in manifest); FR-012 (march. prefix); Acceptance Scenarios 1.1 (complete), 2.1, 2.2
+**Addresses**: FR-002 (deploy skills, record in manifest); FR-012 (march. prefix); Acceptance Scenarios US1-1 (complete), US2-1, US2-2
 
 ### Tasks
 
-- [ ] Define the skill list in `src/skills.ts`: a function (e.g., `getM1Skills()`) returning an array of skill definitions, each with `filename`, `category`, `deployTarget`, and `content`. The three M1 skills are:
+- [ ] Define the skill list in `src/skills.ts`: a function (e.g., `getM1Skills()`) returning an array of skill definitions, each with `filename`, `category`, `deployTarget`, `agent`, and `content` (matching the MarchSkill entity in the data model). All M1 skills target `agent: "claude"`. The three M1 skills are:
   - `march.spawn-dispatch.md` → `~/.claude/commands/` (category: spawn-dispatch)
   - `march.spawn-status.md` → `~/.claude/commands/` (category: spawn-status)
   - `march.output-handling.md` → `~/.claude/prompts/` (category: output-handling)
@@ -82,7 +82,7 @@
 
 **Justification**: Dependency warnings complete the init contract. End-to-end tests validate the full flow against all acceptance scenarios, closing out US1.
 
-**Addresses**: FR-010 (git/Docker warnings); Acceptance Scenarios 1.2, 1.3; full coverage of 1.1–1.5
+**Addresses**: FR-010 (git/Docker warnings); Acceptance Scenarios US1-2, US1-3; full coverage of US1-1 through US1-5
 
 ### Tasks
 
@@ -96,7 +96,7 @@
   - Scenario 3: Docker missing from PATH — init succeeds, warning on stderr.
   - Scenario 4: Unwritable home directories — init fails with clear error, exit 1.
   - Scenario 5: Existing installation — init prints redirect to `march update`, exit 1.
-- [ ] Verify that when both git and Docker are present on PATH, no warnings are printed (Acceptance Scenario 6.1, 6.2).
+- [ ] Verify that when both git and Docker are present on PATH, no warnings are printed (Acceptance Scenarios US6-1, US6-2).
 
 **PR Outcome**: `march init` is feature-complete for US1. All 5 acceptance scenarios pass. Dependency warnings print to stderr without blocking init.
 
