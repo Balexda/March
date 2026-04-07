@@ -27,10 +27,12 @@ try {
       process.exit(SUCCESS);
     }
   }
-  // Unknown command or other parse error — fall through to show usage
+  // Non-zero commander error (e.g., unknown command) — allow execution
+  // to continue to usage output below
 }
 
-// If we reach here, no subcommand action called process.exit,
-// meaning no command was given or an unknown command was rejected.
+// If we reach here, execution fell through because either:
+// (a) no command was given, or (b) an unknown command threw a CommanderError
+// that was caught and not re-thrown above.
 program.outputHelp();
 process.exit(USAGE_ERROR);
