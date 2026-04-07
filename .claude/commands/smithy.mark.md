@@ -14,22 +14,71 @@ The user's input: $ARGUMENTS
 This may be:
 - A **feature description** (e.g., "add webhook support for build events").
 - A **path to an RFC** (e.g., `docs/rfcs/2026-001-webhook-support/webhook-support.rfc.md`).
+- A **path to a `.features.md`** (feature map) with an optional feature number
+  (e.g., `docs/rfcs/2026-001-foo/01-core.features.md` or
+  `docs/rfcs/2026-001-foo/01-core.features.md 3`).
 - Empty — if so, ask the user what they want to specify.
+
+---
+
+## Routing
+
+Before starting, determine the mode:
+
+1. **If the input is a `.features.md` file path** (with or without a feature number):
+   a. Read the file and parse `### Feature N: <Title>` headings. If no such
+      headings are found, abort with: "This file does not appear to be a valid
+      feature map — expected `### Feature N: <Title>` headings."
+   b. Extract the `**Source RFC**` path from the file header.
+   c. Determine which features already have specs by checking the
+      `## Spec Progress` checklist at the bottom of the `.features.md`. A
+      feature is "specc'd" when its entry is checked (`- [x]`). A feature is
+      unspecced when its entry is unchecked (`- [ ]`). If the checklist does
+      not exist yet, create it now with all features unchecked, write it to
+      the file, and treat every feature as unspecced. (Mark updates the
+      checklist after creating a spec — see Phase 6.)
+   d. **With feature number**: If the number is out of range, list available
+      features with their numbers and titles, then stop. If the feature is
+      already specc'd (per step c), extract the spec folder path from its
+      checked entry (after the `→`) and go to **Phase 0** (Review Loop) with
+      that spec. Otherwise, go to **Phase 1** targeting that feature.
+   e. **Without feature number**: Auto-select the first `### Feature N` that
+      is not yet specc'd (per step c). If **all** features already have specs,
+      present a table of features with their spec folder paths and ask the
+      user which to audit (Phase 0).
+2. **If the input is an RFC path** (`.rfc.md`): existing behavior — go to Phase 1.
+3. **If the input is a feature description** (plain text, no file extension):
+   existing behavior — go to Phase 1.
+4. **If the input is empty**: ask the user what they want to specify.
+
+When entering Phase 1 from a `.features.md`, carry forward:
+- The selected feature's **Title**, **Description**, **User-Facing Value**, and
+  **Scope Boundaries** as the starting context.
+- The **Source RFC** path from the `.features.md` header (if present; if missing,
+  look for a co-located `.rfc.md` in the same directory).
+- The **feature map path** and **feature number** for traceability.
 
 ---
 
 ## Phase 1: Intake
 
-1. Parse the input. If it's an RFC path, read and extract goals, constraints,
-   and open questions. If it's a feature description, treat it as the starting
-   context.
+1. Parse the input:
+   - **RFC path**: Read and extract goals, constraints, and open questions.
+   - **Feature description**: Treat as the starting context.
+   - **Feature map** (from Routing): Use the selected feature's Title,
+     Description, User-Facing Value, and Scope Boundaries as the starting
+     context. Also read the Source RFC (resolved during Routing) for additional
+     goals and constraints.
 2. Explore the codebase to understand current architecture, relevant modules,
    and existing patterns that inform the specification.
 3. Determine the spec folder name:
    - Scan `specs/` for existing folders matching `YYYY-MM-DD-NNN-*`.
    - Derive `<NNN>` as the next sequential number (zero-padded to 3 digits,
      starting at `001`).
-   - Derive `<slug>` as a short kebab-case name from the feature description.
+   - Derive `<slug>` from the feature title (when from a feature map) or the
+     feature description: lowercase, replace spaces and special characters
+     with hyphens, collapse consecutive hyphens, trim leading/trailing
+     hyphens. Use the **full** title — do not shorten or abbreviate.
    - Folder name: `<YYYY-MM-DD>-<NNN>-<slug>` (e.g., `2026-03-14-004-webhook-support`).
 4. Create a git branch with the same name as the folder:
    ```
@@ -182,6 +231,7 @@ Draft the `<slug>.spec.md` file with this structure:
 **Created**: YYYY-MM-DD
 **Status**: Draft
 **Input**: <source — user description or RFC path with summary>
+**Source Feature Map**: `<path-to-.features.md>` — Feature <N>: <Title> *(include only when input is a `.features.md`)*
 
 ## Clarifications
 
@@ -391,8 +441,26 @@ Existing contracts remain unchanged.
 
 ## Phase 6: Write & Review
 
-Create the spec folder and write all three files to disk first, then present a
-summary to the user:
+Create the spec folder and write all three files to disk first.
+
+**Feature map write-back** (when input was a `.features.md`): Update the
+`.features.md` to track progress. If a `## Spec Progress` section does not
+exist at the bottom of the file, create it with one checklist entry per
+feature parsed during Routing. Mark the current feature's entry as complete
+and include the spec folder path:
+
+```markdown
+## Spec Progress
+
+- [x] Feature 1: Template Deployment → `specs/2026-03-14-001-template-deployment/`
+- [ ] Feature 2: Permission Management
+- [ ] Feature 3: Webhook Support
+```
+
+If the section already exists, update only the current feature's entry from
+`- [ ]` to `- [x]` and append the spec folder path.
+
+Then present a summary to the user:
 
 1. Show a summary of what was produced:
    - Spec folder path and branch name.
@@ -464,7 +532,8 @@ through Phase 0).
   is the job of a downstream command.
 - **Do NOT** skip the clarification phase. Even if the input seems clear, do a
   quick scan and confirm with the user.
-- **DO** accept both RFC paths and direct feature descriptions as input.
+- **DO** accept RFC paths, direct feature descriptions, and `.features.md` paths as input.
+- **DO** auto-select the first unspecced feature when given a `.features.md` without a feature number.
 - **DO** keep specs anchored to user value — every requirement should trace to
   a user story.
 - **DO** number user stories sequentially — downstream commands depend on this.
