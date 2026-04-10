@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { isOnPath, INIT_DEPENDENCIES } from "./deps.js";
+import { isOnPath, isFinderAvailable, INIT_DEPENDENCIES } from "./deps.js";
 
 describe("INIT_DEPENDENCIES", () => {
   it("has exactly 2 entries: git and docker", () => {
@@ -44,6 +44,32 @@ describe("isOnPath", () => {
       process.env.PATH = "/tmp";
       expect(isOnPath("node")).toBe(false);
       expect(isOnPath("git")).toBe(false);
+    } finally {
+      process.env.PATH = originalPath;
+    }
+  });
+});
+
+describe("isFinderAvailable", () => {
+  it("returns true in the normal test environment (which is on PATH)", () => {
+    expect(isFinderAvailable()).toBe(true);
+  });
+
+  it("returns false when PATH is empty", () => {
+    const originalPath = process.env.PATH;
+    try {
+      process.env.PATH = "";
+      expect(isFinderAvailable()).toBe(false);
+    } finally {
+      process.env.PATH = originalPath;
+    }
+  });
+
+  it("returns false when PATH contains only /tmp (no which there)", () => {
+    const originalPath = process.env.PATH;
+    try {
+      process.env.PATH = "/tmp";
+      expect(isFinderAvailable()).toBe(false);
     } finally {
       process.env.PATH = originalPath;
     }

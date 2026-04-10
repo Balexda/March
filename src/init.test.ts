@@ -5,6 +5,11 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+// Absolute path to the 'which' binary — used to build isolated test PATHs.
+const WHICH_PATH = execFileSync("which", ["which"], {
+  encoding: "utf-8",
+}).trim();
+
 const CLI_PATH = resolve(import.meta.dirname, "../dist/cli.js");
 
 function runWithHome(
@@ -67,6 +72,18 @@ describe("march init", () => {
     }
     tmpDirs.length = 0;
   });
+
+  /**
+   * Creates a temporary bin directory containing only a symlink to `which`.
+   * Use as PATH alongside nodeBinDir to test per-dependency warnings without
+   * git or docker being present (even when they share /usr/bin with which).
+   */
+  function makeFakeBinWithWhich(): string {
+    const fakeBin = path.join(makeTmpDir(), "bin");
+    fs.mkdirSync(fakeBin);
+    fs.symlinkSync(WHICH_PATH, path.join(fakeBin, path.basename(WHICH_PATH)));
+    return fakeBin;
+  }
 
   function restorePermissions(dir: string): void {
     try {
@@ -257,11 +274,12 @@ describe("march init", () => {
 
   it("prints git warning to stderr when git is not on PATH", () => {
     const tmpDir = makeTmpDir();
-    // Use a minimal PATH that has node but not git or docker
+    // PATH has node + a fake bin containing only 'which' (not git or docker)
+    const fakeBin = makeFakeBinWithWhich();
     const nodeBinDir = path.dirname(process.execPath);
     const result = runWithEnv(["init"], {
       HOME: tmpDir,
-      PATH: nodeBinDir,
+      PATH: [nodeBinDir, fakeBin].join(path.delimiter),
     });
 
     expect(result.exitCode).toBe(0);
@@ -270,10 +288,11 @@ describe("march init", () => {
 
   it("prints docker warning to stderr when docker is not on PATH", () => {
     const tmpDir = makeTmpDir();
+    const fakeBin = makeFakeBinWithWhich();
     const nodeBinDir = path.dirname(process.execPath);
     const result = runWithEnv(["init"], {
       HOME: tmpDir,
-      PATH: nodeBinDir,
+      PATH: [nodeBinDir, fakeBin].join(path.delimiter),
     });
 
     expect(result.exitCode).toBe(0);
@@ -282,14 +301,29 @@ describe("march init", () => {
 
   it("exits 0 even when dependency warnings are present", () => {
     const tmpDir = makeTmpDir();
+    const fakeBin = makeFakeBinWithWhich();
     const nodeBinDir = path.dirname(process.execPath);
     const result = runWithEnv(["init"], {
       HOME: tmpDir,
-      PATH: nodeBinDir,
+      PATH: [nodeBinDir, fakeBin].join(path.delimiter),
     });
 
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toContain("initialized successfully");
+  });
+
+  it("emits cannot-detect warning when which is not on PATH", () => {
+    const tmpDir = makeTmpDir();
+    // PATH has only node — which itself is absent
+    const result = runWithEnv(["init"], {
+      HOME: tmpDir,
+      PATH: path.dirname(process.execPath),
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stderr).toContain("cannot verify git or Docker");
+    expect(result.stderr).not.toContain("git not found");
+    expect(result.stderr).not.toContain("Docker not found");
   });
 
   it("no warnings on stderr when both git and docker are on PATH", () => {
@@ -302,5 +336,6 @@ describe("march init", () => {
     expect(result.exitCode).toBe(0);
     expect(result.stderr).not.toContain("git not found");
     expect(result.stderr).not.toContain("Docker not found");
+    expect(result.stderr).not.toContain("cannot verify");
   });
 });

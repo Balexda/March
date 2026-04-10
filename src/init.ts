@@ -4,7 +4,7 @@ import os from "node:os";
 import { createManifest, isValidManifest } from "./manifest.js";
 import { getM1Skills } from "./skills.js";
 import { CLI_VERSION } from "./version.js";
-import { INIT_DEPENDENCIES, isOnPath } from "./deps.js";
+import { FINDER_BIN, INIT_DEPENDENCIES, isFinderAvailable, isOnPath } from "./deps.js";
 
 export class InitError extends Error {
   constructor(message: string) {
@@ -129,9 +129,15 @@ export async function initMarch(homeDir?: string): Promise<InitResult> {
 
   // 5. Check dependencies and collect warnings
   const warnings: string[] = [];
-  for (const dep of INIT_DEPENDENCIES) {
-    if (!isOnPath(dep.name)) {
-      warnings.push(dep.warning);
+  if (!isFinderAvailable()) {
+    warnings.push(
+      `\`${FINDER_BIN}\` not found \u2014 cannot verify git or Docker are installed.`,
+    );
+  } else {
+    for (const dep of INIT_DEPENDENCIES) {
+      if (!isOnPath(dep.name)) {
+        warnings.push(dep.warning);
+      }
     }
   }
 
