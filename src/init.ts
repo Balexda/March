@@ -13,6 +13,11 @@ export class InitError extends Error {
   }
 }
 
+export interface InitResult {
+  summary: string;
+  warnings: string[];
+}
+
 /**
  * Initialize the March environment.
  *
@@ -21,19 +26,16 @@ export class InitError extends Error {
  * verifying the environment is safe to write to. Guards against existing
  * installations and unwritable directories. The manifest is written last
  * to prevent partial state where the manifest claims files exist that
- * were not yet deployed.
+ * were not yet deployed. After deployment, checks for `git` and `docker`
+ * on PATH; any missing dependencies produce warnings collected in the
+ * returned `InitResult.warnings` array without blocking completion.
  *
  * @param homeDir - Override the home directory (defaults to `os.homedir()`).
  *                  Useful in tests and for programmatic callers that need to
  *                  target a non-default home location.
- * @returns An object with a success summary and any dependency warnings.
+ * @returns An {@link InitResult} with a success summary and any dependency warnings.
  * @throws {InitError} On any pre-flight or write failure.
  */
-export interface InitResult {
-  summary: string;
-  warnings: string[];
-}
-
 export async function initMarch(homeDir?: string): Promise<InitResult> {
   const home = homeDir ?? os.homedir();
   const marchDir = path.join(home, ".march");
