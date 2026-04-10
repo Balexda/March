@@ -39,7 +39,7 @@
 
 ### Tasks
 
-- [ ] Define the `MarchManifest` TypeScript interface in `src/manifest.ts` matching the data model: `version` (number), `marchVersion` (string), `deployLocation` (string), `agents` (string[]), `files` (Record<string, string[]>). Add a factory function `createManifest(cliVersion: string): MarchManifest` that returns a manifest with `version: 1`, `marchVersion` set to the passed `cliVersion`, `deployLocation: "user"`, `agents: ["claude"]`, and `files: { claude: [] }`.
+- [x] Define the `MarchManifest` TypeScript interface in `src/manifest.ts` matching the data model: `version` (number), `marchVersion` (string), `deployLocation` (string), `agents` (string[]), `files` (Record<string, string[]>). Add a factory function `createManifest(cliVersion: string): MarchManifest` that returns a manifest with `version: 1`, `marchVersion` set to the passed `cliVersion`, `deployLocation: "user"`, `agents: ["claude"]`, and `files: { claude: [] }`.
 - [ ] Implement `src/init.ts` with the init command handler. Accept a `homeDir` parameter (defaults to `os.homedir()`) to enable testing with temp directories. The handler orchestrates: (1) check for existing manifest, (2) check writability, (3) create dirs, (4) write manifest.
 - [ ] Implement the already-installed guard: if `~/.march/march-manifest.json` exists and contains valid JSON, print "March is already installed. Run `march update` to upgrade." to stdout and exit 1 (FR-003).
 - [ ] Implement corrupted manifest detection: if `~/.march/march-manifest.json` exists but is not valid JSON or fails schema validation, print a warning about the corrupted manifest and exit 1 with a message suggesting manual removal and re-init.
