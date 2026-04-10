@@ -1,15 +1,22 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, afterEach } from "vitest";
 import { execFileSync } from "node:child_process";
 import { resolve } from "node:path";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
 const CLI_PATH = resolve(import.meta.dirname, "../dist/cli.js");
 
-function run(args: string[]): { stdout: string; stderr: string; exitCode: number } {
+function run(
+  args: string[],
+  options?: { env?: Record<string, string> },
+): { stdout: string; stderr: string; exitCode: number } {
   try {
     const stdout = execFileSync("node", [CLI_PATH, ...args], {
       encoding: "utf-8",
       timeout: 5000,
       stdio: ["pipe", "pipe", "pipe"],
+      env: options?.env,
     });
     return { stdout, stderr: "", exitCode: 0 };
   } catch (err: unknown) {
@@ -19,10 +26,32 @@ function run(args: string[]): { stdout: string; stderr: string; exitCode: number
 }
 
 describe("march CLI", () => {
-  it("march init prints stub message and exits 1", () => {
-    const result = run(["init"]);
-    expect(result.stdout).toContain("not yet implemented");
-    expect(result.exitCode).toBe(1);
+  const tmpDirs: string[] = [];
+
+  function makeTmpDir(): string {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "march-cli-test-"));
+    tmpDirs.push(dir);
+    return dir;
+  }
+
+  afterEach(() => {
+    for (const dir of tmpDirs) {
+      try {
+        fs.rmSync(dir, { recursive: true, force: true });
+      } catch {
+        // best-effort cleanup
+      }
+    }
+    tmpDirs.length = 0;
+  });
+
+  it("march init runs successfully on clean home", () => {
+    const tmpDir = makeTmpDir();
+    const result = run(["init"], {
+      env: { ...process.env, HOME: tmpDir },
+    });
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("initialized successfully");
   });
 
   it("march with no args exits 2 with usage", () => {
