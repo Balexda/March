@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { Command, CommanderError } from "commander";
-import { ERROR, SUCCESS, USAGE_ERROR } from "./exit-codes.js";
+import { SUCCESS, USAGE_ERROR } from "./exit-codes.js";
+import { initMarch } from "./init.js";
 
 const program = new Command();
 
@@ -13,13 +14,13 @@ program
 program
   .command("init")
   .description("Initialize the March environment")
-  .action(() => {
-    console.log("not yet implemented");
-    process.exit(ERROR);
+  .action(async () => {
+    await initMarch();
+    process.exit(SUCCESS);
   });
 
 try {
-  program.parse(process.argv);
+  await program.parseAsync(process.argv);
 } catch (err: unknown) {
   if (err instanceof CommanderError) {
     // commander.version and commander.help throw with exitCode 0

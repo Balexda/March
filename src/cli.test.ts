@@ -19,10 +19,14 @@ function run(args: string[]): { stdout: string; stderr: string; exitCode: number
 }
 
 describe("march CLI", () => {
-  it("march init prints stub message and exits 1", () => {
+  it("march init runs the init handler", () => {
     const result = run(["init"]);
-    expect(result.stdout).toContain("not yet implemented");
-    expect(result.exitCode).toBe(1);
+    // After wiring, init either succeeds (fresh install) or reports already installed
+    const isSuccess =
+      result.exitCode === 0 && result.stdout.includes("initialized successfully");
+    const isAlreadyInstalled =
+      result.exitCode === 1 && result.stdout.includes("already installed");
+    expect(isSuccess || isAlreadyInstalled).toBe(true);
   });
 
   it("march with no args exits 2 with usage", () => {
