@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 import { createManifest, isValidManifest } from "./manifest.js";
+import { CLI_VERSION } from "./version.js";
 
 export class InitError extends Error {
   constructor(message: string) {
@@ -85,7 +86,7 @@ export async function initMarch(homeDir?: string): Promise<string> {
   }
 
   // 3. Write manifest
-  const manifest = createManifest("0.1.0");
+  const manifest = createManifest(CLI_VERSION);
   try {
     await fs.writeFile(manifestPath, JSON.stringify(manifest, null, 2));
   } catch {

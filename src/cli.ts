@@ -2,12 +2,13 @@
 import { Command, CommanderError } from "commander";
 import { ERROR, SUCCESS, USAGE_ERROR } from "./exit-codes.js";
 import { initMarch, InitError } from "./init.js";
+import { CLI_VERSION } from "./version.js";
 
 const program = new Command();
 
 program
   .name("march")
-  .version("0.1.0")
+  .version(CLI_VERSION)
   .option("--yes", "Skip confirmation prompts")
   .exitOverride();
 
