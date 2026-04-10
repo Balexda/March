@@ -12,7 +12,8 @@ import { ERROR } from "./exit-codes.js";
  * unwritable directories.
  *
  * @param homeDir - Override the home directory (defaults to `os.homedir()`).
- *                  Accepts a parameter to enable testing with temp directories.
+ *                  Useful in tests and for programmatic callers that need to
+ *                  target a non-default home location.
  */
 export async function initMarch(homeDir?: string): Promise<void> {
   const home = homeDir ?? os.homedir();
