@@ -1,4 +1,4 @@
-import { execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 
 /**
  * Represents a dependency that should be checked during init.
@@ -29,21 +29,17 @@ export const INIT_DEPENDENCIES: readonly InitDependency[] = [
 /**
  * Checks whether a given executable is available on the system PATH.
  *
- * Uses `which` on Unix-like systems and `where` on Windows. The check
- * command's stdout and stderr are silenced. Any error (including command
- * not found) causes the function to return false.
+ * Uses `which` on Unix-like systems and `where` on Windows via
+ * `execFileSync` (no shell, no injection risk). stdout and stderr are
+ * silenced. Any error (including command not found) returns false.
  *
  * @param executable - The name of the executable to search for.
  * @returns `true` if the executable is found on PATH, `false` otherwise.
  */
 export function isOnPath(executable: string): boolean {
-  const command =
-    process.platform === "win32"
-      ? `where ${executable}`
-      : `which ${executable}`;
-
+  const finder = process.platform === "win32" ? "where" : "which";
   try {
-    execSync(command, { stdio: "ignore" });
+    execFileSync(finder, [executable], { stdio: "ignore" });
     return true;
   } catch {
     return false;
