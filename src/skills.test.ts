@@ -3,7 +3,7 @@ import { getM1Skills, type MarchSkill } from "./skills.js";
 
 describe("MarchSkill interface and getM1Skills", () => {
   it("returns exactly 3 skills", () => {
-    const skills = getM1Skills();
+    const skills: MarchSkill[] = getM1Skills();
     expect(skills).toHaveLength(3);
   });
 
