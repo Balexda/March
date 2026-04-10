@@ -85,7 +85,12 @@ describe("march init", () => {
     expect(manifest.marchVersion).toBe("0.1.0");
     expect(manifest.deployLocation).toBe("user");
     expect(manifest.agents).toEqual(["claude"]);
-    expect(manifest.files).toEqual({ claude: [] });
+    expect(manifest.files.claude).toHaveLength(3);
+    expect(manifest.files.claude).toEqual([
+      ".claude/commands/march.spawn-dispatch.md",
+      ".claude/commands/march.spawn-status.md",
+      ".claude/prompts/march.output-handling.md",
+    ]);
   });
 
   it("already-installed guard triggers on existing valid manifest", () => {
@@ -157,5 +162,79 @@ describe("march init", () => {
     expect(result.exitCode).toBe(1);
     const output = result.stdout + result.stderr;
     expect(output).toMatch(/[Cc]annot create directory/);
+  });
+
+  it("all 3 skill files exist at expected paths after init", () => {
+    const tmpDir = makeTmpDir();
+    const result = runWithHome(["init"], tmpDir);
+
+    expect(result.exitCode).toBe(0);
+
+    const expectedFiles = [
+      path.join(tmpDir, ".claude", "commands", "march.spawn-dispatch.md"),
+      path.join(tmpDir, ".claude", "commands", "march.spawn-status.md"),
+      path.join(tmpDir, ".claude", "prompts", "march.output-handling.md"),
+    ];
+    for (const filePath of expectedFiles) {
+      expect(fs.existsSync(filePath), `Expected ${filePath} to exist`).toBe(true);
+    }
+  });
+
+  it("all deployed skill files are valid markdown", () => {
+    const tmpDir = makeTmpDir();
+    runWithHome(["init"], tmpDir);
+
+    const skillFiles = [
+      path.join(tmpDir, ".claude", "commands", "march.spawn-dispatch.md"),
+      path.join(tmpDir, ".claude", "commands", "march.spawn-status.md"),
+      path.join(tmpDir, ".claude", "prompts", "march.output-handling.md"),
+    ];
+    for (const filePath of skillFiles) {
+      const content = fs.readFileSync(filePath, "utf-8");
+      expect(content).toMatch(/^#\s+/m);
+      expect(content.length).toBeGreaterThan(0);
+    }
+  });
+
+  it("~/.claude/commands and ~/.claude/prompts are created if absent", () => {
+    const tmpDir = makeTmpDir();
+    runWithHome(["init"], tmpDir);
+
+    expect(fs.existsSync(path.join(tmpDir, ".claude", "commands"))).toBe(true);
+    expect(fs.existsSync(path.join(tmpDir, ".claude", "prompts"))).toBe(true);
+  });
+
+  it("all deployed filenames start with march.", () => {
+    const tmpDir = makeTmpDir();
+    runWithHome(["init"], tmpDir);
+
+    const manifestPath = path.join(tmpDir, ".march", "march-manifest.json");
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf-8"));
+    for (const filePath of manifest.files.claude as string[]) {
+      const filename = path.basename(filePath);
+      expect(filename).toMatch(/^march\./);
+    }
+  });
+
+  it("manifest files.claude paths use no leading ~/ prefix", () => {
+    const tmpDir = makeTmpDir();
+    runWithHome(["init"], tmpDir);
+
+    const manifestPath = path.join(tmpDir, ".march", "march-manifest.json");
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf-8"));
+    for (const filePath of manifest.files.claude as string[]) {
+      expect(filePath).not.toMatch(/^~\//);
+      expect(filePath).not.toMatch(/^\//);
+    }
+  });
+
+  it("success message lists deployed skill files", () => {
+    const tmpDir = makeTmpDir();
+    const result = runWithHome(["init"], tmpDir);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("march.spawn-dispatch.md");
+    expect(result.stdout).toContain("march.spawn-status.md");
+    expect(result.stdout).toContain("march.output-handling.md");
   });
 });
