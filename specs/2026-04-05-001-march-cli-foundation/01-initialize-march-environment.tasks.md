@@ -70,7 +70,7 @@
 - [x] Implement skill deployment in `src/init.ts` (or a `deploySkills` function called by init): iterate the skill list, create target directories if missing, write each file to its deploy target. All filenames must use the `march.` prefix (FR-012).
 - [x] After all skill files are written successfully, populate the manifest's `files.claude` array with the deployed paths relative to HOME using forward slashes and no leading `~/` (e.g., `.claude/commands/march.spawn-dispatch.md`). Then write the manifest to disk. This "write manifest last" ordering prevents partial state where the manifest claims files exist but they don't.
 - [x] Update the init success message to include the list of deployed skill files.
-- [ ] Write tests: (a) after init, all 3 skill files exist at expected paths and are valid markdown, (b) manifest `files.claude` contains exactly 3 paths in the correct relative format (no `~/` prefix), (c) `~/.claude/commands/` and `~/.claude/prompts/` directories are created if absent, (d) all deployed filenames start with `march.`.
+- [x] Write tests: (a) after init, all 3 skill files exist at expected paths and are valid markdown, (b) manifest `files.claude` contains exactly 3 paths in the correct relative format (no `~/` prefix), (c) `~/.claude/commands/` and `~/.claude/prompts/` directories are created if absent, (d) all deployed filenames start with `march.`.
 
 **PR Outcome**: `march init` now deploys 3 placeholder skill files to `~/.claude/commands/` and `~/.claude/prompts/`, records them in the manifest, and prints a summary. The full happy-path init flow works end-to-end (minus dependency warnings).
 
