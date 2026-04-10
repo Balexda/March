@@ -23,7 +23,7 @@
 - [x] In `src/cli.test.ts`, add tests:
   - `march version` exits 0 and stdout contains the current package version string.
   - `march version` stdout is byte-for-byte identical to `march --version` stdout (capture both with `run()` and assert `===`).
-- [ ] Run `npm test` to confirm all existing tests pass alongside the new ones.
+- [x] Run `npm test` to confirm all existing tests pass alongside the new ones.
 
 **PR Outcome**: `march version` is a working subcommand that prints the bare version string (e.g., `0.1.0`) and exits 0, with parity guaranteed against `march --version`.
 
@@ -54,7 +54,7 @@
   - `march help version` exits 0 and stdout contains version-specific help text.
   - `march help nonexistent` exits 2.
   - `march init --help` exits 0 (FR-008 coverage — Commander provides this automatically; this test confirms it is not broken).
-- [ ] Run `npm test` to confirm all existing tests pass alongside the new ones.
+- [x] Run `npm test` to confirm all existing tests pass alongside the new ones.
 
 **PR Outcome**: `march help` is a first-class subcommand with correct exit codes for all invocations (0 for no-arg or valid command, 2 for invalid command name), output identical to `march --help`, and the command listing reflects all registered commands including `version` from Slice 1.
 
