@@ -5,10 +5,10 @@ import { execFileSync } from "node:child_process";
  */
 export interface InitDependency {
   /** The executable name to look for on PATH (e.g., "git"). */
-  name: string;
+  readonly name: string;
 
   /** The warning message to print to stderr if the executable is not found. */
-  warning: string;
+  readonly warning: string;
 }
 
 /**
