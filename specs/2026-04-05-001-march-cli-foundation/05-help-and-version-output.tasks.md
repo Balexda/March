@@ -47,7 +47,7 @@
     - If found: call `found.outputHelp()`.
   - If no argument: call `program.outputHelp()`.
   - In both valid cases, set `process.exitCode = SUCCESS`.
-- [ ] In `src/cli.test.ts`, add tests:
+- [x] In `src/cli.test.ts`, add tests:
   - `march help` exits 0 and stdout lists `init`, `version`, and `help` in the command listing.
   - `march help` stdout is byte-for-byte identical to `march --help` stdout.
   - `march help init` exits 0 and stdout contains init-specific help text.
