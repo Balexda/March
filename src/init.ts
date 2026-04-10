@@ -4,12 +4,18 @@ import os from "node:os";
 import { createManifest, isValidManifest } from "./manifest.js";
 import { getM1Skills } from "./skills.js";
 import { CLI_VERSION } from "./version.js";
+import { FINDER_BIN, INIT_DEPENDENCIES, isFinderAvailable, isOnPath } from "./deps.js";
 
 export class InitError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "InitError";
   }
+}
+
+export interface InitResult {
+  summary: string;
+  warnings: string[];
 }
 
 /**
@@ -20,15 +26,17 @@ export class InitError extends Error {
  * verifying the environment is safe to write to. Guards against existing
  * installations and unwritable directories. The manifest is written last
  * to prevent partial state where the manifest claims files exist that
- * were not yet deployed.
+ * were not yet deployed. After deployment, checks for `git` and `docker`
+ * on PATH; any missing dependencies produce warnings collected in the
+ * returned `InitResult.warnings` array without blocking completion.
  *
  * @param homeDir - Override the home directory (defaults to `os.homedir()`).
  *                  Useful in tests and for programmatic callers that need to
  *                  target a non-default home location.
- * @returns A summary of what was created.
+ * @returns An {@link InitResult} with a success summary and any dependency warnings.
  * @throws {InitError} On any pre-flight or write failure.
  */
-export async function initMarch(homeDir?: string): Promise<string> {
+export async function initMarch(homeDir?: string): Promise<InitResult> {
   const home = homeDir ?? os.homedir();
   const marchDir = path.join(home, ".march");
   const claudeDir = path.join(home, ".claude");
@@ -119,7 +127,21 @@ export async function initMarch(homeDir?: string): Promise<string> {
     throw new InitError(`Cannot write manifest: ${manifestPath}`);
   }
 
-  // 5. Return success summary
+  // 5. Check dependencies and collect warnings
+  const warnings: string[] = [];
+  if (!isFinderAvailable()) {
+    warnings.push(
+      `\`${FINDER_BIN}\` not found \u2014 cannot verify git or Docker are installed.`,
+    );
+  } else {
+    for (const dep of INIT_DEPENDENCIES) {
+      if (!isOnPath(dep.name)) {
+        warnings.push(dep.warning);
+      }
+    }
+  }
+
+  // 6. Return success summary and any warnings
   const lines = [
     "March initialized successfully.",
     `  Created: ${marchDir}`,
@@ -128,5 +150,5 @@ export async function initMarch(homeDir?: string): Promise<string> {
     "  Deployed skills:",
     ...deployedPaths.map((p) => `    ${p}`),
   ];
-  return lines.join("\n");
+  return { summary: lines.join("\n"), warnings };
 }

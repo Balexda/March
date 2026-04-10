@@ -86,17 +86,17 @@
 
 ### Tasks
 
-- [ ] Implement dependency checking in `src/deps.ts`: a function that checks whether a given executable is on PATH (e.g., using `child_process.execSync('which <name>')` or a cross-platform equivalent). Return a boolean indicating found/not-found.
-- [ ] Define the init dependency requirements: `git` with warning message "git not found — required for spawn operations." and `docker` with warning message "Docker not found — required for spawn operations."
-- [ ] Wire dependency checks into the init flow (in `src/init.ts`): after successful manifest and skill deployment, check for git and docker. Print any warnings to **stderr** (per contracts doc). Init still exits 0 regardless of warnings.
-- [ ] Write unit tests for the dependency checker: mock or manipulate PATH to test found/not-found cases.
-- [ ] Write end-to-end integration tests against a temporary HOME covering all 5 US1 acceptance scenarios:
+- [x] Implement dependency checking in `src/deps.ts`: a function that checks whether a given executable is on PATH (e.g., using `child_process.execSync('which <name>')` or a cross-platform equivalent). Return a boolean indicating found/not-found.
+- [x] Define the init dependency requirements: `git` with warning message "git not found — required for spawn operations." and `docker` with warning message "Docker not found — required for spawn operations."
+- [x] Wire dependency checks into the init flow (in `src/init.ts`): after successful manifest and skill deployment, check for git and docker. Print any warnings to **stderr** (per contracts doc). Init still exits 0 regardless of warnings.
+- [x] Write unit tests for the dependency checker: mock or manipulate PATH to test found/not-found cases.
+- [x] Write end-to-end integration tests against a temporary HOME covering all 5 US1 acceptance scenarios:
   - Scenario 1: Clean install — manifest created, 3 skill files deployed, exit 0.
   - Scenario 2: git missing from PATH — init succeeds, warning on stderr.
   - Scenario 3: Docker missing from PATH — init succeeds, warning on stderr.
   - Scenario 4: Unwritable home directories — init fails with clear error, exit 1.
   - Scenario 5: Existing installation — init prints redirect to `march update`, exit 1.
-- [ ] Verify that when both git and Docker are present on PATH, no warnings are printed (Acceptance Scenarios US6-1, US6-2).
+- [x] Verify that when both git and Docker are present on PATH, no warnings are printed (Acceptance Scenarios US6-1, US6-2).
 
 **PR Outcome**: `march init` is feature-complete for US1. All 5 acceptance scenarios pass. Dependency warnings print to stderr without blocking init.
 

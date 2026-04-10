@@ -1,9 +1,14 @@
 import { describe, it, expect, afterEach } from "vitest";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { resolve } from "node:path";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+
+// Absolute path to the 'which' binary — used to build isolated test PATHs.
+const WHICH_PATH = execFileSync("which", ["which"], {
+  encoding: "utf-8",
+}).trim();
 
 const CLI_PATH = resolve(import.meta.dirname, "../dist/cli.js");
 
@@ -16,7 +21,9 @@ function runWithHome(
       encoding: "utf-8",
       timeout: 10000,
       stdio: ["pipe", "pipe", "pipe"],
-      env: { ...process.env, HOME: homeDir },
+      // USERPROFILE is the Windows equivalent of HOME; include both for
+      // cross-platform consistency.
+      env: { ...process.env, HOME: homeDir, USERPROFILE: homeDir },
     });
     return { stdout, stderr: "", exitCode: 0 };
   } catch (err: unknown) {
@@ -27,6 +34,25 @@ function runWithHome(
       exitCode: e.status ?? 1,
     };
   }
+}
+
+function runWithEnv(
+  args: string[],
+  env: Record<string, string | undefined>,
+): { stdout: string; stderr: string; exitCode: number } {
+  // Merge with process.env so required variables (SystemRoot, PATHEXT, etc.)
+  // are not accidentally dropped. Keys in `env` take precedence.
+  const result = spawnSync("node", [CLI_PATH, ...args], {
+    encoding: "utf-8",
+    timeout: 10000,
+    stdio: ["pipe", "pipe", "pipe"],
+    env: { ...process.env, ...env },
+  });
+  return {
+    stdout: result.stdout ?? "",
+    stderr: result.stderr ?? "",
+    exitCode: result.status ?? 1,
+  };
 }
 
 describe("march init", () => {
@@ -50,6 +76,31 @@ describe("march init", () => {
     }
     tmpDirs.length = 0;
   });
+
+  /**
+   * Creates a temporary bin directory containing a symlink to `which` plus
+   * optional stub executables (shell scripts that exit 0) for each name in
+   * `stubs`. Use the returned path in a controlled PATH so tests are fully
+   * self-contained regardless of what is installed on the host machine.
+   *
+   * `which` and `node` are assumed to be available on the CI box; we symlink
+   * `which` rather than stubbing it to keep PATH construction simple. If CI
+   * environments are ever encountered where `which` itself is missing, add a
+   * stub for it here too.
+   */
+  function makeFakeBin(stubs: string[] = []): string {
+    const fakeBin = path.join(makeTmpDir(), "bin");
+    fs.mkdirSync(fakeBin);
+    // Always include 'which' so isFinderAvailable() returns true.
+    fs.symlinkSync(WHICH_PATH, path.join(fakeBin, path.basename(WHICH_PATH)));
+    // Add any requested stub executables.
+    for (const name of stubs) {
+      const stub = path.join(fakeBin, name);
+      fs.writeFileSync(stub, "#!/bin/sh\nexit 0\n");
+      fs.chmodSync(stub, 0o755);
+    }
+    return fakeBin;
+  }
 
   function restorePermissions(dir: string): void {
     try {
@@ -236,5 +287,83 @@ describe("march init", () => {
     expect(result.stdout).toContain("march.spawn-dispatch.md");
     expect(result.stdout).toContain("march.spawn-status.md");
     expect(result.stdout).toContain("march.output-handling.md");
+  });
+
+  it("prints git warning to stderr when git is not on PATH", () => {
+    const tmpDir = makeTmpDir();
+    // Fake bin has 'which' but no git or docker — isolates the git warning.
+    const fakeBin = makeFakeBin();
+    const nodeBinDir = path.dirname(process.execPath);
+    const result = runWithEnv(["init"], {
+      HOME: tmpDir,
+      USERPROFILE: tmpDir,
+      PATH: [nodeBinDir, fakeBin].join(path.delimiter),
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stderr).toContain("git not found");
+  });
+
+  it("prints docker warning to stderr when docker is not on PATH", () => {
+    const tmpDir = makeTmpDir();
+    const fakeBin = makeFakeBin();
+    const nodeBinDir = path.dirname(process.execPath);
+    const result = runWithEnv(["init"], {
+      HOME: tmpDir,
+      USERPROFILE: tmpDir,
+      PATH: [nodeBinDir, fakeBin].join(path.delimiter),
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stderr).toContain("Docker not found");
+  });
+
+  it("exits 0 even when dependency warnings are present", () => {
+    const tmpDir = makeTmpDir();
+    const fakeBin = makeFakeBin();
+    const nodeBinDir = path.dirname(process.execPath);
+    const result = runWithEnv(["init"], {
+      HOME: tmpDir,
+      USERPROFILE: tmpDir,
+      PATH: [nodeBinDir, fakeBin].join(path.delimiter),
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("initialized successfully");
+  });
+
+  it("emits cannot-detect warning when which is not on PATH", () => {
+    const tmpDir = makeTmpDir();
+    // PATH has only node — which itself is absent, triggering the cannot-detect path.
+    const result = runWithEnv(["init"], {
+      HOME: tmpDir,
+      USERPROFILE: tmpDir,
+      PATH: path.dirname(process.execPath),
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stderr).toContain("cannot verify git or Docker");
+    expect(result.stderr).not.toContain("git not found");
+    expect(result.stderr).not.toContain("Docker not found");
+  });
+
+  it("no warnings on stderr when both git and docker are on PATH", () => {
+    const tmpDir = makeTmpDir();
+    // Fake bin has 'which' + stub git and docker scripts — fully self-contained,
+    // no dependency on the host machine having git or Docker installed.
+    // node and which are assumed to be available on the CI box (symlinked in
+    // makeFakeBin); add stubs for them here too if that assumption ever breaks.
+    const fakeBin = makeFakeBin(["git", "docker"]);
+    const nodeBinDir = path.dirname(process.execPath);
+    const result = runWithEnv(["init"], {
+      HOME: tmpDir,
+      USERPROFILE: tmpDir,
+      PATH: [nodeBinDir, fakeBin].join(path.delimiter),
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stderr).not.toContain("git not found");
+    expect(result.stderr).not.toContain("Docker not found");
+    expect(result.stderr).not.toContain("cannot verify");
   });
 });
