@@ -62,11 +62,11 @@
 
 ### Tasks
 
-- [ ] Define the skill list in `src/skills.ts`: a function (e.g., `getM1Skills()`) returning an array of skill definitions, each with `filename`, `category`, `deployTarget`, `agent`, and `content` (matching the MarchSkill entity in the data model). All M1 skills target `agent: "claude"`. The three M1 skills are:
+- [x] Define the skill list in `src/skills.ts`: a function (e.g., `getM1Skills()`) returning an array of skill definitions, each with `filename`, `category`, `deployTarget`, `agent`, and `content` (matching the MarchSkill entity in the data model). All M1 skills target `agent: "claude"`. The three M1 skills are:
   - `march.spawn-dispatch.md` → `~/.claude/commands/` (category: spawn-dispatch)
   - `march.spawn-status.md` → `~/.claude/commands/` (category: spawn-status)
   - `march.output-handling.md` → `~/.claude/prompts/` (category: output-handling)
-- [ ] Author minimal placeholder markdown content for each skill file. Each should have a title (e.g., `# March: Spawn Dispatch`) and a one-line body stating it is a placeholder that will be authored during Features 2-6.
+- [x] Author minimal placeholder markdown content for each skill file. Each should have a title (e.g., `# March: Spawn Dispatch`) and a one-line body stating it is a placeholder that will be authored during Features 2-6.
 - [ ] Implement skill deployment in `src/init.ts` (or a `deploySkills` function called by init): iterate the skill list, create target directories if missing, write each file to its deploy target. All filenames must use the `march.` prefix (FR-012).
 - [ ] After all skill files are written successfully, populate the manifest's `files.claude` array with the deployed paths relative to HOME using forward slashes and no leading `~/` (e.g., `.claude/commands/march.spawn-dispatch.md`). Then write the manifest to disk. This "write manifest last" ordering prevents partial state where the manifest claims files exist but they don't.
 - [ ] Update the init success message to include the list of deployed skill files.
