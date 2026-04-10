@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from "vitest";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { resolve } from "node:path";
 import fs from "node:fs";
 import os from "node:os";
@@ -27,6 +27,23 @@ function runWithHome(
       exitCode: e.status ?? 1,
     };
   }
+}
+
+function runWithEnv(
+  args: string[],
+  env: Record<string, string | undefined>,
+): { stdout: string; stderr: string; exitCode: number } {
+  const result = spawnSync("node", [CLI_PATH, ...args], {
+    encoding: "utf-8",
+    timeout: 10000,
+    stdio: ["pipe", "pipe", "pipe"],
+    env,
+  });
+  return {
+    stdout: result.stdout ?? "",
+    stderr: result.stderr ?? "",
+    exitCode: result.status ?? 1,
+  };
 }
 
 describe("march init", () => {
@@ -236,5 +253,54 @@ describe("march init", () => {
     expect(result.stdout).toContain("march.spawn-dispatch.md");
     expect(result.stdout).toContain("march.spawn-status.md");
     expect(result.stdout).toContain("march.output-handling.md");
+  });
+
+  it("prints git warning to stderr when git is not on PATH", () => {
+    const tmpDir = makeTmpDir();
+    // Use a minimal PATH that has node but not git or docker
+    const nodeBinDir = path.dirname(process.execPath);
+    const result = runWithEnv(["init"], {
+      HOME: tmpDir,
+      PATH: nodeBinDir,
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stderr).toContain("git not found");
+  });
+
+  it("prints docker warning to stderr when docker is not on PATH", () => {
+    const tmpDir = makeTmpDir();
+    const nodeBinDir = path.dirname(process.execPath);
+    const result = runWithEnv(["init"], {
+      HOME: tmpDir,
+      PATH: nodeBinDir,
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stderr).toContain("Docker not found");
+  });
+
+  it("exits 0 even when dependency warnings are present", () => {
+    const tmpDir = makeTmpDir();
+    const nodeBinDir = path.dirname(process.execPath);
+    const result = runWithEnv(["init"], {
+      HOME: tmpDir,
+      PATH: nodeBinDir,
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("initialized successfully");
+  });
+
+  it("no warnings on stderr when both git and docker are on PATH", () => {
+    const tmpDir = makeTmpDir();
+    const result = runWithEnv(["init"], {
+      ...process.env,
+      HOME: tmpDir,
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stderr).not.toContain("git not found");
+    expect(result.stderr).not.toContain("Docker not found");
   });
 });

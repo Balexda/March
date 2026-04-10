@@ -4,6 +4,7 @@ import os from "node:os";
 import { createManifest, isValidManifest } from "./manifest.js";
 import { getM1Skills } from "./skills.js";
 import { CLI_VERSION } from "./version.js";
+import { INIT_DEPENDENCIES, isOnPath } from "./deps.js";
 
 export class InitError extends Error {
   constructor(message: string) {
@@ -25,10 +26,15 @@ export class InitError extends Error {
  * @param homeDir - Override the home directory (defaults to `os.homedir()`).
  *                  Useful in tests and for programmatic callers that need to
  *                  target a non-default home location.
- * @returns A summary of what was created.
+ * @returns An object with a success summary and any dependency warnings.
  * @throws {InitError} On any pre-flight or write failure.
  */
-export async function initMarch(homeDir?: string): Promise<string> {
+export interface InitResult {
+  summary: string;
+  warnings: string[];
+}
+
+export async function initMarch(homeDir?: string): Promise<InitResult> {
   const home = homeDir ?? os.homedir();
   const marchDir = path.join(home, ".march");
   const claudeDir = path.join(home, ".claude");
@@ -119,7 +125,15 @@ export async function initMarch(homeDir?: string): Promise<string> {
     throw new InitError(`Cannot write manifest: ${manifestPath}`);
   }
 
-  // 5. Return success summary
+  // 5. Check dependencies and collect warnings
+  const warnings: string[] = [];
+  for (const dep of INIT_DEPENDENCIES) {
+    if (!isOnPath(dep.name)) {
+      warnings.push(dep.warning);
+    }
+  }
+
+  // 6. Return success summary and any warnings
   const lines = [
     "March initialized successfully.",
     `  Created: ${marchDir}`,
@@ -128,5 +142,5 @@ export async function initMarch(homeDir?: string): Promise<string> {
     "  Deployed skills:",
     ...deployedPaths.map((p) => `    ${p}`),
   ];
-  return lines.join("\n");
+  return { summary: lines.join("\n"), warnings };
 }

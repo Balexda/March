@@ -17,8 +17,11 @@ program
   .description("Initialize the March environment")
   .action(async () => {
     try {
-      const summary = await initMarch();
+      const { summary, warnings } = await initMarch();
       console.log(summary);
+      for (const warning of warnings) {
+        process.stderr.write(warning + "\n");
+      }
       process.exit(SUCCESS);
     } catch (err) {
       if (err instanceof InitError) {
