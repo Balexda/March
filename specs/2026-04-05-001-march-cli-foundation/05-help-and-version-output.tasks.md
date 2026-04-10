@@ -17,7 +17,7 @@
 
 ### Tasks
 
-- [ ] In `src/cli.ts`, register a `version` subcommand after the existing `init` command:
+- [x] In `src/cli.ts`, register a `version` subcommand after the existing `init` command:
   - `.command("version").description("Display the installed CLI version")`
   - Action sets `commandHandled = true`, calls `console.log(CLI_VERSION)`, sets `process.exitCode = SUCCESS`.
 - [x] In `src/cli.test.ts`, add tests:

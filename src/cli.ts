@@ -41,6 +41,15 @@ program
     }
   });
 
+program
+  .command("version")
+  .description("Display the installed CLI version")
+  .action(() => {
+    commandHandled = true;
+    console.log(CLI_VERSION);
+    process.exitCode = SUCCESS;
+  });
+
 try {
   await program.parseAsync(process.argv);
 } catch (err: unknown) {
