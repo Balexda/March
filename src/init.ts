@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 import { createManifest, isValidManifest } from "./manifest.js";
+import { getM1Skills } from "./skills.js";
 import { CLI_VERSION } from "./version.js";
 
 export class InitError extends Error {
@@ -85,20 +86,44 @@ export async function initMarch(homeDir?: string): Promise<string> {
     }
   }
 
-  // 3. Write manifest
+  // 3. Deploy skill files
+  const skills = getM1Skills();
+  const deployedPaths: string[] = [];
+
+  for (const skill of skills) {
+    const targetDir = path.join(home, skill.deployTarget);
+    try {
+      await fs.mkdir(targetDir, { recursive: true });
+    } catch {
+      throw new InitError(`Cannot create directory: ${targetDir}`);
+    }
+    try {
+      await fs.writeFile(path.join(targetDir, skill.filename), skill.content);
+    } catch {
+      throw new InitError(
+        `Cannot write skill file: ${path.join(targetDir, skill.filename)}`,
+      );
+    }
+    deployedPaths.push(skill.deployTarget + "/" + skill.filename);
+  }
+
+  // 4. Write manifest last with files.claude populated
   const manifest = createManifest(CLI_VERSION);
+  manifest.files.claude = deployedPaths;
   try {
     await fs.writeFile(manifestPath, JSON.stringify(manifest, null, 2));
   } catch {
     throw new InitError(`Cannot write manifest: ${manifestPath}`);
   }
 
-  // 4. Return success summary
+  // 5. Return success summary
   const lines = [
     "March initialized successfully.",
     `  Created: ${marchDir}`,
     `  Created: ${claudeDir}`,
     `  Manifest: ${manifestPath}`,
+    "  Deployed skills:",
+    ...deployedPaths.map((p) => `    ${p}`),
   ];
   return lines.join("\n");
 }

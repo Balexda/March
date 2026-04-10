@@ -85,7 +85,12 @@ describe("march init", () => {
     expect(manifest.marchVersion).toBe("0.1.0");
     expect(manifest.deployLocation).toBe("user");
     expect(manifest.agents).toEqual(["claude"]);
-    expect(manifest.files).toEqual({ claude: [] });
+    expect(manifest.files.claude).toHaveLength(3);
+    expect(manifest.files.claude).toEqual([
+      ".claude/commands/march.spawn-dispatch.md",
+      ".claude/commands/march.spawn-status.md",
+      ".claude/prompts/march.output-handling.md",
+    ]);
   });
 
   it("already-installed guard triggers on existing valid manifest", () => {
