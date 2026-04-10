@@ -15,9 +15,12 @@ export class InitError extends Error {
 /**
  * Initialize the March environment.
  *
- * Creates `~/.march/march-manifest.json` after verifying the environment
- * is safe to write to. Guards against existing installations and
- * unwritable directories.
+ * Creates `~/.march/march-manifest.json` and deploys the M1 placeholder
+ * skill files to `~/.claude/commands/` and `~/.claude/prompts/` after
+ * verifying the environment is safe to write to. Guards against existing
+ * installations and unwritable directories. The manifest is written last
+ * to prevent partial state where the manifest claims files exist that
+ * were not yet deployed.
  *
  * @param homeDir - Override the home directory (defaults to `os.homedir()`).
  *                  Useful in tests and for programmatic callers that need to
