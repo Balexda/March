@@ -20,7 +20,7 @@
 - [ ] In `src/cli.ts`, register a `version` subcommand after the existing `init` command:
   - `.command("version").description("Display the installed CLI version")`
   - Action sets `commandHandled = true`, calls `console.log(CLI_VERSION)`, sets `process.exitCode = SUCCESS`.
-- [ ] In `src/cli.test.ts`, add tests:
+- [x] In `src/cli.test.ts`, add tests:
   - `march version` exits 0 and stdout contains the current package version string.
   - `march version` stdout is byte-for-byte identical to `march --version` stdout (capture both with `run()` and assert `===`).
 - [ ] Run `npm test` to confirm all existing tests pass alongside the new ones.
