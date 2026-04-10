@@ -12,21 +12,30 @@ program
   .option("--yes", "Skip confirmation prompts")
   .exitOverride();
 
+// Tracks whether a registered command handled the invocation. Required because
+// process.exitCode (unlike process.exit()) does not terminate immediately, so
+// the usage-output fallthrough block must be gated explicitly.
+let commandHandled = false;
+
 program
   .command("init")
   .description("Initialize the March environment")
   .action(async () => {
+    commandHandled = true;
     try {
       const { summary, warnings } = await initMarch();
       console.log(summary);
       for (const warning of warnings) {
         process.stderr.write(warning + "\n");
       }
-      process.exit(SUCCESS);
+      // Set exitCode rather than calling process.exit() so buffered stdout/
+      // stderr is fully flushed before the process terminates naturally.
+      process.exitCode = SUCCESS;
     } catch (err) {
       if (err instanceof InitError) {
         console.error(err.message);
-        process.exit(ERROR);
+        process.exitCode = ERROR;
+        return;
       }
       throw err;
     }
@@ -38,15 +47,15 @@ try {
   if (err instanceof CommanderError) {
     // commander.version and commander.help throw with exitCode 0
     if (err.exitCode === 0) {
-      process.exit(SUCCESS);
+      commandHandled = true;
+      process.exitCode = SUCCESS;
     }
   }
-  // Non-zero commander error (e.g., unknown command) — allow execution
-  // to continue to usage output below
+  // Non-zero commander error (e.g., unknown command) — fall through to usage output
 }
 
-// If we reach here, execution fell through because either:
-// (a) no command was given, or (b) an unknown command threw a CommanderError
-// that was caught and not re-thrown above.
-program.outputHelp();
-process.exit(USAGE_ERROR);
+// No command was handled: either no args given or an unrecognised command.
+if (!commandHandled) {
+  program.outputHelp();
+  process.exitCode = USAGE_ERROR;
+}
