@@ -46,7 +46,7 @@
 - [x] Implement writability pre-checks: before creating anything, create `~/.march/` and `~/.claude/` directories if they don't exist (using `fs.mkdir` with `recursive: true`), then explicitly verify write permission on each directory using `fs.access` with `fs.constants.W_OK`. This two-step check is necessary because `mkdir` with `recursive: true` succeeds silently on pre-existing read-only directories. If directory creation fails or the writability check fails, print a clear error naming the unwritable directory and exit 1 (FR-011).
 - [x] On successful pre-checks, write `~/.march/march-manifest.json` with the manifest JSON (pretty-printed with 2-space indent). Print a success message to stdout listing what was created.
 - [x] Wire the init handler into `src/cli.ts` dispatch, replacing the stub from Slice 1.
-- [ ] Write tests against a temporary HOME directory: (a) clean install creates manifest with correct schema and field values, (b) already-installed guard triggers on existing valid manifest (exit 1, correct message), (c) corrupted manifest detected (exit 1, warning), (d) unwritable directory fails with clear error (exit 1).
+- [x] Write tests against a temporary HOME directory: (a) clean install creates manifest with correct schema and field values, (b) already-installed guard triggers on existing valid manifest (exit 1, correct message), (c) corrupted manifest detected (exit 1, warning), (d) unwritable directory fails with clear error (exit 1).
 
 **PR Outcome**: `march init` creates `~/.march/march-manifest.json` on a clean system, or fails clearly if already installed or if directories are unwritable. No skill files deployed yet.
 
