@@ -39,7 +39,7 @@
 
 ### Tasks
 
-- [ ] In `src/cli.ts`, register an explicit `help` subcommand after `version` (before `parseAsync`):
+- [x] In `src/cli.ts`, register an explicit `help` subcommand after `version` (before `parseAsync`):
   - `.command("help [command]").description("Display help for a command")`
   - Action sets `commandHandled = true`.
   - If a `command` argument is provided, look it up via `program.commands.find(c => c.name() === cmd)`.
