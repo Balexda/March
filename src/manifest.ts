@@ -21,6 +21,24 @@ export interface MarchManifest {
 }
 
 /**
+ * Checks whether a parsed JSON value has the shape of a valid MarchManifest.
+ * Returns true only if all required fields are present with correct types.
+ */
+export function isValidManifest(value: unknown): value is MarchManifest {
+  if (typeof value !== "object" || value === null) return false;
+  const obj = value as Record<string, unknown>;
+  return (
+    typeof obj.version === "number" &&
+    typeof obj.marchVersion === "string" &&
+    typeof obj.deployLocation === "string" &&
+    Array.isArray(obj.agents) &&
+    obj.agents.every((a: unknown) => typeof a === "string") &&
+    typeof obj.files === "object" &&
+    obj.files !== null
+  );
+}
+
+/**
  * Creates a new MarchManifest with default values.
  *
  * @param cliVersion - The semantic version of the March CLI.

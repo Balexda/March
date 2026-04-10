@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { createManifest, type MarchManifest } from "./manifest.js";
+import { createManifest, isValidManifest, type MarchManifest } from "./manifest.js";
 
 describe("MarchManifest", () => {
   it("createManifest returns a manifest with correct default structure", () => {
@@ -35,5 +35,47 @@ describe("MarchManifest", () => {
     expect(Array.isArray(manifest.agents)).toBe(true);
     expect(typeof manifest.files).toBe("object");
     expect(Array.isArray(manifest.files.claude)).toBe(true);
+  });
+});
+
+describe("isValidManifest", () => {
+  it("accepts a well-formed manifest", () => {
+    expect(isValidManifest(createManifest("0.1.0"))).toBe(true);
+  });
+
+  it("rejects null", () => {
+    expect(isValidManifest(null)).toBe(false);
+  });
+
+  it("rejects a string", () => {
+    expect(isValidManifest("hello")).toBe(false);
+  });
+
+  it("rejects an object missing required fields", () => {
+    expect(isValidManifest({ hello: "world" })).toBe(false);
+  });
+
+  it("rejects an object with wrong field types", () => {
+    expect(
+      isValidManifest({
+        version: "1",
+        marchVersion: "0.1.0",
+        deployLocation: "user",
+        agents: ["claude"],
+        files: { claude: [] },
+      }),
+    ).toBe(false);
+  });
+
+  it("rejects agents with non-string elements", () => {
+    expect(
+      isValidManifest({
+        version: 1,
+        marchVersion: "0.1.0",
+        deployLocation: "user",
+        agents: [123],
+        files: { claude: [] },
+      }),
+    ).toBe(false);
   });
 });

@@ -94,14 +94,21 @@ describe("march init", () => {
     fs.mkdirSync(marchDir, { recursive: true });
     fs.writeFileSync(
       path.join(marchDir, "march-manifest.json"),
-      JSON.stringify({ version: 1, marchVersion: "0.1.0" }),
+      JSON.stringify({
+        version: 1,
+        marchVersion: "0.1.0",
+        deployLocation: "user",
+        agents: ["claude"],
+        files: { claude: [] },
+      }),
     );
 
     const result = runWithHome(["init"], tmpDir);
 
     expect(result.exitCode).toBe(1);
-    expect(result.stdout).toContain("already installed");
-    expect(result.stdout).toContain("march update");
+    const output = result.stdout + result.stderr;
+    expect(output).toContain("already installed");
+    expect(output).toContain("march update");
   });
 
   it("corrupted manifest detected exits 1 with warning", () => {
@@ -119,6 +126,23 @@ describe("march init", () => {
     const output = result.stdout + result.stderr;
     expect(output).toMatch(/[Cc]orrupted/);
     expect(output).toMatch(/invalid JSON/i);
+  });
+
+  it("valid JSON but invalid manifest shape is treated as corrupted", () => {
+    const tmpDir = makeTmpDir();
+    const marchDir = path.join(tmpDir, ".march");
+    fs.mkdirSync(marchDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(marchDir, "march-manifest.json"),
+      JSON.stringify({ hello: "world" }),
+    );
+
+    const result = runWithHome(["init"], tmpDir);
+
+    expect(result.exitCode).toBe(1);
+    const output = result.stdout + result.stderr;
+    expect(output).toMatch(/[Cc]orrupted/);
+    expect(output).toMatch(/not a valid March manifest/i);
   });
 
   it("unwritable directory fails with clear error", () => {

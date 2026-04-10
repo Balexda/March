@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { Command, CommanderError } from "commander";
-import { SUCCESS, USAGE_ERROR } from "./exit-codes.js";
-import { initMarch } from "./init.js";
+import { ERROR, SUCCESS, USAGE_ERROR } from "./exit-codes.js";
+import { initMarch, InitError } from "./init.js";
 
 const program = new Command();
 
@@ -15,8 +15,17 @@ program
   .command("init")
   .description("Initialize the March environment")
   .action(async () => {
-    await initMarch();
-    process.exit(SUCCESS);
+    try {
+      const summary = await initMarch();
+      console.log(summary);
+      process.exit(SUCCESS);
+    } catch (err) {
+      if (err instanceof InitError) {
+        console.error(err.message);
+        process.exit(ERROR);
+      }
+      throw err;
+    }
   });
 
 try {
