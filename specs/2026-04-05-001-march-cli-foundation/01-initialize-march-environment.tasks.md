@@ -86,8 +86,8 @@
 
 ### Tasks
 
-- [ ] Implement dependency checking in `src/deps.ts`: a function that checks whether a given executable is on PATH (e.g., using `child_process.execSync('which <name>')` or a cross-platform equivalent). Return a boolean indicating found/not-found.
-- [ ] Define the init dependency requirements: `git` with warning message "git not found — required for spawn operations." and `docker` with warning message "Docker not found — required for spawn operations."
+- [x] Implement dependency checking in `src/deps.ts`: a function that checks whether a given executable is on PATH (e.g., using `child_process.execSync('which <name>')` or a cross-platform equivalent). Return a boolean indicating found/not-found.
+- [x] Define the init dependency requirements: `git` with warning message "git not found — required for spawn operations." and `docker` with warning message "Docker not found — required for spawn operations."
 - [ ] Wire dependency checks into the init flow (in `src/init.ts`): after successful manifest and skill deployment, check for git and docker. Print any warnings to **stderr** (per contracts doc). Init still exits 0 regardless of warnings.
 - [ ] Write unit tests for the dependency checker: mock or manipulate PATH to test found/not-found cases.
 - [ ] Write end-to-end integration tests against a temporary HOME covering all 5 US1 acceptance scenarios:
