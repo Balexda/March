@@ -72,7 +72,12 @@ export async function initMarch(homeDir?: string): Promise<void> {
 
   // 3. Write manifest
   const manifest = createManifest("0.1.0");
-  await fs.writeFile(manifestPath, JSON.stringify(manifest, null, 2));
+  try {
+    await fs.writeFile(manifestPath, JSON.stringify(manifest, null, 2));
+  } catch {
+    console.error(`Cannot write manifest: ${manifestPath}`);
+    process.exit(ERROR);
+  }
 
   // 4. Print success message
   console.log("March initialized successfully.");
