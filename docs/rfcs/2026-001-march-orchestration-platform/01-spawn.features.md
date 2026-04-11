@@ -69,7 +69,7 @@
 ## Spec Progress
 
 - [x] Feature 1: March CLI Foundation → `specs/2026-04-05-001-march-cli-foundation/`
-- [ ] Feature 2: Spawn Dispatch
+- [x] Feature 2: Spawn Dispatch → `specs/2026-04-11-002-spawn-dispatch/`
 - [ ] Feature 3: Multi-Backend Execution Interface
 - [ ] Feature 4: Spawn Sandbox Security
 - [ ] Feature 5: Spawn Output Extraction
