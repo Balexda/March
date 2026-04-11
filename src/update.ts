@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 import { isValidManifest, type MarchManifest } from "./manifest.js";
+import { getM1Skills } from "./skills.js";
 import { CLI_VERSION } from "./version.js";
 
 export class UpdateError extends Error {
@@ -168,13 +169,92 @@ export async function updateMarch(
     // If force is true, fall through to file operations (Task 2)
   }
 
-  // Step C — File operations (Task 2 will implement this)
-  // For now, return a placeholder result for the upgrade path
+  // Step C — File operations
+  const skills = getM1Skills();
+  const newPaths = skills.map((s) => `${s.deployTarget}/${s.filename}`);
+  const oldPaths: string[] = (manifest.files.claude ?? []) as string[];
+
+  const newSet = new Set(newPaths);
+  const oldSet = new Set(oldPaths);
+
+  const added = newPaths.filter((p) => !oldSet.has(p));
+  const removed = oldPaths.filter((p) => !newSet.has(p));
+
+  // Deploy all current skill files (overwrite unchanged, add new)
+  for (const skill of skills) {
+    const targetDir = path.join(home, skill.deployTarget);
+    try {
+      await fs.mkdir(targetDir, { recursive: true });
+    } catch {
+      throw new UpdateError(`Cannot create directory: ${targetDir}`);
+    }
+    try {
+      await fs.writeFile(path.join(targetDir, skill.filename), skill.content);
+    } catch {
+      throw new UpdateError(
+        `Cannot write skill file: ${path.join(targetDir, skill.filename)}`,
+      );
+    }
+  }
+
+  // Remove stale files tracked in the old manifest but absent from the new set.
+  // Silently tolerate ENOENT (already gone = desired state).
+  // Untracked user files are never touched.
+  for (const relPath of removed) {
+    const fullPath = path.join(home, relPath);
+    try {
+      await fs.rm(fullPath);
+    } catch (err: unknown) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code !== "ENOENT") {
+        throw new UpdateError(
+          `Cannot remove stale file ${fullPath}: ${code ?? String(err)}`,
+        );
+      }
+    }
+  }
+
+  // Rewrite manifest last, after all filesystem operations succeed,
+  // to prevent partial state where the manifest claims files that do not exist.
+  const updatedManifest: MarchManifest = {
+    ...manifest,
+    marchVersion: cliVersion,
+    files: { ...manifest.files, claude: newPaths },
+  };
+  try {
+    await fs.writeFile(manifestPath, JSON.stringify(updatedManifest, null, 2));
+  } catch {
+    throw new UpdateError(`Cannot write manifest: ${manifestPath}`);
+  }
+
+  // Build human-readable summary
+  const unchanged = newPaths.filter((p) => oldSet.has(p));
+  const summaryLines: string[] = [
+    `March updated successfully from v${installedVersion} to v${cliVersion}.`,
+  ];
+  if (added.length > 0) {
+    summaryLines.push("  Added:");
+    for (const p of added) summaryLines.push(`    ${p}`);
+  }
+  if (removed.length > 0) {
+    summaryLines.push("  Removed:");
+    for (const p of removed) summaryLines.push(`    ${p}`);
+  }
+  if (unchanged.length > 0) {
+    summaryLines.push("  Unchanged:");
+    for (const p of unchanged) summaryLines.push(`    ${p}`);
+  }
+
+  const warnings: string[] = [];
+  if (cmp > 0) {
+    warnings.push(`Downgrade applied: v${installedVersion} → v${cliVersion}.`);
+  }
+
   return {
-    summary: `March updated from v${installedVersion} to v${cliVersion}.`,
-    warnings: [],
-    added: [],
-    removed: [],
+    summary: summaryLines.join("\n"),
+    warnings,
+    added,
+    removed,
     skipped: false,
     downgrade: cmp > 0,
   };
