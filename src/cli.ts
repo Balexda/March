@@ -76,7 +76,7 @@ try {
   await program.parseAsync(process.argv);
 } catch (err: unknown) {
   if (err instanceof CommanderError) {
-    // commander.version throws with exitCode 0 when --version is passed
+    // Commander throws with exitCode 0 for any handled flag (e.g. --version, --help)
     if (err.exitCode === 0) {
       commandHandled = true;
       process.exitCode = SUCCESS;
