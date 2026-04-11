@@ -115,9 +115,12 @@ describe("march CLI", () => {
     }
   });
 
-  it("march with unrecognized command exits 2", () => {
+  it("march with unrecognized command exits 2 with error and valid commands", () => {
     const result = run(["nonexistent"]);
     expect(result.exitCode).toBe(2);
+    expect(result.stderr).toContain("nonexistent");
+    const combined = result.stdout + result.stderr;
+    expect(combined).toContain("init");
   });
 
   it("--yes flag is accepted without error", () => {

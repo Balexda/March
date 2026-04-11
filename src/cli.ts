@@ -192,6 +192,10 @@ try {
 
 // No command was handled: either no args given or an unrecognised command.
 if (!commandHandled) {
+  const unknownCmd = process.argv.slice(2).find((arg) => !arg.startsWith("-"));
+  if (unknownCmd) {
+    process.stderr.write(`error: unknown command '${unknownCmd}'\n`);
+  }
   program.outputHelp();
   process.exitCode = USAGE_ERROR;
 }
