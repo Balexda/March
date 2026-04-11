@@ -87,6 +87,7 @@ describe("march CLI", () => {
   it("march version stdout is byte-for-byte identical to march --version stdout", () => {
     const versionSubcommand = run(["version"]);
     const versionFlag = run(["--version"]);
+    expect(versionFlag.exitCode).toBe(0);
     expect(versionSubcommand.stdout).toBe(versionFlag.stdout);
   });
 
@@ -101,6 +102,7 @@ describe("march CLI", () => {
   it("march help stdout is byte-for-byte identical to march --help stdout", () => {
     const helpSubcommand = run(["help"]);
     const helpFlag = run(["--help"]);
+    expect(helpFlag.exitCode).toBe(0);
     expect(helpSubcommand.stdout).toBe(helpFlag.stdout);
   });
 
