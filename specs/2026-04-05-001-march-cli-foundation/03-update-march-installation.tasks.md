@@ -13,7 +13,7 @@
 
 **Justification**: The update module is structurally parallel to init — the same function handles all four acceptance scenarios and the edge case. All scenarios test the same core logic (read manifest, compare, diff files, act). Splitting further would create a PR where the module exists but the command is unreachable, which is not a working increment.
 
-**Addresses**: FR-004, FR-005, FR-006 (partial — registering `update` as a setup command), FR-008, FR-009; Acceptance Scenarios 3.1, 3.2, 3.3, 3.4; edge case (update before init)
+**Addresses**: FR-004, FR-005, FR-006 (partial — registering `update` as a setup command), FR-008, FR-009; Acceptance Scenarios US3-1, US3-2, US3-3, US3-4; edge case (update before init)
 
 ### Tasks
 
