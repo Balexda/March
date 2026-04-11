@@ -71,6 +71,16 @@ describe("MarchSkill interface and getM1Skills", () => {
     }
   });
 
+  it("each skill content opens with an H1 heading", () => {
+    const skills = getM1Skills();
+    for (const skill of skills) {
+      expect(
+        skill.content.trimStart().startsWith("# "),
+        `${skill.filename} content must open with an H1 heading ("# ...")`,
+      ).toBe(true);
+    }
+  });
+
   it("spawn-dispatch content has correct title and placeholder text", () => {
     const skills = getM1Skills();
     const skill = skills.find((s) => s.category === "spawn-dispatch")!;

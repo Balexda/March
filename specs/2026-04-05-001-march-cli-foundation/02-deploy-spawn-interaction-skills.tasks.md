@@ -18,7 +18,7 @@
 ### Tasks
 
 - [x] In `src/skills.test.ts`, replace the loose filename pattern test on line 24 (`/^march\..*\.md$/`) with a strict Claude Code-compatible pattern: `/^march\.[a-z0-9-]+\.md$/`. This ensures filenames produce valid slash command names (no spaces, no uppercase, no special characters beyond the hyphen already used in `spawn-dispatch`, `spawn-status`, and `output-handling`).
-- [ ] In `src/skills.test.ts`, add a test "each skill content opens with an H1 heading" that checks `skill.content.trimStart().startsWith("# ")` for all skills. This is stronger than the existing `toContain("#")` check on line 70 and directly maps to what Claude Code renders as the command title.
+- [x] In `src/skills.test.ts`, add a test "each skill content opens with an H1 heading" that checks `skill.content.trimStart().startsWith("# ")` for all skills. This is stronger than the existing `toContain("#")` check on line 70 and directly maps to what Claude Code renders as the command title.
 - [ ] Run `npm test` and verify all tests pass, including the three per-skill title tests on lines 74–93 that assert placeholder content — those tests are correct for this milestone and must continue to pass.
 
 **PR Outcome**: `skills.test.ts` encodes Claude Code's discoverability format requirements as executable assertions. Any future skill definition that uses a non-discoverable filename or omits the required H1 heading will fail CI.
