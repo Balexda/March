@@ -334,7 +334,7 @@ describe("march update", () => {
       }),
     );
 
-    // execFileSync pipes stdin, making it non-TTY
+    // spawnSync (used by runWithHome) pipes stdin, making it non-TTY
     const result = runWithHome(["update"], tmpDir);
 
     expect(result.exitCode).toBe(0);
