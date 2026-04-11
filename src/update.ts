@@ -192,7 +192,18 @@ export async function updateMarch(
   // Step C — File operations
   const skills = getM1Skills();
   const newPaths = skills.map((s) => `${s.deployTarget}/${s.filename}`);
-  const oldPaths: string[] = (manifest.files.claude ?? []) as string[];
+  const claudeFiles = manifest.files.claude;
+  if (
+    !Array.isArray(claudeFiles) ||
+    !claudeFiles.every((p) => typeof p === "string")
+  ) {
+    throw new UpdateError(
+      `Corrupted manifest at ${manifestPath}. ` +
+        "The files.claude field is not an array of strings. " +
+        "Please remove ~/.march/march-manifest.json and re-run `march init`.",
+    );
+  }
+  const oldPaths: string[] = claudeFiles;
 
   const newSet = new Set(newPaths);
   const oldSet = new Set(oldPaths);

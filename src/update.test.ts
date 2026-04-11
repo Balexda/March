@@ -85,6 +85,26 @@ describe("march update", () => {
     expect(output).toMatch(/[Cc]orrupt/);
   });
 
+  it("manifest with non-array files.claude → exits 1 with corruption message", () => {
+    const tmpDir = makeTmpDir();
+    writeManifest(
+      tmpDir,
+      JSON.stringify({
+        version: 1,
+        marchVersion: "0.0.1",
+        deployLocation: "user",
+        agents: ["claude"],
+        files: { claude: "bad" },
+      }),
+    );
+
+    const result = runWithHome(["update"], tmpDir);
+
+    expect(result.exitCode).toBe(1);
+    const output = result.stdout + result.stderr;
+    expect(output).toMatch(/[Cc]orrupt/);
+  });
+
   it("same version → exits 0 with 'already up to date'", () => {
     const tmpDir = makeTmpDir();
     writeManifest(
