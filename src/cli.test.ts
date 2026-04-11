@@ -1,11 +1,18 @@
 import { describe, it, expect, afterEach } from "vitest";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { resolve } from "node:path";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { FINDER_BIN } from "./deps.js";
 
 const CLI_PATH = resolve(import.meta.dirname, "../dist/cli.js");
+
+// Absolute path to the finder binary (which on Unix, where on Windows) —
+// used to build isolated test PATHs.
+const FINDER_PATH = execFileSync(FINDER_BIN, [FINDER_BIN], {
+  encoding: "utf-8",
+}).trim();
 
 function run(
   args: string[],
@@ -44,6 +51,47 @@ describe("march CLI", () => {
     }
     tmpDirs.length = 0;
   });
+
+  /**
+   * Runs the CLI with a fully controlled environment. Uses `spawnSync` instead
+   * of `execFileSync` so both stdout and stderr are captured regardless of
+   * exit code.
+   */
+  function runWithEnv(
+    args: string[],
+    env: Record<string, string | undefined>,
+  ): { stdout: string; stderr: string; exitCode: number } {
+    const result = spawnSync("node", [CLI_PATH, ...args], {
+      encoding: "utf-8",
+      timeout: 10000,
+      stdio: ["pipe", "pipe", "pipe"],
+      env: { ...process.env, ...env },
+    });
+    return {
+      stdout: result.stdout ?? "",
+      stderr: result.stderr ?? "",
+      exitCode: result.status ?? 1,
+    };
+  }
+
+  /**
+   * Creates a temporary bin directory containing a symlink to the finder
+   * binary (which/where) plus optional stub executables for each name in
+   * `stubs`. Returns the bin directory path — the parent tmpdir is tracked
+   * for cleanup in afterEach.
+   */
+  function makeFakeBin(stubs: string[] = []): string {
+    const fakeBin = path.join(makeTmpDir(), "bin");
+    fs.mkdirSync(fakeBin);
+    // Always include the finder binary so isFinderAvailable() returns true.
+    fs.symlinkSync(FINDER_PATH, path.join(fakeBin, path.basename(FINDER_PATH)));
+    for (const name of stubs) {
+      const stub = path.join(fakeBin, name);
+      fs.writeFileSync(stub, "#!/bin/sh\nexit 0\n");
+      fs.chmodSync(stub, 0o755);
+    }
+    return fakeBin;
+  }
 
   it("march init runs successfully on clean home", () => {
     const tmpDir = makeTmpDir();
@@ -126,5 +174,54 @@ describe("march CLI", () => {
   it("march init --help exits 0", () => {
     const result = run(["init", "--help"]);
     expect(result.exitCode).toBe(0);
+  });
+
+  // --- spawn command integration tests ---
+
+  it("march spawn with git missing exits 1, stderr mentions git, no stub message on stdout", () => {
+    const fakeBin = makeFakeBin(); // which only, no git
+    const nodeBinDir = path.dirname(process.execPath);
+    const result = runWithEnv(["spawn"], {
+      PATH: [nodeBinDir, fakeBin].join(path.delimiter),
+    });
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("git");
+    expect(result.stdout).not.toContain("not yet implemented");
+  });
+
+  it("march spawn with git present exits 1 with stub message on stdout", () => {
+    const fakeBin = makeFakeBin(["git"]);
+    const nodeBinDir = path.dirname(process.execPath);
+    const result = runWithEnv(["spawn"], {
+      PATH: [nodeBinDir, fakeBin].join(path.delimiter),
+    });
+    expect(result.exitCode).toBe(1);
+    expect(result.stdout).toContain(
+      "march spawn is not yet implemented",
+    );
+    expect(result.stderr).not.toContain("git");
+  });
+
+  it("march spawn dispatch with git present behaves same as bare spawn", () => {
+    const fakeBin = makeFakeBin(["git"]);
+    const nodeBinDir = path.dirname(process.execPath);
+    const result = runWithEnv(["spawn", "dispatch"], {
+      PATH: [nodeBinDir, fakeBin].join(path.delimiter),
+    });
+    expect(result.exitCode).toBe(1);
+    expect(result.stdout).toContain(
+      "march spawn is not yet implemented",
+    );
+  });
+
+  it("march spawn dispatch with git missing behaves same as bare spawn", () => {
+    const fakeBin = makeFakeBin(); // which only, no git
+    const nodeBinDir = path.dirname(process.execPath);
+    const result = runWithEnv(["spawn", "dispatch"], {
+      PATH: [nodeBinDir, fakeBin].join(path.delimiter),
+    });
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("git");
+    expect(result.stdout).not.toContain("not yet implemented");
   });
 });

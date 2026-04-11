@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { Command, CommanderError } from "commander";
 import { ERROR, SUCCESS, USAGE_ERROR } from "./exit-codes.js";
+import { checkSpawnDependencies } from "./deps.js";
 import { initMarch, InitError } from "./init.js";
 import { CLI_VERSION } from "./version.js";
 
@@ -70,6 +71,24 @@ program
       program.outputHelp();
       process.exitCode = SUCCESS;
     }
+  });
+
+program
+  .command("spawn [subcommand]")
+  .description("Spawn a new environment (not yet implemented)")
+  .allowUnknownOption()
+  .action(() => {
+    commandHandled = true;
+    const result = checkSpawnDependencies();
+    if (!result.ok) {
+      process.stderr.write(result.error + "\n");
+      process.exitCode = ERROR;
+      return;
+    }
+    console.log(
+      "march spawn is not yet implemented. It will be available after Feature 2: Spawn Dispatch.",
+    );
+    process.exitCode = ERROR;
   });
 
 try {

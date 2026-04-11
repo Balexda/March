@@ -1,6 +1,15 @@
 import { describe, it, expect } from "vitest";
 import path from "node:path";
-import { isOnPath, isFinderAvailable, INIT_DEPENDENCIES } from "./deps.js";
+import fs from "node:fs";
+import os from "node:os";
+import { execFileSync } from "node:child_process";
+import { FINDER_BIN } from "./deps.js";
+import {
+  isOnPath,
+  isFinderAvailable,
+  checkSpawnDependencies,
+  INIT_DEPENDENCIES,
+} from "./deps.js";
 
 describe("INIT_DEPENDENCIES", () => {
   it("has exactly 2 entries: git and docker", () => {
@@ -82,6 +91,108 @@ describe("isFinderAvailable", () => {
     try {
       process.env.PATH = "/tmp";
       expect(isFinderAvailable()).toBe(false);
+    } finally {
+      process.env.PATH = originalPath;
+    }
+  });
+
+  it("finds the finder binary when it has a PATHEXT extension (win32 simulation)", () => {
+    // Simulate the Windows scenario: the binary on disk has an extension
+    // (e.g., where.exe) and PATHEXT tells the shell to try that suffix.
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "march-pathext-"));
+    const binDir = path.join(tmpDir, "bin");
+    fs.mkdirSync(binDir);
+    // Create a file named <FINDER_BIN>.exe (e.g., which.exe or where.exe).
+    const withExt = path.join(binDir, FINDER_BIN + ".exe");
+    fs.writeFileSync(withExt, "");
+
+    const originalPath = process.env.PATH;
+    const originalPathExt = process.env.PATHEXT;
+    const originalPlatform = Object.getOwnPropertyDescriptor(process, "platform");
+    try {
+      // Point PATH only at our bin dir and pretend we are on win32.
+      process.env.PATH = binDir;
+      process.env.PATHEXT = ".EXE";
+      Object.defineProperty(process, "platform", { value: "win32" });
+      expect(isFinderAvailable()).toBe(true);
+    } finally {
+      process.env.PATH = originalPath;
+      process.env.PATHEXT = originalPathExt;
+      if (originalPlatform) {
+        Object.defineProperty(process, "platform", originalPlatform);
+      }
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+});
+
+// Absolute path to the finder binary (which on Unix, where on Windows) —
+// used to build isolated PATH environments for unit tests.
+const FINDER_PATH = execFileSync(FINDER_BIN, [FINDER_BIN], {
+  encoding: "utf-8",
+}).trim();
+
+describe("checkSpawnDependencies", () => {
+  /**
+   * Creates a temporary directory containing a symlink to `which` and optional
+   * stub executables. Callers must clean up via the returned path.
+   */
+  function makeFakeBin(stubs: string[] = []): string {
+    const fakeBin = path.join(
+      fs.mkdtempSync(path.join(os.tmpdir(), "march-deps-test-")),
+      "bin",
+    );
+    fs.mkdirSync(fakeBin);
+    // Symlink the finder binary so isFinderAvailable() returns true.
+    fs.symlinkSync(FINDER_PATH, path.join(fakeBin, path.basename(FINDER_PATH)));
+    for (const name of stubs) {
+      const stub = path.join(fakeBin, name);
+      fs.writeFileSync(stub, "#!/bin/sh\nexit 0\n");
+      fs.chmodSync(stub, 0o755);
+    }
+    return fakeBin;
+  }
+
+  it("returns ok:true when finder is available and git is on PATH", () => {
+    const originalPath = process.env.PATH;
+    const fakeBin = makeFakeBin(["git"]);
+    const nodeBinDir = path.dirname(process.execPath);
+    try {
+      process.env.PATH = [nodeBinDir, fakeBin].join(path.delimiter);
+      const result = checkSpawnDependencies();
+      expect(result.ok).toBe(true);
+    } finally {
+      process.env.PATH = originalPath;
+      fs.rmSync(path.dirname(fakeBin), { recursive: true, force: true });
+    }
+  });
+
+  it("returns ok:false with error mentioning 'git' when git is not on PATH", () => {
+    const originalPath = process.env.PATH;
+    const fakeBin = makeFakeBin(); // no git stub
+    const nodeBinDir = path.dirname(process.execPath);
+    try {
+      process.env.PATH = [nodeBinDir, fakeBin].join(path.delimiter);
+      const result = checkSpawnDependencies();
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error).toContain("git");
+      }
+    } finally {
+      process.env.PATH = originalPath;
+      fs.rmSync(path.dirname(fakeBin), { recursive: true, force: true });
+    }
+  });
+
+  it("returns ok:false with path-search utility error when finder is unavailable", () => {
+    const originalPath = process.env.PATH;
+    try {
+      process.env.PATH = "";
+      const result = checkSpawnDependencies();
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error).toContain("path-search utility");
+      }
     } finally {
       process.env.PATH = originalPath;
     }

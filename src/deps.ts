@@ -32,19 +32,44 @@ export const INIT_DEPENDENCIES: readonly InitDependency[] = [
 export const FINDER_BIN = process.platform === "win32" ? "where" : "which";
 
 /**
+ * Returns the PATHEXT extensions to try when probing for an executable.
+ * On Windows, `fs.existsSync("where")` misses `where.exe` because it does
+ * not perform PATHEXT resolution the way the shell does. This helper parses
+ * `process.env.PATHEXT` (falling back to a sensible default) and returns
+ * the extensions to append. On non-Windows platforms, returns an empty array
+ * so only the bare name is checked.
+ */
+function getPathExtensions(): string[] {
+  if (process.platform !== "win32") return [];
+  const raw = process.env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD";
+  return raw.split(";").filter(Boolean);
+}
+
+/**
  * Returns `true` if the finder binary (`which` on Unix, `where` on Windows)
  * is itself present on PATH.
  *
  * Scans PATH entries directly using `fs.existsSync` to avoid the circularity
- * of using `which` to find `which`. When this returns `false`, `isOnPath`
- * cannot produce reliable results and callers should emit a single
- * "cannot detect" warning rather than per-dependency false-negatives.
+ * of using `which` to find `which`. On Windows, also checks with each PATHEXT
+ * extension (e.g., `where.exe`) because `existsSync` does not perform the
+ * shell's automatic extension resolution.
+ *
+ * When this returns `false`, `isOnPath` cannot produce reliable results and
+ * callers should emit a single "cannot detect" warning rather than
+ * per-dependency false-negatives.
  */
 export function isFinderAvailable(): boolean {
   const dirs = (process.env.PATH ?? "").split(path.delimiter).filter(Boolean);
+  const extensions = getPathExtensions();
   return dirs.some((dir) => {
     try {
-      return fs.existsSync(path.join(dir, FINDER_BIN));
+      // Check bare name (works on Unix; may also match on Windows if the
+      // file has no extension).
+      if (fs.existsSync(path.join(dir, FINDER_BIN))) return true;
+      // On Windows, try each PATHEXT extension (e.g., where.exe).
+      return extensions.some((ext) =>
+        fs.existsSync(path.join(dir, FINDER_BIN + ext.toLowerCase())),
+      );
     } catch {
       return false;
     }
@@ -71,4 +96,43 @@ export function isOnPath(executable: string): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * Result of a spawn dependency check. Either all required dependencies are
+ * present (`ok: true`) or one or more are missing (`ok: false` with a
+ * human-readable `error` message suitable for writing to stderr).
+ */
+export type DependencyCheckResult =
+  | { readonly ok: true }
+  | { readonly ok: false; readonly error: string };
+
+/**
+ * Checks whether git — the hard dependency for all spawn operations — is
+ * available on PATH. Returns a structured result so the caller can decide
+ * how to present the outcome (stderr message, exit code, etc.).
+ *
+ * **Fail-safe behavior**: if `isFinderAvailable()` returns false we cannot
+ * reliably determine whether git is present. Rather than silently assuming
+ * it is (which would lead to a cryptic `execFileSync` failure later), we
+ * report a blocking error. This differs from the init-time path, which
+ * emits a soft warning, because spawn actually requires git to function.
+ */
+export function checkSpawnDependencies(): DependencyCheckResult {
+  if (!isFinderAvailable()) {
+    return {
+      ok: false,
+      error:
+        "Cannot verify spawn dependencies: unable to locate the path-search utility. Ensure your PATH is configured correctly.",
+    };
+  }
+
+  if (!isOnPath("git")) {
+    return {
+      ok: false,
+      error: "git not found on PATH — required for spawn operations.",
+    };
+  }
+
+  return { ok: true };
 }
