@@ -107,9 +107,11 @@ describe("march CLI", () => {
     expect(result.exitCode).toBe(2);
     const combined = result.stdout + result.stderr;
     expect(combined).toMatch(/usage|Usage/i);
-    // AS 4.1: no-args output lists all five registered commands (two-tier listing)
+    // AS 4.1: no-args output lists all five registered commands (two-tier listing).
+    // Match command-list entries (leading whitespace + command name as first word)
+    // to avoid false positives from --help/--version in the Options section.
     for (const cmd of ["init", "update", "help", "version", "spawn"]) {
-      expect(combined).toContain(cmd);
+      expect(combined).toMatch(new RegExp(`^\\s+${cmd}\\b`, "m"));
     }
   });
 
