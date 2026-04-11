@@ -71,13 +71,14 @@ describe("MarchSkill interface and getM1Skills", () => {
     }
   });
 
-  it("each skill content opens with an H1 heading", () => {
+  it("each skill content opens with an H1 heading with non-empty text", () => {
     const skills = getM1Skills();
     for (const skill of skills) {
+      const firstLine = skill.content.trimStart().split("\n")[0];
       expect(
-        skill.content.trimStart().startsWith("# "),
-        `${skill.filename} content must open with an H1 heading ("# ...")`,
-      ).toBe(true);
+        firstLine,
+        `${skill.filename} content must open with an H1 heading with non-empty text (e.g. "# My Title")`,
+      ).toMatch(/^# \S/);
     }
   });
 
