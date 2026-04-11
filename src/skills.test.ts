@@ -21,7 +21,7 @@ describe("MarchSkill interface and getM1Skills", () => {
   it("all filenames start with march. and end with .md", () => {
     const skills = getM1Skills();
     for (const skill of skills) {
-      expect(skill.filename).toMatch(/^march\..*\.md$/);
+      expect(skill.filename).toMatch(/^march\.[a-z0-9-]+\.md$/);
     }
   });
 
@@ -68,6 +68,17 @@ describe("MarchSkill interface and getM1Skills", () => {
     for (const skill of skills) {
       expect(skill.content.length).toBeGreaterThan(0);
       expect(skill.content).toContain("#");
+    }
+  });
+
+  it("each skill content opens with an H1 heading with non-empty text", () => {
+    const skills = getM1Skills();
+    for (const skill of skills) {
+      const firstLine = skill.content.trimStart().split("\n")[0];
+      expect(
+        firstLine,
+        `${skill.filename} content must open with an H1 heading with non-empty text (e.g. "# My Title")`,
+      ).toMatch(/^# \S/);
     }
   });
 
