@@ -21,7 +21,7 @@ describe("MarchSkill interface and getM1Skills", () => {
   it("all filenames start with march. and end with .md", () => {
     const skills = getM1Skills();
     for (const skill of skills) {
-      expect(skill.filename).toMatch(/^march\..*\.md$/);
+      expect(skill.filename).toMatch(/^march\.[a-z0-9-]+\.md$/);
     }
   });
 
