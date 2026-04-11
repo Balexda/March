@@ -4,11 +4,13 @@ import { resolve } from "node:path";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { FINDER_BIN } from "./deps.js";
 
 const CLI_PATH = resolve(import.meta.dirname, "../dist/cli.js");
 
-// Absolute path to the 'which' binary — used to build isolated test PATHs.
-const WHICH_PATH = execFileSync("which", ["which"], {
+// Absolute path to the finder binary (which on Unix, where on Windows) —
+// used to build isolated test PATHs.
+const FINDER_PATH = execFileSync(FINDER_BIN, [FINDER_BIN], {
   encoding: "utf-8",
 }).trim();
 
@@ -73,15 +75,16 @@ describe("march CLI", () => {
   }
 
   /**
-   * Creates a temporary bin directory containing a symlink to `which` plus
-   * optional stub executables for each name in `stubs`. Returns the bin
-   * directory path — the parent tmpdir is tracked for cleanup in afterEach.
+   * Creates a temporary bin directory containing a symlink to the finder
+   * binary (which/where) plus optional stub executables for each name in
+   * `stubs`. Returns the bin directory path — the parent tmpdir is tracked
+   * for cleanup in afterEach.
    */
   function makeFakeBin(stubs: string[] = []): string {
     const fakeBin = path.join(makeTmpDir(), "bin");
     fs.mkdirSync(fakeBin);
-    // Always include 'which' so isFinderAvailable() returns true.
-    fs.symlinkSync(WHICH_PATH, path.join(fakeBin, path.basename(WHICH_PATH)));
+    // Always include the finder binary so isFinderAvailable() returns true.
+    fs.symlinkSync(FINDER_PATH, path.join(fakeBin, path.basename(FINDER_PATH)));
     for (const name of stubs) {
       const stub = path.join(fakeBin, name);
       fs.writeFileSync(stub, "#!/bin/sh\nexit 0\n");

@@ -3,6 +3,7 @@ import path from "node:path";
 import fs from "node:fs";
 import os from "node:os";
 import { execFileSync } from "node:child_process";
+import { FINDER_BIN } from "./deps.js";
 import {
   isOnPath,
   isFinderAvailable,
@@ -96,8 +97,9 @@ describe("isFinderAvailable", () => {
   });
 });
 
-// Absolute path to 'which' — used to build isolated PATH environments for unit tests.
-const WHICH_PATH = execFileSync("which", ["which"], {
+// Absolute path to the finder binary (which on Unix, where on Windows) —
+// used to build isolated PATH environments for unit tests.
+const FINDER_PATH = execFileSync(FINDER_BIN, [FINDER_BIN], {
   encoding: "utf-8",
 }).trim();
 
@@ -112,8 +114,8 @@ describe("checkSpawnDependencies", () => {
       "bin",
     );
     fs.mkdirSync(fakeBin);
-    // Symlink 'which' so isFinderAvailable() returns true.
-    fs.symlinkSync(WHICH_PATH, path.join(fakeBin, path.basename(WHICH_PATH)));
+    // Symlink the finder binary so isFinderAvailable() returns true.
+    fs.symlinkSync(FINDER_PATH, path.join(fakeBin, path.basename(FINDER_PATH)));
     for (const name of stubs) {
       const stub = path.join(fakeBin, name);
       fs.writeFileSync(stub, "#!/bin/sh\nexit 0\n");
