@@ -24,7 +24,7 @@
 - SpawnRecord schema is deliberately minimal and versioned. Downstream features (5, 6) may extend it.
 - The base Docker image with the backend CLI pre-installed is provided as a tagged image. Feature 2's generated Dockerfile `FROM`s this base and `COPY`s the worktree snapshot.
 - Resource limits (memory, CPU, timeout) use hardcoded defaults. Hatchery (M2) later makes them configurable via profiles.
-- The `.march/` directory inside the repo is added to `.gitignore` if not already present.
+- Worktrees are created as siblings to the repo (`<repo>/../worktrees/march/<spawn-id>/`), not inside it. This avoids dot-directory visibility issues on macOS and prevents TUI agents running against the repo from reading/editing spawn worktrees.
 
 ## Artifact Hierarchy
 
@@ -73,14 +73,13 @@ As an operator, I want each spawn to get its own git worktree and dedicated bran
 
 **Why this priority**: Worktree isolation is a prerequisite for the snapshot step and for preventing branch race conditions between concurrent spawns.
 
-**Independent Test**: Run `march spawn dispatch` from a git repo. Verify that a new branch `march/spawn/<spawn-id>` exists and a worktree directory exists at `<repo>/.march/worktrees/<spawn-id>/`.
+**Independent Test**: Run `march spawn dispatch` from a git repo. Verify that a new branch `march/spawn/<spawn-id>` exists and a worktree directory exists at `<repo>/../worktrees/march/<spawn-id>/`.
 
 **Acceptance Scenarios**:
 
 1. **Given** a git repository, **When** the operator dispatches a spawn, **Then** a new branch `march/spawn/<spawn-id>` is created from the current HEAD.
-2. **Given** a git repository, **When** the operator dispatches a spawn, **Then** a worktree is created at `<repo>/.march/worktrees/<spawn-id>/` linked to the new branch.
-3. **Given** a git repository where `.march/` is not in `.gitignore`, **When** the operator dispatches a spawn, **Then** `.march/` is appended to `.gitignore` before worktree creation.
-4. **Given** a git repository, **When** the operator dispatches a spawn, **Then** the spawn ID follows the format `YYYYMMDD-<6-char-hex>` (e.g., `20260411-a1b2c3`).
+2. **Given** a git repository, **When** the operator dispatches a spawn, **Then** a worktree is created at `<repo>/../worktrees/march/<spawn-id>/` linked to the new branch.
+3. **Given** a git repository, **When** the operator dispatches a spawn, **Then** the spawn ID follows the format `YYYYMMDD-<6-char-hex>` (e.g., `20260411-a1b2c3`).
 5. **Given** a branch `march/spawn/<spawn-id>` already exists (collision), **When** the operator dispatches a spawn, **Then** a new spawn ID is generated to avoid the collision.
 6. **Given** worktree creation fails (e.g., filesystem permissions), **When** the operator dispatches a spawn, **Then** the error is reported clearly, any partially created branch is cleaned up, and the command exits with code 1.
 
@@ -177,8 +176,8 @@ As an operator, I want `march spawn dispatch` to wait for the container to finis
 - **FR-003**: The `march spawn dispatch` command MUST validate that `git` and `docker` are available on PATH and that the configured base container image is accessible before performing any operations. Missing dependencies or an unavailable image MUST produce clear error messages on stderr and exit with code 1.
 - **FR-004**: The `march spawn dispatch` command MUST validate that the current working directory is inside a git repository. If not, it MUST exit with code 1 and print a clear error.
 - **FR-005**: Each spawn MUST be assigned a unique SpawnId in the format `YYYYMMDD-<6-char-hex>`.
-- **FR-006**: Each spawn MUST create a dedicated git branch named `march/spawn/<spawn-id>` from the current HEAD and a git worktree at `<repo>/.march/worktrees/<spawn-id>/`.
-- **FR-007**: The `.march/` directory MUST be added to the repository's `.gitignore` if not already present, before worktree creation.
+- **FR-006**: Each spawn MUST create a dedicated git branch named `march/spawn/<spawn-id>` from the current HEAD and a git worktree at `<repo>/../worktrees/march/<spawn-id>/`.
+- **FR-007**: The worktree parent directory (`<repo>/../worktrees/march/`) MUST be created if it does not exist.
 - **FR-008**: The worktree snapshot MUST include only git-tracked files (via `git ls-files`) minus a hardcoded exclusion list. Untracked files and files ignored by `.gitignore` MUST be excluded.
 - **FR-009**: The exclusion list MUST exclude at minimum: `.env`, `.env.*`, and files matching common credential patterns.
 - **FR-010**: The worktree snapshot MUST be baked into a Docker image via a generated Dockerfile (using `COPY`), not mounted via a bind mount.

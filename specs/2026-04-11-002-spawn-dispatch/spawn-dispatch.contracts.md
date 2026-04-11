@@ -35,7 +35,7 @@ Prompt source precedence: `--prompt-file` > `--prompt` > stdin. If none is provi
 
 | Effect | Location | Description |
 |--------|----------|-------------|
-| Worktree created | `<repo>/.march/worktrees/<spawn-id>/` | Git worktree with dedicated branch. |
+| Worktree created | `<repo>/../worktrees/march/<spawn-id>/` | Git worktree with dedicated branch. |
 | Branch created | `march/spawn/<spawn-id>` | Dedicated git branch for this spawn. |
 | Docker image built | Docker daemon | Tagged image containing the worktree snapshot. |
 | Container launched | Docker daemon | Running container executing the backend CLI. |
@@ -100,7 +100,7 @@ march spawn --help
 | Stage | Action | Produces | Cleanup on failure |
 |-------|--------|----------|-------------------|
 | 1. Validate | Check dependencies (git, docker), verify git repo context, verify base image available | Validation pass | None (no state created yet) |
-| 2. Worktree | Create branch `march/spawn/<id>`, create worktree at `<repo>/.march/worktrees/<id>/` | Branch + worktree | Delete branch, remove worktree |
+| 2. Worktree | Create branch `march/spawn/<id>`, create worktree at `<repo>/../worktrees/march/<id>/` | Branch + worktree | Delete branch, remove worktree |
 | 3. Snapshot | Generate Dockerfile, build image with worktree files | Docker image | Remove image, delete branch, remove worktree |
 | 4. Launch | `docker run` with hardcoded security config | Running container | Stop and remove container, remove image, delete branch, remove worktree |
 | 5. Handoff | Write finalized prompt to container, invoke backend CLI | Backend process running inside container | (Contained within stage 4's container) |
@@ -127,9 +127,8 @@ Ordering constraints:
 |-----------|---------|-------|
 | Generate SpawnId | (internal) | `YYYYMMDD-<6-char-hex>` from date + `crypto.randomBytes(3)`. |
 | Detect repo root | `git rev-parse --show-toplevel` | Fails if not in a git repo. |
-| Ensure `.march/` in `.gitignore` | Read and conditionally append | Only appends if `.march/` is not already present. |
 | Create branch | `git branch march/spawn/<id> <base-ref>` | `<base-ref>` defaults to `HEAD`. |
-| Create worktree | `git worktree add <repo>/.march/worktrees/<id>/ march/spawn/<id>` | Links worktree to the new branch. |
+| Create worktree | `git worktree add <repo>/../worktrees/march/<id>/ march/spawn/<id>` | Links worktree to the new branch. |
 | List tracked files | `git ls-files` (in worktree) | Used for snapshot file list. |
 
 #### Branch Naming Convention
@@ -222,7 +221,7 @@ This list is hardcoded in Feature 2. Feature 4 may expand it based on threat mod
   "id": "20260411-a1b2c3",
   "repoPath": "/home/user/myproject",
   "branch": "march/spawn/20260411-a1b2c3",
-  "worktreePath": "/home/user/myproject/.march/worktrees/20260411-a1b2c3",
+  "worktreePath": "/home/user/worktrees/march/20260411-a1b2c3",
   "containerId": "a1b2c3d4e5f6789012345678abcdef0123456789012345678abcdef0123456789",
   "imageId": "march-spawn-20260411-a1b2c3",
   "backend": "claude-code",
@@ -334,7 +333,7 @@ No events or hooks are introduced by Feature 2. The Herald event bus (Milestone 
 - **Docker CLI**: Feature 2 invokes `docker` via `child_process` for image builds and container management. Docker daemon must be running. No library dependency on a Docker SDK.
 - **Backend CLI (Claude Code)**: Feature 2 invokes the backend CLI inside the Docker container as the container's entrypoint. The backend CLI is pre-installed in the base Docker image. Feature 2 does not install the backend CLI — it assumes the base image provides it.
 - **Filesystem (`~/.march/spawns/`)**: Feature 2 creates and writes SpawnRecord files here. This directory is separate from the installation manifest at `~/.march/march-manifest.json`. Feature 2 creates the directory if it does not exist.
-- **Filesystem (`<repo>/.march/worktrees/`)**: Feature 2 creates worktree directories here. This path is inside the git repository and is gitignored. Feature 2 ensures `.march/` is in `.gitignore`.
+- **Filesystem (`<repo>/../worktrees/march/`)**: Feature 2 creates worktree directories here. This path is a sibling to the git repository, outside the repo tree. This avoids dot-directory visibility issues on macOS and prevents TUI agents running against the repo from accessing spawn worktrees.
 - **Feature 1 (CLI Foundation)**: Feature 2 extends the `spawn` command namespace by replacing the stub with a proper subcommand group. Feature 2 depends on Feature 1's exit code constants, dependency check utilities, and Commander program instance.
 - **Feature 3 (Multi-Backend Execution Interface)**: Feature 2 defines the `SpawnBackend` interface that Feature 3 implements. Feature 2 ships a hardcoded Claude Code backend. Feature 3 replaces it with a polymorphic selection mechanism.
 - **Feature 4 (Spawn Sandbox Security)**: Feature 2 ships a hardcoded security configuration (SpawnConfig). Feature 4 audits this configuration against the RFC's Appendix A threat model and may tighten it. The Docker network policy (bridge mode in Feature 2) is a known gap that Feature 4 addresses.
