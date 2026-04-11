@@ -40,6 +40,7 @@ Use the **smithy-refine** sub-agent. Pass it:
   | **Task Completeness** | Are tasks within each slice sufficient to achieve the slice goal? Are there missing steps (tests, docs, validation)? |
   | **FR Traceability** | Does every slice trace to at least one FR or acceptance scenario from the user story? Are any FRs unaddressed? |
   | **Dependency Order** | Is the recommended implementation sequence logical? Would reordering reduce risk or unblock parallel work? |
+  | **Task Scoping** | Do tasks describe *what* to accomplish (not *how* with exact code)? Are there standalone test tasks, file-reading tasks, verification tasks, or line-number references that would break fresh-context dispatch? |
   | **Spec Alignment** | Do the slices fully cover the user story's acceptance scenarios? Has the spec changed since the tasks file was written? |
 
 - **Target files**: the `.tasks.md` file alongside the source spec (`.spec.md`),
@@ -127,79 +128,72 @@ Handle the scout report as follows:
 
 ## Phase 2.8: Approach Planning
 
-### Competing Plans
+### Competing Slice Decompositions
 
-Use competing **smithy-plan** sub-agents to generate the approach from multiple
-perspectives.
+Use competing **smithy-slice** sub-agents to generate the task decomposition
+from multiple perspectives.
 
-### Competing Plan Lenses
+### Competing Slice Lenses
 
-Dispatch 3 competing **smithy-plan** sub-agents in parallel. Each receives the
-same planning context, feature description, codebase file paths, and scout
-report — the only difference is the **additional planning directives** field.
+Dispatch 2 competing **smithy-slice** sub-agents in parallel. Each receives the
+same user story, spec artifacts, codebase file paths, and scout report — the
+only difference is the **additional planning directives** field.
 
 Use the following lens directives (one per sub-agent):
 
-#### Simplification
+#### Minimal Path
 
-> **Directive:** Actively seek unnecessary complexity, over-engineering, and
-> YAGNI violations. Propose simpler alternatives — fewer files, fewer
-> indirections, inline solutions over extracted utilities. Challenge
-> abstractions that don't earn their keep. In the Tradeoffs section, surface at
-> least one simpler alternative even if you ultimately recommend against it.
-> This directive biases your attention, not your coverage — still flag critical
-> robustness issues or separation concerns if you find them.
+> **Directive:** Achieve the user story's goals with minimum code churn. Prefer
+> adding behavior where it naturally fits in the existing code structure —
+> extend current functions, add cases to existing switches, augment existing
+> tests. Avoid refactoring, extracting, or reorganizing unless strictly
+> required by acceptance criteria. Produce fewer, more targeted tasks. In the
+> Tradeoffs section, surface at least one lower-churn alternative even if you
+> ultimately recommend against it. This directive biases your attention, not
+> your coverage — still flag structural problems or missing tasks if you find
+> them.
 
-#### Separation of Concerns
+#### Structural Integrity
 
-> **Directive:** Actively seek mixed responsibilities, coupling between
-> unrelated concepts, and SRP violations. Propose cleaner module boundaries —
-> clear interfaces, single-purpose files, explicit dependency injection. In the
-> Tradeoffs section, surface at least one alternative with better separation
-> even if you ultimately recommend against it. This directive biases your
-> attention, not your coverage — still flag simplification opportunities or
-> robustness issues if you find them.
-
-#### Robustness
-
-> **Directive:** Actively seek error handling gaps, edge cases, failure modes,
-> and missing validation at system boundaries. Flag assumptions about external
-> state and unhandled error conditions. Prefer defensive design. In the
-> Tradeoffs section, surface at least one more defensive alternative even if
-> you ultimately recommend against it. This directive biases your attention,
-> not your coverage — still flag unnecessary complexity or separation concerns
-> if you find them.
+> **Directive:** Achieve the user story's goals with code in the architecturally
+> correct location. If the right place for new behavior requires extracting a
+> module, moving logic between layers, or reorganizing existing code, include
+> those steps as tasks. Prioritize code health and maintainability over minimal
+> diff. In the Tradeoffs section, surface at least one better-structured
+> alternative even if you ultimately recommend against it. This directive biases
+> your attention, not your coverage — still flag unnecessary refactoring or
+> scope creep if you find them.
 
 ---
 
 Pass the quoted directive text above as the **Additional planning directives**
-field for the corresponding smithy-plan run.
+field for the corresponding smithy-slice run.
 
-After all 3 return, dispatch the **smithy-reconcile** sub-agent. Pass it:
+After both return, dispatch the **smithy-reconcile-slices** sub-agent. Pass it:
 
-- All 3 plan outputs, each labeled with its lens name (e.g.,
-  "**[Simplification]** …", "**[Separation of Concerns]** …",
-  "**[Robustness]** …")
+- Both slice decomposition outputs, each labeled with its lens name (e.g.,
+  "**[Minimal Path]** …", "**[Structural Integrity]** …")
 - The same context file paths
-- The planning context and feature description
+- The user story and spec artifact paths
 
-Use the reconciled plan as the basis for presenting the approach to the user.
-Pass each smithy-plan sub-agent:
+Use the reconciled decomposition as the basis for presenting the approach to
+the user.
+Pass each smithy-slice sub-agent:
 
-- **Planning context**: tasks artifact
-- **Feature/problem description**: the user story title, acceptance scenarios, priority, and traced FRs from Phase 1
-- **Codebase file paths**: the code areas mapped to acceptance scenarios during Phase 2, plus the spec artifacts (`.spec.md`, `.data-model.md`, `.contracts.md`)
+- **User story**: the story title, acceptance scenarios, priority, and traced FRs from Phase 1
+- **Spec artifacts**: paths to the `.spec.md`, `.data-model.md`, and `.contracts.md`
+- **Codebase file paths**: the code areas mapped to acceptance scenarios during Phase 2
 - **Scout report**: the scout report from Phase 2.5 (if it contained conflicts or warnings)
 - **Additional planning directives**: the lens directive from the competing-lenses section above (each run gets a different directive)
 
-Present the reconciled plan to the user as:
+Present the reconciled decomposition to the user as:
 
 1. **Summary** — What you understand the user story to deliver and the proposed slicing strategy.
 2. **Approach** — The reconciled approach for PR-sized slices and task ordering. Note any
    items annotated with `[via <lens>]`.
 3. **Risks** — The reconciled risk assessment.
-4. **Conflicts** — If the reconciled plan contains unresolved conflicts between
-   approaches, present them with both options and the reconciler's
+4. **Conflicts** — If the reconciled decomposition contains unresolved conflicts
+   between approaches, present them with both options and the reconciler's
    recommendation. Let the user decide.
 
 
@@ -302,6 +296,39 @@ Guidelines for slicing:
 - Include tests, docs, and validation steps within the slice that introduces the
   code — do not batch these into a separate "testing slice".
 
+Guidelines for task authoring:
+
+Each task is dispatched to a **fresh sub-agent** (smithy-implement) with no
+memory of prior tasks. The sub-agent receives the task description, task number,
+slice goal, file paths (spec, data-model, contracts, and the tasks/strike file),
+and the branch name — but nothing learned by previous tasks persists. Author
+tasks accordingly:
+
+- **Describe the WHAT, not the HOW in detail.** A task should state the
+  behavioral outcome or structural change to achieve. Do not prescribe exact
+  code, exact line numbers, or copy-paste replacement text. Line numbers shift;
+  code prescribed at planning time is frequently wrong at implementation time.
+  Instead, reference the target file/module and the desired behavior.
+- **Do not create standalone test tasks.** Testing is handled by
+  smithy-implement's TDD protocol (red-green-refactor). Every functional task
+  already includes writing a failing test, implementing to pass, and refactoring.
+  A task like "Write tests for X" is redundant — the sub-agent already does this
+  as part of implementing X.
+- **Do not create pre-research or file-reading tasks.** Each task runs in a
+  fresh context. A task like "Read file X to understand Y" produces no lasting
+  artifact — the next task's sub-agent cannot access what the previous one
+  learned. If understanding a file's structure is a prerequisite, encode that
+  knowledge into the task description itself or ensure it is captured in the
+  contracts/data-model.
+- **Do not bake test expectations into task descriptions.** Tasks like "Add a
+  test case that asserts X returns Y with input Z" pre-empt the TDD cycle. If a
+  specific scenario must be covered, express it as acceptance criteria or
+  attach it as extra context on the functional task — not as a separate testing
+  task with prescribed assertions.
+- **Verification is handled by forge.** Do not create tasks for running the
+  test suite, linting, or building. Forge runs validation after all tasks in a
+  slice complete.
+
 ---
 
 ## Phase 5: Write & Review
@@ -335,7 +362,7 @@ ask again.
 - **DO** keep slices PR-sized. If a slice feels too large, split it further.
 - **DO** use zero-padded two-digit numbering for the filename (`01-`, `02-`,
   ..., `99-`) for consistent sort order.
-- **DO** internally generate all clarifying questions first, then present them one at a time with recommended answers.
+- **DO** invoke smithy-clarify for ambiguity scanning and triage.
 - **DO** read all three spec artifacts (spec, data model, contracts) before
   slicing — the data model and contracts inform implementation boundaries.
 - **DO** explore the codebase to ground slices in reality — don't slice in
@@ -351,6 +378,17 @@ ask again.
   for in-progress work from other stories.
 - **DO** note cross-story dependencies in the Dependency Order section (as
   "Cross-Story Dependencies") without pulling that work into your slices.
+- **DO NOT** write tasks that reference specific line numbers or prescribe exact
+  replacement code. Tasks must survive codebase drift between planning and
+  implementation. Reference files, modules, and behaviors instead.
+- **DO NOT** create standalone "write tests for X" tasks. smithy-implement uses
+  TDD — tests are written as part of implementing each functional task.
+- **DO NOT** create file-reading or research tasks. Each task runs in a fresh
+  sub-agent with no memory of prior tasks. Encode necessary context into the
+  task description or the spec artifacts.
+- **DO** express testing requirements as acceptance criteria on the functional
+  task, not as separate tasks. If a specific edge case must be tested, add it
+  as a note on the task that implements the relevant behavior.
 
 ---
 

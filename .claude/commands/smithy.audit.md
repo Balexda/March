@@ -119,6 +119,7 @@ Use the checklist matching the artifact's extension. Each checklist defines what
 | **Task Completeness** | Are tasks within each slice sufficient to achieve the slice goal? Are there missing steps (tests, docs, validation)? |
 | **Testability** | Is it clear how each slice should be tested? Are integration test concerns addressed? |
 | **Edge Case Coverage** | Are boundary conditions, error paths, and failure modes covered in the tasks? |
+| **Task Scoping** | Do tasks describe *what* to accomplish without prescribing exact code, line numbers, or copy-paste replacements? Are there standalone test tasks (should be part of TDD), file-reading/research tasks (break fresh-context dispatch), verification tasks (handled by forge), or baked-in test expectations (pre-empt TDD)? |
 | **FR Traceability** | Does every slice trace to at least one FR or acceptance scenario? Are any FRs unaddressed? |
 | **Dependency Order** | Is the recommended implementation sequence logical? Would reordering reduce risk or unblock parallel work? |
 ## Audit Checklist (.strike.md)

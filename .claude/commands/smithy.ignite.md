@@ -224,6 +224,16 @@ of not solving it?>
 - <Goal 2>
 - <Goal 3>
 
+## Out of Scope
+
+- <Explicitly excluded capability 1>
+- <Explicitly excluded capability 2>
+
+## Personas
+
+- <Persona 1 — role and how they benefit from this RFC>
+- <Persona 2 — role and how they benefit>
+
 ## Proposal
 
 <The "WHAT" — describe what will be built at a high level. Focus on outcomes
