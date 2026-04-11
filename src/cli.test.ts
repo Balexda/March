@@ -171,12 +171,44 @@ describe("march CLI", () => {
     expect(result.exitCode).toBe(2);
   });
 
-  it("march init --help exits 0", () => {
+  it("march init --help exits 0 and stdout contains init and its description", () => {
     const result = run(["init", "--help"]);
     expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("init");
+    expect(result.stdout).toContain("Initialize");
   });
 
-  // --- spawn command integration tests ---
+  it("march update --help exits 0 and stdout contains update", () => {
+    const result = run(["update", "--help"]);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("update");
+  });
+
+  it("march version --help exits 0 and stdout contains version", () => {
+    const result = run(["version", "--help"]);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("version");
+  });
+
+  it("march help --help exits 0 and stdout contains help", () => {
+    const result = run(["help", "--help"]);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("help");
+  });
+
+  it("march spawn --help exits 0 and stdout contains spawn", () => {
+    const result = run(["spawn", "--help"]);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("spawn");
+  });
+
+  // --- spawn command integration tests (AS 4.2) ---
+  // AS 4.2 specifies an unconditional stub: "march spawn prints 'not yet
+  // implemented' and exits 1". The accepted implementation adds a dependency
+  // gate (checkSpawnDependencies) before the stub message. The git-present
+  // branch satisfies AS 4.2 directly — it prints the "not yet implemented"
+  // message and exits 1. The git-missing branch surfaces a prerequisite error
+  // instead, giving users actionable feedback before they reach the stub.
 
   it("march spawn with git missing exits 1, stderr mentions git, no stub message on stdout", () => {
     const fakeBin = makeFakeBin(); // which only, no git
