@@ -77,4 +77,54 @@ describe("march CLI", () => {
     const result = run(["--version"]);
     expect(result.stdout).toContain("0.1.0");
   });
+
+  it("march version exits 0 and stdout contains the package version", () => {
+    const result = run(["version"]);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("0.1.0");
+  });
+
+  it("march version stdout is byte-for-byte identical to march --version stdout", () => {
+    const versionSubcommand = run(["version"]);
+    const versionFlag = run(["--version"]);
+    expect(versionFlag.exitCode).toBe(0);
+    expect(versionSubcommand.stdout).toBe(versionFlag.stdout);
+  });
+
+  it("march help exits 0 and stdout lists init, version, and help", () => {
+    const result = run(["help"]);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("init");
+    expect(result.stdout).toContain("version");
+    expect(result.stdout).toContain("help");
+  });
+
+  it("march help stdout is byte-for-byte identical to march --help stdout", () => {
+    const helpSubcommand = run(["help"]);
+    const helpFlag = run(["--help"]);
+    expect(helpFlag.exitCode).toBe(0);
+    expect(helpSubcommand.stdout).toBe(helpFlag.stdout);
+  });
+
+  it("march help init exits 0 and stdout contains init-specific help text", () => {
+    const result = run(["help", "init"]);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("init");
+  });
+
+  it("march help version exits 0 and stdout contains version-specific help text", () => {
+    const result = run(["help", "version"]);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("version");
+  });
+
+  it("march help nonexistent exits 2", () => {
+    const result = run(["help", "nonexistent"]);
+    expect(result.exitCode).toBe(2);
+  });
+
+  it("march init --help exits 0", () => {
+    const result = run(["init", "--help"]);
+    expect(result.exitCode).toBe(0);
+  });
 });

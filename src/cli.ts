@@ -10,7 +10,8 @@ program
   .name("march")
   .version(CLI_VERSION)
   .option("--yes", "Skip confirmation prompts")
-  .exitOverride();
+  .exitOverride()
+  .addHelpCommand(false);
 
 // Tracks whether a registered command handled the invocation. Required because
 // process.exitCode (unlike process.exit()) does not terminate immediately, so
@@ -41,11 +42,41 @@ program
     }
   });
 
+program
+  .command("version")
+  .description("Display the installed CLI version")
+  .action(() => {
+    commandHandled = true;
+    console.log(CLI_VERSION);
+    process.exitCode = SUCCESS;
+  });
+
+program
+  .command("help [command]")
+  .description("Display help for a command")
+  .action((cmd?: string) => {
+    commandHandled = true;
+    if (cmd) {
+      const found = program.commands.find((c) => c.name() === cmd);
+      if (!found) {
+        process.stderr.write(`error: unknown command '${cmd}'\n`);
+        program.outputHelp();
+        process.exitCode = USAGE_ERROR;
+        return;
+      }
+      found.outputHelp();
+      process.exitCode = SUCCESS;
+    } else {
+      program.outputHelp();
+      process.exitCode = SUCCESS;
+    }
+  });
+
 try {
   await program.parseAsync(process.argv);
 } catch (err: unknown) {
   if (err instanceof CommanderError) {
-    // commander.version and commander.help throw with exitCode 0
+    // Commander throws with exitCode 0 for any handled flag (e.g. --version, --help)
     if (err.exitCode === 0) {
       commandHandled = true;
       process.exitCode = SUCCESS;
