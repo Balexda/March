@@ -53,7 +53,7 @@
 
 ### Tasks
 
-- [ ] In `src/cli.ts`, modify the `!commandHandled` fallthrough block at the end of the file to detect when an unrecognized token was given. When `process.argv.length > 2`, scan `process.argv.slice(2)` for the first argument that does not start with `-` and write `error: unknown command '<token>'\n` to stderr (using `process.stderr.write`, matching the format already used in the `march help nonexistent` handler). Then call `program.outputHelp()` and set `process.exitCode = USAGE_ERROR` as before. When `process.argv.length <= 2` (a true no-args invocation), call `program.outputHelp()` with no preceding error message. This keeps no-args behavior unchanged while giving unrecognized-command invocations a clear error signal.
+- [ ] In `src/cli.ts`, modify the `!commandHandled` fallthrough block at the end of the file to detect when an unrecognized command was given. Scan `process.argv.slice(2)` for the first argument that does not start with `-`. Only if such a token is found, write `error: unknown command '<token>'\n` to stderr (using `process.stderr.write`, matching the format already used in the `march help nonexistent` handler) before calling `program.outputHelp()`. If no non-flag token is found — e.g., `march --yes` where every extra argv entry is a flag — emit no error message and call `program.outputHelp()` directly. Set `process.exitCode = USAGE_ERROR` in all branches. This ensures option-only invocations never produce a spurious "unknown command 'undefined'" message.
 
 - [ ] In `src/cli.test.ts`, extend the "march with unrecognized command exits 2" test to assert that stderr contains the string "nonexistent" and that the combined stdout+stderr contains at least one valid command name. Retain the existing exit code 2 assertion.
 
