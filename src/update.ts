@@ -166,7 +166,7 @@ export async function updateMarch(
       };
     }
 
-    // If force is true, fall through to file operations (Task 2)
+    // If force is true, fall through to file operations below.
   }
 
   // Step C — File operations
