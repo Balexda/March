@@ -68,24 +68,16 @@ program
     commandHandled = true;
     const yes = program.opts().yes as boolean | undefined;
     try {
-      const result = await updateMarch();
+      // When --yes is set, pass force=true on the first call so a downgrade
+      // proceeds immediately without a detection roundtrip that would print
+      // the "Pass --yes" warning before the update runs.
+      const result = await updateMarch(undefined, yes ? true : undefined);
 
       if (result.downgrade) {
-        // Print the downgrade summary and warnings regardless of path taken.
+        // Downgrade detected and --yes was not set (force bypasses this branch).
         console.log(result.summary);
         for (const warning of result.warnings) {
           process.stderr.write(warning + "\n");
-        }
-
-        if (yes) {
-          // --yes bypasses the prompt; proceed directly with the forced update.
-          const forced = await updateMarch(undefined, true);
-          console.log(forced.summary);
-          for (const warning of forced.warnings) {
-            process.stderr.write(warning + "\n");
-          }
-          process.exitCode = SUCCESS;
-          return;
         }
 
         if (!process.stdin.isTTY) {
