@@ -105,7 +105,12 @@ describe("march CLI", () => {
   it("march with no args exits 2 with usage", () => {
     const result = run([]);
     expect(result.exitCode).toBe(2);
-    expect(result.stdout + result.stderr).toMatch(/usage|Usage/i);
+    const combined = result.stdout + result.stderr;
+    expect(combined).toMatch(/usage|Usage/i);
+    // AS 4.1: no-args output lists all five registered commands (two-tier listing)
+    for (const cmd of ["init", "update", "help", "version", "spawn"]) {
+      expect(combined).toContain(cmd);
+    }
   });
 
   it("march with unrecognized command exits 2", () => {
