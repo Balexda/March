@@ -1,6 +1,14 @@
 import { describe, it, expect } from "vitest";
 import path from "node:path";
-import { isOnPath, isFinderAvailable, INIT_DEPENDENCIES } from "./deps.js";
+import fs from "node:fs";
+import os from "node:os";
+import { execFileSync } from "node:child_process";
+import {
+  isOnPath,
+  isFinderAvailable,
+  checkSpawnDependencies,
+  INIT_DEPENDENCIES,
+} from "./deps.js";
 
 describe("INIT_DEPENDENCIES", () => {
   it("has exactly 2 entries: git and docker", () => {
@@ -82,6 +90,78 @@ describe("isFinderAvailable", () => {
     try {
       process.env.PATH = "/tmp";
       expect(isFinderAvailable()).toBe(false);
+    } finally {
+      process.env.PATH = originalPath;
+    }
+  });
+});
+
+// Absolute path to 'which' — used to build isolated PATH environments for unit tests.
+const WHICH_PATH = execFileSync("which", ["which"], {
+  encoding: "utf-8",
+}).trim();
+
+describe("checkSpawnDependencies", () => {
+  /**
+   * Creates a temporary directory containing a symlink to `which` and optional
+   * stub executables. Callers must clean up via the returned path.
+   */
+  function makeFakeBin(stubs: string[] = []): string {
+    const fakeBin = path.join(
+      fs.mkdtempSync(path.join(os.tmpdir(), "march-deps-test-")),
+      "bin",
+    );
+    fs.mkdirSync(fakeBin);
+    // Symlink 'which' so isFinderAvailable() returns true.
+    fs.symlinkSync(WHICH_PATH, path.join(fakeBin, path.basename(WHICH_PATH)));
+    for (const name of stubs) {
+      const stub = path.join(fakeBin, name);
+      fs.writeFileSync(stub, "#!/bin/sh\nexit 0\n");
+      fs.chmodSync(stub, 0o755);
+    }
+    return fakeBin;
+  }
+
+  it("returns ok:true when finder is available and git is on PATH", () => {
+    const originalPath = process.env.PATH;
+    const fakeBin = makeFakeBin(["git"]);
+    const nodeBinDir = path.dirname(process.execPath);
+    try {
+      process.env.PATH = [nodeBinDir, fakeBin].join(path.delimiter);
+      const result = checkSpawnDependencies();
+      expect(result.ok).toBe(true);
+    } finally {
+      process.env.PATH = originalPath;
+      fs.rmSync(path.dirname(fakeBin), { recursive: true, force: true });
+    }
+  });
+
+  it("returns ok:false with error mentioning 'git' when git is not on PATH", () => {
+    const originalPath = process.env.PATH;
+    const fakeBin = makeFakeBin(); // no git stub
+    const nodeBinDir = path.dirname(process.execPath);
+    try {
+      process.env.PATH = [nodeBinDir, fakeBin].join(path.delimiter);
+      const result = checkSpawnDependencies();
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error).toContain("git");
+      }
+    } finally {
+      process.env.PATH = originalPath;
+      fs.rmSync(path.dirname(fakeBin), { recursive: true, force: true });
+    }
+  });
+
+  it("returns ok:false with path-search utility error when finder is unavailable", () => {
+    const originalPath = process.env.PATH;
+    try {
+      process.env.PATH = "";
+      const result = checkSpawnDependencies();
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error).toContain("path-search utility");
+      }
     } finally {
       process.env.PATH = originalPath;
     }
