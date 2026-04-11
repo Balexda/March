@@ -28,7 +28,6 @@ cat prompt.txt | march spawn dispatch [options]
 | `--prompt` | string | One of `--prompt-file`, `--prompt`, or stdin | Inline prompt string (convenience for short prompts). |
 | stdin | stream | One of `--prompt-file`, `--prompt`, or stdin | Piped input used as the prompt when neither flag is provided. |
 | `--base` | string | No | Git ref to branch from (default: `HEAD`). |
-| `--timeout` | integer | No | Override the default execution timeout in seconds. |
 
 Prompt source precedence: `--prompt-file` > `--prompt` > stdin. If none is provided, exit with usage error.
 
@@ -48,7 +47,7 @@ Prompt source precedence: `--prompt-file` > `--prompt` > stdin. If none is provi
 | Condition | Exit Code | Description |
 |-----------|-----------|-------------|
 | No prompt provided | 2 | Usage error — no `--prompt-file`, `--prompt`, or stdin. |
-| Missing dependency (git, docker, backend CLI) | 1 | Dependency not found on PATH. Clear error on stderr. |
+| Missing dependency (git, docker) or unavailable backend image | 1 | Required host dependency (`git` or `docker`) not found on PATH, or the configured base container image is unavailable. Clear error on stderr. |
 | Not in a git repository | 1 | cwd is not inside a git repo. |
 | Prompt file not found or not readable | 1 | The file specified by `--prompt-file` does not exist. |
 | Worktree creation failure | 1 | Git worktree or branch creation failed. Partial state cleaned up. |
@@ -100,7 +99,7 @@ march spawn --help
 
 | Stage | Action | Produces | Cleanup on failure |
 |-------|--------|----------|-------------------|
-| 1. Validate | Check dependencies (git, docker, backend CLI), verify git repo context | Validation pass | None (no state created yet) |
+| 1. Validate | Check dependencies (git, docker), verify git repo context, verify base image available | Validation pass | None (no state created yet) |
 | 2. Worktree | Create branch `march/spawn/<id>`, create worktree at `<repo>/.march/worktrees/<id>/` | Branch + worktree | Delete branch, remove worktree |
 | 3. Snapshot | Generate Dockerfile, build image with worktree files | Docker image | Remove image, delete branch, remove worktree |
 | 4. Launch | `docker run` with hardcoded security config | Running container | Stop and remove container, remove image, delete branch, remove worktree |
@@ -182,19 +181,19 @@ docker run \
   <backend-entrypoint-command>
 ```
 
-The backend entrypoint command is constructed by the `SpawnBackend.buildEntrypoint()` method. For Claude Code:
+The backend entrypoint command is constructed by the `SpawnBackend.buildEntrypoint()` method. Because Docker's exec form (`["cmd", "arg", ...]`) does not invoke a shell, the entrypoint must explicitly use `sh -c` when shell expansion is needed. For Claude Code:
 
 ```
-claude -p "$(cat /march/prompt.txt)" \
+sh -c 'claude -p "$(cat /march/prompt.txt)" \
   --output-format json \
   --dangerously-skip-permissions \
   --bare \
-  --no-session-persistence
+  --no-session-persistence'
 ```
 
 #### Snapshot Exclusion List
 
-Files excluded from the Docker build context (in addition to untracked/`.gitignore`-d files):
+Files excluded from the Docker build context (in addition to untracked files and files ignored by `.gitignore`):
 
 | Pattern | Reason |
 |---------|--------|
@@ -224,7 +223,7 @@ This list is hardcoded in Feature 2. Feature 4 may expand it based on threat mod
   "repoPath": "/home/user/myproject",
   "branch": "march/spawn/20260411-a1b2c3",
   "worktreePath": "/home/user/myproject/.march/worktrees/20260411-a1b2c3",
-  "containerId": "sha256:abc123...",
+  "containerId": "a1b2c3d4e5f6789012345678abcdef0123456789012345678abcdef0123456789",
   "imageId": "march-spawn-20260411-a1b2c3",
   "backend": "claude-code",
   "status": "stopped",
@@ -256,8 +255,8 @@ interface SpawnBackend {
   /** Backend identifier (e.g., "claude-code", "gemini"). */
   name: string;
 
-  /** CLI binary name to check during dependency validation. */
-  cliCommand: string;
+  /** Base Docker image tag that has this backend CLI pre-installed. */
+  baseImage: string;
 
   /** Environment variable names the backend requires. */
   requiredEnvVars: string[];
@@ -278,11 +277,8 @@ name: "claude-code"
 cliCommand: "claude"
 requiredEnvVars: ["ANTHROPIC_API_KEY"]
 buildEntrypoint("/march/prompt.txt"):
-  ["claude", "-p", "$(cat /march/prompt.txt)",
-   "--output-format", "json",
-   "--dangerously-skip-permissions",
-   "--bare",
-   "--no-session-persistence"]
+  ["sh", "-c",
+   "claude -p \"$(cat /march/prompt.txt)\" --output-format json --dangerously-skip-permissions --bare --no-session-persistence"]
 ```
 
 Feature 3 will:
@@ -318,8 +314,12 @@ const spawn = program.command("spawn")
 
 spawn.command("dispatch")
   .description("Dispatch a spawn")
-  .requiredOption("--prompt-file <path>", "Path to prompt file")
-  .action(async (options) => { /* dispatch logic */ });
+  .option("--prompt-file <path>", "Path to prompt file")
+  .option("--prompt <string>", "Prompt text")
+  .action(async (options) => {
+    // Enforce "exactly one of --prompt-file, --prompt, or stdin" in validation logic
+    /* dispatch logic */
+  });
 ```
 
 The `spawn` subcommand group allows Feature 3-6 to register additional verbs (e.g., `spawn extract`, `spawn push`) without modifying the dispatch code.

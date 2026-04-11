@@ -17,22 +17,25 @@ Purpose: Tracks the metadata and outcome of a single spawn dispatch. This is the
 | `repoPath` | string | Yes | Absolute path to the source git repository root. |
 | `branch` | string | Yes | Git branch name created for this spawn (e.g., `march/spawn/20260411-a1b2c3`). |
 | `worktreePath` | string | Yes | Absolute path to the spawn's worktree directory. |
-| `containerId` | string | Yes | Docker container ID (full SHA). |
-| `imageId` | string | Yes | Docker image ID or tag used for this spawn. |
+| `containerId` | string | Conditional | Docker container ID (64-char hex string). Required once a container has been created (when `status` is `"running"` or `"stopped"`, and for `"failed"` only if failure occurred after container creation). |
+| `imageId` | string | Conditional | Docker image ID or tag used for this spawn. Required once an image has been successfully built. |
 | `backend` | string | Yes | Backend identifier (e.g., `"claude-code"`). Hardcoded in Feature 2; Feature 3 adds selection. |
 | `status` | string | Yes | Current spawn status: `"created"`, `"running"`, `"stopped"`, `"failed"`. |
-| `exitCode` | integer | No | Container exit code. Present only when `status` is `"stopped"` or `"failed"`. |
+| `exitCode` | integer | Conditional | Container exit code. Required when a started container has stopped or failed; omitted for failures that occur before container start. |
 | `prompt` | string | Yes | The operator's raw prompt (before finalization). Stored for traceability. |
 | `createdAt` | string | Yes | ISO 8601 timestamp of when the spawn was created. |
-| `startedAt` | string | No | ISO 8601 timestamp of when the container started running. |
-| `stoppedAt` | string | No | ISO 8601 timestamp of when the container stopped. Present when `status` is `"stopped"` or `"failed"`. |
+| `startedAt` | string | Conditional | ISO 8601 timestamp of when the container started running. Required once the container has started. |
+| `stoppedAt` | string | Conditional | ISO 8601 timestamp of when the container stopped. Required when a started container has stopped or failed after start. |
 | `timedOut` | boolean | No | `true` if the container was killed due to exceeding the execution timeout. Defaults to `false`. |
 
 Validation rules:
 - `version` must be a positive integer.
 - `id` must match the pattern `^\d{8}-[0-9a-f]{6}$`.
 - `status` must be one of: `"created"`, `"running"`, `"stopped"`, `"failed"`.
-- `exitCode` must be present when `status` is `"stopped"` or `"failed"`.
+- `imageId` must be present once an image has been successfully built.
+- `containerId` must be present once a container has been created; required for `"running"` and `"stopped"` records, and for `"failed"` records only when failure occurred after container creation.
+- `startedAt` must be present once the container has started; required for `"running"` and `"stopped"` records.
+- `exitCode` and `stoppedAt` must be present when `status` is `"stopped"`. For `"failed"`, they are required only if a container had started.
 - `createdAt`, `startedAt`, and `stoppedAt` must be valid ISO 8601 timestamps when present.
 - `repoPath` and `worktreePath` must be absolute paths.
 
@@ -66,7 +69,7 @@ Purpose: Defines the contract between Feature 2 (dispatch) and the backend execu
 | Field/Method | Type | Notes |
 |-------------|------|-------|
 | `name` | string | Backend identifier (e.g., `"claude-code"`, `"gemini"`). |
-| `cliCommand` | string | CLI binary name to check during dependency validation (e.g., `"claude"`). |
+| `baseImage` | string | Base Docker image tag that has this backend CLI pre-installed. |
 | `buildEntrypoint` | `(promptFilePath: string) => string[]` | Constructs the container entrypoint command with the prompt file path. Returns the command and arguments array. |
 | `requiredEnvVars` | string[] | Environment variable names the backend requires (e.g., `["ANTHROPIC_API_KEY"]`). |
 

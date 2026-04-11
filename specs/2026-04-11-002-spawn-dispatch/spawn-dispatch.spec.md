@@ -11,11 +11,11 @@
 
 ### Session 2026-04-11
 
-- Q: How is the prompt delivered to the backend CLI inside the container? → A: Via the backend CLI's prompt flag (`-p` for Claude Code, `--prompt` for Gemini). The `-p` flag is required to activate headless mode in Claude Code. For long prompts, the finalized prompt is written to a temporary file inside the container and referenced via shell expansion (e.g., `-p "$(cat /march/prompt.txt)"`). `[Critical Assumption]`
+- Q: How is the prompt delivered to the backend CLI inside the container? → A: Via the backend CLI's prompt flag (`-p` for Claude Code, `--prompt` for Gemini). The `-p` flag is required to activate headless mode in Claude Code. The finalized prompt is written to a file inside the container, and the entrypoint uses an explicit shell (`sh -c`) to expand `$(cat /march/prompt.txt)` into the `-p` argument. `[Critical Assumption]`
 - Q: What Docker network policy does Feature 2 use? → A: Feature 2 ships with the default Docker bridge network. This allows the container to reach the LLM API endpoint but does not restrict outbound traffic to only that endpoint. Feature 4 (Spawn Sandbox Security) is responsible for hardening the network policy. The spec documents this as a known security gap.
-- Q: Does Feature 2 persist spawn state? → A: Yes. A SpawnRecord is written to `~/.march/spawns/<spawn-id>.json` after the container exits. Feature 5 (Output Extraction) needs the container ID, worktree path, and branch name to function.
+- Q: Does Feature 2 persist spawn state? → A: Yes. A SpawnRecord is created at dispatch start at `~/.march/spawns/<spawn-id>.json` with initial status `"created"`, then updated as the spawn progresses through its lifecycle and finalized after the container exits. Feature 5 (Output Extraction) needs the final record to include the container ID, worktree path, and branch name.
 - Q: Does `march spawn dispatch` require a git repo? → A: Yes. The command detects the repo root by walking up from cwd and fails with a clear error if not inside a git repository. This is a hard precondition, not a soft warning.
-- Q: What gets included in the worktree snapshot? → A: Only git-tracked files (via `git ls-files`), minus a hardcoded exclusion list (`.env`, `.env.*`, credential files). Untracked files and `.gitignore`-d files are excluded. The worktree is created from the current HEAD — uncommitted changes in the operator's working tree are not included.
+- Q: What gets included in the worktree snapshot? → A: Only git-tracked files (via `git ls-files`), minus a hardcoded exclusion list (`.env`, `.env.*`, credential files). Untracked files and files ignored by `.gitignore` are excluded. The worktree is created from the current HEAD — uncommitted changes in the operator's working tree are not included.
 
 ### Assumptions
 
@@ -51,7 +51,7 @@ As an operator, I want `march spawn dispatch` to be a registered CLI command wit
 
 ### User Story 2: Dependency Validation at Dispatch Time (Priority: P1)
 
-As an operator, I want `march spawn dispatch` to verify that git, Docker, and the backend CLI are all available before attempting any operations so that I get a clear, actionable error instead of a cryptic failure mid-dispatch.
+As an operator, I want `march spawn dispatch` to verify that git and Docker are available and the base container image is accessible before attempting any operations so that I get a clear, actionable error instead of a cryptic failure mid-dispatch.
 
 **Why this priority**: Failing fast with clear errors prevents wasted time and partial state. Dependencies are the first gate in the dispatch pipeline.
 
@@ -61,7 +61,7 @@ As an operator, I want `march spawn dispatch` to verify that git, Docker, and th
 
 1. **Given** `git` is not on PATH, **When** the operator runs `march spawn dispatch`, **Then** the command exits with code 1 and prints "git not found — required for spawn operations" to stderr.
 2. **Given** `docker` is not on PATH, **When** the operator runs `march spawn dispatch`, **Then** the command exits with code 1 and prints "Docker not found — required for spawn operations" to stderr.
-3. **Given** the backend CLI (`claude`) is not on PATH, **When** the operator runs `march spawn dispatch`, **Then** the command exits with code 1 and prints a message identifying the missing backend CLI.
+3. **Given** the configured base container image is not available locally or pullable, **When** the operator runs `march spawn dispatch`, **Then** the command exits with code 1 and prints a message identifying the unavailable image.
 4. **Given** the current working directory is not inside a git repository, **When** the operator runs `march spawn dispatch`, **Then** the command exits with code 1 and prints "Not inside a git repository — march spawn must be run from within a git repo."
 5. **Given** all dependencies are available and the operator is inside a git repo, **When** the operator runs `march spawn dispatch`, **Then** the dependency check passes silently and dispatch proceeds.
 
@@ -154,7 +154,7 @@ As an operator, I want `march spawn dispatch` to wait for the container to finis
 1. **Given** a running spawn container, **When** the container process exits with code 0, **Then** `march spawn dispatch` reports success and exits with code 0.
 2. **Given** a running spawn container, **When** the container process exits with a non-zero code, **Then** `march spawn dispatch` reports the failure with the container's exit code and exits with code 1.
 3. **Given** a running spawn container, **When** the container exceeds the maximum execution time (hardcoded timeout), **Then** the container is killed, a timeout is reported, and the command exits with code 1.
-4. **Given** a spawn that completes (success or failure), **When** the lifecycle step finishes, **Then** a SpawnRecord is written to `~/.march/spawns/<spawn-id>.json` with the spawn's metadata and final status.
+4. **Given** a spawn that completes (success or failure), **When** the lifecycle step finishes, **Then** the SpawnRecord at `~/.march/spawns/<spawn-id>.json` is updated with the spawn's final status, exit code, and `stoppedAt` timestamp.
 5. **Given** a spawn that completes, **When** the lifecycle step finishes, **Then** the stopped container is left in place (not removed) so that Feature 5 can extract its output.
 
 ### Edge Cases
@@ -174,12 +174,12 @@ As an operator, I want `march spawn dispatch` to wait for the container to finis
 
 - **FR-001**: The `march spawn dispatch` command MUST be registered as a verb under the `spawn` system namespace, following the `march <system> <verb>` pattern established in the Feature 1 extension contract.
 - **FR-002**: The `march spawn` command with no verb MUST print help text listing available spawn verbs and exit with code 2.
-- **FR-003**: The `march spawn dispatch` command MUST validate that `git`, `docker`, and the backend CLI are available on PATH before performing any operations. Missing dependencies MUST produce clear error messages on stderr and exit with code 1.
+- **FR-003**: The `march spawn dispatch` command MUST validate that `git` and `docker` are available on PATH and that the configured base container image is accessible before performing any operations. Missing dependencies or an unavailable image MUST produce clear error messages on stderr and exit with code 1.
 - **FR-004**: The `march spawn dispatch` command MUST validate that the current working directory is inside a git repository. If not, it MUST exit with code 1 and print a clear error.
 - **FR-005**: Each spawn MUST be assigned a unique SpawnId in the format `YYYYMMDD-<6-char-hex>`.
 - **FR-006**: Each spawn MUST create a dedicated git branch named `march/spawn/<spawn-id>` from the current HEAD and a git worktree at `<repo>/.march/worktrees/<spawn-id>/`.
 - **FR-007**: The `.march/` directory MUST be added to the repository's `.gitignore` if not already present, before worktree creation.
-- **FR-008**: The worktree snapshot MUST include only git-tracked files (via `git ls-files`) minus a hardcoded exclusion list. Untracked and `.gitignore`-d files MUST be excluded.
+- **FR-008**: The worktree snapshot MUST include only git-tracked files (via `git ls-files`) minus a hardcoded exclusion list. Untracked files and files ignored by `.gitignore` MUST be excluded.
 - **FR-009**: The exclusion list MUST exclude at minimum: `.env`, `.env.*`, and files matching common credential patterns.
 - **FR-010**: The worktree snapshot MUST be baked into a Docker image via a generated Dockerfile (using `COPY`), not mounted via a bind mount.
 - **FR-011**: The Docker container MUST run with `--cap-drop=ALL` and as a non-root user.
@@ -190,7 +190,7 @@ As an operator, I want `march spawn dispatch` to wait for the container to finis
 - **FR-016**: The backend CLI MUST be invoked with structured JSON output enabled (`--output-format json`).
 - **FR-017**: The `march spawn dispatch` command MUST block until the container process exits.
 - **FR-018**: A maximum execution timeout MUST be enforced. If the container exceeds it, the container MUST be killed.
-- **FR-019**: A SpawnRecord MUST be written to `~/.march/spawns/<spawn-id>.json` upon spawn completion (success or failure).
+- **FR-019**: A SpawnRecord MUST be created at `~/.march/spawns/<spawn-id>.json` at dispatch start and updated as the spawn progresses through its lifecycle. The record MUST be finalized upon spawn completion (success or failure).
 - **FR-020**: The stopped container MUST NOT be removed after the spawn completes. It MUST remain available for Feature 5 (Output Extraction).
 - **FR-021**: If any step in the dispatch pipeline fails, all prior artifacts (branch, worktree, Docker image) MUST be cleaned up before the command exits.
 - **FR-022**: The command MUST use exit codes consistently: 0 (success), 1 (error), 2 (usage error).
