@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from "vitest";
-import { execFileSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { resolve } from "node:path";
 import fs from "node:fs";
 import os from "node:os";
@@ -11,22 +11,17 @@ function runWithHome(
   args: string[],
   homeDir: string,
 ): { stdout: string; stderr: string; exitCode: number } {
-  try {
-    const stdout = execFileSync("node", [CLI_PATH, ...args], {
-      encoding: "utf-8",
-      timeout: 10000,
-      stdio: ["pipe", "pipe", "pipe"],
-      env: { ...process.env, HOME: homeDir, USERPROFILE: homeDir },
-    });
-    return { stdout, stderr: "", exitCode: 0 };
-  } catch (err: unknown) {
-    const e = err as { stdout: string; stderr: string; status: number };
-    return {
-      stdout: e.stdout ?? "",
-      stderr: e.stderr ?? "",
-      exitCode: e.status ?? 1,
-    };
-  }
+  const result = spawnSync("node", [CLI_PATH, ...args], {
+    encoding: "utf-8",
+    timeout: 10000,
+    stdio: ["pipe", "pipe", "pipe"],
+    env: { ...process.env, HOME: homeDir, USERPROFILE: homeDir },
+  });
+  return {
+    stdout: result.stdout ?? "",
+    stderr: result.stderr ?? "",
+    exitCode: result.status ?? 1,
+  };
 }
 
 describe("march update", () => {
@@ -278,5 +273,66 @@ describe("march update", () => {
     // Should succeed despite the ENOENT on the stale file
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toContain("updated successfully");
+  });
+
+  it("downgrade with --yes bypasses prompt and performs the downgrade", () => {
+    const tmpDir = makeTmpDir();
+    writeManifest(
+      tmpDir,
+      JSON.stringify({
+        version: 1,
+        marchVersion: "9.9.9",
+        deployLocation: "user",
+        agents: ["claude"],
+        files: { claude: [] },
+      }),
+    );
+
+    // --yes is a top-level flag, must appear before the subcommand
+    const result = runWithHome(["--yes", "update"], tmpDir);
+
+    expect(result.exitCode).toBe(0);
+    const output = result.stdout + result.stderr;
+    expect(output).toMatch(/[Dd]owngrade/);
+
+    // Manifest should now be rewritten to the CLI version
+    const manifestPath = path.join(tmpDir, ".march", "march-manifest.json");
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf-8"));
+    expect(manifest.marchVersion).toBe("0.1.0");
+  });
+
+  it("downgrade without --yes in non-TTY environment prints --yes instruction and exits 0", () => {
+    const tmpDir = makeTmpDir();
+    writeManifest(
+      tmpDir,
+      JSON.stringify({
+        version: 1,
+        marchVersion: "9.9.9",
+        deployLocation: "user",
+        agents: ["claude"],
+        files: { claude: [] },
+      }),
+    );
+
+    // execFileSync pipes stdin, making it non-TTY
+    const result = runWithHome(["update"], tmpDir);
+
+    expect(result.exitCode).toBe(0);
+    const output = result.stdout + result.stderr;
+    expect(output).toMatch(/[Dd]owngrade/);
+    expect(output).toContain("--yes");
+
+    // Manifest must NOT have been rewritten
+    const manifestPath = path.join(tmpDir, ".march", "march-manifest.json");
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf-8"));
+    expect(manifest.marchVersion).toBe("9.9.9");
+  });
+
+  it("update command appears in march help output", () => {
+    const tmpDir = makeTmpDir();
+    const result = runWithHome(["help"], tmpDir);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("update");
   });
 });
