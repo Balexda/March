@@ -105,7 +105,14 @@ describe("march CLI", () => {
   it("march with no args exits 2 with usage", () => {
     const result = run([]);
     expect(result.exitCode).toBe(2);
-    expect(result.stdout + result.stderr).toMatch(/usage|Usage/i);
+    const combined = result.stdout + result.stderr;
+    expect(combined).toMatch(/usage|Usage/i);
+    // AS 4.1: no-args output lists all five registered commands (two-tier listing).
+    // Match command-list entries (leading whitespace + command name as first word)
+    // to avoid false positives from --help/--version in the Options section.
+    for (const cmd of ["init", "update", "help", "version", "spawn"]) {
+      expect(combined).toMatch(new RegExp(`^\\s+${cmd}\\b`, "m"));
+    }
   });
 
   it("march with unrecognized command exits 2", () => {

@@ -17,7 +17,7 @@
 
 ### Tasks
 
-- [ ] In `src/cli.test.ts`, extend the "march with no args exits 2 with usage" test to assert that the combined stdout+stderr output contains each of the strings: `init`, `update`, `help`, `version`, and `spawn`. The no-args behavior (Commander's `outputHelp()` listing all registered commands, gated by the `!commandHandled` fallthrough in `src/cli.ts`) is already implemented — no production code change is needed. This task locks the AS 4.1 two-tier listing contract (setup commands + spawn system namespace) as a regression-guarded assertion.
+- [x] In `src/cli.test.ts`, extend the "march with no args exits 2 with usage" test to assert that the combined stdout+stderr output contains each of the strings: `init`, `update`, `help`, `version`, and `spawn`. The no-args behavior (Commander's `outputHelp()` listing all registered commands, gated by the `!commandHandled` fallthrough in `src/cli.ts`) is already implemented — no production code change is needed. This task locks the AS 4.1 two-tier listing contract (setup commands + spawn system namespace) as a regression-guarded assertion.
 
 **PR Outcome**: The no-args output content is pinned. Removing or renaming any registered command will cause this test to fail, preserving the two-tier command listing required by FR-006.
 
