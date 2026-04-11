@@ -11,9 +11,9 @@
 
 **Goal**: `march spawn` exists as a registered CLI command that checks whether git is on PATH before proceeding. If git is missing, it exits with a clear, human-readable error naming the missing dependency. If git is present, it prints the "not yet implemented" stub message. Both paths exit with code 1.
 
-**Justification**: Acceptance Scenarios 1-3 (init-time dependency warnings) are already fully implemented and tested in `src/deps.ts`, `src/init.ts`, `src/cli.ts`, and `src/init.test.ts`. The only unimplemented acceptance criterion is Scenario 4, which requires `march spawn` to perform a runtime dependency pre-check. The `march spawn` command does not yet exist in `cli.ts` — this slice creates it with the dependency guard as a single deliverable unit. The dependency-check function is placed in `deps.ts` alongside the existing dependency utilities so it is reusable by future spawn subcommands.
+**Justification**: Acceptance Scenarios US6-1 through US6-3 (init-time dependency warnings) are already fully implemented and tested in `src/deps.ts`, `src/init.ts`, `src/cli.ts`, and `src/init.test.ts`. The only unimplemented acceptance criterion is US6-4, which requires `march spawn` to perform a runtime dependency pre-check. The `march spawn` command does not yet exist in `cli.ts` — this slice creates it with the dependency guard as a single deliverable unit. The dependency-check function is placed in `deps.ts` alongside the existing dependency utilities so it is reusable by future spawn subcommands.
 
-**Addresses**: FR-007 (spawn stub); Acceptance Scenario 6.4
+**Addresses**: FR-007 (spawn stub); Acceptance Scenario US6-4
 
 ### Tasks
 
@@ -37,5 +37,5 @@ Recommended implementation sequence:
 
 | Dependency | Direction | Notes |
 |------------|-----------|-------|
-| User Story 1: Initialize March Environment | depends on | Story 1 implemented the init-time dependency checking (`deps.ts`, `init.ts`) that this story's Scenarios 1-3 rely on. Story 6 extends `deps.ts` with a spawn-time check. |
-| User Story 4: CLI Command Structure and Dispatch | depends on | Story 4 owns the `march spawn` stub (FR-007). This story creates the spawn command registration as a prerequisite for Scenario 4. If Story 4 has already landed, the implementing agent should augment the existing spawn handler rather than re-registering it. |
+| User Story 1: Initialize March Environment | depends on | Story 1 implemented the init-time dependency checking (`deps.ts`, `init.ts`) that US6-1 through US6-3 rely on. Story 6 extends `deps.ts` with a spawn-time check. |
+| User Story 4: CLI Command Structure and Dispatch | depends on | Story 4 owns the `march spawn` stub (FR-007). This story creates the spawn command registration as a prerequisite for US6-4. If Story 4 has already landed, the implementing agent should augment the existing spawn handler rather than re-registering it. |
