@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "smithyVersion": "0.2.6",
+  "smithyVersion": "0.2.7",
   "deployLocation": "repo",
   "agents": [
     "claude"
@@ -30,7 +30,11 @@
       ".claude/agents/smithy.refine.md",
       ".claude/agents/smithy.review.md",
       ".claude/agents/smithy.scout.md",
-      ".claude/agents/smithy.slice.md"
+      ".claude/agents/smithy.slice.md",
+      ".claude/skills/smithy.pr-review/SKILL.md",
+      ".claude/skills/smithy.pr-review/scripts/find-pr.sh",
+      ".claude/skills/smithy.pr-review/scripts/get-comments.sh",
+      ".claude/skills/smithy.pr-review/scripts/reply-comment.sh"
     ]
   }
 }

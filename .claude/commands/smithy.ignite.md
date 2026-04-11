@@ -197,7 +197,43 @@ Use the **smithy-clarify** sub-agent. Pass it:
 canonical title formats and check for repo-level overrides in the project's
 CLAUDE.md. Apply those conventions to all headings in this artifact.
 
-Using the workshopped answers from Phase 2, draft a structured RFC with this format.
+After each sub-phase's smithy-plan call returns, the orchestrator appends the
+returned content to `<slug>.rfc.md` before dispatching the next sub-phase. This
+is the append-and-continue protocol for all sub-phases below.
+
+### Sub-phase 3c: Goals + Out of Scope
+
+Dispatch **smithy-plan** with:
+
+- **Planning context**: "Draft the Goals and Out of Scope sections for this RFC"
+- **Feature/problem description**: the user's idea description plus the full clarification output from Phase 2
+- **Codebase file paths**: the path to the accumulating `<slug>.rfc.md` (which by this point contains Summary, Motivation, and Personas from earlier sub-phases)
+- **Additional planning directives**: constrain smithy-plan to produce only the Goals and Out of Scope sections in the RFC template format — not a full planning document
+
+Append the returned content to the RFC file.
+
+### Sub-phase 3d: Proposal + Design Considerations
+
+Dispatch **smithy-plan** with:
+
+- **Planning context**: "Draft the Proposal and Design Considerations sections for this RFC"
+- **Feature/problem description**: the user's idea description plus the clarification output and the reconciled approach from Phase 1.5
+- **Codebase file paths**: the path to the accumulating `<slug>.rfc.md` (which by this point contains Summary through Out of Scope)
+- **Additional planning directives**: constrain smithy-plan to produce only the Proposal and Design Considerations sections — not a full planning document
+
+Append the returned content to the RFC file.
+
+### Sub-phase 3f: Milestones
+
+Dispatch **smithy-plan** with:
+
+- **Planning context**: "Draft the Milestones section for this RFC, with per-milestone success criteria"
+- **Feature/problem description**: the user's idea description plus the clarification output
+- **Codebase file paths**: the path to the accumulating `<slug>.rfc.md` (containing all prior sections)
+- **Additional planning directives**: produce milestone decomposition only, with each milestone formatted as `### Milestone N: <Title>` followed by `**Description**` and `**Success Criteria**` bullets matching the RFC template
+
+Append the returned content to the RFC file.
+
 
 **Important — Decisions vs Open Questions**: Items discussed during clarification
 that have been resolved belong in **Decisions** (document what was decided and why).
