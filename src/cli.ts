@@ -75,7 +75,7 @@ program
 
 program
   .command("spawn [subcommand]")
-  .description("Spawn a new environment")
+  .description("Spawn a new environment (not yet implemented)")
   .allowUnknownOption()
   .action(() => {
     commandHandled = true;
