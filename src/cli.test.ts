@@ -115,7 +115,7 @@ describe("march CLI", () => {
     }
   });
 
-  it("march with unrecognized command exits 2 with error and valid commands", () => {
+  it("march with unknown command exits 2 with error and valid commands", () => {
     const result = run(["nonexistent"]);
     expect(result.exitCode).toBe(2);
     expect(result.stderr).toContain("nonexistent");

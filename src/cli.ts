@@ -193,7 +193,7 @@ try {
       process.exitCode = SUCCESS;
     }
   }
-  // Non-zero commander error (e.g., unknown command) — fall through to usage output
+  // Non-zero Commander error — fall through to the !commandHandled block below.
 }
 
 // No command was handled: either no args given or an unrecognised command.
