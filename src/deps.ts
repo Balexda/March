@@ -72,3 +72,42 @@ export function isOnPath(executable: string): boolean {
     return false;
   }
 }
+
+/**
+ * Result of a spawn dependency check. Either all required dependencies are
+ * present (`ok: true`) or one or more are missing (`ok: false` with a
+ * human-readable `error` message suitable for writing to stderr).
+ */
+export type DependencyCheckResult =
+  | { readonly ok: true }
+  | { readonly ok: false; readonly error: string };
+
+/**
+ * Checks whether git — the hard dependency for all spawn operations — is
+ * available on PATH. Returns a structured result so the caller can decide
+ * how to present the outcome (stderr message, exit code, etc.).
+ *
+ * **Fail-safe behavior**: if `isFinderAvailable()` returns false we cannot
+ * reliably determine whether git is present. Rather than silently assuming
+ * it is (which would lead to a cryptic `execFileSync` failure later), we
+ * report a blocking error. This differs from the init-time path, which
+ * emits a soft warning, because spawn actually requires git to function.
+ */
+export function checkSpawnDependencies(): DependencyCheckResult {
+  if (!isFinderAvailable()) {
+    return {
+      ok: false,
+      error:
+        "Cannot verify spawn dependencies: unable to locate the path-search utility. Ensure your PATH is configured correctly.",
+    };
+  }
+
+  if (!isOnPath("git")) {
+    return {
+      ok: false,
+      error: "git not found on PATH — required for spawn operations.",
+    };
+  }
+
+  return { ok: true };
+}
