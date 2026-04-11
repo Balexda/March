@@ -95,6 +95,35 @@ describe("isFinderAvailable", () => {
       process.env.PATH = originalPath;
     }
   });
+
+  it("finds the finder binary when it has a PATHEXT extension (win32 simulation)", () => {
+    // Simulate the Windows scenario: the binary on disk has an extension
+    // (e.g., where.exe) and PATHEXT tells the shell to try that suffix.
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "march-pathext-"));
+    const binDir = path.join(tmpDir, "bin");
+    fs.mkdirSync(binDir);
+    // Create a file named <FINDER_BIN>.exe (e.g., which.exe or where.exe).
+    const withExt = path.join(binDir, FINDER_BIN + ".exe");
+    fs.writeFileSync(withExt, "");
+
+    const originalPath = process.env.PATH;
+    const originalPathExt = process.env.PATHEXT;
+    const originalPlatform = Object.getOwnPropertyDescriptor(process, "platform");
+    try {
+      // Point PATH only at our bin dir and pretend we are on win32.
+      process.env.PATH = binDir;
+      process.env.PATHEXT = ".EXE";
+      Object.defineProperty(process, "platform", { value: "win32" });
+      expect(isFinderAvailable()).toBe(true);
+    } finally {
+      process.env.PATH = originalPath;
+      process.env.PATHEXT = originalPathExt;
+      if (originalPlatform) {
+        Object.defineProperty(process, "platform", originalPlatform);
+      }
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
 });
 
 // Absolute path to the finder binary (which on Unix, where on Windows) —
