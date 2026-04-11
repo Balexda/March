@@ -161,6 +161,10 @@ program
   .allowUnknownOption()
   .action(() => {
     commandHandled = true;
+    // Intentional: spawn requires git even at the stub stage. The dependency
+    // error gives users without git a more actionable message than the generic
+    // "not yet implemented" stub would. contracts.md omits this guard because
+    // it describes the logical contract, not this implementation detail.
     const result = checkSpawnDependencies();
     if (!result.ok) {
       process.stderr.write(result.error + "\n");
