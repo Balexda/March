@@ -54,6 +54,26 @@ function compareSemver(
 }
 
 /**
+ * Resolves `relPath` against `home` and asserts it stays within the
+ * `.claude/` subtree. Throws `UpdateError` if the resolved path escapes
+ * that boundary (e.g., via `..` traversal segments or absolute paths).
+ *
+ * @returns The resolved absolute path, safe to use for deletion.
+ */
+function validateMarchPath(home: string, relPath: string): string {
+  const claudeRoot = path.resolve(home, ".claude");
+  const resolved = path.resolve(home, relPath);
+  if (resolved !== claudeRoot && !resolved.startsWith(claudeRoot + path.sep)) {
+    throw new UpdateError(
+      `Manifest contains a path outside the managed directory: "${relPath}". ` +
+        "The manifest may be corrupted or tampered. " +
+        "Please remove ~/.march/march-manifest.json and re-run `march init`.",
+    );
+  }
+  return resolved;
+}
+
+/**
  * Update an existing March installation to match the current CLI version.
  *
  * Reads the existing manifest at `~/.march/march-manifest.json`, validates
@@ -177,6 +197,13 @@ export async function updateMarch(
   const newSet = new Set(newPaths);
   const oldSet = new Set(oldPaths);
 
+  // Validate all manifest-tracked paths before any file operations.
+  // Prevents a tampered manifest from causing deletions outside the
+  // March-managed .claude/ tree (e.g., via path-traversal segments).
+  for (const relPath of oldPaths) {
+    validateMarchPath(home, relPath);
+  }
+
   const added = newPaths.filter((p) => !oldSet.has(p));
   const removed = oldPaths.filter((p) => !newSet.has(p));
 
@@ -201,7 +228,7 @@ export async function updateMarch(
   // Silently tolerate ENOENT (already gone = desired state).
   // Untracked user files are never touched.
   for (const relPath of removed) {
-    const fullPath = path.join(home, relPath);
+    const fullPath = path.resolve(home, relPath); // already validated above
     try {
       await fs.rm(fullPath);
     } catch (err: unknown) {

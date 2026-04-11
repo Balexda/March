@@ -328,6 +328,33 @@ describe("march update", () => {
     expect(manifest.marchVersion).toBe("9.9.9");
   });
 
+  it("tampered manifest with path-traversal entry → exits 1 without touching victim file", () => {
+    const tmpDir = makeTmpDir();
+    // Place a file outside the .claude/ tree that the traversal would target
+    const victimFile = path.join(tmpDir, "victim.txt");
+    fs.writeFileSync(victimFile, "important data\n");
+
+    writeManifest(
+      tmpDir,
+      JSON.stringify({
+        version: 1,
+        marchVersion: "0.0.1",
+        deployLocation: "user",
+        agents: ["claude"],
+        // ".claude/../victim.txt" resolves to ~/victim.txt — outside .claude/
+        files: { claude: [".claude/../victim.txt"] },
+      }),
+    );
+
+    const result = runWithHome(["update"], tmpDir);
+
+    expect(result.exitCode).toBe(1);
+    const output = result.stdout + result.stderr;
+    expect(output).toMatch(/tampered|corrupted/i);
+    // Victim file must still exist — the update must not have touched it
+    expect(fs.existsSync(victimFile)).toBe(true);
+  });
+
   it("update command appears in march help output", () => {
     const tmpDir = makeTmpDir();
     const result = runWithHome(["help"], tmpDir);
