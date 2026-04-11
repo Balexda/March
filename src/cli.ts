@@ -1,9 +1,28 @@
 #!/usr/bin/env node
+import { createInterface } from "node:readline";
 import { Command, CommanderError } from "commander";
 import { ERROR, SUCCESS, USAGE_ERROR } from "./exit-codes.js";
 import { checkSpawnDependencies } from "./deps.js";
 import { initMarch, InitError } from "./init.js";
+import { updateMarch, UpdateError } from "./update.js";
 import { CLI_VERSION } from "./version.js";
+
+/**
+ * Prompts the user for a yes/no confirmation on the given question.
+ * Returns true if the user confirms (answers 'y' or 'yes'), false otherwise.
+ */
+function confirm(question: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const rl = createInterface({
+      input: process.stdin,
+      output: process.stderr,
+    });
+    rl.question(`${question} [y/N] `, (answer) => {
+      rl.close();
+      resolve(answer.trim().toLowerCase() === "y" || answer.trim().toLowerCase() === "yes");
+    });
+  });
+}
 
 const program = new Command();
 
@@ -35,6 +54,69 @@ program
       process.exitCode = SUCCESS;
     } catch (err) {
       if (err instanceof InitError) {
+        console.error(err.message);
+        process.exitCode = ERROR;
+        return;
+      }
+      throw err;
+    }
+  });
+
+program
+  .command("update")
+  .description("Update the March installation")
+  .action(async () => {
+    commandHandled = true;
+    const yes = program.opts().yes as boolean | undefined;
+    try {
+      // When --yes is set, pass force=true on the first call so a downgrade
+      // proceeds immediately without a detection roundtrip that would print
+      // the "Pass --yes" warning before the update runs.
+      const result = await updateMarch(undefined, yes ? true : undefined);
+
+      if (result.downgrade) {
+        // Downgrade detected and --yes was not set (force bypasses this branch).
+        console.log(result.summary);
+        for (const warning of result.warnings) {
+          process.stderr.write(warning + "\n");
+        }
+
+        if (!process.stdin.isTTY) {
+          // Non-interactive environment: instruct the user and exit 0 without
+          // performing the downgrade.
+          process.stderr.write(
+            "Pass --yes to force the downgrade in non-interactive mode.\n",
+          );
+          process.exitCode = SUCCESS;
+          return;
+        }
+
+        // Interactive TTY: ask for confirmation.
+        const confirmed = await confirm(
+          `Downgrade from v${result.summary.match(/v(\S+)/)?.[1] ?? "?"} to v${CLI_VERSION}?`,
+        );
+        if (!confirmed) {
+          process.stderr.write("Downgrade cancelled.\n");
+          process.exitCode = SUCCESS;
+          return;
+        }
+
+        const forced = await updateMarch(undefined, true);
+        console.log(forced.summary);
+        for (const warning of forced.warnings) {
+          process.stderr.write(warning + "\n");
+        }
+        process.exitCode = SUCCESS;
+        return;
+      }
+
+      console.log(result.summary);
+      for (const warning of result.warnings) {
+        process.stderr.write(warning + "\n");
+      }
+      process.exitCode = SUCCESS;
+    } catch (err) {
+      if (err instanceof UpdateError) {
         console.error(err.message);
         process.exitCode = ERROR;
         return;
