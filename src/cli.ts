@@ -2,6 +2,7 @@
 import { Command, CommanderError } from "commander";
 import { ERROR, SUCCESS, USAGE_ERROR } from "./exit-codes.js";
 import { initMarch, InitError } from "./init.js";
+import { updateMarch, UpdateError } from "./update.js";
 import { CLI_VERSION } from "./version.js";
 
 const program = new Command();
@@ -34,6 +35,28 @@ program
       process.exitCode = SUCCESS;
     } catch (err) {
       if (err instanceof InitError) {
+        console.error(err.message);
+        process.exitCode = ERROR;
+        return;
+      }
+      throw err;
+    }
+  });
+
+program
+  .command("update")
+  .description("Update the March installation")
+  .action(async () => {
+    commandHandled = true;
+    try {
+      const result = await updateMarch();
+      console.log(result.summary);
+      for (const warning of result.warnings) {
+        process.stderr.write(warning + "\n");
+      }
+      process.exitCode = SUCCESS;
+    } catch (err) {
+      if (err instanceof UpdateError) {
         console.error(err.message);
         process.exitCode = ERROR;
         return;
