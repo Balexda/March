@@ -13,7 +13,7 @@
 
 **Justification**: Acceptance Scenarios 1-3 (init-time dependency warnings) are already fully implemented and tested in `src/deps.ts`, `src/init.ts`, `src/cli.ts`, and `src/init.test.ts`. The only unimplemented acceptance criterion is Scenario 4, which requires `march spawn` to perform a runtime dependency pre-check. The `march spawn` command does not yet exist in `cli.ts` — this slice creates it with the dependency guard as a single deliverable unit. The dependency-check function is placed in `deps.ts` alongside the existing dependency utilities so it is reusable by future spawn subcommands.
 
-**Addresses**: FR-010 (runtime enforcement of dependency checking); FR-007 (spawn stub); Acceptance Scenario 6.4
+**Addresses**: FR-007 (spawn stub); Acceptance Scenario 6.4
 
 ### Tasks
 
