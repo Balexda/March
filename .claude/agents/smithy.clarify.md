@@ -1,6 +1,6 @@
 ---
 name: smithy-clarify
-description: "Shared clarification sub-agent. Scans for ambiguity across provided categories, then triages findings into assumptions and questions with confidence/impact scoring. Invoked by other smithy agents."
+description: "Shared clarification sub-agent. Scans for ambiguity across provided categories, then triages findings into assumptions (including Critical Assumptions) and questions with confidence/impact scoring. Invoked by other smithy agents."
 tools:
   - Read
   - Grep
@@ -65,7 +65,7 @@ For each candidate, produce all four elements:
 
 | Level | Meaning |
 |-------|---------|
-| **Critical** | Getting this wrong would invalidate the artifact or cause significant rework. Must be confirmed with the user. |
+| **Critical** | Getting this wrong would invalidate the artifact or cause significant rework. When confidence is High, proceed as a `[Critical Assumption]`. |
 | **High** | Materially affects scope, architecture, or user experience. Wrong answer leads to meaningful wasted effort. |
 | **Medium** | Affects quality or completeness but can be corrected later without major rework. |
 | **Low** | Minor preference or stylistic choice. Wrong answer has negligible downstream cost. |
@@ -87,18 +87,21 @@ Split candidates into two groups:
 ### Assumptions
 
 Items where:
-- Impact is **not Critical**, AND
 - Confidence is **High**
+
+This includes any Impact level. If Impact is **Critical** and Confidence is
+**High**, the item becomes an assumption with a `[Critical Assumption]`
+annotation.
 
 These are items you are confident about and will proceed with unless the user
 objects.
 
 ### Questions
 
-Everything else, ordered as follows:
+Everything else (Confidence is **not High**), ordered as follows:
 
-1. **All Critical-impact items** — regardless of confidence. These are always
-   asked, even if there are more than 5.
+1. **Critical-impact items where Confidence is not High** — Critical+Medium and
+   Critical+Low items are always asked, even if there are more than 5.
 2. **Highest-impact remaining items** — fill up to a **total of 5 questions**
    with the highest-impact non-Critical items that were not triaged as
    assumptions.
@@ -106,9 +109,8 @@ Everything else, ordered as follows:
 ### Edge cases
 
 - If no candidates qualify as assumptions, skip the assumptions block entirely.
-- If the triage produces zero questions (all items are assumptions), convert
-  the single highest-impact assumption back into a question — never skip
-  clarification entirely.
+- If triage produces zero questions (all items are assumptions), skip Step 5
+  entirely. Zero questions is a valid outcome.
 
 ---
 
@@ -117,6 +119,7 @@ Everything else, ordered as follows:
 If there are assumptions to present, print them as a single block:
 
 > **Assumptions** (we'll proceed with these unless you say otherwise):
+> - _Assumption text_ [Critical Assumption] `[Impact: Critical · Confidence: High]`
 > - _Assumption text and recommended answer_ `[Impact: High · Confidence: High]`
 > - _Assumption text and recommended answer_ `[Impact: Medium · Confidence: High]`
 > - …
@@ -150,8 +153,8 @@ regenerate remaining questions. Repeat until all questions are answered.
 
 ## Rules
 
-- **Never skip clarification.** Even if everything looks clear, present at least
-  one question.
+- **Always run the full scan and triage.** Never skip Steps 1–3. Zero questions
+  is a valid outcome when all candidates triage as assumptions.
 - **Do not batch questions.** Present exactly one question per message after the
   assumptions block. Questions are pre-generated in Step 2 — reveal them
   sequentially without re-analysis between answers.
@@ -159,7 +162,9 @@ regenerate remaining questions. Repeat until all questions are answered.
   scan → assumptions → questions flow. The parent agent does not relay messages.
 - **Return a summary when done.** After all questions are answered, return a
   structured summary to the parent agent containing:
-  1. The final list of **assumptions** (with any user adjustments).
+  1. The final list of **assumptions** (with any user adjustments), including
+     `[Critical Assumption]` annotations for any Critical-impact items promoted
+     to assumptions.
   2. Each **question** and the user's **answer** (or accepted recommendation).
   3. Any **decisions** made during the conversation.
   The parent agent uses this summary to continue its next phase.

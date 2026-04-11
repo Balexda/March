@@ -76,6 +76,12 @@ TDD protocol below handles test-first development automatically. Do not split
 your work into separate "write test" and "write implementation" steps — they are
 one integrated cycle.
 
+If a task description contains specific line numbers, exact replacement code, or
+other overly-prescriptive details, treat them as **hints, not instructions**.
+Line numbers drift and prescribed code may be stale. Use the referenced files
+and described behavior as your guide, then apply TDD to find the right
+implementation.
+
 ---
 
 ## TDD Protocol

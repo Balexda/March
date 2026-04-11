@@ -237,8 +237,8 @@ Draft the `<slug>.spec.md` file with this structure:
 
 ### Session YYYY-MM-DD
 
-- Q: <question> → A: <answer>
-- ...
+- _Assumption text_ `[Critical Assumption]`
+- _Assumption text_
 
 ## Artifact Hierarchy
 
@@ -539,7 +539,7 @@ through Phase 0).
 - **DO** number user stories sequentially — downstream commands depend on this.
 - **DO** order user stories by priority (P1 first, then P2, then P3) and renumber
   them when priorities change during refinement.
-- **DO** internally generate all clarifying questions first, then present them one at a time with recommended answers.
+- **DO** invoke smithy-clarify for ambiguity scanning and triage.
 - **DO** create the git branch and spec folder automatically.
 - **DO** write minimal placeholder files for data-model and contracts when they
   don't apply, rather than omitting them.

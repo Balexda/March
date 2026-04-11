@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "smithyVersion": "0.2.4",
+  "smithyVersion": "0.2.6",
   "deployLocation": "repo",
   "agents": [
     "claude"
@@ -24,10 +24,13 @@
       ".claude/agents/smithy.implement.md",
       ".claude/agents/smithy.maid.md",
       ".claude/agents/smithy.plan.md",
+      ".claude/agents/smithy.prose.md",
+      ".claude/agents/smithy.reconcile-slices.md",
       ".claude/agents/smithy.reconcile.md",
       ".claude/agents/smithy.refine.md",
       ".claude/agents/smithy.review.md",
-      ".claude/agents/smithy.scout.md"
+      ".claude/agents/smithy.scout.md",
+      ".claude/agents/smithy.slice.md"
     ]
   }
 }
