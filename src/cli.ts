@@ -31,7 +31,13 @@ program
   .version(CLI_VERSION)
   .option("--yes", "Skip confirmation prompts")
   .exitOverride()
-  .addHelpCommand(false);
+  .addHelpCommand(false)
+  .configureOutput({
+    // Suppress Commander's own error output (e.g. "error: unknown command
+    // 'foo'") because the !commandHandled fallthrough block handles
+    // unrecognised-command messaging explicitly via process.stderr.write.
+    writeErr: () => {},
+  });
 
 // Tracks whether a registered command handled the invocation. Required because
 // process.exitCode (unlike process.exit()) does not terminate immediately, so
