@@ -29,7 +29,7 @@
 
 **Justification**: FR-008 requires every command to support `--help`. Only `march init --help` is currently tested, and only for exit code — not output content. The other four commands have no `--help` tests. Separately, the spawn stub's `checkSpawnDependencies()` pre-check conflicts with the contracts.md description of an unconditional stub — the decision to include the gate is intentional but undocumented. This slice delivers both gaps as a coherent unit: complete `--help` coverage naturally requires understanding the spawn command's behavior, and that understanding drives the alignment comment.
 
-**Addresses**: FR-007, FR-008, FR-009; Acceptance Scenarios 4.2, 4.3; Scout Conflicts 1 and 2
+**Addresses**: FR-007, FR-008, FR-009; Acceptance Scenarios 4.2, 4.3; two implementation/spec divergences: (a) `src/cli.ts` calls `checkSpawnDependencies()` before the "not yet implemented" message, but `march-cli-foundation.contracts.md` describes `march spawn` as a pure pass-through stub with no dependency gate; (b) the existing spawn tests in `src/cli.test.ts` validate a two-branch gated behavior (git-missing → error; git-present → stub message), while AS 4.2 describes an unconditional stub
 
 ### Tasks
 
@@ -39,7 +39,7 @@
 
 - [ ] In `src/cli.test.ts`, add a comment to the spawn test group (the "march spawn with git missing" and "march spawn with git present" tests) linking the two behavioral branches to Acceptance Scenario 4.2 and documenting that the dependency-gated behavior is the accepted implementation of the spec's unconditional stub — the git-present branch satisfies AS 4.2's "not yet implemented" message requirement; the git-missing branch surfaces a prerequisite error before the stub message.
 
-**PR Outcome**: All five registered commands have `--help` tests asserting exit 0 and command-specific content, satisfying FR-008. The spawn stub's two-branch behavior is documented in code and tests, resolving the spec/implementation conflict from the consistency scan.
+**PR Outcome**: All five registered commands have `--help` tests asserting exit 0 and command-specific content, satisfying FR-008. The spawn stub's two-branch behavior (dependency-gated in code; unconditional in contracts.md) is documented in code and tests, making the intentional deviation explicit.
 
 ---
 
