@@ -172,17 +172,20 @@ program
   .command("spawn [subcommand]")
   .description("Spawn a new environment")
   .allowUnknownOption()
-  .action(() => {
+  .action((subcommand?: string) => {
     commandHandled = true;
-    // Dependency validation runs before dispatching. This includes the PATH
-    // search utility gate (which/where) plus the four hard preconditions:
-    // git on PATH, docker on PATH, cwd inside a git repo, and base image
-    // accessible, per FR-003 and FR-004.
-    const result = checkSpawnDependencies(BASE_IMAGE);
-    if (!result.ok) {
-      process.stderr.write(result.error + "\n");
-      process.exitCode = ERROR;
-      return;
+    // Dispatch-only validation: only `march spawn dispatch` runs the full
+    // dependency check (PATH search utility + git on PATH + docker on PATH +
+    // cwd inside a git repo + base image accessible, per FR-003 and FR-004).
+    // Bare `march spawn` and other subcommands skip the check so unrelated
+    // spawn paths aren't forced through docker/repo/base-image validation.
+    if (subcommand === "dispatch") {
+      const result = checkSpawnDependencies(BASE_IMAGE);
+      if (!result.ok) {
+        process.stderr.write(result.error + "\n");
+        process.exitCode = ERROR;
+        return;
+      }
     }
     console.log(
       "march spawn is not yet implemented. It will be available after Feature 2: Spawn Dispatch.",
