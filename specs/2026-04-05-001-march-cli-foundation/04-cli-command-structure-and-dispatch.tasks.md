@@ -67,7 +67,7 @@ Recommended implementation sequence:
 
 1. [x] **Slice 1** — No dependencies. Pure test extension. Land first — the no-args content assertions act as a regression net for the production code change in Slice 3 (confirming the `!commandHandled` path change does not accidentally fire for valid no-args invocations).
 2. [x] **Slice 2** — No dependency on Slice 1; can be implemented in parallel. Resolves the spawn alignment conflict and locks the spawn command behavior before Slice 3 modifies the adjacent `!commandHandled` block.
-3. [ ] **Slice 3** — Should follow Slices 1 and 2. The no-args assertions from Slice 1 provide the regression net; the spawn alignment context from Slice 2 clarifies the overall `commandHandled` flow before the production code change lands.
+3. [x] **Slice 3** — Should follow Slices 1 and 2. The no-args assertions from Slice 1 provide the regression net; the spawn alignment context from Slice 2 clarifies the overall `commandHandled` flow before the production code change lands.
 
 ### Cross-Story Dependencies
 
