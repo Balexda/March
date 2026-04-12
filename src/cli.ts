@@ -31,7 +31,13 @@ program
   .version(CLI_VERSION)
   .option("--yes", "Skip confirmation prompts")
   .exitOverride()
-  .addHelpCommand(false);
+  .addHelpCommand(false)
+  .configureOutput({
+    // Suppress Commander's own error output (e.g. "error: unknown command
+    // 'foo'") because the !commandHandled fallthrough block handles
+    // unrecognised-command messaging explicitly via process.stderr.write.
+    writeErr: () => {},
+  });
 
 // Tracks whether a registered command handled the invocation. Required because
 // process.exitCode (unlike process.exit()) does not terminate immediately, so
@@ -187,11 +193,15 @@ try {
       process.exitCode = SUCCESS;
     }
   }
-  // Non-zero commander error (e.g., unknown command) — fall through to usage output
+  // Non-zero Commander error — fall through to the !commandHandled block below.
 }
 
 // No command was handled: either no args given or an unrecognised command.
 if (!commandHandled) {
+  const unknownCmd = process.argv.slice(2).find((arg) => !arg.startsWith("-"));
+  if (unknownCmd) {
+    process.stderr.write(`error: unknown command '${unknownCmd}'\n`);
+  }
   program.outputHelp();
   process.exitCode = USAGE_ERROR;
 }
