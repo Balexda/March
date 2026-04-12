@@ -168,8 +168,8 @@ describe("checkSpawnDependencies", () => {
     const nodeBinDir = path.dirname(process.execPath);
     try {
       process.env.PATH = [nodeBinDir, fakeBin].join(path.delimiter);
-      // The test runs inside the March repo, so repo-context check passes.
-      // The docker stub exits 0 for all subcommands (including image inspect).
+      // The git and docker stubs exit 0 for all subcommands, so the
+      // repo-context and image-inspect checks both succeed in this test.
       const result = checkSpawnDependencies(TEST_BASE_IMAGE);
       expect(result.ok).toBe(true);
     } finally {
@@ -234,19 +234,18 @@ describe("checkSpawnDependencies", () => {
   it("returns ok:false with error containing 'git repository' when not in a repo", () => {
     const originalPath = process.env.PATH;
     const originalCwd = process.cwd();
-    // Use real git so that `git rev-parse --show-toplevel` actually fails in a
-    // non-repo directory. Stub only docker.
-    const fakeBin = makeFakeBin(["docker"]);
+    // Stub git to fail on `rev-parse` (simulating a non-repo cwd) and docker
+    // to succeed. This keeps the test hermetic — it does not depend on the
+    // host having a real git binary on PATH.
+    const fakeBin = makeFakeBin(["git", "docker"], {
+      git:
+        '#!/bin/sh\nif [ "$1" = "rev-parse" ]; then\n  exit 128\nfi\nexit 0\n',
+    });
     const nodeBinDir = path.dirname(process.execPath);
     // Create a temp dir that is definitely not inside a git repo.
     const nonRepoDir = fs.mkdtempSync(path.join(os.tmpdir(), "march-no-repo-"));
     try {
-      // Include the real PATH so that the real git binary is available.
-      process.env.PATH = [
-        nodeBinDir,
-        fakeBin,
-        originalPath ?? "",
-      ].join(path.delimiter);
+      process.env.PATH = [nodeBinDir, fakeBin].join(path.delimiter);
       process.chdir(nonRepoDir);
       const result = checkSpawnDependencies(TEST_BASE_IMAGE);
       expect(result.ok).toBe(false);

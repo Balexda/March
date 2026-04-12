@@ -303,5 +303,11 @@ describe("march CLI", () => {
     expect(result.stderr).not.toContain("not found");
     expect(result.stderr).not.toContain("Not inside a git repository");
     expect(result.stderr).not.toContain("march-base:latest");
+    // Validation passed and control reached the placeholder stub: exit 1
+    // with the "not yet implemented" message on stdout. Asserting the exit
+    // code and stub message ensures regressions in the happy path (e.g., the
+    // CLI bailing out before reaching the spawn handler) are caught.
+    expect(result.exitCode).toBe(1);
+    expect(result.stdout).toContain("march spawn is not yet implemented");
   });
 });

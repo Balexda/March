@@ -174,9 +174,10 @@ program
   .allowUnknownOption()
   .action(() => {
     commandHandled = true;
-    // Dependency validation runs before dispatching. All four hard preconditions
-    // (git on PATH, docker on PATH, cwd inside a git repo, base image accessible)
-    // are checked here per FR-003 and FR-004.
+    // Dependency validation runs before dispatching. This includes the PATH
+    // search utility gate (which/where) plus the four hard preconditions:
+    // git on PATH, docker on PATH, cwd inside a git repo, and base image
+    // accessible, per FR-003 and FR-004.
     const result = checkSpawnDependencies(BASE_IMAGE);
     if (!result.ok) {
       process.stderr.write(result.error + "\n");
