@@ -171,6 +171,14 @@ Once approved, write a single strike document to `specs/strikes/YYYY-MM-DD-<slug
 
 <Important decisions and tradeoffs made during the interactive planning phase.>
 
+## Specification Debt
+
+| ID | Description | Source Category | Impact | Confidence | Status | Resolution |
+|----|-------------|-----------------|--------|------------|--------|------------|
+| SD-001 | <what is unresolved> | <clarify scan category> | High | Medium | open | — |
+
+_If no debt items, write: "None — all ambiguities resolved."_
+
 ## Single Slice
 
 **Goal**: <What this slice delivers as a standalone increment.>

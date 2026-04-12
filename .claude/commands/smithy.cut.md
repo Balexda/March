@@ -40,7 +40,7 @@ Use the **smithy-refine** sub-agent. Pass it:
   | **Task Completeness** | Are tasks within each slice sufficient to achieve the slice goal? Are there missing steps (tests, docs, validation)? |
   | **FR Traceability** | Does every slice trace to at least one FR or acceptance scenario from the user story? Are any FRs unaddressed? |
   | **Dependency Order** | Is the recommended implementation sequence logical? Would reordering reduce risk or unblock parallel work? |
-  | **Task Scoping** | Do tasks describe *what* to accomplish (not *how* with exact code)? Are there standalone test tasks, file-reading tasks, verification tasks, or line-number references that would break fresh-context dispatch? |
+  | **Task Scoping** | Do tasks follow the structured format (bold title + behavioral description + acceptance criteria bullets)? Are any tasks over 150 words? Do tasks reference acceptance scenarios by ID rather than restating their content? Are test mechanics absent (no stub configs, mock patterns, assertion structures)? Are there standalone test tasks, file-reading tasks, verification tasks, line-number references, exact code prescriptions, exact error strings, or exact function signatures that would break fresh-context dispatch or create brittleness? |
   | **Spec Alignment** | Do the slices fully cover the user story's acceptance scenarios? Has the spec changed since the tasks file was written? |
 
 - **Target files**: the `.tasks.md` file alongside the source spec (`.spec.md`),
@@ -67,13 +67,28 @@ Phase 0).
      artifacts (`.spec.md`, `.data-model.md`, `.contracts.md`).
    - **User story number** — validate it exists in the spec file.
 2. Read all three spec artifacts to build full context.
-3. Extract the target user story — its title, acceptance scenarios, priority,
+3. **Inherit upstream debt.** After reading the source spec's three artifact
+   files, also read the spec's `## Specification Debt` section. Extract all
+   items with `status: open` or `status: inherited`. Carry them forward into
+   the tasks file's `## Specification Debt` table with status `inherited` and
+   a description prefixed with
+   `inherited from spec: <original SD-NNN description>`. Preserve the
+   upstream SD-NNN identifiers in the ID column (cut's own new items will
+   continue numbering from where the inherited list leaves off — see Phase 4
+   guidelines). Leave the Resolution column as `—`. If the upstream
+   `## Specification Debt` section is absent, empty, or the table is
+   malformed, treat this as a non-blocking warning: append an italic note
+   directly below the `## Specification Debt` table heading (before any table
+   rows): `_Upstream spec debt could not be parsed — inheritance skipped._`
+   This keeps the warning outside the table so it does not break the
+   structured row format.
+4. Extract the target user story — its title, acceptance scenarios, priority,
    and any FRs that trace to it.
-4. Derive the **story slug** — a short kebab-case name from the user story
+5. Derive the **story slug** — a short kebab-case name from the user story
    title (e.g., "User Story 4: Slice a User Story into Tasks" →
    `slice-story-into-tasks`). Older specs may use an em dash (`—`) instead
    of a colon as the separator; accept both when parsing.
-5. Confirm the target to the user:
+6. Confirm the target to the user:
    - Spec folder path.
    - User story number and title.
    - Derived filename: `<NN>-<story-slug>.tasks.md`.
@@ -222,6 +237,12 @@ Use the **smithy-clarify** sub-agent. Pass it:
   flag as Partial/Missing if the spec itself is ambiguous about which story owns
   a piece of functionality. If all categories are Clear, skip to Phase 4.
 
+**Bail-out check**: If clarify returns `bail_out: true`, output the
+`debt_items` table and the `bail_out_summary` guidance message to the terminal
+so the user can see exactly which ambiguities need resolution. Do not write any
+artifact files. Stop and wait for the user to provide expanded information or
+narrow the scope, then re-run.
+
 ---
 
 ## Phase 4: Slice
@@ -252,9 +273,14 @@ Draft the tasks file with this structure:
 
 ### Tasks
 
-- [ ] <Task 1 — specific, actionable implementation step>
-- [ ] <Task 2>
-- [ ] ...
+- [ ] **<Title — imperative verb phrase, max 12 words>**
+
+  <Description — 2–3 sentences. Reference target files/modules
+   and acceptance scenarios by ID (e.g., "AS 2.1").>
+
+  _Acceptance criteria:_
+  - <observable invariant or behavior to verify>
+  - ...
 
 **PR Outcome**: <What the PR delivers when merged — observable behavior or capability.>
 
@@ -305,7 +331,7 @@ Guidelines for slicing:
 - Slices are numbered sequentially starting at 1.
 - Include tests, docs, and validation steps within the slice that introduces the
   code — do not batch these into a separate "testing slice".
-- Populate the `## Specification Debt` section with debt items from cut's own clarify run. Assign SD-NNN identifiers. Leave Resolution as `—` for all `open` items. Inherited items from the upstream spec are added by Slice 4 — do not duplicate them here until that slice lands.
+- Populate the `## Specification Debt` section with both (1) inherited items from the source spec (carried over in Phase 1) and (2) new items from cut's own clarify run. Inherited items use status `inherited`; new items use status `open`. Assign new SD-NNN identifiers to cut's own items, continuing from where the inherited list left off.
 
 Guidelines for task authoring:
 
@@ -313,32 +339,105 @@ Each task is dispatched to a **fresh sub-agent** (smithy-implement) with no
 memory of prior tasks. The sub-agent receives the task description, task number,
 slice goal, file paths (spec, data-model, contracts, and the tasks/strike file),
 and the branch name — but nothing learned by previous tasks persists. Author
-tasks accordingly:
+tasks accordingly.
 
-- **Describe the WHAT, not the HOW in detail.** A task should state the
-  behavioral outcome or structural change to achieve. Do not prescribe exact
-  code, exact line numbers, or copy-paste replacement text. Line numbers shift;
-  code prescribed at planning time is frequently wrong at implementation time.
-  Instead, reference the target file/module and the desired behavior.
-- **Do not create standalone test tasks.** Testing is handled by
-  smithy-implement's TDD protocol (red-green-refactor). Every functional task
-  already includes writing a failing test, implementing to pass, and refactoring.
-  A task like "Write tests for X" is redundant — the sub-agent already does this
-  as part of implementing X.
-- **Do not create pre-research or file-reading tasks.** Each task runs in a
-  fresh context. A task like "Read file X to understand Y" produces no lasting
-  artifact — the next task's sub-agent cannot access what the previous one
-  learned. If understanding a file's structure is a prerequisite, encode that
-  knowledge into the task description itself or ensure it is captured in the
-  contracts/data-model.
-- **Do not bake test expectations into task descriptions.** Tasks like "Add a
-  test case that asserts X returns Y with input Z" pre-empt the TDD cycle. If a
-  specific scenario must be covered, express it as acceptance criteria or
-  attach it as extra context on the functional task — not as a separate testing
-  task with prescribed assertions.
-- **Verification is handled by forge.** Do not create tasks for running the
-  test suite, linting, or building. Forge runs validation after all tasks in a
-  slice complete.
+### Task format (mandatory)
+
+Every task must use this structure:
+
+```
+- [ ] **<Title — imperative verb phrase, max 12 words>**
+
+  <Description — 2–3 sentences. Name the target file/module and the outcome.
+   Reference acceptance scenarios by ID (e.g., "AS 2.1").>
+
+  _Acceptance criteria:_
+  - <observable invariant or behavior to verify>
+  - <another criterion>
+  - ...
+```
+
+- **Title**: bold imperative verb phrase, max 12 words. Scannable at a glance.
+- **Description**: 2–3 sentences. States WHAT changes and WHERE.
+- **Acceptance criteria**: 3–7 bullets. Observable invariants — what the
+  implement agent verifies via TDD.
+- **Total length**: aim for 50–100 words. Tasks over 150 words are almost
+  certainly overspecified — split them or trim prescriptive detail.
+
+### Reference, don't restate
+
+The implement agent receives the spec file path and reads acceptance
+scenarios directly. **Reference scenarios by ID** (e.g., "satisfies
+AS 2.1–2.3") rather than restating their content in the task. Similarly,
+reference contracts and data model sections by name rather than copying
+their definitions.
+
+**Escape hatch**: inline behavioral detail only when the task covers
+behavior that has no corresponding acceptance scenario (e.g.,
+implementation-level concerns like check ordering). Even then, use the
+acceptance criteria bullet format — never wall-of-text.
+
+### Task format — before/after contrast
+
+**BAD** — overspecified, brittle, wall-of-text:
+
+> - [ ] Extend `checkSpawnDependencies()` in `src/deps.ts` to accept a
+>   required `baseImage: string` parameter and validate all four hard
+>   preconditions in order. (1) Keep the existing `isFinderAvailable()` gate.
+>   (2) Fix the git error message from `"git not found on PATH — required for
+>   spawn operations."` to `"git not found — required for spawn operations"`.
+>   (3) Add an `isOnPath("docker")` check returning `{ ok: false, error:
+>   "Docker not found — required for spawn operations" }` when docker is
+>   absent. (4) Add a git repository context check by running `git rev-parse
+>   --show-toplevel` via `execFileSync` ... In `src/deps.test.ts`, update the
+>   existing `checkSpawnDependencies` test suite: the `ok:true` test currently
+>   stubs only `["git"]` and must be updated to stub `["git", "docker"]` and
+>   account for the new `baseImage` parameter ...
+
+This task is ~300 words. It embeds exact error strings, exact function calls,
+exact stub configurations, and exact test modifications. All of this drifts
+between planning and implementation.
+
+**GOOD** — behavioral, scannable, referencing the spec:
+
+> - [ ] **Extend `checkSpawnDependencies()` to validate all spawn preconditions**
+>
+>   Add a `baseImage` parameter to the function in `src/deps.ts`. Expand it to
+>   validate all preconditions from US2 acceptance scenarios 2.1–2.5, returning
+>   the first failure encountered.
+>
+>   _Acceptance criteria:_
+>   - Existing finder-availability gate preserved
+>   - Git-missing error matches AS 2.1 wording
+>   - Docker-on-PATH check added (AS 2.2)
+>   - Git repo context check added (AS 2.4)
+>   - Base image check with pull fallback added (AS 2.3)
+>   - Check ordering: finder, git, docker, repo context, base image
+
+Same task, ~80 words. The implement agent looks up AS 2.1–2.5 in the spec
+for exact wording, uses TDD to determine test approach, and reads the
+existing code to find the right implementation pattern.
+
+### Prohibitions
+
+- **No standalone test tasks.** The TDD protocol writes tests as part of
+  every functional task. "Write tests for X" is redundant.
+- **No research or file-reading tasks.** Each task runs in a fresh context
+  with no memory of prior tasks. Encode necessary context into the task or
+  spec artifacts.
+- **No verification tasks.** Forge runs npm test/build after all tasks
+  complete.
+- **No baked-in test expectations.** "Assert X returns Y with input Z"
+  pre-empts TDD. Express required behavior as acceptance criteria instead.
+- **No line-number references or exact code.** Line numbers drift; prescribed
+  code is frequently wrong. Reference files/modules and behaviors.
+- **No test mechanics.** Do not prescribe stub configurations, mock objects,
+  assertion patterns, or test helper modifications. The TDD protocol
+  determines test approach. If a behavior must be verified, state it as an
+  acceptance criterion.
+- **No exact error strings or function signatures.** Reference the acceptance
+  scenario that defines the expected wording instead of copying it into the
+  task.
 
 ---
 
@@ -349,19 +448,20 @@ the zero-padded user story number).
 
 **Spec write-back**: After writing the tasks file, update the source `.spec.md`
 to reflect that this story has been cut. Find the `## Story Dependency Order`
-section in the spec file and change the checkbox for the current user story from
-`- [ ]` to `- [x]`, appending the repo-relative tasks file path:
+section in the spec file and change the first checkbox for the current user
+story from `[ ]` to `[x]` (i.e., `[ ][ ]` → `[x][ ]`), appending the
+repo-relative tasks file path:
 
 ```markdown
-- [x] **User Story 3: <Title>** — <rationale> → `specs/<folder>/03-story-slug.tasks.md`
+- [x][ ] **User Story 3: <Title>** — <rationale> → `specs/<folder>/03-story-slug.tasks.md`
 ```
 
 If the `## Story Dependency Order` section does not exist in the spec (e.g.,
 older specs created before this section was introduced), skip the write-back
 silently — do not add the section or fail. Match the story by its number
 (`User Story <N>`) in the bold text. Update only the matching entry — do not
-modify other entries. If the entry is already `[x]`, skip — the operation is
-idempotent.
+modify other entries or the second checkbox. If the first checkbox is already
+`[x]` (entry is `[x][ ]` or `[x][x]`), skip — the operation is idempotent.
 
 Then present a summary to the user:
 
@@ -407,19 +507,20 @@ ask again.
   for in-progress work from other stories.
 - **DO** note cross-story dependencies in the Dependency Order section (as
   "Cross-Story Dependencies") without pulling that work into your slices.
-- **DO** update the spec file's Story Dependency Order checkbox when writing the
-  tasks file. If the section is missing, skip silently.
-- **DO NOT** write tasks that reference specific line numbers or prescribe exact
-  replacement code. Tasks must survive codebase drift between planning and
-  implementation. Reference files, modules, and behaviors instead.
-- **DO NOT** create standalone "write tests for X" tasks. smithy-implement uses
-  TDD — tests are written as part of implementing each functional task.
-- **DO NOT** create file-reading or research tasks. Each task runs in a fresh
-  sub-agent with no memory of prior tasks. Encode necessary context into the
-  task description or the spec artifacts.
+- **DO** update the spec file's Story Dependency Order first checkbox
+  (`[ ][ ]` → `[x][ ]`) when writing the tasks file. Do not modify the second
+  checkbox. If the section is missing, skip silently.
+- **DO** use the structured task format (bold title + behavioral description +
+  acceptance criteria bullets). See "Guidelines for task authoring" above.
+- **DO** reference acceptance scenarios by ID (e.g., "AS 2.1") rather than
+  restating their content. The implement agent reads the spec directly.
+- **DO NOT** write tasks that reference specific line numbers, prescribe exact
+  code, embed exact error strings, or prescribe test mechanics (stubs, mocks,
+  assertion patterns). Tasks must survive codebase drift.
+- **DO NOT** create standalone test tasks, file-reading tasks, or verification
+  tasks. See "Prohibitions" in the task authoring guidelines.
 - **DO** express testing requirements as acceptance criteria on the functional
-  task, not as separate tasks. If a specific edge case must be tested, add it
-  as a note on the task that implements the relevant behavior.
+  task, not as separate tasks.
 
 ---
 
@@ -428,7 +529,7 @@ ask again.
 1. **Audit findings and refinements** (if repeating the command on existing tasks).
 2. Created/updated files:
    - `specs/<folder>/<NN>-<story-slug>.tasks.md`
-   - `specs/<date>-<NNN>-<slug>/<slug>.spec.md` *(Story Dependency Order checkbox updated)*
+   - `specs/<date>-<NNN>-<slug>/<slug>.spec.md` *(Story Dependency Order first checkbox updated)*
 3. Summary report containing:
    - Slice count with titles.
    - FR and acceptance scenario coverage.

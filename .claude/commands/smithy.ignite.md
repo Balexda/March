@@ -366,6 +366,14 @@ influence downstream design decisions. Keep this at "WHAT not HOW" level.>
 - <Genuinely unresolved question 1>
 - <Genuinely unresolved question 2>
 
+## Specification Debt
+
+| ID | Description | Source Category | Impact | Confidence | Status | Resolution |
+|----|-------------|-----------------|--------|------------|--------|------------|
+| SD-001 | <what is unresolved> | <clarify scan category> | High | Medium | open | — |
+
+_If no debt items, write: "None — all ambiguities resolved."_
+
 ## Milestones
 
 ### Milestone 1: <Title>
