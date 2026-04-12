@@ -132,7 +132,7 @@ Pipeline proceeds with all items as assumptions. Empty debt list returned.
 | "Whether webhooks are synchronous or async" — no prior art | Low | Debt item |
 | **Assumptions:** 0 | | |
 
-Zero assumptions. All scope is uncertain. Bail-out assessment applies (see Rules).
+Zero assumptions. All scope is uncertain. Bail-out assessment applies (see Step 3).
 
 **(c) Mixed → assumptions block + non-empty debt list**
 
@@ -143,6 +143,19 @@ Zero assumptions. All scope is uncertain. Bail-out assessment applies (see Rules
 | "Rate limit policy" — no existing policy found | Low | Debt item |
 
 Assumptions block contains one item. Debt list contains two items.
+
+### Bail-out assessment
+
+After categorizing debt items, assess whether debt scope would hollow out the
+artifact. If the majority of Key Entities would remain undefined, or the
+majority of user stories cannot be meaningfully specified due to debt items,
+set `bail_out: true`. Treat 50% as a rough calibration, not a hard threshold —
+apply judgment about whether the artifact would be load-bearing without the
+missing information. When bail_out is true, set `bail_out_summary` to: "These
+unresolved ambiguities cover too much scope to produce a reliable artifact.
+Please provide more information on the items above, or narrow the scope, then
+re-run." The debt table is already in `debt_items` — do not duplicate it in
+`bail_out_summary`.
 
 ---
 
@@ -184,15 +197,8 @@ Incorporate any changes, then return the summary to the parent agent.
      `bail_out` is true. The full debt table is already in `debt_items`; this
      field carries the guidance message only.
   The parent agent uses this summary to continue its next phase.
-- **Bail-out assessment.** After categorizing debt items, assess whether debt
-  scope would hollow out the artifact. If the majority of Key Entities would
-  remain undefined, or the majority of user stories cannot be meaningfully
-  specified due to debt items, set `bail_out: true`. Treat 50% as a rough
-  calibration, not a hard threshold — apply judgment about whether the artifact
-  would be load-bearing without the missing information. When bail_out is true,
-  set `bail_out_summary` to: "These unresolved ambiguities cover too much scope
-  to produce a reliable artifact. Please provide more information on the items
-  above, or narrow the scope, then re-run." The debt table is already in
-  `debt_items` — do not duplicate it in `bail_out_summary`.
+- **Bail-out assessment.** See the bail-out assessment subsection in Step 3.
+  After categorizing debt items, assess scope and set `bail_out: true` when the
+  artifact would be hollowed out. The full heuristic is defined in Step 3.
 - **Be transparent about uncertainty.** If confidence is Low, say so — do not
   inflate confidence to avoid asking.

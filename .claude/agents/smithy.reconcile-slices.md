@@ -96,9 +96,23 @@ the task:
   rewrite it as a behavioral description on the functional task.
 - **No line-number references or exact code.** If a task references specific
   lines, rewrite to reference files/modules and desired behavior.
+- **No test mechanics.** If a task prescribes stub configurations, mock
+  objects, assertion patterns, or test helper modifications, strip them and
+  express the underlying requirement as an acceptance criterion.
+- **No restated acceptance scenarios.** If a task copies acceptance scenario
+  content from the spec instead of referencing it by ID (e.g., "AS 2.1"),
+  replace with a reference. The implement agent receives the spec file path.
+- **No exact error strings or function signatures.** If a task embeds the
+  exact text of an error message, prescribes a specific API call, or pastes
+  a function or type signature, replace with a reference to the acceptance
+  scenario or contract that defines it.
+- **Format violations.** Every task must follow the structured format: bold
+  imperative title (max 12 words), 2–3 sentence behavioral description,
+  bulleted acceptance criteria (3–7 items). If a task is a freeform paragraph
+  or exceeds 150 words, rewrite it into the format. Trim prescriptive detail.
 
-If you remove or merge tasks during this step, note it in the output so the
-parent agent can see what was cleaned up.
+If you remove, merge, or reformat tasks during this step, note it in the
+output so the parent agent can see what was cleaned up.
 
 ### Step 4: Resolve Conflicts
 
@@ -152,9 +166,13 @@ Return a single reconciled decomposition to the parent agent:
 **Addresses**: <FR-XXX, FR-YYY; Acceptance Scenario N.M>
 
 Tasks:
-- [ ] <Task 1> [via <lens>] (if from a single decomposition)
-- [ ] <Task 2>
-- [ ] ...
+- [ ] **<Title — imperative verb phrase, max 12 words>** [via <lens>]
+
+  <Description — 2–3 sentences. Reference AS N.M by ID.>
+
+  _Acceptance criteria:_
+  - <observable invariant>
+  - ...
 
 **PR Outcome**: <What the PR delivers when merged.>
 

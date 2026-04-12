@@ -76,6 +76,7 @@ Use the **smithy-refine** sub-agent. Pass it:
   | **Gaps** | Are there milestone goals or success criteria that no feature addresses? |
   | **Overlap** | Are there features with unclear or overlapping boundaries? |
   | **Dependency Clarity** | Are inter-feature dependencies within the milestone evident, or are they hidden? |
+  | **Feature Dependency Order** | If the feature map contains a `## Feature Dependency Order` section: does it list every feature with dual checkboxes (`[ ][ ]`, `[x][ ]`, or `[x][x]`)? Is the recommended sequence logically justified? Do `[x][ ]` entries match features that have spec folders? Do `[x][x]` entries match features that have spec folders and whose stories are all marked `[x][x]` (or another equivalent completion signal)? If absent (legacy feature map), treat as N/A. |
   | **RFC Alignment** | Does the feature map align with the RFC's stated goals and success criteria for this milestone? |
 
 - **Target files**: the `.features.md` file and the source `.rfc.md` file
@@ -288,6 +289,22 @@ this format:
 
 <!-- Repeat for each feature -->
 
+<!-- Specification Debt appears here for templates without ## Assumptions sections -->
+## Specification Debt
+
+| ID | Description | Source Category | Impact | Confidence | Status | Resolution |
+|----|-------------|-----------------|--------|------------|--------|------------|
+| SD-001 | <what is unresolved> | <clarify scan category> | High | Medium | open | — |
+
+_If no debt items, write: "None — all ambiguities resolved."_
+
+## Feature Dependency Order
+
+Recommended specification sequence:
+
+- [ ][ ] **Feature 1: <Title>** — <dependency rationale>
+- [ ][ ] **Feature 2: <Title>** — <dependency rationale>
+
 ## Cross-Milestone Dependencies
 
 Direction must be either `depends on` or `depended upon by`.
@@ -334,3 +351,11 @@ again. Once approved, suggest the next step:
   parallel by other agents. Each agent owns exactly one milestone.
 - **DO** note cross-milestone dependencies in the feature map (as
   "Cross-Milestone Dependencies") without pulling that work into your features.
+- **DO** include a `## Feature Dependency Order` section listing every feature
+  with `- [ ][ ]` dual checkboxes and a dependency rationale. Order features by
+  dependency graph — features with no dependencies come first, dependent features
+  come after their prerequisites. Include rationale for each entry (e.g., "No
+  dependencies; foundational", "Depends on Feature 1 for X", "Can parallelize
+  with Feature 2"). All items start as `[ ][ ]` — `smithy.mark` updates the
+  first checkbox when a spec is created; `smithy.forge` updates the second when
+  implementation is complete.

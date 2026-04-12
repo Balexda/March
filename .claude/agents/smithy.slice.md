@@ -103,6 +103,16 @@ learned by previous tasks persists between invocations.
 - **Reference files/modules and desired behavior** — not specific line numbers,
   not exact replacement code, not copy-paste text. Line numbers drift between
   planning and implementation; prescribed code is frequently wrong.
+- **Use the structured task format** — bold imperative title (max 12 words),
+  2–3 sentence behavioral description, then bulleted acceptance criteria
+  (3–7 items). See the Output section for the format template.
+- **Reference acceptance scenarios by ID** (e.g., "satisfies AS 2.1–2.3")
+  rather than restating their content. The implement agent receives the spec
+  file path and can look up scenarios directly. Inline behavioral detail only
+  when the task covers behavior that has no corresponding acceptance scenario.
+- **Stay under 150 words per task** (title + description + criteria combined).
+  Tasks exceeding this are almost certainly overspecified — split them or
+  remove prescriptive detail.
 
 #### Tasks MUST NOT:
 - **Be standalone test tasks.** "Write tests for X" is redundant — the TDD
@@ -123,6 +133,13 @@ learned by previous tasks persists between invocations.
 - **Reference specific line numbers or exact code.** "Update line 68 to change
   X to Y" is brittle. Instead: "Update the triage logic in `smithy.clarify.prompt`
   to allow Critical+High items through as assumptions."
+- **Prescribe test mechanics.** Stub configurations, mock objects, assertion
+  patterns, test helper modifications — these are implementation decisions
+  the TDD protocol handles. If a specific behavior must be verified, state it
+  as an acceptance criterion on the task, not as a test prescription.
+- **Embed exact error strings or function signatures.** Reference the
+  acceptance scenario that defines the expected wording instead of copying it
+  into the task. The implement agent reads the spec.
 
 ---
 
@@ -146,9 +163,14 @@ Return a structured decomposition to the parent agent:
 **Addresses**: <FR-XXX, FR-YYY; Acceptance Scenario N.M>
 
 Tasks:
-- [ ] <Task 1 — behavioral outcome, referencing target files/modules>
-- [ ] <Task 2>
-- [ ] ...
+- [ ] **<Title — imperative verb phrase, max 12 words>**
+
+  <Description — 2–3 sentences. Reference target files/modules
+   and acceptance scenarios by ID (e.g., "AS 2.1").>
+
+  _Acceptance criteria:_
+  - <observable invariant or behavior to verify>
+  - ...
 
 **PR Outcome**: <What the PR delivers when merged.>
 
@@ -188,9 +210,10 @@ Tasks:
   the parent agent only.
 - **Read-only.** You do not create, modify, or delete any files. You produce
   a decomposition — the parent agent decides what to do with it.
-- **Be specific.** Reference concrete files, modules, and behaviors. Generic
-  tasks ("consider adding tests") are not useful — name the specific module
-  and describe the behavioral change.
+- **Be specific, not prescriptive.** "Specific" means naming the target
+  module and the behavioral change. It does NOT mean dictating the
+  implementation approach, test structure, or exact code. Name the file and
+  the outcome — not the function call, the stub config, or the assertion.
 - **Stay scoped.** Decompose only the assigned user story. Do not propose
   tasks for other stories in the same spec.
 - **Honor directives.** When additional planning directives are provided,

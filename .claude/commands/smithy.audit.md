@@ -97,6 +97,7 @@ Use the checklist matching the artifact's extension. Each checklist defines what
 | **Gaps** | Are there milestone goals or success criteria that no feature addresses? |
 | **Overlap** | Are there features with unclear or overlapping boundaries? |
 | **Dependency Clarity** | Are inter-feature dependencies within the milestone evident, or are they hidden? |
+| **Feature Dependency Order** | If the feature map contains a `## Feature Dependency Order` section: does it list every feature with dual checkboxes (`[ ][ ]`, `[x][ ]`, or `[x][x]`)? Is the sequence logically justified? Do `[x][ ]`/`[x][x]` entries match features with spec folders? Do `[x][x]` entries match features whose specs have all stories complete? If absent (legacy feature map), treat as N/A. |
 | **RFC Alignment** | Does the feature map align with the RFC's stated goals and success criteria for this milestone? |
 ## Audit Checklist (.spec.md)
 
@@ -111,7 +112,7 @@ Use the checklist matching the artifact's extension. Each checklist defines what
 | **Contract Completeness** | Do all integration boundaries have defined inputs, outputs, and error conditions? Are there contracts implied by requirements but not documented? |
 | **Ambiguity & Risk** | Are there vague terms, unstated assumptions, or scope boundaries that could be interpreted multiple ways? |
 | **Staleness** | Does the spec still reflect the current codebase reality? Have upstream changes invalidated any assumptions? |
-| **Story Dependency Order** | If the spec contains a `## Story Dependency Order` section: does it list every user story with a `- [ ]` or `- [x]` checkbox? Is the recommended sequence logically justified? Do `[x]` entries match stories with `.tasks.md` files in the spec folder? If the section is absent (legacy specs predating this convention), treat as N/A — do not flag. |
+| **Story Dependency Order** | If the spec contains a `## Story Dependency Order` section: does it list every user story with dual checkboxes (`[ ][ ]`, `[x][ ]`, or `[x][x]`)? Is the recommended sequence logically justified? Do first-checked entries (`[x][ ]` or `[x][x]`) match stories with `.tasks.md` files in the spec folder? Do fully-checked entries (`[x][x]`) match stories whose tasks files have all slices complete? If the section is absent (legacy specs predating this convention), treat as N/A — do not flag. |
 ## Audit Checklist (.tasks.md)
 
 | Category | What to check |
@@ -120,7 +121,7 @@ Use the checklist matching the artifact's extension. Each checklist defines what
 | **Task Completeness** | Are tasks within each slice sufficient to achieve the slice goal? Are there missing steps (tests, docs, validation)? |
 | **Testability** | Is it clear how each slice should be tested? Are integration test concerns addressed? |
 | **Edge Case Coverage** | Are boundary conditions, error paths, and failure modes covered in the tasks? |
-| **Task Scoping** | Do tasks describe *what* to accomplish without prescribing exact code, line numbers, or copy-paste replacements? Are there standalone test tasks (should be part of TDD), file-reading/research tasks (break fresh-context dispatch), verification tasks (handled by forge), or baked-in test expectations (pre-empt TDD)? |
+| **Task Scoping** | Do tasks follow the structured format (bold title + behavioral description + acceptance criteria bullets)? Are any tasks over 150 words? Do tasks reference acceptance scenarios by ID rather than restating their content? Are test mechanics absent (no stub configs, mock patterns, assertion structures, exact error strings, exact function signatures)? Are there standalone test tasks (should be part of TDD), file-reading/research tasks (break fresh-context dispatch), verification tasks (handled by forge), or baked-in test expectations (pre-empt TDD)? |
 | **FR Traceability** | Does every slice trace to at least one FR or acceptance scenario? Are any FRs unaddressed? |
 | **Dependency Order** | Is the recommended implementation sequence logical? Would reordering reduce risk or unblock parallel work? |
 ## Audit Checklist (.strike.md)
