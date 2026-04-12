@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # get-comments.sh — Fetch unresolved PR review threads with full reply chains
 #
-# Usage: bash .claude/skills/smithy.pr-review/scripts/get-comments.sh <owner/repo> <pr-number>
+# Usage: bash ${CLAUDE_SKILL_DIR}/scripts/get-comments.sh <owner/repo> <pr-number>
 #
 # Output: JSON array of unresolved review threads. Each thread has:
 #   - isResolved (always false in output — resolved threads are filtered)

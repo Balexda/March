@@ -164,8 +164,8 @@ Tasks:
 
 ### Dependency Order
 
-1. **Slice N** — <why this comes first>
-2. **Slice M** — <why this follows>
+1. [ ] **Slice N** — <why this comes first>
+2. [ ] **Slice M** — <why this follows>
 
 ### Conflicts
 

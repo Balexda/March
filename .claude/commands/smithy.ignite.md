@@ -197,9 +197,53 @@ Use the **smithy-clarify** sub-agent. Pass it:
 canonical title formats and check for repo-level overrides in the project's
 CLAUDE.md. Apply those conventions to all headings in this artifact.
 
-After each sub-phase's smithy-plan call returns, the orchestrator appends the
-returned content to `<slug>.rfc.md` before dispatching the next sub-phase. This
-is the append-and-continue protocol for all sub-phases below.
+### RFC File Creation
+
+Before any sub-phase begins, create the RFC folder and file:
+
+1. Create the folder `docs/rfcs/<YYYY>-<NNN>-<slug>/` if it doesn't exist.
+2. Create `docs/rfcs/<YYYY>-<NNN>-<slug>/<slug>.rfc.md` with only the RFC header — nothing else:
+
+```markdown
+# RFC: <Title>
+
+**Created**: YYYY-MM-DD  |  **Status**: Draft
+```
+
+Do not add a template skeleton or empty section placeholders. Each sub-phase
+will append its own section headings and content. The RFC template code fence
+below is a reference for section ordering and format — do not copy it into the
+file.
+
+### Append-and-Continue Protocol
+
+After each sub-phase's sub-agent returns, the orchestrator appends the returned
+content to `<slug>.rfc.md` before dispatching the next sub-phase. This is the
+append-and-continue protocol for sub-phases 3a–3f. For inline sub-phase 3e, the
+orchestrator appends directly. Sub-phase 3g is an exception: it rewrites the
+entire file in place (harmonize pass) rather than appending.
+
+### Sub-phase 3a: Summary + Motivation
+
+Dispatch **smithy-prose** with:
+
+- **section_assignment**: "Summary and Motivation / Problem Statement"
+- **idea_description**: the user's idea description or PRD content from intake
+- **clarify_output**: the Q&A and assumptions from Phase 2 clarification
+- **rfc_file_path**: do not pass (this is the first sub-phase; the RFC file contains only the header)
+
+After smithy-prose returns, append the returned content to `<slug>.rfc.md`.
+
+### Sub-phase 3b: Personas
+
+Dispatch **smithy-prose** with:
+
+- **section_assignment**: "Personas"
+- **idea_description**: the user's idea description or PRD content from intake
+- **clarify_output**: the Q&A and assumptions from Phase 2 clarification
+- **rfc_file_path**: the path to the accumulating `<slug>.rfc.md` (which at this point contains the header plus Summary and Motivation)
+
+After smithy-prose returns, append the returned content to the RFC file.
 
 ### Sub-phase 3c: Goals + Out of Scope
 
@@ -223,6 +267,24 @@ Dispatch **smithy-plan** with:
 
 Append the returned content to the RFC file.
 
+### Sub-phase 3e: Decisions + Open Questions
+
+This sub-phase is orchestrator-inline — no sub-agent dispatch.
+
+Synthesize the **Decisions** and **Open Questions** sections directly from the
+clarification record (Phase 2 output) and the reconciled approach (Phase 1.5):
+
+- **Decisions**: Items that were discussed and resolved during clarification or
+  reconciliation. Each entry states what was decided and why.
+- **Open Questions**: Items that remain genuinely unresolved and need further
+  investigation or stakeholder input.
+
+Refer to the "Decisions vs Open Questions" guidance below the template code
+fence for the distinction between these two sections.
+
+Append both formatted sections (`## Decisions` and `## Open Questions`) to the
+RFC file.
+
 ### Sub-phase 3f: Milestones
 
 Dispatch **smithy-plan** with:
@@ -233,6 +295,20 @@ Dispatch **smithy-plan** with:
 - **Additional planning directives**: produce milestone decomposition only, with each milestone formatted as `### Milestone N: <Title>` followed by `**Description**` and `**Success Criteria**` bullets matching the RFC template
 
 Append the returned content to the RFC file.
+
+### Sub-phase 3g: Harmonize
+
+This sub-phase is orchestrator-inline — no sub-agent dispatch.
+
+1. Read the complete `<slug>.rfc.md` from disk.
+2. Perform a coherence pass:
+   - Smooth tone across sections written by different sub-agents.
+   - Fix cross-references between sections (e.g., a Milestone referencing a Goal
+     by name, a Proposal referencing a Persona).
+   - Verify that every expected RFC template section is present and non-empty.
+3. Rewrite the file in place with the harmonized content.
+
+Confirm the harmonize step completed before proceeding to Phase 4.
 
 
 **Important — Decisions vs Open Questions**: Items discussed during clarification
@@ -311,18 +387,24 @@ influence downstream design decisions. Keep this at "WHAT not HOW" level.>
 
 ## Phase 4: Write & Review
 
-1. Create the folder `docs/rfcs/<YYYY>-<NNN>-<slug>/` if it doesn't exist.
-2. Write the RFC to `docs/rfcs/<YYYY>-<NNN>-<slug>/<slug>.rfc.md`.
-3. Present a **summary** of the draft — title, problem statement, milestone
-   count and titles, key decisions.
-4. **Do NOT dump the full RFC contents into the terminal.** The file is on
+Phase 3 already created the RFC folder, wrote the file piecewise through
+sub-phases 3a–3f, and harmonized it in sub-phase 3g. Skip folder creation
+and file write — proceed directly to review:
+
+1. Present a **summary** of the harmonized RFC — title, milestone count and
+   titles, key decisions.
+2. Point the user to the file on disk:
+   `docs/rfcs/<YYYY>-<NNN>-<slug>/<slug>.rfc.md`.
+3. **Do NOT dump the full RFC contents into the terminal.** The file is on
    disk — the user can review it in their editor.
-5. **STOP and ask**: "Review the RFC at `<path>` and let me know if you'd like
+4. **STOP and ask**: "Review the RFC at `<path>` and let me know if you'd like
    changes, or approve to move on."
 
-If the user wants changes, incorporate them, update the file on disk, and ask
-again. Once approved, suggest the next step: "Ready for `smithy.render` to
-break a milestone into features."
+If the user wants changes, incorporate them by updating the existing file in
+place (do not rewrite from scratch). Ask again after each round of changes.
+Once approved, suggest the next step: "Ready for `smithy.render` to break a
+milestone into features."
+
 
 ---
 

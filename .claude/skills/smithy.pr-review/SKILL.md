@@ -1,6 +1,6 @@
 ---
 name: smithy.pr-review
-description: "GitHub PR review operations: list inline comments, reply to comments, check CI run status. Use when handling review feedback on an open pull request."
+description: "GitHub PR review operations: list inline comments, reply to comments. Use when handling review feedback on an open pull request."
 allowed-tools: Bash(bash *smithy.pr-review/scripts/find-pr.sh) Bash(bash *smithy.pr-review/scripts/get-comments.sh *) Bash(bash *smithy.pr-review/scripts/reply-comment.sh *)
 ---
 # smithy.pr-review

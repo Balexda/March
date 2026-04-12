@@ -266,12 +266,22 @@ Draft the tasks file with this structure:
 
 ---
 
+## Specification Debt
+
+| ID | Description | Source Category | Impact | Confidence | Status | Resolution |
+|----|-------------|-----------------|--------|------------|--------|------------|
+| SD-001 | <what is unresolved> | <clarify scan category> | High | Medium | open | — |
+
+_If no debt items, write: "None — all ambiguities resolved."_
+
+---
+
 ## Dependency Order
 
 Recommended implementation sequence:
 
-1. **Slice N** — <why this comes first>
-2. **Slice M** — <why this follows>
+1. [ ] **Slice N** — <why this comes first>
+2. [ ] **Slice M** — <why this follows>
 3. ...
 
 ### Cross-Story Dependencies
@@ -295,6 +305,7 @@ Guidelines for slicing:
 - Slices are numbered sequentially starting at 1.
 - Include tests, docs, and validation steps within the slice that introduces the
   code — do not batch these into a separate "testing slice".
+- Populate the `## Specification Debt` section with debt items from cut's own clarify run. Assign SD-NNN identifiers. Leave Resolution as `—` for all `open` items. Inherited items from the upstream spec are added by Slice 4 — do not duplicate them here until that slice lands.
 
 Guidelines for task authoring:
 
@@ -334,7 +345,25 @@ tasks accordingly:
 ## Phase 5: Write & Review
 
 Write the file to `specs/<folder>/<NN>-<story-slug>.tasks.md` (where `<NN>` is
-the zero-padded user story number), then present a summary to the user:
+the zero-padded user story number).
+
+**Spec write-back**: After writing the tasks file, update the source `.spec.md`
+to reflect that this story has been cut. Find the `## Story Dependency Order`
+section in the spec file and change the checkbox for the current user story from
+`- [ ]` to `- [x]`, appending the repo-relative tasks file path:
+
+```markdown
+- [x] **User Story 3: <Title>** — <rationale> → `specs/<folder>/03-story-slug.tasks.md`
+```
+
+If the `## Story Dependency Order` section does not exist in the spec (e.g.,
+older specs created before this section was introduced), skip the write-back
+silently — do not add the section or fail. Match the story by its number
+(`User Story <N>`) in the bold text. Update only the matching entry — do not
+modify other entries. If the entry is already `[x]`, skip — the operation is
+idempotent.
+
+Then present a summary to the user:
 
 1. Show a summary:
    - Number of slices with their titles.
@@ -378,6 +407,8 @@ ask again.
   for in-progress work from other stories.
 - **DO** note cross-story dependencies in the Dependency Order section (as
   "Cross-Story Dependencies") without pulling that work into your slices.
+- **DO** update the spec file's Story Dependency Order checkbox when writing the
+  tasks file. If the section is missing, skip silently.
 - **DO NOT** write tasks that reference specific line numbers or prescribe exact
   replacement code. Tasks must survive codebase drift between planning and
   implementation. Reference files, modules, and behaviors instead.
@@ -395,8 +426,9 @@ ask again.
 ## Output
 
 1. **Audit findings and refinements** (if repeating the command on existing tasks).
-2. Created/updated tasks file:
+2. Created/updated files:
    - `specs/<folder>/<NN>-<story-slug>.tasks.md`
+   - `specs/<date>-<NNN>-<slug>/<slug>.spec.md` *(Story Dependency Order checkbox updated)*
 3. Summary report containing:
    - Slice count with titles.
    - FR and acceptance scenario coverage.

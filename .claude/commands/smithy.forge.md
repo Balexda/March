@@ -184,6 +184,26 @@ After the sub-agent returns:
 
 ---
 
+## Mark Slice Complete
+
+For `.tasks.md` mode only:
+
+In the tasks file, find the `## Dependency Order` section and change the target
+slice's checkbox from `[ ]` to `[x]`. For example, if implementing Slice 2:
+
+```
+1. [x] **Slice 1** — ...   (already completed)
+2. [x] **Slice 2** — ...   ← mark this one
+3. [ ] **Slice 3** — ...   (not yet started)
+```
+
+Commit the change: `mark slice <N> complete in dependency order`
+
+This ensures the PR diff includes the Dependency Order context, making it easy
+for reviewers to see which slice was completed and what comes next.
+
+---
+
 ## Validation
 
 After implementation, review, and documentation check, run the full validation
