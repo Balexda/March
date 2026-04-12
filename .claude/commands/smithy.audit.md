@@ -111,6 +111,7 @@ Use the checklist matching the artifact's extension. Each checklist defines what
 | **Contract Completeness** | Do all integration boundaries have defined inputs, outputs, and error conditions? Are there contracts implied by requirements but not documented? |
 | **Ambiguity & Risk** | Are there vague terms, unstated assumptions, or scope boundaries that could be interpreted multiple ways? |
 | **Staleness** | Does the spec still reflect the current codebase reality? Have upstream changes invalidated any assumptions? |
+| **Story Dependency Order** | If the spec contains a `## Story Dependency Order` section: does it list every user story with a `- [ ]` or `- [x]` checkbox? Is the recommended sequence logically justified? Do `[x]` entries match stories with `.tasks.md` files in the spec folder? If the section is absent (legacy specs predating this convention), treat as N/A — do not flag. |
 ## Audit Checklist (.tasks.md)
 
 | Category | What to check |

@@ -268,6 +268,14 @@ As a <persona>, I want <goal> so that <benefit>.
 - <edge case 1>
 - ...
 
+## Story Dependency Order
+
+Recommended implementation sequence:
+
+- [ ] **User Story 1: <Title>** — <dependency rationale>
+- [ ] **User Story 2: <Title>** — <dependency rationale>
+- [ ] **User Story N: <Title>** — <dependency rationale>
+
 ## Requirements *(mandatory)*
 
 ### Functional Requirements
@@ -283,6 +291,14 @@ As a <persona>, I want <goal> so that <benefit>.
 ## Assumptions
 
 - ...
+
+## Specification Debt
+
+| ID | Description | Source Category | Impact | Confidence | Status | Resolution |
+|----|-------------|-----------------|--------|------------|--------|------------|
+| SD-001 | <what is unresolved> | <clarify scan category> | High | Medium | open | — |
+
+_If no debt items, write: "None — all ambiguities resolved."_
 
 ## Out of Scope
 
@@ -307,7 +323,21 @@ Guidelines for the spec:
 - Success criteria are measurable and testable.
 - Do NOT include implementation phases, milestones, or task breakdowns.
 - Do NOT include specific file paths, function names, or implementation details.
+  (Exception: the `→` links in Story Dependency Order are auto-appended by
+  `smithy.cut` and are cross-reference paths, not implementation details.)
 - DO trace back to RFC sections when input is an RFC.
+- Populate the `## Specification Debt` section from clarify's returned `debt_items`. Assign sequential SD-NNN identifiers starting at SD-001. Carry the description, source_category, impact, confidence, and status fields directly from clarify's return. Leave Resolution as `—` for all `open` items.
+- The Story Dependency Order section lists all user stories in recommended
+  implementation sequence with `- [ ]` checkboxes. Order by dependency graph,
+  not by priority — stories with no dependencies come first, stories that depend
+  on others come after their prerequisites. Stories that can be implemented in
+  parallel should be noted as such in their rationale. Each entry includes a
+  brief rationale explaining why it is positioned where it is (e.g., "No
+  dependencies", "Depends on Story 1 for the auth module", "Can parallelize
+  with Story 2").
+- The `[ ]` checkboxes in Story Dependency Order are updated to `[x]` by
+  `smithy.cut` when it creates the tasks file for that story. Do NOT manually
+  check them during spec creation.
 
 ---
 
@@ -500,6 +530,7 @@ Use the **smithy-refine** sub-agent. Pass it:
   | **Contract Completeness** | Do all integration boundaries have defined inputs, outputs, and error conditions? Are there contracts implied by requirements but not documented? |
   | **Ambiguity & Risk** | Are there vague terms, unstated assumptions, or scope boundaries that could be interpreted multiple ways? |
   | **Staleness** | Does the spec still reflect the current codebase reality? Have upstream changes invalidated any assumptions? |
+  | **Story Dependency Order** | If the spec contains a `## Story Dependency Order` section: does it list all user stories? Is the implementation sequence logically justified? Do `[x]` entries match stories that have `.tasks.md` files? If absent (legacy spec), treat as N/A. |
 
 - **Target files**: the spec (`.spec.md`), data model (`.data-model.md`), and
   contracts (`.contracts.md`) in the spec folder.

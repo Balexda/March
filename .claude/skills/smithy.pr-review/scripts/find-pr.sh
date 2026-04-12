@@ -9,6 +9,13 @@
 set -euo pipefail
 
 BRANCH=$(git branch --show-current)
+
+# Detached HEAD — no branch to look up
+if [ -z "$BRANCH" ]; then
+  echo '{}'
+  exit 0
+fi
+
 PR_JSON=$(gh pr list --head "$BRANCH" --json number --state open --limit 1)
 
 # Check if any PR exists

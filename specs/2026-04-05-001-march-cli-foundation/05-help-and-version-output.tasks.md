@@ -64,8 +64,8 @@
 
 Recommended implementation sequence:
 
-1. **Slice 1** — `version` must be registered before Slice 2 so that the `march help` listing includes `version` and Slice 2's listing assertion passes.
-2. **Slice 2** — Depends on Slice 1; the `march help version` test and the listing assertion both require `version` to already be registered.
+1. [x] **Slice 1** — `version` must be registered before Slice 2 so that the `march help` listing includes `version` and Slice 2's listing assertion passes.
+2. [x] **Slice 2** — Depends on Slice 1; the `march help version` test and the listing assertion both require `version` to already be registered.
 
 ### Cross-Story Dependencies
 

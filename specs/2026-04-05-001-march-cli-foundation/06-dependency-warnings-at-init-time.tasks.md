@@ -31,7 +31,7 @@
 
 Recommended implementation sequence:
 
-1. **Slice 1** — This is the only slice. It is self-contained and builds on existing, already-tested infrastructure in `deps.ts` and `cli.ts`.
+1. [x] **Slice 1** — This is the only slice. It is self-contained and builds on existing, already-tested infrastructure in `deps.ts` and `cli.ts`.
 
 ### Cross-Story Dependencies
 
