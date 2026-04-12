@@ -60,12 +60,14 @@ describe("march CLI", () => {
   function runWithEnv(
     args: string[],
     env: Record<string, string | undefined>,
+    options?: { cwd?: string },
   ): { stdout: string; stderr: string; exitCode: number } {
     const result = spawnSync("node", [CLI_PATH, ...args], {
       encoding: "utf-8",
       timeout: 10000,
       stdio: ["pipe", "pipe", "pipe"],
       env: { ...process.env, ...env },
+      ...(options?.cwd ? { cwd: options.cwd } : {}),
     });
     return {
       stdout: result.stdout ?? "",
@@ -212,58 +214,94 @@ describe("march CLI", () => {
     expect(result.stdout).toContain("spawn");
   });
 
-  // --- spawn command integration tests (AS 4.2) ---
-  // AS 4.2 specifies an unconditional stub: "march spawn prints 'not yet
-  // implemented' and exits 1". The accepted implementation adds a dependency
-  // gate (checkSpawnDependencies) before the stub message. The git-present
-  // branch satisfies AS 4.2 directly — it prints the "not yet implemented"
-  // message and exits 1. The git-missing branch surfaces a prerequisite error
-  // instead, giving users actionable feedback before they reach the stub.
+  // --- spawn dispatch dependency validation (Story 2 acceptance scenarios) ---
 
-  it("march spawn with git missing exits 1, stderr mentions git, no stub message on stdout", () => {
-    const fakeBin = makeFakeBin(); // which only, no git
-    const nodeBinDir = path.dirname(process.execPath);
-    const result = runWithEnv(["spawn"], {
-      PATH: [nodeBinDir, fakeBin].join(path.delimiter),
-    });
-    expect(result.exitCode).toBe(1);
-    expect(result.stderr).toContain("git");
-    expect(result.stdout).not.toContain("not yet implemented");
-  });
-
-  it("march spawn with git present exits 1 with stub message on stdout", () => {
-    const fakeBin = makeFakeBin(["git"]);
-    const nodeBinDir = path.dirname(process.execPath);
-    const result = runWithEnv(["spawn"], {
-      PATH: [nodeBinDir, fakeBin].join(path.delimiter),
-    });
-    expect(result.exitCode).toBe(1);
-    expect(result.stdout).toContain(
-      "march spawn is not yet implemented",
-    );
-    expect(result.stderr).not.toContain("git");
-  });
-
-  it("march spawn dispatch with git present behaves same as bare spawn", () => {
-    const fakeBin = makeFakeBin(["git"]);
+  it("spawn dispatch: git missing — exit 1, stderr contains 'git not found', no Docker error", () => {
+    const fakeBin = makeFakeBin(); // which only, no git or docker
     const nodeBinDir = path.dirname(process.execPath);
     const result = runWithEnv(["spawn", "dispatch"], {
       PATH: [nodeBinDir, fakeBin].join(path.delimiter),
     });
     expect(result.exitCode).toBe(1);
-    expect(result.stdout).toContain(
-      "march spawn is not yet implemented",
-    );
+    expect(result.stderr).toContain("git not found");
+    expect(result.stderr).not.toContain("Docker");
   });
 
-  it("march spawn dispatch with git missing behaves same as bare spawn", () => {
-    const fakeBin = makeFakeBin(); // which only, no git
+  it("spawn dispatch: docker missing — exit 1, stderr contains 'Docker not found'", () => {
+    const fakeBin = makeFakeBin(["git"]); // git only, no docker
     const nodeBinDir = path.dirname(process.execPath);
     const result = runWithEnv(["spawn", "dispatch"], {
       PATH: [nodeBinDir, fakeBin].join(path.delimiter),
     });
     expect(result.exitCode).toBe(1);
-    expect(result.stderr).toContain("git");
-    expect(result.stdout).not.toContain("not yet implemented");
+    expect(result.stderr).toContain("Docker not found");
+  });
+
+  it("spawn dispatch: not in a git repo — exit 1, stderr contains 'Not inside a git repository'", () => {
+    // Smart git stub: fails on `rev-parse` (simulates being outside a repo),
+    // succeeds for other git commands so isOnPath("git") passes.
+    const tmpDir = makeTmpDir();
+    const binDir = path.join(tmpDir, "bin");
+    fs.mkdirSync(binDir);
+    fs.symlinkSync(FINDER_PATH, path.join(binDir, path.basename(FINDER_PATH)));
+    const gitStub = path.join(binDir, "git");
+    fs.writeFileSync(
+      gitStub,
+      '#!/bin/sh\nif [ "$1" = "rev-parse" ]; then\n  exit 128\nfi\nexit 0\n',
+    );
+    fs.chmodSync(gitStub, 0o755);
+    const dockerStub = path.join(binDir, "docker");
+    fs.writeFileSync(dockerStub, "#!/bin/sh\nexit 0\n");
+    fs.chmodSync(dockerStub, 0o755);
+
+    const nodeBinDir = path.dirname(process.execPath);
+    // Create a temp dir outside any git repo.
+    const nonRepoDir = makeTmpDir();
+    const result = runWithEnv(
+      ["spawn", "dispatch"],
+      { PATH: [nodeBinDir, binDir].join(path.delimiter) },
+      { cwd: nonRepoDir },
+    );
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("Not inside a git repository");
+  });
+
+  it("spawn dispatch: base image unavailable — exit 1, stderr identifies the image name", () => {
+    // Docker stub that fails on `image inspect` and `pull` subcommands.
+    const fakeBin = makeTmpDir();
+    const binDir = path.join(fakeBin, "bin");
+    fs.mkdirSync(binDir);
+    fs.symlinkSync(FINDER_PATH, path.join(binDir, path.basename(FINDER_PATH)));
+    // Simple git stub.
+    const gitStub = path.join(binDir, "git");
+    fs.writeFileSync(gitStub, "#!/bin/sh\nexit 0\n");
+    fs.chmodSync(gitStub, 0o755);
+    // Smart docker stub: fails on `image` and `pull`, succeeds otherwise.
+    const dockerStub = path.join(binDir, "docker");
+    fs.writeFileSync(
+      dockerStub,
+      '#!/bin/sh\nif [ "$1" = "image" ] || [ "$1" = "pull" ]; then\n  exit 1\nfi\nexit 0\n',
+    );
+    fs.chmodSync(dockerStub, 0o755);
+
+    const nodeBinDir = path.dirname(process.execPath);
+    const result = runWithEnv(["spawn", "dispatch"], {
+      PATH: [nodeBinDir, binDir].join(path.delimiter),
+    });
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("march-base:latest");
+  });
+
+  it("spawn dispatch: all dependencies present — no dependency error on stderr", () => {
+    // Docker stub that succeeds for everything (including image inspect).
+    const fakeBin = makeFakeBin(["git", "docker"]);
+    const nodeBinDir = path.dirname(process.execPath);
+    const result = runWithEnv(["spawn", "dispatch"], {
+      PATH: [nodeBinDir, fakeBin].join(path.delimiter),
+    });
+    // Dispatch proceeds past validation — no dependency error on stderr.
+    expect(result.stderr).not.toContain("not found");
+    expect(result.stderr).not.toContain("Not inside a git repository");
+    expect(result.stderr).not.toContain("march-base:latest");
   });
 });

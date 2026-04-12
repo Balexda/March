@@ -8,6 +8,13 @@ import { updateMarch, UpdateError } from "./update.js";
 import { CLI_VERSION } from "./version.js";
 
 /**
+ * Tagged base container image with the backend CLI pre-installed.
+ * Used by the dispatch action to validate image availability via
+ * checkSpawnDependencies(). Eventually derived from SpawnBackend.baseImage.
+ */
+const BASE_IMAGE = "march-base:latest";
+
+/**
  * Prompts the user for a yes/no confirmation on the given question.
  * Returns true if the user confirms (answers 'y' or 'yes'), false otherwise.
  */
@@ -171,7 +178,7 @@ program
     // error gives users without git a more actionable message than the generic
     // "not yet implemented" stub would. contracts.md omits this guard because
     // it describes the logical contract, not this implementation detail.
-    const result = checkSpawnDependencies("march-base:latest");
+    const result = checkSpawnDependencies(BASE_IMAGE);
     if (!result.ok) {
       process.stderr.write(result.error + "\n");
       process.exitCode = ERROR;
