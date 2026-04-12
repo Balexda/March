@@ -170,14 +170,13 @@ program
 
 program
   .command("spawn [subcommand]")
-  .description("Spawn a new environment (not yet implemented)")
+  .description("Spawn a new environment")
   .allowUnknownOption()
   .action(() => {
     commandHandled = true;
-    // Intentional: spawn requires git even at the stub stage. The dependency
-    // error gives users without git a more actionable message than the generic
-    // "not yet implemented" stub would. contracts.md omits this guard because
-    // it describes the logical contract, not this implementation detail.
+    // Dependency validation runs before dispatching. All four hard preconditions
+    // (git on PATH, docker on PATH, cwd inside a git repo, base image accessible)
+    // are checked here per FR-003 and FR-004.
     const result = checkSpawnDependencies(BASE_IMAGE);
     if (!result.ok) {
       process.stderr.write(result.error + "\n");
