@@ -8,6 +8,13 @@ import { updateMarch, UpdateError } from "./update.js";
 import { CLI_VERSION } from "./version.js";
 
 /**
+ * Tagged base container image with the backend CLI pre-installed.
+ * Used by the dispatch action to validate image availability via
+ * checkSpawnDependencies(). Eventually derived from SpawnBackend.baseImage.
+ */
+const BASE_IMAGE = "march-base:latest";
+
+/**
  * Prompts the user for a yes/no confirmation on the given question.
  * Returns true if the user confirms (answers 'y' or 'yes'), false otherwise.
  */
@@ -163,19 +170,22 @@ program
 
 program
   .command("spawn [subcommand]")
-  .description("Spawn a new environment (not yet implemented)")
+  .description("Spawn a new environment")
   .allowUnknownOption()
-  .action(() => {
+  .action((subcommand?: string) => {
     commandHandled = true;
-    // Intentional: spawn requires git even at the stub stage. The dependency
-    // error gives users without git a more actionable message than the generic
-    // "not yet implemented" stub would. contracts.md omits this guard because
-    // it describes the logical contract, not this implementation detail.
-    const result = checkSpawnDependencies();
-    if (!result.ok) {
-      process.stderr.write(result.error + "\n");
-      process.exitCode = ERROR;
-      return;
+    // Dispatch-only validation: only `march spawn dispatch` runs the full
+    // dependency check (PATH search utility + git on PATH + docker on PATH +
+    // cwd inside a git repo + base image accessible, per FR-003 and FR-004).
+    // Bare `march spawn` and other subcommands skip the check so unrelated
+    // spawn paths aren't forced through docker/repo/base-image validation.
+    if (subcommand === "dispatch") {
+      const result = checkSpawnDependencies(BASE_IMAGE);
+      if (!result.ok) {
+        process.stderr.write(result.error + "\n");
+        process.exitCode = ERROR;
+        return;
+      }
     }
     console.log(
       "march spawn is not yet implemented. It will be available after Feature 2: Spawn Dispatch.",
