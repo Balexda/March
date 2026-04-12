@@ -29,7 +29,7 @@
 
 Recommended implementation sequence:
 
-1. **Slice 1** — self-contained; only `skills.test.ts` changes.
+1. [x] **Slice 1** — self-contained; only `skills.test.ts` changes.
 
 ### Cross-Story Dependencies
 

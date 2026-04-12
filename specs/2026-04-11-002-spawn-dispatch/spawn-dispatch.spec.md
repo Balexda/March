@@ -167,6 +167,18 @@ As an operator, I want `march spawn dispatch` to wait for the container to finis
 - Prompt file does not exist or is not readable — fail with a clear error before any git or Docker operations.
 - Container exits before the backend CLI starts (e.g., entrypoint failure) — report the container exit code and include container logs in the error output.
 
+## Story Dependency Order
+
+Recommended implementation sequence:
+
+- [x] **User Story 1: Spawn Dispatch CLI Surface** — No dependencies beyond Feature 1; establishes the subcommand group that all other stories plug into → `specs/2026-04-11-002-spawn-dispatch/01-spawn-dispatch-cli-surface.tasks.md`
+- [ ] **User Story 2: Dependency Validation at Dispatch Time** — Depends on Story 1 for the dispatch action; adds full dependency checks (git, docker, base image, repo context)
+- [ ] **User Story 3: Create Isolated Worktree and Branch per Spawn** — Depends on Story 2 for validated repo context; creates the worktree that Story 4 snapshots
+- [ ] **User Story 4: Snapshot Worktree into Docker Image** — Depends on Story 3 for worktree; builds the Docker image that Story 5 launches
+- [ ] **User Story 5: Launch Container with Hardcoded Security Configuration** — Depends on Story 4 for Docker image; starts the container that Story 6 hands off to
+- [ ] **User Story 6: Finalize Prompt and Hand Off to Backend** — Depends on Stories 1 and 5; implements prompt reading and passes it to the running container
+- [ ] **User Story 7: Container Lifecycle: Wait for Exit** — Depends on Story 5 for container launch; monitors the container and collects exit status
+
 ## Requirements
 
 ### Functional Requirements

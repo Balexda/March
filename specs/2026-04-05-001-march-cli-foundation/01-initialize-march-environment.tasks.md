@@ -106,10 +106,10 @@
 
 Recommended implementation sequence:
 
-1. **Slice 1** — must come first; establishes the project and entry point that all other slices build on.
-2. **Slice 2** — depends on Slice 1 dispatch; delivers manifest creation which Slice 3 depends on.
-3. **Slice 3** — depends on Slice 2 manifest; deploys skills and populates the manifest's files mapping.
-4. **Slice 4** — depends on Slices 2-3 for the full init flow; adds warnings and comprehensive e2e tests.
+1. [x] **Slice 1** — must come first; establishes the project and entry point that all other slices build on.
+2. [x] **Slice 2** — depends on Slice 1 dispatch; delivers manifest creation which Slice 3 depends on.
+3. [x] **Slice 3** — depends on Slice 2 manifest; deploys skills and populates the manifest's files mapping.
+4. [x] **Slice 4** — depends on Slices 2-3 for the full init flow; adds warnings and comprehensive e2e tests.
 
 ### Cross-Story Dependencies
 

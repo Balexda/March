@@ -31,7 +31,7 @@
 
 Recommended implementation sequence:
 
-1. **Slice 1** — This is the only slice. It depends on the already-merged init infrastructure (`src/manifest.ts`, `src/skills.ts`, `src/init.ts`, `src/cli.ts`, `src/version.ts`, `src/exit-codes.ts`).
+1. [x] **Slice 1** — This is the only slice. It depends on the already-merged init infrastructure (`src/manifest.ts`, `src/skills.ts`, `src/init.ts`, `src/cli.ts`, `src/version.ts`, `src/exit-codes.ts`).
 
 ### Cross-Story Dependencies
 
