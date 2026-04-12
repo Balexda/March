@@ -1,0 +1,54 @@
+name: Smithy self-upgrade
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  upgrade:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: 'npm'
+
+      - name: Install latest Smithy CLI
+        run: npm install -g @balexda/smithy@latest
+
+      - name: Show installed version
+        run: smithy --version
+
+      - name: Run smithy update
+        run: smithy update -y
+
+      - name: Create pull request
+        uses: peter-evans/create-pull-request@v7
+        with:
+          branch: smithy/auto-upgrade
+          delete-branch: true
+          commit-message: "chore: upgrade Smithy templates"
+          title: "chore: upgrade Smithy templates to latest"
+          body: |
+            Automated upgrade run by `.github/workflows/smithy-upgrade.yml`.
+
+            - Installed `@balexda/smithy@latest` globally
+            - Ran `smithy update -y` against the repo manifest
+
+            Review the diff in `.claude/` and `.smithy/smithy-manifest.json`
+            before merging.
+
+            > Note: this workflow requires *Settings → Actions → General →
+            > Workflow permissions → "Allow GitHub Actions to create and
+            > approve pull requests"* to be enabled.
+          labels: |
+            smithy-upgrade
+            automated
