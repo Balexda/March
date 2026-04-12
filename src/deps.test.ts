@@ -136,8 +136,14 @@ describe("checkSpawnDependencies", () => {
   /**
    * Creates a temporary directory containing a symlink to `which` and optional
    * stub executables. Callers must clean up via the returned path.
+   *
+   * When `stubScripts` is provided, it maps executable names to custom shell
+   * script bodies (overriding the default `exit 0` stub).
    */
-  function makeFakeBin(stubs: string[] = []): string {
+  function makeFakeBin(
+    stubs: string[] = [],
+    stubScripts: Record<string, string> = {},
+  ): string {
     const fakeBin = path.join(
       fs.mkdtempSync(path.join(os.tmpdir(), "march-deps-test-")),
       "bin",
@@ -147,19 +153,24 @@ describe("checkSpawnDependencies", () => {
     fs.symlinkSync(FINDER_PATH, path.join(fakeBin, path.basename(FINDER_PATH)));
     for (const name of stubs) {
       const stub = path.join(fakeBin, name);
-      fs.writeFileSync(stub, "#!/bin/sh\nexit 0\n");
+      const script = stubScripts[name] ?? "#!/bin/sh\nexit 0\n";
+      fs.writeFileSync(stub, script);
       fs.chmodSync(stub, 0o755);
     }
     return fakeBin;
   }
 
-  it("returns ok:true when finder is available and git is on PATH", () => {
+  const TEST_BASE_IMAGE = "march-base:latest";
+
+  it("returns ok:true when all dependencies are present and inside a git repo", () => {
     const originalPath = process.env.PATH;
-    const fakeBin = makeFakeBin(["git"]);
+    const fakeBin = makeFakeBin(["git", "docker"]);
     const nodeBinDir = path.dirname(process.execPath);
     try {
       process.env.PATH = [nodeBinDir, fakeBin].join(path.delimiter);
-      const result = checkSpawnDependencies();
+      // The test runs inside the March repo, so repo-context check passes.
+      // The docker stub exits 0 for all subcommands (including image inspect).
+      const result = checkSpawnDependencies(TEST_BASE_IMAGE);
       expect(result.ok).toBe(true);
     } finally {
       process.env.PATH = originalPath;
@@ -167,16 +178,18 @@ describe("checkSpawnDependencies", () => {
     }
   });
 
-  it("returns ok:false with error mentioning 'git' when git is not on PATH", () => {
+  it("returns ok:false with spec-exact git error when git is not on PATH", () => {
     const originalPath = process.env.PATH;
     const fakeBin = makeFakeBin(); // no git stub
     const nodeBinDir = path.dirname(process.execPath);
     try {
       process.env.PATH = [nodeBinDir, fakeBin].join(path.delimiter);
-      const result = checkSpawnDependencies();
+      const result = checkSpawnDependencies(TEST_BASE_IMAGE);
       expect(result.ok).toBe(false);
       if (!result.ok) {
-        expect(result.error).toContain("git");
+        expect(result.error).toBe(
+          "git not found \u2014 required for spawn operations",
+        );
       }
     } finally {
       process.env.PATH = originalPath;
@@ -188,13 +201,84 @@ describe("checkSpawnDependencies", () => {
     const originalPath = process.env.PATH;
     try {
       process.env.PATH = "";
-      const result = checkSpawnDependencies();
+      const result = checkSpawnDependencies(TEST_BASE_IMAGE);
       expect(result.ok).toBe(false);
       if (!result.ok) {
         expect(result.error).toContain("path-search utility");
       }
     } finally {
       process.env.PATH = originalPath;
+    }
+  });
+
+  it("returns ok:false with error containing 'Docker' when docker is not on PATH", () => {
+    const originalPath = process.env.PATH;
+    const fakeBin = makeFakeBin(["git"]); // git only, no docker
+    const nodeBinDir = path.dirname(process.execPath);
+    try {
+      process.env.PATH = [nodeBinDir, fakeBin].join(path.delimiter);
+      const result = checkSpawnDependencies(TEST_BASE_IMAGE);
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error).toContain("Docker");
+        expect(result.error).toBe(
+          "Docker not found \u2014 required for spawn operations",
+        );
+      }
+    } finally {
+      process.env.PATH = originalPath;
+      fs.rmSync(path.dirname(fakeBin), { recursive: true, force: true });
+    }
+  });
+
+  it("returns ok:false with error containing 'git repository' when not in a repo", () => {
+    const originalPath = process.env.PATH;
+    const originalCwd = process.cwd();
+    // Use real git so that `git rev-parse --show-toplevel` actually fails in a
+    // non-repo directory. Stub only docker.
+    const fakeBin = makeFakeBin(["docker"]);
+    const nodeBinDir = path.dirname(process.execPath);
+    // Create a temp dir that is definitely not inside a git repo.
+    const nonRepoDir = fs.mkdtempSync(path.join(os.tmpdir(), "march-no-repo-"));
+    try {
+      // Include the real PATH so that the real git binary is available.
+      process.env.PATH = [
+        nodeBinDir,
+        fakeBin,
+        originalPath ?? "",
+      ].join(path.delimiter);
+      process.chdir(nonRepoDir);
+      const result = checkSpawnDependencies(TEST_BASE_IMAGE);
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error).toContain("git repository");
+      }
+    } finally {
+      process.chdir(originalCwd);
+      process.env.PATH = originalPath;
+      fs.rmSync(path.dirname(fakeBin), { recursive: true, force: true });
+      fs.rmSync(nonRepoDir, { recursive: true, force: true });
+    }
+  });
+
+  it("returns ok:false with error containing the image name when base image is unavailable", () => {
+    const originalPath = process.env.PATH;
+    const fakeBin = makeFakeBin(["git", "docker"], {
+      docker:
+        '#!/bin/sh\nif [ "$1" = "image" ] || [ "$1" = "pull" ]; then\n  exit 1\nfi\nexit 0\n',
+    });
+    const nodeBinDir = path.dirname(process.execPath);
+    try {
+      process.env.PATH = [nodeBinDir, fakeBin].join(path.delimiter);
+      // Run from inside the March repo so repo-context check passes.
+      const result = checkSpawnDependencies(TEST_BASE_IMAGE);
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error).toContain(TEST_BASE_IMAGE);
+      }
+    } finally {
+      process.env.PATH = originalPath;
+      fs.rmSync(path.dirname(fakeBin), { recursive: true, force: true });
     }
   });
 });

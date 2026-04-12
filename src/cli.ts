@@ -171,7 +171,7 @@ program
     // error gives users without git a more actionable message than the generic
     // "not yet implemented" stub would. contracts.md omits this guard because
     // it describes the logical contract, not this implementation detail.
-    const result = checkSpawnDependencies();
+    const result = checkSpawnDependencies("march-base:latest");
     if (!result.ok) {
       process.stderr.write(result.error + "\n");
       process.exitCode = ERROR;

@@ -108,17 +108,25 @@ export type DependencyCheckResult =
   | { readonly ok: false; readonly error: string };
 
 /**
- * Checks whether git — the hard dependency for all spawn operations — is
- * available on PATH. Returns a structured result so the caller can decide
- * how to present the outcome (stderr message, exit code, etc.).
+ * Checks whether all hard dependencies for spawn operations are available.
+ * Validates in order: finder availability, git on PATH, docker on PATH,
+ * git repository context, and base container image accessibility.
+ *
+ * Returns a structured result so the caller can decide how to present the
+ * outcome (stderr message, exit code, etc.).
  *
  * **Fail-safe behavior**: if `isFinderAvailable()` returns false we cannot
- * reliably determine whether git is present. Rather than silently assuming
- * it is (which would lead to a cryptic `execFileSync` failure later), we
- * report a blocking error. This differs from the init-time path, which
- * emits a soft warning, because spawn actually requires git to function.
+ * reliably determine whether git/docker are present. Rather than silently
+ * assuming they are (which would lead to a cryptic `execFileSync` failure
+ * later), we report a blocking error. This differs from the init-time path,
+ * which emits a soft warning, because spawn actually requires these tools
+ * to function.
+ *
+ * @param baseImage - The tagged base container image to verify is accessible.
  */
-export function checkSpawnDependencies(): DependencyCheckResult {
+export function checkSpawnDependencies(
+  baseImage: string,
+): DependencyCheckResult {
   if (!isFinderAvailable()) {
     return {
       ok: false,
@@ -130,8 +138,43 @@ export function checkSpawnDependencies(): DependencyCheckResult {
   if (!isOnPath("git")) {
     return {
       ok: false,
-      error: "git not found on PATH — required for spawn operations.",
+      error: "git not found \u2014 required for spawn operations",
     };
+  }
+
+  if (!isOnPath("docker")) {
+    return {
+      ok: false,
+      error: "Docker not found \u2014 required for spawn operations",
+    };
+  }
+
+  // Check that we are inside a git repository.
+  try {
+    execFileSync("git", ["rev-parse", "--show-toplevel"], { stdio: "ignore" });
+  } catch {
+    return {
+      ok: false,
+      error:
+        "Not inside a git repository \u2014 march spawn must be run from within a git repo.",
+    };
+  }
+
+  // Check that the base container image is accessible (locally or pullable).
+  try {
+    execFileSync("docker", ["image", "inspect", baseImage], {
+      stdio: "ignore",
+    });
+  } catch {
+    // Image not available locally — try pulling it.
+    try {
+      execFileSync("docker", ["pull", baseImage], { stdio: "ignore" });
+    } catch {
+      return {
+        ok: false,
+        error: `Base container image "${baseImage}" is not available locally and could not be pulled.`,
+      };
+    }
   }
 
   return { ok: true };
