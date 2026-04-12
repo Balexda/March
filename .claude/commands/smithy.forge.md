@@ -206,61 +206,15 @@ for reviewers to see which slice was completed and what comes next.
 
 ## Story Completion Cascade
 
-For `.tasks.md` mode only. After marking the slice complete, check whether
-**all** slices in the `## Dependency Order` section are now `[x]`. If any
-slices remain `[ ]`, skip this section entirely.
+Forge does **not** update the `## Story Dependency Order` or
+`## Feature Dependency Order` sections. Those single checkboxes track
+*artifact creation* (tasks file, spec folder) and are flipped by
+`smithy.cut` and `smithy.mark` respectively. Implementation progress lives in
+the per-slice checkboxes inside each `.tasks.md` and is the single source of
+truth for "done".
 
-If ALL slices are complete, cascade completion upward through the artifact
-hierarchy:
-
-### Step 1: Update the source spec
-
-Read the source spec file (from the tasks file header `**Source**` field). Find
-this story's entry in the `## Story Dependency Order` section by matching
-`User Story <N>` in the bold text. The `<N>` comes from the tasks file header
-`**Story Number**` field — **strip any leading zeros** before matching (e.g.,
-`03` → `3`) since spec entries use unpadded numbers (`User Story 3`, not
-`User Story 03`).
-
-Only update entries whose first checkbox is already `[x]` — i.e., change
-`[x][ ]` → `[x][x]`. Do NOT update `[ ][ ]` entries (that would produce the
-invalid state `[ ][x]`):
-
-```
-- [x][x] **User Story N: <Title>** — <rationale> → `<tasks-file-path>`
-```
-
-If the entry is already `[x][x]`, skip. If the entry is `[ ][ ]` (first
-checkbox not set), skip with a warning — the spec write-back from cut may not
-have run. If the `## Story Dependency Order` section does not exist (legacy
-spec), skip silently.
-
-Commit the change: `mark story <N> complete in story dependency order`
-
-### Step 2: Check for feature completion
-
-After updating the spec, check whether **all** stories in the spec's
-`## Story Dependency Order` section are now `[x][x]`. If any stories are not
-fully complete (`[ ][ ]` or `[x][ ]`), skip this step.
-
-If ALL stories are `[x][x]`:
-
-1. Check the spec header for a `**Source Feature Map**` field.
-2. If the field is absent (spec was not created from a feature map), skip
-   silently.
-3. If present, read the feature map file at that path.
-4. Find this feature's entry in the `## Feature Dependency Order` section by
-   matching the spec folder path after `→` in the entry text.
-5. Only update entries whose first checkbox is already `[x]` — change
-   `[x][ ]` → `[x][x]`. Do NOT update `[ ][ ]` entries:
-   ```
-   - [x][x] **Feature N: <Title>** — <rationale> → `<spec-folder-path>/`
-   ```
-6. If the entry is already `[x][x]`, skip. If the entry is `[ ][ ]`, skip
-   with a warning. If the `## Feature Dependency Order` section does not exist
-   (legacy feature map), skip silently.
-
-Commit the change: `mark feature complete in feature dependency order`
+After marking a slice complete, forge's bookkeeping ends at the tasks file.
+No cascade into the spec or feature map is required.
 
 ---
 

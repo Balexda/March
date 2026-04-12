@@ -448,20 +448,20 @@ the zero-padded user story number).
 
 **Spec write-back**: After writing the tasks file, update the source `.spec.md`
 to reflect that this story has been cut. Find the `## Story Dependency Order`
-section in the spec file and change the first checkbox for the current user
-story from `[ ]` to `[x]` (i.e., `[ ][ ]` → `[x][ ]`), appending the
-repo-relative tasks file path:
+section in the spec file and flip the current user story's checkbox from
+`[ ]` to `[x]`, appending the repo-relative tasks file path:
 
 ```markdown
-- [x][ ] **User Story 3: <Title>** — <rationale> → `specs/<folder>/03-story-slug.tasks.md`
+- [x] **User Story 3 Tasks: <Title>** — <rationale> → `specs/<folder>/03-story-slug.tasks.md`
 ```
 
 If the `## Story Dependency Order` section does not exist in the spec (e.g.,
 older specs created before this section was introduced), skip the write-back
 silently — do not add the section or fail. Match the story by its number
 (`User Story <N>`) in the bold text. Update only the matching entry — do not
-modify other entries or the second checkbox. If the first checkbox is already
-`[x]` (entry is `[x][ ]` or `[x][x]`), skip — the operation is idempotent.
+modify other entries or rename rows cut has not touched. If the checkbox is
+already `[x]`, skip — the operation is idempotent. The checkbox tracks
+tasks-file creation, not implementation completeness.
 
 Then present a summary to the user:
 
@@ -507,9 +507,9 @@ ask again.
   for in-progress work from other stories.
 - **DO** note cross-story dependencies in the Dependency Order section (as
   "Cross-Story Dependencies") without pulling that work into your slices.
-- **DO** update the spec file's Story Dependency Order first checkbox
-  (`[ ][ ]` → `[x][ ]`) when writing the tasks file. Do not modify the second
-  checkbox. If the section is missing, skip silently.
+- **DO** update the spec file's Story Dependency Order checkbox from `[ ]` to
+  `[x]` when writing the tasks file. The checkbox tracks tasks-file creation,
+  not implementation completeness. If the section is missing, skip silently.
 - **DO** use the structured task format (bold title + behavioral description +
   acceptance criteria bullets). See "Guidelines for task authoring" above.
 - **DO** reference acceptance scenarios by ID (e.g., "AS 2.1") rather than
@@ -529,7 +529,7 @@ ask again.
 1. **Audit findings and refinements** (if repeating the command on existing tasks).
 2. Created/updated files:
    - `specs/<folder>/<NN>-<story-slug>.tasks.md`
-   - `specs/<date>-<NNN>-<slug>/<slug>.spec.md` *(Story Dependency Order first checkbox updated)*
+   - `specs/<date>-<NNN>-<slug>/<slug>.spec.md` *(Story Dependency Order checkbox flipped to `[x]`)*
 3. Summary report containing:
    - Slice count with titles.
    - FR and acceptance scenario coverage.

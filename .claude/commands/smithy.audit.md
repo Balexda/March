@@ -97,7 +97,7 @@ Use the checklist matching the artifact's extension. Each checklist defines what
 | **Gaps** | Are there milestone goals or success criteria that no feature addresses? |
 | **Overlap** | Are there features with unclear or overlapping boundaries? |
 | **Dependency Clarity** | Are inter-feature dependencies within the milestone evident, or are they hidden? |
-| **Feature Dependency Order** | If the feature map contains a `## Feature Dependency Order` section: does it list every feature with dual checkboxes (`[ ][ ]`, `[x][ ]`, or `[x][x]`)? Is the sequence logically justified? Do `[x][ ]`/`[x][x]` entries match features with spec folders? Do `[x][x]` entries match features whose specs have all stories complete? If absent (legacy feature map), treat as N/A. |
+| **Feature Dependency Order** | If the feature map contains a `## Feature Dependency Order` section: does it list every feature with a single `[ ]`/`[x]` checkbox and a `**Feature N Spec: <Title>**` row title? Is the sequence logically justified? Do `[x]` entries match features that have spec folders? If absent (legacy feature map), treat as N/A. |
 | **RFC Alignment** | Does the feature map align with the RFC's stated goals and success criteria for this milestone? |
 ## Audit Checklist (.spec.md)
 
@@ -112,7 +112,7 @@ Use the checklist matching the artifact's extension. Each checklist defines what
 | **Contract Completeness** | Do all integration boundaries have defined inputs, outputs, and error conditions? Are there contracts implied by requirements but not documented? |
 | **Ambiguity & Risk** | Are there vague terms, unstated assumptions, or scope boundaries that could be interpreted multiple ways? |
 | **Staleness** | Does the spec still reflect the current codebase reality? Have upstream changes invalidated any assumptions? |
-| **Story Dependency Order** | If the spec contains a `## Story Dependency Order` section: does it list every user story with dual checkboxes (`[ ][ ]`, `[x][ ]`, or `[x][x]`)? Is the recommended sequence logically justified? Do first-checked entries (`[x][ ]` or `[x][x]`) match stories with `.tasks.md` files in the spec folder? Do fully-checked entries (`[x][x]`) match stories whose tasks files have all slices complete? If the section is absent (legacy specs predating this convention), treat as N/A — do not flag. |
+| **Story Dependency Order** | If the spec contains a `## Story Dependency Order` section: does it list every user story with a single `[ ]`/`[x]` checkbox and a `**User Story N Tasks: <Title>**` row title? Is the recommended sequence logically justified? Do `[x]` entries match user stories that have `.tasks.md` files in the spec folder? If the section is absent (legacy specs predating this convention), treat as N/A — do not flag. |
 ## Audit Checklist (.tasks.md)
 
 | Category | What to check |

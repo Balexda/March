@@ -34,14 +34,16 @@ Before starting, determine the mode:
       `## Feature Dependency Order` section in the `.features.md` (locate by
       heading name, not by position — it may appear before
       `## Cross-Milestone Dependencies` or at the end of the file).
-      Each entry uses dual checkboxes: `- [ ][ ]` (unspecced),
-      `- [x][ ]` (spec created), or `- [x][x]` (fully implemented). A feature
-      is "specc'd" when its first checkbox is `[x]` (matches `[x][ ]` or
-      `[x][x]`). A feature is unspecced when its first checkbox is `[ ]`
-      (matches `[ ][ ]`). If the section does not exist yet, create it now
-      with all features as `- [ ][ ]`, ordered by dependency graph with
-      rationale, write it to the file, and treat every feature as unspecced.
-      (Mark updates the first checkbox after creating a spec — see Phase 6.)
+      Each entry uses a single GFM task-list checkbox and an artifact-qualified
+      row title of the form `- [ ] **Feature N Spec: <Title>** — <rationale>`.
+      The checkbox tracks whether the spec folder for that feature exists:
+      `[ ]` means the spec has not been created yet, `[x]` means it has.
+      A feature is "specc'd" when its checkbox is `[x]`; unspecced when `[ ]`.
+      If the section does not exist yet, create it now with all features as
+      `- [ ] **Feature N Spec: <Title>** — <rationale>`, ordered by dependency
+      graph, write it to the file, and treat every feature as unspecced.
+      (Mark flips the checkbox from `[ ]` to `[x]` after creating a spec —
+      see Phase 6.)
    d. **With feature number**: If the number is out of range, list available
       features with their numbers and titles, then stop. If the feature is
       already specc'd (per step c), extract the spec folder path from its
@@ -283,9 +285,9 @@ As a <persona>, I want <goal> so that <benefit>.
 
 Recommended implementation sequence:
 
-- [ ][ ] **User Story 1: <Title>** — <dependency rationale>
-- [ ][ ] **User Story 2: <Title>** — <dependency rationale>
-- [ ][ ] **User Story N: <Title>** — <dependency rationale>
+- [ ] **User Story 1 Tasks: <Title>** — <dependency rationale>
+- [ ] **User Story 2 Tasks: <Title>** — <dependency rationale>
+- [ ] **User Story N Tasks: <Title>** — <dependency rationale>
 
 ## Requirements *(mandatory)*
 
@@ -335,23 +337,24 @@ Guidelines for the spec:
 - Do NOT include implementation phases, milestones, or task breakdowns.
 - Do NOT include specific file paths, function names, or implementation details.
   (Exception: the `→` links in Story Dependency Order are auto-appended by
-  `smithy.cut` when it updates the first checkbox, and are cross-reference
-  paths, not implementation details.)
+  `smithy.cut` when it flips the checkbox, and are cross-reference paths,
+  not implementation details.)
 - DO trace back to RFC sections when input is an RFC.
 - Populate the `## Specification Debt` section from clarify's returned `debt_items`. Assign sequential SD-NNN identifiers starting at SD-001. Carry the description, source_category, impact, confidence, and status fields directly from clarify's return. Leave Resolution as `—` for all `open` items.
 - The Story Dependency Order section lists all user stories in recommended
-  implementation sequence with `- [ ][ ]` dual checkboxes. Order by dependency
+  implementation sequence with single-checkbox rows of the form
+  `- [ ] **User Story N Tasks: <Title>** — <rationale>`. Order by dependency
   graph, not by priority — stories with no dependencies come first, stories that
   depend on others come after their prerequisites. Stories that can be
   implemented in parallel should be noted as such in their rationale. Each entry
   includes a brief rationale explaining why it is positioned where it is (e.g.,
   "No dependencies", "Depends on Story 1 for the auth module", "Can parallelize
   with Story 2").
-- The dual checkboxes in Story Dependency Order encode two states: the first
-  checkbox is updated from `[ ]` to `[x]` by `smithy.cut` when it creates the
-  tasks file (`[ ][ ]` → `[x][ ]`). The second checkbox is updated from `[ ]`
-  to `[x]` by `smithy.forge` when all slices in the tasks file are complete
-  (`[x][ ]` → `[x][x]`). Do NOT manually check them during spec creation.
+- The checkbox on each Story Dependency Order row tracks whether the story's
+  `.tasks.md` file has been created: `smithy.cut` flips it from `[ ]` to `[x]`
+  when it writes the tasks file. It does NOT represent implementation
+  completeness — per-slice progress lives inside each `.tasks.md`. Do NOT
+  manually check story rows during spec creation.
 
 ---
 
@@ -491,24 +494,24 @@ Create the spec folder and write all three files to disk first.
 `.features.md` to track progress. If a `## Feature Dependency Order` section
 does not exist in the file, create it just before `## Cross-Milestone
 Dependencies` (or at the end of the file if that section is absent) with one
-dual-checkbox
-entry per feature parsed during Routing, ordered by dependency graph with
-rationale. Then update the current feature's first checkbox to `[x]` and
-append the spec folder path:
+single-checkbox entry per feature parsed during Routing, ordered by dependency
+graph with rationale. Then flip the current feature's checkbox from `[ ]` to
+`[x]` and append the spec folder path:
 
 ```markdown
 ## Feature Dependency Order
 
 Recommended specification sequence:
 
-- [x][ ] **Feature 1: Template Deployment** — No dependencies; foundational. → `specs/2026-03-14-001-template-deployment/`
-- [ ][ ] **Feature 2: Permission Management** — Depends on Feature 1 for deployment infrastructure.
-- [ ][ ] **Feature 3: Webhook Support** — Independent; can parallelize with Feature 2.
+- [x] **Feature 1 Spec: Template Deployment** — No dependencies; foundational. → `specs/2026-03-14-001-template-deployment/`
+- [ ] **Feature 2 Spec: Permission Management** — Depends on Feature 1 for deployment infrastructure.
+- [ ] **Feature 3 Spec: Webhook Support** — Independent; can parallelize with Feature 2.
 ```
 
-If the section already exists, update only the current feature's entry: change
-the first checkbox from `[ ]` to `[x]` (i.e., `[ ][ ]` → `[x][ ]`) and
-append the spec folder path after `→`. Do not modify the second checkbox.
+If the section already exists, update only the current feature's entry: flip
+its checkbox from `[ ]` to `[x]` and append the spec folder path after `→`.
+The checkbox tracks whether the spec folder has been created, not whether the
+feature is fully implemented.
 
 Then present a summary to the user:
 
@@ -550,7 +553,7 @@ Use the **smithy-refine** sub-agent. Pass it:
   | **Contract Completeness** | Do all integration boundaries have defined inputs, outputs, and error conditions? Are there contracts implied by requirements but not documented? |
   | **Ambiguity & Risk** | Are there vague terms, unstated assumptions, or scope boundaries that could be interpreted multiple ways? |
   | **Staleness** | Does the spec still reflect the current codebase reality? Have upstream changes invalidated any assumptions? |
-  | **Story Dependency Order** | If the spec contains a `## Story Dependency Order` section: does it list all user stories with dual checkboxes (`[ ][ ]`, `[x][ ]`, or `[x][x]`)? Is the sequence logically justified? Do first-checked entries (`[x][ ]` or `[x][x]`) match stories with `.tasks.md` files? Do fully-checked entries (`[x][x]`) match stories whose tasks files have all slices complete? If absent (legacy spec), treat as N/A. |
+  | **Story Dependency Order** | If the spec contains a `## Story Dependency Order` section: does it list all user stories with a single `[ ]`/`[x]` checkbox and a `**User Story N Tasks: <Title>**` row title? Is the sequence logically justified? Do `[x]` entries match stories with `.tasks.md` files in the spec folder? If absent (legacy spec), treat as N/A. |
 
 - **Target files**: the spec (`.spec.md`), data model (`.data-model.md`), and
   contracts (`.contracts.md`) in the spec folder.
