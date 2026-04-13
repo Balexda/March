@@ -29,9 +29,9 @@
 
 ## Dependency Order
 
-Recommended implementation sequence:
-
-1. [x] **Slice 1** — This is the only slice. It depends on the already-merged init infrastructure (`src/manifest.ts`, `src/skills.ts`, `src/init.ts`, `src/cli.ts`, `src/version.ts`, `src/exit-codes.ts`).
+| ID | Title                  | Depends On | Artifact |
+|----|------------------------|------------|----------|
+| S1 | `march update` Command | —          | —        |
 
 ### Cross-Story Dependencies
 

@@ -141,16 +141,16 @@ As an operator, I want `march init` to check for git and Docker and warn me if t
 - Concurrent `march init` runs — not expected for a solo operator tool; no concurrency guarantees required.
 - Skill files with names that collide with existing SmithyCLI skills in `~/.claude/commands/` — March skills should use a `march.` prefix (e.g., `march.spawn-dispatch.md`) to avoid collisions.
 
-## Story Dependency Order
+## Dependency Order
 
-Recommended implementation sequence:
-
-- [x] **User Story 1: Initialize March Environment** — No dependencies; establishes project skeleton, manifest, and skill deployment that all other stories build on → `specs/2026-04-05-001-march-cli-foundation/01-initialize-march-environment.tasks.md`
-- [x] **User Story 2: Deploy Spawn-Interaction Skills** — Depends on Story 1 for deployment mechanism and skill file slots → `specs/2026-04-05-001-march-cli-foundation/02-deploy-spawn-interaction-skills.tasks.md`
-- [x] **User Story 3: Update March Installation** — Depends on Story 1 for manifest schema and Story 2 for skill format invariants → `specs/2026-04-05-001-march-cli-foundation/03-update-march-installation.tasks.md`
-- [x] **User Story 5: Help and Version Output** — No dependency on Stories 2-3; only needs the CLI entry point from Story 1; can parallelize with Stories 2-3 → `specs/2026-04-05-001-march-cli-foundation/05-help-and-version-output.tasks.md`
-- [x] **User Story 4: CLI Command Structure and Dispatch** — Depends on Stories 1, 3, and 5 for full command registration; validates no-args listing includes all commands → `specs/2026-04-05-001-march-cli-foundation/04-cli-command-structure-and-dispatch.tasks.md`
-- [x] **User Story 6: Dependency Warnings at Init Time** — Depends on Stories 1 and 4; extends deps.ts and spawn command behavior → `specs/2026-04-05-001-march-cli-foundation/06-dependency-warnings-at-init-time.tasks.md`
+| ID  | Title                                | Depends On    | Artifact                                                                                   |
+|-----|--------------------------------------|---------------|--------------------------------------------------------------------------------------------|
+| US1 | Initialize March Environment         | —             | `specs/2026-04-05-001-march-cli-foundation/01-initialize-march-environment.tasks.md`       |
+| US2 | Deploy Spawn-Interaction Skills      | US1           | `specs/2026-04-05-001-march-cli-foundation/02-deploy-spawn-interaction-skills.tasks.md`    |
+| US3 | Update March Installation            | US1, US2      | `specs/2026-04-05-001-march-cli-foundation/03-update-march-installation.tasks.md`          |
+| US4 | CLI Command Structure and Dispatch   | US1, US3, US5 | `specs/2026-04-05-001-march-cli-foundation/04-cli-command-structure-and-dispatch.tasks.md` |
+| US5 | Help and Version Output              | US1           | `specs/2026-04-05-001-march-cli-foundation/05-help-and-version-output.tasks.md`            |
+| US6 | Dependency Warnings at Init Time     | US1, US4      | `specs/2026-04-05-001-march-cli-foundation/06-dependency-warnings-at-init-time.tasks.md`   |
 
 ## Requirements
 

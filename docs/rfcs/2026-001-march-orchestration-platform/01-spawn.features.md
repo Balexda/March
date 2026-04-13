@@ -66,11 +66,22 @@
 - Includes: Patch application to the spawn's worktree/branch, branch push to remote, GitHub PR creation with spawn metadata (prompt summary, backend used, execution stats), CLI output confirming the PR URL
 - Excludes: PR review workflows, merge automation, CI/CD integration, worktree cleanup after merge (M3 Brood)
 
-## Spec Progress
+## Dependency Order
 
-- [x] Feature 1: March CLI Foundation → `specs/2026-04-05-001-march-cli-foundation/`
-- [x] Feature 2: Spawn Dispatch → `specs/2026-04-11-002-spawn-dispatch/`
-- [ ] Feature 3: Multi-Backend Execution Interface
-- [ ] Feature 4: Spawn Sandbox Security
-- [ ] Feature 5: Spawn Output Extraction
-- [ ] Feature 6: PR Integration
+| ID | Title                              | Depends On | Artifact                                     |
+|----|------------------------------------|------------|----------------------------------------------|
+| F1 | March CLI Foundation               | —          | `specs/2026-04-05-001-march-cli-foundation/` |
+| F2 | Spawn Dispatch                     | F1         | `specs/2026-04-11-002-spawn-dispatch/`       |
+| F3 | Multi-Backend Execution Interface  | F2         | —                                            |
+| F4 | Spawn Sandbox Security             | F2         | —                                            |
+| F5 | Spawn Output Extraction            | F2         | —                                            |
+| F6 | PR Integration                     | F5         | —                                            |
+
+## Cross-Milestone Dependencies
+
+Direction must be either `depends on` or `depended upon by`.
+
+| Dependency | Direction | Notes |
+|------------|-----------|-------|
+| Milestone 2: Hatchery | depended upon by | Milestone 2 formalizes the hardcoded container configuration from Features 2 and 4 into declarative, editable profiles. The `SpawnConfig` constant and the security posture established here become the seed for the first Hatchery profile. |
+| Milestone 3: Brood | depended upon by | Milestone 3 owns cleanup of the worktree, branch, and container lifecycle artifacts produced by Feature 2. Milestone 1 leaves stopped containers and worktrees in place for Feature 5 extraction; Brood later manages their disposal. |

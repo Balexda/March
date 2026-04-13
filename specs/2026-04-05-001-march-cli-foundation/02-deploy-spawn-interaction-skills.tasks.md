@@ -27,9 +27,9 @@
 
 ## Dependency Order
 
-Recommended implementation sequence:
-
-1. [x] **Slice 1** — self-contained; only `skills.test.ts` changes.
+| ID | Title                                     | Depends On | Artifact |
+|----|-------------------------------------------|------------|----------|
+| S1 | Verify Claude Code Discoverability Format | —          | —        |
 
 ### Cross-Story Dependencies
 

@@ -104,12 +104,12 @@
 
 ## Dependency Order
 
-Recommended implementation sequence:
-
-1. [x] **Slice 1** — must come first; establishes the project and entry point that all other slices build on.
-2. [x] **Slice 2** — depends on Slice 1 dispatch; delivers manifest creation which Slice 3 depends on.
-3. [x] **Slice 3** — depends on Slice 2 manifest; deploys skills and populates the manifest's files mapping.
-4. [x] **Slice 4** — depends on Slices 2-3 for the full init flow; adds warnings and comprehensive e2e tests.
+| ID | Title                                                 | Depends On | Artifact |
+|----|-------------------------------------------------------|------------|----------|
+| S1 | Project Skeleton and Minimal CLI Entry Point          | —          | —        |
+| S2 | Manifest Creation and Pre-Flight Guards               | S1         | —        |
+| S3 | Skill File Deployment                                 | S2         | —        |
+| S4 | Dependency Warnings and End-to-End Integration Tests  | S2, S3     | —        |
 
 ### Cross-Story Dependencies
 
