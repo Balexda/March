@@ -31,24 +31,29 @@ Before starting, determine the mode:
       feature map — expected `### Feature N: <Title>` headings."
    b. Extract the `**Source RFC**` path from the file header.
    c. Determine which features already have specs by checking the
-      `## Feature Dependency Order` section in the `.features.md` (locate by
+      `## Dependency Order` 4-column table in the `.features.md` (locate by
       heading name, not by position — it may appear before
-      `## Cross-Milestone Dependencies` or at the end of the file).
-      Each entry uses a single GFM task-list checkbox and an artifact-qualified
-      row title of the form `- [ ] **Feature N Spec: <Title>** — <rationale>`.
-      The checkbox tracks whether the spec folder for that feature exists:
-      `[ ]` means the spec has not been created yet, `[x]` means it has.
-      A feature is "specc'd" when its checkbox is `[x]`; unspecced when `[ ]`.
-      If the section does not exist yet, create it now with all features as
-      `- [ ] **Feature N Spec: <Title>** — <rationale>`, ordered by dependency
-      graph, write it to the file, and treat every feature as unspecced.
-      (Mark flips the checkbox from `[ ]` to `[x]` after creating a spec —
-      see Phase 6.)
+      `## Cross-Milestone Dependencies` or at the end of the file). The table
+      has columns `ID | Title | Depends On | Artifact`, with one `F<N>` row
+      per feature. A feature is "specc'd" when its row's `Artifact` cell
+      contains a non-`—` path (the path points to the feature's spec folder).
+      A feature is "unspecced" when its row's `Artifact` cell is `—` or when
+      the row is missing from the table.
+
+      **Backward-compat clause**: If the file contains only the legacy
+      `## Feature Dependency Order` checkbox section and NO `## Dependency Order`
+      table, treat every feature as unspecced and do NOT modify the file during
+      routing. Mark will not migrate or write to legacy files in this phase.
+
+      If neither a `## Dependency Order` table nor a legacy
+      `## Feature Dependency Order` section exists, treat every feature as
+      unspecced. Do NOT create the section during routing — section creation
+      and write-back happen in Phase 6.
    d. **With feature number**: If the number is out of range, list available
       features with their numbers and titles, then stop. If the feature is
       already specc'd (per step c), extract the spec folder path from its
-      checked entry (after the `→`) and go to **Phase 0** (Review Loop) with
-      that spec. Otherwise, go to **Phase 1** targeting that feature.
+      `Artifact` cell and go to **Phase 0** (Review Loop) with that spec.
+      Otherwise, go to **Phase 1** targeting that feature.
    e. **Without feature number**: Auto-select the first `### Feature N` that
       is not yet specc'd (per step c). If **all** features already have specs,
       present a table of features with their spec folder paths and ask the
@@ -281,13 +286,15 @@ As a <persona>, I want <goal> so that <benefit>.
 - <edge case 1>
 - ...
 
-## Story Dependency Order
+## Dependency Order
 
 Recommended implementation sequence:
 
-- [ ] **User Story 1 Tasks: <Title>** — <dependency rationale>
-- [ ] **User Story 2 Tasks: <Title>** — <dependency rationale>
-- [ ] **User Story N Tasks: <Title>** — <dependency rationale>
+| ID | Title | Depends On | Artifact |
+|----|-------|-----------|----------|
+| US1 | <Title> | — | — |
+| US2 | <Title> | — | — |
+| USN | <Title> | — | — |
 
 ## Requirements *(mandatory)*
 
@@ -336,25 +343,16 @@ Guidelines for the spec:
 - Success criteria are measurable and testable.
 - Do NOT include implementation phases, milestones, or task breakdowns.
 - Do NOT include specific file paths, function names, or implementation details.
-  (Exception: the `→` links in Story Dependency Order are auto-appended by
-  `smithy.cut` when it flips the checkbox, and are cross-reference paths,
-  not implementation details.)
 - DO trace back to RFC sections when input is an RFC.
 - Populate the `## Specification Debt` section from clarify's returned `debt_items`. Assign sequential SD-NNN identifiers starting at SD-001. Carry the description, source_category, impact, confidence, and status fields directly from clarify's return. Leave Resolution as `—` for all `open` items.
-- The Story Dependency Order section lists all user stories in recommended
-  implementation sequence with single-checkbox rows of the form
-  `- [ ] **User Story N Tasks: <Title>** — <rationale>`. Order by dependency
-  graph, not by priority — stories with no dependencies come first, stories that
-  depend on others come after their prerequisites. Stories that can be
-  implemented in parallel should be noted as such in their rationale. Each entry
-  includes a brief rationale explaining why it is positioned where it is (e.g.,
-  "No dependencies", "Depends on Story 1 for the auth module", "Can parallelize
-  with Story 2").
-- The checkbox on each Story Dependency Order row tracks whether the story's
-  `.tasks.md` file has been created: `smithy.cut` flips it from `[ ]` to `[x]`
-  when it writes the tasks file. It does NOT represent implementation
-  completeness — per-slice progress lives inside each `.tasks.md`. Do NOT
-  manually check story rows during spec creation.
+- The `## Dependency Order` section lists all user stories in recommended
+  implementation sequence as a 4-column table using `US<N>` IDs (e.g., `US1`,
+  `US2`). Order rows by dependency graph, not by priority — stories with no
+  dependencies come first, stories that depend on others come after their
+  prerequisites. The `Depends On` column contains `—` or a comma-separated list
+  of same-table IDs (e.g., `US1, US3`); no prose justifications. The `Artifact`
+  column starts as `—` and is populated by `smithy.cut` when it creates the
+  tasks file. Do NOT use checkboxes in the `## Dependency Order` section.
 
 ---
 
@@ -491,27 +489,58 @@ Existing contracts remain unchanged.
 Create the spec folder and write all three files to disk first.
 
 **Feature map write-back** (when input was a `.features.md`): Update the
-`.features.md` to track progress. If a `## Feature Dependency Order` section
-does not exist in the file, create it just before `## Cross-Milestone
-Dependencies` (or at the end of the file if that section is absent) with one
-single-checkbox entry per feature parsed during Routing, ordered by dependency
-graph with rationale. Then flip the current feature's checkbox from `[ ]` to
-`[x]` and append the spec folder path:
+`## Dependency Order` 4-column table in the `.features.md` so its `Artifact`
+column points at the newly-created spec folder for the current feature. The
+table is the authoritative link between the feature map and its child specs —
+no checkboxes are flipped and no prose is rewritten.
 
-```markdown
-## Feature Dependency Order
+Write-back procedure:
 
-Recommended specification sequence:
+1. **Locate the `## Dependency Order` table** in the `.features.md` file
+   (locate by heading name, not by position). The table has the columns
+   `ID | Title | Depends On | Artifact`, with one `F<N>` row per feature.
+2. **Find the matching row** whose `ID` cell equals `F<N>` where `<N>` is the
+   current feature number (the one this spec was just created for). Match by
+   the `F<N>` identifier, not by title or row position.
+3. **Update the `Artifact` cell** on that row: replace `—` with the spec
+   folder path (e.g., `specs/2026-03-14-004-webhook-support/`). Do not touch
+   the `ID`, `Title`, or `Depends On` cells. Do not touch any other row.
+4. **Idempotency**: If the matching row's `Artifact` cell already contains
+   the correct spec folder path, skip the write entirely — this is a no-op.
+   Do not append, duplicate, or rewrite the cell.
+5. **Row missing**: If the `## Dependency Order` table exists but contains no
+   row whose `ID` cell equals `F<N>`, append a new row to the end of the
+   table: set `ID` to `F<N>`, `Title` to the feature title from the feature
+   list parsed during Routing, `Depends On` to `—`, and `Artifact` to the
+   spec folder path.
+6. **Table absent**: If the file contains neither a `## Dependency Order`
+   table nor a legacy `## Feature Dependency Order` section, create a new
+   `## Dependency Order` section just before `## Cross-Milestone Dependencies`
+   (or at the end of the file if that section is absent). Seed the table
+   from the feature list parsed during Routing — one `F<N>` row per feature
+   in feature-number order, with `Depends On` set to `—` for every row and
+   `Artifact` set to `—` for every row **except** the current feature's row,
+   which gets the spec folder path. Use this shape:
 
-- [x] **Feature 1 Spec: Template Deployment** — No dependencies; foundational. → `specs/2026-03-14-001-template-deployment/`
-- [ ] **Feature 2 Spec: Permission Management** — Depends on Feature 1 for deployment infrastructure.
-- [ ] **Feature 3 Spec: Webhook Support** — Independent; can parallelize with Feature 2.
-```
+   ```markdown
+   ## Dependency Order
 
-If the section already exists, update only the current feature's entry: flip
-its checkbox from `[ ]` to `[x]` and append the spec folder path after `→`.
-The checkbox tracks whether the spec folder has been created, not whether the
-feature is fully implemented.
+   | ID | Title | Depends On | Artifact |
+   |----|-------|------------|----------|
+   | F1 | Template Deployment | — | specs/2026-03-14-001-template-deployment/ |
+   | F2 | Permission Management | — | — |
+   | F3 | Webhook Support | — | — |
+   ```
+
+7. **Legacy format present**: If the file contains only the legacy
+   `## Feature Dependency Order` checkbox section and NO `## Dependency Order`
+   table, **skip write-back silently**. Do not migrate, rewrite, or annotate
+   the legacy section. Do not flip any checkbox. The spec folder is still
+   created on disk; only the feature map is left untouched. Mention in the
+   summary that the legacy feature map was not updated.
+
+The `Artifact` cell is the single source of truth for "does this feature
+have a spec yet" — it replaces the legacy checkbox signal entirely.
 
 Then present a summary to the user:
 
@@ -553,7 +582,7 @@ Use the **smithy-refine** sub-agent. Pass it:
   | **Contract Completeness** | Do all integration boundaries have defined inputs, outputs, and error conditions? Are there contracts implied by requirements but not documented? |
   | **Ambiguity & Risk** | Are there vague terms, unstated assumptions, or scope boundaries that could be interpreted multiple ways? |
   | **Staleness** | Does the spec still reflect the current codebase reality? Have upstream changes invalidated any assumptions? |
-  | **Story Dependency Order** | If the spec contains a `## Story Dependency Order` section: does it list all user stories with a single `[ ]`/`[x]` checkbox and a `**User Story N Tasks: <Title>**` row title? Is the sequence logically justified? Do `[x]` entries match stories with `.tasks.md` files in the spec folder? If absent (legacy spec), treat as N/A. |
+  | **Dependency Order** | Does the spec contain a `## Dependency Order` 4-column table (`ID \| Title \| Depends On \| Artifact`)? Does it list every user story with a `US<N>` ID (no leading zeros)? Does each `Depends On` cell contain `—` or comma-separated same-table IDs (no prose)? Does each `Artifact` cell contain `—` or a repo-relative path to the corresponding `.tasks.md` file? Are any `- [ ]`/`- [x]` checkboxes present in the section (an error if so)? |
 
 - **Target files**: the spec (`.spec.md`), data model (`.data-model.md`), and
   contracts (`.contracts.md`) in the spec folder.

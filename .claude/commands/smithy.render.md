@@ -298,12 +298,14 @@ this format:
 
 _If no debt items, write: "None — all ambiguities resolved."_
 
-## Feature Dependency Order
+## Dependency Order
 
 Recommended specification sequence:
 
-- [ ] **Feature 1 Spec: <Title>** — <dependency rationale>
-- [ ] **Feature 2 Spec: <Title>** — <dependency rationale>
+| ID | Title | Depends On | Artifact |
+|----|-------|-----------|----------|
+| F1 | <Title> | — | — |
+| F2 | <Title> | — | — |
 
 ## Cross-Milestone Dependencies
 
@@ -351,13 +353,10 @@ again. Once approved, suggest the next step:
   parallel by other agents. Each agent owns exactly one milestone.
 - **DO** note cross-milestone dependencies in the feature map (as
   "Cross-Milestone Dependencies") without pulling that work into your features.
-- **DO** include a `## Feature Dependency Order` section listing every feature
-  with a single-checkbox row of the form
-  `- [ ] **Feature N Spec: <Title>** — <dependency rationale>`. Order features
-  by dependency graph — features with no dependencies come first, dependent
-  features come after their prerequisites. Include rationale for each entry
-  (e.g., "No dependencies; foundational", "Depends on Feature 1 for X", "Can
-  parallelize with Feature 2"). All items start as `[ ]` — `smithy.mark`
-  flips the checkbox to `[x]` and appends the spec folder path when it creates
-  the spec. The checkbox tracks spec-folder creation, not implementation
-  completeness; per-slice progress lives inside each story's `.tasks.md`.
+- **DO** include a `## Dependency Order` section listing every feature as a
+  4-column table with `F<N>` IDs (e.g., `F1`, `F2`). Order rows by dependency
+  graph — features with no dependencies come first, dependent features come
+  after their prerequisites. The `Depends On` column contains `—` or a
+  comma-separated list of same-table IDs. The `Artifact` column starts as `—`
+  and is populated by `smithy.mark` when it creates the spec folder. Do NOT
+  use checkboxes in the `## Dependency Order` section.
