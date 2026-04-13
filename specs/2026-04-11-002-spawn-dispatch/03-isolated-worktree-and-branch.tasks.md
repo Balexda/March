@@ -72,9 +72,11 @@
 
 ## Dependency Order
 
-Recommended implementation sequence:
+| ID | Title                                                         | Depends On | Artifact |
+|----|---------------------------------------------------------------|------------|----------|
+| S1 | Worktree Creation and Initial SpawnRecord Wired into Dispatch | —          | —        |
 
-1. [ ] **Slice 1** — This is the only slice. Task 1 (worktree module) and Task 2 (SpawnRecord module) are independent of each other and may be implemented in either order, but both must land before Task 3 (dispatch wiring), whose integration tests exercise the functions introduced by Tasks 1 and 2. All three tasks belong to the same PR.
+Task 1 (worktree module) and Task 2 (SpawnRecord module) are independent of each other and may be implemented in either order, but both must land before Task 3 (dispatch wiring), whose integration tests exercise the functions introduced by Tasks 1 and 2. All three tasks belong to the same PR.
 
 ### Cross-Story Dependencies
 
