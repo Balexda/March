@@ -62,10 +62,10 @@
 
 ## Dependency Order
 
-Recommended implementation sequence:
-
-1. [x] **Slice 1** — `version` must be registered before Slice 2 so that the `march help` listing includes `version` and Slice 2's listing assertion passes.
-2. [x] **Slice 2** — Depends on Slice 1; the `march help version` test and the listing assertion both require `version` to already be registered.
+| ID | Title                                     | Depends On | Artifact |
+|----|-------------------------------------------|------------|----------|
+| S1 | Version Subcommand                        | —          | —        |
+| S2 | Help Subcommand with Argument Validation  | S1         | —        |
 
 ### Cross-Story Dependencies
 

@@ -38,9 +38,9 @@ None — all ambiguities resolved. Four high-confidence assumptions were identif
 
 ## Dependency Order
 
-Recommended implementation sequence:
-
-1. [x] **Slice 1** — This is the only slice. Task 1 (deps.ts) should be implemented before Task 2 (cli.ts) because Task 2's integration tests exercise the function that Task 1 implements. Both tasks are in the same PR.
+| ID | Title                                                  | Depends On | Artifact |
+|----|--------------------------------------------------------|------------|----------|
+| S1 | Extend Dependency Checks and Wire into Dispatch Action | —          | —        |
 
 ### Cross-Story Dependencies
 
