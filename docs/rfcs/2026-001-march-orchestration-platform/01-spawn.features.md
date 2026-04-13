@@ -66,11 +66,22 @@
 - Includes: Patch application to the spawn's worktree/branch, branch push to remote, GitHub PR creation with spawn metadata (prompt summary, backend used, execution stats), CLI output confirming the PR URL
 - Excludes: PR review workflows, merge automation, CI/CD integration, worktree cleanup after merge (M3 Brood)
 
-## Spec Progress
+## Feature Dependency Order
 
-- [x] Feature 1: March CLI Foundation → `specs/2026-04-05-001-march-cli-foundation/`
-- [x] Feature 2: Spawn Dispatch → `specs/2026-04-11-002-spawn-dispatch/`
-- [ ] Feature 3: Multi-Backend Execution Interface
-- [ ] Feature 4: Spawn Sandbox Security
-- [ ] Feature 5: Spawn Output Extraction
-- [ ] Feature 6: PR Integration
+Recommended specification sequence:
+
+- [x] **Feature 1 Spec: March CLI Foundation** — No dependencies; foundational. Establishes the CLI surface, manifest, and skill deployment mechanism that every other feature plugs into. → `specs/2026-04-05-001-march-cli-foundation/`
+- [x] **Feature 2 Spec: Spawn Dispatch** — Depends on Feature 1 for the CLI command dispatch and `march spawn` namespace. Delivers the end-to-end dispatch pipeline (worktree, snapshot, container launch, prompt handoff) that Features 3–6 extend or consume. → `specs/2026-04-11-002-spawn-dispatch/`
+- [ ] **Feature 3 Spec: Multi-Backend Execution Interface** — Depends on Feature 2 for the single-backend dispatch pipeline it generalizes. Introduces the polymorphic `SpawnBackend` interface and the Gemini implementation alongside the Feature 2 Claude Code path.
+- [ ] **Feature 4 Spec: Spawn Sandbox Security** — Depends on Feature 2 for the container launch surface it hardens. Evaluates and mitigates the Appendix A threat model (network policy, capability drop, env var whitelist, secret exclusion); can parallelize with Feature 3 since it targets container configuration rather than backend selection.
+- [ ] **Feature 5 Spec: Spawn Output Extraction** — Depends on Feature 2 for the stopped container and SpawnRecord it extracts from. Independent of Features 3 and 4; can parallelize with both.
+- [ ] **Feature 6 Spec: PR Integration** — Depends on Feature 5 for the extracted patch payload it applies and pushes. Terminal feature in the Milestone 1 dependency graph.
+
+## Cross-Milestone Dependencies
+
+Direction must be either `depends on` or `depended upon by`.
+
+| Dependency | Direction | Notes |
+|------------|-----------|-------|
+| Milestone 2: Hatchery | depended upon by | Milestone 2 formalizes the hardcoded container configuration from Features 2 and 4 into declarative, editable profiles. The `SpawnConfig` constant and the security posture established here become the seed for the first Hatchery profile. |
+| Milestone 3: Brood | depended upon by | Milestone 3 owns cleanup of the worktree, branch, and container lifecycle artifacts produced by Feature 2. Milestone 1 leaves stopped containers and worktrees in place for Feature 5 extraction; Brood later manages their disposal. |
