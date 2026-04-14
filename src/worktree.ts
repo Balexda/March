@@ -75,16 +75,55 @@ function branchExists(repoRoot: string, branch: string): boolean {
   }
 }
 
-/** Best-effort branch deletion, swallowing errors (used during rollback). */
-function deleteBranch(repoRoot: string, branch: string): void {
+/**
+ * Best-effort branch deletion used during rollback. Returns `true` if
+ * the branch is gone at the end of the call (either deleted or never
+ * existed), `false` if `git branch -D` failed against an existing
+ * branch. Callers surface a stderr warning when this returns `false`
+ * so operators know manual cleanup may be required — FR-021 mandates
+ * no residual artifacts on failure, so a silent swallow would hide a
+ * contract violation.
+ */
+function deleteBranch(repoRoot: string, branch: string): boolean {
+  // If the branch isn't there in the first place, treat it as a
+  // successful (idempotent) removal. This avoids false-positive
+  // warnings when the rollback helper is called twice or when the
+  // branch was never created.
+  if (!branchExists(repoRoot, branch)) return true;
   try {
     execFileSync("git", ["branch", "-D", branch], {
       cwd: repoRoot,
       stdio: "ignore",
     });
+    return true;
   } catch {
-    // best-effort cleanup
+    return false;
   }
+}
+
+/**
+ * Emits a stderr warning when rollback cleanup left residual state.
+ * Operators need this signal because FR-021 mandates no residual
+ * artifacts after a failed dispatch, and silently swallowing cleanup
+ * failures would leave them to discover stale `march/spawn/*` branches
+ * and worktree directories later with no context.
+ */
+function warnIncompleteRollback(
+  spawnId: string,
+  branch: string | undefined,
+  worktreePath: string | undefined,
+): void {
+  const parts: string[] = [];
+  if (branch) {
+    parts.push(`branch "${branch}" may still exist`);
+  }
+  if (worktreePath) {
+    parts.push(`worktree "${worktreePath}" may still exist`);
+  }
+  if (parts.length === 0) return;
+  process.stderr.write(
+    `warning: incomplete rollback for spawn ${spawnId} — ${parts.join("; ")}; manual cleanup may be required.\n`,
+  );
 }
 
 /**
@@ -159,7 +198,9 @@ export function createSpawnWorktree(repoRoot: string): SpawnWorktree {
   try {
     fs.mkdirSync(path.dirname(worktreePath), { recursive: true });
   } catch (err) {
-    deleteBranch(repoRoot, branch);
+    if (!deleteBranch(repoRoot, branch)) {
+      warnIncompleteRollback(spawnId, branch, undefined);
+    }
     throw new WorktreeError(
       `Failed to create worktree parent directory: ${(err as Error).message}`,
     );
@@ -170,7 +211,9 @@ export function createSpawnWorktree(repoRoot: string): SpawnWorktree {
   // proceed. Otherwise `git worktree add` would fail and our rollback
   // would rmSync pre-existing content.
   if (fs.existsSync(worktreePath)) {
-    deleteBranch(repoRoot, branch);
+    if (!deleteBranch(repoRoot, branch)) {
+      warnIncompleteRollback(spawnId, branch, undefined);
+    }
     throw new WorktreeError(
       `Worktree target already exists: "${worktreePath}". Refusing to overwrite.`,
     );
@@ -210,9 +253,10 @@ function isGitLinkedWorktree(dir: string): boolean {
 
 /**
  * Removes a spawn's worktree and branch. Used by the dispatch action to
- * roll back when a later pipeline stage fails. Best-effort: individual
- * cleanup failures are swallowed so callers can continue with a usable
- * error path, but the function does not throw.
+ * roll back when a later pipeline stage fails. Does not throw — cleanup
+ * errors are tracked per artifact, and a single stderr warning is
+ * emitted at the end listing anything that may still exist so operators
+ * know manual cleanup may be required (FR-021).
  *
  * Safety: the filesystem fallback only `rmSync`s the worktree directory
  * if it looks like a git-linked worktree (contains a `.git` file
@@ -227,12 +271,14 @@ export function removeSpawnWorktree(
   // Try `git worktree remove --force` first; fall back to a filesystem
   // rm + `git worktree prune` if git refuses (e.g., because the worktree
   // directory is in a partial state after a hook-failed worktree add).
+  let worktreeRemoved = false;
   try {
     execFileSync(
       "git",
       ["worktree", "remove", "--force", worktree.worktreePath],
       { cwd: repoRoot, stdio: "ignore" },
     );
+    worktreeRemoved = true;
   } catch {
     // Only rmSync the directory if it actually looks like a git worktree.
     // This avoids clobbering unrelated user data that happens to live at
@@ -241,7 +287,7 @@ export function removeSpawnWorktree(
       try {
         fs.rmSync(worktree.worktreePath, { recursive: true, force: true });
       } catch {
-        // ignore
+        // swallowed — state tracked in worktreeRemoved below
       }
     }
     try {
@@ -252,7 +298,18 @@ export function removeSpawnWorktree(
     } catch {
       // ignore
     }
+    // The fallback succeeded if the target path is now gone (or was
+    // never materialized in the first place).
+    worktreeRemoved = !fs.existsSync(worktree.worktreePath);
   }
 
-  deleteBranch(repoRoot, worktree.branch);
+  const branchDeleted = deleteBranch(repoRoot, worktree.branch);
+
+  if (!worktreeRemoved || !branchDeleted) {
+    warnIncompleteRollback(
+      worktree.spawnId,
+      branchDeleted ? undefined : worktree.branch,
+      worktreeRemoved ? undefined : worktree.worktreePath,
+    );
+  }
 }

@@ -246,29 +246,48 @@ describe("worktree", () => {
       expect(() => removeSpawnWorktree(repoRoot, result)).not.toThrow();
     });
 
-    it("fallback rmSync refuses to delete a non-worktree directory", () => {
+    it("fallback rmSync refuses to delete a non-worktree directory and warns", () => {
       // Guard against the rollback wiping pre-existing user data. Build a
       // SpawnWorktree handle that points at an unregistered directory
       // containing important user content, then invoke the rollback
       // helper. `git worktree remove --force` will fail (the path is not
       // a registered worktree), and the fallback path must refuse to
       // rmSync because there is no `.git` file marking the directory as
-      // a linked worktree.
+      // a linked worktree. The helper must also emit a stderr warning
+      // so the operator knows state may be incomplete (FR-021).
       const repoRoot = makeRepo();
       const userDir = path.join(path.dirname(repoRoot), "unrelated");
       fs.mkdirSync(userDir);
       fs.writeFileSync(path.join(userDir, "precious.txt"), "do not delete");
 
-      removeSpawnWorktree(repoRoot, {
-        spawnId: "20990101-deadbe",
-        branch: "march/spawn/20990101-deadbe",
-        worktreePath: userDir,
-      });
+      // Capture stderr via a direct method replacement. vi.spyOn on
+      // process.stderr.write can be unreliable under vitest's own
+      // stderr capture, so swap in a plain recording function.
+      const captured: string[] = [];
+      const origWrite = process.stderr.write.bind(process.stderr);
+      process.stderr.write = ((chunk: string | Uint8Array) => {
+        captured.push(typeof chunk === "string" ? chunk : chunk.toString());
+        return true;
+      }) as typeof process.stderr.write;
+      try {
+        removeSpawnWorktree(repoRoot, {
+          spawnId: "20990101-deadbe",
+          branch: "march/spawn/20990101-deadbe",
+          worktreePath: userDir,
+        });
+      } finally {
+        process.stderr.write = origWrite;
+      }
 
       expect(fs.existsSync(userDir)).toBe(true);
       expect(
         fs.readFileSync(path.join(userDir, "precious.txt"), "utf-8"),
       ).toBe("do not delete");
+      // Warning must mention the stale worktree path so the operator can
+      // locate it.
+      const combined = captured.join("");
+      expect(combined).toContain("incomplete rollback");
+      expect(combined).toContain(userDir);
     });
   });
 });
