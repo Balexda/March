@@ -292,22 +292,235 @@ describe("march CLI", () => {
     expect(result.stderr).toContain("march-base:latest");
   });
 
-  it("spawn dispatch: all dependencies present — no dependency error on stderr", () => {
-    // Docker stub that succeeds for everything (including image inspect).
-    const fakeBin = makeFakeBin(["git", "docker"]);
+  // --- spawn dispatch worktree + initial SpawnRecord (Story 3) ---
+
+  /**
+   * Initializes a real git repo in a fresh tmp dir and returns its
+   * absolute path. The repo has a single committed file so HEAD is
+   * resolvable and `git worktree add` has something to check out.
+   *
+   * The repo is nested one level inside a tmp parent so the worktree
+   * sibling (`<parent>/worktrees/march/`) stays isolated per test.
+   */
+  function makeRealRepo(): string {
+    const parent = makeTmpDir();
+    const repoRoot = path.join(parent, "repo");
+    fs.mkdirSync(repoRoot);
+    const env = {
+      ...process.env,
+      GIT_AUTHOR_NAME: "Test",
+      GIT_AUTHOR_EMAIL: "test@example.com",
+      GIT_COMMITTER_NAME: "Test",
+      GIT_COMMITTER_EMAIL: "test@example.com",
+    };
+    execFileSync("git", ["init", "-q", "-b", "main"], { cwd: repoRoot, env });
+    fs.writeFileSync(path.join(repoRoot, "README.md"), "hello\n");
+    execFileSync("git", ["add", "README.md"], { cwd: repoRoot, env });
+    // Disable GPG signing explicitly so the test commit does not depend
+    // on a signing key in the host environment.
+    execFileSync(
+      "git",
+      ["-c", "commit.gpgsign=false", "commit", "-q", "-m", "initial"],
+      { cwd: repoRoot, env },
+    );
+    return repoRoot;
+  }
+
+  /**
+   * Builds a bin dir containing a smart docker stub (succeeds on `image
+   * inspect`) plus a finder symlink, keeping the real git on PATH. The
+   * bin dir comes first in PATH so the docker stub wins over any system
+   * docker, while git is resolved by fall-through to the inherited PATH.
+   */
+  function makeDockerStubBinDir(): string {
+    const binDir = path.join(makeTmpDir(), "bin");
+    fs.mkdirSync(binDir);
+    fs.symlinkSync(FINDER_PATH, path.join(binDir, path.basename(FINDER_PATH)));
+    const dockerStub = path.join(binDir, "docker");
+    // Succeeds for every subcommand, including `image inspect` and
+    // `pull`, so checkSpawnDependencies' base-image check passes.
+    fs.writeFileSync(dockerStub, "#!/bin/sh\nexit 0\n");
+    fs.chmodSync(dockerStub, 0o755);
+    return binDir;
+  }
+
+  it("spawn dispatch: success path creates branch, worktree, and SpawnRecord", () => {
+    const repoRoot = makeRealRepo();
+    const home = makeTmpDir();
+    const dockerStubDir = makeDockerStubBinDir();
     const nodeBinDir = path.dirname(process.execPath);
-    const result = runWithEnv(["spawn", "dispatch"], {
-      PATH: [nodeBinDir, fakeBin].join(path.delimiter),
-    });
-    // Dispatch proceeds past validation — no dependency error on stderr.
+    const result = runWithEnv(
+      ["spawn", "dispatch"],
+      {
+        // Docker stub first, then real PATH for git.
+        PATH: [nodeBinDir, dockerStubDir, process.env.PATH ?? ""].join(
+          path.delimiter,
+        ),
+        HOME: home,
+      },
+      { cwd: repoRoot },
+    );
+
+    // No dependency-validation errors on stderr.
     expect(result.stderr).not.toContain("not found");
     expect(result.stderr).not.toContain("Not inside a git repository");
     expect(result.stderr).not.toContain("march-base:latest");
-    // Validation passed and control reached the placeholder stub: exit 1
-    // with the "not yet implemented" message on stdout. Asserting the exit
-    // code and stub message ensures regressions in the happy path (e.g., the
-    // CLI bailing out before reaching the spawn handler) are caught.
+    // Dispatch continues to the placeholder stub after worktree + record
+    // creation; the stub sets exit code 1 with its message on stdout.
     expect(result.exitCode).toBe(1);
     expect(result.stdout).toContain("march spawn is not yet implemented");
+
+    // Exactly one march/spawn/* branch was created in the source repo.
+    // `git branch --list` prefixes the current branch with "* " and any
+    // branch checked out in a linked worktree with "+ ", so we use
+    // for-each-ref for a clean machine-readable listing.
+    const branches = execFileSync(
+      "git",
+      ["for-each-ref", "--format=%(refname:short)", "refs/heads/march/spawn/"],
+      { cwd: repoRoot, encoding: "utf-8" },
+    )
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean);
+    expect(branches).toHaveLength(1);
+    const branch = branches[0];
+    expect(branch).toMatch(/^march\/spawn\/\d{8}-[0-9a-f]{6}$/);
+
+    // Sibling worktree directory exists at <repo>/../worktrees/march/<id>.
+    const spawnId = branch.replace("march/spawn/", "");
+    const worktreePath = path.join(
+      path.dirname(repoRoot),
+      "worktrees",
+      "march",
+      spawnId,
+    );
+    expect(fs.existsSync(worktreePath)).toBe(true);
+    expect(fs.existsSync(path.join(worktreePath, "README.md"))).toBe(true);
+
+    // Initial SpawnRecord file exists and validates against the data model
+    // for the `"created"` state.
+    const recordPath = path.join(
+      home,
+      ".march",
+      "spawns",
+      `${spawnId}.json`,
+    );
+    expect(fs.existsSync(recordPath)).toBe(true);
+    const record = JSON.parse(fs.readFileSync(recordPath, "utf-8"));
+    expect(record.version).toBe(1);
+    expect(record.id).toBe(spawnId);
+    expect(record.repoPath).toBe(repoRoot);
+    expect(record.branch).toBe(branch);
+    expect(record.worktreePath).toBe(worktreePath);
+    expect(record.backend).toBe("claude-code");
+    expect(record.status).toBe("created");
+    expect(record.createdAt).toMatch(
+      /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/,
+    );
+    // Conditional fields are absent at the `created` state.
+    expect(record.containerId).toBeUndefined();
+    expect(record.imageId).toBeUndefined();
+    expect(record.startedAt).toBeUndefined();
+    expect(record.exitCode).toBeUndefined();
+    expect(record.stoppedAt).toBeUndefined();
+  });
+
+  it("spawn dispatch: worktree creation failure rolls back branch and leaves no SpawnRecord", () => {
+    const repoRoot = makeRealRepo();
+    const home = makeTmpDir();
+    const dockerStubDir = makeDockerStubBinDir();
+    const nodeBinDir = path.dirname(process.execPath);
+
+    // Force `git worktree add` to fail AFTER creating the branch by
+    // installing a post-checkout hook that always exits 1. Per git's
+    // documented behavior the hook's exit status becomes the operation's
+    // exit status, so this is a permission-independent way to exercise
+    // the rollback path (important when tests run as root).
+    const hookPath = path.join(repoRoot, ".git", "hooks", "post-checkout");
+    fs.writeFileSync(hookPath, "#!/bin/sh\nexit 1\n");
+    fs.chmodSync(hookPath, 0o755);
+
+    const result = runWithEnv(
+      ["spawn", "dispatch"],
+      {
+        PATH: [nodeBinDir, dockerStubDir, process.env.PATH ?? ""].join(
+          path.delimiter,
+        ),
+        HOME: home,
+      },
+      { cwd: repoRoot },
+    );
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr.length).toBeGreaterThan(0);
+
+    // No residual march/spawn/* branch (ref should be rolled back).
+    const branches = execFileSync(
+      "git",
+      ["for-each-ref", "--format=%(refname:short)", "refs/heads/march/spawn/"],
+      { cwd: repoRoot, encoding: "utf-8" },
+    );
+    expect(branches.trim()).toBe("");
+
+    // No residual worktree directory under <parent>/worktrees/march/.
+    const worktreeParent = path.join(
+      path.dirname(repoRoot),
+      "worktrees",
+      "march",
+    );
+    const leftover =
+      fs.existsSync(worktreeParent) && fs.readdirSync(worktreeParent);
+    expect(!leftover || leftover.length === 0).toBe(true);
+
+    // No SpawnRecord file in the isolated HOME.
+    const spawnsDir = path.join(home, ".march", "spawns");
+    const hasAnyRecord =
+      fs.existsSync(spawnsDir) &&
+      fs.readdirSync(spawnsDir).some((f) => f.endsWith(".json"));
+    expect(hasAnyRecord).toBe(false);
+  });
+
+  it("spawn dispatch: SpawnRecord write failure rolls back worktree and branch", () => {
+    const repoRoot = makeRealRepo();
+    const home = makeTmpDir();
+    // Pre-create `<home>/.march` as a regular file so writing the record
+    // under `<home>/.march/spawns/` fails (ENOTDIR on mkdir), while the
+    // worktree step — which runs first — succeeds.
+    fs.writeFileSync(path.join(home, ".march"), "not a dir");
+
+    const dockerStubDir = makeDockerStubBinDir();
+    const nodeBinDir = path.dirname(process.execPath);
+    const result = runWithEnv(
+      ["spawn", "dispatch"],
+      {
+        PATH: [nodeBinDir, dockerStubDir, process.env.PATH ?? ""].join(
+          path.delimiter,
+        ),
+        HOME: home,
+      },
+      { cwd: repoRoot },
+    );
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr.length).toBeGreaterThan(0);
+
+    // No residual march/spawn/* branch — record-write failure rolls back
+    // the worktree and branch.
+    const branches = execFileSync(
+      "git",
+      ["for-each-ref", "--format=%(refname:short)", "refs/heads/march/spawn/"],
+      { cwd: repoRoot, encoding: "utf-8" },
+    );
+    expect(branches.trim()).toBe("");
+
+    // No sibling worktree directory either.
+    const worktreeParent = path.join(
+      path.dirname(repoRoot),
+      "worktrees",
+      "march",
+    );
+    const leftover =
+      fs.existsSync(worktreeParent) && fs.readdirSync(worktreeParent);
+    expect(!leftover || leftover.length === 0).toBe(true);
   });
 });

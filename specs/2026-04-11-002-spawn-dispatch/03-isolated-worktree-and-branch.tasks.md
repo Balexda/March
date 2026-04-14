@@ -17,7 +17,7 @@
 
 ### Tasks
 
-- [ ] **Introduce worktree creation module with collision retry and cleanup**
+- [x] **Introduce worktree creation module with collision retry and cleanup**
 
   Add a new module under `src/` that exports a function to create a spawn's branch and linked worktree given a repo root. The function generates a SpawnId, detects branch-name collisions and regenerates, ensures the worktree parent directory exists, invokes git to create the branch and worktree, and rolls back any partial branch on failure. Satisfies AS 3.1–3.3, 3.5, and 3.6.
 
@@ -32,7 +32,7 @@
   - Returned value exposes spawn ID, branch name, and absolute worktree path for downstream consumers
   - Unit tests operate against a real temporary git repository fixture (no mocking of the git CLI)
 
-- [ ] **Add SpawnRecord module writing the initial `created` record**
+- [x] **Add SpawnRecord module writing the initial `created` record**
 
   Add a new module under `src/` that writes and updates SpawnRecord files at `~/.march/spawns/<spawn-id>.json`. This slice exercises the initial-write path (status `"created"`) per the data-model `absent → created` transition; Stories 4–7 extend the module with status updates and finalization. The module must create the `~/.march/spawns/` directory on first use per the spec edge case. Satisfies FR-019 for the initial write.
 
@@ -43,7 +43,7 @@
   - A delete/rollback helper removes the record file for a given spawn ID and is idempotent if the file is already absent
   - Unit tests write to an isolated `HOME`/`~/.march` tmpdir and assert the emitted JSON structure
 
-- [ ] **Wire worktree creation and initial record into the dispatch action**
+- [x] **Wire worktree creation and initial record into the dispatch action**
 
   Update the `dispatch` action in `src/cli.ts` to invoke the worktree module after dependency validation passes, then write the initial SpawnRecord. Add integration coverage in `src/cli.test.ts` for the success path and for the rollback paths introduced by this slice. The success path must leave the dispatch command in its existing post-validation placeholder state so Stories 4–7 can extend it without test churn. Satisfies AS 3.1, 3.2, and 3.6 plus FR-019's initial-write requirement.
 

@@ -1,11 +1,23 @@
 #!/usr/bin/env node
+import { execFileSync } from "node:child_process";
 import { createInterface } from "node:readline";
 import { Command, CommanderError } from "commander";
 import { ERROR, SUCCESS, USAGE_ERROR } from "./exit-codes.js";
 import { checkSpawnDependencies } from "./deps.js";
 import { initMarch, InitError } from "./init.js";
+import {
+  removeSpawnRecord,
+  SpawnRecordError,
+  writeInitialSpawnRecord,
+} from "./spawn-record.js";
 import { updateMarch, UpdateError } from "./update.js";
 import { CLI_VERSION } from "./version.js";
+import {
+  createSpawnWorktree,
+  removeSpawnWorktree,
+  SpawnWorktree,
+  WorktreeError,
+} from "./worktree.js";
 
 /**
  * Tagged base container image with the backend CLI pre-installed.
@@ -183,6 +195,59 @@ program
       const result = checkSpawnDependencies(BASE_IMAGE);
       if (!result.ok) {
         process.stderr.write(result.error + "\n");
+        process.exitCode = ERROR;
+        return;
+      }
+
+      // checkSpawnDependencies has already verified we're inside a git
+      // repo; re-run `git rev-parse --show-toplevel` here to capture the
+      // absolute repo root for the worktree + SpawnRecord modules.
+      let repoRoot: string;
+      try {
+        repoRoot = execFileSync("git", ["rev-parse", "--show-toplevel"], {
+          encoding: "utf-8",
+        }).trim();
+      } catch (err) {
+        process.stderr.write(
+          `Failed to detect repo root: ${(err as Error).message}\n`,
+        );
+        process.exitCode = ERROR;
+        return;
+      }
+
+      // Stage 2 (Worktree) — create branch + linked worktree. Failures
+      // inside createSpawnWorktree self-roll-back before throwing;
+      // failures at the subsequent SpawnRecord write roll back the
+      // worktree + branch from the caller below.
+      let worktree: SpawnWorktree;
+      try {
+        worktree = createSpawnWorktree(repoRoot);
+      } catch (err) {
+        const message =
+          err instanceof WorktreeError ? err.message : (err as Error).message;
+        process.stderr.write(message + "\n");
+        process.exitCode = ERROR;
+        return;
+      }
+
+      // Initial SpawnRecord write (FR-019, data-model `absent → created`).
+      // On failure, roll back the branch + worktree so no residual state
+      // survives the partial dispatch.
+      try {
+        writeInitialSpawnRecord({
+          id: worktree.spawnId,
+          repoPath: repoRoot,
+          branch: worktree.branch,
+          worktreePath: worktree.worktreePath,
+        });
+      } catch (err) {
+        removeSpawnRecord(worktree.spawnId);
+        removeSpawnWorktree(repoRoot, worktree);
+        const message =
+          err instanceof SpawnRecordError
+            ? err.message
+            : (err as Error).message;
+        process.stderr.write(message + "\n");
         process.exitCode = ERROR;
         return;
       }
