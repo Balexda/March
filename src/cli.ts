@@ -15,6 +15,7 @@ import { CLI_VERSION } from "./version.js";
 import {
   createSpawnWorktree,
   removeSpawnWorktree,
+  SpawnWorktree,
   WorktreeError,
 } from "./worktree.js";
 
@@ -218,7 +219,7 @@ program
       // inside createSpawnWorktree self-roll-back before throwing;
       // failures at the subsequent SpawnRecord write roll back the
       // worktree + branch from the caller below.
-      let worktree;
+      let worktree: SpawnWorktree;
       try {
         worktree = createSpawnWorktree(repoRoot);
       } catch (err) {
