@@ -132,10 +132,23 @@ export function writeInitialSpawnRecord(
 
   const filePath = spawnRecordPath(input.id, homeDir);
   try {
-    fs.writeFileSync(filePath, JSON.stringify(record, null, 2) + "\n", "utf-8");
+    // `flag: "wx"` creates the file exclusively — if a SpawnRecord
+    // already exists at this path (e.g., an ID collision survived the
+    // worktree collision check, or a stale record was left behind),
+    // refuse to overwrite it and surface an explicit error.
+    fs.writeFileSync(filePath, JSON.stringify(record, null, 2) + "\n", {
+      encoding: "utf-8",
+      flag: "wx",
+    });
   } catch (err) {
+    const error = err as NodeJS.ErrnoException;
+    if (error.code === "EEXIST") {
+      throw new SpawnRecordError(
+        `Spawn record already exists at "${filePath}" and will not be overwritten.`,
+      );
+    }
     throw new SpawnRecordError(
-      `Failed to write spawn record at "${filePath}": ${(err as Error).message}`,
+      `Failed to write spawn record at "${filePath}": ${error.message}`,
     );
   }
   return record;

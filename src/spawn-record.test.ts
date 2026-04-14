@@ -127,6 +127,17 @@ describe("spawn-record", () => {
         SpawnRecordError,
       );
     });
+
+    it("refuses to overwrite an existing SpawnRecord (exclusive create)", () => {
+      const home = makeHome();
+      // First write succeeds.
+      writeInitialSpawnRecord(baseInput, home);
+      // Second write with the same ID must surface an explicit error
+      // rather than silently clobbering the first record.
+      expect(() => writeInitialSpawnRecord(baseInput, home)).toThrow(
+        /already exists/,
+      );
+    });
   });
 
   describe("removeSpawnRecord", () => {
