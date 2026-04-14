@@ -133,12 +133,15 @@ describe("spawn-record", () => {
     it("removes an existing record file", () => {
       const home = makeHome();
       const id = "20260411-deadbe";
-      writeInitialSpawnRecord({ ...{
-        id,
-        repoPath: "/abs/repo",
-        branch: `march/spawn/${id}`,
-        worktreePath: `/abs/worktrees/march/${id}`,
-      } }, home);
+      writeInitialSpawnRecord(
+        {
+          id,
+          repoPath: "/abs/repo",
+          branch: `march/spawn/${id}`,
+          worktreePath: `/abs/worktrees/march/${id}`,
+        },
+        home,
+      );
 
       expect(fs.existsSync(spawnRecordPath(id, home))).toBe(true);
       removeSpawnRecord(id, home);
