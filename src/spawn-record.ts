@@ -47,6 +47,13 @@ export interface SpawnRecord {
   containerId?: string;
   imageId?: string;
   exitCode?: number;
+  /**
+   * Raw operator prompt. The data model marks this Yes/required, but
+   * per SD-004 in the Story 3 tasks file, Feature 2 defers prompt
+   * reading to Story 6 — Story 3 writes the initial `"created"` record
+   * without a `prompt` field, and Story 6 populates it before any
+   * downstream consumer reads the record.
+   */
   prompt?: string;
   startedAt?: string;
   stoppedAt?: string;
@@ -93,7 +100,8 @@ export function spawnRecordPath(id: string, homeDir?: string): string {
  * Creates `<home>/.march/spawns/` on demand if it does not yet exist,
  * covering the spec edge case about first-time spawn dispatch.
  *
- * @param input - SpawnId and git artifacts captured by the worktree step.
+ * @param input - Spawn ID, repo root, branch, worktree path, and optional
+ *   backend override captured by the worktree step.
  * @param homeDir - Override home directory (defaults to `os.homedir()`).
  * @returns The written record.
  * @throws {SpawnRecordError} If directory creation or file write fails.

@@ -54,7 +54,7 @@ export function spawnBranchName(spawnId: string): string {
 
 /**
  * Returns the absolute worktree path for a spawn, placed at
- * `<repoRoot>/../worktrees/march/<spawn-id>/` per FR-006. The parent
+ * `<repoRoot>/../worktrees/march/<spawn-id>` per FR-006. The parent
  * directory is created on demand by {@link createSpawnWorktree}.
  */
 export function spawnWorktreePath(repoRoot: string, spawnId: string): string {

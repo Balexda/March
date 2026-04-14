@@ -214,8 +214,10 @@ program
         return;
       }
 
-      // Stage 2 (Worktree) — create branch + linked worktree. Errors
-      // roll themselves back inside createSpawnWorktree.
+      // Stage 2 (Worktree) — create branch + linked worktree. Failures
+      // inside createSpawnWorktree self-roll-back before throwing;
+      // failures at the subsequent SpawnRecord write roll back the
+      // worktree + branch from the caller below.
       let worktree;
       try {
         worktree = createSpawnWorktree(repoRoot);
