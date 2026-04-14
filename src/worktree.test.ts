@@ -245,5 +245,30 @@ describe("worktree", () => {
       // Second removal should be a no-op and not throw.
       expect(() => removeSpawnWorktree(repoRoot, result)).not.toThrow();
     });
+
+    it("fallback rmSync refuses to delete a non-worktree directory", () => {
+      // Guard against the rollback wiping pre-existing user data. Build a
+      // SpawnWorktree handle that points at an unregistered directory
+      // containing important user content, then invoke the rollback
+      // helper. `git worktree remove --force` will fail (the path is not
+      // a registered worktree), and the fallback path must refuse to
+      // rmSync because there is no `.git` file marking the directory as
+      // a linked worktree.
+      const repoRoot = makeRepo();
+      const userDir = path.join(path.dirname(repoRoot), "unrelated");
+      fs.mkdirSync(userDir);
+      fs.writeFileSync(path.join(userDir, "precious.txt"), "do not delete");
+
+      removeSpawnWorktree(repoRoot, {
+        spawnId: "20990101-deadbe",
+        branch: "march/spawn/20990101-deadbe",
+        worktreePath: userDir,
+      });
+
+      expect(fs.existsSync(userDir)).toBe(true);
+      expect(
+        fs.readFileSync(path.join(userDir, "precious.txt"), "utf-8"),
+      ).toBe("do not delete");
+    });
   });
 });

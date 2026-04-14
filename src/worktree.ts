@@ -91,35 +91,65 @@ function deleteBranch(repoRoot: string, branch: string): void {
  * Creates a dedicated branch and linked worktree for a new spawn.
  *
  * Steps (in order):
- *   1. Generate a SpawnId and branch name, retrying on branch-name
- *      collisions up to {@link MAX_COLLISION_RETRIES} times.
+ *   1. Pick a SpawnId and create `march/spawn/<spawn-id>` from HEAD in
+ *      a single retry loop. Branch creation itself is the authoritative
+ *      collision check — a pre-check via `show-ref` plus a separate
+ *      `git branch` step would race against concurrent dispatches that
+ *      create the same ref between check and create. Any branch-creation
+ *      failure (existing branch, refs-dir contention, etc.) triggers a
+ *      retry with a fresh ID up to {@link MAX_COLLISION_RETRIES} times.
  *   2. Ensure the worktree parent directory (`<repo>/../worktrees/march/`)
  *      exists, creating it on demand per FR-007.
- *   3. Create `march/spawn/<spawn-id>` from the current HEAD of `repoRoot`.
- *   4. Run `git worktree add` to materialize the linked worktree.
- *   5. On any post-step-3 failure, delete the branch before surfacing the
- *      error so no residual state is left behind.
+ *   3. Run `git worktree add` to materialize the linked worktree.
+ *   4. On any post-step-1 failure, delete the branch (and any partially
+ *      created worktree state) before surfacing the error so no
+ *      residual state is left behind.
  *
  * @param repoRoot - Absolute path to the source git repository root.
  * @returns The spawn ID, branch, and absolute worktree path.
  * @throws {WorktreeError} On collision-retry exhaustion or any git failure.
  */
 export function createSpawnWorktree(repoRoot: string): SpawnWorktree {
-  // 1. Generate a unique spawn ID with bounded collision retry.
+  // 1. Pick a unique spawn ID and create its branch atomically. The
+  //    branch-creation step IS the collision check — a pre-check would
+  //    be racy under concurrent dispatches. We still do a cheap
+  //    `branchExists` fast-path to avoid forking git when the branch is
+  //    already known to exist, but it is an optimization, not the
+  //    authoritative guard.
   let spawnId: string | undefined;
   let branch: string | undefined;
+  let lastBranchError: Error | undefined;
   for (let attempt = 0; attempt < MAX_COLLISION_RETRIES; attempt++) {
     const candidateId = generateSpawnId();
     const candidateBranch = spawnBranchName(candidateId);
-    if (!branchExists(repoRoot, candidateBranch)) {
+
+    // Fast-path: skip candidates we can already see collide. This saves
+    // a git fork in the common case without being relied on for
+    // correctness.
+    if (branchExists(repoRoot, candidateBranch)) {
+      continue;
+    }
+
+    try {
+      execFileSync("git", ["branch", candidateBranch, "HEAD"], {
+        cwd: repoRoot,
+        stdio: "ignore",
+      });
       spawnId = candidateId;
       branch = candidateBranch;
       break;
+    } catch (err) {
+      // Any branch-creation failure is treated as a retryable collision.
+      // Exhausting all retries surfaces the last error to the caller.
+      lastBranchError = err as Error;
     }
   }
   if (!spawnId || !branch) {
+    const suffix = lastBranchError
+      ? `: ${lastBranchError.message}`
+      : " (branch-name collisions)";
     throw new WorktreeError(
-      `Failed to generate a unique spawn ID after ${MAX_COLLISION_RETRIES} attempts (branch-name collisions)`,
+      `Failed to create spawn branch after ${MAX_COLLISION_RETRIES} attempts${suffix}`,
     );
   }
 
@@ -129,24 +159,24 @@ export function createSpawnWorktree(repoRoot: string): SpawnWorktree {
   try {
     fs.mkdirSync(path.dirname(worktreePath), { recursive: true });
   } catch (err) {
+    deleteBranch(repoRoot, branch);
     throw new WorktreeError(
       `Failed to create worktree parent directory: ${(err as Error).message}`,
     );
   }
 
-  // 3. Create the spawn branch from HEAD.
-  try {
-    execFileSync("git", ["branch", branch, "HEAD"], {
-      cwd: repoRoot,
-      stdio: "ignore",
-    });
-  } catch (err) {
+  // Safety: if the target worktree path already exists on disk (e.g.,
+  // stale content from a prior run or unrelated user data), refuse to
+  // proceed. Otherwise `git worktree add` would fail and our rollback
+  // would rmSync pre-existing content.
+  if (fs.existsSync(worktreePath)) {
+    deleteBranch(repoRoot, branch);
     throw new WorktreeError(
-      `Failed to create branch "${branch}": ${(err as Error).message}`,
+      `Worktree target already exists: "${worktreePath}". Refusing to overwrite.`,
     );
   }
 
-  // 4. Create the linked worktree. On failure, roll back the branch and
+  // 3. Create the linked worktree. On failure, roll back the branch and
   // any partially-materialized worktree state (e.g., if a hook failure
   // left the worktree directory on disk after git populated it).
   try {
@@ -164,11 +194,31 @@ export function createSpawnWorktree(repoRoot: string): SpawnWorktree {
   return { spawnId, branch, worktreePath };
 }
 
+/** Returns true if `dir` looks like a git-linked worktree (has a `.git` file). */
+function isGitLinkedWorktree(dir: string): boolean {
+  try {
+    const dotGit = path.join(dir, ".git");
+    // Linked worktrees have a `.git` FILE (not a directory) that points
+    // back into `<repoRoot>/.git/worktrees/<name>`. If the entry is
+    // missing or is a directory, this is not a git-linked worktree.
+    const stat = fs.lstatSync(dotGit);
+    return stat.isFile();
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Removes a spawn's worktree and branch. Used by the dispatch action to
  * roll back when a later pipeline stage fails. Best-effort: individual
  * cleanup failures are swallowed so callers can continue with a usable
  * error path, but the function does not throw.
+ *
+ * Safety: the filesystem fallback only `rmSync`s the worktree directory
+ * if it looks like a git-linked worktree (contains a `.git` file
+ * pointing back at the parent repo). This prevents accidental deletion
+ * of pre-existing user data if the target path was never actually
+ * populated by git.
  */
 export function removeSpawnWorktree(
   repoRoot: string,
@@ -176,7 +226,7 @@ export function removeSpawnWorktree(
 ): void {
   // Try `git worktree remove --force` first; fall back to a filesystem
   // rm + `git worktree prune` if git refuses (e.g., because the worktree
-  // directory no longer exists on disk).
+  // directory is in a partial state after a hook-failed worktree add).
   try {
     execFileSync(
       "git",
@@ -184,10 +234,15 @@ export function removeSpawnWorktree(
       { cwd: repoRoot, stdio: "ignore" },
     );
   } catch {
-    try {
-      fs.rmSync(worktree.worktreePath, { recursive: true, force: true });
-    } catch {
-      // ignore
+    // Only rmSync the directory if it actually looks like a git worktree.
+    // This avoids clobbering unrelated user data that happens to live at
+    // the target path.
+    if (isGitLinkedWorktree(worktree.worktreePath)) {
+      try {
+        fs.rmSync(worktree.worktreePath, { recursive: true, force: true });
+      } catch {
+        // ignore
+      }
     }
     try {
       execFileSync("git", ["worktree", "prune"], {
