@@ -289,10 +289,10 @@ RFC file.
 
 Dispatch **smithy-plan** with:
 
-- **Planning context**: "Draft the Milestones section for this RFC, with per-milestone success criteria"
+- **Planning context**: "Draft the Milestones section and Dependency Order table for this RFC"
 - **Feature/problem description**: the user's idea description plus the clarification output
 - **Codebase file paths**: the path to the accumulating `<slug>.rfc.md` (containing all prior sections)
-- **Additional planning directives**: produce milestone decomposition only, with each milestone formatted as `### Milestone N: <Title>` followed by `**Description**` and `**Success Criteria**` bullets matching the RFC template
+- **Additional planning directives**: produce the milestone decomposition followed immediately by a `## Dependency Order` 4-column table with `M<N>` IDs. Each milestone must be formatted as `### Milestone N: <Title>` followed by `**Description**` and `**Success Criteria**` bullets. The Dependency Order table uses columns `ID | Title | Depends On | Artifact`. In `Depends On`, each cell must be exactly `—` or a comma-separated list of `M<N>` IDs from the same table (e.g., `M1` or `M1, M2`); do not use prose or any other format. In `Artifact`, each cell starts as `—`; do not use checkboxes.
 
 Append the returned content to the RFC file.
 
@@ -391,6 +391,15 @@ _If no debt items, write: "None — all ambiguities resolved."_
 **Success Criteria**:
 - <Measurable outcome 1>
 - <Measurable outcome 2>
+
+## Dependency Order
+
+Recommended implementation sequence:
+
+| ID | Title | Depends On | Artifact |
+|----|-------|-----------|----------|
+| M1 | <Title> | — | — |
+| M2 | <Title> | — | — |
 ```
 
 ## Phase 4: Write & Review

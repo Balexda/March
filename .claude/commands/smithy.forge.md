@@ -184,37 +184,23 @@ After the sub-agent returns:
 
 ---
 
-## Mark Slice Complete
-
-For `.tasks.md` mode only:
-
-In the tasks file, find the `## Dependency Order` section and change the target
-slice's checkbox from `[ ]` to `[x]`. For example, if implementing Slice 2:
-
-```
-1. [x] **Slice 1** — ...   (already completed)
-2. [x] **Slice 2** — ...   ← mark this one
-3. [ ] **Slice 3** — ...   (not yet started)
-```
-
-Commit the change: `mark slice <N> complete in dependency order`
-
-This ensures the PR diff includes the Dependency Order context, making it easy
-for reviewers to see which slice was completed and what comes next.
-
----
-
 ## Story Completion Cascade
 
-Forge does **not** update the `## Story Dependency Order` or
-`## Feature Dependency Order` sections. Those single checkboxes track
-*artifact creation* (tasks file, spec folder) and are flipped by
-`smithy.cut` and `smithy.mark` respectively. Implementation progress lives in
-the per-slice checkboxes inside each `.tasks.md` and is the single source of
-truth for "done".
+Forge makes **no writes** to any `## Dependency Order` table. Slice completion
+is determined solely by the per-task checkboxes inside each `## Slice N:` body
+of the tasks file — when every `- [ ]` in a slice's task list has been flipped
+to `- [x]` by the implementation sub-agents, that slice is complete.
 
-After marking a slice complete, forge's bookkeeping ends at the tasks file.
-No cascade into the spec or feature map is required.
+Parent artifacts' `Artifact` columns — the spec's `## Dependency Order` table
+(populated by `smithy.cut` when it creates the tasks file) and the features
+file's `## Dependency Order` table (populated by `smithy.mark` when it creates
+the spec folder) — are not forge's responsibility. Those upstream commands own
+their own write-back into the table format.
+
+Implementation progress lives in the per-slice task checkboxes inside each
+`.tasks.md` and is the single source of truth for "done". No cascade writes
+into the spec, features file, or any other parent artifact are required after
+forge completes a slice.
 
 ---
 
