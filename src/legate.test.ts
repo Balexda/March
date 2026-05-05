@@ -214,7 +214,11 @@ describe("legate module", () => {
         runSetup: false,
       });
 
-      expect(result.postSetupCommands).toHaveLength(2);
+      // On Linux/WSL2 the bridge-start command is appended; elsewhere the
+      // post-setup list is just the two agent-deck commands. The test runs
+      // on Linux in CI/dev, so we expect three.
+      const expectedLength = process.platform === "linux" ? 3 : 2;
+      expect(result.postSetupCommands).toHaveLength(expectedLength);
       const [setAutoMode, restart] = result.postSetupCommands;
 
       expect(setAutoMode).toEqual([
@@ -235,9 +239,21 @@ describe("legate module", () => {
         "restart",
         "conductor-legate-march",
       ]);
+      if (process.platform === "linux") {
+        // The bridge-start command is required for the conductor to
+        // receive heartbeats from agent-deck's bridge daemon. Without it
+        // the conductor is functional but inert.
+        expect(result.postSetupCommands[2]).toEqual([
+          "systemctl",
+          "--user",
+          "start",
+          "agent-deck-conductor-bridge",
+        ]);
+      }
 
-      // With --no-setup, autoModeConfigured stays false because nothing ran.
+      // With --no-setup, post-setup booleans stay false because nothing ran.
       expect(result.autoModeConfigured).toBe(false);
+      expect(result.bridgeActive).toBe(false);
     });
 
     it("shell-quotes the setup command in the --no-setup summary", async () => {

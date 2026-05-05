@@ -100,8 +100,16 @@ The conductor never polls on its own schedule — heartbeats and transition noti
 2. Render `src/templates/legate/CLAUDE.md` with `{REPO_NAME}` / `{REPO_PATH}` / `{PROFILE}` / `{CONDUCTOR_NAME}` / `{WORKER_GROUP}` substitutions.
 3. Stage the rendered template at `~/.march/legate/<conductor-name>/CLAUDE.md` (stable, march-owned path).
 4. Run `agent-deck -p <profile> conductor setup <name> -description "..." -claude-md <staged path>`. agent-deck symlinks the conductor's own `CLAUDE.md` to the staged file, registers the conductor session, and starts it.
+5. `agent-deck session set conductor-<name> auto-mode true` + `session restart` to put the conductor into Claude Code's `--permission-mode auto`.
+6. (Linux/WSL2) `systemctl --user start agent-deck-conductor-bridge` and verify with `systemctl --user is-active --quiet agent-deck-conductor-bridge`. agent-deck installs and tries to enable+start this systemd unit during conductor setup, but a successful unit install does not guarantee a healthy daemon — `march legate init` re-asserts the start and verifies, so a crash-loop (e.g. a Python 3.8 host trying to run a bridge.py that uses Python 3.9 generics) is surfaced immediately rather than silently leaving the conductor inert.
 
 After that, editing `~/.march/legate/<conductor-name>/CLAUDE.md` (or re-running `march legate init` after editing the source template) and `agent-deck session restart conductor-<name>` is the iteration loop.
+
+### Why bridge-start matters
+
+The conductor's only autonomous trigger is `[HEARTBEAT]` messages. The agent-deck bridge daemon (`~/.agent-deck/conductor/bridge.py`, run as `agent-deck-conductor-bridge.service` on Linux/WSL2 or `com.agentdeck.conductor-bridge` launchd plist on macOS) is what generates those messages on a configurable cadence (default 15 min) and forwards them into the conductor's tmux session via `agent-deck session send`. With the bridge stopped, the conductor sits in `waiting` indefinitely — healthy but inert. Manual `agent-deck session send` is the fallback.
+
+**Python version requirement (host-level):** agent-deck's `bridge.py` uses PEP 585 generic builtins (`list[dict]`, `dict[str, Any]`), which require Python 3.9 or newer. On hosts whose default `python3` is 3.8 or older (Ubuntu 20.04 / WSL2's stock image, for example), the bridge will crash on import and systemd will retry until it gives up, even though the unit shows as "loaded". `march legate init` will surface this as a `Bridge daemon: NOT active` warning with the log path so the operator can either install Python 3.9+ or fall back to manual heartbeats.
 
 ## Permission mode — how it's wired
 

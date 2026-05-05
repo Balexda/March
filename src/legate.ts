@@ -122,14 +122,20 @@ export interface LegateInitResult {
   setupCommand: string[];
   /**
    * Commands run after `agent-deck conductor setup` succeeds to put the
-   * conductor session into Claude Code's auto mode. Persisted on
-   * `Instance.ExtraArgs` so they survive restarts. Empty when
+   * conductor session into auto mode and ensure the agent-deck bridge
+   * daemon is running so heartbeats reach the conductor. Empty when
    * `runSetup === false`.
    */
   postSetupCommands: string[][];
   setupRan: boolean;
   /** True when the post-setup auto-mode commands all succeeded. */
   autoModeConfigured: boolean;
+  /**
+   * True when the conductor bridge daemon is verified active after this
+   * run. Without it, the conductor never receives heartbeat messages and
+   * never acts on its own. Linux/WSL2 only; macOS path is best-effort.
+   */
+  bridgeActive: boolean;
   summary: string;
 }
 
@@ -338,10 +344,33 @@ export async function initLegate(
     "restart",
     conductorTitle,
   ];
-  const postSetupCommands = [setAutoModeCommand, restartCommand];
+  // The conductor bridge daemon delivers heartbeats to the conductor's
+  // tmux session. Without it running, the conductor never wakes up on its
+  // own — heartbeats are the only timer it has. agent-deck installs and
+  // tries to enable+start the systemd unit during `conductor setup`, but
+  // a successful unit-write does not guarantee a healthy daemon (crashed
+  // dependency, missing python version, etc.), so we explicitly start +
+  // verify here. Linux/WSL2 only for now; macOS users should run the
+  // platform-appropriate launchctl command from the printed warning.
+  const isLinuxLike = process.platform === "linux";
+  const startBridgeCommand = isLinuxLike
+    ? ["systemctl", "--user", "start", "agent-deck-conductor-bridge"]
+    : null;
+  const bridgeIsActiveCommand = isLinuxLike
+    ? [
+        "systemctl",
+        "--user",
+        "is-active",
+        "--quiet",
+        "agent-deck-conductor-bridge",
+      ]
+    : null;
+  const postSetupCommands: string[][] = [setAutoModeCommand, restartCommand];
+  if (startBridgeCommand) postSetupCommands.push(startBridgeCommand);
 
   let setupRan = false;
   let autoModeConfigured = false;
+  let bridgeActive = false;
   const postSetupWarnings: string[] = [];
   if (opts.runSetup ?? true) {
     try {
@@ -387,6 +416,57 @@ export async function initLegate(
         );
       }
     }
+
+    // Ensure the bridge daemon is running. agent-deck's `conductor setup`
+    // already attempted `enable --now`; a successful systemctl start now
+    // is a no-op. We follow up with `is-active --quiet` after a brief
+    // grace period so we catch crash-loops (a common failure mode is
+    // bridge.py requiring Python 3.9+ on a host with 3.8 available — the
+    // daemon imports, dies, systemd retries until it gives up).
+    if (startBridgeCommand && bridgeIsActiveCommand) {
+      try {
+        execFileSync(startBridgeCommand[0], startBridgeCommand.slice(1), {
+          stdio: "ignore",
+        });
+      } catch {
+        // Non-fatal: continue to is-active check, which gives a clearer
+        // message than "exit 5 from systemctl start".
+      }
+      // Brief settle so a crash-loop has time to fail at least once before
+      // we sample is-active. 1s is enough for python import errors; we are
+      // not waiting for steady state, just for the first failure to show up.
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+      try {
+        execFileSync(
+          bridgeIsActiveCommand[0],
+          bridgeIsActiveCommand.slice(1),
+          { stdio: "ignore" },
+        );
+        bridgeActive = true;
+      } catch {
+        bridgeActive = false;
+        const bridgeLogPath = path.join(
+          home,
+          ".agent-deck",
+          "conductor",
+          "bridge.log",
+        );
+        postSetupWarnings.push(
+          `Bridge daemon did not stay active after start. The conductor will not ` +
+            `receive automatic heartbeats and will only act when nudged manually ` +
+            `via \`agent-deck -p ${profile} session send ${conductorTitle} "<message>"\`. ` +
+            `Common cause: bridge.py requires Python 3.9+ (PEP 585 generics). ` +
+            `Inspect the failure:\n  systemctl --user status agent-deck-conductor-bridge\n  tail -n 50 ${bridgeLogPath}`,
+        );
+      }
+    } else if (process.platform !== "linux") {
+      postSetupWarnings.push(
+        `Bridge daemon auto-start is currently Linux/WSL2 only (this host: ${process.platform}). ` +
+          `Start it manually with the platform-appropriate command — see ` +
+          `agent-deck's \`conductor status ${conductorName}\` output for the hint. ` +
+          `Without the bridge running, the conductor will not receive heartbeats.`,
+      );
+    }
   }
 
   const conductorDir = path.join(home, ".agent-deck", "conductor", conductorName);
@@ -407,6 +487,13 @@ export async function initLegate(
         ? autoModeConfigured
           ? "enabled (auto-mode field set on conductor session)"
           : "NOT configured — see warnings"
+        : "deferred (run setup first)"
+    }`,
+    `  Bridge daemon:  ${
+      setupRan
+        ? bridgeActive
+          ? "active (heartbeats will reach the conductor)"
+          : "NOT active — conductor will only respond to manual session-send messages; see warnings"
         : "deferred (run setup first)"
     }`,
     "",
@@ -451,6 +538,7 @@ export async function initLegate(
     postSetupCommands,
     setupRan,
     autoModeConfigured,
+    bridgeActive,
     summary: summaryLines.join("\n"),
   };
 }
