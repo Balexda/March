@@ -49,6 +49,22 @@ function validateConductorName(name: string): void {
   }
 }
 
+/**
+ * Single-quote a shell argument when it contains anything outside a safe
+ * literal set, escaping embedded single quotes via the standard
+ * `'\''` trick. Used to render copy-paste-safe versions of `setupCommand`
+ * for human-facing summaries and error messages — `execFileSync` itself
+ * doesn't need this because it passes argv directly without a shell.
+ */
+function shellQuote(arg: string): string {
+  if (/^[a-zA-Z0-9_./@:%+=,-]+$/.test(arg)) return arg;
+  return "'" + arg.replaceAll("'", `'\\''`) + "'";
+}
+
+function formatShellCommand(cmd: readonly string[]): string {
+  return cmd.map(shellQuote).join(" ");
+}
+
 function validateProfileName(name: string): void {
   if (!name) {
     throw new LegateError("Profile name cannot be empty.");
@@ -296,15 +312,18 @@ export async function initLegate(
       const status = (err as { status?: number }).status;
       throw new LegateError(
         `agent-deck conductor setup failed (exit code ${status ?? "?"}). ` +
-          `Rendered template stayed at ${templateOutputPath}; you can re-run setup manually:\n  ${setupCommand.join(" ")}`,
+          `Rendered template stayed at ${templateOutputPath}; you can re-run setup manually:\n  ${formatShellCommand(setupCommand)}`,
       );
     }
   }
 
   const conductorDir = path.join(home, ".agent-deck", "conductor", conductorName);
 
-  const summaryLines = [
-    `Legate (${conductorName}) configured for ${repoName}.`,
+  // Header is shared. The trailing how-to-edit / how-to-attach guidance
+  // differs between the two flows because, in the --no-setup case, the
+  // conductor does not yet exist and there is no symlink to update.
+  const baseLines = [
+    `Legate (${conductorName}) ${setupRan ? "configured" : "rendered"} for ${repoName}.`,
     `  Profile:        ${profile}`,
     `  Conductor:      ${conductorName}`,
     `  Worker group:   ${workerGroup}`,
@@ -312,20 +331,26 @@ export async function initLegate(
     `  Template:       ${templateOutputPath}`,
     `  Conductor dir:  ${conductorDir}`,
     "",
-    "The conductor's CLAUDE.md is symlinked to the template above. Edit the",
-    "template to evolve legate's behavior; changes take effect after:",
-    `  agent-deck -p ${profile} session restart conductor-${conductorName}`,
-    "",
-    "Attach:",
-    `  agent-deck -p ${profile} session attach conductor-${conductorName}`,
   ];
-  if (!setupRan) {
-    summaryLines.push(
-      "",
-      "Setup skipped (--no-setup). Run when ready:",
-      `  ${setupCommand.join(" ")}`,
-    );
-  }
+  const tailLines = setupRan
+    ? [
+        "The conductor's CLAUDE.md is symlinked to the template above. Edit the",
+        "template to evolve legate's behavior; changes take effect after:",
+        `  agent-deck -p ${profile} session restart conductor-${conductorName}`,
+        "",
+        "Attach:",
+        `  agent-deck -p ${profile} session attach conductor-${conductorName}`,
+      ]
+    : [
+        "Setup skipped (--no-setup). The template is rendered but no conductor",
+        "has been created yet. Run when ready:",
+        `  ${formatShellCommand(setupCommand)}`,
+        "",
+        "After that, the conductor's CLAUDE.md will be symlinked to the",
+        "template above and you can attach with:",
+        `  agent-deck -p ${profile} session attach conductor-${conductorName}`,
+      ];
+  const summaryLines = [...baseLines, ...tailLines];
 
   return {
     profile,

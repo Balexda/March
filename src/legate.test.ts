@@ -181,9 +181,51 @@ describe("legate module", () => {
       expect(result.setupCommand).toContain("legate-march");
       expect(result.setupCommand).toContain("-claude-md");
       expect(result.setupCommand).toContain(result.templateOutputPath);
-      // Skipped-setup branch surfaces the manual command in the summary.
+      // Skipped-setup branch surfaces the shell-quoted manual command and
+      // does NOT claim the conductor has been created yet (the symlink and
+      // restart wording is reserved for the runSetup=true path).
       expect(result.summary).toContain("Setup skipped");
-      expect(result.summary).toContain(result.setupCommand.join(" "));
+      expect(result.summary).toContain(
+        "no conductor\nhas been created yet",
+      );
+      expect(result.summary).not.toMatch(
+        /CLAUDE\.md is symlinked to the template above\. Edit the\n\s*template/,
+      );
+      expect(result.summary).not.toContain("session restart");
+    });
+
+    it("shell-quotes the setup command in the --no-setup summary", async () => {
+      const home = makeTmpDir();
+      const tpl = makeTemplate("ok");
+
+      // Default description contains spaces and arrow punctuation, both of
+      // which would split incorrectly under a naive `setupCommand.join(" ")`.
+      const result = await initLegate({
+        repoPath: "/some/repo/March",
+        homeDir: home,
+        templatePath: tpl,
+        runSetup: false,
+      });
+
+      const desc = "Legate orchestrator for March (Smithy plan→PR→fix loop)";
+      expect(result.summary).toContain(`'${desc}'`);
+      // setupCommand itself stores the raw argv (correct for execFileSync);
+      // only the rendered string is quoted.
+      expect(result.setupCommand).toContain(desc);
+    });
+
+    it("rendered for vs configured for varies with runSetup outcome", async () => {
+      const home = makeTmpDir();
+      const tpl = makeTemplate("ok");
+
+      const result = await initLegate({
+        repoPath: "/some/repo/March",
+        homeDir: home,
+        templatePath: tpl,
+        runSetup: false,
+      });
+      expect(result.summary.split("\n")[0]).toContain("rendered for March");
+      expect(result.summary.split("\n")[0]).not.toContain("configured for");
     });
 
     it("respects explicit profile, name, description, and worker-group overrides", async () => {
