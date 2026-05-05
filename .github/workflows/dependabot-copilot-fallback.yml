@@ -1,0 +1,101 @@
+name: Dependabot Copilot Fallback
+
+# When the main CI workflow fails on a Dependabot-authored PR, ping
+# @copilot in a PR comment so the Copilot Coding Agent can attempt to
+# push a fix commit to the same branch. The maintainer reviews the
+# resulting PR at their leisure.
+#
+# Setup notes (one-time, manual):
+#   - Settings -> Code security -> "Dependabot security updates" must
+#     be enabled so security advisories open PRs immediately.
+#   - Settings -> Actions -> General -> Workflow permissions must allow
+#     workflows to create and approve pull requests / comments.
+#   - GitHub Copilot Coding Agent must be enabled on the repo for the
+#     @copilot mention to be actioned.
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+
+permissions:
+  pull-requests: write
+  actions: read
+  contents: read
+
+jobs:
+  ping-copilot:
+    if: >-
+      github.event.workflow_run.conclusion == 'failure' &&
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.actor.login == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Resolve associated pull request
+        id: pr
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const run = context.payload.workflow_run;
+            const prs = run.pull_requests || [];
+            if (prs.length === 0) {
+              core.setFailed(
+                'workflow_run payload had no associated pull_requests; ' +
+                'cannot determine which PR to comment on.'
+              );
+              return;
+            }
+            const pr = prs[0];
+            core.setOutput('number', pr.number);
+            core.setOutput('run_url', run.html_url);
+            core.setOutput('run_conclusion', run.conclusion);
+            core.setOutput('head_branch', run.head_branch);
+            core.setOutput('head_sha', run.head_sha);
+
+      - name: Comment on PR pinging @copilot
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const prNumber = Number('${{ steps.pr.outputs.number }}');
+            const runUrl = '${{ steps.pr.outputs.run_url }}';
+            const headBranch = '${{ steps.pr.outputs.head_branch }}';
+            const headSha = '${{ steps.pr.outputs.head_sha }}';
+
+            // Idempotency: a marker scoped to the head SHA prevents
+            // re-pinging on workflow re-runs of the same commit. A new
+            // commit on the branch (Dependabot rebase, or a Copilot
+            // fix-up) produces a new SHA and is allowed to ping again.
+            const marker = `<!-- march-fallback:ping-for-sha-${headSha} -->`;
+            const existing = await github.paginate(
+              github.rest.issues.listComments,
+              {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: prNumber,
+                per_page: 100,
+              },
+            );
+            if (existing.some(c => c.body && c.body.includes(marker))) {
+              core.info(`Already pinged @copilot for ${headSha}; skipping.`);
+              return;
+            }
+
+            const body = [
+              marker,
+              '@copilot the `CI` workflow failed on this Dependabot bump.',
+              '',
+              'Please investigate the failing checks and push a fix commit to this branch (`' + headBranch + '`).',
+              '',
+              `- Failed run: ${runUrl}`,
+              `- Head SHA: \`${headSha}\``,
+              '',
+              'If the dependency change itself is sound but tests need adjusting, update the tests.',
+              'If the change introduces a real regression that needs a human decision, comment here so a maintainer can take over.',
+            ].join('\n');
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber,
+              body,
+            });
