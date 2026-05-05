@@ -32,6 +32,16 @@ export const SPAWN_DOCKERFILE_NAME = "Dockerfile";
 const STDERR_TAIL_CHARS = 4_000;
 
 /**
+ * Cap on the captured docker stderr buffer. `execFileSync`'s default
+ * `maxBuffer` is 1 MiB, which a verbose build failure can blow past
+ * (multi-stage failures, many `RUN` lines, base-image pull progress on
+ * stderr) — overflowing reports as `ENOBUFS` and masquerades as a
+ * dispatch failure. 16 MiB gives plenty of headroom while still bounding
+ * memory if the daemon goes haywire and streams forever.
+ */
+const DOCKER_STDERR_MAX_BUFFER = 16 * 1024 * 1024;
+
+/**
  * Returns the canonical image tag for a given spawn ID. Centralised so the
  * build, removal, and (eventually) container-launch helpers all agree on the
  * tag format `march-spawn-<spawn-id>` from the contracts.
@@ -137,10 +147,16 @@ export function buildSpawnImage(input: BuildSpawnImageInput): string {
         input.contextPath,
       ],
       {
-        // Capture stderr so the BuildError can surface it. stdout is
-        // ignored (build output is voluminous and not user-facing here);
         // stdin is closed so docker doesn't block on TTY detection.
-        stdio: ["ignore", "pipe", "pipe"],
+        // stdout is sent straight to /dev/null because we never read it
+        // and `execFileSync`'s default 1 MiB `maxBuffer` would otherwise
+        // overflow on real-world builds (multi-stage, large base image
+        // pull progress, etc.) and masquerade as a dispatch failure.
+        // stderr stays piped so the BuildError can surface it, but with
+        // an explicit `maxBuffer` cap large enough that a verbose failure
+        // does not trigger the same ENOBUFS path.
+        stdio: ["ignore", "ignore", "pipe"],
+        maxBuffer: DOCKER_STDERR_MAX_BUFFER,
       },
     );
   } catch (err) {
