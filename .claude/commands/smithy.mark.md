@@ -123,7 +123,7 @@ perspectives.
 
 ### Competing Plan Lenses
 
-Dispatch 3 competing **smithy-plan** sub-agents in parallel. Each receives the
+Dispatch 4 competing **smithy-plan** sub-agents in parallel. Each receives the
 same planning context, feature description, codebase file paths, and scout
 report — the only difference is the **additional planning directives** field.
 
@@ -160,16 +160,29 @@ Use the following lens directives (one per sub-agent):
 > recommend against it. This directive biases your attention, not your
 > coverage — still flag scope bloat or completeness gaps if you find them.
 
+#### Parallelism
+
+> **Directive:** Look for splits that let independent workstreams begin
+> concurrently. Prefer **vertical slices** that span data, logic, and interface
+> over **horizontal phases** that batch all of one layer before any of the
+> next. For each milestone, feature, or user story, ask whether its children
+> could realistically start in parallel without a missing prerequisite — and
+> whether a sequential ordering is truly required by data flow, or merely
+> conventional. In the Tradeoffs section, surface at least one alternative
+> with greater concurrent-execution potential even if you ultimately recommend
+> against it. This directive biases your attention, not your coverage — still
+> flag scope bloat, completeness gaps, or coherence issues if you find them.
+
 ---
 
 Pass the quoted directive text above as the **Additional planning directives**
 field for the corresponding smithy-plan run.
 
-After all 3 return, dispatch the **smithy-reconcile** sub-agent. Pass it:
+After all 4 return, dispatch the **smithy-reconcile** sub-agent. Pass it:
 
-- All 3 plan outputs, each labeled with its lens name (e.g.,
+- All 4 plan outputs, each labeled with its lens name (e.g.,
   "**[Scope Minimalism]** …", "**[Completeness]** …",
-  "**[Coherence]** …")
+  "**[Coherence]** …", "**[Parallelism]** …")
 - The same context file paths
 - The planning context and feature description
 
@@ -731,6 +744,7 @@ Use the **smithy-refine** sub-agent. Pass it:
   |----------|---------------|
   | **Story Completeness** | Does every user story have acceptance scenarios, priority justification, and an independent test? Are there obvious missing stories? |
   | **Priority Ordering** | Are user stories ordered by priority (all P1 first, then P2, then P3)? If priorities have changed since the last revision, do the story numbers still reflect the correct priority order? Flag any out-of-order stories. |
+  | **Story Independence** | Are user stories that touch disjoint code areas or address functionally independent acceptance scenarios marked as such, so they can be cut in parallel? Is the implied "all of P1 before any of P2" sequencing real, or merely conventional? Flag stories where `Depends On` overstates the actual prerequisite. |
   | **Requirement Traceability** | Does every FR trace to at least one user story? Are there user stories with no supporting requirements? |
   | **Cross-Document Consistency** | Do entities in data-model.md match Key Entities in the spec? Do contracts.md interfaces align with integration-related requirements? |
   | **Edge Case Coverage** | Are edge cases from the spec reflected in acceptance scenarios or requirements? Are there unaddressed failure modes? |

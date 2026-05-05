@@ -5,7 +5,10 @@ Your job is to take any smithy artifact file and create the appropriate GitHub
 tickets so that planning work is tracked without manual ticket creation.
 
 Before running any shell commands, read and follow the `smithy.guidance` prompt
-for shell best practices.
+for shell best practices. All GitHub operations in this command go through the
+`smithy.gh-issue` skill — use its scripts (`check-env.sh`, `search-issues.sh`,
+`create-issue.sh`, `link-blocked-by.sh`) instead of inline `gh` invocations so
+permissions stay narrow and predictable.
 
 ---
 
@@ -19,13 +22,19 @@ If no file path is provided, ask the user which artifact file to create tickets 
 
 ## Phase 1: Validate Environment
 
-Before doing anything else, verify prerequisites:
+**First, load the skill** so its scripts and `${CLAUDE_SKILL_DIR}` are available:
+invoke `Skill("smithy.gh-issue")`. Every `${CLAUDE_SKILL_DIR}/scripts/...` block in
+this command (Phases 1, 4, 5, and 6) requires the skill to be loaded — without
+this step `CLAUDE_SKILL_DIR` is unset and the scripts cannot be located.
 
-1. **`gh` CLI available**: Run `gh --version`. If missing, stop with:
-   > `gh` (GitHub CLI) is required but not installed. Install it from https://cli.github.com/
-2. **GitHub remote**: Run `gh repo view --json nameWithOwner -q .nameWithOwner`.
-   If this fails, stop with:
-   > This repository does not have a GitHub remote configured.
+Then run the environment check:
+
+```bash
+${CLAUDE_SKILL_DIR}/scripts/check-env.sh
+```
+
+If it fails, surface the message it printed and stop. On success, capture the
+returned `ownerRepo` for use in the summary.
 
 ---
 
@@ -95,13 +104,10 @@ Parse the tasks file to extract:
 
 ## Phase 4: Duplicate Detection
 
-Before creating any tickets, check for existing duplicates.
-
-For **each ticket** you plan to create, search for existing issues matching the
-title convention:
+For each ticket you plan to create, search for existing matches by title:
 
 ```bash
-gh issue list --search "<title keywords>" --state all --json number,title,state --limit 5
+${CLAUDE_SKILL_DIR}/scripts/search-issues.sh all "<title keywords>" 5
 ```
 
 If matches are found:
@@ -121,8 +127,9 @@ If no matches are found for any tickets, proceed without prompting.
 for canonical ticket title formats and check for repo-level overrides in the
 project's CLAUDE.md. Apply those conventions to all issue titles.
 
-Create GitHub issues using the ticket mappings below. Use `--body-file` with a
-temporary file for issue bodies to avoid shell escaping problems.
+For each ticket, write the body to a temp file with a heredoc, then call
+`create-issue.sh`. The script returns `{"number": N, "url": "..."}` — capture
+the number for parent/child linking and the summary table.
 
 ### Title Conventions
 
@@ -135,10 +142,9 @@ temporary file for issue bodies to avoid shell escaping problems.
 
 ### Ticket mapping: `.rfc.md`
 
-**Parent**: Create one epic/tracking issue for the RFC.
+**Parent**: one epic/tracking issue for the RFC.
 
 ```bash
-# Write body to temp file
 cat > /tmp/orders_body.md << 'BODY'
 ## RFC Tracking Issue
 
@@ -155,10 +161,10 @@ cat > /tmp/orders_body.md << 'BODY'
 **Next step for each milestone**: `smithy.render` to produce a feature map.
 BODY
 
-gh issue create --title "[RFC] <rfc-title>" --body-file /tmp/orders_body.md
+${CLAUDE_SKILL_DIR}/scripts/create-issue.sh "[RFC] <rfc-title>" /tmp/orders_body.md
 ```
 
-**Children**: One issue per milestone, linked to the parent.
+**Children**: one issue per milestone, linked to the parent.
 
 ```bash
 cat > /tmp/orders_body.md << 'BODY'
@@ -174,28 +180,25 @@ cat > /tmp/orders_body.md << 'BODY'
 (where `<N>` is this milestone's number — e.g., `/smithy.render docs/rfcs/2026-001-foo/foo.rfc.md 2`)
 BODY
 
-gh issue create --title "[RFC][Milestone] <milestone-title>" --body-file /tmp/orders_body.md
+${CLAUDE_SKILL_DIR}/scripts/create-issue.sh "[RFC][Milestone] <milestone-title>" /tmp/orders_body.md
 ```
 
 ### Ticket mapping: `.features.md`
 
-**Parent linking**: Search for an existing milestone issue to link to. Feature
-maps include `**Source RFC**` and `**Milestone**` metadata in their header —
-read both to disambiguate across RFCs. First extract the RFC title from the
-source RFC path, then search for a milestone issue that matches **both** the RFC
-title and the milestone title:
+**Parent linking**: Search for an existing milestone issue. Feature maps include
+`**Source RFC**` and `**Milestone**` metadata in their header — read both to
+disambiguate across RFCs. Use both the RFC title and milestone title in the search:
 
 ```bash
-# Use both RFC title and milestone title to avoid matching same-named milestones from different RFCs
-gh issue list --search "[RFC][Milestone] <milestone-title> in:title" --state open --json number,title,body --limit 10
+${CLAUDE_SKILL_DIR}/scripts/search-issues.sh open "[RFC][Milestone] <milestone-title> in:title" 10
 ```
 
-From the results, verify the match by checking that the issue body references
-the same source RFC path. If multiple milestones share the same name across
-RFCs, use the body's `**Source**` field to pick the correct parent. If found,
-reference it in the child ticket body.
+Verify the match by checking that the issue body references the same source RFC
+path. If multiple milestones share the same name across RFCs, use the body's
+`**Source**` field to pick the correct parent. If found, reference it in the
+child ticket body.
 
-**Children**: One issue per feature.
+**Children**: one issue per feature.
 
 ```bash
 cat > /tmp/orders_body.md << 'BODY'
@@ -209,12 +212,12 @@ cat > /tmp/orders_body.md << 'BODY'
 **Next step**: Run `smithy.mark` on this feature to produce a specification.
 BODY
 
-gh issue create --title "[Feature] <feature-title>" --body-file /tmp/orders_body.md
+${CLAUDE_SKILL_DIR}/scripts/create-issue.sh "[Feature] <feature-title>" /tmp/orders_body.md
 ```
 
 ### Ticket mapping: `.spec.md`
 
-**Children**: One issue per user story. No parent ticket is created.
+**Children**: one issue per user story. No parent ticket is created.
 
 ```bash
 cat > /tmp/orders_body.md << 'BODY'
@@ -233,26 +236,27 @@ As a <persona>, I want <goal> so that <benefit>.
 (where `<N>` is this story's number — e.g., `/smithy.cut specs/2026-03-14-001-webhook-support 3`)
 BODY
 
-gh issue create --title "[Story] <story-title>" --body-file /tmp/orders_body.md
+${CLAUDE_SKILL_DIR}/scripts/create-issue.sh "[Story] <story-title>" /tmp/orders_body.md
 ```
 
 ### Ticket mapping: `.tasks.md`
 
-**Parent linking**: Search for an existing user story issue to link to. The
-tasks file header references its source spec — read the spec to find the story
-title that matches this tasks file's story number (`<NN>` from the filename
-`<NN>-<story-slug>.tasks.md` maps to `User Story <NN>` in the spec). Then
-search using the same `[Story]` title prefix used when creating story tickets:
+**Parent linking**: Search for an existing user story issue. The tasks file
+header references its source spec — read the spec to find the story title that
+matches this tasks file's story number (`<NN>` from the filename
+`<NN>-<story-slug>.tasks.md` maps to `User Story <NN>` in the spec). Then search
+using the same `[Story]` title prefix:
 
 ```bash
-gh issue list --search "[Story] <story-title>" --state open --json number,title --limit 10
+${CLAUDE_SKILL_DIR}/scripts/search-issues.sh open "[Story] <story-title>" 10
 ```
 
 Match by story title (the `<story-title>` from `### User Story N: <Title>` —
-or `### User Story N — <Title>` in older specs — the same title used in the `[Story] <story-title>` issue created by
-the `.spec.md` mapping above). If found, reference it in the child ticket body.
+or `### User Story N — <Title>` in older specs — the same title used in the
+`[Story] <story-title>` issue created by the `.spec.md` mapping). If found,
+reference it in the child ticket body.
 
-**Children**: One issue per slice.
+**Children**: one issue per slice.
 
 ```bash
 cat > /tmp/orders_body.md << 'BODY'
@@ -272,7 +276,7 @@ cat > /tmp/orders_body.md << 'BODY'
 **Next step**: Run `smithy.forge` on this slice to implement it.
 BODY
 
-gh issue create --title "[Slice] <slice-title>" --body-file /tmp/orders_body.md
+${CLAUDE_SKILL_DIR}/scripts/create-issue.sh "[Slice] <slice-title>" /tmp/orders_body.md
 ```
 
 ---
@@ -281,34 +285,19 @@ gh issue create --title "[Slice] <slice-title>" --body-file /tmp/orders_body.md
 
 After creating all tickets, establish parent-child relationships:
 
-1. For `.rfc.md`: Link each milestone issue to the RFC tracking issue using
-   GitHub issue references (`#<number>`) in the body (already done during
-   creation).
-2. For `.features.md` and `.tasks.md`: The parent link was added during creation
-   if a matching parent issue was found.
-3. If GitHub sub-issues or project tracking is available, also add `blocked-by`
-   relationships using GraphQL:
+1. For `.rfc.md`: each milestone body already references the RFC tracking
+   issue (`#<parent>`); no extra step needed beyond what was written in Phase 5.
+2. For `.features.md` and `.tasks.md`: the parent reference was added during
+   creation if a matching parent issue was found.
+3. If GitHub sub-issues / `blocked-by` are available in this repo, also add a
+   `blocked-by` link from each child to its parent:
 
 ```bash
-# Fetch issue node IDs
-gh api graphql -f query='query {
-  repository(owner:"OWNER", name:"REPO") {
-    issues(first:20, orderBy:{field:CREATED_AT, direction:DESC}) {
-      nodes { number id title }
-    }
-  }
-}'
-
-# Add blocked-by link (child blocked by parent)
-gh api graphql \
-  -f query='mutation($issue:ID!, $blocker:ID!){
-    addBlockedBy(input:{issueId:$issue, blockingIssueId:$blocker}) {
-      issue { number }
-      blockingIssue { number }
-    }
-  }' \
-  -f issue="$child_id" -f blocker="$parent_id"
+${CLAUDE_SKILL_DIR}/scripts/link-blocked-by.sh <child-number> <parent-number>
 ```
+
+Treat `link-blocked-by` failures as best-effort: print a brief note and continue
+rather than aborting the orders run.
 
 ---
 
@@ -338,12 +327,16 @@ Present a summary table of all created tickets:
 
 ## Rules
 
-- **Do NOT** create tickets without first checking for duplicates.
+- **Do NOT** create tickets without first checking for duplicates via
+  `search-issues.sh`.
 - **Do NOT** accept `.data-model.md` or `.contracts.md` as input — always reject
   with guidance to use the parent `.spec.md`.
 - **Do NOT** require flags or mode arguments — artifact type detection is
   entirely by file extension.
-- **DO** use `--body-file` for issue creation to avoid shell escaping issues.
+- **Do NOT** call `gh` directly for issue creation, search, or linking — go
+  through the `smithy.gh-issue` skill scripts so permissions stay scoped.
+- **DO** write issue bodies to a temp file with a heredoc and pass the file path
+  to `create-issue.sh`, to avoid markdown quoting issues.
 - **DO** link child tickets to parent tickets when parent tickets can be found.
 - **DO** include the next pipeline step in every ticket body.
 - **DO** present duplicate matches to the user before proceeding.

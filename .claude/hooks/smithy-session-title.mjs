@@ -2,120 +2,116 @@
 // Smithy session-title hook for Claude Code.
 //
 // Wired into .claude/settings.json as a UserPromptSubmit hook by `smithy init`.
-// On every user prompt that starts with `/smithy.<cmd>`, derive a short session
-// title (slug + command + IDs) and emit it as `sessionTitle`. For non-smithy
-// prompts, exits silently. Any error path also exits silently so this hook
-// never blocks a user prompt.
+// On every user prompt that starts with `/smithy.<cmd>` for an artifact-producing
+// command AND carries a recognizable artifact path, derive a kebab-case session
+// title (`<parent-slug>-<cmd>[-<n>[-<m>]]`) and emit it as `sessionTitle`. For
+// non-rename commands, description-only invocations, or non-smithy prompts, exit
+// silently so Claude Code's own auto-naming stays in charge. Any error path also
+// exits silently — this hook never blocks a user prompt.
 
 import { pathToFileURL } from 'node:url';
 
 const SMITHY_PREFIX = /^\/smithy\.([a-z][a-z0-9-]*)\b/i;
+const RENAME_COMMANDS = new Set(['spark', 'ignite', 'mark', 'cut', 'forge', 'strike', 'render']);
 
-function capitalize(s) {
-  if (!s) return '';
-  return s.charAt(0).toUpperCase() + s.slice(1).toLowerCase();
+// Path-shape regexes. Each captures the human-readable slug AFTER any
+// date/uniqueness prefix, and keeps multi-word kebab slugs whole.
+const SPEC_FOLDER_RE   = /specs?\/\d{4}-\d{2}-\d{2}-\d{3}-([a-z0-9][a-z0-9-]*)/i;
+const PRD_RFC_FOLDER_RE = /docs\/(?:prds|rfcs)\/\d{4}-\d{3}-([a-z0-9][a-z0-9-]*)/i;
+const TASKS_FILE_RE    = /(?:^|[\s/])(\d{1,3})-([a-z0-9][a-z0-9-]*)\.tasks\.md\b/i;
+const FEATURES_FILE_RE = /(?:^|[\s/])\d{1,3}-([a-z0-9][a-z0-9-]*)\.features\.md\b/i;
+// Strike files live at specs/strikes/YYYY-MM-DD-<slug>.strike.md (per smithy.strike).
+// The date prefix is optional — bare `<slug>.strike.md` is also accepted.
+const STRIKE_FILE_RE   = /(?:^|[\s/])(?:\d{4}-\d{2}-\d{2}-)?([a-z][a-z0-9-]*)\.strike\.md\b/i;
+const TRAILING_INT_RE  = /(?:^|\s)(\d{1,3})\s*$/;
+
+function trailingInt(rest) {
+  const m = rest.match(TRAILING_INT_RE);
+  return m ? String(parseInt(m[1], 10)) : null;
 }
 
-function pad2(n) {
-  const s = String(n);
-  return s.length === 1 ? '0' + s : s;
-}
-
-// Try to extract slug + numeric IDs from the argument string of a smithy command.
-function parseArgs(cmd, rest) {
-  let slug;
-  let storyNum;
-  let sliceNum;
-
-  // Tasks file pattern: <NN>-<slug>.tasks.md (anywhere in path)
-  const tasksMatch = rest.match(/(?:^|[\s/])(\d{1,3})-([a-z0-9][a-z0-9-]*)\.tasks\.md\b/i);
-  if (tasksMatch) {
-    storyNum = pad2(parseInt(tasksMatch[1], 10));
-    slug = tasksMatch[2];
-  }
-
-  // Strike file pattern: <slug>.strike.md
-  if (!slug) {
-    const strikeMatch = rest.match(/(?:^|[\s/])([a-z0-9][a-z0-9-]*)\.strike\.md\b/i);
-    if (strikeMatch) {
-      slug = strikeMatch[1];
-    }
-  }
-
-  // Spec folder pattern: specs/<YYYY>-<MM>-<DD>-<NNN>-<slug>
-  if (!slug) {
-    const specMatch = rest.match(/specs?\/\d{4}-\d{2}-\d{2}-\d{3}-([a-z0-9][a-z0-9-]*)/i);
-    if (specMatch) {
-      slug = specMatch[1];
-    }
-  }
-
-  // Quoted-string fallback: first quoted run, take its first word
-  if (!slug) {
-    const quoted = rest.match(/["']([^"']+)["']/);
-    if (quoted) {
-      const firstQuotedWord = quoted[1].trim().split(/\s+/)[0];
-      if (firstQuotedWord) slug = firstQuotedWord;
-    }
-  }
-
-  // First non-flag, non-numeric token fallback
-  if (!slug) {
-    const firstWord = rest.trim().split(/\s+/)[0];
-    if (firstWord && !firstWord.startsWith('-') && /[a-z]/i.test(firstWord)) {
-      const last = firstWord.split('/').filter(Boolean).pop() || firstWord;
-      slug = last.replace(/\.[^.]+$/, '').replace(/^\d+-/, '');
-    }
-  }
-
-  // Trailing bare integer: slice number for forge, story number for cut
-  const trailingInt = rest.match(/(?:^|\s)(\d{1,3})\s*$/);
-  if (trailingInt) {
-    const n = pad2(parseInt(trailingInt[1], 10));
-    if (cmd === 'forge') {
-      sliceNum = n;
-    } else if (cmd === 'cut' && !storyNum) {
-      storyNum = n;
-    }
-  }
-
-  return { slug, storyNum, sliceNum };
+function joinTitle(parts) {
+  return parts.filter(p => p !== null && p !== undefined && p !== '').join('-');
 }
 
 /**
  * Derive a Claude Code session title from a user prompt.
- * Returns null if the prompt is not a `/smithy.<cmd>` invocation.
+ * Returns null when the prompt should not trigger a rename.
  *
  * @param {string} prompt
- * @param {{ branch?: string }} [options]
  * @returns {string | null}
  */
-export function deriveTitle(prompt, options = {}) {
+export function deriveTitle(prompt) {
   if (typeof prompt !== 'string') return null;
   const trimmed = prompt.trim();
   const match = trimmed.match(SMITHY_PREFIX);
   if (!match) return null;
 
   const cmd = match[1].toLowerCase();
+  if (!RENAME_COMMANDS.has(cmd)) return null;
+
   const rest = trimmed.slice(match[0].length).trim();
+  if (!rest) return null;
 
-  const { slug, storyNum, sliceNum } = parseArgs(cmd, rest);
+  const tasks    = rest.match(TASKS_FILE_RE);
+  const features = rest.match(FEATURES_FILE_RE);
+  const strike   = rest.match(STRIKE_FILE_RE);
+  const spec     = rest.match(SPEC_FOLDER_RE);
+  const prdRfc   = rest.match(PRD_RFC_FOLDER_RE);
+  const tail     = trailingInt(rest);
 
-  // Build the display slug: take the first dash/space-separated segment, capitalize.
-  let display = '';
-  if (slug) {
-    display = capitalize(slug.split(/[-\s]/)[0]);
-  }
-  if (!display && options.branch) {
-    const branchTail = options.branch.split(/[/_-]/).pop() || '';
-    display = capitalize(branchTail);
-  }
-  if (!display) {
-    display = 'Smithy';
-  }
+  // Per-command format-by-shape table.
+  switch (cmd) {
+    case 'forge': {
+      // Tasks file: <spec-slug>-forge-<storyN>[-<sliceN>]
+      if (tasks && spec) {
+        const storyN = String(parseInt(tasks[1], 10));
+        return joinTitle([spec[1], 'forge', storyN, tail]);
+      }
+      // Strike file: <strike-slug>-forge
+      if (strike) return joinTitle([strike[1], 'forge']);
+      return null;
+    }
 
-  const numbers = [storyNum, sliceNum].filter(Boolean).join(' ');
-  return [display, cmd, numbers].filter(Boolean).join(' ');
+    case 'cut': {
+      // Spec folder + optional trailing story number.
+      if (spec) return joinTitle([spec[1], 'cut', tail]);
+      return null;
+    }
+
+    case 'mark': {
+      // Features file + optional trailing feature number takes precedence.
+      if (features) return joinTitle([features[1], 'mark', tail]);
+      // Plain RFC path → <rfc-slug>-mark.
+      if (prdRfc) return joinTitle([prdRfc[1], 'mark']);
+      return null;
+    }
+
+    case 'render': {
+      // A features.md path lives inside an RFC folder and matches both regexes;
+      // prefer the features-file slug so Phase-0 review titles use the feature
+      // map (`core-render`) rather than the parent RFC (`foo-render`).
+      if (features) return joinTitle([features[1], 'render', tail]);
+      if (prdRfc) return joinTitle([prdRfc[1], 'render', tail]);
+      return null;
+    }
+
+    case 'ignite':
+    case 'spark': {
+      // Phase-0 review of an existing PRD/RFC: <slug>-<cmd>.
+      if (prdRfc) return joinTitle([prdRfc[1], cmd]);
+      return null;
+    }
+
+    case 'strike': {
+      // Phase-0 review of an existing strike file: <slug>-strike.
+      if (strike) return joinTitle([strike[1], 'strike']);
+      return null;
+    }
+
+    default:
+      return null;
+  }
 }
 
 // --- main: read stdin JSON, emit sessionTitle if applicable ---
@@ -141,7 +137,12 @@ async function main() {
 }
 
 // Run main only when executed directly (not when imported by tests).
-const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
+let isMain = false;
+try {
+  isMain = !!process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
+} catch {
+  isMain = false;
+}
 if (isMain) {
   await main();
 }
