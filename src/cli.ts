@@ -3,7 +3,8 @@ import { execFileSync } from "node:child_process";
 import { createInterface } from "node:readline";
 import { Command, CommanderError } from "commander";
 import { ERROR, SUCCESS, USAGE_ERROR } from "./exit-codes.js";
-import { checkSpawnDependencies } from "./deps.js";
+import { checkSpawnDependencies, isFinderAvailable, isOnPath } from "./deps.js";
+import { initLegate, LegateError } from "./legate.js";
 import { initMarch, InitError } from "./init.js";
 import {
   removeSpawnRecord,
@@ -177,6 +178,91 @@ program
     } else {
       program.outputHelp();
       process.exitCode = SUCCESS;
+    }
+  });
+
+const legate = program
+  .command("legate")
+  .description("Manage the per-repo legate conductor (Smithy workflow orchestrator)")
+  .action(() => {
+    // Bare `march legate` (no subcommand): print the legate help so users see
+    // the available subcommands instead of falling through to the program's
+    // "unknown command" handler.
+    commandHandled = true;
+    legate.outputHelp();
+    process.exitCode = USAGE_ERROR;
+  });
+
+legate
+  .command("init")
+  .description("Set up a legate conductor for the current repository")
+  .option("-p, --profile <profile>", "agent-deck profile (default: derived from repo basename)")
+  .option("-n, --name <name>", "Conductor name (default: legate-<repo-slug>)")
+  .option("-d, --description <description>", "Conductor description")
+  .option("-g, --worker-group <group>", "Group for worker sessions (default: legate-workers)")
+  .option("--no-setup", "Render the template only; skip `agent-deck conductor setup`")
+  .action(async (opts: {
+    profile?: string;
+    name?: string;
+    description?: string;
+    workerGroup?: string;
+    setup?: boolean; // commander negates --no-setup into setup=false
+  }) => {
+    commandHandled = true;
+
+    // 1. Detect repo root. Legate is per-repo, so this is mandatory.
+    let repoRoot: string;
+    try {
+      repoRoot = execFileSync("git", ["rev-parse", "--show-toplevel"], {
+        encoding: "utf-8",
+        stdio: ["ignore", "pipe", "ignore"],
+      }).trim();
+    } catch {
+      process.stderr.write(
+        "Run `march legate init` from inside a git repository.\n",
+      );
+      process.exitCode = ERROR;
+      return;
+    }
+
+    // 2. Verify agent-deck is on PATH when we'll actually invoke it.
+    const willRunSetup = opts.setup !== false;
+    if (willRunSetup) {
+      if (!isFinderAvailable()) {
+        process.stderr.write(
+          "Cannot verify agent-deck is installed: path-search utility unavailable.\n",
+        );
+        process.exitCode = ERROR;
+        return;
+      }
+      if (!isOnPath("agent-deck")) {
+        process.stderr.write(
+          "agent-deck not found on PATH — install it from https://github.com/asheshgoplani/agent-deck or pass --no-setup to render the template only.\n",
+        );
+        process.exitCode = ERROR;
+        return;
+      }
+    }
+
+    // 3. Render template + (optionally) run agent-deck conductor setup.
+    try {
+      const result = await initLegate({
+        repoPath: repoRoot,
+        profile: opts.profile,
+        conductorName: opts.name,
+        description: opts.description,
+        workerGroup: opts.workerGroup,
+        runSetup: willRunSetup,
+      });
+      console.log(result.summary);
+      process.exitCode = SUCCESS;
+    } catch (err) {
+      if (err instanceof LegateError) {
+        console.error(err.message);
+        process.exitCode = ERROR;
+        return;
+      }
+      throw err;
     }
   });
 
