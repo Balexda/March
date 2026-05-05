@@ -4,7 +4,7 @@ import { createInterface } from "node:readline";
 import { Command, CommanderError } from "commander";
 import { ERROR, SUCCESS, USAGE_ERROR } from "./exit-codes.js";
 import { checkSpawnDependencies, isFinderAvailable, isOnPath } from "./deps.js";
-import { initLegate, LegateError } from "./legate.js";
+import { checkBridgeRequirements, initLegate, LegateError } from "./legate.js";
 import { initMarch, InitError } from "./init.js";
 import {
   removeSpawnRecord,
@@ -199,12 +199,17 @@ legate
   .option("-d, --description <description>", "Conductor description")
   .option("-g, --worker-group <group>", "Group for worker sessions (default: legate-workers)")
   .option("--no-setup", "Render the template only; skip `agent-deck conductor setup`")
+  .option(
+    "--no-bridge-check",
+    "Skip the Python 3.9+ pre-flight check for the agent-deck conductor bridge daemon. Use only when you intend to drive the conductor manually with `agent-deck session send`.",
+  )
   .action(async (opts: {
     profile?: string;
     name?: string;
     description?: string;
     workerGroup?: string;
     setup?: boolean; // commander negates --no-setup into setup=false
+    bridgeCheck?: boolean; // commander negates --no-bridge-check into bridgeCheck=false
   }) => {
     commandHandled = true;
 
@@ -266,9 +271,23 @@ legate
         process.exitCode = ERROR;
         return;
       }
+
+      // 3. Bridge pre-flight: confirm python3 is recent enough to actually
+      //    run agent-deck's conductor bridge daemon. The bridge is what
+      //    delivers heartbeats; without it, the conductor is functional
+      //    but inert. Failing here is preferable to deploying a conductor
+      //    that silently never wakes up. Skipped under --no-bridge-check.
+      if (opts.bridgeCheck !== false) {
+        const check = checkBridgeRequirements();
+        if (!check.ok) {
+          process.stderr.write(check.message + "\n");
+          process.exitCode = ERROR;
+          return;
+        }
+      }
     }
 
-    // 3. Render template + (optionally) run agent-deck conductor setup.
+    // 4. Render template + (optionally) run agent-deck conductor setup.
     try {
       const result = await initLegate({
         repoPath: repoRoot,

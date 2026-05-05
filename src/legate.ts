@@ -65,6 +65,114 @@ function formatShellCommand(cmd: readonly string[]): string {
   return cmd.map(shellQuote).join(" ");
 }
 
+/**
+ * Result of a pre-flight check for the agent-deck conductor bridge daemon's
+ * Python runtime. The bridge is required for the conductor to receive
+ * heartbeat messages and act on its own; without it, mini-legate is a
+ * console-mode tool driven by manual `agent-deck session send`.
+ */
+export type BridgeRequirementCheck =
+  | {
+      readonly ok: true;
+      readonly pythonVersion: string;
+      readonly pythonPath?: string;
+    }
+  | {
+      readonly ok: false;
+      readonly reason: "missing" | "too-old" | "unparseable";
+      readonly detected?: string;
+      readonly pythonPath?: string;
+      readonly message: string;
+    };
+
+const MIN_PYTHON_MAJOR = 3;
+const MIN_PYTHON_MINOR = 9;
+
+/**
+ * Check the python3 interpreter the conductor bridge will actually use
+ * (the one resolved by the systemd unit's `ExecStart=python3 bridge.py`,
+ * which inherits PATH from the systemd --user environment, which usually
+ * mirrors the user's login PATH). The bridge.py shipped by agent-deck
+ * uses PEP 585 generic-builtin syntax (`list[dict]`) and crashes on
+ * import under Python < 3.9.
+ *
+ * Returns a structured result so callers can choose whether to hard-fail,
+ * print a warning, or proceed under `--no-bridge-check`.
+ */
+export function checkBridgeRequirements(): BridgeRequirementCheck {
+  let raw: string;
+  let pythonPath: string | undefined;
+  try {
+    raw = execFileSync("python3", ["--version"], {
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "pipe"],
+    }).trim();
+  } catch (err) {
+    return {
+      ok: false,
+      reason: "missing",
+      message:
+        "python3 not found on PATH. The agent-deck conductor bridge daemon " +
+        "is a Python script (~/.agent-deck/conductor/bridge.py); without " +
+        "Python 3.9+ available, the conductor will receive no heartbeats. " +
+        "Install Python 3.9 or newer (and ensure `python3` resolves to it), " +
+        "or pass --no-bridge-check to deploy a manually-driven conductor.",
+    };
+  }
+  try {
+    pythonPath = execFileSync("which", ["python3"], {
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+  } catch {
+    // Best-effort; the version output below is what gates the decision.
+  }
+
+  // `python3 --version` prints e.g. "Python 3.8.10" or "Python 3.10.6".
+  const match = raw.match(/^Python\s+(\d+)\.(\d+)/);
+  if (!match) {
+    return {
+      ok: false,
+      reason: "unparseable",
+      detected: raw,
+      pythonPath,
+      message:
+        `Could not parse "${raw}" as a Python version. The conductor bridge requires ` +
+        `Python ${MIN_PYTHON_MAJOR}.${MIN_PYTHON_MINOR}+; install it (and ensure ` +
+        `\`python3\` resolves to it) or pass --no-bridge-check to deploy a manually-driven conductor.`,
+    };
+  }
+  const major = Number(match[1]);
+  const minor = Number(match[2]);
+  if (
+    major < MIN_PYTHON_MAJOR ||
+    (major === MIN_PYTHON_MAJOR && minor < MIN_PYTHON_MINOR)
+  ) {
+    return {
+      ok: false,
+      reason: "too-old",
+      detected: `${major}.${minor}`,
+      pythonPath,
+      message:
+        `Python ${major}.${minor} detected${pythonPath ? ` at ${pythonPath}` : ""}; ` +
+        `agent-deck's conductor bridge (\`~/.agent-deck/conductor/bridge.py\`) requires ` +
+        `Python ${MIN_PYTHON_MAJOR}.${MIN_PYTHON_MINOR} or newer (it uses PEP 585 ` +
+        `generic-builtin syntax such as \`list[dict]\` that throws TypeError on import ` +
+        `under 3.8 and earlier). Without a working bridge the conductor receives no ` +
+        `heartbeat messages and will only act when nudged manually via ` +
+        `\`agent-deck session send\`.\n\n` +
+        `To proceed:\n` +
+        `  1. Install Python 3.9 or newer and ensure \`python3\` resolves to it ` +
+        `(Ubuntu: \`sudo apt install python3.10 && sudo update-alternatives --install ` +
+        `/usr/bin/python3 python3 /usr/bin/python3.10 1\`; macOS: \`brew install python@3.12\` ` +
+        `then update PATH; or use pyenv/asdf for a user-level install).\n` +
+        `  2. Or re-run with --no-bridge-check to deploy a manually-driven conductor ` +
+        `(you will be responsible for sending heartbeats yourself).`,
+    };
+  }
+  return { ok: true, pythonVersion: `${major}.${minor}`, pythonPath };
+}
+
 function validateProfileName(name: string): void {
   if (!name) {
     throw new LegateError("Profile name cannot be empty.");

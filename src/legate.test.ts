@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
+  checkBridgeRequirements,
   deriveDefaults,
   initLegate,
   LegateError,
@@ -86,6 +87,25 @@ describe("legate module", () => {
       // same agent-deck install without manual --name overrides.
       expect(deriveDefaults("/path/to/Smithy").conductorName).toBe("legate-smithy");
       expect(deriveDefaults("/path/to/AgentDeck").conductorName).toBe("legate-agentdeck");
+    });
+  });
+
+  describe("checkBridgeRequirements", () => {
+    it("returns the host's actual python3 version on success", () => {
+      // The test host running CI/dev has *some* python3; we don't assume
+      // a specific version, only that the function returns a structured
+      // result. If python3 is missing entirely, fall through to the
+      // ok=false branch with reason="missing".
+      const result = checkBridgeRequirements();
+      if (result.ok) {
+        expect(result.pythonVersion).toMatch(/^\d+\.\d+$/);
+      } else {
+        // Acceptable on hosts where python3 is missing or too old; only
+        // assert the structured fields are coherent.
+        expect(["missing", "too-old", "unparseable"]).toContain(result.reason);
+        expect(result.message).toMatch(/python|Python/);
+        expect(result.message).toContain("--no-bridge-check");
+      }
     });
   });
 
