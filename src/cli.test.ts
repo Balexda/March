@@ -337,9 +337,31 @@ describe("march CLI", () => {
     fs.mkdirSync(binDir);
     fs.symlinkSync(FINDER_PATH, path.join(binDir, path.basename(FINDER_PATH)));
     const dockerStub = path.join(binDir, "docker");
-    // Succeeds for every subcommand, including `image inspect` and
-    // `pull`, so checkSpawnDependencies' base-image check passes.
+    // Succeeds for every subcommand, including `image inspect`, `pull`,
+    // and `build`, so checkSpawnDependencies' base-image check passes
+    // and the snapshot/build stage in dispatch returns success.
     fs.writeFileSync(dockerStub, "#!/bin/sh\nexit 0\n");
+    fs.chmodSync(dockerStub, 0o755);
+    return binDir;
+  }
+
+  /**
+   * Builds a bin dir containing a docker stub that succeeds on every
+   * subcommand EXCEPT `build` (which exits 1). Used to simulate a docker
+   * build failure during dispatch so tests can exercise the Story 4
+   * rollback path: SpawnRecord transitions to "failed" and is preserved
+   * on disk while the worktree, branch, and any partially tagged image
+   * are cleaned up.
+   */
+  function makeDockerBuildFailBinDir(): string {
+    const binDir = path.join(makeTmpDir(), "bin");
+    fs.mkdirSync(binDir);
+    fs.symlinkSync(FINDER_PATH, path.join(binDir, path.basename(FINDER_PATH)));
+    const dockerStub = path.join(binDir, "docker");
+    fs.writeFileSync(
+      dockerStub,
+      '#!/bin/sh\nif [ "$1" = "build" ]; then\n  echo "simulated build failure" >&2\n  exit 1\nfi\nexit 0\n',
+    );
     fs.chmodSync(dockerStub, 0o755);
     return binDir;
   }
@@ -417,12 +439,87 @@ describe("march CLI", () => {
     expect(record.createdAt).toMatch(
       /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/,
     );
-    // Conditional fields are absent at the `created` state.
+    // Story 4: imageId is populated by the snapshot/build stage on the
+    // success path. Status remains "created" — Story 7 owns transitions
+    // out of "created" to "running" / "stopped".
+    expect(record.imageId).toBe(`march-spawn-${spawnId}`);
+    // Other conditional fields are still absent at this state.
     expect(record.containerId).toBeUndefined();
-    expect(record.imageId).toBeUndefined();
     expect(record.startedAt).toBeUndefined();
     expect(record.exitCode).toBeUndefined();
     expect(record.stoppedAt).toBeUndefined();
+  });
+
+  it("spawn dispatch: docker build failure transitions SpawnRecord to failed and cleans up worktree+branch+image", () => {
+    const repoRoot = makeRealRepo();
+    const home = makeTmpDir();
+    // Docker stub that succeeds on `image inspect` / `pull` (so the
+    // dependency check passes) but fails on `build` so the Story 4
+    // snapshot+build stage exercises its failure path.
+    const dockerStubDir = makeDockerBuildFailBinDir();
+    const nodeBinDir = path.dirname(process.execPath);
+    const result = runWithEnv(
+      ["spawn", "dispatch"],
+      {
+        PATH: [nodeBinDir, dockerStubDir, process.env.PATH ?? ""].join(
+          path.delimiter,
+        ),
+        HOME: home,
+      },
+      { cwd: repoRoot },
+    );
+
+    // Build failure → exit 1 with a clear stderr message surfacing the
+    // docker stderr tail.
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr.length).toBeGreaterThan(0);
+
+    // No residual march/spawn/* branch — the rollback must delete it via
+    // removeSpawnWorktree.
+    const branches = execFileSync(
+      "git",
+      ["for-each-ref", "--format=%(refname:short)", "refs/heads/march/spawn/"],
+      { cwd: repoRoot, encoding: "utf-8" },
+    );
+    expect(branches.trim()).toBe("");
+
+    // No residual worktree directory under <parent>/worktrees/march/.
+    const worktreeParent = path.join(
+      path.dirname(repoRoot),
+      "worktrees",
+      "march",
+    );
+    const leftover =
+      fs.existsSync(worktreeParent) && fs.readdirSync(worktreeParent);
+    expect(!leftover || leftover.length === 0).toBe(true);
+
+    // The SpawnRecord file IS preserved on disk per the data-model
+    // `created → failed` transition and the contracts' "stage 7 Record
+    // runs unconditionally" rule. Status is "failed" and stoppedAt is
+    // populated.
+    const spawnsDir = path.join(home, ".march", "spawns");
+    expect(fs.existsSync(spawnsDir)).toBe(true);
+    const recordFiles = fs
+      .readdirSync(spawnsDir)
+      .filter((f) => f.endsWith(".json"));
+    expect(recordFiles).toHaveLength(1);
+    const record = JSON.parse(
+      fs.readFileSync(path.join(spawnsDir, recordFiles[0]), "utf-8"),
+    );
+    expect(record.status).toBe("failed");
+    expect(record.stoppedAt).toMatch(
+      /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/,
+    );
+    // The Story 3 fields the initial write populated must still be
+    // intact on the failed record.
+    expect(record.version).toBe(1);
+    expect(record.id).toBe(recordFiles[0].replace(/\.json$/, ""));
+    expect(record.repoPath).toBe(repoRoot);
+    expect(record.branch).toBe(`march/spawn/${record.id}`);
+    expect(record.backend).toBe("claude-code");
+    // imageId must NOT be populated — the build failed before
+    // updateSpawnRecordImageId ran.
+    expect(record.imageId).toBeUndefined();
   });
 
   it("spawn dispatch: worktree creation failure rolls back branch and leaves no SpawnRecord", () => {
