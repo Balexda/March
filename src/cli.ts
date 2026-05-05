@@ -181,17 +181,15 @@ program
     }
   });
 
+// Subcommand group with no own action. Commander then handles both
+// `march legate` (no subcommand → emits help and throws `commander.help`)
+// and `march legate <bad>` (→ throws `commander.unknownCommand` naming the
+// actual unknown token, instead of `commander.excessArguments` blaming the
+// parent group). Both are intercepted in the bottom-of-file catch so the
+// user sees either help or a precise unknown-command message.
 const legate = program
   .command("legate")
-  .description("Manage the per-repo legate conductor (Smithy workflow orchestrator)")
-  .action(() => {
-    // Bare `march legate` (no subcommand): print the legate help so users see
-    // the available subcommands instead of falling through to the program's
-    // "unknown command" handler.
-    commandHandled = true;
-    legate.outputHelp();
-    process.exitCode = USAGE_ERROR;
-  });
+  .description("Manage the per-repo legate conductor (Smithy workflow orchestrator)");
 
 legate
   .command("init")
@@ -370,17 +368,53 @@ program
     process.exitCode = ERROR;
   });
 
+/**
+ * Walk commander's tree following positional tokens in argv to find the
+ * deepest Command that exists. Used to scope the help we re-emit when
+ * commander throws `commander.help` for a subcommand group whose stderr
+ * help write was suppressed by our `configureOutput.writeErr` override.
+ */
+function findInvokedCommand(argv: readonly string[]): Command {
+  let cur: Command = program;
+  for (const arg of argv) {
+    if (arg.startsWith("-")) continue;
+    const child = cur.commands.find(
+      (c) => c.name() === arg || c.aliases().includes(arg),
+    );
+    if (!child) break;
+    cur = child;
+  }
+  return cur;
+}
+
 try {
   await program.parseAsync(process.argv);
 } catch (err: unknown) {
   if (err instanceof CommanderError) {
-    // Commander throws with exitCode 0 for any handled flag (e.g. --version, --help)
     if (err.exitCode === 0) {
+      // Commander throws with exitCode 0 for any handled flag (e.g.
+      // --version, --help); the corresponding output already went to stdout.
       commandHandled = true;
       process.exitCode = SUCCESS;
+    } else if (err.code === "commander.help") {
+      // Subcommand group invoked with no subcommand (e.g. `march legate`).
+      // Commander emitted help to stderr, but our writeErr override
+      // suppressed it — re-emit to stdout, scoped to the right command.
+      commandHandled = true;
+      findInvokedCommand(process.argv.slice(2)).outputHelp();
+      process.exitCode = USAGE_ERROR;
+    } else if (err.code === "commander.unknownCommand") {
+      // err.message names the actual unknown token, even when it's a
+      // subcommand inside a group (`march legate frobnicate` →
+      // "error: unknown command 'frobnicate'"). The bottom-of-file argv
+      // scan would otherwise mis-blame the parent group.
+      commandHandled = true;
+      process.stderr.write(err.message + "\n");
+      findInvokedCommand(process.argv.slice(2)).outputHelp();
+      process.exitCode = USAGE_ERROR;
     }
   }
-  // Non-zero Commander error — fall through to the !commandHandled block below.
+  // Other Commander errors fall through to the !commandHandled block below.
 }
 
 // No command was handled: either no args given or an unrecognised command.
