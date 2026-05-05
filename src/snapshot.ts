@@ -25,7 +25,8 @@ export class SnapshotError extends Error {
  *   `.secrets` directory segment at any depth.
  *
  * Order is preserved to mirror the contracts table for diff-readability.
- * Hatchery (M2) will make this configurable; Feature 4 may extend it.
+ * Feature 4 may expand it based on threat model evaluation; Hatchery
+ * (M2) makes it configurable per profile.
  */
 export const SNAPSHOT_EXCLUSION_PATTERNS: readonly string[] = [
   ".env",

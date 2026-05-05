@@ -188,8 +188,8 @@ describe("spawn-record", () => {
       );
 
       expect(updated.imageId).toBe("march-spawn-20260411-image1");
-      // Story 7 owns transitions out of `"created"`; this helper must not
-      // touch status.
+      // Story 5 owns the "created" → "running" transition; this helper
+      // must not touch status.
       expect(updated.status).toBe("created");
 
       const onDisk = JSON.parse(

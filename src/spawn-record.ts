@@ -50,8 +50,8 @@ export interface SpawnRecord {
   exitCode?: number;
   /**
    * Raw operator prompt. The data model marks this Yes/required, but
-   * per SD-004 in the Story 3 tasks file, Feature 2 defers prompt
-   * reading to Story 6 — Story 3 writes the initial `"created"` record
+   * per SD-004 in the Story 4 tasks file, Feature 2 defers prompt
+   * reading to Story 6 — the initial `"created"` record is written
    * without a `prompt` field, and Story 6 populates it before any
    * downstream consumer reads the record.
    */
@@ -241,8 +241,8 @@ function atomicWriteSpawnRecord(
  * the existing record.
  *
  * This helper does NOT modify `status` — the record remains `"created"`.
- * Story 7 owns transitions out of `"created"` to `"running"` /
- * `"stopped"`.
+ * Story 5 owns the `"created" → "running"` transition (container start);
+ * Story 7 owns `"running" → "stopped" / "failed"`.
  *
  * @throws {SpawnRecordError} If the source record is missing, unreadable,
  *   or the atomic write fails.
