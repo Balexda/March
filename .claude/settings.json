@@ -162,5 +162,17 @@
       "Bash(git symbolic-ref --delete *)",
       "Bash(git symbolic-ref -d *)"
     ]
+  },
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/smithy-session-title.mjs\""
+          }
+        ]
+      }
+    ]
   }
 }

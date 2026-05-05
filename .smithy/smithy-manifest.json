@@ -1,12 +1,13 @@
 {
   "version": 1,
-  "smithyVersion": "0.3.3",
+  "smithyVersion": "0.4.1",
   "deployLocation": "repo",
   "agents": [
     "claude"
   ],
   "permissions": false,
   "issueTemplates": false,
+  "sessionTitles": true,
   "files": {
     "claude": [
       ".claude/commands/smithy.audit.md",
@@ -17,24 +18,29 @@
       ".claude/commands/smithy.mark.md",
       ".claude/commands/smithy.orders.md",
       ".claude/commands/smithy.render.md",
+      ".claude/commands/smithy.spark.md",
       ".claude/commands/smithy.strike.md",
       ".claude/prompts/smithy.guidance.md",
       ".claude/prompts/smithy.titles.md",
       ".claude/agents/smithy.clarify.md",
       ".claude/agents/smithy.implement.md",
+      ".claude/agents/smithy.implementation-review.md",
       ".claude/agents/smithy.maid.md",
+      ".claude/agents/smithy.plan-review.md",
       ".claude/agents/smithy.plan.md",
       ".claude/agents/smithy.prose.md",
       ".claude/agents/smithy.reconcile-slices.md",
       ".claude/agents/smithy.reconcile.md",
       ".claude/agents/smithy.refine.md",
-      ".claude/agents/smithy.review.md",
       ".claude/agents/smithy.scout.md",
       ".claude/agents/smithy.slice.md",
+      ".claude/agents/smithy.survey.md",
       ".claude/skills/smithy.pr-review/SKILL.md",
       ".claude/skills/smithy.pr-review/scripts/find-pr.sh",
       ".claude/skills/smithy.pr-review/scripts/get-comments.sh",
-      ".claude/skills/smithy.pr-review/scripts/reply-comment.sh"
+      ".claude/skills/smithy.pr-review/scripts/reply-comment.sh",
+      ".claude/skills/smithy.status/SKILL.md",
+      ".claude/hooks/smithy-session-title.mjs"
     ]
   }
 }
