@@ -17,7 +17,7 @@
 
 ### Tasks
 
-- [ ] **Introduce snapshot module that assembles a build context from git-tracked files**
+- [x] **Introduce snapshot module that assembles a build context from git-tracked files**
 
   Add a new module under `src/` that, given a worktree path, produces a temporary build-context directory containing only the files reported by `git ls-files` (run inside the worktree), minus the hardcoded exclusion list defined in the contracts' Snapshot Exclusion List. The module must materialize files into the temp directory (via copy, not symlink, so the Docker build context is self-contained) while preserving their relative paths, and must clean up the temp directory after its caller finishes with it. Exposed as a function that returns the temp context path plus a cleanup handle.
 
