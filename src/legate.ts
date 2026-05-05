@@ -211,6 +211,15 @@ export interface LegateInitOptions {
   description?: string;
   /** Group for worker sessions launched by the conductor (default: `legate-workers`). */
   workerGroup?: string;
+  /**
+   * Claude model alias or full ID for the conductor session itself. Workers
+   * are launched with the Claude default — they do real implementation work
+   * and benefit from a more capable model. The conductor's job is mostly
+   * orchestration (read smithy status, dispatch via agent-deck, watch gh,
+   * update state.json), so a lighter model is appropriate. Default: `sonnet`.
+   * Override with full IDs (e.g. `claude-opus-4-7`) when needed.
+   */
+  model?: string;
   /** Override `os.homedir()` (tests / programmatic callers). */
   homeDir?: string;
   /** Explicit template path (tests). When unset, the module locates the bundled template. */
@@ -360,6 +369,7 @@ export async function initLegate(
   const profile = opts.profile ?? defaults.profile;
   const conductorName = opts.conductorName ?? defaults.conductorName;
   const workerGroup = opts.workerGroup ?? defaults.workerGroup;
+  const model = opts.model ?? "sonnet";
   const repoName = defaults.repoName;
   const description =
     opts.description ??
@@ -444,6 +454,24 @@ export async function initLegate(
     "auto-mode",
     "true",
   ];
+  // Pin the conductor's claude model via persisted extra-args. agent-deck
+  // appends Instance.ExtraArgs after the auto-mode flag, producing
+  // `--permission-mode auto --model <model>` on every start/restart. The
+  // conductor's role is orchestration-heavy / reasoning-light, so a smaller
+  // model (default `sonnet`) is intentional; workers stay on the Claude
+  // default for real implementation work.
+  const setModelCommand = [
+    "agent-deck",
+    "-p",
+    profile,
+    "session",
+    "set",
+    conductorTitle,
+    "extra-args",
+    "--",
+    "--model",
+    model,
+  ];
   const restartCommand = [
     "agent-deck",
     "-p",
@@ -473,7 +501,11 @@ export async function initLegate(
         "agent-deck-conductor-bridge",
       ]
     : null;
-  const postSetupCommands: string[][] = [setAutoModeCommand, restartCommand];
+  const postSetupCommands: string[][] = [
+    setAutoModeCommand,
+    setModelCommand,
+    restartCommand,
+  ];
   if (startBridgeCommand) postSetupCommands.push(startBridgeCommand);
 
   let setupRan = false;
@@ -510,7 +542,22 @@ export async function initLegate(
           `Run manually:\n  ${formatShellCommand(setAutoModeCommand)}`,
       );
     }
+    let modelSet = false;
     if (autoModeSet) {
+      try {
+        execFileSync(setModelCommand[0], setModelCommand.slice(1), {
+          stdio: "inherit",
+        });
+        modelSet = true;
+      } catch (err) {
+        const status = (err as { status?: number }).status;
+        postSetupWarnings.push(
+          `Failed to set --model ${model} on ${conductorTitle} (exit ${status ?? "?"}). ` +
+            `Run manually:\n  ${formatShellCommand(setModelCommand)}`,
+        );
+      }
+    }
+    if (autoModeSet && modelSet) {
       try {
         execFileSync(restartCommand[0], restartCommand.slice(1), {
           stdio: "inherit",
@@ -519,7 +566,7 @@ export async function initLegate(
       } catch (err) {
         const status = (err as { status?: number }).status;
         postSetupWarnings.push(
-          `Failed to restart ${conductorTitle} after setting auto mode (exit ${status ?? "?"}). ` +
+          `Failed to restart ${conductorTitle} after setting auto mode + model (exit ${status ?? "?"}). ` +
             `Run manually:\n  ${formatShellCommand(restartCommand)}`,
         );
       }
@@ -597,6 +644,9 @@ export async function initLegate(
           : "NOT configured — see warnings"
         : "deferred (run setup first)"
     }`,
+    `  Model:          ${model}${
+      setupRan ? "" : " (deferred — run setup first)"
+    }`,
     `  Bridge daemon:  ${
       setupRan
         ? bridgeActive
@@ -620,8 +670,9 @@ export async function initLegate(
         "has been created yet. Run when ready:",
         `  ${formatShellCommand(setupCommand)}`,
         "",
-        "Then enable auto mode and restart:",
+        "Then enable auto mode, pin model, and restart:",
         `  ${formatShellCommand(setAutoModeCommand)}`,
+        `  ${formatShellCommand(setModelCommand)}`,
         `  ${formatShellCommand(restartCommand)}`,
         "",
         "After that, the conductor's CLAUDE.md will be symlinked to the",

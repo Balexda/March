@@ -213,8 +213,11 @@ describe("legate module", () => {
       expect(result.summary).not.toMatch(
         /CLAUDE\.md is symlinked to the template above\. Edit the\n\s*template/,
       );
-      expect(result.summary).toContain("Then enable auto mode and restart");
+      expect(result.summary).toContain(
+        "Then enable auto mode, pin model, and restart",
+      );
       expect(result.summary).toContain("auto-mode true");
+      expect(result.summary).toContain("--model sonnet");
       expect(result.summary).toContain("session restart");
     });
 
@@ -234,12 +237,11 @@ describe("legate module", () => {
         runSetup: false,
       });
 
-      // On Linux/WSL2 the bridge-start command is appended; elsewhere the
-      // post-setup list is just the two agent-deck commands. The test runs
-      // on Linux in CI/dev, so we expect three.
-      const expectedLength = process.platform === "linux" ? 3 : 2;
+      // Post-setup commands: auto-mode + model + restart, plus bridge-start
+      // on Linux/WSL2. Order is [auto-mode, model, restart, bridge?].
+      const expectedLength = process.platform === "linux" ? 4 : 3;
       expect(result.postSetupCommands).toHaveLength(expectedLength);
-      const [setAutoMode, restart] = result.postSetupCommands;
+      const [setAutoMode, setModel, restart] = result.postSetupCommands;
 
       expect(setAutoMode).toEqual([
         "agent-deck",
@@ -250,6 +252,19 @@ describe("legate module", () => {
         "conductor-legate-march",
         "auto-mode",
         "true",
+      ]);
+      // Default model is sonnet — orchestration-light, cheap on Claude Max.
+      expect(setModel).toEqual([
+        "agent-deck",
+        "-p",
+        "march",
+        "session",
+        "set",
+        "conductor-legate-march",
+        "extra-args",
+        "--",
+        "--model",
+        "sonnet",
       ]);
       expect(restart).toEqual([
         "agent-deck",
@@ -263,7 +278,7 @@ describe("legate module", () => {
         // The bridge-start command is required for the conductor to
         // receive heartbeats from agent-deck's bridge daemon. Without it
         // the conductor is functional but inert.
-        expect(result.postSetupCommands[2]).toEqual([
+        expect(result.postSetupCommands[3]).toEqual([
           "systemctl",
           "--user",
           "start",
@@ -274,6 +289,23 @@ describe("legate module", () => {
       // With --no-setup, post-setup booleans stay false because nothing ran.
       expect(result.autoModeConfigured).toBe(false);
       expect(result.bridgeActive).toBe(false);
+    });
+
+    it("respects an explicit --model override", async () => {
+      const home = makeTmpDir();
+      const tpl = makeTemplate("ok");
+
+      const result = await initLegate({
+        repoPath: "/some/repo/March",
+        homeDir: home,
+        templatePath: tpl,
+        runSetup: false,
+        model: "claude-opus-4-7",
+      });
+
+      const setModel = result.postSetupCommands[1];
+      expect(setModel[setModel.length - 1]).toBe("claude-opus-4-7");
+      expect(result.summary).toContain("Model:          claude-opus-4-7");
     });
 
     it("shell-quotes the setup command in the --no-setup summary", async () => {

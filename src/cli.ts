@@ -198,6 +198,10 @@ legate
   .option("-n, --name <name>", "Conductor name (default: legate-<repo-slug>)")
   .option("-d, --description <description>", "Conductor description")
   .option("-g, --worker-group <group>", "Group for worker sessions (default: legate-workers)")
+  .option(
+    "-m, --model <model>",
+    "Claude model alias or full ID for the conductor session (default: sonnet — orchestration is reasoning-light; workers stay on the Claude default).",
+  )
   .option("--no-setup", "Render the template only; skip `agent-deck conductor setup`")
   .option(
     "--no-bridge-check",
@@ -208,6 +212,7 @@ legate
     name?: string;
     description?: string;
     workerGroup?: string;
+    model?: string;
     setup?: boolean; // commander negates --no-setup into setup=false
     bridgeCheck?: boolean; // commander negates --no-bridge-check into bridgeCheck=false
   }) => {
@@ -295,6 +300,7 @@ legate
         conductorName: opts.name,
         description: opts.description,
         workerGroup: opts.workerGroup,
+        model: opts.model,
         runSetup: willRunSetup,
       });
       console.log(result.summary);
