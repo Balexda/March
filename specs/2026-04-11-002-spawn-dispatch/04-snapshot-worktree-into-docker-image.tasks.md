@@ -17,7 +17,7 @@
 
 ### Tasks
 
-- [ ] **Introduce snapshot module that assembles a build context from git-tracked files**
+- [x] **Introduce snapshot module that assembles a build context from git-tracked files**
 
   Add a new module under `src/` that, given a worktree path, produces a temporary build-context directory containing only the files reported by `git ls-files` (run inside the worktree), minus the hardcoded exclusion list defined in the contracts' Snapshot Exclusion List. The module must materialize files into the temp directory (via copy, not symlink, so the Docker build context is self-contained) while preserving their relative paths, and must clean up the temp directory after its caller finishes with it. Exposed as a function that returns the temp context path plus a cleanup handle.
 
@@ -30,7 +30,7 @@
   - Cleanup helper is idempotent and does not throw if the temp directory is already gone
   - Unit tests operate against real temp worktree fixtures (no mocking of `git ls-files`), cover the exclusion list end-to-end, and assert that excluded files do not appear in the build context
 
-- [ ] **Add Dockerfile generator and `docker build` invocation producing a tagged image**
+- [x] **Add Dockerfile generator and `docker build` invocation producing a tagged image**
 
   Extend the snapshot module (or add a sibling module under `src/`) with a function that writes a generated `Dockerfile` into the build context and invokes `docker build` to produce a tagged image `march-spawn-<spawn-id>`. The generated Dockerfile must match the contracts' Image Build template: `FROM <base-image-tag>`, `COPY --chown=march:march . /march/workspace`, `WORKDIR /march/workspace`. The base image tag comes from the existing `BASE_IMAGE` constant used by dependency validation. On build failure, the function must surface a `SnapshotError` (or equivalent typed error) whose message includes the docker stderr tail so operators can diagnose the failure, and must not leave a tagged image behind. Successful return yields the image tag/ID for the caller to record.
 
@@ -43,7 +43,7 @@
   - Unit tests exercise the Dockerfile-generation path without requiring a running docker daemon (pure text assertion), and a separate integration-level test either stubs the docker invocation at the `execFile` boundary or guards itself behind a "docker available" check
   - A companion `removeSpawnImage(spawnId)` (or equivalent) helper is exported for use by the dispatch action's rollback path; it is idempotent and does not throw if the image does not exist
 
-- [ ] **Extend SpawnRecord module with `imageId` update and `created → failed` transition helpers**
+- [x] **Extend SpawnRecord module with `imageId` update and `created → failed` transition helpers**
 
   Extend `src/spawn-record.ts` with two functions: (a) an `imageId` update used after a successful snapshot build, and (b) a `created → failed` transition used by the dispatch rollback path when snapshot, build, or record-update fails. Both functions must read the existing record, mutate the relevant fields, and write the file back atomically (write-temp-then-rename) so a crash mid-write cannot leave a corrupted JSON file. The `imageId` update does NOT change `status` (Story 7 owns transitions out of `"failed"`/`"stopped"`). The `created → failed` helper sets `status` to `"failed"` and populates `stoppedAt` with the current ISO 8601 timestamp; it optionally accepts an error message to record alongside the transition (stored in a future-compatible way per the data model, or dropped if no schema slot exists). The existing `writeInitialSpawnRecord` and `removeSpawnRecord` functions must continue to work unchanged.
 
@@ -55,7 +55,7 @@
   - Missing record file surfaces a `SpawnRecordError` with a clear message (callers should not reach this path under correct dispatch ordering, but the error is defensive)
   - Unit tests cover: the happy path for `imageId` update (initial record → record with `imageId`), the happy path for `markSpawnRecordFailed` (initial record → record with `status: "failed"` and `stoppedAt`), the missing-file error path for both helpers, and assert the round-tripped records still validate against the data-model rules for their respective states
 
-- [ ] **Wire snapshot + image build into the dispatch action with failed-state record preservation**
+- [x] **Wire snapshot + image build into the dispatch action with failed-state record preservation**
 
   Update the `dispatch` action in `src/cli.ts` so that, after the initial SpawnRecord write succeeds, it (a) assembles the build context from the worktree via the snapshot module, (b) invokes the docker build to produce `march-spawn-<spawn-id>`, (c) updates the SpawnRecord with `imageId`, and (d) cleans up the temp build context regardless of outcome. On any failure in (a)–(c), the dispatch action must transition the SpawnRecord to `"failed"` via `markSpawnRecordFailed` (preserving the record on disk for auditing) and clean up the physical artifacts in reverse order: remove the image (if any), remove the worktree, delete the branch. The dispatch command then exits 1 with a clear stderr message. The SpawnRecord file itself is NOT deleted — this implements the data-model `created → failed` transition and the Dispatch Pipeline contract's "stage 7 Record runs unconditionally" rule. Add integration coverage in `src/cli.test.ts` for the success path and for each failure path introduced by this slice. The success path must leave the dispatch command in a post-Story-4 placeholder state so Stories 5–7 can extend it without test churn.
 

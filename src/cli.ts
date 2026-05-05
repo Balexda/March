@@ -5,9 +5,19 @@ import { Command, CommanderError } from "commander";
 import { ERROR, SUCCESS, USAGE_ERROR } from "./exit-codes.js";
 import { checkSpawnDependencies } from "./deps.js";
 import { initMarch, InitError } from "./init.js";
+import { createBuildContext, SnapshotError } from "./snapshot.js";
 import {
+  buildSpawnImage,
+  BuildError,
+  removeSpawnImage,
+  writeSpawnDockerfile,
+} from "./snapshot-build.js";
+import { BASE_IMAGE } from "./spawn-config.js";
+import {
+  markSpawnRecordFailed,
   removeSpawnRecord,
   SpawnRecordError,
+  updateSpawnRecordImageId,
   writeInitialSpawnRecord,
 } from "./spawn-record.js";
 import { updateMarch, UpdateError } from "./update.js";
@@ -18,13 +28,6 @@ import {
   SpawnWorktree,
   WorktreeError,
 } from "./worktree.js";
-
-/**
- * Tagged base container image with the backend CLI pre-installed.
- * Used by the dispatch action to validate image availability via
- * checkSpawnDependencies(). Eventually derived from SpawnBackend.baseImage.
- */
-const BASE_IMAGE = "march-base:latest";
 
 /**
  * Prompts the user for a yes/no confirmation on the given question.
@@ -244,6 +247,68 @@ program
         removeSpawnRecord(worktree.spawnId);
         removeSpawnWorktree(repoRoot, worktree);
         const message =
+          err instanceof SpawnRecordError
+            ? err.message
+            : (err as Error).message;
+        process.stderr.write(message + "\n");
+        process.exitCode = ERROR;
+        return;
+      }
+
+      // Stage 3 (Snapshot + Build) — assemble a temp build context from
+      // the worktree's tracked files (minus the Snapshot Exclusion List),
+      // generate the spawn Dockerfile, build the tagged image
+      // `march-spawn-<id>`, and update the SpawnRecord with the resulting
+      // imageId. Per the Dispatch Pipeline contract's "stage 7 Record
+      // runs unconditionally" rule and the data-model `created → failed`
+      // transition, any failure here transitions the SpawnRecord to
+      // `"failed"` (preserved on disk for auditing), then rolls back the
+      // image / worktree / branch in reverse order. The SpawnRecord file
+      // itself is NOT deleted on Story 4 failures.
+      try {
+        const handle = createBuildContext(worktree.worktreePath);
+        try {
+          const dockerfilePath = writeSpawnDockerfile(handle.contextPath);
+          const imageTag = buildSpawnImage({
+            spawnId: worktree.spawnId,
+            contextPath: handle.contextPath,
+            dockerfilePath,
+          });
+          updateSpawnRecordImageId(worktree.spawnId, imageTag);
+        } finally {
+          // Inner finally so the temp build-context dir is removed on both
+          // the success and failure paths once docker has copied from it
+          // (AS 4.x — "cleaned up on both success and failure").
+          handle.cleanup();
+        }
+      } catch (err) {
+        // Per the contract: transition the SpawnRecord to "failed" BEFORE
+        // physical-artifact cleanup so that even if cleanup itself fails
+        // partway through, the record reflects the failure for auditing.
+        try {
+          markSpawnRecordFailed(worktree.spawnId, {
+            error: (err as Error).message,
+          });
+        } catch (markErr) {
+          // The record may now be in an inconsistent state (still
+          // "created" or partially written). Surface a clear warning but
+          // continue with artifact cleanup — the operator still needs the
+          // worktree / branch / image gone per FR-021.
+          process.stderr.write(
+            `warning: failed to transition spawn record to "failed" for spawn ${worktree.spawnId}: ${(markErr as Error).message}; the record file may be in an inconsistent state.\n`,
+          );
+        }
+
+        // Reverse-order artifact cleanup: image (idempotent — no-op if
+        // build never produced one) → worktree (also deletes the branch).
+        // The SpawnRecord file is NOT removed — it stays on disk with
+        // status "failed" so failure auditing remains possible.
+        removeSpawnImage(worktree.spawnId);
+        removeSpawnWorktree(repoRoot, worktree);
+
+        const message =
+          err instanceof SnapshotError ||
+          err instanceof BuildError ||
           err instanceof SpawnRecordError
             ? err.message
             : (err as Error).message;

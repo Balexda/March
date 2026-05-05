@@ -4,11 +4,13 @@ import os from "node:os";
 import path from "node:path";
 import {
   DEFAULT_BACKEND,
+  markSpawnRecordFailed,
   removeSpawnRecord,
   SPAWN_RECORD_VERSION,
   spawnRecordDir,
   spawnRecordPath,
   SpawnRecordError,
+  updateSpawnRecordImageId,
   writeInitialSpawnRecord,
 } from "./spawn-record.js";
 
@@ -162,6 +164,174 @@ describe("spawn-record", () => {
     it("is idempotent when the record file is already absent", () => {
       const home = makeHome();
       expect(() => removeSpawnRecord("20260411-nofile", home)).not.toThrow();
+    });
+  });
+
+  describe("updateSpawnRecordImageId", () => {
+    const baseInput = {
+      id: "20260411-image1",
+      repoPath: "/abs/repo",
+      branch: "march/spawn/20260411-image1",
+      worktreePath: "/abs/worktrees/march/20260411-image1",
+    };
+
+    it("populates imageId on the existing record without touching status", () => {
+      const home = makeHome();
+      const initial = writeInitialSpawnRecord(baseInput, home);
+      expect(initial.status).toBe("created");
+      expect(initial.imageId).toBeUndefined();
+
+      const updated = updateSpawnRecordImageId(
+        baseInput.id,
+        "march-spawn-20260411-image1",
+        home,
+      );
+
+      expect(updated.imageId).toBe("march-spawn-20260411-image1");
+      // Story 5 owns the "created" → "running" transition; this helper
+      // must not touch status.
+      expect(updated.status).toBe("created");
+
+      const onDisk = JSON.parse(
+        fs.readFileSync(spawnRecordPath(baseInput.id, home), "utf-8"),
+      );
+      expect(onDisk).toEqual(updated);
+      // Round-tripped record still satisfies the data-model rules for the
+      // `"created"` state with a built image: required fields all present,
+      // imageId populated, no premature lifecycle fields.
+      expect(onDisk.version).toBe(SPAWN_RECORD_VERSION);
+      expect(onDisk.id).toBe(baseInput.id);
+      expect(onDisk.repoPath).toBe(baseInput.repoPath);
+      expect(onDisk.branch).toBe(baseInput.branch);
+      expect(onDisk.worktreePath).toBe(baseInput.worktreePath);
+      expect(onDisk.backend).toBe(DEFAULT_BACKEND);
+      expect(onDisk.createdAt).toBe(initial.createdAt);
+      expect(onDisk.containerId).toBeUndefined();
+      expect(onDisk.startedAt).toBeUndefined();
+      expect(onDisk.stoppedAt).toBeUndefined();
+      expect(onDisk.exitCode).toBeUndefined();
+    });
+
+    it("preserves the original createdAt and other initial fields", () => {
+      const home = makeHome();
+      const initial = writeInitialSpawnRecord(baseInput, home);
+      const updated = updateSpawnRecordImageId(
+        baseInput.id,
+        "sha256:deadbeef",
+        home,
+      );
+      expect(updated.createdAt).toBe(initial.createdAt);
+      expect(updated.repoPath).toBe(initial.repoPath);
+      expect(updated.branch).toBe(initial.branch);
+      expect(updated.worktreePath).toBe(initial.worktreePath);
+      expect(updated.backend).toBe(initial.backend);
+    });
+
+    it("writes the updated record atomically (no leftover temp files)", () => {
+      const home = makeHome();
+      writeInitialSpawnRecord(baseInput, home);
+      updateSpawnRecordImageId(baseInput.id, "march-spawn-x", home);
+
+      const dir = spawnRecordDir(home);
+      const entries = fs.readdirSync(dir);
+      // Only the final record file should remain — temp files used for the
+      // atomic write must be renamed away or cleaned up.
+      expect(entries).toEqual([`${baseInput.id}.json`]);
+    });
+
+    it("throws SpawnRecordError when the record file is missing", () => {
+      const home = makeHome();
+      // No initial write — file does not exist.
+      expect(() =>
+        updateSpawnRecordImageId(baseInput.id, "march-spawn-x", home),
+      ).toThrow(SpawnRecordError);
+    });
+  });
+
+  describe("markSpawnRecordFailed", () => {
+    const baseInput = {
+      id: "20260411-fail01",
+      repoPath: "/abs/repo",
+      branch: "march/spawn/20260411-fail01",
+      worktreePath: "/abs/worktrees/march/20260411-fail01",
+    };
+
+    it("transitions an existing `created` record to `failed` with stoppedAt", () => {
+      const home = makeHome();
+      const initial = writeInitialSpawnRecord(baseInput, home);
+      expect(initial.status).toBe("created");
+      expect(initial.stoppedAt).toBeUndefined();
+
+      const before = Date.now();
+      const failed = markSpawnRecordFailed(baseInput.id, undefined, home);
+      const after = Date.now();
+
+      expect(failed.status).toBe("failed");
+      expect(failed.stoppedAt).toBeDefined();
+      expect(failed.stoppedAt).toMatch(
+        /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/,
+      );
+      const stoppedAt = Date.parse(failed.stoppedAt as string);
+      expect(stoppedAt).toBeGreaterThanOrEqual(before - 1);
+      expect(stoppedAt).toBeLessThanOrEqual(after + 1);
+
+      // Initial fields preserved.
+      expect(failed.id).toBe(initial.id);
+      expect(failed.repoPath).toBe(initial.repoPath);
+      expect(failed.branch).toBe(initial.branch);
+      expect(failed.worktreePath).toBe(initial.worktreePath);
+      expect(failed.backend).toBe(initial.backend);
+      expect(failed.createdAt).toBe(initial.createdAt);
+
+      // Round-tripped on disk.
+      const onDisk = JSON.parse(
+        fs.readFileSync(spawnRecordPath(baseInput.id, home), "utf-8"),
+      );
+      expect(onDisk).toEqual(failed);
+
+      // Data-model rules for `"failed"` from a pre-container failure:
+      // `containerId`, `startedAt`, and `exitCode` remain absent because
+      // the failure occurred before container start.
+      expect(onDisk.containerId).toBeUndefined();
+      expect(onDisk.startedAt).toBeUndefined();
+      expect(onDisk.exitCode).toBeUndefined();
+    });
+
+    it("accepts an optional error message argument without changing schema", () => {
+      // The data model has no slot for an error message today (see SD note in
+      // the spawn-record source). Passing one must not throw and must not
+      // pollute the persisted record with an unknown field.
+      const home = makeHome();
+      writeInitialSpawnRecord(baseInput, home);
+      const failed = markSpawnRecordFailed(
+        baseInput.id,
+        { error: "docker build exited non-zero" },
+        home,
+      );
+      expect(failed.status).toBe("failed");
+      const onDisk = JSON.parse(
+        fs.readFileSync(spawnRecordPath(baseInput.id, home), "utf-8"),
+      );
+      // Implementation drops the error message — no extraneous field on disk.
+      expect(Object.keys(onDisk)).not.toContain("error");
+      expect(Object.keys(onDisk)).not.toContain("failureReason");
+    });
+
+    it("writes the failed record atomically (no leftover temp files)", () => {
+      const home = makeHome();
+      writeInitialSpawnRecord(baseInput, home);
+      markSpawnRecordFailed(baseInput.id, undefined, home);
+
+      const dir = spawnRecordDir(home);
+      const entries = fs.readdirSync(dir);
+      expect(entries).toEqual([`${baseInput.id}.json`]);
+    });
+
+    it("throws SpawnRecordError when the record file is missing", () => {
+      const home = makeHome();
+      expect(() =>
+        markSpawnRecordFailed(baseInput.id, undefined, home),
+      ).toThrow(SpawnRecordError);
     });
   });
 });
