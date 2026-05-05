@@ -210,17 +210,43 @@ legate
   }) => {
     commandHandled = true;
 
-    // 1. Detect repo root. Legate is per-repo, so this is mandatory.
+    // 1. Detect repo root. Legate is per-repo, so this is mandatory. Three
+    //    distinct failures need distinct messages — pointing the user at
+    //    "run from inside a git repo" when `git` itself isn't installed
+    //    sends them in the wrong direction.
+    if (!isFinderAvailable()) {
+      process.stderr.write(
+        "Cannot verify git is installed: path-search utility unavailable.\n",
+      );
+      process.exitCode = ERROR;
+      return;
+    }
+    if (!isOnPath("git")) {
+      process.stderr.write(
+        "git not found on PATH — required to detect the repository root.\n",
+      );
+      process.exitCode = ERROR;
+      return;
+    }
     let repoRoot: string;
     try {
       repoRoot = execFileSync("git", ["rev-parse", "--show-toplevel"], {
         encoding: "utf-8",
-        stdio: ["ignore", "pipe", "ignore"],
+        stdio: ["ignore", "pipe", "pipe"],
       }).trim();
-    } catch {
-      process.stderr.write(
-        "Run `march legate init` from inside a git repository.\n",
-      );
+    } catch (err) {
+      const stderr = ((err as { stderr?: Buffer | string }).stderr ?? "")
+        .toString()
+        .trim();
+      if (stderr.includes("not a git repository")) {
+        process.stderr.write(
+          "Run `march legate init` from inside a git repository.\n",
+        );
+      } else {
+        process.stderr.write(
+          `Failed to detect the repository root: ${stderr || (err as Error).message}\n`,
+        );
+      }
       process.exitCode = ERROR;
       return;
     }
