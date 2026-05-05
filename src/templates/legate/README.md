@@ -105,19 +105,29 @@ After that, editing `~/.march/legate/<conductor-name>/CLAUDE.md` (or re-running 
 
 ## Required operator configuration
 
-Mini-legate launches workers with `agent-deck launch --worktree <branch> -b --title-lock`, but auto-mode permission handling is profile-/group-scoped, not per-launch. The operator should set this once in `~/.agent-deck/config.toml` so workers don't pause on permission prompts:
+Mini-legate launches workers with `agent-deck launch --worktree <branch> -b --title-lock`, but permission handling is profile-/group-scoped in agent-deck's config, not per-launch. The operator should set this once in `~/.agent-deck/config.toml` so neither the conductor nor its workers stall on permission prompts:
 
 ```toml
-# Conductor itself runs in dangerous mode (agent-deck recommends this for
-# any conductor doing real automation).
+# Conductor: classifier-based auto-approval (--permission-mode auto).
+# Routine tool calls auto-approve; genuinely risky actions still surface.
 [conductors.legate-<slug>.claude]
-dangerous_mode = true
+auto_mode = true
 
-# Worker sessions launched by legate also need it; scoping to the worker
-# group keeps unrelated profiles unaffected.
+# Worker sessions: same level. Scoping to the worker group keeps
+# unrelated profiles in this account unaffected.
 [groups."legate-workers".claude]
-dangerous_mode = true
+auto_mode = true
 ```
+
+agent-deck exposes three claude permission keys with a fixed precedence (see `internal/session/userconfig.go`):
+
+| Key                         | Maps to                                    | Use it when                                                       |
+|-----------------------------|--------------------------------------------|-------------------------------------------------------------------|
+| `auto_mode = true`          | `--permission-mode auto`                   | **Default for mini-legate.** Classifier auto-approves routine ops. |
+| `allow_dangerous_mode = true` | `--allow-dangerously-skip-permissions`   | Lets the operator opt in to yolo mid-session via `/dangerous`.    |
+| `dangerous_mode = true`     | `--dangerously-skip-permissions`           | Yolo. Overrides `auto_mode`. Escape valve, not a default.         |
+
+Mini-legate prefers `auto_mode` everywhere. The conductor escalates via a `NEED:` note when it hits a permission prompt rather than asking the operator to flip on `dangerous_mode` — the auto classifier surfacing an approval prompt is itself a signal that the action deserves operator review.
 
 If the worker block is missing, the conductor will escalate with a `NEED:` note on its first heartbeat after detection rather than silently stalling.
 

@@ -110,17 +110,21 @@ Sessions resolve by exact title, ID prefix, path, or fuzzy match.
 
 ## Worker Session Configuration
 
-Every worker you launch is a Claude Code session run by agent-deck under the `{WORKER_GROUP}` group of `{PROFILE}`. To do real work without permission-asking the operator on every tool call, the operator should set the following once in `~/.agent-deck/config.toml`:
+Every worker you launch is a Claude Code session run by agent-deck under the `{WORKER_GROUP}` group of `{PROFILE}`. To do real work without permission-asking the operator on every routine tool call, the operator should set the following once in `~/.agent-deck/config.toml`:
 
 ```toml
-# Auto-approve tool calls for worker sessions in this profile/group.
-# This is the same dangerous_mode setting the conductor itself uses; scoping
-# it to the worker group rather than globally keeps unrelated profiles safe.
+# Classifier-based auto-approval for workers in this group. Maps to
+# Claude Code's `--permission-mode auto`. Routine edits/commits/tests
+# auto-approve; genuinely risky actions still surface for review.
+# Scoping to the worker group rather than globally keeps unrelated
+# profiles unaffected.
 [groups."{WORKER_GROUP}".claude]
-dangerous_mode = true
+auto_mode = true
 ```
 
-If that config is missing, workers will pause on permission prompts and the loop will stall. On startup, check `~/.agent-deck/config.toml` for this block; if absent, escalate with a one-line `NEED:` note telling the operator to add it.
+If that block is missing, workers will pause on permission prompts and the loop will stall. On startup, check `~/.agent-deck/config.toml` for this block; if absent, escalate with a one-line `NEED:` note telling the operator to add it.
+
+`dangerous_mode = true` (the yolo flag, `--dangerously-skip-permissions`) is the *escape valve* for a slice that keeps stalling on auto mode's classifier — escalate first, let the operator opt in to dangerous mode for a specific case rather than defaulting to it. Per agent-deck, `dangerous_mode` overrides `auto_mode`.
 
 Three launch flags are non-negotiable for workers:
 
@@ -256,7 +260,7 @@ When you first start (or after a restart):
 
 ## Notes
 
-- You lean on Claude Code auto mode. Routine tool calls do not need operator approval — `[claude].allow_dangerous_mode = true` in `~/.agent-deck/config.toml` handles permission prompts. Don't pause on permission asks; the operator chose this trade-off.
+- You lean on Claude Code auto mode (`--permission-mode auto`, set via `[conductors.{CONDUCTOR_NAME}.claude] auto_mode = true` in `~/.agent-deck/config.toml`). Routine tool calls — reading state, running `gh`/`smithy`/`agent-deck` commands, updating `state.json` — auto-approve under that mode. Don't pause on permission asks for routine work; the operator chose this trade-off. Anything the auto-mode classifier *does* surface for approval is exactly the kind of action the operator wants to see, so respect it (escalate via `NEED:` rather than asking the operator to flip on `dangerous_mode`).
 - Prefer `agent-deck launch ... -m "<prompt>"` over separate `add` + `start` + `send` when starting new worker sessions — it's atomic and matches the conductor convention.
 - Prefer `session send ... --wait -q --timeout 600s` (single call) over `send` + `output` (two calls) when you need the reply now.
 - The heartbeat cadence is set globally; you do not control it. If you need finer-grained polling for a specific PR, do it inside a single response — don't try to schedule yourself.
