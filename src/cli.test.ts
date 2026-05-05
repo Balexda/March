@@ -138,6 +138,73 @@ describe("march CLI", () => {
     expect(result.stdout).toContain("0.1.0");
   });
 
+  describe("march legate", () => {
+    it("bare `march legate` exits 2 and prints the legate group help", () => {
+      const result = run(["legate"]);
+      expect(result.exitCode).toBe(2);
+      const combined = result.stdout + result.stderr;
+      expect(combined).toContain("Usage: march legate");
+      // The help should list `init` as a known subcommand.
+      expect(combined).toMatch(/^\s+init\b/m);
+    });
+
+    it("`march legate <bad>` reports the actual unknown subcommand, not 'legate'", () => {
+      const result = run(["legate", "frobnicate"]);
+      expect(result.exitCode).toBe(2);
+      // Critical regression guard: previously the bottom-of-file argv scan
+      // mis-blamed the parent group token, so users saw
+      // "unknown command 'legate'". The fix surfaces commander's own
+      // diagnostic which names the actual unknown subcommand.
+      expect(result.stderr).toContain("unknown command 'frobnicate'");
+      expect(result.stderr).not.toContain("unknown command 'legate'");
+      // Help output should be the legate group's, not the program's, so
+      // the user sees the valid subcommand list scoped to legate.
+      const combined = result.stdout + result.stderr;
+      expect(combined).toContain("Usage: march legate");
+    });
+
+    it("`march legate init --help` exits 0 and prints init flag surface", () => {
+      const result = run(["legate", "init", "--help"]);
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain("Usage: march legate init");
+      expect(result.stdout).toContain("--profile");
+      expect(result.stdout).toContain("--name");
+      expect(result.stdout).toContain("--no-setup");
+    });
+
+    it("`march legate init` outside a git repository exits 1 with a clear message", () => {
+      // os.tmpdir() is not part of any git repo on the host — running
+      // from there exercises the not-a-git-repo branch.
+      const tmpDir = makeTmpDir();
+      const result = runWithEnv(
+        ["legate", "init", "--no-setup"],
+        { ...process.env },
+        { cwd: tmpDir },
+      );
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toContain(
+        "Run `march legate init` from inside a git repository.",
+      );
+    });
+
+    it("`march legate init` without git on PATH exits 1 with a git-specific message", () => {
+      // Fake bin with no `git` stub — `isOnPath('git')` returns false.
+      // Distinct from the not-a-git-repo branch: cluster 4 split these
+      // because the previous catch sent users in the wrong direction.
+      // Prepend the node bin dir so spawnSync can still locate `node`
+      // itself; that lookup uses the child's PATH.
+      const fakeBin = makeFakeBin([]);
+      const nodeBinDir = path.dirname(process.execPath);
+      const result = runWithEnv(
+        ["legate", "init", "--no-setup"],
+        { PATH: `${nodeBinDir}${path.delimiter}${fakeBin}`, HOME: makeTmpDir() },
+      );
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toContain("git not found on PATH");
+      expect(result.stderr).not.toContain("from inside a git repository");
+    });
+  });
+
   it("march version exits 0 and stdout contains the package version", () => {
     const result = run(["version"]);
     expect(result.exitCode).toBe(0);
