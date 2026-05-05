@@ -1,4 +1,4 @@
-name: Smithy self-upgrade
+name: Smithy upgrade
 
 on:
   workflow_dispatch:
