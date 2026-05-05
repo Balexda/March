@@ -182,8 +182,10 @@ describe("legate module", () => {
       expect(result.setupCommand).toContain("-claude-md");
       expect(result.setupCommand).toContain(result.templateOutputPath);
       // Skipped-setup branch surfaces the shell-quoted manual command and
-      // does NOT claim the conductor has been created yet (the symlink and
-      // restart wording is reserved for the runSetup=true path).
+      // does NOT claim the conductor has been created yet (the symlink/
+      // attach wording is reserved for the runSetup=true path), but it
+      // *does* surface the post-setup auto-mode commands so the operator
+      // can run the full sequence by hand.
       expect(result.summary).toContain("Setup skipped");
       expect(result.summary).toContain(
         "no conductor\nhas been created yet",
@@ -191,7 +193,53 @@ describe("legate module", () => {
       expect(result.summary).not.toMatch(
         /CLAUDE\.md is symlinked to the template above\. Edit the\n\s*template/,
       );
-      expect(result.summary).not.toContain("session restart");
+      expect(result.summary).toContain("Then persist auto mode and restart");
+      expect(result.summary).toContain("--permission-mode");
+      expect(result.summary).toContain("session restart");
+    });
+
+    it("returns post-setup auto-mode commands targeting the conductor session", async () => {
+      // agent-deck's [conductors.<name>.claude] block does not support
+      // auto_mode (only config_dir + env_file per userconfig.go); auto mode
+      // has to be persisted on the conductor's Instance.ExtraArgs via
+      // `agent-deck session set ... extra-args -- --permission-mode auto`,
+      // followed by a restart so the new flag takes effect immediately.
+      const home = makeTmpDir();
+      const tpl = makeTemplate("ok");
+
+      const result = await initLegate({
+        repoPath: "/some/repo/March",
+        homeDir: home,
+        templatePath: tpl,
+        runSetup: false,
+      });
+
+      expect(result.postSetupCommands).toHaveLength(2);
+      const [setExtraArgs, restart] = result.postSetupCommands;
+
+      expect(setExtraArgs).toEqual([
+        "agent-deck",
+        "-p",
+        "march",
+        "session",
+        "set",
+        "conductor-legate-march",
+        "extra-args",
+        "--",
+        "--permission-mode",
+        "auto",
+      ]);
+      expect(restart).toEqual([
+        "agent-deck",
+        "-p",
+        "march",
+        "session",
+        "restart",
+        "conductor-legate-march",
+      ]);
+
+      // With --no-setup, autoModeConfigured stays false because nothing ran.
+      expect(result.autoModeConfigured).toBe(false);
     });
 
     it("shell-quotes the setup command in the --no-setup summary", async () => {

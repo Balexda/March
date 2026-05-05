@@ -103,33 +103,32 @@ The conductor never polls on its own schedule — heartbeats and transition noti
 
 After that, editing `~/.march/legate/<conductor-name>/CLAUDE.md` (or re-running `march legate init` after editing the source template) and `agent-deck session restart conductor-<name>` is the iteration loop.
 
-## Required operator configuration
+## Permission mode — how it's wired
 
-Mini-legate launches workers with `agent-deck launch --worktree <branch> -b --title-lock`, but permission handling is profile-/group-scoped in agent-deck's config, not per-launch. The operator should set this once in `~/.agent-deck/config.toml` so neither the conductor nor its workers stall on permission prompts:
+agent-deck only exposes the `auto_mode` key on the global `[claude]` block (see `internal/session/userconfig.go:653`). `[groups.<name>.claude]` and `[conductors.<name>.claude]` only carry `config_dir` and `env_file`. Setting `[claude] auto_mode = true` globally would put **every** Claude session on the host into auto mode — too broad for a per-repo legate.
 
-```toml
-# Conductor: classifier-based auto-approval (--permission-mode auto).
-# Routine tool calls auto-approve; genuinely risky actions still surface.
-[conductors.legate-<slug>.claude]
-auto_mode = true
+To scope auto mode to legate's own conductor + its workers without affecting unrelated sessions, mini-legate uses agent-deck's per-session `extra-args` mechanism, which persists CLI flags on the Instance and re-applies them on every start/restart:
 
-# Worker sessions: same level. Scoping to the worker group keeps
-# unrelated profiles in this account unaffected.
-[groups."legate-workers".claude]
-auto_mode = true
-```
+- **Conductor** — `march legate init` runs, after `agent-deck conductor setup`:
+  ```
+  agent-deck -p <profile> session set conductor-legate-<slug> extra-args -- --permission-mode auto
+  agent-deck -p <profile> session restart conductor-legate-<slug>
+  ```
+  No operator action required; this is part of the deploy.
 
-agent-deck exposes three claude permission keys with a fixed precedence (see `internal/session/userconfig.go`):
+- **Workers** — the conductor's CLAUDE.md tells legate to include `--extra-arg --permission-mode --extra-arg auto` on every `agent-deck launch` for a worker. agent-deck stores those tokens on `Instance.ExtraArgs` and re-applies them on restart, so the auto-mode flag survives session lifecycle events.
 
-| Key                         | Maps to                                    | Use it when                                                       |
-|-----------------------------|--------------------------------------------|-------------------------------------------------------------------|
-| `auto_mode = true`          | `--permission-mode auto`                   | **Default for mini-legate.** Classifier auto-approves routine ops. |
-| `allow_dangerous_mode = true` | `--allow-dangerously-skip-permissions`   | Lets the operator opt in to yolo mid-session via `/dangerous`.    |
-| `dangerous_mode = true`     | `--dangerously-skip-permissions`           | Yolo. Overrides `auto_mode`. Escape valve, not a default.         |
+agent-deck exposes three claude permission keys / flags with a fixed precedence (`userconfig.go`):
 
-Mini-legate prefers `auto_mode` everywhere. The conductor escalates via a `NEED:` note when it hits a permission prompt rather than asking the operator to flip on `dangerous_mode` — the auto classifier surfacing an approval prompt is itself a signal that the action deserves operator review.
+| Key / extra-arg                       | Maps to                                    | Use it when                                                       |
+|---------------------------------------|--------------------------------------------|-------------------------------------------------------------------|
+| `--permission-mode auto`              | classifier auto-approval                   | **Default for mini-legate.** Routine ops auto-approve.            |
+| `--allow-dangerously-skip-permissions`| opt-in to yolo via `/dangerous` mid-session| When the operator wants to flip on yolo manually for one session. |
+| `--dangerously-skip-permissions`      | yolo (overrides auto)                      | Escape valve for a slice that keeps stalling on auto mode.        |
 
-If the worker block is missing, the conductor will escalate with a `NEED:` note on its first heartbeat after detection rather than silently stalling.
+Mini-legate prefers auto mode everywhere. The conductor escalates via a `NEED:` note when it hits a permission prompt rather than reaching for `dangerous_mode` — the auto classifier surfacing an approval prompt is itself a signal that the action deserves operator review.
+
+If the conductor or a worker is missing the `--permission-mode auto` extra-arg (e.g. operator manually cleared it), the conductor will escalate on its first heartbeat after detection rather than silently stalling.
 
 ## Boundaries — what mini-legate will not do
 

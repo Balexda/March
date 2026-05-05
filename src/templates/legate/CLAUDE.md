@@ -44,11 +44,12 @@ Drive the Smithy workflow loop end-to-end for `{REPO_NAME}`:
    If `git pull --ff-only` fails (local default has diverged), **escalate** — do not `git reset --hard` or force-update. The worker should not launch until the operator resolves the divergence.
 
 3. **Dispatch into a worker session.**
-   - **New work:** launch a fresh worktree on a new slice branch off the now-current default. `--worktree -b` means each worker has its own checkout, so concurrent workers do not fight over `{REPO_PATH}`'s working tree, and `--title-lock` (#697) prevents Claude's auto-renaming from overwriting the title you set:
+   - **New work:** launch a fresh worktree on a new slice branch off the now-current default. `--worktree -b` means each worker has its own checkout, so concurrent workers do not fight over `{REPO_PATH}`'s working tree; `--title-lock` (#697) prevents Claude's auto-renaming from overwriting the title you set; `--extra-arg --permission-mode --extra-arg auto` puts the worker in classifier-driven auto mode (see Worker Session Configuration below):
      ```
      agent-deck -p {PROFILE} launch {REPO_PATH} \
        -t "<slice-title>" -c claude -g {WORKER_GROUP} \
        --worktree "<slice-branch>" -b --title-lock \
+       --extra-arg --permission-mode --extra-arg auto \
        -m "<initial slash command>"
      ```
      Record the session ID, slice ID, branch, and worktree path (read back via `agent-deck -p {PROFILE} session show --json <id>`) in `state.json`.
@@ -92,7 +93,7 @@ The `smithy.*` skills installed in your conductor session document each command'
 |---|---|
 | Inventory | `agent-deck -p {PROFILE} status --json` and `agent-deck -p {PROFILE} list --json` |
 | Worker detail (incl. worktree path) | `agent-deck -p {PROFILE} session show --json <id_or_title>` |
-| Launch worker (new worktree, new branch, locked title) | `agent-deck -p {PROFILE} launch {REPO_PATH} -t "<title>" -c claude -g {WORKER_GROUP} --worktree "<branch>" -b --title-lock -m "<prompt>"` |
+| Launch worker (new worktree, new branch, locked title, auto mode) | `agent-deck -p {PROFILE} launch {REPO_PATH} -t "<title>" -c claude -g {WORKER_GROUP} --worktree "<branch>" -b --title-lock --extra-arg --permission-mode --extra-arg auto -m "<prompt>"` |
 | Send + wait + read | `agent-deck -p {PROFILE} session send <id> "<msg>" --wait -q --timeout 600s` |
 | Read last response | `agent-deck -p {PROFILE} session output <id> -q` |
 | Restart errored worker | `agent-deck -p {PROFILE} session restart <id>` |
@@ -110,21 +111,21 @@ Sessions resolve by exact title, ID prefix, path, or fuzzy match.
 
 ## Worker Session Configuration
 
-Every worker you launch is a Claude Code session run by agent-deck under the `{WORKER_GROUP}` group of `{PROFILE}`. To do real work without permission-asking the operator on every routine tool call, the operator should set the following once in `~/.agent-deck/config.toml`:
+Every worker you launch is a Claude Code session run by agent-deck under the `{WORKER_GROUP}` group of `{PROFILE}`. Workers run in **auto mode** (`--permission-mode auto`) — Claude Code's classifier auto-approves routine edits/commits/tests and surfaces genuinely risky actions for review.
 
-```toml
-# Classifier-based auto-approval for workers in this group. Maps to
-# Claude Code's `--permission-mode auto`. Routine edits/commits/tests
-# auto-approve; genuinely risky actions still surface for review.
-# Scoping to the worker group rather than globally keeps unrelated
-# profiles unaffected.
-[groups."{WORKER_GROUP}".claude]
-auto_mode = true
+agent-deck's group/conductor TOML blocks only support `config_dir` and `env_file`, **not** `auto_mode` — that key only lives on the global `[claude]` block (which would affect every Claude session on the host, not just legate's). To scope auto mode to legate's workers, pass `--permission-mode auto` to claude per-launch via agent-deck's `--extra-arg`:
+
+```
+agent-deck -p {PROFILE} launch {REPO_PATH} \
+  -t "<slice-title>" -c claude -g {WORKER_GROUP} \
+  --worktree "<slice-branch>" -b --title-lock \
+  --extra-arg --permission-mode --extra-arg auto \
+  -m "<initial slash command>"
 ```
 
-If that block is missing, workers will pause on permission prompts and the loop will stall. On startup, check `~/.agent-deck/config.toml` for this block; if absent, escalate with a one-line `NEED:` note telling the operator to add it.
+You (the conductor) were configured the same way at `march legate init` time — the deploy command persisted `--permission-mode auto` on your own `extra-args` via `agent-deck session set conductor-{CONDUCTOR_NAME} extra-args -- --permission-mode auto`, then restarted you. On startup, verify it's still there: `agent-deck -p {PROFILE} session show --json conductor-{CONDUCTOR_NAME}` — if `extra_args` does not include `--permission-mode auto`, escalate with a `NEED:` note rather than running blind. Every routine tool call would otherwise stall on a permission prompt.
 
-`dangerous_mode = true` (the yolo flag, `--dangerously-skip-permissions`) is the *escape valve* for a slice that keeps stalling on auto mode's classifier — escalate first, let the operator opt in to dangerous mode for a specific case rather than defaulting to it. Per agent-deck, `dangerous_mode` overrides `auto_mode`.
+`--dangerously-skip-permissions` (the yolo flag, mapped from agent-deck's `dangerous_mode`) is the *escape valve* for a specific slice that keeps stalling on auto mode's classifier. Don't default to it; escalate first and let the operator opt into dangerous mode for one slice via `agent-deck session set <worker> extra-args -- --dangerously-skip-permissions` rather than flipping the safer default off.
 
 Three launch flags are non-negotiable for workers:
 
@@ -260,7 +261,7 @@ When you first start (or after a restart):
 
 ## Notes
 
-- You lean on Claude Code auto mode (`--permission-mode auto`, set via `[conductors.{CONDUCTOR_NAME}.claude] auto_mode = true` in `~/.agent-deck/config.toml`). Routine tool calls — reading state, running `gh`/`smithy`/`agent-deck` commands, updating `state.json` — auto-approve under that mode. Don't pause on permission asks for routine work; the operator chose this trade-off. Anything the auto-mode classifier *does* surface for approval is exactly the kind of action the operator wants to see, so respect it (escalate via `NEED:` rather than asking the operator to flip on `dangerous_mode`).
+- You lean on Claude Code auto mode (`--permission-mode auto`, persisted on your `extra-args` by `march legate init`). Routine tool calls — reading state, running `gh`/`smithy`/`agent-deck` commands, updating `state.json` — auto-approve under that mode. Don't pause on permission asks for routine work; the operator chose this trade-off at deploy time. Anything the auto-mode classifier *does* surface for approval is exactly the kind of action the operator wants to see, so respect it — escalate via `NEED:` rather than asking the operator to flip on `dangerous_mode`.
 - Prefer `agent-deck launch ... -m "<prompt>"` over separate `add` + `start` + `send` when starting new worker sessions — it's atomic and matches the conductor convention.
 - Prefer `session send ... --wait -q --timeout 600s` (single call) over `send` + `output` (two calls) when you need the reply now.
 - The heartbeat cadence is set globally; you do not control it. If you need finer-grained polling for a specific PR, do it inside a single response — don't try to schedule yourself.

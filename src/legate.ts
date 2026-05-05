@@ -120,7 +120,16 @@ export interface LegateInitResult {
   templateOutputPath: string;
   conductorDir: string;
   setupCommand: string[];
+  /**
+   * Commands run after `agent-deck conductor setup` succeeds to put the
+   * conductor session into Claude Code's auto mode. Persisted on
+   * `Instance.ExtraArgs` so they survive restarts. Empty when
+   * `runSetup === false`.
+   */
+  postSetupCommands: string[][];
   setupRan: boolean;
+  /** True when the post-setup auto-mode commands all succeeded. */
+  autoModeConfigured: boolean;
   summary: string;
 }
 
@@ -301,7 +310,39 @@ export async function initLegate(
     templateOutputPath,
   ];
 
+  // Post-setup commands persist Claude Code's auto mode on the conductor's
+  // own Instance.ExtraArgs. agent-deck's [claude] auto_mode key only exists
+  // at global scope (userconfig.go: ClaudeSettings.AutoMode); group and
+  // conductor TOML blocks only carry config_dir + env_file. To scope auto
+  // mode to *this* conductor without affecting every Claude session on the
+  // host, mutate extra-args after setup and restart so the flag takes
+  // effect immediately rather than on next start.
+  const conductorTitle = `conductor-${conductorName}`;
+  const setExtraArgsCommand = [
+    "agent-deck",
+    "-p",
+    profile,
+    "session",
+    "set",
+    conductorTitle,
+    "extra-args",
+    "--",
+    "--permission-mode",
+    "auto",
+  ];
+  const restartCommand = [
+    "agent-deck",
+    "-p",
+    profile,
+    "session",
+    "restart",
+    conductorTitle,
+  ];
+  const postSetupCommands = [setExtraArgsCommand, restartCommand];
+
   let setupRan = false;
+  let autoModeConfigured = false;
+  const postSetupWarnings: string[] = [];
   if (opts.runSetup ?? true) {
     try {
       execFileSync(setupCommand[0], setupCommand.slice(1), {
@@ -314,6 +355,37 @@ export async function initLegate(
         `agent-deck conductor setup failed (exit code ${status ?? "?"}). ` +
           `Rendered template stayed at ${templateOutputPath}; you can re-run setup manually:\n  ${formatShellCommand(setupCommand)}`,
       );
+    }
+
+    // Run post-setup steps best-effort. The conductor exists at this point;
+    // a failure here means the operator can fix manually with the printed
+    // command rather than the whole init being lost.
+    let extraArgsOK = false;
+    try {
+      execFileSync(setExtraArgsCommand[0], setExtraArgsCommand.slice(1), {
+        stdio: "inherit",
+      });
+      extraArgsOK = true;
+    } catch (err) {
+      const status = (err as { status?: number }).status;
+      postSetupWarnings.push(
+        `Failed to persist --permission-mode auto on ${conductorTitle} (exit ${status ?? "?"}). ` +
+          `Run manually:\n  ${formatShellCommand(setExtraArgsCommand)}`,
+      );
+    }
+    if (extraArgsOK) {
+      try {
+        execFileSync(restartCommand[0], restartCommand.slice(1), {
+          stdio: "inherit",
+        });
+        autoModeConfigured = true;
+      } catch (err) {
+        const status = (err as { status?: number }).status;
+        postSetupWarnings.push(
+          `Failed to restart ${conductorTitle} after setting auto mode (exit ${status ?? "?"}). ` +
+            `Run manually:\n  ${formatShellCommand(restartCommand)}`,
+        );
+      }
     }
   }
 
@@ -330,27 +402,42 @@ export async function initLegate(
     `  Repo:           ${repoPath}`,
     `  Template:       ${templateOutputPath}`,
     `  Conductor dir:  ${conductorDir}`,
+    `  Auto mode:      ${
+      setupRan
+        ? autoModeConfigured
+          ? "enabled (--permission-mode auto persisted on extra-args)"
+          : "NOT configured — see warnings"
+        : "deferred (run setup first)"
+    }`,
     "",
   ];
   const tailLines = setupRan
     ? [
         "The conductor's CLAUDE.md is symlinked to the template above. Edit the",
         "template to evolve legate's behavior; changes take effect after:",
-        `  agent-deck -p ${profile} session restart conductor-${conductorName}`,
+        `  agent-deck -p ${profile} session restart ${conductorTitle}`,
         "",
         "Attach:",
-        `  agent-deck -p ${profile} session attach conductor-${conductorName}`,
+        `  agent-deck -p ${profile} session attach ${conductorTitle}`,
       ]
     : [
         "Setup skipped (--no-setup). The template is rendered but no conductor",
         "has been created yet. Run when ready:",
         `  ${formatShellCommand(setupCommand)}`,
         "",
+        "Then persist auto mode and restart:",
+        `  ${formatShellCommand(setExtraArgsCommand)}`,
+        `  ${formatShellCommand(restartCommand)}`,
+        "",
         "After that, the conductor's CLAUDE.md will be symlinked to the",
         "template above and you can attach with:",
-        `  agent-deck -p ${profile} session attach conductor-${conductorName}`,
+        `  agent-deck -p ${profile} session attach ${conductorTitle}`,
       ];
-  const summaryLines = [...baseLines, ...tailLines];
+  const warningLines =
+    postSetupWarnings.length > 0
+      ? ["", "Warnings:", ...postSetupWarnings.map((w) => `  ${w}`)]
+      : [];
+  const summaryLines = [...baseLines, ...tailLines, ...warningLines];
 
   return {
     profile,
@@ -361,7 +448,9 @@ export async function initLegate(
     templateOutputPath,
     conductorDir,
     setupCommand,
+    postSetupCommands,
     setupRan,
+    autoModeConfigured,
     summary: summaryLines.join("\n"),
   };
 }
