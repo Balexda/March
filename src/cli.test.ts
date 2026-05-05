@@ -473,6 +473,11 @@ describe("march CLI", () => {
     // docker stderr tail.
     expect(result.exitCode).toBe(1);
     expect(result.stderr.length).toBeGreaterThan(0);
+    // End-to-end check that the docker stderr tail surfaces through
+    // BuildError.message to the operator-facing stream — locks Task 2's
+    // "message includes the docker stderr tail so operators can diagnose"
+    // acceptance criterion as integration-tested.
+    expect(result.stderr).toContain("simulated build failure");
 
     // No residual march/spawn/* branch — the rollback must delete it via
     // removeSpawnWorktree.

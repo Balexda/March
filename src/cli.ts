@@ -286,7 +286,9 @@ program
         // physical-artifact cleanup so that even if cleanup itself fails
         // partway through, the record reflects the failure for auditing.
         try {
-          markSpawnRecordFailed(worktree.spawnId);
+          markSpawnRecordFailed(worktree.spawnId, {
+            error: (err as Error).message,
+          });
         } catch (markErr) {
           // The record may now be in an inconsistent state (still
           // "created" or partially written). Surface a clear warning but
