@@ -311,24 +311,24 @@ export async function initLegate(
   ];
 
   // Post-setup commands persist Claude Code's auto mode on the conductor's
-  // own Instance.ExtraArgs. agent-deck's [claude] auto_mode key only exists
-  // at global scope (userconfig.go: ClaudeSettings.AutoMode); group and
+  // ClaudeOptions. agent-deck's [claude].auto_mode key only exists at
+  // global scope (userconfig.go: ClaudeSettings.AutoMode); group and
   // conductor TOML blocks only carry config_dir + env_file. To scope auto
   // mode to *this* conductor without affecting every Claude session on the
-  // host, mutate extra-args after setup and restart so the flag takes
-  // effect immediately rather than on next start.
+  // host, use agent-deck's `auto-mode` mutable field (mutators.go:211),
+  // which flips ClaudeOptions.AutoMode → emits `--permission-mode auto`
+  // on every start/restart. Restart so the flag takes effect immediately
+  // rather than on next start.
   const conductorTitle = `conductor-${conductorName}`;
-  const setExtraArgsCommand = [
+  const setAutoModeCommand = [
     "agent-deck",
     "-p",
     profile,
     "session",
     "set",
     conductorTitle,
-    "extra-args",
-    "--",
-    "--permission-mode",
-    "auto",
+    "auto-mode",
+    "true",
   ];
   const restartCommand = [
     "agent-deck",
@@ -338,7 +338,7 @@ export async function initLegate(
     "restart",
     conductorTitle,
   ];
-  const postSetupCommands = [setExtraArgsCommand, restartCommand];
+  const postSetupCommands = [setAutoModeCommand, restartCommand];
 
   let setupRan = false;
   let autoModeConfigured = false;
@@ -360,20 +360,20 @@ export async function initLegate(
     // Run post-setup steps best-effort. The conductor exists at this point;
     // a failure here means the operator can fix manually with the printed
     // command rather than the whole init being lost.
-    let extraArgsOK = false;
+    let autoModeSet = false;
     try {
-      execFileSync(setExtraArgsCommand[0], setExtraArgsCommand.slice(1), {
+      execFileSync(setAutoModeCommand[0], setAutoModeCommand.slice(1), {
         stdio: "inherit",
       });
-      extraArgsOK = true;
+      autoModeSet = true;
     } catch (err) {
       const status = (err as { status?: number }).status;
       postSetupWarnings.push(
-        `Failed to persist --permission-mode auto on ${conductorTitle} (exit ${status ?? "?"}). ` +
-          `Run manually:\n  ${formatShellCommand(setExtraArgsCommand)}`,
+        `Failed to enable auto-mode on ${conductorTitle} (exit ${status ?? "?"}). ` +
+          `Run manually:\n  ${formatShellCommand(setAutoModeCommand)}`,
       );
     }
-    if (extraArgsOK) {
+    if (autoModeSet) {
       try {
         execFileSync(restartCommand[0], restartCommand.slice(1), {
           stdio: "inherit",
@@ -405,7 +405,7 @@ export async function initLegate(
     `  Auto mode:      ${
       setupRan
         ? autoModeConfigured
-          ? "enabled (--permission-mode auto persisted on extra-args)"
+          ? "enabled (auto-mode field set on conductor session)"
           : "NOT configured — see warnings"
         : "deferred (run setup first)"
     }`,
@@ -425,8 +425,8 @@ export async function initLegate(
         "has been created yet. Run when ready:",
         `  ${formatShellCommand(setupCommand)}`,
         "",
-        "Then persist auto mode and restart:",
-        `  ${formatShellCommand(setExtraArgsCommand)}`,
+        "Then enable auto mode and restart:",
+        `  ${formatShellCommand(setAutoModeCommand)}`,
         `  ${formatShellCommand(restartCommand)}`,
         "",
         "After that, the conductor's CLAUDE.md will be symlinked to the",

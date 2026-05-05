@@ -123,7 +123,7 @@ agent-deck -p {PROFILE} launch {REPO_PATH} \
   -m "<initial slash command>"
 ```
 
-You (the conductor) were configured the same way at `march legate init` time — the deploy command persisted `--permission-mode auto` on your own `extra-args` via `agent-deck session set conductor-{CONDUCTOR_NAME} extra-args -- --permission-mode auto`, then restarted you. On startup, verify it's still there: `agent-deck -p {PROFILE} session show --json conductor-{CONDUCTOR_NAME}` — if `extra_args` does not include `--permission-mode auto`, escalate with a `NEED:` note rather than running blind. Every routine tool call would otherwise stall on a permission prompt.
+You (the conductor) were configured at `march legate init` time — the deploy ran `agent-deck session set conductor-{CONDUCTOR_NAME} auto-mode true` (which flips `ClaudeOptions.AutoMode` and emits `--permission-mode auto` on every start/restart) and then restarted you. On startup, verify it's still on: read `tool_data` for your session in agent-deck's state and confirm `auto_mode: true` (or simply check that you don't pause on routine permission prompts). If it's missing, escalate with a `NEED:` note rather than running blind — every routine tool call would otherwise stall.
 
 `--dangerously-skip-permissions` (the yolo flag, mapped from agent-deck's `dangerous_mode`) is the *escape valve* for a specific slice that keeps stalling on auto mode's classifier. Don't default to it; escalate first and let the operator opt into dangerous mode for one slice via `agent-deck session set <worker> extra-args -- --dangerously-skip-permissions` rather than flipping the safer default off.
 

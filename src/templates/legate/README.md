@@ -111,12 +111,12 @@ To scope auto mode to legate's own conductor + its workers without affecting unr
 
 - **Conductor** — `march legate init` runs, after `agent-deck conductor setup`:
   ```
-  agent-deck -p <profile> session set conductor-legate-<slug> extra-args -- --permission-mode auto
+  agent-deck -p <profile> session set conductor-legate-<slug> auto-mode true
   agent-deck -p <profile> session restart conductor-legate-<slug>
   ```
-  No operator action required; this is part of the deploy.
+  This flips `ClaudeOptions.AutoMode` on the conductor's Instance — agent-deck's launcher then emits `--permission-mode auto` on every start/restart. No operator action required; this is part of the deploy. (We use the direct `auto-mode` field rather than `extra-args -- --permission-mode auto` so a future inspection via `agent-deck session show` reports auto mode as a structured field rather than an opaque token list, and to avoid a misleading agent-deck CLI success-message bug that prints only the first positional arg.)
 
-- **Workers** — the conductor's CLAUDE.md tells legate to include `--extra-arg --permission-mode --extra-arg auto` on every `agent-deck launch` for a worker. agent-deck stores those tokens on `Instance.ExtraArgs` and re-applies them on restart, so the auto-mode flag survives session lifecycle events.
+- **Workers** — the conductor's CLAUDE.md tells legate to include `--extra-arg --permission-mode --extra-arg auto` on every `agent-deck launch` for a worker. There is no per-launch `--auto-mode` flag on `agent-deck launch`, so workers go through the extra-args path; agent-deck stores those tokens on `Instance.ExtraArgs` and re-applies them on restart, so the flag survives session lifecycle events.
 
 agent-deck exposes three claude permission keys / flags with a fixed precedence (`userconfig.go`):
 

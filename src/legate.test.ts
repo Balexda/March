@@ -193,17 +193,17 @@ describe("legate module", () => {
       expect(result.summary).not.toMatch(
         /CLAUDE\.md is symlinked to the template above\. Edit the\n\s*template/,
       );
-      expect(result.summary).toContain("Then persist auto mode and restart");
-      expect(result.summary).toContain("--permission-mode");
+      expect(result.summary).toContain("Then enable auto mode and restart");
+      expect(result.summary).toContain("auto-mode true");
       expect(result.summary).toContain("session restart");
     });
 
     it("returns post-setup auto-mode commands targeting the conductor session", async () => {
       // agent-deck's [conductors.<name>.claude] block does not support
       // auto_mode (only config_dir + env_file per userconfig.go); auto mode
-      // has to be persisted on the conductor's Instance.ExtraArgs via
-      // `agent-deck session set ... extra-args -- --permission-mode auto`,
-      // followed by a restart so the new flag takes effect immediately.
+      // has to be flipped on the conductor's ClaudeOptions via the direct
+      // `auto-mode` mutable field (mutators.go:211), followed by a restart
+      // so the new flag takes effect immediately.
       const home = makeTmpDir();
       const tpl = makeTemplate("ok");
 
@@ -215,19 +215,17 @@ describe("legate module", () => {
       });
 
       expect(result.postSetupCommands).toHaveLength(2);
-      const [setExtraArgs, restart] = result.postSetupCommands;
+      const [setAutoMode, restart] = result.postSetupCommands;
 
-      expect(setExtraArgs).toEqual([
+      expect(setAutoMode).toEqual([
         "agent-deck",
         "-p",
         "march",
         "session",
         "set",
         "conductor-legate-march",
-        "extra-args",
-        "--",
-        "--permission-mode",
-        "auto",
+        "auto-mode",
+        "true",
       ]);
       expect(restart).toEqual([
         "agent-deck",
