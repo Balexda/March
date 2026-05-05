@@ -111,14 +111,27 @@ export interface LegateInitResult {
 /**
  * Slugify a string for use as an agent-deck profile or conductor-name component.
  * Conductor names must match `^[a-zA-Z0-9][a-zA-Z0-9._-]*$` and be ≤ 64 chars.
+ *
+ * Returns an empty string when the input has no slug-able characters; callers
+ * are responsible for substituting a stable per-repo fallback so two such
+ * repos do not collide on the same default name.
  */
 export function slugify(s: string): string {
-  const slug = s
+  return s
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "")
     .slice(0, 56); // leave headroom for "legate-" prefix without hitting 64
-  return slug || "repo";
+}
+
+/**
+ * Stable 8-hex-char content hash used to disambiguate repos whose basename
+ * has no slug-able characters (purely non-ASCII or punctuation). Hashing the
+ * absolute repo path keeps the resulting profile/conductor name stable across
+ * runs while still being unique per repo.
+ */
+function repoHashSuffix(repoPath: string): string {
+  return createHash("sha256").update(repoPath).digest("hex").slice(0, 8);
 }
 
 export function deriveDefaults(repoPath: string): {
@@ -128,7 +141,12 @@ export function deriveDefaults(repoPath: string): {
   repoName: string;
 } {
   const repoName = path.basename(repoPath);
-  const slug = slugify(repoName);
+  const baseSlug = slugify(repoName);
+  // When the basename has no slug-able characters, fall back to a hash of
+  // the absolute repo path so two such repos do not both default to the
+  // same `repo` / `legate-repo` names — that would silently collide in
+  // agent-deck's system-wide conductor namespace.
+  const slug = baseSlug || `repo-${repoHashSuffix(repoPath)}`;
   return {
     profile: slug,
     // Conductor names are unique system-wide in agent-deck — encode the repo

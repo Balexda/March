@@ -42,9 +42,11 @@ describe("legate module", () => {
       expect(slugify("---trim---")).toBe("trim");
     });
 
-    it("falls back to 'repo' for an empty result", () => {
-      expect(slugify("")).toBe("repo");
-      expect(slugify("___")).toBe("repo");
+    it("returns an empty string when the input has no slug-able characters", () => {
+      // Callers (deriveDefaults) substitute a stable per-repo hash fallback;
+      // slugify itself does not pick a fallback to avoid silent collisions.
+      expect(slugify("")).toBe("");
+      expect(slugify("___")).toBe("");
     });
 
     it("caps length at 56 chars to leave headroom for the legate- prefix", () => {
@@ -60,6 +62,22 @@ describe("legate module", () => {
       expect(defaults.profile).toBe("march");
       expect(defaults.conductorName).toBe("legate-march");
       expect(defaults.workerGroup).toBe("legate-workers");
+    });
+
+    it("falls back to a path-hashed slug when the repo basename has no slug-able characters", () => {
+      // Two repos whose basenames slug to empty must still produce
+      // different defaults — otherwise both default to `legate-repo` and
+      // collide in agent-deck's system-wide conductor namespace.
+      const a = deriveDefaults("/path/to/___");
+      const b = deriveDefaults("/other/path/to/___");
+      expect(a.conductorName).not.toBe(b.conductorName);
+      expect(a.profile).not.toBe(b.profile);
+      expect(a.conductorName).toMatch(/^legate-repo-[0-9a-f]{8}$/);
+      expect(b.conductorName).toMatch(/^legate-repo-[0-9a-f]{8}$/);
+
+      // Hashing the absolute path → same path produces the same slug.
+      const a2 = deriveDefaults("/path/to/___");
+      expect(a2.conductorName).toBe(a.conductorName);
     });
 
     it("encodes the repo slug into the conductor name so per-repo legates do not collide", () => {
