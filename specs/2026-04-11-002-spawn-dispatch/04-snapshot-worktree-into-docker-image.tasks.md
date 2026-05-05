@@ -43,7 +43,7 @@
   - Unit tests exercise the Dockerfile-generation path without requiring a running docker daemon (pure text assertion), and a separate integration-level test either stubs the docker invocation at the `execFile` boundary or guards itself behind a "docker available" check
   - A companion `removeSpawnImage(spawnId)` (or equivalent) helper is exported for use by the dispatch action's rollback path; it is idempotent and does not throw if the image does not exist
 
-- [ ] **Extend SpawnRecord module with `imageId` update and `created → failed` transition helpers**
+- [x] **Extend SpawnRecord module with `imageId` update and `created → failed` transition helpers**
 
   Extend `src/spawn-record.ts` with two functions: (a) an `imageId` update used after a successful snapshot build, and (b) a `created → failed` transition used by the dispatch rollback path when snapshot, build, or record-update fails. Both functions must read the existing record, mutate the relevant fields, and write the file back atomically (write-temp-then-rename) so a crash mid-write cannot leave a corrupted JSON file. The `imageId` update does NOT change `status` (Story 7 owns transitions out of `"failed"`/`"stopped"`). The `created → failed` helper sets `status` to `"failed"` and populates `stoppedAt` with the current ISO 8601 timestamp; it optionally accepts an error message to record alongside the transition (stored in a future-compatible way per the data model, or dropped if no schema slot exists). The existing `writeInitialSpawnRecord` and `removeSpawnRecord` functions must continue to work unchanged.
 

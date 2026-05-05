@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -166,4 +167,146 @@ export function removeSpawnRecord(id: string, homeDir?: string): void {
   } catch {
     // best-effort — treat as idempotent
   }
+}
+
+/**
+ * Reads and parses an existing SpawnRecord from disk. Throws
+ * `SpawnRecordError` if the file is missing or unreadable, or if the
+ * contents are not valid JSON.
+ */
+function readSpawnRecord(id: string, homeDir?: string): SpawnRecord {
+  const filePath = spawnRecordPath(id, homeDir);
+  let raw: string;
+  try {
+    raw = fs.readFileSync(filePath, "utf-8");
+  } catch (err) {
+    const error = err as NodeJS.ErrnoException;
+    if (error.code === "ENOENT") {
+      throw new SpawnRecordError(
+        `Spawn record not found at "${filePath}".`,
+      );
+    }
+    throw new SpawnRecordError(
+      `Failed to read spawn record at "${filePath}": ${error.message}`,
+    );
+  }
+  try {
+    return JSON.parse(raw) as SpawnRecord;
+  } catch (err) {
+    throw new SpawnRecordError(
+      `Failed to parse spawn record at "${filePath}": ${(err as Error).message}`,
+    );
+  }
+}
+
+/**
+ * Writes a SpawnRecord to disk atomically. Writes a sibling temp file
+ * first (so it lives on the same filesystem as the target, guaranteeing
+ * `rename` is atomic), then renames it over the target path. If any step
+ * fails, the temp file is best-effort removed before re-raising.
+ *
+ * The temp filename uses a random suffix from `crypto.randomBytes` so
+ * concurrent dispatches cannot collide on the temp name.
+ */
+function atomicWriteSpawnRecord(
+  filePath: string,
+  record: SpawnRecord,
+): void {
+  const suffix = crypto.randomBytes(6).toString("hex");
+  const tmpPath = `${filePath}.tmp-${suffix}`;
+  const payload = JSON.stringify(record, null, 2) + "\n";
+  try {
+    fs.writeFileSync(tmpPath, payload, { encoding: "utf-8" });
+    fs.renameSync(tmpPath, filePath);
+  } catch (err) {
+    // Best-effort cleanup: if the rename failed (or the write failed
+    // partway through), make sure we don't leave a half-written temp
+    // file behind.
+    try {
+      fs.rmSync(tmpPath, { force: true });
+    } catch {
+      // ignore cleanup errors
+    }
+    throw new SpawnRecordError(
+      `Failed to atomically write spawn record at "${filePath}": ${(err as Error).message}`,
+    );
+  }
+}
+
+/**
+ * Updates an existing SpawnRecord with the `imageId` produced by a
+ * successful Docker image build (Story 4 / FR-019). Reads the record at
+ * `spawnRecordPath(id)`, sets `imageId`, and writes the result back
+ * atomically (temp file + rename) so a crash mid-write cannot corrupt
+ * the existing record.
+ *
+ * This helper does NOT modify `status` — the record remains `"created"`.
+ * Story 7 owns transitions out of `"created"` to `"running"` /
+ * `"stopped"`.
+ *
+ * @throws {SpawnRecordError} If the source record is missing, unreadable,
+ *   or the atomic write fails.
+ */
+export function updateSpawnRecordImageId(
+  id: string,
+  imageId: string,
+  homeDir?: string,
+): SpawnRecord {
+  const existing = readSpawnRecord(id, homeDir);
+  const updated: SpawnRecord = {
+    ...existing,
+    imageId,
+  };
+  atomicWriteSpawnRecord(spawnRecordPath(id, homeDir), updated);
+  return updated;
+}
+
+/**
+ * Options accepted by {@link markSpawnRecordFailed}.
+ *
+ * Note: `error` is currently dropped because the SpawnRecord data model
+ * has no slot for an error message. The argument is accepted today so
+ * callers (e.g., the dispatch rollback path in Story 4 task 4) can pass
+ * a contextual message without the call site changing when the data
+ * model gains a `failureReason` (or similar) field. When that slot is
+ * added, this helper should persist the message into the new field.
+ */
+export interface MarkSpawnRecordFailedOptions {
+  error?: string;
+}
+
+/**
+ * Transitions an existing SpawnRecord from `"created"` (or any other
+ * pre-`"failed"` state) to `"failed"`, populating `stoppedAt` with the
+ * current ISO 8601 timestamp. Implements the data-model `created →
+ * failed` transition for Story 4's failure paths (snapshot, Docker
+ * build, or `imageId` record-update failure).
+ *
+ * The optional `error` argument is currently dropped — see
+ * {@link MarkSpawnRecordFailedOptions}.
+ *
+ * Atomic write (temp file + rename); a crash mid-write cannot corrupt
+ * the existing record.
+ *
+ * @throws {SpawnRecordError} If the source record is missing, unreadable,
+ *   or the atomic write fails.
+ */
+export function markSpawnRecordFailed(
+  id: string,
+  options?: MarkSpawnRecordFailedOptions,
+  homeDir?: string,
+): SpawnRecord {
+  // The `error` field on `options` is accepted for forward compatibility
+  // but currently dropped — see the JSDoc on
+  // `MarkSpawnRecordFailedOptions`.
+  void options;
+
+  const existing = readSpawnRecord(id, homeDir);
+  const updated: SpawnRecord = {
+    ...existing,
+    status: "failed",
+    stoppedAt: new Date().toISOString(),
+  };
+  atomicWriteSpawnRecord(spawnRecordPath(id, homeDir), updated);
+  return updated;
 }
