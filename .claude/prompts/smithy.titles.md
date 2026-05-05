@@ -2,8 +2,8 @@
 
 This prompt is the **single source of truth** for artifact title conventions
 across all smithy planning commands. Every command that produces or parses
-artifacts (ignite, render, mark, cut, strike, orders) references this prompt
-to ensure consistent naming.
+artifacts (spark, ignite, render, mark, cut, strike, orders) references this
+prompt to ensure consistent naming.
 
 ---
 
@@ -14,6 +14,7 @@ Every artifact file begins with an H1 heading that follows this pattern:
 
 | Artifact | H1 Format | Example |
 |----------|-----------|---------|
+| PRD | `# PRD: <Title>` | `# PRD: Prompt Template Linter` |
 | RFC | `# RFC: <Title>` | `# RFC: Plugin System` |
 | Feature Map | `# Feature Map: <Title>` | `# Feature Map: Core Pipeline` |
 | Feature Spec | `# Feature Specification: <Title>` | `# Feature Specification: Webhook Support` |
@@ -59,6 +60,7 @@ alphanumeric characters only.
 
 | Artifact | Folder Pattern | Example |
 |----------|----------------|---------|
+| PRD | `docs/prds/<YYYY>-<NNN>-<slug>.prd.md` (flat file, no folder) | `docs/prds/2026-001-prompt-lint.prd.md` |
 | RFC | `docs/rfcs/<YYYY>-<NNN>-<slug>/` | `docs/rfcs/2026-001-plugin-system/` |
 | Feature Map | Co-located in RFC folder | `docs/rfcs/2026-001-plugin-system/01-core-pipeline.features.md` |
 | Spec | `specs/<YYYY-MM-DD>-<NNN>-<slug>/` | `specs/2026-03-14-001-webhook-support/` |

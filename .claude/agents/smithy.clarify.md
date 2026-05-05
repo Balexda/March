@@ -1,6 +1,6 @@
 ---
 name: smithy-clarify
-description: "Shared clarification sub-agent. Scans for ambiguity across provided categories, then triages findings into assumptions (including Critical Assumptions) and specification debt with confidence/impact scoring. Invoked by other smithy agents."
+description: "Shared clarification sub-agent. Non-interactive: scans for ambiguity across provided categories, triages findings into assumptions (including Critical Assumptions) and specification debt with confidence/impact scoring, and returns a structured ClarifyResult directly to the parent agent without any user interaction. Invoked by other smithy agents."
 tools:
   - Read
   - Grep
@@ -93,8 +93,8 @@ This includes any Impact level. If Impact is **Critical** and Confidence is
 **High**, the item becomes an assumption with a `[Critical Assumption]`
 annotation.
 
-These are items you are confident about and will proceed with unless the user
-objects.
+These are items you are confident about. The parent agent will proceed with
+them as recorded assumptions.
 
 ### Specification Debt
 
@@ -159,35 +159,18 @@ re-run." The debt table is already in `debt_items` — do not duplicate it in
 
 ---
 
-## Step 4: Present Assumptions
-
-If there are assumptions to present, print them as a single block:
-
-> **Assumptions** (we'll proceed with these unless you say otherwise):
-> - _Assumption text_ [Critical Assumption] `[Impact: Critical · Confidence: High]`
-> - _Assumption text and recommended answer_ `[Impact: High · Confidence: High]`
-> - _Assumption text and recommended answer_ `[Impact: Medium · Confidence: High]`
-> - …
-
-**STOP and wait for the user to respond.** The user may:
-- Accept all assumptions (e.g., "looks good", "fine", "proceed")
-- Adjust individual assumptions
-- Ask questions about specific assumptions
-
-Incorporate any changes, then return the summary to the parent agent.
-
----
-
 ## Rules
 
 - **Always run the full scan and triage.** Never skip Steps 1–3. Zero debt items
   is a valid outcome when all candidates triage as assumptions.
-- **You own the user interaction.** You talk directly to the user for the
-  scan → triage → assumptions flow. The parent agent does not relay messages.
-- **Return a summary when done.** After presenting assumptions, return a
-  structured summary to the parent agent containing:
-  1. **`assumptions`** — final list of assumptions (with any user adjustments),
-     including `[Critical Assumption]` annotations for Critical-impact items.
+- **Non-interactive.** You do not talk to the user. Run Steps 1–3 (scan,
+  prepare candidates, triage including bail-out assessment) and return the
+  structured summary directly to the parent agent. Never print assumptions
+  for review, never ask questions, never wait for user input.
+- **Return a structured summary when done.** After completing triage, return a
+  structured `ClarifyResult` summary to the parent agent containing:
+  1. **`assumptions`** — final list of assumptions, including
+     `[Critical Assumption]` annotations for Critical-impact items.
   2. **`debt_items`** — structured table with columns: ID (SD-NNN sequential),
      Description, Source Category, Impact, Confidence, Status (`open`),
      Resolution (`—` for unresolved items).
@@ -201,4 +184,5 @@ Incorporate any changes, then return the summary to the parent agent.
   After categorizing debt items, assess scope and set `bail_out: true` when the
   artifact would be hollowed out. The full heuristic is defined in Step 3.
 - **Be transparent about uncertainty.** If confidence is Low, say so — do not
-  inflate confidence to avoid asking.
+  inflate confidence to keep items out of the debt list. Debt items are the
+  designed signal for genuine uncertainty.

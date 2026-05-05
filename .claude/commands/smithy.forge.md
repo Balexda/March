@@ -150,7 +150,7 @@ git diff --name-only <BASE_SHA> HEAD
 git diff <BASE_SHA> HEAD
 ```
 
-Use the **smithy-review** sub-agent. Pass it:
+Use the **smithy-implementation-review** sub-agent. Pass it:
 
 - **BASE_SHA**: The commit SHA from before implementation started
 - **Slice goal**: The slice's stated goal
@@ -159,12 +159,57 @@ Use the **smithy-review** sub-agent. Pass it:
 - **Changed files**: The list of files changed between BASE_SHA and HEAD
 - **Raw diff**: The full diff output
 
-After the review sub-agent returns:
+`smithy-implementation-review` is **read-only**. It returns a `ReviewResult`
+containing a list of `Finding` entries (`category`, `severity`, `confidence`,
+`description`, `artifact_path`, `proposed_fix`) and a summary. It does not
+modify files, run commands, or create commits — forge owns every on-disk
+change and commit resulting from a finding.
 
-1. **Escalated items** (low-confidence Critical findings): Present them to the
-   user and get guidance. Fix or accept as appropriate.
-2. **Auto-fixes applied**: Note the additional commits in the PR description.
-3. **PR notes**: Include the review summary in the PR body.
+Process each returned finding using the severity × confidence triage table
+from the shared review protocol:
+
+| Severity | Confidence | Forge action |
+|----------|------------|--------------|
+| Critical | High | Apply the `proposed_fix` on disk, run the test suite, commit as `review: <description>`, and note the fix in the PR body. |
+| Critical | Low | Do not apply. Append the finding to the slice planning artifact's `## Specification Debt` section and flag it in the PR body for the reviewer. |
+| Important | High | Apply the `proposed_fix` on disk, run the test suite, commit as `review: <description>`. |
+| Important | Low | Do not apply. Append the finding to the slice planning artifact's `## Specification Debt` section. |
+| Minor | Any | Do not apply and do not record as debt. Note in the PR body only. |
+
+"Slice planning artifact" above means the `.tasks.md`, `.strike.md`,
+`.spec.md`, or equivalent planning file associated with the slice you were
+asked to implement (derived from the intake file path). This is intentionally
+independent of the finding's `artifact_path`: when `artifact_path` points to
+source code or another non-planning file, do **not** create or edit a
+`## Specification Debt` section there — record the debt in the planning
+artifact only.
+
+When applying a High-confidence fix:
+
+1. Edit the files named in `artifact_path` using the `proposed_fix`.
+2. Run the test suite to confirm no regression.
+3. If tests still pass, stage and commit with the message
+   `review: <brief description of fix>`.
+4. If tests fail, revert the edit, reclassify the finding as **Low
+   confidence**, and handle it via the Low-confidence row of the table
+   above (debt for Critical/Important, PR note for Minor). Do not commit a
+   failing fix.
+
+After all findings have been processed, summarize the outcome:
+
+1. **Escalated items** — Low-confidence Critical findings surfaced to the
+   user in the PR body with the review agent's description.
+2. **Applied fixes** — the list of `review:` commits created by forge with
+   the corresponding findings they resolved.
+3. **PR notes** — Minor findings and other review summary content to
+   include in the PR body.
+4. **Recorded debt** — any Low-confidence Important (or reclassified
+   Critical) findings appended to the artifact's `## Specification Debt`
+   section, so reviewers can see them without reading the full agent
+   transcript.
+
+Forge's existing error-handling STOP gates (test failure mid-slice, blocked
+task, complex-fix escalation) are unchanged by the review phase.
 
 ---
 
@@ -212,8 +257,6 @@ suite against the **current HEAD** (which includes any maid auto-fix commits):
 - Lint
 - Tests
 
-For `.strike.md` mode: also run through the **Validation Plan** checklist from the strike document and check off each item.
-
 Include the command output summary in your final response so reviewers know what passed locally.
 
 ---
@@ -242,7 +285,7 @@ This traceability lets reviewers navigate from PR → slice → spec to understa
   - **Tasks completed**: Checklist of what was implemented
   - **Review**: Auto-fixes applied, notes for reviewer (important/minor findings)
   - **Documentation**: Maid findings — auto-fixes applied and items flagged for review (omit section if clean)
-  - **Validation**: Summary of commands run and their results, plus Validation Plan outcomes (run after all code and doc fixes are committed)
+  - **Validation**: Summary of commands run and their results (run after all code and doc fixes are committed)
 
 ---
 

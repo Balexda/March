@@ -62,7 +62,8 @@ Before auditing, locate the source RFC and the specific milestone the map covers
 3. **Read the matched RFC milestone section** so it is available as the baseline
    for the audit scan.
 4. If neither the header nor the fallback resolves a valid RFC and milestone,
-   stop and ask the user to provide the RFC path and milestone number.
+   abort with an error message instructing the user to re-invoke render with
+   an explicit RFC path and milestone number.
 
 ### Phase 0a–0b: Audit & Refinement Questions
 
@@ -76,7 +77,6 @@ Use the **smithy-refine** sub-agent. Pass it:
   | **Gaps** | Are there milestone goals or success criteria that no feature addresses? |
   | **Overlap** | Are there features with unclear or overlapping boundaries? |
   | **Dependency Clarity** | Are inter-feature dependencies within the milestone evident, or are they hidden? |
-  | **Feature Dependency Order** | If the feature map contains a `## Feature Dependency Order` section: does it list every feature with a single `[ ]`/`[x]` checkbox and a `**Feature N Spec: <Title>**` row title? Is the recommended sequence logically justified? Do `[x]` entries match features that have spec folders? If absent (legacy feature map), treat as N/A. |
   | **RFC Alignment** | Does the feature map align with the RFC's stated goals and success criteria for this milestone? |
 
 - **Target files**: the `.features.md` file and the source `.rfc.md` file
@@ -91,16 +91,66 @@ Use the **smithy-refine** sub-agent. Pass it:
 
 After the sub-agent returns its summary:
 
-1. Incorporate the user's answers into an **updated feature map**.
-2. Overwrite the existing `.features.md` with the updated version.
-3. Present a **summary** of what changed (features added, removed, merged,
-   re-scoped, or reworded). **Do NOT dump the full file contents into the
-   terminal** — the file is on disk for the user to review.
-4. **STOP and ask**: "Review the updated map at `<path>` and let me know if
-   you'd like changes, or approve to move on."
+1. Apply the refinements from smithy-refine directly to the `.features.md`
+   file in place — refine is non-interactive and returns high-confidence
+   refinements ready to apply. Do not pause for user approval before
+   writing.
+2. Route any low-confidence findings returned in `debt_items` into the
+   feature map's `## Specification Debt` section.
+3. Run the **Plan-Review Pass** described below on the refined
+   `.features.md` file before committing. Plan-review runs after refine has
+   applied its changes and before the commit below, so any High-confidence
+   fixes it proposes are captured in the same refinement commit.
+4. Commit the refinement diff and create a PR for the refinement using the
+   forge `gh pr create` pattern (the same pattern Phase 4 uses below).
+5. Render the one-shot output block (the format defined in the
+   `one-shot-output` shared snippet, inlined into Phase 4 below) as the
+   terminal contract for the refinement pass, using the feature map as the
+   artifact produced. Do **not** pause for user approval of the refinement
+   diff before creating the PR — Phase 0 is non-interactive like the
+   first-pass flow.
 
-If the user requests changes, incorporate them, update the file on disk, and
-ask again. Once approved, confirm the file path and suggest next steps.
+#### Plan-Review Pass (Phase 0c)
+
+After refine applies its changes to the feature map and before committing,
+dispatch the **smithy-plan-review** sub-agent to perform a self-consistency
+review of the refined artifact. Pass it:
+
+- **artifact_paths** — the repo-relative path to the refined feature map
+  file (`docs/rfcs/<YYYY>-<NNN>-<slug>/<NN>-<milestone-slug>.features.md`).
+- **artifact_type** — `feature-map`.
+
+The agent is read-only and returns a `ReviewResult` containing `findings` and a
+`summary`. Process the findings using the shared severity × confidence triage
+table:
+
+| Severity  | Confidence | Action                                                                                                       |
+|-----------|------------|--------------------------------------------------------------------------------------------------------------|
+| Critical  | High       | Apply the `proposed_fix` to the feature map on disk. Note the fix in the PR body.                            |
+| Critical  | Low        | Do not apply. Append to the feature map's `## Specification Debt` section. Flag in PR for the reviewer.      |
+| Important | High       | Apply the `proposed_fix` to the feature map on disk.                                                         |
+| Important | Low        | Do not apply. Append to the feature map's `## Specification Debt` section.                                   |
+| Minor     | Any        | Do not apply. Note in the PR body only.                                                                      |
+
+For each Low-confidence finding routed to debt, append a new row to the
+feature map's `## Specification Debt` table with the next available `SD-NNN`
+identifier (continue numbering from whatever refine or prior clarify passes
+already wrote — do not reset). Use the finding's `description` for the
+Description column, set `Source Category` to `plan-review:<finding category>`
+(e.g., `plan-review:Internal contradiction`), copy severity into Impact and
+confidence into Confidence, set Status to `open`, and leave Resolution as `—`.
+
+For each High-confidence finding, edit the feature map file in place using
+the `proposed_fix`. The Phase 0c commit below captures both the refine diff
+and the plan-review fixes in the same commit.
+
+If the agent returns drift findings (assumption-output drift category),
+surface them prominently in the refinement PR body so the reviewer can
+confirm the underlying assumption rather than silently accepting the applied
+fix.
+
+The review agent never modifies files itself — all on-disk changes are made
+here, by render.
 
 ---
 
@@ -110,18 +160,19 @@ Parse the input and prepare the target:
 
 1. **Read the RFC file.** Parse the Milestones section to extract all milestones
    (each `### Milestone N: <Title>` heading).
-2. **Validate the target milestone.** If a milestone number was specified, confirm
-   it exists. If auto-selected, proceed with that choice (step 5 will confirm).
+2. **Validate the target milestone.** If a milestone number was specified,
+   verify it exists in the RFC and abort with a clear error if it does not.
+   If auto-selected, proceed with that choice without asking — render is
+   one-shot and Step 5 only reports the target, it does not re-confirm it.
 3. **Derive the slug.** Create a kebab-case slug from the milestone title
    (e.g., "Core Pipeline Commands" → `core-pipeline-commands`).
 4. **Derive the filename.** `<NN>-<milestone-slug>.features.md` where `<NN>` is the
    two-digit zero-padded milestone number (e.g., `01-`, `02-`, ... `09-`, `10-`).
-5. **Confirm the target with the user:**
+5. **Report the target** to the terminal so the developer can see what
+   render picked (do not block on confirmation — render is one-shot):
    - RFC path
    - Milestone number and title
    - Derived filename
-
-**STOP and wait** for the user to confirm before proceeding.
 
 ---
 
@@ -318,27 +369,196 @@ Direction must be either `depends on` or `depended upon by`.
 _If no cross-milestone dependencies exist, state "None — this milestone is self-contained."_
 ```
 
-## Phase 4: Write & Review
+## Phase 4: Write & Create PR
+
+Render runs one-shot: after the feature map is on disk, commit it, create a
+PR for the feature map artifact, and render the one-shot output snippet as
+the terminal contract. Do **not** pause for user approval before creating
+the PR.
+
+### Plan-Review Pass
+
+After the feature map file is on disk and before the commit step, dispatch
+the **smithy-plan-review** sub-agent to perform a self-consistency review.
+Pass it:
+
+- **artifact_paths** — the repo-relative path to the feature map file
+  (`docs/rfcs/<YYYY>-<NNN>-<slug>/<NN>-<milestone-slug>.features.md`).
+- **artifact_type** — `feature-map`.
+
+The agent is read-only and returns a `ReviewResult` containing `findings` and a
+`summary`. Process the findings using the shared severity × confidence triage
+table from the contracts:
+
+| Severity  | Confidence | Action                                                                                                       |
+|-----------|------------|--------------------------------------------------------------------------------------------------------------|
+| Critical  | High       | Apply the `proposed_fix` to the feature map on disk. Note the fix in the PR body.                            |
+| Critical  | Low        | Do not apply. Append to the feature map's `## Specification Debt` section. Flag in PR for the reviewer.      |
+| Important | High       | Apply the `proposed_fix` to the feature map on disk.                                                         |
+| Important | Low        | Do not apply. Append to the feature map's `## Specification Debt` section.                                   |
+| Minor     | Any        | Do not apply. Note in the PR body only.                                                                      |
+
+For each Low-confidence finding routed to debt, append a new row to the
+feature map's `## Specification Debt` table with the next available `SD-NNN`
+identifier (continue numbering from whatever clarify already wrote in Phase 2
+— do not reset). Use the finding's `description` for the Description column,
+set `Source Category` to `plan-review:<finding category>` (e.g.,
+`plan-review:Internal contradiction`), copy severity into Impact and
+confidence into Confidence, set Status to `open`, and leave Resolution as `—`.
+
+For each High-confidence finding, edit the feature map file in place using
+the `proposed_fix`. The commit below captures both the original feature map
+and the applied fixes in the same diff.
+
+If the agent returns drift findings (assumption-output drift category),
+surface them prominently in the PR body so the reviewer can confirm the
+underlying assumption rather than silently accepting the applied fix.
+
+The review agent never modifies files itself — all on-disk changes are made
+here, by render.
+
+### Commit and create the PR
 
 1. Write the feature map to the RFC folder as `<NN>-<milestone-slug>.features.md`,
    co-located with the source RFC.
-2. Present a **summary** of the draft — feature count, feature titles, and key
-   scope boundaries. **Do NOT dump the full file contents into the terminal** —
-   the file is on disk for the user to review.
-3. **STOP and ask**: "Review the feature map at `<path>` and let me know if
-   you'd like changes, or approve to move on."
+2. Run the Plan-Review Pass described above on the feature map file that was
+   just written.
+3. Commit the feature map file on the feature branch (capturing both the
+   original feature map and any plan-review fixes in the same diff).
+4. Create a PR for the feature map artifact using the forge `gh pr create`
+   pattern:
+   - **Title**: `Feature Map: <Milestone Title>`, under 70 characters,
+     descriptive text only.
+   - **Body**: the one-shot output snippet content (rendered below) plus a
+     relative link to the feature map file.
+5. Render the one-shot output snippet as the terminal contract. For a
+   feature-map run, use the RFC folder as the spec folder and substitute
+   feature counts where the snippet asks for user stories / functional
+   requirements. Copy the clarify return's `assumptions` into the
+   snippet's `## Assumptions` section (the snippet / PR body is the only
+   Assumptions surface — the feature map artifact has no `## Assumptions`
+   section). Write `debt_items` into **both** the feature map's
+   `## Specification Debt` table **and** the snippet's
+   `## Specification Debt` summary so the PR body and the artifact stay
+   in sync.
 
-If the user wants changes, incorporate them, update the file on disk, and ask
-again. Once approved, suggest the next step:
-> "Ready for `smithy.mark` to specify each feature."
+## One-Shot Output
 
+Render this block verbatim as the terminal output of a one-shot planning
+command run. Replace each placeholder with the value captured during the run
+— do **not** reword the section headers, and do **not** drop sections. The
+format is the contract that lets developers scan every planning command's
+output the same way.
+
+```markdown
+## Summary
+
+- **Spec folder**: `<path>`
+- **Branch**: `<branch>`
+- **Artifacts produced**: <count> files (<list>)
+- **User stories**: <count> (P1: <n>, P2: <n>, P3: <n>)
+- **Functional requirements**: <count>
+
+## Assumptions
+
+- <assumption 1>
+- <assumption 2> [Critical Assumption]
+- ...
+
+(If clarify returned zero assumptions, write: `None — the feature description
+was unambiguous.`)
+
+## Specification Debt
+
+<count> items deferred — see `## Specification Debt` in the artifact.
+
+- <debt item 1 description> [Impact: <level>]
+- <debt item 2 description> [Impact: <level>]
+- ...
+
+(If clarify returned zero debt items, write: `None — no specification debt
+was recorded.`)
+
+## PR
+
+<PR link>
+```
+
+### Placeholder Guidance
+
+- **Spec folder**: absolute-or-repo-relative path to the folder containing the
+  artifacts produced by the run (e.g. `specs/2026-04-08-003-reduce-interaction-friction/`).
+  For RFC-only runs (ignite without a downstream spec folder), use the RFC
+  file's parent directory.
+- **Branch**: the feature branch the command pushed the PR from.
+- **Artifacts produced**: file count and comma-separated list of basenames
+  (e.g. `3 files (reduce-interaction-friction.spec.md, …data-model.md,
+  …contracts.md)`).
+- **User stories / Functional requirements**: counts lifted from the spec.
+  For commands that don't produce a spec directly (ignite → RFC, render →
+  feature map), substitute the next-level-down counts — milestones, features,
+  etc. — and relabel the bullet accordingly.
+- **Assumptions**: copy each item from the clarify return's `assumptions`
+  array. Preserve the `[Critical Assumption]` annotation on any item whose
+  severity was Critical.
+- **Specification Debt**: copy each item from the clarify return's
+  `debt_items` array, including its Impact level. The leading count MUST
+  match the number of bullets rendered.
+- **PR**: the `gh pr create` URL captured after the artifact write-out step.
+
+### Error Fallbacks
+
+Two edge cases change the output shape. Follow these rules rather than
+attempting to render the full format above:
+
+- **PR creation failure**: if `gh pr create` fails (network error, auth
+  failure, missing upstream, etc.), still render the `## Summary`,
+  `## Assumptions`, and `## Specification Debt` sections from the captured
+  run data, then replace the `## PR` section with:
+
+  ```markdown
+  ## PR
+
+  PR creation failed — artifacts are on disk at `<spec folder>`. Re-run `gh
+  pr create` manually, or retry the command. Error: <error message>.
+  ```
+
+  Never silently drop the PR section; the developer needs to see that PR
+  creation was attempted and failed.
+
+- **Bail-out**: if the run short-circuited because clarify returned
+  `bail_out: true`, no artifacts were written and there is no PR. Skip the
+  full format above and render only:
+
+  ```markdown
+  ## Bail-Out
+
+  The feature description has too much specification debt to produce a
+  meaningful artifact. No files were written and no PR was created.
+
+  ### Why
+
+  <clarify's bail_out_summary>
+
+  ### What's needed
+
+  <clarify's debt summary — the specific information required to proceed>
+  ```
+
+  Do not emit `## Summary`, `## Assumptions`, `## Specification Debt`, or
+  `## PR` in the bail-out case. The bail-out summary replaces the whole
+  block.
 ---
 
 ## Rules
 
 - **DO NOT** write code or implementation details. Feature maps are "WHAT not HOW".
-- **DO NOT** skip clarification. Always ask at least one question, even for well-defined milestones.
-- **DO** write the feature map file to disk before asking for review — do not
+- **DO NOT** skip clarification. Always run smithy-clarify — it is
+  non-interactive and returns assumptions and debt items directly.
+- **DO NOT** stop for user approval before creating the feature map PR.
+  Render is one-shot: Phase 4 writes the map, creates the PR, and renders
+  the one-shot output snippet without an intermediate approval gate.
+- **DO** write the feature map file to disk before creating the PR — do not
   dump the full contents into the terminal.
 - **DO NOT** treat render as an entry point — it requires an existing RFC from `smithy.ignite`. If the user provides a description instead of a file path, redirect them to ignite.
 - **DO** ensure each feature is a discrete unit of user-facing functionality.

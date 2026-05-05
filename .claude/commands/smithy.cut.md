@@ -41,6 +41,7 @@ Use the **smithy-refine** sub-agent. Pass it:
   | **FR Traceability** | Does every slice trace to at least one FR or acceptance scenario from the user story? Are any FRs unaddressed? |
   | **Dependency Order** | Is the recommended implementation sequence logical? Would reordering reduce risk or unblock parallel work? |
   | **Task Scoping** | Do tasks follow the structured format (bold title + behavioral description + acceptance criteria bullets)? Are any tasks over 150 words? Do tasks reference acceptance scenarios by ID rather than restating their content? Are test mechanics absent (no stub configs, mock patterns, assertion structures)? Are there standalone test tasks, file-reading tasks, verification tasks, line-number references, exact code prescriptions, exact error strings, or exact function signatures that would break fresh-context dispatch or create brittleness? |
+  | **Specification Debt** | Are there open debt items that can now be resolved based on new information or user answers? Are all debt items structured with required metadata columns? Are inherited items attributed to their source artifact? |
   | **Spec Alignment** | Do the slices fully cover the user story's acceptance scenarios? Has the spec changed since the tasks file was written? |
 
 - **Target files**: the `.tasks.md` file alongside the source spec (`.spec.md`),
@@ -50,9 +51,216 @@ Use the **smithy-refine** sub-agent. Pass it:
 ### 0c. Apply Refinements
 
 After the sub-agent returns its summary, update the existing tasks file on disk
-to incorporate the refinements. Present a summary of what changed — do not dump
-the full file contents into the terminal. **STOP and ask** the user to review
-the updated file at its path and let you know if further changes are needed.
+to incorporate the refinements. Do not dump the full file contents into the
+terminal.
+
+One-shot mode: do **not** stop to ask the user to review or approve the
+refinements. The refinement diff is the review surface and the one-shot PR
+below is how the user sees it.
+
+Plan-review runs unconditionally on the tasks file after refine — even
+when refine returned an empty `refinements` list. Refine and plan-review
+audit different categories, so plan-review can surface issues refine did
+not identify (internal contradictions, logical gaps, assumption-output
+drift, brittle references). The no-op check below fires only when both
+sub-agents produced nothing and the worktree is still clean.
+
+#### Plan-Review Pass (Phase 0c)
+
+After refine applies its changes to the tasks file (or declines to) and
+before the no-op check below, dispatch the **smithy-plan-review**
+sub-agent to perform a self-consistency review of the tasks file. Pass it:
+
+- **artifact_paths** — the repo-relative path to the refined tasks file
+  (`specs/<folder>/<NN>-<story-slug>.tasks.md`).
+- **artifact_type** — `tasks`.
+
+The agent is read-only and returns a `ReviewResult` containing `findings` and a
+`summary`. Process the findings using the shared severity × confidence triage
+table:
+
+| Severity  | Confidence | Action                                                                                                    |
+|-----------|------------|-----------------------------------------------------------------------------------------------------------|
+| Critical  | High       | Apply the `proposed_fix` to the tasks file on disk. Note the fix in the PR body.                          |
+| Critical  | Low        | Do not apply. Append to the tasks file's `## Specification Debt` section. Flag in PR for the reviewer.    |
+| Important | High       | Apply the `proposed_fix` to the tasks file on disk.                                                       |
+| Important | Low        | Do not apply. Append to the tasks file's `## Specification Debt` section.                                 |
+| Minor     | Any        | Do not apply. Note in the PR body only.                                                                   |
+
+For each Low-confidence finding routed to debt, append a new row to the
+tasks file's `## Specification Debt` table with the next available `SD-NNN`
+identifier (continue numbering from whatever the tasks file already contains,
+including debt inherited from the spec — do not reset). Use the finding's
+`description` for the Description column, set `Source Category` to
+`plan-review:<finding category>` (e.g., `plan-review:Internal
+contradiction`), copy severity into Impact and confidence into Confidence,
+set Status to `open`, and leave Resolution as `—`.
+
+For each High-confidence finding, edit the tasks file in place using the
+`proposed_fix`. The Phase 0c commit below captures both the refine diff and
+the plan-review fixes in the same commit.
+
+If the agent returns drift findings (assumption-output drift category),
+surface them prominently in the refinement PR body so the reviewer can
+confirm the underlying assumption rather than silently accepting the applied
+fix.
+
+The review agent never modifies files itself — all on-disk changes are made
+here, by cut.
+
+**No-op check** (runs after refine and plan-review): if refine returned an
+empty `refinements` list, plan-review returned no High-confidence fixes and
+no new debt rows, and `git status --porcelain` reports a clean worktree,
+this pass had nothing to change. Skip the commit, push, and PR-creation
+steps below. Render the one-shot output snippet with an explicit "no-op"
+note in `## Summary` ("Artifacts produced: 0 files — refine and plan-review
+found no changes") and reuse the branch's existing PR URL if one exists
+(fall back to "No PR — nothing to change" otherwise). Do not fail with
+"nothing to commit".
+
+1. Stage and commit the refinement diff on the current branch. The commit
+   message should describe the refinements applied (e.g.,
+   `cut refine: split Slice 2; resolve SD-001`).
+2. Push the branch to `origin`.
+3. Check whether the current branch already has an open pull request (for
+   example with `gh pr view --json url` or by querying by head branch).
+   - If a PR already exists for this branch, capture and reuse that PR URL
+     for the one-shot output snippet — do **not** run `gh pr create`
+     again, and do **not** treat the existing PR as a failure.
+   - If no PR exists, create one using the same `gh pr create` pattern
+     that `smithy.forge` uses:
+     - **Title**: `Refine <user story title> tasks` — under 70 characters.
+     - **Body**: the refine summary, a list of refinements applied, and any
+       debt items resolved or introduced by this pass.
+4. Capture the resulting or existing PR URL for the one-shot output snippet.
+
+If `gh pr create` fails, fall through to the PR-creation-failure branch of
+the one-shot output snippet so the user sees exactly what changed and what
+went wrong.
+
+Render the shared one-shot output snippet as the terminal output, mapping
+refine-run data onto the snippet's canonical sections: in `## Summary`, use
+the spec folder for `<path>`, the current branch for `<branch>`, and list
+the refined tasks file (plus any spec write-back) under "Artifacts
+produced". Follow the snippet's relabeling guidance to report the slice
+count in place of the default "User stories" bullet. Populate Assumptions
+(from refine's findings), Specification Debt (from refine's `debt_items`,
+including inherited debt carried forward from the spec), and PR (the
+captured URL). Do not invent new placeholders or reinterpret existing
+ones.
+
+## One-Shot Output
+
+Render this block verbatim as the terminal output of a one-shot planning
+command run. Replace each placeholder with the value captured during the run
+— do **not** reword the section headers, and do **not** drop sections. The
+format is the contract that lets developers scan every planning command's
+output the same way.
+
+```markdown
+## Summary
+
+- **Spec folder**: `<path>`
+- **Branch**: `<branch>`
+- **Artifacts produced**: <count> files (<list>)
+- **User stories**: <count> (P1: <n>, P2: <n>, P3: <n>)
+- **Functional requirements**: <count>
+
+## Assumptions
+
+- <assumption 1>
+- <assumption 2> [Critical Assumption]
+- ...
+
+(If clarify returned zero assumptions, write: `None — the feature description
+was unambiguous.`)
+
+## Specification Debt
+
+<count> items deferred — see `## Specification Debt` in the artifact.
+
+- <debt item 1 description> [Impact: <level>]
+- <debt item 2 description> [Impact: <level>]
+- ...
+
+(If clarify returned zero debt items, write: `None — no specification debt
+was recorded.`)
+
+## PR
+
+<PR link>
+```
+
+### Placeholder Guidance
+
+- **Spec folder**: absolute-or-repo-relative path to the folder containing the
+  artifacts produced by the run (e.g. `specs/2026-04-08-003-reduce-interaction-friction/`).
+  For RFC-only runs (ignite without a downstream spec folder), use the RFC
+  file's parent directory.
+- **Branch**: the feature branch the command pushed the PR from.
+- **Artifacts produced**: file count and comma-separated list of basenames
+  (e.g. `3 files (reduce-interaction-friction.spec.md, …data-model.md,
+  …contracts.md)`).
+- **User stories / Functional requirements**: counts lifted from the spec.
+  For commands that don't produce a spec directly (ignite → RFC, render →
+  feature map), substitute the next-level-down counts — milestones, features,
+  etc. — and relabel the bullet accordingly.
+- **Assumptions**: copy each item from the clarify return's `assumptions`
+  array. Preserve the `[Critical Assumption]` annotation on any item whose
+  severity was Critical.
+- **Specification Debt**: copy each item from the clarify return's
+  `debt_items` array, including its Impact level. The leading count MUST
+  match the number of bullets rendered.
+- **PR**: the `gh pr create` URL captured after the artifact write-out step.
+
+### Error Fallbacks
+
+Two edge cases change the output shape. Follow these rules rather than
+attempting to render the full format above:
+
+- **PR creation failure**: if `gh pr create` fails (network error, auth
+  failure, missing upstream, etc.), still render the `## Summary`,
+  `## Assumptions`, and `## Specification Debt` sections from the captured
+  run data, then replace the `## PR` section with:
+
+  ```markdown
+  ## PR
+
+  PR creation failed — artifacts are on disk at `<spec folder>`. Re-run `gh
+  pr create` manually, or retry the command. Error: <error message>.
+  ```
+
+  Never silently drop the PR section; the developer needs to see that PR
+  creation was attempted and failed.
+
+- **Bail-out**: if the run short-circuited because clarify returned
+  `bail_out: true`, no artifacts were written and there is no PR. Skip the
+  full format above and render only:
+
+  ```markdown
+  ## Bail-Out
+
+  The feature description has too much specification debt to produce a
+  meaningful artifact. No files were written and no PR was created.
+
+  ### Why
+
+  <clarify's bail_out_summary>
+
+  ### What's needed
+
+  <clarify's debt summary — the specific information required to proceed>
+  ```
+
+  Do not emit `## Summary`, `## Assumptions`, `## Specification Debt`, or
+  `## PR` in the bail-out case. The bail-out summary replaces the whole
+  block.
+**Resolving specification debt**: When the refine sub-agent identifies debt
+items that can now be resolved based on new information or user answers,
+update those items in the tasks file's `## Specification Debt` table: change
+status from `open` or `inherited` to `resolved` and populate the Resolution
+column with a note describing how and when the item was addressed (e.g.,
+`Resolved 2026-04-10 — user confirmed webhooks are HTTP-only`).
 
 This phase runs INSTEAD of Phases 1-5 when a tasks file already exists. If more
 refinement is needed, the user can re-run the command (another pass through
@@ -443,7 +651,7 @@ existing code to find the right implementation pattern.
 
 ---
 
-## Phase 5: Write & Review
+## Phase 5: Write & PR
 
 Write the file to `specs/<folder>/<NN>-<story-slug>.tasks.md` (where `<NN>` is
 the zero-padded user story number).
@@ -474,13 +682,12 @@ Write-back procedure:
    table: set `ID` to `US<N>`, `Title` to the user story title from the story
    list parsed in Phase 1, `Depends On` to `—`, and `Artifact` to the
    repo-relative tasks file path.
-6. **Table absent**: If the spec contains neither a `## Dependency Order`
-   table nor a legacy `## Story Dependency Order` section, create a new
-   `## Dependency Order` section at the end of the spec file. Seed the table
-   from the user story list parsed in Phase 1 — one `US<N>` row per story in
-   story-number order, with `Depends On` set to `—` for every row and
-   `Artifact` set to `—` for every row **except** the current story's row,
-   which gets the repo-relative tasks file path. Use this shape:
+6. **Table absent**: If the spec contains no `## Dependency Order` table,
+   create a new `## Dependency Order` section at the end of the spec file.
+   Seed the table from the user story list parsed in Phase 1 — one `US<N>`
+   row per story in story-number order, with `Depends On` set to `—` for
+   every row and `Artifact` set to `—` for every row **except** the current
+   story's row, which gets the repo-relative tasks file path. Use this shape:
 
    ```markdown
    ## Dependency Order
@@ -492,32 +699,212 @@ Write-back procedure:
    | US3 | <Story 3 title> | — | specs/<folder>/03-story-slug.tasks.md |
    ```
 
-7. **Legacy format present**: If the spec contains only the legacy
-   `## Story Dependency Order` checkbox section and NO `## Dependency Order`
-   table, **skip write-back silently**. Do not migrate, rewrite, or annotate
-   the legacy section. Do not flip any checkbox. The tasks file is still
-   written to disk; only the source spec is left untouched. Mention in the
-   summary that the legacy spec was not updated.
-
 The `Artifact` cell is the single source of truth for "does this user story
-have a tasks file yet" — it replaces the legacy checkbox signal entirely.
+have a tasks file yet".
 
-Then present a summary to the user:
+### Plan-Review Pass
 
-1. Show a summary:
-   - Number of slices with their titles.
-   - Which FRs and acceptance scenarios each slice addresses.
-   - The recommended implementation order.
-   - Estimated complexity per slice (small / medium / large).
-2. Highlight any risks, open questions, or tradeoffs in the slicing.
-3. **Do NOT dump the full file contents into the terminal.** The file is on
-   disk — the user can review it in their editor.
-4. **STOP and ask**: "Review the tasks at `<path>` and let me know if you'd
-   like changes, or approve to finalize."
+After the tasks file is on disk (and the spec write-back has been performed)
+and before committing, dispatch the **smithy-plan-review** sub-agent to
+perform a self-consistency review. Pass it:
 
-If the user requests changes, incorporate them, update the file on disk, and
-ask again.
+- **artifact_paths** — the repo-relative path to the tasks file just written
+  (for cut: `specs/<folder>/<NN>-<story-slug>.tasks.md`). The spec
+  write-back path is **not** part of the review's `artifact_paths` — the
+  review only audits the new tasks artifact, not the parent spec's
+  dependency-order table.
+- **artifact_type** — `tasks`.
 
+The agent is read-only and returns a `ReviewResult` containing `findings` and a
+`summary`. Process the findings using the shared severity × confidence triage
+table from the contracts:
+
+| Severity  | Confidence | Action                                                                                                    |
+|-----------|------------|-----------------------------------------------------------------------------------------------------------|
+| Critical  | High       | Apply the `proposed_fix` to the tasks file on disk. Note the fix in the PR body.                          |
+| Critical  | Low        | Do not apply. Append to the tasks file's `## Specification Debt` section. Flag in PR for the reviewer.    |
+| Important | High       | Apply the `proposed_fix` to the tasks file on disk.                                                       |
+| Important | Low        | Do not apply. Append to the tasks file's `## Specification Debt` section.                                 |
+| Minor     | Any        | Do not apply. Note in the PR body only.                                                                   |
+
+For each Low-confidence finding routed to debt, append a new row to the
+tasks file's `## Specification Debt` table with the next available `SD-NNN`
+identifier (continue numbering from whatever the tasks file already
+contains, including debt inherited from the spec in Phase 1 and new items
+from cut's own clarify run — do not reset). Use the finding's `description`
+for the Description column, set `Source Category` to `plan-review:<finding
+category>` (e.g., `plan-review:Internal contradiction`), copy severity into
+Impact and confidence into Confidence, set Status to `open`, and leave
+Resolution as `—`.
+
+For each High-confidence finding, edit the tasks file in place using the
+`proposed_fix`. The commit below captures both the original tasks file and
+the applied fixes in the same diff.
+
+If the agent returns drift findings (assumption-output drift category),
+surface them prominently in the PR body so the reviewer can confirm the
+underlying assumption rather than silently accepting the applied fix.
+
+The review agent never modifies files itself — all on-disk changes are made
+here, by cut.
+
+### Commit and create the PR
+
+One-shot mode: do **not** stop to ask the user to review or approve the tasks
+file. The file is on disk and the PR is the review surface.
+
+**Branch check**: before committing, verify the current branch is NOT the
+repository's default branch. Discover the default branch dynamically (e.g.
+`git symbolic-ref refs/remotes/origin/HEAD`) rather than assuming `main`.
+If HEAD is on the default branch, stop with an error telling the user to
+re-run cut from the spec folder's feature branch (the one `smithy.mark`
+created) — pushing planning commits to the default branch and calling
+`gh pr create` with `head == base` will fail and pollute history.
+
+1. Stage and commit both the new `.tasks.md` file and the spec's
+   `## Dependency Order` write-back on the current branch.
+2. Push the branch to `origin`.
+3. Create a pull request using the same `gh pr create` pattern that
+   `smithy.forge` uses:
+   - **Title**: the user story title, under 70 characters, plain descriptive
+     text (no FR numbers, no bracketed tags).
+   - **Body**: a short summary with the tasks file path, the slice count and
+     titles, the FRs and acceptance scenarios each slice addresses, the
+     recommended implementation order, any tradeoffs noted, and a one-line
+     pointer to `smithy.forge` as the next step.
+4. Capture the resulting PR URL for the one-shot output snippet.
+
+If `gh pr create` fails (network error, auth failure, missing upstream,
+etc.), do **not** roll back the written files — they stay on disk. Fall
+through to the PR-creation-failure branch of the one-shot output snippet
+below so the user sees exactly what was produced and what went wrong.
+
+The bail-out behavior from Phase 3 is preserved: if clarify returned
+`bail_out: true`, the pipeline short-circuits before writing the tasks file
+and before this commit-and-PR step. The one-shot output snippet renders its
+Bail-Out branch instead of the full contract.
+
+### Render the one-shot output contract
+
+Render the shared one-shot output snippet as the terminal output for this
+run. Map captured run data onto the snippet's canonical sections: in
+`## Summary`, use the spec folder for `<path>`, the current branch name
+for `<branch>`, and list the tasks file (plus the spec write-back) under
+"Artifacts produced". Follow the snippet's relabeling guidance to report
+the slice count in place of the default "User stories" bullet. Populate
+Assumptions and Specification Debt from the full `assumptions` and
+`debt_items` arrays returned by clarify (including debt inherited from
+the spec), and substitute the PR URL from the previous step into the
+`## PR` section. Do not invent new placeholders or reinterpret existing
+ones. Do NOT dump the full file contents into the terminal; the snippet
+is the contract.
+
+## One-Shot Output
+
+Render this block verbatim as the terminal output of a one-shot planning
+command run. Replace each placeholder with the value captured during the run
+— do **not** reword the section headers, and do **not** drop sections. The
+format is the contract that lets developers scan every planning command's
+output the same way.
+
+```markdown
+## Summary
+
+- **Spec folder**: `<path>`
+- **Branch**: `<branch>`
+- **Artifacts produced**: <count> files (<list>)
+- **User stories**: <count> (P1: <n>, P2: <n>, P3: <n>)
+- **Functional requirements**: <count>
+
+## Assumptions
+
+- <assumption 1>
+- <assumption 2> [Critical Assumption]
+- ...
+
+(If clarify returned zero assumptions, write: `None — the feature description
+was unambiguous.`)
+
+## Specification Debt
+
+<count> items deferred — see `## Specification Debt` in the artifact.
+
+- <debt item 1 description> [Impact: <level>]
+- <debt item 2 description> [Impact: <level>]
+- ...
+
+(If clarify returned zero debt items, write: `None — no specification debt
+was recorded.`)
+
+## PR
+
+<PR link>
+```
+
+### Placeholder Guidance
+
+- **Spec folder**: absolute-or-repo-relative path to the folder containing the
+  artifacts produced by the run (e.g. `specs/2026-04-08-003-reduce-interaction-friction/`).
+  For RFC-only runs (ignite without a downstream spec folder), use the RFC
+  file's parent directory.
+- **Branch**: the feature branch the command pushed the PR from.
+- **Artifacts produced**: file count and comma-separated list of basenames
+  (e.g. `3 files (reduce-interaction-friction.spec.md, …data-model.md,
+  …contracts.md)`).
+- **User stories / Functional requirements**: counts lifted from the spec.
+  For commands that don't produce a spec directly (ignite → RFC, render →
+  feature map), substitute the next-level-down counts — milestones, features,
+  etc. — and relabel the bullet accordingly.
+- **Assumptions**: copy each item from the clarify return's `assumptions`
+  array. Preserve the `[Critical Assumption]` annotation on any item whose
+  severity was Critical.
+- **Specification Debt**: copy each item from the clarify return's
+  `debt_items` array, including its Impact level. The leading count MUST
+  match the number of bullets rendered.
+- **PR**: the `gh pr create` URL captured after the artifact write-out step.
+
+### Error Fallbacks
+
+Two edge cases change the output shape. Follow these rules rather than
+attempting to render the full format above:
+
+- **PR creation failure**: if `gh pr create` fails (network error, auth
+  failure, missing upstream, etc.), still render the `## Summary`,
+  `## Assumptions`, and `## Specification Debt` sections from the captured
+  run data, then replace the `## PR` section with:
+
+  ```markdown
+  ## PR
+
+  PR creation failed — artifacts are on disk at `<spec folder>`. Re-run `gh
+  pr create` manually, or retry the command. Error: <error message>.
+  ```
+
+  Never silently drop the PR section; the developer needs to see that PR
+  creation was attempted and failed.
+
+- **Bail-out**: if the run short-circuited because clarify returned
+  `bail_out: true`, no artifacts were written and there is no PR. Skip the
+  full format above and render only:
+
+  ```markdown
+  ## Bail-Out
+
+  The feature description has too much specification debt to produce a
+  meaningful artifact. No files were written and no PR was created.
+
+  ### Why
+
+  <clarify's bail_out_summary>
+
+  ### What's needed
+
+  <clarify's debt summary — the specific information required to proceed>
+  ```
+
+  Do not emit `## Summary`, `## Assumptions`, `## Specification Debt`, or
+  `## PR` in the bail-out case. The bail-out summary replaces the whole
+  block.
 ---
 
 ## Rules
@@ -549,9 +936,7 @@ ask again.
 - **DO** update the spec file's `## Dependency Order` table after writing the
   tasks file: set the matching `US<N>` row's `Artifact` cell to the
   repo-relative tasks file path. The `Artifact` cell tracks tasks-file
-  creation, not implementation completeness. If only the legacy
-  `## Story Dependency Order` checkbox section is present (and no table),
-  skip the write-back silently — do not migrate legacy files.
+  creation, not implementation completeness.
 - **DO** use the structured task format (bold title + behavioral description +
   acceptance criteria bullets). See "Guidelines for task authoring" above.
 - **DO** reference acceptance scenarios by ID (e.g., "AS 2.1") rather than

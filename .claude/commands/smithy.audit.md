@@ -86,9 +86,10 @@ Use the checklist matching the artifact's extension. Each checklist defines what
 | **Ambiguity** | Are problem statement, goals, and constraints clearly defined? Are there vague terms that need tightening? |
 | **Milestone Completeness** | Does every milestone have a clear deliverable? Are milestones ordered logically with no gaps in coverage? |
 | **Feasibility** | Are there known technical risks, dependencies, or unknowns that could block milestones? Are constraints realistic? |
-| **Persona Clarity** | Are target personas identified? Is it clear who benefits and how? |
-| **Scope Boundaries** | Is it clear what is explicitly out of scope? Are there adjacent concerns that could cause scope creep? |
+| **Persona Coverage** | Are target personas identified by role with enough description to explain who they are and how this RFC benefits them? A Personas section that exists but only names personas without describing their context or benefit fails this check. Vague references like "users" or "developers" without further detail are not coverage. |
+| **Out of Scope Completeness** | Are explicit exclusions documented in the Out of Scope section, not merely implied elsewhere? Are the scope boundaries drawn tightly enough that adjacent concerns cannot creep in? An Out of Scope section that exists but only gestures at exclusions ("not a full rewrite") without naming the specific capabilities being excluded fails this check. |
 | **Decisions vs Open Questions** | Are resolved items listed under Decisions (not Open Questions)? Do Open Questions contain only genuinely unresolved unknowns? |
+| **Specification Debt** | Does the RFC contain a `## Specification Debt` section? Are debt items structured with required metadata? |
 | **Dependency Order** | Does a `## Dependency Order` section appear immediately after `## Milestones`? Is it a 4-column Markdown table with headers `ID | Title | Depends On | Artifact`? Does every row use an `M<N>` ID (no leading zeros) that is unique within the table? Does each `Depends On` cell list only IDs from the same table (or `—`)? Does every `Artifact` cell contain either `—` or a repo-relative path to an existing `.features.md` file (flag any path that does not resolve; `—` is valid when the feature map has not yet been created)? No `[ ]`/`[x]` checkbox syntax is valid here — flag any checkbox markup as a finding. |
 ## Audit Checklist (.features.md)
 
@@ -98,8 +99,9 @@ Use the checklist matching the artifact's extension. Each checklist defines what
 | **Gaps** | Are there milestone goals or success criteria that no feature addresses? |
 | **Overlap** | Are there features with unclear or overlapping boundaries? |
 | **Dependency Clarity** | Are inter-feature dependencies within the milestone evident, or are they hidden? |
-| **Dependency Order** | If the feature map contains a `## Dependency Order` section: is it a 4-column Markdown table with headers `ID | Title | Depends On | Artifact`? Does every row use an `F<N>` ID (no leading zeros) that is unique within the table? Does each `Depends On` cell list only IDs from the same table (or `—`)? Does every `Artifact` cell contain either `—` or a repo-relative path to an existing spec folder (flag any path that does not resolve)? Is the sequence logically justified? No `[ ]`/`[x]` checkbox syntax is valid here — flag any checkbox markup as a finding. If the feature map instead contains only a legacy `## Feature Dependency Order` section (checkbox-based), treat as N/A. |
+| **Dependency Order** | If the feature map contains a `## Dependency Order` section: is it a 4-column Markdown table with headers `ID | Title | Depends On | Artifact`? Does every row use an `F<N>` ID (no leading zeros) that is unique within the table? Does each `Depends On` cell list only IDs from the same table (or `—`)? Does every `Artifact` cell contain either `—` or a repo-relative path to an existing spec folder (flag any path that does not resolve)? Is the sequence logically justified? No `[ ]`/`[x]` checkbox syntax is valid here — flag any checkbox markup as a finding. |
 | **RFC Alignment** | Does the feature map align with the RFC's stated goals and success criteria for this milestone? |
+| **Specification Debt** | Does the feature map contain a `## Specification Debt` section? Are debt items structured with required metadata? |
 ## Audit Checklist (.spec.md)
 
 | Category | What to check |
@@ -112,8 +114,9 @@ Use the checklist matching the artifact's extension. Each checklist defines what
 | **Data Model Integrity** | Are relationships, state transitions, and validation rules internally consistent? Are there entities referenced but not defined, or defined but never referenced? |
 | **Contract Completeness** | Do all integration boundaries have defined inputs, outputs, and error conditions? Are there contracts implied by requirements but not documented? |
 | **Ambiguity & Risk** | Are there vague terms, unstated assumptions, or scope boundaries that could be interpreted multiple ways? |
+| **Specification Debt** | Does the spec contain a `## Specification Debt` section between `## Assumptions` and `## Out of Scope`? Are debt items structured with ID, Description, Source Category, Impact, Confidence, Status, and Resolution columns? Are any previously-open items now resolvable? |
 | **Staleness** | Does the spec still reflect the current codebase reality? Have upstream changes invalidated any assumptions? |
-| **Dependency Order** | If the spec contains a `## Dependency Order` section: is it a 4-column Markdown table with headers `ID | Title | Depends On | Artifact`? Does every row use a `US<N>` ID (no leading zeros) that is unique within the table? Does each `Depends On` cell list only IDs from the same table (or `—`)? Does every `Artifact` cell contain either `—` or a repo-relative path to an existing `.tasks.md` file in the spec folder (flag any path that does not resolve)? Is the recommended sequence logically justified? No `[ ]`/`[x]` checkbox syntax is valid here — flag any checkbox markup as a finding. If the spec instead contains only a legacy `## Story Dependency Order` section (checkbox-based, predating the table convention), treat as N/A — do not flag. |
+| **Dependency Order** | If the spec contains a `## Dependency Order` section: is it a 4-column Markdown table with headers `ID | Title | Depends On | Artifact`? Does every row use a `US<N>` ID (no leading zeros) that is unique within the table? Does each `Depends On` cell list only IDs from the same table (or `—`)? Does every `Artifact` cell contain either `—` or a repo-relative path to an existing `.tasks.md` file in the spec folder (flag any path that does not resolve)? Is the recommended sequence logically justified? No `[ ]`/`[x]` checkbox syntax is valid here — flag any checkbox markup as a finding. |
 ## Audit Checklist (.tasks.md)
 
 | Category | What to check |
@@ -124,6 +127,7 @@ Use the checklist matching the artifact's extension. Each checklist defines what
 | **Edge Case Coverage** | Are boundary conditions, error paths, and failure modes covered in the tasks? |
 | **Task Scoping** | Do tasks follow the structured format (bold title + behavioral description + acceptance criteria bullets)? Are any tasks over 150 words? Do tasks reference acceptance scenarios by ID rather than restating their content? Are test mechanics absent (no stub configs, mock patterns, assertion structures, exact error strings, exact function signatures)? Are there standalone test tasks (should be part of TDD), file-reading/research tasks (break fresh-context dispatch), verification tasks (handled by forge), or baked-in test expectations (pre-empt TDD)? |
 | **FR Traceability** | Does every slice trace to at least one FR or acceptance scenario? Are any FRs unaddressed? |
+| **Specification Debt** | Does the tasks file contain a `## Specification Debt` section before `## Dependency Order`? Are inherited items properly attributed to the source spec? Are any open items resolvable given the current codebase state? |
 | **Dependency Order** | If the tasks file contains a `## Dependency Order` section: is it a 4-column Markdown table with headers `ID | Title | Depends On | Artifact`? Does every row use an `S<N>` ID (no leading zeros) that is unique within the table? Does each `Depends On` cell list only IDs from the same table (or `—`)? Does every `S<N>` row's `Artifact` cell contain `—` (slices live inline in the tasks file, so they never link to a separate artifact — flag any path)? Is the recommended implementation sequence logical? Would reordering reduce risk or unblock parallel work? No `[ ]`/`[x]` checkbox syntax is valid here — flag any checkbox markup as a finding. |
 ## Audit Checklist (.strike.md)
 
@@ -131,10 +135,10 @@ Use the checklist matching the artifact's extension. Each checklist defines what
 |----------|---------------|
 | **Requirement Completeness** | Are all functional requirements numbered and testable? Do they cover the full scope of the feature? |
 | **Slice Scoping** | Is the single slice PR-sized? Does it have a clear standalone goal and justification? |
-| **Validation Plan Coverage** | Does the validation plan have concrete steps that verify each requirement and success criterion? |
 | **Data Model Presence** | Is a Data Model section present? If data changes are needed, are entities and relationships defined? |
 | **Contracts Presence** | Is a Contracts section present? If interface changes are needed, are they specified? |
 | **Success Criteria** | Are success criteria numbered, testable, and aligned with the requirements? |
+| **Specification Debt** | Does the strike document contain a `## Specification Debt` section? Are debt items structured with required metadata? |
 ---
 
 ## Read-Only Enforcement

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # find-pr.sh — Detect the open PR for the current branch
 #
-# Usage: bash ${CLAUDE_SKILL_DIR}/scripts/find-pr.sh
+# Usage: ${CLAUDE_SKILL_DIR}/scripts/find-pr.sh
 #
 # Output: JSON with owner, repo, pr, ownerRepo fields.
 # Returns empty object ({}) if no open PR exists for the current branch.

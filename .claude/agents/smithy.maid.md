@@ -65,7 +65,7 @@ For each file in scope, look for:
 
 ### What NOT to check
 
-- Code style, formatting, or naming conventions — that is smithy-review's job.
+- Code style, formatting, or naming conventions — that is smithy-implementation-review's job.
 - Test coverage or correctness — that is smithy-implement's job (the TDD sub-agent invoked by forge).
 - Anything outside the 20-file blast radius.
 
