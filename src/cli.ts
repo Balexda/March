@@ -5,6 +5,7 @@ import { Command, CommanderError } from "commander";
 import { ERROR, SUCCESS, USAGE_ERROR } from "./exit-codes.js";
 import { checkSpawnDependencies } from "./deps.js";
 import { initMarch, InitError } from "./init.js";
+import { BASE_IMAGE } from "./spawn-config.js";
 import {
   removeSpawnRecord,
   SpawnRecordError,
@@ -18,13 +19,6 @@ import {
   SpawnWorktree,
   WorktreeError,
 } from "./worktree.js";
-
-/**
- * Tagged base container image with the backend CLI pre-installed.
- * Used by the dispatch action to validate image availability via
- * checkSpawnDependencies(). Eventually derived from SpawnBackend.baseImage.
- */
-const BASE_IMAGE = "march-base:latest";
 
 /**
  * Prompts the user for a yes/no confirmation on the given question.

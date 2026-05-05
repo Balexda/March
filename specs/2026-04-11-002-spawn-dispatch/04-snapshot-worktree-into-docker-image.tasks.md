@@ -30,7 +30,7 @@
   - Cleanup helper is idempotent and does not throw if the temp directory is already gone
   - Unit tests operate against real temp worktree fixtures (no mocking of `git ls-files`), cover the exclusion list end-to-end, and assert that excluded files do not appear in the build context
 
-- [ ] **Add Dockerfile generator and `docker build` invocation producing a tagged image**
+- [x] **Add Dockerfile generator and `docker build` invocation producing a tagged image**
 
   Extend the snapshot module (or add a sibling module under `src/`) with a function that writes a generated `Dockerfile` into the build context and invokes `docker build` to produce a tagged image `march-spawn-<spawn-id>`. The generated Dockerfile must match the contracts' Image Build template: `FROM <base-image-tag>`, `COPY --chown=march:march . /march/workspace`, `WORKDIR /march/workspace`. The base image tag comes from the existing `BASE_IMAGE` constant used by dependency validation. On build failure, the function must surface a `SnapshotError` (or equivalent typed error) whose message includes the docker stderr tail so operators can diagnose the failure, and must not leave a tagged image behind. Successful return yields the image tag/ID for the caller to record.
 
