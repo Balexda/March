@@ -168,22 +168,55 @@ function listTrackedFiles(worktreePath: string): string[] {
  * "self-contained context" requirement: `docker build` inspects the
  * context as a flat file tree and would not follow symlinks pointing
  * outside the temp directory.
+ *
+ * Returns `true` if the file was copied, `false` if the entry was a
+ * gitlink/submodule (directory in the worktree) and was skipped. Submodule
+ * entries appear in `git ls-files` output but are directories on disk;
+ * they have their own contexts and must not be conflated with this
+ * spawn's snapshot.
+ *
+ * Throws {@link SnapshotError} if the entry is a symlink. `git` tracks
+ * symlinks as path → target, but `fs.copyFileSync` follows symlinks on
+ * the source side, which means a tracked symlink pointing outside the
+ * worktree (e.g. `/etc/passwd`) would copy host data into the build
+ * context. We refuse rather than try to validate the resolved target,
+ * because the contracts' Snapshot Exclusion List does not currently
+ * cover symlinks and silently following them would be a privilege
+ * escalation surface.
  */
 function copyTrackedFile(
   worktreePath: string,
   contextPath: string,
   relPosixPath: string,
-): void {
+): boolean {
   // `git ls-files` always emits POSIX paths; convert to host separators
   // for the destination side so e.g. Windows callers see correct paths.
   const relHost = relPosixPath.split("/").join(path.sep);
   const src = path.join(worktreePath, relHost);
+
+  // lstatSync (not statSync) so we see the symlink itself, not its
+  // resolved target. This is the security check.
+  const stat = fs.lstatSync(src);
+  if (stat.isSymbolicLink()) {
+    throw new SnapshotError(
+      `Refusing to snapshot symlinked path "${relPosixPath}" — symlinks in the build context could exfiltrate host files outside the worktree.`,
+    );
+  }
+  if (stat.isDirectory()) {
+    // Submodule (gitlink, mode 160000): `git ls-files` lists these but
+    // they are directories on disk and have their own git history. We
+    // skip them rather than recurse — the spawn's snapshot is intentionally
+    // single-repo (Feature 2 scope; multi-repo snapshots are out of scope).
+    return false;
+  }
+
   const dest = path.join(contextPath, relHost);
   fs.mkdirSync(path.dirname(dest), { recursive: true });
   // COPYFILE_FICLONE allows reflink/CoW on supporting filesystems for a
   // free speedup but falls back to a normal copy elsewhere — the result
   // is still a real file, not a symlink.
   fs.copyFileSync(src, dest, fs.constants.COPYFILE_FICLONE);
+  return true;
 }
 
 /**
