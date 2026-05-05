@@ -222,6 +222,65 @@ describe("legate module", () => {
       );
     });
 
+    it("rejects path-traversal in conductor name before composing the staging path", async () => {
+      const home = makeTmpDir();
+      const tpl = makeTemplate("ok");
+
+      await expect(
+        initLegate({
+          repoPath: "/some/repo/March",
+          homeDir: home,
+          templatePath: tpl,
+          runSetup: false,
+          conductorName: "../../.ssh",
+        }),
+      ).rejects.toThrow(/Invalid conductor name/);
+
+      // Staging dir should not contain anything outside ~/.march/legate.
+      const escapeTarget = path.join(path.dirname(home), ".ssh");
+      expect(fs.existsSync(escapeTarget)).toBe(false);
+    });
+
+    it("rejects an empty or oversized conductor name", async () => {
+      const home = makeTmpDir();
+      const tpl = makeTemplate("ok");
+
+      await expect(
+        initLegate({
+          repoPath: "/some/repo/March",
+          homeDir: home,
+          templatePath: tpl,
+          runSetup: false,
+          conductorName: "",
+        }),
+      ).rejects.toThrow(/Conductor name cannot be empty/);
+
+      await expect(
+        initLegate({
+          repoPath: "/some/repo/March",
+          homeDir: home,
+          templatePath: tpl,
+          runSetup: false,
+          conductorName: "x".repeat(65),
+        }),
+      ).rejects.toThrow(/Conductor name too long/);
+    });
+
+    it("rejects path-traversal in profile name", async () => {
+      const home = makeTmpDir();
+      const tpl = makeTemplate("ok");
+
+      await expect(
+        initLegate({
+          repoPath: "/some/repo/March",
+          homeDir: home,
+          templatePath: tpl,
+          runSetup: false,
+          profile: "../escape",
+        }),
+      ).rejects.toThrow(/Invalid profile name/);
+    });
+
     it("throws LegateError when an explicit template path is missing", async () => {
       const home = makeTmpDir();
       await expect(

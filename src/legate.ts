@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -8,6 +9,60 @@ export class LegateError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "LegateError";
+  }
+}
+
+/**
+ * Conductor names are joined into filesystem paths under `~/.march/legate/`
+ * and `~/.agent-deck/conductor/`, and are passed to `agent-deck conductor
+ * setup`. agent-deck enforces this exact regex (see
+ * `internal/session/conductor.go: ValidateConductorName`); we mirror it here
+ * to (a) reject path-traversal attempts (`..`, `/`) before we compose any
+ * filesystem path and (b) fail fast with a march-side message rather than
+ * shelling out and parsing agent-deck's stderr.
+ */
+const CONDUCTOR_NAME_REGEX = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/;
+const CONDUCTOR_NAME_MAX_LEN = 64;
+
+/**
+ * Profile names also appear in filesystem paths (agent-deck's profile-keyed
+ * config dirs) and as a CLI flag value. Apply the same alphanumeric+`._-`
+ * shape so callers cannot inject path separators or shell metacharacters.
+ */
+const PROFILE_NAME_REGEX = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/;
+const PROFILE_NAME_MAX_LEN = 64;
+
+function validateConductorName(name: string): void {
+  if (!name) {
+    throw new LegateError("Conductor name cannot be empty.");
+  }
+  if (name.length > CONDUCTOR_NAME_MAX_LEN) {
+    throw new LegateError(
+      `Conductor name too long (max ${CONDUCTOR_NAME_MAX_LEN} characters): ${name}`,
+    );
+  }
+  if (!CONDUCTOR_NAME_REGEX.test(name)) {
+    throw new LegateError(
+      `Invalid conductor name "${name}": must start with an alphanumeric ` +
+        "character and contain only alphanumerics, dots, underscores, or hyphens.",
+    );
+  }
+}
+
+function validateProfileName(name: string): void {
+  if (!name) {
+    throw new LegateError("Profile name cannot be empty.");
+  }
+  if (name.length > PROFILE_NAME_MAX_LEN) {
+    throw new LegateError(
+      `Profile name too long (max ${PROFILE_NAME_MAX_LEN} characters): ${name}`,
+    );
+  }
+  if (!PROFILE_NAME_REGEX.test(name)) {
+    throw new LegateError(
+      `Invalid profile name "${name}": must start with an alphanumeric ` +
+        "character and contain only alphanumerics, dots, underscores, or hyphens.",
+    );
   }
 }
 
@@ -152,6 +207,12 @@ export async function initLegate(
   const description =
     opts.description ??
     `Legate orchestrator for ${repoName} (Smithy plan→PR→fix loop)`;
+
+  // Validate before composing any filesystem path so caller-supplied values
+  // like `../../.ssh` cannot escape the staging root, and so we surface a
+  // march-side error instead of shelling out and parsing agent-deck's stderr.
+  validateProfileName(profile);
+  validateConductorName(conductorName);
 
   const templatePath = await findTemplate(opts.templatePath);
   let tpl: string;
