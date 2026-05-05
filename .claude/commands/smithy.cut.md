@@ -358,7 +358,7 @@ from multiple perspectives.
 
 ### Competing Slice Lenses
 
-Dispatch 2 competing **smithy-slice** sub-agents in parallel. Each receives the
+Dispatch 3 competing **smithy-slice** sub-agents in parallel. Each receives the
 same user story, spec artifacts, codebase file paths, and scout report — the
 only difference is the **additional planning directives** field.
 
@@ -387,15 +387,29 @@ Use the following lens directives (one per sub-agent):
 > your attention, not your coverage — still flag unnecessary refactoring or
 > scope creep if you find them.
 
+#### Independent Slices
+
+> **Directive:** Bias toward slices whose `Depends On` cell is `—`. When two
+> slices touch the same files but address functionally independent acceptance
+> scenarios, treat them as parallel-eligible rather than fabricating a
+> sequential chain. Avoid front-loading "scaffolding" or "groundwork" slices
+> that exist only to enable later work — if scaffolding is real, fold it into
+> the first slice that needs it. In the Tradeoffs section, surface at least
+> one alternative slicing with greater parallel-execution potential even if
+> you ultimately recommend against it. This directive biases your attention,
+> not your coverage — still flag structural problems, missing tasks, or scope
+> creep if you find them.
+
 ---
 
 Pass the quoted directive text above as the **Additional planning directives**
 field for the corresponding smithy-slice run.
 
-After both return, dispatch the **smithy-reconcile-slices** sub-agent. Pass it:
+After all 3 return, dispatch the **smithy-reconcile-slices** sub-agent. Pass it:
 
-- Both slice decomposition outputs, each labeled with its lens name (e.g.,
-  "**[Minimal Path]** …", "**[Structural Integrity]** …")
+- All 3 slice decomposition outputs, each labeled with its lens name (e.g.,
+  "**[Minimal Path]** …", "**[Structural Integrity]** …",
+  "**[Independent Slices]** …")
 - The same context file paths
 - The user story and spec artifact paths
 

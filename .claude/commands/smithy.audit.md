@@ -99,6 +99,7 @@ Use the checklist matching the artifact's extension. Each checklist defines what
 | **Gaps** | Are there milestone goals or success criteria that no feature addresses? |
 | **Overlap** | Are there features with unclear or overlapping boundaries? |
 | **Dependency Clarity** | Are inter-feature dependencies within the milestone evident, or are they hidden? |
+| **Feature Independence** | Are features that touch disjoint code areas or address functionally independent milestone goals marked as such, so they can be specced and cut in parallel? Is the implied ordering real (data flow / contract dependency), or merely conventional? Flag features whose `Depends On` overstates the actual prerequisite. |
 | **Dependency Order** | If the feature map contains a `## Dependency Order` section: is it a 4-column Markdown table with headers `ID | Title | Depends On | Artifact`? Does every row use an `F<N>` ID (no leading zeros) that is unique within the table? Does each `Depends On` cell list only IDs from the same table (or `—`)? Does every `Artifact` cell contain either `—` or a repo-relative path to an existing spec folder (flag any path that does not resolve)? Is the sequence logically justified? No `[ ]`/`[x]` checkbox syntax is valid here — flag any checkbox markup as a finding. |
 | **RFC Alignment** | Does the feature map align with the RFC's stated goals and success criteria for this milestone? |
 | **Specification Debt** | Does the feature map contain a `## Specification Debt` section? Are debt items structured with required metadata? |
@@ -108,6 +109,7 @@ Use the checklist matching the artifact's extension. Each checklist defines what
 |----------|---------------|
 | **Story Completeness** | Does every user story have acceptance scenarios, priority justification, and an independent test? Are there obvious missing stories? |
 | **Priority Ordering** | Are user stories ordered by priority (all P1 first, then P2, then P3)? If any story appears out of priority order, flag it as a finding. |
+| **Story Independence** | Are user stories that touch disjoint code areas or address functionally independent acceptance scenarios marked as such, so they can be cut in parallel? Is the implied "all of P1 before any of P2" sequencing real, or merely conventional? Flag stories where `Depends On` overstates the actual prerequisite. |
 | **Requirement Traceability** | Does every FR trace to at least one user story? Are there user stories with no supporting requirements? |
 | **Cross-Document Consistency** | Do entities in data-model.md match Key Entities in the spec? Do contracts.md interfaces align with integration-related requirements? |
 | **Edge Case Coverage** | Are edge cases from the spec reflected in acceptance scenarios or requirements? Are there unaddressed failure modes? |

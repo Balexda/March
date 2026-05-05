@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "smithyVersion": "0.4.1",
+  "smithyVersion": "0.4.2",
   "deployLocation": "repo",
   "agents": [
     "claude"
@@ -35,6 +35,11 @@
       ".claude/agents/smithy.scout.md",
       ".claude/agents/smithy.slice.md",
       ".claude/agents/smithy.survey.md",
+      ".claude/skills/smithy.gh-issue/SKILL.md",
+      ".claude/skills/smithy.gh-issue/scripts/check-env.sh",
+      ".claude/skills/smithy.gh-issue/scripts/create-issue.sh",
+      ".claude/skills/smithy.gh-issue/scripts/link-blocked-by.sh",
+      ".claude/skills/smithy.gh-issue/scripts/search-issues.sh",
       ".claude/skills/smithy.pr-review/SKILL.md",
       ".claude/skills/smithy.pr-review/scripts/find-pr.sh",
       ".claude/skills/smithy.pr-review/scripts/get-comments.sh",

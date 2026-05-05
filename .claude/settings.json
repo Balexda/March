@@ -169,7 +169,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/smithy-session-title.mjs\""
+            "command": "[ -f \"$CLAUDE_PROJECT_DIR/.claude/hooks/smithy-session-title.mjs\" ] && node \"$CLAUDE_PROJECT_DIR/.claude/hooks/smithy-session-title.mjs\" || true"
           }
         ]
       }

@@ -26,9 +26,9 @@ dispatching competing smithy-slice sub-agents.
 
 The parent agent passes you:
 
-1. **Competing decompositions** — the structured outputs from 2 smithy-slice
-   runs, each labeled with the focus lens that produced it (e.g.,
-   "Minimal Path", "Structural Integrity").
+1. **Competing decompositions** — the structured outputs from the parallel
+   smithy-slice runs, each labeled with the focus lens that produced it (e.g.,
+   "Minimal Path", "Structural Integrity", "Independent Slices").
 2. **Context file paths** — the same codebase files that were passed to the
    slice agents, so you can verify findings against actual code.
 3. **User story** — the story title, acceptance scenarios, and traced FRs, for
@@ -42,41 +42,55 @@ The parent agent passes you:
 
 ### Step 1: Compare Slice Strategies
 
-The two decompositions may propose **different slice boundaries** — different
-numbers of slices, different groupings of acceptance scenarios, different
-foundational-vs-additive orderings. This is the most important divergence to
-resolve.
+The competing decompositions may propose **different slice boundaries** —
+different numbers of slices, different groupings of acceptance scenarios,
+different foundational-vs-additive orderings. This is the most important
+divergence to resolve.
 
 1. Map each decomposition's slices to the acceptance scenarios they address.
-2. Identify whether both decompositions cover all acceptance scenarios.
+2. Identify whether all decompositions cover the full set of acceptance
+   scenarios.
 3. Categorize the relationship:
-   - **Same slicing** — both propose the same slice boundaries (possibly with
-     different task details). Proceed to Step 2.
-   - **Different granularity** — one proposes more slices than the other (e.g.,
+   - **Same slicing** — all decompositions propose the same slice boundaries
+     (possibly with different task details). Proceed to Step 2.
+   - **Different granularity** — one proposes more slices than another (e.g.,
      2 vs 3 slices covering the same scenarios). Assess whether the finer
      split produces genuinely independent PRs or just fragments coherent work.
-   - **Different grouping** — both propose the same number of slices but group
-     scenarios differently. Assess which grouping produces more cohesive,
-     independently deliverable PRs.
+   - **Different grouping** — decompositions propose the same number of slices
+     but group scenarios differently. Assess which grouping produces more
+     cohesive, independently deliverable PRs.
 
 For different-granularity or different-grouping cases, read the relevant code
 to assess which slicing better matches the codebase's natural boundaries
 (module structure, test organization, dependency graph). Present the conflict
 with a recommendation (see Step 4).
 
+**Parallelism check.** When one decomposition marks `Depends On = —` and
+another asserts an ordering, verify the dependency exists in the actual data
+or code flow before adopting the ordered version. Convention-driven sequencing
+(e.g., "do scaffolding first, then features") is not a real dependency —
+prefer the parallel-eligible version unless the code or data flow demands
+ordering.
+
 ### Step 2: Reconcile Tasks Within Slices
 
-Once slice boundaries are established (or for each competing boundary option):
+Once slice boundaries are established (or for each competing boundary option),
+classify each task across the N decompositions you received:
 
-1. **Consensus tasks** — tasks that appear in both decompositions (same
-   substance, possibly different wording). Keep the strongest formulation.
-2. **Unique tasks** — tasks from only one decomposition. Assess whether they
-   represent genuine work the other missed, or lens-specific additions (e.g.,
-   Structural Integrity adding a refactoring task that Minimal Path skipped).
-   Include with a `[via <lens>]` annotation.
-3. **Conflicting tasks** — tasks that address the same concern differently
-   (e.g., one modifies an existing function in-place, another extracts a new
-   module). Present as a conflict with recommendation.
+1. **Consensus tasks** — tasks that appear in **≥2 of N** decompositions (same
+   substance, possibly different wording). Tasks present in all N decompositions
+   are the strongest consensus and should be ordered first; tasks in 2 of N or
+   more are still consensus. Keep the strongest formulation and annotate with
+   the count, e.g. `[consensus: 3/3]` or `[consensus: 2/3 — Minimal Path,
+   Independent Slices]`.
+2. **Unique tasks** — tasks that appear in **exactly 1** decomposition. Assess
+   whether they represent genuine work the others missed, or lens-specific
+   additions (e.g., Structural Integrity adding a refactoring task that the
+   other lenses skipped). Include with a `[via <lens>]` annotation.
+3. **Conflicting tasks** — tasks where two or more decompositions address the
+   same concern differently (e.g., one modifies an existing function in-place,
+   another extracts a new module). Present as a conflict in Step 4 with all
+   competing approaches listed, not just two.
 
 ### Step 3: Validate Task Scoping
 
@@ -121,25 +135,27 @@ For each conflict (slice-level or task-level):
 1. Read the relevant code to assess which approach better fits current
    codebase patterns and conventions.
 2. Consider the tradeoffs each decomposition articulated.
-3. Present **both options** with a recommendation and reasoning. Do not
-   silently drop the losing option — the user benefits from seeing the
-   tradeoff.
+3. Present **all conflicting options** (one per dissenting lens) with a
+   recommendation and reasoning. Do not silently drop any losing option —
+   the user benefits from seeing every tradeoff that surfaced.
 
-Format conflicts as:
+Format conflicts as a bullet list with one entry per dissenting lens — two
+entries when only two lenses disagreed, three when all three did, and so on:
 
 ```
 **Conflict: <topic>**
-- **Option A** (<lens>): <description>
-- **Option B** (<lens>): <description>
-- **Recommendation**: <which option and why>
+- **<Lens A>**: <description of that lens's approach>
+- **<Lens B>**: <description of that lens's approach>
+- **<Lens C>**: <description of that lens's approach>   # only if a third lens dissented
+- **Recommendation**: <which option and why; tie-breaking rationale if applicable>
 ```
 
 ### Step 5: Carry Forward Scout Context
 
 If the competing decompositions referenced a scout report, verify that the
 reconciled output addresses all scout conflicts. If different decompositions
-handled a conflict differently, include both approaches in the conflicts
-section (Step 4).
+handled a conflict differently, include every distinct approach in the
+conflicts section (Step 4) — one entry per dissenting lens.
 
 ---
 
@@ -218,14 +234,17 @@ explanations — omit section if none>
   proposal. If a lens surfaced it, include it — annotated with its source.
   The user and parent agent decide what to act on.
 - **Be transparent about conflicts.** When decompositions disagree on slice
-  boundaries or task approach, show both sides. Make a recommendation but
-  present it as a recommendation, not a decision.
+  boundaries or task approach, show every dissenting side — one entry per
+  lens, not a forced two-way framing. Make a recommendation but present it
+  as a recommendation, not a decision.
 - **Verify against code.** When resolving conflicts, read the actual codebase
   files rather than relying solely on the competing decompositions'
   descriptions. The code is the source of truth.
 - **Enforce task scoping.** Unlike plan reconciliation, you have an additional
   responsibility: validating that every task in the final output complies with
   the scoping rules. This is a hard constraint, not a lens-dependent concern.
-- **Prefer consensus.** When both decompositions agree on a slice boundary or
-  task, that finding gets the highest confidence. Structure the output so
-  consensus items appear first.
+- **Prefer consensus.** A finding is consensus when it appears in **≥2 of N**
+  decompositions; full N/N agreement is the highest confidence and 2/N
+  through (N−1)/N still counts as consensus (with the count noted on the
+  item — see Step 2). Structure the output so consensus items appear first,
+  ordered by their agreement count (N/N before (N−1)/N before 2/N).
