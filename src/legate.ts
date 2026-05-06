@@ -236,6 +236,10 @@ export interface LegateInitResult {
   repoPath: string;
   templateOutputPath: string;
   conductorDir: string;
+  /** Staged skill directory under march's control (`~/.march/legate/<name>/skill`). */
+  skillStagedDir: string;
+  /** True when the skill was symlinked into the conductor's `.claude/skills/legate`. */
+  skillSymlinked: boolean;
   setupCommand: string[];
   /**
    * Commands run after `agent-deck conductor setup` succeeds to put the
@@ -354,6 +358,69 @@ async function findTemplate(explicit?: string): Promise<string> {
 }
 
 /**
+ * Copy the legate skill (SKILL.md + scripts/) from the source template
+ * directory into a staging directory under march's control, then return that
+ * staged path. agent-deck's conductor setup symlinks the conductor's
+ * `CLAUDE.md` to a march-owned path; we mirror the same convention for the
+ * skill so editing scripts in the staged dir takes effect on next conductor
+ * restart without re-running `march legate init`.
+ */
+async function stageSkill(
+  sourceTemplateDir: string,
+  stagedSkillDir: string,
+): Promise<void> {
+  const sourceSkillDir = path.join(sourceTemplateDir, "skill");
+  try {
+    await fs.access(sourceSkillDir);
+  } catch {
+    throw new LegateError(
+      `Cannot locate legate skill source at ${sourceSkillDir}`,
+    );
+  }
+
+  // Wipe + recreate so re-runs don't leave stale scripts that were renamed
+  // or removed in a newer template.
+  await fs.rm(stagedSkillDir, { recursive: true, force: true });
+  await fs.mkdir(path.join(stagedSkillDir, "scripts"), { recursive: true });
+
+  // Copy SKILL.md
+  await fs.copyFile(
+    path.join(sourceSkillDir, "SKILL.md"),
+    path.join(stagedSkillDir, "SKILL.md"),
+  );
+
+  // Copy scripts and ensure they're executable. fs.copyFile preserves content
+  // but resets mode to default; chmod +x explicitly so the conductor can
+  // invoke them via `bash <path>` or directly.
+  const scriptsSrc = path.join(sourceSkillDir, "scripts");
+  const entries = await fs.readdir(scriptsSrc);
+  for (const entry of entries) {
+    const src = path.join(scriptsSrc, entry);
+    const dst = path.join(stagedSkillDir, "scripts", entry);
+    await fs.copyFile(src, dst);
+    await fs.chmod(dst, 0o755);
+  }
+}
+
+/**
+ * Symlink `<conductor-dir>/.claude/skills/legate` to the staged skill dir so
+ * Claude Code auto-discovers the skill on the conductor's next session start.
+ * Idempotent — replaces an existing symlink/directory.
+ */
+async function symlinkSkillIntoConductor(
+  stagedSkillDir: string,
+  conductorDir: string,
+): Promise<void> {
+  const skillsDir = path.join(conductorDir, ".claude", "skills");
+  await fs.mkdir(skillsDir, { recursive: true });
+  const linkPath = path.join(skillsDir, "legate");
+  // Replace prior link/dir; rm with force handles both cases (symlink or
+  // copied directory left over from older versions).
+  await fs.rm(linkPath, { recursive: true, force: true });
+  await fs.symlink(stagedSkillDir, linkPath);
+}
+
+/**
  * Render the legate CLAUDE.md template for `repoPath` and (by default) run
  * `agent-deck conductor setup` so the conductor's own CLAUDE.md is symlinked
  * to the rendered file. Re-runnable: the rendered template stays at a stable
@@ -415,6 +482,23 @@ export async function initLegate(
   } catch {
     throw new LegateError(
       `Cannot write rendered template: ${templateOutputPath}`,
+    );
+  }
+
+  // Stage the legate skill (SKILL.md + scripts/) at a sibling path under the
+  // same march-owned staging dir. The skill provides deterministic, classifier-
+  // friendly bash helpers for the loop's mechanics; CLAUDE.md tells the
+  // conductor *what* to do, the skill provides *how*. After conductor setup
+  // creates the conductor dir, we symlink it into <conductor>/.claude/skills/
+  // so Claude Code auto-discovers it on the next session start.
+  const sourceTemplateDir = path.dirname(templatePath);
+  const stagedSkillDir = path.join(stagingDir, "skill");
+  try {
+    await stageSkill(sourceTemplateDir, stagedSkillDir);
+  } catch (err) {
+    if (err instanceof LegateError) throw err;
+    throw new LegateError(
+      `Failed to stage legate skill at ${stagedSkillDir}: ${(err as Error).message}`,
     );
   }
 
@@ -508,9 +592,14 @@ export async function initLegate(
   ];
   if (startBridgeCommand) postSetupCommands.push(startBridgeCommand);
 
+  // Conductor dir path is needed both for the symlink-skill step (after setup
+  // creates it) and for the final summary. Compute once here.
+  const conductorDir = path.join(home, ".agent-deck", "conductor", conductorName);
+
   let setupRan = false;
   let autoModeConfigured = false;
   let bridgeActive = false;
+  let skillSymlinked = false;
   const postSetupWarnings: string[] = [];
   if (opts.runSetup ?? true) {
     try {
@@ -523,6 +612,20 @@ export async function initLegate(
       throw new LegateError(
         `agent-deck conductor setup failed (exit code ${status ?? "?"}). ` +
           `Rendered template stayed at ${templateOutputPath}; you can re-run setup manually:\n  ${formatShellCommand(setupCommand)}`,
+      );
+    }
+
+    // Symlink the staged skill into the conductor's `.claude/skills/legate`
+    // so Claude Code auto-discovers it on the next session start. Best-effort:
+    // a failure here doesn't block auto-mode/model/restart from running.
+    try {
+      await symlinkSkillIntoConductor(stagedSkillDir, conductorDir);
+      skillSymlinked = true;
+    } catch (err) {
+      postSetupWarnings.push(
+        `Failed to symlink legate skill into ${conductorDir}/.claude/skills/legate: ` +
+          `${(err as Error).message}\n` +
+          `The conductor will still work but won't have the skill's helper scripts.`,
       );
     }
 
@@ -624,8 +727,6 @@ export async function initLegate(
     }
   }
 
-  const conductorDir = path.join(home, ".agent-deck", "conductor", conductorName);
-
   // Header is shared. The trailing how-to-edit / how-to-attach guidance
   // differs between the two flows because, in the --no-setup case, the
   // conductor does not yet exist and there is no symlink to update.
@@ -653,6 +754,13 @@ export async function initLegate(
           ? "active (heartbeats will reach the conductor)"
           : "NOT active — conductor will only respond to manual session-send messages; see warnings"
         : "deferred (run setup first)"
+    }`,
+    `  Skill:          ${
+      setupRan
+        ? skillSymlinked
+          ? `legate (.claude/skills/legate → ${stagedSkillDir})`
+          : "NOT symlinked — see warnings"
+        : `legate staged at ${stagedSkillDir} (symlinked on setup)`
     }`,
     "",
   ];
@@ -693,6 +801,8 @@ export async function initLegate(
     repoPath,
     templateOutputPath,
     conductorDir,
+    skillStagedDir: stagedSkillDir,
+    skillSymlinked,
     setupCommand,
     postSetupCommands,
     setupRan,

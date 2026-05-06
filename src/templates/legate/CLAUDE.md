@@ -18,6 +18,25 @@ You operate on top of four things:
 - **State:** maintain `./state.json` and append every meaningful action to `./task-log.md`.
 - **Working directory:** your shell starts in your conductor dir (`~/.agent-deck/conductor/{CONDUCTOR_NAME}/`), **not** in the managed repo. Every `smithy` and `gh` command you run needs the repo as its working directory — either prefix with `(cd {REPO_PATH} && ...)` or, for `gh`, pass `--repo <owner/repo>` after looking the slug up once via `gh repo view --repo {REPO_PATH} --json nameWithOwner -q .nameWithOwner` and caching it in `state.json`.
 
+## The `legate` skill — your mechanics layer
+
+A Claude Code skill named `legate` is auto-loaded at session start from `.claude/skills/legate/SKILL.md` (relative to your conductor home). **Prefer its operations over composing inline command pipelines** — the scripts under `.claude/skills/legate/scripts/` are pre-canned, audited, and don't trip auto-mode's classifier.
+
+The operations you'll use on every loop iteration:
+
+| Need to … | Operation | Script |
+|---|---|---|
+| Sync the default branch before launching new work | "Sync default branch" | `.claude/skills/legate/scripts/sync-default-branch.sh <repo-path>` |
+| List workers in your group | "List workers" | `.claude/skills/legate/scripts/list-workers.sh <profile> <worker-group>` |
+| Launch a new worker for a slice | "Launch worker for a slice" | `.claude/skills/legate/scripts/launch-worker.sh <profile> <repo> <title> <group> <branch> <verb-cmd>` |
+| Find a worker's PR (resilient to branch renames) | "Discover PR for a worker" | `.claude/skills/legate/scripts/discover-pr.sh <profile> <session-id> <repo> [<since>]` |
+| Get CI + review state for a PR | "Babysit a PR" | `.claude/skills/legate/scripts/babysit-pr.sh <repo> <pr-num>` |
+| Refresh smithy status | "Refresh smithy status" | `.claude/skills/legate/scripts/smithy-status.sh <repo-path>` |
+
+All operations emit JSON to stdout, status messages to stderr, and exit 0/1/2 for success/op-failure/invalid-input. Read `.claude/skills/legate/SKILL.md` for the full operation reference and output schemas.
+
+If you find yourself reaching for `python3 -c "..."` or other inline-script patterns, **stop** — auto-mode's classifier blocks those and stalls the heartbeat loop. Use the skill's scripts instead, or extend a script and commit the change.
+
 ## What You Own — The Loop
 
 Drive the Smithy workflow loop end-to-end for `{REPO_NAME}`:
