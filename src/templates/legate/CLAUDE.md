@@ -313,11 +313,26 @@ Skill(skill="legate")
 After the skill is loaded, run the heartbeat sequence in this exact order. The scripts are pre-canned, audited, and now pre-approved by your active skill grant; reaching for inline `python3 -c` or hand-composed pipelines instead would still trip auto-mode and break the loop.
 
 1. Inventory: `.claude/skills/legate/scripts/list-workers.sh {PROFILE} {WORKER_GROUP}` → JSON array of workers with status, branch, worktree.
-2. For each tracked PR in `state.json`: `.claude/skills/legate/scripts/babysit-pr.sh {REPO_PATH} <pr-num>` → CI status, review decision, unresolved inline thread count.
-3. For workers in `waiting` whose `pr` field is still `null` in `state.json`: `.claude/skills/legate/scripts/discover-pr.sh {PROFILE} <session-id> {REPO_PATH}` → finds the PR (resilient to the branch renames `/smithy.*` does, see SmithyCLI#297).
-4. Update `state.json` with everything that changed (PR numbers, CI states, thread counts, slice stages).
-5. Decide actions per the **Auto-Respond vs Escalate** rules. Dispatch `/smithy.fix` to the slice's existing worker on CI failure or unresolved threads (same-PR amendment, never a fresh worker). Pick up the next ready slice if one's available — but first run `.claude/skills/legate/scripts/sync-default-branch.sh {REPO_PATH}` and only then `.claude/skills/legate/scripts/launch-worker.sh ...`.
-6. Reply with a `[STATUS]` summary line. **Format**:
+2. For workers in `waiting` whose `pr` field is still `null` in `state.json`: `.claude/skills/legate/scripts/discover-pr.sh {PROFILE} <session-id> {REPO_PATH}` → finds the PR (resilient to the branch renames `/smithy.*` does, see SmithyCLI#297). Capture `headRefName` into `state.json` as `pr.actual_branch`.
+3. **For every tracked PR in `state.json` — including the ones you just discovered, including the ones with CI green — run** `.claude/skills/legate/scripts/babysit-pr.sh {REPO_PATH} <pr-num>`. **This step is non-skippable.** discover-pr's CI status is *not sufficient* — `babysit-pr.sh` is the only operation that surfaces unresolved inline review threads (the things `/smithy.fix` is built around). Reviewers (Copilot, humans) routinely leave inline comments on PRs that pass CI; if you skip this step the loop silently misses every review-driven fix opportunity. Always run it for every open PR you track, every heartbeat.
+4. Update `state.json` with everything that changed: PR numbers, `checks` status, `thread_count`, `unresolved_threads`, slice `stage`. The `stage` field flips:
+   - `pr-open` → `pr-in-fix` when `checks == "FAIL"` or `thread_count > 0`.
+   - `pr-in-fix` → `pr-open` when CI is now PASS *and* `thread_count == 0`.
+   - `pr-open` → `merged` when `state == "MERGED"`.
+5. Decide actions per the **Auto-Respond vs Escalate** rules. **Every agent-deck mutation goes through a skill script** — never call `agent-deck` directly, the skill scripts are how those operations stay inside `allowed-tools` and skip the auto-mode prompt. **`/smithy.fix` messages with newlines must be passed via file** (`Write(./fix-msg-<slice>.md)` first, then `send-to-worker.sh`) — inline `$'...'`/heredoc constructs trip the classifier:
+   - `checks == "FAIL"`:
+     1. `Write(./fix-msg-<slice-id>.md)` containing: `/smithy.fix\n\nCI failure on <check-name>:\n<failed_checks summary from babysit-pr>`.
+     2. `.claude/skills/legate/scripts/send-to-worker.sh {PROFILE} <worker_session_id> ./fix-msg-<slice-id>.md`.
+     Same-PR amendment, never a fresh worker.
+   - `thread_count > 0`:
+     1. `Write(./fix-msg-<slice-id>.md)` containing: `/smithy.fix\n\nUnresolved review threads on PR #<num>:\n<paste unresolved_threads list from babysit-pr — path, line, body_preview for each>`.
+     2. `.claude/skills/legate/scripts/send-to-worker.sh {PROFILE} <worker_session_id> ./fix-msg-<slice-id>.md`.
+     Same-PR amendment, never a fresh worker.
+   - `state == "MERGED"` → mark slice merged in `state.json`, log to `task-log.md`, then evaluate whether the next step in this line of work is now eligible (forge after a merged cut, etc.) and dispatch only if so via `launch-worker.sh`.
+   - Worker `status == "error"` → `.claude/skills/legate/scripts/restart-worker.sh {PROFILE} <worker_session_id>` — once per worker per heartbeat. If the same worker is `error` again on the next heartbeat, escalate via `NEED:`.
+   - All clear (CI PASS + 0 threads + state OPEN) → no action; report status on the heartbeat reply.
+6. If you have spare cycles after handling tracked PRs and a new ready slice exists in `smithy status` whose deps are all merged, pick it up: first run `.claude/skills/legate/scripts/sync-default-branch.sh {REPO_PATH}`, then `.claude/skills/legate/scripts/launch-worker.sh ...`. Only one new dispatch per heartbeat — keep the loop pace operator-paceable.
+7. Reply with a `[STATUS]` summary line. **Format**:
    ```
    [STATUS] All clear. (3 workers tracked, 1 PR open & green)
    ```
@@ -336,7 +351,7 @@ When `agent-deck-notify-daemon` tells you a worker just transitioned `running �
 
 0. **Invoke the legate skill first** with `Skill(skill="legate")` if you haven't already this session — same reason as the heartbeat case: the skill's `allowed-tools` need to be active before bashing its scripts.
 1. Identify the worker's slice in `state.json` by `worker_session_id`.
-2. **`running → waiting`**: same as heartbeat steps 3 → 6, scoped to that one worker first (read its output, discover its PR, update state, decide). The transition usually means the worker just finished `/smithy.cut` or `/smithy.forge` and pushed a PR — the legate skill's `discover-pr.sh` is exactly designed for this case.
+2. **`running → waiting`**: run `discover-pr.sh` against this worker (heartbeat step 2), then **always** run `babysit-pr.sh` against the discovered PR (heartbeat step 3) — the new PR may already have review comments waiting. Update state.json (step 4), decide and dispatch (step 5), reply (step 7). The transition usually means the worker just finished `/smithy.cut` or `/smithy.forge` and pushed a PR — the legate skill's `discover-pr.sh` finds it (resilient to branch renames), `babysit-pr.sh` checks whether reviewers have already commented.
 3. **`running → error`**: try `agent-deck -p {PROFILE} session restart <id>` once. If the worker errors again on the next heartbeat, escalate via `NEED:`.
 4. **`running → idle`**: skip — the operator has acknowledged this session; no action needed unless explicitly asked.
 

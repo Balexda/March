@@ -1,7 +1,7 @@
 ---
 name: legate
 description: "Use this skill when acting as (or directing) a Smithy pipeline conductor. Primary triggers: [HEARTBEAT] ticks requiring worker scan + PR status refresh; worker session state transitions (running→waiting→merged); CI failures or review threads that need /smithy.fix dispatch to an existing worker; launching new workers for cut/forge slices; syncing the default branch before dispatch; discovering a worker's PR after branch rename; updating state.json after slice transitions. Skip for human code review, standalone git queries, or tasks with no conductor/worker/slice context."
-allowed-tools: Bash(.claude/skills/legate/scripts/sync-default-branch.sh:*) Bash(.claude/skills/legate/scripts/list-workers.sh:*) Bash(.claude/skills/legate/scripts/launch-worker.sh:*) Bash(.claude/skills/legate/scripts/discover-pr.sh:*) Bash(.claude/skills/legate/scripts/babysit-pr.sh:*) Bash(.claude/skills/legate/scripts/smithy-status.sh:*)
+allowed-tools: Bash(.claude/skills/legate/scripts/sync-default-branch.sh:*) Bash(.claude/skills/legate/scripts/list-workers.sh:*) Bash(.claude/skills/legate/scripts/launch-worker.sh:*) Bash(.claude/skills/legate/scripts/discover-pr.sh:*) Bash(.claude/skills/legate/scripts/babysit-pr.sh:*) Bash(.claude/skills/legate/scripts/smithy-status.sh:*) Bash(.claude/skills/legate/scripts/send-to-worker.sh:*) Bash(.claude/skills/legate/scripts/restart-worker.sh:*)
 ---
 
 # Skill: legate (Smithy workflow operations)
@@ -123,6 +123,40 @@ Returns the parsed Smithy status for the loop's "pick next work" step.
 ```
 
 Stdout: JSON from `smithy status --format json`, run from inside `<repo-path>`.
+
+---
+
+## Operation: Send to existing worker
+
+Dispatch a follow-up slash command (or any message) to a worker that's already in `waiting`. This is how `/smithy.fix` gets sent to the slice's existing worker — same PR, same amendment, never a fresh worker.
+
+The message body is passed via a **file path**, not inline:
+
+```bash
+# Step 1: write the message body to a file under cwd. Use the Write tool
+#         (auto-approved per .claude/settings.json's Write(./**) entry).
+#         File path: ./fix-msg-<slice-id>.md works. Newlines, code fences,
+#         and any other content go into the file directly — no escaping.
+
+# Step 2: dispatch
+.claude/skills/legate/scripts/send-to-worker.sh <profile> <session-id-or-title> <message-file>
+```
+
+Why a file and not an inline arg: Smithy `/smithy.fix` messages routinely include newlines and code fences. Building those inline forces shell-escape constructs (`$'...\n...'`, heredocs) which auto-mode's classifier flags as risky and pauses on. Writing the body to a file first sidesteps that — the bash command that calls send-to-worker.sh stays a clean `<script> <profile> <session-id> <path>` invocation that matches its `allowed-tools` pattern cleanly.
+
+Wraps `agent-deck -p <profile> session send <id> <message> --wait -q --timeout 600s`. Stdout: the worker's reply (raw text). Use this for `/smithy.fix` dispatch on CI failure or unresolved review threads, and for any operator-style follow-up you want to forward to a specific worker.
+
+---
+
+## Operation: Restart errored worker
+
+Restart a worker session whose agent-deck status is `error`. Per CLAUDE.md, the conductor tries this **once** on `running → error` transition; if the worker errors again on the next heartbeat, escalate via `NEED:` instead of restarting again.
+
+```bash
+.claude/skills/legate/scripts/restart-worker.sh <profile> <session-id-or-title>
+```
+
+Stdout: agent-deck's confirmation. Don't loop on this — repeated restarts indicate the worker has a deeper problem the operator needs to look at.
 
 ---
 

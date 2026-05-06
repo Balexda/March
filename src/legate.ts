@@ -439,6 +439,8 @@ const LEGATE_SKILL_SCRIPTS = [
   "discover-pr.sh",
   "babysit-pr.sh",
   "smithy-status.sh",
+  "send-to-worker.sh",
+  "restart-worker.sh",
 ] as const;
 
 async function writeNarrowSettings(conductorDir: string): Promise<void> {
