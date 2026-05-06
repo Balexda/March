@@ -1,6 +1,7 @@
 {
   "name": "@balexda/march",
   "version": "0.1.0",
+  "description": "CLI for the March agentic-development workflow: snapshot a worktree, dispatch a sandboxed spawn, and deploy the March skills for Claude Code.",
   "type": "module",
   "bin": {
     "march": "./dist/cli.js"
@@ -11,6 +12,18 @@
     "build": "tsup src/cli.ts --format esm --clean",
     "start": "node dist/cli.js",
     "typecheck": "tsc --noEmit"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Balexda/March.git"
+  },
+  "homepage": "https://github.com/Balexda/March#readme",
+  "bugs": {
+    "url": "https://github.com/Balexda/March/issues"
+  },
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
   },
   "files": [
     "dist",
