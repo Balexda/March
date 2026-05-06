@@ -1,0 +1,6 @@
+# Outputs from skill-creator's optimization loop. The trigger-eval-*.json
+# inputs are version-controlled; everything else here is regenerable from
+# `python3.12 -m scripts.run_loop` and would just churn the repo.
+optimization-report*.html
+results/
+results-v2/

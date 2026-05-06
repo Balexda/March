@@ -2,7 +2,7 @@
 
 This directory ships the prompt that turns an [agent-deck](https://github.com/asheshgoplani/agent-deck) **conductor** into a per-repo **Legate** — a Claude Code session that drives the Smithy plan→implement→PR→fix loop on a single repository.
 
-`CLAUDE.md` is the conductor's identity prompt. It is rendered with the values of the target repository by `march legate init` (see [`src/legate.ts`](../../legate.ts)) into `~/.march/legate/<conductor-name>/CLAUDE.md`, then `agent-deck conductor setup --claude-md <path>` symlinks the conductor's own `CLAUDE.md` to that file. Editing the rendered template and restarting the conductor is the operator's iteration loop.
+`CLAUDE.md` is the conductor's identity prompt. It is rendered with the values of the target repository by `march legate init` (see [`src/legate.ts`](../../legate.ts)) into `~/.march/legate/<conductor-name>/CLAUDE.md` (a march-owned staged snapshot), then **copied** into `<conductor-dir>/CLAUDE.md`. The skill in `skill/` is similarly staged and **copied** to `<conductor-dir>/.claude/skills/legate/`. We deliberately use copies rather than symlinks: Claude Code's `--permission-mode auto` classifier flags symlinks pointing outside cwd as cross-boundary reads and pauses on them, which stalls the heartbeat-driven loop. With copies, every read the conductor does stays inside its own cwd. The trade-off: editing the staged file no longer auto-propagates — operators iterate by editing the source template (`src/templates/legate/`), then re-running `march legate init`, which re-renders, re-copies, and restarts the conductor.
 
 This README is **not** rendered or deployed — it stays here as developer-facing documentation of what the prompt is meant to do.
 
@@ -16,6 +16,33 @@ Mini-legate is a precursor to the full Legate component described in March RFC `
 - The `smithy.pr-review` skill for unresolved inline review threads.
 
 There is no host-side spawn sandbox, no declarative profile system, no separate event bus, and no persistent session manager — those arrive with M1–M4. Mini-legate's interface to those concerns is whatever agent-deck provides today.
+
+## The `legate` skill — mechanics layer
+
+Mini-legate's *identity* (who I am, what I own, escalation rules, the loop) lives in `CLAUDE.md`. Its *mechanics* (the actual command sequences) live in a Claude Code skill at `skill/`, which is deployed alongside CLAUDE.md into the conductor dir as `<conductor-dir>/.claude/skills/legate/`.
+
+Six audited bash scripts back the operations:
+
+| Operation | Script | When the conductor uses it |
+|---|---|---|
+| Sync default branch | `sync-default-branch.sh <repo-path>` | Before any new-work dispatch |
+| List workers | `list-workers.sh <profile> <worker-group>` | Every heartbeat (inventory) |
+| Launch worker for slice | `launch-worker.sh <profile> <repo-path> <slice-title> <worker-group> <branch> <verb-cmd>` | Dispatching new cuts/forges |
+| Discover PR for worker | `discover-pr.sh <profile> <session-id> <repo-path> [<since>]` | When a worker hits `waiting`; resilient to `/smithy.*` branch renames (see [SmithyCLI#297](https://github.com/Balexda/SmithyCLI/issues/297)) |
+| Babysit PR | `babysit-pr.sh <repo-path> <pr-num>` | Every heartbeat for each tracked PR |
+| Refresh smithy status | `smithy-status.sh <repo-path>` | Loop step 1 (pick next work) |
+
+Each script: `set -euo pipefail`, JSON to stdout, status to stderr, structured exit codes (0 success / 1 op-failure / 2 invalid input).
+
+**Why a skill, not inline shell?** Claude Code's `--permission-mode auto` (which the conductor runs under) classifies inline `python3 -c "..."` and other ad-hoc patterns as arbitrary code execution and pauses for operator approval. A single such pause inside a heartbeat-driven loop stalls the orchestration. Skills self-declare permitted bash patterns via `allowed-tools` in their frontmatter, so when the legate skill is invoked, its scripts auto-approve as a unit — no per-script settings.json bash entries needed.
+
+The skill's `allowed-tools` line:
+
+```yaml
+allowed-tools: Bash(*/legate/scripts/sync-default-branch.sh:*) Bash(*/legate/scripts/list-workers.sh:*) Bash(*/legate/scripts/launch-worker.sh:*) Bash(*/legate/scripts/discover-pr.sh:*) Bash(*/legate/scripts/babysit-pr.sh:*) Bash(*/legate/scripts/smithy-status.sh:*)
+```
+
+`SKILL.md`'s description was tuned via skill-creator's optimization loop (see `skill-workspace/optimization-report.html` for the iteration-by-iteration trigger-rate metrics).
 
 ## Slice State Machine
 
@@ -98,12 +125,15 @@ The conductor never polls on its own schedule — heartbeats and transition noti
 
 1. Detect repo basename → derive defaults: profile = repo slug, conductor name = `legate-<slug>`, worker group = `legate-workers`.
 2. Render `src/templates/legate/CLAUDE.md` with `{REPO_NAME}` / `{REPO_PATH}` / `{PROFILE}` / `{CONDUCTOR_NAME}` / `{WORKER_GROUP}` substitutions.
-3. Stage the rendered template at `~/.march/legate/<conductor-name>/CLAUDE.md` (stable, march-owned path).
-4. Run `agent-deck -p <profile> conductor setup <name> -description "..." -claude-md <staged path>`. agent-deck symlinks the conductor's own `CLAUDE.md` to the staged file, registers the conductor session, and starts it.
-5. `agent-deck session set conductor-<name> auto-mode true` to put the conductor into Claude Code's `--permission-mode auto`, then `agent-deck session set conductor-<name> extra-args -- --model <model>` to pin the model (default: `sonnet`; override with `march legate init --model <id>`), then `session restart` so both flags take effect immediately. The conductor's role is orchestration-heavy / reasoning-light — Sonnet is intentionally chosen as the default; workers stay on the Claude default for real implementation work.
-6. (Linux/WSL2) `systemctl --user start agent-deck-conductor-bridge` and verify with `systemctl --user is-active --quiet agent-deck-conductor-bridge`. agent-deck installs and tries to enable+start this systemd unit during conductor setup, but a successful unit install does not guarantee a healthy daemon — `march legate init` re-asserts the start and verifies, so a crash-loop (e.g. a Python 3.8 host trying to run a bridge.py that uses Python 3.9 generics) is surfaced immediately rather than silently leaving the conductor inert.
+3. Stage the rendered template at `~/.march/legate/<conductor-name>/CLAUDE.md` (stable, march-owned snapshot for inspection / debugging).
+4. Stage the skill at `~/.march/legate/<conductor-name>/skill/` — wipes any previous staged copy first so scripts removed in a newer source template don't linger, then copies `SKILL.md` and the six executable scripts.
+5. Run `agent-deck -p <profile> conductor setup <name> -description "..."` (no `-claude-md` — see below). agent-deck registers the conductor session, writes its default conductor `CLAUDE.md`, installs the heartbeat timer + bridge unit, and starts the session.
+6. Copy the rendered CLAUDE.md and the staged skill directly into `<conductor-dir>/CLAUDE.md` and `<conductor-dir>/.claude/skills/legate/` (replacing agent-deck's defaults and any prior symlinks/copies). **Why copies, not symlinks**: Claude Code's `--permission-mode auto` classifier flags symlink reads pointing outside cwd as cross-boundary access and pauses on them, which stalls the heartbeat-driven loop. With copies, every read the conductor does stays inside its own cwd → no classifier pause → no stall.
+7. Write `<conductor-dir>/.claude/settings.json` with a narrow allow list scoped to legate: `Skill(legate:*)` (authorizes invoking the skill, which cascades into the bash patterns the skill self-declares via `allowed-tools`), plus `Read(./**)` / `Edit(./**)` / `Write(./**)` so the conductor can update `state.json`, `task-log.md`, `LEARNINGS.md`, and any working notes within its own cwd. Deliberately *not* in this list: `Bash(*)`, `Read(*)`, `Edit(*)`, `Write(*)`, or any tool-wide wildcard — those would be a permission bypass.
+8. `agent-deck session set conductor-<name> auto-mode true` to put the conductor into Claude Code's `--permission-mode auto`, then `agent-deck session set conductor-<name> extra-args -- --model <model>` to pin the model (default: `sonnet`; override with `march legate init --model <id>`), then `session restart` so both flags take effect immediately. The conductor's role is orchestration-heavy / reasoning-light — Sonnet is intentionally chosen as the default; workers stay on the Claude default for real implementation work.
+9. (Linux/WSL2) `systemctl --user start agent-deck-conductor-bridge` and verify with `systemctl --user is-active --quiet agent-deck-conductor-bridge`. agent-deck installs and tries to enable+start this systemd unit during conductor setup, but a successful unit install does not guarantee a healthy daemon — `march legate init` re-asserts the start and verifies, so a crash-loop (e.g. a Python 3.8 host trying to run a bridge.py that uses Python 3.9 generics) is surfaced immediately rather than silently leaving the conductor inert.
 
-After that, editing `~/.march/legate/<conductor-name>/CLAUDE.md` (or re-running `march legate init` after editing the source template) and `agent-deck session restart conductor-<name>` is the iteration loop.
+After that, the iteration loop is: edit the source template (`src/templates/legate/CLAUDE.md`, `skill/SKILL.md`, or `skill/scripts/*.sh`), then re-run `march legate init` from inside the same repo. That re-renders, re-stages, re-copies, re-writes settings, and restarts the conductor in one shot.
 
 ### Why bridge-start matters
 
@@ -113,20 +143,38 @@ The conductor's only autonomous trigger is `[HEARTBEAT]` messages. The agent-dec
 
 ## Permission mode — how it's wired
 
-agent-deck only exposes the `auto_mode` key on the global `[claude]` block (see `internal/session/userconfig.go:653`). `[groups.<name>.claude]` and `[conductors.<name>.claude]` only carry `config_dir` and `env_file`. Setting `[claude] auto_mode = true` globally would put **every** Claude session on the host into auto mode — too broad for a per-repo legate.
+The conductor runs under Claude Code's `--permission-mode auto`, layered with two levels of scoped pre-approval:
 
-To scope auto mode to legate's own conductor + its workers without affecting unrelated sessions, mini-legate uses agent-deck's per-session `extra-args` mechanism, which persists CLI flags on the Instance and re-applies them on every start/restart:
+**Level 1 — conductor session permission mode** (set via agent-deck). The `auto_mode` key on the global `[claude]` block in `~/.agent-deck/config.toml` would put *every* Claude session on the host into auto mode (per `internal/session/userconfig.go:653`); group and conductor TOML blocks only carry `config_dir` / `env_file`, not permission keys. To scope auto mode to *just* this conductor, `march legate init` mutates the conductor's Instance directly:
 
-- **Conductor** — `march legate init` runs, after `agent-deck conductor setup`:
-  ```
-  agent-deck -p <profile> session set conductor-legate-<slug> auto-mode true
-  agent-deck -p <profile> session restart conductor-legate-<slug>
-  ```
-  This flips `ClaudeOptions.AutoMode` on the conductor's Instance — agent-deck's launcher then emits `--permission-mode auto` on every start/restart. No operator action required; this is part of the deploy. (We use the direct `auto-mode` field rather than `extra-args -- --permission-mode auto` so a future inspection via `agent-deck session show` reports auto mode as a structured field rather than an opaque token list, and to avoid a misleading agent-deck CLI success-message bug that prints only the first positional arg.)
+```
+agent-deck -p <profile> session set conductor-legate-<slug> auto-mode true
+```
 
-- **Workers** — the conductor's CLAUDE.md tells legate to include `--extra-arg --permission-mode --extra-arg auto` on every `agent-deck launch` for a worker. There is no per-launch `--auto-mode` flag on `agent-deck launch`, so workers go through the extra-args path; agent-deck stores those tokens on `Instance.ExtraArgs` and re-applies them on restart, so the flag survives session lifecycle events.
+This flips `ClaudeOptions.AutoMode` and agent-deck's launcher emits `--permission-mode auto` on every start/restart. Workers go through the per-launch `--extra-arg --permission-mode --extra-arg auto` path because there is no `--auto-mode` flag on `agent-deck launch`. The `auto-mode` field is preferred over `extra-args -- --permission-mode auto` so a future inspection via `agent-deck session show` reports auto mode as a structured field rather than an opaque token list, and to dodge a misleading agent-deck CLI success-message bug that prints only the first positional arg.
 
-agent-deck exposes three claude permission keys / flags with a fixed precedence (`userconfig.go`):
+**Level 2 — narrow allow list in the conductor's project settings**. `<conductor-dir>/.claude/settings.json` (written by `march legate init`) pre-approves exactly what the legate loop needs and nothing else:
+
+```json
+{
+  "permissions": {
+    "allow": [
+      "Skill(legate:*)",
+      "Read(./**)",
+      "Edit(./**)",
+      "Write(./**)"
+    ]
+  }
+}
+```
+
+`Skill(legate:*)` authorizes invoking the legate skill. The skill's own SKILL.md frontmatter declares `allowed-tools: Bash(*/legate/scripts/<each>:*)`, so granting the skill cascades into per-script bash approval — there's no need for per-script `Bash(...)` entries in this settings file.
+
+`Read(./**)` / `Edit(./**)` / `Write(./**)` are cwd-scoped — the conductor's cwd is its own dir, so it can update `state.json`, `task-log.md`, `LEARNINGS.md`, and any additional notes it judges useful, without prompting on every write. Reads of files outside cwd are *not* granted; auto-mode still gates those.
+
+Deliberately *not* in the allow list: `Bash(*)`, `Read(*)`, `Edit(*)`, `Write(*)`, or any tool-wide wildcard. Those would be a permission bypass dressed as a fix; this allow list is the operationalization of the operator's choice to use the legate skill.
+
+**Permission-key reference** (agent-deck flags + Claude Code precedence):
 
 | Key / extra-arg                       | Maps to                                    | Use it when                                                       |
 |---------------------------------------|--------------------------------------------|-------------------------------------------------------------------|

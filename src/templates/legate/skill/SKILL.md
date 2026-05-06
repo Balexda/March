@@ -1,6 +1,7 @@
 ---
 name: legate
-description: Mini-legate operations for the Smithy plan-and-implement loop on a single repository. Provides deterministic, classifier-friendly bash scripts for syncing the default branch, listing workers, launching new workers, discovering PRs (resilient to branch renames), babysitting PRs through CI + review cycles, and refreshing smithy status. Loaded automatically by the legate-<repo> conductor on every heartbeat — used to drive the loop without composing inline shell pipelines that trip Claude Code's auto-mode classifier.
+description: "Use this skill when acting as (or directing) a Smithy pipeline conductor. Primary triggers: [HEARTBEAT] ticks requiring worker scan + PR status refresh; worker session state transitions (running→waiting→merged); CI failures or review threads that need /smithy.fix dispatch to an existing worker; launching new workers for cut/forge slices; syncing the default branch before dispatch; discovering a worker's PR after branch rename; updating state.json after slice transitions. Skip for human code review, standalone git queries, or tasks with no conductor/worker/slice context."
+allowed-tools: Bash(.claude/skills/legate/scripts/sync-default-branch.sh:*) Bash(.claude/skills/legate/scripts/list-workers.sh:*) Bash(.claude/skills/legate/scripts/launch-worker.sh:*) Bash(.claude/skills/legate/scripts/discover-pr.sh:*) Bash(.claude/skills/legate/scripts/babysit-pr.sh:*) Bash(.claude/skills/legate/scripts/smithy-status.sh:*)
 ---
 
 # Skill: legate (Smithy workflow operations)

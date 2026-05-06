@@ -212,8 +212,11 @@ describe("legate module", () => {
       expect(result.setupCommand).toContain("march");
       expect(result.setupCommand).toContain("setup");
       expect(result.setupCommand).toContain("legate-march");
-      expect(result.setupCommand).toContain("-claude-md");
-      expect(result.setupCommand).toContain(result.templateOutputPath);
+      // We deliberately do NOT pass `-claude-md` to agent-deck — that would
+      // create a symlink that auto-mode flags as a cross-boundary read.
+      // Instead, the rendered template is copied into the conductor's
+      // CLAUDE.md after setup runs (see copyTemplateIntoConductor).
+      expect(result.setupCommand).not.toContain("-claude-md");
       // Skipped-setup branch surfaces the shell-quoted manual command and
       // does NOT claim the conductor has been created yet (the symlink/
       // attach wording is reserved for the runSetup=true path), but it
@@ -221,11 +224,10 @@ describe("legate module", () => {
       // can run the full sequence by hand.
       expect(result.summary).toContain("Setup skipped");
       expect(result.summary).toContain(
-        "no conductor\nhas been created yet",
+        "no conductor has been created and nothing has been copied",
       );
-      expect(result.summary).not.toMatch(
-        /CLAUDE\.md is symlinked to the template above\. Edit the\n\s*template/,
-      );
+      // The symlink wording is gone — we copy on setup-run, not symlink.
+      expect(result.summary).not.toContain("symlinked to the template above");
       expect(result.summary).toContain(
         "Then enable auto mode, pin model, and restart",
       );
@@ -441,10 +443,10 @@ describe("legate module", () => {
       );
       expect(scriptStat.mode & 0o111).not.toBe(0);
 
-      // With --no-setup, the conductor dir doesn't exist yet so the symlink
-      // step is skipped — skillSymlinked stays false. The summary calls this
-      // out so the operator knows the skill is staged but not yet linked.
-      expect(result.skillSymlinked).toBe(false);
+      // With --no-setup, the conductor dir doesn't exist yet so the copy
+      // step is skipped — skillDeployed stays false. The summary calls this
+      // out so the operator knows the skill is staged but not yet copied.
+      expect(result.skillDeployed).toBe(false);
       expect(result.summary).toContain("legate staged at");
     });
 

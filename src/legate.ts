@@ -236,10 +236,15 @@ export interface LegateInitResult {
   repoPath: string;
   templateOutputPath: string;
   conductorDir: string;
-  /** Staged skill directory under march's control (`~/.march/legate/<name>/skill`). */
+  /**
+   * Staged skill directory under march's control
+   * (`~/.march/legate/<name>/skill`). The source-of-truth snapshot kept by
+   * `march legate init`; the conductor reads from a copy of this in its own
+   * `.claude/skills/legate/`, not from this path directly.
+   */
   skillStagedDir: string;
-  /** True when the skill was symlinked into the conductor's `.claude/skills/legate`. */
-  skillSymlinked: boolean;
+  /** True when the skill was copied into the conductor's `.claude/skills/legate`. */
+  skillDeployed: boolean;
   setupCommand: string[];
   /**
    * Commands run after `agent-deck conductor setup` succeeds to put the
@@ -402,22 +407,119 @@ async function stageSkill(
   }
 }
 
+// Write a narrow `.claude/settings.json` in the conductor dir that
+// pre-approves exactly what the legate loop needs and nothing else.
+//
+// The grant model follows the convention used by the user's existing skills
+// (e.g. `Skill(smithy.*:*)` in their settings.json):
+//
+//   - `Skill(legate:*)` — authorizes the conductor to invoke the legate
+//     skill. The skill's own SKILL.md frontmatter declares its `allowed-tools`
+//     (Bash patterns matching `*/legate/scripts/<each>:*`), so granting the
+//     skill cascades into per-script bash approval without us having to
+//     enumerate paths in this settings file.
+//   - `Read(./**)` / `Edit(./**)` / `Write(./**)` — cwd-scoped file access.
+//     The conductor's cwd is its own dir, so this lets it update state.json,
+//     task-log.md, LEARNINGS.md, and take any additional notes it judges
+//     useful, without prompting on every write. Reads of files outside cwd
+//     are NOT granted — auto-mode still gates those.
+//
+// Deliberately *not* in the allow list: `Bash(*)`, `Read(*)`, `Edit(*)`,
+// `Write(*)`, or any other tool-wide wildcard. Those would be a permission
+// bypass; this allow list is the operationalization of the operator's
+// choice to use the legate skill.
+// The legate skill's deployed scripts. Single source of truth shared by the
+// skill copier (via fs.readdir on the source) and the settings.json writer
+// (which generates per-script Bash allow patterns). If a script is added or
+// removed in `src/templates/legate/skill/scripts/`, this list must follow.
+const LEGATE_SKILL_SCRIPTS = [
+  "sync-default-branch.sh",
+  "list-workers.sh",
+  "launch-worker.sh",
+  "discover-pr.sh",
+  "babysit-pr.sh",
+  "smithy-status.sh",
+] as const;
+
+async function writeNarrowSettings(conductorDir: string): Promise<void> {
+  const settingsDir = path.join(conductorDir, ".claude");
+  await fs.mkdir(settingsDir, { recursive: true });
+  // Per-script Bash patterns matching the relative-path form the conductor
+  // produces when it invokes a skill script (e.g.
+  // `.claude/skills/legate/scripts/list-workers.sh default legate-workers`).
+  // The skill's own `allowed-tools` frontmatter declares the same patterns,
+  // but in practice that grant doesn't always propagate to the auto-mode
+  // classifier on the conductor's first bash call after `Skill(legate)` —
+  // putting the patterns directly in settings.json is the belt-and-suspenders
+  // path that closes the gap. Each pattern is scoped to one specific deployed
+  // script (no `Bash(*)` or `Bash(bash *)` wildcards).
+  const skillBashAllows = LEGATE_SKILL_SCRIPTS.map(
+    (script) => `Bash(.claude/skills/legate/scripts/${script} *)`,
+  );
+  const settings = {
+    permissions: {
+      allow: [
+        "Skill(legate:*)",
+        "Read(./**)",
+        "Edit(./**)",
+        "Write(./**)",
+        ...skillBashAllows,
+      ],
+    },
+  };
+  await fs.writeFile(
+    path.join(settingsDir, "settings.json"),
+    JSON.stringify(settings, null, 2) + "\n",
+  );
+}
+
 /**
- * Symlink `<conductor-dir>/.claude/skills/legate` to the staged skill dir so
- * Claude Code auto-discovers the skill on the conductor's next session start.
- * Idempotent — replaces an existing symlink/directory.
+ * Copy the rendered CLAUDE.md from the staged path directly into the
+ * conductor's home so Claude Code's auto-mode classifier doesn't trip on
+ * cross-boundary symlink resolution. Replaces any prior symlink/file.
+ *
+ * The trade-off: editing the staged file no longer auto-propagates to the
+ * conductor on session restart — operators iterate by editing the source
+ * template (`src/templates/legate/CLAUDE.md`) and re-running `march legate
+ * init`, which re-renders + re-copies. This is the explicit cost of B
+ * (auto-mode safety preserved) versus the prior symlink approach.
  */
-async function symlinkSkillIntoConductor(
+async function copyTemplateIntoConductor(
+  stagedTemplatePath: string,
+  conductorDir: string,
+): Promise<void> {
+  const target = path.join(conductorDir, "CLAUDE.md");
+  // rm with force handles all prior states: symlink, file, or missing.
+  await fs.rm(target, { force: true });
+  await fs.copyFile(stagedTemplatePath, target);
+}
+
+/**
+ * Recursively copy the staged skill directory directly into the conductor's
+ * `.claude/skills/legate/`. Same rationale as copyTemplateIntoConductor:
+ * keeps every read inside the conductor's cwd so auto-mode's classifier
+ * doesn't pause on cross-boundary access. Replaces any prior
+ * symlink/directory.
+ */
+async function copySkillIntoConductor(
   stagedSkillDir: string,
   conductorDir: string,
 ): Promise<void> {
   const skillsDir = path.join(conductorDir, ".claude", "skills");
   await fs.mkdir(skillsDir, { recursive: true });
-  const linkPath = path.join(skillsDir, "legate");
-  // Replace prior link/dir; rm with force handles both cases (symlink or
-  // copied directory left over from older versions).
-  await fs.rm(linkPath, { recursive: true, force: true });
-  await fs.symlink(stagedSkillDir, linkPath);
+  const target = path.join(skillsDir, "legate");
+  // Replace prior link/dir; rm with force handles symlinks, copied dirs,
+  // and missing-target alike.
+  await fs.rm(target, { recursive: true, force: true });
+  // fs.cp recursively copies the staged dir tree. Node 16.7+; we target 22 in
+  // tsconfig so this is safe.
+  await fs.cp(stagedSkillDir, target, { recursive: true });
+  // Ensure scripts are +x — fs.cp preserves source mode but be explicit so
+  // we never produce a scripts/ dir whose entries can't be invoked.
+  const scriptsDir = path.join(target, "scripts");
+  for (const entry of await fs.readdir(scriptsDir)) {
+    await fs.chmod(path.join(scriptsDir, entry), 0o755);
+  }
 }
 
 /**
@@ -505,6 +607,15 @@ export async function initLegate(
   // Build the agent-deck command. agent-deck's flag parser accepts single-dash
   // long flags (Go `flag` package); we match that style for parity with the
   // documented examples.
+  //
+  // We deliberately do NOT pass `-claude-md` here. agent-deck's `-claude-md`
+  // creates a symlink from `<conductor-dir>/CLAUDE.md` → the staged path,
+  // which Claude Code's auto-mode classifier then flags as a cross-boundary
+  // read on every session start (the symlink target lives outside cwd).
+  // Instead, agent-deck writes its default conductor CLAUDE.md, then we
+  // overwrite it with our rendered template via copyTemplateIntoConductor
+  // below. The conductor reads a regular file inside its own cwd → no
+  // cross-boundary prompt. Same approach for the skill (copy, not symlink).
   const setupCommand = [
     "agent-deck",
     "-p",
@@ -514,8 +625,6 @@ export async function initLegate(
     conductorName,
     "-description",
     description,
-    "-claude-md",
-    templateOutputPath,
   ];
 
   // Post-setup commands persist Claude Code's auto mode on the conductor's
@@ -599,7 +708,7 @@ export async function initLegate(
   let setupRan = false;
   let autoModeConfigured = false;
   let bridgeActive = false;
-  let skillSymlinked = false;
+  let skillDeployed = false;
   const postSetupWarnings: string[] = [];
   if (opts.runSetup ?? true) {
     try {
@@ -615,17 +724,37 @@ export async function initLegate(
       );
     }
 
-    // Symlink the staged skill into the conductor's `.claude/skills/legate`
-    // so Claude Code auto-discovers it on the next session start. Best-effort:
-    // a failure here doesn't block auto-mode/model/restart from running.
+    // Copy the rendered CLAUDE.md and the skill directory directly into the
+    // conductor's home (replacing any prior symlink from older deploys). This
+    // keeps every read the conductor does inside its own cwd, so auto-mode's
+    // classifier doesn't pause on cross-boundary access — see the comment on
+    // copyTemplateIntoConductor for the design trade-off.
     try {
-      await symlinkSkillIntoConductor(stagedSkillDir, conductorDir);
-      skillSymlinked = true;
+      await copyTemplateIntoConductor(templateOutputPath, conductorDir);
     } catch (err) {
       postSetupWarnings.push(
-        `Failed to symlink legate skill into ${conductorDir}/.claude/skills/legate: ` +
+        `Failed to copy CLAUDE.md into ${conductorDir}/CLAUDE.md: ` +
+          `${(err as Error).message}\n` +
+          `The conductor's CLAUDE.md is whatever agent-deck's default writer left there.`,
+      );
+    }
+    try {
+      await copySkillIntoConductor(stagedSkillDir, conductorDir);
+      skillDeployed = true;
+    } catch (err) {
+      postSetupWarnings.push(
+        `Failed to copy legate skill into ${conductorDir}/.claude/skills/legate: ` +
           `${(err as Error).message}\n` +
           `The conductor will still work but won't have the skill's helper scripts.`,
+      );
+    }
+    try {
+      await writeNarrowSettings(conductorDir);
+    } catch (err) {
+      postSetupWarnings.push(
+        `Failed to write narrow .claude/settings.json into ${conductorDir}: ` +
+          `${(err as Error).message}\n` +
+          `Without it, every skill-script invocation will pause for operator approval.`,
       );
     }
 
@@ -757,25 +886,30 @@ export async function initLegate(
     }`,
     `  Skill:          ${
       setupRan
-        ? skillSymlinked
-          ? `legate (.claude/skills/legate → ${stagedSkillDir})`
-          : "NOT symlinked — see warnings"
-        : `legate staged at ${stagedSkillDir} (symlinked on setup)`
+        ? skillDeployed
+          ? `legate (deployed to .claude/skills/legate; staged source at ${stagedSkillDir})`
+          : "NOT deployed — see warnings"
+        : `legate staged at ${stagedSkillDir} (copied into conductor on setup)`
     }`,
     "",
   ];
   const tailLines = setupRan
     ? [
-        "The conductor's CLAUDE.md is symlinked to the template above. Edit the",
-        "template to evolve legate's behavior; changes take effect after:",
-        `  agent-deck -p ${profile} session restart ${conductorTitle}`,
+        "CLAUDE.md and the legate skill were copied into the conductor's home",
+        "(no symlinks — keeps every read inside cwd so auto-mode doesn't pause).",
+        "To iterate on the prompt or skill scripts: edit the source under",
+        "`src/templates/legate/` in the march repo, then re-run:",
+        `  march legate init --profile ${profile}`,
+        "That re-renders, re-copies, and restarts the conductor.",
         "",
         "Attach:",
         `  agent-deck -p ${profile} session attach ${conductorTitle}`,
       ]
     : [
-        "Setup skipped (--no-setup). The template is rendered but no conductor",
-        "has been created yet. Run when ready:",
+        "Setup skipped (--no-setup). The template + skill are staged at",
+        `  ${stagingDir}`,
+        "but no conductor has been created and nothing has been copied into",
+        "a conductor dir yet. Run when ready:",
         `  ${formatShellCommand(setupCommand)}`,
         "",
         "Then enable auto mode, pin model, and restart:",
@@ -783,8 +917,8 @@ export async function initLegate(
         `  ${formatShellCommand(setModelCommand)}`,
         `  ${formatShellCommand(restartCommand)}`,
         "",
-        "After that, the conductor's CLAUDE.md will be symlinked to the",
-        "template above and you can attach with:",
+        "Re-running `march legate init` will perform setup AND copy the",
+        "rendered template + skill into the conductor's home, then attach:",
         `  agent-deck -p ${profile} session attach ${conductorTitle}`,
       ];
   const warningLines =
@@ -802,7 +936,7 @@ export async function initLegate(
     templateOutputPath,
     conductorDir,
     skillStagedDir: stagedSkillDir,
-    skillSymlinked,
+    skillDeployed,
     setupCommand,
     postSetupCommands,
     setupRan,

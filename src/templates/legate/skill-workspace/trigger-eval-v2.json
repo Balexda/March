@@ -1,0 +1,102 @@
+[
+  {
+    "query": "[HEARTBEAT] [default] Status: 1 waiting, 2 running, 0 idle, 0 error. Workers: cut-spawn-dispatch-us5 (running), cut-spawn-dispatch-us6 (waiting), forge-multi-backend-us1 (running). Check waiting sessions and report what needs my attention.",
+    "should_trigger": true
+  },
+  {
+    "query": "[HEARTBEAT] [march] Status: 0 waiting, 3 running, 0 idle, 0 error. All workers active — refresh PR state for the open ones and report.",
+    "should_trigger": true
+  },
+  {
+    "query": "[HEARTBEAT] [legate] periodic check — list waiting workers, refresh open PRs (CI + reviews), recommend next action as a [STATUS] reply.",
+    "should_trigger": true
+  },
+  {
+    "query": "Heartbeat tick — re-scan all workers, refresh open PRs (CI + reviews), dispatch /smithy.fix where needed, reply with [STATUS]",
+    "should_trigger": true
+  },
+  {
+    "query": "[HEARTBEAT] [default] Status: 0 waiting, 0 running, 1 idle, 1 error. Worker forge-spawn-sandbox-us2 is in error — investigate and act per your loop rules.",
+    "should_trigger": true
+  },
+  {
+    "query": "Worker cut-spawn-dispatch-us5 just transitioned running → waiting. Find its PR and add it to state.json.",
+    "should_trigger": true
+  },
+  {
+    "query": "Transition notification: forge-multi-backend-us3 went running → waiting. Read worker output, confirm a PR was opened, capture the URL into state.json.",
+    "should_trigger": true
+  },
+  {
+    "query": "transition: cut-us6 → waiting. Worker said 'PR opened: https://github.com/Balexda/March/pull/82'. Update state.json with the URL and check CI.",
+    "should_trigger": true
+  },
+  {
+    "query": "agent-deck just notified: session forge-spawn-sandbox-us2 went from running to error. Restart it once, and if it errors again on the next heartbeat escalate.",
+    "should_trigger": true
+  },
+  {
+    "query": "Sync the default branch in /home/jmbattista/Development/March and dispatch /smithy.cut for US6 of spec 2026-04-11-002-spawn-dispatch on a fresh worktree.",
+    "should_trigger": true
+  },
+  {
+    "query": "PR #75 has a CI failure on the eslint job. Dispatch /smithy.fix to the worker that owns it — same PR, not a new step.",
+    "should_trigger": true
+  },
+  {
+    "query": "I just merged PR #76 for the US7 cut. Mark that slice merged in state.json and pick up the next ready forge if its dependencies are merged.",
+    "should_trigger": true
+  },
+  {
+    "query": "Three smithy.cut PRs are open from yesterday's dispatch (PR #75/76/77) — babysit them: check CI on each, list any unresolved review comments, and tell me if any are ready for me to merge.",
+    "should_trigger": true
+  },
+  {
+    "query": "Refresh smithy status from the March repo and tell me what's next-up by dependency order — cuts and forges.",
+    "should_trigger": true
+  },
+  {
+    "query": "Cut user story 5 of the spawn-dispatch spec into a tasks file at specs/2026-04-11-002-spawn-dispatch/05-...tasks.md.",
+    "should_trigger": false
+  },
+  {
+    "query": "Show me unresolved inline review threads on Balexda/March PR #123 and group them by file path.",
+    "should_trigger": false
+  },
+  {
+    "query": "What's the difference between smithy.cut and smithy.forge? When would I use each in my workflow?",
+    "should_trigger": false
+  },
+  {
+    "query": "Refactor src/legate.ts in the March repo to extract the post-setup commands into a separate exported function. Keep the existing tests green.",
+    "should_trigger": false
+  },
+  {
+    "query": "Set up a new agent-deck conductor for ~/Development/SmithyCLI in the default profile, called legate-smithycli, with the legate template.",
+    "should_trigger": false
+  },
+  {
+    "query": "What's the current branch of /home/jmbattista/Development/March and is it ahead of origin?",
+    "should_trigger": false
+  },
+  {
+    "query": "Read docs/rfcs/2026-001-march-orchestration-platform/march-orchestration-platform.rfc.md and summarize what milestones are planned and what their dependencies are.",
+    "should_trigger": false
+  },
+  {
+    "query": "Run npm test in /home/jmbattista/Development/March and tell me which test files are failing.",
+    "should_trigger": false
+  },
+  {
+    "query": "Help me configure a Telegram bot for my agent-deck conductor — the bot is set up with @BotFather already, just need to wire it into ~/.agent-deck/config.toml.",
+    "should_trigger": false
+  },
+  {
+    "query": "List all PRs I have open right now across all my GitHub repos, sorted by createdAt.",
+    "should_trigger": false
+  },
+  {
+    "query": "I'm reviewing a smithy.fix PR #88 — it has CI passing but I want to see the diff against main before approving. Show me the changed files.",
+    "should_trigger": false
+  }
+]
