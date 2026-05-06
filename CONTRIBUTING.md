@@ -26,6 +26,7 @@ Tests that the CLI parses options correctly, deploys files to the right location
 | `src/cli.test.ts` | CLI integration (init, update, spawn dispatch wiring) |
 | `src/init.test.ts` | `march init`: manifest creation, skill deployment, idempotency guard |
 | `src/update.test.ts` | `march update`: upgrade/downgrade gating, `--yes` force path |
+| `src/legate.test.ts` | `march legate init`: slug derivation, template render, idempotent re-runs |
 | `src/manifest.test.ts` | Manifest schema and validity checks |
 | `src/skills.test.ts` | M1 skill definitions and deployment targets |
 | `src/deps.test.ts` | PATH lookup, finder availability, dependency warnings |

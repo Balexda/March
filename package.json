@@ -27,7 +27,8 @@
     "access": "public"
   },
   "files": [
-    "dist"
+    "dist",
+    "src/templates"
   ],
   "dependencies": {
     "commander": "^14.0.3",
