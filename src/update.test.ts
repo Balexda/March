@@ -111,7 +111,7 @@ describe("march update", () => {
       tmpDir,
       JSON.stringify({
         version: 1,
-        marchVersion: "0.1.0",
+        marchVersion: "0.1.1",
         deployLocation: "user",
         agents: ["claude"],
         files: { claude: [] },
@@ -193,7 +193,7 @@ describe("march update", () => {
     // Manifest marchVersion should now be the current CLI version
     const manifestPath = path.join(tmpDir, ".march", "march-manifest.json");
     const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf-8"));
-    expect(manifest.marchVersion).toBe("0.1.0");
+    expect(manifest.marchVersion).toBe("0.1.1");
     expect(manifest.files.claude).toHaveLength(3);
   });
 
@@ -318,7 +318,7 @@ describe("march update", () => {
     // Manifest should now be rewritten to the CLI version
     const manifestPath = path.join(tmpDir, ".march", "march-manifest.json");
     const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf-8"));
-    expect(manifest.marchVersion).toBe("0.1.0");
+    expect(manifest.marchVersion).toBe("0.1.1");
   });
 
   it("downgrade without --yes in non-TTY environment prints --yes instruction and exits 0", () => {

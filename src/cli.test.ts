@@ -135,7 +135,7 @@ describe("march CLI", () => {
 
   it("march --version prints 0.1.0", () => {
     const result = run(["--version"]);
-    expect(result.stdout).toContain("0.1.0");
+    expect(result.stdout).toContain("0.1.1");
   });
 
   describe("march legate", () => {
@@ -208,7 +208,7 @@ describe("march CLI", () => {
   it("march version exits 0 and stdout contains the package version", () => {
     const result = run(["version"]);
     expect(result.exitCode).toBe(0);
-    expect(result.stdout).toContain("0.1.0");
+    expect(result.stdout).toContain("0.1.1");
   });
 
   it("march version stdout is byte-for-byte identical to march --version stdout", () => {

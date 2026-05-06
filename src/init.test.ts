@@ -134,7 +134,7 @@ describe("march init", () => {
 
     const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf-8"));
     expect(manifest.version).toBe(1);
-    expect(manifest.marchVersion).toBe("0.1.0");
+    expect(manifest.marchVersion).toBe("0.1.1");
     expect(manifest.deployLocation).toBe("user");
     expect(manifest.agents).toEqual(["claude"]);
     expect(manifest.files.claude).toHaveLength(3);
