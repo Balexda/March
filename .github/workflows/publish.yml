@@ -1,0 +1,106 @@
+name: Publish to npm
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'Branch to publish from'
+        required: true
+        default: 'main'
+        type: string
+      agent_tests_passed:
+        description: 'Agent tests (A*) verified in a Claude Code session (see tests/Agent.tests.md)'
+        required: true
+        type: boolean
+        default: false
+      manual_tests_passed:
+        description: 'Human tests (H*) verified in an interactive terminal (see tests/Manual.tests.md)'
+        required: true
+        type: boolean
+        default: false
+
+concurrency:
+  group: npm-publish
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Validate branch name
+      run: |
+        BRANCH="${{ inputs.branch }}"
+        if [[ ! "$BRANCH" =~ ^[a-zA-Z0-9_./-]+$ ]]; then
+          echo "::error::Invalid branch name: '$BRANCH'"
+          exit 1
+        fi
+
+    - name: Verify manual test gates
+      run: |
+        if [[ "${{ inputs.agent_tests_passed }}" != "true" ]]; then
+          echo "::error::Agent tests (A*) must be verified before publishing. See tests/Agent.tests.md"
+          exit 1
+        fi
+        if [[ "${{ inputs.manual_tests_passed }}" != "true" ]]; then
+          echo "::error::Human tests (H*) must be verified before publishing. See tests/Manual.tests.md"
+          exit 1
+        fi
+
+  publish:
+    needs: validate
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+      id-token: write
+
+    steps:
+    - uses: actions/checkout@v6
+      with:
+        ref: ${{ inputs.branch }}
+        ssh-key: ${{ secrets.DEPLOY_KEY }}
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v6
+      with:
+        node-version: 24
+        cache: 'npm'
+
+    - name: Install dependencies
+      run: npm ci
+
+    - name: Build
+      run: npm run build
+
+    - name: Typecheck
+      run: npx tsc --noEmit
+
+    - name: Test
+      run: npm test
+
+    - name: Configure git
+      run: |
+        git config user.name "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+
+    - name: Bump version
+      id: version
+      run: |
+        npm version patch -m "release: v%s"
+        echo "version=$(node -p 'require("./package.json").version')" >> "$GITHUB_OUTPUT"
+
+    - name: Publish to npm
+      run: npm publish
+
+    - name: Push version commit and tag
+      run: |
+        git push origin "HEAD:refs/heads/${{ inputs.branch }}"
+        git push origin "v${{ steps.version.outputs.version }}"
+
+    - name: Create GitHub Release with auto-generated notes
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        gh release create "v${{ steps.version.outputs.version }}" \
+          --title "v${{ steps.version.outputs.version }}" \
+          --generate-notes
