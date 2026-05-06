@@ -33,6 +33,4 @@ Requires Node 20 or 22. `march spawn dispatch` additionally requires `git` and `
 | `march version` | Print the installed CLI version. |
 | `march help [command]` | Show help for a command. |
 
-## Contributing
-
 See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, testing strategy, and pre-release checklist.
