@@ -1,9 +1,15 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { spawnSync } from "node:child_process";
 import { resolve } from "node:path";
+import { createRequire } from "node:module";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+
+const _require = createRequire(import.meta.url);
+const PKG_VERSION: string = (
+  _require("../package.json") as { version: string }
+).version;
 
 const CLI_PATH = resolve(import.meta.dirname, "../dist/cli.js");
 
@@ -111,7 +117,7 @@ describe("march update", () => {
       tmpDir,
       JSON.stringify({
         version: 1,
-        marchVersion: "0.1.0",
+        marchVersion: PKG_VERSION,
         deployLocation: "user",
         agents: ["claude"],
         files: { claude: [] },
@@ -193,7 +199,7 @@ describe("march update", () => {
     // Manifest marchVersion should now be the current CLI version
     const manifestPath = path.join(tmpDir, ".march", "march-manifest.json");
     const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf-8"));
-    expect(manifest.marchVersion).toBe("0.1.0");
+    expect(manifest.marchVersion).toBe(PKG_VERSION);
     expect(manifest.files.claude).toHaveLength(3);
   });
 
@@ -318,7 +324,7 @@ describe("march update", () => {
     // Manifest should now be rewritten to the CLI version
     const manifestPath = path.join(tmpDir, ".march", "march-manifest.json");
     const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf-8"));
-    expect(manifest.marchVersion).toBe("0.1.0");
+    expect(manifest.marchVersion).toBe(PKG_VERSION);
   });
 
   it("downgrade without --yes in non-TTY environment prints --yes instruction and exits 0", () => {
