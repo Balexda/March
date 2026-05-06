@@ -56,7 +56,7 @@
 
 ## Slice 2: Container Wait Module
 
-**Goal**: Introduce `src/spawn-wait.ts` housing the `docker wait` and `docker kill` invocations that implement pipeline stage 6 (Wait). Exports `waitForContainer(containerId, timeoutSeconds)` returning a discriminated-union result `{ kind: "exited", exitCode } | { kind: "timedOut" }`, plus a `WaitError` typed error class. Independently testable via stub-bin-dir fixtures; no caller wiring in this slice.
+**Goal**: Introduce `src/spawn-wait.ts` housing the `docker wait` and `docker kill` invocations that implement pipeline stage 6 (Wait). Exports `waitForContainer(containerId, timeoutSeconds)` returning a discriminated-union result `{ kind: "exited", exitCode } | { kind: "timedOut", exitCode? }` (the timeout variant carries the killed container's settled exit code — typically 137 for SIGKILL — when the post-kill capture succeeds, so the dispatch action can persist it on the SpawnRecord per AS 7.4), plus a `WaitError` typed error class. Independently testable via stub-bin-dir fixtures; no caller wiring in this slice.
 
 **Justification**: Touches only the new file `src/spawn-wait.ts` and its sibling `src/spawn-wait.test.ts`. No file overlap with Slice 1, so the two are parallel-eligible (the wait module accepts `timeoutSeconds` as a parameter so it does not even need to import `TIMEOUT_SECONDS` from Slice 1 to be testable). Mirrors the `src/snapshot-build.ts` precedent: a focused module per pipeline-stage docker subcommand.
 
@@ -66,24 +66,25 @@
 
 - [ ] **Implement `waitForContainer` with discriminated-union result** [via Independent Slices]
 
-  Create `src/spawn-wait.ts` exporting `waitForContainer(containerId, timeoutSeconds)`. The function invokes `docker wait <containerId>` to block until the container exits, parses the integer exit code from stdout, and returns `{ kind: "exited", exitCode }`. When the wait exceeds `timeoutSeconds`, the function issues a best-effort `docker kill <containerId>` and returns `{ kind: "timedOut" }`. The container is NOT removed on either path — `docker rm` must never be invoked from this module (FR-020 / AS 7.5). Docker invocations follow the established `src/snapshot-build.ts` pattern: `execFileSync` with `stdio: ["ignore", "pipe", "pipe"]` and an explicit `maxBuffer` cap so verbose output cannot trigger `ENOBUFS`.
+  Create `src/spawn-wait.ts` exporting `waitForContainer(containerId, timeoutSeconds)`. The function invokes `docker wait <containerId>` to block until the container exits, parses the integer exit code from stdout, and returns `{ kind: "exited", exitCode }`. When the wait exceeds `timeoutSeconds`, the function issues a best-effort `docker kill <containerId>`, captures the killed container's settled exit code (typically 137 for SIGKILL — via a follow-up `docker wait <containerId>` or `docker inspect`), and returns `{ kind: "timedOut", exitCode }` when the capture succeeds or `{ kind: "timedOut" }` when it fails. The container is NOT removed on either path — `docker rm` must never be invoked from this module (FR-020 / AS 7.5). Docker invocations follow the established `src/snapshot-build.ts` pattern: `execFileSync` with `stdio: ["ignore", "pipe", "pipe"]` and an explicit `maxBuffer` cap so verbose output cannot trigger `ENOBUFS`.
 
   _Acceptance criteria:_
   - Happy path: `docker wait` returns within the timeout, stdout is parsed as an integer, `{ kind: "exited", exitCode }` is returned — satisfies AS 7.1 and AS 7.2
-  - Timeout path: when wall-clock exceeds `timeoutSeconds`, `docker kill <containerId>` is issued and `{ kind: "timedOut" }` is returned — satisfies AS 7.3 and FR-018
+  - Timeout path: when wall-clock exceeds `timeoutSeconds`, `docker kill <containerId>` is issued; the killed container's settled exit code is captured (e.g., via a follow-up `docker wait <containerId>` or `docker inspect`) and surfaced as `{ kind: "timedOut", exitCode }`; if the capture fails (container vanished, daemon error), the result is `{ kind: "timedOut" }` and the capture failure is swallowed best-effort — satisfies AS 7.3, AS 7.4 (exit-code preservation on timeout per the data-model `running → failed` rule "exitCode populated (if available)"), and FR-018
   - Container is never removed by this module on any path (no `docker rm` / `docker container rm` invocation) — satisfies FR-020 and AS 7.5
   - Throws a typed `WaitError` (exported from this module) when `docker wait` itself fails for non-timeout reasons (e.g., daemon unreachable, unknown container ID); the message includes a tail of the docker stderr stream following `BuildError`'s precedent in `snapshot-build.ts`
   - `timeoutSeconds` is a function parameter — the module does not import `TIMEOUT_SECONDS` from `spawn-config.ts`, so Slice 2 can ship before Slice 1
-  - `docker kill` failure on the timeout path (e.g., container has already exited between timeout detection and kill) is swallowed best-effort: the `{ kind: "timedOut" }` result is authoritative
+  - `docker kill` failure on the timeout path (e.g., container has already exited between timeout detection and kill) is swallowed best-effort: the `{ kind: "timedOut", exitCode? }` result remains authoritative
 
 - [ ] **Defensive parse of `docker wait` stdout** [via Minimal Path]
 
-  Within the same module, parse `docker wait`'s stdout robustly. Trim whitespace, then verify the result is an integer using `Number.parseInt(trimmed, 10)` followed by an `Number.isInteger` (and finite) check. Empty output, non-integer output, or output with multiple lines that does not parse cleanly must surface as a `WaitError` with a diagnostic message rather than producing `NaN` on the result.
+  Within the same module, parse `docker wait`'s stdout robustly. Trim whitespace, then validate the trimmed result against a strict whole-integer pattern (e.g., `/^-?\d+$/`) **before** passing it to `Number.parseInt(trimmed, 10)`. The strict pre-check is required because `parseInt`'s prefix-parsing semantics will silently accept malformed output like `"137junk"` or `"137\n0"` as `137`, which would mis-finalize the SpawnRecord with a fabricated exit code. After conversion, also assert `Number.isInteger` (and finite) on the parsed value as a defence-in-depth check. Empty output, output that fails the strict regex, output with embedded non-digit characters, or multi-line output containing anything beyond a single integer line must surface as a `WaitError` with a diagnostic message that names the unexpected output, rather than producing `NaN` or a partially parsed value.
 
   _Acceptance criteria:_
-  - Integer stdout (trimmed) returns the parsed exit code in `{ kind: "exited" }`
-  - Empty / non-integer / unparseable stdout throws `WaitError` with a message that names the unexpected output
-  - Behavioural coverage in `src/spawn-wait.test.ts` exercises the integer, empty, and non-integer paths via stub-bin-dir fixtures that emit each shape
+  - Trimmed stdout that matches `/^-?\d+$/` parses to the expected exit code and returns `{ kind: "exited", exitCode }`
+  - Empty stdout throws `WaitError` with a message that names the unexpected output
+  - Stdout with non-integer suffixes (e.g., `"137junk"`) or multiple lines (e.g., `"137\n0"`) throws `WaitError` — `parseInt`'s prefix-parsing must NOT silently accept these
+  - Behavioural coverage in `src/spawn-wait.test.ts` exercises the integer, empty, suffixed, and multi-line paths via stub-bin-dir fixtures that emit each shape
 
 - [ ] **Document the synchronous-invocation choice in module JSDoc** [via Minimal Path]
 
@@ -91,18 +92,19 @@
 
   _Acceptance criteria:_
   - Module-level JSDoc names the synchronous-invocation choice and the conditions under which it should be revisited
-  - Reference to the data-model assumption that March is single-operator at this milestone
+  - Reference points at the spec's "## Assumptions" entry in `spawn-dispatch.spec.md` that states March is a single-operator tool at this milestone (the canonical source of the assumption — the data model does not document it)
 
 - [ ] **Behavioural test surface for `waitForContainer` against a docker stub** [via Independent Slices]
 
-  Add `src/spawn-wait.test.ts`. Use a stub `docker` binary placed in a temp `$PATH` directory (mirroring `cli.test.ts`'s `makeDockerStubBinDir` and `makeDockerBuildFailBinDir` patterns) so the wait module can be exercised without a live daemon. Cover the four behavioural paths AS 7.1–7.5 specify and the parse-failure path: container exits 0, container exits non-zero, container hangs longer than `timeoutSeconds`, `docker wait` fails for a non-timeout reason, and `docker wait` emits unparseable stdout. Verify the no-`docker rm` invariant (AS 7.5 / FR-020) by inspecting the stub bin-dir's invocation log and asserting no `rm` / `container rm` subcommand was called in any path.
+  Add `src/spawn-wait.test.ts`. Use a stub `docker` binary placed in a temp `$PATH` directory (mirroring `cli.test.ts`'s `makeDockerStubBinDir` and `makeDockerBuildFailBinDir` patterns) so the wait module can be exercised without a live daemon. Cover the three wait outcomes AS 7.1–7.3 specify plus the two error-handling paths the wait module owns at this layer: container exits 0 (AS 7.1), container exits non-zero (AS 7.2), container hangs longer than `timeoutSeconds` (AS 7.3), `docker wait` fails for a non-timeout reason, and `docker wait` emits unparseable stdout. AS 7.4 (persisted-record finalization) is exercised at the dispatch-integration level in Slice 3 — not here, since this module does not write the SpawnRecord. AS 7.5 / FR-020 (no-`docker rm` invariant) is verified at this level by inspecting the stub bin-dir's invocation log and asserting no `rm` / `container rm` subcommand was called in any path.
 
   _Acceptance criteria:_
   - Happy path (exit 0) returns `{ kind: "exited", exitCode: 0 }` — AS 7.1
-  - Non-zero exit (e.g., 137) returns `{ kind: "exited", exitCode: 137 }` — AS 7.2
-  - Timeout path returns `{ kind: "timedOut" }` and the stub records a `docker kill` invocation — AS 7.3 / FR-018
+  - Non-zero exit (e.g., 42) returns `{ kind: "exited", exitCode: 42 }` — AS 7.2
+  - Timeout path with a stub whose post-kill capture succeeds returns `{ kind: "timedOut", exitCode: 137 }` and the stub records a `docker kill <id>` invocation followed by the post-kill capture call (`docker wait <id>` or `docker inspect <id>`) — AS 7.3 / AS 7.4 / FR-018
+  - Timeout path with a stub whose post-kill capture fails (the second `docker wait` exits non-zero, simulating a vanished container) returns `{ kind: "timedOut" }` (no `exitCode`) — exercises the best-effort capture-failure branch
   - Daemon-unreachable / unknown-container path throws `WaitError` whose message surfaces the docker stderr tail
-  - Unparseable stdout (empty / non-integer) throws `WaitError`
+  - Unparseable stdout (empty, suffixed integer like `"137junk"`, multi-line like `"137\n0"`) throws `WaitError`
   - In every path, the stub's invocation log contains no `docker rm` / `docker container rm` call — AS 7.5 / FR-020
   - Tests use a small `timeoutSeconds` (e.g., < 1 second) so the timeout-path test does not slow the suite
 
@@ -128,8 +130,8 @@
   - Stage 6 + Stage 7 execute only when the persisted SpawnRecord has `containerId` populated; otherwise the dispatch falls through to the existing placeholder console-log unchanged — preserves today's observable behaviour pre-US5
   - On `{ kind: "exited", exitCode: 0 }`: `markSpawnRecordStopped` is called with `exitCode: 0`, `process.exitCode` is set to `SUCCESS` (0), and dispatch returns — satisfies AS 7.1 and FR-022
   - On `{ kind: "exited", exitCode: <non-zero> }`: `markSpawnRecordStopped` is called with the actual code, `process.exitCode` is set to `ERROR` (1), and dispatch returns — satisfies AS 7.2 and FR-022
-  - On `{ kind: "timedOut" }`: `markSpawnRecordTimedOut` is called (no `exitCode` argument), `process.exitCode` is set to `ERROR` (1), and dispatch returns — satisfies AS 7.3 and FR-022
-  - In all wired-path outcomes, the persisted SpawnRecord on disk reflects the final `status`, `exitCode` (where required by the data model), `stoppedAt`, and `timedOut` (timeout path only) — satisfies AS 7.4
+  - On `{ kind: "timedOut", exitCode? }`: `markSpawnRecordTimedOut(id, exitCode)` is called, **forwarding the captured `exitCode` whenever Slice 2 supplied one** (typically 137 from the post-kill capture) so the persisted record retains the killed container's settled code per AS 7.4 and the data-model `running → failed` rule. When the wait module could not capture an exit code (best-effort capture failure), `markSpawnRecordTimedOut` is called without an `exitCode` argument and the data model permits the omission via "exitCode populated (if available)". `process.exitCode` is set to `ERROR` (1) and dispatch returns — satisfies AS 7.3 and FR-022
+  - In all wired-path outcomes, the persisted SpawnRecord on disk reflects the final `status`, `exitCode` (populated whenever the wait module supplies one — including the timeout path when the post-kill capture succeeds), `stoppedAt`, and `timedOut` (timeout path only) — satisfies AS 7.4
   - `docker rm` / `docker container rm` is never invoked by the dispatch action — satisfies AS 7.5 and FR-020
   - On `WaitError` (or any other thrown error inside Stage 6), the SpawnRecord is transitioned to `"failed"` via `markSpawnRecordFailed` (NOT `markSpawnRecordTimedOut`) so `timedOut` stays `false`/absent and the failure is not mis-attributed to a timeout
   - `markSpawnRecordFailed` is reused as-is from Story 4 for the `running → failed` non-timeout `WaitError` path — its existing behaviour (set `status: "failed"`, populate `stoppedAt`, leave `timedOut` and `exitCode` untouched) already satisfies the data-model `running → failed` requirements when `exitCode` is not deterministically known; no widening of the helper is required for US7 and Slice 1 leaves it unchanged
@@ -152,7 +154,7 @@
   _Acceptance criteria:_
   - One integration test per acceptance scenario, AS 7.1 through AS 7.5, referenced by ID in a test comment
   - Tests run against the existing `makeRealRepo` + isolated-`HOME` fixture
-  - Each test asserts the persisted SpawnRecord's `status`, `exitCode` (where the data-model requires it), `stoppedAt`, and `timedOut` against AS 7.4
+  - Each test asserts the persisted SpawnRecord's `status`, `exitCode` (including the timeout-path test, which asserts the captured exit code from the post-kill `docker wait` capture is persisted on the SpawnRecord — satisfying AS 7.4 and the data-model `running → failed` exit-code rule), `stoppedAt`, and `timedOut` against AS 7.4
   - Each test asserts the dispatch CLI exit code matches FR-022 (0 success, 1 error or timeout)
   - The stub bin-dir's invocation log contains no `docker rm` / `docker container rm` call in any path — AS 7.5 / FR-020
   - All pre-existing Story 2, 3, 4 integration tests continue to pass unmodified
