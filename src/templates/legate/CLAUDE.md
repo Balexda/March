@@ -324,10 +324,10 @@ After the skill is loaded, run the heartbeat sequence in this exact order. The s
      1. `Write(./fix-msg-<slice-id>.md)` containing: `/smithy.fix\n\nCI failure on <check-name>:\n<failed_checks summary from babysit-pr>`.
      2. `.claude/skills/legate/scripts/send-to-worker.sh {PROFILE} <worker_session_id> ./fix-msg-<slice-id>.md`.
      Same-PR amendment, never a fresh worker.
-   - `thread_count > 0`:
-     1. `Write(./fix-msg-<slice-id>.md)` containing: `/smithy.fix\n\nUnresolved review threads on PR #<num>:\n<paste unresolved_threads list from babysit-pr — path, line, body_preview for each>`.
+   - `needs_response_count > 0` (unresolved threads where the *last* comment isn't from the PR author — i.e. a reviewer is waiting for action; threads where the worker already replied and just await operator-click-Resolve are excluded):
+     1. `Write(./fix-msg-<slice-id>.md)` containing: `/smithy.fix\n\nUnresolved review threads on PR #<num> (where reviewer is awaiting response):\n<paste unresolved_threads where needs_response==true — path, line, last_author, body_preview for each>`.
      2. `.claude/skills/legate/scripts/send-to-worker.sh {PROFILE} <worker_session_id> ./fix-msg-<slice-id>.md`.
-     Same-PR amendment, never a fresh worker.
+     Same-PR amendment, never a fresh worker. Note: `thread_count > 0` with `needs_response_count == 0` means the worker already addressed every open thread and they're just unresolved because the operator hasn't clicked Resolve — do **not** re-dispatch in that case; report on heartbeat reply ("3 threads addressed by worker, awaiting operator-resolve") and continue.
    - `state == "MERGED"` → mark slice merged in `state.json`, log to `task-log.md`, then evaluate whether the next step in this line of work is now eligible (forge after a merged cut, etc.) and dispatch only if so via `launch-worker.sh`.
    - Worker `status == "error"` → `.claude/skills/legate/scripts/restart-worker.sh {PROFILE} <worker_session_id>` — once per worker per heartbeat. If the same worker is `error` again on the next heartbeat, escalate via `NEED:`.
    - All clear (CI PASS + 0 threads + state OPEN) → no action; report status on the heartbeat reply.
