@@ -442,6 +442,7 @@ const LEGATE_SKILL_SCRIPTS = [
   "send-to-worker.sh",
   "restart-worker.sh",
   "rerun-ci.sh",
+  "request-rebase.sh",
 ] as const;
 
 async function writeNarrowSettings(conductorDir: string): Promise<void> {

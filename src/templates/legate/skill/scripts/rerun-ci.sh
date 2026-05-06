@@ -1,12 +1,8 @@
 #!/usr/bin/env bash
 # legate skill: re-trigger a failed CI run on a PR.
 #
-# When `babysit-pr.sh` reports `checks == "FAIL"` but the failure root-cause
-# is upstream (a previous main red, a transient Actions infra hiccup, an
-# environment problem since fixed), the right action is *rerun the CI*,
-# not push another `/smithy.fix` amendment. Wraps `gh run rerun --failed`
-# so the dispatch stays inside the legate skill's `allowed-tools` and
-# auto-mode doesn't pause.
+# Wraps `gh run rerun --failed` so the dispatch stays inside the legate
+# skill's `allowed-tools` and auto-mode doesn't pause.
 #
 # Usage:
 #   rerun-ci.sh <repo-path> <run-id>
@@ -21,10 +17,23 @@
 #   1 gh call failed (e.g. run already passing, run id invalid)
 #   2 invalid input
 #
-# When NOT to use:
-#   - Real test/lint failure rooted in this PR's diff → `/smithy.fix` via
-#     `send-to-worker.sh`, not rerun-ci.
-#   - Run is currently in_progress → wait for it to complete before rerun.
+# IMPORTANT: rerun-ci re-runs *the same workflow against the same merge
+# commit*. GitHub computes the PR's merge commit from (PR head, main HEAD)
+# at the time the original run started; rerun reuses that merge commit
+# verbatim. So:
+#
+#   - Transient infra hiccup, flaky network test, runner OOM → rerun-ci
+#     is the right tool. The same code+main may behave differently on a
+#     second attempt.
+#   - Main was red when this PR ran, parent fix-PR has since merged, the
+#     test still references the *old* main → rerun-ci is the WRONG tool.
+#     It will reuse the stale merge commit and fail identically. Use
+#     request-rebase.sh instead — that makes the worker rebase the
+#     branch onto current main and force-push, which causes GitHub to
+#     recompute the merge commit and fire fresh CI.
+#   - Real test/lint failure rooted in this PR's diff → `/smithy.fix`
+#     via `send-to-worker.sh`, not rerun-ci.
+#   - Run is currently in_progress → wait for it to complete first.
 set -euo pipefail
 
 if [[ $# -ne 2 ]]; then

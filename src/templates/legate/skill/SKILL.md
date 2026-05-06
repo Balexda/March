@@ -1,7 +1,7 @@
 ---
 name: legate
 description: "Use this skill when acting as (or directing) a Smithy pipeline conductor. Primary triggers: [HEARTBEAT] ticks requiring worker scan + PR status refresh; worker session state transitions (running→waiting→merged); CI failures or review threads that need /smithy.fix dispatch to an existing worker; launching new workers for cut/forge slices; syncing the default branch before dispatch; discovering a worker's PR after branch rename; updating state.json after slice transitions. Skip for human code review, standalone git queries, or tasks with no conductor/worker/slice context."
-allowed-tools: Bash(.claude/skills/legate/scripts/sync-default-branch.sh:*) Bash(.claude/skills/legate/scripts/list-workers.sh:*) Bash(.claude/skills/legate/scripts/launch-worker.sh:*) Bash(.claude/skills/legate/scripts/discover-pr.sh:*) Bash(.claude/skills/legate/scripts/babysit-pr.sh:*) Bash(.claude/skills/legate/scripts/smithy-status.sh:*) Bash(.claude/skills/legate/scripts/send-to-worker.sh:*) Bash(.claude/skills/legate/scripts/restart-worker.sh:*) Bash(.claude/skills/legate/scripts/rerun-ci.sh:*)
+allowed-tools: Bash(.claude/skills/legate/scripts/sync-default-branch.sh:*) Bash(.claude/skills/legate/scripts/list-workers.sh:*) Bash(.claude/skills/legate/scripts/launch-worker.sh:*) Bash(.claude/skills/legate/scripts/discover-pr.sh:*) Bash(.claude/skills/legate/scripts/babysit-pr.sh:*) Bash(.claude/skills/legate/scripts/smithy-status.sh:*) Bash(.claude/skills/legate/scripts/send-to-worker.sh:*) Bash(.claude/skills/legate/scripts/restart-worker.sh:*) Bash(.claude/skills/legate/scripts/rerun-ci.sh:*) Bash(.claude/skills/legate/scripts/request-rebase.sh:*)
 ---
 
 # Skill: legate (Smithy workflow operations)
@@ -162,7 +162,7 @@ Stdout: agent-deck's confirmation. Don't loop on this — repeated restarts indi
 
 ## Operation: Re-trigger failed CI run
 
-Re-run a GitHub Actions workflow run when the failure is upstream — a previous main red, transient infra hiccup, environment problem since fixed — and the right action is to rerun rather than push another `/smithy.fix` amendment.
+Re-run a GitHub Actions workflow run **on the same workflow file and the same merge commit** when the failure was a transient infra/network hiccup that should pass on a second attempt.
 
 ```bash
 .claude/skills/legate/scripts/rerun-ci.sh <repo-path> <run-id>
@@ -170,11 +170,28 @@ Re-run a GitHub Actions workflow run when the failure is upstream — a previous
 
 `<run-id>` is the GitHub Actions run id, extractable from `babysit-pr`'s `failed_checks[].url` field (`https://github.com/<owner>/<repo>/actions/runs/<RUN-ID>/job/<job-id>` → take the `<RUN-ID>` segment).
 
-When to choose this over `send-to-worker.sh` for `/smithy.fix`:
-- **Use rerun-ci.sh** when CI failed because of an upstream condition (main was red, parent PR's bug, infra) that has since been resolved (e.g. parent fix-PR merged) — *no code change needed on this PR*.
+**Important: rerun-ci does NOT pick up changes that have landed on main since the original run.** `gh run rerun` reuses the merge commit GitHub computed from `(PR head, main HEAD)` *at the time the original run started*. If the failure was caused by a bug in main that has since been fixed by a parent PR merging, rerun-ci will fail identically — same code, same merge commit, same failure. For that case use `request-rebase.sh` instead, which makes the worker rebase its branch onto current main and force-push so GitHub recomputes the merge commit and re-fires CI from scratch.
+
+When to choose this:
+- **Use rerun-ci.sh** when the failure looks transient — a network blip, a flaky test, an Actions infra timeout — and main hasn't materially changed in a way that would cause the test to behave differently. No code change needed on this PR.
+- **Use request-rebase.sh** when the failure is "stale main" — the failed run started *before* a known fix landed on main, or the failure shape matches a problem main has since fixed. Force-push after rebase causes a fresh CI on a fresh merge commit.
 - **Use send-to-worker.sh /smithy.fix** when the failure is rooted in this PR's own diff — needs a real amendment.
 
-`babysit-pr` includes the failure timestamps; if the `failed_checks` URLs point at runs that started *before* a known fix landed on main, prefer rerun-ci.
+---
+
+## Operation: Request rebase
+
+Ask a worker to rebase its PR branch onto current `origin/main` and force-push. Used when CI is failing on a stale merge commit that doesn't include a fix from a recently-merged parent PR.
+
+```bash
+.claude/skills/legate/scripts/request-rebase.sh <profile> <session-id-or-title> <worktree-path>
+```
+
+`worktree-path` comes from the slice's `worktree_path` field in `state.json` — recorded by `launch-worker.sh` when the worker was created. The script dispatches a single message to the worker (which owns the worktree) instructing it to `git fetch origin && git rebase origin/main && git push --force-with-lease`, and returns the worker's reply. The worker handles conflicts and reports back so the conductor can escalate via `NEED:` rather than guessing at a resolution.
+
+Why dispatch this through the worker rather than rebasing from outside: the worker owns the worktree as a single writer. If the conductor and the worker both touch files in the same worktree concurrently, they conflict. Workers in `waiting` are ready to act on a message; that's the safe way to mutate the worktree.
+
+Wait for the worker's reply before declaring the slice fixed — and on the next heartbeat, re-run `babysit-pr` to confirm CI actually passes on the rebased branch (the rebase pushes a new SHA, which fires fresh CI; that fresh run is what determines whether the fix worked). Don't loop rebases — if the first rebase doesn't make CI green, the failure is more likely in the PR's own diff and warrants `/smithy.fix`.
 
 ---
 

@@ -320,12 +320,18 @@ After the skill is loaded, run the heartbeat sequence in this exact order. The s
    - `pr-in-fix` → `pr-open` when CI is now PASS *and* `thread_count == 0`.
    - `pr-open` → `merged` when `state == "MERGED"`.
 5. Decide actions per the **Auto-Respond vs Escalate** rules. **Every agent-deck / gh mutation goes through a skill script** — never call `agent-deck` or `gh run` directly, the skill scripts are how those operations stay inside `allowed-tools` and skip the auto-mode prompt. **`/smithy.fix` messages with newlines must be passed via file** (`Write(./fix-msg-<slice>.md)` first, then `send-to-worker.sh`) — inline `$'...'`/heredoc constructs trip the classifier:
-   - `checks == "FAIL"` — first decide: is this an **upstream-fixed-since** failure, or a **real PR-diff** failure?
-     - **Upstream-fixed-since** (the failed run's `startedAt` from babysit-pr is *before* a known fix landed on main, e.g. you just saw a parent fix-PR get merged): use `.claude/skills/legate/scripts/rerun-ci.sh {REPO_PATH} <run-id>` — extract `<run-id>` from `failed_checks[].url` (the `runs/<RUN-ID>/job/...` segment). No code change, just retrigger.
-     - **Real PR-diff failure**:
+   - `checks == "FAIL"` — three sub-cases. Choose the right tool; **triggering an action is *not* the same as the slice being clear — wait for the next heartbeat to confirm the new run actually passes**.
+     - **(a) Upstream-fixed-since** — the failed run started *before* a known parent-fix PR merged on main, OR the failure shape (version mismatch, fixture drift, an assertion that matches a problem main has since fixed) tells you the cause is stale main, not this PR's diff. **`rerun-ci.sh` does NOT help here** — `gh run rerun` re-runs the same workflow against the *same merge commit* (which GitHub computed against then-stale main), so the rerun fails identically. Use `request-rebase.sh` to make the worker rebase its branch onto current main and force-push; that causes GitHub to recompute the merge commit and fire fresh CI:
+       ```
+       .claude/skills/legate/scripts/request-rebase.sh {PROFILE} <worker_session_id> <worktree_path-from-state.json>
+       ```
+       Same-PR amendment. Mark the slice's `stage` in `state.json` as `pr-rebasing`.
+     - **(b) Transient flake** — no recent main changes would explain the failure; no PR-diff issue; e.g. a flaky network test, runner OOM, an Actions infra timeout. Use `.claude/skills/legate/scripts/rerun-ci.sh {REPO_PATH} <run-id>`. No code change. Mark `stage` as `pr-in-rerun`.
+     - **(c) Real PR-diff failure** — the failed test exercises code from this PR's own diff. `/smithy.fix`:
        1. `Write(./fix-msg-<slice-id>.md)` containing: `/smithy.fix\n\nCI failure on <check-name>:\n<failed_checks summary from babysit-pr>`.
-       2. `.claude/skills/legate/scripts/send-to-worker.sh {PROFILE} <worker_session_id> ./fix-msg-<slice-id>.md`.
-       Same-PR amendment, never a fresh worker.
+       2. `.claude/skills/legate/scripts/send-to-worker.sh {PROFILE} <worker_session_id> ./fix-msg-<slice-id>.md`. Same-PR amendment, never a fresh worker. Mark `stage` as `pr-in-fix`.
+
+     **Verification on the next heartbeat is non-negotiable.** Re-run babysit-pr against the PR every tick; the slice is only actually clear when `state == "MERGED"` *or* (`checks == "PASS"` *and* `needs_response_count == 0`). Until then, report the slice's `stage` (`pr-rebasing`, `pr-in-rerun`, `pr-in-fix`) honestly in your `[STATUS]` reply — *not* "all clear". If the same failure recurs after the dispatched action, do not just re-dispatch the same action: change tactic (e.g. `pr-rebasing` → if CI still fails after the rebased run completes, the failure has a real PR-diff component → switch to `/smithy.fix`) or escalate via `NEED:`.
    - `needs_response_count > 0` (unresolved threads where the *last* comment isn't from the PR author — i.e. a reviewer is waiting for action; threads where the worker already replied and just await operator-click-Resolve are excluded):
      1. `Write(./fix-msg-<slice-id>.md)` containing: `/smithy.fix\n\nUnresolved review threads on PR #<num> (where reviewer is awaiting response):\n<paste unresolved_threads where needs_response==true — path, line, last_author, body_preview for each>`.
      2. `.claude/skills/legate/scripts/send-to-worker.sh {PROFILE} <worker_session_id> ./fix-msg-<slice-id>.md`.
