@@ -146,6 +146,18 @@ March consists of five major components, delivered incrementally:
 - It can coordinate multi-step workflows (plan → dispatch → review → integrate).
 - The accumulated smithy-style skills are integrated as core Legate capabilities.
 
+## Dependency Order
+
+Recommended implementation sequence:
+
+| ID | Title    | Depends On     | Artifact                                                                       |
+|----|----------|----------------|--------------------------------------------------------------------------------|
+| M1 | Spawn    | —              | docs/rfcs/2026-001-march-orchestration-platform/01-spawn.features.md           |
+| M2 | Hatchery | M1             | —                                                                              |
+| M3 | Brood    | M1, M2         | —                                                                              |
+| M4 | Herald   | M1, M2, M3     | —                                                                              |
+| M5 | Legate   | M1, M2, M3, M4 | —                                                                              |
+
 ---
 
 ## Appendix A: Spawn Sandbox Threat Model
