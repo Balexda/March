@@ -1,10 +1,16 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { execFileSync, spawnSync } from "node:child_process";
 import { resolve } from "node:path";
+import { createRequire } from "node:module";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { FINDER_BIN } from "./deps.js";
+
+const _require = createRequire(import.meta.url);
+const PKG_VERSION: string = (
+  _require("../package.json") as { version: string }
+).version;
 
 const CLI_PATH = resolve(import.meta.dirname, "../dist/cli.js");
 
@@ -133,9 +139,9 @@ describe("march CLI", () => {
     expect(result.stderr).not.toContain("unknown option");
   });
 
-  it("march --version prints 0.1.0", () => {
+  it("march --version prints the package version", () => {
     const result = run(["--version"]);
-    expect(result.stdout).toContain("0.1.0");
+    expect(result.stdout).toContain(PKG_VERSION);
   });
 
   describe("march legate", () => {
@@ -208,7 +214,7 @@ describe("march CLI", () => {
   it("march version exits 0 and stdout contains the package version", () => {
     const result = run(["version"]);
     expect(result.exitCode).toBe(0);
-    expect(result.stdout).toContain("0.1.0");
+    expect(result.stdout).toContain(PKG_VERSION);
   });
 
   it("march version stdout is byte-for-byte identical to march --version stdout", () => {

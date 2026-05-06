@@ -1,10 +1,16 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { execFileSync, spawnSync } from "node:child_process";
 import { resolve } from "node:path";
+import { createRequire } from "node:module";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { FINDER_BIN } from "./deps.js";
+
+const _require = createRequire(import.meta.url);
+const PKG_VERSION: string = (
+  _require("../package.json") as { version: string }
+).version;
 
 // Absolute path to the finder binary (which on Unix, where on Windows) —
 // used to build isolated test PATHs.
@@ -134,7 +140,7 @@ describe("march init", () => {
 
     const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf-8"));
     expect(manifest.version).toBe(1);
-    expect(manifest.marchVersion).toBe("0.1.0");
+    expect(manifest.marchVersion).toBe(PKG_VERSION);
     expect(manifest.deployLocation).toBe("user");
     expect(manifest.agents).toEqual(["claude"]);
     expect(manifest.files.claude).toHaveLength(3);
