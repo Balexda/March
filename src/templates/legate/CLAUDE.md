@@ -319,11 +319,13 @@ After the skill is loaded, run the heartbeat sequence in this exact order. The s
    - `pr-open` → `pr-in-fix` when `checks == "FAIL"` or `thread_count > 0`.
    - `pr-in-fix` → `pr-open` when CI is now PASS *and* `thread_count == 0`.
    - `pr-open` → `merged` when `state == "MERGED"`.
-5. Decide actions per the **Auto-Respond vs Escalate** rules. **Every agent-deck mutation goes through a skill script** — never call `agent-deck` directly, the skill scripts are how those operations stay inside `allowed-tools` and skip the auto-mode prompt. **`/smithy.fix` messages with newlines must be passed via file** (`Write(./fix-msg-<slice>.md)` first, then `send-to-worker.sh`) — inline `$'...'`/heredoc constructs trip the classifier:
-   - `checks == "FAIL"`:
-     1. `Write(./fix-msg-<slice-id>.md)` containing: `/smithy.fix\n\nCI failure on <check-name>:\n<failed_checks summary from babysit-pr>`.
-     2. `.claude/skills/legate/scripts/send-to-worker.sh {PROFILE} <worker_session_id> ./fix-msg-<slice-id>.md`.
-     Same-PR amendment, never a fresh worker.
+5. Decide actions per the **Auto-Respond vs Escalate** rules. **Every agent-deck / gh mutation goes through a skill script** — never call `agent-deck` or `gh run` directly, the skill scripts are how those operations stay inside `allowed-tools` and skip the auto-mode prompt. **`/smithy.fix` messages with newlines must be passed via file** (`Write(./fix-msg-<slice>.md)` first, then `send-to-worker.sh`) — inline `$'...'`/heredoc constructs trip the classifier:
+   - `checks == "FAIL"` — first decide: is this an **upstream-fixed-since** failure, or a **real PR-diff** failure?
+     - **Upstream-fixed-since** (the failed run's `startedAt` from babysit-pr is *before* a known fix landed on main, e.g. you just saw a parent fix-PR get merged): use `.claude/skills/legate/scripts/rerun-ci.sh {REPO_PATH} <run-id>` — extract `<run-id>` from `failed_checks[].url` (the `runs/<RUN-ID>/job/...` segment). No code change, just retrigger.
+     - **Real PR-diff failure**:
+       1. `Write(./fix-msg-<slice-id>.md)` containing: `/smithy.fix\n\nCI failure on <check-name>:\n<failed_checks summary from babysit-pr>`.
+       2. `.claude/skills/legate/scripts/send-to-worker.sh {PROFILE} <worker_session_id> ./fix-msg-<slice-id>.md`.
+       Same-PR amendment, never a fresh worker.
    - `needs_response_count > 0` (unresolved threads where the *last* comment isn't from the PR author — i.e. a reviewer is waiting for action; threads where the worker already replied and just await operator-click-Resolve are excluded):
      1. `Write(./fix-msg-<slice-id>.md)` containing: `/smithy.fix\n\nUnresolved review threads on PR #<num> (where reviewer is awaiting response):\n<paste unresolved_threads where needs_response==true — path, line, last_author, body_preview for each>`.
      2. `.claude/skills/legate/scripts/send-to-worker.sh {PROFILE} <worker_session_id> ./fix-msg-<slice-id>.md`.

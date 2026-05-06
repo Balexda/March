@@ -1,7 +1,7 @@
 ---
 name: legate
 description: "Use this skill when acting as (or directing) a Smithy pipeline conductor. Primary triggers: [HEARTBEAT] ticks requiring worker scan + PR status refresh; worker session state transitions (running→waiting→merged); CI failures or review threads that need /smithy.fix dispatch to an existing worker; launching new workers for cut/forge slices; syncing the default branch before dispatch; discovering a worker's PR after branch rename; updating state.json after slice transitions. Skip for human code review, standalone git queries, or tasks with no conductor/worker/slice context."
-allowed-tools: Bash(.claude/skills/legate/scripts/sync-default-branch.sh:*) Bash(.claude/skills/legate/scripts/list-workers.sh:*) Bash(.claude/skills/legate/scripts/launch-worker.sh:*) Bash(.claude/skills/legate/scripts/discover-pr.sh:*) Bash(.claude/skills/legate/scripts/babysit-pr.sh:*) Bash(.claude/skills/legate/scripts/smithy-status.sh:*) Bash(.claude/skills/legate/scripts/send-to-worker.sh:*) Bash(.claude/skills/legate/scripts/restart-worker.sh:*)
+allowed-tools: Bash(.claude/skills/legate/scripts/sync-default-branch.sh:*) Bash(.claude/skills/legate/scripts/list-workers.sh:*) Bash(.claude/skills/legate/scripts/launch-worker.sh:*) Bash(.claude/skills/legate/scripts/discover-pr.sh:*) Bash(.claude/skills/legate/scripts/babysit-pr.sh:*) Bash(.claude/skills/legate/scripts/smithy-status.sh:*) Bash(.claude/skills/legate/scripts/send-to-worker.sh:*) Bash(.claude/skills/legate/scripts/restart-worker.sh:*) Bash(.claude/skills/legate/scripts/rerun-ci.sh:*)
 ---
 
 # Skill: legate (Smithy workflow operations)
@@ -157,6 +157,24 @@ Restart a worker session whose agent-deck status is `error`. Per CLAUDE.md, the 
 ```
 
 Stdout: agent-deck's confirmation. Don't loop on this — repeated restarts indicate the worker has a deeper problem the operator needs to look at.
+
+---
+
+## Operation: Re-trigger failed CI run
+
+Re-run a GitHub Actions workflow run when the failure is upstream — a previous main red, transient infra hiccup, environment problem since fixed — and the right action is to rerun rather than push another `/smithy.fix` amendment.
+
+```bash
+.claude/skills/legate/scripts/rerun-ci.sh <repo-path> <run-id>
+```
+
+`<run-id>` is the GitHub Actions run id, extractable from `babysit-pr`'s `failed_checks[].url` field (`https://github.com/<owner>/<repo>/actions/runs/<RUN-ID>/job/<job-id>` → take the `<RUN-ID>` segment).
+
+When to choose this over `send-to-worker.sh` for `/smithy.fix`:
+- **Use rerun-ci.sh** when CI failed because of an upstream condition (main was red, parent PR's bug, infra) that has since been resolved (e.g. parent fix-PR merged) — *no code change needed on this PR*.
+- **Use send-to-worker.sh /smithy.fix** when the failure is rooted in this PR's own diff — needs a real amendment.
+
+`babysit-pr` includes the failure timestamps; if the `failed_checks` URLs point at runs that started *before* a known fix landed on main, prefer rerun-ci.
 
 ---
 

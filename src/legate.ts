@@ -441,6 +441,7 @@ const LEGATE_SKILL_SCRIPTS = [
   "smithy-status.sh",
   "send-to-worker.sh",
   "restart-worker.sh",
+  "rerun-ci.sh",
 ] as const;
 
 async function writeNarrowSettings(conductorDir: string): Promise<void> {
