@@ -3,7 +3,8 @@ import { execFileSync } from "node:child_process";
 import { createInterface } from "node:readline";
 import { Command, CommanderError } from "commander";
 import { ERROR, SUCCESS, USAGE_ERROR } from "./exit-codes.js";
-import { checkSpawnDependencies } from "./deps.js";
+import { checkSpawnDependencies, isFinderAvailable, isOnPath } from "./deps.js";
+import { checkBridgeRequirements, initLegate, LegateError } from "./legate.js";
 import { initMarch, InitError } from "./init.js";
 import { createBuildContext, SnapshotError } from "./snapshot.js";
 import {
@@ -183,6 +184,140 @@ program
     }
   });
 
+// Subcommand group with no own action. Commander then handles both
+// `march legate` (no subcommand → emits help and throws `commander.help`)
+// and `march legate <bad>` (→ throws `commander.unknownCommand` naming the
+// actual unknown token, instead of `commander.excessArguments` blaming the
+// parent group). Both are intercepted in the bottom-of-file catch so the
+// user sees either help or a precise unknown-command message.
+const legate = program
+  .command("legate")
+  .description("Manage the per-repo legate conductor (Smithy workflow orchestrator)");
+
+legate
+  .command("init")
+  .description("Set up a legate conductor for the current repository")
+  .option("-p, --profile <profile>", "agent-deck profile (default: derived from repo basename)")
+  .option("-n, --name <name>", "Conductor name (default: legate-<repo-slug>)")
+  .option("-d, --description <description>", "Conductor description")
+  .option("-g, --worker-group <group>", "Group for worker sessions (default: legate-workers)")
+  .option(
+    "-m, --model <model>",
+    "Claude model alias or full ID for the conductor session (default: sonnet — orchestration is reasoning-light; workers stay on the Claude default).",
+  )
+  .option("--no-setup", "Render the template only; skip `agent-deck conductor setup`")
+  .option(
+    "--no-bridge-check",
+    "Skip the Python 3.9+ pre-flight check for the agent-deck conductor bridge daemon. Use only when you intend to drive the conductor manually with `agent-deck session send`.",
+  )
+  .action(async (opts: {
+    profile?: string;
+    name?: string;
+    description?: string;
+    workerGroup?: string;
+    model?: string;
+    setup?: boolean; // commander negates --no-setup into setup=false
+    bridgeCheck?: boolean; // commander negates --no-bridge-check into bridgeCheck=false
+  }) => {
+    commandHandled = true;
+
+    // 1. Detect repo root. Legate is per-repo, so this is mandatory. Three
+    //    distinct failures need distinct messages — pointing the user at
+    //    "run from inside a git repo" when `git` itself isn't installed
+    //    sends them in the wrong direction.
+    if (!isFinderAvailable()) {
+      process.stderr.write(
+        "Cannot verify git is installed: path-search utility unavailable.\n",
+      );
+      process.exitCode = ERROR;
+      return;
+    }
+    if (!isOnPath("git")) {
+      process.stderr.write(
+        "git not found on PATH — required to detect the repository root.\n",
+      );
+      process.exitCode = ERROR;
+      return;
+    }
+    let repoRoot: string;
+    try {
+      repoRoot = execFileSync("git", ["rev-parse", "--show-toplevel"], {
+        encoding: "utf-8",
+        stdio: ["ignore", "pipe", "pipe"],
+      }).trim();
+    } catch (err) {
+      const stderr = ((err as { stderr?: Buffer | string }).stderr ?? "")
+        .toString()
+        .trim();
+      if (stderr.includes("not a git repository")) {
+        process.stderr.write(
+          "Run `march legate init` from inside a git repository.\n",
+        );
+      } else {
+        process.stderr.write(
+          `Failed to detect the repository root: ${stderr || (err as Error).message}\n`,
+        );
+      }
+      process.exitCode = ERROR;
+      return;
+    }
+
+    // 2. Verify agent-deck is on PATH when we'll actually invoke it.
+    const willRunSetup = opts.setup !== false;
+    if (willRunSetup) {
+      if (!isFinderAvailable()) {
+        process.stderr.write(
+          "Cannot verify agent-deck is installed: path-search utility unavailable.\n",
+        );
+        process.exitCode = ERROR;
+        return;
+      }
+      if (!isOnPath("agent-deck")) {
+        process.stderr.write(
+          "agent-deck not found on PATH — install it from https://github.com/asheshgoplani/agent-deck or pass --no-setup to render the template only.\n",
+        );
+        process.exitCode = ERROR;
+        return;
+      }
+
+      // 3. Bridge pre-flight: confirm python3 is recent enough to actually
+      //    run agent-deck's conductor bridge daemon. The bridge is what
+      //    delivers heartbeats; without it, the conductor is functional
+      //    but inert. Failing here is preferable to deploying a conductor
+      //    that silently never wakes up. Skipped under --no-bridge-check.
+      if (opts.bridgeCheck !== false) {
+        const check = checkBridgeRequirements();
+        if (!check.ok) {
+          process.stderr.write(check.message + "\n");
+          process.exitCode = ERROR;
+          return;
+        }
+      }
+    }
+
+    // 4. Render template + (optionally) run agent-deck conductor setup.
+    try {
+      const result = await initLegate({
+        repoPath: repoRoot,
+        profile: opts.profile,
+        conductorName: opts.name,
+        description: opts.description,
+        workerGroup: opts.workerGroup,
+        model: opts.model,
+        runSetup: willRunSetup,
+      });
+      console.log(result.summary);
+      process.exitCode = SUCCESS;
+    } catch (err) {
+      if (err instanceof LegateError) {
+        console.error(err.message);
+        process.exitCode = ERROR;
+        return;
+      }
+      throw err;
+    }
+  });
+
 program
   .command("spawn [subcommand]")
   .description("Spawn a new environment")
@@ -323,17 +458,53 @@ program
     process.exitCode = ERROR;
   });
 
+/**
+ * Walk commander's tree following positional tokens in argv to find the
+ * deepest Command that exists. Used to scope the help we re-emit when
+ * commander throws `commander.help` for a subcommand group whose stderr
+ * help write was suppressed by our `configureOutput.writeErr` override.
+ */
+function findInvokedCommand(argv: readonly string[]): Command {
+  let cur: Command = program;
+  for (const arg of argv) {
+    if (arg.startsWith("-")) continue;
+    const child = cur.commands.find(
+      (c) => c.name() === arg || c.aliases().includes(arg),
+    );
+    if (!child) break;
+    cur = child;
+  }
+  return cur;
+}
+
 try {
   await program.parseAsync(process.argv);
 } catch (err: unknown) {
   if (err instanceof CommanderError) {
-    // Commander throws with exitCode 0 for any handled flag (e.g. --version, --help)
     if (err.exitCode === 0) {
+      // Commander throws with exitCode 0 for any handled flag (e.g.
+      // --version, --help); the corresponding output already went to stdout.
       commandHandled = true;
       process.exitCode = SUCCESS;
+    } else if (err.code === "commander.help") {
+      // Subcommand group invoked with no subcommand (e.g. `march legate`).
+      // Commander emitted help to stderr, but our writeErr override
+      // suppressed it — re-emit to stdout, scoped to the right command.
+      commandHandled = true;
+      findInvokedCommand(process.argv.slice(2)).outputHelp();
+      process.exitCode = USAGE_ERROR;
+    } else if (err.code === "commander.unknownCommand") {
+      // err.message names the actual unknown token, even when it's a
+      // subcommand inside a group (`march legate frobnicate` →
+      // "error: unknown command 'frobnicate'"). The bottom-of-file argv
+      // scan would otherwise mis-blame the parent group.
+      commandHandled = true;
+      process.stderr.write(err.message + "\n");
+      findInvokedCommand(process.argv.slice(2)).outputHelp();
+      process.exitCode = USAGE_ERROR;
     }
   }
-  // Non-zero Commander error — fall through to the !commandHandled block below.
+  // Other Commander errors fall through to the !commandHandled block below.
 }
 
 // No command was handled: either no args given or an unrecognised command.
