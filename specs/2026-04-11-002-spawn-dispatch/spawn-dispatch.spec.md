@@ -177,7 +177,7 @@ As an operator, I want `march spawn dispatch` to wait for the container to finis
 | US4 | Snapshot Worktree into Docker Image                  | US3        | `specs/2026-04-11-002-spawn-dispatch/04-snapshot-worktree-into-docker-image.tasks.md` |
 | US5 | Launch Container with Hardcoded Security Configuration | US4      | `specs/2026-04-11-002-spawn-dispatch/05-launch-container-with-security-config.tasks.md` |
 | US6 | Finalize Prompt and Hand Off to Backend              | US1, US5   | —                                                                                 |
-| US7 | Container Lifecycle: Wait for Exit                   | US5        | —                                                                                 |
+| US7 | Container Lifecycle: Wait for Exit                   | US5        | `specs/2026-04-11-002-spawn-dispatch/07-container-lifecycle-wait-for-exit.tasks.md` |
 
 ## Requirements
 
