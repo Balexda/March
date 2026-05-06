@@ -60,11 +60,18 @@ Drive the Smithy workflow loop end-to-end for `{REPO_NAME}`:
 
 4. **Wait — do not poll.** You receive a transition notification when a worker moves `running → waiting | error | idle`. On every `[HEARTBEAT]`, re-scan all workers and PRs you track. Between those signals, sit idle.
 
-5. **Confirm a PR landed.** When a worker returns from a slash command that should produce a PR (`/smithy.cut`, `/smithy.forge`, `/smithy.fix`, etc.), find the PR from inside the repo:
-   ```
-   (cd {REPO_PATH} && gh pr list --search "head:<branch>" --state open --json number,url,state,headRefName,statusCheckRollup)
-   ```
-   Capture the PR number into `state.json` against that slice. If no PR appeared and one was expected, escalate.
+5. **Confirm a PR landed.** When a worker transitions to `waiting`, find its PR. **Do not** rely on branch-name match — `/smithy.*` slash-commands sometimes rename or re-prefix the branch they push to (e.g. a worktree on `smithy/cut/spawn-dispatch-us5` may end up pushing to `feature/smithy/cut/spawn-dispatch-us5`; tracked upstream as `Balexda/SmithyCLI#297`). Use this discovery sequence instead:
+
+   1. **Primary**: read the worker's last output and grep for the PR URL the agent printed when it ran `gh pr create`:
+      ```
+      agent-deck -p {PROFILE} session output <worker_session_id> -q | grep -oE 'https://github\.com/[^/]+/[^/]+/pull/[0-9]+' | tail -1
+      ```
+   2. **Fallback** when (1) yields nothing — query GitHub for *your* recently-opened PRs and match by `createdAt > <dispatch_time>` and title pattern:
+      ```
+      (cd {REPO_PATH} && gh pr list --author @me --state open --json number,url,headRefName,title,createdAt)
+      ```
+      Then in `state.json` record `pr.actual_branch` (from `headRefName`) alongside the worktree branch, so subsequent `/smithy.fix` dispatches target the right PR/branch.
+   3. Capture the PR number, URL, *actual head branch*, and the slice id into `state.json`. If no PR appeared and one was expected, escalate.
 
 6. **Babysit the PR.**
    - **CI:** `(cd {REPO_PATH} && gh pr checks <num>)` — on FAIL, dispatch `/smithy.fix` to the slice's worker session with the failing-check summary.
@@ -108,7 +115,7 @@ The `smithy.*` skills installed in your conductor session document each command'
 
 | Action | Command |
 |---|---|
-| Inventory | `agent-deck -p {PROFILE} status --json` and `agent-deck -p {PROFILE} list --json` |
+| Inventory | `agent-deck -p {PROFILE} status --json` and `agent-deck -p {PROFILE} list --json` (filter with `jq`, e.g. `... \| jq '[.[] \| select(.group == "{WORKER_GROUP}")]'`) |
 | Worker detail (incl. worktree path) | `agent-deck -p {PROFILE} session show --json <id_or_title>` |
 | Launch worker (new worktree, new branch, locked title, auto mode) | `agent-deck -p {PROFILE} launch {REPO_PATH} -t "<title>" -c claude -g {WORKER_GROUP} --worktree "<branch>" -b --title-lock --extra-arg --permission-mode --extra-arg auto -m "<prompt>"` |
 | Send + wait + read | `agent-deck -p {PROFILE} session send <id> "<msg>" --wait -q --timeout 600s` |
@@ -125,6 +132,21 @@ Sessions resolve by exact title, ID prefix, path, or fuzzy match.
 | PR check status | `(cd {REPO_PATH} && gh pr checks <num>)` |
 | PR review summary (overall state, mergeable) | `(cd {REPO_PATH} && gh pr view <num> --json state,statusCheckRollup,mergeable,reviews,comments)` |
 | **Unresolved inline review threads** | use the **`smithy.pr-review`** skill — `gh pr view --json reviews,comments` does *not* surface unresolved inline threads |
+
+## Command-pattern hygiene (avoid stalling auto mode)
+
+You run under Claude Code's `--permission-mode auto`. The classifier auto-approves common shell tools but pauses on patterns it deems risky — most notably **`python3 -c "<inline script>"`** (treated as arbitrary code execution). When a permission prompt fires, your tmux session blocks until the operator answers it; in practice this means a single `python3 -c` in your tool calls can stall the entire heartbeat-driven loop.
+
+Prefer these patterns:
+
+- **JSON filtering**: use `jq` (always installed). Examples:
+  - `agent-deck -p {PROFILE} list --json | jq '[.[] | select(.group == "{WORKER_GROUP}")]'`
+  - `gh pr view <num> --json state,statusCheckRollup,mergeable | jq '.statusCheckRollup'`
+- **Reading state.json / writing state.json**: prefer the Read/Edit/Write tools the IDE gives you over inline shell scripts. They're auto-approved and they round-trip JSON cleanly.
+- **Grep / awk / sed**: fine, auto-mode trusts them.
+- **Avoid**: `python3 -c "..."`, `bash -c "$(curl ...)"`-style chains, anything that builds and immediately executes a script. If the operation truly needs Python, write it to a small file first and execute that — but in almost every case `jq` + standard shell is sufficient.
+
+If you find yourself reaching for `python3 -c` to filter a JSON blob, stop and use `jq` instead.
 
 ## Worker Session Configuration
 
