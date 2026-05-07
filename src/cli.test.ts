@@ -20,6 +20,13 @@ const FINDER_PATH = execFileSync(FINDER_BIN, [FINDER_BIN], {
   encoding: "utf-8",
 }).trim();
 
+// Deterministic 64-hex-char fake container ID emitted by the docker stub
+// when invoked as `docker run -d ...`. Shared between the stub builder and
+// the success-path assertion so the test asserts on the exact literal the
+// stub prints — see SD-003 in the US5 tasks file. The 64-char width matches
+// the full container ID format Docker actually returns from `run -d`.
+const FAKE_CONTAINER_ID = "0123456789abcdef".repeat(4);
+
 function run(
   args: string[],
   options?: { env?: Record<string, string> },
@@ -404,6 +411,13 @@ describe("march CLI", () => {
    * inspect`) plus a finder symlink, keeping the real git on PATH. The
    * bin dir comes first in PATH so the docker stub wins over any system
    * docker, while git is resolved by fall-through to the inherited PATH.
+   *
+   * The stub additionally prints {@link FAKE_CONTAINER_ID} to stdout when
+   * invoked as `docker run -d ...` so `launchSpawnContainer`'s stdout-
+   * capture path is exercisable end-to-end (SD-003). All other subcommands
+   * (`image inspect`, `pull`, `build`, `image rm`, `rm`, etc.) continue to
+   * exit 0 with no output so existing US2/US4 tests using this stub remain
+   * unaffected.
    */
   function makeDockerStubBinDir(): string {
     const binDir = path.join(makeTmpDir(), "bin");
@@ -412,8 +426,14 @@ describe("march CLI", () => {
     const dockerStub = path.join(binDir, "docker");
     // Succeeds for every subcommand, including `image inspect`, `pull`,
     // and `build`, so checkSpawnDependencies' base-image check passes
-    // and the snapshot/build stage in dispatch returns success.
-    fs.writeFileSync(dockerStub, "#!/bin/sh\nexit 0\n");
+    // and the snapshot/build stage in dispatch returns success. When
+    // invoked as `docker run -d ...`, prints a deterministic 64-hex-char
+    // container ID so launchSpawnContainer's stdout capture has something
+    // to trim and return — see SD-003 and FAKE_CONTAINER_ID above.
+    fs.writeFileSync(
+      dockerStub,
+      `#!/bin/sh\nif [ "$1" = "run" ] && [ "$2" = "-d" ]; then\n  echo "${FAKE_CONTAINER_ID}"\n  exit 0\nfi\nexit 0\n`,
+    );
     fs.chmodSync(dockerStub, 0o755);
     return binDir;
   }
@@ -434,6 +454,31 @@ describe("march CLI", () => {
     fs.writeFileSync(
       dockerStub,
       '#!/bin/sh\nif [ "$1" = "build" ]; then\n  echo "simulated build failure" >&2\n  exit 1\nfi\nexit 0\n',
+    );
+    fs.chmodSync(dockerStub, 0o755);
+    return binDir;
+  }
+
+  /**
+   * Builds a bin dir containing a docker stub that succeeds on every
+   * subcommand EXCEPT `run` (which exits 1 with "simulated launch failure"
+   * on stderr). Patterned after {@link makeDockerBuildFailBinDir} but
+   * targets the Stage 4 launch boundary instead of Stage 3. `build` must
+   * succeed because Stage 4 only runs after Stage 3's build has succeeded;
+   * `rm -f` must also succeed so the rollback chain's removeSpawnContainer
+   * call does not error out. Used by the launch-failure integration test
+   * to exercise the dispatch's Stage-4 rollback path: SpawnRecord
+   * transitions to "failed" and is preserved on disk while the container
+   * (none — never started), image, worktree, and branch are cleaned up.
+   */
+  function makeDockerRunFailBinDir(): string {
+    const binDir = path.join(makeTmpDir(), "bin");
+    fs.mkdirSync(binDir);
+    fs.symlinkSync(FINDER_PATH, path.join(binDir, path.basename(FINDER_PATH)));
+    const dockerStub = path.join(binDir, "docker");
+    fs.writeFileSync(
+      dockerStub,
+      '#!/bin/sh\nif [ "$1" = "run" ]; then\n  echo "simulated launch failure" >&2\n  exit 1\nfi\nexit 0\n',
     );
     fs.chmodSync(dockerStub, 0o755);
     return binDir;
@@ -460,10 +505,12 @@ describe("march CLI", () => {
     expect(result.stderr).not.toContain("not found");
     expect(result.stderr).not.toContain("Not inside a git repository");
     expect(result.stderr).not.toContain("march-base:latest");
-    // Dispatch continues to the placeholder stub after worktree + record
-    // creation; the stub sets exit code 1 with its message on stdout.
-    expect(result.exitCode).toBe(1);
-    expect(result.stdout).toContain("march spawn is not yet implemented");
+    // After Stage 4 lands, dispatch exits cleanly (exit 0) once the
+    // container has launched and the SpawnRecord has transitioned to
+    // "running". Stories 6–7 will extend dispatch from here without the
+    // misleading "not yet implemented" placeholder reappearing — see
+    // SD-005 in the US5 tasks file.
+    expect(result.exitCode).toBe(0);
 
     // Exactly one march/spawn/* branch was created in the source repo.
     // `git branch --list` prefixes the current branch with "* " and any
@@ -492,8 +539,8 @@ describe("march CLI", () => {
     expect(fs.existsSync(worktreePath)).toBe(true);
     expect(fs.existsSync(path.join(worktreePath, "README.md"))).toBe(true);
 
-    // Initial SpawnRecord file exists and validates against the data model
-    // for the `"created"` state.
+    // SpawnRecord file exists and validates against the data model for
+    // the `"running"` state after Stage 4's create → running transition.
     const recordPath = path.join(
       home,
       ".march",
@@ -508,17 +555,24 @@ describe("march CLI", () => {
     expect(record.branch).toBe(branch);
     expect(record.worktreePath).toBe(worktreePath);
     expect(record.backend).toBe("claude-code");
-    expect(record.status).toBe("created");
+    expect(record.status).toBe("running");
     expect(record.createdAt).toMatch(
       /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/,
     );
-    // Story 4: imageId is populated by the snapshot/build stage on the
-    // success path. Status remains "created" — Story 7 owns transitions
-    // out of "created" to "running" / "stopped".
+    // Story 4 populates imageId during the snapshot/build stage. Story 5
+    // owns the "created" → "running" transition (this slice). Story 7
+    // owns "running" → "stopped" / "failed".
     expect(record.imageId).toBe(`march-spawn-${spawnId}`);
-    // Other conditional fields are still absent at this state.
-    expect(record.containerId).toBeUndefined();
-    expect(record.startedAt).toBeUndefined();
+    // containerId is the trimmed stdout of `docker run -d`. The docker
+    // stub emits FAKE_CONTAINER_ID for `run -d` so the assertion locks
+    // the stub-emitted ID end-to-end through launchSpawnContainer's
+    // stdout-capture path (SD-003).
+    expect(record.containerId).toBe(FAKE_CONTAINER_ID);
+    expect(record.startedAt).toMatch(
+      /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/,
+    );
+    // Terminal-state fields remain absent until Story 7's lifecycle wait
+    // populates them on container exit.
     expect(record.exitCode).toBeUndefined();
     expect(record.stoppedAt).toBeUndefined();
   });
@@ -598,6 +652,89 @@ describe("march CLI", () => {
     // imageId must NOT be populated — the build failed before
     // updateSpawnRecordImageId ran.
     expect(record.imageId).toBeUndefined();
+  });
+
+  it("spawn dispatch: container launch failure transitions SpawnRecord to failed and cleans up image+worktree+branch", () => {
+    const repoRoot = makeRealRepo();
+    const home = makeTmpDir();
+    // Docker stub that succeeds on every subcommand except `run` (so the
+    // dependency check, snapshot/build, and the rollback's `rm -f` all
+    // pass) and exits 1 with "simulated launch failure" on stderr when
+    // the dispatch reaches Stage 4. Exercises the Stage 4 rollback path:
+    // SpawnRecord transitions "created" → "failed" with stoppedAt
+    // populated, the image/worktree/branch are cleaned up, and the
+    // record file is preserved on disk for auditing per the contracts'
+    // "stage 7 Record runs unconditionally" rule.
+    const dockerStubDir = makeDockerRunFailBinDir();
+    const nodeBinDir = path.dirname(process.execPath);
+    const result = runWithEnv(
+      ["spawn", "dispatch"],
+      {
+        PATH: [nodeBinDir, dockerStubDir, process.env.PATH ?? ""].join(
+          path.delimiter,
+        ),
+        HOME: home,
+      },
+      { cwd: repoRoot },
+    );
+
+    // Launch failure → exit 1 with the docker stderr tail surfacing
+    // through LaunchError.message to the operator-facing stream.
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr.length).toBeGreaterThan(0);
+    expect(result.stderr).toContain("simulated launch failure");
+
+    // No residual march/spawn/* branch — Stage 4 rollback must delete
+    // the branch via removeSpawnWorktree.
+    const branches = execFileSync(
+      "git",
+      ["for-each-ref", "--format=%(refname:short)", "refs/heads/march/spawn/"],
+      { cwd: repoRoot, encoding: "utf-8" },
+    );
+    expect(branches.trim()).toBe("");
+
+    // No residual worktree directory under <parent>/worktrees/march/.
+    const worktreeParent = path.join(
+      path.dirname(repoRoot),
+      "worktrees",
+      "march",
+    );
+    const leftover =
+      fs.existsSync(worktreeParent) && fs.readdirSync(worktreeParent);
+    expect(!leftover || leftover.length === 0).toBe(true);
+
+    // SpawnRecord file is preserved on disk per the data-model
+    // `created → failed` transition and the contracts' "stage 7 Record
+    // runs unconditionally" rule. Status is "failed" and stoppedAt is
+    // populated.
+    const spawnsDir = path.join(home, ".march", "spawns");
+    expect(fs.existsSync(spawnsDir)).toBe(true);
+    const recordFiles = fs
+      .readdirSync(spawnsDir)
+      .filter((f) => f.endsWith(".json"));
+    expect(recordFiles).toHaveLength(1);
+    const record = JSON.parse(
+      fs.readFileSync(path.join(spawnsDir, recordFiles[0]), "utf-8"),
+    );
+    expect(record.status).toBe("failed");
+    expect(record.stoppedAt).toMatch(
+      /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/,
+    );
+    // Stages 1–3 fields the initial write + Stage 3 imageId update
+    // populated must still be intact on the failed record.
+    expect(record.version).toBe(1);
+    expect(record.id).toBe(recordFiles[0].replace(/\.json$/, ""));
+    expect(record.repoPath).toBe(repoRoot);
+    expect(record.branch).toBe(`march/spawn/${record.id}`);
+    expect(record.backend).toBe("claude-code");
+    // imageId IS populated — Stage 3 succeeded; only Stage 4 (launch)
+    // failed in this scenario.
+    expect(record.imageId).toBe(`march-spawn-${record.id}`);
+    // containerId / startedAt remain absent — the docker stub exited 1
+    // before producing a container ID, so launchSpawnContainer threw
+    // before markSpawnRecordRunning could populate either field.
+    expect(record.containerId).toBeUndefined();
+    expect(record.startedAt).toBeUndefined();
   });
 
   it("spawn dispatch: worktree creation failure rolls back branch and leaves no SpawnRecord", () => {

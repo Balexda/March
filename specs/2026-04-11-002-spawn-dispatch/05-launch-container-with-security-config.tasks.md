@@ -67,7 +67,7 @@
   - Existing Story 1–4 rollback paths continue to pass unchanged — those failures occur before Stage 4 and are unaffected by this slice
   - Behavioral coverage of AS 5.1–5.6 is exercised by the integration tests below; this task introduces no standalone test files
 
-- [ ] **Extend integration coverage in `cli.test.ts` for Stage 4 success and launch-failure paths**
+- [x] **Extend integration coverage in `cli.test.ts` for Stage 4 success and launch-failure paths**
 
   Update `src/cli.test.ts` to cover the new Stage 4 behaviors against the existing real-tmp-repo fixture with isolated `HOME`. Update the existing dispatch success test so its tail no longer asserts the post-Stage-3 placeholder text and instead asserts the `"running"` SpawnRecord and a populated container ID. Extend the existing `makeDockerStubBinDir` so the docker stub prints a deterministic fake container ID on `docker run -d` so `launchSpawnContainer`'s stdout-capture path is exercisable end-to-end (see SD-003). Add a new `makeDockerRunFailBinDir` stub patterned after `makeDockerBuildFailBinDir` and a new launch-failure integration test. Fix the stale Story-7-attribution comment near the success-path assertions (see SD-004) and audit the rest of `src/` for similar drift while you're there.
 
