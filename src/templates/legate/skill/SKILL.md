@@ -1,7 +1,7 @@
 ---
 name: legate
 description: "Use this skill when acting as (or directing) a Smithy pipeline conductor. Primary triggers: [HEARTBEAT] ticks requiring worker scan + PR status refresh; worker session state transitions (running→waiting→merged); CI failures or review threads that need /smithy.fix dispatch to an existing worker; launching new workers for cut/forge slices; syncing the default branch before dispatch; discovering a worker's PR after branch rename; updating state.json after slice transitions. Skip for human code review, standalone git queries, or tasks with no conductor/worker/slice context."
-allowed-tools: Bash(.claude/skills/legate/scripts/sync-default-branch.sh:*) Bash(.claude/skills/legate/scripts/list-workers.sh:*) Bash(.claude/skills/legate/scripts/launch-worker.sh:*) Bash(.claude/skills/legate/scripts/discover-pr.sh:*) Bash(.claude/skills/legate/scripts/babysit-pr.sh:*) Bash(.claude/skills/legate/scripts/smithy-status.sh:*) Bash(.claude/skills/legate/scripts/send-to-worker.sh:*) Bash(.claude/skills/legate/scripts/restart-worker.sh:*) Bash(.claude/skills/legate/scripts/rerun-ci.sh:*) Bash(.claude/skills/legate/scripts/request-rebase.sh:*)
+allowed-tools: Bash(.claude/skills/legate/scripts/sync-default-branch.sh:*) Bash(.claude/skills/legate/scripts/list-workers.sh:*) Bash(.claude/skills/legate/scripts/launch-worker.sh:*) Bash(.claude/skills/legate/scripts/discover-pr.sh:*) Bash(.claude/skills/legate/scripts/babysit-pr.sh:*) Bash(.claude/skills/legate/scripts/smithy-status.sh:*) Bash(.claude/skills/legate/scripts/send-to-worker.sh:*) Bash(.claude/skills/legate/scripts/restart-worker.sh:*) Bash(.claude/skills/legate/scripts/rerun-ci.sh:*) Bash(.claude/skills/legate/scripts/request-rebase.sh:*) Bash(.claude/skills/legate/scripts/request-conflict-resolution.sh:*)
 ---
 
 # Skill: legate (Smithy workflow operations)
@@ -192,6 +192,28 @@ Ask a worker to rebase its PR branch onto current `origin/main` and force-push. 
 Why dispatch this through the worker rather than rebasing from outside: the worker owns the worktree as a single writer. If the conductor and the worker both touch files in the same worktree concurrently, they conflict. Workers in `waiting` are ready to act on a message; that's the safe way to mutate the worktree.
 
 Wait for the worker's reply before declaring the slice fixed — and on the next heartbeat, re-run `babysit-pr` to confirm CI actually passes on the rebased branch (the rebase pushes a new SHA, which fires fresh CI; that fresh run is what determines whether the fix worked). Don't loop rebases — if the first rebase doesn't make CI green, the failure is more likely in the PR's own diff and warrants `/smithy.fix`.
+
+---
+
+## Operation: Request conflict resolution
+
+Ask a worker to resolve a real merge conflict on its PR branch by rebasing onto the latest default branch and editing the conflicting files, then force-push. Used when `babysit-pr` reports `state == "OPEN"` and `mergeable == "CONFLICTING"` — the PR cannot merge because its diff overlaps something that landed on the default branch since the worker last rebased. CI may still be green and threads may be clear; the merge is dirty regardless.
+
+```bash
+.claude/skills/legate/scripts/request-conflict-resolution.sh \
+  <profile> <session-id-or-title> <worktree-path> <default-branch> <pr-num>
+```
+
+`worktree-path` and `default-branch` come from the slice and `repo` blocks in `state.json`; `pr-num` is the PR number from the slice's `pr.number`. The script dispatches a single `/smithy.fix` message instructing the worker to fetch the latest default, rebase onto it, resolve each conflict using the slice's spec / data-model / contracts as ground truth, `git rebase --continue`, and `git push --force-with-lease`. The worker falls back to `git rebase --abort` and reports the tangled paths only if the conflict reflects a genuine design disagreement between two slices that the operator must arbitrate.
+
+How this differs from `request-rebase.sh`:
+
+- **`request-rebase.sh`** assumes a clean rebase. The two branches don't overlap; the rebase is pure replay. Conflicts there are an *error path* — the worker aborts and reports.
+- **`request-conflict-resolution.sh`** assumes a real conflict. The two branches *do* overlap and need semantic merging; `/smithy.fix` framing loads the worker's reviewer skills against the slice's intent.
+
+Don't reach for both at once on the same PR — `request-conflict-resolution.sh` already includes the rebase, so dispatching `request-rebase.sh` first is wasted motion.
+
+Wait for the worker's reply, then re-run `babysit-pr` on the next heartbeat to confirm `mergeable` flipped to `MERGEABLE` (and CI is still green on the rebased SHA). If `mergeable` is still `CONFLICTING` after the worker reports a successful push, escalate via `NEED:` — the PR likely conflicts with *another* PR that merged since the worker started.
 
 ---
 
