@@ -53,7 +53,7 @@
   - The internal `buildClaudeCodeEntrypoint(promptFilePath)` helper has signature `(promptFilePath: string) => string[]` matching the future `SpawnBackend.buildEntrypoint` shape; no exported `SpawnBackend` interface is introduced (Feature 3 owns that)
   - Unit tests stub the docker invocation at the `execFile` boundary and assert flag composition end-to-end (every flag from `SPAWN_CONFIG` appears in the captured argv)
 
-- [ ] **Wire Stage 4 launch into the dispatch action with success record-update and failure rollback**
+- [x] **Wire Stage 4 launch into the dispatch action with success record-update and failure rollback**
 
   Update the `dispatch` action in `src/cli.ts` so that, after the Stage 3 snapshot+build block has succeeded, it (a) invokes `launchSpawnContainer` with the spawn ID, and (b) on success calls `markSpawnRecordRunning(spawnId, containerId)` to transition the record to `"running"`. On any failure in (a) or (b), call `markSpawnRecordFailed` (preserving the record on disk for auditing), then clean up physical artifacts in reverse order: remove the container (idempotent — no-op if launch never produced one) → remove the image → remove the worktree → delete the branch, then write the error to stderr and exit 1. Failure handling matches the inline-in-catch pattern already used by the Stage 3 wiring. Remove the existing post-Stage-3 "not yet implemented" placeholder and its `process.exitCode = ERROR` so a successful Stage 4 launch leaves the dispatch in a clean exit-0 state — see SD-005 for the rationale.
 
