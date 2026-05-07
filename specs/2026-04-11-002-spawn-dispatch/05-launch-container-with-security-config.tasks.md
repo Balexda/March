@@ -39,7 +39,7 @@
   - The round-tripped record satisfies the data-model rules for the `"running"` state (`containerId` and `startedAt` both present)
   - Unit tests cover the happy-path transition (`"created"` with `imageId` → `"running"` with `imageId`/`containerId`/`startedAt`), the missing-file error path, and assert all pre-existing fields are preserved through the transition
 
-- [ ] **Introduce container-launch helpers in new `src/container-launch.ts`**
+- [x] **Introduce container-launch helpers in new `src/container-launch.ts`**
 
   Create `src/container-launch.ts` mirroring the small-module pattern of `snapshot-build.ts`. Export a `LaunchError` typed error class (mirrors `BuildError`), a `launchSpawnContainer({ spawnId })` function that runs `docker run -d` against the spawn's tagged image with all flags derived from `SPAWN_CONFIG` plus the Claude Code entrypoint per the contracts' Container Launch and Claude Code Implementation sections, and an idempotent `removeSpawnContainer(spawnId)` helper for the dispatch rollback chain. Returns the container ID captured from `docker run -d` stdout. Internally, use a small `buildClaudeCodeEntrypoint(promptFilePath)` helper so Feature 3's later `SpawnBackend.buildEntrypoint` migration is a rename rather than a re-architecting.
 
