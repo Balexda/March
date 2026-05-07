@@ -1,0 +1,168 @@
+---
+name: legate.babysit
+description: "Mini-legate's PR-management skill. Use on every heartbeat (load before any other skill) to scan tracked PRs in state.json, run the decision tree (MERGED → CONFLICTING → FAIL → unresolved threads → all-clear), and dispatch the right action — `/smithy.fix` to the slice's worker, a rebase request, a CI rerun, a worker restart, or a merge transition. Triggers: heartbeat ticks, worker `running → waiting` transitions, operator follow-ups about an open PR. Skip for new-work dispatch (that's `legate.dispatch`)."
+allowed-tools: Bash(.claude/skills/legate.babysit/scripts/babysit-pr.sh:*) Bash(.claude/skills/legate.babysit/scripts/send-to-worker.sh:*) Bash(.claude/skills/legate.babysit/scripts/request-rebase.sh:*) Bash(.claude/skills/legate.babysit/scripts/request-conflict-resolution.sh:*) Bash(.claude/skills/legate.babysit/scripts/rerun-ci.sh:*) Bash(.claude/skills/legate.babysit/scripts/restart-worker.sh:*) Bash(.claude/skills/legate.babysit/scripts/discover-pr.sh:*) Bash(.claude/skills/legate.babysit/scripts/list-workers.sh:*)
+---
+
+# Skill: legate.babysit (existing-PR mechanics)
+
+This skill manages every PR the conductor already knows about. Load it **first** on every heartbeat — its `allowed-tools` need to be active before you bash any of its scripts, and the decision tree below is what actually drives action selection. The conductor's `CLAUDE.md` carries the loop skeleton and the universal invariants; this skill carries the PR-state decision tree.
+
+Load via `Skill(skill="legate.babysit")` once per session. The classifier registers the allowed-tools for the rest of the session.
+
+---
+
+## The protocol
+
+Run these steps in order on every heartbeat (and on every `running → waiting` transition for an individual worker):
+
+### 1. Inventory workers
+
+```
+.claude/skills/legate.babysit/scripts/list-workers.sh {{PROFILE}} {{WORKER_GROUP}}
+```
+
+Returns a JSON array of `{id, title, status, worktree_branch, worktree_path, parent_session_id}` for every session in your worker group. Reconcile against `state.json` — workers in `running` need no action this tick; workers in `waiting` may have a fresh PR or fresh review activity to process.
+
+### 2. Discover PRs for any waiting worker without a PR yet
+
+For each worker in `waiting` whose `pr` field is still `null` in `state.json`:
+
+```
+.claude/skills/legate.babysit/scripts/discover-pr.sh {{PROFILE}} <session-id> {{REPO_PATH}}
+```
+
+Two-tier discovery (resilient to branch renames `/smithy.*` does, see SmithyCLI#297): first greps the worker's tmux output for the `https://github.com/.../pull/N` URL, then falls back to `gh pr list --author @me --state open` filtered by dispatch timestamp. Capture `headRefName` into `state.json` as `pr.actual_branch`.
+
+### 3. Babysit every tracked PR
+
+**Non-skippable.** For every tracked PR in `state.json` — including the ones you just discovered, including the ones with CI green:
+
+```
+.claude/skills/legate.babysit/scripts/babysit-pr.sh {{REPO_PATH}} <pr-num>
+```
+
+Combines `gh pr view --json` for top-level state with a GraphQL `pullRequest.reviewThreads` query for unresolved inline threads. The discover-pr CI status is *not sufficient* — `babysit-pr.sh` is the only operation that surfaces unresolved inline review threads (the things `/smithy.fix` is built around). Reviewers (Copilot, humans) routinely leave inline comments on PRs that pass CI; if you skip this step the loop silently misses every review-driven fix opportunity.
+
+Output schema:
+```json
+{
+  "number": N, "url": "...", "state": "OPEN|MERGED|CLOSED",
+  "mergeable": "MERGEABLE|CONFLICTING|UNKNOWN",
+  "head_branch": "...", "title": "...",
+  "review_decision": "APPROVED|CHANGES_REQUESTED|REVIEW_REQUIRED|null",
+  "checks": "PASS|FAIL|PENDING|NONE",
+  "failed_checks": [{"name": "...", "url": "..."}],
+  "unresolved_threads": [{"id", "path", "line", "author", "body_preview", "last_author", "comment_count", "needs_response"}],
+  "thread_count": <n>,
+  "needs_response_count": <n where last comment isn't from PR author>
+}
+```
+
+### 4. Update `state.json`
+
+Capture: PR numbers, `checks` status, `mergeable`, `thread_count`, `unresolved_threads`, slice `stage`. Stage transitions:
+
+- `pr-open` → `pr-resolving-conflicts` when `mergeable == "CONFLICTING"`.
+- `pr-open` → `pr-in-fix` when `checks == "FAIL"` or `thread_count > 0` (and `mergeable != "CONFLICTING"` — the conflict branch wins when both are true).
+- `pr-in-fix` → `pr-open` when CI is now PASS *and* `thread_count == 0` *and* `mergeable != "CONFLICTING"`.
+- `pr-resolving-conflicts` → `pr-open` when `mergeable == "MERGEABLE"` again (the worker's force-push landed and GitHub finished re-computing the merge).
+- `pr-rebasing` → `pr-open` when CI is PASS on the rebased SHA.
+- `pr-in-rerun` → `pr-open` when the re-triggered run completes PASS.
+- `pr-open` → `merged` when `state == "MERGED"`.
+
+### 5. Decide and dispatch
+
+Evaluate the bullets in order; the first match wins per heartbeat. Mark the resulting `stage` in `state.json` so the next heartbeat's verification step knows what to expect.
+
+#### `state == "MERGED"`
+
+Mark slice `merged` in `state.json`, log to `task-log.md`. **The merge of a PR is the only event that unblocks the next step in this line of work** — surface this to the dispatch skill on the next iteration so it can evaluate whether forge-after-cut (or slice-N+1-after-slice-N) is now eligible.
+
+#### `state == "OPEN"` AND `mergeable == "CONFLICTING"`
+
+The PR cannot merge because its diff overlaps something that landed on the default branch since the worker last rebased. CI being green and threads being clear do **not** matter here; a CONFLICTING PR is blocked regardless. Note `mergeable == "UNKNOWN"` is transient (GitHub is still computing the merge) — skip it and re-check next heartbeat; only act on `CONFLICTING`.
+
+```
+.claude/skills/legate.babysit/scripts/request-conflict-resolution.sh {{PROFILE}} <worker_session_id> <worktree_path-from-state.json> <repo.default_branch-from-state.json> <pr.number>
+```
+
+Same-PR amendment. Sets `stage = pr-resolving-conflicts`. The rebase pushes a new SHA which fires fresh CI — so handling CONFLICTING here subsumes any coincident `checks == "FAIL"` you would have otherwise routed below; do not also dispatch `request-rebase.sh` or `rerun-ci.sh` in the same heartbeat.
+
+**Recurrence rule:** if on the *next* heartbeat `mergeable` is still `CONFLICTING` after the worker reported a successful push, escalate via `NEED:` — the PR likely conflicts with yet another sibling PR that merged in the meantime, and chaining rebases blindly will not converge.
+
+#### `checks == "FAIL"` (only reached when `mergeable != "CONFLICTING"`)
+
+Three sub-cases. Choose the right tool — getting this wrong loops uselessly.
+
+**(a) Upstream-fixed-since.** The failed run started *before* a known parent-fix PR merged on main, OR the failure shape (version mismatch, fixture drift, an assertion that matches a problem main has since fixed) tells you the cause is stale main, not this PR's diff. **`rerun-ci.sh` does NOT help here** — `gh run rerun` re-runs the same workflow against the *same merge commit* (which GitHub computed against then-stale main), so the rerun fails identically. Use `request-rebase.sh`:
+
+```
+.claude/skills/legate.babysit/scripts/request-rebase.sh {{PROFILE}} <worker_session_id> <worktree_path-from-state.json>
+```
+
+The rebase causes GitHub to recompute the merge commit and fire fresh CI. Same-PR amendment. Sets `stage = pr-rebasing`.
+
+**(b) Transient flake.** No recent main changes would explain the failure; no PR-diff issue; e.g. a flaky network test, runner OOM, an Actions infra timeout. Use:
+
+```
+.claude/skills/legate.babysit/scripts/rerun-ci.sh {{REPO_PATH}} <run-id>
+```
+
+Extract `<run-id>` from `babysit-pr`'s `failed_checks[].url` (the `runs/<RUN-ID>/job/...` segment). No code change. Sets `stage = pr-in-rerun`.
+
+**(c) Real PR-diff failure.** The failed test exercises code from this PR's own diff. Use `/smithy.fix`:
+
+1. `Write(./fix-msg-<slice-id>.md)` containing: `/smithy.fix\n\nCI failure on <check-name>:\n<failed_checks summary from babysit-pr>`.
+2. `.claude/skills/legate.babysit/scripts/send-to-worker.sh {{PROFILE}} <worker_session_id> ./fix-msg-<slice-id>.md`.
+
+Same-PR amendment. Sets `stage = pr-in-fix`.
+
+#### `needs_response_count > 0`
+
+Unresolved threads where the *last* comment isn't from the PR author — i.e. a reviewer is waiting for action. Threads where the worker already replied and just await operator-click-Resolve are excluded.
+
+1. `Write(./fix-msg-<slice-id>.md)` containing: `/smithy.fix\n\nUnresolved review threads on PR #<num> (where reviewer is awaiting response):\n<paste unresolved_threads where needs_response==true — path, line, last_author, body_preview for each>`.
+2. `.claude/skills/legate.babysit/scripts/send-to-worker.sh {{PROFILE}} <worker_session_id> ./fix-msg-<slice-id>.md`.
+
+Same-PR amendment. Note: `thread_count > 0` with `needs_response_count == 0` means the worker already addressed every open thread and they're just unresolved because the operator hasn't clicked Resolve — do **not** re-dispatch in that case; report on heartbeat reply ("3 threads addressed by worker, awaiting operator-resolve") and continue.
+
+#### Worker `status == "error"`
+
+```
+.claude/skills/legate.babysit/scripts/restart-worker.sh {{PROFILE}} <worker_session_id>
+```
+
+Once per worker per heartbeat. If the same worker is `error` again on the next heartbeat, escalate via `NEED:`.
+
+#### All clear
+
+`state == "OPEN"` AND `checks == "PASS"` AND `thread_count == 0` AND `mergeable != "CONFLICTING"` → no action. Report on the heartbeat reply.
+
+{{>verification-rule}}
+
+{{>fix-msg-via-file}}
+
+---
+
+## Operation reference
+
+| Operation | Script | Returns |
+|---|---|---|
+| List workers | `list-workers.sh <profile> <worker-group>` | JSON array of workers (id, title, status, branch, worktree, parent) |
+| Discover a worker's PR | `discover-pr.sh <profile> <session-id> <repo> [<since>]` | JSON `{number, url, headRefName, state, ...}` or `{}` if no PR |
+| Babysit a PR | `babysit-pr.sh <repo> <pr-num>` | JSON with full PR state (see schema above) |
+| Send a fix message | `send-to-worker.sh <profile> <session-id> <msg-file>` | Worker's reply text |
+| Request rebase (clean) | `request-rebase.sh <profile> <session-id> <worktree-path>` | Worker's reply (new HEAD sha or conflict description) |
+| Request conflict resolution | `request-conflict-resolution.sh <profile> <session-id> <worktree-path> <default-branch> <pr-num>` | Worker's reply (resolved sha or design-disagreement description) |
+| Re-trigger CI | `rerun-ci.sh <repo> <run-id>` | gh's confirmation line |
+| Restart errored worker | `restart-worker.sh <profile> <session-id>` | agent-deck's confirmation |
+
+All scripts emit JSON or status text to stdout, progress to stderr, and exit 0/1/2 for success/op-failure/invalid-input.
+
+## Standing rules (mirror of CLAUDE.md)
+
+- **One PR per Smithy step. Never chain.** A merged PR is the only event that unblocks the next step. Never auto-merge.
+- **`/smithy.fix` re-uses the existing worker** (same-PR amendment); never launch a fresh worker for a fix.
+- **Always escalate when about to bypass a merge gate.** Surface a `NEED:` note instead of acting.
+- **Direct `agent-deck` and `gh run` invocations stall the classifier.** If you need an operation that isn't covered by a script here, file a follow-up to extend this skill rather than composing inline.
