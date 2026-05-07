@@ -14,8 +14,8 @@ export const DEFAULT_BACKEND = "claude-code";
 
 /**
  * Lifecycle states for a SpawnRecord, as defined by the data model.
- * Feature 2 writes `"created"` here; Stories 4–7 drive the remaining
- * transitions.
+ * Feature 2 writes `"created"` here; Story 5 drives the `created → running`
+ * transition; Stories 6–7 drive the remaining transitions.
  */
 export type SpawnStatus = "created" | "running" | "stopped" | "failed";
 
@@ -280,7 +280,8 @@ export interface MarkSpawnRecordFailedOptions {
  * pre-`"failed"` state) to `"failed"`, populating `stoppedAt` with the
  * current ISO 8601 timestamp. Implements the data-model `created →
  * failed` transition for Story 4's failure paths (snapshot, Docker
- * build, or `imageId` record-update failure).
+ * build, or `imageId` record-update failure) and Story 5's failure
+ * paths (container launch or `containerId` record-update failure).
  *
  * The optional `error` argument is currently dropped — see
  * {@link MarkSpawnRecordFailedOptions}.
