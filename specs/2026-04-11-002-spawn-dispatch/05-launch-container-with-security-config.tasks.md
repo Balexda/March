@@ -17,7 +17,7 @@
 
 ### Tasks
 
-- [ ] **Define `SpawnConfig` typed interface and `SPAWN_CONFIG` constant in `spawn-config.ts`**
+- [x] **Define `SpawnConfig` typed interface and `SPAWN_CONFIG` constant in `spawn-config.ts`**
 
   Extend `src/spawn-config.ts` with a typed `SpawnConfig` interface and an exported `SPAWN_CONFIG` constant carrying the hardcoded security and resource defaults consumed by Stage 4. Field names and validation rules come from the data-model SpawnConfig entity. Update the module-level JSDoc to no longer conflate `SpawnConfig` and `SpawnBackend`.
 
