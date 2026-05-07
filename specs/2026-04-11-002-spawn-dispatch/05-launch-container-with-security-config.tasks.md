@@ -28,7 +28,7 @@
   - JSDoc references Feature 4 as the owner of network-policy hardening and notes the bridge-network gap is intentional
   - Existing `BASE_IMAGE` export is preserved unchanged
 
-- [ ] **Add `markSpawnRecordRunning` SpawnRecord transition to `spawn-record.ts`**
+- [x] **Add `markSpawnRecordRunning` SpawnRecord transition to `spawn-record.ts`**
 
   Extend `src/spawn-record.ts` with a `markSpawnRecordRunning(id, containerId, homeDir?)` helper that reads the existing record, populates `containerId` and `startedAt` (current ISO 8601 timestamp), transitions `status` to `"running"`, and writes the result back atomically (temp file + rename). Implements the data-model `created → running` transition for Stage 4. Mirrors the existing `updateSpawnRecordImageId` and `markSpawnRecordFailed` patterns.
 

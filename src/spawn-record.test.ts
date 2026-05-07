@@ -5,6 +5,7 @@ import path from "node:path";
 import {
   DEFAULT_BACKEND,
   markSpawnRecordFailed,
+  markSpawnRecordRunning,
   removeSpawnRecord,
   SPAWN_RECORD_VERSION,
   spawnRecordDir,
@@ -331,6 +332,96 @@ describe("spawn-record", () => {
       const home = makeHome();
       expect(() =>
         markSpawnRecordFailed(baseInput.id, undefined, home),
+      ).toThrow(SpawnRecordError);
+    });
+  });
+
+  describe("markSpawnRecordRunning", () => {
+    const baseInput = {
+      id: "20260411-run001",
+      repoPath: "/abs/repo",
+      branch: "march/spawn/20260411-run001",
+      worktreePath: "/abs/worktrees/march/20260411-run001",
+    };
+
+    it("transitions a `created` record (with imageId) to `running` populating containerId and startedAt", () => {
+      const home = makeHome();
+      const initial = writeInitialSpawnRecord(baseInput, home);
+      const withImage = updateSpawnRecordImageId(
+        baseInput.id,
+        "march-spawn-20260411-run001",
+        home,
+      );
+      expect(withImage.status).toBe("created");
+      expect(withImage.imageId).toBe("march-spawn-20260411-run001");
+      expect(withImage.containerId).toBeUndefined();
+      expect(withImage.startedAt).toBeUndefined();
+
+      const before = Date.now();
+      const running = markSpawnRecordRunning(
+        baseInput.id,
+        "abc123def456containerid",
+        home,
+      );
+      const after = Date.now();
+
+      expect(running.status).toBe("running");
+      expect(running.containerId).toBe("abc123def456containerid");
+      expect(running.startedAt).toBeDefined();
+      expect(running.startedAt).toMatch(
+        /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/,
+      );
+      const startedAt = Date.parse(running.startedAt as string);
+      expect(Number.isFinite(startedAt)).toBe(true);
+      expect(startedAt).toBeGreaterThanOrEqual(before - 1);
+      expect(startedAt).toBeLessThanOrEqual(after + 1);
+
+      // All pre-existing fields preserved.
+      expect(running.version).toBe(SPAWN_RECORD_VERSION);
+      expect(running.id).toBe(initial.id);
+      expect(running.repoPath).toBe(initial.repoPath);
+      expect(running.branch).toBe(initial.branch);
+      expect(running.worktreePath).toBe(initial.worktreePath);
+      expect(running.backend).toBe(initial.backend);
+      expect(running.createdAt).toBe(initial.createdAt);
+      expect(running.imageId).toBe(withImage.imageId);
+    });
+
+    it("on-disk round-trip equals the returned object", () => {
+      const home = makeHome();
+      writeInitialSpawnRecord(baseInput, home);
+      updateSpawnRecordImageId(baseInput.id, "march-spawn-x", home);
+      const running = markSpawnRecordRunning(
+        baseInput.id,
+        "container-abc",
+        home,
+      );
+      const onDisk = JSON.parse(
+        fs.readFileSync(spawnRecordPath(baseInput.id, home), "utf-8"),
+      );
+      expect(onDisk).toEqual(running);
+      // Data-model rules for `"running"`: containerId and startedAt
+      // both present.
+      expect(onDisk.containerId).toBe("container-abc");
+      expect(typeof onDisk.startedAt).toBe("string");
+      expect(onDisk.startedAt.length).toBeGreaterThan(0);
+    });
+
+    it("writes the running record atomically (no leftover temp files)", () => {
+      const home = makeHome();
+      writeInitialSpawnRecord(baseInput, home);
+      updateSpawnRecordImageId(baseInput.id, "march-spawn-x", home);
+      markSpawnRecordRunning(baseInput.id, "container-abc", home);
+
+      const dir = spawnRecordDir(home);
+      const entries = fs.readdirSync(dir);
+      expect(entries).toEqual([`${baseInput.id}.json`]);
+    });
+
+    it("throws SpawnRecordError when the record file is missing", () => {
+      const home = makeHome();
+      expect(() =>
+        markSpawnRecordRunning(baseInput.id, "container-abc", home),
       ).toThrow(SpawnRecordError);
     });
   });
