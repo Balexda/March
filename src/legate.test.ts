@@ -140,10 +140,23 @@ describe("legate module", () => {
   });
 
   describe("initLegate", () => {
+    /**
+     * Build a fake template directory that mirrors the production layout
+     * `src/templates/legate/{CLAUDE.md, skill/{SKILL.md, scripts/...}}` —
+     * just enough that stageSkill can copy without erroring. Tests that don't
+     * care about the skill contents get a no-op script.
+     */
     function makeTemplate(content: string): string {
       const dir = makeTmpDir();
       const tplPath = path.join(dir, "CLAUDE.md");
       fs.writeFileSync(tplPath, content);
+      const skillDir = path.join(dir, "skill");
+      fs.mkdirSync(path.join(skillDir, "scripts"), { recursive: true });
+      fs.writeFileSync(path.join(skillDir, "SKILL.md"), "test skill\n");
+      fs.writeFileSync(
+        path.join(skillDir, "scripts", "noop.sh"),
+        "#!/bin/sh\nexit 0\n",
+      );
       return tplPath;
     }
 
@@ -199,8 +212,11 @@ describe("legate module", () => {
       expect(result.setupCommand).toContain("march");
       expect(result.setupCommand).toContain("setup");
       expect(result.setupCommand).toContain("legate-march");
-      expect(result.setupCommand).toContain("-claude-md");
-      expect(result.setupCommand).toContain(result.templateOutputPath);
+      // We deliberately do NOT pass `-claude-md` to agent-deck — that would
+      // create a symlink that auto-mode flags as a cross-boundary read.
+      // Instead, the rendered template is copied into the conductor's
+      // CLAUDE.md after setup runs (see copyTemplateIntoConductor).
+      expect(result.setupCommand).not.toContain("-claude-md");
       // Skipped-setup branch surfaces the shell-quoted manual command and
       // does NOT claim the conductor has been created yet (the symlink/
       // attach wording is reserved for the runSetup=true path), but it
@@ -208,11 +224,10 @@ describe("legate module", () => {
       // can run the full sequence by hand.
       expect(result.summary).toContain("Setup skipped");
       expect(result.summary).toContain(
-        "no conductor\nhas been created yet",
+        "no conductor has been created and nothing has been copied",
       );
-      expect(result.summary).not.toMatch(
-        /CLAUDE\.md is symlinked to the template above\. Edit the\n\s*template/,
-      );
+      // The symlink wording is gone — we copy on setup-run, not symlink.
+      expect(result.summary).not.toContain("symlinked to the template above");
       expect(result.summary).toContain(
         "Then enable auto mode, pin model, and restart",
       );
@@ -394,6 +409,80 @@ describe("legate module", () => {
       expect(fs.readFileSync(second.templateOutputPath, "utf-8")).toContain(
         "v2 March",
       );
+    });
+
+    it("stages the skill alongside the rendered template", async () => {
+      // Production deploys put SKILL.md + scripts under the staged dir so
+      // that re-running `march legate init` is the iteration loop for skill
+      // changes too. The conductor's `.claude/skills/legate` symlink (set up
+      // post-`agent-deck conductor setup`) points at this staged dir, so
+      // edits here propagate to the live conductor on session restart.
+      const home = makeTmpDir();
+      const tpl = makeTemplate("ok");
+
+      const result = await initLegate({
+        repoPath: "/some/repo/March",
+        homeDir: home,
+        templatePath: tpl,
+        runSetup: false,
+      });
+
+      expect(result.skillStagedDir).toBe(
+        path.join(home, ".march", "legate", "legate-march", "skill"),
+      );
+      expect(fs.existsSync(path.join(result.skillStagedDir, "SKILL.md"))).toBe(
+        true,
+      );
+      expect(
+        fs.existsSync(path.join(result.skillStagedDir, "scripts", "noop.sh")),
+      ).toBe(true);
+      // Scripts must be executable (mode +x) so the conductor can `bash` them
+      // or invoke them directly without a shell prefix.
+      const scriptStat = fs.statSync(
+        path.join(result.skillStagedDir, "scripts", "noop.sh"),
+      );
+      expect(scriptStat.mode & 0o111).not.toBe(0);
+
+      // With --no-setup, the conductor dir doesn't exist yet so the copy
+      // step is skipped — skillDeployed stays false. The summary calls this
+      // out so the operator knows the skill is staged but not yet copied.
+      expect(result.skillDeployed).toBe(false);
+      expect(result.summary).toContain("legate staged at");
+    });
+
+    it("re-staging cleans up a removed script from a previous render", async () => {
+      // If a future template removes a script, re-running init should not
+      // leave the old one behind in the staged dir.
+      const home = makeTmpDir();
+      const tpl = makeTemplate("ok");
+
+      const first = await initLegate({
+        repoPath: "/some/repo/March",
+        homeDir: home,
+        templatePath: tpl,
+        runSetup: false,
+      });
+      // Add a script to the staged dir that isn't in the source — simulates
+      // an old script removed in a newer version of the template.
+      const ghost = path.join(first.skillStagedDir, "scripts", "ghost.sh");
+      fs.writeFileSync(ghost, "#!/bin/sh\nexit 0\n");
+      expect(fs.existsSync(ghost)).toBe(true);
+
+      // Re-run init.
+      await initLegate({
+        repoPath: "/some/repo/March",
+        homeDir: home,
+        templatePath: tpl,
+        runSetup: false,
+      });
+
+      // Stale script is gone; canonical script is back.
+      expect(fs.existsSync(ghost)).toBe(false);
+      expect(
+        fs.existsSync(
+          path.join(first.skillStagedDir, "scripts", "noop.sh"),
+        ),
+      ).toBe(true);
     });
 
     it("rejects path-traversal in conductor name before composing the staging path", async () => {

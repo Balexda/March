@@ -1,0 +1,82 @@
+[
+  {
+    "query": "I'm running mini-legate as the conductor for my March repo. The 5pm heartbeat just fired — list the worker sessions in my legate-workers group and tell me which ones are waiting.",
+    "should_trigger": true
+  },
+  {
+    "query": "I have three smithy.cut PRs open from yesterday's dispatch (PR #75/76/77). Need to babysit them: check CI on each, list any unresolved review comments, and tell me if any are ready for me to merge.",
+    "should_trigger": true
+  },
+  {
+    "query": "There's a worker called cut-us5 in agent-deck and it just finished its job. Find the PR it opened — the branch was renamed by smithy.cut so I can't just search by branch name.",
+    "should_trigger": true
+  },
+  {
+    "query": "Sync the default branch in /home/jmbattista/Development/March and then launch a fresh worker session for /smithy.cut on user story 6 of spec 2026-04-11-002-spawn-dispatch.",
+    "should_trigger": true
+  },
+  {
+    "query": "PR #75 has a CI failure on the lint check (the eslint job). Dispatch /smithy.fix to the worker that owns it — same PR, not a new step.",
+    "should_trigger": true
+  },
+  {
+    "query": "I just merged the cut PR for US5. Please mark that slice as merged in the conductor's state.json and pick up the next ready forge if its dependencies are merged.",
+    "should_trigger": true
+  },
+  {
+    "query": "[HEARTBEAT] Status: 3 running, 1 waiting, 0 idle, 0 error. Re-scan workers and PRs you're tracking, then report what needs my attention as a [STATUS] reply.",
+    "should_trigger": true
+  },
+  {
+    "query": "Refresh smithy status from the March repo and tell me what cuts and forges are next-up by dependency order.",
+    "should_trigger": true
+  },
+  {
+    "query": "My agent-deck conductor (legate-march) needs to dispatch a /smithy.forge for slice F02-T05. Sync main first to make sure we're not branching off stale code, then launch the worker.",
+    "should_trigger": true
+  },
+  {
+    "query": "Cut user story 5 of the spawn-dispatch spec into a tasks file at specs/2026-04-11-002-spawn-dispatch/05-...tasks.md.",
+    "should_trigger": false
+  },
+  {
+    "query": "Show me unresolved inline review threads on Balexda/March PR #123 and group them by file.",
+    "should_trigger": false
+  },
+  {
+    "query": "What's the difference between smithy.cut and smithy.forge? When would I use each?",
+    "should_trigger": false
+  },
+  {
+    "query": "Refactor src/legate.ts in the March repo to extract the post-setup commands into a separate exported function. Keep the existing tests green.",
+    "should_trigger": false
+  },
+  {
+    "query": "Set up a new agent-deck conductor for ~/Development/SmithyCLI in the default profile, called legate-smithycli, with the legate template.",
+    "should_trigger": false
+  },
+  {
+    "query": "What's the current branch of /home/jmbattista/Development/March and is it ahead of origin?",
+    "should_trigger": false
+  },
+  {
+    "query": "Read docs/rfcs/2026-001-march-orchestration-platform/march-orchestration-platform.rfc.md and summarize what milestones are planned.",
+    "should_trigger": false
+  },
+  {
+    "query": "Run npm test in /home/jmbattista/Development/March and tell me which test files are failing.",
+    "should_trigger": false
+  },
+  {
+    "query": "Help me configure a Telegram bot for my agent-deck conductor — the bot is set up with @BotFather already, just need to wire it into ~/.agent-deck/config.toml.",
+    "should_trigger": false
+  },
+  {
+    "query": "List all PRs I have open right now across all my GitHub repos, sorted by createdAt.",
+    "should_trigger": false
+  },
+  {
+    "query": "I'm reviewing a smithy.fix PR #88 — it has CI passing but I want to see the diff against main before approving. Show me the changed files.",
+    "should_trigger": false
+  }
+]
