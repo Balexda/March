@@ -220,24 +220,34 @@ export type LegateSkillName = (typeof LEGATE_SKILLS)[number];
 
 /**
  * Read-only `agent-deck` patterns the conductor sometimes needs outside the
- * skill scripts (e.g. `agent-deck session show --json` to capture session
- * details after launch — though the dispatch skill now ships
- * `inspect-worker.sh` as the audited path for that). Belt-and-suspenders:
- * even with `inspect-worker.sh` covering the common case, allowing these
- * patterns means a one-off direct invocation in the future doesn't stall
- * the heartbeat loop on a permission prompt.
+ * skill scripts. The dispatch skill ships `inspect-worker.sh` as the
+ * audited path for `session show`, but in practice the conductor also
+ * legitimately reaches for `session output` (to read what a worker last
+ * said before deciding whether to dispatch to it) and the various `list`
+ * / `status` commands during reconciliation. Belt-and-suspenders: with
+ * these patterns allowed, a one-off direct read invocation doesn't stall
+ * the heartbeat loop on a permission prompt — a failure mode that
+ * historically locked the live conductor for hours.
  *
  * Deliberately *only* read operations. Any `agent-deck session send`,
- * `launch`, or `restart` still goes through a skill script — those are
- * mutations that need to stay audited.
+ * `launch`, `restart`, `set`, or other mutation still goes through a skill
+ * script — those are mutations that need to stay audited.
+ *
+ * Patterns are anchored on the agent-deck command tree (see
+ * `agent-deck --help`); add new entries here when a read primitive shows
+ * up that matches none of these. Avoid `Bash(agent-deck *)` — that would
+ * be a permission bypass dressed as a fix.
  */
 const AGENT_DECK_READ_ALLOWS = [
   "Bash(agent-deck * session show *)",
   "Bash(agent-deck * session show --json *)",
+  "Bash(agent-deck * session output *)",
   "Bash(agent-deck * list *)",
   "Bash(agent-deck * list --json *)",
   "Bash(agent-deck * status *)",
   "Bash(agent-deck * status --json *)",
+  "Bash(agent-deck * conductor list *)",
+  "Bash(agent-deck * conductor status *)",
 ] as const;
 
 export interface LegateInitOptions {
