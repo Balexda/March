@@ -16,11 +16,111 @@ If no feature description is clear from the input above, ask the user what they 
 
 ## Phase 1: Branch
 
-Create a working branch automatically. Do not ask the user — just do it.
+Resolve the working branch automatically. Do not ask the user — apply the
+policy below and move on.
 
-1. Derive a short kebab-case slug from the feature description (e.g., "add a --verbose flag" → `verbose-flag`).
+## Branch Selection Policy
+
+Apply this check before any auto-naming branch step in the parent phase,
+and again at the commit-and-PR step. It exists so `smithy.<verb>` is safe
+to invoke from a pre-existing checkout on a non-default branch —
+orchestrators that pre-create a linked git worktree on a known branch and
+hand it to a Claude Code worker rely on the agent honoring the checkout
+rather than renaming it. The same `smithy.<verb>` invoked the normal way
+(in the main checkout, after `mark` / `cut` set up a branch) must still
+auto-create its own branch as before.
+
+### Detect the default branch
+
+1. First try the cheap form:
+
+   ```bash
+   git symbolic-ref refs/remotes/origin/HEAD
+   ```
+
+   On success it prints a single line like `refs/remotes/origin/main`;
+   strip the `refs/remotes/origin/` prefix to get the default branch
+   name. Do not assume `main`. (Note: do **not** add the `--short` flag —
+   the bare form is what the repo's auto-allow list permits, and the
+   prefix is easy to strip.)
+
+2. If that command exits non-zero with `not a symbolic ref` (common in
+   fresh clones, mirrors, and some linked worktrees where `origin/HEAD`
+   was never set), fall back to:
+
+   ```bash
+   git remote show origin
+   ```
+
+   Find the line `  HEAD branch: <name>` in the output and use `<name>`.
+
+3. If both fail, ask the user which branch is the default and proceed
+   from their answer rather than guessing.
+
+### Detect the worktree shape
+
+Determine whether the current working directory is the **main checkout**
+or a **linked worktree**:
+
+```bash
+git rev-parse --git-dir
+git rev-parse --git-common-dir
+```
+
+- If the two paths are equal, the current cwd is the **main checkout**.
+- If they differ (the `--git-dir` path lives under
+  `<common>/worktrees/<name>`), the current cwd is a **linked worktree**
+  — typically created by `git worktree add` or by an upstream
+  orchestrator that pre-staged it for an agent run.
+
+### Detect the current branch
+
+```bash
+git rev-parse --abbrev-ref HEAD
+```
+
+### Decide
+
+- **If the current branch is not the default branch AND the current cwd
+  is a linked worktree**, keep the existing branch. Skip the parent
+  phase's auto-naming step, do not run `git checkout -b`, and do not
+  prepend `feature/` or any other prefix when later pushing or opening
+  the PR. The orchestrator already chose this branch and tracks the work
+  by that exact name.
+- **Otherwise** (the cwd is the main checkout, or the current branch is
+  already the default branch), run the parent phase's auto-naming step
+  (`git checkout -b <derived-name>`). The main-checkout case is the
+  greenfield path *and* the normal `mark` → `cut` → `forge` flow —
+  forge, for example, must continue to auto-create its per-slice branch
+  even when the user invoked it while still sitting on the spec branch
+  that `mark` created.
+
+Confirm the resolved branch name to the user and proceed.
+
+### PR step
+
+The same rule applies during the commit-and-PR step: push the resolved
+branch as-is, and pass it as the PR's head when the chosen PR-creation
+tool requires it (e.g. the `head` argument for the GitHub MCP tool, or
+the equivalent flag on the CLI fallback — see the
+`pr-create-tool-choice` snippet for which tool to prefer). **Never
+create a new branch or rename the current one as part of the PR-creation
+command** (in particular, do not prepend `feature/` to the resolved
+branch). The branch the agent commits and pushes from must be the same
+branch the resulting PR is opened against. This rule applies in both
+the main checkout and a linked worktree — branch renames during PR
+creation are always wrong.
+When the policy creates a new branch (the current checkout is the default
+branch), use this auto-naming step:
+
+1. Derive a short kebab-case slug from the feature description (e.g.,
+   "add a --verbose flag" → `verbose-flag`).
 2. Run `git checkout -b strike/<slug>`.
-3. Confirm the branch name to the user and move on.
+
+When the policy keeps the existing branch (the current cwd is a linked
+worktree on a non-default branch — typical when an orchestrator
+pre-staged it), skip the auto-name and continue with the current
+checkout. Confirm the resolved branch name to the user and move on.
 
 ---
 
@@ -145,7 +245,7 @@ with this format:
 ```markdown
 # Strike: <Title>
 
-**Date:** YYYY-MM-DD  |  **Branch:** strike/<slug>  |  **Status:** Ready
+**Date:** YYYY-MM-DD  |  **Branch:** <resolved-branch>  |  **Status:** Ready
 
 ## Summary
 
@@ -262,23 +362,27 @@ here, by strike.
 
 ### Commit and create the PR
 
-1. **Commit the strike document** on the `strike/<slug>` branch with a
-   message referencing the strike goal.
-2. **Push the branch** with `git push -u origin strike/<slug>`.
-3. **Create the PR** using the same `gh pr create` pattern as
-   `smithy-forge`:
+1. **Commit the strike document** on the resolved branch (the one chosen
+   in Phase 1 — either `strike/<slug>` for a greenfield run, or the
+   pre-existing branch the policy preserved) with a message referencing
+   the strike goal.
+2. **Push the branch** with `git push -u origin <resolved-branch>`. Use
+   the actual resolved branch name; do not rename or prepend a prefix
+   such as `feature/`.
+3. **Create the PR** using the same PR-creation pattern as `smithy-forge`
+   (Prefer `mcp__github__create_pull_request` (the GitHub MCP tool); fall back to `gh pr create` only when the MCP server is unavailable.):
    - **Title**: the strike goal, concise and under 70 characters.
    - **Body**: include the strike summary, goal, link to the
      `.strike.md` file, and the one-shot output content produced below
      **excluding the `## PR` section**, since the PR URL is only known
-     after `gh pr create` succeeds. Populate the other sections
+     after PR creation succeeds. Populate the other sections
      (`## Summary`, `## Assumptions`, `## Specification Debt`) from the
      run data captured during Phase 2 and Phase 3.
-4. **Capture the PR URL** returned by `gh pr create`.
+4. **Capture the PR URL** returned by the PR-creation call.
 5. **Render the full one-shot output** as the terminal output of this
    run using the shared snippet below. Populate the placeholders from
    the strike run data: `Spec folder` = `specs/strikes/`, `Branch` =
-   `strike/<slug>`, `Artifacts produced` = the single `.strike.md`
+   the resolved branch from Phase 1, `Artifacts produced` = the single `.strike.md`
    file, and substitute `User stories` / `Functional requirements`
    with the strike's requirement and task counts per the snippet's
    placeholder guidance. Populate the `## PR` section with the URL
@@ -288,7 +392,7 @@ here, by strike.
    not block on approval. A developer can invoke `smithy-forge` with
    the strike file path when they are ready.
 
-If `gh pr create` fails, follow the snippet's PR-creation-failure fallback:
+If PR creation fails, follow the snippet's PR-creation-failure fallback:
 still render the Summary, Assumptions, and Specification Debt sections, and
 replace the `## PR` section with the failure note so the developer knows
 the artifact is on disk and can retry manually.
@@ -355,14 +459,15 @@ was recorded.`)
 - **Specification Debt**: copy each item from the clarify return's
   `debt_items` array, including its Impact level. The leading count MUST
   match the number of bullets rendered.
-- **PR**: the `gh pr create` URL captured after the artifact write-out step.
+- **PR**: the URL captured from the PR creation step (see the
+  `pr-create-tool-choice` snippet for which tool ran).
 
 ### Error Fallbacks
 
 Two edge cases change the output shape. Follow these rules rather than
 attempting to render the full format above:
 
-- **PR creation failure**: if `gh pr create` fails (network error, auth
+- **PR creation failure**: if PR creation fails (network error, auth
   failure, missing upstream, etc.), still render the `## Summary`,
   `## Assumptions`, and `## Specification Debt` sections from the captured
   run data, then replace the `## PR` section with:
@@ -370,8 +475,9 @@ attempting to render the full format above:
   ```markdown
   ## PR
 
-  PR creation failed — artifacts are on disk at `<spec folder>`. Re-run `gh
-  pr create` manually, or retry the command. Error: <error message>.
+  PR creation failed — artifacts are on disk at `<spec folder>`. Re-run
+  the PR creation step manually (see `pr-create-tool-choice` for the
+  tool to use), or retry the command. Error: <error message>.
   ```
 
   Never silently drop the PR section; the developer needs to see that PR

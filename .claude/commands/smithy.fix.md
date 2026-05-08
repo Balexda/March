@@ -118,8 +118,10 @@ one logical fix per commit.
 ### For PR review comments (Path A)
 
 After all items have been fixed or declined, use the `smithy.pr-review` skill's
-**Reply to a Comment** operation for each thread's root comment (use `databaseId`
-from the first comment in the thread's `comments[]` array):
+**Reply to a Comment** operation for each thread's root comment. Pick the
+identifier that matches the path the skill chose for your environment: `id`
+(MCP path) or `databaseId` (script-fallback path) — both come from the first
+comment in the thread's `comments[]` array:
 
 - For fixed items: `"Fixed in <commit-sha>: <one-line explanation>"`
 - For declined items: `"Not addressed: <explanation>"`
