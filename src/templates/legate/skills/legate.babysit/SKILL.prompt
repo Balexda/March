@@ -75,6 +75,10 @@ Capture: PR numbers, `checks` status, `mergeable`, `thread_count`, `unresolved_t
 
 Evaluate the bullets in order; the first match wins per heartbeat. Mark the resulting `stage` in `state.json` so the next heartbeat's verification step knows what to expect.
 
+**Worker status normalization (idle workers with tracked outstanding work).** The conductor's status grammar in `CLAUDE.md` says `idle` is operator territory. That default holds — *except* when the slice's `stage` is in the non-terminal action set (`pr-resolving-conflicts`, `pr-in-fix`, `pr-rebasing`, `pr-in-rerun`). For those stages the conductor still owns the recovery: dispatch the action anyway. `agent-deck session send` (which all the action scripts ultimately call) auto-promotes the worker `idle → running`, and the worker processes the message normally. The `idle` flag was probably set by an earlier transition before the recovery completed, not a deliberate operator hand-off. Surface every such wake in your `[STATUS]` reply as a labeled `AUTO:` line — e.g. `AUTO: woke US6 worker (was idle, slice stage=pr-resolving-conflicts) and dispatched request-conflict-resolution.sh` — so the operator sees what happened and can correct course on the next heartbeat if they intended the idle as terminal.
+
+Workers whose slice is `merged` / `escalated` / `planning` / `implementing` are left alone when idle — there's no PR-amendment in flight, and the operator owns the call to start fresh work.
+
 #### `state == "MERGED"`
 
 Mark slice `merged` in `state.json`, log to `task-log.md`. **The merge of a PR is the only event that unblocks the next step in this line of work** — surface this to the dispatch skill on the next iteration so it can evaluate whether forge-after-cut (or slice-N+1-after-slice-N) is now eligible.
