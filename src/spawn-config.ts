@@ -8,9 +8,13 @@
  * - {@link BASE_IMAGE} — the tagged base container image with the backend
  *   CLI pre-installed.
  * - {@link SpawnConfig} / {@link SPAWN_CONFIG} — the hardcoded container
- *   security and resource posture consumed by Stage 4 (Launch). This is
- *   the single auditable source of truth for the values surfaced to
- *   `docker run` flags.
+ *   security and resource posture consumed by Stage 4 (Launch) and Stage
+ *   6 (Wait). This is the single auditable source of truth: every value
+ *   defined here is surfaced to the dispatch pipeline at the stage that
+ *   owns it. Stage 4 surfaces `capDrop`, `user`, `memoryLimit`,
+ *   `cpuLimit`, `networkMode`, and `envWhitelist` as `docker run` flags.
+ *   Stage 6 (owned by Story 7) enforces `timeoutSeconds` against the
+ *   running container's wall clock.
  *
  * Out of scope (lives elsewhere):
  * - The `SpawnBackend` polymorphic interface — that's Feature 3's
@@ -76,21 +80,28 @@ export interface SpawnConfig {
 }
 
 /**
- * The single, auditable hardcoded SpawnConfig consumed by Stage 4 of the
- * dispatch pipeline. No other module should hardcode any of these values.
+ * The single, auditable hardcoded SpawnConfig consumed by the dispatch
+ * pipeline. No other module should hardcode any of these values; every
+ * field is sourced from this constant at the stage that owns it.
  *
  * Values come verbatim from the data-model SpawnConfig entity examples
  * (see `spawn-dispatch.data-model.md`):
- * - `capDrop: ["ALL"]` — drop every Linux capability (AS 5.1).
- * - `user: "march"` — non-root, matches the `--chown=march:march` baked
- *   into the generated Dockerfile by `writeSpawnDockerfile` (AS 5.2).
- * - `networkMode: "bridge"` — default Docker bridge; Feature 4 owns
- *   network-policy hardening, the bridge gap is intentional (AS 5.5).
- * - `memoryLimit: "4g"`, `cpuLimit: "2"` — hardcoded resource ceilings
- *   sized for typical Claude Code sessions (AS 5.3).
- * - `timeoutSeconds: 3600` — one-hour wall clock guard rail.
- * - `envWhitelist: ["ANTHROPIC_API_KEY"]` — only the backend's auth key
- *   is forwarded into the sandbox (AS 5.4).
+ * - `capDrop: ["ALL"]` — Stage 4 emits one `--cap-drop=<cap>` per entry
+ *   (AS 5.1).
+ * - `user: "march"` — Stage 4 passes `--user`; non-root, matches the
+ *   `--chown=march:march` baked into the generated Dockerfile by
+ *   `writeSpawnDockerfile` (AS 5.2).
+ * - `networkMode: "bridge"` — Stage 4 passes `--network`; default Docker
+ *   bridge, Feature 4 owns network-policy hardening, the bridge gap is
+ *   intentional (AS 5.5).
+ * - `memoryLimit: "4g"`, `cpuLimit: "2"` — Stage 4 passes `--memory` and
+ *   `--cpus`; hardcoded resource ceilings sized for typical Claude Code
+ *   sessions (AS 5.3).
+ * - `timeoutSeconds: 3600` — Stage 6 (Wait) enforces this against the
+ *   running container's wall clock; Story 7 owns the enforcement.
+ * - `envWhitelist: ["ANTHROPIC_API_KEY"]` — Stage 4 emits one `-e VAR`
+ *   passthrough flag per entry; only the backend's auth key is forwarded
+ *   into the sandbox (AS 5.4).
  */
 export const SPAWN_CONFIG: SpawnConfig = {
   capDrop: ["ALL"],

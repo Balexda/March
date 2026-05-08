@@ -61,6 +61,10 @@ describe("container-launch", () => {
       const [bin, args] = childProcessMock.execFileSync.mock.calls[0];
       expect(bin).toBe("docker");
 
+      const expectedCapDropFlags = SPAWN_CONFIG.capDrop.map(
+        (cap) => `--cap-drop=${cap}`,
+      );
+
       const expectedEnvFlags: string[] = [];
       for (const envVar of SPAWN_CONFIG.envWhitelist) {
         // Passthrough form: two adjacent argv entries `-e` then `VAR`,
@@ -74,7 +78,7 @@ describe("container-launch", () => {
         "-d",
         "--name",
         CONTAINER_NAME,
-        "--cap-drop=ALL",
+        ...expectedCapDropFlags,
         "--user",
         SPAWN_CONFIG.user,
         "--memory",
@@ -87,6 +91,22 @@ describe("container-launch", () => {
         IMAGE_TAG,
         ...EXPECTED_ENTRYPOINT,
       ]);
+    });
+
+    it("derives every `--cap-drop=<cap>` flag from SPAWN_CONFIG.capDrop", () => {
+      childProcessMock.execFileSync.mockReturnValueOnce(Buffer.from("id\n"));
+
+      launchSpawnContainer({ spawnId: SPAWN_ID });
+
+      const [, args] = childProcessMock.execFileSync.mock.calls[0];
+      const argList = args as string[];
+      const capDropArgs = argList.filter((a) => a.startsWith("--cap-drop"));
+      // One combined-form `--cap-drop=<cap>` entry per SPAWN_CONFIG entry,
+      // and nothing else. Locks the derivation so a future cap addition
+      // in SPAWN_CONFIG.capDrop is automatically surfaced to docker run.
+      expect(capDropArgs).toEqual(
+        SPAWN_CONFIG.capDrop.map((cap) => `--cap-drop=${cap}`),
+      );
     });
 
     it("passes env-vars in passthrough form (`-e VAR`, no `=value`)", () => {

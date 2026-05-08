@@ -114,7 +114,7 @@ export interface LaunchSpawnContainerInput {
  * ```
  * run -d
  * --name march-spawn-<spawn-id>
- * --cap-drop=ALL
+ * --cap-drop=<cap> (per entry in SPAWN_CONFIG.capDrop; defaults to ["ALL"])
  * --user <SPAWN_CONFIG.user>
  * --memory <SPAWN_CONFIG.memoryLimit>
  * --cpus <SPAWN_CONFIG.cpuLimit>
@@ -123,6 +123,10 @@ export interface LaunchSpawnContainerInput {
  * <imageTag>
  * <claudeCodeEntrypoint...>
  * ```
+ *
+ * `SPAWN_CONFIG.timeoutSeconds` is intentionally NOT emitted at this
+ * stage — Stage 6 (Wait) enforces the timeout per the Dispatch Pipeline
+ * contract; Story 7 owns that enforcement.
  *
  * Env-vars are passed via `-e VAR` passthrough (Docker reads the value from
  * the operator's environment), not `-e VAR=<inlined>`. See SD-001 for the
@@ -149,6 +153,11 @@ export function launchSpawnContainer(input: LaunchSpawnContainerInput): string {
   const containerName = spawnContainerName(spawnId);
   const imageTag = spawnImageTag(spawnId);
 
+  // Cap-drop flags derived from SPAWN_CONFIG.capDrop so the constant is
+  // the single auditable source of truth for what's surfaced to docker
+  // run. Combined `--cap-drop=<cap>` form matches the contracts' template.
+  const capDropFlags = SPAWN_CONFIG.capDrop.map((cap) => `--cap-drop=${cap}`);
+
   const envFlags: string[] = [];
   for (const envVar of SPAWN_CONFIG.envWhitelist) {
     // Passthrough form: `-e VAR` (no `=value`) so Docker reads the value
@@ -161,7 +170,7 @@ export function launchSpawnContainer(input: LaunchSpawnContainerInput): string {
     "-d",
     "--name",
     containerName,
-    "--cap-drop=ALL",
+    ...capDropFlags,
     "--user",
     SPAWN_CONFIG.user,
     "--memory",
