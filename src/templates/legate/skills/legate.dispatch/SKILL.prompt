@@ -16,12 +16,14 @@ Load via `Skill(skill="legate.dispatch")`. The classifier registers the allowed-
 
 Run this protocol on every heartbeat after the babysit pass completes:
 
-1. **Babysit must have nothing urgent in flight.** If any tracked PR is `pr-resolving-conflicts`, `pr-rebasing`, `pr-in-rerun`, or `pr-in-fix`, prefer letting the existing dispatches converge. Spare cycles only exist when in-flight work is parked waiting on operator merge or external CI.
+1. **For forge/cut candidates only: babysit must have nothing urgent in flight.** If any tracked PR is `pr-resolving-conflicts`, `pr-rebasing`, `pr-in-rerun`, or `pr-in-fix`, prefer letting the existing dispatches converge before stacking another **forge or cut** on top — those verbs produce slice-level work that shares branches and review attention with the stuck PR. Spare cycles for forge/cut only exist when in-flight work is parked waiting on operator merge or external CI.
+
+   This gate does **not** apply to `smithy.render` or `smithy.mark` candidates. Render writes a new `.features.md` (and updates a milestone Artifact cell on the parent RFC); mark writes a new spec folder (and updates a feature Artifact cell on the parent feature map). Neither verb touches any spec, tasks file, branch, or PR that an in-flight forge/cut is working on, so a stuck implementation slice is no reason to delay upstream planning. If a render or mark is the highest-priority ready item per `smithy status`, dispatch it even when a forge/cut is parked.
 2. **`smithy status` reports a ready item.** Use the script (below) — never compose `smithy` commands directly.
 3. **All dependencies of the ready item have merged PRs.** In the normal heartbeat order (babysit → cleanup → dispatch), a merged dep has already been moved into `state.json.archived_slices.<id>` by the time you run — that's the primary place to check. A dep can also still appear in `state.json.slices.<id>` with `pr.state == "MERGED"` if cleanup *failed* to archive it on this or a prior heartbeat (look for `last_action_note: "cleanup failed: ..."`); treat that as merged for dep-check but expect cleanup to retry it next heartbeat. Do not preempt the merge gate.
 4. **You have not already dispatched a new worker this heartbeat.** Cap is one new launch per tick — keeps the loop pace operator-paceable.
 
-If any of (1)–(4) is false, do nothing this heartbeat and let the babysit reply describe the holding pattern.
+If any of (1)–(4) is false, do nothing this heartbeat and let the babysit reply describe the holding pattern. When (1) gates a forge/cut but a render/mark is ready, the render/mark wins — log the holding pattern for the gated forge/cut and dispatch the planning verb.
 
 ---
 
