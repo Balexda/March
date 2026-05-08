@@ -318,6 +318,12 @@ export function markSpawnRecordFailed(
  * `startedAt` (current ISO 8601 timestamp). Implements the data-model
  * `created → running` transition for Stage 4 (FR-019).
  *
+ * Refuses to operate on a record whose `status` is not `"created"` — the
+ * data model defines `created → running` as a strict transition, so
+ * applying it to a record that is already `"running"`, `"stopped"`, or
+ * `"failed"` would silently double-write `startedAt` or resurrect a
+ * terminated spawn. A `SpawnRecordError` is thrown in that case.
+ *
  * Story 7 owns transitions out of `"running"` (`running → stopped` and
  * `running → failed`); this helper does not touch those.
  *
@@ -326,7 +332,7 @@ export function markSpawnRecordFailed(
  * crash mid-write cannot corrupt the existing record.
  *
  * @throws {SpawnRecordError} If the source record is missing, unreadable,
- *   or the atomic write fails.
+ *   not in the `"created"` state, or the atomic write fails.
  */
 export function markSpawnRecordRunning(
   id: string,
@@ -334,6 +340,11 @@ export function markSpawnRecordRunning(
   homeDir?: string,
 ): SpawnRecord {
   const existing = readSpawnRecord(id, homeDir);
+  if (existing.status !== "created") {
+    throw new SpawnRecordError(
+      `Cannot transition spawn record "${id}" to "running": current status is "${existing.status}"; the data-model only permits "created" → "running".`,
+    );
+  }
   const updated: SpawnRecord = {
     ...existing,
     status: "running",

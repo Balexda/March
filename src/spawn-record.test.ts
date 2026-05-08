@@ -424,5 +424,33 @@ describe("spawn-record", () => {
         markSpawnRecordRunning(baseInput.id, "container-abc", home),
       ).toThrow(SpawnRecordError);
     });
+
+    it("refuses to transition a record that is already `running` (strict created → running guard)", () => {
+      const home = makeHome();
+      writeInitialSpawnRecord(baseInput, home);
+      updateSpawnRecordImageId(baseInput.id, "march-spawn-x", home);
+      // First transition succeeds.
+      markSpawnRecordRunning(baseInput.id, "container-first", home);
+      // Second transition must fail because the record is no longer
+      // `"created"` — the data-model only permits `created → running`.
+      expect(() =>
+        markSpawnRecordRunning(baseInput.id, "container-second", home),
+      ).toThrow(/current status is "running"/);
+      // The on-disk record is unchanged from the first transition.
+      const onDisk = JSON.parse(
+        fs.readFileSync(spawnRecordPath(baseInput.id, home), "utf-8"),
+      );
+      expect(onDisk.containerId).toBe("container-first");
+    });
+
+    it("refuses to transition a record that is in `failed` (strict created → running guard)", () => {
+      const home = makeHome();
+      writeInitialSpawnRecord(baseInput, home);
+      // Transition straight to "failed" without going through "running".
+      markSpawnRecordFailed(baseInput.id, undefined, home);
+      expect(() =>
+        markSpawnRecordRunning(baseInput.id, "container-abc", home),
+      ).toThrow(/current status is "failed"/);
+    });
   });
 });
