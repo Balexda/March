@@ -35,16 +35,17 @@ If any of (1)–(4) is false, do nothing this heartbeat and let the babysit repl
 
 Returns Smithy's view of what's ready. The conductor's `state.json` is the source of truth for *what's already dispatched*; cross-reference to find work items that exist in `smithy status` but not in `state.json.slices`.
 
-Prioritization, in order. Each ready item from `smithy status` carries a `next_action.command` (e.g. `smithy.cut`, `smithy.forge`, `smithy.mark`, `smithy.render`, `smithy.audit`); dispatch off that field rather than guessing the verb from the artifact type.
+Prioritization, in order. Each ready item from `smithy status` carries a `next_action.command` drawn from the closed set {`smithy.render`, `smithy.mark`, `smithy.cut`, `smithy.forge`} — those are the only four verbs the status emitter ever produces. Dispatch off that field rather than guessing the verb from the artifact type.
 
 1. **Cuts for any user story that is ready** (`next_action.command == "smithy.cut"`). Cuts on different specs, or on different user-stories within the same spec, are independent and run in parallel as separate workers — they touch separate tasks files.
 2. **Forges for any slice whose dependencies are merged** (`next_action.command == "smithy.forge"`). Forges on independent slices run in parallel; forges on dependent slices wait for the predecessor's PR to merge (visible in either `slices.<dep-id>` with `pr.state == "MERGED"` or `archived_slices.<dep-id>`) before being dispatched.
-3. **Planning-chain steps for upstream artifacts** (`next_action.command` ∈ {`smithy.render`, `smithy.mark`, `smithy.audit`}), in the order `smithy status` recommends. These are the verbs that produce the artifacts cut/forge then consume:
+3. **Planning-chain steps for upstream artifacts** (`next_action.command` ∈ {`smithy.render`, `smithy.mark`}), in the order `smithy status` recommends. These are the verbs that produce the artifacts cut/forge then consume:
    - `smithy.render` — produces a feature map (`.features.md`) from an RFC milestone.
    - `smithy.mark` — produces a spec folder (`.spec.md`/`.data-model.md`/`.contracts.md`) from a feature in a feature map.
-   - `smithy.audit` — refinement pass on existing planning artifacts.
 
    Do **not** silently skip a `smithy.mark` or `smithy.render` next_action just because no cut/forge is queued — they are the upstream of the same chain and must be dispatched the same way. The verb-cmd is `/<command> <arguments joined by spaces>` straight from `next_action`.
+
+`smithy.audit` is intentionally **not** in the dispatch surface: `smithy status` never recommends it (audit is a read-only review against a specific artifact, not a forward-chain step). Operators invoke it manually when they want a second pass. Leave it for them.
 
 ### 2. Sync the default branch
 
