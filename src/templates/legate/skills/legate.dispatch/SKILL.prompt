@@ -18,7 +18,7 @@ Run this protocol on every heartbeat after the babysit pass completes:
 
 1. **Babysit must have nothing urgent in flight.** If any tracked PR is `pr-resolving-conflicts`, `pr-rebasing`, `pr-in-rerun`, or `pr-in-fix`, prefer letting the existing dispatches converge. Spare cycles only exist when in-flight work is parked waiting on operator merge or external CI.
 2. **`smithy status` reports a ready item.** Use the script (below) — never compose `smithy` commands directly.
-3. **All dependencies of the ready item have merged PRs.** A dep is satisfied if its slice-id appears in either `state.json.slices.<id>` with `pr.state == "MERGED"` (merged this heartbeat, cleanup hasn't run yet) or `state.json.archived_slices.<id>` (merged in a prior heartbeat and already swept by `legate.cleanup`). Do not preempt the merge gate.
+3. **All dependencies of the ready item have merged PRs.** In the normal heartbeat order (babysit → cleanup → dispatch), a merged dep has already been moved into `state.json.archived_slices.<id>` by the time you run — that's the primary place to check. A dep can also still appear in `state.json.slices.<id>` with `pr.state == "MERGED"` if cleanup *failed* to archive it on this or a prior heartbeat (look for `last_action_note: "cleanup failed: ..."`); treat that as merged for dep-check but expect cleanup to retry it next heartbeat. Do not preempt the merge gate.
 4. **You have not already dispatched a new worker this heartbeat.** Cap is one new launch per tick — keeps the loop pace operator-paceable.
 
 If any of (1)–(4) is false, do nothing this heartbeat and let the babysit reply describe the holding pattern.
