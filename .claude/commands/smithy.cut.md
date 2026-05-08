@@ -121,20 +121,25 @@ found no changes") and reuse the branch's existing PR URL if one exists
 1. Stage and commit the refinement diff on the current branch. The commit
    message should describe the refinements applied (e.g.,
    `cut refine: split Slice 2; resolve SD-001`).
-2. Push the branch to `origin`.
+2. Push the current branch to `origin` as-is — do not rename it or
+   prepend a prefix such as `feature/`. Orchestrators that pre-create
+   the worktree track the spec by the branch name they chose, and a
+   renamed PR head breaks downstream PR discovery (see the branch
+   policy below for the full rule).
 3. Check whether the current branch already has an open pull request (for
-   example with `gh pr view --json url` or by querying by head branch).
+   example with `mcp__github__list_pull_requests` filtered by `head`, or
+   `gh pr view --json url` if MCP is unavailable).
    - If a PR already exists for this branch, capture and reuse that PR URL
-     for the one-shot output snippet — do **not** run `gh pr create`
-     again, and do **not** treat the existing PR as a failure.
-   - If no PR exists, create one using the same `gh pr create` pattern
-     that `smithy.forge` uses:
+     for the one-shot output snippet — do **not** create another PR, and
+     do **not** treat the existing PR as a failure.
+   - If no PR exists, create one using the same PR-creation pattern that
+     `smithy.forge` uses (Prefer `mcp__github__create_pull_request` (the GitHub MCP tool); fall back to `gh pr create` only when the MCP server is unavailable.):
      - **Title**: `Refine <user story title> tasks` — under 70 characters.
      - **Body**: the refine summary, a list of refinements applied, and any
        debt items resolved or introduced by this pass.
 4. Capture the resulting or existing PR URL for the one-shot output snippet.
 
-If `gh pr create` fails, fall through to the PR-creation-failure branch of
+If PR creation fails, fall through to the PR-creation-failure branch of
 the one-shot output snippet so the user sees exactly what changed and what
 went wrong.
 
@@ -211,14 +216,15 @@ was recorded.`)
 - **Specification Debt**: copy each item from the clarify return's
   `debt_items` array, including its Impact level. The leading count MUST
   match the number of bullets rendered.
-- **PR**: the `gh pr create` URL captured after the artifact write-out step.
+- **PR**: the URL captured from the PR creation step (see the
+  `pr-create-tool-choice` snippet for which tool ran).
 
 ### Error Fallbacks
 
 Two edge cases change the output shape. Follow these rules rather than
 attempting to render the full format above:
 
-- **PR creation failure**: if `gh pr create` fails (network error, auth
+- **PR creation failure**: if PR creation fails (network error, auth
   failure, missing upstream, etc.), still render the `## Summary`,
   `## Assumptions`, and `## Specification Debt` sections from the captured
   run data, then replace the `## PR` section with:
@@ -226,8 +232,9 @@ attempting to render the full format above:
   ```markdown
   ## PR
 
-  PR creation failed — artifacts are on disk at `<spec folder>`. Re-run `gh
-  pr create` manually, or retry the command. Error: <error message>.
+  PR creation failed — artifacts are on disk at `<spec folder>`. Re-run
+  the PR creation step manually (see `pr-create-tool-choice` for the
+  tool to use), or retry the command. Error: <error message>.
   ```
 
   Never silently drop the PR section; the developer needs to see that PR
@@ -772,14 +779,19 @@ repository's default branch. Discover the default branch dynamically (e.g.
 `git symbolic-ref refs/remotes/origin/HEAD`) rather than assuming `main`.
 If HEAD is on the default branch, stop with an error telling the user to
 re-run cut from the spec folder's feature branch (the one `smithy.mark`
-created) — pushing planning commits to the default branch and calling
-`gh pr create` with `head == base` will fail and pollute history.
+created) — pushing planning commits to the default branch and creating a
+PR with `head == base` will fail and pollute history.
 
 1. Stage and commit both the new `.tasks.md` file and the spec's
    `## Dependency Order` write-back on the current branch.
-2. Push the branch to `origin`.
-3. Create a pull request using the same `gh pr create` pattern that
-   `smithy.forge` uses:
+2. Push the current branch to `origin` as-is — do not rename it or
+   prepend a prefix such as `feature/`. The PR must be opened against
+   the same branch name the operator (or upstream orchestrator) had
+   checked out when cut was invoked, so downstream tooling can find
+   the PR by that branch name. The branch policy below states the
+   full rule.
+3. Create a pull request using the same PR-creation pattern that
+   `smithy.forge` uses (Prefer `mcp__github__create_pull_request` (the GitHub MCP tool); fall back to `gh pr create` only when the MCP server is unavailable.):
    - **Title**: the user story title, under 70 characters, plain descriptive
      text (no FR numbers, no bracketed tags).
    - **Body**: a short summary with the tasks file path, the slice count and
@@ -788,7 +800,7 @@ created) — pushing planning commits to the default branch and calling
      pointer to `smithy.forge` as the next step.
 4. Capture the resulting PR URL for the one-shot output snippet.
 
-If `gh pr create` fails (network error, auth failure, missing upstream,
+If PR creation fails (network error, auth failure, missing upstream,
 etc.), do **not** roll back the written files — they stay on disk. Fall
 through to the PR-creation-failure branch of the one-shot output snippet
 below so the user sees exactly what was produced and what went wrong.
@@ -875,14 +887,15 @@ was recorded.`)
 - **Specification Debt**: copy each item from the clarify return's
   `debt_items` array, including its Impact level. The leading count MUST
   match the number of bullets rendered.
-- **PR**: the `gh pr create` URL captured after the artifact write-out step.
+- **PR**: the URL captured from the PR creation step (see the
+  `pr-create-tool-choice` snippet for which tool ran).
 
 ### Error Fallbacks
 
 Two edge cases change the output shape. Follow these rules rather than
 attempting to render the full format above:
 
-- **PR creation failure**: if `gh pr create` fails (network error, auth
+- **PR creation failure**: if PR creation fails (network error, auth
   failure, missing upstream, etc.), still render the `## Summary`,
   `## Assumptions`, and `## Specification Debt` sections from the captured
   run data, then replace the `## PR` section with:
@@ -890,8 +903,9 @@ attempting to render the full format above:
   ```markdown
   ## PR
 
-  PR creation failed — artifacts are on disk at `<spec folder>`. Re-run `gh
-  pr create` manually, or retry the command. Error: <error message>.
+  PR creation failed — artifacts are on disk at `<spec folder>`. Re-run
+  the PR creation step manually (see `pr-create-tool-choice` for the
+  tool to use), or retry the command. Error: <error message>.
   ```
 
   Never silently drop the PR section; the developer needs to see that PR
@@ -963,6 +977,99 @@ attempting to render the full format above:
 - **DO** express testing requirements as acceptance criteria on the functional
   task, not as separate tasks.
 
+---
+
+## Branch Selection Policy
+
+Apply this check before any auto-naming branch step in the parent phase,
+and again at the commit-and-PR step. It exists so `smithy.<verb>` is safe
+to invoke from a pre-existing checkout on a non-default branch —
+orchestrators that pre-create a linked git worktree on a known branch and
+hand it to a Claude Code worker rely on the agent honoring the checkout
+rather than renaming it. The same `smithy.<verb>` invoked the normal way
+(in the main checkout, after `mark` / `cut` set up a branch) must still
+auto-create its own branch as before.
+
+### Detect the default branch
+
+1. First try the cheap form:
+
+   ```bash
+   git symbolic-ref refs/remotes/origin/HEAD
+   ```
+
+   On success it prints a single line like `refs/remotes/origin/main`;
+   strip the `refs/remotes/origin/` prefix to get the default branch
+   name. Do not assume `main`. (Note: do **not** add the `--short` flag —
+   the bare form is what the repo's auto-allow list permits, and the
+   prefix is easy to strip.)
+
+2. If that command exits non-zero with `not a symbolic ref` (common in
+   fresh clones, mirrors, and some linked worktrees where `origin/HEAD`
+   was never set), fall back to:
+
+   ```bash
+   git remote show origin
+   ```
+
+   Find the line `  HEAD branch: <name>` in the output and use `<name>`.
+
+3. If both fail, ask the user which branch is the default and proceed
+   from their answer rather than guessing.
+
+### Detect the worktree shape
+
+Determine whether the current working directory is the **main checkout**
+or a **linked worktree**:
+
+```bash
+git rev-parse --git-dir
+git rev-parse --git-common-dir
+```
+
+- If the two paths are equal, the current cwd is the **main checkout**.
+- If they differ (the `--git-dir` path lives under
+  `<common>/worktrees/<name>`), the current cwd is a **linked worktree**
+  — typically created by `git worktree add` or by an upstream
+  orchestrator that pre-staged it for an agent run.
+
+### Detect the current branch
+
+```bash
+git rev-parse --abbrev-ref HEAD
+```
+
+### Decide
+
+- **If the current branch is not the default branch AND the current cwd
+  is a linked worktree**, keep the existing branch. Skip the parent
+  phase's auto-naming step, do not run `git checkout -b`, and do not
+  prepend `feature/` or any other prefix when later pushing or opening
+  the PR. The orchestrator already chose this branch and tracks the work
+  by that exact name.
+- **Otherwise** (the cwd is the main checkout, or the current branch is
+  already the default branch), run the parent phase's auto-naming step
+  (`git checkout -b <derived-name>`). The main-checkout case is the
+  greenfield path *and* the normal `mark` → `cut` → `forge` flow —
+  forge, for example, must continue to auto-create its per-slice branch
+  even when the user invoked it while still sitting on the spec branch
+  that `mark` created.
+
+Confirm the resolved branch name to the user and proceed.
+
+### PR step
+
+The same rule applies during the commit-and-PR step: push the resolved
+branch as-is, and pass it as the PR's head when the chosen PR-creation
+tool requires it (e.g. the `head` argument for the GitHub MCP tool, or
+the equivalent flag on the CLI fallback — see the
+`pr-create-tool-choice` snippet for which tool to prefer). **Never
+create a new branch or rename the current one as part of the PR-creation
+command** (in particular, do not prepend `feature/` to the resolved
+branch). The branch the agent commits and pushes from must be the same
+branch the resulting PR is opened against. This rule applies in both
+the main checkout and a linked worktree — branch renames during PR
+creation are always wrong.
 ---
 
 ## Output
