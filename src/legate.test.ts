@@ -584,8 +584,13 @@ describe("legate module", () => {
         const content = fs.readFileSync(sm, "utf-8");
         // Frontmatter survived render.
         expect(content.startsWith("---")).toBe(true);
-        // Variables interpolated into the body.
-        expect(content).toContain("legate-workers");
+        // Variables interpolated into the body. Every skill's protocol
+        // ultimately invokes one or more scripts that take the repo path,
+        // so {{REPO_PATH}} is the one variable every skill is guaranteed
+        // to render — {{WORKER_GROUP}} is only used by skills that scan
+        // or launch worker sessions (babysit, dispatch), not by cleanup
+        // which operates on per-slice session IDs from state.json.
+        expect(content).toContain("/some/repo/March");
       }
     });
   });

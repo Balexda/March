@@ -18,7 +18,7 @@ This mirrors the convention SmithyCli uses for its own agent-skill templates.
 
 | Snippet | Used by |
 |---|---|
-| `state-json-schema.md` | CLAUDE.prompt, legate.babysit, legate.dispatch (universal contract) |
+| `state-json-schema.md` | CLAUDE.prompt, legate.babysit, legate.cleanup, legate.dispatch (universal contract) |
 | `status-grammar.md` | CLAUDE.prompt (universal worker-state vocabulary) |
 | `escalation-grammar.md` | CLAUDE.prompt (the `[STATUS]` reply format with AUTO:/NEED: lines) |
 | `auto-mode-rules.md` | CLAUDE.prompt (tool calls the loop will never produce) |

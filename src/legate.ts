@@ -215,7 +215,11 @@ export type TemplateVars = Record<TemplateVar, string>;
  *   2. Adding the name here.
  *   3. Updating `CLAUDE.prompt`'s heartbeat protocol to load and use it.
  */
-export const LEGATE_SKILLS = ["legate.babysit", "legate.dispatch"] as const;
+export const LEGATE_SKILLS = [
+  "legate.babysit",
+  "legate.cleanup",
+  "legate.dispatch",
+] as const;
 export type LegateSkillName = (typeof LEGATE_SKILLS)[number];
 
 /**
