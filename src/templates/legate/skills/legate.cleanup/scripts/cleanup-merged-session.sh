@@ -48,9 +48,13 @@ if out=$(agent-deck -p "$PROFILE" session remove "$SESSION" --prune-worktree --f
   exit 0
 fi
 
-# Defensive regex: agent-deck's exact "not found" wording may vary across
-# versions. Match any of the common phrasings as idempotent success.
-if echo "$out" | grep -qiE "not found|no such session|does not exist"; then
+# Match agent-deck's session-missing shape specifically — `Error: session
+# '<id>' not found` as of v1.7.79. Both alternatives require the word
+# "session" near the missing-indicator so unrelated agent-deck errors
+# that happen to contain "not found" / "does not exist" (config-file
+# errors, profile-config errors, etc.) fail loudly instead of being
+# silently swallowed and treated as an already-removed session.
+if echo "$out" | grep -qiE "session [^[:space:]]+ not found|no such session|session [^[:space:]]+ does not exist"; then
   jq -nc \
     --arg s "$SESSION" \
     --arg sl "$SLICE_ID" \
