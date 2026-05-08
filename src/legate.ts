@@ -664,6 +664,146 @@ async function copySkillsIntoConductor(
 }
 
 /**
+ * Heartbeat script body. agent-deck's `conductor setup` writes its own
+ * heartbeat.sh that sends a "Heartbeat:" prefixed message — but the legate
+ * CLAUDE.md only treats messages starting with `[HEARTBEAT]` as heartbeat
+ * triggers, so the agent-deck-managed script silently fails to drive the
+ * loop. We overwrite it with this version, which mirrors the format
+ * bridge.py's in-process heartbeat_loop produces:
+ *   [HEARTBEAT] [<name>] Status: N waiting, N running, N idle, N error,
+ *   N stopped. Waiting sessions: ... Check if any need auto-response or
+ *   user attention.
+ *
+ * agent-deck's `MigrateConductorHeartbeatScripts` auto-migrator
+ * (internal/session/conductor.go) detects "managed" scripts via two
+ * substrings — both must be absent here so the migrator classifies our
+ * script as user-authored and skips it. If you edit this template, do not
+ * reintroduce either pattern (see legate.test.ts for the assertions).
+ *
+ * `{NAME}` is the conductor name, `{PROFILE}` the agent-deck profile,
+ * `{WORKER_GROUP}` the group whose member sessions should appear in the
+ * status counts. Substitution is straight string replacement; values are
+ * already validated by validateConductorName / validateProfileName before
+ * we reach here.
+ */
+const LEGATE_HEARTBEAT_SCRIPT_TEMPLATE = `#!/bin/bash
+# march-managed heartbeat dispatcher for the {NAME} legate conductor.
+# Replaces agent-deck's auto-generated heartbeat.sh; sends the [HEARTBEAT]
+# format the legate CLAUDE.md actually treats as a trigger.
+
+set -u
+
+NAME="{NAME}"
+GROUP="{WORKER_GROUP}"
+PROFILE="{PROFILE}"
+TARGET="conductor-\${NAME}"
+
+if ! agent-deck conductor status --json 2>/dev/null | grep -q '"enabled".*true'; then
+    exit 0
+fi
+
+# Don't fire while the conductor itself is busy.
+STATE=$(agent-deck -p "$PROFILE" session show "$TARGET" --json 2>/dev/null \\
+    | awk -F'"' '/"status"/{print $4; exit}')
+case "$STATE" in
+    idle|waiting) ;;
+    *) exit 0 ;;
+esac
+
+# Pull worker session list. Passed to python via env var so the heredoc
+# carrying the python script does not shadow the pipe.
+SESSIONS_JSON=$(agent-deck -p "$PROFILE" list --json 2>/dev/null)
+if [ -z "$SESSIONS_JSON" ]; then
+    exit 0
+fi
+
+PAYLOAD=$(
+    SESSIONS_JSON="$SESSIONS_JSON" \\
+    HB_NAME="$NAME" \\
+    HB_GROUP="$GROUP" \\
+    python3 -c '
+import json, os, sys
+
+name = os.environ["HB_NAME"]
+group = os.environ["HB_GROUP"]
+try:
+    data = json.loads(os.environ["SESSIONS_JSON"])
+except Exception:
+    sys.exit(0)
+sessions = data.get("sessions", data) if isinstance(data, dict) else data
+if not isinstance(sessions, list):
+    sys.exit(0)
+
+scoped = []
+for s in sessions:
+    title = s.get("title", "") or ""
+    g = s.get("group", "") or ""
+    if title.startswith("conductor-"):
+        continue
+    if g != group and not g.startswith(group + "/"):
+        continue
+    scoped.append(s)
+
+buckets = {"waiting": [], "running": [], "idle": [], "error": [], "stopped": []}
+for s in scoped:
+    buckets.setdefault(s.get("status", ""), []).append(s)
+
+def n(b):
+    return len(buckets.get(b, []))
+
+parts = [
+    "[HEARTBEAT] [%s] Status: %d waiting, %d running, %d idle, %d error, %d stopped."
+    % (name, n("waiting"), n("running"), n("idle"), n("error"), n("stopped"))
+]
+
+def details(bucket):
+    return ", ".join(
+        "%s (project: %s)" % (s.get("title", "untitled"), s.get("path", ""))
+        for s in buckets.get(bucket, [])
+    )
+
+if buckets["waiting"]:
+    parts.append("Waiting sessions: %s." % details("waiting"))
+if buckets["error"]:
+    parts.append("Error sessions: %s." % details("error"))
+parts.append("Check if any need auto-response or user attention.")
+
+print(" ".join(parts))
+'
+)
+
+if [ -z "\${PAYLOAD:-}" ]; then
+    exit 0
+fi
+
+agent-deck -p "$PROFILE" session send "$TARGET" "$PAYLOAD" --no-wait -q
+`;
+
+/**
+ * Render the heartbeat script for `(conductorName, profile, workerGroup)`
+ * and write it to `<conductorDir>/heartbeat.sh` with mode 0755.
+ *
+ * Caller is responsible for ensuring `agent-deck conductor setup` has
+ * already run so the conductor dir exists; this overwrites whatever
+ * heartbeat.sh agent-deck just wrote.
+ */
+export async function writeLegateHeartbeatScript(
+  conductorDir: string,
+  conductorName: string,
+  profile: string,
+  workerGroup: string,
+): Promise<void> {
+  const body = LEGATE_HEARTBEAT_SCRIPT_TEMPLATE
+    .replaceAll("{NAME}", conductorName)
+    .replaceAll("{PROFILE}", profile)
+    .replaceAll("{WORKER_GROUP}", workerGroup);
+  const target = path.join(conductorDir, "heartbeat.sh");
+  await fs.writeFile(target, body, { mode: 0o755 });
+  // writeFile honors mode only when creating; on overwrite, fix the mode.
+  await fs.chmod(target, 0o755);
+}
+
+/**
  * Render the legate CLAUDE.prompt template for `repoPath` and (by default) run
  * `agent-deck conductor setup` so the conductor's own CLAUDE.md is copied
  * from the rendered file. Re-runnable: the rendered template stays at a
@@ -896,6 +1036,22 @@ export async function initLegate(
         `Failed to write narrow .claude/settings.json into ${conductorDir}: ` +
           `${(err as Error).message}\n` +
           `Without it, every skill-script invocation will pause for operator approval.`,
+      );
+    }
+    try {
+      await writeLegateHeartbeatScript(
+        conductorDir,
+        conductorName,
+        profile,
+        workerGroup,
+      );
+    } catch (err) {
+      postSetupWarnings.push(
+        `Failed to overwrite heartbeat.sh in ${conductorDir}: ` +
+          `${(err as Error).message}\n` +
+          `Without this, the agent-deck-managed heartbeat sends a "Heartbeat:" message ` +
+          `that the legate CLAUDE.md does not recognize as a trigger — the conductor ` +
+          `will receive periodic messages but never run babysit/cleanup/dispatch.`,
       );
     }
 

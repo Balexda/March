@@ -2,6 +2,7 @@ import { describe, it, expect, afterEach } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { execFileSync } from "node:child_process";
 import {
   checkBridgeRequirements,
   deriveDefaults,
@@ -11,6 +12,7 @@ import {
   renderPrompt,
   renderTemplate,
   slugify,
+  writeLegateHeartbeatScript,
 } from "./legate.js";
 
 describe("legate module", () => {
@@ -587,6 +589,78 @@ describe("legate module", () => {
         // Variables interpolated into the body.
         expect(content).toContain("legate-workers");
       }
+    });
+  });
+
+  describe("writeLegateHeartbeatScript", () => {
+    async function render(opts?: {
+      name?: string;
+      profile?: string;
+      group?: string;
+    }): Promise<{ scriptPath: string; body: string }> {
+      const dir = makeTmpDir();
+      const name = opts?.name ?? "legate-march";
+      const profile = opts?.profile ?? "march";
+      const group = opts?.group ?? "legate-workers";
+      await writeLegateHeartbeatScript(dir, name, profile, group);
+      const scriptPath = path.join(dir, "heartbeat.sh");
+      const body = fs.readFileSync(scriptPath, "utf-8");
+      return { scriptPath, body };
+    }
+
+    it("substitutes the conductor name, profile, and worker group", async () => {
+      const { body } = await render({
+        name: "legate-myrepo",
+        profile: "myrepo",
+        group: "legate-workers",
+      });
+      expect(body).toContain(`NAME="legate-myrepo"`);
+      expect(body).toContain(`PROFILE="myrepo"`);
+      expect(body).toContain(`GROUP="legate-workers"`);
+    });
+
+    it("emits a payload that uses the [HEARTBEAT] format the legate CLAUDE.md triggers on", async () => {
+      const { body } = await render();
+      // The python builder produces "[HEARTBEAT] [<name>] Status: ..."
+      expect(body).toContain(
+        `"[HEARTBEAT] [%s] Status: %d waiting, %d running, %d idle, %d error, %d stopped."`,
+      );
+    });
+
+    it("omits the substrings agent-deck's auto-migrator uses to identify managed scripts", async () => {
+      // MigrateConductorHeartbeatScripts in
+      // internal/session/conductor.go classifies a script as "managed" iff
+      // it contains BOTH of these substrings; if either is absent the
+      // migrator leaves the file alone.
+      const { body } = await render();
+      expect(body).not.toContain("# Heartbeat for conductor:");
+      expect(body).not.toContain(`SESSION="conductor-`);
+    });
+
+    it("writes an executable file (mode 0755)", async () => {
+      const { scriptPath } = await render();
+      const stats = fs.statSync(scriptPath);
+      // POSIX mode bits: owner rwx, group rx, other rx -> 0o755 = 493
+      expect(stats.mode & 0o777).toBe(0o755);
+    });
+
+    it("produces a script that passes `bash -n` syntax check", async () => {
+      const { scriptPath } = await render();
+      // bash -n parses without executing; a non-zero exit means a syntax
+      // error in the generated script.
+      expect(() =>
+        execFileSync("bash", ["-n", scriptPath], { stdio: "pipe" }),
+      ).not.toThrow();
+    });
+
+    it("overwrites an existing heartbeat.sh in place", async () => {
+      const dir = makeTmpDir();
+      const target = path.join(dir, "heartbeat.sh");
+      fs.writeFileSync(target, "#!/bin/bash\necho stale\n", { mode: 0o755 });
+      await writeLegateHeartbeatScript(dir, "legate-march", "march", "legate-workers");
+      const body = fs.readFileSync(target, "utf-8");
+      expect(body).not.toContain("echo stale");
+      expect(body).toContain(`NAME="legate-march"`);
     });
   });
 });
