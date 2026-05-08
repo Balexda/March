@@ -18,7 +18,7 @@ Run this protocol on every heartbeat after the babysit pass completes:
 
 1. **Babysit must have nothing urgent in flight.** If any tracked PR is `pr-resolving-conflicts`, `pr-rebasing`, `pr-in-rerun`, or `pr-in-fix`, prefer letting the existing dispatches converge. Spare cycles only exist when in-flight work is parked waiting on operator merge or external CI.
 2. **`smithy status` reports a ready item.** Use the script (below) — never compose `smithy` commands directly.
-3. **All dependencies of the ready item have merged PRs in `state.json`.** Do not preempt the merge gate.
+3. **All dependencies of the ready item have merged PRs.** A dep is satisfied if its slice-id appears in either `state.json.slices.<id>` with `pr.state == "MERGED"` (merged this heartbeat, cleanup hasn't run yet) or `state.json.archived_slices.<id>` (merged in a prior heartbeat and already swept by `legate.cleanup`). Do not preempt the merge gate.
 4. **You have not already dispatched a new worker this heartbeat.** Cap is one new launch per tick — keeps the loop pace operator-paceable.
 
 If any of (1)–(4) is false, do nothing this heartbeat and let the babysit reply describe the holding pattern.
@@ -37,7 +37,7 @@ Returns Smithy's view of what's ready. The conductor's `state.json` is the sourc
 
 Prioritization, in order:
 1. **Cuts for any user story that is ready.** Cuts on different specs, or on different user-stories within the same spec, are independent and run in parallel as separate workers — they touch separate tasks files.
-2. **Forges for any slice whose dependencies are merged.** Forges on independent slices run in parallel; forges on dependent slices wait for the predecessor's PR to merge before being dispatched.
+2. **Forges for any slice whose dependencies are merged.** Forges on independent slices run in parallel; forges on dependent slices wait for the predecessor's PR to merge (visible in either `slices.<dep-id>` with `pr.state == "MERGED"` or `archived_slices.<dep-id>`) before being dispatched.
 3. **Render/audit steps in the order `smithy status` recommends.**
 
 ### 2. Sync the default branch
@@ -71,7 +71,7 @@ Three launch flags are non-negotiable for workers — the script wires them all:
 - `--title-lock` — Claude Code's session auto-rename will otherwise overwrite the title you set, breaking title-based session resolution.
 - `-c claude` — agent runtime. Codex workers are not supported by this prompt.
 
-Worktrees are not auto-cleaned by mini-legate when a slice merges; the precursor leaves cleanup to the operator (or to Brood once Milestone 3 ships). When you mark a slice `merged` in `state.json`, leave the `worktree_path` recorded so the operator can reclaim disk.
+Worker sessions and their worktrees are auto-cleaned by `legate.cleanup` after a slice merges. At dispatch time you do not need to think about teardown — when babysit transitions a slice to `merged`, cleanup (which runs after babysit and before dispatch on the same heartbeat) removes the session via `agent-deck session remove --prune-worktree --force` and moves the slice's record into `archived_slices`. Capture `worktree_path` into `state.json` here for cleanup's bookkeeping; the entry will be moved out of `slices` after the merge. Brood (Milestone 3) will own broader lifecycle cleanup.
 
 ### 4. Capture session details
 

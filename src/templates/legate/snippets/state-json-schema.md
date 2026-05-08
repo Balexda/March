@@ -22,11 +22,21 @@ Maintain a slim, structured state file across compactions:
       "last_action": "2026-05-04T18:30:00Z"
     }
   },
+  "archived_slices": {
+    "<merged-slice-id>": {
+      "pr_number": 124,
+      "pr_url": "https://github.com/Owner/Repo/pull/124",
+      "worker_title": "cut: spawn-dispatch US5",
+      "merged_at": "2026-05-07T22:30:00Z"
+    }
+  },
   "last_smithy_status_at": "2026-05-04T18:30:00Z",
   "last_heartbeat": "2026-05-04T18:30:00Z"
 }
 ```
 
 `repo.default_branch` and `repo.owner_with_name` are detected once on first run and reused — they do not change for the life of a conductor. `slices[].worktree_path` is the per-slice checkout created by `--worktree`; capture it from `inspect-worker.sh` (legate.dispatch skill) after launch.
+
+`archived_slices` is the breadcrumb store written by `legate.cleanup` after a slice's PR merges and its worker session has been torn down. Each entry holds only what's needed downstream: the PR number/URL (audit), the worker title (debugging), and the merge timestamp. The full slice record does not carry forward — `task-log.md` is the audit trail. `legate.dispatch` consults both `slices.<id>` (with `pr.state == "MERGED"` for slices merged this heartbeat that cleanup hasn't yet processed) and `archived_slices.<id>` (for slices merged in a prior heartbeat) when checking whether a downstream slice's dependencies have all merged.
 
 Read `state.json` at the start of every turn. Update it after any state-changing action. Store summaries, not transcripts.

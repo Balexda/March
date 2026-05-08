@@ -1,0 +1,131 @@
+---
+name: legate.cleanup
+description: "Mini-legate's post-merge teardown skill. Use on every heartbeat (load between `legate.babysit` and `legate.dispatch`) to sweep every slice in `state.json` whose `stage == 'merged'`: remove the worker session via `agent-deck session remove --prune-worktree --force` (kills the tmux process, deletes the git worktree, drops the registry entry), move the slice from `slices` to `archived_slices` so dispatch's dep-check still sees the merge, and append a task-log entry. After processing all merged slices, if at least one was cleaned, fetch origin/<default> so the next dispatch sees the freshest refs. Triggers: heartbeat ticks where babysit has just transitioned (or has previously transitioned) one or more slices to `merged`. No-op when zero slices are merged. Skip for in-flight PRs (that's `legate.babysit`) or new-work launches (that's `legate.dispatch`)."
+allowed-tools: Bash(.claude/skills/legate.cleanup/scripts/cleanup-merged-session.sh:*) Bash(.claude/skills/legate.cleanup/scripts/fetch-default-branch.sh:*)
+---
+
+# Skill: legate.cleanup (post-merge teardown mechanics)
+
+This skill is the only path that destroys worker sessions and prunes their worktrees. Load it **after** `legate.babysit` and **before** `legate.dispatch` on every heartbeat — its `allowed-tools` need to be active before you bash either of its scripts, and its scope is exactly the merged slices babysit has produced.
+
+Load via `Skill(skill="legate.cleanup")`. The classifier registers the allowed-tools for the rest of the session.
+
+The skill is intentionally narrow: one decision (which slices to clean), one destructive action (`agent-deck session remove --prune-worktree --force`), one bookkeeping move (slice → archived_slices), one optional fetch. No tactic-selection, no escalation tree like babysit's.
+
+---
+
+## When to clean
+
+Run this protocol on every heartbeat after the babysit pass completes and before dispatch begins. Cleanup is unconditional and idempotent:
+
+- If zero slices have `stage == "merged"`, cleanup is a no-op — no script invocations, no `state.json` mutation, no task-log entry, no own line in the heartbeat reply.
+- If one or more slices have `stage == "merged"`, process each one in turn (see protocol below), then run a single fetch.
+
+Cleanup is **not** triggered by `running → waiting | error | idle` transitions — those are slice-targeted and stage-targeted; cleanup is a system-wide sweep that belongs only on the heartbeat tick.
+
+---
+
+## The protocol
+
+### 1. Identify the merged set
+
+Read `state.json`. Collect every entry under `slices.<id>` where `stage == "merged"`. If the set is empty, stop here and return cleanly to the conductor.
+
+### 2. Per-slice teardown
+
+For each merged slice in the set, run the four steps below in order. **Process slices independently** — one slice's failure does not block the next; per-slice failures emit a `NEED:` and leave that slice in `slices` with stage=merged for next-heartbeat retry.
+
+#### 2a. Sanity-check the slice
+
+Skip and emit `NEED:` if `pr.state != "MERGED"` (state drift; the cached PR state disagrees with the stage — likely an operator hand-edit). Do not auto-act on a slice whose state-json stage and PR state disagree.
+
+If `worker_session_id == null` (operator-imported / hand-marked-merged slice with no associated worker), skip step 2b and proceed to 2c — there is no agent-deck session to remove, but the bookkeeping move and log line still apply.
+
+#### 2b. Remove the worker session and prune its worktree
+
+```
+.claude/skills/legate.cleanup/scripts/cleanup-merged-session.sh {{PROFILE}} <worker_session_id> <slice-id>
+```
+
+Wraps `agent-deck -p {{PROFILE}} session remove <worker_session_id> --prune-worktree --force`. The `--prune-worktree` flag is mandatory — the registry-delete alone leaves the git worktree on disk forever. The `--force` flag covers any worker state (`running`, `waiting`, `idle`); when `pr.state == "MERGED"` the worker has nothing useful left to do.
+
+Output schema:
+```json
+{"session_id": "...", "slice_id": "...", "removed": true|false, "reason": "session_not_found"|null}
+```
+
+`removed == false` with `reason == "session_not_found"` means a prior heartbeat's cleanup partially completed (the script succeeded last time, but the `state.json` edit didn't land before a crash). Treat as success — proceed to 2c.
+
+If the script exits non-zero (anything other than session-not-found), **do not move the slice into `archived_slices`**. Leave it in `slices` with stage=merged and add `last_action_note: "cleanup failed: <error>"` so next heartbeat retries. Surface a `NEED:` line for this slice.
+
+#### 2c. Move the slice into `archived_slices`
+
+`Edit(state.json)`: delete `slices.<slice-id>`, add a record under `archived_slices.<slice-id>`:
+
+```json
+{
+  "pr_number": <from slices.<id>.pr.number>,
+  "pr_url":    <from slices.<id>.pr.url>,
+  "worker_title": <from slices.<id>.worker_title>,
+  "merged_at": "<ISO-8601 now>"
+}
+```
+
+The minimal record is what `legate.dispatch` consults during its dep-check — that's the only downstream consumer. Don't carry the full slice record forward; the audit trail lives in `task-log.md`.
+
+#### 2d. Append to `task-log.md`
+
+```markdown
+## YYYY-MM-DD HH:MM — Cleanup
+- <slice-id> (<worker_title>) — PR #<num> merged → removed worker session <worker_session_id>, pruned worktree.
+```
+
+If `worker_session_id` was null, replace the trailing clause with `→ no worker session to remove (operator-imported slice)`.
+
+### 3. Refresh origin refs
+
+After the per-slice loop completes, **if at least one slice was cleaned this heartbeat** (i.e. moved into `archived_slices`), run:
+
+```
+.claude/skills/legate.cleanup/scripts/fetch-default-branch.sh {{REPO_PATH}}
+```
+
+This runs `git fetch origin <default>` (no switch, no pull — that's dispatch's `sync-default-branch.sh`'s concern; we don't want to fight it for HEAD-update semantics). Returns JSON `{"default_branch": "...", "fetched": true}`. The next dispatch in this same heartbeat sees fresh refs and can build a new worker on top of the merged commit.
+
+Skip the fetch when zero slices were cleaned — there are no new refs to pull.
+
+### 4. Surface to the heartbeat reply
+
+For each cleaned slice, emit one `AUTO:` line in the heartbeat `[STATUS]` reply:
+
+```
+AUTO: cleaned up <slice-id> (PR #<num> merged) — session removed, worktree pruned
+```
+
+For each cleanup failure, emit one `NEED:` line:
+
+```
+NEED: <slice-id> cleanup failed — <error>; slice remains in state.json for retry
+```
+
+Zero-cleanup heartbeats produce no annotations from this skill.
+
+---
+
+## Operation reference
+
+| Operation | Script | Returns |
+|---|---|---|
+| Remove a merged slice's worker session + worktree | `cleanup-merged-session.sh <profile> <session-id> <slice-id>` | JSON `{session_id, slice_id, removed, reason?}` |
+| Fetch origin/<default> after cleanup | `fetch-default-branch.sh <repo-path>` | JSON `{default_branch, fetched}` |
+
+Both scripts emit JSON to stdout, progress to stderr, and exit 0/1/2 for success/op-failure/invalid-input. `removed: false` with `reason: "session_not_found"` is a success exit (0).
+
+## Standing rules
+
+- **Only act on slices with `stage == "merged"`.** Slices in `escalated`, `pr-*`, `planning`, or `implementing` are out of scope. The boundaries snippet documents this — cleanup does not override it.
+- **Per-slice independence.** One slice's failure does not block another; emit a `NEED:` for the failure and continue with the rest of the merged set.
+- **Idempotent retry on partial-progress crash.** If `agent-deck session remove` reports session-not-found, treat as success and continue. The next heartbeat then sees a clean state.
+- **`archived_slices`, not `slices`, after teardown.** Don't transition stage to "archived" in `slices` — actually move the entry. The `slices` map is for in-flight work only.
+- **No archive carry-over for failures.** A slice that failed cleanup stays in `slices` (stage=merged) until its next-heartbeat retry succeeds. Do not move it to `archived_slices` until removal is confirmed.
+- **Do not invoke `agent-deck session remove` outside this script.** The auto-mode classifier deliberately gates `session remove` (it's destructive); the wrapper script is the only audited path.

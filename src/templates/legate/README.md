@@ -27,14 +27,17 @@ src/templates/legate/
     ├── legate.babysit/                 ← existing-PR mechanics
     │   ├── SKILL.prompt                ← decision tree, stage transitions, /smithy.fix composition
     │   └── scripts/                    ← babysit-pr, send-to-worker, request-rebase, …
+    ├── legate.cleanup/                 ← post-merge teardown
+    │   ├── SKILL.prompt                ← merged-slice sweep, archive bookkeeping
+    │   └── scripts/                    ← cleanup-merged-session, fetch-default-branch
     └── legate.dispatch/                ← new-work mechanics
         ├── SKILL.prompt                ← step boundaries, sync-then-launch protocol
         └── scripts/                    ← smithy-status, sync-default-branch, launch-worker, inspect-worker
 ```
 
-## The two skills — mechanics layer
+## The three skills — mechanics layer
 
-Mini-legate's *identity* (who I am, what I own, escalation rules, the loop skeleton) lives in `CLAUDE.prompt`. Its *mechanics* are split across two Claude Code skills, each deployed alongside CLAUDE.md into the conductor dir.
+Mini-legate's *identity* (who I am, what I own, escalation rules, the loop skeleton) lives in `CLAUDE.prompt`. Its *mechanics* are split across three Claude Code skills, each deployed alongside CLAUDE.md into the conductor dir.
 
 **`legate.babysit`** — existing-PR mechanics. Loaded first on every heartbeat. Owns the decision tree (`MERGED → CONFLICTING → FAIL → unresolved threads → all-clear`), stage transitions, and every script that mutates an existing PR via the worker that owns it.
 
@@ -49,7 +52,14 @@ Mini-legate's *identity* (who I am, what I own, escalation rules, the loop skele
 | Re-trigger CI | `rerun-ci.sh <repo> <run-id>` |
 | Restart errored worker | `restart-worker.sh <profile> <session-id>` |
 
-**`legate.dispatch`** — new-work mechanics. Loaded second on every heartbeat (only after babysit reports clean). Owns `smithy status` interpretation, default-branch sync, and the one-PR-per-step launch protocol. Operators can disable this skill on repos where the conductor should only manage existing PRs.
+**`legate.cleanup`** — post-merge teardown. Loaded after babysit and before dispatch on every heartbeat. Sweeps every slice in `state.json` whose `stage == "merged"`: removes the worker session via `agent-deck session remove --prune-worktree --force` (one command stops the tmux process, prunes the git worktree, and drops the registry entry), moves the slice from `slices` into `archived_slices` (so dispatch's dep-check still sees the merge), appends a task-log entry, and — if at least one slice was cleaned — fetches origin/<default> so the next dispatch in the same heartbeat sees fresh refs. No-op when zero slices are merged.
+
+| Operation | Script |
+|---|---|
+| Remove a merged slice's worker session + worktree | `cleanup-merged-session.sh <profile> <session-id> <slice-id>` |
+| Fetch origin/<default> after cleanup | `fetch-default-branch.sh <repo-path>` |
+
+**`legate.dispatch`** — new-work mechanics. Loaded last on every heartbeat (only after babysit reports clean). Owns `smithy status` interpretation, default-branch sync, and the one-PR-per-step launch protocol. Operators can disable this skill on repos where the conductor should only manage existing PRs. Dispatch's dep-check consults both `slices` and `archived_slices`, so a merged predecessor is visible even after cleanup has swept it.
 
 | Operation | Script |
 |---|---|
@@ -60,7 +70,7 @@ Mini-legate's *identity* (who I am, what I own, escalation rules, the loop skele
 
 Each script: `set -euo pipefail`, JSON to stdout, status to stderr, structured exit codes (0 success / 1 op-failure / 2 invalid input).
 
-**Why two skills, not one?** Three reasons. (a) **Per-repo enablement** — disabling dispatch on a repo where the conductor should only watch existing PRs is a config flip rather than a prompt rewrite. (b) **Narrower `allowed-tools`** — each skill grants only its own scripts; an operator can audit one skill's surface area without paging through eight others. (c) **Side-effect locality** — dispatch is the only thing that mutates worktrees and creates new sessions; babysit is the only thing that touches existing PRs. Future skills (e.g. PR review, issue triage, merge) can be added without expanding either of these.
+**Why three skills, not one?** Three reasons. (a) **Per-repo enablement** — disabling dispatch on a repo where the conductor should only watch existing PRs is a config flip rather than a prompt rewrite. Cleanup is non-disable-able because leaving merged worker sessions in place is what motivates the skill. (b) **Narrower `allowed-tools`** — each skill grants only its own scripts; an operator can audit one skill's surface area without paging through twelve others. (c) **Side-effect locality** — dispatch is the only thing that mutates worktrees and creates new sessions; cleanup is the only thing that destroys them; babysit is the only thing that touches existing PRs. Future skills (e.g. PR review, issue triage, merge) can be added without expanding any of these.
 
 **Why a skill, not inline shell?** Claude Code's `--permission-mode auto` (which the conductor runs under) classifies inline `python3 -c "..."` and other ad-hoc patterns as arbitrary code execution and pauses for operator approval. A single such pause inside a heartbeat-driven loop stalls the orchestration. Skills self-declare permitted bash patterns via `allowed-tools` in their frontmatter, so when a legate skill is invoked, its scripts auto-approve as a unit.
 
@@ -98,9 +108,11 @@ Each Smithy slice the conductor picks up moves through this state machine. Trigg
               ┌──────────────────────────────────────┐
               │  PR_OPEN                             │  reviews resolved
               │  watch CI                            │  + CI green
-              │  watch reviews via smithy.pr-review  │  ──────────▶  **MERGED**
-              │  watch comments via gh pr view       │   (operator merges,
-              └──────────────────┬───────────────────┘    legate marks slice)
+              │  watch reviews via smithy.pr-review  │  ──────────▶  MERGED  ─▶  **ARCHIVED**
+              │  watch comments via gh pr view       │   (operator merges,    (cleanup removes
+              └──────────────────┬───────────────────┘    babysit marks slice)  worker + worktree;
+                                                                                slice moves into
+                                                                                archived_slices)
                                  │
               CI FAIL  ◀─────────┤────────▶  unresolved inline thread
                                  │
@@ -132,7 +144,7 @@ Each Smithy slice the conductor picks up moves through this state machine. Trigg
 | `pr-rebasing`              | A `request-rebase.sh` has been dispatched (clean rebase to pick up an upstream fix).              |
 | `pr-in-rerun`              | `rerun-ci.sh` has been triggered for a transient flake.                                           |
 | `pr-resolving-conflicts`   | A `request-conflict-resolution.sh` has been dispatched for a real merge conflict against default. |
-| `merged`                   | PR is `MERGED`. Worktree is left on disk for operator cleanup until Brood (M3) ships.             |
+| `merged`                   | PR is `MERGED`. Cleanup will sweep the slice on the same heartbeat: worker session removed, worktree pruned, slice moved into `archived_slices`. |
 | `escalated`                | Conductor has surfaced a `NEED:` to the operator; legate will not act on this slice until cleared.|
 
 ### What drives transitions
@@ -156,7 +168,7 @@ The conductor never polls on its own schedule — heartbeats and transition noti
 4. For each skill in `skills/<name>/`: render its `SKILL.prompt` (frontmatter preserved; body interpolated), stage at `~/.march/legate/<conductor-name>/skills/<name>/SKILL.md`, and copy its `scripts/` alongside. Wipes any previous staged copy first so scripts removed in a newer source template don't linger.
 5. Run `agent-deck -p <profile> conductor setup <name> -description "..."` (no `-claude-md` — see below). agent-deck registers the conductor session, writes its default conductor `CLAUDE.md`, installs the heartbeat timer + bridge unit, and starts the session.
 6. Copy the rendered CLAUDE.md and each staged skill directly into `<conductor-dir>/CLAUDE.md` and `<conductor-dir>/.claude/skills/<name>/` (replacing agent-deck's defaults and any prior symlinks/copies, including any legacy monolithic `<conductor-dir>/.claude/skills/legate/` from older deploys — Claude Code autoloads every dir under `.claude/skills/`, so a leftover legacy dir would shadow the new per-skill grants). **Why copies, not symlinks**: Claude Code's `--permission-mode auto` classifier flags symlink reads pointing outside cwd as cross-boundary access and pauses on them, which stalls the heartbeat-driven loop.
-7. Write `<conductor-dir>/.claude/settings.json` with a narrow allow list: `Skill(legate.babysit:*)` and `Skill(legate.dispatch:*)` (per-skill grants), per-script `Bash(...)` allows that mirror each skill's `allowed-tools` (belt-and-suspenders for first-call classifier behavior), `Read(./**)` / `Edit(./**)` / `Write(./**)` for cwd-scoped state updates, and read-only `Bash(agent-deck * session show *)` / `... list *` / `... status *` patterns so a future direct invocation doesn't stall (the dispatch skill's `inspect-worker.sh` covers the common case but the underlying read patterns being allowed is cheap insurance). Deliberately *not* in this list: `Bash(*)`, `Read(*)`, `Edit(*)`, `Write(*)`, or any tool-wide wildcard — those would be a permission bypass.
+7. Write `<conductor-dir>/.claude/settings.json` with a narrow allow list: `Skill(legate.babysit:*)`, `Skill(legate.cleanup:*)`, and `Skill(legate.dispatch:*)` (per-skill grants), per-script `Bash(...)` allows that mirror each skill's `allowed-tools` (belt-and-suspenders for first-call classifier behavior), `Read(./**)` / `Edit(./**)` / `Write(./**)` for cwd-scoped state updates, and read-only `Bash(agent-deck * session show *)` / `... list *` / `... status *` patterns so a future direct invocation doesn't stall (the dispatch skill's `inspect-worker.sh` covers the common case but the underlying read patterns being allowed is cheap insurance). Deliberately *not* in this list: `Bash(*)`, `Read(*)`, `Edit(*)`, `Write(*)`, or any tool-wide wildcard — those would be a permission bypass.
 8. `agent-deck session set conductor-<name> auto-mode true` to put the conductor into Claude Code's `--permission-mode auto`, then `agent-deck session set conductor-<name> extra-args -- --model <model>` to pin the model (default: `sonnet`; override with `march legate init --model <id>`), then `session restart` so both flags take effect immediately. The conductor's role is orchestration-heavy / reasoning-light — Sonnet is intentionally chosen as the default; workers stay on the Claude default for real implementation work.
 9. (Linux/WSL2) `systemctl --user start agent-deck-conductor-bridge` and verify with `systemctl --user is-active --quiet agent-deck-conductor-bridge`. agent-deck installs and tries to enable+start this systemd unit during conductor setup, but a successful unit install does not guarantee a healthy daemon — `march legate init` re-asserts the start and verifies, so a crash-loop (e.g. a Python 3.8 host trying to run a bridge.py that uses Python 3.9 generics) is surfaced immediately rather than silently leaving the conductor inert.
 
@@ -180,18 +192,20 @@ agent-deck -p <profile> session set conductor-legate-<slug> auto-mode true
 
 This flips `ClaudeOptions.AutoMode` and agent-deck's launcher emits `--permission-mode auto` on every start/restart. Workers go through the per-launch `--extra-arg --permission-mode --extra-arg auto` path because there is no `--auto-mode` flag on `agent-deck launch`. The `auto-mode` field is preferred over `extra-args -- --permission-mode auto` so a future inspection via `agent-deck session show` reports auto mode as a structured field rather than an opaque token list, and to dodge a misleading agent-deck CLI success-message bug that prints only the first positional arg.
 
-**Level 2 — narrow allow list in the conductor's project settings**. `<conductor-dir>/.claude/settings.json` (written by `march legate init`) pre-approves exactly what the two skills need and nothing else:
+**Level 2 — narrow allow list in the conductor's project settings**. `<conductor-dir>/.claude/settings.json` (written by `march legate init`) pre-approves exactly what the three skills need and nothing else:
 
 ```json
 {
   "permissions": {
     "allow": [
       "Skill(legate.babysit:*)",
+      "Skill(legate.cleanup:*)",
       "Skill(legate.dispatch:*)",
       "Read(./**)",
       "Edit(./**)",
       "Write(./**)",
       "Bash(.claude/skills/legate.babysit/scripts/babysit-pr.sh *)",
+      "Bash(.claude/skills/legate.cleanup/scripts/cleanup-merged-session.sh *)",
       "Bash(.claude/skills/legate.dispatch/scripts/launch-worker.sh *)",
       "...one Bash(...) entry per deployed script...",
       "Bash(agent-deck * session show *)",
