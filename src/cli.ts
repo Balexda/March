@@ -4,6 +4,11 @@ import { createInterface } from "node:readline";
 import { Command, CommanderError } from "commander";
 import { ERROR, SUCCESS, USAGE_ERROR } from "./exit-codes.js";
 import { checkSpawnDependencies, isFinderAvailable, isOnPath } from "./deps.js";
+import {
+  launchSpawnContainer,
+  LaunchError,
+  removeSpawnContainer,
+} from "./container-launch.js";
 import { checkBridgeRequirements, initLegate, LegateError } from "./legate.js";
 import { initMarch, InitError } from "./init.js";
 import { createBuildContext, SnapshotError } from "./snapshot.js";
@@ -16,6 +21,7 @@ import {
 import { BASE_IMAGE } from "./spawn-config.js";
 import {
   markSpawnRecordFailed,
+  markSpawnRecordRunning,
   removeSpawnRecord,
   SpawnRecordError,
   updateSpawnRecordImageId,
@@ -451,6 +457,56 @@ program
         process.exitCode = ERROR;
         return;
       }
+
+      // Stage 4 (Launch) — start the spawn container with the hardcoded
+      // SPAWN_CONFIG security configuration, capture the container ID,
+      // and transition the SpawnRecord from "created" to "running"
+      // (FR-011 / FR-012 / FR-013, FR-019, AS 5.1–5.5, data-model
+      // created → running).
+      //
+      // On any failure here (LaunchError from the container launch, or
+      // SpawnRecordError from the running-record update), mirror Stage 3's
+      // failure pattern: transition the SpawnRecord to "failed" (preserved
+      // on disk for auditing per the contracts' "stage 7 Record runs
+      // unconditionally" rule and SD-002), then run reverse-order cleanup
+      // (container → image → worktree+branch) before exiting 1.
+      // markSpawnRecordRunning failure after a successful launch still
+      // calls removeSpawnContainer so a started container does not survive
+      // a failed transition (SD-002).
+      try {
+        const containerId = launchSpawnContainer({ spawnId: worktree.spawnId });
+        markSpawnRecordRunning(worktree.spawnId, containerId);
+      } catch (err) {
+        try {
+          markSpawnRecordFailed(worktree.spawnId, {
+            error: (err as Error).message,
+          });
+        } catch (markErr) {
+          process.stderr.write(
+            `warning: failed to transition spawn record to "failed" for spawn ${worktree.spawnId}: ${(markErr as Error).message}; the record file may be in an inconsistent state.\n`,
+          );
+        }
+        // Reverse-order artifact cleanup. removeSpawnContainer is idempotent
+        // (no-op if launch never produced a container), so it is safe to
+        // call unconditionally on the failure path.
+        removeSpawnContainer(worktree.spawnId);
+        removeSpawnImage(worktree.spawnId);
+        removeSpawnWorktree(repoRoot, worktree);
+
+        const message =
+          err instanceof LaunchError || err instanceof SpawnRecordError
+            ? err.message
+            : (err as Error).message;
+        process.stderr.write(message + "\n");
+        process.exitCode = ERROR;
+        return;
+      }
+
+      // Stage 4 success — dispatch returns cleanly with the container
+      // running. Stories 6 (prompt handoff) and 7 (lifecycle wait) extend
+      // dispatch from here; Story 7 in particular will replace this exit-0
+      // fall-through with the container's actual exit code.
+      return;
     }
     console.log(
       "march spawn is not yet implemented. It will be available after Feature 2: Spawn Dispatch.",

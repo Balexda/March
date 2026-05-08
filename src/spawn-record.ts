@@ -14,8 +14,8 @@ export const DEFAULT_BACKEND = "claude-code";
 
 /**
  * Lifecycle states for a SpawnRecord, as defined by the data model.
- * Feature 2 writes `"created"` here; Stories 4–7 drive the remaining
- * transitions.
+ * Feature 2 writes `"created"` here; Story 5 drives the `created → running`
+ * transition; Stories 6–7 drive the remaining transitions.
  */
 export type SpawnStatus = "created" | "running" | "stopped" | "failed";
 
@@ -280,7 +280,8 @@ export interface MarkSpawnRecordFailedOptions {
  * pre-`"failed"` state) to `"failed"`, populating `stoppedAt` with the
  * current ISO 8601 timestamp. Implements the data-model `created →
  * failed` transition for Story 4's failure paths (snapshot, Docker
- * build, or `imageId` record-update failure).
+ * build, or `imageId` record-update failure) and Story 5's failure
+ * paths (container launch or `containerId` record-update failure).
  *
  * The optional `error` argument is currently dropped — see
  * {@link MarkSpawnRecordFailedOptions}.
@@ -306,6 +307,49 @@ export function markSpawnRecordFailed(
     ...existing,
     status: "failed",
     stoppedAt: new Date().toISOString(),
+  };
+  atomicWriteSpawnRecord(spawnRecordPath(id, homeDir), updated);
+  return updated;
+}
+
+/**
+ * Transitions an existing SpawnRecord from `"created"` to `"running"`,
+ * populating `containerId` (from the captured `docker run -d` stdout) and
+ * `startedAt` (current ISO 8601 timestamp). Implements the data-model
+ * `created → running` transition for Stage 4 (FR-019).
+ *
+ * Refuses to operate on a record whose `status` is not `"created"` — the
+ * data model defines `created → running` as a strict transition, so
+ * applying it to a record that is already `"running"`, `"stopped"`, or
+ * `"failed"` would silently double-write `startedAt` or resurrect a
+ * terminated spawn. A `SpawnRecordError` is thrown in that case.
+ *
+ * Story 7 owns transitions out of `"running"` (`running → stopped` and
+ * `running → failed`); this helper does not touch those.
+ *
+ * Atomic write (temp file + rename) — semantics match
+ * {@link updateSpawnRecordImageId} and {@link markSpawnRecordFailed} so a
+ * crash mid-write cannot corrupt the existing record.
+ *
+ * @throws {SpawnRecordError} If the source record is missing, unreadable,
+ *   not in the `"created"` state, or the atomic write fails.
+ */
+export function markSpawnRecordRunning(
+  id: string,
+  containerId: string,
+  homeDir?: string,
+): SpawnRecord {
+  const existing = readSpawnRecord(id, homeDir);
+  if (existing.status !== "created") {
+    throw new SpawnRecordError(
+      `Cannot transition spawn record "${id}" to "running": current status is "${existing.status}"; the data-model only permits "created" → "running".`,
+    );
+  }
+  const updated: SpawnRecord = {
+    ...existing,
+    status: "running",
+    containerId,
+    startedAt: new Date().toISOString(),
   };
   atomicWriteSpawnRecord(spawnRecordPath(id, homeDir), updated);
   return updated;

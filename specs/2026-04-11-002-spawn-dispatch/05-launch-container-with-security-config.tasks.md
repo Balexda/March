@@ -17,7 +17,7 @@
 
 ### Tasks
 
-- [ ] **Define `SpawnConfig` typed interface and `SPAWN_CONFIG` constant in `spawn-config.ts`**
+- [x] **Define `SpawnConfig` typed interface and `SPAWN_CONFIG` constant in `spawn-config.ts`**
 
   Extend `src/spawn-config.ts` with a typed `SpawnConfig` interface and an exported `SPAWN_CONFIG` constant carrying the hardcoded security and resource defaults consumed by Stage 4. Field names and validation rules come from the data-model SpawnConfig entity. Update the module-level JSDoc to no longer conflate `SpawnConfig` and `SpawnBackend`.
 
@@ -28,7 +28,7 @@
   - JSDoc references Feature 4 as the owner of network-policy hardening and notes the bridge-network gap is intentional
   - Existing `BASE_IMAGE` export is preserved unchanged
 
-- [ ] **Add `markSpawnRecordRunning` SpawnRecord transition to `spawn-record.ts`**
+- [x] **Add `markSpawnRecordRunning` SpawnRecord transition to `spawn-record.ts`**
 
   Extend `src/spawn-record.ts` with a `markSpawnRecordRunning(id, containerId, homeDir?)` helper that reads the existing record, populates `containerId` and `startedAt` (current ISO 8601 timestamp), transitions `status` to `"running"`, and writes the result back atomically (temp file + rename). Implements the data-model `created → running` transition for Stage 4. Mirrors the existing `updateSpawnRecordImageId` and `markSpawnRecordFailed` patterns.
 
@@ -39,7 +39,7 @@
   - The round-tripped record satisfies the data-model rules for the `"running"` state (`containerId` and `startedAt` both present)
   - Unit tests cover the happy-path transition (`"created"` with `imageId` → `"running"` with `imageId`/`containerId`/`startedAt`), the missing-file error path, and assert all pre-existing fields are preserved through the transition
 
-- [ ] **Introduce container-launch helpers in new `src/container-launch.ts`**
+- [x] **Introduce container-launch helpers in new `src/container-launch.ts`**
 
   Create `src/container-launch.ts` mirroring the small-module pattern of `snapshot-build.ts`. Export a `LaunchError` typed error class (mirrors `BuildError`), a `launchSpawnContainer({ spawnId })` function that runs `docker run -d` against the spawn's tagged image with all flags derived from `SPAWN_CONFIG` plus the Claude Code entrypoint per the contracts' Container Launch and Claude Code Implementation sections, and an idempotent `removeSpawnContainer(spawnId)` helper for the dispatch rollback chain. Returns the container ID captured from `docker run -d` stdout. Internally, use a small `buildClaudeCodeEntrypoint(promptFilePath)` helper so Feature 3's later `SpawnBackend.buildEntrypoint` migration is a rename rather than a re-architecting.
 
@@ -53,7 +53,7 @@
   - The internal `buildClaudeCodeEntrypoint(promptFilePath)` helper has signature `(promptFilePath: string) => string[]` matching the future `SpawnBackend.buildEntrypoint` shape; no exported `SpawnBackend` interface is introduced (Feature 3 owns that)
   - Unit tests stub the docker invocation at the `execFile` boundary and assert flag composition end-to-end (every flag from `SPAWN_CONFIG` appears in the captured argv)
 
-- [ ] **Wire Stage 4 launch into the dispatch action with success record-update and failure rollback**
+- [x] **Wire Stage 4 launch into the dispatch action with success record-update and failure rollback**
 
   Update the `dispatch` action in `src/cli.ts` so that, after the Stage 3 snapshot+build block has succeeded, it (a) invokes `launchSpawnContainer` with the spawn ID, and (b) on success calls `markSpawnRecordRunning(spawnId, containerId)` to transition the record to `"running"`. On any failure in (a) or (b), call `markSpawnRecordFailed` (preserving the record on disk for auditing), then clean up physical artifacts in reverse order: remove the container (idempotent — no-op if launch never produced one) → remove the image → remove the worktree → delete the branch, then write the error to stderr and exit 1. Failure handling matches the inline-in-catch pattern already used by the Stage 3 wiring. Remove the existing post-Stage-3 "not yet implemented" placeholder and its `process.exitCode = ERROR` so a successful Stage 4 launch leaves the dispatch in a clean exit-0 state — see SD-005 for the rationale.
 
@@ -67,7 +67,7 @@
   - Existing Story 1–4 rollback paths continue to pass unchanged — those failures occur before Stage 4 and are unaffected by this slice
   - Behavioral coverage of AS 5.1–5.6 is exercised by the integration tests below; this task introduces no standalone test files
 
-- [ ] **Extend integration coverage in `cli.test.ts` for Stage 4 success and launch-failure paths**
+- [x] **Extend integration coverage in `cli.test.ts` for Stage 4 success and launch-failure paths**
 
   Update `src/cli.test.ts` to cover the new Stage 4 behaviors against the existing real-tmp-repo fixture with isolated `HOME`. Update the existing dispatch success test so its tail no longer asserts the post-Stage-3 placeholder text and instead asserts the `"running"` SpawnRecord and a populated container ID. Extend the existing `makeDockerStubBinDir` so the docker stub prints a deterministic fake container ID on `docker run -d` so `launchSpawnContainer`'s stdout-capture path is exercisable end-to-end (see SD-003). Add a new `makeDockerRunFailBinDir` stub patterned after `makeDockerBuildFailBinDir` and a new launch-failure integration test. Fix the stale Story-7-attribution comment near the success-path assertions (see SD-004) and audit the rest of `src/` for similar drift while you're there.
 
