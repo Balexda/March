@@ -1,0 +1,136 @@
+---
+name: legate.dispatch
+description: "Mini-legate's new-work-launch skill. Use after `legate.babysit` reports clean (or with spare cycles) to consult `smithy status`, sync the default branch, and launch one new worker on the next ready slice. Triggers: heartbeat ticks where babysit has no urgent action, operator request for `/smithy.cut` or `/smithy.forge`, slice-merge events that unblock the next step. Skip for managing existing PRs (that's `legate.babysit`). Operators can disable this skill on repos where the conductor should only manage existing PRs."
+allowed-tools: Bash(.claude/skills/legate.dispatch/scripts/sync-default-branch.sh:*) Bash(.claude/skills/legate.dispatch/scripts/launch-worker.sh:*) Bash(.claude/skills/legate.dispatch/scripts/inspect-worker.sh:*) Bash(.claude/skills/legate.dispatch/scripts/smithy-status.sh:*)
+---
+
+# Skill: legate.dispatch (new-work mechanics)
+
+This skill picks the next ready Smithy work item, syncs the default branch, and launches a new worker. Load it **after** `legate.babysit` on every heartbeat — only one new dispatch per heartbeat, only when babysit has nothing pressing to do.
+
+Load via `Skill(skill="legate.dispatch")`. The classifier registers the allowed-tools for the rest of the session.
+
+---
+
+## When to dispatch
+
+Run this protocol on every heartbeat after the babysit pass completes:
+
+1. **Babysit must have nothing urgent in flight.** If any tracked PR is `pr-resolving-conflicts`, `pr-rebasing`, `pr-in-rerun`, or `pr-in-fix`, prefer letting the existing dispatches converge. Spare cycles only exist when in-flight work is parked waiting on operator merge or external CI.
+2. **`smithy status` reports a ready item.** Use the script (below) — never compose `smithy` commands directly.
+3. **All dependencies of the ready item have merged PRs in `state.json`.** Do not preempt the merge gate.
+4. **You have not already dispatched a new worker this heartbeat.** Cap is one new launch per tick — keeps the loop pace operator-paceable.
+
+If any of (1)–(4) is false, do nothing this heartbeat and let the babysit reply describe the holding pattern.
+
+---
+
+## The protocol
+
+### 1. Refresh smithy status
+
+```
+.claude/skills/legate.dispatch/scripts/smithy-status.sh {{REPO_PATH}}
+```
+
+Returns Smithy's view of what's ready. The conductor's `state.json` is the source of truth for *what's already dispatched*; cross-reference to find work items that exist in `smithy status` but not in `state.json.slices`.
+
+Prioritization, in order:
+1. **Cuts for any user story that is ready.** Cuts on different specs, or on different user-stories within the same spec, are independent and run in parallel as separate workers — they touch separate tasks files.
+2. **Forges for any slice whose dependencies are merged.** Forges on independent slices run in parallel; forges on dependent slices wait for the predecessor's PR to merge before being dispatched.
+3. **Render/audit steps in the order `smithy status` recommends.**
+
+### 2. Sync the default branch
+
+**Required before every new-work dispatch.** New worker sessions branch off whatever HEAD `{{REPO_PATH}}` points at. If you skip this step and a previous PR merged since you last fetched, the new worker silently builds on stale code and produces a PR that's already behind.
+
+```
+.claude/skills/legate.dispatch/scripts/sync-default-branch.sh {{REPO_PATH}}
+```
+
+Returns JSON `{"default_branch": "...", "synced": true, "head": "<sha>"}`. Cache `default_branch` into `state.json.repo.default_branch` on first detection — it does not change for the life of a conductor.
+
+The script uses `git pull --ff-only` and exits non-zero on divergence rather than forcing. If it fails, **escalate** — do not `git reset --hard` or force-update. The worker should not launch until the operator resolves the divergence.
+
+### 3. Launch the worker
+
+```
+.claude/skills/legate.dispatch/scripts/launch-worker.sh \
+  {{PROFILE}} {{REPO_PATH}} "<slice-title>" {{WORKER_GROUP}} <branch> <verb-cmd>
+```
+
+- `slice-title`: e.g. `cut: spawn-dispatch US5`
+- `branch`: the worktree branch name; you choose (e.g. `smithy/cut/spawn-dispatch-us5`). Note: `/smithy.*` slash-commands may rename this when they push (see SmithyCLI#297) — the babysit skill's `discover-pr.sh` handles that case.
+- `verb-cmd`: the initial message to send, e.g. `/smithy.cut specs/2026-04-11-002-spawn-dispatch 5`
+
+Returns JSON `{"session_id": "...", "branch": "...", "worktree_path": "..."}`. The script atomically creates the worktree, launches the Claude session under your worker group, locks the title (#agent-deck-697), pins auto-mode permission via `--permission-mode auto`, and sends the initial slash command.
+
+Three launch flags are non-negotiable for workers — the script wires them all:
+
+- `--worktree "<slice-branch>" -b` — each worker gets its own git worktree on a new branch. Without this, concurrent workers fight over `{{REPO_PATH}}`'s working tree and step on each other's commits.
+- `--title-lock` — Claude Code's session auto-rename will otherwise overwrite the title you set, breaking title-based session resolution.
+- `-c claude` — agent runtime. Codex workers are not supported by this prompt.
+
+Worktrees are not auto-cleaned by mini-legate when a slice merges; the precursor leaves cleanup to the operator (or to Brood once Milestone 3 ships). When you mark a slice `merged` in `state.json`, leave the `worktree_path` recorded so the operator can reclaim disk.
+
+### 4. Capture session details
+
+The launch script returns the new session ID and worktree path in its JSON output. To re-confirm or fetch additional fields (e.g. `claude_session_id`, `parent_session_id`, current `status`), use:
+
+```
+.claude/skills/legate.dispatch/scripts/inspect-worker.sh {{PROFILE}} <session-id-or-title>
+```
+
+This wraps `agent-deck session show --json`. **Always go through this script** — calling `agent-deck session show` directly is what historically stalled the heartbeat loop, because it sits outside both skills' `allowed-tools` and trips the auto-mode classifier on a permission prompt.
+
+### 5. Record into `state.json`
+
+Add a new entry under `slices.<slice-id>` per the schema in `CLAUDE.md`:
+
+```json
+{
+  "worker_session_id": "<from launch-worker JSON>",
+  "worker_title": "<slice-title>",
+  "branch": "<launch branch>",
+  "actual_branch": null,
+  "worktree_path": "<from launch-worker JSON>",
+  "stage": "implementing",
+  "pr": null,
+  "last_action": "<ISO-8601 now>",
+  "last_action_note": "Launched <slice-title> via /smithy.<verb>"
+}
+```
+
+`actual_branch` and `pr.number` are filled in by `legate.babysit` on the worker's next `running → waiting` transition (when `discover-pr.sh` finds the URL the worker printed when it ran `gh pr create`).
+
+### 6. Stop
+
+You launched one worker. That's the cap per heartbeat. Yield back to the conductor for its `[STATUS]` reply. The next heartbeat re-runs babysit first; only after babysit reports clean does this skill get another chance to dispatch.
+
+---
+
+## Worker session configuration
+
+Workers run in **auto mode** (`--permission-mode auto`) — Claude Code's classifier auto-approves routine edits/commits/tests and surfaces genuinely risky actions for review. agent-deck's group/conductor TOML blocks only support `config_dir` and `env_file`, **not** `auto_mode` (that key only lives on the global `[claude]` block, which would affect every Claude session on the host). To scope auto mode to legate's workers, the launch script passes `--permission-mode auto` per-launch via agent-deck's `--extra-arg`.
+
+`--dangerously-skip-permissions` (the yolo flag, mapped from agent-deck's `dangerous_mode`) is the *escape valve* for a specific slice that keeps stalling on auto mode's classifier. Don't default to it; escalate first and let the operator opt into dangerous mode for one slice via `agent-deck session set <worker> extra-args -- --dangerously-skip-permissions` rather than flipping the safer default off for everyone.
+
+---
+
+## Operation reference
+
+| Operation | Script | Returns |
+|---|---|---|
+| Refresh smithy status | `smithy-status.sh <repo-path>` | smithy's status output (JSON) |
+| Sync default branch | `sync-default-branch.sh <repo-path>` | JSON `{default_branch, synced, head}` |
+| Launch worker for slice | `launch-worker.sh <profile> <repo> <title> <group> <branch> <verb-cmd>` | JSON `{session_id, branch, worktree_path}` |
+| Inspect worker | `inspect-worker.sh <profile> <session-id-or-title>` | JSON from `agent-deck session show` |
+
+All scripts emit JSON to stdout, progress to stderr, and exit 0/1/2 for success/op-failure/invalid-input.
+
+## Standing rules
+
+- **One new dispatch per heartbeat.** Hard cap. Even if multiple slices are ready, launch one and yield.
+- **Sync default before launching.** Always. Skipping this is how stale-base PRs slip out.
+- **Never bypass the merge gate.** Forges wait for their dependency PRs to merge. Cuts on parallel user stories are fine; cuts that depend on each other are not.
+- **`launch-worker.sh` is the only path that creates new sessions.** Don't compose `agent-deck launch` directly — the script wires the non-negotiable flags (`--worktree -b --title-lock --extra-arg ...`).
