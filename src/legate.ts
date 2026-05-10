@@ -700,7 +700,7 @@ set -u
 NAME="{NAME}"
 GROUP="{WORKER_GROUP}"
 PROFILE="{PROFILE}"
-TARGET="conductor-\${NAME}"
+TARGET="conductor-$NAME"
 
 if ! agent-deck conductor status --json 2>/dev/null | grep -q '"enabled".*true'; then
     exit 0
