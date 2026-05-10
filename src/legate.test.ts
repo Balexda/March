@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import {
+  buildColdStartPrompt,
   checkBridgeRequirements,
   deriveDefaults,
   initLegate,
@@ -256,9 +257,10 @@ describe("legate module", () => {
         runSetup: false,
       });
 
-      const expectedLength = process.platform === "linux" ? 4 : 3;
+      const expectedLength = process.platform === "linux" ? 5 : 4;
       expect(result.postSetupCommands).toHaveLength(expectedLength);
-      const [setAutoMode, setModel, restart] = result.postSetupCommands;
+      const [setAutoMode, setModel, restart, sendColdStart] =
+        result.postSetupCommands;
 
       expect(setAutoMode).toEqual([
         "agent-deck",
@@ -290,8 +292,19 @@ describe("legate module", () => {
         "restart",
         "conductor-legate-march",
       ]);
+      expect(sendColdStart.slice(0, 6)).toEqual([
+        "agent-deck",
+        "-p",
+        "march",
+        "session",
+        "send",
+        "conductor-legate-march",
+      ]);
+      // The 7th element is the rendered priming prompt — assert it carries
+      // the legate persona marker rather than re-snapshotting the full body.
+      expect(sendColdStart[6]).toMatch(/Cold start as the Legate for March/);
       if (process.platform === "linux") {
-        expect(result.postSetupCommands[3]).toEqual([
+        expect(result.postSetupCommands[4]).toEqual([
           "systemctl",
           "--user",
           "start",
@@ -677,6 +690,49 @@ describe("legate module", () => {
       const body = fs.readFileSync(target, "utf-8");
       expect(body).not.toContain("echo stale");
       expect(body).toContain(`NAME="legate-march"`);
+    });
+  });
+
+  describe("buildColdStartPrompt", () => {
+    const opts = {
+      profile: "march",
+      workerGroup: "legate-workers",
+      repoName: "March",
+      repoPath: "/some/repo/March",
+    };
+
+    it("substitutes every placeholder (no leftover {…} markers)", () => {
+      const prompt = buildColdStartPrompt(opts);
+      expect(prompt).toContain("March");
+      expect(prompt).toContain("/some/repo/March");
+      expect(prompt).toContain("agent-deck profile march");
+      expect(prompt).toContain("group: legate-workers");
+      expect(prompt).not.toMatch(/\{REPO_NAME\}|\{REPO_PATH\}|\{PROFILE\}|\{WORKER_GROUP\}/);
+    });
+
+    it("introduces the legate persona and goals so auto-mode has alignment context", () => {
+      const prompt = buildColdStartPrompt(opts);
+      // Persona lead-in.
+      expect(prompt).toMatch(/Cold start as the Legate for March/);
+      // Auto-mode scope statement.
+      expect(prompt).toContain("--permission-mode auto");
+      // The three skills must be named so the classifier sees them in
+      // recent context before the model invokes Skill(legate.*).
+      expect(prompt).toContain("legate.babysit");
+      expect(prompt).toContain("legate.cleanup");
+      expect(prompt).toContain("legate.dispatch");
+      // Defers strict mechanics to CLAUDE.md.
+      expect(prompt).toMatch(/CLAUDE\.md is the authoritative spec/);
+    });
+
+    it("ends with the on-this-turn checklist so the first reply is the alignment ack, not tool work", () => {
+      const prompt = buildColdStartPrompt(opts);
+      expect(prompt).toMatch(/On this turn:/);
+      expect(prompt).toMatch(/cold-start acknowledgement/);
+      expect(prompt).toMatch(
+        /Online for March \(march\)\. Skills available: legate\.babysit, legate\.cleanup, legate\.dispatch\./,
+      );
+      expect(prompt).toMatch(/Wait for the first \[HEARTBEAT\]/);
     });
   });
 });
