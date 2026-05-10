@@ -624,6 +624,17 @@ describe("legate module", () => {
       expect(body).toContain(`GROUP="legate-workers"`);
     });
 
+    it("expands TARGET via $NAME (no braces) so the {NAME} placeholder substitution doesn't corrupt it", async () => {
+      // Regression: if TARGET uses ${NAME}, the {NAME}→conductorName replace
+      // matches the inner {NAME} substring and produces e.g.
+      // `conductor-$legate-march`, which then fails under `set -u` because
+      // `$legate` is unset. Use $NAME (no braces) to keep the placeholder
+      // and the bash variable disjoint.
+      const { body } = await render({ name: "legate-myrepo" });
+      expect(body).toContain(`TARGET="conductor-$NAME"`);
+      expect(body).not.toContain(`TARGET="conductor-$legate-myrepo"`);
+    });
+
     it("emits a payload that uses the [HEARTBEAT] format the legate CLAUDE.md triggers on", async () => {
       const { body } = await render();
       // The python builder produces "[HEARTBEAT] [<name>] Status: ..."

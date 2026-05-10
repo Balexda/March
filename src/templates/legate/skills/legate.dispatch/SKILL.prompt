@@ -1,6 +1,6 @@
 ---
 name: legate.dispatch
-description: "Mini-legate's new-work-launch skill. Use after `legate.babysit` reports clean (or with spare cycles) to consult `smithy status`, sync the default branch, and launch one new worker on the next ready slice. Triggers: heartbeat ticks where babysit has no urgent action, operator request for `/smithy.cut` or `/smithy.forge`, slice-merge events that unblock the next step. Skip for managing existing PRs (that's `legate.babysit`). Operators can disable this skill on repos where the conductor should only manage existing PRs."
+description: "Mini-legate's new-work-launch skill. Use after `legate.babysit` reports clean (or with spare cycles) to consult `smithy status`, sync the default branch, and launch one new worker on the next ready slice. Triggers: heartbeat ticks where babysit has no urgent action, operator request for any planning verb (`/smithy.render`, `/smithy.mark`, `/smithy.cut`) or `/smithy.forge`, slice-merge events that unblock the next step. Skip for managing existing PRs (that's `legate.babysit`). Operators can disable this skill on repos where the conductor should only manage existing PRs."
 allowed-tools: Bash(.claude/skills/legate.dispatch/scripts/sync-default-branch.sh:*) Bash(.claude/skills/legate.dispatch/scripts/launch-worker.sh:*) Bash(.claude/skills/legate.dispatch/scripts/inspect-worker.sh:*) Bash(.claude/skills/legate.dispatch/scripts/smithy-status.sh:*)
 ---
 
@@ -16,12 +16,14 @@ Load via `Skill(skill="legate.dispatch")`. The classifier registers the allowed-
 
 Run this protocol on every heartbeat after the babysit pass completes:
 
-1. **Babysit must have nothing urgent in flight.** If any tracked PR is `pr-resolving-conflicts`, `pr-rebasing`, `pr-in-rerun`, or `pr-in-fix`, prefer letting the existing dispatches converge. Spare cycles only exist when in-flight work is parked waiting on operator merge or external CI.
+1. **For forge/cut candidates only: babysit must have nothing urgent in flight.** If any tracked PR is `pr-resolving-conflicts`, `pr-rebasing`, `pr-in-rerun`, or `pr-in-fix`, prefer letting the existing dispatches converge before stacking another **forge or cut** on top — those verbs produce slice-level work that shares branches and review attention with the stuck PR. Spare cycles for forge/cut only exist when in-flight work is parked waiting on operator merge or external CI.
+
+   This gate does **not** apply to `smithy.render` or `smithy.mark` candidates. Render writes a new `.features.md` (and updates a milestone Artifact cell on the parent RFC); mark writes a new spec folder (and updates a feature Artifact cell on the parent feature map). Neither verb touches any spec, tasks file, branch, or PR that an in-flight forge/cut is working on, so a stuck implementation slice is no reason to delay upstream planning. If a render or mark is the highest-priority ready item per `smithy status`, dispatch it even when a forge/cut is parked.
 2. **`smithy status` reports a ready item.** Use the script (below) — never compose `smithy` commands directly.
 3. **All dependencies of the ready item have merged PRs.** In the normal heartbeat order (babysit → cleanup → dispatch), a merged dep has already been moved into `state.json.archived_slices.<id>` by the time you run — that's the primary place to check. A dep can also still appear in `state.json.slices.<id>` with `pr.state == "MERGED"` if cleanup *failed* to archive it on this or a prior heartbeat (look for `last_action_note: "cleanup failed: ..."`); treat that as merged for dep-check but expect cleanup to retry it next heartbeat. Do not preempt the merge gate.
 4. **You have not already dispatched a new worker this heartbeat.** Cap is one new launch per tick — keeps the loop pace operator-paceable.
 
-If any of (1)–(4) is false, do nothing this heartbeat and let the babysit reply describe the holding pattern.
+If any of (1)–(4) is false, do nothing this heartbeat and let the babysit reply describe the holding pattern. When (1) gates a forge/cut but a render/mark is ready, the render/mark wins — log the holding pattern for the gated forge/cut and dispatch the planning verb.
 
 ---
 
@@ -35,10 +37,17 @@ If any of (1)–(4) is false, do nothing this heartbeat and let the babysit repl
 
 Returns Smithy's view of what's ready. The conductor's `state.json` is the source of truth for *what's already dispatched*; cross-reference to find work items that exist in `smithy status` but not in `state.json.slices`.
 
-Prioritization, in order:
-1. **Cuts for any user story that is ready.** Cuts on different specs, or on different user-stories within the same spec, are independent and run in parallel as separate workers — they touch separate tasks files.
-2. **Forges for any slice whose dependencies are merged.** Forges on independent slices run in parallel; forges on dependent slices wait for the predecessor's PR to merge (visible in either `slices.<dep-id>` with `pr.state == "MERGED"` or `archived_slices.<dep-id>`) before being dispatched.
-3. **Render/audit steps in the order `smithy status` recommends.**
+Prioritization, in order. Each ready item from `smithy status` carries a `next_action.command` drawn from the closed set {`smithy.render`, `smithy.mark`, `smithy.cut`, `smithy.forge`} — those are the only four verbs the status emitter ever produces. Dispatch off that field rather than guessing the verb from the artifact type.
+
+1. **Cuts for any user story that is ready** (`next_action.command == "smithy.cut"`). Cuts on different specs, or on different user-stories within the same spec, are independent and run in parallel as separate workers — they touch separate tasks files.
+2. **Forges for any slice whose dependencies are merged** (`next_action.command == "smithy.forge"`). Forges on independent slices run in parallel; forges on dependent slices wait for the predecessor's PR to merge (visible in either `slices.<dep-id>` with `pr.state == "MERGED"` or `archived_slices.<dep-id>`) before being dispatched.
+3. **Planning-chain steps for upstream artifacts** (`next_action.command` ∈ {`smithy.render`, `smithy.mark`}), in the order `smithy status` recommends. These are the verbs that produce the artifacts cut/forge then consume:
+   - `smithy.render` — produces a feature map (`.features.md`) from an RFC milestone.
+   - `smithy.mark` — produces a spec folder (`.spec.md`/`.data-model.md`/`.contracts.md`) from a feature in a feature map.
+
+   Do **not** silently skip a `smithy.mark` or `smithy.render` next_action just because no cut/forge is queued — they are the upstream of the same chain and must be dispatched the same way. The verb-cmd is `/<command> <arguments joined by spaces>` straight from `next_action`.
+
+`smithy.audit` is intentionally **not** in the dispatch surface: `smithy status` never recommends it (audit is a read-only review against a specific artifact, not a forward-chain step). Operators invoke it manually when they want a second pass. Leave it for them.
 
 ### 2. Sync the default branch
 
@@ -59,9 +68,13 @@ The script uses `git pull --ff-only` and exits non-zero on divergence rather tha
   {{PROFILE}} {{REPO_PATH}} "<slice-title>" {{WORKER_GROUP}} <branch> <verb-cmd>
 ```
 
-- `slice-title`: e.g. `cut: spawn-dispatch US5`
-- `branch`: the worktree branch name; you choose (e.g. `smithy/cut/spawn-dispatch-us5`). Note: `/smithy.*` slash-commands may rename this when they push (see SmithyCLI#297) — the babysit skill's `discover-pr.sh` handles that case.
-- `verb-cmd`: the initial message to send, e.g. `/smithy.cut specs/2026-04-11-002-spawn-dispatch 5`
+- `slice-title`: name the title `<verb>: <artifact-id>`, e.g. `cut: spawn-dispatch US5`, `forge: spawn-dispatch S3`, `mark: 01-spawn F3`, `render: march-orchestration-platform M2`.
+- `branch`: the worktree branch name; you choose (e.g. `smithy/cut/spawn-dispatch-us5`, `smithy/mark/01-spawn-f3`). Note: `/smithy.*` slash-commands may rename this when they push (see SmithyCLI#297) — the babysit skill's `discover-pr.sh` handles that case.
+- `verb-cmd`: the initial message to send — formed by joining `next_action.command` and `next_action.arguments`. Examples:
+  - cut: `/smithy.cut specs/2026-04-11-002-spawn-dispatch 5`
+  - forge: `/smithy.forge specs/2026-04-11-002-spawn-dispatch/05-launch-container-with-security-config.tasks.md 1`
+  - mark: `/smithy.mark docs/rfcs/2026-001-march-orchestration-platform/01-spawn.features.md 3`
+  - render: `/smithy.render docs/rfcs/2026-001-march-orchestration-platform/march-orchestration-platform.rfc.md 2`
 
 Returns JSON `{"session_id": "...", "branch": "...", "worktree_path": "..."}`. The script atomically creates the worktree, launches the Claude session under your worker group, locks the title (#agent-deck-697), pins auto-mode permission via `--permission-mode auto`, and sends the initial slash command.
 
