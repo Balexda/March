@@ -1,6 +1,6 @@
 ---
 name: legate.dispatch
-description: "Mini-legate's new-work-launch skill. Use after `legate.babysit` reports clean (or with spare cycles) to consult `smithy status`, sync the default branch, and launch one new worker on the next ready slice. Triggers: heartbeat ticks where babysit has no urgent action, operator request for `/smithy.cut` or `/smithy.forge`, slice-merge events that unblock the next step. Skip for managing existing PRs (that's `legate.babysit`). Operators can disable this skill on repos where the conductor should only manage existing PRs."
+description: "Mini-legate's new-work-launch skill. Use after `legate.babysit` reports clean (or with spare cycles) to consult `smithy status`, sync the default branch, and launch one new worker on the next ready slice. Triggers: heartbeat ticks where babysit has no urgent action, operator request for `/smithy.render`, `/smithy.mark`, `/smithy.audit`, `/smithy.cut`, or `/smithy.forge`, slice-merge events that unblock the next step. Skip for managing existing PRs (that's `legate.babysit`). Operators can disable this skill on repos where the conductor should only manage existing PRs."
 allowed-tools: Bash(.claude/skills/legate.dispatch/scripts/sync-default-branch.sh:*) Bash(.claude/skills/legate.dispatch/scripts/launch-worker.sh:*) Bash(.claude/skills/legate.dispatch/scripts/inspect-worker.sh:*) Bash(.claude/skills/legate.dispatch/scripts/smithy-status.sh:*)
 ---
 
