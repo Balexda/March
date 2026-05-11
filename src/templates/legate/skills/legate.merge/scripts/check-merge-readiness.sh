@@ -128,7 +128,7 @@ query($owner: String!, $name: String!, $pr: Int!) {
 # benign and should not override a prior APPROVED/CHANGES_REQUESTED.
 echo "$SNAPSHOT" | jq '
   .data.repository.pullRequest as $pr
-  | ($pr.commits.nodes[0].commit.statusCheckRollup.contexts.nodes // []) as $checks_raw
+  | ($pr.commits.nodes[0]?.commit?.statusCheckRollup?.contexts?.nodes // []) as $checks_raw
   | ($pr.reviews.nodes // []) as $reviews_raw
   | (
       $reviews_raw
