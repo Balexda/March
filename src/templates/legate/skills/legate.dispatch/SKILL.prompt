@@ -73,7 +73,7 @@ The script uses `git pull --ff-only` and exits non-zero on divergence rather tha
 
 ```
 .claude/skills/legate.dispatch/scripts/launch-worker.sh \
-  {{PROFILE}} {{REPO_PATH}} "<slice-title>" {{WORKER_GROUP}} <branch> <verb-cmd>
+  {{PROFILE}} {{REPO_PATH}} "<slice-title>" {{WORKER_GROUP}} <branch> <verb-cmd> <slice-id>
 ```
 
 - `slice-title`: name the title `<verb>: <artifact-id>`, e.g. `cut: spawn-dispatch US5`, `forge: spawn-dispatch S3`, `mark: 01-spawn F3`, `render: march-orchestration-platform M2`.
@@ -83,8 +83,11 @@ The script uses `git pull --ff-only` and exits non-zero on divergence rather tha
   - forge: `/smithy.forge specs/2026-04-11-002-spawn-dispatch/05-launch-container-with-security-config.tasks.md 1`
   - mark: `/smithy.mark docs/rfcs/2026-001-march-orchestration-platform/01-spawn.features.md 3`
   - render: `/smithy.render docs/rfcs/2026-001-march-orchestration-platform/march-orchestration-platform.rfc.md 2`
+- `slice-id`: the same id you'll record under `state.json.slices.<slice-id>`. Must match `^[a-zA-Z0-9][a-zA-Z0-9._-]*$` (it goes into a filename). Pick a short stable derivation of the artifact (e.g. `spawn-dispatch-us5-cut`, `cli-foundation-us2-s1`).
 
 Returns JSON `{"session_id": "...", "branch": "...", "worktree_path": "..."}`. The script atomically creates the worktree, launches the Claude session under your worker group, locks the title (#agent-deck-697), pins auto-mode permission via `--permission-mode auto`, and sends the initial slash command.
+
+**Recovery stage:** before launching, the script writes the `verb-cmd` to `./dispatch-msg-<slice-id>.md` in your cwd (the conductor dir). If agent-deck later revives the worker after a host restart, the revived Claude Code process comes back fresh and does NOT replay the original `-m` argument — the slice ends up recorded as `implementing` but the worker pane is an empty splash. `legate.babysit` reads this file when it detects the revival signature (`stage=implementing`, status idle/waiting, no PR, no recent worker output) and re-sends the contents via `send-to-worker.sh`. Do not delete `dispatch-msg-*.md` files by hand; `legate.cleanup` removes them when the slice merges.
 
 Three launch flags are non-negotiable for workers — the script wires them all:
 
