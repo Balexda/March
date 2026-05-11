@@ -58,7 +58,12 @@ fi
 
 # Pull the squash-merge commit SHA back so the conductor can record it in
 # task-log.md. `mergeCommit.oid` is the squash commit on the default branch.
-MERGE_SHA="$(gh pr view "$PR" --json mergeCommit -q '.mergeCommit.oid // ""')"
+# Best-effort: the merge already succeeded, so we must still emit the
+# `merged: true` document even if this follow-up call fails transiently
+# (rate limit, eventual consistency between merge and mergeCommit lookup).
+# An empty merge_sha in the JSON is acceptable — the operator can recover
+# the SHA from `gh pr view` themselves.
+MERGE_SHA="$(gh pr view "$PR" --json mergeCommit -q '.mergeCommit.oid // ""' 2>/dev/null || true)"
 
 jq -nc \
   --argjson pr "$PR" \
