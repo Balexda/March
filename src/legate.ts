@@ -809,6 +809,78 @@ export async function writeLegateHeartbeatScript(
 }
 
 /**
+ * Cold-start priming prompt sent to the conductor immediately after
+ * `agent-deck session restart` succeeds, before the first heartbeat
+ * arrives. This is the *only* opportunity the model has to emit a
+ * first-turn alignment statement before tool calls begin: without it,
+ * the conductor's first turn is its response to a `[HEARTBEAT]`, and
+ * the auto-mode classifier evaluates `Skill(legate.*)` + skill-script
+ * bashes against an essentially empty recent context.
+ *
+ * The prompt introduces the legate persona and goals at high level —
+ * just enough for auto-mode to gauge alignment — and explicitly defers
+ * to CLAUDE.md and the per-skill `SKILL.md` files for the strict
+ * mechanics. Keep this short and persona-shaped; do not duplicate the
+ * full heartbeat decision tree, the state.json schema, or the boundary
+ * rules. Those live in CLAUDE.prompt and the skill prompts; drift
+ * between this prompt and CLAUDE.md is a maintenance hazard.
+ *
+ * Placeholders (single-curly, replaced via `.replaceAll`):
+ *   {REPO_NAME}, {REPO_PATH}, {PROFILE}, {WORKER_GROUP}
+ */
+const LEGATE_COLD_START_PROMPT_TEMPLATE = `Cold start as the Legate for {REPO_NAME} ({REPO_PATH}, agent-deck profile {PROFILE}). You are a Claude Code session in --permission-mode auto whose job is to keep the Smithy plan→PR→fix loop running on this one repo without operator intervention. Your CLAUDE.md is the authoritative spec for behavior — read it; this message just primes alignment.
+
+Persona and goals:
+- You orchestrate Smithy work for {REPO_NAME} only. You do not touch other repos or other profiles.
+- You drive worker Claude sessions (group: {WORKER_GROUP}) through /smithy.* slash commands, watch the GitHub PRs they open, and dispatch fixes when CI fails or reviewers leave inline comments. Workers do all implementation; you never edit the repo directly.
+- Optimize for forward progress with minimal operator escalation: drain merged PRs, unblock waiting workers, dispatch the next ready slice. Ask for help (NEED:) only when the situation is genuinely outside your loop.
+- One /smithy.<verb> dispatch = one PR. You never auto-merge.
+
+What you operate on:
+- agent-deck conductor — parent/child links, heartbeats, transition notifications.
+- smithy CLI + skills — source of truth for what work to pick next.
+- gh CLI — source of truth for high-level PR state.
+- The smithy.pr-review skill — source of truth for unresolved inline review threads.
+
+Three skills carry the mechanics. Load each once on this turn so the auto-mode classifier registers their allowed-tools:
+- legate.babysit — existing PRs (CI failures, conflicts, review threads, merges).
+- legate.cleanup — post-merge teardown (kill worker, prune worktree, archive slice).
+- legate.dispatch — new work (launch one worker for one ready slice).
+
+Auto-mode alignment — your routine actions are exactly:
+(a) Skill() to load one of the three skills above;
+(b) bash invocation of a script under .claude/skills/legate.*/scripts/;
+(c) Read/Edit of state.json, task-log.md, LEARNINGS.md, POLICY.md, CLAUDE.md, meta.json, or */SKILL.md inside this conductor dir;
+(d) a [STATUS] or NEED: reply to a heartbeat or operator message.
+
+Anything else escalates via NEED: rather than executing — inline python3 -c / bash -c / node -e, scripts outside legate.*, writes outside cwd, direct network primitives, destructive git (reset --hard, push --force, clean -fd), work against another repo or profile, or agent-deck session send to a running worker.
+
+On this turn:
+1. Read CLAUDE.md end-to-end.
+2. Run its cold-start checklist (read state.json if present; load legate.babysit, legate.cleanup, legate.dispatch once via the Skill tool; append a startup entry to task-log.md).
+3. Reply with the cold-start acknowledgement: "Online for {REPO_NAME} ({PROFILE}). Skills available: legate.babysit, legate.cleanup, legate.dispatch. Will not invoke anything outside their scripts without escalating."
+4. Wait for the first [HEARTBEAT]. Do not poll on your own.`;
+
+/**
+ * Render the cold-start priming prompt for a freshly-restarted conductor.
+ * Intended to be passed as the message argument of `agent-deck session send`
+ * via {@link execFileSync} (argv-direct, so the embedded backticks, dashes,
+ * and arrows do not need shell escaping).
+ */
+export function buildColdStartPrompt(opts: {
+  profile: string;
+  workerGroup: string;
+  repoName: string;
+  repoPath: string;
+}): string {
+  return LEGATE_COLD_START_PROMPT_TEMPLATE
+    .replaceAll("{REPO_NAME}", opts.repoName)
+    .replaceAll("{REPO_PATH}", opts.repoPath)
+    .replaceAll("{PROFILE}", opts.profile)
+    .replaceAll("{WORKER_GROUP}", opts.workerGroup);
+}
+
+/**
  * Render the legate CLAUDE.prompt template for `repoPath` and (by default) run
  * `agent-deck conductor setup` so the conductor's own CLAUDE.md is copied
  * from the rendered file. Re-runnable: the rendered template stays at a
@@ -966,6 +1038,40 @@ export async function initLegate(
     "restart",
     conductorTitle,
   ];
+  // Cold-start priming prompt: delivered as the conductor's first user
+  // message after `session restart`, before the first heartbeat arrives.
+  // Without it, the model's first reply is to a terse [HEARTBEAT] line
+  // and auto-mode's classifier judges the first Skill() / script-bash
+  // calls against essentially empty recent context. See
+  // LEGATE_COLD_START_PROMPT_TEMPLATE for rationale.
+  const coldStartPrompt = buildColdStartPrompt({
+    profile,
+    workerGroup,
+    repoName,
+    repoPath,
+  });
+  // Stage the rendered prompt so manual remediation commands can reference
+  // it via `"$(cat <file>)"` instead of inlining the multi-paragraph body.
+  const coldStartPromptPath = path.join(stagingDir, "cold-start-prompt.txt");
+  try {
+    await fs.writeFile(coldStartPromptPath, coldStartPrompt);
+  } catch {
+    throw new LegateError(
+      `Cannot write cold-start prompt file: ${coldStartPromptPath}`,
+    );
+  }
+  const sendColdStartCommand = [
+    "agent-deck",
+    "-p",
+    profile,
+    "session",
+    "send",
+    conductorTitle,
+    coldStartPrompt,
+  ];
+  const sendColdStartManualHint =
+    `agent-deck -p ${shellQuote(profile)} session send ${shellQuote(conductorTitle)} ` +
+    `"$(cat ${shellQuote(coldStartPromptPath)})"`;
   const isLinuxLike = process.platform === "linux";
   const startBridgeCommand = isLinuxLike
     ? ["systemctl", "--user", "start", "agent-deck-conductor-bridge"]
@@ -983,6 +1089,7 @@ export async function initLegate(
     setAutoModeCommand,
     setModelCommand,
     restartCommand,
+    sendColdStartCommand,
   ];
   if (startBridgeCommand) postSetupCommands.push(startBridgeCommand);
 
@@ -1106,6 +1213,28 @@ export async function initLegate(
       }
     }
 
+    // Deliver the cold-start priming prompt before the first heartbeat
+    // can arrive. Gated on autoModeConfigured so we know the conductor
+    // was successfully restarted (and is therefore alive to receive).
+    // Best-effort: a failure means the conductor will still run, but
+    // its first reply will be to a terse [HEARTBEAT] rather than the
+    // priming context, so the auto-mode classifier may pause more often.
+    if (autoModeConfigured) {
+      try {
+        execFileSync(sendColdStartCommand[0], sendColdStartCommand.slice(1), {
+          stdio: "inherit",
+        });
+      } catch (err) {
+        const status = (err as { status?: number }).status;
+        postSetupWarnings.push(
+          `Failed to deliver cold-start priming prompt to ${conductorTitle} (exit ${status ?? "?"}). ` +
+            `The conductor will still run, but its first reply will respond to a heartbeat ` +
+            `rather than priming context — auto-mode classifier may pause more often. ` +
+            `Prompt staged at ${coldStartPromptPath}. Run manually:\n  ${sendColdStartManualHint}`,
+        );
+      }
+    }
+
     // Ensure the bridge daemon is running.
     if (startBridgeCommand && bridgeIsActiveCommand) {
       try {
@@ -1216,10 +1345,12 @@ export async function initLegate(
         "a conductor dir yet. Run when ready:",
         `  ${formatShellCommand(setupCommand)}`,
         "",
-        "Then enable auto mode, pin model, and restart:",
+        "Then enable auto mode, pin model, restart, and deliver the",
+        "cold-start priming prompt (staged below):",
         `  ${formatShellCommand(setAutoModeCommand)}`,
         `  ${formatShellCommand(setModelCommand)}`,
         `  ${formatShellCommand(restartCommand)}`,
+        `  ${sendColdStartManualHint}`,
         "",
         "Re-running `march legate init` will perform setup AND copy the",
         "rendered template + skills into the conductor's home, then attach:",
