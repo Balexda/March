@@ -153,6 +153,6 @@ Both scripts emit JSON to stdout, progress to stderr, and exit 0/1/2 for success
 - **Per-PR independence.** One slice's gate failure does not block another; emit `NEED:` for the failure and continue.
 - **`--match-head-commit` is mandatory.** The merge script enforces it. Calling `gh pr merge` without SHA pinning would race against a worker push that happened between readiness check and merge call — never bypass.
 - **Surface every gate failure as `NEED:`.** Do not silently skip a slice that's missing one approval — the operator should see it and decide whether to merge manually under their repo's relaxed rules. Conservative-by-design means *visible* conservatism, not silent.
-- **Never bypass the gate.** All seven conditions must clear. There is no override flag, no "force merge" path, no "the operator said it was fine in chat" exception. If the operator wants to merge under relaxed rules, they merge in the GitHub UI themselves.
+- **Never bypass the gate.** Every condition above must clear. There is no override flag, no "force merge" path, no "the operator said it was fine in chat" exception. If the operator wants to merge under relaxed rules, they merge in the GitHub UI themselves.
 - **Do not invoke `gh pr merge` outside this script.** The auto-mode classifier deliberately gates merge calls (they're irreversible); the wrapper script is the only audited path.
 - **Do not run before babysit.** Babysit's per-heartbeat scan is what produces the `pr-open` set you act on. Running merge before babysit would act on stale state.
