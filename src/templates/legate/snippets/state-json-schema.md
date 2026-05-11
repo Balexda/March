@@ -22,6 +22,7 @@ Maintain a slim, structured state file across compactions:
       "worktree_path": "/home/.../{{REPO_NAME}}-feature-...",
       "stage": "planning|implementing|pr-open|pr-in-fix|pr-rebasing|pr-in-rerun|pr-resolving-conflicts|merged|escalated",
       "pr": { "number": 123, "url": "...", "state": "OPEN|MERGED|CLOSED", "checks": "PASS|FAIL|PENDING", "mergeable": "MERGEABLE|CONFLICTING|UNKNOWN" },
+      "resume_pending (optional; omitted when not in a resume cycle)": "selected",
       "last_action": "2026-05-04T18:30:00Z",
       "last_action_note": "Launched cut: spawn-dispatch US5 via /smithy.cut"
     }
@@ -48,6 +49,8 @@ Three slice fields fill in over time and are `null` (or absent) on a freshly-lau
 - `slices[].last_action_note` is a free-form summary of the most recent state-changing action — written by dispatch on launch (`"Launched ... via /smithy.<verb>"`), by issue intake on launch (`"Launched issue-#<N> worker — \"<title>\""`), by babysit on stage transitions, and by cleanup on retry-able failures (`"cleanup failed: <error>"`). Read it before acting on a slice; the verification-rule snippet documents how to interpret it.
 
 `slices[].kind` discriminates the slice's origin: `"smithy"` (default; created by `legate.dispatch` from `smithy status`) or `"issue"` (created by `legate.issue` from an operator-handed GitHub issue). When absent, treat as `"smithy"` for backwards compatibility with state files written before this field existed. Issue-kind slices use the synthetic id `issue-<N>` (where `<N>` is the issue number) and carry an `issue: { number, url, title }` subobject for audit; Smithy-kind slices omit `issue`. `legate.babysit` and `legate.cleanup` operate uniformly on `slices` regardless of `kind` — the discriminator exists so audit trail (task-log entries, archived_slices records) and any future kind-specific filtering can branch cleanly.
+
+`slices[].resume_pending` is an in-flight flag owned by `legate.resume`. Two states: absent (the default; no resume cycle), or `"selected"` (the resume skill detected Claude Code's "Resume from summary" picker on this worker, sent `"1"` to clear it, and owes the slice a stage-aware nudge on a subsequent heartbeat once the summary has loaded). When the nudge is delivered, the key is **deleted** — not set to `null` or `""` — so a grep for genuinely-pending slices is straightforward. Every downstream skill (babysit, merge, cleanup, dispatch) **skips** any slice whose `resume_pending == "selected"` for the rest of that heartbeat; the worker's TUI may not be fully cleared and an `agent-deck session send` into a half-cleared picker is silently lost. The field is not carried into `archived_slices`; resume state is in-flight only.
 
 `archived_slices` is the breadcrumb store written by `legate.cleanup` after a slice's PR merges and its worker session has been torn down. Each entry holds only what's needed downstream: the PR number/URL (audit), the worker title (debugging), and the merge timestamp. The full slice record does not carry forward — `task-log.md` is the audit trail. `legate.dispatch` consults both `slices.<id>` (with `pr.state == "MERGED"` for slices merged this heartbeat that cleanup hasn't yet processed) and `archived_slices.<id>` (for slices merged in a prior heartbeat) when checking whether a downstream slice's dependencies have all merged.
 

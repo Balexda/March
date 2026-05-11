@@ -1,0 +1,197 @@
+---
+name: legate.resume
+description: "Mini-legate's session-resume skill. Use on every heartbeat (load FIRST, before `legate.babysit`) to detect worker sessions that have just restarted and are showing Claude Code's \"Resume from summary\" picker. The protocol is a two-tick handshake: tick 1 detects the picker via `check-resume-prompt.sh`, types \"1\" via `select-resume-summary.sh` to select \"Resume from summary (recommended)\", and marks the slice `resume_pending=\"selected\"` in `state.json`; tick 2 (or later) sees the worker back in `waiting` with the picker cleared and sends a stage-aware nudge via `nudge-resumed-worker.sh` to push the work forward. Triggers: every heartbeat. Skip downstream skill dispatches for any worker whose picker is still up — they would be silently swallowed by the TUI."
+allowed-tools: Bash(.claude/skills/legate.resume/scripts/check-resume-prompt.sh:*) Bash(.claude/skills/legate.resume/scripts/select-resume-summary.sh:*) Bash(.claude/skills/legate.resume/scripts/nudge-resumed-worker.sh:*)
+---
+
+# Skill: legate.resume (worker session-restart recovery)
+
+This skill owns one job for the workers managing `{{REPO_PATH}}`: when a worker's Claude Code TUI restarts (because `restart-worker.sh` ran, because agent-deck restarted the session, because the host rebooted, …) and Claude shows its "Resume from summary" picker, clear the picker by selecting option 1 (recommended), then on the next heartbeat nudge the worker to continue the work it was in the middle of.
+
+Load it **first** on every heartbeat — before `legate.babysit`. The reason is mechanical, not stylistic: a worker stuck on the picker silently swallows every `agent-deck session send`, because the TUI consumes keystrokes as picker hotkeys rather than as Claude input. If `legate.babysit` runs first and dispatches `/smithy.fix` to a stuck worker, that fix message is lost — the picker treats it as a sequence of hotkeys that may select an unintended option. Resolving the picker before any other skill touches the worker is the only safe order.
+
+Load via `Skill(skill="legate.resume")` once per session. The classifier registers the allowed-tools for the rest of the session.
+
+---
+
+## The picker we're clearing
+
+Claude Code emits this prompt on session restart when the previous session was long-running or token-heavy. Verbatim shape:
+
+```
+This session is 7h 4m old and 231.5k tokens.
+
+Resuming the full session will consume a substantial portion of your usage limits. We recommend resuming from a summary.
+
+> 1. Resume from summary (recommended)
+  2. Resume full session as-is
+  3. Don't ask me again
+```
+
+**Operator policy: always select option 1** (Resume from summary). Reasoning: option 2 reloads the full session, which is exactly the usage-limit hit Claude is warning about and gives the worker no advantage for legate's loop (the worker only needs enough context to finish its in-flight slice, which the summary captures). Option 3 ("Don't ask me again") persists a *global* choice across future restarts — that's a setting the operator should make manually, not one the conductor decides on their behalf.
+
+`check-resume-prompt.sh` matches two stable substrings (`"Resume from summary"` for the option-1 label, `"Resuming the full session"` for the preamble). Either match → `stuck=true`.
+
+---
+
+## The protocol
+
+Run this every heartbeat, **before** `legate.babysit`. Two distinct phases run in the same heartbeat:
+
+### Phase A — detect-and-select (tick N)
+
+For every worker in `state.json.slices` (and any worker in `{{WORKER_GROUP}}` not yet tracked — strays still count; clearing the picker prevents the worker from sitting indefinitely):
+
+1. Run `check-resume-prompt.sh {{PROFILE}} <worker_session_id>`. If `stuck=false`, skip this worker for Phase A; move on.
+2. If `stuck=true`:
+   - Run `select-resume-summary.sh {{PROFILE}} <worker_session_id>`. This types `"1"` into the worker session and returns immediately (no `--wait`).
+   - **Update `state.json`** for the tracked slice: set `slices.<id>.resume_pending = "selected"` and `slices.<id>.last_action = "<ISO-8601 now>"` and `slices.<id>.last_action_note = "resume picker detected; sent '1' to select Resume-from-summary"`.
+   - **Skip every other skill's dispatch to this worker for this heartbeat.** Babysit/merge/cleanup/dispatch must not touch a worker whose `resume_pending == "selected"` and whose picker may still be in the middle of being cleared. The simplest implementation: pass the set of resume-pending slice IDs forward and have those skills no-op on them this tick.
+   - Surface `AUTO: <slice-id> worker session showed Resume-from-summary picker — sent '1' to clear; nudge on next heartbeat`.
+3. If the worker is not tracked in `state.json.slices` (stray session in `{{WORKER_GROUP}}`), still run `select-resume-summary.sh`, but skip the state.json update — there's no slice to flag. Surface `AUTO: stray worker <session-id> showed Resume-from-summary picker — sent '1' to clear (no tracked slice)`.
+
+### Phase B — nudge-on-next-tick (tick N+1, or later)
+
+For every slice in `state.json.slices` with `resume_pending == "selected"`:
+
+1. **Re-check the picker.** Run `check-resume-prompt.sh {{PROFILE}} <worker_session_id>` again. Two outcomes:
+   - **Still stuck** — the "1" we sent didn't take. Most common cause: the worker session was unusually slow to render the picker the first time, and the keystroke landed before the picker accepted input. Re-run `select-resume-summary.sh`, leave `resume_pending = "selected"`, log `AUTO: <slice-id> picker still showing after select — re-sent '1'`. After two consecutive heartbeats with `still stuck`, escalate via `NEED:` rather than retrying a third time (the assumption that the TUI is accepting our keystrokes has failed; this is operator territory).
+   - **Cleared** — picker is gone. Continue to step 2.
+2. **Check the worker's `agent-deck` status.** From `list-workers.sh` output (legate.babysit owns that script; consume its output here):
+   - `running` — Claude is still loading the summary. Leave `resume_pending = "selected"`, no nudge this tick. The next heartbeat re-checks.
+   - `waiting` — Summary loaded, worker idle. Proceed to step 3.
+   - `idle` — Treat as `waiting` for the purpose of the nudge (the conductor's standard worker-status normalization rule applies — see `legate.babysit/SKILL.md`'s decision tree). Proceed to step 3.
+   - `error` — Restart did not stabilize the worker. Escalate via `NEED:`; don't auto-restart again (resume + restart loop is operator territory).
+3. **Compose a stage-aware nudge.** `Write(./resume-msg-<slice-id>.md)` with the body sketched below, parametrized on `slices.<id>.stage`. The same rationale as `/smithy.fix` messages — write to a file, then deliver via the script.
+4. **Deliver the nudge.** Run `nudge-resumed-worker.sh {{PROFILE}} <worker_session_id> ./resume-msg-<slice-id>.md`. Wait for the worker's reply (the script uses `--wait -q --timeout 600s`).
+5. **Clear `resume_pending`** in `state.json` (delete the key). Update `last_action` and write `last_action_note = "resume-from-summary completed; nudged worker to continue"`.
+6. **Append to `task-log.md`**:
+   ```markdown
+   ## YYYY-MM-DD HH:MM — Worker resume
+   - <slice-id> (<worker_title>) restarted; summary loaded; nudged at stage=<stage>.
+   ```
+7. Surface `AUTO: <slice-id> resumed from summary at stage=<stage> — nudged worker to continue`.
+
+After Phase B runs, the rest of the heartbeat (babysit → merge → cleanup → dispatch) proceeds as normal. The slice now has the worker re-engaged and any follow-up CI / review / merge work is back in babysit's lane.
+
+---
+
+## Composing the nudge message
+
+The nudge is one short markdown body, written to `./resume-msg-<slice-id>.md`. Tailor the wording to the slice's current `stage`. In every case lead with the same orienting paragraph, then add stage-specific guidance. The worker has just loaded a summary and may have lost detail — the orienting paragraph re-anchors them; the stage hint tells them what action to take.
+
+**Header (always include):**
+
+```markdown
+You were just resumed from a session summary after a Claude Code restart. Some context from your prior session may be lossy.
+
+You are working on slice **<slice-id>** (`<worker_title>`) on branch `<branch>`. Worktree: `<worktree_path>`. Current legate-tracked stage: **<stage>**.
+
+Take a moment to reorient: run `git status`, `git log -5 --oneline`, and (if a PR is open) `gh pr view <pr-number>` to see where you actually are. Then continue per the guidance below.
+```
+
+**Stage-specific tail:**
+
+- `planning` — worker was running `/smithy.cut` (or similar) when interrupted:
+
+  ```markdown
+  ## Continue: /smithy.cut
+
+  Resume the `/smithy.cut` (or whichever `/smithy.<verb>` command opened this slice) you were running. Finish whatever's needed to (a) commit your work and (b) `gh pr create` so legate can pick the PR up on the next heartbeat. If the planning task was already complete and only the PR push remained, push and open the PR now.
+  ```
+
+- `implementing` — worker was running `/smithy.forge` (or similar):
+
+  ```markdown
+  ## Continue: /smithy.forge
+
+  Resume the `/smithy.forge` (or whichever `/smithy.<verb>` command was implementing this slice) you were running. Finish the in-flight task(s), commit, push, and `gh pr create`. If `gh pr view` shows a PR already exists for this branch, your job is to make sure local commits are pushed and the PR is in a reviewable state; do not open a duplicate.
+  ```
+
+- `pr-open` — PR is already open and was in steady state when the restart happened:
+
+  ```markdown
+  ## Continue: monitor
+
+  A PR is already open for this slice (#<pr-number>). Check `gh pr view <pr-number> --comments` and `gh pr checks <pr-number>`. If everything is green and there are no unresolved review comments, you have nothing to do — the conductor will dispatch follow-up work via `/smithy.fix` if anything changes. Reply with a one-line summary of the PR state so the conductor knows you're back online.
+  ```
+
+- `pr-in-fix` — worker was in the middle of `/smithy.fix` for CI failures or unresolved review threads:
+
+  ```markdown
+  ## Continue: /smithy.fix
+
+  You were partway through a `/smithy.fix` when interrupted. PR #<pr-number>. Pick up where you left off: re-read the failed-check log (or the unresolved review threads — `gh pr view <pr-number> --comments`), continue the fix, commit, and push. The PR should be amended in place, never re-opened.
+  ```
+
+- `pr-rebasing` — worker was running a clean rebase to pick up an upstream fix:
+
+  ```markdown
+  ## Continue: rebase
+
+  You were rebasing this branch onto the default branch to pick up an upstream fix. PR #<pr-number>. Check `git status` — if a rebase is in progress, finish it (`git rebase --continue` after resolving any conflicts, or `git rebase --abort` if the situation has changed and the rebase is no longer the right tactic; in that case report the abort so the conductor escalates). Then force-push (`git push --force-with-lease`) so the PR's branch reflects the rebased history.
+  ```
+
+- `pr-resolving-conflicts` — worker was resolving real merge conflicts against the default branch:
+
+  ```markdown
+  ## Continue: resolve conflicts
+
+  You were resolving merge conflicts against the default branch for PR #<pr-number>. Check `git status` to see whether you're mid-rebase or mid-merge, resolve the remaining conflicts (favor the design intent of *this* PR's diff over mechanically taking either side), commit, and force-push (`git push --force-with-lease`). If the conflict scope has grown such that resolving cleanly is impractical, stop and reply with a description of what you found — the conductor will escalate to the operator instead.
+  ```
+
+- `pr-in-rerun` — no worker action needed; CI is being re-triggered externally:
+
+  ```markdown
+  ## Continue: idle
+
+  This slice is in `pr-in-rerun` — the conductor re-triggered CI for a transient flake. There is no worker action required; sit tight, and the conductor will dispatch follow-up work via `/smithy.fix` if the rerun fails too. Reply with a one-line "online and idle" acknowledgement so the conductor knows you're back.
+  ```
+
+- `merged` or `escalated` — defensive case. The slice shouldn't have `resume_pending` set in either state (cleanup would have run for merged; escalated should not see a resume cycle). If you encounter this combination, **skip the nudge**, clear `resume_pending`, surface `NEED:` describing the inconsistency.
+
+When the slice's `kind == "issue"`, append one extra line to the header so the worker knows the artifact-less context:
+
+```markdown
+This slice came from a GitHub issue (#<N>) rather than a Smithy artifact, so there is no spec/slice file to read; the issue body and the existing PR diff are your sources of truth.
+```
+
+---
+
+## Operation reference
+
+| Operation | Script | Returns |
+|---|---|---|
+| Check for the resume picker | `check-resume-prompt.sh <profile> <session-id-or-title>` | JSON `{stuck, marker, excerpt}` |
+| Select "Resume from summary" | `select-resume-summary.sh <profile> <session-id-or-title>` | agent-deck's confirmation line |
+| Send the post-resume nudge | `nudge-resumed-worker.sh <profile> <session-id-or-title> <msg-file>` | The worker's reply (raw text) |
+
+All scripts emit JSON or status text to stdout, progress to stderr, and exit 0/1/2 for success/op-failure/invalid-input. `check-resume-prompt.sh` is safe to call on every worker every heartbeat — it is read-only and tolerant of transient `agent-deck` lookup failures (returns `stuck=false` rather than erroring).
+
+## State.json — the `resume_pending` field
+
+This skill adds one optional field to `slices.<id>`:
+
+```json
+{
+  "resume_pending": "selected"
+}
+```
+
+Semantics:
+
+- **Absent / unset** — no resume cycle in flight for this slice (the default).
+- **`"selected"`** — Phase A detected the picker and sent `"1"`. Phase B is owed on a subsequent heartbeat (re-check + nudge or re-send).
+
+When clearing the field, **delete the key entirely** rather than setting it to `null` or `""` — the state.json schema treats absence as the canonical "no resume cycle" state, and keeping zombie nulls around makes it harder for operators to grep `state.json` for genuinely-pending slices.
+
+The field is **not** carried into `archived_slices` when cleanup moves a slice over; resume state is an in-flight concern only.
+
+## Standing rules
+
+- **Load first on every heartbeat.** Resume detection must precede every other skill's dispatch — a stuck picker silently eats `agent-deck session send` keystrokes, so any earlier dispatch is lost.
+- **Other skills skip resume-pending slices for the rest of the heartbeat.** A slice with `resume_pending == "selected"` is mid-clear; babysit/merge/cleanup/dispatch must not touch its worker until Phase B clears the flag.
+- **Always select option 1.** Option 2 (full session) is the usage-limit hit Claude is warning about; option 3 (Don't ask again) is a persistent global setting that the operator owns, not the conductor.
+- **One re-send, then escalate.** If the picker is still up after two consecutive heartbeats of `select-resume-summary.sh`, surface `NEED:` rather than retrying — the assumption that the TUI is consuming our keystrokes has failed.
+- **Stray workers get the picker cleared, not nudged.** A worker session in `{{WORKER_GROUP}}` without a tracked slice in `state.json` still benefits from clearing — leaving it stuck wastes a slot. But there's no stage to anchor a nudge against, so skip Phase B for that worker.
+- **No raw tmux send-keys; no inline shell.** The three scripts are the entire audited surface area. If a future variant of the picker needs different keys, extend the skill at the source and re-run `march legate init`.
