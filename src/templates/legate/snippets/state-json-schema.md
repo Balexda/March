@@ -14,7 +14,7 @@ Maintain a slim, structured state file across compactions:
   "slices": {
     "<slice-id>": {
       "kind": "smithy|issue (optional; defaults to smithy when absent)",
-      "issue": { "number": 42, "url": "...", "title": "..." },
+      "issue (only when kind == \"issue\"; omitted for smithy slices)": { "number": 42, "url": "...", "title": "..." },
       "worker_session_id": "...",
       "worker_title": "...",
       "branch": "feature/...",
