@@ -47,4 +47,6 @@ Three slice fields fill in over time and are `null` (or absent) on a freshly-lau
 
 `archived_slices` is the breadcrumb store written by `legate.cleanup` after a slice's PR merges and its worker session has been torn down. Each entry holds only what's needed downstream: the PR number/URL (audit), the worker title (debugging), and the merge timestamp. The full slice record does not carry forward — `task-log.md` is the audit trail. `legate.dispatch` consults both `slices.<id>` (with `pr.state == "MERGED"` for slices merged this heartbeat that cleanup hasn't yet processed) and `archived_slices.<id>` (for slices merged in a prior heartbeat) when checking whether a downstream slice's dependencies have all merged.
 
+Stage transitions into `merged` come from two sources: `legate.babysit` writes `merged` when it observes `state == "MERGED"` on a PR (i.e. the operator merged in the GitHub UI, or `legate.merge` already merged earlier this heartbeat and GitHub has reflected it); `legate.merge` writes `merged` directly after a successful auto-merge of a slice it transitioned out of `pr-open`. Both paths are equivalent from cleanup's perspective.
+
 Read `state.json` at the start of every turn. Update it after any state-changing action. Store summaries, not transcripts.

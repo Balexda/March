@@ -217,6 +217,7 @@ export type TemplateVars = Record<TemplateVar, string>;
  */
 export const LEGATE_SKILLS = [
   "legate.babysit",
+  "legate.merge",
   "legate.cleanup",
   "legate.dispatch",
 ] as const;

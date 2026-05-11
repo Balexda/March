@@ -166,7 +166,7 @@ All scripts emit JSON or status text to stdout, progress to stderr, and exit 0/1
 
 ## Standing rules (mirror of CLAUDE.md)
 
-- **One PR per Smithy step. Never chain.** A merged PR is the only event that unblocks the next step. Never auto-merge.
+- **One PR per Smithy step. Never chain.** A merged PR is the only event that unblocks the next step. Babysit itself never calls `gh pr merge` — a merge is owned by `legate.merge` (under a strict gate) or by the operator clicking Merge in the UI; this skill only *detects* the merge (`state == "MERGED"`) and transitions the slice to `merged`.
 - **`/smithy.fix` re-uses the existing worker** (same-PR amendment); never launch a fresh worker for a fix.
 - **Always escalate when about to bypass a merge gate.** Surface a `NEED:` note instead of acting.
 - **Direct `agent-deck` and `gh run` invocations stall the classifier.** If you need an operation that isn't covered by a script here, file a follow-up to extend this skill rather than composing inline.

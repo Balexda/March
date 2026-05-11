@@ -1,0 +1,158 @@
+---
+name: legate.merge
+description: "Mini-legate's auto-merge skill. Use on every heartbeat (load between `legate.babysit` and `legate.cleanup`) to consider every slice in `state.json` whose `stage == 'pr-open'` for squash-merge. The gate is stricter than GitHub's `mergeable` flag: a PR merges only when the repo's own merge requirements are satisfied AND mini-legate's added floor is satisfied — all checks PASS, no merge conflicts, GitHub `mergeStateStatus == clean`, at least one human (non-bot) APPROVED review, and zero outstanding CHANGES_REQUESTED reviews. Every gate failure becomes a `NEED:` line so the operator decides whether to merge under relaxed-rules cases (no required CI, no required approvals); only a fully-gated PR is squash-merged. On success, transitions the slice to `stage = merged` so cleanup tears down the worker session this heartbeat. Triggers: heartbeat ticks where babysit reports at least one slice in `pr-open` with checks PASS and threads clear. No-op when zero candidates. Skip for in-flight PRs that are still failing CI / resolving conflicts (that's `legate.babysit`), post-merge teardown (that's `legate.cleanup`), or new-work launches (that's `legate.dispatch`). Operators who want every merge human-driven can omit this skill from their conductor — its gate is conservative-by-design but the existence of the skill is itself opt-in via deployment."
+allowed-tools: Bash(.claude/skills/legate.merge/scripts/check-merge-readiness.sh:*) Bash(.claude/skills/legate.merge/scripts/squash-merge-pr.sh:*)
+---
+
+# Skill: legate.merge (auto-squash-merge mechanics)
+
+This skill is the only path that calls `gh pr merge`. Load it **after** `legate.babysit` and **before** `legate.cleanup` on every heartbeat — its `allowed-tools` need to be active before you bash either of its scripts, and its scope is exactly the slices babysit has placed in the all-clear `pr-open` stage.
+
+Load via `Skill(skill="legate.merge")`. The classifier registers the allowed-tools for the rest of the session.
+
+The skill is intentionally narrow: one decision (which `pr-open` slices clear the gate), one external action (`gh pr merge --squash --match-head-commit <sha>`), one bookkeeping update (slice stage `pr-open` → `merged`). No tactic-selection, no escalation tree like babysit's.
+
+---
+
+## When to merge
+
+Run this protocol on every heartbeat after the babysit pass completes and before cleanup begins. Merge is unconditional and idempotent at the skill level: the readiness check is what decides per-PR.
+
+A slice is merged **only when ALL of the following are true**. The first violation is reported as a `NEED:` line and the slice is skipped (not merged, not transitioned). Babysit will continue to manage it next heartbeat.
+
+1. **Slice is in babysit's all-clear state** — `state.json` `slices.<id>.stage == "pr-open"`. This means babysit *this heartbeat* confirmed CI is PASS, no conflicts, and `thread_count == 0`. Skip slices in any other stage; they're not ready by definition.
+2. **PR is open** — `state == "OPEN"`.
+3. **No conflicts** — `mergeable == "MERGEABLE"`. `UNKNOWN` is transient (GitHub still computing); skip and re-check next heartbeat.
+4. **All checks pass** — `checks == "PASS"`. This is mini-legate's stricter floor: even if the repo doesn't *require* CI, we won't merge over a failing run.
+5. **Merge button is available** — GitHub's `mergeStateStatus == "clean"`. This single field implicitly enforces *the repo's own rules* (required reviews, required checks, up-to-date branch, draft state). If the repo requires N approvals or M required checks and they aren't met, GitHub returns `blocked`/`behind`/`dirty`/etc., and the gate fails — operator decides.
+6. **At least one human approval** — count of non-bot reviewers whose latest non-COMMENTED review is `APPROVED` is `≥ 1`. Bot reviews (Copilot, dependabot, GitHub Apps presenting as `<name>[bot]`) are excluded; only humans count toward this floor.
+7. **No outstanding `CHANGES_REQUESTED`** — count of non-bot reviewers whose latest non-COMMENTED review is `CHANGES_REQUESTED` is `0`. A pending CR from any human means hold off, even if there's also an approval from someone else.
+
+Conditions 5/6/7 together implement the operator policy:
+
+- **Strict repos** (CI required, approvals required via branch protection): condition 5 enforces the repo's own bar. Conditions 6/7 are usually redundant but cheap to verify.
+- **Relaxed repos** (no required CI, no required approvals): condition 5 says "GitHub permits it"; conditions 4/6/7 add mini-legate's floor. A PR that GitHub considers `mergeable` but has failing CI or zero approvals stays in human hands.
+
+Cleanup runs immediately after this skill — when we transition `pr-open → merged`, cleanup will sweep the slice on the same heartbeat.
+
+---
+
+## The protocol
+
+### 1. Identify candidates
+
+Read `state.json`. Collect every entry under `slices.<id>` where `stage == "pr-open"` and `pr.number` is set. If the set is empty, stop here and emit no annotation in the heartbeat reply (zero-work heartbeats produce no skill-line, same as cleanup).
+
+### 2. Per-candidate readiness check
+
+For each candidate, run:
+
+```
+.claude/skills/legate.merge/scripts/check-merge-readiness.sh {{REPO_PATH}} <pr-num>
+```
+
+Returns one JSON document combining `gh api graphql` for `state`, `mergeable`, `mergeStateStatus`, `reviewDecision`, `headRefOid`, `commits.last.statusCheckRollup`, and `reviews`. Output schema:
+
+```json
+{
+  "number": N,
+  "url": "...",
+  "head_sha": "...",
+  "state": "OPEN|MERGED|CLOSED",
+  "mergeable": "MERGEABLE|CONFLICTING|UNKNOWN",
+  "merge_state_status": "clean|blocked|behind|dirty|draft|unstable|has_hooks|unknown",
+  "checks": "PASS|FAIL|PENDING|NONE",
+  "review_decision": "APPROVED|CHANGES_REQUESTED|REVIEW_REQUIRED|null",
+  "human_approval_count": N,
+  "changes_requested_count": N,
+  "ready_to_merge": true|false,
+  "blocking_reasons": ["..."]
+}
+```
+
+The script's `ready_to_merge` boolean is the single signal you act on. `blocking_reasons` is an enumerated list (e.g. `["mergeStateStatus=blocked", "no human approval (0 approvals from non-bot reviewers)"]`) — copy verbatim into the `NEED:` line.
+
+The bot-filter logic inside the script normalises GitHub's `Bot` typename and `<name>[bot]` login suffix; a Copilot Pull Request review or a dependabot approval will not satisfy condition 6 even though GitHub itself counts them toward `reviewDecision`. This is intentional — the operator policy is "human approval".
+
+### 3. Gate
+
+If `ready_to_merge == false`:
+
+- Do **not** invoke the merge script.
+- Do **not** transition the slice's stage. Babysit will continue to manage it.
+- Emit one `NEED:` line per slice in the heartbeat reply:
+
+  ```
+  NEED: PR #<num> (<slice-id>) cannot auto-merge — <comma-separated blocking_reasons>
+  ```
+
+- Continue to the next candidate. Per-PR independence: one slice's gate failure doesn't affect any other.
+
+If `ready_to_merge == true`, proceed to step 4.
+
+### 4. Squash-merge
+
+```
+.claude/skills/legate.merge/scripts/squash-merge-pr.sh {{REPO_PATH}} <pr-num> <head_sha-from-readiness-check>
+```
+
+The `head_sha` argument is mandatory — it pins `gh pr merge --match-head-commit` to the SHA we observed in step 2. If the worker (or operator) pushed a new commit between the readiness check and the merge call, the merge fails cleanly and the slice stays at `pr-open` for re-evaluation next heartbeat.
+
+On `merged: true`:
+
+1. `Edit(state.json)`:
+   - `slices.<id>.stage = "merged"`
+   - `slices.<id>.pr.state = "MERGED"`
+   - `slices.<id>.last_action = "<ISO-8601 now>"`
+   - `slices.<id>.last_action_note = "merged via legate.merge — squash, sha=<merge_sha>"`
+2. Append to `task-log.md`:
+
+   ```markdown
+   ## YYYY-MM-DD HH:MM — Auto-merge
+   - <slice-id> (<worker_title>) — PR #<num> squash-merged via legate.merge (sha=<merge_sha>).
+   ```
+
+3. Emit one `AUTO:` line in the heartbeat reply:
+
+   ```
+   AUTO: merged PR #<num> (<slice-id>) — squash, gate cleared
+   ```
+
+On `merged: false` (race on head SHA, transient `gh` failure, GitHub API error):
+
+- Leave `slices.<id>.stage = "pr-open"`. The next heartbeat re-evaluates from scratch.
+- Set `slices.<id>.last_action_note = "merge failed: <error>"` so the next pass shows context.
+- Emit one `NEED:` line:
+
+  ```
+  NEED: merge of PR #<num> (<slice-id>) failed — <error>; slice remains at pr-open for retry
+  ```
+
+### 5. Stop
+
+No per-heartbeat cap. If five slices are simultaneously gate-clear, all five squash-merge in this heartbeat. Different from `legate.dispatch`'s one-launch-per-heartbeat policy, which exists to bound *new work creation*; merging an already-green, already-approved PR has no resource cost and no contention.
+
+After the per-candidate loop, return cleanly to the conductor — cleanup runs next and will sweep any slices we transitioned to `merged`.
+
+{{>verification-rule}}
+
+---
+
+## Operation reference
+
+| Operation | Script | Returns |
+|---|---|---|
+| Check merge readiness | `check-merge-readiness.sh <repo-path> <pr-num>` | JSON with `ready_to_merge` and `blocking_reasons` (see schema above) |
+| Squash-merge a gated PR | `squash-merge-pr.sh <repo-path> <pr-num> <head-sha>` | JSON `{merged, pr, merge_sha?}` or `{merged: false, error}` |
+
+Both scripts emit JSON to stdout, progress to stderr, and exit 0/1/2 for success/op-failure/invalid-input.
+
+## Standing rules
+
+- **Only act on slices with `stage == "pr-open"`.** Slices in `pr-in-fix`, `pr-resolving-conflicts`, `pr-rebasing`, `pr-in-rerun`, `escalated`, `planning`, `implementing`, or `merged` are out of scope. Babysit owns the transitions in and out of `pr-open`; this skill is a downstream consumer.
+- **Per-PR independence.** One slice's gate failure does not block another; emit `NEED:` for the failure and continue.
+- **`--match-head-commit` is mandatory.** The merge script enforces it. Calling `gh pr merge` without SHA pinning would race against a worker push that happened between readiness check and merge call — never bypass.
+- **Surface every gate failure as `NEED:`.** Do not silently skip a slice that's missing one approval — the operator should see it and decide whether to merge manually under their repo's relaxed rules. Conservative-by-design means *visible* conservatism, not silent.
+- **Never bypass the gate.** Every condition above must clear. There is no override flag, no "force merge" path, no "the operator said it was fine in chat" exception. If the operator wants to merge under relaxed rules, they merge in the GitHub UI themselves.
+- **Do not invoke `gh pr merge` outside this script.** The auto-mode classifier deliberately gates merge calls (they're irreversible); the wrapper script is the only audited path.
+- **Do not run before babysit.** Babysit's per-heartbeat scan is what produces the `pr-open` set you act on. Running merge before babysit would act on stale state.
