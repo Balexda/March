@@ -43,8 +43,15 @@ echo "launching worker: title='$TITLE' branch='$BRANCH' verb='$VERB_CMD'" >&2
 # Snapshot existing sessions in the group so we can identify the new one
 # afterward. agent-deck launch doesn't reliably print a parseable session id
 # on stdout across versions, so we diff before/after by created_at.
+#
+# Carry the snapshot as a JSON array (passed via --argjson below) rather than
+# a comma-joined string + substring match: substring matching can false-filter
+# a new session whose id happens to be a substring of an existing one in the
+# same group, and the failure mode is silent ("could not identify newly
+# launched worker") — a class of bug that only surfaces under specific id
+# collisions.
 BEFORE_IDS="$(agent-deck -p "$PROFILE" list --json \
-              | jq -r --arg g "$GROUP" '[.[] | select(.group == $g) | .id] | sort | join(",")')"
+              | jq -c --arg g "$GROUP" '[.[] | select(.group == $g) | .id]')"
 
 # The launch itself. --title-lock prevents Claude's auto-rename from clobbering
 # the title; --extra-arg pair pins --permission-mode auto on the worker session
@@ -58,11 +65,14 @@ agent-deck -p "$PROFILE" launch "$REPO" \
   --extra-arg --permission-mode --extra-arg auto \
   -m "$VERB_CMD" >&2
 
-# Find the new session: anything in the group not in BEFORE_IDS.
+# Find the new session: anything in the group whose id is not in the
+# BEFORE_IDS array. `index` over an array does exact-element membership;
+# unlike `inside` over a comma-joined string it doesn't risk a false positive
+# from substring matches.
 AFTER="$(agent-deck -p "$PROFILE" list --json \
-         | jq --arg g "$GROUP" --arg b "$BEFORE_IDS" '
+         | jq --arg g "$GROUP" --argjson b "$BEFORE_IDS" '
              [.[] | select(.group == $g)
-              | select((.id | inside($b)) | not)]
+              | select($b | index(.id) | not)]
              | sort_by(.created_at // 0)
              | last // null
          ')"
