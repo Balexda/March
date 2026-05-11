@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
 # legate skill: structured merge-readiness check for the merge gate.
 #
-# One `gh pr view --json` call returns everything needed: state, mergeable,
-# mergeStateStatus, statusCheckRollup, reviewDecision, reviews (with author
-# type and per-review state), and headRefOid (to pin --match-head-commit on
-# the merge call). The merge skill applies its gate to this single document
-# rather than fanning out across multiple gh calls; that keeps the heartbeat
-# pass cheap and the readiness snapshot atomic.
+# One `gh api graphql` query (preceded by a single `gh repo view` to resolve
+# owner/name) returns everything needed: state, mergeable, mergeStateStatus,
+# statusCheckRollup, reviewDecision, reviews (with author type and per-review
+# state), and headRefOid (to pin --match-head-commit on the merge call). We
+# go through GraphQL because `mergeStateStatus` is not exposed via `gh pr
+# view --json` — that field is required to enforce the repo's own merge
+# rules without us having to re-derive them. The merge skill applies its
+# gate to this single document rather than fanning out across multiple gh
+# calls; that keeps the heartbeat pass cheap and the readiness snapshot
+# atomic.
 #
 # The gate is the user's spec: only emit ready_to_merge=true when ALL of
 #   - state == OPEN
