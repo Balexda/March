@@ -7,6 +7,8 @@ import {
   buildColdStartPrompt,
   checkBridgeRequirements,
   deriveDefaults,
+  discoverRepoMetadata,
+  ensureInitialState,
   initLegate,
   LegateError,
   LEGATE_SKILLS,
@@ -640,6 +642,204 @@ describe("legate module", () => {
       }
     });
 
+    it("stages legate.dispatch with find-ready-slices.sh alongside the other dispatch scripts", async () => {
+      // find-ready-slices.sh is the jq-based wrapper around smithy-status.sh
+      // that the dispatch protocol uses to filter for dispatchable items.
+      // Without it deployed, the conductor's only recourse is to inline
+      // `python3 -c "..."` (or jq) against smithy-status.sh's stdout, which
+      // the legate's auto-mode rules explicitly NEED-escalate — every
+      // heartbeat would stall on operator approval.
+      const home = makeTmpDir();
+      const result = await initLegate({
+        repoPath: "/some/repo/March",
+        homeDir: home,
+        runSetup: false,
+      });
+      const dispatch = result.skills.find((s) => s.name === "legate.dispatch");
+      expect(dispatch).toBeDefined();
+      const scriptsDir = path.join(dispatch!.stagedDir, "scripts");
+      for (const name of [
+        "find-ready-slices.sh",
+        "inspect-worker.sh",
+        "launch-worker.sh",
+        "smithy-status.sh",
+        "sync-default-branch.sh",
+      ]) {
+        const p = path.join(scriptsDir, name);
+        expect(fs.existsSync(p)).toBe(true);
+        // +x bit so the conductor's `bash <path>` calls succeed.
+        expect(fs.statSync(p).mode & 0o111).not.toBe(0);
+      }
+    });
+
+    it("launch-worker.sh post-launch jq filter binds .id before piping to index($b)", async () => {
+      // Regression: the earlier filter `select($b | index(.id) | not)`
+      // re-evaluated `.id` against $b (the array), not the outer session.
+      // jq 1.6 dies with `Cannot index array with string "id"` and the
+      // script exits 5 on every launch. The conductor recovered via
+      // inspect-worker.sh so the bug went unnoticed, but every launch
+      // logged a stack trace and lost the JSON output downstream consumers
+      // expected. The corrected pattern binds the session into $s first.
+      const home = makeTmpDir();
+      const result = await initLegate({
+        repoPath: "/some/repo/March",
+        homeDir: home,
+        runSetup: false,
+      });
+      const dispatch = result.skills.find((s) => s.name === "legate.dispatch");
+      const launchScript = fs.readFileSync(
+        path.join(dispatch!.stagedDir, "scripts", "launch-worker.sh"),
+        "utf-8",
+      );
+      // String-content guard: the broken pattern must not reappear.
+      expect(launchScript).not.toMatch(/select\(\s*\$b\s*\|\s*index\(\.id\)/);
+      // Positive assertion: the corrected binding is present.
+      expect(launchScript).toMatch(/\.\s+as\s+\$s/);
+      expect(launchScript).toMatch(/index\(\$s\.id\)/);
+
+      // Functional check: extract the jq filter and run it against fixture
+      // data. Mirrors the agent-deck list --json schema (flat array of
+      // objects). Verifies both the empty-BEFORE_IDS case (initial run with
+      // no prior workers) and the populated case (worker already existed).
+      const fixture = JSON.stringify([
+        {
+          id: "conductor-id",
+          group: "conductor",
+          created_at: "2026-01-01T00:00:00Z",
+        },
+        {
+          id: "old-worker",
+          group: "legate-workers",
+          created_at: "2026-01-02T00:00:00Z",
+        },
+        {
+          id: "new-worker",
+          group: "legate-workers",
+          created_at: "2026-01-03T00:00:00Z",
+        },
+      ]);
+      const filter = `[.[] | select(.group == $g) | . as $s | select($b | index($s.id) | not)] | sort_by(.created_at // 0) | last // null`;
+      // Empty BEFORE_IDS: both workers are "new"; expect the latest by created_at.
+      const emptyResult = execFileSync(
+        "jq",
+        ["--arg", "g", "legate-workers", "--argjson", "b", "[]", filter],
+        { input: fixture, encoding: "utf-8" },
+      );
+      expect(JSON.parse(emptyResult).id).toBe("new-worker");
+      // Populated BEFORE_IDS containing old-worker: only new-worker is new.
+      const populatedResult = execFileSync(
+        "jq",
+        [
+          "--arg",
+          "g",
+          "legate-workers",
+          "--argjson",
+          "b",
+          '["old-worker"]',
+          filter,
+        ],
+        { input: fixture, encoding: "utf-8" },
+      );
+      expect(JSON.parse(populatedResult).id).toBe("new-worker");
+      // Populated BEFORE_IDS containing every worker: nothing new.
+      const allKnownResult = execFileSync(
+        "jq",
+        [
+          "--arg",
+          "g",
+          "legate-workers",
+          "--argjson",
+          "b",
+          '["old-worker","new-worker"]',
+          filter,
+        ],
+        { input: fixture, encoding: "utf-8" },
+      );
+      expect(JSON.parse(allKnownResult)).toBeNull();
+    });
+
+    it("stages legate.babysit with recover-stranded-worker.sh", async () => {
+      // Revival recovery: agent-deck respawns a worker's Claude Code process
+      // after a host restart without replaying the original `-m` argument,
+      // leaving the worker pane an empty splash. recover-stranded-worker.sh
+      // reads the verb-cmd staged by launch-worker.sh and re-sends it. Must
+      // be deployed so the babysit decision tree can call it.
+      const home = makeTmpDir();
+      const result = await initLegate({
+        repoPath: "/some/repo/March",
+        homeDir: home,
+        runSetup: false,
+      });
+      const babysit = result.skills.find((s) => s.name === "legate.babysit");
+      const scriptsDir = path.join(babysit!.stagedDir, "scripts");
+      const p = path.join(scriptsDir, "recover-stranded-worker.sh");
+      expect(fs.existsSync(p)).toBe(true);
+      expect(fs.statSync(p).mode & 0o111).not.toBe(0);
+
+      // Sanity: script syntax must parse — a typo would only surface at the
+      // first failed heartbeat in production otherwise.
+      expect(() =>
+        execFileSync("bash", ["-n", p], { stdio: "pipe" }),
+      ).not.toThrow();
+    });
+
+    it("launch-worker.sh accepts a slice-id arg and stages dispatch-msg-<slice-id>.md", async () => {
+      // The 7th positional arg is what enables revival recovery: writing
+      // the verb-cmd to a file the babysit skill can read back. Without
+      // this arg, a host restart strands the worker with no way to
+      // re-dispatch.
+      const home = makeTmpDir();
+      const result = await initLegate({
+        repoPath: "/some/repo/March",
+        homeDir: home,
+        runSetup: false,
+      });
+      const dispatch = result.skills.find((s) => s.name === "legate.dispatch");
+      const launchScript = fs.readFileSync(
+        path.join(dispatch!.stagedDir, "scripts", "launch-worker.sh"),
+        "utf-8",
+      );
+      // Arg count enforced.
+      expect(launchScript).toMatch(/if \[\[ \$# -ne 7 \]\]/);
+      // Usage line mentions slice-id.
+      expect(launchScript).toMatch(/<slice-id>/);
+      // SLICE_ID is bound to $7 and validated.
+      expect(launchScript).toMatch(/SLICE_ID="\$7"/);
+      expect(launchScript).toMatch(/\^\[a-zA-Z0-9\]\[a-zA-Z0-9\._\-\]\*\$/);
+      // Stage file path is derived from the validated slice-id.
+      expect(launchScript).toMatch(/dispatch-msg-\$\{SLICE_ID\}\.md/);
+      // verb-cmd is written via printf (so newlines round-trip cleanly).
+      expect(launchScript).toMatch(/printf '%s\\n' "\$VERB_CMD"/);
+    });
+
+    it("cleanup-merged-session.sh removes the staged dispatch-msg file before tearing the session down", async () => {
+      // Stage files in the conductor's cwd survive across heartbeats by
+      // design; without explicit cleanup on merge, the dir would accumulate
+      // a file per slice ever launched. Order matters too: the rm must
+      // happen before agent-deck session remove succeeds, so a re-run
+      // after partial failure still completes the rm idempotently.
+      const home = makeTmpDir();
+      const result = await initLegate({
+        repoPath: "/some/repo/March",
+        homeDir: home,
+        runSetup: false,
+      });
+      const cleanup = result.skills.find((s) => s.name === "legate.cleanup");
+      const script = fs.readFileSync(
+        path.join(cleanup!.stagedDir, "scripts", "cleanup-merged-session.sh"),
+        "utf-8",
+      );
+      expect(script).toMatch(/dispatch-msg-\$\{SLICE_ID\}\.md/);
+      expect(script).toMatch(/rm -f "\$DISPATCH_MSG_PATH"/);
+      // rm must precede the actual `agent-deck ... session remove` call.
+      // The header comment also mentions "session remove" — anchor on the
+      // invocation form to skip past it.
+      const rmIdx = script.indexOf('rm -f "$DISPATCH_MSG_PATH"');
+      const removeCallIdx = script.indexOf('agent-deck -p "$PROFILE" session remove');
+      expect(rmIdx).toBeGreaterThan(0);
+      expect(removeCallIdx).toBeGreaterThan(rmIdx);
+    });
+
     it("stages legate.issue with its three operator-issue-intake scripts", async () => {
       // legate.issue is the operator-driven (non-heartbeat) skill that
       // converts a GitHub issue handoff into a tracked worker. The three
@@ -793,6 +993,195 @@ describe("legate module", () => {
         /Online for March \(march\)\. Skills available: legate\.babysit, legate\.cleanup, legate\.dispatch\./,
       );
       expect(prompt).toMatch(/Wait for the first \[HEARTBEAT\]/);
+    });
+  });
+
+  describe("discoverRepoMetadata", () => {
+    it("returns nulls when the path is not a git checkout", () => {
+      // A bare tmp dir has no .git, so `gh repo view` fails fast.
+      const dir = makeTmpDir();
+      const result = discoverRepoMetadata(dir);
+      expect(result).toEqual({ ownerWithName: null, defaultBranch: null });
+    });
+
+    it("returns nulls when the path does not exist", () => {
+      // execFileSync throws when cwd doesn't exist; we swallow it.
+      const result = discoverRepoMetadata("/nonexistent/path/should/never/exist");
+      expect(result).toEqual({ ownerWithName: null, defaultBranch: null });
+    });
+  });
+
+  describe("ensureInitialState", () => {
+    it("creates a fresh state.json with discovered repo fields when missing", async () => {
+      const dir = makeTmpDir();
+      const mutated = await ensureInitialState(dir, {
+        profile: "gatecli",
+        repoName: "GateCLI",
+        repoPath: "/some/repo/GateCLI",
+        ownerWithName: "Owner/GateCLI",
+        defaultBranch: "main",
+      });
+      expect(mutated).toBe(true);
+      const written = JSON.parse(
+        fs.readFileSync(path.join(dir, "state.json"), "utf-8"),
+      );
+      expect(written).toEqual({
+        profile: "gatecli",
+        repo: {
+          name: "GateCLI",
+          path: "/some/repo/GateCLI",
+          default_branch: "main",
+          owner_with_name: "Owner/GateCLI",
+        },
+        slices: {},
+        archived_slices: {},
+      });
+    });
+
+    it("writes nulls when discovery returned nulls (operator-visible signal)", async () => {
+      const dir = makeTmpDir();
+      const mutated = await ensureInitialState(dir, {
+        profile: "gatecli",
+        repoName: "GateCLI",
+        repoPath: "/some/repo/GateCLI",
+        ownerWithName: null,
+        defaultBranch: null,
+      });
+      expect(mutated).toBe(true);
+      const written = JSON.parse(
+        fs.readFileSync(path.join(dir, "state.json"), "utf-8"),
+      );
+      expect(written.repo.owner_with_name).toBeNull();
+      expect(written.repo.default_branch).toBeNull();
+    });
+
+    it("preserves existing slices and archived_slices when filling in repo fields", async () => {
+      const dir = makeTmpDir();
+      // State the conductor wrote during a prior heartbeat — slug + branch
+      // were unknown then because gh repo view paused on auto-mode, but a
+      // worker was still launched and recorded.
+      const prior = {
+        profile: "gatecli",
+        repo: {
+          name: "GateCLI",
+          path: "/some/repo/GateCLI",
+          default_branch: null,
+          owner_with_name: null,
+        },
+        slices: {
+          "feature-1-cut": {
+            worker_session_id: "abc123",
+            worker_title: "cut: feature-1",
+            stage: "pr-open",
+          },
+        },
+        archived_slices: {
+          "feature-0-cut": { pr_number: 7, merged_at: "2026-05-01T00:00:00Z" },
+        },
+        last_heartbeat: "2026-05-10T17:00:00Z",
+      };
+      fs.writeFileSync(path.join(dir, "state.json"), JSON.stringify(prior));
+
+      const mutated = await ensureInitialState(dir, {
+        profile: "gatecli",
+        repoName: "GateCLI",
+        repoPath: "/some/repo/GateCLI",
+        ownerWithName: "Owner/GateCLI",
+        defaultBranch: "main",
+      });
+      expect(mutated).toBe(true);
+
+      const written = JSON.parse(
+        fs.readFileSync(path.join(dir, "state.json"), "utf-8"),
+      );
+      expect(written.repo.owner_with_name).toBe("Owner/GateCLI");
+      expect(written.repo.default_branch).toBe("main");
+      // Operator-managed fields untouched.
+      expect(written.slices).toEqual(prior.slices);
+      expect(written.archived_slices).toEqual(prior.archived_slices);
+      expect(written.last_heartbeat).toBe("2026-05-10T17:00:00Z");
+    });
+
+    it("does not overwrite existing non-null repo fields with discovered values", async () => {
+      // If an operator manually corrected the slug, a re-run of init must
+      // not blow that away with whatever gh reports today.
+      const dir = makeTmpDir();
+      const prior = {
+        profile: "gatecli",
+        repo: {
+          name: "GateCLI",
+          path: "/some/repo/GateCLI",
+          default_branch: "develop",
+          owner_with_name: "OperatorChosen/GateCLI",
+        },
+        slices: {},
+        archived_slices: {},
+      };
+      fs.writeFileSync(path.join(dir, "state.json"), JSON.stringify(prior));
+
+      const mutated = await ensureInitialState(dir, {
+        profile: "gatecli",
+        repoName: "GateCLI",
+        repoPath: "/some/repo/GateCLI",
+        ownerWithName: "Discovered/GateCLI",
+        defaultBranch: "main",
+      });
+      expect(mutated).toBe(false);
+
+      const written = JSON.parse(
+        fs.readFileSync(path.join(dir, "state.json"), "utf-8"),
+      );
+      expect(written.repo.owner_with_name).toBe("OperatorChosen/GateCLI");
+      expect(written.repo.default_branch).toBe("develop");
+    });
+
+    it("treats malformed state.json as missing and writes a fresh skeleton", async () => {
+      const dir = makeTmpDir();
+      fs.writeFileSync(path.join(dir, "state.json"), "this is not json {{{");
+
+      const mutated = await ensureInitialState(dir, {
+        profile: "gatecli",
+        repoName: "GateCLI",
+        repoPath: "/some/repo/GateCLI",
+        ownerWithName: "Owner/GateCLI",
+        defaultBranch: "main",
+      });
+      expect(mutated).toBe(true);
+
+      const written = JSON.parse(
+        fs.readFileSync(path.join(dir, "state.json"), "utf-8"),
+      );
+      expect(written.repo.owner_with_name).toBe("Owner/GateCLI");
+      expect(written.slices).toEqual({});
+    });
+
+    it("backfills missing repo subfields one at a time", async () => {
+      const dir = makeTmpDir();
+      // Half-populated: slug present, branch absent.
+      const prior = {
+        profile: "gatecli",
+        repo: {
+          name: "GateCLI",
+          path: "/some/repo/GateCLI",
+          owner_with_name: "Owner/GateCLI",
+        },
+        slices: {},
+        archived_slices: {},
+      };
+      fs.writeFileSync(path.join(dir, "state.json"), JSON.stringify(prior));
+
+      await ensureInitialState(dir, {
+        profile: "gatecli",
+        repoName: "GateCLI",
+        repoPath: "/some/repo/GateCLI",
+        ownerWithName: "Owner/GateCLI",
+        defaultBranch: "main",
+      });
+      const written = JSON.parse(
+        fs.readFileSync(path.join(dir, "state.json"), "utf-8"),
+      );
+      expect(written.repo.owner_with_name).toBe("Owner/GateCLI");
+      expect(written.repo.default_branch).toBe("main");
     });
   });
 });

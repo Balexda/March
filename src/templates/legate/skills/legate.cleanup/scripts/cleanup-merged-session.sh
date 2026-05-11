@@ -38,6 +38,16 @@ fi
 
 echo "cleanup: profile=$PROFILE session=$SESSION slice=$SLICE_ID" >&2
 
+# Remove the launch-time dispatch-msg stage file if present. Safe even
+# when missing (operator may be cleaning up a slice launched before the
+# staging fix existed). The file lives in the conductor's cwd; rm -f
+# tolerates absence rather than failing the whole cleanup.
+DISPATCH_MSG_PATH="./dispatch-msg-${SLICE_ID}.md"
+if [[ -f "$DISPATCH_MSG_PATH" ]]; then
+  rm -f "$DISPATCH_MSG_PATH"
+  echo "cleanup: removed stage file $DISPATCH_MSG_PATH" >&2
+fi
+
 # Capture stdout+stderr together so we can pattern-match agent-deck's failure
 # mode when the session is already gone.
 if out=$(agent-deck -p "$PROFILE" session remove "$SESSION" --prune-worktree --force 2>&1); then

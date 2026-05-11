@@ -3,10 +3,13 @@
 #
 # Atomically: create a worktree on a fresh slice branch, start a Claude session
 # in it under the worker group, lock the title, pin --permission-mode auto via
-# agent-deck's --extra-arg, and send the initial slash command.
+# agent-deck's --extra-arg, and send the initial slash command. Stages the
+# verb-cmd to `./dispatch-msg-<slice-id>.md` in the conductor's cwd so
+# legate.babysit can re-send it if agent-deck revives the session without
+# replaying the original `-m` argument (the WSL2-restart failure mode).
 #
 # Usage:
-#   launch-worker.sh <profile> <repo-path> <slice-title> <worker-group> <branch> <verb-cmd>
+#   launch-worker.sh <profile> <repo-path> <slice-title> <worker-group> <branch> <verb-cmd> <slice-id>
 #
 # Stdout: JSON `{"session_id": "...", "branch": "...", "worktree_path": "..."}`
 #         derived by querying agent-deck immediately after launch.
@@ -16,8 +19,8 @@
 #   2 invalid input
 set -euo pipefail
 
-if [[ $# -ne 6 ]]; then
-  echo "usage: launch-worker.sh <profile> <repo-path> <slice-title> <worker-group> <branch> <verb-cmd>" >&2
+if [[ $# -ne 7 ]]; then
+  echo "usage: launch-worker.sh <profile> <repo-path> <slice-title> <worker-group> <branch> <verb-cmd> <slice-id>" >&2
   exit 2
 fi
 
@@ -27,9 +30,19 @@ TITLE="$3"
 GROUP="$4"
 BRANCH="$5"
 VERB_CMD="$6"
+SLICE_ID="$7"
 
 if [[ ! -d "$REPO/.git" && ! -f "$REPO/.git" ]]; then
   echo "not a git repo: $REPO" >&2
+  exit 2
+fi
+
+# slice-id goes into a filename in the conductor's cwd. Restrict it to a
+# safe charset so a malformed conductor invocation can't escape the dir
+# via `..` or smuggle shell metachars into a script that reads the file
+# back. Mirrors the agent-deck conductor-name regex.
+if [[ ! "$SLICE_ID" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]]; then
+  echo "invalid slice-id (must match ^[a-zA-Z0-9][a-zA-Z0-9._-]*$): $SLICE_ID" >&2
   exit 2
 fi
 
@@ -38,7 +51,15 @@ if ! command -v agent-deck >/dev/null 2>&1; then
   exit 1
 fi
 
-echo "launching worker: title='$TITLE' branch='$BRANCH' verb='$VERB_CMD'" >&2
+# Stage the verb-cmd into the conductor's cwd BEFORE we launch. If
+# agent-deck launch fails, we'd rather leave a stale stage file than a
+# live worker without a recovery path. The babysit skill looks for this
+# file when it spots a `stage=implementing` worker that's idle with no
+# PR (the WSL2-restart revival signature) and re-sends the contents.
+DISPATCH_MSG_PATH="./dispatch-msg-${SLICE_ID}.md"
+printf '%s\n' "$VERB_CMD" > "$DISPATCH_MSG_PATH"
+
+echo "launching worker: title='$TITLE' branch='$BRANCH' verb='$VERB_CMD' staged='$DISPATCH_MSG_PATH'" >&2
 
 # Snapshot existing sessions in the group so we can identify the new one
 # afterward. agent-deck launch doesn't reliably print a parseable session id
@@ -69,10 +90,16 @@ agent-deck -p "$PROFILE" launch "$REPO" \
 # BEFORE_IDS array. `index` over an array does exact-element membership;
 # unlike `inside` over a comma-joined string it doesn't risk a false positive
 # from substring matches.
+#
+# Capture .id into $i before piping $b through index — without the binding,
+# `$b | index(.id)` re-evaluates `.id` against $b (the array) and trips jq
+# with "Cannot index array with string \"id\"". The binding makes the
+# membership lookup explicit: "is $i (the session's id) in $b?"
 AFTER="$(agent-deck -p "$PROFILE" list --json \
          | jq --arg g "$GROUP" --argjson b "$BEFORE_IDS" '
              [.[] | select(.group == $g)
-              | select($b | index(.id) | not)]
+              | . as $s
+              | select($b | index($s.id) | not)]
              | sort_by(.created_at // 0)
              | last // null
          ')"
