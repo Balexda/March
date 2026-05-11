@@ -220,6 +220,7 @@ export const LEGATE_SKILLS = [
   "legate.merge",
   "legate.cleanup",
   "legate.dispatch",
+  "legate.issue",
 ] as const;
 export type LegateSkillName = (typeof LEGATE_SKILLS)[number];
 

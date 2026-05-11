@@ -1,0 +1,226 @@
+---
+name: legate.issue
+description: "Mini-legate's GitHub-issue intake skill. Use when the operator hands you a GitHub issue (a number, `#N`, or full issue URL, optionally followed by extra context) and asks for it to be addressed. The protocol fetches the issue via `gh`, syncs the default branch, launches a worker session that owns the fix end-to-end (investigate → implement → push → open a PR that closes the issue), and records the work in `state.json` as an `issue-<N>` slice with `kind: \"issue\"`, so `legate.babysit` and `legate.cleanup` track its PR through merge identically to a Smithy slice. Triggers: an operator message naming a GitHub issue (`issue 42`, `issue #42`, `issue https://github.com/Owner/Repo/issues/42`, `please fix issue 42 — focus on the migration path`). Skip on heartbeat ticks (those are handled by `legate.babysit`/`legate.cleanup`/`legate.dispatch`) and skip when no issue reference is present in the operator message."
+allowed-tools: Bash(.claude/skills/legate.issue/scripts/fetch-issue.sh:*) Bash(.claude/skills/legate.issue/scripts/sync-default-branch.sh:*) Bash(.claude/skills/legate.issue/scripts/launch-issue-worker.sh:*)
+---
+
+# Skill: legate.issue (operator-driven GitHub issue intake)
+
+This skill owns one job: turn a GitHub issue reference (handed in by the operator, off-cycle from the heartbeat loop) into a tracked worker session whose PR `legate.babysit` and `legate.cleanup` will subsequently manage. It is the *only* legate skill that introduces work that did not come from `smithy status`.
+
+Load via `Skill(skill="legate.issue")`. The classifier registers the allowed-tools for the rest of the session.
+
+The skill is intentionally narrow: one decision (parse the operator message → resolve the issue), one read (`gh issue view`), one pre-flight (sync the default branch), one launch (worker session with the issue context as its initial prompt), one bookkeeping insert (`slices.issue-<N>` with `kind: "issue"`). After the launch, this skill steps out — `legate.babysit` picks the slice up on the next heartbeat by virtue of it living in `state.json.slices`.
+
+---
+
+## When to run
+
+Run this protocol when the operator sends a message that names a GitHub issue. Concretely, treat all of these as triggers:
+
+- `issue 42` / `issue #42`
+- `issue https://github.com/{{REPO_NAME}}/issues/42`
+- A free-form sentence whose meaning is clearly "please address GitHub issue N", optionally with a trailing context note (`issue 42 — favor the smaller patch over the refactor`).
+
+Do **not** run on:
+
+- A heartbeat tick — heartbeats are babysit/cleanup/dispatch territory.
+- A message that mentions an issue but is not asking you to dispatch a worker (e.g. "what does issue 42 say?" → just `gh issue view` and reply; do not launch).
+- A message asking you to pick up a Smithy slice — that's `legate.dispatch`. The two are distinct surfaces; an issue-kind slice does not pass through `smithy status`.
+
+If parsing the operator message is ambiguous (no clear issue reference, or multiple references and unclear which to act on), surface a `NEED:` and stop — do not guess.
+
+---
+
+## Idempotency
+
+Before doing any work, **read `state.json` and check for an existing `slices.issue-<N>` entry**. If one is present:
+
+- If its `stage` is non-terminal (`implementing`, `pr-open`, `pr-in-fix`, `pr-rebasing`, `pr-in-rerun`, `pr-resolving-conflicts`), do nothing — the prior dispatch is in flight; report `AUTO: issue #<N> already in flight (stage=<stage>, worker=<worker_title>)` and stop.
+- If its `stage` is `escalated` or `merged`, surface a `NEED:` rather than silently re-dispatching: the operator should explicitly clear the existing slice or instruct the conductor to start fresh, since re-dispatching could resurrect a worker tree that was never cleaned up or duplicate a closed PR.
+- If the slice has been moved into `archived_slices.issue-<N>` (issue was previously merged), assume the operator wants a follow-up and proceed — but mention it in the `[STATUS]` reply so the operator can correct course if they intended otherwise.
+
+---
+
+## The protocol
+
+### 1. Parse the operator message
+
+From the operator message, extract:
+
+- **`issue_ref`** — the issue number, `#N`, or full GitHub issue URL.
+- **`extra_context`** — anything else the operator wrote (everything after the issue reference, after stripping leading punctuation/dashes/colons). Empty string is fine.
+
+Normalize `issue_ref` to a bare number for downstream use:
+
+- `42` → `42`
+- `#42` → `42`
+- `https://github.com/Owner/Repo/issues/42` → `42` (and verify the path matches `{{REPO_NAME}}` — if it points at a different repo, surface a `NEED:` and stop; this conductor's scope is `{{REPO_PATH}}`).
+
+### 2. Fetch the issue
+
+```
+.claude/skills/legate.issue/scripts/fetch-issue.sh {{REPO_PATH}} <issue-number>
+```
+
+Wraps `gh issue view <num> --json number,title,body,url,author,labels,state,comments` (run from inside `{{REPO_PATH}}` so `gh` resolves the right repo). Returns:
+
+```json
+{
+  "number": 42,
+  "title": "...",
+  "body": "...",
+  "url": "https://github.com/Owner/Repo/issues/42",
+  "author": "octocat",
+  "labels": ["bug", "p1"],
+  "state": "OPEN|CLOSED",
+  "comments": [
+    {"author": "...", "createdAt": "...", "body": "..."}
+  ]
+}
+```
+
+If the script reports `state: "CLOSED"`, surface a `NEED:` (the operator may want to re-open or work on a follow-up — don't auto-pick a closed issue).
+
+If the script exits non-zero (issue not found, network error, `gh` not authenticated), surface a `NEED:` with the script's stderr summary and stop. Do not retry — `gh` errors are operator-territory.
+
+### 3. Sync the default branch
+
+**Required before launching a worker**, same pre-flight `legate.dispatch` runs. New worker sessions branch off whatever HEAD `{{REPO_PATH}}` points at; if a previous PR merged since the last fetch, the new worker silently builds on stale code.
+
+```
+.claude/skills/legate.issue/scripts/sync-default-branch.sh {{REPO_PATH}}
+```
+
+Returns JSON `{"default_branch": "...", "synced": true, "head": "<sha>"}`. Cache `default_branch` into `state.json.repo.default_branch` on first detection — it does not change for the life of the conductor.
+
+If sync fails (divergence — script exits non-zero), **escalate**: do not `git reset --hard` or force-update. The worker should not launch until the operator resolves the divergence.
+
+### 4. Compose the worker prompt
+
+`Write(./issue-msg-<N>.md)` containing:
+
+```markdown
+You are working on GitHub issue #<N> in {{REPO_NAME}} (`{{REPO_PATH}}`).
+
+## Issue
+**Title:** <title>
+**URL:** <url>
+**Author:** <author>
+**Labels:** <comma-separated labels, or "none">
+**State:** <state>
+
+<body>
+
+## Recent comments
+
+<for each comment, latest first, up to 5: `**<author>** (<createdAt>):\n\n<body>\n\n---`>
+
+## Operator notes
+
+<extra_context, or "_(none)_" if empty>
+
+## Your job
+
+1. Investigate the relevant code and the issue thoroughly before editing. Read the linked code paths in the issue body if any are referenced.
+2. Implement a fix on this branch only — do not touch unrelated areas.
+3. Run any project test/lint commands (`npm test`, `pytest`, etc. — figure out the right ones from the repo's CI config or scripts).
+4. Commit with a message that references the issue.
+5. `gh pr create` with a body that includes `Closes #<N>` so merging the PR auto-closes the issue. The conductor (legate) tracks your PR by polling — opening it is enough; you do not need to ping anything.
+6. When you are done, summarize what changed in your reply.
+
+Operator policy:
+- Single-PR scope: this branch and worktree are exclusively for issue #<N>. Do not stack other work on top.
+- Don't auto-merge; the operator does that. The conductor will dispatch `/smithy.fix` to you if CI fails or reviewers leave comments.
+- If the issue is unclear, ambiguous, or out-of-scope (e.g. asks for a feature you'd need a design doc for), post a comment on the issue asking the operator for direction rather than guessing — then stop and wait. Do not push speculative work.
+```
+
+Notes:
+
+- The prompt is intentionally not a `/smithy.<verb>` slash command. There is no Smithy artifact (spec, slice, tasks file) backing an issue — the worker reads the issue body and code directly. `/smithy.fix` is still the verb the conductor will use later if the issue's PR needs CI/review remediation, because that's how `legate.babysit` dispatches and `/smithy.fix` is repo-local "fix CI/threads on this PR" tooling that doesn't require a tasks file.
+- Comments are capped at 5 most-recent to keep the worker's initial context bounded; longer threads are still visible to the worker via `gh issue view #<N> --comments`.
+
+### 5. Launch the worker
+
+```
+.claude/skills/legate.issue/scripts/launch-issue-worker.sh \
+  {{PROFILE}} {{REPO_PATH}} "<slice-title>" {{WORKER_GROUP}} <branch> ./issue-msg-<N>.md
+```
+
+Args:
+
+- **`slice-title`**: `issue: #<N> <short-title>`, where `<short-title>` is the first ~40 characters of the issue title with newlines replaced by spaces. Example: `issue: #42 conductor wedges on empty smithy status`.
+- **`branch`**: `issue/<N>-<slugified-title-prefix>`. Example: `issue/42-conductor-wedges-on-empty-smithy-status`. Slugify with the same rules as `march`'s slug helper: lowercase, replace runs of non-alphanumerics with `-`, trim leading/trailing `-`, cap to ~50 chars after the `issue/<N>-` prefix.
+- **`./issue-msg-<N>.md`**: the prompt file from step 4.
+
+The script atomically creates the worktree on `<branch>`, launches the Claude session under `{{WORKER_GROUP}}`, locks the title, pins `--permission-mode auto`, and sends the message file's contents as the initial prompt (file-based send because the prompt contains newlines and code fences — inline `-m` would force shell-escape constructs that auto-mode flags).
+
+Returns JSON `{"session_id": "...", "branch": "...", "worktree_path": "..."}` — same shape as `launch-worker.sh`. The same three non-negotiable launch flags apply: `--worktree <branch> -b`, `--title-lock`, `-c claude`.
+
+### 6. Record into `state.json`
+
+Add an entry under `slices.issue-<N>`:
+
+```json
+{
+  "kind": "issue",
+  "issue": {
+    "number": <N>,
+    "url": "<from fetch-issue>",
+    "title": "<from fetch-issue>"
+  },
+  "worker_session_id": "<from launch JSON>",
+  "worker_title": "issue: #<N> <short-title>",
+  "branch": "<launch branch>",
+  "actual_branch": null,
+  "worktree_path": "<from launch JSON>",
+  "stage": "implementing",
+  "pr": null,
+  "last_action": "<ISO-8601 now>",
+  "last_action_note": "Launched issue-#<N> worker — \"<title>\""
+}
+```
+
+`actual_branch` and `pr` fill in when `legate.babysit`'s `discover-pr.sh` runs on the worker's first `running → waiting` transition — same flow as a Smithy slice. Babysit and cleanup do not need to inspect `kind` to do their work; the discriminator exists for audit trail and for any future skill that needs to filter by origin.
+
+### 7. Append to `task-log.md`
+
+```markdown
+## YYYY-MM-DD HH:MM — Operator dispatch (issue)
+- Operator handed off issue #<N> ("<title>"). Synced default branch, launched worker `<slice-title>` on `<branch>` (worktree `<worktree_path>`).
+- Operator notes: <extra_context, or "(none)">.
+```
+
+### 8. Surface to the operator reply
+
+The reply to the operator's message is a single `[STATUS]` line followed by one `AUTO:` line:
+
+```
+[STATUS] Dispatched worker for issue #<N>.
+
+AUTO: issue-#<N> launched — worker <session-id-or-title>, branch <branch>; babysit will track the PR on the next heartbeat
+```
+
+If the issue is closed, fetch failed, or sync failed, replace the `AUTO:` line with a `NEED:` line and skip steps 4-7.
+
+---
+
+## Operation reference
+
+| Operation | Script | Returns |
+|---|---|---|
+| Fetch issue detail | `fetch-issue.sh <repo-path> <issue-number>` | JSON `{number, title, body, url, author, labels, state, comments[]}` |
+| Sync default branch | `sync-default-branch.sh <repo-path>` | JSON `{default_branch, synced, head}` |
+| Launch worker for issue | `launch-issue-worker.sh <profile> <repo> <title> <group> <branch> <prompt-file>` | JSON `{session_id, branch, worktree_path}` |
+
+All scripts emit JSON to stdout, progress to stderr, and exit 0/1/2 for success/op-failure/invalid-input.
+
+## Standing rules
+
+- **Operator-triggered, never heartbeat-triggered.** This skill runs only off an operator message naming an issue. The heartbeat loop never invokes it.
+- **One worker per issue.** Idempotency check first; never double-dispatch a live `issue-<N>` slice.
+- **Cross-repo scope is forbidden.** If an issue URL points at a repo other than `{{REPO_NAME}}`, escalate. The conductor manages exactly one repo (see boundaries).
+- **Sync default before launching.** Skipping this is how stale-base PRs slip out — same rule as `legate.dispatch`.
+- **`launch-issue-worker.sh` is the only path that creates the worker.** Don't compose `agent-deck launch` directly — the script wires the non-negotiable flags (`--worktree -b --title-lock --extra-arg ...`) and the file-based initial-message send.
+- **No auto-merge.** The conductor's role ends at "PR is open and tracked by babysit". Closing the issue happens on PR merge via the `Closes #<N>` line — operator-driven, not legate-driven.
+- **Closed issues are operator-territory.** Don't dispatch on a closed issue without explicit operator instruction; surface a `NEED:` instead.

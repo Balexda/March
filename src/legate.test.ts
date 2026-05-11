@@ -595,6 +595,35 @@ describe("legate module", () => {
         expect(content).toContain("/some/repo/March");
       }
     });
+
+    it("stages legate.issue with its three operator-issue-intake scripts", async () => {
+      // legate.issue is the operator-driven (non-heartbeat) skill that
+      // converts a GitHub issue handoff into a tracked worker. The three
+      // scripts named here are the entire surface area its SKILL.prompt's
+      // `allowed-tools` declares — if any one is missing on disk after a
+      // render, the deployed conductor will pause for permission on the
+      // first script invocation and stall the operator-reply path.
+      const home = makeTmpDir();
+      const result = await initLegate({
+        repoPath: "/some/repo/March",
+        homeDir: home,
+        runSetup: false,
+      });
+      const issue = result.skills.find((s) => s.name === "legate.issue");
+      expect(issue).toBeDefined();
+      const scriptsDir = path.join(issue!.stagedDir, "scripts");
+      for (const name of [
+        "fetch-issue.sh",
+        "sync-default-branch.sh",
+        "launch-issue-worker.sh",
+      ]) {
+        const p = path.join(scriptsDir, name);
+        expect(fs.existsSync(p)).toBe(true);
+        // Scripts must be +x; otherwise the conductor's `bash <path>` calls
+        // succeed but direct invocation pauses on a permission-denied prompt.
+        expect(fs.statSync(p).mode & 0o111).not.toBe(0);
+      }
+    });
   });
 
   describe("writeLegateHeartbeatScript", () => {
