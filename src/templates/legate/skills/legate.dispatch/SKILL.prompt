@@ -1,7 +1,7 @@
 ---
 name: legate.dispatch
 description: "Mini-legate's new-work-launch skill. Use after `legate.babysit` reports clean (or with spare cycles) to consult `smithy status`, sync the default branch, and launch one new worker on the next ready slice. Triggers: heartbeat ticks where babysit has no urgent action, operator request for any planning verb (`/smithy.render`, `/smithy.mark`, `/smithy.cut`) or `/smithy.forge`, slice-merge events that unblock the next step. Skip for managing existing PRs (that's `legate.babysit`). Operators can disable this skill on repos where the conductor should only manage existing PRs."
-allowed-tools: Bash(.claude/skills/legate.dispatch/scripts/sync-default-branch.sh:*) Bash(.claude/skills/legate.dispatch/scripts/launch-worker.sh:*) Bash(.claude/skills/legate.dispatch/scripts/inspect-worker.sh:*) Bash(.claude/skills/legate.dispatch/scripts/smithy-status.sh:*)
+allowed-tools: Bash(.claude/skills/legate.dispatch/scripts/sync-default-branch.sh:*) Bash(.claude/skills/legate.dispatch/scripts/launch-worker.sh:*) Bash(.claude/skills/legate.dispatch/scripts/inspect-worker.sh:*) Bash(.claude/skills/legate.dispatch/scripts/smithy-status.sh:*) Bash(.claude/skills/legate.dispatch/scripts/find-ready-slices.sh:*)
 ---
 
 # Skill: legate.dispatch (new-work mechanics)
@@ -35,7 +35,15 @@ If any of (1)–(4) is false, do nothing this heartbeat and let the babysit repl
 .claude/skills/legate.dispatch/scripts/smithy-status.sh {{REPO_PATH}}
 ```
 
-Returns Smithy's view of what's ready. The conductor's `state.json` is the source of truth for *what's already dispatched*; cross-reference to find work items that exist in `smithy status` but not in `state.json.slices`.
+Returns Smithy's view of what's ready (full report — every record, including done and virtual ones). The conductor's `state.json` is the source of truth for *what's already dispatched*; cross-reference to find work items that exist in `smithy status` but not in `state.json.slices`.
+
+To filter that report down to dispatchable items, **always use the wrapper script** — never inline `python3 -c`, `jq`, `bash -c`, or `node -e` against the JSON. Inline interpreters are explicitly NEED-escalations under the legate's auto-mode rules and will pause the loop on every heartbeat:
+
+```
+.claude/skills/legate.dispatch/scripts/find-ready-slices.sh {{REPO_PATH}}
+```
+
+Returns a JSON array of `{type, path, title, status, next_action}` for every record where `next_action != null` and `virtual` is false (i.e. ready, dispatchable items). Empty array `[]` is the legitimate quiescent state — nothing to launch this heartbeat.
 
 Prioritization, in order. Each ready item from `smithy status` carries a `next_action.command` drawn from the closed set {`smithy.render`, `smithy.mark`, `smithy.cut`, `smithy.forge`} — those are the only four verbs the status emitter ever produces. Dispatch off that field rather than guessing the verb from the artifact type.
 

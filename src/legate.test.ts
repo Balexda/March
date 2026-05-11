@@ -642,6 +642,36 @@ describe("legate module", () => {
       }
     });
 
+    it("stages legate.dispatch with find-ready-slices.sh alongside the other dispatch scripts", async () => {
+      // find-ready-slices.sh is the jq-based wrapper around smithy-status.sh
+      // that the dispatch protocol uses to filter for dispatchable items.
+      // Without it deployed, the conductor's only recourse is to inline
+      // `python3 -c "..."` (or jq) against smithy-status.sh's stdout, which
+      // the legate's auto-mode rules explicitly NEED-escalate — every
+      // heartbeat would stall on operator approval.
+      const home = makeTmpDir();
+      const result = await initLegate({
+        repoPath: "/some/repo/March",
+        homeDir: home,
+        runSetup: false,
+      });
+      const dispatch = result.skills.find((s) => s.name === "legate.dispatch");
+      expect(dispatch).toBeDefined();
+      const scriptsDir = path.join(dispatch!.stagedDir, "scripts");
+      for (const name of [
+        "find-ready-slices.sh",
+        "inspect-worker.sh",
+        "launch-worker.sh",
+        "smithy-status.sh",
+        "sync-default-branch.sh",
+      ]) {
+        const p = path.join(scriptsDir, name);
+        expect(fs.existsSync(p)).toBe(true);
+        // +x bit so the conductor's `bash <path>` calls succeed.
+        expect(fs.statSync(p).mode & 0o111).not.toBe(0);
+      }
+    });
+
     it("stages legate.issue with its three operator-issue-intake scripts", async () => {
       // legate.issue is the operator-driven (non-heartbeat) skill that
       // converts a GitHub issue handoff into a tracked worker. The three

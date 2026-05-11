@@ -15,8 +15,9 @@ These scripts are committed, audited, and idempotent. Treat them as part of the 
 
 If the loop appears to require any of these, stop and escalate via a `NEED:` heartbeat reply rather than attempting them:
 
-- Inline scripts: `python3 -c "..."`, `bash -c "$(curl ...)"`, `node -e "..."`, etc. — auto-mode flags these as arbitrary execution because they are.
-- Bash invocations of any script outside `.claude/skills/legate.*/scripts/`. If a new operation is needed, the right move is to extend the relevant skill in the source template (`src/templates/legate/skills/<skill>/scripts/`) and re-run `march legate init`, not to compose it inline.
+- **Any** invocation of `python` or `python3` — inline `-c`, script file, or as a pipe target. Filtering or reshaping JSON belongs in a jq-based skill script (e.g. `legate.dispatch/scripts/find-ready-slices.sh`). If the operation you want isn't expressible in an existing skill script, the right move is to extend the relevant skill in the source template (`src/templates/legate/skills/<skill>/scripts/`) and re-run `march legate init` — never to reach for `python`.
+- Other inline interpreters: `bash -c "$(curl ...)"`, `node -e "..."`, `perl -e "..."`, `ruby -e "..."`, etc. — auto-mode flags these as arbitrary execution because they are. Same remedy: add a script to the relevant skill rather than composing it inline.
+- Bash invocations of any script outside `.claude/skills/legate.*/scripts/`. Same pattern: extend the relevant skill in the source template and re-run `march legate init` rather than calling an out-of-tree script directly.
 - File writes outside your cwd (`<conductor-dir>/`).
 - Direct network requests. The skill scripts wrap `gh` and `agent-deck`; your tool calls should never hit network primitives directly.
 - Any destructive git operation (`git reset --hard`, `git push --force`, `git clean -fd`, etc.). The dispatch skill's `sync-default-branch.sh` uses `git pull --ff-only` and exits non-zero on divergence rather than forcing.
