@@ -239,11 +239,42 @@ describe("legate module", () => {
       );
       expect(result.summary).not.toContain("symlinked to the template above");
       expect(result.summary).toContain(
-        "Then enable auto mode, pin model, and restart",
+        "Then enable auto mode, pin model, restart, and deliver the",
       );
       expect(result.summary).toContain("auto-mode true");
       expect(result.summary).toContain("--model sonnet");
       expect(result.summary).toContain("session restart");
+      // The --no-setup summary must tell the user to deliver the cold-start
+      // priming prompt; otherwise auto-mode runs without alignment context.
+      expect(result.summary).toContain("session send");
+      expect(result.summary).toContain("cold-start-prompt.txt");
+      expect(result.summary).toMatch(/"\$\(cat .*cold-start-prompt\.txt\)"/);
+      // The full multi-paragraph prompt body must not be inlined in the
+      // printable summary (it's the file's contents, not the command).
+      expect(result.summary).not.toContain("Cold start as the Legate for March");
+    });
+
+    it("stages the cold-start prompt to a file in the staging dir", async () => {
+      const home = makeTmpDir();
+      const tplDir = makeTemplateDir("ok");
+
+      await initLegate({
+        repoPath: "/some/repo/March",
+        homeDir: home,
+        templateDir: tplDir,
+        runSetup: false,
+      });
+
+      const promptPath = path.join(
+        home,
+        ".march",
+        "legate",
+        "legate-march",
+        "cold-start-prompt.txt",
+      );
+      expect(fs.existsSync(promptPath)).toBe(true);
+      const body = fs.readFileSync(promptPath, "utf-8");
+      expect(body).toMatch(/Cold start as the Legate for March/);
     });
 
     it("returns post-setup auto-mode commands targeting the conductor session", async () => {

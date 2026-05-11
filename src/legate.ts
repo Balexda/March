@@ -1049,6 +1049,16 @@ export async function initLegate(
     repoName,
     repoPath,
   });
+  // Stage the rendered prompt so manual remediation commands can reference
+  // it via `"$(cat <file>)"` instead of inlining the multi-paragraph body.
+  const coldStartPromptPath = path.join(stagingDir, "cold-start-prompt.txt");
+  try {
+    await fs.writeFile(coldStartPromptPath, coldStartPrompt);
+  } catch {
+    throw new LegateError(
+      `Cannot write cold-start prompt file: ${coldStartPromptPath}`,
+    );
+  }
   const sendColdStartCommand = [
     "agent-deck",
     "-p",
@@ -1058,6 +1068,9 @@ export async function initLegate(
     conductorTitle,
     coldStartPrompt,
   ];
+  const sendColdStartManualHint =
+    `agent-deck -p ${shellQuote(profile)} session send ${shellQuote(conductorTitle)} ` +
+    `"$(cat ${shellQuote(coldStartPromptPath)})"`;
   const isLinuxLike = process.platform === "linux";
   const startBridgeCommand = isLinuxLike
     ? ["systemctl", "--user", "start", "agent-deck-conductor-bridge"]
@@ -1216,7 +1229,7 @@ export async function initLegate(
           `Failed to deliver cold-start priming prompt to ${conductorTitle} (exit ${status ?? "?"}). ` +
             `The conductor will still run, but its first reply will respond to a heartbeat ` +
             `rather than priming context — auto-mode classifier may pause more often. ` +
-            `Run manually:\n  ${formatShellCommand(sendColdStartCommand)}`,
+            `Prompt staged at ${coldStartPromptPath}. Run manually:\n  ${sendColdStartManualHint}`,
         );
       }
     }
@@ -1331,10 +1344,12 @@ export async function initLegate(
         "a conductor dir yet. Run when ready:",
         `  ${formatShellCommand(setupCommand)}`,
         "",
-        "Then enable auto mode, pin model, and restart:",
+        "Then enable auto mode, pin model, restart, and deliver the",
+        "cold-start priming prompt (staged below):",
         `  ${formatShellCommand(setAutoModeCommand)}`,
         `  ${formatShellCommand(setModelCommand)}`,
         `  ${formatShellCommand(restartCommand)}`,
+        `  ${sendColdStartManualHint}`,
         "",
         "Re-running `march legate init` will perform setup AND copy the",
         "rendered template + skills into the conductor's home, then attach:",
