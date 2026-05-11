@@ -810,6 +810,152 @@ export async function writeLegateHeartbeatScript(
 }
 
 /**
+ * Probe `gh repo view` against `repoPath` for the GitHub slug
+ * (`owner/repo`) and default branch name. Best-effort: returns nulls
+ * when `gh` is missing, unauthenticated, the path isn't a git checkout,
+ * or the remote isn't a GitHub repo. The caller is expected to surface
+ * a postSetupWarning rather than abort, since the legate conductor can
+ * still operate after an operator runs `gh auth login` and re-runs init.
+ *
+ * Why this exists: CLAUDE.md instructs the conductor to "look the slug up
+ * once and cache it in state.json" on first run, but the lookup happens at
+ * the top-level prompt — outside any skill script — so auto-mode's
+ * classifier pauses on the compound `(cd <repo> && gh repo view ...)`
+ * call. Pre-populating state.json at deploy time skips that stall, since
+ * the conductor reads the cached values instead of re-running gh.
+ */
+export function discoverRepoMetadata(
+  repoPath: string,
+): { ownerWithName: string | null; defaultBranch: string | null } {
+  let raw: string;
+  try {
+    raw = execFileSync(
+      "gh",
+      ["repo", "view", "--json", "nameWithOwner,defaultBranchRef"],
+      { cwd: repoPath, stdio: ["ignore", "pipe", "ignore"], encoding: "utf-8" },
+    );
+  } catch {
+    return { ownerWithName: null, defaultBranch: null };
+  }
+  let parsed: { nameWithOwner?: string; defaultBranchRef?: { name?: string } };
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return { ownerWithName: null, defaultBranch: null };
+  }
+  return {
+    ownerWithName: parsed.nameWithOwner ?? null,
+    defaultBranch: parsed.defaultBranchRef?.name ?? null,
+  };
+}
+
+/**
+ * Initial state.json shape written into a fresh conductor dir. Mirrors the
+ * schema documented in `snippets/state-json-schema.md`. `default_branch`
+ * and `owner_with_name` are filled in from `discoverRepoMetadata`; both
+ * may be null on a host without `gh` auth, in which case the conductor
+ * falls back to the same lookup at heartbeat time (which is exactly the
+ * stall this bootstrap exists to prevent — a postSetupWarning is the
+ * right operator-facing signal).
+ */
+interface InitialStateRepoFields {
+  profile: string;
+  repoName: string;
+  repoPath: string;
+  ownerWithName: string | null;
+  defaultBranch: string | null;
+}
+
+/**
+ * Write `<conductorDir>/state.json` with the discovered repo slug and
+ * default branch pre-populated, so the conductor's first dispatch
+ * heartbeat reads cached values instead of inlining a top-level
+ * `gh repo view` (which auto-mode pauses on — see discoverRepoMetadata).
+ *
+ * Merge semantics — the conductor owns `slices` / `archived_slices` /
+ * timestamps after the first heartbeat, so on re-run we must NOT clobber
+ * the file. Instead:
+ *   - If state.json is missing, write a fresh skeleton with discovered
+ *     repo fields.
+ *   - If state.json exists, fill in only repo-level fields that are
+ *     null/missing (`profile`, `repo.name`, `repo.path`,
+ *     `repo.owner_with_name`, `repo.default_branch`). Operator-managed
+ *     `slices` / `archived_slices` are left untouched.
+ *
+ * Returns true when the file was created or mutated, false when it
+ * existed and already had every repo field populated. The boolean is
+ * surfaced in the post-setup summary so the operator can distinguish
+ * "I just bootstrapped it" from "no-op, already current."
+ */
+export async function ensureInitialState(
+  conductorDir: string,
+  defaults: InitialStateRepoFields,
+): Promise<boolean> {
+  const target = path.join(conductorDir, "state.json");
+  let existing: Record<string, unknown> | null = null;
+  try {
+    const raw = await fs.readFile(target, "utf-8");
+    const parsed: unknown = JSON.parse(raw);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      existing = parsed as Record<string, unknown>;
+    }
+  } catch {
+    existing = null;
+  }
+
+  if (existing) {
+    let mutated = false;
+    if (!existing.profile) {
+      existing.profile = defaults.profile;
+      mutated = true;
+    }
+    const repoRaw = existing.repo;
+    const repo: Record<string, unknown> =
+      repoRaw && typeof repoRaw === "object" && !Array.isArray(repoRaw)
+        ? (repoRaw as Record<string, unknown>)
+        : {};
+    if (existing.repo !== repo) {
+      existing.repo = repo;
+      mutated = true;
+    }
+    if (!repo.name) {
+      repo.name = defaults.repoName;
+      mutated = true;
+    }
+    if (!repo.path) {
+      repo.path = defaults.repoPath;
+      mutated = true;
+    }
+    if (!repo.owner_with_name && defaults.ownerWithName) {
+      repo.owner_with_name = defaults.ownerWithName;
+      mutated = true;
+    }
+    if (!repo.default_branch && defaults.defaultBranch) {
+      repo.default_branch = defaults.defaultBranch;
+      mutated = true;
+    }
+    if (mutated) {
+      await fs.writeFile(target, JSON.stringify(existing, null, 2) + "\n");
+    }
+    return mutated;
+  }
+
+  const initial = {
+    profile: defaults.profile,
+    repo: {
+      name: defaults.repoName,
+      path: defaults.repoPath,
+      default_branch: defaults.defaultBranch,
+      owner_with_name: defaults.ownerWithName,
+    },
+    slices: {},
+    archived_slices: {},
+  };
+  await fs.writeFile(target, JSON.stringify(initial, null, 2) + "\n");
+  return true;
+}
+
+/**
  * Cold-start priming prompt sent to the conductor immediately after
  * `agent-deck session restart` succeeds, before the first heartbeat
  * arrives. This is the *only* opportunity the model has to emit a
@@ -1165,6 +1311,43 @@ export async function initLegate(
           `Without this, the agent-deck-managed heartbeat sends a "Heartbeat:" message ` +
           `that the legate CLAUDE.md does not recognize as a trigger — the conductor ` +
           `will receive periodic messages but never run babysit/cleanup/dispatch.`,
+      );
+    }
+
+    // Bootstrap state.json with the GitHub slug + default branch so the
+    // conductor's first dispatch does not stall on a top-level
+    // `(cd <repo> && gh repo view ...)` call (auto-mode pauses on the
+    // compound shell op, since it's outside any skill script). Best-effort
+    // on every axis: discovery failure is reported as a warning, write
+    // failure is reported as a warning, and an existing state.json is
+    // merged rather than clobbered to preserve operator-managed slices.
+    const repoMetadata = discoverRepoMetadata(repoPath);
+    if (!repoMetadata.ownerWithName || !repoMetadata.defaultBranch) {
+      postSetupWarnings.push(
+        `Could not discover GitHub slug and/or default branch for ${repoPath} ` +
+          `via \`gh repo view\` (got owner_with_name=${repoMetadata.ownerWithName ?? "null"}, ` +
+          `default_branch=${repoMetadata.defaultBranch ?? "null"}). ` +
+          `state.json will be written with whatever was discovered; the conductor ` +
+          `will fall back to inlining \`gh repo view\` on its first dispatch ` +
+          `heartbeat, which auto-mode pauses on. Fix: \`gh auth login\` (or ensure ` +
+          `the path is a checkout of a GitHub repo), then re-run \`march legate init\`.`,
+      );
+    }
+    try {
+      await ensureInitialState(conductorDir, {
+        profile,
+        repoName,
+        repoPath,
+        ownerWithName: repoMetadata.ownerWithName,
+        defaultBranch: repoMetadata.defaultBranch,
+      });
+    } catch (err) {
+      postSetupWarnings.push(
+        `Failed to bootstrap state.json in ${conductorDir}: ` +
+          `${(err as Error).message}\n` +
+          `Without it, the conductor's first dispatch heartbeat will inline a ` +
+          `top-level \`gh repo view\` call that auto-mode pauses on — the loop ` +
+          `will stall on operator approval until the slug is cached.`,
       );
     }
 

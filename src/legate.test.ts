@@ -7,6 +7,8 @@ import {
   buildColdStartPrompt,
   checkBridgeRequirements,
   deriveDefaults,
+  discoverRepoMetadata,
+  ensureInitialState,
   initLegate,
   LegateError,
   LEGATE_SKILLS,
@@ -793,6 +795,195 @@ describe("legate module", () => {
         /Online for March \(march\)\. Skills available: legate\.babysit, legate\.cleanup, legate\.dispatch\./,
       );
       expect(prompt).toMatch(/Wait for the first \[HEARTBEAT\]/);
+    });
+  });
+
+  describe("discoverRepoMetadata", () => {
+    it("returns nulls when the path is not a git checkout", () => {
+      // A bare tmp dir has no .git, so `gh repo view` fails fast.
+      const dir = makeTmpDir();
+      const result = discoverRepoMetadata(dir);
+      expect(result).toEqual({ ownerWithName: null, defaultBranch: null });
+    });
+
+    it("returns nulls when the path does not exist", () => {
+      // execFileSync throws when cwd doesn't exist; we swallow it.
+      const result = discoverRepoMetadata("/nonexistent/path/should/never/exist");
+      expect(result).toEqual({ ownerWithName: null, defaultBranch: null });
+    });
+  });
+
+  describe("ensureInitialState", () => {
+    it("creates a fresh state.json with discovered repo fields when missing", async () => {
+      const dir = makeTmpDir();
+      const mutated = await ensureInitialState(dir, {
+        profile: "gatecli",
+        repoName: "GateCLI",
+        repoPath: "/some/repo/GateCLI",
+        ownerWithName: "Owner/GateCLI",
+        defaultBranch: "main",
+      });
+      expect(mutated).toBe(true);
+      const written = JSON.parse(
+        fs.readFileSync(path.join(dir, "state.json"), "utf-8"),
+      );
+      expect(written).toEqual({
+        profile: "gatecli",
+        repo: {
+          name: "GateCLI",
+          path: "/some/repo/GateCLI",
+          default_branch: "main",
+          owner_with_name: "Owner/GateCLI",
+        },
+        slices: {},
+        archived_slices: {},
+      });
+    });
+
+    it("writes nulls when discovery returned nulls (operator-visible signal)", async () => {
+      const dir = makeTmpDir();
+      const mutated = await ensureInitialState(dir, {
+        profile: "gatecli",
+        repoName: "GateCLI",
+        repoPath: "/some/repo/GateCLI",
+        ownerWithName: null,
+        defaultBranch: null,
+      });
+      expect(mutated).toBe(true);
+      const written = JSON.parse(
+        fs.readFileSync(path.join(dir, "state.json"), "utf-8"),
+      );
+      expect(written.repo.owner_with_name).toBeNull();
+      expect(written.repo.default_branch).toBeNull();
+    });
+
+    it("preserves existing slices and archived_slices when filling in repo fields", async () => {
+      const dir = makeTmpDir();
+      // State the conductor wrote during a prior heartbeat — slug + branch
+      // were unknown then because gh repo view paused on auto-mode, but a
+      // worker was still launched and recorded.
+      const prior = {
+        profile: "gatecli",
+        repo: {
+          name: "GateCLI",
+          path: "/some/repo/GateCLI",
+          default_branch: null,
+          owner_with_name: null,
+        },
+        slices: {
+          "feature-1-cut": {
+            worker_session_id: "abc123",
+            worker_title: "cut: feature-1",
+            stage: "pr-open",
+          },
+        },
+        archived_slices: {
+          "feature-0-cut": { pr_number: 7, merged_at: "2026-05-01T00:00:00Z" },
+        },
+        last_heartbeat: "2026-05-10T17:00:00Z",
+      };
+      fs.writeFileSync(path.join(dir, "state.json"), JSON.stringify(prior));
+
+      const mutated = await ensureInitialState(dir, {
+        profile: "gatecli",
+        repoName: "GateCLI",
+        repoPath: "/some/repo/GateCLI",
+        ownerWithName: "Owner/GateCLI",
+        defaultBranch: "main",
+      });
+      expect(mutated).toBe(true);
+
+      const written = JSON.parse(
+        fs.readFileSync(path.join(dir, "state.json"), "utf-8"),
+      );
+      expect(written.repo.owner_with_name).toBe("Owner/GateCLI");
+      expect(written.repo.default_branch).toBe("main");
+      // Operator-managed fields untouched.
+      expect(written.slices).toEqual(prior.slices);
+      expect(written.archived_slices).toEqual(prior.archived_slices);
+      expect(written.last_heartbeat).toBe("2026-05-10T17:00:00Z");
+    });
+
+    it("does not overwrite existing non-null repo fields with discovered values", async () => {
+      // If an operator manually corrected the slug, a re-run of init must
+      // not blow that away with whatever gh reports today.
+      const dir = makeTmpDir();
+      const prior = {
+        profile: "gatecli",
+        repo: {
+          name: "GateCLI",
+          path: "/some/repo/GateCLI",
+          default_branch: "develop",
+          owner_with_name: "OperatorChosen/GateCLI",
+        },
+        slices: {},
+        archived_slices: {},
+      };
+      fs.writeFileSync(path.join(dir, "state.json"), JSON.stringify(prior));
+
+      const mutated = await ensureInitialState(dir, {
+        profile: "gatecli",
+        repoName: "GateCLI",
+        repoPath: "/some/repo/GateCLI",
+        ownerWithName: "Discovered/GateCLI",
+        defaultBranch: "main",
+      });
+      expect(mutated).toBe(false);
+
+      const written = JSON.parse(
+        fs.readFileSync(path.join(dir, "state.json"), "utf-8"),
+      );
+      expect(written.repo.owner_with_name).toBe("OperatorChosen/GateCLI");
+      expect(written.repo.default_branch).toBe("develop");
+    });
+
+    it("treats malformed state.json as missing and writes a fresh skeleton", async () => {
+      const dir = makeTmpDir();
+      fs.writeFileSync(path.join(dir, "state.json"), "this is not json {{{");
+
+      const mutated = await ensureInitialState(dir, {
+        profile: "gatecli",
+        repoName: "GateCLI",
+        repoPath: "/some/repo/GateCLI",
+        ownerWithName: "Owner/GateCLI",
+        defaultBranch: "main",
+      });
+      expect(mutated).toBe(true);
+
+      const written = JSON.parse(
+        fs.readFileSync(path.join(dir, "state.json"), "utf-8"),
+      );
+      expect(written.repo.owner_with_name).toBe("Owner/GateCLI");
+      expect(written.slices).toEqual({});
+    });
+
+    it("backfills missing repo subfields one at a time", async () => {
+      const dir = makeTmpDir();
+      // Half-populated: slug present, branch absent.
+      const prior = {
+        profile: "gatecli",
+        repo: {
+          name: "GateCLI",
+          path: "/some/repo/GateCLI",
+          owner_with_name: "Owner/GateCLI",
+        },
+        slices: {},
+        archived_slices: {},
+      };
+      fs.writeFileSync(path.join(dir, "state.json"), JSON.stringify(prior));
+
+      await ensureInitialState(dir, {
+        profile: "gatecli",
+        repoName: "GateCLI",
+        repoPath: "/some/repo/GateCLI",
+        ownerWithName: "Owner/GateCLI",
+        defaultBranch: "main",
+      });
+      const written = JSON.parse(
+        fs.readFileSync(path.join(dir, "state.json"), "utf-8"),
+      );
+      expect(written.repo.owner_with_name).toBe("Owner/GateCLI");
+      expect(written.repo.default_branch).toBe("main");
     });
   });
 });
