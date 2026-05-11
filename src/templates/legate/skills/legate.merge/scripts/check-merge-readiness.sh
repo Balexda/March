@@ -68,11 +68,33 @@ cd "$REPO"
 # full snapshot in one call. Reviews come back ordered oldest→newest; we
 # reduce per-author to the latest non-COMMENTED state so a stale
 # CHANGES_REQUESTED that was later superseded by an APPROVED doesn't block.
-OWNER_REPO="$(gh repo view --json nameWithOwner -q .nameWithOwner)"
+#
+# Both `gh` calls below can fail (auth lapse, transient API error, PR not
+# found, network blip). On failure we honour the documented stdout contract
+# — emit a `{ready_to_merge: false, blocking_reasons: [...]}` document so
+# the conductor still parses a structured JSON document — and exit 1 so the
+# conductor's exit-code check still surfaces a `NEED:` line on the heartbeat.
+fail() {
+  jq -nc \
+    --argjson pr "$PR" \
+    --arg reason "$1" \
+    '{
+      number: $pr, url: null, head_sha: null,
+      state: null, mergeable: null, merge_state_status: null,
+      checks: null, review_decision: null,
+      human_approval_count: 0, changes_requested_count: 0,
+      ready_to_merge: false, blocking_reasons: [$reason]
+    }'
+  exit 1
+}
+
+if ! OWNER_REPO="$(gh repo view --json nameWithOwner -q .nameWithOwner 2>&1)"; then
+  fail "gh repo view failed: $OWNER_REPO"
+fi
 OWNER="${OWNER_REPO%%/*}"
 NAME="${OWNER_REPO##*/}"
 
-SNAPSHOT="$(gh api graphql \
+if ! SNAPSHOT="$(gh api graphql \
   -F owner="$OWNER" \
   -F name="$NAME" \
   -F pr="$PR" \
@@ -118,7 +140,9 @@ query($owner: String!, $name: String!, $pr: Int!) {
       }
     }
   }
-}')"
+}' 2>&1)"; then
+  fail "gh api graphql failed: $SNAPSHOT"
+fi
 
 # The `__typename` on author lets us distinguish `User` (human) from `Bot`
 # without a per-login allowlist — Copilot Pull Request reviews come back as
