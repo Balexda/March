@@ -185,7 +185,7 @@ The CLAUDE.prompt loads skills in this order on every heartbeat:
 2. `legate.babysit` — handle existing PRs.
 3. `legate.merge` — auto-squash-merge gated PRs from this tick.
 4. `legate.cleanup` — sweep merged slices into `archived_slices`, prune worktrees.
-5. `legate.dispatch` — pick up new work (only if babysit reported clean, and at most one new worker per tick).
+5. `legate.dispatch` — pick up new work. Runs every heartbeat regardless of what babysit found; iterates the entire ready set and launches one worker per ready slice that has no in-flight worker yet (no per-heartbeat cap on the number of new workers). See "Concurrency and dispatch behavior" below.
 
 `legate.issue` is not in the heartbeat order; it's triggered by operator message.
 
