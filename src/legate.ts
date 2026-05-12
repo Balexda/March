@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Dotprompt } from "dotprompt";
+import { FINDER_BIN, isFinderAvailable, isOnPath } from "./deps.js";
 
 export class LegateError extends Error {
   constructor(message: string) {
@@ -700,6 +701,22 @@ const LEGATE_HEARTBEAT_SCRIPT_TEMPLATE = `#!/bin/bash
 
 set -u
 
+# PATH augmentation, baked in at \`march legate init\` time.
+#
+# Why: agent-deck's heartbeat systemd unit sets a minimal PATH (typically
+# /usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin). On hosts where the user's
+# interactive tmux comes from Homebrew/Linuxbrew (a different prefix), the
+# systemd-restricted PATH resolves \`tmux\` to the system binary, which is
+# usually an older version than the running tmux server. The protocol-
+# mismatched client gets disconnected (\`server exited unexpectedly\`),
+# and agent-deck's session-status probe falls back to reporting \`error\`
+# — heartbeats then silently fail to deliver.
+#
+# The line below prepends the directory holding the tmux that \`march
+# legate init\` saw on its PATH at deploy time, so the systemd-fired
+# script uses the same tmux the user's shell does.
+{TMUX_PATH_PREPEND}
+
 NAME="{NAME}"
 GROUP="{WORKER_GROUP}"
 PROFILE="{PROFILE}"
@@ -709,12 +726,20 @@ if ! agent-deck conductor status --json 2>/dev/null | grep -q '"enabled".*true';
     exit 0
 fi
 
-# Don't fire while the conductor itself is busy.
+# Skip only when the conductor is genuinely unreachable. agent-deck's
+# status classifier transiently flips a Claude session to "error" when
+# the TUI is in certain input states (e.g. half-typed text in the
+# prompt, or a stale spinner) — those are recoverable, and a fresh
+# heartbeat is usually what unsticks them. Skipping on "error" used to
+# strand conductors overnight: every fire silently no-op'd while the
+# session sat in transient-error. Skip only "running" (genuinely busy;
+# next tick can pick up) and "stopped" (no tmux to deliver into).
 STATE=$(agent-deck -p "$PROFILE" session show "$TARGET" --json 2>/dev/null \\
     | awk -F'"' '/"status"/{print $4; exit}')
 case "$STATE" in
-    idle|waiting) ;;
-    *) exit 0 ;;
+    running|stopped) exit 0 ;;
+    "") exit 0 ;;
+    *) ;;
 esac
 
 # Pull worker session list. Passed to python via env var so the heredoc
@@ -787,8 +812,42 @@ agent-deck -p "$PROFILE" session send "$TARGET" "$PAYLOAD" --no-wait -q
 `;
 
 /**
+ * Resolve the directory containing the `tmux` binary on the operator's
+ * current PATH. Returns `null` when tmux is not findable (no `which` /
+ * `where`, no tmux on PATH).
+ *
+ * Used by `writeLegateHeartbeatScript` to bake the operator's tmux dir
+ * into heartbeat.sh's PATH so systemd-fired heartbeats use the same tmux
+ * client as the user's interactive shell (preventing protocol-mismatch
+ * failures with a brew-installed tmux server).
+ */
+export function resolveTmuxBinDir(): string | null {
+  if (!isFinderAvailable() || !isOnPath("tmux")) return null;
+  try {
+    const out = execFileSync(FINDER_BIN, ["tmux"], {
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+    // `which`/`where` may print multiple lines if a binary appears more
+    // than once on PATH; take the first match — that's the resolution
+    // an unadorned `tmux` invocation in this shell would get.
+    const firstLine = out.split(/\r?\n/)[0]?.trim();
+    if (!firstLine) return null;
+    return path.dirname(firstLine);
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Render the heartbeat script for `(conductorName, profile, workerGroup)`
  * and write it to `<conductorDir>/heartbeat.sh` with mode 0755.
+ *
+ * `tmuxBinDir` is prepended to PATH inside the generated script (see the
+ * comment in LEGATE_HEARTBEAT_SCRIPT_TEMPLATE for why). Pass `null` to
+ * emit a commented-out placeholder — the script will fall through to the
+ * systemd-default PATH, which fails on hosts whose tmux server runs from
+ * a non-system prefix.
  *
  * Caller is responsible for ensuring `agent-deck conductor setup` has
  * already run so the conductor dir exists; this overwrites whatever
@@ -799,11 +858,37 @@ export async function writeLegateHeartbeatScript(
   conductorName: string,
   profile: string,
   workerGroup: string,
+  tmuxBinDir: string | null = resolveTmuxBinDir(),
 ): Promise<void> {
+  // Belt: forbid characters that remain "live" inside a bash double-
+  // quoted string so the substitution can't escape its surroundings:
+  //   "  ends the string
+  //   \n \r  break the line / inject new statements
+  //   $  parameter expansion (e.g. $RANDOM, ${HOME})
+  //   `  command substitution (still active inside double quotes —
+  //      this is the one we missed in the first pass; flagged by
+  //      Copilot and Codex review independently)
+  //   \  backslash escape — would let an attacker write \" or \$ to
+  //      smuggle a metacharacter past a naive regex
+  // validateConductorName already covers NAME/PROFILE; this guards the
+  // new substitution.
+  if (tmuxBinDir !== null && /["\n\r$`\\]/.test(tmuxBinDir)) {
+    throw new LegateError(
+      `Refusing to embed tmux dir with shell-special characters (",\\n,\\r,$,\`,\\\\): ${tmuxBinDir}`,
+    );
+  }
+  const pathPrepend =
+    tmuxBinDir === null
+      ? `# tmux not found on PATH at \`march legate init\` time. If the systemd-\n` +
+        `# fired heartbeats fail with \`session not running\`, prepend the dir\n` +
+        `# holding your tmux to PATH here, e.g.:\n` +
+        `# export PATH="/home/linuxbrew/.linuxbrew/bin:$PATH"`
+      : `export PATH="${tmuxBinDir}:$PATH"`;
   const body = LEGATE_HEARTBEAT_SCRIPT_TEMPLATE
     .replaceAll("{NAME}", conductorName)
     .replaceAll("{PROFILE}", profile)
-    .replaceAll("{WORKER_GROUP}", workerGroup);
+    .replaceAll("{WORKER_GROUP}", workerGroup)
+    .replaceAll("{TMUX_PATH_PREPEND}", pathPrepend);
   const target = path.join(conductorDir, "heartbeat.sh");
   await fs.writeFile(target, body, { mode: 0o755 });
   // writeFile honors mode only when creating; on overwrite, fix the mode.

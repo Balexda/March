@@ -28,11 +28,22 @@
 #     "failed_checks": [{"name": "...", "url": "..."}],
 #     "unresolved_threads": [{"id": ..., "path": "...", "line": ...,
 #                             "author": "...", "body_preview": "...",
-#                             "last_author": "...", "comment_count": ...,
+#                             "last_author": "...", "last_comment_at": "ISO-8601",
+#                             "comment_count": ...,
 #                             "needs_response": bool}],
 #     "thread_count": <count of unresolved>,
 #     "needs_response_count": <subset where last comment is NOT by PR author>
 #   }
+#
+# `last_comment_at` is the createdAt of the most recent comment in the
+# thread (matches `last_author`). The caller cross-references this against
+# `state.json.slices[id].pr_open_at` to detect new reviewer activity in
+# single-user setups where worker and reviewer share a GitHub identity
+# (a `last_author == pr_author` thread is "addressed" by author-identity
+# alone, but if the comment was made after the slice last transitioned to
+# pr-open it's almost certainly the operator reviewing). The caller (the
+# babysit SKILL.prompt's decision tree) does the timestamp comparison —
+# this script just surfaces the data.
 #
 # Decision rules per the conductor's CLAUDE.md:
 #   - state == MERGED → mark slice merged.
@@ -41,10 +52,15 @@
 #                               whose last comment is from a reviewer (the
 #                               worker hasn't responded yet, or the operator
 #                               followed up on a previous reply).
-#   - thread_count > 0 but needs_response_count == 0 → worker has replied to
-#     every unresolved thread. No re-dispatch — operator needs to click
-#     Resolve on github (or there's something the worker missed and operator
-#     will route via NEED:).
+#   - thread_count > 0, needs_response_count == 0, but ANY thread has
+#     last_comment_at > slice.pr_open_at → dispatch /smithy.fix anyway
+#     (single-user override: a worker-identity reply that arrived after
+#     the slice opened is almost certainly the operator).
+#   - thread_count > 0 but needs_response_count == 0 and no
+#     last_comment_at > slice.pr_open_at → worker has replied to every
+#     unresolved thread. No re-dispatch — operator needs to click Resolve
+#     on github (or there's something the worker missed and operator will
+#     route via NEED:).
 #   - Otherwise → no action.
 #
 # Exit: 0 success / 1 gh call failed / 2 invalid input.
@@ -121,6 +137,7 @@ query($owner: String!, $name: String!, $pr: Int!) {
         author: $sorted[0].author.login,
         body_preview: ($sorted[0].body | tostring | .[0:140]),
         last_author: $sorted[-1].author.login,
+        last_comment_at: $sorted[-1].createdAt,
         comment_count: ($sorted | length)
       }
   ]' 2>/dev/null || echo '[]')"

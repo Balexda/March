@@ -951,6 +951,96 @@ describe("legate module", () => {
       expect(body).not.toContain("echo stale");
       expect(body).toContain(`NAME="legate-march"`);
     });
+
+    it("skips only on running/stopped/unknown states, not on transient 'error'", async () => {
+      // Regression: the previous gate (`case $STATE in idle|waiting) ;;
+      // *) exit 0 ;;`) silently no-op'd whenever agent-deck's classifier
+      // transiently flipped the conductor to "error" — which it does
+      // when the TUI has half-typed text or a stale spinner. Conductors
+      // got stranded overnight because every timer fire bailed without
+      // delivering the heartbeat that would have unstuck them. The new
+      // gate must skip only on "running" (genuinely busy) and "stopped"
+      // (no tmux to deliver into), and send the heartbeat on every
+      // other state including "error".
+      const { body } = await render();
+      expect(body).toContain("running|stopped) exit 0 ;;");
+      expect(body).not.toMatch(/case "\$STATE" in\s*\n\s*idle\|waiting\) ;;/);
+    });
+
+    it("prepends the operator's tmux dir to PATH when one is provided", async () => {
+      // The systemd unit's restricted PATH otherwise resolves `tmux` to
+      // /usr/bin/tmux, which can't talk to a server started by a
+      // brew-installed tmux (protocol mismatch → `server exited
+      // unexpectedly` → agent-deck reports the conductor as "not
+      // running"). Baking the operator's tmux dir into PATH at deploy
+      // time keeps the systemd-fired heartbeat using the same binary
+      // the user's shell does.
+      const dir = makeTmpDir();
+      await writeLegateHeartbeatScript(
+        dir,
+        "legate-march",
+        "march",
+        "legate-workers",
+        "/home/linuxbrew/.linuxbrew/bin",
+      );
+      const body = fs.readFileSync(path.join(dir, "heartbeat.sh"), "utf-8");
+      expect(body).toContain(
+        `export PATH="/home/linuxbrew/.linuxbrew/bin:$PATH"`,
+      );
+    });
+
+    it("emits a commented placeholder when tmux is not findable at init time", async () => {
+      // Don't silently bake a bad PATH; surface an actionable hint so
+      // operators know what knob to turn if heartbeats don't deliver.
+      const dir = makeTmpDir();
+      await writeLegateHeartbeatScript(
+        dir,
+        "legate-march",
+        "march",
+        "legate-workers",
+        null,
+      );
+      const body = fs.readFileSync(path.join(dir, "heartbeat.sh"), "utf-8");
+      expect(body).toContain("tmux not found on PATH");
+      expect(body).toContain(`# export PATH=`);
+      expect(body).not.toMatch(/^export PATH=/m);
+    });
+
+    it("refuses to embed a tmux dir containing shell-special characters", async () => {
+      // The substituted dir lands inside a double-quoted bash string;
+      // characters that stay "live" inside double quotes — `"`, `$`,
+      // backslash, backtick (command substitution), and any newline —
+      // would let an attacker escape the string and inject arbitrary
+      // shell that the systemd-fired heartbeat would then execute on
+      // every tick. Reject at write time rather than ship a mis-quoted
+      // heartbeat.sh.
+      const dir = makeTmpDir();
+      const cases: Array<[string, string]> = [
+        [`"`, `/tmp/"; rm -rf /; #`],
+        [`$`, `/tmp/$HOME`],
+        [`\\n`, `/tmp/foo\nrm -rf /`],
+        // Backticks — caught by the PR #99 review (Copilot + Codex
+        // both flagged this). Inside a double-quoted string,
+        // \`command\` still runs.
+        [`backtick`, "/tmp/`whoami`"],
+        // Backslash — could be used to smuggle a metacharacter past a
+        // single-pass regex (e.g. \\" → \" after one round of bash
+        // parsing).
+        [`backslash`, `/tmp/foo\\$HOME`],
+      ];
+      for (const [label, value] of cases) {
+        await expect(
+          writeLegateHeartbeatScript(
+            dir,
+            "legate-march",
+            "march",
+            "legate-workers",
+            value,
+          ),
+          `should reject ${label}: ${value}`,
+        ).rejects.toThrow(/shell-special characters/);
+      }
+    });
   });
 
   describe("buildColdStartPrompt", () => {
