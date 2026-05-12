@@ -153,7 +153,7 @@ Recommended implementation sequence:
 | ID | Title    | Depends On     | Artifact                                                                       |
 |----|----------|----------------|--------------------------------------------------------------------------------|
 | M1 | Spawn    | —              | docs/rfcs/2026-001-march-orchestration-platform/01-spawn.features.md           |
-| M2 | Hatchery | M1             | —                                                                              |
+| M2 | Hatchery | M1             | docs/rfcs/2026-001-march-orchestration-platform/02-hatchery.features.md        |
 | M3 | Brood    | M1, M2         | —                                                                              |
 | M4 | Herald   | M1, M2, M3     | —                                                                              |
 | M5 | Legate   | M1, M2, M3, M4 | —                                                                              |
