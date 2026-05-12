@@ -860,12 +860,21 @@ export async function writeLegateHeartbeatScript(
   workerGroup: string,
   tmuxBinDir: string | null = resolveTmuxBinDir(),
 ): Promise<void> {
-  // Belt: forbid quotes/newlines in the substituted dir so the line
-  // can't escape its surrounding double-quoted string. validateConductorName
-  // already covers NAME/PROFILE; this guards the new substitution.
-  if (tmuxBinDir !== null && /["\n\r$]/.test(tmuxBinDir)) {
+  // Belt: forbid characters that remain "live" inside a bash double-
+  // quoted string so the substitution can't escape its surroundings:
+  //   "  ends the string
+  //   \n \r  break the line / inject new statements
+  //   $  parameter expansion (e.g. $RANDOM, ${HOME})
+  //   `  command substitution (still active inside double quotes —
+  //      this is the one we missed in the first pass; flagged by
+  //      Copilot and Codex review independently)
+  //   \  backslash escape — would let an attacker write \" or \$ to
+  //      smuggle a metacharacter past a naive regex
+  // validateConductorName already covers NAME/PROFILE; this guards the
+  // new substitution.
+  if (tmuxBinDir !== null && /["\n\r$`\\]/.test(tmuxBinDir)) {
     throw new LegateError(
-      `Refusing to embed tmux dir with quote/newline/dollar-sign: ${tmuxBinDir}`,
+      `Refusing to embed tmux dir with shell-special characters (",\\n,\\r,$,\`,\\\\): ${tmuxBinDir}`,
     );
   }
   const pathPrepend =

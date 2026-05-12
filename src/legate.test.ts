@@ -1008,19 +1008,38 @@ describe("legate module", () => {
 
     it("refuses to embed a tmux dir containing shell-special characters", async () => {
       // The substituted dir lands inside a double-quoted bash string;
-      // a stray `"`, `$`, or newline would let it escape and inject
-      // arbitrary shell. Reject at write time rather than ship a
-      // mis-quoted heartbeat.sh.
+      // characters that stay "live" inside double quotes — `"`, `$`,
+      // backslash, backtick (command substitution), and any newline —
+      // would let an attacker escape the string and inject arbitrary
+      // shell that the systemd-fired heartbeat would then execute on
+      // every tick. Reject at write time rather than ship a mis-quoted
+      // heartbeat.sh.
       const dir = makeTmpDir();
-      await expect(
-        writeLegateHeartbeatScript(
-          dir,
-          "legate-march",
-          "march",
-          "legate-workers",
-          `/tmp/"; rm -rf /; #`,
-        ),
-      ).rejects.toThrow(/quote\/newline\/dollar-sign/);
+      const cases: Array<[string, string]> = [
+        [`"`, `/tmp/"; rm -rf /; #`],
+        [`$`, `/tmp/$HOME`],
+        [`\\n`, `/tmp/foo\nrm -rf /`],
+        // Backticks — caught by the PR #99 review (Copilot + Codex
+        // both flagged this). Inside a double-quoted string,
+        // \`command\` still runs.
+        [`backtick`, "/tmp/`whoami`"],
+        // Backslash — could be used to smuggle a metacharacter past a
+        // single-pass regex (e.g. \\" → \" after one round of bash
+        // parsing).
+        [`backslash`, `/tmp/foo\\$HOME`],
+      ];
+      for (const [label, value] of cases) {
+        await expect(
+          writeLegateHeartbeatScript(
+            dir,
+            "legate-march",
+            "march",
+            "legate-workers",
+            value,
+          ),
+          `should reject ${label}: ${value}`,
+        ).rejects.toThrow(/shell-special characters/);
+      }
     });
   });
 
