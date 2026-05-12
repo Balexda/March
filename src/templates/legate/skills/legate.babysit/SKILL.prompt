@@ -53,23 +53,35 @@ Output schema:
   "review_decision": "APPROVED|CHANGES_REQUESTED|REVIEW_REQUIRED|null",
   "checks": "PASS|FAIL|PENDING|NONE",
   "failed_checks": [{"name": "...", "url": "..."}],
-  "unresolved_threads": [{"id", "path", "line", "author", "body_preview", "last_author", "comment_count", "needs_response"}],
+  "unresolved_threads": [{"id", "path", "line", "author", "body_preview", "last_author", "last_comment_at", "comment_count", "needs_response"}],
   "thread_count": <n>,
   "needs_response_count": <n where last comment isn't from PR author>
 }
 ```
+
+`unresolved_threads[].last_comment_at` is the ISO-8601 `createdAt` of the thread's most recent comment. The conductor uses this to detect new operator review activity in single-user setups where worker and reviewer share a GitHub identity — see "Single-user override" below.
 
 ### 4. Update `state.json`
 
 Capture: PR numbers, `checks` status, `mergeable`, `thread_count`, `unresolved_threads`, slice `stage`. Stage transitions:
 
 - `pr-open` → `pr-resolving-conflicts` when `mergeable == "CONFLICTING"`.
-- `pr-open` → `pr-in-fix` when `checks == "FAIL"` or `thread_count > 0` (and `mergeable != "CONFLICTING"` — the conflict branch wins when both are true).
-- `pr-in-fix` → `pr-open` when CI is now PASS *and* `thread_count == 0` *and* `mergeable != "CONFLICTING"`.
-- `pr-resolving-conflicts` → `pr-open` when `mergeable == "MERGEABLE"` again (the worker's force-push landed and GitHub finished re-computing the merge).
-- `pr-rebasing` → `pr-open` when CI is PASS on the rebased SHA.
-- `pr-in-rerun` → `pr-open` when the re-triggered run completes PASS.
+- `pr-open` → `pr-in-fix` when `checks == "FAIL"` or `thread_count > 0` (and `mergeable != "CONFLICTING"` — the conflict branch wins when both are true). See "Single-user override" below for the rule on threads whose `last_author == pr_author`.
+- `pr-in-fix` → `pr-open` when CI is now PASS *and* `thread_count == 0` *and* `mergeable != "CONFLICTING"`. **On this transition, also write `slices[id].pr_open_at = <now-ISO-8601>`** so the next babysit pass can tell new reviewer comments from worker replies.
+- Worker's first `running → waiting` after `gh pr create` (discover-pr lands a PR for an `implementing` slice) → `pr-open`. **Also write `pr_open_at` on this transition.**
+- `pr-resolving-conflicts` → `pr-open` when `mergeable == "MERGEABLE"` again (the worker's force-push landed and GitHub finished re-computing the merge). **Refresh `pr_open_at`.**
+- `pr-rebasing` → `pr-open` when CI is PASS on the rebased SHA. **Refresh `pr_open_at`.**
+- `pr-in-rerun` → `pr-open` when the re-triggered run completes PASS. **Refresh `pr_open_at`.**
 - `pr-open` → `merged` when `state == "MERGED"`.
+
+#### Single-user override
+
+When worker and operator share a GitHub identity (workers push using the operator's `gh` credentials), the `needs_response = (last_author != pr_author)` heuristic returns `false` for an operator-added inline comment — both authors look identical — and the slice silently stays in `pr-open` waiting for an approval that the operator is actively reviewing instead of granting. The override:
+
+- If `slices[id].pr_open_at` is set, treat any unresolved thread with `last_comment_at > pr_open_at` as `needs_response = true` even when `last_author == pr_author`. Build the `/smithy.fix` body from those threads exactly as in the multi-user case (path, line, last_author, body_preview).
+- If `slices[id].pr_open_at` is **absent** (slice was opened by an older legate that didn't track it), treat every unresolved thread as `needs_response = true` once — pessimistic catch-up. The transition you make this heartbeat will record `pr_open_at`, so the next pass is precise.
+
+The override only fires for slices in `pr-open` (or transitioning into `pr-open` this heartbeat). A slice already in `pr-in-fix` has a worker actively responding; the operator's new comment will be included naturally on the next `pr-in-fix → pr-open` transition.
 
 ### 5. Decide and dispatch
 
@@ -145,7 +157,7 @@ Unresolved threads where the *last* comment isn't from the PR author — i.e. a 
 1. `Write(./fix-msg-<slice-id>.md)` containing: `/smithy.fix\n\nUnresolved review threads on PR #<num> (where reviewer is awaiting response):\n<paste unresolved_threads where needs_response==true — path, line, last_author, body_preview for each>`.
 2. `.claude/skills/legate.babysit/scripts/send-to-worker.sh {{PROFILE}} <worker_session_id> ./fix-msg-<slice-id>.md`.
 
-Same-PR amendment. Note: `thread_count > 0` with `needs_response_count == 0` means the worker already addressed every open thread and they're just unresolved because the operator hasn't clicked Resolve — do **not** re-dispatch in that case; report on heartbeat reply ("3 threads addressed by worker, awaiting operator-resolve") and continue.
+Same-PR amendment. Note: `thread_count > 0` with `needs_response_count == 0` means **most likely** the worker already addressed every open thread and they're just unresolved because the operator hasn't clicked Resolve — do **not** re-dispatch in that case; report on heartbeat reply ("3 threads addressed by worker, awaiting operator-resolve") and continue. **Exception**: when worker and operator share a GitHub identity, an operator-added inline comment also has `last_author == pr_author` and would be misclassified as "addressed". Apply the single-user override (see "Update `state.json`" above): any unresolved thread whose `last_comment_at > slices[id].pr_open_at` counts as needing response and is included in the `/smithy.fix` body. If `pr_open_at` is absent on the slice, treat every unresolved thread as needing response (one-time pessimistic catch-up; the transition this heartbeat will record `pr_open_at` for next time).
 
 #### Worker `status == "error"`
 
