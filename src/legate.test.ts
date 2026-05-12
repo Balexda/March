@@ -1007,9 +1007,26 @@ describe("legate module", () => {
       );
     });
 
-    it("accepts a range of systemd time-span suffixes", async () => {
+    it("accepts every common single-unit systemd time-span suffix (review feedback: PR #98)", async () => {
+      // Review caught that the initial regex `(s|min|h|d)` rejected
+      // legitimate single-unit forms like `500ms`, `1w`, and the short
+      // aliases `5m` / `1hr`. Broadened to a common-units alphabet; this
+      // is the positive test guarding regression in that direction.
       const home = makeTmpDir();
-      for (const value of ["5min", "10min", "300s", "1h", "2d"]) {
+      for (const value of [
+        "5min",
+        "10min",
+        "300s",
+        "1h",
+        "2d",
+        "500ms",
+        "1w",
+        "1y",
+        "5m", // alias for 5min
+        "1hr", // alias for 1h
+        "100us",
+        "10ns",
+      ]) {
         await writeHeartbeatTimerOverride(home, "legate-march", value);
         const body = fs.readFileSync(overridePath(home, "legate-march"), "utf-8");
         expect(body).toContain(`OnBootSec=${value}`);
@@ -1019,7 +1036,21 @@ describe("legate module", () => {
 
     it("rejects malformed intervals before composing a path or writing anything", async () => {
       const home = makeTmpDir();
-      for (const bad of ["", "5", "5m", "abc", "0min", "-5min", "5 min"]) {
+      // Note: `5m` is *valid* (alias for 5 minutes per systemd.time); not
+      // included here. Composite forms (`1h 30min`) and unknown suffixes
+      // remain rejected — we narrow systemd's full grammar to single-unit
+      // forms so validation can run march-side.
+      for (const bad of [
+        "",
+        "5",
+        "abc",
+        "0min",
+        "-5min",
+        "5 min",
+        "1h 30min", // composite — deliberately unsupported
+        "5mins", // plural — not a systemd suffix
+        "5weeks", // long form — not a systemd suffix
+      ]) {
         await expect(
           writeHeartbeatTimerOverride(home, "legate-march", bad),
         ).rejects.toBeInstanceOf(LegateError);

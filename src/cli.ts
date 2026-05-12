@@ -213,7 +213,7 @@ legate
   )
   .option(
     "-i, --heartbeat-interval <interval>",
-    "Cadence at which the conductor's systemd heartbeat timer fires, as a systemd time span (e.g. 5min, 10min, 300s, 1h). Default: 5min — agent-deck's own default is 15min, which is too slow for the Smithy plan→PR→fix loop. Linux/WSL2 only; ignored on other platforms.",
+    "Cadence at which the conductor's systemd heartbeat timer fires. Accepts a subset of systemd time-span syntax: positive integer + single suffix (ns, us, ms, s, m, min, h, hr, d, w, y) — e.g. 5min, 10min, 300s, 1h, 500ms, 1w. Composite forms (1h 30min) are not supported. Default: 5min — agent-deck's own default is 15min, which is too slow for the Smithy plan→PR→fix loop. Validated everywhere; the systemd drop-in is only written on Linux/WSL2 (other platforms surface a warning and the operator pins the cadence manually).",
   )
   .option("--no-setup", "Render the template only; skip `agent-deck conductor setup`")
   .option(

@@ -206,13 +206,25 @@ function validateProfileName(name: string): void {
 export const DEFAULT_HEARTBEAT_INTERVAL = "5min";
 
 /**
- * systemd time-span shape — accepts forms like `5min`, `300s`, `1h`, `30s`.
- * Deliberately narrow: any value reaches a systemd unit file the operator
- * will not see until the next daemon-reload, so a typo here surfaces as a
- * timer that silently fails to start. Validating up front keeps the error
- * march-side and fixable.
+ * Subset of systemd time-span shape accepted as a heartbeat interval. systemd
+ * itself accepts more (composites like `1h 30min`, named-month / -year units),
+ * but we narrow to a single positive integer + a common single-unit suffix
+ * so we can validate march-side. Any value here reaches a systemd unit file
+ * the operator will not see until the next daemon-reload, so a typo surfaces
+ * as a timer that silently fails to start; failing fast keeps the error
+ * recoverable.
+ *
+ * Suffix alternation MUST list longer forms first (`ms` before `m`, `min`
+ * before `m`, `hr` before `h`) — JS regex alternation is leftmost-match, so
+ * `m` would otherwise win against `min` / `ms` and the trailing characters
+ * would force the anchored match to fail.
+ *
+ * Composite forms (`1h 30min`) are intentionally out of scope; pass the
+ * equivalent single-unit value instead (`5400s`).
  */
-const HEARTBEAT_INTERVAL_REGEX = /^[1-9][0-9]*(s|min|h|d)$/;
+const HEARTBEAT_INTERVAL_REGEX = /^[1-9][0-9]*(ms|us|ns|min|hr|s|m|h|d|w|y)$/;
+const HEARTBEAT_INTERVAL_SUFFIXES =
+  "ns, us, ms, s, m, min, h, hr, d, w, or y";
 
 function validateHeartbeatInterval(value: string): void {
   if (!value) {
@@ -221,8 +233,10 @@ function validateHeartbeatInterval(value: string): void {
   if (!HEARTBEAT_INTERVAL_REGEX.test(value)) {
     throw new LegateError(
       `Invalid heartbeat interval "${value}": must be a positive integer ` +
-        "followed by a systemd time-span suffix (s, min, h, or d). " +
-        'Examples: "5min", "10min", "300s", "1h".',
+        `followed by a single systemd time-span suffix (${HEARTBEAT_INTERVAL_SUFFIXES}). ` +
+        'Examples: "5min", "10min", "300s", "1h", "500ms", "1w". ' +
+        "Composite forms like \"1h 30min\" are not supported — use the " +
+        "equivalent single-unit value (e.g. \"5400s\").",
     );
   }
 }
@@ -1446,20 +1460,27 @@ export async function initLegate(
     // Linux-only: macOS has no systemd; on other platforms we skip with a
     // warning and the operator can pin the cadence manually.
     if (isLinuxLike) {
-      const timerUnitPath = path.join(
-        home,
-        ".config",
-        "systemd",
-        "user",
-        `agent-deck-conductor-heartbeat-${conductorName}.timer`,
-      );
-      const timerUnitExists = await fs
-        .stat(timerUnitPath)
-        .then(() => true)
-        .catch(() => false);
+      // Probe via `systemctl --user cat` rather than `fs.stat` on a single
+      // path: systemd user units can live in any of the standard search
+      // paths (`~/.config/systemd/user`, `/etc/systemd/user`,
+      // `/usr/lib/systemd/user`, etc.). `systemctl cat` returns exit 0 iff
+      // the unit is loadable from any of them, so checking one path with
+      // `fs.stat` would silently skip the override on hosts where the unit
+      // ships from a system path.
+      const timerUnit = `agent-deck-conductor-heartbeat-${conductorName}.timer`;
+      let timerUnitExists = false;
+      try {
+        execFileSync("systemctl", ["--user", "cat", timerUnit], {
+          stdio: "ignore",
+        });
+        timerUnitExists = true;
+      } catch {
+        timerUnitExists = false;
+      }
       if (!timerUnitExists) {
         postSetupWarnings.push(
-          `Heartbeat timer unit not found at ${timerUnitPath}. agent-deck did not ` +
+          `Heartbeat timer unit ${timerUnit} is not loadable by systemd --user ` +
+            `(\`systemctl --user cat ${timerUnit}\` failed). agent-deck did not ` +
             `install a per-conductor systemd timer — the cadence-override drop-in ` +
             `was not written. The conductor will fall back to whatever cadence the ` +
             `agent-deck bridge daemon uses (default 15 min, from ` +
