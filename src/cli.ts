@@ -211,6 +211,10 @@ legate
     "-m, --model <model>",
     "Claude model alias or full ID for the conductor session (default: sonnet — orchestration is reasoning-light; workers stay on the Claude default).",
   )
+  .option(
+    "-i, --heartbeat-interval <interval>",
+    "Cadence at which the conductor's systemd heartbeat timer fires, as a systemd time span (e.g. 5min, 10min, 300s, 1h). Default: 5min — agent-deck's own default is 15min, which is too slow for the Smithy plan→PR→fix loop. Linux/WSL2 only; ignored on other platforms.",
+  )
   .option("--no-setup", "Render the template only; skip `agent-deck conductor setup`")
   .option(
     "--no-bridge-check",
@@ -222,6 +226,7 @@ legate
     description?: string;
     workerGroup?: string;
     model?: string;
+    heartbeatInterval?: string;
     setup?: boolean; // commander negates --no-setup into setup=false
     bridgeCheck?: boolean; // commander negates --no-bridge-check into bridgeCheck=false
   }) => {
@@ -310,6 +315,7 @@ legate
         description: opts.description,
         workerGroup: opts.workerGroup,
         model: opts.model,
+        heartbeatInterval: opts.heartbeatInterval,
         runSetup: willRunSetup,
       });
       console.log(result.summary);

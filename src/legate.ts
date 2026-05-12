@@ -191,6 +191,101 @@ function validateProfileName(name: string): void {
   }
 }
 
+/**
+ * Default heartbeat cadence for legate conductors. agent-deck's own default
+ * is 15 min (from `~/.agent-deck/config.toml`'s `[conductor].heartbeat_interval`),
+ * which is too slow for the Smithy plan→PR→fix loop: a stalled worker can
+ * sit idle for the full interval before the conductor notices. 5 min keeps
+ * the loop responsive without blowing through tokens — workers that are
+ * mid-edit don't see the heartbeat anyway (it only fires when the conductor
+ * is idle/waiting), so the cost is bounded.
+ *
+ * Overridable per-call via `--heartbeat-interval`; written as a systemd
+ * drop-in at `~/.config/systemd/user/agent-deck-conductor-heartbeat-<name>.timer.d/override.conf`.
+ */
+export const DEFAULT_HEARTBEAT_INTERVAL = "5min";
+
+/**
+ * systemd time-span shape — accepts forms like `5min`, `300s`, `1h`, `30s`.
+ * Deliberately narrow: any value reaches a systemd unit file the operator
+ * will not see until the next daemon-reload, so a typo here surfaces as a
+ * timer that silently fails to start. Validating up front keeps the error
+ * march-side and fixable.
+ */
+const HEARTBEAT_INTERVAL_REGEX = /^[1-9][0-9]*(s|min|h|d)$/;
+
+function validateHeartbeatInterval(value: string): void {
+  if (!value) {
+    throw new LegateError("Heartbeat interval cannot be empty.");
+  }
+  if (!HEARTBEAT_INTERVAL_REGEX.test(value)) {
+    throw new LegateError(
+      `Invalid heartbeat interval "${value}": must be a positive integer ` +
+        "followed by a systemd time-span suffix (s, min, h, or d). " +
+        'Examples: "5min", "10min", "300s", "1h".',
+    );
+  }
+}
+
+/**
+ * Build the systemd drop-in override that pins the conductor's heartbeat
+ * timer to `interval`. The empty `OnBootSec=` / `OnUnitActiveSec=` lines
+ * before the new values are required: systemd accumulates `[Timer]` entries
+ * across drop-ins unless you blank the parent unit's values first, so
+ * without them we'd append a second cadence rather than replace the 15-min
+ * default.
+ */
+function renderHeartbeatTimerOverride(
+  conductorName: string,
+  interval: string,
+): string {
+  return `# march-managed: ${conductorName} heartbeats fire every ${interval}.
+# Reverse with:
+#   rm -rf ~/.config/systemd/user/agent-deck-conductor-heartbeat-${conductorName}.timer.d
+#   systemctl --user daemon-reload
+#   systemctl --user restart agent-deck-conductor-heartbeat-${conductorName}.timer
+# The empty assignments before the new values clear the parent unit's
+# defaults (systemd accumulates [Timer] entries across drop-ins unless
+# you blank them first).
+[Timer]
+OnBootSec=
+OnUnitActiveSec=
+OnBootSec=${interval}
+OnUnitActiveSec=${interval}
+`;
+}
+
+/**
+ * Write `~/.config/systemd/user/agent-deck-conductor-heartbeat-<name>.timer.d/override.conf`
+ * pinning the conductor's heartbeat cadence to `interval`. Caller is
+ * responsible for running `systemctl --user daemon-reload` and restarting
+ * the timer to pick up the change.
+ *
+ * Linux-only. macOS / other platforms have no equivalent unit, so the
+ * caller should skip the write and surface a warning instead.
+ *
+ * Returns the absolute path of the written override file.
+ */
+export async function writeHeartbeatTimerOverride(
+  homeDir: string,
+  conductorName: string,
+  interval: string,
+): Promise<string> {
+  validateConductorName(conductorName);
+  validateHeartbeatInterval(interval);
+  const dropInDir = path.join(
+    homeDir,
+    ".config",
+    "systemd",
+    "user",
+    `agent-deck-conductor-heartbeat-${conductorName}.timer.d`,
+  );
+  await fs.mkdir(dropInDir, { recursive: true });
+  const target = path.join(dropInDir, "override.conf");
+  await fs.writeFile(target, renderHeartbeatTimerOverride(conductorName, interval));
+  return target;
+}
+
 const TEMPLATE_VARS = [
   "REPO_NAME",
   "REPO_PATH",
@@ -277,6 +372,16 @@ export interface LegateInitOptions {
    * Override with full IDs (e.g. `claude-opus-4-7`) when needed.
    */
   model?: string;
+  /**
+   * Cadence at which the conductor's systemd heartbeat timer fires. Written
+   * as a drop-in override at
+   * `~/.config/systemd/user/agent-deck-conductor-heartbeat-<name>.timer.d/override.conf`.
+   * Must be a systemd time span (e.g. `5min`, `10min`, `300s`, `1h`).
+   * Default: {@link DEFAULT_HEARTBEAT_INTERVAL} (`5min`).
+   * Linux-only — on macOS the override is skipped with a warning, since
+   * the systemd timer doesn't exist there.
+   */
+  heartbeatInterval?: string;
   /** Override `os.homedir()` (tests / programmatic callers). */
   homeDir?: string;
   /**
@@ -329,6 +434,20 @@ export interface LegateInitResult {
    * never acts on its own. Linux/WSL2 only; macOS path is best-effort.
    */
   bridgeActive: boolean;
+  /**
+   * Heartbeat cadence pinned for this conductor via the systemd drop-in
+   * override. Equals `opts.heartbeatInterval ?? DEFAULT_HEARTBEAT_INTERVAL`
+   * regardless of whether the override was actually written (see
+   * `heartbeatOverrideWritten`).
+   */
+  heartbeatInterval: string;
+  /**
+   * True when the systemd drop-in override at
+   * `~/.config/systemd/user/agent-deck-conductor-heartbeat-<name>.timer.d/override.conf`
+   * was written this run. False on macOS / non-Linux and when `runSetup`
+   * is false (override write is gated on setup having run).
+   */
+  heartbeatOverrideWritten: boolean;
   summary: string;
 }
 
@@ -1045,6 +1164,7 @@ export async function initLegate(
   const conductorName = opts.conductorName ?? defaults.conductorName;
   const workerGroup = opts.workerGroup ?? defaults.workerGroup;
   const model = opts.model ?? "sonnet";
+  const heartbeatInterval = opts.heartbeatInterval ?? DEFAULT_HEARTBEAT_INTERVAL;
   const repoName = defaults.repoName;
   const description =
     opts.description ??
@@ -1055,6 +1175,7 @@ export async function initLegate(
   // march-side error instead of shelling out and parsing agent-deck's stderr.
   validateProfileName(profile);
   validateConductorName(conductorName);
+  validateHeartbeatInterval(heartbeatInterval);
 
   const templateDir = await findTemplateDir(opts.templateDir);
   const claudePromptPath = path.join(templateDir, "CLAUDE.prompt");
@@ -1246,6 +1367,7 @@ export async function initLegate(
   let setupRan = false;
   let autoModeConfigured = false;
   let bridgeActive = false;
+  let heartbeatOverrideWritten = false;
   let deploymentResults: { name: LegateSkillName; deployed: boolean }[] = [];
   const postSetupWarnings: string[] = [];
   if (opts.runSetup ?? true) {
@@ -1312,6 +1434,88 @@ export async function initLegate(
           `Without this, the agent-deck-managed heartbeat sends a "Heartbeat:" message ` +
           `that the legate CLAUDE.md does not recognize as a trigger — the conductor ` +
           `will receive periodic messages but never run babysit/cleanup/dispatch.`,
+      );
+    }
+
+    // Pin the conductor's heartbeat cadence via a systemd drop-in override.
+    // agent-deck's default is 15 min (set globally in
+    // `~/.agent-deck/config.toml`); 5 min is the legate sweet spot — fast
+    // enough that stuck workers are noticed promptly, slow enough that we
+    // don't burn through tokens on no-op ticks. The drop-in is per-conductor
+    // so multiple legates can coexist with different cadences if needed.
+    // Linux-only: macOS has no systemd; on other platforms we skip with a
+    // warning and the operator can pin the cadence manually.
+    if (isLinuxLike) {
+      const timerUnitPath = path.join(
+        home,
+        ".config",
+        "systemd",
+        "user",
+        `agent-deck-conductor-heartbeat-${conductorName}.timer`,
+      );
+      const timerUnitExists = await fs
+        .stat(timerUnitPath)
+        .then(() => true)
+        .catch(() => false);
+      if (!timerUnitExists) {
+        postSetupWarnings.push(
+          `Heartbeat timer unit not found at ${timerUnitPath}. agent-deck did not ` +
+            `install a per-conductor systemd timer — the cadence-override drop-in ` +
+            `was not written. The conductor will fall back to whatever cadence the ` +
+            `agent-deck bridge daemon uses (default 15 min, from ` +
+            `~/.agent-deck/config.toml's [conductor].heartbeat_interval).`,
+        );
+      } else {
+        try {
+          await writeHeartbeatTimerOverride(
+            home,
+            conductorName,
+            heartbeatInterval,
+          );
+          heartbeatOverrideWritten = true;
+          // daemon-reload + restart so the new cadence takes effect this
+          // run. Best-effort: if either fails the override file is still on
+          // disk and a subsequent host reboot picks it up, so we warn rather
+          // than abort.
+          try {
+            execFileSync("systemctl", ["--user", "daemon-reload"], {
+              stdio: "ignore",
+            });
+            execFileSync(
+              "systemctl",
+              [
+                "--user",
+                "restart",
+                `agent-deck-conductor-heartbeat-${conductorName}.timer`,
+              ],
+              { stdio: "ignore" },
+            );
+          } catch (err) {
+            postSetupWarnings.push(
+              `Wrote heartbeat-cadence override (${heartbeatInterval}) but failed to ` +
+                `reload/restart the timer: ${(err as Error).message}\n` +
+                `The new cadence will take effect after the next host reboot, or ` +
+                `you can apply it manually:\n` +
+                `  systemctl --user daemon-reload\n` +
+                `  systemctl --user restart agent-deck-conductor-heartbeat-${conductorName}.timer`,
+            );
+          }
+        } catch (err) {
+          postSetupWarnings.push(
+            `Failed to write heartbeat-cadence override (${heartbeatInterval}) ` +
+              `for ${conductorName}: ${(err as Error).message}\n` +
+              `The conductor will fall back to the agent-deck default cadence ` +
+              `(15 min). Pin manually by creating ` +
+              `~/.config/systemd/user/agent-deck-conductor-heartbeat-${conductorName}.timer.d/override.conf.`,
+          );
+        }
+      }
+    } else {
+      postSetupWarnings.push(
+        `Heartbeat-cadence override is currently Linux/WSL2 only (this host: ` +
+          `${process.platform}). The conductor will run at the agent-deck default ` +
+          `cadence (15 min, from ~/.agent-deck/config.toml's [conductor].heartbeat_interval). ` +
+          `To pin a different cadence, configure the platform-equivalent scheduler manually.`,
       );
     }
 
@@ -1508,6 +1712,13 @@ export async function initLegate(
           : "NOT active — conductor will only respond to manual session-send messages; see warnings"
         : "deferred (run setup first)"
     }`,
+    `  Heartbeat:      ${
+      setupRan
+        ? heartbeatOverrideWritten
+          ? `${heartbeatInterval} (pinned via systemd drop-in override)`
+          : `${heartbeatInterval} requested — override NOT written; see warnings`
+        : `${heartbeatInterval} (deferred — run setup first)`
+    }`,
     `  Skills:         ${skillsLine}`,
     "",
   ];
@@ -1562,6 +1773,8 @@ export async function initLegate(
     setupRan,
     autoModeConfigured,
     bridgeActive,
+    heartbeatInterval,
+    heartbeatOverrideWritten,
     summary: summaryLines.join("\n"),
   };
 }
