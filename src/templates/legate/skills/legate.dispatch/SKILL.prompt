@@ -1,12 +1,12 @@
 ---
 name: legate.dispatch
-description: "Mini-legate's new-work-launch skill. Use after `legate.babysit` reports clean (or with spare cycles) to consult `smithy status`, sync the default branch, and launch one new worker on the next ready slice. Triggers: heartbeat ticks where babysit has no urgent action, operator request for any planning verb (`/smithy.render`, `/smithy.mark`, `/smithy.cut`) or `/smithy.forge`, slice-merge events that unblock the next step. Skip for managing existing PRs (that's `legate.babysit`). Operators can disable this skill on repos where the conductor should only manage existing PRs."
+description: "Mini-legate's new-work-launch skill. Runs on every heartbeat after babysit/merge/cleanup, independent of their state — consults `smithy status`, syncs the default branch, and launches workers on ready slices that have no in-flight worker yet. Triggers: heartbeat ticks, operator request for any planning verb (`/smithy.render`, `/smithy.mark`, `/smithy.cut`) or `/smithy.forge`, slice-merge events that unblock the next step. Skip for managing existing PRs (that's `legate.babysit`). Operators can disable this skill on repos where the conductor should only manage existing PRs."
 allowed-tools: Bash(.claude/skills/legate.dispatch/scripts/sync-default-branch.sh:*) Bash(.claude/skills/legate.dispatch/scripts/launch-worker.sh:*) Bash(.claude/skills/legate.dispatch/scripts/inspect-worker.sh:*) Bash(.claude/skills/legate.dispatch/scripts/smithy-status.sh:*) Bash(.claude/skills/legate.dispatch/scripts/find-ready-slices.sh:*)
 ---
 
 # Skill: legate.dispatch (new-work mechanics)
 
-This skill picks the next ready Smithy work item, syncs the default branch, and launches a new worker. Load it **after** `legate.babysit` on every heartbeat — only one new dispatch per heartbeat, only when babysit has nothing pressing to do.
+This skill picks ready Smithy work items, syncs the default branch, and launches new workers. Load it **last** on every heartbeat (after resume → babysit → merge → cleanup). Run it **regardless of what babysit found** — new dispatches create new workers on new branches in new worktrees and don't interfere with in-flight PRs that babysit is shepherding. Iterate over every ready item and launch one worker per item that doesn't already have one.
 
 Load via `Skill(skill="legate.dispatch")`. The classifier registers the allowed-tools for the rest of the session.
 
@@ -14,16 +14,17 @@ Load via `Skill(skill="legate.dispatch")`. The classifier registers the allowed-
 
 ## When to dispatch
 
-Run this protocol on every heartbeat after the babysit pass completes:
+Run this protocol on **every** heartbeat — there is no babysit-clean gate. A PR sitting in `pr-in-fix`, `pr-rebasing`, `pr-in-rerun`, or `pr-resolving-conflicts` does not block new dispatch: each new worker lives in its own worktree on its own branch, so a stuck implementation slice has no contention with a fresh `smithy.cut`/`smithy.forge`/`smithy.mark`/`smithy.render` on a different artifact. The previous "babysit must be clean" gate stranded conductors for hours when one PR was cycling fix-comments; that gate is removed.
 
-1. **For forge/cut candidates only: babysit must have nothing urgent in flight.** If any tracked PR is `pr-resolving-conflicts`, `pr-rebasing`, `pr-in-rerun`, or `pr-in-fix`, prefer letting the existing dispatches converge before stacking another **forge or cut** on top — those verbs produce slice-level work that shares branches and review attention with the stuck PR. Spare cycles for forge/cut only exist when in-flight work is parked waiting on operator merge or external CI.
+For each ready item from `smithy status`, dispatch when all of the following hold:
 
-   This gate does **not** apply to `smithy.render` or `smithy.mark` candidates. Render writes a new `.features.md` (and updates a milestone Artifact cell on the parent RFC); mark writes a new spec folder (and updates a feature Artifact cell on the parent feature map). Neither verb touches any spec, tasks file, branch, or PR that an in-flight forge/cut is working on, so a stuck implementation slice is no reason to delay upstream planning. If a render or mark is the highest-priority ready item per `smithy status`, dispatch it even when a forge/cut is parked.
-2. **`smithy status` reports a ready item.** Use the script (below) — never compose `smithy` commands directly.
-3. **All dependencies of the ready item have merged PRs.** In the normal heartbeat order (babysit → cleanup → dispatch), a merged dep has already been moved into `state.json.archived_slices.<id>` by the time you run — that's the primary place to check. A dep can also still appear in `state.json.slices.<id>` with `pr.state == "MERGED"` if cleanup *failed* to archive it on this or a prior heartbeat (look for `last_action_note: "cleanup failed: ..."`); treat that as merged for dep-check but expect cleanup to retry it next heartbeat. Do not preempt the merge gate.
-4. **You have not already dispatched a new worker this heartbeat.** Cap is one new launch per tick — keeps the loop pace operator-paceable.
+1. **`smithy status` reports it as ready** with a non-null `next_action`. Use the wrapper script (below) — never compose `smithy` commands directly.
+2. **All dependencies have merged PRs.** Check `state.json.archived_slices.<id>` first (cleanup moves merged deps there on the same heartbeat), then fall back to `state.json.slices.<id>` with `pr.state == "MERGED"` if cleanup hasn't archived yet (look for `last_action_note: "cleanup failed: ..."` to know that's why). Do not preempt the merge gate — an unmerged forge predecessor blocks the dependent forge regardless of how many heartbeats have elapsed.
+3. **No worker is already in flight for this artifact.** Look for an existing `state.json.slices.<id>` whose `command` + `arguments` (or `branch`) match this ready item. If one exists in any non-terminal stage, skip this item — the existing worker owns it. Do not stack a second worker on the same slice.
 
-If any of (1)–(4) is false, do nothing this heartbeat and let the babysit reply describe the holding pattern. When (1) gates a forge/cut but a render/mark is ready, the render/mark wins — log the holding pattern for the gated forge/cut and dispatch the planning verb.
+Items that pass all three are dispatched. The order matters when multiple items are ready: see *Prioritization* below.
+
+There is **no hard cap on dispatches per heartbeat**. Launch one worker per ready, undispatched, dep-merged item in this heartbeat. The natural rate limit is "items that pass the three gates above", and `launch-worker.sh` is the only path that creates sessions — so the dispatch count is bounded by the size of the ready set, not by an arbitrary tick budget.
 
 ---
 
@@ -127,9 +128,11 @@ Add a new entry under `slices.<slice-id>` per the schema in `CLAUDE.md`:
 
 `actual_branch` and `pr.number` are filled in by `legate.babysit` on the worker's next `running → waiting` transition (when `discover-pr.sh` finds the URL the worker printed when it ran `gh pr create`).
 
-### 6. Stop
+### 6. Loop or stop
 
-You launched one worker. That's the cap per heartbeat. Yield back to the conductor for its `[STATUS]` reply. The next heartbeat re-runs babysit first; only after babysit reports clean does this skill get another chance to dispatch.
+You launched one worker. If more items in the ready set pass the three gates (ready, deps merged, no in-flight worker on the same artifact), repeat steps 3–5 for each — there is no per-heartbeat dispatch cap. When the ready set is exhausted (or every remaining item is blocked by a still-in-flight worker on the same artifact), yield back to the conductor for its `[STATUS]` reply.
+
+Each launch is serialized: complete the worker creation + `state.json` write for slice N before starting slice N+1, so a failure on N+1 doesn't leave N half-recorded. Re-call `find-ready-slices.sh` between launches if a long-running launch could have changed the ready set (unusual, but harmless to re-check).
 
 ---
 
@@ -154,7 +157,9 @@ All scripts emit JSON to stdout, progress to stderr, and exit 0/1/2 for success/
 
 ## Standing rules
 
-- **One new dispatch per heartbeat.** Hard cap. Even if multiple slices are ready, launch one and yield.
-- **Sync default before launching.** Always. Skipping this is how stale-base PRs slip out.
+- **No per-heartbeat cap on dispatch count.** Launch one worker per item in the ready set that passes the three gates (ready, deps merged, no in-flight worker on the same artifact). The natural rate limit is the size of the ready set.
+- **No babysit-clean gate.** Dispatch runs every heartbeat regardless of what babysit found. A PR in `pr-in-fix`/`pr-rebasing`/`pr-in-rerun`/`pr-resolving-conflicts` is babysit's problem to shepherd; dispatching new work on a different artifact does not interfere with it.
+- **Sync default before launching.** Always. Skipping this is how stale-base PRs slip out. Sync once per heartbeat before the first launch, not per-launch.
 - **Never bypass the merge gate.** Forges wait for their dependency PRs to merge. Cuts on parallel user stories are fine; cuts that depend on each other are not.
+- **One worker per artifact.** If `state.json.slices.<id>` already exists for an artifact in a non-terminal stage, do not stack a second worker on it. The in-flight worker owns the work.
 - **`launch-worker.sh` is the only path that creates new sessions.** Don't compose `agent-deck launch` directly — the script wires the non-negotiable flags (`--worktree -b --title-lock --extra-arg ...`).
