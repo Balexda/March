@@ -19,12 +19,12 @@
 
 - [ ] **Define `SpawnBackend` interface in `src/spawn-backend.ts`**
 
-  Create `src/spawn-backend.ts` exporting a `SpawnBackend` interface with the four members specified in the contracts (`name`, `baseImage`, `requiredEnvVars`, `buildEntrypoint`) and no others. The `buildEntrypoint` return type is the structural-compatibility commitment AS 2.5 names — it must be assignable to the entrypoint argv shape `launchSpawnContainer` consumes today, without modifying `src/container-launch.ts`.
+  Create `src/spawn-backend.ts` exporting a `SpawnBackend` interface with the four members specified in the contracts (`name`, `baseImage`, `requiredEnvVars`, `buildEntrypoint`) and no others. The `buildEntrypoint` return type is the structural-compatibility commitment AS 2.5 names — it must be assignable to the return type of the existing F2 `buildClaudeCodeEntrypoint` helper in `src/container-launch.ts` (the argv form `launchSpawnContainer` passes to `docker run`), without modifying `src/container-launch.ts`.
 
   _Acceptance criteria:_
   - Interface declares exactly the four members named in AS 2.1; no `validateAuth`, `parseExitCode`, or `cliCommand`.
   - `requiredEnvVars` and `buildEntrypoint`'s return type use the `readonly` array modifier per the contract.
-  - `buildEntrypoint`'s return type is structurally assignable to the entrypoint argv shape consumed by `launchSpawnContainer` (AS 2.5) — verified by a type-level assertion in tests, not by modifying `LaunchSpawnContainerInput` (that field is US5's deliverable).
+  - `buildEntrypoint`'s return type is structurally assignable to the return type of the existing F2 `buildClaudeCodeEntrypoint` helper in `src/container-launch.ts` (AS 2.5) — verified by a type-level assertion in tests. `LaunchSpawnContainerInput` (today: `{ spawnId: string }`) is NOT modified in US2; the `backend: SpawnBackend` field that `LaunchSpawnContainerInput` will gain is US5's deliverable.
   - A plain object literal satisfying all four members compiles without a cast.
   - File is new; no existing `src/*.ts` file is touched.
 
