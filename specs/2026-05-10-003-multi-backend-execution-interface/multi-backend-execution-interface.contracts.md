@@ -47,7 +47,7 @@ All other F2 outputs (worktree, branch, image, container, status print) are unch
 |-----------|-----------|-------------|
 | Unknown backend (from `--backend` flag) | 2 (USAGE_ERROR) | Error names the rejected value, identifies `--backend` flag as the source, and lists registered backend names. |
 | Unknown backend (from `MARCH_BACKEND` env var) | 2 (USAGE_ERROR) | As above, but the source attribution is `MARCH_BACKEND env var`. |
-| Selected backend's `requiredEnvVars` not all set in operator's environment | 2 (USAGE_ERROR) | Auth pre-flight failure. Error names the backend and each missing variable. Runs BEFORE Stage 2 (Worktree); no worktree, branch, image, or container is created. |
+| Selected backend's `requiredEnvVars` not all set in operator's environment | 2 (USAGE_ERROR) | Auth pre-flight failure. Error names the backend and each missing variable. Runs BEFORE Stage 2 (Worktree), so no spawn-scoped artifacts (worktree, branch, snapshot image, container) are produced. The Stage 1 dependency check may have already pulled the backend's base image to the host cache; that pre-existing pull is not rolled back. |
 | Selected backend's `baseImage` not available | 1 | Stage 1 dependency check (existing F2 contract); error message names the per-backend image rather than a global `BASE_IMAGE`. |
 
 All other F2 error conditions are unchanged.
@@ -184,7 +184,7 @@ The values of present-but-empty env vars are never echoed; no prefix of any valu
 
 #### Cleanup ordering
 
-Unchanged from F2. Cleanup runs in reverse order (container → image → worktree+branch). Auth pre-flight failures (Stage 1.5) produce no artifacts; nothing to clean up.
+Unchanged from F2. Cleanup runs in reverse order (container → snapshot image → worktree+branch). Auth pre-flight failures (Stage 1.5) produce no spawn-scoped artifacts (no worktree, branch, snapshot image, or container), so there is nothing for the dispatch action to clean up. A base image pulled by the Stage 1 dependency check before the pre-flight ran is a host-level cache entry and is intentionally retained.
 
 ---
 
