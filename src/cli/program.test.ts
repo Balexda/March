@@ -183,6 +183,20 @@ describe("march CLI", () => {
       expect(result.stdout).toContain("--profile");
       expect(result.stdout).toContain("--name");
       expect(result.stdout).toContain("--no-setup");
+      expect(result.stdout).toContain("--with-container");
+    });
+
+    it("`march legate init --with-container` without docker exits 1 with a docker-specific message", () => {
+      const fakeBin = makeFakeBin(["git"]); // git only, no docker
+      const nodeBinDir = path.dirname(process.execPath);
+      const result = runWithEnv(
+        ["legate", "init", "--with-container"],
+        { PATH: `${nodeBinDir}${path.delimiter}${fakeBin}`, HOME: makeTmpDir() },
+      );
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toContain("Docker not found on PATH");
+      expect(result.stderr).toContain("--with-container");
+      expect(result.stderr).not.toContain("agent-deck not found");
     });
 
     it("`march legate init` outside a git repository exits 1 with a clear message", () => {

@@ -1220,6 +1220,18 @@ describe("legate module", () => {
       expect(result.summary).toContain("Heartbeat:");
       expect(result.summary).toContain("7min");
     });
+
+    it("rejects withContainer when setup is skipped because no conductor dir exists to mount", async () => {
+      const home = makeTmpDir();
+      await expect(
+        initLegate({
+          repoPath: "/some/repo/March",
+          homeDir: home,
+          runSetup: false,
+          withContainer: true,
+        }),
+      ).rejects.toThrow(/requires setup/);
+    });
   });
 
   describe("buildColdStartPrompt", () => {
