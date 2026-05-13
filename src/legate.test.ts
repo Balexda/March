@@ -6,6 +6,7 @@ import { execFileSync } from "node:child_process";
 import {
   buildColdStartPrompt,
   checkBridgeRequirements,
+  DEFAULT_HEARTBEAT_INTERVAL,
   deriveDefaults,
   discoverRepoMetadata,
   ensureInitialState,
@@ -15,6 +16,7 @@ import {
   renderPrompt,
   renderTemplate,
   slugify,
+  writeHeartbeatTimerOverride,
   writeLegateHeartbeatScript,
 } from "./legate.js";
 
@@ -1040,6 +1042,183 @@ describe("legate module", () => {
           `should reject ${label}: ${value}`,
         ).rejects.toThrow(/shell-special characters/);
       }
+    });
+  });
+
+  describe("writeHeartbeatTimerOverride", () => {
+    function overridePath(home: string, name: string): string {
+      return path.join(
+        home,
+        ".config",
+        "systemd",
+        "user",
+        `agent-deck-conductor-heartbeat-${name}.timer.d`,
+        "override.conf",
+      );
+    }
+
+    it("defaults to 5min — faster than agent-deck's 15min so stuck workers are noticed promptly", () => {
+      expect(DEFAULT_HEARTBEAT_INTERVAL).toBe("5min");
+    });
+
+    it("writes the drop-in at the systemd user path keyed on the conductor name", async () => {
+      const home = makeTmpDir();
+      const written = await writeHeartbeatTimerOverride(home, "legate-march", "5min");
+      expect(written).toBe(overridePath(home, "legate-march"));
+      expect(fs.existsSync(written)).toBe(true);
+    });
+
+    it("blanks the parent unit's [Timer] keys before re-setting them so systemd does not accumulate two cadences", async () => {
+      // Regression guard for the systemd drop-in semantics: omitting the
+      // empty `OnBootSec=` / `OnUnitActiveSec=` lines causes systemd to
+      // keep BOTH the 15-min default and the new value, so the timer fires
+      // at the shorter of the two and effectively ignores the override.
+      const home = makeTmpDir();
+      await writeHeartbeatTimerOverride(home, "legate-march", "10min");
+      const body = fs.readFileSync(overridePath(home, "legate-march"), "utf-8");
+      const blank = body.indexOf("OnBootSec=\n");
+      const set = body.indexOf("OnBootSec=10min");
+      expect(blank).toBeGreaterThan(0);
+      expect(set).toBeGreaterThan(blank);
+      expect(body).toContain("OnUnitActiveSec=\n");
+      expect(body).toContain("OnUnitActiveSec=10min");
+    });
+
+    it("includes a reversal recipe in the header comment so operators can undo without grepping man pages", async () => {
+      const home = makeTmpDir();
+      await writeHeartbeatTimerOverride(home, "legate-march", "5min");
+      const body = fs.readFileSync(overridePath(home, "legate-march"), "utf-8");
+      expect(body).toContain(
+        "rm -rf ~/.config/systemd/user/agent-deck-conductor-heartbeat-legate-march.timer.d",
+      );
+      expect(body).toContain("systemctl --user daemon-reload");
+      expect(body).toContain(
+        "systemctl --user restart agent-deck-conductor-heartbeat-legate-march.timer",
+      );
+    });
+
+    it("accepts every common single-unit systemd time-span suffix (review feedback: PR #98)", async () => {
+      // Review caught that the initial regex `(s|min|h|d)` rejected
+      // legitimate single-unit forms like `500ms`, `1w`, and the short
+      // aliases `5m` / `1hr`. Broadened to a common-units alphabet; this
+      // is the positive test guarding regression in that direction.
+      const home = makeTmpDir();
+      for (const value of [
+        "5min",
+        "10min",
+        "300s",
+        "1h",
+        "2d",
+        "500ms",
+        "1w",
+        "1y",
+        "5m", // alias for 5min
+        "1hr", // alias for 1h
+        "100us",
+        "10ns",
+      ]) {
+        await writeHeartbeatTimerOverride(home, "legate-march", value);
+        const body = fs.readFileSync(overridePath(home, "legate-march"), "utf-8");
+        expect(body).toContain(`OnBootSec=${value}`);
+        expect(body).toContain(`OnUnitActiveSec=${value}`);
+      }
+    });
+
+    it("rejects malformed intervals before composing a path or writing anything", async () => {
+      const home = makeTmpDir();
+      // Note: `5m` is *valid* (alias for 5 minutes per systemd.time); not
+      // included here. Composite forms (`1h 30min`) and unknown suffixes
+      // remain rejected — we narrow systemd's full grammar to single-unit
+      // forms so validation can run march-side.
+      for (const bad of [
+        "",
+        "5",
+        "abc",
+        "0min",
+        "-5min",
+        "5 min",
+        "1h 30min", // composite — deliberately unsupported
+        "5mins", // plural — not a systemd suffix
+        "5weeks", // long form — not a systemd suffix
+      ]) {
+        await expect(
+          writeHeartbeatTimerOverride(home, "legate-march", bad),
+        ).rejects.toBeInstanceOf(LegateError);
+      }
+      // No partial dir creation when validation fails.
+      expect(
+        fs.existsSync(
+          path.join(home, ".config", "systemd", "user", "agent-deck-conductor-heartbeat-legate-march.timer.d"),
+        ),
+      ).toBe(false);
+    });
+
+    it("rejects malicious conductor names so override path cannot escape the systemd dir", async () => {
+      const home = makeTmpDir();
+      await expect(
+        writeHeartbeatTimerOverride(home, "../../etc", "5min"),
+      ).rejects.toBeInstanceOf(LegateError);
+    });
+
+    it("overwrites an existing override.conf in place (re-running init updates the cadence)", async () => {
+      const home = makeTmpDir();
+      await writeHeartbeatTimerOverride(home, "legate-march", "15min");
+      await writeHeartbeatTimerOverride(home, "legate-march", "5min");
+      const body = fs.readFileSync(overridePath(home, "legate-march"), "utf-8");
+      expect(body).toContain("OnBootSec=5min");
+      expect(body).not.toContain("OnBootSec=15min");
+    });
+  });
+
+  describe("initLegate heartbeat override", () => {
+    it("threads the heartbeat-interval option through to the result regardless of whether setup ran", async () => {
+      // runSetup: false skips the systemd write — but the resolved interval
+      // (after defaulting + validation) should still surface in the result
+      // so callers can echo it in their summary.
+      const home = makeTmpDir();
+      const result = await initLegate({
+        repoPath: "/some/repo/March",
+        homeDir: home,
+        heartbeatInterval: "10min",
+        runSetup: false,
+      });
+      expect(result.heartbeatInterval).toBe("10min");
+      expect(result.heartbeatOverrideWritten).toBe(false);
+    });
+
+    it("defaults the heartbeat interval to 5min when no flag is passed", async () => {
+      const home = makeTmpDir();
+      const result = await initLegate({
+        repoPath: "/some/repo/March",
+        homeDir: home,
+        runSetup: false,
+      });
+      expect(result.heartbeatInterval).toBe(DEFAULT_HEARTBEAT_INTERVAL);
+      expect(result.heartbeatInterval).toBe("5min");
+    });
+
+    it("rejects an invalid heartbeat-interval value before any agent-deck work begins", async () => {
+      const home = makeTmpDir();
+      await expect(
+        initLegate({
+          repoPath: "/some/repo/March",
+          homeDir: home,
+          heartbeatInterval: "five-minutes",
+          runSetup: false,
+        }),
+      ).rejects.toBeInstanceOf(LegateError);
+    });
+
+    it("includes the heartbeat cadence in the summary so operators see what was pinned", async () => {
+      const home = makeTmpDir();
+      const result = await initLegate({
+        repoPath: "/some/repo/March",
+        homeDir: home,
+        heartbeatInterval: "7min",
+        runSetup: false,
+      });
+      expect(result.summary).toContain("Heartbeat:");
+      expect(result.summary).toContain("7min");
     });
   });
 
