@@ -138,6 +138,20 @@ export const SPAWN_CONFIG: SpawnConfig = {
 export const PROMPT_PATH = "/march/prompt.txt";
 
 /**
+ * In-container working directory baked into the Dockerfile via the
+ * `COPY ... <workdir>` and `WORKDIR <workdir>` lines emitted by
+ * `writeSpawnDockerfile` in `snapshot-build.ts`, and consumed by the
+ * prompt-finalization helper in `prompt-finalize.ts` so the value
+ * cannot drift between the Dockerfile template and the finalized
+ * prompt's `Working Directory: ...` header line.
+ *
+ * Single source of truth: every module that needs to refer to the
+ * spawn container's working directory imports this constant rather
+ * than hardcoding the string `/march/workspace` locally.
+ */
+export const CONTAINER_WORKDIR = "/march/workspace";
+
+/**
  * Interface boundary defining how Feature 2 invokes an AI backend inside a
  * spawn container. Feature 2 ships a single hardcoded implementation
  * ({@link claudeCodeBackend}); Feature 3 introduces polymorphic backend

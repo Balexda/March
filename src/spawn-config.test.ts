@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   BASE_IMAGE,
+  CONTAINER_WORKDIR,
   PROMPT_PATH,
   SPAWN_CONFIG,
   claudeCodeBackend,
@@ -94,6 +95,19 @@ describe("spawn-config", () => {
       // container). Asserted as a literal so the entrypoint argv test below
       // and the Stage 5 destination cannot drift apart.
       expect(PROMPT_PATH).toBe("/march/prompt.txt");
+    });
+  });
+
+  describe("CONTAINER_WORKDIR", () => {
+    it("is the in-container working directory baked into the Dockerfile WORKDIR", () => {
+      // Single source of truth shared by `writeSpawnDockerfile` in
+      // `snapshot-build.ts` (which emits the literal as both the COPY
+      // destination and the WORKDIR) and the `finalizePrompt` helper in
+      // `prompt-finalize.ts` (which embeds it in the `Working Directory: ...`
+      // header line). Asserted as a literal so the Dockerfile content test
+      // in `snapshot-build.test.ts` and the prompt-finalize tests cannot
+      // drift apart.
+      expect(CONTAINER_WORKDIR).toBe("/march/workspace");
     });
   });
 

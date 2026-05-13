@@ -41,7 +41,7 @@
   - Existing consumers of `BASE_IMAGE` (dispatch action, Dockerfile generator) continue to compile and pass tests without import-path churn
   - Unit tests assert the entrypoint array returned for a representative prompt path and the field values for `name`, `baseImage`, and `requiredEnvVars`
 
-- [ ] **Finalize raw prompt with spawn ID and container working directory**
+- [x] **Finalize raw prompt with spawn ID and container working directory**
 
   Add a pure finalization helper alongside the prompt-ingestion module that takes the raw prompt plus the spawn context (spawn ID, container working directory) and returns the finalized prompt string the backend will see. The container working directory must be derived from the Dockerfile `WORKDIR` declared in `src/snapshot-build.ts` rather than hardcoded as a separate literal. AS 6.3 is satisfied by the finalization output.
 
