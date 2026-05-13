@@ -16,12 +16,22 @@
  *   Stage 6 (owned by Story 7) enforces `timeoutSeconds` against the
  *   running container's wall clock.
  *
+ * - {@link PROMPT_PATH} — the in-container path where Stage 5 (Handoff)
+ *   writes the finalized prompt and where {@link claudeCodeBackend}'s
+ *   entrypoint reads it. Single source of truth so the entrypoint command
+ *   and the handoff destination cannot drift apart (SD-004 from US6
+ *   slice 1).
+ * - {@link SpawnBackend} / {@link claudeCodeBackend} — the interface
+ *   boundary Feature 3 polymorphically extends, plus Feature 2's single
+ *   hardcoded Claude Code implementation. Verbatim from the contracts'
+ *   SpawnBackend Interface and Claude Code Implementation sections.
+ *
  * Out of scope (lives elsewhere):
- * - The `SpawnBackend` polymorphic interface — that's Feature 3's
- *   contract boundary, not this module's concern. Feature 2 hardcodes a
- *   single Claude Code backend; Feature 3 will introduce the interface.
  * - Per-backend defaults and configurable security profiles — Hatchery
  *   (M2) makes these editable per profile.
+ * - The Stage 5 handoff helper itself that writes the finalized prompt
+ *   into the running container at {@link PROMPT_PATH} — that lands in
+ *   Task 4 of this same slice.
  *
  * Network policy: Feature 4 (Spawn Sandbox Security) owns network-policy
  * hardening. The default Docker `bridge` network used here is a
@@ -111,4 +121,87 @@ export const SPAWN_CONFIG: SpawnConfig = {
   cpuLimit: "2",
   timeoutSeconds: 3600,
   envWhitelist: ["ANTHROPIC_API_KEY"],
+};
+
+/**
+ * In-container path where the finalized prompt is written by the Stage 5
+ * handoff helper and read by {@link claudeCodeBackend}'s entrypoint via
+ * `$(cat ...)` shell expansion. Single source of truth so the entrypoint
+ * command and the handoff destination cannot drift apart (SD-004 from US6
+ * slice 1).
+ *
+ * Out of scope per the Feature 2 contract: the prompt is NOT baked into
+ * the image — it is delivered to the running container at Stage 5. The
+ * Dockerfile template in `snapshot-build.ts` (`FROM` / `COPY` / `WORKDIR`)
+ * and the `createBuildContext` output in `snapshot.ts` remain untouched.
+ */
+export const PROMPT_PATH = "/march/prompt.txt";
+
+/**
+ * Interface boundary defining how Feature 2 invokes an AI backend inside a
+ * spawn container. Feature 2 ships a single hardcoded implementation
+ * ({@link claudeCodeBackend}); Feature 3 introduces polymorphic backend
+ * selection (Gemini + a selection mechanism) by replacing the hardcoded
+ * import in the dispatch action with a registry lookup keyed on a CLI flag
+ * or configuration.
+ *
+ * Shape comes verbatim from `spawn-dispatch.contracts.md` →
+ * "SpawnBackend Interface".
+ */
+export interface SpawnBackend {
+  /** Backend identifier (e.g. `"claude-code"`, `"gemini"`). */
+  readonly name: string;
+  /** Base Docker image tag that has this backend CLI pre-installed. */
+  readonly baseImage: string;
+  /**
+   * Environment variable names the backend requires (e.g.
+   * `"ANTHROPIC_API_KEY"`). Story 5's Stage 4 Launch will source the
+   * `-e VAR` passthrough flags from this list once Feature 3 lands the
+   * polymorphic backend selection mechanism; for Feature 2 the values
+   * mirror {@link SpawnConfig.envWhitelist}.
+   */
+  readonly requiredEnvVars: readonly string[];
+  /**
+   * Constructs the container entrypoint command. Returns the argv array
+   * docker should exec inside the container. Because Docker's exec form
+   * does not invoke a shell, this returns an explicit `sh -c` wrapper when
+   * shell expansion (e.g. `$(cat ...)`) is required.
+   *
+   * @param promptFilePath - In-container path to the finalized prompt file
+   *   that the Stage 5 handoff helper has written. Typically
+   *   {@link PROMPT_PATH}.
+   * @returns argv array suitable for passing positionally to `docker run`.
+   */
+  buildEntrypoint(promptFilePath: string): string[];
+}
+
+/**
+ * Hardcoded Claude Code backend used by Feature 2. The single source of
+ * truth for the entrypoint command — verbatim from
+ * `spawn-dispatch.contracts.md` → "Claude Code Implementation (Feature 2)".
+ *
+ * The shell wrapper (`sh -c`) is required because Docker's exec form does
+ * not invoke a shell, and the entrypoint relies on `$(cat ...)` shell
+ * expansion to inline the prompt without exposing it on the argv (which
+ * would otherwise show up in `docker inspect` output and process listings
+ * inside the container).
+ *
+ * Feature 3 will:
+ *   1. Add a Gemini implementation with its own `buildEntrypoint` and
+ *      `requiredEnvVars`.
+ *   2. Add a backend selection mechanism (CLI flag or configuration).
+ *   3. May extend {@link SpawnBackend} with additional methods (e.g.,
+ *      `parseExitCode`, `validateAuth`).
+ */
+export const claudeCodeBackend: SpawnBackend = {
+  name: "claude-code",
+  baseImage: BASE_IMAGE,
+  requiredEnvVars: ["ANTHROPIC_API_KEY"],
+  buildEntrypoint(promptFilePath: string): string[] {
+    return [
+      "sh",
+      "-c",
+      `claude -p "$(cat ${promptFilePath})" --output-format json --dangerously-skip-permissions --bare --no-session-persistence`,
+    ];
+  },
 };

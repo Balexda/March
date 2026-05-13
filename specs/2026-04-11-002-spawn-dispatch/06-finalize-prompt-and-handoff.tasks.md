@@ -31,7 +31,7 @@
   - Existing Stages 1–3 of `march spawn dispatch` continue to run unchanged when a valid prompt source is supplied
   - Unit tests exercise each source, the precedence order, and the missing-file/no-source error paths against real temp files and a fake readable stream — no mocking of the module internals
 
-- [ ] **Define `SpawnBackend` interface with hardcoded Claude Code implementation**
+- [x] **Define `SpawnBackend` interface with hardcoded Claude Code implementation**
 
   Extend `src/spawn-config.ts` (per the file's existing header comment, which already pre-announces this growth) with the `SpawnBackend` interface from the contracts' SpawnBackend Interface section and a single hardcoded Claude Code implementation. The implementation's `buildEntrypoint(promptFilePath)` must return the exact command array specified in the contracts' Claude Code Implementation block. `BASE_IMAGE` must remain consistent with `claudeCodeBackend.baseImage` so existing imports from `src/cli.ts` and `src/snapshot-build.ts` continue to work. AS 6.5 is satisfied by the entrypoint this implementation returns.
 

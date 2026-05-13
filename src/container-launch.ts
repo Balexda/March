@@ -1,6 +1,19 @@
 import { execFileSync } from "node:child_process";
-import { SPAWN_CONFIG } from "./spawn-config.js";
+import {
+  PROMPT_PATH,
+  SPAWN_CONFIG,
+  claudeCodeBackend,
+} from "./spawn-config.js";
 import { spawnImageTag } from "./snapshot-build.js";
+
+/**
+ * Re-export of {@link PROMPT_PATH} under the `CONTAINER_PROMPT_PATH` name
+ * preserved for backward compatibility with existing call sites and tests
+ * that imported the constant from this module before US6 slice 1
+ * consolidated it into `spawn-config.ts` (SD-004). New code should import
+ * `PROMPT_PATH` directly from `./spawn-config.js`.
+ */
+export { PROMPT_PATH as CONTAINER_PROMPT_PATH } from "./spawn-config.js";
 
 /**
  * Error thrown by docker run / container-management operations in the
@@ -18,18 +31,6 @@ export class LaunchError extends Error {
     this.name = "LaunchError";
   }
 }
-
-/**
- * In-container path where Story 6 will materialise the finalized prompt
- * file before launch. The Claude Code entrypoint constructed by
- * {@link buildClaudeCodeEntrypoint} reads from this path via
- * `$(cat /march/prompt.txt)`.
- *
- * Exported as a load-bearing contract: any consumer that places a prompt
- * file into the container must use this path, and any future migration to
- * a per-backend `SpawnBackend.buildEntrypoint` must continue to honor it.
- */
-export const CONTAINER_PROMPT_PATH = "/march/prompt.txt";
 
 /** Maximum docker stderr characters surfaced in a {@link LaunchError}. */
 const STDERR_TAIL_CHARS = 4_000;
@@ -70,31 +71,6 @@ function stderrTail(stderr: unknown): string {
   text = text.trimEnd();
   if (text.length <= STDERR_TAIL_CHARS) return text;
   return "…" + text.slice(-STDERR_TAIL_CHARS);
-}
-
-/**
- * Constructs the Claude Code container entrypoint. Returns the argv array
- * docker should exec inside the container, parameterised on the in-container
- * prompt-file path so the future `SpawnBackend.buildEntrypoint(promptFilePath)`
- * migration (Feature 3) is a rename rather than a re-architecting.
- *
- * Output matches the contracts' Claude Code Implementation section verbatim:
- *
- * ```
- * ["sh", "-c",
- *  "claude -p \"$(cat /march/prompt.txt)\" --output-format json --dangerously-skip-permissions --bare --no-session-persistence"]
- * ```
- *
- * The shell wrapper (`sh -c`) is required because Docker's exec form does
- * not invoke a shell, and the entrypoint relies on `$(cat ...)` shell
- * expansion to inline the prompt without exposing it on the argv.
- */
-function buildClaudeCodeEntrypoint(promptFilePath: string): string[] {
-  return [
-    "sh",
-    "-c",
-    `claude -p "$(cat ${promptFilePath})" --output-format json --dangerously-skip-permissions --bare --no-session-persistence`,
-  ];
 }
 
 /** Inputs to {@link launchSpawnContainer}. */
@@ -181,7 +157,7 @@ export function launchSpawnContainer(input: LaunchSpawnContainerInput): string {
     SPAWN_CONFIG.networkMode,
     ...envFlags,
     imageTag,
-    ...buildClaudeCodeEntrypoint(CONTAINER_PROMPT_PATH),
+    ...claudeCodeBackend.buildEntrypoint(PROMPT_PATH),
   ];
 
   let stdout: Buffer | string;
