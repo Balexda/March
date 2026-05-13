@@ -78,7 +78,7 @@ Recommended specification sequence:
 
 | ID | Title                                          | Depends On | Artifact |
 |----|------------------------------------------------|------------|----------|
-| F1 | Profile Schema and Validation Library          | —          | —        |
+| F1 | Profile Schema and Validation Library          | —          | specs/2026-05-12-003-profile-schema-and-validation-library/ |
 | F2 | Profile Storage and Resolution                 | F1         | —        |
 | F3 | Default Profile Materialization via `march init` | F1, F2   | —        |
 | F4 | Hatchery CLI Surface                           | F1, F2     | —        |
