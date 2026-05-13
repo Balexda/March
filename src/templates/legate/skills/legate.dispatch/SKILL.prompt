@@ -126,7 +126,7 @@ Add a new entry under `slices.<slice-id>` per the schema in `CLAUDE.md`:
 }
 ```
 
-`actual_branch` and `pr.number` are filled in by `legate.babysit` on the worker's next `running → waiting` transition (when `discover-pr.sh` finds the URL the worker printed when it ran `gh pr create`).
+`actual_branch` and `pr.number` are filled in by `legate.babysit` on the next heartbeat where `discover-pr.sh` finds the URL the worker printed when it ran `gh pr create` — typically the worker's `running → waiting` transition, but babysit also runs discovery when an `implementing`-stage worker has passed straight through to `idle`.
 
 ### 6. Loop or stop
 

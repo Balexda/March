@@ -5,6 +5,7 @@ This guide is for developers iterating on the mini-legate template: the prompt, 
 > Companion docs in this directory:
 > - [`README.md`](./README.md) — what mini-legate is and how it works conceptually.
 > - [`CLAUDE.md`](./CLAUDE.md) — programmatic state inspection and other agent-facing context.
+> - [`ACCEPTANCE.md`](./ACCEPTANCE.md) — verifiable invariants for post-deploy validation and regression-checking after any template change.
 
 ## Source layout
 
@@ -108,7 +109,22 @@ agent-deck -p <profile> conductor status legate-<slug>
 1. Edit any of: `CLAUDE.prompt`, `snippets/*.md`, `skills/<name>/SKILL.prompt`, or `skills/<name>/scripts/*.sh`.
 2. From inside the same target repo, re-run `march legate init`.
 3. That re-renders, re-stages, re-copies all skill files, re-writes the settings file, and restarts the conductor in one shot. Any previous staged copy is wiped first, so scripts removed in a newer source template don't linger.
-4. On the next heartbeat (or after a forced one), the conductor picks up the new skills.
+4. On the next heartbeat (or after a forced one), the conductor picks up the new **script** content (each script is re-`exec`'d every invocation) and any settings.json changes.
+5. **The conductor does *not* automatically pick up new `SKILL.md` or `CLAUDE.md` content this way.** See below.
+
+### Why a re-deploy isn't enough to refresh `SKILL.md` / `CLAUDE.md` content
+
+`agent-deck session restart` reloads MCPs but resumes the Claude Code conversation rather than starting fresh — the agent's working memory still contains the `SKILL.md` body it loaded on the *previous* `Skill(skill="legate.<name>")` call, and CLAUDE.md is part of the system context that was set at session start. Copying new files onto disk doesn't invalidate either.
+
+To force the running conductor to pick up new SKILL.md content, send an operator message asking it to re-invoke the skill:
+
+```bash
+agent-deck -p <profile> session send conductor-legate-<slug> "Operator note — legate.<skill> SKILL.md has been updated. Please re-load Skill(skill=\"legate.<skill>\") so the new content replaces what's cached in this session's context." --no-wait -q
+```
+
+The agent will re-call `Skill(...)`, the classifier re-reads `SKILL.md` from disk, and subsequent decisions follow the new body. Confirmed working on a live deploy: this is how the babysit Step 2 fix (PR #100) for the "PR stranded on idle implementing-stage worker" coverage gap was validated — the file copy alone was insufficient; an explicit Skill re-load was required before the conductor switched from the old recovery path to the new discovery path.
+
+For CLAUDE.md changes (system context, loop skeleton, status grammar), the operator-nudge trick doesn't work — CLAUDE.md is loaded once at session start. Either wait for natural context compaction or do a hard session reset (clear the `claude_session_id` in the agent-deck DB and restart, or `/clear` inside the tmux pane).
 
 If you touched `src/legate.ts` or `src/cli.ts` (not the template files), rebuild first: `npm run build`.
 
@@ -200,3 +216,4 @@ The conductor's only autonomous trigger is `[HEARTBEAT]` messages. The agent-dec
 - Run `npm test` after any TypeScript or template change. The test suite covers the renderer, the deploy flow, and the script contracts.
 - For interactive testing: pick a low-stakes target repo (or create a throwaway one), run `march legate init` against it, then either (a) wait for a heartbeat, or (b) trigger one manually with `bash <conductor-dir>/heartbeat.sh`. See [`CLAUDE.md`](./CLAUDE.md) for the programmatic inspection patterns.
 - Skill scripts should be runnable standalone for unit checks — they take their inputs as positional args, write JSON to stdout, and use exit codes (0/1/2) so a test can assert success without parsing stderr.
+- For end-to-end validation of conductor behavior — beyond what the unit tests cover — walk through [`ACCEPTANCE.md`](./ACCEPTANCE.md) against a live conductor. Each criterion has a verification command and a stated failure mode.

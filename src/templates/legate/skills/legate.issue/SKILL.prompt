@@ -181,7 +181,7 @@ Add an entry under `slices.issue-<N>`:
 }
 ```
 
-`actual_branch` and `pr` fill in when `legate.babysit`'s `discover-pr.sh` runs on the worker's first `running → waiting` transition — same flow as a Smithy slice. Babysit and cleanup do not need to inspect `kind` to do their work; the discriminator exists for audit trail and for any future skill that needs to filter by origin.
+`actual_branch` and `pr` fill in when `legate.babysit`'s `discover-pr.sh` lands a PR — typically on the worker's first `running → waiting` transition, but babysit also runs discovery for `implementing`-stage workers that have passed straight through to `idle` (see legate.babysit Step 2). Same flow as a Smithy slice. Babysit and cleanup do not need to inspect `kind` to do their work; the discriminator exists for audit trail and for any future skill that needs to filter by origin.
 
 ### 7. Append to `task-log.md`
 
