@@ -63,7 +63,7 @@
   - The helper is exported from its module but is not invoked from the dispatch action; the post-Stage-3 fallthrough placeholder remains in place
   - Unit tests exercise the helper against a stubbed Docker invocation; an integration test gated on a "docker available" check round-trips the prompt through a real container started for the test (mirroring US4's docker-stub-vs-real-daemon pattern) and asserts the file contents inside the container post-handoff
 
-- [ ] **Persist raw prompt onto SpawnRecord before backend handoff**
+- [x] **Persist raw prompt onto SpawnRecord before backend handoff**
 
   Add an `updateSpawnRecordPrompt` helper to `src/spawn-record.ts` alongside the existing `updateSpawnRecordImageId` helper. The helper reads the existing record, sets the `prompt` field to the operator's raw prompt, and writes the record back atomically (temp file + rename) following the existing helpers' pattern. Wire the call into the dispatch action in `src/cli.ts` between prompt resolution (Task 1) and Stage 4 (Launch — owned by Story 5) so the record is data-model-conformant before any downstream consumer reads it. This closes SD-004 from `03-isolated-worktree-and-branch.tasks.md`.
 

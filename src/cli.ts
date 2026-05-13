@@ -26,6 +26,7 @@ import {
   removeSpawnRecord,
   SpawnRecordError,
   updateSpawnRecordImageId,
+  updateSpawnRecordPrompt,
   writeInitialSpawnRecord,
 } from "./spawn-record.js";
 import { updateMarch, UpdateError } from "./update.js";
@@ -395,13 +396,6 @@ program
         }
         throw err;
       }
-      // `prompt` is intentionally unused at this slice level — Tasks 3 and
-      // 5 wire it into finalizePrompt() and updateSpawnRecordPrompt().
-      // Silencing the "unused variable" warning with a void reference
-      // keeps the seam visible without a // @ts-ignore that future tasks
-      // would have to remember to remove.
-      void prompt;
-
       // checkSpawnDependencies has already verified we're inside a git
       // repo; re-run `git rev-parse --show-toplevel` here to capture the
       // absolute repo root for the worktree + SpawnRecord modules.
@@ -445,6 +439,40 @@ program
         });
       } catch (err) {
         removeSpawnRecord(worktree.spawnId);
+        removeSpawnWorktree(repoRoot, worktree);
+        const message =
+          err instanceof SpawnRecordError
+            ? err.message
+            : (err as Error).message;
+        process.stderr.write(message + "\n");
+        process.exitCode = ERROR;
+        return;
+      }
+
+      // Stage 2b — backfill the operator's raw prompt onto the SpawnRecord
+      // before any downstream consumer reads the record. Closes SD-004
+      // from `03-isolated-worktree-and-branch.tasks.md` so any record
+      // reaching `"running"` or beyond carries a populated `prompt` field
+      // per the data-model SpawnRecord entity.
+      //
+      // On failure, transition the record to `"failed"` (per FR-021 and
+      // the data-model `created → failed` transition) BEFORE running the
+      // reverse-order cleanup chain so even if cleanup itself fails
+      // partway through, the on-disk record reflects the failure for
+      // auditing. The only artifacts to clean up at this stage are the
+      // worktree + branch (no image, no container yet).
+      try {
+        updateSpawnRecordPrompt(worktree.spawnId, prompt);
+      } catch (err) {
+        try {
+          markSpawnRecordFailed(worktree.spawnId, {
+            error: (err as Error).message,
+          });
+        } catch (markErr) {
+          process.stderr.write(
+            `warning: failed to transition spawn record to "failed" for spawn ${worktree.spawnId}: ${(markErr as Error).message}; the record file may be in an inconsistent state.\n`,
+          );
+        }
         removeSpawnWorktree(repoRoot, worktree);
         const message =
           err instanceof SpawnRecordError

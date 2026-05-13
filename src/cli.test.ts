@@ -631,6 +631,11 @@ describe("march CLI", () => {
     expect(record.startedAt).toMatch(
       /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/,
     );
+    // US6 Task 5: the operator's raw prompt is persisted onto the record
+    // BEFORE Stage 3 begins, so any record reaching "running" (or beyond)
+    // carries the prompt field. Closes SD-004 from
+    // 03-isolated-worktree-and-branch.tasks.md.
+    expect(record.prompt).toBe("test prompt");
     // Terminal-state fields remain absent until Story 7's lifecycle wait
     // populates them on container exit.
     expect(record.exitCode).toBeUndefined();
@@ -714,6 +719,9 @@ describe("march CLI", () => {
     // imageId must NOT be populated — the build failed before
     // updateSpawnRecordImageId ran.
     expect(record.imageId).toBeUndefined();
+    // US6 Task 5: the prompt is persisted BEFORE Stage 3, so a Stage 3
+    // build failure preserves the prompt on the failed record.
+    expect(record.prompt).toBe("test prompt");
   });
 
   it("spawn dispatch: container launch failure transitions SpawnRecord to failed and cleans up image+worktree+branch", () => {
@@ -799,6 +807,9 @@ describe("march CLI", () => {
     // before markSpawnRecordRunning could populate either field.
     expect(record.containerId).toBeUndefined();
     expect(record.startedAt).toBeUndefined();
+    // US6 Task 5: the prompt is persisted BEFORE Stage 3, so a Stage 4
+    // launch failure preserves the prompt on the failed record.
+    expect(record.prompt).toBe("test prompt");
   });
 
   it("spawn dispatch: worktree creation failure rolls back branch and leaves no SpawnRecord", () => {
