@@ -63,14 +63,14 @@ The command MUST be run inside a git repository (the repo path is detected by wa
 march herald diff <prev-snapshot-path> <next-snapshot-path>
 ```
 
-Either path may be the literal string `null` to denote "no prior snapshot" (first observation case).
+`<prev-snapshot-path>` may be the literal string `null` to denote "no prior snapshot" (first observation case). `<next-snapshot-path>` MUST be a path to a readable snapshot file — there is no defined behavior for a `null` next snapshot, and the CLI rejects it as a usage error.
 
 #### Inputs
 
 | Parameter              | Type   | Required | Description                                                                                          |
 |------------------------|--------|----------|------------------------------------------------------------------------------------------------------|
-| `<prev-snapshot-path>` | string | Yes      | Path to the prior snapshot JSON, or the literal `null`.                                              |
-| `<next-snapshot-path>` | string | Yes      | Path to the fresh snapshot JSON.                                                                     |
+| `<prev-snapshot-path>` | string | Yes      | Path to the prior snapshot JSON, or the literal `null` (first observation).                          |
+| `<next-snapshot-path>` | string | Yes      | Path to the fresh snapshot JSON. MUST be a readable file; `null` is not accepted here.               |
 
 #### Outputs
 
@@ -188,7 +188,7 @@ The literal payload sent to the conductor is the six-character string `[EVENT]`.
 | Parameter                       | Type    | Required | Description                                                                                       |
 |---------------------------------|---------|----------|---------------------------------------------------------------------------------------------------|
 | `<profile>`                     | string  | Yes      | The agent-deck profile both conductors live in. Read from `meta.json.profile`.                    |
-| `<paired-legate-conductor-id>`  | string  | Yes      | The target legate conductor's session id (or title). Read from `meta.json.paired_legate`.         |
+| `<paired-legate-conductor-id>`  | string  | Yes      | The target legate conductor's **name** (e.g., `legate-march`) as stored in `meta.json.paired_legate`. The daemon passes this string verbatim to `agent-deck session send`, which resolves it against the profile's conductor registry (agent-deck accepts a conductor name, session id, or title interchangeably here). `meta.json.paired_legate` MUST store the conductor name, not the prefixed tmux title (`conductor-<name>`) or the numeric session id, since those are agent-deck implementation details that can change. |
 
 #### Outputs
 
@@ -258,9 +258,17 @@ The full 14-kind PR event vocabulary is defined in the data model document. Cons
 
 The single `[EVENT]` doorbell described above. No other signal types are defined.
 
-### Inbound events (consumers → herald)
+### Inbound signals (legate → herald)
 
-None. Herald is a pure producer of events and signals; consumers have no upward path to herald.
+One signal is defined: a **cleanup signal** sent by `legate.cleanup` when it tears down a slice (worker session removed, worktree pruned, slice fully removed from `state.json`). The signal MUST cause herald to delete the per-PR snapshot file and remove or archive the PR's events from `events.ndjson`.
+
+The signal's wire protocol is captured as SD-008 in the spec — the principle ("only herald writes to herald-owned files") is fixed, but the exact mechanism is open. Candidate mechanisms include:
+
+- A file-drop into a herald-owned inbox directory (e.g., `~/.agent-deck/conductor/herald-<slug>/inbox/cleanup-pr-<N>.json`). Durable and observable; mildly bends "only herald writes" to "only herald writes outside the inbox."
+- An `agent-deck session send` of a recognizable cleanup-signal string (e.g., `[CLEANUP pr=<N>]`) to herald's tmux pane, parsed by the daemon loop. Symmetric with the doorbell but fragile under busy ticks.
+- A herald-supplied script (e.g., `cleanup-pr.sh <pr-number>`) invoked synchronously by `legate.cleanup` and ratified as a herald-owned mutation surface. Simplest; concentrates mutation logic in herald's repo even when invoked from outside.
+
+The spec deliberately does not pick a mechanism here. The chosen approach will be specified during the implementation slice that delivers FR-022 / SD-008.
 
 ## Integration Boundaries
 

@@ -52,7 +52,7 @@ Location: `~/.agent-deck/conductor/herald-<slug>/events.ndjson` (single file per
 | `ts`              | string    | Yes      | ISO-8601 UTC timestamp of when the event was emitted (same instant as the diff that produced it).                            |
 | `prev`            | any       | Yes      | Prior value of the changed field on the snapshot. Type varies by `kind` (see taxonomy). `null` allowed only for `pr.opened`.|
 | `next`            | any       | Yes      | New value of the changed field on the snapshot. Type varies by `kind`.                                                      |
-| `ref`             | string    | No       | Discriminator for thread events (thread id) and `pr.head_pushed` (head SHA). Omitted on kinds where no ref applies.         |
+| `ref`             | string \| integer | No | Discriminator for thread events and `pr.head_pushed`. For `pr.thread_*` kinds, `ref` is the GraphQL `databaseId` integer (matches `unresolved_threads[].id` from the snapshot). For `pr.head_pushed`, `ref` is the head SHA string. Omitted on kinds where no ref applies. Consumers MUST handle both numeric and string forms. |
 
 Validation rules:
 - `seq` is strictly increasing line by line. A reader that observes a gap or a non-increasing value MUST treat the file as corrupt and surface an error rather than silently skipping.
@@ -96,7 +96,8 @@ Location: `~/.agent-deck/conductor/<legate-name>/herald-cursor.json` (lives insi
 
 Validation rules:
 - Cursor write is atomic (temp + rename) so a crash mid-write does not corrupt the file.
-- If the cursor file is absent or corrupt, the consumer treats `last_seq` as `0` and reads from the beginning. Exact replay semantics (read all vs read from tail vs persist `last_seq` elsewhere as backup) are open — see SD-004.
+- If the cursor file is **absent**, the consumer treats `last_seq` as `0` and reads from the beginning (cold-start replay).
+- If the cursor file is **present but corrupt** (unparseable JSON, missing required fields, or schema_version mismatch), the consumer's read script exits 2 *without modifying the cursor* and surfaces the corruption to its caller. The caller decides whether to invoke `reset-cursor.sh` (which deliberately replays from `last_seq = 0`) or escalate to the operator. This split intentionally avoids silently re-processing the entire log on transient corruption, while preserving the cold-start replay path for the genuinely-absent case. See SD-004 for the open tail on automated corruption recovery.
 - The consumer MUST advance the cursor only after it has successfully processed the read batch. A read script that returns events but fails to update the cursor before its caller crashes will deliver duplicates on the next read; this is preferable to silently losing events.
 
 ### 4) Herald Conductor Meta (`meta.json`)
@@ -146,7 +147,11 @@ Validation rules:
 
 4. **captured → archived** (PR drops out of legate's tracked set)
    - Trigger: PR is no longer present in either `state.json.slices` or `state.json.archived_slices` (i.e., legate's `legate.cleanup` has fully pruned the slice).
-   - Effects: snapshot is no longer refreshed. Cleanup of the on-disk file is governed by SD-002 and is not specified here.
+   - Effects: snapshot is no longer refreshed by the poll loop.
+
+5. **archived → removed** (cleanup signal received)
+   - Trigger: `legate.cleanup` signals herald that a slice was torn down (FR-022). The wire protocol is SD-008.
+   - Effects: herald deletes the per-PR snapshot file. The PR's prior events in `events.ndjson` may also be rotated or archived as part of the same cleanup, per SD-001's resolution to a cleanup-driven model.
 
 ### Event log lifecycle
 
