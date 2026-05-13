@@ -183,12 +183,14 @@ docker run \
 The backend entrypoint command is constructed by the `SpawnBackend.buildEntrypoint()` method. Because Docker's exec form (`["cmd", "arg", ...]`) does not invoke a shell, the entrypoint must explicitly use `sh -c` when shell expansion is needed. For Claude Code:
 
 ```
-sh -c 'claude -p "$(cat /march/prompt.txt)" \
+sh -c 'claude -p "$(cat "/march/prompt.txt")" \
   --output-format json \
   --dangerously-skip-permissions \
   --bare \
   --no-session-persistence'
 ```
+
+The inner double quotes around the path inside `$(...)` are intentional: they keep `cat` correct against paths containing spaces or shell metacharacters. POSIX sh re-opens parsing inside `$(...)`, so the nested `"..."` is well-formed.
 
 #### Snapshot Exclusion List
 
@@ -277,7 +279,7 @@ cliCommand: "claude"
 requiredEnvVars: ["ANTHROPIC_API_KEY"]
 buildEntrypoint("/march/prompt.txt"):
   ["sh", "-c",
-   "claude -p \"$(cat /march/prompt.txt)\" --output-format json --dangerously-skip-permissions --bare --no-session-persistence"]
+   "claude -p \"$(cat \"/march/prompt.txt\")\" --output-format json --dangerously-skip-permissions --bare --no-session-persistence"]
 ```
 
 Feature 3 will:

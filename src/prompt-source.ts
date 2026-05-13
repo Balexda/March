@@ -89,24 +89,19 @@ export class PromptSourceError extends Error {
 
 /**
  * Read a `Readable` stream to end and return its contents as a UTF-8 string.
- * Buffers `data` chunks (handling both Buffer and string emissions) and
- * resolves once `end` fires. Rejects on stream errors.
+ * Uses the async-iterator protocol so listeners are attached and detached by
+ * the Node runtime automatically — no manual `removeListener` cleanup needed,
+ * no risk of listener accumulation if the same stream is reused, and stream
+ * errors propagate as rejections directly.
  */
-function readStreamToString(
+async function readStreamToString(
   stream: NodeJS.ReadableStream,
 ): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const chunks: Buffer[] = [];
-    stream.on("data", (chunk: Buffer | string) => {
-      chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
-    });
-    stream.on("end", () => {
-      resolve(Buffer.concat(chunks).toString("utf-8"));
-    });
-    stream.on("error", (err) => {
-      reject(err);
-    });
-  });
+  const chunks: Buffer[] = [];
+  for await (const chunk of stream as AsyncIterable<Buffer | string>) {
+    chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
+  }
+  return Buffer.concat(chunks).toString("utf-8");
 }
 
 /**

@@ -148,10 +148,15 @@ describe("spawn-config", () => {
       // does not invoke a shell, and the entrypoint relies on `$(cat ...)`
       // shell expansion to inline the prompt without exposing it on the
       // argv. AS 6.5 is satisfied by this exact array.
+      // The inner double quotes around the path inside `$(...)` are a
+      // defensive tightening over the contracts' literal example so paths
+      // with spaces or shell metacharacters cannot break parsing or inject.
+      // POSIX sh re-opens parsing inside `$(...)`, so the nesting is
+      // well-formed and `cat` still receives the path as a single argument.
       expect(claudeCodeBackend.buildEntrypoint(PROMPT_PATH)).toEqual([
         "sh",
         "-c",
-        `claude -p "$(cat /march/prompt.txt)" --output-format json --dangerously-skip-permissions --bare --no-session-persistence`,
+        `claude -p "$(cat "/march/prompt.txt")" --output-format json --dangerously-skip-permissions --bare --no-session-persistence`,
       ]);
     });
 
@@ -165,7 +170,7 @@ describe("spawn-config", () => {
       expect(argv).toHaveLength(3);
       expect(argv[0]).toBe("sh");
       expect(argv[1]).toBe("-c");
-      expect(argv[2]).toContain("$(cat /some/other/path)");
+      expect(argv[2]).toContain(`$(cat "/some/other/path")`);
       expect(argv[2]).not.toContain("/march/prompt.txt");
     });
   });

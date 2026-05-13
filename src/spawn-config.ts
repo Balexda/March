@@ -215,7 +215,12 @@ export const claudeCodeBackend: SpawnBackend = {
     return [
       "sh",
       "-c",
-      `claude -p "$(cat ${promptFilePath})" --output-format json --dangerously-skip-permissions --bare --no-session-persistence`,
+      // Inner double quotes around the path inside `$(...)` so paths with
+      // spaces or shell metacharacters cannot break parsing or inject. POSIX
+      // sh re-opens parsing inside `$(...)`, so the nested quoting is
+      // well-formed. The contracts' Claude Code Implementation block was
+      // updated to reflect this safer form.
+      `claude -p "$(cat "${promptFilePath}")" --output-format json --dangerously-skip-permissions --bare --no-session-persistence`,
     ];
   },
 };
