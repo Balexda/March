@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { SPAWN_CONFIG } from "./spawn-config.js";
+import { SPAWN_CONFIG } from "../hatchery/spawn-config.js";
 import { spawnImageTag } from "./snapshot-build.js";
 
 /**

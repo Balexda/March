@@ -35,7 +35,7 @@
  * Consumed by:
  * - `src/cli.ts` dispatch action — passes this to `checkSpawnDependencies`
  *   so the dispatch fails fast if the image is unavailable.
- * - `src/snapshot-build.ts` — used as the `FROM` line of the generated
+ * - `src/spawn/snapshot-build.ts` — used as the `FROM` line of the generated
  *   Dockerfile per the Image Build contract.
  *
  * Will eventually be derived from `SpawnBackend.baseImage` once Feature 3

@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Dotprompt } from "dotprompt";
-import { FINDER_BIN, isFinderAvailable, isOnPath } from "./deps.js";
+import { FINDER_BIN, isFinderAvailable, isOnPath } from "../shared/deps.js";
 
 export class LegateError extends Error {
   constructor(message: string) {
@@ -580,7 +580,7 @@ export async function renderTemplate(
 /**
  * Locate the bundled template *directory*. Tries paths relative to the
  * calling module so this works both when imported from source
- * (`src/legate.ts` → `src/templates/...`) and when bundled (`dist/cli.js` →
+ * (`src/legate/init.ts` → `src/templates/...`) and when bundled (`dist/cli.js` →
  * `../src/templates/...`, since `package.json#files` ships `src/templates`
  * alongside `dist`).
  */
@@ -596,6 +596,7 @@ async function findTemplateDir(explicit?: string): Promise<string> {
   const here = path.dirname(fileURLToPath(import.meta.url));
   const candidates = [
     path.join(here, "templates", "legate"),
+    path.join(here, "..", "templates", "legate"),
     path.join(here, "..", "src", "templates", "legate"),
     path.join(here, "..", "..", "src", "templates", "legate"),
   ];

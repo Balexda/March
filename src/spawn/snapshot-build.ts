@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
-import { BASE_IMAGE } from "./spawn-config.js";
+import { BASE_IMAGE } from "../hatchery/spawn-config.js";
 
 /**
  * Error thrown by docker build / image-management operations in the

@@ -3,7 +3,7 @@ import path from "node:path";
 import os from "node:os";
 import { isValidManifest, type MarchManifest } from "./manifest.js";
 import { getM1Skills } from "./skills.js";
-import { CLI_VERSION } from "./version.js";
+import { CLI_VERSION } from "../shared/version.js";
 
 export class UpdateError extends Error {
   constructor(message: string) {
