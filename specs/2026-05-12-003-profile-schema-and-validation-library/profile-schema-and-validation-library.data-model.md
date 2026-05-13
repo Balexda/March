@@ -124,7 +124,7 @@ Purpose: declares include/exclude patterns applied when materializing the build 
 | Field | Type | Required | Notes |
 |-------|------|----------|-------|
 | `include` | `string[]` | No | Optional. M2 semantics deferred (see [SD-001](profile-schema-and-validation-library.spec.md#specification-debt)) — F1 accepts shape only. |
-| `exclude` | `string[]` | Yes (when `snapshot` present) | Patterns to exclude from the build context. **Shape-compatible** with the `compileExclusions` function exported from `src/snapshot.ts` — basename globs (no `/`) match a path's final segment; trailing-slash patterns (`.secrets/`) match any directory segment. F1 preserves these strings verbatim. |
+| `exclude` | `string[]` | Yes (when `snapshot` present) | Patterns to exclude from the build context. **Shape-compatible** with the pattern format `src/snapshot.ts` already uses (encoded in the exported `SNAPSHOT_EXCLUSION_PATTERNS` constant, consumed by the exported `isExcludedPath` predicate, and interpreted by a private `compileExclusions` helper) — basename globs (no `/`) match a path's final segment; trailing-slash patterns (`.secrets/`) match any directory segment. F1 preserves these strings verbatim. |
 
 Validation rules:
 - `exclude` missing when `snapshot` is present: `MissingField`.
@@ -206,15 +206,15 @@ Validation rules:
 
 ### 8) `ToolsPolicy` (`Profile.tools?`, optional)
 
-Purpose: declares which backend tools are enabled or disabled. **Shipped in M2 but unconsumed** — no M2 runtime component reads it. Shipping the field avoids a `version: 2` migration when an M3+ component arrives that does honor it.
+Purpose: declares which backend tools are allowed or disallowed. **Shipped in M2 but unconsumed** — no M2 runtime component reads it. Shipping the field avoids a `version: 2` migration when an M3+ component arrives that does honor it. Field names (`allowed`/`disallowed`) match the canonical naming in the Hatchery feature map.
 
 | Field | Type | Required | Notes |
 |-------|------|----------|-------|
-| `enabled` | `string[]` | No | Optional. Tool names; F1 enforces shape only. Empty array valid. |
-| `disabled` | `string[]` | No | Optional. Tool names; F1 enforces shape only. Empty array valid. |
+| `allowed` | `string[]` | No | Optional. Tool names; F1 enforces shape only. Empty array valid. |
+| `disallowed` | `string[]` | No | Optional. Tool names; F1 enforces shape only. Empty array valid. |
 
 Validation rules:
-- A tool name appearing in both `enabled` and `disabled`: `ToolOverlap` at `/tools` (offending name included in message).
+- A tool name appearing in both `allowed` and `disallowed`: `ToolOverlap` at `/tools` (offending name included in message).
 - Non-string entry: `WrongType` at the indexed path.
 - Unknown property at this level: `UnknownField`.
 
@@ -243,7 +243,7 @@ Purpose: the discriminated return shape of `validateProfile`. Lets consumers nar
 ```ts
 type ValidationResult =
   | { ok: true;  value: Profile }
-  | { ok: false; errors: ValidationError[] };
+  | { ok: false; errors: readonly ValidationError[] };
 ```
 
 Validation rules (i.e., guarantees about the return value):
@@ -278,7 +278,7 @@ Purpose: stable enumeration of every structural problem the validator can report
 | `InvalidHost` | `NetworkEndpoint.host` is empty, malformed, or contains a scheme. | `/network/allowlist/0/host` |
 | `InvalidPort` | `NetworkEndpoint.port` is outside `[1, 65535]` or non-integer. | `/network/allowlist/0/port` |
 | `InvalidProtocol` | `NetworkEndpoint.protocol` is outside `{"http", "https", "tcp"}`. | `/network/allowlist/0/protocol` |
-| `ToolOverlap` | A tool name appears in both `tools.enabled` and `tools.disabled`. | `/tools` |
+| `ToolOverlap` | A tool name appears in both `tools.allowed` and `tools.disallowed`. | `/tools` |
 
 ## Relationships
 
@@ -305,7 +305,7 @@ unknown  --[validateProfile]-->  ValidationResult
 - A `Profile` is uniquely identified within a profile registry by `Profile.name`. F1 validates `name` shape but **does not** enforce uniqueness — that is F2's concern (filesystem catalogue) and F4's concern (CLI registry list/inspect/validate).
 - Within a single profile, `FileMount.target` values SHOULD be unique across the `fileMounts` array. F1 does not enforce this in M2 (deferred — see [SD-006](profile-schema-and-validation-library.spec.md#specification-debt)).
 - Within a single profile, `NetworkEndpoint` entries SHOULD be unique by `(host, port, protocol)` triple. F1 does not enforce this in M2.
-- `tools.enabled` and `tools.disabled` MUST NOT share entries (enforced via `ToolOverlap`).
+- `tools.allowed` and `tools.disallowed` MUST NOT share entries (enforced via `ToolOverlap`).
 
 ## Module Layout
 

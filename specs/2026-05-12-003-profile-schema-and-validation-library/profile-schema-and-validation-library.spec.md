@@ -15,7 +15,7 @@
 - _No host-path mount variant_: `FileMount` is a discriminated union of `named-volume` and `snapshot` only. A2 (no host bind mounts) is enforced **both** by the type system (no `host-path` variant in the `FileMount` union) **and** at runtime — the validator emits `UnknownDiscriminator` for unknown `kind` values per FR-009. `[Critical Assumption]`
 - _envWhitelist is the exclusive env mechanism_: Profile schema has no inline `env: { KEY: value }` map and no `envFile` or `passthrough` field. A3 is structurally enforced — the only way to admit env vars into a sandbox is to name them in `envWhitelist`. `[Critical Assumption]`
 - _M1 SpawnConfig fields map 1:1 onto Profile.container + Profile.resources_: `container = { capDrop, user, envWhitelist }`, `resources = { memoryLimit, cpuLimit, timeoutSeconds }`. M1's `networkMode` is replaced by `Profile.network.mode` (discriminated). F5 is a pure rename for six fields and a replacement for the seventh. `[Critical Assumption]`
-- _`snapshot.exclude` remains `string[]`_: Per scout finding, the `compileExclusions` function exported from `src/snapshot.ts` expects `readonly string[]` and distinguishes basename globs from directory patterns by trailing `/`. F1 preserves this representation rather than introducing structured pattern objects.
+- _`snapshot.exclude` remains `string[]`_: Per scout finding, the pattern format used by `src/snapshot.ts` — encoded in the exported `SNAPSHOT_EXCLUSION_PATTERNS` constant and consumed by the exported `isExcludedPath` predicate (with `createBuildContext` applying it internally via a private `compileExclusions` helper) — is `readonly string[]` distinguishing basename globs from directory patterns by trailing `/`. F1 preserves this representation rather than introducing structured pattern objects.
 - _`BASE_IMAGE` migration target is `Profile.baseImage`_: The seeded `spawn` profile encodes `march-base:latest` (M1's `BASE_IMAGE` value from the `BASE_IMAGE` constant in `src/spawn-config.ts`) into its `baseImage` field. This is what allows F5 to delete `src/spawn-config.ts` outright (not just `SPAWN_CONFIG`).
 - _`baseImage` accepts but does not require digest pinning_: Docker reference grammar `name[:tag][@digest]` is accepted; M2 does not enforce digest pinning.
 - _`name` regex_: `^[a-z][a-z0-9-]{0,62}$` — lowercase ASCII start, alphanumerics and hyphens only, 1–63 chars. Matches both `spawn` and `pr-management` (the two F3-seeded profile names) and gives F2 a filesystem-safe filename.
@@ -28,7 +28,7 @@
 - _`name` uniqueness across profiles is out of scope for F1_: The validator validates a single profile in isolation. Collision detection belongs to F2 (filesystem catalogue) / F4 (CLI registry).
 - _`pr-management` profile shape needs no F1 schema changes_: Broader allowlist (`api.github.com`), broader envWhitelist (`GH_TOKEN`, `GITHUB_TOKEN`), and repo-snapshot file mounts are all expressible under the reconciled schema. F1 is data-content-agnostic.
 - _No external schema validation library_: "Pure validator" plus closed-world / aggregated-errors / discriminated-union requirements imply hand-rolled validation. The codebase has no Zod/Ajv/Yup; F1 stays consistent.
-- _`tools.enabled` and `tools.disabled` overlap is `ToolOverlap`_: A tool name appearing in both lists is contradictory and rejected, rather than silently resolved.
+- _`tools.allowed` and `tools.disallowed` overlap is `ToolOverlap`_: A tool name appearing in both lists is contradictory and rejected, rather than silently resolved.
 - _`snapshot` is optional at root_: When present, `exclude` is required and `include` is optional. Absent `snapshot` means F2/F5 fall back to documented defaults (deferred to those features).
 - _`SnapshotMustBeReadOnly`_: The `{ kind: "snapshot", target, readOnly: true }` literal-true makes mutable snapshots unrepresentable; the named error covers the case where an operator authors `readOnly: false` literally on a snapshot mount.
 
@@ -128,7 +128,7 @@ As a security-conscious operator, I want `Profile.network` to be a discriminated
 
 ### User Story 6: A2/A5 — File Mounts and Snapshot Policy Enforce Threat Model Structurally (Priority: P1)
 
-As a security-conscious operator, I want `Profile.fileMounts` to be a closed discriminated union admitting only `named-volume` and `snapshot` variants (no `host-path` kind), and `Profile.snapshot.exclude` to remain a `string[]` compatible with `compileExclusions` in `src/snapshot.ts:86`, so that A2 (no host bind mounts) is enforced by type and A5 (snapshot include/exclude) wires straight into M1's existing pattern engine without translation.
+As a security-conscious operator, I want `Profile.fileMounts` to be a closed discriminated union admitting only `named-volume` and `snapshot` variants (no `host-path` kind), and `Profile.snapshot.exclude` to remain a `string[]` whose entries match the pattern format that `src/snapshot.ts`'s exported `SNAPSHOT_EXCLUSION_PATTERNS` and `isExcludedPath` already use, so that A2 (no host bind mounts) is enforced by type and A5 (snapshot include/exclude) wires straight into M1's existing pattern engine without translation.
 
 **Why this priority**: A2 and A5 are the third and fourth Appendix A constraints. A2 is the most consequential — a misconfigured bind mount exposes the host filesystem to an LLM agent — and the only way to make it structurally impossible is to omit the variant from the type. A5's `string[]` shape compat resolves a load-bearing scout-flagged conflict: any other representation forces F5 to translate, invalidating the pure-rename claim. P1 for both.
 
@@ -148,19 +148,19 @@ As a security-conscious operator, I want `Profile.fileMounts` to be a closed dis
 
 ### User Story 7: Optional `tools` Policy, Shipped But Unconsumed (Priority: P2)
 
-As a forward-looking profile author, I want `tools: { enabled?: string[]; disabled?: string[] }` to be an optional top-level field that the schema validates for shape (and rejects overlap), even though M2 has no runtime consumer for it, so that M3+ enforcement can land without a schema-version bump.
+As a forward-looking profile author, I want `tools: { allowed?: string[]; disallowed?: string[] }` to be an optional top-level field that the schema validates for shape (and rejects overlap), even though M2 has no runtime consumer for it, so that M3+ enforcement can land without a schema-version bump.
 
 **Why this priority**: P2 because no M2 consumer reads it — F5 will explicitly ignore the field at dispatch time. But shipping the field now avoids a `version: 2` migration when an M3+ component arrives that does honor it.
 
-**Independent Test**: Three fixtures — `tools` absent, `tools: { enabled: ["Bash"] }`, and `tools: { enabled: ["Bash"], disabled: ["Bash"] }` — produce the expected outcomes (pass, pass, `ToolOverlap`).
+**Independent Test**: Three fixtures — `tools` absent, `tools: { allowed: ["Bash"] }`, and `tools: { allowed: ["Bash"], disallowed: ["Bash"] }` — produce the expected outcomes (pass, pass, `ToolOverlap`).
 
 **Acceptance Scenarios**:
 
 1. **Given** a profile with `tools` absent, **When** validated, **Then** the result passes.
-2. **Given** `tools: { enabled: ["Bash", "Read"], disabled: ["WebFetch"] }`, **When** validated, **Then** the result passes.
-3. **Given** `tools: { enabled: ["Bash"], disabled: ["Bash"] }` (a tool in both lists), **When** validated, **Then** `ToolOverlap` at `/tools` (with the offending tool name in the message) is produced.
-4. **Given** `tools: { enabled: [42] }` (non-string entry), **When** validated, **Then** `WrongType` at `/tools/enabled/0` is produced.
-5. **Given** `tools: { enabled: [] }` or `tools: {}`, **When** validated, **Then** the result passes (empty or absent inner lists are valid).
+2. **Given** `tools: { allowed: ["Bash", "Read"], disallowed: ["WebFetch"] }`, **When** validated, **Then** the result passes.
+3. **Given** `tools: { allowed: ["Bash"], disallowed: ["Bash"] }` (a tool in both lists), **When** validated, **Then** `ToolOverlap` at `/tools` (with the offending tool name in the message) is produced.
+4. **Given** `tools: { allowed: [42] }` (non-string entry), **When** validated, **Then** `WrongType` at `/tools/allowed/0` is produced.
+5. **Given** `tools: { allowed: [] }` or `tools: {}`, **When** validated, **Then** the result passes (empty or absent inner lists are valid).
 
 ---
 
@@ -225,7 +225,7 @@ US2–US7 are pairwise independent once US1 lands, so the bulk of the implementa
 - **FR-008**: The `Profile` type MUST NOT contain any property at any nesting that admits inline env var values (no `env`, no `envFile`, no `environment`, no `passthrough`). The only env mechanism is `container.envWhitelist: string[]` listing variable names that Docker reads from the operator's environment at launch.
 - **FR-009**: The `FileMount` type MUST be a discriminated union over `kind` admitting exactly `"named-volume"` and `"snapshot"`; no `"host-path"`, `"host-bind"`, `"bind"`, or any other variant exists. Unknown discriminators MUST produce `UnknownDiscriminator` errors.
 - **FR-010**: The `SnapshotMount` variant MUST require `readOnly: true` as a literal-typed field. A `SnapshotMount` with `readOnly: false` MUST produce `SnapshotMustBeReadOnly`.
-- **FR-011**: The `snapshot.exclude` field MUST be `string[]` so the array can be fed unchanged into the `compileExclusions` function exported from `src/snapshot.ts`. Pattern entries are not interpreted by F1's validator; only structural type (string) and basic shape (non-empty, no absolute paths, no `..` traversals) are checked.
+- **FR-011**: The `snapshot.exclude` field MUST be `string[]` so the array can be fed unchanged into the exclusion-matching logic in `src/snapshot.ts` (the exported `isExcludedPath` predicate and `createBuildContext` function, whose private `compileExclusions` helper interprets each pattern). Pattern entries are not interpreted by F1's validator; only structural type (string) and basic shape (non-empty, no absolute paths, no `..` traversals) are checked.
 - **FR-012**: The `NetworkPolicy` type MUST be a discriminated union over `mode` admitting exactly `"bridge"`, `"none"`, and `"allowlist"`. The `"allowlist"` discriminator MUST require a non-empty `allowlist: NetworkEndpoint[]`; the `"bridge"` and `"none"` discriminators MUST NOT admit an `allowlist` field.
 - **FR-013**: `NetworkEndpoint` MUST consist of `{ host: string, port: number, protocol: "http" | "https" | "tcp" }`. Schemes in `host` are forbidden; protocol carries that information.
 - **FR-014**: `Profile.version` MUST accept only the literal integer `1` in M2. Any other value (including `"1"` as a string) MUST produce `UnsupportedSchemaVersion`.
@@ -237,7 +237,7 @@ US2–US7 are pairwise independent once US1 lands, so the bulk of the implementa
 - **FR-020**: `resources.memoryLimit: string` MUST match Docker memory grammar `^[0-9]+[bkmgBKMG]$`. Violations produce `InvalidMemoryLimit`.
 - **FR-021**: `resources.cpuLimit: string` MUST match positive-number grammar `^[0-9]+(\.[0-9]+)?$`. Violations produce `InvalidCpuLimit`.
 - **FR-022**: `resources.timeoutSeconds: number` MUST be a positive integer. Violations produce `InvalidTimeout`.
-- **FR-023**: `tools` (optional) MUST consist of `{ enabled?: string[], disabled?: string[] }`. A tool name appearing in both arrays MUST produce `ToolOverlap`. Empty inner arrays and an absent `tools` field are valid.
+- **FR-023**: `tools` (optional) MUST consist of `{ allowed?: string[], disallowed?: string[] }` (matching the feature map's canonical naming). A tool name appearing in both arrays MUST produce `ToolOverlap`. Empty inner arrays and an absent `tools` field are valid.
 - **FR-024**: M1's `SpawnConfig` field semantics MUST be preserved 1:1 for the six retained fields (`capDrop`, `user`, `memoryLimit`, `cpuLimit`, `timeoutSeconds`, `envWhitelist`), in `Profile.container` and `Profile.resources`. M1's `networkMode` field is replaced by `Profile.network.mode`.
 - **FR-025**: The `BASE_IMAGE` constant exported from `src/spawn-config.ts` (`"march-base:latest"`) is explicitly designated as the migration target for `Profile.baseImage`. F5 may delete the entire `src/spawn-config.ts` module after migrating both `SPAWN_CONFIG` and `BASE_IMAGE` into the seeded `spawn` profile.
 - **FR-026**: F1 MUST ship a fixture corpus at `tests/fixtures/profile/`: at least one valid fixture for each documented profile shape (`m1-spawn-parity.yaml`, `pr-management-shape.yaml`) and at least one invalid fixture for each `ValidationErrorCode`. Each invalid fixture MUST have a sidecar `.expected.json` listing the expected error codes.
@@ -251,9 +251,9 @@ US2–US7 are pairwise independent once US1 lands, so the bulk of the implementa
 - **SnapshotPolicy** (`Profile.snapshot?`): include/exclude pattern lists for the build-context snapshot. `exclude` shape is `string[]` for compatibility with `compileExclusions`.
 - **NetworkPolicy** (`Profile.network`): closed discriminated union over `mode` admitting `"bridge"`, `"none"`, and `"allowlist"`. The `"allowlist"` discriminator carries structured `NetworkEndpoint` entries.
 - **NetworkEndpoint**: `{ host, port, protocol }` triple. Host is a name or IP literal; scheme is carried by `protocol`, not embedded in `host`.
-- **ToolsPolicy** (`Profile.tools?`): optional `{ enabled?, disabled? }` lists. Shipped in M2 but no M2 runtime consumer.
+- **ToolsPolicy** (`Profile.tools?`): optional `{ allowed?, disallowed? }` lists. Shipped in M2 but no M2 runtime consumer.
 - **ValidationError**: a single structural problem. Carries `code` (named enum), `path` (JSON pointer), `message` (human-readable diagnostic).
-- **ValidationResult**: discriminated union of `{ ok: true, value: Profile }` and `{ ok: false, errors: ValidationError[] }`. Lets consumers narrow without exception handling.
+- **ValidationResult**: discriminated union of `{ ok: true, value: Profile }` and `{ ok: false, errors: readonly ValidationError[] }`. Lets consumers narrow without exception handling.
 
 ## Assumptions
 

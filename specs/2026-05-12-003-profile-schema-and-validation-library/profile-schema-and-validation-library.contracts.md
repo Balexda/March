@@ -31,7 +31,7 @@ export function validateProfile(input: unknown): ValidationResult;
 // Discriminated return type.
 export type ValidationResult =
   | { ok: true;  value: Profile }
-  | { ok: false; errors: ValidationError[] };
+  | { ok: false; errors: readonly ValidationError[] };
 
 // Error shape.
 export interface ValidationError {
@@ -88,7 +88,7 @@ export interface BridgeNetwork     { /* mode: "bridge" */ }
 export interface NoneNetwork       { /* mode: "none" */ }
 export interface AllowlistNetwork  { /* mode: "allowlist" + allowlist */ }
 export interface NetworkEndpoint   { /* host, port, protocol */ }
-export interface ToolsPolicy       { /* enabled?, disabled? */ }
+export interface ToolsPolicy       { /* allowed?, disallowed? */ }
 ```
 
 #### Inputs
@@ -113,12 +113,13 @@ The validator never throws. Every structural problem becomes a `ValidationError`
 |-----------|----------|-------------|
 | `input` is not an object | `{ ok: false, errors: [{ code: "WrongType", path: "", ... }] }` | Returned in a single error; no further validation attempted. |
 | `input.version` is missing or not `1` | `{ ok: false, errors: [{ code: "UnsupportedSchemaVersion", path: "/version", ... }] }` | **Short-circuits** all other validation. The errors array contains exactly one entry. |
-| Required field missing at any depth | One `MissingField` error per missing field, aggregated with other errors. | Field's JSON-pointer path. |
+| Required field missing at any depth | One `MissingField` error per missing field, aggregated with other errors. The `EmptyAllowlist` rule below takes precedence over the generic `MissingField` for the specific case of `allowlist` under `mode: "allowlist"`. | Field's JSON-pointer path. |
 | Field has wrong type at any depth | One `WrongType` error per offender. | Field's path. |
 | Unknown property at any object level | One `UnknownField` error per unrecognized key. | Path to the unrecognized key, not the parent. |
 | Unknown discriminator value (e.g., `FileMount.kind: "host-bind"`) | One `UnknownDiscriminator` at the discriminator's path. | Sibling fields of an unknown discriminator are not further validated (the discriminator's variant is unknown, so its sibling shape is unknown). |
 | Domain rule violation (regex, enum, range) | The corresponding named code (e.g., `InvalidName`, `InvalidPort`). | Field's path. |
-| Cross-field rule violation (`AllowlistNetwork` with empty `allowlist`, `tools` overlap) | The corresponding named code (`EmptyAllowlist`, `ToolOverlap`) at the parent path. | Parent's path. |
+| `AllowlistNetwork` (`mode: "allowlist"`) with `allowlist` either **absent** or present-but-empty | A single `EmptyAllowlist` at `/network/allowlist`. Missing and empty both produce this code (not `MissingField`) so consumers handle a uniform "no allowed endpoints under allowlist mode" condition. | `/network/allowlist` |
+| `tools.allowed` and `tools.disallowed` share an entry | One `ToolOverlap` at `/tools` with the offending name in `message`. | `/tools` |
 
 #### Behavior Contracts
 
@@ -152,7 +153,7 @@ F1 has no callers it depends on. It is a leaf module; consumers import the publi
 F1 imports nothing outside `src/profile/` from the codebase. In particular:
 
 - F1 does **not** import `src/spawn-config.ts`. The 1:1 mapping is enforced by a type-only test (`type _: Omit<SpawnConfig, "networkMode"> extends StructuralMatch<ContainerSecurity & ResourceLimits>`), not by a runtime import.
-- F1 does **not** import `src/snapshot.ts` or its `compileExclusions` function. F1's `snapshot.exclude` is `string[]` precisely so consumers (F5) can feed it into `compileExclusions` *without* F1 needing to invoke or depend on that module. This decoupling is load-bearing because F5 will likely relocate `compileExclusions` during the M1→M2 refactor.
+- F1 does **not** import `src/snapshot.ts` or any of its exports (`SNAPSHOT_EXCLUSION_PATTERNS`, `isExcludedPath`, `createBuildContext`, `BuildContextHandle`, `SnapshotError`). F1's `snapshot.exclude` is `string[]` precisely so consumers (F5) can feed it into the existing exclusion-matching logic in `src/snapshot.ts` — currently the exported `isExcludedPath` predicate and the private `compileExclusions` helper invoked by `createBuildContext` — *without* F1 needing to invoke or depend on that module. This decoupling is load-bearing because F5 will likely relocate or refactor that logic during the M1→M2 refactor.
 - F1 does **not** import `js-yaml` or any other parser. F2 parses YAML; F1 validates the already-parsed `unknown`.
 
 ### Outbound — Module-export contract for F5
@@ -165,7 +166,7 @@ F5's refactor of `src/spawn-config.ts` is a contract obligation that F1's data m
 | `SpawnConfig` interface (`src/spawn-config.ts`) | Deleted by F5. | `ContainerSecurity & ResourceLimits` (minus `networkMode`, which moves to `NetworkPolicy.mode`). |
 | `SPAWN_CONFIG` constant (`src/spawn-config.ts`) | Deleted by F5. | The seeded `spawn` profile's `container` + `resources` fields, with values byte-identical to the M1 constant. |
 | `SNAPSHOT_EXCLUSION_PATTERNS` constant (`src/snapshot.ts`) | Deleted by F5. | The seeded `spawn` profile's `snapshot.exclude` array, with values byte-identical to the M1 constant. |
-| `compileExclusions` function (`src/snapshot.ts`) | Retained by F5; may be relocated within the profile/snapshot pipeline. | F5's runtime consumer of `Profile.snapshot.exclude`. |
+| Exclusion-matching logic in `src/snapshot.ts` (the exported `isExcludedPath` predicate and the private `compileExclusions` helper invoked by `createBuildContext`) | Retained by F5; may be relocated or refactored within the profile/snapshot pipeline. | F5's runtime consumer of `Profile.snapshot.exclude`. |
 
 The F5 contract is "byte-identical Docker invocation for the seeded `spawn` profile compared to M1's current run." F1's job is to admit a profile whose values reproduce the M1 constants verbatim; the byte-identity assertion is enforced at fixture level (`tests/fixtures/profile/valid/m1-spawn-parity.yaml` in US8) and at F5's regression-test level.
 
