@@ -49,11 +49,12 @@ export interface SpawnRecord {
   imageId?: string;
   exitCode?: number;
   /**
-   * Raw operator prompt. The data model marks this Yes/required, but
-   * per SD-004 in the Story 4 tasks file, Feature 2 defers prompt
-   * reading to Story 6 — the initial `"created"` record is written
-   * without a `prompt` field, and Story 6 populates it before any
-   * downstream consumer reads the record.
+   * Raw operator prompt, persisted before Stage 3 (Snapshot) runs. The
+   * initial `"created"` record written by Story 3's
+   * `writeInitialSpawnRecord` omits this field (per SD-004 in
+   * `03-isolated-worktree-and-branch.tasks.md`); Story 6 backfills it
+   * via {@link updateSpawnRecordPrompt} before any downstream consumer
+   * reads the record.
    */
   prompt?: string;
   startedAt?: string;

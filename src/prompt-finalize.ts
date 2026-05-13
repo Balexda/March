@@ -25,9 +25,10 @@ import { CONTAINER_WORKDIR } from "./spawn-config.js";
  *
  * Out of scope: this module does not write the finalized prompt
  * anywhere (Task 4 owns Stage 5 handoff into the running container)
- * and is not wired into the dispatch action in `src/cli.ts` (Story 5
- * owns the call sequence that composes resolution → finalization →
- * handoff between Stage 4 Launch and Stage 6 Wait).
+ * and is not wired into the dispatch action in `src/cli.ts` in this
+ * slice — Story 5 owns the wiring that calls `finalizePrompt` and
+ * then the Stage 5 handoff helper between Stage 4 Launch and Stage 6
+ * Wait.
  */
 
 /**

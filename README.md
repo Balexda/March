@@ -29,7 +29,7 @@ Requires Node 20 or 22. `march spawn dispatch` additionally requires `git` and `
 | :--- | :--- |
 | `march init` | Initialize the March environment (manifest at `~/.march/march-manifest.json` + Claude skills under `~/.claude/`). |
 | `march update` | Update an existing March installation; prompts on downgrade unless `--yes`. |
-| `march spawn dispatch` | Create a worktree, snapshot it as a Docker build context, build `march-spawn-<id>`, launch the container with hardened security configuration, and transition the SpawnRecord to `"running"`. |
+| `march spawn dispatch` | Read the operator's prompt from `--prompt-file <path>`, `--prompt <string>`, or piped stdin; create a worktree, snapshot it as a Docker build context, build `march-spawn-<id>`, persist the prompt onto the SpawnRecord, launch the container with hardened security configuration, and transition the SpawnRecord to `"running"`. |
 | `march legate init` | Set up a per-repo *mini-legate* conductor (Smithy plan→PR→fix loop) on top of [agent-deck](https://github.com/asheshgoplani/agent-deck). |
 | `march version` | Print the installed CLI version. |
 | `march help [command]` | Show help for a command. |

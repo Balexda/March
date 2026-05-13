@@ -590,9 +590,10 @@ program
       }
 
       // Stage 4 success — dispatch returns cleanly with the container
-      // running. Stories 6 (prompt handoff) and 7 (lifecycle wait) extend
-      // dispatch from here; Story 7 in particular will replace this exit-0
-      // fall-through with the container's actual exit code.
+      // running. Story 5 owns the Stage 5 handoff wiring (compose
+      // `finalizePrompt` + `handoffPromptToContainer` between Stage 4
+      // Launch and Stage 6 Wait) and Story 7 (lifecycle wait) replaces
+      // this exit-0 fall-through with the container's actual exit code.
       return;
     }
     console.log(
