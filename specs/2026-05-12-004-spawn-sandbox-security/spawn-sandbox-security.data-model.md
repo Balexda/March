@@ -84,15 +84,15 @@ Purpose: The runtime network configuration F4 creates per spawn at Stage 4, repl
 
 | Component | Type | Required | Notes |
 |-----------|------|----------|-------|
-| Private spawn network | Docker user-defined network | Yes | Named `march-spawn-net-<spawn-id>`. The spawn container and the proxy sidecar are the only members. The spawn container has no other network attachment. |
+| Private spawn network | Docker user-defined network | Yes | Named `march-spawn-net-<spawn-id>`. Created with `--internal` so the network has NO route to the public internet — the spawn container, attached only here, cannot reach the outside world directly. The spawn container and the proxy sidecar are the only members. The spawn container has no other network attachment; the proxy sidecar is additionally attached to the default Docker bridge for outbound egress (the only multi-homed component in the topology). |
 | Proxy sidecar container | Docker container | Yes | Named `march-spawn-proxy-<spawn-id>`. Joined to BOTH the private spawn network AND a default-bridge network for outbound access. Configured with the selected backend's `allowedEgressHosts` as its CONNECT-time hostname allowlist. Image is implementation detail — see SD-003. |
-| Spawn container's proxy env vars | Docker env vars | Yes | `HTTP_PROXY` and `HTTPS_PROXY` set at launch time to the proxy sidecar's loopback endpoint on the private spawn network. Computed values, not stored in `SpawnBackend.requiredEnvVars`. |
+| Spawn container's proxy env vars | Docker env vars | Yes | `HTTP_PROXY` and `HTTPS_PROXY` set at launch time to the proxy sidecar's URL on the private spawn network — Docker DNS name (e.g., `http://march-spawn-proxy-<spawn-id>:8080`), NOT `127.0.0.1` / loopback (which would resolve to the spawn container itself). Computed values, not stored in `SpawnBackend.requiredEnvVars`. |
 
 Lifecycle:
 
 1. `absent` → `created`
    - Trigger: Stage 4 (Launch) begins.
-   - Effects: The private spawn network is created via `docker network create march-spawn-net-<spawn-id>`. The proxy sidecar container is launched on this network with its allowlist configured. The spawn container is launched with `--network=none`, then attached to the private spawn network via `docker network connect`. The spawn container receives `HTTP_PROXY` / `HTTPS_PROXY` env vars pointing to the sidecar.
+   - Effects: The private spawn network is created via `docker network create --internal march-spawn-net-<spawn-id>`. The proxy sidecar container is launched on this network with its allowlist configured AND additionally attached to the default Docker bridge via `docker network connect bridge <proxy-container>` so the proxy can reach the operator's network for outbound CONNECT. The spawn container is launched with `--network=none`, then attached to the private spawn network via `docker network connect`. The spawn container receives `HTTP_PROXY` / `HTTPS_PROXY` env vars pointing to the sidecar's Docker DNS name on the private network (e.g., `http://march-spawn-proxy-<spawn-id>:8080`) — never `127.0.0.1` / loopback.
 
 2. `created` → `removed`
    - Trigger: Spawn container exits (success, failure, or timeout) — Stage 6 (Wait) returns.
@@ -139,7 +139,7 @@ Per-control `expected`/`observed` shapes (informal):
 | A2 (Volume Mount) | `{ mountCount: number, mountTypes: string[] }` — expected: `{ mountCount: 1, mountTypes: ["tmpfs"] }` (the `/tmp` tmpfs); fail if any `bind` mount is observed. |
 | A3 (Env Leakage) | `{ env: string[] }` — expected: exactly the selected backend's `requiredEnvVars` plus the proxy env vars (`HTTP_PROXY`, `HTTPS_PROXY`); fail if any extra env keys are present. |
 | A4 (DNS / Network) | `{ networkMode: string, attachedNetworks: string[], probeBlocked?: boolean }` — `probeBlocked` populated only when `--probe` was passed. |
-| A5 (Snapshot Secrets) | `{ exclusionPatternCount: number }` — pass if the running container's snapshot image was built with the post-F4 `SNAPSHOT_EXCLUSION_PATTERNS` (best inferred from a build-time label on the image). Limited verification — primary assertion is on the snapshot test fixtures, not the running container. |
+| A5 (Snapshot Secrets) | `{ exclusionPatternsVersion: string }` — pass if the running container's snapshot image carries an `org.opencontainers.image.labels.io.march.snapshot.exclusion-patterns-version` label (or the equivalent `LABEL` in the generated Dockerfile, key `io.march.snapshot.exclusion-patterns-version`) whose value matches the post-F4 patterns version constant (e.g., `"f4-2026-05-12"`). The label is set by `writeSpawnDockerfile` at Stage 3 (Snapshot) — `LABEL io.march.snapshot.exclusion-patterns-version="f4-2026-05-12"` — and is the only signal verify can read at runtime to confirm which exclusion list shipped into the snapshot. Limited verification — primary assertion remains on the snapshot test fixtures (US3 acceptance scenarios), not the running container. |
 | A7 (Egress Hosts) | `{ allowedEgressHosts: string[] }` — expected: the selected backend's `allowedEgressHosts`; observed: read from the proxy sidecar's runtime configuration. |
 | A8 (Resource Exhaustion) | `{ memoryBytes: number, nanoCpus: number, pidsLimit: number, readOnlyRootfs: boolean }` |
 

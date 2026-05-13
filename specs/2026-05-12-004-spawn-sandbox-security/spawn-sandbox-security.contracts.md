@@ -50,7 +50,7 @@ march spawn verify <spawn-id> [--probe]
 | `docker inspect <container-id>` returns "no such container" | 2 | "container no longer exists (was it removed?)" message on stderr. |
 | `docker inspect` succeeds but the container is in `Exited` state | 2 | Same as the SpawnRecord-stopped case — the spawn's runtime state has been torn down. |
 | Backend not registered (e.g., SpawnRecord references a backend the running CLI doesn't know about) | 2 | "unknown backend in SpawnRecord" message on stderr. |
-| `--probe` requested but the spawn container has no `docker exec` capability (very rare, e.g., container exited between the inspect call and the probe call) | 2 | "could not execute probe" message on stderr. The control reports `n/a` rather than a synthetic pass/fail. |
+| `--probe` requested but the spawn container has no `docker exec` capability (very rare, e.g., container exited between the inspect call and the probe call) | 2 | "could not execute probe" message on stderr. The structured JSON report IS still emitted to stdout — the A4 `ControlReport` entry has `status: "n/a"` and `mismatch` omitted, so a downstream JSON consumer sees the unverifiable-A4 outcome alongside the other controls' results. The exit code 2 reflects that verification could not be completed (not that controls failed); the report is the diagnostic, the exit code is the routing signal. |
 
 ---
 
@@ -164,23 +164,30 @@ interface SpawnConfig {
                       ┌──────────────────────────┐
                       │ default Docker bridge    │  outbound to internet
                       └────────────┬─────────────┘
-                                   │
+                                   │ (proxy is multi-homed:
+                                   │  attached to bridge via
+                                   │  Stage 4.2b)
                       ┌────────────▼─────────────┐
                       │ march-spawn-proxy-<id>   │  HTTP CONNECT proxy
                       │ (sidecar container)      │  with hostname allowlist =
                       │                          │  selectedBackend.allowedEgressHosts
                       └────────────┬─────────────┘
-                                   │
+                                   │ (proxy is also attached to
+                                   │  the internal private network)
                       ┌────────────▼─────────────┐
                       │ march-spawn-net-<id>     │  private user-defined
-                      │ (Docker network)         │  Docker network
-                      └────────────┬─────────────┘
-                                   │
+                      │ (Docker network,         │  Docker network — created
+                      │  --internal: no route    │  with --internal so the
+                      │  to public internet)     │  spawn cannot bypass the
+                      └────────────┬─────────────┘  proxy by reaching the
+                                   │                outside world directly
                       ┌────────────▼─────────────┐
                       │ march-spawn-<id>         │  spawn container
-                      │ (--network=none initially│  HTTP_PROXY / HTTPS_PROXY
-                      │  attached to march-spawn │  env vars point to sidecar
-                      │  -net-<id> at launch)    │
+                      │ (--network=none at run,  │  HTTP_PROXY / HTTPS_PROXY
+                      │  attached only to        │  env vars point to the
+                      │  march-spawn-net-<id>    │  sidecar's Docker DNS name
+                      │  in Stage 4.4)           │  on the private network —
+                      │                          │  NEVER 127.0.0.1 / loopback
                       └──────────────────────────┘
 ```
 
@@ -190,10 +197,11 @@ The F2 `Validate → Worktree → Snapshot → Launch → Handoff → Wait → R
 
 | Sub-step | Action | Cleanup-on-failure ordering |
 |----------|--------|-----------------------------|
-| 4.1 Network create | `docker network create march-spawn-net-<spawn-id>` | None (no prior topology yet) |
-| 4.2 Proxy launch | `docker run -d --name march-spawn-proxy-<spawn-id> --network march-spawn-net-<spawn-id> -e ALLOWLIST="<hosts>" <proxy-image>` (also attached to default bridge for outbound) | Remove network (4.1) |
+| 4.1 Network create | `docker network create --internal march-spawn-net-<spawn-id>` (the `--internal` flag forbids any default route to the host's external interfaces — containers attached only to this network have NO route to the public internet, satisfying FR-004) | None (no prior topology yet) |
+| 4.2a Proxy launch | `docker run -d --name march-spawn-proxy-<spawn-id> --network march-spawn-net-<spawn-id> -e ALLOWLIST="<hosts>" <proxy-image>` (proxy starts attached only to the private network, with no outbound path yet — that lands in 4.2b) | Remove network (4.1) |
+| 4.2b Proxy bridge attach | `docker network connect bridge march-spawn-proxy-<spawn-id>` (multi-homes the proxy: private network for spawn-side ingress, default bridge for operator-side egress; the proxy is the **only** multi-homed component in the topology) | Remove proxy (4.2a) + network (4.1) |
 | 4.3 Spawn launch | `docker run -d --name march-spawn-<spawn-id> --network=none --read-only --tmpfs /tmp --pids-limit <n> ... <spawn-image>` (with bind-mount validator running first against the composed argv) | Remove proxy + network |
-| 4.4 Spawn network attach | `docker network connect march-spawn-net-<spawn-id> march-spawn-<spawn-id>` | Remove spawn container + proxy + network |
+| 4.4 Spawn network attach | `docker network connect march-spawn-net-<spawn-id> march-spawn-<spawn-id>` (spawn becomes single-homed on the internal private network — `--network=none` at create time is replaced by exactly one attached network and no route to the public internet); set the spawn container's `HTTP_PROXY` / `HTTPS_PROXY` env vars to the proxy's Docker DNS name on the private network (`http://march-spawn-proxy-<spawn-id>:8080`) | Remove spawn container + proxy + network |
 
 #### Lifecycle ordering (F4 extension)
 
@@ -376,7 +384,7 @@ Cleanup of the proxy sidecar and private network runs **on every dispatch outcom
 |-------|-------|----|
 | `spawnId` | `string` (required) | `string` (required, unchanged). |
 | `backend` | `SpawnBackend` (required, F3 added) | `SpawnBackend` (required, unchanged). The function now also reads `backend.allowedEgressHosts` for proxy sidecar configuration (F4 addition). |
-| `proxyEndpoint` | (n/a) | `string` (required, NEW in F4). The loopback URL (e.g., `http://march-spawn-proxy-<spawn-id>:8080`) the spawn container uses as its proxy. Computed by Stage 4.2 and passed forward into Stage 4.3 so it can be set as the spawn container's `HTTP_PROXY` / `HTTPS_PROXY` env vars. |
+| `proxyEndpoint` | (n/a) | `string` (required, NEW in F4). The proxy sidecar's URL on the private spawn network (e.g., `http://march-spawn-proxy-<spawn-id>:8080`) — NOT a loopback URL. The hostname resolves via Docker DNS within the user-defined private network the spawn and proxy share. Computed by Stage 4.2 and passed forward into Stage 4.3 so it can be set as the spawn container's `HTTP_PROXY` / `HTTPS_PROXY` env vars. |
 
 #### Behavioral guarantee
 
