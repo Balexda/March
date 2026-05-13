@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
-import { BASE_IMAGE } from "./spawn-config.js";
+import { BASE_IMAGE, CONTAINER_WORKDIR } from "./spawn-config.js";
 
 /**
  * Error thrown by docker build / image-management operations in the
@@ -76,10 +76,15 @@ export function writeSpawnDockerfile(
   // Trailing newline so POSIX tools don't whine about a missing final LF
   // and so a manual `cat` of a leaked context doesn't run into the next
   // shell prompt — small ergonomic win, no behavioral impact on docker.
+  // `CONTAINER_WORKDIR` is the single source of truth — both the `COPY`
+  // destination and the `WORKDIR` line are sourced from the same constant
+  // so the prompt-finalization helper in `prompt-finalize.ts` (which
+  // imports it for the `Working Directory: ...` header line) cannot drift
+  // from the actual in-container working directory.
   const content =
     `FROM ${baseImage}\n` +
-    `COPY --chown=march:march . /march/workspace\n` +
-    `WORKDIR /march/workspace\n`;
+    `COPY --chown=march:march . ${CONTAINER_WORKDIR}\n` +
+    `WORKDIR ${CONTAINER_WORKDIR}\n`;
   fs.writeFileSync(dockerfilePath, content, { encoding: "utf-8" });
   return dockerfilePath;
 }

@@ -1,5 +1,13 @@
 import { describe, it, expect } from "vitest";
-import { BASE_IMAGE, SPAWN_CONFIG, type SpawnConfig } from "./spawn-config.js";
+import {
+  BASE_IMAGE,
+  CONTAINER_WORKDIR,
+  PROMPT_PATH,
+  SPAWN_CONFIG,
+  claudeCodeBackend,
+  type SpawnBackend,
+  type SpawnConfig,
+} from "./spawn-config.js";
 
 /**
  * Tests for the spawn-config module.
@@ -76,6 +84,94 @@ describe("spawn-config", () => {
       // Backend-specific auth key only — narrowing this further is
       // Feature 4's responsibility per the contracts.
       expect(SPAWN_CONFIG.envWhitelist).toEqual(["ANTHROPIC_API_KEY"]);
+    });
+  });
+
+  describe("PROMPT_PATH", () => {
+    it("is the in-container path the Stage 5 handoff helper writes to (SD-004)", () => {
+      // Single source of truth shared by `claudeCodeBackend.buildEntrypoint`
+      // (which embeds the path in the `sh -c` command) and Task 4's Stage 5
+      // handoff helper (which writes the prompt to this path inside the
+      // container). Asserted as a literal so the entrypoint argv test below
+      // and the Stage 5 destination cannot drift apart.
+      expect(PROMPT_PATH).toBe("/march/prompt.txt");
+    });
+  });
+
+  describe("CONTAINER_WORKDIR", () => {
+    it("is the in-container working directory baked into the Dockerfile WORKDIR", () => {
+      // Single source of truth shared by `writeSpawnDockerfile` in
+      // `snapshot-build.ts` (which emits the literal as both the COPY
+      // destination and the WORKDIR) and the `finalizePrompt` helper in
+      // `prompt-finalize.ts` (which embeds it in the `Working Directory: ...`
+      // header line). Asserted as a literal so the Dockerfile content test
+      // in `snapshot-build.test.ts` and the prompt-finalize tests cannot
+      // drift apart.
+      expect(CONTAINER_WORKDIR).toBe("/march/workspace");
+    });
+  });
+
+  describe("claudeCodeBackend", () => {
+    it("is typeable as the SpawnBackend interface", () => {
+      // Compile-time only — the assignment fails typecheck if the exported
+      // interface no longer matches the constant's shape.
+      const backend: SpawnBackend = claudeCodeBackend;
+      expect(backend).toBe(claudeCodeBackend);
+    });
+
+    it("identifies itself as `claude-code`", () => {
+      // Verbatim from the contracts' Claude Code Implementation block.
+      // Feature 3 will key its backend-selection mechanism on this name.
+      expect(claudeCodeBackend.name).toBe("claude-code");
+    });
+
+    it("uses BASE_IMAGE as its baseImage (single source of truth)", () => {
+      // Locks the consistency requirement from the slice: BASE_IMAGE and
+      // `claudeCodeBackend.baseImage` must agree so existing consumers in
+      // `src/cli.ts` and `src/snapshot-build.ts` keep compiling without
+      // import-path churn.
+      expect(claudeCodeBackend.baseImage).toBe(BASE_IMAGE);
+      expect(claudeCodeBackend.baseImage).toBe("march-base:latest");
+    });
+
+    it("requires exactly ANTHROPIC_API_KEY in requiredEnvVars", () => {
+      // Verbatim from the contracts' Claude Code Implementation block.
+      // Story 5's Stage 4 Launch will source the `-e VAR` passthrough flags
+      // from this list (currently sourced from `SPAWN_CONFIG.envWhitelist`,
+      // which mirrors the same single auth key).
+      expect(claudeCodeBackend.requiredEnvVars).toEqual(["ANTHROPIC_API_KEY"]);
+    });
+
+    it("buildEntrypoint(PROMPT_PATH) returns the contracts' exact 3-element argv", () => {
+      // Verbatim from the contracts' Claude Code Implementation block.
+      // The shell wrapper (`sh -c`) is required because Docker's exec form
+      // does not invoke a shell, and the entrypoint relies on `$(cat ...)`
+      // shell expansion to inline the prompt without exposing it on the
+      // argv. AS 6.5 is satisfied by this exact array.
+      // The inner double quotes around the path inside `$(...)` are a
+      // defensive tightening over the contracts' literal example so paths
+      // with spaces or shell metacharacters cannot break parsing or inject.
+      // POSIX sh re-opens parsing inside `$(...)`, so the nesting is
+      // well-formed and `cat` still receives the path as a single argument.
+      expect(claudeCodeBackend.buildEntrypoint(PROMPT_PATH)).toEqual([
+        "sh",
+        "-c",
+        `claude -p "$(cat "/march/prompt.txt")" --output-format json --dangerously-skip-permissions --bare --no-session-persistence`,
+      ]);
+    });
+
+    it("parameterises the prompt path through to the `$(cat ...)` substitution", () => {
+      // Different prompt path → different `$(cat <path>)` substitution.
+      // Guards against a future refactor that accidentally hardcodes
+      // `/march/prompt.txt` inside the implementation instead of using the
+      // argument, which would silently break the Feature 3 migration that
+      // expects `buildEntrypoint` to be a pure function of its input.
+      const argv = claudeCodeBackend.buildEntrypoint("/some/other/path");
+      expect(argv).toHaveLength(3);
+      expect(argv[0]).toBe("sh");
+      expect(argv[1]).toBe("-c");
+      expect(argv[2]).toContain(`$(cat "/some/other/path")`);
+      expect(argv[2]).not.toContain("/march/prompt.txt");
     });
   });
 });

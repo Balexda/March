@@ -12,6 +12,7 @@ import {
   spawnRecordPath,
   SpawnRecordError,
   updateSpawnRecordImageId,
+  updateSpawnRecordPrompt,
   writeInitialSpawnRecord,
 } from "./spawn-record.js";
 
@@ -246,6 +247,104 @@ describe("spawn-record", () => {
       expect(() =>
         updateSpawnRecordImageId(baseInput.id, "march-spawn-x", home),
       ).toThrow(SpawnRecordError);
+    });
+  });
+
+  describe("updateSpawnRecordPrompt", () => {
+    const baseInput = {
+      id: "20260411-prom01",
+      repoPath: "/abs/repo",
+      branch: "march/spawn/20260411-prom01",
+      worktreePath: "/abs/worktrees/march/20260411-prom01",
+    };
+
+    it("populates prompt on the existing record without touching status or other fields", () => {
+      const home = makeHome();
+      const initial = writeInitialSpawnRecord(baseInput, home);
+      expect(initial.status).toBe("created");
+      expect(initial.prompt).toBeUndefined();
+
+      const updated = updateSpawnRecordPrompt(
+        baseInput.id,
+        "my operator prompt",
+        home,
+      );
+
+      expect(updated.prompt).toBe("my operator prompt");
+      // SD-004 close: this helper must NOT modify status — Story 5 owns
+      // the "created" → "running" transition.
+      expect(updated.status).toBe("created");
+
+      // Every other field is preserved verbatim from the initial write.
+      expect(updated.version).toBe(initial.version);
+      expect(updated.id).toBe(initial.id);
+      expect(updated.repoPath).toBe(initial.repoPath);
+      expect(updated.branch).toBe(initial.branch);
+      expect(updated.worktreePath).toBe(initial.worktreePath);
+      expect(updated.backend).toBe(initial.backend);
+      expect(updated.createdAt).toBe(initial.createdAt);
+
+      // Round-tripped on disk.
+      const onDisk = JSON.parse(
+        fs.readFileSync(spawnRecordPath(baseInput.id, home), "utf-8"),
+      );
+      expect(onDisk).toEqual(updated);
+      // Conditional fields that belong to later lifecycle states remain
+      // absent — the helper only writes `prompt`.
+      expect(onDisk.containerId).toBeUndefined();
+      expect(onDisk.imageId).toBeUndefined();
+      expect(onDisk.startedAt).toBeUndefined();
+      expect(onDisk.stoppedAt).toBeUndefined();
+      expect(onDisk.exitCode).toBeUndefined();
+    });
+
+    it("preserves an imageId previously populated by updateSpawnRecordImageId", () => {
+      const home = makeHome();
+      writeInitialSpawnRecord(baseInput, home);
+      updateSpawnRecordImageId(
+        baseInput.id,
+        "march-spawn-20260411-prom01",
+        home,
+      );
+      const updated = updateSpawnRecordPrompt(
+        baseInput.id,
+        "another prompt",
+        home,
+      );
+      // Confirms ordering insensitivity: prompt may be persisted before
+      // imageId (the dispatch wiring case) or after (defensive case).
+      expect(updated.imageId).toBe("march-spawn-20260411-prom01");
+      expect(updated.prompt).toBe("another prompt");
+      expect(updated.status).toBe("created");
+    });
+
+    it("writes the updated record atomically (no leftover temp files)", () => {
+      const home = makeHome();
+      writeInitialSpawnRecord(baseInput, home);
+      updateSpawnRecordPrompt(baseInput.id, "my prompt", home);
+
+      const dir = spawnRecordDir(home);
+      const entries = fs.readdirSync(dir);
+      // Only the final record file should remain — temp files used for
+      // the atomic write must be renamed away or cleaned up.
+      expect(entries).toEqual([`${baseInput.id}.json`]);
+    });
+
+    it("throws SpawnRecordError with a clear message when the record file is missing", () => {
+      const home = makeHome();
+      // No initial write — file does not exist.
+      expect(() =>
+        updateSpawnRecordPrompt("20260411-absent", "ignored", home),
+      ).toThrow(SpawnRecordError);
+      try {
+        updateSpawnRecordPrompt("20260411-absent", "ignored", home);
+      } catch (err) {
+        // The error message must surface the missing path so operators can
+        // diagnose stale or relocated records.
+        expect((err as Error).message).toContain(
+          spawnRecordPath("20260411-absent", home),
+        );
+      }
     });
   });
 

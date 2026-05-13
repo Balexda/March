@@ -49,11 +49,12 @@ export interface SpawnRecord {
   imageId?: string;
   exitCode?: number;
   /**
-   * Raw operator prompt. The data model marks this Yes/required, but
-   * per SD-004 in the Story 4 tasks file, Feature 2 defers prompt
-   * reading to Story 6 — the initial `"created"` record is written
-   * without a `prompt` field, and Story 6 populates it before any
-   * downstream consumer reads the record.
+   * Raw operator prompt, persisted before Stage 3 (Snapshot) runs. The
+   * initial `"created"` record written by Story 3's
+   * `writeInitialSpawnRecord` omits this field (per SD-004 in
+   * `03-isolated-worktree-and-branch.tasks.md`); Story 6 backfills it
+   * via {@link updateSpawnRecordPrompt} before any downstream consumer
+   * reads the record.
    */
   prompt?: string;
   startedAt?: string;
@@ -256,6 +257,36 @@ export function updateSpawnRecordImageId(
   const updated: SpawnRecord = {
     ...existing,
     imageId,
+  };
+  atomicWriteSpawnRecord(spawnRecordPath(id, homeDir), updated);
+  return updated;
+}
+
+/**
+ * Persists the operator's raw prompt onto an existing SpawnRecord
+ * (FR-019 `prompt` field write). Reads the record at `spawnRecordPath(id)`,
+ * sets `prompt`, and writes the result back atomically (temp file +
+ * rename) so a crash mid-write cannot corrupt the existing record.
+ *
+ * This helper does NOT modify `status` — the record remains in whatever
+ * state it was in when this helper was called (typically `"created"` from
+ * the initial write or `"created"` post-imageId-update). Closes SD-004 in
+ * `03-isolated-worktree-and-branch.tasks.md` (the initial Story 3 write
+ * deliberately omitted `prompt`; this helper backfills it before any
+ * downstream consumer reads the record).
+ *
+ * @throws {SpawnRecordError} If the source record is missing, unreadable,
+ *   or the atomic write fails.
+ */
+export function updateSpawnRecordPrompt(
+  id: string,
+  prompt: string,
+  homeDir?: string,
+): SpawnRecord {
+  const existing = readSpawnRecord(id, homeDir);
+  const updated: SpawnRecord = {
+    ...existing,
+    prompt,
   };
   atomicWriteSpawnRecord(spawnRecordPath(id, homeDir), updated);
   return updated;

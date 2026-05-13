@@ -11,6 +11,7 @@ import {
 } from "./container-launch.js";
 import { checkBridgeRequirements, initLegate, LegateError } from "./legate.js";
 import { initMarch, InitError } from "./init.js";
+import { PromptSourceError, resolveRawPrompt } from "./prompt-source.js";
 import { createBuildContext, SnapshotError } from "./snapshot.js";
 import {
   buildSpawnImage,
@@ -25,6 +26,7 @@ import {
   removeSpawnRecord,
   SpawnRecordError,
   updateSpawnRecordImageId,
+  updateSpawnRecordPrompt,
   writeInitialSpawnRecord,
 } from "./spawn-record.js";
 import { updateMarch, UpdateError } from "./update.js";
@@ -333,8 +335,25 @@ legate
 program
   .command("spawn [subcommand]")
   .description("Spawn a new environment")
+  // US6 Task 1: register --prompt-file / --prompt on the existing flat
+  // spawn stub. The Commander subcommand-group refactor that US1 owns is
+  // intentionally NOT introduced here — US6's prompt-ingestion gate piggy-
+  // backs on the current `spawn [subcommand]` action so it can resolve the
+  // operator's raw prompt before any git or Docker operation runs against
+  // the user's repo (per the spec edge case).
+  .option("--prompt-file <path>", "Path to a file containing the task prompt")
+  .option("--prompt <string>", "Inline task prompt string")
   .allowUnknownOption()
-  .action((subcommand?: string) => {
+  .action(async (
+    subcommand: string | undefined,
+    cmdOpts: { promptFile?: string; prompt?: string },
+  ) => {
+    // Commander 14 invokes the action with `(positional, options,
+    // command)` once any `.option()` is registered on a parent command —
+    // the parsed options arrive as the SECOND argument, NOT a method on
+    // the trailing Command instance. Bind it directly so `cmdOpts` is
+    // the literal parsed-options object Commander built from the
+    // registered `--prompt-file` / `--prompt` flags.
     commandHandled = true;
     // Dispatch-only validation: only `march spawn dispatch` runs the full
     // dependency check (PATH search utility + git on PATH + docker on PATH +
@@ -349,6 +368,34 @@ program
         return;
       }
 
+      // US6 Task 1: resolve the operator's raw prompt from
+      // --prompt-file > --prompt > stdin (per the contracts' Inputs table)
+      // BEFORE any git or Docker operation runs against the user's repo.
+      // Per the spec edge case ("Prompt file does not exist or is not
+      // readable — fail with a clear error before any git or Docker
+      // operations") and SD-005, this gate runs after the host-level
+      // pre-flight (checkSpawnDependencies — which only inspects PATH and
+      // the base image, no repo-state mutation) and before Stage 2
+      // (Worktree). Later US6 tasks consume the resolved prompt for
+      // finalization and SpawnRecord persistence; for now we hold it in a
+      // local that downstream tasks will read.
+      let prompt: string;
+      try {
+        const resolved = await resolveRawPrompt({
+          promptFile: cmdOpts.promptFile,
+          prompt: cmdOpts.prompt,
+          stdin: process.stdin,
+          isTTY: !!process.stdin.isTTY,
+        });
+        prompt = resolved.prompt;
+      } catch (err) {
+        if (err instanceof PromptSourceError) {
+          process.stderr.write(err.message + "\n");
+          process.exitCode = err.exitCode === 2 ? USAGE_ERROR : ERROR;
+          return;
+        }
+        throw err;
+      }
       // checkSpawnDependencies has already verified we're inside a git
       // repo; re-run `git rev-parse --show-toplevel` here to capture the
       // absolute repo root for the worktree + SpawnRecord modules.
@@ -392,6 +439,40 @@ program
         });
       } catch (err) {
         removeSpawnRecord(worktree.spawnId);
+        removeSpawnWorktree(repoRoot, worktree);
+        const message =
+          err instanceof SpawnRecordError
+            ? err.message
+            : (err as Error).message;
+        process.stderr.write(message + "\n");
+        process.exitCode = ERROR;
+        return;
+      }
+
+      // Stage 2b — backfill the operator's raw prompt onto the SpawnRecord
+      // before any downstream consumer reads the record. Closes SD-004
+      // from `03-isolated-worktree-and-branch.tasks.md` so any record
+      // reaching `"running"` or beyond carries a populated `prompt` field
+      // per the data-model SpawnRecord entity.
+      //
+      // On failure, transition the record to `"failed"` (per FR-021 and
+      // the data-model `created → failed` transition) BEFORE running the
+      // reverse-order cleanup chain so even if cleanup itself fails
+      // partway through, the on-disk record reflects the failure for
+      // auditing. The only artifacts to clean up at this stage are the
+      // worktree + branch (no image, no container yet).
+      try {
+        updateSpawnRecordPrompt(worktree.spawnId, prompt);
+      } catch (err) {
+        try {
+          markSpawnRecordFailed(worktree.spawnId, {
+            error: (err as Error).message,
+          });
+        } catch (markErr) {
+          process.stderr.write(
+            `warning: failed to transition spawn record to "failed" for spawn ${worktree.spawnId}: ${(markErr as Error).message}; the record file may be in an inconsistent state.\n`,
+          );
+        }
         removeSpawnWorktree(repoRoot, worktree);
         const message =
           err instanceof SpawnRecordError
@@ -509,9 +590,10 @@ program
       }
 
       // Stage 4 success — dispatch returns cleanly with the container
-      // running. Stories 6 (prompt handoff) and 7 (lifecycle wait) extend
-      // dispatch from here; Story 7 in particular will replace this exit-0
-      // fall-through with the container's actual exit code.
+      // running. Story 5 owns the Stage 5 handoff wiring (compose
+      // `finalizePrompt` + `handoffPromptToContainer` between Stage 4
+      // Launch and Stage 6 Wait) and Story 7 (lifecycle wait) replaces
+      // this exit-0 fall-through with the container's actual exit code.
       return;
     }
     console.log(

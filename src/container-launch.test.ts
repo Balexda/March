@@ -35,7 +35,7 @@ const IMAGE_TAG = `march-spawn-${SPAWN_ID}`;
 const EXPECTED_ENTRYPOINT = [
   "sh",
   "-c",
-  `claude -p "$(cat ${CONTAINER_PROMPT_PATH})" --output-format json --dangerously-skip-permissions --bare --no-session-persistence`,
+  `claude -p "$(cat "${CONTAINER_PROMPT_PATH}")" --output-format json --dangerously-skip-permissions --bare --no-session-persistence`,
 ];
 
 describe("container-launch", () => {
@@ -158,7 +158,7 @@ describe("container-launch", () => {
 
       expect(entrypoint).toEqual(EXPECTED_ENTRYPOINT);
       const shellCmd = entrypoint[2];
-      expect(shellCmd).toContain("$(cat /march/prompt.txt)");
+      expect(shellCmd).toContain(`$(cat "/march/prompt.txt")`);
       expect(shellCmd).toMatch(
         /--output-format json --dangerously-skip-permissions --bare --no-session-persistence$/,
       );
