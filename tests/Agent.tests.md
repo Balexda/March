@@ -112,7 +112,7 @@ rm -rf /tmp/march-test-home /tmp/march-test-repo
 **Purpose**: Verify the failure path: on a docker build failure the SpawnRecord transitions to `failed` and the worktree + branch are removed.
 
 **Steps**:
-1. Repeat the A4 setup, but point dispatch at a base image that does not exist (e.g., temporarily edit `src/hatchery/spawn-config.ts` to set `BASE_IMAGE` to `does-not-exist:bogus`, then `npm run build`). Or pull the dispatch image, then `docker rmi --force` it after dispatch begins — whichever is easier in your environment.
+1. Repeat the A4 setup, but point dispatch at a base image that does not exist (e.g., temporarily edit the selected backend's `baseImage` in `src/spawn/backends.ts` to `does-not-exist:bogus`, then `npm run build`). Or pull the dispatch image, then `docker rmi --force` it after dispatch begins — whichever is easier in your environment.
 2. Run `march spawn dispatch` against `/tmp/march-test-repo`.
 
 **Expected**:
@@ -121,4 +121,4 @@ rm -rf /tmp/march-test-home /tmp/march-test-repo
 - [ ] `git worktree list` does **not** show a `march-spawn-<id>` worktree.
 - [ ] No `march-spawn-<id>` Docker image is left behind.
 
-Restore the original `BASE_IMAGE` and rebuild before moving on.
+Restore the original backend `baseImage` and rebuild before moving on.

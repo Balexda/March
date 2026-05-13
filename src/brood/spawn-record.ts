@@ -94,6 +94,11 @@ export function spawnRecordPath(id: string, homeDir?: string): string {
   return path.join(spawnRecordDir(homeDir), `${id}.json`);
 }
 
+/** Output log path for a completed spawn, adjacent to its SpawnRecord. */
+export function spawnOutputPath(id: string, homeDir?: string): string {
+  return path.join(spawnRecordDir(homeDir), `${id}.output.log`);
+}
+
 /**
  * Writes the initial SpawnRecord file with status `"created"` per the
  * data model's `absent → created` transition (FR-019).
@@ -261,6 +266,20 @@ export function updateSpawnRecordImageId(
   return updated;
 }
 
+export function updateSpawnRecordPrompt(
+  id: string,
+  prompt: string,
+  homeDir?: string,
+): SpawnRecord {
+  const existing = readSpawnRecord(id, homeDir);
+  const updated: SpawnRecord = {
+    ...existing,
+    prompt,
+  };
+  atomicWriteSpawnRecord(spawnRecordPath(id, homeDir), updated);
+  return updated;
+}
+
 /**
  * Options accepted by {@link markSpawnRecordFailed}.
  *
@@ -350,6 +369,27 @@ export function markSpawnRecordRunning(
     status: "running",
     containerId,
     startedAt: new Date().toISOString(),
+  };
+  atomicWriteSpawnRecord(spawnRecordPath(id, homeDir), updated);
+  return updated;
+}
+
+export function markSpawnRecordStopped(
+  id: string,
+  exitCode: number,
+  homeDir?: string,
+): SpawnRecord {
+  const existing = readSpawnRecord(id, homeDir);
+  if (existing.status !== "running") {
+    throw new SpawnRecordError(
+      `Cannot transition spawn record "${id}" to "stopped": current status is "${existing.status}"; the data-model only permits "running" → "stopped".`,
+    );
+  }
+  const updated: SpawnRecord = {
+    ...existing,
+    status: exitCode === 0 ? "stopped" : "failed",
+    exitCode,
+    stoppedAt: new Date().toISOString(),
   };
   atomicWriteSpawnRecord(spawnRecordPath(id, homeDir), updated);
   return updated;

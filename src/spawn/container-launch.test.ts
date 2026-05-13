@@ -22,10 +22,16 @@ vi.mock("node:child_process", () => ({
 // Import under test AFTER vi.mock so the mock is applied to its imports.
 import {
   CONTAINER_PROMPT_PATH,
+  copyPromptToContainer,
+  createSpawnContainer,
   LaunchError,
   launchSpawnContainer,
+  readSpawnContainerLogs,
   removeSpawnContainer,
+  startSpawnContainer,
+  waitForSpawnContainer,
 } from "./container-launch.js";
+import { claudeCodeBackend, codexBackend } from "./backends.js";
 import { SPAWN_CONFIG } from "../hatchery/spawn-config.js";
 
 const SPAWN_ID = "20260504-abc123";
@@ -37,6 +43,8 @@ const EXPECTED_ENTRYPOINT = [
   "-c",
   `claude -p "$(cat ${CONTAINER_PROMPT_PATH})" --output-format json --dangerously-skip-permissions --bare --no-session-persistence`,
 ];
+
+const CODEX_HOME = "/tmp/march-test-codex-home";
 
 describe("container-launch", () => {
   beforeEach(() => {
@@ -50,12 +58,12 @@ describe("container-launch", () => {
   });
 
   describe("launchSpawnContainer", () => {
-    it("invokes `docker run -d` with all required flags in the contract's order", () => {
+    it("invokes `docker create` with all required flags in the contract's order", () => {
       childProcessMock.execFileSync.mockReturnValueOnce(
         Buffer.from("abc123def456789\n"),
       );
 
-      launchSpawnContainer({ spawnId: SPAWN_ID });
+      createSpawnContainer({ spawnId: SPAWN_ID, backend: claudeCodeBackend });
 
       expect(childProcessMock.execFileSync).toHaveBeenCalledTimes(1);
       const [bin, args] = childProcessMock.execFileSync.mock.calls[0];
@@ -66,7 +74,7 @@ describe("container-launch", () => {
       );
 
       const expectedEnvFlags: string[] = [];
-      for (const envVar of SPAWN_CONFIG.envWhitelist) {
+      for (const envVar of claudeCodeBackend.requiredEnvVars) {
         // Passthrough form: two adjacent argv entries `-e` then `VAR`,
         // never `-e VAR=<value>` — Docker reads the value from the
         // operator's environment per SD-001.
@@ -74,8 +82,7 @@ describe("container-launch", () => {
       }
 
       expect(args).toEqual([
-        "run",
-        "-d",
+        "create",
         "--name",
         CONTAINER_NAME,
         ...expectedCapDropFlags,
@@ -96,7 +103,7 @@ describe("container-launch", () => {
     it("derives every `--cap-drop=<cap>` flag from SPAWN_CONFIG.capDrop", () => {
       childProcessMock.execFileSync.mockReturnValueOnce(Buffer.from("id\n"));
 
-      launchSpawnContainer({ spawnId: SPAWN_ID });
+      createSpawnContainer({ spawnId: SPAWN_ID, backend: claudeCodeBackend });
 
       const [, args] = childProcessMock.execFileSync.mock.calls[0];
       const argList = args as string[];
@@ -112,7 +119,7 @@ describe("container-launch", () => {
     it("passes env-vars in passthrough form (`-e VAR`, no `=value`)", () => {
       childProcessMock.execFileSync.mockReturnValueOnce(Buffer.from("id\n"));
 
-      launchSpawnContainer({ spawnId: SPAWN_ID });
+      createSpawnContainer({ spawnId: SPAWN_ID, backend: claudeCodeBackend });
 
       const [, args] = childProcessMock.execFileSync.mock.calls[0];
       const argList = args as string[];
@@ -122,7 +129,7 @@ describe("container-launch", () => {
           const next = argList[i + 1];
           expect(next).toBeDefined();
           expect(next).not.toContain("=");
-          expect(SPAWN_CONFIG.envWhitelist).toContain(next);
+          expect(claudeCodeBackend.requiredEnvVars).toContain(next);
         }
         // No combined `-e VAR=value` form anywhere in the argv.
         expect(argList[i]).not.toMatch(/^-e=/);
@@ -135,14 +142,17 @@ describe("container-launch", () => {
         Buffer.from(`${fakeId}\n`),
       );
 
-      const got = launchSpawnContainer({ spawnId: SPAWN_ID });
+      const got = createSpawnContainer({
+        spawnId: SPAWN_ID,
+        backend: claudeCodeBackend,
+      });
       expect(got).toBe(fakeId);
     });
 
     it("emits the Claude Code entrypoint verbatim from the contracts", () => {
       childProcessMock.execFileSync.mockReturnValueOnce(Buffer.from("id\n"));
 
-      launchSpawnContainer({ spawnId: SPAWN_ID });
+      createSpawnContainer({ spawnId: SPAWN_ID, backend: claudeCodeBackend });
 
       const [, args] = childProcessMock.execFileSync.mock.calls[0];
       const argList = args as string[];
@@ -181,7 +191,7 @@ describe("container-launch", () => {
 
       let caught: unknown;
       try {
-        launchSpawnContainer({ spawnId: SPAWN_ID });
+        createSpawnContainer({ spawnId: SPAWN_ID, backend: claudeCodeBackend });
       } catch (e) {
         caught = e;
       }
@@ -204,7 +214,7 @@ describe("container-launch", () => {
         .mockReturnValueOnce(Buffer.from(""));
 
       try {
-        launchSpawnContainer({ spawnId: SPAWN_ID });
+        createSpawnContainer({ spawnId: SPAWN_ID, backend: claudeCodeBackend });
       } catch {
         // expected
       }
@@ -234,13 +244,98 @@ describe("container-launch", () => {
 
       let caught: unknown;
       try {
-        launchSpawnContainer({ spawnId: SPAWN_ID });
+        createSpawnContainer({ spawnId: SPAWN_ID, backend: claudeCodeBackend });
       } catch (e) {
         caught = e;
       }
       // Original launch error must still surface; the rm failure is best-effort.
       expect(caught).toBeInstanceOf(LaunchError);
       expect((caught as LaunchError).message).toContain("launch stderr");
+    });
+
+    it("uses the Codex backend entrypoint and read-only credential mount", () => {
+      const previousCodexHome = process.env.CODEX_HOME;
+      process.env.CODEX_HOME = CODEX_HOME;
+      childProcessMock.execFileSync.mockReturnValueOnce(Buffer.from("id\n"));
+
+      try {
+        createSpawnContainer({ spawnId: SPAWN_ID, backend: codexBackend });
+      } finally {
+        if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
+        else process.env.CODEX_HOME = previousCodexHome;
+      }
+
+      const [, args] = childProcessMock.execFileSync.mock.calls[0];
+      const argList = args as string[];
+      expect(argList).toContain("-v");
+      expect(argList).toContain(`${CODEX_HOME}:/march/codex-auth:ro`);
+      expect(argList).toContain("CODEX_HOME=/march/codex-home");
+
+      const imageIdx = argList.lastIndexOf(IMAGE_TAG);
+      const entrypoint = argList.slice(imageIdx + 1);
+      expect(entrypoint).toEqual([
+        "sh",
+        "-c",
+        `cp -R /march/codex-auth/. /march/codex-home/ && chmod -R u+rwX /march/codex-home && codex exec --json --ephemeral --ignore-rules --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --cd /march/workspace - < ${CONTAINER_PROMPT_PATH}`,
+      ]);
+    });
+
+    it("keeps launchSpawnContainer as a compatibility alias for create", () => {
+      childProcessMock.execFileSync.mockReturnValueOnce(Buffer.from("id\n"));
+      expect(
+        launchSpawnContainer({ spawnId: SPAWN_ID, backend: claudeCodeBackend }),
+      ).toBe("id");
+      const [, args] = childProcessMock.execFileSync.mock.calls[0];
+      expect((args as string[])[0]).toBe("create");
+    });
+  });
+
+  describe("prompt handoff and lifecycle helpers", () => {
+    it("copies the prompt into the stopped container before start", () => {
+      childProcessMock.execFileSync.mockReturnValueOnce(Buffer.from(""));
+
+      copyPromptToContainer("container-id", "hello");
+
+      expect(childProcessMock.execFileSync).toHaveBeenCalledTimes(1);
+      const [bin, args] = childProcessMock.execFileSync.mock.calls[0];
+      expect(bin).toBe("docker");
+      expect((args as string[])[0]).toBe("cp");
+      expect((args as string[])[2]).toBe(`container-id:${CONTAINER_PROMPT_PATH}`);
+    });
+
+    it("starts the created container", () => {
+      childProcessMock.execFileSync.mockReturnValueOnce(Buffer.from(""));
+      startSpawnContainer("container-id");
+      expect(childProcessMock.execFileSync).toHaveBeenCalledWith(
+        "docker",
+        ["start", "container-id"],
+        expect.objectContaining({ stdio: ["ignore", "ignore", "pipe"] }),
+      );
+    });
+
+    it("waits for the container and parses the exit code", () => {
+      childProcessMock.execFileSync.mockReturnValueOnce(Buffer.from("0\n"));
+      expect(waitForSpawnContainer("container-id")).toEqual({ exitCode: 0 });
+      expect(childProcessMock.execFileSync).toHaveBeenCalledWith(
+        "docker",
+        ["wait", "container-id"],
+        expect.objectContaining({ stdio: ["ignore", "pipe", "pipe"] }),
+      );
+    });
+
+    it("rejects unparseable docker wait output", () => {
+      childProcessMock.execFileSync.mockReturnValueOnce(Buffer.from("0\n1\n"));
+      expect(() => waitForSpawnContainer("container-id")).toThrow(LaunchError);
+    });
+
+    it("reads docker logs as text", () => {
+      childProcessMock.execFileSync.mockReturnValueOnce(Buffer.from("Olympia\n"));
+      expect(readSpawnContainerLogs("container-id")).toBe("Olympia\n");
+      expect(childProcessMock.execFileSync).toHaveBeenCalledWith(
+        "docker",
+        ["logs", "container-id"],
+        expect.objectContaining({ stdio: ["ignore", "pipe", "pipe"] }),
+      );
     });
   });
 

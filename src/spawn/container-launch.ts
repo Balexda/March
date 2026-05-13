@@ -1,4 +1,11 @@
 import { execFileSync } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import {
+  resolveCredentialMounts,
+  type SpawnBackend,
+} from "./backends.js";
 import { SPAWN_CONFIG } from "../hatchery/spawn-config.js";
 import { spawnImageTag } from "./snapshot-build.js";
 
@@ -22,8 +29,7 @@ export class LaunchError extends Error {
 /**
  * In-container path where Story 6 will materialise the finalized prompt
  * file before launch. The Claude Code entrypoint constructed by
- * {@link buildClaudeCodeEntrypoint} reads from this path via
- * `$(cat /march/prompt.txt)`.
+ * the selected backend reads from this path.
  *
  * Exported as a load-bearing contract: any consumer that places a prompt
  * file into the container must use this path, and any future migration to
@@ -72,68 +78,50 @@ function stderrTail(stderr: unknown): string {
   return "…" + text.slice(-STDERR_TAIL_CHARS);
 }
 
-/**
- * Constructs the Claude Code container entrypoint. Returns the argv array
- * docker should exec inside the container, parameterised on the in-container
- * prompt-file path so the future `SpawnBackend.buildEntrypoint(promptFilePath)`
- * migration (Feature 3) is a rename rather than a re-architecting.
- *
- * Output matches the contracts' Claude Code Implementation section verbatim:
- *
- * ```
- * ["sh", "-c",
- *  "claude -p \"$(cat /march/prompt.txt)\" --output-format json --dangerously-skip-permissions --bare --no-session-persistence"]
- * ```
- *
- * The shell wrapper (`sh -c`) is required because Docker's exec form does
- * not invoke a shell, and the entrypoint relies on `$(cat ...)` shell
- * expansion to inline the prompt without exposing it on the argv.
- */
-function buildClaudeCodeEntrypoint(promptFilePath: string): string[] {
-  return [
-    "sh",
-    "-c",
-    `claude -p "$(cat ${promptFilePath})" --output-format json --dangerously-skip-permissions --bare --no-session-persistence`,
-  ];
-}
-
-/** Inputs to {@link launchSpawnContainer}. */
+/** Inputs to {@link createSpawnContainer}. */
 export interface LaunchSpawnContainerInput {
   /** SpawnId — used to derive the container name and image tag. */
   readonly spawnId: string;
+  /** Backend selected for this spawn. */
+  readonly backend: SpawnBackend;
+}
+
+export interface WaitForSpawnContainerResult {
+  readonly exitCode: number;
 }
 
 /**
- * Invokes `docker run -d` for a single spawn against the image tag produced
+ * Invokes `docker create` for a single spawn against the image tag produced
  * by Story 4 (`march-spawn-<spawn-id>`), composing the security and resource
- * flags from {@link SPAWN_CONFIG} and the Claude Code entrypoint per the
- * contracts' Container Launch and Claude Code Implementation sections.
+ * flags from {@link SPAWN_CONFIG} and the selected backend's entrypoint per
+ * the contracts' Container Launch section.
  *
  * The argv composition is, in order:
  *
  * ```
- * run -d
+ * create
  * --name march-spawn-<spawn-id>
  * --cap-drop=<cap> (per entry in SPAWN_CONFIG.capDrop; defaults to ["ALL"])
  * --user <SPAWN_CONFIG.user>
  * --memory <SPAWN_CONFIG.memoryLimit>
  * --cpus <SPAWN_CONFIG.cpuLimit>
  * --network <SPAWN_CONFIG.networkMode>
- * (-e <var> per entry in SPAWN_CONFIG.envWhitelist — passthrough form)
+ * (-e <var> per entry in backend.requiredEnvVars — passthrough form)
+ * (-e <var=value> and -v <source:target:ro> per backend credential mount)
  * <imageTag>
- * <claudeCodeEntrypoint...>
+ * <backend.buildEntrypoint...>
  * ```
  *
  * `SPAWN_CONFIG.timeoutSeconds` is intentionally NOT emitted at this
  * stage — Stage 6 (Wait) enforces the timeout per the Dispatch Pipeline
  * contract; Story 7 owns that enforcement.
  *
- * Env-vars are passed via `-e VAR` passthrough (Docker reads the value from
- * the operator's environment), not `-e VAR=<inlined>`. See SD-001 for the
- * rationale; Feature 4 may add a pre-flight check that the operator has
- * `ANTHROPIC_API_KEY` set before reaching this stage.
+ * Required env-vars are passed via `-e VAR` passthrough (Docker reads the
+ * value from the operator's environment), not `-e VAR=<inlined>`. Credential
+ * mount env-vars are explicit container-local values such as
+ * `CODEX_HOME=/march/codex-home`; they never include host secrets.
  *
- * On success, returns the trimmed container ID captured from `docker run -d`
+ * On success, returns the trimmed container ID captured from `docker create`
  * stdout (the full container ID, not the name) so callers can populate the
  * SpawnRecord's `containerId` field.
  *
@@ -146,10 +134,10 @@ export interface LaunchSpawnContainerInput {
  * launch failure is more diagnostic and the cleanup is best-effort by
  * contract.
  *
- * @throws {LaunchError} If `docker run -d` exits non-zero.
+ * @throws {LaunchError} If `docker create` exits non-zero.
  */
-export function launchSpawnContainer(input: LaunchSpawnContainerInput): string {
-  const { spawnId } = input;
+export function createSpawnContainer(input: LaunchSpawnContainerInput): string {
+  const { backend, spawnId } = input;
   const containerName = spawnContainerName(spawnId);
   const imageTag = spawnImageTag(spawnId);
 
@@ -159,15 +147,23 @@ export function launchSpawnContainer(input: LaunchSpawnContainerInput): string {
   const capDropFlags = SPAWN_CONFIG.capDrop.map((cap) => `--cap-drop=${cap}`);
 
   const envFlags: string[] = [];
-  for (const envVar of SPAWN_CONFIG.envWhitelist) {
+  for (const envVar of backend.requiredEnvVars) {
     // Passthrough form: `-e VAR` (no `=value`) so Docker reads the value
-    // from the operator's environment at launch time. Per SD-001.
+    // from the operator's environment at launch time.
     envFlags.push("-e", envVar);
   }
 
+  const volumeFlags: string[] = [];
+  for (const mount of resolveCredentialMounts(backend)) {
+    const suffix = mount.readOnly ? ":ro" : "";
+    volumeFlags.push("-v", `${mount.hostPath}:${mount.containerPath}${suffix}`);
+    for (const [envVar, value] of Object.entries(mount.env)) {
+      envFlags.push("-e", `${envVar}=${value}`);
+    }
+  }
+
   const args: string[] = [
-    "run",
-    "-d",
+    "create",
     "--name",
     containerName,
     ...capDropFlags,
@@ -179,16 +175,17 @@ export function launchSpawnContainer(input: LaunchSpawnContainerInput): string {
     SPAWN_CONFIG.cpuLimit,
     "--network",
     SPAWN_CONFIG.networkMode,
+    ...volumeFlags,
     ...envFlags,
     imageTag,
-    ...buildClaudeCodeEntrypoint(CONTAINER_PROMPT_PATH),
+    ...backend.buildEntrypoint(CONTAINER_PROMPT_PATH),
   ];
 
   let stdout: Buffer | string;
   try {
     stdout = execFileSync("docker", args, {
       // stdin is closed so docker doesn't block on TTY detection.
-      // stdout is captured because `docker run -d` prints the container
+      // stdout is captured because `docker create` prints the container
       // ID we need to return. stderr stays piped so the LaunchError can
       // surface it. Both streams are bounded with an explicit `maxBuffer`
       // so a verbose failure does not trigger ENOBUFS — see the constant
@@ -209,14 +206,101 @@ export function launchSpawnContainer(input: LaunchSpawnContainerInput): string {
     }
     throw new LaunchError(
       tail.length > 0
-        ? `docker run failed for "${containerName}":\n${tail}`
-        : `docker run failed for "${containerName}": ${(err as Error).message}`,
+        ? `docker create failed for "${containerName}":\n${tail}`
+        : `docker create failed for "${containerName}": ${(err as Error).message}`,
     );
   }
 
-  // `docker run -d` prints the full container ID followed by a newline.
+  // `docker create` prints the full container ID followed by a newline.
   const text = Buffer.isBuffer(stdout) ? stdout.toString("utf-8") : stdout;
   return text.trim();
+}
+
+export const launchSpawnContainer = createSpawnContainer;
+
+export function copyPromptToContainer(
+  containerId: string,
+  prompt: string,
+): void {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "march-spawn-prompt-"));
+  const promptPath = path.join(tmpDir, "prompt.txt");
+  try {
+    fs.writeFileSync(promptPath, prompt, "utf-8");
+    execFileSync("docker", ["cp", promptPath, `${containerId}:${CONTAINER_PROMPT_PATH}`], {
+      stdio: ["ignore", "ignore", "pipe"],
+      maxBuffer: DOCKER_OUTPUT_MAX_BUFFER,
+    });
+  } catch (err) {
+    const tail = stderrTail((err as { stderr?: unknown }).stderr);
+    throw new LaunchError(
+      tail.length > 0
+        ? `docker cp prompt failed for "${containerId}":\n${tail}`
+        : `docker cp prompt failed for "${containerId}": ${(err as Error).message}`,
+    );
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+}
+
+export function startSpawnContainer(containerId: string): void {
+  try {
+    execFileSync("docker", ["start", containerId], {
+      stdio: ["ignore", "ignore", "pipe"],
+      maxBuffer: DOCKER_OUTPUT_MAX_BUFFER,
+    });
+  } catch (err) {
+    const tail = stderrTail((err as { stderr?: unknown }).stderr);
+    throw new LaunchError(
+      tail.length > 0
+        ? `docker start failed for "${containerId}":\n${tail}`
+        : `docker start failed for "${containerId}": ${(err as Error).message}`,
+    );
+  }
+}
+
+export function waitForSpawnContainer(
+  containerId: string,
+): WaitForSpawnContainerResult {
+  let stdout: Buffer | string;
+  try {
+    stdout = execFileSync("docker", ["wait", containerId], {
+      stdio: ["ignore", "pipe", "pipe"],
+      maxBuffer: DOCKER_OUTPUT_MAX_BUFFER,
+    });
+  } catch (err) {
+    const tail = stderrTail((err as { stderr?: unknown }).stderr);
+    throw new LaunchError(
+      tail.length > 0
+        ? `docker wait failed for "${containerId}":\n${tail}`
+        : `docker wait failed for "${containerId}": ${(err as Error).message}`,
+    );
+  }
+
+  const text = Buffer.isBuffer(stdout) ? stdout.toString("utf-8") : stdout;
+  const trimmed = text.trim();
+  if (!/^-?\d+$/.test(trimmed)) {
+    throw new LaunchError(
+      `docker wait returned unexpected output for "${containerId}": ${JSON.stringify(text)}`,
+    );
+  }
+  return { exitCode: Number.parseInt(trimmed, 10) };
+}
+
+export function readSpawnContainerLogs(containerId: string): string {
+  try {
+    const stdout = execFileSync("docker", ["logs", containerId], {
+      stdio: ["ignore", "pipe", "pipe"],
+      maxBuffer: DOCKER_OUTPUT_MAX_BUFFER,
+    });
+    return Buffer.isBuffer(stdout) ? stdout.toString("utf-8") : stdout;
+  } catch (err) {
+    const tail = stderrTail((err as { stderr?: unknown }).stderr);
+    throw new LaunchError(
+      tail.length > 0
+        ? `docker logs failed for "${containerId}":\n${tail}`
+        : `docker logs failed for "${containerId}": ${(err as Error).message}`,
+    );
+  }
 }
 
 /**

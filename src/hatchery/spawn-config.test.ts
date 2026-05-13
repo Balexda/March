@@ -14,11 +14,8 @@ import { BASE_IMAGE, SPAWN_CONFIG, type SpawnConfig } from "./spawn-config.js";
 
 describe("spawn-config", () => {
   describe("BASE_IMAGE", () => {
-    it("preserves the previously published tag exactly", () => {
-      // Story 4's snapshot-build module imports this literal — any drift
-      // here breaks the build/launch pipeline. Asserted explicitly so
-      // future refactors must update the test alongside the constant.
-      expect(BASE_IMAGE).toBe("march-base:latest");
+    it("points direct Dockerfile helper calls at the default Claude backend image", () => {
+      expect(BASE_IMAGE).toBe("march-spawn-claude:latest");
     });
   });
 
@@ -72,10 +69,5 @@ describe("spawn-config", () => {
       expect(SPAWN_CONFIG.timeoutSeconds).toBeGreaterThan(0);
     });
 
-    it("whitelists exactly ANTHROPIC_API_KEY and nothing else (AS 5.4)", () => {
-      // Backend-specific auth key only — narrowing this further is
-      // Feature 4's responsibility per the contracts.
-      expect(SPAWN_CONFIG.envWhitelist).toEqual(["ANTHROPIC_API_KEY"]);
-    });
   });
 });

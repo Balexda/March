@@ -10,6 +10,7 @@
     "pretest": "tsup src/cli.ts --format esm --clean",
     "test": "vitest run",
     "build": "tsup src/cli.ts --format esm --clean",
+    "build:spawn-codex-image": "docker build -t march-spawn-codex:latest -f docker/spawn-codex.Dockerfile docker",
     "start": "node dist/cli.js",
     "typecheck": "tsc --noEmit"
   },
