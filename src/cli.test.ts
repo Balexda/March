@@ -372,6 +372,62 @@ describe("march CLI", () => {
     expect(result.stderr).toContain("march-base:latest");
   });
 
+  // --- spawn dispatch prompt source gate (Story 6 Task 1) ---
+
+  it("spawn dispatch: no prompt source — exit 2 with usage error before any git or Docker repo operation", () => {
+    // Full dependency stack present (real git on PATH, docker stub that
+    // satisfies the image-inspect check) so the dispatch reaches the
+    // prompt-resolution gate. stdin is piped (spawnSync default for
+    // `stdio: ["pipe", ...]`) and closes empty, so the gate must surface
+    // a usage error (exit 2) per the spec edge case "fail with a clear
+    // error before any git or Docker operations" and the contracts'
+    // "No prompt provided → exit 2 (usage error)" row.
+    const repoRoot = makeRealRepo();
+    const home = makeTmpDir();
+    const dockerStubDir = makeDockerStubBinDir();
+    const nodeBinDir = path.dirname(process.execPath);
+    const result = runWithEnv(
+      ["spawn", "dispatch"],
+      {
+        PATH: [nodeBinDir, dockerStubDir, process.env.PATH ?? ""].join(
+          path.delimiter,
+        ),
+        HOME: home,
+      },
+      { cwd: repoRoot },
+    );
+
+    // Usage error per FR-022.
+    expect(result.exitCode).toBe(2);
+    expect(result.stderr).toContain("no prompt source provided");
+
+    // No git side effects: no march/spawn/* branch was created.
+    const branches = execFileSync(
+      "git",
+      ["for-each-ref", "--format=%(refname:short)", "refs/heads/march/spawn/"],
+      { cwd: repoRoot, encoding: "utf-8" },
+    );
+    expect(branches.trim()).toBe("");
+
+    // No worktree directory created under <parent>/worktrees/march/.
+    const worktreeParent = path.join(
+      path.dirname(repoRoot),
+      "worktrees",
+      "march",
+    );
+    const leftover =
+      fs.existsSync(worktreeParent) && fs.readdirSync(worktreeParent);
+    expect(!leftover || leftover.length === 0).toBe(true);
+
+    // No SpawnRecord file in the isolated HOME — prompt resolution
+    // failing precedes the initial record write.
+    const spawnsDir = path.join(home, ".march", "spawns");
+    const hasAnyRecord =
+      fs.existsSync(spawnsDir) &&
+      fs.readdirSync(spawnsDir).some((f) => f.endsWith(".json"));
+    expect(hasAnyRecord).toBe(false);
+  });
+
   // --- spawn dispatch worktree + initial SpawnRecord (Story 3) ---
 
   /**
@@ -490,7 +546,11 @@ describe("march CLI", () => {
     const dockerStubDir = makeDockerStubBinDir();
     const nodeBinDir = path.dirname(process.execPath);
     const result = runWithEnv(
-      ["spawn", "dispatch"],
+      // US6 Task 1: dispatch now requires a prompt source. Pass an inline
+      // --prompt so the success path exercises the same Stage 1–4 chain it
+      // did before the prompt gate was introduced. The flag value is
+      // discarded — later US6 tasks will assert on the persisted prompt.
+      ["spawn", "dispatch", "--prompt", "test prompt"],
       {
         // Docker stub first, then real PATH for git.
         PATH: [nodeBinDir, dockerStubDir, process.env.PATH ?? ""].join(
@@ -586,7 +646,9 @@ describe("march CLI", () => {
     const dockerStubDir = makeDockerBuildFailBinDir();
     const nodeBinDir = path.dirname(process.execPath);
     const result = runWithEnv(
-      ["spawn", "dispatch"],
+      // US6 Task 1: a valid prompt source is required before the Stage 3
+      // build failure path is reachable. The flag value is discarded.
+      ["spawn", "dispatch", "--prompt", "test prompt"],
       {
         PATH: [nodeBinDir, dockerStubDir, process.env.PATH ?? ""].join(
           path.delimiter,
@@ -668,7 +730,9 @@ describe("march CLI", () => {
     const dockerStubDir = makeDockerRunFailBinDir();
     const nodeBinDir = path.dirname(process.execPath);
     const result = runWithEnv(
-      ["spawn", "dispatch"],
+      // US6 Task 1: a valid prompt source is required before Stage 4
+      // launch failure is reachable. The flag value is discarded.
+      ["spawn", "dispatch", "--prompt", "test prompt"],
       {
         PATH: [nodeBinDir, dockerStubDir, process.env.PATH ?? ""].join(
           path.delimiter,
@@ -753,7 +817,9 @@ describe("march CLI", () => {
     fs.chmodSync(hookPath, 0o755);
 
     const result = runWithEnv(
-      ["spawn", "dispatch"],
+      // US6 Task 1: prompt source required to reach the worktree-creation
+      // failure path. Flag value is discarded.
+      ["spawn", "dispatch", "--prompt", "test prompt"],
       {
         PATH: [nodeBinDir, dockerStubDir, process.env.PATH ?? ""].join(
           path.delimiter,
@@ -803,7 +869,9 @@ describe("march CLI", () => {
     const dockerStubDir = makeDockerStubBinDir();
     const nodeBinDir = path.dirname(process.execPath);
     const result = runWithEnv(
-      ["spawn", "dispatch"],
+      // US6 Task 1: prompt source required to reach the SpawnRecord-write
+      // failure path. Flag value is discarded.
+      ["spawn", "dispatch", "--prompt", "test prompt"],
       {
         PATH: [nodeBinDir, dockerStubDir, process.env.PATH ?? ""].join(
           path.delimiter,

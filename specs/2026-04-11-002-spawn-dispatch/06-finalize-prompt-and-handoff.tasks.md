@@ -17,7 +17,7 @@
 
 ### Tasks
 
-- [ ] **Resolve raw prompt from `--prompt-file`, `--prompt`, or stdin**
+- [x] **Resolve raw prompt from `--prompt-file`, `--prompt`, or stdin**
 
   Add a prompt-ingestion module under `src/` that resolves the operator's raw prompt from one of three sources with the precedence defined in the contracts' `march spawn dispatch` Inputs table. The module must work against today's flat `program.command("spawn [subcommand]")` Commander stub in `src/cli.ts`; the implementer chooses whether to register Commander options on the existing command or parse `process.argv` directly, but must not introduce the Commander subcommand-group refactor that User Story 1 owns. Resolution failures must follow the contracts' Error Conditions table.
 
