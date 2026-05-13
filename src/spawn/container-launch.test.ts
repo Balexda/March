@@ -26,7 +26,7 @@ import {
   launchSpawnContainer,
   removeSpawnContainer,
 } from "./container-launch.js";
-import { SPAWN_CONFIG } from "./spawn-config.js";
+import { SPAWN_CONFIG } from "../hatchery/spawn-config.js";
 
 const SPAWN_ID = "20260504-abc123";
 const CONTAINER_NAME = `march-spawn-${SPAWN_ID}`;

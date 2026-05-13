@@ -3,8 +3,8 @@ import path from "node:path";
 import os from "node:os";
 import { createManifest, isValidManifest } from "./manifest.js";
 import { getM1Skills } from "./skills.js";
-import { CLI_VERSION } from "./version.js";
-import { FINDER_BIN, INIT_DEPENDENCIES, isFinderAvailable, isOnPath } from "./deps.js";
+import { CLI_VERSION } from "../shared/version.js";
+import { FINDER_BIN, INIT_DEPENDENCIES, isFinderAvailable, isOnPath } from "../shared/deps.js";
 
 export class InitError extends Error {
   constructor(message: string) {

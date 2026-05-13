@@ -30,7 +30,7 @@ import {
   writeSpawnDockerfile,
   SPAWN_DOCKERFILE_NAME,
 } from "./snapshot-build.js";
-import { BASE_IMAGE } from "./spawn-config.js";
+import { BASE_IMAGE } from "../hatchery/spawn-config.js";
 
 describe("snapshot-build", () => {
   const tmpDirs: string[] = [];

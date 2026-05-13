@@ -8,10 +8,10 @@ import path from "node:path";
 
 const _require = createRequire(import.meta.url);
 const PKG_VERSION: string = (
-  _require("../package.json") as { version: string }
+  _require("../../package.json") as { version: string }
 ).version;
 
-const CLI_PATH = resolve(import.meta.dirname, "../dist/cli.js");
+const CLI_PATH = resolve(import.meta.dirname, "../../dist/cli.js");
 
 function runWithHome(
   args: string[],

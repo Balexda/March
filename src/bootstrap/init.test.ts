@@ -5,11 +5,11 @@ import { createRequire } from "node:module";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { FINDER_BIN } from "./deps.js";
+import { FINDER_BIN } from "../shared/deps.js";
 
 const _require = createRequire(import.meta.url);
 const PKG_VERSION: string = (
-  _require("../package.json") as { version: string }
+  _require("../../package.json") as { version: string }
 ).version;
 
 // Absolute path to the finder binary (which on Unix, where on Windows) —
@@ -18,7 +18,7 @@ const FINDER_PATH = execFileSync(FINDER_BIN, [FINDER_BIN], {
   encoding: "utf-8",
 }).trim();
 
-const CLI_PATH = resolve(import.meta.dirname, "../dist/cli.js");
+const CLI_PATH = resolve(import.meta.dirname, "../../dist/cli.js");
 
 function runWithHome(
   args: string[],

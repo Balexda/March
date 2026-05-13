@@ -18,7 +18,7 @@ import {
   slugify,
   writeHeartbeatTimerOverride,
   writeLegateHeartbeatScript,
-} from "./legate.js";
+} from "./init.js";
 
 describe("legate module", () => {
   const tmpDirs: string[] = [];
