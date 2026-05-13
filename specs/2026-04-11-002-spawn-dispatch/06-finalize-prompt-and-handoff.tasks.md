@@ -51,7 +51,7 @@
   - The container working directory referenced in the finalized prompt matches the Dockerfile's `WORKDIR` (single source of truth)
   - Unit tests assert the finalized output contains all three required pieces (raw prompt, spawn ID, working directory) for representative inputs
 
-- [ ] **Implement Stage 5 prompt handoff into the running container**
+- [x] **Implement Stage 5 prompt handoff into the running container**
 
   Add a Stage 5 handoff helper that takes a `containerId` (produced by Stage 4 Launch — owned by Story 5) and the finalized prompt string from Task 3 and writes the prompt into the running container at the path consumed by `claudeCodeBackend.buildEntrypoint`. Per the spec's Critical Assumption and the contracts' Stage 5 row ("Write finalized prompt to container, invoke backend CLI"), the prompt is delivered to the running container at handoff time — it is NOT baked into the image. The Image Build template (`FROM/COPY/WORKDIR`) in `src/snapshot-build.ts`, the `createBuildContext` output in `src/snapshot.ts`, and the Snapshot Exclusion List MUST remain untouched. The helper is exported but not wired into `src/cli.ts`'s dispatch action; the wiring lands in Story 5 alongside the Stage 4 Launch integration so the call sequence (launch → handoff → wait) is added in one place. See SD-002 for the exact handoff mechanism the helper uses (`docker cp` vs. `docker exec`) and SD-003 for how Story 5 will sequence the launch and handoff so the entrypoint does not race the prompt write.
 
