@@ -179,7 +179,7 @@ As an operator (and Feature 6 — PR Integration — as a downstream consumer), 
 
 | ID  | Title                                                          | Depends On | Artifact |
 |-----|----------------------------------------------------------------|------------|----------|
-| US2 | SpawnBackend Interface and Registry                            | —          | —        |
+| US2 | SpawnBackend Interface and Registry                            | —          | specs/2026-05-10-003-multi-backend-execution-interface/02-spawnbackend-interface-and-registry.tasks.md |
 | US3 | Claude Code Backend (Refactor with Behavioral Preservation)    | US2        | —        |
 | US4 | Gemini CLI Backend                                             | US2        | —        |
 | US5 | Per-Backend Image and Env Derivation in the Dispatch Pipeline  | US3, US4   | —        |
