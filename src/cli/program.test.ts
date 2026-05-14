@@ -506,6 +506,33 @@ exit 0
     return binDir;
   }
 
+  function makeDockerNoPatchStubBinDir(invocationLog?: string): string {
+    const binDir = path.join(makeTmpDir(), "bin");
+    fs.mkdirSync(binDir);
+    fs.symlinkSync(FINDER_PATH, path.join(binDir, path.basename(FINDER_PATH)));
+    const dockerStub = path.join(binDir, "docker");
+    fs.writeFileSync(
+      dockerStub,
+      `#!/bin/sh
+${invocationLog ? `printf '%s\\n' "$*" >> "${invocationLog}"\n` : ""}if [ "$1" = "create" ]; then
+  echo "${FAKE_CONTAINER_ID}"
+  exit 0
+fi
+if [ "$1" = "wait" ]; then
+  echo "0"
+  exit 0
+fi
+if [ "$1" = "logs" ]; then
+  echo "completed without a patch"
+  exit 0
+fi
+exit 0
+`,
+    );
+    fs.chmodSync(dockerStub, 0o755);
+    return binDir;
+  }
+
   /**
    * Builds a bin dir containing a docker stub that succeeds on every
    * subcommand EXCEPT `build` (which exits 1). Used to simulate a docker
@@ -578,7 +605,17 @@ if [ "$1" = "launch" ]; then
   WORKTREE="$(dirname "$REPO")/agent-deck-worktrees/$SAFE_BRANCH"
   mkdir -p "$(dirname "$WORKTREE")"
   git -C "$REPO" worktree add -q -b "$BRANCH" "$WORKTREE" HEAD
-  printf '{"id":"manager-session","title":"%s","group":"%s","worktree_branch":"%s","worktree_path":"%s"}\\n' "$TITLE" "$GROUP" "$BRANCH" "$WORKTREE"
+  printf '{"id":"manager-session","title":"%s","group":"%s","worktree_branch":"%s","worktree_path":"%s","created_at":"2026-05-14T00:00:00Z"}\\n' "$TITLE" "$GROUP" "$BRANCH" "$WORKTREE" > "${invocationLog}.session.json"
+  exit 0
+fi
+if [ "$1" = "list" ]; then
+  if [ -f "${invocationLog}.session.json" ]; then
+    printf '['
+    cat "${invocationLog}.session.json"
+    printf ']\\n'
+  else
+    printf '[]\\n'
+  fi
   exit 0
 fi
 if [ "$1" = "session" ] && [ "$2" = "send" ]; then
@@ -587,6 +624,10 @@ if [ "$1" = "session" ] && [ "$2" = "send" ]; then
 fi
 if [ "$1" = "session" ] && [ "$2" = "show" ]; then
   printf '{"id":"%s"}\\n' "$3"
+  exit 0
+fi
+if [ "$1" = "session" ] && [ "$2" = "remove" ]; then
+  rm -f "${invocationLog}.session.json"
   exit 0
 fi
 exit 0
@@ -761,6 +802,80 @@ exit 0
       .split("\n")
       .find((line) => line.startsWith("build "));
     expect(buildLine).toContain("march-spawn-");
+  });
+
+  it("hatchery spawn: record write failure prunes the manager session", () => {
+    const repoRoot = makeRealRepo();
+    const home = makeTmpDir();
+    const codexHome = path.join(home, "codex-home");
+    fs.mkdirSync(codexHome);
+    fs.writeFileSync(path.join(home, ".march"), "not a dir");
+    const dockerStubDir = makeDockerPatchStubBinDir();
+    const agentDeckLog = path.join(home, "agent-deck.log");
+    const agentDeckStubDir = makeAgentDeckStubBinDir(agentDeckLog);
+    const nodeBinDir = path.dirname(process.execPath);
+    const result = runWithEnv(
+      ["hatchery", "spawn", "--prompt", "add a generated file"],
+      {
+        PATH: [
+          nodeBinDir,
+          agentDeckStubDir,
+          dockerStubDir,
+          process.env.PATH ?? "",
+        ].join(path.delimiter),
+        HOME: home,
+        CODEX_HOME: codexHome,
+      },
+      { cwd: repoRoot },
+    );
+
+    expect(result.exitCode).toBe(1);
+    const agentDeckInvocations = fs.readFileSync(agentDeckLog, "utf-8");
+    expect(agentDeckInvocations).toMatch(/^launch /m);
+    expect(agentDeckInvocations).toMatch(
+      /^session remove manager-session --prune-worktree --force$/m,
+    );
+  });
+
+  it("hatchery spawn: malformed spawn output is persisted before failing", () => {
+    const repoRoot = makeRealRepo();
+    const home = makeTmpDir();
+    const codexHome = path.join(home, "codex-home");
+    fs.mkdirSync(codexHome);
+    const dockerStubDir = makeDockerNoPatchStubBinDir();
+    const agentDeckLog = path.join(home, "agent-deck.log");
+    const agentDeckStubDir = makeAgentDeckStubBinDir(agentDeckLog);
+    const nodeBinDir = path.dirname(process.execPath);
+    const result = runWithEnv(
+      ["hatchery", "spawn", "--prompt", "add a generated file"],
+      {
+        PATH: [
+          nodeBinDir,
+          agentDeckStubDir,
+          dockerStubDir,
+          process.env.PATH ?? "",
+        ].join(path.delimiter),
+        HOME: home,
+        CODEX_HOME: codexHome,
+      },
+      { cwd: repoRoot },
+    );
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("no git patch");
+    expect(result.stderr).toContain("spawn-output.log");
+    const logsRoot = path.join(home, ".march", "logs", "hatchery-spawns");
+    const spawnIds = fs.readdirSync(logsRoot);
+    expect(spawnIds).toHaveLength(1);
+    const handoffDir = path.join(logsRoot, spawnIds[0]);
+    expect(
+      fs.readFileSync(path.join(handoffDir, "spawn-output.log"), "utf-8"),
+    ).toContain("completed without a patch");
+    expect(fs.readFileSync(path.join(handoffDir, "patch.diff"), "utf-8")).toBe("");
+    const agentDeckInvocations = fs.readFileSync(agentDeckLog, "utf-8");
+    expect(agentDeckInvocations).toMatch(
+      /^session remove manager-session --prune-worktree --force$/m,
+    );
   });
 
   it("spawn dispatch: unknown backend exits 2 before dependency checks", () => {

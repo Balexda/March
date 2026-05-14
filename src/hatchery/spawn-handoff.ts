@@ -54,6 +54,7 @@ export interface HatcherySpawnOptions {
 export interface AgentDeckManagerSession {
   readonly sessionId: string;
   readonly title: string;
+  readonly group: string;
   readonly branch: string;
   readonly worktreePath: string;
 }
@@ -273,6 +274,9 @@ export function launchAgentDeckManager(input: {
   readonly group: string;
   readonly profile?: string;
 }): AgentDeckManagerSession {
+  const beforeIds = new Set(
+    listAgentDeckSessions(input.profile, input.group).map((session) => session.sessionId),
+  );
   const args = [
     ...(input.profile ? ["-p", input.profile] : []),
     "launch",
@@ -287,14 +291,11 @@ export function launchAgentDeckManager(input: {
     input.branch,
     "-b",
     "--title-lock",
-    "--json",
   ];
 
-  let stdout: string;
   try {
-    stdout = execFileSync("agent-deck", args, {
-      encoding: "utf-8",
-      stdio: ["ignore", "pipe", "pipe"],
+    execFileSync("agent-deck", args, {
+      stdio: ["ignore", "ignore", "pipe"],
       maxBuffer: EXEC_MAX_BUFFER,
     });
   } catch (err) {
@@ -306,46 +307,91 @@ export function launchAgentDeckManager(input: {
     );
   }
 
-  const parsed = parseAgentDeckSession(stdout);
-  if (!parsed.sessionId) {
+  const launched = listAgentDeckSessions(input.profile, input.group)
+    .filter((session) => !beforeIds.has(session.sessionId))
+    .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+    .at(-1);
+  if (!launched) {
     throw new HatcherySpawnError(
-      `agent-deck manager launch did not return a session id: ${stdout.trim()}`,
+      `agent-deck manager launch completed but the new session could not be identified from agent-deck list.`,
     );
   }
 
-  let worktreePath = parsed.worktreePath;
+  let worktreePath: string | undefined = launched.worktreePath;
   if (!worktreePath) {
-    worktreePath = readAgentDeckWorktreePath(parsed.sessionId, input.profile);
+    worktreePath = readAgentDeckWorktreePath(launched.sessionId, input.profile);
   }
   if (!worktreePath) {
     throw new HatcherySpawnError(
-      `agent-deck manager session "${parsed.sessionId}" did not report a worktree path.`,
+      `agent-deck manager session "${launched.sessionId}" did not report a worktree path.`,
     );
   }
 
   return {
-    sessionId: parsed.sessionId,
-    title: parsed.title ?? input.title,
-    branch: parsed.branch ?? input.branch,
+    sessionId: launched.sessionId,
+    title: launched.title || input.title,
+    group: launched.group || input.group,
+    branch: launched.branch || input.branch,
     worktreePath,
   };
 }
 
-function parseAgentDeckSession(stdout: string): {
-  sessionId?: string;
-  title?: string;
-  branch?: string;
-  worktreePath?: string;
-} {
-  const parsed = parseJsonMaybe(stdout.trim());
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
-  const record = parsed as Record<string, unknown>;
+interface AgentDeckSessionSnapshot {
+  readonly sessionId: string;
+  readonly title: string;
+  readonly group: string;
+  readonly branch: string;
+  readonly worktreePath: string;
+  readonly createdAt: string;
+}
+
+function parseAgentDeckSession(record: Record<string, unknown>): AgentDeckSessionSnapshot | null {
+  const sessionId = firstString(record, ["id", "session_id", "sessionId"]);
+  if (!sessionId) return null;
   return {
-    sessionId: firstString(record, ["id", "session_id", "sessionId"]),
-    title: firstString(record, ["title", "name"]),
-    branch: firstString(record, ["worktree_branch", "branch", "worktreeBranch"]),
-    worktreePath: firstString(record, ["worktree_path", "path", "worktreePath"]),
+    sessionId,
+    title: firstString(record, ["title", "name"]) ?? "",
+    group: firstString(record, ["group"]) ?? "",
+    branch: firstString(record, ["worktree_branch", "branch", "worktreeBranch"]) ?? "",
+    worktreePath: firstString(record, ["worktree_path", "path", "worktreePath"]) ?? "",
+    createdAt: firstString(record, ["created_at", "createdAt"]) ?? "",
   };
+}
+
+function listAgentDeckSessions(
+  profile: string | undefined,
+  group: string,
+): AgentDeckSessionSnapshot[] {
+  const args = [...(profile ? ["-p", profile] : []), "list", "--json"];
+  let stdout: string;
+  try {
+    stdout = execFileSync("agent-deck", args, {
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "pipe"],
+      maxBuffer: EXEC_MAX_BUFFER,
+    });
+  } catch (err) {
+    const stderr = stderrText((err as { stderr?: unknown }).stderr);
+    throw new HatcherySpawnError(
+      stderr
+        ? `agent-deck session list failed:\n${stderr}`
+        : `agent-deck session list failed: ${(err as Error).message}`,
+    );
+  }
+
+  const parsed = parseJsonMaybe(stdout.trim());
+  if (!Array.isArray(parsed)) {
+    throw new HatcherySpawnError("agent-deck list --json returned unexpected output.");
+  }
+
+  return parsed
+    .filter((value): value is Record<string, unknown> =>
+      !!value && typeof value === "object" && !Array.isArray(value),
+    )
+    .map((record) => parseAgentDeckSession(record))
+    .filter((session): session is AgentDeckSessionSnapshot =>
+      !!session && session.group === group,
+    );
 }
 
 function firstString(
@@ -376,9 +422,33 @@ function readAgentDeckWorktreePath(
       stdio: ["ignore", "pipe", "pipe"],
       maxBuffer: EXEC_MAX_BUFFER,
     });
-    return parseAgentDeckSession(stdout).worktreePath;
+    const parsed = parseJsonMaybe(stdout.trim());
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
+    return parseAgentDeckSession(parsed as Record<string, unknown>)?.worktreePath;
   } catch {
     return undefined;
+  }
+}
+
+export function removeAgentDeckManager(input: {
+  readonly sessionId: string;
+  readonly profile?: string;
+}): void {
+  const args = [
+    ...(input.profile ? ["-p", input.profile] : []),
+    "session",
+    "remove",
+    input.sessionId,
+    "--prune-worktree",
+    "--force",
+  ];
+  try {
+    execFileSync("agent-deck", args, {
+      stdio: ["ignore", "ignore", "pipe"],
+      maxBuffer: EXEC_MAX_BUFFER,
+    });
+  } catch {
+    // Best-effort cleanup for failed handoffs. Surface the original error.
   }
 }
 
@@ -436,7 +506,8 @@ export function runHatcherySpawn(
   const group = input.managerGroup?.trim() || DEFAULT_MANAGER_GROUP;
   const startedAt = new Date().toISOString();
 
-  const manager = launchAgentDeckManager({
+  let manager: AgentDeckManagerSession | undefined;
+  manager = launchAgentDeckManager({
     repoPath: input.repoPath,
     spawnId,
     branch,
@@ -447,18 +518,19 @@ export function runHatcherySpawn(
 
   const spawnPrompt = buildSpawnPatchPrompt(input.prompt);
 
-  writeInitialSpawnRecord({
-    id: spawnId,
-    repoPath: input.repoPath,
-    branch,
-    worktreePath: manager.worktreePath,
-    backend: input.backend.name,
-  }, input.homeDir);
-  updateSpawnRecordPrompt(spawnId, spawnPrompt, input.homeDir);
-
   let containerId: string | undefined;
   let logs = "";
+  let handedOff = false;
   try {
+    writeInitialSpawnRecord({
+      id: spawnId,
+      repoPath: input.repoPath,
+      branch,
+      worktreePath: manager.worktreePath,
+      backend: input.backend.name,
+    }, input.homeDir);
+    updateSpawnRecordPrompt(spawnId, spawnPrompt, input.homeDir);
+
     const handle = createBuildContext(manager.worktreePath);
     try {
       const dockerfilePath = writeSpawnDockerfile(
@@ -483,13 +555,16 @@ export function runHatcherySpawn(
     const waitResult = waitForSpawnContainer(containerId);
     logs = readSpawnContainerLogs(containerId);
     markSpawnRecordStopped(spawnId, waitResult.exitCode, input.homeDir);
+    const metadataPath = path.join(hatcherySpawnLogDir(spawnId, input.homeDir), "metadata.json");
+    const spawnOutputPath = path.join(hatcherySpawnLogDir(spawnId, input.homeDir), "spawn-output.log");
+    const patchPath = path.join(hatcherySpawnLogDir(spawnId, input.homeDir), "patch.diff");
+    const managerPrompt = buildManagerPrompt({
+      operatorPrompt: input.prompt,
+      patchPath,
+      spawnOutputPath,
+      metadataPath,
+    });
     if (waitResult.exitCode !== 0) {
-      const managerPrompt = buildManagerPrompt({
-        operatorPrompt: input.prompt,
-        patchPath: "",
-        spawnOutputPath: "",
-        metadataPath: "",
-      });
       const artifacts = createHatcherySpawnArtifacts({
         spawnId,
         homeDir: input.homeDir,
@@ -503,16 +578,23 @@ export function runHatcherySpawn(
       );
     }
 
-    const patch = extractPatchFromSpawnOutput(logs);
-    const metadataPath = path.join(hatcherySpawnLogDir(spawnId, input.homeDir), "metadata.json");
-    const spawnOutputPath = path.join(hatcherySpawnLogDir(spawnId, input.homeDir), "spawn-output.log");
-    const patchPath = path.join(hatcherySpawnLogDir(spawnId, input.homeDir), "patch.diff");
-    const managerPrompt = buildManagerPrompt({
-      operatorPrompt: input.prompt,
-      patchPath,
-      spawnOutputPath,
-      metadataPath,
-    });
+    let patch: string;
+    try {
+      patch = extractPatchFromSpawnOutput(logs);
+    } catch (err) {
+      const artifacts = createHatcherySpawnArtifacts({
+        spawnId,
+        homeDir: input.homeDir,
+        spawnOutput: logs,
+        patch: "",
+        managerPrompt,
+        metadata: metadataFor(input, manager, spawnId, branch, waitResult.exitCode, startedAt),
+      });
+      throw new HatcherySpawnError(
+        `${(err as Error).message} Logs: ${artifacts.spawnOutputPath}`,
+      );
+    }
+
     const artifacts = createHatcherySpawnArtifacts({
       spawnId,
       homeDir: input.homeDir,
@@ -526,6 +608,7 @@ export function runHatcherySpawn(
       prompt: managerPrompt,
       profile: input.agentDeckProfile,
     });
+    handedOff = true;
 
     return {
       spawnId,
@@ -552,6 +635,12 @@ export function runHatcherySpawn(
     }
     if (containerId) removeSpawnContainer(spawnId);
     removeSpawnImage(spawnId);
+    if (manager && !handedOff) {
+      removeAgentDeckManager({
+        sessionId: manager.sessionId,
+        profile: input.agentDeckProfile,
+      });
+    }
     if (
       err instanceof SnapshotError ||
       err instanceof BuildError ||
