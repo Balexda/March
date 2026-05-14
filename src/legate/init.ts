@@ -515,6 +515,16 @@ function repoHashSuffix(repoPath: string): string {
   return createHash("sha256").update(repoPath).digest("hex").slice(0, 8);
 }
 
+function deriveProcessorName(conductorName: string): string {
+  const prefix = "processor-";
+  const raw = `${prefix}${conductorName}`;
+  if (raw.length <= CONDUCTOR_NAME_MAX_LEN) return raw;
+
+  const suffix = createHash("sha256").update(conductorName).digest("hex").slice(0, 8);
+  const headLength = CONDUCTOR_NAME_MAX_LEN - prefix.length - suffix.length - 1;
+  return `${prefix}${conductorName.slice(0, headLength)}-${suffix}`;
+}
+
 export function deriveDefaults(repoPath: string): {
   profile: string;
   conductorName: string;
@@ -529,12 +539,13 @@ export function deriveDefaults(repoPath: string): {
   // same `repo` / `legate-repo` names — that would silently collide in
   // agent-deck's system-wide conductor namespace.
   const slug = baseSlug || `repo-${repoHashSuffix(repoPath)}`;
+  const conductorName = `legate-${slug}`;
   return {
     profile: slug,
     // Conductor names are unique system-wide in agent-deck — encode the repo
     // slug so multiple repos can each have their own legate without collision.
-    conductorName: `legate-${slug}`,
-    processorName: `processor-legate-${slug}`,
+    conductorName,
+    processorName: deriveProcessorName(conductorName),
     workerGroup: "legate-workers",
     repoName,
   };
@@ -642,7 +653,10 @@ import { fileURLToPath } from "node:url";
 const here = path.dirname(fileURLToPath(import.meta.url));
 const metaPath = path.join(here, "processor-meta.json");
 const meta = JSON.parse(fs.readFileSync(metaPath, "utf-8"));
-const intervalSeconds = Number(process.env.MARCH_PROCESSOR_INTERVAL_SECONDS || "60");
+const rawIntervalSeconds = Number(process.env.MARCH_PROCESSOR_INTERVAL_SECONDS || "60");
+const intervalSeconds = Number.isFinite(rawIntervalSeconds) && rawIntervalSeconds > 0
+  ? rawIntervalSeconds
+  : 60;
 
 function now() {
   return new Date().toISOString();
@@ -670,7 +684,7 @@ function readJsonIfPresent(file) {
 
 function agentDeckList() {
   try {
-    const out = execFileSync("agent-deck", ["-p", meta.profile, "list", "--json"], {
+    const out = execFileSync("agent-deck", ["-p", meta.profile, "list", "-json"], {
       encoding: "utf-8",
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -729,9 +743,26 @@ function tick() {
   );
 }
 
+function logTickError(err) {
+  const message = err?.message || String(err);
+  try {
+    appendText(meta.processor_log_path, \`[\${now()}] processor_error=\${message}\`);
+  } catch {
+    console.error(\`[\${now()}] processor_error=\${message}\`);
+  }
+}
+
+function safeTick() {
+  try {
+    tick();
+  } catch (err) {
+    logTickError(err);
+  }
+}
+
 appendText(meta.processor_log_path, \`[\${now()}] processor starting in observe-and-log mode for \${meta.paired_legate}\`);
-tick();
-setInterval(tick, Math.max(10, intervalSeconds) * 1000);
+safeTick();
+setInterval(safeTick, Math.max(10, intervalSeconds) * 1000);
 `;
 
 async function writeProcessorFiles(input: {
@@ -742,7 +773,7 @@ async function writeProcessorFiles(input: {
   await fs.mkdir(input.stagingDir, { recursive: true });
   const stagedLoopPath = path.join(input.stagingDir, "processor-loop.mjs");
   const stagedMetaPath = path.join(input.stagingDir, "processor-meta.json");
-  await fs.writeFile(stagedLoopPath, PROCESSOR_LOOP_MJS, { mode: 0o755 });
+  await fs.writeFile(stagedLoopPath, PROCESSOR_LOOP_MJS);
   await fs.chmod(stagedLoopPath, 0o755);
   await fs.writeFile(stagedMetaPath, JSON.stringify(input.meta, null, 2) + "\n");
   return { stagedLoopPath, stagedMetaPath };
@@ -1452,7 +1483,9 @@ export async function initLegate(
   const shouldRunSetup = opts.runSetup ?? true;
   const runLegateSetup = shouldRunSetup && !processorOnly;
   const runProcessorSetup = shouldRunSetup && processorEnabled;
-  const processorName = `processor-${conductorName}`;
+  const processorName = opts.conductorName
+    ? deriveProcessorName(conductorName)
+    : defaults.processorName;
   const workerGroup = opts.workerGroup ?? defaults.workerGroup;
   const model = opts.model ?? "sonnet";
   const heartbeatInterval = opts.heartbeatInterval ?? DEFAULT_HEARTBEAT_INTERVAL;
@@ -1461,13 +1494,6 @@ export async function initLegate(
     opts.description ??
     `Legate orchestrator for ${repoName} (Smithy plan→PR→fix loop)`;
 
-  // Validate before composing any filesystem path so caller-supplied values
-  // like `../../.ssh` cannot escape the staging root, and so we surface a
-  // march-side error instead of shelling out and parsing agent-deck's stderr.
-  validateProfileName(profile);
-  validateConductorName(conductorName);
-  if (processorEnabled) validateConductorName(processorName);
-  validateHeartbeatInterval(heartbeatInterval);
   if (processorOnly && opts.processor === false) {
     throw new LegateError(
       "`--processor-only` cannot be combined with `--no-processor`.",
@@ -1478,6 +1504,13 @@ export async function initLegate(
       "`march legate init --processor-only` cannot be combined with --with-container because the Claude Legate conductor is not deployed.",
     );
   }
+  // Validate before composing any filesystem path so caller-supplied values
+  // like `../../.ssh` cannot escape the staging root, and so we surface a
+  // march-side error instead of shelling out and parsing agent-deck's stderr.
+  validateProfileName(profile);
+  validateConductorName(conductorName);
+  if (processorEnabled) validateConductorName(processorName);
+  validateHeartbeatInterval(heartbeatInterval);
   if (opts.withContainer && !runLegateSetup) {
     throw new LegateError(
       "`march legate init --with-container` requires setup so there is a conductor directory to mount. Remove --no-setup and re-run.",
@@ -1686,7 +1719,7 @@ export async function initLegate(
     "setup",
     processorName,
     "-description",
-    `Deterministic Legate processor for ${repoName}`,
+    `Deterministic observe-and-log Legate processor for ${repoName}`,
     "-no-heartbeat",
   ];
   const processorTitle = `conductor-${processorName}`;
@@ -2259,6 +2292,10 @@ export async function initLegate(
           "and the Claude Legate conductor will not be created. Run when ready:",
           `  ${formatShellCommand(processorSetupCommand)}`,
           "",
+          "Then copy the staged processor files into the processor conductor dir:",
+          `  ${formatShellCommand(["cp", path.join(processorStagingDir, "processor-loop.mjs"), path.join(processorConductorDir, "processor-loop.mjs")])}`,
+          `  ${formatShellCommand(["cp", path.join(processorStagingDir, "processor-meta.json"), path.join(processorConductorDir, "processor-meta.json")])}`,
+          "",
           "Then configure and start the deterministic processor:",
           `  ${formatShellCommand(setProcessorToolCommand)}`,
           `  ${formatShellCommand(setProcessorCommandCommand)}`,
@@ -2297,6 +2334,10 @@ export async function initLegate(
         `  ${sendColdStartManualHint}`,
         ...(processorEnabled
           ? [
+              "",
+              "Then copy the staged processor files into the processor conductor dir:",
+              `  ${formatShellCommand(["cp", path.join(processorStagingDir, "processor-loop.mjs"), path.join(processorConductorDir, "processor-loop.mjs")])}`,
+              `  ${formatShellCommand(["cp", path.join(processorStagingDir, "processor-meta.json"), path.join(processorConductorDir, "processor-meta.json")])}`,
               "",
               "Then configure and start the deterministic processor:",
               `  ${formatShellCommand(setProcessorToolCommand)}`,

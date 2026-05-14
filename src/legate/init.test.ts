@@ -287,7 +287,7 @@ describe("legate module", () => {
         "setup",
         "processor-legate-march",
         "-description",
-        "Deterministic Legate processor for March",
+        "Deterministic observe-and-log Legate processor for March",
         "-no-heartbeat",
       ]);
       expect(result.processorSetupRan).toBe(false);
@@ -297,7 +297,11 @@ describe("legate module", () => {
       const metaPath = path.join(result.processorStagingDir!, "processor-meta.json");
       expect(fs.existsSync(loopPath)).toBe(true);
       expect(fs.statSync(loopPath).mode & 0o111).not.toBe(0);
-      expect(fs.readFileSync(loopPath, "utf-8")).toContain("console.log(text)");
+      const loop = fs.readFileSync(loopPath, "utf-8");
+      expect(loop).toContain("console.log(text)");
+      expect(loop).toContain('list", "-json"');
+      expect(loop).toContain("Number.isFinite(rawIntervalSeconds)");
+      expect(loop).toContain("function safeTick()");
       expect(fs.existsSync(metaPath)).toBe(true);
       const meta = JSON.parse(fs.readFileSync(metaPath, "utf-8"));
       expect(meta.paired_legate).toBe("legate-march");
@@ -332,6 +336,25 @@ describe("legate module", () => {
         path.join(home, ".agent-deck", "conductor", "processor-legate-smithy"),
       );
       expect(result.processorSetupCommand).toContain("processor-legate-smithy");
+    });
+
+    it("keeps processor names valid for long custom conductor names", async () => {
+      const home = makeTmpDir();
+      const tplDir = makeTemplateDir("ok");
+      const conductorName = `legate-${"x".repeat(57)}`;
+
+      const result = await initLegate({
+        repoPath: "/some/repo/SmithyCli",
+        homeDir: home,
+        templateDir: tplDir,
+        runSetup: false,
+        conductorName,
+      });
+
+      expect(result.conductorName).toBe(conductorName);
+      expect(result.processorName).toMatch(/^processor-legate-x+-[0-9a-f]{8}$/);
+      expect(result.processorName!.length).toBeLessThanOrEqual(64);
+      expect(result.processorSetupCommand).toContain(result.processorName);
     });
 
     it("can disable processor staging with processor=false", async () => {
@@ -418,6 +441,9 @@ describe("legate module", () => {
       expect(result.summary).toContain("Processor-only setup skipped");
       expect(result.summary).toContain("Claude Legate conductor will not be created");
       expect(result.summary).toContain("conductor setup processor-legate-march");
+      expect(result.summary).toContain("Then copy the staged processor files");
+      expect(result.summary).toContain("processor-loop.mjs");
+      expect(result.summary).toContain("processor-meta.json");
       expect(result.summary).not.toContain("conductor setup legate-march");
       expect(result.summary).not.toContain("auto-mode true");
       expect(result.summary).not.toContain("session send conductor-legate-march");
@@ -432,8 +458,9 @@ describe("legate module", () => {
           homeDir: home,
           processorOnly: true,
           processor: false,
+          heartbeatInterval: "not-valid",
         }),
-      ).rejects.toThrow(LegateError);
+      ).rejects.toThrow("cannot be combined");
 
       await expect(
         initLegate({
@@ -441,8 +468,9 @@ describe("legate module", () => {
           homeDir: home,
           processorOnly: true,
           withContainer: true,
+          heartbeatInterval: "not-valid",
         }),
-      ).rejects.toThrow(LegateError);
+      ).rejects.toThrow("cannot be combined");
     });
 
     it("stages the cold-start prompt to a file in the staging dir", async () => {
