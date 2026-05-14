@@ -23,10 +23,16 @@ import {
   initLegate,
   LegateError,
 } from "../legate/init.js";
+import {
+  DEFAULT_MANAGER_GROUP,
+  HatcherySpawnError,
+  runHatcherySpawn,
+} from "../hatchery/spawn-handoff.js";
 import { initMarch, InitError } from "../bootstrap/init.js";
 import { createBuildContext, SnapshotError } from "../spawn/snapshot.js";
 import {
   listBackends,
+  getBackend,
   missingCredentialMounts,
   missingRequiredEnvVars,
   resolveBackendSelection,
@@ -99,6 +105,31 @@ function backendSourceLabel(source: BackendSelectionSource): string {
   if (source === "flag") return "--backend flag";
   if (source === "env") return "MARCH_BACKEND env var";
   return "default backend";
+}
+
+function resolveHatcheryBackendSelection(input: {
+  readonly flagValue?: string;
+  readonly envValue?: string;
+}): {
+  readonly requestedName: string;
+  readonly source: BackendSelectionSource;
+  readonly backend?: ReturnType<typeof getBackend>;
+} {
+  const flagValue = input.flagValue?.trim();
+  if (flagValue) {
+    return { requestedName: flagValue, source: "flag", backend: getBackend(flagValue) };
+  }
+
+  const envValue = input.envValue?.trim();
+  if (envValue) {
+    return { requestedName: envValue, source: "env", backend: getBackend(envValue) };
+  }
+
+  return {
+    requestedName: "codex",
+    source: "default",
+    backend: getBackend("codex"),
+  };
 }
 
 program
@@ -377,6 +408,120 @@ legate
         return;
       }
       throw err;
+    }
+  });
+
+const hatchery = program
+  .command("hatchery")
+  .description("Manage Hatchery container/profile workflows");
+
+hatchery
+  .command("spawn")
+  .description("Run a one-shot spawn and hand its patch to an agent-deck manager")
+  .option(
+    "--backend <name>",
+    `Backend for spawn execution (${listBackends().join(", ")}; default: codex)`,
+  )
+  .option("--prompt <prompt>", "Task prompt for the spawn; Hatchery injects patch-output instructions")
+  .option(
+    "--agent-deck-profile <profile>",
+    "agent-deck profile for the manager session",
+  )
+  .option(
+    "--manager-group <group>",
+    `agent-deck group for manager sessions (default: ${DEFAULT_MANAGER_GROUP})`,
+  )
+  .option("--name <name>", "agent-deck session name/title for the manager")
+  .option("--title <title>", "Alias for --name")
+  .action((opts: {
+    backend?: string;
+    prompt?: string;
+    agentDeckProfile?: string;
+    managerGroup?: string;
+    name?: string;
+    title?: string;
+  }) => {
+    commandHandled = true;
+
+    const backendSelection = resolveHatcheryBackendSelection({
+      flagValue: opts.backend,
+      envValue: process.env.MARCH_BACKEND,
+    });
+    const selectedBackend = backendSelection.backend;
+    if (!selectedBackend) {
+      process.stderr.write(
+        `Unknown backend "${backendSelection.requestedName}" from ${backendSourceLabel(backendSelection.source)}. Supported backends: ${listBackends().join(", ")}\n`,
+      );
+      process.exitCode = USAGE_ERROR;
+      return;
+    }
+
+    const prompt = opts.prompt;
+    if (!prompt || prompt.length === 0) {
+      process.stderr.write(
+        "march hatchery spawn requires --prompt <prompt>.\n",
+      );
+      process.exitCode = USAGE_ERROR;
+      return;
+    }
+
+    if (!isFinderAvailable()) {
+      process.stderr.write(
+        "Cannot verify agent-deck is installed: path-search utility unavailable.\n",
+      );
+      process.exitCode = ERROR;
+      return;
+    }
+    if (!isOnPath("agent-deck")) {
+      process.stderr.write(
+        "agent-deck not found on PATH — required for `march hatchery spawn` manager handoff.\n",
+      );
+      process.exitCode = ERROR;
+      return;
+    }
+
+    const deps = checkSpawnDependencies(selectedBackend.baseImage);
+    if (!deps.ok) {
+      process.stderr.write(deps.error + "\n");
+      process.exitCode = ERROR;
+      return;
+    }
+
+    let repoRoot: string;
+    try {
+      repoRoot = execFileSync("git", ["rev-parse", "--show-toplevel"], {
+        encoding: "utf-8",
+      }).trim();
+    } catch (err) {
+      process.stderr.write(
+        `Failed to detect repo root: ${(err as Error).message}\n`,
+      );
+      process.exitCode = ERROR;
+      return;
+    }
+
+    try {
+      const result = runHatcherySpawn({
+        repoPath: repoRoot,
+        prompt,
+        backend: selectedBackend,
+        agentDeckProfile: opts.agentDeckProfile,
+        managerGroup: opts.managerGroup,
+        title: opts.name ?? opts.title,
+      });
+      console.log(result.summary);
+      process.exitCode = SUCCESS;
+    } catch (err) {
+      const message =
+        err instanceof HatcherySpawnError ||
+        err instanceof SnapshotError ||
+        err instanceof BuildError ||
+        err instanceof LaunchError ||
+        err instanceof SpawnRecordError
+          ? err.message
+          : (err as Error).message;
+      process.stderr.write(message + "\n");
+      process.exitCode = ERROR;
     }
   });
 
