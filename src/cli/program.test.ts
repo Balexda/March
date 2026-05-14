@@ -21,10 +21,10 @@ const FINDER_PATH = execFileSync(FINDER_BIN, [FINDER_BIN], {
 }).trim();
 
 // Deterministic 64-hex-char fake container ID emitted by the docker stub
-// when invoked as `docker run -d ...`. Shared between the stub builder and
+// when invoked as `docker create ...`. Shared between the stub builder and
 // the success-path assertion so the test asserts on the exact literal the
 // stub prints — see SD-003 in the US5 tasks file. The 64-char width matches
-// the full container ID format Docker actually returns from `run -d`.
+// the full container ID format Docker actually returns from `create`.
 const FAKE_CONTAINER_ID = "0123456789abcdef".repeat(4);
 
 function run(
@@ -338,7 +338,7 @@ describe("march CLI", () => {
     // Create a temp dir outside any git repo.
     const nonRepoDir = makeTmpDir();
     const result = runWithEnv(
-      ["spawn", "dispatch"],
+      ["spawn", "dispatch", "--prompt", "what is the capital of Washington state"],
       { PATH: [nodeBinDir, binDir].join(path.delimiter) },
       { cwd: nonRepoDir },
     );
@@ -369,7 +369,7 @@ describe("march CLI", () => {
       PATH: [nodeBinDir, binDir].join(path.delimiter),
     });
     expect(result.exitCode).toBe(1);
-    expect(result.stderr).toContain("march-base:latest");
+    expect(result.stderr).toContain("march-spawn-claude:latest");
   });
 
   // --- spawn dispatch worktree + initial SpawnRecord (Story 3) ---
@@ -413,13 +413,11 @@ describe("march CLI", () => {
    * docker, while git is resolved by fall-through to the inherited PATH.
    *
    * The stub additionally prints {@link FAKE_CONTAINER_ID} to stdout when
-   * invoked as `docker run -d ...` so `launchSpawnContainer`'s stdout-
-   * capture path is exercisable end-to-end (SD-003). All other subcommands
-   * (`image inspect`, `pull`, `build`, `image rm`, `rm`, etc.) continue to
-   * exit 0 with no output so existing US2/US4 tests using this stub remain
-   * unaffected.
+   * invoked as `docker create`, emits a zero exit code for `docker wait`,
+   * and emits a proof answer for `docker logs` so the lifecycle/output path
+   * is exercisable end-to-end.
    */
-  function makeDockerStubBinDir(): string {
+  function makeDockerStubBinDir(invocationLog?: string): string {
     const binDir = path.join(makeTmpDir(), "bin");
     fs.mkdirSync(binDir);
     fs.symlinkSync(FINDER_PATH, path.join(binDir, path.basename(FINDER_PATH)));
@@ -427,12 +425,12 @@ describe("march CLI", () => {
     // Succeeds for every subcommand, including `image inspect`, `pull`,
     // and `build`, so checkSpawnDependencies' base-image check passes
     // and the snapshot/build stage in dispatch returns success. When
-    // invoked as `docker run -d ...`, prints a deterministic 64-hex-char
-    // container ID so launchSpawnContainer's stdout capture has something
-    // to trim and return — see SD-003 and FAKE_CONTAINER_ID above.
+    // invoked as `docker create`, prints a deterministic 64-hex-char
+    // container ID so createSpawnContainer's stdout capture has something
+    // to trim and return.
     fs.writeFileSync(
       dockerStub,
-      `#!/bin/sh\nif [ "$1" = "run" ] && [ "$2" = "-d" ]; then\n  echo "${FAKE_CONTAINER_ID}"\n  exit 0\nfi\nexit 0\n`,
+      `#!/bin/sh\n${invocationLog ? `printf '%s\\n' "$*" >> "${invocationLog}"\n` : ""}if [ "$1" = "create" ]; then\n  echo "${FAKE_CONTAINER_ID}"\n  exit 0\nfi\nif [ "$1" = "wait" ]; then\n  echo "0"\n  exit 0\nfi\nif [ "$1" = "logs" ]; then\n  echo "The capital of Washington state is Olympia."\n  exit 0\nfi\nexit 0\n`,
     );
     fs.chmodSync(dockerStub, 0o755);
     return binDir;
@@ -461,7 +459,7 @@ describe("march CLI", () => {
 
   /**
    * Builds a bin dir containing a docker stub that succeeds on every
-   * subcommand EXCEPT `run` (which exits 1 with "simulated launch failure"
+   * subcommand EXCEPT `create` (which exits 1 with "simulated launch failure"
    * on stderr). Patterned after {@link makeDockerBuildFailBinDir} but
    * targets the Stage 4 launch boundary instead of Stage 3. `build` must
    * succeed because Stage 4 only runs after Stage 3's build has succeeded;
@@ -478,7 +476,7 @@ describe("march CLI", () => {
     const dockerStub = path.join(binDir, "docker");
     fs.writeFileSync(
       dockerStub,
-      '#!/bin/sh\nif [ "$1" = "run" ]; then\n  echo "simulated launch failure" >&2\n  exit 1\nfi\nexit 0\n',
+      '#!/bin/sh\nif [ "$1" = "create" ]; then\n  echo "simulated launch failure" >&2\n  exit 1\nfi\nexit 0\n',
     );
     fs.chmodSync(dockerStub, 0o755);
     return binDir;
@@ -490,13 +488,14 @@ describe("march CLI", () => {
     const dockerStubDir = makeDockerStubBinDir();
     const nodeBinDir = path.dirname(process.execPath);
     const result = runWithEnv(
-      ["spawn", "dispatch"],
+      ["spawn", "dispatch", "--prompt", "what is the capital of Washington state"],
       {
         // Docker stub first, then real PATH for git.
         PATH: [nodeBinDir, dockerStubDir, process.env.PATH ?? ""].join(
           path.delimiter,
         ),
         HOME: home,
+        ANTHROPIC_API_KEY: "test-key",
       },
       { cwd: repoRoot },
     );
@@ -504,7 +503,7 @@ describe("march CLI", () => {
     // No dependency-validation errors on stderr.
     expect(result.stderr).not.toContain("not found");
     expect(result.stderr).not.toContain("Not inside a git repository");
-    expect(result.stderr).not.toContain("march-base:latest");
+    expect(result.stderr).not.toContain("march-spawn-claude:latest");
     // After Stage 4 lands, dispatch exits cleanly (exit 0) once the
     // container has launched and the SpawnRecord has transitioned to
     // "running". Stories 6–7 will extend dispatch from here without the
@@ -555,26 +554,130 @@ describe("march CLI", () => {
     expect(record.branch).toBe(branch);
     expect(record.worktreePath).toBe(worktreePath);
     expect(record.backend).toBe("claude-code");
-    expect(record.status).toBe("running");
+    expect(record.status).toBe("stopped");
     expect(record.createdAt).toMatch(
       /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/,
     );
-    // Story 4 populates imageId during the snapshot/build stage. Story 5
-    // owns the "created" → "running" transition (this slice). Story 7
-    // owns "running" → "stopped" / "failed".
     expect(record.imageId).toBe(`march-spawn-${spawnId}`);
-    // containerId is the trimmed stdout of `docker run -d`. The docker
-    // stub emits FAKE_CONTAINER_ID for `run -d` so the assertion locks
-    // the stub-emitted ID end-to-end through launchSpawnContainer's
-    // stdout-capture path (SD-003).
     expect(record.containerId).toBe(FAKE_CONTAINER_ID);
     expect(record.startedAt).toMatch(
       /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/,
     );
-    // Terminal-state fields remain absent until Story 7's lifecycle wait
-    // populates them on container exit.
-    expect(record.exitCode).toBeUndefined();
-    expect(record.stoppedAt).toBeUndefined();
+    expect(record.prompt).toBe("what is the capital of Washington state");
+    expect(record.exitCode).toBe(0);
+    expect(record.stoppedAt).toMatch(
+      /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/,
+    );
+    expect(result.stdout).toContain("Olympia");
+    expect(
+      fs.readFileSync(
+        path.join(home, ".march", "spawns", `${spawnId}.output.log`),
+        "utf-8",
+      ),
+    ).toContain("Olympia");
+  });
+
+  it("spawn dispatch: unknown backend exits 2 before dependency checks", () => {
+    const fakeBin = makeFakeBin(); // no git or docker needed
+    const nodeBinDir = path.dirname(process.execPath);
+    const result = runWithEnv(["spawn", "dispatch", "--backend", "missing"], {
+      PATH: [nodeBinDir, fakeBin].join(path.delimiter),
+    });
+
+    expect(result.exitCode).toBe(2);
+    expect(result.stderr).toContain('Unknown backend "missing"');
+    expect(result.stderr).toContain("claude-code");
+    expect(result.stderr).toContain("codex");
+    expect(result.stderr).not.toContain("git not found");
+  });
+
+  it("spawn dispatch: Codex missing credential directory exits 2 and leaves no SpawnRecord", () => {
+    const repoRoot = makeRealRepo();
+    const home = makeTmpDir();
+    const missingCodexHome = path.join(home, "missing-codex-home");
+    const dockerStubDir = makeDockerStubBinDir();
+    const nodeBinDir = path.dirname(process.execPath);
+    const result = runWithEnv(
+      ["spawn", "dispatch", "--backend", "codex"],
+      {
+        PATH: [nodeBinDir, dockerStubDir, process.env.PATH ?? ""].join(
+          path.delimiter,
+        ),
+        HOME: home,
+        CODEX_HOME: missingCodexHome,
+      },
+      { cwd: repoRoot },
+    );
+
+    expect(result.exitCode).toBe(2);
+    expect(result.stderr).toContain(
+      'Backend "codex" requires readable credential directories',
+    );
+    expect(result.stderr).toContain(missingCodexHome);
+    const branches = execFileSync(
+      "git",
+      ["for-each-ref", "--format=%(refname:short)", "refs/heads/march/spawn/"],
+      { cwd: repoRoot, encoding: "utf-8" },
+    );
+    expect(branches.trim()).toBe("");
+    expect(fs.existsSync(path.join(home, ".march", "spawns"))).toBe(false);
+  });
+
+  it("spawn dispatch: --backend codex wins over MARCH_BACKEND and records codex", () => {
+    const repoRoot = makeRealRepo();
+    const home = makeTmpDir();
+    const codexHome = path.join(home, "codex-home");
+    fs.mkdirSync(codexHome);
+    const dockerLog = path.join(home, "docker-invocations.log");
+    const dockerStubDir = makeDockerStubBinDir(dockerLog);
+    const nodeBinDir = path.dirname(process.execPath);
+    const result = runWithEnv(
+      [
+        "spawn",
+        "dispatch",
+        "--backend",
+        "codex",
+        "--prompt",
+        "what is the capital of Washington state",
+      ],
+      {
+        PATH: [nodeBinDir, dockerStubDir, process.env.PATH ?? ""].join(
+          path.delimiter,
+        ),
+        HOME: home,
+        CODEX_HOME: codexHome,
+        MARCH_BACKEND: "claude-code",
+      },
+      { cwd: repoRoot },
+    );
+
+    expect(result.exitCode).toBe(0);
+    const spawnsDir = path.join(home, ".march", "spawns");
+    const recordFiles = fs
+      .readdirSync(spawnsDir)
+      .filter((f) => f.endsWith(".json"));
+    expect(recordFiles).toHaveLength(1);
+    const record = JSON.parse(
+      fs.readFileSync(path.join(spawnsDir, recordFiles[0]), "utf-8"),
+    );
+    expect(record.backend).toBe("codex");
+    expect(record.status).toBe("stopped");
+    expect(record.prompt).toBe("what is the capital of Washington state");
+    expect(record.exitCode).toBe(0);
+    expect(record.containerId).toBe(FAKE_CONTAINER_ID);
+    expect(result.stdout).toContain("Olympia");
+
+    const invocations = fs.readFileSync(dockerLog, "utf-8").trim().split("\n");
+    const createIndex = invocations.findIndex((line) => line.startsWith("create "));
+    const cpIndex = invocations.findIndex((line) => line.startsWith("cp "));
+    const startIndex = invocations.findIndex((line) => line.startsWith("start "));
+    const waitIndex = invocations.findIndex((line) => line.startsWith("wait "));
+    const logsIndex = invocations.findIndex((line) => line.startsWith("logs "));
+    expect(createIndex).toBeGreaterThan(-1);
+    expect(cpIndex).toBeGreaterThan(createIndex);
+    expect(startIndex).toBeGreaterThan(cpIndex);
+    expect(waitIndex).toBeGreaterThan(startIndex);
+    expect(logsIndex).toBeGreaterThan(waitIndex);
   });
 
   it("spawn dispatch: docker build failure transitions SpawnRecord to failed and cleans up worktree+branch+image", () => {
@@ -586,12 +689,13 @@ describe("march CLI", () => {
     const dockerStubDir = makeDockerBuildFailBinDir();
     const nodeBinDir = path.dirname(process.execPath);
     const result = runWithEnv(
-      ["spawn", "dispatch"],
+      ["spawn", "dispatch", "--prompt", "simulate build failure"],
       {
         PATH: [nodeBinDir, dockerStubDir, process.env.PATH ?? ""].join(
           path.delimiter,
         ),
         HOME: home,
+        ANTHROPIC_API_KEY: "test-key",
       },
       { cwd: repoRoot },
     );
@@ -668,12 +772,13 @@ describe("march CLI", () => {
     const dockerStubDir = makeDockerRunFailBinDir();
     const nodeBinDir = path.dirname(process.execPath);
     const result = runWithEnv(
-      ["spawn", "dispatch"],
+      ["spawn", "dispatch", "--prompt", "simulate launch failure"],
       {
         PATH: [nodeBinDir, dockerStubDir, process.env.PATH ?? ""].join(
           path.delimiter,
         ),
         HOME: home,
+        ANTHROPIC_API_KEY: "test-key",
       },
       { cwd: repoRoot },
     );
@@ -753,12 +858,13 @@ describe("march CLI", () => {
     fs.chmodSync(hookPath, 0o755);
 
     const result = runWithEnv(
-      ["spawn", "dispatch"],
+      ["spawn", "dispatch", "--prompt", "simulate worktree failure"],
       {
         PATH: [nodeBinDir, dockerStubDir, process.env.PATH ?? ""].join(
           path.delimiter,
         ),
         HOME: home,
+        ANTHROPIC_API_KEY: "test-key",
       },
       { cwd: repoRoot },
     );
@@ -803,12 +909,13 @@ describe("march CLI", () => {
     const dockerStubDir = makeDockerStubBinDir();
     const nodeBinDir = path.dirname(process.execPath);
     const result = runWithEnv(
-      ["spawn", "dispatch"],
+      ["spawn", "dispatch", "--prompt", "simulate record failure"],
       {
         PATH: [nodeBinDir, dockerStubDir, process.env.PATH ?? ""].join(
           path.delimiter,
         ),
         HOME: home,
+        ANTHROPIC_API_KEY: "test-key",
       },
       { cwd: repoRoot },
     );

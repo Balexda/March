@@ -94,6 +94,11 @@ export function spawnRecordPath(id: string, homeDir?: string): string {
   return path.join(spawnRecordDir(homeDir), `${id}.json`);
 }
 
+/** Output log path for a completed spawn, adjacent to its SpawnRecord. */
+export function spawnOutputPath(id: string, homeDir?: string): string {
+  return path.join(spawnRecordDir(homeDir), `${id}.output.log`);
+}
+
 /**
  * Writes the initial SpawnRecord file with status `"created"` per the
  * data model's `absent → created` transition (FR-019).
@@ -241,8 +246,8 @@ function atomicWriteSpawnRecord(
  * the existing record.
  *
  * This helper does NOT modify `status` — the record remains `"created"`.
- * Story 5 owns the `"created" → "running"` transition (container start);
- * Story 7 owns `"running" → "stopped" / "failed"`.
+ * The launch and wait stages own the later `"created" → "running"` and
+ * `"running" → "stopped" / "failed"` transitions.
  *
  * @throws {SpawnRecordError} If the source record is missing, unreadable,
  *   or the atomic write fails.
@@ -256,6 +261,20 @@ export function updateSpawnRecordImageId(
   const updated: SpawnRecord = {
     ...existing,
     imageId,
+  };
+  atomicWriteSpawnRecord(spawnRecordPath(id, homeDir), updated);
+  return updated;
+}
+
+export function updateSpawnRecordPrompt(
+  id: string,
+  prompt: string,
+  homeDir?: string,
+): SpawnRecord {
+  const existing = readSpawnRecord(id, homeDir);
+  const updated: SpawnRecord = {
+    ...existing,
+    prompt,
   };
   atomicWriteSpawnRecord(spawnRecordPath(id, homeDir), updated);
   return updated;
@@ -314,7 +333,7 @@ export function markSpawnRecordFailed(
 
 /**
  * Transitions an existing SpawnRecord from `"created"` to `"running"`,
- * populating `containerId` (from the captured `docker run -d` stdout) and
+ * populating `containerId` (from the captured `docker create` stdout) and
  * `startedAt` (current ISO 8601 timestamp). Implements the data-model
  * `created → running` transition for Stage 4 (FR-019).
  *
@@ -324,8 +343,8 @@ export function markSpawnRecordFailed(
  * `"failed"` would silently double-write `startedAt` or resurrect a
  * terminated spawn. A `SpawnRecordError` is thrown in that case.
  *
- * Story 7 owns transitions out of `"running"` (`running → stopped` and
- * `running → failed`); this helper does not touch those.
+ * The wait stage owns transitions out of `"running"` (`running → stopped`
+ * and `running → failed`); this helper does not touch those.
  *
  * Atomic write (temp file + rename) — semantics match
  * {@link updateSpawnRecordImageId} and {@link markSpawnRecordFailed} so a
@@ -350,6 +369,27 @@ export function markSpawnRecordRunning(
     status: "running",
     containerId,
     startedAt: new Date().toISOString(),
+  };
+  atomicWriteSpawnRecord(spawnRecordPath(id, homeDir), updated);
+  return updated;
+}
+
+export function markSpawnRecordStopped(
+  id: string,
+  exitCode: number,
+  homeDir?: string,
+): SpawnRecord {
+  const existing = readSpawnRecord(id, homeDir);
+  if (existing.status !== "running") {
+    throw new SpawnRecordError(
+      `Cannot transition spawn record "${id}" to "stopped": current status is "${existing.status}"; the data-model only permits "running" → "stopped".`,
+    );
+  }
+  const updated: SpawnRecord = {
+    ...existing,
+    status: exitCode === 0 ? "stopped" : "failed",
+    exitCode,
+    stoppedAt: new Date().toISOString(),
   };
   atomicWriteSpawnRecord(spawnRecordPath(id, homeDir), updated);
   return updated;

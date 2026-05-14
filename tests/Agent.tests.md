@@ -71,9 +71,9 @@ cat /tmp/march-test-home/.march/march-manifest.json
 
 ---
 
-## A4: `march spawn dispatch` builds a tagged image and writes a SpawnRecord
+## A4: `march spawn dispatch` builds a tagged image and returns backend output
 
-**Purpose**: End-to-end check that dispatch creates a worktree, builds `march-spawn-<id>`, and writes a `created` SpawnRecord. Requires `git` and `docker` on `PATH` and the configured base image to be pullable.
+**Purpose**: End-to-end check that dispatch selects a backend, creates a worktree, builds `march-spawn-<id>` from that backend's `baseImage`, hands off a prompt, waits for completion, captures logs, and writes a stopped SpawnRecord. Requires `git` and `docker` on `PATH`, plus the selected backend's base image and credentials. For Codex, build/register the local base image first with `npm run build:spawn-codex-image` and provide `CODEX_HOME` or `HOME/.codex`.
 
 **Steps**:
 ```bash
@@ -85,16 +85,21 @@ git -C /tmp/march-test-repo add README.md
 git -C /tmp/march-test-repo -c user.email=t@t -c user.name=t commit -q -m init
 
 cd /tmp/march-test-repo
-HOME=/tmp/march-test-home node /path/to/March/dist/cli.js spawn dispatch
+HOME=/tmp/march-test-home CODEX_HOME="${CODEX_HOME:-$HOME/.codex}" \
+  node /path/to/March/dist/cli.js spawn dispatch \
+  --backend codex \
+  --prompt "what is the capital of Washington state"
 
 ls /tmp/march-test-home/.march/spawns
 docker images --filter "reference=march-spawn-*" --format '{{.Repository}}:{{.Tag}}'
 git -C /tmp/march-test-repo worktree list
+cat /tmp/march-test-home/.march/spawns/*.output.log
 ```
 
 **Expected**:
-- [ ] Command exits `0` with a success summary referencing a spawn id.
-- [ ] `~/.march/spawns/<id>.json` exists with `state: "created"` and an `imageId` field.
+- [ ] Command exits `0` and output contains `Olympia`.
+- [ ] `~/.march/spawns/<id>.json` exists with `backend: "codex"`, `status: "stopped"`, `exitCode: 0`, `containerId`, `startedAt`, `stoppedAt`, and an `imageId` field.
+- [ ] `~/.march/spawns/<id>.output.log` exists and contains the retrieved backend output.
 - [ ] `docker images` shows a `march-spawn-<id>` tag matching the SpawnRecord.
 - [ ] `git worktree list` includes a `march-spawn-<id>` worktree under the test repo.
 
@@ -112,8 +117,8 @@ rm -rf /tmp/march-test-home /tmp/march-test-repo
 **Purpose**: Verify the failure path: on a docker build failure the SpawnRecord transitions to `failed` and the worktree + branch are removed.
 
 **Steps**:
-1. Repeat the A4 setup, but point dispatch at a base image that does not exist (e.g., temporarily edit `src/hatchery/spawn-config.ts` to set `BASE_IMAGE` to `does-not-exist:bogus`, then `npm run build`). Or pull the dispatch image, then `docker rmi --force` it after dispatch begins — whichever is easier in your environment.
-2. Run `march spawn dispatch` against `/tmp/march-test-repo`.
+1. Repeat the A4 setup, but point dispatch at a base image that does not exist (e.g., temporarily edit the selected backend's `baseImage` in `src/spawn/backends.ts` to `does-not-exist:bogus`, then `npm run build`). Or pull the dispatch image, then `docker rmi --force` it after dispatch begins — whichever is easier in your environment.
+2. Run `march spawn dispatch --prompt "simulate build failure"` against `/tmp/march-test-repo`.
 
 **Expected**:
 - [ ] Command exits non-zero with a clear error.
@@ -121,4 +126,4 @@ rm -rf /tmp/march-test-home /tmp/march-test-repo
 - [ ] `git worktree list` does **not** show a `march-spawn-<id>` worktree.
 - [ ] No `march-spawn-<id>` Docker image is left behind.
 
-Restore the original `BASE_IMAGE` and rebuild before moving on.
+Restore the original backend `baseImage` and rebuild before moving on.

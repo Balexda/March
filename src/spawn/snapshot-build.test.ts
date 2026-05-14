@@ -139,8 +139,8 @@ describe("snapshot-build", () => {
 
     it("throws BuildError surfacing the docker stderr tail on build failure", () => {
       const stderrText =
-        "Step 1/3 : FROM march-base:latest\n" +
-        "ERROR: failed to solve: pull access denied for march-base, repository does not exist\n";
+        "Step 1/3 : FROM march-spawn-claude:latest\n" +
+        "ERROR: failed to solve: pull access denied for march-spawn-claude, repository does not exist\n";
       const err = Object.assign(new Error("Command failed"), {
         stderr: Buffer.from(stderrText),
         status: 1,

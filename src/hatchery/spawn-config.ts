@@ -1,25 +1,22 @@
 /**
  * Centralised spawn-time configuration constants shared across the dispatch
  * pipeline. Modules from later stages (snapshot build, container launch)
- * import the base image tag and {@link SPAWN_CONFIG} from here so future
- * Feature 3 / Feature 4 refactors only need to change a single location.
+ * import {@link SPAWN_CONFIG} from here so future Feature 3 / Feature 4
+ * refactors only need to change a single location.
  *
  * Scope of this module:
- * - {@link BASE_IMAGE} — the tagged base container image with the backend
- *   CLI pre-installed.
  * - {@link SpawnConfig} / {@link SPAWN_CONFIG} — the hardcoded container
  *   security and resource posture consumed by Stage 4 (Launch) and Stage
  *   6 (Wait). This is the single auditable source of truth: every value
  *   defined here is surfaced to the dispatch pipeline at the stage that
  *   owns it. Stage 4 surfaces `capDrop`, `user`, `memoryLimit`,
- *   `cpuLimit`, `networkMode`, and `envWhitelist` as `docker run` flags.
+ *   `cpuLimit`, and `networkMode` as `docker create` flags.
  *   Stage 6 (owned by Story 7) enforces `timeoutSeconds` against the
  *   running container's wall clock.
  *
  * Out of scope (lives elsewhere):
- * - The `SpawnBackend` polymorphic interface — that's Feature 3's
- *   contract boundary, not this module's concern. Feature 2 hardcodes a
- *   single Claude Code backend; Feature 3 will introduce the interface.
+ * - The `SpawnBackend` polymorphic interface — that lives in `src/spawn/`
+ *   because it controls runtime entrypoints and backend-specific auth.
  * - Per-backend defaults and configurable security profiles — Hatchery
  *   (M2) makes these editable per profile.
  *
@@ -29,21 +26,8 @@
  * Appendix A threat model.
  */
 
-/**
- * Tagged base container image with the backend CLI pre-installed.
- *
- * Consumed by:
- * - `src/cli.ts` dispatch action — passes this to `checkSpawnDependencies`
- *   so the dispatch fails fast if the image is unavailable.
- * - `src/spawn/snapshot-build.ts` — used as the `FROM` line of the generated
- *   Dockerfile per the Image Build contract.
- *
- * Will eventually be derived from `SpawnBackend.baseImage` once Feature 3
- * lands the polymorphic backend selection mechanism; until then the
- * Claude Code default is hardcoded here so all consumers agree on a single
- * source of truth.
- */
-export const BASE_IMAGE = "march-base:latest";
+/** Default base image retained for direct Dockerfile helper calls. */
+export const BASE_IMAGE = "march-spawn-claude:latest";
 
 /**
  * Shape of the hardcoded container security and resource configuration
@@ -70,13 +54,6 @@ export interface SpawnConfig {
   readonly cpuLimit: string;
   /** Maximum execution time before the container is killed, in seconds. */
   readonly timeoutSeconds: number;
-  /**
-   * Environment variable names allowed to pass into the container. For
-   * Feature 2 this is the backend-specific auth key only — pass-through
-   * form, no inlined values (Docker reads each value from the operator's
-   * environment at launch time).
-   */
-  readonly envWhitelist: readonly string[];
 }
 
 /**
@@ -98,10 +75,7 @@ export interface SpawnConfig {
  *   `--cpus`; hardcoded resource ceilings sized for typical Claude Code
  *   sessions (AS 5.3).
  * - `timeoutSeconds: 3600` — Stage 6 (Wait) enforces this against the
- *   running container's wall clock; Story 7 owns the enforcement.
- * - `envWhitelist: ["ANTHROPIC_API_KEY"]` — Stage 4 emits one `-e VAR`
- *   passthrough flag per entry; only the backend's auth key is forwarded
- *   into the sandbox (AS 5.4).
+ *   running container's wall clock.
  */
 export const SPAWN_CONFIG: SpawnConfig = {
   capDrop: ["ALL"],
@@ -110,5 +84,4 @@ export const SPAWN_CONFIG: SpawnConfig = {
   memoryLimit: "4g",
   cpuLimit: "2",
   timeoutSeconds: 3600,
-  envWhitelist: ["ANTHROPIC_API_KEY"],
 };

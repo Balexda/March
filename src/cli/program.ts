@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import fs from "node:fs";
 import { createInterface } from "node:readline";
 import { Command, CommanderError } from "commander";
 import { ERROR, SUCCESS, USAGE_ERROR } from "../shared/exit-codes.js";
@@ -8,9 +9,14 @@ import {
   isOnPath,
 } from "../shared/deps.js";
 import {
+  copyPromptToContainer,
+  createSpawnContainer,
   launchSpawnContainer,
   LaunchError,
+  readSpawnContainerLogs,
   removeSpawnContainer,
+  startSpawnContainer,
+  waitForSpawnContainer,
 } from "../spawn/container-launch.js";
 import {
   checkBridgeRequirements,
@@ -20,18 +26,27 @@ import {
 import { initMarch, InitError } from "../bootstrap/init.js";
 import { createBuildContext, SnapshotError } from "../spawn/snapshot.js";
 import {
+  listBackends,
+  missingCredentialMounts,
+  missingRequiredEnvVars,
+  resolveBackendSelection,
+  type BackendSelectionSource,
+} from "../spawn/backends.js";
+import {
   buildSpawnImage,
   BuildError,
   removeSpawnImage,
   writeSpawnDockerfile,
 } from "../spawn/snapshot-build.js";
-import { BASE_IMAGE } from "../hatchery/spawn-config.js";
 import {
   markSpawnRecordFailed,
   markSpawnRecordRunning,
+  markSpawnRecordStopped,
   removeSpawnRecord,
   SpawnRecordError,
+  spawnOutputPath,
   updateSpawnRecordImageId,
+  updateSpawnRecordPrompt,
   writeInitialSpawnRecord,
 } from "../brood/spawn-record.js";
 import { updateMarch, UpdateError } from "../bootstrap/update.js";
@@ -79,6 +94,12 @@ program
 // process.exitCode (unlike process.exit()) does not terminate immediately, so
 // the usage-output fallthrough block must be gated explicitly.
 let commandHandled = false;
+
+function backendSourceLabel(source: BackendSelectionSource): string {
+  if (source === "flag") return "--backend flag";
+  if (source === "env") return "MARCH_BACKEND env var";
+  return "default backend";
+}
 
 program
   .command("init")
@@ -340,8 +361,13 @@ legate
 program
   .command("spawn [subcommand]")
   .description("Spawn a new environment")
+  .option(
+    "--backend <name>",
+    `Backend for spawn dispatch (${listBackends().join(", ")})`,
+  )
+  .option("--prompt <prompt>", "Prompt to run in the spawned backend")
   .allowUnknownOption()
-  .action((subcommand?: string) => {
+  .action((subcommand?: string, options?: { backend?: string; prompt?: string }) => {
     commandHandled = true;
     // Dispatch-only validation: only `march spawn dispatch` runs the full
     // dependency check (PATH search utility + git on PATH + docker on PATH +
@@ -349,10 +375,50 @@ program
     // Bare `march spawn` and other subcommands skip the check so unrelated
     // spawn paths aren't forced through docker/repo/base-image validation.
     if (subcommand === "dispatch") {
-      const result = checkSpawnDependencies(BASE_IMAGE);
+      const backendSelection = resolveBackendSelection({
+        flagValue: options?.backend,
+        envValue: process.env.MARCH_BACKEND,
+      });
+      const selectedBackend = backendSelection.backend;
+      if (!selectedBackend) {
+        process.stderr.write(
+          `Unknown backend "${backendSelection.requestedName}" from ${backendSourceLabel(backendSelection.source)}. Supported backends: ${listBackends().join(", ")}\n`,
+        );
+        process.exitCode = USAGE_ERROR;
+        return;
+      }
+
+      const result = checkSpawnDependencies(selectedBackend.baseImage);
       if (!result.ok) {
         process.stderr.write(result.error + "\n");
         process.exitCode = ERROR;
+        return;
+      }
+
+      const missingEnvVars = missingRequiredEnvVars(selectedBackend);
+      if (missingEnvVars.length > 0) {
+        process.stderr.write(
+          `Backend "${selectedBackend.name}" requires ${selectedBackend.requiredEnvVars.join(", ")}: missing ${missingEnvVars.join(", ")}. Set the variable(s) and re-run.\n`,
+        );
+        process.exitCode = USAGE_ERROR;
+        return;
+      }
+
+      const missingMounts = missingCredentialMounts(selectedBackend);
+      if (missingMounts.length > 0) {
+        process.stderr.write(
+          `Backend "${selectedBackend.name}" requires readable credential directories: ${missingMounts.map((mount) => mount.hostPath).join(", ")}. Configure the credential path(s) and re-run.\n`,
+        );
+        process.exitCode = USAGE_ERROR;
+        return;
+      }
+
+      const prompt = options?.prompt;
+      if (!prompt || prompt.length === 0) {
+        process.stderr.write(
+          'march spawn dispatch requires --prompt <prompt> for the Codex lifecycle proof path.\n',
+        );
+        process.exitCode = USAGE_ERROR;
         return;
       }
 
@@ -396,7 +462,9 @@ program
           repoPath: repoRoot,
           branch: worktree.branch,
           worktreePath: worktree.worktreePath,
+          backend: selectedBackend.name,
         });
+        updateSpawnRecordPrompt(worktree.spawnId, prompt);
       } catch (err) {
         removeSpawnRecord(worktree.spawnId);
         removeSpawnWorktree(repoRoot, worktree);
@@ -422,7 +490,10 @@ program
       try {
         const handle = createBuildContext(worktree.worktreePath);
         try {
-          const dockerfilePath = writeSpawnDockerfile(handle.contextPath);
+          const dockerfilePath = writeSpawnDockerfile(
+            handle.contextPath,
+            selectedBackend.baseImage,
+          );
           const imageTag = buildSpawnImage({
             spawnId: worktree.spawnId,
             contextPath: handle.contextPath,
@@ -486,8 +557,14 @@ program
       // markSpawnRecordRunning failure after a successful launch still
       // calls removeSpawnContainer so a started container does not survive
       // a failed transition (SD-002).
+      let containerId: string;
       try {
-        const containerId = launchSpawnContainer({ spawnId: worktree.spawnId });
+        containerId = createSpawnContainer({
+          spawnId: worktree.spawnId,
+          backend: selectedBackend,
+        });
+        copyPromptToContainer(containerId, prompt);
+        startSpawnContainer(containerId);
         markSpawnRecordRunning(worktree.spawnId, containerId);
       } catch (err) {
         try {
@@ -515,10 +592,33 @@ program
         return;
       }
 
-      // Stage 4 success — dispatch returns cleanly with the container
-      // running. Stories 6 (prompt handoff) and 7 (lifecycle wait) extend
-      // dispatch from here; Story 7 in particular will replace this exit-0
-      // fall-through with the container's actual exit code.
+      try {
+        const waitResult = waitForSpawnContainer(containerId);
+        const logs = readSpawnContainerLogs(containerId);
+        fs.writeFileSync(spawnOutputPath(worktree.spawnId), logs, "utf-8");
+        markSpawnRecordStopped(worktree.spawnId, waitResult.exitCode);
+        if (logs.length > 0) {
+          process.stdout.write(logs);
+          if (!logs.endsWith("\n")) process.stdout.write("\n");
+        }
+        process.exitCode = waitResult.exitCode === 0 ? SUCCESS : ERROR;
+      } catch (err) {
+        try {
+          markSpawnRecordFailed(worktree.spawnId, {
+            error: (err as Error).message,
+          });
+        } catch (markErr) {
+          process.stderr.write(
+            `warning: failed to transition spawn record to "failed" for spawn ${worktree.spawnId}: ${(markErr as Error).message}; the record file may be in an inconsistent state.\n`,
+          );
+        }
+        const message =
+          err instanceof LaunchError || err instanceof SpawnRecordError
+            ? err.message
+            : (err as Error).message;
+        process.stderr.write(message + "\n");
+        process.exitCode = ERROR;
+      }
       return;
     }
     console.log(
