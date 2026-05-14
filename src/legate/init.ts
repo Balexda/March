@@ -6,6 +6,10 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Dotprompt } from "dotprompt";
 import { FINDER_BIN, isFinderAvailable, isOnPath } from "../shared/deps.js";
+import {
+  ensureLegateContainer,
+  type LegateContainerResult,
+} from "../hatchery/legate-container.js";
 
 export class LegateError extends Error {
   constructor(message: string) {
@@ -407,6 +411,8 @@ export interface LegateInitOptions {
   templateDir?: string;
   /** When false, render the template but skip `agent-deck conductor setup`. Default: true. */
   runSetup?: boolean;
+  /** Build and launch the Hatchery-managed Legate container after setup. */
+  withContainer?: boolean;
 }
 
 export interface LegateSkillDeployment {
@@ -463,6 +469,8 @@ export interface LegateInitResult {
    * is false (override write is gated on setup having run).
    */
   heartbeatOverrideWritten: boolean;
+  /** Hatchery-managed Legate container launched by `--with-container`. */
+  legateContainer?: LegateContainerResult;
   summary: string;
 }
 
@@ -1276,6 +1284,11 @@ export async function initLegate(
   validateProfileName(profile);
   validateConductorName(conductorName);
   validateHeartbeatInterval(heartbeatInterval);
+  if (opts.withContainer && opts.runSetup === false) {
+    throw new LegateError(
+      "`march legate init --with-container` requires setup so there is a conductor directory to mount. Remove --no-setup and re-run.",
+    );
+  }
 
   const templateDir = await findTemplateDir(opts.templateDir);
   const claudePromptPath = path.join(templateDir, "CLAUDE.prompt");
@@ -1468,6 +1481,7 @@ export async function initLegate(
   let autoModeConfigured = false;
   let bridgeActive = false;
   let heartbeatOverrideWritten = false;
+  let legateContainer: LegateContainerResult | undefined;
   let deploymentResults: { name: LegateSkillName; deployed: boolean }[] = [];
   const postSetupWarnings: string[] = [];
   if (opts.runSetup ?? true) {
@@ -1778,6 +1792,22 @@ export async function initLegate(
     deploymentResults = LEGATE_SKILLS.map((name) => ({ name, deployed: false }));
   }
 
+  if (opts.withContainer) {
+    try {
+      legateContainer = ensureLegateContainer({
+        conductorName,
+        profile,
+        repoPath,
+        conductorDir,
+        homeDir: home,
+      });
+    } catch (err) {
+      throw new LegateError(
+        `Failed to launch Hatchery Legate container: ${(err as Error).message}`,
+      );
+    }
+  }
+
   const skills: LegateSkillDeployment[] = stagedSkills.map(({ name, stagedDir }) => ({
     name,
     stagedDir,
@@ -1825,6 +1855,13 @@ export async function initLegate(
           ? `${heartbeatInterval} (pinned via systemd drop-in override)`
           : `${heartbeatInterval} requested — override NOT written; see warnings`
         : `${heartbeatInterval} (deferred — run setup first)`
+    }`,
+    `  Container:      ${
+      legateContainer
+        ? `${legateContainer.containerName} (${legateContainer.containerId || "id unavailable"}) using ${legateContainer.imageTag}${
+            legateContainer.replaced ? " — replaced existing container" : ""
+          }`
+        : "not requested"
     }`,
     `  Skills:         ${skillsLine}`,
     "",
@@ -1882,6 +1919,7 @@ export async function initLegate(
     bridgeActive,
     heartbeatInterval,
     heartbeatOverrideWritten,
+    ...(legateContainer ? { legateContainer } : {}),
     summary: summaryLines.join("\n"),
   };
 }

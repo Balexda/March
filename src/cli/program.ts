@@ -245,6 +245,10 @@ legate
   )
   .option("--no-setup", "Render the template only; skip `agent-deck conductor setup`")
   .option(
+    "--with-container",
+    "Build and launch the Hatchery-managed Legate container after setup",
+  )
+  .option(
     "--no-bridge-check",
     "Skip the Python 3.9+ pre-flight check for the agent-deck conductor bridge daemon. Use only when you intend to drive the conductor manually with `agent-deck session send`.",
   )
@@ -256,6 +260,7 @@ legate
     model?: string;
     heartbeatInterval?: string;
     setup?: boolean; // commander negates --no-setup into setup=false
+    withContainer?: boolean;
     bridgeCheck?: boolean; // commander negates --no-bridge-check into bridgeCheck=false
   }) => {
     commandHandled = true;
@@ -303,6 +308,22 @@ legate
 
     // 2. Verify agent-deck is on PATH when we'll actually invoke it.
     const willRunSetup = opts.setup !== false;
+    if (opts.withContainer) {
+      if (!isFinderAvailable()) {
+        process.stderr.write(
+          "Cannot verify Docker is installed: path-search utility unavailable.\n",
+        );
+        process.exitCode = ERROR;
+        return;
+      }
+      if (!isOnPath("docker")) {
+        process.stderr.write(
+          "Docker not found on PATH — required for `march legate init --with-container`.\n",
+        );
+        process.exitCode = ERROR;
+        return;
+      }
+    }
     if (willRunSetup) {
       if (!isFinderAvailable()) {
         process.stderr.write(
@@ -345,6 +366,7 @@ legate
         model: opts.model,
         heartbeatInterval: opts.heartbeatInterval,
         runSetup: willRunSetup,
+        withContainer: opts.withContainer === true,
       });
       console.log(result.summary);
       process.exitCode = SUCCESS;
