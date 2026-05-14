@@ -125,7 +125,7 @@ describe("march CLI", () => {
     // AS 4.1: no-args output lists all five registered commands (two-tier listing).
     // Match command-list entries (leading whitespace + command name as first word)
     // to avoid false positives from --help/--version in the Options section.
-    for (const cmd of ["init", "update", "help", "version", "spawn"]) {
+    for (const cmd of ["init", "update", "help", "version", "hatchery", "spawn"]) {
       expect(combined).toMatch(new RegExp(`^\\s+${cmd}\\b`, "m"));
     }
   });
@@ -308,6 +308,33 @@ describe("march CLI", () => {
     expect(result.stdout).toContain("spawn");
   });
 
+  it("march hatchery spawn --help exits 0 and prints handoff flags", () => {
+    const result = run(["hatchery", "spawn", "--help"]);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("Usage: march hatchery spawn");
+    expect(result.stdout).toContain("--prompt");
+    expect(result.stdout).toContain("--agent-deck-profile");
+    expect(result.stdout).toContain("--manager-group");
+    expect(result.stdout).toContain("--name");
+    expect(result.stdout).toContain("default: codex");
+  });
+
+  it("hatchery spawn: agent-deck missing exits before Docker dependency validation", () => {
+    const fakeBin = makeFakeBin(["git", "docker"]);
+    const nodeBinDir = path.dirname(process.execPath);
+    const result = runWithEnv(
+      ["hatchery", "spawn", "--prompt", "make a patch"],
+      {
+        PATH: [nodeBinDir, fakeBin].join(path.delimiter),
+        ANTHROPIC_API_KEY: "test-key",
+      },
+    );
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("agent-deck not found");
+    expect(result.stderr).not.toContain("Base container image");
+  });
+
   // --- spawn dispatch dependency validation (Story 2 acceptance scenarios) ---
 
   it("spawn dispatch: git missing — exit 1, stderr contains 'git not found', no Docker error", () => {
@@ -450,6 +477,35 @@ describe("march CLI", () => {
     return binDir;
   }
 
+  function makeDockerPatchStubBinDir(invocationLog?: string): string {
+    const binDir = path.join(makeTmpDir(), "bin");
+    fs.mkdirSync(binDir);
+    fs.symlinkSync(FINDER_PATH, path.join(binDir, path.basename(FINDER_PATH)));
+    const dockerStub = path.join(binDir, "docker");
+    fs.writeFileSync(
+      dockerStub,
+      `#!/bin/sh
+${invocationLog ? `printf '%s\\n' "$*" >> "${invocationLog}"\n` : ""}if [ "$1" = "create" ]; then
+  echo "${FAKE_CONTAINER_ID}"
+  exit 0
+fi
+if [ "$1" = "wait" ]; then
+  echo "0"
+  exit 0
+fi
+if [ "$1" = "logs" ]; then
+  cat <<'PATCH'
+{"patch":"diff --git a/generated.txt b/generated.txt\\nnew file mode 100644\\nindex 0000000..c1827f0\\n--- /dev/null\\n+++ b/generated.txt\\n@@ -0,0 +1 @@\\n+generated\\n"}
+PATCH
+  exit 0
+fi
+exit 0
+`,
+    );
+    fs.chmodSync(dockerStub, 0o755);
+    return binDir;
+  }
+
   /**
    * Builds a bin dir containing a docker stub that succeeds on every
    * subcommand EXCEPT `build` (which exits 1). Used to simulate a docker
@@ -493,6 +549,50 @@ describe("march CLI", () => {
       '#!/bin/sh\nif [ "$1" = "create" ]; then\n  echo "simulated launch failure" >&2\n  exit 1\nfi\nexit 0\n',
     );
     fs.chmodSync(dockerStub, 0o755);
+    return binDir;
+  }
+
+  function makeAgentDeckStubBinDir(invocationLog: string): string {
+    const binDir = path.join(makeTmpDir(), "agent-bin");
+    fs.mkdirSync(binDir);
+    const agentDeckStub = path.join(binDir, "agent-deck");
+    fs.writeFileSync(
+      agentDeckStub,
+      `#!/bin/sh
+printf '%s\\n' "$*" >> "${invocationLog}"
+if [ "$1" = "launch" ]; then
+  REPO="$2"
+  BRANCH=""
+  TITLE=""
+  GROUP=""
+  shift 2
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --worktree|-w|-worktree) BRANCH="$2"; shift 2 ;;
+      -t|-title|--title) TITLE="$2"; shift 2 ;;
+      -g|-group|--group) GROUP="$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  SAFE_BRANCH=$(printf '%s' "$BRANCH" | tr '/' '-')
+  WORKTREE="$(dirname "$REPO")/agent-deck-worktrees/$SAFE_BRANCH"
+  mkdir -p "$(dirname "$WORKTREE")"
+  git -C "$REPO" worktree add -q -b "$BRANCH" "$WORKTREE" HEAD
+  printf '{"id":"manager-session","title":"%s","group":"%s","worktree_branch":"%s","worktree_path":"%s"}\\n' "$TITLE" "$GROUP" "$BRANCH" "$WORKTREE"
+  exit 0
+fi
+if [ "$1" = "session" ] && [ "$2" = "send" ]; then
+  printf '%s\\n' "$4" > "${invocationLog}.prompt"
+  exit 0
+fi
+if [ "$1" = "session" ] && [ "$2" = "show" ]; then
+  printf '{"id":"%s"}\\n' "$3"
+  exit 0
+fi
+exit 0
+`,
+    );
+    fs.chmodSync(agentDeckStub, 0o755);
     return binDir;
   }
 
@@ -589,6 +689,78 @@ describe("march CLI", () => {
         "utf-8",
       ),
     ).toContain("Olympia");
+  });
+
+  it("hatchery spawn: launches an agent-deck manager, captures patch artifacts, and sends the manager prompt", () => {
+    const repoRoot = makeRealRepo();
+    const home = makeTmpDir();
+    const codexHome = path.join(home, "codex-home");
+    fs.mkdirSync(codexHome);
+    const dockerLog = path.join(home, "docker.log");
+    const dockerStubDir = makeDockerPatchStubBinDir(dockerLog);
+    const agentDeckLog = path.join(home, "agent-deck.log");
+    const agentDeckStubDir = makeAgentDeckStubBinDir(agentDeckLog);
+    const nodeBinDir = path.dirname(process.execPath);
+    const result = runWithEnv(
+      [
+        "hatchery",
+        "spawn",
+        "--prompt",
+        "add a generated file",
+        "--name",
+        "manager title",
+      ],
+      {
+        PATH: [
+          nodeBinDir,
+          agentDeckStubDir,
+          dockerStubDir,
+          process.env.PATH ?? "",
+        ].join(path.delimiter),
+        HOME: home,
+        CODEX_HOME: codexHome,
+      },
+      { cwd: repoRoot },
+    );
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("Hatchery spawn");
+    expect(result.stdout).toContain("manager-session");
+
+    const agentDeckInvocations = fs.readFileSync(agentDeckLog, "utf-8");
+    expect(agentDeckInvocations).toMatch(/^launch /m);
+    expect(agentDeckInvocations).toMatch(/^session send manager-session /m);
+
+    const worktreeParent = path.join(path.dirname(repoRoot), "agent-deck-worktrees");
+    const managerWorktrees = fs.readdirSync(worktreeParent);
+    expect(managerWorktrees).toHaveLength(1);
+    const managerWorktree = path.join(worktreeParent, managerWorktrees[0]);
+    expect(fs.existsSync(path.join(managerWorktree, "README.md"))).toBe(true);
+
+    const logsRoot = path.join(home, ".march", "logs", "hatchery-spawns");
+    const spawnIds = fs.readdirSync(logsRoot);
+    expect(spawnIds).toHaveLength(1);
+    const handoffDir = path.join(logsRoot, spawnIds[0]);
+    const metadata = JSON.parse(
+      fs.readFileSync(path.join(handoffDir, "metadata.json"), "utf-8"),
+    );
+    expect(metadata.backend).toBe("codex");
+    expect(metadata.managerSession.title).toBe("manager title");
+    expect(fs.readFileSync(path.join(handoffDir, "patch.diff"), "utf-8")).toContain(
+      "diff --git a/generated.txt b/generated.txt",
+    );
+    expect(
+      fs.readFileSync(path.join(handoffDir, "manager-prompt.md"), "utf-8"),
+    ).toContain("Apply and review the staged spawn patch");
+    expect(
+      fs.readFileSync(`${agentDeckLog}.prompt`, "utf-8"),
+    ).toContain(path.join(handoffDir, "patch.diff"));
+
+    const dockerInvocations = fs.readFileSync(dockerLog, "utf-8");
+    const buildLine = dockerInvocations
+      .split("\n")
+      .find((line) => line.startsWith("build "));
+    expect(buildLine).toContain("march-spawn-");
   });
 
   it("spawn dispatch: unknown backend exits 2 before dependency checks", () => {
