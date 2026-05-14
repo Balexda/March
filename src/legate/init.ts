@@ -332,6 +332,7 @@ export type TemplateVars = Record<TemplateVar, string>;
  */
 export const LEGATE_SKILLS = [
   "legate.resume",
+  "legate.error",
   "legate.babysit",
   "legate.merge",
   "legate.cleanup",
@@ -647,6 +648,7 @@ function processorMetaFor(input: {
 
 const PROCESSOR_LOOP_MJS = `#!/usr/bin/env node
 import { execFileSync } from "node:child_process";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -1095,8 +1097,43 @@ function sendAgentDeckMessage(sessionId, message, wait = false) {
   return execText("agent-deck", args);
 }
 
-function restartWorker(sessionId) {
-  return execText("agent-deck", ["-p", meta.profile, "session", "restart", sessionId]);
+function truncateText(text, max = 4000) {
+  const value = String(text || "");
+  if (value.length <= max) return value;
+  return value.slice(value.length - max);
+}
+
+function hashText(text) {
+  return crypto.createHash("sha256").update(String(text || "")).digest("hex").slice(0, 16);
+}
+
+function captureRecentSessionOutput(sessionId) {
+  try {
+    const output = execText("agent-deck", ["-p", meta.profile, "session", "output", sessionId, "-q"]);
+    return { output: truncateText(output.trim()) };
+  } catch (err) {
+    return { output: "", error: err?.message || String(err) };
+  }
+}
+
+function workerErrorDetail({ sliceId, slice, worker, sessionId, recent }) {
+  const pr = slice.pr || {};
+  const lines = [
+    "Worker session is in agent-deck error state.",
+    "",
+    \`slice: \${sliceId}\`,
+    \`session: \${sessionId}\${worker?.title ? " (" + worker.title + ")" : ""}\`,
+    \`worker_path: \${worker?.path || slice.worktree_path || "unknown"}\`,
+    \`stage: \${slice.stage || "unknown"}\`,
+    \`PR: \${pr.url || (pr.number ? "#" + pr.number : "none")}\`,
+    \`last_action_note: \${slice.last_action_note || "none"}\`,
+    "",
+    "Recent output:",
+    recent.output || (recent.error ? \`<unavailable: \${recent.error}>\` : "<empty>"),
+    "",
+    "This is not deterministic-safe for the processor. Run legate.error to inspect the worker and choose recovery: resume prompt, direct diagnostic query, restart, login/auth escalation, or operator escalation.",
+  ];
+  return lines.join("\\n");
 }
 
 function sendDoorbellToLegate() {
@@ -1272,18 +1309,31 @@ function runBabysit(state, workerList, ts) {
     const workerStatus = worker.status || "other";
 
     if (workerStatus === "error") {
-      const key = actionKey("restart-worker", slice.pr || {}, sessionId);
-      if (!alreadyDispatched(slice, key)) {
-        try {
-          restartWorker(sessionId);
-          markSliceAction(slice, "restart-worker", key, "processor restarted errored worker", ts);
-          mutated = true;
-          actions.push({ action: "restart-worker", sliceId, sessionId, pr: slice.pr || {}, detail: "restarted errored worker" });
-        } catch (err) {
-          failures.push({ slice_id: sliceId, session_id: sessionId, error: err?.message || String(err) });
-        }
+      const recent = captureRecentSessionOutput(sessionId);
+      const key = actionKey("worker-error", slice.pr || {}, \`\${sessionId}:\${hashText(recent.output || recent.error || "")}\`);
+      if (!slice.worker_error_detected_at) slice.worker_error_detected_at = ts;
+      slice.worker_error_last_seen_at = ts;
+      const request = requestLegateJudgement({
+        ts,
+        slice,
+        requestKey: key,
+        sliceId,
+        sessionId,
+        pr: slice.pr || null,
+        reason: "worker_session_error",
+        detail: workerErrorDetail({ sliceId, slice, worker, sessionId, recent }),
+      });
+      if (request) {
+        requests.push(request);
       }
+      mutated = true;
       continue;
+    }
+
+    if (slice.worker_error_last_seen_at) {
+      delete slice.worker_error_detected_at;
+      delete slice.worker_error_last_seen_at;
+      mutated = true;
     }
 
     if (workerStatus === "running") continue;
@@ -2196,13 +2246,17 @@ What you operate on:
 - gh CLI — source of truth for high-level PR state.
 - The smithy.pr-review skill — source of truth for unresolved inline review threads.
 
-Three skills carry the mechanics. Load each once on this turn so the auto-mode classifier registers their allowed-tools:
+Seven skills carry the mechanics. Load each once on this turn so the auto-mode classifier registers their allowed-tools:
+- legate.resume — worker session-restart recovery and Resume-from-summary picker clearing.
+- legate.error — opaque worker error recovery via inspection, login escalation, restart, or diagnostic prompt.
 - legate.babysit — existing PRs (CI failures, conflicts, review threads, merges).
+- legate.merge — strict-gate auto-squash-merge.
 - legate.cleanup — post-merge teardown (kill worker, prune worktree, archive slice).
 - legate.dispatch — new work (launch one worker for one ready slice).
+- legate.issue — operator-driven GitHub issue intake.
 
 Auto-mode alignment — your routine actions are exactly:
-(a) Skill() to load one of the three skills above;
+(a) Skill() to load one of the seven skills above;
 (b) bash invocation of a script under .claude/skills/legate.*/scripts/;
 (c) Read/Edit of state.json, task-log.md, LEARNINGS.md, POLICY.md, CLAUDE.md, meta.json, or */SKILL.md inside this conductor dir;
 (d) a [STATUS] or NEED: reply to a heartbeat or operator message.
@@ -2211,8 +2265,8 @@ Anything else escalates via NEED: rather than executing — inline python3 -c / 
 
 On this turn:
 1. Read CLAUDE.md end-to-end.
-2. Run its cold-start checklist (read state.json if present; load legate.babysit, legate.cleanup, legate.dispatch once via the Skill tool; append a startup entry to task-log.md).
-3. Reply with the cold-start acknowledgement: "Online for {REPO_NAME} ({PROFILE}). Skills available: legate.babysit, legate.cleanup, legate.dispatch. Will not invoke anything outside their scripts without escalating."
+2. Run its cold-start checklist (read state.json if present; load legate.resume, legate.error, legate.babysit, legate.merge, legate.cleanup, legate.dispatch, and legate.issue once via the Skill tool; append a startup entry to task-log.md).
+3. Reply with the cold-start acknowledgement: "Online for {REPO_NAME} ({PROFILE}). Skills available: legate.resume, legate.error, legate.babysit, legate.merge, legate.cleanup, legate.dispatch, legate.issue. Will not invoke anything outside their scripts without escalating."
 4. Wait for the first [HEARTBEAT]. Do not poll on your own.`;
 
 /**

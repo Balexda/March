@@ -162,13 +162,14 @@ This flips the conductor's auto-mode flag; agent-deck's launcher emits `--permis
 
 **Level 2 — narrow allow list in the conductor's project settings**.
 
-`<conductor-dir>/.claude/settings.json` pre-approves exactly what the six skills need and nothing else:
+`<conductor-dir>/.claude/settings.json` pre-approves exactly what the seven skills need and nothing else:
 
 ```json
 {
   "permissions": {
     "allow": [
       "Skill(legate.resume:*)",
+      "Skill(legate.error:*)",
       "Skill(legate.babysit:*)",
       "Skill(legate.merge:*)",
       "Skill(legate.cleanup:*)",
@@ -178,6 +179,7 @@ This flips the conductor's auto-mode flag; agent-deck's launcher emits `--permis
       "Edit(./**)",
       "Write(./**)",
       "Bash(.claude/skills/legate.resume/scripts/check-resume-prompt.sh *)",
+      "Bash(.claude/skills/legate.error/scripts/inspect-worker-error.sh *)",
       "Bash(.claude/skills/legate.resume/scripts/select-resume-summary.sh *)",
       "Bash(.claude/skills/legate.resume/scripts/nudge-resumed-worker.sh *)",
       "Bash(.claude/skills/legate.babysit/scripts/babysit-pr.sh *)",

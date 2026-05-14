@@ -310,6 +310,9 @@ describe("legate module", () => {
       expect(loop).toContain("review-fix");
       expect(loop).toContain("conflict-fix");
       expect(loop).toContain("ci-fix");
+      expect(loop).toContain("worker_session_error");
+      expect(loop).toContain("function workerErrorDetail");
+      expect(loop).toContain("agent-deck error state");
       expect(loop).toContain("] heartbeat slice_count=");
       expect(loop).toContain("function formatCleanupLine");
       expect(loop).toContain("${prefix}cleaned up");
@@ -1107,6 +1110,27 @@ describe("legate module", () => {
         expect(fs.statSync(p).mode & 0o111).not.toBe(0);
       }
     });
+
+    it("stages legate.error with its worker-error recovery scripts", async () => {
+      const home = makeTmpDir();
+      const result = await initLegate({
+        repoPath: "/some/repo/March",
+        homeDir: home,
+        runSetup: false,
+      });
+      const skill = result.skills.find((s) => s.name === "legate.error");
+      expect(skill).toBeDefined();
+      const scriptsDir = path.join(skill!.stagedDir, "scripts");
+      for (const name of [
+        "inspect-worker-error.sh",
+        "send-error-message.sh",
+        "restart-worker.sh",
+      ]) {
+        const p = path.join(scriptsDir, name);
+        expect(fs.existsSync(p)).toBe(true);
+        expect(fs.statSync(p).mode & 0o111).not.toBe(0);
+      }
+    });
   });
 
   describe("writeLegateHeartbeatScript", () => {
@@ -1494,11 +1518,15 @@ describe("legate module", () => {
       expect(prompt).toMatch(/Cold start as the Legate for March/);
       // Auto-mode scope statement.
       expect(prompt).toContain("--permission-mode auto");
-      // The three skills must be named so the classifier sees them in
+      // The core skills must be named so the classifier sees them in
       // recent context before the model invokes Skill(legate.*).
+      expect(prompt).toContain("legate.resume");
+      expect(prompt).toContain("legate.error");
       expect(prompt).toContain("legate.babysit");
+      expect(prompt).toContain("legate.merge");
       expect(prompt).toContain("legate.cleanup");
       expect(prompt).toContain("legate.dispatch");
+      expect(prompt).toContain("legate.issue");
       // Defers strict mechanics to CLAUDE.md.
       expect(prompt).toMatch(/CLAUDE\.md is the authoritative spec/);
     });
@@ -1508,7 +1536,7 @@ describe("legate module", () => {
       expect(prompt).toMatch(/On this turn:/);
       expect(prompt).toMatch(/cold-start acknowledgement/);
       expect(prompt).toMatch(
-        /Online for March \(march\)\. Skills available: legate\.babysit, legate\.cleanup, legate\.dispatch\./,
+        /Online for March \(march\)\. Skills available: legate\.resume, legate\.error, legate\.babysit, legate\.merge, legate\.cleanup, legate\.dispatch, legate\.issue\./,
       );
       expect(prompt).toMatch(/Wait for the first \[HEARTBEAT\]/);
     });
