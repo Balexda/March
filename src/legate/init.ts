@@ -1037,6 +1037,9 @@ function cleanupTerminalPrs(state, workerList, ts) {
     removeDispatchMessage(sliceId);
     const removal = removeWorkerSession(sessionId);
     if (removal.error) {
+      slice.last_action = ts;
+      slice.last_action_note = \`cleanup failed: \${removal.error}\`;
+      mutated = true;
       failures.push({
         slice_id: sliceId,
         session_id: sessionId,
@@ -1214,6 +1217,10 @@ function failedChecksSummary(pr) {
     .join("\\n");
 }
 
+function prDiscoverySince(slice) {
+  return slice.last_action || slice.created_at || slice.dispatched_at || slice.started_at || "";
+}
+
 function reviewThreadsSummary(threads) {
   return threads
     .map((thread) => \`- \${thread.path || "unknown path"}\${thread.line ? ":" + thread.line : ""} by \${thread.last_author || thread.author || "unknown"}: \${thread.body_preview || ""}\`)
@@ -1242,15 +1249,6 @@ Resolve conflicted files by preserving both the latest default-branch intent and
 Reply with the new HEAD sha when the push completes. If the conflict reflects a genuine design disagreement, abort the rebase and summarize the conflicting paths and disagreement.\`;
 }
 
-function ciFixMessage(pr) {
-  return \`/smithy.fix
-
-CI failed on PR #\${pr.number}. Please inspect and fix the failing checks, then push to the same PR branch.
-
-Failed checks:
-\${failedChecksSummary(pr)}\`;
-}
-
 function reviewFixMessage(pr, threads) {
   return \`/smithy.fix
 
@@ -1275,16 +1273,25 @@ function discoverPrForSlice(slice, state, sessionId) {
   } catch {
     // fall through to branch-based lookup
   }
-  const branch = slice.actual_branch || slice.branch;
-  if (!branch) return null;
   try {
     const owner = repoOwner(state);
-    const args = ["pr", "list", "--state", "open", "--head", branch, "--json", "number,url,state,mergeable,headRefName,title,statusCheckRollup"];
+    const args = ["pr", "list", "--author", "@me", "--state", "open", "--json", "number,url,state,mergeable,headRefName,title,statusCheckRollup,createdAt"];
     if (owner) args.push("-R", owner);
     const options = owner ? {} : { cwd: repoPath };
     const list = JSON.parse(execText("gh", args, options));
     if (!Array.isArray(list) || list.length === 0) return null;
-    return queryPrForBabysit({ pr: { number: list[0].number } }, state);
+    const since = prDiscoverySince(slice);
+    const candidates = since
+      ? list.filter((candidate) => String(candidate.createdAt || "") >= since)
+      : list;
+    const expectedBranch = slice.actual_branch || slice.branch || "";
+    const branchMatches = expectedBranch
+      ? candidates.filter((candidate) => candidate.headRefName === expectedBranch)
+      : [];
+    const chosen = (branchMatches.length > 0 ? branchMatches : candidates)
+      .sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")))[0];
+    if (!chosen) return null;
+    return queryPrForBabysit({ pr: { number: chosen.number } }, state);
   } catch {
     return null;
   }
@@ -1388,7 +1395,23 @@ function runBabysit(state, workerList, ts) {
     }
 
     if (pr.mergeable === "CONFLICTING") {
-      if (slice.stage === "pr-resolving-conflicts") continue;
+      if (slice.stage === "pr-resolving-conflicts") {
+        const request = requestLegateJudgement({
+          ts,
+          slice,
+          requestKey: actionKey("conflict-persisted", pr),
+          sliceId,
+          sessionId,
+          pr,
+          reason: "merge conflict persisted after processor prompt",
+          detail: \`PR #\${pr.number} is still CONFLICTING after the processor previously sent a conflict-resolution prompt. Legate judgement is required before repeating recovery.\`,
+        });
+        if (request) {
+          requests.push(request);
+          mutated = true;
+        }
+        continue;
+      }
       const key = actionKey("conflict-fix", pr);
       if (alreadyDispatched(slice, key)) continue;
       try {
@@ -1431,27 +1454,24 @@ function runBabysit(state, workerList, ts) {
     }
 
     if (pr.checks === "FAIL") {
-      if (slice.stage === "pr-in-fix") continue;
-      const key = actionKey("ci-fix", pr, (pr.failed_checks || []).map((check) => \`\${check.name}:\${check.url || ""}\`).join(","));
-      if (alreadyDispatched(slice, key)) continue;
-      try {
-        sendAgentDeckMessage(sessionId, ciFixMessage(pr), false);
-      } catch (err) {
-        const request = requestLegateJudgement({ ts, slice, requestKey: actionKey("ci-send-failed", pr, key), sliceId, sessionId, pr, reason: "processor failed to send CI /smithy.fix", detail: err?.message || String(err) });
-        if (request) {
-          requests.push(request);
-          mutated = true;
-        }
-        continue;
+      const request = requestLegateJudgement({
+        ts,
+        slice,
+        requestKey: actionKey("ci-failure", pr, (pr.failed_checks || []).map((check) => \`\${check.name}:\${check.url || ""}\`).join(",")),
+        sliceId,
+        sessionId,
+        pr,
+        reason: "CI failure requires Legate judgement",
+        detail: \`PR #\${pr.number} has failing CI. The deterministic processor cannot distinguish stale-main, transient flake, and real PR-diff failure safely. Failed checks:\\n\${failedChecksSummary(pr)}\`,
+      });
+      if (request) {
+        requests.push(request);
+        mutated = true;
       }
-      slice.stage = "pr-in-fix";
-      markSliceAction(slice, "ci-fix", key, "processor sent CI-failure /smithy.fix", ts);
-      mutated = true;
-      actions.push({ action: "ci-fix", sliceId, sessionId, pr, detail: "sent /smithy.fix for CI failure" });
       continue;
     }
 
-    if ((pr.checks === "PASS" || pr.checks === "NONE") && pr.thread_count === 0 && pr.mergeable !== "CONFLICTING") {
+    if (pr.checks === "PASS" && pr.thread_count === 0 && pr.mergeable !== "CONFLICTING") {
       if (["pr-in-fix", "pr-resolving-conflicts", "pr-rebasing", "pr-in-rerun", "implementing"].includes(slice.stage)) {
         slice.stage = "pr-open";
         slice.pr_open_at = ts;

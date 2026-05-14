@@ -309,7 +309,7 @@ describe("legate module", () => {
       expect(loop).toContain("processor_requests_path");
       expect(loop).toContain("review-fix");
       expect(loop).toContain("conflict-fix");
-      expect(loop).toContain("ci-fix");
+      expect(loop).toContain("CI failure requires Legate judgement");
       expect(loop).toContain("worker_session_error");
       expect(loop).toContain("function workerErrorDetail");
       expect(loop).toContain("agent-deck error state");

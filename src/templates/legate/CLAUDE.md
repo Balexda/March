@@ -185,7 +185,7 @@ The CLAUDE.prompt loads skills in this order on every heartbeat:
 2. `legate.error` — handle opaque worker `error` sessions escalated by the processor or reported by agent-deck.
 3. `legate.babysit` — handle existing PRs.
 4. `legate.merge` — auto-squash-merge gated PRs from this tick.
-5. `legate.cleanup` and the deterministic processor — sweep terminal PR slices into `archived_slices`, prune worktrees. The processor also mirrors the deterministic babysit subset: PR discovery/state refresh, conflict prompts, review-thread `/smithy.fix`, CI `/smithy.fix`, and all-clear transitions. Opaque worker errors are escalated to `legate.error`.
+5. `legate.cleanup` and the deterministic processor — sweep terminal PR slices into `archived_slices`, prune worktrees. The processor also mirrors the deterministic babysit subset: PR discovery/state refresh, first conflict prompts, review-thread `/smithy.fix`, and all-clear transitions. Failed CI, persistent conflicts, and opaque worker errors are escalated to the Legate conductor.
 6. `legate.dispatch` — pick up new work. Runs every heartbeat regardless of what babysit found; iterates the entire ready set and launches one worker per ready slice that has no in-flight worker yet (no per-heartbeat cap on the number of new workers). See "Concurrency and dispatch behavior" below.
 
 `legate.issue` is not in the heartbeat order; it's triggered by operator message.
