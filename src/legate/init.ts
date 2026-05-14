@@ -310,6 +310,7 @@ const TEMPLATE_VARS = [
   "REPO_PATH",
   "PROFILE",
   "CONDUCTOR_NAME",
+  "PROCESSOR_NAME",
   "WORKER_GROUP",
 ] as const;
 
@@ -411,6 +412,13 @@ export interface LegateInitOptions {
   templateDir?: string;
   /** When false, render the template but skip `agent-deck conductor setup`. Default: true. */
   runSetup?: boolean;
+  /** Deploy the paired deterministic processor conductor. Default: true. */
+  processor?: boolean;
+  /**
+   * Deploy only the deterministic processor conductor. The Claude-backed
+   * Legate conductor is not created, started, restarted, or configured.
+   */
+  processorOnly?: boolean;
   /** Build and launch the Hatchery-managed Legate container after setup. */
   withContainer?: boolean;
 }
@@ -426,11 +434,18 @@ export interface LegateSkillDeployment {
 export interface LegateInitResult {
   profile: string;
   conductorName: string;
+  processorName?: string;
   workerGroup: string;
   repoName: string;
   repoPath: string;
   templateOutputPath: string;
   conductorDir: string;
+  processorStagingDir?: string;
+  processorConductorDir?: string;
+  processorSetupCommand?: string[];
+  processorPostSetupCommands?: string[][];
+  processorSetupRan?: boolean;
+  processorConfigured?: boolean;
   /**
    * Parent dir of every staged skill: `~/.march/legate/<conductor>/skills/`.
    * Per-skill subdirs hang off this; see `skills` for the per-skill detail.
@@ -503,6 +518,7 @@ function repoHashSuffix(repoPath: string): string {
 export function deriveDefaults(repoPath: string): {
   profile: string;
   conductorName: string;
+  processorName: string;
   workerGroup: string;
   repoName: string;
 } {
@@ -518,6 +534,7 @@ export function deriveDefaults(repoPath: string): {
     // Conductor names are unique system-wide in agent-deck — encode the repo
     // slug so multiple repos can each have their own legate without collision.
     conductorName: `legate-${slug}`,
+    processorName: `processor-legate-${slug}`,
     workerGroup: "legate-workers",
     repoName,
   };
@@ -583,6 +600,166 @@ export async function renderTemplate(
   partials: Record<string, string> = {},
 ): Promise<string> {
   return renderPrompt(tpl, partials, vars);
+}
+
+function processorMetaFor(input: {
+  profile: string;
+  conductorName: string;
+  processorName: string;
+  repoName: string;
+  repoPath: string;
+  workerGroup: string;
+  processorConductorDir: string;
+  legateConductorDir: string;
+}): Record<string, unknown> {
+  return {
+    schema_version: 1,
+    profile: input.profile,
+    paired_legate: input.conductorName,
+    processor_name: input.processorName,
+    repo: {
+      name: input.repoName,
+      path: input.repoPath,
+    },
+    worker_group: input.workerGroup,
+    legate_state_path: path.join(input.legateConductorDir, "state.json"),
+    processor_log_path: path.join(input.processorConductorDir, "processor.log"),
+    processor_events_path: path.join(input.processorConductorDir, "processor.ndjson"),
+    processor_requests_path: path.join(
+      input.processorConductorDir,
+      "processor-requests.ndjson",
+    ),
+    mode: "observe-and-log",
+  };
+}
+
+const PROCESSOR_LOOP_MJS = `#!/usr/bin/env node
+import { execFileSync } from "node:child_process";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const here = path.dirname(fileURLToPath(import.meta.url));
+const metaPath = path.join(here, "processor-meta.json");
+const meta = JSON.parse(fs.readFileSync(metaPath, "utf-8"));
+const intervalSeconds = Number(process.env.MARCH_PROCESSOR_INTERVAL_SECONDS || "60");
+
+function now() {
+  return new Date().toISOString();
+}
+
+function append(file, value) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.appendFileSync(file, JSON.stringify(value) + "\\n", "utf-8");
+}
+
+function appendText(file, text) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.appendFileSync(file, text + "\\n", "utf-8");
+  console.log(text);
+}
+
+function readJsonIfPresent(file) {
+  try {
+    return JSON.parse(fs.readFileSync(file, "utf-8"));
+  } catch (err) {
+    if (err && err.code === "ENOENT") return null;
+    throw err;
+  }
+}
+
+function agentDeckList() {
+  try {
+    const out = execFileSync("agent-deck", ["-p", meta.profile, "list", "--json"], {
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    const parsed = JSON.parse(out);
+    return Array.isArray(parsed) ? parsed : parsed.sessions || [];
+  } catch (err) {
+    return { error: err?.message || String(err) };
+  }
+}
+
+function summarizeWorkers(list) {
+  if (!Array.isArray(list)) return { error: list.error || "unavailable" };
+  const buckets = { waiting: 0, running: 0, idle: 0, error: 0, stopped: 0, other: 0 };
+  for (const session of list) {
+    const group = session.group || "";
+    if (group !== meta.worker_group && !group.startsWith(meta.worker_group + "/")) {
+      continue;
+    }
+    const status = session.status || "other";
+    if (Object.prototype.hasOwnProperty.call(buckets, status)) buckets[status] += 1;
+    else buckets.other += 1;
+  }
+  return buckets;
+}
+
+function tick() {
+  const ts = now();
+  let state = null;
+  let stateError = null;
+  try {
+    state = readJsonIfPresent(meta.legate_state_path);
+  } catch (err) {
+    stateError = err?.message || String(err);
+  }
+  const workers = summarizeWorkers(agentDeckList());
+  const slices = state?.slices && typeof state.slices === "object" ? state.slices : {};
+  const archived = state?.archived_slices && typeof state.archived_slices === "object"
+    ? state.archived_slices
+    : {};
+  const record = {
+    schema_version: 1,
+    ts,
+    processor: meta.processor_name,
+    paired_legate: meta.paired_legate,
+    mode: "observe-and-log",
+    state_present: Boolean(state),
+    state_error: stateError,
+    slice_count: Object.keys(slices).length,
+    archived_slice_count: Object.keys(archived).length,
+    workers,
+  };
+  append(meta.processor_events_path, record);
+  appendText(
+    meta.processor_log_path,
+    \`[\${ts}] observe slice_count=\${record.slice_count} archived=\${record.archived_slice_count} workers=\${JSON.stringify(workers)}\${stateError ? " state_error=" + stateError : ""}\`,
+  );
+}
+
+appendText(meta.processor_log_path, \`[\${now()}] processor starting in observe-and-log mode for \${meta.paired_legate}\`);
+tick();
+setInterval(tick, Math.max(10, intervalSeconds) * 1000);
+`;
+
+async function writeProcessorFiles(input: {
+  stagingDir: string;
+  processorConductorDir: string;
+  meta: Record<string, unknown>;
+}): Promise<{ stagedLoopPath: string; stagedMetaPath: string }> {
+  await fs.mkdir(input.stagingDir, { recursive: true });
+  const stagedLoopPath = path.join(input.stagingDir, "processor-loop.mjs");
+  const stagedMetaPath = path.join(input.stagingDir, "processor-meta.json");
+  await fs.writeFile(stagedLoopPath, PROCESSOR_LOOP_MJS, { mode: 0o755 });
+  await fs.chmod(stagedLoopPath, 0o755);
+  await fs.writeFile(stagedMetaPath, JSON.stringify(input.meta, null, 2) + "\n");
+  return { stagedLoopPath, stagedMetaPath };
+}
+
+async function copyProcessorFilesIntoConductor(
+  processorStagingDir: string,
+  processorConductorDir: string,
+): Promise<void> {
+  await fs.mkdir(processorConductorDir, { recursive: true });
+  for (const name of ["processor-loop.mjs", "processor-meta.json"]) {
+    await fs.copyFile(
+      path.join(processorStagingDir, name),
+      path.join(processorConductorDir, name),
+    );
+  }
+  await fs.chmod(path.join(processorConductorDir, "processor-loop.mjs"), 0o755);
 }
 
 /**
@@ -1270,6 +1447,12 @@ export async function initLegate(
   const defaults = deriveDefaults(repoPath);
   const profile = opts.profile ?? defaults.profile;
   const conductorName = opts.conductorName ?? defaults.conductorName;
+  const processorOnly = opts.processorOnly === true;
+  const processorEnabled = processorOnly || opts.processor !== false;
+  const shouldRunSetup = opts.runSetup ?? true;
+  const runLegateSetup = shouldRunSetup && !processorOnly;
+  const runProcessorSetup = shouldRunSetup && processorEnabled;
+  const processorName = `processor-${conductorName}`;
   const workerGroup = opts.workerGroup ?? defaults.workerGroup;
   const model = opts.model ?? "sonnet";
   const heartbeatInterval = opts.heartbeatInterval ?? DEFAULT_HEARTBEAT_INTERVAL;
@@ -1283,8 +1466,19 @@ export async function initLegate(
   // march-side error instead of shelling out and parsing agent-deck's stderr.
   validateProfileName(profile);
   validateConductorName(conductorName);
+  if (processorEnabled) validateConductorName(processorName);
   validateHeartbeatInterval(heartbeatInterval);
-  if (opts.withContainer && opts.runSetup === false) {
+  if (processorOnly && opts.processor === false) {
+    throw new LegateError(
+      "`--processor-only` cannot be combined with `--no-processor`.",
+    );
+  }
+  if (processorOnly && opts.withContainer) {
+    throw new LegateError(
+      "`march legate init --processor-only` cannot be combined with --with-container because the Claude Legate conductor is not deployed.",
+    );
+  }
+  if (opts.withContainer && !runLegateSetup) {
     throw new LegateError(
       "`march legate init --with-container` requires setup so there is a conductor directory to mount. Remove --no-setup and re-run.",
     );
@@ -1308,6 +1502,7 @@ export async function initLegate(
     REPO_PATH: repoPath,
     PROFILE: profile,
     CONDUCTOR_NAME: conductorName,
+    PROCESSOR_NAME: processorName,
     WORKER_GROUP: workerGroup,
   };
 
@@ -1476,15 +1671,95 @@ export async function initLegate(
   if (startBridgeCommand) postSetupCommands.push(startBridgeCommand);
 
   const conductorDir = path.join(home, ".agent-deck", "conductor", conductorName);
+  const processorStagingDir = path.join(stagingDir, "processor");
+  const processorConductorDir = path.join(
+    home,
+    ".agent-deck",
+    "conductor",
+    processorName,
+  );
+  const processorSetupCommand = [
+    "agent-deck",
+    "-p",
+    profile,
+    "conductor",
+    "setup",
+    processorName,
+    "-description",
+    `Deterministic Legate processor for ${repoName}`,
+    "-no-heartbeat",
+  ];
+  const processorTitle = `conductor-${processorName}`;
+  const processorRuntimeCommand = formatShellCommand([
+    "node",
+    path.join(processorConductorDir, "processor-loop.mjs"),
+  ]);
+  const setProcessorToolCommand = [
+    "agent-deck",
+    "-p",
+    profile,
+    "session",
+    "set",
+    processorTitle,
+    "tool",
+    "shell",
+  ];
+  const setProcessorCommandCommand = [
+    "agent-deck",
+    "-p",
+    profile,
+    "session",
+    "set",
+    processorTitle,
+    "command",
+    processorRuntimeCommand,
+  ];
+  const restartProcessorCommand = [
+    "agent-deck",
+    "-p",
+    profile,
+    "session",
+    "restart",
+    processorTitle,
+  ];
+  const processorPostSetupCommands = [
+    setProcessorToolCommand,
+    setProcessorCommandCommand,
+    restartProcessorCommand,
+  ];
+  if (processorEnabled) {
+    try {
+      await writeProcessorFiles({
+        stagingDir: processorStagingDir,
+        processorConductorDir,
+        meta: processorMetaFor({
+          profile,
+          conductorName,
+          processorName,
+          repoName,
+          repoPath,
+          workerGroup,
+          processorConductorDir,
+          legateConductorDir: conductorDir,
+        }),
+      });
+    } catch (err) {
+      throw new LegateError(
+        `Failed to stage deterministic processor files: ${(err as Error).message}`,
+      );
+    }
+  }
 
   let setupRan = false;
+  let processorSetupRan = false;
+  let processorConfigured = false;
   let autoModeConfigured = false;
   let bridgeActive = false;
   let heartbeatOverrideWritten = false;
   let legateContainer: LegateContainerResult | undefined;
   let deploymentResults: { name: LegateSkillName; deployed: boolean }[] = [];
   const postSetupWarnings: string[] = [];
-  if (opts.runSetup ?? true) {
+  if (runLegateSetup) {
     try {
       execFileSync(setupCommand[0], setupCommand.slice(1), {
         stdio: "inherit",
@@ -1787,9 +2062,74 @@ export async function initLegate(
       );
     }
   } else {
-    // No setup ran; record skills as staged-but-not-deployed so the result
-    // shape is consistent.
+    // No Claude conductor setup ran; record skills as staged-but-not-deployed
+    // so the result shape is consistent.
     deploymentResults = LEGATE_SKILLS.map((name) => ({ name, deployed: false }));
+  }
+
+  if (runProcessorSetup) {
+    try {
+      execFileSync(processorSetupCommand[0], processorSetupCommand.slice(1), {
+        stdio: "inherit",
+      });
+      processorSetupRan = true;
+    } catch (err) {
+      const status = (err as { status?: number }).status;
+      postSetupWarnings.push(
+        `agent-deck processor conductor setup failed (exit ${status ?? "?"}). ` +
+          `Processor files are staged at ${processorStagingDir}; run manually:\n` +
+          `  ${formatShellCommand(processorSetupCommand)}`,
+      );
+    }
+    if (processorSetupRan) {
+      try {
+        await copyProcessorFilesIntoConductor(
+          processorStagingDir,
+          processorConductorDir,
+        );
+      } catch (err) {
+        postSetupWarnings.push(
+          `Failed to copy deterministic processor files into ${processorConductorDir}: ` +
+            `${(err as Error).message}`,
+        );
+      }
+      let processorToolSet = false;
+      try {
+        execFileSync(
+          setProcessorToolCommand[0],
+          setProcessorToolCommand.slice(1),
+          { stdio: "inherit" },
+        );
+        processorToolSet = true;
+      } catch (err) {
+        const status = (err as { status?: number }).status;
+        postSetupWarnings.push(
+          `Failed to set processor session tool to shell (exit ${status ?? "?"}). ` +
+            `Run manually:\n  ${formatShellCommand(setProcessorToolCommand)}`,
+        );
+      }
+      if (processorToolSet) {
+        try {
+          execFileSync(
+            setProcessorCommandCommand[0],
+            setProcessorCommandCommand.slice(1),
+            { stdio: "inherit" },
+          );
+          execFileSync(
+            restartProcessorCommand[0],
+            restartProcessorCommand.slice(1),
+            { stdio: "inherit" },
+          );
+          processorConfigured = true;
+        } catch (err) {
+          const status = (err as { status?: number }).status;
+          postSetupWarnings.push(
+            `Failed to configure/restart processor runtime (exit ${status ?? "?"}). ` +
+              `Run manually:\n  ${formatShellCommand(setProcessorCommandCommand)}\n  ${formatShellCommand(restartProcessorCommand)}`,
+          );
+        }
+      }
+    }
   }
 
   if (opts.withContainer) {
@@ -1822,35 +2162,65 @@ export async function initLegate(
     ? allSkillsDeployed
       ? `${LEGATE_SKILLS.join(", ")} (deployed to .claude/skills/; staged source under ${skillsStagedDir})`
       : `partial — see warnings (${skills.filter((s) => s.deployed).map((s) => s.name).join(", ") || "none"} deployed)`
-    : `${LEGATE_SKILLS.join(", ")} staged at ${skillsStagedDir} (copied into conductor on setup)`;
+    : processorOnly
+      ? `${LEGATE_SKILLS.join(", ")} staged at ${skillsStagedDir} (Claude conductor not deployed)`
+      : `${LEGATE_SKILLS.join(", ")} staged at ${skillsStagedDir} (copied into conductor on setup)`;
+  const processorLine = processorEnabled
+    ? processorConfigured
+      ? `${processorName} (observe-and-log shell runtime configured)`
+      : runProcessorSetup
+        ? `${processorName} staged/configuration incomplete — see warnings`
+        : `${processorName} (observe-and-log deferred — run setup first)`
+    : "disabled (--no-processor)";
+  const legateStatus = processorOnly
+    ? processorConfigured
+      ? "processor-only configured"
+      : runProcessorSetup
+        ? "processor-only incomplete"
+        : "processor-only rendered"
+    : setupRan
+      ? "configured"
+      : "rendered";
 
   const baseLines = [
-    `Legate (${conductorName}) ${setupRan ? "configured" : "rendered"} for ${repoName}.`,
+    `Legate (${conductorName}) ${legateStatus} for ${repoName}.`,
     `  Profile:        ${profile}`,
-    `  Conductor:      ${conductorName}`,
+    `  Conductor:      ${
+      processorOnly ? `${conductorName} (not deployed; state path only)` : conductorName
+    }`,
+    `  Processor:      ${processorLine}`,
     `  Worker group:   ${workerGroup}`,
     `  Repo:           ${repoPath}`,
     `  Template:       ${templateOutputPath}`,
     `  Conductor dir:  ${conductorDir}`,
+    `  Processor dir:  ${
+      processorEnabled ? processorConductorDir : "disabled"
+    }`,
     `  Auto mode:      ${
-      setupRan
+      processorOnly
+        ? "skipped (--processor-only)"
+        : setupRan
         ? autoModeConfigured
           ? "enabled (auto-mode field set on conductor session)"
           : "NOT configured — see warnings"
         : "deferred (run setup first)"
     }`,
     `  Model:          ${model}${
-      setupRan ? "" : " (deferred — run setup first)"
+      processorOnly ? " (skipped — processor-only)" : setupRan ? "" : " (deferred — run setup first)"
     }`,
     `  Bridge daemon:  ${
-      setupRan
+      processorOnly
+        ? "skipped (--processor-only)"
+        : setupRan
         ? bridgeActive
           ? "active (heartbeats will reach the conductor)"
           : "NOT active — conductor will only respond to manual session-send messages; see warnings"
         : "deferred (run setup first)"
     }`,
     `  Heartbeat:      ${
-      setupRan
+      processorOnly
+        ? "skipped (--processor-only)"
+        : setupRan
         ? heartbeatOverrideWritten
           ? `${heartbeatInterval} (pinned via systemd drop-in override)`
           : `${heartbeatInterval} requested — override NOT written; see warnings`
@@ -1866,7 +2236,38 @@ export async function initLegate(
     `  Skills:         ${skillsLine}`,
     "",
   ];
-  const tailLines = setupRan
+  const tailLines = processorOnly
+    ? processorConfigured
+      ? [
+          "Processor-only deployment complete. The Claude Legate conductor was not",
+          "created, started, restarted, or configured. The processor observes the",
+          "existing Legate state file path when present:",
+          `  ${path.join(conductorDir, "state.json")}`,
+          "",
+          "Attach:",
+          `  agent-deck -p ${profile} session attach ${processorTitle}`,
+        ]
+      : runProcessorSetup
+        ? [
+            "Processor-only deployment was attempted, but processor configuration",
+            "did not complete. The Claude Legate conductor was not created or",
+            "started. See warnings above, then run the printed processor commands.",
+          ]
+      : [
+          "Processor-only setup skipped (--no-setup). Processor files are staged at",
+          `  ${processorStagingDir}`,
+          "and the Claude Legate conductor will not be created. Run when ready:",
+          `  ${formatShellCommand(processorSetupCommand)}`,
+          "",
+          "Then configure and start the deterministic processor:",
+          `  ${formatShellCommand(setProcessorToolCommand)}`,
+          `  ${formatShellCommand(setProcessorCommandCommand)}`,
+          `  ${formatShellCommand(restartProcessorCommand)}`,
+          "",
+          "Attach:",
+          `  agent-deck -p ${profile} session attach ${processorTitle}`,
+        ]
+    : setupRan
     ? [
         "CLAUDE.md and the legate skills were copied into the conductor's home",
         "(no symlinks — keeps every read inside cwd so auto-mode doesn't pause).",
@@ -1884,6 +2285,9 @@ export async function initLegate(
         "but no conductor has been created and nothing has been copied into",
         "a conductor dir yet. Run when ready:",
         `  ${formatShellCommand(setupCommand)}`,
+        ...(processorEnabled
+          ? [`  ${formatShellCommand(processorSetupCommand)}`]
+          : []),
         "",
         "Then enable auto mode, pin model, restart, and deliver the",
         "cold-start priming prompt (staged below):",
@@ -1891,6 +2295,15 @@ export async function initLegate(
         `  ${formatShellCommand(setModelCommand)}`,
         `  ${formatShellCommand(restartCommand)}`,
         `  ${sendColdStartManualHint}`,
+        ...(processorEnabled
+          ? [
+              "",
+              "Then configure and start the deterministic processor:",
+              `  ${formatShellCommand(setProcessorToolCommand)}`,
+              `  ${formatShellCommand(setProcessorCommandCommand)}`,
+              `  ${formatShellCommand(restartProcessorCommand)}`,
+            ]
+          : []),
         "",
         "Re-running `march legate init` will perform setup AND copy the",
         "rendered template + skills into the conductor's home, then attach:",
@@ -1905,11 +2318,22 @@ export async function initLegate(
   return {
     profile,
     conductorName,
+    ...(processorEnabled ? { processorName } : {}),
     workerGroup,
     repoName,
     repoPath,
     templateOutputPath,
     conductorDir,
+    ...(processorEnabled
+      ? {
+          processorStagingDir,
+          processorConductorDir,
+          processorSetupCommand,
+          processorPostSetupCommands,
+          processorSetupRan,
+          processorConfigured,
+        }
+      : {}),
     skillsStagedDir,
     skills,
     setupCommand,

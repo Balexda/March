@@ -69,6 +69,7 @@ describe("legate module", () => {
       expect(defaults.repoName).toBe("March");
       expect(defaults.profile).toBe("march");
       expect(defaults.conductorName).toBe("legate-march");
+      expect(defaults.processorName).toBe("processor-legate-march");
       expect(defaults.workerGroup).toBe("legate-workers");
     });
 
@@ -78,6 +79,7 @@ describe("legate module", () => {
       expect(a.conductorName).not.toBe(b.conductorName);
       expect(a.profile).not.toBe(b.profile);
       expect(a.conductorName).toMatch(/^legate-repo-[0-9a-f]{8}$/);
+      expect(a.processorName).toMatch(/^processor-legate-repo-[0-9a-f]{8}$/);
       expect(b.conductorName).toMatch(/^legate-repo-[0-9a-f]{8}$/);
 
       const a2 = deriveDefaults("/path/to/___");
@@ -109,6 +111,7 @@ describe("legate module", () => {
       REPO_PATH: "/home/u/March",
       PROFILE: "march",
       CONDUCTOR_NAME: "legate-march",
+      PROCESSOR_NAME: "processor-legate-march",
       WORKER_GROUP: "legate-workers",
     };
 
@@ -256,6 +259,190 @@ describe("legate module", () => {
       // The full multi-paragraph prompt body must not be inlined in the
       // printable summary (it's the file's contents, not the command).
       expect(result.summary).not.toContain("Cold start as the Legate for March");
+    });
+
+    it("stages a deterministic processor scaffold by default", async () => {
+      const home = makeTmpDir();
+      const tplDir = makeTemplateDir("processor={{PROCESSOR_NAME}}");
+
+      const result = await initLegate({
+        repoPath: "/some/repo/March",
+        homeDir: home,
+        templateDir: tplDir,
+        runSetup: false,
+      });
+
+      expect(result.processorName).toBe("processor-legate-march");
+      expect(result.processorStagingDir).toBe(
+        path.join(home, ".march", "legate", "legate-march", "processor"),
+      );
+      expect(result.processorConductorDir).toBe(
+        path.join(home, ".agent-deck", "conductor", "processor-legate-march"),
+      );
+      expect(result.processorSetupCommand).toEqual([
+        "agent-deck",
+        "-p",
+        "march",
+        "conductor",
+        "setup",
+        "processor-legate-march",
+        "-description",
+        "Deterministic Legate processor for March",
+        "-no-heartbeat",
+      ]);
+      expect(result.processorSetupRan).toBe(false);
+      expect(result.processorConfigured).toBe(false);
+
+      const loopPath = path.join(result.processorStagingDir!, "processor-loop.mjs");
+      const metaPath = path.join(result.processorStagingDir!, "processor-meta.json");
+      expect(fs.existsSync(loopPath)).toBe(true);
+      expect(fs.statSync(loopPath).mode & 0o111).not.toBe(0);
+      expect(fs.readFileSync(loopPath, "utf-8")).toContain("console.log(text)");
+      expect(fs.existsSync(metaPath)).toBe(true);
+      const meta = JSON.parse(fs.readFileSync(metaPath, "utf-8"));
+      expect(meta.paired_legate).toBe("legate-march");
+      expect(meta.processor_name).toBe("processor-legate-march");
+      expect(meta.legate_state_path).toBe(
+        path.join(home, ".agent-deck", "conductor", "legate-march", "state.json"),
+      );
+      expect(meta.mode).toBe("observe-and-log");
+
+      const rendered = fs.readFileSync(result.templateOutputPath, "utf-8");
+      expect(rendered).toContain("processor=processor-legate-march");
+      expect(result.summary).toContain("Processor:");
+      expect(result.summary).toContain("processor-legate-march");
+      expect(result.summary).toContain("observe-and-log");
+    });
+
+    it("derives the processor name from the selected conductor name", async () => {
+      const home = makeTmpDir();
+      const tplDir = makeTemplateDir("ok");
+
+      const result = await initLegate({
+        repoPath: "/some/repo/SmithyCli",
+        homeDir: home,
+        templateDir: tplDir,
+        runSetup: false,
+        conductorName: "legate-smithy",
+      });
+
+      expect(result.conductorName).toBe("legate-smithy");
+      expect(result.processorName).toBe("processor-legate-smithy");
+      expect(result.processorConductorDir).toBe(
+        path.join(home, ".agent-deck", "conductor", "processor-legate-smithy"),
+      );
+      expect(result.processorSetupCommand).toContain("processor-legate-smithy");
+    });
+
+    it("can disable processor staging with processor=false", async () => {
+      const home = makeTmpDir();
+      const tplDir = makeTemplateDir("ok");
+
+      const result = await initLegate({
+        repoPath: "/some/repo/March",
+        homeDir: home,
+        templateDir: tplDir,
+        runSetup: false,
+        processor: false,
+      });
+
+      expect(result.processorName).toBeUndefined();
+      expect(result.processorSetupCommand).toBeUndefined();
+      expect(
+        fs.existsSync(path.join(home, ".march", "legate", "legate-march", "processor")),
+      ).toBe(false);
+      expect(result.summary).toContain("disabled (--no-processor)");
+    });
+
+    it("can deploy only the deterministic processor without configuring the Claude conductor", async () => {
+      const home = makeTmpDir();
+      const binDir = makeTmpDir();
+      const agentDeck = path.join(binDir, "agent-deck");
+      fs.writeFileSync(
+        agentDeck,
+        [
+          "#!/bin/sh",
+          'if [ "$1" = "-p" ]; then shift 2; fi',
+          'if [ "$1" = "conductor" ] && [ "$2" = "setup" ]; then mkdir -p "$HOME/.agent-deck/conductor/$3"; exit 0; fi',
+          "exit 0",
+          "",
+        ].join("\n"),
+      );
+      fs.chmodSync(agentDeck, 0o755);
+      const oldPath = process.env.PATH;
+      const oldHome = process.env.HOME;
+      process.env.PATH = [binDir, oldPath ?? ""].join(path.delimiter);
+      process.env.HOME = home;
+      try {
+        const result = await initLegate({
+          repoPath: "/some/repo/March",
+          homeDir: home,
+          processorOnly: true,
+        });
+
+        expect(result.setupRan).toBe(false);
+        expect(result.processorSetupRan).toBe(true);
+        expect(result.processorConfigured).toBe(true);
+        expect(fs.existsSync(result.conductorDir)).toBe(false);
+        expect(
+          fs.existsSync(path.join(result.processorConductorDir!, "processor-loop.mjs")),
+        ).toBe(true);
+        expect(result.summary).toContain("processor-only configured");
+        expect(result.summary).toContain("Conductor:      legate-march (not deployed");
+        expect(result.summary).toContain("Auto mode:      skipped (--processor-only)");
+        expect(result.summary).toContain(
+          "The Claude Legate conductor was not",
+        );
+        expect(result.summary).toContain(
+          "agent-deck -p march session attach conductor-processor-legate-march",
+        );
+        expect(result.summary).not.toContain("auto-mode true");
+      } finally {
+        process.env.PATH = oldPath;
+        process.env.HOME = oldHome;
+      }
+    });
+
+    it("renders processor-only no-setup instructions without Claude setup steps", async () => {
+      const home = makeTmpDir();
+
+      const result = await initLegate({
+        repoPath: "/some/repo/March",
+        homeDir: home,
+        runSetup: false,
+        processorOnly: true,
+      });
+
+      expect(result.setupRan).toBe(false);
+      expect(result.processorSetupRan).toBe(false);
+      expect(result.summary).toContain("Processor-only setup skipped");
+      expect(result.summary).toContain("Claude Legate conductor will not be created");
+      expect(result.summary).toContain("conductor setup processor-legate-march");
+      expect(result.summary).not.toContain("conductor setup legate-march");
+      expect(result.summary).not.toContain("auto-mode true");
+      expect(result.summary).not.toContain("session send conductor-legate-march");
+    });
+
+    it("rejects contradictory processor-only options", async () => {
+      const home = makeTmpDir();
+
+      await expect(
+        initLegate({
+          repoPath: "/some/repo/March",
+          homeDir: home,
+          processorOnly: true,
+          processor: false,
+        }),
+      ).rejects.toThrow(LegateError);
+
+      await expect(
+        initLegate({
+          repoPath: "/some/repo/March",
+          homeDir: home,
+          processorOnly: true,
+          withContainer: true,
+        }),
+      ).rejects.toThrow(LegateError);
     });
 
     it("stages the cold-start prompt to a file in the staging dir", async () => {

@@ -14,6 +14,7 @@ You operate on top of four things:
 - **Repo:** `{{REPO_PATH}}` ({{REPO_NAME}}). You do not touch other repos.
 - **Profile:** `{{PROFILE}}`. Always pass `-p {{PROFILE}}` on every `agent-deck` command.
 - **Conductor name:** `{{CONDUCTOR_NAME}}`. You live in `~/.agent-deck/conductor/{{CONDUCTOR_NAME}}/`.
+- **Deterministic processor:** `{{PROCESSOR_NAME}}`. It is a paired, non-interactive shell runtime that observes `state.json`, worker status, and processor request logs without spending LLM tokens.
 - **Worker group:** `{{WORKER_GROUP}}` — group every worker session you launch into this group so they're easy to inspect and reconcile.
 - **Working directory:** your shell starts in your conductor dir, **not** in the managed repo. The skill scripts handle `cd` for you; outside the scripts, prefix with `(cd {{REPO_PATH}} && ...)` or pass `--repo Owner/Repo` to `gh` (look the slug up once and cache it in `state.json`).
 
@@ -46,6 +47,8 @@ If you find yourself about to dispatch a step that depends on an unmerged PR, st
 ## Heartbeat protocol
 
 Heartbeats (`[HEARTBEAT] [{{PROFILE}}] Status: ...` from the bridge) and worker transition notifications (`running → waiting | error | idle`) are your **only** autonomous triggers. The conductor never polls on its own schedule, so missing one of these directly stalls the loop.
+
+The paired deterministic processor may send the literal doorbell `[PROCESSOR]`. Treat it as a prompt to inspect `~/.agent-deck/conductor/{{PROCESSOR_NAME}}/processor-requests.ndjson` and `~/.agent-deck/conductor/{{PROCESSOR_NAME}}/processor.log`. In this scaffold phase the processor is observe-and-log only: it does not own state transitions, worker launch, PR fixes, merge, or cleanup. If a processor request needs judgement, answer from this Claude session and use the normal `NEED:` / `[STATUS]` grammar; do not move deterministic work back into ad hoc inline shell.
 
 On every `[HEARTBEAT]`:
 

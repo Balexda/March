@@ -249,6 +249,14 @@ legate
     "Build and launch the Hatchery-managed Legate container after setup",
   )
   .option(
+    "--no-processor",
+    "Skip deploying the paired deterministic Legate processor conductor",
+  )
+  .option(
+    "--processor-only",
+    "Deploy only the paired deterministic processor conductor; do not create or start the Claude Legate conductor",
+  )
+  .option(
     "--no-bridge-check",
     "Skip the Python 3.9+ pre-flight check for the agent-deck conductor bridge daemon. Use only when you intend to drive the conductor manually with `agent-deck session send`.",
   )
@@ -261,9 +269,26 @@ legate
     heartbeatInterval?: string;
     setup?: boolean; // commander negates --no-setup into setup=false
     withContainer?: boolean;
+    processor?: boolean; // commander negates --no-processor into processor=false
+    processorOnly?: boolean;
     bridgeCheck?: boolean; // commander negates --no-bridge-check into bridgeCheck=false
   }) => {
     commandHandled = true;
+
+    if (opts.processorOnly && opts.processor === false) {
+      process.stderr.write(
+        "`--processor-only` cannot be combined with `--no-processor`.\n",
+      );
+      process.exitCode = USAGE_ERROR;
+      return;
+    }
+    if (opts.processorOnly && opts.withContainer) {
+      process.stderr.write(
+        "`--processor-only` cannot be combined with `--with-container`.\n",
+      );
+      process.exitCode = USAGE_ERROR;
+      return;
+    }
 
     // 1. Detect repo root. Legate is per-repo, so this is mandatory. Three
     //    distinct failures need distinct messages — pointing the user at
@@ -308,6 +333,7 @@ legate
 
     // 2. Verify agent-deck is on PATH when we'll actually invoke it.
     const willRunSetup = opts.setup !== false;
+    const willRunClaudeConductorSetup = willRunSetup && opts.processorOnly !== true;
     if (opts.withContainer) {
       if (!isFinderAvailable()) {
         process.stderr.write(
@@ -345,7 +371,7 @@ legate
       //    delivers heartbeats; without it, the conductor is functional
       //    but inert. Failing here is preferable to deploying a conductor
       //    that silently never wakes up. Skipped under --no-bridge-check.
-      if (opts.bridgeCheck !== false) {
+      if (willRunClaudeConductorSetup && opts.bridgeCheck !== false) {
         const check = checkBridgeRequirements();
         if (!check.ok) {
           process.stderr.write(check.message + "\n");
@@ -366,6 +392,8 @@ legate
         model: opts.model,
         heartbeatInterval: opts.heartbeatInterval,
         runSetup: willRunSetup,
+        processor: opts.processorOnly ? true : opts.processor !== false,
+        processorOnly: opts.processorOnly === true,
         withContainer: opts.withContainer === true,
       });
       console.log(result.summary);
