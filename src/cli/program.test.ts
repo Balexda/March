@@ -21,10 +21,10 @@ const FINDER_PATH = execFileSync(FINDER_BIN, [FINDER_BIN], {
 }).trim();
 
 // Deterministic 64-hex-char fake container ID emitted by the docker stub
-// when invoked as `docker run -d ...`. Shared between the stub builder and
+// when invoked as `docker create ...`. Shared between the stub builder and
 // the success-path assertion so the test asserts on the exact literal the
 // stub prints — see SD-003 in the US5 tasks file. The 64-char width matches
-// the full container ID format Docker actually returns from `run -d`.
+// the full container ID format Docker actually returns from `create`.
 const FAKE_CONTAINER_ID = "0123456789abcdef".repeat(4);
 
 function run(
@@ -610,7 +610,9 @@ describe("march CLI", () => {
     );
 
     expect(result.exitCode).toBe(2);
-    expect(result.stderr).toContain('Backend "codex" requires credential path');
+    expect(result.stderr).toContain(
+      'Backend "codex" requires readable credential directories',
+    );
     expect(result.stderr).toContain(missingCodexHome);
     const branches = execFileSync(
       "git",

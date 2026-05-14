@@ -1,4 +1,7 @@
 import { describe, expect, it } from "vitest";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import {
   claudeCodeBackend,
   codexBackend,
@@ -108,5 +111,33 @@ describe("spawn backends", () => {
     });
     expect(missing).toHaveLength(1);
     expect(missing[0].hostPath).toBe("/path/that/does/not/exist");
+  });
+
+  it("rejects credential paths that exist but are not directories", () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "march-codex-home-"));
+    const filePath = path.join(tmpDir, "config.toml");
+    fs.writeFileSync(filePath, "not a directory\n");
+    try {
+      const missing = missingCredentialMounts(codexBackend, {
+        CODEX_HOME: filePath,
+      });
+      expect(missing).toHaveLength(1);
+      expect(missing[0].hostPath).toBe(filePath);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("accepts readable credential directories", () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "march-codex-home-"));
+    try {
+      expect(
+        missingCredentialMounts(codexBackend, {
+          CODEX_HOME: tmpDir,
+        }),
+      ).toEqual([]);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
   });
 });

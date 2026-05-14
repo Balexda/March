@@ -153,6 +153,17 @@ export function missingCredentialMounts(
   env: NodeJS.ProcessEnv = process.env,
 ): readonly BackendCredentialMount[] {
   return resolveCredentialMounts(backend, env).filter(
-    (mount) => !fs.existsSync(mount.hostPath),
+    (mount) => !isReadableDirectory(mount.hostPath),
   );
+}
+
+function isReadableDirectory(hostPath: string): boolean {
+  try {
+    const stat = fs.statSync(hostPath);
+    if (!stat.isDirectory()) return false;
+    fs.accessSync(hostPath, fs.constants.R_OK);
+    return true;
+  } catch {
+    return false;
+  }
 }

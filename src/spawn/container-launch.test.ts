@@ -4,7 +4,7 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
  * Tests for the container-launch module.
  *
  * The unit test surface uses `vi.mock` to stub `node:child_process` at the
- * `execFileSync` boundary so the docker run / docker rm helpers can be
+ * `execFileSync` boundary so the docker create / docker rm helpers can be
  * asserted without requiring a running Docker daemon. Mirrors the testing
  * approach used by `snapshot-build.test.ts`.
  */
@@ -110,7 +110,7 @@ describe("container-launch", () => {
       const capDropArgs = argList.filter((a) => a.startsWith("--cap-drop"));
       // One combined-form `--cap-drop=<cap>` entry per SPAWN_CONFIG entry,
       // and nothing else. Locks the derivation so a future cap addition
-      // in SPAWN_CONFIG.capDrop is automatically surfaced to docker run.
+      // in SPAWN_CONFIG.capDrop is automatically surfaced to docker create.
       expect(capDropArgs).toEqual(
         SPAWN_CONFIG.capDrop.map((cap) => `--cap-drop=${cap}`),
       );
@@ -136,7 +136,7 @@ describe("container-launch", () => {
       }
     });
 
-    it("returns the trimmed container ID from `docker run -d` stdout", () => {
+    it("returns the trimmed container ID from `docker create` stdout", () => {
       const fakeId = "abc123def456789012345678";
       childProcessMock.execFileSync.mockReturnValueOnce(
         Buffer.from(`${fakeId}\n`),
@@ -181,7 +181,7 @@ describe("container-launch", () => {
         stderr: Buffer.from(stderrText),
         status: 1,
       });
-      // First call: docker run fails. Second call: cleanup `docker rm -f`
+      // First call: docker create fails. Second call: cleanup `docker rm -f`
       // succeeds (no-op).
       childProcessMock.execFileSync
         .mockImplementationOnce(() => {
@@ -319,7 +319,31 @@ describe("container-launch", () => {
       expect(childProcessMock.execFileSync).toHaveBeenCalledWith(
         "docker",
         ["wait", "container-id"],
-        expect.objectContaining({ stdio: ["ignore", "pipe", "pipe"] }),
+        expect.objectContaining({
+          stdio: ["ignore", "pipe", "pipe"],
+          timeout: SPAWN_CONFIG.timeoutSeconds * 1000,
+        }),
+      );
+    });
+
+    it("removes the container and throws if docker wait exceeds the configured timeout", () => {
+      const timeoutErr = Object.assign(new Error("spawnSync docker ETIMEDOUT"), {
+        code: "ETIMEDOUT",
+        killed: true,
+        signal: "SIGTERM",
+      });
+      childProcessMock.execFileSync
+        .mockImplementationOnce(() => {
+          throw timeoutErr;
+        })
+        .mockReturnValueOnce(Buffer.from(""));
+
+      expect(() => waitForSpawnContainer("container-id")).toThrow(LaunchError);
+      expect(childProcessMock.execFileSync).toHaveBeenNthCalledWith(
+        2,
+        "docker",
+        ["rm", "-f", "container-id"],
+        expect.objectContaining({ stdio: ["ignore", "ignore", "pipe"] }),
       );
     });
 

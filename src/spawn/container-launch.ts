@@ -10,7 +10,7 @@ import { SPAWN_CONFIG } from "../hatchery/spawn-config.js";
 import { spawnImageTag } from "./snapshot-build.js";
 
 /**
- * Error thrown by docker run / container-management operations in the
+ * Error thrown by docker create/start/wait/logs operations in the
  * launch pipeline. Distinct from {@link import("./snapshot-build.js").BuildError}
  * (image build) so callers can distinguish "image build failed" from
  * "container failed to start" without string-matching.
@@ -113,8 +113,8 @@ export interface WaitForSpawnContainerResult {
  * ```
  *
  * `SPAWN_CONFIG.timeoutSeconds` is intentionally NOT emitted at this
- * stage — Stage 6 (Wait) enforces the timeout per the Dispatch Pipeline
- * contract; Story 7 owns that enforcement.
+ * stage — `waitForSpawnContainer` enforces the timeout per the Dispatch
+ * Pipeline contract.
  *
  * Required env-vars are passed via `-e VAR` passthrough (Docker reads the
  * value from the operator's environment), not `-e VAR=<inlined>`. Credential
@@ -143,7 +143,7 @@ export function createSpawnContainer(input: LaunchSpawnContainerInput): string {
 
   // Cap-drop flags derived from SPAWN_CONFIG.capDrop so the constant is
   // the single auditable source of truth for what's surfaced to docker
-  // run. Combined `--cap-drop=<cap>` form matches the contracts' template.
+  // create. Combined `--cap-drop=<cap>` form matches the contracts' template.
   const capDropFlags = SPAWN_CONFIG.capDrop.map((cap) => `--cap-drop=${cap}`);
 
   const envFlags: string[] = [];
@@ -196,7 +196,7 @@ export function createSpawnContainer(input: LaunchSpawnContainerInput): string {
   } catch (err) {
     const tail = stderrTail((err as { stderr?: unknown }).stderr);
     // Best-effort cleanup of any partially started container. If docker
-    // never created the container (e.g. the run failed during flag
+    // never created the container (e.g. create failed during flag
     // validation), `docker rm -f` will exit non-zero — `removeSpawnContainer`
     // swallows that, so this never re-throws over the original error.
     try {
@@ -266,8 +266,15 @@ export function waitForSpawnContainer(
     stdout = execFileSync("docker", ["wait", containerId], {
       stdio: ["ignore", "pipe", "pipe"],
       maxBuffer: DOCKER_OUTPUT_MAX_BUFFER,
+      timeout: SPAWN_CONFIG.timeoutSeconds * 1000,
     });
   } catch (err) {
+    if (isExecTimeout(err)) {
+      forceRemoveContainer(containerId);
+      throw new LaunchError(
+        `docker wait timed out for "${containerId}" after ${SPAWN_CONFIG.timeoutSeconds}s; container was removed`,
+      );
+    }
     const tail = stderrTail((err as { stderr?: unknown }).stderr);
     throw new LaunchError(
       tail.length > 0
@@ -284,6 +291,32 @@ export function waitForSpawnContainer(
     );
   }
   return { exitCode: Number.parseInt(trimmed, 10) };
+}
+
+function isExecTimeout(err: unknown): boolean {
+  const e = err as {
+    code?: unknown;
+    errno?: unknown;
+    killed?: unknown;
+    signal?: unknown;
+  };
+  return (
+    e.code === "ETIMEDOUT" ||
+    e.errno === "ETIMEDOUT" ||
+    e.killed === true ||
+    e.signal === "SIGTERM"
+  );
+}
+
+function forceRemoveContainer(containerId: string): void {
+  try {
+    execFileSync("docker", ["rm", "-f", containerId], {
+      stdio: ["ignore", "ignore", "pipe"],
+      maxBuffer: DOCKER_OUTPUT_MAX_BUFFER,
+    });
+  } catch {
+    // Best-effort timeout cleanup; the timeout error remains the useful signal.
+  }
 }
 
 export function readSpawnContainerLogs(containerId: string): string {

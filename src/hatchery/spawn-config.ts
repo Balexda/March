@@ -1,8 +1,8 @@
 /**
  * Centralised spawn-time configuration constants shared across the dispatch
  * pipeline. Modules from later stages (snapshot build, container launch)
- * import the base image tag and {@link SPAWN_CONFIG} from here so future
- * Feature 3 / Feature 4 refactors only need to change a single location.
+ * import {@link SPAWN_CONFIG} from here so future Feature 3 / Feature 4
+ * refactors only need to change a single location.
  *
  * Scope of this module:
  * - {@link SpawnConfig} / {@link SPAWN_CONFIG} — the hardcoded container
@@ -10,7 +10,7 @@
  *   6 (Wait). This is the single auditable source of truth: every value
  *   defined here is surfaced to the dispatch pipeline at the stage that
  *   owns it. Stage 4 surfaces `capDrop`, `user`, `memoryLimit`,
- *   `cpuLimit`, and `networkMode` as `docker run` flags.
+ *   `cpuLimit`, and `networkMode` as `docker create` flags.
  *   Stage 6 (owned by Story 7) enforces `timeoutSeconds` against the
  *   running container's wall clock.
  *
@@ -26,7 +26,6 @@
  * Appendix A threat model.
  */
 
-/**
 /** Default base image retained for direct Dockerfile helper calls. */
 export const BASE_IMAGE = "march-spawn-claude:latest";
 
@@ -76,7 +75,7 @@ export interface SpawnConfig {
  *   `--cpus`; hardcoded resource ceilings sized for typical Claude Code
  *   sessions (AS 5.3).
  * - `timeoutSeconds: 3600` — Stage 6 (Wait) enforces this against the
- *   running container's wall clock; Story 7 owns the enforcement.
+ *   running container's wall clock.
  */
 export const SPAWN_CONFIG: SpawnConfig = {
   capDrop: ["ALL"],

@@ -407,7 +407,7 @@ program
       const missingMounts = missingCredentialMounts(selectedBackend);
       if (missingMounts.length > 0) {
         process.stderr.write(
-          `Backend "${selectedBackend.name}" requires credential path(s): ${missingMounts.map((mount) => mount.hostPath).join(", ")}. Configure the credential path(s) and re-run.\n`,
+          `Backend "${selectedBackend.name}" requires readable credential directories: ${missingMounts.map((mount) => mount.hostPath).join(", ")}. Configure the credential path(s) and re-run.\n`,
         );
         process.exitCode = USAGE_ERROR;
         return;
