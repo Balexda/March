@@ -640,7 +640,8 @@ function processorMetaFor(input: {
       input.processorConductorDir,
       "processor-requests.ndjson",
     ),
-    mode: "observe-and-log",
+    legate_conductor_dir: input.legateConductorDir,
+    mode: "terminal-pr-maintenance",
   };
 }
 
@@ -673,12 +674,81 @@ function appendText(file, text) {
   console.log(text);
 }
 
+function printText(text) {
+  console.log(text);
+}
+
 function readJsonIfPresent(file) {
   try {
     return JSON.parse(fs.readFileSync(file, "utf-8"));
   } catch (err) {
     if (err && err.code === "ENOENT") return null;
     throw err;
+  }
+}
+
+function writeJson(file, value) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify(value, null, 2) + "\\n", "utf-8");
+}
+
+function execText(command, args, options = {}) {
+  return execFileSync(command, args, {
+    encoding: "utf-8",
+    stdio: ["ignore", "pipe", "pipe"],
+    ...options,
+  });
+}
+
+function formatCleanupLine(event, prefix = "") {
+  return \`[\${event.ts}] \${prefix}cleaned up \${event.slice_id} PR #\${event.pr_number} \${event.pr_state}: removed session \${event.session_id}, pruned worktree\`;
+}
+
+function formatCleanupFailureLine(event, prefix = "") {
+  return \`[\${event.ts}] \${prefix}cleanup failed \${event.slice_id || "unknown"}\${event.pr_state ? " PR " + event.pr_state : ""}: \${event.error}\`;
+}
+
+function formatBabysitActionLine(event, prefix = "") {
+  return \`[\${event.ts}] \${prefix}babysit \${event.action} \${event.slice_id} PR #\${event.pr_number}: \${event.detail}\`;
+}
+
+function formatProcessorRequestLine(event, prefix = "") {
+  return \`[\${event.ts}] \${prefix}requested legate judgement for \${event.slice_id || "unknown"}\${event.pr_number ? " PR #" + event.pr_number : ""}: \${event.reason}\`;
+}
+
+function replayRecentActionEvents(limit = 10) {
+  let raw;
+  try {
+    raw = fs.readFileSync(meta.processor_events_path, "utf-8");
+  } catch (err) {
+    if (err && err.code === "ENOENT") return;
+    throw err;
+  }
+  const events = raw
+    .trim()
+    .split("\\n")
+    .filter(Boolean)
+    .map((line) => {
+      try {
+        return JSON.parse(line);
+      } catch {
+        return null;
+      }
+    })
+    .filter((event) => event?.kind === "cleanup" || event?.kind === "cleanup_failure" || event?.kind === "babysit_action" || event?.kind === "processor_request")
+    .slice(-limit);
+  if (events.length === 0) return;
+  printText(\`[\${now()}] replaying \${events.length} recent processor action event(s) to stdout\`);
+  for (const event of events) {
+    if (event.kind === "cleanup") {
+      printText(formatCleanupLine(event, "recent action: "));
+    } else if (event.kind === "cleanup_failure") {
+      printText(formatCleanupFailureLine(event, "recent action: "));
+    } else if (event.kind === "babysit_action") {
+      printText(formatBabysitActionLine(event, "recent action: "));
+    } else {
+      printText(formatProcessorRequestLine(event, "recent action: "));
+    }
   }
 }
 
@@ -695,19 +765,658 @@ function agentDeckList() {
   }
 }
 
+function sessionGroup(session) {
+  return session.group || session.group_path || "";
+}
+
+function isWorkerSession(session) {
+  const group = sessionGroup(session);
+  return group === meta.worker_group || group.startsWith(meta.worker_group + "/");
+}
+
+function sessionMatchesSlice(session, slice) {
+  const sessionId = String(slice.worker_session_id || "");
+  if (!sessionId) return false;
+  return session.id === sessionId || session.title === sessionId || session.name === sessionId;
+}
+
 function summarizeWorkers(list) {
   if (!Array.isArray(list)) return { error: list.error || "unavailable" };
   const buckets = { waiting: 0, running: 0, idle: 0, error: 0, stopped: 0, other: 0 };
   for (const session of list) {
-    const group = session.group || "";
-    if (group !== meta.worker_group && !group.startsWith(meta.worker_group + "/")) {
-      continue;
-    }
+    if (!isWorkerSession(session)) continue;
     const status = session.status || "other";
     if (Object.prototype.hasOwnProperty.call(buckets, status)) buckets[status] += 1;
     else buckets.other += 1;
   }
   return buckets;
+}
+
+function workerBySessionId(list) {
+  const out = new Map();
+  if (!Array.isArray(list)) return out;
+  for (const session of list) {
+    if (!isWorkerSession(session)) continue;
+    if (session.id) out.set(String(session.id), session);
+    if (session.title) out.set(String(session.title), session);
+    if (session.name) out.set(String(session.name), session);
+  }
+  return out;
+}
+
+function prNumber(slice) {
+  const n = slice?.pr?.number;
+  if (typeof n === "number" && Number.isInteger(n) && n > 0) return String(n);
+  if (typeof n === "string" && /^[0-9]+$/.test(n)) return n;
+  return null;
+}
+
+function repoOwner(state) {
+  const owner = state?.repo?.owner_with_name;
+  if (typeof owner === "string" && owner.length > 0) return owner;
+  const repoPath = state?.repo?.path || meta.repo?.path;
+  if (typeof repoPath !== "string" || repoPath.length === 0) return null;
+  try {
+    const out = execText("gh", ["repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"], {
+      cwd: repoPath,
+    });
+    return out.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+function ghPrArgs(slice, state, fields) {
+  const number = prNumber(slice);
+  if (!number) return { skipped: true, reason: "missing_pr_number" };
+  const args = ["pr", "view", number, "--json", fields];
+  const owner = repoOwner(state);
+  if (typeof owner === "string" && owner.length > 0) {
+    args.push("-R", owner);
+  }
+  const options = {
+  };
+  const repoPath = state?.repo?.path || meta.repo?.path;
+  if (!owner && typeof repoPath === "string" && repoPath.length > 0) {
+    options.cwd = repoPath;
+  }
+  return { args, options, owner, number };
+}
+
+function queryPr(slice, state) {
+  const request = ghPrArgs(slice, state, "number,url,state");
+  if (request.skipped) return request;
+  const out = execText("gh", request.args, request.options);
+  return JSON.parse(out);
+}
+
+function checksSummary(statusCheckRollup) {
+  const checks = Array.isArray(statusCheckRollup) ? statusCheckRollup : [];
+  if (checks.length === 0) return "NONE";
+  if (checks.some((check) => ["FAILURE", "TIMED_OUT", "ACTION_REQUIRED", "CANCELLED"].includes(check.conclusion))) {
+    return "FAIL";
+  }
+  if (checks.some((check) => ["IN_PROGRESS", "QUEUED", "PENDING"].includes(check.status))) {
+    return "PENDING";
+  }
+  return "PASS";
+}
+
+function failedChecks(statusCheckRollup) {
+  const checks = Array.isArray(statusCheckRollup) ? statusCheckRollup : [];
+  return checks
+    .filter((check) => ["FAILURE", "TIMED_OUT", "ACTION_REQUIRED", "CANCELLED"].includes(check.conclusion))
+    .map((check) => ({
+      name: check.name || check.context || "unknown",
+      url: check.detailsUrl || check.targetUrl || null,
+    }));
+}
+
+function queryReviewThreads(owner, prNumberValue) {
+  if (!owner) return [];
+  const [repoOwnerName, repoName] = owner.split("/");
+  if (!repoOwnerName || !repoName) return [];
+  const out = execText("gh", [
+    "api",
+    "graphql",
+    "-F",
+    \`owner=\${repoOwnerName}\`,
+    "-F",
+    \`name=\${repoName}\`,
+    "-F",
+    \`pr=\${prNumberValue}\`,
+    "-f",
+    \`query=query($owner: String!, $name: String!, $pr: Int!) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $pr) {
+      reviewThreads(first: 100) {
+        nodes {
+          isResolved
+          comments(first: 50) {
+            nodes {
+              databaseId
+              body
+              path
+              line
+              author { login }
+              createdAt
+            }
+          }
+        }
+      }
+    }
+  }
+}\`,
+  ]);
+  const parsed = JSON.parse(out);
+  const nodes = parsed?.data?.repository?.pullRequest?.reviewThreads?.nodes || [];
+  return nodes
+    .filter((thread) => thread && thread.isResolved === false)
+    .map((thread) => {
+      const comments = Array.isArray(thread.comments?.nodes)
+        ? [...thread.comments.nodes].sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)))
+        : [];
+      const first = comments[0] || {};
+      const last = comments[comments.length - 1] || first;
+      return {
+        id: first.databaseId,
+        path: first.path,
+        line: first.line,
+        author: first.author?.login,
+        body_preview: String(first.body || "").slice(0, 140),
+        last_author: last.author?.login,
+        last_comment_at: last.createdAt,
+        comment_count: comments.length,
+      };
+    });
+}
+
+function queryPrForBabysit(slice, state) {
+  const request = ghPrArgs(
+    slice,
+    state,
+    "number,url,state,mergeable,reviewDecision,statusCheckRollup,headRefName,title,author",
+  );
+  if (request.skipped) return request;
+  const summary = JSON.parse(execText("gh", request.args, request.options));
+  const threads = queryReviewThreads(request.owner || repoOwner(state), summary.number);
+  const prAuthor = summary.author?.login || "";
+  const annotated = threads.map((thread) => ({
+    ...thread,
+    needs_response: thread.last_author !== prAuthor,
+  }));
+  return {
+    number: summary.number,
+    url: summary.url,
+    state: summary.state,
+    mergeable: summary.mergeable,
+    head_branch: summary.headRefName,
+    title: summary.title,
+    review_decision: summary.reviewDecision,
+    checks: checksSummary(summary.statusCheckRollup),
+    failed_checks: failedChecks(summary.statusCheckRollup),
+    unresolved_threads: annotated,
+    thread_count: annotated.length,
+    needs_response_count: annotated.filter((thread) => thread.needs_response).length,
+  };
+}
+
+function removeDispatchMessage(sliceId) {
+  const base = meta.legate_conductor_dir;
+  if (typeof base !== "string" || base.length === 0) return false;
+  const target = path.join(base, \`dispatch-msg-\${sliceId}.md\`);
+  try {
+    fs.rmSync(target, { force: true });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function removeWorkerSession(sessionId) {
+  try {
+    execFileSync(
+      "agent-deck",
+      ["-p", meta.profile, "session", "remove", sessionId, "--prune-worktree", "--force"],
+      { encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"] },
+    );
+    return { removed: true };
+  } catch (err) {
+    const output = [err?.stdout, err?.stderr, err?.message].filter(Boolean).join("\\n");
+    if (/session [^\\s]+ not found|no such session|session [^\\s]+ does not exist/i.test(output)) {
+      return { removed: false, reason: "session_not_found" };
+    }
+    return { error: output || String(err) };
+  }
+}
+
+function archiveSlice(state, sliceId, slice, pr, terminalState, ts) {
+  const archived = state.archived_slices && typeof state.archived_slices === "object"
+    ? state.archived_slices
+    : {};
+  state.archived_slices = archived;
+  const archivedSlice = {
+    pr_number: pr.number ?? slice?.pr?.number ?? null,
+    pr_url: pr.url ?? slice?.pr?.url ?? null,
+    worker_title: slice.worker_title ?? null,
+    terminal_state: terminalState,
+  };
+  if (terminalState === "MERGED") archivedSlice.merged_at = ts;
+  if (terminalState === "CLOSED") archivedSlice.closed_at = ts;
+  archived[sliceId] = archivedSlice;
+  delete state.slices[sliceId];
+}
+
+function cleanupTerminalPrs(state, workerList, ts) {
+  const cleanups = [];
+  const failures = [];
+  const slices = state?.slices && typeof state.slices === "object" ? state.slices : {};
+  if (!state || !Array.isArray(workerList)) return { cleanups, failures };
+  const workers = workerList.filter(isWorkerSession);
+  let mutated = false;
+
+  for (const [sliceId, slice] of Object.entries(slices)) {
+    if (!slice || typeof slice !== "object") continue;
+    const sessionId = String(slice.worker_session_id || "");
+    if (!sessionId) continue;
+    if (!workers.some((session) => sessionMatchesSlice(session, slice))) continue;
+
+    let pr;
+    try {
+      pr = queryPr(slice, state);
+    } catch (err) {
+      failures.push({ slice_id: sliceId, session_id: sessionId, error: err?.message || String(err) });
+      continue;
+    }
+    if (pr?.skipped) continue;
+    const terminalState = pr?.state;
+    if (terminalState !== "MERGED" && terminalState !== "CLOSED") continue;
+
+    removeDispatchMessage(sliceId);
+    const removal = removeWorkerSession(sessionId);
+    if (removal.error) {
+      failures.push({
+        slice_id: sliceId,
+        session_id: sessionId,
+        pr_number: pr.number ?? slice?.pr?.number ?? null,
+        pr_state: terminalState,
+        error: removal.error,
+      });
+      continue;
+    }
+
+    archiveSlice(state, sliceId, slice, pr, terminalState, ts);
+    mutated = true;
+    const cleanup = {
+      schema_version: 1,
+      ts,
+      processor: meta.processor_name,
+      paired_legate: meta.paired_legate,
+      kind: "cleanup",
+      slice_id: sliceId,
+      session_id: sessionId,
+      pr_number: pr.number ?? slice?.pr?.number ?? null,
+      pr_url: pr.url ?? slice?.pr?.url ?? null,
+      pr_state: terminalState,
+      removed: removal.removed,
+      reason: removal.reason ?? null,
+    };
+    cleanups.push(cleanup);
+  }
+
+  if (mutated) writeJson(meta.legate_state_path, state);
+  return { cleanups, failures };
+}
+
+function actionKey(action, pr, extra = "") {
+  const head = pr?.head_branch || "";
+  return [action, pr?.number || "", pr?.state || "", pr?.mergeable || "", pr?.checks || "", head, extra].join(":");
+}
+
+function markSliceAction(slice, action, key, note, ts) {
+  slice.last_processor_action = action;
+  slice.last_processor_action_key = key;
+  slice.last_processor_action_at = ts;
+  slice.last_action = ts;
+  slice.last_action_note = note;
+}
+
+function alreadyDispatched(slice, key) {
+  return slice.last_processor_action_key === key;
+}
+
+function sendAgentDeckMessage(sessionId, message, wait = false) {
+  const args = ["-p", meta.profile, "session", "send", sessionId, message, "-q"];
+  if (wait) {
+    args.push("--wait", "--timeout", "600s");
+  } else {
+    args.push("--no-wait");
+  }
+  return execText("agent-deck", args);
+}
+
+function restartWorker(sessionId) {
+  return execText("agent-deck", ["-p", meta.profile, "session", "restart", sessionId]);
+}
+
+function sendDoorbellToLegate() {
+  try {
+    execText("agent-deck", [
+      "-p",
+      meta.profile,
+      "session",
+      "send",
+      \`conductor-\${meta.paired_legate}\`,
+      "[PROCESSOR]",
+      "--no-wait",
+      "-q",
+    ]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function requestLegateJudgement(input) {
+  if (input.slice && input.requestKey && input.slice.last_processor_request_key === input.requestKey) {
+    return null;
+  }
+  const event = {
+    schema_version: 1,
+    ts: input.ts,
+    processor: meta.processor_name,
+    paired_legate: meta.paired_legate,
+    kind: "processor_request",
+    slice_id: input.sliceId,
+    session_id: input.sessionId || null,
+    pr_number: input.pr?.number ?? input.prNumber ?? null,
+    reason: input.reason,
+    detail: input.detail,
+  };
+  append(meta.processor_requests_path, event);
+  append(meta.processor_events_path, event);
+  const delivered = sendDoorbellToLegate();
+  appendText(meta.processor_log_path, \`\${formatProcessorRequestLine(event)}\${delivered ? "" : " (doorbell delivery failed)"}\`);
+  if (input.slice && input.requestKey) {
+    input.slice.last_processor_request_key = input.requestKey;
+    input.slice.last_processor_request_at = input.ts;
+  }
+  return event;
+}
+
+function updatePrSnapshot(slice, pr) {
+  slice.pr = {
+    number: pr.number,
+    url: pr.url,
+    state: pr.state,
+    checks: pr.checks,
+    mergeable: pr.mergeable,
+  };
+  if (pr.head_branch) slice.actual_branch = pr.head_branch;
+  slice.thread_count = pr.thread_count;
+  slice.needs_response_count = pr.needs_response_count;
+  slice.unresolved_threads = pr.unresolved_threads;
+}
+
+function threadsNeedingResponse(slice, pr) {
+  const openAt = slice.pr_open_at ? Date.parse(slice.pr_open_at) : NaN;
+  return (pr.unresolved_threads || []).filter((thread) => {
+    if (thread.needs_response) return true;
+    if (slice.stage !== "pr-open" && slice.stage) return false;
+    if (!Number.isFinite(openAt)) return true;
+    const last = Date.parse(thread.last_comment_at || "");
+    return Number.isFinite(last) && last > openAt;
+  });
+}
+
+function failedChecksSummary(pr) {
+  const failed = pr.failed_checks || [];
+  if (failed.length === 0) return "No failed-check details were available.";
+  return failed
+    .map((check) => \`- \${check.name}\${check.url ? ": " + check.url : ""}\`)
+    .join("\\n");
+}
+
+function reviewThreadsSummary(threads) {
+  return threads
+    .map((thread) => \`- \${thread.path || "unknown path"}\${thread.line ? ":" + thread.line : ""} by \${thread.last_author || thread.author || "unknown"}: \${thread.body_preview || ""}\`)
+    .join("\\n");
+}
+
+function conflictMessage(slice, pr, state) {
+  const defaultBranch = state?.repo?.default_branch || "main";
+  const worktree = slice.worktree_path || "<worker worktree>";
+  return \`/smithy.fix
+
+PR #\${pr.number} is blocked from merging: GitHub reports mergeable=CONFLICTING against origin/\${defaultBranch}.
+
+Please rebase onto the latest default and resolve the conflicts:
+
+  cd "\${worktree}"
+  git fetch origin
+  git rebase origin/\${defaultBranch}
+
+Resolve conflicted files by preserving both the latest default-branch intent and this slice's spec/contracts intent. Then:
+
+  git add <resolved-paths>
+  git rebase --continue
+  git push --force-with-lease
+
+Reply with the new HEAD sha when the push completes. If the conflict reflects a genuine design disagreement, abort the rebase and summarize the conflicting paths and disagreement.\`;
+}
+
+function ciFixMessage(pr) {
+  return \`/smithy.fix
+
+CI failed on PR #\${pr.number}. Please inspect and fix the failing checks, then push to the same PR branch.
+
+Failed checks:
+\${failedChecksSummary(pr)}\`;
+}
+
+function reviewFixMessage(pr, threads) {
+  return \`/smithy.fix
+
+Unresolved review threads on PR #\${pr.number} need a response. Please address them in the same PR branch and push the fix.
+
+Threads:
+\${reviewThreadsSummary(threads)}\`;
+}
+
+function discoverPrForSlice(slice, state, sessionId) {
+  const repoPath = state?.repo?.path || meta.repo?.path;
+  if (!repoPath) return null;
+  try {
+    const output = execText("agent-deck", ["-p", meta.profile, "session", "output", sessionId, "-q"]);
+    const matches = output.match(/https:\\/\\/github\\.com\\/[^\\s/]+\\/[^\\s/]+\\/pull\\/([0-9]+)/g) || [];
+    if (matches.length > 0) {
+      const url = matches[matches.length - 1];
+      const number = url.split("/").pop();
+      const pr = queryPrForBabysit({ pr: { number } }, state);
+      return pr?.skipped ? null : pr;
+    }
+  } catch {
+    // fall through to branch-based lookup
+  }
+  const branch = slice.actual_branch || slice.branch;
+  if (!branch) return null;
+  try {
+    const owner = repoOwner(state);
+    const args = ["pr", "list", "--state", "open", "--head", branch, "--json", "number,url,state,mergeable,headRefName,title,statusCheckRollup"];
+    if (owner) args.push("-R", owner);
+    const options = owner ? {} : { cwd: repoPath };
+    const list = JSON.parse(execText("gh", args, options));
+    if (!Array.isArray(list) || list.length === 0) return null;
+    return queryPrForBabysit({ pr: { number: list[0].number } }, state);
+  } catch {
+    return null;
+  }
+}
+
+function runBabysit(state, workerList, ts) {
+  const actions = [];
+  const failures = [];
+  const requests = [];
+  const slices = state?.slices && typeof state.slices === "object" ? state.slices : {};
+  if (!state || !Array.isArray(workerList)) return { actions, failures, requests, mutated: false };
+  const workers = workerBySessionId(workerList);
+  let mutated = false;
+
+  for (const [sliceId, slice] of Object.entries(slices)) {
+    if (!slice || typeof slice !== "object") continue;
+    if (slice.resume_pending === "selected") continue;
+    const sessionId = String(slice.worker_session_id || "");
+    if (!sessionId) continue;
+    const worker = workers.get(sessionId);
+    if (!worker) continue;
+    const workerStatus = worker.status || "other";
+
+    if (workerStatus === "error") {
+      const key = actionKey("restart-worker", slice.pr || {}, sessionId);
+      if (!alreadyDispatched(slice, key)) {
+        try {
+          restartWorker(sessionId);
+          markSliceAction(slice, "restart-worker", key, "processor restarted errored worker", ts);
+          mutated = true;
+          actions.push({ action: "restart-worker", sliceId, sessionId, pr: slice.pr || {}, detail: "restarted errored worker" });
+        } catch (err) {
+          failures.push({ slice_id: sliceId, session_id: sessionId, error: err?.message || String(err) });
+        }
+      }
+      continue;
+    }
+
+    if (workerStatus === "running") continue;
+
+    let pr = null;
+    if (!slice.pr && slice.stage === "implementing" && (workerStatus === "waiting" || workerStatus === "idle")) {
+      pr = discoverPrForSlice(slice, state, sessionId);
+      if (pr) {
+        updatePrSnapshot(slice, pr);
+        slice.stage = "pr-open";
+        slice.pr_open_at = ts;
+        markSliceAction(slice, "discover-pr", actionKey("discover-pr", pr), "processor discovered PR", ts);
+        mutated = true;
+        actions.push({ action: "discover-pr", sliceId, sessionId, pr, detail: "discovered worker PR" });
+      }
+    }
+
+    if (!pr) {
+      if (!slice.pr) continue;
+      try {
+        pr = queryPrForBabysit(slice, state);
+      } catch (err) {
+        const request = requestLegateJudgement({
+          ts,
+          slice,
+          requestKey: actionKey("query-failed", slice.pr || {}, "query"),
+          sliceId,
+          sessionId,
+          prNumber: slice.pr?.number,
+          reason: "processor could not query PR state",
+          detail: err?.message || String(err),
+        });
+        if (request) {
+          requests.push(request);
+          mutated = true;
+        }
+        continue;
+      }
+      if (pr?.skipped) continue;
+      updatePrSnapshot(slice, pr);
+      mutated = true;
+    }
+
+    if (pr.state === "MERGED" || pr.state === "CLOSED") continue;
+    if (pr.state !== "OPEN") {
+      const request = requestLegateJudgement({ ts, slice, requestKey: actionKey("unknown-pr-state", pr), sliceId, sessionId, pr, reason: "unknown PR state", detail: \`state=\${pr.state}\` });
+      if (request) {
+        requests.push(request);
+        mutated = true;
+      }
+      continue;
+    }
+
+    if (pr.mergeable === "CONFLICTING") {
+      if (slice.stage === "pr-resolving-conflicts") continue;
+      const key = actionKey("conflict-fix", pr);
+      if (alreadyDispatched(slice, key)) continue;
+      try {
+        sendAgentDeckMessage(sessionId, conflictMessage(slice, pr, state), false);
+      } catch (err) {
+        const request = requestLegateJudgement({ ts, slice, requestKey: actionKey("conflict-send-failed", pr), sliceId, sessionId, pr, reason: "processor failed to send conflict-resolution prompt", detail: err?.message || String(err) });
+        if (request) {
+          requests.push(request);
+          mutated = true;
+        }
+        continue;
+      }
+      slice.stage = "pr-resolving-conflicts";
+      markSliceAction(slice, "conflict-fix", key, "processor sent conflict-resolution fix", ts);
+      mutated = true;
+      actions.push({ action: "conflict-fix", sliceId, sessionId, pr, detail: "sent conflict-resolution prompt" });
+      continue;
+    }
+
+    const neededThreads = threadsNeedingResponse(slice, pr);
+    if (neededThreads.length > 0) {
+      if (slice.stage === "pr-in-fix") continue;
+      const key = actionKey("review-fix", pr, neededThreads.map((thread) => \`\${thread.id || ""}@\${thread.last_comment_at || ""}\`).join(","));
+      if (alreadyDispatched(slice, key)) continue;
+      try {
+        sendAgentDeckMessage(sessionId, reviewFixMessage(pr, neededThreads), false);
+      } catch (err) {
+        const request = requestLegateJudgement({ ts, slice, requestKey: actionKey("review-send-failed", pr, key), sliceId, sessionId, pr, reason: "processor failed to send review-thread /smithy.fix", detail: err?.message || String(err) });
+        if (request) {
+          requests.push(request);
+          mutated = true;
+        }
+        continue;
+      }
+      slice.stage = "pr-in-fix";
+      markSliceAction(slice, "review-fix", key, "processor sent review-thread /smithy.fix", ts);
+      mutated = true;
+      actions.push({ action: "review-fix", sliceId, sessionId, pr, detail: \`sent /smithy.fix for \${neededThreads.length} review thread(s)\` });
+      continue;
+    }
+
+    if (pr.checks === "FAIL") {
+      if (slice.stage === "pr-in-fix") continue;
+      const key = actionKey("ci-fix", pr, (pr.failed_checks || []).map((check) => \`\${check.name}:\${check.url || ""}\`).join(","));
+      if (alreadyDispatched(slice, key)) continue;
+      try {
+        sendAgentDeckMessage(sessionId, ciFixMessage(pr), false);
+      } catch (err) {
+        const request = requestLegateJudgement({ ts, slice, requestKey: actionKey("ci-send-failed", pr, key), sliceId, sessionId, pr, reason: "processor failed to send CI /smithy.fix", detail: err?.message || String(err) });
+        if (request) {
+          requests.push(request);
+          mutated = true;
+        }
+        continue;
+      }
+      slice.stage = "pr-in-fix";
+      markSliceAction(slice, "ci-fix", key, "processor sent CI-failure /smithy.fix", ts);
+      mutated = true;
+      actions.push({ action: "ci-fix", sliceId, sessionId, pr, detail: "sent /smithy.fix for CI failure" });
+      continue;
+    }
+
+    if ((pr.checks === "PASS" || pr.checks === "NONE") && pr.thread_count === 0 && pr.mergeable !== "CONFLICTING") {
+      if (["pr-in-fix", "pr-resolving-conflicts", "pr-rebasing", "pr-in-rerun", "implementing"].includes(slice.stage)) {
+        slice.stage = "pr-open";
+        slice.pr_open_at = ts;
+        markSliceAction(slice, "pr-open", actionKey("pr-open", pr), "processor observed PR all clear", ts);
+        mutated = true;
+        actions.push({ action: "pr-open", sliceId, sessionId, pr, detail: "observed PR all clear" });
+      }
+      continue;
+    }
+
+    if (pr.checks === "PENDING" || pr.mergeable === "UNKNOWN") continue;
+  }
+
+  if (mutated) writeJson(meta.legate_state_path, state);
+  return { actions, failures, requests, mutated };
 }
 
 function tick() {
@@ -719,7 +1428,16 @@ function tick() {
   } catch (err) {
     stateError = err?.message || String(err);
   }
-  const workers = summarizeWorkers(agentDeckList());
+  const workerList = agentDeckList();
+  const cleanupResult = cleanupTerminalPrs(state, workerList, ts);
+  const babysitWorkerList = cleanupResult.cleanups.length > 0
+    ? agentDeckList()
+    : workerList;
+  const babysitResult = runBabysit(state, babysitWorkerList, ts);
+  const summaryWorkerList = cleanupResult.cleanups.length > 0 || babysitResult.actions.length > 0
+    ? agentDeckList()
+    : workerList;
+  const workers = summarizeWorkers(summaryWorkerList);
   const slices = state?.slices && typeof state.slices === "object" ? state.slices : {};
   const archived = state?.archived_slices && typeof state.archived_slices === "object"
     ? state.archived_slices
@@ -729,17 +1447,69 @@ function tick() {
     ts,
     processor: meta.processor_name,
     paired_legate: meta.paired_legate,
-    mode: "observe-and-log",
+    kind: "heartbeat",
+    mode: "terminal-pr-maintenance",
     state_present: Boolean(state),
     state_error: stateError,
     slice_count: Object.keys(slices).length,
     archived_slice_count: Object.keys(archived).length,
     workers,
+    cleanup_count: cleanupResult.cleanups.length,
+    cleanup_failure_count: cleanupResult.failures.length,
+    babysit_action_count: babysitResult.actions.length,
+    processor_request_count: babysitResult.requests.length,
   };
   append(meta.processor_events_path, record);
+  for (const cleanup of cleanupResult.cleanups) {
+    append(meta.processor_events_path, cleanup);
+    appendText(meta.processor_log_path, formatCleanupLine(cleanup));
+  }
+  for (const failure of cleanupResult.failures) {
+    append(meta.processor_events_path, {
+      schema_version: 1,
+      ts,
+      processor: meta.processor_name,
+      paired_legate: meta.paired_legate,
+      kind: "cleanup_failure",
+      ...failure,
+    });
+    appendText(meta.processor_log_path, formatCleanupFailureLine({ ts, ...failure }));
+  }
+  for (const action of babysitResult.actions) {
+    const event = {
+      schema_version: 1,
+      ts,
+      processor: meta.processor_name,
+      paired_legate: meta.paired_legate,
+      kind: "babysit_action",
+      action: action.action,
+      slice_id: action.sliceId,
+      session_id: action.sessionId,
+      pr_number: action.pr?.number ?? null,
+      pr_url: action.pr?.url ?? null,
+      detail: action.detail,
+    };
+    append(meta.processor_events_path, event);
+    appendText(meta.processor_log_path, formatBabysitActionLine(event));
+  }
+  for (const failure of babysitResult.failures) {
+    const event = {
+      schema_version: 1,
+      ts,
+      processor: meta.processor_name,
+      paired_legate: meta.paired_legate,
+      kind: "babysit_failure",
+      ...failure,
+    };
+    append(meta.processor_events_path, event);
+    appendText(
+      meta.processor_log_path,
+      \`[\${ts}] babysit failed \${failure.slice_id || "unknown"}: \${failure.error}\`,
+    );
+  }
   appendText(
     meta.processor_log_path,
-    \`[\${ts}] observe slice_count=\${record.slice_count} archived=\${record.archived_slice_count} workers=\${JSON.stringify(workers)}\${stateError ? " state_error=" + stateError : ""}\`,
+    \`[\${ts}] heartbeat slice_count=\${record.slice_count} archived=\${record.archived_slice_count} cleanups=\${record.cleanup_count} babysit_actions=\${record.babysit_action_count} processor_requests=\${record.processor_request_count} workers=\${JSON.stringify(workers)}\${stateError ? " state_error=" + stateError : ""}\`,
   );
 }
 
@@ -760,7 +1530,8 @@ function safeTick() {
   }
 }
 
-appendText(meta.processor_log_path, \`[\${now()}] processor starting in observe-and-log mode for \${meta.paired_legate}\`);
+appendText(meta.processor_log_path, \`[\${now()}] processor starting in terminal-pr-maintenance mode for \${meta.paired_legate}\`);
+replayRecentActionEvents();
 safeTick();
 setInterval(safeTick, Math.max(10, intervalSeconds) * 1000);
 `;
@@ -1719,7 +2490,7 @@ export async function initLegate(
     "setup",
     processorName,
     "-description",
-    `Deterministic observe-and-log Legate processor for ${repoName}`,
+    `Deterministic PR maintenance Legate processor for ${repoName}`,
     "-no-heartbeat",
   ];
   const processorTitle = `conductor-${processorName}`;
@@ -2200,10 +2971,10 @@ export async function initLegate(
       : `${LEGATE_SKILLS.join(", ")} staged at ${skillsStagedDir} (copied into conductor on setup)`;
   const processorLine = processorEnabled
     ? processorConfigured
-      ? `${processorName} (observe-and-log shell runtime configured)`
+      ? `${processorName} (terminal PR maintenance shell runtime configured)`
       : runProcessorSetup
         ? `${processorName} staged/configuration incomplete — see warnings`
-        : `${processorName} (observe-and-log deferred — run setup first)`
+        : `${processorName} (terminal PR maintenance deferred — run setup first)`
     : "disabled (--no-processor)";
   const legateStatus = processorOnly
     ? processorConfigured

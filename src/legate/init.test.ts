@@ -287,7 +287,7 @@ describe("legate module", () => {
         "setup",
         "processor-legate-march",
         "-description",
-        "Deterministic observe-and-log Legate processor for March",
+        "Deterministic PR maintenance Legate processor for March",
         "-no-heartbeat",
       ]);
       expect(result.processorSetupRan).toBe(false);
@@ -299,7 +299,26 @@ describe("legate module", () => {
       expect(fs.statSync(loopPath).mode & 0o111).not.toBe(0);
       const loop = fs.readFileSync(loopPath, "utf-8");
       expect(loop).toContain("console.log(text)");
+      expect(loop).toContain("function printText");
+      expect(loop).toContain("function replayRecentActionEvents");
+      expect(loop).toContain("recent processor action event(s) to stdout");
+      expect(loop).toContain("function runBabysit");
+      expect(loop).toContain("function queryPrForBabysit");
+      expect(loop).toContain("function requestLegateJudgement");
+      expect(loop).toContain('"[PROCESSOR]"');
+      expect(loop).toContain("processor_requests_path");
+      expect(loop).toContain("review-fix");
+      expect(loop).toContain("conflict-fix");
+      expect(loop).toContain("ci-fix");
+      expect(loop).toContain("] heartbeat slice_count=");
+      expect(loop).toContain("function formatCleanupLine");
+      expect(loop).toContain("${prefix}cleaned up");
       expect(loop).toContain('list", "-json"');
+      expect(loop).toContain('"session", "remove", sessionId, "--prune-worktree", "--force"');
+      expect(loop).toContain('terminalState !== "MERGED" && terminalState !== "CLOSED"');
+      expect(loop).toContain('reason: "session_not_found"');
+      expect(loop).toContain('terminal_state: terminalState');
+      expect(loop).toContain("function cleanupTerminalPrs");
       expect(loop).toContain("Number.isFinite(rawIntervalSeconds)");
       expect(loop).toContain("function safeTick()");
       expect(fs.existsSync(metaPath)).toBe(true);
@@ -309,13 +328,16 @@ describe("legate module", () => {
       expect(meta.legate_state_path).toBe(
         path.join(home, ".agent-deck", "conductor", "legate-march", "state.json"),
       );
-      expect(meta.mode).toBe("observe-and-log");
+      expect(meta.legate_conductor_dir).toBe(
+        path.join(home, ".agent-deck", "conductor", "legate-march"),
+      );
+      expect(meta.mode).toBe("terminal-pr-maintenance");
 
       const rendered = fs.readFileSync(result.templateOutputPath, "utf-8");
       expect(rendered).toContain("processor=processor-legate-march");
       expect(result.summary).toContain("Processor:");
       expect(result.summary).toContain("processor-legate-march");
-      expect(result.summary).toContain("observe-and-log");
+      expect(result.summary).toContain("terminal PR maintenance");
     });
 
     it("derives the processor name from the selected conductor name", async () => {
