@@ -1,0 +1,197 @@
+---
+name: legate.error
+description: "Mini-legate's opaque worker-error recovery skill. Use when the deterministic processor sends a [PROCESSOR] request with reason=worker_session_error, or when a heartbeat/transition shows a worker in agent-deck error state. This skill inspects the worker, classifies the failure, and chooses a recovery action: login escalation, resume/stage-aware nudge, direct diagnostic query, restart, or NEED."
+allowed-tools: Bash(.claude/skills/legate.error/scripts/inspect-worker-error.sh:*) Bash(.claude/skills/legate.error/scripts/send-error-message.sh:*) Bash(.claude/skills/legate.error/scripts/restart-worker.sh:*)
+---
+
+# Skill: legate.error (opaque worker-error recovery)
+
+This skill owns worker sessions whose state is `error` for `{{REPO_PATH}}`. The deterministic processor may detect those sessions, but recovery is judgement-heavy: it depends on recent terminal output, the slice stage, whether Claude is asking for login, and whether the worker needs a resume nudge, a diagnostic prompt, or a restart. That policy belongs here in the Claude-backed Legate conductor.
+
+Load via `Skill(skill="legate.error")` before invoking any script in this skill. The classifier registers the allowed-tools for the rest of the session.
+
+---
+
+## Triggers
+
+Run this skill when any of these happen:
+
+- The processor sends `[PROCESSOR]` and the newest relevant request in `processor-requests.ndjson` has `reason == "worker_session_error"`.
+- A heartbeat or transition reports a worker in `error`.
+- The operator asks to recover errored workers.
+
+Do **not** run this skill for normal CI failures, merge conflicts, or review comments. Those stay in `legate.babysit`.
+
+---
+
+## Inputs to read
+
+1. `state.json` — find the slice by `slice_id` or `worker_session_id`.
+2. `~/.agent-deck/conductor/{{PROCESSOR_NAME}}/processor-requests.ndjson` — read the latest `worker_session_error` request if the trigger was `[PROCESSOR]`.
+3. `.claude/skills/legate.error/scripts/inspect-worker-error.sh {{PROFILE}} <session-id>` — capture current agent-deck session metadata and recent output.
+
+The processor request already includes a bounded output excerpt. Still run the inspect script before acting; the worker may have changed state since the processor tick.
+
+---
+
+## Classification
+
+Classify the failure into exactly one bucket:
+
+- `auth-required` — recent output contains `Please run /login` or `API Error: 401 Invalid authentication credentials`.
+- `resume-picker` — recent output contains `Resume from summary` or `Resuming the full session`.
+- `stale-status` — agent-deck says `error`, but the output shows a normal waiting prompt or the session is otherwise responsive.
+- `actionable-tool-failure` — output contains a concrete failed command or slash-command failure the worker can respond to.
+- `transient-crash` — the worker process appears crashed/restarted and there is no useful diagnostic text.
+- `unknown` — anything else.
+
+If the bucket is ambiguous, choose `unknown`.
+
+---
+
+## Recovery Actions
+
+### `auth-required`
+
+Do not query the worker repeatedly. Reply to the operator:
+
+```text
+NEED: Claude Code login refresh required. Run /login in the Legate conductor session, then tell me to resume.
+```
+
+Update `state.json` for the slice:
+
+- `worker_error_handled_at = <ISO-8601 now>`
+- `worker_error_resolution = "auth-required"`
+- `last_action = <ISO-8601 now>`
+- `last_action_note = "worker error requires Claude login refresh"`
+
+After the operator confirms login and asks to resume, run `legate.resume` or this skill again to wake affected workers.
+
+### `resume-picker`
+
+Defer to `legate.resume`. Load `legate.resume` and run its normal detect/select protocol for this worker. Do not manually type picker choices from this skill.
+
+Update `worker_error_resolution = "deferred-to-legate.resume"`.
+
+### `stale-status`
+
+Send a short diagnostic query using `send-error-message.sh`:
+
+```markdown
+You were reported in agent-deck error state, but the session appears responsive.
+
+Slice: <slice-id>
+Stage: <stage>
+PR: <pr-url or none>
+
+Please summarize your current state in one paragraph: are you able to continue, are you blocked, or did you already finish the assigned task?
+```
+
+Record `worker_error_resolution = "queried-responsive-worker"`.
+
+### `actionable-tool-failure`
+
+Send a stage-aware continuation prompt using `send-error-message.sh`. Keep it brief and targeted. Use the stage templates below.
+
+Record `worker_error_resolution = "sent-stage-aware-recovery"`.
+
+### `transient-crash`
+
+If this is the first observed crash for this exact `last_processor_request_key`, run:
+
+```bash
+.claude/skills/legate.error/scripts/restart-worker.sh {{PROFILE}} <session-id>
+```
+
+Then record `worker_error_resolution = "restarted-worker"` and rely on `legate.resume` on the next heartbeat to clear any Resume-from-summary picker.
+
+If the same worker errors again after restart, do not restart again; use:
+
+```text
+NEED: Worker <slice-id> is repeatedly entering error state after restart. Manual inspection required.
+```
+
+### `unknown`
+
+Ask the worker for a direct diagnosis if the session is responsive enough for `send-error-message.sh`; otherwise escalate:
+
+```text
+NEED: Worker <slice-id> is in agent-deck error state and Legate cannot classify the failure from recent output.
+```
+
+Record `worker_error_resolution = "unknown-escalated"` or `worker_error_resolution = "queried-unknown-error"`.
+
+---
+
+## Stage-aware recovery prompt tails
+
+Always include this header:
+
+```markdown
+You were reported in agent-deck error state and Legate is attempting recovery.
+
+Slice: <slice-id>
+Stage: <stage>
+Worktree: <worktree_path>
+PR: <pr-url or none>
+
+Before doing anything destructive, run `git status` and re-check the PR/check/review state if a PR exists.
+```
+
+Then append one tail:
+
+- `implementing`:
+  ```markdown
+  Continue the original `/smithy.<verb>` implementation. If a PR already exists for this branch, do not open a duplicate; push any missing commits and report the PR URL.
+  ```
+
+- `pr-in-fix`:
+  ```markdown
+  Continue the in-place `/smithy.fix` for the existing PR. Re-read failed checks and unresolved review threads, amend the same branch, and push.
+  ```
+
+- `pr-resolving-conflicts`:
+  ```markdown
+  Continue conflict resolution for the existing PR. Re-check `git status`; if a rebase is in progress, resolve conflicts and `git rebase --continue`, then `git push --force-with-lease`.
+  ```
+
+- `pr-open`:
+  ```markdown
+  Re-check the PR state, CI, and review threads. If no worker action is needed, reply with a concise status.
+  ```
+
+- Any other stage:
+  ```markdown
+  Reconstruct your current state from the working tree and PR, then report whether you can continue or need operator help.
+  ```
+
+---
+
+## State Updates
+
+After any recovery action, update the slice:
+
+- `worker_error_handled_at`
+- `worker_error_resolution`
+- `last_action`
+- `last_action_note`
+
+Append a short `task-log.md` entry:
+
+```markdown
+## YYYY-MM-DD HH:MM — Worker error recovery
+- <slice-id> (<worker_title>) classified as <bucket>; action=<recovery>.
+```
+
+Reply with one `[STATUS]` line and an `AUTO:` or `NEED:` line.
+
+---
+
+## Operation Reference
+
+| Operation | Script | Notes |
+|---|---|---|
+| Inspect errored worker | `inspect-worker-error.sh <profile> <session-id-or-title>` | Read-only. Prints session metadata and recent output. |
+| Send recovery/diagnostic message | `send-error-message.sh <profile> <session-id-or-title> <message-file>` | Uses file body to avoid inline shell escaping. Waits for reply. |
+| Restart worker | `restart-worker.sh <profile> <session-id-or-title>` | Use only for `transient-crash`, once. |

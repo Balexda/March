@@ -1,7 +1,7 @@
 ---
 name: legate.babysit
 description: "Mini-legate's PR-management skill. Use on every heartbeat (load before any other skill) to scan tracked PRs in state.json, run the decision tree (MERGED → CONFLICTING → FAIL → unresolved threads → all-clear), and dispatch the right action — `/smithy.fix` to the slice's worker, a rebase request, a CI rerun, a worker restart, or a merge transition. Triggers: heartbeat ticks, worker `running → waiting` transitions, operator follow-ups about an open PR. Skip for new-work dispatch (that's `legate.dispatch`)."
-allowed-tools: Bash(.claude/skills/legate.babysit/scripts/babysit-pr.sh:*) Bash(.claude/skills/legate.babysit/scripts/send-to-worker.sh:*) Bash(.claude/skills/legate.babysit/scripts/request-rebase.sh:*) Bash(.claude/skills/legate.babysit/scripts/request-conflict-resolution.sh:*) Bash(.claude/skills/legate.babysit/scripts/rerun-ci.sh:*) Bash(.claude/skills/legate.babysit/scripts/restart-worker.sh:*) Bash(.claude/skills/legate.babysit/scripts/discover-pr.sh:*) Bash(.claude/skills/legate.babysit/scripts/list-workers.sh:*) Bash(.claude/skills/legate.babysit/scripts/recover-stranded-worker.sh:*)
+allowed-tools: Bash(.claude/skills/legate.babysit/scripts/babysit-pr.sh:*) Bash(.claude/skills/legate.babysit/scripts/send-to-worker.sh:*) Bash(.claude/skills/legate.babysit/scripts/request-rebase.sh:*) Bash(.claude/skills/legate.babysit/scripts/request-conflict-resolution.sh:*) Bash(.claude/skills/legate.babysit/scripts/rerun-ci.sh:*) Bash(.claude/skills/legate.babysit/scripts/discover-pr.sh:*) Bash(.claude/skills/legate.babysit/scripts/list-workers.sh:*) Bash(.claude/skills/legate.babysit/scripts/recover-stranded-worker.sh:*)
 ---
 
 # Skill: legate.babysit (existing-PR mechanics)
@@ -163,11 +163,7 @@ Same-PR amendment. Note: `thread_count > 0` with `needs_response_count == 0` mea
 
 #### Worker `status == "error"`
 
-```
-.claude/skills/legate.babysit/scripts/restart-worker.sh {{PROFILE}} <worker_session_id>
-```
-
-Once per worker per heartbeat. If the same worker is `error` again on the next heartbeat, escalate via `NEED:`.
+Stop babysit for that slice and hand it to `legate.error`. Opaque worker failures are not PR-state mechanics: they may be auth prompts, resume pickers, stale agent-deck status, transient crashes, or real tool failures. Load `Skill(skill="legate.error")` and let that skill inspect and choose the recovery action.
 
 #### All clear
 
@@ -190,7 +186,6 @@ Once per worker per heartbeat. If the same worker is `error` again on the next h
 | Request rebase (clean) | `request-rebase.sh <profile> <session-id> <worktree-path>` | Worker's reply (new HEAD sha or conflict description) |
 | Request conflict resolution | `request-conflict-resolution.sh <profile> <session-id> <worktree-path> <default-branch> <pr-num>` | Worker's reply (resolved sha or design-disagreement description) |
 | Re-trigger CI | `rerun-ci.sh <repo> <run-id>` | gh's confirmation line |
-| Restart errored worker | `restart-worker.sh <profile> <session-id>` | agent-deck's confirmation |
 
 All scripts emit JSON or status text to stdout, progress to stderr, and exit 0/1/2 for success/op-failure/invalid-input.
 

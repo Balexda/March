@@ -6,7 +6,7 @@ allowed-tools: Bash(.claude/skills/legate.cleanup/scripts/cleanup-merged-session
 
 # Skill: legate.cleanup (post-merge teardown mechanics)
 
-This skill is the only path that destroys worker sessions and prunes their worktrees. Load it **after** `legate.babysit` and **before** `legate.dispatch` on every heartbeat — its `allowed-tools` need to be active before you bash either of its scripts, and its scope is exactly the merged slices babysit has produced.
+This skill is the Claude-backed path that destroys worker sessions and prunes their worktrees for slices already marked `stage == "merged"`. The paired deterministic processor can also remove live worker sessions whose GitHub PR is terminal (`MERGED` or `CLOSED`) and archive them directly. Load this skill **after** `legate.babysit` and **before** `legate.dispatch` on every heartbeat — its `allowed-tools` need to be active before you bash either of its scripts, and its scope is exactly the merged slices babysit has produced.
 
 Load via `Skill(skill="legate.cleanup")`. The classifier registers the allowed-tools for the rest of the session.
 

@@ -287,7 +287,7 @@ describe("legate module", () => {
         "setup",
         "processor-legate-march",
         "-description",
-        "Deterministic observe-and-log Legate processor for March",
+        "Deterministic PR maintenance Legate processor for March",
         "-no-heartbeat",
       ]);
       expect(result.processorSetupRan).toBe(false);
@@ -299,7 +299,29 @@ describe("legate module", () => {
       expect(fs.statSync(loopPath).mode & 0o111).not.toBe(0);
       const loop = fs.readFileSync(loopPath, "utf-8");
       expect(loop).toContain("console.log(text)");
+      expect(loop).toContain("function printText");
+      expect(loop).toContain("function replayRecentActionEvents");
+      expect(loop).toContain("recent processor action event(s) to stdout");
+      expect(loop).toContain("function runBabysit");
+      expect(loop).toContain("function queryPrForBabysit");
+      expect(loop).toContain("function requestLegateJudgement");
+      expect(loop).toContain('"[PROCESSOR]"');
+      expect(loop).toContain("processor_requests_path");
+      expect(loop).toContain("review-fix");
+      expect(loop).toContain("conflict-fix");
+      expect(loop).toContain("CI failure requires Legate judgement");
+      expect(loop).toContain("worker_session_error");
+      expect(loop).toContain("function workerErrorDetail");
+      expect(loop).toContain("agent-deck error state");
+      expect(loop).toContain("] heartbeat slice_count=");
+      expect(loop).toContain("function formatCleanupLine");
+      expect(loop).toContain("${prefix}cleaned up");
       expect(loop).toContain('list", "-json"');
+      expect(loop).toContain('"session", "remove", sessionId, "--prune-worktree", "--force"');
+      expect(loop).toContain('terminalState !== "MERGED" && terminalState !== "CLOSED"');
+      expect(loop).toContain('reason: "session_not_found"');
+      expect(loop).toContain('terminal_state: terminalState');
+      expect(loop).toContain("function cleanupTerminalPrs");
       expect(loop).toContain("Number.isFinite(rawIntervalSeconds)");
       expect(loop).toContain("function safeTick()");
       expect(fs.existsSync(metaPath)).toBe(true);
@@ -309,13 +331,16 @@ describe("legate module", () => {
       expect(meta.legate_state_path).toBe(
         path.join(home, ".agent-deck", "conductor", "legate-march", "state.json"),
       );
-      expect(meta.mode).toBe("observe-and-log");
+      expect(meta.legate_conductor_dir).toBe(
+        path.join(home, ".agent-deck", "conductor", "legate-march"),
+      );
+      expect(meta.mode).toBe("terminal-pr-maintenance");
 
       const rendered = fs.readFileSync(result.templateOutputPath, "utf-8");
       expect(rendered).toContain("processor=processor-legate-march");
       expect(result.summary).toContain("Processor:");
       expect(result.summary).toContain("processor-legate-march");
-      expect(result.summary).toContain("observe-and-log");
+      expect(result.summary).toContain("terminal PR maintenance");
     });
 
     it("derives the processor name from the selected conductor name", async () => {
@@ -1085,6 +1110,27 @@ describe("legate module", () => {
         expect(fs.statSync(p).mode & 0o111).not.toBe(0);
       }
     });
+
+    it("stages legate.error with its worker-error recovery scripts", async () => {
+      const home = makeTmpDir();
+      const result = await initLegate({
+        repoPath: "/some/repo/March",
+        homeDir: home,
+        runSetup: false,
+      });
+      const skill = result.skills.find((s) => s.name === "legate.error");
+      expect(skill).toBeDefined();
+      const scriptsDir = path.join(skill!.stagedDir, "scripts");
+      for (const name of [
+        "inspect-worker-error.sh",
+        "send-error-message.sh",
+        "restart-worker.sh",
+      ]) {
+        const p = path.join(scriptsDir, name);
+        expect(fs.existsSync(p)).toBe(true);
+        expect(fs.statSync(p).mode & 0o111).not.toBe(0);
+      }
+    });
   });
 
   describe("writeLegateHeartbeatScript", () => {
@@ -1472,11 +1518,15 @@ describe("legate module", () => {
       expect(prompt).toMatch(/Cold start as the Legate for March/);
       // Auto-mode scope statement.
       expect(prompt).toContain("--permission-mode auto");
-      // The three skills must be named so the classifier sees them in
+      // The core skills must be named so the classifier sees them in
       // recent context before the model invokes Skill(legate.*).
+      expect(prompt).toContain("legate.resume");
+      expect(prompt).toContain("legate.error");
       expect(prompt).toContain("legate.babysit");
+      expect(prompt).toContain("legate.merge");
       expect(prompt).toContain("legate.cleanup");
       expect(prompt).toContain("legate.dispatch");
+      expect(prompt).toContain("legate.issue");
       // Defers strict mechanics to CLAUDE.md.
       expect(prompt).toMatch(/CLAUDE\.md is the authoritative spec/);
     });
@@ -1486,7 +1536,7 @@ describe("legate module", () => {
       expect(prompt).toMatch(/On this turn:/);
       expect(prompt).toMatch(/cold-start acknowledgement/);
       expect(prompt).toMatch(
-        /Online for March \(march\)\. Skills available: legate\.babysit, legate\.cleanup, legate\.dispatch\./,
+        /Online for March \(march\)\. Skills available: legate\.resume, legate\.error, legate\.babysit, legate\.merge, legate\.cleanup, legate\.dispatch, legate\.issue\./,
       );
       expect(prompt).toMatch(/Wait for the first \[HEARTBEAT\]/);
     });
