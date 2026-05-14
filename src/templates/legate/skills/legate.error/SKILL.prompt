@@ -1,12 +1,12 @@
 ---
 name: legate.error
-description: "Mini-legate's opaque worker-error recovery skill. Use when the deterministic processor sends a [PROCESSOR] request with reason=worker_session_error, or when a heartbeat/transition shows a worker in agent-deck error state. This skill inspects the worker, classifies the failure, and chooses a recovery action: login escalation, resume/stage-aware nudge, direct diagnostic query, restart, or NEED."
+description: "Mini-legate's opaque worker-error recovery skill. Use when the deterministic loop sends a [PROCESSOR] request with reason=worker_session_error or reason=claude_api_401_login_required, or when a heartbeat/transition shows a worker in agent-deck error state. This skill inspects the worker, classifies the failure, and chooses a recovery action: login escalation, resume/stage-aware nudge, direct diagnostic query, restart, or NEED."
 allowed-tools: Bash(.claude/skills/legate.error/scripts/inspect-worker-error.sh:*) Bash(.claude/skills/legate.error/scripts/send-error-message.sh:*) Bash(.claude/skills/legate.error/scripts/restart-worker.sh:*)
 ---
 
 # Skill: legate.error (opaque worker-error recovery)
 
-This skill owns worker sessions whose state is `error` for `{{REPO_PATH}}`. The deterministic processor may detect those sessions, but recovery is judgement-heavy: it depends on recent terminal output, the slice stage, whether Claude is asking for login, and whether the worker needs a resume nudge, a diagnostic prompt, or a restart. That policy belongs here in the Claude-backed Legate conductor.
+This skill owns worker sessions whose state is `error` or login-blocked for `{{REPO_PATH}}`. The deterministic loop may detect those sessions, but recovery is judgement-heavy: it depends on recent terminal output, the slice stage, whether Claude is asking for login, and whether the worker needs a resume nudge, a diagnostic prompt, or a restart. That policy belongs here in the Claude-backed Legate agent.
 
 Load via `Skill(skill="legate.error")` before invoking any script in this skill. The classifier registers the allowed-tools for the rest of the session.
 
@@ -16,7 +16,7 @@ Load via `Skill(skill="legate.error")` before invoking any script in this skill.
 
 Run this skill when any of these happen:
 
-- The processor sends `[PROCESSOR]` and the newest relevant request in `processor-requests.ndjson` has `reason == "worker_session_error"`.
+- The loop sends `[PROCESSOR]` and the newest relevant request in `legate-loop-requests.ndjson` has `reason == "worker_session_error"` or `reason == "claude_api_401_login_required"`.
 - A heartbeat or transition reports a worker in `error`.
 - The operator asks to recover errored workers.
 
@@ -27,10 +27,10 @@ Do **not** run this skill for normal CI failures, merge conflicts, or review com
 ## Inputs to read
 
 1. `state.json` — find the slice by `slice_id` or `worker_session_id`.
-2. `~/.agent-deck/conductor/{{PROCESSOR_NAME}}/processor-requests.ndjson` — read the latest `worker_session_error` request if the trigger was `[PROCESSOR]`.
+2. `~/.agent-deck/conductor/{{LOOP_NAME}}/legate-loop-requests.ndjson` — read the latest `worker_session_error` or `claude_api_401_login_required` request if the trigger was `[PROCESSOR]`. For older installs, fall back to `~/.agent-deck/conductor/{{PROCESSOR_NAME}}/processor-requests.ndjson`.
 3. `.claude/skills/legate.error/scripts/inspect-worker-error.sh {{PROFILE}} <session-id>` — capture current agent-deck session metadata and recent output.
 
-The processor request already includes a bounded output excerpt. Still run the inspect script before acting; the worker may have changed state since the processor tick.
+The loop request already includes a bounded output excerpt. Still run the inspect script before acting; the worker may have changed state since the loop tick.
 
 ---
 
@@ -63,6 +63,7 @@ Update `state.json` for the slice:
 
 - `worker_error_handled_at = <ISO-8601 now>`
 - `worker_error_resolution = "auth-required"`
+- keep any `login_blocked_*` fields until the deterministic loop re-checks the worker and sends its login-refresh resume prompt
 - `last_action = <ISO-8601 now>`
 - `last_action_note = "worker error requires Claude login refresh"`
 

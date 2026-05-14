@@ -86,9 +86,11 @@ describe("legate-container", () => {
     const home = makeTmpDir();
     const repo = path.join(home, "repo");
     const conductor = path.join(home, ".agent-deck", "conductor", "legate-march");
+    const loop = path.join(home, ".agent-deck", "conductor", "march-legate-loop");
     const ghConfig = path.join(home, ".config", "gh");
     fs.mkdirSync(repo, { recursive: true });
     fs.mkdirSync(conductor, { recursive: true });
+    fs.mkdirSync(loop, { recursive: true });
     fs.mkdirSync(path.join(home, ".march"), { recursive: true });
     fs.mkdirSync(path.join(home, ".claude"), { recursive: true });
     fs.mkdirSync(ghConfig, { recursive: true });
@@ -97,6 +99,7 @@ describe("legate-container", () => {
     const mounts = legateContainerMounts({
       repoPath: repo,
       conductorDir: conductor,
+      loopConductorDir: loop,
       homeDir: home,
       dockerSocketPath: path.join(home, "missing.sock"),
     });
@@ -105,6 +108,7 @@ describe("legate-container", () => {
       expect.arrayContaining([
         { source: repo, target: repo, required: true },
         { source: conductor, target: conductor, required: true },
+        { source: loop, target: loop, required: true },
         { source: path.join(home, ".march"), target: path.join(LEGATE_CONTAINER_HOME, ".march"), required: false },
         { source: path.join(home, ".claude"), target: path.join(LEGATE_CONTAINER_HOME, ".claude"), required: false },
         { source: ghConfig, target: path.join(LEGATE_CONTAINER_HOME, ".config", "gh"), required: false },
@@ -141,14 +145,19 @@ describe("legate-container", () => {
     const home = makeTmpDir();
     const repo = path.join(home, "repo");
     const conductor = path.join(home, ".agent-deck", "conductor", "legate-march");
+    const loop = path.join(home, ".agent-deck", "conductor", "march-legate-loop");
+    const loopScript = path.join(loop, "legate-loop.mjs");
     fs.mkdirSync(repo, { recursive: true });
     fs.mkdirSync(conductor, { recursive: true });
+    fs.mkdirSync(loop, { recursive: true });
 
     const args = buildLegateContainerRunArgs({
       conductorName: "legate-march",
       profile: "march",
       repoPath: repo,
       conductorDir: conductor,
+      loopConductorDir: loop,
+      loopScriptPath: loopScript,
       homeDir: home,
       imageTag: "march-legate:test",
       dockerSocketPath: path.join(home, "missing.sock"),
@@ -163,7 +172,7 @@ describe("legate-container", () => {
       "unless-stopped",
     ]);
     expect(args).toContain("--workdir");
-    expect(args).toContain(conductor);
+    expect(args).toContain(loop);
     expect(args).toContain(`HOME=${LEGATE_CONTAINER_HOME}`);
     expect(args).toContain("MARCH_LEGATE_CONTAINER=1");
     expect(args).toContain("ANTHROPIC_API_KEY");
@@ -173,6 +182,8 @@ describe("legate-container", () => {
     expect(args).toContain("march-legate:test");
     expect(args).toContain("sh");
     expect(args).toContain("-lc");
+    expect(args.at(-1)).toContain("March Legate loop starting");
+    expect(args.at(-1)).toContain(`exec node "${loopScript}"`);
   });
 
   it("builds the image, replaces any existing container, and returns the launched id", () => {

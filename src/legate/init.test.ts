@@ -68,8 +68,9 @@ describe("legate module", () => {
       const defaults = deriveDefaults("/home/user/Development/March");
       expect(defaults.repoName).toBe("March");
       expect(defaults.profile).toBe("march");
-      expect(defaults.conductorName).toBe("legate-march");
-      expect(defaults.processorName).toBe("processor-legate-march");
+      expect(defaults.conductorName).toBe("march-legate-agent");
+      expect(defaults.loopName).toBe("march-legate-loop");
+      expect(defaults.processorName).toBe("march-legate-loop");
       expect(defaults.workerGroup).toBe("legate-workers");
     });
 
@@ -78,17 +79,17 @@ describe("legate module", () => {
       const b = deriveDefaults("/other/path/to/___");
       expect(a.conductorName).not.toBe(b.conductorName);
       expect(a.profile).not.toBe(b.profile);
-      expect(a.conductorName).toMatch(/^legate-repo-[0-9a-f]{8}$/);
-      expect(a.processorName).toMatch(/^processor-legate-repo-[0-9a-f]{8}$/);
-      expect(b.conductorName).toMatch(/^legate-repo-[0-9a-f]{8}$/);
+      expect(a.conductorName).toMatch(/^repo-[0-9a-f]{8}-legate-agent$/);
+      expect(a.processorName).toMatch(/^repo-[0-9a-f]{8}-legate-loop$/);
+      expect(b.conductorName).toMatch(/^repo-[0-9a-f]{8}-legate-agent$/);
 
       const a2 = deriveDefaults("/path/to/___");
       expect(a2.conductorName).toBe(a.conductorName);
     });
 
     it("encodes the repo slug into the conductor name so per-repo legates do not collide", () => {
-      expect(deriveDefaults("/path/to/Smithy").conductorName).toBe("legate-smithy");
-      expect(deriveDefaults("/path/to/AgentDeck").conductorName).toBe("legate-agentdeck");
+      expect(deriveDefaults("/path/to/Smithy").conductorName).toBe("smithy-legate-agent");
+      expect(deriveDefaults("/path/to/AgentDeck").conductorName).toBe("agentdeck-legate-agent");
     });
   });
 
@@ -110,8 +111,9 @@ describe("legate module", () => {
       REPO_NAME: "March",
       REPO_PATH: "/home/u/March",
       PROFILE: "march",
-      CONDUCTOR_NAME: "legate-march",
-      PROCESSOR_NAME: "processor-legate-march",
+      CONDUCTOR_NAME: "march-legate-agent",
+      LOOP_NAME: "march-legate-loop",
+      PROCESSOR_NAME: "march-legate-loop",
       WORKER_GROUP: "legate-workers",
     };
 
@@ -124,7 +126,7 @@ describe("legate module", () => {
       expect(out).toContain("path=/home/u/March");
       expect(out).toContain("profile=march");
       expect(out).toContain("name-again=March");
-      expect(out).toContain("cond=legate-march");
+      expect(out).toContain("cond=march-legate-agent");
       expect(out).toContain("group=legate-workers");
     });
 
@@ -201,7 +203,8 @@ describe("legate module", () => {
       });
 
       expect(result.profile).toBe("march");
-      expect(result.conductorName).toBe("legate-march");
+      expect(result.conductorName).toBe("march-legate-agent");
+      expect(result.loopName).toBe("march-legate-loop");
       expect(result.workerGroup).toBe("legate-workers");
       expect(result.repoName).toBe("March");
       expect(result.setupRan).toBe(false);
@@ -210,7 +213,7 @@ describe("legate module", () => {
         home,
         ".march",
         "legate",
-        "legate-march",
+        "march-legate-agent",
         "CLAUDE.md",
       );
       expect(result.templateOutputPath).toBe(expected);
@@ -219,7 +222,7 @@ describe("legate module", () => {
       const rendered = fs.readFileSync(expected, "utf-8");
       expect(rendered).toContain("Repo: March (/some/repo/March)");
       expect(rendered).toContain("Profile: march");
-      expect(rendered).toContain("Conductor: legate-march");
+      expect(rendered).toContain("Conductor: march-legate-agent");
       expect(rendered).toContain("Group: legate-workers");
     });
 
@@ -238,7 +241,7 @@ describe("legate module", () => {
       expect(result.setupCommand).toContain("-p");
       expect(result.setupCommand).toContain("march");
       expect(result.setupCommand).toContain("setup");
-      expect(result.setupCommand).toContain("legate-march");
+      expect(result.setupCommand).toContain("march-legate-agent");
       expect(result.setupCommand).not.toContain("-claude-md");
       expect(result.summary).toContain("Setup skipped");
       expect(result.summary).toContain(
@@ -261,7 +264,7 @@ describe("legate module", () => {
       expect(result.summary).not.toContain("Cold start as the Legate for March");
     });
 
-    it("stages a deterministic processor scaffold by default", async () => {
+    it("stages a deterministic loop scaffold by default", async () => {
       const home = makeTmpDir();
       const tplDir = makeTemplateDir("processor={{PROCESSOR_NAME}}");
 
@@ -272,12 +275,13 @@ describe("legate module", () => {
         runSetup: false,
       });
 
-      expect(result.processorName).toBe("processor-legate-march");
+      expect(result.loopName).toBe("march-legate-loop");
+      expect(result.processorName).toBe("march-legate-loop");
       expect(result.processorStagingDir).toBe(
-        path.join(home, ".march", "legate", "legate-march", "processor"),
+        path.join(home, ".march", "legate", "march-legate-agent", "loop"),
       );
       expect(result.processorConductorDir).toBe(
-        path.join(home, ".agent-deck", "conductor", "processor-legate-march"),
+        path.join(home, ".agent-deck", "conductor", "march-legate-loop"),
       );
       expect(result.processorSetupCommand).toEqual([
         "agent-deck",
@@ -285,16 +289,16 @@ describe("legate module", () => {
         "march",
         "conductor",
         "setup",
-        "processor-legate-march",
+        "march-legate-loop",
         "-description",
-        "Deterministic PR maintenance Legate processor for March",
+        "Deterministic Legate loop for March",
         "-no-heartbeat",
       ]);
       expect(result.processorSetupRan).toBe(false);
       expect(result.processorConfigured).toBe(false);
 
-      const loopPath = path.join(result.processorStagingDir!, "processor-loop.mjs");
-      const metaPath = path.join(result.processorStagingDir!, "processor-meta.json");
+      const loopPath = path.join(result.processorStagingDir!, "legate-loop.mjs");
+      const metaPath = path.join(result.processorStagingDir!, "legate-loop-meta.json");
       expect(fs.existsSync(loopPath)).toBe(true);
       expect(fs.statSync(loopPath).mode & 0o111).not.toBe(0);
       const loop = fs.readFileSync(loopPath, "utf-8");
@@ -311,6 +315,9 @@ describe("legate module", () => {
       expect(loop).toContain("conflict-fix");
       expect(loop).toContain("CI failure requires Legate judgement");
       expect(loop).toContain("worker_session_error");
+      expect(loop).toContain("claude_api_401_login_required");
+      expect(loop).toContain("function hasClaudeLoginBlock");
+      expect(loop).toContain("login-resume");
       expect(loop).toContain("function workerErrorDetail");
       expect(loop).toContain("agent-deck error state");
       expect(loop).toContain("] heartbeat slice_count=");
@@ -326,20 +333,24 @@ describe("legate module", () => {
       expect(loop).toContain("function safeTick()");
       expect(fs.existsSync(metaPath)).toBe(true);
       const meta = JSON.parse(fs.readFileSync(metaPath, "utf-8"));
-      expect(meta.paired_legate).toBe("legate-march");
-      expect(meta.processor_name).toBe("processor-legate-march");
+      expect(meta.paired_legate).toBe("march-legate-agent");
+      expect(meta.loop_name).toBe("march-legate-loop");
+      expect(meta.processor_name).toBe("march-legate-loop");
       expect(meta.legate_state_path).toBe(
-        path.join(home, ".agent-deck", "conductor", "legate-march", "state.json"),
+        path.join(home, ".agent-deck", "conductor", "march-legate-agent", "state.json"),
       );
       expect(meta.legate_conductor_dir).toBe(
-        path.join(home, ".agent-deck", "conductor", "legate-march"),
+        path.join(home, ".agent-deck", "conductor", "march-legate-agent"),
+      );
+      expect(meta.loop_requests_path).toBe(
+        path.join(home, ".agent-deck", "conductor", "march-legate-loop", "legate-loop-requests.ndjson"),
       );
       expect(meta.mode).toBe("terminal-pr-maintenance");
 
       const rendered = fs.readFileSync(result.templateOutputPath, "utf-8");
-      expect(rendered).toContain("processor=processor-legate-march");
-      expect(result.summary).toContain("Processor:");
-      expect(result.summary).toContain("processor-legate-march");
+      expect(rendered).toContain("processor=march-legate-loop");
+      expect(result.summary).toContain("Loop:");
+      expect(result.summary).toContain("march-legate-loop");
       expect(result.summary).toContain("terminal PR maintenance");
     });
 
@@ -356,11 +367,11 @@ describe("legate module", () => {
       });
 
       expect(result.conductorName).toBe("legate-smithy");
-      expect(result.processorName).toBe("processor-legate-smithy");
+      expect(result.processorName).toBe("legate-smithy-loop");
       expect(result.processorConductorDir).toBe(
-        path.join(home, ".agent-deck", "conductor", "processor-legate-smithy"),
+        path.join(home, ".agent-deck", "conductor", "legate-smithy-loop"),
       );
-      expect(result.processorSetupCommand).toContain("processor-legate-smithy");
+      expect(result.processorSetupCommand).toContain("legate-smithy-loop");
     });
 
     it("keeps processor names valid for long custom conductor names", async () => {
@@ -377,7 +388,7 @@ describe("legate module", () => {
       });
 
       expect(result.conductorName).toBe(conductorName);
-      expect(result.processorName).toMatch(/^processor-legate-x+-[0-9a-f]{8}$/);
+      expect(result.processorName).toMatch(/^legate-x+-[0-9a-f]{8}$/);
       expect(result.processorName!.length).toBeLessThanOrEqual(64);
       expect(result.processorSetupCommand).toContain(result.processorName);
     });
@@ -397,9 +408,9 @@ describe("legate module", () => {
       expect(result.processorName).toBeUndefined();
       expect(result.processorSetupCommand).toBeUndefined();
       expect(
-        fs.existsSync(path.join(home, ".march", "legate", "legate-march", "processor")),
+        fs.existsSync(path.join(home, ".march", "legate", "march-legate-agent", "loop")),
       ).toBe(false);
-      expect(result.summary).toContain("disabled (--no-processor)");
+      expect(result.summary).toContain("disabled (--no-loop)");
     });
 
     it("can deploy only the deterministic processor without configuring the Claude conductor", async () => {
@@ -433,18 +444,81 @@ describe("legate module", () => {
         expect(result.processorConfigured).toBe(true);
         expect(fs.existsSync(result.conductorDir)).toBe(false);
         expect(
-          fs.existsSync(path.join(result.processorConductorDir!, "processor-loop.mjs")),
+          fs.existsSync(path.join(result.processorConductorDir!, "legate-loop.mjs")),
         ).toBe(true);
-        expect(result.summary).toContain("processor-only configured");
-        expect(result.summary).toContain("Conductor:      legate-march (not deployed");
-        expect(result.summary).toContain("Auto mode:      skipped (--processor-only)");
+        expect(result.summary).toContain("loop-only configured");
+        expect(result.summary).toContain("Agent:          march-legate-agent (not deployed");
+        expect(result.summary).toContain("Auto mode:      skipped (--loop-only)");
         expect(result.summary).toContain(
-          "The Claude Legate conductor was not",
+          "The Claude Legate agent was not",
         );
         expect(result.summary).toContain(
-          "agent-deck -p march session attach conductor-processor-legate-march",
+          "agent-deck -p march session attach conductor-march-legate-loop",
         );
         expect(result.summary).not.toContain("auto-mode true");
+      } finally {
+        process.env.PATH = oldPath;
+        process.env.HOME = oldHome;
+      }
+    });
+
+    it("configures managed containers to run the loop while the loop conductor tails docker logs", async () => {
+      const home = makeTmpDir();
+      const binDir = makeTmpDir();
+      const commandLog = path.join(home, "commands.log");
+      const agentDeck = path.join(binDir, "agent-deck");
+      fs.writeFileSync(
+        agentDeck,
+        [
+          "#!/bin/sh",
+          `printf '%s\\n' "$*" >> ${JSON.stringify(commandLog)}`,
+          'if [ "$1" = "-p" ]; then shift 2; fi',
+          'if [ "$1" = "conductor" ] && [ "$2" = "setup" ]; then mkdir -p "$HOME/.agent-deck/conductor/$3"; exit 0; fi',
+          "exit 0",
+          "",
+        ].join("\n"),
+      );
+      fs.chmodSync(agentDeck, 0o755);
+      const docker = path.join(binDir, "docker");
+      fs.writeFileSync(
+        docker,
+        [
+          "#!/bin/sh",
+          `printf 'docker %s\\n' "$*" >> ${JSON.stringify(commandLog)}`,
+          'if [ "$1" = "run" ]; then echo container-id-managed; fi',
+          "exit 0",
+          "",
+        ].join("\n"),
+      );
+      fs.chmodSync(docker, 0o755);
+      const systemctl = path.join(binDir, "systemctl");
+      fs.writeFileSync(systemctl, "#!/bin/sh\nexit 0\n");
+      fs.chmodSync(systemctl, 0o755);
+
+      const oldPath = process.env.PATH;
+      const oldHome = process.env.HOME;
+      process.env.PATH = [binDir, oldPath ?? ""].join(path.delimiter);
+      process.env.HOME = home;
+      try {
+        const result = await initLegate({
+          repoPath: "/some/repo/March",
+          homeDir: home,
+          withContainer: true,
+        });
+
+        expect(result.legateContainer?.containerId).toBe("container-id-managed");
+        expect(
+          fs.existsSync(path.join(result.loopConductorDir!, "legate-loop.mjs")),
+        ).toBe(true);
+        const log = fs.readFileSync(commandLog, "utf-8");
+        expect(log).toContain(
+          "docker run -d --name march-legate-march-legate-agent",
+        );
+        expect(log).toContain('exec node "');
+        expect(log).toContain("legate-loop.mjs");
+        expect(log).toContain(
+          "session set conductor-march-legate-loop command docker logs -f --tail=200 march-legate-march-legate-agent",
+        );
       } finally {
         process.env.PATH = oldPath;
         process.env.HOME = oldHome;
@@ -463,15 +537,15 @@ describe("legate module", () => {
 
       expect(result.setupRan).toBe(false);
       expect(result.processorSetupRan).toBe(false);
-      expect(result.summary).toContain("Processor-only setup skipped");
-      expect(result.summary).toContain("Claude Legate conductor will not be created");
-      expect(result.summary).toContain("conductor setup processor-legate-march");
-      expect(result.summary).toContain("Then copy the staged processor files");
-      expect(result.summary).toContain("processor-loop.mjs");
-      expect(result.summary).toContain("processor-meta.json");
-      expect(result.summary).not.toContain("conductor setup legate-march");
+      expect(result.summary).toContain("Loop-only setup skipped");
+      expect(result.summary).toContain("Claude Legate agent will not be created");
+      expect(result.summary).toContain("conductor setup march-legate-loop");
+      expect(result.summary).toContain("Then copy the staged loop files");
+      expect(result.summary).toContain("legate-loop.mjs");
+      expect(result.summary).toContain("legate-loop-meta.json");
+      expect(result.summary).not.toContain("conductor setup march-legate-agent");
       expect(result.summary).not.toContain("auto-mode true");
-      expect(result.summary).not.toContain("session send conductor-legate-march");
+      expect(result.summary).not.toContain("session send conductor-march-legate-agent");
     });
 
     it("rejects contradictory processor-only options", async () => {
@@ -513,7 +587,7 @@ describe("legate module", () => {
         home,
         ".march",
         "legate",
-        "legate-march",
+        "march-legate-agent",
         "cold-start-prompt.txt",
       );
       expect(fs.existsSync(promptPath)).toBe(true);
@@ -543,7 +617,7 @@ describe("legate module", () => {
         "march",
         "session",
         "set",
-        "conductor-legate-march",
+        "conductor-march-legate-agent",
         "auto-mode",
         "true",
       ]);
@@ -553,7 +627,7 @@ describe("legate module", () => {
         "march",
         "session",
         "set",
-        "conductor-legate-march",
+        "conductor-march-legate-agent",
         "extra-args",
         "--",
         "--model",
@@ -565,7 +639,7 @@ describe("legate module", () => {
         "march",
         "session",
         "restart",
-        "conductor-legate-march",
+        "conductor-march-legate-agent",
       ]);
       expect(sendColdStart.slice(0, 6)).toEqual([
         "agent-deck",
@@ -573,7 +647,7 @@ describe("legate module", () => {
         "march",
         "session",
         "send",
-        "conductor-legate-march",
+        "conductor-march-legate-agent",
       ]);
       // The 7th element is the rendered priming prompt — assert it carries
       // the legate persona marker rather than re-snapshotting the full body.
@@ -709,7 +783,7 @@ describe("legate module", () => {
         home,
         ".march",
         "legate",
-        "legate-march",
+        "march-legate-agent",
         "skills",
       );
       expect(result.skillsStagedDir).toBe(expectedSkillsDir);
@@ -862,7 +936,8 @@ describe("legate module", () => {
       const rendered = fs.readFileSync(result.templateOutputPath, "utf-8");
       expect(rendered).toContain("Legate: Smithy Workflow Conductor for March");
       expect(rendered).toContain("/some/repo/March");
-      expect(rendered).toContain("legate-march");
+      expect(rendered).toContain("march-legate-agent");
+      expect(rendered).toContain("march-legate-loop");
       // The rendered CLAUDE.md should have the snippets resolved — pick a
       // distinctive line from one of them.
       expect(rendered).toContain("State Management");

@@ -257,18 +257,18 @@ program
 // user sees either help or a precise unknown-command message.
 const legate = program
   .command("legate")
-  .description("Manage the per-repo legate conductor (Smithy workflow orchestrator)");
+  .description("Manage the per-repo Legate agent and deterministic loop");
 
 legate
   .command("init")
-  .description("Set up a legate conductor for the current repository")
+  .description("Set up a Legate agent and deterministic loop for the current repository")
   .option("-p, --profile <profile>", "agent-deck profile (default: derived from repo basename)")
-  .option("-n, --name <name>", "Conductor name (default: legate-<repo-slug>)")
-  .option("-d, --description <description>", "Conductor description")
+  .option("-n, --name <name>", "Legate agent conductor name (default: <repo-slug>-legate-agent)")
+  .option("-d, --description <description>", "Legate agent conductor description")
   .option("-g, --worker-group <group>", "Group for worker sessions (default: legate-workers)")
   .option(
     "-m, --model <model>",
-    "Claude model alias or full ID for the conductor session (default: sonnet — orchestration is reasoning-light; workers stay on the Claude default).",
+    "Claude model alias or full ID for the Legate agent session (default: sonnet — orchestration is reasoning-light; workers stay on the Claude default).",
   )
   .option(
     "-i, --heartbeat-interval <interval>",
@@ -281,11 +281,19 @@ legate
   )
   .option(
     "--no-processor",
-    "Skip deploying the paired deterministic Legate processor conductor",
+    "Deprecated alias for --no-loop",
+  )
+  .option(
+    "--no-loop",
+    "Skip deploying the paired deterministic Legate loop conductor",
   )
   .option(
     "--processor-only",
-    "Deploy only the paired deterministic processor conductor; do not create or start the Claude Legate conductor",
+    "Deprecated alias for --loop-only",
+  )
+  .option(
+    "--loop-only",
+    "Deploy only the paired deterministic loop conductor; do not create or start the Claude Legate agent",
   )
   .option(
     "--no-bridge-check",
@@ -302,20 +310,25 @@ legate
     withContainer?: boolean;
     processor?: boolean; // commander negates --no-processor into processor=false
     processorOnly?: boolean;
+    loop?: boolean; // commander negates --no-loop into loop=false
+    loopOnly?: boolean;
     bridgeCheck?: boolean; // commander negates --no-bridge-check into bridgeCheck=false
   }) => {
     commandHandled = true;
 
-    if (opts.processorOnly && opts.processor === false) {
+    const loopDisabled = opts.loop === false || opts.processor === false;
+    const loopOnly = opts.loopOnly === true || opts.processorOnly === true;
+
+    if (loopOnly && loopDisabled) {
       process.stderr.write(
-        "`--processor-only` cannot be combined with `--no-processor`.\n",
+        "`--loop-only` cannot be combined with `--no-loop`.\n",
       );
       process.exitCode = USAGE_ERROR;
       return;
     }
-    if (opts.processorOnly && opts.withContainer) {
+    if (loopOnly && opts.withContainer) {
       process.stderr.write(
-        "`--processor-only` cannot be combined with `--with-container`.\n",
+        "`--loop-only` cannot be combined with `--with-container`.\n",
       );
       process.exitCode = USAGE_ERROR;
       return;
@@ -364,7 +377,7 @@ legate
 
     // 2. Verify agent-deck is on PATH when we'll actually invoke it.
     const willRunSetup = opts.setup !== false;
-    const willRunClaudeConductorSetup = willRunSetup && opts.processorOnly !== true;
+    const willRunClaudeConductorSetup = willRunSetup && !loopOnly;
     if (opts.withContainer) {
       if (!isFinderAvailable()) {
         process.stderr.write(
@@ -423,8 +436,10 @@ legate
         model: opts.model,
         heartbeatInterval: opts.heartbeatInterval,
         runSetup: willRunSetup,
-        processor: opts.processorOnly ? true : opts.processor !== false,
-        processorOnly: opts.processorOnly === true,
+        loop: loopOnly ? true : !loopDisabled,
+        loopOnly,
+        processor: loopOnly ? true : !loopDisabled,
+        processorOnly: loopOnly,
         withContainer: opts.withContainer === true,
       });
       console.log(result.summary);
