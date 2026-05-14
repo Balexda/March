@@ -311,8 +311,11 @@ describe("legate module", () => {
       expect(loop).toContain("conflict-fix");
       expect(loop).toContain("CI failure requires Legate judgement");
       expect(loop).toContain("worker_session_error");
+      expect(loop).toContain("function workerErrorRequestKey");
+      expect(loop).toContain('return `worker-error:${sessionId}:${stage}:${pr}:${outputHash}`');
       expect(loop).toContain("function workerErrorDetail");
       expect(loop).toContain("agent-deck error state");
+      expect(loop).not.toContain("restartWorker(");
       expect(loop).toContain("] heartbeat slice_count=");
       expect(loop).toContain("function formatCleanupLine");
       expect(loop).toContain("${prefix}cleaned up");
