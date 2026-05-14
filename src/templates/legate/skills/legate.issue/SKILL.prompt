@@ -1,6 +1,6 @@
 ---
 name: legate.issue
-description: "Mini-legate's GitHub-issue intake skill. Use when the operator hands you a GitHub issue (a number, `#N`, or full issue URL, optionally followed by extra context) and asks for it to be addressed. The protocol fetches the issue via `gh`, syncs the default branch, launches a worker session that owns the fix end-to-end (investigate → implement → push → open a PR that closes the issue), and records the work in `state.json` as an `issue-<N>` slice with `kind: \"issue\"`, so `legate.babysit` and `legate.cleanup` track its PR through merge identically to a Smithy slice. Triggers: an operator message naming a GitHub issue (`issue 42`, `issue #42`, `issue https://github.com/Owner/Repo/issues/42`, `please fix issue 42 — focus on the migration path`). Skip on heartbeat ticks (those are handled by `legate.babysit`/`legate.cleanup`/`legate.dispatch`) and skip when no issue reference is present in the operator message."
+description: "Mini-legate's GitHub-issue intake skill. Use when the operator hands you a GitHub issue (a number, `#N`, or full issue URL, optionally followed by extra context) and asks for it to be addressed. The protocol fetches the issue via `gh`, syncs the default branch, launches a worker session that owns the fix end-to-end (investigate → implement → push → open a PR that closes the issue), and records the work in `state.json` as an `issue-<N>` slice with `kind: \"issue\"`, so `legate.babysit` and `legate.cleanup` track its PR through merge identically to a Smithy slice. Triggers: an operator message naming a GitHub issue (`issue 42`, `issue #42`, `issue https://github.com/Owner/Repo/issues/42`, `please fix issue 42 — focus on the migration path`). Skip on heartbeat ticks (those are handled by the processor plus `legate.babysit`/`legate.cleanup`) and skip when no issue reference is present in the operator message."
 allowed-tools: Bash(.claude/skills/legate.issue/scripts/fetch-issue.sh:*) Bash(.claude/skills/legate.issue/scripts/sync-default-branch.sh:*) Bash(.claude/skills/legate.issue/scripts/launch-issue-worker.sh:*)
 ---
 
@@ -26,7 +26,7 @@ Do **not** run on:
 
 - A heartbeat tick — heartbeats are babysit/cleanup/dispatch territory.
 - A message that mentions an issue but is not asking you to dispatch a worker (e.g. "what does issue 42 say?" → just `gh issue view` and reply; do not launch).
-- A message asking you to pick up a Smithy slice — that's `legate.dispatch`. The two are distinct surfaces; an issue-kind slice does not pass through `smithy status`.
+- A message asking you to pick up a Smithy slice — heartbeat-driven Smithy pickup is owned by the deterministic processor. The two are distinct surfaces; an issue-kind slice does not pass through `smithy status`.
 
 If parsing the operator message is ambiguous (no clear issue reference, or multiple references and unclear which to act on), surface a `NEED:` and stop — do not guess.
 
@@ -86,7 +86,7 @@ If the script exits non-zero (issue not found, network error, `gh` not authentic
 
 ### 3. Sync the default branch
 
-**Required before launching a worker**, same pre-flight `legate.dispatch` runs. New worker sessions branch off whatever HEAD `{{REPO_PATH}}` points at; if a previous PR merged since the last fetch, the new worker silently builds on stale code.
+**Required before launching a worker**, same safety rule the processor uses before Smithy dispatch. New worker sessions branch off whatever HEAD `{{REPO_PATH}}` points at; if a previous PR merged since the last fetch, the new worker silently builds on stale code.
 
 ```
 .claude/skills/legate.issue/scripts/sync-default-branch.sh {{REPO_PATH}}
@@ -155,7 +155,7 @@ Args:
 
 The script atomically creates the worktree on `<branch>`, launches the Claude session under `{{WORKER_GROUP}}`, locks the title, pins `--permission-mode auto`, and sends the message file's contents as the initial prompt (file-based send because the prompt contains newlines and code fences — inline `-m` would force shell-escape constructs that auto-mode flags).
 
-Returns JSON `{"session_id": "...", "branch": "...", "worktree_path": "..."}` — same shape as `launch-worker.sh`. The same three non-negotiable launch flags apply: `--worktree <branch> -b`, `--title-lock`, `-c claude`.
+Returns JSON `{"session_id": "...", "branch": "...", "worktree_path": "..."}`. The same three non-negotiable launch flags apply: `--worktree <branch> -b`, `--title-lock`, `-c claude`.
 
 ### 6. Record into `state.json`
 
@@ -220,7 +220,7 @@ All scripts emit JSON to stdout, progress to stderr, and exit 0/1/2 for success/
 - **Operator-triggered, never heartbeat-triggered.** This skill runs only off an operator message naming an issue. The heartbeat loop never invokes it.
 - **One worker per issue.** Idempotency check first; never double-dispatch a live `issue-<N>` slice.
 - **Cross-repo scope is forbidden.** If an issue URL points at a repo other than `{{REPO_NAME}}`, escalate. The conductor manages exactly one repo (see boundaries).
-- **Sync default before launching.** Skipping this is how stale-base PRs slip out — same rule as `legate.dispatch`.
+- **Sync default before launching.** Skipping this is how stale-base PRs slip out — same rule the processor uses for Smithy dispatch.
 - **`launch-issue-worker.sh` is the only path that creates the worker.** Don't compose `agent-deck launch` directly — the script wires the non-negotiable flags (`--worktree -b --title-lock --extra-arg ...`) and the file-based initial-message send.
 - **No auto-merge.** The conductor's role ends at "PR is open and tracked by babysit". Closing the issue happens on PR merge via the `Closes #<N>` line — operator-driven, not legate-driven.
 - **Closed issues are operator-territory.** Don't dispatch on a closed issue without explicit operator instruction; surface a `NEED:` instead.

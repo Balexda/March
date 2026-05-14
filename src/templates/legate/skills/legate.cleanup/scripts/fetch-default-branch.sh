@@ -2,12 +2,11 @@
 # legate skill: fetch the repo's origin/<default> refs without switching or
 # pulling.
 #
-# Cleanup-side companion to `legate.dispatch/scripts/sync-default-branch.sh`:
-# the dispatch script does fetch + switch + pull (advances local HEAD before a
-# new launch); this one is the narrower "just refresh refs" used after
-# cleanup so the next dispatch in the same heartbeat sees the freshly-merged
-# commit. We deliberately do not switch or pull — that's dispatch's
-# responsibility, and we don't want to fight it for HEAD-update semantics.
+# Cleanup-side companion to the deterministic processor's default-branch sync:
+# the processor does fetch + switch + pull before a Hatchery Smithy launch;
+# this one is the narrower "just refresh refs" used after cleanup so the next
+# processor dispatch tick sees the freshly-merged commit. We deliberately do
+# not switch or pull because the processor owns HEAD-update semantics.
 #
 # Usage:
 #   fetch-default-branch.sh <repo-path>

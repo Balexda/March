@@ -13,8 +13,8 @@ Maintain a slim, structured state file across compactions:
   },
   "slices": {
     "<slice-id>": {
-      "kind": "smithy|issue (optional; defaults to smithy when absent)",
-      "issue (only when kind == \"issue\"; omitted for smithy slices)": { "number": 42, "url": "...", "title": "..." },
+      "kind": "smithy",
+      "issue": null,
       "worker_session_id": "...",
       "worker_title": "...",
       "branch": "feature/...",
@@ -22,6 +22,10 @@ Maintain a slim, structured state file across compactions:
       "worktree_path": "/home/.../{{REPO_NAME}}-feature-...",
       "stage": "planning|implementing|pr-open|pr-in-fix|pr-rebasing|pr-in-rerun|pr-resolving-conflicts|merged|escalated",
       "pr": { "number": 123, "url": "...", "state": "OPEN|MERGED|CLOSED", "checks": "PASS|FAIL|PENDING", "mergeable": "MERGEABLE|CONFLICTING|UNKNOWN" },
+      "command": "smithy.cut",
+      "arguments": ["..."],
+      "artifact_path": "specs/...",
+      "hatchery": { "spawn_id": "...", "backend": "codex", "artifacts_dir": "...", "patch_path": "...", "spawn_output_path": "...", "metadata_path": "..." },
       "pr_open_at": "2026-05-11T17:00:00Z (set by babysit each time the slice transitions to pr-open; used to detect new reviewer comments in single-user setups)",
       "resume_pending (optional; omitted when not in a resume cycle)": "selected",
       "login_blocked_at (optional; omitted unless Claude Code auth is stale)": "2026-05-14T17:00:00Z",
@@ -45,7 +49,7 @@ Maintain a slim, structured state file across compactions:
 }
 ```
 
-`repo.default_branch` and `repo.owner_with_name` are detected once on first run and reused — they do not change for the life of a conductor. `slices[].worktree_path` is the per-slice checkout created by `--worktree`; capture it from `inspect-worker.sh` (legate.dispatch skill) after launch.
+`repo.default_branch` and `repo.owner_with_name` are detected once on first run and reused — they do not change for the life of a conductor. `slices[].worktree_path` is the per-slice checkout created by `--worktree`; for Smithy dispatches, the deterministic loop captures it from the Hatchery manager session.
 
 Four slice fields fill in over time and are `null` (or absent) on a freshly-launched slice:
 
@@ -56,15 +60,15 @@ Four slice fields fill in over time and are `null` (or absent) on a freshly-laun
 
 The deterministic loop may add `last_processor_action*` and `last_processor_request*` bookkeeping fields to a live slice. These retain the historical `processor` prefix for compatibility; they are idempotency keys and timestamps for loop-sent babysit actions or `[PROCESSOR]` escalations. Keep them when editing state by hand unless you intentionally want the loop to retry that exact action.
 
-For opaque worker failures, the processor may add `worker_error_detected_at` and `worker_error_last_seen_at` before escalating to `legate.error`. The Legate error skill may add `worker_error_handled_at` and `worker_error_resolution` after it classifies and acts on the failure. These fields are operational breadcrumbs; they do not change the PR dependency graph.
+For opaque worker failures, the loop may add `worker_error_detected_at` and `worker_error_last_seen_at` before escalating to `legate.error`. The Legate error skill may add `worker_error_handled_at` and `worker_error_resolution` after it classifies and acts on the failure. These fields are operational breadcrumbs; they do not change the PR dependency graph.
 
 For Claude Code login refresh failures, the loop may add `login_blocked_at`, `login_blocked_session_id`, `login_blocked_reason = "claude_api_401_login_required"`, and `login_blocked_output_hash`. While these fields are present, normal babysit actions to that worker are skipped. The Legate agent asks the operator to run `/login`; after auth is refreshed, the loop re-checks worker output, sends one stage-aware `login-resume` prompt, and deletes the `login_blocked_*` fields.
 
-`slices[].kind` discriminates the slice's origin: `"smithy"` (default; created by `legate.dispatch` from `smithy status`) or `"issue"` (created by `legate.issue` from an operator-handed GitHub issue). When absent, treat as `"smithy"` for backwards compatibility with state files written before this field existed. Issue-kind slices use the synthetic id `issue-<N>` (where `<N>` is the issue number) and carry an `issue: { number, url, title }` subobject for audit; Smithy-kind slices omit `issue`. `legate.babysit` and `legate.cleanup` operate uniformly on `slices` regardless of `kind` — the discriminator exists so audit trail (task-log entries, archived_slices records) and any future kind-specific filtering can branch cleanly.
+`slices[].kind` discriminates the slice's origin: `"smithy"` (default; created by the deterministic loop from `smithy status`) or `"issue"` (created by `legate.issue` from an operator-handed GitHub issue). When absent, treat as `"smithy"` for backwards compatibility with state files written before this field existed. Issue-kind slices use the synthetic id `issue-<N>` (where `<N>` is the issue number) and carry an `issue: { number, url, title }` subobject for audit; Smithy-kind slices omit `issue` and may carry `command`, `arguments`, `artifact_path`, and `hatchery` metadata for duplicate detection and audit. `legate.babysit` and `legate.cleanup` operate uniformly on `slices` regardless of `kind` — the discriminator exists so audit trail (task-log entries, archived_slices records) and any future kind-specific filtering can branch cleanly.
 
-`slices[].resume_pending` is an in-flight flag owned by `legate.resume`. Two states: absent (the default; no resume cycle), or `"selected"` (the resume skill detected Claude Code's "Resume from summary" picker on this worker, sent `"1"` to clear it, and owes the slice a stage-aware nudge on a subsequent heartbeat once the summary has loaded). When the nudge is delivered, the key is **deleted** — not set to `null` or `""` — so a grep for genuinely-pending slices is straightforward. Every downstream skill (babysit, merge, cleanup, dispatch) **skips** any slice whose `resume_pending == "selected"` for the rest of that heartbeat; the worker's TUI may not be fully cleared and an `agent-deck session send` into a half-cleared picker is silently lost. The field is not carried into `archived_slices`; resume state is in-flight only.
+`slices[].resume_pending` is an in-flight flag owned by `legate.resume`. Two states: absent (the default; no resume cycle), or `"selected"` (the resume skill detected Claude Code's "Resume from summary" picker on this worker, sent `"1"` to clear it, and owes the slice a stage-aware nudge on a subsequent heartbeat once the summary has loaded). When the nudge is delivered, the key is **deleted** — not set to `null` or `""` — so a grep for genuinely-pending slices is straightforward. Every downstream skill (babysit, merge, cleanup) **skips** any slice whose `resume_pending == "selected"` for the rest of that heartbeat; the worker's TUI may not be fully cleared and an `agent-deck session send` into a half-cleared picker is silently lost. The field is not carried into `archived_slices`; resume state is in-flight only.
 
-`archived_slices` is the breadcrumb store written by cleanup after a terminal PR's worker session has been torn down. Entries hold only what's needed downstream: PR number/URL (audit), worker title (debugging), terminal state, and the terminal timestamp (`merged_at` for `MERGED`, `closed_at` for `CLOSED`). The full slice record does not carry forward — `task-log.md` and the deterministic loop log are the audit trail. `legate.dispatch` consults both `slices.<id>` (with `pr.state == "MERGED"` for slices merged this heartbeat that cleanup hasn't yet processed) and `archived_slices.<id>` entries whose `terminal_state == "MERGED"` or `merged_at` is present when checking whether a downstream slice's dependencies have all merged. `CLOSED` archives mean the worker is gone, not that dependencies are satisfied.
+`archived_slices` is the breadcrumb store written by cleanup after a terminal PR's worker session has been torn down. Entries hold only what's needed downstream: PR number/URL (audit), worker title (debugging), terminal state, and the terminal timestamp (`merged_at` for `MERGED`, `closed_at` for `CLOSED`). The full slice record does not carry forward — `task-log.md` and the deterministic loop log are the audit trail. The loop's Smithy dispatch consults both `slices.<id>` (with `pr.state == "MERGED"` for slices merged this heartbeat that cleanup hasn't yet processed) and `archived_slices.<id>` entries whose `terminal_state == "MERGED"` or `merged_at` is present when checking whether a downstream slice's dependencies have all merged. `CLOSED` archives mean the worker is gone, not that dependencies are satisfied.
 
 Stage transitions into `merged` come from two sources: `legate.babysit` writes `merged` when it observes `state == "MERGED"` on a PR (i.e. the operator merged in the GitHub UI, or `legate.merge` already merged earlier this heartbeat and GitHub has reflected it); `legate.merge` writes `merged` directly after a successful auto-merge of a slice it transitioned out of `pr-open`. Both paths are equivalent from cleanup's perspective.
 

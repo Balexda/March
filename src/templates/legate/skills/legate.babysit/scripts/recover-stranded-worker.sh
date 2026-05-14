@@ -3,27 +3,27 @@
 #
 # When the host (WSL2) restarts mid-flight, agent-deck's reviver respawns
 # the worker's Claude Code process but does NOT replay the original `-m`
-# argument that `launch-worker.sh` passed at first launch. The worker
+# launch message passed at first launch. The worker
 # session keeps its id, group, and worktree — agent-deck records show
 # it as alive — but Claude Code comes back to an empty splash screen and
-# never sees the `/smithy.<verb>` slash command the conductor expects it
+# never sees the work prompt the conductor expects it
 # to be working on. The slice sits at `stage=implementing` in state.json
 # forever.
 #
-# `legate.dispatch/scripts/launch-worker.sh` stages the verb-cmd to
-# `<conductor-cwd>/dispatch-msg-<slice-id>.md` precisely so this script
-# can detect the failure and re-dispatch.
+# The deterministic processor and issue launch path stage the original
+# prompt to `<conductor-cwd>/dispatch-msg-<slice-id>.md` precisely so this
+# script can detect the failure and re-dispatch.
 #
 # Detection: the worker's tmux pane (full scrollback) is captured and
-# searched for the verb-cmd string. A session that received and processed
-# its launch message has the verb-cmd echoed in its conversation history
+# searched for the staged prompt string. A session that received and processed
+# its launch message has the prompt echoed in its conversation history
 # (Claude Code prints the user message above each response). A revived
 # session has only the Claude Code splash banner. Absence of the verb-cmd
 # in the scrollback is the signature.
 #
 # `agent-deck session output -q` is NOT sufficient — it returns only the
 # most recent response chunk, not the full conversation, so it would
-# always miss the verb-cmd on a long-running worker and false-positive
+# always miss the original prompt on a long-running worker and false-positive
 # every check. tmux's scrollback buffer is the right source.
 #
 # Usage:
@@ -48,8 +48,8 @@ SESSION="$2"
 SLICE_ID="$3"
 
 # slice-id is interpolated into a filename in cwd. Mirror the constraint
-# in launch-worker.sh so a malformed conductor invocation can't escape
-# the conductor dir.
+# used by every launch path so a malformed conductor invocation can't
+# escape the conductor dir.
 if [[ ! "$SLICE_ID" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]]; then
   echo "invalid slice-id (must match ^[a-zA-Z0-9][a-zA-Z0-9._-]*$): $SLICE_ID" >&2
   exit 2

@@ -164,7 +164,7 @@ describe("legate module", () => {
      *   <dir>/skills/<name>/SKILL.prompt
      *   <dir>/skills/<name>/scripts/*.sh
      *
-     * Skills follow the production names (legate.babysit, legate.dispatch)
+     * Skills follow the production names (legate.babysit, legate.issue)
      * because the deploy code enumerates them via LEGATE_SKILLS.
      */
     function makeTemplateDir(claudeContent: string): string {
@@ -301,6 +301,9 @@ describe("legate module", () => {
       const metaPath = path.join(result.processorStagingDir!, "legate-loop-meta.json");
       expect(fs.existsSync(loopPath)).toBe(true);
       expect(fs.statSync(loopPath).mode & 0o111).not.toBe(0);
+      expect(() =>
+        execFileSync(process.execPath, ["--check", loopPath], { stdio: "pipe" }),
+      ).not.toThrow();
       const loop = fs.readFileSync(loopPath, "utf-8");
       expect(loop).toContain("console.log(text)");
       expect(loop).toContain("function printText");
@@ -332,6 +335,13 @@ describe("legate module", () => {
       expect(loop).toContain('reason: "session_not_found"');
       expect(loop).toContain('terminal_state: terminalState');
       expect(loop).toContain("function cleanupTerminalPrs");
+      expect(loop).toContain("function runDispatch");
+      expect(loop).toContain("function readySmithyItems");
+      expect(loop).toContain('"hatchery"');
+      expect(loop).toContain('"--backend"');
+      expect(loop).toContain('"codex"');
+      expect(loop).toContain('"--json"');
+      expect(loop).toContain("dispatch_action_count");
       expect(loop).toContain("Number.isFinite(rawIntervalSeconds)");
       expect(loop).toContain("function safeTick()");
       expect(fs.existsSync(metaPath)).toBe(true);
@@ -962,127 +972,27 @@ describe("legate module", () => {
       }
     });
 
-    it("stages legate.dispatch with find-ready-slices.sh alongside the other dispatch scripts", async () => {
-      // find-ready-slices.sh is the jq-based wrapper around smithy-status.sh
-      // that the dispatch protocol uses to filter for dispatchable items.
-      // Without it deployed, the conductor's only recourse is to inline
-      // `python3 -c "..."` (or jq) against smithy-status.sh's stdout, which
-      // the legate's auto-mode rules explicitly NEED-escalate — every
-      // heartbeat would stall on operator approval.
+    it("does not stage the legacy legate.dispatch skill", async () => {
       const home = makeTmpDir();
       const result = await initLegate({
         repoPath: "/some/repo/March",
         homeDir: home,
         runSetup: false,
       });
-      const dispatch = result.skills.find((s) => s.name === "legate.dispatch");
-      expect(dispatch).toBeDefined();
-      const scriptsDir = path.join(dispatch!.stagedDir, "scripts");
-      for (const name of [
-        "find-ready-slices.sh",
-        "inspect-worker.sh",
-        "launch-worker.sh",
-        "smithy-status.sh",
-        "sync-default-branch.sh",
-      ]) {
-        const p = path.join(scriptsDir, name);
-        expect(fs.existsSync(p)).toBe(true);
-        // +x bit so the conductor's `bash <path>` calls succeed.
-        expect(fs.statSync(p).mode & 0o111).not.toBe(0);
-      }
-    });
-
-    it("launch-worker.sh post-launch jq filter binds .id before piping to index($b)", async () => {
-      // Regression: the earlier filter `select($b | index(.id) | not)`
-      // re-evaluated `.id` against $b (the array), not the outer session.
-      // jq 1.6 dies with `Cannot index array with string "id"` and the
-      // script exits 5 on every launch. The conductor recovered via
-      // inspect-worker.sh so the bug went unnoticed, but every launch
-      // logged a stack trace and lost the JSON output downstream consumers
-      // expected. The corrected pattern binds the session into $s first.
-      const home = makeTmpDir();
-      const result = await initLegate({
-        repoPath: "/some/repo/March",
-        homeDir: home,
-        runSetup: false,
-      });
-      const dispatch = result.skills.find((s) => s.name === "legate.dispatch");
-      const launchScript = fs.readFileSync(
-        path.join(dispatch!.stagedDir, "scripts", "launch-worker.sh"),
-        "utf-8",
-      );
-      // String-content guard: the broken pattern must not reappear.
-      expect(launchScript).not.toMatch(/select\(\s*\$b\s*\|\s*index\(\.id\)/);
-      // Positive assertion: the corrected binding is present.
-      expect(launchScript).toMatch(/\.\s+as\s+\$s/);
-      expect(launchScript).toMatch(/index\(\$s\.id\)/);
-
-      // Functional check: extract the jq filter and run it against fixture
-      // data. Mirrors the agent-deck list --json schema (flat array of
-      // objects). Verifies both the empty-BEFORE_IDS case (initial run with
-      // no prior workers) and the populated case (worker already existed).
-      const fixture = JSON.stringify([
-        {
-          id: "conductor-id",
-          group: "conductor",
-          created_at: "2026-01-01T00:00:00Z",
-        },
-        {
-          id: "old-worker",
-          group: "legate-workers",
-          created_at: "2026-01-02T00:00:00Z",
-        },
-        {
-          id: "new-worker",
-          group: "legate-workers",
-          created_at: "2026-01-03T00:00:00Z",
-        },
-      ]);
-      const filter = `[.[] | select(.group == $g) | . as $s | select($b | index($s.id) | not)] | sort_by(.created_at // 0) | last // null`;
-      // Empty BEFORE_IDS: both workers are "new"; expect the latest by created_at.
-      const emptyResult = execFileSync(
-        "jq",
-        ["--arg", "g", "legate-workers", "--argjson", "b", "[]", filter],
-        { input: fixture, encoding: "utf-8" },
-      );
-      expect(JSON.parse(emptyResult).id).toBe("new-worker");
-      // Populated BEFORE_IDS containing old-worker: only new-worker is new.
-      const populatedResult = execFileSync(
-        "jq",
-        [
-          "--arg",
-          "g",
-          "legate-workers",
-          "--argjson",
-          "b",
-          '["old-worker"]',
-          filter,
-        ],
-        { input: fixture, encoding: "utf-8" },
-      );
-      expect(JSON.parse(populatedResult).id).toBe("new-worker");
-      // Populated BEFORE_IDS containing every worker: nothing new.
-      const allKnownResult = execFileSync(
-        "jq",
-        [
-          "--arg",
-          "g",
-          "legate-workers",
-          "--argjson",
-          "b",
-          '["old-worker","new-worker"]',
-          filter,
-        ],
-        { input: fixture, encoding: "utf-8" },
-      );
-      expect(JSON.parse(allKnownResult)).toBeNull();
+      const dispatch = result.skills.find((s) => String(s.name) === "legate.dispatch");
+      expect(dispatch).toBeUndefined();
+      expect(
+        fs.existsSync(
+          path.join(home, ".march", "legate", "legate-march", "skills", "legate.dispatch"),
+        ),
+      ).toBe(false);
     });
 
     it("stages legate.babysit with recover-stranded-worker.sh", async () => {
       // Revival recovery: agent-deck respawns a worker's Claude Code process
       // after a host restart without replaying the original `-m` argument,
       // leaving the worker pane an empty splash. recover-stranded-worker.sh
-      // reads the verb-cmd staged by launch-worker.sh and re-sends it. Must
+      // reads the launch prompt staged by the processor and re-sends it. Must
       // be deployed so the babysit decision tree can call it.
       const home = makeTmpDir();
       const result = await initLegate({
@@ -1103,33 +1013,20 @@ describe("legate module", () => {
       ).not.toThrow();
     });
 
-    it("launch-worker.sh accepts a slice-id arg and stages dispatch-msg-<slice-id>.md", async () => {
-      // The 7th positional arg is what enables revival recovery: writing
-      // the verb-cmd to a file the babysit skill can read back. Without
-      // this arg, a host restart strands the worker with no way to
-      // re-dispatch.
+    it("processor stages dispatch-msg files for Hatchery-launched managers", async () => {
       const home = makeTmpDir();
       const result = await initLegate({
         repoPath: "/some/repo/March",
         homeDir: home,
         runSetup: false,
       });
-      const dispatch = result.skills.find((s) => s.name === "legate.dispatch");
-      const launchScript = fs.readFileSync(
-        path.join(dispatch!.stagedDir, "scripts", "launch-worker.sh"),
+      const loop = fs.readFileSync(
+        path.join(result.processorStagingDir!, "processor-loop.mjs"),
         "utf-8",
       );
-      // Arg count enforced.
-      expect(launchScript).toMatch(/if \[\[ \$# -ne 7 \]\]/);
-      // Usage line mentions slice-id.
-      expect(launchScript).toMatch(/<slice-id>/);
-      // SLICE_ID is bound to $7 and validated.
-      expect(launchScript).toMatch(/SLICE_ID="\$7"/);
-      expect(launchScript).toMatch(/\^\[a-zA-Z0-9\]\[a-zA-Z0-9\._\-\]\*\$/);
-      // Stage file path is derived from the validated slice-id.
-      expect(launchScript).toMatch(/dispatch-msg-\$\{SLICE_ID\}\.md/);
-      // verb-cmd is written via printf (so newlines round-trip cleanly).
-      expect(launchScript).toMatch(/printf '%s\\n' "\$VERB_CMD"/);
+      expect(loop).toContain("function stageDispatchMessage");
+      expect(loop).toContain('"dispatch-msg-" + sliceId + ".md"');
+      expect(loop).toContain("managerPromptPath");
     });
 
     it("cleanup-merged-session.sh removes the staged dispatch-msg file before tearing the session down", async () => {
@@ -1615,7 +1512,6 @@ describe("legate module", () => {
       expect(prompt).toContain("legate.babysit");
       expect(prompt).toContain("legate.merge");
       expect(prompt).toContain("legate.cleanup");
-      expect(prompt).toContain("legate.dispatch");
       expect(prompt).toContain("legate.issue");
       // Defers strict mechanics to CLAUDE.md.
       expect(prompt).toMatch(/CLAUDE\.md is the authoritative spec/);
@@ -1626,7 +1522,7 @@ describe("legate module", () => {
       expect(prompt).toMatch(/On this turn:/);
       expect(prompt).toMatch(/cold-start acknowledgement/);
       expect(prompt).toMatch(
-        /Online for March \(march\)\. Skills available: legate\.resume, legate\.error, legate\.babysit, legate\.merge, legate\.cleanup, legate\.dispatch, legate\.issue\./,
+        /Online for March \(march\)\. Skills available: legate\.resume, legate\.error, legate\.babysit, legate\.merge, legate\.cleanup, legate\.issue\./,
       );
       expect(prompt).toMatch(/Wait for the first \[HEARTBEAT\]/);
     });

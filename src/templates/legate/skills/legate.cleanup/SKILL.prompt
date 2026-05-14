@@ -1,12 +1,12 @@
 ---
 name: legate.cleanup
-description: "Mini-legate's post-merge teardown skill. Use on every heartbeat (load between `legate.babysit` and `legate.dispatch`) to sweep every slice in `state.json` whose `stage == 'merged'`: remove the worker session via `agent-deck session remove --prune-worktree --force` (kills the tmux process, deletes the git worktree, drops the registry entry), move the slice from `slices` to `archived_slices` so dispatch's dep-check still sees the merge, and append a task-log entry. After processing all merged slices, if at least one was cleaned, fetch origin/<default> so the next dispatch sees the freshest refs. Triggers: heartbeat ticks where babysit has just transitioned (or has previously transitioned) one or more slices to `merged`. No-op when zero slices are merged. Skip for in-flight PRs (that's `legate.babysit`) or new-work launches (that's `legate.dispatch`)."
+description: "Mini-legate's post-merge teardown skill. Use on every heartbeat (load after `legate.babysit` and `legate.merge`) to sweep every slice in `state.json` whose `stage == 'merged'`: remove the worker session via `agent-deck session remove --prune-worktree --force` (kills the tmux process, deletes the git worktree, drops the registry entry), move the slice from `slices` to `archived_slices` so the processor's dep-check still sees the merge, and append a task-log entry. Triggers: heartbeat ticks where babysit has just transitioned (or has previously transitioned) one or more slices to `merged`. No-op when zero slices are merged. Skip for in-flight PRs (that's `legate.babysit`) or new-work launches (owned by the deterministic processor)."
 allowed-tools: Bash(.claude/skills/legate.cleanup/scripts/cleanup-merged-session.sh:*) Bash(.claude/skills/legate.cleanup/scripts/fetch-default-branch.sh:*)
 ---
 
 # Skill: legate.cleanup (post-merge teardown mechanics)
 
-This skill is the Claude-backed path that destroys worker sessions and prunes their worktrees for slices already marked `stage == "merged"`. The paired deterministic processor can also remove live worker sessions whose GitHub PR is terminal (`MERGED` or `CLOSED`) and archive them directly. Load this skill **after** `legate.babysit` and **before** `legate.dispatch` on every heartbeat — its `allowed-tools` need to be active before you bash either of its scripts, and its scope is exactly the merged slices babysit has produced.
+This skill is the Claude-backed path that destroys worker sessions and prunes their worktrees for slices already marked `stage == "merged"`. The paired deterministic processor can also remove live worker sessions whose GitHub PR is terminal (`MERGED` or `CLOSED`) and archive them directly. Load this skill **after** `legate.babysit` and `legate.merge` on every heartbeat — its `allowed-tools` need to be active before you bash either of its scripts, and its scope is exactly the merged slices babysit has produced.
 
 Load via `Skill(skill="legate.cleanup")`. The classifier registers the allowed-tools for the rest of the session.
 
@@ -16,7 +16,7 @@ The skill is intentionally narrow: one decision (which slices to clean), one des
 
 ## When to clean
 
-Run this protocol on every heartbeat after the babysit pass completes and before dispatch begins. Cleanup is unconditional and idempotent:
+Run this protocol on every heartbeat after the babysit/merge pass completes. Cleanup is unconditional and idempotent:
 
 - If zero slices have `stage == "merged"`, cleanup is a no-op — no script invocations, no `state.json` mutation, no task-log entry, no own line in the heartbeat reply.
 - If one or more slices have `stage == "merged"`, process each one in turn (see protocol below), then run a single fetch.
@@ -71,7 +71,7 @@ If the script exits non-zero (anything other than session-not-found), **do not m
 }
 ```
 
-The minimal record is what `legate.dispatch` consults during its dep-check — that's the only downstream consumer. Don't carry the full slice record forward; the audit trail lives in `task-log.md`.
+The minimal record is what the deterministic processor consults during its dep-check — that's the only downstream consumer. Don't carry the full slice record forward; the audit trail lives in `task-log.md`.
 
 #### 2d. Append to `task-log.md`
 
@@ -90,7 +90,7 @@ After the per-slice loop completes, **if at least one slice was cleaned this hea
 .claude/skills/legate.cleanup/scripts/fetch-default-branch.sh {{REPO_PATH}}
 ```
 
-This runs `git fetch origin <default>` (no switch, no pull — that's dispatch's `sync-default-branch.sh`'s concern; we don't want to fight it for HEAD-update semantics). Returns JSON `{"default_branch": "...", "fetched": true}`. The next dispatch in this same heartbeat sees fresh refs and can build a new worker on top of the merged commit.
+This runs `git fetch origin <default>` (no switch, no pull — the deterministic processor owns switch/pull before Hatchery dispatch). Returns JSON `{"default_branch": "...", "fetched": true}`. The processor's next dispatch tick sees fresh refs and can build a new worker on top of the merged commit.
 
 Skip the fetch when zero slices were cleaned — there are no new refs to pull.
 

@@ -483,6 +483,8 @@ hatchery
   )
   .option("--name <name>", "agent-deck session name/title for the manager")
   .option("--title <title>", "Alias for --name")
+  .option("--branch <branch>", "Branch/worktree name for the manager session")
+  .option("--json", "Print the Hatchery spawn result as JSON")
   .action((opts: {
     backend?: string;
     prompt?: string;
@@ -490,6 +492,8 @@ hatchery
     managerGroup?: string;
     name?: string;
     title?: string;
+    branch?: string;
+    json?: boolean;
   }) => {
     commandHandled = true;
 
@@ -558,8 +562,13 @@ hatchery
         agentDeckProfile: opts.agentDeckProfile,
         managerGroup: opts.managerGroup,
         title: opts.name ?? opts.title,
+        branch: opts.branch,
       });
-      console.log(result.summary);
+      if (opts.json) {
+        console.log(JSON.stringify(result, null, 2));
+      } else {
+        console.log(result.summary);
+      }
       process.exitCode = SUCCESS;
     } catch (err) {
       const message =

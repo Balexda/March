@@ -356,6 +356,8 @@ describe("march CLI", () => {
     expect(result.stdout).toContain("--agent-deck-profile");
     expect(result.stdout).toContain("--manager-group");
     expect(result.stdout).toContain("--name");
+    expect(result.stdout).toContain("--branch");
+    expect(result.stdout).toContain("--json");
     expect(result.stdout).toContain("default: codex");
   });
 
@@ -790,6 +792,8 @@ exit 0
         "add a generated file",
         "--name",
         "manager title",
+        "--branch",
+        "smithy/cut/generated",
       ],
       {
         PATH: [
@@ -810,6 +814,7 @@ exit 0
 
     const agentDeckInvocations = fs.readFileSync(agentDeckLog, "utf-8");
     expect(agentDeckInvocations).toMatch(/^launch /m);
+    expect(agentDeckInvocations).toContain("--worktree smithy/cut/generated");
     expect(agentDeckInvocations).toMatch(/^session send manager-session /m);
 
     const worktreeParent = path.join(path.dirname(repoRoot), "agent-deck-worktrees");

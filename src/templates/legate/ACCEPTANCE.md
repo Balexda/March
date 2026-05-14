@@ -25,11 +25,11 @@ The shorthand `<conductor-dir>` means `~/.agent-deck/conductor/<conductor-name>/
 - Verify: `tmux capture-pane -t "$(agent-deck -p <profile> session show conductor-<name> --json | jq -r .tmux_session)" -p | tail -5` — the bottom prompt should be empty (just `❯`) when the conductor is `waiting`. A half-typed message ("merge PR #77") or a feedback survey ("How is Claude doing this session?") blocks the next heartbeat.
 - Failure: clear the input manually with `tmux send-keys C-u` or dismiss the survey by sending the appropriate digit. If this happens repeatedly, the heartbeat sender is mis-targeted.
 
-## B. New-work dispatch (`legate.dispatch`)
+## B. New-work dispatch (deterministic processor)
 
 **B1. Ready slices get workers within one heartbeat.**
-- Verify: `bash <conductor-dir>/.claude/skills/legate.dispatch/scripts/find-ready-slices.sh <repo-path>` enumerates the ready set. Each item not already present in `state.json.slices` should appear as a worker session within one heartbeat after `find-ready-slices` first surfaces it.
-- Failure: dispatch is either (a) treating an unmerged dep as merged, (b) treating an escalated/archived slice as in-flight, or (c) `find-ready-slices.sh` is hiding the item. Cross-check against `smithy status --graph --no-color` from the target repo.
+- Verify: `smithy status --format json` shows a ready non-virtual item with `next_action`, and the paired processor logs a `dispatch_action` in `<processor-dir>/processor.ndjson`. Each dispatched item should appear in `state.json.slices` with `hatchery.backend == "codex"` and a worker session id for the Claude manager.
+- Failure: dispatch is either (a) treating an unmerged dep as merged, (b) treating an escalated/archived slice as in-flight, or (c) `smithy status` is not exposing the item as ready. Cross-check against `smithy status --graph --no-color` from the target repo and `<processor-dir>/processor.log`.
 
 **B2. Each worker has a staged dispatch message on disk.**
 - Verify: every slice in `state.json.slices` with `stage == "implementing"` should have a `<conductor-dir>/dispatch-msg-<slice-id>.md` file. `legate.cleanup` removes it post-merge.
@@ -97,7 +97,7 @@ The shorthand `<conductor-dir>` means `~/.agent-deck/conductor/<conductor-name>/
 
 **F1. Merged slices are archived within one heartbeat.**
 - Verify: when `state == "MERGED"` is observed on a PR (by either babysit or merge), the slice should move from `slices` to `archived_slices` on the same heartbeat. The worker session should be removed (`agent-deck -p <profile> list --json` no longer lists it), the worktree pruned, and a task-log entry appended.
-- Failure: lingering merged slices in `slices` block dispatch's dep-check.
+- Failure: lingering merged slices in `slices` block the processor's dep-check.
 
 **F2. `archived_slices` carries only the audit minimum.**
 - Verify: each archived entry has exactly `{pr_number, pr_url, worker_title, merged_at}` — no full slice body, no transient stage data.

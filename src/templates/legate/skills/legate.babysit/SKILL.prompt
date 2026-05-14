@@ -1,6 +1,6 @@
 ---
 name: legate.babysit
-description: "Mini-legate's PR-management skill. Use on every heartbeat (load before any other skill) to scan tracked PRs in state.json, run the decision tree (MERGED → CONFLICTING → FAIL → unresolved threads → all-clear), and dispatch the right action — `/smithy.fix` to the slice's worker, a rebase request, a CI rerun, a worker restart, or a merge transition. Triggers: heartbeat ticks, worker `running → waiting` transitions, operator follow-ups about an open PR. Skip for new-work dispatch (that's `legate.dispatch`)."
+description: "Mini-legate's PR-management skill. Use on every heartbeat (load before merge/cleanup) to scan tracked PRs in state.json, run the decision tree (MERGED → CONFLICTING → FAIL → unresolved threads → all-clear), and dispatch the right action — `/smithy.fix` to the slice's worker, a rebase request, a CI rerun, a worker restart, or a merge transition. Triggers: heartbeat ticks, worker `running → waiting` transitions, operator follow-ups about an open PR. Skip new-work dispatch; that is owned by the deterministic processor."
 allowed-tools: Bash(.claude/skills/legate.babysit/scripts/babysit-pr.sh:*) Bash(.claude/skills/legate.babysit/scripts/send-to-worker.sh:*) Bash(.claude/skills/legate.babysit/scripts/request-rebase.sh:*) Bash(.claude/skills/legate.babysit/scripts/request-conflict-resolution.sh:*) Bash(.claude/skills/legate.babysit/scripts/rerun-ci.sh:*) Bash(.claude/skills/legate.babysit/scripts/discover-pr.sh:*) Bash(.claude/skills/legate.babysit/scripts/list-workers.sh:*) Bash(.claude/skills/legate.babysit/scripts/recover-stranded-worker.sh:*)
 ---
 
@@ -93,7 +93,7 @@ Evaluate the bullets in order; the first match wins per heartbeat. Mark the resu
 
 Workers whose slice is `merged` / `escalated` / `planning` / `implementing` are left alone when idle — there's no PR-amendment in flight, and the operator owns the call to start fresh work.
 
-**Exception: revival-stranded workers in `implementing`.** agent-deck's reviver respawns a worker's Claude Code process after a host restart (WSL2 reboot, session kill, etc.) but does NOT replay the `-m` argument that `launch-worker.sh` originally passed. The session keeps its id, group, and worktree, so agent-deck status shows it `idle` or `waiting`, but the Claude Code pane is a fresh splash — the worker never sees the `/smithy.<verb>` command. State.json still says `stage=implementing` because no transition ever happened. Left alone, the slice stalls forever.
+**Exception: revival-stranded workers in `implementing`.** agent-deck's reviver respawns a worker's Claude Code process after a host restart (WSL2 reboot, session kill, etc.) but does NOT replay the launch message originally passed by the issue skill or deterministic processor. The session keeps its id, group, and worktree, so agent-deck status shows it `idle` or `waiting`, but the Claude Code pane is a fresh splash — the worker never sees the work prompt. State.json still says `stage=implementing` because no transition ever happened. Left alone, the slice stalls forever.
 
 For each tracked slice where `pr == null` (no PR yet) AND the worker is `idle` or `waiting`, attempt recovery once per heartbeat:
 
@@ -101,7 +101,7 @@ For each tracked slice where `pr == null` (no PR yet) AND the worker is `idle` o
 .claude/skills/legate.babysit/scripts/recover-stranded-worker.sh {{PROFILE}} <worker_session_id> <slice-id>
 ```
 
-The script reads `./dispatch-msg-<slice-id>.md` (staged by `legate.dispatch/scripts/launch-worker.sh` on launch), captures the worker's tmux pane scrollback, and re-sends the verb-cmd via `agent-deck session send` only if the scrollback does NOT contain the verb-cmd string. Output JSON tells you which path it took:
+The script reads `./dispatch-msg-<slice-id>.md` (staged by the deterministic processor for Smithy work and by launch scripts for direct worker launches), captures the worker's tmux pane scrollback, and re-sends the staged prompt via `agent-deck session send` only if the scrollback does NOT contain the staged prompt string. Output JSON tells you which path it took:
 
 - `{"recovered": true, ...}` — re-dispatched. Surface in your `[STATUS]` reply as `AUTO: re-dispatched <slice-id> after revival`.
 - `{"recovered": false, "reason": "pane scrollback already contains verb-cmd"}` — worker processed the launch message at some point, leave it alone. The `idle` is genuine (operator territory or worker waiting on something).
@@ -111,7 +111,7 @@ Note: this check is cheap (one tmux capture, one substring scan) and idempotent 
 
 #### `state == "MERGED"`
 
-Mark slice `merged` in `state.json`, log to `task-log.md`. **The merge of a PR is the only event that unblocks the next step in this line of work** — surface this to the dispatch skill on the next iteration so it can evaluate whether forge-after-cut (or slice-N+1-after-slice-N) is now eligible.
+Mark slice `merged` in `state.json`, log to `task-log.md`. **The merge of a PR is the only event that unblocks the next step in this line of work** — the deterministic processor will evaluate whether forge-after-cut (or slice-N+1-after-slice-N) is now eligible on its next tick.
 
 #### `state == "OPEN"` AND `mergeable == "CONFLICTING"`
 

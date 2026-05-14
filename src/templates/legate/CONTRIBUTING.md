@@ -26,9 +26,6 @@ src/templates/legate/
     ├── legate.cleanup/                 ← post-merge teardown
     │   ├── SKILL.prompt                ← merged-slice sweep, archive bookkeeping
     │   └── scripts/                    ← cleanup-merged-session, fetch-default-branch
-    ├── legate.dispatch/                ← new-work mechanics (smithy status)
-    │   ├── SKILL.prompt                ← step boundaries, sync-then-launch protocol
-    │   └── scripts/                    ← smithy-status, sync-default-branch, launch-worker, inspect-worker, find-ready-slices
     └── legate.issue/                   ← operator-driven GitHub-issue intake
         ├── SKILL.prompt                ← parse → fetch → sync → launch → record protocol
         └── scripts/                    ← fetch-issue, sync-default-branch, launch-issue-worker
@@ -162,7 +159,7 @@ This flips the conductor's auto-mode flag; agent-deck's launcher emits `--permis
 
 **Level 2 — narrow allow list in the conductor's project settings**.
 
-`<conductor-dir>/.claude/settings.json` pre-approves exactly what the seven skills need and nothing else:
+`<conductor-dir>/.claude/settings.json` pre-approves exactly what the six skills need and nothing else:
 
 ```json
 {
@@ -173,7 +170,6 @@ This flips the conductor's auto-mode flag; agent-deck's launcher emits `--permis
       "Skill(legate.babysit:*)",
       "Skill(legate.merge:*)",
       "Skill(legate.cleanup:*)",
-      "Skill(legate.dispatch:*)",
       "Skill(legate.issue:*)",
       "Read(./**)",
       "Edit(./**)",
@@ -186,7 +182,6 @@ This flips the conductor's auto-mode flag; agent-deck's launcher emits `--permis
       "Bash(.claude/skills/legate.merge/scripts/check-merge-readiness.sh *)",
       "Bash(.claude/skills/legate.merge/scripts/squash-merge-pr.sh *)",
       "Bash(.claude/skills/legate.cleanup/scripts/cleanup-merged-session.sh *)",
-      "Bash(.claude/skills/legate.dispatch/scripts/launch-worker.sh *)",
       "Bash(.claude/skills/legate.issue/scripts/launch-issue-worker.sh *)",
       "...one Bash(...) entry per deployed script...",
       "Bash(agent-deck * session show *)",

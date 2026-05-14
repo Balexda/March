@@ -48,6 +48,7 @@ export interface HatcherySpawnOptions {
   readonly agentDeckProfile?: string;
   readonly managerGroup?: string;
   readonly title?: string;
+  readonly branch?: string;
   readonly homeDir?: string;
 }
 
@@ -501,7 +502,7 @@ export function runHatcherySpawn(
   validateHatcherySpawnBackend(input.backend);
 
   const spawnId = generateSpawnId();
-  const branch = managerBranchName(spawnId);
+  const branch = input.branch?.trim() || managerBranchName(spawnId);
   const title = input.title?.trim() || `spawn manager ${spawnId}`;
   const group = input.managerGroup?.trim() || DEFAULT_MANAGER_GROUP;
   const startedAt = new Date().toISOString();

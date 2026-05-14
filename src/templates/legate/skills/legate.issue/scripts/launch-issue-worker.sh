@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # legate.issue skill: launch a new worker session for a GitHub issue.
 #
-# Variant of legate.dispatch's launch-worker.sh. Two differences:
+# Launch a direct Claude worker for operator-driven issue intake.
 #
 #   1. The initial message is read from a file rather than passed inline. Issue
 #      prompts contain newlines, code fences, and reproduction snippets — building
@@ -21,7 +21,7 @@
 #
 # Stdout: JSON `{"session_id": "...", "title": "...", "branch": "...",
 #                "worktree_path": "...", "status": "..."}` derived by querying
-#          agent-deck immediately after launch (same shape as launch-worker.sh).
+#          agent-deck immediately after launch.
 # Exit:
 #   0 success
 #   1 launch failed
@@ -72,7 +72,7 @@ fi
 echo "launching issue worker: title='$TITLE' branch='$BRANCH' prompt-bytes=${#PROMPT}" >&2
 
 # Snapshot existing sessions in the group so we can identify the new one
-# afterward — same approach as legate.dispatch's launch-worker.sh. agent-deck
+# afterward. agent-deck
 # launch doesn't reliably print a parseable session id on stdout across
 # versions, so we diff before/after by created_at.
 #
