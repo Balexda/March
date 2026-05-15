@@ -114,7 +114,7 @@ Each Smithy slice the conductor picks up moves through this state machine. Trigg
 | `pr-in-fix`                | A `/smithy.fix` has been dispatched in response to CI failure or review feedback.                 |
 | `pr-rebasing`              | A `request-rebase.sh` has been dispatched (clean rebase to pick up an upstream fix).              |
 | `pr-in-rerun`              | `rerun-ci.sh` has been triggered for a transient flake.                                           |
-| `pr-resolving-conflicts`   | A `request-conflict-resolution.sh` has been dispatched for a real merge conflict against default. |
+| `pr-resolving-conflicts`   | The loop has dispatched a first conflict-resolution prompt for a real merge conflict against default. |
 | `merged`                   | PR is `MERGED`. Cleanup will sweep the slice on the same heartbeat: worker session removed, worktree pruned, slice moved into `archived_slices`. |
 | `escalated`                | Conductor has surfaced a `NEED:` to the operator; legate will not act on this slice until cleared.|
 

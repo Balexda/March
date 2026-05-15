@@ -1035,12 +1035,7 @@ describe("legate module", () => {
       ).toBe(false);
     });
 
-    it("stages legate.babysit with recover-stranded-worker.sh", async () => {
-      // Revival recovery: agent-deck respawns a worker's Claude Code process
-      // after a host restart without replaying the original `-m` argument,
-      // leaving the worker pane an empty splash. recover-stranded-worker.sh
-      // reads the launch prompt staged by the processor and re-sends it. Must
-      // be deployed so the babysit decision tree can call it.
+    it("does not stage loop-owned babysit scripts", async () => {
       const home = makeTmpDir();
       const result = await initLegate({
         repoPath: "/some/repo/March",
@@ -1049,15 +1044,9 @@ describe("legate module", () => {
       });
       const babysit = result.skills.find((s) => s.name === "legate.babysit");
       const scriptsDir = path.join(babysit!.stagedDir, "scripts");
-      const p = path.join(scriptsDir, "recover-stranded-worker.sh");
-      expect(fs.existsSync(p)).toBe(true);
-      expect(fs.statSync(p).mode & 0o111).not.toBe(0);
-
-      // Sanity: script syntax must parse — a typo would only surface at the
-      // first failed heartbeat in production otherwise.
-      expect(() =>
-        execFileSync("bash", ["-n", p], { stdio: "pipe" }),
-      ).not.toThrow();
+      expect(fs.existsSync(path.join(scriptsDir, "discover-pr.sh"))).toBe(false);
+      expect(fs.existsSync(path.join(scriptsDir, "recover-stranded-worker.sh"))).toBe(false);
+      expect(fs.existsSync(path.join(scriptsDir, "request-conflict-resolution.sh"))).toBe(false);
     });
 
     it("processor stages dispatch-msg files for Hatchery-launched managers", async () => {

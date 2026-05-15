@@ -41,12 +41,12 @@ The shorthand `<conductor-dir>` means `~/.agent-deck/conductor/<conductor-name>/
 
 ## C. PR discovery (`legate.babysit` Step 2)
 
-**C1. Any slice with `pr == null` AND `stage == "implementing"` whose worker is `waiting` OR `idle` gets `discover-pr.sh` run against it on the next heartbeat.**
-- Verify: capture the conductor pane (`tmux capture-pane -pS -300 | grep discover-pr.sh`) — expect a `discover-pr.sh <profile> <session> <repo>` invocation per matching slice each heartbeat. Output should map the PR (when one exists) into `state.json.slices.<id>.pr.{number,url,state,...}` within the same heartbeat.
-- Failure: if the conductor instead jumps straight to `recover-stranded-worker.sh` on an idle worker that has pushed a PR, the `SKILL.md` in context is the pre-PR-#100 version. See `CONTRIBUTING.md` § *Why a re-deploy isn't enough to refresh `SKILL.md` / `CLAUDE.md` content*.
+**C1. Any slice with `pr == null` AND `stage == "implementing"` whose worker is `waiting` OR `idle` is discovered by the deterministic loop on the next tick.**
+- Verify: inspect `legate-loop.log` / `legate-loop.ndjson` — expect a `discover-pr` action per matching slice when a PR exists. State should map the PR into `state.json.slices.<id>.pr.{number,url,state,...}` within the same tick.
+- Failure: if the Claude agent tries to recover an idle worker before the loop has had a chance to discover its PR, the deployed babysit skill is stale or the loop is not running.
 
-**C2. `discover-pr.sh` finds the PR via tier-1 (tmux scrollback) when the worker hasn't been recycled.**
-- Verify: run `discover-pr.sh <profile> <worker-session> <repo>` manually. Stderr should print `primary`; stdout should contain `headRefName` matching the worker's pushed branch (which can differ from the originally-requested branch — `/smithy.*` slash-commands sometimes rename on push).
+**C2. Loop PR discovery captures the actual pushed branch.**
+- Verify: `state.json.slices.<id>.actual_branch` matches the PR `headRefName` (which can differ from the originally-requested branch — `/smithy.*` slash-commands sometimes rename on push).
 - Failure: `primary` missing means the tmux output got cleared (compaction, very old session). Tier-2 (`gh pr list`) should still match by branch; if tier-2 also fails to find the PR, check whether the worker actually pushed (`git ls-remote origin`).
 
 **C3. Branch-renames on push are captured into `actual_branch`.**
@@ -60,7 +60,7 @@ The shorthand `<conductor-dir>` means `~/.agent-deck/conductor/<conductor-name>/
 - Failure: a tracked PR not in the grep means the conductor is short-circuiting on stage. The "all clear" stage (`pr-open`, no threads, PASS) is *not* a skip — it must still run babysit-pr.sh to detect new review activity.
 
 **D2. CONFLICTING is dispatched as conflict resolution, not as a rebase or rerun.**
-- Verify: when `babysit-pr.sh` returns `mergeable: "CONFLICTING"`, the next conductor action for that PR should be `request-conflict-resolution.sh`. Slice stage transitions to `pr-resolving-conflicts`. **No** parallel `request-rebase.sh` or `rerun-ci.sh` in the same heartbeat (the conflict rebase fires fresh CI; chaining is wasted work).
+- Verify: when loop PR refresh sees `mergeable: "CONFLICTING"`, the next loop action for that PR should be a first conflict-resolution prompt. Slice stage transitions to `pr-resolving-conflicts`. **No** parallel `request-rebase.sh` or `rerun-ci.sh` in the same tick (the conflict rebase fires fresh CI; chaining is wasted work).
 - Failure: dispatching both is a decision-tree ordering bug.
 
 **D3. CI failures route to the right tool.**
