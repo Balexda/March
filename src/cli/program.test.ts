@@ -184,15 +184,17 @@ describe("march CLI", () => {
       expect(result.stdout).toContain("--name");
       expect(result.stdout).toContain("--no-setup");
       expect(result.stdout).toContain("--with-container");
+      expect(result.stdout).toContain("--no-loop");
+      expect(result.stdout).toContain("--loop-only");
       expect(result.stdout).toContain("--no-processor");
       expect(result.stdout).toContain("--processor-only");
     });
 
-    it("`march legate init --processor-only --no-processor` exits 2 before dependency checks", () => {
+    it("`march legate init --loop-only --no-loop` exits 2 before dependency checks", () => {
       const fakeBin = makeFakeBin(); // no git needed; conflict is syntactic.
       const nodeBinDir = path.dirname(process.execPath);
       const result = runWithEnv(
-        ["legate", "init", "--processor-only", "--no-processor"],
+        ["legate", "init", "--loop-only", "--no-loop"],
         { PATH: `${nodeBinDir}${path.delimiter}${fakeBin}`, HOME: makeTmpDir() },
       );
       expect(result.exitCode).toBe(2);
@@ -200,11 +202,23 @@ describe("march CLI", () => {
       expect(result.stderr).not.toContain("git not found");
     });
 
-    it("`march legate init --processor-only --with-container` exits 2 before Docker checks", () => {
+    it("`march legate init --loop-only --with-container` exits 2 before Docker checks", () => {
       const fakeBin = makeFakeBin(); // no docker needed; conflict is syntactic.
       const nodeBinDir = path.dirname(process.execPath);
       const result = runWithEnv(
-        ["legate", "init", "--processor-only", "--with-container"],
+        ["legate", "init", "--loop-only", "--with-container"],
+        { PATH: `${nodeBinDir}${path.delimiter}${fakeBin}`, HOME: makeTmpDir() },
+      );
+      expect(result.exitCode).toBe(2);
+      expect(result.stderr).toContain("cannot be combined");
+      expect(result.stderr).not.toContain("Docker not found");
+    });
+
+    it("`march legate init --with-container --no-loop` exits 2 before Docker checks", () => {
+      const fakeBin = makeFakeBin(); // no docker needed; conflict is syntactic.
+      const nodeBinDir = path.dirname(process.execPath);
+      const result = runWithEnv(
+        ["legate", "init", "--with-container", "--no-loop"],
         { PATH: `${nodeBinDir}${path.delimiter}${fakeBin}`, HOME: makeTmpDir() },
       );
       expect(result.exitCode).toBe(2);

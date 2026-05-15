@@ -72,6 +72,7 @@ export interface LegateContainerMount {
 export interface BuildLegateContainerArgsInput {
   readonly repoPath: string;
   readonly conductorDir: string;
+  readonly loopConductorDir?: string;
   readonly homeDir: string;
   readonly dockerSocketPath?: string;
 }
@@ -82,7 +83,7 @@ function addMountIfPresent(
   target: string = source,
   required = false,
 ): void {
-  if (required || fs.existsSync(source)) {
+  if ((required || fs.existsSync(source)) && !mounts.some((m) => m.target === target)) {
     mounts.push({ source, target, required });
   }
 }
@@ -93,6 +94,9 @@ export function legateContainerMounts(
   const mounts: LegateContainerMount[] = [];
   addMountIfPresent(mounts, input.repoPath, input.repoPath, true);
   addMountIfPresent(mounts, input.conductorDir, input.conductorDir, true);
+  if (input.loopConductorDir && input.loopConductorDir !== input.conductorDir) {
+    addMountIfPresent(mounts, input.loopConductorDir, input.loopConductorDir, true);
+  }
   addMountIfPresent(
     mounts,
     path.join(input.homeDir, ".march"),
@@ -128,6 +132,15 @@ export function legateContainerMounts(
     input.dockerSocketPath ?? "/var/run/docker.sock",
     "/var/run/docker.sock",
   );
+  const tmux = process.env.TMUX;
+  const tmuxSocket = tmux?.split(",")[0];
+  if (tmuxSocket) {
+    addMountIfPresent(mounts, path.dirname(tmuxSocket), path.dirname(tmuxSocket));
+  }
+  if (typeof process.getuid === "function") {
+    const defaultTmuxDir = path.join(os.tmpdir(), `tmux-${process.getuid()}`);
+    addMountIfPresent(mounts, defaultTmuxDir, defaultTmuxDir);
+  }
   return mounts;
 }
 
@@ -135,6 +148,7 @@ export interface LegateContainerRunArgsInput
   extends BuildLegateContainerArgsInput {
   readonly conductorName: string;
   readonly profile: string;
+  readonly loopScriptPath?: string;
   readonly imageTag?: string;
 }
 
@@ -150,7 +164,7 @@ export function buildLegateContainerRunArgs(
     "--restart",
     "unless-stopped",
     "--workdir",
-    input.conductorDir,
+    input.loopConductorDir ?? input.conductorDir,
   ];
 
   if (typeof process.getuid === "function" && typeof process.getgid === "function") {
@@ -182,7 +196,9 @@ export function buildLegateContainerRunArgs(
     imageTag,
     "sh",
     "-lc",
-    "printf 'March Legate container ready: %s (%s)\\n' \"$MARCH_LEGATE_CONDUCTOR\" \"$MARCH_LEGATE_PROFILE\"; trap 'exit 0' TERM INT; while :; do sleep 3600; done",
+    input.loopScriptPath
+      ? `printf 'March Legate loop starting: %s (%s)\\n' "$MARCH_LEGATE_CONDUCTOR" "$MARCH_LEGATE_PROFILE"; exec node ${JSON.stringify(input.loopScriptPath)}`
+      : "printf 'March Legate container ready: %s (%s)\\n' \"$MARCH_LEGATE_CONDUCTOR\" \"$MARCH_LEGATE_PROFILE\"; trap 'exit 0' TERM INT; while :; do sleep 3600; done",
   );
   return args;
 }
