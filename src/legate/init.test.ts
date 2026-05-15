@@ -242,6 +242,7 @@ describe("legate module", () => {
       expect(result.setupCommand).toContain("march");
       expect(result.setupCommand).toContain("setup");
       expect(result.setupCommand).toContain("march-legate-agent");
+      expect(result.setupCommand).toContain("-no-heartbeat");
       expect(result.setupCommand).not.toContain("-claude-md");
       expect(result.summary).toContain("Setup skipped");
       expect(result.summary).toContain(
@@ -1487,7 +1488,7 @@ describe("legate module", () => {
       ).rejects.toBeInstanceOf(LegateError);
     });
 
-    it("includes the heartbeat cadence in the summary so operators see what was pinned", async () => {
+    it("reports that agent heartbeats are disabled in the summary", async () => {
       const home = makeTmpDir();
       const result = await initLegate({
         repoPath: "/some/repo/March",
@@ -1496,7 +1497,10 @@ describe("legate module", () => {
         runSetup: false,
       });
       expect(result.summary).toContain("Heartbeat:");
-      expect(result.summary).toContain("7min");
+      expect(result.summary).toContain(
+        "disabled for legate-agent (deferred — run setup first)",
+      );
+      expect(result.summary).not.toContain("7min");
     });
 
     it("rejects withContainer when setup is skipped because no conductor dir exists to mount", async () => {
@@ -1565,7 +1569,9 @@ describe("legate module", () => {
       expect(prompt).toMatch(
         /Online for March \(march\)\. Skills available: legate\.resume, legate\.error, legate\.babysit, legate\.merge, legate\.issue\./,
       );
-      expect(prompt).toMatch(/Wait for the first \[HEARTBEAT\]/);
+      expect(prompt).toMatch(
+        /Wait for a \[PROCESSOR\] loop escalation or operator message/,
+      );
     });
   });
 

@@ -2866,18 +2866,17 @@ export async function ensureInitialState(
 
 /**
  * Cold-start priming prompt sent to the conductor immediately after
- * `agent-deck session restart` succeeds, before the first heartbeat
- * arrives. This is the *only* opportunity the model has to emit a
- * first-turn alignment statement before tool calls begin: without it,
- * the conductor's first turn is its response to a `[HEARTBEAT]`, and
- * the auto-mode classifier evaluates `Skill(legate.*)` + skill-script
- * bashes against an essentially empty recent context.
+ * `agent-deck session restart` succeeds. This is the *only* opportunity
+ * the model has to emit a first-turn alignment statement before loop
+ * doorbells or operator messages begin: without it, the auto-mode
+ * classifier evaluates `Skill(legate.*)` + skill-script bashes against
+ * an essentially empty recent context.
  *
  * The prompt introduces the legate persona and goals at high level —
  * just enough for auto-mode to gauge alignment — and explicitly defers
  * to CLAUDE.md and the per-skill `SKILL.md` files for the strict
  * mechanics. Keep this short and persona-shaped; do not duplicate the
- * full heartbeat decision tree, the state.json schema, or the boundary
+ * full loop escalation decision tree, the state.json schema, or the boundary
  * rules. Those live in CLAUDE.prompt and the skill prompts; drift
  * between this prompt and CLAUDE.md is a maintenance hazard.
  *
@@ -2893,7 +2892,7 @@ Persona and goals:
 - One /smithy.<verb> dispatch = one PR. You never auto-merge.
 
 What you operate on:
-- agent-deck conductor — parent/child links, heartbeats, transition notifications.
+- agent-deck conductor — parent/child links and operator/loop messages.
 - smithy CLI + skills — source of truth for what work to pick next.
 - gh CLI — source of truth for high-level PR state.
 - The smithy.pr-review skill — source of truth for unresolved inline review threads.
@@ -2908,16 +2907,18 @@ Five skills carry the Claude-side mechanics. Load each once on this turn so the 
 Auto-mode alignment — your routine actions are exactly:
 (a) Skill() to load one of the five skills above;
 (b) bash invocation of a script under .claude/skills/legate.*/scripts/;
-(c) Read/Edit of state.json, task-log.md, LEARNINGS.md, POLICY.md, CLAUDE.md, meta.json, or */SKILL.md inside this conductor dir;
-(d) a [STATUS] or NEED: reply to a heartbeat or operator message.
+(c) Read of state.json, task-log.md, LEARNINGS.md, POLICY.md, CLAUDE.md, meta.json, legate-loop logs/requests, or */SKILL.md inside this conductor dir;
+(d) a [STATUS] or NEED: reply to a loop escalation or operator message.
+
+The deterministic legate-loop owns routine writes to state.json and task-log.md. Do not edit those files for heartbeat-style bookkeeping, PR refresh, all-clear transitions, cleanup, or dispatch. If a judgement action changes the world by messaging a worker or rerunning CI, let the loop observe and record the resulting state on its next tick unless a skill explicitly says otherwise.
 
 Anything else escalates via NEED: rather than executing — inline python3 -c / bash -c / node -e, scripts outside legate.*, writes outside cwd, direct network primitives, destructive git (reset --hard, push --force, clean -fd), work against another repo or profile, or agent-deck session send to a running worker.
 
 On this turn:
 1. Read CLAUDE.md end-to-end.
-2. Run its cold-start checklist (read state.json if present; load legate.resume, legate.error, legate.babysit, legate.merge, and legate.issue once via the Skill tool; append a startup entry to task-log.md).
+2. Run its cold-start checklist (read state.json if present; load legate.resume, legate.error, legate.babysit, legate.merge, and legate.issue once via the Skill tool). Do not edit state.json or task-log.md on cold start.
 3. Reply with the cold-start acknowledgement: "Online for {REPO_NAME} ({PROFILE}). Skills available: legate.resume, legate.error, legate.babysit, legate.merge, legate.issue. Will not invoke anything outside their scripts without escalating."
-4. Wait for the first [HEARTBEAT]. Do not poll on your own.`;
+4. Wait for a [PROCESSOR] loop escalation or operator message. Do not poll on your own.`;
 
 /**
  * Render the cold-start priming prompt for a freshly-restarted conductor.
@@ -3100,6 +3101,7 @@ export async function initLegate(
     conductorName,
     "-description",
     description,
+    "-no-heartbeat",
   ];
 
   const conductorTitle = `conductor-${conductorName}`;
@@ -3134,10 +3136,9 @@ export async function initLegate(
     conductorTitle,
   ];
   // Cold-start priming prompt: delivered as the conductor's first user
-  // message after `session restart`, before the first heartbeat arrives.
-  // Without it, the model's first reply is to a terse [HEARTBEAT] line
-  // and auto-mode's classifier judges the first Skill() / script-bash
-  // calls against essentially empty recent context. See
+  // message after `session restart`, before loop doorbells or operator
+  // messages arrive. Without it, auto-mode's classifier judges the first
+  // Skill() / script-bash calls against essentially empty recent context. See
   // LEGATE_COLD_START_PROMPT_TEMPLATE for rationale.
   const coldStartPrompt = buildColdStartPrompt({
     profile,
@@ -3338,111 +3339,10 @@ export async function initLegate(
           `Without it, every skill-script invocation will pause for operator approval.`,
       );
     }
-    try {
-      await writeLegateHeartbeatScript(
-        conductorDir,
-        conductorName,
-        profile,
-        workerGroup,
-      );
-    } catch (err) {
-      postSetupWarnings.push(
-        `Failed to overwrite heartbeat.sh in ${conductorDir}: ` +
-          `${(err as Error).message}\n` +
-          `Without this, the agent-deck-managed heartbeat sends a "Heartbeat:" message ` +
-          `that the legate CLAUDE.md does not recognize as a trigger — the conductor ` +
-          `will receive periodic messages but never run loop escalations or merge checks.`,
-      );
-    }
-
-    // Pin the conductor's heartbeat cadence via a systemd drop-in override.
-    // agent-deck's default is 15 min (set globally in
-    // `~/.agent-deck/config.toml`); 5 min is the legate sweet spot — fast
-    // enough that stuck workers are noticed promptly, slow enough that we
-    // don't burn through tokens on no-op ticks. The drop-in is per-conductor
-    // so multiple legates can coexist with different cadences if needed.
-    // Linux-only: macOS has no systemd; on other platforms we skip with a
-    // warning and the operator can pin the cadence manually.
-    if (isLinuxLike) {
-      // Probe via `systemctl --user cat` rather than `fs.stat` on a single
-      // path: systemd user units can live in any of the standard search
-      // paths (`~/.config/systemd/user`, `/etc/systemd/user`,
-      // `/usr/lib/systemd/user`, etc.). `systemctl cat` returns exit 0 iff
-      // the unit is loadable from any of them, so checking one path with
-      // `fs.stat` would silently skip the override on hosts where the unit
-      // ships from a system path.
-      const timerUnit = `agent-deck-conductor-heartbeat-${conductorName}.timer`;
-      let timerUnitExists = false;
-      try {
-        execFileSync("systemctl", ["--user", "cat", timerUnit], {
-          stdio: "ignore",
-        });
-        timerUnitExists = true;
-      } catch {
-        timerUnitExists = false;
-      }
-      if (!timerUnitExists) {
-        postSetupWarnings.push(
-          `Heartbeat timer unit ${timerUnit} is not loadable by systemd --user ` +
-            `(\`systemctl --user cat ${timerUnit}\` failed). agent-deck did not ` +
-            `install a per-conductor systemd timer — the cadence-override drop-in ` +
-            `was not written. The conductor will fall back to whatever cadence the ` +
-            `agent-deck bridge daemon uses (default 15 min, from ` +
-            `~/.agent-deck/config.toml's [conductor].heartbeat_interval).`,
-        );
-      } else {
-        try {
-          await writeHeartbeatTimerOverride(
-            home,
-            conductorName,
-            heartbeatInterval,
-          );
-          heartbeatOverrideWritten = true;
-          // daemon-reload + restart so the new cadence takes effect this
-          // run. Best-effort: if either fails the override file is still on
-          // disk and a subsequent host reboot picks it up, so we warn rather
-          // than abort.
-          try {
-            execFileSync("systemctl", ["--user", "daemon-reload"], {
-              stdio: "ignore",
-            });
-            execFileSync(
-              "systemctl",
-              [
-                "--user",
-                "restart",
-                `agent-deck-conductor-heartbeat-${conductorName}.timer`,
-              ],
-              { stdio: "ignore" },
-            );
-          } catch (err) {
-            postSetupWarnings.push(
-              `Wrote heartbeat-cadence override (${heartbeatInterval}) but failed to ` +
-                `reload/restart the timer: ${(err as Error).message}\n` +
-                `The new cadence will take effect after the next host reboot, or ` +
-                `you can apply it manually:\n` +
-                `  systemctl --user daemon-reload\n` +
-                `  systemctl --user restart agent-deck-conductor-heartbeat-${conductorName}.timer`,
-            );
-          }
-        } catch (err) {
-          postSetupWarnings.push(
-            `Failed to write heartbeat-cadence override (${heartbeatInterval}) ` +
-              `for ${conductorName}: ${(err as Error).message}\n` +
-              `The conductor will fall back to the agent-deck default cadence ` +
-              `(15 min). Pin manually by creating ` +
-              `~/.config/systemd/user/agent-deck-conductor-heartbeat-${conductorName}.timer.d/override.conf.`,
-          );
-        }
-      }
-    } else {
-      postSetupWarnings.push(
-        `Heartbeat-cadence override is currently Linux/WSL2 only (this host: ` +
-          `${process.platform}). The conductor will run at the agent-deck default ` +
-          `cadence (15 min, from ~/.agent-deck/config.toml's [conductor].heartbeat_interval). ` +
-          `To pin a different cadence, configure the platform-equivalent scheduler manually.`,
-      );
-    }
+    // The Claude-backed legate-agent is reactive. The deterministic
+    // legate-loop owns ticking, state mutation, cleanup, PR refresh, and
+    // dispatch. The agent is launched with `-no-heartbeat` and only receives
+    // cold-start alignment, explicit operator messages, or loop doorbells.
 
     // Bootstrap state.json with the GitHub slug + default branch so the
     // conductor's first dispatch does not stall on a top-level
@@ -3527,12 +3427,12 @@ export async function initLegate(
       }
     }
 
-    // Deliver the cold-start priming prompt before the first heartbeat
-    // can arrive. Gated on autoModeConfigured so we know the conductor
+    // Deliver the cold-start priming prompt before loop doorbells or operator
+    // messages arrive. Gated on autoModeConfigured so we know the conductor
     // was successfully restarted (and is therefore alive to receive).
     // Best-effort: a failure means the conductor will still run, but
-    // its first reply will be to a terse [HEARTBEAT] rather than the
-    // priming context, so the auto-mode classifier may pause more often.
+    // its first tool use may happen without priming context, so the
+    // auto-mode classifier may pause more often.
     if (autoModeConfigured) {
       try {
         execFileSync(sendColdStartCommand[0], sendColdStartCommand.slice(1), {
@@ -3542,8 +3442,8 @@ export async function initLegate(
         const status = (err as { status?: number }).status;
         postSetupWarnings.push(
           `Failed to deliver cold-start priming prompt to ${conductorTitle} (exit ${status ?? "?"}). ` +
-            `The conductor will still run, but its first reply will respond to a heartbeat ` +
-            `rather than priming context — auto-mode classifier may pause more often. ` +
+            `The conductor will still run, but its first action may happen without ` +
+            `priming context — auto-mode classifier may pause more often. ` +
             `Prompt staged at ${coldStartPromptPath}. Run manually:\n  ${sendColdStartManualHint}`,
         );
       }
@@ -3575,8 +3475,8 @@ export async function initLegate(
           "bridge.log",
         );
         postSetupWarnings.push(
-          `Bridge daemon did not stay active after start. The conductor will not ` +
-            `receive automatic heartbeats and will only act when nudged manually ` +
+          `Bridge daemon did not stay active after start. The agent will not ` +
+            `receive bridge-delivered operator or loop messages and will only act when nudged manually ` +
             `via \`agent-deck -p ${profile} session send ${conductorTitle} "<message>"\`. ` +
             `Common cause: bridge.py requires Python 3.9+ (PEP 585 generics). ` +
             `Inspect the failure:\n  systemctl --user status agent-deck-conductor-bridge\n  tail -n 50 ${bridgeLogPath}`,
@@ -3587,7 +3487,7 @@ export async function initLegate(
         `Bridge daemon auto-start is currently Linux/WSL2 only (this host: ${process.platform}). ` +
           `Start it manually with the platform-appropriate command — see ` +
           `agent-deck's \`conductor status ${conductorName}\` output for the hint. ` +
-          `Without the bridge running, the conductor will not receive heartbeats.`,
+          `Without the bridge running, the agent will not receive bridge-delivered messages.`,
       );
     }
   } else {
@@ -3745,18 +3645,16 @@ export async function initLegate(
         ? "skipped (--loop-only)"
         : setupRan
         ? bridgeActive
-          ? "active (heartbeats will reach the conductor)"
-          : "NOT active — conductor will only respond to manual session-send messages; see warnings"
+          ? "active (operator messages can reach the agent)"
+          : "NOT active — agent will only respond to direct session-send messages; see warnings"
         : "deferred (run setup first)"
     }`,
     `  Heartbeat:      ${
       processorOnly
         ? "skipped (--loop-only)"
         : setupRan
-        ? heartbeatOverrideWritten
-          ? `${heartbeatInterval} (pinned via systemd drop-in override)`
-          : `${heartbeatInterval} requested — override NOT written; see warnings`
-        : `${heartbeatInterval} (deferred — run setup first)`
+        ? "disabled for legate-agent; legate-loop owns ticks"
+        : "disabled for legate-agent (deferred — run setup first)"
     }`,
     `  Container:      ${
       legateContainer
