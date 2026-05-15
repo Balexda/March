@@ -1568,6 +1568,18 @@ describe("legate module", () => {
         }),
       ).rejects.toThrow(/requires setup/);
     });
+
+    it("rejects withContainer when loop deployment is disabled", async () => {
+      const home = makeTmpDir();
+      await expect(
+        initLegate({
+          repoPath: "/some/repo/March",
+          homeDir: home,
+          withContainer: true,
+          loop: false,
+        }),
+      ).rejects.toThrow(/cannot be combined with --no-loop/);
+    });
   });
 
   describe("buildColdStartPrompt", () => {

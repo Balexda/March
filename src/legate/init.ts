@@ -2526,6 +2526,11 @@ export async function initLegate(
       "`march legate init --loop-only` cannot be combined with --with-container because the Claude Legate agent is not deployed.",
     );
   }
+  if (opts.withContainer && !loopEnabled) {
+    throw new LegateError(
+      "`march legate init --with-container` cannot be combined with --no-loop because the managed container runs the deterministic Legate loop.",
+    );
+  }
   // Validate before composing any filesystem path so caller-supplied values
   // like `../../.ssh` cannot escape the staging root, and so we surface a
   // march-side error instead of shelling out and parsing agent-deck's stderr.

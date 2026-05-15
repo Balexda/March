@@ -141,6 +141,38 @@ describe("legate-container", () => {
     });
   });
 
+  it("mounts the default tmux socket directory even when TMUX is unset", () => {
+    if (typeof process.getuid !== "function") return;
+    const home = makeTmpDir();
+    const repo = path.join(home, "repo");
+    const conductor = path.join(home, "conductor");
+    const defaultTmuxDir = path.join(os.tmpdir(), `tmux-${process.getuid()}`);
+    const existed = fs.existsSync(defaultTmuxDir);
+    fs.mkdirSync(repo);
+    fs.mkdirSync(conductor);
+    fs.mkdirSync(defaultTmuxDir, { recursive: true });
+    const oldTmux = process.env.TMUX;
+    delete process.env.TMUX;
+
+    try {
+      const mounts = legateContainerMounts({
+        repoPath: repo,
+        conductorDir: conductor,
+        homeDir: home,
+        dockerSocketPath: path.join(home, "missing.sock"),
+      });
+
+      expect(mounts).toContainEqual({
+        source: defaultTmuxDir,
+        target: defaultTmuxDir,
+        required: false,
+      });
+    } finally {
+      process.env.TMUX = oldTmux;
+      if (!existed) fs.rmSync(defaultTmuxDir, { recursive: true, force: true });
+    }
+  });
+
   it("builds docker run args with mounted state and passthrough secrets", () => {
     const home = makeTmpDir();
     const repo = path.join(home, "repo");

@@ -83,7 +83,7 @@ function addMountIfPresent(
   target: string = source,
   required = false,
 ): void {
-  if (required || fs.existsSync(source)) {
+  if ((required || fs.existsSync(source)) && !mounts.some((m) => m.target === target)) {
     mounts.push({ source, target, required });
   }
 }
@@ -136,6 +136,10 @@ export function legateContainerMounts(
   const tmuxSocket = tmux?.split(",")[0];
   if (tmuxSocket) {
     addMountIfPresent(mounts, path.dirname(tmuxSocket), path.dirname(tmuxSocket));
+  }
+  if (typeof process.getuid === "function") {
+    const defaultTmuxDir = path.join(os.tmpdir(), `tmux-${process.getuid()}`);
+    addMountIfPresent(mounts, defaultTmuxDir, defaultTmuxDir);
   }
   return mounts;
 }

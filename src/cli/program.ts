@@ -333,6 +333,13 @@ legate
       process.exitCode = USAGE_ERROR;
       return;
     }
+    if (opts.withContainer && loopDisabled) {
+      process.stderr.write(
+        "`--with-container` cannot be combined with `--no-loop`.\n",
+      );
+      process.exitCode = USAGE_ERROR;
+      return;
+    }
 
     // 1. Detect repo root. Legate is per-repo, so this is mandatory. Three
     //    distinct failures need distinct messages — pointing the user at
