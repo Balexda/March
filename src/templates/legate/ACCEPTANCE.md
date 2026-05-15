@@ -25,11 +25,11 @@ The shorthand `<conductor-dir>` means `~/.agent-deck/conductor/<conductor-name>/
 - Verify: `tmux capture-pane -t "$(agent-deck -p <profile> session show conductor-<name> --json | jq -r .tmux_session)" -p | tail -5` — the bottom prompt should be empty (just `❯`) when the conductor is `waiting`. A half-typed message ("merge PR #77") or a feedback survey ("How is Claude doing this session?") blocks the next heartbeat.
 - Failure: clear the input manually with `tmux send-keys C-u` or dismiss the survey by sending the appropriate digit. If this happens repeatedly, the heartbeat sender is mis-targeted.
 
-## B. New-work dispatch (deterministic processor)
+## B. New-work dispatch (deterministic loop)
 
 **B1. Ready slices get workers within one heartbeat.**
 - Verify: `smithy status --format json` shows a ready non-virtual item with `next_action`, and the paired processor logs a `dispatch_action` in `<processor-dir>/processor.ndjson`. Each dispatched item should appear in `state.json.slices` with `hatchery.backend == "codex"` and a worker session id for the Claude manager.
-- Failure: dispatch is either (a) treating an unmerged dep as merged, (b) treating an escalated/archived slice as in-flight, or (c) `smithy status` is not exposing the item as ready. Cross-check against `smithy status --graph --no-color` from the target repo and `<processor-dir>/processor.log`.
+- Failure: dispatch is either (a) treating an unmerged dep as merged, (b) treating an escalated/archived slice as in-flight, or (c) `smithy status` is not exposing the item as ready. Cross-check against `smithy status --graph --no-color` from the target repo and `<loop-dir>/legate-loop.log`.
 
 **B2. Each worker has a staged dispatch message on disk.**
 - Verify: every slice in `state.json.slices` with `stage == "implementing"` should have a `<conductor-dir>/dispatch-msg-<slice-id>.md` file. `legate.cleanup` removes it post-merge.

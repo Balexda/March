@@ -26,7 +26,7 @@ Do **not** run on:
 
 - A heartbeat tick — heartbeats are babysit/cleanup/dispatch territory.
 - A message that mentions an issue but is not asking you to dispatch a worker (e.g. "what does issue 42 say?" → just `gh issue view` and reply; do not launch).
-- A message asking you to pick up a Smithy slice — heartbeat-driven Smithy pickup is owned by the deterministic processor. The two are distinct surfaces; an issue-kind slice does not pass through `smithy status`.
+- A message asking you to pick up a Smithy slice — heartbeat-driven Smithy pickup is owned by the deterministic loop. The two are distinct surfaces; an issue-kind slice does not pass through `smithy status`.
 
 If parsing the operator message is ambiguous (no clear issue reference, or multiple references and unclear which to act on), surface a `NEED:` and stop — do not guess.
 

@@ -25,7 +25,7 @@ There is no host-side spawn sandbox, no declarative profile system, no separate 
 
 A conductor is one Claude Code session pinned to one repository. agent-deck's bridge daemon fires a `[HEARTBEAT]` message at the conductor on a fixed cadence (default 15 minutes); the conductor wakes, runs its skill suite in a fixed order, and goes back to `waiting`. Worker sessions (one per Smithy slice) live in the same agent-deck profile under the `legate-workers` group. The conductor never polls on its own schedule — heartbeats and agent-deck transition notifications are the only timers.
 
-The conductor's identity (who I am, what I own, escalation rules, the loop skeleton) lives in `CLAUDE.prompt`. Claude-side mechanics are split across **six skills**, each deployed as `.claude/skills/<name>/SKILL.md` plus `.claude/skills/<name>/scripts/`. Heartbeat-driven Smithy dispatch lives in the deterministic processor.
+The conductor's identity (who I am, what I own, escalation rules, the loop skeleton) lives in `CLAUDE.prompt`. Claude-side mechanics are split across **six skills**, each deployed as `.claude/skills/<name>/SKILL.md` plus `.claude/skills/<name>/scripts/`. Heartbeat-driven Smithy dispatch lives in the paired deterministic loop.
 
 ## The six skills — mechanics layer
 

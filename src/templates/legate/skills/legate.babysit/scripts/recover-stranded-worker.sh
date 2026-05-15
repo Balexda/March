@@ -10,7 +10,7 @@
 # to be working on. The slice sits at `stage=implementing` in state.json
 # forever.
 #
-# The deterministic processor and issue launch path stage the original
+# The deterministic loop and issue launch path stage the original
 # prompt to `<conductor-cwd>/dispatch-msg-<slice-id>.md` precisely so this
 # script can detect the failure and re-dispatch.
 #

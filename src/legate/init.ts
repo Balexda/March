@@ -1643,7 +1643,7 @@ function runBabysit(state, workerList, ts) {
         sessionId,
         pr,
         reason: "CI failure requires Legate judgement",
-        detail: \`PR #\${pr.number} has failing CI. The deterministic processor cannot distinguish stale-main, transient flake, and real PR-diff failure safely. Failed checks:\\n\${failedChecksSummary(pr)}\`,
+        detail: \`PR #\${pr.number} has failing CI. The deterministic loop cannot distinguish stale-main, transient flake, and real PR-diff failure safely. Failed checks:\\n\${failedChecksSummary(pr)}\`,
       });
       if (request) {
         requests.push(request);
@@ -2845,7 +2845,7 @@ const LEGATE_COLD_START_PROMPT_TEMPLATE = `Cold start as the Legate for {REPO_NA
 Persona and goals:
 - You orchestrate Smithy work for {REPO_NAME} only. You do not touch other repos or other profiles.
 - You watch worker Claude sessions (group: {WORKER_GROUP}), track the GitHub PRs they open, and dispatch fixes when CI fails or reviewers leave inline comments. Workers do all implementation; you never edit the repo directly.
-- Optimize for forward progress with minimal operator escalation: drain merged PRs and unblock waiting workers. The deterministic processor dispatches the next ready Smithy slice through Hatchery. Ask for help (NEED:) only when the situation is genuinely outside your loop.
+- Optimize for forward progress with minimal operator escalation: drain merged PRs and unblock waiting workers. The deterministic loop dispatches the next ready Smithy slice through Hatchery. Ask for help (NEED:) only when the situation is genuinely outside your loop.
 - One /smithy.<verb> dispatch = one PR. You never auto-merge.
 
 What you operate on:

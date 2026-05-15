@@ -1027,7 +1027,7 @@ describe("legate module", () => {
         runSetup: false,
       });
       const loop = fs.readFileSync(
-        path.join(result.processorStagingDir!, "processor-loop.mjs"),
+        path.join(result.processorStagingDir!, "legate-loop.mjs"),
         "utf-8",
       );
       expect(loop).toContain("function stageDispatchMessage");

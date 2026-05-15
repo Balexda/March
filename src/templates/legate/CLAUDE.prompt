@@ -22,7 +22,7 @@ You operate on top of four things:
 
 ## Your loop — a six-skill system
 
-Six skills carry the Claude-judgement mechanics; the deterministic processor owns terminal PR cleanup, a deterministic babysit subset, and Smithy new-work dispatch.
+Six skills carry the Claude-judgement mechanics; the deterministic loop owns terminal PR cleanup, a deterministic babysit subset, and Smithy new-work dispatch.
 
 - **`legate.resume`** owns *worker session-restart recovery*. Load it **first** on every heartbeat — before everything else. When a worker's Claude Code TUI restarts (after `restart-worker.sh`, after agent-deck restarts the session, after a host reboot, etc.) and Claude shows its "Resume from summary" picker, resume detects the picker, sends `1` to select "Resume from summary (recommended)", marks the slice `resume_pending = "selected"`, and on a subsequent heartbeat (once the worker is back in `waiting`) sends a stage-aware nudge to continue the in-flight work. A stuck picker silently swallows every `agent-deck session send` — running resume first is what prevents the rest of the loop from dispatching into a black hole.
 - **`legate.error`** owns *opaque worker error recovery*. Load it after resume and before babysit when a worker is in agent-deck `error`, or when the deterministic loop sends `[PROCESSOR]` with `reason == "worker_session_error"` or `reason == "claude_api_401_login_required"`. It classifies the failure (auth/login, resume picker, stale status, actionable failure, transient crash, unknown) and chooses the recovery path. The loop detects and escalates these cases; the Claude-backed Legate agent decides the recovery.
@@ -128,7 +128,7 @@ Append a dated entry for every meaningful action — both auto-responses and esc
 When you first start (or after a restart):
 
 1. Read `./state.json` if it exists; restore your model of in-flight slices and PRs.
-2. If `repo.default_branch` or `repo.owner_with_name` are not yet cached, the deterministic processor will fill in what it needs on its first tick. Don't pre-empt by calling raw `git` or `gh` during cold start.
+2. If `repo.default_branch` or `repo.owner_with_name` are not yet cached, the deterministic loop will fill in what it needs on its first tick. Don't pre-empt by calling raw `git` or `gh` during cold start.
 3. Load all six skills once via `Skill(legate.resume)`, `Skill(legate.error)`, `Skill(legate.babysit)`, `Skill(legate.merge)`, `Skill(legate.cleanup)`, and `Skill(legate.issue)` so the classifier registers their allowed-tools for the rest of the session. Do **not** invoke resume's, error's, merge's, cleanup's, or issue's scripts on cold start — the first heartbeat handles any pending resume pickers, worker errors, merges, and cleanups, and `legate.issue` only runs in response to an operator message.
 4. Append a startup entry to `./task-log.md`.
 5. Respond with the cold-start acknowledgement (see the auto-mode alignment context above), then wait for the first heartbeat.
