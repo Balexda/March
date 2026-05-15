@@ -1078,6 +1078,13 @@ function actionKey(action, pr, extra = "") {
   return [action, pr?.number || "", pr?.state || "", pr?.mergeable || "", pr?.checks || "", head, extra].join(":");
 }
 
+function workerErrorRequestKey(sessionId, slice, recent) {
+  const stage = slice.stage || "unknown";
+  const pr = prNumber(slice) || "none";
+  const outputHash = hashText(recent.output || recent.error || "");
+  return \`worker-error:\${sessionId}:\${stage}:\${pr}:\${outputHash}\`;
+}
+
 function markSliceAction(slice, action, key, note, ts) {
   slice.last_processor_action = action;
   slice.last_processor_action_key = key;
@@ -1317,7 +1324,7 @@ function runBabysit(state, workerList, ts) {
 
     if (workerStatus === "error") {
       const recent = captureRecentSessionOutput(sessionId);
-      const key = actionKey("worker-error", slice.pr || {}, \`\${sessionId}:\${hashText(recent.output || recent.error || "")}\`);
+      const key = workerErrorRequestKey(sessionId, slice, recent);
       if (!slice.worker_error_detected_at) slice.worker_error_detected_at = ts;
       slice.worker_error_last_seen_at = ts;
       const request = requestLegateJudgement({
