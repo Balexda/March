@@ -306,6 +306,49 @@ export async function writeHeartbeatTimerOverride(
   return target;
 }
 
+function renderDisabledHeartbeatScript(conductorName: string): string {
+  return `#!/bin/sh
+# march-managed: ${conductorName} is reactive; legate-loop owns ticks.
+exit 0
+`;
+}
+
+async function writeDisabledHeartbeatScript(
+  conductorDir: string,
+  conductorName: string,
+): Promise<string> {
+  validateConductorName(conductorName);
+  const target = path.join(conductorDir, "heartbeat.sh");
+  await fs.writeFile(target, renderDisabledHeartbeatScript(conductorName), {
+    mode: 0o755,
+  });
+  await fs.chmod(target, 0o755);
+  return target;
+}
+
+function disableLegacyHeartbeatTimer(conductorName: string): void {
+  validateConductorName(conductorName);
+  const timer = `agent-deck-conductor-heartbeat-${conductorName}.timer`;
+  const service = `agent-deck-conductor-heartbeat-${conductorName}.service`;
+  execFileSync("systemctl", ["--user", "disable", "--now", timer], {
+    stdio: "ignore",
+  });
+  try {
+    execFileSync("systemctl", ["--user", "stop", service], {
+      stdio: "ignore",
+    });
+  } catch {
+    // The one-shot service is usually inactive after the timer fires.
+  }
+  try {
+    execFileSync("systemctl", ["--user", "daemon-reload"], {
+      stdio: "ignore",
+    });
+  } catch {
+    // The timer is already disabled; daemon-reload is best-effort cleanup.
+  }
+}
+
 const TEMPLATE_VARS = [
   "REPO_NAME",
   "REPO_PATH",
@@ -3343,6 +3386,29 @@ export async function initLegate(
     // legate-loop owns ticking, state mutation, cleanup, PR refresh, and
     // dispatch. The agent is launched with `-no-heartbeat` and only receives
     // cold-start alignment, explicit operator messages, or loop doorbells.
+    try {
+      await writeDisabledHeartbeatScript(conductorDir, conductorName);
+    } catch (err) {
+      postSetupWarnings.push(
+        `Failed to neutralize legacy heartbeat.sh in ${conductorDir}: ` +
+          `${(err as Error).message}\n` +
+          `The legate-agent is configured with -no-heartbeat, but a stale ` +
+          `heartbeat.sh may still be invoked by an old scheduler. Remove or ` +
+          `replace ${path.join(conductorDir, "heartbeat.sh")} manually.`,
+      );
+    }
+    if (isLinuxLike) {
+      try {
+        disableLegacyHeartbeatTimer(conductorName);
+      } catch (err) {
+        postSetupWarnings.push(
+          `Failed to disable legacy heartbeat timer for ${conductorName}: ` +
+            `${(err as Error).message}\n` +
+            `The legate-agent is reactive; stop any stale scheduler manually:\n` +
+            `  systemctl --user disable --now agent-deck-conductor-heartbeat-${conductorName}.timer`,
+        );
+      }
+    }
 
     // Bootstrap state.json with the GitHub slug + default branch so the
     // conductor's first dispatch does not stall on a top-level

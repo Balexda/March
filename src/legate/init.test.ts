@@ -586,6 +586,12 @@ describe("legate module", () => {
         expect(log).toContain(
           "session set conductor-march-legate-loop command docker logs -f --tail=200 march-legate-march-legate-agent",
         );
+        const heartbeat = fs.readFileSync(
+          path.join(result.conductorDir, "heartbeat.sh"),
+          "utf-8",
+        );
+        expect(heartbeat).toContain("march-managed: march-legate-agent is reactive");
+        expect(heartbeat).not.toContain("[HEARTBEAT]");
       } finally {
         process.env.PATH = oldPath;
         process.env.HOME = oldHome;
