@@ -396,7 +396,7 @@ describe("legate module", () => {
       expect(result.processorSetupCommand).toContain("legate-smithy-loop");
     });
 
-    it("pairs the bare legate-agent name with legate-loop", async () => {
+    it("uses the effective profile in default conductor names", async () => {
       const home = makeTmpDir();
       const tplDir = makeTemplateDir("ok");
 
@@ -405,16 +405,34 @@ describe("legate module", () => {
         homeDir: home,
         templateDir: tplDir,
         runSetup: false,
+        profile: "smithy",
+      });
+
+      expect(result.conductorName).toBe("smithy-legate-agent");
+      expect(result.loopName).toBe("smithy-legate-loop");
+      expect(result.processorName).toBe("smithy-legate-loop");
+      expect(result.processorConductorDir).toBe(
+        path.join(home, ".agent-deck", "conductor", "smithy-legate-loop"),
+      );
+      expect(result.processorSetupCommand).toContain("smithy-legate-loop");
+    });
+
+    it("expands the bare legate-agent role name with the effective profile", async () => {
+      const home = makeTmpDir();
+      const tplDir = makeTemplateDir("ok");
+
+      const result = await initLegate({
+        repoPath: "/some/repo/SmithyCli",
+        homeDir: home,
+        templateDir: tplDir,
+        runSetup: false,
+        profile: "smithy",
         conductorName: "legate-agent",
       });
 
-      expect(result.conductorName).toBe("legate-agent");
-      expect(result.loopName).toBe("legate-loop");
-      expect(result.processorName).toBe("legate-loop");
-      expect(result.processorConductorDir).toBe(
-        path.join(home, ".agent-deck", "conductor", "legate-loop"),
-      );
-      expect(result.processorSetupCommand).toContain("legate-loop");
+      expect(result.conductorName).toBe("smithy-legate-agent");
+      expect(result.loopName).toBe("smithy-legate-loop");
+      expect(result.processorName).toBe("smithy-legate-loop");
     });
 
     it("keeps processor names valid for long custom conductor names", async () => {
@@ -996,8 +1014,7 @@ describe("legate module", () => {
         // ultimately invokes one or more scripts that take the repo path,
         // so {{REPO_PATH}} is the one variable every skill is guaranteed
         // to render — {{WORKER_GROUP}} is only used by skills that scan
-        // or launch worker sessions (babysit, dispatch), not by cleanup
-        // which operates on per-slice session IDs from state.json.
+        // or launch worker sessions.
         expect(content).toContain("/some/repo/March");
       }
     });
@@ -1059,32 +1076,20 @@ describe("legate module", () => {
       expect(loop).toContain("managerPromptPath");
     });
 
-    it("cleanup-merged-session.sh removes the staged dispatch-msg file before tearing the session down", async () => {
-      // Stage files in the conductor's cwd survive across heartbeats by
-      // design; without explicit cleanup on merge, the dir would accumulate
-      // a file per slice ever launched. Order matters too: the rm must
-      // happen before agent-deck session remove succeeds, so a re-run
-      // after partial failure still completes the rm idempotently.
+    it("does not stage the legacy legate.cleanup skill", async () => {
       const home = makeTmpDir();
       const result = await initLegate({
         repoPath: "/some/repo/March",
         homeDir: home,
         runSetup: false,
       });
-      const cleanup = result.skills.find((s) => s.name === "legate.cleanup");
-      const script = fs.readFileSync(
-        path.join(cleanup!.stagedDir, "scripts", "cleanup-merged-session.sh"),
-        "utf-8",
-      );
-      expect(script).toMatch(/dispatch-msg-\$\{SLICE_ID\}\.md/);
-      expect(script).toMatch(/rm -f "\$DISPATCH_MSG_PATH"/);
-      // rm must precede the actual `agent-deck ... session remove` call.
-      // The header comment also mentions "session remove" — anchor on the
-      // invocation form to skip past it.
-      const rmIdx = script.indexOf('rm -f "$DISPATCH_MSG_PATH"');
-      const removeCallIdx = script.indexOf('agent-deck -p "$PROFILE" session remove');
-      expect(rmIdx).toBeGreaterThan(0);
-      expect(removeCallIdx).toBeGreaterThan(rmIdx);
+      const cleanup = result.skills.find((s) => String(s.name) === "legate.cleanup");
+      expect(cleanup).toBeUndefined();
+      expect(
+        fs.existsSync(
+          path.join(home, ".march", "legate", "legate-march", "skills", "legate.cleanup"),
+        ),
+      ).toBe(false);
     });
 
     it("stages legate.issue with its three operator-issue-intake scripts", async () => {
@@ -1554,7 +1559,6 @@ describe("legate module", () => {
       expect(prompt).toContain("legate.error");
       expect(prompt).toContain("legate.babysit");
       expect(prompt).toContain("legate.merge");
-      expect(prompt).toContain("legate.cleanup");
       expect(prompt).toContain("legate.issue");
       // Defers strict mechanics to CLAUDE.md.
       expect(prompt).toMatch(/CLAUDE\.md is the authoritative spec/);
@@ -1565,7 +1569,7 @@ describe("legate module", () => {
       expect(prompt).toMatch(/On this turn:/);
       expect(prompt).toMatch(/cold-start acknowledgement/);
       expect(prompt).toMatch(
-        /Online for March \(march\)\. Skills available: legate\.resume, legate\.error, legate\.babysit, legate\.merge, legate\.cleanup, legate\.issue\./,
+        /Online for March \(march\)\. Skills available: legate\.resume, legate\.error, legate\.babysit, legate\.merge, legate\.issue\./,
       );
       expect(prompt).toMatch(/Wait for the first \[HEARTBEAT\]/);
     });

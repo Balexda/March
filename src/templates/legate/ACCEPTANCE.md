@@ -32,7 +32,7 @@ The shorthand `<conductor-dir>` means `~/.agent-deck/conductor/<conductor-name>/
 - Failure: dispatch is either (a) treating an unmerged dep as merged, (b) treating an escalated/archived slice as in-flight, or (c) `smithy status` is not exposing the item as ready. Cross-check against `smithy status --graph --no-color` from the target repo and `<loop-dir>/legate-loop.log`.
 
 **B2. Each worker has a staged dispatch message on disk.**
-- Verify: every slice in `state.json.slices` with `stage == "implementing"` should have a `<conductor-dir>/dispatch-msg-<slice-id>.md` file. `legate.cleanup` removes it post-merge.
+- Verify: every slice in `state.json.slices` with `stage == "implementing"` should have a `<conductor-dir>/dispatch-msg-<slice-id>.md` file. The deterministic loop removes it post-merge.
 - Failure: a missing `dispatch-msg-*.md` means an older dispatch ran before staging was added; revival-stranded recovery will surface `NEED:` lines. Operator must re-dispatch manually.
 
 **B3. No worker is launched on an artifact that already has an in-flight worker.**
@@ -93,7 +93,7 @@ The shorthand `<conductor-dir>` means `~/.agent-deck/conductor/<conductor-name>/
 - Verify: grep `<conductor-dir>/.claude/skills/legate.babysit/` for `gh pr merge` — should return no results. Only `legate.merge/scripts/squash-merge-pr.sh` is allowed to merge.
 - Failure: if babysit gains merge authority, the strict gate is bypassed.
 
-## F. Cleanup (`legate.cleanup`)
+## F. Cleanup (deterministic loop)
 
 **F1. Merged slices are archived within one heartbeat.**
 - Verify: when `state == "MERGED"` is observed on a PR (by either babysit or merge), the slice should move from `slices` to `archived_slices` on the same heartbeat. The worker session should be removed (`agent-deck -p <profile> list --json` no longer lists it), the worktree pruned, and a task-log entry appended.
@@ -128,7 +128,7 @@ The shorthand `<conductor-dir>` means `~/.agent-deck/conductor/<conductor-name>/
 - Verify: send a test message ("issue 999 — investigate later") to the conductor. The reply should be a `[STATUS]` + `AUTO: launched issue-#999 worker` line (or a `NEED:` line if the issue is closed/wrong repo/ambiguous). No babysit/merge/cleanup output should appear.
 - Failure: the issue grammar is silently mis-classified into babysit (or worse, ignored entirely).
 
-**H2. Issue-kind slices flow through babysit/cleanup identically to Smithy slices.**
+**H2. Issue-kind slices flow through loop babysitting/cleanup identically to Smithy slices.**
 - Verify: an issue-#<N> slice should appear in `state.json.slices` with `kind: "issue"` and an `issue: {number, url, title}` subobject. All other fields and lifecycle behaviors match a Smithy slice.
 - Failure: babysit branching on `kind` is a smell — `kind` is audit-only.
 

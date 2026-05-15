@@ -337,7 +337,6 @@ export const LEGATE_SKILLS = [
   "legate.error",
   "legate.babysit",
   "legate.merge",
-  "legate.cleanup",
   "legate.issue",
 ] as const;
 export type LegateSkillName = (typeof LEGATE_SKILLS)[number];
@@ -528,7 +527,7 @@ function repoHashSuffix(repoPath: string): string {
 }
 
 function deriveLoopName(conductorName: string): string {
-  const raw = conductorName === "legate-agent" || conductorName.endsWith("-legate-agent")
+  const raw = conductorName.endsWith("-legate-agent")
     ? `${conductorName.slice(0, -"legate-agent".length)}legate-loop`
     : `${conductorName}-loop`;
   if (raw.length <= CONDUCTOR_NAME_MAX_LEN) return raw;
@@ -536,6 +535,13 @@ function deriveLoopName(conductorName: string): string {
   const suffix = createHash("sha256").update(conductorName).digest("hex").slice(0, 8);
   const headLength = CONDUCTOR_NAME_MAX_LEN - suffix.length - 1;
   return `${raw.slice(0, headLength)}-${suffix}`;
+}
+
+function roleConductorName(profile: string, roleName: string): string {
+  if (roleName === "legate-agent" || roleName === "legate-loop") {
+    return `${profile}-${roleName}`;
+  }
+  return roleName;
 }
 
 export function deriveDefaults(repoPath: string): {
@@ -2863,16 +2869,15 @@ What you operate on:
 - gh CLI — source of truth for high-level PR state.
 - The smithy.pr-review skill — source of truth for unresolved inline review threads.
 
-Six skills carry the Claude-side mechanics. Load each once on this turn so the auto-mode classifier registers their allowed-tools:
+Five skills carry the Claude-side mechanics. Load each once on this turn so the auto-mode classifier registers their allowed-tools:
 - legate.resume — worker session-restart recovery and Resume-from-summary picker clearing.
 - legate.error — opaque worker error recovery via inspection, login escalation, restart, or diagnostic prompt.
-- legate.babysit — existing PRs (CI failures, conflicts, review threads, merges).
+- legate.babysit — PR judgement escalations from the deterministic loop (CI classification, repeated conflicts, send failures).
 - legate.merge — strict-gate auto-squash-merge.
-- legate.cleanup — post-merge teardown (kill worker, prune worktree, archive slice).
 - legate.issue — operator-driven GitHub issue intake.
 
 Auto-mode alignment — your routine actions are exactly:
-(a) Skill() to load one of the six skills above;
+(a) Skill() to load one of the five skills above;
 (b) bash invocation of a script under .claude/skills/legate.*/scripts/;
 (c) Read/Edit of state.json, task-log.md, LEARNINGS.md, POLICY.md, CLAUDE.md, meta.json, or */SKILL.md inside this conductor dir;
 (d) a [STATUS] or NEED: reply to a heartbeat or operator message.
@@ -2881,8 +2886,8 @@ Anything else escalates via NEED: rather than executing — inline python3 -c / 
 
 On this turn:
 1. Read CLAUDE.md end-to-end.
-2. Run its cold-start checklist (read state.json if present; load legate.resume, legate.error, legate.babysit, legate.merge, legate.cleanup, and legate.issue once via the Skill tool; append a startup entry to task-log.md).
-3. Reply with the cold-start acknowledgement: "Online for {REPO_NAME} ({PROFILE}). Skills available: legate.resume, legate.error, legate.babysit, legate.merge, legate.cleanup, legate.issue. Will not invoke anything outside their scripts without escalating."
+2. Run its cold-start checklist (read state.json if present; load legate.resume, legate.error, legate.babysit, legate.merge, and legate.issue once via the Skill tool; append a startup entry to task-log.md).
+3. Reply with the cold-start acknowledgement: "Online for {REPO_NAME} ({PROFILE}). Skills available: legate.resume, legate.error, legate.babysit, legate.merge, legate.issue. Will not invoke anything outside their scripts without escalating."
 4. Wait for the first [HEARTBEAT]. Do not poll on your own.`;
 
 /**
@@ -2918,7 +2923,9 @@ export async function initLegate(
   const repoPath = opts.repoPath;
   const defaults = deriveDefaults(repoPath);
   const profile = opts.profile ?? defaults.profile;
-  const conductorName = opts.conductorName ?? defaults.conductorName;
+  const conductorName = opts.conductorName !== undefined
+    ? roleConductorName(profile, opts.conductorName)
+    : `${profile}-legate-agent`;
   const loopOnly = opts.loopOnly === true || opts.processorOnly === true;
   const loopEnabled = loopOnly || (opts.loop !== false && opts.processor !== false);
   const processorOnly = loopOnly;
@@ -2927,9 +2934,7 @@ export async function initLegate(
   const runLegateSetup = shouldRunSetup && !loopOnly;
   const runLoopSetup = shouldRunSetup && loopEnabled;
   const runProcessorSetup = runLoopSetup;
-  const loopName = opts.conductorName
-    ? deriveLoopName(conductorName)
-    : defaults.loopName;
+  const loopName = deriveLoopName(conductorName);
   const processorName = loopName;
   const workerGroup = opts.workerGroup ?? defaults.workerGroup;
   const model = opts.model ?? "sonnet";
@@ -3317,7 +3322,7 @@ export async function initLegate(
           `${(err as Error).message}\n` +
           `Without this, the agent-deck-managed heartbeat sends a "Heartbeat:" message ` +
           `that the legate CLAUDE.md does not recognize as a trigger — the conductor ` +
-          `will receive periodic messages but never run babysit/cleanup/dispatch.`,
+          `will receive periodic messages but never run loop escalations or merge checks.`,
       );
     }
 

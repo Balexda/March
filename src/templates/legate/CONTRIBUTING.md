@@ -17,15 +17,12 @@ src/templates/legate/
     ├── legate.resume/                  ← worker session-restart recovery
     │   ├── SKILL.prompt                ← picker detection, two-tick handshake, stage-aware nudge
     │   └── scripts/                    ← check-resume-prompt, select-resume-summary, nudge-resumed-worker
-    ├── legate.babysit/                 ← existing-PR mechanics
-    │   ├── SKILL.prompt                ← decision tree, stage transitions, /smithy.fix composition
+    ├── legate.babysit/                 ← PR judgement escalations
+    │   ├── SKILL.prompt                ← CI classification, repeated conflicts, send failures
     │   └── scripts/                    ← babysit-pr, send-to-worker, request-rebase, …
     ├── legate.merge/                   ← auto-squash-merge under a strict gate
     │   ├── SKILL.prompt                ← gate conditions, per-candidate readiness check, squash-merge
     │   └── scripts/                    ← check-merge-readiness, squash-merge-pr
-    ├── legate.cleanup/                 ← post-merge teardown
-    │   ├── SKILL.prompt                ← merged-slice sweep, archive bookkeeping
-    │   └── scripts/                    ← cleanup-merged-session, fetch-default-branch
     └── legate.issue/                   ← operator-driven GitHub-issue intake
         ├── SKILL.prompt                ← parse → fetch → sync → launch → record protocol
         └── scripts/                    ← fetch-issue, sync-default-branch, launch-issue-worker
@@ -159,7 +156,7 @@ This flips the conductor's auto-mode flag; agent-deck's launcher emits `--permis
 
 **Level 2 — narrow allow list in the conductor's project settings**.
 
-`<conductor-dir>/.claude/settings.json` pre-approves exactly what the six skills need and nothing else:
+`<conductor-dir>/.claude/settings.json` pre-approves exactly what the five skills need and nothing else:
 
 ```json
 {
@@ -169,7 +166,6 @@ This flips the conductor's auto-mode flag; agent-deck's launcher emits `--permis
       "Skill(legate.error:*)",
       "Skill(legate.babysit:*)",
       "Skill(legate.merge:*)",
-      "Skill(legate.cleanup:*)",
       "Skill(legate.issue:*)",
       "Read(./**)",
       "Edit(./**)",
@@ -181,7 +177,6 @@ This flips the conductor's auto-mode flag; agent-deck's launcher emits `--permis
       "Bash(.claude/skills/legate.babysit/scripts/babysit-pr.sh *)",
       "Bash(.claude/skills/legate.merge/scripts/check-merge-readiness.sh *)",
       "Bash(.claude/skills/legate.merge/scripts/squash-merge-pr.sh *)",
-      "Bash(.claude/skills/legate.cleanup/scripts/cleanup-merged-session.sh *)",
       "Bash(.claude/skills/legate.issue/scripts/launch-issue-worker.sh *)",
       "...one Bash(...) entry per deployed script...",
       "Bash(agent-deck * session show *)",

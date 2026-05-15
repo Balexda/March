@@ -1,173 +1,137 @@
 ---
 name: legate.babysit
-description: "Mini-legate's PR-management skill. Use on every heartbeat (load before merge/cleanup) to scan tracked PRs in state.json, run the decision tree (MERGED → CONFLICTING → FAIL → unresolved threads → all-clear), and dispatch the right action — `/smithy.fix` to the slice's worker, a rebase request, a CI rerun, a worker restart, or a merge transition. Triggers: heartbeat ticks, worker `running → waiting` transitions, operator follow-ups about an open PR. Skip new-work dispatch; that is owned by the deterministic loop."
-allowed-tools: Bash(.claude/skills/legate.babysit/scripts/babysit-pr.sh:*) Bash(.claude/skills/legate.babysit/scripts/send-to-worker.sh:*) Bash(.claude/skills/legate.babysit/scripts/request-rebase.sh:*) Bash(.claude/skills/legate.babysit/scripts/request-conflict-resolution.sh:*) Bash(.claude/skills/legate.babysit/scripts/rerun-ci.sh:*) Bash(.claude/skills/legate.babysit/scripts/discover-pr.sh:*) Bash(.claude/skills/legate.babysit/scripts/list-workers.sh:*) Bash(.claude/skills/legate.babysit/scripts/recover-stranded-worker.sh:*)
+description: "Mini-legate's judgement path for tracked PRs. Use when the deterministic loop escalates a PR request that needs Claude/operator judgement, especially failed CI classification, repeated conflicts, or a worker action send failure. Routine PR discovery, PR-state refresh, first conflict prompts, review-thread `/smithy.fix`, all-clear transitions, terminal cleanup, and Smithy new-work dispatch are owned by the deterministic loop."
+allowed-tools: Bash(.claude/skills/legate.babysit/scripts/babysit-pr.sh:*) Bash(.claude/skills/legate.babysit/scripts/send-to-worker.sh:*) Bash(.claude/skills/legate.babysit/scripts/request-rebase.sh:*) Bash(.claude/skills/legate.babysit/scripts/rerun-ci.sh:*) Bash(.claude/skills/legate.babysit/scripts/list-workers.sh:*)
 ---
 
-# Skill: legate.babysit (existing-PR mechanics)
+# Skill: legate.babysit (PR Judgement Escalations)
 
-This skill manages every PR the conductor already knows about. Load it **first** on every heartbeat — its `allowed-tools` need to be active before you bash any of its scripts, and the decision tree below is what actually drives action selection. The conductor's `CLAUDE.md` carries the loop skeleton and the universal invariants; this skill carries the PR-state decision tree.
+Most PR babysitting is no longer Claude-owned. The paired deterministic loop owns:
 
-Load via `Skill(skill="legate.babysit")` once per session. The classifier registers the allowed-tools for the rest of the session.
+- PR discovery for implementing workers.
+- Routine PR-state refresh.
+- First merge-conflict prompts.
+- Review-thread `/smithy.fix` dispatch.
+- All-clear transitions back to `pr-open`.
+- Terminal PR cleanup handoff and Smithy new-work dispatch.
+
+Load this skill only when the Legate agent needs judgement beyond those deterministic rules. Typical triggers are `[PROCESSOR]` requests in `~/.agent-deck/conductor/{{LOOP_NAME}}/legate-loop-requests.ndjson`, operator follow-up on a tracked PR, or a heartbeat where CLAUDE.md tells you a loop request needs action.
+
+Load via `Skill(skill="legate.babysit")` before running any script here.
 
 ---
 
-## The protocol
+## Protocol
 
-Run these steps in order on every heartbeat (and on every `running → waiting` transition for an individual worker):
+### 1. Read the Request and State
 
-### 1. Inventory workers
+Read `state.json` and the newest relevant entry from:
 
-```
-.claude/skills/legate.babysit/scripts/list-workers.sh {{PROFILE}} {{WORKER_GROUP}}
-```
-
-Returns a JSON array of `{id, title, status, worktree_branch, worktree_path, parent_session_id}` for every session in your worker group. Reconcile against `state.json` — workers in `running` need no action this tick; workers in `waiting` may have a fresh PR or fresh review activity to process.
-
-### 2. Discover PRs for any worker without a PR yet
-
-For each tracked slice with `pr == null` AND `stage == "implementing"` whose worker is in `waiting` OR `idle`:
-
-```
-.claude/skills/legate.babysit/scripts/discover-pr.sh {{PROFILE}} <session-id> {{REPO_PATH}}
+```text
+~/.agent-deck/conductor/{{LOOP_NAME}}/legate-loop-requests.ndjson
 ```
 
-Two-tier discovery (resilient to branch renames `/smithy.*` does, see SmithyCLI#297): first greps the worker's tmux output for the `https://github.com/.../pull/N` URL, then falls back to `gh pr list --author @me --state open` filtered by dispatch timestamp. Capture `headRefName` into `state.json` as `pr.actual_branch`.
+Older installs may still write `processor-requests.ndjson`; use that only as a fallback.
 
-**Why `idle` is in scope here, not just `waiting`:** a worker can run `gh pr create`, hit `[PERSIST]`, and have agent-deck classify it `idle` before the next heartbeat ever sees a `running → waiting` transition. If discovery only ran on `waiting`, the PR would be stranded — Step 5's "leave `implementing`-stage idle workers alone" rule would skip it, and the slice would sit at `stage=implementing`, `pr=null` indefinitely while the PR accrues review activity nobody is responding to. Discovery is cheap (one tmux-output read, optionally one `gh pr list`) and idempotent: if the worker hasn't pushed yet, both tiers return `{}` and the recovery logic in Step 5 still fires normally.
+Identify:
 
-### 3. Babysit every tracked PR
+- `slice_id`
+- `worker_session_id`
+- `pr.number`
+- `reason`
+- `detail`
+- the slice's current `stage`, `worktree_path`, `actual_branch`, and `last_action_note`
 
-**Non-skippable.** For every tracked PR in `state.json` — including the ones you just discovered, including the ones with CI green:
+If the request is stale because the slice is now `merged`, archived, or no longer exists, report a short `[STATUS]` and do not send worker actions.
 
-```
+### 2. Refresh PR Facts When Needed
+
+For a current PR, inspect the latest PR state:
+
+```bash
 .claude/skills/legate.babysit/scripts/babysit-pr.sh {{REPO_PATH}} <pr-num>
 ```
 
-Combines `gh pr view --json` for top-level state with a GraphQL `pullRequest.reviewThreads` query for unresolved inline threads. The discover-pr CI status is *not sufficient* — `babysit-pr.sh` is the only operation that surfaces unresolved inline review threads (the things `/smithy.fix` is built around). Reviewers (Copilot, humans) routinely leave inline comments on PRs that pass CI; if you skip this step the loop silently misses every review-driven fix opportunity.
+Use the output to confirm `state`, `mergeable`, `checks`, failed checks, and unresolved review threads before making a judgement. Do not duplicate deterministic loop work:
 
-Output schema:
-```json
-{
-  "number": N, "url": "...", "state": "OPEN|MERGED|CLOSED",
-  "mergeable": "MERGEABLE|CONFLICTING|UNKNOWN",
-  "head_branch": "...", "title": "...",
-  "review_decision": "APPROVED|CHANGES_REQUESTED|REVIEW_REQUIRED|null",
-  "checks": "PASS|FAIL|PENDING|NONE",
-  "failed_checks": [{"name": "...", "url": "..."}],
-  "unresolved_threads": [{"id", "path", "line", "author", "body_preview", "last_author", "last_comment_at", "comment_count", "needs_response"}],
-  "thread_count": <n>,
-  "needs_response_count": <n where last comment isn't from PR author>
-}
+- If the PR is `MERGED` or `CLOSED`, let the loop/cleanup path handle terminal state.
+- If `mergeable == "CONFLICTING"` and this is the first conflict, let the loop handle it.
+- If unresolved review threads need response, let the loop handle routine `/smithy.fix` dispatch unless the request says the loop failed to send it.
+- If checks are `PENDING` or mergeability is `UNKNOWN`, report `[STATUS]` and wait.
+
+### 3. Classify Failed CI
+
+When the loop escalates `reason == "CI failure requires Legate judgement"`, choose exactly one path.
+
+**Stale main / upstream fixed since**
+
+Use when the failed run predates a relevant main-branch fix, or the failure shape clearly matches a problem already fixed on default.
+
+```bash
+.claude/skills/legate.babysit/scripts/request-rebase.sh {{PROFILE}} <worker_session_id> <worktree_path>
 ```
 
-`unresolved_threads[].last_comment_at` is the ISO-8601 `createdAt` of the thread's most recent comment. The conductor uses this to detect new operator review activity in single-user setups where worker and reviewer share a GitHub identity — see "Single-user override" below.
+Set the slice stage to `pr-rebasing`, update `last_action` and `last_action_note`, append `task-log.md`, and report `AUTO: requested rebase for <slice-id>`.
 
-### 4. Update `state.json`
+**Transient CI failure**
 
-Capture: PR numbers, `checks` status, `mergeable`, `thread_count`, `unresolved_threads`, slice `stage`. Stage transitions:
+Use when the failure is runner/network/infra/flaky and the PR diff is not implicated.
 
-- `pr-open` → `pr-resolving-conflicts` when `mergeable == "CONFLICTING"`.
-- `pr-open` → `pr-in-fix` when `checks == "FAIL"` or `thread_count > 0` (and `mergeable != "CONFLICTING"` — the conflict branch wins when both are true). See "Single-user override" below for the rule on threads whose `last_author == pr_author`.
-- `pr-in-fix` → `pr-open` when CI is now PASS *and* `thread_count == 0` *and* `mergeable != "CONFLICTING"`. **On this transition, also write `slices[id].pr_open_at = <now-ISO-8601>`** so the next babysit pass can tell new reviewer comments from worker replies.
-- First heartbeat where `discover-pr.sh` lands a PR for an `implementing`-stage slice → `pr-open`. (Typically triggered by the worker's `running → waiting` transition after `gh pr create`, but also fires when the worker passed straight through to `idle` — see Step 2.) **Also write `pr_open_at` on this transition.**
-- `pr-resolving-conflicts` → `pr-open` when `mergeable == "MERGEABLE"` again (the worker's force-push landed and GitHub finished re-computing the merge). **Refresh `pr_open_at`.**
-- `pr-rebasing` → `pr-open` when CI is PASS on the rebased SHA. **Refresh `pr_open_at`.**
-- `pr-in-rerun` → `pr-open` when the re-triggered run completes PASS. **Refresh `pr_open_at`.**
-- `pr-open` → `merged` when `state == "MERGED"`.
-
-#### Single-user override
-
-When worker and operator share a GitHub identity (workers push using the operator's `gh` credentials), the `needs_response = (last_author != pr_author)` heuristic returns `false` for an operator-added inline comment — both authors look identical — and the slice silently stays in `pr-open` waiting for an approval that the operator is actively reviewing instead of granting. The override:
-
-- If `slices[id].pr_open_at` is set, treat any unresolved thread with `last_comment_at > pr_open_at` as `needs_response = true` even when `last_author == pr_author`. Build the `/smithy.fix` body from those threads exactly as in the multi-user case (path, line, last_author, body_preview).
-- If `slices[id].pr_open_at` is **absent** (slice was opened by an older legate that didn't track it), treat every unresolved thread as `needs_response = true` once — pessimistic catch-up. The transition you make this heartbeat will record `pr_open_at`, so the next pass is precise.
-
-The override only fires for slices in `pr-open` (or transitioning into `pr-open` this heartbeat). A slice already in `pr-in-fix` has a worker actively responding; the operator's new comment will be included naturally on the next `pr-in-fix → pr-open` transition.
-
-### 5. Decide and dispatch
-
-Evaluate the bullets in order; the first match wins per heartbeat. Mark the resulting `stage` in `state.json` so the next heartbeat's verification step knows what to expect.
-
-**Worker status normalization (idle workers with tracked outstanding work).** The conductor's status grammar in `CLAUDE.md` says `idle` is operator territory. That default holds — *except* when the slice's `stage` is in the non-terminal action set (`pr-resolving-conflicts`, `pr-in-fix`, `pr-rebasing`, `pr-in-rerun`). For those stages the conductor still owns the recovery: dispatch the action anyway. `agent-deck session send` (which all the action scripts ultimately call) auto-promotes the worker `idle → running`, and the worker processes the message normally. The `idle` flag was probably set by an earlier transition before the recovery completed, not a deliberate operator hand-off. Surface every such wake in your `[STATUS]` reply as a labeled `AUTO:` line — e.g. `AUTO: woke US6 worker (was idle, slice stage=pr-resolving-conflicts) and dispatched request-conflict-resolution.sh` — so the operator sees what happened and can correct course on the next heartbeat if they intended the idle as terminal.
-
-Workers whose slice is `merged` / `escalated` / `planning` / `implementing` are left alone when idle — there's no PR-amendment in flight, and the operator owns the call to start fresh work.
-
-**Exception: revival-stranded workers in `implementing`.** agent-deck's reviver respawns a worker's Claude Code process after a host restart (WSL2 reboot, session kill, etc.) but does NOT replay the launch message originally passed by the issue skill or deterministic loop. The session keeps its id, group, and worktree, so agent-deck status shows it `idle` or `waiting`, but the Claude Code pane is a fresh splash — the worker never sees the work prompt. State.json still says `stage=implementing` because no transition ever happened. Left alone, the slice stalls forever.
-
-For each tracked slice where `pr == null` (no PR yet) AND the worker is `idle` or `waiting`, attempt recovery once per heartbeat:
-
-```
-.claude/skills/legate.babysit/scripts/recover-stranded-worker.sh {{PROFILE}} <worker_session_id> <slice-id>
-```
-
-The script reads `./dispatch-msg-<slice-id>.md` (staged by the deterministic loop for Smithy work and by launch scripts for direct worker launches), captures the worker's tmux pane scrollback, and re-sends the staged prompt via `agent-deck session send` only if the scrollback does NOT contain the staged prompt string. Output JSON tells you which path it took:
-
-- `{"recovered": true, ...}` — re-dispatched. Surface in your `[STATUS]` reply as `AUTO: re-dispatched <slice-id> after revival`.
-- `{"recovered": false, "reason": "pane scrollback already contains verb-cmd"}` — worker processed the launch message at some point, leave it alone. The `idle` is genuine (operator territory or worker waiting on something).
-- `{"recovered": false, "reason": "stage file missing"}` — slice was launched by an older build before staging existed; you cannot auto-recover. Surface a `NEED:` so the operator can re-dispatch manually or re-run `march legate init` for staging on the next launch.
-
-Note: this check is cheap (one tmux capture, one substring scan) and idempotent — running it on a healthy worker is a no-op. Run it as the first action of any `implementing`-stage, no-PR slice's babysit pass.
-
-#### `state == "MERGED"`
-
-Mark slice `merged` in `state.json`, log to `task-log.md`. **The merge of a PR is the only event that unblocks the next step in this line of work** — the deterministic loop will evaluate whether forge-after-cut (or slice-N+1-after-slice-N) is now eligible on its next tick.
-
-#### `state == "OPEN"` AND `mergeable == "CONFLICTING"`
-
-The PR cannot merge because its diff overlaps something that landed on the default branch since the worker last rebased. CI being green and threads being clear do **not** matter here; a CONFLICTING PR is blocked regardless. Note `mergeable == "UNKNOWN"` is transient (GitHub is still computing the merge) — skip it and re-check next heartbeat; only act on `CONFLICTING`.
-
-```
-.claude/skills/legate.babysit/scripts/request-conflict-resolution.sh {{PROFILE}} <worker_session_id> <worktree_path-from-state.json> <repo.default_branch-from-state.json> <pr.number>
-```
-
-Same-PR amendment. Sets `stage = pr-resolving-conflicts`. The rebase pushes a new SHA which fires fresh CI — so handling CONFLICTING here subsumes any coincident `checks == "FAIL"` you would have otherwise routed below; do not also dispatch `request-rebase.sh` or `rerun-ci.sh` in the same heartbeat.
-
-**Recurrence rule:** if on the *next* heartbeat `mergeable` is still `CONFLICTING` after the worker reported a successful push, escalate via `NEED:` — the PR likely conflicts with yet another sibling PR that merged in the meantime, and chaining rebases blindly will not converge.
-
-#### `checks == "FAIL"` (only reached when `mergeable != "CONFLICTING"`)
-
-Three sub-cases. Choose the right tool — getting this wrong loops uselessly.
-
-**(a) Upstream-fixed-since.** The failed run started *before* a known parent-fix PR merged on main, OR the failure shape (version mismatch, fixture drift, an assertion that matches a problem main has since fixed) tells you the cause is stale main, not this PR's diff. **`rerun-ci.sh` does NOT help here** — `gh run rerun` re-runs the same workflow against the *same merge commit* (which GitHub computed against then-stale main), so the rerun fails identically. Use `request-rebase.sh`:
-
-```
-.claude/skills/legate.babysit/scripts/request-rebase.sh {{PROFILE}} <worker_session_id> <worktree_path-from-state.json>
-```
-
-The rebase causes GitHub to recompute the merge commit and fire fresh CI. Same-PR amendment. Sets `stage = pr-rebasing`.
-
-**(b) Transient flake.** No recent main changes would explain the failure; no PR-diff issue; e.g. a flaky network test, runner OOM, an Actions infra timeout. Use:
-
-```
+```bash
 .claude/skills/legate.babysit/scripts/rerun-ci.sh {{REPO_PATH}} <run-id>
 ```
 
-Extract `<run-id>` from `babysit-pr`'s `failed_checks[].url` (the `runs/<RUN-ID>/job/...` segment). No code change. Sets `stage = pr-in-rerun`.
+Extract `<run-id>` from `failed_checks[].url`. Set stage to `pr-in-rerun`, update state/logs, and report `AUTO: reran CI for <slice-id>`.
 
-**(c) Real PR-diff failure.** The failed test exercises code from this PR's own diff. Use `/smithy.fix`:
+**Real PR-diff failure**
 
-1. `Write(./fix-msg-<slice-id>.md)` containing: `/smithy.fix\n\nCI failure on <check-name>:\n<failed_checks summary from babysit-pr>`.
-2. `.claude/skills/legate.babysit/scripts/send-to-worker.sh {{PROFILE}} <worker_session_id> ./fix-msg-<slice-id>.md`.
+Use when the failed check exercises code changed by this PR.
 
-Same-PR amendment. Sets `stage = pr-in-fix`.
+1. Write `./fix-msg-<slice-id>.md`:
 
-#### `needs_response_count > 0`
+   ```text
+   /smithy.fix
 
-Unresolved threads where the *last* comment isn't from the PR author — i.e. a reviewer is waiting for action. Threads where the worker already replied and just await operator-click-Resolve are excluded.
+   CI failure on PR #<num>:
+   <failed check summary and relevant log pointers>
+   ```
 
-1. `Write(./fix-msg-<slice-id>.md)` containing: `/smithy.fix\n\nUnresolved review threads on PR #<num> (where reviewer is awaiting response):\n<paste unresolved_threads where needs_response==true — path, line, last_author, body_preview for each>`.
-2. `.claude/skills/legate.babysit/scripts/send-to-worker.sh {{PROFILE}} <worker_session_id> ./fix-msg-<slice-id>.md`.
+2. Send it:
 
-Same-PR amendment. Note: `thread_count > 0` with `needs_response_count == 0` means **most likely** the worker already addressed every open thread and they're just unresolved because the operator hasn't clicked Resolve — do **not** re-dispatch in that case; report on heartbeat reply ("3 threads addressed by worker, awaiting operator-resolve") and continue. **Exception**: when worker and operator share a GitHub identity, an operator-added inline comment also has `last_author == pr_author` and would be misclassified as "addressed". Apply the single-user override (see "Update `state.json`" above): any unresolved thread whose `last_comment_at > slices[id].pr_open_at` counts as needing response and is included in the `/smithy.fix` body. If `pr_open_at` is absent on the slice, treat every unresolved thread as needing response (one-time pessimistic catch-up; the transition this heartbeat will record `pr_open_at` for next time).
+   ```bash
+   .claude/skills/legate.babysit/scripts/send-to-worker.sh {{PROFILE}} <worker_session_id> ./fix-msg-<slice-id>.md
+   ```
 
-#### Worker `status == "error"`
+Set stage to `pr-in-fix`, update state/logs, and report `AUTO: sent /smithy.fix for <slice-id>`.
 
-Stop babysit for that slice and hand it to `legate.error`. Opaque worker failures are not PR-state mechanics: they may be auth prompts, resume pickers, stale agent-deck status, transient crashes, or real tool failures. Load `Skill(skill="legate.error")` and let that skill inspect and choose the recovery action.
+If you cannot classify the failure confidently, do not guess. Reply with `NEED:` and include the failed check names/URLs and the uncertainty.
 
-#### All clear
+### 4. Handle Loop Send Failures
 
-`state == "OPEN"` AND `checks == "PASS"` AND `thread_count == 0` AND `mergeable != "CONFLICTING"` → no action. Report on the heartbeat reply.
+For loop requests such as:
+
+- `processor failed to send conflict-resolution prompt`
+- `processor failed to send review-thread /smithy.fix`
+- `processor failed to send login-refresh resume prompt`
+
+First inspect `detail`. If the failure is a stale session id, missing worker, or auth/login block, hand off to `legate.error` or surface `NEED:`. If the failure was transient and the intended action is still valid, resend using the appropriate script in this skill and update `state.json` exactly once.
+
+### 5. Persistent Conflicts
+
+If the loop already sent the first conflict-resolution prompt and the PR is still `CONFLICTING` on a later check, do not blindly resend. Inspect the PR and worker output if needed, then either:
+
+- `NEED:` with the conflicting paths and why another automated rebase is unsafe, or
+- send a targeted `/smithy.fix` via `send-to-worker.sh` if the next action is obvious and same-PR amendment is still safe.
+
+### 6. Worker Inventory
+
+Use worker inventory only for context or stale-session diagnosis:
+
+```bash
+.claude/skills/legate.babysit/scripts/list-workers.sh {{PROFILE}} {{WORKER_GROUP}}
+```
+
+Do not use this skill to launch new workers. Smithy dispatch belongs to the loop; operator issue intake belongs to `legate.issue`.
 
 {{>verification-rule}}
 
@@ -175,23 +139,20 @@ Stop babysit for that slice and hand it to `legate.error`. Opaque worker failure
 
 ---
 
-## Operation reference
+## Operation Reference
 
-| Operation | Script | Returns |
+| Operation | Script | Use |
 |---|---|---|
-| List workers | `list-workers.sh <profile> <worker-group>` | JSON array of workers (id, title, status, branch, worktree, parent) |
-| Discover a worker's PR | `discover-pr.sh <profile> <session-id> <repo> [<since>]` | JSON `{number, url, headRefName, state, ...}` or `{}` if no PR |
-| Babysit a PR | `babysit-pr.sh <repo> <pr-num>` | JSON with full PR state (see schema above) |
-| Send a fix message | `send-to-worker.sh <profile> <session-id> <msg-file>` | Worker's reply text |
-| Request rebase (clean) | `request-rebase.sh <profile> <session-id> <worktree-path>` | Worker's reply (new HEAD sha or conflict description) |
-| Request conflict resolution | `request-conflict-resolution.sh <profile> <session-id> <worktree-path> <default-branch> <pr-num>` | Worker's reply (resolved sha or design-disagreement description) |
-| Re-trigger CI | `rerun-ci.sh <repo> <run-id>` | gh's confirmation line |
+| Inspect PR | `babysit-pr.sh <repo> <pr-num>` | Refresh facts before judgement |
+| Send worker message | `send-to-worker.sh <profile> <session-id> <msg-file>` | Same-PR `/smithy.fix` only |
+| Request rebase | `request-rebase.sh <profile> <session-id> <worktree-path>` | Stale-main CI failure |
+| Re-trigger CI | `rerun-ci.sh <repo> <run-id>` | Transient CI failure |
+| List workers | `list-workers.sh <profile> <worker-group>` | Diagnosis only |
 
-All scripts emit JSON or status text to stdout, progress to stderr, and exit 0/1/2 for success/op-failure/invalid-input.
+## Standing Rules
 
-## Standing rules (mirror of CLAUDE.md)
-
-- **One PR per Smithy step. Never chain.** A merged PR is the only event that unblocks the next step. Babysit itself never calls `gh pr merge` — a merge is owned by `legate.merge` (under a strict gate) or by the operator clicking Merge in the UI; this skill only *detects* the merge (`state == "MERGED"`) and transitions the slice to `merged`.
-- **`/smithy.fix` re-uses the existing worker** (same-PR amendment); never launch a fresh worker for a fix.
-- **Always escalate when about to bypass a merge gate.** Surface a `NEED:` note instead of acting.
-- **Direct `agent-deck` and `gh run` invocations stall the classifier.** If you need an operation that isn't covered by a script here, file a follow-up to extend this skill rather than composing inline.
+- One Smithy step equals one PR. Never chain into new work from this skill.
+- `/smithy.fix` reuses the existing worker and PR.
+- Merge decisions belong to `legate.merge` or the operator.
+- Discovery, routine review-thread fixes, first conflict prompts, and all-clear transitions belong to the deterministic loop.
+- If acting would bypass a merge gate or duplicate a loop action, stop and surface `NEED:`.

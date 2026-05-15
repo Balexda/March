@@ -46,7 +46,7 @@ For every worker in `state.json.slices` (and any worker in `{{WORKER_GROUP}}` no
 2. If `stuck=true`:
    - Run `select-resume-summary.sh {{PROFILE}} <worker_session_id>`. This types `"1"` into the worker session and returns immediately (no `--wait`).
    - **Update `state.json`** for the tracked slice: set `slices.<id>.resume_pending = "selected"` and `slices.<id>.last_action = "<ISO-8601 now>"` and `slices.<id>.last_action_note = "resume picker detected; sent '1' to select Resume-from-summary"`.
-   - **Skip every other skill's dispatch to this worker for this heartbeat.** Babysit/merge/cleanup/dispatch must not touch a worker whose `resume_pending == "selected"` and whose picker may still be in the middle of being cleared. The simplest implementation: pass the set of resume-pending slice IDs forward and have those skills no-op on them this tick.
+   - **Skip every other skill's dispatch to this worker for this heartbeat.** Babysit/merge must not touch a worker whose `resume_pending == "selected"` and whose picker may still be in the middle of being cleared. The simplest implementation: pass the set of resume-pending slice IDs forward and have those skills no-op on them this tick.
    - Surface `AUTO: <slice-id> worker session showed Resume-from-summary picker — sent '1' to clear; nudge on next heartbeat`.
 3. If the worker is not tracked in `state.json.slices` (stray session in `{{WORKER_GROUP}}`), still run `select-resume-summary.sh`, but skip the state.json update — there's no slice to flag. Surface `AUTO: stray worker <session-id> showed Resume-from-summary picker — sent '1' to clear (no tracked slice)`.
 
@@ -72,7 +72,7 @@ For every slice in `state.json.slices` with `resume_pending == "selected"`:
    ```
 7. Surface `AUTO: <slice-id> resumed from summary at stage=<stage> — nudged worker to continue`.
 
-After Phase B runs, the rest of the heartbeat (babysit → merge → cleanup → dispatch) proceeds as normal. The slice now has the worker re-engaged and any follow-up CI / review / merge work is back in babysit's lane.
+After Phase B runs, the rest of the heartbeat (loop escalations → merge) proceeds as normal. The slice now has the worker re-engaged and any follow-up CI / review / merge work is back in the loop's lane, with judgement escalations routed to babysit.
 
 ---
 
@@ -185,12 +185,12 @@ Semantics:
 
 When clearing the field, **delete the key entirely** rather than setting it to `null` or `""` — the state.json schema treats absence as the canonical "no resume cycle" state, and keeping zombie nulls around makes it harder for operators to grep `state.json` for genuinely-pending slices.
 
-The field is **not** carried into `archived_slices` when cleanup moves a slice over; resume state is an in-flight concern only.
+The field is **not** carried into `archived_slices` when the loop moves a slice over; resume state is an in-flight concern only.
 
 ## Standing rules
 
 - **Load first on every heartbeat.** Resume detection must precede every other skill's dispatch — a stuck picker silently eats `agent-deck session send` keystrokes, so any earlier dispatch is lost.
-- **Other skills skip resume-pending slices for the rest of the heartbeat.** A slice with `resume_pending == "selected"` is mid-clear; babysit/merge/cleanup/dispatch must not touch its worker until Phase B clears the flag.
+- **Other skills skip resume-pending slices for the rest of the heartbeat.** A slice with `resume_pending == "selected"` is mid-clear; babysit/merge must not touch its worker until Phase B clears the flag.
 - **Always select option 1.** Option 2 (full session) is the usage-limit hit Claude is warning about; option 3 (Don't ask again) is a persistent global setting that the operator owns, not the conductor.
 - **One re-send, then escalate.** If the picker is still up after two consecutive heartbeats of `select-resume-summary.sh`, surface `NEED:` rather than retrying — the assumption that the TUI is consuming our keystrokes has failed.
 - **Stray workers get the picker cleared, not nudged.** A worker session in `{{WORKER_GROUP}}` without a tracked slice in `state.json` still benefits from clearing — leaving it stuck wastes a slot. But there's no stage to anchor a nudge against, so skip Phase B for that worker.
