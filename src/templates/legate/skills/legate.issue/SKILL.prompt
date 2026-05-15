@@ -144,7 +144,7 @@ Notes:
 
 ```
 .claude/skills/legate.issue/scripts/launch-issue-worker.sh \
-  {{PROFILE}} {{REPO_PATH}} "<slice-title>" {{WORKER_GROUP}} <branch> ./issue-msg-<N>.md
+  {{PROFILE}} {{REPO_PATH}} "<slice-title>" {{WORKER_GROUP}} <branch> ./issue-msg-<N>.md issue-<N>
 ```
 
 Args:
@@ -152,6 +152,7 @@ Args:
 - **`slice-title`**: `issue: #<N> <short-title>`, where `<short-title>` is the first ~40 characters of the issue title with newlines replaced by spaces. Example: `issue: #42 conductor wedges on empty smithy status`.
 - **`branch`**: `issue/<N>-<slugified-title-prefix>`. Example: `issue/42-conductor-wedges-on-empty-smithy-status`. Slugify with the same rules as `march`'s slug helper: lowercase, replace runs of non-alphanumerics with `-`, trim leading/trailing `-`, cap to ~50 chars after the `issue/<N>-` prefix.
 - **`./issue-msg-<N>.md`**: the prompt file from step 4.
+- **`issue-<N>`**: the state slice id. The launcher stages the same prompt to `./dispatch-msg-issue-<N>.md` so `legate.babysit` can recover a revived worker that lost its original launch message.
 
 The script atomically creates the worktree on `<branch>`, launches the Claude session under `{{WORKER_GROUP}}`, locks the title, pins `--permission-mode auto`, and sends the message file's contents as the initial prompt (file-based send because the prompt contains newlines and code fences — inline `-m` would force shell-escape constructs that auto-mode flags).
 
@@ -211,7 +212,7 @@ If the issue is closed, fetch failed, or sync failed, replace the `AUTO:` line w
 |---|---|---|
 | Fetch issue detail | `fetch-issue.sh <repo-path> <issue-number>` | JSON `{number, title, body, url, author, labels, state, comments[]}` |
 | Sync default branch | `sync-default-branch.sh <repo-path>` | JSON `{default_branch, synced, head}` |
-| Launch worker for issue | `launch-issue-worker.sh <profile> <repo> <title> <group> <branch> <prompt-file>` | JSON `{session_id, branch, worktree_path}` |
+| Launch worker for issue | `launch-issue-worker.sh <profile> <repo> <title> <group> <branch> <prompt-file> <slice-id>` | JSON `{session_id, branch, worktree_path}` |
 
 All scripts emit JSON to stdout, progress to stderr, and exit 0/1/2 for success/op-failure/invalid-input.
 

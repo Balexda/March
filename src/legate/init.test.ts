@@ -337,6 +337,12 @@ describe("legate module", () => {
       expect(loop).toContain("function cleanupTerminalPrs");
       expect(loop).toContain("function runDispatch");
       expect(loop).toContain("function readySmithyItems");
+      expect(loop).toContain("hashText(dispatchItemKey(item))");
+      expect(loop).toContain("function forgeNodeId");
+      expect(loop).toContain("status?.graph?.nodes");
+      expect(loop).toContain("function dependencySatisfied");
+      expect(loop).toContain("dispatchSliceId(depItem)");
+      expect(loop).toContain("dependenciesClear(state, status, item)");
       expect(loop).toContain('"hatchery"');
       expect(loop).toContain('"--backend"');
       expect(loop).toContain('"codex"');
@@ -1084,6 +1090,19 @@ describe("legate module", () => {
         // succeed but direct invocation pauses on a permission-denied prompt.
         expect(fs.statSync(p).mode & 0o111).not.toBe(0);
       }
+      const launcher = fs.readFileSync(
+        path.join(scriptsDir, "launch-issue-worker.sh"),
+        "utf-8",
+      );
+      expect(launcher).toContain("if [[ $# -ne 7 ]]");
+      expect(launcher).toContain('SLICE_ID="$7"');
+      expect(launcher).toContain('DISPATCH_MSG_PATH="./dispatch-msg-${SLICE_ID}.md"');
+      expect(launcher).toContain('printf \'%s\\n\' "$PROMPT" >"$DISPATCH_MSG_PATH"');
+      expect(() =>
+        execFileSync("bash", ["-n", path.join(scriptsDir, "launch-issue-worker.sh")], {
+          stdio: "pipe",
+        }),
+      ).not.toThrow();
     });
 
     it("stages legate.error with its worker-error recovery scripts", async () => {

@@ -17,7 +17,7 @@
 #      changes their runtime posture.
 #
 # Usage:
-#   launch-issue-worker.sh <profile> <repo-path> <slice-title> <worker-group> <branch> <prompt-file>
+#   launch-issue-worker.sh <profile> <repo-path> <slice-title> <worker-group> <branch> <prompt-file> <slice-id>
 #
 # Stdout: JSON `{"session_id": "...", "title": "...", "branch": "...",
 #                "worktree_path": "...", "status": "..."}` derived by querying
@@ -28,8 +28,8 @@
 #   2 invalid input
 set -euo pipefail
 
-if [[ $# -ne 6 ]]; then
-  echo "usage: launch-issue-worker.sh <profile> <repo-path> <slice-title> <worker-group> <branch> <prompt-file>" >&2
+if [[ $# -ne 7 ]]; then
+  echo "usage: launch-issue-worker.sh <profile> <repo-path> <slice-title> <worker-group> <branch> <prompt-file> <slice-id>" >&2
   echo "  Pass the worker's initial prompt as a path to a file (use the Write" >&2
   echo "  tool to create it under cwd; that's auto-approved). Inline messages" >&2
   echo "  with newlines force shell-escape constructs that auto-mode pauses on." >&2
@@ -42,6 +42,7 @@ TITLE="$3"
 GROUP="$4"
 BRANCH="$5"
 PROMPT_FILE="$6"
+SLICE_ID="$7"
 
 if [[ ! -d "$REPO/.git" && ! -f "$REPO/.git" ]]; then
   echo "not a git repo: $REPO" >&2
@@ -68,6 +69,13 @@ if [[ -z "$PROMPT" ]]; then
   echo "prompt file is empty: $PROMPT_FILE" >&2
   exit 2
 fi
+if [[ ! "$SLICE_ID" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]]; then
+  echo "invalid slice-id (must match ^[a-zA-Z0-9][a-zA-Z0-9._-]*$): $SLICE_ID" >&2
+  exit 2
+fi
+
+DISPATCH_MSG_PATH="./dispatch-msg-${SLICE_ID}.md"
+printf '%s\n' "$PROMPT" >"$DISPATCH_MSG_PATH"
 
 echo "launching issue worker: title='$TITLE' branch='$BRANCH' prompt-bytes=${#PROMPT}" >&2
 

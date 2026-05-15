@@ -1719,8 +1719,10 @@ function dispatchSliceId(item) {
   const action = item?.next_action || {};
   const verb = smithyVerb(action.command);
   const args = actionArguments(action);
-  const basis = item?.path || item?.title || args.join(" ") || verb;
-  return slugifyDispatchPart(basis, "smithy") + "-" + slugifyDispatchPart(verb, "step");
+  const basis = [item?.path || item?.title || "smithy", ...args].join(" ");
+  const stem = slugifyDispatchPart(basis, "smithy").slice(0, 44);
+  const hash = hashText(dispatchItemKey(item)).slice(0, 8);
+  return stem + "-" + slugifyDispatchPart(verb, "step") + "-" + hash;
 }
 
 function dispatchTitle(item) {
@@ -1733,8 +1735,9 @@ function dispatchTitle(item) {
 function dispatchBranch(item) {
   const action = item?.next_action || {};
   const verb = slugifyDispatchPart(smithyVerb(action.command), "step");
-  const stem = slugifyDispatchPart(item?.title || item?.path || actionArguments(action).join(" "), "work");
-  return "smithy/" + verb + "/" + stem;
+  const stem = slugifyDispatchPart([item?.title || item?.path || "work", ...actionArguments(action)].join(" "), "work").slice(0, 44);
+  const hash = hashText(dispatchItemKey(item)).slice(0, 8);
+  return "smithy/" + verb + "/" + stem + "-" + hash;
 }
 
 function isTerminalSlice(slice) {
@@ -1748,30 +1751,62 @@ function alreadyHasInFlightSlice(state, item, sliceId) {
   const slices = state?.slices && typeof state.slices === "object" ? state.slices : {};
   const key = dispatchItemKey(item);
   for (const [existingId, slice] of Object.entries(slices)) {
-    if (!slice || typeof slice !== "object" || isTerminalSlice(slice)) continue;
     if (existingId === sliceId) return true;
+    if (!slice || typeof slice !== "object" || isTerminalSlice(slice)) continue;
     if (sliceActionKey(slice) === key) return true;
     if (slice.branch && slice.branch === dispatchBranch(item)) return true;
   }
   return false;
 }
 
-function dependencyIds(item) {
-  const raw =
-    item?.dependencies ||
-    item?.depends_on ||
-    item?.next_action?.dependencies ||
-    item?.next_action?.depends_on ||
-    [];
-  if (!Array.isArray(raw)) return [];
+function graphNodes(status) {
+  return status?.graph?.nodes && typeof status.graph.nodes === "object"
+    ? status.graph.nodes
+    : {};
+}
+
+function graphNode(status, nodeId) {
+  const nodes = graphNodes(status);
+  return nodeId ? nodes[nodeId] || null : null;
+}
+
+function forgeRowId(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  return /^[a-zA-Z]/.test(raw) ? raw : "S" + raw;
+}
+
+function forgeNodeId(item) {
+  const args = actionArguments(item?.next_action || {});
+  const tasksPath = args[0] || item?.path || "";
+  const rowId = forgeRowId(args[1]);
+  if (!tasksPath || !rowId) return null;
+  return tasksPath + "#" + rowId;
+}
+
+function recordRowForForgeItem(status, item) {
+  const args = actionArguments(item?.next_action || {});
+  const tasksPath = args[0] || item?.path || "";
+  const rowId = forgeRowId(args[1]);
+  if (!tasksPath || !rowId) return null;
+  const records = Array.isArray(status?.records) ? status.records : [];
+  const record = records.find((candidate) => candidate?.path === tasksPath);
+  const rows = Array.isArray(record?.dependency_order?.rows)
+    ? record.dependency_order.rows
+    : [];
+  return rows.find((row) => String(row?.id || "") === rowId) || null;
+}
+
+function dependencyIds(status, item) {
+  const nodeId = forgeNodeId(item);
+  const node = graphNode(status, nodeId);
+  const row = node?.row || recordRowForForgeItem(status, item) || {};
+  const raw = Array.isArray(row?.depends_on) ? row.depends_on : [];
+  const recordPath = String(node?.record_path || actionArguments(item?.next_action || {})[0] || item?.path || "");
   return raw
-    .map((dep) => {
-      if (typeof dep === "string") return dep;
-      if (dep && typeof dep === "object") return dep.id || dep.slice_id || dep.path || dep.title || "";
-      return "";
-    })
-    .map((dep) => String(dep).trim())
-    .filter(Boolean);
+    .map((dep) => String(dep || "").trim())
+    .filter(Boolean)
+    .map((dep) => dep.includes("#") ? dep : recordPath + "#" + dep);
 }
 
 function dependencyMerged(state, depId) {
@@ -1784,12 +1819,42 @@ function dependencyMerged(state, depId) {
     if (archivedSlice.terminal_state === "MERGED" || archivedSlice.merged_at) return true;
   }
   const liveSlice = live[depId] || live[slugifyDispatchPart(depId)];
-  if (liveSlice && typeof liveSlice === "object" && liveSlice.pr?.state === "MERGED") return true;
+  if (liveSlice && typeof liveSlice === "object") {
+    if (liveSlice.stage === "merged" || liveSlice.pr?.state === "MERGED") return true;
+  }
   return false;
 }
 
-function dependenciesClear(state, item) {
-  return dependencyIds(item).every((depId) => dependencyMerged(state, depId));
+function itemFromGraphNode(node) {
+  const recordPath = String(node?.record_path || "");
+  const row = node?.row && typeof node.row === "object" ? node.row : {};
+  const rowId = String(row.id || "").trim();
+  const rowNumber = rowId.replace(/^[a-zA-Z]+/, "") || rowId;
+  return {
+    path: recordPath,
+    title: row.title || recordPath,
+    next_action: {
+      command: "smithy.forge",
+      arguments: [recordPath, rowNumber],
+    },
+  };
+}
+
+function dependencySatisfied(state, status, depId) {
+  const node = graphNode(status, depId);
+  const nodeStatus = String(node?.status || "").toLowerCase();
+  if (nodeStatus === "done") return true;
+  const depItem = node ? itemFromGraphNode(node) : null;
+  const candidates = [
+    depId,
+    depItem ? dispatchSliceId(depItem) : null,
+    slugifyDispatchPart(depId),
+  ].filter(Boolean);
+  return candidates.some((candidate) => dependencyMerged(state, candidate));
+}
+
+function dependenciesClear(state, status, item) {
+  return dependencyIds(status, item).every((depId) => dependencySatisfied(state, status, depId));
 }
 
 function dispatchPriority(item) {
@@ -1931,7 +1996,7 @@ function runDispatch(state, ts) {
   for (const item of ready) {
     const sliceId = dispatchSliceId(item);
     if (alreadyHasInFlightSlice(state, item, sliceId)) continue;
-    if (String(item.next_action?.command || "") === "smithy.forge" && !dependenciesClear(state, item)) continue;
+    if (String(item.next_action?.command || "") === "smithy.forge" && !dependenciesClear(state, status, item)) continue;
 
     try {
       if (!synced) {
