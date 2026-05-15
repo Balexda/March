@@ -337,6 +337,8 @@ describe("legate module", () => {
       expect(loop).toContain("function cleanupTerminalPrs");
       expect(loop).toContain("function runDispatch");
       expect(loop).toContain("function readySmithyItems");
+      expect(loop).toContain("function execMarch");
+      expect(loop).toContain("meta.march_cli_path");
       expect(loop).toContain("hashText(dispatchItemKey(item))");
       expect(loop).toContain("function forgeNodeId");
       expect(loop).toContain("status?.graph?.nodes");
@@ -355,6 +357,7 @@ describe("legate module", () => {
       expect(meta.paired_legate).toBe("march-legate-agent");
       expect(meta.loop_name).toBe("march-legate-loop");
       expect(meta.processor_name).toBe("march-legate-loop");
+      expect(meta.march_cli_path).toBeTruthy();
       expect(meta.legate_state_path).toBe(
         path.join(home, ".agent-deck", "conductor", "march-legate-agent", "state.json"),
       );
@@ -391,6 +394,27 @@ describe("legate module", () => {
         path.join(home, ".agent-deck", "conductor", "legate-smithy-loop"),
       );
       expect(result.processorSetupCommand).toContain("legate-smithy-loop");
+    });
+
+    it("pairs the bare legate-agent name with legate-loop", async () => {
+      const home = makeTmpDir();
+      const tplDir = makeTemplateDir("ok");
+
+      const result = await initLegate({
+        repoPath: "/some/repo/SmithyCli",
+        homeDir: home,
+        templateDir: tplDir,
+        runSetup: false,
+        conductorName: "legate-agent",
+      });
+
+      expect(result.conductorName).toBe("legate-agent");
+      expect(result.loopName).toBe("legate-loop");
+      expect(result.processorName).toBe("legate-loop");
+      expect(result.processorConductorDir).toBe(
+        path.join(home, ".agent-deck", "conductor", "legate-loop"),
+      );
+      expect(result.processorSetupCommand).toContain("legate-loop");
     });
 
     it("keeps processor names valid for long custom conductor names", async () => {

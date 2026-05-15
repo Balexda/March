@@ -528,8 +528,8 @@ function repoHashSuffix(repoPath: string): string {
 }
 
 function deriveLoopName(conductorName: string): string {
-  const raw = conductorName.endsWith("-legate-agent")
-    ? `${conductorName.slice(0, -"-legate-agent".length)}-legate-loop`
+  const raw = conductorName === "legate-agent" || conductorName.endsWith("-legate-agent")
+    ? `${conductorName.slice(0, -"legate-agent".length)}legate-loop`
     : `${conductorName}-loop`;
   if (raw.length <= CONDUCTOR_NAME_MAX_LEN) return raw;
 
@@ -649,6 +649,7 @@ function loopMetaFor(input: {
       name: input.repoName,
       path: input.repoPath,
     },
+    march_cli_path: process.argv[1] ? path.resolve(process.argv[1]) : null,
     worker_group: input.workerGroup,
     legate_state_path: path.join(input.legateConductorDir, "state.json"),
     loop_log_path: path.join(input.loopConductorDir, "legate-loop.log"),
@@ -722,6 +723,14 @@ function execText(command, args, options = {}) {
     stdio: ["ignore", "pipe", "pipe"],
     ...options,
   });
+}
+
+function execMarch(args, options = {}) {
+  const cliPath = meta.march_cli_path;
+  if (typeof cliPath === "string" && cliPath.length > 0) {
+    return execText(process.execPath, [cliPath, ...args], options);
+  }
+  return execText("march", args, options);
 }
 
 function formatCleanupLine(event, prefix = "") {
@@ -1948,7 +1957,7 @@ function runHatcheryDispatch(item) {
     buildSmithySpawnPrompt(item),
     "--json",
   ];
-  const out = execText("march", args, { cwd: repoPath });
+  const out = execMarch(args, { cwd: repoPath });
   return JSON.parse(out);
 }
 
