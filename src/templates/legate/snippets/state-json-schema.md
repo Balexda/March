@@ -27,10 +27,10 @@ Maintain a slim, structured state file across compactions:
       "artifact_path": "specs/...",
       "hatchery": { "spawn_id": "...", "backend": "codex", "artifacts_dir": "...", "patch_path": "...", "spawn_output_path": "...", "metadata_path": "..." },
       "pr_open_at": "2026-05-11T17:00:00Z (set by babysit each time the slice transitions to pr-open; used to detect new reviewer comments in single-user setups)",
-      "resume_pending (optional; omitted when not in a resume cycle)": "selected",
-      "login_blocked_at (optional; omitted unless Claude Code auth is stale)": "2026-05-14T17:00:00Z",
-      "login_blocked_session_id (optional)": "...",
-      "login_blocked_reason (optional)": "claude_api_401_login_required",
+      "resume_pending": "selected",
+      "login_blocked_at": "2026-05-14T17:00:00Z",
+      "login_blocked_session_id": "...",
+      "login_blocked_reason": "claude_api_401_login_required",
       "last_action": "2026-05-04T18:30:00Z",
       "last_action_note": "Launched cut: spawn-dispatch US5 via /smithy.cut"
     }
