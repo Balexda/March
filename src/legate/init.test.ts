@@ -318,8 +318,11 @@ describe("legate module", () => {
       expect(loop).toContain("claude_api_401_login_required");
       expect(loop).toContain("function hasClaudeLoginBlock");
       expect(loop).toContain("login-resume");
+      expect(loop).toContain("function workerErrorRequestKey");
+      expect(loop).toContain('return `worker-error:${sessionId}:${stage}:${pr}:${outputHash}`');
       expect(loop).toContain("function workerErrorDetail");
       expect(loop).toContain("agent-deck error state");
+      expect(loop).not.toContain("restartWorker(");
       expect(loop).toContain("] heartbeat slice_count=");
       expect(loop).toContain("function formatCleanupLine");
       expect(loop).toContain("${prefix}cleaned up");
