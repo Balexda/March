@@ -3,7 +3,8 @@
   "smithyVersion": "0.4.6",
   "deployLocation": "repo",
   "agents": [
-    "claude"
+    "claude",
+    "codex"
   ],
   "permissions": false,
   "issueTemplates": false,
@@ -47,6 +48,7 @@
       ".claude/skills/smithy.pr-review/scripts/reply-comment.sh",
       ".claude/skills/smithy.status/SKILL.md",
       ".claude/hooks/smithy-session-title.mjs"
-    ]
+    ],
+    "codex": []
   }
 }
