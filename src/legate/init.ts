@@ -1408,6 +1408,38 @@ Threads:
 \${reviewThreadsSummary(threads)}\`;
 }
 
+function addBranchVariants(branches, value) {
+  const raw = String(value || "").trim();
+  if (!raw) return;
+  const normalized = raw.replace(/^refs\\/heads\\//, "");
+  branches.add(normalized);
+  if (normalized.startsWith("feature/")) {
+    branches.add(normalized.slice("feature/".length));
+  } else {
+    branches.add(\`feature/\${normalized}\`);
+  }
+}
+
+function expectedPrBranches(slice) {
+  const branches = new Set();
+  addBranchVariants(branches, slice.actual_branch);
+  addBranchVariants(branches, slice.branch);
+  if (slice.worktree_path) {
+    try {
+      addBranchVariants(branches, execText("git", ["-C", slice.worktree_path, "branch", "--show-current"]));
+    } catch {
+      // Best-effort guard only; branch fields still protect PR discovery.
+    }
+  }
+  return branches;
+}
+
+function prMatchesSliceBranch(slice, pr) {
+  const branches = expectedPrBranches(slice);
+  if (branches.size === 0) return false;
+  return branches.has(String(pr?.head_branch || pr?.headRefName || ""));
+}
+
 function discoverPrForSlice(slice, state, sessionId) {
   const repoPath = state?.repo?.path || meta.repo?.path;
   if (!repoPath) return null;
@@ -1418,7 +1450,7 @@ function discoverPrForSlice(slice, state, sessionId) {
       const url = matches[matches.length - 1];
       const number = url.split("/").pop();
       const pr = queryPrForBabysit({ pr: { number } }, state);
-      return pr?.skipped ? null : pr;
+      return pr?.skipped || !prMatchesSliceBranch(slice, pr) ? null : pr;
     }
   } catch {
     // fall through to branch-based lookup
@@ -1434,11 +1466,8 @@ function discoverPrForSlice(slice, state, sessionId) {
     const candidates = since
       ? list.filter((candidate) => String(candidate.createdAt || "") >= since)
       : list;
-    const expectedBranch = slice.actual_branch || slice.branch || "";
-    const branchMatches = expectedBranch
-      ? candidates.filter((candidate) => candidate.headRefName === expectedBranch)
-      : [];
-    const chosen = (branchMatches.length > 0 ? branchMatches : candidates)
+    const branchMatches = candidates.filter((candidate) => prMatchesSliceBranch(slice, candidate));
+    const chosen = branchMatches
       .sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")))[0];
     if (!chosen) return null;
     return queryPrForBabysit({ pr: { number: chosen.number } }, state);
@@ -1667,7 +1696,7 @@ function runBabysit(state, workerList, ts) {
       continue;
     }
 
-    if (pr.checks === "PASS" && pr.thread_count === 0 && pr.mergeable !== "CONFLICTING") {
+    if (pr.checks === "PASS" && pr.needs_response_count === 0 && pr.mergeable !== "CONFLICTING") {
       if (["pr-in-fix", "pr-resolving-conflicts", "pr-rebasing", "pr-in-rerun", "implementing"].includes(slice.stage)) {
         slice.stage = "pr-open";
         slice.pr_open_at = ts;

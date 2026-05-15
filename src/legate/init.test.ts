@@ -316,6 +316,11 @@ describe("legate module", () => {
       expect(loop).toContain("processor_requests_path");
       expect(loop).toContain("review-fix");
       expect(loop).toContain("conflict-fix");
+      expect(loop).toContain("function expectedPrBranches");
+      expect(loop).toContain("function prMatchesSliceBranch");
+      expect(loop).toContain("!prMatchesSliceBranch(slice, pr) ? null : pr");
+      expect(loop).toContain("candidates.filter((candidate) => prMatchesSliceBranch(slice, candidate))");
+      expect(loop).toContain('pr.checks === "PASS" && pr.needs_response_count === 0');
       expect(loop).toContain("CI failure requires Legate judgement");
       expect(loop).toContain("worker_session_error");
       expect(loop).toContain("claude_api_401_login_required");
