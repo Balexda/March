@@ -815,6 +815,7 @@ exit 0
     const agentDeckInvocations = fs.readFileSync(agentDeckLog, "utf-8");
     expect(agentDeckInvocations).toMatch(/^launch /m);
     expect(agentDeckInvocations).toContain("--worktree smithy/cut/generated");
+    expect(agentDeckInvocations).toContain("--extra-arg --model --extra-arg sonnet");
     expect(agentDeckInvocations).toMatch(/^session send manager-session /m);
 
     const worktreeParent = path.join(path.dirname(repoRoot), "agent-deck-worktrees");

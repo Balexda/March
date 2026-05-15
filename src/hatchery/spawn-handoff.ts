@@ -79,6 +79,7 @@ export interface HatcherySpawnResult {
 }
 
 export const DEFAULT_MANAGER_GROUP = "march-spawn-managers";
+export const DEFAULT_MANAGER_MODEL = "sonnet";
 
 const EXEC_MAX_BUFFER = 16 * 1024 * 1024;
 
@@ -292,6 +293,10 @@ export function launchAgentDeckManager(input: {
     input.branch,
     "-b",
     "--title-lock",
+    "--extra-arg",
+    "--model",
+    "--extra-arg",
+    DEFAULT_MANAGER_MODEL,
   ];
 
   try {
