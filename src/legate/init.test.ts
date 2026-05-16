@@ -410,6 +410,105 @@ describe("legate module", () => {
       expect(result.summary).toContain("terminal PR maintenance");
     });
 
+    // The functions below live inside the LEGATE_LOOP_MJS template literal
+    // and run only inside the deployed loop process, so we can't import them
+    // directly. We extract each function's source via regex and reconstruct
+    // a callable with `new Function`. The goal is to test the *behavior* of
+    // the generated code — substring assertions higher up missed three real
+    // bugs (runner syntax, stub-archive dedup, escalated dedup) that these
+    // tests now lock in.
+    async function stageLoop(home: string): Promise<string> {
+      const tplDir = makeTemplateDir("ok");
+      const result = await initLegate({
+        repoPath: "/some/repo/March",
+        homeDir: home,
+        templateDir: tplDir,
+        runSetup: false,
+      });
+      return path.join(result.processorStagingDir!, "legate-loop.mjs");
+    }
+
+    function extractFn(loopSrc: string, name: string): Function {
+      const re = new RegExp(`function ${name}\\([^)]*\\)\\s*\\{[\\s\\S]+?\\n\\}`);
+      const match = loopSrc.match(re);
+      if (!match) throw new Error(`could not extract function ${name}`);
+      // eslint-disable-next-line @typescript-eslint/no-implied-eval
+      return new Function(`${match[0]}; return ${name};`)();
+    }
+
+    it("generated hatchery runner code parses as valid JavaScript", async () => {
+      // Regression guard for the escape bug where "\\n" in the template
+      // literal collapsed to a real newline inside the runner's "..." string
+      // literal, producing a SyntaxError that silently killed every spawn.
+      const loop = fs.readFileSync(await stageLoop(makeTmpDir()), "utf-8");
+      const hatcheryRunnerCode = extractFn(loop, "hatcheryRunnerCode") as () => string;
+      const runner = hatcheryRunnerCode();
+      expect(() => new Function(runner)).not.toThrow();
+      // Also confirm node -e accepts it — this is what the loop actually does.
+      expect(() =>
+        execFileSync(process.execPath, ["--check", "-"], { input: runner, stdio: "pipe" }),
+      ).not.toThrow();
+    });
+
+    it("generated hatchery runner writes an error result when the spawn exits non-zero", async () => {
+      // End-to-end: build the runner, run it against a request that fails,
+      // verify it writes the expected error JSON and stderr log. Catches both
+      // the syntax bug (runner wouldn't execute at all) and any future
+      // regression in the success/failure branching.
+      const home = makeTmpDir();
+      const loop = fs.readFileSync(await stageLoop(home), "utf-8");
+      const hatcheryRunnerCode = extractFn(loop, "hatcheryRunnerCode") as () => string;
+      const requestPath = path.join(home, "req.json");
+      const resultPath = path.join(home, "result.json");
+      const logPath = path.join(home, "result.log");
+      fs.writeFileSync(
+        requestPath,
+        JSON.stringify({
+          command: "/bin/sh",
+          args: ["-c", "printf 'boom\\n' 1>&2; exit 7"],
+          cwd: home,
+          resultPath,
+          logPath,
+        }),
+      );
+      execFileSync(process.execPath, ["-e", hatcheryRunnerCode(), requestPath], { stdio: "pipe" });
+      const result = JSON.parse(fs.readFileSync(resultPath, "utf-8"));
+      expect(result.exitCode).toBe(7);
+      expect(String(result.error)).toContain("boom");
+      expect(fs.readFileSync(logPath, "utf-8")).toContain("boom");
+    });
+
+    it("isStubArchivedSlice distinguishes legacy stubs from real archive entries", async () => {
+      // Regression guard for the smithy outage where 8 legacy stub archive
+      // entries (cmd=null, branch=null) silently blocked every fresh
+      // dispatch via SID collision.
+      const loop = fs.readFileSync(await stageLoop(makeTmpDir()), "utf-8");
+      const isStub = extractFn(loop, "isStubArchivedSlice") as (s: unknown) => boolean;
+      expect(isStub(null)).toBe(true);
+      expect(isStub({})).toBe(true);
+      expect(isStub({ command: null, arguments: null, branch: null })).toBe(true);
+      expect(isStub({ command: "smithy.forge" })).toBe(false);
+      expect(isStub({ branch: "smithy/forge/x-abc12345" })).toBe(false);
+      expect(isStub({ actual_branch: "feature/smithy/forge/x" })).toBe(false);
+    });
+
+    it("sliceReleasesArtifact treats only merged slices as releasing the artifact", async () => {
+      // Regression guard for the dedup bug where escalated slices were
+      // treated as terminal, allowing the loop to re-dispatch artifacts an
+      // operator had explicitly stood down.
+      const loop = fs.readFileSync(await stageLoop(makeTmpDir()), "utf-8");
+      const releases = extractFn(loop, "sliceReleasesArtifact") as (s: unknown) => boolean;
+      expect(releases({ stage: "merged" })).toBe(true);
+      expect(releases({ pr: { state: "MERGED" } })).toBe(true);
+      // Anything else — including escalated and closed-unmerged — must
+      // continue to block re-dispatch.
+      expect(releases({ stage: "escalated" })).toBe(false);
+      expect(releases({ stage: "implementing" })).toBe(false);
+      expect(releases({ pr: { state: "CLOSED" } })).toBe(false);
+      expect(releases({})).toBe(false);
+      expect(releases(null)).toBe(false);
+    });
+
     it("derives the processor name from the selected conductor name", async () => {
       const home = makeTmpDir();
       const tplDir = makeTemplateDir("ok");
