@@ -3,7 +3,22 @@
 **Spec Folder**: `2026-05-10-003-multi-backend-execution-interface`
 **Branch**: `feature/smithy/mark/01-spawn-f3` *(orchestrator-staged linked worktree; preserved per Branch Selection Policy because the cwd is a non-default linked worktree)*
 **Created**: 2026-05-10
-**Status**: Draft
+**Status**: Draft  |  **Implementation status (2026-05-16)**: **Done (provisional, diverged).** See [Divergence note](#divergence-note-2026-05-16) immediately below before reading the rest of the spec.
+
+## Divergence note (2026-05-16)
+
+The shipped implementation diverged from this spec in two material ways:
+
+1. **Codex replaces Gemini.** The second registered backend is `codex` (`march-spawn-codex:latest`), not `gemini`. All Gemini-specific user stories, scenarios, and FRs below (US4, FR-008, SC-001, etc.) should be read as *originally specified but not implemented*. Gemini was cut from the RFC on 2026-05-16; see RFC [Accelerated Work & Reordering](../../docs/rfcs/2026-001-march-orchestration-platform/march-orchestration-platform.rfc.md#accelerated-work--reordering-2026-05). Substitute `codex` / `CODEX_HOME` / `march-spawn-codex:latest` for `gemini` / `GEMINI_API_KEY` / `march-gemini-base:latest` wherever the spec refers to the second backend, **with the auth caveat below**.
+2. **Codex uses credential-mount auth, not env-var auth.** This spec assumed both backends share env-var auth (`requiredEnvVars` → `process.env` check). Codex instead requires a `BackendCredentialMountSpec`: the host's `CODEX_HOME` directory is bind-mounted read-only into the container at `/march/codex-auth`, and the entrypoint copies it into the in-container home (`cp -R /march/codex-auth/. /march/codex-home`) before invoking the CLI. This is a first-class backend capability, **not a workaround**.
+
+   Concretely, the `SpawnBackend` contract is broader than US2/FR-005 describe: backends may declare either `requiredEnvVars` (env-var auth, like Claude Code) or a credential-mount spec (like Codex). The auth pre-flight (US6/FR-013) is generalized accordingly — env-var backends are checked against `process.env`; credential-mount backends are checked for the presence and readability of the host source directory. Live shape lives in `src/spawn/backends.ts`.
+
+The structural backbone of this spec — the `SpawnBackend` interface, the registry pattern, the `--backend` / `MARCH_BACKEND` selection, per-backend image and env derivation, SpawnRecord traceability — is **realized as specified**. Only the second backend's identity and auth model diverged.
+
+A Stage B spec ("hatchery declarative profiles") will move per-backend posture (resource limits, network allowlist, credential-mount spec) into Hatchery profiles, at which point this spec's "shared posture across backends" assumption (Assumptions §4) will be revisited.
+
+
 **Input**: `docs/rfcs/2026-001-march-orchestration-platform/march-orchestration-platform.rfc.md` — Milestone 1: Spawn (Decisions: "Multi-backend spawn interface"; Appendices B and C)
 **Source Feature Map**: `docs/rfcs/2026-001-march-orchestration-platform/01-spawn.features.md` — Feature 3: Multi-Backend Execution Interface
 

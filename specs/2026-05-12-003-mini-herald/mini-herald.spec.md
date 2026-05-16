@@ -3,7 +3,17 @@
 **Spec Folder**: `2026-05-12-003-mini-herald`
 **Branch**: `feature/mini-herald`
 **Created**: 2026-05-12
-**Status**: Draft
+**Status**: Draft  |  **Implementation status (2026-05-16)**: **Not started.** Promoted to active backlog item (Stage B spec #2 in the RFC) — see [Consumer context](#consumer-context-2026-05-16) below.
+
+## Consumer context (2026-05-16)
+
+Since this spec was drafted, the `legate-loop` deterministic processor has shipped (in `src/legate/init.ts`, sibling to `legate-agent`) and currently **polls `smithy status --format json` directly** on its heartbeat tick to find ready slices and detect PR-state changes. That polling is the "scraped-together message-passing system" the operator wants to replace.
+
+When mini-herald lands, `legate-loop` becomes its primary first-party consumer: it should subscribe to herald events (via the `legate.herald` skill or a structural equivalent) instead of polling, with herald owning the `babysit-pr.sh`-shaped snapshot capture and diff. This makes US1–US6 of this spec load-bearing for an active processor, not just for the eventual M5 Legate.
+
+The rest of the spec stands as written.
+
+
 **Input**: Operator-authored feature description — a precursor to Herald (Milestone 4 of `docs/rfcs/2026-001-march-orchestration-platform/march-orchestration-platform.rfc.md`), built ahead of full Herald to deliver deterministic PR-event signals into mini-legate now.
 
 ## Clarifications
