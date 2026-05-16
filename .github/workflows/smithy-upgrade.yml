@@ -43,8 +43,8 @@ jobs:
             - Installed `@balexda/smithy@latest` globally
             - Ran `smithy update -y` against the repo manifest
 
-            Review the diff in `.claude/` and `.smithy/smithy-manifest.json`
-            before merging.
+            Review the diff in `.claude/`, `.agents/`, `tools/codex/`,
+            `.codex/`, and `.smithy/smithy-manifest.json` before merging.
 
             > Note: this workflow requires *Settings → Actions → General →
             > Workflow permissions → "Allow GitHub Actions to create and
