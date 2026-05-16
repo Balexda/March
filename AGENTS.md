@@ -2,6 +2,18 @@
 
 This repo is the March CLI. Keep changes aligned with the product subsystem boundaries; do not put new runtime code directly under `src/` unless it is the executable entrypoint.
 
+## Read these before designing anything new
+
+Two long-lived repo docs anchor *why* March is shaped the way it is. Read them before proposing a new component, a new spec, or a non-trivial behavior change. They are short and load-bearing.
+
+- [`docs/vision.md`](docs/vision.md) — March's thesis: **Smithy decomposes ideas into high-quality plans; March executes those plans with minimum operator intervention.** The "ideas in, quality out" framing.
+- [`docs/operating-philosophy.md`](docs/operating-philosophy.md) — the per-component intervention-avoidance table (which component eliminates which intervention) and three rules of thumb every spec is held to:
+  1. **No interactive surfaces inside an autonomous component** — no permission prompts, no "are you sure?", no blocking on input the spawn can't receive. Escalations are events, not blocks.
+  2. **Minimum required access, not zero access** — sandboxes start tight and peel back through typed interfaces (e.g., `SpawnBackend.credentialMounts`), never through operator-authored exceptions.
+  3. **Failures are clean exits, not hangs** — timeouts kill containers; pre-flights fail fast; terminal-state events fire so consumers don't wait forever.
+
+When you write a spec or a piece of code that makes the operator/automation trade-off (and most non-trivial March changes do), cite these docs rather than restating the philosophy. If a change would violate one of the rules of thumb, surface the trade-off explicitly — either resolve it in the spec and revise the philosophy doc with the new rule, or push back on the change.
+
 ## Source Ownership
 
 - `src/cli.ts`: bin wrapper only. It should import `runCli` and do no command work itself.

@@ -5,6 +5,10 @@
 **Created**: 2026-05-12
 **Status (2026-05-16)**: **Not started** as written. Some primitives (`src/brood/spawn-record.ts`, `src/brood/worktree.ts`) exist from M1; ad-hoc container management for Legate + Steward currently lives in `src/hatchery/legate-container.ts` and `src/hatchery/spawn-handoff.ts` and should migrate here once the CLI surface (F2/F3) lands. Stage B spec #3 in the RFC backlog (brood lifecycle CLI) maps onto F2/F3 of this map and additionally formalizes Steward container lifecycle. See RFC [Accelerated Work & Reordering](march-orchestration-platform.rfc.md#accelerated-work--reordering-2026-05).
 
+## Philosophy hook
+
+Brood's role in the system, per [`docs/operating-philosophy.md`](../../operating-philosophy.md), is to eliminate operator intervention in *cleanup and lifecycle* — the operator does not manually remove containers, prune worktrees, archive logs, or reconcile orphaned branches. Every feature in this map should be checked against that role: if a feature here makes the operator more involved in lifecycle decisions, it is probably solving a different problem and belongs elsewhere.
+
 ## Accelerated context (2026-05-16)
 
 When this feature map was drafted (2026-05-12) it assumed Spawn was the only containerized session type Brood would manage in M3. Bootstrap acceleration has since introduced two additional containerized session types that Brood will also need to own:

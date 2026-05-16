@@ -43,6 +43,56 @@ The initial operator is the author. Making March usable for other solo technical
 - **Incremental capability delivery**: Each milestone produces a usable component, with smithy-style skills deployed alongside to provide a pseudo-legate until the full orchestrator exists.
 - **Observable and attachable**: Interactive components (Legate, future session types) run in tmux sessions that the operator can SSH into and attach to directly. Spawns are headless and non-interactable but their status and output are observable via the March CLI.
 
+## Operating Philosophy
+
+March is the execution counterpart to Smithy's planning loop. Together they form a complete idea-to-merged-code pipeline whose central goal is **high-quality output with minimum operator intervention at the points where intervention does not add value**.
+
+> The canonical statements of this philosophy live outside this RFC, in two long-lived repo-level documents:
+>
+> - [`docs/vision.md`](../../vision.md) — the high-level "what and why" of March (ideas in, quality out; Smithy decomposes, March executes). Stable; rarely revised. Carries the operator-facing promise and the day-in-the-life narrative.
+> - [`docs/operating-philosophy.md`](../../operating-philosophy.md) — the implementation-level "how": per-component intervention-avoidance table and the three rules of thumb (no interactive surfaces in autonomous components; minimum required access; failures are clean exits). Living; expected to evolve as we learn.
+>
+> This RFC section is a stable summary anchored to those two docs. If the docs and this section drift, the docs win — the RFC's job is to make architectural decisions for this milestone series; the docs' job is to anchor *why* those decisions are shaped the way they are across milestone series.
+
+### Smithy decomposes; March executes
+
+Smithy turns a vague idea into a mergeable change set through a cyclical expand-then-segment process:
+
+```
+idea → PRD → RFC → feature maps → specs → tasks → finished code
+   └─ expand ──┘└─ expand ─┘└─ expand ─┘└─ expand ──┘
+        └─ group/segment ─┘└─ group/segment ─┘└─ group/segment ─┘
+```
+
+Each step expands the prior artifact (more detail, more concrete questions answered), then groups and segments the result into the next layer's discrete units. Lots of touch points by design — every cycle is a chance to catch ambiguity, surface debt, and produce something a reader can act on without re-deriving the prior cycle. The output is high-quality, but the *artifact lineage itself is high-touch*: each artifact needs review, each segmentation is a decision.
+
+March exists to take Smithy's output — a fully decomposed plan, down to actionable task slices — and execute it across a coordinated system **without making the operator the constant point of intervention**. Smithy is high-touch by design; March is low-touch by design. The combination is what makes the pipeline economically viable for a solo operator.
+
+### Per-component intervention-avoidance
+
+Every March component eliminates operator intervention at a specific layer of execution:
+
+| Component | The intervention it eliminates |
+|-----------|-------------------------------|
+| **Spawn** | Intervention in *execution of individual steps*. The operator does not babysit a session, approve commands, or watch progress — the spawn runs to completion (or to a clean failure) and emits a structured result. |
+| **Hatchery** | Intervention in *setting up to run the steps*. The operator does not assemble container args, juggle credentials, or hand-tune security posture per session — profiles declare the configuration once and every spawn / steward / legate / future role consumes the same declarative source. |
+| **Brood** | Intervention in *cleanup and lifecycle*. The operator does not manually remove containers, prune worktrees, archive logs, or reconcile orphaned branches — Brood owns the full cradle-to-grave path for every containerized session. |
+| **Herald** | Intervention in *checking whether anything is ready yet*. The operator does not refresh `gh pr view`, poll `smithy status`, or context-switch to ask "is it done? is it done? what do I need to do next?" — Herald watches deterministic state (PRs, sessions, queues) and fires events on transitions so the next consumer reacts without the operator looking. |
+| **Legate** | Intervention in *managing parts of the system*. The operator does not pick what to run next, monitor for stalls across many parallel work items, or decide when to retry vs. escalate — Legate runs the orchestration loop and only surfaces decisions that genuinely require operator judgment. |
+| **Steward** | Intervention in *assembling and submitting the work*. The operator does not take the patch the spawn produced, apply it, run tests, commit, push, and open the PR — the Steward session does that and only escalates if something is genuinely ambiguous (merge conflict, failing test that needs judgment). |
+
+The **March CLI** is the operator's *deliberate* intervention surface. When the operator does want to step in — to dispatch an ad-hoc spawn, inspect a stuck session, or override a decision — there are clear verbs to do so. The default path is autonomous; the intervention path is one command away.
+
+### What this means for individual feature design
+
+Three rules of thumb that fall out of the philosophy and should be applied across every spec, every feature map:
+
+1. **No interactive surfaces inside an autonomous component.** No permission prompts reaching the spawn, no approval requests waiting on the operator inside a brood teardown, no questions the herald asks before routing an event. If a component genuinely needs operator judgment, it raises an escalation (via Herald / via SpawnRecord state) — it does not block.
+2. **Minimum required access, not zero access.** Sandboxes start tight (F2's `bridge` network, F2's snapshot-only filesystem) and peel back deliberately as real backends require it (F4's per-backend egress allowlist, the accelerated `BackendCredentialMountSpec` for Codex). Every peel-back is declared on the component's interface (not operator-authored), so the structural enforcement holds even as the access surface grows.
+3. **Failures are clean exits, not hangs.** Auto-mode and auto-review (in Claude Code, Codex, etc.) are powerful but imperfect — sessions occasionally stall, and alignment validation costs tokens. The sandbox cannot prevent stalls but it must prevent stalls from becoming hangs: timeouts kill the container, pre-flights fail fast before any artifact is created, herald events fire on transitions to terminal states. The operator should walk away and come back to *something* — either a green PR ready to merge or a SpawnRecord marked failed with a diagnostic. Never a hung session waiting for input it cannot receive.
+
+These rules are referenced explicitly from feature specs (e.g., F4's [Design philosophy](../../specs/2026-05-12-004-spawn-sandbox-security/spawn-sandbox-security.spec.md#design-philosophy-2026-05-16) section) and apply wherever a March component is making the operator/automation trade-off.
+
 ## Out of Scope
 
 The following are explicitly not part of this RFC:
