@@ -192,6 +192,17 @@ this section if new entrants appear.>
 The empty-state stub is a **legitimate, honest result** — it is not a failure.
 The parent command will append it to the PRD's Alternatives section as-is.
 
+<!--
+  Stub-string maintenance note (SD-005, expand-evals-coverage feature):
+  The opening sentence "No comparable off-the-shelf options identified during
+  survey." is asserted as one branch of a regex alternation in
+  `evals/cases/spark-from-idea.yaml` (FR-008). Renaming or rephrasing this
+  sentence breaks the spark eval's empty-state path silently. Update both
+  files together — the YAML's `required_patterns` block carries a reciprocal
+  comment pointing back here.
+-->
+
+
 ---
 
 ## Rules

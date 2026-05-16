@@ -1,3 +1,7 @@
+---
+name: smithy-orders
+description: "Create GitHub tickets from any artifact file. Auto-detects artifact type by extension and creates the correct ticket structure."
+---
 # smithy.orders
 
 You are the **smithy.orders agent** for this repository.
@@ -23,16 +27,15 @@ If no file path is provided, ask the user which artifact file to create tickets 
 ## Phase 1: Validate Environment
 
 **First, load the skill** so its scripts are available: invoke `Skill("smithy.gh-issue")`.
-Every `${CLAUDE_SKILL_DIR}/scripts/...` block in this command
-(Phases 1, 4, 5, and 6) requires the skill to be loaded — without this step
-`CLAUDE_SKILL_DIR` is unset and the scripts cannot be located.
 
 
+Running the scripts requires the `smithy.gh-issue` skill
+to be deployed in the `.agents/skills/` directory.
 
 Then run the environment check:
 
 ```bash
-${CLAUDE_SKILL_DIR}/scripts/check-env.sh
+./.agents/skills/smithy.gh-issue/scripts/check-env.sh
 ```
 
 If it fails, surface the message it printed and stop. On success, capture the
@@ -221,7 +224,7 @@ Parse the tasks file to extract:
 For each ticket you plan to create, search for existing matches by title:
 
 ```bash
-${CLAUDE_SKILL_DIR}/scripts/search-issues.sh all "<title keywords>" 5
+./.agents/skills/smithy.gh-issue/scripts/search-issues.sh all "<title keywords>" 5
 ```
 
 If matches are found:
@@ -275,7 +278,7 @@ cat > /tmp/orders_body.md << 'BODY'
 **Next step for each milestone**: `smithy.render` to produce a feature map.
 BODY
 
-${CLAUDE_SKILL_DIR}/scripts/create-issue.sh "[RFC] <rfc-title>" /tmp/orders_body.md
+./.agents/skills/smithy.gh-issue/scripts/create-issue.sh "[RFC] <rfc-title>" /tmp/orders_body.md
 ```
 
 **Children**: one issue per milestone, linked to the parent. The body
@@ -306,7 +309,7 @@ cat > /tmp/orders_body.md << 'BODY'
 Run `{{next_step}}` to produce a feature map for this milestone.
 BODY
 
-${CLAUDE_SKILL_DIR}/scripts/create-issue.sh "[RFC][Milestone] <milestone-title>" /tmp/orders_body.md
+./.agents/skills/smithy.gh-issue/scripts/create-issue.sh "[RFC][Milestone] <milestone-title>" /tmp/orders_body.md
 ```
 
 ### Ticket mapping: `.features.md`
@@ -316,7 +319,7 @@ ${CLAUDE_SKILL_DIR}/scripts/create-issue.sh "[RFC][Milestone] <milestone-title>"
 disambiguate across RFCs. Use both the RFC title and milestone title in the search:
 
 ```bash
-${CLAUDE_SKILL_DIR}/scripts/search-issues.sh open "[RFC][Milestone] <milestone-title> in:title" 10
+./.agents/skills/smithy.gh-issue/scripts/search-issues.sh open "[RFC][Milestone] <milestone-title> in:title" 10
 ```
 
 Verify the match by checking that the issue body references the same source RFC
@@ -346,7 +349,7 @@ cat > /tmp/orders_body.md << 'BODY'
 Run `{{next_step}}` on this feature to produce a spec with user stories.
 BODY
 
-${CLAUDE_SKILL_DIR}/scripts/create-issue.sh "[Feature] <feature-title>" /tmp/orders_body.md
+./.agents/skills/smithy.gh-issue/scripts/create-issue.sh "[Feature] <feature-title>" /tmp/orders_body.md
 ```
 
 ### Ticket mapping: `.spec.md`
@@ -417,7 +420,7 @@ For **each** user story extracted in Phase 3, perform the following steps:
    Write the rendered body to `/tmp/orders_body.md` and then call:
 
    ```bash
-   ${CLAUDE_SKILL_DIR}/scripts/create-issue.sh "[Story] <story-title>" /tmp/orders_body.md
+   ./.agents/skills/smithy.gh-issue/scripts/create-issue.sh "[Story] <story-title>" /tmp/orders_body.md
    ```
 
    Skip the heredoc fallthrough below for this user story.
@@ -454,7 +457,7 @@ cat > /tmp/orders_body.md << 'BODY'
 Run `{{next_step}}` (equivalent to `smithy.cut {{spec_folder}} {{user_story_number}}`) to decompose this story into implementable slices, then `smithy.forge` on each slice.
 BODY
 
-${CLAUDE_SKILL_DIR}/scripts/create-issue.sh "[Story] <story-title>" /tmp/orders_body.md
+./.agents/skills/smithy.gh-issue/scripts/create-issue.sh "[Story] <story-title>" /tmp/orders_body.md
 ```
 
 ### Ticket mapping: `.tasks.md`
@@ -466,7 +469,7 @@ matches this tasks file's story number (`<NN>` from the filename
 using the same `[Story]` title prefix:
 
 ```bash
-${CLAUDE_SKILL_DIR}/scripts/search-issues.sh open "[Story] <story-title>" 10
+./.agents/skills/smithy.gh-issue/scripts/search-issues.sh open "[Story] <story-title>" 10
 ```
 
 Match by story title (the `<story-title>` from `### User Story N: <Title>` —
@@ -502,7 +505,7 @@ cat > /tmp/orders_body.md << 'BODY'
 Run `{{next_step}}` to implement this slice as a PR.
 BODY
 
-${CLAUDE_SKILL_DIR}/scripts/create-issue.sh "[Slice] <slice-title>" /tmp/orders_body.md
+./.agents/skills/smithy.gh-issue/scripts/create-issue.sh "[Slice] <slice-title>" /tmp/orders_body.md
 ```
 
 ---
@@ -519,7 +522,7 @@ After creating all tickets, establish parent-child relationships:
    `blocked-by` link from each child to its parent:
 
 ```bash
-${CLAUDE_SKILL_DIR}/scripts/link-blocked-by.sh <child-number> <parent-number>
+./.agents/skills/smithy.gh-issue/scripts/link-blocked-by.sh <child-number> <parent-number>
 ```
 
 Treat `link-blocked-by` failures as best-effort: print a brief note and continue

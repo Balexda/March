@@ -1,13 +1,12 @@
 {
   "version": 1,
-  "smithyVersion": "0.4.6",
+  "smithyVersion": "0.4.7",
   "deployLocation": "repo",
   "agents": [
     "claude",
     "codex"
   ],
   "permissions": false,
-  "issueTemplates": false,
   "sessionTitles": true,
   "files": {
     "claude": [
@@ -49,6 +48,32 @@
       ".claude/skills/smithy.status/SKILL.md",
       ".claude/hooks/smithy-session-title.mjs"
     ],
-    "codex": []
+    "codex": [
+      "tools/codex/prompts/smithy.guidance.md",
+      "tools/codex/prompts/smithy.titles.md",
+      ".agents/skills/smithy-audit/SKILL.md",
+      ".agents/skills/smithy-cut/SKILL.md",
+      ".agents/skills/smithy-fix/SKILL.md",
+      ".agents/skills/smithy-forge/SKILL.md",
+      ".agents/skills/smithy-ignite/SKILL.md",
+      ".agents/skills/smithy-mark/SKILL.md",
+      ".agents/skills/smithy-orders/SKILL.md",
+      ".agents/skills/smithy-render/SKILL.md",
+      ".agents/skills/smithy-spark/SKILL.md",
+      ".agents/skills/smithy-strike/SKILL.md",
+      ".agents/skills/smithy-guidance/SKILL.md",
+      ".agents/skills/smithy-titles/SKILL.md",
+      ".agents/skills/smithy.gh-issue/SKILL.md",
+      ".agents/skills/smithy.gh-issue/scripts/check-env.sh",
+      ".agents/skills/smithy.gh-issue/scripts/create-issue.sh",
+      ".agents/skills/smithy.gh-issue/scripts/link-blocked-by.sh",
+      ".agents/skills/smithy.gh-issue/scripts/search-issues.sh",
+      ".agents/skills/smithy.helper-docker/SKILL.md",
+      ".agents/skills/smithy.pr-review/SKILL.md",
+      ".agents/skills/smithy.pr-review/scripts/find-pr.sh",
+      ".agents/skills/smithy.pr-review/scripts/get-comments.sh",
+      ".agents/skills/smithy.pr-review/scripts/reply-comment.sh",
+      ".agents/skills/smithy.status/SKILL.md"
+    ]
   }
 }
