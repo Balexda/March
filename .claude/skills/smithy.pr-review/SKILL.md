@@ -1,7 +1,7 @@
 ---
 name: smithy.pr-review
 description: "GitHub PR review operations: list inline comments, reply to comments. Use when handling review feedback on an open pull request."
-allowed-tools: Bash(git remote get-url *) Bash(git branch --show-current) Bash(git config --get remote.origin.url) Bash(*/smithy.pr-review/scripts/find-pr.sh) Bash(*/smithy.pr-review/scripts/get-comments.sh:*) Bash(*/smithy.pr-review/scripts/reply-comment.sh:*) mcp__github__list_pull_requests mcp__github__pull_request_read mcp__github__add_reply_to_pull_request_comment
+allowed-tools: Bash(git remote get-url *) Bash(git branch --show-current) Bash(git config --get remote.origin.url) Bash(*/smithy.pr-review/scripts/find-pr.sh) Bash(*/smithy.pr-review/scripts/get-comments.sh:*) Bash(*/smithy.pr-review/scripts/reply-comment.sh:*) mcp__github__list_pull_requests mcp__github__pull_request_read mcp__github__add_reply_to_pull_request_comment _list_pull_request_review_threads _reply_to_review_comment
 ---
 # smithy.pr-review
 
@@ -19,9 +19,9 @@ Provides GitHub PR review operations through two interchangeable paths:
 
 | Operation             | MCP-first path                                    | Script fallback                                                                  |
 |-----------------------|---------------------------------------------------|----------------------------------------------------------------------------------|
-| Find Open PR          | `mcp__github__list_pull_requests`                 | `${CLAUDE_SKILL_DIR}/scripts/find-pr.sh`                                         |
-| List Inline Comments  | `mcp__github__pull_request_read` (`get_review_comments`) | `${CLAUDE_SKILL_DIR}/scripts/get-comments.sh <ownerRepo> <pr-number>`     |
-| Reply to a Comment    | `mcp__github__add_reply_to_pull_request_comment`  | `${CLAUDE_SKILL_DIR}/scripts/reply-comment.sh <ownerRepo> <pr-number> <id> <body-file>` |
+| Find Open PR          | `mcp__github__list_pull_requests`                 | `${CLAUDE_SKILL_DIR}``/scripts/find-pr.sh` |
+| List Inline Comments  | `mcp__github__pull_request_read` (`get_review_comments`) | `${CLAUDE_SKILL_DIR}``/scripts/get-comments.sh <ownerRepo> <pr-number>` |
+| Reply to a Comment    | `mcp__github__add_reply_to_pull_request_comment`  | `${CLAUDE_SKILL_DIR}``/scripts/reply-comment.sh <ownerRepo> <pr-number> <id> <body-file>` |
 
 ## Path Selection
 

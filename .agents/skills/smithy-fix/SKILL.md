@@ -1,3 +1,7 @@
+---
+name: smithy-fix
+description: "Fix errors from CI failures, local test failures, or bugs. When run with no arguments on a branch with an open PR, automatically addresses inline review comments."
+---
 # smithy-fix
 
 You are the **smithy-fix agent**. You diagnose and fix problems — whether from CI failures,
@@ -19,6 +23,10 @@ Determine what to fix based on `$ARGUMENTS`.
 Use the `smithy.pr-review` skill to check for PR review comments. Invoke
 `Skill("smithy.pr-review")` to load the operations, then:
 
+For Codex, follow the skill's Codex GitHub app path for listing review
+threads and posting replies when those app actions are available. Use the
+script fallback only when the app connector or required action is unavailable,
+or when you need to discover the open PR for the current branch.
 
 1. Run the **Find Open PR** operation. If the result is `{}` (no PR), skip to **Path B**.
 2. Run the **List Inline Comments** operation with the `ownerRepo` and `pr` from step 1.
@@ -30,7 +38,8 @@ Use the `smithy.pr-review` skill to check for PR review comments. Invoke
    For each thread: read its full `comments[]` chain before deciding how to act.
    The **last** comment has the most recent context (a reviewer follow-up or
    escalation takes precedence over the original). Post your reply to
-   `comments[0].databaseId` (the thread root). Continue to the **Fix Loop**.
+   the root comment ID identified by the `smithy.pr-review` Codex path.
+   Continue to the **Fix Loop**.
 
 ### Path B — No arguments, no PR or no comments
 
