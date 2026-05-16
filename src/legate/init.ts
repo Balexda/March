@@ -1859,9 +1859,24 @@ function archivedSlices(state) {
     : {};
 }
 
+// A stub archive entry has no command, no args, and no branch — usually a
+// leftover from an older state-schema migration. dispatchSliceId is
+// deterministic from the item path, so a stub's persisted key collides
+// with the SID of any freshly-computed ready item on the same path, even
+// when no real work was ever recorded for it. Treat stubs as "no info"
+// and fall back to the stronger action_key / branch matchers so we don't
+// silently block fresh dispatches behind ghost archives.
+function isStubArchivedSlice(slice) {
+  if (!slice || typeof slice !== "object") return true;
+  const hasCommand = typeof slice.command === "string" && slice.command.length > 0;
+  const hasBranch = (typeof slice.branch === "string" && slice.branch.length > 0)
+    || (typeof slice.actual_branch === "string" && slice.actual_branch.length > 0);
+  return !hasCommand && !hasBranch;
+}
+
 function alreadyArchivedSlice(state, item, sliceId) {
   const archived = archivedSlices(state);
-  if (Object.prototype.hasOwnProperty.call(archived, sliceId)) return true;
+  if (Object.prototype.hasOwnProperty.call(archived, sliceId) && !isStubArchivedSlice(archived[sliceId])) return true;
   const key = dispatchItemKey(item);
   const branch = dispatchBranch(item);
   for (const slice of Object.values(archived)) {

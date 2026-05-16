@@ -366,6 +366,10 @@ describe("legate module", () => {
       expect(loop).toContain("function sliceReleasesArtifact");
       expect(loop).toContain('slice.stage === "merged"');
       expect(loop).toContain("if (sliceReleasesArtifact(slice)) continue;");
+      // Legacy stub archive entries (no command, no branch) must not block
+      // fresh dispatches by SID collision alone.
+      expect(loop).toContain("function isStubArchivedSlice");
+      expect(loop).toContain("!isStubArchivedSlice(archived[sliceId])");
       // Runner crash guard: any runner-side exception must still produce a
       // result file so the loop can transition the slice out of hatchery-pending.
       expect(loop).toContain("hatchery runner crashed:");
