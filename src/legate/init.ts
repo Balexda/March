@@ -2216,7 +2216,7 @@ function stageDispatchMessage(sliceId, result) {
       body = "";
     }
   }
-  if (!body) body = "Continue the Hatchery manager handoff for slice " + sliceId + ". Read the Hatchery artifacts, apply the patch, verify, commit, push, and open the PR.";
+  if (!body) body = "Continue the Hatchery manager handoff for slice " + sliceId + ". The Hatchery patch has already been applied and staged in this worktree if the handoff completed. Inspect git status and the staged diff, verify, commit, push, and open the PR.";
   fs.writeFileSync(target, body.trimEnd() + "\\n", "utf-8");
   return target;
 }
@@ -2263,6 +2263,7 @@ function runDispatch(state, ts) {
   for (const item of ready) {
     const sliceId = dispatchSliceId(item);
     if (alreadyHasInFlightSlice(state, item, sliceId)) continue;
+    if (String(item.next_action?.command || "") === "smithy.forge" && !dependenciesClear(state, status, item)) continue;
 
     try {
       if (!synced) {

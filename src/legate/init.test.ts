@@ -353,7 +353,7 @@ describe("legate module", () => {
       expect(loop).toContain("dispatchSliceId(depItem)");
       expect(loop).toContain("function readyLayerNodeIds");
       expect(loop).toContain("readyLayerNodeIds(status)");
-      expect(loop).not.toContain('String(item.next_action?.command || "") === "smithy.forge" && !dependenciesClear');
+      expect(loop).toContain('String(item.next_action?.command || "") === "smithy.forge" && !dependenciesClear');
       expect(loop).toContain("alreadyArchivedSlice(state, item, sliceId)");
       expect(loop).toContain('kind: "dispatch_failure"');
       expect(loop).toContain('kind: "dispatch_read_failure"');
@@ -1086,6 +1086,8 @@ describe("legate module", () => {
       expect(loop).toContain("function stageDispatchMessage");
       expect(loop).toContain('"dispatch-msg-" + sliceId + ".md"');
       expect(loop).toContain("managerPromptPath");
+      expect(loop).toContain("The Hatchery patch has already been applied and staged");
+      expect(loop).not.toContain("Read the Hatchery artifacts, apply the patch");
     });
 
     it("does not stage the legacy legate.cleanup skill", async () => {
