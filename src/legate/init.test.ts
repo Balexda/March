@@ -350,7 +350,12 @@ describe("legate module", () => {
       expect(loop).toContain("status?.graph?.nodes");
       expect(loop).toContain("function dependencySatisfied");
       expect(loop).toContain("dispatchSliceId(depItem)");
-      expect(loop).toContain("dependenciesClear(state, status, item)");
+      expect(loop).toContain("function readyLayerNodeIds");
+      expect(loop).toContain("readyLayerNodeIds(status)");
+      expect(loop).not.toContain('String(item.next_action?.command || "") === "smithy.forge" && !dependenciesClear');
+      expect(loop).toContain("alreadyArchivedSlice(state, item, sliceId)");
+      expect(loop).toContain('kind: "dispatch_failure"');
+      expect(loop).toContain('kind: "dispatch_read_failure"');
       expect(loop).toContain('"hatchery"');
       expect(loop).toContain('"--backend"');
       expect(loop).toContain('"codex"');

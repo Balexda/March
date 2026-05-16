@@ -1083,6 +1083,13 @@ function archiveSlice(state, sliceId, slice, pr, terminalState, ts) {
     pr_number: pr.number ?? slice?.pr?.number ?? null,
     pr_url: pr.url ?? slice?.pr?.url ?? null,
     worker_title: slice.worker_title ?? null,
+    branch: slice.branch ?? null,
+    actual_branch: slice.actual_branch ?? null,
+    command: slice.command ?? null,
+    arguments: Array.isArray(slice.arguments)
+      ? slice.arguments.map((arg) => String(arg))
+      : [],
+    artifact_path: slice.artifact_path ?? null,
     terminal_state: terminalState,
   };
   if (terminalState === "MERGED") archivedSlice.merged_at = ts;
@@ -1834,7 +1841,28 @@ function isTerminalSlice(slice) {
   return false;
 }
 
+function archivedSlices(state) {
+  return state?.archived_slices && typeof state.archived_slices === "object"
+    ? state.archived_slices
+    : {};
+}
+
+function alreadyArchivedSlice(state, item, sliceId) {
+  const archived = archivedSlices(state);
+  if (Object.prototype.hasOwnProperty.call(archived, sliceId)) return true;
+  const key = dispatchItemKey(item);
+  const branch = dispatchBranch(item);
+  for (const slice of Object.values(archived)) {
+    if (!slice || typeof slice !== "object") continue;
+    if (sliceActionKey(slice) === key) return true;
+    if (slice.branch && slice.branch === branch) return true;
+    if (slice.actual_branch && slice.actual_branch === branch) return true;
+  }
+  return false;
+}
+
 function alreadyHasInFlightSlice(state, item, sliceId) {
+  if (alreadyArchivedSlice(state, item, sliceId)) return true;
   const slices = state?.slices && typeof state.slices === "object" ? state.slices : {};
   const key = dispatchItemKey(item);
   for (const [existingId, slice] of Object.entries(slices)) {
@@ -1953,11 +1981,34 @@ function dispatchPriority(item) {
   return 9;
 }
 
+function readyLayerNodeIds(status) {
+  const layers = Array.isArray(status?.graph?.layers) ? status.graph.layers : [];
+  const layer = layers.find((candidate) => Number(candidate?.layer) === 0);
+  const ids = Array.isArray(layer?.node_ids) ? layer.node_ids : [];
+  return new Set(ids.map((id) => String(id)));
+}
+
+function recordGraphNodeId(record) {
+  if (!record || typeof record !== "object") return null;
+  if (record.parent_path && record.parent_row_id) {
+    return String(record.parent_path) + "#" + String(record.parent_row_id);
+  }
+  const action = record.next_action || {};
+  if (String(action.command || "") === "smithy.render") {
+    const args = actionArguments(action);
+    const milestone = args[1] ? "M" + String(args[1]).replace(/^[a-zA-Z]+/, "") : "";
+    return milestone ? String(args[0] || record.path || "") + "#" + milestone : null;
+  }
+  return record.path ? String(record.path) : null;
+}
+
 function readySmithyItems(status) {
   const records = Array.isArray(status?.records) ? status.records : [];
+  const readyNodes = readyLayerNodeIds(status);
   return records
     .filter((record) => record?.next_action && !record.virtual)
     .filter((record) => ["smithy.render", "smithy.mark", "smithy.cut", "smithy.forge"].includes(String(record.next_action.command || "")))
+    .filter((record) => readyNodes.size === 0 || readyNodes.has(recordGraphNodeId(record)))
     .map((record, index) => ({ ...record, __index: index }))
     .sort((a, b) => dispatchPriority(a) - dispatchPriority(b) || a.__index - b.__index);
 }
@@ -2071,7 +2122,18 @@ function runDispatch(state, ts) {
   try {
     status = readSmithyStatus(repoPath);
   } catch (err) {
-    failures.push({ error: err?.message || String(err) });
+    const error = err?.message || String(err);
+    const failure = { error, phase: "read-smithy-status" };
+    failures.push(failure);
+    append(meta.processor_events_path, {
+      schema_version: 1,
+      ts,
+      processor: meta.processor_name,
+      paired_legate: meta.paired_legate,
+      kind: "dispatch_read_failure",
+      ...failure,
+    });
+    appendText(meta.processor_log_path, "[" + ts + "] dispatch read failed: " + error);
     return { actions, failures, mutated: false };
   }
   state.last_smithy_status_at = ts;
@@ -2083,7 +2145,6 @@ function runDispatch(state, ts) {
   for (const item of ready) {
     const sliceId = dispatchSliceId(item);
     if (alreadyHasInFlightSlice(state, item, sliceId)) continue;
-    if (String(item.next_action?.command || "") === "smithy.forge" && !dependenciesClear(state, status, item)) continue;
 
     try {
       if (!synced) {
