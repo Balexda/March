@@ -201,29 +201,23 @@ function patchFromText(text: string): string | null {
 
 export function buildManagerPrompt(input: {
   readonly operatorPrompt: string;
-  readonly patchPath: string;
-  readonly spawnOutputPath: string;
-  readonly metadataPath: string;
+  readonly patchPath?: string;
+  readonly spawnOutputPath?: string;
+  readonly metadataPath?: string;
 }): string {
   return [
     "You are the March Hatchery management session for a completed spawn.",
     "",
-    "Apply and review the staged spawn patch, then open a PR.",
+    "Review the already-applied staged change, then open a PR.",
     "",
     `Original request:\n${input.operatorPrompt.trimEnd()}`,
     "",
-    "Artifacts:",
-    `- Patch: ${input.patchPath}`,
-    `- Spawn output log: ${input.spawnOutputPath}`,
-    `- Metadata: ${input.metadataPath}`,
-    "",
     "Required workflow:",
-    "1. Read the metadata and spawn output log.",
-    "2. Apply the patch from the repository root with `git apply --index`.",
-    "3. Review the resulting diff for correctness and security.",
-    "4. Run the smallest meaningful verification for the touched code.",
-    "5. Commit the applied change, push the branch, and open a GitHub PR.",
-    "6. Report the PR URL and any verification gaps.",
+    "1. Inspect `git status --short` and the staged diff.",
+    "2. Review the resulting diff for correctness and security.",
+    "3. Run the smallest meaningful verification for the touched code.",
+    "4. Commit the applied change, push the branch, and open a GitHub PR.",
+    "5. Report the PR URL and any verification gaps.",
   ].join("\n");
 }
 
@@ -293,6 +287,10 @@ export function launchAgentDeckManager(input: {
     input.branch,
     "-b",
     "--title-lock",
+    "--extra-arg",
+    "--permission-mode",
+    "--extra-arg",
+    "auto",
     "--extra-arg",
     "--model",
     "--extra-arg",
@@ -485,6 +483,26 @@ export function sendPromptToAgentDeckManager(input: {
   }
 }
 
+export function applyPatchToManagerWorktree(input: {
+  readonly patchPath: string;
+  readonly worktreePath: string;
+}): void {
+  try {
+    execFileSync("git", ["apply", "--index", input.patchPath], {
+      cwd: input.worktreePath,
+      stdio: ["ignore", "ignore", "pipe"],
+      maxBuffer: EXEC_MAX_BUFFER,
+    });
+  } catch (err) {
+    const stderr = stderrText((err as { stderr?: unknown }).stderr);
+    throw new HatcherySpawnError(
+      stderr
+        ? `git apply --index failed in manager worktree:\n${stderr}`
+        : `git apply --index failed in manager worktree: ${(err as Error).message}`,
+    );
+  }
+}
+
 export function validateHatcherySpawnBackend(backend: SpawnBackend): void {
   const missingEnvVars = missingRequiredEnvVars(backend);
   if (missingEnvVars.length > 0) {
@@ -561,14 +579,8 @@ export function runHatcherySpawn(
     const waitResult = waitForSpawnContainer(containerId);
     logs = readSpawnContainerLogs(containerId);
     markSpawnRecordStopped(spawnId, waitResult.exitCode, input.homeDir);
-    const metadataPath = path.join(hatcherySpawnLogDir(spawnId, input.homeDir), "metadata.json");
-    const spawnOutputPath = path.join(hatcherySpawnLogDir(spawnId, input.homeDir), "spawn-output.log");
-    const patchPath = path.join(hatcherySpawnLogDir(spawnId, input.homeDir), "patch.diff");
     const managerPrompt = buildManagerPrompt({
       operatorPrompt: input.prompt,
-      patchPath,
-      spawnOutputPath,
-      metadataPath,
     });
     if (waitResult.exitCode !== 0) {
       const artifacts = createHatcherySpawnArtifacts({
@@ -608,6 +620,10 @@ export function runHatcherySpawn(
       patch,
       managerPrompt,
       metadata: metadataFor(input, manager, spawnId, branch, waitResult.exitCode, startedAt),
+    });
+    applyPatchToManagerWorktree({
+      patchPath: artifacts.patchPath,
+      worktreePath: manager.worktreePath,
     });
     sendPromptToAgentDeckManager({
       sessionId: manager.sessionId,

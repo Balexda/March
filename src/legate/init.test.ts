@@ -344,6 +344,7 @@ describe("legate module", () => {
       expect(loop).toContain("function runDispatch");
       expect(loop).toContain("function readySmithyItems");
       expect(loop).toContain("function execMarch");
+      expect(loop).toContain('import { execFileSync, spawn } from "node:child_process";');
       expect(loop).toContain("meta.march_cli_path");
       expect(loop).toContain("hashText(dispatchItemKey(item))");
       expect(loop).toContain("function forgeNodeId");
@@ -356,6 +357,11 @@ describe("legate module", () => {
       expect(loop).toContain("alreadyArchivedSlice(state, item, sliceId)");
       expect(loop).toContain('kind: "dispatch_failure"');
       expect(loop).toContain('kind: "dispatch_read_failure"');
+      expect(loop).toContain("function launchHatcheryDispatch");
+      expect(loop).toContain("child.unref()");
+      expect(loop).toContain("function completePendingHatcheryDispatches");
+      expect(loop).toContain('stage: "hatchery-pending"');
+      expect(loop).toContain("hatchery_result_path");
       expect(loop).toContain('"hatchery"');
       expect(loop).toContain('"--backend"');
       expect(loop).toContain('"codex"');

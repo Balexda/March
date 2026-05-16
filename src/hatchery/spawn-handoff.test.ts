@@ -106,7 +106,7 @@ describe("spawn-handoff", () => {
     );
   });
 
-  it("writes handoff artifacts and includes paths in the manager prompt", () => {
+  it("writes handoff artifacts and tells the manager the patch is already applied", () => {
     const home = makeTmpDir();
     const patch = "diff --git a/a b/a\n--- a/a\n+++ b/a\n";
     const prompt = buildManagerPrompt({
@@ -127,7 +127,10 @@ describe("spawn-handoff", () => {
     expect(fs.readFileSync(artifacts.patchPath, "utf-8")).toBe(patch);
     expect(fs.readFileSync(artifacts.spawnOutputPath, "utf-8")).toBe("spawn log");
     expect(fs.readFileSync(artifacts.managerPromptPath, "utf-8")).toContain(
-      "Apply and review the staged spawn patch",
+      "Review the already-applied staged change",
+    );
+    expect(fs.readFileSync(artifacts.managerPromptPath, "utf-8")).not.toContain(
+      artifacts.patchPath,
     );
     const metadata = JSON.parse(fs.readFileSync(artifacts.metadataPath, "utf-8"));
     expect(metadata.artifacts.patchPath).toBe(artifacts.patchPath);

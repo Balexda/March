@@ -719,7 +719,7 @@ function loopMetaFor(input: {
 }
 
 const LEGATE_LOOP_MJS = `#!/usr/bin/env node
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -2064,7 +2064,42 @@ function buildSmithySpawnPrompt(item) {
   ].join("\\n");
 }
 
-function runHatcheryDispatch(item) {
+function hatcheryResultPath(sliceId) {
+  return path.join(meta.legate_conductor_dir || here, "hatchery-result-" + sliceId + ".json");
+}
+
+function hatcheryLogPath(sliceId) {
+  return path.join(meta.legate_conductor_dir || here, "hatchery-result-" + sliceId + ".log");
+}
+
+function hatcheryRequestPath(sliceId) {
+  return path.join(meta.legate_conductor_dir || here, "hatchery-request-" + sliceId + ".json");
+}
+
+function hatcheryRunnerCode() {
+  return [
+    'const { spawnSync } = require("node:child_process");',
+    'const fs = require("node:fs");',
+    'const request = JSON.parse(fs.readFileSync(process.argv[1], "utf-8"));',
+    'const result = spawnSync(request.command, request.args, { cwd: request.cwd, encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"] });',
+    'if (result.stderr) fs.appendFileSync(request.logPath, result.stderr);',
+    'if (result.status === 0) {',
+    '  fs.writeFileSync(request.resultPath, result.stdout || "", "utf-8");',
+    '} else {',
+    '  fs.writeFileSync(request.resultPath, JSON.stringify({ error: result.stderr || result.error?.message || "hatchery spawn failed", exitCode: result.status ?? null }) + "\\n", "utf-8");',
+    '}',
+  ].join("\\n");
+}
+
+function marchCommandAndArgs(args) {
+  const cliPath = meta.march_cli_path;
+  if (typeof cliPath === "string" && cliPath.length > 0) {
+    return { command: process.execPath, args: [cliPath, ...args] };
+  }
+  return { command: "march", args };
+}
+
+function launchHatcheryDispatch(item, resultPath, logPath) {
   const repoPath = meta.repo?.path;
   if (typeof repoPath !== "string" || repoPath.length === 0) {
     throw new Error("repo path is missing");
@@ -2086,8 +2121,86 @@ function runHatcheryDispatch(item) {
     buildSmithySpawnPrompt(item),
     "--json",
   ];
-  const out = execMarch(args, { cwd: repoPath });
-  return JSON.parse(out);
+  fs.mkdirSync(path.dirname(resultPath), { recursive: true });
+  fs.writeFileSync(resultPath, "", "utf-8");
+  const requestPath = hatcheryRequestPath(dispatchSliceId(item));
+  const resolved = marchCommandAndArgs(args);
+  fs.writeFileSync(requestPath, JSON.stringify({
+    command: resolved.command,
+    args: resolved.args,
+    cwd: repoPath,
+    resultPath,
+    logPath,
+  }) + "\\n", "utf-8");
+  const child = spawn(process.execPath, ["-e", hatcheryRunnerCode(), requestPath], {
+    cwd: repoPath,
+    detached: true,
+    stdio: ["ignore", "ignore", "ignore"],
+  });
+  child.unref();
+  return { pid: child.pid || null, requestPath };
+}
+
+function completePendingHatcheryDispatches(state, ts) {
+  const actions = [];
+  const failures = [];
+  let mutated = false;
+  const slices = state?.slices && typeof state.slices === "object" ? state.slices : {};
+  for (const [sliceId, slice] of Object.entries(slices)) {
+    if (!slice || typeof slice !== "object" || slice.stage !== "hatchery-pending") continue;
+    const resultPath = slice.hatchery?.hatchery_result_path;
+    if (typeof resultPath !== "string" || resultPath.length === 0) continue;
+    let raw;
+    try {
+      raw = fs.readFileSync(resultPath, "utf-8").trim();
+    } catch (err) {
+      if (err && err.code === "ENOENT") continue;
+      failures.push({ slice_id: sliceId, command: actionCommandLine({ command: slice.command, arguments: slice.arguments || [] }), error: err?.message || String(err) });
+      continue;
+    }
+    if (!raw) continue;
+    let result;
+    try {
+      result = JSON.parse(raw);
+    } catch {
+      continue;
+    }
+    if (result.error) {
+      slice.stage = "escalated";
+      slice.last_action = ts;
+      slice.last_action_note = "NEED: Hatchery dispatch failed: " + String(result.error).trim();
+      failures.push({ slice_id: sliceId, command: actionCommandLine({ command: slice.command, arguments: slice.arguments || [] }), error: String(result.error).trim() });
+      mutated = true;
+      continue;
+    }
+    const manager = result.managerSession || {};
+    const artifacts = result.artifacts || {};
+    stageDispatchMessage(sliceId, result);
+    slice.worker_session_id = manager.sessionId || null;
+    slice.worker_title = manager.title || slice.worker_title;
+    slice.branch = result.branch || manager.branch || slice.branch;
+    slice.worktree_path = manager.worktreePath || null;
+    slice.stage = "implementing";
+    slice.hatchery = {
+      ...(slice.hatchery || {}),
+      spawn_id: result.spawnId,
+      backend: result.backend || "codex",
+      artifacts_dir: artifacts.dir || null,
+      patch_path: artifacts.patchPath || null,
+      spawn_output_path: artifacts.spawnOutputPath || null,
+      metadata_path: artifacts.metadataPath || null,
+    };
+    slice.last_action = ts;
+    slice.last_action_note = "Hatchery codex spawn completed and handed off to manager";
+    actions.push({
+      action: "dispatch-complete",
+      sliceId,
+      sessionId: manager.sessionId || null,
+      detail: "Hatchery codex spawn completed for " + actionCommandLine({ command: slice.command, arguments: slice.arguments || [] }),
+    });
+    mutated = true;
+  }
+  return { actions, failures, mutated };
 }
 
 function stageDispatchMessage(sliceId, result) {
@@ -2117,6 +2230,11 @@ function runDispatch(state, ts) {
     failures.push({ error: "repo path is missing" });
     return { actions, failures, mutated: false };
   }
+  if (!state.slices || typeof state.slices !== "object") state.slices = {};
+  const completed = completePendingHatcheryDispatches(state, ts);
+  actions.push(...completed.actions);
+  failures.push(...completed.failures);
+  let mutated = completed.mutated;
 
   let status;
   try {
@@ -2134,14 +2252,14 @@ function runDispatch(state, ts) {
       ...failure,
     });
     appendText(meta.processor_log_path, "[" + ts + "] dispatch read failed: " + error);
-    return { actions, failures, mutated: false };
+    if (mutated) writeJson(meta.legate_state_path, state);
+    return { actions, failures, mutated };
   }
   state.last_smithy_status_at = ts;
 
   const ready = readySmithyItems(status);
   let synced = false;
-  let mutated = true;
-  if (!state.slices || typeof state.slices !== "object") state.slices = {};
+  mutated = true;
   for (const item of ready) {
     const sliceId = dispatchSliceId(item);
     if (alreadyHasInFlightSlice(state, item, sliceId)) continue;
@@ -2151,43 +2269,48 @@ function runDispatch(state, ts) {
         syncDefaultBranch(state);
         synced = true;
       }
-      const result = runHatcheryDispatch(item);
-      const manager = result.managerSession || {};
-      const artifacts = result.artifacts || {};
-      stageDispatchMessage(sliceId, result);
       const action = item.next_action || {};
+      const resultPath = hatcheryResultPath(sliceId);
+      const logPath = hatcheryLogPath(sliceId);
+      const requestPath = hatcheryRequestPath(sliceId);
       state.slices[sliceId] = {
         kind: "smithy",
-        worker_session_id: manager.sessionId,
-        worker_title: manager.title || dispatchTitle(item),
-        branch: result.branch || manager.branch || dispatchBranch(item),
+        worker_session_id: null,
+        worker_title: dispatchTitle(item),
+        branch: dispatchBranch(item),
         actual_branch: null,
-        worktree_path: manager.worktreePath || null,
-        stage: "implementing",
+        worktree_path: null,
+        stage: "hatchery-pending",
         pr: null,
         command: action.command,
         arguments: actionArguments(action),
         artifact_path: item.path || null,
         hatchery: {
-          spawn_id: result.spawnId,
-          backend: result.backend || "codex",
-          artifacts_dir: artifacts.dir || null,
-          patch_path: artifacts.patchPath || null,
-          spawn_output_path: artifacts.spawnOutputPath || null,
-          metadata_path: artifacts.metadataPath || null,
+          backend: "codex",
+          hatchery_result_path: resultPath,
+          hatchery_request_path: requestPath,
+          hatchery_log_path: logPath,
         },
         last_action: ts,
-        last_action_note: "Launched " + dispatchTitle(item) + " via Hatchery codex spawn for " + actionCommandLine(action),
+        last_action_note: "Queued Hatchery codex spawn for " + actionCommandLine(action),
       };
+      writeJson(meta.legate_state_path, state);
+      const launched = launchHatcheryDispatch(item, resultPath, logPath);
       actions.push({
         action: "dispatch",
         sliceId,
-        sessionId: manager.sessionId || null,
-        detail: "launched Hatchery codex spawn for " + actionCommandLine(action),
+        sessionId: null,
+        detail: "queued Hatchery codex spawn pid " + (launched.pid || "unknown") + " for " + actionCommandLine(action),
       });
-      writeJson(meta.legate_state_path, state);
     } catch (err) {
       const error = err?.message || String(err);
+      const existing = state.slices?.[sliceId];
+      if (existing && existing.stage === "hatchery-pending") {
+        existing.stage = "escalated";
+        existing.last_action = ts;
+        existing.last_action_note = "NEED: Hatchery dispatch launch failed: " + error;
+        mutated = true;
+      }
       failures.push({ slice_id: sliceId, command: actionCommandLine(item.next_action), error });
       append(meta.processor_events_path, {
         schema_version: 1,
