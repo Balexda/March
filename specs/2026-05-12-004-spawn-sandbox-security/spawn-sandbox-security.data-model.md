@@ -2,51 +2,78 @@
 
 ## Overview
 
-This model captures the data shapes F4 introduces or extends to enforce the RFC's Appendix A threat model: an extended `SpawnBackend` interface (5 members), an extended `SpawnConfig` constant (8 fields), the per-spawn network topology (private Docker network + proxy sidecar) created at Stage 4, and the structured verification report emitted by `march spawn verify`. Most F4 changes are additive extensions to F2/F3 entities — the sole new persistent-style entity is the verification report, which is a transient stdout payload, not an on-disk artifact.
+This model captures the data shapes F4 introduces or extends to enforce the RFC's Appendix A threat model: an extended `SpawnBackend` interface (6 members), the `BackendCredentialMountSpec` data type that anchors typed bind-mount exceptions, an extended `SpawnConfig` constant (8 fields), the per-spawn network topology (private Docker network + proxy sidecar) created at Stage 4, and the structured verification report emitted by `march spawn verify`. Most F4 changes are additive extensions to F2/F3 entities — the sole new persistent-style entity is the verification report, which is a transient stdout payload, not an on-disk artifact.
+
+**Rework note (2026-05-16)**: This data model originally described a 5-member `SpawnBackend` with Claude Code + Gemini. The accelerated multi-backend work shipped `credentialMounts` as a 5th member (live in `src/spawn/backends.ts`) and replaced Gemini with Codex; F4 now adds `allowedEgressHosts` as the 6th member. See the F4 spec's [Design philosophy](spawn-sandbox-security.spec.md#design-philosophy-2026-05-16) section for the framing.
 
 ## Entities
 
-### 1) SpawnBackend (extended — 5 members, supersedes F3's 4-member shape)
+### 1) SpawnBackend (extended — 6 members, supersedes F3's 4-member shape)
 
-Purpose: First-class registry entity defined by F3. F4 extends it with `allowedEgressHosts` so the per-backend network egress allowlist is sourced from the same single source of truth as the backend's base image, env vars, and entrypoint argv. Promoting the allowlist onto `SpawnBackend` keeps the post-F3 architecture's "every per-backend concern lives on the backend" principle intact and avoids re-introducing the cross-backend leakage F3 just removed.
+Purpose: First-class registry entity defined by F3 and extended in two waves: the accelerated multi-backend work added `credentialMounts: readonly BackendCredentialMountSpec[]` (5 members live in `src/spawn/backends.ts`); F4 adds `allowedEgressHosts: readonly string[]` (6 members). The egress allowlist and the credential-mount list are both intrinsic to backend identity and are sourced from the same single source of truth as the backend's base image, env vars, and entrypoint argv. Promoting them onto `SpawnBackend` keeps the post-F3 architecture's "every per-backend concern lives on the backend" principle intact.
 
 | Field/Method | Type | Required | Notes |
 |--------------|------|----------|-------|
 | `name` | string | Yes | Registry key. Inherited from F3 unchanged. |
 | `baseImage` | string | Yes | Docker image tag with the backend CLI pre-installed. Inherited from F3 unchanged. |
-| `requiredEnvVars` | `readonly string[]` | Yes | Environment variable names the backend requires. Inherited from F3 unchanged. |
+| `requiredEnvVars` | `readonly string[]` | Yes | Environment variable names the backend requires (auth pre-flight is an env-presence check). May be `[]` for backends that authenticate purely via credential mounts (e.g., Codex). |
+| `credentialMounts` | `readonly BackendCredentialMountSpec[]` | Yes | **Accelerated (pre-F4) addition.** Typed bind-mount declarations the backend requires to operate headlessly (e.g., Codex's `CODEX_HOME → /march/codex-auth` mount). May be `[]` for backends that need no host credential material (e.g., Claude Code under env-var auth). Consumed by US5's bind-mount validator as the typed-exception allow-set and by FR-013a's credential-mount pre-flight. See Entity 1a. |
 | `buildEntrypoint` | `(promptFilePath: string) => readonly string[]` | Yes | Container entrypoint argv builder. Inherited from F3 unchanged. |
 | `allowedEgressHosts` | `readonly string[]` | Yes | **NEW in F4.** Exact hostnames the backend's CLI requires for outbound HTTPS traffic. No wildcards in F4 — see SD-005. Consumed by US1's proxy sidecar at Stage 4 as the CONNECT-time hostname allowlist. |
 
 Validation rules:
-- `allowedEgressHosts` must be a non-empty array of strings — every backend in M1 (Claude Code, Gemini) requires at least one outbound host to function.
+- `allowedEgressHosts` must be a non-empty array of strings — every supported backend (Claude Code, Codex) requires at least one outbound host to function.
 - Each element must be a syntactically valid hostname (RFC-952/1123 labels separated by dots; no scheme, no port, no path).
 - Element matching is case-insensitive at the proxy layer (DNS hostnames are case-insensitive).
 - Duplicates within a single backend's array are permitted but redundant. Cross-backend overlaps are unrestricted (the proxy is per-spawn / per-backend; no global uniqueness constraint).
+- `credentialMounts` may be `[]`. When non-empty, each entry's `containerPath` MUST start with `/march/` (operational convention; constrains the in-container target to the March-owned tree).
 
 #### Concrete F4 Implementations
 
-**`claudeCodeBackend`** (extension to F3's implementation):
+**`claudeCodeBackend`** (extension to the live `src/spawn/backends.ts`):
 
 | Member | Value |
 |--------|-------|
 | `name` | `"claude-code"` |
-| `baseImage` | `"march-base:latest"` |
+| `baseImage` | `"march-spawn-claude:latest"` |
 | `requiredEnvVars` | `["ANTHROPIC_API_KEY"]` |
+| `credentialMounts` | `[]` (Claude Code authenticates via env var only in F4; OAuth path remains deferred per spec Out of Scope) |
 | `buildEntrypoint(p)` | `["sh", "-c", \`claude -p "$(cat ${p})" --output-format json --dangerously-skip-permissions --bare --no-session-persistence\`]` |
 | `allowedEgressHosts` | `["api.anthropic.com"]` |
 
-**`geminiBackend`** (extension to F3's implementation):
+**`codexBackend`** (extension to the live `src/spawn/backends.ts`):
 
 | Member | Value |
 |--------|-------|
-| `name` | `"gemini"` |
-| `baseImage` | `"march-gemini-base:latest"` |
-| `requiredEnvVars` | `["GEMINI_API_KEY"]` |
-| `buildEntrypoint(p)` | `["sh", "-c", \`gemini --prompt "$(cat ${p})" --approval-mode=yolo --output-format json\`]` |
-| `allowedEgressHosts` | `["generativelanguage.googleapis.com"]` (best inference per SD-001 — pending render/cut verification of Gemini CLI's actual outbound footprint) |
+| `name` | `"codex"` |
+| `baseImage` | `"march-spawn-codex:latest"` |
+| `requiredEnvVars` | `[]` (Codex authenticates via the credential mount, not env vars) |
+| `credentialMounts` | `[{ name: "Codex credential directory", containerPath: "/march/codex-auth", readOnly: true, resolveHostPath: env => env.CODEX_HOME ?? path.join(env.HOME ?? os.homedir(), ".codex"), env: { CODEX_HOME: "/march/codex-home" } }]` (single entry — see Entity 1a for the type) |
+| `buildEntrypoint(p)` | `["sh", "-c", \`cp -R /march/codex-auth/. /march/codex-home/ && chmod -R u+rwX /march/codex-home && codex exec --json --ephemeral --ignore-rules --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --cd ${CONTAINER_WORKDIR} - < ${p}\`]` |
+| `allowedEgressHosts` | per SD-008 — placeholder `["chatgpt.com"]` pending render/cut measurement |
 
-Note: F4's spec explicitly supersedes F3's "interface stays at four members" decision (F3 FR-005, F3 SC-005, plus `multi-backend-execution-interface.spec.md` Assumptions — the bullet beginning "The `SpawnBackend` interface promoted in F3 is the canonical dispatch contract going forward"). The supersession is documented in F4's Clarifications session 2026-05-12 and surfaced in F4's FR-002.
+Note: F4's spec explicitly supersedes F3's "interface stays at four members" decision (F3 FR-005, F3 SC-005, plus `multi-backend-execution-interface.spec.md` Assumptions — the bullet beginning "The `SpawnBackend` interface promoted in F3 is the canonical dispatch contract going forward"). The 5th member (`credentialMounts`) was added by the accelerated multi-backend work; the 6th (`allowedEgressHosts`) is F4's. The supersession is documented in F4's Clarifications session 2026-05-12 (amended 2026-05-16) and surfaced in F4's FR-002.
+
+---
+
+### 1a) BackendCredentialMountSpec (accelerated addition; F4 consumes)
+
+Purpose: Declares a typed bind-mount exception the backend requires for headless operation. Anchored on the backend so the bind-mount reject validator (US5) can distinguish operator-authored host paths (rejected) from backend-declared ones (admitted). Source path is computed at launch time via a function rather than a static string so backends can read environment variables with fallbacks (e.g., Codex prefers `CODEX_HOME` and falls back to `~/.codex`).
+
+| Field | Type | Required | Notes |
+|-------|------|----------|-------|
+| `name` | string | Yes | Human-readable label used in error messages (e.g., `"Codex credential directory"`). |
+| `containerPath` | string | Yes | The absolute in-container target path. Constrained to start with `/march/`. Used as the right-hand side of the `-v <host>:<container>` flag. |
+| `readOnly` | boolean | Yes | Whether the mount is read-only. F4 expects `true` for credential mounts — read-only credentials cannot be written back by the spawn LLM. |
+| `resolveHostPath` | `(env: NodeJS.ProcessEnv) => string` | Yes | Called at launch time with `process.env`. Returns the absolute host path to mount. Allows env-var-based lookups with sensible fallbacks. Pure function — must not perform I/O. |
+| `env` | `Readonly<Record<string, string>>` | Yes | Env vars the mount injects into the container so the in-container CLI reads from the mounted (or post-copy) location. For Codex: `{ CODEX_HOME: "/march/codex-home" }` — the entrypoint copies `/march/codex-auth → /march/codex-home` for writability, then the CLI reads `CODEX_HOME=/march/codex-home`. Counted by A3's audit verification alongside `requiredEnvVars` and the F4 proxy env vars. |
+
+Validation rules:
+- `containerPath` MUST start with `/march/` and MUST be absolute.
+- `resolveHostPath(process.env)` MUST return a string that exists on the host filesystem at launch time (checked by FR-013a's credential-mount pre-flight). If it doesn't, dispatch fails before the bind-mount validator runs.
+- `env` keys MUST be valid POSIX env var names (`[A-Z_][A-Z0-9_]*`).
+
+Lifecycle: Compile-time constant on each backend implementation. No runtime mutation.
 
 ---
 
@@ -136,8 +163,8 @@ Per-control `expected`/`observed` shapes (informal):
 | Control | Shape |
 |---------|-------|
 | A1 (Container Escape) | `{ capDrop: string[], user: string }` |
-| A2 (Volume Mount) | `{ mountCount: number, mountTypes: string[] }` — expected: `{ mountCount: 1, mountTypes: ["tmpfs"] }` (the `/tmp` tmpfs); fail if any `bind` mount is observed. |
-| A3 (Env Leakage) | `{ env: string[] }` — expected: exactly the selected backend's `requiredEnvVars` plus the proxy env vars (`HTTP_PROXY`, `HTTPS_PROXY`); fail if any extra env keys are present. |
+| A2 (Volume Mount) | `{ mountCount: number, mountTypes: string[], bindSources: string[] }` — expected `mountTypes` always contains `"tmpfs"` (for `/tmp`); when `selectedBackend.credentialMounts` is non-empty, `mountTypes` also contains `"bind"` and `bindSources` enumerates the resolved host paths from `selectedBackend.credentialMounts.map(m => m.resolveHostPath(process.env))`. Fail if any `bind` mount source is observed that is NOT in the backend's declared set. For Claude Code (`credentialMounts: []`): expected `{ mountCount: 1, mountTypes: ["tmpfs"], bindSources: [] }`. For Codex: expected `{ mountCount: 2, mountTypes: ["tmpfs", "bind"], bindSources: ["<resolved CODEX_HOME>"] }`. |
+| A3 (Env Leakage) | `{ env: string[] }` — expected: exactly the selected backend's `requiredEnvVars` PLUS the keys of each `credentialMounts[].env` (e.g., Codex contributes `CODEX_HOME`) PLUS the F4-injected proxy env vars (`HTTP_PROXY`, `HTTPS_PROXY`); fail if any extra env keys are present. |
 | A4 (DNS / Network) | `{ networkMode: string, attachedNetworks: string[], probeBlocked?: boolean }` — `probeBlocked` populated only when `--probe` was passed. |
 | A5 (Snapshot Secrets) | `{ exclusionPatternsVersion: string }` — pass if the running container's snapshot image carries an `org.opencontainers.image.labels.io.march.snapshot.exclusion-patterns-version` label (or the equivalent `LABEL` in the generated Dockerfile, key `io.march.snapshot.exclusion-patterns-version`) whose value matches the post-F4 patterns version constant (e.g., `"f4-2026-05-12"`). The label is set by `writeSpawnDockerfile` at Stage 3 (Snapshot) — `LABEL io.march.snapshot.exclusion-patterns-version="f4-2026-05-12"` — and is the only signal verify can read at runtime to confirm which exclusion list shipped into the snapshot. Limited verification — primary assertion remains on the snapshot test fixtures (US3 acceptance scenarios), not the running container. |
 | A7 (Egress Hosts) | `{ allowedEgressHosts: string[] }` — expected: the selected backend's `allowedEgressHosts`; observed: read from the proxy sidecar's runtime configuration. |
@@ -181,7 +208,8 @@ The F2 baseline patterns (`.env`, `.env.*`, `*.pem`, `*.key`, `.secrets/`, `cred
 - **`SpawnBackend.allowedEgressHosts` is consumed by the Spawn Network Topology's proxy sidecar configuration** at Stage 4 (Launch). One backend → one allowlist → one proxy sidecar instance per spawn.
 - **`SpawnConfig.networkMode = "none"` and the Spawn Network Topology are coupled.** With `networkMode = "none"`, the spawn container has no default network access; the private spawn network + proxy sidecar provides the only egress path. Changing `networkMode` away from `"none"` would invalidate the topology.
 - **`SpawnConfig.readOnlyRootfs` and tmpfs mounts are coupled.** When `readOnlyRootfs = true`, at minimum a `--tmpfs /tmp` mount is required so the spawn has writable scratch space. Additional tmpfs mounts may be required per SD-002.
-- **The Bind-Mount Reject Validator (US5) operates on the composed `docker run` argv** before container creation. It does not interact with persisted entities; it inspects the in-flight argv array.
+- **The Bind-Mount Reject Validator (US5) operates on the composed `docker run` argv** before container creation. It does not interact with persisted entities; it inspects the in-flight argv array. Its allow-set is computed from `selectedBackend.credentialMounts.map(m => m.resolveHostPath(process.env))` — any `-v` / `--mount` / `--volume` flag whose source is NOT in that set causes rejection.
+- **`BackendCredentialMountSpec.resolveHostPath` is called twice per dispatch**: once at FR-013a's credential-mount pre-flight (existence check) and once at the composed argv to populate the `-v <host>:<container>` flag. The same `process.env` snapshot is used both times to guarantee consistency.
 - **`SandboxVerificationReport` reads from the SpawnRecord (F2) to resolve the spawn-id → container-id mapping.** It does not modify the SpawnRecord. It reads from `docker inspect` output to populate `observed` fields.
 - **The Threat-Model Audit Table (spec artifact in US6) cross-references all of the above** as the audit story's primary deliverable. It is documentation, not a runtime entity.
 
@@ -216,8 +244,9 @@ The F2 baseline patterns (`.env`, `.env.*`, `*.pem`, `*.key`, `.secrets/`, `cred
 |-----------|------------------------------|
 | F2 (post-F2)  | 4 (interface stub: `name`, `baseImage`, `buildEntrypoint`, `requiredEnvVars`) |
 | F3 (post-F3)  | 4 (interface formalized at exactly 4 members; F3 explicitly closes additions) |
-| F4 (post-F4)  | 5 (F4 supersedes F3's "closed at 4" decision and adds `allowedEgressHosts`) |
-| M2 (Hatchery) | Hatchery profiles may layer additional per-profile fields (e.g., `additionalAllowedHosts`); the interface itself remains the canonical contract |
+| Accelerated (2026-05, pre-F4) | 5 (adds `credentialMounts: readonly BackendCredentialMountSpec[]`; supersedes F3's "closed at 4" — see `src/spawn/backends.ts`) |
+| F4 (post-F4)  | 6 (adds `allowedEgressHosts: readonly string[]`) |
+| M2 (Hatchery) | Hatchery profiles may layer additional per-profile fields (e.g., `additionalAllowedHosts`, per-profile credential-mount overrides); the interface itself remains the canonical contract |
 
 ## Identity & Uniqueness
 
