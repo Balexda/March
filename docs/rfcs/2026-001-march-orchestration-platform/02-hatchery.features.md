@@ -3,7 +3,7 @@
 **Source RFC**: `docs/rfcs/2026-001-march-orchestration-platform/march-orchestration-platform.rfc.md`
 **Milestone**: 2 — Hatchery
 **Created**: 2026-05-11
-**Status (2026-05-16)**: **Partial.** During bootstrap acceleration we shipped one concrete Hatchery profile path — the Legate container in `src/hatchery/legate-container.ts` — and a spawn → **Steward** handoff in `src/hatchery/spawn-handoff.ts`. Both are **Done (provisional)**. The declarative profile system that F1–F6 describe (YAML schema, loader, `march hatchery list/inspect/validate`, refactor of `SPAWN_CONFIG` into a profile) is **Not started** and is queued as Stage B spec #1 in the RFC backlog. The F3 `pr-management` profile concept survives as the Steward's profile (Stage B spec #4 will formalize the role). See RFC [Accelerated Work & Reordering](march-orchestration-platform.rfc.md#accelerated-work--reordering-2026-05).
+**Status (2026-05-16)**: **Partial.** During bootstrap acceleration we shipped one concrete Hatchery profile path — the Legate container in `src/hatchery/legate-container.ts` — and a spawn → **Steward** handoff in `src/hatchery/spawn-handoff.ts`. Both are **Done (provisional)**. F1 (Profile Schema and Validation Library) now has a **draft spec** at `specs/2026-05-12-003-profile-schema-and-validation-library/`. F2–F6 (storage/resolution, `march init` seeding, CLI surface, spawn-consumes-profile refactor, hatchery skills) are **Not started** and remain queued as Stage B spec #1 in the RFC backlog. The F3 `pr-management` profile concept survives as the Steward's profile (Stage B spec #4 will formalize the role). See RFC [Accelerated Work & Reordering](march-orchestration-platform.rfc.md#accelerated-work--reordering-2026-05).
 
 ## Features
 

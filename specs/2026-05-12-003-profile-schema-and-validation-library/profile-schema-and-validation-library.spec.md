@@ -3,7 +3,7 @@
 **Spec Folder**: `2026-05-12-003-profile-schema-and-validation-library`
 **Branch**: `feature/smithy/mark/02-hatchery-f1`
 **Created**: 2026-05-12
-**Status**: Draft
+**Status**: Draft  |  **Implementation status (2026-05-16)**: **Not started** — spec drafted, no code. This spec is the first concrete piece of Stage B spec #1 (hatchery declarative profiles) in the RFC backlog. When implementation begins, F1 lands the schema + validator; F2–F6 follow per `02-hatchery.features.md`. The accelerated `src/hatchery/legate-container.ts` and `src/hatchery/spawn-config.ts` are the consumers that will migrate to profile-backed config in F5.
 **Input**: `docs/rfcs/2026-001-march-orchestration-platform/march-orchestration-platform.rfc.md` — Milestone 2: Hatchery
 **Source Feature Map**: `docs/rfcs/2026-001-march-orchestration-platform/02-hatchery.features.md` — Feature 1: Profile Schema and Validation Library
 

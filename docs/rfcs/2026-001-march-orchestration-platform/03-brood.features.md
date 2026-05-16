@@ -3,6 +3,7 @@
 **Source RFC**: `docs/rfcs/2026-001-march-orchestration-platform/march-orchestration-platform.rfc.md`
 **Milestone**: 3 — Brood (Basic)
 **Created**: 2026-05-12
+**Status (2026-05-16)**: **Not started** as written. Some primitives (`src/brood/spawn-record.ts`, `src/brood/worktree.ts`) exist from M1; ad-hoc container management for Legate + Steward currently lives in `src/hatchery/legate-container.ts` and `src/hatchery/spawn-handoff.ts` and should migrate here once the CLI surface (F2/F3) lands. Stage B spec #3 in the RFC backlog (brood lifecycle CLI) maps onto F2/F3 of this map and additionally formalizes Steward container lifecycle. See RFC [Accelerated Work & Reordering](march-orchestration-platform.rfc.md#accelerated-work--reordering-2026-05).
 
 ## Features
 

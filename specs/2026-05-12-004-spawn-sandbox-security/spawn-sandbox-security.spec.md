@@ -3,7 +3,12 @@
 **Spec Folder**: `2026-05-12-004-spawn-sandbox-security`
 **Branch**: `feature/smithy/mark/01-spawn-f4` *(orchestrator-staged linked worktree; preserved per Branch Selection Policy because the cwd is a non-default linked worktree)*
 **Created**: 2026-05-12
-**Status**: Draft
+**Status**: Draft  |  **Implementation status (2026-05-16)**: **Not started.** Two cross-references for readers, both reflecting changes that post-date this spec's drafting:
+
+1. **Gemini was cut as a supported backend** on 2026-05-16 (see RFC Decisions and [Accelerated Work & Reordering](../../docs/rfcs/2026-001-march-orchestration-platform/march-orchestration-platform.rfc.md#accelerated-work--reordering-2026-05)). SD-001 (Gemini egress hosts) is now moot. The `allowedEgressHosts` story (US2) applies only to **Claude Code** (`["api.anthropic.com"]`) and **Codex** (host TBD when this spec is implemented). Drop Gemini-specific FRs/scenarios at render time.
+2. **Codex uses credential-mount auth**, not env-var. The "no bind mounts ever" invariant (US5) needs to admit Codex's `/march/codex-auth → CODEX_HOME` read-only mount as a typed exception via the `BackendCredentialMountSpec` introduced in the amended multi-backend spec. The validator's blanket rejection of `-v` / `--mount` / `--volume` must be relaxed to: rejects host-path mounts *except* those declared by the selected backend's credential-mount spec.
+
+
 **Input**: `docs/rfcs/2026-001-march-orchestration-platform/march-orchestration-platform.rfc.md` — Milestone 1: Spawn (Appendix A: Spawn Sandbox Threat Model — A1–A8)
 **Source Feature Map**: `docs/rfcs/2026-001-march-orchestration-platform/01-spawn.features.md` — Feature 4: Spawn Sandbox Security
 

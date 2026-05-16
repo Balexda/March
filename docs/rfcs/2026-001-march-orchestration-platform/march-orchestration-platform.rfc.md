@@ -133,7 +133,7 @@ The accelerated pieces are deliberately marked **Done (provisional)** below. The
 - The known attack surfaces enumerated in Appendix A have been evaluated and mitigated.
 - The CLI completes the loop: applies the extracted patch to the spawn's worktree and branch, pushes, and creates a GitHub PR for code review. Full loop: prompt in → sandbox execution → patch out → reviewable PR.
 
-### Milestone 2: Hatchery — **Partial** (Legate container shipped provisionally; declarative profile system not started)
+### Milestone 2: Hatchery — **Partial** (Legate container shipped provisionally; F1 profile schema spec drafted at `specs/2026-05-12-003-profile-schema-and-validation-library/`; declarative loader/CLI not implemented)
 
 **Description**: Build the container profile configuration system. The Hatchery is a non-LLM functional system that manages declarative profiles for any containerized March component. Different roles require different security postures — from fully sandboxed spawns to more permissioned agents that handle PR management or orchestration. The Hatchery formalizes the hardcoded container configuration from Milestone 1 into a general-purpose, editable profile system.
 
@@ -145,7 +145,7 @@ The accelerated pieces are deliberately marked **Done (provisional)** below. The
 - Profiles can be listed, inspected, and validated via the March CLI.
 - Skills updated to cover Hatchery interactions.
 
-### Milestone 3: Brood (Basic) — **Partial** (record-keeping primitives exist in `src/brood/`; CLI surface not started)
+### Milestone 3: Brood (Basic) — **Partial** (record-keeping primitives exist in `src/brood/`; feature map drafted at `docs/rfcs/2026-001-march-orchestration-platform/03-brood.features.md`; no specs cut, no CLI surface yet)
 
 **Description**: Build the session lifecycle manager. The Brood is a non-LLM functional system that interacts with the Hatchery to spin up, track, and tear down spawn sessions, giving the operator visibility into all active and completed work.
 
@@ -198,7 +198,7 @@ These specs build *on top of* the as-built code rather than replacing it. They a
 
 | # | Spec | Replaces / hardens | Notes |
 |---|------|--------------------|-------|
-| 1 | Hatchery declarative profiles | Hardcoded `SPAWN_CONFIG` in `src/hatchery/spawn-config.ts`; ad-hoc `legate-container.ts` | YAML profile loader + `march hatchery list/inspect/validate`. Closes M2's stated scope. |
+| 1 | Hatchery declarative profiles | Hardcoded `SPAWN_CONFIG` in `src/hatchery/spawn-config.ts`; ad-hoc `legate-container.ts` | YAML profile loader + `march hatchery list/inspect/validate`. Closes M2's stated scope. **In flight** — F1 spec drafted at `specs/2026-05-12-003-profile-schema-and-validation-library/`; F2–F6 still to cut. |
 | 2 | Mini-herald daemon | `legate-loop`'s direct `smithy status` polling | Implement the existing `specs/2026-05-12-003-mini-herald/` spec; wire `legate-loop` to consume herald events. The "better message passing system" referenced in the 2026-05 acceleration notes. |
 | 3 | Brood lifecycle CLI | Ad-hoc container management spread across `legate-container.ts`, `spawn-handoff.ts`, and `src/brood/` primitives | `march brood list/status/clean`. Owns container/worktree lifecycle for legates, spawns, and stewards. Integrates with hatchery profiles + herald events. |
 | 4 | Steward role formalization | Ad-hoc `launchAgentDeckManager()` path in `spawn-handoff.ts` | Names + specs the steward role: prompt contract, exit conditions, brood-managed lifecycle. |

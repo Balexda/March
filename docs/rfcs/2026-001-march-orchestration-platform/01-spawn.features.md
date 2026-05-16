@@ -3,7 +3,7 @@
 **Source RFC**: `docs/rfcs/2026-001-march-orchestration-platform/march-orchestration-platform.rfc.md`
 **Milestone**: 1 — Spawn
 **Created**: 2026-03-30
-**Status (2026-05-16)**: M1 is **Done (realized)** for F1, F2, F4, F5, F6. F3 (Multi-Backend) is **Done (provisional, diverged)** — Codex shipped instead of Gemini using credential-mount auth; see `specs/2026-05-10-003-multi-backend-execution-interface/` for the amended spec. Patch extraction + PR creation (F5/F6) is realized but extended in `src/hatchery/spawn-handoff.ts` with a Steward handoff that will be formalized in a Stage B spec (see RFC backlog).
+**Status (2026-05-16)**: M1 is **Done (realized)** for F1, F2, F5, F6. F3 (Multi-Backend) is **Done (provisional, diverged)** — Codex shipped instead of Gemini using credential-mount auth; see `specs/2026-05-10-003-multi-backend-execution-interface/` for the amended spec. F4 (Spawn Sandbox Security) has a **draft spec** at `specs/2026-05-12-004-spawn-sandbox-security/` that pre-dates the Gemini cut — its Gemini-egress story (SD-001) is now moot; treat its `allowedEgressHosts` work as applying to Claude Code + Codex only. Patch extraction + PR creation (F5/F6) is realized but extended in `src/hatchery/spawn-handoff.ts` with a Steward handoff that will be formalized in a Stage B spec (see RFC backlog).
 
 ## Features
 
