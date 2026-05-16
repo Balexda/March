@@ -2110,6 +2110,16 @@ function hatcheryRunnerCode() {
   // this, a crashed runner leaves the slice stuck in hatchery-pending forever
   // because completePendingHatcheryDispatches only acts when the result file
   // appears.
+  //
+  // Escape carefully: this code lives inside a TEMPLATE LITERAL that becomes
+  // the deployed legate-loop.mjs. Anywhere we need a backslash-n in the
+  // runner SOURCE we're handing to \`node -e\`, we must write four
+  // backslashes here: template eval collapses \\\\n -> \\n, then the
+  // deployed .mjs evaluates \\n -> \\n (2 chars) inside the array element,
+  // which finally evaluates to a real \\n inside the runner's "..." string
+  // literal. Using only two backslashes used to insert a real newline mid
+  // string literal, producing a SyntaxError that silently killed every
+  // hatchery spawn.
   return [
     'const { spawnSync } = require("node:child_process");',
     'const fs = require("node:fs");',
@@ -2121,15 +2131,15 @@ function hatcheryRunnerCode() {
     '  if (result.status === 0) {',
     '    fs.writeFileSync(request.resultPath, result.stdout || "", "utf-8");',
     '  } else {',
-    '    fs.writeFileSync(request.resultPath, JSON.stringify({ error: result.stderr || result.error?.message || "hatchery spawn failed", exitCode: result.status ?? null }) + "\\n", "utf-8");',
+    '    fs.writeFileSync(request.resultPath, JSON.stringify({ error: result.stderr || result.error?.message || "hatchery spawn failed", exitCode: result.status ?? null }) + "\\\\n", "utf-8");',
     '  }',
     '} catch (err) {',
     '  const message = (err && err.stack) ? err.stack : String(err);',
     '  try {',
     '    if (request && request.resultPath) {',
-    '      fs.writeFileSync(request.resultPath, JSON.stringify({ error: "hatchery runner crashed: " + message, exitCode: null }) + "\\n", "utf-8");',
+    '      fs.writeFileSync(request.resultPath, JSON.stringify({ error: "hatchery runner crashed: " + message, exitCode: null }) + "\\\\n", "utf-8");',
     '    }',
-    '    if (request && request.logPath) { fs.appendFileSync(request.logPath, "runner crash: " + message + "\\n"); }',
+    '    if (request && request.logPath) { fs.appendFileSync(request.logPath, "runner crash: " + message + "\\\\n"); }',
     '  } catch {}',
     '  process.exit(1);',
     '}',
