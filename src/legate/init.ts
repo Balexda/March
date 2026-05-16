@@ -2183,6 +2183,18 @@ function completePendingHatcheryDispatches(state, ts) {
   let mutated = false;
   const slices = state?.slices && typeof state.slices === "object" ? state.slices : {};
   const nowMs = Date.parse(ts);
+  const escalateStale = (slice, sliceId, reason) => {
+    const queuedMs = Date.parse(slice.last_action || "");
+    if (!Number.isFinite(queuedMs) || !Number.isFinite(nowMs)) return false;
+    if (nowMs - queuedMs <= HATCHERY_PENDING_TIMEOUT_MS) return false;
+    const ageMin = Math.round((nowMs - queuedMs) / 60000);
+    const note = "NEED: Hatchery spawn " + reason + " after " + ageMin + " min (runner likely crashed before writing); manual investigation required";
+    slice.stage = "escalated";
+    slice.last_action = ts;
+    slice.last_action_note = note;
+    failures.push({ slice_id: sliceId, command: actionCommandLine({ command: slice.command, arguments: slice.arguments || [] }), error: note });
+    return true;
+  };
   for (const [sliceId, slice] of Object.entries(slices)) {
     if (!slice || typeof slice !== "object" || slice.stage !== "hatchery-pending") continue;
     const resultPath = slice.hatchery?.hatchery_result_path;
@@ -2192,22 +2204,19 @@ function completePendingHatcheryDispatches(state, ts) {
       raw = fs.readFileSync(resultPath, "utf-8").trim();
     } catch (err) {
       if (err && err.code === "ENOENT") {
-        const queuedMs = Date.parse(slice.last_action || "");
-        if (Number.isFinite(queuedMs) && Number.isFinite(nowMs) && nowMs - queuedMs > HATCHERY_PENDING_TIMEOUT_MS) {
-          const ageMin = Math.round((nowMs - queuedMs) / 60000);
-          const note = "NEED: Hatchery spawn produced no result file after " + ageMin + " min (runner likely crashed before writing); manual investigation required";
-          slice.stage = "escalated";
-          slice.last_action = ts;
-          slice.last_action_note = note;
-          failures.push({ slice_id: sliceId, command: actionCommandLine({ command: slice.command, arguments: slice.arguments || [] }), error: note });
-          mutated = true;
-        }
+        if (escalateStale(slice, sliceId, "produced no result file")) mutated = true;
         continue;
       }
       failures.push({ slice_id: sliceId, command: actionCommandLine({ command: slice.command, arguments: slice.arguments || [] }), error: err?.message || String(err) });
       continue;
     }
-    if (!raw) continue;
+    if (!raw) {
+      // Empty result file = launchHatcheryDispatch wrote the placeholder but
+      // the runner died before writing real content. Same failure mode as a
+      // missing file; treat it the same way once the timeout has elapsed.
+      if (escalateStale(slice, sliceId, "left an empty result file")) mutated = true;
+      continue;
+    }
     let result;
     try {
       result = JSON.parse(raw);

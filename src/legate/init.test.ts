@@ -372,7 +372,8 @@ describe("legate module", () => {
       // Stuck hatchery-pending slices must time out and escalate so a crashed
       // runner doesn't park a slice forever.
       expect(loop).toContain("HATCHERY_PENDING_TIMEOUT_MS");
-      expect(loop).toContain("Hatchery spawn produced no result file");
+      expect(loop).toContain("produced no result file");
+      expect(loop).toContain("left an empty result file");
       expect(loop).toContain("hatchery_result_path");
       expect(loop).toContain('"hatchery"');
       expect(loop).toContain('"--backend"');
