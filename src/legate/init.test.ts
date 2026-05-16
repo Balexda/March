@@ -361,6 +361,18 @@ describe("legate module", () => {
       expect(loop).toContain("child.unref()");
       expect(loop).toContain("function completePendingHatcheryDispatches");
       expect(loop).toContain('stage: "hatchery-pending"');
+      // Escalated/closed-unmerged slices must still block re-dispatch of the
+      // same artifact — only a merged slice releases the artifact.
+      expect(loop).toContain("function sliceReleasesArtifact");
+      expect(loop).toContain('slice.stage === "merged"');
+      expect(loop).toContain("if (sliceReleasesArtifact(slice)) continue;");
+      // Runner crash guard: any runner-side exception must still produce a
+      // result file so the loop can transition the slice out of hatchery-pending.
+      expect(loop).toContain("hatchery runner crashed:");
+      // Stuck hatchery-pending slices must time out and escalate so a crashed
+      // runner doesn't park a slice forever.
+      expect(loop).toContain("HATCHERY_PENDING_TIMEOUT_MS");
+      expect(loop).toContain("Hatchery spawn produced no result file");
       expect(loop).toContain("hatchery_result_path");
       expect(loop).toContain('"hatchery"');
       expect(loop).toContain('"--backend"');

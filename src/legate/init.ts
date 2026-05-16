@@ -1841,6 +1841,18 @@ function isTerminalSlice(slice) {
   return false;
 }
 
+// Dedup helper for new-dispatch suppression. Stricter than isTerminalSlice:
+// only a successfully merged slice means the artifact is "done" and a fresh
+// dispatch is safe. Escalated / closed-unmerged slices are still load-bearing
+// — they represent unresolved blockers that an operator must clear, and the
+// loop must not silently re-queue the same artifact behind their back.
+function sliceReleasesArtifact(slice) {
+  if (!slice || typeof slice !== "object") return false;
+  if (slice.stage === "merged") return true;
+  if (slice.pr?.state === "MERGED") return true;
+  return false;
+}
+
 function archivedSlices(state) {
   return state?.archived_slices && typeof state.archived_slices === "object"
     ? state.archived_slices
@@ -1867,7 +1879,8 @@ function alreadyHasInFlightSlice(state, item, sliceId) {
   const key = dispatchItemKey(item);
   for (const [existingId, slice] of Object.entries(slices)) {
     if (existingId === sliceId) return true;
-    if (!slice || typeof slice !== "object" || isTerminalSlice(slice)) continue;
+    if (!slice || typeof slice !== "object") continue;
+    if (sliceReleasesArtifact(slice)) continue;
     if (sliceActionKey(slice) === key) return true;
     if (slice.branch && slice.branch === dispatchBranch(item)) return true;
   }
@@ -2077,16 +2090,33 @@ function hatcheryRequestPath(sliceId) {
 }
 
 function hatcheryRunnerCode() {
+  // Wrapped in try/catch so any runner-side crash (bad request file, missing
+  // command, spawnSync throw, fs error) still produces a result file. Without
+  // this, a crashed runner leaves the slice stuck in hatchery-pending forever
+  // because completePendingHatcheryDispatches only acts when the result file
+  // appears.
   return [
     'const { spawnSync } = require("node:child_process");',
     'const fs = require("node:fs");',
-    'const request = JSON.parse(fs.readFileSync(process.argv[1], "utf-8"));',
-    'const result = spawnSync(request.command, request.args, { cwd: request.cwd, encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"] });',
-    'if (result.stderr) fs.appendFileSync(request.logPath, result.stderr);',
-    'if (result.status === 0) {',
-    '  fs.writeFileSync(request.resultPath, result.stdout || "", "utf-8");',
-    '} else {',
-    '  fs.writeFileSync(request.resultPath, JSON.stringify({ error: result.stderr || result.error?.message || "hatchery spawn failed", exitCode: result.status ?? null }) + "\\n", "utf-8");',
+    'let request = null;',
+    'try {',
+    '  request = JSON.parse(fs.readFileSync(process.argv[1], "utf-8"));',
+    '  const result = spawnSync(request.command, request.args, { cwd: request.cwd, encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"] });',
+    '  if (result.stderr) { try { fs.appendFileSync(request.logPath, result.stderr); } catch {} }',
+    '  if (result.status === 0) {',
+    '    fs.writeFileSync(request.resultPath, result.stdout || "", "utf-8");',
+    '  } else {',
+    '    fs.writeFileSync(request.resultPath, JSON.stringify({ error: result.stderr || result.error?.message || "hatchery spawn failed", exitCode: result.status ?? null }) + "\\n", "utf-8");',
+    '  }',
+    '} catch (err) {',
+    '  const message = (err && err.stack) ? err.stack : String(err);',
+    '  try {',
+    '    if (request && request.resultPath) {',
+    '      fs.writeFileSync(request.resultPath, JSON.stringify({ error: "hatchery runner crashed: " + message, exitCode: null }) + "\\n", "utf-8");',
+    '    }',
+    '    if (request && request.logPath) { fs.appendFileSync(request.logPath, "runner crash: " + message + "\\n"); }',
+    '  } catch {}',
+    '  process.exit(1);',
     '}',
   ].join("\\n");
 }
@@ -2141,11 +2171,18 @@ function launchHatcheryDispatch(item, resultPath, logPath) {
   return { pid: child.pid || null, requestPath };
 }
 
+// If the hatchery runner dies before writing its result file, the slice would
+// otherwise sit in hatchery-pending forever. After this many ms with no result,
+// escalate so an operator can investigate. 15 minutes is generous — a healthy
+// codex spawn completes within a couple of minutes.
+const HATCHERY_PENDING_TIMEOUT_MS = 15 * 60 * 1000;
+
 function completePendingHatcheryDispatches(state, ts) {
   const actions = [];
   const failures = [];
   let mutated = false;
   const slices = state?.slices && typeof state.slices === "object" ? state.slices : {};
+  const nowMs = Date.parse(ts);
   for (const [sliceId, slice] of Object.entries(slices)) {
     if (!slice || typeof slice !== "object" || slice.stage !== "hatchery-pending") continue;
     const resultPath = slice.hatchery?.hatchery_result_path;
@@ -2154,7 +2191,19 @@ function completePendingHatcheryDispatches(state, ts) {
     try {
       raw = fs.readFileSync(resultPath, "utf-8").trim();
     } catch (err) {
-      if (err && err.code === "ENOENT") continue;
+      if (err && err.code === "ENOENT") {
+        const queuedMs = Date.parse(slice.last_action || "");
+        if (Number.isFinite(queuedMs) && Number.isFinite(nowMs) && nowMs - queuedMs > HATCHERY_PENDING_TIMEOUT_MS) {
+          const ageMin = Math.round((nowMs - queuedMs) / 60000);
+          const note = "NEED: Hatchery spawn produced no result file after " + ageMin + " min (runner likely crashed before writing); manual investigation required";
+          slice.stage = "escalated";
+          slice.last_action = ts;
+          slice.last_action_note = note;
+          failures.push({ slice_id: sliceId, command: actionCommandLine({ command: slice.command, arguments: slice.arguments || [] }), error: note });
+          mutated = true;
+        }
+        continue;
+      }
       failures.push({ slice_id: sliceId, command: actionCommandLine({ command: slice.command, arguments: slice.arguments || [] }), error: err?.message || String(err) });
       continue;
     }
