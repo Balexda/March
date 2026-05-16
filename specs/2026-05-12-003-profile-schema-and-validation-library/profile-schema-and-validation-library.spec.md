@@ -4,6 +4,18 @@
 **Branch**: `feature/smithy/mark/02-hatchery-f1`
 **Created**: 2026-05-12
 **Status**: Draft  |  **Implementation status (2026-05-16)**: **Not started** — spec drafted, no code. This spec is the first concrete piece of Stage B spec #1 (hatchery declarative profiles) in the RFC backlog. When implementation begins, F1 lands the schema + validator; F2–F6 follow per `02-hatchery.features.md`. The accelerated `src/hatchery/legate-container.ts` and `src/hatchery/spawn-config.ts` are the consumers that will migrate to profile-backed config in F5.
+
+## Accelerated context (2026-05-16)
+
+This spec was drafted on 2026-05-12. Three bootstrap changes have landed since then that affect downstream features (F2–F6) and add two new real consumers without invalidating the F1 schema itself:
+
+1. **Codex is the second backend, not Gemini.** Codex uses a **credential-mount** auth pattern: the host's `CODEX_HOME` directory is bind-mounted read-only into the container at `/march/codex-auth` and copied into the in-container home at entrypoint time. This mount is a typed exception to "no host bind mounts ever" (A2/FR-009) and must be expressible in the schema. As written, F1's `FileMount` discriminated union admits only `named-volume` and `snapshot` — there is no variant for "backend-declared credential mount." See [SD-017](#specification-debt-2026-05-16-additions).
+2. **The `pr-management` profile is the Steward's profile.** The Steward role (Claude Code agent-deck session that handles review/test/commit/push/PR after a spawn) was named in the RFC on 2026-05-16. The `pr-management` profile this spec already accommodates is the same profile, used by `src/hatchery/spawn-handoff.ts`. No schema change needed; the fixture corpus (US8/FR-026) should name the fixture `steward.yaml` or alias it.
+3. **A third real consumer exists: the Legate container.** `src/hatchery/legate-container.ts` ships an ad-hoc Hatchery profile for the `legate-agent` + `legate-loop` pair. F3 (default profile materialization) only seeds `spawn` and `pr-management`; a `legate` profile should be added as a third seeded shape to make the migration of `legate-container.ts` into the profile system a pure swap. See [SD-018](#specification-debt-2026-05-16-additions).
+
+None of these invalidate the F1 schema's core shape (Profile identity, container security, resources, network policy, snapshot policy, A2/A3/A5/A7 structural enforcement). The Gemini references in this spec (none direct — all surface as "two backends" in F3 narrative and the `BackendCredentialMountSpec` absence) can be ignored or replaced by Codex in fixtures.
+
+
 **Input**: `docs/rfcs/2026-001-march-orchestration-platform/march-orchestration-platform.rfc.md` — Milestone 2: Hatchery
 **Source Feature Map**: `docs/rfcs/2026-001-march-orchestration-platform/02-hatchery.features.md` — Feature 1: Profile Schema and Validation Library
 
@@ -286,6 +298,16 @@ US2–US7 are pairwise independent once US1 lands, so the bulk of the implementa
 | SD-014 | `NetworkEndpoint.host` grammar in data-model entity 7 ("DNS-resolvable hostname (RFC 1123) or IPv4 literal. CIDR and IPv6 deferred") asserts the lean-(b) resolution of SD-002 as definitive, while SD-002 itself remains open. Either close SD-002 with lean-(b) or soften entity 7's `host` row to defer the grammar to SD-002. | plan-review:Assumption-output drift | Important | Low | open | — |
 | SD-015 | `NetworkEndpoint.port` range (`[1, 65535]`, no wildcards) is asserted in data-model entities 7 and 11 as definitive while SD-003 remains open. Either close SD-003 with the asserted resolution or soften entities 7 and 11 to defer to SD-003. | plan-review:Assumption-output drift | Important | Low | open | — |
 | SD-016 | `ValidationErrorCode` is asserted as a public-API surface (data-model entity 11 and contracts "Contract Stability and Versioning" section) while SD-005 still marks the stability question as open. Either close SD-005 with the asserted resolution (codes stable within M2, extensible in M3+) or soften the data model and contracts to defer to SD-005. | plan-review:Assumption-output drift | Important | Low | open | — |
+
+### Specification Debt — 2026-05-16 additions
+
+These items track schema gaps surfaced by the bootstrap acceleration (see [Accelerated context](#accelerated-context-2026-05-16)).
+
+| ID | Description | Source Category | Impact | Confidence | Status | Resolution |
+|----|-------------|-----------------|--------|------------|--------|------------|
+| SD-017 | Codex's credential-mount auth (`/march/codex-auth → CODEX_HOME`, read-only host-source bind) is not expressible under F1's current `FileMount` union (`named-volume` + `snapshot` only). Two viable resolutions: (a) introduce a third `FileMount` variant `credential-mount` with required `source: { fromBackend: string }` so the host source path is *not* operator-authored (operator names a backend; the backend declares the path), preserving A2's "no operator-authored host paths" guarantee; (b) keep `FileMount` closed and locate credential mounts on the `SpawnBackend` interface in the multi-backend spec, treating them as backend-attached not profile-attached. Recommended lean: (b) — credential mounts are intrinsically per-backend (like `requiredEnvVars`), not per-profile, so they belong on the backend interface and the profile-validator stays clean. The "no host bind mounts" structural guarantee remains schema-level; backend credential mounts are a declared exception evaluated at launch composition. F4 (Spawn Sandbox Security) US5's bind-mount validator must admit this typed exception. | clarify:Domain & Data Model | Critical | Medium | open | — |
+| SD-018 | F3 (default profile materialization) seeds `spawn` and `pr-management`. The accelerated `src/hatchery/legate-container.ts` constitutes a *third* real profile (the Legate container) whose ad-hoc config should migrate into the profile system to avoid two paths for hatchery profiles. Recommended lean: extend F3's seed list to include a `legate` profile and migrate `legate-container.ts` to read its config from there in the Stage B "brood lifecycle CLI" spec (RFC backlog #3). F1 imposes no constraint here — `legate` is data, not schema. Logged on F1 so F3 picks it up. | clarify:Feature Boundaries / Scope Within the Milestone | Important | Medium | open | — |
+| SD-019 | The `pr-management` profile is the Steward profile (named 2026-05-16). The fixture corpus (FR-026/SC-006) should reflect the role name. Recommended lean: keep `pr-management` as the profile *name* (it's the workflow, not the role) and add a comment/sidecar mapping it to the Steward role. Operator may prefer renaming the profile to `steward`; that's a content decision, not an F1 schema decision. | clarify:Terminology | Low | Medium | open | — |
 
 ## Out of Scope
 
