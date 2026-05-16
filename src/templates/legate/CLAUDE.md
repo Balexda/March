@@ -146,15 +146,15 @@ It:
 
 **Previous behavior (fixed):** the gate used to be `case "$STATE" in idle|waiting) ;; *) exit 0 ;;`, which silently bailed on `error`. Conductors that transiently lapsed into `error` overnight got stranded — the heartbeat that would have unstuck them was the very thing the gate blocked. If you observe this regression returning, check the gate in `src/legate.ts:LEGATE_HEARTBEAT_SCRIPT_TEMPLATE`.
 
-## Inspecting the dispatch loop's input
+## Inspecting the deterministic loop's dispatch input
 
-The dispatch skill consumes `find-ready-slices.sh`, deployed alongside the dispatch scripts. To see exactly what dispatch will consider on the next heartbeat:
+Smithy dispatch runs in the paired deterministic loop, not in a Claude skill. To see exactly what it will consider on the next tick:
 
 ```bash
-bash ~/.agent-deck/conductor/<conductor-name>/.claude/skills/legate.dispatch/scripts/find-ready-slices.sh <repo-path>
+(cd <repo-path> && smithy status --format json)
 ```
 
-Returns a JSON array of `{type, path, title, status, next_action}` objects — one per ready item. Empty array `[]` means nothing is ready (legitimate quiescent state). `next_action.command` is drawn from the closed set `{smithy.render, smithy.mark, smithy.cut, smithy.forge}`.
+The loop reads `records[]` and picks non-virtual records with `next_action.command` in `{smithy.render, smithy.mark, smithy.cut, smithy.forge}`. Empty ready sets are a legitimate quiescent state.
 
 To see what `smithy status --graph` would say (the same data in a different shape):
 
@@ -183,18 +183,18 @@ The CLAUDE.prompt loads skills in this order on every heartbeat:
 
 1. `legate.resume` — clear any "Resume from summary" pickers before anything else tries to send keystrokes.
 2. `legate.error` — handle opaque worker `error` sessions escalated by the processor or reported by agent-deck.
-3. `legate.babysit` — handle existing PRs.
+3. `legate.babysit` — handle PR judgement escalations from the loop.
 4. `legate.merge` — auto-squash-merge gated PRs from this tick.
-5. `legate.cleanup` and the deterministic processor — sweep terminal PR slices into `archived_slices`, prune worktrees. The processor also mirrors the deterministic babysit subset: PR discovery/state refresh, first conflict prompts, review-thread `/smithy.fix`, and all-clear transitions. Failed CI, persistent conflicts, and opaque worker errors are escalated to the Legate conductor.
-6. `legate.dispatch` — pick up new work. Runs every heartbeat regardless of what babysit found; iterates the entire ready set and launches one worker per ready slice that has no in-flight worker yet (no per-heartbeat cap on the number of new workers). See "Concurrency and dispatch behavior" below.
+
+The deterministic loop runs beside the Claude agent. It performs terminal PR cleanup, mirrors the deterministic babysit subset, and picks up Smithy new work through Hatchery. Failed CI, persistent conflicts, opaque worker errors, auth blocks, sync failures, and Hatchery dispatch failures are escalated to the Legate agent.
 
 `legate.issue` is not in the heartbeat order; it's triggered by operator message.
 
-## Concurrency and dispatch behavior
+## Concurrency and Dispatch Behavior
 
-`legate.dispatch/SKILL.prompt` runs on **every** heartbeat regardless of what babysit found, and iterates over every ready item from `find-ready-slices.sh`. For each, it launches one worker if (a) all dependencies have merged, and (b) no existing entry in `state.json.slices` already claims that artifact. There is **no per-heartbeat dispatch cap** — the natural rate limit is the size of the ready set. If you see a conductor sit on a known-ready, unclaimed item across multiple heartbeats, the bug is in one of: dep-check (treating a merged PR as unmerged), the in-flight check (treating an escalated/archived slice as live), or `find-ready-slices.sh` (failing to surface the item).
+The deterministic loop runs on **every** tick regardless of what babysit found, and iterates over every ready item from `smithy status --format json`. For each, it launches one Hatchery/Codex-backed manager session if (a) all dependencies have merged or are already done in Smithy's graph, and (b) no existing entry in `state.json.slices` already claims that command/action. There is **no per-tick dispatch cap** — the natural rate limit is the size of the ready set. If you see a conductor sit on a known-ready, unclaimed item across multiple ticks, the bug is in one of: dep-check, duplicate/in-flight detection, or Smithy not surfacing the item as ready.
 
-Dispatch and agent-deck are decoupled: agent-deck can launch arbitrary workers; the conductor decides what to launch based on `smithy status` + `state.json` cross-reference.
+Dispatch and agent-deck are decoupled: agent-deck can launch arbitrary workers; the loop decides what to launch based on `smithy status` + `state.json` cross-reference.
 
 ## Where the deploy code lives
 
@@ -225,7 +225,7 @@ agent-deck -p <profile> list --json \
                     | {title, group, status, id}'
 
 # What dispatch would pick up next
-bash ~/.agent-deck/conductor/<name>/.claude/skills/legate.dispatch/scripts/find-ready-slices.sh <repo-path>
+(cd <repo-path> && smithy status --format json)
 
 # Tail conductor's tmux pane
 tmux capture-pane -t "$(agent-deck -p <profile> session show conductor-<name> --json | jq -r .tmux_session)" -pS -200

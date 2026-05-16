@@ -356,6 +356,8 @@ describe("march CLI", () => {
     expect(result.stdout).toContain("--agent-deck-profile");
     expect(result.stdout).toContain("--manager-group");
     expect(result.stdout).toContain("--name");
+    expect(result.stdout).toContain("--branch");
+    expect(result.stdout).toContain("--json");
     expect(result.stdout).toContain("default: codex");
   });
 
@@ -790,6 +792,8 @@ exit 0
         "add a generated file",
         "--name",
         "manager title",
+        "--branch",
+        "smithy/cut/generated",
       ],
       {
         PATH: [
@@ -810,6 +814,11 @@ exit 0
 
     const agentDeckInvocations = fs.readFileSync(agentDeckLog, "utf-8");
     expect(agentDeckInvocations).toMatch(/^launch /m);
+    expect(agentDeckInvocations).toContain("--worktree smithy/cut/generated");
+    expect(agentDeckInvocations).toContain(
+      "--extra-arg --permission-mode --extra-arg auto",
+    );
+    expect(agentDeckInvocations).toContain("--extra-arg --model --extra-arg sonnet");
     expect(agentDeckInvocations).toMatch(/^session send manager-session /m);
 
     const worktreeParent = path.join(path.dirname(repoRoot), "agent-deck-worktrees");
@@ -817,6 +826,15 @@ exit 0
     expect(managerWorktrees).toHaveLength(1);
     const managerWorktree = path.join(worktreeParent, managerWorktrees[0]);
     expect(fs.existsSync(path.join(managerWorktree, "README.md"))).toBe(true);
+    expect(fs.readFileSync(path.join(managerWorktree, "generated.txt"), "utf-8")).toBe(
+      "generated\n",
+    );
+    expect(
+      execFileSync("git", ["diff", "--cached", "--", "generated.txt"], {
+        cwd: managerWorktree,
+        encoding: "utf-8",
+      }),
+    ).toContain("+generated");
 
     const logsRoot = path.join(home, ".march", "logs", "hatchery-spawns");
     const spawnIds = fs.readdirSync(logsRoot);
@@ -832,10 +850,10 @@ exit 0
     );
     expect(
       fs.readFileSync(path.join(handoffDir, "manager-prompt.md"), "utf-8"),
-    ).toContain("Apply and review the staged spawn patch");
+    ).toContain("Review the already-applied staged change");
     expect(
       fs.readFileSync(`${agentDeckLog}.prompt`, "utf-8"),
-    ).toContain(path.join(handoffDir, "patch.diff"));
+    ).not.toContain(path.join(handoffDir, "patch.diff"));
 
     const dockerInvocations = fs.readFileSync(dockerLog, "utf-8");
     const buildLine = dockerInvocations

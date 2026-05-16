@@ -306,6 +306,49 @@ export async function writeHeartbeatTimerOverride(
   return target;
 }
 
+function renderDisabledHeartbeatScript(conductorName: string): string {
+  return `#!/bin/sh
+# march-managed: ${conductorName} is reactive; legate-loop owns ticks.
+exit 0
+`;
+}
+
+async function writeDisabledHeartbeatScript(
+  conductorDir: string,
+  conductorName: string,
+): Promise<string> {
+  validateConductorName(conductorName);
+  const target = path.join(conductorDir, "heartbeat.sh");
+  await fs.writeFile(target, renderDisabledHeartbeatScript(conductorName), {
+    mode: 0o755,
+  });
+  await fs.chmod(target, 0o755);
+  return target;
+}
+
+function disableLegacyHeartbeatTimer(conductorName: string): void {
+  validateConductorName(conductorName);
+  const timer = `agent-deck-conductor-heartbeat-${conductorName}.timer`;
+  const service = `agent-deck-conductor-heartbeat-${conductorName}.service`;
+  execFileSync("systemctl", ["--user", "disable", "--now", timer], {
+    stdio: "ignore",
+  });
+  try {
+    execFileSync("systemctl", ["--user", "stop", service], {
+      stdio: "ignore",
+    });
+  } catch {
+    // The one-shot service is usually inactive after the timer fires.
+  }
+  try {
+    execFileSync("systemctl", ["--user", "daemon-reload"], {
+      stdio: "ignore",
+    });
+  } catch {
+    // The timer is already disabled; daemon-reload is best-effort cleanup.
+  }
+}
+
 const TEMPLATE_VARS = [
   "REPO_NAME",
   "REPO_PATH",
@@ -337,17 +380,14 @@ export const LEGATE_SKILLS = [
   "legate.error",
   "legate.babysit",
   "legate.merge",
-  "legate.cleanup",
-  "legate.dispatch",
   "legate.issue",
 ] as const;
 export type LegateSkillName = (typeof LEGATE_SKILLS)[number];
 
 /**
  * Read-only `agent-deck` patterns the conductor sometimes needs outside the
- * skill scripts. The dispatch skill ships `inspect-worker.sh` as the
- * audited path for `session show`, but in practice the conductor also
- * legitimately reaches for `session output` (to read what a worker last
+ * skill scripts. In practice the conductor also legitimately reaches for
+ * `session output` (to read what a worker last
  * said before deciding whether to dispatch to it) and the various `list`
  * / `status` commands during reconciliation. Belt-and-suspenders: with
  * these patterns allowed, a one-off direct read invocation doesn't stall
@@ -531,13 +571,20 @@ function repoHashSuffix(repoPath: string): string {
 
 function deriveLoopName(conductorName: string): string {
   const raw = conductorName.endsWith("-legate-agent")
-    ? `${conductorName.slice(0, -"-legate-agent".length)}-legate-loop`
+    ? `${conductorName.slice(0, -"legate-agent".length)}legate-loop`
     : `${conductorName}-loop`;
   if (raw.length <= CONDUCTOR_NAME_MAX_LEN) return raw;
 
   const suffix = createHash("sha256").update(conductorName).digest("hex").slice(0, 8);
   const headLength = CONDUCTOR_NAME_MAX_LEN - suffix.length - 1;
   return `${raw.slice(0, headLength)}-${suffix}`;
+}
+
+function roleConductorName(profile: string, roleName: string): string {
+  if (roleName === "legate-agent" || roleName === "legate-loop") {
+    return `${profile}-${roleName}`;
+  }
+  return roleName;
 }
 
 export function deriveDefaults(repoPath: string): {
@@ -651,6 +698,7 @@ function loopMetaFor(input: {
       name: input.repoName,
       path: input.repoPath,
     },
+    march_cli_path: process.argv[1] ? path.resolve(process.argv[1]) : null,
     worker_group: input.workerGroup,
     legate_state_path: path.join(input.legateConductorDir, "state.json"),
     loop_log_path: path.join(input.loopConductorDir, "legate-loop.log"),
@@ -671,7 +719,7 @@ function loopMetaFor(input: {
 }
 
 const LEGATE_LOOP_MJS = `#!/usr/bin/env node
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -726,6 +774,14 @@ function execText(command, args, options = {}) {
   });
 }
 
+function execMarch(args, options = {}) {
+  const cliPath = meta.march_cli_path;
+  if (typeof cliPath === "string" && cliPath.length > 0) {
+    return execText(process.execPath, [cliPath, ...args], options);
+  }
+  return execText("march", args, options);
+}
+
 function formatCleanupLine(event, prefix = "") {
   return \`[\${event.ts}] \${prefix}cleaned up \${event.slice_id} PR #\${event.pr_number} \${event.pr_state}: removed session \${event.session_id}, pruned worktree\`;
 }
@@ -761,7 +817,7 @@ function replayRecentActionEvents(limit = 10) {
         return null;
       }
     })
-    .filter((event) => event?.kind === "cleanup" || event?.kind === "cleanup_failure" || event?.kind === "babysit_action" || event?.kind === "processor_request")
+    .filter((event) => event?.kind === "cleanup" || event?.kind === "cleanup_failure" || event?.kind === "babysit_action" || event?.kind === "dispatch_action" || event?.kind === "processor_request")
     .slice(-limit);
   if (events.length === 0) return;
   printText(\`[\${now()}] replaying \${events.length} recent processor action event(s) to stdout\`);
@@ -772,6 +828,8 @@ function replayRecentActionEvents(limit = 10) {
       printText(formatCleanupFailureLine(event, "recent action: "));
     } else if (event.kind === "babysit_action") {
       printText(formatBabysitActionLine(event, "recent action: "));
+    } else if (event.kind === "dispatch_action") {
+      printText("[" + event.ts + "] recent action: dispatch " + event.slice_id + ": " + event.detail);
     } else {
       printText(formatProcessorRequestLine(event, "recent action: "));
     }
@@ -1025,6 +1083,13 @@ function archiveSlice(state, sliceId, slice, pr, terminalState, ts) {
     pr_number: pr.number ?? slice?.pr?.number ?? null,
     pr_url: pr.url ?? slice?.pr?.url ?? null,
     worker_title: slice.worker_title ?? null,
+    branch: slice.branch ?? null,
+    actual_branch: slice.actual_branch ?? null,
+    command: slice.command ?? null,
+    arguments: Array.isArray(slice.arguments)
+      ? slice.arguments.map((arg) => String(arg))
+      : [],
+    artifact_path: slice.artifact_path ?? null,
     terminal_state: terminalState,
   };
   if (terminalState === "MERGED") archivedSlice.merged_at = ts;
@@ -1393,6 +1458,38 @@ Threads:
 \${reviewThreadsSummary(threads)}\`;
 }
 
+function addBranchVariants(branches, value) {
+  const raw = String(value || "").trim();
+  if (!raw) return;
+  const normalized = raw.replace(/^refs\\/heads\\//, "");
+  branches.add(normalized);
+  if (normalized.startsWith("feature/")) {
+    branches.add(normalized.slice("feature/".length));
+  } else {
+    branches.add(\`feature/\${normalized}\`);
+  }
+}
+
+function expectedPrBranches(slice) {
+  const branches = new Set();
+  addBranchVariants(branches, slice.actual_branch);
+  addBranchVariants(branches, slice.branch);
+  if (slice.worktree_path) {
+    try {
+      addBranchVariants(branches, execText("git", ["-C", slice.worktree_path, "branch", "--show-current"]));
+    } catch {
+      // Best-effort guard only; branch fields still protect PR discovery.
+    }
+  }
+  return branches;
+}
+
+function prMatchesSliceBranch(slice, pr) {
+  const branches = expectedPrBranches(slice);
+  if (branches.size === 0) return false;
+  return branches.has(String(pr?.head_branch || pr?.headRefName || ""));
+}
+
 function discoverPrForSlice(slice, state, sessionId) {
   const repoPath = state?.repo?.path || meta.repo?.path;
   if (!repoPath) return null;
@@ -1403,7 +1500,7 @@ function discoverPrForSlice(slice, state, sessionId) {
       const url = matches[matches.length - 1];
       const number = url.split("/").pop();
       const pr = queryPrForBabysit({ pr: { number } }, state);
-      return pr?.skipped ? null : pr;
+      return pr?.skipped || !prMatchesSliceBranch(slice, pr) ? null : pr;
     }
   } catch {
     // fall through to branch-based lookup
@@ -1419,11 +1516,8 @@ function discoverPrForSlice(slice, state, sessionId) {
     const candidates = since
       ? list.filter((candidate) => String(candidate.createdAt || "") >= since)
       : list;
-    const expectedBranch = slice.actual_branch || slice.branch || "";
-    const branchMatches = expectedBranch
-      ? candidates.filter((candidate) => candidate.headRefName === expectedBranch)
-      : [];
-    const chosen = (branchMatches.length > 0 ? branchMatches : candidates)
+    const branchMatches = candidates.filter((candidate) => prMatchesSliceBranch(slice, candidate));
+    const chosen = branchMatches
       .sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")))[0];
     if (!chosen) return null;
     return queryPrForBabysit({ pr: { number: chosen.number } }, state);
@@ -1643,7 +1737,7 @@ function runBabysit(state, workerList, ts) {
         sessionId,
         pr,
         reason: "CI failure requires Legate judgement",
-        detail: \`PR #\${pr.number} has failing CI. The deterministic processor cannot distinguish stale-main, transient flake, and real PR-diff failure safely. Failed checks:\\n\${failedChecksSummary(pr)}\`,
+        detail: \`PR #\${pr.number} has failing CI. The deterministic loop cannot distinguish stale-main, transient flake, and real PR-diff failure safely. Failed checks:\\n\${failedChecksSummary(pr)}\`,
       });
       if (request) {
         requests.push(request);
@@ -1652,7 +1746,7 @@ function runBabysit(state, workerList, ts) {
       continue;
     }
 
-    if (pr.checks === "PASS" && pr.thread_count === 0 && pr.mergeable !== "CONFLICTING") {
+    if (pr.checks === "PASS" && pr.needs_response_count === 0 && pr.mergeable !== "CONFLICTING") {
       if (["pr-in-fix", "pr-resolving-conflicts", "pr-rebasing", "pr-in-rerun", "implementing"].includes(slice.stage)) {
         slice.stage = "pr-open";
         slice.pr_open_at = ts;
@@ -1670,6 +1764,572 @@ function runBabysit(state, workerList, ts) {
   return { actions, failures, requests, mutated };
 }
 
+function slugifyDispatchPart(value, fallback = "item") {
+  const slug = String(value || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 56);
+  return slug || fallback;
+}
+
+function smithyVerb(command) {
+  return String(command || "").replace(/^smithy\\./, "");
+}
+
+function actionArguments(action) {
+  return Array.isArray(action?.arguments)
+    ? action.arguments.map((arg) => String(arg))
+    : [];
+}
+
+function actionCommandLine(action) {
+  const command = String(action?.command || "");
+  const args = actionArguments(action);
+  return ["/" + command, ...args].join(" ").trim();
+}
+
+function dispatchItemKey(item) {
+  const action = item?.next_action || {};
+  return JSON.stringify({
+    command: action.command || "",
+    arguments: actionArguments(action),
+    path: item?.path || "",
+  });
+}
+
+function sliceActionKey(slice) {
+  if (!slice || typeof slice !== "object") return "";
+  return JSON.stringify({
+    command: slice.command || "",
+    arguments: Array.isArray(slice.arguments)
+      ? slice.arguments.map((arg) => String(arg))
+      : [],
+    path: slice.artifact_path || "",
+  });
+}
+
+function dispatchSliceId(item) {
+  const action = item?.next_action || {};
+  const verb = smithyVerb(action.command);
+  const args = actionArguments(action);
+  const basis = [item?.path || item?.title || "smithy", ...args].join(" ");
+  const stem = slugifyDispatchPart(basis, "smithy").slice(0, 44);
+  const hash = hashText(dispatchItemKey(item)).slice(0, 8);
+  return stem + "-" + slugifyDispatchPart(verb, "step") + "-" + hash;
+}
+
+function dispatchTitle(item) {
+  const action = item?.next_action || {};
+  const verb = smithyVerb(action.command);
+  const title = item?.title || item?.path || actionArguments(action).join(" ");
+  return verb + ": " + String(title || "smithy work").slice(0, 80);
+}
+
+function dispatchBranch(item) {
+  const action = item?.next_action || {};
+  const verb = slugifyDispatchPart(smithyVerb(action.command), "step");
+  const stem = slugifyDispatchPart([item?.title || item?.path || "work", ...actionArguments(action)].join(" "), "work").slice(0, 44);
+  const hash = hashText(dispatchItemKey(item)).slice(0, 8);
+  return "smithy/" + verb + "/" + stem + "-" + hash;
+}
+
+function isTerminalSlice(slice) {
+  if (!slice || typeof slice !== "object") return true;
+  if (slice.stage === "merged" || slice.stage === "escalated") return true;
+  if (slice.pr?.state === "MERGED" || slice.pr?.state === "CLOSED") return true;
+  return false;
+}
+
+function archivedSlices(state) {
+  return state?.archived_slices && typeof state.archived_slices === "object"
+    ? state.archived_slices
+    : {};
+}
+
+function alreadyArchivedSlice(state, item, sliceId) {
+  const archived = archivedSlices(state);
+  if (Object.prototype.hasOwnProperty.call(archived, sliceId)) return true;
+  const key = dispatchItemKey(item);
+  const branch = dispatchBranch(item);
+  for (const slice of Object.values(archived)) {
+    if (!slice || typeof slice !== "object") continue;
+    if (sliceActionKey(slice) === key) return true;
+    if (slice.branch && slice.branch === branch) return true;
+    if (slice.actual_branch && slice.actual_branch === branch) return true;
+  }
+  return false;
+}
+
+function alreadyHasInFlightSlice(state, item, sliceId) {
+  if (alreadyArchivedSlice(state, item, sliceId)) return true;
+  const slices = state?.slices && typeof state.slices === "object" ? state.slices : {};
+  const key = dispatchItemKey(item);
+  for (const [existingId, slice] of Object.entries(slices)) {
+    if (existingId === sliceId) return true;
+    if (!slice || typeof slice !== "object" || isTerminalSlice(slice)) continue;
+    if (sliceActionKey(slice) === key) return true;
+    if (slice.branch && slice.branch === dispatchBranch(item)) return true;
+  }
+  return false;
+}
+
+function graphNodes(status) {
+  return status?.graph?.nodes && typeof status.graph.nodes === "object"
+    ? status.graph.nodes
+    : {};
+}
+
+function graphNode(status, nodeId) {
+  const nodes = graphNodes(status);
+  return nodeId ? nodes[nodeId] || null : null;
+}
+
+function forgeRowId(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  return /^[a-zA-Z]/.test(raw) ? raw : "S" + raw;
+}
+
+function forgeNodeId(item) {
+  const args = actionArguments(item?.next_action || {});
+  const tasksPath = args[0] || item?.path || "";
+  const rowId = forgeRowId(args[1]);
+  if (!tasksPath || !rowId) return null;
+  return tasksPath + "#" + rowId;
+}
+
+function recordRowForForgeItem(status, item) {
+  const args = actionArguments(item?.next_action || {});
+  const tasksPath = args[0] || item?.path || "";
+  const rowId = forgeRowId(args[1]);
+  if (!tasksPath || !rowId) return null;
+  const records = Array.isArray(status?.records) ? status.records : [];
+  const record = records.find((candidate) => candidate?.path === tasksPath);
+  const rows = Array.isArray(record?.dependency_order?.rows)
+    ? record.dependency_order.rows
+    : [];
+  return rows.find((row) => String(row?.id || "") === rowId) || null;
+}
+
+function dependencyIds(status, item) {
+  const nodeId = forgeNodeId(item);
+  const node = graphNode(status, nodeId);
+  const row = node?.row || recordRowForForgeItem(status, item) || {};
+  const raw = Array.isArray(row?.depends_on) ? row.depends_on : [];
+  const recordPath = String(node?.record_path || actionArguments(item?.next_action || {})[0] || item?.path || "");
+  return raw
+    .map((dep) => String(dep || "").trim())
+    .filter(Boolean)
+    .map((dep) => dep.includes("#") ? dep : recordPath + "#" + dep);
+}
+
+function dependencyMerged(state, depId) {
+  const archived = state?.archived_slices && typeof state.archived_slices === "object"
+    ? state.archived_slices
+    : {};
+  const live = state?.slices && typeof state.slices === "object" ? state.slices : {};
+  const archivedSlice = archived[depId] || archived[slugifyDispatchPart(depId)];
+  if (archivedSlice && typeof archivedSlice === "object") {
+    if (archivedSlice.terminal_state === "MERGED" || archivedSlice.merged_at) return true;
+  }
+  const liveSlice = live[depId] || live[slugifyDispatchPart(depId)];
+  if (liveSlice && typeof liveSlice === "object") {
+    if (liveSlice.stage === "merged" || liveSlice.pr?.state === "MERGED") return true;
+  }
+  return false;
+}
+
+function itemFromGraphNode(node) {
+  const recordPath = String(node?.record_path || "");
+  const row = node?.row && typeof node.row === "object" ? node.row : {};
+  const rowId = String(row.id || "").trim();
+  const rowNumber = rowId.replace(/^[a-zA-Z]+/, "") || rowId;
+  return {
+    path: recordPath,
+    title: row.title || recordPath,
+    next_action: {
+      command: "smithy.forge",
+      arguments: [recordPath, rowNumber],
+    },
+  };
+}
+
+function dependencySatisfied(state, status, depId) {
+  const node = graphNode(status, depId);
+  const nodeStatus = String(node?.status || "").toLowerCase();
+  if (nodeStatus === "done") return true;
+  const depItem = node ? itemFromGraphNode(node) : null;
+  const candidates = [
+    depId,
+    depItem ? dispatchSliceId(depItem) : null,
+    slugifyDispatchPart(depId),
+  ].filter(Boolean);
+  return candidates.some((candidate) => dependencyMerged(state, candidate));
+}
+
+function dependenciesClear(state, status, item) {
+  return dependencyIds(status, item).every((depId) => dependencySatisfied(state, status, depId));
+}
+
+function dispatchPriority(item) {
+  const command = String(item?.next_action?.command || "");
+  if (command === "smithy.cut") return 0;
+  if (command === "smithy.forge") return 1;
+  if (command === "smithy.render") return 2;
+  if (command === "smithy.mark") return 3;
+  return 9;
+}
+
+function readyLayerNodeIds(status) {
+  const layers = Array.isArray(status?.graph?.layers) ? status.graph.layers : [];
+  const layer = layers.find((candidate) => Number(candidate?.layer) === 0);
+  const ids = Array.isArray(layer?.node_ids) ? layer.node_ids : [];
+  return new Set(ids.map((id) => String(id)));
+}
+
+function recordGraphNodeId(record) {
+  if (!record || typeof record !== "object") return null;
+  if (record.parent_path && record.parent_row_id) {
+    return String(record.parent_path) + "#" + String(record.parent_row_id);
+  }
+  const action = record.next_action || {};
+  if (String(action.command || "") === "smithy.render") {
+    const args = actionArguments(action);
+    const milestone = args[1] ? "M" + String(args[1]).replace(/^[a-zA-Z]+/, "") : "";
+    return milestone ? String(args[0] || record.path || "") + "#" + milestone : null;
+  }
+  return record.path ? String(record.path) : null;
+}
+
+function readySmithyItems(status) {
+  const records = Array.isArray(status?.records) ? status.records : [];
+  const readyNodes = readyLayerNodeIds(status);
+  return records
+    .filter((record) => record?.next_action && !record.virtual)
+    .filter((record) => ["smithy.render", "smithy.mark", "smithy.cut", "smithy.forge"].includes(String(record.next_action.command || "")))
+    .filter((record) => readyNodes.size === 0 || readyNodes.has(recordGraphNodeId(record)))
+    .map((record, index) => ({ ...record, __index: index }))
+    .sort((a, b) => dispatchPriority(a) - dispatchPriority(b) || a.__index - b.__index);
+}
+
+function readSmithyStatus(repoPath) {
+  const out = execText("smithy", ["status", "--format", "json"], { cwd: repoPath });
+  return JSON.parse(out);
+}
+
+function syncDefaultBranch(state) {
+  const repoPath = state?.repo?.path || meta.repo?.path;
+  if (typeof repoPath !== "string" || repoPath.length === 0) {
+    throw new Error("repo path is missing");
+  }
+  let defaultBranch = state?.repo?.default_branch;
+  if (!defaultBranch) {
+    try {
+      defaultBranch = execText("git", ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"], { cwd: repoPath })
+        .trim()
+        .replace(/^origin\\//, "");
+    } catch {
+      defaultBranch = execText("gh", ["repo", "view", "--json", "defaultBranchRef", "-q", ".defaultBranchRef.name"], { cwd: repoPath }).trim();
+    }
+  }
+  if (!defaultBranch) throw new Error("could not determine default branch");
+  execText("git", ["fetch", "origin", defaultBranch], { cwd: repoPath });
+  execText("git", ["switch", defaultBranch], { cwd: repoPath });
+  execText("git", ["pull", "--ff-only", "origin", defaultBranch], { cwd: repoPath });
+  if (state.repo && !state.repo.default_branch) state.repo.default_branch = defaultBranch;
+  return {
+    default_branch: defaultBranch,
+    synced: true,
+    head: execText("git", ["rev-parse", "HEAD"], { cwd: repoPath }).trim(),
+  };
+}
+
+function buildSmithySpawnPrompt(item) {
+  const commandLine = actionCommandLine(item.next_action);
+  return [
+    "Complete this Smithy workflow step and produce a git patch.",
+    "",
+    "Smithy command:",
+    commandLine,
+    "",
+    "Artifact:",
+    item.path || item.title || "(unknown)",
+    "",
+    "Rules:",
+    "- Implement only this one Smithy step.",
+    "- Do not chain into the next Smithy step.",
+    "- Make the smallest coherent patch needed for this step.",
+    "- Leave PR creation to the Hatchery manager session.",
+  ].join("\\n");
+}
+
+function hatcheryResultPath(sliceId) {
+  return path.join(meta.legate_conductor_dir || here, "hatchery-result-" + sliceId + ".json");
+}
+
+function hatcheryLogPath(sliceId) {
+  return path.join(meta.legate_conductor_dir || here, "hatchery-result-" + sliceId + ".log");
+}
+
+function hatcheryRequestPath(sliceId) {
+  return path.join(meta.legate_conductor_dir || here, "hatchery-request-" + sliceId + ".json");
+}
+
+function hatcheryRunnerCode() {
+  return [
+    'const { spawnSync } = require("node:child_process");',
+    'const fs = require("node:fs");',
+    'const request = JSON.parse(fs.readFileSync(process.argv[1], "utf-8"));',
+    'const result = spawnSync(request.command, request.args, { cwd: request.cwd, encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"] });',
+    'if (result.stderr) fs.appendFileSync(request.logPath, result.stderr);',
+    'if (result.status === 0) {',
+    '  fs.writeFileSync(request.resultPath, result.stdout || "", "utf-8");',
+    '} else {',
+    '  fs.writeFileSync(request.resultPath, JSON.stringify({ error: result.stderr || result.error?.message || "hatchery spawn failed", exitCode: result.status ?? null }) + "\\n", "utf-8");',
+    '}',
+  ].join("\\n");
+}
+
+function marchCommandAndArgs(args) {
+  const cliPath = meta.march_cli_path;
+  if (typeof cliPath === "string" && cliPath.length > 0) {
+    return { command: process.execPath, args: [cliPath, ...args] };
+  }
+  return { command: "march", args };
+}
+
+function launchHatcheryDispatch(item, resultPath, logPath) {
+  const repoPath = meta.repo?.path;
+  if (typeof repoPath !== "string" || repoPath.length === 0) {
+    throw new Error("repo path is missing");
+  }
+  const args = [
+    "hatchery",
+    "spawn",
+    "--backend",
+    "codex",
+    "--agent-deck-profile",
+    meta.profile,
+    "--manager-group",
+    meta.worker_group,
+    "--name",
+    dispatchTitle(item),
+    "--branch",
+    dispatchBranch(item),
+    "--prompt",
+    buildSmithySpawnPrompt(item),
+    "--json",
+  ];
+  fs.mkdirSync(path.dirname(resultPath), { recursive: true });
+  fs.writeFileSync(resultPath, "", "utf-8");
+  const requestPath = hatcheryRequestPath(dispatchSliceId(item));
+  const resolved = marchCommandAndArgs(args);
+  fs.writeFileSync(requestPath, JSON.stringify({
+    command: resolved.command,
+    args: resolved.args,
+    cwd: repoPath,
+    resultPath,
+    logPath,
+  }) + "\\n", "utf-8");
+  const child = spawn(process.execPath, ["-e", hatcheryRunnerCode(), requestPath], {
+    cwd: repoPath,
+    detached: true,
+    stdio: ["ignore", "ignore", "ignore"],
+  });
+  child.unref();
+  return { pid: child.pid || null, requestPath };
+}
+
+function completePendingHatcheryDispatches(state, ts) {
+  const actions = [];
+  const failures = [];
+  let mutated = false;
+  const slices = state?.slices && typeof state.slices === "object" ? state.slices : {};
+  for (const [sliceId, slice] of Object.entries(slices)) {
+    if (!slice || typeof slice !== "object" || slice.stage !== "hatchery-pending") continue;
+    const resultPath = slice.hatchery?.hatchery_result_path;
+    if (typeof resultPath !== "string" || resultPath.length === 0) continue;
+    let raw;
+    try {
+      raw = fs.readFileSync(resultPath, "utf-8").trim();
+    } catch (err) {
+      if (err && err.code === "ENOENT") continue;
+      failures.push({ slice_id: sliceId, command: actionCommandLine({ command: slice.command, arguments: slice.arguments || [] }), error: err?.message || String(err) });
+      continue;
+    }
+    if (!raw) continue;
+    let result;
+    try {
+      result = JSON.parse(raw);
+    } catch {
+      continue;
+    }
+    if (result.error) {
+      slice.stage = "escalated";
+      slice.last_action = ts;
+      slice.last_action_note = "NEED: Hatchery dispatch failed: " + String(result.error).trim();
+      failures.push({ slice_id: sliceId, command: actionCommandLine({ command: slice.command, arguments: slice.arguments || [] }), error: String(result.error).trim() });
+      mutated = true;
+      continue;
+    }
+    const manager = result.managerSession || {};
+    const artifacts = result.artifacts || {};
+    stageDispatchMessage(sliceId, result);
+    slice.worker_session_id = manager.sessionId || null;
+    slice.worker_title = manager.title || slice.worker_title;
+    slice.branch = result.branch || manager.branch || slice.branch;
+    slice.worktree_path = manager.worktreePath || null;
+    slice.stage = "implementing";
+    slice.hatchery = {
+      ...(slice.hatchery || {}),
+      spawn_id: result.spawnId,
+      backend: result.backend || "codex",
+      artifacts_dir: artifacts.dir || null,
+      patch_path: artifacts.patchPath || null,
+      spawn_output_path: artifacts.spawnOutputPath || null,
+      metadata_path: artifacts.metadataPath || null,
+    };
+    slice.last_action = ts;
+    slice.last_action_note = "Hatchery codex spawn completed and handed off to manager";
+    actions.push({
+      action: "dispatch-complete",
+      sliceId,
+      sessionId: manager.sessionId || null,
+      detail: "Hatchery codex spawn completed for " + actionCommandLine({ command: slice.command, arguments: slice.arguments || [] }),
+    });
+    mutated = true;
+  }
+  return { actions, failures, mutated };
+}
+
+function stageDispatchMessage(sliceId, result) {
+  const base = meta.legate_conductor_dir;
+  if (typeof base !== "string" || base.length === 0) return null;
+  const target = path.join(base, "dispatch-msg-" + sliceId + ".md");
+  const managerPromptPath = result?.artifacts?.managerPromptPath;
+  let body = "";
+  if (typeof managerPromptPath === "string" && managerPromptPath.length > 0) {
+    try {
+      body = fs.readFileSync(managerPromptPath, "utf-8");
+    } catch {
+      body = "";
+    }
+  }
+  if (!body) body = "Continue the Hatchery manager handoff for slice " + sliceId + ". The Hatchery patch has already been applied and staged in this worktree if the handoff completed. Inspect git status and the staged diff, verify, commit, push, and open the PR.";
+  fs.writeFileSync(target, body.trimEnd() + "\\n", "utf-8");
+  return target;
+}
+
+function runDispatch(state, ts) {
+  const actions = [];
+  const failures = [];
+  if (!state) return { actions, failures, mutated: false };
+  const repoPath = state?.repo?.path || meta.repo?.path;
+  if (typeof repoPath !== "string" || repoPath.length === 0) {
+    failures.push({ error: "repo path is missing" });
+    return { actions, failures, mutated: false };
+  }
+  if (!state.slices || typeof state.slices !== "object") state.slices = {};
+  const completed = completePendingHatcheryDispatches(state, ts);
+  actions.push(...completed.actions);
+  failures.push(...completed.failures);
+  let mutated = completed.mutated;
+
+  let status;
+  try {
+    status = readSmithyStatus(repoPath);
+  } catch (err) {
+    const error = err?.message || String(err);
+    const failure = { error, phase: "read-smithy-status" };
+    failures.push(failure);
+    append(meta.processor_events_path, {
+      schema_version: 1,
+      ts,
+      processor: meta.processor_name,
+      paired_legate: meta.paired_legate,
+      kind: "dispatch_read_failure",
+      ...failure,
+    });
+    appendText(meta.processor_log_path, "[" + ts + "] dispatch read failed: " + error);
+    if (mutated) writeJson(meta.legate_state_path, state);
+    return { actions, failures, mutated };
+  }
+  state.last_smithy_status_at = ts;
+
+  const ready = readySmithyItems(status);
+  let synced = false;
+  mutated = true;
+  for (const item of ready) {
+    const sliceId = dispatchSliceId(item);
+    if (alreadyHasInFlightSlice(state, item, sliceId)) continue;
+    if (String(item.next_action?.command || "") === "smithy.forge" && !dependenciesClear(state, status, item)) continue;
+
+    try {
+      if (!synced) {
+        syncDefaultBranch(state);
+        synced = true;
+      }
+      const action = item.next_action || {};
+      const resultPath = hatcheryResultPath(sliceId);
+      const logPath = hatcheryLogPath(sliceId);
+      const requestPath = hatcheryRequestPath(sliceId);
+      state.slices[sliceId] = {
+        kind: "smithy",
+        worker_session_id: null,
+        worker_title: dispatchTitle(item),
+        branch: dispatchBranch(item),
+        actual_branch: null,
+        worktree_path: null,
+        stage: "hatchery-pending",
+        pr: null,
+        command: action.command,
+        arguments: actionArguments(action),
+        artifact_path: item.path || null,
+        hatchery: {
+          backend: "codex",
+          hatchery_result_path: resultPath,
+          hatchery_request_path: requestPath,
+          hatchery_log_path: logPath,
+        },
+        last_action: ts,
+        last_action_note: "Queued Hatchery codex spawn for " + actionCommandLine(action),
+      };
+      writeJson(meta.legate_state_path, state);
+      const launched = launchHatcheryDispatch(item, resultPath, logPath);
+      actions.push({
+        action: "dispatch",
+        sliceId,
+        sessionId: null,
+        detail: "queued Hatchery codex spawn pid " + (launched.pid || "unknown") + " for " + actionCommandLine(action),
+      });
+    } catch (err) {
+      const error = err?.message || String(err);
+      const existing = state.slices?.[sliceId];
+      if (existing && existing.stage === "hatchery-pending") {
+        existing.stage = "escalated";
+        existing.last_action = ts;
+        existing.last_action_note = "NEED: Hatchery dispatch launch failed: " + error;
+        mutated = true;
+      }
+      failures.push({ slice_id: sliceId, command: actionCommandLine(item.next_action), error });
+      append(meta.processor_events_path, {
+        schema_version: 1,
+        ts,
+        processor: meta.processor_name,
+        paired_legate: meta.paired_legate,
+        kind: "dispatch_failure",
+        slice_id: sliceId,
+        command: actionCommandLine(item.next_action),
+        error,
+      });
+      appendText(meta.processor_log_path, "[" + ts + "] dispatch failed " + sliceId + ": " + error);
+    }
+  }
+  if (mutated) writeJson(meta.legate_state_path, state);
+  return { actions, failures, mutated };
+}
+
 function tick() {
   const ts = now();
   let state = null;
@@ -1685,7 +2345,8 @@ function tick() {
     ? agentDeckList()
     : workerList;
   const babysitResult = runBabysit(state, babysitWorkerList, ts);
-  const summaryWorkerList = cleanupResult.cleanups.length > 0 || babysitResult.actions.length > 0
+  const dispatchResult = runDispatch(state, ts);
+  const summaryWorkerList = cleanupResult.cleanups.length > 0 || babysitResult.actions.length > 0 || dispatchResult.actions.length > 0
     ? agentDeckList()
     : workerList;
   const workers = summarizeWorkers(summaryWorkerList);
@@ -1709,6 +2370,8 @@ function tick() {
     cleanup_failure_count: cleanupResult.failures.length,
     babysit_action_count: babysitResult.actions.length,
     processor_request_count: babysitResult.requests.length,
+    dispatch_action_count: dispatchResult.actions.length,
+    dispatch_failure_count: dispatchResult.failures.length,
   };
   append(meta.processor_events_path, record);
   for (const cleanup of cleanupResult.cleanups) {
@@ -1758,9 +2421,27 @@ function tick() {
       \`[\${ts}] babysit failed \${failure.slice_id || "unknown"}: \${failure.error}\`,
     );
   }
+  for (const action of dispatchResult.actions) {
+    const event = {
+      schema_version: 1,
+      ts,
+      processor: meta.processor_name,
+      paired_legate: meta.paired_legate,
+      kind: "dispatch_action",
+      action: action.action,
+      slice_id: action.sliceId,
+      session_id: action.sessionId,
+      detail: action.detail,
+    };
+    append(meta.processor_events_path, event);
+    appendText(
+      meta.processor_log_path,
+      "[" + ts + "] dispatch " + action.sliceId + ": " + action.detail,
+    );
+  }
   appendText(
     meta.processor_log_path,
-    \`[\${ts}] heartbeat slice_count=\${record.slice_count} archived=\${record.archived_slice_count} cleanups=\${record.cleanup_count} babysit_actions=\${record.babysit_action_count} processor_requests=\${record.processor_request_count} workers=\${JSON.stringify(workers)}\${stateError ? " state_error=" + stateError : ""}\`,
+    \`[\${ts}] heartbeat slice_count=\${record.slice_count} archived=\${record.archived_slice_count} cleanups=\${record.cleanup_count} babysit_actions=\${record.babysit_action_count} dispatches=\${record.dispatch_action_count} processor_requests=\${record.processor_request_count} workers=\${JSON.stringify(workers)}\${stateError ? " state_error=" + stateError : ""}\`,
   );
 }
 
@@ -1916,8 +2597,7 @@ async function stageSkill(
  * specific deployed script (no `Bash(*)` or `Bash(bash *)` wildcards).
  *
  * The `AGENT_DECK_READ_ALLOWS` patterns are a separate belt-and-suspenders
- * layer for direct `agent-deck session show / list / status` reads — the
- * dispatch skill's `inspect-worker.sh` covers the common case, but allowing
+ * layer for direct `agent-deck session show / list / status` reads. Allowing
  * the underlying read patterns means a future ad-hoc invocation doesn't
  * stall the loop.
  */
@@ -2414,18 +3094,17 @@ export async function ensureInitialState(
 
 /**
  * Cold-start priming prompt sent to the conductor immediately after
- * `agent-deck session restart` succeeds, before the first heartbeat
- * arrives. This is the *only* opportunity the model has to emit a
- * first-turn alignment statement before tool calls begin: without it,
- * the conductor's first turn is its response to a `[HEARTBEAT]`, and
- * the auto-mode classifier evaluates `Skill(legate.*)` + skill-script
- * bashes against an essentially empty recent context.
+ * `agent-deck session restart` succeeds. This is the *only* opportunity
+ * the model has to emit a first-turn alignment statement before loop
+ * doorbells or operator messages begin: without it, the auto-mode
+ * classifier evaluates `Skill(legate.*)` + skill-script bashes against
+ * an essentially empty recent context.
  *
  * The prompt introduces the legate persona and goals at high level —
  * just enough for auto-mode to gauge alignment — and explicitly defers
  * to CLAUDE.md and the per-skill `SKILL.md` files for the strict
  * mechanics. Keep this short and persona-shaped; do not duplicate the
- * full heartbeat decision tree, the state.json schema, or the boundary
+ * full loop escalation decision tree, the state.json schema, or the boundary
  * rules. Those live in CLAUDE.prompt and the skill prompts; drift
  * between this prompt and CLAUDE.md is a maintenance hazard.
  *
@@ -2436,38 +3115,38 @@ const LEGATE_COLD_START_PROMPT_TEMPLATE = `Cold start as the Legate for {REPO_NA
 
 Persona and goals:
 - You orchestrate Smithy work for {REPO_NAME} only. You do not touch other repos or other profiles.
-- You drive worker Claude sessions (group: {WORKER_GROUP}) through /smithy.* slash commands, watch the GitHub PRs they open, and dispatch fixes when CI fails or reviewers leave inline comments. Workers do all implementation; you never edit the repo directly.
-- Optimize for forward progress with minimal operator escalation: drain merged PRs, unblock waiting workers, dispatch the next ready slice. Ask for help (NEED:) only when the situation is genuinely outside your loop.
+- You watch worker Claude sessions (group: {WORKER_GROUP}), track the GitHub PRs they open, and dispatch fixes when CI fails or reviewers leave inline comments. Workers do all implementation; you never edit the repo directly.
+- Optimize for forward progress with minimal operator escalation: drain merged PRs and unblock waiting workers. The deterministic loop dispatches the next ready Smithy slice through Hatchery. Ask for help (NEED:) only when the situation is genuinely outside your loop.
 - One /smithy.<verb> dispatch = one PR. You never auto-merge.
 
 What you operate on:
-- agent-deck conductor — parent/child links, heartbeats, transition notifications.
+- agent-deck conductor — parent/child links and operator/loop messages.
 - smithy CLI + skills — source of truth for what work to pick next.
 - gh CLI — source of truth for high-level PR state.
 - The smithy.pr-review skill — source of truth for unresolved inline review threads.
 
-Seven skills carry the mechanics. Load each once on this turn so the auto-mode classifier registers their allowed-tools:
+Five skills carry the Claude-side mechanics. Load each once on this turn so the auto-mode classifier registers their allowed-tools:
 - legate.resume — worker session-restart recovery and Resume-from-summary picker clearing.
 - legate.error — opaque worker error recovery via inspection, login escalation, restart, or diagnostic prompt.
-- legate.babysit — existing PRs (CI failures, conflicts, review threads, merges).
+- legate.babysit — PR judgement escalations from the deterministic loop (CI classification, repeated conflicts, send failures).
 - legate.merge — strict-gate auto-squash-merge.
-- legate.cleanup — post-merge teardown (kill worker, prune worktree, archive slice).
-- legate.dispatch — new work (launch one worker for one ready slice).
 - legate.issue — operator-driven GitHub issue intake.
 
 Auto-mode alignment — your routine actions are exactly:
-(a) Skill() to load one of the seven skills above;
+(a) Skill() to load one of the five skills above;
 (b) bash invocation of a script under .claude/skills/legate.*/scripts/;
-(c) Read/Edit of state.json, task-log.md, LEARNINGS.md, POLICY.md, CLAUDE.md, meta.json, or */SKILL.md inside this conductor dir;
-(d) a [STATUS] or NEED: reply to a heartbeat or operator message.
+(c) Read of state.json, task-log.md, LEARNINGS.md, POLICY.md, CLAUDE.md, meta.json, legate-loop logs/requests, or */SKILL.md inside this conductor dir;
+(d) a [STATUS] or NEED: reply to a loop escalation or operator message.
+
+The deterministic legate-loop owns routine writes to state.json and task-log.md. Do not edit those files for heartbeat-style bookkeeping, PR refresh, all-clear transitions, cleanup, or dispatch. If a judgement action changes the world by messaging a worker or rerunning CI, let the loop observe and record the resulting state on its next tick unless a skill explicitly says otherwise.
 
 Anything else escalates via NEED: rather than executing — inline python3 -c / bash -c / node -e, scripts outside legate.*, writes outside cwd, direct network primitives, destructive git (reset --hard, push --force, clean -fd), work against another repo or profile, or agent-deck session send to a running worker.
 
 On this turn:
 1. Read CLAUDE.md end-to-end.
-2. Run its cold-start checklist (read state.json if present; load legate.resume, legate.error, legate.babysit, legate.merge, legate.cleanup, legate.dispatch, and legate.issue once via the Skill tool; append a startup entry to task-log.md).
-3. Reply with the cold-start acknowledgement: "Online for {REPO_NAME} ({PROFILE}). Skills available: legate.resume, legate.error, legate.babysit, legate.merge, legate.cleanup, legate.dispatch, legate.issue. Will not invoke anything outside their scripts without escalating."
-4. Wait for the first [HEARTBEAT]. Do not poll on your own.`;
+2. Run its cold-start checklist (read state.json if present; load legate.resume, legate.error, legate.babysit, legate.merge, and legate.issue once via the Skill tool). Do not edit state.json or task-log.md on cold start.
+3. Reply with the cold-start acknowledgement: "Online for {REPO_NAME} ({PROFILE}). Skills available: legate.resume, legate.error, legate.babysit, legate.merge, legate.issue. Will not invoke anything outside their scripts without escalating."
+4. Wait for a [PROCESSOR] loop escalation or operator message. Do not poll on your own.`;
 
 /**
  * Render the cold-start priming prompt for a freshly-restarted conductor.
@@ -2502,7 +3181,9 @@ export async function initLegate(
   const repoPath = opts.repoPath;
   const defaults = deriveDefaults(repoPath);
   const profile = opts.profile ?? defaults.profile;
-  const conductorName = opts.conductorName ?? defaults.conductorName;
+  const conductorName = opts.conductorName !== undefined
+    ? roleConductorName(profile, opts.conductorName)
+    : `${profile}-legate-agent`;
   const loopOnly = opts.loopOnly === true || opts.processorOnly === true;
   const loopEnabled = loopOnly || (opts.loop !== false && opts.processor !== false);
   const processorOnly = loopOnly;
@@ -2511,9 +3192,7 @@ export async function initLegate(
   const runLegateSetup = shouldRunSetup && !loopOnly;
   const runLoopSetup = shouldRunSetup && loopEnabled;
   const runProcessorSetup = runLoopSetup;
-  const loopName = opts.conductorName
-    ? deriveLoopName(conductorName)
-    : defaults.loopName;
+  const loopName = deriveLoopName(conductorName);
   const processorName = loopName;
   const workerGroup = opts.workerGroup ?? defaults.workerGroup;
   const model = opts.model ?? "sonnet";
@@ -2650,6 +3329,7 @@ export async function initLegate(
     conductorName,
     "-description",
     description,
+    "-no-heartbeat",
   ];
 
   const conductorTitle = `conductor-${conductorName}`;
@@ -2684,10 +3364,9 @@ export async function initLegate(
     conductorTitle,
   ];
   // Cold-start priming prompt: delivered as the conductor's first user
-  // message after `session restart`, before the first heartbeat arrives.
-  // Without it, the model's first reply is to a terse [HEARTBEAT] line
-  // and auto-mode's classifier judges the first Skill() / script-bash
-  // calls against essentially empty recent context. See
+  // message after `session restart`, before loop doorbells or operator
+  // messages arrive. Without it, auto-mode's classifier judges the first
+  // Skill() / script-bash calls against essentially empty recent context. See
   // LEGATE_COLD_START_PROMPT_TEMPLATE for rationale.
   const coldStartPrompt = buildColdStartPrompt({
     profile,
@@ -2888,110 +3567,32 @@ export async function initLegate(
           `Without it, every skill-script invocation will pause for operator approval.`,
       );
     }
+    // The Claude-backed legate-agent is reactive. The deterministic
+    // legate-loop owns ticking, state mutation, cleanup, PR refresh, and
+    // dispatch. The agent is launched with `-no-heartbeat` and only receives
+    // cold-start alignment, explicit operator messages, or loop doorbells.
     try {
-      await writeLegateHeartbeatScript(
-        conductorDir,
-        conductorName,
-        profile,
-        workerGroup,
-      );
+      await writeDisabledHeartbeatScript(conductorDir, conductorName);
     } catch (err) {
       postSetupWarnings.push(
-        `Failed to overwrite heartbeat.sh in ${conductorDir}: ` +
+        `Failed to neutralize legacy heartbeat.sh in ${conductorDir}: ` +
           `${(err as Error).message}\n` +
-          `Without this, the agent-deck-managed heartbeat sends a "Heartbeat:" message ` +
-          `that the legate CLAUDE.md does not recognize as a trigger — the conductor ` +
-          `will receive periodic messages but never run babysit/cleanup/dispatch.`,
+          `The legate-agent is configured with -no-heartbeat, but a stale ` +
+          `heartbeat.sh may still be invoked by an old scheduler. Remove or ` +
+          `replace ${path.join(conductorDir, "heartbeat.sh")} manually.`,
       );
     }
-
-    // Pin the conductor's heartbeat cadence via a systemd drop-in override.
-    // agent-deck's default is 15 min (set globally in
-    // `~/.agent-deck/config.toml`); 5 min is the legate sweet spot — fast
-    // enough that stuck workers are noticed promptly, slow enough that we
-    // don't burn through tokens on no-op ticks. The drop-in is per-conductor
-    // so multiple legates can coexist with different cadences if needed.
-    // Linux-only: macOS has no systemd; on other platforms we skip with a
-    // warning and the operator can pin the cadence manually.
     if (isLinuxLike) {
-      // Probe via `systemctl --user cat` rather than `fs.stat` on a single
-      // path: systemd user units can live in any of the standard search
-      // paths (`~/.config/systemd/user`, `/etc/systemd/user`,
-      // `/usr/lib/systemd/user`, etc.). `systemctl cat` returns exit 0 iff
-      // the unit is loadable from any of them, so checking one path with
-      // `fs.stat` would silently skip the override on hosts where the unit
-      // ships from a system path.
-      const timerUnit = `agent-deck-conductor-heartbeat-${conductorName}.timer`;
-      let timerUnitExists = false;
       try {
-        execFileSync("systemctl", ["--user", "cat", timerUnit], {
-          stdio: "ignore",
-        });
-        timerUnitExists = true;
-      } catch {
-        timerUnitExists = false;
-      }
-      if (!timerUnitExists) {
+        disableLegacyHeartbeatTimer(conductorName);
+      } catch (err) {
         postSetupWarnings.push(
-          `Heartbeat timer unit ${timerUnit} is not loadable by systemd --user ` +
-            `(\`systemctl --user cat ${timerUnit}\` failed). agent-deck did not ` +
-            `install a per-conductor systemd timer — the cadence-override drop-in ` +
-            `was not written. The conductor will fall back to whatever cadence the ` +
-            `agent-deck bridge daemon uses (default 15 min, from ` +
-            `~/.agent-deck/config.toml's [conductor].heartbeat_interval).`,
+          `Failed to disable legacy heartbeat timer for ${conductorName}: ` +
+            `${(err as Error).message}\n` +
+            `The legate-agent is reactive; stop any stale scheduler manually:\n` +
+            `  systemctl --user disable --now agent-deck-conductor-heartbeat-${conductorName}.timer`,
         );
-      } else {
-        try {
-          await writeHeartbeatTimerOverride(
-            home,
-            conductorName,
-            heartbeatInterval,
-          );
-          heartbeatOverrideWritten = true;
-          // daemon-reload + restart so the new cadence takes effect this
-          // run. Best-effort: if either fails the override file is still on
-          // disk and a subsequent host reboot picks it up, so we warn rather
-          // than abort.
-          try {
-            execFileSync("systemctl", ["--user", "daemon-reload"], {
-              stdio: "ignore",
-            });
-            execFileSync(
-              "systemctl",
-              [
-                "--user",
-                "restart",
-                `agent-deck-conductor-heartbeat-${conductorName}.timer`,
-              ],
-              { stdio: "ignore" },
-            );
-          } catch (err) {
-            postSetupWarnings.push(
-              `Wrote heartbeat-cadence override (${heartbeatInterval}) but failed to ` +
-                `reload/restart the timer: ${(err as Error).message}\n` +
-                `The new cadence will take effect after the next host reboot, or ` +
-                `you can apply it manually:\n` +
-                `  systemctl --user daemon-reload\n` +
-                `  systemctl --user restart agent-deck-conductor-heartbeat-${conductorName}.timer`,
-            );
-          }
-        } catch (err) {
-          postSetupWarnings.push(
-            `Failed to write heartbeat-cadence override (${heartbeatInterval}) ` +
-              `for ${conductorName}: ${(err as Error).message}\n` +
-              `The conductor will fall back to the agent-deck default cadence ` +
-              `(15 min). Pin manually by creating ` +
-              `~/.config/systemd/user/agent-deck-conductor-heartbeat-${conductorName}.timer.d/override.conf.`,
-          );
-        }
       }
-    } else {
-      postSetupWarnings.push(
-        `Heartbeat-cadence override is currently Linux/WSL2 only (this host: ` +
-          `${process.platform}). The conductor will run at the agent-deck default ` +
-          `cadence (15 min, from ~/.agent-deck/config.toml's [conductor].heartbeat_interval). ` +
-          `To pin a different cadence, configure the platform-equivalent scheduler manually.`,
-      );
     }
 
     // Bootstrap state.json with the GitHub slug + default branch so the
@@ -3077,12 +3678,12 @@ export async function initLegate(
       }
     }
 
-    // Deliver the cold-start priming prompt before the first heartbeat
-    // can arrive. Gated on autoModeConfigured so we know the conductor
+    // Deliver the cold-start priming prompt before loop doorbells or operator
+    // messages arrive. Gated on autoModeConfigured so we know the conductor
     // was successfully restarted (and is therefore alive to receive).
     // Best-effort: a failure means the conductor will still run, but
-    // its first reply will be to a terse [HEARTBEAT] rather than the
-    // priming context, so the auto-mode classifier may pause more often.
+    // its first tool use may happen without priming context, so the
+    // auto-mode classifier may pause more often.
     if (autoModeConfigured) {
       try {
         execFileSync(sendColdStartCommand[0], sendColdStartCommand.slice(1), {
@@ -3092,8 +3693,8 @@ export async function initLegate(
         const status = (err as { status?: number }).status;
         postSetupWarnings.push(
           `Failed to deliver cold-start priming prompt to ${conductorTitle} (exit ${status ?? "?"}). ` +
-            `The conductor will still run, but its first reply will respond to a heartbeat ` +
-            `rather than priming context — auto-mode classifier may pause more often. ` +
+            `The conductor will still run, but its first action may happen without ` +
+            `priming context — auto-mode classifier may pause more often. ` +
             `Prompt staged at ${coldStartPromptPath}. Run manually:\n  ${sendColdStartManualHint}`,
         );
       }
@@ -3125,8 +3726,8 @@ export async function initLegate(
           "bridge.log",
         );
         postSetupWarnings.push(
-          `Bridge daemon did not stay active after start. The conductor will not ` +
-            `receive automatic heartbeats and will only act when nudged manually ` +
+          `Bridge daemon did not stay active after start. The agent will not ` +
+            `receive bridge-delivered operator or loop messages and will only act when nudged manually ` +
             `via \`agent-deck -p ${profile} session send ${conductorTitle} "<message>"\`. ` +
             `Common cause: bridge.py requires Python 3.9+ (PEP 585 generics). ` +
             `Inspect the failure:\n  systemctl --user status agent-deck-conductor-bridge\n  tail -n 50 ${bridgeLogPath}`,
@@ -3137,7 +3738,7 @@ export async function initLegate(
         `Bridge daemon auto-start is currently Linux/WSL2 only (this host: ${process.platform}). ` +
           `Start it manually with the platform-appropriate command — see ` +
           `agent-deck's \`conductor status ${conductorName}\` output for the hint. ` +
-          `Without the bridge running, the conductor will not receive heartbeats.`,
+          `Without the bridge running, the agent will not receive bridge-delivered messages.`,
       );
     }
   } else {
@@ -3295,18 +3896,16 @@ export async function initLegate(
         ? "skipped (--loop-only)"
         : setupRan
         ? bridgeActive
-          ? "active (heartbeats will reach the conductor)"
-          : "NOT active — conductor will only respond to manual session-send messages; see warnings"
+          ? "active (operator messages can reach the agent)"
+          : "NOT active — agent will only respond to direct session-send messages; see warnings"
         : "deferred (run setup first)"
     }`,
     `  Heartbeat:      ${
       processorOnly
         ? "skipped (--loop-only)"
         : setupRan
-        ? heartbeatOverrideWritten
-          ? `${heartbeatInterval} (pinned via systemd drop-in override)`
-          : `${heartbeatInterval} requested — override NOT written; see warnings`
-        : `${heartbeatInterval} (deferred — run setup first)`
+        ? "disabled for legate-agent; legate-loop owns ticks"
+        : "disabled for legate-agent (deferred — run setup first)"
     }`,
     `  Container:      ${
       legateContainer

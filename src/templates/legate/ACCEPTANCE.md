@@ -25,14 +25,14 @@ The shorthand `<conductor-dir>` means `~/.agent-deck/conductor/<conductor-name>/
 - Verify: `tmux capture-pane -t "$(agent-deck -p <profile> session show conductor-<name> --json | jq -r .tmux_session)" -p | tail -5` — the bottom prompt should be empty (just `❯`) when the conductor is `waiting`. A half-typed message ("merge PR #77") or a feedback survey ("How is Claude doing this session?") blocks the next heartbeat.
 - Failure: clear the input manually with `tmux send-keys C-u` or dismiss the survey by sending the appropriate digit. If this happens repeatedly, the heartbeat sender is mis-targeted.
 
-## B. New-work dispatch (`legate.dispatch`)
+## B. New-work dispatch (deterministic loop)
 
 **B1. Ready slices get workers within one heartbeat.**
-- Verify: `bash <conductor-dir>/.claude/skills/legate.dispatch/scripts/find-ready-slices.sh <repo-path>` enumerates the ready set. Each item not already present in `state.json.slices` should appear as a worker session within one heartbeat after `find-ready-slices` first surfaces it.
-- Failure: dispatch is either (a) treating an unmerged dep as merged, (b) treating an escalated/archived slice as in-flight, or (c) `find-ready-slices.sh` is hiding the item. Cross-check against `smithy status --graph --no-color` from the target repo.
+- Verify: `smithy status --format json` shows a ready non-virtual item with `next_action`, and the paired processor logs a `dispatch_action` in `<processor-dir>/processor.ndjson`. Each dispatched item should appear in `state.json.slices` with `hatchery.backend == "codex"` and a worker session id for the Claude manager.
+- Failure: dispatch is either (a) treating an unmerged dep as merged, (b) treating an escalated/archived slice as in-flight, or (c) `smithy status` is not exposing the item as ready. Cross-check against `smithy status --graph --no-color` from the target repo and `<loop-dir>/legate-loop.log`.
 
 **B2. Each worker has a staged dispatch message on disk.**
-- Verify: every slice in `state.json.slices` with `stage == "implementing"` should have a `<conductor-dir>/dispatch-msg-<slice-id>.md` file. `legate.cleanup` removes it post-merge.
+- Verify: every slice in `state.json.slices` with `stage == "implementing"` should have a `<conductor-dir>/dispatch-msg-<slice-id>.md` file. The deterministic loop removes it post-merge.
 - Failure: a missing `dispatch-msg-*.md` means an older dispatch ran before staging was added; revival-stranded recovery will surface `NEED:` lines. Operator must re-dispatch manually.
 
 **B3. No worker is launched on an artifact that already has an in-flight worker.**
@@ -41,12 +41,12 @@ The shorthand `<conductor-dir>` means `~/.agent-deck/conductor/<conductor-name>/
 
 ## C. PR discovery (`legate.babysit` Step 2)
 
-**C1. Any slice with `pr == null` AND `stage == "implementing"` whose worker is `waiting` OR `idle` gets `discover-pr.sh` run against it on the next heartbeat.**
-- Verify: capture the conductor pane (`tmux capture-pane -pS -300 | grep discover-pr.sh`) — expect a `discover-pr.sh <profile> <session> <repo>` invocation per matching slice each heartbeat. Output should map the PR (when one exists) into `state.json.slices.<id>.pr.{number,url,state,...}` within the same heartbeat.
-- Failure: if the conductor instead jumps straight to `recover-stranded-worker.sh` on an idle worker that has pushed a PR, the `SKILL.md` in context is the pre-PR-#100 version. See `CONTRIBUTING.md` § *Why a re-deploy isn't enough to refresh `SKILL.md` / `CLAUDE.md` content*.
+**C1. Any slice with `pr == null` AND `stage == "implementing"` whose worker is `waiting` OR `idle` is discovered by the deterministic loop on the next tick.**
+- Verify: inspect `legate-loop.log` / `legate-loop.ndjson` — expect a `discover-pr` action per matching slice when a PR exists. State should map the PR into `state.json.slices.<id>.pr.{number,url,state,...}` within the same tick.
+- Failure: if the Claude agent tries to recover an idle worker before the loop has had a chance to discover its PR, the deployed babysit skill is stale or the loop is not running.
 
-**C2. `discover-pr.sh` finds the PR via tier-1 (tmux scrollback) when the worker hasn't been recycled.**
-- Verify: run `discover-pr.sh <profile> <worker-session> <repo>` manually. Stderr should print `primary`; stdout should contain `headRefName` matching the worker's pushed branch (which can differ from the originally-requested branch — `/smithy.*` slash-commands sometimes rename on push).
+**C2. Loop PR discovery captures the actual pushed branch.**
+- Verify: `state.json.slices.<id>.actual_branch` matches the PR `headRefName` (which can differ from the originally-requested branch — `/smithy.*` slash-commands sometimes rename on push).
 - Failure: `primary` missing means the tmux output got cleared (compaction, very old session). Tier-2 (`gh pr list`) should still match by branch; if tier-2 also fails to find the PR, check whether the worker actually pushed (`git ls-remote origin`).
 
 **C3. Branch-renames on push are captured into `actual_branch`.**
@@ -60,7 +60,7 @@ The shorthand `<conductor-dir>` means `~/.agent-deck/conductor/<conductor-name>/
 - Failure: a tracked PR not in the grep means the conductor is short-circuiting on stage. The "all clear" stage (`pr-open`, no threads, PASS) is *not* a skip — it must still run babysit-pr.sh to detect new review activity.
 
 **D2. CONFLICTING is dispatched as conflict resolution, not as a rebase or rerun.**
-- Verify: when `babysit-pr.sh` returns `mergeable: "CONFLICTING"`, the next conductor action for that PR should be `request-conflict-resolution.sh`. Slice stage transitions to `pr-resolving-conflicts`. **No** parallel `request-rebase.sh` or `rerun-ci.sh` in the same heartbeat (the conflict rebase fires fresh CI; chaining is wasted work).
+- Verify: when loop PR refresh sees `mergeable: "CONFLICTING"`, the next loop action for that PR should be a first conflict-resolution prompt. Slice stage transitions to `pr-resolving-conflicts`. **No** parallel `request-rebase.sh` or `rerun-ci.sh` in the same tick (the conflict rebase fires fresh CI; chaining is wasted work).
 - Failure: dispatching both is a decision-tree ordering bug.
 
 **D3. CI failures route to the right tool.**
@@ -93,11 +93,11 @@ The shorthand `<conductor-dir>` means `~/.agent-deck/conductor/<conductor-name>/
 - Verify: grep `<conductor-dir>/.claude/skills/legate.babysit/` for `gh pr merge` — should return no results. Only `legate.merge/scripts/squash-merge-pr.sh` is allowed to merge.
 - Failure: if babysit gains merge authority, the strict gate is bypassed.
 
-## F. Cleanup (`legate.cleanup`)
+## F. Cleanup (deterministic loop)
 
 **F1. Merged slices are archived within one heartbeat.**
 - Verify: when `state == "MERGED"` is observed on a PR (by either babysit or merge), the slice should move from `slices` to `archived_slices` on the same heartbeat. The worker session should be removed (`agent-deck -p <profile> list --json` no longer lists it), the worktree pruned, and a task-log entry appended.
-- Failure: lingering merged slices in `slices` block dispatch's dep-check.
+- Failure: lingering merged slices in `slices` block the processor's dep-check.
 
 **F2. `archived_slices` carries only the audit minimum.**
 - Verify: each archived entry has exactly `{pr_number, pr_url, worker_title, merged_at}` — no full slice body, no transient stage data.
@@ -128,7 +128,7 @@ The shorthand `<conductor-dir>` means `~/.agent-deck/conductor/<conductor-name>/
 - Verify: send a test message ("issue 999 — investigate later") to the conductor. The reply should be a `[STATUS]` + `AUTO: launched issue-#999 worker` line (or a `NEED:` line if the issue is closed/wrong repo/ambiguous). No babysit/merge/cleanup output should appear.
 - Failure: the issue grammar is silently mis-classified into babysit (or worse, ignored entirely).
 
-**H2. Issue-kind slices flow through babysit/cleanup identically to Smithy slices.**
+**H2. Issue-kind slices flow through loop babysitting/cleanup identically to Smithy slices.**
 - Verify: an issue-#<N> slice should appear in `state.json.slices` with `kind: "issue"` and an `issue: {number, url, title}` subobject. All other fields and lifecycle behaviors match a Smithy slice.
 - Failure: babysit branching on `kind` is a smell — `kind` is audit-only.
 

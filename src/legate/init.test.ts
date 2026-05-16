@@ -164,7 +164,7 @@ describe("legate module", () => {
      *   <dir>/skills/<name>/SKILL.prompt
      *   <dir>/skills/<name>/scripts/*.sh
      *
-     * Skills follow the production names (legate.babysit, legate.dispatch)
+     * Skills follow the production names (legate.babysit, legate.issue)
      * because the deploy code enumerates them via LEGATE_SKILLS.
      */
     function makeTemplateDir(claudeContent: string): string {
@@ -242,6 +242,7 @@ describe("legate module", () => {
       expect(result.setupCommand).toContain("march");
       expect(result.setupCommand).toContain("setup");
       expect(result.setupCommand).toContain("march-legate-agent");
+      expect(result.setupCommand).toContain("-no-heartbeat");
       expect(result.setupCommand).not.toContain("-claude-md");
       expect(result.summary).toContain("Setup skipped");
       expect(result.summary).toContain(
@@ -301,6 +302,9 @@ describe("legate module", () => {
       const metaPath = path.join(result.processorStagingDir!, "legate-loop-meta.json");
       expect(fs.existsSync(loopPath)).toBe(true);
       expect(fs.statSync(loopPath).mode & 0o111).not.toBe(0);
+      expect(() =>
+        execFileSync(process.execPath, ["--check", loopPath], { stdio: "pipe" }),
+      ).not.toThrow();
       const loop = fs.readFileSync(loopPath, "utf-8");
       expect(loop).toContain("console.log(text)");
       expect(loop).toContain("function printText");
@@ -313,6 +317,11 @@ describe("legate module", () => {
       expect(loop).toContain("processor_requests_path");
       expect(loop).toContain("review-fix");
       expect(loop).toContain("conflict-fix");
+      expect(loop).toContain("function expectedPrBranches");
+      expect(loop).toContain("function prMatchesSliceBranch");
+      expect(loop).toContain("!prMatchesSliceBranch(slice, pr) ? null : pr");
+      expect(loop).toContain("candidates.filter((candidate) => prMatchesSliceBranch(slice, candidate))");
+      expect(loop).toContain('pr.checks === "PASS" && pr.needs_response_count === 0');
       expect(loop).toContain("CI failure requires Legate judgement");
       expect(loop).toContain("worker_session_error");
       expect(loop).toContain("claude_api_401_login_required");
@@ -332,6 +341,32 @@ describe("legate module", () => {
       expect(loop).toContain('reason: "session_not_found"');
       expect(loop).toContain('terminal_state: terminalState');
       expect(loop).toContain("function cleanupTerminalPrs");
+      expect(loop).toContain("function runDispatch");
+      expect(loop).toContain("function readySmithyItems");
+      expect(loop).toContain("function execMarch");
+      expect(loop).toContain('import { execFileSync, spawn } from "node:child_process";');
+      expect(loop).toContain("meta.march_cli_path");
+      expect(loop).toContain("hashText(dispatchItemKey(item))");
+      expect(loop).toContain("function forgeNodeId");
+      expect(loop).toContain("status?.graph?.nodes");
+      expect(loop).toContain("function dependencySatisfied");
+      expect(loop).toContain("dispatchSliceId(depItem)");
+      expect(loop).toContain("function readyLayerNodeIds");
+      expect(loop).toContain("readyLayerNodeIds(status)");
+      expect(loop).toContain('String(item.next_action?.command || "") === "smithy.forge" && !dependenciesClear');
+      expect(loop).toContain("alreadyArchivedSlice(state, item, sliceId)");
+      expect(loop).toContain('kind: "dispatch_failure"');
+      expect(loop).toContain('kind: "dispatch_read_failure"');
+      expect(loop).toContain("function launchHatcheryDispatch");
+      expect(loop).toContain("child.unref()");
+      expect(loop).toContain("function completePendingHatcheryDispatches");
+      expect(loop).toContain('stage: "hatchery-pending"');
+      expect(loop).toContain("hatchery_result_path");
+      expect(loop).toContain('"hatchery"');
+      expect(loop).toContain('"--backend"');
+      expect(loop).toContain('"codex"');
+      expect(loop).toContain('"--json"');
+      expect(loop).toContain("dispatch_action_count");
       expect(loop).toContain("Number.isFinite(rawIntervalSeconds)");
       expect(loop).toContain("function safeTick()");
       expect(fs.existsSync(metaPath)).toBe(true);
@@ -339,6 +374,7 @@ describe("legate module", () => {
       expect(meta.paired_legate).toBe("march-legate-agent");
       expect(meta.loop_name).toBe("march-legate-loop");
       expect(meta.processor_name).toBe("march-legate-loop");
+      expect(meta.march_cli_path).toBeTruthy();
       expect(meta.legate_state_path).toBe(
         path.join(home, ".agent-deck", "conductor", "march-legate-agent", "state.json"),
       );
@@ -375,6 +411,45 @@ describe("legate module", () => {
         path.join(home, ".agent-deck", "conductor", "legate-smithy-loop"),
       );
       expect(result.processorSetupCommand).toContain("legate-smithy-loop");
+    });
+
+    it("uses the effective profile in default conductor names", async () => {
+      const home = makeTmpDir();
+      const tplDir = makeTemplateDir("ok");
+
+      const result = await initLegate({
+        repoPath: "/some/repo/SmithyCli",
+        homeDir: home,
+        templateDir: tplDir,
+        runSetup: false,
+        profile: "smithy",
+      });
+
+      expect(result.conductorName).toBe("smithy-legate-agent");
+      expect(result.loopName).toBe("smithy-legate-loop");
+      expect(result.processorName).toBe("smithy-legate-loop");
+      expect(result.processorConductorDir).toBe(
+        path.join(home, ".agent-deck", "conductor", "smithy-legate-loop"),
+      );
+      expect(result.processorSetupCommand).toContain("smithy-legate-loop");
+    });
+
+    it("expands the bare legate-agent role name with the effective profile", async () => {
+      const home = makeTmpDir();
+      const tplDir = makeTemplateDir("ok");
+
+      const result = await initLegate({
+        repoPath: "/some/repo/SmithyCli",
+        homeDir: home,
+        templateDir: tplDir,
+        runSetup: false,
+        profile: "smithy",
+        conductorName: "legate-agent",
+      });
+
+      expect(result.conductorName).toBe("smithy-legate-agent");
+      expect(result.loopName).toBe("smithy-legate-loop");
+      expect(result.processorName).toBe("smithy-legate-loop");
     });
 
     it("keeps processor names valid for long custom conductor names", async () => {
@@ -522,6 +597,12 @@ describe("legate module", () => {
         expect(log).toContain(
           "session set conductor-march-legate-loop command docker logs -f --tail=200 march-legate-march-legate-agent",
         );
+        const heartbeat = fs.readFileSync(
+          path.join(result.conductorDir, "heartbeat.sh"),
+          "utf-8",
+        );
+        expect(heartbeat).toContain("march-managed: march-legate-agent is reactive");
+        expect(heartbeat).not.toContain("[HEARTBEAT]");
       } finally {
         process.env.PATH = oldPath;
         process.env.HOME = oldHome;
@@ -956,134 +1037,28 @@ describe("legate module", () => {
         // ultimately invokes one or more scripts that take the repo path,
         // so {{REPO_PATH}} is the one variable every skill is guaranteed
         // to render — {{WORKER_GROUP}} is only used by skills that scan
-        // or launch worker sessions (babysit, dispatch), not by cleanup
-        // which operates on per-slice session IDs from state.json.
+        // or launch worker sessions.
         expect(content).toContain("/some/repo/March");
       }
     });
 
-    it("stages legate.dispatch with find-ready-slices.sh alongside the other dispatch scripts", async () => {
-      // find-ready-slices.sh is the jq-based wrapper around smithy-status.sh
-      // that the dispatch protocol uses to filter for dispatchable items.
-      // Without it deployed, the conductor's only recourse is to inline
-      // `python3 -c "..."` (or jq) against smithy-status.sh's stdout, which
-      // the legate's auto-mode rules explicitly NEED-escalate — every
-      // heartbeat would stall on operator approval.
+    it("does not stage the legacy legate.dispatch skill", async () => {
       const home = makeTmpDir();
       const result = await initLegate({
         repoPath: "/some/repo/March",
         homeDir: home,
         runSetup: false,
       });
-      const dispatch = result.skills.find((s) => s.name === "legate.dispatch");
-      expect(dispatch).toBeDefined();
-      const scriptsDir = path.join(dispatch!.stagedDir, "scripts");
-      for (const name of [
-        "find-ready-slices.sh",
-        "inspect-worker.sh",
-        "launch-worker.sh",
-        "smithy-status.sh",
-        "sync-default-branch.sh",
-      ]) {
-        const p = path.join(scriptsDir, name);
-        expect(fs.existsSync(p)).toBe(true);
-        // +x bit so the conductor's `bash <path>` calls succeed.
-        expect(fs.statSync(p).mode & 0o111).not.toBe(0);
-      }
+      const dispatch = result.skills.find((s) => String(s.name) === "legate.dispatch");
+      expect(dispatch).toBeUndefined();
+      expect(
+        fs.existsSync(
+          path.join(home, ".march", "legate", "legate-march", "skills", "legate.dispatch"),
+        ),
+      ).toBe(false);
     });
 
-    it("launch-worker.sh post-launch jq filter binds .id before piping to index($b)", async () => {
-      // Regression: the earlier filter `select($b | index(.id) | not)`
-      // re-evaluated `.id` against $b (the array), not the outer session.
-      // jq 1.6 dies with `Cannot index array with string "id"` and the
-      // script exits 5 on every launch. The conductor recovered via
-      // inspect-worker.sh so the bug went unnoticed, but every launch
-      // logged a stack trace and lost the JSON output downstream consumers
-      // expected. The corrected pattern binds the session into $s first.
-      const home = makeTmpDir();
-      const result = await initLegate({
-        repoPath: "/some/repo/March",
-        homeDir: home,
-        runSetup: false,
-      });
-      const dispatch = result.skills.find((s) => s.name === "legate.dispatch");
-      const launchScript = fs.readFileSync(
-        path.join(dispatch!.stagedDir, "scripts", "launch-worker.sh"),
-        "utf-8",
-      );
-      // String-content guard: the broken pattern must not reappear.
-      expect(launchScript).not.toMatch(/select\(\s*\$b\s*\|\s*index\(\.id\)/);
-      // Positive assertion: the corrected binding is present.
-      expect(launchScript).toMatch(/\.\s+as\s+\$s/);
-      expect(launchScript).toMatch(/index\(\$s\.id\)/);
-
-      // Functional check: extract the jq filter and run it against fixture
-      // data. Mirrors the agent-deck list --json schema (flat array of
-      // objects). Verifies both the empty-BEFORE_IDS case (initial run with
-      // no prior workers) and the populated case (worker already existed).
-      const fixture = JSON.stringify([
-        {
-          id: "conductor-id",
-          group: "conductor",
-          created_at: "2026-01-01T00:00:00Z",
-        },
-        {
-          id: "old-worker",
-          group: "legate-workers",
-          created_at: "2026-01-02T00:00:00Z",
-        },
-        {
-          id: "new-worker",
-          group: "legate-workers",
-          created_at: "2026-01-03T00:00:00Z",
-        },
-      ]);
-      const filter = `[.[] | select(.group == $g) | . as $s | select($b | index($s.id) | not)] | sort_by(.created_at // 0) | last // null`;
-      // Empty BEFORE_IDS: both workers are "new"; expect the latest by created_at.
-      const emptyResult = execFileSync(
-        "jq",
-        ["--arg", "g", "legate-workers", "--argjson", "b", "[]", filter],
-        { input: fixture, encoding: "utf-8" },
-      );
-      expect(JSON.parse(emptyResult).id).toBe("new-worker");
-      // Populated BEFORE_IDS containing old-worker: only new-worker is new.
-      const populatedResult = execFileSync(
-        "jq",
-        [
-          "--arg",
-          "g",
-          "legate-workers",
-          "--argjson",
-          "b",
-          '["old-worker"]',
-          filter,
-        ],
-        { input: fixture, encoding: "utf-8" },
-      );
-      expect(JSON.parse(populatedResult).id).toBe("new-worker");
-      // Populated BEFORE_IDS containing every worker: nothing new.
-      const allKnownResult = execFileSync(
-        "jq",
-        [
-          "--arg",
-          "g",
-          "legate-workers",
-          "--argjson",
-          "b",
-          '["old-worker","new-worker"]',
-          filter,
-        ],
-        { input: fixture, encoding: "utf-8" },
-      );
-      expect(JSON.parse(allKnownResult)).toBeNull();
-    });
-
-    it("stages legate.babysit with recover-stranded-worker.sh", async () => {
-      // Revival recovery: agent-deck respawns a worker's Claude Code process
-      // after a host restart without replaying the original `-m` argument,
-      // leaving the worker pane an empty splash. recover-stranded-worker.sh
-      // reads the verb-cmd staged by launch-worker.sh and re-sends it. Must
-      // be deployed so the babysit decision tree can call it.
+    it("does not stage loop-owned babysit scripts", async () => {
       const home = makeTmpDir();
       const result = await initLegate({
         repoPath: "/some/repo/March",
@@ -1092,72 +1067,43 @@ describe("legate module", () => {
       });
       const babysit = result.skills.find((s) => s.name === "legate.babysit");
       const scriptsDir = path.join(babysit!.stagedDir, "scripts");
-      const p = path.join(scriptsDir, "recover-stranded-worker.sh");
-      expect(fs.existsSync(p)).toBe(true);
-      expect(fs.statSync(p).mode & 0o111).not.toBe(0);
-
-      // Sanity: script syntax must parse — a typo would only surface at the
-      // first failed heartbeat in production otherwise.
-      expect(() =>
-        execFileSync("bash", ["-n", p], { stdio: "pipe" }),
-      ).not.toThrow();
+      expect(fs.existsSync(path.join(scriptsDir, "discover-pr.sh"))).toBe(false);
+      expect(fs.existsSync(path.join(scriptsDir, "recover-stranded-worker.sh"))).toBe(false);
+      expect(fs.existsSync(path.join(scriptsDir, "request-conflict-resolution.sh"))).toBe(false);
     });
 
-    it("launch-worker.sh accepts a slice-id arg and stages dispatch-msg-<slice-id>.md", async () => {
-      // The 7th positional arg is what enables revival recovery: writing
-      // the verb-cmd to a file the babysit skill can read back. Without
-      // this arg, a host restart strands the worker with no way to
-      // re-dispatch.
+    it("processor stages dispatch-msg files for Hatchery-launched managers", async () => {
       const home = makeTmpDir();
       const result = await initLegate({
         repoPath: "/some/repo/March",
         homeDir: home,
         runSetup: false,
       });
-      const dispatch = result.skills.find((s) => s.name === "legate.dispatch");
-      const launchScript = fs.readFileSync(
-        path.join(dispatch!.stagedDir, "scripts", "launch-worker.sh"),
+      const loop = fs.readFileSync(
+        path.join(result.processorStagingDir!, "legate-loop.mjs"),
         "utf-8",
       );
-      // Arg count enforced.
-      expect(launchScript).toMatch(/if \[\[ \$# -ne 7 \]\]/);
-      // Usage line mentions slice-id.
-      expect(launchScript).toMatch(/<slice-id>/);
-      // SLICE_ID is bound to $7 and validated.
-      expect(launchScript).toMatch(/SLICE_ID="\$7"/);
-      expect(launchScript).toMatch(/\^\[a-zA-Z0-9\]\[a-zA-Z0-9\._\-\]\*\$/);
-      // Stage file path is derived from the validated slice-id.
-      expect(launchScript).toMatch(/dispatch-msg-\$\{SLICE_ID\}\.md/);
-      // verb-cmd is written via printf (so newlines round-trip cleanly).
-      expect(launchScript).toMatch(/printf '%s\\n' "\$VERB_CMD"/);
+      expect(loop).toContain("function stageDispatchMessage");
+      expect(loop).toContain('"dispatch-msg-" + sliceId + ".md"');
+      expect(loop).toContain("managerPromptPath");
+      expect(loop).toContain("The Hatchery patch has already been applied and staged");
+      expect(loop).not.toContain("Read the Hatchery artifacts, apply the patch");
     });
 
-    it("cleanup-merged-session.sh removes the staged dispatch-msg file before tearing the session down", async () => {
-      // Stage files in the conductor's cwd survive across heartbeats by
-      // design; without explicit cleanup on merge, the dir would accumulate
-      // a file per slice ever launched. Order matters too: the rm must
-      // happen before agent-deck session remove succeeds, so a re-run
-      // after partial failure still completes the rm idempotently.
+    it("does not stage the legacy legate.cleanup skill", async () => {
       const home = makeTmpDir();
       const result = await initLegate({
         repoPath: "/some/repo/March",
         homeDir: home,
         runSetup: false,
       });
-      const cleanup = result.skills.find((s) => s.name === "legate.cleanup");
-      const script = fs.readFileSync(
-        path.join(cleanup!.stagedDir, "scripts", "cleanup-merged-session.sh"),
-        "utf-8",
-      );
-      expect(script).toMatch(/dispatch-msg-\$\{SLICE_ID\}\.md/);
-      expect(script).toMatch(/rm -f "\$DISPATCH_MSG_PATH"/);
-      // rm must precede the actual `agent-deck ... session remove` call.
-      // The header comment also mentions "session remove" — anchor on the
-      // invocation form to skip past it.
-      const rmIdx = script.indexOf('rm -f "$DISPATCH_MSG_PATH"');
-      const removeCallIdx = script.indexOf('agent-deck -p "$PROFILE" session remove');
-      expect(rmIdx).toBeGreaterThan(0);
-      expect(removeCallIdx).toBeGreaterThan(rmIdx);
+      const cleanup = result.skills.find((s) => String(s.name) === "legate.cleanup");
+      expect(cleanup).toBeUndefined();
+      expect(
+        fs.existsSync(
+          path.join(home, ".march", "legate", "legate-march", "skills", "legate.cleanup"),
+        ),
+      ).toBe(false);
     });
 
     it("stages legate.issue with its three operator-issue-intake scripts", async () => {
@@ -1187,6 +1133,19 @@ describe("legate module", () => {
         // succeed but direct invocation pauses on a permission-denied prompt.
         expect(fs.statSync(p).mode & 0o111).not.toBe(0);
       }
+      const launcher = fs.readFileSync(
+        path.join(scriptsDir, "launch-issue-worker.sh"),
+        "utf-8",
+      );
+      expect(launcher).toContain("if [[ $# -ne 7 ]]");
+      expect(launcher).toContain('SLICE_ID="$7"');
+      expect(launcher).toContain('DISPATCH_MSG_PATH="./dispatch-msg-${SLICE_ID}.md"');
+      expect(launcher).toContain('printf \'%s\\n\' "$PROMPT" >"$DISPATCH_MSG_PATH"');
+      expect(() =>
+        execFileSync("bash", ["-n", path.join(scriptsDir, "launch-issue-worker.sh")], {
+          stdio: "pipe",
+        }),
+      ).not.toThrow();
     });
 
     it("stages legate.error with its worker-error recovery scripts", async () => {
@@ -1548,7 +1507,7 @@ describe("legate module", () => {
       ).rejects.toBeInstanceOf(LegateError);
     });
 
-    it("includes the heartbeat cadence in the summary so operators see what was pinned", async () => {
+    it("reports that agent heartbeats are disabled in the summary", async () => {
       const home = makeTmpDir();
       const result = await initLegate({
         repoPath: "/some/repo/March",
@@ -1557,7 +1516,10 @@ describe("legate module", () => {
         runSetup: false,
       });
       expect(result.summary).toContain("Heartbeat:");
-      expect(result.summary).toContain("7min");
+      expect(result.summary).toContain(
+        "disabled for legate-agent (deferred — run setup first)",
+      );
+      expect(result.summary).not.toContain("7min");
     });
 
     it("rejects withContainer when setup is skipped because no conductor dir exists to mount", async () => {
@@ -1614,8 +1576,6 @@ describe("legate module", () => {
       expect(prompt).toContain("legate.error");
       expect(prompt).toContain("legate.babysit");
       expect(prompt).toContain("legate.merge");
-      expect(prompt).toContain("legate.cleanup");
-      expect(prompt).toContain("legate.dispatch");
       expect(prompt).toContain("legate.issue");
       // Defers strict mechanics to CLAUDE.md.
       expect(prompt).toMatch(/CLAUDE\.md is the authoritative spec/);
@@ -1626,9 +1586,11 @@ describe("legate module", () => {
       expect(prompt).toMatch(/On this turn:/);
       expect(prompt).toMatch(/cold-start acknowledgement/);
       expect(prompt).toMatch(
-        /Online for March \(march\)\. Skills available: legate\.resume, legate\.error, legate\.babysit, legate\.merge, legate\.cleanup, legate\.dispatch, legate\.issue\./,
+        /Online for March \(march\)\. Skills available: legate\.resume, legate\.error, legate\.babysit, legate\.merge, legate\.issue\./,
       );
-      expect(prompt).toMatch(/Wait for the first \[HEARTBEAT\]/);
+      expect(prompt).toMatch(
+        /Wait for a \[PROCESSOR\] loop escalation or operator message/,
+      );
     });
   });
 
