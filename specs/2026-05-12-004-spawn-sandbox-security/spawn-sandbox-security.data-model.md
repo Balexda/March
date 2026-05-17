@@ -153,7 +153,7 @@ Purpose: The structured JSON report emitted by `march spawn verify <spawn-id>`. 
 |-------|------|----------|-------|
 | `control` | string | Yes | The Appendix A control identifier: `"A1"`, `"A2"`, `"A3"`, `"A4"`, `"A5"`, `"A7"`, `"A8"`. |
 | `name` | string | Yes | Human-readable control name (e.g., `"Container Escape"`). |
-| `status` | string | Yes | One of `"pass"`, `"fail"`, `"n/a"`. `"n/a"` is reserved for controls that cannot be verified at runtime (currently none in F4 — every checked control has an observable signal). |
+| `status` | string | Yes | One of `"pass"`, `"fail"`, `"n/a"`. `"n/a"` is emitted when a control cannot be verified for this specific run — for example, the A4 control reports `"n/a"` when the operator passed `--probe` but the probe could not execute (container exited between the `docker inspect` call and the `docker exec` probe — see contracts.md `--probe` error condition). All A1–A8 controls are *checkable* in F4 (every control has an observable signal); `"n/a"` is a runtime degradation outcome, not a structural omission. |
 | `expected` | object | Yes | The control's expected configuration as derived from `SpawnConfig` and the selected backend. Shape varies per control (see below). |
 | `observed` | object | Yes | The actual configuration read from `docker inspect`. Same shape as `expected`. |
 | `mismatch` | string | Conditional | Required when `status === "fail"`. Human-readable description of the diff. Omitted when `status === "pass"` or `"n/a"`. |
