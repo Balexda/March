@@ -3,7 +3,7 @@
 **Spec Folder**: `2026-04-05-001-march-cli-foundation`
 **Branch**: `2026-04-05-001-march-cli-foundation`
 **Created**: 2026-04-05
-**Status**: Draft
+**Status**: Draft  |  **Implementation status (2026-05-16)**: **Done (realized).** All six user stories shipped in `src/cli/` and `src/bootstrap/`. No outstanding gaps.
 **Input**: `docs/rfcs/2026-001-march-orchestration-platform/march-orchestration-platform.rfc.md` — Milestone 1: Spawn
 **Source Feature Map**: `docs/rfcs/2026-001-march-orchestration-platform/01-spawn.features.md` — Feature 1: March CLI Foundation
 

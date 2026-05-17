@@ -3,6 +3,22 @@
 **Source RFC**: `docs/rfcs/2026-001-march-orchestration-platform/march-orchestration-platform.rfc.md`
 **Milestone**: 3 — Brood (Basic)
 **Created**: 2026-05-12
+**Status (2026-05-16)**: **Not started** as written. Some primitives (`src/brood/spawn-record.ts`, `src/brood/worktree.ts`) exist from M1; ad-hoc container management for Legate + Steward currently lives in `src/hatchery/legate-container.ts` and `src/hatchery/spawn-handoff.ts` and should migrate here once the CLI surface (F2/F3) lands. Stage B spec #3 in the RFC backlog (brood lifecycle CLI) maps onto F2/F3 of this map and additionally formalizes Steward container lifecycle. See RFC [Accelerated Work & Reordering](march-orchestration-platform.rfc.md#accelerated-work--reordering-2026-05).
+
+## Philosophy hook
+
+Brood's role in the system, per [`docs/operating-philosophy.md`](../../operating-philosophy.md), is to eliminate operator intervention in *cleanup and lifecycle* — the operator does not manually remove containers, prune worktrees, archive logs, or reconcile orphaned branches. Every feature in this map should be checked against that role: if a feature here makes the operator more involved in lifecycle decisions, it is probably solving a different problem and belongs elsewhere.
+
+## Accelerated context (2026-05-16)
+
+When this feature map was drafted (2026-05-12) it assumed Spawn was the only containerized session type Brood would manage in M3. Bootstrap acceleration has since introduced two additional containerized session types that Brood will also need to own:
+
+- **Steward sessions** — Claude Code agent-deck sessions launched per spawn by `src/hatchery/spawn-handoff.ts`, running under the `pr-management` profile (when Hatchery profiles land). One steward per spawn; lifecycle bounded by review/test/commit/push/PR.
+- **Legate containers** — the `legate-agent` + `legate-loop` pair, currently managed ad-hoc by `src/hatchery/legate-container.ts`. Long-lived; one per operator workspace.
+
+These don't invalidate the F1–F6 decomposition below — Spawn-focused Brood is still the right Basic milestone — but they create a Stage B follow-on. Spec #4 in the RFC backlog ("steward role formalization") and the implicit migration of `legate-container.ts` into Brood will extend the `SpawnView` / `SessionRecord` shape with a discriminated `kind` (`spawn` | `steward` | `legate`) once a second session type actually needs CLI surface. Until then, F1–F6 stay scoped to spawns, and the additional session types are managed by their accelerated code paths.
+
+F5 (Interactive Session Attach Helper) already anticipates this: its `march/<name>` tmux namespace is the documented attach surface, and Legate's agent-deck conductor session is the first concrete consumer. When Brood migrates Legate's container lifecycle in the Stage B follow-on, the F5 namespace contract is the seam.
 
 ## Features
 
@@ -101,4 +117,5 @@ Direction must be either `depends on` or `depended upon by`.
 | Milestone 1: Spawn | depends on | F1 extends `SpawnRecord` (`src/spawn-record.ts`) with `failureReason` and reads the JSON files M1 writes. F3 reuses M1's `removeSpawnContainer` (`src/container-launch.ts`) and `removeSpawnWorktree` (`src/worktree.ts`) helpers. F6 deploys via M1 F1's `march init` skill-deployment pipeline. M3 does NOT redo M1 F6's PR-integration work — the RFC's "Code review via GitHub" design consideration ("Integration tooling (part of Brood or a dedicated component)") is satisfied entirely by M1 F6. |
 | Milestone 2: Hatchery | depends on | Loose dependency: F1 tolerates SpawnRecords both with and without an M2 F5 `profile` field — M3 begins safely even if M2 F5 has not yet landed. F6's skill catalog accumulates onto the M2 F6 skill set; deployment plumbing is unchanged. |
 | Milestone 4: Herald | depended upon by | F1's `docker inspect`-based liveness reconciliation is a poll-time approximation of what Herald will deliver as event-driven status transitions. When M4 lands, F1's reconciliation sub-capability can be replaced with Herald subscriptions; the `SpawnView` API need not change. |
-| Milestone 5: Legate | depended upon by | F5's `march/` tmux namespace is the forward contract M5 will register Legate under. The first `march/<name>` tmux session in the system will be Legate's. F6's "pseudo-legate" orientation skill is replaced by real Legate orchestration when M5 lands. |
+| Milestone 5: Legate | depended upon by | F5's `march/` tmux namespace is the forward contract M5 will register Legate under. The first `march/<name>` tmux session in the system will be Legate's (as of 2026-05-16, the accelerated `legate-agent` already runs in a tmux/agent-deck conductor session — its container lifecycle currently lives in `src/hatchery/legate-container.ts` and will migrate into Brood in the Stage B follow-on described in the Accelerated context). F6's "pseudo-legate" orientation skill is replaced by real Legate orchestration when M5 lands. |
+| Hatchery: Spawn-Handoff / Steward (2026-05 accelerated) | depended upon by | The Steward sessions launched by `src/hatchery/spawn-handoff.ts` are containerized Claude Code agent-deck sessions whose lifecycle Brood will eventually own (Stage B spec #4: steward role formalization). Out of scope for the M3 Basic milestone; in scope for the Stage B follow-on. |

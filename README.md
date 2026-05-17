@@ -2,6 +2,12 @@
 
 CLI for the **March** agentic-development workflow. March deploys a small set of Claude Code skills, then takes a worktree of your repo, snapshots it into a Docker image, and dispatches a sandboxed *spawn* for an agent to work inside.
 
+## Vision
+
+**Smithy makes the ideas high-quality. March makes the execution low-touch.** Together they let a solo operator ship serious work without becoming the bottleneck — you bring the ideas and the judgment, March takes care of the chaos in between. Spawns run individual steps without babysitting; the Hatchery sets up containers without hand-tuning; Brood handles cleanup; Herald watches for state changes so you don't have to refresh `gh pr view`; Legate orchestrates multiple parallel work items; Stewards assemble each spawn's output into a reviewable PR. You walk away, and come back to either a green PR ready to merge or a clear diagnostic — never a hung session waiting for input it cannot receive.
+
+Full statement: [`docs/vision.md`](docs/vision.md). Implementation-level guidance for contributors: [`docs/operating-philosophy.md`](docs/operating-philosophy.md).
+
 ## Installation
 
 You can run March directly via `npx` (recommended):

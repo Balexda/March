@@ -3,6 +3,7 @@
 **Source RFC**: `docs/rfcs/2026-001-march-orchestration-platform/march-orchestration-platform.rfc.md`
 **Milestone**: 1 — Spawn
 **Created**: 2026-03-30
+**Status (2026-05-16)**: M1 is **Done (realized)** for F1, F2, F5, F6. F3 (Multi-Backend) is **Done (provisional, diverged)** — Codex shipped instead of Gemini using credential-mount auth; see `specs/2026-05-10-003-multi-backend-execution-interface/` for the amended spec. F4 (Spawn Sandbox Security) has a **draft spec** at `specs/2026-05-12-004-spawn-sandbox-security/` that pre-dates the Gemini cut — its Gemini-egress story (SD-001) is now moot; treat its `allowedEgressHosts` work as applying to Claude Code + Codex only. Patch extraction + PR creation (F5/F6) is realized but extended in `src/hatchery/spawn-handoff.ts` with a Steward handoff that will be formalized in a Stage B spec (see RFC backlog).
 
 ## Features
 
@@ -26,14 +27,14 @@
 - Includes: Worktree and branch creation, worktree snapshot (copy, not mount) into Docker container, container launch with hardcoded security config, prompt finalization and handoff to the AI backend, container lifecycle (start, wait for exit)
 - Excludes: Output extraction (Feature 5), PR creation (Feature 6), declarative profile configuration (M2 Hatchery), worktree cleanup (M3 Brood)
 
-### Feature 3: Multi-Backend Execution Interface
+### Feature 3: Multi-Backend Execution Interface — **Done (provisional, diverged)**
 
-**Description**: A common backend abstraction — prompt in, structured JSON out, exit-code completion signaling — with implementations for both Gemini CLI and Claude Code CLI as validated spawn backends.
+**Description**: A common backend abstraction — prompt in, structured JSON out, exit-code completion signaling — with implementations for **Claude Code CLI** and **Codex CLI** as the two live spawn backends. (Originally specified with Gemini as the second backend; Gemini was cut 2026-05-16. Codex uses a credential-mount auth pattern that env-var-only Gemini did not require.)
 
 **User-Facing Value**: The operator can choose which AI backend to use per spawn based on capability, cost model, or preference. Both backends work through the same interface with no difference in the rest of the workflow.
 
 **Scope Boundaries**:
-- Includes: Common backend interface definition, Gemini CLI integration (headless flags, `--approval-mode=yolo`, `--output-format json`), Claude Code CLI integration (`-p`, `--dangerously-skip-permissions`, `--bare`, `--output-format json`), backend-specific auth propagation (API key for Gemini, API key or OAuth/session for Claude Code), backend selection via CLI flag or configuration
+- Includes: Common backend interface definition, Claude Code CLI integration (`-p`, `--dangerously-skip-permissions`, `--bare`, `--output-format json`), Codex CLI integration (`--dangerously-bypass-approvals-and-sandbox`, credential-mount auth via `/march/codex-auth → CODEX_HOME`), backend-specific auth propagation (env-var for Claude Code; credential-mount for Codex), backend selection via CLI flag or configuration. (Gemini was originally listed here and was cut 2026-05-16.)
 - Excludes: Agent SDK programmatic interface (deferred to M3+), local/self-hosted LLM backends
 
 ### Feature 4: Spawn Sandbox Security

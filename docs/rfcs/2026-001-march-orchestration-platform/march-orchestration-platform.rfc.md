@@ -1,6 +1,13 @@
 # RFC: March — Coordinated AI Development Control Plane
 
-**Created**: 2026-03-26  |  **Status**: Draft
+**Created**: 2026-03-26  |  **Status**: Amended 2026-05-16
+
+> **Status note (2026-05-16)** — Implementation has jumped ahead of the milestone plan during bootstrap testing. Pieces of Legate (a deterministic `legate-loop` processor and a Claude-backed `legate-agent`), a spawn → **steward** handoff, the Codex backend, and a Legate container under Hatchery have been built provisionally. See [Accelerated Work & Reordering](#accelerated-work--reordering-2026-05) for the current shape of the system, and per-milestone status labels in [Milestones](#milestones). Status labels used throughout this RFC:
+>
+> - **Done (realized)** — concept fully implemented as described
+> - **Done (provisional)** — works in practice but vibe-coded during bootstrap; needs hardening or replacement by a planned successor
+> - **Partial** — some pieces shipped, gaps remain
+> - **Not started** — no implementation yet
 
 ## Summary
 
@@ -31,10 +38,60 @@ The initial operator is the author. Making March usable for other solo technical
 ## Goals
 
 - **Safe parallel execution**: Dispatch work to sandboxed AI sessions that cannot cause damage beyond their designated scope, with sandbox integrity treated as an existential requirement.
-- **Model-agnostic orchestration**: Support multiple AI backends through a common interface. Both Gemini CLI and Claude Code CLI are validated for headless spawn execution (see Appendices B and C); the operator selects per-spawn based on capability needs, cost model, or preference. Interactive components (Legate) may use any backend that supports conversational interaction.
+- **Model-agnostic orchestration**: Support multiple AI backends through a common interface. Claude Code CLI and Codex CLI are the two supported spawn backends (see Appendices B and C; Gemini was dropped 2026-05-16 — see [Accelerated Work & Reordering](#accelerated-work--reordering-2026-05)). The operator selects per-spawn based on capability needs, cost model, or preference. Interactive components (Legate, Steward) use any backend that supports conversational interaction.
 - **Deterministic coordination**: Build the event bus (Herald), session management (Brood), and profile configuration (Hatchery) as functional, non-LLM systems — reliable infrastructure, not vibed behavior.
 - **Incremental capability delivery**: Each milestone produces a usable component, with smithy-style skills deployed alongside to provide a pseudo-legate until the full orchestrator exists.
 - **Observable and attachable**: Interactive components (Legate, future session types) run in tmux sessions that the operator can SSH into and attach to directly. Spawns are headless and non-interactable but their status and output are observable via the March CLI.
+
+## Operating Philosophy
+
+March is the execution counterpart to Smithy's planning loop. Together they form a complete idea-to-merged-code pipeline whose central goal is **high-quality output with minimum operator intervention at the points where intervention does not add value**.
+
+> The canonical statements of this philosophy live outside this RFC, in two long-lived repo-level documents:
+>
+> - [`docs/vision.md`](../../vision.md) — the high-level "what and why" of March (ideas in, quality out; Smithy decomposes, March executes). Stable; rarely revised. Carries the operator-facing promise and the day-in-the-life narrative.
+> - [`docs/operating-philosophy.md`](../../operating-philosophy.md) — the implementation-level "how": per-component intervention-avoidance table and the three rules of thumb (no interactive surfaces in autonomous components; minimum required access; failures are clean exits). Living; expected to evolve as we learn.
+>
+> This RFC section is a stable summary anchored to those two docs. If the docs and this section drift, the docs win — the RFC's job is to make architectural decisions for this milestone series; the docs' job is to anchor *why* those decisions are shaped the way they are across milestone series.
+
+### Smithy decomposes; March executes
+
+Smithy turns a vague idea into a mergeable change set through a cyclical expand-then-segment process:
+
+```
+idea → PRD → RFC → feature maps → specs → tasks → finished code
+   └─ expand ──┘└─ expand ─┘└─ expand ─┘└─ expand ──┘
+        └─ group/segment ─┘└─ group/segment ─┘└─ group/segment ─┘
+```
+
+Each step expands the prior artifact (more detail, more concrete questions answered), then groups and segments the result into the next layer's discrete units. Lots of touch points by design — every cycle is a chance to catch ambiguity, surface debt, and produce something a reader can act on without re-deriving the prior cycle. The output is high-quality, but the *artifact lineage itself is high-touch*: each artifact needs review, each segmentation is a decision.
+
+March exists to take Smithy's output — a fully decomposed plan, down to actionable task slices — and execute it across a coordinated system **without making the operator the constant point of intervention**. Smithy is high-touch by design; March is low-touch by design. The combination is what makes the pipeline economically viable for a solo operator.
+
+### Per-component intervention-avoidance
+
+Every March component eliminates operator intervention at a specific layer of execution:
+
+| Component | The intervention it eliminates |
+|-----------|-------------------------------|
+| **Spawn** | Intervention in *execution of individual steps*. The operator does not babysit a session, approve commands, or watch progress — the spawn runs to completion (or to a clean failure) and emits a structured result. |
+| **Hatchery** | Intervention in *setting up to run the steps*. The operator does not assemble container args, juggle credentials, or hand-tune security posture per session — profiles declare the configuration once and every spawn / steward / legate / future role consumes the same declarative source. |
+| **Brood** | Intervention in *cleanup and lifecycle*. The operator does not manually remove containers, prune worktrees, archive logs, or reconcile orphaned branches — Brood owns the full cradle-to-grave path for every containerized session. |
+| **Herald** | Intervention in *checking whether anything is ready yet*. The operator does not refresh `gh pr view`, poll `smithy status`, or context-switch to ask "is it done? is it done? what do I need to do next?" — Herald watches deterministic state (PRs, sessions, queues) and fires events on transitions so the next consumer reacts without the operator looking. |
+| **Legate** | Intervention in *managing parts of the system*. The operator does not pick what to run next, monitor for stalls across many parallel work items, or decide when to retry vs. escalate — Legate runs the orchestration loop and only surfaces decisions that genuinely require operator judgment. |
+| **Steward** | Intervention in *assembling and submitting the work*. The operator does not take the patch the spawn produced, apply it, run tests, commit, push, and open the PR — the Steward session does that and only escalates if something is genuinely ambiguous (merge conflict, failing test that needs judgment). |
+
+The **March CLI** is the operator's *deliberate* intervention surface. When the operator does want to step in — to dispatch an ad-hoc spawn, inspect a stuck session, or override a decision — there are clear verbs to do so. The default path is autonomous; the intervention path is one command away.
+
+### What this means for individual feature design
+
+Three rules of thumb that fall out of the philosophy and should be applied across every spec, every feature map:
+
+1. **No interactive surfaces inside an autonomous component.** No permission prompts reaching the spawn, no approval requests waiting on the operator inside a brood teardown, no questions the herald asks before routing an event. If a component genuinely needs operator judgment, it raises an escalation (via Herald / via SpawnRecord state) — it does not block.
+2. **Minimum required access, not zero access.** Sandboxes start tight (F2's `bridge` network, F2's snapshot-only filesystem) and peel back deliberately as real backends require it (F4's per-backend egress allowlist, the accelerated `BackendCredentialMountSpec` for Codex). Every peel-back is declared on the component's interface (not operator-authored), so the structural enforcement holds even as the access surface grows.
+3. **Failures are clean exits, not hangs.** Auto-mode and auto-review (in Claude Code, Codex, etc.) are powerful but imperfect — sessions occasionally stall, and alignment validation costs tokens. The sandbox cannot prevent stalls but it must prevent stalls from becoming hangs: timeouts kill the container, pre-flights fail fast before any artifact is created, herald events fire on transitions to terminal states. The operator should walk away and come back to *something* — either a green PR ready to merge or a SpawnRecord marked failed with a diagnostic. Never a hung session waiting for input it cannot receive.
+
+These rules are referenced explicitly from feature specs (e.g., F4's [Design philosophy](../../specs/2026-05-12-004-spawn-sandbox-security/spawn-sandbox-security.spec.md#design-philosophy-2026-05-16) section) and apply wherever a March component is making the operator/automation trade-off.
 
 ## Out of Scope
 
@@ -44,7 +101,7 @@ The following are explicitly not part of this RFC:
 - **Web UI** — March is CLI/TUI-first. A browser-based interface is not planned.
 - **Plugin / extension system** — Third-party extensibility is not a goal. The system is opinionated and internally composable, not a platform for others to extend.
 - **Automated CI/CD integration** — March produces PRs for code review. What happens after merge (CI pipelines, deployment) is outside March's scope.
-- **Local / self-hosted LLM backends** — While theoretically compatible, March does not target Ollama or similar local inference as a backend. The starting backends are cloud-hosted Gemini CLI and Claude Code CLI (see Appendices B and C).
+- **Local / self-hosted LLM backends** — While theoretically compatible, March does not target Ollama or similar local inference as a backend. The supported backends are cloud-hosted Claude Code CLI and Codex CLI (see Appendices B and C).
 
 ## Proposal
 
@@ -58,7 +115,14 @@ March consists of five major components, delivered incrementally:
 
 **Herald** — The event bus. A deterministic, non-LLM system that routes events (spawn completion, errors, escalations, status changes) between components. Consumes the structured JSON output format produced by spawns. First-class clients are built from the outset rather than relying on message-passing heuristics.
 
-**Legate** — The intelligent orchestrator. An LLM-powered interactive shell that owns the full March workflow — planning, dispatch, monitoring, escalation, and integration. Leverages an LLM (likely Claude Code) for reasoning. Much of its behavior is prototyped incrementally via smithy-style skills deployed with each preceding milestone.
+**Legate** — The intelligent orchestrator. As of 2026-05 Legate is composed of two siblings (see [Accelerated Work & Reordering](#accelerated-work--reordering-2026-05)):
+
+- **`legate-agent`** — the Claude-backed interactive shell originally described in this RFC. Owns planning, escalation, and decisions that need an LLM.
+- **`legate-loop`** — a deterministic processor that runs the heartbeat-driven dispatch loop, watches steward sessions, and reconciles PRs. Non-LLM. This is responsibility the RFC originally assigned to M5 Legate; it was pulled forward into M2/M3 so the system could run end-to-end before full Legate landed.
+
+Much of the agent's behavior is still prototyped incrementally via smithy-style skills deployed with each preceding milestone.
+
+**Steward** — The PR-management session. A Claude Code agent-deck session, launched per spawn via `src/hatchery/spawn-handoff.ts`, that receives the spawn's extracted patch and drives review, test, commit, push, and PR creation. Runs under the `pr-management` Hatchery profile in auto-mode steered by skills. Named in this RFC 2026-05-16; previously referred to as "manager" in code. Brood will own its container lifecycle (see backlog).
 
 **March CLI** — Scaffolded from the start, following the SmithyCLI pattern. `march init` bootstraps the working environment, deploying skills and prompts co-incident with each completed milestone. The CLI serves as both the deployment mechanism and the user's primary interface until Legate is fully realized.
 
@@ -78,16 +142,34 @@ March consists of five major components, delivered incrementally:
 
 - **Spawn output format**: Structured JSON envelope, which may include a git patch as a payload field. This gives Herald a consistent format to consume regardless of content. The exact schema (required fields, optional payload types, metadata) will be defined during Milestone 1 specification.
 - **Hatchery profile approach**: Profiles lean heavily on opinionated defaults. `march init` materializes those defaults as editable files so the operator can see exactly what they're getting and adjust as needed. The exact schema (file format, field structure, override mechanics) will be defined during Milestone 2 specification.
-- **Multi-backend spawn interface**: The common abstraction is prompt in, structured JSON out. All validated backends (Gemini CLI, Claude Code CLI) support native headless mode with structured JSON output and process-exit completion signaling — no prompt augmentation or external completion detection is needed. Both use the same pattern: `<cli> -p "<prompt>" --output-format json` with backend-specific permission flags (`--approval-mode=yolo` for Gemini, `--dangerously-skip-permissions` for Claude Code). The rest of the system (Brood, Herald) sees only a stopped container with a JSON result — it never needs to know which backend ran. Authentication differs by backend: Gemini requires an API key, while Claude Code supports OAuth session tokens (compatible with Claude Max subscriptions for flat-rate, no-per-token cost). See Appendices B and C for detailed validation.
+- **Multi-backend spawn interface**: The common abstraction is prompt in, structured JSON out. Supported backends (Claude Code CLI, Codex CLI) provide headless execution with process-exit completion signaling. Authentication differs by backend — Claude Code uses env-var (`ANTHROPIC_API_KEY`) or OAuth/session (Claude Max), while Codex uses a **credential-mount** pattern: the host's `CODEX_HOME` is bind-mounted read-only into the container at `/march/codex-auth` and copied into the in-container home at entrypoint time. This makes the `SpawnBackend` contract accommodate both env-var and credential-mount auth shapes. **Gemini** was originally listed here but has been cut (2026-05-16) — Claude + Codex covers the operator's needs and Gemini's env-var-only auth model has no consumer. Appendix B should be read as historical context for the multi-backend contract, not as a live backend commitment.
 
 ## Open Questions
 
 - **Naming**: `march` vs `the-march` for the CLI binary and package name.
 - **Herald protocol**: What event format and transport does the Herald use? File-based events, Unix sockets, or something else within the Docker/tmux environment?
 
+## Accelerated Work & Reordering (2026-05)
+
+Bootstrap testing surfaced enough end-to-end pain that we vibe-coded portions of M2 and M5 ahead of schedule rather than wait for the milestone order. What landed:
+
+- **`legate-loop` processor** (originally M5 Legate scope): a deterministic, heartbeat-driven dispatch loop that reads `smithy status --format json`, launches steward sessions for ready slices, and reconciles their output. Lives in `src/legate/init.ts`. Sibling to the Claude-backed `legate-agent`.
+- **Spawn → Steward handoff** (`src/hatchery/spawn-handoff.ts`): completed spawns hand their patch off to a Claude Code agent-deck session running under a `pr-management` profile. The steward owns review/test/commit/push/PR. Replaces what the RFC originally implied would be a deterministic CLI script.
+- **Legate container under Hatchery** (`src/hatchery/legate-container.ts`): one concrete Hatchery profile shipped — for the Legate container — without the broader declarative profile system.
+- **Codex backend** (`src/spawn/backends.ts`): added alongside Claude Code with a credential-mount auth pattern. Gemini was dropped.
+
+What this reordering **defers** (now tracked as Stage B backlog — see [Backlog of follow-on specs](#backlog-of-follow-on-specs-stage-b)):
+
+- Declarative hatchery profile schema + `march hatchery list/inspect/validate` CLI (M2 originally).
+- Mini-herald daemon and the event-driven message bus (`legate-loop` currently polls `smithy status` directly — see `specs/2026-05-12-003-mini-herald/`).
+- Brood CLI surface (M3) — `src/brood/` has record-keeping primitives but no operator-facing `march brood list/status/clean`. Brood is the right home for steward container lifecycle once it exists.
+- A7 network policy enforcement — spawn containers still run on the default Docker bridge.
+
+The accelerated pieces are deliberately marked **Done (provisional)** below. They work in practice but were shaped by whatever issues we hit during bootstrap, not by spec; the Stage B specs will harden or replace them.
+
 ## Milestones
 
-### Milestone 1: Spawn
+### Milestone 1: Spawn — **Done (realized)**
 
 **Description**: Build the end-to-end spawn loop and the March CLI that drives it. This is the first usable component — a human can send work to an isolated executor and get a reviewable PR back. The CLI is the primary interface and is a first-class deliverable, not scaffolding. Container configuration is hardcoded/minimal in this milestone — Hatchery (Milestone 2) will later formalize it into declarative, editable profiles.
 
@@ -101,7 +183,7 @@ March consists of five major components, delivered incrementally:
 - The known attack surfaces enumerated in Appendix A have been evaluated and mitigated.
 - The CLI completes the loop: applies the extracted patch to the spawn's worktree and branch, pushes, and creates a GitHub PR for code review. Full loop: prompt in → sandbox execution → patch out → reviewable PR.
 
-### Milestone 2: Hatchery
+### Milestone 2: Hatchery — **Partial** (Legate container shipped provisionally; F1 profile schema spec drafted at `specs/2026-05-12-003-profile-schema-and-validation-library/`; declarative loader/CLI not implemented)
 
 **Description**: Build the container profile configuration system. The Hatchery is a non-LLM functional system that manages declarative profiles for any containerized March component. Different roles require different security postures — from fully sandboxed spawns to more permissioned agents that handle PR management or orchestration. The Hatchery formalizes the hardcoded container configuration from Milestone 1 into a general-purpose, editable profile system.
 
@@ -113,7 +195,7 @@ March consists of five major components, delivered incrementally:
 - Profiles can be listed, inspected, and validated via the March CLI.
 - Skills updated to cover Hatchery interactions.
 
-### Milestone 3: Brood (Basic)
+### Milestone 3: Brood (Basic) — **Partial** (record-keeping primitives exist in `src/brood/`; feature map drafted at `docs/rfcs/2026-001-march-orchestration-platform/03-brood.features.md`; no specs cut, no CLI surface yet)
 
 **Description**: Build the session lifecycle manager. The Brood is a non-LLM functional system that interacts with the Hatchery to spin up, track, and tear down spawn sessions, giving the operator visibility into all active and completed work.
 
@@ -125,7 +207,7 @@ March consists of five major components, delivered incrementally:
 - Skills updated to cover Brood management. The accumulated skill set forms a functional pseudo-legate.
 - **MVP complete**: the system is usable for dispatching, configuring, and managing parallel sandboxed AI work.
 
-### Milestone 4: Herald
+### Milestone 4: Herald — **Not started** (mini-herald precursor spec drafted at `specs/2026-05-12-003-mini-herald/`)
 
 **Description**: Build the deterministic event bus. The Herald is a non-LLM functional system that routes events between components, enabling coordination without requiring direct component-to-component communication.
 
@@ -135,9 +217,11 @@ March consists of five major components, delivered incrementally:
 - The operator can observe the event stream via the March CLI.
 - Components react to events without polling or direct coupling.
 
-### Milestone 5: Legate
+### Milestone 5: Legate — **Done (provisional, accelerated)**
 
-**Description**: Build the intelligent orchestrator. The Legate is an LLM-powered interactive shell that owns the full March workflow — planning, dispatch, monitoring, escalation, and integration. It absorbs and extends the pseudo-legate skills accumulated across prior milestones.
+**Description**: Build the intelligent orchestrator.
+
+**Accelerated status (2026-05-16)**: Implemented as a split — `legate-agent` (Claude-backed interactive shell) + `legate-loop` (deterministic processor that handles dispatch, worker monitoring, PR reconciliation). The loop currently polls `smithy status --format json` directly; the mini-herald spec will replace that polling with event consumption. See [Accelerated Work & Reordering](#accelerated-work--reordering-2026-05). The Legate is an LLM-powered interactive shell that owns the full March workflow — planning, dispatch, monitoring, escalation, and integration. It absorbs and extends the pseudo-legate skills accumulated across prior milestones.
 
 **Success Criteria**:
 - The Legate can accept a goal and break it into dispatchable work.
@@ -157,6 +241,20 @@ Recommended implementation sequence:
 | M3 | Brood    | M1, M2         | —                                                                              |
 | M4 | Herald   | M1, M2, M3     | —                                                                              |
 | M5 | Legate   | M1, M2, M3, M4 | —                                                                              |
+
+## Backlog of follow-on specs (Stage B)
+
+These specs build *on top of* the as-built code rather than replacing it. They are the next wave of stabilization work after the 2026-05 acceleration. Ordered by priority.
+
+| # | Spec | Replaces / hardens | Notes |
+|---|------|--------------------|-------|
+| 1 | Hatchery declarative profiles | Hardcoded `SPAWN_CONFIG` in `src/hatchery/spawn-config.ts`; ad-hoc `legate-container.ts` | YAML profile loader + `march hatchery list/inspect/validate`. Closes M2's stated scope. **In flight** — F1 spec drafted at `specs/2026-05-12-003-profile-schema-and-validation-library/`; F2–F6 still to cut. |
+| 2 | Mini-herald daemon | `legate-loop`'s direct `smithy status` polling | Implement the existing `specs/2026-05-12-003-mini-herald/` spec; wire `legate-loop` to consume herald events. The "better message passing system" referenced in the 2026-05 acceleration notes. |
+| 3 | Brood lifecycle CLI | Ad-hoc container management spread across `legate-container.ts`, `spawn-handoff.ts`, and `src/brood/` primitives | `march brood list/status/clean`. Owns container/worktree lifecycle for legates, spawns, and stewards. Integrates with hatchery profiles + herald events. |
+| 4 | Steward role formalization | Ad-hoc `launchAgentDeckManager()` path in `spawn-handoff.ts` | Names + specs the steward role: prompt contract, exit conditions, brood-managed lifecycle. |
+| 5 | A7 network policy enforcement | Default Docker bridge on spawn containers | Firewall / proxy rules per backend profile; tied to hatchery profile schema so it's declarative. |
+
+(Cut from scope as of 2026-05-16: **Gemini backend**. Claude Code + Codex covers operator needs.)
 
 ---
 
@@ -250,9 +348,11 @@ The spawn sandbox is the single most critical security boundary in March. An LLM
 
 ---
 
-## Appendix B: Gemini CLI Headless Mode Validation
+## Appendix B: Gemini CLI Headless Mode Validation — **Historical (Gemini cut 2026-05-16)**
 
-The RFC assumes headless Gemini as the initial spawn backend. This appendix documents the capabilities that support this choice, based on Gemini CLI's current feature set.
+> Gemini was dropped as a supported backend on 2026-05-16; Claude Code + Codex covers operator needs. This appendix is preserved as historical context for how the multi-backend contract was validated and what shape a future env-var-auth backend would take. Codex's credential-mount auth pattern (Appendix C, plus the multi-backend spec) is the live counterpart.
+
+The RFC originally assumed headless Gemini as the initial spawn backend. This appendix documents the capabilities that support this choice, based on Gemini CLI's current feature set.
 
 ### B1. Headless Dispatch
 

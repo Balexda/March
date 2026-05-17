@@ -3,7 +3,7 @@
 **Spec Folder**: `2026-04-11-002-spawn-dispatch`
 **Branch**: `2026-04-11-002-spawn-dispatch`
 **Created**: 2026-04-11
-**Status**: Draft
+**Status**: Draft  |  **Implementation status (2026-05-16)**: **Done (realized)** for the dispatch pipeline itself (`src/spawn/` and `src/brood/spawn-record.ts`). Patch extraction and PR creation have been **extended** in `src/hatchery/spawn-handoff.ts` with a Steward (Claude Code agent-deck session) handoff that this spec did not anticipate. The Steward role will be formalized in a Stage B spec; see RFC [Accelerated Work & Reordering](../../docs/rfcs/2026-001-march-orchestration-platform/march-orchestration-platform.rfc.md#accelerated-work--reordering-2026-05).
 **Input**: `docs/rfcs/2026-001-march-orchestration-platform/march-orchestration-platform.rfc.md` — Milestone 1: Spawn
 **Source Feature Map**: `docs/rfcs/2026-001-march-orchestration-platform/01-spawn.features.md` — Feature 2: Spawn Dispatch
 
