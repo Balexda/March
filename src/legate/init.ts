@@ -2205,9 +2205,22 @@ const HATCHERY_PENDING_TIMEOUT_MS = 15 * 60 * 1000;
 function completePendingHatcheryDispatches(state, ts) {
   const actions = [];
   const failures = [];
+  const notifications = [];
   let mutated = false;
   const slices = state?.slices && typeof state.slices === "object" ? state.slices : {};
   const nowMs = Date.parse(ts);
+  const queueDispatchEscalation = (slice, sliceId, reason, error) => {
+    // Build a stable requestKey so requestLegateJudgement only fires once per
+    // distinct failure mode. Without notification the agent never wakes and
+    // the operator sees "loop is silent" while state.json piles up escalated
+    // slices.
+    const key = "hatchery-failure:" + sliceId + ":" + reason + ":" + hashText(String(error || "")).slice(0, 12);
+    notifications.push({
+      slice, sliceId, requestKey: key,
+      reason: "hatchery_dispatch_failed",
+      detail: "Hatchery dispatch for " + actionCommandLine({ command: slice.command, arguments: slice.arguments || [] }) + " escalated: " + reason + ".\\n\\nError:\\n" + String(error || "(no detail)").trim() + "\\n\\nSlice has been marked escalated in state.json. Inspect with legate.error or operator-clear with smithy.status as appropriate.",
+    });
+  };
   const escalateStale = (slice, sliceId, reason) => {
     const queuedMs = Date.parse(slice.last_action || "");
     if (!Number.isFinite(queuedMs) || !Number.isFinite(nowMs)) return false;
@@ -2218,6 +2231,7 @@ function completePendingHatcheryDispatches(state, ts) {
     slice.last_action = ts;
     slice.last_action_note = note;
     failures.push({ slice_id: sliceId, command: actionCommandLine({ command: slice.command, arguments: slice.arguments || [] }), error: note });
+    queueDispatchEscalation(slice, sliceId, "runner-silent", note);
     return true;
   };
   for (const [sliceId, slice] of Object.entries(slices)) {
@@ -2249,10 +2263,12 @@ function completePendingHatcheryDispatches(state, ts) {
       continue;
     }
     if (result.error) {
+      const errorText = String(result.error).trim();
       slice.stage = "escalated";
       slice.last_action = ts;
-      slice.last_action_note = "NEED: Hatchery dispatch failed: " + String(result.error).trim();
-      failures.push({ slice_id: sliceId, command: actionCommandLine({ command: slice.command, arguments: slice.arguments || [] }), error: String(result.error).trim() });
+      slice.last_action_note = "NEED: Hatchery dispatch failed: " + errorText;
+      failures.push({ slice_id: sliceId, command: actionCommandLine({ command: slice.command, arguments: slice.arguments || [] }), error: errorText });
+      queueDispatchEscalation(slice, sliceId, "spawn-error", errorText);
       mutated = true;
       continue;
     }
@@ -2283,7 +2299,7 @@ function completePendingHatcheryDispatches(state, ts) {
     });
     mutated = true;
   }
-  return { actions, failures, mutated };
+  return { actions, failures, mutated, notifications };
 }
 
 function stageDispatchMessage(sliceId, result) {
@@ -2318,6 +2334,15 @@ function runDispatch(state, ts) {
   actions.push(...completed.actions);
   failures.push(...completed.failures);
   let mutated = completed.mutated;
+  // Wake the legate agent for each escalation produced by completion (spawn
+  // errors and stale-pending timeouts). requestLegateJudgement is idempotent
+  // by requestKey so duplicate ticks won't spam the doorbell.
+  for (const n of completed.notifications || []) {
+    requestLegateJudgement({
+      ts, slice: n.slice, sliceId: n.sliceId,
+      requestKey: n.requestKey, reason: n.reason, detail: n.detail,
+    });
+  }
 
   let status;
   try {
@@ -2394,6 +2419,14 @@ function runDispatch(state, ts) {
         existing.last_action = ts;
         existing.last_action_note = "NEED: Hatchery dispatch launch failed: " + error;
         mutated = true;
+        // Wake the legate agent — without this the operator only sees state.json
+        // grow stale while the loop appears idle.
+        requestLegateJudgement({
+          ts, slice: existing, sliceId,
+          requestKey: "hatchery-failure:" + sliceId + ":launch-throw:" + hashText(error).slice(0, 12),
+          reason: "hatchery_dispatch_failed",
+          detail: "Hatchery dispatch launch threw for " + actionCommandLine(item.next_action) + ".\\n\\nError:\\n" + error + "\\n\\nSlice is escalated in state.json; inspect with legate.error.",
+        });
       }
       failures.push({ slice_id: sliceId, command: actionCommandLine(item.next_action), error });
       append(meta.processor_events_path, {

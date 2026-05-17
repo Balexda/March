@@ -492,6 +492,24 @@ describe("legate module", () => {
       expect(isStub({ actual_branch: "feature/smithy/forge/x" })).toBe(false);
     });
 
+    it("hatchery escalations notify the legate agent via processor_requests", async () => {
+      // Regression guard for the silent-loop bug: prior to this fix, every
+      // dispatch escalation only wrote state.json and the log file. The
+      // legate agent waits for a [PROCESSOR] message and so stayed idle
+      // indefinitely while artifacts piled up in escalated state.
+      const loop = fs.readFileSync(await stageLoop(makeTmpDir()), "utf-8");
+      // Both escalation sites must call requestLegateJudgement.
+      expect(loop).toContain('reason: "hatchery_dispatch_failed"');
+      // runDispatch catch path (launchHatcheryDispatch throws).
+      expect(loop).toMatch(/requestLegateJudgement\([\s\S]*?launch-throw/);
+      expect(loop).toContain("Hatchery dispatch launch threw");
+      // completePendingHatcheryDispatches forwards a notifications batch up.
+      expect(loop).toContain("queueDispatchEscalation");
+      expect(loop).toContain("hatchery-failure:");
+      // The caller in runDispatch must drain those notifications.
+      expect(loop).toMatch(/for \(const n of completed\.notifications/);
+    });
+
     it("sliceReleasesArtifact treats only merged slices as releasing the artifact", async () => {
       // Regression guard for the dedup bug where escalated slices were
       // treated as terminal, allowing the loop to re-dispatch artifacts an
