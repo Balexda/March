@@ -9,6 +9,7 @@ import {
   extractPatchFromSpawnOutput,
   hatcherySpawnLogDir,
   managerBranchName,
+  pickLaunchedSession,
 } from "./spawn-handoff.js";
 
 describe("spawn-handoff", () => {
@@ -230,5 +231,71 @@ describe("spawn-handoff", () => {
     );
     const metadata = JSON.parse(fs.readFileSync(artifacts.metadataPath, "utf-8"));
     expect(metadata.artifacts.patchPath).toBe(artifacts.patchPath);
+  });
+
+  describe("pickLaunchedSession", () => {
+    // Regression guard for the launchAgentDeckManager race that wired three
+    // concurrent spawns to the same (wrong) session on smithy: every loser
+    // attached to a phantom session whose worktree didn't exist, causing
+    // applyPatchToManagerWorktree to fail with the misleading message
+    // "spawnSync git ENOENT". With branch-aware selection, two concurrent
+    // launches whose post-launch view of agent-deck is identical still pick
+    // their own session because the branch is unique per launch.
+    const session = (
+      id: string,
+      branch: string,
+      createdAt: string,
+    ): { sessionId: string; title: string; group: string; branch: string; worktreePath: string; createdAt: string } => ({
+      sessionId: id,
+      title: id,
+      group: "legate-workers",
+      branch,
+      worktreePath: "/wt/" + id,
+      createdAt,
+    });
+
+    it("picks the new session whose branch matches the requested launch branch", () => {
+      const before = new Set(["pre1"]);
+      const sessions = [
+        session("pre1", "smithy/forge/old", "2026-05-17T06:00:00Z"),
+        session("a", "smithy/forge/alpha", "2026-05-17T06:53:18Z"),
+        session("b", "smithy/forge/beta", "2026-05-17T06:53:19Z"),
+        session("c", "smithy/mark/gamma", "2026-05-17T06:53:20Z"),
+      ];
+      // Each concurrent launch sees the same `sessions` snapshot but picks
+      // its own session by branch.
+      expect(pickLaunchedSession(sessions, before, "smithy/forge/alpha")?.sessionId).toBe("a");
+      expect(pickLaunchedSession(sessions, before, "smithy/forge/beta")?.sessionId).toBe("b");
+      expect(pickLaunchedSession(sessions, before, "smithy/mark/gamma")?.sessionId).toBe("c");
+    });
+
+    it("ignores sessions already present in the pre-launch snapshot even when their branch matches", () => {
+      const before = new Set(["existing"]);
+      const sessions = [
+        session("existing", "smithy/forge/alpha", "2026-05-17T05:00:00Z"),
+        session("new", "smithy/forge/alpha", "2026-05-17T06:53:18Z"),
+      ];
+      expect(pickLaunchedSession(sessions, before, "smithy/forge/alpha")?.sessionId).toBe("new");
+    });
+
+    it("falls back to newest-not-in-snapshot when no session reports the requested branch", () => {
+      // Defensive: some agent-deck versions may not surface branch on the
+      // session record; preserve the historical behavior for that case.
+      const before = new Set<string>();
+      const sessions = [
+        session("a", "", "2026-05-17T06:53:18Z"),
+        session("b", "", "2026-05-17T06:53:19Z"),
+      ];
+      expect(pickLaunchedSession(sessions, before, "smithy/forge/alpha")?.sessionId).toBe("b");
+    });
+
+    it("returns undefined when nothing matches and the snapshot covers everything", () => {
+      const before = new Set(["a", "b"]);
+      const sessions = [
+        session("a", "x", "1"),
+        session("b", "y", "2"),
+      ];
+      expect(pickLaunchedSession(sessions, before, "z")).toBeUndefined();
+    });
   });
 });

@@ -280,6 +280,42 @@ export function createHatcherySpawnArtifacts(input: {
   return { dir, spawnOutputPath, patchPath, managerPromptPath, metadataPath };
 }
 
+/**
+ * Pick the session created by a single `agent-deck launch` call out of
+ * the post-launch session list. Diff-since-snapshot alone is unsafe when
+ * multiple launches race in the same tick — each runner sees the same
+ * `beforeIds` snapshot and the same post-launch list, and a naive
+ * "newest not in snapshot" pick converges on whichever session sorted
+ * latest by createdAt. Every concurrent spawn would then attach to the
+ * same session, and the losers would fail downstream when the wrong
+ * (or nonexistent) worktree gets used as a cwd.
+ *
+ * Filter by the requested branch first — each launch passes a unique
+ * `--worktree <branch>`, so branch is a deterministic identity for "this
+ * launch's session." Fall back to the diff-since-snapshot pick only when
+ * the session record doesn't carry branch metadata at all (older
+ * agent-deck versions, edge cases).
+ *
+ * Exported for direct unit testing.
+ */
+export function pickLaunchedSession(
+  sessions: readonly AgentDeckSessionSnapshot[],
+  beforeIds: ReadonlySet<string>,
+  branch: string,
+): AgentDeckSessionSnapshot | undefined {
+  const branchMatch = sessions
+    .filter((session) => session.branch === branch && !beforeIds.has(session.sessionId))
+    .slice()
+    .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+    .at(-1);
+  if (branchMatch) return branchMatch;
+  return sessions
+    .filter((session) => !beforeIds.has(session.sessionId))
+    .slice()
+    .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+    .at(-1);
+}
+
 export function launchAgentDeckManager(input: {
   readonly repoPath: string;
   readonly spawnId: string;
@@ -329,10 +365,8 @@ export function launchAgentDeckManager(input: {
     );
   }
 
-  const launched = listAgentDeckSessions(input.profile, input.group)
-    .filter((session) => !beforeIds.has(session.sessionId))
-    .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
-    .at(-1);
+  const allSessions = listAgentDeckSessions(input.profile, input.group);
+  const launched = pickLaunchedSession(allSessions, beforeIds, input.branch);
   if (!launched) {
     throw new HatcherySpawnError(
       `agent-deck manager launch completed but the new session could not be identified from agent-deck list.`,
@@ -505,6 +539,20 @@ export function applyPatchToManagerWorktree(input: {
   readonly patchPath: string;
   readonly worktreePath: string;
 }): void {
+  // Pre-check cwd existence so we don't surface Node's misleading
+  // "spawnSync git ENOENT" — which happens when execFileSync can't chdir
+  // to the manager worktree, and looks identical to "git is not
+  // installed." The race in launchAgentDeckManager used to produce this
+  // error every time a concurrent dispatch attached to the wrong session;
+  // even after the race fix, surfacing a clear message keeps future
+  // failures debuggable.
+  if (!fs.existsSync(input.worktreePath)) {
+    throw new HatcherySpawnError(
+      `git apply --index aborted: manager worktree not found at ${input.worktreePath}. ` +
+        `This usually means launchAgentDeckManager attached to the wrong session (race) ` +
+        `or the worktree was removed between launch and patch-apply.`,
+    );
+  }
   try {
     execFileSync("git", ["apply", "--index", input.patchPath], {
       cwd: input.worktreePath,
