@@ -31,7 +31,7 @@ These trace directly to [`docs/operating-philosophy.md`](operating-philosophy.md
 
 ## 3. Two-axis taxonomy
 
-The current `CONTRIBUTING.md` model — Tier 1 (Automated) / Tier 2 (Agent) / Tier 3 (Human) — conflates three different things: *who* runs the test, *what scope* it exercises, and *whether it asserts over deterministic or stochastic output*. This document separates them onto orthogonal axes.
+The prior `CONTRIBUTING.md` model — Tier 1 (Automated) / Tier 2 (Agent) / Tier 3 (Human), which this document replaces — conflated three different things: *who* runs the test, *what scope* it exercises, and *whether it asserts over deterministic or stochastic output*. This document separates them onto orthogonal axes.
 
 ### Axis A — Scope (what the test exercises)
 
@@ -144,7 +144,7 @@ This document is principles-first, but the principles are easier to apply when y
 
 Today's tests, mapped to the new taxonomy.
 
-### Automated (today's "Tier 1")
+### Automated (formerly "Tier 1")
 
 | Test file | New label |
 |-----------|-----------|
@@ -163,7 +163,7 @@ Today's tests, mapped to the new taxonomy.
 | `src/spawn/container-launch.test.ts` | L2 / Deterministic / CI |
 | `src/hatchery/legate-container.test.ts` | L2 / Deterministic / CI |
 
-### Agent + Human (today's "Tier 2" / "Tier 3")
+### Agent + Human (formerly "Tier 2" / "Tier 3")
 
 | Reference | New label | Status |
 |-----------|-----------|--------|

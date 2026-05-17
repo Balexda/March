@@ -36,7 +36,7 @@ The full framing — scope tiers (L0 unit / L1 subsystem / L2 cross-subsystem / 
 
 Day-to-day commands:
 
-- **`npm test`** — runs the deterministic CI suite (today: L0 + L1 tests; cassette-replayed L2/L3 will land here as the [Roadmap](docs/testing-strategy.md#9-roadmap) progresses). Cost: $0, < 2 minutes. Runs on every push and PR.
+- **`npm test`** — runs the deterministic CI suite. Today that's the full vitest set: L0, L1, and the L2 cases that exercise real Docker (`spawn/container-launch`, `spawn/snapshot-build`, `hatchery/legate-container`). Cassette-replayed L2/L3 will land here as the [Roadmap](docs/testing-strategy.md#9-roadmap) progresses. Cost: $0, < 2 minutes. Runs on every push and PR.
 - **`npm run typecheck`** — `tsc --noEmit`.
 
 Agent-driven and human tests:
