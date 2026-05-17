@@ -48,7 +48,7 @@ Validation rules:
 | `name` | `"codex"` |
 | `baseImage` | `"march-spawn-codex:latest"` |
 | `requiredEnvVars` | `[]` (Codex authenticates via the credential mount, not env vars) |
-| `credentialMounts` | `[{ name: "Codex credential directory", containerPath: "/march/codex-auth", readOnly: true, resolveHostPath: env => env.CODEX_HOME ?? path.join(env.HOME ?? os.homedir(), ".codex"), env: { CODEX_HOME: "/march/codex-home" } }]` (single entry — see Entity 1a for the type) |
+| `credentialMounts` | `[{ name: "Codex credential directory", containerPath: "/march/codex-auth", readOnly: true, resolveHostPath: env => (env.CODEX_HOME && env.CODEX_HOME.length > 0) ? env.CODEX_HOME : path.join(env.HOME && env.HOME.length > 0 ? env.HOME : os.homedir(), ".codex"), env: { CODEX_HOME: "/march/codex-home" } }]` (single entry — see Entity 1a for the type. Note: the live impl treats empty strings as unset — `length > 0` checks, not `??`) |
 | `buildEntrypoint(p)` | `["sh", "-c", \`cp -R /march/codex-auth/. /march/codex-home/ && chmod -R u+rwX /march/codex-home && codex exec --json --ephemeral --ignore-rules --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --cd ${CONTAINER_WORKDIR} - < ${p}\`]` |
 | `allowedEgressHosts` | per SD-008 — placeholder `["chatgpt.com"]` pending render/cut measurement |
 

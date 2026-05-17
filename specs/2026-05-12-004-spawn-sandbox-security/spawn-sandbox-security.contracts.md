@@ -122,7 +122,7 @@ The F3 spec's "interface stays at four members" claim (F3 FR-005, F3 SC-005, plu
 | `name` | `"codex"` |
 | `baseImage` | `"march-spawn-codex:latest"` |
 | `requiredEnvVars` | `[]` (authenticates via credentialMounts) |
-| `credentialMounts` | `[{ name: "Codex credential directory", containerPath: "/march/codex-auth", readOnly: true, resolveHostPath: env => env.CODEX_HOME ?? path.join(env.HOME ?? os.homedir(), ".codex"), env: { CODEX_HOME: "/march/codex-home" } }]` |
+| `credentialMounts` | `[{ name: "Codex credential directory", containerPath: "/march/codex-auth", readOnly: true, resolveHostPath: env => (env.CODEX_HOME && env.CODEX_HOME.length > 0) ? env.CODEX_HOME : path.join(env.HOME && env.HOME.length > 0 ? env.HOME : os.homedir(), ".codex"), env: { CODEX_HOME: "/march/codex-home" } }]` (live impl treats empty strings as unset — `length > 0` checks, not `??`) |
 | `allowedEgressHosts` | per SD-008 — placeholder `["chatgpt.com"]` pending render/cut measurement |
 
 ---
