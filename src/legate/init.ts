@@ -2327,6 +2327,66 @@ function deleteHatcheryArtifacts(slice) {
 // loop re-dispatches it on the next tick. For everything else, returns the
 // verdict + detail string so the caller can include them in the escalation
 // notification.
+// Locate the git worktree (if any) that currently has the colliding branch
+// checked out. Returns the worktree's filesystem path, or null when the
+// branch isn't held by a worktree.
+function findWorktreeForBranch(repoPath, branchName) {
+  let out;
+  try {
+    out = execText("git", ["worktree", "list", "--porcelain"], { cwd: repoPath });
+  } catch {
+    return null;
+  }
+  const blocks = out.split("\\n\\n");
+  for (const block of blocks) {
+    const wt = block.match(/^worktree (.+)$/m);
+    const br = block.match(/^branch refs\\/heads\\/(.+)$/m);
+    if (wt && br && br[1].trim() === branchName) {
+      return wt[1].trim();
+    }
+  }
+  return null;
+}
+
+// Check whether a worktree path is empty of in-progress work — no
+// uncommitted changes, no untracked files (other than git internals).
+// Conservative: any output from "git status --porcelain" blocks removal.
+function worktreeIsClean(worktreePath) {
+  try {
+    const out = execText("git", ["status", "--porcelain"], { cwd: worktreePath });
+    return out.trim().length === 0;
+  } catch {
+    return false;
+  }
+}
+
+// Check whether any agent-deck session in our worker group is currently
+// pointing at this worktree. If a live session holds it, the worker may
+// still be doing real work — never remove.
+function agentDeckSessionHoldsWorktree(worktreePath) {
+  try {
+    const list = agentDeckList();
+    if (!Array.isArray(list)) return false;
+    return list.some((session) => {
+      const path = String(session?.path || session?.worktree_path || "");
+      return path === worktreePath;
+    });
+  } catch {
+    return false;
+  }
+}
+
+// Attempt to recover from a "branch already exists" dispatch failure
+// without operator help. Reads classifyBranchCollision; for verdicts marked
+// autoSafe, deletes the stale branch and removes the slice from state so the
+// loop re-dispatches it on the next tick. For everything else, returns the
+// verdict + detail string so the caller can include them in the escalation
+// notification.
+//
+// If "git branch -D" fails because the branch is checked out in a worktree,
+// inspects the worktree: when clean AND not held by an active agent-deck
+// session, removes the worktree with "git worktree remove --force" first,
+// then deletes the branch. Anything dirty or session-held escalates.
 function tryRecoverBranchCollision(state, slice, sliceId, errorText) {
   const branchName = parseBranchCollisionError(errorText);
   if (!branchName) return null;
@@ -2341,14 +2401,38 @@ function tryRecoverBranchCollision(state, slice, sliceId, errorText) {
   if (!classification.autoSafe) {
     return { recovered: false, verdict: classification.verdict, detail: summary };
   }
+  let extra = "";
   try {
     execText("git", ["branch", "-D", branchName], { cwd: repoPath });
   } catch (err) {
-    return { recovered: false, verdict: classification.verdict + "-delete-failed", detail: summary + " | branch delete failed: " + (err?.message || String(err)) };
+    // git refuses when the branch is checked out by a worktree. Try to
+    // unblock by removing the worktree — but only when it's safe (no
+    // uncommitted changes, not held by an active agent-deck session).
+    const worktreePath = findWorktreeForBranch(repoPath, branchName);
+    if (!worktreePath) {
+      return { recovered: false, verdict: classification.verdict + "-delete-failed", detail: summary + " | branch delete failed: " + (err?.message || String(err)) };
+    }
+    if (!worktreeIsClean(worktreePath)) {
+      return { recovered: false, verdict: classification.verdict + "-worktree-dirty", detail: summary + " | branch held by worktree " + worktreePath + " with uncommitted changes; refusing to auto-remove" };
+    }
+    if (agentDeckSessionHoldsWorktree(worktreePath)) {
+      return { recovered: false, verdict: classification.verdict + "-worktree-session", detail: summary + " | branch held by worktree " + worktreePath + " which is still owned by a live agent-deck session; operator must drain that session before re-dispatch" };
+    }
+    try {
+      execText("git", ["worktree", "remove", "--force", worktreePath], { cwd: repoPath });
+    } catch (e2) {
+      return { recovered: false, verdict: classification.verdict + "-worktree-remove-failed", detail: summary + " | worktree remove failed: " + (e2?.message || String(e2)) };
+    }
+    extra = " | worktree " + worktreePath + " removed";
+    try {
+      execText("git", ["branch", "-D", branchName], { cwd: repoPath });
+    } catch (e3) {
+      return { recovered: false, verdict: classification.verdict + "-delete-after-worktree-failed", detail: summary + extra + " | second branch delete failed: " + (e3?.message || String(e3)) };
+    }
   }
   deleteHatcheryArtifacts(slice);
   delete state.slices[sliceId];
-  return { recovered: true, verdict: classification.verdict, detail: summary + " | branch deleted, slice released for re-dispatch" };
+  return { recovered: true, verdict: classification.verdict, detail: summary + extra + " | branch deleted, slice released for re-dispatch" };
 }
 
 function completePendingHatcheryDispatches(state, ts) {
