@@ -174,11 +174,11 @@ Per-control `expected`/`observed` shapes (informal):
 
 ### 5) SnapshotExclusionPattern (formalized)
 
-Purpose: The pattern entries that compose `SNAPSHOT_EXCLUSION_PATTERNS` in `src/snapshot.ts`. Already exists as an array literal in F2; F4 promotes the per-pattern rationale to documentation by enumerating each new pattern's threat (A5 sub-vector).
+Purpose: The pattern entries that compose `SNAPSHOT_EXCLUSION_PATTERNS` in `src/spawn/snapshot.ts`. Already exists as an array literal in F2; F4 promotes the per-pattern rationale to documentation by enumerating each new pattern's threat (A5 sub-vector).
 
 | Field | Type | Required | Notes |
 |-------|------|----------|-------|
-| `pattern` | string | Yes | Either a basename glob (`*` and `?` wildcards, no `/`) matched against the path's final segment at any depth, OR a directory-segment literal with trailing `/` matched against any interior segment. Engine semantics: the existing `isExcludedPath` in `src/snapshot.ts`. |
+| `pattern` | string | Yes | Either a basename glob (`*` and `?` wildcards, no `/`) matched against the path's final segment at any depth, OR a directory-segment literal with trailing `/` matched against any interior segment. Engine semantics: the existing `isExcludedPath` in `src/spawn/snapshot.ts`. |
 | `category` | string | (documentation) | The credential category the pattern targets (e.g., `"SSH key"`, `"PKCS12 keystore"`, `"npm auth token"`). For audit traceability; not present in the runtime array. |
 
 #### F4 expansion (new patterns added to the F2 baseline)
