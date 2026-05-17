@@ -106,6 +106,71 @@ describe("spawn-handoff", () => {
     );
   });
 
+  it("extracts a fenced patch whose body contains nested ```ts fences (added file contents)", () => {
+    // Reproduces issue #131: codex emits a ```diff fence whose patch body
+    // adds files containing their own ```ts/```diff fences. The closing ``` of
+    // the OUTER fence is the only one preceded by a newline (inner fences are
+    // prefixed by `+` because they are patch-added lines). Naive non-greedy
+    // matching stops at the first inner fence and truncates the patch.
+    const patch = extractPatchFromSpawnOutput(
+      JSON.stringify({
+        type: "item.completed",
+        item: {
+          type: "agent_message",
+          text:
+            "Done.\n\n```diff\n" +
+            "diff --git a/docs/api.md b/docs/api.md\n" +
+            "new file mode 100644\n" +
+            "--- /dev/null\n" +
+            "+++ b/docs/api.md\n" +
+            "@@ -0,0 +1,7 @@\n" +
+            "+# API\n" +
+            "+\n" +
+            "+```ts\n" +
+            "+export function foo(): void;\n" +
+            "+```\n" +
+            "+\n" +
+            "+End.\n" +
+            "```",
+        },
+      }),
+    );
+
+    expect(patch).toContain("export function foo(): void;");
+    expect(patch).toContain("+End.");
+    expect(patch).toContain("+```ts");
+    expect(patch.startsWith("diff --git a/docs/api.md")).toBe(true);
+    // The patch must not be truncated at the inner ```ts fence.
+    expect(patch).not.toMatch(/\n```\s*$/);
+  });
+
+  it("preserves a trailing whitespace-only context line at the end of the patch", () => {
+    // Reproduces issue #131: a hunk header like `@@ -43,7 +43,7 @@` requires
+    // 7 lines on each side; if the final line is a blank context line (just
+    // " \n"), trimEnd() strips it and git apply fails with "corrupt patch".
+    const fullPatch =
+      "diff --git a/file.md b/file.md\n" +
+      "--- a/file.md\n" +
+      "+++ b/file.md\n" +
+      "@@ -1,3 +1,3 @@\n" +
+      "-old line\n" +
+      "+new line\n" +
+      " \n"; // trailing blank context line — must survive extraction
+    const patch = extractPatchFromSpawnOutput(
+      JSON.stringify({
+        type: "item.completed",
+        item: {
+          type: "agent_message",
+          text: "Result:\n\n```diff\n" + fullPatch + "```",
+        },
+      }),
+    );
+
+    // The blank context line " \n" must be preserved so git apply sees the
+    // hunk's full line count.
+    expect(patch).toBe(fullPatch);
+  });
+
   it("writes handoff artifacts and tells the manager the patch is already applied", () => {
     const home = makeTmpDir();
     const patch = "diff --git a/a b/a\n--- a/a\n+++ b/a\n";
