@@ -2823,12 +2823,35 @@ function completePendingHatcheryDispatches(state, ts) {
     if (!Number.isFinite(queuedMs) || !Number.isFinite(nowMs)) return false;
     if (nowMs - queuedMs <= HATCHERY_PENDING_TIMEOUT_MS) return false;
     const ageMin = Math.round((nowMs - queuedMs) / 60000);
-    const note = "NEED: Hatchery spawn " + reason + " after " + ageMin + " min (runner likely crashed before writing); manual investigation required";
+    // Runner-silent recovery: the hatchery runner died before writing its
+    // result file (almost always because the loop conductor was restarted
+    // mid-spawn — detached:true doesnt fully insulate from tmux's session-
+    // kill cascade). This is transient. Auto-clear the slice and let it
+    // re-dispatch, capped by a per-slice retry counter.
+    const limit = 3;
+    const counts = transientRetryCounts(state);
+    const key = "runner-silent:" + sliceId;
+    const prev = Number.isFinite(counts[key]) ? counts[key] : 0;
+    const nextN = prev + 1;
+    if (nextN <= limit) {
+      counts[key] = nextN;
+      actions.push({
+        action: "auto-recovered",
+        sliceId,
+        sessionId: null,
+        detail: "runner-silent (" + reason + ") after " + ageMin + " min — likely loop restart killed the runner (attempt " + nextN + "/" + limit + "); slice released for re-dispatch",
+      });
+      deleteHatcheryArtifacts(slice);
+      delete state.slices[sliceId];
+      return true;
+    }
+    delete counts[key];
+    const note = "NEED: Hatchery spawn " + reason + " after " + ageMin + " min and " + limit + " auto-retry attempts; runner is dying repeatedly — manual investigation required";
     slice.stage = "escalated";
     slice.last_action = ts;
     slice.last_action_note = note;
     failures.push({ slice_id: sliceId, command: actionCommandLine({ command: slice.command, arguments: slice.arguments || [] }), error: note });
-    queueDispatchEscalation(slice, sliceId, "runner-silent", note);
+    queueDispatchEscalation(slice, sliceId, "runner-silent-persistent", note);
     return true;
   };
   for (const [sliceId, slice] of Object.entries(slices)) {
