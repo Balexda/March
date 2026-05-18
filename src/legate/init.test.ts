@@ -791,12 +791,14 @@ describe("legate module", () => {
       expect(parse("")).toBe(false);
     });
 
-    it("tryRecoverSpawnPatchError retries 3 times then escalates with a distinct counter key", async () => {
-      // Codex-side patch failures (truncation, malformed diff) are transient
-      // — re-running codex produces different output, usually correct on
-      // the next attempt. Verify the per-slice retry counter is stored under
-      // a "spawn-error:<sliceId>" key so it doesn't collide with the
-      // wrong-worktree-race counter.
+    it("tryRecoverSpawnPatchError retries up to limit times then escalates with a distinct counter key", async () => {
+      // Codex-side patch failures (truncation, malformed diff) are deeply
+      // non-deterministic — re-running codex produces different output, often
+      // correct on the next attempt. Limit is generous (10) because each
+      // retry is cheap (one codex container) and we'd rather burn compute
+      // than strand a slice that would've succeeded on attempt 7. Verify the
+      // counter is stored under "spawn-error:<sliceId>" so it doesn't
+      // collide with the wrong-worktree-race counter.
       const loop = fs.readFileSync(await stageLoop(makeTmpDir()), "utf-8");
       const recover = extractFn(
         loop,
@@ -807,12 +809,12 @@ describe("legate module", () => {
       const errorText = "git apply --index failed in manager worktree:\nerror: corrupt patch at /tmp/p.diff:42";
       const state: any = { slices: { s1: { hatchery: {} } } };
 
-      for (let i = 1; i <= 3; i++) {
+      for (let i = 1; i <= 10; i++) {
         const r = recover(state, state.slices.s1 || (state.slices.s1 = { hatchery: {} }), "s1", errorText);
         expect(r).toMatchObject({ recovered: true, verdict: "spawn-error-retry" });
         expect(state.transient_retry_counts["spawn-error:s1"]).toBe(i);
       }
-      // Fourth attempt → escalate, slice retained, counter cleared.
+      // Beyond limit → escalate, slice retained, counter cleared.
       state.slices.s1 = { hatchery: {} };
       const escalated = recover(state, state.slices.s1, "s1", errorText);
       expect(escalated).toMatchObject({ recovered: false, verdict: "spawn-error-persistent" });

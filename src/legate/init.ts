@@ -2776,7 +2776,12 @@ function parseSpawnPatchError(text) {
 
 function tryRecoverSpawnPatchError(state, slice, sliceId, errorText) {
   if (!parseSpawnPatchError(errorText)) return null;
-  const limit = 3;
+  // Codex patch errors are deeply non-deterministic — same prompt, different
+  // output each run. Give it a generous budget before declaring the artifact
+  // genuinely undispatchable. The cost of each retry is one codex container
+  // (~2-3 min), and we'd rather burn an hour of compute than strand a slice
+  // that would have succeeded on attempt 7.
+  const limit = 10;
   const counts = transientRetryCounts(state);
   const key = "spawn-error:" + sliceId;
   const prev = Number.isFinite(counts[key]) ? counts[key] : 0;
@@ -3004,10 +3009,15 @@ function completePendingHatcheryDispatches(state, ts) {
     // Stable handoff timestamp so stranded-steward detection can measure
     // elapsed time without being reset by subsequent markSliceAction calls.
     slice.implementing_started_at = ts;
-    // Clear the race-retry counter once the slice has cleanly transitioned
-    // to implementing — the upstream race no longer applies to this slice.
+    // Clear ALL transient retry counters for this slice — wrong-worktree
+    // race (keyed plain), spawn-error, stranded-leftover, runner-silent
+    // (each keyed as "<error>:<sliceId>"). The slice has cleanly transitioned
+    // to implementing, so any prior transient failures are no longer relevant.
     if (state.transient_retry_counts && typeof state.transient_retry_counts === "object") {
       delete state.transient_retry_counts[sliceId];
+      for (const k of Object.keys(state.transient_retry_counts)) {
+        if (k.endsWith(":" + sliceId)) delete state.transient_retry_counts[k];
+      }
     }
     actions.push({
       action: "dispatch-complete",
