@@ -354,7 +354,13 @@ describe("legate module", () => {
       expect(loop).toContain("dispatchSliceId(depItem)");
       expect(loop).toContain("function readyLayerNodeIds");
       expect(loop).toContain("readyLayerNodeIds(status)");
-      expect(loop).toContain('String(item.next_action?.command || "") === "smithy.forge" && !dependenciesClear');
+      // dependenciesClear used to gate forge dispatches behind row-level
+      // `depends_on` resolution, but it disagreed with smithy's own layer-0
+      // ready set when a row's depends_on referenced a tasks.md without a
+      // slice suffix. Trust smithy as the readiness authority; the loop
+      // dispatches every item in `readySmithyItems(status)` that isn't
+      // already in flight.
+      expect(loop).not.toContain("!dependenciesClear(state, status, item)");
       expect(loop).toContain("alreadyArchivedSlice(state, item, sliceId)");
       expect(loop).toContain('kind: "dispatch_failure"');
       expect(loop).toContain('kind: "dispatch_read_failure"');

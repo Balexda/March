@@ -2666,7 +2666,15 @@ function runDispatch(state, ts) {
   for (const item of ready) {
     const sliceId = dispatchSliceId(item);
     if (alreadyHasInFlightSlice(state, item, sliceId)) continue;
-    if (String(item.next_action?.command || "") === "smithy.forge" && !dependenciesClear(state, status, item)) continue;
+    // Trust smithy's readyLayerNodeIds filter as the authoritative "ready
+    // to work" set. The previous extra dependenciesClear gate disagreed
+    // with smithy on slice-level deps: a tasks.md row's depends_on would
+    // reference the bare tasks.md path while smithy's graph keys those
+    // nodes as path#S<n>, so graphNode returned null and the dep was
+    // conservatively treated as unresolved — even though smithy itself
+    // had already cleared the item to layer 0. Letting smithy own the
+    // readiness verdict matches the operator's "smithy status --graph"
+    // mental model and gets the loop to dispatch every layer-0 item.
 
     try {
       if (!synced) {
