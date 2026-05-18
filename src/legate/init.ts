@@ -2256,13 +2256,18 @@ function launchHatcheryDispatch(item, resultPath, logPath) {
 // codex spawn completes within a couple of minutes.
 const HATCHERY_PENDING_TIMEOUT_MS = 15 * 60 * 1000;
 
-// Pull the branch name out of a hatchery spawn error like
-//   "branch 'feature/smithy/forge/...' already exists"
+// Pull the branch name out of a hatchery spawn error. Git emits at least
+// two forms for the same underlying condition:
+//   "branch 'feature/...' already exists"            (git branch -b on an existing branch)
+//   "fatal: a branch named 'feature/...' already exists"  (git checkout -b / worktree add -b)
 // Returns null when the error isn't a branch collision so callers fall
 // through to the normal escalation path.
 function parseBranchCollisionError(text) {
-  const match = String(text || "").match(/branch '([^']+)' already exists/);
-  return match ? match[1] : null;
+  const s = String(text || "");
+  const named = s.match(/branch named '([^']+)' already exists/);
+  if (named) return named[1];
+  const direct = s.match(/branch '([^']+)' already exists/);
+  return direct ? direct[1] : null;
 }
 
 // Inspect a local branch enough to classify a collision: where its HEAD
@@ -2375,7 +2380,12 @@ function agentDeckSessionHoldsWorktree(worktreePath) {
     const list = agentDeckList();
     if (!Array.isArray(list)) return false;
     return list.some((session) => {
-      const path = String(session?.path || session?.worktree_path || "");
+      // Match the hatchery session parser's field-name precedence
+      // (src/hatchery/spawn-handoff.ts:parseAgentDeckSession) so we never
+      // refuse to recognize a live session because it exposes the
+      // worktree as a different key — e.g. older "path", current
+      // snake_case "worktree_path", or camelCase "worktreePath".
+      const path = String(session?.worktree_path || session?.path || session?.worktreePath || "");
       return path === worktreePath;
     });
   } catch {
