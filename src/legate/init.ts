@@ -2022,14 +2022,23 @@ function dependencyMerged(state, depId) {
   return false;
 }
 
-function itemFromGraphNode(node) {
+function itemFromGraphNode(status, node) {
   const recordPath = String(node?.record_path || "");
   const row = node?.row && typeof node.row === "object" ? node.row : {};
   const rowId = String(row.id || "").trim();
   const rowNumber = rowId.replace(/^[a-zA-Z]+/, "") || rowId;
+  // Look up the matching smithy status record so parent_path / parent_row_id
+  // are populated. Without these, dispatchSliceId(depItem) falls into the
+  // hash-based fallback and produces an ID that cannot match the semantic
+  // ID used when that dep was actually dispatched — leaving merged-archived
+  // deps invisible to dependencySatisfied.
+  const records = Array.isArray(status?.records) ? status.records : [];
+  const record = records.find((candidate) => candidate?.path === recordPath) || {};
   return {
     path: recordPath,
     title: row.title || recordPath,
+    parent_path: record.parent_path || null,
+    parent_row_id: record.parent_row_id || null,
     next_action: {
       command: "smithy.forge",
       arguments: [recordPath, rowNumber],
@@ -2041,7 +2050,7 @@ function dependencySatisfied(state, status, depId) {
   const node = graphNode(status, depId);
   const nodeStatus = String(node?.status || "").toLowerCase();
   if (nodeStatus === "done") return true;
-  const depItem = node ? itemFromGraphNode(node) : null;
+  const depItem = node ? itemFromGraphNode(status, node) : null;
   const candidates = [
     depId,
     depItem ? dispatchSliceId(depItem) : null,
