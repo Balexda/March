@@ -1,0 +1,135 @@
+---
+name: legate.unwedge
+description: "Mini-legate's skill for unwedging hatchery dispatch failures that left behind stale local branches or revealed partial-work scenarios. Use when the deterministic loop sends a [PROCESSOR] request with reason starting with 'hatchery_dispatch_failed' or 'branch-collision', or when state.json shows a slice escalated with last_action_note containing 'branch ... already exists'. Inspects the colliding branch, classifies the collision (orphan-ref, post-merge-stale, open-pr, diverged-unknown), and either cleans it autonomously or escalates with the verdict so the operator/agent can act."
+allowed-tools: Bash(.claude/skills/legate.unwedge/scripts/inspect-partial-work.sh:*) Bash(.claude/skills/legate.unwedge/scripts/clean-stale-branch.sh:*)
+---
+
+# Skill: legate.unwedge (hatchery branch-collision + partial-work recovery)
+
+The deterministic loop now auto-recovers the most common branch-collision failures (HEAD-on-default-branch orphan refs and post-merge stale refs with no open PR). For everything else — open PRs, diverged HEADs with no PR record, or the partial-work scenario where smithy keeps reporting a slice as ready even after its PR landed — the loop escalates here.
+
+Load via `Skill(skill="legate.unwedge")` before invoking any script. The classifier registers the allowed-tools for the rest of the session.
+
+---
+
+## Triggers
+
+Run this skill when any of these happen:
+
+- The loop sends `[PROCESSOR]` and the newest relevant request in `legate-loop-requests.ndjson` has `reason` starting with `hatchery_dispatch_failed` or `branch-collision`.
+- `state.json` shows a slice with `stage: "escalated"` and `last_action_note` containing `branch '<branch>' already exists`.
+- The operator asks you to investigate a stuck dispatch.
+
+Do **not** run this skill for normal CI failures, merge conflicts, or review comments. Those stay in `legate.babysit`.
+
+---
+
+## Inputs to read
+
+1. `state.json` — locate the escalated slice by id. `command` + `arguments` are the smithy invocation; `last_action_note` typically includes the loop's verdict + branch-state summary, and **the actual git branch (with the `feature/` prefix agent-deck adds) is parsed from `last_action_note` or the most recent `hatchery_dispatch_failed` processor request**. Prefer that branch when inspecting / cleaning; the slice's own `branch` field is the symbolic dispatch branch (e.g. `smithy/forge/...`) and will not match the real local ref you need to operate on.
+2. `~/.agent-deck/conductor/{{LOOP_NAME}}/legate-loop-requests.ndjson` — read the latest `hatchery_dispatch_failed` / `branch-collision-*` entry for the structured detail the loop already gathered.
+3. The colliding branch in `{{REPO_PATH}}` — never trust a stale verdict, re-run `inspect-partial-work.sh` if any time has elapsed.
+
+---
+
+## Classification
+
+The loop emits a verdict in the escalation detail (e.g. `branch-collision-open-pr`, `branch-collision-diverged-unknown`). Re-validate it with `inspect-partial-work.sh` before acting. Final classifications:
+
+- `orphan-ref` — branch HEAD is an ancestor of the default branch (no diverged work). Loop should have auto-recovered this; if you see it here, the loop's gh/git probe failed.
+- `post-merge-stale` — branch has merged PR(s) and no open PR, but HEAD isn't an ancestor of default (squash-merge). Loop should also have auto-recovered.
+- `open-pr` — branch has an open PR. Escalate to operator — do not delete.
+- `diverged-unknown` — branch has diverged HEAD with no PR record. Escalate.
+- `partial-work` — merged PR(s) exist AND `smithy status` still reports the slice's `next_action` as ready. The PR landed incomplete; the slice needs a corrective dispatch with a custom prompt addressing the gap. This skill cannot autonomously dispatch corrective work yet (tracked separately); escalate via `NEED:` with the specific gap.
+
+---
+
+## Recovery Actions
+
+### `orphan-ref` / `post-merge-stale`
+
+The loop should have handled these autonomously. If you reach this branch, it likely failed (gh auth, network, etc.). Run the cleanup manually:
+
+```bash
+.claude/skills/legate.unwedge/scripts/clean-stale-branch.sh \
+  "{{REPO_PATH}}" "<branch>" "~/.agent-deck/conductor/{{CONDUCTOR_NAME}}/state.json" "<slice-id>"
+```
+
+The script re-validates safety conditions before acting. If it exits non-zero with `refused`, do **not** retry — classify as `open-pr` or `diverged-unknown` instead.
+
+Record in `task-log.md`:
+
+```markdown
+## YYYY-MM-DD HH:MM — Hatchery branch unwedge
+- <slice-id> branch=<branch> verdict=<verdict>; cleared. Loop will re-dispatch.
+```
+
+Reply `[STATUS]` with the slice id + verdict + "cleared for re-dispatch".
+
+### `open-pr`
+
+Do not delete. Reply:
+
+```text
+NEED: Hatchery dispatch for <slice-id> blocked by existing branch <branch> with open PR #<n> (<url>). Either land or close that PR before the loop can re-dispatch this slice. Operator action required.
+```
+
+### `diverged-unknown`
+
+Do not delete. Run `inspect-partial-work.sh` to capture the divergence (last 5 commits, etc.) and include the report in the NEED:
+
+```text
+NEED: Hatchery dispatch for <slice-id> blocked by existing branch <branch>. HEAD has diverged from <default> with no PR record. Inspection below — operator decide whether to delete or salvage.
+
+<paste inspect-partial-work.sh output>
+```
+
+### `partial-work`
+
+Run `inspect-partial-work.sh` to capture the merged-PR body + diff stat, then read `smithy status --format json` for the slice's parent record to identify what's still expected. Reply:
+
+```text
+NEED: Slice <slice-id> shows partial-work signature. Merged PR(s): #<n> (<url>). Smithy still reports next_action=<command> args=<args>. Gap (best-effort summary based on merged-PR diff vs. expected scope):
+- <gap line 1>
+- <gap line 2>
+
+Recommended corrective scope:
+- <correction line 1>
+- <correction line 2>
+
+Autonomous corrective dispatch is not yet implemented (see march issue #<n>). Operator decide: re-dispatch same scope (run clean-stale-branch.sh and let loop retry — likely produces the same partial result), or compose a corrective prompt and spawn manually via `march hatchery spawn`.
+```
+
+---
+
+## State Updates
+
+After any recovery action, update the slice (only if it still exists in `state.slices`):
+
+- `worker_error_handled_at = <ISO-8601 now>`
+- `worker_error_resolution` = one of `cleaned-orphan-ref`, `cleaned-post-merge-stale`, `escalated-open-pr`, `escalated-diverged-unknown`, `escalated-partial-work`
+- `last_action = <ISO-8601 now>`
+- `last_action_note = "legate.unwedge: <verdict> — <action taken>"`
+
+Note that `clean-stale-branch.sh` deletes the slice on success; in that case there's nothing to update.
+
+Append a short `task-log.md` entry as shown above.
+
+---
+
+## Operation Reference
+
+| Operation | Script | Notes |
+|---|---|---|
+| Inspect partial-work / branch collision | `inspect-partial-work.sh <repo-path> <branch>` | Read-only. Prints HEAD, ancestry, PR list, merged-PR body + diff stat. |
+| Clean stale branch + clear slice | `clean-stale-branch.sh <repo-path> <branch> <state.json> <slice-id>` | Refuses unless verdict is orphan-ref or post-merge-stale. Atomic state.json write. |
+
+---
+
+## Safety Rules
+
+- Never delete a branch that has any open PR, regardless of what the loop's escalation detail says. Re-validate every time.
+- Never edit `state.json` by hand. Use `clean-stale-branch.sh` (atomic rename) or escalate.
+- Never `git push --delete` the remote branch from this skill — only delete local refs. Remote branches associated with merged PRs should be cleaned up by the PR-cleanup flow, not here.
+- If `clean-stale-branch.sh` exits non-zero, do **not** retry. Read the stderr verdict and escalate.
+- For `partial-work`, do **not** attempt to manually re-dispatch via `agent-deck session send` or by editing `state.json`. Spawn would go through `march hatchery spawn` and that's outside this skill's scope today.

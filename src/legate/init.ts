@@ -381,6 +381,7 @@ export const LEGATE_SKILLS = [
   "legate.babysit",
   "legate.merge",
   "legate.issue",
+  "legate.unwedge",
 ] as const;
 export type LegateSkillName = (typeof LEGATE_SKILLS)[number];
 
@@ -2183,26 +2184,35 @@ function hatcheryRunnerCode() {
   // literal. Using only two backslashes used to insert a real newline mid
   // string literal, producing a SyntaxError that silently killed every
   // hatchery spawn.
+  // resultPath and logPath come in as their own argv entries (argv[2], argv[3])
+  // so the crash guard has somewhere to write even when the request file
+  // itself fails to read or parse. If we relied on request.resultPath
+  // alone, a malformed/truncated request would leave request = null and
+  // the catch block would have no path to fall back to, stranding the slice
+  // in hatchery-pending until the 15-min stale timeout fires.
   return [
     'const { spawnSync } = require("node:child_process");',
     'const fs = require("node:fs");',
+    'const requestPath = process.argv[1];',
+    'const resultPath = process.argv[2];',
+    'const logPath = process.argv[3];',
     'let request = null;',
     'try {',
-    '  request = JSON.parse(fs.readFileSync(process.argv[1], "utf-8"));',
+    '  request = JSON.parse(fs.readFileSync(requestPath, "utf-8"));',
     '  const result = spawnSync(request.command, request.args, { cwd: request.cwd, encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"] });',
-    '  if (result.stderr) { try { fs.appendFileSync(request.logPath, result.stderr); } catch {} }',
+    '  if (result.stderr) { try { fs.appendFileSync(logPath, result.stderr); } catch {} }',
     '  if (result.status === 0) {',
-    '    fs.writeFileSync(request.resultPath, result.stdout || "", "utf-8");',
+    '    fs.writeFileSync(resultPath, result.stdout || "", "utf-8");',
     '  } else {',
-    '    fs.writeFileSync(request.resultPath, JSON.stringify({ error: result.stderr || result.error?.message || "hatchery spawn failed", exitCode: result.status ?? null }) + "\\\\n", "utf-8");',
+    '    fs.writeFileSync(resultPath, JSON.stringify({ error: result.stderr || result.error?.message || "hatchery spawn failed", exitCode: result.status ?? null }) + "\\\\n", "utf-8");',
     '  }',
     '} catch (err) {',
     '  const message = (err && err.stack) ? err.stack : String(err);',
     '  try {',
-    '    if (request && request.resultPath) {',
-    '      fs.writeFileSync(request.resultPath, JSON.stringify({ error: "hatchery runner crashed: " + message, exitCode: null }) + "\\\\n", "utf-8");',
+    '    if (resultPath) {',
+    '      fs.writeFileSync(resultPath, JSON.stringify({ error: "hatchery runner crashed: " + message, exitCode: null }) + "\\\\n", "utf-8");',
     '    }',
-    '    if (request && request.logPath) { fs.appendFileSync(request.logPath, "runner crash: " + message + "\\\\n"); }',
+    '    if (logPath) { fs.appendFileSync(logPath, "runner crash: " + message + "\\\\n"); }',
     '  } catch {}',
     '  process.exit(1);',
     '}',
@@ -2250,7 +2260,7 @@ function launchHatcheryDispatch(item, resultPath, logPath) {
     resultPath,
     logPath,
   }) + "\\n", "utf-8");
-  const child = spawn(process.execPath, ["-e", hatcheryRunnerCode(), requestPath], {
+  const child = spawn(process.execPath, ["-e", hatcheryRunnerCode(), requestPath, resultPath, logPath], {
     cwd: repoPath,
     detached: true,
     stdio: ["ignore", "ignore", "ignore"],
@@ -2300,22 +2310,32 @@ function inspectCollidedBranch(repoPath, defaultBranch, branchName) {
     }
   }
   let prs = [];
+  let prsKnown = true;
   try {
     const out = execText("gh", ["pr", "list", "--head", branchName, "--state", "all", "--json", "number,state"], { cwd: repoPath });
     prs = JSON.parse(out);
     if (!Array.isArray(prs)) prs = [];
   } catch {
-    // gh failures (auth, network) leave prs empty; verdict falls through to
-    // diverged-unknown which escalates rather than silently delete.
+    // gh failures (auth, network) mean we cannot prove that no open PR
+    // exists. Track that explicitly so classifyBranchCollision refuses
+    // the autoSafe verdicts — otherwise an ancestor-of-master branch
+    // would auto-delete without the open-PR check actually succeeding.
     prs = [];
+    prsKnown = false;
   }
-  return { head, isAncestor, prs };
+  return { head, isAncestor, prs, prsKnown };
 }
 
 function classifyBranchCollision(info) {
   if (!info) return { verdict: "no-such-branch", autoSafe: false };
   const open = info.prs.filter((p) => p && p.state === "OPEN");
   const merged = info.prs.filter((p) => p && p.state === "MERGED");
+  // If we couldn't verify the PR list, refuse the autoSafe verdicts —
+  // an ancestor-of-master branch might still have an open PR we can't
+  // see. Escalate so the operator or agent can investigate.
+  if (info.prsKnown === false) {
+    return { verdict: "pr-lookup-unknown", autoSafe: false, open, merged };
+  }
   if (open.length > 0) {
     return { verdict: "open-pr", autoSafe: false, open, merged };
   }
@@ -2477,7 +2497,7 @@ function completePendingHatcheryDispatches(state, ts) {
     notifications.push({
       slice, sliceId, requestKey: key,
       reason: "hatchery_dispatch_failed",
-      detail: "Hatchery dispatch for " + actionCommandLine({ command: slice.command, arguments: slice.arguments || [] }) + " escalated: " + reason + ".\\n\\nError:\\n" + String(error || "(no detail)").trim() + "\\n\\nSlice has been marked escalated in state.json. The loop auto-recovers orphan-ref and post-merge-stale branch collisions; anything with an open PR or unknown divergence reaches here for operator inspection. Otherwise run legate.error for worker-side recovery.",
+      detail: "Hatchery dispatch for " + actionCommandLine({ command: slice.command, arguments: slice.arguments || [] }) + " escalated: " + reason + ".\\n\\nError:\\n" + String(error || "(no detail)").trim() + "\\n\\nSlice has been marked escalated in state.json. If reason is 'spawn-error' with 'branch ... already exists' or any 'branch-collision-*' verdict, load legate.unwedge and run inspect-partial-work.sh / clean-stale-branch.sh — the loop auto-recovers orphan-ref and post-merge-stale cases, but anything with an open PR or unknown divergence reaches here for operator inspection. Otherwise run legate.error for worker-side recovery.",
     });
   };
   const escalateStale = (slice, sliceId, reason) => {
@@ -2700,7 +2720,7 @@ function runDispatch(state, ts) {
           ts, slice: existing, sliceId,
           requestKey: "hatchery-failure:" + sliceId + ":launch-throw:" + hashText(error).slice(0, 12),
           reason: "hatchery_dispatch_failed",
-          detail: "Hatchery dispatch launch threw for " + actionCommandLine(item.next_action) + ".\\n\\nError:\\n" + error + "\\n\\nSlice is escalated in state.json; inspect with legate.error.",
+          detail: "Hatchery dispatch launch threw for " + actionCommandLine(item.next_action) + ".\\n\\nError:\\n" + error + "\\n\\nSlice is escalated in state.json. For 'branch already exists' surface this via legate.unwedge; otherwise legate.error.",
         });
       }
       failures.push({ slice_id: sliceId, command: actionCommandLine(item.next_action), error });
@@ -3516,15 +3536,16 @@ What you operate on:
 - gh CLI — source of truth for high-level PR state.
 - The smithy.pr-review skill — source of truth for unresolved inline review threads.
 
-Five skills carry the Claude-side mechanics. Load each once on this turn so the auto-mode classifier registers their allowed-tools:
+Six skills carry the Claude-side mechanics. Load each once on this turn so the auto-mode classifier registers their allowed-tools:
 - legate.resume — worker session-restart recovery and Resume-from-summary picker clearing.
 - legate.error — opaque worker error recovery via inspection, login escalation, restart, or diagnostic prompt.
 - legate.babysit — PR judgement escalations from the deterministic loop (CI classification, repeated conflicts, send failures).
 - legate.merge — strict-gate auto-squash-merge.
 - legate.issue — operator-driven GitHub issue intake.
+- legate.unwedge — hatchery branch-collision + partial-work recovery (loop auto-recovers the safe cases; this skill handles open-PR / diverged-unknown / partial-work).
 
 Auto-mode alignment — your routine actions are exactly:
-(a) Skill() to load one of the five skills above;
+(a) Skill() to load one of the six skills above;
 (b) bash invocation of a script under .claude/skills/legate.*/scripts/;
 (c) Read of state.json, task-log.md, LEARNINGS.md, POLICY.md, CLAUDE.md, meta.json, legate-loop logs/requests, or */SKILL.md inside this conductor dir;
 (d) a [STATUS] or NEED: reply to a loop escalation or operator message.
@@ -3535,8 +3556,8 @@ Anything else escalates via NEED: rather than executing — inline python3 -c / 
 
 On this turn:
 1. Read CLAUDE.md end-to-end.
-2. Run its cold-start checklist (read state.json if present; load legate.resume, legate.error, legate.babysit, legate.merge, and legate.issue once via the Skill tool). Do not edit state.json or task-log.md on cold start.
-3. Reply with the cold-start acknowledgement: "Online for {REPO_NAME} ({PROFILE}). Skills available: legate.resume, legate.error, legate.babysit, legate.merge, legate.issue. Will not invoke anything outside their scripts without escalating."
+2. Run its cold-start checklist (read state.json if present; load legate.resume, legate.error, legate.babysit, legate.merge, legate.issue, and legate.unwedge once via the Skill tool). Do not edit state.json or task-log.md on cold start.
+3. Reply with the cold-start acknowledgement: "Online for {REPO_NAME} ({PROFILE}). Skills available: legate.resume, legate.error, legate.babysit, legate.merge, legate.issue, legate.unwedge. Will not invoke anything outside their scripts without escalating."
 4. Wait for a [PROCESSOR] loop escalation or operator message. Do not poll on your own.`;
 
 /**

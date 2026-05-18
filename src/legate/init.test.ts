@@ -479,11 +479,36 @@ describe("legate module", () => {
           logPath,
         }),
       );
-      execFileSync(process.execPath, ["-e", hatcheryRunnerCode(), requestPath], { stdio: "pipe" });
+      execFileSync(process.execPath, ["-e", hatcheryRunnerCode(), requestPath, resultPath, logPath], { stdio: "pipe" });
       const result = JSON.parse(fs.readFileSync(resultPath, "utf-8"));
       expect(result.exitCode).toBe(7);
       expect(String(result.error)).toContain("boom");
       expect(fs.readFileSync(logPath, "utf-8")).toContain("boom");
+    });
+
+    it("generated hatchery runner writes a crash result when the request file is malformed", async () => {
+      // Regression guard: previously the crash branch only wrote when
+      // `request` had parsed successfully (which exposed request.resultPath).
+      // A malformed request file left request = null, the catch block had no
+      // path to write to, and the slice sat in hatchery-pending until the
+      // 15-min stale timeout fired. Now resultPath/logPath come in as
+      // separate argv entries so the crash guard can always write.
+      const home = makeTmpDir();
+      const loop = fs.readFileSync(await stageLoop(home), "utf-8");
+      const hatcheryRunnerCode = extractFn(loop, "hatcheryRunnerCode") as () => string;
+      const requestPath = path.join(home, "bad-req.json");
+      const resultPath = path.join(home, "result.json");
+      const logPath = path.join(home, "result.log");
+      fs.writeFileSync(requestPath, "not valid json{{{");
+      try {
+        execFileSync(process.execPath, ["-e", hatcheryRunnerCode(), requestPath, resultPath, logPath], { stdio: "pipe" });
+      } catch {
+        // runner exits 1 on crash; that's fine, we just need the result file.
+      }
+      const result = JSON.parse(fs.readFileSync(resultPath, "utf-8"));
+      expect(String(result.error)).toContain("hatchery runner crashed:");
+      expect(result.exitCode).toBeNull();
+      expect(fs.readFileSync(logPath, "utf-8")).toContain("runner crash:");
     });
 
     it("isStubArchivedSlice distinguishes legacy stubs from real archive entries", async () => {
@@ -583,16 +608,48 @@ describe("legate module", () => {
       const classify = extractFn(loop, "classifyBranchCollision") as (info: unknown) => { verdict: string; autoSafe: boolean };
 
       // HEAD already on default branch => orphan ref, no diverged work
-      expect(classify({ head: "abc", isAncestor: true, prs: [] })).toMatchObject({ verdict: "orphan-ref", autoSafe: true });
+      expect(classify({ head: "abc", isAncestor: true, prs: [], prsKnown: true })).toMatchObject({ verdict: "orphan-ref", autoSafe: true });
       // Merged PR + no open PR + diverged HEAD (squash-merge case)
-      expect(classify({ head: "abc", isAncestor: false, prs: [{ number: 1, state: "MERGED" }] })).toMatchObject({ verdict: "post-merge-stale", autoSafe: true });
+      expect(classify({ head: "abc", isAncestor: false, prs: [{ number: 1, state: "MERGED" }], prsKnown: true })).toMatchObject({ verdict: "post-merge-stale", autoSafe: true });
       // Open PR — must escalate even if also merged
-      expect(classify({ head: "abc", isAncestor: false, prs: [{ number: 1, state: "OPEN" }, { number: 2, state: "MERGED" }] })).toMatchObject({ verdict: "open-pr", autoSafe: false });
-      expect(classify({ head: "abc", isAncestor: true, prs: [{ number: 1, state: "OPEN" }] })).toMatchObject({ verdict: "open-pr", autoSafe: false });
+      expect(classify({ head: "abc", isAncestor: false, prs: [{ number: 1, state: "OPEN" }, { number: 2, state: "MERGED" }], prsKnown: true })).toMatchObject({ verdict: "open-pr", autoSafe: false });
+      expect(classify({ head: "abc", isAncestor: true, prs: [{ number: 1, state: "OPEN" }], prsKnown: true })).toMatchObject({ verdict: "open-pr", autoSafe: false });
       // Diverged HEAD + no PR data — unknown work, escalate
-      expect(classify({ head: "abc", isAncestor: false, prs: [] })).toMatchObject({ verdict: "diverged-unknown", autoSafe: false });
+      expect(classify({ head: "abc", isAncestor: false, prs: [], prsKnown: true })).toMatchObject({ verdict: "diverged-unknown", autoSafe: false });
       // Null info (branch already gone) — nothing to recover
       expect(classify(null)).toMatchObject({ verdict: "no-such-branch", autoSafe: false });
+      // gh pr list failed — cannot prove there's no open PR, must refuse
+      // autoSafe even for an ancestor-of-master branch.
+      expect(classify({ head: "abc", isAncestor: true, prs: [], prsKnown: false })).toMatchObject({ verdict: "pr-lookup-unknown", autoSafe: false });
+      expect(classify({ head: "abc", isAncestor: false, prs: [], prsKnown: false })).toMatchObject({ verdict: "pr-lookup-unknown", autoSafe: false });
+    });
+
+    it("stages legate.unwedge skill with inspect + clean-stale scripts", async () => {
+      // Regression guard: adding legate.unwedge to LEGATE_SKILLS is necessary
+      // but not sufficient — the skill template directory has to exist and
+      // ship both scripts, executable. Without this the deploy silently
+      // skips the new skill.
+      //
+      // Use the real src/templates/legate dir (not the synthetic test
+      // fixture) so we exercise the actual scripts shipped in the repo.
+      const home = makeTmpDir();
+      const result = await initLegate({
+        repoPath: "/some/repo/March",
+        homeDir: home,
+        runSetup: false,
+      });
+      const unwedge = result.skills.find((s) => s.name === "legate.unwedge");
+      expect(unwedge).toBeDefined();
+      expect(fs.existsSync(path.join(unwedge!.stagedDir, "SKILL.md"))).toBe(true);
+      const inspect = path.join(unwedge!.stagedDir, "scripts", "inspect-partial-work.sh");
+      const clean = path.join(unwedge!.stagedDir, "scripts", "clean-stale-branch.sh");
+      expect(fs.existsSync(inspect)).toBe(true);
+      expect(fs.existsSync(clean)).toBe(true);
+      expect(fs.statSync(inspect).mode & 0o111).not.toBe(0);
+      expect(fs.statSync(clean).mode & 0o111).not.toBe(0);
+      const skillBody = fs.readFileSync(path.join(unwedge!.stagedDir, "SKILL.md"), "utf-8");
+      expect(skillBody).toContain("inspect-partial-work.sh");
+      expect(skillBody).toContain("clean-stale-branch.sh");
     });
 
     it("hatchery escalations notify the legate agent via processor_requests", async () => {
@@ -1823,7 +1880,7 @@ describe("legate module", () => {
       expect(prompt).toMatch(/On this turn:/);
       expect(prompt).toMatch(/cold-start acknowledgement/);
       expect(prompt).toMatch(
-        /Online for March \(march\)\. Skills available: legate\.resume, legate\.error, legate\.babysit, legate\.merge, legate\.issue\./,
+        /Online for March \(march\)\. Skills available: legate\.resume, legate\.error, legate\.babysit, legate\.merge, legate\.issue, legate\.unwedge\./,
       );
       expect(prompt).toMatch(
         /Wait for a \[PROCESSOR\] loop escalation or operator message/,
