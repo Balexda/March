@@ -1809,14 +1809,68 @@ function sliceActionKey(slice) {
   });
 }
 
-function dispatchSliceId(item) {
+// Strip a known artifact suffix from a basename so the leftover is a short,
+// readable spec / RFC / features-file slug. Returns null if the suffix isn't
+// recognized so we can fall back to the hash-based name rather than misderive.
+function dispatchArtifactSlug(filename) {
+  if (typeof filename !== "string" || filename.length === 0) return null;
+  const base = filename.split("/").pop() || "";
+  const m = base.match(/^(.+?)\\.(?:spec|rfc|features|tasks)\\.md$/);
+  return m ? m[1] : null;
+}
+
+// Derive a structured identity (spec/RFC slug + US/M row + slice/feature/
+// milestone index) for a smithy status record. Produces a short, semantic
+// stem that mirrors how operators already hand-name slices ("us6-s1",
+// "spawn-dispatch-us7"). Returns the legacy hash-based stem only when the
+// record lacks the structure to derive a meaningful name — in that case
+// behavior is identical to the pre-refactor scheme.
+//
+// Branch / slice ID collisions are intentional under this scheme: the same
+// spec + US + slice yields the same name on every dispatch, so a collision
+// means "this is a re-attempt of the same logical work", which is exactly
+// what the loop's branch-collision recovery wants to surface (vs. an opaque
+// hash that hides whether the collision is meaningful).
+function dispatchIdentity(item) {
   const action = item?.next_action || {};
   const verb = smithyVerb(action.command);
   const args = actionArguments(action);
+  const parentSlug = dispatchArtifactSlug(item?.parent_path);
+  const row = String(item?.parent_row_id || "").trim().toLowerCase();
+  const numericTail = (s) => String(s || "").replace(/[^0-9]/g, "");
+  let stem = null;
+  if (verb === "forge" && parentSlug && row) {
+    const slice = numericTail(args[1]);
+    stem = parentSlug + "-" + row + (slice ? "-s" + slice : "");
+  } else if (verb === "cut" && parentSlug && row) {
+    const slice = numericTail(args[1]);
+    stem = parentSlug + "-" + row + (slice ? "-s" + slice : "");
+  } else if (verb === "mark" && parentSlug && row) {
+    const feature = numericTail(args[1]);
+    stem = parentSlug + "-" + row + (feature ? "-f" + feature : "");
+  } else if (verb === "render") {
+    const rfcSlug = dispatchArtifactSlug(args[0]) || parentSlug;
+    const milestone = numericTail(args[1]);
+    if (rfcSlug && milestone) stem = rfcSlug + "-m" + milestone;
+  }
+  if (stem) {
+    return { stem: slugifyDispatchPart(stem, "smithy"), verb, hash: null, semantic: true };
+  }
+  // Fallback: original hash-based scheme. Keeps dispatch working for records
+  // without parent_path / parent_row_id structure. Order is preserved
+  // exactly so existing state.json / archive entries keyed by the legacy
+  // ID continue to match: dispatchSliceId is "<stem>-<verb>-<hash>",
+  // dispatchBranch is "smithy/<verb>/<stem>-<hash>".
   const basis = [item?.path || item?.title || "smithy", ...args].join(" ");
-  const stem = slugifyDispatchPart(basis, "smithy").slice(0, 44);
+  const truncStem = slugifyDispatchPart(basis, "smithy").slice(0, 44);
   const hash = hashText(dispatchItemKey(item)).slice(0, 8);
-  return stem + "-" + slugifyDispatchPart(verb, "step") + "-" + hash;
+  return { stem: truncStem, verb, hash, semantic: false };
+}
+
+function dispatchSliceId(item) {
+  const { stem, verb, hash, semantic } = dispatchIdentity(item);
+  const verbSlug = slugifyDispatchPart(verb, "step");
+  return semantic ? stem + "-" + verbSlug : stem + "-" + verbSlug + "-" + hash;
 }
 
 function dispatchTitle(item) {
@@ -1827,11 +1881,11 @@ function dispatchTitle(item) {
 }
 
 function dispatchBranch(item) {
-  const action = item?.next_action || {};
-  const verb = slugifyDispatchPart(smithyVerb(action.command), "step");
-  const stem = slugifyDispatchPart([item?.title || item?.path || "work", ...actionArguments(action)].join(" "), "work").slice(0, 44);
-  const hash = hashText(dispatchItemKey(item)).slice(0, 8);
-  return "smithy/" + verb + "/" + stem + "-" + hash;
+  const { stem, verb, hash, semantic } = dispatchIdentity(item);
+  const verbSlug = slugifyDispatchPart(verb, "step");
+  return semantic
+    ? "smithy/" + verbSlug + "/" + stem
+    : "smithy/" + verbSlug + "/" + stem + "-" + hash;
 }
 
 function isTerminalSlice(slice) {
@@ -1841,15 +1895,42 @@ function isTerminalSlice(slice) {
   return false;
 }
 
+// Dedup helper for new-dispatch suppression. Stricter than isTerminalSlice:
+// only a successfully merged slice means the artifact is "done" and a fresh
+// dispatch is safe. Escalated / closed-unmerged slices are still load-bearing
+// — they represent unresolved blockers that an operator must clear, and the
+// loop must not silently re-queue the same artifact behind their back.
+function sliceReleasesArtifact(slice) {
+  if (!slice || typeof slice !== "object") return false;
+  if (slice.stage === "merged") return true;
+  if (slice.pr?.state === "MERGED") return true;
+  return false;
+}
+
 function archivedSlices(state) {
   return state?.archived_slices && typeof state.archived_slices === "object"
     ? state.archived_slices
     : {};
 }
 
+// A stub archive entry has no command, no args, and no branch — usually a
+// leftover from an older state-schema migration. dispatchSliceId is
+// deterministic from the item path, so a stub's persisted key collides
+// with the SID of any freshly-computed ready item on the same path, even
+// when no real work was ever recorded for it. Treat stubs as "no info"
+// and fall back to the stronger action_key / branch matchers so we don't
+// silently block fresh dispatches behind ghost archives.
+function isStubArchivedSlice(slice) {
+  if (!slice || typeof slice !== "object") return true;
+  const hasCommand = typeof slice.command === "string" && slice.command.length > 0;
+  const hasBranch = (typeof slice.branch === "string" && slice.branch.length > 0)
+    || (typeof slice.actual_branch === "string" && slice.actual_branch.length > 0);
+  return !hasCommand && !hasBranch;
+}
+
 function alreadyArchivedSlice(state, item, sliceId) {
   const archived = archivedSlices(state);
-  if (Object.prototype.hasOwnProperty.call(archived, sliceId)) return true;
+  if (Object.prototype.hasOwnProperty.call(archived, sliceId) && !isStubArchivedSlice(archived[sliceId])) return true;
   const key = dispatchItemKey(item);
   const branch = dispatchBranch(item);
   for (const slice of Object.values(archived)) {
@@ -1867,7 +1948,8 @@ function alreadyHasInFlightSlice(state, item, sliceId) {
   const key = dispatchItemKey(item);
   for (const [existingId, slice] of Object.entries(slices)) {
     if (existingId === sliceId) return true;
-    if (!slice || typeof slice !== "object" || isTerminalSlice(slice)) continue;
+    if (!slice || typeof slice !== "object") continue;
+    if (sliceReleasesArtifact(slice)) continue;
     if (sliceActionKey(slice) === key) return true;
     if (slice.branch && slice.branch === dispatchBranch(item)) return true;
   }
@@ -1940,14 +2022,23 @@ function dependencyMerged(state, depId) {
   return false;
 }
 
-function itemFromGraphNode(node) {
+function itemFromGraphNode(status, node) {
   const recordPath = String(node?.record_path || "");
   const row = node?.row && typeof node.row === "object" ? node.row : {};
   const rowId = String(row.id || "").trim();
   const rowNumber = rowId.replace(/^[a-zA-Z]+/, "") || rowId;
+  // Look up the matching smithy status record so parent_path / parent_row_id
+  // are populated. Without these, dispatchSliceId(depItem) falls into the
+  // hash-based fallback and produces an ID that cannot match the semantic
+  // ID used when that dep was actually dispatched — leaving merged-archived
+  // deps invisible to dependencySatisfied.
+  const records = Array.isArray(status?.records) ? status.records : [];
+  const record = records.find((candidate) => candidate?.path === recordPath) || {};
   return {
     path: recordPath,
     title: row.title || recordPath,
+    parent_path: record.parent_path || null,
+    parent_row_id: record.parent_row_id || null,
     next_action: {
       command: "smithy.forge",
       arguments: [recordPath, rowNumber],
@@ -1959,7 +2050,7 @@ function dependencySatisfied(state, status, depId) {
   const node = graphNode(status, depId);
   const nodeStatus = String(node?.status || "").toLowerCase();
   if (nodeStatus === "done") return true;
-  const depItem = node ? itemFromGraphNode(node) : null;
+  const depItem = node ? itemFromGraphNode(status, node) : null;
   const candidates = [
     depId,
     depItem ? dispatchSliceId(depItem) : null,
@@ -2077,16 +2168,43 @@ function hatcheryRequestPath(sliceId) {
 }
 
 function hatcheryRunnerCode() {
+  // Wrapped in try/catch so any runner-side crash (bad request file, missing
+  // command, spawnSync throw, fs error) still produces a result file. Without
+  // this, a crashed runner leaves the slice stuck in hatchery-pending forever
+  // because completePendingHatcheryDispatches only acts when the result file
+  // appears.
+  //
+  // Escape carefully: this code lives inside a TEMPLATE LITERAL that becomes
+  // the deployed legate-loop.mjs. Anywhere we need a backslash-n in the
+  // runner SOURCE we're handing to \`node -e\`, we must write four
+  // backslashes here: template eval collapses \\\\n -> \\n, then the
+  // deployed .mjs evaluates \\n -> \\n (2 chars) inside the array element,
+  // which finally evaluates to a real \\n inside the runner's "..." string
+  // literal. Using only two backslashes used to insert a real newline mid
+  // string literal, producing a SyntaxError that silently killed every
+  // hatchery spawn.
   return [
     'const { spawnSync } = require("node:child_process");',
     'const fs = require("node:fs");',
-    'const request = JSON.parse(fs.readFileSync(process.argv[1], "utf-8"));',
-    'const result = spawnSync(request.command, request.args, { cwd: request.cwd, encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"] });',
-    'if (result.stderr) fs.appendFileSync(request.logPath, result.stderr);',
-    'if (result.status === 0) {',
-    '  fs.writeFileSync(request.resultPath, result.stdout || "", "utf-8");',
-    '} else {',
-    '  fs.writeFileSync(request.resultPath, JSON.stringify({ error: result.stderr || result.error?.message || "hatchery spawn failed", exitCode: result.status ?? null }) + "\\n", "utf-8");',
+    'let request = null;',
+    'try {',
+    '  request = JSON.parse(fs.readFileSync(process.argv[1], "utf-8"));',
+    '  const result = spawnSync(request.command, request.args, { cwd: request.cwd, encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"] });',
+    '  if (result.stderr) { try { fs.appendFileSync(request.logPath, result.stderr); } catch {} }',
+    '  if (result.status === 0) {',
+    '    fs.writeFileSync(request.resultPath, result.stdout || "", "utf-8");',
+    '  } else {',
+    '    fs.writeFileSync(request.resultPath, JSON.stringify({ error: result.stderr || result.error?.message || "hatchery spawn failed", exitCode: result.status ?? null }) + "\\\\n", "utf-8");',
+    '  }',
+    '} catch (err) {',
+    '  const message = (err && err.stack) ? err.stack : String(err);',
+    '  try {',
+    '    if (request && request.resultPath) {',
+    '      fs.writeFileSync(request.resultPath, JSON.stringify({ error: "hatchery runner crashed: " + message, exitCode: null }) + "\\\\n", "utf-8");',
+    '    }',
+    '    if (request && request.logPath) { fs.appendFileSync(request.logPath, "runner crash: " + message + "\\\\n"); }',
+    '  } catch {}',
+    '  process.exit(1);',
     '}',
   ].join("\\n");
 }
@@ -2141,11 +2259,240 @@ function launchHatcheryDispatch(item, resultPath, logPath) {
   return { pid: child.pid || null, requestPath };
 }
 
+// If the hatchery runner dies before writing its result file, the slice would
+// otherwise sit in hatchery-pending forever. After this many ms with no result,
+// escalate so an operator can investigate. 15 minutes is generous — a healthy
+// codex spawn completes within a couple of minutes.
+const HATCHERY_PENDING_TIMEOUT_MS = 15 * 60 * 1000;
+
+// Pull the branch name out of a hatchery spawn error. Git emits at least
+// two forms for the same underlying condition:
+//   "branch 'feature/...' already exists"            (git branch -b on an existing branch)
+//   "fatal: a branch named 'feature/...' already exists"  (git checkout -b / worktree add -b)
+// Returns null when the error isn't a branch collision so callers fall
+// through to the normal escalation path.
+function parseBranchCollisionError(text) {
+  const s = String(text || "");
+  const named = s.match(/branch named '([^']+)' already exists/);
+  if (named) return named[1];
+  const direct = s.match(/branch '([^']+)' already exists/);
+  return direct ? direct[1] : null;
+}
+
+// Inspect a local branch enough to classify a collision: where its HEAD
+// sits, whether the work already landed on the default branch, and what
+// PRs exist for it. All read-only — caller decides whether to act.
+function inspectCollidedBranch(repoPath, defaultBranch, branchName) {
+  let head = null;
+  try {
+    head = execText("git", ["rev-parse", branchName], { cwd: repoPath }).trim();
+  } catch {
+    // branch doesn't exist locally anymore — nothing to recover.
+    return null;
+  }
+  let isAncestor = false;
+  if (defaultBranch) {
+    try {
+      execText("git", ["merge-base", "--is-ancestor", branchName, defaultBranch], { cwd: repoPath });
+      isAncestor = true;
+    } catch {
+      isAncestor = false;
+    }
+  }
+  let prs = [];
+  try {
+    const out = execText("gh", ["pr", "list", "--head", branchName, "--state", "all", "--json", "number,state"], { cwd: repoPath });
+    prs = JSON.parse(out);
+    if (!Array.isArray(prs)) prs = [];
+  } catch {
+    // gh failures (auth, network) leave prs empty; verdict falls through to
+    // diverged-unknown which escalates rather than silently delete.
+    prs = [];
+  }
+  return { head, isAncestor, prs };
+}
+
+function classifyBranchCollision(info) {
+  if (!info) return { verdict: "no-such-branch", autoSafe: false };
+  const open = info.prs.filter((p) => p && p.state === "OPEN");
+  const merged = info.prs.filter((p) => p && p.state === "MERGED");
+  if (open.length > 0) {
+    return { verdict: "open-pr", autoSafe: false, open, merged };
+  }
+  if (info.isAncestor) {
+    // Branch HEAD is already an ancestor of the default branch — there's no
+    // diverged work to lose. Safe to delete.
+    return { verdict: "orphan-ref", autoSafe: true, open, merged };
+  }
+  if (merged.length > 0) {
+    // PR was squash-merged so HEAD isn't an ancestor, but the work landed.
+    // Safe to delete the stale ref.
+    return { verdict: "post-merge-stale", autoSafe: true, open, merged };
+  }
+  return { verdict: "diverged-unknown", autoSafe: false, open, merged };
+}
+
+function deleteHatcheryArtifacts(slice) {
+  const remove = (p) => {
+    if (typeof p !== "string" || p.length === 0) return;
+    try { fs.unlinkSync(p); } catch { /* best effort */ }
+  };
+  remove(slice?.hatchery?.hatchery_request_path);
+  remove(slice?.hatchery?.hatchery_result_path);
+  remove(slice?.hatchery?.hatchery_log_path);
+}
+
+// Attempt to recover from a "branch already exists" dispatch failure
+// without operator help. Reads classifyBranchCollision; for verdicts marked
+// autoSafe, deletes the stale branch and removes the slice from state so the
+// loop re-dispatches it on the next tick. For everything else, returns the
+// verdict + detail string so the caller can include them in the escalation
+// notification.
+// Locate the git worktree (if any) that currently has the colliding branch
+// checked out. Returns the worktree's filesystem path, or null when the
+// branch isn't held by a worktree.
+function findWorktreeForBranch(repoPath, branchName) {
+  let out;
+  try {
+    out = execText("git", ["worktree", "list", "--porcelain"], { cwd: repoPath });
+  } catch {
+    return null;
+  }
+  const blocks = out.split("\\n\\n");
+  for (const block of blocks) {
+    const wt = block.match(/^worktree (.+)$/m);
+    const br = block.match(/^branch refs\\/heads\\/(.+)$/m);
+    if (wt && br && br[1].trim() === branchName) {
+      return wt[1].trim();
+    }
+  }
+  return null;
+}
+
+// Check whether a worktree path is empty of in-progress work — no
+// uncommitted changes, no untracked files (other than git internals).
+// Conservative: any output from "git status --porcelain" blocks removal.
+function worktreeIsClean(worktreePath) {
+  try {
+    const out = execText("git", ["status", "--porcelain"], { cwd: worktreePath });
+    return out.trim().length === 0;
+  } catch {
+    return false;
+  }
+}
+
+// Check whether any agent-deck session in our worker group is currently
+// pointing at this worktree. If a live session holds it, the worker may
+// still be doing real work — never remove.
+function agentDeckSessionHoldsWorktree(worktreePath) {
+  try {
+    const list = agentDeckList();
+    if (!Array.isArray(list)) return false;
+    return list.some((session) => {
+      // Match the hatchery session parser's field-name precedence
+      // (src/hatchery/spawn-handoff.ts:parseAgentDeckSession) so we never
+      // refuse to recognize a live session because it exposes the
+      // worktree as a different key — e.g. older "path", current
+      // snake_case "worktree_path", or camelCase "worktreePath".
+      const path = String(session?.worktree_path || session?.path || session?.worktreePath || "");
+      return path === worktreePath;
+    });
+  } catch {
+    return false;
+  }
+}
+
+// Attempt to recover from a "branch already exists" dispatch failure
+// without operator help. Reads classifyBranchCollision; for verdicts marked
+// autoSafe, deletes the stale branch and removes the slice from state so the
+// loop re-dispatches it on the next tick. For everything else, returns the
+// verdict + detail string so the caller can include them in the escalation
+// notification.
+//
+// If "git branch -D" fails because the branch is checked out in a worktree,
+// inspects the worktree: when clean AND not held by an active agent-deck
+// session, removes the worktree with "git worktree remove --force" first,
+// then deletes the branch. Anything dirty or session-held escalates.
+function tryRecoverBranchCollision(state, slice, sliceId, errorText) {
+  const branchName = parseBranchCollisionError(errorText);
+  if (!branchName) return null;
+  const repoPath = state?.repo?.path || meta.repo?.path;
+  if (typeof repoPath !== "string" || repoPath.length === 0) return null;
+  const defaultBranch = state?.repo?.default_branch || meta.repo?.default_branch || null;
+  const info = inspectCollidedBranch(repoPath, defaultBranch, branchName);
+  const classification = classifyBranchCollision(info);
+  const summary = info
+    ? "branch=" + branchName + " head=" + (info.head || "").slice(0, 7) + " ancestor-of-" + (defaultBranch || "default") + "=" + info.isAncestor + " open_prs=[" + classification.open.map((p) => "#" + p.number).join(",") + "] merged_prs=[" + classification.merged.map((p) => "#" + p.number).join(",") + "]"
+    : "branch=" + branchName + " (no local ref)";
+  if (!classification.autoSafe) {
+    return { recovered: false, verdict: classification.verdict, detail: summary };
+  }
+  let extra = "";
+  try {
+    execText("git", ["branch", "-D", branchName], { cwd: repoPath });
+  } catch (err) {
+    // git refuses when the branch is checked out by a worktree. Try to
+    // unblock by removing the worktree — but only when it's safe (no
+    // uncommitted changes, not held by an active agent-deck session).
+    const worktreePath = findWorktreeForBranch(repoPath, branchName);
+    if (!worktreePath) {
+      return { recovered: false, verdict: classification.verdict + "-delete-failed", detail: summary + " | branch delete failed: " + (err?.message || String(err)) };
+    }
+    if (!worktreeIsClean(worktreePath)) {
+      return { recovered: false, verdict: classification.verdict + "-worktree-dirty", detail: summary + " | branch held by worktree " + worktreePath + " with uncommitted changes; refusing to auto-remove" };
+    }
+    if (agentDeckSessionHoldsWorktree(worktreePath)) {
+      return { recovered: false, verdict: classification.verdict + "-worktree-session", detail: summary + " | branch held by worktree " + worktreePath + " which is still owned by a live agent-deck session; operator must drain that session before re-dispatch" };
+    }
+    try {
+      execText("git", ["worktree", "remove", "--force", worktreePath], { cwd: repoPath });
+    } catch (e2) {
+      return { recovered: false, verdict: classification.verdict + "-worktree-remove-failed", detail: summary + " | worktree remove failed: " + (e2?.message || String(e2)) };
+    }
+    extra = " | worktree " + worktreePath + " removed";
+    try {
+      execText("git", ["branch", "-D", branchName], { cwd: repoPath });
+    } catch (e3) {
+      return { recovered: false, verdict: classification.verdict + "-delete-after-worktree-failed", detail: summary + extra + " | second branch delete failed: " + (e3?.message || String(e3)) };
+    }
+  }
+  deleteHatcheryArtifacts(slice);
+  delete state.slices[sliceId];
+  return { recovered: true, verdict: classification.verdict, detail: summary + extra + " | branch deleted, slice released for re-dispatch" };
+}
+
 function completePendingHatcheryDispatches(state, ts) {
   const actions = [];
   const failures = [];
+  const notifications = [];
   let mutated = false;
   const slices = state?.slices && typeof state.slices === "object" ? state.slices : {};
+  const nowMs = Date.parse(ts);
+  const queueDispatchEscalation = (slice, sliceId, reason, error) => {
+    // Build a stable requestKey so requestLegateJudgement only fires once per
+    // distinct failure mode. Without notification the agent never wakes and
+    // the operator sees "loop is silent" while state.json piles up escalated
+    // slices.
+    const key = "hatchery-failure:" + sliceId + ":" + reason + ":" + hashText(String(error || "")).slice(0, 12);
+    notifications.push({
+      slice, sliceId, requestKey: key,
+      reason: "hatchery_dispatch_failed",
+      detail: "Hatchery dispatch for " + actionCommandLine({ command: slice.command, arguments: slice.arguments || [] }) + " escalated: " + reason + ".\\n\\nError:\\n" + String(error || "(no detail)").trim() + "\\n\\nSlice has been marked escalated in state.json. The loop auto-recovers orphan-ref and post-merge-stale branch collisions; anything with an open PR or unknown divergence reaches here for operator inspection. Otherwise run legate.error for worker-side recovery.",
+    });
+  };
+  const escalateStale = (slice, sliceId, reason) => {
+    const queuedMs = Date.parse(slice.last_action || "");
+    if (!Number.isFinite(queuedMs) || !Number.isFinite(nowMs)) return false;
+    if (nowMs - queuedMs <= HATCHERY_PENDING_TIMEOUT_MS) return false;
+    const ageMin = Math.round((nowMs - queuedMs) / 60000);
+    const note = "NEED: Hatchery spawn " + reason + " after " + ageMin + " min (runner likely crashed before writing); manual investigation required";
+    slice.stage = "escalated";
+    slice.last_action = ts;
+    slice.last_action_note = note;
+    failures.push({ slice_id: sliceId, command: actionCommandLine({ command: slice.command, arguments: slice.arguments || [] }), error: note });
+    queueDispatchEscalation(slice, sliceId, "runner-silent", note);
+    return true;
+  };
   for (const [sliceId, slice] of Object.entries(slices)) {
     if (!slice || typeof slice !== "object" || slice.stage !== "hatchery-pending") continue;
     const resultPath = slice.hatchery?.hatchery_result_path;
@@ -2154,11 +2501,20 @@ function completePendingHatcheryDispatches(state, ts) {
     try {
       raw = fs.readFileSync(resultPath, "utf-8").trim();
     } catch (err) {
-      if (err && err.code === "ENOENT") continue;
+      if (err && err.code === "ENOENT") {
+        if (escalateStale(slice, sliceId, "produced no result file")) mutated = true;
+        continue;
+      }
       failures.push({ slice_id: sliceId, command: actionCommandLine({ command: slice.command, arguments: slice.arguments || [] }), error: err?.message || String(err) });
       continue;
     }
-    if (!raw) continue;
+    if (!raw) {
+      // Empty result file = launchHatcheryDispatch wrote the placeholder but
+      // the runner died before writing real content. Same failure mode as a
+      // missing file; treat it the same way once the timeout has elapsed.
+      if (escalateStale(slice, sliceId, "left an empty result file")) mutated = true;
+      continue;
+    }
     let result;
     try {
       result = JSON.parse(raw);
@@ -2166,10 +2522,28 @@ function completePendingHatcheryDispatches(state, ts) {
       continue;
     }
     if (result.error) {
+      const errorText = String(result.error).trim();
+      // Auto-recover branch-collision failures when the branch is provably
+      // safe to delete (HEAD on default branch, or merged-PR + no open PR).
+      // Anything ambiguous falls through to escalation with the verdict
+      // included in the detail so the agent / operator has the full context.
+      const recovery = tryRecoverBranchCollision(state, slice, sliceId, errorText);
+      if (recovery && recovery.recovered) {
+        actions.push({
+          action: "auto-recovered",
+          sliceId,
+          sessionId: null,
+          detail: "branch-collision " + recovery.verdict + " auto-recovered: " + recovery.detail,
+        });
+        mutated = true;
+        continue;
+      }
+      const detail = recovery ? errorText + "\\n\\nLoop verdict: " + recovery.detail : errorText;
       slice.stage = "escalated";
       slice.last_action = ts;
-      slice.last_action_note = "NEED: Hatchery dispatch failed: " + String(result.error).trim();
-      failures.push({ slice_id: sliceId, command: actionCommandLine({ command: slice.command, arguments: slice.arguments || [] }), error: String(result.error).trim() });
+      slice.last_action_note = "NEED: Hatchery dispatch failed: " + detail;
+      failures.push({ slice_id: sliceId, command: actionCommandLine({ command: slice.command, arguments: slice.arguments || [] }), error: detail });
+      queueDispatchEscalation(slice, sliceId, recovery ? "branch-collision-" + recovery.verdict : "spawn-error", detail);
       mutated = true;
       continue;
     }
@@ -2200,7 +2574,7 @@ function completePendingHatcheryDispatches(state, ts) {
     });
     mutated = true;
   }
-  return { actions, failures, mutated };
+  return { actions, failures, mutated, notifications };
 }
 
 function stageDispatchMessage(sliceId, result) {
@@ -2235,6 +2609,15 @@ function runDispatch(state, ts) {
   actions.push(...completed.actions);
   failures.push(...completed.failures);
   let mutated = completed.mutated;
+  // Wake the legate agent for each escalation produced by completion (spawn
+  // errors and stale-pending timeouts). requestLegateJudgement is idempotent
+  // by requestKey so duplicate ticks won't spam the doorbell.
+  for (const n of completed.notifications || []) {
+    requestLegateJudgement({
+      ts, slice: n.slice, sliceId: n.sliceId,
+      requestKey: n.requestKey, reason: n.reason, detail: n.detail,
+    });
+  }
 
   let status;
   try {
@@ -2311,6 +2694,14 @@ function runDispatch(state, ts) {
         existing.last_action = ts;
         existing.last_action_note = "NEED: Hatchery dispatch launch failed: " + error;
         mutated = true;
+        // Wake the legate agent — without this the operator only sees state.json
+        // grow stale while the loop appears idle.
+        requestLegateJudgement({
+          ts, slice: existing, sliceId,
+          requestKey: "hatchery-failure:" + sliceId + ":launch-throw:" + hashText(error).slice(0, 12),
+          reason: "hatchery_dispatch_failed",
+          detail: "Hatchery dispatch launch threw for " + actionCommandLine(item.next_action) + ".\\n\\nError:\\n" + error + "\\n\\nSlice is escalated in state.json; inspect with legate.error.",
+        });
       }
       failures.push({ slice_id: sliceId, command: actionCommandLine(item.next_action), error });
       append(meta.processor_events_path, {

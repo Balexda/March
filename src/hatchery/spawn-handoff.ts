@@ -280,6 +280,72 @@ export function createHatcherySpawnArtifacts(input: {
   return { dir, spawnOutputPath, patchPath, managerPromptPath, metadataPath };
 }
 
+/**
+ * Pick the session created by a single `agent-deck launch` call out of
+ * the post-launch session list. Diff-since-snapshot alone is unsafe when
+ * multiple launches race in the same tick — each runner sees the same
+ * `beforeIds` snapshot and the same post-launch list, and a naive
+ * "newest not in snapshot" pick converges on whichever session sorted
+ * latest by createdAt. Every concurrent spawn would then attach to the
+ * same session, and the losers would fail downstream when the wrong
+ * (or nonexistent) worktree gets used as a cwd.
+ *
+ * Filter by the launched session's `worktreePath` — the only per-launch
+ * identifier agent-deck reliably surfaces in `list --json`. Each launch
+ * passes a unique `--worktree <branch>`, and agent-deck derives the
+ * worktree directory deterministically from the branch
+ * (`feature-<branch with "/" → "-">`). Branch field on the session record
+ * is empty in current agent-deck versions, so a naive branch filter
+ * collapses to nothing and the race resurfaces. Match by the trailing
+ * directory name of `path` to stay robust against differences in the
+ * repo's worktree-parent location.
+ *
+ * Fall back to the diff-since-snapshot pick only when no session
+ * surfaces a matching worktree directory (e.g. older agent-deck
+ * versions, edge cases) — explicit so a future agent-deck upgrade that
+ * starts surfacing branch can still benefit from both paths.
+ *
+ * Exported for direct unit testing.
+ */
+export function pickLaunchedSession(
+  sessions: readonly AgentDeckSessionSnapshot[],
+  beforeIds: ReadonlySet<string>,
+  branch: string,
+): AgentDeckSessionSnapshot | undefined {
+  const expectedDirName = expectedWorktreeDirName(branch);
+  const dirMatch = sessions
+    .filter((session) => {
+      if (beforeIds.has(session.sessionId)) return false;
+      if (!session.worktreePath) return false;
+      const last = path.basename(session.worktreePath);
+      return last === expectedDirName;
+    })
+    .slice()
+    .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+    .at(-1);
+  if (dirMatch) return dirMatch;
+  const branchMatch = sessions
+    .filter((session) => session.branch === branch && !beforeIds.has(session.sessionId))
+    .slice()
+    .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+    .at(-1);
+  if (branchMatch) return branchMatch;
+  return sessions
+    .filter((session) => !beforeIds.has(session.sessionId))
+    .slice()
+    .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+    .at(-1);
+}
+
+/**
+ * Derive the worktree directory name agent-deck creates for a given
+ * branch. agent-deck's --worktree flag produces `feature-<branch>` with
+ * "/" rewritten to "-". Exported for unit testing.
+ */
+export function expectedWorktreeDirName(branch: string): string {
+  return "feature-" + branch.replace(/\//g, "-");
+}
+
 export function launchAgentDeckManager(input: {
   readonly repoPath: string;
   readonly spawnId: string;
@@ -329,10 +395,8 @@ export function launchAgentDeckManager(input: {
     );
   }
 
-  const launched = listAgentDeckSessions(input.profile, input.group)
-    .filter((session) => !beforeIds.has(session.sessionId))
-    .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
-    .at(-1);
+  const allSessions = listAgentDeckSessions(input.profile, input.group);
+  const launched = pickLaunchedSession(allSessions, beforeIds, input.branch);
   if (!launched) {
     throw new HatcherySpawnError(
       `agent-deck manager launch completed but the new session could not be identified from agent-deck list.`,
@@ -346,6 +410,29 @@ export function launchAgentDeckManager(input: {
   if (!worktreePath) {
     throw new HatcherySpawnError(
       `agent-deck manager session "${launched.sessionId}" did not report a worktree path.`,
+    );
+  }
+
+  // Hard correctness check: the session's worktree directory MUST match the
+  // one agent-deck would create for our --worktree <branch> flag. Without
+  // this guard, when pickLaunchedSession's worktree-dir match fails (a
+  // launched session sometimes isn't persisted by the time we query under
+  // load), the diff-since-snapshot fallback can pick a sibling launch's
+  // session and we silently apply our patch to the wrong worktree. Failing
+  // here surfaces the race as an escalation rather than as data corruption.
+  // Run after the worktreePath fallback so older agent-deck versions whose
+  // `list --json` omits `worktreePath` (resolved via `session show --json`)
+  // still hit the validation with a populated path.
+  const expectedDirName = expectedWorktreeDirName(input.branch);
+  const actualDirName = path.basename(worktreePath);
+  if (actualDirName !== expectedDirName) {
+    throw new HatcherySpawnError(
+      `agent-deck manager session "${launched.sessionId}" attached to worktree ` +
+        `"${worktreePath}" but this launch requested branch "${input.branch}" ` +
+        `which should produce worktree dir "${expectedDirName}". Refusing to apply patch to ` +
+        `the wrong worktree. This usually means a concurrent launch consumed our session ` +
+        `before we could identify it; the loop's next tick should re-dispatch cleanly once ` +
+        `the colliding spawn finishes.`,
     );
   }
 
@@ -505,6 +592,20 @@ export function applyPatchToManagerWorktree(input: {
   readonly patchPath: string;
   readonly worktreePath: string;
 }): void {
+  // Pre-check cwd existence so we don't surface Node's misleading
+  // "spawnSync git ENOENT" — which happens when execFileSync can't chdir
+  // to the manager worktree, and looks identical to "git is not
+  // installed." The race in launchAgentDeckManager used to produce this
+  // error every time a concurrent dispatch attached to the wrong session;
+  // even after the race fix, surfacing a clear message keeps future
+  // failures debuggable.
+  if (!fs.existsSync(input.worktreePath)) {
+    throw new HatcherySpawnError(
+      `git apply --index aborted: manager worktree not found at ${input.worktreePath}. ` +
+        `This usually means launchAgentDeckManager attached to the wrong session (race) ` +
+        `or the worktree was removed between launch and patch-apply.`,
+    );
+  }
   try {
     execFileSync("git", ["apply", "--index", input.patchPath], {
       cwd: input.worktreePath,

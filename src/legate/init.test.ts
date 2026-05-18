@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
+import nodeCrypto from "node:crypto";
 import {
   buildColdStartPrompt,
   checkBridgeRequirements,
@@ -361,6 +362,23 @@ describe("legate module", () => {
       expect(loop).toContain("child.unref()");
       expect(loop).toContain("function completePendingHatcheryDispatches");
       expect(loop).toContain('stage: "hatchery-pending"');
+      // Escalated/closed-unmerged slices must still block re-dispatch of the
+      // same artifact — only a merged slice releases the artifact.
+      expect(loop).toContain("function sliceReleasesArtifact");
+      expect(loop).toContain('slice.stage === "merged"');
+      expect(loop).toContain("if (sliceReleasesArtifact(slice)) continue;");
+      // Legacy stub archive entries (no command, no branch) must not block
+      // fresh dispatches by SID collision alone.
+      expect(loop).toContain("function isStubArchivedSlice");
+      expect(loop).toContain("!isStubArchivedSlice(archived[sliceId])");
+      // Runner crash guard: any runner-side exception must still produce a
+      // result file so the loop can transition the slice out of hatchery-pending.
+      expect(loop).toContain("hatchery runner crashed:");
+      // Stuck hatchery-pending slices must time out and escalate so a crashed
+      // runner doesn't park a slice forever.
+      expect(loop).toContain("HATCHERY_PENDING_TIMEOUT_MS");
+      expect(loop).toContain("produced no result file");
+      expect(loop).toContain("left an empty result file");
       expect(loop).toContain("hatchery_result_path");
       expect(loop).toContain('"hatchery"');
       expect(loop).toContain('"--backend"');
@@ -391,6 +409,225 @@ describe("legate module", () => {
       expect(result.summary).toContain("Loop:");
       expect(result.summary).toContain("march-legate-loop");
       expect(result.summary).toContain("terminal PR maintenance");
+    });
+
+    // The functions below live inside the LEGATE_LOOP_MJS template literal
+    // and run only inside the deployed loop process, so we can't import them
+    // directly. We extract each function's source via regex and reconstruct
+    // a callable with `new Function`. The goal is to test the *behavior* of
+    // the generated code — substring assertions higher up missed three real
+    // bugs (runner syntax, stub-archive dedup, escalated dedup) that these
+    // tests now lock in.
+    async function stageLoop(home: string): Promise<string> {
+      const tplDir = makeTemplateDir("ok");
+      const result = await initLegate({
+        repoPath: "/some/repo/March",
+        homeDir: home,
+        templateDir: tplDir,
+        runSetup: false,
+      });
+      return path.join(result.processorStagingDir!, "legate-loop.mjs");
+    }
+
+    function extractFn(loopSrc: string, name: string, deps: string[] = []): Function {
+      const grab = (n: string) => {
+        const re = new RegExp(`function ${n}\\([^)]*\\)\\s*\\{[\\s\\S]+?\\n\\}`);
+        const match = loopSrc.match(re);
+        if (!match) throw new Error(`could not extract function ${n}`);
+        return match[0];
+      };
+      const blobs = [...deps, name].map(grab);
+      // The loop file's hashText calls crypto.createHash from a top-level
+      // `import crypto from "node:crypto"`. In our isolated `new Function`
+      // sandbox there's no module scope, so we pass crypto in as a parameter.
+      // eslint-disable-next-line @typescript-eslint/no-implied-eval
+      return new Function("crypto", `${blobs.join("\n")}; return ${name};`)(nodeCrypto);
+    }
+
+    it("generated hatchery runner code parses as valid JavaScript", async () => {
+      // Regression guard for the escape bug where "\\n" in the template
+      // literal collapsed to a real newline inside the runner's "..." string
+      // literal, producing a SyntaxError that silently killed every spawn.
+      const loop = fs.readFileSync(await stageLoop(makeTmpDir()), "utf-8");
+      const hatcheryRunnerCode = extractFn(loop, "hatcheryRunnerCode") as () => string;
+      const runner = hatcheryRunnerCode();
+      expect(() => new Function(runner)).not.toThrow();
+      // Also confirm node -e accepts it — this is what the loop actually does.
+      expect(() =>
+        execFileSync(process.execPath, ["--check", "-"], { input: runner, stdio: "pipe" }),
+      ).not.toThrow();
+    });
+
+    it("generated hatchery runner writes an error result when the spawn exits non-zero", async () => {
+      // End-to-end: build the runner, run it against a request that fails,
+      // verify it writes the expected error JSON and stderr log. Catches both
+      // the syntax bug (runner wouldn't execute at all) and any future
+      // regression in the success/failure branching.
+      const home = makeTmpDir();
+      const loop = fs.readFileSync(await stageLoop(home), "utf-8");
+      const hatcheryRunnerCode = extractFn(loop, "hatcheryRunnerCode") as () => string;
+      const requestPath = path.join(home, "req.json");
+      const resultPath = path.join(home, "result.json");
+      const logPath = path.join(home, "result.log");
+      fs.writeFileSync(
+        requestPath,
+        JSON.stringify({
+          command: "/bin/sh",
+          args: ["-c", "printf 'boom\\n' 1>&2; exit 7"],
+          cwd: home,
+          resultPath,
+          logPath,
+        }),
+      );
+      execFileSync(process.execPath, ["-e", hatcheryRunnerCode(), requestPath], { stdio: "pipe" });
+      const result = JSON.parse(fs.readFileSync(resultPath, "utf-8"));
+      expect(result.exitCode).toBe(7);
+      expect(String(result.error)).toContain("boom");
+      expect(fs.readFileSync(logPath, "utf-8")).toContain("boom");
+    });
+
+    it("isStubArchivedSlice distinguishes legacy stubs from real archive entries", async () => {
+      // Regression guard for the smithy outage where 8 legacy stub archive
+      // entries (cmd=null, branch=null) silently blocked every fresh
+      // dispatch via SID collision.
+      const loop = fs.readFileSync(await stageLoop(makeTmpDir()), "utf-8");
+      const isStub = extractFn(loop, "isStubArchivedSlice") as (s: unknown) => boolean;
+      expect(isStub(null)).toBe(true);
+      expect(isStub({})).toBe(true);
+      expect(isStub({ command: null, arguments: null, branch: null })).toBe(true);
+      expect(isStub({ command: "smithy.forge" })).toBe(false);
+      expect(isStub({ branch: "smithy/forge/x-abc12345" })).toBe(false);
+      expect(isStub({ actual_branch: "feature/smithy/forge/x" })).toBe(false);
+    });
+
+    it("dispatch identity derives semantic stems from structured records", async () => {
+      // Regression guard: the prior hash-based scheme produced opaque names
+      // (smithy/forge/tasks-deployment-location-...-cc245ea6) where a
+      // collision told the operator nothing. The new derivation should
+      // produce stems that match the hand-curated march pattern
+      // (us6-s1, m1, etc.) so a collision reads as "this exact slice is
+      // re-attempting" rather than "this hash is re-attempting."
+      const loop = fs.readFileSync(await stageLoop(makeTmpDir()), "utf-8");
+      const deps = ["smithyVerb", "actionArguments", "slugifyDispatchPart", "hashText", "dispatchItemKey", "dispatchArtifactSlug", "dispatchIdentity"];
+      const dispatchSliceId = extractFn(loop, "dispatchSliceId", deps) as (item: unknown) => string;
+      const dispatchBranch = extractFn(loop, "dispatchBranch", deps) as (item: unknown) => string;
+
+      const forge = {
+        path: "specs/2026-03-21-002-smithy-orders-issue-templates/03-deployment-location-honored-end-to-end.tasks.md",
+        parent_path: "specs/2026-03-21-002-smithy-orders-issue-templates/smithy-orders-issue-templates.spec.md",
+        parent_row_id: "US3",
+        next_action: { command: "smithy.forge", arguments: ["specs/...whatever.tasks.md", "2"] },
+      };
+      expect(dispatchSliceId(forge)).toBe("smithy-orders-issue-templates-us3-s2-forge");
+      expect(dispatchBranch(forge)).toBe("smithy/forge/smithy-orders-issue-templates-us3-s2");
+
+      const cut = {
+        parent_path: "specs/2026-05-15-006-smithy-implement/smithy-implement.spec.md",
+        parent_row_id: "US1",
+        next_action: { command: "smithy.cut", arguments: ["specs/2026-05-15-006-smithy-implement", "1"] },
+      };
+      expect(dispatchSliceId(cut)).toBe("smithy-implement-us1-s1-cut");
+      expect(dispatchBranch(cut)).toBe("smithy/cut/smithy-implement-us1-s1");
+
+      const mark = {
+        path: "docs/rfcs/2026-001-token-savings/01-measurement-foundation.features.md",
+        parent_path: "docs/rfcs/2026-001-token-savings/token-savings.rfc.md",
+        parent_row_id: "M1",
+        next_action: { command: "smithy.mark", arguments: ["docs/rfcs/2026-001-token-savings/01-measurement-foundation.features.md"] },
+      };
+      expect(dispatchSliceId(mark)).toBe("token-savings-m1-mark");
+      expect(dispatchBranch(mark)).toBe("smithy/mark/token-savings-m1");
+
+      const render = {
+        next_action: { command: "smithy.render", arguments: ["docs/rfcs/2026-001-token-savings/token-savings.rfc.md", "3"] },
+      };
+      expect(dispatchSliceId(render)).toBe("token-savings-m3-render");
+      expect(dispatchBranch(render)).toBe("smithy/render/token-savings-m3");
+    });
+
+    it("dispatch identity falls back to hash-based stem when record lacks structure", async () => {
+      // Records without parent_path / parent_row_id (or unusual verbs) still
+      // need to dispatch — fall back to the legacy hash scheme rather than
+      // produce an ambiguous stem.
+      const loop = fs.readFileSync(await stageLoop(makeTmpDir()), "utf-8");
+      const deps = ["smithyVerb", "actionArguments", "slugifyDispatchPart", "hashText", "dispatchItemKey", "dispatchArtifactSlug", "dispatchIdentity"];
+      const dispatchSliceId = extractFn(loop, "dispatchSliceId", deps) as (item: unknown) => string;
+      const dispatchBranch = extractFn(loop, "dispatchBranch", deps) as (item: unknown) => string;
+      const dispatchIdentity = extractFn(loop, "dispatchIdentity", deps) as (item: unknown) => { semantic: boolean };
+
+      const orphan = {
+        path: "some/loose/artifact.md",
+        title: "Free-floating record",
+        next_action: { command: "smithy.forge", arguments: ["some/loose/artifact.md", "1"] },
+      };
+      expect(dispatchIdentity(orphan).semantic).toBe(false);
+      // Fallback IDs use the legacy <stem>-<verb>-<hash> order so existing
+      // state.json / archive entries keyed by the legacy ID keep matching.
+      expect(dispatchSliceId(orphan)).toMatch(/-forge-[0-9a-f]{8}$/);
+      expect(dispatchBranch(orphan)).toMatch(/^smithy\/forge\/.+-[0-9a-f]{8}$/);
+    });
+
+    it("parseBranchCollisionError extracts the branch name from hatchery spawn errors", async () => {
+      const loop = fs.readFileSync(await stageLoop(makeTmpDir()), "utf-8");
+      const parse = extractFn(loop, "parseBranchCollisionError") as (s: string) => string | null;
+      expect(parse("agent-deck manager launch failed:\nError: branch 'feature/smithy/forge/foo-bar' already exists (remove -b flag to use existing branch)\n")).toBe("feature/smithy/forge/foo-bar");
+      expect(parse("some unrelated error")).toBeNull();
+      expect(parse("")).toBeNull();
+    });
+
+    it("classifyBranchCollision returns autoSafe verdicts only for risk-free cases", async () => {
+      // Locks in the loop's policy: never auto-delete a branch with an open
+      // PR or with diverged work whose status is unknown. Open-PR and
+      // diverged-unknown must require operator/agent review.
+      const loop = fs.readFileSync(await stageLoop(makeTmpDir()), "utf-8");
+      const classify = extractFn(loop, "classifyBranchCollision") as (info: unknown) => { verdict: string; autoSafe: boolean };
+
+      // HEAD already on default branch => orphan ref, no diverged work
+      expect(classify({ head: "abc", isAncestor: true, prs: [] })).toMatchObject({ verdict: "orphan-ref", autoSafe: true });
+      // Merged PR + no open PR + diverged HEAD (squash-merge case)
+      expect(classify({ head: "abc", isAncestor: false, prs: [{ number: 1, state: "MERGED" }] })).toMatchObject({ verdict: "post-merge-stale", autoSafe: true });
+      // Open PR — must escalate even if also merged
+      expect(classify({ head: "abc", isAncestor: false, prs: [{ number: 1, state: "OPEN" }, { number: 2, state: "MERGED" }] })).toMatchObject({ verdict: "open-pr", autoSafe: false });
+      expect(classify({ head: "abc", isAncestor: true, prs: [{ number: 1, state: "OPEN" }] })).toMatchObject({ verdict: "open-pr", autoSafe: false });
+      // Diverged HEAD + no PR data — unknown work, escalate
+      expect(classify({ head: "abc", isAncestor: false, prs: [] })).toMatchObject({ verdict: "diverged-unknown", autoSafe: false });
+      // Null info (branch already gone) — nothing to recover
+      expect(classify(null)).toMatchObject({ verdict: "no-such-branch", autoSafe: false });
+    });
+
+    it("hatchery escalations notify the legate agent via processor_requests", async () => {
+      // Regression guard for the silent-loop bug: prior to this fix, every
+      // dispatch escalation only wrote state.json and the log file. The
+      // legate agent waits for a [PROCESSOR] message and so stayed idle
+      // indefinitely while artifacts piled up in escalated state.
+      const loop = fs.readFileSync(await stageLoop(makeTmpDir()), "utf-8");
+      // Both escalation sites must call requestLegateJudgement.
+      expect(loop).toContain('reason: "hatchery_dispatch_failed"');
+      // runDispatch catch path (launchHatcheryDispatch throws).
+      expect(loop).toMatch(/requestLegateJudgement\([\s\S]*?launch-throw/);
+      expect(loop).toContain("Hatchery dispatch launch threw");
+      // completePendingHatcheryDispatches forwards a notifications batch up.
+      expect(loop).toContain("queueDispatchEscalation");
+      expect(loop).toContain("hatchery-failure:");
+      // The caller in runDispatch must drain those notifications.
+      expect(loop).toMatch(/for \(const n of completed\.notifications/);
+    });
+
+    it("sliceReleasesArtifact treats only merged slices as releasing the artifact", async () => {
+      // Regression guard for the dedup bug where escalated slices were
+      // treated as terminal, allowing the loop to re-dispatch artifacts an
+      // operator had explicitly stood down.
+      const loop = fs.readFileSync(await stageLoop(makeTmpDir()), "utf-8");
+      const releases = extractFn(loop, "sliceReleasesArtifact") as (s: unknown) => boolean;
+      expect(releases({ stage: "merged" })).toBe(true);
+      expect(releases({ pr: { state: "MERGED" } })).toBe(true);
+      // Anything else — including escalated and closed-unmerged — must
+      // continue to block re-dispatch.
+      expect(releases({ stage: "escalated" })).toBe(false);
+      expect(releases({ stage: "implementing" })).toBe(false);
+      expect(releases({ pr: { state: "CLOSED" } })).toBe(false);
+      expect(releases({})).toBe(false);
+      expect(releases(null)).toBe(false);
     });
 
     it("derives the processor name from the selected conductor name", async () => {
