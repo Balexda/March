@@ -90,6 +90,7 @@ Each scope below specifies what is allowed, what determinism mode applies by def
 - **Allowed**: tmp dirs, in-process fixtures, vitest mocks.
 - **Forbidden**: real git, real docker, real network, real backend.
 - **Default determinism**: deterministic. There should be no stochastic L0 tests.
+- **Framework**: vitest. The shape — assert exact return given exact input — is what vitest is good at.
 - **Existing examples**: `src/brood/spawn-record.test.ts`, `src/spawn/snapshot.test.ts`, `src/spawn/backends.test.ts`, `src/shared/deps.test.ts`, `src/bootstrap/manifest.test.ts`, `src/bootstrap/skills.test.ts`.
 - **First-test template**: instantiate the type, call the method, assert exact return. No setup beyond the class itself.
 
@@ -98,6 +99,7 @@ Each scope below specifies what is allowed, what determinism mode applies by def
 - **Allowed**: real filesystem (tmp), real git, in-process invocation of one subsystem's public surface.
 - **Forbidden**: another subsystem's behavior in the assertion path. Real docker containers managed by another subsystem.
 - **Default determinism**: deterministic. Use of real git is reproducible; git state is fully controlled by the test.
+- **Framework**: vitest. L1 stays in-process by design, so the function-call assertion shape still fits. If an L1 test grows container plumbing in its setup, that is the signal it should be re-labeled L2 and adopt the L2 framework.
 - **Existing examples**: `src/brood/worktree.test.ts`, `src/bootstrap/init.test.ts`, `src/bootstrap/update.test.ts`, `src/legate/init.test.ts`.
 - **First-test template**: set up a throwaway repo / tmp HOME, call the subsystem's top-level entry point, assert filesystem state + return value.
 
@@ -106,16 +108,18 @@ Each scope below specifies what is allowed, what determinism mode applies by def
 - **Allowed**: real docker, real git, throwaway repos, one container launched by the subsystem under test. Backends behind a cassette.
 - **Forbidden**: the Legate orchestration loop. Live backend calls in the CI variant.
 - **Default determinism**: deterministic (cassette-replayed). A stochastic L2 variant is allowed in the `Scheduled` context for cassette-drift detection.
-- **Existing examples**: `src/hatchery/legate-container.test.ts`, `src/spawn/container-launch.test.ts`, `src/spawn/snapshot-build.test.ts`. These exercise container shape but not yet the cross-subsystem handoff paths issue #133 calls out.
-- **First-test template**: spin up the throwaway-repo factory, launch one container with a cassette mounted, drive the inter-subsystem boundary, assert the artifact landed where the consumer expects it. The first L2 test the codebase should add is the Spawn → Steward handoff (issue #133's race-condition hotspot).
+- **Framework**: Gherkin via **Cucumber.js** (`@cucumber/cucumber`). At this scope a test is a scenario — *given* a throwaway repo and a cassette mounted, *when* Subsystem A drives Subsystem B across the boundary, *then* the artifact lands in the expected shape. Gherkin's `Given / When / Then` matches the structure of the LLM-produced acceptance scenarios already showing up in Smithy specs, so the spec-to-test handoff is mostly mechanical rather than a translation step. See §7 for why Cucumber.js over alternatives.
+- **Existing examples**: `src/hatchery/legate-container.test.ts`, `src/spawn/container-launch.test.ts`, `src/spawn/snapshot-build.test.ts`. These exercise container shape but not yet the cross-subsystem handoff paths issue #133 calls out, and they are written in vitest — when they grow into true cross-subsystem scenarios, expect to port them to Cucumber.js or write the Cucumber.js version alongside.
+- **First-test template**: a `.feature` file with one scenario, a step-definitions file that spins up the throwaway-repo factory, launches the container with a cassette mounted, drives the inter-subsystem boundary, and asserts the artifact landed where the consumer expects it. The first L2 test the codebase should add is the Spawn → Steward handoff (issue #133's race-condition hotspot).
 
 ### L3 — System
 
 - **Allowed**: everything L2 allows, plus the full Legate loop and multi-container coordination.
 - **Forbidden**: live backend calls in the CI variant. Anything that depends on operator interaction (those are H-tests).
 - **Default determinism**: deterministic (cassettes for every backend exchange). A stochastic L3 variant runs `Scheduled`.
-- **Existing examples**: none automated. The prose A1–A5 in `tests/Agent.tests.md` are L3-shaped today.
-- **First-test template**: seed a repo with a known Smithy plan, hand it to a real Legate, replay cassettes for every backend exchange in the loop, assert the loop terminates with a PR in the expected state.
+- **Framework**: Gherkin via **Cucumber.js**, same toolchain as L2. At L3 the assertion shape is "*given* this seed repo and Smithy plan, *when* Legate runs the loop end-to-end against replayed cassettes, *then* a PR exists in state X with these properties." Trying to write that in vitest collapses readability; Gherkin is the native shape. The L3 step-definition library is largely a superset of L2's, with extra orchestration helpers.
+- **Existing examples**: none automated. The prose A1–A5 in `tests/Agent.tests.md` are L3-shaped today and will become the first `.feature` files when Phase 3 lands.
+- **First-test template**: a `.feature` file that seeds a repo with a known Smithy plan, hands it to a real Legate, replays cassettes for every backend exchange in the loop, and asserts the loop terminates with a PR in the expected state.
 
 ## 6. Cost policy
 
@@ -140,6 +144,9 @@ This document is principles-first, but the principles are easier to apply when y
 - **LangSmith trace-as-fixture** — production traces become regression fixtures by converting them into cassettes. Aspirational; depends on Herald (M4) landing.
 - **`pass@k` / `pass^k` metrics** from the agent-eval literature — the right way to score a stochastic test that runs a small number of trials.
 - **Jepsen-style scenario testing** — the model for L3 coordination tests once Brood orchestrates multiple Spawns concurrently. The race conditions in PR #126 are exactly the class of bug Jepsen's lineage targets.
+- **Cucumber.js (`@cucumber/cucumber`)** — the chosen runner for L2 and L3 (see §5). Picked over the alternatives because it is the canonical Gherkin runner for Node, has first-class TypeScript support and parallel execution, and a healthy 2026 release cadence — it is the safe place to land an integration tier the rest of the strategy depends on. Considered and rejected: `@amiceli/vitest-cucumber` (would give us a unified vitest story, but the ecosystem — single maintainer, ~90 GitHub stars — is too thin a foundation for our integration tier); `jest-cucumber` (we don't use Jest, and it couples Gherkin to Jest's structure less cleanly than Cucumber.js stands alone).
+- **playwright-bdd** — the future browser path. We do not have a UI today, but when one lands, `playwright-bdd` keeps the `.feature` files we have written and runs them against Playwright instead of asking us to learn a second BDD dialect.
+- **Maestro** — the future mobile path, for the same reason. If we ever need device automation, the plan is a custom step-definition library that drives Maestro from the same Gherkin scenarios. Aspirational; called out so the Gherkin investment is understood as a forward-compatible choice, not a sunk-cost trap.
 
 ## 8. Gap analysis
 
@@ -195,7 +202,8 @@ Each phase has a clean predecessor; do not skip ahead.
 
 ## 10. What this doc does NOT cover
 
-- The specific test framework choice beyond vitest (already settled).
 - Eval rubrics for agent output quality. A future Smithy spec under Phase 4 or 5 will define these — `pass^k` is the right metric *shape*, but the per-scenario thresholds need their own design.
 - Production observability and SLOs. That's operations-doc territory.
 - Anything Smithy-side. `smithy test` covers slice-level test plans for individual specs; this strategy is March's harness-side complement, not a replacement for it.
+
+(The framework choice per scope — vitest for L0/L1, Cucumber.js for L2/L3 — *is* settled by this doc; see §5 and §7.)
