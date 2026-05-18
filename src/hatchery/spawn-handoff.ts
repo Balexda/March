@@ -290,11 +290,20 @@ export function createHatcherySpawnArtifacts(input: {
  * same session, and the losers would fail downstream when the wrong
  * (or nonexistent) worktree gets used as a cwd.
  *
- * Filter by the requested branch first — each launch passes a unique
- * `--worktree <branch>`, so branch is a deterministic identity for "this
- * launch's session." Fall back to the diff-since-snapshot pick only when
- * the session record doesn't carry branch metadata at all (older
- * agent-deck versions, edge cases).
+ * Filter by the launched session's `worktreePath` — the only per-launch
+ * identifier agent-deck reliably surfaces in `list --json`. Each launch
+ * passes a unique `--worktree <branch>`, and agent-deck derives the
+ * worktree directory deterministically from the branch
+ * (`feature-<branch with "/" → "-">`). Branch field on the session record
+ * is empty in current agent-deck versions, so a naive branch filter
+ * collapses to nothing and the race resurfaces. Match by the trailing
+ * directory name of `path` to stay robust against differences in the
+ * repo's worktree-parent location.
+ *
+ * Fall back to the diff-since-snapshot pick only when no session
+ * surfaces a matching worktree directory (e.g. older agent-deck
+ * versions, edge cases) — explicit so a future agent-deck upgrade that
+ * starts surfacing branch can still benefit from both paths.
  *
  * Exported for direct unit testing.
  */
@@ -303,6 +312,18 @@ export function pickLaunchedSession(
   beforeIds: ReadonlySet<string>,
   branch: string,
 ): AgentDeckSessionSnapshot | undefined {
+  const expectedDirName = expectedWorktreeDirName(branch);
+  const dirMatch = sessions
+    .filter((session) => {
+      if (beforeIds.has(session.sessionId)) return false;
+      if (!session.worktreePath) return false;
+      const last = session.worktreePath.split("/").filter(Boolean).pop() ?? "";
+      return last === expectedDirName;
+    })
+    .slice()
+    .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+    .at(-1);
+  if (dirMatch) return dirMatch;
   const branchMatch = sessions
     .filter((session) => session.branch === branch && !beforeIds.has(session.sessionId))
     .slice()
@@ -314,6 +335,15 @@ export function pickLaunchedSession(
     .slice()
     .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
     .at(-1);
+}
+
+/**
+ * Derive the worktree directory name agent-deck creates for a given
+ * branch. agent-deck's --worktree flag produces `feature-<branch>` with
+ * "/" rewritten to "-". Exported for unit testing.
+ */
+export function expectedWorktreeDirName(branch: string): string {
+  return "feature-" + branch.replace(/\//g, "-");
 }
 
 export function launchAgentDeckManager(input: {

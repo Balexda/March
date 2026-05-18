@@ -10,6 +10,7 @@ import {
   hatcherySpawnLogDir,
   managerBranchName,
   pickLaunchedSession,
+  expectedWorktreeDirName,
 } from "./spawn-handoff.js";
 
 describe("spawn-handoff", () => {
@@ -243,6 +244,7 @@ describe("spawn-handoff", () => {
     // their own session because the branch is unique per launch.
     const session = (
       id: string,
+      worktreeDir: string,
       branch: string,
       createdAt: string,
     ): { sessionId: string; title: string; group: string; branch: string; worktreePath: string; createdAt: string } => ({
@@ -250,52 +252,80 @@ describe("spawn-handoff", () => {
       title: id,
       group: "legate-workers",
       branch,
-      worktreePath: "/wt/" + id,
+      worktreePath: worktreeDir.startsWith("/") ? worktreeDir : "/wt/" + worktreeDir,
       createdAt,
     });
 
-    it("picks the new session whose branch matches the requested launch branch", () => {
+    it("derives the worktree directory name agent-deck assigns to a branch", () => {
+      // agent-deck creates feature-<branch with slashes rewritten> when
+      // --worktree <branch> is passed. The session record's path field
+      // ends with that dir, which is the only per-launch identifier
+      // current agent-deck versions reliably surface in list --json.
+      expect(expectedWorktreeDirName("smithy/forge/alpha-us3-s2")).toBe(
+        "feature-smithy-forge-alpha-us3-s2",
+      );
+      expect(expectedWorktreeDirName("smithy/mark/token-savings-m1")).toBe(
+        "feature-smithy-mark-token-savings-m1",
+      );
+    });
+
+    it("picks the new session whose worktree dir matches the launched branch (race fix)", () => {
+      // Concurrent launches all see the same post-launch snapshot. Each
+      // launch's session is identified by the worktree directory agent-deck
+      // creates, derived deterministically from the requested branch.
+      // Reproduces the smithy bug where 3 concurrent dispatches all picked
+      // the same wrong session because the naive `.at(-1)` fallback
+      // collapsed on the chronologically-latest session for everyone.
       const before = new Set(["pre1"]);
       const sessions = [
-        session("pre1", "smithy/forge/old", "2026-05-17T06:00:00Z"),
-        session("a", "smithy/forge/alpha", "2026-05-17T06:53:18Z"),
-        session("b", "smithy/forge/beta", "2026-05-17T06:53:19Z"),
-        session("c", "smithy/mark/gamma", "2026-05-17T06:53:20Z"),
+        session("pre1", "feature-smithy-forge-old", "", "2026-05-17T06:00:00Z"),
+        session("a", "feature-smithy-forge-alpha", "", "2026-05-17T06:53:18Z"),
+        session("b", "feature-smithy-forge-beta", "", "2026-05-17T06:53:19Z"),
+        session("c", "feature-smithy-mark-gamma", "", "2026-05-17T06:53:20Z"),
       ];
-      // Each concurrent launch sees the same `sessions` snapshot but picks
-      // its own session by branch.
       expect(pickLaunchedSession(sessions, before, "smithy/forge/alpha")?.sessionId).toBe("a");
       expect(pickLaunchedSession(sessions, before, "smithy/forge/beta")?.sessionId).toBe("b");
       expect(pickLaunchedSession(sessions, before, "smithy/mark/gamma")?.sessionId).toBe("c");
     });
 
-    it("ignores sessions already present in the pre-launch snapshot even when their branch matches", () => {
+    it("matches by the trailing worktree dir name regardless of the path prefix", () => {
+      // The repo's worktree-parent directory varies per host; only the
+      // basename is stable.
+      const before = new Set<string>();
+      const sessions = [
+        session("a", "/some/where/else/feature-smithy-forge-alpha", "", "1"),
+      ];
+      expect(pickLaunchedSession(sessions, before, "smithy/forge/alpha")?.sessionId).toBe("a");
+    });
+
+    it("ignores sessions already present in the pre-launch snapshot even when the worktree matches", () => {
       const before = new Set(["existing"]);
       const sessions = [
-        session("existing", "smithy/forge/alpha", "2026-05-17T05:00:00Z"),
-        session("new", "smithy/forge/alpha", "2026-05-17T06:53:18Z"),
+        session("existing", "feature-smithy-forge-alpha", "", "2026-05-17T05:00:00Z"),
+        session("new", "feature-smithy-forge-alpha", "", "2026-05-17T06:53:18Z"),
       ];
       expect(pickLaunchedSession(sessions, before, "smithy/forge/alpha")?.sessionId).toBe("new");
     });
 
-    it("falls back to newest-not-in-snapshot when no session reports the requested branch", () => {
-      // Defensive: some agent-deck versions may not surface branch on the
-      // session record; preserve the historical behavior for that case.
+    it("falls back to branch-then-newest when no session has a matching worktree dir", () => {
+      // Defensive: keep the historical behavior available if agent-deck
+      // ever stops creating worktree dirs from --worktree.
       const before = new Set<string>();
       const sessions = [
-        session("a", "", "2026-05-17T06:53:18Z"),
-        session("b", "", "2026-05-17T06:53:19Z"),
+        session("a", "feature-unrelated-x", "", "2026-05-17T06:53:18Z"),
+        session("b", "feature-unrelated-y", "", "2026-05-17T06:53:19Z"),
       ];
+      // No worktree-dir match → no branch field populated → fallback picks .at(-1).
       expect(pickLaunchedSession(sessions, before, "smithy/forge/alpha")?.sessionId).toBe("b");
     });
 
     it("returns undefined when nothing matches and the snapshot covers everything", () => {
       const before = new Set(["a", "b"]);
       const sessions = [
-        session("a", "x", "1"),
-        session("b", "y", "2"),
+        session("a", "feature-x", "", "1"),
+        session("b", "feature-y", "", "2"),
       ];
-      expect(pickLaunchedSession(sessions, before, "z")).toBeUndefined();
+      expect(pickLaunchedSession(sessions, before, "smithy/z")).toBeUndefined();
     });
   });
 });
