@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
+import nodeCrypto from "node:crypto";
 import {
   buildColdStartPrompt,
   checkBridgeRequirements,
@@ -428,12 +429,19 @@ describe("legate module", () => {
       return path.join(result.processorStagingDir!, "legate-loop.mjs");
     }
 
-    function extractFn(loopSrc: string, name: string): Function {
-      const re = new RegExp(`function ${name}\\([^)]*\\)\\s*\\{[\\s\\S]+?\\n\\}`);
-      const match = loopSrc.match(re);
-      if (!match) throw new Error(`could not extract function ${name}`);
+    function extractFn(loopSrc: string, name: string, deps: string[] = []): Function {
+      const grab = (n: string) => {
+        const re = new RegExp(`function ${n}\\([^)]*\\)\\s*\\{[\\s\\S]+?\\n\\}`);
+        const match = loopSrc.match(re);
+        if (!match) throw new Error(`could not extract function ${n}`);
+        return match[0];
+      };
+      const blobs = [...deps, name].map(grab);
+      // The loop file's hashText calls crypto.createHash from a top-level
+      // `import crypto from "node:crypto"`. In our isolated `new Function`
+      // sandbox there's no module scope, so we pass crypto in as a parameter.
       // eslint-disable-next-line @typescript-eslint/no-implied-eval
-      return new Function(`${match[0]}; return ${name};`)();
+      return new Function("crypto", `${blobs.join("\n")}; return ${name};`)(nodeCrypto);
     }
 
     it("generated hatchery runner code parses as valid JavaScript", async () => {
@@ -490,6 +498,100 @@ describe("legate module", () => {
       expect(isStub({ command: "smithy.forge" })).toBe(false);
       expect(isStub({ branch: "smithy/forge/x-abc12345" })).toBe(false);
       expect(isStub({ actual_branch: "feature/smithy/forge/x" })).toBe(false);
+    });
+
+    it("dispatch identity derives semantic stems from structured records", async () => {
+      // Regression guard: the prior hash-based scheme produced opaque names
+      // (smithy/forge/tasks-deployment-location-...-cc245ea6) where a
+      // collision told the operator nothing. The new derivation should
+      // produce stems that match the hand-curated march pattern
+      // (us6-s1, m1, etc.) so a collision reads as "this exact slice is
+      // re-attempting" rather than "this hash is re-attempting."
+      const loop = fs.readFileSync(await stageLoop(makeTmpDir()), "utf-8");
+      const deps = ["smithyVerb", "actionArguments", "slugifyDispatchPart", "hashText", "dispatchItemKey", "dispatchArtifactSlug", "dispatchIdentity"];
+      const dispatchSliceId = extractFn(loop, "dispatchSliceId", deps) as (item: unknown) => string;
+      const dispatchBranch = extractFn(loop, "dispatchBranch", deps) as (item: unknown) => string;
+
+      const forge = {
+        path: "specs/2026-03-21-002-smithy-orders-issue-templates/03-deployment-location-honored-end-to-end.tasks.md",
+        parent_path: "specs/2026-03-21-002-smithy-orders-issue-templates/smithy-orders-issue-templates.spec.md",
+        parent_row_id: "US3",
+        next_action: { command: "smithy.forge", arguments: ["specs/...whatever.tasks.md", "2"] },
+      };
+      expect(dispatchSliceId(forge)).toBe("smithy-orders-issue-templates-us3-s2-forge");
+      expect(dispatchBranch(forge)).toBe("smithy/forge/smithy-orders-issue-templates-us3-s2");
+
+      const cut = {
+        parent_path: "specs/2026-05-15-006-smithy-implement/smithy-implement.spec.md",
+        parent_row_id: "US1",
+        next_action: { command: "smithy.cut", arguments: ["specs/2026-05-15-006-smithy-implement", "1"] },
+      };
+      expect(dispatchSliceId(cut)).toBe("smithy-implement-us1-s1-cut");
+      expect(dispatchBranch(cut)).toBe("smithy/cut/smithy-implement-us1-s1");
+
+      const mark = {
+        path: "docs/rfcs/2026-001-token-savings/01-measurement-foundation.features.md",
+        parent_path: "docs/rfcs/2026-001-token-savings/token-savings.rfc.md",
+        parent_row_id: "M1",
+        next_action: { command: "smithy.mark", arguments: ["docs/rfcs/2026-001-token-savings/01-measurement-foundation.features.md"] },
+      };
+      expect(dispatchSliceId(mark)).toBe("token-savings-m1-mark");
+      expect(dispatchBranch(mark)).toBe("smithy/mark/token-savings-m1");
+
+      const render = {
+        next_action: { command: "smithy.render", arguments: ["docs/rfcs/2026-001-token-savings/token-savings.rfc.md", "3"] },
+      };
+      expect(dispatchSliceId(render)).toBe("token-savings-m3-render");
+      expect(dispatchBranch(render)).toBe("smithy/render/token-savings-m3");
+    });
+
+    it("dispatch identity falls back to hash-based stem when record lacks structure", async () => {
+      // Records without parent_path / parent_row_id (or unusual verbs) still
+      // need to dispatch — fall back to the legacy hash scheme rather than
+      // produce an ambiguous stem.
+      const loop = fs.readFileSync(await stageLoop(makeTmpDir()), "utf-8");
+      const deps = ["smithyVerb", "actionArguments", "slugifyDispatchPart", "hashText", "dispatchItemKey", "dispatchArtifactSlug", "dispatchIdentity"];
+      const dispatchSliceId = extractFn(loop, "dispatchSliceId", deps) as (item: unknown) => string;
+      const dispatchBranch = extractFn(loop, "dispatchBranch", deps) as (item: unknown) => string;
+      const dispatchIdentity = extractFn(loop, "dispatchIdentity", deps) as (item: unknown) => { semantic: boolean };
+
+      const orphan = {
+        path: "some/loose/artifact.md",
+        title: "Free-floating record",
+        next_action: { command: "smithy.forge", arguments: ["some/loose/artifact.md", "1"] },
+      };
+      expect(dispatchIdentity(orphan).semantic).toBe(false);
+      // Stem ends with -<8 hex chars>-<verb> in the fallback scheme.
+      expect(dispatchSliceId(orphan)).toMatch(/-[0-9a-f]{8}-forge$/);
+      expect(dispatchBranch(orphan)).toMatch(/^smithy\/forge\/.+-[0-9a-f]{8}$/);
+    });
+
+    it("parseBranchCollisionError extracts the branch name from hatchery spawn errors", async () => {
+      const loop = fs.readFileSync(await stageLoop(makeTmpDir()), "utf-8");
+      const parse = extractFn(loop, "parseBranchCollisionError") as (s: string) => string | null;
+      expect(parse("agent-deck manager launch failed:\nError: branch 'feature/smithy/forge/foo-bar' already exists (remove -b flag to use existing branch)\n")).toBe("feature/smithy/forge/foo-bar");
+      expect(parse("some unrelated error")).toBeNull();
+      expect(parse("")).toBeNull();
+    });
+
+    it("classifyBranchCollision returns autoSafe verdicts only for risk-free cases", async () => {
+      // Locks in the loop's policy: never auto-delete a branch with an open
+      // PR or with diverged work whose status is unknown. Open-PR and
+      // diverged-unknown must require operator/agent review.
+      const loop = fs.readFileSync(await stageLoop(makeTmpDir()), "utf-8");
+      const classify = extractFn(loop, "classifyBranchCollision") as (info: unknown) => { verdict: string; autoSafe: boolean };
+
+      // HEAD already on default branch => orphan ref, no diverged work
+      expect(classify({ head: "abc", isAncestor: true, prs: [] })).toMatchObject({ verdict: "orphan-ref", autoSafe: true });
+      // Merged PR + no open PR + diverged HEAD (squash-merge case)
+      expect(classify({ head: "abc", isAncestor: false, prs: [{ number: 1, state: "MERGED" }] })).toMatchObject({ verdict: "post-merge-stale", autoSafe: true });
+      // Open PR — must escalate even if also merged
+      expect(classify({ head: "abc", isAncestor: false, prs: [{ number: 1, state: "OPEN" }, { number: 2, state: "MERGED" }] })).toMatchObject({ verdict: "open-pr", autoSafe: false });
+      expect(classify({ head: "abc", isAncestor: true, prs: [{ number: 1, state: "OPEN" }] })).toMatchObject({ verdict: "open-pr", autoSafe: false });
+      // Diverged HEAD + no PR data — unknown work, escalate
+      expect(classify({ head: "abc", isAncestor: false, prs: [] })).toMatchObject({ verdict: "diverged-unknown", autoSafe: false });
+      // Null info (branch already gone) — nothing to recover
+      expect(classify(null)).toMatchObject({ verdict: "no-such-branch", autoSafe: false });
     });
 
     it("hatchery escalations notify the legate agent via processor_requests", async () => {

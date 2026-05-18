@@ -1809,14 +1809,64 @@ function sliceActionKey(slice) {
   });
 }
 
-function dispatchSliceId(item) {
+// Strip a known artifact suffix from a basename so the leftover is a short,
+// readable spec / RFC / features-file slug. Returns null if the suffix isn't
+// recognized so we can fall back to the hash-based name rather than misderive.
+function dispatchArtifactSlug(filename) {
+  if (typeof filename !== "string" || filename.length === 0) return null;
+  const base = filename.split("/").pop() || "";
+  const m = base.match(/^(.+?)\\.(?:spec|rfc|features|tasks)\\.md$/);
+  return m ? m[1] : null;
+}
+
+// Derive a structured identity (spec/RFC slug + US/M row + slice/feature/
+// milestone index) for a smithy status record. Produces a short, semantic
+// stem that mirrors how operators already hand-name slices ("us6-s1",
+// "spawn-dispatch-us7"). Returns the legacy hash-based stem only when the
+// record lacks the structure to derive a meaningful name — in that case
+// behavior is identical to the pre-refactor scheme.
+//
+// Branch / slice ID collisions are intentional under this scheme: the same
+// spec + US + slice yields the same name on every dispatch, so a collision
+// means "this is a re-attempt of the same logical work", which is exactly
+// what the loop's branch-collision recovery wants to surface (vs. an opaque
+// hash that hides whether the collision is meaningful).
+function dispatchIdentity(item) {
   const action = item?.next_action || {};
   const verb = smithyVerb(action.command);
   const args = actionArguments(action);
+  const parentSlug = dispatchArtifactSlug(item?.parent_path);
+  const row = String(item?.parent_row_id || "").trim().toLowerCase();
+  const numericTail = (s) => String(s || "").replace(/[^0-9]/g, "");
+  let stem = null;
+  if (verb === "forge" && parentSlug && row) {
+    const slice = numericTail(args[1]);
+    stem = parentSlug + "-" + row + (slice ? "-s" + slice : "");
+  } else if (verb === "cut" && parentSlug && row) {
+    const slice = numericTail(args[1]);
+    stem = parentSlug + "-" + row + (slice ? "-s" + slice : "");
+  } else if (verb === "mark" && parentSlug && row) {
+    const feature = numericTail(args[1]);
+    stem = parentSlug + "-" + row + (feature ? "-f" + feature : "");
+  } else if (verb === "render") {
+    const rfcSlug = dispatchArtifactSlug(args[0]) || parentSlug;
+    const milestone = numericTail(args[1]);
+    if (rfcSlug && milestone) stem = rfcSlug + "-m" + milestone;
+  }
+  if (stem) {
+    return { stem: slugifyDispatchPart(stem, "smithy"), verb, semantic: true };
+  }
+  // Fallback: original hash-based scheme. Keeps dispatch working for records
+  // without parent_path / parent_row_id structure.
   const basis = [item?.path || item?.title || "smithy", ...args].join(" ");
-  const stem = slugifyDispatchPart(basis, "smithy").slice(0, 44);
+  const truncStem = slugifyDispatchPart(basis, "smithy").slice(0, 44);
   const hash = hashText(dispatchItemKey(item)).slice(0, 8);
-  return stem + "-" + slugifyDispatchPart(verb, "step") + "-" + hash;
+  return { stem: truncStem + "-" + hash, verb, semantic: false };
+}
+
+function dispatchSliceId(item) {
+  const { stem, verb } = dispatchIdentity(item);
+  return stem + "-" + slugifyDispatchPart(verb, "step");
 }
 
 function dispatchTitle(item) {
@@ -1827,11 +1877,8 @@ function dispatchTitle(item) {
 }
 
 function dispatchBranch(item) {
-  const action = item?.next_action || {};
-  const verb = slugifyDispatchPart(smithyVerb(action.command), "step");
-  const stem = slugifyDispatchPart([item?.title || item?.path || "work", ...actionArguments(action)].join(" "), "work").slice(0, 44);
-  const hash = hashText(dispatchItemKey(item)).slice(0, 8);
-  return "smithy/" + verb + "/" + stem + "-" + hash;
+  const { stem, verb } = dispatchIdentity(item);
+  return "smithy/" + slugifyDispatchPart(verb, "step") + "/" + stem;
 }
 
 function isTerminalSlice(slice) {
@@ -2202,6 +2249,108 @@ function launchHatcheryDispatch(item, resultPath, logPath) {
 // codex spawn completes within a couple of minutes.
 const HATCHERY_PENDING_TIMEOUT_MS = 15 * 60 * 1000;
 
+// Pull the branch name out of a hatchery spawn error like
+//   "branch 'feature/smithy/forge/...' already exists"
+// Returns null when the error isn't a branch collision so callers fall
+// through to the normal escalation path.
+function parseBranchCollisionError(text) {
+  const match = String(text || "").match(/branch '([^']+)' already exists/);
+  return match ? match[1] : null;
+}
+
+// Inspect a local branch enough to classify a collision: where its HEAD
+// sits, whether the work already landed on the default branch, and what
+// PRs exist for it. All read-only — caller decides whether to act.
+function inspectCollidedBranch(repoPath, defaultBranch, branchName) {
+  let head = null;
+  try {
+    head = execText("git", ["rev-parse", branchName], { cwd: repoPath }).trim();
+  } catch {
+    // branch doesn't exist locally anymore — nothing to recover.
+    return null;
+  }
+  let isAncestor = false;
+  if (defaultBranch) {
+    try {
+      execText("git", ["merge-base", "--is-ancestor", branchName, defaultBranch], { cwd: repoPath });
+      isAncestor = true;
+    } catch {
+      isAncestor = false;
+    }
+  }
+  let prs = [];
+  try {
+    const out = execText("gh", ["pr", "list", "--head", branchName, "--state", "all", "--json", "number,state"], { cwd: repoPath });
+    prs = JSON.parse(out);
+    if (!Array.isArray(prs)) prs = [];
+  } catch {
+    // gh failures (auth, network) leave prs empty; verdict falls through to
+    // diverged-unknown which escalates rather than silently delete.
+    prs = [];
+  }
+  return { head, isAncestor, prs };
+}
+
+function classifyBranchCollision(info) {
+  if (!info) return { verdict: "no-such-branch", autoSafe: false };
+  const open = info.prs.filter((p) => p && p.state === "OPEN");
+  const merged = info.prs.filter((p) => p && p.state === "MERGED");
+  if (open.length > 0) {
+    return { verdict: "open-pr", autoSafe: false, open, merged };
+  }
+  if (info.isAncestor) {
+    // Branch HEAD is already an ancestor of the default branch — there's no
+    // diverged work to lose. Safe to delete.
+    return { verdict: "orphan-ref", autoSafe: true, open, merged };
+  }
+  if (merged.length > 0) {
+    // PR was squash-merged so HEAD isn't an ancestor, but the work landed.
+    // Safe to delete the stale ref.
+    return { verdict: "post-merge-stale", autoSafe: true, open, merged };
+  }
+  return { verdict: "diverged-unknown", autoSafe: false, open, merged };
+}
+
+function deleteHatcheryArtifacts(slice) {
+  const remove = (p) => {
+    if (typeof p !== "string" || p.length === 0) return;
+    try { fs.unlinkSync(p); } catch { /* best effort */ }
+  };
+  remove(slice?.hatchery?.hatchery_request_path);
+  remove(slice?.hatchery?.hatchery_result_path);
+  remove(slice?.hatchery?.hatchery_log_path);
+}
+
+// Attempt to recover from a "branch already exists" dispatch failure
+// without operator help. Reads classifyBranchCollision; for verdicts marked
+// autoSafe, deletes the stale branch and removes the slice from state so the
+// loop re-dispatches it on the next tick. For everything else, returns the
+// verdict + detail string so the caller can include them in the escalation
+// notification.
+function tryRecoverBranchCollision(state, slice, sliceId, errorText) {
+  const branchName = parseBranchCollisionError(errorText);
+  if (!branchName) return null;
+  const repoPath = state?.repo?.path || meta.repo?.path;
+  if (typeof repoPath !== "string" || repoPath.length === 0) return null;
+  const defaultBranch = state?.repo?.default_branch || meta.repo?.default_branch || null;
+  const info = inspectCollidedBranch(repoPath, defaultBranch, branchName);
+  const classification = classifyBranchCollision(info);
+  const summary = info
+    ? "branch=" + branchName + " head=" + (info.head || "").slice(0, 7) + " ancestor-of-" + (defaultBranch || "default") + "=" + info.isAncestor + " open_prs=[" + classification.open.map((p) => "#" + p.number).join(",") + "] merged_prs=[" + classification.merged.map((p) => "#" + p.number).join(",") + "]"
+    : "branch=" + branchName + " (no local ref)";
+  if (!classification.autoSafe) {
+    return { recovered: false, verdict: classification.verdict, detail: summary };
+  }
+  try {
+    execText("git", ["branch", "-D", branchName], { cwd: repoPath });
+  } catch (err) {
+    return { recovered: false, verdict: classification.verdict + "-delete-failed", detail: summary + " | branch delete failed: " + (err?.message || String(err)) };
+  }
+  deleteHatcheryArtifacts(slice);
+  delete state.slices[sliceId];
+  return { recovered: true, verdict: classification.verdict, detail: summary + " | branch deleted, slice released for re-dispatch" };
+}
+
 function completePendingHatcheryDispatches(state, ts) {
   const actions = [];
   const failures = [];
@@ -2218,7 +2367,7 @@ function completePendingHatcheryDispatches(state, ts) {
     notifications.push({
       slice, sliceId, requestKey: key,
       reason: "hatchery_dispatch_failed",
-      detail: "Hatchery dispatch for " + actionCommandLine({ command: slice.command, arguments: slice.arguments || [] }) + " escalated: " + reason + ".\\n\\nError:\\n" + String(error || "(no detail)").trim() + "\\n\\nSlice has been marked escalated in state.json. Inspect with legate.error or operator-clear with smithy.status as appropriate.",
+      detail: "Hatchery dispatch for " + actionCommandLine({ command: slice.command, arguments: slice.arguments || [] }) + " escalated: " + reason + ".\\n\\nError:\\n" + String(error || "(no detail)").trim() + "\\n\\nSlice has been marked escalated in state.json. The loop auto-recovers orphan-ref and post-merge-stale branch collisions; anything with an open PR or unknown divergence reaches here for operator inspection. Otherwise run legate.error for worker-side recovery.",
     });
   };
   const escalateStale = (slice, sliceId, reason) => {
@@ -2264,11 +2413,27 @@ function completePendingHatcheryDispatches(state, ts) {
     }
     if (result.error) {
       const errorText = String(result.error).trim();
+      // Auto-recover branch-collision failures when the branch is provably
+      // safe to delete (HEAD on default branch, or merged-PR + no open PR).
+      // Anything ambiguous falls through to escalation with the verdict
+      // included in the detail so the agent / operator has the full context.
+      const recovery = tryRecoverBranchCollision(state, slice, sliceId, errorText);
+      if (recovery && recovery.recovered) {
+        actions.push({
+          action: "auto-recovered",
+          sliceId,
+          sessionId: null,
+          detail: "branch-collision " + recovery.verdict + " auto-recovered: " + recovery.detail,
+        });
+        mutated = true;
+        continue;
+      }
+      const detail = recovery ? errorText + "\\n\\nLoop verdict: " + recovery.detail : errorText;
       slice.stage = "escalated";
       slice.last_action = ts;
-      slice.last_action_note = "NEED: Hatchery dispatch failed: " + errorText;
-      failures.push({ slice_id: sliceId, command: actionCommandLine({ command: slice.command, arguments: slice.arguments || [] }), error: errorText });
-      queueDispatchEscalation(slice, sliceId, "spawn-error", errorText);
+      slice.last_action_note = "NEED: Hatchery dispatch failed: " + detail;
+      failures.push({ slice_id: sliceId, command: actionCommandLine({ command: slice.command, arguments: slice.arguments || [] }), error: detail });
+      queueDispatchEscalation(slice, sliceId, recovery ? "branch-collision-" + recovery.verdict : "spawn-error", detail);
       mutated = true;
       continue;
     }
