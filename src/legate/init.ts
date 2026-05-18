@@ -3048,6 +3048,78 @@ function stageDispatchMessage(sliceId, result) {
   return target;
 }
 
+// Ghost-steward cleanup: launchAgentDeckManager creates the agent-deck
+// session BEFORE codex spawn + patch apply + manager-prompt send. If anything
+// fails after the launch but before the success path (codex truncation,
+// "already exists in index", etc.) the session is left dangling: its worktree
+// is empty, claude is running with no prompt to act on, and the slice it
+// belongs to is either escalated or gone from state.slices. The session is
+// alive enough that agentDeckSessionHoldsWorktree() refuses to delete its
+// branch, which blocks future dispatches of the same artifact.
+//
+// Detect such sessions on each tick and remove them. A session is a ghost
+// when:
+//   - it's in the worker_group, AND
+//   - its worktree path's basename doesn't match the expected worktree dir
+//     of any non-terminal slice's branch, AND
+//   - it's at least 5 minutes old (give legitimate launches time to be
+//     linked to their slice's worker_session_id)
+function runGhostStewardCleanup(state, workerList, ts) {
+  const actions = [];
+  let mutated = false;
+  if (!Array.isArray(workerList)) return { actions, mutated };
+  const slices = state?.slices && typeof state.slices === "object" ? state.slices : {};
+  const activeDirs = new Set();
+  const activeSessionIds = new Set();
+  for (const [_sid, slice] of Object.entries(slices)) {
+    if (!slice || typeof slice !== "object") continue;
+    if (isTerminalSlice(slice)) continue;
+    const sessId = slice.worker_session_id;
+    if (typeof sessId === "string" && sessId.length > 0) activeSessionIds.add(sessId);
+    const br = typeof slice.branch === "string" ? slice.branch : "";
+    if (br.length === 0) continue;
+    // Slice tracks the bare branch (e.g., "smithy/forge/...") while agent-deck
+    // creates "feature/<branch>" worktree dirs. Cover both forms.
+    const stripped = br.replace(/^feature\\//, "");
+    activeDirs.add("feature-" + stripped.replace(/\\//g, "-"));
+  }
+  const nowMs = Date.parse(ts);
+  const minAgeMs = 5 * 60 * 1000;
+  for (const session of workerList) {
+    if (!session || typeof session !== "object") continue;
+    if (!isWorkerSession(session)) continue;
+    if (typeof session.id === "string" && activeSessionIds.has(session.id)) continue;
+    const worktreePath = session.worktreePath || session.worktree_path || session.path;
+    if (typeof worktreePath !== "string" || worktreePath.length === 0) continue;
+    const dirName = path.basename(worktreePath);
+    if (activeDirs.has(dirName)) continue;
+    const createdAt = Date.parse(session.created_at || session.createdAt || "");
+    if (Number.isFinite(createdAt) && Number.isFinite(nowMs) && nowMs - createdAt < minAgeMs) continue;
+    try {
+      execFileSync("agent-deck", ["-p", meta.profile, "session", "remove", session.id, "--prune-worktree", "--force"], {
+        encoding: "utf-8",
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      actions.push({
+        action: "ghost-cleanup",
+        sessionId: session.id,
+        title: session.title || "",
+        detail: "removed ghost steward (worktree " + dirName + " not tracked by any non-terminal slice)",
+      });
+      mutated = true;
+    } catch (err) {
+      // Surface the failure as a note but keep going — next tick can retry.
+      actions.push({
+        action: "ghost-cleanup-failed",
+        sessionId: session.id,
+        title: session.title || "",
+        detail: "agent-deck session remove failed for " + dirName + ": " + (err?.message || String(err)).slice(0, 200),
+      });
+    }
+  }
+  return { actions, mutated };
+}
+
 function runDispatch(state, ts) {
   const actions = [];
   const failures = [];
@@ -3193,12 +3265,16 @@ function tick() {
   }
   const workerList = agentDeckList();
   const cleanupResult = cleanupTerminalPrs(state, workerList, ts);
-  const babysitWorkerList = cleanupResult.cleanups.length > 0
+  const postCleanupWorkerList = cleanupResult.cleanups.length > 0
     ? agentDeckList()
     : workerList;
+  const ghostResult = runGhostStewardCleanup(state, postCleanupWorkerList, ts);
+  const babysitWorkerList = ghostResult.actions.length > 0
+    ? agentDeckList()
+    : postCleanupWorkerList;
   const babysitResult = runBabysit(state, babysitWorkerList, ts);
   const dispatchResult = runDispatch(state, ts);
-  const summaryWorkerList = cleanupResult.cleanups.length > 0 || babysitResult.actions.length > 0 || dispatchResult.actions.length > 0
+  const summaryWorkerList = cleanupResult.cleanups.length > 0 || ghostResult.actions.length > 0 || babysitResult.actions.length > 0 || dispatchResult.actions.length > 0
     ? agentDeckList()
     : workerList;
   const workers = summarizeWorkers(summaryWorkerList);
@@ -3220,6 +3296,7 @@ function tick() {
     workers,
     cleanup_count: cleanupResult.cleanups.length,
     cleanup_failure_count: cleanupResult.failures.length,
+    ghost_cleanup_count: ghostResult.actions.filter((a) => a.action === "ghost-cleanup").length,
     babysit_action_count: babysitResult.actions.length,
     processor_request_count: babysitResult.requests.length,
     dispatch_action_count: dispatchResult.actions.length,
@@ -3229,6 +3306,21 @@ function tick() {
   for (const cleanup of cleanupResult.cleanups) {
     append(meta.processor_events_path, cleanup);
     appendText(meta.processor_log_path, formatCleanupLine(cleanup));
+  }
+  for (const action of ghostResult.actions) {
+    const event = {
+      schema_version: 1,
+      ts,
+      processor: meta.processor_name,
+      paired_legate: meta.paired_legate,
+      kind: "ghost_cleanup",
+      action: action.action,
+      session_id: action.sessionId,
+      title: action.title,
+      detail: action.detail,
+    };
+    append(meta.processor_events_path, event);
+    appendText(meta.processor_log_path, "[" + ts + "] " + action.action + " " + action.sessionId + " " + (action.title || "") + ": " + action.detail + "\\n");
   }
   for (const failure of cleanupResult.failures) {
     append(meta.processor_events_path, {
@@ -3293,7 +3385,7 @@ function tick() {
   }
   appendText(
     meta.processor_log_path,
-    \`[\${ts}] heartbeat slice_count=\${record.slice_count} archived=\${record.archived_slice_count} cleanups=\${record.cleanup_count} babysit_actions=\${record.babysit_action_count} dispatches=\${record.dispatch_action_count} processor_requests=\${record.processor_request_count} workers=\${JSON.stringify(workers)}\${stateError ? " state_error=" + stateError : ""}\`,
+    \`[\${ts}] heartbeat slice_count=\${record.slice_count} archived=\${record.archived_slice_count} cleanups=\${record.cleanup_count} ghost_cleanups=\${record.ghost_cleanup_count} babysit_actions=\${record.babysit_action_count} dispatches=\${record.dispatch_action_count} processor_requests=\${record.processor_request_count} workers=\${JSON.stringify(workers)}\${stateError ? " state_error=" + stateError : ""}\`,
   );
 }
 
