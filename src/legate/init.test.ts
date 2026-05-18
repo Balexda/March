@@ -561,8 +561,9 @@ describe("legate module", () => {
         next_action: { command: "smithy.forge", arguments: ["some/loose/artifact.md", "1"] },
       };
       expect(dispatchIdentity(orphan).semantic).toBe(false);
-      // Stem ends with -<8 hex chars>-<verb> in the fallback scheme.
-      expect(dispatchSliceId(orphan)).toMatch(/-[0-9a-f]{8}-forge$/);
+      // Fallback IDs use the legacy <stem>-<verb>-<hash> order so existing
+      // state.json / archive entries keyed by the legacy ID keep matching.
+      expect(dispatchSliceId(orphan)).toMatch(/-forge-[0-9a-f]{8}$/);
       expect(dispatchBranch(orphan)).toMatch(/^smithy\/forge\/.+-[0-9a-f]{8}$/);
     });
 

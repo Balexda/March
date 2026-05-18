@@ -1854,19 +1854,23 @@ function dispatchIdentity(item) {
     if (rfcSlug && milestone) stem = rfcSlug + "-m" + milestone;
   }
   if (stem) {
-    return { stem: slugifyDispatchPart(stem, "smithy"), verb, semantic: true };
+    return { stem: slugifyDispatchPart(stem, "smithy"), verb, hash: null, semantic: true };
   }
   // Fallback: original hash-based scheme. Keeps dispatch working for records
-  // without parent_path / parent_row_id structure.
+  // without parent_path / parent_row_id structure. Order is preserved
+  // exactly so existing state.json / archive entries keyed by the legacy
+  // ID continue to match: dispatchSliceId is "<stem>-<verb>-<hash>",
+  // dispatchBranch is "smithy/<verb>/<stem>-<hash>".
   const basis = [item?.path || item?.title || "smithy", ...args].join(" ");
   const truncStem = slugifyDispatchPart(basis, "smithy").slice(0, 44);
   const hash = hashText(dispatchItemKey(item)).slice(0, 8);
-  return { stem: truncStem + "-" + hash, verb, semantic: false };
+  return { stem: truncStem, verb, hash, semantic: false };
 }
 
 function dispatchSliceId(item) {
-  const { stem, verb } = dispatchIdentity(item);
-  return stem + "-" + slugifyDispatchPart(verb, "step");
+  const { stem, verb, hash, semantic } = dispatchIdentity(item);
+  const verbSlug = slugifyDispatchPart(verb, "step");
+  return semantic ? stem + "-" + verbSlug : stem + "-" + verbSlug + "-" + hash;
 }
 
 function dispatchTitle(item) {
@@ -1877,8 +1881,11 @@ function dispatchTitle(item) {
 }
 
 function dispatchBranch(item) {
-  const { stem, verb } = dispatchIdentity(item);
-  return "smithy/" + slugifyDispatchPart(verb, "step") + "/" + stem;
+  const { stem, verb, hash, semantic } = dispatchIdentity(item);
+  const verbSlug = slugifyDispatchPart(verb, "step");
+  return semantic
+    ? "smithy/" + verbSlug + "/" + stem
+    : "smithy/" + verbSlug + "/" + stem + "-" + hash;
 }
 
 function isTerminalSlice(slice) {
