@@ -38,7 +38,7 @@ The milestone-level execution plan (M-A through M-H, success criteria, dependenc
 
 Day-to-day commands:
 
-- **`npm test`** — runs the deterministic CI suite. Today that's the full vitest set: L0, L1, and the L2 cases that exercise real Docker (`spawn/container-launch`, `spawn/snapshot-build`, `hatchery/legate-container`). Cassette-replayed L2/L3 will land here as the [Roadmap](docs/testing-strategy.md#9-roadmap) progresses. Cost: $0, < 2 minutes. Runs on every push and PR.
+- **`npm test`** — runs the deterministic CI suite. Today that's the full vitest set: L0, L1, and the L2 cases that exercise real Docker (`spawn/container-launch`, `spawn/snapshot-build`, `hatchery/legate-container`). Cassette-replayed L2/L3 will land here as the [RFC milestones](docs/rfcs/2026-002-layered-testing-framework/layered-testing-framework.rfc.md#milestones) progress. Cost: $0, < 2 minutes. Runs on every push and PR.
 - **`npm run typecheck`** — `tsc --noEmit`.
 
 Agent-driven and human tests:
@@ -59,4 +59,4 @@ Before publishing a new version:
 3. Human tests (H1–H2) verified in an interactive terminal
 4. Trigger the **Publish to npm** workflow with both test gate checkboxes checked
 
-See **[docs/testing-strategy.md § Cost policy](docs/testing-strategy.md#6-cost-policy)** for how scheduled stochastic runs and cassette refresh interact with the release flow once Phase 2+ of the Roadmap lands.
+See **[docs/testing-strategy.md § Cost policy](docs/testing-strategy.md#6-cost-policy)** for the principles, and the [RFC milestones](docs/rfcs/2026-002-layered-testing-framework/layered-testing-framework.rfc.md#milestones) for the sequencing — scheduled stochastic runs and cassette refresh interact with the release flow once those milestones land.

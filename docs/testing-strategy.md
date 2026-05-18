@@ -126,7 +126,7 @@ This document is principles-first, but the principles are easier to apply when y
 
 ## 8. What this strategy does NOT cover
 
-- The specific milestone sequencing, scope, success criteria, and dependencies that turn this strategy into shipped infrastructure. That lives in [`docs/rfcs/2026-002-layered-testing-framework/layered-testing-framework.rfc.md`](rfcs/2026-002-layered-testing-framework/layered-testing-framework.rfc.md), the gap-analysis baseline of today's tests, and per-milestone specs derived from the RFC.
+- The specific milestone sequencing, scope, success criteria, dependencies, and gap-analysis baseline of today's tests that turn this strategy into shipped infrastructure. That all lives in [`docs/rfcs/2026-002-layered-testing-framework/layered-testing-framework.rfc.md`](rfcs/2026-002-layered-testing-framework/layered-testing-framework.rfc.md) and the per-milestone specs derived from it.
 - Eval rubrics for agent output quality. A future Smithy spec will define these — `pass^k` is the right metric *shape*, but the per-scenario thresholds need their own design.
 - Production observability and SLOs. That's operations-doc territory.
 - Anything Smithy-side. `smithy test` covers slice-level test plans for individual specs; this strategy is March's harness-side complement, not a replacement for it.
