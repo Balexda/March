@@ -113,12 +113,22 @@ export function extractPatchFromSpawnOutput(output: string): string {
 
   const markerIndex = output.indexOf("diff --git ");
   if (markerIndex >= 0) {
-    return output.slice(markerIndex).trimEnd() + "\n";
+    return normalizeTrailingNewline(output.slice(markerIndex));
   }
 
   throw new HatcherySpawnError(
     "Spawn completed but no git patch was found in its output. Expected a JSON/JSONL `patch` field or raw output beginning with `diff --git`.",
   );
+}
+
+// Strip only trailing newlines, then add exactly one. Unlike trimEnd(), this
+// preserves trailing whitespace-only context lines (e.g., " \n") that are part
+// of the hunk content — stripping them changes the hunk's line count and makes
+// `git apply` reject the patch as corrupt.
+function normalizeTrailingNewline(text: string): string {
+  let end = text.length;
+  while (end > 0 && text.charCodeAt(end - 1) === 0x0a) end--;
+  return text.slice(0, end) + "\n";
 }
 
 function extractPatchFromJsonOutput(output: string): string | null {
@@ -190,11 +200,19 @@ function patchFromJsonValue(
 }
 
 function patchFromText(text: string): string | null {
-  const fenced = text.match(/```(?:diff|patch)?\s*\n([\s\S]*?diff --git [\s\S]*?)```/);
-  if (fenced?.[1]) return fenced[1].trimEnd() + "\n";
+  // Require the closing fence to be at line start, optionally indented with
+  // spaces or tabs (CommonMark allows up to 3 spaces of indentation on the
+  // closing fence). Inner ```ts / ```diff fences embedded as added patch
+  // lines are prefixed by `+` (or `-`/space-then-content for context), so
+  // they fail this anchor and don't terminate the match. Only the outer
+  // closing fence on its own line matches.
+  const fenced = text.match(
+    /```(?:diff|patch)?[^\n]*\n([\s\S]*?diff --git [\s\S]*?)\n[ \t]*```[ \t]*(?:\r?\n|\r|$)/,
+  );
+  if (fenced?.[1]) return normalizeTrailingNewline(fenced[1]);
 
   const markerIndex = text.indexOf("diff --git ");
-  if (markerIndex >= 0) return text.slice(markerIndex).trimEnd() + "\n";
+  if (markerIndex >= 0) return normalizeTrailingNewline(text.slice(markerIndex));
 
   return null;
 }
