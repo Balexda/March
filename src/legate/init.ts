@@ -1193,15 +1193,20 @@ function alreadyDispatched(slice, key) {
 // enough to avoid false positives on slow verification suites but tight
 // enough that the operator isn't waiting hours on a session that gave up
 // post-push. After the first nudge, re-nudge every interval until the slice
-// either makes it to "pr-open" or hits the total budget — sonnet often
-// completes one stage per turn (commit, push, gh pr create), so a single
-// nudge typically only advances the workflow one step. Re-nudge until the PR
-// appears.
+// either makes it to "pr-open" or the operator manually intervenes — sonnet
+// often completes one stage per turn (commit, push, gh pr create), so a
+// single nudge typically only advances the workflow one step.
+//
+// alertEscalateMs sends ONE [PROCESSOR] notification to the legate-agent at
+// the 25-min mark so the operator knows the steward is taking unusually
+// long; but the watchdog KEEPS nudging — giving up entirely would strand
+// the slice (operator can manually escalate further if intervention is
+// actually needed).
 function strandedStewardConfig() {
   return {
     initialNudgeMs: 10 * 60 * 1000,
     repeatNudgeMs: 5 * 60 * 1000,
-    escalateMs: 25 * 60 * 1000,
+    alertEscalateMs: 25 * 60 * 1000,
     message: [
       "[STRANDED-STEWARD-NUDGE] The deterministic loop sees no PR for this slice yet.",
       "Resume the Hatchery manager workflow where you left off:",
@@ -1218,9 +1223,12 @@ function strandedStewardConfig() {
   };
 }
 
-// Returns "nudged" if we sent (or re-sent) a nudge this tick, "escalate" if
-// the total budget has elapsed without a PR, or null if neither condition is
-// met yet (too early, or already escalated).
+// Returns "nudged" if we sent (or re-sent) a nudge this tick, "alert" if
+// this is the first tick past the 25-min budget (one-time operator alert),
+// or null if neither condition is met (too early, or alert already fired).
+// Keeps nudging on every repeat interval regardless of total elapsed time —
+// giving up would strand the slice forever, and the operator can intervene
+// manually if the alert fires.
 function maybeNudgeStrandedSteward(slice, sliceId, sessionId, ts, sendMessage = sendAgentDeckMessage) {
   if (slice.stage !== "implementing") return null;
   if (!sessionId) return null;
@@ -1230,12 +1238,6 @@ function maybeNudgeStrandedSteward(slice, sliceId, sessionId, ts, sendMessage = 
   if (!Number.isFinite(startedAt) || !Number.isFinite(nowMs)) return null;
   const elapsed = nowMs - startedAt;
   if (elapsed < cfg.initialNudgeMs) return null;
-  // Escalation budget reached — escalate once, idempotently.
-  if (elapsed >= cfg.escalateMs) {
-    if (slice.steward_stranded_escalated_at) return null;
-    slice.steward_stranded_escalated_at = ts;
-    return "escalate";
-  }
   const nudgedAt = Date.parse(slice.steward_nudge_sent_at || "");
   // First nudge: at initialNudgeMs.
   if (!Number.isFinite(nudgedAt)) {
@@ -1248,16 +1250,26 @@ function maybeNudgeStrandedSteward(slice, sliceId, sessionId, ts, sendMessage = 
     slice.steward_nudge_count = 1;
     return "nudged";
   }
-  // Re-nudge: every repeatNudgeMs after the previous nudge, until escalate.
-  if (nowMs - nudgedAt < cfg.repeatNudgeMs) return null;
+  // Past the 25-min budget: send ONE operator alert, then keep nudging.
+  // The alert is the operator's signal to manually intervene if desired,
+  // but the watchdog keeps doing its job either way.
+  let alertFired = false;
+  if (elapsed >= cfg.alertEscalateMs && !slice.steward_stranded_escalated_at) {
+    slice.steward_stranded_escalated_at = ts;
+    alertFired = true;
+  }
+  // Re-nudge: every repeatNudgeMs after the previous nudge. No upper bound.
+  if (nowMs - nudgedAt < cfg.repeatNudgeMs) {
+    return alertFired ? "alert" : null;
+  }
   try {
     sendMessage(sessionId, cfg.message, false);
   } catch {
-    return null;
+    return alertFired ? "alert" : null;
   }
   slice.steward_nudge_sent_at = ts;
   slice.steward_nudge_count = (slice.steward_nudge_count || 1) + 1;
-  return "nudged";
+  return alertFired ? "alert" : "nudged";
 }
 
 function sendAgentDeckMessage(sessionId, message, wait = false) {
@@ -1718,18 +1730,19 @@ function runBabysit(state, workerList, ts) {
         // Send a single explicit nudge to resume; if that doesn't produce a
         // PR by the next watchdog interval, escalate for operator review.
         const nudgeOutcome = maybeNudgeStrandedSteward(slice, sliceId, sessionId, ts);
-        if (nudgeOutcome === "nudged") {
+        if (nudgeOutcome === "nudged" || nudgeOutcome === "alert") {
           mutated = true;
           actions.push({ action: "steward-nudge", sliceId, sessionId, detail: "sent stranded-steward nudge (count " + (slice.steward_nudge_count || 1) + ") — implementing for " + Math.round((Date.parse(ts) - Date.parse(slice.implementing_started_at || ts)) / 60000) + "min with no PR" });
-        } else if (nudgeOutcome === "escalate") {
+        }
+        if (nudgeOutcome === "alert") {
           const request = requestLegateJudgement({
             ts,
             slice,
-            requestKey: actionKey("steward-stranded", { number: 0 }, "second"),
+            requestKey: actionKey("steward-stranded", { number: 0 }, "alert"),
             sliceId,
             sessionId,
-            reason: "steward stranded after dispatch",
-            detail: "Slice has been in 'implementing' for >" + strandedStewardConfig().escalateMs / 60000 + "min with no PR despite a follow-up nudge. The steward likely exited before opening the PR; operator must inspect the worktree at " + (slice.worktree_path || "(unknown)") + " and either run 'gh pr create' manually or re-dispatch.",
+            reason: "steward stranded after dispatch (watchdog still nudging)",
+            detail: "Slice has been in 'implementing' for >" + strandedStewardConfig().alertEscalateMs / 60000 + "min with no PR. The watchdog is still re-nudging every 5 min; operator can manually inspect the worktree at " + (slice.worktree_path || "(unknown)") + " and run 'gh pr create' if the steward is genuinely stuck.",
           });
           if (request) {
             requests.push(request);

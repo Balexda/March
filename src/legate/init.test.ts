@@ -706,12 +706,13 @@ describe("legate module", () => {
       expect(state.slices.s1).toBeDefined();
     });
 
-    it("maybeNudgeStrandedSteward re-nudges every 5 min after first nudge until 25 min budget", async () => {
+    it("maybeNudgeStrandedSteward keeps nudging past 25-min alert; alert fires once", async () => {
       // Watchdog for stewards that exit between push and `gh pr create`.
       // sonnet typically completes only one stage per turn (commit, then
       // push, then gh pr create), so a single nudge often only advances the
-      // workflow one step. The watchdog re-nudges every interval until the
-      // PR opens or the total budget runs out.
+      // workflow one step. The watchdog re-nudges every 5 min indefinitely
+      // — giving up entirely would strand the slice — but fires a single
+      // operator alert at 25 min as a "this is taking unusually long" signal.
       const loop = fs.readFileSync(await stageLoop(makeTmpDir()), "utf-8");
       const nudge = extractFn(
         loop,
@@ -733,32 +734,37 @@ describe("legate module", () => {
       expect(sends.length).toBe(1);
       expect(sends[0].msg).toContain("[STRANDED-STEWARD-NUDGE]");
       expect(sends[0].msg).toContain("gh pr create");
-      expect(slice.steward_nudge_sent_at).toBe("2026-05-18T10:10:00.000Z");
       expect(slice.steward_nudge_count).toBe(1);
 
-      // 1 min after first nudge: too soon for re-nudge.
-      expect(nudge(slice, "s1", "sess-1", "2026-05-18T10:11:00.000Z", sendStub)).toBeNull();
-      expect(sends.length).toBe(1);
-
-      // 5 min after first nudge (15 min total): re-nudge.
+      // 5 min after first nudge: re-nudge.
       const r2 = nudge(slice, "s1", "sess-1", "2026-05-18T10:15:00.000Z", sendStub);
       expect(r2).toBe("nudged");
       expect(sends.length).toBe(2);
       expect(slice.steward_nudge_count).toBe(2);
 
-      // Another 5 min (20 min total): re-nudge again.
+      // 20 min: re-nudge again.
       const r3 = nudge(slice, "s1", "sess-1", "2026-05-18T10:20:00.000Z", sendStub);
       expect(r3).toBe("nudged");
       expect(sends.length).toBe(3);
       expect(slice.steward_nudge_count).toBe(3);
 
-      // 25 min total: escalate.
+      // 25 min: alert fires (operator-visible warning) AND nudge fires.
       const r4 = nudge(slice, "s1", "sess-1", "2026-05-18T10:25:00.000Z", sendStub);
-      expect(r4).toBe("escalate");
+      expect(r4).toBe("alert");
+      expect(sends.length).toBe(4);
+      expect(slice.steward_nudge_count).toBe(4);
       expect(slice.steward_stranded_escalated_at).toBe("2026-05-18T10:25:00.000Z");
 
-      // Once escalated, subsequent ticks must NOT re-escalate.
-      expect(nudge(slice, "s1", "sess-1", "2026-05-18T10:30:00.000Z", sendStub)).toBeNull();
+      // 30 min: keep nudging (alert already fired, no new alert).
+      const r5 = nudge(slice, "s1", "sess-1", "2026-05-18T10:30:00.000Z", sendStub);
+      expect(r5).toBe("nudged");
+      expect(sends.length).toBe(5);
+      expect(slice.steward_nudge_count).toBe(5);
+
+      // 90 min — many cycles later, still nudging. No upper bound.
+      const r6 = nudge(slice, "s1", "sess-1", "2026-05-18T11:30:00.000Z", sendStub);
+      expect(r6).toBe("nudged");
+      expect(slice.steward_nudge_count).toBe(6);
     });
 
     it("maybeNudgeStrandedSteward ignores slices that aren't in implementing", async () => {
