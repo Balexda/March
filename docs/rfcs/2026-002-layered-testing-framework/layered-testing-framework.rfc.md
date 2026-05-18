@@ -4,7 +4,7 @@
 
 ## Summary
 
-This RFC commits March to a two-axis test taxonomy — scope (L0–L3) crossed with determinism (deterministic vs. stochastic) — and to a cassette-replayed integration tier that makes cross-subsystem coverage affordable on a $0 PR gate. Execution is sequenced across eight vertical-slice milestones (M-A through M-H), each delivering an end-to-end working capability with explicit exit criteria. The strategy doc at [`docs/testing-strategy.md`](../../testing-strategy.md) remains the long-lived principles companion; this RFC is the commitment, sequencing, and per-milestone success criteria that turn those principles into shipped infrastructure.
+This RFC commits March to a two-axis test taxonomy — scope (L0–L3) crossed with determinism (deterministic vs. stochastic) — and to a cassette-replayed integration tier that makes cross-subsystem coverage affordable on a $0 PR gate. Execution is sequenced across eight vertical-slice milestones (M1 through M8), each delivering an end-to-end working capability with explicit exit criteria. The strategy doc at [`docs/testing-strategy.md`](../../testing-strategy.md) remains the long-lived principles companion; this RFC is the commitment, sequencing, and per-milestone success criteria that turn those principles into shipped infrastructure.
 
 ## Motivation / Problem Statement
 
@@ -31,12 +31,12 @@ The goal: a harness where every cross-subsystem contract has a deterministic tes
 ## Out of Scope
 
 - **Production observability and SLOs** — operations-doc territory, not the testing framework.
-- **Production AI-flow observability** (Langfuse/Phoenix/Braintrust-style traces of live agent usage feeding back into operator dashboards) — a separate concern from CI eval; deferred to a future trace-RFC, not part of this framework.
-- **Distributed-system traces** (OpenTelemetry-style instrumentation across containers) — deferred to a future RFC; not part of this framework.
+- **Production AI-flow observability** (Langfuse/Phoenix/Braintrust-style traces of live agent usage feeding back into operator dashboards) — a separate concern from CI eval; if a future RFC adopts a production-tracing platform that work is owned there, not here.
+- **Distributed-system traces** (OpenTelemetry-style instrumentation across containers) — out of scope for a harness-side testing framework; if production tracing lands it will be owned by its own RFC.
 - **Smithy-side testing** — `smithy test` covers slice-level test plans for individual specs and remains the authoritative Smithy-side surface; this RFC is March's harness-side complement, not a replacement.
 - **TTY-only H1–H2 tests in `tests/Manual.tests.md`** — readline TTY behavior is genuinely human-test territory and stays as-is; this RFC does not propose automating them.
 - **Framework reselection** — vitest for L0/L1, Cucumber.js for L2/L3, and PromptFoo for the stochastic suite are locked by `docs/testing-strategy.md` §5 and §7; revisiting that choice is out of scope here.
-- **Herald implementation itself** — M-H consumes Herald events to feed regression cassettes, but the Herald subsystem is built by its own RFC; M-H is Blocked on Herald and ships no Herald code.
+- **Herald implementation itself** — M8 consumes Herald events to feed regression cassettes, but the Herald subsystem is built by its own RFC; M8 is Blocked on Herald and ships no Herald code.
 - **Rewriting existing L0/L1 tests** — they are tagged in place, not restructured, unless a later milestone re-labels one across scopes.
 - **Re-deriving the strategy doc's principles, taxonomy, or cassette pivot** — those remain authoritative in [`docs/testing-strategy.md`](../../testing-strategy.md) §2–§4; this RFC consumes them as inputs.
 
@@ -48,7 +48,7 @@ The goal: a harness where every cross-subsystem contract has a deterministic tes
 
 ### The Operator as Test Author
 
-In this mode the Operator is sitting down to write a new test — usually because a feature spec calls for one or because a bug surfaced a missing assertion. They need to pick a scope (L0, L1, L2, or L3) and a framework (vitest or Cucumber.js) without re-deriving the taxonomy from first principles every time. Today, every cross-subsystem test requires inventing scaffolding from scratch — there is no L2 cassette harness to write against, so the test either does not get written or gets written as a brittle L1 with mocks that lie. This RFC gives the Test Author per-scope playbooks and locked framework choices, so the question collapses from "how do I even structure this?" to "which playbook applies?"
+In this mode the Operator is sitting down to write a new test — usually because a feature spec calls for one or because a bug surfaced a missing assertion. They need to pick a scope (L0, L1, L2, or L3) and a framework (vitest for L0/L1, Cucumber.js for L2/L3, or PromptFoo if the test belongs to the scheduled stochastic suite) without re-deriving the taxonomy from first principles every time. Today, every cross-subsystem test requires inventing scaffolding from scratch — there is no L2 cassette harness to write against, so the test either does not get written or gets written as a brittle L1 with mocks that lie. This RFC gives the Test Author per-scope playbooks and locked framework choices, so the question collapses from "how do I even structure this?" to "which playbook applies?"
 
 ### The Operator as CI Failure Triager
 
@@ -96,8 +96,8 @@ In the same PR that lands this RFC, `docs/testing-strategy.md` is trimmed to str
 - **Framework choice per scope is locked.** vitest for L0 and L1; Cucumber.js (`@cucumber/cucumber`) for L2 and L3. Settled in [`docs/testing-strategy.md`](../../testing-strategy.md) §5 and §7 with explicit rationale against `@amiceli/vitest-cucumber` (ecosystem too thin) and `jest-cucumber` (we don't use Jest). This RFC does not reopen the choice; each milestone spec inherits it.
 - **Stochastic-suite framework is PromptFoo.** The scheduled suite uses **PromptFoo** (`promptfoo`) as the eval runner — TypeScript-native, CI-first, config-in-repo, npm-installable, no external runtime. Settled in [`docs/testing-strategy.md`](../../testing-strategy.md) §5 and §7 with explicit rationale against Phoenix (Arize) — Python-first, heavier infrastructure, optimized for notebook + online tracing rather than CI eval — and Braintrust (hosted; inconsistent with the strategy's OSS self-hostable posture). Phoenix may be revisited if a future RFC adopts it as a unified production AI-flow tracing platform, but the eval-framework choice is not blocked on that decision.
 - **The PR gate stays at $0.** No live-backend invocation is reachable from `npm test`, the four `test:l*` scripts, or any staged CI job. Live backends run only from the scheduled stochastic workflow on its own credentials boundary.
-- **Milestones are vertical slices, not horizontal phases.** Each milestone delivers an end-to-end working capability rather than building one infrastructure layer to completion before the next begins. Selected over a six-milestone horizontal restating of the strategy's phase list because vertical slicing forces the cassette format to be shaped by a real consumer and unlocks concurrent work (M-A∥M-B, M-C∥M-D).
-- **`docs/testing-strategy.md` shifts to strategic-only in the same PR as this RFC.** Gap-analysis and roadmap content migrates here as committed sequencing; the strategy doc keeps Principles, Taxonomy, Cassette pivot, framework rationale, cost-policy principles, Named exemplars, and scope. Bidirectional cross-links.
+- **Milestones are vertical slices, not horizontal phases.** Each milestone delivers an end-to-end working capability rather than building one infrastructure layer to completion before the next begins. Selected over a six-milestone horizontal restating of the strategy's phase list because vertical slicing forces the cassette format to be shaped by a real consumer and unlocks concurrent work (M1∥M2, M3∥M4).
+- **`docs/testing-strategy.md` shifts to strategic-only in the same PR as this RFC.** The strategy doc's former Gap analysis and Roadmap sections migrated into this RFC, along with the operational specifics of Cost policy (staged-workflow gating, cassette-refresh policy, quarantine rule, cost-visibility publishing). The strategy doc keeps its current §2 Principles, §3 Two-axis taxonomy, §4 Cassette pivot, §5 framework rationale, §6 cost-policy principles, §7 Named exemplars, and §8 scope. Bidirectional cross-links.
 - **Contract documentation lives at `docs/subsystems/<name>/contract.md`.** One file per subsystem (Spawn, Hatchery, Brood, Herald-stub, Legate, Steward). A freshness CI check flags subsystem-source changes lacking a contract-doc update.
 - **Cassettes live at `tests/cassettes/`.** Checked into the repo; refresh is an explicit reviewed PR with a PR template and a triage policy; never a silent re-record.
 - **Tag vocabulary is fixed: `@l0`, `@l1`, `@l2`, `@l3`, `@deterministic`, `@stochastic`, `@ci`, `@scheduled`.** Extension by addition only — never repurpose an existing tag.
@@ -110,7 +110,7 @@ In the same PR that lands this RFC, `docs/testing-strategy.md` is trimmed to str
 - **The first L2 slice is hard-capped at one cassette, one `.feature` file, one concurrency variant.** The concurrent-dispatch variant counts as one scenario with two execution modes sharing the same cassette, not a second scenario.
 - **Cost-summary publishing target: GitHub Actions job summary + append-only `tests/cost-history.jsonl` committed by the scheduled workflow.** Herald-event integration is deferred to a follow-on once Herald lands.
 - **L1 Hatchery gap-fill has no hard dependency on Hatchery's contract doc being drafted first.** Tests are written against the current public TypeScript surface; the contract doc is drafted concurrently and the tests retro-link to it.
-- **M-H carries `Status: Blocked` on Herald (RFC 2026-001 M4 — Not started)** rather than being deferred to a backlog. Keeps the strategy commitment visible without overpromising sequencing; status flips to `In progress` once Herald M4 reaches `Done`.
+- **M8 carries `Status: Blocked` on Herald (RFC 2026-001 M4 — Not started)** rather than being deferred to a backlog. Keeps the strategy commitment visible without overpromising sequencing; status flips to `In progress` once Herald M4 reaches `Done`. The cross-RFC dependency on Herald is documented in M8's Description rather than encoded in the Dependency Order table because the canonical Smithy `Depends On` syntax has no cross-RFC form today (tracked upstream as [SmithyCLI #369](https://github.com/Balexda/SmithyCLI/issues/369)).
 
 ## Open Questions
 
@@ -122,18 +122,17 @@ None — all deferred decisions are tracked in §Specification Debt below.
 |----|-------------|-----------------|--------|------------|--------|------------|
 | SD-001 | Initial scheduled-suite token budget cap (USD per weekly run). Working recommendation: $5 soft cap with alert on overrun, $20 hard kill, revisit after four runs. No prior cost data exists. | clarify:Constraints | High | Medium | open | — |
 | SD-002 | Contract-freshness CI mechanism: TypeScript AST diff against last-committed `contract.md` vs. Smithy-agent directive that flags drift on PR review. Recommendation: start with the Smithy-agent directive (low infra cost, fits operating philosophy of "Smithy decomposes; March executes") and add structural AST diff only if drift slips through. | clarify:Risks | Medium | Medium | open | — |
-| SD-003 | Cassette format v0 shape: JSONL HTTP capture (raw request/response pairs) at the proxy layer, with **per-backend variants accommodated side-by-side** because Claude Code and Codex CLI emit different JSONL event shapes natively. The v0 cassette substrate stores the raw shape each backend produced (likely as per-backend subdirectories or per-backend schema variants within one cassette file); long-term unification is harness-side work tracked in [#137](https://github.com/Balexda/March/issues/137) (transformer layer in spawn). Once #137 lands, M-E can converge cassettes to a single normalized shape. Codex credential-mount vs. Claude env-var split is a separate redaction-pluggability concern handled in M-E. | clarify:Risks | High | Medium | open | — |
+| SD-003 | Cassette format v0 shape: JSONL HTTP capture (raw request/response pairs) at the proxy layer, with **per-backend variants accommodated side-by-side** because Claude Code and Codex CLI emit different JSONL event shapes natively. The v0 cassette substrate stores the raw shape each backend produced (likely as per-backend subdirectories or per-backend schema variants within one cassette file); long-term unification is harness-side work tracked in [#137](https://github.com/Balexda/March/issues/137) (transformer layer in spawn). Once #137 lands, M5 can converge cassettes to a single normalized shape. Codex credential-mount vs. Claude env-var split is a separate redaction-pluggability concern handled in M5. | clarify:Risks | High | Medium | open | — |
 | SD-004 | Quarantine SLA escalation path when the operator misses the one-week deadline. Strategy §6 says "quarantine is a visible state, not a hiding place" but does not define day-8 behavior. Recommendation: weekly stochastic-suite report posts an "overdue quarantine" line item; no automated escalation beyond visibility (escalation-to-whom is undefined for a solo operator). | clarify:Constraints | Medium | Medium | open | — |
-| SD-005 | Cucumber.js parallel-worker behavior is unknown relative to vitest's worker model and must be measured before the staged-CI parallelism strategy is locked. The Codex-vs-Claude redaction-shape divergence raised in §Design Considerations is a related concern that may require expanding SD-003 rather than a separate debt row. | plan-review:Debt completeness | Medium | Low | open | — |
+| SD-005 | Cucumber.js parallel-worker behavior is unknown relative to vitest's worker model and must be measured during M3 before the staged-CI parallelism strategy is locked. SD-006 (staged-gate shape) is the downstream decision that depends on this measurement. | plan-review:Debt completeness | Medium | Low | open | — |
 | SD-006 | Whether the staged CI workflow gates L2-cassette and L3-cassette on L1 pass as well, or only on L0. The current decision is "L0 fail-fast, then L1∥L2-cassette∥L3-cassette in parallel," but if Cucumber.js parallel-worker behavior turns out to interact badly with vitest workers running concurrently, the gating shape may need to revert to "L0+L1 gate, then L2-cassette∥L3-cassette." Resolves once SD-005 measurement is in. | feedback:gating-shape | Medium | Medium | open | — |
 | SD-007 | Where cassette refresh code lives — `src/testing/` (treated as production code) or `tests/support/` (treated as test-only code). Cassette tooling is testing infrastructure but ships in operator-facing CLI verbs once it grows beyond the proof-of-concept. | feedback:code-location | Low | Medium | open | — |
-| SD-008 | Whether the framework eventually grows a per-subsystem "smoke test" tier between L1 and L2 for "this subsystem starts up cleanly and exposes its public surface" without crossing a subsystem boundary. Not in scope for any current milestone, but the taxonomy may need a fifth scope label if M-D's Hatchery work surfaces the need. Revisit after M-D. | feedback:tier-expansion | Low | Low | open | — |
-| SD-009 | How this RFC coordinates with a future `smithy test` integration on the Smithy side. The strategy doc declares Smithy-side testing out of scope, but the per-slice test plans Smithy generates and the per-scope tests this framework runs share an output surface (passing tests, gating PRs). Coordination spec is deferred; this RFC just names that the coordination will eventually be needed. | feedback:smithy-coordination | Medium | Low | open | — |
-| SD-010 | Eval rubrics and per-scenario `pass^k` thresholds for agent output quality. The metric *shape* (`pass^k`) is committed; per-scenario thresholds need their own design. Deferred to a future Smithy spec sequenced after M-F. | clarify:Constraints | Medium | Medium | open | — |
+| SD-008 | How this RFC coordinates with a future `smithy test` integration on the Smithy side. The strategy doc declares Smithy-side testing out of scope, but the per-slice test plans Smithy generates and the per-scope tests this framework runs share an output surface (passing tests, gating PRs). Coordination spec is deferred; this RFC just names that the coordination will eventually be needed. | feedback:smithy-coordination | Medium | Low | open | — |
+| SD-009 | Eval rubrics and per-scenario `pass^k` thresholds for agent output quality. The metric *shape* (`pass^k`) is committed; per-scenario thresholds need their own design. Deferred to a future Smithy spec sequenced after M6. | clarify:Constraints | Medium | Medium | open | — |
 
 ## Milestones
 
-### Milestone M-A: Test Legibility & Staged CI
+### Milestone M1: Test Legibility & Staged CI — **Not started**
 
 **Description**: Realizes the **two-axis taxonomy** and the **staged CI workflow** primitives from §Proposal, and stands up the **quarantine routing** scaffolding. Advances the *fail loud, fail fast* and *cost is a first-class budget* goals by giving the CI pipeline a layered shape where cheap invariants fail fast and broken-fundamentals failures stop the build before integration tier burns wall-clock. Day-one startable; no prerequisites.
 
@@ -143,12 +142,12 @@ None — all deferred decisions are tracked in §Specification Debt below.
 - `npm test` remains as a local convenience alias that runs all four staged scripts in sequence and exits non-zero on the first failure.
 - `.github/workflows/ci.yml` defines a `l0` job that runs first as a fail-fast gate, and three jobs `l1`, `l2-cassette`, `l3-cassette` that fan out in parallel on `l0` success; each job runs only its corresponding `npm run test:*` script.
 - The "material change" policy for the three pre-existing vitest L2 tests is recorded in `CONTRIBUTING.md` under a "Test Layer Migration" heading and enumerates the triggering conditions verbatim.
-- A `tests/quarantine/` directory plus a `quarantine.ts` (or equivalent) routing primitive exists; quarantined tests are excluded from the four staged scripts and listed in a generated `tests/quarantine/INDEX.md`. (SLA timer is wired in M-F.)
+- A `tests/quarantine/` directory plus a `quarantine.ts` (or equivalent) routing primitive exists; quarantined tests are excluded from the four staged scripts and listed in a generated `tests/quarantine/INDEX.md`. (SLA timer is wired in M6.)
 - `CONTRIBUTING.md` references the four staged scripts, the tag taxonomy, and the quarantine routing primitive; `docs/testing-strategy.md` is trimmed to strategic-only content in the same PR.
 
-### Milestone M-B: Subsystem Contract Documentation Track
+### Milestone M2: Subsystem Contract Documentation Track — **Not started**
 
-**Description**: Realizes the **contract documentation** primitive from §Proposal. Advances the *contracts are explicit artifacts* goal by producing one explicit contract per subsystem at a stable location, plus the freshness check that prevents the artifacts from drifting silently. Concurrent with M-A — touches `docs/subsystems/**` and a new CI check, no dependency on M-A's CI plumbing.
+**Description**: Realizes the **contract documentation** primitive from §Proposal. Advances the *contracts are explicit artifacts* goal by producing one explicit contract per subsystem at a stable location, plus the freshness check that prevents the artifacts from drifting silently. Concurrent with M1 — touches `docs/subsystems/**` and a new CI check, no dependency on M1's CI plumbing.
 
 **Success Criteria**:
 - Six contract documents exist: `docs/subsystems/spawn/contract.md`, `docs/subsystems/hatchery/contract.md`, `docs/subsystems/brood/contract.md`, `docs/subsystems/herald-stub/contract.md`, `docs/subsystems/legate/contract.md`, `docs/subsystems/steward/contract.md`.
@@ -157,9 +156,9 @@ None — all deferred decisions are tracked in §Specification Debt below.
 - A `.github/workflows/contract-freshness.yml` job (or equivalent Smithy agent directive per SD-002) fails any PR that modifies a subsystem's public-source paths without touching the corresponding `contract.md`; the mapping of source globs to contract paths lives in `docs/subsystems/contract-freshness.config.json`.
 - Running `npm run docs:contracts:check` locally reproduces the CI freshness verdict.
 
-### Milestone M-C: First L2 Vertical Slice — Spawn → Steward
+### Milestone M3: First L2 Vertical Slice — Spawn → Steward — **Not started**
 
-**Description**: Realizes the **cassette substrate** primitive from §Proposal as a hard-capped proof-of-concept against the Spawn ↔ Steward boundary, plus the throwaway-repo factory, Docker pinning, and Cucumber.js step-definition library that downstream milestones generalize. Advances the *tests are the contract* and *deterministic core, stochastic edge* goals by landing the first cross-subsystem test that asserts contract behavior deterministically against a recorded backend exchange. The scope cap (one cassette, one `.feature`, one concurrency variant per §Design Considerations) is enforced. Depends on M-A (staged CI to land in) and M-B (Spawn + Steward contracts to assert against).
+**Description**: Realizes the **cassette substrate** primitive from §Proposal as a hard-capped proof-of-concept against the Spawn ↔ Steward boundary, plus the throwaway-repo factory, Docker pinning, and Cucumber.js step-definition library that downstream milestones generalize. Advances the *tests are the contract* and *deterministic core, stochastic edge* goals by landing the first cross-subsystem test that asserts contract behavior deterministically against a recorded backend exchange. The scope cap (one cassette, one `.feature`, one concurrency variant per §Design Considerations) is enforced. Depends on M1 (staged CI to land in) and M2 (Spawn + Steward contracts to assert against).
 
 **Success Criteria**:
 - `docs/testing/cassette-format-v0.md` records the cassette v0 format per SD-003 — JSONL HTTP capture at the proxy layer with per-backend variants accommodated side-by-side (Claude Code and Codex CLI emit different event shapes natively until the spawn-output unification in [#137](https://github.com/Balexda/March/issues/137) lands). The doc also records the redaction pass rules for API keys, auth headers, and token-shaped strings, and the file layout under `tests/cassettes/` including the per-backend split convention.
@@ -170,32 +169,32 @@ None — all deferred decisions are tracked in §Specification Debt below.
 - A Cucumber.js step-definition library lives under `tests/l2/steps/` with a documented composition contract (`tests/l2/steps/README.md`) describing how downstream L3 scenarios reuse the same steps.
 - `npm run test:l2-cassette` executes the slice green in under 30 seconds with no network egress (verified by a network-deny wrapper).
 
-### Milestone M-D: L1 Gap-Fill (Hatchery)
+### Milestone M4: L1 Gap-Fill (Hatchery) — **Not started**
 
-**Description**: Does not realize a new §Proposal primitive — instead consumes the **two-axis taxonomy** (tags applied during M-A) and the **contract documentation** track (M-B's Hatchery contract, drafted concurrently) to close the highest-priority L1 gap surfaced during M-A's tagging pass. Advances the *tests are the contract* goal at the L1 scope. Concurrent with M-C — vitest vs. Cucumber, different files, no cassette dependency. Depends on M-A only; M-B's Hatchery contract is drafted concurrently and the tests retro-link to it.
+**Description**: Does not realize a new §Proposal primitive — instead consumes the **two-axis taxonomy** (tags applied during M1) and the **contract documentation** track (M2's Hatchery contract, drafted concurrently) to close the highest-priority L1 gap surfaced during M1's tagging pass. Advances the *tests are the contract* goal at the L1 scope. Concurrent with M3 — vitest vs. Cucumber, different files, no cassette dependency. Depends on M1 only; M2's Hatchery contract is drafted concurrently and the tests retro-link to it.
 
 **Success Criteria**:
 - New vitest L1 test files under `src/hatchery/` cover (a) profile-policy schema validation, (b) environment material assembly, and (c) credential-mount spec validation; one named test file per concern.
 - Each new test file is tagged `@l1 @deterministic @ci` and is picked up by `npm run test:l1`.
 - The L1 suite for `src/hatchery/` grows by at least 20 new test cases relative to the pre-milestone baseline, recorded in the PR description against `npm run test:l1 -- --reporter=verbose` output.
-- Any additional L1 holes flagged by M-A's tagging pass are either closed in this milestone or filed as tracked issues referenced from `docs/testing/l1-gap-backlog.md`.
-- `npm run test:l1` runs green in CI's `l1` job introduced by M-A.
+- Any additional L1 holes flagged by M1's tagging pass are either closed in this milestone or filed as tracked issues referenced from `docs/testing/l1-gap-backlog.md`.
+- `npm run test:l1` runs green in CI's `l1` job introduced by M1.
 
-### Milestone M-E: Cassette Infrastructure Generalization
+### Milestone M5: Cassette Infrastructure Generalization — **Not started**
 
-**Description**: Generalizes the **cassette substrate** primitive from §Proposal once M-C and M-D have provided real consumer signal, adds redaction-rule pluggability per the Codex/Claude divergence concern from §Design Considerations, and validates the generalized substrate with two additional L2 scenarios. If [#137](https://github.com/Balexda/March/issues/137) (spawn output-format unification) has landed by the time M-E runs, M-E also converges the per-backend cassette variants from M-C into a single normalized shape; if not, M-E preserves the per-backend split and tracks the converge work for a follow-on milestone. Advances the *deterministic core, stochastic edge* goal by making the substrate reusable beyond the proof-of-concept. Depends on M-C (real consumer signal) and M-D (vitest-L1 contract surface for non-cassette comparison).
+**Description**: Generalizes the **cassette substrate** primitive from §Proposal once M3 and M4 have provided real consumer signal, adds redaction-rule pluggability per the Codex/Claude divergence concern from §Design Considerations, and validates the generalized substrate with two additional L2 scenarios. If [#137](https://github.com/Balexda/March/issues/137) (spawn output-format unification) has landed by the time M5 runs, M5 also converges the per-backend cassette variants from M3 into a single normalized shape; if not, M5 preserves the per-backend split and tracks the converge work for a follow-on milestone. Advances the *deterministic core, stochastic edge* goal by making the substrate reusable beyond the proof-of-concept. Depends on M3 (real consumer signal) and M4 (vitest-L1 contract surface for non-cassette comparison).
 
 **Success Criteria**:
 - `tests/support/cassette/` contains a versioned cassette runtime with an explicit `FORMAT_VERSION` constant; `docs/testing/cassette-format.md` supersedes the v0 doc and records the v0 → vNext migration story.
 - Redaction rules are pluggable: `tests/support/cassette/redactors/` contains separate `codex.ts` and `claude.ts` redactor modules, both registered through a single registry, with unit tests asserting each redacts its respective auth-shape.
-- A cassette-refresh PR template exists at `.github/PULL_REQUEST_TEMPLATE/cassette-refresh.md` and a triage policy is documented at `docs/testing/cassette-refresh-triage.md` (consumed by M-F's scheduled suite).
+- A cassette-refresh PR template exists at `.github/PULL_REQUEST_TEMPLATE/cassette-refresh.md` and a triage policy is documented at `docs/testing/cassette-refresh-triage.md` (consumed by M6's scheduled suite).
 - A second L2 scenario exists at `tests/l2/brood-spawn.feature` with cassette `tests/cassettes/brood-spawn/dispatch.jsonl`.
 - A third L2 scenario exists at `tests/l2/hatchery-materialization.feature` with cassette `tests/cassettes/hatchery-materialization/profile.jsonl`.
 - `npm run test:l2-cassette` executes all three L2 scenarios green in CI's `l2-cassette` job in under 60 seconds.
 
-### Milestone M-F: Scheduled Stochastic Suite + Recording Mode + Cost/Quarantine Tooling
+### Milestone M6: Scheduled Stochastic Suite + Recording Mode + Cost/Quarantine Tooling — **Not started**
 
-**Description**: Realizes the **staged CI workflow**'s scheduled side from §Proposal — the weekly stochastic suite against live backends, plus the **cost tooling**, **cassette-refresh workflow**, and quarantine SLA wiring named in the supporting concerns. Advances the *cost is a first-class budget* and *fail loud, fail fast* goals by making cost observable per run, gating spend, and giving stochastic flakes a one-week SLA. Depends on M-C (at least one recorded scenario to drift-check against) and M-E (generalized cassette infrastructure to write into).
+**Description**: Realizes the **staged CI workflow**'s scheduled side from §Proposal — the weekly stochastic suite against live backends, plus the **cost tooling**, **cassette-refresh workflow**, and quarantine SLA wiring named in the supporting concerns. Advances the *cost is a first-class budget* and *fail loud, fail fast* goals by making cost observable per run, gating spend, and giving stochastic flakes a one-week SLA. Depends on M3 (at least one recorded scenario to drift-check against) and M5 (generalized cassette infrastructure to write into).
 
 **Success Criteria**:
 - `.github/workflows/scheduled-stochastic.yml` exists with a weekly `schedule:` trigger and references a secrets context (e.g., `secrets.STOCHASTIC_*`) disjoint from the PR-gate workflows; a CI lint enforces that no PR-gate workflow references those secret names.
@@ -203,40 +202,42 @@ None — all deferred decisions are tracked in §Specification Debt below.
 - A token-budget gate enforces a soft cap and a hard kill (initial defaults per the SD-001 working recommendation: $5 soft alert, $20 hard kill; revisited after four scheduled runs) configured via repository variables; exceeding the hard cap fails the job and aborts further backend calls.
 - A PromptFoo configuration file at `tests/stochastic/promptfoo.yaml` declares the scheduled scenarios — each tagged `@stochastic @scheduled` — including provider configs for Codex and Claude, `pass^k` retry counts, deterministic assertion checks (schema validity, presence of required fields), and any LLM-as-judge graders. A `test:stochastic` script in `package.json` invokes `promptfoo eval` against that config; the scheduled workflow calls `npm run test:stochastic`.
 - A `--record` mode for the cassette runtime produces new cassette files under `tests/cassettes/` and is invoked by the workflow when drift is detected against the proof-of-concept scenario.
-- `.github/PULL_REQUEST_TEMPLATE/cassette-refresh.md` (from M-E) and a new `.github/ISSUE_TEMPLATE/cassette-refresh.yml` are wired into the workflow's drift-detection handler.
+- `.github/PULL_REQUEST_TEMPLATE/cassette-refresh.md` (from M5) and a new `.github/ISSUE_TEMPLATE/cassette-refresh.yml` are wired into the workflow's drift-detection handler.
 - Quarantine SLA wiring enforces a 7-day clock against entries in `tests/quarantine/INDEX.md`; overdue items appear in the workflow's weekly report and in the job summary.
 - A structured cost summary is written to `$GITHUB_STEP_SUMMARY` and appended to `tests/cost-history.jsonl` (one JSON object per run); the workflow commits the updated history file back to the repo. PromptFoo's per-run output (token counts, latency per provider) feeds the summary rather than being a separate publishing path.
 
-### Milestone M-G: L3 Vertical Slice
+### Milestone M7: L3 Vertical Slice — **Not started**
 
-**Description**: Exercises the **cassette substrate** primitive at the L3 scope from §Proposal by lifting `tests/Agent.tests.md` A1 into a runnable Cucumber.js scenario. Advances the *tests are the contract* and *deterministic core, stochastic edge* goals at the system scope by replacing prose dogfooding with a deterministic, cassette-replayed regression. Depends on M-E (generalized cassette infra for multi-backend scenarios), M-D (Hatchery L1 must hold the boundary L3 scenarios cross), and M-C (step-definition library reused under `tests/l2/steps/`).
+**Description**: Exercises the **cassette substrate** primitive at the L3 scope from §Proposal by lifting `tests/Agent.tests.md` A1 into a runnable Cucumber.js scenario. Advances the *tests are the contract* and *deterministic core, stochastic edge* goals at the system scope by replacing prose dogfooding with a deterministic, cassette-replayed regression. Depends on M5 (generalized cassette infra for multi-backend scenarios), M4 (Hatchery L1 must hold the boundary L3 scenarios cross), and M3 (step-definition library reused under `tests/l2/steps/`).
 
 **Success Criteria**:
 - A feature file exists at `tests/l3/agent-a1.feature` whose scenarios are a direct, traceable derivation of scenario A1 in `tests/Agent.tests.md` (cross-references recorded in the feature file's `# Source:` header).
-- L3-specific orchestration helpers live under `tests/l3/steps/` and import and reuse the step-definition library produced by M-C under `tests/l2/steps/`.
+- L3-specific orchestration helpers live under `tests/l3/steps/` and import and reuse the step-definition library produced by M3 under `tests/l2/steps/`.
 - All backend exchanges in the Legate loop for scenario A1 are replayed from cassettes under `tests/cassettes/l3/agent-a1/`; a network-deny wrapper around the run asserts zero outbound calls.
 - The L3 feature file is tagged `@l3 @deterministic @ci` and runs in CI's `l3-cassette` job via `npm run test:l3-cassette`.
 - `npm run test:l3-cassette` runs green in under 90 seconds.
 
-### Milestone M-H: Herald-Enabled Trace-as-Fixture
+### Milestone M8: Herald-Enabled Trace-as-Fixture — **Blocked** (depends on RFC 2026-001 M4 Herald — Not started)
 
-**Description**: Does not realize a new §Proposal primitive — instead consumes the **cassette substrate** (generalized in M-E) and the **L3 vertical-slice consumer** (M-G) to close the loop between operator-visible production runs and L3 regression coverage by converting Herald events into cassettes. Advances the *deterministic core, stochastic edge* goal at the regression scope. **Blocked on Herald (RFC 2026-001 M4 — Not started)**; depends on M-G (an L3 cassette consumer must exist) and Herald M4.
+**Description**: Does not realize a new §Proposal primitive — instead consumes the **cassette substrate** (generalized in M5) and the **L3 vertical-slice consumer** (M7) to close the loop between operator-visible production runs and L3 regression coverage by converting Herald events into cassettes. Advances the *deterministic core, stochastic edge* goal at the regression scope. Depends on M7 (an L3 cassette consumer must exist) and on **RFC 2026-001 M4 Herald** (cross-RFC dependency — see §Decisions and [SmithyCLI #369](https://github.com/Balexda/SmithyCLI/issues/369) for the convention gap). Cannot start until Herald lands.
 
 **Success Criteria**:
-- A trace-to-cassette tool exists (e.g., `tools/trace-to-cassette/`) that subscribes to Herald events and emits cassette files conforming to the M-E format under `tests/cassettes/from-trace/`.
+- A trace-to-cassette tool exists (e.g., `tools/trace-to-cassette/`) that subscribes to Herald events and emits cassette files conforming to the M5 format under `tests/cassettes/from-trace/`.
 - At least one cassette in `tests/cassettes/from-trace/` was generated by the tool from a real captured production trace; the source trace ID is recorded in a sidecar `*.provenance.json` file.
 - A new L3 regression test under `tests/l3/` consumes that cassette and runs green in `npm run test:l3-cassette`.
 - The pipeline is documented at `docs/testing/trace-as-fixture.md` including the redaction guarantees applied during conversion.
 
 ## Dependency Order
 
-| ID  | Title                                                                       | Depends On                  | Artifact |
-|-----|-----------------------------------------------------------------------------|-----------------------------|----------|
-| M-A | Test Legibility & Staged CI                                                 | —                           | —        |
-| M-B | Subsystem Contract Documentation Track                                      | —                           | —        |
-| M-C | First L2 Vertical Slice — Spawn → Steward                                   | M-A, M-B                    | —        |
-| M-D | L1 Gap-Fill (Hatchery)                                                      | M-A                         | —        |
-| M-E | Cassette Infrastructure Generalization                                      | M-C, M-D                    | —        |
-| M-F | Scheduled Stochastic Suite + Recording Mode + Cost/Quarantine Tooling       | M-C, M-E                    | —        |
-| M-G | L3 Vertical Slice                                                           | M-C, M-D, M-E               | —        |
-| M-H | Herald-Enabled Trace-as-Fixture                                             | M-G, RFC 2026-001 M4        | —        |
+The table lists only in-RFC dependencies. M8's additional cross-RFC dependency on Herald (RFC 2026-001 M4) is documented in §Decisions and in M8's Description — the canonical Smithy `Depends On` syntax has no cross-RFC form today, tracked upstream as [SmithyCLI #369](https://github.com/Balexda/SmithyCLI/issues/369).
+
+| ID | Title                                                                       | Depends On     | Artifact |
+|----|-----------------------------------------------------------------------------|----------------|----------|
+| M1 | Test Legibility & Staged CI                                                 | —              | —        |
+| M2 | Subsystem Contract Documentation Track                                      | —              | —        |
+| M3 | First L2 Vertical Slice — Spawn → Steward                                   | M1, M2         | —        |
+| M4 | L1 Gap-Fill (Hatchery)                                                      | M1             | —        |
+| M5 | Cassette Infrastructure Generalization                                      | M3, M4         | —        |
+| M6 | Scheduled Stochastic Suite + Recording Mode + Cost/Quarantine Tooling       | M3, M5         | —        |
+| M7 | L3 Vertical Slice                                                           | M3, M4, M5     | —        |
+| M8 | Herald-Enabled Trace-as-Fixture                                             | M7             | —        |
