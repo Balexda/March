@@ -144,6 +144,37 @@ describe("spawn-handoff", () => {
     expect(patch).not.toMatch(/\n```\s*$/);
   });
 
+  it("accepts an indented closing fence (CommonMark allows up to 3 spaces)", () => {
+    // Defensive regression coverage for PR #135 review: a closing fence may
+    // be written with leading spaces or tabs. The outer fence must still
+    // match so we don't fall through to the raw `diff --git` marker path,
+    // which would return the closing backticks and trailing prose verbatim
+    // and produce an invalid patch.
+    const patch = extractPatchFromSpawnOutput(
+      JSON.stringify({
+        type: "item.completed",
+        item: {
+          type: "agent_message",
+          text:
+            "Here:\n\n```diff\n" +
+            "diff --git a/x b/x\n" +
+            "--- a/x\n" +
+            "+++ b/x\n" +
+            "@@ -1 +1 @@\n" +
+            "-a\n" +
+            "+b\n" +
+            "   ```\n" + // indented closing fence
+            "trailing prose that must not leak into the patch",
+        },
+      }),
+    );
+
+    expect(patch.startsWith("diff --git a/x b/x")).toBe(true);
+    expect(patch).not.toContain("```");
+    expect(patch).not.toContain("trailing prose");
+    expect(patch.endsWith("+b\n")).toBe(true);
+  });
+
   it("preserves a trailing whitespace-only context line at the end of the patch", () => {
     // Reproduces issue #131: a hunk header like `@@ -43,7 +43,7 @@` requires
     // 7 lines on each side; if the final line is a blank context line (just

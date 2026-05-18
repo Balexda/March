@@ -200,13 +200,14 @@ function patchFromJsonValue(
 }
 
 function patchFromText(text: string): string | null {
-  // Require the closing fence to be preceded by a newline at the START of its
-  // line. Inner ```ts / ```diff fences embedded as added patch lines are
-  // prefixed by `+` (or `-`/` ` for context), so they fail this anchor and
-  // don't terminate the match. Only the outer closing fence — which sits on
-  // its own line — matches.
+  // Require the closing fence to be at line start, optionally indented with
+  // spaces or tabs (CommonMark allows up to 3 spaces of indentation on the
+  // closing fence). Inner ```ts / ```diff fences embedded as added patch
+  // lines are prefixed by `+` (or `-`/space-then-content for context), so
+  // they fail this anchor and don't terminate the match. Only the outer
+  // closing fence on its own line matches.
   const fenced = text.match(
-    /```(?:diff|patch)?[^\n]*\n([\s\S]*?diff --git [\s\S]*?)\n```(?:\r?\n|\r|$)/,
+    /```(?:diff|patch)?[^\n]*\n([\s\S]*?diff --git [\s\S]*?)\n[ \t]*```[ \t]*(?:\r?\n|\r|$)/,
   );
   if (fenced?.[1]) return normalizeTrailingNewline(fenced[1]);
 
