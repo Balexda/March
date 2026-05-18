@@ -630,6 +630,154 @@ describe("legate module", () => {
       expect(classify({ head: "abc", isAncestor: false, prs: [], prsKnown: false })).toMatchObject({ verdict: "pr-lookup-unknown", autoSafe: false });
     });
 
+    it("parseWrongWorktreeRaceError detects the agent-deck launch-race refusal", async () => {
+      // The error text in spawn-handoff.ts is the contract; if it changes
+      // there, this regex must change in lockstep.
+      const loop = fs.readFileSync(await stageLoop(makeTmpDir()), "utf-8");
+      const parse = extractFn(loop, "parseWrongWorktreeRaceError") as (s: string) => boolean;
+      expect(parse(
+        'agent-deck manager session "abc-123" attached to worktree "/tmp/feature-wrong" but this launch requested branch "smithy/forge/x" which should produce worktree dir "feature-smithy-forge-x". Refusing to apply patch to the wrong worktree.',
+      )).toBe(true);
+      // Branch-already-exists is a different recovery path and must not
+      // match — otherwise tryRecoverWrongWorktreeRace would swallow it
+      // before tryRecoverBranchCollision gets a chance.
+      expect(parse("agent-deck manager launch failed:\nError: branch 'feature/smithy/forge/x' already exists")).toBe(false);
+      expect(parse("git apply --index failed in manager worktree: corrupt patch")).toBe(false);
+      expect(parse("")).toBe(false);
+    });
+
+    it("tryRecoverWrongWorktreeRace releases the slice for the first 3 attempts then escalates", async () => {
+      // Race-victim auto-release path. The wrong-worktree refusal is a
+      // known-transient upstream agent-deck race; escalating immediately
+      // would strand the slice on operator review for something that
+      // would have resolved on the next tick. Cap retries so a persistent
+      // race still surfaces to the operator.
+      const loop = fs.readFileSync(await stageLoop(makeTmpDir()), "utf-8");
+      const recover = extractFn(
+        loop,
+        "tryRecoverWrongWorktreeRace",
+        ["transientRetryCounts", "parseWrongWorktreeRaceError", "deleteHatcheryArtifacts"],
+      ) as (state: any, slice: any, sliceId: string, errorText: string) => any;
+
+      const errorText =
+        'agent-deck manager session "abc-123" attached to worktree "/tmp/feature-wrong" but this launch requested branch "smithy/forge/x" which should produce worktree dir "feature-smithy-forge-x". Refusing to apply patch to the wrong worktree.';
+      const sliceId = "s1";
+      const state: any = { slices: { [sliceId]: { hatchery: {} } } };
+
+      const r1 = recover(state, state.slices[sliceId], sliceId, errorText);
+      expect(r1).toMatchObject({ recovered: true, verdict: "wrong-worktree-race" });
+      expect(state.slices[sliceId]).toBeUndefined();
+      expect(state.transient_retry_counts[sliceId]).toBe(1);
+
+      state.slices[sliceId] = { hatchery: {} };
+      const r2 = recover(state, state.slices[sliceId], sliceId, errorText);
+      expect(r2).toMatchObject({ recovered: true });
+      expect(state.transient_retry_counts[sliceId]).toBe(2);
+
+      state.slices[sliceId] = { hatchery: {} };
+      const r3 = recover(state, state.slices[sliceId], sliceId, errorText);
+      expect(r3).toMatchObject({ recovered: true });
+      expect(state.transient_retry_counts[sliceId]).toBe(3);
+
+      // Fourth attempt exceeds the limit — does NOT delete the slice
+      // (caller falls through to escalation) and clears the counter so a
+      // future successful dispatch starts fresh.
+      state.slices[sliceId] = { hatchery: {} };
+      const r4 = recover(state, state.slices[sliceId], sliceId, errorText);
+      expect(r4).toMatchObject({ recovered: false, verdict: "wrong-worktree-race-persistent" });
+      expect(state.slices[sliceId]).toBeDefined();
+      expect(state.transient_retry_counts[sliceId]).toBeUndefined();
+    });
+
+    it("tryRecoverWrongWorktreeRace returns null for non-race errors", async () => {
+      // Other recovery paths must not be hijacked. A corrupt-patch or
+      // branch-collision error has its own escalation behavior.
+      const loop = fs.readFileSync(await stageLoop(makeTmpDir()), "utf-8");
+      const recover = extractFn(
+        loop,
+        "tryRecoverWrongWorktreeRace",
+        ["transientRetryCounts", "parseWrongWorktreeRaceError", "deleteHatcheryArtifacts"],
+      ) as (state: any, slice: any, sliceId: string, errorText: string) => any;
+
+      const state: any = { slices: { s1: { hatchery: {} } } };
+      expect(recover(state, state.slices.s1, "s1", "git apply --index failed in manager worktree: corrupt patch")).toBeNull();
+      expect(recover(state, state.slices.s1, "s1", "agent-deck manager launch failed:\nError: branch 'feature/x' already exists")).toBeNull();
+      // Slice must NOT have been deleted by a null return.
+      expect(state.slices.s1).toBeDefined();
+    });
+
+    it("maybeNudgeStrandedSteward re-nudges every 5 min after first nudge until 25 min budget", async () => {
+      // Watchdog for stewards that exit between push and `gh pr create`.
+      // sonnet typically completes only one stage per turn (commit, then
+      // push, then gh pr create), so a single nudge often only advances the
+      // workflow one step. The watchdog re-nudges every interval until the
+      // PR opens or the total budget runs out.
+      const loop = fs.readFileSync(await stageLoop(makeTmpDir()), "utf-8");
+      const nudge = extractFn(
+        loop,
+        "maybeNudgeStrandedSteward",
+        ["strandedStewardConfig"],
+      ) as (slice: any, sliceId: string, sessionId: string, ts: string, sendMessage: any) => string | null;
+
+      const sends: Array<{ sessionId: string; msg: string }> = [];
+      const sendStub = (sessionId: string, msg: string) => { sends.push({ sessionId, msg }); };
+
+      // Just-handed-off: too early to nudge.
+      const slice: any = { stage: "implementing", implementing_started_at: "2026-05-18T10:00:00.000Z" };
+      expect(nudge(slice, "s1", "sess-1", "2026-05-18T10:05:00.000Z", sendStub)).toBeNull();
+      expect(sends.length).toBe(0);
+
+      // 10 min in: first nudge.
+      const r1 = nudge(slice, "s1", "sess-1", "2026-05-18T10:10:00.000Z", sendStub);
+      expect(r1).toBe("nudged");
+      expect(sends.length).toBe(1);
+      expect(sends[0].msg).toContain("[STRANDED-STEWARD-NUDGE]");
+      expect(sends[0].msg).toContain("gh pr create");
+      expect(slice.steward_nudge_sent_at).toBe("2026-05-18T10:10:00.000Z");
+      expect(slice.steward_nudge_count).toBe(1);
+
+      // 1 min after first nudge: too soon for re-nudge.
+      expect(nudge(slice, "s1", "sess-1", "2026-05-18T10:11:00.000Z", sendStub)).toBeNull();
+      expect(sends.length).toBe(1);
+
+      // 5 min after first nudge (15 min total): re-nudge.
+      const r2 = nudge(slice, "s1", "sess-1", "2026-05-18T10:15:00.000Z", sendStub);
+      expect(r2).toBe("nudged");
+      expect(sends.length).toBe(2);
+      expect(slice.steward_nudge_count).toBe(2);
+
+      // Another 5 min (20 min total): re-nudge again.
+      const r3 = nudge(slice, "s1", "sess-1", "2026-05-18T10:20:00.000Z", sendStub);
+      expect(r3).toBe("nudged");
+      expect(sends.length).toBe(3);
+      expect(slice.steward_nudge_count).toBe(3);
+
+      // 25 min total: escalate.
+      const r4 = nudge(slice, "s1", "sess-1", "2026-05-18T10:25:00.000Z", sendStub);
+      expect(r4).toBe("escalate");
+      expect(slice.steward_stranded_escalated_at).toBe("2026-05-18T10:25:00.000Z");
+
+      // Once escalated, subsequent ticks must NOT re-escalate.
+      expect(nudge(slice, "s1", "sess-1", "2026-05-18T10:30:00.000Z", sendStub)).toBeNull();
+    });
+
+    it("maybeNudgeStrandedSteward ignores slices that aren't in implementing", async () => {
+      // Other stages have their own logic — never nudge into a stage we
+      // don't own.
+      const loop = fs.readFileSync(await stageLoop(makeTmpDir()), "utf-8");
+      const nudge = extractFn(
+        loop,
+        "maybeNudgeStrandedSteward",
+        ["strandedStewardConfig"],
+      ) as (slice: any, sliceId: string, sessionId: string, ts: string, sendMessage: any) => string | null;
+      const sendStub = () => { };
+
+      for (const stage of ["pr-open", "pr-in-fix", "escalated", "merged", "hatchery-pending"]) {
+        const slice: any = { stage, implementing_started_at: "2026-05-18T10:00:00.000Z" };
+        expect(nudge(slice, "s1", "sess-1", "2026-05-18T11:00:00.000Z", sendStub)).toBeNull();
+      }
+    });
+
     it("stages legate.unwedge skill with inspect + clean-stale scripts", async () => {
       // Regression guard: adding legate.unwedge to LEGATE_SKILLS is necessary
       // but not sufficient — the skill template directory has to exist and

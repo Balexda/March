@@ -1187,6 +1187,79 @@ function alreadyDispatched(slice, key) {
   return slice.last_processor_action_key === key;
 }
 
+// Stranded-steward watchdog tuning. A healthy steward typically reaches
+// "gh pr create" within 2-5 minutes after dispatch — review + verification +
+// commit + push + PR all happen in one claude turn. 10 minutes is generous
+// enough to avoid false positives on slow verification suites but tight
+// enough that the operator isn't waiting hours on a session that gave up
+// post-push. After the first nudge, re-nudge every interval until the slice
+// either makes it to "pr-open" or hits the total budget — sonnet often
+// completes one stage per turn (commit, push, gh pr create), so a single
+// nudge typically only advances the workflow one step. Re-nudge until the PR
+// appears.
+function strandedStewardConfig() {
+  return {
+    initialNudgeMs: 10 * 60 * 1000,
+    repeatNudgeMs: 5 * 60 * 1000,
+    escalateMs: 25 * 60 * 1000,
+    message: [
+      "[STRANDED-STEWARD-NUDGE] The deterministic loop sees no PR for this slice yet.",
+      "Resume the Hatchery manager workflow where you left off:",
+      "- If you haven't committed yet: run the verification, commit, push, then open the PR.",
+      "- If you've committed but not pushed: 'git push -u origin <branch>'.",
+      "- If you've pushed but not opened the PR: 'gh pr create' with title/body derived from",
+      "  the artifact path and original request.",
+      "End your turn ONLY after one of:",
+      "  (a) reporting 'PR: <url>' on the final line, or",
+      "  (b) escalating via 'NEED: <summary> -- <next action>'.",
+      "If a previous turn ended after 'git push' without 'gh pr create', that's the stranded-",
+      "steward bug the loop is nudging you out of. Run 'gh pr create' now.",
+    ].join("\\n"),
+  };
+}
+
+// Returns "nudged" if we sent (or re-sent) a nudge this tick, "escalate" if
+// the total budget has elapsed without a PR, or null if neither condition is
+// met yet (too early, or already escalated).
+function maybeNudgeStrandedSteward(slice, sliceId, sessionId, ts, sendMessage = sendAgentDeckMessage) {
+  if (slice.stage !== "implementing") return null;
+  if (!sessionId) return null;
+  const cfg = strandedStewardConfig();
+  const startedAt = Date.parse(slice.implementing_started_at || slice.last_action || "");
+  const nowMs = Date.parse(ts);
+  if (!Number.isFinite(startedAt) || !Number.isFinite(nowMs)) return null;
+  const elapsed = nowMs - startedAt;
+  if (elapsed < cfg.initialNudgeMs) return null;
+  // Escalation budget reached — escalate once, idempotently.
+  if (elapsed >= cfg.escalateMs) {
+    if (slice.steward_stranded_escalated_at) return null;
+    slice.steward_stranded_escalated_at = ts;
+    return "escalate";
+  }
+  const nudgedAt = Date.parse(slice.steward_nudge_sent_at || "");
+  // First nudge: at initialNudgeMs.
+  if (!Number.isFinite(nudgedAt)) {
+    try {
+      sendMessage(sessionId, cfg.message, false);
+    } catch {
+      return null;
+    }
+    slice.steward_nudge_sent_at = ts;
+    slice.steward_nudge_count = 1;
+    return "nudged";
+  }
+  // Re-nudge: every repeatNudgeMs after the previous nudge, until escalate.
+  if (nowMs - nudgedAt < cfg.repeatNudgeMs) return null;
+  try {
+    sendMessage(sessionId, cfg.message, false);
+  } catch {
+    return null;
+  }
+  slice.steward_nudge_sent_at = ts;
+  slice.steward_nudge_count = (slice.steward_nudge_count || 1) + 1;
+  return "nudged";
+}
+
 function sendAgentDeckMessage(sessionId, message, wait = false) {
   const args = ["-p", meta.profile, "session", "send", sessionId, message, "-q"];
   if (wait) {
@@ -1635,7 +1708,36 @@ function runBabysit(state, workerList, ts) {
     }
 
     if (!pr) {
-      if (!slice.pr) continue;
+      if (!slice.pr) {
+        // Stranded-steward watchdog: a slice that's been "implementing" for
+        // longer than the nudge threshold without producing a PR has almost
+        // certainly exited mid-workflow (post-commit, post-push, or mid-
+        // gh-pr-create). The manager-prompt asks claude to escalate via
+        // NEED: rather than stop silently, but legacy stewards and sonnet's
+        // "task complete" judgement can still drop the workflow.
+        // Send a single explicit nudge to resume; if that doesn't produce a
+        // PR by the next watchdog interval, escalate for operator review.
+        const nudgeOutcome = maybeNudgeStrandedSteward(slice, sliceId, sessionId, ts);
+        if (nudgeOutcome === "nudged") {
+          mutated = true;
+          actions.push({ action: "steward-nudge", sliceId, sessionId, detail: "sent stranded-steward nudge (count " + (slice.steward_nudge_count || 1) + ") — implementing for " + Math.round((Date.parse(ts) - Date.parse(slice.implementing_started_at || ts)) / 60000) + "min with no PR" });
+        } else if (nudgeOutcome === "escalate") {
+          const request = requestLegateJudgement({
+            ts,
+            slice,
+            requestKey: actionKey("steward-stranded", { number: 0 }, "second"),
+            sliceId,
+            sessionId,
+            reason: "steward stranded after dispatch",
+            detail: "Slice has been in 'implementing' for >" + strandedStewardConfig().escalateMs / 60000 + "min with no PR despite a follow-up nudge. The steward likely exited before opening the PR; operator must inspect the worktree at " + (slice.worktree_path || "(unknown)") + " and either run 'gh pr create' manually or re-dispatch.",
+          });
+          if (request) {
+            requests.push(request);
+            mutated = true;
+          }
+        }
+        continue;
+      }
       try {
         pr = queryPrForBabysit(slice, state);
       } catch (err) {
@@ -2481,6 +2583,53 @@ function tryRecoverBranchCollision(state, slice, sliceId, errorText) {
   return { recovered: true, verdict: classification.verdict, detail: summary + extra + " | branch deleted, slice released for re-dispatch" };
 }
 
+// Match the launchAgentDeckManager wrong-worktree refusal — the upstream
+// n→n-1 agent-deck launch race where pickLaunchedSession attaches to the
+// wrong sibling session. The error text is the contract; if it changes in
+// spawn-handoff.ts, update the regex here in lockstep.
+function parseWrongWorktreeRaceError(text) {
+  const s = String(text || "");
+  return /agent-deck manager session "[^"]+" attached to worktree "[^"]+" but this launch requested branch/.test(s);
+}
+
+function transientRetryCounts(state) {
+  if (!state.transient_retry_counts || typeof state.transient_retry_counts !== "object") {
+    state.transient_retry_counts = {};
+  }
+  return state.transient_retry_counts;
+}
+
+// Race-victim recovery: the wrong-worktree refusal is by design transient
+// (the race resolves once concurrent launches finish), so escalating would
+// strand the slice on operator review for a problem that fixes itself.
+// Auto-release by deleting the slice, bump a per-slice counter, and only
+// fall through to escalation if the same slice keeps losing the race.
+// Retry limit is 3: each retry costs one tick (60s) + codex spawn time, so
+// if the race won't resolve in 3 tries the operator needs to know.
+function tryRecoverWrongWorktreeRace(state, slice, sliceId, errorText) {
+  if (!parseWrongWorktreeRaceError(errorText)) return null;
+  const limit = 3;
+  const counts = transientRetryCounts(state);
+  const prev = Number.isFinite(counts[sliceId]) ? counts[sliceId] : 0;
+  const next = prev + 1;
+  if (next > limit) {
+    delete counts[sliceId];
+    return {
+      recovered: false,
+      verdict: "wrong-worktree-race-persistent",
+      detail: "wrong-worktree race recurred " + next + " times for this slice; auto-release exhausted, escalating for operator review",
+    };
+  }
+  counts[sliceId] = next;
+  deleteHatcheryArtifacts(slice);
+  delete state.slices[sliceId];
+  return {
+    recovered: true,
+    verdict: "wrong-worktree-race",
+    detail: "agent-deck launch race detected (attempt " + next + "/" + limit + "); slice released for re-dispatch on next tick",
+  };
+}
+
 function completePendingHatcheryDispatches(state, ts) {
   const actions = [];
   const failures = [];
@@ -2558,12 +2707,32 @@ function completePendingHatcheryDispatches(state, ts) {
         mutated = true;
         continue;
       }
-      const detail = recovery ? errorText + "\\n\\nLoop verdict: " + recovery.detail : errorText;
+      // Race-victim recovery runs only when branch-collision recovery had
+      // nothing to do with the error. Order matters: a wrong-worktree
+      // error never carries a "branch already exists" substring, so the
+      // two paths are mutually exclusive — but checking branch-collision
+      // first keeps the existing recovery behavior untouched.
+      const raceRecovery = recovery ? null : tryRecoverWrongWorktreeRace(state, slice, sliceId, errorText);
+      if (raceRecovery && raceRecovery.recovered) {
+        actions.push({
+          action: "auto-recovered",
+          sliceId,
+          sessionId: null,
+          detail: raceRecovery.verdict + ": " + raceRecovery.detail,
+        });
+        mutated = true;
+        continue;
+      }
+      const effectiveRecovery = recovery || raceRecovery;
+      const detail = effectiveRecovery ? errorText + "\\n\\nLoop verdict: " + effectiveRecovery.detail : errorText;
       slice.stage = "escalated";
       slice.last_action = ts;
       slice.last_action_note = "NEED: Hatchery dispatch failed: " + detail;
       failures.push({ slice_id: sliceId, command: actionCommandLine({ command: slice.command, arguments: slice.arguments || [] }), error: detail });
-      queueDispatchEscalation(slice, sliceId, recovery ? "branch-collision-" + recovery.verdict : "spawn-error", detail);
+      const reasonTag = recovery
+        ? "branch-collision-" + recovery.verdict
+        : (raceRecovery ? raceRecovery.verdict : "spawn-error");
+      queueDispatchEscalation(slice, sliceId, reasonTag, detail);
       mutated = true;
       continue;
     }
@@ -2586,6 +2755,14 @@ function completePendingHatcheryDispatches(state, ts) {
     };
     slice.last_action = ts;
     slice.last_action_note = "Hatchery codex spawn completed and handed off to manager";
+    // Stable handoff timestamp so stranded-steward detection can measure
+    // elapsed time without being reset by subsequent markSliceAction calls.
+    slice.implementing_started_at = ts;
+    // Clear the race-retry counter once the slice has cleanly transitioned
+    // to implementing — the upstream race no longer applies to this slice.
+    if (state.transient_retry_counts && typeof state.transient_retry_counts === "object") {
+      delete state.transient_retry_counts[sliceId];
+    }
     actions.push({
       action: "dispatch-complete",
       sliceId,
