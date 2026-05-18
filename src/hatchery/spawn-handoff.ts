@@ -317,7 +317,7 @@ export function pickLaunchedSession(
     .filter((session) => {
       if (beforeIds.has(session.sessionId)) return false;
       if (!session.worktreePath) return false;
-      const last = session.worktreePath.split("/").filter(Boolean).pop() ?? "";
+      const last = path.basename(session.worktreePath);
       return last === expectedDirName;
     })
     .slice()
@@ -402,25 +402,6 @@ export function launchAgentDeckManager(input: {
       `agent-deck manager launch completed but the new session could not be identified from agent-deck list.`,
     );
   }
-  // Hard correctness check: the session's worktree directory MUST match the
-  // one agent-deck would create for our --worktree <branch> flag. Without
-  // this guard, when pickLaunchedSession's worktree-dir match fails (a
-  // launched session sometimes isn't persisted by the time we query under
-  // load), the diff-since-snapshot fallback can pick a sibling launch's
-  // session and we silently apply our patch to the wrong worktree. Failing
-  // here surfaces the race as an escalation rather than as data corruption.
-  const expectedDirName = expectedWorktreeDirName(input.branch);
-  const actualDirName = (launched.worktreePath || "").split("/").filter(Boolean).pop() ?? "";
-  if (actualDirName !== expectedDirName) {
-    throw new HatcherySpawnError(
-      `agent-deck manager session "${launched.sessionId}" attached to worktree ` +
-        `"${launched.worktreePath}" but this launch requested branch "${input.branch}" ` +
-        `which should produce worktree dir "${expectedDirName}". Refusing to apply patch to ` +
-        `the wrong worktree. This usually means a concurrent launch consumed our session ` +
-        `before we could identify it; the loop's next tick should re-dispatch cleanly once ` +
-        `the colliding spawn finishes.`,
-    );
-  }
 
   let worktreePath: string | undefined = launched.worktreePath;
   if (!worktreePath) {
@@ -429,6 +410,29 @@ export function launchAgentDeckManager(input: {
   if (!worktreePath) {
     throw new HatcherySpawnError(
       `agent-deck manager session "${launched.sessionId}" did not report a worktree path.`,
+    );
+  }
+
+  // Hard correctness check: the session's worktree directory MUST match the
+  // one agent-deck would create for our --worktree <branch> flag. Without
+  // this guard, when pickLaunchedSession's worktree-dir match fails (a
+  // launched session sometimes isn't persisted by the time we query under
+  // load), the diff-since-snapshot fallback can pick a sibling launch's
+  // session and we silently apply our patch to the wrong worktree. Failing
+  // here surfaces the race as an escalation rather than as data corruption.
+  // Run after the worktreePath fallback so older agent-deck versions whose
+  // `list --json` omits `worktreePath` (resolved via `session show --json`)
+  // still hit the validation with a populated path.
+  const expectedDirName = expectedWorktreeDirName(input.branch);
+  const actualDirName = path.basename(worktreePath);
+  if (actualDirName !== expectedDirName) {
+    throw new HatcherySpawnError(
+      `agent-deck manager session "${launched.sessionId}" attached to worktree ` +
+        `"${worktreePath}" but this launch requested branch "${input.branch}" ` +
+        `which should produce worktree dir "${expectedDirName}". Refusing to apply patch to ` +
+        `the wrong worktree. This usually means a concurrent launch consumed our session ` +
+        `before we could identify it; the loop's next tick should re-dispatch cleanly once ` +
+        `the colliding spawn finishes.`,
     );
   }
 
