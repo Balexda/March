@@ -644,7 +644,11 @@ if [ "$1" = "launch" ]; then
     esac
   done
   SAFE_BRANCH=$(printf '%s' "$BRANCH" | tr '/' '-')
-  WORKTREE="$(dirname "$REPO")/agent-deck-worktrees/$SAFE_BRANCH"
+  # Mirror the real agent-deck's "feature-<branch>" worktree naming so
+  # spawn-handoff's expectedWorktreeDirName check passes; the validation
+  # added after the smithy launch-race incident requires the picked
+  # session's worktree basename to equal "feature-<branch-with-slashes>".
+  WORKTREE="$(dirname "$REPO")/agent-deck-worktrees/feature-$SAFE_BRANCH"
   mkdir -p "$(dirname "$WORKTREE")"
   git -C "$REPO" worktree add -q -b "$BRANCH" "$WORKTREE" HEAD
   printf '{"id":"manager-session","title":"%s","group":"%s","worktree_branch":"%s","worktree_path":"%s","created_at":"2026-05-14T00:00:00Z"}\\n' "$TITLE" "$GROUP" "$BRANCH" "$WORKTREE" > "${invocationLog}.session.json"
