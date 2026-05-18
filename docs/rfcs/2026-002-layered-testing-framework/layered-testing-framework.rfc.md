@@ -162,7 +162,7 @@ None — all deferred decisions are tracked in §Specification Debt below.
 **Description**: Realizes the **cassette substrate** primitive from §Proposal as a hard-capped proof-of-concept against the Spawn ↔ Steward boundary, plus the throwaway-repo factory, Docker pinning, and Cucumber.js step-definition library that downstream milestones generalize. Advances the *tests are the contract* and *deterministic core, stochastic edge* goals by landing the first cross-subsystem test that asserts contract behavior deterministically against a recorded backend exchange. The scope cap (one cassette, one `.feature`, one concurrency variant per §Design Considerations) is enforced. Depends on M-A (staged CI to land in) and M-B (Spawn + Steward contracts to assert against).
 
 **Success Criteria**:
-- `docs/testing/cassette-format-v0.md` records the JSONL HTTP capture format, the redaction pass rules for API keys, auth headers, and token-shaped strings, and the file layout under `tests/cassettes/`.
+- `docs/testing/cassette-format-v0.md` records the cassette v0 format selected per SD-003 (working assumption: JSONL HTTP capture), the redaction pass rules for API keys, auth headers, and token-shaped strings, and the file layout under `tests/cassettes/`.
 - A throwaway-repo factory utility exists at `tests/support/throwaway-repo.ts` (or equivalent) and is exercised by at least one test that asserts a freshly-seeded repo is produced per invocation.
 - `docs/testing/docker-pinning-policy.md` documents digest-locked base images; at least one image referenced by the L2 slice is pinned by SHA-256 digest and the digest is checked into the repo.
 - Exactly one cassette file exists at `tests/cassettes/spawn-steward/handoff.jsonl` capturing a real Spawn → Steward exchange against `src/hatchery/spawn-handoff.ts`.
@@ -172,7 +172,7 @@ None — all deferred decisions are tracked in §Specification Debt below.
 
 ### Milestone M-D: L1 Gap-Fill (Hatchery)
 
-**Description**: Advances the *tests are the contract* goal at the L1 scope by closing the highest-priority L1 gap surfaced during M-A's tagging pass. Concurrent with M-C — vitest vs. Cucumber, different files, no cassette dependency. Depends on M-A only; M-B's Hatchery contract is drafted concurrently and the tests retro-link to it.
+**Description**: Does not realize a new §Proposal primitive — instead consumes the **two-axis taxonomy** (tags applied during M-A) and the **contract documentation** track (M-B's Hatchery contract, drafted concurrently) to close the highest-priority L1 gap surfaced during M-A's tagging pass. Advances the *tests are the contract* goal at the L1 scope. Concurrent with M-C — vitest vs. Cucumber, different files, no cassette dependency. Depends on M-A only; M-B's Hatchery contract is drafted concurrently and the tests retro-link to it.
 
 **Success Criteria**:
 - New vitest L1 test files under `src/hatchery/` cover (a) profile-policy schema validation, (b) environment material assembly, and (c) credential-mount spec validation; one named test file per concern.
@@ -220,7 +220,7 @@ None — all deferred decisions are tracked in §Specification Debt below.
 
 ### Milestone M-H: Herald-Enabled Trace-as-Fixture
 
-**Description**: Closes the loop between operator-visible production runs and L3 regression coverage by converting Herald events into cassettes, advancing the *deterministic core, stochastic edge* goal at the regression scope. **Blocked on Herald (RFC 2026-001 M4 — Not started)**; depends on M-G (an L3 cassette consumer must exist) and Herald M4.
+**Description**: Does not realize a new §Proposal primitive — instead consumes the **cassette substrate** (generalized in M-E) and the **L3 vertical-slice consumer** (M-G) to close the loop between operator-visible production runs and L3 regression coverage by converting Herald events into cassettes. Advances the *deterministic core, stochastic edge* goal at the regression scope. **Blocked on Herald (RFC 2026-001 M4 — Not started)**; depends on M-G (an L3 cassette consumer must exist) and Herald M4.
 
 **Success Criteria**:
 - A trace-to-cassette tool exists (e.g., `tools/trace-to-cassette/`) that subscribes to Herald events and emits cassette files conforming to the M-E format under `tests/cassettes/from-trace/`.
