@@ -2630,6 +2630,175 @@ function tryRecoverWrongWorktreeRace(state, slice, sliceId, errorText) {
   };
 }
 
+// Adopt-open-PR recovery: when the branch collision verdict is "open-pr"
+// for a PR that matches this slice's expected branch, the work is already
+// in flight on GitHub. Don't escalate — transition the slice directly to
+// pr-open so the loop's normal babysit picks up the PR going forward.
+function tryAdoptOpenPr(state, slice, sliceId, errorText, ts) {
+  const branchName = parseBranchCollisionError(errorText);
+  if (!branchName) return null;
+  const repoPath = state?.repo?.path || meta.repo?.path;
+  if (typeof repoPath !== "string" || repoPath.length === 0) return null;
+  const defaultBranch = state?.repo?.default_branch || meta.repo?.default_branch || null;
+  const info = inspectCollidedBranch(repoPath, defaultBranch, branchName);
+  const classification = classifyBranchCollision(info);
+  if (classification.verdict !== "open-pr") return null;
+  // Pick the first PR matching our slice branch, falling back to the
+  // first open PR on the branch (the names diverge slightly between the
+  // smithy dispatch branch slug and the actual feature/* git ref).
+  const candidates = classification.open || [];
+  const tentativeSlice = { branch: slice.branch || branchName };
+  let chosen = candidates.find((p) => prMatchesSliceBranch(tentativeSlice, p));
+  if (!chosen) chosen = candidates[0];
+  if (!chosen) return null;
+  let hydrated;
+  try {
+    hydrated = queryPrForBabysit({ pr: { number: chosen.number } }, state);
+  } catch {
+    return null;
+  }
+  if (!hydrated || hydrated.skipped) return null;
+  // Transition the slice to pr-open with the discovered PR.
+  slice.stage = "pr-open";
+  slice.pr_open_at = ts;
+  slice.branch = branchName.replace(/^feature\\//, "");
+  slice.last_action = ts;
+  slice.last_action_note = "Adopted existing open PR #" + chosen.number;
+  updatePrSnapshot(slice, hydrated);
+  deleteHatcheryArtifacts(slice);
+  return {
+    recovered: true,
+    verdict: "open-pr-adopted",
+    detail: "branch=" + branchName + " head=" + (info?.head || "").slice(0, 7) + " | adopted PR #" + chosen.number + " (" + (hydrated.url || "") + ")",
+  };
+}
+
+// Stranded-leftover recovery: a branch with diverged commits, no PR (open
+// or merged), and no live agent-deck session owning its worktree is almost
+// always the leftover of a previous stranded steward — the steward
+// committed and pushed, then exited before opening the PR, and the slice
+// was cleared or the steward record removed. The branch is "orphaned
+// work" from the loop's perspective: re-dispatching produces fresh
+// content; preserving it requires operator action (open the PR manually).
+// Conservative auto-recovery: delete the branch + worktree, bump a retry
+// counter, and let the new dispatch produce a clean steward run. This
+// loses the prior partial work, but the manager-prompt + stranded-steward
+// watchdog now make stranded leftovers exceptional, so this should rarely
+// fire after the first one-time cleanup.
+function tryRecoverStrandedLeftover(state, slice, sliceId, errorText, classification, info, branchName) {
+  if (!info || info.isAncestor) return null;
+  // classifyBranchCollision strips prsKnown from the diverged-unknown return
+  // value, so read it from info directly (info comes from inspectCollidedBranch
+  // which sets prsKnown explicitly based on whether the gh pr list succeeded).
+  if (!info.prsKnown) return null;
+  if ((classification.open || []).length > 0) return null;
+  if ((classification.merged || []).length > 0) return null;
+  if (classification.verdict !== "diverged-unknown") return null;
+  const repoPath = state?.repo?.path || meta.repo?.path;
+  if (typeof repoPath !== "string" || repoPath.length === 0) return null;
+  // Refuse if a live agent-deck session still owns the worktree — that
+  // means there's an active steward and we'd be racing it.
+  const worktreePath = findWorktreeForBranch(repoPath, branchName);
+  if (worktreePath && agentDeckSessionHoldsWorktree(worktreePath)) return null;
+  const limit = 3;
+  const counts = transientRetryCounts(state);
+  const key = "stranded-leftover:" + sliceId;
+  const prev = Number.isFinite(counts[key]) ? counts[key] : 0;
+  const next = prev + 1;
+  if (next > limit) {
+    delete counts[key];
+    return {
+      recovered: false,
+      verdict: "stranded-leftover-persistent",
+      detail: "stranded-leftover cleanup recurred " + next + " times for " + branchName + "; auto-release exhausted, escalating for operator review",
+    };
+  }
+  counts[key] = next;
+  let extra = "";
+  if (worktreePath) {
+    try {
+      execText("git", ["worktree", "remove", "--force", worktreePath], { cwd: repoPath });
+      extra = " | worktree " + worktreePath + " removed";
+    } catch (err) {
+      return { recovered: false, verdict: "stranded-leftover-worktree-remove-failed", detail: "worktree remove failed: " + (err?.message || String(err)) };
+    }
+  }
+  try {
+    execText("git", ["branch", "-D", branchName], { cwd: repoPath });
+  } catch (err) {
+    return { recovered: false, verdict: "stranded-leftover-delete-failed", detail: "branch delete failed: " + (err?.message || String(err)) };
+  }
+  // Delete the remote branch too. If we leave it behind, the re-dispatched
+  // steward will push to a remote ref that diverged from the new local
+  // branch (since the new local branch starts from origin/master while the
+  // remote stranded ref still has the prior steward's commits). The result
+  // is a push rejection on the new steward. The stranded-leftover verdict
+  // already confirms no PR references this ref, so the remote ref has no
+  // GitHub-side dependencies — safe to delete.
+  let remoteExtra = "";
+  try {
+    execText("git", ["push", "--delete", "origin", branchName], { cwd: repoPath });
+    remoteExtra = " | origin/" + branchName + " also deleted";
+  } catch (err) {
+    const msg = String(err?.message || err || "");
+    // "remote ref does not exist" is fine — nothing to delete.
+    if (/remote ref does not exist|src refspec.*does not match/i.test(msg)) {
+      remoteExtra = " | no remote ref (already absent)";
+    } else {
+      // Otherwise surface the failure but don't roll back the local delete —
+      // the loop will retry the dispatch and the same recovery will run
+      // again. Note the failure for diagnosis.
+      remoteExtra = " | WARNING remote ref delete failed: " + msg.slice(0, 200);
+    }
+  }
+  deleteHatcheryArtifacts(slice);
+  delete state.slices[sliceId];
+  return {
+    recovered: true,
+    verdict: "stranded-leftover",
+    detail: "branch=" + branchName + " head=" + (info.head || "").slice(0, 7) + " no PR, no live session (attempt " + next + "/" + limit + ")" + extra + remoteExtra + " | slice released for re-dispatch",
+  };
+}
+
+// Codex spawn-error recovery: when 'git apply --index' rejects the patch
+// codex produced — usually because codex truncated its output mid-diff
+// ("corrupt patch at ...:N") or generated a patch that re-creates an
+// existing file ("already exists in index") — re-running codex with the
+// same prompt typically produces a different (often correct) output. Add
+// a per-slice retry counter and escalate only if it persists.
+function parseSpawnPatchError(text) {
+  const s = String(text || "");
+  if (/git apply --index failed/.test(s)) return true;
+  if (/corrupt patch at /.test(s)) return true;
+  if (/already exists in index/.test(s)) return true;
+  return false;
+}
+
+function tryRecoverSpawnPatchError(state, slice, sliceId, errorText) {
+  if (!parseSpawnPatchError(errorText)) return null;
+  const limit = 3;
+  const counts = transientRetryCounts(state);
+  const key = "spawn-error:" + sliceId;
+  const prev = Number.isFinite(counts[key]) ? counts[key] : 0;
+  const next = prev + 1;
+  if (next > limit) {
+    delete counts[key];
+    return {
+      recovered: false,
+      verdict: "spawn-error-persistent",
+      detail: "codex spawn produced an unapplicable patch " + next + " times for this slice; auto-release exhausted, escalating for operator review",
+    };
+  }
+  counts[key] = next;
+  deleteHatcheryArtifacts(slice);
+  delete state.slices[sliceId];
+  return {
+    recovered: true,
+    verdict: "spawn-error-retry",
+    detail: "codex spawn patch error (attempt " + next + "/" + limit + "); slice released for re-dispatch on next tick",
+  };
+}
+
 function completePendingHatcheryDispatches(state, ts) {
   const actions = [];
   const failures = [];
@@ -2696,6 +2865,21 @@ function completePendingHatcheryDispatches(state, ts) {
       // safe to delete (HEAD on default branch, or merged-PR + no open PR).
       // Anything ambiguous falls through to escalation with the verdict
       // included in the detail so the agent / operator has the full context.
+      // Branch-collision adoption: if the colliding branch already has an
+      // open PR matching this slice, the work is already in flight on
+      // GitHub. Adopt the PR and transition the slice to pr-open instead
+      // of escalating — there's nothing to recover.
+      const adoption = tryAdoptOpenPr(state, slice, sliceId, errorText, ts);
+      if (adoption && adoption.recovered) {
+        actions.push({
+          action: "auto-recovered",
+          sliceId,
+          sessionId: null,
+          detail: "branch-collision " + adoption.verdict + ": " + adoption.detail,
+        });
+        mutated = true;
+        continue;
+      }
       const recovery = tryRecoverBranchCollision(state, slice, sliceId, errorText);
       if (recovery && recovery.recovered) {
         actions.push({
@@ -2706,6 +2890,30 @@ function completePendingHatcheryDispatches(state, ts) {
         });
         mutated = true;
         continue;
+      }
+      // Stranded-leftover recovery: a diverged branch with no PR and no
+      // live session is almost always the residue of a previous stranded
+      // steward. The branch-collision path above refused (verdict was
+      // diverged-unknown, not autoSafe). Try the leftover cleanup with a
+      // retry counter so a persistent diverged-unknown still escalates.
+      let leftoverRecovery = null;
+      if (recovery && recovery.verdict === "diverged-unknown") {
+        const branchName = parseBranchCollisionError(errorText);
+        const repoPath = state?.repo?.path || meta.repo?.path;
+        const defaultBranch = state?.repo?.default_branch || meta.repo?.default_branch || null;
+        const info = branchName ? inspectCollidedBranch(repoPath, defaultBranch, branchName) : null;
+        const classification = classifyBranchCollision(info);
+        leftoverRecovery = tryRecoverStrandedLeftover(state, slice, sliceId, errorText, classification, info, branchName);
+        if (leftoverRecovery && leftoverRecovery.recovered) {
+          actions.push({
+            action: "auto-recovered",
+            sliceId,
+            sessionId: null,
+            detail: leftoverRecovery.verdict + ": " + leftoverRecovery.detail,
+          });
+          mutated = true;
+          continue;
+        }
       }
       // Race-victim recovery runs only when branch-collision recovery had
       // nothing to do with the error. Order matters: a wrong-worktree
@@ -2723,7 +2931,22 @@ function completePendingHatcheryDispatches(state, ts) {
         mutated = true;
         continue;
       }
-      const effectiveRecovery = recovery || raceRecovery;
+      // Spawn-error recovery: corrupt-patch and "already exists in index"
+      // failures originate in codex's output and are typically transient
+      // (re-running produces different output). Retry up to 3 times via
+      // the same transient_retry_counts machinery.
+      const spawnRecovery = (recovery || raceRecovery) ? null : tryRecoverSpawnPatchError(state, slice, sliceId, errorText);
+      if (spawnRecovery && spawnRecovery.recovered) {
+        actions.push({
+          action: "auto-recovered",
+          sliceId,
+          sessionId: null,
+          detail: spawnRecovery.verdict + ": " + spawnRecovery.detail,
+        });
+        mutated = true;
+        continue;
+      }
+      const effectiveRecovery = recovery || raceRecovery || spawnRecovery || leftoverRecovery;
       const detail = effectiveRecovery ? errorText + "\\n\\nLoop verdict: " + effectiveRecovery.detail : errorText;
       slice.stage = "escalated";
       slice.last_action = ts;
@@ -2731,7 +2954,7 @@ function completePendingHatcheryDispatches(state, ts) {
       failures.push({ slice_id: sliceId, command: actionCommandLine({ command: slice.command, arguments: slice.arguments || [] }), error: detail });
       const reasonTag = recovery
         ? "branch-collision-" + recovery.verdict
-        : (raceRecovery ? raceRecovery.verdict : "spawn-error");
+        : (raceRecovery ? raceRecovery.verdict : (spawnRecovery ? spawnRecovery.verdict : (leftoverRecovery ? leftoverRecovery.verdict : "spawn-error")));
       queueDispatchEscalation(slice, sliceId, reasonTag, detail);
       mutated = true;
       continue;

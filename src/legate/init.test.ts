@@ -778,6 +778,51 @@ describe("legate module", () => {
       }
     });
 
+    it("parseSpawnPatchError matches corrupt-patch + already-exists-in-index + generic git apply failures", async () => {
+      const loop = fs.readFileSync(await stageLoop(makeTmpDir()), "utf-8");
+      const parse = extractFn(loop, "parseSpawnPatchError") as (s: string) => boolean;
+      expect(parse("git apply --index failed in manager worktree:\nerror: corrupt patch at /tmp/p.diff:42")).toBe(true);
+      expect(parse("git apply --index failed in manager worktree:\nerror: evals/cases/x.yaml: already exists in index")).toBe(true);
+      expect(parse("git apply --index failed in manager worktree:\nerror: something else")).toBe(true);
+      // Branch-collision and wrong-worktree errors must NOT match — they
+      // have their own recovery paths.
+      expect(parse("agent-deck manager launch failed:\nError: branch 'feature/x' already exists")).toBe(false);
+      expect(parse("agent-deck manager session \"abc\" attached to worktree \"/tmp/wrong\" but this launch")).toBe(false);
+      expect(parse("")).toBe(false);
+    });
+
+    it("tryRecoverSpawnPatchError retries 3 times then escalates with a distinct counter key", async () => {
+      // Codex-side patch failures (truncation, malformed diff) are transient
+      // — re-running codex produces different output, usually correct on
+      // the next attempt. Verify the per-slice retry counter is stored under
+      // a "spawn-error:<sliceId>" key so it doesn't collide with the
+      // wrong-worktree-race counter.
+      const loop = fs.readFileSync(await stageLoop(makeTmpDir()), "utf-8");
+      const recover = extractFn(
+        loop,
+        "tryRecoverSpawnPatchError",
+        ["transientRetryCounts", "parseSpawnPatchError", "deleteHatcheryArtifacts"],
+      ) as (state: any, slice: any, sliceId: string, errorText: string) => any;
+
+      const errorText = "git apply --index failed in manager worktree:\nerror: corrupt patch at /tmp/p.diff:42";
+      const state: any = { slices: { s1: { hatchery: {} } } };
+
+      for (let i = 1; i <= 3; i++) {
+        const r = recover(state, state.slices.s1 || (state.slices.s1 = { hatchery: {} }), "s1", errorText);
+        expect(r).toMatchObject({ recovered: true, verdict: "spawn-error-retry" });
+        expect(state.transient_retry_counts["spawn-error:s1"]).toBe(i);
+      }
+      // Fourth attempt → escalate, slice retained, counter cleared.
+      state.slices.s1 = { hatchery: {} };
+      const escalated = recover(state, state.slices.s1, "s1", errorText);
+      expect(escalated).toMatchObject({ recovered: false, verdict: "spawn-error-persistent" });
+      expect(state.slices.s1).toBeDefined();
+      expect(state.transient_retry_counts["spawn-error:s1"]).toBeUndefined();
+
+      // Non-matching errors return null and don't touch state.
+      expect(recover(state, state.slices.s1, "s1", "agent-deck manager launch failed:\nError: branch 'x' already exists")).toBeNull();
+    });
+
     it("stages legate.unwedge skill with inspect + clean-stale scripts", async () => {
       // Regression guard: adding legate.unwedge to LEGATE_SKILLS is necessary
       // but not sufficient — the skill template directory has to exist and
