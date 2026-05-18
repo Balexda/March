@@ -32,35 +32,19 @@ Tests live next to the modules they cover. When adding a module, place it under 
 
 ## Testing
 
-March has two testing tiers:
+The strategy — scope tiers (L0 unit / L1 subsystem / L2 cross-subsystem / L3 system), the deterministic-vs-stochastic axis, the cassette pivot, the cost policy, and the framework choice per scope — lives in **[docs/testing-strategy.md](docs/testing-strategy.md)**. Read it once before adding tests in a new layer.
 
-### Tier 1: CLI Behavior (init / update / spawn dispatch)
+The milestone-level execution plan (M1 through M8, success criteria, dependency order, the gap-analysis baseline of today's tests) lives in **[docs/rfcs/2026-002-layered-testing-framework/layered-testing-framework.rfc.md](docs/rfcs/2026-002-layered-testing-framework/layered-testing-framework.rfc.md)**.
 
-Tests that the CLI parses options correctly, deploys files to the right locations, handles idempotency, and rolls back partial state on failure. Covered by automated tests and human interactive tests.
+Day-to-day commands:
 
-**Automated** (`npm test`) — runs in CI on every push and PR:
+- **`npm test`** — runs the deterministic CI suite. Today that's the full vitest set: L0, L1, and the L2 cases that exercise real Docker (`spawn/container-launch`, `spawn/snapshot-build`, `hatchery/legate-container`). Cassette-replayed L2/L3 will land here as the [RFC milestones](docs/rfcs/2026-002-layered-testing-framework/layered-testing-framework.rfc.md#milestones) progress. Cost: $0, < 2 minutes. Runs on every push and PR.
+- **`npm run typecheck`** — `tsc --noEmit`.
 
-| Test file | Scope |
-|-----------|-------|
-| `src/cli/program.test.ts` | CLI integration (init, update, spawn dispatch wiring) |
-| `src/bootstrap/init.test.ts` | `march init`: manifest creation, skill deployment, idempotency guard |
-| `src/bootstrap/update.test.ts` | `march update`: upgrade/downgrade gating, `--yes` force path |
-| `src/legate/init.test.ts` | `march legate init`: slug derivation, template render, idempotent re-runs |
-| `src/bootstrap/manifest.test.ts` | Manifest schema and validity checks |
-| `src/bootstrap/skills.test.ts` | M1 skill definitions and deployment targets |
-| `src/shared/deps.test.ts` | PATH lookup, finder availability, dependency warnings |
-| `src/brood/worktree.test.ts` | Spawn worktree creation + rollback |
-| `src/spawn/snapshot.test.ts` | Snapshot Exclusion List, build-context assembly |
-| `src/spawn/snapshot-build.test.ts` | Spawn Dockerfile generation, image build, image removal |
-| `src/brood/spawn-record.test.ts` | SpawnRecord write / state transitions / rollback |
+Agent-driven and human tests:
 
-**Human tests** (interactive terminal) — for the `readline`-based downgrade prompt that only fires when stdin is a TTY. See **[tests/Manual.tests.md](tests/Manual.tests.md)** (H1-H2).
-
-### Tier 2: End-to-End Spawn Dispatch
-
-Tests that `march spawn dispatch` produces a real worktree, builds a tagged Docker image, writes a `SpawnRecord` in `~/.march/spawns/`, and rolls back cleanly on failure. Requires `git` and `docker` on `PATH` and a pullable base image, so it runs as an agent test rather than in CI.
-
-**Agent tests** (Claude Code session) — verify the full dispatch lifecycle on a throwaway repo and the `failed`-state rollback. See **[tests/Agent.tests.md](tests/Agent.tests.md)** (A1-A5).
+- **Agent tests** (Claude Code session) — end-to-end dispatch lifecycle on a throwaway repo and `failed`-state rollback. Today documented as prose; aspirational target is `L3 / Deterministic / CI` (cassette-replayed) plus `L3 / Stochastic / Scheduled` (weekly live-backend). See **[tests/Agent.tests.md](tests/Agent.tests.md)** (A1–A5).
+- **Human tests** (interactive terminal) — TTY-only flows like the `readline` downgrade prompt. See **[tests/Manual.tests.md](tests/Manual.tests.md)** (H1–H2).
 
 ## Automated Dependency Updates
 
@@ -71,6 +55,8 @@ This repo runs Dependabot on a monthly schedule (plus immediate security advisor
 Before publishing a new version:
 
 1. All automated tests pass: `npm test`
-2. Agent tests (A1-A5) verified in a Claude Code session
-3. Human tests (H1-H2) verified in an interactive terminal
+2. Agent tests (A1–A5) verified in a Claude Code session
+3. Human tests (H1–H2) verified in an interactive terminal
 4. Trigger the **Publish to npm** workflow with both test gate checkboxes checked
+
+See **[docs/testing-strategy.md § Cost policy](docs/testing-strategy.md#6-cost-policy)** for the principles, and the [RFC milestones](docs/rfcs/2026-002-layered-testing-framework/layered-testing-framework.rfc.md#milestones) for the sequencing — scheduled stochastic runs and cassette refresh interact with the release flow once those milestones land.
