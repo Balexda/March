@@ -708,6 +708,14 @@ function loopMetaFor(input: {
       input.loopConductorDir,
       "legate-loop-requests.ndjson",
     ),
+    loop_heartbeat_log_path: path.join(
+      input.loopConductorDir,
+      "legate-loop-heartbeat.log",
+    ),
+    loop_heartbeat_events_path: path.join(
+      input.loopConductorDir,
+      "legate-loop-heartbeat.ndjson",
+    ),
     processor_log_path: path.join(input.loopConductorDir, "legate-loop.log"),
     processor_events_path: path.join(input.loopConductorDir, "legate-loop.ndjson"),
     processor_requests_path: path.join(
@@ -729,6 +737,10 @@ import { fileURLToPath } from "node:url";
 const here = path.dirname(fileURLToPath(import.meta.url));
 const metaPath = path.join(here, "legate-loop-meta.json");
 const meta = JSON.parse(fs.readFileSync(metaPath, "utf-8"));
+// Heartbeats go to a sibling log so the main legate-loop.log stays readable.
+// Fall back to the action log for older deployments whose meta predates the split.
+const heartbeatLogPath = meta.loop_heartbeat_log_path || meta.processor_log_path;
+const heartbeatEventsPath = meta.loop_heartbeat_events_path || meta.processor_events_path;
 const rawIntervalSeconds = Number(process.env.MARCH_LEGATE_LOOP_INTERVAL_SECONDS || process.env.MARCH_PROCESSOR_INTERVAL_SECONDS || "60");
 const intervalSeconds = Number.isFinite(rawIntervalSeconds) && rawIntervalSeconds > 0
   ? rawIntervalSeconds
@@ -747,6 +759,14 @@ function appendText(file, text) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.appendFileSync(file, text + "\\n", "utf-8");
   console.log(text);
+}
+
+// Heartbeat path: writes to disk for liveness checks but does NOT echo to
+// stdout. The conductor tmux session would otherwise drown out real events
+// with one heartbeat line per tick.
+function appendTextSilent(file, text) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.appendFileSync(file, text + "\\n", "utf-8");
 }
 
 function printText(text) {
@@ -2274,6 +2294,12 @@ function buildSmithySpawnPrompt(item) {
     "- Implement only this one Smithy step.",
     "- Do not chain into the next Smithy step.",
     "- Make the smallest coherent patch needed for this step.",
+    "- Every acceptance criterion the step lists must be satisfied by the patch.",
+    "  Do not produce a partial patch and rely on a follow-up — the deterministic",
+    "  loop dedups future dispatches off the merged slice id and a partial merge",
+    "  is silently abandoned.",
+    "- Flip the matching tasks.md row(s) from \`[ ]\` to \`[x]\` in the same patch.",
+    "  The check-state is the loop's only durable signal that this slice is done.",
     "- Leave PR creation to the Hatchery manager session.",
   ].join("\\n");
 }
@@ -3509,7 +3535,7 @@ function tick() {
     dispatch_action_count: dispatchResult.actions.length,
     dispatch_failure_count: dispatchResult.failures.length,
   };
-  append(meta.processor_events_path, record);
+  append(heartbeatEventsPath, record);
   for (const cleanup of cleanupResult.cleanups) {
     append(meta.processor_events_path, cleanup);
     appendText(meta.processor_log_path, formatCleanupLine(cleanup));
@@ -3605,8 +3631,8 @@ function tick() {
       "[" + ts + "] dispatch " + action.sliceId + ": " + action.detail,
     );
   }
-  appendText(
-    meta.processor_log_path,
+  appendTextSilent(
+    heartbeatLogPath,
     \`[\${ts}] heartbeat slice_count=\${record.slice_count} archived=\${record.archived_slice_count} cleanups=\${record.cleanup_count} ghost_cleanups=\${record.ghost_cleanup_count} relaunches=\${record.relaunch_count} babysit_actions=\${record.babysit_action_count} dispatches=\${record.dispatch_action_count} processor_requests=\${record.processor_request_count} workers=\${JSON.stringify(workers)}\${stateError ? " state_error=" + stateError : ""}\`,
   );
 }

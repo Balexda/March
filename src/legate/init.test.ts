@@ -334,6 +334,15 @@ describe("legate module", () => {
       expect(loop).toContain("agent-deck error state");
       expect(loop).not.toContain("restartWorker(");
       expect(loop).toContain("] heartbeat slice_count=");
+      // Heartbeat lines and ndjson records are written to the heartbeat-only
+      // sibling files so legate-loop.log stays scannable for real events.
+      expect(loop).toContain("meta.loop_heartbeat_log_path");
+      expect(loop).toContain("meta.loop_heartbeat_events_path");
+      expect(loop).toContain("append(heartbeatEventsPath, record)");
+      // Heartbeat line uses the silent helper so it never reaches the
+      // conductor's stdout (the tmux attach view stays scannable).
+      expect(loop).toContain("function appendTextSilent");
+      expect(loop).toContain("appendTextSilent(\n    heartbeatLogPath,");
       expect(loop).toContain("function formatCleanupLine");
       expect(loop).toContain("${prefix}cleaned up");
       expect(loop).toContain('list", "-json"');
@@ -407,6 +416,12 @@ describe("legate module", () => {
       );
       expect(meta.loop_requests_path).toBe(
         path.join(home, ".agent-deck", "conductor", "march-legate-loop", "legate-loop-requests.ndjson"),
+      );
+      expect(meta.loop_heartbeat_log_path).toBe(
+        path.join(home, ".agent-deck", "conductor", "march-legate-loop", "legate-loop-heartbeat.log"),
+      );
+      expect(meta.loop_heartbeat_events_path).toBe(
+        path.join(home, ".agent-deck", "conductor", "march-legate-loop", "legate-loop-heartbeat.ndjson"),
       );
       expect(meta.mode).toBe("terminal-pr-maintenance");
 
