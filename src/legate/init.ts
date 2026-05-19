@@ -3196,8 +3196,9 @@ function runStewardRelaunch(state, workerList, ts) {
     counts[key] = nextN;
     // Compute worktree path. Use the slice's recorded worktree_path when
     // it points at an extant directory; otherwise derive from the repo
-    // parent (agent-deck's sibling-worktree convention).
-    const worktreesParent = path.resolve(path.dirname(repoPath), "..", "WorkTrees", path.basename(repoPath));
+    // parent (agent-deck's sibling-worktree convention: <repoParent>/
+    // WorkTrees/<repoName>/<expectedDirName>).
+    const worktreesParent = path.join(path.dirname(repoPath), "WorkTrees", path.basename(repoPath));
     let worktreePath = slice.worktree_path || path.join(worktreesParent, expectedDirName);
     if (!fs.existsSync(worktreePath)) {
       // Try to re-create from the branch ref.
