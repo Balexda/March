@@ -446,6 +446,32 @@ export function launchAgentDeckManager(input: {
     );
   }
 
+  // Enable agent-deck session-level auto-mode on the new steward. The
+  // conductor session has this set explicitly during legate init, but
+  // `agent-deck launch` creates worker sessions with auto-mode=false by
+  // default. Without it, claude's `--permission-mode auto` only suppresses
+  // some prompts; the agent-deck classifier still pauses tool calls,
+  // leaving the steward stuck mid-workflow on every loop nudge.
+  //
+  // Best-effort: don't fail the whole dispatch if this step errors. The
+  // session is still functional, just less responsive to babysit messages.
+  const autoModeArgs = [
+    ...(input.profile ? ["-p", input.profile] : []),
+    "session",
+    "set",
+    launched.sessionId,
+    "auto-mode",
+    "true",
+  ];
+  try {
+    execFileSync("agent-deck", autoModeArgs, {
+      stdio: ["ignore", "ignore", "pipe"],
+      maxBuffer: EXEC_MAX_BUFFER,
+    });
+  } catch {
+    // Swallow — see comment above.
+  }
+
   return {
     sessionId: launched.sessionId,
     title: launched.title || input.title,
