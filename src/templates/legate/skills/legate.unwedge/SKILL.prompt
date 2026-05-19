@@ -52,7 +52,7 @@ The loop should have handled these autonomously. If you reach this branch, it li
 
 ```bash
 .claude/skills/legate.unwedge/scripts/clean-stale-branch.sh \
-  "{{REPO_PATH}}" "<branch>" "~/.agent-deck/conductor/{{CONDUCTOR_NAME}}/state.json" "<slice-id>"
+  "{{REPO_PATH}}" "<branch>" "$HOME/.agent-deck/conductor/{{CONDUCTOR_NAME}}/state.json" "<slice-id>"
 ```
 
 The script re-validates safety conditions before acting. If it exits non-zero with `refused`, do **not** retry — classify as `open-pr` or `diverged-unknown` instead.
