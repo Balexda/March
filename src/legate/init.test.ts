@@ -371,6 +371,26 @@ describe("legate module", () => {
       // already in flight.
       expect(loop).not.toContain("!dependenciesClear(state, status, item)");
       expect(loop).toContain("alreadyArchivedSlice(state, item, sliceId)");
+      // Partial-merge recovery (#140): when smithy still says ready and a
+      // MERGED archive entry collides, fire a recovery dispatch rather than
+      // silently filtering. The check has to look only at MERGED archives,
+      // tracked by an attempt counter persisted in state.recovery_attempts,
+      // capped at MAX_RECOVERY_ATTEMPTS.
+      expect(loop).toContain("function blockingMergedArchive");
+      expect(loop).toContain("function inFlightSliceMatches");
+      expect(loop).toContain("function handleRecoveryDispatch");
+      expect(loop).toContain("function buildSmithyRecoverySpawnPrompt");
+      expect(loop).toContain("MAX_RECOVERY_ATTEMPTS");
+      expect(loop).toContain("state.recovery_attempts");
+      expect(loop).toContain("original_slice_id");
+      expect(loop).toContain('action: "recovery_dispatch"');
+      expect(loop).toContain('"recovery_dispatch" : "dispatch_action"');
+      expect(loop).toContain("recovery-dispatch");
+      expect(loop).toContain("recovery_dispatch_exhausted");
+      // The recovery prompt must point the worker at the prior PR and ask
+      // for either a finishing patch or a checkbox-only cleanup PR.
+      expect(loop).toContain("RECOVERY DISPATCH");
+      expect(loop).toContain("Prior merged PR");
       expect(loop).toContain('kind: "dispatch_failure"');
       expect(loop).toContain('kind: "dispatch_read_failure"');
       expect(loop).toContain("function launchHatcheryDispatch");
@@ -530,6 +550,100 @@ describe("legate module", () => {
       expect(String(result.error)).toContain("hatchery runner crashed:");
       expect(result.exitCode).toBeNull();
       expect(fs.readFileSync(logPath, "utf-8")).toContain("runner crash:");
+    });
+
+    it("blockingMergedArchive only matches MERGED archive entries, never escalated/closed", async () => {
+      // Recovery dispatch (#140) is for the partial-merge case only. A
+      // closed-unmerged or escalated archive entry represents an unresolved
+      // operator decision and must keep blocking re-dispatch — never let the
+      // recovery path silently rerun those.
+      const loop = fs.readFileSync(await stageLoop(makeTmpDir()), "utf-8");
+      const deps = ["smithyVerb", "actionArguments", "slugifyDispatchPart", "hashText", "dispatchItemKey", "sliceActionKey", "dispatchArtifactSlug", "dispatchIdentity", "dispatchBranch", "archivedSlices", "isStubArchivedSlice"];
+      const blocking = extractFn(loop, "blockingMergedArchive", deps) as (state: unknown, item: unknown, sliceId: string) => unknown;
+
+      const item = {
+        path: "specs/foo/01-bar.tasks.md",
+        parent_path: "specs/foo/foo.spec.md",
+        parent_row_id: "US1",
+        next_action: { command: "smithy.forge", arguments: ["specs/foo/01-bar.tasks.md", "2"] },
+      };
+      const sliceId = "foo-us1-s2-forge";
+      const archivedKey = "foo-us1-s2-forge";
+
+      // MERGED via terminal_state — should return the entry.
+      const merged = { command: "smithy.forge", arguments: ["specs/foo/01-bar.tasks.md", "2"], branch: "smithy/forge/foo-us1-s2", terminal_state: "MERGED", pr_number: 42 };
+      expect(blocking({ archived_slices: { [archivedKey]: merged } }, item, sliceId)).toEqual(merged);
+
+      // Escalated (stage) — must NOT match.
+      const escalated = { ...merged, terminal_state: undefined, stage: "escalated" };
+      expect(blocking({ archived_slices: { [archivedKey]: escalated } }, item, sliceId)).toBeNull();
+
+      // Closed-unmerged — must NOT match.
+      const closed = { ...merged, terminal_state: "CLOSED" };
+      expect(blocking({ archived_slices: { [archivedKey]: closed } }, item, sliceId)).toBeNull();
+
+      // Stub legacy entry — must NOT match (handled by isStubArchivedSlice).
+      const stub = { terminal_state: "MERGED" };
+      expect(blocking({ archived_slices: { [archivedKey]: stub } }, item, sliceId)).toBeNull();
+
+      // No archive at all — null.
+      expect(blocking({ archived_slices: {} }, item, sliceId)).toBeNull();
+
+      // Match by sliceActionKey when the archive id differs (legacy hash IDs).
+      expect(blocking({ archived_slices: { "some-other-hash-id": merged } }, item, sliceId)).toEqual(merged);
+    });
+
+    it("inFlightSliceMatches dedups by original_slice_id so we never queue two recovery attempts at once", async () => {
+      // Once a recovery slice is in flight, the next tick must not mint
+      // another recovery attempt for the same original. Without the
+      // original_slice_id check, the recovery slice's distinct branch and
+      // sid would slip past sliceActionKey/branch dedup and we'd dispatch
+      // recovery-1, recovery-2, recovery-3, ... on consecutive ticks.
+      const loop = fs.readFileSync(await stageLoop(makeTmpDir()), "utf-8");
+      const deps = ["smithyVerb", "actionArguments", "slugifyDispatchPart", "hashText", "dispatchItemKey", "sliceActionKey", "dispatchArtifactSlug", "dispatchIdentity", "dispatchBranch", "sliceReleasesArtifact"];
+      const inFlight = extractFn(loop, "inFlightSliceMatches", deps) as (state: unknown, item: unknown, sliceId: string) => boolean;
+
+      const item = {
+        path: "specs/foo/01-bar.tasks.md",
+        parent_path: "specs/foo/foo.spec.md",
+        parent_row_id: "US1",
+        next_action: { command: "smithy.forge", arguments: ["specs/foo/01-bar.tasks.md", "2"] },
+      };
+      const sliceId = "foo-us1-s2-forge";
+
+      // Recovery slice in flight for this original — must be considered in flight.
+      const stateWithRecovery = {
+        slices: {
+          "foo-us1-s2-forge-recovery-1": {
+            stage: "hatchery-pending",
+            original_slice_id: sliceId,
+            branch: "smithy/forge/foo-us1-s2-recovery-1",
+            command: "smithy.forge",
+            arguments: ["specs/foo/01-bar.tasks.md", "2"],
+          },
+        },
+      };
+      expect(inFlight(stateWithRecovery, item, sliceId)).toBe(true);
+
+      // A merged live slice under a *different* sid (would never collide on
+      // id, but might collide on sliceActionKey) releases its artifact and
+      // must not block. In practice cleanupTerminalPrs runs first and moves
+      // it to archived_slices, but the helper itself has to handle the
+      // mid-tick case where the cleanup hasn't happened yet.
+      const stateMergedSibling = {
+        slices: {
+          "foo-us1-s2-forge-recovery-1": {
+            stage: "merged",
+            command: "smithy.forge",
+            arguments: ["specs/foo/01-bar.tasks.md", "2"],
+            branch: "smithy/forge/foo-us1-s2-recovery-1",
+          },
+        },
+      };
+      expect(inFlight(stateMergedSibling, item, sliceId)).toBe(false);
+
+      // Empty state — not in flight.
+      expect(inFlight({ slices: {} }, item, sliceId)).toBe(false);
     });
 
     it("isStubArchivedSlice distinguishes legacy stubs from real archive entries", async () => {

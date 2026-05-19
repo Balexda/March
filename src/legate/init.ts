@@ -838,7 +838,7 @@ function replayRecentActionEvents(limit = 10) {
         return null;
       }
     })
-    .filter((event) => event?.kind === "cleanup" || event?.kind === "cleanup_failure" || event?.kind === "babysit_action" || event?.kind === "dispatch_action" || event?.kind === "processor_request")
+    .filter((event) => event?.kind === "cleanup" || event?.kind === "cleanup_failure" || event?.kind === "babysit_action" || event?.kind === "dispatch_action" || event?.kind === "recovery_dispatch" || event?.kind === "processor_request")
     .slice(-limit);
   if (events.length === 0) return;
   printText(\`[\${now()}] replaying \${events.length} recent processor action event(s) to stdout\`);
@@ -851,6 +851,8 @@ function replayRecentActionEvents(limit = 10) {
       printText(formatBabysitActionLine(event, "recent action: "));
     } else if (event.kind === "dispatch_action") {
       printText("[" + event.ts + "] recent action: dispatch " + event.slice_id + ": " + event.detail);
+    } else if (event.kind === "recovery_dispatch") {
+      printText("[" + event.ts + "] recent action: recovery-dispatch " + event.slice_id + ": " + event.detail);
     } else {
       printText(formatProcessorRequestLine(event, "recent action: "));
     }
@@ -2087,17 +2089,67 @@ function alreadyArchivedSlice(state, item, sliceId) {
 
 function alreadyHasInFlightSlice(state, item, sliceId) {
   if (alreadyArchivedSlice(state, item, sliceId)) return true;
+  return inFlightSliceMatches(state, item, sliceId);
+}
+
+// Live-only portion of the dedup check. Carved out so the recovery-dispatch
+// path can distinguish "blocked because a recovery is already in flight"
+// from "blocked because the prior MERGED archive collides" — the former is
+// correct dedup, the latter is the exact case we want to recover from.
+function inFlightSliceMatches(state, item, sliceId) {
   const slices = state?.slices && typeof state.slices === "object" ? state.slices : {};
   const key = dispatchItemKey(item);
+  const branch = dispatchBranch(item);
   for (const [existingId, slice] of Object.entries(slices)) {
     if (existingId === sliceId) return true;
     if (!slice || typeof slice !== "object") continue;
     if (sliceReleasesArtifact(slice)) continue;
+    // Recovery slice for the same item — its original_slice_id matches
+    // the to-be-dispatched sliceId. Without this, every tick would mint
+    // a new recovery-N attempt for the same in-flight original.
+    if (slice.original_slice_id === sliceId) return true;
     if (sliceActionKey(slice) === key) return true;
-    if (slice.branch && slice.branch === dispatchBranch(item)) return true;
+    if (slice.branch && slice.branch === branch) return true;
   }
   return false;
 }
+
+// Returns the matching archived slice ONLY if it terminated in MERGED.
+// Callers use this to detect the partial-merge dedup wedge: smithy says
+// "still ready", the slice id collides with a prior MERGED archive, the
+// loop should fire a recovery dispatch rather than silently filtering.
+// Escalated / closed-unmerged archives intentionally fall through (return
+// null) so they keep blocking re-dispatch — those represent unresolved
+// operator decisions and recovery is not the right tool.
+function blockingMergedArchive(state, item, sliceId) {
+  const archived = archivedSlices(state);
+  const key = dispatchItemKey(item);
+  const branch = dispatchBranch(item);
+  const isMerged = (a) => {
+    if (!a || typeof a !== "object") return false;
+    if (a.terminal_state === "MERGED") return true;
+    if (a.stage === "merged") return true;
+    if (a.pr && a.pr.state === "MERGED") return true;
+    return false;
+  };
+  const direct = archived[sliceId];
+  if (direct && !isStubArchivedSlice(direct) && isMerged(direct)) return direct;
+  for (const slice of Object.values(archived)) {
+    if (!slice || typeof slice !== "object") continue;
+    if (!isMerged(slice)) continue;
+    if (sliceActionKey(slice) === key) return slice;
+    if (slice.branch && slice.branch === branch) return slice;
+    if (slice.actual_branch && slice.actual_branch === branch) return slice;
+  }
+  return null;
+}
+
+// Cap on recovery dispatches per original slice. Two attempts is enough to
+// distinguish a fluky worker (first attempt missed the checkbox) from a
+// systemic problem (the smithy spec itself is unparseable, the work is
+// genuinely impossible, or the prompt isn't taking). After this we escalate
+// to the legate agent instead of looping forever.
+const MAX_RECOVERY_ATTEMPTS = 2;
 
 function graphNodes(status) {
   return status?.graph?.nodes && typeof status.graph.nodes === "object"
@@ -2304,6 +2356,43 @@ function buildSmithySpawnPrompt(item) {
   ].join("\\n");
 }
 
+// Recovery-dispatch prompt: a layer-0 ready item collided with a prior
+// MERGED archive entry. The prior PR shipped a partial slice that left the
+// matching tasks.md row \`[ ]\`, so the loop's dedup silently filtered the
+// item until this path was added. Frame the work as cleanup: either finish
+// the remaining acceptance criteria or open a checkbox-only fix PR.
+function buildSmithyRecoverySpawnPrompt(item, mergedArchive, attempt) {
+  const commandLine = actionCommandLine(item.next_action);
+  const priorPr = mergedArchive?.pr || {};
+  const priorPrLine = priorPr.number
+    ? "Prior merged PR: #" + priorPr.number + (priorPr.url ? " (" + priorPr.url + ")" : "")
+    : "Prior merged slice: " + (mergedArchive?.branch || mergedArchive?.actual_branch || "(branch unknown)");
+  return [
+    "RECOVERY DISPATCH (attempt " + attempt + "). The slice listed below was",
+    "previously merged via the prior PR — but the merge was partial: smithy",
+    "still reports the tasks.md row as ready, which means at least one",
+    "checkbox is still \`[ ]\` and/or an acceptance criterion is unmet.",
+    "",
+    priorPrLine,
+    "",
+    "Smithy command:",
+    commandLine,
+    "",
+    "Artifact:",
+    item.path || item.title || "(unknown)",
+    "",
+    "Rules:",
+    "- Read the artifact and the prior merged diff (\`gh pr view <num> --json files\`",
+    "  if you have the number). Identify what shipped vs. what is still missing.",
+    "- If acceptance criteria are unmet: implement them now. Smallest coherent patch.",
+    "- If the work is actually done and only the checkbox was missed: open a",
+    "  checkbox-only cleanup PR that flips the row from \`[ ]\` to \`[x]\`.",
+    "- Either way, the patch MUST flip the matching tasks.md row(s).",
+    "- Do not re-implement work the prior PR already shipped — don't churn.",
+    "- Leave PR creation to the Hatchery manager session.",
+  ].join("\\n");
+}
+
 function hatcheryResultPath(sliceId) {
   return path.join(meta.legate_conductor_dir || here, "hatchery-result-" + sliceId + ".json");
 }
@@ -2375,11 +2464,15 @@ function marchCommandAndArgs(args) {
   return { command: "march", args };
 }
 
-function launchHatcheryDispatch(item, resultPath, logPath) {
+function launchHatcheryDispatch(item, resultPath, logPath, opts) {
   const repoPath = meta.repo?.path;
   if (typeof repoPath !== "string" || repoPath.length === 0) {
     throw new Error("repo path is missing");
   }
+  const branch = opts?.branchOverride || dispatchBranch(item);
+  const title = opts?.titleOverride || dispatchTitle(item);
+  const prompt = opts?.promptOverride || buildSmithySpawnPrompt(item);
+  const requestSliceId = opts?.requestSliceIdOverride || dispatchSliceId(item);
   const args = [
     "hatchery",
     "spawn",
@@ -2390,16 +2483,16 @@ function launchHatcheryDispatch(item, resultPath, logPath) {
     "--manager-group",
     meta.worker_group,
     "--name",
-    dispatchTitle(item),
+    title,
     "--branch",
-    dispatchBranch(item),
+    branch,
     "--prompt",
-    buildSmithySpawnPrompt(item),
+    prompt,
     "--json",
   ];
   fs.mkdirSync(path.dirname(resultPath), { recursive: true });
   fs.writeFileSync(resultPath, "", "utf-8");
-  const requestPath = hatcheryRequestPath(dispatchSliceId(item));
+  const requestPath = hatcheryRequestPath(requestSliceId);
   const resolved = marchCommandAndArgs(args);
   fs.writeFileSync(requestPath, JSON.stringify({
     command: resolved.command,
@@ -3348,6 +3441,118 @@ function runStewardRelaunch(state, workerList, ts) {
   return { actions, failures, mutated };
 }
 
+// Detect-and-act for the partial-merge dedup wedge. Caller has confirmed
+// (a) smithy still reports item as ready, (b) a MERGED archive entry
+// collides with the would-be slice id, (c) no live recovery is already in
+// flight. We mint a recovery-N slice id and branch, persist the attempt
+// counter, build a recovery-flavored spawn prompt, and launch hatchery the
+// same way runDispatch does for a normal slice. After MAX_RECOVERY_ATTEMPTS
+// we stop dispatching and instead nudge the legate agent — at that point a
+// human needs to look (spec is wrong, prompt is failing, or the work is
+// genuinely impossible).
+function handleRecoveryDispatch(state, ts, item, sliceId, mergedArchive) {
+  const actions = [];
+  const failures = [];
+  const notifications = [];
+  state.recovery_attempts = state.recovery_attempts && typeof state.recovery_attempts === "object"
+    ? state.recovery_attempts
+    : {};
+  const priorAttempts = Number(state.recovery_attempts[sliceId]) || 0;
+  const attempt = priorAttempts + 1;
+  const recoverySliceId = sliceId + "-recovery-" + attempt;
+
+  if (attempt > MAX_RECOVERY_ATTEMPTS) {
+    // Exhausted: nudge the legate agent once (dedup via requestKey), then
+    // leave the artifact alone until an operator clears the wedge.
+    notifications.push({
+      slice: mergedArchive, sliceId,
+      requestKey: "recovery-exhausted:" + sliceId + ":" + priorAttempts,
+      reason: "recovery_dispatch_exhausted",
+      detail: "Recovery dispatch for " + sliceId + " hit MAX_RECOVERY_ATTEMPTS=" + MAX_RECOVERY_ATTEMPTS + ". "
+        + "Smithy still reports " + (item.path || "(unknown artifact)") + " as ready, "
+        + "but every recovery merged without ticking the tasks.md box. "
+        + "Inspect the spec, the prior PR(s), and clear the archive entry manually "
+        + "(or fix the spec) before the loop will dispatch this artifact again.",
+    });
+    return { actions, failures, notifications };
+  }
+
+  try {
+    syncDefaultBranch(state);
+    const action = item.next_action || {};
+    const resultPath = hatcheryResultPath(recoverySliceId);
+    const logPath = hatcheryLogPath(recoverySliceId);
+    const requestPath = hatcheryRequestPath(recoverySliceId);
+    const recoveryBranch = dispatchBranch(item) + "-recovery-" + attempt;
+    const recoveryTitle = "recovery(" + attempt + "): " + dispatchTitle(item);
+    state.slices[recoverySliceId] = {
+      kind: "smithy",
+      worker_session_id: null,
+      worker_title: recoveryTitle,
+      branch: recoveryBranch,
+      actual_branch: null,
+      worktree_path: null,
+      stage: "hatchery-pending",
+      pr: null,
+      command: action.command,
+      arguments: actionArguments(action),
+      artifact_path: item.path || null,
+      hatchery: {
+        backend: "codex",
+        hatchery_result_path: resultPath,
+        hatchery_request_path: requestPath,
+        hatchery_log_path: logPath,
+      },
+      original_slice_id: sliceId,
+      recovery_attempt: attempt,
+      prior_pr_number: mergedArchive?.pr?.number || null,
+      prior_pr_url: mergedArchive?.pr?.url || null,
+      prior_branch: mergedArchive?.branch || mergedArchive?.actual_branch || null,
+      last_action: ts,
+      last_action_note: "Queued Hatchery recovery codex spawn (attempt " + attempt + ") for " + actionCommandLine(action),
+    };
+    state.recovery_attempts[sliceId] = attempt;
+    writeJson(meta.legate_state_path, state);
+    const launched = launchHatcheryDispatch(item, resultPath, logPath, {
+      branchOverride: recoveryBranch,
+      titleOverride: recoveryTitle,
+      promptOverride: buildSmithyRecoverySpawnPrompt(item, mergedArchive, attempt),
+      requestSliceIdOverride: recoverySliceId,
+    });
+    actions.push({
+      action: "recovery_dispatch",
+      sliceId: recoverySliceId,
+      sessionId: null,
+      detail: "queued Hatchery recovery codex spawn pid " + (launched.pid || "unknown")
+        + " (attempt " + attempt + " of " + MAX_RECOVERY_ATTEMPTS + ") "
+        + "for " + actionCommandLine(action)
+        + (mergedArchive?.pr?.number ? "; prior PR #" + mergedArchive.pr.number : ""),
+    });
+  } catch (err) {
+    const error = err?.message || String(err);
+    const existing = state.slices?.[recoverySliceId];
+    if (existing && existing.stage === "hatchery-pending") {
+      existing.stage = "escalated";
+      existing.last_action = ts;
+      existing.last_action_note = "NEED: Hatchery recovery dispatch launch failed: " + error;
+      notifications.push({
+        slice: existing, sliceId: recoverySliceId,
+        requestKey: "hatchery-failure:" + recoverySliceId + ":launch-throw:" + hashText(error).slice(0, 12),
+        reason: "hatchery_recovery_dispatch_failed",
+        detail: "Hatchery recovery dispatch launch threw for " + actionCommandLine(item.next_action)
+          + " (recovery attempt " + attempt + ").\\n\\nError:\\n" + error
+          + "\\n\\nSlice is escalated in state.json. legate.unwedge / legate.error as appropriate.",
+      });
+    }
+    failures.push({
+      slice_id: recoverySliceId,
+      command: actionCommandLine(item.next_action),
+      error,
+    });
+  }
+  return { actions, failures, notifications };
+}
+
 function runDispatch(state, ts) {
   const actions = [];
   const failures = [];
@@ -3398,7 +3603,35 @@ function runDispatch(state, ts) {
   mutated = true;
   for (const item of ready) {
     const sliceId = dispatchSliceId(item);
-    if (alreadyHasInFlightSlice(state, item, sliceId)) continue;
+    // Live-slice dedup first. If a worker (or a prior recovery attempt) is
+    // already in-flight for this item, never queue a second.
+    if (inFlightSliceMatches(state, item, sliceId)) continue;
+
+    // Partial-merge recovery: smithy still reports the item as ready, but a
+    // prior MERGED archive entry collides with the to-be-minted slice id.
+    // Without this branch, alreadyArchivedSlice silently filtered the item
+    // and the loop went idle on real work. See Balexda/March#140.
+    const blockingMerged = blockingMergedArchive(state, item, sliceId);
+    if (blockingMerged) {
+      const recoveryResult = handleRecoveryDispatch(state, ts, item, sliceId, blockingMerged);
+      if (recoveryResult) {
+        actions.push(...recoveryResult.actions);
+        failures.push(...recoveryResult.failures);
+        for (const n of recoveryResult.notifications || []) {
+          requestLegateJudgement({
+            ts, slice: n.slice, sliceId: n.sliceId,
+            requestKey: n.requestKey, reason: n.reason, detail: n.detail,
+          });
+        }
+      }
+      continue;
+    }
+
+    // Defensive: anything else in archived_slices (escalated, closed-unmerged,
+    // hash-stub) still blocks. blockingMergedArchive returns null for those
+    // cases on purpose — only MERGED archives are recovery candidates.
+    if (alreadyArchivedSlice(state, item, sliceId)) continue;
+
     // Trust smithy's readyLayerNodeIds filter as the authoritative "ready
     // to work" set. The previous extra dependenciesClear gate disagreed
     // with smithy on slice-level deps: a tasks.md row's depends_on would
@@ -3614,12 +3847,13 @@ function tick() {
     );
   }
   for (const action of dispatchResult.actions) {
+    const isRecovery = action.action === "recovery_dispatch";
     const event = {
       schema_version: 1,
       ts,
       processor: meta.processor_name,
       paired_legate: meta.paired_legate,
-      kind: "dispatch_action",
+      kind: isRecovery ? "recovery_dispatch" : "dispatch_action",
       action: action.action,
       slice_id: action.sliceId,
       session_id: action.sessionId,
@@ -3628,7 +3862,7 @@ function tick() {
     append(meta.processor_events_path, event);
     appendText(
       meta.processor_log_path,
-      "[" + ts + "] dispatch " + action.sliceId + ": " + action.detail,
+      "[" + ts + "] " + (isRecovery ? "recovery-dispatch" : "dispatch") + " " + action.sliceId + ": " + action.detail,
     );
   }
   appendTextSilent(
