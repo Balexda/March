@@ -850,8 +850,8 @@ describe("legate module", () => {
       // For the smoke check we focus on the active-slice path that doesn't
       // require meta plumbing (returns empty actions when workerList isn't
       // an array).
-      expect(cleanup({}, null, "2026-05-18T10:00:00.000Z")).toMatchObject({ actions: [], mutated: false });
-      expect(cleanup({}, undefined, "2026-05-18T10:00:00.000Z")).toMatchObject({ actions: [], mutated: false });
+      expect(cleanup({}, null as unknown as any[], "2026-05-18T10:00:00.000Z")).toMatchObject({ actions: [], mutated: false });
+      expect(cleanup({}, undefined as unknown as any[], "2026-05-18T10:00:00.000Z")).toMatchObject({ actions: [], mutated: false });
       // Empty workerList: nothing to clean.
       expect(cleanup({ slices: {} }, [], "2026-05-18T10:00:00.000Z")).toMatchObject({ actions: [], mutated: false });
     });
