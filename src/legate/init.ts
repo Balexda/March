@@ -3140,6 +3140,187 @@ function runGhostStewardCleanup(state, workerList, ts) {
   return { actions, mutated };
 }
 
+// Orphaned-PR steward re-launch: when a non-terminal slice has a PR but its
+// worker_session_id either is null or points to a session that no longer
+// exists in agent-deck, the slice is stuck. Babysit cannot send /smithy.fix
+// to a missing session. Re-attach a fresh opus steward to the existing
+// branch+worktree so the slice is babysit-ready again.
+//
+// Two cases this handles:
+//   - tryAdoptOpenPr transitioned the slice to pr-open without ever launching
+//     a session (the PR came from a previous run whose steward is gone).
+//   - A bulk session-remove (manual or by ghost-cleanup) took the steward
+//     while the slice was still pr-open / pr-in-fix.
+//
+// Throttle to 3 attempts per slice via transient_retry_counts so a
+// genuinely-broken re-launch path doesn't loop forever.
+function runStewardRelaunch(state, workerList, ts) {
+  const actions = [];
+  const failures = [];
+  let mutated = false;
+  if (!Array.isArray(workerList)) return { actions, failures, mutated };
+  const liveSessionIds = new Set();
+  for (const s of workerList) {
+    if (isWorkerSession(s) && typeof s.id === "string") liveSessionIds.add(s.id);
+  }
+  const slices = state?.slices && typeof state.slices === "object" ? state.slices : {};
+  const eligibleStages = new Set([
+    "implementing",
+    "pr-open",
+    "pr-in-fix",
+    "pr-resolving-conflicts",
+    "pr-rebasing",
+    "pr-in-rerun",
+  ]);
+  const repoPath = state?.repo?.path || meta.repo?.path;
+  if (typeof repoPath !== "string" || repoPath.length === 0) return { actions, failures, mutated };
+  for (const [sliceId, slice] of Object.entries(slices)) {
+    if (!slice || typeof slice !== "object") continue;
+    if (!eligibleStages.has(slice.stage)) continue;
+    const pr = slice.pr || {};
+    if (!pr.number) continue;
+    const sessId = slice.worker_session_id;
+    if (typeof sessId === "string" && sessId.length > 0 && liveSessionIds.has(sessId)) continue;
+    const rawBranch = typeof slice.branch === "string" ? slice.branch : "";
+    if (rawBranch.length === 0) continue;
+    const bareBranch = rawBranch.replace(/^feature\\//, "");
+    const featureBranch = "feature/" + bareBranch;
+    const expectedDirName = "feature-" + bareBranch.replace(/\\//g, "-");
+    // Throttle.
+    const limit = 3;
+    const counts = transientRetryCounts(state);
+    const key = "relaunch-steward:" + sliceId;
+    const prev = Number.isFinite(counts[key]) ? counts[key] : 0;
+    const nextN = prev + 1;
+    if (nextN > limit) continue;
+    counts[key] = nextN;
+    // Compute worktree path. Use the slice's recorded worktree_path when
+    // it points at an extant directory; otherwise derive from the repo
+    // parent (agent-deck's sibling-worktree convention).
+    const worktreesParent = path.resolve(path.dirname(repoPath), "..", "WorkTrees", path.basename(repoPath));
+    let worktreePath = slice.worktree_path || path.join(worktreesParent, expectedDirName);
+    if (!fs.existsSync(worktreePath)) {
+      // Try to re-create from the branch ref.
+      try {
+        fs.mkdirSync(path.dirname(worktreePath), { recursive: true });
+        execText("git", ["worktree", "add", worktreePath, featureBranch], { cwd: repoPath });
+      } catch (err) {
+        actions.push({
+          action: "relaunch-failed",
+          sliceId,
+          sessionId: null,
+          detail: "could not recreate worktree at " + worktreePath + " from branch " + featureBranch + ": " + (err?.message || String(err)).slice(0, 200),
+        });
+        continue;
+      }
+    }
+    // Launch a fresh agent-deck session attached to the existing worktree.
+    // No -b: don't create a new branch. The session attaches to whatever
+    // branch the worktree is on.
+    const launchTitle = slice.worker_title || ("steward: " + sliceId);
+    let beforeIds;
+    try {
+      const beforeList = agentDeckList();
+      beforeIds = new Set(Array.isArray(beforeList) ? beforeList.map((s) => s.id) : []);
+    } catch {
+      beforeIds = new Set();
+    }
+    const launchArgs = [
+      "-p", meta.profile,
+      "launch",
+      repoPath,
+      "-t", launchTitle,
+      "-c", "claude",
+      "-g", meta.worker_group,
+      "--worktree", bareBranch,
+      "--title-lock",
+      "--extra-arg", "--permission-mode",
+      "--extra-arg", "auto",
+      "--extra-arg", "--model",
+      "--extra-arg", "opus",
+    ];
+    try {
+      execFileSync("agent-deck", launchArgs, {
+        encoding: "utf-8",
+        stdio: ["ignore", "ignore", "pipe"],
+      });
+    } catch (err) {
+      actions.push({
+        action: "relaunch-failed",
+        sliceId,
+        sessionId: null,
+        detail: "agent-deck launch failed: " + (err?.message || String(err)).slice(0, 200),
+      });
+      continue;
+    }
+    // Identify the new session by diffing the list.
+    let newSessionId = null;
+    try {
+      const afterList = agentDeckList();
+      if (Array.isArray(afterList)) {
+        for (const s of afterList) {
+          if (!isWorkerSession(s)) continue;
+          if (beforeIds.has(s.id)) continue;
+          newSessionId = s.id;
+          break;
+        }
+      }
+    } catch {}
+    if (!newSessionId) {
+      actions.push({
+        action: "relaunch-failed",
+        sliceId,
+        sessionId: null,
+        detail: "agent-deck launch returned no identifiable new session",
+      });
+      continue;
+    }
+    // Enable session-level auto-mode (parity with launchAgentDeckManager).
+    try {
+      execFileSync("agent-deck", ["-p", meta.profile, "session", "set", newSessionId, "auto-mode", "true"], {
+        encoding: "utf-8",
+        stdio: ["ignore", "ignore", "pipe"],
+      });
+    } catch {}
+    // Send a context message so claude knows it's a steward on a PR.
+    const contextMsg = [
+      "[STEWARD RESUME] You are the re-launched March Hatchery management session for PR #" + pr.number + ".",
+      "Branch: " + featureBranch,
+      "PR: " + (pr.url || "(unknown)"),
+      "",
+      "The previous steward session for this slice was removed; the loop has attached you to the",
+      "existing worktree so future babysit messages have somewhere to go. Stand by for:",
+      "  - '/smithy.fix <thread-summary>' if review threads need a response.",
+      "  - Conflict-resolution prompts if the branch develops merge conflicts.",
+      "  - CI-failure judgement requests.",
+      "",
+      "When such a message arrives, act on it directly: inspect, fix, commit, push.",
+      "Do not pre-emptively rewrite anything; the PR is already open and may be in review.",
+    ].join("\\n");
+    try {
+      execFileSync("agent-deck", ["-p", meta.profile, "session", "send", newSessionId, contextMsg], {
+        encoding: "utf-8",
+        stdio: ["ignore", "ignore", "pipe"],
+      });
+    } catch {
+      // Best-effort: session is alive; future babysit messages will still reach it.
+    }
+    slice.worker_session_id = newSessionId;
+    slice.worker_title = launchTitle;
+    slice.worktree_path = worktreePath;
+    slice.last_action = ts;
+    slice.last_action_note = "Re-launched steward for PR #" + pr.number + " (attempt " + nextN + "/" + limit + "); new session " + newSessionId;
+    mutated = true;
+    actions.push({
+      action: "relaunch-steward",
+      sliceId,
+      sessionId: newSessionId,
+      detail: "re-attached opus steward to PR #" + pr.number + " on " + featureBranch + " (attempt " + nextN + "/" + limit + ")",
+    });
+  }
+  return { actions, failures, mutated };
+}
+
 function runDispatch(state, ts) {
   const actions = [];
   const failures = [];
@@ -3289,12 +3470,16 @@ function tick() {
     ? agentDeckList()
     : workerList;
   const ghostResult = runGhostStewardCleanup(state, postCleanupWorkerList, ts);
-  const babysitWorkerList = ghostResult.actions.length > 0
+  const postGhostWorkerList = ghostResult.actions.length > 0
     ? agentDeckList()
     : postCleanupWorkerList;
+  const relaunchResult = runStewardRelaunch(state, postGhostWorkerList, ts);
+  const babysitWorkerList = relaunchResult.actions.length > 0
+    ? agentDeckList()
+    : postGhostWorkerList;
   const babysitResult = runBabysit(state, babysitWorkerList, ts);
   const dispatchResult = runDispatch(state, ts);
-  const summaryWorkerList = cleanupResult.cleanups.length > 0 || ghostResult.actions.length > 0 || babysitResult.actions.length > 0 || dispatchResult.actions.length > 0
+  const summaryWorkerList = cleanupResult.cleanups.length > 0 || ghostResult.actions.length > 0 || relaunchResult.actions.length > 0 || babysitResult.actions.length > 0 || dispatchResult.actions.length > 0
     ? agentDeckList()
     : workerList;
   const workers = summarizeWorkers(summaryWorkerList);
@@ -3317,6 +3502,7 @@ function tick() {
     cleanup_count: cleanupResult.cleanups.length,
     cleanup_failure_count: cleanupResult.failures.length,
     ghost_cleanup_count: ghostResult.actions.filter((a) => a.action === "ghost-cleanup").length,
+    relaunch_count: relaunchResult.actions.filter((a) => a.action === "relaunch-steward").length,
     babysit_action_count: babysitResult.actions.length,
     processor_request_count: babysitResult.requests.length,
     dispatch_action_count: dispatchResult.actions.length,
@@ -3341,6 +3527,21 @@ function tick() {
     };
     append(meta.processor_events_path, event);
     appendText(meta.processor_log_path, "[" + ts + "] " + action.action + " " + action.sessionId + " " + (action.title || "") + ": " + action.detail + "\\n");
+  }
+  for (const action of relaunchResult.actions) {
+    const event = {
+      schema_version: 1,
+      ts,
+      processor: meta.processor_name,
+      paired_legate: meta.paired_legate,
+      kind: "steward_relaunch",
+      action: action.action,
+      slice_id: action.sliceId,
+      session_id: action.sessionId,
+      detail: action.detail,
+    };
+    append(meta.processor_events_path, event);
+    appendText(meta.processor_log_path, "[" + ts + "] " + action.action + " " + action.sliceId + ": " + action.detail + "\\n");
   }
   for (const failure of cleanupResult.failures) {
     append(meta.processor_events_path, {
@@ -3405,7 +3606,7 @@ function tick() {
   }
   appendText(
     meta.processor_log_path,
-    \`[\${ts}] heartbeat slice_count=\${record.slice_count} archived=\${record.archived_slice_count} cleanups=\${record.cleanup_count} ghost_cleanups=\${record.ghost_cleanup_count} babysit_actions=\${record.babysit_action_count} dispatches=\${record.dispatch_action_count} processor_requests=\${record.processor_request_count} workers=\${JSON.stringify(workers)}\${stateError ? " state_error=" + stateError : ""}\`,
+    \`[\${ts}] heartbeat slice_count=\${record.slice_count} archived=\${record.archived_slice_count} cleanups=\${record.cleanup_count} ghost_cleanups=\${record.ghost_cleanup_count} relaunches=\${record.relaunch_count} babysit_actions=\${record.babysit_action_count} dispatches=\${record.dispatch_action_count} processor_requests=\${record.processor_request_count} workers=\${JSON.stringify(workers)}\${stateError ? " state_error=" + stateError : ""}\`,
   );
 }
 
