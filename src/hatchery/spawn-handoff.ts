@@ -79,7 +79,14 @@ export interface HatcherySpawnResult {
 }
 
 export const DEFAULT_MANAGER_GROUP = "march-spawn-managers";
-export const DEFAULT_MANAGER_MODEL = "sonnet";
+// Stewards need agent-deck's session-level auto-mode to keep babysit
+// /smithy.fix nudges flowing without pausing the classifier. Empirically,
+// sonnet sessions in agent-deck v1.9.17 surface "auto mode unavailable
+// for this model" in the TUI even when auto-mode=true is set on the
+// session row, leaving the steward stalled mid-workflow. opus has the
+// auto-mode capability and reaches the same workflow steps in fewer
+// turns, so the per-spawn cost premium is acceptable.
+export const DEFAULT_MANAGER_MODEL = "opus";
 
 const EXEC_MAX_BUFFER = 16 * 1024 * 1024;
 

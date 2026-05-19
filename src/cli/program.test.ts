@@ -822,7 +822,7 @@ exit 0
     expect(agentDeckInvocations).toContain(
       "--extra-arg --permission-mode --extra-arg auto",
     );
-    expect(agentDeckInvocations).toContain("--extra-arg --model --extra-arg sonnet");
+    expect(agentDeckInvocations).toContain("--extra-arg --model --extra-arg opus");
     expect(agentDeckInvocations).toMatch(/^session send manager-session /m);
 
     const worktreeParent = path.join(path.dirname(repoRoot), "agent-deck-worktrees");
