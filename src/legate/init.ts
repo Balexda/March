@@ -381,6 +381,7 @@ export const LEGATE_SKILLS = [
   "legate.babysit",
   "legate.merge",
   "legate.issue",
+  "legate.unwedge",
 ] as const;
 export type LegateSkillName = (typeof LEGATE_SKILLS)[number];
 
@@ -1186,6 +1187,98 @@ function alreadyDispatched(slice, key) {
   return slice.last_processor_action_key === key;
 }
 
+// Stranded-steward watchdog tuning. A healthy steward typically reaches
+// "gh pr create" within 2-5 minutes after dispatch — review + verification +
+// commit + push + PR all happen in one claude turn. 10 minutes is generous
+// enough to avoid false positives on slow verification suites but tight
+// enough that the operator isn't waiting hours on a session that gave up
+// post-push. After the first nudge, re-nudge every interval until the slice
+// either makes it to "pr-open" or the operator manually intervenes — sonnet
+// often completes one stage per turn (commit, push, gh pr create), so a
+// single nudge typically only advances the workflow one step.
+//
+// alertEscalateMs sends ONE [PROCESSOR] notification to the legate-agent at
+// the 25-min mark so the operator knows the steward is taking unusually
+// long; but the watchdog KEEPS nudging — giving up entirely would strand
+// the slice (operator can manually escalate further if intervention is
+// actually needed).
+function strandedStewardConfig() {
+  return {
+    initialNudgeMs: 10 * 60 * 1000,
+    repeatNudgeMs: 5 * 60 * 1000,
+    alertEscalateMs: 25 * 60 * 1000,
+    message: [
+      "[STRANDED-STEWARD-NUDGE] The deterministic loop sees no PR for this slice yet.",
+      "Resume the Hatchery manager workflow where you left off:",
+      "- If you haven't committed yet: run the verification, commit, push, then open the PR.",
+      "- If you've committed but not pushed: 'git push -u origin <branch>'.",
+      "- If you've pushed but not opened the PR: 'gh pr create' with title/body derived from",
+      "  the artifact path and original request.",
+      "",
+      "OVERRIDE: If a repo-local pr-creation skill is gating PR creation on finding a",
+      "linked GitHub issue, SKIP the issue search. Hatchery dispatches do NOT have a",
+      "tracking issue. Compose the PR body without an issue link and run 'gh pr create'",
+      "now. Mention 'No tracking issue (Hatchery autonomous dispatch)' in the body if",
+      "the skill template requires an explanation.",
+      "",
+      "End your turn ONLY after one of:",
+      "  (a) reporting 'PR: <url>' on the final line, or",
+      "  (b) escalating via 'NEED: <summary> -- <next action>'.",
+      "If a previous turn ended after 'git push' without 'gh pr create', that's the stranded-",
+      "steward bug the loop is nudging you out of. Run 'gh pr create' now.",
+    ].join("\\n"),
+  };
+}
+
+// Returns "nudged" if we sent (or re-sent) a nudge this tick, "alert" if
+// this is the first tick past the 25-min budget (one-time operator alert),
+// or null if neither condition is met (too early, or alert already fired).
+// Keeps nudging on every repeat interval regardless of total elapsed time —
+// giving up would strand the slice forever, and the operator can intervene
+// manually if the alert fires.
+function maybeNudgeStrandedSteward(slice, sliceId, sessionId, ts, sendMessage = sendAgentDeckMessage) {
+  if (slice.stage !== "implementing") return null;
+  if (!sessionId) return null;
+  const cfg = strandedStewardConfig();
+  const startedAt = Date.parse(slice.implementing_started_at || slice.last_action || "");
+  const nowMs = Date.parse(ts);
+  if (!Number.isFinite(startedAt) || !Number.isFinite(nowMs)) return null;
+  const elapsed = nowMs - startedAt;
+  if (elapsed < cfg.initialNudgeMs) return null;
+  const nudgedAt = Date.parse(slice.steward_nudge_sent_at || "");
+  // First nudge: at initialNudgeMs.
+  if (!Number.isFinite(nudgedAt)) {
+    try {
+      sendMessage(sessionId, cfg.message, false);
+    } catch {
+      return null;
+    }
+    slice.steward_nudge_sent_at = ts;
+    slice.steward_nudge_count = 1;
+    return "nudged";
+  }
+  // Past the 25-min budget: send ONE operator alert, then keep nudging.
+  // The alert is the operator's signal to manually intervene if desired,
+  // but the watchdog keeps doing its job either way.
+  let alertFired = false;
+  if (elapsed >= cfg.alertEscalateMs && !slice.steward_stranded_escalated_at) {
+    slice.steward_stranded_escalated_at = ts;
+    alertFired = true;
+  }
+  // Re-nudge: every repeatNudgeMs after the previous nudge. No upper bound.
+  if (nowMs - nudgedAt < cfg.repeatNudgeMs) {
+    return alertFired ? "alert" : null;
+  }
+  try {
+    sendMessage(sessionId, cfg.message, false);
+  } catch {
+    return alertFired ? "alert" : null;
+  }
+  slice.steward_nudge_sent_at = ts;
+  slice.steward_nudge_count = (slice.steward_nudge_count || 1) + 1;
+  return alertFired ? "alert" : "nudged";
+}
+
 function sendAgentDeckMessage(sessionId, message, wait = false) {
   const args = ["-p", meta.profile, "session", "send", sessionId, message, "-q"];
   if (wait) {
@@ -1634,7 +1727,37 @@ function runBabysit(state, workerList, ts) {
     }
 
     if (!pr) {
-      if (!slice.pr) continue;
+      if (!slice.pr) {
+        // Stranded-steward watchdog: a slice that's been "implementing" for
+        // longer than the nudge threshold without producing a PR has almost
+        // certainly exited mid-workflow (post-commit, post-push, or mid-
+        // gh-pr-create). The manager-prompt asks claude to escalate via
+        // NEED: rather than stop silently, but legacy stewards and sonnet's
+        // "task complete" judgement can still drop the workflow.
+        // Send a single explicit nudge to resume; if that doesn't produce a
+        // PR by the next watchdog interval, escalate for operator review.
+        const nudgeOutcome = maybeNudgeStrandedSteward(slice, sliceId, sessionId, ts);
+        if (nudgeOutcome === "nudged" || nudgeOutcome === "alert") {
+          mutated = true;
+          actions.push({ action: "steward-nudge", sliceId, sessionId, detail: "sent stranded-steward nudge (count " + (slice.steward_nudge_count || 1) + ") — implementing for " + Math.round((Date.parse(ts) - Date.parse(slice.implementing_started_at || ts)) / 60000) + "min with no PR" });
+        }
+        if (nudgeOutcome === "alert") {
+          const request = requestLegateJudgement({
+            ts,
+            slice,
+            requestKey: actionKey("steward-stranded", { number: 0 }, "alert"),
+            sliceId,
+            sessionId,
+            reason: "steward stranded after dispatch (watchdog still nudging)",
+            detail: "Slice has been in 'implementing' for >" + strandedStewardConfig().alertEscalateMs / 60000 + "min with no PR. The watchdog is still re-nudging every 5 min; operator can manually inspect the worktree at " + (slice.worktree_path || "(unknown)") + " and run 'gh pr create' if the steward is genuinely stuck.",
+          });
+          if (request) {
+            requests.push(request);
+            mutated = true;
+          }
+        }
+        continue;
+      }
       try {
         pr = queryPrForBabysit(slice, state);
       } catch (err) {
@@ -2183,26 +2306,35 @@ function hatcheryRunnerCode() {
   // literal. Using only two backslashes used to insert a real newline mid
   // string literal, producing a SyntaxError that silently killed every
   // hatchery spawn.
+  // resultPath and logPath come in as their own argv entries (argv[2], argv[3])
+  // so the crash guard has somewhere to write even when the request file
+  // itself fails to read or parse. If we relied on request.resultPath
+  // alone, a malformed/truncated request would leave request = null and
+  // the catch block would have no path to fall back to, stranding the slice
+  // in hatchery-pending until the 15-min stale timeout fires.
   return [
     'const { spawnSync } = require("node:child_process");',
     'const fs = require("node:fs");',
+    'const requestPath = process.argv[1];',
+    'const resultPath = process.argv[2];',
+    'const logPath = process.argv[3];',
     'let request = null;',
     'try {',
-    '  request = JSON.parse(fs.readFileSync(process.argv[1], "utf-8"));',
+    '  request = JSON.parse(fs.readFileSync(requestPath, "utf-8"));',
     '  const result = spawnSync(request.command, request.args, { cwd: request.cwd, encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"] });',
-    '  if (result.stderr) { try { fs.appendFileSync(request.logPath, result.stderr); } catch {} }',
+    '  if (result.stderr) { try { fs.appendFileSync(logPath, result.stderr); } catch {} }',
     '  if (result.status === 0) {',
-    '    fs.writeFileSync(request.resultPath, result.stdout || "", "utf-8");',
+    '    fs.writeFileSync(resultPath, result.stdout || "", "utf-8");',
     '  } else {',
-    '    fs.writeFileSync(request.resultPath, JSON.stringify({ error: result.stderr || result.error?.message || "hatchery spawn failed", exitCode: result.status ?? null }) + "\\\\n", "utf-8");',
+    '    fs.writeFileSync(resultPath, JSON.stringify({ error: result.stderr || result.error?.message || "hatchery spawn failed", exitCode: result.status ?? null }) + "\\\\n", "utf-8");',
     '  }',
     '} catch (err) {',
     '  const message = (err && err.stack) ? err.stack : String(err);',
     '  try {',
-    '    if (request && request.resultPath) {',
-    '      fs.writeFileSync(request.resultPath, JSON.stringify({ error: "hatchery runner crashed: " + message, exitCode: null }) + "\\\\n", "utf-8");',
+    '    if (resultPath) {',
+    '      fs.writeFileSync(resultPath, JSON.stringify({ error: "hatchery runner crashed: " + message, exitCode: null }) + "\\\\n", "utf-8");',
     '    }',
-    '    if (request && request.logPath) { fs.appendFileSync(request.logPath, "runner crash: " + message + "\\\\n"); }',
+    '    if (logPath) { fs.appendFileSync(logPath, "runner crash: " + message + "\\\\n"); }',
     '  } catch {}',
     '  process.exit(1);',
     '}',
@@ -2250,7 +2382,7 @@ function launchHatcheryDispatch(item, resultPath, logPath) {
     resultPath,
     logPath,
   }) + "\\n", "utf-8");
-  const child = spawn(process.execPath, ["-e", hatcheryRunnerCode(), requestPath], {
+  const child = spawn(process.execPath, ["-e", hatcheryRunnerCode(), requestPath, resultPath, logPath], {
     cwd: repoPath,
     detached: true,
     stdio: ["ignore", "ignore", "ignore"],
@@ -2300,22 +2432,32 @@ function inspectCollidedBranch(repoPath, defaultBranch, branchName) {
     }
   }
   let prs = [];
+  let prsKnown = true;
   try {
     const out = execText("gh", ["pr", "list", "--head", branchName, "--state", "all", "--json", "number,state"], { cwd: repoPath });
     prs = JSON.parse(out);
     if (!Array.isArray(prs)) prs = [];
   } catch {
-    // gh failures (auth, network) leave prs empty; verdict falls through to
-    // diverged-unknown which escalates rather than silently delete.
+    // gh failures (auth, network) mean we cannot prove that no open PR
+    // exists. Track that explicitly so classifyBranchCollision refuses
+    // the autoSafe verdicts — otherwise an ancestor-of-master branch
+    // would auto-delete without the open-PR check actually succeeding.
     prs = [];
+    prsKnown = false;
   }
-  return { head, isAncestor, prs };
+  return { head, isAncestor, prs, prsKnown };
 }
 
 function classifyBranchCollision(info) {
   if (!info) return { verdict: "no-such-branch", autoSafe: false };
   const open = info.prs.filter((p) => p && p.state === "OPEN");
   const merged = info.prs.filter((p) => p && p.state === "MERGED");
+  // If we couldn't verify the PR list, refuse the autoSafe verdicts —
+  // an ancestor-of-master branch might still have an open PR we can't
+  // see. Escalate so the operator or agent can investigate.
+  if (info.prsKnown === false) {
+    return { verdict: "pr-lookup-unknown", autoSafe: false, open, merged };
+  }
   if (open.length > 0) {
     return { verdict: "open-pr", autoSafe: false, open, merged };
   }
@@ -2461,6 +2603,227 @@ function tryRecoverBranchCollision(state, slice, sliceId, errorText) {
   return { recovered: true, verdict: classification.verdict, detail: summary + extra + " | branch deleted, slice released for re-dispatch" };
 }
 
+// Match the launchAgentDeckManager wrong-worktree refusal — the upstream
+// n→n-1 agent-deck launch race where pickLaunchedSession attaches to the
+// wrong sibling session. The error text is the contract; if it changes in
+// spawn-handoff.ts, update the regex here in lockstep.
+function parseWrongWorktreeRaceError(text) {
+  const s = String(text || "");
+  return /agent-deck manager session "[^"]+" attached to worktree "[^"]+" but this launch requested branch/.test(s);
+}
+
+function transientRetryCounts(state) {
+  if (!state.transient_retry_counts || typeof state.transient_retry_counts !== "object") {
+    state.transient_retry_counts = {};
+  }
+  return state.transient_retry_counts;
+}
+
+// Race-victim recovery: the wrong-worktree refusal is by design transient
+// (the race resolves once concurrent launches finish), so escalating would
+// strand the slice on operator review for a problem that fixes itself.
+// Auto-release by deleting the slice, bump a per-slice counter, and only
+// fall through to escalation if the same slice keeps losing the race.
+// Retry limit is 3: each retry costs one tick (60s) + codex spawn time, so
+// if the race won't resolve in 3 tries the operator needs to know.
+function tryRecoverWrongWorktreeRace(state, slice, sliceId, errorText) {
+  if (!parseWrongWorktreeRaceError(errorText)) return null;
+  const limit = 3;
+  const counts = transientRetryCounts(state);
+  const prev = Number.isFinite(counts[sliceId]) ? counts[sliceId] : 0;
+  const next = prev + 1;
+  if (next > limit) {
+    delete counts[sliceId];
+    return {
+      recovered: false,
+      verdict: "wrong-worktree-race-persistent",
+      detail: "wrong-worktree race recurred " + next + " times for this slice; auto-release exhausted, escalating for operator review",
+    };
+  }
+  counts[sliceId] = next;
+  deleteHatcheryArtifacts(slice);
+  delete state.slices[sliceId];
+  return {
+    recovered: true,
+    verdict: "wrong-worktree-race",
+    detail: "agent-deck launch race detected (attempt " + next + "/" + limit + "); slice released for re-dispatch on next tick",
+  };
+}
+
+// Adopt-open-PR recovery: when the branch collision verdict is "open-pr"
+// for a PR that matches this slice's expected branch, the work is already
+// in flight on GitHub. Don't escalate — transition the slice directly to
+// pr-open so the loop's normal babysit picks up the PR going forward.
+function tryAdoptOpenPr(state, slice, sliceId, errorText, ts) {
+  const branchName = parseBranchCollisionError(errorText);
+  if (!branchName) return null;
+  const repoPath = state?.repo?.path || meta.repo?.path;
+  if (typeof repoPath !== "string" || repoPath.length === 0) return null;
+  const defaultBranch = state?.repo?.default_branch || meta.repo?.default_branch || null;
+  const info = inspectCollidedBranch(repoPath, defaultBranch, branchName);
+  const classification = classifyBranchCollision(info);
+  if (classification.verdict !== "open-pr") return null;
+  // Pick the first PR matching our slice branch, falling back to the
+  // first open PR on the branch (the names diverge slightly between the
+  // smithy dispatch branch slug and the actual feature/* git ref).
+  const candidates = classification.open || [];
+  const tentativeSlice = { branch: slice.branch || branchName };
+  let chosen = candidates.find((p) => prMatchesSliceBranch(tentativeSlice, p));
+  if (!chosen) chosen = candidates[0];
+  if (!chosen) return null;
+  let hydrated;
+  try {
+    hydrated = queryPrForBabysit({ pr: { number: chosen.number } }, state);
+  } catch {
+    return null;
+  }
+  if (!hydrated || hydrated.skipped) return null;
+  // Transition the slice to pr-open with the discovered PR.
+  slice.stage = "pr-open";
+  slice.pr_open_at = ts;
+  slice.branch = branchName.replace(/^feature\\//, "");
+  slice.last_action = ts;
+  slice.last_action_note = "Adopted existing open PR #" + chosen.number;
+  updatePrSnapshot(slice, hydrated);
+  deleteHatcheryArtifacts(slice);
+  return {
+    recovered: true,
+    verdict: "open-pr-adopted",
+    detail: "branch=" + branchName + " head=" + (info?.head || "").slice(0, 7) + " | adopted PR #" + chosen.number + " (" + (hydrated.url || "") + ")",
+  };
+}
+
+// Stranded-leftover recovery: a branch with diverged commits, no PR (open
+// or merged), and no live agent-deck session owning its worktree is almost
+// always the leftover of a previous stranded steward — the steward
+// committed and pushed, then exited before opening the PR, and the slice
+// was cleared or the steward record removed. The branch is "orphaned
+// work" from the loop's perspective: re-dispatching produces fresh
+// content; preserving it requires operator action (open the PR manually).
+// Conservative auto-recovery: delete the branch + worktree, bump a retry
+// counter, and let the new dispatch produce a clean steward run. This
+// loses the prior partial work, but the manager-prompt + stranded-steward
+// watchdog now make stranded leftovers exceptional, so this should rarely
+// fire after the first one-time cleanup.
+function tryRecoverStrandedLeftover(state, slice, sliceId, errorText, classification, info, branchName) {
+  if (!info || info.isAncestor) return null;
+  // classifyBranchCollision strips prsKnown from the diverged-unknown return
+  // value, so read it from info directly (info comes from inspectCollidedBranch
+  // which sets prsKnown explicitly based on whether the gh pr list succeeded).
+  if (!info.prsKnown) return null;
+  if ((classification.open || []).length > 0) return null;
+  if ((classification.merged || []).length > 0) return null;
+  if (classification.verdict !== "diverged-unknown") return null;
+  const repoPath = state?.repo?.path || meta.repo?.path;
+  if (typeof repoPath !== "string" || repoPath.length === 0) return null;
+  // Refuse if a live agent-deck session still owns the worktree — that
+  // means there's an active steward and we'd be racing it.
+  const worktreePath = findWorktreeForBranch(repoPath, branchName);
+  if (worktreePath && agentDeckSessionHoldsWorktree(worktreePath)) return null;
+  const limit = 3;
+  const counts = transientRetryCounts(state);
+  const key = "stranded-leftover:" + sliceId;
+  const prev = Number.isFinite(counts[key]) ? counts[key] : 0;
+  const next = prev + 1;
+  if (next > limit) {
+    delete counts[key];
+    return {
+      recovered: false,
+      verdict: "stranded-leftover-persistent",
+      detail: "stranded-leftover cleanup recurred " + next + " times for " + branchName + "; auto-release exhausted, escalating for operator review",
+    };
+  }
+  counts[key] = next;
+  let extra = "";
+  if (worktreePath) {
+    try {
+      execText("git", ["worktree", "remove", "--force", worktreePath], { cwd: repoPath });
+      extra = " | worktree " + worktreePath + " removed";
+    } catch (err) {
+      return { recovered: false, verdict: "stranded-leftover-worktree-remove-failed", detail: "worktree remove failed: " + (err?.message || String(err)) };
+    }
+  }
+  try {
+    execText("git", ["branch", "-D", branchName], { cwd: repoPath });
+  } catch (err) {
+    return { recovered: false, verdict: "stranded-leftover-delete-failed", detail: "branch delete failed: " + (err?.message || String(err)) };
+  }
+  // Delete the remote branch too. If we leave it behind, the re-dispatched
+  // steward will push to a remote ref that diverged from the new local
+  // branch (since the new local branch starts from origin/master while the
+  // remote stranded ref still has the prior steward's commits). The result
+  // is a push rejection on the new steward. The stranded-leftover verdict
+  // already confirms no PR references this ref, so the remote ref has no
+  // GitHub-side dependencies — safe to delete.
+  let remoteExtra = "";
+  try {
+    execText("git", ["push", "--delete", "origin", branchName], { cwd: repoPath });
+    remoteExtra = " | origin/" + branchName + " also deleted";
+  } catch (err) {
+    const msg = String(err?.message || err || "");
+    // "remote ref does not exist" is fine — nothing to delete.
+    if (/remote ref does not exist|src refspec.*does not match/i.test(msg)) {
+      remoteExtra = " | no remote ref (already absent)";
+    } else {
+      // Otherwise surface the failure but don't roll back the local delete —
+      // the loop will retry the dispatch and the same recovery will run
+      // again. Note the failure for diagnosis.
+      remoteExtra = " | WARNING remote ref delete failed: " + msg.slice(0, 200);
+    }
+  }
+  deleteHatcheryArtifacts(slice);
+  delete state.slices[sliceId];
+  return {
+    recovered: true,
+    verdict: "stranded-leftover",
+    detail: "branch=" + branchName + " head=" + (info.head || "").slice(0, 7) + " no PR, no live session (attempt " + next + "/" + limit + ")" + extra + remoteExtra + " | slice released for re-dispatch",
+  };
+}
+
+// Codex spawn-error recovery: when 'git apply --index' rejects the patch
+// codex produced — usually because codex truncated its output mid-diff
+// ("corrupt patch at ...:N") or generated a patch that re-creates an
+// existing file ("already exists in index") — re-running codex with the
+// same prompt typically produces a different (often correct) output. Add
+// a per-slice retry counter and escalate only if it persists.
+function parseSpawnPatchError(text) {
+  const s = String(text || "");
+  if (/git apply --index failed/.test(s)) return true;
+  if (/corrupt patch at /.test(s)) return true;
+  if (/already exists in index/.test(s)) return true;
+  return false;
+}
+
+function tryRecoverSpawnPatchError(state, slice, sliceId, errorText) {
+  if (!parseSpawnPatchError(errorText)) return null;
+  // Codex patch errors are deeply non-deterministic — same prompt, different
+  // output each run. Give it a generous budget before declaring the artifact
+  // genuinely undispatchable. The cost of each retry is one codex container
+  // (~2-3 min), and we'd rather burn an hour of compute than strand a slice
+  // that would have succeeded on attempt 7.
+  const limit = 10;
+  const counts = transientRetryCounts(state);
+  const key = "spawn-error:" + sliceId;
+  const prev = Number.isFinite(counts[key]) ? counts[key] : 0;
+  const next = prev + 1;
+  if (next > limit) {
+    delete counts[key];
+    return {
+      recovered: false,
+      verdict: "spawn-error-persistent",
+      detail: "codex spawn produced an unapplicable patch " + next + " times for this slice; auto-release exhausted, escalating for operator review",
+    };
+  }
+  counts[key] = next;
+  deleteHatcheryArtifacts(slice);
+  delete state.slices[sliceId];
+  return {
+    recovered: true,
+    verdict: "spawn-error-retry",
+    detail: "codex spawn patch error (attempt " + next + "/" + limit + "); slice released for re-dispatch on next tick",
+  };
+}
+
 function completePendingHatcheryDispatches(state, ts) {
   const actions = [];
   const failures = [];
@@ -2477,7 +2840,7 @@ function completePendingHatcheryDispatches(state, ts) {
     notifications.push({
       slice, sliceId, requestKey: key,
       reason: "hatchery_dispatch_failed",
-      detail: "Hatchery dispatch for " + actionCommandLine({ command: slice.command, arguments: slice.arguments || [] }) + " escalated: " + reason + ".\\n\\nError:\\n" + String(error || "(no detail)").trim() + "\\n\\nSlice has been marked escalated in state.json. The loop auto-recovers orphan-ref and post-merge-stale branch collisions; anything with an open PR or unknown divergence reaches here for operator inspection. Otherwise run legate.error for worker-side recovery.",
+      detail: "Hatchery dispatch for " + actionCommandLine({ command: slice.command, arguments: slice.arguments || [] }) + " escalated: " + reason + ".\\n\\nError:\\n" + String(error || "(no detail)").trim() + "\\n\\nSlice has been marked escalated in state.json. If reason is 'spawn-error' with 'branch ... already exists' or any 'branch-collision-*' verdict, load legate.unwedge and run inspect-partial-work.sh / clean-stale-branch.sh — the loop auto-recovers orphan-ref and post-merge-stale cases, but anything with an open PR or unknown divergence reaches here for operator inspection. Otherwise run legate.error for worker-side recovery.",
     });
   };
   const escalateStale = (slice, sliceId, reason) => {
@@ -2485,12 +2848,35 @@ function completePendingHatcheryDispatches(state, ts) {
     if (!Number.isFinite(queuedMs) || !Number.isFinite(nowMs)) return false;
     if (nowMs - queuedMs <= HATCHERY_PENDING_TIMEOUT_MS) return false;
     const ageMin = Math.round((nowMs - queuedMs) / 60000);
-    const note = "NEED: Hatchery spawn " + reason + " after " + ageMin + " min (runner likely crashed before writing); manual investigation required";
+    // Runner-silent recovery: the hatchery runner died before writing its
+    // result file (almost always because the loop conductor was restarted
+    // mid-spawn — detached:true doesnt fully insulate from tmux's session-
+    // kill cascade). This is transient. Auto-clear the slice and let it
+    // re-dispatch, capped by a per-slice retry counter.
+    const limit = 3;
+    const counts = transientRetryCounts(state);
+    const key = "runner-silent:" + sliceId;
+    const prev = Number.isFinite(counts[key]) ? counts[key] : 0;
+    const nextN = prev + 1;
+    if (nextN <= limit) {
+      counts[key] = nextN;
+      actions.push({
+        action: "auto-recovered",
+        sliceId,
+        sessionId: null,
+        detail: "runner-silent (" + reason + ") after " + ageMin + " min — likely loop restart killed the runner (attempt " + nextN + "/" + limit + "); slice released for re-dispatch",
+      });
+      deleteHatcheryArtifacts(slice);
+      delete state.slices[sliceId];
+      return true;
+    }
+    delete counts[key];
+    const note = "NEED: Hatchery spawn " + reason + " after " + ageMin + " min and " + limit + " auto-retry attempts; runner is dying repeatedly — manual investigation required";
     slice.stage = "escalated";
     slice.last_action = ts;
     slice.last_action_note = note;
     failures.push({ slice_id: sliceId, command: actionCommandLine({ command: slice.command, arguments: slice.arguments || [] }), error: note });
-    queueDispatchEscalation(slice, sliceId, "runner-silent", note);
+    queueDispatchEscalation(slice, sliceId, "runner-silent-persistent", note);
     return true;
   };
   for (const [sliceId, slice] of Object.entries(slices)) {
@@ -2527,6 +2913,21 @@ function completePendingHatcheryDispatches(state, ts) {
       // safe to delete (HEAD on default branch, or merged-PR + no open PR).
       // Anything ambiguous falls through to escalation with the verdict
       // included in the detail so the agent / operator has the full context.
+      // Branch-collision adoption: if the colliding branch already has an
+      // open PR matching this slice, the work is already in flight on
+      // GitHub. Adopt the PR and transition the slice to pr-open instead
+      // of escalating — there's nothing to recover.
+      const adoption = tryAdoptOpenPr(state, slice, sliceId, errorText, ts);
+      if (adoption && adoption.recovered) {
+        actions.push({
+          action: "auto-recovered",
+          sliceId,
+          sessionId: null,
+          detail: "branch-collision " + adoption.verdict + ": " + adoption.detail,
+        });
+        mutated = true;
+        continue;
+      }
       const recovery = tryRecoverBranchCollision(state, slice, sliceId, errorText);
       if (recovery && recovery.recovered) {
         actions.push({
@@ -2538,12 +2939,71 @@ function completePendingHatcheryDispatches(state, ts) {
         mutated = true;
         continue;
       }
-      const detail = recovery ? errorText + "\\n\\nLoop verdict: " + recovery.detail : errorText;
+      // Stranded-leftover recovery: a diverged branch with no PR and no
+      // live session is almost always the residue of a previous stranded
+      // steward. The branch-collision path above refused (verdict was
+      // diverged-unknown, not autoSafe). Try the leftover cleanup with a
+      // retry counter so a persistent diverged-unknown still escalates.
+      let leftoverRecovery = null;
+      if (recovery && recovery.verdict === "diverged-unknown") {
+        const branchName = parseBranchCollisionError(errorText);
+        const repoPath = state?.repo?.path || meta.repo?.path;
+        const defaultBranch = state?.repo?.default_branch || meta.repo?.default_branch || null;
+        const info = branchName ? inspectCollidedBranch(repoPath, defaultBranch, branchName) : null;
+        const classification = classifyBranchCollision(info);
+        leftoverRecovery = tryRecoverStrandedLeftover(state, slice, sliceId, errorText, classification, info, branchName);
+        if (leftoverRecovery && leftoverRecovery.recovered) {
+          actions.push({
+            action: "auto-recovered",
+            sliceId,
+            sessionId: null,
+            detail: leftoverRecovery.verdict + ": " + leftoverRecovery.detail,
+          });
+          mutated = true;
+          continue;
+        }
+      }
+      // Race-victim recovery runs only when branch-collision recovery had
+      // nothing to do with the error. Order matters: a wrong-worktree
+      // error never carries a "branch already exists" substring, so the
+      // two paths are mutually exclusive — but checking branch-collision
+      // first keeps the existing recovery behavior untouched.
+      const raceRecovery = recovery ? null : tryRecoverWrongWorktreeRace(state, slice, sliceId, errorText);
+      if (raceRecovery && raceRecovery.recovered) {
+        actions.push({
+          action: "auto-recovered",
+          sliceId,
+          sessionId: null,
+          detail: raceRecovery.verdict + ": " + raceRecovery.detail,
+        });
+        mutated = true;
+        continue;
+      }
+      // Spawn-error recovery: corrupt-patch and "already exists in index"
+      // failures originate in codex's output and are typically transient
+      // (re-running produces different output). Retry up to 3 times via
+      // the same transient_retry_counts machinery.
+      const spawnRecovery = (recovery || raceRecovery) ? null : tryRecoverSpawnPatchError(state, slice, sliceId, errorText);
+      if (spawnRecovery && spawnRecovery.recovered) {
+        actions.push({
+          action: "auto-recovered",
+          sliceId,
+          sessionId: null,
+          detail: spawnRecovery.verdict + ": " + spawnRecovery.detail,
+        });
+        mutated = true;
+        continue;
+      }
+      const effectiveRecovery = recovery || raceRecovery || spawnRecovery || leftoverRecovery;
+      const detail = effectiveRecovery ? errorText + "\\n\\nLoop verdict: " + effectiveRecovery.detail : errorText;
       slice.stage = "escalated";
       slice.last_action = ts;
       slice.last_action_note = "NEED: Hatchery dispatch failed: " + detail;
       failures.push({ slice_id: sliceId, command: actionCommandLine({ command: slice.command, arguments: slice.arguments || [] }), error: detail });
-      queueDispatchEscalation(slice, sliceId, recovery ? "branch-collision-" + recovery.verdict : "spawn-error", detail);
+      const reasonTag = recovery
+        ? "branch-collision-" + recovery.verdict
+        : (raceRecovery ? raceRecovery.verdict : (spawnRecovery ? spawnRecovery.verdict : (leftoverRecovery ? leftoverRecovery.verdict : "spawn-error")));
+      queueDispatchEscalation(slice, sliceId, reasonTag, detail);
       mutated = true;
       continue;
     }
@@ -2566,6 +3026,19 @@ function completePendingHatcheryDispatches(state, ts) {
     };
     slice.last_action = ts;
     slice.last_action_note = "Hatchery codex spawn completed and handed off to manager";
+    // Stable handoff timestamp so stranded-steward detection can measure
+    // elapsed time without being reset by subsequent markSliceAction calls.
+    slice.implementing_started_at = ts;
+    // Clear ALL transient retry counters for this slice — wrong-worktree
+    // race (keyed plain), spawn-error, stranded-leftover, runner-silent
+    // (each keyed as "<error>:<sliceId>"). The slice has cleanly transitioned
+    // to implementing, so any prior transient failures are no longer relevant.
+    if (state.transient_retry_counts && typeof state.transient_retry_counts === "object") {
+      delete state.transient_retry_counts[sliceId];
+      for (const k of Object.keys(state.transient_retry_counts)) {
+        if (k.endsWith(":" + sliceId)) delete state.transient_retry_counts[k];
+      }
+    }
     actions.push({
       action: "dispatch-complete",
       sliceId,
@@ -2593,6 +3066,260 @@ function stageDispatchMessage(sliceId, result) {
   if (!body) body = "Continue the Hatchery manager handoff for slice " + sliceId + ". The Hatchery patch has already been applied and staged in this worktree if the handoff completed. Inspect git status and the staged diff, verify, commit, push, and open the PR.";
   fs.writeFileSync(target, body.trimEnd() + "\\n", "utf-8");
   return target;
+}
+
+// Ghost-steward cleanup: launchAgentDeckManager creates the agent-deck
+// session BEFORE codex spawn + patch apply + manager-prompt send. If anything
+// fails after the launch but before the success path (codex truncation,
+// "already exists in index", etc.) the session is left dangling: its worktree
+// is empty, claude is running with no prompt to act on, and the slice it
+// belongs to is either escalated or gone from state.slices. The session is
+// alive enough that agentDeckSessionHoldsWorktree() refuses to delete its
+// branch, which blocks future dispatches of the same artifact.
+//
+// Detect such sessions on each tick and remove them. A session is a ghost
+// when:
+//   - it's in the worker_group, AND
+//   - its worktree path's basename doesn't match the expected worktree dir
+//     of any non-terminal slice's branch, AND
+//   - it's at least 5 minutes old (give legitimate launches time to be
+//     linked to their slice's worker_session_id)
+function runGhostStewardCleanup(state, workerList, ts) {
+  const actions = [];
+  let mutated = false;
+  if (!Array.isArray(workerList)) return { actions, mutated };
+  const slices = state?.slices && typeof state.slices === "object" ? state.slices : {};
+  const activeDirs = new Set();
+  const activeSessionIds = new Set();
+  for (const [_sid, slice] of Object.entries(slices)) {
+    if (!slice || typeof slice !== "object") continue;
+    if (isTerminalSlice(slice)) continue;
+    const sessId = slice.worker_session_id;
+    if (typeof sessId === "string" && sessId.length > 0) activeSessionIds.add(sessId);
+    const br = typeof slice.branch === "string" ? slice.branch : "";
+    if (br.length === 0) continue;
+    // Slice tracks the bare branch (e.g., "smithy/forge/...") while agent-deck
+    // creates "feature/<branch>" worktree dirs. Cover both forms.
+    const stripped = br.replace(/^feature\\//, "");
+    activeDirs.add("feature-" + stripped.replace(/\\//g, "-"));
+  }
+  const nowMs = Date.parse(ts);
+  const minAgeMs = 5 * 60 * 1000;
+  for (const session of workerList) {
+    if (!session || typeof session !== "object") continue;
+    if (!isWorkerSession(session)) continue;
+    if (typeof session.id === "string" && activeSessionIds.has(session.id)) continue;
+    const worktreePath = session.worktreePath || session.worktree_path || session.path;
+    if (typeof worktreePath !== "string" || worktreePath.length === 0) continue;
+    const dirName = path.basename(worktreePath);
+    if (activeDirs.has(dirName)) continue;
+    const createdAt = Date.parse(session.created_at || session.createdAt || "");
+    if (Number.isFinite(createdAt) && Number.isFinite(nowMs) && nowMs - createdAt < minAgeMs) continue;
+    try {
+      execFileSync("agent-deck", ["-p", meta.profile, "session", "remove", session.id, "--prune-worktree", "--force"], {
+        encoding: "utf-8",
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      actions.push({
+        action: "ghost-cleanup",
+        sessionId: session.id,
+        title: session.title || "",
+        detail: "removed ghost steward (worktree " + dirName + " not tracked by any non-terminal slice)",
+      });
+      mutated = true;
+    } catch (err) {
+      // Surface the failure as a note but keep going — next tick can retry.
+      actions.push({
+        action: "ghost-cleanup-failed",
+        sessionId: session.id,
+        title: session.title || "",
+        detail: "agent-deck session remove failed for " + dirName + ": " + (err?.message || String(err)).slice(0, 200),
+      });
+    }
+  }
+  return { actions, mutated };
+}
+
+// Orphaned-PR steward re-launch: when a non-terminal slice has a PR but its
+// worker_session_id either is null or points to a session that no longer
+// exists in agent-deck, the slice is stuck. Babysit cannot send /smithy.fix
+// to a missing session. Re-attach a fresh opus steward to the existing
+// branch+worktree so the slice is babysit-ready again.
+//
+// Two cases this handles:
+//   - tryAdoptOpenPr transitioned the slice to pr-open without ever launching
+//     a session (the PR came from a previous run whose steward is gone).
+//   - A bulk session-remove (manual or by ghost-cleanup) took the steward
+//     while the slice was still pr-open / pr-in-fix.
+//
+// Throttle to 3 attempts per slice via transient_retry_counts so a
+// genuinely-broken re-launch path doesn't loop forever.
+function runStewardRelaunch(state, workerList, ts) {
+  const actions = [];
+  const failures = [];
+  let mutated = false;
+  if (!Array.isArray(workerList)) return { actions, failures, mutated };
+  const liveSessionIds = new Set();
+  for (const s of workerList) {
+    if (isWorkerSession(s) && typeof s.id === "string") liveSessionIds.add(s.id);
+  }
+  const slices = state?.slices && typeof state.slices === "object" ? state.slices : {};
+  const eligibleStages = new Set([
+    "implementing",
+    "pr-open",
+    "pr-in-fix",
+    "pr-resolving-conflicts",
+    "pr-rebasing",
+    "pr-in-rerun",
+  ]);
+  const repoPath = state?.repo?.path || meta.repo?.path;
+  if (typeof repoPath !== "string" || repoPath.length === 0) return { actions, failures, mutated };
+  for (const [sliceId, slice] of Object.entries(slices)) {
+    if (!slice || typeof slice !== "object") continue;
+    if (!eligibleStages.has(slice.stage)) continue;
+    const pr = slice.pr || {};
+    if (!pr.number) continue;
+    const sessId = slice.worker_session_id;
+    if (typeof sessId === "string" && sessId.length > 0 && liveSessionIds.has(sessId)) continue;
+    const rawBranch = typeof slice.branch === "string" ? slice.branch : "";
+    if (rawBranch.length === 0) continue;
+    const bareBranch = rawBranch.replace(/^feature\\//, "");
+    const featureBranch = "feature/" + bareBranch;
+    const expectedDirName = "feature-" + bareBranch.replace(/\\//g, "-");
+    // Throttle.
+    const limit = 3;
+    const counts = transientRetryCounts(state);
+    const key = "relaunch-steward:" + sliceId;
+    const prev = Number.isFinite(counts[key]) ? counts[key] : 0;
+    const nextN = prev + 1;
+    if (nextN > limit) continue;
+    counts[key] = nextN;
+    // Compute worktree path. Use the slice's recorded worktree_path when
+    // it points at an extant directory; otherwise derive from the repo
+    // parent (agent-deck's sibling-worktree convention: <repoParent>/
+    // WorkTrees/<repoName>/<expectedDirName>).
+    const worktreesParent = path.join(path.dirname(repoPath), "WorkTrees", path.basename(repoPath));
+    let worktreePath = slice.worktree_path || path.join(worktreesParent, expectedDirName);
+    if (!fs.existsSync(worktreePath)) {
+      // Try to re-create from the branch ref.
+      try {
+        fs.mkdirSync(path.dirname(worktreePath), { recursive: true });
+        execText("git", ["worktree", "add", worktreePath, featureBranch], { cwd: repoPath });
+      } catch (err) {
+        actions.push({
+          action: "relaunch-failed",
+          sliceId,
+          sessionId: null,
+          detail: "could not recreate worktree at " + worktreePath + " from branch " + featureBranch + ": " + (err?.message || String(err)).slice(0, 200),
+        });
+        continue;
+      }
+    }
+    // Launch a fresh agent-deck session attached to the existing worktree.
+    // No -b: don't create a new branch. The session attaches to whatever
+    // branch the worktree is on.
+    const launchTitle = slice.worker_title || ("steward: " + sliceId);
+    let beforeIds;
+    try {
+      const beforeList = agentDeckList();
+      beforeIds = new Set(Array.isArray(beforeList) ? beforeList.map((s) => s.id) : []);
+    } catch {
+      beforeIds = new Set();
+    }
+    const launchArgs = [
+      "-p", meta.profile,
+      "launch",
+      repoPath,
+      "-t", launchTitle,
+      "-c", "claude",
+      "-g", meta.worker_group,
+      "--worktree", bareBranch,
+      "--title-lock",
+      "--extra-arg", "--permission-mode",
+      "--extra-arg", "auto",
+      "--extra-arg", "--model",
+      "--extra-arg", "opus",
+    ];
+    try {
+      execFileSync("agent-deck", launchArgs, {
+        encoding: "utf-8",
+        stdio: ["ignore", "ignore", "pipe"],
+      });
+    } catch (err) {
+      actions.push({
+        action: "relaunch-failed",
+        sliceId,
+        sessionId: null,
+        detail: "agent-deck launch failed: " + (err?.message || String(err)).slice(0, 200),
+      });
+      continue;
+    }
+    // Identify the new session by diffing the list.
+    let newSessionId = null;
+    try {
+      const afterList = agentDeckList();
+      if (Array.isArray(afterList)) {
+        for (const s of afterList) {
+          if (!isWorkerSession(s)) continue;
+          if (beforeIds.has(s.id)) continue;
+          newSessionId = s.id;
+          break;
+        }
+      }
+    } catch {}
+    if (!newSessionId) {
+      actions.push({
+        action: "relaunch-failed",
+        sliceId,
+        sessionId: null,
+        detail: "agent-deck launch returned no identifiable new session",
+      });
+      continue;
+    }
+    // Enable session-level auto-mode (parity with launchAgentDeckManager).
+    try {
+      execFileSync("agent-deck", ["-p", meta.profile, "session", "set", newSessionId, "auto-mode", "true"], {
+        encoding: "utf-8",
+        stdio: ["ignore", "ignore", "pipe"],
+      });
+    } catch {}
+    // Send a context message so claude knows it's a steward on a PR.
+    const contextMsg = [
+      "[STEWARD RESUME] You are the re-launched March Hatchery management session for PR #" + pr.number + ".",
+      "Branch: " + featureBranch,
+      "PR: " + (pr.url || "(unknown)"),
+      "",
+      "The previous steward session for this slice was removed; the loop has attached you to the",
+      "existing worktree so future babysit messages have somewhere to go. Stand by for:",
+      "  - '/smithy.fix <thread-summary>' if review threads need a response.",
+      "  - Conflict-resolution prompts if the branch develops merge conflicts.",
+      "  - CI-failure judgement requests.",
+      "",
+      "When such a message arrives, act on it directly: inspect, fix, commit, push.",
+      "Do not pre-emptively rewrite anything; the PR is already open and may be in review.",
+    ].join("\\n");
+    try {
+      execFileSync("agent-deck", ["-p", meta.profile, "session", "send", newSessionId, contextMsg], {
+        encoding: "utf-8",
+        stdio: ["ignore", "ignore", "pipe"],
+      });
+    } catch {
+      // Best-effort: session is alive; future babysit messages will still reach it.
+    }
+    slice.worker_session_id = newSessionId;
+    slice.worker_title = launchTitle;
+    slice.worktree_path = worktreePath;
+    slice.last_action = ts;
+    slice.last_action_note = "Re-launched steward for PR #" + pr.number + " (attempt " + nextN + "/" + limit + "); new session " + newSessionId;
+    mutated = true;
+    actions.push({
+      action: "relaunch-steward",
+      sliceId,
+      sessionId: newSessionId,
+      detail: "re-attached opus steward to PR #" + pr.number + " on " + featureBranch + " (attempt " + nextN + "/" + limit + ")",
+    });
+  }
+  return { actions, failures, mutated };
 }
 
 function runDispatch(state, ts) {
@@ -2646,7 +3373,15 @@ function runDispatch(state, ts) {
   for (const item of ready) {
     const sliceId = dispatchSliceId(item);
     if (alreadyHasInFlightSlice(state, item, sliceId)) continue;
-    if (String(item.next_action?.command || "") === "smithy.forge" && !dependenciesClear(state, status, item)) continue;
+    // Trust smithy's readyLayerNodeIds filter as the authoritative "ready
+    // to work" set. The previous extra dependenciesClear gate disagreed
+    // with smithy on slice-level deps: a tasks.md row's depends_on would
+    // reference the bare tasks.md path while smithy's graph keys those
+    // nodes as path#S<n>, so graphNode returned null and the dep was
+    // conservatively treated as unresolved — even though smithy itself
+    // had already cleared the item to layer 0. Letting smithy own the
+    // readiness verdict matches the operator's "smithy status --graph"
+    // mental model and gets the loop to dispatch every layer-0 item.
 
     try {
       if (!synced) {
@@ -2700,7 +3435,7 @@ function runDispatch(state, ts) {
           ts, slice: existing, sliceId,
           requestKey: "hatchery-failure:" + sliceId + ":launch-throw:" + hashText(error).slice(0, 12),
           reason: "hatchery_dispatch_failed",
-          detail: "Hatchery dispatch launch threw for " + actionCommandLine(item.next_action) + ".\\n\\nError:\\n" + error + "\\n\\nSlice is escalated in state.json; inspect with legate.error.",
+          detail: "Hatchery dispatch launch threw for " + actionCommandLine(item.next_action) + ".\\n\\nError:\\n" + error + "\\n\\nSlice is escalated in state.json. For 'branch already exists' surface this via legate.unwedge; otherwise legate.error.",
         });
       }
       failures.push({ slice_id: sliceId, command: actionCommandLine(item.next_action), error });
@@ -2732,12 +3467,20 @@ function tick() {
   }
   const workerList = agentDeckList();
   const cleanupResult = cleanupTerminalPrs(state, workerList, ts);
-  const babysitWorkerList = cleanupResult.cleanups.length > 0
+  const postCleanupWorkerList = cleanupResult.cleanups.length > 0
     ? agentDeckList()
     : workerList;
+  const ghostResult = runGhostStewardCleanup(state, postCleanupWorkerList, ts);
+  const postGhostWorkerList = ghostResult.actions.length > 0
+    ? agentDeckList()
+    : postCleanupWorkerList;
+  const relaunchResult = runStewardRelaunch(state, postGhostWorkerList, ts);
+  const babysitWorkerList = relaunchResult.actions.length > 0
+    ? agentDeckList()
+    : postGhostWorkerList;
   const babysitResult = runBabysit(state, babysitWorkerList, ts);
   const dispatchResult = runDispatch(state, ts);
-  const summaryWorkerList = cleanupResult.cleanups.length > 0 || babysitResult.actions.length > 0 || dispatchResult.actions.length > 0
+  const summaryWorkerList = cleanupResult.cleanups.length > 0 || ghostResult.actions.length > 0 || relaunchResult.actions.length > 0 || babysitResult.actions.length > 0 || dispatchResult.actions.length > 0
     ? agentDeckList()
     : workerList;
   const workers = summarizeWorkers(summaryWorkerList);
@@ -2759,6 +3502,8 @@ function tick() {
     workers,
     cleanup_count: cleanupResult.cleanups.length,
     cleanup_failure_count: cleanupResult.failures.length,
+    ghost_cleanup_count: ghostResult.actions.filter((a) => a.action === "ghost-cleanup").length,
+    relaunch_count: relaunchResult.actions.filter((a) => a.action === "relaunch-steward").length,
     babysit_action_count: babysitResult.actions.length,
     processor_request_count: babysitResult.requests.length,
     dispatch_action_count: dispatchResult.actions.length,
@@ -2768,6 +3513,36 @@ function tick() {
   for (const cleanup of cleanupResult.cleanups) {
     append(meta.processor_events_path, cleanup);
     appendText(meta.processor_log_path, formatCleanupLine(cleanup));
+  }
+  for (const action of ghostResult.actions) {
+    const event = {
+      schema_version: 1,
+      ts,
+      processor: meta.processor_name,
+      paired_legate: meta.paired_legate,
+      kind: "ghost_cleanup",
+      action: action.action,
+      session_id: action.sessionId,
+      title: action.title,
+      detail: action.detail,
+    };
+    append(meta.processor_events_path, event);
+    appendText(meta.processor_log_path, "[" + ts + "] " + action.action + " " + action.sessionId + " " + (action.title || "") + ": " + action.detail + "\\n");
+  }
+  for (const action of relaunchResult.actions) {
+    const event = {
+      schema_version: 1,
+      ts,
+      processor: meta.processor_name,
+      paired_legate: meta.paired_legate,
+      kind: "steward_relaunch",
+      action: action.action,
+      slice_id: action.sliceId,
+      session_id: action.sessionId,
+      detail: action.detail,
+    };
+    append(meta.processor_events_path, event);
+    appendText(meta.processor_log_path, "[" + ts + "] " + action.action + " " + action.sliceId + ": " + action.detail + "\\n");
   }
   for (const failure of cleanupResult.failures) {
     append(meta.processor_events_path, {
@@ -2832,7 +3607,7 @@ function tick() {
   }
   appendText(
     meta.processor_log_path,
-    \`[\${ts}] heartbeat slice_count=\${record.slice_count} archived=\${record.archived_slice_count} cleanups=\${record.cleanup_count} babysit_actions=\${record.babysit_action_count} dispatches=\${record.dispatch_action_count} processor_requests=\${record.processor_request_count} workers=\${JSON.stringify(workers)}\${stateError ? " state_error=" + stateError : ""}\`,
+    \`[\${ts}] heartbeat slice_count=\${record.slice_count} archived=\${record.archived_slice_count} cleanups=\${record.cleanup_count} ghost_cleanups=\${record.ghost_cleanup_count} relaunches=\${record.relaunch_count} babysit_actions=\${record.babysit_action_count} dispatches=\${record.dispatch_action_count} processor_requests=\${record.processor_request_count} workers=\${JSON.stringify(workers)}\${stateError ? " state_error=" + stateError : ""}\`,
   );
 }
 
@@ -3516,15 +4291,16 @@ What you operate on:
 - gh CLI — source of truth for high-level PR state.
 - The smithy.pr-review skill — source of truth for unresolved inline review threads.
 
-Five skills carry the Claude-side mechanics. Load each once on this turn so the auto-mode classifier registers their allowed-tools:
+Six skills carry the Claude-side mechanics. Load each once on this turn so the auto-mode classifier registers their allowed-tools:
 - legate.resume — worker session-restart recovery and Resume-from-summary picker clearing.
 - legate.error — opaque worker error recovery via inspection, login escalation, restart, or diagnostic prompt.
 - legate.babysit — PR judgement escalations from the deterministic loop (CI classification, repeated conflicts, send failures).
 - legate.merge — strict-gate auto-squash-merge.
 - legate.issue — operator-driven GitHub issue intake.
+- legate.unwedge — hatchery branch-collision + partial-work recovery (loop auto-recovers the safe cases; this skill handles open-PR / diverged-unknown / partial-work).
 
 Auto-mode alignment — your routine actions are exactly:
-(a) Skill() to load one of the five skills above;
+(a) Skill() to load one of the six skills above;
 (b) bash invocation of a script under .claude/skills/legate.*/scripts/;
 (c) Read of state.json, task-log.md, LEARNINGS.md, POLICY.md, CLAUDE.md, meta.json, legate-loop logs/requests, or */SKILL.md inside this conductor dir;
 (d) a [STATUS] or NEED: reply to a loop escalation or operator message.
@@ -3535,8 +4311,8 @@ Anything else escalates via NEED: rather than executing — inline python3 -c / 
 
 On this turn:
 1. Read CLAUDE.md end-to-end.
-2. Run its cold-start checklist (read state.json if present; load legate.resume, legate.error, legate.babysit, legate.merge, and legate.issue once via the Skill tool). Do not edit state.json or task-log.md on cold start.
-3. Reply with the cold-start acknowledgement: "Online for {REPO_NAME} ({PROFILE}). Skills available: legate.resume, legate.error, legate.babysit, legate.merge, legate.issue. Will not invoke anything outside their scripts without escalating."
+2. Run its cold-start checklist (read state.json if present; load legate.resume, legate.error, legate.babysit, legate.merge, legate.issue, and legate.unwedge once via the Skill tool). Do not edit state.json or task-log.md on cold start.
+3. Reply with the cold-start acknowledgement: "Online for {REPO_NAME} ({PROFILE}). Skills available: legate.resume, legate.error, legate.babysit, legate.merge, legate.issue, legate.unwedge. Will not invoke anything outside their scripts without escalating."
 4. Wait for a [PROCESSOR] loop escalation or operator message. Do not poll on your own.`;
 
 /**

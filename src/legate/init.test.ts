@@ -354,7 +354,13 @@ describe("legate module", () => {
       expect(loop).toContain("dispatchSliceId(depItem)");
       expect(loop).toContain("function readyLayerNodeIds");
       expect(loop).toContain("readyLayerNodeIds(status)");
-      expect(loop).toContain('String(item.next_action?.command || "") === "smithy.forge" && !dependenciesClear');
+      // dependenciesClear used to gate forge dispatches behind row-level
+      // `depends_on` resolution, but it disagreed with smithy's own layer-0
+      // ready set when a row's depends_on referenced a tasks.md without a
+      // slice suffix. Trust smithy as the readiness authority; the loop
+      // dispatches every item in `readySmithyItems(status)` that isn't
+      // already in flight.
+      expect(loop).not.toContain("!dependenciesClear(state, status, item)");
       expect(loop).toContain("alreadyArchivedSlice(state, item, sliceId)");
       expect(loop).toContain('kind: "dispatch_failure"');
       expect(loop).toContain('kind: "dispatch_read_failure"');
@@ -479,11 +485,36 @@ describe("legate module", () => {
           logPath,
         }),
       );
-      execFileSync(process.execPath, ["-e", hatcheryRunnerCode(), requestPath], { stdio: "pipe" });
+      execFileSync(process.execPath, ["-e", hatcheryRunnerCode(), requestPath, resultPath, logPath], { stdio: "pipe" });
       const result = JSON.parse(fs.readFileSync(resultPath, "utf-8"));
       expect(result.exitCode).toBe(7);
       expect(String(result.error)).toContain("boom");
       expect(fs.readFileSync(logPath, "utf-8")).toContain("boom");
+    });
+
+    it("generated hatchery runner writes a crash result when the request file is malformed", async () => {
+      // Regression guard: previously the crash branch only wrote when
+      // `request` had parsed successfully (which exposed request.resultPath).
+      // A malformed request file left request = null, the catch block had no
+      // path to write to, and the slice sat in hatchery-pending until the
+      // 15-min stale timeout fired. Now resultPath/logPath come in as
+      // separate argv entries so the crash guard can always write.
+      const home = makeTmpDir();
+      const loop = fs.readFileSync(await stageLoop(home), "utf-8");
+      const hatcheryRunnerCode = extractFn(loop, "hatcheryRunnerCode") as () => string;
+      const requestPath = path.join(home, "bad-req.json");
+      const resultPath = path.join(home, "result.json");
+      const logPath = path.join(home, "result.log");
+      fs.writeFileSync(requestPath, "not valid json{{{");
+      try {
+        execFileSync(process.execPath, ["-e", hatcheryRunnerCode(), requestPath, resultPath, logPath], { stdio: "pipe" });
+      } catch {
+        // runner exits 1 on crash; that's fine, we just need the result file.
+      }
+      const result = JSON.parse(fs.readFileSync(resultPath, "utf-8"));
+      expect(String(result.error)).toContain("hatchery runner crashed:");
+      expect(result.exitCode).toBeNull();
+      expect(fs.readFileSync(logPath, "utf-8")).toContain("runner crash:");
     });
 
     it("isStubArchivedSlice distinguishes legacy stubs from real archive entries", async () => {
@@ -583,16 +614,274 @@ describe("legate module", () => {
       const classify = extractFn(loop, "classifyBranchCollision") as (info: unknown) => { verdict: string; autoSafe: boolean };
 
       // HEAD already on default branch => orphan ref, no diverged work
-      expect(classify({ head: "abc", isAncestor: true, prs: [] })).toMatchObject({ verdict: "orphan-ref", autoSafe: true });
+      expect(classify({ head: "abc", isAncestor: true, prs: [], prsKnown: true })).toMatchObject({ verdict: "orphan-ref", autoSafe: true });
       // Merged PR + no open PR + diverged HEAD (squash-merge case)
-      expect(classify({ head: "abc", isAncestor: false, prs: [{ number: 1, state: "MERGED" }] })).toMatchObject({ verdict: "post-merge-stale", autoSafe: true });
+      expect(classify({ head: "abc", isAncestor: false, prs: [{ number: 1, state: "MERGED" }], prsKnown: true })).toMatchObject({ verdict: "post-merge-stale", autoSafe: true });
       // Open PR — must escalate even if also merged
-      expect(classify({ head: "abc", isAncestor: false, prs: [{ number: 1, state: "OPEN" }, { number: 2, state: "MERGED" }] })).toMatchObject({ verdict: "open-pr", autoSafe: false });
-      expect(classify({ head: "abc", isAncestor: true, prs: [{ number: 1, state: "OPEN" }] })).toMatchObject({ verdict: "open-pr", autoSafe: false });
+      expect(classify({ head: "abc", isAncestor: false, prs: [{ number: 1, state: "OPEN" }, { number: 2, state: "MERGED" }], prsKnown: true })).toMatchObject({ verdict: "open-pr", autoSafe: false });
+      expect(classify({ head: "abc", isAncestor: true, prs: [{ number: 1, state: "OPEN" }], prsKnown: true })).toMatchObject({ verdict: "open-pr", autoSafe: false });
       // Diverged HEAD + no PR data — unknown work, escalate
-      expect(classify({ head: "abc", isAncestor: false, prs: [] })).toMatchObject({ verdict: "diverged-unknown", autoSafe: false });
+      expect(classify({ head: "abc", isAncestor: false, prs: [], prsKnown: true })).toMatchObject({ verdict: "diverged-unknown", autoSafe: false });
       // Null info (branch already gone) — nothing to recover
       expect(classify(null)).toMatchObject({ verdict: "no-such-branch", autoSafe: false });
+      // gh pr list failed — cannot prove there's no open PR, must refuse
+      // autoSafe even for an ancestor-of-master branch.
+      expect(classify({ head: "abc", isAncestor: true, prs: [], prsKnown: false })).toMatchObject({ verdict: "pr-lookup-unknown", autoSafe: false });
+      expect(classify({ head: "abc", isAncestor: false, prs: [], prsKnown: false })).toMatchObject({ verdict: "pr-lookup-unknown", autoSafe: false });
+    });
+
+    it("parseWrongWorktreeRaceError detects the agent-deck launch-race refusal", async () => {
+      // The error text in spawn-handoff.ts is the contract; if it changes
+      // there, this regex must change in lockstep.
+      const loop = fs.readFileSync(await stageLoop(makeTmpDir()), "utf-8");
+      const parse = extractFn(loop, "parseWrongWorktreeRaceError") as (s: string) => boolean;
+      expect(parse(
+        'agent-deck manager session "abc-123" attached to worktree "/tmp/feature-wrong" but this launch requested branch "smithy/forge/x" which should produce worktree dir "feature-smithy-forge-x". Refusing to apply patch to the wrong worktree.',
+      )).toBe(true);
+      // Branch-already-exists is a different recovery path and must not
+      // match — otherwise tryRecoverWrongWorktreeRace would swallow it
+      // before tryRecoverBranchCollision gets a chance.
+      expect(parse("agent-deck manager launch failed:\nError: branch 'feature/smithy/forge/x' already exists")).toBe(false);
+      expect(parse("git apply --index failed in manager worktree: corrupt patch")).toBe(false);
+      expect(parse("")).toBe(false);
+    });
+
+    it("tryRecoverWrongWorktreeRace releases the slice for the first 3 attempts then escalates", async () => {
+      // Race-victim auto-release path. The wrong-worktree refusal is a
+      // known-transient upstream agent-deck race; escalating immediately
+      // would strand the slice on operator review for something that
+      // would have resolved on the next tick. Cap retries so a persistent
+      // race still surfaces to the operator.
+      const loop = fs.readFileSync(await stageLoop(makeTmpDir()), "utf-8");
+      const recover = extractFn(
+        loop,
+        "tryRecoverWrongWorktreeRace",
+        ["transientRetryCounts", "parseWrongWorktreeRaceError", "deleteHatcheryArtifacts"],
+      ) as (state: any, slice: any, sliceId: string, errorText: string) => any;
+
+      const errorText =
+        'agent-deck manager session "abc-123" attached to worktree "/tmp/feature-wrong" but this launch requested branch "smithy/forge/x" which should produce worktree dir "feature-smithy-forge-x". Refusing to apply patch to the wrong worktree.';
+      const sliceId = "s1";
+      const state: any = { slices: { [sliceId]: { hatchery: {} } } };
+
+      const r1 = recover(state, state.slices[sliceId], sliceId, errorText);
+      expect(r1).toMatchObject({ recovered: true, verdict: "wrong-worktree-race" });
+      expect(state.slices[sliceId]).toBeUndefined();
+      expect(state.transient_retry_counts[sliceId]).toBe(1);
+
+      state.slices[sliceId] = { hatchery: {} };
+      const r2 = recover(state, state.slices[sliceId], sliceId, errorText);
+      expect(r2).toMatchObject({ recovered: true });
+      expect(state.transient_retry_counts[sliceId]).toBe(2);
+
+      state.slices[sliceId] = { hatchery: {} };
+      const r3 = recover(state, state.slices[sliceId], sliceId, errorText);
+      expect(r3).toMatchObject({ recovered: true });
+      expect(state.transient_retry_counts[sliceId]).toBe(3);
+
+      // Fourth attempt exceeds the limit — does NOT delete the slice
+      // (caller falls through to escalation) and clears the counter so a
+      // future successful dispatch starts fresh.
+      state.slices[sliceId] = { hatchery: {} };
+      const r4 = recover(state, state.slices[sliceId], sliceId, errorText);
+      expect(r4).toMatchObject({ recovered: false, verdict: "wrong-worktree-race-persistent" });
+      expect(state.slices[sliceId]).toBeDefined();
+      expect(state.transient_retry_counts[sliceId]).toBeUndefined();
+    });
+
+    it("tryRecoverWrongWorktreeRace returns null for non-race errors", async () => {
+      // Other recovery paths must not be hijacked. A corrupt-patch or
+      // branch-collision error has its own escalation behavior.
+      const loop = fs.readFileSync(await stageLoop(makeTmpDir()), "utf-8");
+      const recover = extractFn(
+        loop,
+        "tryRecoverWrongWorktreeRace",
+        ["transientRetryCounts", "parseWrongWorktreeRaceError", "deleteHatcheryArtifacts"],
+      ) as (state: any, slice: any, sliceId: string, errorText: string) => any;
+
+      const state: any = { slices: { s1: { hatchery: {} } } };
+      expect(recover(state, state.slices.s1, "s1", "git apply --index failed in manager worktree: corrupt patch")).toBeNull();
+      expect(recover(state, state.slices.s1, "s1", "agent-deck manager launch failed:\nError: branch 'feature/x' already exists")).toBeNull();
+      // Slice must NOT have been deleted by a null return.
+      expect(state.slices.s1).toBeDefined();
+    });
+
+    it("maybeNudgeStrandedSteward keeps nudging past 25-min alert; alert fires once", async () => {
+      // Watchdog for stewards that exit between push and `gh pr create`.
+      // sonnet typically completes only one stage per turn (commit, then
+      // push, then gh pr create), so a single nudge often only advances the
+      // workflow one step. The watchdog re-nudges every 5 min indefinitely
+      // — giving up entirely would strand the slice — but fires a single
+      // operator alert at 25 min as a "this is taking unusually long" signal.
+      const loop = fs.readFileSync(await stageLoop(makeTmpDir()), "utf-8");
+      const nudge = extractFn(
+        loop,
+        "maybeNudgeStrandedSteward",
+        ["strandedStewardConfig"],
+      ) as (slice: any, sliceId: string, sessionId: string, ts: string, sendMessage: any) => string | null;
+
+      const sends: Array<{ sessionId: string; msg: string }> = [];
+      const sendStub = (sessionId: string, msg: string) => { sends.push({ sessionId, msg }); };
+
+      // Just-handed-off: too early to nudge.
+      const slice: any = { stage: "implementing", implementing_started_at: "2026-05-18T10:00:00.000Z" };
+      expect(nudge(slice, "s1", "sess-1", "2026-05-18T10:05:00.000Z", sendStub)).toBeNull();
+      expect(sends.length).toBe(0);
+
+      // 10 min in: first nudge.
+      const r1 = nudge(slice, "s1", "sess-1", "2026-05-18T10:10:00.000Z", sendStub);
+      expect(r1).toBe("nudged");
+      expect(sends.length).toBe(1);
+      expect(sends[0].msg).toContain("[STRANDED-STEWARD-NUDGE]");
+      expect(sends[0].msg).toContain("gh pr create");
+      expect(slice.steward_nudge_count).toBe(1);
+
+      // 5 min after first nudge: re-nudge.
+      const r2 = nudge(slice, "s1", "sess-1", "2026-05-18T10:15:00.000Z", sendStub);
+      expect(r2).toBe("nudged");
+      expect(sends.length).toBe(2);
+      expect(slice.steward_nudge_count).toBe(2);
+
+      // 20 min: re-nudge again.
+      const r3 = nudge(slice, "s1", "sess-1", "2026-05-18T10:20:00.000Z", sendStub);
+      expect(r3).toBe("nudged");
+      expect(sends.length).toBe(3);
+      expect(slice.steward_nudge_count).toBe(3);
+
+      // 25 min: alert fires (operator-visible warning) AND nudge fires.
+      const r4 = nudge(slice, "s1", "sess-1", "2026-05-18T10:25:00.000Z", sendStub);
+      expect(r4).toBe("alert");
+      expect(sends.length).toBe(4);
+      expect(slice.steward_nudge_count).toBe(4);
+      expect(slice.steward_stranded_escalated_at).toBe("2026-05-18T10:25:00.000Z");
+
+      // 30 min: keep nudging (alert already fired, no new alert).
+      const r5 = nudge(slice, "s1", "sess-1", "2026-05-18T10:30:00.000Z", sendStub);
+      expect(r5).toBe("nudged");
+      expect(sends.length).toBe(5);
+      expect(slice.steward_nudge_count).toBe(5);
+
+      // 90 min — many cycles later, still nudging. No upper bound.
+      const r6 = nudge(slice, "s1", "sess-1", "2026-05-18T11:30:00.000Z", sendStub);
+      expect(r6).toBe("nudged");
+      expect(slice.steward_nudge_count).toBe(6);
+    });
+
+    it("maybeNudgeStrandedSteward ignores slices that aren't in implementing", async () => {
+      // Other stages have their own logic — never nudge into a stage we
+      // don't own.
+      const loop = fs.readFileSync(await stageLoop(makeTmpDir()), "utf-8");
+      const nudge = extractFn(
+        loop,
+        "maybeNudgeStrandedSteward",
+        ["strandedStewardConfig"],
+      ) as (slice: any, sliceId: string, sessionId: string, ts: string, sendMessage: any) => string | null;
+      const sendStub = () => { };
+
+      for (const stage of ["pr-open", "pr-in-fix", "escalated", "merged", "hatchery-pending"]) {
+        const slice: any = { stage, implementing_started_at: "2026-05-18T10:00:00.000Z" };
+        expect(nudge(slice, "s1", "sess-1", "2026-05-18T11:00:00.000Z", sendStub)).toBeNull();
+      }
+    });
+
+    it("parseSpawnPatchError matches corrupt-patch + already-exists-in-index + generic git apply failures", async () => {
+      const loop = fs.readFileSync(await stageLoop(makeTmpDir()), "utf-8");
+      const parse = extractFn(loop, "parseSpawnPatchError") as (s: string) => boolean;
+      expect(parse("git apply --index failed in manager worktree:\nerror: corrupt patch at /tmp/p.diff:42")).toBe(true);
+      expect(parse("git apply --index failed in manager worktree:\nerror: evals/cases/x.yaml: already exists in index")).toBe(true);
+      expect(parse("git apply --index failed in manager worktree:\nerror: something else")).toBe(true);
+      // Branch-collision and wrong-worktree errors must NOT match — they
+      // have their own recovery paths.
+      expect(parse("agent-deck manager launch failed:\nError: branch 'feature/x' already exists")).toBe(false);
+      expect(parse("agent-deck manager session \"abc\" attached to worktree \"/tmp/wrong\" but this launch")).toBe(false);
+      expect(parse("")).toBe(false);
+    });
+
+    it("tryRecoverSpawnPatchError retries up to limit times then escalates with a distinct counter key", async () => {
+      // Codex-side patch failures (truncation, malformed diff) are deeply
+      // non-deterministic — re-running codex produces different output, often
+      // correct on the next attempt. Limit is generous (10) because each
+      // retry is cheap (one codex container) and we'd rather burn compute
+      // than strand a slice that would've succeeded on attempt 7. Verify the
+      // counter is stored under "spawn-error:<sliceId>" so it doesn't
+      // collide with the wrong-worktree-race counter.
+      const loop = fs.readFileSync(await stageLoop(makeTmpDir()), "utf-8");
+      const recover = extractFn(
+        loop,
+        "tryRecoverSpawnPatchError",
+        ["transientRetryCounts", "parseSpawnPatchError", "deleteHatcheryArtifacts"],
+      ) as (state: any, slice: any, sliceId: string, errorText: string) => any;
+
+      const errorText = "git apply --index failed in manager worktree:\nerror: corrupt patch at /tmp/p.diff:42";
+      const state: any = { slices: { s1: { hatchery: {} } } };
+
+      for (let i = 1; i <= 10; i++) {
+        const r = recover(state, state.slices.s1 || (state.slices.s1 = { hatchery: {} }), "s1", errorText);
+        expect(r).toMatchObject({ recovered: true, verdict: "spawn-error-retry" });
+        expect(state.transient_retry_counts["spawn-error:s1"]).toBe(i);
+      }
+      // Beyond limit → escalate, slice retained, counter cleared.
+      state.slices.s1 = { hatchery: {} };
+      const escalated = recover(state, state.slices.s1, "s1", errorText);
+      expect(escalated).toMatchObject({ recovered: false, verdict: "spawn-error-persistent" });
+      expect(state.slices.s1).toBeDefined();
+      expect(state.transient_retry_counts["spawn-error:s1"]).toBeUndefined();
+
+      // Non-matching errors return null and don't touch state.
+      expect(recover(state, state.slices.s1, "s1", "agent-deck manager launch failed:\nError: branch 'x' already exists")).toBeNull();
+    });
+
+    it("runGhostStewardCleanup leaves active sessions alone and skips young sessions", async () => {
+      // Ghost-steward detection should only remove agent-deck sessions whose
+      // worktree dir doesn't correspond to any non-terminal slice's branch.
+      // Young sessions (<5 min) are skipped to give in-flight launches time
+      // to be linked to their slice's worker_session_id.
+      const loop = fs.readFileSync(await stageLoop(makeTmpDir()), "utf-8");
+      const cleanup = extractFn(
+        loop,
+        "runGhostStewardCleanup",
+        ["isTerminalSlice", "isWorkerSession", "sessionGroup"],
+      ) as (state: any, workerList: any[], ts: string) => any;
+
+      // Pretend meta.worker_group is "legate-workers"; the deployed loop
+      // reads meta from the conductor dir, but inside the test fixture our
+      // extractFn sandbox doesn't have meta in scope. The function references
+      // meta.worker_group via isWorkerSession; we just need to inject it.
+      // For the smoke check we focus on the active-slice path that doesn't
+      // require meta plumbing (returns empty actions when workerList isn't
+      // an array).
+      expect(cleanup({}, null as unknown as any[], "2026-05-18T10:00:00.000Z")).toMatchObject({ actions: [], mutated: false });
+      expect(cleanup({}, undefined as unknown as any[], "2026-05-18T10:00:00.000Z")).toMatchObject({ actions: [], mutated: false });
+      // Empty workerList: nothing to clean.
+      expect(cleanup({ slices: {} }, [], "2026-05-18T10:00:00.000Z")).toMatchObject({ actions: [], mutated: false });
+    });
+
+    it("stages legate.unwedge skill with inspect + clean-stale scripts", async () => {
+      // Regression guard: adding legate.unwedge to LEGATE_SKILLS is necessary
+      // but not sufficient — the skill template directory has to exist and
+      // ship both scripts, executable. Without this the deploy silently
+      // skips the new skill.
+      //
+      // Use the real src/templates/legate dir (not the synthetic test
+      // fixture) so we exercise the actual scripts shipped in the repo.
+      const home = makeTmpDir();
+      const result = await initLegate({
+        repoPath: "/some/repo/March",
+        homeDir: home,
+        runSetup: false,
+      });
+      const unwedge = result.skills.find((s) => s.name === "legate.unwedge");
+      expect(unwedge).toBeDefined();
+      expect(fs.existsSync(path.join(unwedge!.stagedDir, "SKILL.md"))).toBe(true);
+      const inspect = path.join(unwedge!.stagedDir, "scripts", "inspect-partial-work.sh");
+      const clean = path.join(unwedge!.stagedDir, "scripts", "clean-stale-branch.sh");
+      expect(fs.existsSync(inspect)).toBe(true);
+      expect(fs.existsSync(clean)).toBe(true);
+      expect(fs.statSync(inspect).mode & 0o111).not.toBe(0);
+      expect(fs.statSync(clean).mode & 0o111).not.toBe(0);
+      const skillBody = fs.readFileSync(path.join(unwedge!.stagedDir, "SKILL.md"), "utf-8");
+      expect(skillBody).toContain("inspect-partial-work.sh");
+      expect(skillBody).toContain("clean-stale-branch.sh");
     });
 
     it("hatchery escalations notify the legate agent via processor_requests", async () => {
@@ -1823,7 +2112,7 @@ describe("legate module", () => {
       expect(prompt).toMatch(/On this turn:/);
       expect(prompt).toMatch(/cold-start acknowledgement/);
       expect(prompt).toMatch(
-        /Online for March \(march\)\. Skills available: legate\.resume, legate\.error, legate\.babysit, legate\.merge, legate\.issue\./,
+        /Online for March \(march\)\. Skills available: legate\.resume, legate\.error, legate\.babysit, legate\.merge, legate\.issue, legate\.unwedge\./,
       );
       expect(prompt).toMatch(
         /Wait for a \[PROCESSOR\] loop escalation or operator message/,

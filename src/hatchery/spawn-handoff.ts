@@ -79,7 +79,14 @@ export interface HatcherySpawnResult {
 }
 
 export const DEFAULT_MANAGER_GROUP = "march-spawn-managers";
-export const DEFAULT_MANAGER_MODEL = "sonnet";
+// Stewards need agent-deck's session-level auto-mode to keep babysit
+// /smithy.fix nudges flowing without pausing the classifier. Empirically,
+// sonnet sessions in agent-deck v1.9.17 surface "auto mode unavailable
+// for this model" in the TUI even when auto-mode=true is set on the
+// session row, leaving the steward stalled mid-workflow. opus has the
+// auto-mode capability and reaches the same workflow steps in fewer
+// turns, so the per-spawn cost premium is acceptable.
+export const DEFAULT_MANAGER_MODEL = "opus";
 
 const EXEC_MAX_BUFFER = 16 * 1024 * 1024;
 
@@ -230,12 +237,22 @@ export function buildManagerPrompt(input: {
     "",
     `Original request:\n${input.operatorPrompt.trimEnd()}`,
     "",
-    "Required workflow:",
+    "Required workflow — execute every step in this turn; do NOT end your turn",
+    "between steps. The deterministic loop has no way to nudge you mid-task,",
+    "so a session that stops after the commit or push but before the PR is a",
+    "stranded steward that requires manual recovery.",
     "1. Inspect `git status --short` and the staged diff.",
     "2. Review the resulting diff for correctness and security.",
     "3. Run the smallest meaningful verification for the touched code.",
-    "4. Commit the applied change, push the branch, and open a GitHub PR.",
-    "5. Report the PR URL and any verification gaps.",
+    "4. Commit the applied change. (`git commit`)",
+    "5. Push the branch to origin. (`git push -u origin <branch>`)",
+    "6. Open the PR with `gh pr create`. Use the artifact path and original request",
+    "   to compose the title and body — keep it under ~70 chars; details belong in",
+    "   the body. Mention any verification gaps directly in the PR body.",
+    "7. Report the PR URL on the final line of your reply as `PR: <url>`. If any",
+    "   step fails, escalate via `NEED: <one-line summary> — <one-line next action>`",
+    "   instead of stopping silently. NEVER end your turn after a successful commit",
+    "   or push if the PR has not yet been opened — that leaves the workflow stranded.",
   ].join("\n");
 }
 
@@ -434,6 +451,32 @@ export function launchAgentDeckManager(input: {
         `before we could identify it; the loop's next tick should re-dispatch cleanly once ` +
         `the colliding spawn finishes.`,
     );
+  }
+
+  // Enable agent-deck session-level auto-mode on the new steward. The
+  // conductor session has this set explicitly during legate init, but
+  // `agent-deck launch` creates worker sessions with auto-mode=false by
+  // default. Without it, claude's `--permission-mode auto` only suppresses
+  // some prompts; the agent-deck classifier still pauses tool calls,
+  // leaving the steward stuck mid-workflow on every loop nudge.
+  //
+  // Best-effort: don't fail the whole dispatch if this step errors. The
+  // session is still functional, just less responsive to babysit messages.
+  const autoModeArgs = [
+    ...(input.profile ? ["-p", input.profile] : []),
+    "session",
+    "set",
+    launched.sessionId,
+    "auto-mode",
+    "true",
+  ];
+  try {
+    execFileSync("agent-deck", autoModeArgs, {
+      stdio: ["ignore", "ignore", "pipe"],
+      maxBuffer: EXEC_MAX_BUFFER,
+    });
+  } catch {
+    // Swallow — see comment above.
   }
 
   return {

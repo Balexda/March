@@ -204,6 +204,28 @@ describe("spawn-handoff", () => {
     expect(patch).toBe(fullPatch);
   });
 
+  it("manager prompt enumerates push and PR creation as separate atomic steps", () => {
+    // Regression guard for the steward-strands-after-push bug. The previous
+    // prompt combined commit + push + open PR in one step; in production
+    // sonnet sometimes ended its turn after the successful push tool result,
+    // leaving the workflow stranded with no PR. Splitting the workflow into
+    // atomic steps and explicitly forbidding mid-task exit fixes this.
+    const prompt = buildManagerPrompt({ operatorPrompt: "Do the work." });
+    // Each terminal action gets its own numbered step so claude can't
+    // consider "step 4 complete" after just the commit.
+    expect(prompt).toMatch(/4\. Commit/);
+    expect(prompt).toMatch(/5\. Push/);
+    expect(prompt).toMatch(/6\. Open the PR with `gh pr create`/);
+    expect(prompt).toMatch(/7\. Report the PR URL/);
+    // The mid-task-exit prohibition must be present in plain language so
+    // claude reads it during planning, not just as boilerplate.
+    expect(prompt).toMatch(/do NOT end your turn/i);
+    expect(prompt).toContain("NEED:");
+    expect(prompt).toContain("stranded steward");
+    // No combined "commit + push + open PR" step survives in step 4.
+    expect(prompt).not.toMatch(/4\.[^\n]*push[^\n]*PR/);
+  });
+
   it("writes handoff artifacts and tells the manager the patch is already applied", () => {
     const home = makeTmpDir();
     const patch = "diff --git a/a b/a\n--- a/a\n+++ b/a\n";
