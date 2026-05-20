@@ -1,7 +1,6 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { spawnRecordDir } from "../spawn-record.js";
 import { getDatabaseSync, type BroodDatabase } from "./sqlite.js";
 import type {
   ListSessionsFilter,
@@ -34,10 +33,6 @@ export interface SessionStoreOptions {
   readonly homeDir?: string;
   /** Explicit db path (e.g. `":memory:"` for tests). Overrides `homeDir`. */
   readonly dbPath?: string;
-  /** Import existing `~/.march/spawns/*.json` on open (default true). */
-  readonly importSpawnRecords?: boolean;
-  /** Best-effort warning sink for skipped/malformed records. */
-  readonly warn?: (message: string) => void;
 }
 
 /** Ordered registry columns — single source of truth for read/write mapping. */
@@ -109,33 +104,6 @@ ON CONFLICT(id) DO UPDATE SET
 
 interface SqliteRow {
   [key: string]: string | number | null;
-}
-
-/** Shape of a persisted SpawnRecord we read during import (loosely typed so it
- *  tolerates forward-compatible fields added by later milestones). */
-interface ImportedSpawnRecord {
-  id?: unknown;
-  status?: unknown;
-  repoPath?: unknown;
-  branch?: unknown;
-  worktreePath?: unknown;
-  containerId?: unknown;
-  imageId?: unknown;
-  exitCode?: unknown;
-  backend?: unknown;
-  createdAt?: unknown;
-  startedAt?: unknown;
-  stoppedAt?: unknown;
-  stewardSessionId?: unknown;
-  failureReason?: unknown;
-}
-
-function str(value: unknown): string | undefined {
-  return typeof value === "string" && value.length > 0 ? value : undefined;
-}
-
-function num(value: unknown): number | undefined {
-  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
 /** Copy only the keys of `changes` whose value is not `undefined` onto `base`. */
@@ -210,17 +178,17 @@ function recordToValues(record: SessionRecord): Array<string | number | null> {
 
 /**
  * The brood session registry, backed by `node:sqlite`. Synchronous API: the
- * single-threaded Fastify server serializes access naturally, and WAL +
- * busy_timeout tolerate the JSON-import scan racing a live dispatch.
+ * single-threaded Fastify server serializes access naturally.
+ *
+ * Brood's inputs are strictly its API (the Hatchery registration push + operator
+ * verbs), its own persistent store, and its teardown call-outs — it never reads
+ * another service's filesystem. The store survives restarts, so there is no
+ * filesystem bootstrap to rebuild from `~/.march/spawns`.
  */
 export class SessionStore {
   private readonly db: BroodDatabase;
-  private readonly warn: (message: string) => void;
 
   constructor(options: SessionStoreOptions = {}) {
-    this.warn =
-      options.warn ?? ((message) => process.stderr.write(`${message}\n`));
-
     const dbPath = options.dbPath ?? registryDbPath(options.homeDir);
     if (dbPath !== ":memory:") {
       fs.mkdirSync(path.dirname(dbPath), { recursive: true });
@@ -232,10 +200,6 @@ export class SessionStore {
     }
     this.db.exec("PRAGMA busy_timeout = 5000;");
     this.migrate();
-
-    if (options.importSpawnRecords !== false) {
-      this.importSpawnRecords(options.homeDir);
-    }
   }
 
   private migrate(): void {
@@ -322,72 +286,6 @@ export class SessionStore {
       status: "torndown",
       torndownAt: new Date().toISOString(),
     });
-  }
-
-  /**
-   * Import existing per-spawn JSON records into the registry so a brood that
-   * starts after spawns already exist still owns them. Never overwrites a row
-   * that already exists (sqlite is authoritative). Uses a tolerant read: a
-   * malformed file is skipped with a warning rather than failing the scan.
-   */
-  importSpawnRecords(homeDir?: string): void {
-    const dir = spawnRecordDir(homeDir);
-    let entries: string[];
-    try {
-      entries = fs.readdirSync(dir);
-    } catch {
-      return; // no spawns dir yet — nothing to import
-    }
-    const now = new Date().toISOString();
-    for (const name of entries) {
-      if (!name.endsWith(".json")) continue;
-      const filePath = path.join(dir, name);
-      const parsed = this.readSpawnRecordTolerant(filePath);
-      if (!parsed) continue;
-      const id = str(parsed.id);
-      if (!id || this.get(id)) continue; // unknown id or already owned
-      this.persist({
-        id,
-        kind: "spawn",
-        status: (str(parsed.status) as SessionStatus) ?? "created",
-        repoPath: str(parsed.repoPath),
-        branch: str(parsed.branch),
-        worktreePath: str(parsed.worktreePath),
-        containerId: str(parsed.containerId),
-        agentDeckSessionId: str(parsed.stewardSessionId),
-        backend: str(parsed.backend),
-        imageId: str(parsed.imageId),
-        exitCode: num(parsed.exitCode),
-        failureReason: str(parsed.failureReason),
-        createdAt: str(parsed.createdAt) ?? now,
-        updatedAt: now,
-        startedAt: str(parsed.startedAt),
-        stoppedAt: str(parsed.stoppedAt),
-      });
-    }
-  }
-
-  private readSpawnRecordTolerant(
-    filePath: string,
-  ): ImportedSpawnRecord | undefined {
-    // Safe-read protocol: one retry on parse failure (catches a concurrent
-    // dispatch mid-write), then skip-and-warn.
-    for (let attempt = 0; attempt < 2; attempt++) {
-      let raw: string;
-      try {
-        raw = fs.readFileSync(filePath, "utf-8");
-      } catch {
-        return undefined;
-      }
-      try {
-        return JSON.parse(raw) as ImportedSpawnRecord;
-      } catch {
-        if (attempt === 1) {
-          this.warn(`brood: skipping unreadable spawn record at "${filePath}"`);
-        }
-      }
-    }
-    return undefined;
   }
 
   /** Close the underlying database handle. */

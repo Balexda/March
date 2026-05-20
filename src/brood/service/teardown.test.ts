@@ -121,7 +121,7 @@ function seedSpawnGroup(store: SessionStore): {
 describe.skipIf(!sqliteAvailable)("teardownSession", () => {
   it("runs steps in order: archive → container → steward → worktree → branch", async () => {
     const home = makeHome();
-    const store = new SessionStore({ dbPath: ":memory:", importSpawnRecords: false });
+    const store = new SessionStore({ dbPath: ":memory:" });
     const group = seedSpawnGroup(store);
     const rec = recordingDeps(home);
     // worktree is present so the worktree step actually runs.
@@ -142,7 +142,7 @@ describe.skipIf(!sqliteAvailable)("teardownSession", () => {
   });
 
   it("removes the worktree by the exact registry path, and only that path", async () => {
-    const store = new SessionStore({ dbPath: ":memory:", importSpawnRecords: false });
+    const store = new SessionStore({ dbPath: ":memory:" });
     const group = seedSpawnGroup(store);
     const rec = recordingDeps(makeHome());
     rec.deps.pathExists = (p) => p === group.worktreePath;
@@ -160,7 +160,7 @@ describe.skipIf(!sqliteAvailable)("teardownSession", () => {
   });
 
   it("skips worktree removal when the steward (castra) already removed it", async () => {
-    const store = new SessionStore({ dbPath: ":memory:", importSpawnRecords: false });
+    const store = new SessionStore({ dbPath: ":memory:" });
     const group = seedSpawnGroup(store);
     const rec = recordingDeps(makeHome(), {}, { stewardRemovesWorktree: true });
     // Worktree exists until the steward fake clears it.
@@ -169,7 +169,7 @@ describe.skipIf(!sqliteAvailable)("teardownSession", () => {
     rec.deps.removeSteward = async (input) => {
       rec.calls.push(`steward:${input.sessionId}`);
       present = false; // castra reclaimed the shared worktree
-      return { removed: true, via: "castra" };
+      return { removed: true };
     };
 
     const result = await teardownSession(store, group.spawnId, { force: true }, rec.deps);
@@ -183,7 +183,7 @@ describe.skipIf(!sqliteAvailable)("teardownSession", () => {
   });
 
   it("is idempotent — a second teardown of a torndown session is a no-op", async () => {
-    const store = new SessionStore({ dbPath: ":memory:", importSpawnRecords: false });
+    const store = new SessionStore({ dbPath: ":memory:" });
     const group = seedSpawnGroup(store);
     const rec = recordingDeps(makeHome());
     await teardownSession(store, group.spawnId, { force: true }, rec.deps);
@@ -196,7 +196,7 @@ describe.skipIf(!sqliteAvailable)("teardownSession", () => {
   });
 
   it("continues after a failing step and records a warning", async () => {
-    const store = new SessionStore({ dbPath: ":memory:", importSpawnRecords: false });
+    const store = new SessionStore({ dbPath: ":memory:" });
     const group = seedSpawnGroup(store);
     const rec = recordingDeps(makeHome());
     rec.deps.pathExists = (p) => p === group.worktreePath;
@@ -217,7 +217,7 @@ describe.skipIf(!sqliteAvailable)("teardownSession", () => {
   });
 
   it("marks both the spawn and steward rows torndown", async () => {
-    const store = new SessionStore({ dbPath: ":memory:", importSpawnRecords: false });
+    const store = new SessionStore({ dbPath: ":memory:" });
     const group = seedSpawnGroup(store);
     const rec = recordingDeps(makeHome());
     await teardownSession(store, group.spawnId, { force: true }, rec.deps);
@@ -227,7 +227,7 @@ describe.skipIf(!sqliteAvailable)("teardownSession", () => {
   });
 
   it("resolves the parent spawn when teardown is keyed by the steward id", async () => {
-    const store = new SessionStore({ dbPath: ":memory:", importSpawnRecords: false });
+    const store = new SessionStore({ dbPath: ":memory:" });
     const group = seedSpawnGroup(store);
     const rec = recordingDeps(makeHome());
     rec.deps.pathExists = (p) => p === group.worktreePath;
@@ -241,7 +241,7 @@ describe.skipIf(!sqliteAvailable)("teardownSession", () => {
   });
 
   it("refuses to tear down a running spawn without force, allows it with force", async () => {
-    const store = new SessionStore({ dbPath: ":memory:", importSpawnRecords: false });
+    const store = new SessionStore({ dbPath: ":memory:" });
     store.register({
       id: "live",
       kind: "spawn",
@@ -263,7 +263,7 @@ describe.skipIf(!sqliteAvailable)("teardownSession", () => {
   });
 
   it("throws BroodNotFoundError for an unknown id", async () => {
-    const store = new SessionStore({ dbPath: ":memory:", importSpawnRecords: false });
+    const store = new SessionStore({ dbPath: ":memory:" });
     await expect(
       teardownSession(store, "nope", {}, recordingDeps(makeHome()).deps),
     ).rejects.toBeInstanceOf(BroodNotFoundError);
@@ -272,7 +272,7 @@ describe.skipIf(!sqliteAvailable)("teardownSession", () => {
 
   it("writes a record snapshot + container log to the archive dir", async () => {
     const home = makeHome();
-    const store = new SessionStore({ dbPath: ":memory:", importSpawnRecords: false });
+    const store = new SessionStore({ dbPath: ":memory:" });
     const group = seedSpawnGroup(store);
     const rec = recordingDeps(home);
     await teardownSession(store, group.spawnId, { force: true }, rec.deps);
@@ -286,7 +286,7 @@ describe.skipIf(!sqliteAvailable)("teardownSession", () => {
   });
 
   it("defers worktree + branch when steward removal fails (does not orphan a live checkout)", async () => {
-    const store = new SessionStore({ dbPath: ":memory:", importSpawnRecords: false });
+    const store = new SessionStore({ dbPath: ":memory:" });
     const group = seedSpawnGroup(store);
     const rec = recordingDeps(makeHome());
     rec.deps.pathExists = (p) => p === group.worktreePath;

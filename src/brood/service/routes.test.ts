@@ -16,7 +16,7 @@ async function buildApp(teardown?: (
   app: FastifyInstance;
   store: SessionStore;
 }> {
-  const store = new SessionStore({ dbPath: ":memory:", importSpawnRecords: false });
+  const store = new SessionStore({ dbPath: ":memory:" });
   const app = Fastify();
   await registerRoutes(app, { store, teardown });
   apps.push(app);

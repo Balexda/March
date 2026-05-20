@@ -12,7 +12,7 @@ describe.skipIf(!sqliteAvailable)("buildServer", () => {
   });
 
   it("builds an app wired to the provided store and serves /healthz", async () => {
-    const store = new SessionStore({ dbPath: ":memory:", importSpawnRecords: false });
+    const store = new SessionStore({ dbPath: ":memory:" });
     const { app, store: wired } = await buildServer({ store });
     close = async () => {
       await app.close();
@@ -24,7 +24,7 @@ describe.skipIf(!sqliteAvailable)("buildServer", () => {
   });
 
   it("serves registered sessions end-to-end through the app", async () => {
-    const store = new SessionStore({ dbPath: ":memory:", importSpawnRecords: false });
+    const store = new SessionStore({ dbPath: ":memory:" });
     const { app } = await buildServer({ store });
     close = async () => {
       await app.close();
