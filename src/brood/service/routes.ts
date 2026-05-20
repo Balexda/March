@@ -1,3 +1,4 @@
+import path from "node:path";
 import type { FastifyInstance } from "fastify";
 import { isFinderAvailable, isOnPath } from "../../shared/deps.js";
 import {
@@ -45,7 +46,22 @@ export type RegisterValidation =
   | { readonly ok: true; readonly input: RegisterSessionInput }
   | { readonly ok: false; readonly error: string };
 
-/** Validate and normalize a POST /sessions body. */
+/**
+ * A git branch / refname brood will pass to `git branch -D` / `git worktree`.
+ * Conservative: must start alphanumeric, allow `[A-Za-z0-9._/-]`, and reject
+ * `..` (path traversal in refnames). Rejects whitespace, control chars, and a
+ * leading `-` (which would be parsed as a git flag).
+ */
+function isSafeBranch(branch: string): boolean {
+  return /^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(branch) && !branch.includes("..");
+}
+
+/**
+ * Validate and normalize a POST /sessions body. Only known fields are kept
+ * (unexpected keys are dropped so the API never echoes data the store silently
+ * discards). Paths/branches are validated because teardown acts on them
+ * (`git` + a `.git`-guarded `rmSync`).
+ */
 export function validateRegister(
   body: Partial<RegisterSessionInput>,
 ): RegisterValidation {
@@ -61,8 +77,55 @@ export function validateRegister(
   if (body.status && !SESSION_STATUSES.includes(body.status)) {
     return { ok: false, error: `invalid status "${body.status}".` };
   }
-  return { ok: true, input: { ...body, id, kind } };
+  for (const field of ["repoPath", "worktreePath"] as const) {
+    const value = body[field];
+    if (value !== undefined && (typeof value !== "string" || !path.isAbsolute(value))) {
+      return { ok: false, error: `${field} must be an absolute path.` };
+    }
+  }
+  if (
+    body.branch !== undefined &&
+    (typeof body.branch !== "string" || !isSafeBranch(body.branch))
+  ) {
+    return { ok: false, error: `invalid branch "${String(body.branch)}".` };
+  }
+
+  // Allow-list: copy only known RegisterSessionInput fields.
+  const input: RegisterSessionInput = { id, kind };
+  if (body.status) input.status = body.status;
+  if (body.parentId !== undefined) input.parentId = body.parentId;
+  if (body.repoPath !== undefined) input.repoPath = body.repoPath;
+  if (body.branch !== undefined) input.branch = body.branch;
+  if (body.worktreePath !== undefined) input.worktreePath = body.worktreePath;
+  if (body.containerId !== undefined) input.containerId = body.containerId;
+  if (body.agentDeckSessionId !== undefined) {
+    input.agentDeckSessionId = body.agentDeckSessionId;
+  }
+  if (body.profile !== undefined) input.profile = body.profile;
+  if (body.group !== undefined) input.group = body.group;
+  if (body.backend !== undefined) input.backend = body.backend;
+  if (body.imageId !== undefined) input.imageId = body.imageId;
+  if (body.exitCode !== undefined) input.exitCode = body.exitCode;
+  if (body.failureReason !== undefined) input.failureReason = body.failureReason;
+  return { ok: true, input };
 }
+
+/** Allowed mutable fields on PATCH /sessions/:id. */
+const UPDATE_FIELDS: readonly (keyof UpdateSessionInput)[] = [
+  "status",
+  "containerId",
+  "imageId",
+  "exitCode",
+  "failureReason",
+  "agentDeckSessionId",
+  "worktreePath",
+  "branch",
+  "profile",
+  "group",
+  "startedAt",
+  "stoppedAt",
+  "torndownAt",
+];
 
 function asString(value: unknown): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined;
@@ -94,12 +157,13 @@ export async function registerRoutes(
   app.get("/readyz", async (_request, reply) => {
     const finder = isFinderAvailable();
     const docker = finder && isOnPath("docker");
+    const git = finder && isOnPath("git");
     // Brood needs docker + git locally to reclaim artifacts; steward teardown is
     // delegated to Castra over HTTP (probed best-effort, not gating readiness).
     const castra = await createCastraClientFromEnv().reachable();
-    const ready = docker;
+    const ready = docker && git;
     reply.code(ready ? 200 : 503);
-    return { ready, docker, castra };
+    return { ready, docker, git, castra };
   });
 
   app.post("/sessions", async (request, reply) => {
@@ -143,10 +207,32 @@ export async function registerRoutes(
 
   app.patch("/sessions/:id", async (request, reply) => {
     const { id } = request.params as { id: string };
-    const changes = (request.body ?? {}) as UpdateSessionInput;
-    if (changes.status && !SESSION_STATUSES.includes(changes.status)) {
+    const body = (request.body ?? {}) as Partial<UpdateSessionInput>;
+    if (body.status && !SESSION_STATUSES.includes(body.status)) {
       reply.code(400);
-      return { error: `invalid status "${changes.status}".` };
+      return { error: `invalid status "${body.status}".` };
+    }
+    if (
+      body.worktreePath !== undefined &&
+      (typeof body.worktreePath !== "string" ||
+        !path.isAbsolute(body.worktreePath))
+    ) {
+      reply.code(400);
+      return { error: "worktreePath must be an absolute path." };
+    }
+    if (
+      body.branch !== undefined &&
+      (typeof body.branch !== "string" || !isSafeBranch(body.branch))
+    ) {
+      reply.code(400);
+      return { error: `invalid branch "${String(body.branch)}".` };
+    }
+    // Whitelist: only known mutable fields reach the store.
+    const changes: UpdateSessionInput = {};
+    for (const field of UPDATE_FIELDS) {
+      if (body[field] !== undefined) {
+        (changes as Record<string, unknown>)[field] = body[field];
+      }
     }
     const record = store.update(id, changes);
     if (!record) {

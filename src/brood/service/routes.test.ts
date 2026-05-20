@@ -43,6 +43,7 @@ describe.skipIf(!sqliteAvailable)("brood routes", () => {
     expect([200, 503]).toContain(res.statusCode);
     const body = res.json();
     expect(body).toHaveProperty("docker");
+    expect(body).toHaveProperty("git");
     expect(body).toHaveProperty("castra");
   });
 
@@ -77,6 +78,52 @@ describe.skipIf(!sqliteAvailable)("brood routes", () => {
       payload: { id: "x", kind: "wrong" },
     });
     expect(badKind.statusCode).toBe(400);
+  });
+
+  it("POST /sessions drops unknown fields and rejects bad paths/branch", async () => {
+    const { app } = await buildApp();
+    const ok = await app.inject({
+      method: "POST",
+      url: "/sessions",
+      payload: { id: "s1", kind: "spawn", bogus: "x" },
+    });
+    expect(ok.statusCode).toBe(201);
+    expect(ok.json()).not.toHaveProperty("bogus");
+    expect(
+      (
+        await app.inject({
+          method: "POST",
+          url: "/sessions",
+          payload: { id: "s2", kind: "spawn", repoPath: "rel/path" },
+        })
+      ).statusCode,
+    ).toBe(400);
+    expect(
+      (
+        await app.inject({
+          method: "POST",
+          url: "/sessions",
+          payload: { id: "s3", kind: "spawn", branch: "../evil" },
+        })
+      ).statusCode,
+    ).toBe(400);
+  });
+
+  it("PATCH /sessions/:id ignores unknown keys", async () => {
+    const { app } = await buildApp();
+    await app.inject({
+      method: "POST",
+      url: "/sessions",
+      payload: { id: "s1", kind: "spawn" },
+    });
+    const patched = await app.inject({
+      method: "PATCH",
+      url: "/sessions/s1",
+      payload: { containerId: "c1", bogus: "x" },
+    });
+    expect(patched.statusCode).toBe(200);
+    expect(patched.json()).not.toHaveProperty("bogus");
+    expect(patched.json().containerId).toBe("c1");
   });
 
   it("register is idempotent (re-POST upserts, still 201)", async () => {
