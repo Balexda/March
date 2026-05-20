@@ -73,7 +73,18 @@ When entering Phase 1 from a `.features.md`, carry forward:
 ## Phase 1: Intake
 
 1. Parse the input:
-   - **RFC path**: Read and extract goals, constraints, and open questions.
+   - **RFC path**: Read and extract goals, constraints, and any
+     unresolved `SD-NNN` rows from the RFC's Specification-Debt table —
+     the current RFC contract has no separate "Open Questions" section;
+     unresolved uncertainty lives in the debt table. **Legacy
+     fallback**: pre-migration RFCs (drafted before the Open Questions
+     section was retired) may still contain a `## Open Questions`
+     heading. If that heading is present, also read its bullets and
+     treat them as additional unresolved-uncertainty intake alongside
+     the `SD-NNN` rows — `smithy.mark` can be invoked directly on an
+     RFC path without first running ignite's harmonization step that
+     would translate those bullets into debt rows, so dropping them
+     here would silently lose constraints.
    - **Feature description**: Treat as the starting context.
    - **Feature map** (from Routing): Use the selected feature's Title,
      Description, User-Facing Value, and Scope Boundaries as the starting
@@ -370,7 +381,7 @@ Guidelines for the spec:
 - Do NOT include implementation phases, milestones, or task breakdowns.
 - Do NOT include specific file paths, function names, or implementation details.
 - DO trace back to RFC sections when input is an RFC.
-- Populate the `## Specification Debt` section from clarify's returned `debt_items`. Assign sequential SD-NNN identifiers starting at SD-001. Carry the description, source_category, impact, confidence, and status fields directly from clarify's return. Leave Resolution as `—` for all `open` items.
+- Populate the `## Specification Debt` section from clarify's returned `debt_items`. Assign sequential SD-NNN identifiers starting at SD-001. Carry the description, source_category, impact, confidence, and status fields directly from clarify's return — never reword a description into a directive, and never add a row that did not come from `debt_items`. The kind gate is enforced by `smithy-clarify` Step 3; do not bypass it here by manually appending requirement, acceptance-test, dependency-coordination, deferral, or post-hoc resolution rows. Leave Resolution as `—` for all `open` items.
 - The `## Dependency Order` section lists all user stories in recommended
   implementation sequence as a 4-column table using `US<N>` IDs (e.g., `US1`,
   `US2`). Order rows by dependency graph, not by priority — stories with no
@@ -704,7 +715,13 @@ was recorded.`)
   severity was Critical.
 - **Specification Debt**: copy each item from the clarify return's
   `debt_items` array, including its Impact level. The leading count MUST
-  match the number of bullets rendered.
+  match the number of bullets rendered. Each bullet's description must
+  read as a steering need — an open question or "unresolved choice
+  between X and Y" — and must come straight from `debt_items` without
+  rewording. Do not synthesize bullets here from requirements,
+  acceptance tests, dependency/coordination notes, or deferred-work
+  notices; if clarify's kind gate (see `smithy-clarify` Step 3) dropped
+  those, they stay dropped.
 - **PR**: the URL captured from the PR creation step (see the
   `pr-create-tool-choice` snippet for which tool ran).
 
@@ -942,7 +959,13 @@ was recorded.`)
   severity was Critical.
 - **Specification Debt**: copy each item from the clarify return's
   `debt_items` array, including its Impact level. The leading count MUST
-  match the number of bullets rendered.
+  match the number of bullets rendered. Each bullet's description must
+  read as a steering need — an open question or "unresolved choice
+  between X and Y" — and must come straight from `debt_items` without
+  rewording. Do not synthesize bullets here from requirements,
+  acceptance tests, dependency/coordination notes, or deferred-work
+  notices; if clarify's kind gate (see `smithy-clarify` Step 3) dropped
+  those, they stay dropped.
 - **PR**: the URL captured from the PR creation step (see the
   `pr-create-tool-choice` snippet for which tool ran).
 

@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "smithyVersion": "0.4.7",
+  "smithyVersion": "0.4.8",
   "deployLocation": "repo",
   "agents": [
     "claude",
@@ -42,6 +42,7 @@
       ".claude/skills/smithy.gh-issue/scripts/search-issues.sh",
       ".claude/skills/smithy.helper-docker/SKILL.md",
       ".claude/skills/smithy.pr-review/SKILL.md",
+      ".claude/skills/smithy.pr-review/scripts/add-comment.sh",
       ".claude/skills/smithy.pr-review/scripts/find-pr.sh",
       ".claude/skills/smithy.pr-review/scripts/get-comments.sh",
       ".claude/skills/smithy.pr-review/scripts/reply-comment.sh",
@@ -70,6 +71,7 @@
       ".agents/skills/smithy.gh-issue/scripts/search-issues.sh",
       ".agents/skills/smithy.helper-docker/SKILL.md",
       ".agents/skills/smithy.pr-review/SKILL.md",
+      ".agents/skills/smithy.pr-review/scripts/add-comment.sh",
       ".agents/skills/smithy.pr-review/scripts/find-pr.sh",
       ".agents/skills/smithy.pr-review/scripts/get-comments.sh",
       ".agents/skills/smithy.pr-review/scripts/reply-comment.sh",

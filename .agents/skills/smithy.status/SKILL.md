@@ -98,39 +98,79 @@ The CLI's text renderer is authoritative.
 
 ## Question mode
 
-1. Run exactly one shell command:
+1. Run exactly one shell command. For most questions, prefer the
+   pending shorthand — it drops every `done` record from the payload
+   so you only pay for artifacts that still have work to dispatch:
 
    ```bash
-   smithy status --format json
+   smithy status --format json --pending
    ```
+
+   `--pending` is exactly equivalent to `--status in-progress,not-started`
+   (the `--status` flag now accepts a comma-separated set, e.g.
+   `--status in-progress,not-started,unknown` if you also want to see
+   parse errors). Drop `--pending` (i.e., run `smithy status --format
+   json`) only when the question actually requires done artifacts —
+   "how many tasks are done?", "show me everything", "is X complete?".
 
 2. Parse the JSON. The payload follows the `StatusJsonPayload` contract from
    `src/commands/status.ts`:
    - `summary` — per-type counts (`rfc`, `features`, `spec`, `tasks`) of
      `done` / `in-progress` / `not-started` / `unknown`, plus
-     `orphan_count`, `broken_link_count`, `parse_error_count`.
-   - `records` — every `ArtifactRecord` discovered, with `type`, `path`,
+     `orphan_count`, `broken_link_count`, `parse_error_count`. **The
+     summary is always aggregate over the full scan, regardless of
+     `--status` / `--pending` / `--type` (SD-010)** — so `done` counts
+     stay accurate even under `--pending`, and you can answer counting
+     questions like "how many tasks are done?" from the pending payload
+     directly without dropping the filter.
+   - `records` — the `ArtifactRecord` set surviving the filter (with
+     ancestors retained for context). Each record carries `type`, `path`,
      `title`, `status`, `parent_path`, optional `completed` / `total`
      (slice counts on `tasks` records), and `next_action`. The
      `next_action.command` and `next_action.arguments` fields are the
      authoritative "what to do next" hint for that artifact, and
-     `next_action.suppressed_by_ancestor` (when present) marks a hint that
-     was suppressed in the rendered tree because an ancestor is itself
-     not-started.
-   - `tree` — hierarchical view (`roots: TreeNode[]`).
-   - `graph` — cross-artifact dependency graph with `nodes`, `layers`
-     (topological), `cycles`, and `dangling_refs`.
+     `next_action.suppressed_by_ancestor` (when present) marks a hint
+     that was suppressed in the rendered tree because an ancestor is
+     itself not-started. Under `--pending`, the `records` list excludes
+     `done` artifacts but keeps their `done` ancestors as headers when a
+     pending descendant lives beneath them.
+   - There is no `tree` field on the wire. Every `ArtifactRecord` carries
+     `parent_path`, so the hierarchical view can be reconstructed locally
+     without paying for the duplication in the payload.
+   - `graph` — cross-artifact dependency graph. The wire format mirrors
+     the CLI `--all` flag via a top-level `mode` discriminator:
+     - `mode: "pending-only"` (default, no `--all`): `nodes` is keyed
+       only by FQ IDs of `done`-free rows; every `layers[i].node_ids`
+       lists only the pending FQ IDs in that layer, and
+       `layers[i].complete_count` reports how many `done` nodes the
+       layer had. Layers that were entirely `done` are omitted from
+       `layers[]` (their work is fully accounted for via
+       `summary.counts`).
+     - `mode: "all"` (`--all`): `nodes` is the full graph; each
+       `layers[i].node_ids` is complete, with `pending_node_indexes`
+       and `complete_node_indexes` partitioning it by status.
+     `cycles` and `dangling_refs` are mode-independent.
+   - `--graph` is a **no-op** in JSON mode (the payload is always
+     graph-shaped). To change what is on the wire, use `--all`.
 
 3. Answer the user's question in **one to three sentences**, or a short
    bulleted list when enumerating multiple items. Quote concrete IDs, paths,
    counts, titles, and `next_action` commands directly from the JSON.
 
    Examples:
-   - **"what's next?"** → cite the first actionable record from the lowest
-     non-empty `graph.layers[]` (or scan `records` in order, picking the
-     first whose `next_action` is non-null and `next_action.suppressed_by_ancestor`
-     is not `true`). Return its `next_action.command` plus
+   - **"what's next?"** → the canonical source is `records` plus
+     `next_action`: scan `records` in order and return the first whose
+     `next_action` is non-null and whose `next_action.suppressed_by_ancestor`
+     is not `true`. Quote its `next_action.command` plus
      `next_action.arguments`, along with the artifact's title and path.
+     `graph.layers[]` is a useful *candidate* list when the user is
+     thinking in dependency-graph terms, but it is **not** the canonical
+     answer on its own: fully-done leading layers are omitted in
+     `pending-only` mode (so `layers[0]` need not correspond to true
+     layer 0 — read `layers[0].layer` to know which layer it actually
+     is), and graph layering does not encode
+     `next_action.suppressed_by_ancestor`, so a graph-first pick may
+     still need filtering against the matching `records` entry.
    - **"how many slices for this tasks file?"** → find the matching `tasks`
      record from `records` and quote its `total` (and, when relevant, its
      `completed`) field. The CLI emits one `ArtifactRecord` per file — there
@@ -139,19 +179,30 @@ The CLI's text renderer is authoritative.
    - **"which user stories are left for this spec?"** → list `spec`-type
      records under that spec folder whose `status` is not `done`, with
      their paths.
-   - **"what's blocked?"** → walk `graph.nodes` and, for each node whose
-     owning record is not yet `done`, list it together with the IDs in
-     `node.row.depends_on` whose corresponding nodes still have a non-`done`
-     `status`. Those `depends_on` IDs are the actual blockers. (The
-     `next_action.suppressed_by_ancestor` flag only marks suppression by a
-     not-started ancestor in the rendered tree — it is not a
+   - **"what's blocked?"** → walk `graph.nodes` and, for each node, list
+     it together with the IDs in `node.row.depends_on` whose corresponding
+     entries are also present in `graph.nodes`. In `pending-only` mode an
+     ID that appears in `depends_on` but is *missing* from `graph.nodes`
+     is already `done` (the serializer drops only done nodes from
+     `nodes`), so it does not block; in `all` mode you can confirm via
+     each referenced node's `status` field directly. (The
+     `next_action.suppressed_by_ancestor` flag only marks suppression by
+     a not-started ancestor in the rendered tree — it is not a
      dependency-blocked signal.)
    - **"how many tasks are done?"** → quote `summary.counts.tasks.done`
      directly.
+   - **"show me everything, including completed work"** → rerun
+     without `--pending` and with `--all`. `--pending` drops `done`
+     records from the wire entirely; `--all` keeps `done` graph nodes
+     visible with their partition indexes. Together they restore the
+     full payload — every record, every node — for the rare question
+     that genuinely needs it.
 
 4. **Do not invent data.** If the JSON does not contain enough information
    to answer the question, say so plainly and (if helpful) suggest the CLI
-   flag — `--graph`, `--type`, `--all`, `--root` — that would surface it.
+   flag — `--type`, `--all`, `--status`, `--pending`, `--root` — that
+   would surface it. `--graph` is a no-op in JSON mode and never needs
+   to be suggested.
 
 5. **Do not chain extra invocations.** Issue exactly one `smithy status`
    call per user request — no follow-up runs with different flags. If a

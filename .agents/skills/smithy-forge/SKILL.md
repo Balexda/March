@@ -272,7 +272,15 @@ behavior).
 ### 5. Mark the task complete
 
 Update the task checkbox from `- [ ]` to `- [x]` in the tasks or strike file.
-Include this edit in the implementation commit.
+**Include this edit in the implementation commit — not a follow-up commit.**
+
+The checkbox flip is **mandatory**, not bookkeeping. The slice's parent
+orchestrator (`smithy.forge`) gates PR creation on every task in the slice
+reading `- [x]` at HEAD; a merged PR that leaves rows unchecked wedges the
+downstream dispatch loop (`smithy status` keeps the slice in progress while
+the merge-archive blocks re-dispatch). If you cannot legitimately mark the
+task complete (work is blocked, requirements unclear), do not fake the flip
+— stop and report the blocker per the constraints below.
 
 ---
 
@@ -349,10 +357,15 @@ it never takes the action itself.
 | Severity | Confidence | Parent Action |
 |----------|------------|---------------|
 | Critical | High | Apply proposed fix, note in PR |
-| Critical | Low | Record as specification debt, flag in PR for reviewer |
+| Critical | Low | Record as specification debt **if it passes the kind gate** (see `smithy-clarify` Step 3b for the canonical definition and routing table), otherwise route via the gate's routing table and flag in PR for reviewer |
 | Important | High | Apply proposed fix |
-| Important | Low | Record as specification debt |
+| Important | Low | Record as specification debt **if it passes the kind gate**, otherwise route via the gate's routing table (`smithy-clarify` Step 3b) to the artifact's proper section (FR, acceptance scenarios, governance, out-of-scope) |
 | Minor | Any | Note in PR only |
+
+The canonical kind-gate criteria and the leak-kind → proper-home
+routing table live in `smithy-clarify` Step 3b. This snippet
+deliberately does not restate them; consult that section directly
+when triaging a Critical-Low or Important-Low finding.
 
 ### Read-only invariant
 
@@ -378,6 +391,42 @@ Scan the files changed between BASE_SHA and HEAD for documentation staleness:
 For each stale doc found:
 - If the fix is obvious (e.g., update a parameter name in JSDoc), apply it and commit as `maid: <description>`.
 - If the fix requires judgment (e.g., rewriting a README section), note it for the PR body under "Documentation Notes".
+
+---
+
+## Slice Completion Check
+
+Before opening the PR, **re-read the target slice's task list** from the
+`.tasks.md` or `.strike.md` file at HEAD and verify that **every task
+checkbox in the target slice is now `- [x]`**.
+
+```bash
+# Inspect the target slice's task list at the current HEAD
+git show HEAD:<tasks-file-path>
+```
+
+Forge owns the checkbox flip. The implementer must flip each task's
+checkbox in the same commit that lands the implementation
+
+(see TDD protocol step 5). This re-read is the orchestrator's gate:
+if any `- [ ]` rows remain in the target slice, the slice is **not**
+ready to ship.
+
+**STOP gate.** If any task in the target slice is still `- [ ]`:
+
+1. Identify the unchecked task(s) and re-examine whether the implementation
+   actually covered them.
+2. If the work is genuinely done but the checkbox was never flipped, edit the
+   file to flip the box and commit as
+   `forge: mark slice <N> task <M> complete`.
+3. If the work is **not** done, do **not** flip the box and do **not** open
+   the PR. Report the gap to the user and either dispatch the missing task
+   or escalate. A merged PR with unchecked rows wedges the downstream
+   dispatch loop (`smithy status` reports the slice as still in progress
+   while the merge-archive blocks re-dispatch) — never ship past this gate.
+
+Only after every task in the target slice reads `- [x]` at HEAD may you
+proceed to the Pull Request step.
 
 ---
 
@@ -454,6 +503,11 @@ This traceability lets reviewers navigate from PR → slice → spec to understa
 - **Slice number out of range**: Stop and list available slices with their goals.
 - **Branch already exists**: Ask the user whether to continue on the existing branch or abort.
 - **Slice already forged (PR exists)**: Warn the user and confirm before proceeding.
+- **Unchecked tasks at PR time**: If the Slice Completion Check finds any
+  `- [ ]` rows in the target slice at HEAD, do **not** open the PR. Either
+  flip the checkbox in a `forge: ...` commit (if the work is actually done)
+  or stop and report the missing work to the user. Shipping a merged PR
+  with unchecked rows wedges the downstream dispatch loop.
 - **Test failure mid-slice**: Stop, report the failure, and do not proceed to the next task.
 - **`.strike.md` with all tasks already complete**: Warn and confirm before proceeding.
 - **Cross-story dependency not met**: If a required story/slice hasn't been

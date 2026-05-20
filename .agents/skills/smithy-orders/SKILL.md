@@ -202,6 +202,31 @@ Parse the RFC to extract:
 Parse the feature map to extract:
 - **Features** — each feature entry (typically H3 or list items under a
   Features/Feature List section) becomes a ticket.
+- **Feature map metadata** — read the feature map's header metadata rather
+  than guessing paths:
+  - **Source RFC** — from the `**Source RFC**` field. Resolve the path as
+    follows:
+    1. If the value is an absolute path or starts with the repo root, try it
+       as-is.
+    2. Otherwise treat it as a path **relative to the `.features.md` file's
+       own directory** (not the current working directory). For example, if the
+       feature map is at `evals/fixture/rfcs/mark-eval/01-core.features.md`
+       and the field value is `mark-eval.rfc.md`, resolve to
+       `evals/fixture/rfcs/mark-eval/mark-eval.rfc.md`.
+    If the field is absent or the resolved RFC path cannot be located on disk,
+    keep parsing features but set the downstream `{{features_path}}` value to
+    empty string per the data-model validation rule.
+  - **Milestone number** — from the `**Milestone**: <N> — <Title>` field. Use
+    the number `<N>` as the stable lookup key; do not match by milestone title
+    because names can collide across RFCs.
+- **Feature map path for interpolation** — when the Source RFC can be read and
+  the milestone number is known, read the source RFC's `## Dependency Order`
+  table, find the row whose ID is `M<N>` for the feature map's milestone
+  number, and capture that row's `Artifact` column value as
+  `{{features_path}}` for Phase 5. If the `## Dependency Order` table is
+  missing, the matching milestone row is absent, the `Artifact` cell is absent,
+  or the cell is `—`, capture empty string instead of leaving a literal
+  `{{features_path}}` token in the rendered body.
 
 ### For `.spec.md`
 
@@ -286,6 +311,83 @@ below is the built-in fallback used when `<manifestDir>/templates/orders/rfc.md`
 is absent (US4); when present, US2's template-resolution path wins and
 this heredoc is bypassed.
 
+**Template-driven rendering (preferred path).** Before falling back to the
+heredoc below, attempt to render the body from the user-overridable rfc
+template provisioned by `smithy init` under
+`<manifestDir>/templates/orders/rfc.md`. `<manifestDir>` is the value
+captured at the end of Phase 1's "Manifest Discovery and `<manifestDir>`
+Resolution" sub-section — do not re-probe the filesystem; reuse the
+already-resolved value. Only the per-milestone child issue is rendered
+through the template; the RFC parent tracking issue above keeps its
+hardcoded heredoc and is intentionally out of scope for template
+overrides.
+
+For **each** milestone extracted in Phase 3, perform the following steps:
+
+1. **Build the rfc-type interpolation context.** Compute a value for every
+   variable named in the data-model's rfc row. Sources:
+
+   - `` ← the milestone's title (the same `<milestone-title>` used
+     in the `[RFC][Milestone] <milestone-title>` issue title).
+   - `` ← the integer `N` from the
+     `### Milestone N: <Title>` heading (no leading zeros — e.g., `3`).
+   - `` ← the `<Title>` portion of
+     `### Milestone N: <Title>`.
+   - `` ← the milestone's `**Description**` body
+     parsed in Phase 3.
+   - `` ← the milestone's `**Success
+     Criteria**` body parsed in Phase 3. When the milestone had no
+     `**Success Criteria**` block, use empty string per the data-model
+     validation rule.
+   - `` ← the artifact path argument that `smithy.orders` was
+     invoked with (the `.rfc.md` file).
+   - `` ← the `#<n>` reference for the RFC parent tracking
+     issue (the `[RFC] <rfc-title>` epic) created earlier in this same
+     orders run. If for some reason that parent was not created, use
+     empty string.
+   - `` ← the literal string `smithy.render <rfc_path> <milestone_number>`
+     per the data-model next-step mapping, **with `<rfc_path>` and
+     `<milestone_number>` already substituted using the values captured
+     above** (e.g., `smithy.render docs/rfcs/2026-03-21-001-foo.rfc.md 3`).
+     Compose ``'s value first, before running the global
+     substitution pass on the template body, so the rendered body's
+     `` becomes the fully-resolved command rather than a
+     command still containing `` / ``.
+
+2. **Read the template file.** Using the `Read` tool, attempt to read
+   `<manifestDir>/templates/orders/rfc.md`.
+
+3. **If the read succeeds** (the template file exists): perform a
+   **global** substitution of every variable in the context built in
+   step 1 across the entire template body. Every occurrence of every
+   known placeholder must be replaced — not just the first. Because
+   ``'s value was pre-composed in step 1 with `<rfc_path>`
+   and `<milestone_number>` already substituted, the rendered
+   `` introduces no new placeholders into the output —
+   this single pass only replaces tokens that were already present in
+   the template body, including any user-customised parenthetical aside
+   that references `` or `` directly.
+   Unknown `` names (any token not in the rfc-row context
+   above) are **left as literal text** per the data-model validation
+   rule — do not error and do not delete them.
+
+   Write the rendered body to `/tmp/orders_body.md` and then call:
+
+   ```bash
+   ./.agents/skills/smithy.gh-issue/scripts/create-issue.sh "[RFC][Milestone] <milestone-title>" /tmp/orders_body.md
+   ```
+
+   Skip the heredoc fallthrough below for this milestone.
+
+4. **If the read fails** because the file does not exist (i.e.,
+   `<manifestDir>/templates/orders/rfc.md` is absent on disk): fall
+   through to the heredoc body below so `orders` still produces an
+   issue. Do **not** treat any other read failure (permission denied,
+   I/O error) as "absent" — surface those errors and stop.
+
+**Fallthrough heredoc body.** Used only when the template file at
+`<manifestDir>/templates/orders/rfc.md` is absent:
+
 ```bash
 cat > /tmp/orders_body.md << 'BODY'
 # {{title}}
@@ -327,10 +429,72 @@ path. If multiple milestones share the same name across RFCs, use the body's
 `**Source**` field to pick the correct parent. If found, reference it in the
 child ticket body.
 
-**Children**: one issue per feature. The body below is the built-in
-fallback used when `<manifestDir>/templates/orders/features.md` is
-absent (US4); when present, US2's template-resolution path wins and
-this heredoc is bypassed.
+**Children**: one issue per feature. Template-driven rendering for
+the features type uses `<manifestDir>/templates/orders/features.md` when the
+file exists; otherwise it falls through to the heredoc below so `orders` still
+produces an issue.
+
+**Template-driven rendering (preferred path).** Before falling back to the
+heredoc below, attempt to render the body from the user-overridable features
+template provisioned by `smithy init` under
+`<manifestDir>/templates/orders/features.md`. `<manifestDir>` is the value
+captured at the end of Phase 1's "Manifest Discovery and `<manifestDir>`
+Resolution" sub-section — do not re-probe the filesystem; reuse the
+already-resolved value. Preserve the parent milestone-linkage search logic
+above; the resulting `#<n>` reference is part of the interpolation context.
+
+For **each** feature extracted in Phase 3, perform the following steps:
+
+1. **Build the features-type interpolation context.** Compute a value for every
+   variable named in the data-model's features row. Sources:
+
+   - `` ← the feature's title (the same `<feature-title>` used in the
+     `[Feature] <feature-title>` issue title).
+   - `` ← the feature description body parsed in
+     Phase 3.
+   - `` ← the milestone number parsed from the feature
+     map's `**Milestone**` metadata in Phase 3.
+   - `` ← the `#<n>` reference for the matched
+     `[RFC][Milestone] <milestone-title>` issue. If no parent issue was found,
+     use empty string.
+   - `` ← the value captured in Phase 3 from the source RFC's
+     `## Dependency Order` table `Artifact` column for this milestone. When
+     Phase 3 could not locate the source RFC, could not find the matching
+     milestone row by number, or found an empty/`—` artifact cell, use empty
+     string.
+   - `` ← the literal instruction `smithy.mark` on this feature,
+     per the data-model next-step mapping. Include enough context for the
+     operator to run mark on the specific feature, e.g.
+     `smithy.mark <features_path> <feature_number>` when that source path and
+     feature number are known; otherwise use `smithy.mark` on this feature.
+
+2. **Read the template file.** Using the `Read` tool, attempt to read
+   `<manifestDir>/templates/orders/features.md`.
+
+3. **If the read succeeds** (the template file exists): perform a
+   **global** substitution of every variable in the context built in
+   step 1 across the entire template body. Every occurrence of every
+   known placeholder must be replaced — not just the first. Unknown
+   `` names (any token not in the features-row context above)
+   are **left as literal text** per the data-model validation rule — do
+   not error and do not delete them.
+
+   Write the rendered body to `/tmp/orders_body.md` and then call:
+
+   ```bash
+   ./.agents/skills/smithy.gh-issue/scripts/create-issue.sh "[Feature] <feature-title>" /tmp/orders_body.md
+   ```
+
+   Skip the heredoc fallthrough below for this feature.
+
+4. **If the read fails** because the file does not exist (i.e.,
+   `<manifestDir>/templates/orders/features.md` is absent on disk): fall
+   through to the heredoc body below so `orders` still produces an
+   issue. Do **not** treat any other read failure (permission denied,
+   I/O error) as "absent" — surface those errors and stop.
+
+**Fallthrough heredoc body.** Used only when the template file at
+`<manifestDir>/templates/orders/features.md` is absent:
 
 ```bash
 cat > /tmp/orders_body.md << 'BODY'
@@ -481,6 +645,71 @@ reference it in the child ticket body.
 fallback used when `<manifestDir>/templates/orders/tasks.md` is absent
 (US4); when present, US2's template-resolution path wins and this
 heredoc is bypassed.
+
+**Template-driven rendering (preferred path).** Before falling back to the
+heredoc below, attempt to render the body from the user-overridable tasks
+template provisioned by `smithy init` under
+`<manifestDir>/templates/orders/tasks.md`. `<manifestDir>` is the value
+captured at the end of Phase 1's "Manifest Discovery and `<manifestDir>`
+Resolution" sub-section — do not re-probe the filesystem; reuse the
+already-resolved value.
+
+For **each** slice extracted in Phase 3, perform the following steps:
+
+1. **Build the tasks-type interpolation context.** Compute a value for every
+   variable named in the data-model's tasks row. Sources:
+
+   - `` ← the slice's title (the same `<slice-title>` used in the
+     `[Slice] <slice-title>` issue title).
+   - `` ← the integer `N` from the `## Slice N: <Title>`
+     heading (no leading zeros — e.g., `2`).
+   - `` ← the slice's goal statement parsed in Phase 3.
+   - `` ← the slice's task checklist parsed in Phase 3. This
+     is a multi-line markdown value: it includes the `- [ ]` bullets and
+     any nested prose under each bullet. Preserve the embedded newlines and
+     list structure verbatim during substitution — do not flatten, trim, or
+     collapse the value to a single line.
+   - `` ← the artifact path argument that `smithy.orders` was
+     invoked with (the `.tasks.md` file).
+   - `` ← the `#<n>` reference for the `[Story] <story-title>`
+     issue resolved by the parent-linking `search-issues.sh` call earlier in
+     this `.tasks.md` mapping. If no parent was found, use empty string per
+     the data-model validation rule.
+   - `` ← the literal string `smithy.forge on this slice` per
+     the data-model next-step mapping (note: this is an English phrase, not
+     a CLI-shaped command with placeholder slots, so there are no nested
+     `` references to resolve within it).
+
+2. **Read the template file.** Using the `Read` tool, attempt to read
+   `<manifestDir>/templates/orders/tasks.md`.
+
+3. **If the read succeeds** (the template file exists): perform a
+   **global** substitution of every variable in the context built in
+   step 1 across the entire template body. Every occurrence of every
+   known placeholder must be replaced — not just the first. When the
+   `` placeholder is replaced, its multi-line markdown
+   value (the parsed `- [ ]` task checklist) must be inserted with its
+   newlines and list structure preserved so the rendered body still
+   renders as a list. Unknown `` names (any token not in
+   the tasks-row context above) are **left as literal text** per the
+   data-model validation rule — do not error and do not delete them.
+
+   Write the rendered body to `/tmp/orders_body.md` and then call:
+
+   ```bash
+   ./.agents/skills/smithy.gh-issue/scripts/create-issue.sh "[Slice] <slice-title>" /tmp/orders_body.md
+   ```
+
+   Skip the heredoc fallthrough below for this slice.
+
+4. **If the read fails** because the file does not exist (i.e.,
+   `<manifestDir>/templates/orders/tasks.md` is absent on disk): fall
+   through to the heredoc body below so `orders` still produces an
+   issue. Do **not** treat any other read failure (permission denied,
+   I/O error) as "absent" — surface those errors and stop.
+
+**Fallthrough heredoc body.** Used only when the template file at
+`<manifestDir>/templates/orders/tasks.md` is absent:
 
 ```bash
 cat > /tmp/orders_body.md << 'BODY'

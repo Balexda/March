@@ -131,7 +131,15 @@ behavior).
 ### 5. Mark the task complete
 
 Update the task checkbox from `- [ ]` to `- [x]` in the tasks or strike file.
-Include this edit in the implementation commit.
+**Include this edit in the implementation commit — not a follow-up commit.**
+
+The checkbox flip is **mandatory**, not bookkeeping. The slice's parent
+orchestrator (`smithy.forge`) gates PR creation on every task in the slice
+reading `- [x]` at HEAD; a merged PR that leaves rows unchecked wedges the
+downstream dispatch loop (`smithy status` keeps the slice in progress while
+the merge-archive blocks re-dispatch). If you cannot legitimately mark the
+task complete (work is blocked, requirements unclear), do not fake the flip
+— stop and report the blocker per the constraints below.
 
 ---
 
@@ -161,6 +169,15 @@ When done, return a structured summary to the parent agent:
 
 1. **Status** — `success`, `blocked`, or `failure`
 2. **Commit SHA** — the SHA of the implementation commit (if success)
-3. **Files changed** — list of files created or modified
+3. **Files changed** — list of files created or modified (must include the
+   tasks/strike file when `Status` is `success`, because the implementation
+   commit flips this task's checkbox per TDD protocol step 5)
 4. **Blockers** — description of any issues that prevented completion (if blocked/failure)
 5. **Notes** — any observations for the orchestrator (discovered scope, risks, etc.)
+
+A `success` response **must** correspond to a single commit that contains
+both the implementation and the `- [ ]` → `- [x]` flip for this task in the
+tasks/strike file. If the work is genuinely incomplete, return `blocked`
+with the gap described — never return `success` with the checkbox still
+unflipped, since the parent forge orchestrator gates PR creation on every
+task in the slice reading `- [x]` at HEAD.

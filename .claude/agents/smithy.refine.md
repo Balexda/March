@@ -139,10 +139,31 @@ parent agent applies them to disk during its Phase 0 refinement step.
 
 ### Specification Debt (cannot confidently resolve)
 
-Everything else (**Confidence is Medium or Low**) becomes a debt item.
+Apply the **same kind gate** as `smithy-clarify` Step 3b before
+routing a finding to debt: a finding qualifies as debt only if it
+names an unresolved choice between two or more meaningfully different
+paths and contains no prescription ("Implementers verify…",
+"Mitigation: pin both…", "Resolution: X owns A and Y owns B"). See
+`smithy-clarify` Step 3b for the full kind-gate rubric and routing
+table; do not duplicate it here.
+
+Findings that are really requirements, acceptance tests, dependency/
+coordination notes, deferral records, or post-hoc resolution notes
+are **not dropped** — they still carry information the artifact
+should reflect. Route them as `refinements` rather than `debt_items`,
+with the `Target` pointed at the proper home named in `smithy-clarify`
+Step 3b's routing table (`### Functional Requirements`, `### Acceptance
+Scenarios`, `## Out of Scope`, the RFC's Cross-Cutting Governance
+matrix, etc.). The parent command applies the refinement to that
+section verbatim; the debt table stays clean.
+
+Everything that passes the kind gate where **Confidence is Medium or
+Low** becomes a debt item.
 
 For each, record a structured `DebtItem` entry containing:
-- **Description** — the finding statement plus why confidence is low
+- **Description** — the finding stated as an open question or
+  "unresolved choice between X and Y", plus why confidence is low.
+  Never a directive.
 - **Source Category** — the audit category that produced the finding
 - **Impact** — Critical / High / Medium / Low (from Step 2)
 - **Confidence** — Medium or Low (from Step 2)

@@ -82,27 +82,67 @@ For each candidate, produce all four elements:
 
 ## Step 3: Triage
 
-Split candidates into two groups:
+Sort candidates by confidence first, then apply the **kind gate** only
+to candidates destined for `debt_items`. The kind gate decides whether
+a Medium/Low-confidence finding is a true steering need or a leak of
+some other kind that belongs in a different section of the artifact —
+it does **not** filter the assumption stream, which exists to carry
+the model's High-confidence inferences forward.
 
-### Assumptions
+### Step 3a: Confidence sort
 
-Items where:
-- Confidence is **High**
+- **High confidence** → route to `assumptions`. No kind-gate check.
+  If Impact is **Critical**, annotate with `[Critical Assumption]`.
+- **Medium or Low confidence** → continue to Step 3b.
 
-This includes any Impact level. If Impact is **Critical** and Confidence is
-**High**, the item becomes an assumption with a `[Critical Assumption]`
-annotation.
+These are items you are confident about (the assumption stream) or
+items where you are not (continue triaging below). The parent agent
+will proceed with the assumption stream as recorded assumptions.
 
-These are items you are confident about. The parent agent will proceed with
-them as recorded assumptions.
+### Step 3b: Kind gate (applied only to Medium/Low candidates)
 
-### Specification Debt
+A Medium/Low candidate qualifies as a `debt_items` row only if **all
+three** are true:
 
-Everything else (Confidence is **Medium or Low**) becomes a debt item:
+1. **Open question**: the description names an unresolved choice the
+   codebase, conventions, and prior art cannot settle.
+2. **Named alternatives**: two or more meaningfully different paths
+   exist, and picking between them changes what the artifact specifies.
+3. **No prescription**: the description does not also tell the
+   implementer what to do, nor what to verify, nor when to defer it.
 
-These are items where the recommended answer is uncertain enough that proceeding
-without flagging the gap would risk producing an unreliable artifact. Each debt
-item is recorded with structured metadata for downstream resolution.
+Candidates that **pass** the gate go to `debt_items`. Candidates that
+**fail** are not silently discarded — they still represent information
+the model wants to surface. Route them to `assumptions` with a
+`[Critical Assumption]` annotation regardless of Impact, so the parent
+command can lift them into the artifact's proper section
+(`### Functional Requirements`, `### Acceptance Scenarios`,
+`## Out of Scope`, the RFC's Cross-Cutting Governance matrix, the PR
+body, etc.) when populating the artifact. The annotation flags the
+finding for human attention because the model's confidence is
+non-High.
+
+The table below names the leak kinds and where they ultimately belong
+in the artifact:
+
+| If the candidate is really… | Tell the model | Proper home |
+|-----------------------------|----------------|-------------|
+| **A requirement** ("X must Y", "Implementers verify Z", "Mitigation: pin both files", "Resolution: X owns A and Y owns B") | the answer is known; the model is just writing the requirement | the artifact's `### Functional Requirements` (specs) or RFC body |
+| **A load-bearing assumption** ("Assumption: a retry count of 5 is sufficient", "Assumption: X is acceptable for now") | the model already chose; this is an assumption stated as if it were a question | the artifact's `## Assumptions` section, with `[Critical Assumption]` if the impact is Critical |
+| **An acceptance test** ("acceptance criteria require empirically capturing X", "Verification needed against actual Y at render/cut time") | this is verification work, not a steering choice | the user story's `### Acceptance Scenarios` |
+| **A dependency / coordination note** ("F1.5 and F1.6 both touch file Z; second-to-land rebases", "Tracked separately so SD-N's resolution explicitly closes both") | the RFC's Cross-Cutting Governance / touched-files matrix and `## Dependency Order` table already track this | the RFC's governance section, never debt |
+| **Future work / deferral** ("deferred to follow-up", "out of scope this round", "intentionally not authored in this round") | the decision to defer is already made; debt is forward-looking, not a deferral record | the artifact's `## Out of Scope` plus a follow-up GitHub issue |
+| **A resolution record** ("this was fixed in the same PR", "Resolution: resolved YYYY-MM-DD — verified that…", "Recorded here so a future maintainer can re-evaluate; no action expected", "reviewer's concern investigated and dismissed") | debt is forward-looking; backward-looking notes belong in the PR description or, at most, in a row whose `status` is already `resolved` | the PR body, never an `open` debt row |
+
+**Positive test for `debt_items`:** before recording any item as debt,
+you must be able to phrase its description as a question or as
+"unresolved choice between X and Y." If you can only phrase it as a
+directive ("we will…", "implementers must…", "mitigation: …"), route
+it to `assumptions` with `[Critical Assumption]` instead.
+
+A debt item is valid only if a human could resolve it by picking
+between the named alternatives — not by writing code, writing a test,
+waiting for another artifact, or by being told the answer.
 
 ### Edge cases
 
@@ -143,6 +183,18 @@ Zero assumptions. All scope is uncertain. Bail-out assessment applies (see Step 
 | "Rate limit policy" — no existing policy found | Low | Debt item |
 
 Assumptions block contains one item. Debt list contains two items.
+
+**(d) Kind-gate failure → routed to assumptions with `[Critical Assumption]`, not dropped**
+
+| Candidate | Confidence | Kind gate | Triage result |
+|-----------|-----------|----------|--------------|
+| "Auth provider" — inferred from existing OAuth setup | High | not applied (Step 3a) | Assumption |
+| "Mitigation: pin the stub string in both the survey template and the eval scenario" | Medium | **fails** (prescription, no named alternatives) | Assumption with `[Critical Assumption]` — the parent will lift it into `### Functional Requirements` |
+| "Whether scenarios that create a PR need `gh` stub credentials, regex alternation, or assertion against the failure branch" | Medium | **passes** (open question + 3 named paths + no prescription) | Debt item |
+
+The assumptions block contains two items; one is a true high-confidence
+inference and one is a Critical-flagged leak that the parent must route
+to its proper section. Debt list contains one steering need.
 
 ### Bail-out assessment
 
@@ -186,3 +238,10 @@ re-run." The debt table is already in `debt_items` — do not duplicate it in
 - **Be transparent about uncertainty.** If confidence is Low, say so — do not
   inflate confidence to keep items out of the debt list. Debt items are the
   designed signal for genuine uncertainty.
+- **Phrase debt descriptions as steering questions.** Every `Description`
+  field in `debt_items` must read as an open question or as "unresolved
+  choice between X and Y" — never as a directive ("Implementers must…",
+  "Mitigation: pin both…", "Resolution: X owns A and Y owns B"). If you
+  can only write the row as a directive, the candidate failed the kind
+  gate in Step 3b and belongs in `assumptions` with `[Critical
+  Assumption]`, not in `debt_items`.

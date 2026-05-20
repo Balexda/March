@@ -215,7 +215,13 @@ was recorded.`)
   severity was Critical.
 - **Specification Debt**: copy each item from the clarify return's
   `debt_items` array, including its Impact level. The leading count MUST
-  match the number of bullets rendered.
+  match the number of bullets rendered. Each bullet's description must
+  read as a steering need — an open question or "unresolved choice
+  between X and Y" — and must come straight from `debt_items` without
+  rewording. Do not synthesize bullets here from requirements,
+  acceptance tests, dependency/coordination notes, or deferred-work
+  notices; if clarify's kind gate (see `smithy-clarify` Step 3) dropped
+  those, they stay dropped.
 - **PR**: the URL captured from the PR creation step (see the
   `pr-create-tool-choice` snippet for which tool ran).
 
@@ -561,7 +567,7 @@ Guidelines for slicing:
 - Slices are numbered sequentially starting at 1.
 - Include tests, docs, and validation steps within the slice that introduces the
   code — do not batch these into a separate "testing slice".
-- Populate the `## Specification Debt` section with both (1) inherited items from the source spec (carried over in Phase 1) and (2) new items from cut's own clarify run. Inherited items use status `inherited`; new items use status `open`. Assign new SD-NNN identifiers to cut's own items, continuing from where the inherited list left off.
+- Populate the `## Specification Debt` section with both (1) inherited items from the source spec (carried over in Phase 1) and (2) new items from cut's own clarify run. Inherited items use status `inherited`; new items use status `open`. Assign new SD-NNN identifiers to cut's own items, continuing from where the inherited list left off. New items are bound by the same kind gate as `smithy-clarify` Step 3: never add a row that did not come from clarify's `debt_items`, and never reword a description into a directive. Requirement, acceptance-test, dependency/coordination, deferral, and post-hoc resolution findings have homes elsewhere in the tasks file (acceptance criteria on each task, the `## Dependency Order` table, follow-up issues) and must not appear here.
 - In the `## Dependency Order` table, `Depends On` must be exactly `—` or a comma-separated list of same-table `S<N>` IDs (e.g., `S1` or `S1, S2`); do not use prose. `Artifact` must always be `—` for every slice row — slices live inline as `## Slice N:` bodies and have no separate artifact file.
 
 Guidelines for task authoring:
@@ -886,7 +892,13 @@ was recorded.`)
   severity was Critical.
 - **Specification Debt**: copy each item from the clarify return's
   `debt_items` array, including its Impact level. The leading count MUST
-  match the number of bullets rendered.
+  match the number of bullets rendered. Each bullet's description must
+  read as a steering need — an open question or "unresolved choice
+  between X and Y" — and must come straight from `debt_items` without
+  rewording. Do not synthesize bullets here from requirements,
+  acceptance tests, dependency/coordination notes, or deferred-work
+  notices; if clarify's kind gate (see `smithy-clarify` Step 3) dropped
+  those, they stay dropped.
 - **PR**: the URL captured from the PR creation step (see the
   `pr-create-tool-choice` snippet for which tool ran).
 
