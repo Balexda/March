@@ -61,6 +61,7 @@ import { CLI_VERSION } from "../shared/version.js";
 import { startDispatchSpan } from "../observability/spawn-trace.js";
 import { recordSpawnRun } from "../observability/spawn-metrics.js";
 import { buildSpawnOtelContext } from "../observability/in-spawn-emitter.js";
+import { initOtel } from "../observability/otel.js";
 import {
   createSpawnWorktree,
   removeSpawnWorktree,
@@ -948,6 +949,19 @@ function findInvokedCommand(argv: readonly string[]): Command {
 }
 
 export async function runCli(argv: readonly string[] = process.argv): Promise<void> {
+  // The OTEL lifecycle is owned here, in the CLI subsystem, so src/cli.ts stays
+  // a pure bin wrapper. No-op unless MARCH_OTEL=1; the finally force-flushes
+  // spans/metrics before the process exits — which happens as soon as runCli
+  // returns, since the CLI does no further work.
+  const otel = initOtel();
+  try {
+    await dispatchCli(argv);
+  } finally {
+    await otel.shutdown();
+  }
+}
+
+async function dispatchCli(argv: readonly string[]): Promise<void> {
   try {
     await program.parseAsync([...argv]);
   } catch (err: unknown) {
