@@ -1,0 +1,14 @@
+# Provisions March's dashboards into the bundled Grafana. Mounted alongside the
+# otel-lgtm image's own provider files (Grafana loads every *.yaml in the
+# provisioning/dashboards dir), so it adds the "March" folder without clobbering
+# the image's built-in RED/JVM dashboards or the auto-provisioned datasources.
+apiVersion: 1
+
+providers:
+  - name: "March"
+    type: file
+    folder: "March"
+    allowUiUpdates: true
+    options:
+      path: /etc/march/dashboards
+      foldersFromFilesStructure: false

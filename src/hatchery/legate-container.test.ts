@@ -210,6 +210,12 @@ describe("legate-container", () => {
     expect(args).toContain("ANTHROPIC_API_KEY");
     expect(args).toContain("GH_TOKEN");
     expect(args).toContain("GITHUB_TOKEN");
+    // Observability env is forwarded so the orchestrator the loop spawns emits
+    // to the otel-lgtm stack from inside the container.
+    expect(args).toContain("MARCH_OTEL");
+    expect(args).toContain("MARCH_OTEL_ENDPOINT");
+    expect(args).toContain("OTEL_EXPORTER_OTLP_ENDPOINT");
+    expect(args).toContain("MARCH_OTEL_SERVICE_NAME");
     expect(args.join("\n")).not.toContain("secret-value");
     expect(args).toContain("march-legate:test");
     expect(args).toContain("sh");
