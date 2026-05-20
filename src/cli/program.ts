@@ -717,9 +717,17 @@ brood
         process.exitCode = SUCCESS;
       } catch (err) {
         if (err instanceof BroodNotFoundError) {
-          // Idempotent: nothing tracked under this id — nothing to tear down.
-          console.log(`Session "${id}" is not tracked by Brood; nothing to tear down.`);
-          process.exitCode = SUCCESS;
+          // A 404 means Brood has no record of this session — NOT that cleanup
+          // succeeded. Brood persists across restarts and returns a 200 no-op
+          // for already-torndown sessions, so a 404 only happens when the
+          // session was never registered (e.g. a missed registration during a
+          // transient Brood outage). Exit non-zero so the caller (the legate
+          // loop) defers and retries rather than archiving the slice over an
+          // orphaned steward/container/worktree.
+          process.stderr.write(
+            `Session "${id}" is not tracked by Brood; cannot confirm teardown.\n`,
+          );
+          process.exitCode = ERROR;
           return;
         }
         const message =
