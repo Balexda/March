@@ -735,7 +735,6 @@ export function runHatcherySpawn(
 
     const spawnPrompt = buildSpawnPatchPrompt(input.prompt);
 
-    try {
     writeInitialSpawnRecord({
       id: spawnId,
       repoPath: input.repoPath,
@@ -863,6 +862,7 @@ export function runHatcherySpawn(
       ].join("\n"),
     };
   } catch (err) {
+    dispatch.recordException(err);
     if (!(err instanceof HatcherySpawnError)) {
       try {
         markSpawnRecordFailed(spawnId, { error: (err as Error).message }, input.homeDir);
@@ -888,10 +888,6 @@ export function runHatcherySpawn(
       throw err;
     }
     throw new HatcherySpawnError((err as Error).message);
-  }
-  } catch (err) {
-    dispatch.recordException(err);
-    throw err;
   } finally {
     const outcome: "success" | "failure" =
       exitCode === 0 ? "success" : "failure";
