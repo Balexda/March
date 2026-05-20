@@ -53,14 +53,18 @@ const LEGATE_PASSTHROUGH_ENV = [
   "ANTHROPIC_API_KEY",
   "GH_TOKEN",
   "GITHUB_TOKEN",
-  // Observability: forwarded so the `march hatchery spawn` orchestrator the loop
-  // shells out to (which reads these at runtime) emits spawn metrics + spans to
-  // the otel-lgtm stack. Each is `-e NAME` (value inherited from the env), so an
-  // unset var is simply a no-op. From inside the container the endpoint must be
-  // reachable — e.g. http://host.docker.internal:4318, or otel-lgtm:4318 when
-  // the container is attached to the `march` network. The loop's own spans use
-  // the endpoint frozen into meta at `march legate init` time, so init must run
-  // with the same MARCH_OTEL_ENDPOINT the container will use.
+  // Where the loop reaches the Hatchery SERVICE (it POSTs spawns over HTTP rather
+  // than shelling out). From inside the container this must be reachable — e.g.
+  // http://host.docker.internal:8080, or http://hatchery:8080 on the `march`
+  // network. Defaults to http://localhost:8080 when unset.
+  "MARCH_HATCHERY_URL",
+  // Observability: forwarded so emitters that read these at runtime ship spans +
+  // metrics to the otel-lgtm stack. Each is `-e NAME` (value inherited from the
+  // env), so an unset var is simply a no-op. From inside the container the
+  // endpoint must be reachable — e.g. http://host.docker.internal:4318, or
+  // otel-lgtm:4318 when the container is attached to the `march` network. The
+  // loop's own spans use the endpoint frozen into meta at `march legate init`
+  // time, so init must run with the same MARCH_OTEL_ENDPOINT the container uses.
   "MARCH_OTEL",
   "MARCH_OTEL_ENDPOINT",
   "OTEL_EXPORTER_OTLP_ENDPOINT",

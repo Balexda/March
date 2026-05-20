@@ -59,9 +59,9 @@ How each emitter reaches the collector:
 
 The Legate loop freezes its telemetry config into its meta file at
 `march legate init` time (so the standalone loop process needs no env at
-runtime). The `march hatchery spawn` orchestrator the loop shells out to reads
-the env at runtime. So **set the env before `init`, and keep it set in the
-environment the loop runs in**:
+runtime). The loop dispatches by POSTing to the Hatchery service over HTTP
+(`MARCH_HATCHERY_URL`), and that service emits its own spawn telemetry. So **set
+the env before `init`, and keep it set in the environment the loop runs in**:
 
 ```bash
 export MARCH_OTEL=1
@@ -264,8 +264,10 @@ and can be observed as a service.
 - **API:** `POST /spawns` (creates a job, returns `202 {id}`),
   `GET /spawns/:id` (job status/result), `GET /healthz` (liveness),
   `GET /readyz` (docker + agent-deck reachable). Spawns can run up to an hour, so
-  the API is an async job + poll; the client blocks by polling, preserving the
-  legate loop's existing `march hatchery spawn --json` contract.
+  the API is an async job + poll. The `march hatchery spawn` CLI and the legate
+  loop are both clients: the loop's dispatch runner POSTs a spawn and polls the
+  job to completion (via `MARCH_HATCHERY_URL`), writing the same result shape its
+  completion logic always consumed.
 - **Execution:** each job runs in a `worker_threads` worker that re-loads the CLI
   bundle and calls the unchanged `runHatcherySpawn`, so the synchronous
   agent-deck/docker/git work never blocks the event loop.

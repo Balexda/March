@@ -28,6 +28,7 @@ import {
   type LoopMetricsSnapshot,
 } from "../../observability/loop-metrics.js";
 import { emitLoopLog, type LoopLogSeverity } from "../../observability/logs.js";
+import { resolveHatcheryUrl } from "../../hatchery/service/client.js";
 import type { LoopMeta } from "./meta.js";
 
 // Injected at startup by configureLoopRuntime().
@@ -220,21 +221,6 @@ function execText(command, args, options = {}) {
     stdio: ["ignore", "pipe", "pipe"],
     ...options,
   });
-}
-
-// In the container the baked `march` on PATH is authoritative; meta.march_cli_path
-// is a host path frozen at init that won't resolve in the container
-// (Balexda/March#149). Outside the container, keep using the frozen path.
-function inContainer() {
-  return process.env.MARCH_LEGATE_CONTAINER === "1";
-}
-
-function execMarch(args, options = {}) {
-  const cliPath = meta.march_cli_path;
-  if (!inContainer() && typeof cliPath === "string" && cliPath.length > 0) {
-    return execText(process.execPath, [cliPath, ...args], options);
-  }
-  return execText("march", args, options);
 }
 
 function formatCleanupLine(event, prefix = "") {
@@ -1977,71 +1963,58 @@ function hatcheryRequestPath(sliceId) {
 }
 
 function hatcheryRunnerCode() {
-  // Wrapped in try/catch so any runner-side crash (bad request file, missing
-  // command, spawnSync throw, fs error) still produces a result file. Without
-  // this, a crashed runner leaves the slice stuck in hatchery-pending forever
-  // because completePendingHatcheryDispatches only acts when the result file
-  // appears.
+  // Detached runner: POSTs the spawn to the Hatchery SERVICE over HTTP and polls
+  // the job to completion, writing the same result-file shapes the old CLI runner
+  // did — a HatcherySpawnResult JSON on success, { error } on failure — so all of
+  // completePendingHatcheryDispatches' completion/recovery logic is unchanged.
+  // (Network calls replace the former `march hatchery spawn` CLI exec.)
   //
-  // Escape carefully: this code lives inside a TEMPLATE LITERAL that becomes
-  // the deployed legate-loop.mjs. Anywhere we need a backslash-n in the
-  // runner SOURCE we're handing to `node -e`, we must write four
-  // backslashes here: template eval collapses \\n -> \n, then the
-  // deployed .mjs evaluates \n -> \n (2 chars) inside the array element,
-  // which finally evaluates to a real \n inside the runner's "..." string
-  // literal. Using only two backslashes used to insert a real newline mid
-  // string literal, producing a SyntaxError that silently killed every
-  // hatchery spawn.
-  // resultPath and logPath come in as their own argv entries (argv[2], argv[3])
-  // so the crash guard has somewhere to write even when the request file
-  // itself fails to read or parse. If we relied on request.resultPath
-  // alone, a malformed/truncated request would leave request = null and
-  // the catch block would have no path to fall back to, stranding the slice
-  // in hatchery-pending until the 15-min stale timeout fires.
+  // Wrapped in try/catch so any runner-side crash still produces a result file;
+  // otherwise a dead runner strands the slice in hatchery-pending until the
+  // stale timeout. resultPath/logPath come as their own argv entries so the
+  // crash guard has somewhere to write even if the request file fails to parse.
+  // Anywhere the runner SOURCE needs a backslash-n we write `\\n` (this is a
+  // normal .ts string now, not nested in another template literal).
   return [
-    'const { spawnSync } = require("node:child_process");',
     'const fs = require("node:fs");',
     'const requestPath = process.argv[1];',
     'const resultPath = process.argv[2];',
     'const logPath = process.argv[3];',
-    'let request = null;',
-    'try {',
-    '  request = JSON.parse(fs.readFileSync(requestPath, "utf-8"));',
-    // request.otelEnv is present only when the deployment has telemetry on
-    // (meta.otel.enabled at init). It carries MARCH_OTEL=1 + endpoint down to
-    // the "march hatchery spawn" orchestrator so it emits spawn metrics/spans —
-    // the loop is launched by agent-deck as a bare node with no MARCH_OTEL in
-    // its env, so without this the orchestrator (which reads process.env) would
-    // emit nothing. Omitted when off, so the spawn argv/env is unchanged.
-    // (No backticks in this comment: it lives inside the LEGATE_LOOP_MJS literal.)
-    '  const spawnOpts = { cwd: request.cwd, encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"] };',
-    '  if (request.otelEnv) spawnOpts.env = Object.assign({}, process.env, request.otelEnv);',
-    '  const result = spawnSync(request.command, request.args, spawnOpts);',
-    '  if (result.stderr) { try { fs.appendFileSync(logPath, result.stderr); } catch {} }',
-    '  if (result.status === 0) {',
-    '    fs.writeFileSync(resultPath, result.stdout || "", "utf-8");',
-    '  } else {',
-    '    fs.writeFileSync(resultPath, JSON.stringify({ error: result.stderr || result.error?.message || "hatchery spawn failed", exitCode: result.status ?? null }) + "\\n", "utf-8");',
-    '  }',
-    '} catch (err) {',
-    '  const message = (err && err.stack) ? err.stack : String(err);',
+    'const POLL_MS = 2000;',
+    'const TIMEOUT_MS = 3900000;',
+    'const sleep = (ms) => new Promise((r) => setTimeout(r, ms));',
+    'const writeResult = (obj) => fs.writeFileSync(resultPath, JSON.stringify(obj) + "\\n", "utf-8");',
+    '(async () => {',
     '  try {',
-    '    if (resultPath) {',
-    '      fs.writeFileSync(resultPath, JSON.stringify({ error: "hatchery runner crashed: " + message, exitCode: null }) + "\\n", "utf-8");',
+    '    const request = JSON.parse(fs.readFileSync(requestPath, "utf-8"));',
+    '    const base = String(request.baseUrl || "http://localhost:8080").replace(/\\/+$/, "");',
+    '    const postRes = await fetch(base + "/spawns", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(request.spawn) });',
+    '    const postText = await postRes.text();',
+    '    if (postRes.status !== 202) {',
+    '      let m = postText; try { m = JSON.parse(postText).error || postText; } catch {}',
+    '      writeResult({ error: "hatchery POST /spawns failed (" + postRes.status + "): " + m, exitCode: null });',
+    '      process.exit(1);',
     '    }',
-    '    if (logPath) { fs.appendFileSync(logPath, "runner crash: " + message + "\\n"); }',
-    '  } catch {}',
-    '  process.exit(1);',
-    '}',
+    '    const id = JSON.parse(postText).id;',
+    '    const deadline = Date.now() + TIMEOUT_MS;',
+    '    for (;;) {',
+    '      await sleep(POLL_MS);',
+    '      let getRes;',
+    '      try { getRes = await fetch(base + "/spawns/" + id); } catch (e) { if (Date.now() >= deadline) throw e; continue; }',
+    '      if (getRes.status !== 200) { if (Date.now() >= deadline) { writeResult({ error: "hatchery GET /spawns/" + id + " failed (" + getRes.status + ")", exitCode: null }); process.exit(1); } continue; }',
+    '      const rec = JSON.parse(await getRes.text());',
+    '      if (rec.status === "succeeded") { writeResult(rec.result || {}); process.exit(0); }',
+    '      if (rec.status === "failed") { writeResult({ error: (rec.error && rec.error.message) || "hatchery spawn failed", exitCode: null }); process.exit(1); }',
+    '      if (Date.now() >= deadline) { writeResult({ error: "timed out waiting for hatchery job " + id, exitCode: null }); process.exit(1); }',
+    '    }',
+    '  } catch (err) {',
+    '    const message = (err && err.stack) ? err.stack : String(err);',
+    '    try { writeResult({ error: "hatchery runner crashed: " + message, exitCode: null }); } catch {}',
+    '    try { if (logPath) fs.appendFileSync(logPath, "runner crash: " + message + "\\n"); } catch {}',
+    '    process.exit(1);',
+    '  }',
+    '})();',
   ].join("\n");
-}
-
-function marchCommandAndArgs(args) {
-  const cliPath = meta.march_cli_path;
-  if (!inContainer() && typeof cliPath === "string" && cliPath.length > 0) {
-    return { command: process.execPath, args: [cliPath, ...args] };
-  }
-  return { command: "march", args };
 }
 
 function launchHatcheryDispatch(item, resultPath, logPath, opts) {
@@ -2054,50 +2027,33 @@ function launchHatcheryDispatch(item, resultPath, logPath, opts) {
   const title = opts?.titleOverride || dispatchTitle(item);
   const prompt = opts?.promptOverride || buildSmithySpawnPrompt(item);
   const requestSliceId = opts?.requestSliceIdOverride || dispatchSliceId(item);
-  const args = [
-    "hatchery",
-    "spawn",
-    "--backend",
-    "codex",
-    "--agent-deck-profile",
-    meta.profile,
-    "--manager-group",
-    meta.worker_group,
-    "--name",
-    title,
-    "--branch",
-    branch,
-    "--profile",
-    meta.profile,
-    "--task-type",
-    dispatchIdent.verb,
-    "--task-name",
-    dispatchIdent.stem,
-    "--slice-id",
-    requestSliceId,
-    "--prompt",
+  // Wire shape for POST /spawns (Hatchery service). repoPath must be valid INSIDE
+  // the hatchery container — it bind-mounts the repo + worktree-parent at the
+  // identical absolute path. Telemetry is now owned by the service, so we no
+  // longer pass MARCH_OTEL down; the dispatch trace is correlated server-side via
+  // sliceId (the same deterministic-id scheme).
+  const spawnRequest = {
     prompt,
-    "--json",
-  ];
+    backend: "codex",
+    repoPath,
+    agentDeckProfile: meta.profile,
+    managerGroup: meta.worker_group,
+    title,
+    branch,
+    profile: meta.profile,
+    taskType: dispatchIdent.verb,
+    taskName: dispatchIdent.stem,
+    sliceId: requestSliceId,
+  };
   fs.mkdirSync(path.dirname(resultPath), { recursive: true });
   fs.writeFileSync(resultPath, "", "utf-8");
   const requestPath = hatcheryRequestPath(requestSliceId);
-  const resolved = marchCommandAndArgs(args);
   const requestBody = {
-    command: resolved.command,
-    args: resolved.args,
-    cwd: repoPath,
+    baseUrl: resolveHatcheryUrl(process.env),
+    spawn: spawnRequest,
     resultPath,
     logPath,
   };
-  // Propagate the deployment's frozen telemetry config to the spawn orchestrator
-  // so it emits even though the loop runs without MARCH_OTEL in its ambient env.
-  if (meta.otel && meta.otel.enabled) {
-    requestBody.otelEnv = {
-      MARCH_OTEL: "1",
-      MARCH_OTEL_ENDPOINT: meta.otel.endpoint || "http://localhost:4318",
-    };
-  }
   fs.writeFileSync(requestPath, JSON.stringify(requestBody) + "\n", "utf-8");
   const child = spawn(process.execPath, ["-e", hatcheryRunnerCode(), requestPath, resultPath, logPath], {
     cwd: repoPath,
