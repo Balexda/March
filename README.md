@@ -36,24 +36,27 @@ Requires Node 20 or 22. `march spawn dispatch` additionally requires `git` and `
 | `march init` | Initialize the March environment (manifest at `~/.march/march-manifest.json` + Claude skills under `~/.claude/`). |
 | `march update` | Update an existing March installation; prompts on downgrade unless `--yes`. |
 | `march spawn dispatch` | Create a worktree, snapshot it as a Docker build context, build `march-spawn-<id>`, launch the container with hardened security configuration, and transition the SpawnRecord to `"running"`. |
+| `march hatchery serve` | Run the Hatchery service (Fastify HTTP API) — the single long-running container that performs spawns. The container entrypoint. |
+| `march hatchery spawn` | Run a one-shot spawn and hand its patch to an agent-deck manager. A thin client that posts to the Hatchery service (`MARCH_HATCHERY_URL`, default `http://localhost:8080`). |
 | `march legate init` | Set up a per-repo Legate agent plus paired deterministic loop for the Smithy plan→PR→fix workflow on top of [agent-deck](https://github.com/asheshgoplani/agent-deck). Pass `--with-container` to run the loop in the Hatchery-managed Legate container while the agent-deck loop pane tails its logs. |
 | `march version` | Print the installed CLI version. |
 | `march help [command]` | Show help for a command. |
 
 ## Observability
 
-March emits OpenTelemetry traces and metrics — spawn success rate, spawn
-runtime, and a trace per dispatched unit of work — to a local, all-in-one
-Grafana stack. Telemetry is opt-in (`MARCH_OTEL=1`) and a complete no-op when
-off; a missing collector never affects a command.
+March emits OpenTelemetry traces, metrics, and logs — spawn success rate, spawn
+runtime, a trace per dispatched unit of work, and Hatchery service health — to a
+local, all-in-one Grafana stack. Telemetry is opt-in (`MARCH_OTEL=1`) and a
+complete no-op when off; a missing collector never affects a command.
 
 ```bash
 docker compose -f docker/otel-lgtm.docker-compose.yml up -d
-open http://localhost:3000      # Grafana (admin/admin) → "March — Spawn observability"
+open http://localhost:3000      # Grafana (admin/admin) → "March — Spawn observability" / "March — Hatchery service"
 ```
 
 Then run March with `MARCH_OTEL=1` set. Full details — enabling it per Legate
-deployment, the trace/span and metric model, the provisioned dashboard, and how
-to validate the stack — are in **[docs/Observability.md](docs/Observability.md)**.
+deployment, the trace/span/metric/log model, the Hatchery service, the
+provisioned dashboards, and how to validate the stack — are in
+**[docs/Observability.md](docs/Observability.md)**.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, testing strategy, and pre-release checklist.

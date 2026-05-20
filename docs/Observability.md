@@ -1,7 +1,7 @@
 # Observability
 
-March emits OpenTelemetry traces and metrics so you can answer three questions
-about the autonomous dispatch loop:
+March emits OpenTelemetry traces, metrics, and logs so you can answer three
+questions about the autonomous dispatch loop:
 
 1. **Spawn success rate** — what fraction of dispatched spawns exit cleanly?
 2. **Spawn runtime** — how long do spawns take, by backend and task type?
@@ -42,7 +42,10 @@ reach the collector at `otel-lgtm:4318`.
 |---|---|---|
 | `MARCH_OTEL` | unset | Master switch. Telemetry is active **only** when set to `1`. |
 | `MARCH_OTEL_ENDPOINT` / `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://localhost:4318` | OTLP/HTTP base endpoint. `MARCH_OTEL_ENDPOINT` wins if both are set. |
-| `MARCH_OTEL_SERVICE_NAME` | `march` | `service.name` resource attribute for the orchestrator's spans/metrics. The Legate loop's own spans always report `service.name=march-legate`. |
+| `MARCH_OTEL_SERVICE_NAME` | `march` | `service.name` resource attribute for the orchestrator's spans/metrics. The Legate loop's own spans always report `service.name=march-legate`; the Hatchery service container sets `march-hatchery`. |
+| `MARCH_HATCHERY_URL` | `http://localhost:8080` | Base URL the `march hatchery spawn` thin client posts to. |
+| `MARCH_HATCHERY_PORT` | `8080` | Port the `march hatchery serve` service listens on. |
+| `MARCH_HATCHERY_LOG_DIR` | `~/.march/logs` | Directory for the service's JSONL log file (`hatchery.jsonl`). |
 
 How each emitter reaches the collector:
 
@@ -133,6 +136,34 @@ keeping ids out of labels bounds cardinality.
 
 `outcome` is `success` (container exit 0) or `failure`.
 
+#### Hatchery service metrics
+
+The Hatchery service (see [Hatchery as a service](#hatchery-as-a-service)) emits
+its own instruments, defined in
+[`src/observability/hatchery-metrics.ts`](../src/observability/hatchery-metrics.ts).
+Labels stay low-cardinality — `route` is the route **template** (`/spawns/:id`),
+never the concrete path.
+
+| OTel instrument | Prometheus series | Meaning |
+|---|---|---|
+| `march.hatchery.requests` (counter) | `march_hatchery_requests_total` | HTTP requests by `{route, method, outcome}` (`outcome` = `success` for 2xx/3xx, else `error`) |
+| `march.hatchery.request.duration` (histogram, `s`) | `march_hatchery_request_duration_seconds_{bucket,count,sum}` | HTTP request latency |
+| `march.hatchery.active_spawns` (up/down) | `march_hatchery_active_spawns` | spawn jobs currently executing |
+| `march.hatchery.uptime` (gauge, `s`) | `march_hatchery_uptime_seconds` | service process uptime |
+| `march.hatchery.heartbeat` (counter) | `march_hatchery_heartbeat_total` | liveness tick (every 15s) |
+
+### Logs
+
+The Hatchery service writes structured JSONL with pino to a log file
+(`$MARCH_HATCHERY_LOG_DIR/hatchery.jsonl`, default `~/.march/logs/`) **and**, when
+`MARCH_OTEL=1`, mirrors each record to the collector over OTLP/HTTP
+(`/v1/logs`) → Loki. The file sink is always on so logs survive even with
+telemetry off; the OTLP bridge and pino level→OTel-severity mapping live in
+[`src/observability/logger.ts`](../src/observability/logger.ts). Records carry
+`trace_id`/`span_id` when emitted inside a dispatch span, so you can pivot from a
+log line to its trace. In Grafana: **Explore → Loki**, query
+`{service_name="march-hatchery"}`.
+
 ### Profiles (isolating test/integ telemetry)
 
 Every metric and span is tagged with a **profile** — metric label `profile`,
@@ -157,6 +188,33 @@ in-sandbox `spawn.exec` span (`march hatchery spawn --profile`, passed down by
 the loop), and the metrics. Spawns with no deployment profile (e.g. an ad-hoc
 `march spawn dispatch` without `--profile`) report `profile="unknown"`.
 
+## Hatchery as a service
+
+Hatchery runs as a **single long-running container** that exposes an HTTP API;
+`march hatchery spawn` is a thin client that posts to it instead of doing the
+work in-process. This gives one place that emits the logs/metrics/traces above
+and can be observed as a service.
+
+- **Entrypoint:** `march hatchery serve` (Fastify). Compose:
+  [`docker/hatchery.docker-compose.yml`](../docker/hatchery.docker-compose.yml),
+  image: [`docker/hatchery.Dockerfile`](../docker/hatchery.Dockerfile).
+- **API:** `POST /spawns` (creates a job, returns `202 {id}`),
+  `GET /spawns/:id` (job status/result), `GET /healthz` (liveness),
+  `GET /readyz` (docker + agent-deck reachable). Spawns can run up to an hour, so
+  the API is an async job + poll; the client blocks by polling, preserving the
+  legate loop's existing `march hatchery spawn --json` contract.
+- **Execution:** each job runs in a `worker_threads` worker that re-loads the CLI
+  bundle and calls the unchanged `runHatcherySpawn`, so the synchronous
+  agent-deck/docker/git work never blocks the event loop.
+- **Host access:** the container joins the `march` network (reaches the collector
+  at `otel-lgtm:4318`) and mounts the docker socket, the host `HOME` at the
+  **identical path** (so repo + worktree paths agent-deck creates are valid
+  inside the container — this is required for `git apply`), the host tmux socket,
+  and the agent-deck binary. Spawn sandboxes it launches are siblings on the host
+  daemon and still reach the collector at `host.docker.internal:4318`.
+
+See [CONTRIBUTING.md](../CONTRIBUTING.md) for the bring-up commands.
+
 ## The dashboard
 
 [`docker/grafana/dashboards/march-spawns.json`](../docker/grafana/dashboards/march-spawns.json)
@@ -172,9 +230,17 @@ task type, and a recent-dispatch-traces table (Tempo). `backend` / `task_type` /
 `profile` / `outcome` template variables filter the metric panels — set
 `profile` to scope a dashboard to one deployment (or exclude a test profile).
 
+A second dashboard,
+[`docker/grafana/dashboards/march-hatchery.json`](../docker/grafana/dashboards/march-hatchery.json)
+("**March — Hatchery service**"), covers the service itself: heartbeat/uptime,
+active spawns, HTTP request rate + latency percentiles + error rate, spawn
+success rate (shared `march_spawn_runs_total`), a Loki logs panel
+(`{service_name="march-hatchery"}`), and a Tempo traces table.
+
 To browse raw traces: **Explore → Tempo**, query
 `{ resource.service.name =~ "march.*" }`. Metrics: **Explore → Prometheus**,
-e.g. `march_spawn_runs_total`.
+e.g. `march_spawn_runs_total`. Logs: **Explore → Loki**,
+`{service_name="march-hatchery"}`.
 
 ## Validating the stack end to end
 
@@ -216,12 +282,21 @@ machinery, update the signals in lock-step:
   (the in-container emitter). The cross-process test in `init.test.ts` locks this
   alignment in.
 - **New metric or label** → add it in
-  [`src/observability/spawn-metrics.ts`](../src/observability/spawn-metrics.ts).
-  Keep labels low-cardinality — never add a per-spawn/per-slice id as a label;
-  that belongs in traces. Then update the dashboard JSON if a panel should use
-  it.
+  [`src/observability/spawn-metrics.ts`](../src/observability/spawn-metrics.ts)
+  (spawn metrics) or
+  [`src/observability/hatchery-metrics.ts`](../src/observability/hatchery-metrics.ts)
+  (Hatchery service metrics). Keep labels low-cardinality — never add a
+  per-spawn/per-slice id or a concrete request path as a label; ids belong in
+  traces, and routes use the template form. Then update the dashboard JSON if a
+  panel should use it.
+- **New log call** → use the pino logger from
+  [`src/observability/logger.ts`](../src/observability/logger.ts) so it lands in
+  the file sink and ships via OTLP. Logs stay a complete no-op transport when
+  `MARCH_OTEL!=1` (the file is still written). Keep log attributes
+  low-cardinality too.
 - **New panel / query** → edit
-  [`docker/grafana/dashboards/march-spawns.json`](../docker/grafana/dashboards/march-spawns.json).
+  [`docker/grafana/dashboards/march-spawns.json`](../docker/grafana/dashboards/march-spawns.json)
+  or [`docker/grafana/dashboards/march-hatchery.json`](../docker/grafana/dashboards/march-hatchery.json).
   Reference datasources by uid (`prometheus`, `tempo`, `loki`). Validate against
   a live stack before committing.
 

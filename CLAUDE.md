@@ -12,14 +12,21 @@ Quick pointers:
 - **Contributor setup, testing strategy, release checklist:**
   [`CONTRIBUTING.md`](CONTRIBUTING.md).
 - **Observability (OpenTelemetry → `otel-lgtm`):**
-  [`docs/Observability.md`](docs/Observability.md). Telemetry is opt-in
-  (`MARCH_OTEL=1`) and a no-op when off. **Keep it in lock-step with the dispatch
-  machinery** — new dispatch path or lifecycle action → emit a span; new failure
-  mode → emit an *errored* span; a new process joining a trace → reuse the
-  deterministic id helpers kept identical across `src/observability/trace-ids.ts`,
-  `src/legate/init.ts`, and `src/observability/in-spawn-emitter.ts`; new
-  metrics/labels (low-cardinality only) → `src/observability/spawn-metrics.ts`
-  plus the dashboards under `docker/grafana/`.
+  [`docs/Observability.md`](docs/Observability.md). Telemetry (traces, metrics,
+  logs) is opt-in (`MARCH_OTEL=1`) and a no-op when off. **Keep it in lock-step
+  with the dispatch machinery** — new dispatch path or lifecycle action → emit a
+  span; new failure mode → emit an *errored* span; a new process joining a trace
+  → reuse the deterministic id helpers kept identical across
+  `src/observability/trace-ids.ts`, `src/legate/init.ts`, and
+  `src/observability/in-spawn-emitter.ts`; new metrics/labels (low-cardinality
+  only) → `src/observability/spawn-metrics.ts` (spawns) or
+  `src/observability/hatchery-metrics.ts` (the Hatchery service); new logs → the
+  pino logger in `src/observability/logger.ts` (file sink + OTLP, no-op when
+  off); then the dashboards under `docker/grafana/`.
+- **Hatchery is a containerized service:** `march hatchery serve` (Fastify) under
+  `src/hatchery/service/` runs the spawn flow; `march hatchery spawn` is a thin
+  HTTP client. Image/compose: `docker/hatchery.Dockerfile`,
+  `docker/hatchery.docker-compose.yml`.
 
 ## Verification
 

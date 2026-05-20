@@ -20,11 +20,11 @@ When you write a spec or a piece of code that makes the operator/automation trad
 - `src/cli/`: Commander setup and command dispatch. Keep command handlers thin; move subsystem behavior into the owning domain directory.
 - `src/bootstrap/`: install/update/manifest/skill deployment for `march init` and `march update`.
 - `src/spawn/`: one-shot spawn execution: snapshot, Dockerfile/image build, backend entrypoint, container launch, prompt handoff, output extraction.
-- `src/hatchery/`: container/profile policy. The current hardcoded spawn config lives here because Hatchery will own declarative profiles.
+- `src/hatchery/`: container/profile policy and the spawn orchestrator (`runHatcherySpawn`). `src/hatchery/service/` is the containerized Fastify service (`march hatchery serve`): routes, in-memory job store, the worker that runs `runHatcherySpawn`, and the thin HTTP client `march hatchery spawn` uses. Image/compose live in `docker/hatchery.Dockerfile` and `docker/hatchery.docker-compose.yml`.
 - `src/brood/`: lifecycle state and cleanup: spawn records, worktrees, branches, running/stopped session tracking.
 - `src/herald/`: deterministic event bus and mini-herald modules. PR event schema, snapshots, event log, cursor handling, and daemon code belong here.
 - `src/legate/`: Legate conductor setup and orchestration bootstrap. Static deployed assets stay in `src/templates/legate/`.
-- `src/observability/`: OpenTelemetry bootstrap, deterministic trace/span id helpers, spawn metrics, the dispatch-trace helper, and the in-sandbox emitter. Telemetry is env-gated (`MARCH_OTEL=1`) and a no-op when off. Grafana/stack assets live under `docker/` (`otel-lgtm.docker-compose.yml`, `grafana/`).
+- `src/observability/`: OpenTelemetry bootstrap (traces, metrics, **logs**), deterministic trace/span id helpers, spawn metrics (`spawn-metrics.ts`), Hatchery service metrics (`hatchery-metrics.ts`), the pino+OTLP logger (`logger.ts`), the dispatch-trace helper, and the in-sandbox emitter. Telemetry is env-gated (`MARCH_OTEL=1`) and a no-op when off (the log file is still written). Grafana/stack assets live under `docker/` (`otel-lgtm.docker-compose.yml`, `grafana/`).
 - `src/shared/`: small infrastructure utilities with no durable domain owner.
 
 When a feature spans multiple subsystems, split code by ownership. For example, a future dispatch option may add CLI parsing in `src/cli/`, profile resolution in `src/hatchery/`, lifecycle updates in `src/brood/`, and execution changes in `src/spawn/`.
@@ -37,7 +37,7 @@ When a feature spans multiple subsystems, split code by ownership. For example, 
 - Keep generated `dist/` out of commits unless the release process asks for it.
 - Use `npm run` scripts for verification. Do not invoke `npx vitest`, `npx tsup`, or ad hoc equivalents.
 - Be aware that git-heavy tests may need permissions outside the default sandbox because they create temporary repositories and linked worktrees.
-- **Keep observability in lock-step with the dispatch machinery.** When you add a loop lifecycle action or a new dispatch path, emit a span for it (`maybeEmitLoopSpan` in `src/legate/init.ts`); when you add a failure mode, emit an *errored* span so it surfaces in traces; when a new process joins a trace, reuse the deterministic id helpers (kept byte-for-byte identical across `src/observability/trace-ids.ts`, `src/legate/init.ts`, and `src/observability/in-spawn-emitter.ts`). New metrics/labels go in `src/observability/spawn-metrics.ts` (low-cardinality only — never per-spawn/slice ids), and update `docker/grafana/dashboards/` to match. The full guide is [`docs/Observability.md`](docs/Observability.md).
+- **Keep observability in lock-step with the dispatch machinery.** When you add a loop lifecycle action or a new dispatch path, emit a span for it (`maybeEmitLoopSpan` in `src/legate/init.ts`); when you add a failure mode, emit an *errored* span so it surfaces in traces; when a new process joins a trace, reuse the deterministic id helpers (kept byte-for-byte identical across `src/observability/trace-ids.ts`, `src/legate/init.ts`, and `src/observability/in-spawn-emitter.ts`). New metrics/labels go in `src/observability/spawn-metrics.ts` (spawns) or `src/observability/hatchery-metrics.ts` (the Hatchery service) — low-cardinality only, never per-spawn/slice ids or concrete request paths; new logs go through the pino logger in `src/observability/logger.ts`; then update `docker/grafana/dashboards/` to match. The full guide is [`docs/Observability.md`](docs/Observability.md).
 
 ## Verification
 

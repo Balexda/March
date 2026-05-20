@@ -1,0 +1,8 @@
+# Build-context excludes for the repo-root build (docker/hatchery.Dockerfile).
+# The spawn-codex image builds from the docker/ subdir and is unaffected.
+.git
+node_modules
+dist
+*.log
+.smithy
+docs
