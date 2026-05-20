@@ -29,6 +29,9 @@ import {
   HatcheryClientError,
   runSpawnViaService,
 } from "../hatchery/service/client.js";
+import { runCastraServer } from "../castra/serve.js";
+import { CASTRA_TOKEN_ENV } from "../castra/config.js";
+import { CastraValidationError } from "../castra/types.js";
 import { initMarch, InitError } from "../bootstrap/init.js";
 import { createBuildContext, SnapshotError } from "../spawn/snapshot.js";
 import {
@@ -608,6 +611,55 @@ hatchery
     // Resolves only when the service shuts down (SIGTERM/SIGINT).
     await startServer({ port, host: opts.host });
     process.exitCode = SUCCESS;
+  });
+
+// Subcommand group with no own action — same pattern as `legate`/`hatchery`:
+// bare `march castra` emits the group help and `march castra <bad>` reports the
+// real unknown token. Both intercepted in the bottom-of-file catch.
+const castra = program
+  .command("castra")
+  .description("Manage Castra — the interactive-sessions host fronting agent-deck over HTTP");
+
+castra
+  .command("serve")
+  .description("Run the Castra HTTP service (binds loopback by default)")
+  .option("--port <port>", "Port to listen on (default: deterministic 8800–9799)")
+  .option("--host <host>", "Bind address (default: 127.0.0.1; the container binds 0.0.0.0)")
+  .option("--token <token>", `Bearer token gating /v1/* (default: ${CASTRA_TOKEN_ENV} env var)`)
+  .action(async (opts: { port?: string; host?: string; token?: string }) => {
+    commandHandled = true;
+
+    // Castra drives agent-deck directly, so it must be on PATH wherever serve runs.
+    if (!isFinderAvailable()) {
+      process.stderr.write(
+        "Cannot verify agent-deck is installed: path-search utility unavailable.\n",
+      );
+      process.exitCode = ERROR;
+      return;
+    }
+    if (!isOnPath("agent-deck")) {
+      process.stderr.write(
+        "agent-deck not found on PATH — required for `march castra serve`.\n",
+      );
+      process.exitCode = ERROR;
+      return;
+    }
+
+    try {
+      await runCastraServer({
+        port: opts.port,
+        host: opts.host,
+        token: opts.token,
+      });
+      process.exitCode = SUCCESS;
+    } catch (err) {
+      if (err instanceof CastraValidationError) {
+        process.stderr.write(err.message + "\n");
+        process.exitCode = USAGE_ERROR;
+        return;
+      }
+      throw err;
+    }
   });
 
 program

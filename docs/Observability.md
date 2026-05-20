@@ -152,6 +152,24 @@ never the concrete path.
 | `march.hatchery.uptime` (gauge, `s`) | `march_hatchery_uptime_seconds` | service process uptime |
 | `march.hatchery.heartbeat` (counter) | `march_hatchery_heartbeat_total` | liveness tick (every 15s) |
 
+#### Castra (interactive-sessions host)
+
+The Castra service (`service.name=march-castra`) emits one counter + histogram
+per API request, tagged with **low-cardinality labels only** —
+`{route, method, status_class, profile, outcome}`. The matched route *pattern*
+(e.g. `/v1/sessions/:id`) is the label, never the raw URL; session ids, branches,
+and prompt bodies stay out of metrics (they belong in spans/logs).
+
+| OTel instrument | Prometheus series | Meaning |
+|---|---|---|
+| `march.castra.requests` (counter) | `march_castra_requests_total` | API requests by route + outcome |
+| `march.castra.request.duration` (histogram, `s`) | `march_castra_request_duration_seconds_{bucket,count,sum}` | API request wall-clock duration |
+
+`outcome` is `success` (status < 500) or `failure`. Mutating requests
+(`launch`/`send`/`set`/`remove`) also emit a `castra.<op>` span; when the caller
+passes an `x-march-slice-id` header, the span keys off that dispatch slice id so
+it nests under the existing per-dispatch trace.
+
 ### Logs
 
 The Hatchery service writes structured JSONL with pino to a log file
@@ -237,9 +255,18 @@ active spawns, HTTP request rate + latency percentiles + error rate, spawn
 success rate (shared `march_spawn_runs_total`), a Loki logs panel
 (`{service_name="march-hatchery"}`), and a Tempo traces table.
 
+A third dashboard,
+[`docker/grafana/dashboards/march-castra.json`](../docker/grafana/dashboards/march-castra.json)
+("**March — Castra sessions host**"), shows the Castra API's RED metrics:
+request rate, 5xx error ratio, rate by status class, duration percentiles
+(p50/p95/p99), a route × status-class table, and p95 by route — with `profile`
+and `route` template variables. All dashboards land in the same **March** folder
+(the provider loads every JSON under `/etc/march/dashboards`, so dropping the file
+in is all that's needed).
+
 To browse raw traces: **Explore → Tempo**, query
 `{ resource.service.name =~ "march.*" }`. Metrics: **Explore → Prometheus**,
-e.g. `march_spawn_runs_total`. Logs: **Explore → Loki**,
+e.g. `march_spawn_runs_total` or `march_castra_requests_total`. Logs: **Explore → Loki**,
 `{service_name="march-hatchery"}`.
 
 ## Validating the stack end to end

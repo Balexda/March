@@ -1,0 +1,252 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { buildServer } from "./server.js";
+import type { AgentDeckAdapter } from "./adapter.js";
+import {
+  CastraAgentDeckError,
+  CastraConflictError,
+  CastraNotFoundError,
+  type CastraSession,
+} from "./types.js";
+import type { FastifyInstance } from "fastify";
+
+const SAMPLE: CastraSession = {
+  sessionId: "sess-1",
+  title: "Steward",
+  group: "march-spawn-managers",
+  branch: "march/spawn/x",
+  worktreePath: "/repo/feature-march-spawn-x",
+  createdAt: "2026-05-20T00:00:00Z",
+};
+
+function fakeAdapter(overrides: Partial<AgentDeckAdapter> = {}): AgentDeckAdapter {
+  return {
+    list: vi.fn().mockReturnValue([SAMPLE]),
+    launch: vi.fn().mockReturnValue(SAMPLE),
+    show: vi.fn().mockReturnValue(SAMPLE),
+    send: vi.fn(),
+    set: vi.fn(),
+    remove: vi.fn().mockReturnValue({ removed: true }),
+    output: vi.fn().mockReturnValue({ output: "hello", truncated: false }),
+    reachable: vi.fn().mockReturnValue(true),
+    ...overrides,
+  };
+}
+
+describe("castra server", () => {
+  let app: FastifyInstance;
+
+  afterEach(async () => {
+    if (app) await app.close();
+  });
+
+  describe("health & status (open, no auth)", () => {
+    beforeEach(() => {
+      app = buildServer({ adapter: fakeAdapter(), token: "secret" });
+    });
+
+    it("GET /healthz returns ok without a token", async () => {
+      const res = await app.inject({ method: "GET", url: "/healthz" });
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual({ status: "ok" });
+    });
+
+    it("GET /status reports service, version and agent-deck reachability", async () => {
+      const res = await app.inject({ method: "GET", url: "/status" });
+      expect(res.statusCode).toBe(200);
+      const body = res.json();
+      expect(body.service).toBe("march-castra");
+      expect(body.agentDeck).toEqual({ reachable: true });
+      expect(typeof body.uptimeSeconds).toBe("number");
+    });
+  });
+
+  describe("auth", () => {
+    beforeEach(() => {
+      app = buildServer({ adapter: fakeAdapter(), token: "secret" });
+    });
+
+    it("rejects /v1/* without a bearer token", async () => {
+      const res = await app.inject({ method: "GET", url: "/v1/sessions?profile=march" });
+      expect(res.statusCode).toBe(401);
+      expect(res.json().error.code).toBe("unauthorized");
+    });
+
+    it("rejects /v1/* with the wrong token", async () => {
+      const res = await app.inject({
+        method: "GET",
+        url: "/v1/sessions?profile=march",
+        headers: { authorization: "Bearer nope" },
+      });
+      expect(res.statusCode).toBe(401);
+    });
+
+    it("accepts /v1/* with the right token", async () => {
+      const res = await app.inject({
+        method: "GET",
+        url: "/v1/sessions?profile=march",
+        headers: { authorization: "Bearer secret" },
+      });
+      expect(res.statusCode).toBe(200);
+      expect(res.json().sessions).toHaveLength(1);
+    });
+  });
+
+  describe("routes (auth disabled)", () => {
+    let adapter: AgentDeckAdapter;
+    beforeEach(() => {
+      adapter = fakeAdapter();
+      app = buildServer({ adapter });
+    });
+
+    it("GET /v1/sessions passes profile and group to the adapter", async () => {
+      const res = await app.inject({ method: "GET", url: "/v1/sessions?profile=march&group=g" });
+      expect(res.statusCode).toBe(200);
+      expect(adapter.list).toHaveBeenCalledWith({ profile: "march", group: "g" });
+    });
+
+    it("GET /v1/sessions rejects a missing profile with 400", async () => {
+      const res = await app.inject({ method: "GET", url: "/v1/sessions" });
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error.code).toBe("invalid_request");
+    });
+
+    it("GET /v1/sessions rejects an invalid profile shape with 400", async () => {
+      const res = await app.inject({ method: "GET", url: "/v1/sessions?profile=../etc" });
+      expect(res.statusCode).toBe(400);
+    });
+
+    it("POST /v1/sessions launches and returns 201", async () => {
+      const res = await app.inject({
+        method: "POST",
+        url: "/v1/sessions",
+        payload: { profile: "march", repoPath: "/repo", branch: "march/spawn/x", title: "Steward" },
+      });
+      expect(res.statusCode).toBe(201);
+      expect(res.json().session.sessionId).toBe("sess-1");
+      expect(adapter.launch).toHaveBeenCalledWith(
+        expect.objectContaining({ profile: "march", group: "march-spawn-managers" }),
+      );
+    });
+
+    it("POST /v1/sessions surfaces a launch race as 409 conflict", async () => {
+      adapter = fakeAdapter({
+        launch: vi.fn(() => {
+          throw new CastraConflictError("wrong worktree");
+        }),
+      });
+      app = buildServer({ adapter });
+      const res = await app.inject({
+        method: "POST",
+        url: "/v1/sessions",
+        payload: { profile: "march", repoPath: "/repo", branch: "b", title: "t" },
+      });
+      expect(res.statusCode).toBe(409);
+      expect(res.json().error.code).toBe("conflict");
+    });
+
+    it("GET /v1/sessions/:id returns 404 for a missing session", async () => {
+      adapter = fakeAdapter({
+        show: vi.fn(() => {
+          throw new CastraNotFoundError("gone");
+        }),
+      });
+      app = buildServer({ adapter });
+      const res = await app.inject({ method: "GET", url: "/v1/sessions/sess-1?profile=march" });
+      expect(res.statusCode).toBe(404);
+      expect(res.json().error.code).toBe("not_found");
+    });
+
+    it("POST /v1/sessions/:id/send returns 202", async () => {
+      const res = await app.inject({
+        method: "POST",
+        url: "/v1/sessions/sess-1/send",
+        payload: { profile: "march", prompt: "go" },
+      });
+      expect(res.statusCode).toBe(202);
+      expect(adapter.send).toHaveBeenCalledWith({ profile: "march", sessionId: "sess-1", prompt: "go" });
+    });
+
+    it("POST /v1/sessions/:id/set rejects a non-allowlisted key with 400", async () => {
+      const res = await app.inject({
+        method: "POST",
+        url: "/v1/sessions/sess-1/set",
+        payload: { profile: "march", key: "danger", value: "x" },
+      });
+      expect(res.statusCode).toBe(400);
+      expect(adapter.set).not.toHaveBeenCalled();
+    });
+
+    it("POST /v1/sessions/:id/set accepts an allowlisted key", async () => {
+      const res = await app.inject({
+        method: "POST",
+        url: "/v1/sessions/sess-1/set",
+        payload: { profile: "march", key: "auto-mode", value: "true" },
+      });
+      expect(res.statusCode).toBe(200);
+      expect(adapter.set).toHaveBeenCalledWith({
+        profile: "march",
+        sessionId: "sess-1",
+        key: "auto-mode",
+        value: "true",
+      });
+    });
+
+    it("GET /v1/sessions/:id/output returns output payload", async () => {
+      const res = await app.inject({
+        method: "GET",
+        url: "/v1/sessions/sess-1/output?profile=march&lines=10",
+      });
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual({ output: "hello", truncated: false });
+      expect(adapter.output).toHaveBeenCalledWith({ profile: "march", sessionId: "sess-1", lines: 10 });
+    });
+
+    it("DELETE /v1/sessions/:id is idempotent (removed:false when already gone)", async () => {
+      adapter = fakeAdapter({ remove: vi.fn().mockReturnValue({ removed: false }) });
+      app = buildServer({ adapter });
+      const res = await app.inject({
+        method: "DELETE",
+        url: "/v1/sessions/sess-1?profile=march&pruneWorktree=true",
+      });
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual({ ok: true, removed: false });
+      expect(adapter.remove).toHaveBeenCalledWith({
+        profile: "march",
+        sessionId: "sess-1",
+        pruneWorktree: true,
+      });
+    });
+
+    it("maps an agent-deck failure to 502", async () => {
+      adapter = fakeAdapter({
+        list: vi.fn(() => {
+          throw new CastraAgentDeckError("tmux down");
+        }),
+      });
+      app = buildServer({ adapter });
+      const res = await app.inject({ method: "GET", url: "/v1/sessions?profile=march" });
+      expect(res.statusCode).toBe(502);
+      expect(res.json().error.code).toBe("agent_deck_error");
+    });
+
+    it("returns a generic message for an unexpected 500 (no internal detail leak)", async () => {
+      adapter = fakeAdapter({
+        list: vi.fn(() => {
+          throw new Error("secret path /etc/march/token leaked");
+        }),
+      });
+      app = buildServer({ adapter });
+      const res = await app.inject({ method: "GET", url: "/v1/sessions?profile=march" });
+      expect(res.statusCode).toBe(500);
+      expect(res.json().error.code).toBe("internal");
+      expect(res.json().error.message).toBe("Internal server error.");
+      expect(res.payload).not.toContain("secret path");
+    });
+
+    it("returns the uniform envelope for an unknown route", async () => {
+      const res = await app.inject({ method: "GET", url: "/v1/nope" });
+      expect(res.statusCode).toBe(404);
+      expect(res.json().error.code).toBe("not_found");
+    });
+  });
+});

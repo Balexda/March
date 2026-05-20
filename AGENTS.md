@@ -24,6 +24,7 @@ When you write a spec or a piece of code that makes the operator/automation trad
 - `src/brood/`: lifecycle state and cleanup: spawn records, worktrees, branches, running/stopped session tracking.
 - `src/herald/`: deterministic event bus and mini-herald modules. PR event schema, snapshots, event log, cursor handling, and daemon code belong here.
 - `src/legate/`: Legate conductor setup and orchestration bootstrap. Static deployed assets stay in `src/templates/legate/`.
+- `src/castra/`: Castra interactive-sessions host — the agent-deck adapter, the Fastify HTTP API over it, and request telemetry. `march castra serve` is the container entrypoint; the image/compose live at `docker/castra.Dockerfile` and `docker/castra.docker-compose.yml` (mirrors Hatchery). Owns the seam between consumers and `agent-deck`. See [`docs/Castra.md`](docs/Castra.md).
 - `src/observability/`: OpenTelemetry bootstrap (traces, metrics, **logs**), deterministic trace/span id helpers, spawn metrics (`spawn-metrics.ts`), Hatchery service metrics (`hatchery-metrics.ts`), the pino+OTLP logger (`logger.ts`), the dispatch-trace helper, and the in-sandbox emitter. Telemetry is env-gated (`MARCH_OTEL=1`) and a no-op when off (the log file is still written). Grafana/stack assets live under `docker/` (`otel-lgtm.docker-compose.yml`, `grafana/`).
 - `src/shared/`: small infrastructure utilities with no durable domain owner.
 
