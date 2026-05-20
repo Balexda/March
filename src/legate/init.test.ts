@@ -1402,7 +1402,7 @@ describe("legate module", () => {
       }
     });
 
-    it("configures managed containers to run the loop while the loop conductor tails docker logs", async () => {
+    it("runs the loop as a service in a managed container with no agent-deck loop session", async () => {
       const home = makeTmpDir();
       const binDir = makeTmpDir();
       const commandLog = path.join(home, "commands.log");
@@ -1447,17 +1447,23 @@ describe("legate module", () => {
         });
 
         expect(result.legateContainer?.containerId).toBe("container-id-managed");
+        // The container reads its meta from the staged loop dir.
         expect(
-          fs.existsSync(path.join(result.loopConductorDir!, "legate-loop.mjs")),
+          fs.existsSync(path.join(result.loopConductorDir!, "legate-loop-meta.json")),
         ).toBe(true);
         const log = fs.readFileSync(commandLog, "utf-8");
         expect(log).toContain(
           "docker run -d --name march-legate-march-legate-agent",
         );
-        expect(log).toContain('exec node "');
-        expect(log).toContain("legate-loop.mjs");
-        expect(log).toContain(
-          "session set conductor-march-legate-loop command docker logs -f --tail=200 march-legate-march-legate-agent",
+        // The loop now runs as a service via the baked-in CLI, not raw node, and
+        // publishes its HTTP API on a loopback host port.
+        expect(log).toContain("exec march legate loop");
+        expect(log).not.toContain('exec node "');
+        expect(log).toContain("-p 127.0.0.1:");
+        // No agent-deck conductor session is created/configured for the loop.
+        expect(log).not.toContain("conductor setup march-legate-loop");
+        expect(log).not.toContain(
+          "session set conductor-march-legate-loop command",
         );
         const heartbeat = fs.readFileSync(
           path.join(result.conductorDir, "heartbeat.sh"),

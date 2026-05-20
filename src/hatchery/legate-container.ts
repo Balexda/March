@@ -1,7 +1,9 @@
 import { execFileSync } from "node:child_process";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { CLI_VERSION } from "../shared/version.js";
 import { BASE_IMAGE } from "./spawn-config.js";
 
@@ -15,6 +17,24 @@ export class HatcheryError extends Error {
 export const LEGATE_IMAGE_TAG = `march-legate:${CLI_VERSION}`;
 export const LEGATE_DOCKERFILE_NAME = "Dockerfile";
 export const LEGATE_CONTAINER_HOME = "/home/march";
+
+/** Where the baked march CLI lives inside the image. */
+export const LEGATE_CLI_IMAGE_DIR = "/opt/march";
+/** Sub-dir of the build context that carries the baked CLI artifacts. */
+const LEGATE_CLI_CONTEXT_DIR = "march";
+/** Port the loop HTTP service listens on inside the container. */
+export const LEGATE_LOOP_CONTAINER_PORT = 8787;
+
+/**
+ * Deterministic loopback host port for a conductor's loop service. One container
+ * per profile means they would otherwise all collide on a single host port, so
+ * we hash the conductor name into 8800-9799. Deterministic so the legate-agent
+ * can recompute where to reach its loop without discovery.
+ */
+export function legateLoopHostPort(conductorName: string): number {
+  const digest = crypto.createHash("sha256").update(conductorName).digest();
+  return 8800 + (digest.readUInt16BE(0) % 1000);
+}
 
 const STDERR_TAIL_CHARS = 4_000;
 const DOCKER_OUTPUT_MAX_BUFFER = 16 * 1024 * 1024;
@@ -60,8 +80,67 @@ export function renderLegateDockerfile(baseImage: string = BASE_IMAGE): string {
     ` && apt-get install -y --no-install-recommends bash ca-certificates git jq openssh-client python3 tmux \\\n` +
     ` && rm -rf /var/lib/apt/lists/*\n` +
     `RUN mkdir -p ${LEGATE_CONTAINER_HOME} /workspace && chmod 0777 ${LEGATE_CONTAINER_HOME} /workspace\n` +
+    // Bake the CLI so the loop runs as `march legate loop` (a real service)
+    // rather than a raw node script. tsup externalizes runtime deps, so the
+    // bundle is NOT standalone — install production deps from the lockfile.
+    // package.json rides along so version.ts + ESM resolution (type:module) work
+    // from ${LEGATE_CLI_IMAGE_DIR}/dist/cli.js.
+    `COPY ${LEGATE_CLI_CONTEXT_DIR}/ ${LEGATE_CLI_IMAGE_DIR}/\n` +
+    `RUN cd ${LEGATE_CLI_IMAGE_DIR} \\\n` +
+    ` && npm ci --omit=dev --ignore-scripts --no-audit --no-fund \\\n` +
+    ` && npm cache clean --force\n` +
+    `RUN ln -sf ${LEGATE_CLI_IMAGE_DIR}/dist/cli.js /usr/local/bin/march \\\n` +
+    ` && chmod +x ${LEGATE_CLI_IMAGE_DIR}/dist/cli.js\n` +
     `WORKDIR /workspace\n`
   );
+}
+
+/**
+ * Locate the installed march package root (the dir holding both package.json and
+ * dist/cli.js) by walking up from this module. Works whether running from the
+ * bundled dist or from source. Throws if the CLI hasn't been built.
+ */
+export function locateMarchPackageRoot(): string {
+  let dir = path.dirname(fileURLToPath(import.meta.url));
+  for (let i = 0; i < 6; i++) {
+    if (
+      fs.existsSync(path.join(dir, "package.json")) &&
+      fs.existsSync(path.join(dir, "dist", "cli.js"))
+    ) {
+      return dir;
+    }
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  throw new HatcheryError(
+    "Could not locate the built march CLI (dist/cli.js) to bake into the Legate " +
+      "image. Run `npm run build` first.",
+  );
+}
+
+/**
+ * Copy the CLI bundle + package.json + lockfile (+ templates) into the image
+ * build context so the Dockerfile can `npm ci --omit=dev` and bake `march`.
+ */
+function stageCliIntoContext(contextPath: string): void {
+  const root = locateMarchPackageRoot();
+  const dest = path.join(contextPath, LEGATE_CLI_CONTEXT_DIR);
+  fs.mkdirSync(dest, { recursive: true });
+  fs.cpSync(path.join(root, "dist"), path.join(dest, "dist"), { recursive: true });
+  fs.copyFileSync(path.join(root, "package.json"), path.join(dest, "package.json"));
+  const lock = path.join(root, "package-lock.json");
+  if (!fs.existsSync(lock)) {
+    throw new HatcheryError(
+      "Could not find package-lock.json to bake the Legate image's production " +
+        "deps (npm ci). Run `npm install` to generate it.",
+    );
+  }
+  fs.copyFileSync(lock, path.join(dest, "package-lock.json"));
+  const templates = path.join(root, "src", "templates");
+  if (fs.existsSync(templates)) {
+    fs.cpSync(templates, path.join(dest, "src", "templates"), { recursive: true });
+  }
 }
 
 export function writeLegateDockerfile(
@@ -160,7 +239,6 @@ export interface LegateContainerRunArgsInput
   extends BuildLegateContainerArgsInput {
   readonly conductorName: string;
   readonly profile: string;
-  readonly loopScriptPath?: string;
   readonly imageTag?: string;
 }
 
@@ -204,13 +282,20 @@ export function buildLegateContainerRunArgs(
     args.push("-e", envVar);
   }
 
+  // Publish the loop HTTP API on a deterministic loopback host port so the
+  // host-side legate-agent can reach it. Loopback only — never public.
+  args.push(
+    "-p",
+    `127.0.0.1:${legateLoopHostPort(input.conductorName)}:${LEGATE_LOOP_CONTAINER_PORT}`,
+  );
+
+  // The loop now runs as a service (`march legate loop`) from the baked-in CLI,
+  // reading legate-loop-meta.json from the workdir (the loop conductor dir).
   args.push(
     imageTag,
     "sh",
     "-lc",
-    input.loopScriptPath
-      ? `printf 'March Legate loop starting: %s (%s)\\n' "$MARCH_LEGATE_CONDUCTOR" "$MARCH_LEGATE_PROFILE"; exec node ${JSON.stringify(input.loopScriptPath)}`
-      : "printf 'March Legate container ready: %s (%s)\\n' \"$MARCH_LEGATE_CONDUCTOR\" \"$MARCH_LEGATE_PROFILE\"; trap 'exit 0' TERM INT; while :; do sleep 3600; done",
+    `printf 'March Legate loop starting: %s (%s)\\n' "$MARCH_LEGATE_CONDUCTOR" "$MARCH_LEGATE_PROFILE"; exec march legate loop`,
   );
   return args;
 }
@@ -224,6 +309,8 @@ export interface LegateContainerResult {
   readonly containerName: string;
   readonly containerId: string;
   readonly replaced: boolean;
+  /** Loopback host port the loop's HTTP API is published on. */
+  readonly hostPort: number;
 }
 
 export function ensureLegateContainer(
@@ -236,6 +323,7 @@ export function ensureLegateContainer(
     contextPath,
     input.baseImage ?? BASE_IMAGE,
   );
+  stageCliIntoContext(contextPath);
 
   try {
     try {
@@ -291,6 +379,7 @@ export function ensureLegateContainer(
       containerName,
       containerId: text.trim(),
       replaced,
+      hostPort: legateLoopHostPort(input.conductorName),
     };
   } finally {
     try {

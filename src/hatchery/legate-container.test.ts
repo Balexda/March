@@ -17,8 +17,10 @@ import {
   HatcheryError,
   LEGATE_CONTAINER_HOME,
   LEGATE_IMAGE_TAG,
+  LEGATE_LOOP_CONTAINER_PORT,
   legateContainerMounts,
   legateContainerName,
+  legateLoopHostPort,
   renderLegateDockerfile,
   writeLegateDockerfile,
 } from "./legate-container.js";
@@ -70,6 +72,18 @@ describe("legate-container", () => {
     expect(body).toContain(`mkdir -p ${LEGATE_CONTAINER_HOME}`);
     expect(body).toContain(`chmod 0777 ${LEGATE_CONTAINER_HOME}`);
     expect(body).not.toContain("legate-march");
+    // Bakes the march CLI so the loop runs as `march legate loop`.
+    expect(body).toContain("COPY march/ /opt/march/");
+    expect(body).toContain("npm ci --omit=dev");
+    expect(body).toContain("ln -sf /opt/march/dist/cli.js /usr/local/bin/march");
+  });
+
+  it("derives a deterministic loopback host port per conductor", () => {
+    const a = legateLoopHostPort("legate-march");
+    expect(a).toBe(legateLoopHostPort("legate-march"));
+    expect(a).toBeGreaterThanOrEqual(8800);
+    expect(a).toBeLessThan(9800);
+    expect(legateLoopHostPort("other-conductor")).not.toBe(a);
   });
 
   it("writes the generated Dockerfile into the supplied build context", () => {
@@ -178,7 +192,6 @@ describe("legate-container", () => {
     const repo = path.join(home, "repo");
     const conductor = path.join(home, ".agent-deck", "conductor", "legate-march");
     const loop = path.join(home, ".agent-deck", "conductor", "march-legate-loop");
-    const loopScript = path.join(loop, "legate-loop.mjs");
     fs.mkdirSync(repo, { recursive: true });
     fs.mkdirSync(conductor, { recursive: true });
     fs.mkdirSync(loop, { recursive: true });
@@ -189,7 +202,6 @@ describe("legate-container", () => {
       repoPath: repo,
       conductorDir: conductor,
       loopConductorDir: loop,
-      loopScriptPath: loopScript,
       homeDir: home,
       imageTag: "march-legate:test",
       dockerSocketPath: path.join(home, "missing.sock"),
@@ -220,8 +232,13 @@ describe("legate-container", () => {
     expect(args).toContain("march-legate:test");
     expect(args).toContain("sh");
     expect(args).toContain("-lc");
+    // Publishes the loop API on a deterministic loopback host port.
+    expect(args).toContain("-p");
+    expect(args).toContain(
+      `127.0.0.1:${legateLoopHostPort("legate-march")}:${LEGATE_LOOP_CONTAINER_PORT}`,
+    );
     expect(args.at(-1)).toContain("March Legate loop starting");
-    expect(args.at(-1)).toContain(`exec node "${loopScript}"`);
+    expect(args.at(-1)).toContain("exec march legate loop");
   });
 
   it("builds the image, replaces any existing container, and returns the launched id", () => {

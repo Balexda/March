@@ -157,8 +157,23 @@ describe("march CLI", () => {
       expect(result.exitCode).toBe(2);
       const combined = result.stdout + result.stderr;
       expect(combined).toContain("Usage: march legate");
-      // The help should list `init` as a known subcommand.
+      // The help should list `init` and `loop` as known subcommands.
       expect(combined).toMatch(/^\s+init\b/m);
+      expect(combined).toMatch(/^\s+loop\b/m);
+    });
+
+    it("`march legate loop --help` exits 0 and prints the loop service flag surface", () => {
+      const result = run(["legate", "loop", "--help"]);
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain("Usage: march legate loop");
+      expect(result.stdout).toContain("--meta");
+      expect(result.stdout).toContain("--port");
+    });
+
+    it("`march legate loop --port bogus` exits with an invalid-port error", () => {
+      const result = run(["legate", "loop", "--port", "bogus"]);
+      expect(result.exitCode).not.toBe(0);
+      expect(result.stdout + result.stderr).toContain("Invalid --port");
     });
 
     it("`march legate <bad>` reports the actual unknown subcommand, not 'legate'", () => {

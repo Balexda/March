@@ -73,12 +73,15 @@ march legate init …            # freezes endpoint + enabled into loop meta
 - **Host conductor (default):** `localhost:4318` works directly. Make sure the
   agent-deck conductor that launches the loop inherits `MARCH_OTEL=1` so the
   orchestrator children emit too.
-- **Managed container (`--with-container`):** `MARCH_OTEL*` /
-  `OTEL_EXPORTER_OTLP_ENDPOINT` are forwarded into the container, but the
-  endpoint must be reachable from *inside* it — use
+- **Managed container (`--with-container`):** the loop runs as a service
+  (`march legate loop`, one container per profile, no agent-deck session for the
+  loop). `MARCH_OTEL*` / `OTEL_EXPORTER_OTLP_ENDPOINT` are forwarded into the
+  container, but the endpoint must be reachable from *inside* it — use
   `http://host.docker.internal:4318` (or `http://otel-lgtm:4318` on the `march`
   network). Run `init` with the **same** endpoint the container will use, so the
-  loop's frozen config matches its runtime network.
+  loop's frozen config matches its runtime network. (The service also reconciles
+  env from the frozen `meta.otel` at startup, so a meta written with telemetry on
+  lights up the SDK without re-setting the env.)
 
 ## What gets emitted
 
@@ -94,9 +97,9 @@ grouping.
 
 | span | emitted by | where |
 |---|---|---|
-| `legate.dispatch` | Legate loop | generated loop (`maybeEmitLoopSpan`) |
-| `legate.babysit` | Legate loop | generated loop |
-| `legate.cleanup` | Legate loop | generated loop |
+| `legate.dispatch` | Legate loop | loop service (`maybeEmitLoopSpan`, `src/legate/loop/runtime.ts`) |
+| `legate.babysit` | Legate loop | loop service |
+| `legate.cleanup` | Legate loop | loop service |
 | `hatchery.spawn` | orchestrator | `runHatcherySpawn` |
 | `spawn.start` | orchestrator | container create/start |
 | `spawn.end` | orchestrator | `waitForSpawnContainer` |
@@ -170,9 +173,30 @@ and prompt bodies stay out of metrics (they belong in spans/logs).
 passes an `x-march-slice-id` header, the span keys off that dispatch slice id so
 it nests under the existing per-dispatch trace.
 
+#### Loop heartbeat metrics
+
+The loop **service** emits one set of heartbeat metrics per tick via the OTel SDK
+([`src/observability/loop-metrics.ts`](../src/observability/loop-metrics.ts)),
+tagged `{profile, conductor}` only (plus a bounded `state` on the workers gauge).
+These answer "is the loop alive?" and "how deep is the queue?".
+
+| OTel instrument | Prometheus series | Meaning |
+|---|---|---|
+| `march.legate.loop.up` (gauge) | `march_legate_loop_up` | `1` while alive; absence ⇒ down |
+| `march.legate.loop.heartbeats` (counter) | `march_legate_loop_heartbeats_total` | completed ticks |
+| `march.legate.tick.age` (gauge, `s`) | `march_legate_tick_age_seconds` | seconds since last tick (staleness) |
+| `march.legate.tick.duration` (histogram, `s`) | `march_legate_tick_duration_seconds_{bucket,count,sum}` | tick wall-clock |
+| `march.legate.queue.dispatchable` (gauge) | `march_legate_queue_dispatchable` | tasks ready to dispatch now |
+| `march.legate.queue.blocked` (gauge) | `march_legate_queue_blocked` | pending tasks blocked on deps |
+| `march.legate.queue.total` (gauge) | `march_legate_queue_total` | total pending tasks |
+| `march.legate.workers` (gauge) | `march_legate_workers` | worker sessions by `state` |
+| `march.legate.dispatch.actions` (counter) | `march_legate_dispatch_actions_total` | dispatch actions taken |
+| `march.legate.dispatch.failures` (counter) | `march_legate_dispatch_failures_total` | dispatch failures |
+| `march.legate.cleanup.actions` (counter) | `march_legate_cleanup_actions_total` | maintenance actions by `action` |
+
 ### Logs
 
-The Hatchery service writes structured JSONL with pino to a log file
+The **Hatchery service** writes structured JSONL with pino to a log file
 (`$MARCH_HATCHERY_LOG_DIR/hatchery.jsonl`, default `~/.march/logs/`) **and**, when
 `MARCH_OTEL=1`, mirrors each record to the collector over OTLP/HTTP
 (`/v1/logs`) → Loki. The file sink is always on so logs survive even with
@@ -181,6 +205,27 @@ telemetry off; the OTLP bridge and pino level→OTel-severity mapping live in
 `trace_id`/`span_id` when emitted inside a dispatch span, so you can pivot from a
 log line to its trace. In Grafana: **Explore → Loki**, query
 `{service_name="march-hatchery"}`.
+
+The **Legate loop service** forwards its action log to Loki via the OTel logs SDK
+([`src/observability/logs.ts`](../src/observability/logs.ts);
+`service.name=march-legate`), **in addition to** writing the NDJSON/text files in
+the mounted conductor dir (so `docker logs` / `tail` still work for offline
+debugging). Each action event becomes one log record tagged `{profile, conductor,
+event_kind}`; failures map to `severity_text=ERROR`. Records for a dispatched
+unit of work carry the **same deterministic `trace_id`/`span_id`** as the dispatch
+span, so a log line in Grafana links straight to its Tempo trace. The per-tick
+heartbeat is **not** logged (it is captured by the metrics above).
+
+### The loop HTTP API
+
+The loop service runs a small loopback HTTP API (`src/legate/loop/http.ts`,
+Fastify) so the legate-agent can read loop state deterministically instead of
+scraping logs. It exposes `GET /healthz` (liveness) and `GET /status` (the latest
+heartbeat: queue depth, slice/worker counts, last-tick age). It is published on a
+**deterministic per-conductor loopback host port** (`legateLoopHostPort`,
+8800–9799) so multiple per-profile containers don't collide; the port is printed
+in the `march legate init --with-container` summary. Loopback only — never
+exposed publicly.
 
 ### Profiles (isolating test/integ telemetry)
 
@@ -248,12 +293,18 @@ task type, and a recent-dispatch-traces table (Tempo). `backend` / `task_type` /
 `profile` / `outcome` template variables filter the metric panels — set
 `profile` to scope a dashboard to one deployment (or exclude a test profile).
 
-A second dashboard,
+Two more dashboards cover the services.
 [`docker/grafana/dashboards/march-hatchery.json`](../docker/grafana/dashboards/march-hatchery.json)
-("**March — Hatchery service**"), covers the service itself: heartbeat/uptime,
+("**March — Hatchery service**") covers the Hatchery service: heartbeat/uptime,
 active spawns, HTTP request rate + latency percentiles + error rate, spawn
 success rate (shared `march_spawn_runs_total`), a Loki logs panel
 (`{service_name="march-hatchery"}`), and a Tempo traces table.
+[`docker/grafana/dashboards/march-legate-loop.json`](../docker/grafana/dashboards/march-legate-loop.json)
+("**March — Legate loop service**", uid `march-legate-loop`) monitors the loop
+service: liveness (up / last-tick age / heartbeat rate), queue depth
+(dispatchable / blocked / total), dispatch activity, workers by state, and
+forwarded loop logs (Loki, with trace links). It is filtered by `profile` /
+`conductor`, and cross-links the spawn dashboard via its header links.
 
 A third dashboard,
 [`docker/grafana/dashboards/march-castra.json`](../docker/grafana/dashboards/march-castra.json)
@@ -291,39 +342,44 @@ machinery, update the signals in lock-step:
 
 - **New loop lifecycle action or dispatch path** (a new `kind`/`action` in the
   loop's event stream) → add a branch to `maybeEmitLoopSpan` in
-  [`src/legate/init.ts`](../src/legate/init.ts) so it emits a span keyed off the
-  slice id. Root spans for a *new dispatched unit of work* should claim
-  `otelSpanId(sliceId)`; lifecycle actions on an existing dispatch should nest
-  under it via `parentSpanId`.
+  [`src/legate/loop/runtime.ts`](../src/legate/loop/runtime.ts) so it emits a span
+  keyed off the slice id. Root spans for a *new dispatched unit of work* should
+  claim `otelSpanId(sliceId)`; lifecycle actions on an existing dispatch should
+  nest under it via `parentSpanId`. Action events flowing through `append` are
+  also forwarded to Loki by `maybeEmitLoopLog` — add the kind there too if it
+  should show in the logs panels.
 - **New failure mode** → emit an **errored** span (and, where the orchestrator
   runs, the appropriate metric `outcome`) so the failure shows up rather than
   silently vanishing. Recovery and direct-steward dispatches are the worked
   example.
 - **A new process joins a trace** → reuse the deterministic id helpers so its
-  spans land in the right trace. They are intentionally duplicated, byte-for-byte
-  identical, in three places — keep them in sync:
-  [`src/observability/trace-ids.ts`](../src/observability/trace-ids.ts) (the
-  orchestrator), `otelTraceId` / `otelSpanId` in
-  [`src/legate/init.ts`](../src/legate/init.ts) (the loop), and
+  spans land in the right trace. The loop service and the in-container emitter now
+  both reuse [`src/observability/trace-ids.ts`](../src/observability/trace-ids.ts)
+  (the loop's `otelTraceId`/`otelSpanId` in
+  [`src/legate/loop/runtime.ts`](../src/legate/loop/runtime.ts) delegate to it;
   [`src/observability/in-spawn-emitter.ts`](../src/observability/in-spawn-emitter.ts)
-  (the in-container emitter). The cross-process test in `init.test.ts` locks this
-  alignment in.
-- **New metric or label** → add it in
-  [`src/observability/spawn-metrics.ts`](../src/observability/spawn-metrics.ts)
-  (spawn metrics) or
-  [`src/observability/hatchery-metrics.ts`](../src/observability/hatchery-metrics.ts)
-  (Hatchery service metrics). Keep labels low-cardinality — never add a
-  per-spawn/per-slice id or a concrete request path as a label; ids belong in
-  traces, and routes use the template form. Then update the dashboard JSON if a
-  panel should use it.
-- **New log call** → use the pino logger from
-  [`src/observability/logger.ts`](../src/observability/logger.ts) so it lands in
-  the file sink and ships via OTLP. Logs stay a complete no-op transport when
-  `MARCH_OTEL!=1` (the file is still written). Keep log attributes
-  low-cardinality too.
+  keeps a stand-alone copy since it ships into a no-`node_modules` container).
+  Keep them aligned — the cross-process test in `init.test.ts` locks this in.
+- **New metric or label** → spawn metrics in
+  [`src/observability/spawn-metrics.ts`](../src/observability/spawn-metrics.ts);
+  Hatchery service metrics in
+  [`src/observability/hatchery-metrics.ts`](../src/observability/hatchery-metrics.ts);
+  loop heartbeat metrics in
+  [`src/observability/loop-metrics.ts`](../src/observability/loop-metrics.ts).
+  Keep labels low-cardinality — never add a per-spawn/per-slice id or a concrete
+  request path as a label; ids belong in traces, and routes use the template
+  form. Then update the dashboard JSON if a panel should use it.
+- **New log call** → the Hatchery service uses the pino logger in
+  [`src/observability/logger.ts`](../src/observability/logger.ts) (file sink +
+  OTLP); the loop uses the OTel logs SDK in
+  [`src/observability/logs.ts`](../src/observability/logs.ts). Both stay no-ops
+  when `MARCH_OTEL!=1` (the loop still writes its files). Keep log attributes
+  low-cardinality.
 - **New panel / query** → edit
-  [`docker/grafana/dashboards/march-spawns.json`](../docker/grafana/dashboards/march-spawns.json)
-  or [`docker/grafana/dashboards/march-hatchery.json`](../docker/grafana/dashboards/march-hatchery.json).
+  [`docker/grafana/dashboards/march-spawns.json`](../docker/grafana/dashboards/march-spawns.json),
+  [`docker/grafana/dashboards/march-hatchery.json`](../docker/grafana/dashboards/march-hatchery.json),
+  or
+  [`docker/grafana/dashboards/march-legate-loop.json`](../docker/grafana/dashboards/march-legate-loop.json).
   Reference datasources by uid (`prometheus`, `tempo`, `loki`). Validate against
   a live stack before committing.
 
