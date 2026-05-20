@@ -24,6 +24,7 @@ When you write a spec or a piece of code that makes the operator/automation trad
 - `src/brood/`: lifecycle state and cleanup: spawn records, worktrees, branches, running/stopped session tracking.
 - `src/herald/`: deterministic event bus and mini-herald modules. PR event schema, snapshots, event log, cursor handling, and daemon code belong here.
 - `src/legate/`: Legate conductor setup and orchestration bootstrap. Static deployed assets stay in `src/templates/legate/`.
+- `src/observability/`: OpenTelemetry bootstrap, deterministic trace/span id helpers, spawn metrics, the dispatch-trace helper, and the in-sandbox emitter. Telemetry is env-gated (`MARCH_OTEL=1`) and a no-op when off. Grafana/stack assets live under `docker/` (`otel-lgtm.docker-compose.yml`, `grafana/`).
 - `src/shared/`: small infrastructure utilities with no durable domain owner.
 
 When a feature spans multiple subsystems, split code by ownership. For example, a future dispatch option may add CLI parsing in `src/cli/`, profile resolution in `src/hatchery/`, lifecycle updates in `src/brood/`, and execution changes in `src/spawn/`.
@@ -36,6 +37,7 @@ When a feature spans multiple subsystems, split code by ownership. For example, 
 - Keep generated `dist/` out of commits unless the release process asks for it.
 - Use `npm run` scripts for verification. Do not invoke `npx vitest`, `npx tsup`, or ad hoc equivalents.
 - Be aware that git-heavy tests may need permissions outside the default sandbox because they create temporary repositories and linked worktrees.
+- **Keep observability in lock-step with the dispatch machinery.** When you add a loop lifecycle action or a new dispatch path, emit a span for it (`maybeEmitLoopSpan` in `src/legate/init.ts`); when you add a failure mode, emit an *errored* span so it surfaces in traces; when a new process joins a trace, reuse the deterministic id helpers (kept byte-for-byte identical across `src/observability/trace-ids.ts`, `src/legate/init.ts`, and `src/observability/in-spawn-emitter.ts`). New metrics/labels go in `src/observability/spawn-metrics.ts` (low-cardinality only — never per-spawn/slice ids), and update `docker/grafana/dashboards/` to match. The full guide is [`docs/Observability.md`](docs/Observability.md).
 
 ## Verification
 
