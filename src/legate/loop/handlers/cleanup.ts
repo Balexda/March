@@ -1,7 +1,6 @@
 import type { HandlerContext, HandlerResult, LoopState } from "../state/types.js";
 import { emptyHandlerResult } from "../state/types.js";
 import { sessionMatchesSlice } from "../pure/session.js";
-import { formatCleanupLine, formatCleanupFailureLine } from "../pure/format.js";
 import { archiveSlice, dropSession, dropSlice } from "../state/mutations.js";
 
 /**
@@ -65,7 +64,6 @@ export function apply(decisions: CleanupDecision[], ctx: HandlerContext, state: 
         error: teardown.detail || "brood teardown did not confirm",
       };
       res.failures.push(failure);
-      ctx.log(formatCleanupFailureLine({ ts: ctx.ts, ...failure }));
       continue;
     }
     archiveSlice(state.raw, d.sliceId, slice, { number: d.prNumber, url: d.prUrl }, d.terminalState, ctx.ts);
@@ -86,8 +84,6 @@ export function apply(decisions: CleanupDecision[], ctx: HandlerContext, state: 
       removed: true,
     };
     res.actions.push(cleanup);
-    ctx.emit(cleanup);
-    ctx.log(formatCleanupLine(cleanup));
   }
   if (res.mutated) ctx.persist(state);
   return res;
