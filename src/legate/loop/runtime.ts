@@ -222,9 +222,16 @@ function execText(command, args, options = {}) {
   });
 }
 
+// In the container the baked `march` on PATH is authoritative; meta.march_cli_path
+// is a host path frozen at init that won't resolve in the container
+// (Balexda/March#149). Outside the container, keep using the frozen path.
+function inContainer() {
+  return process.env.MARCH_LEGATE_CONTAINER === "1";
+}
+
 function execMarch(args, options = {}) {
   const cliPath = meta.march_cli_path;
-  if (typeof cliPath === "string" && cliPath.length > 0) {
+  if (!inContainer() && typeof cliPath === "string" && cliPath.length > 0) {
     return execText(process.execPath, [cliPath, ...args], options);
   }
   return execText("march", args, options);
@@ -2031,7 +2038,7 @@ function hatcheryRunnerCode() {
 
 function marchCommandAndArgs(args) {
   const cliPath = meta.march_cli_path;
-  if (typeof cliPath === "string" && cliPath.length > 0) {
+  if (!inContainer() && typeof cliPath === "string" && cliPath.length > 0) {
     return { command: process.execPath, args: [cliPath, ...args] };
   }
   return { command: "march", args };
