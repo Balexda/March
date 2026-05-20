@@ -2663,7 +2663,16 @@ function hatcheryRunnerCode() {
     'let request = null;',
     'try {',
     '  request = JSON.parse(fs.readFileSync(requestPath, "utf-8"));',
-    '  const result = spawnSync(request.command, request.args, { cwd: request.cwd, encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"] });',
+    // request.otelEnv is present only when the deployment has telemetry on
+    // (meta.otel.enabled at init). It carries MARCH_OTEL=1 + endpoint down to
+    // the "march hatchery spawn" orchestrator so it emits spawn metrics/spans —
+    // the loop is launched by agent-deck as a bare node with no MARCH_OTEL in
+    // its env, so without this the orchestrator (which reads process.env) would
+    // emit nothing. Omitted when off, so the spawn argv/env is unchanged.
+    // (No backticks in this comment: it lives inside the LEGATE_LOOP_MJS literal.)
+    '  const spawnOpts = { cwd: request.cwd, encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"] };',
+    '  if (request.otelEnv) spawnOpts.env = Object.assign({}, process.env, request.otelEnv);',
+    '  const result = spawnSync(request.command, request.args, spawnOpts);',
     '  if (result.stderr) { try { fs.appendFileSync(logPath, result.stderr); } catch {} }',
     '  if (result.status === 0) {',
     '    fs.writeFileSync(resultPath, result.stdout || "", "utf-8");',
@@ -2730,13 +2739,22 @@ function launchHatcheryDispatch(item, resultPath, logPath, opts) {
   fs.writeFileSync(resultPath, "", "utf-8");
   const requestPath = hatcheryRequestPath(requestSliceId);
   const resolved = marchCommandAndArgs(args);
-  fs.writeFileSync(requestPath, JSON.stringify({
+  const requestBody = {
     command: resolved.command,
     args: resolved.args,
     cwd: repoPath,
     resultPath,
     logPath,
-  }) + "\\n", "utf-8");
+  };
+  // Propagate the deployment's frozen telemetry config to the spawn orchestrator
+  // so it emits even though the loop runs without MARCH_OTEL in its ambient env.
+  if (meta.otel && meta.otel.enabled) {
+    requestBody.otelEnv = {
+      MARCH_OTEL: "1",
+      MARCH_OTEL_ENDPOINT: meta.otel.endpoint || "http://localhost:4318",
+    };
+  }
+  fs.writeFileSync(requestPath, JSON.stringify(requestBody) + "\\n", "utf-8");
   const child = spawn(process.execPath, ["-e", hatcheryRunnerCode(), requestPath, resultPath, logPath], {
     cwd: repoPath,
     detached: true,

@@ -481,6 +481,11 @@ describe("legate module", () => {
       // be filtered out of a real deployment's metrics/traces.
       expect(loop).toContain('"--profile"');
       expect(loop).toContain("march.profile");
+      // The loop propagates its frozen telemetry config down to the spawn
+      // orchestrator (which reads process.env), since the loop itself is
+      // launched without MARCH_OTEL in its ambient env.
+      expect(loop).toContain("requestBody.otelEnv");
+      expect(loop).toContain("spawnOpts.env = Object.assign");
       // Loop-side OTEL spans, sharing the per-dispatch trace (trace id =
       // hash(slice id)) with the orchestrator spans via deterministic ids.
       expect(loop).toContain("function emitLoopSpan");
