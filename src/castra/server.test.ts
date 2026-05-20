@@ -229,6 +229,20 @@ describe("castra server", () => {
       expect(res.json().error.code).toBe("agent_deck_error");
     });
 
+    it("returns a generic message for an unexpected 500 (no internal detail leak)", async () => {
+      adapter = fakeAdapter({
+        list: vi.fn(() => {
+          throw new Error("secret path /etc/march/token leaked");
+        }),
+      });
+      app = buildServer({ adapter });
+      const res = await app.inject({ method: "GET", url: "/v1/sessions?profile=march" });
+      expect(res.statusCode).toBe(500);
+      expect(res.json().error.code).toBe("internal");
+      expect(res.json().error.message).toBe("Internal server error.");
+      expect(res.payload).not.toContain("secret path");
+    });
+
     it("returns the uniform envelope for an unknown route", async () => {
       const res = await app.inject({ method: "GET", url: "/v1/nope" });
       expect(res.statusCode).toBe(404);

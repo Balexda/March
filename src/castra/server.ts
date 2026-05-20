@@ -118,7 +118,7 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
     });
   });
 
-  app.setErrorHandler((err: Error & { validation?: unknown }, _request, reply) => {
+  app.setErrorHandler((err: Error & { validation?: unknown }, request, reply) => {
     if (err.validation) {
       void reply.code(400).send(errorBody("invalid_request", err.message));
       return;
@@ -139,7 +139,11 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
       void reply.code(502).send(errorBody("agent_deck_error", err.message));
       return;
     }
-    void reply.code(500).send(errorBody("internal", err.message));
+    // Unexpected error: log the full detail server-side, but return a generic
+    // message so paths/stderr/dependency internals don't leak to clients and
+    // the public 500 contract stays stable.
+    request.log.error({ err }, "unhandled castra error");
+    void reply.code(500).send(errorBody("internal", "Internal server error."));
   });
 
   app.setNotFoundHandler((request, reply) => {
