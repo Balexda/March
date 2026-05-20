@@ -43,7 +43,6 @@ describe.skipIf(!sqliteAvailable)("brood routes", () => {
     expect([200, 503]).toContain(res.statusCode);
     const body = res.json();
     expect(body).toHaveProperty("docker");
-    expect(body).toHaveProperty("agentDeck");
     expect(body).toHaveProperty("castra");
   });
 

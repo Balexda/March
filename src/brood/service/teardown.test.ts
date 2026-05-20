@@ -10,7 +10,6 @@ import {
   teardownSession,
   type TeardownDeps,
 } from "./teardown.js";
-import type { StewardRemoveResult } from "./castra-client.js";
 
 const tmpDirs: string[] = [];
 
@@ -59,7 +58,7 @@ function recordingDeps(
       if (options.stewardRemovesWorktree) {
         present.clear();
       }
-      return { removed: true, via: "castra" } satisfies StewardRemoveResult;
+      return { removed: true };
     },
     removeWorktreeExact: (_repo, target) => {
       // The worktree step passes only `worktreePath`; the branch step passes
@@ -283,6 +282,30 @@ describe.skipIf(!sqliteAvailable)("teardownSession", () => {
     expect(fs.readFileSync(path.join(dir, "container.log"), "utf-8")).toContain(
       "logs for container-aaa",
     );
+    store.close();
+  });
+
+  it("defers worktree + branch when steward removal fails (does not orphan a live checkout)", async () => {
+    const store = new SessionStore({ dbPath: ":memory:", importSpawnRecords: false });
+    const group = seedSpawnGroup(store);
+    const rec = recordingDeps(makeHome());
+    rec.deps.pathExists = (p) => p === group.worktreePath;
+    // Castra unreachable → removeSteward throws.
+    rec.deps.removeSteward = async () => {
+      throw new Error("Could not reach Castra");
+    };
+
+    const result = await teardownSession(store, group.spawnId, { force: true }, rec.deps);
+
+    expect(result.status).toBe("tearing-down"); // deferred, not torndown
+    expect(result.steps.find((s) => s.step === "steward")?.outcome).toBe("failed");
+    const worktree = result.steps.find((s) => s.step === "worktree");
+    expect(worktree?.outcome).toBe("skipped");
+    expect(worktree?.detail).toContain("deferred");
+    // The worktree was never actually removed...
+    expect(rec.worktreeTargets.some((t) => t.worktreePath)).toBe(false);
+    // ...and the registry row is left retryable (not torndown).
+    expect(store.get(group.spawnId)?.status).toBe("tearing-down");
     store.close();
   });
 });

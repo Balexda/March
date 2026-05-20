@@ -4,7 +4,7 @@ import {
   outcomeFromStatus,
   recordBroodRequest,
 } from "../../observability/brood-metrics.js";
-import { castraConfigured } from "./castra-client.js";
+import { createCastraClientFromEnv } from "../../castra/client.js";
 import type { SessionStore } from "./store.js";
 import {
   BroodConflictError,
@@ -94,16 +94,12 @@ export async function registerRoutes(
   app.get("/readyz", async (_request, reply) => {
     const finder = isFinderAvailable();
     const docker = finder && isOnPath("docker");
-    // Brood needs docker + git to reclaim artifacts; agent-deck is only needed
-    // for the steward fallback when castra is unconfigured.
+    // Brood needs docker + git locally to reclaim artifacts; steward teardown is
+    // delegated to Castra over HTTP (probed best-effort, not gating readiness).
+    const castra = await createCastraClientFromEnv().reachable();
     const ready = docker;
     reply.code(ready ? 200 : 503);
-    return {
-      ready,
-      docker,
-      agentDeck: finder && isOnPath("agent-deck"),
-      castra: castraConfigured(),
-    };
+    return { ready, docker, castra };
   });
 
   app.post("/sessions", async (request, reply) => {

@@ -10,10 +10,7 @@ import {
   removeSpawnWorktreeExact,
   type RemoveWorktreeResult,
 } from "../worktree.js";
-import {
-  removeStewardSession,
-  type StewardRemoveResult,
-} from "./castra-client.js";
+import { createCastraClientFromEnv } from "../../castra/client.js";
 import { broodArchiveDir, type SessionStore } from "./store.js";
 import type {
   SessionRecord,
@@ -45,7 +42,7 @@ export interface TeardownDeps {
   removeSteward?: (input: {
     sessionId: string;
     profile?: string;
-  }) => Promise<StewardRemoveResult>;
+  }) => Promise<{ removed: boolean }>;
   removeWorktreeExact?: (
     repoRoot: string,
     target: { worktreePath?: string; branch?: string },
@@ -63,7 +60,7 @@ interface ResolvedDeps {
   removeSteward: (input: {
     sessionId: string;
     profile?: string;
-  }) => Promise<StewardRemoveResult>;
+  }) => Promise<{ removed: boolean }>;
   removeWorktreeExact: (
     repoRoot: string,
     target: { worktreePath?: string; branch?: string },
@@ -73,11 +70,31 @@ interface ResolvedDeps {
   now: () => string;
 }
 
+/**
+ * Default steward removal — delegate to Castra (#153/#165), the interactive-
+ * sessions host that owns agent-deck. Brood owns the worktree, so it asks Castra
+ * to remove the session WITHOUT pruning the worktree (`pruneWorktree: false`)
+ * and removes the worktree itself by exact path afterward. Throws
+ * `CastraClientError` when Castra is unreachable — teardown then defers the
+ * worktree/branch removal rather than orphaning a live session's checkout.
+ */
+async function defaultRemoveSteward(input: {
+  sessionId: string;
+  profile?: string;
+}): Promise<{ removed: boolean }> {
+  const castra = createCastraClientFromEnv();
+  return castra.removeSession({
+    profile: input.profile ?? "",
+    sessionId: input.sessionId,
+    pruneWorktree: false,
+  });
+}
+
 function resolveDeps(deps: TeardownDeps): ResolvedDeps {
   return {
     removeContainer: deps.removeContainer ?? removeSpawnContainer,
     readContainerLogs: deps.readContainerLogs ?? readSpawnContainerLogs,
-    removeSteward: deps.removeSteward ?? removeStewardSession,
+    removeSteward: deps.removeSteward ?? defaultRemoveSteward,
     removeWorktreeExact: deps.removeWorktreeExact ?? removeSpawnWorktreeExact,
     pathExists: deps.pathExists ?? fs.existsSync,
     homeDir: deps.homeDir,
@@ -204,7 +221,11 @@ export async function teardownSession(
     steps.push({ step: "container", outcome: "skipped" });
   }
 
-  // 3. Steward (await — castra may reclaim the shared worktree).
+  // 3. Steward (await — Castra owns the agent-deck session and may reclaim the
+  //    shared worktree). If removal FAILS (e.g. Castra unreachable) we must NOT
+  //    proceed to remove the worktree — that would pull the checkout out from
+  //    under a still-live session. Defer the worktree/branch and retry next tick.
+  let stewardRemovalFailed = false;
   if (steward) {
     try {
       const res = await d.removeSteward({
@@ -214,9 +235,10 @@ export async function teardownSession(
       steps.push({
         step: "steward",
         outcome: res.removed ? "ok" : "skipped",
-        detail: res.detail ?? `via ${res.via}`,
+        detail: res.removed ? undefined : "already gone",
       });
     } catch (err) {
+      stewardRemovalFailed = true;
       steps.push({ step: "steward", outcome: "failed", detail: message(err) });
       warnings.push(`steward removal failed: ${message(err)}`);
     }
@@ -224,8 +246,14 @@ export async function teardownSession(
     steps.push({ step: "steward", outcome: "skipped" });
   }
 
-  // 4. Worktree (re-check after steward; castra may already have removed it).
-  if (primary.worktreePath && primary.repoPath) {
+  // 4. Worktree (re-check after steward; Castra may already have removed it).
+  if (stewardRemovalFailed) {
+    steps.push({
+      step: "worktree",
+      outcome: "skipped",
+      detail: "deferred: steward removal failed",
+    });
+  } else if (primary.worktreePath && primary.repoPath) {
     if (!d.pathExists(primary.worktreePath)) {
       steps.push({
         step: "worktree",
@@ -248,7 +276,13 @@ export async function teardownSession(
   }
 
   // 5. Branch.
-  if (primary.branch && primary.repoPath) {
+  if (stewardRemovalFailed) {
+    steps.push({
+      step: "branch",
+      outcome: "skipped",
+      detail: "deferred: steward removal failed",
+    });
+  } else if (primary.branch && primary.repoPath) {
     const res = d.removeWorktreeExact(primary.repoPath, {
       branch: primary.branch,
     });
@@ -262,34 +296,42 @@ export async function teardownSession(
     steps.push({ step: "branch", outcome: "skipped" });
   }
 
-  // 6. Mark torndown (the JSON SpawnRecord is left on disk; "disposed" is
-  //    derived from "registry torndown + artifacts gone").
-  store.markTorndown(primary.id);
-  if (steward && steward.id !== primary.id) {
-    store.markTorndown(steward.id);
+  // 6. Mark torndown — but only when the steward was actually removed. If it
+  //    wasn't, leave the row "tearing-down" so the next teardown request retries
+  //    (idempotent re-entry). The JSON SpawnRecord is left on disk; "disposed"
+  //    is derived from "registry torndown + artifacts gone".
+  if (!stewardRemovalFailed) {
+    store.markTorndown(primary.id);
+    if (steward && steward.id !== primary.id) {
+      store.markTorndown(steward.id);
+    }
   }
 
   // Telemetry: one span per teardown (ordered step events), errored when any
   // step failed, plus the low-cardinality teardown metric.
   const failed = steps.some((step) => step.outcome === "failed");
+  const outcome: "success" | "partial" | "error" = stewardRemovalFailed
+    ? "error"
+    : failed
+      ? "partial"
+      : "success";
+  const finalStatus = stewardRemovalFailed ? "tearing-down" : "torndown";
   for (const step of steps) {
     span.event(`teardown.${step.step}`, {
       outcome: step.outcome,
       ...(step.detail ? { detail: step.detail } : {}),
     });
   }
-  span.setAttributes({
-    "march.teardown.outcome": failed ? "partial" : "success",
-  });
-  span.end({ error: failed });
+  span.setAttributes({ "march.teardown.outcome": outcome });
+  span.end({ error: outcome !== "success" });
   recordBroodTeardown({
     kind: primary.kind,
-    outcome: failed ? "partial" : "success",
+    outcome,
     profile: steward?.profile ?? primary.profile ?? "unknown",
     durationSeconds: (Date.now() - startMs) / 1000,
   });
 
-  return { id: primary.id, status: "torndown", steps, warnings };
+  return { id: primary.id, status: finalStatus, steps, warnings };
 }
 
 function message(err: unknown): string {
