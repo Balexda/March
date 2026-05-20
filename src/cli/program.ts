@@ -9,6 +9,7 @@ import {
   isOnPath,
 } from "../shared/deps.js";
 import {
+  copyOtelEmitterToContainer,
   copyPromptToContainer,
   createSpawnContainer,
   launchSpawnContainer,
@@ -59,6 +60,7 @@ import { updateMarch, UpdateError } from "../bootstrap/update.js";
 import { CLI_VERSION } from "../shared/version.js";
 import { startDispatchSpan } from "../observability/spawn-trace.js";
 import { recordSpawnRun } from "../observability/spawn-metrics.js";
+import { buildSpawnOtelContext } from "../observability/in-spawn-emitter.js";
 import {
   createSpawnWorktree,
   removeSpawnWorktree,
@@ -826,11 +828,23 @@ program
       let containerId: string;
       try {
         containerId = dispatch.span("spawn.start", () => {
+          const otelCtx = buildSpawnOtelContext({
+            traceparent: dispatch.traceparent(),
+            attributes: {
+              "service.name": "march-spawn",
+              "march.task.name": taskName,
+              "march.task.type": taskType,
+              "march.backend": selectedBackend.name,
+              "march.spawn_id": worktree.spawnId,
+            },
+          });
           const cid = createSpawnContainer({
             spawnId: worktree.spawnId,
             backend: selectedBackend,
+            otel: otelCtx,
           });
           copyPromptToContainer(cid, prompt);
+          if (otelCtx) copyOtelEmitterToContainer(cid);
           startSpawnContainer(cid);
           markSpawnRecordRunning(worktree.spawnId, cid);
           return cid;

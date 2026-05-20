@@ -174,6 +174,58 @@ describe("container-launch", () => {
       );
     });
 
+    it("leaves argv byte-for-byte unchanged when no OTEL context is supplied", () => {
+      childProcessMock.execFileSync.mockReturnValueOnce(Buffer.from("id\n"));
+      createSpawnContainer({ spawnId: SPAWN_ID, backend: claudeCodeBackend });
+      const [, args] = childProcessMock.execFileSync.mock.calls[0];
+      const argList = args as string[];
+      expect(argList).not.toContain("--add-host");
+      expect(argList.join(" ")).not.toContain("OTEL_EXPORTER_OTLP_ENDPOINT");
+      expect(argList.join(" ")).not.toContain("TRACEPARENT=");
+      const imageIdx = argList.lastIndexOf(IMAGE_TAG);
+      expect(argList.slice(imageIdx + 1)).toEqual(EXPECTED_ENTRYPOINT);
+    });
+
+    it("injects host-gateway + OTLP env and wraps the entrypoint when OTEL is on", () => {
+      childProcessMock.execFileSync.mockReturnValueOnce(Buffer.from("id\n"));
+      const traceparent = `00-${"a".repeat(32)}-${"b".repeat(16)}-01`;
+      createSpawnContainer({
+        spawnId: SPAWN_ID,
+        backend: claudeCodeBackend,
+        otel: {
+          endpoint: "http://host.docker.internal:4318",
+          traceparent,
+          resourceAttributes: "service.name=march-spawn,march.task.type=forge",
+        },
+      });
+      const [, args] = childProcessMock.execFileSync.mock.calls[0];
+      const argList = args as string[];
+
+      // Host-gateway route so the bridge-network container reaches the host.
+      const hostIdx = argList.indexOf("--add-host");
+      expect(hostIdx).toBeGreaterThan(-1);
+      expect(argList[hostIdx + 1]).toBe("host.docker.internal:host-gateway");
+
+      // OTLP env injected as -e KEY=VALUE pairs.
+      expect(argList).toContain(
+        "OTEL_EXPORTER_OTLP_ENDPOINT=http://host.docker.internal:4318",
+      );
+      expect(argList).toContain(`TRACEPARENT=${traceparent}`);
+      expect(argList).toContain(
+        "OTEL_RESOURCE_ATTRIBUTES=service.name=march-spawn,march.task.type=forge",
+      );
+
+      // Entrypoint wrapped to time the agent run and emit a span afterwards,
+      // while preserving the original backend command and exit code.
+      const imageIdx = argList.lastIndexOf(IMAGE_TAG);
+      const entrypoint = argList.slice(imageIdx + 1);
+      expect(entrypoint[0]).toBe("sh");
+      expect(entrypoint[1]).toBe("-c");
+      expect(entrypoint[2]).toContain('$(cat /march/prompt.txt)');
+      expect(entrypoint[2]).toContain("/march/otel-emit.js");
+      expect(entrypoint[2]).toContain("exit $__rc");
+    });
+
     it("throws LaunchError surfacing the docker stderr tail on launch failure", () => {
       const stderrText =
         "docker: Error response from daemon: simulated launch failure: bind mount source path does not exist\n";

@@ -8,6 +8,7 @@ import {
   type SpawnBackend,
 } from "../spawn/backends.js";
 import {
+  copyOtelEmitterToContainer,
   copyPromptToContainer,
   createSpawnContainer,
   LaunchError,
@@ -35,6 +36,7 @@ import {
 } from "../brood/spawn-record.js";
 import { startDispatchSpan } from "../observability/spawn-trace.js";
 import { recordSpawnRun } from "../observability/spawn-metrics.js";
+import { buildSpawnOtelContext } from "../observability/in-spawn-emitter.js";
 
 export class HatcherySpawnError extends Error {
   constructor(message: string) {
@@ -760,8 +762,24 @@ export function runHatcherySpawn(
     }
 
     dispatch.span("spawn.start", () => {
-      containerId = createSpawnContainer({ spawnId, backend: input.backend });
+      const otelCtx = buildSpawnOtelContext({
+        traceparent: dispatch.traceparent(),
+        attributes: {
+          "service.name": "march-spawn",
+          "march.task.name": taskName,
+          "march.task.type": taskType,
+          "march.backend": input.backend.name,
+          "march.spawn_id": spawnId,
+          "march.slice_id": sliceId,
+        },
+      });
+      containerId = createSpawnContainer({
+        spawnId,
+        backend: input.backend,
+        otel: otelCtx,
+      });
       copyPromptToContainer(containerId, spawnPrompt);
+      if (otelCtx) copyOtelEmitterToContainer(containerId);
       startSpawnContainer(containerId);
       markSpawnRecordRunning(spawnId, containerId, input.homeDir);
     });

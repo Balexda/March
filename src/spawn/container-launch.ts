@@ -8,6 +8,12 @@ import {
 } from "./backends.js";
 import { SPAWN_CONFIG } from "../hatchery/spawn-config.js";
 import { spawnImageTag } from "./snapshot-build.js";
+import {
+  IN_SPAWN_EMITTER_PATH,
+  inSpawnEmitterScript,
+  type SpawnOtelContext,
+  wrapEntrypointWithEmitter,
+} from "../observability/in-spawn-emitter.js";
 
 /**
  * Error thrown by docker create/start/wait/logs operations in the
@@ -84,6 +90,12 @@ export interface LaunchSpawnContainerInput {
   readonly spawnId: string;
   /** Backend selected for this spawn. */
   readonly backend: SpawnBackend;
+  /**
+   * When set, the container is wired for telemetry: it gets a host-gateway
+   * route + OTLP env vars, and the backend entrypoint is wrapped to emit a
+   * `spawn.exec` span. Omit to keep the default no-egress sandbox posture.
+   */
+  readonly otel?: SpawnOtelContext;
 }
 
 export interface WaitForSpawnContainerResult {
@@ -162,6 +174,24 @@ export function createSpawnContainer(input: LaunchSpawnContainerInput): string {
     }
   }
 
+  // Telemetry wiring (only when an OTEL context is supplied): a host-gateway
+  // route + OTLP env so the in-container emitter can reach the collector, and a
+  // wrapped entrypoint that emits the agent-run span.
+  const hostFlags: string[] = [];
+  let entrypoint = backend.buildEntrypoint(CONTAINER_PROMPT_PATH);
+  if (input.otel) {
+    hostFlags.push("--add-host", "host.docker.internal:host-gateway");
+    envFlags.push(
+      "-e",
+      `OTEL_EXPORTER_OTLP_ENDPOINT=${input.otel.endpoint}`,
+      "-e",
+      `TRACEPARENT=${input.otel.traceparent}`,
+      "-e",
+      `OTEL_RESOURCE_ATTRIBUTES=${input.otel.resourceAttributes}`,
+    );
+    entrypoint = wrapEntrypointWithEmitter(entrypoint);
+  }
+
   const args: string[] = [
     "create",
     "--name",
@@ -175,10 +205,11 @@ export function createSpawnContainer(input: LaunchSpawnContainerInput): string {
     SPAWN_CONFIG.cpuLimit,
     "--network",
     SPAWN_CONFIG.networkMode,
+    ...hostFlags,
     ...volumeFlags,
     ...envFlags,
     imageTag,
-    ...backend.buildEntrypoint(CONTAINER_PROMPT_PATH),
+    ...entrypoint,
   ];
 
   let stdout: Buffer | string;
@@ -237,6 +268,33 @@ export function copyPromptToContainer(
         ? `docker cp prompt failed for "${containerId}":\n${tail}`
         : `docker cp prompt failed for "${containerId}": ${(err as Error).message}`,
     );
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Copy the in-container OTLP emitter script to {@link IN_SPAWN_EMITTER_PATH}.
+ * Call after {@link copyPromptToContainer} and before {@link startSpawnContainer}
+ * when launching with an OTEL context. Best-effort: a failure here leaves the
+ * wrapped entrypoint to no-op (`node … 2>/dev/null || true`) without affecting
+ * the spawn.
+ */
+export function copyOtelEmitterToContainer(containerId: string): void {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "march-spawn-otel-"));
+  const scriptPath = path.join(tmpDir, "otel-emit.js");
+  try {
+    fs.writeFileSync(scriptPath, inSpawnEmitterScript(), "utf-8");
+    execFileSync(
+      "docker",
+      ["cp", scriptPath, `${containerId}:${IN_SPAWN_EMITTER_PATH}`],
+      {
+        stdio: ["ignore", "ignore", "pipe"],
+        maxBuffer: DOCKER_OUTPUT_MAX_BUFFER,
+      },
+    );
+  } catch {
+    // Best-effort — telemetry must never fail the spawn.
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
