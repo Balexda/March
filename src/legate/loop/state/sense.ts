@@ -118,6 +118,7 @@ export function senseState(deps: SenseDeps): LoopState {
     slices,
     archived,
     repoPath,
+    workerGroup: deps.meta.worker_group,
     sessions,
     sessionsById,
     workers,

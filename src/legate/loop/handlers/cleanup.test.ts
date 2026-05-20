@@ -12,6 +12,7 @@ function loopState(over: Partial<LoopState> = {}): LoopState {
     slices: {},
     archived: {},
     repoPath: "/repo",
+    workerGroup: "legate-workers",
     sessions: [],
     sessionsById: new Map(),
     workers: { waiting: 0, running: 0, idle: 0, error: 0, stopped: 0, other: 0 },

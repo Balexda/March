@@ -45,6 +45,8 @@ export interface LoopState {
   slices: Record<string, any>;
   archived: Record<string, any>;
   repoPath: string | undefined;
+  /** The deployment's worker group (for session classification in handlers). */
+  workerGroup: string;
   /** Agent-deck-shaped sessions (mapped from Castra). */
   sessions: any[];
   sessionsById: Map<string, any>;
