@@ -1,0 +1,56 @@
+# Standalone observability stack for March.
+#
+#   docker compose -f docker/otel-lgtm.docker-compose.yml up -d
+#   open http://localhost:3000   (Grafana; default login admin/admin)
+#
+# grafana/otel-lgtm bundles Grafana + an OpenTelemetry Collector + Tempo
+# (traces) + Loki (logs) + Prometheus/Mimir (metrics) and auto-provisions the
+# Grafana datasources, so nothing else needs wiring.
+#
+# This is the first service of March's eventual multi-container stack. The
+# `march` network is declared up front so future services (legate-loop,
+# hatchery, Herald) can join it and reach the collector at `otel-lgtm:4318`.
+# Today's emitters reach it as:
+#   - march CLI on the host          -> http://localhost:4318
+#   - a spawn sandbox (bridge net)   -> http://host.docker.internal:4318
+#
+# Security: do NOT expose port 3000 (or the OTLP ports) on a public interface.
+name: march-otel
+
+services:
+  otel-lgtm:
+    image: grafana/otel-lgtm:0.11.16
+    container_name: march-otel-lgtm
+    restart: unless-stopped
+    ports:
+      - "3000:3000" # Grafana UI
+      - "4317:4317" # OTLP gRPC
+      - "4318:4318" # OTLP HTTP
+    environment:
+      # Persist the bundled databases under a single mounted root.
+      - GF_PATHS_DATA=/data/grafana
+    volumes:
+      # Persistence is optional — the image runs fully ephemeral without these.
+      # Mounted so dashboards/metrics/traces survive a restart.
+      - march-otel-grafana:/data/grafana
+      - march-otel-prometheus:/data/prometheus
+      - march-otel-loki:/data/loki
+      - march-otel-tempo:/data/tempo
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    networks:
+      - march
+
+networks:
+  march:
+    name: march
+
+volumes:
+  march-otel-grafana:
+  march-otel-prometheus:
+  march-otel-loki:
+  march-otel-tempo:

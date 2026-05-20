@@ -33,6 +33,8 @@ import {
   updateSpawnRecordPrompt,
   writeInitialSpawnRecord,
 } from "../brood/spawn-record.js";
+import { startDispatchSpan } from "../observability/spawn-trace.js";
+import { recordSpawnRun } from "../observability/spawn-metrics.js";
 
 export class HatcherySpawnError extends Error {
   constructor(message: string) {
@@ -50,6 +52,12 @@ export interface HatcherySpawnOptions {
   readonly title?: string;
   readonly branch?: string;
   readonly homeDir?: string;
+  /** Smithy verb (forge/cut/render/mark) for telemetry tagging. */
+  readonly taskType?: string;
+  /** Work-item slug for telemetry tagging. */
+  readonly taskName?: string;
+  /** Dispatch slice id; hashed into the trace id so all spans share one trace. */
+  readonly sliceId?: string;
 }
 
 export interface AgentDeckManagerSession {
@@ -691,23 +699,41 @@ export function runHatcherySpawn(
   const title = input.title?.trim() || `spawn manager ${spawnId}`;
   const group = input.managerGroup?.trim() || DEFAULT_MANAGER_GROUP;
   const startedAt = new Date().toISOString();
+  const startMs = Date.now();
+  const taskType = input.taskType?.trim() || "unknown";
+  const taskName = input.taskName?.trim() || "unknown";
+  const sliceId = input.sliceId?.trim() || "";
+
+  const dispatch = startDispatchSpan({
+    traceKey: sliceId || spawnId,
+    rootName: "hatchery.spawn",
+    attributes: {
+      "march.task.name": taskName,
+      "march.task.type": taskType,
+      "march.backend": input.backend.name,
+      "march.slice_id": sliceId,
+      "march.spawn_id": spawnId,
+    },
+  });
+  let exitCode: number | undefined;
 
   let manager: AgentDeckManagerSession | undefined;
-  manager = launchAgentDeckManager({
-    repoPath: input.repoPath,
-    spawnId,
-    branch,
-    title,
-    group,
-    profile: input.agentDeckProfile,
-  });
-
-  const spawnPrompt = buildSpawnPatchPrompt(input.prompt);
-
   let containerId: string | undefined;
   let logs = "";
   let handedOff = false;
   try {
+    manager = launchAgentDeckManager({
+      repoPath: input.repoPath,
+      spawnId,
+      branch,
+      title,
+      group,
+      profile: input.agentDeckProfile,
+    });
+
+    const spawnPrompt = buildSpawnPatchPrompt(input.prompt);
+
+    try {
     writeInitialSpawnRecord({
       id: spawnId,
       repoPath: input.repoPath,
@@ -733,14 +759,20 @@ export function runHatcherySpawn(
       handle.cleanup();
     }
 
-    containerId = createSpawnContainer({ spawnId, backend: input.backend });
-    copyPromptToContainer(containerId, spawnPrompt);
-    startSpawnContainer(containerId);
-    markSpawnRecordRunning(spawnId, containerId, input.homeDir);
+    dispatch.span("spawn.start", () => {
+      containerId = createSpawnContainer({ spawnId, backend: input.backend });
+      copyPromptToContainer(containerId, spawnPrompt);
+      startSpawnContainer(containerId);
+      markSpawnRecordRunning(spawnId, containerId, input.homeDir);
+    });
 
-    const waitResult = waitForSpawnContainer(containerId);
-    logs = readSpawnContainerLogs(containerId);
-    markSpawnRecordStopped(spawnId, waitResult.exitCode, input.homeDir);
+    const waitResult = dispatch.span("spawn.end", () => {
+      const r = waitForSpawnContainer(containerId!);
+      logs = readSpawnContainerLogs(containerId!);
+      markSpawnRecordStopped(spawnId, r.exitCode, input.homeDir);
+      return r;
+    });
+    exitCode = waitResult.exitCode;
     const managerPrompt = buildManagerPrompt({
       operatorPrompt: input.prompt,
     });
@@ -783,9 +815,12 @@ export function runHatcherySpawn(
       managerPrompt,
       metadata: metadataFor(input, manager, spawnId, branch, waitResult.exitCode, startedAt),
     });
-    applyPatchToManagerWorktree({
-      patchPath: artifacts.patchPath,
-      worktreePath: manager.worktreePath,
+    const managerWorktreePath = manager.worktreePath;
+    dispatch.span("steward.apply", () => {
+      applyPatchToManagerWorktree({
+        patchPath: artifacts.patchPath,
+        worktreePath: managerWorktreePath,
+      });
     });
     sendPromptToAgentDeckManager({
       sessionId: manager.sessionId,
@@ -835,6 +870,23 @@ export function runHatcherySpawn(
       throw err;
     }
     throw new HatcherySpawnError((err as Error).message);
+  }
+  } catch (err) {
+    dispatch.recordException(err);
+    throw err;
+  } finally {
+    const outcome: "success" | "failure" =
+      exitCode === 0 ? "success" : "failure";
+    if (exitCode !== undefined) {
+      dispatch.setAttributes({ "march.exit_code": exitCode });
+    }
+    dispatch.end({ error: outcome !== "success" });
+    recordSpawnRun({
+      backend: input.backend.name,
+      taskType,
+      outcome,
+      durationSeconds: (Date.now() - startMs) / 1000,
+    });
   }
 }
 

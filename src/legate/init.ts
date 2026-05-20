@@ -2354,6 +2354,7 @@ function launchHatcheryDispatch(item, resultPath, logPath) {
   if (typeof repoPath !== "string" || repoPath.length === 0) {
     throw new Error("repo path is missing");
   }
+  const dispatchIdent = dispatchIdentity(item);
   const args = [
     "hatchery",
     "spawn",
@@ -2367,6 +2368,12 @@ function launchHatcheryDispatch(item, resultPath, logPath) {
     dispatchTitle(item),
     "--branch",
     dispatchBranch(item),
+    "--task-type",
+    dispatchIdent.verb,
+    "--task-name",
+    dispatchIdent.stem,
+    "--slice-id",
+    dispatchSliceId(item),
     "--prompt",
     buildSmithySpawnPrompt(item),
     "--json",

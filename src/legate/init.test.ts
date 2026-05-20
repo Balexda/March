@@ -390,6 +390,13 @@ describe("legate module", () => {
       expect(loop).toContain('"--backend"');
       expect(loop).toContain('"codex"');
       expect(loop).toContain('"--json"');
+      // Telemetry tagging: the loop tags each hatchery dispatch with the smithy
+      // verb (task type), work-item slug (task name), and slice id (trace key).
+      expect(loop).toContain('"--task-type"');
+      expect(loop).toContain("dispatchIdent.verb");
+      expect(loop).toContain('"--task-name"');
+      expect(loop).toContain("dispatchIdent.stem");
+      expect(loop).toContain('"--slice-id"');
       expect(loop).toContain("dispatch_action_count");
       expect(loop).toContain("Number.isFinite(rawIntervalSeconds)");
       expect(loop).toContain("function safeTick()");

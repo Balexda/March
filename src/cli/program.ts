@@ -57,6 +57,8 @@ import {
 } from "../brood/spawn-record.js";
 import { updateMarch, UpdateError } from "../bootstrap/update.js";
 import { CLI_VERSION } from "../shared/version.js";
+import { startDispatchSpan } from "../observability/spawn-trace.js";
+import { recordSpawnRun } from "../observability/spawn-metrics.js";
 import {
   createSpawnWorktree,
   removeSpawnWorktree,
@@ -484,6 +486,9 @@ hatchery
   .option("--name <name>", "agent-deck session name/title for the manager")
   .option("--title <title>", "Alias for --name")
   .option("--branch <branch>", "Branch/worktree name for the manager session")
+  .option("--task-type <type>", "Task type (smithy verb) for telemetry tagging")
+  .option("--task-name <name>", "Task name (work-item slug) for telemetry tagging")
+  .option("--slice-id <id>", "Dispatch slice id; hashed into the telemetry trace id")
   .option("--json", "Print the Hatchery spawn result as JSON")
   .action((opts: {
     backend?: string;
@@ -493,6 +498,9 @@ hatchery
     name?: string;
     title?: string;
     branch?: string;
+    taskType?: string;
+    taskName?: string;
+    sliceId?: string;
     json?: boolean;
   }) => {
     commandHandled = true;
@@ -563,6 +571,9 @@ hatchery
         managerGroup: opts.managerGroup,
         title: opts.name ?? opts.title,
         branch: opts.branch,
+        taskType: opts.taskType,
+        taskName: opts.taskName,
+        sliceId: opts.sliceId,
       });
       if (opts.json) {
         console.log(JSON.stringify(result, null, 2));
@@ -592,8 +603,15 @@ program
     `Backend for spawn dispatch (${listBackends().join(", ")})`,
   )
   .option("--prompt <prompt>", "Prompt to run in the spawned backend")
+  .option("--task-type <type>", "Task type for telemetry tagging")
+  .option("--task-name <name>", "Task name for telemetry tagging")
   .allowUnknownOption()
-  .action((subcommand?: string, options?: { backend?: string; prompt?: string }) => {
+  .action((subcommand?: string, options?: {
+    backend?: string;
+    prompt?: string;
+    taskType?: string;
+    taskName?: string;
+  }) => {
     commandHandled = true;
     // Dispatch-only validation: only `march spawn dispatch` runs the full
     // dependency check (PATH search utility + git on PATH + docker on PATH +
@@ -648,6 +666,15 @@ program
         return;
       }
 
+      const taskType =
+        options?.taskType?.trim() ||
+        process.env.MARCH_TASK_TYPE?.trim() ||
+        "unknown";
+      const taskName =
+        options?.taskName?.trim() ||
+        process.env.MARCH_TASK_NAME?.trim() ||
+        "unknown";
+
       // checkSpawnDependencies has already verified we're inside a git
       // repo; re-run `git rev-parse --show-toplevel` here to capture the
       // absolute repo root for the worktree + SpawnRecord modules.
@@ -679,6 +706,19 @@ program
         return;
       }
 
+      const dispatchStartMs = Date.now();
+      const dispatch = startDispatchSpan({
+        traceKey: worktree.spawnId,
+        rootName: "spawn.dispatch",
+        attributes: {
+          "march.task.name": taskName,
+          "march.task.type": taskType,
+          "march.backend": selectedBackend.name,
+          "march.spawn_id": worktree.spawnId,
+        },
+      });
+      let dispatchExitCode: number | undefined;
+      try {
       // Initial SpawnRecord write (FR-019, data-model `absent → created`).
       // On failure, roll back the branch + worktree so no residual state
       // survives the partial dispatch.
@@ -785,13 +825,16 @@ program
       // a failed transition (SD-002).
       let containerId: string;
       try {
-        containerId = createSpawnContainer({
-          spawnId: worktree.spawnId,
-          backend: selectedBackend,
+        containerId = dispatch.span("spawn.start", () => {
+          const cid = createSpawnContainer({
+            spawnId: worktree.spawnId,
+            backend: selectedBackend,
+          });
+          copyPromptToContainer(cid, prompt);
+          startSpawnContainer(cid);
+          markSpawnRecordRunning(worktree.spawnId, cid);
+          return cid;
         });
-        copyPromptToContainer(containerId, prompt);
-        startSpawnContainer(containerId);
-        markSpawnRecordRunning(worktree.spawnId, containerId);
       } catch (err) {
         try {
           markSpawnRecordFailed(worktree.spawnId, {
@@ -819,14 +862,18 @@ program
       }
 
       try {
-        const waitResult = waitForSpawnContainer(containerId);
-        const logs = readSpawnContainerLogs(containerId);
-        fs.writeFileSync(spawnOutputPath(worktree.spawnId), logs, "utf-8");
-        markSpawnRecordStopped(worktree.spawnId, waitResult.exitCode);
-        if (logs.length > 0) {
-          process.stdout.write(logs);
-          if (!logs.endsWith("\n")) process.stdout.write("\n");
-        }
+        const waitResult = dispatch.span("spawn.end", () => {
+          const result = waitForSpawnContainer(containerId);
+          const out = readSpawnContainerLogs(containerId);
+          fs.writeFileSync(spawnOutputPath(worktree.spawnId), out, "utf-8");
+          markSpawnRecordStopped(worktree.spawnId, result.exitCode);
+          if (out.length > 0) {
+            process.stdout.write(out);
+            if (!out.endsWith("\n")) process.stdout.write("\n");
+          }
+          return result;
+        });
+        dispatchExitCode = waitResult.exitCode;
         process.exitCode = waitResult.exitCode === 0 ? SUCCESS : ERROR;
       } catch (err) {
         try {
@@ -844,6 +891,20 @@ program
             : (err as Error).message;
         process.stderr.write(message + "\n");
         process.exitCode = ERROR;
+      }
+      } finally {
+        const outcome: "success" | "failure" =
+          dispatchExitCode === 0 ? "success" : "failure";
+        if (dispatchExitCode !== undefined) {
+          dispatch.setAttributes({ "march.exit_code": dispatchExitCode });
+        }
+        dispatch.end({ error: outcome !== "success" });
+        recordSpawnRun({
+          backend: selectedBackend.name,
+          taskType,
+          outcome,
+          durationSeconds: (Date.now() - dispatchStartMs) / 1000,
+        });
       }
       return;
     }
