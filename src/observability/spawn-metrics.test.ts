@@ -13,6 +13,7 @@ describe("spawn-metrics", () => {
       recordSpawnRun({
         backend: "codex",
         taskType: "forge",
+        profile: "smithy",
         outcome: "success",
         durationSeconds: 1.5,
       }),

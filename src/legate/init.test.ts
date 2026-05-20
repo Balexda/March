@@ -476,6 +476,11 @@ describe("legate module", () => {
       expect(loop).toContain('"--task-name"');
       expect(loop).toContain("dispatchIdent.stem");
       expect(loop).toContain('"--slice-id"');
+      // Deployment profile (set at `march legate init`) is passed to the
+      // orchestrator and stamped on every loop span so test/integ telemetry can
+      // be filtered out of a real deployment's metrics/traces.
+      expect(loop).toContain('"--profile"');
+      expect(loop).toContain("march.profile");
       // Loop-side OTEL spans, sharing the per-dispatch trace (trace id =
       // hash(slice id)) with the orchestrator spans via deterministic ids.
       expect(loop).toContain("function emitLoopSpan");

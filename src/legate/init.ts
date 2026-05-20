@@ -789,7 +789,10 @@ function emitLoopSpan(opts) {
     if (!meta.otel || !meta.otel.enabled || !opts.traceKey) return;
     const endNanos = BigInt(Date.now()) * 1000000n;
     const startNanos = opts.startMs ? BigInt(Math.trunc(opts.startMs)) * 1000000n : endNanos;
-    const attributes = Object.entries(opts.attributes || {}).map(([k, v]) => ({ key: k, value: { stringValue: String(v) } }));
+    // Every loop span carries the deployment profile (set at \`march legate
+    // init\`, also what places agent-deck sessions) so test/integ telemetry can
+    // be filtered out of a real deployment's traces.
+    const attributes = Object.entries({ "march.profile": meta.profile || "unknown", ...(opts.attributes || {}) }).map(([k, v]) => ({ key: k, value: { stringValue: String(v) } }));
     const span = {
       traceId: otelTraceId(opts.traceKey),
       spanId: opts.spanId || crypto.randomBytes(8).toString("hex"),
@@ -2711,6 +2714,8 @@ function launchHatcheryDispatch(item, resultPath, logPath, opts) {
     title,
     "--branch",
     branch,
+    "--profile",
+    meta.profile,
     "--task-type",
     dispatchIdent.verb,
     "--task-name",

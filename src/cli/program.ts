@@ -489,6 +489,10 @@ hatchery
     "agent-deck profile for the manager session",
   )
   .option(
+    "--profile <profile>",
+    "deployment profile for telemetry tagging (set at `march legate init`); defaults to unknown",
+  )
+  .option(
     "--manager-group <group>",
     `agent-deck group for manager sessions (default: ${DEFAULT_MANAGER_GROUP})`,
   )
@@ -503,6 +507,7 @@ hatchery
     backend?: string;
     prompt?: string;
     agentDeckProfile?: string;
+    profile?: string;
     managerGroup?: string;
     name?: string;
     title?: string;
@@ -577,6 +582,7 @@ hatchery
         prompt,
         backend: selectedBackend,
         agentDeckProfile: opts.agentDeckProfile,
+        profile: opts.profile,
         managerGroup: opts.managerGroup,
         title: opts.name ?? opts.title,
         branch: opts.branch,
@@ -614,12 +620,14 @@ program
   .option("--prompt <prompt>", "Prompt to run in the spawned backend")
   .option("--task-type <type>", "Task type for telemetry tagging")
   .option("--task-name <name>", "Task name for telemetry tagging")
+  .option("--profile <profile>", "Deployment profile for telemetry tagging (default: unknown)")
   .allowUnknownOption()
   .action((subcommand?: string, options?: {
     backend?: string;
     prompt?: string;
     taskType?: string;
     taskName?: string;
+    profile?: string;
   }) => {
     commandHandled = true;
     // Dispatch-only validation: only `march spawn dispatch` runs the full
@@ -683,6 +691,9 @@ program
         options?.taskName?.trim() ||
         process.env.MARCH_TASK_NAME?.trim() ||
         "unknown";
+      // Profile is invoker-owned (no env fallback): a bare dispatch has no
+      // Legate deployment profile, so it defaults to "unknown".
+      const profile = options?.profile?.trim() || "unknown";
 
       // checkSpawnDependencies has already verified we're inside a git
       // repo; re-run `git rev-parse --show-toplevel` here to capture the
@@ -720,6 +731,7 @@ program
         traceKey: worktree.spawnId,
         rootName: "spawn.dispatch",
         attributes: {
+          "march.profile": profile,
           "march.task.name": taskName,
           "march.task.type": taskType,
           "march.backend": selectedBackend.name,
@@ -839,6 +851,7 @@ program
             traceparent: dispatch.traceparent(),
             attributes: {
               "service.name": "march-spawn",
+              "march.profile": profile,
               "march.task.name": taskName,
               "march.task.type": taskType,
               "march.backend": selectedBackend.name,
@@ -923,6 +936,7 @@ program
         recordSpawnRun({
           backend: selectedBackend.name,
           taskType,
+          profile,
           outcome,
           durationSeconds: (Date.now() - dispatchStartMs) / 1000,
         });

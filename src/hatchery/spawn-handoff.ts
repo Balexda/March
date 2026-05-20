@@ -54,6 +54,13 @@ export interface HatcherySpawnOptions {
   readonly title?: string;
   readonly branch?: string;
   readonly homeDir?: string;
+  /**
+   * Deployment profile for telemetry tagging — the Legate deployment's profile,
+   * passed down from the loop (set at `march legate init`). Owned by the
+   * deployment, not derived from the agent-deck profile. `"unknown"` for ad-hoc
+   * spawns. Lets test/integ telemetry be filtered out of real metrics.
+   */
+  readonly profile?: string;
   /** Smithy verb (forge/cut/render/mark) for telemetry tagging. */
   readonly taskType?: string;
   /** Work-item slug for telemetry tagging. */
@@ -715,12 +722,14 @@ export function runHatcherySpawn(
   const startMs = Date.now();
   const taskType = input.taskType?.trim() || "unknown";
   const taskName = input.taskName?.trim() || "unknown";
+  const profile = input.profile?.trim() || "unknown";
   const sliceId = input.sliceId?.trim() || "";
 
   const dispatch = startDispatchSpan({
     traceKey: sliceId || spawnId,
     rootName: "hatchery.spawn",
     attributes: {
+      "march.profile": profile,
       "march.task.name": taskName,
       "march.task.type": taskType,
       "march.backend": input.backend.name,
@@ -776,6 +785,7 @@ export function runHatcherySpawn(
         traceparent: dispatch.traceparent(),
         attributes: {
           "service.name": "march-spawn",
+          "march.profile": profile,
           "march.task.name": taskName,
           "march.task.type": taskType,
           "march.backend": input.backend.name,
@@ -909,6 +919,7 @@ export function runHatcherySpawn(
     recordSpawnRun({
       backend: input.backend.name,
       taskType,
+      profile,
       outcome,
       durationSeconds: (Date.now() - startMs) / 1000,
     });

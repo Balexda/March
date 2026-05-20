@@ -118,11 +118,13 @@ A dispatch whose **launch throws** (the orchestrator never runs) is recorded as
 an **errored** `legate.dispatch` span carrying `march.error`, so the failure
 still surfaces as a trace even though no `hatchery.spawn` was ever emitted.
 
+Every span also carries `march.profile` — see [Profiles](#profiles-isolating-testinteg-telemetry).
+
 ### Metrics
 
-Tagged `{backend, task_type, outcome}`. `spawn_id` / `slice_id` are deliberately
-**not** metric labels — per-spawn detail lives in traces, and keeping ids out of
-labels bounds cardinality.
+Tagged `{backend, task_type, profile, outcome}`. `spawn_id` / `slice_id` are
+deliberately **not** metric labels — per-spawn detail lives in traces, and
+keeping ids out of labels bounds cardinality.
 
 | OTel instrument | Prometheus series | Meaning |
 |---|---|---|
@@ -130,6 +132,30 @@ labels bounds cardinality.
 | `march.spawn.duration` (histogram, `s`) | `march_spawn_duration_seconds_{bucket,count,sum}` | spawn wall-clock duration |
 
 `outcome` is `success` (container exit 0) or `failure`.
+
+### Profiles (isolating test/integ telemetry)
+
+Every metric and span is tagged with a **profile** — metric label `profile`,
+span attribute `march.profile`. The profile is the **Legate deployment's
+profile**, chosen at deploy time:
+
+```bash
+march legate init -p smithy …    # this deployment's telemetry is profile="smithy"
+```
+
+It is owned by the deployment, not derived from the agent-deck profile or an
+environment variable. The same profile is what places the deployment's
+agent-deck sessions, so telemetry, sessions, and on-disk paths all line up under
+one name.
+
+This is what keeps integration-test runs from polluting a real deployment's
+numbers: run the tests under a dedicated profile (e.g. `gate`), and every panel
+filters them out with `profile=~"$profile"` (or
+`march_spawn_runs_total{profile!="gate"}` in a raw query). The profile flows
+through every emitter — loop spans (`meta.profile`), the orchestrator and the
+in-sandbox `spawn.exec` span (`march hatchery spawn --profile`, passed down by
+the loop), and the metrics. Spawns with no deployment profile (e.g. an ad-hoc
+`march spawn dispatch` without `--profile`) report `profile="unknown"`.
 
 ## The dashboard
 
@@ -143,7 +169,8 @@ without clobbering the bundled datasources or RED/JVM dashboards.
 Panels: spawn success rate, spawns by outcome, spawn rate by outcome, a
 task-type × outcome breakdown table, duration percentiles (p50/p95/p99), p95 by
 task type, and a recent-dispatch-traces table (Tempo). `backend` / `task_type` /
-`outcome` template variables filter the metric panels.
+`profile` / `outcome` template variables filter the metric panels — set
+`profile` to scope a dashboard to one deployment (or exclude a test profile).
 
 To browse raw traces: **Explore → Tempo**, query
 `{ resource.service.name =~ "march.*" }`. Metrics: **Explore → Prometheus**,
