@@ -422,15 +422,21 @@ describe("legate module", () => {
       // returned graph maps to "ready to dispatch right now" without us
       // having to filter done items out client-side.
       expect(loop).toContain('"status", "--format", "json", "--pending"');
-      // Recovery auto-reset: when master HEAD advances past the SHA recorded
-      // at exhaustion, the loop clears recovery_attempts[sliceId] so the
-      // next tick can try again under whatever changed. Without this, every
-      // exhausted slice stays parked until the operator hand-edits state.
-      expect(loop).toContain("function currentMasterHead");
-      expect(loop).toContain("state.recovery_exhausted_at_head");
-      expect(loop).toContain('action: "recovery_reset"');
-      expect(loop).toContain("master advanced");
-      expect(loop).toContain("recovery-reset");
+      // No-spawn fallback: after MAX_RECOVERY_ATTEMPTS codex spawn attempts,
+      // the loop hands the /smithy.<verb> command straight to a Claude
+      // steward (old mini-legate style) instead of escalating. Logged as a
+      // direct_dispatch action; tracked via state.direct_dispatch_done so it
+      // only fires once before final escalation.
+      expect(loop).toContain("function launchDirectStewardDispatch");
+      expect(loop).toContain("function buildDirectStewardMessage");
+      expect(loop).toContain("state.direct_dispatch_done");
+      expect(loop).toContain('action: "direct_dispatch"');
+      expect(loop).toContain("DIRECT DISPATCH — no spawn");
+      expect(loop).toContain("direct-dispatch");
+      expect(loop).toContain('dispatch_mode: "direct-steward"');
+      // The replaced master-advance reset must be fully gone.
+      expect(loop).not.toContain("recovery_exhausted_at_head");
+      expect(loop).not.toContain("recovery_reset");
       expect(loop).toContain('kind: "dispatch_failure"');
       expect(loop).toContain('kind: "dispatch_read_failure"');
       expect(loop).toContain("function launchHatcheryDispatch");

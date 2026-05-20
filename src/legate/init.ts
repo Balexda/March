@@ -2280,29 +2280,14 @@ function blockingMergedArchive(state, item, sliceId) {
   return null;
 }
 
-// Cap on recovery dispatches per original slice. Two attempts is enough to
-// distinguish a fluky worker (first attempt missed the checkbox) from a
-// systemic problem (the smithy spec itself is unparseable, the work is
-// genuinely impossible, or the prompt isn't taking). After this we escalate
-// to the legate agent instead of looping forever — but the counter
-// auto-resets when master advances (see handleRecoveryDispatch).
+// Cap on codex-spawn recovery dispatches per original slice before the loop
+// stops fighting the spawn path. Two attempts is enough to distinguish a
+// fluky worker (first attempt missed the checkbox) from a systemic codex
+// problem (truncated patches, the prompt not taking). After this we fall
+// back to a direct, no-spawn steward dispatch (see handleRecoveryDispatch) —
+// the old mini-legate style of handing the /smithy.<verb> command straight
+// to a Claude steward that does the whole job itself.
 const MAX_RECOVERY_ATTEMPTS = 2;
-
-// Snapshot of the local master HEAD, used to detect when a smithy- or
-// prompt-side fix has landed since a slice exhausted its recovery budget.
-// When the recorded exhausted_at_head differs from the current HEAD, the
-// loop resets recovery_attempts[sliceId] and lets the slice try again under
-// whatever changed. Returns null on git failure so the caller treats that
-// tick conservatively (no auto-reset).
-function currentMasterHead() {
-  const repoPath = meta.repo?.path;
-  if (typeof repoPath !== "string" || repoPath.length === 0) return null;
-  try {
-    return execText("git", ["rev-parse", "HEAD"], { cwd: repoPath }).trim();
-  } catch {
-    return null;
-  }
-}
 
 function graphNodes(status) {
   return status?.graph?.nodes && typeof status.graph.nodes === "object"
@@ -2667,6 +2652,133 @@ function launchHatcheryDispatch(item, resultPath, logPath, opts) {
   });
   child.unref();
   return { pid: child.pid || null, requestPath };
+}
+
+// Initial message handed to a direct-steward dispatch (no-spawn fallback).
+// The steward runs the /smithy.<verb> command itself and carries it all the
+// way to an open PR — the pre-Hatchery mini-legate flow. \`mergedArchive\` is
+// present when this is the fallback after recovery spawns failed; null on a
+// first-class direct dispatch.
+function buildDirectStewardMessage(item, mergedArchive) {
+  const commandLine = actionCommandLine(item.next_action);
+  const priorPr = mergedArchive?.pr || {};
+  const priorLine = priorPr.number
+    ? "A prior PR (#" + priorPr.number + ") merged for this artifact but left it incomplete — smithy still reports it as pending."
+    : "";
+  return [
+    "[DIRECT DISPATCH — no spawn] The Hatchery codex spawn path failed",
+    "repeatedly for this slice, so the loop is handing you the Smithy command",
+    "directly. Implement it yourself, end-to-end — do not wait for a patch.",
+    priorLine,
+    "",
+    "Run this Smithy command and carry it through to an open PR:",
+    commandLine,
+    "",
+    "Artifact: " + (item.path || item.title || "(unknown)"),
+    "",
+    "Requirements:",
+    "- Satisfy every acceptance criterion the step lists.",
+    "- Flip the matching tasks.md row(s) from \`[ ]\` to \`[x]\` in the same change.",
+    "- Commit, push, and open the PR yourself (\`gh pr create\`).",
+    "- Report the PR URL on the final line as \`PR: <url>\`.",
+    "- If genuinely blocked, escalate via \`NEED: <summary> — <next action>\`",
+    "  instead of ending your turn silently.",
+  ].filter((line) => line !== "").join("\\n");
+}
+
+// Direct-steward dispatch: the no-spawn fallback. Launches a plain Claude
+// steward on a fresh worktree+branch and hands it the /smithy.<verb> command
+// as the initial message. Reliable but slower/less parallel than codex spawn.
+// Returns {launched, sliceId, sessionId, error}. Mutates state.slices on
+// success so babysit/cleanup track the steward like any other.
+function launchDirectStewardDispatch(state, ts, item, sliceId, mergedArchive) {
+  const repoPath = state?.repo?.path || meta.repo?.path;
+  if (typeof repoPath !== "string" || repoPath.length === 0) {
+    return { launched: false, error: "repo path is missing" };
+  }
+  const bareBranch = dispatchBranch(item) + "-direct";
+  const featureBranch = "feature/" + bareBranch;
+  const directSliceId = sliceId + "-direct";
+  const title = "direct: " + dispatchTitle(item);
+  const message = buildDirectStewardMessage(item, mergedArchive);
+
+  let beforeIds;
+  try {
+    const beforeList = agentDeckList();
+    beforeIds = new Set(Array.isArray(beforeList) ? beforeList.map((s) => s.id) : []);
+  } catch {
+    beforeIds = new Set();
+  }
+  const launchArgs = [
+    "-p", meta.profile,
+    "launch",
+    repoPath,
+    "-t", title,
+    "-c", "claude",
+    "-g", meta.worker_group,
+    "--worktree", bareBranch,
+    "-b",
+    "--title-lock",
+    "--model", "opus",
+    "--extra-arg", "--permission-mode",
+    "--extra-arg", "auto",
+    "-message", message,
+    "-q",
+  ];
+  try {
+    execFileSync("agent-deck", launchArgs, {
+      encoding: "utf-8",
+      stdio: ["ignore", "ignore", "pipe"],
+    });
+  } catch (err) {
+    return { launched: false, sliceId: directSliceId, error: "agent-deck launch failed: " + (err?.message || String(err)).slice(0, 200) };
+  }
+  let newSessionId = null;
+  try {
+    const afterList = agentDeckList();
+    if (Array.isArray(afterList)) {
+      for (const s of afterList) {
+        if (!isWorkerSession(s)) continue;
+        if (beforeIds.has(s.id)) continue;
+        newSessionId = s.id;
+        break;
+      }
+    }
+  } catch {}
+  if (!newSessionId) {
+    return { launched: false, sliceId: directSliceId, error: "agent-deck launch returned no identifiable new session" };
+  }
+  try {
+    execFileSync("agent-deck", ["-p", meta.profile, "session", "set", newSessionId, "auto-mode", "true"], {
+      encoding: "utf-8",
+      stdio: ["ignore", "ignore", "pipe"],
+    });
+  } catch {
+    // Best-effort; the --permission-mode auto extra-arg already covers it.
+  }
+  const action = item.next_action || {};
+  const worktreesParent = path.join(path.dirname(repoPath), "WorkTrees", path.basename(repoPath));
+  state.slices[directSliceId] = {
+    kind: "smithy",
+    worker_session_id: newSessionId,
+    worker_title: title,
+    branch: bareBranch,
+    actual_branch: featureBranch,
+    worktree_path: path.join(worktreesParent, "feature-" + bareBranch.replace(/\\//g, "-")),
+    stage: "implementing",
+    implementing_started_at: ts,
+    pr: null,
+    command: action.command,
+    arguments: actionArguments(action),
+    artifact_path: item.path || null,
+    dispatch_mode: "direct-steward",
+    original_slice_id: sliceId,
+    prior_pr_number: mergedArchive?.pr?.number || null,
+    prior_pr_url: mergedArchive?.pr?.url || null,
+    last_action: ts,
+    last_action_note: "direct steward dispatch (no spawn) for " + actionCommandLine(action),
+  };
+  return { launched: true, sliceId: directSliceId, sessionId: newSessionId };
 }
 
 // If the hatchery runner dies before writing its result file, the slice would
@@ -3616,49 +3728,56 @@ function handleRecoveryDispatch(state, ts, item, sliceId, mergedArchive) {
   state.recovery_attempts = state.recovery_attempts && typeof state.recovery_attempts === "object"
     ? state.recovery_attempts
     : {};
-  state.recovery_exhausted_at_head = state.recovery_exhausted_at_head && typeof state.recovery_exhausted_at_head === "object"
-    ? state.recovery_exhausted_at_head
+  state.direct_dispatch_done = state.direct_dispatch_done && typeof state.direct_dispatch_done === "object"
+    ? state.direct_dispatch_done
     : {};
-
-  // Auto-reset when master has advanced since exhaustion. The dispatch loop
-  // can't tell whether the new master content fixes whatever was breaking
-  // recovery (a smithy.forge skill update, a spec rewrite, a worker prompt
-  // change), so we optimistically reset the counter and let the new state
-  // play out — if recovery still fails, it'll re-exhaust and re-escalate.
-  // This is the only path out of exhaustion without manual archive editing.
-  const currentHead = currentMasterHead();
-  const exhaustedAt = state.recovery_exhausted_at_head[sliceId];
-  if (exhaustedAt && currentHead && exhaustedAt !== currentHead) {
-    state.recovery_attempts[sliceId] = 0;
-    delete state.recovery_exhausted_at_head[sliceId];
-    actions.push({
-      action: "recovery_reset",
-      sliceId,
-      sessionId: null,
-      detail: "master advanced (" + exhaustedAt.slice(0, 7) + " → " + currentHead.slice(0, 7)
-        + "); cleared recovery_attempts so we can try " + sliceId + " again",
-    });
-  }
 
   const priorAttempts = Number(state.recovery_attempts[sliceId]) || 0;
   const attempt = priorAttempts + 1;
   const recoverySliceId = sliceId + "-recovery-" + attempt;
 
   if (attempt > MAX_RECOVERY_ATTEMPTS) {
-    // Exhausted: record the master HEAD so a future advance auto-resets
-    // (see the reset block above), nudge the legate agent once (dedup via
-    // requestKey), then leave the artifact alone.
-    if (currentHead) state.recovery_exhausted_at_head[sliceId] = currentHead;
+    // The codex spawn path has failed MAX_RECOVERY_ATTEMPTS times for this
+    // slice. Fall back ONCE to a direct, no-spawn steward dispatch — hand the
+    // /smithy.<verb> command straight to a Claude steward (old mini-legate
+    // style). It's slower but doesn't depend on codex producing an applicable
+    // patch, which is the thing that keeps failing.
+    if (!state.direct_dispatch_done[sliceId]) {
+      const direct = launchDirectStewardDispatch(state, ts, item, sliceId, mergedArchive);
+      if (direct.launched) {
+        state.direct_dispatch_done[sliceId] = ts;
+        actions.push({
+          action: "direct_dispatch",
+          sliceId: direct.sliceId,
+          sessionId: direct.sessionId || null,
+          detail: "codex spawn failed " + priorAttempts + "x; fell back to a no-spawn direct steward dispatch of "
+            + actionCommandLine(item.next_action)
+            + (mergedArchive?.pr?.number ? " (prior partial PR #" + mergedArchive.pr.number + ")" : ""),
+        });
+      } else {
+        failures.push({ slice_id: sliceId, command: actionCommandLine(item.next_action), error: direct.error || "direct dispatch failed" });
+        notifications.push({
+          slice: mergedArchive, sliceId,
+          requestKey: "direct-dispatch-failed:" + sliceId + ":" + hashText(String(direct.error || "")).slice(0, 12),
+          reason: "direct_dispatch_failed",
+          detail: "Codex spawn failed " + priorAttempts + "x for " + sliceId + " and the no-spawn direct steward fallback ALSO failed to launch: "
+            + (direct.error || "(unknown)") + ". Manual intervention required.",
+        });
+      }
+      return { actions, failures, notifications };
+    }
+    // Direct dispatch was already attempted and we're STILL being asked to
+    // recover this slice (its direct PR merged without finishing, or smithy
+    // still reports it ready). No fallback left — escalate for a human.
     notifications.push({
       slice: mergedArchive, sliceId,
-      requestKey: "recovery-exhausted:" + sliceId + ":" + priorAttempts + ":" + (currentHead || "no-head").slice(0, 12),
+      requestKey: "recovery-exhausted:" + sliceId + ":post-direct",
       reason: "recovery_dispatch_exhausted",
-      detail: "Recovery dispatch for " + sliceId + " hit MAX_RECOVERY_ATTEMPTS=" + MAX_RECOVERY_ATTEMPTS + ". "
-        + "Smithy still reports " + (item.path || "(unknown artifact)") + " as ready, "
-        + "but every recovery merged without ticking the tasks.md box. "
-        + "The loop will retry automatically once master advances past " + (currentHead || "the current HEAD").slice(0, 7)
-        + " (assuming the new content addresses the gap). For immediate retry, "
-        + "clear state.recovery_attempts[\\"" + sliceId + "\\"] manually.",
+      detail: "Recovery for " + sliceId + " is exhausted: " + MAX_RECOVERY_ATTEMPTS + " codex spawn attempts AND a "
+        + "no-spawn direct steward dispatch all failed to complete the work (smithy still reports "
+        + (item.path || "the artifact") + " as ready). The spec may be wrong or the work genuinely blocked — "
+        + "inspect the prior PRs and the artifact, then clear state.recovery_attempts[\\"" + sliceId + "\\"] "
+        + "and state.direct_dispatch_done[\\"" + sliceId + "\\"] to retry.",
     });
     return { actions, failures, notifications };
   }
@@ -4058,11 +4177,11 @@ function tick() {
     );
   }
   for (const action of dispatchResult.actions) {
-    const isRecovery = action.action === "recovery_dispatch" || action.action === "recovery_reset";
+    const isRecovery = action.action === "recovery_dispatch" || action.action === "direct_dispatch";
     const logPrefix = action.action === "recovery_dispatch"
       ? "recovery-dispatch"
-      : action.action === "recovery_reset"
-      ? "recovery-reset"
+      : action.action === "direct_dispatch"
+      ? "direct-dispatch"
       : "dispatch";
     const event = {
       schema_version: 1,
