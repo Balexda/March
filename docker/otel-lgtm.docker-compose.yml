@@ -43,7 +43,10 @@ services:
       - ./grafana/provisioning/dashboards/march.yaml:/otel-lgtm/grafana/conf/provisioning/dashboards/march.yaml:ro
       - ./grafana/dashboards:/etc/march/dashboards:ro
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:3000/api/health"]
+      # The image ships curl but not wget, so probe with curl — otherwise the
+      # container reports "unhealthy" forever despite Grafana being up, and any
+      # future `depends_on: condition: service_healthy` would never pass.
+      test: ["CMD", "curl", "-fsS", "http://localhost:3000/api/health"]
       interval: 10s
       timeout: 5s
       retries: 12
