@@ -101,4 +101,13 @@ describe.skipIf(!sqliteAvailable)("SessionStore", () => {
     expect(torndown?.torndownAt).toBeTruthy();
     store.close();
   });
+
+  it("treats kind as immutable on re-register", () => {
+    const store = makeStore();
+    store.register({ id: "s4", kind: "spawn" });
+    const rereg = store.register({ id: "s4", kind: "steward", containerId: "c1" });
+    expect(rereg.kind).toBe("spawn"); // kind not flipped
+    expect(rereg.containerId).toBe("c1"); // other fields still merge
+    store.close();
+  });
 });

@@ -230,8 +230,13 @@ export class SessionStore {
       createdAt: now,
       updatedAt: now,
     };
-    const { id: _id, ...rest } = input;
+    // `kind` is immutable once a row exists: a re-register must not be able to
+    // flip a spawn into a steward (etc.) and break parent/teardown assumptions.
+    // It is dropped from the merge, so `base.kind` (the existing row's kind, or
+    // the new row's kind) is preserved.
+    const { id: _id, kind: _kind, ...rest } = input;
     void _id;
+    void _kind;
     const merged = mergeDefined(base, { ...rest, updatedAt: now });
     this.persist(merged);
     return merged;
