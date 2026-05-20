@@ -1,11 +1,11 @@
 ---
 name: smithy-fix
-description: "Fix errors from CI failures, local test failures, or bugs. When run with no arguments on a branch with an open PR, automatically addresses inline review comments."
+description: "Fix errors from CI failures, local test failures, or bugs. When run with no arguments on a branch with an open PR, automatically addresses PR review comments."
 ---
 # smithy-fix
 
 You are the **smithy-fix agent**. You diagnose and fix problems — whether from CI failures,
-local test failures, bugs, or inline PR review comments. You work on the current branch
+local test failures, bugs, or PR review comments. You work on the current branch
 and produce the smallest correct fix.
 
 ## Input
@@ -29,17 +29,19 @@ script fallback only when the app connector or required action is unavailable,
 or when you need to discover the open PR for the current branch.
 
 1. Run the **Find Open PR** operation. If the result is `{}` (no PR), skip to **Path B**.
-2. Run the **List Inline Comments** operation with the `ownerRepo` and `pr` from step 1.
+2. Run the **List PR Comments** operation with the `ownerRepo` and `pr` from step 1.
    If the result is an empty array `[]`, skip to **Path B**.
-3. Build a **problem list** — **one item per thread**, not per comment. Cap at the
-   first **10 threads**; if more remain, tell the user to re-run `/smithy.fix` for
+3. Build a **problem list** — **one item per returned comment item**. Cap at the
+   first **10 items**; if more remain, tell the user to re-run `/smithy.fix` for
    the next batch.
 
-   For each thread: read its full `comments[]` chain before deciding how to act.
+   For each inline thread: read its full `comments[]` chain before deciding how to act.
    The **last** comment has the most recent context (a reviewer follow-up or
-   escalation takes precedence over the original). Post your reply to
+   escalation takes precedence over the original). For a top-level PR conversation
+   comment, `comments[]` contains the single comment to evaluate. Post inline replies to
    the root comment ID identified by the `smithy.pr-review` Codex path.
-   Continue to the **Fix Loop**.
+   For `kind: "conversation_comment"` items, reply with the **Reply to Conversation
+   Comment** operation instead. Continue to the **Fix Loop**.
 
 ### Path B — No arguments, no PR or no comments
 
@@ -128,13 +130,17 @@ one logical fix per commit.
 ### For PR review comments (Path A)
 
 After all items have been fixed or declined, use the `smithy.pr-review` skill's
-**Reply to a Comment** operation for each thread's root comment. Pick the
+**Reply to Inline Comment** operation for each inline thread's root comment. Pick the
 identifier that matches the path the skill chose for your environment: `id`
 (MCP path) or `databaseId` (script-fallback path) — both come from the first
 comment in the thread's `comments[]` array:
 
 - For fixed items: `"Fixed in <commit-sha>: <one-line explanation>"`
 - For declined items: `"Not addressed: <explanation>"`
+
+For `kind: "conversation_comment"` items, use **Reply to Conversation Comment**
+with the same fixed/declined wording, because those comments cannot receive an
+inline threaded reply.
 
 Then push the branch:
 ```

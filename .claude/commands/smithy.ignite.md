@@ -83,7 +83,7 @@ same section titles as the RFC template code fence later in this prompt.
 | `## Personas`                                     | 3b        |
 | `## Goals`, `## Out of Scope`                     | 3c        |
 | `## Proposal`, `## Design Considerations`         | 3d        |
-| `## Decisions`, `## Open Questions`               | 3e        |
+| `## Decisions`, `## Specification Debt`           | 3e        |
 | `## Milestones`                                   | 3f        |
 
 ### Phase 0.1: Branch on Detected State
@@ -137,9 +137,10 @@ Use the **smithy-refine** sub-agent. Pass it:
   | Category | What to check |
   |----------|---------------|
   | **Problem Statement** | Problem clarity, solution outline, compelling motivation |
-  | **Goals** | Concrete, achievable, non-overlapping |
-  | **Out of Scope Completeness** | Are explicit exclusions documented, not just implied? Are scope boundaries drawn tightly enough that adjacent concerns can't creep in? A section that exists but only vaguely gestures at exclusions fails this check. |
+  | **Goals** | Concrete, achievable, non-overlapping. Goals describe outcomes; they MUST NOT name milestones (`M1`, `M-A`, "delivered by M-C") or use the word "milestone". Milestones realize goals, not the reverse — flag any goal that can only be stated by pointing at the milestone that delivers it. |
+  | **Out of Scope Completeness** | Are explicit exclusions documented, not just implied? Are scope boundaries drawn tightly enough that adjacent concerns can't creep in? Items phrased as "deferred to M-N" or "covered by a later milestone" are in scope for this RFC and MUST NOT appear here — flag them as findings to move into the relevant milestone description. A section that exists but only vaguely gestures at exclusions fails this check. |
   | **Persona Coverage** | Are personas identified with enough description to explain who they are and how this RFC benefits them? Are they relevant to the stated goals? A section that lists a persona by name without describing their role or benefit fails this check. |
+  | **No Open Questions section** | The RFC must not contain a `## Open Questions` heading. Unresolved uncertainty belongs in the `## Specification Debt` table as `SD-NNN` rows. Flag any `## Open Questions` heading as a finding to remove (translating any remaining open questions into Specification Debt rows first). |
   | **Milestones** | Well-defined scope, clear boundaries, success criteria |
   | **Feasibility** | Technical risks, dependency concerns, resource assumptions |
   | **Scope** | Drift from stated goals, feature creep indicators |
@@ -154,8 +155,17 @@ After the sub-agent returns its summary:
 1. Apply the refinements from smithy-refine directly to the RFC file in place
    — refine is non-interactive and returns high-confidence refinements ready
    to apply. Do not pause for user approval before writing.
-2. Route any low-confidence findings returned in `debt_items` into the RFC's
-   `## Specification Debt` section.
+2. Route the Medium/Low-confidence findings returned in `debt_items` into
+   the RFC's `## Specification Debt` section. Never reword a description into a
+   directive, never append rows that did not come from `debt_items`, and do
+   **not** populate the section from the Cross-Cutting Governance / touched-
+   files matrix, from milestone deferrals, or from post-hoc resolution
+   records — those have proper homes elsewhere in the RFC and the kind gate
+   in `smithy-clarify` Step 3 has already filtered them out. At the RFC
+   layer in particular, an empty `## Specification Debt` section is the
+   common, expected outcome — write `_None — no specification debt was
+   recorded._` rather than back-filling the table from coordination notes
+   or future-work to make it look non-empty.
 3. Run the **Plan-Review Pass** described below on the refined RFC file
    before committing. Plan-review runs after refine has applied its changes
    and before the commit below, so any High-confidence fixes it proposes are
@@ -330,10 +340,12 @@ Present the reconciled plan to the user as:
 
 ### Read Prior Clarify Log
 
-Before dispatching smithy-clarify, check whether a `.clarify-log.md` file
-already exists at the RFC folder derived in Phase 1 — for example,
-`docs/rfcs/<YYYY>-<NNN>-<slug>/.clarify-log.md` — using the exact folder
-path resolved during intake, not a hard-coded location.
+Before dispatching smithy-clarify, check whether a clarify log already exists
+for this RFC at `.smithy/clarify-logs/<YYYY>-<NNN>-<slug>.clarify-log.md` —
+using the same slug ignite computed during Phase 1 intake. The log lives in
+the Smithy-owned `.smithy/clarify-logs/` directory (which is gitignored — see
+the append step below), not under the RFC folder, so it never leaks into the
+RFC's commit even if the operator runs `git add .`.
 
 - If the file does not exist, **skip this step silently** and proceed to the
   dispatch below. This is the first-session case — there is nothing to read
@@ -366,14 +378,29 @@ Use the **smithy-clarify** sub-agent. Pass it:
 ### Append New Clarify Log Session
 
 After smithy-clarify returns its summary of assumptions and Q&A, and before
-Phase 3 begins, persist the results to `.clarify-log.md` so future sessions
-on this RFC folder can deduplicate against them:
+Phase 3 begins, persist the results to the per-RFC clarify log so future
+sessions on this RFC can deduplicate against them:
 
-1. Ensure the RFC folder `docs/rfcs/<YYYY>-<NNN>-<slug>/` exists. If it does
-   not yet exist, **create it now** so the write succeeds even on the first
-   session — sub-phase 3a may not have run yet, so the orchestrator cannot
-   assume the folder is already on disk.
-2. Format the returned assumptions and Q&A as a new
+1. **Ensure `.smithy/clarify-logs/` is gitignored.** Before writing the log,
+   read the repo's root `.gitignore`. If it does not contain an entry that
+   matches `.smithy/clarify-logs/` (either `.smithy/clarify-logs/` or a
+   broader pattern that covers it), append the following two lines to the end
+   of `.gitignore`:
+
+   ```
+   # Smithy: clarify-log scratch files (per-RFC append-only working memory)
+   .smithy/clarify-logs/
+   ```
+
+   Skip this step silently if the entry already exists. Do **not** touch any
+   other line in `.gitignore`; in particular, do not move, rewrite, or
+   reformat existing entries. The `.smithy/smithy-manifest.json` file lives
+   at `.smithy/` root and is unaffected by this rule — only the
+   `clarify-logs/` subdirectory is ignored.
+2. Ensure the directory `.smithy/clarify-logs/` exists. Create it if
+   missing. The `.smithy/` directory itself is created by `smithy init`, but
+   the `clarify-logs/` subdirectory may not exist yet on the first session.
+3. Format the returned assumptions and Q&A as a new
    `### Session YYYY-MM-DD` entry using today's date, following exactly this
    structure:
 
@@ -393,9 +420,9 @@ on this RFC folder can deduplicate against them:
    from any other source. Omit either the `**Assumptions**` or
    `**Questions & Answers**` block if smithy-clarify returned nothing for
    that category, but always include the `### Session YYYY-MM-DD` heading.
-3. **Append** the new session entry to
-   `docs/rfcs/<YYYY>-<NNN>-<slug>/.clarify-log.md`. The log is append-only —
-   never overwrite prior sessions, and never modify existing
+4. **Append** the new session entry to
+   `.smithy/clarify-logs/<YYYY>-<NNN>-<slug>.clarify-log.md`. The log is
+   append-only — never overwrite prior sessions, and never modify existing
    `### Session YYYY-MM-DD` entries. If the file does not yet exist, create
    it with the new entry as its first session.
 
@@ -452,8 +479,8 @@ hand-off with the following rules:
    the resumed sub-phase. The sub-agents below all expect
    `idea_description` (normally produced by Phase 1 intake) and
    `clarify_output` (normally produced by Phase 2 clarification), and the
-   inline sub-phase 3e synthesizes Decisions/Open Questions directly from
-   the clarification record. When Phase 0 hands off into a resume, those
+   inline sub-phase 3e synthesizes Decisions directly from the
+   clarification record. When Phase 0 hands off into a resume, those
    in-session artifacts may not exist, so the orchestrator MUST rebuild
    them before continuing:
    - **`idea_description`**: re-derive from the existing `## Summary` and
@@ -461,12 +488,14 @@ hand-off with the following rules:
      those sections do not yet exist (e.g., 3a is the first missing
      sub-phase), fall back to the user's current invocation arguments or
      ask the user to restate the idea in one or two sentences.
-   - **`clarify_output`**: prefer loading the RFC folder's
-     `.clarify-log.md` if it exists. If no log is present, run **Phase 2
-     (Clarify)** before dispatching the first resumed sub-phase so the
-     downstream sub-agents receive grounded clarification context rather
-     than fabricated answers. Do not silently dispatch with empty
-     clarification.
+   - **`clarify_output`**: prefer loading the per-RFC clarify log at
+     `.smithy/clarify-logs/<YYYY>-<NNN>-<slug>.clarify-log.md` if it
+     exists. (This path replaces the legacy in-RFC-folder
+     `.clarify-log.md`; the slug here is the same one ignite uses for the
+     RFC folder.) If no log is present, run **Phase 2 (Clarify)** before
+     dispatching the first resumed sub-phase so the downstream sub-agents
+     receive grounded clarification context rather than fabricated answers.
+     Do not silently dispatch with empty clarification.
 4. **Begin dispatch** from the designated starting sub-phase and continue
    through sub-phase 3g normally, using the append-and-continue protocol
    above for each remaining sub-phase.
@@ -520,7 +549,11 @@ Dispatch **smithy-plan** with:
 - **Planning context**: "Draft the Goals and Out of Scope sections for this RFC"
 - **Feature/problem description**: the user's idea description plus the full clarification output from Phase 2
 - **Codebase file paths**: the path to the accumulating `<slug>.rfc.md` (which by this point contains Summary, Motivation, and Personas from earlier sub-phases)
-- **Additional planning directives**: constrain smithy-plan to produce only the Goals and Out of Scope sections in the RFC template format — not a full planning document. The returned content **must** include a `## Out of Scope` section; it is a required section, never omitted. Source the exclusions from the clarification output when that record identifies items explicitly called out as out of scope. If no exclusions were identified during clarification, smithy-plan must still emit the `## Out of Scope` section with the single placeholder entry `None identified at this time` so the section is never left empty.
+- **Additional planning directives**: constrain smithy-plan to produce only the Goals and Out of Scope sections in the RFC template format — not a full planning document. Apply the following section-role rules.
+
+  **Goals.** Each bullet describes an outcome this RFC commits to delivering, phrased in terms a stakeholder can evaluate without reading the Milestones section. Goals MUST NOT name milestones (e.g., `M-A`, `M1`, "delivered by M-C"), reference milestone IDs by any notation, describe milestone sequencing, or use the word "milestone". The milestone decomposition is downstream of the goals — **milestones reference goals; goals do not reference milestones.** If a candidate goal can only be stated by pointing at the milestone that delivers it, rewrite it as the outcome the milestone produces, or drop it.
+
+  **Out of Scope.** Each bullet is a capability this RFC explicitly will NOT deliver — items that no milestone in this RFC covers and that a future RFC (or a separate effort) would be needed to address. An item that is "deferred to M-N", "covered by a later milestone", or "in scope but not yet specified at this layer" is **in scope for this RFC** and MUST NOT appear here — surface those inside the relevant milestone's description in sub-phase 3f instead. Source out-of-scope entries only from clarification answers that named a capability as excluded from the work entirely (clarify Scope category, "explicitly out of scope" answers). The returned content **must** include a `## Out of Scope` section; it is a required section, never omitted. If no exclusions were identified during clarification, smithy-plan must still emit the `## Out of Scope` section with the single placeholder entry `None identified at this time` so the section is never left empty.
 
 Append the returned content to the RFC file.
 
@@ -535,23 +568,24 @@ Dispatch **smithy-plan** with:
 
 Append the returned content to the RFC file.
 
-### Sub-phase 3e: Decisions + Open Questions
+### Sub-phase 3e: Decisions
 
 This sub-phase is orchestrator-inline — no sub-agent dispatch.
 
-Synthesize the **Decisions** and **Open Questions** sections directly from the
-clarification record (Phase 2 output) and the reconciled approach (Phase 1.5):
+Synthesize the **Decisions** section directly from the clarification record
+(Phase 2 output) and the reconciled approach (Phase 1.5):
 
-- **Decisions**: Items that were discussed and resolved during clarification or
-  reconciliation. Each entry states what was decided and why.
-- **Open Questions**: Items that remain genuinely unresolved and need further
-  investigation or stakeholder input.
+- **Decisions**: Items that were discussed and resolved during clarification
+  or reconciliation. Each entry states what was decided and why.
 
-Refer to the "Decisions vs Open Questions" guidance below the template code
-fence for the distinction between these two sections.
+The RFC has **no `## Open Questions` section**. Genuinely unresolved
+uncertainty is already captured as `SD-NNN` rows in `## Specification Debt`
+by smithy-clarify (and later refine / plan-review passes); duplicating it as
+prose under a separate heading would split the same uncertainty across two
+formats. Refer to the "Decisions vs Specification Debt" guidance below the
+template code fence.
 
-Append both formatted sections (`## Decisions` and `## Open Questions`) to the
-RFC file.
+Append the formatted `## Decisions` section to the RFC file.
 
 ### Sub-phase 3f: Milestones
 
@@ -579,14 +613,16 @@ dispatched in 3g.
      by name, a Proposal referencing a Persona).
    - **Reorder sections to match the RFC template structure** (Summary →
      Motivation / Problem Statement → Goals → Out of Scope → Personas →
-     Proposal → Design Considerations → Decisions → Open Questions →
-     Specification Debt → Milestones → Dependency Order). This reordering is
-     required because sub-phase 3b appends Personas before sub-phase 3c
-     appends Out of Scope, so a correctly drafted Personas section will be
-     misplaced in the accumulating file and MUST be moved into canonical
-     position here.
+     Proposal → Design Considerations → Decisions → Specification Debt →
+     Milestones → Dependency Order). This reordering is required because
+     sub-phase 3b appends Personas before sub-phase 3c appends Out of Scope,
+     so a correctly drafted Personas section will be misplaced in the
+     accumulating file and MUST be moved into canonical position here.
    - Verify that every expected RFC template section is present and non-empty.
    - **Out of Scope safety net**: explicitly verify that the `## Out of Scope` section exists and contains substantive content. If the section is missing entirely, insert it in the correct template position (immediately after `## Goals`) with the single placeholder entry `None identified at this time`. If the section is present but empty or contains no substantive content, fill it in place with the same placeholder phrasing `None identified at this time`. This safety net mirrors the sub-phase 3c directive so both enforcement layers use identical placeholder text.
+   - **Goals scope-scrub**: scan every bullet in `## Goals` for milestone references — any token matching `M[0-9]+`, `M-[A-Z]`, or the literal word "milestone" (case-insensitive). If a goal can only be expressed by naming the milestone that delivers it, rewrite it as the outcome the milestone produces (drop the milestone reference). If the milestone reference cannot be separated from the bullet without losing the goal, drop the bullet — milestones realize goals, not the other way around. This safety net mirrors the sub-phase 3c directive.
+   - **No `## Open Questions` section.** If a `## Open Questions` heading was generated by an earlier sub-phase or carried over from a prior draft of this RFC, **remove it**. Genuinely unresolved uncertainty belongs in `## Specification Debt` as an `SD-NNN` row with `clarify:Risks` or the appropriate clarify category — not as a separate narrative section. If removing the section would lose information that is not already represented in Specification Debt, translate each remaining open question into a new `SD-NNN` row (continue numbering from existing rows) before deleting the heading.
+   - **`## Specification Debt` safety net**: explicitly verify that the `## Specification Debt` section exists at the canonical position (after `## Decisions` and before `## Milestones`). If the section is missing entirely, insert it at that position with the placeholder body `_None — no specification debt was recorded._`. Do **not** back-fill the table from coordination notes, future-work bullets, or milestone deferrals — an empty placeholder is the correct outcome when no debt was recorded by clarify, refine, or plan-review. This safety net mirrors the Phase 0 state-detection contract so a legacy RFC missing the debt table is healed in place on resume.
    - **`## Personas` is a mandatory verified section.** Explicitly check that
      the harmonized RFC contains a non-empty `## Personas` section positioned
      after `## Out of Scope` and before `## Proposal`, and that it lists at
@@ -621,10 +657,13 @@ dispatched in 3g.
 Confirm the harmonize step completed before proceeding to Phase 4.
 
 
-**Important — Decisions vs Open Questions**: Items discussed during clarification
-that have been resolved belong in **Decisions** (document what was decided and why).
-Only genuinely unresolved unknowns that need further investigation or stakeholder
-input belong in **Open Questions**. Do not list resolved items as open questions.
+**Important — Decisions vs Specification Debt**: Items discussed during
+clarification that have been resolved belong in **Decisions** (document what
+was decided and why). Genuinely unresolved unknowns that need further
+investigation or stakeholder input belong in the **Specification Debt** table
+as `SD-NNN` rows — not as a separate narrative section. The RFC has no
+`## Open Questions` section; treating unresolved items as informal prose
+duplicates the debt table in a less structured format.
 
 ```markdown
 # RFC: <Title>
@@ -642,14 +681,14 @@ of not solving it?>
 
 ## Goals
 
-- <Goal 1>
-- <Goal 2>
-- <Goal 3>
+- <Outcome 1 — what this RFC commits to delivering, stated as a result a stakeholder can evaluate. Do NOT reference milestone IDs (M1, M-A, etc.) or the word "milestone"; milestones realize goals, not the reverse.>
+- <Outcome 2>
+- <Outcome 3>
 
 ## Out of Scope
 
-- <Explicitly excluded capability 1>
-- <Explicitly excluded capability 2>
+- <Capability 1 this RFC will NOT deliver — must be a true exclusion, not deferred work. Bad: "Eval rubrics — deferred to M-F or later". Good: "Production observability — lives in operations-doc territory, not in this RFC.">
+- <Capability 2>
 
 ## Personas
 
@@ -670,11 +709,6 @@ influence downstream design decisions. Keep this at "WHAT not HOW" level.>
 
 - <Decision 1 — what was decided and the rationale>
 - <Decision 2>
-
-## Open Questions
-
-- <Genuinely unresolved question 1>
-- <Genuinely unresolved question 2>
 
 ## Specification Debt
 
@@ -850,7 +884,13 @@ was recorded.`)
   severity was Critical.
 - **Specification Debt**: copy each item from the clarify return's
   `debt_items` array, including its Impact level. The leading count MUST
-  match the number of bullets rendered.
+  match the number of bullets rendered. Each bullet's description must
+  read as a steering need — an open question or "unresolved choice
+  between X and Y" — and must come straight from `debt_items` without
+  rewording. Do not synthesize bullets here from requirements,
+  acceptance tests, dependency/coordination notes, or deferred-work
+  notices; if clarify's kind gate (see `smithy-clarify` Step 3) dropped
+  those, they stay dropped.
 - **PR**: the URL captured from the PR creation step (see the
   `pr-create-tool-choice` snippet for which tool ran).
 

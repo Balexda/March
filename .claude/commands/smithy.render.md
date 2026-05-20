@@ -522,7 +522,13 @@ was recorded.`)
   severity was Critical.
 - **Specification Debt**: copy each item from the clarify return's
   `debt_items` array, including its Impact level. The leading count MUST
-  match the number of bullets rendered.
+  match the number of bullets rendered. Each bullet's description must
+  read as a steering need — an open question or "unresolved choice
+  between X and Y" — and must come straight from `debt_items` without
+  rewording. Do not synthesize bullets here from requirements,
+  acceptance tests, dependency/coordination notes, or deferred-work
+  notices; if clarify's kind gate (see `smithy-clarify` Step 3) dropped
+  those, they stay dropped.
 - **PR**: the URL captured from the PR creation step (see the
   `pr-create-tool-choice` snippet for which tool ran).
 

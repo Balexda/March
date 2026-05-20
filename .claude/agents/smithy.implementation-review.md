@@ -87,10 +87,15 @@ it never takes the action itself.
 | Severity | Confidence | Parent Action |
 |----------|------------|---------------|
 | Critical | High | Apply proposed fix, note in PR |
-| Critical | Low | Record as specification debt, flag in PR for reviewer |
+| Critical | Low | Record as specification debt **if it passes the kind gate** (see `smithy-clarify` Step 3b for the canonical definition and routing table), otherwise route via the gate's routing table and flag in PR for reviewer |
 | Important | High | Apply proposed fix |
-| Important | Low | Record as specification debt |
+| Important | Low | Record as specification debt **if it passes the kind gate**, otherwise route via the gate's routing table (`smithy-clarify` Step 3b) to the artifact's proper section (FR, acceptance scenarios, governance, out-of-scope) |
 | Minor | Any | Note in PR only |
+
+The canonical kind-gate criteria and the leak-kind → proper-home
+routing table live in `smithy-clarify` Step 3b. This snippet
+deliberately does not restate them; consult that section directly
+when triaging a Critical-Low or Important-Low finding.
 
 ### Read-only invariant
 
