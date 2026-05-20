@@ -1,0 +1,86 @@
+# Brood service — the session-state + lifecycle/teardown authority.
+#
+#   # 1. observability stack first (creates the `march` network):
+#   docker compose -f docker/otel-lgtm.docker-compose.yml up -d
+#   # 2. build + run brood (from the repo root):
+#   npm run build:brood-image
+#   docker compose -f docker/brood.docker-compose.yml up -d
+#
+# Point producers/consumers at this service (so the Hatchery service registers
+# spawns and the legate loop requests teardown here):
+#   export MARCH_BROOD_URL=http://localhost:9748
+#
+# HOST-SPECIFIC CONFIG (override via env or a .env file next to this compose):
+#   MARCH_HOST_HOME   host HOME, bind-mounted at the IDENTICAL path so repos,
+#                     worktrees and ~/.march resolve to the same absolute paths
+#                     inside the container (required — teardown removes the EXACT
+#                     worktree path recorded at registration).
+#   MARCH_HOST_UID    host uid that owns those files (run-as).
+#   MARCH_HOST_GID    host primary gid for those files (defaults to the uid).
+#   MARCH_DOCKER_GID  gid of the host `docker` group (for /var/run/docker.sock).
+#   CASTRA_URL        castra base URL (default http://castra:9264 on the `march`
+#                     network). brood asks castra to remove the steward session,
+#                     then re-checks + removes the worktree by exact path.
+#   CASTRA_API_TOKEN  bearer token — must match the castra service's token.
+#
+# SECURITY: this mounts the docker socket (host-root-equivalent) and your HOME.
+# The port is bound to localhost only; never expose it publicly, never publish
+# this image.
+name: march-brood
+
+services:
+  brood:
+    build:
+      context: ..
+      dockerfile: docker/brood.Dockerfile
+    image: march-brood:latest
+    container_name: march-brood
+    restart: unless-stopped
+    command: ["brood", "serve"]
+    # Run as the host user so mounted files / sockets are accessible, plus the
+    # docker group so the daemon socket is usable.
+    user: "${MARCH_HOST_UID:-1000}:${MARCH_HOST_GID:-${MARCH_HOST_UID:-1000}}"
+    group_add:
+      - "${MARCH_DOCKER_GID:-1001}"
+    ports:
+      - "127.0.0.1:9748:9748" # localhost only — never public (deterministic brood port)
+    environment:
+      - MARCH_OTEL=1
+      - MARCH_OTEL_ENDPOINT=http://otel-lgtm:4318
+      - MARCH_OTEL_SERVICE_NAME=march-brood
+      - MARCH_BROOD_PORT=9748
+      - MARCH_BROOD_LOG_DIR=/march/logs
+      # os.homedir() resolves from HOME -> the registry (~/.march/brood) and the
+      # exact worktree paths land on the mounted host HOME at identical paths.
+      - HOME=${MARCH_HOST_HOME:-/home/jmbattista}
+      # Steward teardown is delegated to castra (#153/#165) — brood does NOT
+      # mount agent-deck. Reach castra over the shared `march` network; the
+      # bearer token must match castra's. (CASTRA_URL / CASTRA_API_TOKEN are the
+      # same names the shared CastraClient reads.)
+      - CASTRA_URL=${CASTRA_URL:-http://castra:${CASTRA_PORT:-9264}}
+      - CASTRA_API_TOKEN=${CASTRA_API_TOKEN:?CASTRA_API_TOKEN must match the castra service token}
+    volumes:
+      # Host docker daemon (remove spawn containers + read their logs).
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Whole HOME at the identical path: repos, worktrees, ~/.march/brood (the
+      # sqlite registry + teardown archive). No agent-deck/tmux mounts — castra
+      # owns interactive sessions.
+      - ${MARCH_HOST_HOME:-/home/jmbattista}:${MARCH_HOST_HOME:-/home/jmbattista}
+      # Durable service log file (also shipped to otel-lgtm via OTLP logs).
+      - march-brood-logs:/march/logs
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:9748/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
+    networks:
+      - march
+
+networks:
+  march:
+    external: true
+    name: march
+
+volumes:
+  march-brood-logs:

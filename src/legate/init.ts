@@ -740,6 +740,10 @@ function loopMetaFor(input: {
         "http://localhost:4318"
       ).replace(/\/+$/, ""),
     },
+    // Brood service endpoint, frozen at init so the standalone loop can REQUEST
+    // teardown (#155) instead of pruning worktrees itself. Null = brood not
+    // configured; the loop then removes only the agent-deck session (no prune).
+    brood_endpoint: process.env.MARCH_BROOD_URL?.trim() || null,
     mode: "terminal-pr-maintenance",
   };
 }
@@ -1170,11 +1174,48 @@ function removeDispatchMessage(sliceId) {
   }
 }
 
+function broodEnv() {
+  const env = { ...process.env };
+  if (meta.brood_endpoint) env.MARCH_BROOD_URL = meta.brood_endpoint;
+  return env;
+}
+
+// #155: the loop must REQUEST teardown — brood owns removal by exact path and
+// never runs a blanket prune. We invoke the bundled \`march brood teardown\` (a
+// thin HTTP client) so the loop stays synchronous and needs no curl. Exit 0
+// means torn down (or not tracked by brood); a non-zero exit means brood was
+// unreachable or the teardown failed — we DEFER (retry next tick) and never
+// prune ourselves.
+function requestBroodTeardown(sessionId) {
+  const cliPath = meta.march_cli_path;
+  if (!cliPath) {
+    return { error: "march CLI path unknown; cannot request brood teardown" };
+  }
+  try {
+    execFileSync(
+      process.execPath,
+      [cliPath, "brood", "teardown", sessionId, "--force"],
+      { encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"], env: broodEnv() },
+    );
+    return { removed: true };
+  } catch (err) {
+    const output = [err?.stdout, err?.stderr, err?.message].filter(Boolean).join("\\n");
+    return { error: output || String(err) };
+  }
+}
+
 function removeWorkerSession(sessionId) {
+  // When brood is configured, delegate the whole teardown (container + steward +
+  // worktree + branch) to it. Otherwise remove only the agent-deck session,
+  // WITHOUT --prune-worktree: a leaked worktree is the safe lesser evil vs.
+  // corrupting unrelated host worktrees (#155). The loop never prunes.
+  if (meta.brood_endpoint) {
+    return requestBroodTeardown(sessionId);
+  }
   try {
     execFileSync(
       "agent-deck",
-      ["-p", meta.profile, "session", "remove", sessionId, "--prune-worktree", "--force"],
+      ["-p", meta.profile, "session", "remove", sessionId, "--force"],
       { encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"] },
     );
     return { removed: true };
@@ -3621,11 +3662,23 @@ function runGhostStewardCleanup(state, workerList, ts) {
     if (activeDirs.has(dirName)) continue;
     const createdAt = Date.parse(session.created_at || session.createdAt || "");
     if (Number.isFinite(createdAt) && Number.isFinite(nowMs) && nowMs - createdAt < minAgeMs) continue;
-    try {
-      execFileSync("agent-deck", ["-p", meta.profile, "session", "remove", session.id, "--prune-worktree", "--force"], {
-        encoding: "utf-8",
-        stdio: ["ignore", "pipe", "pipe"],
-      });
+    // #155: request teardown via brood (exact-path removal, no blanket prune)
+    // when configured; otherwise remove only the agent-deck session WITHOUT
+    // --prune-worktree. The loop never prunes worktrees itself.
+    const removal = meta.brood_endpoint
+      ? requestBroodTeardown(session.id)
+      : (() => {
+          try {
+            execFileSync("agent-deck", ["-p", meta.profile, "session", "remove", session.id, "--force"], {
+              encoding: "utf-8",
+              stdio: ["ignore", "pipe", "pipe"],
+            });
+            return { removed: true };
+          } catch (err) {
+            return { error: (err?.message || String(err)) };
+          }
+        })();
+    if (!removal.error) {
       actions.push({
         action: "ghost-cleanup",
         sessionId: session.id,
@@ -3633,13 +3686,13 @@ function runGhostStewardCleanup(state, workerList, ts) {
         detail: "removed ghost steward (worktree " + dirName + " not tracked by any non-terminal slice)",
       });
       mutated = true;
-    } catch (err) {
+    } else {
       // Surface the failure as a note but keep going — next tick can retry.
       actions.push({
         action: "ghost-cleanup-failed",
         sessionId: session.id,
         title: session.title || "",
-        detail: "agent-deck session remove failed for " + dirName + ": " + (err?.message || String(err)).slice(0, 200),
+        detail: "ghost steward teardown failed for " + dirName + ": " + String(removal.error).slice(0, 200),
       });
     }
   }

@@ -31,6 +31,15 @@ export interface JobStoreOptions {
   readonly executor?: SpawnExecutor;
   readonly logger?: JobLogger;
   readonly terminalTtlMs?: number;
+  /**
+   * Best-effort hook invoked after a job succeeds — used to register the spawn
+   * + steward with Brood. Failures are logged, never propagated (a missing
+   * registry must not fail the spawn).
+   */
+  readonly onSucceeded?: (
+    result: HatcherySpawnResult,
+    request: SpawnRequest,
+  ) => void | Promise<void>;
 }
 
 /**
@@ -44,12 +53,14 @@ export class JobStore {
   private readonly executor: SpawnExecutor;
   private readonly logger?: JobLogger;
   private readonly terminalTtlMs: number;
+  private readonly onSucceeded?: JobStoreOptions["onSucceeded"];
   private reaper?: ReturnType<typeof setInterval>;
 
   constructor(options: JobStoreOptions = {}) {
     this.executor = options.executor ?? runSpawnInWorker;
     this.logger = options.logger;
     this.terminalTtlMs = options.terminalTtlMs ?? DEFAULT_TERMINAL_TTL_MS;
+    this.onSucceeded = options.onSucceeded;
   }
 
   startReaper(intervalMs: number = DEFAULT_REAPER_INTERVAL_MS): void {
@@ -105,6 +116,16 @@ export class JobStore {
         { job_id: record.id, spawn_id: record.result.spawnId },
         "spawn job succeeded",
       );
+      if (this.onSucceeded) {
+        try {
+          await this.onSucceeded(record.result, request);
+        } catch (err) {
+          this.logger?.error(
+            { job_id: record.id, err: errorMessage(err) },
+            "brood registration hook failed",
+          );
+        }
+      }
     } catch (err) {
       record.error = { message: errorMessage(err) };
       record.status = "failed";

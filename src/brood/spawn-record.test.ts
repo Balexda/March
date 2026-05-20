@@ -298,10 +298,9 @@ describe("spawn-record", () => {
       expect(onDisk.exitCode).toBeUndefined();
     });
 
-    it("accepts an optional error message argument without changing schema", () => {
-      // The data model has no slot for an error message today (see SD note in
-      // the spawn-record source). Passing one must not throw and must not
-      // pollute the persisted record with an unknown field.
+    it("persists the optional error message to failureReason", () => {
+      // The `error` argument is recorded into the forward-compatible
+      // `failureReason` field so Brood can surface *why* a spawn failed.
       const home = makeHome();
       writeInitialSpawnRecord(baseInput, home);
       const failed = markSpawnRecordFailed(
@@ -310,11 +309,22 @@ describe("spawn-record", () => {
         home,
       );
       expect(failed.status).toBe("failed");
+      expect(failed.failureReason).toBe("docker build exited non-zero");
       const onDisk = JSON.parse(
         fs.readFileSync(spawnRecordPath(baseInput.id, home), "utf-8"),
       );
-      // Implementation drops the error message — no extraneous field on disk.
+      expect(onDisk.failureReason).toBe("docker build exited non-zero");
+      // The raw option key is never written verbatim.
       expect(Object.keys(onDisk)).not.toContain("error");
+    });
+
+    it("omits failureReason when no error message is supplied", () => {
+      const home = makeHome();
+      writeInitialSpawnRecord(baseInput, home);
+      markSpawnRecordFailed(baseInput.id, undefined, home);
+      const onDisk = JSON.parse(
+        fs.readFileSync(spawnRecordPath(baseInput.id, home), "utf-8"),
+      );
       expect(Object.keys(onDisk)).not.toContain("failureReason");
     });
 

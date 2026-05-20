@@ -5,6 +5,7 @@ import Fastify, {
 import { createHatcheryLogger } from "../../observability/logger.js";
 import { getActiveOtel } from "../../observability/otel.js";
 import { startHeartbeat } from "../../observability/hatchery-metrics.js";
+import { registerSpawnWithBrood } from "./brood-registration.js";
 import { JobStore, type JobStoreOptions } from "./jobs.js";
 import { registerRoutes } from "./routes.js";
 
@@ -27,7 +28,13 @@ export async function buildServer(
   const logger = options.logger ?? createHatcheryLogger();
   const store =
     options.store ??
-    new JobStore({ ...options.jobStoreOptions, logger });
+    new JobStore({
+      // Default: register completed spawns with Brood (no-op unless
+      // MARCH_BROOD_URL is set). Overridable via jobStoreOptions.
+      onSucceeded: (result, request) => registerSpawnWithBrood(result, request),
+      ...options.jobStoreOptions,
+      logger,
+    });
   const app = Fastify({ loggerInstance: logger });
   await registerRoutes(app, { store });
   return { app, store };

@@ -11,17 +11,33 @@ type PinoLogger = pino.Logger;
 type LevelWithSilent = pino.LevelWithSilent;
 
 /**
- * Resolve the JSONL log file the hatchery service writes to. Always under a
- * real directory so the file survives even when OTel is off:
- *   $MARCH_HATCHERY_LOG_DIR/hatchery.jsonl  (default ~/.march/logs).
+ * Resolve a service's JSONL log file. Always under a real directory so the file
+ * survives even when OTel is off: `$<dirEnvVar>/<fileName>` (default
+ * `~/.march/logs/<fileName>`).
  */
-export function resolveHatcheryLogFilePath(
+export function resolveServiceLogFilePath(
+  fileName: string,
+  dirEnvVar: string,
   env: NodeJS.ProcessEnv = process.env,
 ): string {
   const dir =
-    env.MARCH_HATCHERY_LOG_DIR?.trim() ||
+    env[dirEnvVar]?.trim() ||
     path.join(env.HOME?.trim() || os.homedir(), ".march", "logs");
-  return path.join(dir, "hatchery.jsonl");
+  return path.join(dir, fileName);
+}
+
+/** Hatchery service log file: `$MARCH_HATCHERY_LOG_DIR/hatchery.jsonl`. */
+export function resolveHatcheryLogFilePath(
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  return resolveServiceLogFilePath("hatchery.jsonl", "MARCH_HATCHERY_LOG_DIR", env);
+}
+
+/** Brood service log file: `$MARCH_BROOD_LOG_DIR/brood.jsonl`. */
+export function resolveBroodLogFilePath(
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  return resolveServiceLogFilePath("brood.jsonl", "MARCH_BROOD_LOG_DIR", env);
 }
 
 /**
@@ -104,6 +120,48 @@ function createOtelBridgeStream(): Writable {
   });
 }
 
+export interface ServiceLoggerOptions {
+  readonly serviceName: string;
+  readonly logFilePath: string;
+  readonly level?: LevelWithSilent;
+  readonly env?: NodeJS.ProcessEnv;
+  /** Synchronous file writes. Default false (buffered); set true in tests/CI. */
+  readonly sync?: boolean;
+}
+
+/**
+ * Build a March service logger: a pino instance that always writes JSONL to a
+ * file (durable artifact, mandated independently of telemetry) and, when
+ * `MARCH_OTEL=1`, mirrors each record to the OTel logs pipeline so it ships to
+ * the lgtm collector. Wire the same instance into Fastify so request logs flow
+ * through one pipeline.
+ */
+export function createServiceLogger(options: ServiceLoggerOptions): PinoLogger {
+  const env = options.env ?? process.env;
+  fs.mkdirSync(path.dirname(options.logFilePath), { recursive: true });
+
+  const streams: pino.StreamEntry[] = [
+    {
+      stream: pino.destination({
+        dest: options.logFilePath,
+        sync: options.sync ?? false,
+      }),
+    },
+  ];
+  if (otelEnabled(env)) {
+    streams.push({ stream: createOtelBridgeStream() });
+  }
+
+  return pino(
+    {
+      name: options.serviceName,
+      level: options.level ?? "info",
+      mixin: traceMixin,
+    },
+    pino.multistream(streams),
+  );
+}
+
 export interface HatcheryLoggerOptions {
   readonly logFilePath?: string;
   readonly name?: string;
@@ -113,33 +171,39 @@ export interface HatcheryLoggerOptions {
   readonly sync?: boolean;
 }
 
-/**
- * Build the hatchery service logger: a pino instance that always writes JSONL
- * to a file (durable artifact, mandated independently of telemetry) and, when
- * `MARCH_OTEL=1`, mirrors each record to the OTel logs pipeline so it ships to
- * the lgtm collector. The same instance is wired into Fastify so request logs
- * flow through one pipeline.
- */
+/** Hatchery service logger (`march-hatchery` → `hatchery.jsonl`). */
 export function createHatcheryLogger(
   options: HatcheryLoggerOptions = {},
 ): PinoLogger {
   const env = options.env ?? process.env;
-  const logFilePath = options.logFilePath ?? resolveHatcheryLogFilePath(env);
-  fs.mkdirSync(path.dirname(logFilePath), { recursive: true });
+  return createServiceLogger({
+    serviceName: options.name ?? "march-hatchery",
+    logFilePath: options.logFilePath ?? resolveHatcheryLogFilePath(env),
+    level: options.level,
+    env,
+    sync: options.sync,
+  });
+}
 
-  const streams: pino.StreamEntry[] = [
-    { stream: pino.destination({ dest: logFilePath, sync: options.sync ?? false }) },
-  ];
-  if (otelEnabled(env)) {
-    streams.push({ stream: createOtelBridgeStream() });
-  }
+export interface BroodLoggerOptions {
+  readonly logFilePath?: string;
+  readonly name?: string;
+  readonly level?: LevelWithSilent;
+  readonly env?: NodeJS.ProcessEnv;
+  /** Synchronous file writes. Default false (buffered); set true in tests/CI. */
+  readonly sync?: boolean;
+}
 
-  return pino(
-    {
-      name: options.name ?? "march-hatchery",
-      level: options.level ?? "info",
-      mixin: traceMixin,
-    },
-    pino.multistream(streams),
-  );
+/** Brood service logger (`march-brood` → `brood.jsonl`). */
+export function createBroodLogger(
+  options: BroodLoggerOptions = {},
+): PinoLogger {
+  const env = options.env ?? process.env;
+  return createServiceLogger({
+    serviceName: options.name ?? "march-brood",
+    logFilePath: options.logFilePath ?? resolveBroodLogFilePath(env),
+    level: options.level,
+    env,
+    sync: options.sync,
+  });
 }
