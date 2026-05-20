@@ -15,7 +15,6 @@ import {
   buildLegateContainerRunArgs,
   ensureLegateContainer,
   HatcheryError,
-  LEGATE_AGENT_DECK_TARGET,
   LEGATE_BASE_IMAGE,
   LEGATE_CONTAINER_HOME,
   LEGATE_IMAGE_TAG,
@@ -200,11 +199,9 @@ describe("legate-container", () => {
     const repo = path.join(home, "repo");
     const conductor = path.join(home, ".agent-deck", "conductor", "legate-march");
     const loop = path.join(home, ".agent-deck", "conductor", "march-legate-loop");
-    const agentDeck = path.join(home, "agent-deck");
     fs.mkdirSync(repo, { recursive: true });
     fs.mkdirSync(conductor, { recursive: true });
     fs.mkdirSync(loop, { recursive: true });
-    fs.writeFileSync(agentDeck, "#!/bin/sh\n");
     fs.mkdirSync(path.join(home, ".ssh"), { recursive: true });
     fs.writeFileSync(path.join(home, ".ssh", "id_ed25519"), "key\n");
 
@@ -217,7 +214,6 @@ describe("legate-container", () => {
       homeDir: home,
       imageTag: "march-legate:test",
       dockerSocketPath: path.join(home, "missing.sock"),
-      agentDeckBinPath: agentDeck,
     });
 
     expect(args.slice(0, 6)).toEqual([
@@ -250,8 +246,11 @@ describe("legate-container", () => {
     expect(args).toContain(
       `127.0.0.1:${legateLoopHostPort("legate-march")}:${LEGATE_LOOP_CONTAINER_PORT}`,
     );
-    // Mounts the host agent-deck binary onto the container PATH.
-    expect(args).toContain(`type=bind,src=${agentDeck},dst=${LEGATE_AGENT_DECK_TARGET}`);
+    // agent-deck is no longer mounted — the loop reaches it via Castra (#157).
+    expect(args.join("\n")).not.toContain("/usr/local/bin/agent-deck");
+    // Castra URL + token are forwarded so the loop can call the sessions API.
+    expect(args).toContain("MARCH_CASTRA_URL");
+    expect(args).toContain("CASTRA_API_TOKEN");
     // #154 workaround: point git's ssh at the mounted key by absolute path.
     expect(args).toContain(
       `GIT_SSH_COMMAND=ssh -o IdentitiesOnly=yes -i ${LEGATE_CONTAINER_HOME}/.ssh/id_ed25519`,
@@ -282,10 +281,8 @@ describe("legate-container", () => {
     const home = makeTmpDir();
     const repo = path.join(home, "repo");
     const conductor = path.join(home, "conductor");
-    const agentDeck = path.join(home, "agent-deck");
     fs.mkdirSync(repo);
     fs.mkdirSync(conductor);
-    fs.writeFileSync(agentDeck, "#!/bin/sh\n");
 
     const result = ensureLegateContainer({
       conductorName: "legate-march",
@@ -295,9 +292,6 @@ describe("legate-container", () => {
       homeDir: home,
       imageTag: "march-legate:test",
       dockerSocketPath: path.join(home, "missing.sock"),
-      // Provided so ensureLegateContainer doesn't shell out to resolve it
-      // (execFileSync is mocked here).
-      agentDeckBinPath: agentDeck,
     });
 
     expect(result).toMatchObject({
@@ -329,10 +323,8 @@ describe("legate-container", () => {
     const home = makeTmpDir();
     const repo = path.join(home, "repo");
     const conductor = path.join(home, "conductor");
-    const agentDeck = path.join(home, "agent-deck");
     fs.mkdirSync(repo);
     fs.mkdirSync(conductor);
-    fs.writeFileSync(agentDeck, "#!/bin/sh\n");
 
     let thrown: unknown;
     try {
@@ -342,7 +334,6 @@ describe("legate-container", () => {
         repoPath: repo,
         conductorDir: conductor,
         homeDir: home,
-        agentDeckBinPath: agentDeck,
       });
     } catch (err) {
       thrown = err;

@@ -194,6 +194,7 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
             title: { type: "string", minLength: 1 },
             group: groupSchema,
             model: { type: "string", minLength: 1 },
+            createBranch: { type: "boolean" },
           },
         },
       },
@@ -206,6 +207,7 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
         title: string;
         group?: string;
         model?: string;
+        createBranch?: boolean;
       };
       const session = withCastraSpan(
         {
@@ -221,6 +223,7 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
             title: body.title,
             group: body.group ?? CASTRA_DEFAULT_GROUP,
             model: body.model,
+            createBranch: body.createBranch,
           }),
       );
       return reply.code(201).send({ session });

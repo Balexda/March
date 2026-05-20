@@ -25,8 +25,6 @@ export const LEGATE_CONTAINER_HOME = "/home/march";
  * spawn BASE_IMAGE — the loop never runs claude in its own container.
  */
 export const LEGATE_BASE_IMAGE = "node:22-bookworm-slim";
-/** Where the host's agent-deck binary is mounted inside the container. */
-export const LEGATE_AGENT_DECK_TARGET = "/usr/local/bin/agent-deck";
 
 /** Where the baked march CLI lives inside the image. */
 export const LEGATE_CLI_IMAGE_DIR = "/opt/march";
@@ -58,6 +56,15 @@ const LEGATE_PASSTHROUGH_ENV = [
   // http://host.docker.internal:8080, or http://hatchery:8080 on the `march`
   // network. Defaults to http://localhost:8080 when unset.
   "MARCH_HATCHERY_URL",
+  // Where the loop reaches CASTRA — the interactive-sessions service that fronts
+  // agent-deck. The loop calls Castra's HTTP API for all session ops instead of
+  // mounting/shelling out to agent-deck, so neither the binary nor ~/.agent-deck
+  // is mounted any more. URL must be reachable from inside the container (e.g.
+  // http://host.docker.internal:9264 or http://castra:9264 on the `march` net);
+  // CASTRA_API_TOKEN authorizes the /v1/* calls.
+  "MARCH_CASTRA_URL",
+  "CASTRA_URL",
+  "CASTRA_API_TOKEN",
   // Observability: forwarded so emitters that read these at runtime ship spans +
   // metrics to the otel-lgtm stack. Each is `-e NAME` (value inherited from the
   // env), so an unset var is simply a no-op. From inside the container the
@@ -198,26 +205,6 @@ export interface BuildLegateContainerArgsInput {
   readonly loopConductorDir?: string;
   readonly homeDir: string;
   readonly dockerSocketPath?: string;
-  /**
-   * Host path to the `agent-deck` binary, bind-mounted onto the container PATH.
-   * agent-deck has no apt/npm distribution, so we mount the host's copy (a
-   * static ELF) rather than baking it. Resolved by the caller via PATH lookup.
-   */
-  readonly agentDeckBinPath?: string;
-}
-
-/** Resolve the host `agent-deck` binary path (for bind-mounting). Null if absent. */
-export function resolveAgentDeckBinPath(): string | null {
-  try {
-    const out = execFileSync("bash", ["-lc", "command -v agent-deck"], {
-      encoding: "utf-8",
-      stdio: ["ignore", "pipe", "ignore"],
-    });
-    const resolved = out.trim();
-    return resolved.length > 0 && fs.existsSync(resolved) ? resolved : null;
-  } catch {
-    return null;
-  }
 }
 
 /**
@@ -276,11 +263,8 @@ export function legateContainerMounts(
     path.join(input.homeDir, ".march"),
     path.join(LEGATE_CONTAINER_HOME, ".march"),
   );
-  addMountIfPresent(
-    mounts,
-    path.join(input.homeDir, ".agent-deck"),
-    path.join(LEGATE_CONTAINER_HOME, ".agent-deck"),
-  );
+  // No ~/.agent-deck mount: the loop reaches agent-deck through Castra's HTTP API
+  // now (Balexda/March#157), so neither the binary nor its config lives here.
   addMountIfPresent(
     mounts,
     path.join(input.homeDir, ".claude"),
@@ -306,10 +290,6 @@ export function legateContainerMounts(
     input.dockerSocketPath ?? "/var/run/docker.sock",
     "/var/run/docker.sock",
   );
-  // agent-deck binary (mounted onto PATH) — the loop shells out to it each tick.
-  if (input.agentDeckBinPath) {
-    addMountIfPresent(mounts, input.agentDeckBinPath, LEGATE_AGENT_DECK_TARGET);
-  }
   const tmux = process.env.TMUX;
   const tmuxSocket = tmux?.split(",")[0];
   if (tmuxSocket) {
@@ -412,14 +392,6 @@ export function ensureLegateContainer(
 ): LegateContainerResult {
   const imageTag = input.imageTag ?? LEGATE_IMAGE_TAG;
   const containerName = legateContainerName(input.conductorName);
-  // Resolve the host agent-deck binary to bind-mount (the loop needs it on PATH).
-  const agentDeckBinPath = input.agentDeckBinPath ?? resolveAgentDeckBinPath() ?? undefined;
-  if (!agentDeckBinPath) {
-    throw new HatcheryError(
-      "Could not find the `agent-deck` binary to mount into the Legate container " +
-        "(the loop shells out to it each tick). Ensure agent-deck is on PATH.",
-    );
-  }
   const contextPath = fs.mkdtempSync(path.join(os.tmpdir(), "march-legate-image-"));
   const dockerfilePath = writeLegateDockerfile(
     contextPath,
@@ -460,7 +432,7 @@ export function ensureLegateContainer(
     try {
       stdout = execFileSync(
         "docker",
-        buildLegateContainerRunArgs({ ...input, imageTag, agentDeckBinPath }),
+        buildLegateContainerRunArgs({ ...input, imageTag }),
         {
           stdio: ["ignore", "pipe", "pipe"],
           maxBuffer: DOCKER_OUTPUT_MAX_BUFFER,

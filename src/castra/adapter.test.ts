@@ -42,6 +42,7 @@ function session(overrides: Partial<CastraSession> = {}): Record<string, unknown
     worktree_branch: overrides.branch ?? "",
     worktree_path: overrides.worktreePath ?? "/repo/feature-march-spawn-x",
     created_at: overrides.createdAt ?? "2026-05-20T00:00:00Z",
+    status: overrides.status ?? "idle",
   };
 }
 
@@ -97,6 +98,12 @@ describe("castra adapter — argv builders", () => {
     expect(args.at(-1)).toBe("opus");
   });
 
+  it("includes -b by default and omits it when createBranch is false (attach)", () => {
+    const base = { profile: "march", repoPath: "/repo", title: "t", group: "g", branch: "b" };
+    expect(buildLaunchArgs(base)).toContain("-b");
+    expect(buildLaunchArgs({ ...base, createBranch: false })).not.toContain("-b");
+  });
+
   it("builds session subcommand args", () => {
     expect(buildSessionShowArgs("p", "s")).toEqual(["-p", "p", "session", "show", "s", "--json"]);
     expect(buildSessionSendArgs("p", "s", "hi")).toEqual(["-p", "p", "session", "send", "s", "hi"]);
@@ -123,8 +130,8 @@ describe("castra adapter — pure parsers", () => {
 
   it("picks the launched session by matching worktree dir", () => {
     const sessions: CastraSession[] = [
-      { sessionId: "old", title: "", group: "g", branch: "", worktreePath: "/repo/feature-other", createdAt: "1" },
-      { sessionId: "new", title: "", group: "g", branch: "", worktreePath: "/repo/feature-march-spawn-x", createdAt: "2" },
+      { sessionId: "old", title: "", group: "g", branch: "", worktreePath: "/repo/feature-other", createdAt: "1", status: "idle" },
+      { sessionId: "new", title: "", group: "g", branch: "", worktreePath: "/repo/feature-march-spawn-x", createdAt: "2", status: "idle" },
     ];
     const picked = pickLaunchedSession(sessions, new Set(["old"]), "march/spawn/x");
     expect(picked?.sessionId).toBe("new");
@@ -134,6 +141,7 @@ describe("castra adapter — pure parsers", () => {
     const parsed = parseAgentDeckSession(session({ sessionId: "abc" }));
     expect(parsed?.sessionId).toBe("abc");
     expect(parsed?.worktreePath).toBe("/repo/feature-march-spawn-x");
+    expect(parsed?.status).toBe("idle");
   });
 });
 

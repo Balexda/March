@@ -7,10 +7,13 @@ it. It pairs with **Legate**, the commander: the camp is where the soldiers
 shelling out to `agent-deck` or bind-mounting it, so `agent-deck` lives in exactly
 one place and becomes an implementation detail of a single service.
 
-> **Status — PR1 (service only).** This ships the API + agent-deck adapter +
-> container + telemetry. Cutting the legate-loop over to the API, the dual-run
-> migration, and removing the agent-deck bind-mounts from the legate container
-> are tracked follow-ups (#156, #157); see also #158–#161.
+> **Status.** PR1 shipped the API + agent-deck adapter + container + telemetry.
+> The **legate loop is now cut over** to the API (#156): it makes all session
+> calls (list/launch/output/send/set/remove) to Castra via HTTP and the legate
+> container no longer mounts the `agent-deck` binary or `~/.agent-deck` (#157).
+> The session shape exposes agent-deck `status` and launch supports
+> `createBranch:false` (attach to an existing worktree) for the loop's steward
+> relaunch. Remaining: dual-run migration tooling; see also #158–#161.
 
 ## Topology
 

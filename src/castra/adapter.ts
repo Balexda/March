@@ -37,6 +37,9 @@ export function buildLaunchArgs(input: {
   readonly group: string;
   readonly branch: string;
   readonly model?: string;
+  /** Create a new branch (-b). False attaches to an existing worktree/branch
+   * (the legate loop's steward-relaunch path). Defaults to true. */
+  readonly createBranch?: boolean;
 }): string[] {
   return [
     "-p",
@@ -51,7 +54,8 @@ export function buildLaunchArgs(input: {
     input.group,
     "--worktree",
     input.branch,
-    "-b",
+    // -b creates the branch; omit it to attach to an existing worktree.
+    ...(input.createBranch === false ? [] : ["-b"]),
     "--title-lock",
     "--extra-arg",
     "--permission-mode",
@@ -141,6 +145,7 @@ export function parseAgentDeckSession(
     branch: firstString(record, ["worktree_branch", "branch", "worktreeBranch"]) ?? "",
     worktreePath: firstString(record, ["worktree_path", "path", "worktreePath"]) ?? "",
     createdAt: firstString(record, ["created_at", "createdAt"]) ?? "",
+    status: firstString(record, ["status"]) ?? "",
   };
 }
 
@@ -258,6 +263,8 @@ export interface LaunchSessionInput {
   readonly title: string;
   readonly group: string;
   readonly model?: string;
+  /** False attaches to an existing worktree/branch (steward relaunch). Default true. */
+  readonly createBranch?: boolean;
 }
 
 /**
@@ -297,7 +304,18 @@ export function createAgentDeckAdapter(): AgentDeckAdapter {
       const beforeIds = new Set(groupSessions().map((s) => s.sessionId));
 
       try {
-        runAgentDeck(buildLaunchArgs(input), false);
+        runAgentDeck(
+          buildLaunchArgs({
+            profile: input.profile,
+            repoPath: input.repoPath,
+            title: input.title,
+            group: input.group,
+            branch: input.branch,
+            model: input.model,
+            createBranch: input.createBranch,
+          }),
+          false,
+        );
       } catch (err) {
         throw new CastraAgentDeckError(
           `agent-deck launch failed: ${(err as Error).message}`,
@@ -355,6 +373,7 @@ export function createAgentDeckAdapter(): AgentDeckAdapter {
         branch: launched.branch || input.branch,
         worktreePath,
         createdAt: launched.createdAt,
+        status: launched.status,
       };
     },
 

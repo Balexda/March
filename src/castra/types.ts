@@ -19,6 +19,12 @@ export interface CastraSession {
   readonly branch: string;
   readonly worktreePath: string;
   readonly createdAt: string;
+  /**
+   * agent-deck's session lifecycle status (waiting/running/idle/error/stopped/…).
+   * Consumers like the legate loop's babysit logic gate behavior on it; `""` when
+   * agent-deck doesn't report one.
+   */
+  readonly status: string;
 }
 
 /** Stable error codes returned in the API error envelope. */

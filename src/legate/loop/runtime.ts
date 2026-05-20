@@ -29,6 +29,13 @@ import {
 } from "../../observability/loop-metrics.js";
 import { emitLoopLog, type LoopLogSeverity } from "../../observability/logs.js";
 import { resolveHatcheryUrl } from "../../hatchery/service/client.js";
+import {
+  castraLaunch,
+  castraListSessions,
+  castraRemove,
+  castraSend,
+  castraSessionOutput,
+} from "./castra-client.js";
 import type { LoopMeta } from "./meta.js";
 
 // Injected at startup by configureLoopRuntime().
@@ -280,13 +287,13 @@ function replayRecentActionEvents(limit = 10) {
 }
 
 function agentDeckList() {
+  // Sessions come from Castra (the agent-deck interdiction service), mapped back
+  // to the agent-deck-shaped objects the rest of the loop consumes
+  // (id/status/group/worktree_path/…). On error we return {error} so
+  // summarizeWorkers reports "unavailable" exactly as it did for an agent-deck
+  // CLI failure.
   try {
-    const out = execFileSync("agent-deck", ["-p", meta.profile, "list", "-json"], {
-      encoding: "utf-8",
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    const parsed = JSON.parse(out);
-    return Array.isArray(parsed) ? parsed : parsed.sessions || [];
+    return castraListSessions(meta.profile);
   } catch (err) {
     return { error: err?.message || String(err) };
   }
@@ -501,19 +508,12 @@ function removeDispatchMessage(sliceId) {
 }
 
 function removeWorkerSession(sessionId) {
+  // Castra DELETE is idempotent: a missing session returns {removed:false}.
   try {
-    execFileSync(
-      "agent-deck",
-      ["-p", meta.profile, "session", "remove", sessionId, "--prune-worktree", "--force"],
-      { encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"] },
-    );
-    return { removed: true };
+    const result = castraRemove(meta.profile, sessionId, true);
+    return result.removed ? { removed: true } : { removed: false, reason: "session_not_found" };
   } catch (err) {
-    const output = [err?.stdout, err?.stderr, err?.message].filter(Boolean).join("\n");
-    if (/session [^\s]+ not found|no such session|session [^\s]+ does not exist/i.test(output)) {
-      return { removed: false, reason: "session_not_found" };
-    }
-    return { error: output || String(err) };
+    return { error: err?.message || String(err) };
   }
 }
 
@@ -789,14 +789,12 @@ function maybePostDispatchNudge(slice, sessionId, workerStatus, ts, key, buildMe
   return { nudged: true, escalate: false, count: currentCount + 1 };
 }
 
-function sendAgentDeckMessage(sessionId, message, wait = false) {
-  const args = ["-p", meta.profile, "session", "send", sessionId, message, "-q"];
-  if (wait) {
-    args.push("--wait", "--timeout", "600s");
-  } else {
-    args.push("--no-wait");
-  }
-  return execText("agent-deck", args);
+function sendAgentDeckMessage(sessionId, message, _wait = false) {
+  // Routed through Castra. Castra's send is fire-and-forget (202); the former
+  // --wait/--timeout has no equivalent, which is fine — every loop caller used
+  // the no-wait path.
+  castraSend(meta.profile, sessionId, message, undefined);
+  return "";
 }
 
 function truncateText(text, max = 4000) {
@@ -817,7 +815,7 @@ function hasClaudeLoginBlock(output) {
 
 function captureRecentSessionOutput(sessionId) {
   try {
-    const output = execText("agent-deck", ["-p", meta.profile, "session", "output", sessionId, "-q"]);
+    const output = castraSessionOutput(meta.profile, sessionId, undefined);
     return { output: truncateText(output.trim()) };
   } catch (err) {
     return { output: "", error: err?.message || String(err) };
@@ -944,16 +942,7 @@ function workerErrorDetail({ sliceId, slice, worker, sessionId, recent }) {
 
 function sendDoorbellToLegate() {
   try {
-    execText("agent-deck", [
-      "-p",
-      meta.profile,
-      "session",
-      "send",
-      `conductor-${meta.paired_legate}`,
-      "[PROCESSOR]",
-      "--no-wait",
-      "-q",
-    ]);
+    castraSend(meta.profile, `conductor-${meta.paired_legate}`, "[PROCESSOR]", undefined);
     return true;
   } catch {
     return false;
@@ -1097,7 +1086,7 @@ function discoverPrForSlice(slice, state, sessionId) {
   const repoPath = state?.repo?.path || meta.repo?.path;
   if (!repoPath) return null;
   try {
-    const output = execText("agent-deck", ["-p", meta.profile, "session", "output", sessionId, "-q"]);
+    const output = castraSessionOutput(meta.profile, sessionId, undefined);
     const matches = output.match(/https:\/\/github\.com\/[^\s/]+\/[^\s/]+\/pull\/([0-9]+)/g) || [];
     if (matches.length > 0) {
       const url = matches[matches.length - 1];
@@ -2112,59 +2101,34 @@ function launchDirectStewardDispatch(state, ts, item, sliceId, mergedArchive) {
   const title = "direct: " + dispatchTitle(item);
   const message = buildDirectStewardMessage(item, mergedArchive);
 
-  let beforeIds;
-  try {
-    const beforeList = agentDeckList();
-    beforeIds = new Set(Array.isArray(beforeList) ? beforeList.map((s) => s.id) : []);
-  } catch {
-    beforeIds = new Set();
-  }
-  const launchArgs = [
-    "-p", meta.profile,
-    "launch",
-    repoPath,
-    "-t", title,
-    "-c", "claude",
-    "-g", meta.worker_group,
-    "--worktree", bareBranch,
-    "-b",
-    "--title-lock",
-    "--model", "opus",
-    "--extra-arg", "--permission-mode",
-    "--extra-arg", "auto",
-    "-message", message,
-    "-q",
-  ];
-  try {
-    execFileSync("agent-deck", launchArgs, {
-      encoding: "utf-8",
-      stdio: ["ignore", "ignore", "pipe"],
-    });
-  } catch (err) {
-    return { launched: false, sliceId: directSliceId, error: "agent-deck launch failed: " + (err?.message || String(err)).slice(0, 200) };
-  }
+  // Launch via Castra: it runs agent-deck launch, identifies the new session
+  // (with the worktree-race conflict guard), and sets auto-mode server-side, then
+  // returns the session. A 409 (conflict) surfaces as a launch error so the slice
+  // re-dispatches next tick — same as the old client-side race handling.
   let newSessionId = null;
   try {
-    const afterList = agentDeckList();
-    if (Array.isArray(afterList)) {
-      for (const s of afterList) {
-        if (!isWorkerSession(s)) continue;
-        if (beforeIds.has(s.id)) continue;
-        newSessionId = s.id;
-        break;
-      }
-    }
-  } catch {}
-  if (!newSessionId) {
-    return { launched: false, sliceId: directSliceId, error: "agent-deck launch returned no identifiable new session" };
-  }
-  try {
-    execFileSync("agent-deck", ["-p", meta.profile, "session", "set", newSessionId, "auto-mode", "true"], {
-      encoding: "utf-8",
-      stdio: ["ignore", "ignore", "pipe"],
+    const launched = castraLaunch({
+      profile: meta.profile,
+      repoPath,
+      branch: bareBranch,
+      title,
+      group: meta.worker_group,
+      model: "opus",
+      sliceId: directSliceId,
     });
+    newSessionId = launched.id;
+  } catch (err) {
+    return { launched: false, sliceId: directSliceId, error: "castra launch failed: " + (err?.message || String(err)).slice(0, 200) };
+  }
+  if (!newSessionId) {
+    return { launched: false, sliceId: directSliceId, error: "castra launch returned no identifiable new session" };
+  }
+  // Deliver the initial /smithy.<verb> instruction (Castra launch has no message
+  // param, so send it as a follow-up).
+  try {
+    castraSend(meta.profile, newSessionId, message, directSliceId);
   } catch {
-    // Best-effort; the --permission-mode auto extra-arg already covers it.
+    // Best-effort; babysit will re-nudge if the steward never starts.
   }
   const action = item.next_action || {};
   const worktreesParent = path.join(path.dirname(repoPath), "WorkTrees", path.basename(repoPath));
@@ -2916,10 +2880,7 @@ function runGhostStewardCleanup(state, workerList, ts) {
     const createdAt = Date.parse(session.created_at || session.createdAt || "");
     if (Number.isFinite(createdAt) && Number.isFinite(nowMs) && nowMs - createdAt < minAgeMs) continue;
     try {
-      execFileSync("agent-deck", ["-p", meta.profile, "session", "remove", session.id, "--prune-worktree", "--force"], {
-        encoding: "utf-8",
-        stdio: ["ignore", "pipe", "pipe"],
-      });
+      castraRemove(meta.profile, session.id, true);
       actions.push({
         action: "ghost-cleanup",
         sessionId: session.id,
@@ -3019,70 +2980,39 @@ function runStewardRelaunch(state, workerList, ts) {
     // No -b: don't create a new branch. The session attaches to whatever
     // branch the worktree is on.
     const launchTitle = slice.worker_title || ("steward: " + sliceId);
-    let beforeIds;
+    // Relaunch attaches to the EXISTING worktree/branch (createBranch:false →
+    // no -b). Castra runs the launch, identifies the session, and sets auto-mode.
+    let newSessionId = null;
     try {
-      const beforeList = agentDeckList();
-      beforeIds = new Set(Array.isArray(beforeList) ? beforeList.map((s) => s.id) : []);
-    } catch {
-      beforeIds = new Set();
-    }
-    const launchArgs = [
-      "-p", meta.profile,
-      "launch",
-      repoPath,
-      "-t", launchTitle,
-      "-c", "claude",
-      "-g", meta.worker_group,
-      "--worktree", bareBranch,
-      "--title-lock",
-      "--extra-arg", "--permission-mode",
-      "--extra-arg", "auto",
-      "--extra-arg", "--model",
-      "--extra-arg", "opus",
-    ];
-    try {
-      execFileSync("agent-deck", launchArgs, {
-        encoding: "utf-8",
-        stdio: ["ignore", "ignore", "pipe"],
+      const relaunched = castraLaunch({
+        profile: meta.profile,
+        repoPath,
+        branch: bareBranch,
+        title: launchTitle,
+        group: meta.worker_group,
+        model: "opus",
+        createBranch: false,
+        sliceId,
       });
+      newSessionId = relaunched.id;
     } catch (err) {
       actions.push({
         action: "relaunch-failed",
         sliceId,
         sessionId: null,
-        detail: "agent-deck launch failed: " + (err?.message || String(err)).slice(0, 200),
+        detail: "castra launch failed: " + (err?.message || String(err)).slice(0, 200),
       });
       continue;
     }
-    // Identify the new session by diffing the list.
-    let newSessionId = null;
-    try {
-      const afterList = agentDeckList();
-      if (Array.isArray(afterList)) {
-        for (const s of afterList) {
-          if (!isWorkerSession(s)) continue;
-          if (beforeIds.has(s.id)) continue;
-          newSessionId = s.id;
-          break;
-        }
-      }
-    } catch {}
     if (!newSessionId) {
       actions.push({
         action: "relaunch-failed",
         sliceId,
         sessionId: null,
-        detail: "agent-deck launch returned no identifiable new session",
+        detail: "castra launch returned no identifiable new session",
       });
       continue;
     }
-    // Enable session-level auto-mode (parity with launchAgentDeckManager).
-    try {
-      execFileSync("agent-deck", ["-p", meta.profile, "session", "set", newSessionId, "auto-mode", "true"], {
-        encoding: "utf-8",
-        stdio: ["ignore", "ignore", "pipe"],
-      });
-    } catch {}
     // Send a context message so claude knows it's a steward on a PR.
     const contextMsg = [
       "[STEWARD RESUME] You are the re-launched March Hatchery management session for PR #" + pr.number + ".",
@@ -3099,10 +3029,7 @@ function runStewardRelaunch(state, workerList, ts) {
       "Do not pre-emptively rewrite anything; the PR is already open and may be in review.",
     ].join("\n");
     try {
-      execFileSync("agent-deck", ["-p", meta.profile, "session", "send", newSessionId, contextMsg], {
-        encoding: "utf-8",
-        stdio: ["ignore", "ignore", "pipe"],
-      });
+      castraSend(meta.profile, newSessionId, contextMsg, sliceId);
     } catch {
       // Best-effort: session is alive; future babysit messages will still reach it.
     }
