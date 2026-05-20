@@ -34,7 +34,7 @@ export interface OtelHandle {
   shutdown(): Promise<void>;
 }
 
-/** Resolve the OTLP/HTTP base endpoint (no trailing slash), or undefined. */
+/** Resolve the OTLP/HTTP base endpoint (no trailing slash); falls back to DEFAULT_ENDPOINT. */
 export function resolveOtelEndpoint(
   env: NodeJS.ProcessEnv = process.env,
 ): string {
