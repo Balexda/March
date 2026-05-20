@@ -16,7 +16,14 @@ const SLICE_ID_HEADER = "x-march-slice-id";
 /** Default per-request timeout. Launches can take a few seconds (agent-deck). */
 const DEFAULT_REQUEST_TIMEOUT_MS = 60_000;
 /** Reachability probe timeout — kept short so `/readyz` stays snappy. */
-const REACHABLE_TIMEOUT_MS = 2_000;
+const REACHABLE_TIMEOUT_MS = 3_000;
+/**
+ * Profile used by the readiness probe. `reachable()` lists this profile's
+ * sessions to confirm Castra can actually serve authenticated `/v1/*` calls;
+ * `default` mirrors the Hatchery's fallback profile so the probe exercises a
+ * profile that real spawns may use.
+ */
+const READINESS_PROBE_PROFILE = "default";
 
 type FetchImpl = typeof fetch;
 
@@ -156,12 +163,21 @@ export class CastraClient {
     return { removed: Boolean((body as { removed?: boolean }).removed) };
   }
 
-  /** Best-effort liveness probe against `/healthz` (never throws). */
+  /**
+   * Best-effort readiness probe (never throws). Lists the readiness-probe
+   * profile's sessions through the authenticated `/v1/*` surface so a `true`
+   * means Castra is up, the bearer token is accepted, AND the agent-deck backend
+   * answered — not merely that the open `/healthz` is live. A wrong/missing
+   * token (401/403) or an unreachable backend (5xx) reports not-ready.
+   */
   async reachable(): Promise<boolean> {
     try {
-      const res = await this.fetchImpl(`${this.baseUrl}/healthz`, {
-        signal: AbortSignal.timeout(REACHABLE_TIMEOUT_MS),
-      });
+      const headers: Record<string, string> = {};
+      if (this.token) headers.authorization = `Bearer ${this.token}`;
+      const res = await this.fetchImpl(
+        `${this.baseUrl}/v1/sessions?profile=${encodeURIComponent(READINESS_PROBE_PROFILE)}`,
+        { headers, signal: AbortSignal.timeout(REACHABLE_TIMEOUT_MS) },
+      );
       return res.ok;
     } catch {
       return false;

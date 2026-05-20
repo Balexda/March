@@ -143,12 +143,29 @@ describe("castra client — requests", () => {
     expect(url).toContain("pruneWorktree=true");
   });
 
-  it("reports reachability without throwing", async () => {
+  it("probes the authenticated /v1 surface for readiness", async () => {
+    const fetchImpl = vi.fn(async () => jsonResponse(200, { sessions: [] }));
     const ok = new CastraClient({
       baseUrl: "http://castra:9264",
-      fetchImpl: (async () => new Response("ok", { status: 200 })) as unknown as typeof fetch,
+      token: "secret",
+      fetchImpl: fetchImpl as unknown as typeof fetch,
     });
     expect(await ok.reachable()).toBe(true);
+    const [url, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
+    // Hits an authenticated /v1 endpoint, not the open /healthz.
+    expect(url).toBe("http://castra:9264/v1/sessions?profile=default");
+    expect((init.headers as Record<string, string>).authorization).toBe("Bearer secret");
+  });
+
+  it("reports not-ready on auth failure or transport error (never throws)", async () => {
+    // A wrong/missing token yields 401 — readiness must be false even though
+    // the server is up, because spawns would fail.
+    const unauthorized = new CastraClient({
+      baseUrl: "http://castra:9264",
+      fetchImpl: (async () =>
+        jsonResponse(401, { error: { code: "unauthorized", message: "no" } })) as unknown as typeof fetch,
+    });
+    expect(await unauthorized.reachable()).toBe(false);
 
     const down = new CastraClient({
       baseUrl: "http://castra:9264",
