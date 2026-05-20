@@ -57,12 +57,11 @@ const LEGATE_PASSTHROUGH_ENV = [
   // network. Defaults to http://localhost:8080 when unset.
   "MARCH_HATCHERY_URL",
   // Where the loop reaches CASTRA — the interactive-sessions service that fronts
-  // agent-deck. The loop calls Castra's HTTP API for all session ops instead of
-  // mounting/shelling out to agent-deck, so neither the binary nor ~/.agent-deck
-  // is mounted any more. URL must be reachable from inside the container (e.g.
-  // http://host.docker.internal:9264 or http://castra:9264 on the `march` net);
-  // CASTRA_API_TOKEN authorizes the /v1/* calls.
-  "MARCH_CASTRA_URL",
+  // agent-deck. The loop calls Castra's HTTP API (shared src/castra/client.ts)
+  // for all session ops instead of mounting/shelling out to agent-deck, so
+  // neither the binary nor ~/.agent-deck is mounted any more. CASTRA_URL must be
+  // reachable from inside the container (e.g. http://host.docker.internal:9264 or
+  // http://castra:9264 on the `march` net); CASTRA_API_TOKEN authorizes /v1/*.
   "CASTRA_URL",
   "CASTRA_API_TOKEN",
   // Observability: forwarded so emitters that read these at runtime ship spans +

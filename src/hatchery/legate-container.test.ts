@@ -249,7 +249,7 @@ describe("legate-container", () => {
     // agent-deck is no longer mounted — the loop reaches it via Castra (#157).
     expect(args.join("\n")).not.toContain("/usr/local/bin/agent-deck");
     // Castra URL + token are forwarded so the loop can call the sessions API.
-    expect(args).toContain("MARCH_CASTRA_URL");
+    expect(args).toContain("CASTRA_URL");
     expect(args).toContain("CASTRA_API_TOKEN");
     // #154 workaround: point git's ssh at the mounted key by absolute path.
     expect(args).toContain(

@@ -29,14 +29,32 @@ import {
 } from "../../observability/loop-metrics.js";
 import { emitLoopLog, type LoopLogSeverity } from "../../observability/logs.js";
 import { resolveHatcheryUrl } from "../../hatchery/service/client.js";
-import {
-  castraLaunch,
-  castraListSessions,
-  castraRemove,
-  castraSend,
-  castraSessionOutput,
-} from "./castra-client.js";
+import { SyncCastraClient } from "../../castra/client.js";
 import type { LoopMeta } from "./meta.js";
+
+// Lazily-built sync Castra client (constructed on first use so it reads the
+// CASTRA_URL/token env the container passes in). The loop reaches every
+// interactive session through Castra rather than agent-deck directly.
+let _castra: SyncCastraClient | undefined;
+function castra(): SyncCastraClient {
+  return (_castra ??= new SyncCastraClient());
+}
+
+// Map a Castra session to the agent-deck-shaped object the lifted loop consumes
+// (id/status/group/worktree_path/…), so the loop's classification + babysit code
+// is unchanged against Castra's normalized CastraSession shape.
+function toLoopSession(s: any) {
+  return {
+    id: s.sessionId,
+    title: s.title,
+    name: s.title,
+    group: s.group,
+    status: s.status || "other",
+    branch: s.branch,
+    worktree_path: s.worktreePath,
+    created_at: s.createdAt,
+  };
+}
 
 // Injected at startup by configureLoopRuntime().
 let meta: any;
@@ -293,7 +311,7 @@ function agentDeckList() {
   // summarizeWorkers reports "unavailable" exactly as it did for an agent-deck
   // CLI failure.
   try {
-    return castraListSessions(meta.profile);
+    return castra().listSessions(meta.profile).map(toLoopSession);
   } catch (err) {
     return { error: err?.message || String(err) };
   }
@@ -510,7 +528,7 @@ function removeDispatchMessage(sliceId) {
 function removeWorkerSession(sessionId) {
   // Castra DELETE is idempotent: a missing session returns {removed:false}.
   try {
-    const result = castraRemove(meta.profile, sessionId, true);
+    const result = castra().removeSession({ profile: meta.profile, sessionId, pruneWorktree: true });
     return result.removed ? { removed: true } : { removed: false, reason: "session_not_found" };
   } catch (err) {
     return { error: err?.message || String(err) };
@@ -793,7 +811,7 @@ function sendAgentDeckMessage(sessionId, message, _wait = false) {
   // Routed through Castra. Castra's send is fire-and-forget (202); the former
   // --wait/--timeout has no equivalent, which is fine — every loop caller used
   // the no-wait path.
-  castraSend(meta.profile, sessionId, message, undefined);
+  castra().sendPrompt({ profile: meta.profile, sessionId, prompt: message });
   return "";
 }
 
@@ -815,7 +833,7 @@ function hasClaudeLoginBlock(output) {
 
 function captureRecentSessionOutput(sessionId) {
   try {
-    const output = castraSessionOutput(meta.profile, sessionId, undefined);
+    const output = castra().sessionOutput(meta.profile, sessionId);
     return { output: truncateText(output.trim()) };
   } catch (err) {
     return { output: "", error: err?.message || String(err) };
@@ -942,7 +960,11 @@ function workerErrorDetail({ sliceId, slice, worker, sessionId, recent }) {
 
 function sendDoorbellToLegate() {
   try {
-    castraSend(meta.profile, `conductor-${meta.paired_legate}`, "[PROCESSOR]", undefined);
+    castra().sendPrompt({
+      profile: meta.profile,
+      sessionId: `conductor-${meta.paired_legate}`,
+      prompt: "[PROCESSOR]",
+    });
     return true;
   } catch {
     return false;
@@ -1086,7 +1108,7 @@ function discoverPrForSlice(slice, state, sessionId) {
   const repoPath = state?.repo?.path || meta.repo?.path;
   if (!repoPath) return null;
   try {
-    const output = castraSessionOutput(meta.profile, sessionId, undefined);
+    const output = castra().sessionOutput(meta.profile, sessionId);
     const matches = output.match(/https:\/\/github\.com\/[^\s/]+\/[^\s/]+\/pull\/([0-9]+)/g) || [];
     if (matches.length > 0) {
       const url = matches[matches.length - 1];
@@ -2107,16 +2129,16 @@ function launchDirectStewardDispatch(state, ts, item, sliceId, mergedArchive) {
   // re-dispatches next tick — same as the old client-side race handling.
   let newSessionId = null;
   try {
-    const launched = castraLaunch({
+    const launched = castra().launchSession({
       profile: meta.profile,
       repoPath,
       branch: bareBranch,
       title,
       group: meta.worker_group,
       model: "opus",
-      sliceId: directSliceId,
+      traceKey: directSliceId,
     });
-    newSessionId = launched.id;
+    newSessionId = launched.sessionId;
   } catch (err) {
     return { launched: false, sliceId: directSliceId, error: "castra launch failed: " + (err?.message || String(err)).slice(0, 200) };
   }
@@ -2126,7 +2148,7 @@ function launchDirectStewardDispatch(state, ts, item, sliceId, mergedArchive) {
   // Deliver the initial /smithy.<verb> instruction (Castra launch has no message
   // param, so send it as a follow-up).
   try {
-    castraSend(meta.profile, newSessionId, message, directSliceId);
+    castra().sendPrompt({ profile: meta.profile, sessionId: newSessionId, prompt: message, traceKey: directSliceId });
   } catch {
     // Best-effort; babysit will re-nudge if the steward never starts.
   }
@@ -2880,7 +2902,7 @@ function runGhostStewardCleanup(state, workerList, ts) {
     const createdAt = Date.parse(session.created_at || session.createdAt || "");
     if (Number.isFinite(createdAt) && Number.isFinite(nowMs) && nowMs - createdAt < minAgeMs) continue;
     try {
-      castraRemove(meta.profile, session.id, true);
+      castra().removeSession({ profile: meta.profile, sessionId: session.id, pruneWorktree: true });
       actions.push({
         action: "ghost-cleanup",
         sessionId: session.id,
@@ -2984,7 +3006,7 @@ function runStewardRelaunch(state, workerList, ts) {
     // no -b). Castra runs the launch, identifies the session, and sets auto-mode.
     let newSessionId = null;
     try {
-      const relaunched = castraLaunch({
+      const relaunched = castra().launchSession({
         profile: meta.profile,
         repoPath,
         branch: bareBranch,
@@ -2992,9 +3014,9 @@ function runStewardRelaunch(state, workerList, ts) {
         group: meta.worker_group,
         model: "opus",
         createBranch: false,
-        sliceId,
+        traceKey: sliceId,
       });
-      newSessionId = relaunched.id;
+      newSessionId = relaunched.sessionId;
     } catch (err) {
       actions.push({
         action: "relaunch-failed",
@@ -3029,7 +3051,7 @@ function runStewardRelaunch(state, workerList, ts) {
       "Do not pre-emptively rewrite anything; the PR is already open and may be in review.",
     ].join("\n");
     try {
-      castraSend(meta.profile, newSessionId, contextMsg, sliceId);
+      castra().sendPrompt({ profile: meta.profile, sessionId: newSessionId, prompt: contextMsg, traceKey: sliceId });
     } catch {
       // Best-effort: session is alive; future babysit messages will still reach it.
     }
