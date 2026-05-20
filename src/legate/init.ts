@@ -1301,6 +1301,74 @@ function maybeNudgeStrandedSteward(slice, sliceId, sessionId, ts, sendMessage = 
   return alertFired ? "alert" : "nudged";
 }
 
+// Post-dispatch stuck-worker watchdog tuning. Distinct from the stranded-
+// steward watchdog (which fires while a slice is still in "implementing" and
+// has no PR yet). This covers the post-PR-creation case where the loop sent
+// the worker a /smithy.fix or conflict-resolution prompt and the worker
+// session went to waiting/idle without acting — Claude has received the
+// message but parked (likely on a permission prompt, a stuck spinner, or a
+// "task complete" misjudgement). The loop's existing alreadyDispatched dedup
+// keyed off action keys correctly prevents repeat dispatches when nothing
+// changed, but it also prevents *waking the worker back up* when the change
+// the loop wants is the worker actually doing the work.
+function postDispatchNudgeConfig() {
+  return {
+    // First nudge: at this delay after the original dispatch.
+    initialNudgeMs: 5 * 60 * 1000,
+    // Subsequent nudges: every interval thereafter.
+    repeatNudgeMs: 5 * 60 * 1000,
+    // Cumulative nudges per action key before escalating. Three unanswered
+    // re-nudges (~15 min total) is strong evidence the worker is genuinely
+    // stuck on something the loop can't unblock from outside.
+    escalateAfterNudges: 3,
+  };
+}
+
+// Re-deliver the most recent dispatch message when a worker session has been
+// sitting idle/waiting too long after we sent something. Tracks the nudge
+// count under \`post_dispatch_nudge_for_key\` so when the loop sends a fresh
+// dispatch (different key — new threads, new state), the counter resets.
+// Returns {nudged, escalate, count} for the caller to translate into an
+// action event + optional legate-judgement request.
+function maybePostDispatchNudge(slice, sessionId, workerStatus, ts, key, buildMessage, sendMessage = sendAgentDeckMessage) {
+  if (workerStatus !== "waiting" && workerStatus !== "idle") {
+    return { nudged: false, escalate: false, count: 0 };
+  }
+  if (!sessionId) return { nudged: false, escalate: false, count: 0 };
+  const lastDispatchAt = Date.parse(slice.last_processor_action_at || "");
+  const nowMs = Date.parse(ts);
+  if (!Number.isFinite(lastDispatchAt) || !Number.isFinite(nowMs)) {
+    return { nudged: false, escalate: false, count: 0 };
+  }
+  const cfg = postDispatchNudgeConfig();
+  // Reset nudge state if the action key changed — a new dispatch since the
+  // last nudge state was written invalidates the prior count.
+  if (slice.post_dispatch_nudge_for_key !== key) {
+    slice.post_dispatch_nudge_for_key = key;
+    slice.post_dispatch_nudge_count = 0;
+    slice.post_dispatch_nudge_sent_at = null;
+  }
+  if (nowMs - lastDispatchAt < cfg.initialNudgeMs) {
+    return { nudged: false, escalate: false, count: slice.post_dispatch_nudge_count || 0 };
+  }
+  const currentCount = slice.post_dispatch_nudge_count || 0;
+  if (currentCount >= cfg.escalateAfterNudges) {
+    return { nudged: false, escalate: true, count: currentCount };
+  }
+  const nudgedAt = Date.parse(slice.post_dispatch_nudge_sent_at || "");
+  if (Number.isFinite(nudgedAt) && nowMs - nudgedAt < cfg.repeatNudgeMs) {
+    return { nudged: false, escalate: false, count: currentCount };
+  }
+  try {
+    sendMessage(sessionId, buildMessage(), false);
+  } catch {
+    return { nudged: false, escalate: false, count: currentCount };
+  }
+  slice.post_dispatch_nudge_sent_at = ts;
+  slice.post_dispatch_nudge_count = currentCount + 1;
+  return { nudged: true, escalate: false, count: currentCount + 1 };
+}
+
 function sendAgentDeckMessage(sessionId, message, wait = false) {
   const args = ["-p", meta.profile, "session", "send", sessionId, message, "-q"];
   if (wait) {
@@ -1833,7 +1901,38 @@ function runBabysit(state, workerList, ts) {
         continue;
       }
       const key = actionKey("conflict-fix", pr);
-      if (alreadyDispatched(slice, key)) continue;
+      if (alreadyDispatched(slice, key)) {
+        // Same conflict, conflict prompt already sent. The pr-resolving-
+        // conflicts stage check above escalates as soon as conflict
+        // *persists* across a tick — but the worker may still be parked
+        // (received the prompt, never acted). Nudge before that escalation
+        // fires so we give the worker a chance to wake up.
+        const result = maybePostDispatchNudge(
+          slice, sessionId, workerStatus, ts, key,
+          () => conflictMessage(slice, pr, state),
+        );
+        if (result.nudged) {
+          mutated = true;
+          actions.push({
+            action: "post-dispatch-nudge",
+            sliceId, sessionId, pr,
+            detail: \`re-sent conflict-fix prompt (nudge \${result.count}/\${postDispatchNudgeConfig().escalateAfterNudges}) — worker \${workerStatus}\`,
+          });
+        } else if (result.escalate) {
+          const request = requestLegateJudgement({
+            ts, slice,
+            requestKey: actionKey("conflict-nudges-exhausted", pr, key),
+            sliceId, sessionId, pr,
+            reason: "worker_unresponsive_after_conflict_fix",
+            detail: \`Sent \${result.count} conflict-fix nudges to PR #\${pr.number} worker (session \${sessionId}); still \${workerStatus}. Operator should attach and inspect.\`,
+          });
+          if (request) {
+            requests.push(request);
+            mutated = true;
+          }
+        }
+        continue;
+      }
       try {
         sendAgentDeckMessage(sessionId, conflictMessage(slice, pr, state), false);
       } catch (err) {
@@ -1853,9 +1952,39 @@ function runBabysit(state, workerList, ts) {
 
     const neededThreads = threadsNeedingResponse(slice, pr);
     if (neededThreads.length > 0) {
-      if (slice.stage === "pr-in-fix") continue;
       const key = actionKey("review-fix", pr, neededThreads.map((thread) => \`\${thread.id || ""}@\${thread.last_comment_at || ""}\`).join(","));
-      if (alreadyDispatched(slice, key)) continue;
+      if (alreadyDispatched(slice, key)) {
+        // Same thread set, /smithy.fix already sent. If the worker has been
+        // parked in waiting/idle for too long, re-deliver to wake it up.
+        // Without this the loop's dedup silently lets a stuck worker rot —
+        // the parked Claude session keeps sitting at the prompt and the loop
+        // happily reports "already dispatched" on every tick.
+        const result = maybePostDispatchNudge(
+          slice, sessionId, workerStatus, ts, key,
+          () => reviewFixMessage(pr, neededThreads),
+        );
+        if (result.nudged) {
+          mutated = true;
+          actions.push({
+            action: "post-dispatch-nudge",
+            sliceId, sessionId, pr,
+            detail: \`re-sent /smithy.fix (nudge \${result.count}/\${postDispatchNudgeConfig().escalateAfterNudges}) — worker \${workerStatus} \${Math.round((Date.parse(ts) - Date.parse(slice.last_processor_action_at || ts)) / 60000)}min after dispatch\`,
+          });
+        } else if (result.escalate) {
+          const request = requestLegateJudgement({
+            ts, slice,
+            requestKey: actionKey("review-nudges-exhausted", pr, key),
+            sliceId, sessionId, pr,
+            reason: "worker_unresponsive_after_review_fix",
+            detail: \`Sent \${result.count} /smithy.fix nudges to PR #\${pr.number} worker (session \${sessionId}) and still \${workerStatus} with \${neededThreads.length} thread(s) needing response. Likely parked at a permission prompt or a stuck spinner. Operator should attach and inspect, or close the slice if the worker is unrecoverable.\`,
+          });
+          if (request) {
+            requests.push(request);
+            mutated = true;
+          }
+        }
+        continue;
+      }
       try {
         sendAgentDeckMessage(sessionId, reviewFixMessage(pr, neededThreads), false);
       } catch (err) {

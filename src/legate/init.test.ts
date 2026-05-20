@@ -391,6 +391,18 @@ describe("legate module", () => {
       // for either a finishing patch or a checkbox-only cleanup PR.
       expect(loop).toContain("RECOVERY DISPATCH");
       expect(loop).toContain("Prior merged PR");
+      // Post-dispatch nudge: review-fix and conflict-fix paths now re-deliver
+      // the original message when the worker is waiting/idle past the
+      // threshold, capped + escalated. Without this, the existing
+      // alreadyDispatched dedup silently lets a stuck worker sit forever.
+      expect(loop).toContain("function maybePostDispatchNudge");
+      expect(loop).toContain("function postDispatchNudgeConfig");
+      expect(loop).toContain("post_dispatch_nudge_for_key");
+      expect(loop).toContain("post_dispatch_nudge_count");
+      expect(loop).toContain("post_dispatch_nudge_sent_at");
+      expect(loop).toContain('action: "post-dispatch-nudge"');
+      expect(loop).toContain("worker_unresponsive_after_review_fix");
+      expect(loop).toContain("worker_unresponsive_after_conflict_fix");
       expect(loop).toContain('kind: "dispatch_failure"');
       expect(loop).toContain('kind: "dispatch_read_failure"');
       expect(loop).toContain("function launchHatcheryDispatch");
@@ -894,6 +906,94 @@ describe("legate module", () => {
       const r6 = nudge(slice, "s1", "sess-1", "2026-05-18T11:30:00.000Z", sendStub);
       expect(r6).toBe("nudged");
       expect(slice.steward_nudge_count).toBe(6);
+    });
+
+    it("maybePostDispatchNudge re-delivers the original message after the threshold, caps at 3, escalates", async () => {
+      // The wedge case we hit on the smithy profile: loop sent /smithy.fix
+      // to a worker, worker received the message and went to "waiting"
+      // (Claude parked at a prompt or judged "task complete" too early),
+      // and the loop's alreadyDispatched dedup silently let it sit there
+      // forever. This watchdog re-delivers the message after the threshold,
+      // caps at 3 nudges per action key (so a new dispatch resets the
+      // counter), and signals escalate when the cap is reached.
+      const loop = fs.readFileSync(await stageLoop(makeTmpDir()), "utf-8");
+      const nudge = extractFn(
+        loop,
+        "maybePostDispatchNudge",
+        ["postDispatchNudgeConfig"],
+      ) as (slice: any, sessionId: string, workerStatus: string, ts: string, key: string, build: () => string, send: any) => { nudged: boolean; escalate: boolean; count: number };
+
+      const sends: string[] = [];
+      const sendStub = (_sid: string, msg: string) => { sends.push(msg); };
+      const build = () => "/smithy.fix\nThreads: t1, t2";
+
+      // running worker → never nudge regardless of elapsed time.
+      const sliceRunning: any = { last_processor_action_at: "2026-05-19T01:00:00.000Z" };
+      expect(nudge(sliceRunning, "sess", "running", "2026-05-19T02:00:00.000Z", "k", build, sendStub))
+        .toEqual({ nudged: false, escalate: false, count: 0 });
+      expect(sends.length).toBe(0);
+
+      // waiting but too soon (< 5min after dispatch) → skip.
+      const slice: any = { last_processor_action_at: "2026-05-19T01:00:00.000Z" };
+      expect(nudge(slice, "sess", "waiting", "2026-05-19T01:03:00.000Z", "k1", build, sendStub))
+        .toEqual({ nudged: false, escalate: false, count: 0 });
+      expect(sends.length).toBe(0);
+
+      // 5 min in, first nudge fires.
+      const r1 = nudge(slice, "sess", "waiting", "2026-05-19T01:05:30.000Z", "k1", build, sendStub);
+      expect(r1).toEqual({ nudged: true, escalate: false, count: 1 });
+      expect(sends).toEqual(["/smithy.fix\nThreads: t1, t2"]);
+      expect(slice.post_dispatch_nudge_count).toBe(1);
+      expect(slice.post_dispatch_nudge_for_key).toBe("k1");
+
+      // 2 min after first nudge — too soon, no re-nudge.
+      const r2 = nudge(slice, "sess", "waiting", "2026-05-19T01:07:30.000Z", "k1", build, sendStub);
+      expect(r2).toEqual({ nudged: false, escalate: false, count: 1 });
+      expect(sends.length).toBe(1);
+
+      // 5 min after first nudge — second nudge.
+      const r3 = nudge(slice, "sess", "waiting", "2026-05-19T01:10:30.000Z", "k1", build, sendStub);
+      expect(r3).toEqual({ nudged: true, escalate: false, count: 2 });
+      expect(sends.length).toBe(2);
+
+      // 5 min after second nudge — third nudge.
+      const r4 = nudge(slice, "sess", "waiting", "2026-05-19T01:15:30.000Z", "k1", build, sendStub);
+      expect(r4).toEqual({ nudged: true, escalate: false, count: 3 });
+      expect(sends.length).toBe(3);
+
+      // Cap reached. Next check signals escalate; no new message sent.
+      const r5 = nudge(slice, "sess", "waiting", "2026-05-19T01:20:30.000Z", "k1", build, sendStub);
+      expect(r5).toEqual({ nudged: false, escalate: true, count: 3 });
+      expect(sends.length).toBe(3);
+
+      // New dispatch key (e.g., new threads appeared) — counter resets,
+      // fresh nudge cycle begins. Use a fresh dispatch timestamp.
+      slice.last_processor_action_at = "2026-05-19T02:00:00.000Z";
+      const r6 = nudge(slice, "sess", "waiting", "2026-05-19T02:06:00.000Z", "k2-new-threads", build, sendStub);
+      expect(r6).toEqual({ nudged: true, escalate: false, count: 1 });
+      expect(slice.post_dispatch_nudge_for_key).toBe("k2-new-threads");
+      expect(sends.length).toBe(4);
+    });
+
+    it("maybePostDispatchNudge ignores workers that are running, error, or otherwise non-parked", async () => {
+      const loop = fs.readFileSync(await stageLoop(makeTmpDir()), "utf-8");
+      const nudge = extractFn(
+        loop,
+        "maybePostDispatchNudge",
+        ["postDispatchNudgeConfig"],
+      ) as (slice: any, sessionId: string, workerStatus: string, ts: string, key: string, build: () => string, send: any) => { nudged: boolean; escalate: boolean; count: number };
+
+      const sends: string[] = [];
+      const sendStub = (_sid: string, msg: string) => { sends.push(msg); };
+      const slice: any = { last_processor_action_at: "2026-05-19T01:00:00.000Z" };
+      const build = () => "msg";
+
+      for (const status of ["running", "error", "stopped", "other"]) {
+        const r = nudge(slice, "sess", status, "2026-05-19T02:00:00.000Z", "k", build, sendStub);
+        expect(r.nudged).toBe(false);
+        expect(r.escalate).toBe(false);
+      }
+      expect(sends.length).toBe(0);
     });
 
     it("maybeNudgeStrandedSteward ignores slices that aren't in implementing", async () => {
