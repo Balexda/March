@@ -78,6 +78,7 @@ describe("legate-container", () => {
     // Installs the toolchain the loop shells out to.
     expect(body).toContain("cli.github.com"); // gh
     expect(body).toContain("@balexda/smithy"); // smithy
+    expect(body).toContain("ssh-keyscan"); // git-over-SSH host key
     // Bakes the march CLI so the loop runs as `march legate loop`.
     expect(body).toContain("COPY march/ /opt/march/");
     expect(body).toContain("npm ci --omit=dev");

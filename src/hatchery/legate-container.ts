@@ -95,6 +95,9 @@ export function renderLegateDockerfile(
     `RUN apt-get update \\\n` +
     ` && apt-get install -y --no-install-recommends bash ca-certificates curl git gnupg jq openssh-client python3 tmux \\\n` +
     ` && rm -rf /var/lib/apt/lists/*\n` +
+    // Seed GitHub's SSH host key so git-over-SSH (the common remote form) verifies
+    // without an interactive prompt — the host's system known_hosts isn't mounted.
+    `RUN ssh-keyscan -t rsa,ed25519 github.com >> /etc/ssh/ssh_known_hosts 2>/dev/null || true\n` +
     // gh CLI from its official apt repo (the loop reads PR/branch state via gh).
     `RUN mkdir -p -m 755 /etc/apt/keyrings \\\n` +
     ` && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg -o /etc/apt/keyrings/githubcli-archive-keyring.gpg \\\n` +
