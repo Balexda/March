@@ -1,5 +1,8 @@
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { createInterface } from "node:readline";
 import { Command, CommanderError } from "commander";
 import { ERROR, SUCCESS, USAGE_ERROR } from "../shared/exit-codes.js";
@@ -29,6 +32,13 @@ import {
   HatcheryClientError,
   runSpawnViaService,
 } from "../hatchery/service/client.js";
+import { runCastraServer } from "../castra/serve.js";
+import {
+  CastraContainerError,
+  ensureCastraContainer,
+} from "../castra/container.js";
+import { resolveCastraPort, CASTRA_TOKEN_ENV } from "../castra/config.js";
+import { CastraValidationError } from "../castra/types.js";
 import { initMarch, InitError } from "../bootstrap/init.js";
 import { createBuildContext, SnapshotError } from "../spawn/snapshot.js";
 import {
@@ -608,6 +618,127 @@ hatchery
     // Resolves only when the service shuts down (SIGTERM/SIGINT).
     await startServer({ port, host: opts.host });
     process.exitCode = SUCCESS;
+  });
+
+// Subcommand group with no own action — same pattern as `legate`/`hatchery`:
+// bare `march castra` emits the group help and `march castra <bad>` reports the
+// real unknown token. Both intercepted in the bottom-of-file catch.
+const castra = program
+  .command("castra")
+  .description("Manage Castra — the interactive-sessions host fronting agent-deck over HTTP");
+
+castra
+  .command("serve")
+  .description("Run the Castra HTTP service (binds loopback by default)")
+  .option("--port <port>", "Port to listen on (default: deterministic 8800–9799)")
+  .option("--host <host>", "Bind address (default: 127.0.0.1; the container binds 0.0.0.0)")
+  .option("--token <token>", `Bearer token gating /v1/* (default: ${CASTRA_TOKEN_ENV} env var)`)
+  .action(async (opts: { port?: string; host?: string; token?: string }) => {
+    commandHandled = true;
+
+    // Castra drives agent-deck directly, so it must be on PATH wherever serve runs.
+    if (!isFinderAvailable()) {
+      process.stderr.write(
+        "Cannot verify agent-deck is installed: path-search utility unavailable.\n",
+      );
+      process.exitCode = ERROR;
+      return;
+    }
+    if (!isOnPath("agent-deck")) {
+      process.stderr.write(
+        "agent-deck not found on PATH — required for `march castra serve`.\n",
+      );
+      process.exitCode = ERROR;
+      return;
+    }
+
+    try {
+      await runCastraServer({
+        port: opts.port,
+        host: opts.host,
+        token: opts.token,
+      });
+      process.exitCode = SUCCESS;
+    } catch (err) {
+      if (err instanceof CastraValidationError) {
+        process.stderr.write(err.message + "\n");
+        process.exitCode = USAGE_ERROR;
+        return;
+      }
+      throw err;
+    }
+  });
+
+castra
+  .command("up")
+  .description("Build and launch the shared Castra container on the `march` network")
+  .option("--port <port>", "Published loopback port (default: deterministic 8800–9799)")
+  .option(
+    "--repo <path>",
+    "Repo/worktree-parent dir to mount at its identical path (repeatable, for worktree path parity)",
+    (value: string, acc: string[]) => {
+      acc.push(value);
+      return acc;
+    },
+    [] as string[],
+  )
+  .option("--base-image <image>", "Base image for the Castra image")
+  .action((opts: { port?: string; repo?: string[]; baseImage?: string }) => {
+    commandHandled = true;
+
+    if (!isFinderAvailable()) {
+      process.stderr.write(
+        "Cannot verify Docker is installed: path-search utility unavailable.\n",
+      );
+      process.exitCode = ERROR;
+      return;
+    }
+    if (!isOnPath("docker")) {
+      process.stderr.write(
+        "Docker not found on PATH — required for `march castra up`.\n",
+      );
+      process.exitCode = ERROR;
+      return;
+    }
+
+    let port: number | undefined;
+    try {
+      port = opts.port !== undefined ? resolveCastraPort(opts.port) : undefined;
+    } catch (err) {
+      if (err instanceof CastraValidationError) {
+        process.stderr.write(err.message + "\n");
+        process.exitCode = USAGE_ERROR;
+        return;
+      }
+      throw err;
+    }
+
+    // The running CLI bundle lives at <install>/dist/cli.js; mount <install> so
+    // the container runs this same build via `node <install>/dist/cli.js`.
+    const marchInstallDir = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
+
+    try {
+      const result = ensureCastraContainer({
+        marchInstallDir,
+        homeDir: os.homedir(),
+        port,
+        repoPaths: opts.repo,
+        baseImage: opts.baseImage,
+      });
+      console.log(
+        `Castra container ${result.containerName} (${result.containerId.slice(0, 12)})` +
+          ` listening on http://127.0.0.1:${result.port}` +
+          (result.replaced ? " (replaced existing container)" : ""),
+      );
+      process.exitCode = SUCCESS;
+    } catch (err) {
+      if (err instanceof CastraContainerError) {
+        process.stderr.write(err.message + "\n");
+        process.exitCode = ERROR;
+        return;
+      }
+      throw err;
+    }
   });
 
 program

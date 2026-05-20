@@ -272,6 +272,58 @@ describe("march CLI", () => {
     });
   });
 
+  describe("march castra", () => {
+    it("bare `march castra` exits 2 and prints the castra group help", () => {
+      const result = run(["castra"]);
+      expect(result.exitCode).toBe(2);
+      const combined = result.stdout + result.stderr;
+      expect(combined).toContain("Usage: march castra");
+      // The help should list serve and up as known subcommands.
+      expect(combined).toMatch(/^\s+serve\b/m);
+      expect(combined).toMatch(/^\s+up\b/m);
+    });
+
+    it("`march castra <bad>` reports the actual unknown subcommand, not 'castra'", () => {
+      const result = run(["castra", "frobnicate"]);
+      expect(result.exitCode).toBe(2);
+      expect(result.stderr).toContain("unknown command 'frobnicate'");
+      expect(result.stderr).not.toContain("unknown command 'castra'");
+      const combined = result.stdout + result.stderr;
+      expect(combined).toContain("Usage: march castra");
+    });
+
+    it("`march castra serve --help` exits 0 and prints the serve flag surface", () => {
+      const result = run(["castra", "serve", "--help"]);
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain("Usage: march castra serve");
+      expect(result.stdout).toContain("--port");
+      expect(result.stdout).toContain("--host");
+      expect(result.stdout).toContain("--token");
+    });
+
+    it("`march castra serve` without agent-deck on PATH exits 1 with a clear message", () => {
+      const fakeBin = makeFakeBin([]); // no agent-deck stub
+      const nodeBinDir = path.dirname(process.execPath);
+      const result = runWithEnv(
+        ["castra", "serve"],
+        { PATH: `${nodeBinDir}${path.delimiter}${fakeBin}`, HOME: makeTmpDir() },
+      );
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toContain("agent-deck not found on PATH");
+    });
+
+    it("`march castra up` without docker on PATH exits 1 with a docker-specific message", () => {
+      const fakeBin = makeFakeBin([]); // no docker stub
+      const nodeBinDir = path.dirname(process.execPath);
+      const result = runWithEnv(
+        ["castra", "up"],
+        { PATH: `${nodeBinDir}${path.delimiter}${fakeBin}`, HOME: makeTmpDir() },
+      );
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toContain("Docker not found on PATH");
+    });
+  });
+
   it("march version exits 0 and stdout contains the package version", () => {
     const result = run(["version"]);
     expect(result.exitCode).toBe(0);
