@@ -715,6 +715,16 @@ function loopMetaFor(input: {
       "legate-loop-requests.ndjson",
     ),
     legate_conductor_dir: input.legateConductorDir,
+    // Telemetry config captured at init time from the operator's env, so the
+    // standalone loop process emits without needing env propagation.
+    otel: {
+      enabled: process.env.MARCH_OTEL === "1",
+      endpoint: (
+        process.env.MARCH_OTEL_ENDPOINT ||
+        process.env.OTEL_EXPORTER_OTLP_ENDPOINT ||
+        "http://localhost:4318"
+      ).replace(/\/+$/, ""),
+    },
     mode: "terminal-pr-maintenance",
   };
 }
@@ -741,6 +751,61 @@ function now() {
 function append(file, value) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.appendFileSync(file, JSON.stringify(value) + "\\n", "utf-8");
+  if (file === meta.processor_events_path) maybeEmitLoopSpan(value);
+}
+
+// --- OpenTelemetry (loop-side spans) -------------------------------------
+// Each dispatched unit of work is its own trace: trace id = hash(slice id), so
+// these loop spans share a trace with the orchestrator's hatchery.spawn /
+// spawn.* spans (which use the same deterministic ids). legate.dispatch claims
+// the deterministic span id so the orchestrator spans nest beneath it.
+function otelTraceId(key) {
+  return crypto.createHash("sha256").update("march.trace:" + key).digest("hex").slice(0, 32);
+}
+function otelSpanId(key) {
+  return crypto.createHash("sha256").update("march.span:" + key).digest("hex").slice(0, 16);
+}
+function emitLoopSpan(opts) {
+  try {
+    if (!meta.otel || !meta.otel.enabled || !opts.traceKey) return;
+    const endNanos = BigInt(Date.now()) * 1000000n;
+    const startNanos = opts.startMs ? BigInt(Math.trunc(opts.startMs)) * 1000000n : endNanos;
+    const attributes = Object.entries(opts.attributes || {}).map(([k, v]) => ({ key: k, value: { stringValue: String(v) } }));
+    const span = {
+      traceId: otelTraceId(opts.traceKey),
+      spanId: opts.spanId || crypto.randomBytes(8).toString("hex"),
+      name: opts.name,
+      kind: 1,
+      startTimeUnixNano: startNanos.toString(),
+      endTimeUnixNano: endNanos.toString(),
+      attributes,
+      status: { code: opts.error ? 2 : 1 },
+    };
+    if (opts.parentSpanId) span.parentSpanId = opts.parentSpanId;
+    const payload = { resourceSpans: [{ resource: { attributes: [{ key: "service.name", value: { stringValue: "march-legate" } }] }, scopeSpans: [{ scope: { name: "march-legate" }, spans: [span] }] }] };
+    let endpoint = meta.otel.endpoint || "http://localhost:4318";
+    while (endpoint.endsWith("/")) endpoint = endpoint.slice(0, -1);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 3000);
+    fetch(endpoint + "/v1/traces", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    }).catch(() => {}).finally(() => clearTimeout(timer));
+  } catch (err) {}
+}
+function maybeEmitLoopSpan(event) {
+  if (!event || typeof event !== "object") return;
+  const sliceId = event.slice_id;
+  if (!sliceId) return;
+  if (event.kind === "dispatch_action" && event.action === "dispatch") {
+    emitLoopSpan({ name: "legate.dispatch", traceKey: sliceId, spanId: otelSpanId(sliceId), attributes: { "march.slice_id": sliceId, "march.action": event.action } });
+  } else if (event.kind === "babysit_action") {
+    emitLoopSpan({ name: "legate.babysit", traceKey: sliceId, parentSpanId: otelSpanId(sliceId), attributes: { "march.slice_id": sliceId, "march.action": event.action || "", "march.pr_number": event.pr_number || "" } });
+  } else if (event.kind === "cleanup") {
+    emitLoopSpan({ name: "legate.cleanup", traceKey: sliceId, parentSpanId: otelSpanId(sliceId), attributes: { "march.slice_id": sliceId, "march.pr_state": event.pr_state || "" } });
+  }
 }
 
 function appendText(file, text) {

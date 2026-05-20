@@ -5,6 +5,10 @@ import path from "node:path";
 import { execFileSync } from "node:child_process";
 import nodeCrypto from "node:crypto";
 import {
+  spanIdForDispatch,
+  traceIdForDispatch,
+} from "../observability/trace-ids.js";
+import {
   buildColdStartPrompt,
   checkBridgeRequirements,
   DEFAULT_HEARTBEAT_INTERVAL,
@@ -397,6 +401,16 @@ describe("legate module", () => {
       expect(loop).toContain('"--task-name"');
       expect(loop).toContain("dispatchIdent.stem");
       expect(loop).toContain('"--slice-id"');
+      // Loop-side OTEL spans, sharing the per-dispatch trace (trace id =
+      // hash(slice id)) with the orchestrator spans via deterministic ids.
+      expect(loop).toContain("function emitLoopSpan");
+      expect(loop).toContain("function maybeEmitLoopSpan");
+      expect(loop).toContain("maybeEmitLoopSpan(value)");
+      expect(loop).toContain('"legate.dispatch"');
+      expect(loop).toContain('"legate.babysit"');
+      expect(loop).toContain('"legate.cleanup"');
+      expect(loop).toContain("spanId: otelSpanId(sliceId)");
+      expect(loop).toContain("meta.otel");
       expect(loop).toContain("dispatch_action_count");
       expect(loop).toContain("Number.isFinite(rawIntervalSeconds)");
       expect(loop).toContain("function safeTick()");
@@ -406,6 +420,10 @@ describe("legate module", () => {
       expect(meta.loop_name).toBe("march-legate-loop");
       expect(meta.processor_name).toBe("march-legate-loop");
       expect(meta.march_cli_path).toBeTruthy();
+      // Telemetry config is captured into meta at init time.
+      expect(meta.otel).toBeDefined();
+      expect(typeof meta.otel.enabled).toBe("boolean");
+      expect(typeof meta.otel.endpoint).toBe("string");
       expect(meta.legate_state_path).toBe(
         path.join(home, ".agent-deck", "conductor", "march-legate-agent", "state.json"),
       );
@@ -469,6 +487,22 @@ describe("legate module", () => {
       expect(() =>
         execFileSync(process.execPath, ["--check", "-"], { input: runner, stdio: "pipe" }),
       ).not.toThrow();
+    });
+
+    it("loop OTEL ids match the orchestrator's deterministic ids", async () => {
+      // The loop and the spawn process are separate processes with no shared
+      // context, so they MUST hash a dispatch's slice id to the same trace/span
+      // ids for their spans to land in one trace.
+      const loop = fs.readFileSync(await stageLoop(makeTmpDir()), "utf-8");
+      const otelTraceId = extractFn(loop, "otelTraceId") as (k: string) => string;
+      const otelSpanId = extractFn(loop, "otelSpanId") as (k: string) => string;
+      const sliceId = "my-spec-us1-forge";
+      expect(otelTraceId(sliceId)).toBe(traceIdForDispatch(sliceId));
+      expect(otelSpanId(sliceId)).toBe(spanIdForDispatch(sliceId));
+      // Distinct dispatches get distinct traces (no render/cut/forge grouping).
+      expect(otelTraceId("my-spec-us1-forge")).not.toBe(
+        otelTraceId("my-spec-us1-cut"),
+      );
     });
 
     it("generated hatchery runner writes an error result when the spawn exits non-zero", async () => {
