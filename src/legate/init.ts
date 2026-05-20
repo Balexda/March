@@ -3607,7 +3607,8 @@ function handleRecoveryDispatch(state, ts, item, sliceId, mergedArchive) {
   }
 
   try {
-    syncDefaultBranch(state);
+    // syncDefaultBranch already ran at the top of runDispatch; no need
+    // to re-fetch per recovery dispatch.
     const action = item.next_action || {};
     const resultPath = hatcheryResultPath(recoverySliceId);
     const logPath = hatcheryLogPath(recoverySliceId);
@@ -3706,6 +3707,33 @@ function runDispatch(state, ts) {
     });
   }
 
+  // Pull the default branch BEFORE reading smithy status. Without this,
+  // smithy reads a stale local tasks.md and either (a) reports a row as
+  // ready when a merge elsewhere has already ticked the box (triggering
+  // pointless recovery dispatches) or (b) misses a newly-ready row that a
+  // recent merge unblocked. Fetch is best-effort: on failure (network blip,
+  // repo lock) the tick still proceeds against whatever the local repo last
+  // saw — cleanup/babysit/etc. don't need fresh local state, and the next
+  // tick will retry. We do NOT escalate fetch failures — they are noise on a
+  // healthy system.
+  try {
+    syncDefaultBranch(state);
+  } catch (err) {
+    const error = err?.message || String(err);
+    appendText(
+      meta.processor_log_path,
+      "[" + ts + "] sync warning: " + error + " — proceeding against stale local repo",
+    );
+    append(meta.processor_events_path, {
+      schema_version: 1,
+      ts,
+      processor: meta.processor_name,
+      paired_legate: meta.paired_legate,
+      kind: "sync_warning",
+      error,
+    });
+  }
+
   let status;
   try {
     status = readSmithyStatus(repoPath);
@@ -3728,7 +3756,6 @@ function runDispatch(state, ts) {
   state.last_smithy_status_at = ts;
 
   const ready = readySmithyItems(status);
-  let synced = false;
   mutated = true;
   for (const item of ready) {
     const sliceId = dispatchSliceId(item);
@@ -3772,10 +3799,8 @@ function runDispatch(state, ts) {
     // mental model and gets the loop to dispatch every layer-0 item.
 
     try {
-      if (!synced) {
-        syncDefaultBranch(state);
-        synced = true;
-      }
+      // syncDefaultBranch already ran at the top of runDispatch; no need
+      // to re-fetch per dispatch.
       const action = item.next_action || {};
       const resultPath = hatcheryResultPath(sliceId);
       const logPath = hatcheryLogPath(sliceId);

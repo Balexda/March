@@ -403,6 +403,19 @@ describe("legate module", () => {
       expect(loop).toContain('action: "post-dispatch-nudge"');
       expect(loop).toContain("worker_unresponsive_after_review_fix");
       expect(loop).toContain("worker_unresponsive_after_conflict_fix");
+      // syncDefaultBranch now runs once per tick BEFORE readSmithyStatus so
+      // smithy reads against fresh local repo state. Fetch failures degrade
+      // to a sync_warning event + a log line; the tick continues with the
+      // stale local repo. Without this the loop could either dispatch
+      // recoveries for already-ticked rows or miss freshly-unblocked work.
+      expect(loop).toContain('kind: "sync_warning"');
+      expect(loop).toContain("sync warning:");
+      expect(loop).toContain("proceeding against stale local repo");
+      // The lazy "if (!synced) syncDefaultBranch" inside the dispatch loop
+      // is gone — both normal and recovery dispatches piggyback on the
+      // single top-of-tick sync.
+      expect(loop).not.toContain("if (!synced) {");
+      expect(loop).not.toContain("let synced = false");
       expect(loop).toContain('kind: "dispatch_failure"');
       expect(loop).toContain('kind: "dispatch_read_failure"');
       expect(loop).toContain("function launchHatcheryDispatch");
