@@ -730,6 +730,16 @@ function loopMetaFor(input: {
       "legate-loop-requests.ndjson",
     ),
     legate_conductor_dir: input.legateConductorDir,
+    // Telemetry config captured at init time from the operator's env, so the
+    // standalone loop process emits without needing env propagation.
+    otel: {
+      enabled: process.env.MARCH_OTEL === "1",
+      endpoint: (
+        process.env.MARCH_OTEL_ENDPOINT ||
+        process.env.OTEL_EXPORTER_OTLP_ENDPOINT ||
+        "http://localhost:4318"
+      ).replace(/\/+$/, ""),
+    },
     mode: "terminal-pr-maintenance",
   };
 }
@@ -760,6 +770,79 @@ function now() {
 function append(file, value) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.appendFileSync(file, JSON.stringify(value) + "\\n", "utf-8");
+  if (file === meta.processor_events_path) maybeEmitLoopSpan(value);
+}
+
+// --- OpenTelemetry (loop-side spans) -------------------------------------
+// Each dispatched unit of work is its own trace: trace id = hash(slice id), so
+// these loop spans share a trace with the orchestrator's hatchery.spawn /
+// spawn.* spans (which use the same deterministic ids). legate.dispatch claims
+// the deterministic span id so the orchestrator spans nest beneath it.
+function otelTraceId(key) {
+  return crypto.createHash("sha256").update("march.trace:" + key).digest("hex").slice(0, 32);
+}
+function otelSpanId(key) {
+  return crypto.createHash("sha256").update("march.span:" + key).digest("hex").slice(0, 16);
+}
+function emitLoopSpan(opts) {
+  try {
+    if (!meta.otel || !meta.otel.enabled || !opts.traceKey) return;
+    const endNanos = BigInt(Date.now()) * 1000000n;
+    const startNanos = opts.startMs ? BigInt(Math.trunc(opts.startMs)) * 1000000n : endNanos;
+    // Every loop span carries the deployment profile (set at \`march legate
+    // init\`, also what places agent-deck sessions) so test/integ telemetry can
+    // be filtered out of a real deployment's traces.
+    const attributes = Object.entries({ "march.profile": meta.profile || "unknown", ...(opts.attributes || {}) }).map(([k, v]) => ({ key: k, value: { stringValue: String(v) } }));
+    const span = {
+      traceId: otelTraceId(opts.traceKey),
+      spanId: opts.spanId || crypto.randomBytes(8).toString("hex"),
+      name: opts.name,
+      kind: 1,
+      startTimeUnixNano: startNanos.toString(),
+      endTimeUnixNano: endNanos.toString(),
+      attributes,
+      status: { code: opts.error ? 2 : 1 },
+    };
+    if (opts.parentSpanId) span.parentSpanId = opts.parentSpanId;
+    const payload = { resourceSpans: [{ resource: { attributes: [{ key: "service.name", value: { stringValue: "march-legate" } }] }, scopeSpans: [{ scope: { name: "march-legate" }, spans: [span] }] }] };
+    let endpoint = meta.otel.endpoint || "http://localhost:4318";
+    while (endpoint.endsWith("/")) endpoint = endpoint.slice(0, -1);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 3000);
+    fetch(endpoint + "/v1/traces", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    }).catch(() => {}).finally(() => clearTimeout(timer));
+  } catch (err) {}
+}
+function maybeEmitLoopSpan(event) {
+  if (!event || typeof event !== "object") return;
+  const sliceId = event.slice_id;
+  if (!sliceId) return;
+  if (event.kind === "dispatch_action" && event.action === "dispatch") {
+    emitLoopSpan({ name: "legate.dispatch", traceKey: sliceId, spanId: otelSpanId(sliceId), attributes: { "march.slice_id": sliceId, "march.action": event.action, "march.dispatch_mode": "spawn" } });
+  } else if (event.kind === "recovery_dispatch") {
+    // Failed-spawn recovery (added with the upstream recovery/direct-steward
+    // machinery). Each recovery codex spawn and each no-spawn direct-steward
+    // dispatch is its own dispatched unit of work, so it gets its own trace
+    // keyed off its recovery-/direct-suffixed slice id. Like a normal dispatch,
+    // it claims the deterministic span id (otelSpanId) so a recovery spawn's
+    // hatchery.spawn / spawn.* spans nest beneath this root; direct_dispatch has
+    // no spawn but stays uniform so the dispatch still shows up as a trace.
+    const mode = event.action === "direct_dispatch" ? "direct_steward" : "recovery";
+    emitLoopSpan({ name: "legate.dispatch", traceKey: sliceId, spanId: otelSpanId(sliceId), attributes: { "march.slice_id": sliceId, "march.action": event.action || "", "march.dispatch_mode": mode } });
+  } else if (event.kind === "dispatch_failure") {
+    // launchHatcheryDispatch threw, so the spawn never ran and the orchestrator
+    // never emits hatchery.spawn / the spawn metrics. Record the failed launch
+    // as an errored root span so the dispatch still surfaces — as a failed trace.
+    emitLoopSpan({ name: "legate.dispatch", traceKey: sliceId, spanId: otelSpanId(sliceId), error: true, attributes: { "march.slice_id": sliceId, "march.action": "dispatch", "march.dispatch_mode": "spawn", "march.error": event.error || "dispatch launch failed" } });
+  } else if (event.kind === "babysit_action") {
+    emitLoopSpan({ name: "legate.babysit", traceKey: sliceId, parentSpanId: otelSpanId(sliceId), attributes: { "march.slice_id": sliceId, "march.action": event.action || "", "march.pr_number": event.pr_number || "" } });
+  } else if (event.kind === "cleanup") {
+    emitLoopSpan({ name: "legate.cleanup", traceKey: sliceId, parentSpanId: otelSpanId(sliceId), attributes: { "march.slice_id": sliceId, "march.pr_state": event.pr_state || "" } });
+  }
 }
 
 function appendText(file, text) {
@@ -2580,7 +2663,16 @@ function hatcheryRunnerCode() {
     'let request = null;',
     'try {',
     '  request = JSON.parse(fs.readFileSync(requestPath, "utf-8"));',
-    '  const result = spawnSync(request.command, request.args, { cwd: request.cwd, encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"] });',
+    // request.otelEnv is present only when the deployment has telemetry on
+    // (meta.otel.enabled at init). It carries MARCH_OTEL=1 + endpoint down to
+    // the "march hatchery spawn" orchestrator so it emits spawn metrics/spans —
+    // the loop is launched by agent-deck as a bare node with no MARCH_OTEL in
+    // its env, so without this the orchestrator (which reads process.env) would
+    // emit nothing. Omitted when off, so the spawn argv/env is unchanged.
+    // (No backticks in this comment: it lives inside the LEGATE_LOOP_MJS literal.)
+    '  const spawnOpts = { cwd: request.cwd, encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"] };',
+    '  if (request.otelEnv) spawnOpts.env = Object.assign({}, process.env, request.otelEnv);',
+    '  const result = spawnSync(request.command, request.args, spawnOpts);',
     '  if (result.stderr) { try { fs.appendFileSync(logPath, result.stderr); } catch {} }',
     '  if (result.status === 0) {',
     '    fs.writeFileSync(resultPath, result.stdout || "", "utf-8");',
@@ -2613,6 +2705,7 @@ function launchHatcheryDispatch(item, resultPath, logPath, opts) {
   if (typeof repoPath !== "string" || repoPath.length === 0) {
     throw new Error("repo path is missing");
   }
+  const dispatchIdent = dispatchIdentity(item);
   const branch = opts?.branchOverride || dispatchBranch(item);
   const title = opts?.titleOverride || dispatchTitle(item);
   const prompt = opts?.promptOverride || buildSmithySpawnPrompt(item);
@@ -2630,6 +2723,14 @@ function launchHatcheryDispatch(item, resultPath, logPath, opts) {
     title,
     "--branch",
     branch,
+    "--profile",
+    meta.profile,
+    "--task-type",
+    dispatchIdent.verb,
+    "--task-name",
+    dispatchIdent.stem,
+    "--slice-id",
+    requestSliceId,
     "--prompt",
     prompt,
     "--json",
@@ -2638,13 +2739,22 @@ function launchHatcheryDispatch(item, resultPath, logPath, opts) {
   fs.writeFileSync(resultPath, "", "utf-8");
   const requestPath = hatcheryRequestPath(requestSliceId);
   const resolved = marchCommandAndArgs(args);
-  fs.writeFileSync(requestPath, JSON.stringify({
+  const requestBody = {
     command: resolved.command,
     args: resolved.args,
     cwd: repoPath,
     resultPath,
     logPath,
-  }) + "\\n", "utf-8");
+  };
+  // Propagate the deployment's frozen telemetry config to the spawn orchestrator
+  // so it emits even though the loop runs without MARCH_OTEL in its ambient env.
+  if (meta.otel && meta.otel.enabled) {
+    requestBody.otelEnv = {
+      MARCH_OTEL: "1",
+      MARCH_OTEL_ENDPOINT: meta.otel.endpoint || "http://localhost:4318",
+    };
+  }
+  fs.writeFileSync(requestPath, JSON.stringify(requestBody) + "\\n", "utf-8");
   const child = spawn(process.execPath, ["-e", hatcheryRunnerCode(), requestPath, resultPath, logPath], {
     cwd: repoPath,
     detached: true,

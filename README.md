@@ -40,4 +40,20 @@ Requires Node 20 or 22. `march spawn dispatch` additionally requires `git` and `
 | `march version` | Print the installed CLI version. |
 | `march help [command]` | Show help for a command. |
 
+## Observability
+
+March emits OpenTelemetry traces and metrics — spawn success rate, spawn
+runtime, and a trace per dispatched unit of work — to a local, all-in-one
+Grafana stack. Telemetry is opt-in (`MARCH_OTEL=1`) and a complete no-op when
+off; a missing collector never affects a command.
+
+```bash
+docker compose -f docker/otel-lgtm.docker-compose.yml up -d
+open http://localhost:3000      # Grafana (admin/admin) → "March — Spawn observability"
+```
+
+Then run March with `MARCH_OTEL=1` set. Full details — enabling it per Legate
+deployment, the trace/span and metric model, the provisioned dashboard, and how
+to validate the stack — are in **[docs/Observability.md](docs/Observability.md)**.
+
 See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, testing strategy, and pre-release checklist.

@@ -25,8 +25,10 @@ March's source is organized by product subsystem rather than by generic layers:
 | `src/brood/` | Spawn lifecycle state: worktrees, branches, records, and cleanup ownership. |
 | `src/herald/` | Deterministic event bus code. Add mini-herald event/log/daemon modules here when that feature lands. |
 | `src/legate/` | Legate conductor setup, template rendering, bridge checks, and related orchestration bootstrap. |
+| `src/observability/` | OpenTelemetry bootstrap, deterministic trace/span id helpers, spawn metrics, the dispatch-trace helper, and the in-sandbox emitter. Env-gated (`MARCH_OTEL=1`), no-op when off. |
 | `src/shared/` | Small cross-cutting primitives with no March-domain ownership, such as dependency checks, exit codes, and version lookup. |
 | `src/templates/legate/` | Static Legate runtime template assets packaged with the CLI. Keep these separate from Legate TypeScript implementation. |
+| `docker/` | The `otel-lgtm` observability stack compose file and its provisioned Grafana dashboards (`docker/grafana/`), plus spawn image Dockerfiles. |
 
 Tests live next to the modules they cover. When adding a module, place it under the subsystem that should own the behavior long-term, not necessarily the milestone that first needs it.
 
@@ -45,6 +47,24 @@ Agent-driven and human tests:
 
 - **Agent tests** (Claude Code session) — end-to-end dispatch lifecycle on a throwaway repo and `failed`-state rollback. Today documented as prose; aspirational target is `L3 / Deterministic / CI` (cassette-replayed) plus `L3 / Stochastic / Scheduled` (weekly live-backend). See **[tests/Agent.tests.md](tests/Agent.tests.md)** (A1–A5).
 - **Human tests** (interactive terminal) — TTY-only flows like the `readline` downgrade prompt. See **[tests/Manual.tests.md](tests/Manual.tests.md)** (H1–H2).
+
+## Observability
+
+March emits OpenTelemetry traces and metrics (spawn success rate, runtime, and
+per-dispatch lineage) to a local `grafana/otel-lgtm` stack. Telemetry is opt-in
+(`MARCH_OTEL=1`) and a no-op when off. The full guide — bringing the stack up,
+enabling it per deployment, the trace/span and metric model, the provisioned
+Grafana dashboard, and validation — is in **[docs/Observability.md](docs/Observability.md)**.
+
+**Keep telemetry in lock-step with the dispatch machinery.** When you add a loop
+lifecycle action or a new dispatch path, emit a span for it; when you add a
+failure mode, emit an *errored* span so it surfaces in traces; when a new process
+joins a trace, reuse the deterministic id helpers (kept identical across
+`src/observability/trace-ids.ts`, `src/legate/init.ts`, and
+`src/observability/in-spawn-emitter.ts`). New metrics/labels go in
+`src/observability/spawn-metrics.ts` — low-cardinality only, never per-spawn or
+per-slice ids — and update `docker/grafana/dashboards/` to match. See
+[docs/Observability.md § Keeping observability current](docs/Observability.md#keeping-observability-current).
 
 ## Automated Dependency Updates
 
