@@ -216,6 +216,37 @@ export function resolveAgentDeckBinPath(): string | null {
   }
 }
 
+/**
+ * Build a `GIT_SSH_COMMAND` that points git's ssh at the mounted SSH keys by
+ * absolute path — a workaround for Balexda/March#154: OpenSSH resolves `~/.ssh`
+ * from the passwd database (the image user's home, e.g. /home/node), not `$HOME`,
+ * so the keys we mount under {@link LEGATE_CONTAINER_HOME}/.ssh are otherwise
+ * never found and git-over-SSH fails with "Permission denied (publickey)".
+ * Returns null when no private keys are present. github's host key is seeded into
+ * the image's system known_hosts, so only the identity needs pinning.
+ */
+export function gitSshCommandForMountedKeys(homeDir: string): string | null {
+  const sshDir = path.join(homeDir, ".ssh");
+  let entries: string[];
+  try {
+    entries = fs.readdirSync(sshDir);
+  } catch {
+    return null;
+  }
+  const keys = entries
+    .filter((name) => /^id_/.test(name) && !name.endsWith(".pub"))
+    // ed25519 first, then the rest, for a stable preferred order.
+    .sort((a, b) =>
+      (a.includes("ed25519") ? 0 : 1) - (b.includes("ed25519") ? 0 : 1) ||
+      a.localeCompare(b),
+    );
+  if (keys.length === 0) return null;
+  const identityArgs = keys
+    .map((name) => `-i ${LEGATE_CONTAINER_HOME}/.ssh/${name}`)
+    .join(" ");
+  return `ssh -o IdentitiesOnly=yes ${identityArgs}`;
+}
+
 function addMountIfPresent(
   mounts: LegateContainerMount[],
   source: string,
@@ -332,6 +363,13 @@ export function buildLegateContainerRunArgs(
   );
   for (const envVar of LEGATE_PASSTHROUGH_ENV) {
     args.push("-e", envVar);
+  }
+
+  // Workaround for #154: make git-over-SSH find the mounted keys (ssh ignores
+  // $HOME and uses the passwd home, where nothing is mounted).
+  const gitSsh = gitSshCommandForMountedKeys(input.homeDir);
+  if (gitSsh) {
+    args.push("-e", `GIT_SSH_COMMAND=${gitSsh}`);
   }
 
   // Publish the loop HTTP API on a deterministic loopback host port so the

@@ -20,6 +20,7 @@ import {
   LEGATE_CONTAINER_HOME,
   LEGATE_IMAGE_TAG,
   LEGATE_LOOP_CONTAINER_PORT,
+  gitSshCommandForMountedKeys,
   legateContainerMounts,
   legateContainerName,
   legateLoopHostPort,
@@ -204,6 +205,8 @@ describe("legate-container", () => {
     fs.mkdirSync(conductor, { recursive: true });
     fs.mkdirSync(loop, { recursive: true });
     fs.writeFileSync(agentDeck, "#!/bin/sh\n");
+    fs.mkdirSync(path.join(home, ".ssh"), { recursive: true });
+    fs.writeFileSync(path.join(home, ".ssh", "id_ed25519"), "key\n");
 
     const args = buildLegateContainerRunArgs({
       conductorName: "legate-march",
@@ -249,8 +252,26 @@ describe("legate-container", () => {
     );
     // Mounts the host agent-deck binary onto the container PATH.
     expect(args).toContain(`type=bind,src=${agentDeck},dst=${LEGATE_AGENT_DECK_TARGET}`);
+    // #154 workaround: point git's ssh at the mounted key by absolute path.
+    expect(args).toContain(
+      `GIT_SSH_COMMAND=ssh -o IdentitiesOnly=yes -i ${LEGATE_CONTAINER_HOME}/.ssh/id_ed25519`,
+    );
     expect(args.at(-1)).toContain("March Legate loop starting");
     expect(args.at(-1)).toContain("exec march legate loop");
+  });
+
+  it("orders ssh identities ed25519-first and is null without keys", () => {
+    const home = makeTmpDir();
+    expect(gitSshCommandForMountedKeys(home)).toBeNull(); // no ~/.ssh
+    fs.mkdirSync(path.join(home, ".ssh"), { recursive: true });
+    fs.writeFileSync(path.join(home, ".ssh", "id_rsa"), "k");
+    fs.writeFileSync(path.join(home, ".ssh", "id_rsa.pub"), "k"); // ignored
+    fs.writeFileSync(path.join(home, ".ssh", "id_ed25519"), "k");
+    fs.writeFileSync(path.join(home, ".ssh", "known_hosts"), "h"); // ignored
+    const cmd = gitSshCommandForMountedKeys(home)!;
+    expect(cmd).toBe(
+      `ssh -o IdentitiesOnly=yes -i ${LEGATE_CONTAINER_HOME}/.ssh/id_ed25519 -i ${LEGATE_CONTAINER_HOME}/.ssh/id_rsa`,
+    );
   });
 
   it("builds the image, replaces any existing container, and returns the launched id", () => {
