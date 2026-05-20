@@ -1,6 +1,9 @@
 import { loadSpawnRecord } from "../../brood/spawn-record.js";
 import { BroodClient, broodConfigured } from "../../brood/service/client.js";
-import type { HatcherySpawnResult } from "../spawn-handoff.js";
+import {
+  DEFAULT_AGENT_DECK_PROFILE,
+  type HatcherySpawnResult,
+} from "../spawn-handoff.js";
 import type { SpawnRequest } from "./types.js";
 
 export interface RegisterSpawnDeps {
@@ -48,12 +51,15 @@ export async function registerSpawnWithBrood(
     });
 
     // Steward row links back to the spawn and carries the agent-deck handle.
+    // Record the RESOLVED profile (the same fallback Hatchery used to launch the
+    // steward via Castra), not the raw optional — Castra's teardown requires a
+    // concrete profile, so a profile-less spawn must still be removable.
     await client.register({
       id: result.managerSession.sessionId,
       kind: "steward",
       parentId: result.spawnId,
       agentDeckSessionId: result.managerSession.sessionId,
-      profile: request.agentDeckProfile,
+      profile: request.agentDeckProfile?.trim() || DEFAULT_AGENT_DECK_PROFILE,
       group: request.managerGroup,
       status: "running",
       repoPath: request.repoPath,
