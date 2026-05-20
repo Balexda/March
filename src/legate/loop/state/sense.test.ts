@@ -1,0 +1,113 @@
+import { describe, expect, it, vi } from "vitest";
+import { senseState, type SenseDeps } from "./sense.js";
+import type { LoopMeta } from "../meta.js";
+
+const meta = { worker_group: "legate-workers", repo: { path: "/repo" } } as unknown as LoopMeta;
+
+function deps(over: Partial<SenseDeps> = {}): SenseDeps {
+  return {
+    meta,
+    now: () => "2026-05-20T00:00:00Z",
+    readStateJson: () => ({
+      repo: { path: "/repo", default_branch: "main" },
+      slices: {},
+      archived_slices: {},
+    }),
+    listSessions: () => [],
+    syncDefaultBranch: () => {},
+    readSmithyStatus: () => ({ records: [], graph: {} }),
+    queryPr: () => ({}),
+    sessionOutput: () => ({ output: "" }),
+    ...over,
+  };
+}
+
+describe("senseState (Stage 1)", () => {
+  it("assembles a snapshot with workers + smithy queue", () => {
+    const state = senseState(
+      deps({
+        listSessions: () => [{ id: "s1", group: "legate-workers", status: "running" }],
+        readSmithyStatus: () => ({
+          records: [
+            { path: "a", next_action: { command: "smithy.forge" } },
+            { path: "b", next_action: { command: "smithy.cut" } },
+          ],
+          graph: {},
+        }),
+      }),
+    );
+    expect(state.statePresent).toBe(true);
+    expect(state.workers).toMatchObject({ running: 1 });
+    expect(state.smithy.ok).toBe(true);
+    // both records are ready (no layer constraint) → 2 dispatchable
+    expect(state.smithy.queue).toEqual({ dispatchable: 2, blocked: 0, total: 2 });
+    expect(state.sessionsById.get("s1")).toBeTruthy();
+  });
+
+  it("captures state-read errors without throwing", () => {
+    const state = senseState(
+      deps({
+        readStateJson: () => {
+          throw new Error("corrupt");
+        },
+      }),
+    );
+    expect(state.statePresent).toBe(false);
+    expect(state.stateError).toBe("corrupt");
+  });
+
+  it("surfaces a smithy read failure as smithy.ok=false (non-fatal)", () => {
+    const state = senseState(
+      deps({
+        readSmithyStatus: () => {
+          throw new Error("smithy down");
+        },
+      }),
+    );
+    expect(state.smithy.ok).toBe(false);
+    expect(state.smithy.error).toBe("smithy down");
+  });
+
+  it("fetches per-slice PR + output only for active slices with a live session", () => {
+    const queryPr = vi.fn(() => ({ number: 7, state: "OPEN" }));
+    const sessionOutput = vi.fn(() => ({ output: "log" }));
+    const state = senseState(
+      deps({
+        readStateJson: () => ({
+          repo: { path: "/repo" },
+          slices: {
+            active: { worker_session_id: "s1", stage: "pr-open" },
+            terminal: { worker_session_id: "s2", stage: "merged" }, // skipped (terminal)
+            noSession: { stage: "implementing" }, // skipped (no session)
+            noLiveSession: { worker_session_id: "s9", stage: "implementing" }, // skipped (session absent)
+          },
+          archived_slices: {},
+        }),
+        listSessions: () => [
+          { id: "s1", group: "legate-workers", status: "idle" },
+          { id: "s2", group: "legate-workers", status: "idle" },
+        ],
+        queryPr,
+        sessionOutput,
+      }),
+    );
+    expect(Object.keys(state.perSlice)).toEqual(["active"]);
+    expect(state.perSlice.active!.pr).toMatchObject({ number: 7 });
+    expect(queryPr).toHaveBeenCalledTimes(1);
+    expect(sessionOutput).toHaveBeenCalledWith("s1");
+  });
+
+  it("emits a sync warning but still reads smithy when sync throws", () => {
+    const warn = vi.fn();
+    const state = senseState(
+      deps({
+        syncDefaultBranch: () => {
+          throw new Error("no remote");
+        },
+        warn,
+      }),
+    );
+    expect(warn).toHaveBeenCalled();
+    expect(state.smithy.ok).toBe(true);
+  });
+});
