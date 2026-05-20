@@ -34,9 +34,18 @@ export interface SpawnOtelContext {
  * (e.g. a compose service name) is assumed already reachable and left as-is.
  */
 export function containerOtelEndpoint(hostEndpoint: string): string {
-  return hostEndpoint
-    .replace("//localhost:", "//host.docker.internal:")
-    .replace("//127.0.0.1:", "//host.docker.internal:");
+  try {
+    const url = new URL(hostEndpoint);
+    if (url.hostname === "localhost" || url.hostname === "127.0.0.1") {
+      url.hostname = "host.docker.internal";
+      // URL serialisation appends a trailing slash for a root path; strip it so
+      // callers can append `/v1/traces` without producing a double slash.
+      return url.toString().replace(/\/+$/, "");
+    }
+  } catch {
+    // Not a parseable URL — leave it untouched for the caller to handle.
+  }
+  return hostEndpoint;
 }
 
 /** Encode resource attributes as the OTEL `k=v,k=v` env format (drops blanks). */
