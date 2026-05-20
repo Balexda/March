@@ -69,7 +69,7 @@ export async function runLoop(opts: RunLoopOptions = {}): Promise<void> {
   const host =
     env.MARCH_LEGATE_LOOP_HOST?.trim() ||
     (env.MARCH_LEGATE_CONTAINER === "1" ? "0.0.0.0" : "127.0.0.1");
-  const server = startLoopHttpServer(
+  const server = await startLoopHttpServer(
     { meta, startedAtMs, getSnapshot: getLoopSnapshot },
     port,
     host,
@@ -88,7 +88,7 @@ export async function runLoop(opts: RunLoopOptions = {}): Promise<void> {
       shuttingDown = true;
       console.log(`March Legate loop received ${signal}; shutting down`);
       loop.stop();
-      server.close();
+      await server.close();
       await otel.shutdown();
       resolve();
     };

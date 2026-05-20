@@ -1,12 +1,12 @@
-import http from "node:http";
+import Fastify, { type FastifyInstance } from "fastify";
 import type { LoopMeta } from "./meta.js";
 import type { LoopSnapshot } from "./runtime.js";
 
 /**
- * HTTP API for the Legate loop service. The legate-agent (a Claude conductor on
- * the host) calls this to read loop state deterministically rather than scraping
- * logs. PR1 exposes read-only liveness/status; the route table is structured so
- * deterministic ACTION endpoints (POST /tick, /dispatch, ...) can be added later
+ * HTTP API for the Legate loop service, built on Fastify. The legate-agent (a
+ * Claude conductor on the host) calls this to read loop state deterministically
+ * rather than scraping logs. Today it exposes read-only liveness/status;
+ * deterministic ACTION routes (POST /tick, /dispatch, ...) register the same way
  * (Balexda/March#147). Bind to loopback only — never expose publicly.
  */
 
@@ -14,32 +14,6 @@ export interface LoopHttpContext {
   readonly meta: LoopMeta;
   readonly startedAtMs: number;
   readonly getSnapshot: () => LoopSnapshot;
-}
-
-type Handler = (ctx: LoopHttpContext) => { status: number; body: unknown };
-
-interface Route {
-  readonly method: string;
-  readonly path: string;
-  readonly handler: Handler;
-}
-
-export const ROUTES: Route[] = [
-  { method: "GET", path: "/healthz", handler: healthz },
-  { method: "GET", path: "/status", handler: status },
-];
-
-function healthz(ctx: LoopHttpContext): { status: number; body: unknown } {
-  return {
-    status: 200,
-    body: {
-      status: "ok",
-      pid: process.pid,
-      uptime_seconds: Math.round((Date.now() - ctx.startedAtMs) / 1000),
-      profile: ctx.meta.profile,
-      conductor: ctx.meta.paired_legate,
-    },
-  };
 }
 
 /** Build the /status payload from the latest heartbeat snapshot (pure; testable). */
@@ -79,63 +53,30 @@ export function buildStatus(ctx: LoopHttpContext): Record<string, unknown> {
   };
 }
 
-function status(ctx: LoopHttpContext): { status: number; body: unknown } {
-  return { status: 200, body: buildStatus(ctx) };
-}
+/** Build the Fastify app with the loop routes registered. Exported for tests (inject). */
+export function buildLoopServer(ctx: LoopHttpContext): FastifyInstance {
+  const app = Fastify({ logger: false });
 
-/** Match a method+path against the route table; null when nothing matches. */
-export function matchRoute(method: string, pathname: string): Route | null {
-  return (
-    ROUTES.find((r) => r.method === method && r.path === pathname) ?? null
-  );
-}
+  app.get("/healthz", async () => ({
+    status: "ok",
+    pid: process.pid,
+    uptime_seconds: Math.round((Date.now() - ctx.startedAtMs) / 1000),
+    profile: ctx.meta.profile,
+    conductor: ctx.meta.paired_legate,
+  }));
 
-/** Returns true if any route exists for the path (drives 404 vs 405). */
-function pathExists(pathname: string): boolean {
-  return ROUTES.some((r) => r.path === pathname);
-}
+  app.get("/status", async () => buildStatus(ctx));
 
-function send(res: http.ServerResponse, status: number, body: unknown): void {
-  const payload = JSON.stringify(body);
-  res.writeHead(status, {
-    "content-type": "application/json",
-    "content-length": Buffer.byteLength(payload),
-  });
-  res.end(payload);
-}
-
-/** Build the request listener for the loop API. Exported for tests. */
-export function createRequestListener(
-  ctx: LoopHttpContext,
-): http.RequestListener {
-  return (req, res) => {
-    const method = (req.method || "GET").toUpperCase();
-    const pathname = (req.url || "/").split("?")[0]!;
-    const route = matchRoute(method, pathname);
-    if (route) {
-      try {
-        const { status: code, body } = route.handler(ctx);
-        send(res, code, body);
-      } catch (err) {
-        send(res, 500, { error: (err as Error).message });
-      }
-      return;
-    }
-    if (pathExists(pathname)) {
-      send(res, 405, { error: "method not allowed", path: pathname });
-      return;
-    }
-    send(res, 404, { error: "not found", path: pathname });
-  };
+  return app;
 }
 
 /** Start the loop HTTP server on the given port (loopback by default). */
-export function startLoopHttpServer(
+export async function startLoopHttpServer(
   ctx: LoopHttpContext,
   port: number,
   host = "127.0.0.1",
-): http.Server {
-  const server = http.createServer(createRequestListener(ctx));
-  server.listen(port, host);
-  return server;
+): Promise<FastifyInstance> {
+  const app = buildLoopServer(ctx);
+  await app.listen({ port, host });
+  return app;
 }

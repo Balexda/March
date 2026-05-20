@@ -1,14 +1,7 @@
 import { describe, expect, it } from "vitest";
-import {
-  buildStatus,
-  createRequestListener,
-  matchRoute,
-  type LoopHttpContext,
-} from "./http.js";
+import { buildLoopServer, buildStatus, type LoopHttpContext } from "./http.js";
 import type { LoopMeta } from "./meta.js";
 import type { LoopSnapshot } from "./runtime.js";
-import http from "node:http";
-import { AddressInfo } from "node:net";
 
 const meta = {
   profile: "smithy",
@@ -38,14 +31,7 @@ const heartbeat = {
   state_error: null,
 };
 
-describe("loop http routes", () => {
-  it("matches known routes and rejects unknown ones", () => {
-    expect(matchRoute("GET", "/healthz")?.path).toBe("/healthz");
-    expect(matchRoute("GET", "/status")?.path).toBe("/status");
-    expect(matchRoute("GET", "/nope")).toBeNull();
-    expect(matchRoute("POST", "/status")).toBeNull(); // method mismatch
-  });
-
+describe("loop http (fastify)", () => {
   it("builds a /status payload from the latest heartbeat", () => {
     const status = buildStatus(
       ctxWith({ lastHeartbeat: heartbeat, lastTickAtMs: Date.now(), lastTickDurationMs: 420 }),
@@ -73,28 +59,26 @@ describe("loop http routes", () => {
     });
   });
 
-  it("serves /healthz 200, /status 200, 404 unknown, 405 wrong method over HTTP", async () => {
-    const server = http.createServer(
-      createRequestListener(
-        ctxWith({ lastHeartbeat: heartbeat, lastTickAtMs: Date.now(), lastTickDurationMs: 1 }),
-      ),
+  it("serves /healthz and /status, 404 for unknown routes", async () => {
+    const app = buildLoopServer(
+      ctxWith({ lastHeartbeat: heartbeat, lastTickAtMs: Date.now(), lastTickDurationMs: 1 }),
     );
-    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
-    const { port } = server.address() as AddressInfo;
-    const base = `http://127.0.0.1:${port}`;
     try {
-      const health = await fetch(`${base}/healthz`);
-      expect(health.status).toBe(200);
-      expect((await health.json()).status).toBe("ok");
+      const health = await app.inject({ method: "GET", url: "/healthz" });
+      expect(health.statusCode).toBe(200);
+      expect(health.json().status).toBe("ok");
 
-      const status = await fetch(`${base}/status`);
-      expect(status.status).toBe(200);
-      expect((await status.json()).queue.dispatchable).toBe(2);
+      const status = await app.inject({ method: "GET", url: "/status" });
+      expect(status.statusCode).toBe(200);
+      expect(status.json().queue.dispatchable).toBe(2);
 
-      expect((await fetch(`${base}/nope`)).status).toBe(404);
-      expect((await fetch(`${base}/status`, { method: "POST" })).status).toBe(405);
+      const missing = await app.inject({ method: "GET", url: "/nope" });
+      expect(missing.statusCode).toBe(404);
+
+      const wrongMethod = await app.inject({ method: "POST", url: "/status" });
+      expect(wrongMethod.statusCode).toBe(404);
     } finally {
-      await new Promise<void>((r) => server.close(() => r()));
+      await app.close();
     }
   });
 });
