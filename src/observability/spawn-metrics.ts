@@ -1,4 +1,4 @@
-import type { Attributes } from "@opentelemetry/api";
+import type { Attributes, Counter, Histogram, Meter } from "@opentelemetry/api";
 import { getActiveOtel } from "./otel.js";
 
 export type SpawnOutcome = "success" | "failure";
@@ -22,26 +22,41 @@ export interface RecordSpawnRunInput {
  * No-op when telemetry is disabled. spawn_id is deliberately NOT a metric label
  * to keep cardinality bounded — per-spawn detail lives in traces.
  */
+// OTel expects each instrument to be created once and reused. Cache them keyed
+// by the Meter instance so a fresh initOtel (e.g. between tests) transparently
+// rebuilds them against the new provider rather than reusing stale handles.
+let cachedMeter: Meter | undefined;
+let runsCounter: Counter | undefined;
+let durationHistogram: Histogram | undefined;
+
+function spawnInstruments(meter: Meter): {
+  counter: Counter;
+  histogram: Histogram;
+} {
+  if (meter !== cachedMeter) {
+    cachedMeter = meter;
+    runsCounter = meter.createCounter("march.spawn.runs", {
+      description: "Count of spawn dispatches by outcome",
+      unit: "1",
+    });
+    durationHistogram = meter.createHistogram("march.spawn.duration", {
+      description: "Spawn dispatch wall-clock duration",
+      unit: "s",
+    });
+  }
+  return { counter: runsCounter!, histogram: durationHistogram! };
+}
+
 export function recordSpawnRun(input: RecordSpawnRunInput): void {
   const otel = getActiveOtel();
   if (!otel.enabled) return;
 
-  const meter = otel.getMeter();
+  const { counter, histogram } = spawnInstruments(otel.getMeter());
   const attributes: Attributes = {
     backend: input.backend,
     task_type: input.taskType,
     outcome: input.outcome,
   };
-  meter
-    .createCounter("march.spawn.runs", {
-      description: "Count of spawn dispatches by outcome",
-      unit: "1",
-    })
-    .add(1, attributes);
-  meter
-    .createHistogram("march.spawn.duration", {
-      description: "Spawn dispatch wall-clock duration",
-      unit: "s",
-    })
-    .record(input.durationSeconds, attributes);
+  counter.add(1, attributes);
+  histogram.record(input.durationSeconds, attributes);
 }
