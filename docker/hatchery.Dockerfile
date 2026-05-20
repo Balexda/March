@@ -42,11 +42,12 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 COPY --from=build /app/dist ./dist
-# `march` on PATH; a writable log dir owned by the runtime uid (a fresh named
-# volume inherits this ownership on first mount).
+# `march` on PATH; a world-writable log dir so the service can write its log
+# file under any runtime uid/gid the compose `user:` selects (a fresh named
+# volume inherits this mode on first mount).
 RUN ln -sf /app/dist/cli.js /usr/local/bin/march \
   && mkdir -p /march/logs \
-  && chown 1000:1000 /march/logs
+  && chmod 0777 /march/logs
 
 ENTRYPOINT ["march"]
 CMD ["hatchery", "serve"]

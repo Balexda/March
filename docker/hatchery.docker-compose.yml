@@ -15,6 +15,8 @@
 #                     the same absolute paths inside the container (required —
 #                     git apply targets the worktree path agent-deck created).
 #   MARCH_HOST_UID    host uid that owns those files + the tmux socket (run-as).
+#   MARCH_HOST_GID    host primary gid for those files (defaults to the uid; set
+#                     it explicitly when your primary group id differs from uid).
 #   MARCH_DOCKER_GID  gid of the host `docker` group (for /var/run/docker.sock).
 #   MARCH_AGENT_DECK_BIN  path to the agent-deck binary (statically linked).
 #
@@ -34,7 +36,7 @@ services:
     command: ["hatchery", "serve"]
     # Run as the host user so mounted files / sockets are accessible, plus the
     # docker group so the daemon socket is usable.
-    user: "${MARCH_HOST_UID:-1000}:${MARCH_HOST_UID:-1000}"
+    user: "${MARCH_HOST_UID:-1000}:${MARCH_HOST_GID:-${MARCH_HOST_UID:-1000}}"
     group_add:
       - "${MARCH_DOCKER_GID:-1001}"
     ports:

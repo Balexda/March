@@ -249,13 +249,14 @@ exit 0
       dockerBin: makeDockerStub(dockerLog, PATCH_LOGS),
     });
 
-    const id = await submit(repoRoot, { name: "manager title", branch: "smithy/cut/generated" });
+    const id = await submit(repoRoot, { title: "manager title", branch: "smithy/cut/generated" });
     const job = await poll(id);
     expect(job.status).toBe("succeeded");
 
     const agentDeckInvocations = fs.readFileSync(agentDeckLog, "utf-8");
     expect(agentDeckInvocations).toMatch(/^launch /m);
     expect(agentDeckInvocations).toContain("--worktree smithy/cut/generated");
+    expect(agentDeckInvocations).toContain("manager title");
     expect(agentDeckInvocations).toMatch(/^session send manager-session /m);
 
     const worktreeParent = path.join(path.dirname(repoRoot), "agent-deck-worktrees");

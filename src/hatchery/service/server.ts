@@ -71,15 +71,20 @@ export async function startServer(options: StartServerOptions = {}): Promise<voi
     }
   };
 
+  // Register the completion signal BEFORE listening / installing signal
+  // handlers: a SIGTERM that races `app.listen()` could otherwise call
+  // `app.close()` before the onClose hook exists, leaving startServer hung.
+  const closed = new Promise<void>((resolve) => {
+    app.addHook("onClose", async () => {
+      resolve();
+    });
+  });
+
   process.once("SIGTERM", () => void shutdown("SIGTERM"));
   process.once("SIGINT", () => void shutdown("SIGINT"));
 
   await app.listen({ port, host });
   app.log.info({ port, host }, "hatchery service listening");
 
-  await new Promise<void>((resolve) => {
-    app.addHook("onClose", async () => {
-      resolve();
-    });
-  });
+  await closed;
 }
