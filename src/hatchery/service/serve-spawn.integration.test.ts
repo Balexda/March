@@ -6,13 +6,20 @@ import os from "node:os";
 import path from "node:path";
 import { FINDER_BIN } from "../../shared/deps.js";
 import { buildServer } from "./server.js";
+import { buildServer as buildCastraServer } from "../../castra/server.js";
+import { createAgentDeckAdapter } from "../../castra/adapter.js";
 import type { FastifyInstance } from "fastify";
 
 // Service-layer integration: drive the hatchery service with the REAL worker
 // executor (the worker re-loads dist/cli.js via MARCH_HATCHERY_WORKER_ENTRY and
-// runs runHatcherySpawn) against agent-deck/docker stubs. This is the coverage
-// that previously lived in program.test.ts at the CLI layer — it moved here when
-// the orchestration moved from the CLI into the service worker.
+// runs runHatcherySpawn) against docker stubs and a REAL in-process Castra
+// server whose agent-deck adapter shells out to an agent-deck stub. This
+// exercises the full path the production container takes: hatchery worker →
+// Castra HTTP → agent-deck. It is the coverage that previously lived in
+// program.test.ts at the CLI layer — it moved here when the orchestration moved
+// from the CLI into the service worker.
+
+const CASTRA_TOKEN = "integration-test-token";
 
 const CLI_PATH = resolve(import.meta.dirname, "../../../dist/cli.js");
 const FINDER_PATH = execFileSync(FINDER_BIN, [FINDER_BIN], { encoding: "utf-8" }).trim();
@@ -32,7 +39,7 @@ const silentLogger = {
   },
 } as never;
 
-describe("hatchery service spawn (real worker, stubbed agent-deck/docker)", () => {
+describe("hatchery service spawn (real worker, Castra HTTP + stubbed agent-deck/docker)", () => {
   const tmpDirs: string[] = [];
   // Mutate (never reassign) process.env: workers copy the real environment, and
   // reassigning process.env to a plain object detaches those writes from it.
@@ -42,10 +49,13 @@ describe("hatchery service spawn (real worker, stubbed agent-deck/docker)", () =
     "CODEX_HOME",
     "MARCH_OTEL",
     "MARCH_HATCHERY_WORKER_ENTRY",
+    "CASTRA_URL",
+    "CASTRA_API_TOKEN",
   ] as const;
   let savedKeys: Record<string, string | undefined>;
   let basePath: string;
   let app: FastifyInstance | undefined;
+  let castraApp: FastifyInstance | undefined;
 
   beforeEach(() => {
     savedKeys = {};
@@ -56,6 +66,8 @@ describe("hatchery service spawn (real worker, stubbed agent-deck/docker)", () =
   afterEach(async () => {
     await app?.close();
     app = undefined;
+    await castraApp?.close();
+    castraApp = undefined;
     for (const key of MANAGED_KEYS) {
       const value = savedKeys[key];
       if (value === undefined) delete process.env[key];
@@ -107,6 +119,9 @@ describe("hatchery service spawn (real worker, stubbed agent-deck/docker)", () =
       agentDeckStub,
       `#!/bin/sh
 printf '%s\\n' "$*" >> "${invocationLog}"
+# Castra always passes an explicit -p <profile>; strip it before dispatching so
+# the positional handling below matches regardless of the active profile.
+if [ "$1" = "-p" ]; then shift 2; fi
 if [ "$1" = "launch" ]; then
   REPO="$2"
   BRANCH=""
@@ -212,6 +227,24 @@ exit 0
     process.env.MARCH_HATCHERY_WORKER_ENTRY = CLI_PATH;
   }
 
+  // Stand up a real Castra server (in the main thread) whose adapter shells out
+  // to the agent-deck stub on PATH, then point the worker at it via env. Must
+  // run AFTER startService so the adapter inherits the stubbed PATH, and BEFORE
+  // submit() so the worker's env snapshot includes CASTRA_URL/CASTRA_API_TOKEN.
+  async function startCastra(): Promise<void> {
+    const castra = buildCastraServer({
+      adapter: createAgentDeckAdapter(),
+      token: CASTRA_TOKEN,
+      logger: false,
+    });
+    await castra.listen({ port: 0, host: "127.0.0.1" });
+    castraApp = castra;
+    const address = castra.server.address();
+    const port = typeof address === "object" && address ? address.port : 0;
+    process.env.CASTRA_URL = `http://127.0.0.1:${port}`;
+    process.env.CASTRA_API_TOKEN = CASTRA_TOKEN;
+  }
+
   async function poll(id: string): Promise<{ status: string; result?: unknown; error?: { message: string } }> {
     for (let i = 0; i < 600; i++) {
       const res = await app!.inject({ method: "GET", url: `/spawns/${id}` });
@@ -248,16 +281,19 @@ exit 0
       agentDeckBin: makeAgentDeckStubBinDir(agentDeckLog),
       dockerBin: makeDockerStub(dockerLog, PATCH_LOGS),
     });
+    await startCastra();
 
     const id = await submit(repoRoot, { title: "manager title", branch: "smithy/cut/generated" });
     const job = await poll(id);
     expect(job.status).toBe("succeeded");
 
+    // Castra prefixes every agent-deck invocation with `-p <profile>`; the
+    // Hatchery falls back to the default profile when none is supplied.
     const agentDeckInvocations = fs.readFileSync(agentDeckLog, "utf-8");
-    expect(agentDeckInvocations).toMatch(/^launch /m);
+    expect(agentDeckInvocations).toMatch(/^-p default launch /m);
     expect(agentDeckInvocations).toContain("--worktree smithy/cut/generated");
     expect(agentDeckInvocations).toContain("manager title");
-    expect(agentDeckInvocations).toMatch(/^session send manager-session /m);
+    expect(agentDeckInvocations).toMatch(/^-p default session send manager-session /m);
 
     const worktreeParent = path.join(path.dirname(repoRoot), "agent-deck-worktrees");
     const managerWorktrees = fs.readdirSync(worktreeParent);
@@ -288,14 +324,15 @@ exit 0
       agentDeckBin: makeAgentDeckStubBinDir(agentDeckLog),
       dockerBin: makeDockerStub(path.join(home, "docker.log"), PATCH_LOGS),
     });
+    await startCastra();
 
     const id = await submit(repoRoot);
     const job = await poll(id);
     expect(job.status).toBe("failed");
     const agentDeckInvocations = fs.readFileSync(agentDeckLog, "utf-8");
-    expect(agentDeckInvocations).toMatch(/^launch /m);
+    expect(agentDeckInvocations).toMatch(/^-p default launch /m);
     expect(agentDeckInvocations).toMatch(
-      /^session remove manager-session --prune-worktree --force$/m,
+      /^-p default session remove manager-session --prune-worktree --force$/m,
     );
   }, 30000);
 
@@ -312,6 +349,7 @@ exit 0
       agentDeckBin: makeAgentDeckStubBinDir(agentDeckLog),
       dockerBin: makeDockerStub(path.join(home, "docker.log"), "completed without a patch"),
     });
+    await startCastra();
 
     const id = await submit(repoRoot);
     const job = await poll(id);
@@ -325,7 +363,7 @@ exit 0
     ).toContain("completed without a patch");
     expect(fs.readFileSync(path.join(handoffDir, "patch.diff"), "utf-8")).toBe("");
     expect(fs.readFileSync(agentDeckLog, "utf-8")).toMatch(
-      /^session remove manager-session --prune-worktree --force$/m,
+      /^-p default session remove manager-session --prune-worktree --force$/m,
     );
   }, 30000);
 });

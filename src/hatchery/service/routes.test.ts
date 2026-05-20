@@ -122,14 +122,14 @@ describe("routes", () => {
     expect(res.statusCode).toBe(404);
   });
 
-  it("GET /readyz reports docker + agent-deck readiness", async () => {
+  it("GET /readyz reports docker + castra readiness", async () => {
     app = await makeApp();
     const res = await app.inject({ method: "GET", url: "/readyz" });
     expect([200, 503]).toContain(res.statusCode);
-    const body = res.json() as { ready: boolean; docker: boolean; agentDeck: boolean };
+    const body = res.json() as { ready: boolean; docker: boolean; castra: boolean };
     expect(typeof body.ready).toBe("boolean");
     expect(typeof body.docker).toBe("boolean");
-    expect(typeof body.agentDeck).toBe("boolean");
-    expect(body.ready).toBe(body.docker && body.agentDeck);
+    expect(typeof body.castra).toBe("boolean");
+    expect(body.ready).toBe(body.docker && body.castra);
   });
 });
