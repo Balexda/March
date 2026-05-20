@@ -1,5 +1,4 @@
 import { createHash } from "node:crypto";
-import { CLI_VERSION } from "../shared/version.js";
 import { CastraValidationError } from "./types.js";
 
 /**
@@ -9,12 +8,6 @@ import { CastraValidationError } from "./types.js";
 
 /** OTel `service.name` for the Castra service. */
 export const CASTRA_SERVICE_NAME = "march-castra";
-
-/** Single shared host — one container, one tmux server / agent-deck install. */
-export const CASTRA_CONTAINER_NAME = "march-castra";
-export const CASTRA_IMAGE_TAG = `march-castra:${CLI_VERSION}`;
-export const CASTRA_DOCKERFILE_NAME = "Dockerfile";
-export const CASTRA_CONTAINER_HOME = "/home/march";
 
 /** Env var holding the shared bearer token that gates `/v1/*`. */
 export const CASTRA_TOKEN_ENV = "CASTRA_API_TOKEN";
@@ -52,8 +45,21 @@ export function resolveCastraPort(
   env: NodeJS.ProcessEnv = process.env,
 ): number {
   const raw = override ?? env[CASTRA_PORT_ENV];
-  if (raw === undefined || raw === "" ) return castraPort();
-  const n = typeof raw === "number" ? raw : Number.parseInt(raw, 10);
+  if (raw === undefined || raw === "") return castraPort();
+  let n: number;
+  if (typeof raw === "number") {
+    n = raw;
+  } else {
+    // Require the whole string to be digits so a typo like "8888xyz" fails
+    // fast rather than parseInt-ing to 8888 and binding an unintended port.
+    const trimmed = raw.trim();
+    if (!/^\d+$/.test(trimmed)) {
+      throw new CastraValidationError(
+        `Invalid Castra port "${raw}": expected an integer in 1..65535.`,
+      );
+    }
+    n = Number.parseInt(trimmed, 10);
+  }
   if (!Number.isInteger(n) || n < 1 || n > 65535) {
     throw new CastraValidationError(
       `Invalid Castra port "${raw}": expected an integer in 1..65535.`,

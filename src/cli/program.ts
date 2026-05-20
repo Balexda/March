@@ -1,8 +1,5 @@
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
 import { createInterface } from "node:readline";
 import { Command, CommanderError } from "commander";
 import { ERROR, SUCCESS, USAGE_ERROR } from "../shared/exit-codes.js";
@@ -33,11 +30,7 @@ import {
   runSpawnViaService,
 } from "../hatchery/service/client.js";
 import { runCastraServer } from "../castra/serve.js";
-import {
-  CastraContainerError,
-  ensureCastraContainer,
-} from "../castra/container.js";
-import { resolveCastraPort, CASTRA_TOKEN_ENV } from "../castra/config.js";
+import { CASTRA_TOKEN_ENV } from "../castra/config.js";
 import { CastraValidationError } from "../castra/types.js";
 import { initMarch, InitError } from "../bootstrap/init.js";
 import { createBuildContext, SnapshotError } from "../spawn/snapshot.js";
@@ -663,78 +656,6 @@ castra
       if (err instanceof CastraValidationError) {
         process.stderr.write(err.message + "\n");
         process.exitCode = USAGE_ERROR;
-        return;
-      }
-      throw err;
-    }
-  });
-
-castra
-  .command("up")
-  .description("Build and launch the shared Castra container on the `march` network")
-  .option("--port <port>", "Published loopback port (default: deterministic 8800–9799)")
-  .option(
-    "--repo <path>",
-    "Repo/worktree-parent dir to mount at its identical path (repeatable, for worktree path parity)",
-    (value: string, acc: string[]) => {
-      acc.push(value);
-      return acc;
-    },
-    [] as string[],
-  )
-  .option("--base-image <image>", "Base image for the Castra image")
-  .action((opts: { port?: string; repo?: string[]; baseImage?: string }) => {
-    commandHandled = true;
-
-    if (!isFinderAvailable()) {
-      process.stderr.write(
-        "Cannot verify Docker is installed: path-search utility unavailable.\n",
-      );
-      process.exitCode = ERROR;
-      return;
-    }
-    if (!isOnPath("docker")) {
-      process.stderr.write(
-        "Docker not found on PATH — required for `march castra up`.\n",
-      );
-      process.exitCode = ERROR;
-      return;
-    }
-
-    let port: number | undefined;
-    try {
-      port = opts.port !== undefined ? resolveCastraPort(opts.port) : undefined;
-    } catch (err) {
-      if (err instanceof CastraValidationError) {
-        process.stderr.write(err.message + "\n");
-        process.exitCode = USAGE_ERROR;
-        return;
-      }
-      throw err;
-    }
-
-    // The running CLI bundle lives at <install>/dist/cli.js; mount <install> so
-    // the container runs this same build via `node <install>/dist/cli.js`.
-    const marchInstallDir = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
-
-    try {
-      const result = ensureCastraContainer({
-        marchInstallDir,
-        homeDir: os.homedir(),
-        port,
-        repoPaths: opts.repo,
-        baseImage: opts.baseImage,
-      });
-      console.log(
-        `Castra container ${result.containerName} (${result.containerId.slice(0, 12)})` +
-          ` listening on http://127.0.0.1:${result.port}` +
-          (result.replaced ? " (replaced existing container)" : ""),
-      );
-      process.exitCode = SUCCESS;
-    } catch (err) {
-      if (err instanceof CastraContainerError) {
-        process.stderr.write(err.message + "\n");
-        process.exitCode = ERROR;
         return;
       }
       throw err;

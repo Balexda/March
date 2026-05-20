@@ -48,47 +48,55 @@ API is a focused control surface, not an arbitrary-mutation passthrough.
 
 ## Running it
 
-```bash
-# Build + launch the shared container on the `march` network.
-export CASTRA_API_TOKEN=$(openssl rand -hex 32)
-march castra up --repo /path/to/repo      # --repo is repeatable (worktree path parity)
+Castra deploys as a container via Docker Compose, mirroring the Hatchery service
+([`docker/castra.docker-compose.yml`](../docker/castra.docker-compose.yml),
+image [`docker/castra.Dockerfile`](../docker/castra.Dockerfile)):
 
-# Or run the service directly on the host (binds 127.0.0.1 by default):
-march castra serve --token "$CASTRA_API_TOKEN"
+```bash
+# 1. observability stack first (creates the shared `march` network):
+docker compose -f docker/otel-lgtm.docker-compose.yml up -d
+
+# 2. build + run castra (from the repo root):
+npm run build:castra-image
+export CASTRA_API_TOKEN=$(openssl rand -hex 32)   # required — compose aborts without it
+docker compose -f docker/castra.docker-compose.yml up -d
 ```
 
-`march castra up` builds `march-castra:<version>` (the same toolbox base as the
-legate container) and runs it on the `march` network, publishing a deterministic
-loopback port in the **8800–9799** band (hashed from the service name, matching
-the legate-loop scheme). Consumers reach it as `http://castra:<port>` on the
-`march` network, or `http://127.0.0.1:<port>` from the host.
+Consumers reach the API at `http://localhost:${CASTRA_PORT:-9264}` on the host,
+or `http://castra:${CASTRA_PORT:-9264}` from peers on the `march` network. The
+default port is the deterministic **9264** (in the 8800–9799 band, hashed from the
+service name); override with `CASTRA_PORT`. The compose file binds the port to
+localhost only and joins the `march` network as `external: true` (created by the
+otel-lgtm stack). Host-specific knobs (`MARCH_HOST_HOME`, `MARCH_HOST_UID`,
+`MARCH_DOCKER_GID`, …) are documented inline in the compose file.
 
-March launches its service containers imperatively (the legate container works
-the same way) rather than via `docker-compose`, because the bind mounts are
-host-specific: the install dir, repos at identical absolute paths, the tmux
-socket dir, and the uid all vary per machine. The shared `march` network is
-declared by the otel-lgtm compose stack; `march castra up` **creates it if it
-doesn't exist** (`ensureMarchNetwork`), so Castra starts cleanly even when the
-observability stack is down.
+For host-local development you can also run the service directly without a
+container — it binds `127.0.0.1` by default:
+
+```bash
+CASTRA_API_TOKEN=… march castra serve
+```
 
 ### Worktree path parity
 
-Castra **relocates** `agent-deck` into one container; it does not re-home it.
-`--repo <path>` bind-mounts a repo and its worktree-parent at the **same absolute
-path** inside the container, so a worktree Castra creates at
-`/abs/parent/feature-x` exists at that identical path on the host and in any spawn
-container that mounts the same parent — no path translation, no broken
-`git apply` cwd. (Whether sessions should instead run fully in-container is the
-deferred decision in #161.)
+Castra **relocates** `agent-deck` into one container; it does not re-home it. The
+compose file bind-mounts the host `HOME` at the **same absolute path** inside the
+container (`${MARCH_HOST_HOME}:${MARCH_HOST_HOME}`, the Hatchery pattern), so a
+worktree agent-deck creates at `/abs/parent/feature-x` exists at that identical
+path on the host and in any spawn container that mounts it — no path translation,
+no broken `git apply` cwd. (Whether sessions should instead run fully in-container
+is the deferred decision in #161.)
 
 ## Security
 
 Even on the `march` network, any peer that joins could otherwise drive
 `agent-deck` (launch agents, prune worktrees), so `/v1/*` is gated by a shared
-bearer token (`CASTRA_API_TOKEN`). Do **not** publish the port on a public
-interface. Per-caller tokens / mTLS is a hardening follow-up (#160). If the token
-is unset, `serve` logs a loud warning and runs unauthenticated — only acceptable
-for a strictly loopback, single-user dev box.
+bearer token (`CASTRA_API_TOKEN`). The compose file **requires** it
+(`${CASTRA_API_TOKEN:?…}`) and aborts the bring-up if it's unset, because the
+container binds `0.0.0.0` on the shared network. Do **not** publish the port on a
+public interface. Per-caller tokens / mTLS is a hardening follow-up (#160). The
+host-only `march castra serve` path, by contrast, binds loopback and logs a loud
+warning if it runs without a token — acceptable only for a single-user dev box.
 
 ## Observability
 

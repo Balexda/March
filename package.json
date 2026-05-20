@@ -12,6 +12,7 @@
     "build": "tsup src/cli.ts --format esm --clean",
     "build:spawn-codex-image": "docker build -t march-spawn-codex:latest -f docker/spawn-codex.Dockerfile docker",
     "build:hatchery-image": "docker build -t march-hatchery:latest -f docker/hatchery.Dockerfile .",
+    "build:castra-image": "docker build -t march-castra:latest -f docker/castra.Dockerfile .",
     "start": "node dist/cli.js",
     "typecheck": "tsc --noEmit"
   },

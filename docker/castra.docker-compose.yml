@@ -1,0 +1,84 @@
+# Castra service — the single shared interactive-sessions host that fronts
+# agent-deck over HTTP.
+#
+#   # 1. observability stack first (creates the `march` network):
+#   docker compose -f docker/otel-lgtm.docker-compose.yml up -d
+#   # 2. build + run castra (from the repo root):
+#   npm run build:castra-image
+#   export CASTRA_API_TOKEN=$(openssl rand -hex 32)   # required (see below)
+#   docker compose -f docker/castra.docker-compose.yml up -d
+#
+# Consumers reach the API at http://localhost:${CASTRA_PORT:-9264} on the host,
+# or http://castra:${CASTRA_PORT:-9264} from peers on the `march` network.
+#
+# HOST-SPECIFIC CONFIG (override via env or a .env file next to this compose):
+#   MARCH_HOST_HOME   host HOME, bind-mounted at the IDENTICAL path so repos,
+#                     worktrees, ~/.agent-deck and ~/.march resolve to the same
+#                     absolute paths inside the container (required — agent-deck
+#                     creates worktrees the spawn sandboxes then bind by path).
+#   MARCH_HOST_UID    host uid that owns those files + the tmux socket (run-as).
+#   MARCH_HOST_GID    host primary gid for those files (defaults to the uid).
+#   MARCH_DOCKER_GID  gid of the host `docker` group (for /var/run/docker.sock).
+#   CASTRA_PORT       API port (default: the deterministic 9264 in the 8800–9799 band).
+#   CASTRA_API_TOKEN  bearer token gating /v1/* — REQUIRED. Compose refuses to
+#                     start without it: the container binds 0.0.0.0 and joins the
+#                     `march` network, so an unauthenticated API would expose
+#                     agent-deck controls to any peer container.
+#
+# SECURITY: this mounts the docker socket (host-root-equivalent) and your HOME.
+# The port is bound to localhost only; never expose it publicly, never publish
+# this image.
+name: march-castra
+
+services:
+  castra:
+    build:
+      context: ..
+      dockerfile: docker/castra.Dockerfile
+    image: march-castra:latest
+    container_name: march-castra
+    restart: unless-stopped
+    command: ["castra", "serve", "--host", "0.0.0.0"]
+    # Run as the host user so mounted files / sockets are accessible, plus the
+    # docker group so the daemon socket is usable.
+    user: "${MARCH_HOST_UID:-1000}:${MARCH_HOST_GID:-${MARCH_HOST_UID:-1000}}"
+    group_add:
+      - "${MARCH_DOCKER_GID:-1001}"
+    ports:
+      - "127.0.0.1:${CASTRA_PORT:-9264}:${CASTRA_PORT:-9264}" # localhost only — never public
+    environment:
+      - MARCH_OTEL=1
+      - MARCH_OTEL_ENDPOINT=http://otel-lgtm:4318
+      - MARCH_OTEL_SERVICE_NAME=march-castra
+      - CASTRA_PORT=${CASTRA_PORT:-9264}
+      # Required — compose aborts if unset (the API binds 0.0.0.0 on a shared net).
+      - CASTRA_API_TOKEN=${CASTRA_API_TOKEN:?CASTRA_API_TOKEN must be set; the API binds 0.0.0.0 on the march network}
+      # os.homedir() resolves from HOME -> agent-deck/worktree paths land on the
+      # mounted host HOME at the identical path.
+      - HOME=${MARCH_HOST_HOME:-/home/jmbattista}
+      # agent-deck lives under the mounted HOME's ~/.local/bin.
+      - PATH=${MARCH_HOST_HOME:-/home/jmbattista}/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - GH_TOKEN=${GH_TOKEN:-}
+      - GITHUB_TOKEN=${GITHUB_TOKEN:-}
+    volumes:
+      # Host docker daemon (sessions/stewards run sibling containers on it).
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Whole HOME at the identical path: repos, worktrees, ~/.agent-deck,
+      # ~/.local/bin/agent-deck, ~/.claude, ~/.march.
+      - ${MARCH_HOST_HOME:-/home/jmbattista}:${MARCH_HOST_HOME:-/home/jmbattista}
+      # Host tmux server socket so agent-deck can create/drive sessions.
+      - /tmp/tmux-${MARCH_HOST_UID:-1000}:/tmp/tmux-${MARCH_HOST_UID:-1000}
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:${CASTRA_PORT:-9264}/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
+    networks:
+      - march
+
+networks:
+  march:
+    external: true
+    name: march

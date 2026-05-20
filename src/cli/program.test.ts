@@ -278,9 +278,8 @@ describe("march CLI", () => {
       expect(result.exitCode).toBe(2);
       const combined = result.stdout + result.stderr;
       expect(combined).toContain("Usage: march castra");
-      // The help should list serve and up as known subcommands.
+      // The help should list serve as a known subcommand.
       expect(combined).toMatch(/^\s+serve\b/m);
-      expect(combined).toMatch(/^\s+up\b/m);
     });
 
     it("`march castra <bad>` reports the actual unknown subcommand, not 'castra'", () => {
@@ -310,17 +309,6 @@ describe("march CLI", () => {
       );
       expect(result.exitCode).toBe(1);
       expect(result.stderr).toContain("agent-deck not found on PATH");
-    });
-
-    it("`march castra up` without docker on PATH exits 1 with a docker-specific message", () => {
-      const fakeBin = makeFakeBin([]); // no docker stub
-      const nodeBinDir = path.dirname(process.execPath);
-      const result = runWithEnv(
-        ["castra", "up"],
-        { PATH: `${nodeBinDir}${path.delimiter}${fakeBin}`, HOME: makeTmpDir() },
-      );
-      expect(result.exitCode).toBe(1);
-      expect(result.stderr).toContain("Docker not found on PATH");
     });
   });
 
