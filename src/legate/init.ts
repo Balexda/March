@@ -428,14 +428,21 @@ export interface LegateInitOptions {
   /** Group for worker sessions launched by the conductor (default: `legate-workers`). */
   workerGroup?: string;
   /**
-   * Claude model alias or full ID for the conductor session itself. Workers
-   * are launched with the Claude default — they do real implementation work
-   * and benefit from a more capable model. The conductor's job is mostly
-   * orchestration (read smithy status, dispatch via agent-deck, watch gh,
-   * update state.json), so a lighter model is appropriate. Default: `sonnet`.
+   * Claude model alias or full ID for the conductor session itself. Default:
+   * `opus` — the conductor needs Claude Code's auto-mode classifier, which
+   * is only available on opus. Effort is set separately ({@link effort}) so
+   * we don't pay full reasoning cost for orchestration work.
    * Override with full IDs (e.g. `claude-opus-4-7`) when needed.
    */
   model?: string;
+  /**
+   * Claude Code \`--effort\` level for the conductor session: low | medium |
+   * high | xhigh | max. Default: `medium` — the conductor is reasoning-light
+   * (read state, dispatch, watch, update). High effort is reserved for the
+   * complex escalation judgements, which the worker sessions handle. Setting
+   * this lower than \`high\` materially reduces per-tick latency and cost.
+   */
+  effort?: string;
   /**
    * Cadence at which the conductor's systemd heartbeat timer fires. Written
    * as a drop-in override at
@@ -2277,8 +2284,25 @@ function blockingMergedArchive(state, item, sliceId) {
 // distinguish a fluky worker (first attempt missed the checkbox) from a
 // systemic problem (the smithy spec itself is unparseable, the work is
 // genuinely impossible, or the prompt isn't taking). After this we escalate
-// to the legate agent instead of looping forever.
+// to the legate agent instead of looping forever — but the counter
+// auto-resets when master advances (see handleRecoveryDispatch).
 const MAX_RECOVERY_ATTEMPTS = 2;
+
+// Snapshot of the local master HEAD, used to detect when a smithy- or
+// prompt-side fix has landed since a slice exhausted its recovery budget.
+// When the recorded exhausted_at_head differs from the current HEAD, the
+// loop resets recovery_attempts[sliceId] and lets the slice try again under
+// whatever changed. Returns null on git failure so the caller treats that
+// tick conservatively (no auto-reset).
+function currentMasterHead() {
+  const repoPath = meta.repo?.path;
+  if (typeof repoPath !== "string" || repoPath.length === 0) return null;
+  try {
+    return execText("git", ["rev-parse", "HEAD"], { cwd: repoPath }).trim();
+  } catch {
+    return null;
+  }
+}
 
 function graphNodes(status) {
   return status?.graph?.nodes && typeof status.graph.nodes === "object"
@@ -2429,7 +2453,13 @@ function readySmithyItems(status) {
 }
 
 function readSmithyStatus(repoPath) {
-  const out = execText("smithy", ["status", "--format", "json"], { cwd: repoPath });
+  // --pending = shorthand for --status in-progress,not-started. Filters out
+  // all done records up-front (smithy ships a much smaller, dispatch-shaped
+  // payload — the prior full output had hundreds of done entries the loop
+  // had to wade through). Layer 0 of the returned graph still means "ready
+  // to dispatch right now" — a node's dependencies have either landed (and
+  // were filtered out by --pending) or never existed.
+  const out = execText("smithy", ["status", "--format", "json", "--pending"], { cwd: repoPath });
   return JSON.parse(out);
 }
 
@@ -3586,22 +3616,49 @@ function handleRecoveryDispatch(state, ts, item, sliceId, mergedArchive) {
   state.recovery_attempts = state.recovery_attempts && typeof state.recovery_attempts === "object"
     ? state.recovery_attempts
     : {};
+  state.recovery_exhausted_at_head = state.recovery_exhausted_at_head && typeof state.recovery_exhausted_at_head === "object"
+    ? state.recovery_exhausted_at_head
+    : {};
+
+  // Auto-reset when master has advanced since exhaustion. The dispatch loop
+  // can't tell whether the new master content fixes whatever was breaking
+  // recovery (a smithy.forge skill update, a spec rewrite, a worker prompt
+  // change), so we optimistically reset the counter and let the new state
+  // play out — if recovery still fails, it'll re-exhaust and re-escalate.
+  // This is the only path out of exhaustion without manual archive editing.
+  const currentHead = currentMasterHead();
+  const exhaustedAt = state.recovery_exhausted_at_head[sliceId];
+  if (exhaustedAt && currentHead && exhaustedAt !== currentHead) {
+    state.recovery_attempts[sliceId] = 0;
+    delete state.recovery_exhausted_at_head[sliceId];
+    actions.push({
+      action: "recovery_reset",
+      sliceId,
+      sessionId: null,
+      detail: "master advanced (" + exhaustedAt.slice(0, 7) + " → " + currentHead.slice(0, 7)
+        + "); cleared recovery_attempts so we can try " + sliceId + " again",
+    });
+  }
+
   const priorAttempts = Number(state.recovery_attempts[sliceId]) || 0;
   const attempt = priorAttempts + 1;
   const recoverySliceId = sliceId + "-recovery-" + attempt;
 
   if (attempt > MAX_RECOVERY_ATTEMPTS) {
-    // Exhausted: nudge the legate agent once (dedup via requestKey), then
-    // leave the artifact alone until an operator clears the wedge.
+    // Exhausted: record the master HEAD so a future advance auto-resets
+    // (see the reset block above), nudge the legate agent once (dedup via
+    // requestKey), then leave the artifact alone.
+    if (currentHead) state.recovery_exhausted_at_head[sliceId] = currentHead;
     notifications.push({
       slice: mergedArchive, sliceId,
-      requestKey: "recovery-exhausted:" + sliceId + ":" + priorAttempts,
+      requestKey: "recovery-exhausted:" + sliceId + ":" + priorAttempts + ":" + (currentHead || "no-head").slice(0, 12),
       reason: "recovery_dispatch_exhausted",
       detail: "Recovery dispatch for " + sliceId + " hit MAX_RECOVERY_ATTEMPTS=" + MAX_RECOVERY_ATTEMPTS + ". "
         + "Smithy still reports " + (item.path || "(unknown artifact)") + " as ready, "
         + "but every recovery merged without ticking the tasks.md box. "
-        + "Inspect the spec, the prior PR(s), and clear the archive entry manually "
-        + "(or fix the spec) before the loop will dispatch this artifact again.",
+        + "The loop will retry automatically once master advances past " + (currentHead || "the current HEAD").slice(0, 7)
+        + " (assuming the new content addresses the gap). For immediate retry, "
+        + "clear state.recovery_attempts[\\"" + sliceId + "\\"] manually.",
     });
     return { actions, failures, notifications };
   }
@@ -4001,7 +4058,12 @@ function tick() {
     );
   }
   for (const action of dispatchResult.actions) {
-    const isRecovery = action.action === "recovery_dispatch";
+    const isRecovery = action.action === "recovery_dispatch" || action.action === "recovery_reset";
+    const logPrefix = action.action === "recovery_dispatch"
+      ? "recovery-dispatch"
+      : action.action === "recovery_reset"
+      ? "recovery-reset"
+      : "dispatch";
     const event = {
       schema_version: 1,
       ts,
@@ -4016,7 +4078,7 @@ function tick() {
     append(meta.processor_events_path, event);
     appendText(
       meta.processor_log_path,
-      "[" + ts + "] " + (isRecovery ? "recovery-dispatch" : "dispatch") + " " + action.sliceId + ": " + action.detail,
+      "[" + ts + "] " + logPrefix + " " + action.sliceId + ": " + action.detail,
     );
   }
   appendTextSilent(
@@ -4776,7 +4838,8 @@ export async function initLegate(
   const loopName = deriveLoopName(conductorName);
   const processorName = loopName;
   const workerGroup = opts.workerGroup ?? defaults.workerGroup;
-  const model = opts.model ?? "sonnet";
+  const model = opts.model ?? "opus";
+  const effort = opts.effort ?? "medium";
   const heartbeatInterval = opts.heartbeatInterval ?? DEFAULT_HEARTBEAT_INTERVAL;
   const repoName = defaults.repoName;
   const description =
@@ -4935,6 +4998,8 @@ export async function initLegate(
     "--",
     "--model",
     model,
+    "--effort",
+    effort,
   ];
   const restartCommand = [
     "agent-deck",
@@ -5469,7 +5534,7 @@ export async function initLegate(
           : "NOT configured — see warnings"
         : "deferred (run setup first)"
     }`,
-    `  Model:          ${model}${
+    `  Model:          ${model} (effort: ${effort})${
       processorOnly ? " (skipped — loop-only)" : setupRan ? "" : " (deferred — run setup first)"
     }`,
     `  Bridge daemon:  ${

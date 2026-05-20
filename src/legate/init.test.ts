@@ -254,7 +254,8 @@ describe("legate module", () => {
         "Then enable auto mode, pin model, restart, and deliver the",
       );
       expect(result.summary).toContain("auto-mode true");
-      expect(result.summary).toContain("--model sonnet");
+      expect(result.summary).toContain("--model opus");
+      expect(result.summary).toContain("--effort medium");
       expect(result.summary).toContain("session restart");
       // The --no-setup summary must tell the user to deliver the cold-start
       // priming prompt; otherwise auto-mode runs without alignment context.
@@ -416,6 +417,20 @@ describe("legate module", () => {
       // single top-of-tick sync.
       expect(loop).not.toContain("if (!synced) {");
       expect(loop).not.toContain("let synced = false");
+      // readSmithyStatus now uses --pending so the loop only sees actionable
+      // records (in-progress + not-started). Smithy's layer 0 of the
+      // returned graph maps to "ready to dispatch right now" without us
+      // having to filter done items out client-side.
+      expect(loop).toContain('"status", "--format", "json", "--pending"');
+      // Recovery auto-reset: when master HEAD advances past the SHA recorded
+      // at exhaustion, the loop clears recovery_attempts[sliceId] so the
+      // next tick can try again under whatever changed. Without this, every
+      // exhausted slice stays parked until the operator hand-edits state.
+      expect(loop).toContain("function currentMasterHead");
+      expect(loop).toContain("state.recovery_exhausted_at_head");
+      expect(loop).toContain('action: "recovery_reset"');
+      expect(loop).toContain("master advanced");
+      expect(loop).toContain("recovery-reset");
       expect(loop).toContain('kind: "dispatch_failure"');
       expect(loop).toContain('kind: "dispatch_read_failure"');
       expect(loop).toContain("function launchHatcheryDispatch");
@@ -1483,7 +1498,9 @@ describe("legate module", () => {
         "extra-args",
         "--",
         "--model",
-        "sonnet",
+        "opus",
+        "--effort",
+        "medium",
       ]);
       expect(restart).toEqual([
         "agent-deck",
@@ -1530,8 +1547,33 @@ describe("legate module", () => {
       });
 
       const setModel = result.postSetupCommands[1];
-      expect(setModel[setModel.length - 1]).toBe("claude-opus-4-7");
-      expect(result.summary).toContain("Model:          claude-opus-4-7");
+      // --model is the second-to-last pair now (effort defaults to medium).
+      expect(setModel).toContain("--model");
+      expect(setModel).toContain("claude-opus-4-7");
+      expect(setModel).toContain("--effort");
+      expect(setModel).toContain("medium");
+      expect(result.summary).toContain("Model:          claude-opus-4-7 (effort: medium)");
+    });
+
+    it("respects an explicit --effort override", async () => {
+      const home = makeTmpDir();
+      const tplDir = makeTemplateDir("ok");
+
+      const result = await initLegate({
+        repoPath: "/some/repo/March",
+        homeDir: home,
+        templateDir: tplDir,
+        runSetup: false,
+        effort: "low",
+      });
+
+      const setModel = result.postSetupCommands[1];
+      expect(setModel).toContain("--effort");
+      expect(setModel).toContain("low");
+      // Default model (opus) preserved when only effort is overridden.
+      expect(setModel).toContain("--model");
+      expect(setModel).toContain("opus");
+      expect(result.summary).toContain("Model:          opus (effort: low)");
     });
 
     it("shell-quotes the setup command in the --no-setup summary", async () => {
