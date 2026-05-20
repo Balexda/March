@@ -865,12 +865,19 @@ describe("legate module", () => {
     });
 
     it("parseWrongWorktreeRaceError detects the agent-deck launch-race refusal", async () => {
-      // The error text in spawn-handoff.ts is the contract; if it changes
-      // there, this regex must change in lockstep.
+      // The error text is the contract; if it changes in Castra's adapter
+      // (src/castra/adapter.ts) or the legacy Hatchery wording, this regex
+      // must change in lockstep.
       const loop = fs.readFileSync(await stageLoop(makeTmpDir()), "utf-8");
       const parse = extractFn(loop, "parseWrongWorktreeRaceError") as (s: string) => boolean;
+      // Legacy pre-Castra Hatchery wording.
       expect(parse(
         'agent-deck manager session "abc-123" attached to worktree "/tmp/feature-wrong" but this launch requested branch "smithy/forge/x" which should produce worktree dir "feature-smithy-forge-x". Refusing to apply patch to the wrong worktree.',
+      )).toBe(true);
+      // Current Castra 409-conflict wording, surfaced via the Hatchery's
+      // "Castra session launch failed: ..." wrapper.
+      expect(parse(
+        'Castra session launch failed: agent-deck session "abc-123" attached to worktree "/tmp/feature-wrong" but branch "smithy/forge/x" should produce worktree dir "feature-smithy-forge-x". Refusing to use the wrong worktree; re-dispatch once the colliding launch settles.',
       )).toBe(true);
       // Branch-already-exists is a different recovery path and must not
       // match — otherwise tryRecoverWrongWorktreeRace would swallow it

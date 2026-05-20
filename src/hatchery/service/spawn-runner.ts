@@ -29,10 +29,11 @@ export function workerEntryPath(env: NodeJS.ProcessEnv = process.env): string {
 }
 
 /**
- * Run a spawn in a worker thread so the fully-synchronous `runHatcherySpawn`
- * (execFileSync for agent-deck/docker/git) never blocks the service event loop.
- * Used only in the built bundle; unit tests inject a fake executor and never
- * launch a real worker.
+ * Run a spawn in a worker thread so `runHatcherySpawn` never blocks the service
+ * event loop. It drives interactive sessions through Castra over HTTP, but still
+ * shells out to docker and git via blocking `execFileSync` — the worker isolates
+ * those long synchronous calls from the Fastify reactor. Used only in the built
+ * bundle; unit tests inject a fake executor and never launch a real worker.
  */
 export function runSpawnInWorker(
   request: SpawnRequest,
@@ -85,7 +86,7 @@ export async function runSpawnWorkerBody(data: SpawnWorkerData): Promise<void> {
     if (!backend) {
       throw new Error(`Unknown backend "${request.backend}".`);
     }
-    const result = runHatcherySpawn({
+    const result = await runHatcherySpawn({
       repoPath: request.repoPath,
       prompt: request.prompt,
       backend,

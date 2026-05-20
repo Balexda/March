@@ -3,8 +3,9 @@
 # (or `npm run build:hatchery-image`).
 #
 # The container runs `march hatchery serve` and performs the full spawn flow by
-# shelling out to docker (mounted host socket), git, and agent-deck (mounted host
-# binary) — see docker/hatchery.docker-compose.yml for the required mounts.
+# shelling out to docker (mounted host socket) and git, and driving interactive
+# sessions through the Castra HTTP API (no agent-deck binary or tmux socket
+# mount) — see docker/hatchery.docker-compose.yml for the required mounts/env.
 # syntax=docker/dockerfile:1
 ARG NODE_IMAGE=node:22-bookworm-slim
 ARG DOCKER_CLI_VERSION=27.3.1
@@ -27,12 +28,10 @@ RUN apt-get update \
     curl \
     git \
     jq \
-    tmux \
   && rm -rf /var/lib/apt/lists/*
 # Static docker CLI only (the daemon is the host's, reached via the mounted
-# /var/run/docker.sock). tmux is installed so agent-deck can drive the host
-# tmux server through the mounted socket — keep its version close to the host's
-# to avoid tmux protocol mismatches.
+# /var/run/docker.sock). agent-deck/tmux are no longer needed in this image:
+# interactive sessions are driven through the Castra HTTP API.
 RUN curl -fsSL "https://download.docker.com/linux/static/stable/x86_64/docker-${DOCKER_CLI_VERSION}.tgz" \
     | tar -xz -C /tmp \
   && mv /tmp/docker/docker /usr/local/bin/docker \

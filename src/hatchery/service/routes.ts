@@ -1,6 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import { getBackend, listBackends } from "../../spawn/backends.js";
 import { isFinderAvailable, isOnPath } from "../../shared/deps.js";
+import { createCastraClientFromEnv } from "../../castra/client.js";
 import {
   outcomeFromStatus,
   recordHatcheryRequest,
@@ -74,12 +75,14 @@ export async function registerRoutes(
   app.get("/healthz", async () => ({ status: "ok" }));
 
   app.get("/readyz", async (_request, reply) => {
-    const finder = isFinderAvailable();
-    const docker = finder && isOnPath("docker");
-    const agentDeck = finder && isOnPath("agent-deck");
-    const ready = docker && agentDeck;
+    // docker is still driven locally (sibling spawn containers on the host
+    // socket); interactive sessions now go through Castra over HTTP, so its
+    // reachability — not a local agent-deck binary — gates readiness.
+    const docker = isFinderAvailable() && isOnPath("docker");
+    const castra = await createCastraClientFromEnv().reachable();
+    const ready = docker && castra;
     reply.code(ready ? 200 : 503);
-    return { ready, docker, agentDeck };
+    return { ready, docker, castra };
   });
 
   app.post("/spawns", async (request, reply) => {

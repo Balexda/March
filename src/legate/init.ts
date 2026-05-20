@@ -3103,13 +3103,19 @@ function tryRecoverBranchCollision(state, slice, sliceId, errorText) {
   return { recovered: true, verdict: classification.verdict, detail: summary + extra + " | branch deleted, slice released for re-dispatch" };
 }
 
-// Match the launchAgentDeckManager wrong-worktree refusal — the upstream
-// n→n-1 agent-deck launch race where pickLaunchedSession attaches to the
-// wrong sibling session. The error text is the contract; if it changes in
-// spawn-handoff.ts, update the regex here in lockstep.
+// Match the wrong-worktree launch-race refusal — the upstream n→n-1 agent-deck
+// launch race where the launcher attaches to the wrong sibling session. The
+// error text is the contract. The guard now lives in Castra's adapter
+// (src/castra/adapter.ts), surfaced to the loop via the Hatchery's "Castra
+// session launch failed: ..." wrapper; the first alternative keeps the legacy
+// pre-Castra Hatchery wording recognized. If either message changes, update the
+// matching alternative here in lockstep.
 function parseWrongWorktreeRaceError(text) {
   const s = String(text || "");
-  return /agent-deck manager session "[^"]+" attached to worktree "[^"]+" but this launch requested branch/.test(s);
+  return (
+    /agent-deck manager session "[^"]+" attached to worktree "[^"]+" but this launch requested branch/.test(s) ||
+    /attached to worktree "[^"]+" but branch "[^"]+" should produce worktree dir/.test(s)
+  );
 }
 
 function transientRetryCounts(state) {

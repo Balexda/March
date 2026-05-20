@@ -13,6 +13,13 @@ export const CASTRA_SERVICE_NAME = "march-castra";
 export const CASTRA_TOKEN_ENV = "CASTRA_API_TOKEN";
 /** Env var holding the port the in-container service binds. */
 export const CASTRA_PORT_ENV = "CASTRA_PORT";
+/**
+ * Env var holding the base URL consumers (e.g. the Hatchery) use to reach
+ * Castra over HTTP. When unset, clients fall back to `http://localhost:<port>`
+ * with the deterministic port; the compose file points peers at
+ * `http://castra:<port>` on the shared `march` network.
+ */
+export const CASTRA_URL_ENV = "CASTRA_URL";
 
 /** Default agent-deck group + model for launched stewards (mirrors Hatchery). */
 export const CASTRA_DEFAULT_GROUP = "march-spawn-managers";
