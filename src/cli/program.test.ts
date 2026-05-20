@@ -361,21 +361,13 @@ describe("march CLI", () => {
     expect(result.stdout).toContain("default: codex");
   });
 
-  it("hatchery spawn: agent-deck missing exits before Docker dependency validation", () => {
-    const fakeBin = makeFakeBin(["git", "docker"]);
-    const nodeBinDir = path.dirname(process.execPath);
-    const result = runWithEnv(
-      ["hatchery", "spawn", "--prompt", "make a patch"],
-      {
-        PATH: [nodeBinDir, fakeBin].join(path.delimiter),
-        ANTHROPIC_API_KEY: "test-key",
-      },
-    );
-
-    expect(result.exitCode).toBe(1);
-    expect(result.stderr).toContain("agent-deck not found");
-    expect(result.stderr).not.toContain("Base container image");
-  });
+  // NOTE: `march hatchery spawn` is now a thin HTTP client for the hatchery
+  // service (the agent-deck/docker prechecks and the spawn orchestration moved
+  // server-side — see GET /readyz and src/hatchery/service/). The former
+  // in-process orchestration tests (agent-deck-missing precheck, manager
+  // launch/patch/handoff, record-write-failure prune, malformed-output persist)
+  // now live in src/hatchery/service/serve-spawn.integration.test.ts, which
+  // drives the real worker against the same agent-deck/docker stubs.
 
   // --- spawn dispatch dependency validation (Story 2 acceptance scenarios) ---
 
@@ -519,62 +511,6 @@ describe("march CLI", () => {
     return binDir;
   }
 
-  function makeDockerPatchStubBinDir(invocationLog?: string): string {
-    const binDir = path.join(makeTmpDir(), "bin");
-    fs.mkdirSync(binDir);
-    fs.symlinkSync(FINDER_PATH, path.join(binDir, path.basename(FINDER_PATH)));
-    const dockerStub = path.join(binDir, "docker");
-    fs.writeFileSync(
-      dockerStub,
-      `#!/bin/sh
-${invocationLog ? `printf '%s\\n' "$*" >> "${invocationLog}"\n` : ""}if [ "$1" = "create" ]; then
-  echo "${FAKE_CONTAINER_ID}"
-  exit 0
-fi
-if [ "$1" = "wait" ]; then
-  echo "0"
-  exit 0
-fi
-if [ "$1" = "logs" ]; then
-  cat <<'PATCH'
-{"patch":"diff --git a/generated.txt b/generated.txt\\nnew file mode 100644\\nindex 0000000..c1827f0\\n--- /dev/null\\n+++ b/generated.txt\\n@@ -0,0 +1 @@\\n+generated\\n"}
-PATCH
-  exit 0
-fi
-exit 0
-`,
-    );
-    fs.chmodSync(dockerStub, 0o755);
-    return binDir;
-  }
-
-  function makeDockerNoPatchStubBinDir(invocationLog?: string): string {
-    const binDir = path.join(makeTmpDir(), "bin");
-    fs.mkdirSync(binDir);
-    fs.symlinkSync(FINDER_PATH, path.join(binDir, path.basename(FINDER_PATH)));
-    const dockerStub = path.join(binDir, "docker");
-    fs.writeFileSync(
-      dockerStub,
-      `#!/bin/sh
-${invocationLog ? `printf '%s\\n' "$*" >> "${invocationLog}"\n` : ""}if [ "$1" = "create" ]; then
-  echo "${FAKE_CONTAINER_ID}"
-  exit 0
-fi
-if [ "$1" = "wait" ]; then
-  echo "0"
-  exit 0
-fi
-if [ "$1" = "logs" ]; then
-  echo "completed without a patch"
-  exit 0
-fi
-exit 0
-`,
-    );
-    fs.chmodSync(dockerStub, 0o755);
-    return binDir;
-  }
-
   /**
    * Builds a bin dir containing a docker stub that succeeds on every
    * subcommand EXCEPT `build` (which exits 1). Used to simulate a docker
@@ -618,68 +554,6 @@ exit 0
       '#!/bin/sh\nif [ "$1" = "create" ]; then\n  echo "simulated launch failure" >&2\n  exit 1\nfi\nexit 0\n',
     );
     fs.chmodSync(dockerStub, 0o755);
-    return binDir;
-  }
-
-  function makeAgentDeckStubBinDir(invocationLog: string): string {
-    const binDir = path.join(makeTmpDir(), "agent-bin");
-    fs.mkdirSync(binDir);
-    const agentDeckStub = path.join(binDir, "agent-deck");
-    fs.writeFileSync(
-      agentDeckStub,
-      `#!/bin/sh
-printf '%s\\n' "$*" >> "${invocationLog}"
-if [ "$1" = "launch" ]; then
-  REPO="$2"
-  BRANCH=""
-  TITLE=""
-  GROUP=""
-  shift 2
-  while [ "$#" -gt 0 ]; do
-    case "$1" in
-      --worktree|-w|-worktree) BRANCH="$2"; shift 2 ;;
-      -t|-title|--title) TITLE="$2"; shift 2 ;;
-      -g|-group|--group) GROUP="$2"; shift 2 ;;
-      *) shift ;;
-    esac
-  done
-  SAFE_BRANCH=$(printf '%s' "$BRANCH" | tr '/' '-')
-  # Mirror the real agent-deck's "feature-<branch>" worktree naming so
-  # spawn-handoff's expectedWorktreeDirName check passes; the validation
-  # added after the smithy launch-race incident requires the picked
-  # session's worktree basename to equal "feature-<branch-with-slashes>".
-  WORKTREE="$(dirname "$REPO")/agent-deck-worktrees/feature-$SAFE_BRANCH"
-  mkdir -p "$(dirname "$WORKTREE")"
-  git -C "$REPO" worktree add -q -b "$BRANCH" "$WORKTREE" HEAD
-  printf '{"id":"manager-session","title":"%s","group":"%s","worktree_branch":"%s","worktree_path":"%s","created_at":"2026-05-14T00:00:00Z"}\\n' "$TITLE" "$GROUP" "$BRANCH" "$WORKTREE" > "${invocationLog}.session.json"
-  exit 0
-fi
-if [ "$1" = "list" ]; then
-  if [ -f "${invocationLog}.session.json" ]; then
-    printf '['
-    cat "${invocationLog}.session.json"
-    printf ']\\n'
-  else
-    printf '[]\\n'
-  fi
-  exit 0
-fi
-if [ "$1" = "session" ] && [ "$2" = "send" ]; then
-  printf '%s\\n' "$4" > "${invocationLog}.prompt"
-  exit 0
-fi
-if [ "$1" = "session" ] && [ "$2" = "show" ]; then
-  printf '{"id":"%s"}\\n' "$3"
-  exit 0
-fi
-if [ "$1" = "session" ] && [ "$2" = "remove" ]; then
-  rm -f "${invocationLog}.session.json"
-  exit 0
-fi
-exit 0
-`,
-    );
-    fs.chmodSync(agentDeckStub, 0o755);
     return binDir;
   }
 
@@ -776,168 +650,6 @@ exit 0
         "utf-8",
       ),
     ).toContain("Olympia");
-  });
-
-  it("hatchery spawn: launches an agent-deck manager, captures patch artifacts, and sends the manager prompt", () => {
-    const repoRoot = makeRealRepo();
-    const home = makeTmpDir();
-    const codexHome = path.join(home, "codex-home");
-    fs.mkdirSync(codexHome);
-    const dockerLog = path.join(home, "docker.log");
-    const dockerStubDir = makeDockerPatchStubBinDir(dockerLog);
-    const agentDeckLog = path.join(home, "agent-deck.log");
-    const agentDeckStubDir = makeAgentDeckStubBinDir(agentDeckLog);
-    const nodeBinDir = path.dirname(process.execPath);
-    const result = runWithEnv(
-      [
-        "hatchery",
-        "spawn",
-        "--prompt",
-        "add a generated file",
-        "--name",
-        "manager title",
-        "--branch",
-        "smithy/cut/generated",
-      ],
-      {
-        PATH: [
-          nodeBinDir,
-          agentDeckStubDir,
-          dockerStubDir,
-          process.env.PATH ?? "",
-        ].join(path.delimiter),
-        HOME: home,
-        CODEX_HOME: codexHome,
-      },
-      { cwd: repoRoot },
-    );
-
-    expect(result.exitCode).toBe(0);
-    expect(result.stdout).toContain("Hatchery spawn");
-    expect(result.stdout).toContain("manager-session");
-
-    const agentDeckInvocations = fs.readFileSync(agentDeckLog, "utf-8");
-    expect(agentDeckInvocations).toMatch(/^launch /m);
-    expect(agentDeckInvocations).toContain("--worktree smithy/cut/generated");
-    expect(agentDeckInvocations).toContain(
-      "--extra-arg --permission-mode --extra-arg auto",
-    );
-    expect(agentDeckInvocations).toContain("--extra-arg --model --extra-arg opus");
-    expect(agentDeckInvocations).toMatch(/^session send manager-session /m);
-
-    const worktreeParent = path.join(path.dirname(repoRoot), "agent-deck-worktrees");
-    const managerWorktrees = fs.readdirSync(worktreeParent);
-    expect(managerWorktrees).toHaveLength(1);
-    const managerWorktree = path.join(worktreeParent, managerWorktrees[0]);
-    expect(fs.existsSync(path.join(managerWorktree, "README.md"))).toBe(true);
-    expect(fs.readFileSync(path.join(managerWorktree, "generated.txt"), "utf-8")).toBe(
-      "generated\n",
-    );
-    expect(
-      execFileSync("git", ["diff", "--cached", "--", "generated.txt"], {
-        cwd: managerWorktree,
-        encoding: "utf-8",
-      }),
-    ).toContain("+generated");
-
-    const logsRoot = path.join(home, ".march", "logs", "hatchery-spawns");
-    const spawnIds = fs.readdirSync(logsRoot);
-    expect(spawnIds).toHaveLength(1);
-    const handoffDir = path.join(logsRoot, spawnIds[0]);
-    const metadata = JSON.parse(
-      fs.readFileSync(path.join(handoffDir, "metadata.json"), "utf-8"),
-    );
-    expect(metadata.backend).toBe("codex");
-    expect(metadata.managerSession.title).toBe("manager title");
-    expect(fs.readFileSync(path.join(handoffDir, "patch.diff"), "utf-8")).toContain(
-      "diff --git a/generated.txt b/generated.txt",
-    );
-    expect(
-      fs.readFileSync(path.join(handoffDir, "manager-prompt.md"), "utf-8"),
-    ).toContain("Review the already-applied staged change");
-    expect(
-      fs.readFileSync(`${agentDeckLog}.prompt`, "utf-8"),
-    ).not.toContain(path.join(handoffDir, "patch.diff"));
-
-    const dockerInvocations = fs.readFileSync(dockerLog, "utf-8");
-    const buildLine = dockerInvocations
-      .split("\n")
-      .find((line) => line.startsWith("build "));
-    expect(buildLine).toContain("march-spawn-");
-  });
-
-  it("hatchery spawn: record write failure prunes the manager session", () => {
-    const repoRoot = makeRealRepo();
-    const home = makeTmpDir();
-    const codexHome = path.join(home, "codex-home");
-    fs.mkdirSync(codexHome);
-    fs.writeFileSync(path.join(home, ".march"), "not a dir");
-    const dockerStubDir = makeDockerPatchStubBinDir();
-    const agentDeckLog = path.join(home, "agent-deck.log");
-    const agentDeckStubDir = makeAgentDeckStubBinDir(agentDeckLog);
-    const nodeBinDir = path.dirname(process.execPath);
-    const result = runWithEnv(
-      ["hatchery", "spawn", "--prompt", "add a generated file"],
-      {
-        PATH: [
-          nodeBinDir,
-          agentDeckStubDir,
-          dockerStubDir,
-          process.env.PATH ?? "",
-        ].join(path.delimiter),
-        HOME: home,
-        CODEX_HOME: codexHome,
-      },
-      { cwd: repoRoot },
-    );
-
-    expect(result.exitCode).toBe(1);
-    const agentDeckInvocations = fs.readFileSync(agentDeckLog, "utf-8");
-    expect(agentDeckInvocations).toMatch(/^launch /m);
-    expect(agentDeckInvocations).toMatch(
-      /^session remove manager-session --prune-worktree --force$/m,
-    );
-  });
-
-  it("hatchery spawn: malformed spawn output is persisted before failing", () => {
-    const repoRoot = makeRealRepo();
-    const home = makeTmpDir();
-    const codexHome = path.join(home, "codex-home");
-    fs.mkdirSync(codexHome);
-    const dockerStubDir = makeDockerNoPatchStubBinDir();
-    const agentDeckLog = path.join(home, "agent-deck.log");
-    const agentDeckStubDir = makeAgentDeckStubBinDir(agentDeckLog);
-    const nodeBinDir = path.dirname(process.execPath);
-    const result = runWithEnv(
-      ["hatchery", "spawn", "--prompt", "add a generated file"],
-      {
-        PATH: [
-          nodeBinDir,
-          agentDeckStubDir,
-          dockerStubDir,
-          process.env.PATH ?? "",
-        ].join(path.delimiter),
-        HOME: home,
-        CODEX_HOME: codexHome,
-      },
-      { cwd: repoRoot },
-    );
-
-    expect(result.exitCode).toBe(1);
-    expect(result.stderr).toContain("no git patch");
-    expect(result.stderr).toContain("spawn-output.log");
-    const logsRoot = path.join(home, ".march", "logs", "hatchery-spawns");
-    const spawnIds = fs.readdirSync(logsRoot);
-    expect(spawnIds).toHaveLength(1);
-    const handoffDir = path.join(logsRoot, spawnIds[0]);
-    expect(
-      fs.readFileSync(path.join(handoffDir, "spawn-output.log"), "utf-8"),
-    ).toContain("completed without a patch");
-    expect(fs.readFileSync(path.join(handoffDir, "patch.diff"), "utf-8")).toBe("");
-    const agentDeckInvocations = fs.readFileSync(agentDeckLog, "utf-8");
-    expect(agentDeckInvocations).toMatch(
-      /^session remove manager-session --prune-worktree --force$/m,
-    );
   });
 
   it("spawn dispatch: unknown backend exits 2 before dependency checks", () => {

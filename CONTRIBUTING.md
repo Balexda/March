@@ -21,14 +21,14 @@ March's source is organized by product subsystem rather than by generic layers:
 | `src/cli/` | Commander program setup and command dispatch. |
 | `src/bootstrap/` | `march init` / `march update`, manifest handling, and deployed base skills. |
 | `src/spawn/` | Spawn execution pipeline: snapshots, image builds, backend entrypoints, and container launch. |
-| `src/hatchery/` | Container/profile policy. Today this owns the hardcoded spawn config; future Hatchery profiles expand here. |
+| `src/hatchery/` | Container/profile policy and the spawn orchestrator (`runHatcherySpawn`). `src/hatchery/service/` is the containerized Fastify service (`march hatchery serve`) plus the thin client `march hatchery spawn` uses. |
 | `src/brood/` | Spawn lifecycle state: worktrees, branches, records, and cleanup ownership. |
 | `src/herald/` | Deterministic event bus code. Add mini-herald event/log/daemon modules here when that feature lands. |
 | `src/legate/` | Legate conductor setup, template rendering, bridge checks, and related orchestration bootstrap. |
-| `src/observability/` | OpenTelemetry bootstrap, deterministic trace/span id helpers, spawn metrics, the dispatch-trace helper, and the in-sandbox emitter. Env-gated (`MARCH_OTEL=1`), no-op when off. |
+| `src/observability/` | OpenTelemetry bootstrap (traces, metrics, logs), deterministic trace/span id helpers, spawn metrics (`spawn-metrics.ts`), Hatchery service metrics (`hatchery-metrics.ts`), the pino+OTLP logger (`logger.ts`), the dispatch-trace helper, and the in-sandbox emitter. Env-gated (`MARCH_OTEL=1`), no-op when off. |
 | `src/shared/` | Small cross-cutting primitives with no March-domain ownership, such as dependency checks, exit codes, and version lookup. |
 | `src/templates/legate/` | Static Legate runtime template assets packaged with the CLI. Keep these separate from Legate TypeScript implementation. |
-| `docker/` | The `otel-lgtm` observability stack compose file and its provisioned Grafana dashboards (`docker/grafana/`), plus spawn image Dockerfiles. |
+| `docker/` | The `otel-lgtm` observability stack compose file and its provisioned Grafana dashboards (`docker/grafana/`), the Hatchery service image + compose (`hatchery.Dockerfile`, `hatchery.docker-compose.yml`), plus spawn image Dockerfiles. |
 
 Tests live next to the modules they cover. When adding a module, place it under the subsystem that should own the behavior long-term, not necessarily the milestone that first needs it.
 
@@ -50,11 +50,26 @@ Agent-driven and human tests:
 
 ## Observability
 
-March emits OpenTelemetry traces and metrics (spawn success rate, runtime, and
-per-dispatch lineage) to a local `grafana/otel-lgtm` stack. Telemetry is opt-in
-(`MARCH_OTEL=1`) and a no-op when off. The full guide — bringing the stack up,
-enabling it per deployment, the trace/span and metric model, the provisioned
-Grafana dashboard, and validation — is in **[docs/Observability.md](docs/Observability.md)**.
+March emits OpenTelemetry traces, metrics, and logs (spawn success rate, runtime,
+per-dispatch lineage, and Hatchery service health) to a local `grafana/otel-lgtm`
+stack. Telemetry is opt-in (`MARCH_OTEL=1`) and a no-op when off. The full guide —
+bringing the stack up, enabling it per deployment, the trace/span/metric/log
+model, the provisioned Grafana dashboards, and validation — is in
+**[docs/Observability.md](docs/Observability.md)**.
+
+Hatchery runs as a containerized service. Bring it up after the otel stack:
+
+```bash
+docker compose -f docker/otel-lgtm.docker-compose.yml up -d   # creates the `march` network
+npm run build:hatchery-image
+docker compose -f docker/hatchery.docker-compose.yml up -d
+export MARCH_HATCHERY_URL=http://localhost:8080               # the thin client posts here
+```
+
+The compose mounts host resources (docker socket, your `HOME` at the **identical
+path** so worktree paths resolve, the tmux socket, and the agent-deck binary) —
+review/override the host-specific vars at the top of
+`docker/hatchery.docker-compose.yml`.
 
 **Keep telemetry in lock-step with the dispatch machinery.** When you add a loop
 lifecycle action or a new dispatch path, emit a span for it; when you add a
@@ -62,9 +77,11 @@ failure mode, emit an *errored* span so it surfaces in traces; when a new proces
 joins a trace, reuse the deterministic id helpers (kept identical across
 `src/observability/trace-ids.ts`, `src/legate/init.ts`, and
 `src/observability/in-spawn-emitter.ts`). New metrics/labels go in
-`src/observability/spawn-metrics.ts` — low-cardinality only, never per-spawn or
-per-slice ids — and update `docker/grafana/dashboards/` to match. See
-[docs/Observability.md § Keeping observability current](docs/Observability.md#keeping-observability-current).
+`src/observability/spawn-metrics.ts` (spawns) or
+`src/observability/hatchery-metrics.ts` (the Hatchery service) — low-cardinality
+only, never per-spawn/slice ids or concrete request paths; new logs go through
+`src/observability/logger.ts` — and update `docker/grafana/dashboards/` to match.
+See [docs/Observability.md § Keeping observability current](docs/Observability.md#keeping-observability-current).
 
 ## Automated Dependency Updates
 

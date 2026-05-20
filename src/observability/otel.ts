@@ -1,4 +1,5 @@
 import { metrics, trace, type Meter, type Tracer } from "@opentelemetry/api";
+import { logs, type Logger } from "@opentelemetry/api-logs";
 import {
   BasicTracerProvider,
   BatchSpanProcessor,
@@ -9,6 +10,11 @@ import {
   PeriodicExportingMetricReader,
 } from "@opentelemetry/sdk-metrics";
 import { OTLPMetricExporter } from "@opentelemetry/exporter-metrics-otlp-http";
+import {
+  BatchLogRecordProcessor,
+  LoggerProvider,
+} from "@opentelemetry/sdk-logs";
+import { OTLPLogExporter } from "@opentelemetry/exporter-logs-otlp-http";
 import { resourceFromAttributes } from "@opentelemetry/resources";
 import {
   ATTR_SERVICE_NAME,
@@ -31,6 +37,7 @@ export interface OtelHandle {
   readonly enabled: boolean;
   getTracer(): Tracer;
   getMeter(): Meter;
+  getLogger(): Logger;
   shutdown(): Promise<void>;
 }
 
@@ -55,6 +62,7 @@ const NOOP_HANDLE: OtelHandle = {
   enabled: false,
   getTracer: () => trace.getTracer(INSTRUMENTATION_SCOPE),
   getMeter: () => metrics.getMeter(INSTRUMENTATION_SCOPE),
+  getLogger: () => logs.getLogger(INSTRUMENTATION_SCOPE),
   shutdown: async () => {},
 };
 
@@ -102,15 +110,30 @@ export function initOtel(env: NodeJS.ProcessEnv = process.env): OtelHandle {
     ],
   });
 
+  const loggerProvider = new LoggerProvider({
+    resource,
+    processors: [
+      new BatchLogRecordProcessor(
+        new OTLPLogExporter({ url: `${base}/v1/logs` }),
+      ),
+    ],
+  });
+  // Register globally so emitters that resolve a logger via the API (rather
+  // than the handle) land on this provider too.
+  logs.setGlobalLoggerProvider(loggerProvider);
+
   active = {
     enabled: true,
     getTracer: () => tracerProvider.getTracer(INSTRUMENTATION_SCOPE),
     getMeter: () => meterProvider.getMeter(INSTRUMENTATION_SCOPE),
+    getLogger: () => loggerProvider.getLogger(INSTRUMENTATION_SCOPE),
     shutdown: async () => {
       await withTimeout(safe(() => tracerProvider.forceFlush()));
       await withTimeout(safe(() => meterProvider.forceFlush()));
+      await withTimeout(safe(() => loggerProvider.forceFlush()));
       await safe(() => tracerProvider.shutdown());
       await safe(() => meterProvider.shutdown());
+      await safe(() => loggerProvider.shutdown());
     },
   };
   return active;

@@ -28,9 +28,10 @@ describe("otel gate", () => {
     const handle = initOtel({});
     expect(handle.enabled).toBe(false);
     expect(getActiveOtel().enabled).toBe(false);
-    // No-op tracer/meter are usable without a provider.
+    // No-op tracer/meter/logger are usable without a provider.
     handle.getTracer().startSpan("noop").end();
     handle.getMeter().createCounter("noop").add(1);
+    handle.getLogger().emit({ body: "noop" });
     await expect(handle.shutdown()).resolves.toBeUndefined();
   });
 });

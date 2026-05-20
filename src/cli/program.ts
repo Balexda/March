@@ -24,11 +24,11 @@ import {
   initLegate,
   LegateError,
 } from "../legate/init.js";
+import { DEFAULT_MANAGER_GROUP } from "../hatchery/spawn-handoff.js";
 import {
-  DEFAULT_MANAGER_GROUP,
-  HatcherySpawnError,
-  runHatcherySpawn,
-} from "../hatchery/spawn-handoff.js";
+  HatcheryClientError,
+  runSpawnViaService,
+} from "../hatchery/service/client.js";
 import { initMarch, InitError } from "../bootstrap/init.js";
 import { createBuildContext, SnapshotError } from "../spawn/snapshot.js";
 import {
@@ -503,7 +503,7 @@ hatchery
   .option("--task-name <name>", "Task name (work-item slug) for telemetry tagging")
   .option("--slice-id <id>", "Dispatch slice id; hashed into the telemetry trace id")
   .option("--json", "Print the Hatchery spawn result as JSON")
-  .action((opts: {
+  .action(async (opts: {
     backend?: string;
     prompt?: string;
     agentDeckProfile?: string;
@@ -519,6 +519,11 @@ hatchery
   }) => {
     commandHandled = true;
 
+    // Thin client: validate the cheap, caller-side things here for fast usage
+    // errors, then hand the work to the hatchery service. The agent-deck/docker
+    // prechecks moved server-side (see GET /readyz). Only the repo root is
+    // resolved here because only the caller knows its working repo; the same
+    // path must be valid inside the service container (identical bind mount).
     const backendSelection = resolveHatcheryBackendSelection({
       flagValue: opts.backend,
       envValue: process.env.MARCH_BACKEND,
@@ -541,28 +546,6 @@ hatchery
       return;
     }
 
-    if (!isFinderAvailable()) {
-      process.stderr.write(
-        "Cannot verify agent-deck is installed: path-search utility unavailable.\n",
-      );
-      process.exitCode = ERROR;
-      return;
-    }
-    if (!isOnPath("agent-deck")) {
-      process.stderr.write(
-        "agent-deck not found on PATH — required for `march hatchery spawn` manager handoff.\n",
-      );
-      process.exitCode = ERROR;
-      return;
-    }
-
-    const deps = checkSpawnDependencies(selectedBackend.baseImage);
-    if (!deps.ok) {
-      process.stderr.write(deps.error + "\n");
-      process.exitCode = ERROR;
-      return;
-    }
-
     let repoRoot: string;
     try {
       repoRoot = execFileSync("git", ["rev-parse", "--show-toplevel"], {
@@ -577,10 +560,10 @@ hatchery
     }
 
     try {
-      const result = runHatcherySpawn({
+      const job = await runSpawnViaService({
         repoPath: repoRoot,
         prompt,
-        backend: selectedBackend,
+        backend: selectedBackend.name,
         agentDeckProfile: opts.agentDeckProfile,
         profile: opts.profile,
         managerGroup: opts.managerGroup,
@@ -590,24 +573,41 @@ hatchery
         taskName: opts.taskName,
         sliceId: opts.sliceId,
       });
-      if (opts.json) {
-        console.log(JSON.stringify(result, null, 2));
+      if (job.status === "succeeded" && job.result) {
+        // stdout carries ONLY the result (the legate loop JSON.parses it).
+        if (opts.json) {
+          console.log(JSON.stringify(job.result, null, 2));
+        } else {
+          console.log(job.result.summary);
+        }
+        process.exitCode = SUCCESS;
       } else {
-        console.log(result.summary);
+        process.stderr.write((job.error?.message ?? "Spawn job failed.") + "\n");
+        process.exitCode = ERROR;
       }
-      process.exitCode = SUCCESS;
     } catch (err) {
       const message =
-        err instanceof HatcherySpawnError ||
-        err instanceof SnapshotError ||
-        err instanceof BuildError ||
-        err instanceof LaunchError ||
-        err instanceof SpawnRecordError
-          ? err.message
-          : (err as Error).message;
+        err instanceof HatcheryClientError ? err.message : (err as Error).message;
       process.stderr.write(message + "\n");
       process.exitCode = ERROR;
     }
+  });
+
+hatchery
+  .command("serve")
+  .description("Run the Hatchery service (HTTP API). Container entrypoint.")
+  .option(
+    "--port <port>",
+    "Port to listen on (default: MARCH_HATCHERY_PORT or 8080)",
+  )
+  .option("--host <host>", "Bind host (default 0.0.0.0)")
+  .action(async (opts: { port?: string; host?: string }) => {
+    commandHandled = true;
+    const { startServer } = await import("../hatchery/service/server.js");
+    const port = opts.port ? Number(opts.port) : undefined;
+    // Resolves only when the service shuts down (SIGTERM/SIGINT).
+    await startServer({ port, host: opts.host });
+    process.exitCode = SUCCESS;
   });
 
 program

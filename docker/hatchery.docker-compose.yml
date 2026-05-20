@@ -1,0 +1,80 @@
+# Hatchery service — the single long-running container that performs spawns.
+#
+#   # 1. observability stack first (creates the `march` network):
+#   docker compose -f docker/otel-lgtm.docker-compose.yml up -d
+#   # 2. build + run hatchery (from the repo root):
+#   npm run build:hatchery-image
+#   docker compose -f docker/hatchery.docker-compose.yml up -d
+#
+# The `march hatchery spawn` CLI on the host is a thin client; point it here:
+#   export MARCH_HATCHERY_URL=http://localhost:8080
+#
+# HOST-SPECIFIC CONFIG (override via env or a .env file next to this compose):
+#   MARCH_HOST_HOME   host HOME, bind-mounted at the IDENTICAL path so repos,
+#                     worktrees, ~/.agent-deck, ~/.codex and ~/.march resolve to
+#                     the same absolute paths inside the container (required —
+#                     git apply targets the worktree path agent-deck created).
+#   MARCH_HOST_UID    host uid that owns those files + the tmux socket (run-as).
+#   MARCH_DOCKER_GID  gid of the host `docker` group (for /var/run/docker.sock).
+#   MARCH_AGENT_DECK_BIN  path to the agent-deck binary (statically linked).
+#
+# SECURITY: this mounts the docker socket (host-root-equivalent) and your HOME.
+# The port is bound to localhost only; never expose it publicly, never publish
+# this image.
+name: march-hatchery
+
+services:
+  hatchery:
+    build:
+      context: ..
+      dockerfile: docker/hatchery.Dockerfile
+    image: march-hatchery:latest
+    container_name: march-hatchery
+    restart: unless-stopped
+    command: ["hatchery", "serve"]
+    # Run as the host user so mounted files / sockets are accessible, plus the
+    # docker group so the daemon socket is usable.
+    user: "${MARCH_HOST_UID:-1000}:${MARCH_HOST_UID:-1000}"
+    group_add:
+      - "${MARCH_DOCKER_GID:-1001}"
+    ports:
+      - "127.0.0.1:8080:8080" # localhost only — never public
+    environment:
+      - MARCH_OTEL=1
+      - MARCH_OTEL_ENDPOINT=http://otel-lgtm:4318
+      - MARCH_OTEL_SERVICE_NAME=march-hatchery
+      - MARCH_HATCHERY_PORT=8080
+      - MARCH_HATCHERY_LOG_DIR=/march/logs
+      # os.homedir() resolves from HOME -> spawn records/artifacts land on the
+      # mounted host HOME at the identical path.
+      - HOME=${MARCH_HOST_HOME:-/home/jmbattista}
+      # agent-deck lives under the mounted HOME's ~/.local/bin.
+      - PATH=${MARCH_HOST_HOME:-/home/jmbattista}/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+      - CODEX_HOME=${MARCH_HOST_HOME:-/home/jmbattista}/.codex
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+    volumes:
+      # Host docker daemon (spawn containers run as siblings on it).
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Whole HOME at the identical path: repos, worktrees, ~/.agent-deck,
+      # ~/.codex, ~/.local/bin/agent-deck, ~/.march.
+      - ${MARCH_HOST_HOME:-/home/jmbattista}:${MARCH_HOST_HOME:-/home/jmbattista}
+      # Host tmux server socket so agent-deck can create/drive sessions.
+      - /tmp/tmux-${MARCH_HOST_UID:-1000}:/tmp/tmux-${MARCH_HOST_UID:-1000}
+      # Durable service log file (also shipped to otel-lgtm via OTLP logs).
+      - march-hatchery-logs:/march/logs
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
+    networks:
+      - march
+
+networks:
+  march:
+    external: true
+    name: march
+
+volumes:
+  march-hatchery-logs:
