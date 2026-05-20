@@ -20,9 +20,11 @@ import type { DatabaseSync as DatabaseSyncCtor } from "node:sqlite";
 let databaseSyncImpl: typeof DatabaseSyncCtor | undefined;
 let loadError: Error | undefined;
 
+// Suppress only the one-time ExperimentalWarning node:sqlite prints on load,
+// then restore the original emitter immediately so the global patch does not
+// outlive the require.
+const originalEmitWarning = process.emitWarning.bind(process);
 try {
-  // Suppress only the one-time ExperimentalWarning node:sqlite prints on load.
-  const originalEmitWarning = process.emitWarning.bind(process);
   process.emitWarning = function patchedEmitWarning(
     warning: string | Error,
     ...rest: unknown[]
@@ -39,6 +41,8 @@ try {
   ).DatabaseSync;
 } catch (err) {
   loadError = err as Error;
+} finally {
+  process.emitWarning = originalEmitWarning;
 }
 
 /** True when `node:sqlite` is available (Node >= 22.5). */
