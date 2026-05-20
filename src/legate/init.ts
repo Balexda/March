@@ -428,14 +428,21 @@ export interface LegateInitOptions {
   /** Group for worker sessions launched by the conductor (default: `legate-workers`). */
   workerGroup?: string;
   /**
-   * Claude model alias or full ID for the conductor session itself. Workers
-   * are launched with the Claude default — they do real implementation work
-   * and benefit from a more capable model. The conductor's job is mostly
-   * orchestration (read smithy status, dispatch via agent-deck, watch gh,
-   * update state.json), so a lighter model is appropriate. Default: `sonnet`.
+   * Claude model alias or full ID for the conductor session itself. Default:
+   * `opus` — the conductor needs Claude Code's auto-mode classifier, which
+   * is only available on opus. Effort is set separately ({@link effort}) so
+   * we don't pay full reasoning cost for orchestration work.
    * Override with full IDs (e.g. `claude-opus-4-7`) when needed.
    */
   model?: string;
+  /**
+   * Claude Code \`--effort\` level for the conductor session: low | medium |
+   * high | xhigh | max. Default: `medium` — the conductor is reasoning-light
+   * (read state, dispatch, watch, update). High effort is reserved for the
+   * complex escalation judgements, which the worker sessions handle. Setting
+   * this lower than \`high\` materially reduces per-tick latency and cost.
+   */
+  effort?: string;
   /**
    * Cadence at which the conductor's systemd heartbeat timer fires. Written
    * as a drop-in override at
@@ -708,6 +715,14 @@ function loopMetaFor(input: {
       input.loopConductorDir,
       "legate-loop-requests.ndjson",
     ),
+    loop_heartbeat_log_path: path.join(
+      input.loopConductorDir,
+      "legate-loop-heartbeat.log",
+    ),
+    loop_heartbeat_events_path: path.join(
+      input.loopConductorDir,
+      "legate-loop-heartbeat.ndjson",
+    ),
     processor_log_path: path.join(input.loopConductorDir, "legate-loop.log"),
     processor_events_path: path.join(input.loopConductorDir, "legate-loop.ndjson"),
     processor_requests_path: path.join(
@@ -739,6 +754,10 @@ import { fileURLToPath } from "node:url";
 const here = path.dirname(fileURLToPath(import.meta.url));
 const metaPath = path.join(here, "legate-loop-meta.json");
 const meta = JSON.parse(fs.readFileSync(metaPath, "utf-8"));
+// Heartbeats go to a sibling log so the main legate-loop.log stays readable.
+// Fall back to the action log for older deployments whose meta predates the split.
+const heartbeatLogPath = meta.loop_heartbeat_log_path || meta.processor_log_path;
+const heartbeatEventsPath = meta.loop_heartbeat_events_path || meta.processor_events_path;
 const rawIntervalSeconds = Number(process.env.MARCH_LEGATE_LOOP_INTERVAL_SECONDS || process.env.MARCH_PROCESSOR_INTERVAL_SECONDS || "60");
 const intervalSeconds = Number.isFinite(rawIntervalSeconds) && rawIntervalSeconds > 0
   ? rawIntervalSeconds
@@ -800,7 +819,22 @@ function maybeEmitLoopSpan(event) {
   const sliceId = event.slice_id;
   if (!sliceId) return;
   if (event.kind === "dispatch_action" && event.action === "dispatch") {
-    emitLoopSpan({ name: "legate.dispatch", traceKey: sliceId, spanId: otelSpanId(sliceId), attributes: { "march.slice_id": sliceId, "march.action": event.action } });
+    emitLoopSpan({ name: "legate.dispatch", traceKey: sliceId, spanId: otelSpanId(sliceId), attributes: { "march.slice_id": sliceId, "march.action": event.action, "march.dispatch_mode": "spawn" } });
+  } else if (event.kind === "recovery_dispatch") {
+    // Failed-spawn recovery (added with the upstream recovery/direct-steward
+    // machinery). Each recovery codex spawn and each no-spawn direct-steward
+    // dispatch is its own dispatched unit of work, so it gets its own trace
+    // keyed off its recovery-/direct-suffixed slice id. Like a normal dispatch,
+    // it claims the deterministic span id (otelSpanId) so a recovery spawn's
+    // hatchery.spawn / spawn.* spans nest beneath this root; direct_dispatch has
+    // no spawn but stays uniform so the dispatch still shows up as a trace.
+    const mode = event.action === "direct_dispatch" ? "direct_steward" : "recovery";
+    emitLoopSpan({ name: "legate.dispatch", traceKey: sliceId, spanId: otelSpanId(sliceId), attributes: { "march.slice_id": sliceId, "march.action": event.action || "", "march.dispatch_mode": mode } });
+  } else if (event.kind === "dispatch_failure") {
+    // launchHatcheryDispatch threw, so the spawn never ran and the orchestrator
+    // never emits hatchery.spawn / the spawn metrics. Record the failed launch
+    // as an errored root span so the dispatch still surfaces — as a failed trace.
+    emitLoopSpan({ name: "legate.dispatch", traceKey: sliceId, spanId: otelSpanId(sliceId), error: true, attributes: { "march.slice_id": sliceId, "march.action": "dispatch", "march.dispatch_mode": "spawn", "march.error": event.error || "dispatch launch failed" } });
   } else if (event.kind === "babysit_action") {
     emitLoopSpan({ name: "legate.babysit", traceKey: sliceId, parentSpanId: otelSpanId(sliceId), attributes: { "march.slice_id": sliceId, "march.action": event.action || "", "march.pr_number": event.pr_number || "" } });
   } else if (event.kind === "cleanup") {
@@ -812,6 +846,14 @@ function appendText(file, text) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.appendFileSync(file, text + "\\n", "utf-8");
   console.log(text);
+}
+
+// Heartbeat path: writes to disk for liveness checks but does NOT echo to
+// stdout. The conductor tmux session would otherwise drown out real events
+// with one heartbeat line per tick.
+function appendTextSilent(file, text) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.appendFileSync(file, text + "\\n", "utf-8");
 }
 
 function printText(text) {
@@ -883,7 +925,7 @@ function replayRecentActionEvents(limit = 10) {
         return null;
       }
     })
-    .filter((event) => event?.kind === "cleanup" || event?.kind === "cleanup_failure" || event?.kind === "babysit_action" || event?.kind === "dispatch_action" || event?.kind === "processor_request")
+    .filter((event) => event?.kind === "cleanup" || event?.kind === "cleanup_failure" || event?.kind === "babysit_action" || event?.kind === "dispatch_action" || event?.kind === "recovery_dispatch" || event?.kind === "processor_request")
     .slice(-limit);
   if (events.length === 0) return;
   printText(\`[\${now()}] replaying \${events.length} recent processor action event(s) to stdout\`);
@@ -896,6 +938,8 @@ function replayRecentActionEvents(limit = 10) {
       printText(formatBabysitActionLine(event, "recent action: "));
     } else if (event.kind === "dispatch_action") {
       printText("[" + event.ts + "] recent action: dispatch " + event.slice_id + ": " + event.detail);
+    } else if (event.kind === "recovery_dispatch") {
+      printText("[" + event.ts + "] recent action: recovery-dispatch " + event.slice_id + ": " + event.detail);
     } else {
       printText(formatProcessorRequestLine(event, "recent action: "));
     }
@@ -1342,6 +1386,74 @@ function maybeNudgeStrandedSteward(slice, sliceId, sessionId, ts, sendMessage = 
   slice.steward_nudge_sent_at = ts;
   slice.steward_nudge_count = (slice.steward_nudge_count || 1) + 1;
   return alertFired ? "alert" : "nudged";
+}
+
+// Post-dispatch stuck-worker watchdog tuning. Distinct from the stranded-
+// steward watchdog (which fires while a slice is still in "implementing" and
+// has no PR yet). This covers the post-PR-creation case where the loop sent
+// the worker a /smithy.fix or conflict-resolution prompt and the worker
+// session went to waiting/idle without acting — Claude has received the
+// message but parked (likely on a permission prompt, a stuck spinner, or a
+// "task complete" misjudgement). The loop's existing alreadyDispatched dedup
+// keyed off action keys correctly prevents repeat dispatches when nothing
+// changed, but it also prevents *waking the worker back up* when the change
+// the loop wants is the worker actually doing the work.
+function postDispatchNudgeConfig() {
+  return {
+    // First nudge: at this delay after the original dispatch.
+    initialNudgeMs: 5 * 60 * 1000,
+    // Subsequent nudges: every interval thereafter.
+    repeatNudgeMs: 5 * 60 * 1000,
+    // Cumulative nudges per action key before escalating. Three unanswered
+    // re-nudges (~15 min total) is strong evidence the worker is genuinely
+    // stuck on something the loop can't unblock from outside.
+    escalateAfterNudges: 3,
+  };
+}
+
+// Re-deliver the most recent dispatch message when a worker session has been
+// sitting idle/waiting too long after we sent something. Tracks the nudge
+// count under \`post_dispatch_nudge_for_key\` so when the loop sends a fresh
+// dispatch (different key — new threads, new state), the counter resets.
+// Returns {nudged, escalate, count} for the caller to translate into an
+// action event + optional legate-judgement request.
+function maybePostDispatchNudge(slice, sessionId, workerStatus, ts, key, buildMessage, sendMessage = sendAgentDeckMessage) {
+  if (workerStatus !== "waiting" && workerStatus !== "idle") {
+    return { nudged: false, escalate: false, count: 0 };
+  }
+  if (!sessionId) return { nudged: false, escalate: false, count: 0 };
+  const lastDispatchAt = Date.parse(slice.last_processor_action_at || "");
+  const nowMs = Date.parse(ts);
+  if (!Number.isFinite(lastDispatchAt) || !Number.isFinite(nowMs)) {
+    return { nudged: false, escalate: false, count: 0 };
+  }
+  const cfg = postDispatchNudgeConfig();
+  // Reset nudge state if the action key changed — a new dispatch since the
+  // last nudge state was written invalidates the prior count.
+  if (slice.post_dispatch_nudge_for_key !== key) {
+    slice.post_dispatch_nudge_for_key = key;
+    slice.post_dispatch_nudge_count = 0;
+    slice.post_dispatch_nudge_sent_at = null;
+  }
+  if (nowMs - lastDispatchAt < cfg.initialNudgeMs) {
+    return { nudged: false, escalate: false, count: slice.post_dispatch_nudge_count || 0 };
+  }
+  const currentCount = slice.post_dispatch_nudge_count || 0;
+  if (currentCount >= cfg.escalateAfterNudges) {
+    return { nudged: false, escalate: true, count: currentCount };
+  }
+  const nudgedAt = Date.parse(slice.post_dispatch_nudge_sent_at || "");
+  if (Number.isFinite(nudgedAt) && nowMs - nudgedAt < cfg.repeatNudgeMs) {
+    return { nudged: false, escalate: false, count: currentCount };
+  }
+  try {
+    sendMessage(sessionId, buildMessage(), false);
+  } catch {
+    return { nudged: false, escalate: false, count: currentCount };
+  }
+  slice.post_dispatch_nudge_sent_at = ts;
+  slice.post_dispatch_nudge_count = currentCount + 1;
+  return { nudged: true, escalate: false, count: currentCount + 1 };
 }
 
 function sendAgentDeckMessage(sessionId, message, wait = false) {
@@ -1876,7 +1988,38 @@ function runBabysit(state, workerList, ts) {
         continue;
       }
       const key = actionKey("conflict-fix", pr);
-      if (alreadyDispatched(slice, key)) continue;
+      if (alreadyDispatched(slice, key)) {
+        // Same conflict, conflict prompt already sent. The pr-resolving-
+        // conflicts stage check above escalates as soon as conflict
+        // *persists* across a tick — but the worker may still be parked
+        // (received the prompt, never acted). Nudge before that escalation
+        // fires so we give the worker a chance to wake up.
+        const result = maybePostDispatchNudge(
+          slice, sessionId, workerStatus, ts, key,
+          () => conflictMessage(slice, pr, state),
+        );
+        if (result.nudged) {
+          mutated = true;
+          actions.push({
+            action: "post-dispatch-nudge",
+            sliceId, sessionId, pr,
+            detail: \`re-sent conflict-fix prompt (nudge \${result.count}/\${postDispatchNudgeConfig().escalateAfterNudges}) — worker \${workerStatus}\`,
+          });
+        } else if (result.escalate) {
+          const request = requestLegateJudgement({
+            ts, slice,
+            requestKey: actionKey("conflict-nudges-exhausted", pr, key),
+            sliceId, sessionId, pr,
+            reason: "worker_unresponsive_after_conflict_fix",
+            detail: \`Sent \${result.count} conflict-fix nudges to PR #\${pr.number} worker (session \${sessionId}); still \${workerStatus}. Operator should attach and inspect.\`,
+          });
+          if (request) {
+            requests.push(request);
+            mutated = true;
+          }
+        }
+        continue;
+      }
       try {
         sendAgentDeckMessage(sessionId, conflictMessage(slice, pr, state), false);
       } catch (err) {
@@ -1896,9 +2039,39 @@ function runBabysit(state, workerList, ts) {
 
     const neededThreads = threadsNeedingResponse(slice, pr);
     if (neededThreads.length > 0) {
-      if (slice.stage === "pr-in-fix") continue;
       const key = actionKey("review-fix", pr, neededThreads.map((thread) => \`\${thread.id || ""}@\${thread.last_comment_at || ""}\`).join(","));
-      if (alreadyDispatched(slice, key)) continue;
+      if (alreadyDispatched(slice, key)) {
+        // Same thread set, /smithy.fix already sent. If the worker has been
+        // parked in waiting/idle for too long, re-deliver to wake it up.
+        // Without this the loop's dedup silently lets a stuck worker rot —
+        // the parked Claude session keeps sitting at the prompt and the loop
+        // happily reports "already dispatched" on every tick.
+        const result = maybePostDispatchNudge(
+          slice, sessionId, workerStatus, ts, key,
+          () => reviewFixMessage(pr, neededThreads),
+        );
+        if (result.nudged) {
+          mutated = true;
+          actions.push({
+            action: "post-dispatch-nudge",
+            sliceId, sessionId, pr,
+            detail: \`re-sent /smithy.fix (nudge \${result.count}/\${postDispatchNudgeConfig().escalateAfterNudges}) — worker \${workerStatus} \${Math.round((Date.parse(ts) - Date.parse(slice.last_processor_action_at || ts)) / 60000)}min after dispatch\`,
+          });
+        } else if (result.escalate) {
+          const request = requestLegateJudgement({
+            ts, slice,
+            requestKey: actionKey("review-nudges-exhausted", pr, key),
+            sliceId, sessionId, pr,
+            reason: "worker_unresponsive_after_review_fix",
+            detail: \`Sent \${result.count} /smithy.fix nudges to PR #\${pr.number} worker (session \${sessionId}) and still \${workerStatus} with \${neededThreads.length} thread(s) needing response. Likely parked at a permission prompt or a stuck spinner. Operator should attach and inspect, or close the slice if the worker is unrecoverable.\`,
+          });
+          if (request) {
+            requests.push(request);
+            mutated = true;
+          }
+        }
+        continue;
+      }
       try {
         sendAgentDeckMessage(sessionId, reviewFixMessage(pr, neededThreads), false);
       } catch (err) {
@@ -2132,17 +2305,69 @@ function alreadyArchivedSlice(state, item, sliceId) {
 
 function alreadyHasInFlightSlice(state, item, sliceId) {
   if (alreadyArchivedSlice(state, item, sliceId)) return true;
+  return inFlightSliceMatches(state, item, sliceId);
+}
+
+// Live-only portion of the dedup check. Carved out so the recovery-dispatch
+// path can distinguish "blocked because a recovery is already in flight"
+// from "blocked because the prior MERGED archive collides" — the former is
+// correct dedup, the latter is the exact case we want to recover from.
+function inFlightSliceMatches(state, item, sliceId) {
   const slices = state?.slices && typeof state.slices === "object" ? state.slices : {};
   const key = dispatchItemKey(item);
+  const branch = dispatchBranch(item);
   for (const [existingId, slice] of Object.entries(slices)) {
     if (existingId === sliceId) return true;
     if (!slice || typeof slice !== "object") continue;
     if (sliceReleasesArtifact(slice)) continue;
+    // Recovery slice for the same item — its original_slice_id matches
+    // the to-be-dispatched sliceId. Without this, every tick would mint
+    // a new recovery-N attempt for the same in-flight original.
+    if (slice.original_slice_id === sliceId) return true;
     if (sliceActionKey(slice) === key) return true;
-    if (slice.branch && slice.branch === dispatchBranch(item)) return true;
+    if (slice.branch && slice.branch === branch) return true;
   }
   return false;
 }
+
+// Returns the matching archived slice ONLY if it terminated in MERGED.
+// Callers use this to detect the partial-merge dedup wedge: smithy says
+// "still ready", the slice id collides with a prior MERGED archive, the
+// loop should fire a recovery dispatch rather than silently filtering.
+// Escalated / closed-unmerged archives intentionally fall through (return
+// null) so they keep blocking re-dispatch — those represent unresolved
+// operator decisions and recovery is not the right tool.
+function blockingMergedArchive(state, item, sliceId) {
+  const archived = archivedSlices(state);
+  const key = dispatchItemKey(item);
+  const branch = dispatchBranch(item);
+  const isMerged = (a) => {
+    if (!a || typeof a !== "object") return false;
+    if (a.terminal_state === "MERGED") return true;
+    if (a.stage === "merged") return true;
+    if (a.pr && a.pr.state === "MERGED") return true;
+    return false;
+  };
+  const direct = archived[sliceId];
+  if (direct && !isStubArchivedSlice(direct) && isMerged(direct)) return direct;
+  for (const slice of Object.values(archived)) {
+    if (!slice || typeof slice !== "object") continue;
+    if (!isMerged(slice)) continue;
+    if (sliceActionKey(slice) === key) return slice;
+    if (slice.branch && slice.branch === branch) return slice;
+    if (slice.actual_branch && slice.actual_branch === branch) return slice;
+  }
+  return null;
+}
+
+// Cap on codex-spawn recovery dispatches per original slice before the loop
+// stops fighting the spawn path. Two attempts is enough to distinguish a
+// fluky worker (first attempt missed the checkbox) from a systemic codex
+// problem (truncated patches, the prompt not taking). After this we fall
+// back to a direct, no-spawn steward dispatch (see handleRecoveryDispatch) —
+// the old mini-legate style of handing the /smithy.<verb> command straight
+// to a Claude steward that does the whole job itself.
+const MAX_RECOVERY_ATTEMPTS = 2;
 
 function graphNodes(status) {
   return status?.graph?.nodes && typeof status.graph.nodes === "object"
@@ -2293,7 +2518,13 @@ function readySmithyItems(status) {
 }
 
 function readSmithyStatus(repoPath) {
-  const out = execText("smithy", ["status", "--format", "json"], { cwd: repoPath });
+  // --pending = shorthand for --status in-progress,not-started. Filters out
+  // all done records up-front (smithy ships a much smaller, dispatch-shaped
+  // payload — the prior full output had hundreds of done entries the loop
+  // had to wade through). Layer 0 of the returned graph still means "ready
+  // to dispatch right now" — a node's dependencies have either landed (and
+  // were filtered out by --pending) or never existed.
+  const out = execText("smithy", ["status", "--format", "json", "--pending"], { cwd: repoPath });
   return JSON.parse(out);
 }
 
@@ -2339,6 +2570,49 @@ function buildSmithySpawnPrompt(item) {
     "- Implement only this one Smithy step.",
     "- Do not chain into the next Smithy step.",
     "- Make the smallest coherent patch needed for this step.",
+    "- Every acceptance criterion the step lists must be satisfied by the patch.",
+    "  Do not produce a partial patch and rely on a follow-up — the deterministic",
+    "  loop dedups future dispatches off the merged slice id and a partial merge",
+    "  is silently abandoned.",
+    "- Flip the matching tasks.md row(s) from \`[ ]\` to \`[x]\` in the same patch.",
+    "  The check-state is the loop's only durable signal that this slice is done.",
+    "- Leave PR creation to the Hatchery manager session.",
+  ].join("\\n");
+}
+
+// Recovery-dispatch prompt: a layer-0 ready item collided with a prior
+// MERGED archive entry. The prior PR shipped a partial slice that left the
+// matching tasks.md row \`[ ]\`, so the loop's dedup silently filtered the
+// item until this path was added. Frame the work as cleanup: either finish
+// the remaining acceptance criteria or open a checkbox-only fix PR.
+function buildSmithyRecoverySpawnPrompt(item, mergedArchive, attempt) {
+  const commandLine = actionCommandLine(item.next_action);
+  const priorPr = mergedArchive?.pr || {};
+  const priorPrLine = priorPr.number
+    ? "Prior merged PR: #" + priorPr.number + (priorPr.url ? " (" + priorPr.url + ")" : "")
+    : "Prior merged slice: " + (mergedArchive?.branch || mergedArchive?.actual_branch || "(branch unknown)");
+  return [
+    "RECOVERY DISPATCH (attempt " + attempt + "). The slice listed below was",
+    "previously merged via the prior PR — but the merge was partial: smithy",
+    "still reports the tasks.md row as ready, which means at least one",
+    "checkbox is still \`[ ]\` and/or an acceptance criterion is unmet.",
+    "",
+    priorPrLine,
+    "",
+    "Smithy command:",
+    commandLine,
+    "",
+    "Artifact:",
+    item.path || item.title || "(unknown)",
+    "",
+    "Rules:",
+    "- Read the artifact and the prior merged diff (\`gh pr view <num> --json files\`",
+    "  if you have the number). Identify what shipped vs. what is still missing.",
+    "- If acceptance criteria are unmet: implement them now. Smallest coherent patch.",
+    "- If the work is actually done and only the checkbox was missed: open a",
+    "  checkbox-only cleanup PR that flips the row from \`[ ]\` to \`[x]\`.",
+    "- Either way, the patch MUST flip the matching tasks.md row(s).",
+    "- Do not re-implement work the prior PR already shipped — don't churn.",
     "- Leave PR creation to the Hatchery manager session.",
   ].join("\\n");
 }
@@ -2414,12 +2688,16 @@ function marchCommandAndArgs(args) {
   return { command: "march", args };
 }
 
-function launchHatcheryDispatch(item, resultPath, logPath) {
+function launchHatcheryDispatch(item, resultPath, logPath, opts) {
   const repoPath = meta.repo?.path;
   if (typeof repoPath !== "string" || repoPath.length === 0) {
     throw new Error("repo path is missing");
   }
   const dispatchIdent = dispatchIdentity(item);
+  const branch = opts?.branchOverride || dispatchBranch(item);
+  const title = opts?.titleOverride || dispatchTitle(item);
+  const prompt = opts?.promptOverride || buildSmithySpawnPrompt(item);
+  const requestSliceId = opts?.requestSliceIdOverride || dispatchSliceId(item);
   const args = [
     "hatchery",
     "spawn",
@@ -2430,22 +2708,22 @@ function launchHatcheryDispatch(item, resultPath, logPath) {
     "--manager-group",
     meta.worker_group,
     "--name",
-    dispatchTitle(item),
+    title,
     "--branch",
-    dispatchBranch(item),
+    branch,
     "--task-type",
     dispatchIdent.verb,
     "--task-name",
     dispatchIdent.stem,
     "--slice-id",
-    dispatchSliceId(item),
+    requestSliceId,
     "--prompt",
-    buildSmithySpawnPrompt(item),
+    prompt,
     "--json",
   ];
   fs.mkdirSync(path.dirname(resultPath), { recursive: true });
   fs.writeFileSync(resultPath, "", "utf-8");
-  const requestPath = hatcheryRequestPath(dispatchSliceId(item));
+  const requestPath = hatcheryRequestPath(requestSliceId);
   const resolved = marchCommandAndArgs(args);
   fs.writeFileSync(requestPath, JSON.stringify({
     command: resolved.command,
@@ -2461,6 +2739,133 @@ function launchHatcheryDispatch(item, resultPath, logPath) {
   });
   child.unref();
   return { pid: child.pid || null, requestPath };
+}
+
+// Initial message handed to a direct-steward dispatch (no-spawn fallback).
+// The steward runs the /smithy.<verb> command itself and carries it all the
+// way to an open PR — the pre-Hatchery mini-legate flow. \`mergedArchive\` is
+// present when this is the fallback after recovery spawns failed; null on a
+// first-class direct dispatch.
+function buildDirectStewardMessage(item, mergedArchive) {
+  const commandLine = actionCommandLine(item.next_action);
+  const priorPr = mergedArchive?.pr || {};
+  const priorLine = priorPr.number
+    ? "A prior PR (#" + priorPr.number + ") merged for this artifact but left it incomplete — smithy still reports it as pending."
+    : "";
+  return [
+    "[DIRECT DISPATCH — no spawn] The Hatchery codex spawn path failed",
+    "repeatedly for this slice, so the loop is handing you the Smithy command",
+    "directly. Implement it yourself, end-to-end — do not wait for a patch.",
+    priorLine,
+    "",
+    "Run this Smithy command and carry it through to an open PR:",
+    commandLine,
+    "",
+    "Artifact: " + (item.path || item.title || "(unknown)"),
+    "",
+    "Requirements:",
+    "- Satisfy every acceptance criterion the step lists.",
+    "- Flip the matching tasks.md row(s) from \`[ ]\` to \`[x]\` in the same change.",
+    "- Commit, push, and open the PR yourself (\`gh pr create\`).",
+    "- Report the PR URL on the final line as \`PR: <url>\`.",
+    "- If genuinely blocked, escalate via \`NEED: <summary> — <next action>\`",
+    "  instead of ending your turn silently.",
+  ].filter((line) => line !== "").join("\\n");
+}
+
+// Direct-steward dispatch: the no-spawn fallback. Launches a plain Claude
+// steward on a fresh worktree+branch and hands it the /smithy.<verb> command
+// as the initial message. Reliable but slower/less parallel than codex spawn.
+// Returns {launched, sliceId, sessionId, error}. Mutates state.slices on
+// success so babysit/cleanup track the steward like any other.
+function launchDirectStewardDispatch(state, ts, item, sliceId, mergedArchive) {
+  const repoPath = state?.repo?.path || meta.repo?.path;
+  if (typeof repoPath !== "string" || repoPath.length === 0) {
+    return { launched: false, error: "repo path is missing" };
+  }
+  const bareBranch = dispatchBranch(item) + "-direct";
+  const featureBranch = "feature/" + bareBranch;
+  const directSliceId = sliceId + "-direct";
+  const title = "direct: " + dispatchTitle(item);
+  const message = buildDirectStewardMessage(item, mergedArchive);
+
+  let beforeIds;
+  try {
+    const beforeList = agentDeckList();
+    beforeIds = new Set(Array.isArray(beforeList) ? beforeList.map((s) => s.id) : []);
+  } catch {
+    beforeIds = new Set();
+  }
+  const launchArgs = [
+    "-p", meta.profile,
+    "launch",
+    repoPath,
+    "-t", title,
+    "-c", "claude",
+    "-g", meta.worker_group,
+    "--worktree", bareBranch,
+    "-b",
+    "--title-lock",
+    "--model", "opus",
+    "--extra-arg", "--permission-mode",
+    "--extra-arg", "auto",
+    "-message", message,
+    "-q",
+  ];
+  try {
+    execFileSync("agent-deck", launchArgs, {
+      encoding: "utf-8",
+      stdio: ["ignore", "ignore", "pipe"],
+    });
+  } catch (err) {
+    return { launched: false, sliceId: directSliceId, error: "agent-deck launch failed: " + (err?.message || String(err)).slice(0, 200) };
+  }
+  let newSessionId = null;
+  try {
+    const afterList = agentDeckList();
+    if (Array.isArray(afterList)) {
+      for (const s of afterList) {
+        if (!isWorkerSession(s)) continue;
+        if (beforeIds.has(s.id)) continue;
+        newSessionId = s.id;
+        break;
+      }
+    }
+  } catch {}
+  if (!newSessionId) {
+    return { launched: false, sliceId: directSliceId, error: "agent-deck launch returned no identifiable new session" };
+  }
+  try {
+    execFileSync("agent-deck", ["-p", meta.profile, "session", "set", newSessionId, "auto-mode", "true"], {
+      encoding: "utf-8",
+      stdio: ["ignore", "ignore", "pipe"],
+    });
+  } catch {
+    // Best-effort; the --permission-mode auto extra-arg already covers it.
+  }
+  const action = item.next_action || {};
+  const worktreesParent = path.join(path.dirname(repoPath), "WorkTrees", path.basename(repoPath));
+  state.slices[directSliceId] = {
+    kind: "smithy",
+    worker_session_id: newSessionId,
+    worker_title: title,
+    branch: bareBranch,
+    actual_branch: featureBranch,
+    worktree_path: path.join(worktreesParent, "feature-" + bareBranch.replace(/\\//g, "-")),
+    stage: "implementing",
+    implementing_started_at: ts,
+    pr: null,
+    command: action.command,
+    arguments: actionArguments(action),
+    artifact_path: item.path || null,
+    dispatch_mode: "direct-steward",
+    original_slice_id: sliceId,
+    prior_pr_number: mergedArchive?.pr?.number || null,
+    prior_pr_url: mergedArchive?.pr?.url || null,
+    last_action: ts,
+    last_action_note: "direct steward dispatch (no spawn) for " + actionCommandLine(action),
+  };
+  return { launched: true, sliceId: directSliceId, sessionId: newSessionId };
 }
 
 // If the hatchery runner dies before writing its result file, the slice would
@@ -3394,6 +3799,153 @@ function runStewardRelaunch(state, workerList, ts) {
   return { actions, failures, mutated };
 }
 
+// Detect-and-act for the partial-merge dedup wedge. Caller has confirmed
+// (a) smithy still reports item as ready, (b) a MERGED archive entry
+// collides with the would-be slice id, (c) no live recovery is already in
+// flight. We mint a recovery-N slice id and branch, persist the attempt
+// counter, build a recovery-flavored spawn prompt, and launch hatchery the
+// same way runDispatch does for a normal slice. After MAX_RECOVERY_ATTEMPTS
+// we stop dispatching and instead nudge the legate agent — at that point a
+// human needs to look (spec is wrong, prompt is failing, or the work is
+// genuinely impossible).
+function handleRecoveryDispatch(state, ts, item, sliceId, mergedArchive) {
+  const actions = [];
+  const failures = [];
+  const notifications = [];
+  state.recovery_attempts = state.recovery_attempts && typeof state.recovery_attempts === "object"
+    ? state.recovery_attempts
+    : {};
+  state.direct_dispatch_done = state.direct_dispatch_done && typeof state.direct_dispatch_done === "object"
+    ? state.direct_dispatch_done
+    : {};
+
+  const priorAttempts = Number(state.recovery_attempts[sliceId]) || 0;
+  const attempt = priorAttempts + 1;
+  const recoverySliceId = sliceId + "-recovery-" + attempt;
+
+  if (attempt > MAX_RECOVERY_ATTEMPTS) {
+    // The codex spawn path has failed MAX_RECOVERY_ATTEMPTS times for this
+    // slice. Fall back ONCE to a direct, no-spawn steward dispatch — hand the
+    // /smithy.<verb> command straight to a Claude steward (old mini-legate
+    // style). It's slower but doesn't depend on codex producing an applicable
+    // patch, which is the thing that keeps failing.
+    if (!state.direct_dispatch_done[sliceId]) {
+      const direct = launchDirectStewardDispatch(state, ts, item, sliceId, mergedArchive);
+      if (direct.launched) {
+        state.direct_dispatch_done[sliceId] = ts;
+        actions.push({
+          action: "direct_dispatch",
+          sliceId: direct.sliceId,
+          sessionId: direct.sessionId || null,
+          detail: "codex spawn failed " + priorAttempts + "x; fell back to a no-spawn direct steward dispatch of "
+            + actionCommandLine(item.next_action)
+            + (mergedArchive?.pr?.number ? " (prior partial PR #" + mergedArchive.pr.number + ")" : ""),
+        });
+      } else {
+        failures.push({ slice_id: sliceId, command: actionCommandLine(item.next_action), error: direct.error || "direct dispatch failed" });
+        notifications.push({
+          slice: mergedArchive, sliceId,
+          requestKey: "direct-dispatch-failed:" + sliceId + ":" + hashText(String(direct.error || "")).slice(0, 12),
+          reason: "direct_dispatch_failed",
+          detail: "Codex spawn failed " + priorAttempts + "x for " + sliceId + " and the no-spawn direct steward fallback ALSO failed to launch: "
+            + (direct.error || "(unknown)") + ". Manual intervention required.",
+        });
+      }
+      return { actions, failures, notifications };
+    }
+    // Direct dispatch was already attempted and we're STILL being asked to
+    // recover this slice (its direct PR merged without finishing, or smithy
+    // still reports it ready). No fallback left — escalate for a human.
+    notifications.push({
+      slice: mergedArchive, sliceId,
+      requestKey: "recovery-exhausted:" + sliceId + ":post-direct",
+      reason: "recovery_dispatch_exhausted",
+      detail: "Recovery for " + sliceId + " is exhausted: " + MAX_RECOVERY_ATTEMPTS + " codex spawn attempts AND a "
+        + "no-spawn direct steward dispatch all failed to complete the work (smithy still reports "
+        + (item.path || "the artifact") + " as ready). The spec may be wrong or the work genuinely blocked — "
+        + "inspect the prior PRs and the artifact, then clear state.recovery_attempts[\\"" + sliceId + "\\"] "
+        + "and state.direct_dispatch_done[\\"" + sliceId + "\\"] to retry.",
+    });
+    return { actions, failures, notifications };
+  }
+
+  try {
+    // syncDefaultBranch already ran at the top of runDispatch; no need
+    // to re-fetch per recovery dispatch.
+    const action = item.next_action || {};
+    const resultPath = hatcheryResultPath(recoverySliceId);
+    const logPath = hatcheryLogPath(recoverySliceId);
+    const requestPath = hatcheryRequestPath(recoverySliceId);
+    const recoveryBranch = dispatchBranch(item) + "-recovery-" + attempt;
+    const recoveryTitle = "recovery(" + attempt + "): " + dispatchTitle(item);
+    state.slices[recoverySliceId] = {
+      kind: "smithy",
+      worker_session_id: null,
+      worker_title: recoveryTitle,
+      branch: recoveryBranch,
+      actual_branch: null,
+      worktree_path: null,
+      stage: "hatchery-pending",
+      pr: null,
+      command: action.command,
+      arguments: actionArguments(action),
+      artifact_path: item.path || null,
+      hatchery: {
+        backend: "codex",
+        hatchery_result_path: resultPath,
+        hatchery_request_path: requestPath,
+        hatchery_log_path: logPath,
+      },
+      original_slice_id: sliceId,
+      recovery_attempt: attempt,
+      prior_pr_number: mergedArchive?.pr?.number || null,
+      prior_pr_url: mergedArchive?.pr?.url || null,
+      prior_branch: mergedArchive?.branch || mergedArchive?.actual_branch || null,
+      last_action: ts,
+      last_action_note: "Queued Hatchery recovery codex spawn (attempt " + attempt + ") for " + actionCommandLine(action),
+    };
+    state.recovery_attempts[sliceId] = attempt;
+    writeJson(meta.legate_state_path, state);
+    const launched = launchHatcheryDispatch(item, resultPath, logPath, {
+      branchOverride: recoveryBranch,
+      titleOverride: recoveryTitle,
+      promptOverride: buildSmithyRecoverySpawnPrompt(item, mergedArchive, attempt),
+      requestSliceIdOverride: recoverySliceId,
+    });
+    actions.push({
+      action: "recovery_dispatch",
+      sliceId: recoverySliceId,
+      sessionId: null,
+      detail: "queued Hatchery recovery codex spawn pid " + (launched.pid || "unknown")
+        + " (attempt " + attempt + " of " + MAX_RECOVERY_ATTEMPTS + ") "
+        + "for " + actionCommandLine(action)
+        + (mergedArchive?.pr?.number ? "; prior PR #" + mergedArchive.pr.number : ""),
+    });
+  } catch (err) {
+    const error = err?.message || String(err);
+    const existing = state.slices?.[recoverySliceId];
+    if (existing && existing.stage === "hatchery-pending") {
+      existing.stage = "escalated";
+      existing.last_action = ts;
+      existing.last_action_note = "NEED: Hatchery recovery dispatch launch failed: " + error;
+      notifications.push({
+        slice: existing, sliceId: recoverySliceId,
+        requestKey: "hatchery-failure:" + recoverySliceId + ":launch-throw:" + hashText(error).slice(0, 12),
+        reason: "hatchery_recovery_dispatch_failed",
+        detail: "Hatchery recovery dispatch launch threw for " + actionCommandLine(item.next_action)
+          + " (recovery attempt " + attempt + ").\\n\\nError:\\n" + error
+          + "\\n\\nSlice is escalated in state.json. legate.unwedge / legate.error as appropriate.",
+      });
+    }
+    failures.push({
+      slice_id: recoverySliceId,
+      command: actionCommandLine(item.next_action),
+      error,
+    });
+  }
+  return { actions, failures, notifications };
+}
+
 function runDispatch(state, ts) {
   const actions = [];
   const failures = [];
@@ -3415,6 +3967,33 @@ function runDispatch(state, ts) {
     requestLegateJudgement({
       ts, slice: n.slice, sliceId: n.sliceId,
       requestKey: n.requestKey, reason: n.reason, detail: n.detail,
+    });
+  }
+
+  // Pull the default branch BEFORE reading smithy status. Without this,
+  // smithy reads a stale local tasks.md and either (a) reports a row as
+  // ready when a merge elsewhere has already ticked the box (triggering
+  // pointless recovery dispatches) or (b) misses a newly-ready row that a
+  // recent merge unblocked. Fetch is best-effort: on failure (network blip,
+  // repo lock) the tick still proceeds against whatever the local repo last
+  // saw — cleanup/babysit/etc. don't need fresh local state, and the next
+  // tick will retry. We do NOT escalate fetch failures — they are noise on a
+  // healthy system.
+  try {
+    syncDefaultBranch(state);
+  } catch (err) {
+    const error = err?.message || String(err);
+    appendText(
+      meta.processor_log_path,
+      "[" + ts + "] sync warning: " + error + " — proceeding against stale local repo",
+    );
+    append(meta.processor_events_path, {
+      schema_version: 1,
+      ts,
+      processor: meta.processor_name,
+      paired_legate: meta.paired_legate,
+      kind: "sync_warning",
+      error,
     });
   }
 
@@ -3440,11 +4019,38 @@ function runDispatch(state, ts) {
   state.last_smithy_status_at = ts;
 
   const ready = readySmithyItems(status);
-  let synced = false;
   mutated = true;
   for (const item of ready) {
     const sliceId = dispatchSliceId(item);
-    if (alreadyHasInFlightSlice(state, item, sliceId)) continue;
+    // Live-slice dedup first. If a worker (or a prior recovery attempt) is
+    // already in-flight for this item, never queue a second.
+    if (inFlightSliceMatches(state, item, sliceId)) continue;
+
+    // Partial-merge recovery: smithy still reports the item as ready, but a
+    // prior MERGED archive entry collides with the to-be-minted slice id.
+    // Without this branch, alreadyArchivedSlice silently filtered the item
+    // and the loop went idle on real work. See Balexda/March#140.
+    const blockingMerged = blockingMergedArchive(state, item, sliceId);
+    if (blockingMerged) {
+      const recoveryResult = handleRecoveryDispatch(state, ts, item, sliceId, blockingMerged);
+      if (recoveryResult) {
+        actions.push(...recoveryResult.actions);
+        failures.push(...recoveryResult.failures);
+        for (const n of recoveryResult.notifications || []) {
+          requestLegateJudgement({
+            ts, slice: n.slice, sliceId: n.sliceId,
+            requestKey: n.requestKey, reason: n.reason, detail: n.detail,
+          });
+        }
+      }
+      continue;
+    }
+
+    // Defensive: anything else in archived_slices (escalated, closed-unmerged,
+    // hash-stub) still blocks. blockingMergedArchive returns null for those
+    // cases on purpose — only MERGED archives are recovery candidates.
+    if (alreadyArchivedSlice(state, item, sliceId)) continue;
+
     // Trust smithy's readyLayerNodeIds filter as the authoritative "ready
     // to work" set. The previous extra dependenciesClear gate disagreed
     // with smithy on slice-level deps: a tasks.md row's depends_on would
@@ -3456,10 +4062,8 @@ function runDispatch(state, ts) {
     // mental model and gets the loop to dispatch every layer-0 item.
 
     try {
-      if (!synced) {
-        syncDefaultBranch(state);
-        synced = true;
-      }
+      // syncDefaultBranch already ran at the top of runDispatch; no need
+      // to re-fetch per dispatch.
       const action = item.next_action || {};
       const resultPath = hatcheryResultPath(sliceId);
       const logPath = hatcheryLogPath(sliceId);
@@ -3581,7 +4185,7 @@ function tick() {
     dispatch_action_count: dispatchResult.actions.length,
     dispatch_failure_count: dispatchResult.failures.length,
   };
-  append(meta.processor_events_path, record);
+  append(heartbeatEventsPath, record);
   for (const cleanup of cleanupResult.cleanups) {
     append(meta.processor_events_path, cleanup);
     appendText(meta.processor_log_path, formatCleanupLine(cleanup));
@@ -3660,12 +4264,18 @@ function tick() {
     );
   }
   for (const action of dispatchResult.actions) {
+    const isRecovery = action.action === "recovery_dispatch" || action.action === "direct_dispatch";
+    const logPrefix = action.action === "recovery_dispatch"
+      ? "recovery-dispatch"
+      : action.action === "direct_dispatch"
+      ? "direct-dispatch"
+      : "dispatch";
     const event = {
       schema_version: 1,
       ts,
       processor: meta.processor_name,
       paired_legate: meta.paired_legate,
-      kind: "dispatch_action",
+      kind: isRecovery ? "recovery_dispatch" : "dispatch_action",
       action: action.action,
       slice_id: action.sliceId,
       session_id: action.sessionId,
@@ -3674,11 +4284,11 @@ function tick() {
     append(meta.processor_events_path, event);
     appendText(
       meta.processor_log_path,
-      "[" + ts + "] dispatch " + action.sliceId + ": " + action.detail,
+      "[" + ts + "] " + logPrefix + " " + action.sliceId + ": " + action.detail,
     );
   }
-  appendText(
-    meta.processor_log_path,
+  appendTextSilent(
+    heartbeatLogPath,
     \`[\${ts}] heartbeat slice_count=\${record.slice_count} archived=\${record.archived_slice_count} cleanups=\${record.cleanup_count} ghost_cleanups=\${record.ghost_cleanup_count} relaunches=\${record.relaunch_count} babysit_actions=\${record.babysit_action_count} dispatches=\${record.dispatch_action_count} processor_requests=\${record.processor_request_count} workers=\${JSON.stringify(workers)}\${stateError ? " state_error=" + stateError : ""}\`,
   );
 }
@@ -4434,7 +5044,8 @@ export async function initLegate(
   const loopName = deriveLoopName(conductorName);
   const processorName = loopName;
   const workerGroup = opts.workerGroup ?? defaults.workerGroup;
-  const model = opts.model ?? "sonnet";
+  const model = opts.model ?? "opus";
+  const effort = opts.effort ?? "medium";
   const heartbeatInterval = opts.heartbeatInterval ?? DEFAULT_HEARTBEAT_INTERVAL;
   const repoName = defaults.repoName;
   const description =
@@ -4593,6 +5204,8 @@ export async function initLegate(
     "--",
     "--model",
     model,
+    "--effort",
+    effort,
   ];
   const restartCommand = [
     "agent-deck",
@@ -5127,7 +5740,7 @@ export async function initLegate(
           : "NOT configured — see warnings"
         : "deferred (run setup first)"
     }`,
-    `  Model:          ${model}${
+    `  Model:          ${model} (effort: ${effort})${
       processorOnly ? " (skipped — loop-only)" : setupRan ? "" : " (deferred — run setup first)"
     }`,
     `  Bridge daemon:  ${

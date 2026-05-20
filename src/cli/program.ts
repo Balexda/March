@@ -273,7 +273,11 @@ legate
   .option("-g, --worker-group <group>", "Group for worker sessions (default: legate-workers)")
   .option(
     "-m, --model <model>",
-    "Claude model alias or full ID for the Legate agent session (default: sonnet — orchestration is reasoning-light; workers stay on the Claude default).",
+    "Claude model alias or full ID for the Legate agent session (default: opus — auto-mode classifier requires opus; effort is set separately so we don't pay full reasoning cost for orchestration).",
+  )
+  .option(
+    "--effort <level>",
+    "Claude Code --effort level for the conductor session: low | medium | high | xhigh | max (default: medium — orchestration is reasoning-light; high effort is reserved for the worker sessions doing real implementation).",
   )
   .option(
     "-i, --heartbeat-interval <interval>",
@@ -310,6 +314,7 @@ legate
     description?: string;
     workerGroup?: string;
     model?: string;
+    effort?: string;
     heartbeatInterval?: string;
     setup?: boolean; // commander negates --no-setup into setup=false
     withContainer?: boolean;
@@ -446,6 +451,7 @@ legate
         description: opts.description,
         workerGroup: opts.workerGroup,
         model: opts.model,
+        effort: opts.effort,
         heartbeatInterval: opts.heartbeatInterval,
         runSetup: willRunSetup,
         loop: loopOnly ? true : !loopDisabled,

@@ -258,7 +258,8 @@ describe("legate module", () => {
         "Then enable auto mode, pin model, restart, and deliver the",
       );
       expect(result.summary).toContain("auto-mode true");
-      expect(result.summary).toContain("--model sonnet");
+      expect(result.summary).toContain("--model opus");
+      expect(result.summary).toContain("--effort medium");
       expect(result.summary).toContain("session restart");
       // The --no-setup summary must tell the user to deliver the cold-start
       // priming prompt; otherwise auto-mode runs without alignment context.
@@ -338,6 +339,15 @@ describe("legate module", () => {
       expect(loop).toContain("agent-deck error state");
       expect(loop).not.toContain("restartWorker(");
       expect(loop).toContain("] heartbeat slice_count=");
+      // Heartbeat lines and ndjson records are written to the heartbeat-only
+      // sibling files so legate-loop.log stays scannable for real events.
+      expect(loop).toContain("meta.loop_heartbeat_log_path");
+      expect(loop).toContain("meta.loop_heartbeat_events_path");
+      expect(loop).toContain("append(heartbeatEventsPath, record)");
+      // Heartbeat line uses the silent helper so it never reaches the
+      // conductor's stdout (the tmux attach view stays scannable).
+      expect(loop).toContain("function appendTextSilent");
+      expect(loop).toContain("appendTextSilent(\n    heartbeatLogPath,");
       expect(loop).toContain("function formatCleanupLine");
       expect(loop).toContain("${prefix}cleaned up");
       expect(loop).toContain('list", "-json"');
@@ -366,6 +376,71 @@ describe("legate module", () => {
       // already in flight.
       expect(loop).not.toContain("!dependenciesClear(state, status, item)");
       expect(loop).toContain("alreadyArchivedSlice(state, item, sliceId)");
+      // Partial-merge recovery (#140): when smithy still says ready and a
+      // MERGED archive entry collides, fire a recovery dispatch rather than
+      // silently filtering. The check has to look only at MERGED archives,
+      // tracked by an attempt counter persisted in state.recovery_attempts,
+      // capped at MAX_RECOVERY_ATTEMPTS.
+      expect(loop).toContain("function blockingMergedArchive");
+      expect(loop).toContain("function inFlightSliceMatches");
+      expect(loop).toContain("function handleRecoveryDispatch");
+      expect(loop).toContain("function buildSmithyRecoverySpawnPrompt");
+      expect(loop).toContain("MAX_RECOVERY_ATTEMPTS");
+      expect(loop).toContain("state.recovery_attempts");
+      expect(loop).toContain("original_slice_id");
+      expect(loop).toContain('action: "recovery_dispatch"');
+      expect(loop).toContain('"recovery_dispatch" : "dispatch_action"');
+      expect(loop).toContain("recovery-dispatch");
+      expect(loop).toContain("recovery_dispatch_exhausted");
+      // The recovery prompt must point the worker at the prior PR and ask
+      // for either a finishing patch or a checkbox-only cleanup PR.
+      expect(loop).toContain("RECOVERY DISPATCH");
+      expect(loop).toContain("Prior merged PR");
+      // Post-dispatch nudge: review-fix and conflict-fix paths now re-deliver
+      // the original message when the worker is waiting/idle past the
+      // threshold, capped + escalated. Without this, the existing
+      // alreadyDispatched dedup silently lets a stuck worker sit forever.
+      expect(loop).toContain("function maybePostDispatchNudge");
+      expect(loop).toContain("function postDispatchNudgeConfig");
+      expect(loop).toContain("post_dispatch_nudge_for_key");
+      expect(loop).toContain("post_dispatch_nudge_count");
+      expect(loop).toContain("post_dispatch_nudge_sent_at");
+      expect(loop).toContain('action: "post-dispatch-nudge"');
+      expect(loop).toContain("worker_unresponsive_after_review_fix");
+      expect(loop).toContain("worker_unresponsive_after_conflict_fix");
+      // syncDefaultBranch now runs once per tick BEFORE readSmithyStatus so
+      // smithy reads against fresh local repo state. Fetch failures degrade
+      // to a sync_warning event + a log line; the tick continues with the
+      // stale local repo. Without this the loop could either dispatch
+      // recoveries for already-ticked rows or miss freshly-unblocked work.
+      expect(loop).toContain('kind: "sync_warning"');
+      expect(loop).toContain("sync warning:");
+      expect(loop).toContain("proceeding against stale local repo");
+      // The lazy "if (!synced) syncDefaultBranch" inside the dispatch loop
+      // is gone — both normal and recovery dispatches piggyback on the
+      // single top-of-tick sync.
+      expect(loop).not.toContain("if (!synced) {");
+      expect(loop).not.toContain("let synced = false");
+      // readSmithyStatus now uses --pending so the loop only sees actionable
+      // records (in-progress + not-started). Smithy's layer 0 of the
+      // returned graph maps to "ready to dispatch right now" without us
+      // having to filter done items out client-side.
+      expect(loop).toContain('"status", "--format", "json", "--pending"');
+      // No-spawn fallback: after MAX_RECOVERY_ATTEMPTS codex spawn attempts,
+      // the loop hands the /smithy.<verb> command straight to a Claude
+      // steward (old mini-legate style) instead of escalating. Logged as a
+      // direct_dispatch action; tracked via state.direct_dispatch_done so it
+      // only fires once before final escalation.
+      expect(loop).toContain("function launchDirectStewardDispatch");
+      expect(loop).toContain("function buildDirectStewardMessage");
+      expect(loop).toContain("state.direct_dispatch_done");
+      expect(loop).toContain('action: "direct_dispatch"');
+      expect(loop).toContain("DIRECT DISPATCH — no spawn");
+      expect(loop).toContain("direct-dispatch");
+      expect(loop).toContain('dispatch_mode: "direct-steward"');
+      // The replaced master-advance reset must be fully gone.
+      expect(loop).not.toContain("recovery_exhausted_at_head");
+      expect(loop).not.toContain("recovery_reset");
       expect(loop).toContain('kind: "dispatch_failure"');
       expect(loop).toContain('kind: "dispatch_read_failure"');
       expect(loop).toContain("function launchHatcheryDispatch");
@@ -411,6 +486,14 @@ describe("legate module", () => {
       expect(loop).toContain('"legate.cleanup"');
       expect(loop).toContain("spanId: otelSpanId(sliceId)");
       expect(loop).toContain("meta.otel");
+      // Failed-spawn recovery paths get their own dispatch traces: recovery
+      // codex spawns and no-spawn direct-steward dispatches each emit a root
+      // legate.dispatch span, and a launch that throws is recorded as an
+      // errored span so the failure still surfaces as a trace.
+      expect(loop).toContain('event.kind === "recovery_dispatch"');
+      expect(loop).toContain('"direct_steward"');
+      expect(loop).toContain('event.kind === "dispatch_failure"');
+      expect(loop).toContain('"march.dispatch_mode"');
       expect(loop).toContain("dispatch_action_count");
       expect(loop).toContain("Number.isFinite(rawIntervalSeconds)");
       expect(loop).toContain("function safeTick()");
@@ -432,6 +515,12 @@ describe("legate module", () => {
       );
       expect(meta.loop_requests_path).toBe(
         path.join(home, ".agent-deck", "conductor", "march-legate-loop", "legate-loop-requests.ndjson"),
+      );
+      expect(meta.loop_heartbeat_log_path).toBe(
+        path.join(home, ".agent-deck", "conductor", "march-legate-loop", "legate-loop-heartbeat.log"),
+      );
+      expect(meta.loop_heartbeat_events_path).toBe(
+        path.join(home, ".agent-deck", "conductor", "march-legate-loop", "legate-loop-heartbeat.ndjson"),
       );
       expect(meta.mode).toBe("terminal-pr-maintenance");
 
@@ -556,6 +645,100 @@ describe("legate module", () => {
       expect(String(result.error)).toContain("hatchery runner crashed:");
       expect(result.exitCode).toBeNull();
       expect(fs.readFileSync(logPath, "utf-8")).toContain("runner crash:");
+    });
+
+    it("blockingMergedArchive only matches MERGED archive entries, never escalated/closed", async () => {
+      // Recovery dispatch (#140) is for the partial-merge case only. A
+      // closed-unmerged or escalated archive entry represents an unresolved
+      // operator decision and must keep blocking re-dispatch — never let the
+      // recovery path silently rerun those.
+      const loop = fs.readFileSync(await stageLoop(makeTmpDir()), "utf-8");
+      const deps = ["smithyVerb", "actionArguments", "slugifyDispatchPart", "hashText", "dispatchItemKey", "sliceActionKey", "dispatchArtifactSlug", "dispatchIdentity", "dispatchBranch", "archivedSlices", "isStubArchivedSlice"];
+      const blocking = extractFn(loop, "blockingMergedArchive", deps) as (state: unknown, item: unknown, sliceId: string) => unknown;
+
+      const item = {
+        path: "specs/foo/01-bar.tasks.md",
+        parent_path: "specs/foo/foo.spec.md",
+        parent_row_id: "US1",
+        next_action: { command: "smithy.forge", arguments: ["specs/foo/01-bar.tasks.md", "2"] },
+      };
+      const sliceId = "foo-us1-s2-forge";
+      const archivedKey = "foo-us1-s2-forge";
+
+      // MERGED via terminal_state — should return the entry.
+      const merged = { command: "smithy.forge", arguments: ["specs/foo/01-bar.tasks.md", "2"], branch: "smithy/forge/foo-us1-s2", terminal_state: "MERGED", pr_number: 42 };
+      expect(blocking({ archived_slices: { [archivedKey]: merged } }, item, sliceId)).toEqual(merged);
+
+      // Escalated (stage) — must NOT match.
+      const escalated = { ...merged, terminal_state: undefined, stage: "escalated" };
+      expect(blocking({ archived_slices: { [archivedKey]: escalated } }, item, sliceId)).toBeNull();
+
+      // Closed-unmerged — must NOT match.
+      const closed = { ...merged, terminal_state: "CLOSED" };
+      expect(blocking({ archived_slices: { [archivedKey]: closed } }, item, sliceId)).toBeNull();
+
+      // Stub legacy entry — must NOT match (handled by isStubArchivedSlice).
+      const stub = { terminal_state: "MERGED" };
+      expect(blocking({ archived_slices: { [archivedKey]: stub } }, item, sliceId)).toBeNull();
+
+      // No archive at all — null.
+      expect(blocking({ archived_slices: {} }, item, sliceId)).toBeNull();
+
+      // Match by sliceActionKey when the archive id differs (legacy hash IDs).
+      expect(blocking({ archived_slices: { "some-other-hash-id": merged } }, item, sliceId)).toEqual(merged);
+    });
+
+    it("inFlightSliceMatches dedups by original_slice_id so we never queue two recovery attempts at once", async () => {
+      // Once a recovery slice is in flight, the next tick must not mint
+      // another recovery attempt for the same original. Without the
+      // original_slice_id check, the recovery slice's distinct branch and
+      // sid would slip past sliceActionKey/branch dedup and we'd dispatch
+      // recovery-1, recovery-2, recovery-3, ... on consecutive ticks.
+      const loop = fs.readFileSync(await stageLoop(makeTmpDir()), "utf-8");
+      const deps = ["smithyVerb", "actionArguments", "slugifyDispatchPart", "hashText", "dispatchItemKey", "sliceActionKey", "dispatchArtifactSlug", "dispatchIdentity", "dispatchBranch", "sliceReleasesArtifact"];
+      const inFlight = extractFn(loop, "inFlightSliceMatches", deps) as (state: unknown, item: unknown, sliceId: string) => boolean;
+
+      const item = {
+        path: "specs/foo/01-bar.tasks.md",
+        parent_path: "specs/foo/foo.spec.md",
+        parent_row_id: "US1",
+        next_action: { command: "smithy.forge", arguments: ["specs/foo/01-bar.tasks.md", "2"] },
+      };
+      const sliceId = "foo-us1-s2-forge";
+
+      // Recovery slice in flight for this original — must be considered in flight.
+      const stateWithRecovery = {
+        slices: {
+          "foo-us1-s2-forge-recovery-1": {
+            stage: "hatchery-pending",
+            original_slice_id: sliceId,
+            branch: "smithy/forge/foo-us1-s2-recovery-1",
+            command: "smithy.forge",
+            arguments: ["specs/foo/01-bar.tasks.md", "2"],
+          },
+        },
+      };
+      expect(inFlight(stateWithRecovery, item, sliceId)).toBe(true);
+
+      // A merged live slice under a *different* sid (would never collide on
+      // id, but might collide on sliceActionKey) releases its artifact and
+      // must not block. In practice cleanupTerminalPrs runs first and moves
+      // it to archived_slices, but the helper itself has to handle the
+      // mid-tick case where the cleanup hasn't happened yet.
+      const stateMergedSibling = {
+        slices: {
+          "foo-us1-s2-forge-recovery-1": {
+            stage: "merged",
+            command: "smithy.forge",
+            arguments: ["specs/foo/01-bar.tasks.md", "2"],
+            branch: "smithy/forge/foo-us1-s2-recovery-1",
+          },
+        },
+      };
+      expect(inFlight(stateMergedSibling, item, sliceId)).toBe(false);
+
+      // Empty state — not in flight.
+      expect(inFlight({ slices: {} }, item, sliceId)).toBe(false);
     });
 
     it("isStubArchivedSlice distinguishes legacy stubs from real archive entries", async () => {
@@ -806,6 +989,94 @@ describe("legate module", () => {
       const r6 = nudge(slice, "s1", "sess-1", "2026-05-18T11:30:00.000Z", sendStub);
       expect(r6).toBe("nudged");
       expect(slice.steward_nudge_count).toBe(6);
+    });
+
+    it("maybePostDispatchNudge re-delivers the original message after the threshold, caps at 3, escalates", async () => {
+      // The wedge case we hit on the smithy profile: loop sent /smithy.fix
+      // to a worker, worker received the message and went to "waiting"
+      // (Claude parked at a prompt or judged "task complete" too early),
+      // and the loop's alreadyDispatched dedup silently let it sit there
+      // forever. This watchdog re-delivers the message after the threshold,
+      // caps at 3 nudges per action key (so a new dispatch resets the
+      // counter), and signals escalate when the cap is reached.
+      const loop = fs.readFileSync(await stageLoop(makeTmpDir()), "utf-8");
+      const nudge = extractFn(
+        loop,
+        "maybePostDispatchNudge",
+        ["postDispatchNudgeConfig"],
+      ) as (slice: any, sessionId: string, workerStatus: string, ts: string, key: string, build: () => string, send: any) => { nudged: boolean; escalate: boolean; count: number };
+
+      const sends: string[] = [];
+      const sendStub = (_sid: string, msg: string) => { sends.push(msg); };
+      const build = () => "/smithy.fix\nThreads: t1, t2";
+
+      // running worker → never nudge regardless of elapsed time.
+      const sliceRunning: any = { last_processor_action_at: "2026-05-19T01:00:00.000Z" };
+      expect(nudge(sliceRunning, "sess", "running", "2026-05-19T02:00:00.000Z", "k", build, sendStub))
+        .toEqual({ nudged: false, escalate: false, count: 0 });
+      expect(sends.length).toBe(0);
+
+      // waiting but too soon (< 5min after dispatch) → skip.
+      const slice: any = { last_processor_action_at: "2026-05-19T01:00:00.000Z" };
+      expect(nudge(slice, "sess", "waiting", "2026-05-19T01:03:00.000Z", "k1", build, sendStub))
+        .toEqual({ nudged: false, escalate: false, count: 0 });
+      expect(sends.length).toBe(0);
+
+      // 5 min in, first nudge fires.
+      const r1 = nudge(slice, "sess", "waiting", "2026-05-19T01:05:30.000Z", "k1", build, sendStub);
+      expect(r1).toEqual({ nudged: true, escalate: false, count: 1 });
+      expect(sends).toEqual(["/smithy.fix\nThreads: t1, t2"]);
+      expect(slice.post_dispatch_nudge_count).toBe(1);
+      expect(slice.post_dispatch_nudge_for_key).toBe("k1");
+
+      // 2 min after first nudge — too soon, no re-nudge.
+      const r2 = nudge(slice, "sess", "waiting", "2026-05-19T01:07:30.000Z", "k1", build, sendStub);
+      expect(r2).toEqual({ nudged: false, escalate: false, count: 1 });
+      expect(sends.length).toBe(1);
+
+      // 5 min after first nudge — second nudge.
+      const r3 = nudge(slice, "sess", "waiting", "2026-05-19T01:10:30.000Z", "k1", build, sendStub);
+      expect(r3).toEqual({ nudged: true, escalate: false, count: 2 });
+      expect(sends.length).toBe(2);
+
+      // 5 min after second nudge — third nudge.
+      const r4 = nudge(slice, "sess", "waiting", "2026-05-19T01:15:30.000Z", "k1", build, sendStub);
+      expect(r4).toEqual({ nudged: true, escalate: false, count: 3 });
+      expect(sends.length).toBe(3);
+
+      // Cap reached. Next check signals escalate; no new message sent.
+      const r5 = nudge(slice, "sess", "waiting", "2026-05-19T01:20:30.000Z", "k1", build, sendStub);
+      expect(r5).toEqual({ nudged: false, escalate: true, count: 3 });
+      expect(sends.length).toBe(3);
+
+      // New dispatch key (e.g., new threads appeared) — counter resets,
+      // fresh nudge cycle begins. Use a fresh dispatch timestamp.
+      slice.last_processor_action_at = "2026-05-19T02:00:00.000Z";
+      const r6 = nudge(slice, "sess", "waiting", "2026-05-19T02:06:00.000Z", "k2-new-threads", build, sendStub);
+      expect(r6).toEqual({ nudged: true, escalate: false, count: 1 });
+      expect(slice.post_dispatch_nudge_for_key).toBe("k2-new-threads");
+      expect(sends.length).toBe(4);
+    });
+
+    it("maybePostDispatchNudge ignores workers that are running, error, or otherwise non-parked", async () => {
+      const loop = fs.readFileSync(await stageLoop(makeTmpDir()), "utf-8");
+      const nudge = extractFn(
+        loop,
+        "maybePostDispatchNudge",
+        ["postDispatchNudgeConfig"],
+      ) as (slice: any, sessionId: string, workerStatus: string, ts: string, key: string, build: () => string, send: any) => { nudged: boolean; escalate: boolean; count: number };
+
+      const sends: string[] = [];
+      const sendStub = (_sid: string, msg: string) => { sends.push(msg); };
+      const slice: any = { last_processor_action_at: "2026-05-19T01:00:00.000Z" };
+      const build = () => "msg";
+
+      for (const status of ["running", "error", "stopped", "other"]) {
+        const r = nudge(slice, "sess", status, "2026-05-19T02:00:00.000Z", "k", build, sendStub);
+        expect(r.nudged).toBe(false);
+        expect(r.escalate).toBe(false);
+      }
+      expect(sends.length).toBe(0);
     });
 
     it("maybeNudgeStrandedSteward ignores slices that aren't in implementing", async () => {
@@ -1282,7 +1553,9 @@ describe("legate module", () => {
         "extra-args",
         "--",
         "--model",
-        "sonnet",
+        "opus",
+        "--effort",
+        "medium",
       ]);
       expect(restart).toEqual([
         "agent-deck",
@@ -1329,8 +1602,33 @@ describe("legate module", () => {
       });
 
       const setModel = result.postSetupCommands[1];
-      expect(setModel[setModel.length - 1]).toBe("claude-opus-4-7");
-      expect(result.summary).toContain("Model:          claude-opus-4-7");
+      // --model is the second-to-last pair now (effort defaults to medium).
+      expect(setModel).toContain("--model");
+      expect(setModel).toContain("claude-opus-4-7");
+      expect(setModel).toContain("--effort");
+      expect(setModel).toContain("medium");
+      expect(result.summary).toContain("Model:          claude-opus-4-7 (effort: medium)");
+    });
+
+    it("respects an explicit --effort override", async () => {
+      const home = makeTmpDir();
+      const tplDir = makeTemplateDir("ok");
+
+      const result = await initLegate({
+        repoPath: "/some/repo/March",
+        homeDir: home,
+        templateDir: tplDir,
+        runSetup: false,
+        effort: "low",
+      });
+
+      const setModel = result.postSetupCommands[1];
+      expect(setModel).toContain("--effort");
+      expect(setModel).toContain("low");
+      // Default model (opus) preserved when only effort is overridden.
+      expect(setModel).toContain("--model");
+      expect(setModel).toContain("opus");
+      expect(result.summary).toContain("Model:          opus (effort: low)");
     });
 
     it("shell-quotes the setup command in the --no-setup summary", async () => {
