@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawnRecordDir } from "../spawn-record.js";
-import { DatabaseSync, type BroodDatabase } from "./sqlite.js";
+import { getDatabaseSync, type BroodDatabase } from "./sqlite.js";
 import type {
   ListSessionsFilter,
   RegisterSessionInput,
@@ -225,6 +225,7 @@ export class SessionStore {
     if (dbPath !== ":memory:") {
       fs.mkdirSync(path.dirname(dbPath), { recursive: true });
     }
+    const DatabaseSync = getDatabaseSync();
     this.db = new DatabaseSync(dbPath);
     if (dbPath !== ":memory:") {
       this.db.exec("PRAGMA journal_mode = WAL;");

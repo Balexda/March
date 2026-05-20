@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { spawnRecordDir } from "../spawn-record.js";
+import { sqliteAvailable } from "./sqlite.js";
 import { SessionStore } from "./store.js";
 
 const tmpDirs: string[] = [];
@@ -24,7 +25,7 @@ afterEach(() => {
   }
 });
 
-describe("SessionStore", () => {
+describe.skipIf(!sqliteAvailable)("SessionStore", () => {
   it("registers a session and reads it back", () => {
     const store = makeStore();
     const rec = store.register({

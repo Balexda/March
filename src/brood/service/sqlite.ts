@@ -2,32 +2,62 @@ import { createRequire } from "node:module";
 import type { DatabaseSync as DatabaseSyncCtor } from "node:sqlite";
 
 /**
- * `node:sqlite` loader that suppresses *only* the one-time ExperimentalWarning
- * Node prints when the module is first loaded.
+ * `node:sqlite` loader.
  *
- * The module is loaded via a runtime `require` rather than a static
- * `import ... from "node:sqlite"` on purpose: a static import is hoisted (and,
- * after tsup/esbuild bundling, hoisted above any sibling code), so the warning
- * would fire before a suppressor could install. Loading it through `require`
- * here — after the `process.emitWarning` patch below — guarantees the
- * suppressor runs first regardless of bundling.
+ * `node:sqlite` is a builtin only on Node >= 22.5 (it throws
+ * `ERR_UNKNOWN_BUILTIN_MODULE` on older runtimes). March's services ship on
+ * node:22 images and `march brood serve` is a container entrypoint, but the
+ * published CLI and CI still run on Node 20 for non-brood commands — so this
+ * module must load WITHOUT throwing at import time. The module is loaded via a
+ * runtime `require` (after the warning suppressor) and any failure is captured;
+ * {@link getDatabaseSync} throws a clear error only when the registry is
+ * actually constructed.
+ *
+ * The runtime `require` (not a static `import ... from "node:sqlite"`) also
+ * keeps the warning suppressor ordered correctly even after tsup/esbuild
+ * bundling, which would otherwise hoist a static import above this code.
  */
-const originalEmitWarning = process.emitWarning.bind(process);
-process.emitWarning = function patchedEmitWarning(
-  warning: string | Error,
-  ...rest: unknown[]
-): void {
-  const message =
-    typeof warning === "string" ? warning : (warning?.message ?? "");
-  if (message.includes("SQLite is an experimental feature")) return;
-  (originalEmitWarning as (...args: unknown[]) => void)(warning, ...rest);
-} as typeof process.emitWarning;
+let databaseSyncImpl: typeof DatabaseSyncCtor | undefined;
+let loadError: Error | undefined;
 
-const nodeRequire = createRequire(import.meta.url);
-const sqlite = nodeRequire("node:sqlite") as typeof import("node:sqlite");
+try {
+  // Suppress only the one-time ExperimentalWarning node:sqlite prints on load.
+  const originalEmitWarning = process.emitWarning.bind(process);
+  process.emitWarning = function patchedEmitWarning(
+    warning: string | Error,
+    ...rest: unknown[]
+  ): void {
+    const message =
+      typeof warning === "string" ? warning : (warning?.message ?? "");
+    if (message.includes("SQLite is an experimental feature")) return;
+    (originalEmitWarning as (...args: unknown[]) => void)(warning, ...rest);
+  } as typeof process.emitWarning;
 
-/** The `node:sqlite` `DatabaseSync` constructor (warning suppressed at load). */
-export const DatabaseSync = sqlite.DatabaseSync;
+  const nodeRequire = createRequire(import.meta.url);
+  databaseSyncImpl = (
+    nodeRequire("node:sqlite") as typeof import("node:sqlite")
+  ).DatabaseSync;
+} catch (err) {
+  loadError = err as Error;
+}
+
+/** True when `node:sqlite` is available (Node >= 22.5). */
+export const sqliteAvailable = databaseSyncImpl !== undefined;
+
+/**
+ * The `node:sqlite` `DatabaseSync` constructor. Throws a clear, actionable
+ * error on a runtime where `node:sqlite` is unavailable.
+ */
+export function getDatabaseSync(): typeof DatabaseSyncCtor {
+  if (!databaseSyncImpl) {
+    throw new Error(
+      "Brood's registry requires node:sqlite (Node >= 22.5). " +
+        "Run `march brood serve` on Node 22 — the container image is node:22. " +
+        `(${loadError?.message ?? "node:sqlite unavailable"})`,
+    );
+  }
+  return databaseSyncImpl;
+}
 
 /** An open `DatabaseSync` instance. */
 export type BroodDatabase = InstanceType<typeof DatabaseSyncCtor>;

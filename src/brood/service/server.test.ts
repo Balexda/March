@@ -1,8 +1,9 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { buildServer } from "./server.js";
+import { sqliteAvailable } from "./sqlite.js";
 import { SessionStore } from "./store.js";
 
-describe("buildServer", () => {
+describe.skipIf(!sqliteAvailable)("buildServer", () => {
   let close: (() => Promise<void>) | undefined;
 
   afterEach(async () => {

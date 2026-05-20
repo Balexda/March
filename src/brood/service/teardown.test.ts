@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { sqliteAvailable } from "./sqlite.js";
 import { broodArchiveDir, SessionStore } from "./store.js";
 import {
   BroodConflictError,
@@ -118,7 +119,7 @@ function seedSpawnGroup(store: SessionStore): {
   return { spawnId, stewardId, worktreePath, branch };
 }
 
-describe("teardownSession", () => {
+describe.skipIf(!sqliteAvailable)("teardownSession", () => {
   it("runs steps in order: archive → container → steward → worktree → branch", async () => {
     const home = makeHome();
     const store = new SessionStore({ dbPath: ":memory:", importSpawnRecords: false });

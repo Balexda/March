@@ -1,6 +1,7 @@
 import Fastify, { type FastifyInstance } from "fastify";
 import { afterEach, describe, expect, it } from "vitest";
 import { registerRoutes } from "./routes.js";
+import { sqliteAvailable } from "./sqlite.js";
 import { SessionStore } from "./store.js";
 import { BroodConflictError, BroodNotFoundError } from "./teardown.js";
 import type { TeardownRequest, TeardownResult } from "./types.js";
@@ -28,7 +29,7 @@ afterEach(async () => {
   while (stores.length) stores.pop()!.close();
 });
 
-describe("brood routes", () => {
+describe.skipIf(!sqliteAvailable)("brood routes", () => {
   it("GET /healthz returns ok", async () => {
     const { app } = await buildApp();
     const res = await app.inject({ method: "GET", url: "/healthz" });
