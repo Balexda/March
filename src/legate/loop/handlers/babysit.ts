@@ -1,0 +1,587 @@
+import type { HandlerContext, HandlerResult, LoopState } from "../state/types.js";
+import { emptyHandlerResult } from "../state/types.js";
+import { prNumber, workerBySessionId } from "../pure/session.js";
+import { hashText } from "../pure/hash.js";
+import {
+  conflictMessage,
+  failedChecksSummary,
+  loginRequiredDetail,
+  loginResumeMessage,
+  reviewFixMessage,
+  threadsNeedingResponse,
+  workerErrorDetail,
+} from "../pure/messages.js";
+
+/**
+ * Babysit: the steward watchdog. For every slice with a live worker session it
+ * reacts to the worker's status and its PR's state — login-block recovery,
+ * worker-error escalation, stranded-steward nudges, PR discovery, conflict /
+ * review-thread / CI handling, and post-dispatch re-nudges for parked workers.
+ *
+ * Two-stage: assess() is PURE. It reads the per-slice PR + recent output that
+ * Stage 1 (senseState) already gathered (the Herald-pushable surface) plus the
+ * cadence counters living on each slice, and emits a flat list of
+ * {@link BabysitDecision}s. apply() performs every send / state mutation /
+ * judgement request and persists. Decisions are emitted in original tick order;
+ * a single slice can yield several (e.g. clear-worker-error + a PR action, or
+ * pr-snapshot + a PR action).
+ */
+
+// Stranded-steward watchdog: a slice stuck in "implementing" with no PR has
+// almost certainly exited mid-workflow. Nudge at 10min, re-nudge every 5min,
+// fire a one-time operator alert at 25min — but keep nudging (giving up strands
+// the slice).
+const STRANDED = { initialNudgeMs: 10 * 60 * 1000, repeatNudgeMs: 5 * 60 * 1000, alertEscalateMs: 25 * 60 * 1000 };
+
+// Post-dispatch stuck-worker watchdog: after sending a /smithy.fix or conflict
+// prompt, a worker that parks in waiting/idle gets the message re-delivered at
+// 5min, every 5min, escalating after 3 unanswered re-nudges (~15min).
+const POST_DISPATCH = { initialNudgeMs: 5 * 60 * 1000, repeatNudgeMs: 5 * 60 * 1000, escalateAfterNudges: 3 };
+
+const STRANDED_MESSAGE = [
+  "[STRANDED-STEWARD-NUDGE] The deterministic loop sees no PR for this slice yet.",
+  "Resume the Hatchery manager workflow where you left off:",
+  "- If you haven't committed yet: run the verification, commit, push, then open the PR.",
+  "- If you've committed but not pushed: 'git push -u origin <branch>'.",
+  "- If you've pushed but not opened the PR: 'gh pr create' with title/body derived from",
+  "  the artifact path and original request.",
+  "",
+  "OVERRIDE: If a repo-local pr-creation skill is gating PR creation on finding a",
+  "linked GitHub issue, SKIP the issue search. Hatchery dispatches do NOT have a",
+  "tracking issue. Compose the PR body without an issue link and run 'gh pr create'",
+  "now. Mention 'No tracking issue (Hatchery autonomous dispatch)' in the body if",
+  "the skill template requires an explanation.",
+  "",
+  "End your turn ONLY after one of:",
+  "  (a) reporting 'PR: <url>' on the final line, or",
+  "  (b) escalating via 'NEED: <summary> -- <next action>'.",
+  "If a previous turn ended after 'git push' without 'gh pr create', that's the stranded-",
+  "steward bug the loop is nudging you out of. Run 'gh pr create' now.",
+].join("\n");
+
+const TERMINAL_RESET_STAGES = ["pr-in-fix", "pr-resolving-conflicts", "pr-rebasing", "pr-in-rerun", "implementing"];
+
+/** A judgement request to fire via {@link BabysitDeps.requestJudgement}. */
+export interface JudgementInput {
+  ts: string;
+  slice: any;
+  requestKey: string;
+  sliceId: string;
+  sessionId: string | null;
+  pr?: any;
+  prNumber?: any;
+  reason: string;
+  detail: string;
+}
+
+/** Side-effect seams (Castra send + the legate-judgement emitter from events). */
+export interface BabysitDeps {
+  /** Send a prompt to a worker session; throws on transport failure. */
+  sendMessage: (sessionId: string, message: string) => void;
+  /** Append + doorbell a judgement request; returns the event, or null if deduped. */
+  requestJudgement: (input: JudgementInput) => any | null;
+}
+
+export type BabysitDecision =
+  | { kind: "login-block"; sliceId: string; sessionId: string; outputHash: string; requestKey: string; detail: string }
+  | { kind: "login-resume-unverifiable"; sliceId: string; sessionId: string; requestKey: string; detail: string }
+  | { kind: "login-resume-send"; sliceId: string; sessionId: string; key: string; message: string }
+  | { kind: "worker-error"; sliceId: string; sessionId: string; requestKey: string; detail: string }
+  | { kind: "clear-worker-error"; sliceId: string }
+  | { kind: "steward-nudge"; sliceId: string; sessionId: string; nudge: boolean; alert: boolean; nextCount: number; detail: string; alertRequestKey: string; alertDetail: string }
+  | { kind: "query-failed"; sliceId: string; sessionId: string; requestKey: string; detail: string; prNumber?: any }
+  | { kind: "pr-snapshot"; sliceId: string; pr: any }
+  | { kind: "discover-pr"; sliceId: string; sessionId: string; pr: any }
+  | { kind: "unknown-pr-state"; sliceId: string; sessionId: string; pr: any; requestKey: string; detail: string }
+  | { kind: "conflict-persisted"; sliceId: string; sessionId: string; pr: any; requestKey: string; detail: string }
+  | { kind: "conflict-fix"; sliceId: string; sessionId: string; pr: any; key: string; message: string }
+  | { kind: "post-dispatch-nudge"; sliceId: string; sessionId: string; pr: any; key: string; count: number; message: string; detail: string }
+  | { kind: "nudge-exhausted"; sliceId: string; sessionId: string; pr: any; requestKey: string; reason: string; detail: string }
+  | { kind: "review-fix"; sliceId: string; sessionId: string; pr: any; key: string; message: string; detail: string }
+  | { kind: "ci-failure"; sliceId: string; sessionId: string; pr: any; requestKey: string; detail: string }
+  | { kind: "pr-open-clear"; sliceId: string; sessionId: string; pr: any };
+
+// ---- pure helpers ---------------------------------------------------------
+
+function actionKey(action: string, pr: any, extra = ""): string {
+  return [action, pr?.number || "", pr?.state || "", pr?.mergeable || "", pr?.checks || "", pr?.head_branch || "", extra].join(":");
+}
+
+function workerErrorRequestKey(sessionId: string, slice: any, recent: any): string {
+  const stage = slice.stage || "unknown";
+  const pr = prNumber(slice) || "none";
+  return `worker-error:${sessionId}:${stage}:${pr}:${hashText(recent.output || recent.error || "")}`;
+}
+
+function hasClaudeLoginBlock(output: any): boolean {
+  const text = String(output || "");
+  return text.includes("Please run /login") || text.includes("API Error: 401 Invalid authentication credentials");
+}
+
+function alreadyDispatched(slice: any, key: string): boolean {
+  return slice.last_processor_action_key === key;
+}
+
+function minutesSince(ts: string, since: string | undefined): number {
+  return Math.round((Date.parse(ts) - Date.parse(since || ts)) / 60000);
+}
+
+/** Pure stranded-steward cadence: whether to nudge / alert this tick. */
+function strandedNudge(slice: any, sessionId: string, ts: string): { nudge: boolean; alert: boolean; nextCount: number } | null {
+  if (slice.stage !== "implementing" || !sessionId) return null;
+  const startedAt = Date.parse(slice.implementing_started_at || slice.last_action || "");
+  const nowMs = Date.parse(ts);
+  if (!Number.isFinite(startedAt) || !Number.isFinite(nowMs)) return null;
+  const elapsed = nowMs - startedAt;
+  if (elapsed < STRANDED.initialNudgeMs) return null;
+  const nudgedAt = Date.parse(slice.steward_nudge_sent_at || "");
+  if (!Number.isFinite(nudgedAt)) return { nudge: true, alert: false, nextCount: 1 };
+  const alert = elapsed >= STRANDED.alertEscalateMs && !slice.steward_stranded_escalated_at;
+  if (nowMs - nudgedAt < STRANDED.repeatNudgeMs) {
+    return alert ? { nudge: false, alert: true, nextCount: slice.steward_nudge_count || 1 } : null;
+  }
+  return { nudge: true, alert, nextCount: (slice.steward_nudge_count || 1) + 1 };
+}
+
+/** Pure post-dispatch cadence: re-nudge a parked worker, or signal escalation. */
+function postDispatchNudge(slice: any, workerStatus: string, ts: string, key: string): { nudge: boolean; escalate: boolean; count: number } {
+  const none = { nudge: false, escalate: false, count: 0 };
+  if (workerStatus !== "waiting" && workerStatus !== "idle") return none;
+  const lastDispatchAt = Date.parse(slice.last_processor_action_at || "");
+  const nowMs = Date.parse(ts);
+  if (!Number.isFinite(lastDispatchAt) || !Number.isFinite(nowMs)) return none;
+  // A new dispatch (different action key) invalidates the prior nudge count.
+  const reset = slice.post_dispatch_nudge_for_key !== key;
+  const count = reset ? 0 : slice.post_dispatch_nudge_count || 0;
+  const sentAt = reset ? NaN : Date.parse(slice.post_dispatch_nudge_sent_at || "");
+  if (nowMs - lastDispatchAt < POST_DISPATCH.initialNudgeMs) return { nudge: false, escalate: false, count };
+  if (count >= POST_DISPATCH.escalateAfterNudges) return { nudge: false, escalate: true, count };
+  if (Number.isFinite(sentAt) && nowMs - sentAt < POST_DISPATCH.repeatNudgeMs) return { nudge: false, escalate: false, count };
+  return { nudge: true, escalate: false, count: count + 1 };
+}
+
+// ---- assess ---------------------------------------------------------------
+
+export function assess(state: LoopState): BabysitDecision[] {
+  const out: BabysitDecision[] = [];
+  const workers = workerBySessionId(state.sessions, state.workerGroup);
+
+  for (const [sliceId, slice] of Object.entries(state.slices) as [string, any][]) {
+    if (!slice || typeof slice !== "object") continue;
+    if (slice.resume_pending === "selected") continue;
+    const sessionId = String(slice.worker_session_id || "");
+    if (!sessionId) continue;
+    const worker = workers.get(sessionId);
+    if (!worker) continue;
+    const workerStatus = worker.status || "other";
+    const ext = state.perSlice[sliceId] || {};
+    const recent = ext.recentOutput || { output: "" };
+
+    // 1. Login block.
+    if (hasClaudeLoginBlock(recent.output)) {
+      const outputHash = hashText(recent.output || recent.error || "");
+      out.push({
+        kind: "login-block",
+        sliceId,
+        sessionId,
+        outputHash,
+        requestKey: `login-required:${sessionId}:${outputHash}`,
+        detail: loginRequiredDetail({ sliceId, slice, sessionId, recent }),
+      });
+      continue;
+    }
+
+    // 2. Login-blocked → maybe resume (output is no longer blocked here).
+    if (slice.login_blocked_at || slice.login_blocked_session_id || slice.login_blocked_reason) {
+      if (recent.error) {
+        out.push({
+          kind: "login-resume-unverifiable",
+          sliceId,
+          sessionId,
+          requestKey: `login-refresh-unknown:${sessionId}:${hashText(recent.error)}`,
+          detail: `Could not read worker output to verify login refresh for ${sliceId}: ${recent.error}`,
+        });
+        continue;
+      }
+      const key = ["login-resume", sessionId, slice.stage || "", prNumber(slice) || "", slice.login_blocked_at || ""].join(":");
+      if (!alreadyDispatched(slice, key)) {
+        out.push({ kind: "login-resume-send", sliceId, sessionId, key, message: loginResumeMessage(sliceId, slice) });
+      }
+      continue;
+    }
+
+    // 3. Worker error.
+    if (workerStatus === "error") {
+      out.push({
+        kind: "worker-error",
+        sliceId,
+        sessionId,
+        requestKey: workerErrorRequestKey(sessionId, slice, recent),
+        detail: workerErrorDetail({ sliceId, slice, worker, sessionId, recent }),
+      });
+      continue;
+    }
+
+    // 4. Clear a stale worker-error marker (bookkeeping; not terminal).
+    if (slice.worker_error_last_seen_at) out.push({ kind: "clear-worker-error", sliceId });
+
+    // 5. Running workers are healthy — nothing to do.
+    if (workerStatus === "running") continue;
+
+    // 6. PR logic.
+    evaluatePr(state, sliceId, slice, sessionId, workerStatus, ext, out);
+  }
+  return out;
+}
+
+function evaluatePr(
+  state: LoopState,
+  sliceId: string,
+  slice: any,
+  sessionId: string,
+  workerStatus: string,
+  ext: { pr?: any },
+  out: BabysitDecision[],
+): void {
+  const ts = state.ts;
+  let pr: any = null;
+  let discovered = false;
+
+  if (!slice.pr && slice.stage === "implementing" && (workerStatus === "waiting" || workerStatus === "idle")) {
+    const cand = ext.pr;
+    if (cand && !cand.skipped && !cand.error && cand.number) {
+      pr = cand;
+      discovered = true;
+      out.push({ kind: "discover-pr", sliceId, sessionId, pr });
+    }
+  }
+
+  if (!pr) {
+    if (!slice.pr) {
+      // Stranded-steward watchdog.
+      const sd = strandedNudge(slice, sessionId, ts);
+      if (sd && (sd.nudge || sd.alert)) {
+        out.push({
+          kind: "steward-nudge",
+          sliceId,
+          sessionId,
+          nudge: sd.nudge,
+          alert: sd.alert,
+          nextCount: sd.nextCount,
+          detail: "sent stranded-steward nudge (count " + sd.nextCount + ") — implementing for " + minutesSince(ts, slice.implementing_started_at) + "min with no PR",
+          alertRequestKey: actionKey("steward-stranded", { number: 0 }, "alert"),
+          alertDetail: "Slice has been in 'implementing' for >" + STRANDED.alertEscalateMs / 60000 + "min with no PR. The watchdog is still re-nudging every 5 min; operator can manually inspect the worktree at " + (slice.worktree_path || "(unknown)") + " and run 'gh pr create' if the steward is genuinely stuck.",
+        });
+      }
+      return;
+    }
+    const queried = ext.pr;
+    if (!queried || queried.error) {
+      if (queried && queried.error) {
+        out.push({
+          kind: "query-failed",
+          sliceId,
+          sessionId,
+          requestKey: actionKey("query-failed", slice.pr || {}, "query"),
+          detail: queried.error,
+          prNumber: slice.pr?.number,
+        });
+      }
+      return;
+    }
+    if (queried.skipped) return;
+    pr = queried;
+    out.push({ kind: "pr-snapshot", sliceId, pr });
+  }
+
+  if (pr.state === "MERGED" || pr.state === "CLOSED") return;
+  if (pr.state !== "OPEN") {
+    out.push({ kind: "unknown-pr-state", sliceId, sessionId, pr, requestKey: actionKey("unknown-pr-state", pr), detail: `state=${pr.state}` });
+    return;
+  }
+
+  // Evaluate threads/stage as the worker would see them post-discovery.
+  const evalSlice = discovered ? { ...slice, stage: "pr-open", pr_open_at: ts } : slice;
+
+  if (pr.mergeable === "CONFLICTING") {
+    if (slice.stage === "pr-resolving-conflicts") {
+      out.push({
+        kind: "conflict-persisted",
+        sliceId,
+        sessionId,
+        pr,
+        requestKey: actionKey("conflict-persisted", pr),
+        detail: `PR #${pr.number} is still CONFLICTING after the processor previously sent a conflict-resolution prompt. Legate judgement is required before repeating recovery.`,
+      });
+      return;
+    }
+    const key = actionKey("conflict-fix", pr);
+    if (alreadyDispatched(slice, key)) {
+      const nd = postDispatchNudge(slice, workerStatus, ts, key);
+      if (nd.nudge) {
+        out.push({
+          kind: "post-dispatch-nudge",
+          sliceId,
+          sessionId,
+          pr,
+          key,
+          count: nd.count,
+          message: conflictMessage(slice, pr, state.raw),
+          detail: `re-sent conflict-fix prompt (nudge ${nd.count}/${POST_DISPATCH.escalateAfterNudges}) — worker ${workerStatus}`,
+        });
+      } else if (nd.escalate) {
+        out.push({
+          kind: "nudge-exhausted",
+          sliceId,
+          sessionId,
+          pr,
+          requestKey: actionKey("conflict-nudges-exhausted", pr, key),
+          reason: "worker_unresponsive_after_conflict_fix",
+          detail: `Sent ${nd.count} conflict-fix nudges to PR #${pr.number} worker (session ${sessionId}); still ${workerStatus}. Operator should attach and inspect.`,
+        });
+      }
+      return;
+    }
+    out.push({ kind: "conflict-fix", sliceId, sessionId, pr, key, message: conflictMessage(slice, pr, state.raw) });
+    return;
+  }
+
+  const neededThreads = threadsNeedingResponse(evalSlice, pr);
+  if (neededThreads.length > 0) {
+    const key = actionKey("review-fix", pr, neededThreads.map((t: any) => `${t.id || ""}@${t.last_comment_at || ""}`).join(","));
+    if (alreadyDispatched(slice, key)) {
+      const nd = postDispatchNudge(slice, workerStatus, ts, key);
+      if (nd.nudge) {
+        out.push({
+          kind: "post-dispatch-nudge",
+          sliceId,
+          sessionId,
+          pr,
+          key,
+          count: nd.count,
+          message: reviewFixMessage(pr, neededThreads),
+          detail: `re-sent /smithy.fix (nudge ${nd.count}/${POST_DISPATCH.escalateAfterNudges}) — worker ${workerStatus} ${minutesSince(ts, slice.last_processor_action_at)}min after dispatch`,
+        });
+      } else if (nd.escalate) {
+        out.push({
+          kind: "nudge-exhausted",
+          sliceId,
+          sessionId,
+          pr,
+          requestKey: actionKey("review-nudges-exhausted", pr, key),
+          reason: "worker_unresponsive_after_review_fix",
+          detail: `Sent ${nd.count} /smithy.fix nudges to PR #${pr.number} worker (session ${sessionId}) and still ${workerStatus} with ${neededThreads.length} thread(s) needing response. Likely parked at a permission prompt or a stuck spinner. Operator should attach and inspect, or close the slice if the worker is unrecoverable.`,
+        });
+      }
+      return;
+    }
+    out.push({
+      kind: "review-fix",
+      sliceId,
+      sessionId,
+      pr,
+      key,
+      message: reviewFixMessage(pr, neededThreads),
+      detail: `sent /smithy.fix for ${neededThreads.length} review thread(s)`,
+    });
+    return;
+  }
+
+  if (pr.checks === "FAIL") {
+    out.push({
+      kind: "ci-failure",
+      sliceId,
+      sessionId,
+      pr,
+      requestKey: actionKey("ci-failure", pr, (pr.failed_checks || []).map((c: any) => `${c.name}:${c.url || ""}`).join(",")),
+      detail: `PR #${pr.number} has failing CI. The deterministic loop cannot distinguish stale-main, transient flake, and real PR-diff failure safely. Failed checks:\n${failedChecksSummary(pr)}`,
+    });
+    return;
+  }
+
+  if (pr.checks === "PASS" && pr.needs_response_count === 0 && pr.mergeable !== "CONFLICTING") {
+    if (TERMINAL_RESET_STAGES.includes(slice.stage)) {
+      out.push({ kind: "pr-open-clear", sliceId, sessionId, pr });
+    }
+    return;
+  }
+  // PENDING / UNKNOWN: nothing to do this tick.
+}
+
+// ---- apply ----------------------------------------------------------------
+
+function mark(slice: any, action: string, key: string, note: string, ts: string): void {
+  slice.last_processor_action = action;
+  slice.last_processor_action_key = key;
+  slice.last_processor_action_at = ts;
+  slice.last_action = ts;
+  slice.last_action_note = note;
+}
+
+function snapshot(slice: any, pr: any): void {
+  slice.pr = { number: pr.number, url: pr.url, state: pr.state, checks: pr.checks, mergeable: pr.mergeable };
+  if (pr.head_branch) slice.actual_branch = pr.head_branch;
+  slice.thread_count = pr.thread_count;
+  slice.needs_response_count = pr.needs_response_count;
+  slice.unresolved_threads = pr.unresolved_threads;
+}
+
+function clearLoginBlocked(slice: any): void {
+  delete slice.login_blocked_at;
+  delete slice.login_blocked_session_id;
+  delete slice.login_blocked_reason;
+  delete slice.login_blocked_output_hash;
+}
+
+export function apply(decisions: BabysitDecision[], ctx: HandlerContext, state: LoopState, deps: BabysitDeps): HandlerResult {
+  const res = emptyHandlerResult();
+  const ts = ctx.ts;
+  const fireRequest = (input: JudgementInput): void => {
+    const event = deps.requestJudgement(input);
+    if (event) {
+      res.requests.push(event);
+      res.mutated = true;
+    }
+  };
+
+  for (const d of decisions) {
+    const slice = state.slices[d.sliceId];
+    if (!slice) continue;
+
+    switch (d.kind) {
+      case "login-block": {
+        if (!slice.login_blocked_at) slice.login_blocked_at = ts;
+        slice.login_blocked_session_id = d.sessionId;
+        slice.login_blocked_reason = "claude_api_401_login_required";
+        slice.login_blocked_output_hash = d.outputHash;
+        slice.last_action = ts;
+        slice.last_action_note = "worker blocked on Claude Code login refresh";
+        fireRequest({ ts, slice, requestKey: d.requestKey, sliceId: d.sliceId, sessionId: d.sessionId, pr: slice.pr || null, reason: "claude_api_401_login_required", detail: d.detail });
+        res.mutated = true;
+        break;
+      }
+      case "login-resume-unverifiable":
+        fireRequest({ ts, slice, requestKey: d.requestKey, sliceId: d.sliceId, sessionId: d.sessionId, pr: slice.pr || null, reason: "could not verify Claude login refresh", detail: d.detail });
+        break;
+      case "login-resume-send": {
+        try {
+          deps.sendMessage(d.sessionId, d.message);
+        } catch (err: any) {
+          fireRequest({ ts, slice, requestKey: `login-resume-send-failed:${d.sessionId}:${slice.login_blocked_at || ""}`, sliceId: d.sliceId, sessionId: d.sessionId, pr: slice.pr || null, reason: "processor failed to send login-refresh resume prompt", detail: err?.message || String(err) });
+          break;
+        }
+        clearLoginBlocked(slice);
+        mark(slice, "login-resume", d.key, "processor sent login-refresh resume prompt", ts);
+        res.actions.push({ action: "login-resume", sliceId: d.sliceId, sessionId: d.sessionId, pr: slice.pr || null, detail: "sent resume prompt after Claude login refresh" });
+        res.mutated = true;
+        break;
+      }
+      case "worker-error": {
+        if (!slice.worker_error_detected_at) slice.worker_error_detected_at = ts;
+        slice.worker_error_last_seen_at = ts;
+        fireRequest({ ts, slice, requestKey: d.requestKey, sliceId: d.sliceId, sessionId: d.sessionId, pr: slice.pr || null, reason: "worker_session_error", detail: d.detail });
+        res.mutated = true;
+        break;
+      }
+      case "clear-worker-error":
+        delete slice.worker_error_detected_at;
+        delete slice.worker_error_last_seen_at;
+        res.mutated = true;
+        break;
+      case "steward-nudge": {
+        if (d.nudge) {
+          try {
+            deps.sendMessage(d.sessionId, STRANDED_MESSAGE);
+            slice.steward_nudge_sent_at = ts;
+            slice.steward_nudge_count = d.nextCount;
+          } catch {
+            // send failed — leave counters; next tick retries.
+          }
+        }
+        if (d.alert) {
+          slice.steward_stranded_escalated_at = ts;
+          fireRequest({ ts, slice, requestKey: d.alertRequestKey, sliceId: d.sliceId, sessionId: d.sessionId, reason: "steward stranded after dispatch (watchdog still nudging)", detail: d.alertDetail });
+        }
+        res.actions.push({ action: "steward-nudge", sliceId: d.sliceId, sessionId: d.sessionId, detail: d.detail });
+        res.mutated = true;
+        break;
+      }
+      case "query-failed":
+        fireRequest({ ts, slice, requestKey: d.requestKey, sliceId: d.sliceId, sessionId: d.sessionId, prNumber: d.prNumber, reason: "processor could not query PR state", detail: d.detail });
+        break;
+      case "pr-snapshot":
+        snapshot(slice, d.pr);
+        res.mutated = true;
+        break;
+      case "discover-pr":
+        snapshot(slice, d.pr);
+        slice.stage = "pr-open";
+        slice.pr_open_at = ts;
+        mark(slice, "discover-pr", actionKey("discover-pr", d.pr), "processor discovered PR", ts);
+        res.actions.push({ action: "discover-pr", sliceId: d.sliceId, sessionId: d.sessionId, pr: d.pr, detail: "discovered worker PR" });
+        res.mutated = true;
+        break;
+      case "unknown-pr-state":
+        fireRequest({ ts, slice, requestKey: d.requestKey, sliceId: d.sliceId, sessionId: d.sessionId, pr: d.pr, reason: "unknown PR state", detail: d.detail });
+        break;
+      case "conflict-persisted":
+        fireRequest({ ts, slice, requestKey: d.requestKey, sliceId: d.sliceId, sessionId: d.sessionId, pr: d.pr, reason: "merge conflict persisted after processor prompt", detail: d.detail });
+        break;
+      case "conflict-fix": {
+        try {
+          deps.sendMessage(d.sessionId, d.message);
+        } catch (err: any) {
+          fireRequest({ ts, slice, requestKey: actionKey("conflict-send-failed", d.pr), sliceId: d.sliceId, sessionId: d.sessionId, pr: d.pr, reason: "processor failed to send conflict-resolution prompt", detail: err?.message || String(err) });
+          break;
+        }
+        slice.stage = "pr-resolving-conflicts";
+        mark(slice, "conflict-fix", d.key, "processor sent conflict-resolution fix", ts);
+        res.actions.push({ action: "conflict-fix", sliceId: d.sliceId, sessionId: d.sessionId, pr: d.pr, detail: "sent conflict-resolution prompt" });
+        res.mutated = true;
+        break;
+      }
+      case "post-dispatch-nudge": {
+        try {
+          deps.sendMessage(d.sessionId, d.message);
+        } catch {
+          break;
+        }
+        slice.post_dispatch_nudge_for_key = d.key;
+        slice.post_dispatch_nudge_sent_at = ts;
+        slice.post_dispatch_nudge_count = d.count;
+        res.actions.push({ action: "post-dispatch-nudge", sliceId: d.sliceId, sessionId: d.sessionId, pr: d.pr, detail: d.detail });
+        res.mutated = true;
+        break;
+      }
+      case "nudge-exhausted":
+        fireRequest({ ts, slice, requestKey: d.requestKey, sliceId: d.sliceId, sessionId: d.sessionId, pr: d.pr, reason: d.reason, detail: d.detail });
+        break;
+      case "review-fix": {
+        try {
+          deps.sendMessage(d.sessionId, d.message);
+        } catch (err: any) {
+          fireRequest({ ts, slice, requestKey: actionKey("review-send-failed", d.pr, d.key), sliceId: d.sliceId, sessionId: d.sessionId, pr: d.pr, reason: "processor failed to send review-thread /smithy.fix", detail: err?.message || String(err) });
+          break;
+        }
+        slice.stage = "pr-in-fix";
+        mark(slice, "review-fix", d.key, "processor sent review-thread /smithy.fix", ts);
+        res.actions.push({ action: "review-fix", sliceId: d.sliceId, sessionId: d.sessionId, pr: d.pr, detail: d.detail });
+        res.mutated = true;
+        break;
+      }
+      case "ci-failure":
+        fireRequest({ ts, slice, requestKey: d.requestKey, sliceId: d.sliceId, sessionId: d.sessionId, pr: d.pr, reason: "CI failure requires Legate judgement", detail: d.detail });
+        break;
+      case "pr-open-clear":
+        slice.stage = "pr-open";
+        slice.pr_open_at = ts;
+        mark(slice, "pr-open", actionKey("pr-open", d.pr), "processor observed PR all clear", ts);
+        res.actions.push({ action: "pr-open", sliceId: d.sliceId, sessionId: d.sessionId, pr: d.pr, detail: "observed PR all clear" });
+        res.mutated = true;
+        break;
+    }
+  }
+
+  if (res.mutated) ctx.persist(state);
+  return res;
+}

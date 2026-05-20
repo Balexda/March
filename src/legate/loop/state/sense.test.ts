@@ -97,6 +97,25 @@ describe("senseState (Stage 1)", () => {
     expect(sessionOutput).toHaveBeenCalledWith("s1");
   });
 
+  it("discovers a PR for an implementing slice when queryPr skips", () => {
+    const discoverPr = vi.fn(() => ({ number: 42, state: "OPEN" }));
+    const state = senseState(
+      deps({
+        readStateJson: () => ({
+          repo: { path: "/repo" },
+          slices: { impl: { worker_session_id: "s1", stage: "implementing" } },
+          archived_slices: {},
+        }),
+        listSessions: () => [{ id: "s1", group: "legate-workers", status: "idle" }],
+        queryPr: () => ({ skipped: true }),
+        discoverPr,
+        sessionOutput: () => ({ output: "" }),
+      }),
+    );
+    expect(discoverPr).toHaveBeenCalledWith(expect.anything(), expect.anything(), "/repo", "s1");
+    expect(state.perSlice.impl!.pr).toMatchObject({ number: 42 });
+  });
+
   it("emits a sync warning but still reads smithy when sync throws", () => {
     const warn = vi.fn();
     const state = senseState(

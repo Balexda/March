@@ -24,6 +24,8 @@ export interface SenseDeps {
   readonly readSmithyStatus: (repoPath: string) => any;
   /** Per-slice PR state (queryPrForBabysit) for an active slice. */
   readonly queryPr: (slice: any, state: any, repoPath: string | undefined) => any;
+  /** Branch/output-based PR discovery for an implementing slice with no PR yet. */
+  readonly discoverPr?: (slice: any, state: any, repoPath: string | undefined, sessionId: string) => any;
   /** Recent session output for login/error detection. */
   readonly sessionOutput: (sessionId: string) => { output: string; error?: string };
   /** Sink for non-fatal sync/sense warnings (so they surface in the action log). */
@@ -97,7 +99,14 @@ export function senseState(deps: SenseDeps): LoopState {
       if (isTerminalSlice(slice)) continue;
       const entry: SliceExternalState = {};
       try {
-        entry.pr = deps.queryPr(slice, raw, repoPath);
+        let pr = deps.queryPr(slice, raw, repoPath);
+        // Implementing slice with no PR yet: queryPr skips (no number to query),
+        // so fall back to branch/output-based discovery — Stage 1 owns the read
+        // so babysit's assess can treat "discovered" and "queried" uniformly.
+        if ((!pr || pr.skipped) && slice.stage === "implementing" && !slice.pr?.number && deps.discoverPr) {
+          pr = deps.discoverPr(slice, raw, repoPath, sessionId) ?? pr;
+        }
+        entry.pr = pr;
       } catch (err: any) {
         entry.pr = { error: err?.message || String(err) };
       }
