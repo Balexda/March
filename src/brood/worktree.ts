@@ -252,58 +252,86 @@ function isGitLinkedWorktree(dir: string): boolean {
 }
 
 /**
- * Removes a spawn's worktree and branch. Used by the dispatch action to
- * roll back when a later pipeline stage fails. Does not throw — cleanup
- * errors are tracked per artifact, and a single stderr warning is
- * emitted at the end listing anything that may still exist so operators
- * know manual cleanup may be required (FR-021).
+ * Result of {@link removeSpawnWorktreeExact}: whether the worktree directory
+ * and the branch are gone at the end of the call.
+ */
+export interface RemoveWorktreeResult {
+  readonly worktreeRemoved: boolean;
+  readonly branchDeleted: boolean;
+}
+
+/**
+ * Removes a spawn's worktree and/or branch by EXACT identifier — the only
+ * removal path brood teardown uses.
  *
- * Safety: the filesystem fallback only `rmSync`s the worktree directory
- * if it looks like a git-linked worktree (contains a `.git` file
- * pointing back at the parent repo). This prevents accidental deletion
- * of pre-existing user data if the target path was never actually
- * populated by git.
+ * Safety (issue #155): this NEVER runs `git worktree prune`. A blanket prune
+ * scans every worktree the repo knows about and deletes the admin entry of any
+ * whose checkout it cannot see — which, inside a container that doesn't have
+ * sibling worktrees mounted, corrupts unrelated host worktrees. This function
+ * only ever touches the one `worktreePath` it was handed (via
+ * `git worktree remove --force <exact path>`, with a `.git`-guarded `fs.rmSync`
+ * fallback) and the one named `branch`. Omitted fields are treated as already
+ * removed. Does not throw — the caller inspects the returned flags.
+ */
+export function removeSpawnWorktreeExact(
+  repoRoot: string,
+  target: { readonly worktreePath?: string; readonly branch?: string },
+): RemoveWorktreeResult {
+  const worktreeRemoved = target.worktreePath
+    ? removeWorktreePathExact(repoRoot, target.worktreePath)
+    : true;
+  const branchDeleted = target.branch
+    ? deleteBranch(repoRoot, target.branch)
+    : true;
+  return { worktreeRemoved, branchDeleted };
+}
+
+/**
+ * Removes a single worktree by its exact path. Idempotent (a missing path is
+ * already "removed"). Tries `git worktree remove --force <path>` first; on
+ * failure, falls back to `fs.rmSync` only when the directory still looks like a
+ * git-linked worktree. Never enumerates or prunes other worktrees.
+ */
+function removeWorktreePathExact(
+  repoRoot: string,
+  worktreePath: string,
+): boolean {
+  if (!fs.existsSync(worktreePath)) return true;
+  try {
+    execFileSync("git", ["worktree", "remove", "--force", worktreePath], {
+      cwd: repoRoot,
+      stdio: "ignore",
+    });
+    return true;
+  } catch {
+    // Only rmSync the directory if it actually looks like a git worktree.
+    // This avoids clobbering unrelated user data that happens to live at the
+    // target path. We deliberately do NOT `git worktree prune` here (#155).
+    if (isGitLinkedWorktree(worktreePath)) {
+      try {
+        fs.rmSync(worktreePath, { recursive: true, force: true });
+      } catch {
+        // swallowed — outcome reported via the existsSync check below
+      }
+    }
+    return !fs.existsSync(worktreePath);
+  }
+}
+
+/**
+ * Removes a spawn's worktree and branch during dispatch rollback. Delegates to
+ * {@link removeSpawnWorktreeExact} (which never prunes) and emits a single
+ * stderr warning listing anything that may still exist so operators know manual
+ * cleanup may be required (FR-021).
  */
 export function removeSpawnWorktree(
   repoRoot: string,
   worktree: SpawnWorktree,
 ): void {
-  // Try `git worktree remove --force` first; fall back to a filesystem
-  // rm + `git worktree prune` if git refuses (e.g., because the worktree
-  // directory is in a partial state after a hook-failed worktree add).
-  let worktreeRemoved = false;
-  try {
-    execFileSync(
-      "git",
-      ["worktree", "remove", "--force", worktree.worktreePath],
-      { cwd: repoRoot, stdio: "ignore" },
-    );
-    worktreeRemoved = true;
-  } catch {
-    // Only rmSync the directory if it actually looks like a git worktree.
-    // This avoids clobbering unrelated user data that happens to live at
-    // the target path.
-    if (isGitLinkedWorktree(worktree.worktreePath)) {
-      try {
-        fs.rmSync(worktree.worktreePath, { recursive: true, force: true });
-      } catch {
-        // swallowed — state tracked in worktreeRemoved below
-      }
-    }
-    try {
-      execFileSync("git", ["worktree", "prune"], {
-        cwd: repoRoot,
-        stdio: "ignore",
-      });
-    } catch {
-      // ignore
-    }
-    // The fallback succeeded if the target path is now gone (or was
-    // never materialized in the first place).
-    worktreeRemoved = !fs.existsSync(worktree.worktreePath);
-  }
-
-  const branchDeleted = deleteBranch(repoRoot, worktree.branch);
+  const { worktreeRemoved, branchDeleted } = removeSpawnWorktreeExact(repoRoot, {
+    worktreePath: worktree.worktreePath,
+    branch: worktree.branch,
+  });
 
   if (!worktreeRemoved || !branchDeleted) {
     warnIncompleteRollback(

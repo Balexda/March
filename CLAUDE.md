@@ -27,6 +27,16 @@ Quick pointers:
   `src/hatchery/service/` runs the spawn flow; `march hatchery spawn` is a thin
   HTTP client. Image/compose: `docker/hatchery.Dockerfile`,
   `docker/hatchery.docker-compose.yml`.
+- **Brood is a containerized service:** `march brood serve` (Fastify) under
+  `src/brood/service/` is the session-state + lifecycle/teardown authority — it
+  tracks every spawn/steward/legate in a sqlite registry (`~/.march/brood`) and
+  **owns teardown**: it removes the container, asks castra (or agent-deck) to
+  remove the steward, then removes the worktree/branch by **exact tracked path —
+  never a blanket `git worktree prune`** (issue #155). The Hatchery service
+  registers spawns with it; the legate loop **requests** teardown via
+  `march brood teardown` instead of pruning. Image/compose:
+  `docker/brood.Dockerfile`, `docker/brood.docker-compose.yml`. Set
+  `MARCH_BROOD_URL` so producers/consumers reach it.
 
 ## Verification
 

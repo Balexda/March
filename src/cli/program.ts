@@ -662,6 +662,112 @@ castra
     }
   });
 
+const brood = program
+  .command("brood")
+  .description("Manage Brood session lifecycle (state + teardown)");
+
+brood
+  .command("serve")
+  .description("Run the Brood service (HTTP API). Container entrypoint.")
+  .option(
+    "--port <port>",
+    "Port to listen on (default: MARCH_BROOD_PORT or the deterministic 8800–9799 port)",
+  )
+  .option("--host <host>", "Bind host (default 0.0.0.0)")
+  .action(async (opts: { port?: string; host?: string }) => {
+    commandHandled = true;
+    const { startServer } = await import("../brood/service/server.js");
+    const port = opts.port ? Number(opts.port) : undefined;
+    // Resolves only when the service shuts down (SIGTERM/SIGINT).
+    await startServer({ port, host: opts.host });
+    process.exitCode = SUCCESS;
+  });
+
+brood
+  .command("teardown <id>")
+  .description(
+    "Tear down a session (container, steward, worktree, branch) via Brood",
+  )
+  .option("--force", "Tear down even a running spawn")
+  .option("--kill", "SIGKILL the container instead of graceful stop")
+  .option("--reason <reason>", "Reason recorded on the torn-down session")
+  .action(
+    async (
+      id: string,
+      opts: { force?: boolean; kill?: boolean; reason?: string },
+    ) => {
+      commandHandled = true;
+      const { BroodClient, BroodClientError, BroodNotFoundError } = await import(
+        "../brood/service/client.js"
+      );
+      try {
+        const result = await new BroodClient().teardown(id, {
+          force: opts.force,
+          kill: opts.kill,
+          reason: opts.reason,
+        });
+        for (const step of result.steps) {
+          console.log(
+            `${step.step}: ${step.outcome}${step.detail ? ` (${step.detail})` : ""}`,
+          );
+        }
+        for (const warning of result.warnings) {
+          process.stderr.write(`warning: ${warning}\n`);
+        }
+        process.exitCode = SUCCESS;
+      } catch (err) {
+        if (err instanceof BroodNotFoundError) {
+          // Idempotent: nothing tracked under this id — nothing to tear down.
+          console.log(`Session "${id}" is not tracked by Brood; nothing to tear down.`);
+          process.exitCode = SUCCESS;
+          return;
+        }
+        const message =
+          err instanceof BroodClientError
+            ? err.message
+            : (err as Error).message;
+        process.stderr.write(message + "\n");
+        process.exitCode = ERROR;
+      }
+    },
+  );
+
+brood
+  .command("list")
+  .description("List sessions Brood is tracking")
+  .option("--kind <kind>", "Filter by kind: spawn | steward | legate")
+  .option("--status <status>", "Filter by status")
+  .option("--json", "Print the session list as JSON")
+  .action(async (opts: { kind?: string; status?: string; json?: boolean }) => {
+    commandHandled = true;
+    const { BroodClient, BroodClientError } = await import(
+      "../brood/service/client.js"
+    );
+    try {
+      const sessions = await new BroodClient().list({
+        kind: opts.kind as never,
+        status: opts.status as never,
+      });
+      if (opts.json) {
+        console.log(JSON.stringify(sessions, null, 2));
+      } else if (sessions.length === 0) {
+        console.log("No sessions tracked.");
+      } else {
+        for (const s of sessions) {
+          console.log(
+            `${s.id}\t${s.kind}\t${s.status}\t${s.branch ?? ""}\t${s.containerId ?? ""}`,
+          );
+        }
+      }
+      process.exitCode = SUCCESS;
+    } catch (err) {
+      const message =
+        err instanceof BroodClientError ? err.message : (err as Error).message;
+      process.stderr.write(message + "\n");
+      process.exitCode = ERROR;
+    }
+  });
+
 program
   .command("spawn [subcommand]")
   .description("Spawn a new environment")

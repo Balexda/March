@@ -351,7 +351,14 @@ describe("legate module", () => {
       expect(loop).toContain("function formatCleanupLine");
       expect(loop).toContain("${prefix}cleaned up");
       expect(loop).toContain('list", "-json"');
-      expect(loop).toContain('"session", "remove", sessionId, "--prune-worktree", "--force"');
+      // #155: the loop must REQUEST teardown via brood and must never run a
+      // blanket worktree prune itself. The agent-deck fallback removes only the
+      // session, WITHOUT --prune-worktree.
+      expect(loop).not.toContain('"--prune-worktree"');
+      expect(loop).toContain("function requestBroodTeardown");
+      expect(loop).toContain('[cliPath, "brood", "teardown", sessionId, "--force"]');
+      expect(loop).toContain("meta.brood_endpoint");
+      expect(loop).toContain('"session", "remove", sessionId, "--force"');
       expect(loop).toContain('terminalState !== "MERGED" && terminalState !== "CLOSED"');
       expect(loop).toContain('reason: "session_not_found"');
       expect(loop).toContain('terminal_state: terminalState');

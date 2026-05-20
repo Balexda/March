@@ -32,6 +32,7 @@ import {
   SpawnRecordError,
   updateSpawnRecordImageId,
   updateSpawnRecordPrompt,
+  updateSpawnRecordStewardSession,
   writeInitialSpawnRecord,
 } from "../brood/spawn-record.js";
 import { startDispatchSpan } from "../observability/spawn-trace.js";
@@ -557,6 +558,9 @@ export async function runHatcherySpawn(
       backend: input.backend.name,
     }, input.homeDir);
     updateSpawnRecordPrompt(spawnId, spawnPrompt, input.homeDir);
+    // Record the steward<->spawn link so Brood (and a standalone
+    // `march brood teardown`) can address the steward during teardown.
+    updateSpawnRecordStewardSession(spawnId, manager.sessionId, input.homeDir);
 
     const handle = createBuildContext(manager.worktreePath);
     try {

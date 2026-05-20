@@ -59,6 +59,17 @@ export interface SpawnRecord {
   startedAt?: string;
   stoppedAt?: string;
   timedOut?: boolean;
+  /**
+   * agent-deck session id of the steward launched for this spawn. Populated by
+   * the Hatchery handoff so Brood can address the steward during teardown.
+   * Forward-compatible (no `version` bump).
+   */
+  stewardSessionId?: string;
+  /**
+   * Human-readable failure context. Populated by {@link markSpawnRecordFailed}
+   * from its `error` argument. Forward-compatible (no `version` bump).
+   */
+  failureReason?: string;
 }
 
 /** Inputs required to write the initial `"created"` spawn record. */
@@ -158,6 +169,23 @@ export function writeInitialSpawnRecord(
     );
   }
   return record;
+}
+
+/**
+ * Public reader: load a SpawnRecord by id, returning `undefined` if the file is
+ * absent or unreadable (rather than throwing). Used by cross-component callers
+ * (e.g. Brood registration) that want best-effort access to the persisted
+ * record.
+ */
+export function loadSpawnRecord(
+  id: string,
+  homeDir?: string,
+): SpawnRecord | undefined {
+  try {
+    return readSpawnRecord(id, homeDir);
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -281,14 +309,32 @@ export function updateSpawnRecordPrompt(
 }
 
 /**
+ * Records the agent-deck steward session id launched for this spawn, so Brood
+ * can address the steward during teardown. Atomic write (temp file + rename).
+ *
+ * @throws {SpawnRecordError} If the source record is missing, unreadable, or
+ *   the atomic write fails.
+ */
+export function updateSpawnRecordStewardSession(
+  id: string,
+  stewardSessionId: string,
+  homeDir?: string,
+): SpawnRecord {
+  const existing = readSpawnRecord(id, homeDir);
+  const updated: SpawnRecord = {
+    ...existing,
+    stewardSessionId,
+  };
+  atomicWriteSpawnRecord(spawnRecordPath(id, homeDir), updated);
+  return updated;
+}
+
+/**
  * Options accepted by {@link markSpawnRecordFailed}.
  *
- * Note: `error` is currently dropped because the SpawnRecord data model
- * has no slot for an error message. The argument is accepted today so
- * callers (e.g., the dispatch rollback path in Story 4 task 4) can pass
- * a contextual message without the call site changing when the data
- * model gains a `failureReason` (or similar) field. When that slot is
- * added, this helper should persist the message into the new field.
+ * `error` is persisted to the record's {@link SpawnRecord.failureReason} field
+ * so downstream consumers (Brood `inspect`, the teardown archive) can surface
+ * *why* a spawn failed instead of a bare `failed` status.
  */
 export interface MarkSpawnRecordFailedOptions {
   error?: string;
@@ -302,7 +348,7 @@ export interface MarkSpawnRecordFailedOptions {
  * build, or `imageId` record-update failure) and Story 5's failure
  * paths (container launch or `containerId` record-update failure).
  *
- * The optional `error` argument is currently dropped — see
+ * The optional `error` argument is persisted to `failureReason` — see
  * {@link MarkSpawnRecordFailedOptions}.
  *
  * Atomic write (temp file + rename); a crash mid-write cannot corrupt
@@ -316,16 +362,12 @@ export function markSpawnRecordFailed(
   options?: MarkSpawnRecordFailedOptions,
   homeDir?: string,
 ): SpawnRecord {
-  // The `error` field on `options` is accepted for forward compatibility
-  // but currently dropped — see the JSDoc on
-  // `MarkSpawnRecordFailedOptions`.
-  void options;
-
   const existing = readSpawnRecord(id, homeDir);
   const updated: SpawnRecord = {
     ...existing,
     status: "failed",
     stoppedAt: new Date().toISOString(),
+    ...(options?.error ? { failureReason: options.error } : {}),
   };
   atomicWriteSpawnRecord(spawnRecordPath(id, homeDir), updated);
   return updated;
