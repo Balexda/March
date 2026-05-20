@@ -15,6 +15,8 @@ import {
   buildLegateContainerRunArgs,
   ensureLegateContainer,
   HatcheryError,
+  LEGATE_AGENT_DECK_TARGET,
+  LEGATE_BASE_IMAGE,
   LEGATE_CONTAINER_HOME,
   LEGATE_IMAGE_TAG,
   LEGATE_LOOP_CONTAINER_PORT,
@@ -24,7 +26,6 @@ import {
   renderLegateDockerfile,
   writeLegateDockerfile,
 } from "./legate-container.js";
-import { BASE_IMAGE } from "./spawn-config.js";
 
 describe("legate-container", () => {
   const tmpDirs: string[] = [];
@@ -54,9 +55,11 @@ describe("legate-container", () => {
     expect(legateContainerName("legate-march")).toBe("march-legate-legate-march");
   });
 
-  it("renders a toolbox Dockerfile on top of the current March base image", () => {
+  it("renders a self-sufficient loop Dockerfile from a stock node base", () => {
     const body = renderLegateDockerfile();
-    expect(body).toContain(`FROM ${BASE_IMAGE}`);
+    // Self-contained: stock node base, not the (often-absent) spawn claude base.
+    expect(body).toContain(`FROM ${LEGATE_BASE_IMAGE}`);
+    expect(LEGATE_BASE_IMAGE).toBe("node:22-bookworm-slim");
     for (const pkg of [
       "bash",
       "ca-certificates",
@@ -72,6 +75,9 @@ describe("legate-container", () => {
     expect(body).toContain(`mkdir -p ${LEGATE_CONTAINER_HOME}`);
     expect(body).toContain(`chmod 0777 ${LEGATE_CONTAINER_HOME}`);
     expect(body).not.toContain("legate-march");
+    // Installs the toolchain the loop shells out to.
+    expect(body).toContain("cli.github.com"); // gh
+    expect(body).toContain("@balexda/smithy"); // smithy
     // Bakes the march CLI so the loop runs as `march legate loop`.
     expect(body).toContain("COPY march/ /opt/march/");
     expect(body).toContain("npm ci --omit=dev");
@@ -192,9 +198,11 @@ describe("legate-container", () => {
     const repo = path.join(home, "repo");
     const conductor = path.join(home, ".agent-deck", "conductor", "legate-march");
     const loop = path.join(home, ".agent-deck", "conductor", "march-legate-loop");
+    const agentDeck = path.join(home, "agent-deck");
     fs.mkdirSync(repo, { recursive: true });
     fs.mkdirSync(conductor, { recursive: true });
     fs.mkdirSync(loop, { recursive: true });
+    fs.writeFileSync(agentDeck, "#!/bin/sh\n");
 
     const args = buildLegateContainerRunArgs({
       conductorName: "legate-march",
@@ -205,6 +213,7 @@ describe("legate-container", () => {
       homeDir: home,
       imageTag: "march-legate:test",
       dockerSocketPath: path.join(home, "missing.sock"),
+      agentDeckBinPath: agentDeck,
     });
 
     expect(args.slice(0, 6)).toEqual([
@@ -237,6 +246,8 @@ describe("legate-container", () => {
     expect(args).toContain(
       `127.0.0.1:${legateLoopHostPort("legate-march")}:${LEGATE_LOOP_CONTAINER_PORT}`,
     );
+    // Mounts the host agent-deck binary onto the container PATH.
+    expect(args).toContain(`type=bind,src=${agentDeck},dst=${LEGATE_AGENT_DECK_TARGET}`);
     expect(args.at(-1)).toContain("March Legate loop starting");
     expect(args.at(-1)).toContain("exec march legate loop");
   });
@@ -249,8 +260,10 @@ describe("legate-container", () => {
     const home = makeTmpDir();
     const repo = path.join(home, "repo");
     const conductor = path.join(home, "conductor");
+    const agentDeck = path.join(home, "agent-deck");
     fs.mkdirSync(repo);
     fs.mkdirSync(conductor);
+    fs.writeFileSync(agentDeck, "#!/bin/sh\n");
 
     const result = ensureLegateContainer({
       conductorName: "legate-march",
@@ -260,6 +273,9 @@ describe("legate-container", () => {
       homeDir: home,
       imageTag: "march-legate:test",
       dockerSocketPath: path.join(home, "missing.sock"),
+      // Provided so ensureLegateContainer doesn't shell out to resolve it
+      // (execFileSync is mocked here).
+      agentDeckBinPath: agentDeck,
     });
 
     expect(result).toMatchObject({
@@ -291,8 +307,10 @@ describe("legate-container", () => {
     const home = makeTmpDir();
     const repo = path.join(home, "repo");
     const conductor = path.join(home, "conductor");
+    const agentDeck = path.join(home, "agent-deck");
     fs.mkdirSync(repo);
     fs.mkdirSync(conductor);
+    fs.writeFileSync(agentDeck, "#!/bin/sh\n");
 
     let thrown: unknown;
     try {
@@ -302,6 +320,7 @@ describe("legate-container", () => {
         repoPath: repo,
         conductorDir: conductor,
         homeDir: home,
+        agentDeckBinPath: agentDeck,
       });
     } catch (err) {
       thrown = err;

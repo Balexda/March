@@ -5,7 +5,6 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { CLI_VERSION } from "../shared/version.js";
-import { BASE_IMAGE } from "./spawn-config.js";
 
 export class HatcheryError extends Error {
   constructor(message: string) {
@@ -17,6 +16,17 @@ export class HatcheryError extends Error {
 export const LEGATE_IMAGE_TAG = `march-legate:${CLI_VERSION}`;
 export const LEGATE_DOCKERFILE_NAME = "Dockerfile";
 export const LEGATE_CONTAINER_HOME = "/home/march";
+
+/**
+ * Base image for the Legate loop container. Unlike spawn sandboxes (which run a
+ * coding agent and use the heavier claude/codex bases), the loop container only
+ * needs Node + a small toolchain it shells out to, so it builds from a stock
+ * Node image and self-installs the rest. This deliberately does NOT use the
+ * spawn BASE_IMAGE — the loop never runs claude in its own container.
+ */
+export const LEGATE_BASE_IMAGE = "node:22-bookworm-slim";
+/** Where the host's agent-deck binary is mounted inside the container. */
+export const LEGATE_AGENT_DECK_TARGET = "/usr/local/bin/agent-deck";
 
 /** Where the baked march CLI lives inside the image. */
 export const LEGATE_CLI_IMAGE_DIR = "/opt/march";
@@ -72,13 +82,28 @@ export function legateContainerName(conductorName: string): string {
   return `march-legate-${conductorName}`;
 }
 
-export function renderLegateDockerfile(baseImage: string = BASE_IMAGE): string {
+export function renderLegateDockerfile(
+  baseImage: string = LEGATE_BASE_IMAGE,
+): string {
   return (
     `FROM ${baseImage}\n` +
     `USER root\n` +
+    // Toolchain the deterministic loop shells out to every tick (git/gh for PR +
+    // branch state, jq, python3, tmux/openssh for agent-deck-launched workers).
+    // agent-deck itself is bind-mounted from the host (see legateContainerMounts)
+    // — it has no npm/apt distribution.
     `RUN apt-get update \\\n` +
-    ` && apt-get install -y --no-install-recommends bash ca-certificates git jq openssh-client python3 tmux \\\n` +
+    ` && apt-get install -y --no-install-recommends bash ca-certificates curl git gnupg jq openssh-client python3 tmux \\\n` +
     ` && rm -rf /var/lib/apt/lists/*\n` +
+    // gh CLI from its official apt repo (the loop reads PR/branch state via gh).
+    `RUN mkdir -p -m 755 /etc/apt/keyrings \\\n` +
+    ` && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg -o /etc/apt/keyrings/githubcli-archive-keyring.gpg \\\n` +
+    ` && chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg \\\n` +
+    ` && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" > /etc/apt/sources.list.d/github-cli.list \\\n` +
+    ` && apt-get update && apt-get install -y --no-install-recommends gh \\\n` +
+    ` && rm -rf /var/lib/apt/lists/*\n` +
+    // Smithy CLI — the loop runs \`smithy status\` each tick to find ready work.
+    `RUN npm install -g @balexda/smithy@latest && npm cache clean --force\n` +
     `RUN mkdir -p ${LEGATE_CONTAINER_HOME} /workspace && chmod 0777 ${LEGATE_CONTAINER_HOME} /workspace\n` +
     // Bake the CLI so the loop runs as `march legate loop` (a real service)
     // rather than a raw node script. tsup externalizes runtime deps, so the
@@ -145,7 +170,7 @@ function stageCliIntoContext(contextPath: string): void {
 
 export function writeLegateDockerfile(
   contextPath: string,
-  baseImage: string = BASE_IMAGE,
+  baseImage: string = LEGATE_BASE_IMAGE,
 ): string {
   const dockerfilePath = path.join(contextPath, LEGATE_DOCKERFILE_NAME);
   fs.writeFileSync(dockerfilePath, renderLegateDockerfile(baseImage), {
@@ -166,6 +191,26 @@ export interface BuildLegateContainerArgsInput {
   readonly loopConductorDir?: string;
   readonly homeDir: string;
   readonly dockerSocketPath?: string;
+  /**
+   * Host path to the `agent-deck` binary, bind-mounted onto the container PATH.
+   * agent-deck has no apt/npm distribution, so we mount the host's copy (a
+   * static ELF) rather than baking it. Resolved by the caller via PATH lookup.
+   */
+  readonly agentDeckBinPath?: string;
+}
+
+/** Resolve the host `agent-deck` binary path (for bind-mounting). Null if absent. */
+export function resolveAgentDeckBinPath(): string | null {
+  try {
+    const out = execFileSync("bash", ["-lc", "command -v agent-deck"], {
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    const resolved = out.trim();
+    return resolved.length > 0 && fs.existsSync(resolved) ? resolved : null;
+  } catch {
+    return null;
+  }
 }
 
 function addMountIfPresent(
@@ -223,6 +268,10 @@ export function legateContainerMounts(
     input.dockerSocketPath ?? "/var/run/docker.sock",
     "/var/run/docker.sock",
   );
+  // agent-deck binary (mounted onto PATH) — the loop shells out to it each tick.
+  if (input.agentDeckBinPath) {
+    addMountIfPresent(mounts, input.agentDeckBinPath, LEGATE_AGENT_DECK_TARGET);
+  }
   const tmux = process.env.TMUX;
   const tmuxSocket = tmux?.split(",")[0];
   if (tmuxSocket) {
@@ -318,10 +367,18 @@ export function ensureLegateContainer(
 ): LegateContainerResult {
   const imageTag = input.imageTag ?? LEGATE_IMAGE_TAG;
   const containerName = legateContainerName(input.conductorName);
+  // Resolve the host agent-deck binary to bind-mount (the loop needs it on PATH).
+  const agentDeckBinPath = input.agentDeckBinPath ?? resolveAgentDeckBinPath() ?? undefined;
+  if (!agentDeckBinPath) {
+    throw new HatcheryError(
+      "Could not find the `agent-deck` binary to mount into the Legate container " +
+        "(the loop shells out to it each tick). Ensure agent-deck is on PATH.",
+    );
+  }
   const contextPath = fs.mkdtempSync(path.join(os.tmpdir(), "march-legate-image-"));
   const dockerfilePath = writeLegateDockerfile(
     contextPath,
-    input.baseImage ?? BASE_IMAGE,
+    input.baseImage ?? LEGATE_BASE_IMAGE,
   );
   stageCliIntoContext(contextPath);
 
@@ -358,7 +415,7 @@ export function ensureLegateContainer(
     try {
       stdout = execFileSync(
         "docker",
-        buildLegateContainerRunArgs({ ...input, imageTag }),
+        buildLegateContainerRunArgs({ ...input, imageTag, agentDeckBinPath }),
         {
           stdio: ["ignore", "pipe", "pipe"],
           maxBuffer: DOCKER_OUTPUT_MAX_BUFFER,
