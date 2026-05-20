@@ -67,12 +67,19 @@ function bodyError(body: unknown, fallback: string): string {
   return typeof message === "string" && message.length > 0 ? message : fallback;
 }
 
+/** Default per-request timeout. The legate loop calls teardown synchronously
+ *  (`execFileSync(march brood teardown …)`), so a stalled brood must not block
+ *  it indefinitely. */
+const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
+
 export interface BroodClientOptions {
   readonly baseUrl?: string;
   readonly env?: NodeJS.ProcessEnv;
   readonly fetchImpl?: FetchImpl;
   /** W3C traceparent to propagate so brood spans nest under the caller's trace. */
   readonly traceparent?: string;
+  /** Per-request timeout in ms (default 30s). */
+  readonly timeoutMs?: number;
 }
 
 /**
@@ -86,11 +93,13 @@ export class BroodClient {
   private readonly baseUrl: string;
   private readonly fetchImpl: FetchImpl;
   private readonly traceparent?: string;
+  private readonly timeoutMs: number;
 
   constructor(options: BroodClientOptions = {}) {
     this.baseUrl = options.baseUrl ?? resolveBroodUrl(options.env);
     this.fetchImpl = options.fetchImpl ?? fetch;
     this.traceparent = options.traceparent;
+    this.timeoutMs = options.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
   }
 
   private headers(json: boolean): Record<string, string> {
@@ -111,6 +120,7 @@ export class BroodClient {
         method,
         headers: this.headers(body !== undefined),
         ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+        signal: AbortSignal.timeout(this.timeoutMs),
       });
     } catch (err) {
       throw new BroodUnavailableError(
