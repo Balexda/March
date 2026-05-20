@@ -31,6 +31,12 @@ import { emitLoopLog, type LoopLogSeverity } from "../../observability/logs.js";
 import { resolveHatcheryUrl } from "../../hatchery/service/client.js";
 import { SyncCastraClient } from "../../castra/client.js";
 import type { LoopMeta } from "./meta.js";
+// Decomposed two-stage loop: Stage 1 sense → coordinator (ordered handlers) →
+// heartbeat. runtime now only wires these to the proven I/O seams below.
+import { senseState } from "./state/sense.js";
+import { runTick as coordinatorRunTick } from "./coordinator.js";
+import { runHeartbeat } from "./heartbeat.js";
+import { broodTeardown as broodTeardownCli, type CliRunner } from "./clients/brood.js";
 
 // Lazily-built sync Castra client (constructed on first use so it reads the
 // CASTRA_URL/token env the container passes in). The loop reaches every
@@ -3415,7 +3421,10 @@ function runDispatch(state, ts) {
   return { actions, failures, mutated, queue };
 }
 
-function tick() {
+// Legacy single-pass tick — superseded by the sense → coordinator → heartbeat
+// path in tick() below. Retained (dead, unreferenced) only as a diff anchor for
+// review; removed in the monolith-body cleanup pass.
+function tickLegacy() {
   const ts = now();
   let state = null;
   let stateError = null;
@@ -3578,6 +3587,164 @@ function tick() {
     heartbeatLogPath,
     `[${ts}] heartbeat slice_count=${record.slice_count} archived=${record.archived_slice_count} cleanups=${record.cleanup_count} ghost_cleanups=${record.ghost_cleanup_count} relaunches=${record.relaunch_count} babysit_actions=${record.babysit_action_count} dispatches=${record.dispatch_action_count} processor_requests=${record.processor_request_count} workers=${JSON.stringify(workers)}${stateError ? " state_error=" + stateError : ""}`,
   );
+}
+
+// Fresh-dispatch launch for one ready item: create the hatchery-pending slice,
+// fire the codex spawn, and return the action (or escalate + a notification on a
+// launch throw). The dispatch handler's apply() calls this via DispatchDeps.
+function launchDispatch(state, ts, item, sliceId) {
+  const actions = [];
+  const failures = [];
+  const notifications = [];
+  try {
+    const action = item.next_action || {};
+    const resultPath = hatcheryResultPath(sliceId);
+    const logPath = hatcheryLogPath(sliceId);
+    const requestPath = hatcheryRequestPath(sliceId);
+    state.slices[sliceId] = {
+      kind: "smithy",
+      worker_session_id: null,
+      worker_title: dispatchTitle(item),
+      branch: dispatchBranch(item),
+      actual_branch: null,
+      worktree_path: null,
+      stage: "hatchery-pending",
+      pr: null,
+      command: action.command,
+      arguments: actionArguments(action),
+      artifact_path: item.path || null,
+      hatchery: {
+        backend: "codex",
+        hatchery_result_path: resultPath,
+        hatchery_request_path: requestPath,
+        hatchery_log_path: logPath,
+      },
+      last_action: ts,
+      last_action_note: "Queued Hatchery codex spawn for " + actionCommandLine(action),
+    };
+    writeJson(meta.legate_state_path, state);
+    const launched = launchHatcheryDispatch(item, resultPath, logPath);
+    actions.push({
+      action: "dispatch",
+      sliceId,
+      sessionId: null,
+      detail: "queued Hatchery codex spawn pid " + (launched.pid || "unknown") + " for " + actionCommandLine(action),
+    });
+  } catch (err) {
+    const error = err?.message || String(err);
+    const existing = state.slices?.[sliceId];
+    if (existing && existing.stage === "hatchery-pending") {
+      existing.stage = "escalated";
+      existing.last_action = ts;
+      existing.last_action_note = "NEED: Hatchery dispatch launch failed: " + error;
+      notifications.push({
+        slice: existing, sliceId,
+        requestKey: "hatchery-failure:" + sliceId + ":launch-throw:" + hashText(error).slice(0, 12),
+        reason: "hatchery_dispatch_failed",
+        detail: "Hatchery dispatch launch threw for " + actionCommandLine(item.next_action) + ".\n\nError:\n" + error + "\n\nSlice is escalated in state.json. For 'branch already exists' surface this via legate.unwedge; otherwise legate.error.",
+      });
+    }
+    failures.push({ slice_id: sliceId, command: actionCommandLine(item.next_action), error });
+    append(meta.processor_events_path, {
+      schema_version: 1,
+      ts,
+      processor: meta.processor_name,
+      paired_legate: meta.paired_legate,
+      kind: "dispatch_failure",
+      slice_id: sliceId,
+      command: actionCommandLine(item.next_action),
+      error,
+    });
+    appendText(meta.processor_log_path, "[" + ts + "] dispatch failed " + sliceId + ": " + error);
+  }
+  return { actions, failures, mutated: true, notifications };
+}
+
+// `march` CLI runner for the Brood seam, honoring meta.march_cli_path (the
+// container's baked-in path) and capturing exit + streams for broodTeardown.
+function marchCliRunner(args) {
+  try {
+    const stdout = execFileSync(meta.march_cli_path || "march", args, {
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "pipe"],
+      maxBuffer: 16 * 1024 * 1024,
+    });
+    return { status: 0, stdout: typeof stdout === "string" ? stdout : "", stderr: "" };
+  } catch (err) {
+    return {
+      status: typeof err?.status === "number" ? err.status : 1,
+      stdout: typeof err?.stdout === "string" ? err.stdout : "",
+      stderr: typeof err?.stderr === "string" ? err.stderr : (err?.message ?? ""),
+    };
+  }
+}
+
+// Two-stage tick: Stage 1 senseState gathers the snapshot; the coordinator runs
+// the ordered handlers (cleanup → ghost-cleanup → relaunch → babysit → dispatch)
+// as pure assess + effecting apply; the heartbeat writes the record + events and
+// snapshots it for /status. All I/O is wired to the proven seams in this file.
+function tick() {
+  const senseDeps = {
+    meta,
+    now,
+    readStateJson: () => readJsonIfPresent(meta.legate_state_path),
+    listSessions: () => agentDeckList(),
+    syncDefaultBranch: (repoPath, knownDefault) =>
+      syncDefaultBranch({ repo: { path: repoPath, default_branch: knownDefault } }),
+    readSmithyStatus: (repoPath) => readSmithyStatus(repoPath),
+    queryPr: (slice, st) => queryPrForBabysit(slice, st),
+    discoverPr: (slice, st, _repoPath, sessionId) => discoverPrForSlice(slice, st, sessionId),
+    sessionOutput: (sessionId) => captureRecentSessionOutput(sessionId),
+    warn: (message) => appendText(meta.processor_log_path, "[" + now() + "] " + message),
+  };
+
+  const makeContext = (state) => ({
+    meta,
+    ts: state.ts,
+    castra: castra(),
+    broodTeardown: (sessionId, opts) => broodTeardownCli(sessionId, opts, marchCliRunner as CliRunner),
+    persist: (s) => writeJson(meta.legate_state_path, s.raw),
+    emit: (event) => append(meta.processor_events_path, event),
+    log: (line) => appendText(meta.processor_log_path, line),
+  });
+
+  const babysitDeps = {
+    sendMessage: (sessionId, message) => sendAgentDeckMessage(sessionId, message, false),
+    requestJudgement: (input) => requestLegateJudgement(input),
+  };
+
+  const dispatchDeps = {
+    syncDefaultBranch: (rawState) => syncDefaultBranch(rawState),
+    completePending: (rawState, ts) => completePendingHatcheryDispatches(rawState, ts),
+    launchDispatch: (rawState, ts, item, sliceId) => launchDispatch(rawState, ts, item, sliceId),
+    recoveryDispatch: (rawState, ts, item, sliceId, mergedArchive) =>
+      handleRecoveryDispatch(rawState, ts, item, sliceId, mergedArchive),
+    requestJudgement: (input) => requestLegateJudgement(input),
+  };
+
+  const out = coordinatorRunTick({
+    sense: () => senseState(senseDeps),
+    makeContext,
+    babysit: babysitDeps,
+    dispatch: dispatchDeps,
+  });
+
+  runHeartbeat(out, {
+    meta: {
+      processor_name: meta.processor_name,
+      paired_legate: meta.paired_legate,
+      processor_events_path: meta.processor_events_path,
+      processor_log_path: meta.processor_log_path,
+    },
+    heartbeatEventsPath,
+    heartbeatLogPath,
+    append,
+    appendText,
+    appendTextSilent,
+    setLastHeartbeat: (record) => {
+      lastHeartbeat = record;
+    },
+  });
 }
 
 function logTickError(err) {
