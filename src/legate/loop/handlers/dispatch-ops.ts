@@ -241,7 +241,10 @@ export async function completePendingHatcheryDispatches(state: any, ts: string, 
       spawn_output_path: artifacts.spawnOutputPath || null,
       metadata_path: artifacts.metadataPath || null,
     };
-    deps.emitTransition({ type: "slice.stage.changed", sliceId, stage: "implementing" });
+    // Carry the steward sessionId on the transition so Herald's fold learns the
+    // slice→session link (#210). Without it Herald's PR-discovery gate skips the
+    // steward forever, leaving real PRs stranded in an endless nudge loop.
+    deps.emitTransition({ type: "slice.stage.changed", sliceId, stage: "implementing", sessionId: manager.sessionId || undefined });
     // Clear any transient retry counters for this slice — it cleanly transitioned
     // to implementing, so prior transient failures no longer matter.
     if (state.transient_retry_counts && typeof state.transient_retry_counts === "object") {

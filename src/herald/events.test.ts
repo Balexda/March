@@ -64,6 +64,19 @@ describe("reduce / fold", () => {
     expect(archived.slices.s1.archived).toBe(true);
   });
 
+  it("slice.stage.changed carries the steward sessionId into the fold (#210)", () => {
+    seq = 0;
+    const state = foldEvents([
+      ev({ type: "slice.dispatched", sliceId: "s1", branch: "feature/a", jobId: "job-1" }),
+      ev({ type: "slice.stage.changed", sliceId: "s1", stage: "implementing", sessionId: "sess-9" }),
+    ]);
+    expect(state.slices.s1).toMatchObject({ stage: "implementing", sessionId: "sess-9" });
+
+    // A later stage change without a sessionId must not clobber the known link.
+    const next = foldEvents([ev({ type: "slice.stage.changed", sliceId: "s1", stage: "pr-open" })], state);
+    expect(next.slices.s1).toMatchObject({ stage: "pr-open", sessionId: "sess-9" });
+  });
+
   it("state.error sets the error and clears statePresent", () => {
     seq = 0;
     const state = foldEvents([ev({ type: "state.error", message: "boom" })]);
