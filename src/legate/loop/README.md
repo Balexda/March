@@ -1,0 +1,183 @@
+# Legate loop — the efferent control loop
+
+The legate loop is March's **reaction** half: the *efferent* (motor) side that
+decides what to do and makes it happen, paired with [Herald](../../herald/) as
+the *afferent* (sensory) side that watches and records. Each tick it takes a
+snapshot of the world, runs an ordered set of handlers that move the slice state
+machine, and drives the interactive sessions doing the work. Like Hatchery /
+Brood / Castra / Herald it runs as a small containerized service (`march legate
+loop`, a Fastify app) with deterministic config, per-service metrics + logger,
+and a Docker image.
+
+```
+            ┌─────────────── Legate loop tick (every ~60s) ───────────────┐
+            │  Stage 1 — sense (gather ONE LoopState snapshot):            │
+            │    legacy:  gh / git / smithy + Castra   ─► LoopState        │
+            │    Herald:  drain inbox → fold (#175)    ─► LoopState        │
+            │                          │                                   │
+            │  Stage 2 — coordinator (ordered; mutates the same snapshot): │
+            │    cleanup → ghost-cleanup → relaunch → babysit → dispatch   │
+            │       each = pure assess(state) + effecting apply(ctx,state) │
+            │                          │                                   │
+            │  heartbeat — write the record + events, snapshot for /status │
+            └──────────────────────────────────────────────────────────────┘
+                  │ spawns           │ teardown         │ sessions   │ events
+                  ▼                  ▼                  ▼            ▼
+               Hatchery            Brood             Castra        Herald
+            (codex spawns)   (teardown authority) (interactive)  (event log)
+```
+
+## The two-stage tick
+
+The loop is deliberately split into two stages so the I/O and the logic can be
+tested and evolved independently. The split is what made the Herald cutover a
+drop-in (see [`state/types.ts`](./state/types.ts)).
+
+- **Stage 1 — sense** ([`state/sense.ts`](./state/sense.ts)) does *all* the
+  external reads into a single, mostly-immutable [`LoopState`](./state/types.ts)
+  snapshot: `state.json`, the worker sessions, smithy readiness, and the
+  per-slice PR / output (`perSlice`) for active slices. The I/O is injected via
+  `SenseDeps`, so the gathering is fully unit-testable.
+- **Stage 2 — coordinator** ([`coordinator.ts`](./coordinator.ts)) runs the
+  handlers in a fixed order, threading the *same* mutating `LoopState` through
+  all of them. Each handler is a pure `assess(state) -> Decision[]` plus an
+  effecting `apply(decisions, ctx, state)` that performs side effects and
+  **mutates the snapshot in place** — so a later handler's `assess` sees the
+  current world without re-polling.
+
+### The handler pipeline (order is load-bearing)
+
+`cleanup → ghost-cleanup → relaunch → babysit → dispatch`, awaited in order.
+Do **not** parallelize — earlier handlers drop sessions/slices that later ones
+must not act on.
+
+| Handler | What it does |
+|---------|--------------|
+| [`cleanup`](./handlers/cleanup.ts) | A slice whose PR is `MERGED`/`CLOSED` is done → request Brood teardown, then archive the slice. Defers (never archives over an orphan) if Brood can't confirm. |
+| [`ghost-cleanup`](./handlers/ghost-cleanup.ts) | A worker session whose worktree isn't tracked by any non-terminal slice (and old enough to not be a launch race) is an orphan → request Brood teardown. |
+| [`relaunch`](./handlers/relaunch.ts) | A non-terminal slice with an open PR but a vanished worker → re-attach a fresh opus steward to the existing worktree/branch. Throttled per slice. |
+| [`babysit`](./handlers/babysit.ts) | The steward watchdog: login-block recovery, worker-error escalation, stranded-steward nudges, PR discovery, conflict / review-thread / CI handling, post-dispatch re-nudges. |
+| [`dispatch`](./handlers/dispatch.ts) | Smithy's layer-0 ready items → Hatchery codex spawns; drains completed spawns; partial-merge / branch-collision recovery. |
+
+The heartbeat ([`heartbeat.ts`](./heartbeat.ts)) folds the tick's results into a
+record on disk and a snapshot for `GET /status`.
+
+## Stage 1: poll vs. the Herald inbox
+
+`sense` is a swappable dependency the runtime binds per tick:
+
+- **Legacy (default)** — [`senseState`](./state/sense.ts) polls the world
+  directly: the shared sense I/O in [`../../observe/sense-io.ts`](../../observe/sense-io.ts)
+  (`gh`/`git`/`smithy` + Castra), the same tested implementation Herald uses to
+  observe.
+- **Herald cutover (#175)** — when `MARCH_HERALD_URL` is set,
+  [`senseFromHerald`](./state/sense.ts) instead drains Herald's event inbox and
+  folds it into the `LoopState` (sessions / workers / per-slice PR+output come
+  from the fold), and the handlers dual-write **transition events** back to
+  Herald via [`clients/herald.ts`](./clients/herald.ts). `state.json` stays the
+  legate-owned working state during the soak; smithy *ready records* are still
+  read locally (not yet event-sourced). Unset everywhere ⇒ byte-for-byte the
+  legacy path. See the [Herald README](../../herald/README.md) for the event
+  taxonomy and the rollout plan.
+
+## Source layout
+
+```
+src/legate/loop/
+  index.ts          runLoop entry: env reconciliation (otel/brood/herald),
+                    meta/port resolution, telemetry + HTTP + runtime bring-up
+  meta.ts           LoopMeta shape + loadMeta + resolveIntervalSeconds
+  runtime.ts        the lifted legate-loop.mjs: tick wiring, dispatch/recovery
+                    I/O, OTel dispatch spans, the interval scheduler (@ts-nocheck;
+                    decomposition tracked in Balexda/March#144)
+  coordinator.ts    Stage 2 — sense → ordered handlers → TickResult
+  heartbeat.ts      per-tick heartbeat record + events + /status snapshot
+  http.ts           Fastify server: GET /healthz, GET /status (read-only today)
+  state/
+    types.ts        LoopState / HandlerContext / HandlerResult / TickResult
+    sense.ts        Stage 1: senseState (poll) + senseFromHerald (inbox fold)
+    mutations.ts    archiveSlice / dropSlice / dropSession (shared apply mutations)
+  handlers/         the ordered Stage-2 handlers (assess + apply), one file each
+  clients/
+    brood.ts        teardown authority seam (async BroodClient; MARCH_BROOD_URL)
+    herald.ts       Herald inbox consumer (persistent cursor + fold) + transition
+                    event writer (#175; MARCH_HERALD_URL)
+    exec.ts         async execText (execFile) wrapper for git/gh
+  pure/
+    dispatch-id.ts  deterministic slice id / branch derivation from smithy records
+    session.ts      agent-deck session helpers (worker classification, matching)
+    slice.ts        slice predicates (terminal, archive collision, in-flight)
+    smithy-graph.ts layer-0 ready-item selection from `smithy status`
+    messages.ts     worker prompt / nudge builders
+    format.ts hash.ts  formatting + hashing helpers
+```
+
+## The seams (where the loop reaches other services)
+
+The loop owns *decisions*; the doing is delegated to the other March services,
+each behind an injectable seam so the handlers stay unit-testable:
+
+- **Hatchery** — codex spawns for fresh dispatches. The loop POSTs to the
+  Hatchery service via a detached runner and polls the result file
+  (`runtime.ts`).
+- **Brood** — the session-state + **teardown authority** ([#155](https://github.com/Balexda/March/issues/155)).
+  The loop *requests* teardown ([`clients/brood.ts`](./clients/brood.ts)); it
+  never prunes worktrees itself.
+- **Castra** — the interactive-sessions host. Every steward message / launch /
+  removal goes through the async `CastraClient`.
+- **Herald** — the observation service + unified event log. Source of Stage-1
+  sense and sink for transition events when `MARCH_HERALD_URL` is set.
+
+## Recovery machinery
+
+Most of [`runtime.ts`](./runtime.ts) is auto-recovery for the messy realities of
+the spawn path, each gated behind a per-slice retry counter so a transient
+problem self-heals and only a *persistent* one escalates for operator judgement:
+
+- branch-collision classification + safe auto-delete (orphan-ref / post-merge-stale),
+- open-PR adoption, ghost-session reclamation, wrong-worktree launch-race release,
+- stranded-leftover cleanup, codex patch-error retry, and runner-silent recovery,
+- a no-spawn **direct-steward** fallback after repeated codex-spawn failures.
+
+When Herald is configured these transitions also emit `slice.dispatched` /
+`slice.recovery.dispatched` / `slice.escalated` / `retry.counted` events.
+
+## HTTP API ([`http.ts`](./http.ts))
+
+| Method + path  | Purpose |
+|----------------|---------|
+| `GET /healthz` | liveness |
+| `GET /status`  | latest heartbeat snapshot (last tick, queue, workers, counts) |
+
+Read-only today; deterministic action routes (`POST /tick`, …) register the same
+way when added.
+
+## Configuration
+
+- **Meta** — `legate-loop-meta.json`, frozen at `march legate init`
+  (`loopMetaFor` in [`../init.ts`](../init.ts)) and read by
+  [`meta.ts`](./meta.ts). Resolve order: `--meta` flag → `MARCH_LEGATE_LOOP_META`
+  → `<cwd>/legate-loop-meta.json`.
+- **Interval** — `MARCH_LEGATE_LOOP_INTERVAL_SECONDS` (or
+  `MARCH_PROCESSOR_INTERVAL_SECONDS`), default 60s.
+- **Port / host** — `MARCH_LEGATE_LOOP_PORT` (default 8787); binds `0.0.0.0` in
+  the managed container (`MARCH_LEGATE_CONTAINER=1`), else loopback.
+- **Service discovery** — `MARCH_BROOD_URL` and `MARCH_HERALD_URL` reach Brood
+  and Herald. Both are also *frozen into meta* at init (`brood_endpoint` /
+  `herald_endpoint`) and reconciled into the env at startup (`reconcileBroodEnv`
+  / `reconcileHeraldEnv` in [`index.ts`](./index.ts)) so the containerized loop
+  finds them without env propagation.
+- **Telemetry** — `MARCH_OTEL=1` enables `march.legate.*` metrics + logs and the
+  raw-OTLP dispatch spans (a no-op when off). Identity defaults to
+  `service_name="march-legate"` for the dashboard. Dispatch spans reuse the
+  deterministic id helpers in [`../../observability/trace-ids.ts`](../../observability/trace-ids.ts)
+  so they share a trace with the orchestrator's `hatchery.spawn` / `spawn.*`
+  spans.
+
+## Why two stages (and where this is going)
+
+`src/legate/loop/state/types.ts` documents the contract; `coordinator.ts` injects
+`sense` as a swappable dependency. That seam is the whole point: PR2 (#175) swaps
+the poll for the Herald inbox + dual-writes transition events; PR3 retires
+`state.json` so the Herald fold becomes the sole source of truth and the handlers
+read it directly.
