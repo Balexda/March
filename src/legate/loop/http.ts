@@ -7,7 +7,9 @@ import type { LoopSnapshot } from "./runtime.js";
  * Claude conductor on the host) calls this to read loop state deterministically
  * rather than scraping logs. Today it exposes read-only liveness/status;
  * deterministic ACTION routes (POST /tick, /dispatch, ...) register the same way
- * (Balexda/March#147). Bind to loopback only — never expose publicly.
+ * (Balexda/March#147). Security model: the server binds `0.0.0.0` inside the
+ * container so Docker's loopback port publish can reach it; the host publishes
+ * only on loopback, so the API is never exposed beyond the host.
  */
 
 export interface LoopHttpContext {
