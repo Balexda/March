@@ -241,6 +241,93 @@ describe("queryPrForBabysit", () => {
   });
 });
 
+describe("discoverPrForSlice (branch-based lookup)", () => {
+  // Regression for issue #178 bug 1: the candidate filter awaits the async
+  // prMatchesSliceBranch. Before the fix it filtered on the raw Promise (always
+  // truthy), so every open PR "matched" and the newest one was adopted —
+  // including a PR on the wrong branch.
+  it("does NOT adopt a newer PR on the wrong branch; picks the branch match", async () => {
+    let viewedNumber: string | undefined;
+    routeExec((cmd, args) => {
+      if (cmd === "gh" && args.includes("list")) {
+        // Wrong-branch PR is NEWER — if the predicate isn't awaited it would
+        // win the createdAt sort and be (incorrectly) adopted.
+        return JSON.stringify([
+          {
+            number: 99,
+            url: "https://github.com/octo/march/pull/99",
+            state: "OPEN",
+            headRefName: "feature/wrong",
+            title: "Unrelated",
+            createdAt: "2026-05-20T10:00:00Z",
+          },
+          {
+            number: 42,
+            url: "https://github.com/octo/march/pull/42",
+            state: "OPEN",
+            headRefName: "feature/right",
+            title: "Ours",
+            createdAt: "2026-05-20T01:00:00Z",
+          },
+        ]);
+      }
+      if (cmd === "gh" && args.includes("view")) {
+        viewedNumber = args[2];
+        return JSON.stringify({
+          number: Number(viewedNumber),
+          url: "https://github.com/octo/march/pull/" + viewedNumber,
+          state: "OPEN",
+          mergeable: "MERGEABLE",
+          headRefName: "feature/right",
+          title: "Ours",
+          author: { login: "me" },
+          statusCheckRollup: [],
+        });
+      }
+      if (args.includes("graphql")) {
+        return JSON.stringify({ data: { repository: { pullRequest: { reviewThreads: { nodes: [] } } } } });
+      }
+      return "";
+    });
+
+    const io = createSenseIo({ meta: meta(), castra: fakeCastra({ sessionOutput: async () => "" }) });
+    const slice = { branch: "feature/right" };
+    const state = { repo: { path: "/repo", owner_with_name: "octo/march" } };
+    const pr = await io.discoverPrForSlice(slice, state, "sess-1");
+
+    expect(pr).not.toBeNull();
+    expect(pr.number).toBe(42);
+    expect(pr.head_branch).toBe("feature/right");
+    expect(viewedNumber).toBe("42"); // never hydrated the wrong-branch PR #99
+  });
+
+  it("returns null when no candidate matches the slice branch", async () => {
+    routeExec((cmd, args) => {
+      if (cmd === "gh" && args.includes("list")) {
+        return JSON.stringify([
+          {
+            number: 99,
+            url: "https://github.com/octo/march/pull/99",
+            state: "OPEN",
+            headRefName: "feature/wrong",
+            title: "Unrelated",
+            createdAt: "2026-05-20T10:00:00Z",
+          },
+        ]);
+      }
+      return "";
+    });
+
+    const io = createSenseIo({ meta: meta(), castra: fakeCastra({ sessionOutput: async () => "" }) });
+    const pr = await io.discoverPrForSlice(
+      { branch: "feature/right" },
+      { repo: { path: "/repo", owner_with_name: "octo/march" } },
+      "sess-2",
+    );
+    expect(pr).toBeNull();
+  });
+});
+
 describe("syncDefaultBranch (via SenseDeps)", () => {
   it("fetches/switches/pulls the known default branch and resolves void", async () => {
     const calls: string[][] = [];

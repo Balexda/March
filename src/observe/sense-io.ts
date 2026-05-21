@@ -361,7 +361,14 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
       const candidates = since
         ? list.filter((candidate: any) => String(candidate.createdAt || "") >= since)
         : list;
-      const branchMatches = candidates.filter((candidate: any) => prMatchesSliceBranch(slice, candidate));
+      // prMatchesSliceBranch is async — await every predicate, then keep the
+      // candidates whose resolved boolean is true. Filtering on the raw Promise
+      // would pass every candidate (a Promise is always truthy) and could adopt
+      // a PR on the wrong branch.
+      const matchFlags = await Promise.all(
+        candidates.map((candidate: any) => prMatchesSliceBranch(slice, candidate)),
+      );
+      const branchMatches = candidates.filter((_candidate: any, i: number) => matchFlags[i]);
       const chosen = branchMatches
         .sort((a: any, b: any) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")))[0];
       if (!chosen) return null;
