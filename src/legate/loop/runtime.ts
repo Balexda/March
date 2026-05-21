@@ -961,9 +961,12 @@ async function worktreeIsClean(worktreePath) {
 // Check whether any agent-deck session in our worker group is currently
 // pointing at this worktree. If a live session holds it, the worker may
 // still be doing real work — never remove.
-function agentDeckSessionHoldsWorktree(worktreePath) {
+async function agentDeckSessionHoldsWorktree(worktreePath) {
   try {
-    const list = senseIo().listSessions();
+    // listSessions() is async (Castra fetch) — await it before the Array.isArray
+    // guard, or the guard sees a Promise (never an array), always returns false,
+    // and a live session holding this worktree would never block removal.
+    const list = await senseIo().listSessions();
     if (!Array.isArray(list)) return false;
     return list.some((session) => {
       // Match the hatchery session parser's field-name precedence
@@ -1018,7 +1021,7 @@ async function tryRecoverBranchCollision(state, slice, sliceId, errorText) {
     if (!await worktreeIsClean(worktreePath)) {
       return { recovered: false, verdict: classification.verdict + "-worktree-dirty", detail: summary + " | branch held by worktree " + worktreePath + " with uncommitted changes; refusing to auto-remove" };
     }
-    if (agentDeckSessionHoldsWorktree(worktreePath)) {
+    if (await agentDeckSessionHoldsWorktree(worktreePath)) {
       return { recovered: false, verdict: classification.verdict + "-worktree-session", detail: summary + " | branch held by worktree " + worktreePath + " which is still owned by a live agent-deck session; operator must drain that session before re-dispatch" };
     }
     try {
@@ -1124,7 +1127,13 @@ async function tryAdoptOpenPr(state, slice, sliceId, errorText, ts) {
   // smithy dispatch branch slug and the actual feature/* git ref).
   const candidates = classification.open || [];
   const tentativeSlice = { branch: slice.branch || branchName };
-  let chosen = candidates.find((p) => senseIo().prMatchesSliceBranch(tentativeSlice, p));
+  // prMatchesSliceBranch is async — Array.find on the raw Promise would match
+  // the first candidate unconditionally (a Promise is always truthy), adopting a
+  // PR on the wrong branch. Resolve every predicate first, then pick the match.
+  const matchFlags = await Promise.all(
+    candidates.map((p) => senseIo().prMatchesSliceBranch(tentativeSlice, p)),
+  );
+  let chosen = candidates.find((_p, i) => matchFlags[i]);
   if (!chosen) chosen = candidates[0];
   if (!chosen) return null;
   let hydrated;
@@ -1175,7 +1184,7 @@ async function tryRecoverStrandedLeftover(state, slice, sliceId, errorText, clas
   // Refuse if a live agent-deck session still owns the worktree — that
   // means there's an active steward and we'd be racing it.
   const worktreePath = await findWorktreeForBranch(repoPath, branchName);
-  if (worktreePath && agentDeckSessionHoldsWorktree(worktreePath)) return null;
+  if (worktreePath && await agentDeckSessionHoldsWorktree(worktreePath)) return null;
   const limit = 3;
   const counts = transientRetryCounts(state);
   const key = "stranded-leftover:" + sliceId;
@@ -1903,4 +1912,25 @@ export function startLoopRuntime(): { stop: () => void } {
     stop: () => clearInterval(timer),
   };
 }
+
+// --- Test seam (issue #178) ---------------------------------------------
+// runtime.ts is the @ts-nocheck lifted loop; its recovery helpers close over
+// the module-global `meta` + the lazily-built `senseIo` bundle, so the focused
+// async-fix tests inject a fake senseIo (and minimal meta) to drive the
+// now-active await paths — the session-holds-worktree guard and the
+// adopt-open-PR branch match — without standing up Castra or git. Production
+// code never imports this; it exists only so the dormant logic these fixes
+// activate has direct coverage.
+export const __test = {
+  setSenseIo(io: SenseIo | undefined): void {
+    _senseIo = io;
+  },
+  setMeta(loadedMeta: unknown): void {
+    meta = loadedMeta;
+  },
+  agentDeckSessionHoldsWorktree: (worktreePath: string): Promise<boolean> =>
+    agentDeckSessionHoldsWorktree(worktreePath),
+  tryAdoptOpenPr: (state: any, slice: any, sliceId: string, errorText: string, ts: string): Promise<any> =>
+    tryAdoptOpenPr(state, slice, sliceId, errorText, ts),
+};
 
