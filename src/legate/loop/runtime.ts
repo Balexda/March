@@ -1142,6 +1142,16 @@ function parseBranchCollisionError(text) {
   return direct ? direct[1] : null;
 }
 
+// agent-deck reports a colliding steward session as
+// "session already exists: <title> (<sessionId>)". Extract the trailing
+// session id so the loop can reclaim the ghost and re-dispatch.
+function parseSessionCollisionError(text) {
+  const s = String(text || "");
+  if (!/session already exists/i.test(s)) return null;
+  const m = s.match(/\(([0-9a-fA-F]+-[0-9]+)\)\s*$/) || s.match(/\(([^()]+)\)\s*$/);
+  return m ? m[1].trim() : null;
+}
+
 // Inspect a local branch enough to classify a collision: where its HEAD
 // sits, whether the work already landed on the default branch, and what
 // PRs exist for it. All read-only — caller decides whether to act.
@@ -1385,6 +1395,27 @@ function tryRecoverWrongWorktreeRace(state, slice, sliceId, errorText) {
 // for a PR that matches this slice's expected branch, the work is already
 // in flight on GitHub. Don't escalate — transition the slice directly to
 // pr-open so the loop's normal babysit picks up the PR going forward.
+// Session-collision recovery: the steward launch failed because an agent-deck
+// session with this slice's title already exists — a ghost left by a previous
+// launch that died after creating the session (Brood never registered it, so
+// ghost-cleanup defers under #155 and the collision blocks every re-dispatch).
+// Reclaim it: remove the ghost via Castra (the loop's own client; the deliberate
+// exception to "defer to Brood" — the id is named in the error and is provably
+// the thing blocking this exact slice) + prune its worktree, then release the
+// slice for a clean re-dispatch.
+async function tryRecoverSessionCollision(state, slice, sliceId, errorText) {
+  const sessionId = parseSessionCollisionError(errorText);
+  if (!sessionId) return null;
+  try {
+    await castra().removeSession({ profile: meta.profile, sessionId, pruneWorktree: true });
+  } catch (err) {
+    return { recovered: false, verdict: "session-collision-remove-failed", detail: "ghost session " + sessionId + " remove failed: " + (err?.message || String(err)).slice(0, 200) };
+  }
+  deleteHatcheryArtifacts(slice);
+  delete state.slices[sliceId];
+  return { recovered: true, verdict: "session-collision", detail: "removed colliding ghost session " + sessionId + " (worktree pruned); slice released for re-dispatch" };
+}
+
 async function tryAdoptOpenPr(state, slice, sliceId, errorText, ts) {
   const branchName = parseBranchCollisionError(errorText);
   if (!branchName) return null;
@@ -1659,6 +1690,19 @@ async function completePendingHatcheryDispatches(state, ts) {
         mutated = true;
         continue;
       }
+      // Ghost-session collision (agent-deck "session already exists"): reclaim
+      // the named ghost so the slice can re-dispatch with a fresh steward.
+      const sessionRecovery = await tryRecoverSessionCollision(state, slice, sliceId, errorText);
+      if (sessionRecovery && sessionRecovery.recovered) {
+        actions.push({
+          action: "auto-recovered",
+          sliceId,
+          sessionId: null,
+          detail: sessionRecovery.verdict + " auto-recovered: " + sessionRecovery.detail,
+        });
+        mutated = true;
+        continue;
+      }
       const recovery = await tryRecoverBranchCollision(state, slice, sliceId, errorText);
       if (recovery && recovery.recovered) {
         actions.push({
@@ -1725,7 +1769,7 @@ async function completePendingHatcheryDispatches(state, ts) {
         mutated = true;
         continue;
       }
-      const effectiveRecovery = recovery || raceRecovery || spawnRecovery || leftoverRecovery;
+      const effectiveRecovery = recovery || raceRecovery || spawnRecovery || leftoverRecovery || sessionRecovery;
       const detail = effectiveRecovery ? errorText + "\n\nLoop verdict: " + effectiveRecovery.detail : errorText;
       slice.stage = "escalated";
       slice.last_action = ts;
@@ -1733,7 +1777,7 @@ async function completePendingHatcheryDispatches(state, ts) {
       failures.push({ slice_id: sliceId, command: actionCommandLine({ command: slice.command, arguments: slice.arguments || [] }), error: detail });
       const reasonTag = recovery
         ? "branch-collision-" + recovery.verdict
-        : (raceRecovery ? raceRecovery.verdict : (spawnRecovery ? spawnRecovery.verdict : (leftoverRecovery ? leftoverRecovery.verdict : "spawn-error")));
+        : (sessionRecovery ? sessionRecovery.verdict : (raceRecovery ? raceRecovery.verdict : (spawnRecovery ? spawnRecovery.verdict : (leftoverRecovery ? leftoverRecovery.verdict : "spawn-error"))));
       queueDispatchEscalation(slice, sliceId, reasonTag, detail);
       mutated = true;
       continue;
