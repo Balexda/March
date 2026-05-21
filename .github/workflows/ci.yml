@@ -6,7 +6,8 @@ on:
   pull_request:
 
 jobs:
-  ci:
+  build-test:
+    name: Build & Test (Node ${{ matrix.node-version }})
     runs-on: ubuntu-latest
     strategy:
       matrix:
