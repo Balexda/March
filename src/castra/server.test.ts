@@ -16,6 +16,7 @@ const SAMPLE: CastraSession = {
   branch: "march/spawn/x",
   worktreePath: "/repo/feature-march-spawn-x",
   createdAt: "2026-05-20T00:00:00Z",
+  status: "idle",
 };
 
 function fakeAdapter(overrides: Partial<AgentDeckAdapter> = {}): AgentDeckAdapter {

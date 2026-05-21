@@ -15,14 +15,17 @@ import {
   buildLegateContainerRunArgs,
   ensureLegateContainer,
   HatcheryError,
+  LEGATE_BASE_IMAGE,
   LEGATE_CONTAINER_HOME,
   LEGATE_IMAGE_TAG,
+  LEGATE_LOOP_CONTAINER_PORT,
+  gitSshCommandForMountedKeys,
   legateContainerMounts,
   legateContainerName,
+  legateLoopHostPort,
   renderLegateDockerfile,
   writeLegateDockerfile,
 } from "./legate-container.js";
-import { BASE_IMAGE } from "./spawn-config.js";
 
 describe("legate-container", () => {
   const tmpDirs: string[] = [];
@@ -52,9 +55,11 @@ describe("legate-container", () => {
     expect(legateContainerName("legate-march")).toBe("march-legate-legate-march");
   });
 
-  it("renders a toolbox Dockerfile on top of the current March base image", () => {
+  it("renders a self-sufficient loop Dockerfile from a stock node base", () => {
     const body = renderLegateDockerfile();
-    expect(body).toContain(`FROM ${BASE_IMAGE}`);
+    // Self-contained: stock node base, not the (often-absent) spawn claude base.
+    expect(body).toContain(`FROM ${LEGATE_BASE_IMAGE}`);
+    expect(LEGATE_BASE_IMAGE).toBe("node:22-bookworm-slim");
     for (const pkg of [
       "bash",
       "ca-certificates",
@@ -70,6 +75,22 @@ describe("legate-container", () => {
     expect(body).toContain(`mkdir -p ${LEGATE_CONTAINER_HOME}`);
     expect(body).toContain(`chmod 0777 ${LEGATE_CONTAINER_HOME}`);
     expect(body).not.toContain("legate-march");
+    // Installs the toolchain the loop shells out to.
+    expect(body).toContain("cli.github.com"); // gh
+    expect(body).toContain("@balexda/smithy"); // smithy
+    expect(body).toContain("ssh-keyscan"); // git-over-SSH host key
+    // Bakes the march CLI so the loop runs as `march legate loop`.
+    expect(body).toContain("COPY march/ /opt/march/");
+    expect(body).toContain("npm ci --omit=dev");
+    expect(body).toContain("ln -sf /opt/march/dist/cli.js /usr/local/bin/march");
+  });
+
+  it("derives a deterministic loopback host port per conductor", () => {
+    const a = legateLoopHostPort("legate-march");
+    expect(a).toBe(legateLoopHostPort("legate-march"));
+    expect(a).toBeGreaterThanOrEqual(8800);
+    expect(a).toBeLessThan(9800);
+    expect(legateLoopHostPort("other-conductor")).not.toBe(a);
   });
 
   it("writes the generated Dockerfile into the supplied build context", () => {
@@ -178,10 +199,11 @@ describe("legate-container", () => {
     const repo = path.join(home, "repo");
     const conductor = path.join(home, ".agent-deck", "conductor", "legate-march");
     const loop = path.join(home, ".agent-deck", "conductor", "march-legate-loop");
-    const loopScript = path.join(loop, "legate-loop.mjs");
     fs.mkdirSync(repo, { recursive: true });
     fs.mkdirSync(conductor, { recursive: true });
     fs.mkdirSync(loop, { recursive: true });
+    fs.mkdirSync(path.join(home, ".ssh"), { recursive: true });
+    fs.writeFileSync(path.join(home, ".ssh", "id_ed25519"), "key\n");
 
     const args = buildLegateContainerRunArgs({
       conductorName: "legate-march",
@@ -189,7 +211,6 @@ describe("legate-container", () => {
       repoPath: repo,
       conductorDir: conductor,
       loopConductorDir: loop,
-      loopScriptPath: loopScript,
       homeDir: home,
       imageTag: "march-legate:test",
       dockerSocketPath: path.join(home, "missing.sock"),
@@ -205,6 +226,9 @@ describe("legate-container", () => {
     ]);
     expect(args).toContain("--workdir");
     expect(args).toContain(loop);
+    // The sibling worktrees dir (<repoParent>/WorkTrees/<repoName>) is mounted so
+    // recovery/babysit/relaunch can manage steward worktrees.
+    expect(args.join("\n")).toContain(path.join(path.dirname(repo), "WorkTrees", path.basename(repo)));
     expect(args).toContain(`HOME=${LEGATE_CONTAINER_HOME}`);
     expect(args).toContain("MARCH_LEGATE_CONTAINER=1");
     expect(args).toContain("ANTHROPIC_API_KEY");
@@ -220,8 +244,65 @@ describe("legate-container", () => {
     expect(args).toContain("march-legate:test");
     expect(args).toContain("sh");
     expect(args).toContain("-lc");
+    // Publishes the loop API on a deterministic loopback host port.
+    expect(args).toContain("-p");
+    expect(args).toContain(
+      `127.0.0.1:${legateLoopHostPort("legate-march")}:${LEGATE_LOOP_CONTAINER_PORT}`,
+    );
+    // agent-deck is no longer mounted — the loop reaches it via Castra (#157).
+    expect(args.join("\n")).not.toContain("/usr/local/bin/agent-deck");
+    // Castra URL + token are forwarded so the loop can call the sessions API.
+    expect(args).toContain("CASTRA_URL");
+    expect(args).toContain("CASTRA_API_TOKEN");
+    // #154 workaround: point git's ssh at the mounted key by absolute path.
+    expect(args).toContain(
+      `GIT_SSH_COMMAND=ssh -o IdentitiesOnly=yes -i ${LEGATE_CONTAINER_HOME}/.ssh/id_ed25519`,
+    );
     expect(args.at(-1)).toContain("March Legate loop starting");
-    expect(args.at(-1)).toContain(`exec node "${loopScript}"`);
+    expect(args.at(-1)).toContain("exec march legate loop");
+  });
+
+  it("joins a Docker network when one is configured, and omits --network otherwise", () => {
+    const home = makeTmpDir();
+    const conductor = path.join(home, ".agent-deck", "conductor", "legate-smithy");
+    fs.mkdirSync(conductor, { recursive: true });
+    const common = {
+      conductorName: "legate-smithy",
+      profile: "smithy",
+      repoPath: home,
+      conductorDir: conductor,
+      homeDir: home,
+      imageTag: "march-legate:test",
+      dockerSocketPath: path.join(home, "missing.sock"),
+    };
+
+    const withNet = buildLegateContainerRunArgs({ ...common, network: "march" });
+    const i = withNet.indexOf("--network");
+    expect(i).toBeGreaterThan(-1);
+    expect(withNet[i + 1]).toBe("march");
+
+    const prev = process.env.MARCH_LEGATE_NETWORK;
+    delete process.env.MARCH_LEGATE_NETWORK;
+    try {
+      const noNet = buildLegateContainerRunArgs(common);
+      expect(noNet).not.toContain("--network");
+    } finally {
+      if (prev !== undefined) process.env.MARCH_LEGATE_NETWORK = prev;
+    }
+  });
+
+  it("orders ssh identities ed25519-first and is null without keys", () => {
+    const home = makeTmpDir();
+    expect(gitSshCommandForMountedKeys(home)).toBeNull(); // no ~/.ssh
+    fs.mkdirSync(path.join(home, ".ssh"), { recursive: true });
+    fs.writeFileSync(path.join(home, ".ssh", "id_rsa"), "k");
+    fs.writeFileSync(path.join(home, ".ssh", "id_rsa.pub"), "k"); // ignored
+    fs.writeFileSync(path.join(home, ".ssh", "id_ed25519"), "k");
+    fs.writeFileSync(path.join(home, ".ssh", "known_hosts"), "h"); // ignored
+    const cmd = gitSshCommandForMountedKeys(home)!;
+    expect(cmd).toBe(
+      `ssh -o IdentitiesOnly=yes -i ${LEGATE_CONTAINER_HOME}/.ssh/id_ed25519 -i ${LEGATE_CONTAINER_HOME}/.ssh/id_rsa`,
+    );
   });
 
   it("builds the image, replaces any existing container, and returns the launched id", () => {

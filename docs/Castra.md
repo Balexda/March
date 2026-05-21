@@ -7,10 +7,13 @@ it. It pairs with **Legate**, the commander: the camp is where the soldiers
 shelling out to `agent-deck` or bind-mounting it, so `agent-deck` lives in exactly
 one place and becomes an implementation detail of a single service.
 
-> **Status — PR1 (service only).** This ships the API + agent-deck adapter +
-> container + telemetry. Cutting the legate-loop over to the API, the dual-run
-> migration, and removing the agent-deck bind-mounts from the legate container
-> are tracked follow-ups (#156, #157); see also #158–#161.
+> **Status.** PR1 shipped the API + agent-deck adapter + container + telemetry.
+> The **legate loop is now cut over** to the API (#156): it makes all session
+> calls (list/launch/output/send/set/remove) to Castra via HTTP and the legate
+> container no longer mounts the `agent-deck` binary or `~/.agent-deck` (#157).
+> The session shape exposes agent-deck `status` and launch supports
+> `createBranch:false` (attach to an existing worktree) for the loop's steward
+> relaunch. Remaining: dual-run migration tooling; see also #158–#161.
 
 ## Topology
 
@@ -48,16 +51,18 @@ API is a focused control surface, not an arbitrary-mutation passthrough.
 
 ## Consumers
 
-The **Hatchery** is the first consumer of this API. `runHatcherySpawn`
+The **Hatchery** and the **legate loop** are both consumers, through the client
+in [`src/castra/client.ts`](../src/castra/client.ts). `runHatcherySpawn`
 (`src/hatchery/spawn-handoff.ts`) launches the steward (`POST /v1/sessions`),
 hands it the patch prompt (`POST /v1/sessions/:id/send`), and prunes it on
-failure (`DELETE /v1/sessions/:id`) over HTTP via the client in
-[`src/castra/client.ts`](../src/castra/client.ts) — so the Hatchery container no
-longer mounts `agent-deck` or the tmux socket. It points at Castra with
-`CASTRA_URL` (default `http://castra:9264` on the `march` network) +
-`CASTRA_API_TOKEN`, and its `/readyz` reports Castra reachability instead of a
-local `agent-deck` binary. Cutting the legate-loop over to the API and removing
-agent-deck from the legate container remain tracked follow-ups (#156, #157).
+failure (`DELETE /v1/sessions/:id`) via the async `CastraClient` — so the
+Hatchery container no longer mounts `agent-deck` or the tmux socket. The legate
+loop (#156, #157) makes all of its session calls (list/launch/output/send/remove)
+the same way, but through `SyncCastraClient` in the same module — its tick is
+synchronous, so it uses a `curl` transport while sharing the URL/token
+resolution, slice-id header, error envelope, and wire types. Both point at Castra
+with `CASTRA_URL` (default `http://castra:9264` on the `march` network) +
+`CASTRA_API_TOKEN`.
 
 ## Running it
 

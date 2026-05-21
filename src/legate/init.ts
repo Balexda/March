@@ -5681,7 +5681,42 @@ export async function initLegate(
     deploymentResults = LEGATE_SKILLS.map((name) => ({ name, deployed: false }));
   }
 
-  if (runProcessorSetup) {
+  if (runProcessorSetup && opts.withContainer) {
+    // Container path: the loop runs as a long-running service inside its own
+    // Hatchery-managed container (`march legate loop`). There is NO agent-deck
+    // conductor session for the loop — we only need the loop dir + meta the
+    // container mounts and reads, then we launch the container.
+    try {
+      await copyLoopFilesIntoConductor(loopStagingDir, loopConductorDir);
+      processorSetupRan = true;
+    } catch (err) {
+      postSetupWarnings.push(
+        `Failed to stage deterministic loop files into ${loopConductorDir}: ` +
+          `${(err as Error).message}`,
+      );
+    }
+    if (processorSetupRan) {
+      try {
+        legateContainer = ensureLegateContainer({
+          conductorName,
+          profile,
+          repoPath,
+          conductorDir,
+          loopConductorDir,
+          homeDir: home,
+        });
+        processorConfigured = true;
+      } catch (err) {
+        throw new LegateError(
+          `Failed to launch Hatchery Legate container: ${(err as Error).message}`,
+        );
+      }
+    }
+  } else if (runProcessorSetup) {
+    // Non-container path (legacy): the deterministic loop runs as `node
+    // legate-loop.mjs` inside an agent-deck conductor session. Kept intact so
+    // non-containerized deployments don't regress; removal is tracked in
+    // Balexda/March#146.
     try {
       execFileSync(processorSetupCommand[0], processorSetupCommand.slice(1), {
         stdio: "inherit",
@@ -5706,23 +5741,6 @@ export async function initLegate(
           `Failed to copy deterministic loop files into ${loopConductorDir}: ` +
             `${(err as Error).message}`,
         );
-      }
-      if (opts.withContainer) {
-        try {
-          legateContainer = ensureLegateContainer({
-            conductorName,
-            profile,
-            repoPath,
-            conductorDir,
-            loopConductorDir,
-            loopScriptPath: path.join(loopConductorDir, "legate-loop.mjs"),
-            homeDir: home,
-          });
-        } catch (err) {
-          throw new LegateError(
-            `Failed to launch Hatchery Legate container: ${(err as Error).message}`,
-          );
-        }
       }
       let processorToolSet = false;
       try {
@@ -5783,7 +5801,7 @@ export async function initLegate(
   const loopLine = processorEnabled
     ? processorConfigured
       ? opts.withContainer
-        ? `${loopName} (watching managed container logs; loop runs in ${legateContainer?.containerName ?? "container"})`
+        ? `${loopName} (loop service in ${legateContainer?.containerName ?? "container"}; HTTP http://127.0.0.1:${legateContainer?.hostPort ?? "?"})`
         : `${loopName} (terminal PR maintenance shell runtime configured)`
       : runProcessorSetup
         ? `${loopName} staged/configuration incomplete — see warnings`

@@ -25,6 +25,7 @@ import {
   LegateError,
 } from "../legate/init.js";
 import { DEFAULT_MANAGER_GROUP } from "../hatchery/spawn-handoff.js";
+import { DEFAULT_LOOP_PORT, runLoop } from "../legate/loop/index.js";
 import {
   HatcheryClientError,
   runSpawnViaService,
@@ -472,6 +473,35 @@ legate
         return;
       }
       throw err;
+    }
+  });
+
+legate
+  .command("loop")
+  .description(
+    "Run the deterministic Legate loop as a long-running service (used inside the managed container)",
+  )
+  .option(
+    "--meta <path>",
+    "Path to legate-loop-meta.json (default: $MARCH_LEGATE_LOOP_META or ./legate-loop-meta.json)",
+  )
+  .option(
+    "--port <port>",
+    `HTTP API port, bound to loopback (default: $MARCH_LEGATE_LOOP_PORT or ${DEFAULT_LOOP_PORT})`,
+  )
+  .action(async (opts: { meta?: string; port?: string }) => {
+    commandHandled = true;
+    const port = opts.port ? Number(opts.port) : undefined;
+    if (opts.port !== undefined && (!Number.isFinite(port) || (port as number) <= 0)) {
+      console.error(`Invalid --port "${opts.port}": expected a positive integer.\n`);
+      process.exitCode = ERROR;
+      return;
+    }
+    try {
+      await runLoop({ metaPath: opts.meta, port });
+    } catch (err) {
+      console.error((err as Error).message);
+      process.exitCode = ERROR;
     }
   });
 

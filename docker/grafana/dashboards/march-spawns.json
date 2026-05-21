@@ -16,7 +16,17 @@
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
-  "links": [],
+  "links": [
+    {
+      "asDropdown": false,
+      "icon": "external link",
+      "tags": [],
+      "targetBlank": false,
+      "title": "Legate loop service",
+      "type": "link",
+      "url": "/d/march-legate-loop"
+    }
+  ],
   "liveNow": false,
   "panels": [
     {
