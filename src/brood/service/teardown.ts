@@ -202,7 +202,7 @@ export async function teardownSession(
   // 2. Container.
   if (spawn) {
     try {
-      d.substrate.removeContainer(spawn.id);
+      d.substrate.removeSpawn(spawn.id);
       steps.push({ step: "container", outcome: "ok" });
     } catch (err) {
       steps.push({ step: "container", outcome: "failed", detail: message(err) });
@@ -252,7 +252,7 @@ export async function teardownSession(
         detail: "already removed",
       });
     } else {
-      const res = d.substrate.removeWorktreeExact(primary.repoPath, {
+      const res = d.substrate.removeWorkspace(primary.repoPath, {
         worktreePath: primary.worktreePath,
       });
       if (res.worktreeRemoved) {
@@ -274,7 +274,7 @@ export async function teardownSession(
       detail: "deferred: steward removal failed",
     });
   } else if (primary.branch && primary.repoPath) {
-    const res = d.substrate.removeWorktreeExact(primary.repoPath, {
+    const res = d.substrate.removeWorkspace(primary.repoPath, {
       branch: primary.branch,
     });
     if (res.branchDeleted) {

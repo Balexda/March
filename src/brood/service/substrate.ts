@@ -25,24 +25,27 @@ import {
  */
 export interface TeardownSubstrate {
   /**
-   * Reclaim the spawn's container. Idempotent and best-effort — a missing
-   * container is a successful no-op. An implementation MAY throw to signal a
-   * real failure (e.g. an orchestrator API rejecting the delete), which
-   * teardown records as a failed `container` step before continuing to the
-   * later steps; a non-throwing implementation (see {@link hostTeardownSubstrate})
-   * cannot surface its failures this way, so the step reflects "removal
-   * attempted" rather than "removal verified".
+   * Reclaim the spawn's compute — the running container on the host today, a
+   * pod/task on an orchestrator in a SaaS deployment (the substrate detail is
+   * abstracted away). Idempotent and best-effort — a missing instance is a
+   * successful no-op. An implementation MAY throw to signal a real failure (e.g.
+   * an orchestrator API rejecting the delete), which teardown records as a
+   * failed `container` step before continuing to the later steps; a non-throwing
+   * implementation (see {@link hostTeardownSubstrate}) cannot surface its
+   * failures this way, so the step reflects "removal attempted" rather than
+   * "removal verified".
    */
-  removeContainer(spawnId: string): void;
+  removeSpawn(spawnId: string): void;
 
   /**
-   * Reclaim the spawn's checkout by EXACT identifier — worktree path and/or
-   * branch. Implementations MUST NOT enumerate or prune other checkouts: brood
-   * removes only the exact tracked path it was handed, never a blanket
-   * `git worktree prune` (issue #155). Returns per-target flags rather than
-   * throwing.
+   * Reclaim the spawn's workspace by EXACT identifier — the host worktree path
+   * and/or branch today, an ephemeral per-execution environment/volume in a
+   * SaaS deployment. Implementations MUST NOT enumerate or prune other
+   * workspaces: brood removes only the exact tracked path it was handed, never a
+   * blanket `git worktree prune` (issue #155). Returns per-target flags rather
+   * than throwing.
    */
-  removeWorktreeExact(
+  removeWorkspace(
     repoRoot: string,
     target: { worktreePath?: string; branch?: string },
   ): RemoveWorktreeResult;
@@ -60,18 +63,18 @@ export interface TeardownSubstrate {
  * reports `ok` ("removal attempted"); a host-side docker failure is NOT
  * observable via the step outcome and must be diagnosed out of band (e.g.
  * `docker ps -a`). A substrate that needs failures surfaced as a failed step
- * (e.g. an orchestrator adapter) should throw from `removeContainer` instead.
+ * (e.g. an orchestrator adapter) should throw from `removeSpawn` instead.
  */
 export const hostTeardownSubstrate: TeardownSubstrate = {
-  removeContainer: removeSpawnContainer,
-  removeWorktreeExact: removeSpawnWorktreeExact,
+  removeSpawn: removeSpawnContainer,
+  removeWorkspace: removeSpawnWorktreeExact,
 };
 
 // Extension point (SaaS readiness, #166): provide an alternative
-// `TeardownSubstrate` whose `removeContainer` calls an orchestrator API
-// (k8s/Nomad/Fargate) and whose `removeWorktreeExact` destroys an ephemeral
+// `TeardownSubstrate` whose `removeSpawn` calls an orchestrator API
+// (k8s/Nomad/Fargate) and whose `removeWorkspace` destroys an ephemeral
 // per-execution environment/volume, then inject it via `TeardownDeps.substrate`.
-// The exact-path / never-prune contract on `removeWorktreeExact` (#155) binds
+// The exact-path / never-prune contract on `removeWorkspace` (#155) binds
 // every implementation. No real orchestrator adapter ships yet:
 //
 //   export function createOrchestratorSubstrate(

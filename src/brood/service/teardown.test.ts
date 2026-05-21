@@ -45,13 +45,13 @@ function recordingDeps(
   // one to model castra reclaiming the shared worktree.
   const present = new Set<string>();
 
-  // Substrate adapter (#169): container + worktree/branch reclamation behind one
+  // Substrate adapter (#169): spawn + workspace reclamation behind one
   // injectable seam, mirroring how teardown depends on it in production.
   const substrate: TeardownSubstrate = {
-    removeContainer: (spawnId) => {
+    removeSpawn: (spawnId) => {
       calls.push(`container:${spawnId}`);
     },
-    removeWorktreeExact: (_repo, target) => {
+    removeWorkspace: (_repo, target) => {
       // The worktree step passes only `worktreePath`; the branch step passes
       // only `branch`. Record them distinctly so order assertions can tell
       // them apart.
@@ -90,7 +90,7 @@ function recordingDeps(
     removed: present,
     deps: {
       ...deps,
-      // expose a way for tests to seed "present" paths via removeWorktreeExact
+      // expose a way for tests to seed "present" paths via removeWorkspace
     },
   };
 }
@@ -209,7 +209,7 @@ describe.skipIf(!sqliteAvailable)("teardownSession", () => {
     rec.deps.pathExists = (p) => p === group.worktreePath;
     rec.deps.substrate = {
       ...rec.deps.substrate!,
-      removeContainer: () => {
+      removeSpawn: () => {
         throw new Error("docker daemon down");
       },
     };
