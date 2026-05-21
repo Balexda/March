@@ -30,7 +30,6 @@ function ctx(): HandlerContext {
     ts: NOW,
     castra: {} as any,
     broodTeardown: vi.fn(),
-    persist: vi.fn(),
     emit: vi.fn(),
     emitTransition: vi.fn(),
     log: vi.fn(),
@@ -156,7 +155,6 @@ describe("babysit apply", () => {
     expect(slice.stage).toBe("pr-resolving-conflicts");
     expect((slice as any).last_processor_action_key).toBe("k");
     expect(res.actions[0]).toMatchObject({ action: "conflict-fix" });
-    expect(c.persist).toHaveBeenCalled();
     // #175: a Herald slice.stage.changed transition event accompanies the move.
     expect(c.emitTransition).toHaveBeenCalledWith({ type: "slice.stage.changed", sliceId: "s", stage: "pr-resolving-conflicts" });
   });

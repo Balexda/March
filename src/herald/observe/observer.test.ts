@@ -28,7 +28,6 @@ function senseDeps(over: Partial<SenseDeps> = {}): SenseDeps {
   return {
     meta,
     now: () => "2026-05-20T00:00:00Z",
-    readStateJson: () => ({ repo: { path: "/repo", default_branch: "main" }, slices: {}, archived_slices: {} }),
     listSessions: async () => [],
     syncDefaultBranch: async () => {},
     readSmithyStatus: async () => ({ records: [], graph: {} }),
@@ -70,6 +69,25 @@ describe("runObservation", () => {
     expect(first.appended.length).toBeGreaterThan(0);
     const second = await runObservation({ store, senseDeps: deps });
     expect(second.appended).toEqual([]);
+  });
+
+  it("observes the PR/output of a slice it learned from its own projection", async () => {
+    const store = fakeStore();
+    // The legate's slice.dispatched transition seeds Herald's projection with the
+    // slice→branch/session mapping — no state.json read.
+    store.append({ source: "legate", type: "slice.dispatched", sliceId: "x", branch: "smithy/forge/x", sessionId: "w1" } as AppendEventInput);
+    const result = await runObservation({
+      store,
+      senseDeps: senseDeps({
+        listSessions: async () => [{ id: "w1", group: "legate-workers", status: "idle" }],
+        queryPr: async () => ({ number: 12, state: "OPEN" }),
+        sessionOutput: async () => ({ output: "building" }),
+      }),
+    });
+    const types = result.appended.map((e) => e.type);
+    expect(types).toContain("slice.pr.changed");
+    expect(types).toContain("slice.output.changed");
+    expect(store.projection().slices.x!.pr).toMatchObject({ number: 12 });
   });
 
   it("stamps appended events with the observation ts", async () => {

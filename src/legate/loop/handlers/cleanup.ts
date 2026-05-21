@@ -86,6 +86,5 @@ export async function apply(decisions: CleanupDecision[], ctx: HandlerContext, s
     };
     res.actions.push(cleanup);
   }
-  if (res.mutated) ctx.persist(state);
   return res;
 }

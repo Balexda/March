@@ -31,12 +31,11 @@ import { CastraClient } from "../../castra/client.js";
 import type { LoopMeta } from "./meta.js";
 // Decomposed two-stage loop: Stage 1 sense → coordinator (ordered handlers) →
 // heartbeat. runtime now only wires these to the proven I/O seams below.
-import { senseState, senseFromHerald } from "./state/sense.js";
+import { senseFromHerald } from "./state/sense.js";
 import { createSenseIo, type SenseIo } from "../../observe/sense-io.js";
 import { runTick as coordinatorRunTick } from "./coordinator.js";
 import { runHeartbeat } from "./heartbeat.js";
 import { broodTeardown as broodTeardownCli } from "./clients/brood.js";
-import { heraldConfigured } from "../../herald/service/client.js";
 import { LegateHerald } from "./clients/herald.js";
 
 // Lazily-built async Castra client (constructed on first use so it reads the
@@ -61,29 +60,30 @@ function senseIo(): SenseIo {
   }));
 }
 
-// Herald inbox/write client (#175). Built lazily on first use, and only when a
-// Herald endpoint is configured (MARCH_HERALD_URL) — otherwise the loop keeps its
-// legacy self-poll sense path and writes nothing to the event log, byte-for-byte
-// unchanged. `_herald === undefined` means "not yet resolved"; `null` means
-// "resolved: not configured".
-let _herald: LegateHerald | null | undefined;
-function legateHerald(): LegateHerald | null {
-  if (_herald !== undefined) return _herald;
-  _herald = heraldConfigured(process.env)
-    ? new LegateHerald({ conductorDir: meta.legate_conductor_dir, env: process.env })
-    : null;
-  return _herald;
+// Herald inbox/write client (#175, #176). Built lazily on first use. Since
+// state.json was retired (#176) the legate is unconditionally Herald-backed:
+// Stage 1 drains the inbox and the working state is the event-log fold, so the
+// client always exists (it resolves MARCH_HERALD_URL, defaulting to the
+// deterministic local Herald port).
+let _herald: LegateHerald | undefined;
+function legateHerald(): LegateHerald {
+  return (_herald ??= new LegateHerald({ conductorDir: meta.legate_conductor_dir, env: process.env }));
 }
 
-// Append a transition event to Herald, dual-written alongside state.json during
-// the PR2 soak. Fire-and-forget: a Herald write must never break or slow a tick
-// (the legate's working state is still state.json until PR3). No-op when Herald
-// isn't configured.
+// In-memory working state (the former state.json `raw`): slices, archived_slices,
+// repo, transient retry counters. Threaded across ticks — the Stage-2 handlers
+// mutate it in place — and rebuilt from the Herald fold on cold start (#176). Its
+// durable backing is the event log: every mutation that matters is mirrored by an
+// emitTransition, so a restart reconstructs it from snapshot + trailing events.
+let workingState: any = null;
+
+// Append a transition event to Herald. Since state.json was retired (#176) this
+// is the SOLE durable record of a legate transition. Fire-and-forget: a Herald
+// write must never break or slow a tick (Herald is the single sequencer and
+// re-folds idempotently on its side).
 function emitTransition(event) {
-  const herald = legateHerald();
-  if (!herald) return;
   Promise.resolve()
-    .then(() => herald.append(event))
+    .then(() => legateHerald().append(event))
     .catch(() => {});
 }
 
@@ -219,11 +219,6 @@ function appendTextSilent(file, text) {
 
 function printText(text) {
   console.log(text);
-}
-
-function writeJson(file, value) {
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, JSON.stringify(value, null, 2) + "\n", "utf-8");
 }
 
 // Async command runner (replaces the former execFileSync). Rejects on non-zero
@@ -1299,13 +1294,13 @@ async function completePendingHatcheryDispatches(state, ts) {
   const queueDispatchEscalation = (slice, sliceId, reason, error) => {
     // Build a stable requestKey so requestLegateJudgement only fires once per
     // distinct failure mode. Without notification the agent never wakes and
-    // the operator sees "loop is silent" while state.json piles up escalated
-    // slices.
+    // the operator sees "loop is silent" while escalated slices pile up
+    // unobserved.
     const key = "hatchery-failure:" + sliceId + ":" + reason + ":" + hashText(String(error || "")).slice(0, 12);
     notifications.push({
       slice, sliceId, requestKey: key,
       reason: "hatchery_dispatch_failed",
-      detail: "Hatchery dispatch for " + actionCommandLine({ command: slice.command, arguments: slice.arguments || [] }) + " escalated: " + reason + ".\n\nError:\n" + String(error || "(no detail)").trim() + "\n\nSlice has been marked escalated in state.json. If reason is 'spawn-error' with 'branch ... already exists' or any 'branch-collision-*' verdict, load legate.unwedge and run inspect-partial-work.sh / clean-stale-branch.sh — the loop auto-recovers orphan-ref and post-merge-stale cases, but anything with an open PR or unknown divergence reaches here for operator inspection. Otherwise run legate.error for worker-side recovery.",
+      detail: "Hatchery dispatch for " + actionCommandLine({ command: slice.command, arguments: slice.arguments || [] }) + " escalated: " + reason + ".\n\nError:\n" + String(error || "(no detail)").trim() + "\n\nSlice has been marked escalated (slice.escalated transition event). If reason is 'spawn-error' with 'branch ... already exists' or any 'branch-collision-*' verdict, load legate.unwedge and run inspect-partial-work.sh / clean-stale-branch.sh — the loop auto-recovers orphan-ref and post-merge-stale cases, but anything with an open PR or unknown divergence reaches here for operator inspection. Otherwise run legate.error for worker-side recovery.",
     });
   };
   const escalateStale = (slice, sliceId, reason) => {
@@ -1720,7 +1715,6 @@ async function handleRecoveryDispatch(state, ts, item, sliceId, mergedArchive) {
       last_action_note: "Queued Hatchery recovery codex spawn (attempt " + attempt + ") for " + actionCommandLine(action),
     };
     state.recovery_attempts[sliceId] = attempt;
-    writeJson(meta.legate_state_path, state);
     const launched = launchHatcheryDispatch(item, resultPath, logPath, {
       branchOverride: recoveryBranch,
       titleOverride: recoveryTitle,
@@ -1751,7 +1745,7 @@ async function handleRecoveryDispatch(state, ts, item, sliceId, mergedArchive) {
         reason: "hatchery_recovery_dispatch_failed",
         detail: "Hatchery recovery dispatch launch threw for " + actionCommandLine(item.next_action)
           + " (recovery attempt " + attempt + ").\n\nError:\n" + error
-          + "\n\nSlice is escalated in state.json. legate.unwedge / legate.error as appropriate.",
+          + "\n\nSlice is escalated. legate.unwedge / legate.error as appropriate.",
       });
     }
     failures.push({
@@ -1796,7 +1790,6 @@ function launchDispatch(state, ts, item, sliceId) {
       last_action: ts,
       last_action_note: "Queued Hatchery codex spawn for " + actionCommandLine(action),
     };
-    writeJson(meta.legate_state_path, state);
     const launched = launchHatcheryDispatch(item, resultPath, logPath);
     actions.push({
       action: "dispatch",
@@ -1817,7 +1810,7 @@ function launchDispatch(state, ts, item, sliceId) {
         slice: existing, sliceId,
         requestKey: "hatchery-failure:" + sliceId + ":launch-throw:" + hashText(error).slice(0, 12),
         reason: "hatchery_dispatch_failed",
-        detail: "Hatchery dispatch launch threw for " + actionCommandLine(item.next_action) + ".\n\nError:\n" + error + "\n\nSlice is escalated in state.json. For 'branch already exists' surface this via legate.unwedge; otherwise legate.error.",
+        detail: "Hatchery dispatch launch threw for " + actionCommandLine(item.next_action) + ".\n\nError:\n" + error + "\n\nSlice is escalated. For 'branch already exists' surface this via legate.unwedge; otherwise legate.error.",
       });
     }
     failures.push({ slice_id: sliceId, command: actionCommandLine(item.next_action), error });
@@ -1838,7 +1831,8 @@ function launchDispatch(state, ts, item, sliceId) {
 
 // `march` CLI runner for the Brood seam, honoring meta.march_cli_path (the
 // container's baked-in path) and capturing exit + streams for broodTeardown.
-// Two-stage tick: Stage 1 senseState gathers the snapshot; the coordinator runs
+// Two-stage tick: Stage 1 senseFromHerald drains the inbox + folds the working
+// state; the coordinator runs
 // the ordered handlers (cleanup → ghost-cleanup → relaunch → babysit → dispatch)
 // as pure assess + effecting apply; the heartbeat writes the record + events and
 // snapshots it for /status. All I/O is wired to the proven async seams in this
@@ -1855,11 +1849,11 @@ async function tick() {
     // Brood is a service; broodTeardown hits it over HTTP via the async
     // BroodClient (MARCH_BROOD_URL). No CLI shelling.
     broodTeardown: (sessionId, opts) => broodTeardownCli(sessionId, opts),
-    persist: (s) => writeJson(meta.legate_state_path, s.raw),
     emit: (event) => append(meta.processor_events_path, event),
-    // Herald transition events (#175), dual-written alongside state.json during
-    // the soak. Undefined when Herald isn't configured so handlers no-op.
-    emitTransition: herald ? (event) => emitTransition(event) : undefined,
+    // Herald transition events (#176): the sole durable record of a transition
+    // now that state.json is retired. The in-memory working state is mutated by
+    // the handlers directly and reconstructed from these events on cold start.
+    emitTransition: (event) => emitTransition(event),
     log: (line) => appendText(meta.processor_log_path, line),
   });
 
@@ -1869,9 +1863,9 @@ async function tick() {
   };
 
   const dispatchDeps = {
-    // Under Herald, the default-branch sync is owned by Herald (MARCH_HERALD_SYNC);
-    // drop the dispatch-side best-effort re-sync so the legate never fights it.
-    syncDefaultBranch: herald ? async () => {} : (rawState) => senseIo().syncDefaultBranch(rawState),
+    // The default-branch sync is owned by Herald (MARCH_HERALD_SYNC); the legate
+    // never fetches so it can't fight it.
+    syncDefaultBranch: async () => {},
     completePending: (rawState, ts) => completePendingHatcheryDispatches(rawState, ts),
     launchDispatch: (rawState, ts, item, sliceId) => launchDispatch(rawState, ts, item, sliceId),
     recoveryDispatch: (rawState, ts, item, sliceId, mergedArchive) =>
@@ -1879,12 +1873,10 @@ async function tick() {
     requestJudgement: (input) => requestLegateJudgement(input),
   };
 
-  // Stage 1 cutover (#175): when Herald is configured, drain + fold its event
-  // inbox into the LoopState instead of self-polling gh/git/smithy/Castra;
-  // otherwise keep the legacy senseState path (backward-compatible).
-  const sense = herald
-    ? () => senseFromHerald(senseDeps, herald)
-    : () => senseState(senseDeps);
+  // Stage 1 (#176): drain + fold the Herald inbox into the LoopState. The working
+  // state `raw` is the in-memory `workingState` threaded across ticks (null on
+  // cold start, when senseFromHerald rebuilds it from the fold).
+  const sense = () => senseFromHerald(senseDeps, herald, workingState);
 
   const out = await coordinatorRunTick({
     sense,
@@ -1892,6 +1884,10 @@ async function tick() {
     babysit: babysitDeps,
     dispatch: dispatchDeps,
   });
+
+  // Keep the working state across ticks: the handlers mutated out.state.raw in
+  // place; on cold start senseFromHerald rebuilt it, so capture the reference.
+  workingState = out.state.raw;
 
   runHeartbeat(out, {
     meta: {

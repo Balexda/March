@@ -4,7 +4,7 @@ import { dispatchBranch, dispatchItemKey, sliceActionKey } from "./dispatch-id.j
  * Pure slice/archive reasoning: terminal detection and the dedup/recovery
  * matchers that decide whether a smithy item is already in flight, already
  * archived, or colliding with a prior MERGED archive. No I/O — all derived from
- * the passed `state` (state.json) + smithy `item`.
+ * the passed `state` (the in-memory working state) + smithy `item`.
  */
 
 export function isTerminalSlice(slice: any): boolean {

@@ -24,8 +24,8 @@ client, deterministic config, per-service metrics + logger, and a Docker image.
                                               │ GET /events    │ POST /events
                                               │ ?after=cursor  │ (transitions)
             ┌─────────── Legate (efferent) ───▼───────────────┴──────┐
-            │  drain the inbox one event at a time → fold → react →    │
-            │  append transition events (PR2 cutover, on MARCH_HERALD_URL) │
+            │  drain the inbox → fold → react → append transition      │
+            │  events. The fold IS the working state (no state.json).  │
             └──────────────────────────────────────────────────────────┘
 ```
 
@@ -53,16 +53,20 @@ contract **both** services import (Herald to serve `/state`, the legate to
 rebuild its working state). `EventType` is deliberately low-cardinality (it is a
 metrics label).
 
-- **Observation events** (Herald-written, live today): `slice.pr.changed`,
+- **Observation events** (Herald-written): `slice.pr.changed`,
   `slice.output.changed`, `session.changed`, `workers.changed`,
-  `smithy.queue.changed`, `state.error` / `state.ok`, `heartbeat`.
+  `smithy.queue.changed`, `heartbeat`. (`state.error` / `state.ok` are retired as
+  of #176 — they signalled a `state.json` read failure — but the reducer still
+  folds them for replay of older logs.)
 - **Transition events** (legate-written, emitted at the cutover): `slice.dispatched`,
   `slice.stage.changed`, `slice.archived`, `slice.recovery.dispatched`,
   `steward.relaunched`, `slice.escalated`, `retry.counted`.
 
 `reduce(state, event)` folds either kind into a `SystemState` (per-slice stage +
-PR/output, worker counts, smithy queue, sessions, retry counters). The fold is
-what ultimately replaces the legate's `state.json`.
+PR/output, worker counts, smithy queue, sessions, retry counters). Since #176
+this fold **is** the system state — there is no `state.json`. The legate keeps
+its working state in memory across ticks and rebuilds it from the fold (snapshot
++ trailing events) on a cold start.
 
 ## The closed observe→react loop
 
@@ -92,7 +96,7 @@ src/herald/
     client.ts          HeraldClient + Unavailable/NotFound errors; resolveHeraldUrl / heraldConfigured
     types.ts           store + HTTP query/response types
   observe/
-    observer.ts        runObservation: read projection → senseState → diff → append
+    observer.ts        runObservation: read projection → senseObserved → diff → append
     diff.ts            pure diffObserved(prev, loop) → event bodies (emits only deltas)
 ```
 
@@ -136,9 +140,11 @@ state`.
   the legate's inbox consumption so a deployment without Herald is unaffected.
 - **Meta** — Herald observes the same deployment as the legate, so it reads the
   legate's meta (`MARCH_HERALD_META`, falling back to `MARCH_LEGATE_LOOP_META`).
-- **Read-only by default** — `MARCH_HERALD_SYNC=1` lets Herald own the
-  default-branch `git` sync; left **off** so it never fights a still-polling
-  legate. Herald never touches Docker.
+- **Default-branch sync** — `MARCH_HERALD_SYNC=1` lets Herald own the
+  default-branch `git` sync. It shipped **off** during the rollout so it never
+  fought a still-polling legate; since #176 the legate no longer polls or syncs,
+  so a deployment that wants a fresh local default (so `smithy status` is current)
+  should now run Herald with `MARCH_HERALD_SYNC=1`. Herald never touches Docker.
 - **Telemetry** — `MARCH_OTEL=1` enables `march.herald.*` metrics
   ([`../observability/herald-metrics.ts`](../observability/herald-metrics.ts))
   and JSONL/OTLP logs; a no-op when off. Dashboard:
@@ -154,14 +160,18 @@ Herald is being landed incrementally so the running legate is never at risk:
    refactor, no behavior change).
 2. **PR1 (this service)** — Herald produces observation events; the legate keeps
    polling. Herald is independently deployable and observable.
-3. **PR2 (this change)** — the legate drains the inbox + writes transition events
-   (cutover), gated on `MARCH_HERALD_URL`. When set, Stage-1 sense is sourced from
-   the folded inbox (`senseFromHerald`) instead of self-polling, and handlers
-   dual-write transition events alongside `state.json`. Unset = byte-for-byte the
-   legacy path. The persistent inbox cursor lives in the legate conductor dir
+3. **PR2 (#175)** — the legate drains the inbox + writes transition events
+   (cutover). Stage-1 sense is sourced from the folded inbox (`senseFromHerald`)
+   instead of self-polling, and handlers dual-write transition events alongside
+   `state.json`. The persistent inbox cursor lives in the legate conductor dir
    (`herald-cursor.json`); the legate seam is `src/legate/loop/clients/herald.ts`.
-4. **PR3** — retire `state.json`; the fold becomes the sole source of truth.
+4. **PR3 (#176, this change)** — retire `state.json`; the fold is the sole source
+   of system state. The legate is unconditionally Herald-backed: its working state
+   lives in memory, is mutated by the Stage-2 handlers, is recorded only as
+   transition events, and is rebuilt from the fold on cold start. Herald's observer
+   learns slice→branch/session from its OWN projection (`senseObserved`, fed by the
+   legate's `slice.dispatched`) instead of reading `state.json`.
 
 The two-stage loop was built for this split: `src/legate/loop/state/types.ts`
-documents the Herald cutover and `src/legate/loop/coordinator.ts` already injects
-`sense` as a swappable dependency.
+documents the Herald cutover and `src/legate/loop/coordinator.ts` injects `sense`
+as a swappable dependency.

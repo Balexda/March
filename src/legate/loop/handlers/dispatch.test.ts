@@ -32,7 +32,6 @@ function ctx(): HandlerContext {
     ts: "T",
     castra: {} as any,
     broodTeardown: vi.fn(),
-    persist: vi.fn(),
     emit: vi.fn(),
     log: vi.fn(),
   };
@@ -80,7 +79,6 @@ describe("dispatch apply (orchestration)", () => {
     expect(d.completePending).toHaveBeenCalled();
     expect(d.launchDispatch).toHaveBeenCalledTimes(1);
     expect(res.actions.some((a) => a.action === "dispatch")).toBe(true);
-    expect(c.persist).toHaveBeenCalled();
   });
 
   it("fires legate-judgement requests for completion notifications", async () => {

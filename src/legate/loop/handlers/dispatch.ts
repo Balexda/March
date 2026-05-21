@@ -104,7 +104,6 @@ export async function apply(_decisions: DispatchDecision[], ctx: HandlerContext,
     await fireNotifications(deps, ts, out.notifications, res);
   }
 
-  if (res.mutated) ctx.persist(state);
   return res;
 }
 

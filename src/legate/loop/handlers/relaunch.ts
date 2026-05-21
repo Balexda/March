@@ -12,7 +12,7 @@ import { execText } from "../clients/exec.js";
  * babysit messages have somewhere to land. assess() is pure; apply() recreates
  * the worktree if needed, launches via Castra, sends a resume-context prompt,
  * and rewrites the slice's worker pointer. Throttled to {@link RELAUNCH_LIMIT}
- * attempts per slice via state.json's transient_retry_counts.
+ * attempts per slice via the working state's transient_retry_counts.
  */
 
 const ELIGIBLE_STAGES = new Set([
@@ -204,6 +204,5 @@ export async function apply(
     });
   }
 
-  if (res.mutated) ctx.persist(state);
   return res;
 }

@@ -32,7 +32,6 @@ function ctx(teardown: () => BroodTeardownResult): HandlerContext {
     ts: NOW,
     castra: {} as any,
     broodTeardown: vi.fn(async () => teardown()),
-    persist: vi.fn(),
     emit: vi.fn(),
     log: vi.fn(),
   };

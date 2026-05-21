@@ -1,9 +1,9 @@
 import type { LoopState } from "./types.js";
 
 /**
- * In-memory + state.json mutations shared by Stage-2 handlers' apply(). Mutating
+ * In-memory working-state mutations shared by Stage-2 handlers' apply(). Mutating
  * the LoopState snapshot (not re-polling) is what lets later handlers see the
- * effects of earlier ones within a tick.
+ * effects of earlier ones within a tick; the durable record is the event log.
  */
 
 /** Move a slice into archived_slices and drop it from the live set. Mutates `raw`. */

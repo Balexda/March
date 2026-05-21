@@ -82,20 +82,12 @@ describe("diffObserved", () => {
     expect(changed).toEqual([{ type: "slice.pr.changed", sliceId: "s1", pr: { number: 1, state: "MERGED" } }]);
   });
 
-  it("emits state.error on transition into an error", () => {
+  it("no longer emits state.error / state.ok (Herald does not read state.json, #176)", () => {
+    // Even with a stateError on the snapshot, the retired emission is gone; the
+    // reducer still folds those types for replay of pre-#176 logs.
     const bodies = diffObserved(emptySystemState(), loop({ statePresent: false, stateError: "bad json" }));
-    expect(bodies).toContainEqual({ type: "state.error", message: "bad json" });
-  });
-
-  it("emits state.ok when a prior error recovers (and the reducer clears it)", () => {
-    const errored = applyDiff(emptySystemState(), loop({ statePresent: false, stateError: "bad json" }));
-    expect(errored.stateError).toBe("bad json");
-    // A later healthy read with no slice change must clear the latched error.
-    const bodies = diffObserved(errored, loop({ statePresent: true, stateError: null }));
-    expect(bodies).toContainEqual({ type: "state.ok" });
-    const recovered = applyDiff(errored, loop({ statePresent: true, stateError: null }));
-    expect(recovered.stateError).toBeNull();
-    expect(recovered.statePresent).toBe(true);
+    expect(bodies.map((b) => b.type)).not.toContain("state.error");
+    expect(bodies.map((b) => b.type)).not.toContain("state.ok");
   });
 
   it("skips workers when Castra was unavailable ({error})", () => {

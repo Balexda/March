@@ -6,18 +6,25 @@ import { readySmithyItems } from "../pure/smithy-graph.js";
 import type { ObservedSession, SystemState } from "../../../herald/events.js";
 
 /**
- * Stage 1: gather every external read into one {@link LoopState} snapshot —
- * state.json, Castra sessions (the source of agent-deck activity status),
- * smithy readiness, and the per-slice PR/output state for active slices. This is
- * the surface Herald will later push instead of poll; the I/O is injected via
- * {@link SenseDeps} so it's fully unit-testable.
+ * Stage 1: gather every external read into one {@link LoopState} snapshot. Since
+ * the Herald cutover (#176) the system state is event-sourced, so there are two
+ * Herald-backed entry points and NO `state.json`:
+ *
+ *   - {@link senseFromHerald} — the legate's Stage 1. The working state (`raw`)
+ *     is held in memory across ticks and rebuilt from the Herald fold on cold
+ *     start; the observed world (sessions, workers, per-slice PR/output) comes
+ *     from the fold.
+ *   - {@link senseObserved} — Herald's own observation Stage 1. It sources the
+ *     slices-to-observe from Herald's projection (fed by the legate's
+ *     `slice.dispatched` transition events) and reads the live world for them.
+ *
+ * The world-observing I/O is injected via {@link SenseDeps} so both paths are
+ * fully unit-testable.
  */
 
 export interface SenseDeps {
   readonly meta: LoopMeta;
   readonly now: () => string;
-  /** Read + parse state.json; return null when absent, throw on a real error. */
-  readonly readStateJson: () => any;
   /** Castra session list, mapped to agent-deck-shaped objects (or `{error}`). */
   readonly listSessions: () => Promise<any[] | { error: string }>;
   /** Best-effort default-branch sync before reading smithy (keeps status fresh). */
@@ -42,9 +49,10 @@ async function senseSmithy(
   if (typeof repoPath !== "string" || repoPath.length === 0) {
     return { ok: false, error: "repo path is missing", ready: [], queue: { dispatchable: 0, blocked: 0, total: 0 } };
   }
-  // The Herald sense path passes `sync:false` — Herald owns the default-branch
-  // sync once it's deployed (`MARCH_HERALD_SYNC=1`), so the legate must not also
-  // fetch and fight it. The legacy self-poll path keeps syncing (default true).
+  // The legate's Herald sense path passes `sync:false` — Herald owns the
+  // default-branch sync (`MARCH_HERALD_SYNC=1`), so the legate must not also
+  // fetch and fight it. Herald's own observe path syncs (its `syncDefaultBranch`
+  // is itself the no-op when read-only), so it leaves the default (true).
   if (opts.sync !== false) {
     try {
       await deps.syncDefaultBranch(repoPath, state?.repo?.default_branch);
@@ -74,79 +82,6 @@ async function senseSmithy(
   };
 }
 
-export async function senseState(deps: SenseDeps): Promise<LoopState> {
-  const ts = deps.now();
-  let raw: any = null;
-  let stateError: string | null = null;
-  try {
-    raw = deps.readStateJson();
-  } catch (err: any) {
-    stateError = err?.message || String(err);
-  }
-  const slices = raw?.slices && typeof raw.slices === "object" ? raw.slices : {};
-  const archived = raw?.archived_slices && typeof raw.archived_slices === "object" ? raw.archived_slices : {};
-  const repoPath = raw?.repo?.path || deps.meta.repo?.path;
-
-  const sessionList = await deps.listSessions();
-  const sessions = Array.isArray(sessionList) ? sessionList : [];
-  const sessionsById = new Map<string, any>();
-  for (const s of sessions) {
-    if (s?.id) sessionsById.set(String(s.id), s);
-    if (s?.title) sessionsById.set(String(s.title), s);
-    if (s?.name) sessionsById.set(String(s.name), s);
-  }
-  const workers = summarizeWorkers(sessionList, deps.meta.worker_group);
-
-  // Per-slice external state for slices with a live, non-terminal session — the
-  // union of what cleanup (PR terminal?) and babysit (PR/CI/output) need.
-  const perSlice: Record<string, SliceExternalState> = {};
-  if (raw) {
-    for (const [sliceId, slice] of Object.entries(slices) as [string, any][]) {
-      if (!slice || typeof slice !== "object") continue;
-      const sessionId = String(slice.worker_session_id || "");
-      if (!sessionId) continue;
-      const sessionPresent = sessions.some((s) => sessionMatchesSlice(s, slice));
-      if (!sessionPresent) continue;
-      if (isTerminalSlice(slice)) continue;
-      const entry: SliceExternalState = {};
-      try {
-        let pr = await deps.queryPr(slice, raw, repoPath);
-        // Implementing slice with no PR yet: queryPr skips (no number to query),
-        // so fall back to branch/output-based discovery — Stage 1 owns the read
-        // so babysit's assess can treat "discovered" and "queried" uniformly.
-        if ((!pr || pr.skipped) && slice.stage === "implementing" && !slice.pr?.number && deps.discoverPr) {
-          pr = (await deps.discoverPr(slice, raw, repoPath, sessionId)) ?? pr;
-        }
-        entry.pr = pr;
-      } catch (err: any) {
-        entry.pr = { error: err?.message || String(err) };
-      }
-      try {
-        entry.recentOutput = await deps.sessionOutput(sessionId);
-      } catch (err: any) {
-        entry.recentOutput = { output: "", error: err?.message || String(err) };
-      }
-      perSlice[sliceId] = entry;
-    }
-  }
-
-  return {
-    ts,
-    statePresent: Boolean(raw),
-    stateError,
-    raw,
-    slices,
-    archived,
-    repoPath,
-    workerGroup: deps.meta.worker_group,
-    sessions,
-    sessionsById,
-    workers,
-    smithy: await senseSmithy(deps, raw, repoPath),
-    perSlice,
-  };
-}
-
 /** A consumer of the Herald inbox — drains + folds, returning the projection. */
 export interface HeraldInbox {
   consume(): Promise<SystemState>;
@@ -171,38 +106,76 @@ function adaptObservedSession(s: ObservedSession): any {
 }
 
 /**
- * Stage 1, Herald cutover (#175): build the same {@link LoopState} snapshot the
- * Stage-2 handlers consume, but sourced from the Herald event inbox instead of
- * the legate's own polling. The expensive per-slice PR/output reads, the Castra
- * session list, and the worker buckets all come from the folded projection
- * ({@link HeraldInbox.consume}); the default-branch sync is dropped (Herald owns
- * it). Two things are still read locally during the PR2 soak:
- *
- *   - `raw` / `slices` / `archived` from **state.json** — the legate-owned
- *     working state, dual-written by the handlers (PR3 retires it for the fold).
- *   - the smithy **ready records** — the dispatch-ordered set is not yet
- *     event-sourced (the fold carries only the queue counts), so it's read via
- *     `smithy status`, but WITHOUT the sync.
- *
- * Gated by the runtime on `heraldConfigured(env)` so an unset deployment keeps
- * {@link senseState} byte-for-byte.
+ * Cold-start rebuild of the legate's working `raw` from the Herald fold. The
+ * fold is intentionally thin (its `EventType` is a low-cardinality metric
+ * label), so this restores the slice SET and the durable facts the fold carries
+ * — stage, branch, worktree, session, PR snapshot, archive, and the transient
+ * retry counters — while the loop's self-healing (PR discovery, branch-collision
+ * recovery, stranded-steward nudges) re-derives the per-slice cadence fields the
+ * fold does not. A restart therefore resumes against the same slices rather than
+ * a blank slate, which is what makes retiring `state.json` safe (#176).
  */
-export async function senseFromHerald(deps: SenseDeps, herald: HeraldInbox): Promise<LoopState> {
-  const ts = deps.now();
-  let raw: any = null;
-  let stateError: string | null = null;
-  try {
-    raw = deps.readStateJson();
-  } catch (err: any) {
-    stateError = err?.message || String(err);
+export function rebuildWorkingState(sys: SystemState, meta: LoopMeta): any {
+  const slices: Record<string, any> = {};
+  const archivedSlices: Record<string, any> = {};
+  for (const [sliceId, s] of Object.entries(sys.slices)) {
+    const pr = s.pr as any;
+    const prState = pr?.state;
+    if (s.archived) {
+      archivedSlices[sliceId] = {
+        pr_number: pr?.number ?? null,
+        pr_url: pr?.url ?? null,
+        branch: s.branch ?? null,
+        terminal_state: prState === "MERGED" || prState === "CLOSED" ? prState : s.stage === "merged" ? "MERGED" : null,
+      };
+      continue;
+    }
+    const slice: any = {
+      kind: "smithy",
+      worker_session_id: s.sessionId ?? null,
+      branch: s.branch ?? null,
+      worktree_path: s.worktreePath ?? null,
+      stage: s.stage,
+      pr: pr ?? null,
+    };
+    if (s.escalatedReason !== undefined) slice.last_action_note = s.escalatedReason;
+    slices[sliceId] = slice;
   }
-  const slices = raw?.slices && typeof raw.slices === "object" ? raw.slices : {};
-  const archived = raw?.archived_slices && typeof raw.archived_slices === "object" ? raw.archived_slices : {};
-  const repoPath = raw?.repo?.path || deps.meta.repo?.path;
+  return {
+    repo: { ...(meta.repo ?? {}) },
+    slices,
+    archived_slices: archivedSlices,
+    transient_retry_counts: { ...sys.retries },
+  };
+}
+
+/**
+ * Stage 1 for the legate, Herald-backed (#176). The legate's working state is
+ * the in-memory `raw` object threaded across ticks: the Stage-2 handlers mutate
+ * it in place and it is never written to disk. On the first tick after process
+ * start `prevRaw` is null, so the working state is rebuilt from the Herald fold
+ * ({@link rebuildWorkingState}); thereafter the SAME object is reused and the
+ * caller keeps it via the returned {@link LoopState.raw}.
+ *
+ * The observed world (sessions, workers, per-slice PR/output) always comes from
+ * the folded inbox ({@link HeraldInbox.consume}); the smithy ready set is read
+ * locally WITHOUT syncing (Herald owns the sync). The durable record of every
+ * transition is the event log (the handlers' `emitTransition`), so the in-memory
+ * `raw` can always be rebuilt after a restart.
+ */
+export async function senseFromHerald(deps: SenseDeps, herald: HeraldInbox, prevRaw: any): Promise<LoopState> {
+  const ts = deps.now();
 
   // Drain + fold the Herald inbox: the observed world (sessions, workers,
   // per-slice PR/output) instead of polling gh/git/Castra directly.
   const sys = await herald.consume();
+
+  const raw = prevRaw ?? rebuildWorkingState(sys, deps.meta);
+  if (!raw.slices || typeof raw.slices !== "object") raw.slices = {};
+  if (!raw.archived_slices || typeof raw.archived_slices !== "object") raw.archived_slices = {};
+  const slices = raw.slices;
+  const archived = raw.archived_slices;
+  const repoPath = raw.repo?.path || deps.meta.repo?.path;
 
   const sessions = Object.values(sys.sessions).map(adaptObservedSession);
   const sessionsById = new Map<string, any>();
@@ -223,8 +196,8 @@ export async function senseFromHerald(deps: SenseDeps, herald: HeraldInbox): Pro
 
   return {
     ts,
-    statePresent: Boolean(raw),
-    stateError,
+    statePresent: true,
+    stateError: null,
     raw,
     slices,
     archived,
@@ -234,6 +207,89 @@ export async function senseFromHerald(deps: SenseDeps, herald: HeraldInbox): Pro
     sessionsById,
     workers,
     smithy: await senseSmithy(deps, raw, repoPath, { sync: false }),
+    perSlice,
+  };
+}
+
+/**
+ * Stage 1 for the Herald observation service (#176): assemble the observed
+ * {@link LoopState} the diff folds into events, sourcing the slices-to-observe
+ * from Herald's OWN projection (`prev`, fed by the legate's `slice.dispatched`
+ * transition events) instead of reading the legate's `state.json`. For every
+ * non-terminal slice with a live worker session it reads the PR/CI/review state
+ * and recent session output — the per-slice surface the legate then drains from
+ * the inbox. The world reads (sessions, workers, smithy) are unchanged; the git
+ * sync runs through `deps.syncDefaultBranch`, itself a no-op unless Herald is in
+ * sync mode.
+ */
+export async function senseObserved(deps: SenseDeps, prev: SystemState): Promise<LoopState> {
+  const ts = deps.now();
+  const repoPath = deps.meta.repo?.path;
+  // Synthetic working-state shell carrying only the repo identity the gh/git
+  // reads need (owner discovery, PR queries). There is no state.json to read.
+  const state = { repo: { path: repoPath } };
+
+  const sessionList = await deps.listSessions();
+  const sessions = Array.isArray(sessionList) ? sessionList : [];
+  const sessionsById = new Map<string, any>();
+  for (const s of sessions) {
+    if (s?.id) sessionsById.set(String(s.id), s);
+    if (s?.title) sessionsById.set(String(s.title), s);
+    if (s?.name) sessionsById.set(String(s.name), s);
+  }
+  const workers = summarizeWorkers(sessionList, deps.meta.worker_group);
+
+  // Per-slice external state for slices the projection knows are live and
+  // non-terminal — the union of what cleanup (PR terminal?) and babysit (PR/CI/
+  // output) need, mirroring the former state.json-sourced loop.
+  const perSlice: Record<string, SliceExternalState> = {};
+  for (const [sliceId, s] of Object.entries(prev.slices)) {
+    if (s.archived) continue;
+    const sessionId = String(s.sessionId || "");
+    if (!sessionId) continue;
+    const sliceLike = {
+      pr: s.pr,
+      branch: s.branch,
+      worktree_path: s.worktreePath,
+      worker_session_id: sessionId,
+      stage: s.stage,
+    };
+    if (!sessions.some((sx) => sessionMatchesSlice(sx, sliceLike))) continue;
+    if (isTerminalSlice(sliceLike)) continue;
+    const entry: SliceExternalState = {};
+    try {
+      let pr = await deps.queryPr(sliceLike, state, repoPath);
+      // Implementing slice with no PR yet: queryPr skips (no number to query),
+      // so fall back to branch/output-based discovery so the legate sees the PR
+      // appear in its inbox uniformly.
+      if ((!pr || pr.skipped) && s.stage === "implementing" && !(s.pr as any)?.number && deps.discoverPr) {
+        pr = (await deps.discoverPr(sliceLike, state, repoPath, sessionId)) ?? pr;
+      }
+      entry.pr = pr;
+    } catch (err: any) {
+      entry.pr = { error: err?.message || String(err) };
+    }
+    try {
+      entry.recentOutput = await deps.sessionOutput(sessionId);
+    } catch (err: any) {
+      entry.recentOutput = { output: "", error: err?.message || String(err) };
+    }
+    perSlice[sliceId] = entry;
+  }
+
+  return {
+    ts,
+    statePresent: true,
+    stateError: null,
+    raw: state,
+    slices: {},
+    archived: {},
+    repoPath,
+    workerGroup: deps.meta.worker_group,
+    sessions,
+    sessionsById,
+    workers,
+    smithy: await senseSmithy(deps, state, repoPath),
     perSlice,
   };
 }
