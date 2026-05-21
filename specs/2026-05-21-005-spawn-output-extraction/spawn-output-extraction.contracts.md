@@ -4,6 +4,20 @@
 
 Spawn Output Extraction defines the boundary between completed spawn execution and downstream Steward / PR integration. It consumes lifecycle state and backend output, validates patch content, persists a backend-neutral result, and exposes only validated patch data for handoff.
 
+## Types
+
+These named types appear in the signatures below. They map onto the entities in the [data model](spawn-output-extraction.data-model.md); field-level validation rules live there.
+
+| Type | Kind | Shape |
+|------|------|-------|
+| `ExtractSpawnOutputInput` | input | `{ spawnId: string; backend: string; worktreePath: string; outputSource: OutputSource }` — matches the Extraction Runner inputs below. |
+| `OutputSource` | adapter | `{ readOutput(spawnId: string): { rawJson: string; truncated: boolean } }` — returns bounded output for a terminal spawn; abstracts container / Castra-session / Hatchery-job sources. |
+| `CandidatePatch` | value | `{ patchText: string; summary?: string }` — unvalidated patch payload parsed from a backend envelope. |
+| `ValidateSpawnPatchInput` | input | `{ patchText: string; worktreePath: string }` — matches the Patch Validator inputs below. |
+| `ValidatedPatch` | value | `{ patchText: string; touchedPaths: string[]; sha256: string }` — accepted patch; the validated core of `SpawnPatch` in the data model. |
+| `ExtractionResult` | result | Backend-neutral terminal result returned by `extractSpawnOutput`; the `ExtractionResult` entity in the data model. |
+| `SpawnPatch` | value | Persisted validated patch entity (`spawnId`, `backend`, `patchText`, `touchedPaths`, `sha256`); see the data model. |
+
 ## Interfaces
 
 ### Extraction Runner
@@ -29,12 +43,17 @@ extractSpawnOutput(input: ExtractSpawnOutputInput): ExtractionResult
 
 #### Outputs
 
+Returns an `ExtractionResult` (see the data model for the authoritative entity):
+
 | Field | Type | Description |
 |-------|------|-------------|
+| `spawnId` | string | Source spawn identifier. |
+| `backend` | `"claude-code" \| "codex"` | Backend used for parsing and diagnostics. |
 | `status` | `"succeeded" \| "failed"` | Terminal extraction status. |
-| `patchText` | string | Validated git patch when extraction succeeds. |
-| `failureReason` | string | Stable failure category when extraction fails. |
+| `patch` | `SpawnPatch` | Validated patch (`patchText`, `touchedPaths`, `sha256`); present only when `status` is `"succeeded"`. |
+| `failureReason` | string | Stable failure category; present only when `status` is `"failed"`. |
 | `diagnostic` | string | Bounded human-readable diagnostic. |
+| `extractedAt` | ISO-8601 timestamp | Time the result was finalized. |
 
 #### Error Conditions
 

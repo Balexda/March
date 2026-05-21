@@ -11,7 +11,7 @@
 
 ### Session 2026-05-21
 
-- The requested source feature map and RFC were not present in the worker export. This spec is derived from the existing F2, F3, and F4 specs plus the live spawn, Hatchery, Brood, and Castra modules. `[Critical Assumption]`
+- The source feature map (`docs/rfcs/2026-001-march-orchestration-platform/01-spawn.features.md`) and its RFC are present in the repository and are the authoritative source for this spec. The spec was additionally cross-checked against the existing F2, F3, and F4 specs and the live spawn, Hatchery, Brood, and Castra modules.
 - Feature 5 consumes stopped spawn output and produces a validated patch artifact for downstream Steward / PR integration; it does not create or merge the PR.
 - Spawn output is untrusted input. Feature 5 implements F4's A6 contract by validating backend JSON before processing, rejecting malformed payloads, and validating patch paths before any handoff.
 - Multi-backend support is live with Claude Code and Codex. Gemini references in older specs are historical and must not drive new acceptance criteria.
@@ -148,7 +148,7 @@ Recommended implementation sequence:
 
 | ID | Description | Source Category | Impact | Confidence | Status | Resolution |
 |----|-------------|-----------------|--------|------------|--------|------------|
-| SD-001 | The source feature map and RFC were absent from the worker export, so dependency wording and exact parent-feature acceptance criteria need reviewer confirmation against `docs/rfcs/2026-001-march-orchestration-platform/01-spawn.features.md`. | Constraints | High | Medium | open | — |
+| SD-001 | Initial draft was uncertain whether the source feature map and RFC were available; both are present in the repo, and the F5 scope (sequential handoff, JSON retrieval, structure validation, patch parsing, untrusted-input/A6 defense) was reconciled against `docs/rfcs/2026-001-march-orchestration-platform/01-spawn.features.md`. | Constraints | High | Medium | resolved | Spec confirmed against the present feature map and RFC; dependency wording matches the F5 row. |
 | SD-002 | The exact storage location for `ExtractionResult` must be reconciled with the live Brood registry and any legacy SpawnRecord JSON compatibility expectations before cutting implementation tasks. | Domain & Data Model | Medium | Medium | open | — |
 
 ## Out of Scope
