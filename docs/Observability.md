@@ -65,23 +65,19 @@ the env before `init`, and keep it set in the environment the loop runs in**:
 
 ```bash
 export MARCH_OTEL=1
-export MARCH_OTEL_ENDPOINT=http://localhost:4318   # host-conductor default
+export MARCH_OTEL_ENDPOINT=http://otel-lgtm:4318   # endpoint reachable from the loop container
 march legate init …            # freezes endpoint + enabled into loop meta
-# launch the conductor/loop from this same environment
 ```
 
-- **Host conductor (default):** `localhost:4318` works directly. Make sure the
-  agent-deck conductor that launches the loop inherits `MARCH_OTEL=1` so the
-  orchestrator children emit too.
-- **Managed container (`--with-container`):** the loop runs as a service
-  (`march legate loop`, one container per profile, no agent-deck session for the
-  loop). `MARCH_OTEL*` / `OTEL_EXPORTER_OTLP_ENDPOINT` are forwarded into the
-  container, but the endpoint must be reachable from *inside* it — use
-  `http://host.docker.internal:4318` (or `http://otel-lgtm:4318` on the `march`
-  network). Run `init` with the **same** endpoint the container will use, so the
-  loop's frozen config matches its runtime network. (The service also reconciles
-  env from the frozen `meta.otel` at startup, so a meta written with telemetry on
-  lights up the SDK without re-setting the env.)
+- **Managed container (the only loop runtime):** the loop runs as a service
+  (`march legate loop`, one Hatchery-managed container per profile, no agent-deck
+  session for the loop). `MARCH_OTEL*` / `OTEL_EXPORTER_OTLP_ENDPOINT` are
+  forwarded into the container, but the endpoint must be reachable from *inside*
+  it — use `http://host.docker.internal:4318` (or `http://otel-lgtm:4318` on the
+  `march` network). Run `init` with the **same** endpoint the container will use,
+  so the loop's frozen config matches its runtime network. (The service also
+  reconciles env from the frozen `meta.otel` at startup, so a meta written with
+  telemetry on lights up the SDK without re-setting the env.)
 
 ## What gets emitted
 
@@ -232,8 +228,7 @@ scraping logs. It exposes `GET /healthz` (liveness) and `GET /status` (the lates
 heartbeat: queue depth, slice/worker counts, last-tick age). It is published on a
 **deterministic per-conductor loopback host port** (`legateLoopHostPort`,
 8800–9799) so multiple per-profile containers don't collide; the port is printed
-in the `march legate init --with-container` summary. Loopback only — never
-exposed publicly.
+in the `march legate init` summary. Loopback only — never exposed publicly.
 
 ### Profiles (isolating test/integ telemetry)
 

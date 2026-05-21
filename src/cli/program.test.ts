@@ -198,59 +198,22 @@ describe("march CLI", () => {
       expect(result.stdout).toContain("--profile");
       expect(result.stdout).toContain("--name");
       expect(result.stdout).toContain("--no-setup");
-      expect(result.stdout).toContain("--with-container");
       expect(result.stdout).toContain("--no-loop");
-      expect(result.stdout).toContain("--loop-only");
       expect(result.stdout).toContain("--no-processor");
-      expect(result.stdout).toContain("--processor-only");
     });
 
-    it("`march legate init --loop-only --no-loop` exits 2 before dependency checks", () => {
-      const fakeBin = makeFakeBin(); // no git needed; conflict is syntactic.
-      const nodeBinDir = path.dirname(process.execPath);
-      const result = runWithEnv(
-        ["legate", "init", "--loop-only", "--no-loop"],
-        { PATH: `${nodeBinDir}${path.delimiter}${fakeBin}`, HOME: makeTmpDir() },
-      );
-      expect(result.exitCode).toBe(2);
-      expect(result.stderr).toContain("cannot be combined");
-      expect(result.stderr).not.toContain("git not found");
-    });
-
-    it("`march legate init --loop-only --with-container` exits 2 before Docker checks", () => {
-      const fakeBin = makeFakeBin(); // no docker needed; conflict is syntactic.
-      const nodeBinDir = path.dirname(process.execPath);
-      const result = runWithEnv(
-        ["legate", "init", "--loop-only", "--with-container"],
-        { PATH: `${nodeBinDir}${path.delimiter}${fakeBin}`, HOME: makeTmpDir() },
-      );
-      expect(result.exitCode).toBe(2);
-      expect(result.stderr).toContain("cannot be combined");
-      expect(result.stderr).not.toContain("Docker not found");
-    });
-
-    it("`march legate init --with-container --no-loop` exits 2 before Docker checks", () => {
-      const fakeBin = makeFakeBin(); // no docker needed; conflict is syntactic.
-      const nodeBinDir = path.dirname(process.execPath);
-      const result = runWithEnv(
-        ["legate", "init", "--with-container", "--no-loop"],
-        { PATH: `${nodeBinDir}${path.delimiter}${fakeBin}`, HOME: makeTmpDir() },
-      );
-      expect(result.exitCode).toBe(2);
-      expect(result.stderr).toContain("cannot be combined");
-      expect(result.stderr).not.toContain("Docker not found");
-    });
-
-    it("`march legate init --with-container` without docker exits 1 with a docker-specific message", () => {
+    it("`march legate init` without docker exits 1 with a docker-specific message", () => {
+      // The deterministic loop runs as a Hatchery-managed container — the only
+      // loop runtime — so the default init launches it and requires Docker.
       const fakeBin = makeFakeBin(["git"]); // git only, no docker
       const nodeBinDir = path.dirname(process.execPath);
       const result = runWithEnv(
-        ["legate", "init", "--with-container"],
+        ["legate", "init"],
         { PATH: `${nodeBinDir}${path.delimiter}${fakeBin}`, HOME: makeTmpDir() },
       );
       expect(result.exitCode).toBe(1);
       expect(result.stderr).toContain("Docker not found on PATH");
-      expect(result.stderr).toContain("--with-container");
+      expect(result.stderr).toContain("Legate loop service container");
       expect(result.stderr).not.toContain("agent-deck not found");
     });
 

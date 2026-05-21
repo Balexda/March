@@ -1,10 +1,10 @@
 // @ts-nocheck
 /**
  * Legate loop runtime — a near-verbatim lift of the former generated
- * `legate-loop.mjs` (the LEGATE_LOOP_MJS template in src/legate/init.ts). It is
- * carried as-is so the container service behaves identically to the script it
- * replaces; `@ts-nocheck` marks this as an intentional mechanical lift whose
- * decomposition + typing is tracked in Balexda/March#144.
+ * `legate-loop.mjs` (the LEGATE_LOOP_MJS template once in src/legate/init.ts,
+ * since deleted in Balexda/March#146). This is now the only loop runtime;
+ * `@ts-nocheck` marks it as an intentional mechanical lift whose decomposition +
+ * typing is tracked in Balexda/March#144.
  *
  * Changes from the original .mjs (kept minimal and reviewable):
  *   - meta + interval are injected via configureLoopRuntime() instead of being
