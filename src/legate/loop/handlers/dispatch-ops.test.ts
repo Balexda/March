@@ -25,21 +25,21 @@ const item = (over: any = {}) => ({
 });
 
 describe("launchHatcheryDispatch", () => {
-  it("POSTs a codex spawn request and returns the job id", async () => {
+  it("POSTs a codex spawn request with the caller's slice id and returns the job id", async () => {
     const postSpawn = vi.fn(async (_req: any) => ({ id: "job-42" }));
-    const res = await launchHatcheryDispatch(item(), deps({ postSpawn }));
+    const res = await launchHatcheryDispatch(item(), "slice-7", deps({ postSpawn }));
     expect(res).toEqual({ jobId: "job-42" });
     const req = postSpawn.mock.calls[0]![0] as any;
-    expect(req).toMatchObject({ backend: "codex", repoPath: "/repo", profile: "prof", agentDeckProfile: "prof", managerGroup: "wg" });
+    expect(req).toMatchObject({ backend: "codex", repoPath: "/repo", profile: "prof", agentDeckProfile: "prof", managerGroup: "wg", sliceId: "slice-7" });
     expect(req.prompt.length).toBeGreaterThan(0);
   });
 
   it("throws when the repo path is missing", async () => {
-    await expect(launchHatcheryDispatch(item(), deps({ meta: { repo: {} } }))).rejects.toThrow(/repo path is missing/);
+    await expect(launchHatcheryDispatch(item(), "s", deps({ meta: { repo: {} } }))).rejects.toThrow(/repo path is missing/);
   });
 
   it("throws when the service returns no job id (empty 202 body)", async () => {
-    await expect(launchHatcheryDispatch(item(), deps({ postSpawn: vi.fn(async () => ({})) }))).rejects.toThrow(/no job id/);
+    await expect(launchHatcheryDispatch(item(), "s", deps({ postSpawn: vi.fn(async () => ({})) }))).rejects.toThrow(/no job id/);
   });
 });
 
@@ -47,10 +47,13 @@ describe("launchDispatch", () => {
   it("creates a hatchery-pending slice, records the job id, and emits slice.dispatched with the jobId", async () => {
     const state: any = { slices: {} };
     const emitTransition = vi.fn();
-    const out = await launchDispatch(state, "T", item(), "s", deps({ emitTransition, postSpawn: vi.fn(async () => ({ id: "job-7" })) }));
+    const postSpawn = vi.fn(async (_req: any) => ({ id: "job-7" }));
+    const out = await launchDispatch(state, "T", item(), "s", deps({ emitTransition, postSpawn }));
     expect(state.slices.s).toMatchObject({ stage: "hatchery-pending", command: "smithy.forge", hatchery: { backend: "codex", job_id: "job-7" } });
     expect(out.actions).toEqual([expect.objectContaining({ action: "dispatch", sliceId: "s" })]);
     expect(emitTransition).toHaveBeenCalledWith(expect.objectContaining({ type: "slice.dispatched", sliceId: "s", jobId: "job-7" }));
+    // The spawn runs under the same slice id as the in-memory slice + transition.
+    expect((postSpawn.mock.calls[0]![0] as any).sliceId).toBe("s");
   });
 
   it("escalates the slice and queues a judgement notification when the launch throws", async () => {
@@ -105,11 +108,20 @@ describe("completePendingHatcheryDispatches", () => {
     expect(out.mutated).toBe(false);
   });
 
-  it("waits (no change) on a transient getJob failure", async () => {
+  it("waits (no change) on a transient network getJob failure", async () => {
     const state: any = { slices: { s: pending() } };
-    const out = await completePendingHatcheryDispatches(state, "T", deps({ getJob: vi.fn(async () => { throw new Error("Could not reach hatchery"); }) }));
+    const out = await completePendingHatcheryDispatches(state, "T", deps({ getJob: vi.fn(async () => { throw new Error("Could not reach the hatchery service at http://x"); }) }));
     expect(state.slices.s.stage).toBe("hatchery-pending");
     expect(out.mutated).toBe(false);
+  });
+
+  it("escalates (not strands) on a non-transient getJob lookup failure (e.g. 404 after restart)", async () => {
+    const state: any = { slices: { s: pending() } };
+    const emitTransition = vi.fn();
+    const out = await completePendingHatcheryDispatches(state, "T", deps({ getJob: vi.fn(async () => { throw new Error("hatchery GET /spawns/job-1 failed with status 404"); }), emitTransition }));
+    expect(state.slices.s.stage).toBe("escalated");
+    expect(out.notifications[0]).toMatchObject({ sliceId: "s", reason: "hatchery_dispatch_failed" });
+    expect(emitTransition).toHaveBeenCalledWith(expect.objectContaining({ type: "slice.escalated", sliceId: "s" }));
   });
 
   it("promotes the slice to implementing on success", async () => {

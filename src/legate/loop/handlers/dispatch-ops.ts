@@ -26,7 +26,6 @@ import {
   actionCommandLine,
   dispatchBranch,
   dispatchIdentity,
-  dispatchSliceId,
   dispatchTitle,
 } from "../pure/dispatch-id.js";
 import { buildSmithySpawnPrompt } from "../pure/messages.js";
@@ -57,7 +56,7 @@ export interface DispatchOutcome {
 // the tick. repoPath must be valid INSIDE the hatchery container — it bind-mounts
 // the repo + worktree-parent at the identical absolute path. Telemetry is owned
 // by the service; the dispatch trace is correlated server-side via sliceId.
-export async function launchHatcheryDispatch(item: any, deps: DispatchIoDeps): Promise<{ jobId: string }> {
+export async function launchHatcheryDispatch(item: any, sliceId: string, deps: DispatchIoDeps): Promise<{ jobId: string }> {
   const repoPath = deps.meta.repo?.path;
   if (typeof repoPath !== "string" || repoPath.length === 0) {
     throw new Error("repo path is missing");
@@ -74,7 +73,9 @@ export async function launchHatcheryDispatch(item: any, deps: DispatchIoDeps): P
     profile: deps.meta.profile,
     taskType: dispatchIdent.verb,
     taskName: dispatchIdent.stem,
-    sliceId: dispatchSliceId(item),
+    // Use the caller's slice id so the spawn, the in-memory slice, and the emitted
+    // transitions all correlate under one id (single source of truth).
+    sliceId,
   };
   const created = await deps.postSpawn(spawnRequest);
   // postSpawn's parseJsonBody yields {} on an empty/invalid 202 body, so the id
@@ -112,7 +113,7 @@ export async function launchDispatch(state: any, ts: string, item: any, sliceId:
       last_action: ts,
       last_action_note: "Queued Hatchery codex spawn for " + actionCommandLine(action),
     };
-    const launched = await launchHatcheryDispatch(item, deps);
+    const launched = await launchHatcheryDispatch(item, sliceId, deps);
     state.slices[sliceId].hatchery.job_id = launched.jobId;
     actions.push({
       action: "dispatch",
@@ -196,9 +197,16 @@ export async function completePendingHatcheryDispatches(state: any, ts: string, 
     let job;
     try {
       job = await deps.getJob(jobId);
-    } catch {
-      // Transient: Hatchery briefly unreachable or a momentary lookup blip. Wait
-      // and re-poll next tick rather than escalating a healthy in-flight spawn.
+    } catch (err: any) {
+      // A network blip is transient — the Hatchery client prefixes those with
+      // "Could not reach …" — so wait and re-poll next tick rather than escalating
+      // a healthy in-flight spawn. Any other failure is a real lookup failure
+      // (e.g. a 404 because a Hatchery restart lost the job, or a persistent
+      // non-200); that would otherwise strand the slice in hatchery-pending
+      // forever, so escalate it for judgement.
+      const message = String(err?.message || "");
+      if (message.startsWith("Could not reach")) continue;
+      escalate(slice, sliceId, "Hatchery job lookup failed: " + (message || "unknown error"));
       continue;
     }
     if (job.status !== "succeeded" && job.status !== "failed") {
