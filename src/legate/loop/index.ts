@@ -45,6 +45,21 @@ export function reconcileOtelEnv(meta: LoopMeta, env: NodeJS.ProcessEnv): void {
 }
 
 /**
+ * Reconcile the Brood endpoint the same way: an explicit MARCH_BROOD_URL env
+ * wins, otherwise fall back to `meta.brood_endpoint` frozen at `march legate
+ * init`. The runtime's BroodClient reads MARCH_BROOD_URL, and the managed
+ * container does NOT pass it through, so without this the containerized loop
+ * would default to localhost:9748 and never reach the Brood service — cleanup /
+ * ghost-cleanup would defer forever.
+ */
+export function reconcileBroodEnv(meta: LoopMeta, env: NodeJS.ProcessEnv): void {
+  const frozen = (meta as { brood_endpoint?: unknown }).brood_endpoint;
+  if (!env.MARCH_BROOD_URL && typeof frozen === "string" && frozen.trim().length > 0) {
+    env.MARCH_BROOD_URL = frozen.trim();
+  }
+}
+
+/**
  * Run the Legate loop as a long-running service: telemetry + HTTP API + the
  * periodic tick. Resolves only when a shutdown signal flushes telemetry and
  * stops the loop. Used by `march legate loop` inside the managed container.
@@ -55,6 +70,7 @@ export async function runLoop(opts: RunLoopOptions = {}): Promise<void> {
   const meta = loadMeta(metaPath);
 
   reconcileOtelEnv(meta, env);
+  reconcileBroodEnv(meta, env);
   const otel = initOtel(env);
   initLoopLogs({ profile: meta.profile, conductor: meta.paired_legate });
 
