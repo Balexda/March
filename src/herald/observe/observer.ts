@@ -1,0 +1,45 @@
+import { senseState, type SenseDeps } from "../../legate/loop/state/sense.js";
+import type { AppendEventInput, HeraldEvent, SystemState } from "../events.js";
+import { diffObserved } from "./diff.js";
+
+/** The slice of {@link EventStore} the observer needs. */
+export interface ObserveStore {
+  projection(): SystemState;
+  append(input: AppendEventInput): HeraldEvent;
+}
+
+export interface ObserverDeps {
+  /** The Stage-1 sense I/O (built via `buildSenseIo` in src/observe/sense-io.ts). */
+  readonly senseDeps: SenseDeps;
+  readonly store: ObserveStore;
+}
+
+export interface ObserveResult {
+  /** Observation time (the snapshot ts). */
+  observedAt: string;
+  /** Wall-clock spent sensing the world. */
+  durationMs: number;
+  /** The change events appended this tick (empty when nothing changed). */
+  appended: HeraldEvent[];
+}
+
+/**
+ * Run one observation tick: read the current projection, sense the world, diff,
+ * and append one event per delta to the log (stamped with the observation ts).
+ * The store's hot projection advances as a side effect of each append. Returns
+ * the appended events + timing so the server can update `/status` and metrics.
+ */
+export async function runObservation(deps: ObserverDeps): Promise<ObserveResult> {
+  const prev = deps.store.projection();
+  const started = Date.now();
+  const loop = await senseState(deps.senseDeps);
+  const durationMs = Date.now() - started;
+
+  const appended: HeraldEvent[] = [];
+  for (const body of diffObserved(prev, loop)) {
+    appended.push(
+      deps.store.append({ source: "herald", ts: loop.ts, ...body } as AppendEventInput),
+    );
+  }
+  return { observedAt: loop.ts, durationMs, appended };
+}

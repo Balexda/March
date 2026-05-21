@@ -287,6 +287,35 @@ describe("march CLI", () => {
     });
   });
 
+  describe("march herald", () => {
+    it("bare `march herald` exits 2 and prints the herald group help", () => {
+      const result = run(["herald"]);
+      expect(result.exitCode).toBe(2);
+      const combined = result.stdout + result.stderr;
+      expect(combined).toContain("Usage: march herald");
+      // The help should list serve / events / state as known subcommands.
+      expect(combined).toMatch(/^\s+serve\b/m);
+      expect(combined).toMatch(/^\s+events\b/m);
+      expect(combined).toMatch(/^\s+state\b/m);
+    });
+
+    it("`march herald serve --help` exits 0 and prints the serve flag surface", () => {
+      const result = run(["herald", "serve", "--help"]);
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain("Usage: march herald serve");
+      expect(result.stdout).toContain("--port");
+      expect(result.stdout).toContain("--meta");
+    });
+
+    it("`march herald <bad>` reports the actual unknown subcommand, not 'herald'", () => {
+      const result = run(["herald", "frobnicate"]);
+      expect(result.exitCode).toBe(2);
+      expect(result.stderr).toContain("unknown command 'frobnicate'");
+      expect(result.stderr).not.toContain("unknown command 'herald'");
+      expect(result.stdout + result.stderr).toContain("Usage: march herald");
+    });
+  });
+
   describe("march castra", () => {
     it("bare `march castra` exits 2 and prints the castra group help", () => {
       const result = run(["castra"]);

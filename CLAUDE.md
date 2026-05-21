@@ -37,6 +37,24 @@ Quick pointers:
   `march brood teardown` instead of pruning. Image/compose:
   `docker/brood.Dockerfile`, `docker/brood.docker-compose.yml`. Set
   `MARCH_BROOD_URL` so producers/consumers reach it.
+- **Herald is a containerized service:** `march herald serve` (Fastify) under
+  `src/herald/service/` is the system-state **observation** service — the
+  heartbeat + data collection calved off the legate loop. Each tick it observes
+  the world (the shared sense I/O in `src/observe/sense-io.ts`: `gh`/`git`/
+  `smithy` + Castra) and records **change events** into an append-only,
+  seq-ordered **event log** (`node:sqlite` at `~/.march/herald`). The system
+  state is **event-sourced**: current state is the fold of the log (the shared
+  taxonomy + reducer live in `src/herald/events.ts`, imported by both services).
+  Herald appends *observation* events; the legate (PR2) appends *transition*
+  events and drains the inbox via `GET /events?after=<cursor>`. Herald is the
+  single sequencer (it owns every `seq`, including legate `POST /events`). It is
+  **read-only by default** (`MARCH_HERALD_SYNC=1` enables the git sync) and never
+  touches Docker. New event type → add it to the `events.ts` discriminated union
+  + reducer (keep `EventType` low-cardinality — it is a metric label) and the
+  `POST /events` validator; new metric → `src/observability/herald-metrics.ts`,
+  then `docker/grafana/dashboards/march-herald.json`. Image/compose:
+  `docker/herald.Dockerfile`, `docker/herald.docker-compose.yml`. Set
+  `MARCH_HERALD_URL` so the legate reaches it.
 
 ## Verification
 

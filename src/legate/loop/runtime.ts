@@ -34,6 +34,7 @@ import type { LoopMeta } from "./meta.js";
 // Decomposed two-stage loop: Stage 1 sense → coordinator (ordered handlers) →
 // heartbeat. runtime now only wires these to the proven I/O seams below.
 import { senseState } from "./state/sense.js";
+import { createSenseIo, type SenseIo } from "../../observe/sense-io.js";
 import { runTick as coordinatorRunTick } from "./coordinator.js";
 import { runHeartbeat } from "./heartbeat.js";
 import { broodTeardown as broodTeardownCli } from "./clients/brood.js";
@@ -47,20 +48,17 @@ function castra(): CastraClient {
   return (_castra ??= new CastraClient());
 }
 
-// Map a Castra session to the agent-deck-shaped object the lifted loop consumes
-// (id/status/group/worktree_path/…), so the loop's classification + babysit code
-// is unchanged against Castra's normalized CastraSession shape.
-function toLoopSession(s: any) {
-  return {
-    id: s.sessionId,
-    title: s.title,
-    name: s.title,
-    group: s.group,
-    status: s.status || "other",
-    branch: s.branch,
-    worktree_path: s.worktreePath,
-    created_at: s.createdAt,
-  };
+// Shared system-observation I/O (gh/git/smithy/Castra reads). Lifted into
+// src/observe/sense-io.ts so the legate loop and the Herald service share one
+// tested implementation; built lazily so it reads the configured meta + env.
+let _senseIo: SenseIo | undefined;
+function senseIo(): SenseIo {
+  return (_senseIo ??= createSenseIo({
+    meta,
+    castra: castra(),
+    now,
+    warn: (message: string) => appendText(meta.processor_log_path, "[" + now() + "] " + message),
+  }));
 }
 
 // Injected at startup by configureLoopRuntime().
@@ -233,15 +231,6 @@ function printText(text) {
   console.log(text);
 }
 
-function readJsonIfPresent(file) {
-  try {
-    return JSON.parse(fs.readFileSync(file, "utf-8"));
-  } catch (err) {
-    if (err && err.code === "ENOENT") return null;
-    throw err;
-  }
-}
-
 function writeJson(file, value) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, JSON.stringify(value, null, 2) + "\n", "utf-8");
@@ -321,19 +310,6 @@ function replayRecentActionEvents(limit = 10) {
   }
 }
 
-async function agentDeckList() {
-  // Sessions come from Castra (the agent-deck interdiction service), mapped back
-  // to the agent-deck-shaped objects the rest of the loop consumes
-  // (id/status/group/worktree_path/…). On error we return {error} so
-  // summarizeWorkers reports "unavailable" exactly as it did for an agent-deck
-  // CLI failure.
-  try {
-    return (await castra().listSessions(meta.profile)).map(toLoopSession);
-  } catch (err) {
-    return { error: err?.message || String(err) };
-  }
-}
-
 function sessionGroup(session) {
   return session.group || session.group_path || "";
 }
@@ -353,163 +329,6 @@ function summarizeWorkers(list) {
     else buckets.other += 1;
   }
   return buckets;
-}
-
-function prNumber(slice) {
-  const n = slice?.pr?.number;
-  if (typeof n === "number" && Number.isInteger(n) && n > 0) return String(n);
-  if (typeof n === "string" && /^[0-9]+$/.test(n)) return n;
-  return null;
-}
-
-async function repoOwner(state) {
-  const owner = state?.repo?.owner_with_name;
-  if (typeof owner === "string" && owner.length > 0) return owner;
-  const repoPath = state?.repo?.path || meta.repo?.path;
-  if (typeof repoPath !== "string" || repoPath.length === 0) return null;
-  try {
-    const out = await execText("gh", ["repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"], {
-      cwd: repoPath,
-    });
-    return out.trim() || null;
-  } catch {
-    return null;
-  }
-}
-
-async function ghPrArgs(slice, state, fields) {
-  const number = prNumber(slice);
-  if (!number) return { skipped: true, reason: "missing_pr_number" };
-  const args = ["pr", "view", number, "--json", fields];
-  const owner = await repoOwner(state);
-  if (typeof owner === "string" && owner.length > 0) {
-    args.push("-R", owner);
-  }
-  const options = {
-  };
-  const repoPath = state?.repo?.path || meta.repo?.path;
-  if (!owner && typeof repoPath === "string" && repoPath.length > 0) {
-    options.cwd = repoPath;
-  }
-  return { args, options, owner, number };
-}
-
-async function queryPr(slice, state) {
-  const request = await ghPrArgs(slice, state, "number,url,state");
-  if (request.skipped) return request;
-  const out = await execText("gh", request.args, request.options);
-  return JSON.parse(out);
-}
-
-function checksSummary(statusCheckRollup) {
-  const checks = Array.isArray(statusCheckRollup) ? statusCheckRollup : [];
-  if (checks.length === 0) return "NONE";
-  if (checks.some((check) => ["FAILURE", "TIMED_OUT", "ACTION_REQUIRED", "CANCELLED"].includes(check.conclusion))) {
-    return "FAIL";
-  }
-  if (checks.some((check) => ["IN_PROGRESS", "QUEUED", "PENDING"].includes(check.status))) {
-    return "PENDING";
-  }
-  return "PASS";
-}
-
-function failedChecks(statusCheckRollup) {
-  const checks = Array.isArray(statusCheckRollup) ? statusCheckRollup : [];
-  return checks
-    .filter((check) => ["FAILURE", "TIMED_OUT", "ACTION_REQUIRED", "CANCELLED"].includes(check.conclusion))
-    .map((check) => ({
-      name: check.name || check.context || "unknown",
-      url: check.detailsUrl || check.targetUrl || null,
-    }));
-}
-
-async function queryReviewThreads(owner, prNumberValue) {
-  if (!owner) return [];
-  const [repoOwnerName, repoName] = owner.split("/");
-  if (!repoOwnerName || !repoName) return [];
-  const out = await execText("gh", [
-    "api",
-    "graphql",
-    "-F",
-    `owner=${repoOwnerName}`,
-    "-F",
-    `name=${repoName}`,
-    "-F",
-    `pr=${prNumberValue}`,
-    "-f",
-    `query=query($owner: String!, $name: String!, $pr: Int!) {
-  repository(owner: $owner, name: $name) {
-    pullRequest(number: $pr) {
-      reviewThreads(first: 100) {
-        nodes {
-          isResolved
-          comments(first: 50) {
-            nodes {
-              databaseId
-              body
-              path
-              line
-              author { login }
-              createdAt
-            }
-          }
-        }
-      }
-    }
-  }
-}`,
-  ]);
-  const parsed = JSON.parse(out);
-  const nodes = parsed?.data?.repository?.pullRequest?.reviewThreads?.nodes || [];
-  return nodes
-    .filter((thread) => thread && thread.isResolved === false)
-    .map((thread) => {
-      const comments = Array.isArray(thread.comments?.nodes)
-        ? [...thread.comments.nodes].sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)))
-        : [];
-      const first = comments[0] || {};
-      const last = comments[comments.length - 1] || first;
-      return {
-        id: first.databaseId,
-        path: first.path,
-        line: first.line,
-        author: first.author?.login,
-        body_preview: String(first.body || "").slice(0, 140),
-        last_author: last.author?.login,
-        last_comment_at: last.createdAt,
-        comment_count: comments.length,
-      };
-    });
-}
-
-async function queryPrForBabysit(slice, state) {
-  const request = await ghPrArgs(
-    slice,
-    state,
-    "number,url,state,mergeable,reviewDecision,statusCheckRollup,headRefName,title,author",
-  );
-  if (request.skipped) return request;
-  const summary = JSON.parse(await execText("gh", request.args, request.options));
-  const threads = await queryReviewThreads(request.owner || await repoOwner(state), summary.number);
-  const prAuthor = summary.author?.login || "";
-  const annotated = threads.map((thread) => ({
-    ...thread,
-    needs_response: thread.last_author !== prAuthor,
-  }));
-  return {
-    number: summary.number,
-    url: summary.url,
-    state: summary.state,
-    mergeable: summary.mergeable,
-    head_branch: summary.headRefName,
-    title: summary.title,
-    review_decision: summary.reviewDecision,
-    checks: checksSummary(summary.statusCheckRollup),
-    failed_checks: failedChecks(summary.statusCheckRollup),
-    unresolved_threads: annotated,
-    thread_count: annotated.length,
-    needs_response_count: annotated.filter((thread) => thread.needs_response).length,
-  };
 }
 
 function markSliceAction(slice, action, key, note, ts) {
@@ -532,23 +351,8 @@ async function sendAgentDeckMessage(sessionId, message, _wait = false) {
   return "";
 }
 
-function truncateText(text, max = 4000) {
-  const value = String(text || "");
-  if (value.length <= max) return value;
-  return value.slice(value.length - max);
-}
-
 function hashText(text) {
   return crypto.createHash("sha256").update(String(text || "")).digest("hex").slice(0, 16);
-}
-
-async function captureRecentSessionOutput(sessionId) {
-  try {
-    const output = await castra().sessionOutput(meta.profile, sessionId);
-    return { output: truncateText(output.trim()) };
-  } catch (err) {
-    return { output: "", error: err?.message || String(err) };
-  }
 }
 
 async function sendDoorbellToLegate() {
@@ -603,78 +407,6 @@ function updatePrSnapshot(slice, pr) {
   slice.thread_count = pr.thread_count;
   slice.needs_response_count = pr.needs_response_count;
   slice.unresolved_threads = pr.unresolved_threads;
-}
-
-function prDiscoverySince(slice) {
-  return slice.last_action || slice.created_at || slice.dispatched_at || slice.started_at || "";
-}
-
-function addBranchVariants(branches, value) {
-  const raw = String(value || "").trim();
-  if (!raw) return;
-  const normalized = raw.replace(/^refs\/heads\//, "");
-  branches.add(normalized);
-  if (normalized.startsWith("feature/")) {
-    branches.add(normalized.slice("feature/".length));
-  } else {
-    branches.add(`feature/${normalized}`);
-  }
-}
-
-async function expectedPrBranches(slice) {
-  const branches = new Set();
-  addBranchVariants(branches, slice.actual_branch);
-  addBranchVariants(branches, slice.branch);
-  if (slice.worktree_path) {
-    try {
-      addBranchVariants(branches, await execText("git", ["-C", slice.worktree_path, "branch", "--show-current"]));
-    } catch {
-      // Best-effort guard only; branch fields still protect PR discovery.
-    }
-  }
-  return branches;
-}
-
-async function prMatchesSliceBranch(slice, pr) {
-  const branches = await expectedPrBranches(slice);
-  if (branches.size === 0) return false;
-  return branches.has(String(pr?.head_branch || pr?.headRefName || ""));
-}
-
-async function discoverPrForSlice(slice, state, sessionId) {
-  const repoPath = state?.repo?.path || meta.repo?.path;
-  if (!repoPath) return null;
-  try {
-    const output = await castra().sessionOutput(meta.profile, sessionId);
-    const matches = output.match(/https:\/\/github\.com\/[^\s/]+\/[^\s/]+\/pull\/([0-9]+)/g) || [];
-    if (matches.length > 0) {
-      const url = matches[matches.length - 1];
-      const number = url.split("/").pop();
-      const pr = await queryPrForBabysit({ pr: { number } }, state);
-      return pr?.skipped || !(await prMatchesSliceBranch(slice, pr)) ? null : pr;
-    }
-  } catch {
-    // fall through to branch-based lookup
-  }
-  try {
-    const owner = await repoOwner(state);
-    const args = ["pr", "list", "--author", "@me", "--state", "open", "--json", "number,url,state,mergeable,headRefName,title,statusCheckRollup,createdAt"];
-    if (owner) args.push("-R", owner);
-    const options = owner ? {} : { cwd: repoPath };
-    const list = JSON.parse(await execText("gh", args, options));
-    if (!Array.isArray(list) || list.length === 0) return null;
-    const since = prDiscoverySince(slice);
-    const candidates = since
-      ? list.filter((candidate) => String(candidate.createdAt || "") >= since)
-      : list;
-    const branchMatches = candidates.filter((candidate) => prMatchesSliceBranch(slice, candidate));
-    const chosen = branchMatches
-      .sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")))[0];
-    if (!chosen) return null;
-    return await queryPrForBabysit({ pr: { number: chosen.number } }, state);
-  } catch {
-    return null;
-  }
 }
 
 function slugifyDispatchPart(value, fallback = "item") {
@@ -805,44 +537,6 @@ function isTerminalSlice(slice) {
 // the old mini-legate style of handing the /smithy.<verb> command straight
 // to a Claude steward that does the whole job itself.
 const MAX_RECOVERY_ATTEMPTS = 2;
-
-async function readSmithyStatus(repoPath) {
-  // --pending = shorthand for --status in-progress,not-started. Filters out
-  // all done records up-front (smithy ships a much smaller, dispatch-shaped
-  // payload — the prior full output had hundreds of done entries the loop
-  // had to wade through). Layer 0 of the returned graph still means "ready
-  // to dispatch right now" — a node's dependencies have either landed (and
-  // were filtered out by --pending) or never existed.
-  const out = await execText("smithy", ["status", "--format", "json", "--pending"], { cwd: repoPath });
-  return JSON.parse(out);
-}
-
-async function syncDefaultBranch(state) {
-  const repoPath = state?.repo?.path || meta.repo?.path;
-  if (typeof repoPath !== "string" || repoPath.length === 0) {
-    throw new Error("repo path is missing");
-  }
-  let defaultBranch = state?.repo?.default_branch;
-  if (!defaultBranch) {
-    try {
-      defaultBranch = (await execText("git", ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"], { cwd: repoPath }))
-        .trim()
-        .replace(/^origin\//, "");
-    } catch {
-      defaultBranch = (await execText("gh", ["repo", "view", "--json", "defaultBranchRef", "-q", ".defaultBranchRef.name"], { cwd: repoPath })).trim();
-    }
-  }
-  if (!defaultBranch) throw new Error("could not determine default branch");
-  await execText("git", ["fetch", "origin", defaultBranch], { cwd: repoPath });
-  await execText("git", ["switch", defaultBranch], { cwd: repoPath });
-  await execText("git", ["pull", "--ff-only", "origin", defaultBranch], { cwd: repoPath });
-  if (state.repo && !state.repo.default_branch) state.repo.default_branch = defaultBranch;
-  return {
-    default_branch: defaultBranch,
-    synced: true,
-    head: (await execText("git", ["rev-parse", "HEAD"], { cwd: repoPath })).trim(),
-  };
-}
 
 function buildSmithySpawnPrompt(item) {
   const commandLine = actionCommandLine(item.next_action);
@@ -1269,7 +963,7 @@ async function worktreeIsClean(worktreePath) {
 // still be doing real work — never remove.
 function agentDeckSessionHoldsWorktree(worktreePath) {
   try {
-    const list = agentDeckList();
+    const list = senseIo().listSessions();
     if (!Array.isArray(list)) return false;
     return list.some((session) => {
       // Match the hatchery session parser's field-name precedence
@@ -1430,12 +1124,12 @@ async function tryAdoptOpenPr(state, slice, sliceId, errorText, ts) {
   // smithy dispatch branch slug and the actual feature/* git ref).
   const candidates = classification.open || [];
   const tentativeSlice = { branch: slice.branch || branchName };
-  let chosen = candidates.find((p) => prMatchesSliceBranch(tentativeSlice, p));
+  let chosen = candidates.find((p) => senseIo().prMatchesSliceBranch(tentativeSlice, p));
   if (!chosen) chosen = candidates[0];
   if (!chosen) return null;
   let hydrated;
   try {
-    hydrated = await queryPrForBabysit({ pr: { number: chosen.number } }, state);
+    hydrated = await senseIo().queryPrForBabysit({ pr: { number: chosen.number } }, state);
   } catch {
     return null;
   }
@@ -2069,19 +1763,8 @@ function launchDispatch(state, ts, item, sliceId) {
 // snapshots it for /status. All I/O is wired to the proven async seams in this
 // file (Castra fetch, gh/git/smithy execFile, the Brood HTTP client).
 async function tick() {
-  const senseDeps = {
-    meta,
-    now,
-    readStateJson: () => readJsonIfPresent(meta.legate_state_path),
-    listSessions: () => agentDeckList(),
-    syncDefaultBranch: (repoPath, knownDefault) =>
-      syncDefaultBranch({ repo: { path: repoPath, default_branch: knownDefault } }),
-    readSmithyStatus: (repoPath) => readSmithyStatus(repoPath),
-    queryPr: (slice, st) => queryPrForBabysit(slice, st),
-    discoverPr: (slice, st, _repoPath, sessionId) => discoverPrForSlice(slice, st, sessionId),
-    sessionOutput: (sessionId) => captureRecentSessionOutput(sessionId),
-    warn: (message) => appendText(meta.processor_log_path, "[" + now() + "] " + message),
-  };
+  // Stage 1 reads are the shared observation I/O (src/observe/sense-io.ts).
+  const senseDeps = senseIo().toSenseDeps();
 
   const makeContext = (state) => ({
     meta,
@@ -2101,7 +1784,7 @@ async function tick() {
   };
 
   const dispatchDeps = {
-    syncDefaultBranch: (rawState) => syncDefaultBranch(rawState),
+    syncDefaultBranch: (rawState) => senseIo().syncDefaultBranch(rawState),
     completePending: (rawState, ts) => completePendingHatcheryDispatches(rawState, ts),
     launchDispatch: (rawState, ts, item, sliceId) => launchDispatch(rawState, ts, item, sliceId),
     recoveryDispatch: (rawState, ts, item, sliceId, mergedArchive) =>
