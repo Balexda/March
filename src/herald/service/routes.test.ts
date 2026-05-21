@@ -24,9 +24,11 @@ describe("validateEvent", () => {
   it("requires session.id for session.changed", () => {
     expect(validateEvent({ type: "session.changed", session: {} })).toMatchObject({ ok: false });
   });
-  it("defaults source to legate", () => {
+  it("forces source to legate (cannot spoof a herald observation event)", () => {
     const v = validateEvent({ type: "heartbeat" });
     expect(v.ok && v.input.source).toBe("legate");
+    const spoof = validateEvent({ type: "slice.pr.changed", sliceId: "s1", pr: {}, source: "herald" });
+    expect(spoof.ok && spoof.input.source).toBe("legate");
   });
 });
 

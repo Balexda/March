@@ -67,16 +67,18 @@ export type EventValidation =
   | { readonly ok: false; readonly error: string };
 
 /**
- * Validate a `POST /events` body against the shared taxonomy. Only the `source`
- * + a known `type` (+ its required key) are enforced; the rest of the body is
- * carried through as the event payload.
+ * Validate a `POST /events` body against the shared taxonomy. A known `type`
+ * (+ its required key) is enforced; the rest of the body is carried through as
+ * the event payload. `source` is FORCED to `"legate"` — `POST /events` is the
+ * legate write-path, and Herald's own observation events are appended by the
+ * observer directly to the store (never over HTTP), so a client must not be able
+ * to spoof Herald-authored observation events.
  */
 export function validateEvent(body: Record<string, unknown>): EventValidation {
   const type = body.type;
   if (typeof type !== "string" || !EVENT_TYPES.has(type as EventType)) {
     return { ok: false, error: `unknown event type "${String(type)}".` };
   }
-  const source = body.source === "herald" || body.source === "legate" ? body.source : "legate";
   if (SLICE_TYPES.has(type) && (typeof body.sliceId !== "string" || body.sliceId.length === 0)) {
     return { ok: false, error: `event "${type}" requires a non-empty sliceId.` };
   }
@@ -86,7 +88,7 @@ export function validateEvent(body: Record<string, unknown>): EventValidation {
       return { ok: false, error: `event "session.changed" requires session.id.` };
     }
   }
-  return { ok: true, input: { ...(body as object), source } as AppendEventInput };
+  return { ok: true, input: { ...(body as object), source: "legate" } as AppendEventInput };
 }
 
 export async function registerRoutes(
