@@ -32,7 +32,6 @@ import { emitLoopLog, type LoopLogSeverity } from "../../observability/logs.js";
 import { emitLoopSpan } from "../../observability/loop-spans.js";
 import {
   getJob,
-  HatcheryClientError,
   postSpawn,
   resolveHatcheryUrl,
 } from "../../hatchery/service/client.js";
@@ -391,6 +390,13 @@ async function launchHatcheryDispatch(item: any, opts?: any) {
     sliceId: requestSliceId,
   };
   const created = await postSpawn(resolveHatcheryUrl(process.env), spawnRequest);
+  // postSpawn's parseJsonBody yields {} on an empty/invalid 202 body, so the id
+  // can be missing. Guard it: a slice recorded with no usable job_id is skipped
+  // forever by completePendingHatcheryDispatches (never completed, never even
+  // escalated). Throw so the caller's try/catch escalates the slice instead.
+  if (typeof created.id !== "string" || created.id.length === 0) {
+    throw new Error("hatchery POST /spawns returned no job id");
+  }
   return { jobId: created.id };
 }
 
@@ -617,10 +623,15 @@ async function completePendingHatcheryDispatches(state: any, ts: string) {
       // result file is gone; the service is the source of truth for the spawn.
       job = await getJob(hatcheryBaseUrl, jobId);
     } catch (err: any) {
-      // The service is unreachable, or no longer knows this job (a restart
-      // dropped it). Treat like a stale job: a transient blip before the
-      // timeout just waits; past it the slice is released / escalated.
-      const reason = err instanceof HatcheryClientError ? "is unreachable" : "lookup failed";
+      // getJob throws HatcheryClientError for BOTH a network failure and a
+      // non-200 (e.g. a 404 for a job the service no longer knows after a
+      // restart), so distinguish them by message rather than by type: the
+      // network case is the only one prefixed "Could not reach". Either way it
+      // is treated as a stale job — a transient blip before the timeout just
+      // waits; past it the slice is released / escalated.
+      const reason = String(err?.message || "").startsWith("Could not reach")
+        ? "is unreachable"
+        : "lookup failed";
       if (escalateStale(slice, sliceId, reason)) mutated = true;
       continue;
     }
