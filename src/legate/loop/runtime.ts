@@ -9,10 +9,11 @@
  * Changes from the original .mjs (kept minimal and reviewable):
  *   - meta + interval are injected via configureLoopRuntime() instead of being
  *     read relative to import.meta.url (the bundle's url is dist/cli.js).
- *   - the deterministic trace/span ids reuse src/observability/trace-ids.ts.
- *   - per-tick heartbeat metrics (loop-metrics.ts) and per-event structured
- *     logs (logs.ts) are emitted via the OTel SDK; dispatch spans keep the
- *     original raw-OTLP path for now (Balexda/March#145).
+ *   - per-tick heartbeat metrics (loop-metrics.ts), per-event structured logs
+ *     (logs.ts), and dispatch spans (loop-spans.ts) are all emitted via the OTel
+ *     SDK; the dispatch spans keep nesting deterministically under the
+ *     orchestrator's hatchery.spawn / spawn.* spans via the shared
+ *     trace-ids.ts helpers (Balexda/March#145).
  *   - a lastHeartbeat snapshot is exposed for the HTTP /status endpoint.
  */
 import { execFile, spawn } from "node:child_process";
@@ -20,14 +21,11 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import {
-  spanIdForDispatch,
-  traceIdForDispatch,
-} from "../../observability/trace-ids.js";
-import {
   recordLoopHeartbeat,
   type LoopMetricsSnapshot,
 } from "../../observability/loop-metrics.js";
 import { emitLoopLog, type LoopLogSeverity } from "../../observability/logs.js";
+import { emitLoopSpan } from "../../observability/loop-spans.js";
 import { resolveHatcheryUrl } from "../../hatchery/service/client.js";
 import { CastraClient } from "../../castra/client.js";
 import type { LoopMeta } from "./meta.js";
@@ -115,76 +113,40 @@ function append(file, value) {
 }
 
 // --- OpenTelemetry (loop-side spans) -------------------------------------
-// Each dispatched unit of work is its own trace: trace id = hash(slice id), so
-// these loop spans share a trace with the orchestrator's hatchery.spawn /
-// spawn.* spans (which use the same deterministic ids). legate.dispatch claims
-// the deterministic span id so the orchestrator spans nest beneath it.
-// Delegate to the shared deterministic id helpers so the loop, the orchestrator,
-// and the in-spawn emitter all derive byte-identical ids (CLAUDE.md contract).
-function otelTraceId(key) {
-  return traceIdForDispatch(key);
-}
-function otelSpanId(key) {
-  return spanIdForDispatch(key);
-}
-function emitLoopSpan(opts) {
-  try {
-    if (!meta.otel || !meta.otel.enabled || !opts.traceKey) return;
-    const endNanos = BigInt(Date.now()) * 1000000n;
-    const startNanos = opts.startMs ? BigInt(Math.trunc(opts.startMs)) * 1000000n : endNanos;
-    // Every loop span carries the deployment profile (set at `march legate
-    // init`, also what places agent-deck sessions) so test/integ telemetry can
-    // be filtered out of a real deployment's traces.
-    const attributes = Object.entries({ "march.profile": meta.profile || "unknown", ...(opts.attributes || {}) }).map(([k, v]) => ({ key: k, value: { stringValue: String(v) } }));
-    const span = {
-      traceId: otelTraceId(opts.traceKey),
-      spanId: opts.spanId || crypto.randomBytes(8).toString("hex"),
-      name: opts.name,
-      kind: 1,
-      startTimeUnixNano: startNanos.toString(),
-      endTimeUnixNano: endNanos.toString(),
-      attributes,
-      status: { code: opts.error ? 2 : 1 },
-    };
-    if (opts.parentSpanId) span.parentSpanId = opts.parentSpanId;
-    const payload = { resourceSpans: [{ resource: { attributes: [{ key: "service.name", value: { stringValue: "march-legate" } }] }, scopeSpans: [{ scope: { name: "march-legate" }, spans: [span] }] }] };
-    let endpoint = meta.otel.endpoint || "http://localhost:4318";
-    while (endpoint.endsWith("/")) endpoint = endpoint.slice(0, -1);
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 3000);
-    fetch(endpoint + "/v1/traces", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(payload),
-      signal: controller.signal,
-    }).catch(() => {}).finally(() => clearTimeout(timer));
-  } catch (err) {}
-}
+// Dispatch-lifecycle spans are emitted via the OTel SDK tracer (see
+// src/observability/loop-spans.ts). Each dispatched unit of work is its own
+// trace: trace id = hash(slice id), so these loop spans share a trace with the
+// orchestrator's hatchery.spawn / spawn.* spans (which use the same
+// deterministic ids). legate.dispatch is the root and claims the deterministic
+// span id so the orchestrator spans nest beneath it; babysit/cleanup nest as
+// children of that same parent. loop-spans.ts derives those ids from the slice
+// id via the shared trace-ids.ts helpers (CLAUDE.md cross-process contract), so
+// this layer only classifies events into spans.
 function maybeEmitLoopSpan(event) {
   if (!event || typeof event !== "object") return;
   const sliceId = event.slice_id;
   if (!sliceId) return;
   if (event.kind === "dispatch_action" && event.action === "dispatch") {
-    emitLoopSpan({ name: "legate.dispatch", traceKey: sliceId, spanId: otelSpanId(sliceId), attributes: { "march.slice_id": sliceId, "march.action": event.action, "march.dispatch_mode": "spawn" } });
+    emitLoopSpan({ name: "legate.dispatch", traceKey: sliceId, root: true, attributes: { "march.slice_id": sliceId, "march.action": event.action, "march.dispatch_mode": "spawn" } });
   } else if (event.kind === "recovery_dispatch") {
     // Failed-spawn recovery (added with the upstream recovery/direct-steward
     // machinery). Each recovery codex spawn and each no-spawn direct-steward
     // dispatch is its own dispatched unit of work, so it gets its own trace
     // keyed off its recovery-/direct-suffixed slice id. Like a normal dispatch,
-    // it claims the deterministic span id (otelSpanId) so a recovery spawn's
-    // hatchery.spawn / spawn.* spans nest beneath this root; direct_dispatch has
-    // no spawn but stays uniform so the dispatch still shows up as a trace.
+    // it is the root span (claims the deterministic span id) so a recovery
+    // spawn's hatchery.spawn / spawn.* spans nest beneath it; direct_dispatch
+    // has no spawn but stays uniform so the dispatch still shows up as a trace.
     const mode = event.action === "direct_dispatch" ? "direct_steward" : "recovery";
-    emitLoopSpan({ name: "legate.dispatch", traceKey: sliceId, spanId: otelSpanId(sliceId), attributes: { "march.slice_id": sliceId, "march.action": event.action || "", "march.dispatch_mode": mode } });
+    emitLoopSpan({ name: "legate.dispatch", traceKey: sliceId, root: true, attributes: { "march.slice_id": sliceId, "march.action": event.action || "", "march.dispatch_mode": mode } });
   } else if (event.kind === "dispatch_failure") {
     // launchHatcheryDispatch threw, so the spawn never ran and the orchestrator
     // never emits hatchery.spawn / the spawn metrics. Record the failed launch
     // as an errored root span so the dispatch still surfaces — as a failed trace.
-    emitLoopSpan({ name: "legate.dispatch", traceKey: sliceId, spanId: otelSpanId(sliceId), error: true, attributes: { "march.slice_id": sliceId, "march.action": "dispatch", "march.dispatch_mode": "spawn", "march.error": event.error || "dispatch launch failed" } });
+    emitLoopSpan({ name: "legate.dispatch", traceKey: sliceId, root: true, error: true, attributes: { "march.slice_id": sliceId, "march.action": "dispatch", "march.dispatch_mode": "spawn", "march.error": event.error || "dispatch launch failed" } });
   } else if (event.kind === "babysit_action") {
-    emitLoopSpan({ name: "legate.babysit", traceKey: sliceId, parentSpanId: otelSpanId(sliceId), attributes: { "march.slice_id": sliceId, "march.action": event.action || "", "march.pr_number": event.pr_number || "" } });
+    emitLoopSpan({ name: "legate.babysit", traceKey: sliceId, root: false, attributes: { "march.slice_id": sliceId, "march.action": event.action || "", "march.pr_number": event.pr_number || "" } });
   } else if (event.kind === "cleanup") {
-    emitLoopSpan({ name: "legate.cleanup", traceKey: sliceId, parentSpanId: otelSpanId(sliceId), attributes: { "march.slice_id": sliceId, "march.pr_state": event.pr_state || "" } });
+    emitLoopSpan({ name: "legate.cleanup", traceKey: sliceId, root: false, attributes: { "march.slice_id": sliceId, "march.pr_state": event.pr_state || "" } });
   }
 }
 
