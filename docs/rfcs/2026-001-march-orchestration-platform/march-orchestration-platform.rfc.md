@@ -39,7 +39,7 @@ The initial operator is the author. Making March usable for other solo technical
 
 - **Safe parallel execution**: Dispatch work to sandboxed AI sessions that cannot cause damage beyond their designated scope, with sandbox integrity treated as an existential requirement.
 - **Model-agnostic orchestration**: Support multiple AI backends through a common interface. Claude Code CLI and Codex CLI are the two supported spawn backends (see Appendices B and C; Gemini was dropped 2026-05-16 — see [Accelerated Work & Reordering](#accelerated-work--reordering-2026-05)). The operator selects per-spawn based on capability needs, cost model, or preference. Interactive components (Legate, Steward) use any backend that supports conversational interaction.
-- **Deterministic coordination**: Build the event bus (Herald), session management (Brood), and profile configuration (Hatchery) as functional, non-LLM systems — reliable infrastructure, not vibed behavior.
+- **Deterministic coordination**: Build the system-state observation service (Herald), session management (Brood), and profile configuration (Hatchery) as functional, non-LLM systems — reliable infrastructure, not vibed behavior.
 - **Incremental capability delivery**: Each milestone produces a usable component, with smithy-style skills deployed alongside to provide a pseudo-legate until the full orchestrator exists.
 - **Observable and attachable**: Interactive components (Legate, future session types) run in tmux sessions that the operator can SSH into and attach to directly. Spawns are headless and non-interactable but their status and output are observable via the March CLI.
 
@@ -105,24 +105,31 @@ The following are explicitly not part of this RFC:
 
 ## Proposal
 
-March consists of five major components, delivered incrementally:
+March consists of the following major components, delivered incrementally.
+Since 2026-05 the non-spawn subsystems (Hatchery, Brood, Herald, Castra, and
+the legate loop) run as **containerized Fastify HTTP services** rather than
+in-process libraries — each has a `march <component> serve` container entrypoint
+and thin HTTP clients; consumers reach them over the shared `march` Docker
+network. The original "five major components" framing predates that split:
 
 **Spawn** — The disposable, one-shot sandboxed executor. A spawn is a pure function: one input (a finalized prompt and a snapshotted worktree), one output (a structured JSON result). Each spawn gets its own git worktree and associated branch, which is then snapshotted into a Docker container — the container holds a copy, not a mount, so the LLM agent cannot modify the host. The worktree-per-spawn model also ensures no branch race conditions between concurrent spawns and provides a ready-made location to apply the resulting patch for code review. The container has no outbound network access and no ability to write to disk outside the sandbox. The LLM must terminate before output extraction occurs — there is no concurrent access to results while the agent is running. A deterministic extraction process retrieves the JSON output only after the spawn has fully stopped. The multi-backend interface is prompt in, structured JSON out — backends differ only in completion signaling, and the rest of the system never needs to know which backend ran.
 
-**Hatchery** — The container profile manager. A non-LLM functional system that configures profiles for any containerized March component — not just spawns. Profiles define base image, file mounts, available tools, permissions, and security posture. Different roles get different security profiles: a spawn runs fully sandboxed with no approvals needed; a PR-management agent might have GitHub access but limited filesystem scope; Legate, Brood, and Herald may also deploy in Docker containers with their own profiles. Profiles are declarative, version-controlled, and initialized with opinionated defaults that `march init` materializes as editable files.
+**Hatchery** — The container/profile policy authority and spawn-orchestration service. A non-LLM containerized Fastify service (`march hatchery serve`) that runs the spawn flow inside a container; `march hatchery spawn` is a thin HTTP client. It drives the Steward session through the Castra HTTP API (rather than mounting `agent-deck`) and registers each spawn with Brood at launch. It also owns the container-profile policy for any containerized March component — not just spawns. Profiles define base image, file mounts, available tools, permissions, and security posture, and are the single declarative source consumed by every role: a spawn runs fully sandboxed with no approvals needed; the Steward (`pr-management` profile) has GitHub access but limited filesystem scope; Legate, Brood, and Herald run in their own containers with their own profiles. Profiles are declarative, version-controlled, and initialized with opinionated defaults that `march init` materializes as editable files.
 
-**Brood** — The session lifecycle manager. A non-LLM functional system that interacts with the Hatchery to spin up, track, and tear down spawn sessions. Provides the operator with visibility into what's running, what's completed, and what needs attention.
+**Brood** — The session-state and lifecycle/teardown authority. A non-LLM containerized Fastify service (`march brood serve`) that tracks every spawn / steward / legate in a SQLite registry (`~/.march/brood`) behind a swappable `SessionRepository` interface (sqlite default; a typed `postgres` backend is a not-yet-implemented SaaS extension point selected via `MARCH_BROOD_STORE`). The Hatchery registers spawns with it at launch; the legate loop **requests** teardown via `march brood teardown` rather than pruning anything itself. Brood **owns teardown**: it removes the container, asks Castra to remove the steward, then removes the worktree/branch by **exact tracked path — never a blanket `git worktree prune`** (issue #155). The container + worktree call-outs sit behind a swappable `TeardownSubstrate` adapter (default `hostTeardownSubstrate`, issue #169) so the substrate can be retargeted (host docker socket → orchestrator API; host worktree → ephemeral volume). It also provides the operator with visibility into what's running, what's completed, and what needs attention.
 
-**Herald** — The event bus. A deterministic, non-LLM system that routes events (spawn completion, errors, escalations, status changes) between components. Consumes the structured JSON output format produced by spawns. First-class clients are built from the outset rather than relying on message-passing heuristics.
+**Herald** — The system-state observation service. A deterministic, non-LLM containerized Fastify service (`march herald serve`) that observes the world each tick (the shared sense I/O in `src/observe/sense-io.ts`: `gh`/`git`/`smithy` + Castra) and records change events into an append-only, seq-ordered **event log** (`node:sqlite` at `~/.march/herald`). The system state is **event-sourced**: current state is the fold of the log (the shared taxonomy + reducer in `src/herald/events.ts`, imported by both Herald and the legate). Herald appends *observation* events; the legate appends *transition* events and drains the inbox via `GET /events?after=<cursor>`. Herald is the single sequencer (it owns every `seq`, including legate `POST /events`), is **read-only by default** (`MARCH_HERALD_SYNC=1` enables the git sync), and never touches Docker. This is the heartbeat + data-collection responsibility calved off the legate loop; it replaces the earlier "event bus" framing.
 
 **Legate** — The intelligent orchestrator. As of 2026-05 Legate is composed of two siblings (see [Accelerated Work & Reordering](#accelerated-work--reordering-2026-05)):
 
 - **`legate-agent`** — the Claude-backed interactive shell originally described in this RFC. Owns planning, escalation, and decisions that need an LLM.
-- **`legate-loop`** — a deterministic processor that runs the heartbeat-driven dispatch loop, watches steward sessions, and reconciles PRs. Non-LLM. This is responsibility the RFC originally assigned to M5 Legate; it was pulled forward into M2/M3 so the system could run end-to-end before full Legate landed.
+- **`legate-loop`** — a deterministic processor that runs the heartbeat-driven dispatch loop, watches steward sessions (via the Castra API), and reconciles PRs. Non-LLM. It now runs as an SDK-instrumented **container service** with an HTTP API: it drains the Herald inbox via `GET /events?after=<cursor>`, appends *transition* events via `POST /events`, and requests teardown via `march brood teardown`. This is responsibility the RFC originally assigned to M5 Legate; it was pulled forward into M2/M3 so the system could run end-to-end before full Legate landed.
 
 Much of the agent's behavior is still prototyped incrementally via smithy-style skills deployed with each preceding milestone.
 
-**Steward** — The PR-management session. A Claude Code agent-deck session, launched per spawn via `src/hatchery/spawn-handoff.ts`, that receives the spawn's extracted patch and drives review, test, commit, push, and PR creation. Runs under the `pr-management` Hatchery profile in auto-mode steered by skills. Named in this RFC 2026-05-16; previously referred to as "manager" in code. Brood will own its container lifecycle (see backlog).
+**Castra** — The interactive-sessions host. A containerized Fastify service (one shared `march-castra` host on the `march` network) that fronts the single tmux server / `agent-deck` install over a small bearer-token HTTP API. Consumers (the Hatchery, the legate loop) call Castra's API to launch / send-to / output-from / remove interactive sessions instead of shelling out to `agent-deck` or bind-mounting it, so `agent-deck` lives in exactly one place. The Steward and the interactive Legate session are quartered here. See [`docs/Castra.md`](../../Castra.md).
+
+**Steward** — The PR-management role. An interactive `agent-deck` session **hosted in Castra** (launched per spawn via `src/hatchery/spawn-handoff.ts`, which calls the Castra HTTP API) that receives the spawn's extracted patch and drives review, test, commit, push, and PR creation. Runs under the `pr-management` Hatchery profile in auto-mode steered by skills. Named in this RFC 2026-05-16; previously referred to as "manager" in code. Brood owns its teardown (it asks Castra to remove the session — see the Brood entry and backlog).
 
 **March CLI** — Scaffolded from the start, following the SmithyCLI pattern. `march init` bootstraps the working environment, deploying skills and prompts co-incident with each completed milestone. The CLI serves as both the deployment mechanism and the user's primary interface until Legate is fully realized.
 
@@ -130,12 +137,12 @@ Much of the agent's behavior is still prototyped incrementally via smithy-style 
 
 - **Sandbox integrity is the highest priority.** A spawn is an isolated pure function: one input, one output, no side effects. Spawns run in Docker containers with no outbound network access and no write access outside the sandbox. The only data entering is the finalized prompt and a snapshot of a git worktree (copied into the container, not mounted); the only data leaving is the extracted result. The LLM must fully terminate before output extraction begins — there is no window where the agent and the extraction process access the sandbox concurrently. If this isolation model is compromised, running an LLM in yolo mode is catastrophically unsafe. See **Appendix A: Spawn Sandbox Threat Model** for the enumerated attack surface.
 - **Worktree-per-spawn isolation.** Each spawn gets its own git worktree and dedicated branch. The worktree is snapshotted into the Docker container so the LLM cannot modify the host filesystem. When a result comes back, the worktree provides a ready-made location to apply the patch and trigger code review. This also eliminates branch race conditions — concurrent spawns never compete for the same branch.
-- **Worktree lifecycle.** A worktree is created for the spawn, lives through the PR → review → merge cycle (potentially handed off to a human-interactable session to close the loop), and is disposed of by the Brood along with the associated branch and sandbox container. Brood owns cleanup of the full spawn lifecycle: worktree, branch, and container.
+- **Worktree lifecycle.** A worktree is created for the spawn, lives through the PR → review → merge cycle (handed off to the Steward session in Castra to close the loop), and is disposed of by Brood along with the associated branch and sandbox container. Brood owns cleanup of the full spawn lifecycle and tears down in order — remove the container, ask Castra to remove the steward, then remove the worktree/branch by **exact tracked path (never a blanket `git worktree prune`** — issue #155). The container + worktree call-outs sit behind a `TeardownSubstrate` adapter (default `hostTeardownSubstrate`).
 - **Deterministic systems where possible.** Herald, Hatchery, and Brood are explicitly not LLM-powered. They are functional programs with predictable behavior. This reduces the surface area of non-deterministic decisions to Spawn (execution) and Legate (orchestration).
 - **tmux for interactive components, not spawns.** Spawns are headless and non-interactable — they run as pure Docker containers with no tmux session. tmux is the substrate for interactive components (Legate, and potentially future session types) where the operator needs to SSH in and attach directly. Building on patterns from agent-deck, tmux provides the observability and interactivity layer for components that benefit from it.
 - **Output extraction over network access.** Spawns never initiate outbound communication. Output is written to a designated location within the sandbox, and extraction occurs only after the LLM process has terminated. This is a sequential, non-concurrent handoff: run → stop → extract. The spawn cannot influence the extraction process because it is no longer running when extraction begins.
 - **SmithyCLI as the template for CLI and skill delivery.** The single-source, multi-agent template pattern from SmithyCLI (one markdown file deployed to agent-specific locations) carries forward. Each milestone ships skills that cover interactions with newly built components, accumulating into Legate's eventual behavior. The `march init` command bootstraps the environment, mirroring the `smithy init` model.
-- **Code review via GitHub.** Spawns produce patches or branches. Integration tooling (part of Brood or a dedicated component) takes spawn output and creates PRs or applies patches so the operator can review through standard GitHub workflows. Spawns do not get outside internet access, so this integration is handled by the deterministic infrastructure layer.
+- **Code review via GitHub.** Spawns produce patches or branches. The **Steward** (an interactive `agent-deck` session hosted in Castra) takes spawn output and applies the patch, runs tests, commits, pushes, and opens the PR so the operator can review through standard GitHub workflows. Spawns do not get outside internet access, so this integration is handled outside the sandbox by the Steward session, which the Hatchery drives via the Castra HTTP API.
 - **Persistent state via Docker and tmux.** Running sessions in Docker containers and tmux sessions provides natural durability. State persists across interactions without requiring a separate persistence layer in the early milestones.
 
 ## Decisions
@@ -147,23 +154,23 @@ Much of the agent's behavior is still prototyped incrementally via smithy-style 
 ## Open Questions
 
 - **Naming**: `march` vs `the-march` for the CLI binary and package name.
-- **Herald protocol**: What event format and transport does the Herald use? File-based events, Unix sockets, or something else within the Docker/tmux environment?
+- ~~**Herald protocol**: What event format and transport does the Herald use?~~ **Resolved (2026-05):** Herald is a containerized Fastify HTTP service backed by a `node:sqlite` append-only, seq-ordered event log; consumers poll `GET /events?after=<cursor>` and append via `POST /events`. Herald is the single sequencer; the event taxonomy + reducer live in `src/herald/events.ts`.
 
 ## Accelerated Work & Reordering (2026-05)
 
 Bootstrap testing surfaced enough end-to-end pain that we vibe-coded portions of M2 and M5 ahead of schedule rather than wait for the milestone order. What landed:
 
 - **`legate-loop` processor** (originally M5 Legate scope): a deterministic, heartbeat-driven dispatch loop that reads `smithy status --format json`, launches steward sessions for ready slices, and reconciles their output. Lives in `src/legate/init.ts`. Sibling to the Claude-backed `legate-agent`.
-- **Spawn → Steward handoff** (`src/hatchery/spawn-handoff.ts`): completed spawns hand their patch off to a Claude Code agent-deck session running under a `pr-management` profile. The steward owns review/test/commit/push/PR. Replaces what the RFC originally implied would be a deterministic CLI script.
+- **Spawn → Steward handoff** (`src/hatchery/spawn-handoff.ts`): completed spawns hand their patch off to the Steward — an interactive `agent-deck` session hosted in Castra (launched via the Castra HTTP API) running under a `pr-management` profile. The steward owns review/test/commit/push/PR. Replaces what the RFC originally implied would be a deterministic CLI script.
 - **Legate container under Hatchery** (`src/hatchery/legate-container.ts`): one concrete Hatchery profile shipped — for the Legate container — without the broader declarative profile system.
 - **Codex backend** (`src/spawn/backends.ts`): added alongside Claude Code with a credential-mount auth pattern. Gemini was dropped.
 
 What this reordering **defers** (now tracked as Stage B backlog — see [Backlog of follow-on specs](#backlog-of-follow-on-specs-stage-b)):
 
-- Declarative hatchery profile schema + `march hatchery list/inspect/validate` CLI (M2 originally).
-- Mini-herald daemon and the event-driven message bus (`legate-loop` currently polls `smithy status` directly — see `specs/2026-05-12-003-mini-herald/`).
-- Brood CLI surface (M3) — `src/brood/` has record-keeping primitives but no operator-facing `march brood list/status/clean`. Brood is the right home for steward container lifecycle once it exists.
-- A7 network policy enforcement — spawn containers still run on the default Docker bridge.
+- Declarative hatchery profile schema + `march hatchery list/inspect/validate` CLI (M2 originally) — spec drafted (`specs/2026-05-12-003-profile-schema-and-validation-library/`).
+- ~~Mini-herald daemon~~ **Realized (2026-05):** Herald shipped as the containerized, event-sourced observation service (`march herald serve`), replacing the mini-herald precursor and the "message bus" framing; the legate loop now drains the Herald inbox instead of polling `smithy status` directly. (The file-based `mini-herald` precursor spec has been removed as superseded.)
+- ~~Brood CLI surface (M3)~~ **Realized (2026-05):** Brood shipped as the containerized session-state + teardown authority (`march brood serve`, with `march brood teardown` as the request verb). Operator-facing `list/status` verbs are HTTP clients of that service; Brood owns steward and container teardown (via Castra + the `TeardownSubstrate`).
+- A7 network policy enforcement — spawn containers still run on the default Docker bridge; the hardened per-spawn network model is specified in `specs/2026-05-12-004-spawn-sandbox-security/`.
 
 The accelerated pieces are deliberately marked **Done (provisional)** below. They work in practice but were shaped by whatever issues we hit during bootstrap, not by spec; the Stage B specs will harden or replace them.
 
@@ -207,21 +214,21 @@ The accelerated pieces are deliberately marked **Done (provisional)** below. The
 - Skills updated to cover Brood management. The accumulated skill set forms a functional pseudo-legate.
 - **MVP complete**: the system is usable for dispatching, configuring, and managing parallel sandboxed AI work.
 
-### Milestone 4: Herald — **Not started** (mini-herald precursor spec drafted at `specs/2026-05-12-003-mini-herald/`)
+### Milestone 4: Herald — **Realized (provisional)** as the event-sourced observation service (`march herald serve`); the file-based mini-herald precursor spec has been removed as superseded
 
-**Description**: Build the deterministic event bus. The Herald is a non-LLM functional system that routes events between components, enabling coordination without requiring direct component-to-component communication.
+**Description**: Build the deterministic system-state observation service. Herald is a non-LLM containerized Fastify service that observes the world each tick and records change events into an append-only, seq-ordered **event log** (`node:sqlite`). The system state is **event-sourced** — current state is the fold of the log — so components coordinate by reading the shared log rather than via direct component-to-component communication. Herald appends *observation* events and is the single sequencer; the legate appends *transition* events and drains the inbox via `GET /events?after=<cursor>`. (The earlier "event bus that routes events" framing was superseded by this event-sourced design.)
 
 **Success Criteria**:
-- Events (spawn completion, errors, status changes) are published and routed through the Herald.
-- First-class Herald clients are available for Spawn, Hatchery, and Brood.
-- The operator can observe the event stream via the March CLI.
-- Components react to events without polling or direct coupling.
+- Change events (observation + transition) are appended to a single, seq-ordered event log; Herald is the sole sequencer.
+- The legate (and other consumers) drain the inbox via `GET /events?after=<cursor>` and append transitions via `POST /events`.
+- The operator can observe current system state (the fold of the log) and the event stream via the March CLI / HTTP surface.
+- Components react to state derived from the log rather than polling `smithy status`/`gh` directly; Herald is read-only by default and never touches Docker.
 
 ### Milestone 5: Legate — **Done (provisional, accelerated)**
 
 **Description**: Build the intelligent orchestrator.
 
-**Accelerated status (2026-05-16)**: Implemented as a split — `legate-agent` (Claude-backed interactive shell) + `legate-loop` (deterministic processor that handles dispatch, worker monitoring, PR reconciliation). The loop currently polls `smithy status --format json` directly; the mini-herald spec will replace that polling with event consumption. See [Accelerated Work & Reordering](#accelerated-work--reordering-2026-05). The Legate is an LLM-powered interactive shell that owns the full March workflow — planning, dispatch, monitoring, escalation, and integration. It absorbs and extends the pseudo-legate skills accumulated across prior milestones.
+**Accelerated status (2026-05-16)**: Implemented as a split — `legate-agent` (Claude-backed interactive shell) + `legate-loop` (deterministic processor that handles dispatch, worker monitoring, PR reconciliation). The loop consumes the shipped Herald observation service's event log rather than polling `smithy status --format json` directly (this replaced the earlier mini-herald plan). See [Accelerated Work & Reordering](#accelerated-work--reordering-2026-05). The Legate is an LLM-powered interactive shell that owns the full March workflow — planning, dispatch, monitoring, escalation, and integration. It absorbs and extends the pseudo-legate skills accumulated across prior milestones.
 
 **Success Criteria**:
 - The Legate can accept a goal and break it into dispatchable work.
@@ -249,7 +256,7 @@ These specs build *on top of* the as-built code rather than replacing it. They a
 | # | Spec | Replaces / hardens | Notes |
 |---|------|--------------------|-------|
 | 1 | Hatchery declarative profiles | Hardcoded `SPAWN_CONFIG` in `src/hatchery/spawn-config.ts`; ad-hoc `legate-container.ts` | YAML profile loader + `march hatchery list/inspect/validate`. Closes M2's stated scope. **In flight** — F1 spec drafted at `specs/2026-05-12-003-profile-schema-and-validation-library/`; F2–F6 still to cut. |
-| 2 | Mini-herald daemon | `legate-loop`'s direct `smithy status` polling | Implement the existing `specs/2026-05-12-003-mini-herald/` spec; wire `legate-loop` to consume herald events. The "better message passing system" referenced in the 2026-05 acceleration notes. |
+| 2 | ~~Mini-herald daemon~~ **Realized (2026-05)** | `legate-loop`'s direct `smithy status` polling | Herald shipped as the event-sourced observation service; `legate-loop` consumes Herald events. The file-based mini-herald precursor spec has been removed as superseded. |
 | 3 | Brood lifecycle CLI | Ad-hoc container management spread across `legate-container.ts`, `spawn-handoff.ts`, and `src/brood/` primitives | `march brood list/status/clean`. Owns container/worktree lifecycle for legates, spawns, and stewards. Integrates with hatchery profiles + herald events. |
 | 4 | Steward role formalization | Ad-hoc `launchAgentDeckManager()` path in `spawn-handoff.ts` | Names + specs the steward role: prompt contract, exit conditions, brood-managed lifecycle. |
 | 5 | A7 network policy enforcement | Default Docker bridge on spawn containers | Firewall / proxy rules per backend profile; tied to hatchery profile schema so it's declarative. |

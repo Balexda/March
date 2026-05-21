@@ -4,6 +4,21 @@
 **Branch**: `2026-04-05-001-march-cli-foundation`
 **Created**: 2026-04-05
 **Status**: Draft  |  **Implementation status (2026-05-16)**: **Done (realized).** All six user stories shipped in `src/cli/` and `src/bootstrap/`. No outstanding gaps.
+
+> **Architecture note — the system-command surface has grown (container-service split, 2026-05).**
+> This spec's two-tier model (foundation commands + `march <system> <verb>`) holds,
+> but its enumeration of systems and verbs is stale. The realized CLI
+> (`src/cli/program.ts`) also registers **`castra`** and **`legate`**, and each
+> containerized service exposes a long-running **`serve`** entrypoint plus thin
+> HTTP-client verbs (`march hatchery spawn`, `march brood teardown` / `list`,
+> `march herald events` / `state`). Where this spec marks `brood`/`herald` as
+> "reserved, not implemented" or calls Herald an "event bus," read the corrected
+> roles: Hatchery = containerized spawn-flow service; Brood = session-state +
+> teardown authority; Herald = event-sourced **observation** service; Castra =
+> interactive-sessions host. The foundation commands (`init`/`update`/`help`/
+> `version`) are unchanged; the system commands are HTTP clients that reach those
+> services over the shared `march` Docker network via `MARCH_BROOD_URL`,
+> `MARCH_HERALD_URL`, `CASTRA_URL`/`CASTRA_API_TOKEN`, etc.
 **Input**: `docs/rfcs/2026-001-march-orchestration-platform/march-orchestration-platform.rfc.md` — Milestone 1: Spawn
 **Source Feature Map**: `docs/rfcs/2026-001-march-orchestration-platform/01-spawn.features.md` — Feature 1: March CLI Foundation
 
@@ -86,7 +101,7 @@ As an operator, I want a well-structured CLI with two command tiers so that I ha
 
 The CLI has two command tiers:
 - **Setup commands**: Single-token commands that affect all of March (e.g., `march init`, `march update`, `march help`, `march version`). These are not scoped to a subsystem.
-- **System commands**: `march <system> <verb>` commands that target a specific March subsystem (e.g., `march spawn dispatch`, `march brood status`). The system noun identifies which subsystem (spawn, hatchery, brood, herald, legate), and the verb identifies the operation.
+- **System commands**: `march <system> <verb>` commands that target a specific March subsystem (e.g., `march spawn dispatch`, `march brood teardown`). The system noun identifies which subsystem (spawn, hatchery, brood, herald, castra, legate), and the verb identifies the operation — including each containerized service's `serve` entrypoint and its thin HTTP-client verbs.
 
 **Why this priority**: The CLI is described as a "first-class deliverable, not scaffolding." The command structure is the surface that all subsequent features plug into.
 
@@ -161,7 +176,7 @@ As an operator, I want `march init` to check for git and Docker and warn me if t
 - **FR-003**: The `march init` command MUST detect an existing installation (manifest present) and direct the user to `march update` instead, exiting with code 1.
 - **FR-004**: The `march update` command MUST compare the installed version against the CLI version and redeploy files accordingly, removing stale files tracked in the old manifest but absent from the new deployment set.
 - **FR-005**: The `march update` command MUST preserve files on disk that are NOT tracked in the manifest (user customizations).
-- **FR-006**: The CLI MUST support two command tiers: (a) **setup commands** — single-token commands that affect all of March (`init`, `update`, `help`, `version`), and (b) **system commands** — `march <system> <verb>` commands that target a specific March subsystem (`spawn`, `hatchery`, `brood`, `herald`, `legate`). System commands MUST use the `march <system> <verb>` pattern with a dispatch mechanism that subsequent features can extend.
+- **FR-006**: The CLI MUST support two command tiers: (a) **setup commands** — single-token commands that affect all of March (`init`, `update`, `help`, `version`), and (b) **system commands** — `march <system> <verb>` commands that target a specific March subsystem (`spawn`, `hatchery`, `brood`, `herald`, `castra`, `legate`). System commands MUST use the `march <system> <verb>` pattern with a dispatch mechanism that subsequent features can extend; the dispatch table reserves a `serve` verb for each containerized service and HTTP-client verbs (e.g. `march brood teardown`) for cross-service requests.
 - **FR-007**: The CLI MUST provide a stub for the `march spawn` system namespace that prints "not yet implemented" and exits with code 1.
 - **FR-008**: Every command MUST support a `--help` flag that prints usage information to stdout.
 - **FR-009**: The CLI MUST use exit codes consistently: 0 (success), 1 (error), 2 (usage error).

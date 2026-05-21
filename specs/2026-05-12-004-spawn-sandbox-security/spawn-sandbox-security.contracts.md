@@ -512,7 +512,7 @@ F4 resolves these forward-pointers from F2 and F3:
 
 ## Events / Hooks
 
-No events or hooks are introduced by F4. The Herald event bus (Milestone 4) defines the event system. F4's modifications stay within the dispatch action, the Stage 4 sub-pipeline, the snapshot exclusion list, and the new `march spawn verify` command.
+No events or hooks are introduced by F4. Herald (the shipped event-sourced observation service) defines the system event log. F4's modifications stay within the dispatch action, the Stage 4 sub-pipeline, the snapshot exclusion list, and the new `march spawn verify` command.
 
 ## Integration Boundaries
 
@@ -521,6 +521,6 @@ No events or hooks are introduced by F4. The Herald event bus (Milestone 4) defi
 - **Feature 5 (Spawn Output Extraction)**: F4 publishes the A6 (Output Manipulation) requirement contract that F5 must implement. F5 reads from the spawn container's stdout via `docker logs <container-id>` (or equivalent), which works without an active network attachment — so F4's network teardown at spawn exit does not block F5.
 - **Feature 6 (PR Integration)**: F6 reads the SpawnRecord (unchanged in F4). F6 has no network dependency on the proxy sidecar.
 - **Milestone 2 (Hatchery)**: M2 layers declarative per-profile configuration on top of F4's primitives. The post-F4 `SpawnConfig` (8 fields) and post-F4 `SpawnBackend.allowedEgressHosts` are the seed for M2's first opinionated profile. M2 may make `pidsLimit`, `readOnlyRootfs`, and the egress allowlist per-profile-editable; M2 may also relax the bind-mount reject validator for opt-in profile-driven mounts.
-- **Milestone 3 (Brood)**: Brood's session-management code reads the SpawnRecord (unchanged). The proxy sidecar / private network are torn down when the spawn exits (F4 cleanup chain), so Brood inherits a clean state when it owns the worktree/branch lifecycle.
+- **Brood (shipped session-state + teardown authority)**: Brood already tracks each spawn/steward at launch and owns container/worktree/branch reclamation by **exact tracked path** via `march brood teardown` (never `git worktree prune`). F4's spawn-scoped network artifacts (proxy sidecar, private network) are torn down by the Hatchery dispatch path when the spawn exits — by exact name — so Brood-owned reclamation operates on already-network-clean state. (If Brood removes the spawn container itself, its `TeardownSubstrate` must also reclaim the matching `march-spawn-net-<id>` / `march-spawn-proxy-<id>` by exact name.)
 - **Docker CLI**: F4 grows the Docker surface area Stage 4 uses: `docker network create`, `docker network connect`, `docker network rm`, plus a second `docker run` (for the proxy sidecar). All invoked via `child_process` per the F2/F3 pattern.
 - **External proxy image provisioning**: The HTTP CONNECT proxy image is implementation detail — see SD-003. Whether F4 builds a `march-proxy:latest` image, uses an off-the-shelf image (tinyproxy, mitmproxy), or runs a custom Node.js / Go binary is decided at render/cut. The contract above describes the image's behavior (HTTP CONNECT proxy, hostname allowlist via env var), not its identity.

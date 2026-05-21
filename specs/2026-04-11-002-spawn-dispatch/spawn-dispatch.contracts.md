@@ -1,5 +1,20 @@
 # Contracts: Spawn Dispatch
 
+> **Architecture note (container-service split, 2026-05).** These contracts
+> describe the M1 in-process `march spawn dispatch` flow. Since then: the spawn
+> flow runs inside the **Hatchery containerized service** (`march hatchery serve`;
+> `march hatchery spawn` is a thin HTTP client); the dispatch **provider** is that
+> service, not the CLI binary. Worktree/branch/container **teardown is owned by
+> Brood** (exact tracked path, never `git worktree prune`, #155) and is *requested*
+> via `march brood teardown` — the in-process "reverse-order cleanup" / "stop and
+> remove container, remove worktree, delete branch" stages below are superseded by
+> that ownership. The Hatchery **registers each spawn with Brood at launch**, and
+> hands the extracted patch to the **Steward** (an interactive `agent-deck` session
+> hosted in **Castra**, driven over the Castra HTTP API) — a boundary these
+> contracts do not describe. The headless `claude -p` container here is the
+> **Spawn**, not the integrator. See the full mapping in the banner in
+> `spawn-dispatch.spec.md`.
+
 ## Overview
 
 This document defines the interface contracts for the Spawn Dispatch feature: the `march spawn dispatch` CLI command, the spawn dispatch pipeline (worktree creation, snapshot, container launch, prompt handoff, lifecycle), the SpawnRecord output format, and the integration boundaries with Docker, git, and the AI backend CLI. Contracts are expressed as behavioral specifications without prescribing implementation details.
@@ -325,7 +340,7 @@ The `spawn` subcommand group allows Feature 3-6 to register additional verbs (e.
 
 ## Events / Hooks
 
-No events or hooks are introduced by Feature 2. The Herald event bus (Milestone 4) will define the event system. Feature 2's SpawnRecord serves as the passive state artifact that downstream features poll or read — it is not an event.
+No events or hooks are introduced by Feature 2. Herald (the shipped event-sourced **observation** service, not an "event bus") records lifecycle changes as events the legate drains via `GET /events?after=<cursor>`; Brood holds canonical session state. Feature 2's SpawnRecord is the M1 passive state artifact — superseded by the Brood registry, with lifecycle changes observed by Herald rather than downstream features polling a JSON file.
 
 ## Integration Boundaries
 

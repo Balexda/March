@@ -16,6 +16,12 @@ Purpose: Defines the polymorphic dispatch contract — every backend implementat
 | `baseImage` | string | Yes | Docker image tag containing this backend's CLI pre-installed. Consumed by Stage 1 (Validate — dependency check), Stage 3 (Snapshot — Dockerfile `FROM` line), and any per-backend image diagnostics. |
 | `requiredEnvVars` | `readonly string[]` | Yes | Names of host environment variables that must be set (and non-empty) before the spawn can run. Consumed by Stage 1.5 (Auth Pre-Flight) for validation against the operator's environment, and Stage 4 (Launch) for the container env-flag composition. |
 | `buildEntrypoint` | `(promptFilePath: string) => readonly string[]` | Yes | Pure function returning the `docker run` exec argv that runs this backend's CLI inside the container against the given in-container prompt file path. The argv is the same shape `LaunchSpawnContainerInput.entrypoint` consumes. Implementations are expected to use an `sh -c` wrapper if they rely on shell expansion (e.g., `$(cat ...)`). |
+| `credentialMount` | `BackendCredentialMountSpec \| undefined` | No (shipped 2026-05-16) | **Divergence from the four-member closure.** Present for credential-mount backends (Codex), absent for env-var backends (Claude). Declares the host source directory (e.g. `CODEX_HOME`), the read-only in-container mount path (`/march/codex-auth`), and the in-container copy target. A backend declares **either** `requiredEnvVars` **or** `credentialMount`. This is the typed-interface expression of operating-philosophy rule 2 (minimum required access) — the host path is backend-declared, never operator-authored, so A2's "no operator-authored host bind mounts" guarantee holds. |
+
+> **Divergence note (2026-05-16).** The shipped `SpawnBackend` (`src/spawn/backends.ts`)
+> is **four required members + one optional `credentialMount`**, and the second
+> registered backend is **`codexBackend`, not `geminiBackend`**. The `geminiBackend`
+> rows below are historical context for the contract, not a live implementation.
 
 Validation rules:
 

@@ -1,5 +1,15 @@
 # Data Model: Spawn Dispatch
 
+> **Architecture note (container-service split, 2026-05).** The canonical session
+> store is now the **Brood SQLite registry** (`~/.march/brood`, behind a swappable
+> `SessionRepository`); the Hatchery service registers each spawn with Brood at
+> launch. The `~/.march/spawns/<spawn-id>.json` flat file below is the M1 shape —
+> treat it as legacy / forward-compatible, not the source of truth. `SpawnConfig`'s
+> "Hatchery (M2) replaces this" note is realized: Hatchery profiles are the live
+> mechanism. The `SpawnBackend` boundary is specced in
+> `specs/2026-05-10-003-multi-backend-execution-interface/` (shipped with a fifth
+> optional credential-mount member; Codex, not Gemini).
+
 ## Overview
 
 This model supports the spawn dispatch pipeline: tracking the state and metadata of individual spawn dispatches, defining the hardcoded container security configuration, and establishing the backend execution interface boundary. It extends the March data model (Feature 1's MarchManifest and MarchSkill) with spawn-specific entities that live in a separate state space from the installation manifest.
