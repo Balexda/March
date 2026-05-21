@@ -43,6 +43,18 @@ import {
   CastraClientError,
   createCastraClientFromEnv,
 } from "../castra/client.js";
+import {
+  DEFAULT_AGENT_DECK_PROFILE,
+  DEFAULT_MANAGER_GROUP,
+  DEFAULT_MANAGER_MODEL,
+} from "./defaults.js";
+import { registerStewardLaunchWithBrood } from "./service/brood-registration.js";
+
+export {
+  DEFAULT_AGENT_DECK_PROFILE,
+  DEFAULT_MANAGER_GROUP,
+  DEFAULT_MANAGER_MODEL,
+} from "./defaults.js";
 
 export class HatcherySpawnError extends Error {
   constructor(message: string) {
@@ -100,21 +112,6 @@ export interface HatcherySpawnResult {
   readonly exitCode: number;
   readonly summary: string;
 }
-
-export const DEFAULT_MANAGER_GROUP = "march-spawn-managers";
-// Stewards need agent-deck's session-level auto-mode to keep babysit
-// /smithy.fix nudges flowing without pausing the classifier. Empirically,
-// sonnet sessions in agent-deck v1.9.17 surface "auto mode unavailable
-// for this model" in the TUI even when auto-mode=true is set on the
-// session row, leaving the steward stalled mid-workflow. opus has the
-// auto-mode capability and reaches the same workflow steps in fewer
-// turns, so the per-spawn cost premium is acceptable.
-export const DEFAULT_MANAGER_MODEL = "opus";
-// Castra requires a concrete agent-deck profile on every request, but the
-// Hatchery's `agentDeckProfile` is optional (the deterministic loop always sets
-// it; ad-hoc spawns may not). Fall back to agent-deck's conventional default
-// profile so a profile-less spawn still resolves to a real session store.
-export const DEFAULT_AGENT_DECK_PROFILE = "default";
 
 const EXEC_MAX_BUFFER = 16 * 1024 * 1024;
 
@@ -561,6 +558,25 @@ export async function runHatcherySpawn(
     // Record the steward<->spawn link so Brood (and a standalone
     // `march brood teardown`) can address the steward during teardown.
     updateSpawnRecordStewardSession(spawnId, manager.sessionId, input.homeDir);
+
+    // Register the steward (and a minimal spawn row) with Brood NOW, at launch —
+    // not just on success (#172). The Castra session already exists; if any step
+    // below fails (image/container build, patch extraction, prompt send) the
+    // in-process cleanup is best-effort and can be skipped (Castra unreachable,
+    // worker killed, crash). The launch-time row makes the steward Brood-trackable
+    // so ghost-cleanup can reclaim it instead of deferring on a "registration gap".
+    // Best-effort and MARCH_BROOD_URL-gated: a missing/unreachable registry never
+    // fails the dispatch. The onSucceeded hook later enriches this row.
+    await registerStewardLaunchWithBrood({
+      spawnId,
+      stewardSessionId: manager.sessionId,
+      repoPath: input.repoPath,
+      branch,
+      worktreePath: manager.worktreePath,
+      backend: input.backend.name,
+      profile: agentDeckProfile,
+      group,
+    });
 
     const handle = createBuildContext(manager.worktreePath);
     try {
