@@ -196,10 +196,13 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
             model: { type: "string", minLength: 1 },
             createBranch: { type: "boolean" },
             // Queryable session metadata (#214): a small string→string map Castra
-            // stores and returns from listSessions/show. Bounded to short string
-            // values so it stays a correlation map, not arbitrary blob storage.
+            // stores and returns from listSessions/show. Bounded on key length,
+            // value length, AND entry count so it stays a correlation map, not
+            // arbitrary blob storage / an unbounded request.
             metadata: {
               type: "object",
+              maxProperties: 16,
+              propertyNames: { type: "string", maxLength: 64 },
               additionalProperties: { type: "string", maxLength: 256 },
             },
           },

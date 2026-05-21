@@ -1,6 +1,6 @@
 import type { LoopMeta } from "../meta.js";
 import type { LoopState, SliceExternalState, SmithyView } from "./types.js";
-import { looseSessionMatch, sessionMatchesSlice, summarizeWorkers } from "../pure/session.js";
+import { looseSessionMatch, summarizeWorkers } from "../pure/session.js";
 import { isTerminalSlice } from "../pure/slice.js";
 import { readySmithyItems } from "../pure/smithy-graph.js";
 import type { ObservedSession, SystemState } from "../../../herald/events.js";
@@ -233,7 +233,11 @@ export function resolveSliceSession(
 ): any | null {
   const recordedId = String(s.sessionId || "");
   if (recordedId) {
-    return sessions.find((sx) => sessionMatchesSlice(sx, { worker_session_id: recordedId })) ?? null;
+    // Authoritative: match the session id EXACTLY. The result's `id` is used as
+    // the effective sessionId for PR/output reads, so matching `title`/`name`
+    // here (as `sessionMatchesSlice` does) could attach the slice to the wrong
+    // steward if another live session's title happened to equal the recorded id.
+    return sessions.find((sx) => String(sx?.id ?? "") === recordedId) ?? null;
   }
   const byMeta = sessions.find((sx) => sx?.metadata?.sliceId === sliceId);
   if (byMeta) return byMeta;
