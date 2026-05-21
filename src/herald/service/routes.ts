@@ -55,6 +55,13 @@ const SLICE_TYPES: ReadonlySet<string> = new Set([
   "slice.escalated",
 ]);
 
+/** Transition event types whose schema carries an optional steward `sessionId`. */
+const SESSION_ID_TYPES: ReadonlySet<string> = new Set([
+  "slice.dispatched",
+  "slice.stage.changed",
+  "steward.relaunched",
+]);
+
 /** Parse a non-negative integer query param; returns `fallback` when absent. */
 function parseNonNegInt(raw: unknown, fallback: number): number | null {
   if (raw === undefined || raw === "") return fallback;
@@ -83,12 +90,14 @@ export function validateEvent(body: Record<string, unknown>): EventValidation {
   if (SLICE_TYPES.has(type) && (typeof body.sliceId !== "string" || body.sliceId.length === 0)) {
     return { ok: false, error: `event "${type}" requires a non-empty sliceId.` };
   }
-  // The implementing handoff carries the steward sessionId so Herald's fold
-  // learns the slice→session link PR discovery is gated on (#210). Optional, but
-  // when present it must be a non-empty string.
-  if (type === "slice.stage.changed" && body.sessionId !== undefined) {
-    if (typeof body.sessionId !== "string" || body.sessionId.length === 0) {
-      return { ok: false, error: `event "slice.stage.changed" sessionId must be a non-empty string.` };
+  // Transition events carry the steward sessionId so Herald's fold learns the
+  // slice→session link PR discovery is gated on (#210). It is optional, but when
+  // present it must be a non-empty (non-whitespace) string across every type that
+  // supports it — an empty/garbage id would otherwise fold into slice.sessionId
+  // and corrupt discovery downstream.
+  if (SESSION_ID_TYPES.has(type) && body.sessionId !== undefined) {
+    if (typeof body.sessionId !== "string" || body.sessionId.trim().length === 0) {
+      return { ok: false, error: `event "${type}" sessionId must be a non-empty string.` };
     }
   }
   if (type === "session.changed") {

@@ -24,11 +24,22 @@ describe("validateEvent", () => {
   it("requires session.id for session.changed", () => {
     expect(validateEvent({ type: "session.changed", session: {} })).toMatchObject({ ok: false });
   });
-  it("accepts an optional sessionId on slice.stage.changed, rejecting a non-string (#210)", () => {
+  it("accepts an optional sessionId on slice.stage.changed, rejecting empty/whitespace/non-string (#210)", () => {
     const ok = validateEvent({ type: "slice.stage.changed", sliceId: "s1", stage: "implementing", sessionId: "sess-9" });
     expect(ok).toMatchObject({ ok: true });
     expect(ok.ok && (ok.input as { sessionId?: string }).sessionId).toBe("sess-9");
     expect(validateEvent({ type: "slice.stage.changed", sliceId: "s1", stage: "implementing", sessionId: "" })).toMatchObject({ ok: false });
+    expect(validateEvent({ type: "slice.stage.changed", sliceId: "s1", stage: "implementing", sessionId: "   " })).toMatchObject({ ok: false });
+    expect(validateEvent({ type: "slice.stage.changed", sliceId: "s1", stage: "implementing", sessionId: 42 as unknown as string })).toMatchObject({ ok: false });
+    expect(validateEvent({ type: "slice.stage.changed", sliceId: "s1", stage: "implementing", sessionId: {} as unknown as string })).toMatchObject({ ok: false });
+  });
+  it("validates sessionId consistently across every transition type that carries it (#210)", () => {
+    // The check is centralized, so slice.dispatched / steward.relaunched are guarded too.
+    expect(validateEvent({ type: "slice.dispatched", sliceId: "s1", sessionId: "" })).toMatchObject({ ok: false });
+    expect(validateEvent({ type: "steward.relaunched", sliceId: "s1", sessionId: 7 as unknown as string })).toMatchObject({ ok: false });
+    expect(validateEvent({ type: "slice.dispatched", sliceId: "s1", sessionId: "sess-9" })).toMatchObject({ ok: true });
+    // Absent sessionId is still fine (it is optional on these events).
+    expect(validateEvent({ type: "slice.dispatched", sliceId: "s1" })).toMatchObject({ ok: true });
   });
   it("forces source to legate (cannot spoof a herald observation event)", () => {
     const v = validateEvent({ type: "heartbeat" });
