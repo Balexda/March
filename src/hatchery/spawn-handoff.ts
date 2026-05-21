@@ -24,7 +24,7 @@ import {
   removeSpawnImage,
   writeSpawnDockerfile,
 } from "../spawn/snapshot-build.js";
-import { generateSpawnId } from "../brood/worktree.js";
+import { generateSpawnId, removeSpawnWorktree } from "../brood/worktree.js";
 import {
   markSpawnRecordFailed,
   markSpawnRecordRunning,
@@ -124,6 +124,18 @@ export function hatcherySpawnLogDir(
 
 export function managerBranchName(spawnId: string): string {
   return `march/spawn/${spawnId}`;
+}
+
+/**
+ * The local branch ref agent-deck/castra actually creates for a manager
+ * session: a `feature/` prefix on the bare dispatch branch. The dispatched
+ * `branch` is the symbolic name (e.g. `smithy/cut/01-spawn-f3-s3`); the real
+ * local ref is `feature/smithy/cut/01-spawn-f3-s3`. Idempotent when `branch`
+ * is already prefixed. Used by the failed-spawn rollback to delete the orphan
+ * branch Castra's worktree-prune leaves behind (issue #211).
+ */
+export function orphanManagerBranch(branch: string): string {
+  return "feature/" + branch.replace(/^feature\//, "");
 }
 
 export function buildSpawnPatchPrompt(operatorPrompt: string): string {
@@ -720,6 +732,22 @@ export async function runHatcherySpawn(
         },
         castra,
       );
+      // Castra's removeSession prunes the worktree but LEAVES the local branch
+      // behind. A later re-dispatch of the same slice would then collide on
+      // "branch already exists" and strand the slice operator-only (issue
+      // #211). Remove the orphan branch (and the worktree, idempotently) by
+      // EXACT path via the rollback helper — it never runs a blanket
+      // `git worktree prune` (#155). Best-effort: never mask the spawn error.
+      try {
+        removeSpawnWorktree(input.repoPath, {
+          spawnId,
+          branch: orphanManagerBranch(branch),
+          worktreePath: manager.worktreePath,
+        });
+      } catch {
+        // Swallowed — removeSpawnWorktree is best-effort and surfaces its own
+        // incomplete-rollback warning; preserve the original failure below.
+      }
     }
     if (
       err instanceof SnapshotError ||
