@@ -1,7 +1,23 @@
 import { describe, expect, it, vi } from "vitest";
-import { errorMessage, JobStore } from "./jobs.js";
+import { errorMessage, JobStore, type JobLogger } from "./jobs.js";
 import type { HatcherySpawnResult } from "../spawn-handoff.js";
 import type { SpawnRequest } from "./types.js";
+
+interface LogCall {
+  readonly level: "info" | "error";
+  readonly obj: Record<string, unknown>;
+  readonly msg?: string;
+}
+
+/** Captures structured log records so tests can assert their fields. */
+function recordingLogger(): { logger: JobLogger; calls: LogCall[] } {
+  const calls: LogCall[] = [];
+  const logger: JobLogger = {
+    info: (obj, msg) => calls.push({ level: "info", obj: obj as Record<string, unknown>, msg }),
+    error: (obj, msg) => calls.push({ level: "error", obj: obj as Record<string, unknown>, msg }),
+  };
+  return { logger, calls };
+}
 
 function fakeResult(spawnId = "spawn-123"): HatcherySpawnResult {
   return {
@@ -57,6 +73,71 @@ describe("JobStore", () => {
 
     await vi.waitFor(() => expect(store.get(record.id)?.status).toBe("failed"));
     expect(store.get(record.id)?.error?.message).toBe("boom");
+  });
+
+  it("logs profile/task_type/slice_id on the spawn-start record", async () => {
+    const { logger, calls } = recordingLogger();
+    const store = new JobStore({ executor: async () => fakeResult(), logger });
+    const detailed: SpawnRequest = {
+      ...request,
+      profile: "smithy",
+      taskType: "render",
+      taskName: "render-foo",
+      sliceId: "slice-7",
+    };
+    const record = store.create(detailed);
+    await vi.waitFor(() => expect(store.get(record.id)?.status).toBe("succeeded"));
+
+    const start = calls.find((c) => c.msg === "spawn job started");
+    expect(start?.obj).toMatchObject({
+      job_id: record.id,
+      backend: "codex",
+      task_name: "render-foo",
+      task_type: "render",
+      profile: "smithy",
+      slice_id: "slice-7",
+    });
+  });
+
+  it("omits undefined optional fields from the log record", async () => {
+    const { logger, calls } = recordingLogger();
+    // `request` carries no profile/taskType/taskName/sliceId.
+    const store = new JobStore({ executor: async () => fakeResult(), logger });
+    const record = store.create(request);
+    await vi.waitFor(() => expect(store.get(record.id)?.status).toBe("succeeded"));
+
+    const start = calls.find((c) => c.msg === "spawn job started")!;
+    expect(start.obj).toEqual({ job_id: record.id, backend: "codex" });
+    expect(Object.keys(start.obj)).not.toContain("profile");
+    expect(Object.keys(start.obj)).not.toContain("task_type");
+  });
+
+  it("logs the structured fields on the failure record", async () => {
+    const { logger, calls } = recordingLogger();
+    const store = new JobStore({
+      executor: async () => {
+        throw new Error("boom");
+      },
+      logger,
+    });
+    const detailed: SpawnRequest = {
+      ...request,
+      profile: "smithy",
+      taskType: "render",
+      sliceId: "slice-7",
+    };
+    const record = store.create(detailed);
+    await vi.waitFor(() => expect(store.get(record.id)?.status).toBe("failed"));
+
+    const failure = calls.find((c) => c.msg === "spawn job failed");
+    expect(failure?.level).toBe("error");
+    expect(failure?.obj).toMatchObject({
+      job_id: record.id,
+      profile: "smithy",
+      task_type: "render",
+      slice_id: "slice-7",
+      err: "boom",
+    });
   });
 
   it("assigns distinct ids to concurrent jobs", () => {

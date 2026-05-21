@@ -15,6 +15,23 @@ export function outcomeFromStatus(statusCode: number): RequestOutcome {
   return statusCode >= 200 && statusCode < 400 ? "success" : "error";
 }
 
+/**
+ * Outcome label for a spawn DISPATCH job. Distinct from {@link RequestOutcome}:
+ * a `POST /spawns` returns 202 (an HTTP success) and the job runs
+ * asynchronously, so its eventual success/failure never shows up in the HTTP
+ * request metric. This is the signal that surfaces a dispatch that threw.
+ * Aligned with `march_spawn_runs_total` ("success"/"failure").
+ */
+export type DispatchOutcome = "success" | "failure";
+
+export interface RecordHatcheryDispatchInput {
+  readonly backend: string;
+  readonly taskType: string;
+  /** Deployment profile; `"unknown"` for ad-hoc dispatches with none. */
+  readonly profile: string;
+  readonly outcome: DispatchOutcome;
+}
+
 export interface RecordHatcheryRequestInput {
   /** Route TEMPLATE (e.g. "/spawns/:id"), never the concrete path — keeps cardinality bounded. */
   readonly route: string;
@@ -33,12 +50,14 @@ let requestsCounter: Counter | undefined;
 let requestDuration: Histogram | undefined;
 let activeSpawns: UpDownCounter | undefined;
 let heartbeatCounter: Counter | undefined;
+let dispatchesCounter: Counter | undefined;
 
 interface HatcheryInstruments {
   requests: Counter;
   duration: Histogram;
   active: UpDownCounter;
   heartbeat: Counter;
+  dispatches: Counter;
 }
 
 function hatcheryInstruments(meter: Meter): HatcheryInstruments {
@@ -60,6 +79,11 @@ function hatcheryInstruments(meter: Meter): HatcheryInstruments {
       description: "Liveness heartbeat ticks emitted by the hatchery service",
       unit: "1",
     });
+    dispatchesCounter = meter.createCounter("march.hatchery.dispatches", {
+      description:
+        "Count of spawn dispatch jobs by outcome (the async job's success/failure, not the 202 HTTP response)",
+      unit: "1",
+    });
     // Uptime as an observable gauge — registered once per meter alongside the
     // other instruments so a fresh provider re-attaches the callback.
     meter
@@ -74,6 +98,7 @@ function hatcheryInstruments(meter: Meter): HatcheryInstruments {
     duration: requestDuration!,
     active: activeSpawns!,
     heartbeat: heartbeatCounter!,
+    dispatches: dispatchesCounter!,
   };
 }
 
@@ -89,6 +114,25 @@ export function recordHatcheryRequest(input: RecordHatcheryRequestInput): void {
   };
   requests.add(1, attributes);
   duration.record(input.durationSeconds, attributes);
+}
+
+/**
+ * Record one spawn dispatch job reaching a terminal state, tagged by
+ * backend/task_type/profile/outcome. This is what makes async dispatch failures
+ * observable — the HTTP request metric only sees the 202. No-op when disabled.
+ * Ids stay out of labels to keep cardinality bounded (per-spawn detail is in
+ * traces), mirroring spawn-metrics.
+ */
+export function recordHatcheryDispatch(input: RecordHatcheryDispatchInput): void {
+  const otel = getActiveOtel();
+  if (!otel.enabled) return;
+  const { dispatches } = hatcheryInstruments(otel.getMeter());
+  dispatches.add(1, {
+    backend: input.backend,
+    task_type: input.taskType,
+    profile: input.profile,
+    outcome: input.outcome,
+  });
 }
 
 /** Bump the active-spawns gauge when a job starts. No-op when disabled. */

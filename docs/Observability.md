@@ -151,9 +151,17 @@ never the concrete path.
 |---|---|---|
 | `march.hatchery.requests` (counter) | `march_hatchery_requests_total` | HTTP requests by `{route, method, outcome}` (`outcome` = `success` for 2xx/3xx, else `error`) |
 | `march.hatchery.request.duration` (histogram, `s`) | `march_hatchery_request_duration_seconds_{bucket,count,sum}` | HTTP request latency |
+| `march.hatchery.dispatches` (counter) | `march_hatchery_dispatches_total` | spawn dispatch jobs by `{backend, task_type, profile, outcome}` (`outcome` = `success`/`failure`) |
 | `march.hatchery.active_spawns` (up/down) | `march_hatchery_active_spawns` | spawn jobs currently executing |
 | `march.hatchery.uptime` (gauge, `s`) | `march_hatchery_uptime_seconds` | service process uptime |
 | `march.hatchery.heartbeat` (counter) | `march_hatchery_heartbeat_total` | liveness tick (every 15s) |
+
+`march.hatchery.dispatches` is the **async** dispatch outcome, distinct from the
+HTTP request metric: `POST /spawns` returns `202` (an HTTP success) and the job
+runs in the background, so a dispatch that *fails* never shows up in
+`march_hatchery_requests_total`. The dashboard's "Dispatch error rate" panel
+reads this counter so failed spawns surface even though the HTTP response was a
+202.
 
 #### Castra (interactive-sessions host)
 
@@ -298,8 +306,9 @@ task type, and a recent-dispatch-traces table (Tempo). `backend` / `task_type` /
 Two more dashboards cover the services.
 [`docker/grafana/dashboards/march-hatchery.json`](../docker/grafana/dashboards/march-hatchery.json)
 ("**March — Hatchery service**") covers the Hatchery service: heartbeat/uptime,
-active spawns, HTTP request rate + latency percentiles + error rate, spawn
-success rate (shared `march_spawn_runs_total`), a Loki logs panel
+active spawns, dispatch error rate (`march_hatchery_dispatches_total`), HTTP
+request rate + latency percentiles, spawn success rate (shared
+`march_spawn_runs_total`), a Loki logs panel
 (`{service_name="march-hatchery"}`), and a Tempo traces table.
 [`docker/grafana/dashboards/march-legate-loop.json`](../docker/grafana/dashboards/march-legate-loop.json)
 ("**March — Legate loop service**", uid `march-legate-loop`) monitors the loop
