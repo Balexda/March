@@ -5,28 +5,33 @@ import Fastify, {
 import { createBroodLogger } from "../../observability/logger.js";
 import { getActiveOtel } from "../../observability/otel.js";
 import { startBroodHeartbeat } from "../../observability/brood-metrics.js";
-import { resolveBroodPort } from "../config.js";
+import { resolveBroodPort, resolveBroodStoreBackend } from "../config.js";
 import { registerRoutes } from "./routes.js";
-import { SessionStore, type SessionStoreOptions } from "./store.js";
+import {
+  createSessionRepository,
+  type SessionRepository,
+  type SessionRepositoryConfig,
+} from "./repository.js";
 
 export interface BuildServerOptions {
-  /** Provide a pre-built store (e.g. an in-memory one) for tests. */
-  readonly store?: SessionStore;
-  readonly storeOptions?: SessionStoreOptions;
+  /** Provide a pre-built repository (e.g. an in-memory one) for tests. */
+  readonly store?: SessionRepository;
+  /** Config for the default repository factory (backend + sqlite options). */
+  readonly storeOptions?: SessionRepositoryConfig;
   readonly logger?: FastifyBaseLogger;
 }
 
 export interface BroodServer {
   readonly app: FastifyInstance;
-  readonly store: SessionStore;
+  readonly store: SessionRepository;
 }
 
-/** Build the Fastify app + session store. Testable in-process via `app.inject()`. */
+/** Build the Fastify app + session repository. Testable in-process via `app.inject()`. */
 export async function buildServer(
   options: BuildServerOptions = {},
 ): Promise<BroodServer> {
   const logger = options.logger ?? createBroodLogger();
-  const store = options.store ?? new SessionStore(options.storeOptions);
+  const store = options.store ?? createSessionRepository(options.storeOptions);
   const app = Fastify({ loggerInstance: logger });
   await registerRoutes(app, { store });
   return { app, store };
@@ -48,7 +53,9 @@ export async function startServer(
   const port = options.port ?? resolveBroodPort();
   const host = options.host ?? "0.0.0.0";
 
-  const { app, store } = await buildServer();
+  const { app, store } = await buildServer({
+    storeOptions: { backend: resolveBroodStoreBackend() },
+  });
   const stopHeartbeat = startBroodHeartbeat();
 
   let shuttingDown = false;

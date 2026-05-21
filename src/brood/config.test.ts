@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { broodPort, BROOD_SERVICE_NAME, resolveBroodPort } from "./config.js";
+import {
+  broodPort,
+  BROOD_SERVICE_NAME,
+  resolveBroodPort,
+  resolveBroodStoreBackend,
+} from "./config.js";
 
 describe("brood config", () => {
   it("broodPort is deterministic and inside the 8800–9799 band", () => {
@@ -23,5 +28,21 @@ describe("brood config", () => {
   it("resolveBroodPort throws on a non-numeric or out-of-range override", () => {
     expect(() => resolveBroodPort("abc")).toThrowError(/Invalid Brood port/);
     expect(() => resolveBroodPort(70000)).toThrowError(/Invalid Brood port/);
+  });
+
+  it("resolveBroodStoreBackend defaults to sqlite, honors env, is case-insensitive", () => {
+    expect(resolveBroodStoreBackend({})).toBe("sqlite");
+    expect(resolveBroodStoreBackend({ MARCH_BROOD_STORE: "sqlite" })).toBe(
+      "sqlite",
+    );
+    expect(resolveBroodStoreBackend({ MARCH_BROOD_STORE: "POSTGRES" })).toBe(
+      "postgres",
+    );
+  });
+
+  it("resolveBroodStoreBackend throws on an unrecognized backend", () => {
+    expect(() =>
+      resolveBroodStoreBackend({ MARCH_BROOD_STORE: "mysql" }),
+    ).toThrowError(/Invalid MARCH_BROOD_STORE/);
   });
 });

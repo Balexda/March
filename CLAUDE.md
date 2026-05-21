@@ -34,7 +34,12 @@ Quick pointers:
   remove the steward, then removes the worktree/branch by **exact tracked path —
   never a blanket `git worktree prune`** (issue #155). The Hatchery service
   registers spawns with it; the legate loop **requests** teardown via
-  `march brood teardown` instead of pruning. Image/compose:
+  `march brood teardown` instead of pruning. The registry sits behind a
+  swappable `SessionRepository` interface (`src/brood/service/repository.ts`):
+  callers (routes/teardown/server) depend on the interface, the sqlite
+  `SessionStore` is the default, and `createSessionRepository` selects the
+  backend from `MARCH_BROOD_STORE` (`sqlite` default; `postgres` is a typed,
+  not-yet-implemented extension point for SaaS — issue #167/#166). Image/compose:
   `docker/brood.Dockerfile`, `docker/brood.docker-compose.yml`. Set
   `MARCH_BROOD_URL` so producers/consumers reach it.
 - **Herald is a containerized service:** `march herald serve` (Fastify) under

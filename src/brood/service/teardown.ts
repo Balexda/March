@@ -11,7 +11,8 @@ import {
   type RemoveWorktreeResult,
 } from "../worktree.js";
 import { createCastraClientFromEnv } from "../../castra/client.js";
-import { broodArchiveDir, type SessionStore } from "./store.js";
+import type { SessionRepository } from "./repository.js";
+import { broodArchiveDir } from "./store.js";
 import type {
   SessionRecord,
   TeardownRequest,
@@ -120,7 +121,7 @@ function resolveDeps(deps: TeardownDeps): ResolvedDeps {
  * no-op.
  */
 export async function teardownSession(
-  store: SessionStore,
+  store: SessionRepository,
   id: string,
   request: TeardownRequest = {},
   deps: TeardownDeps = {},
