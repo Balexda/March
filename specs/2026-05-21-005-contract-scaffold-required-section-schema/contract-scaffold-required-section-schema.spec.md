@@ -27,7 +27,7 @@ As the Operator-as-Test-Author, I want every subsystem contract to share the sam
 
 **Why this priority**: The RFC's M2 contract track depends on explicit contract artifacts before L2 and L3 tests can assert subsystem boundaries. The shared section shape must land before any subsystem-specific contract body so later contracts do not churn when the scaffold is standardized.
 
-**Independent Test**: Inspect the scaffolded contract template and verify it contains exactly the three mandatory H2 sections: `## Public Interface`, `## Invariants`, and `## Error Modes`.
+**Independent Test**: Inspect the scaffolded contract template and verify it includes the three mandatory H2 sections: `## Public Interface`, `## Invariants`, and `## Error Modes`. Additional sections (e.g., an overview or glossary) are permitted — the schema requires these three to be present, not that they be the only sections.
 
 **Acceptance Scenarios**:
 
