@@ -295,11 +295,11 @@ from the shared review protocol:
 
 | Severity | Confidence | Forge action |
 |----------|------------|--------------|
-| Critical | High | Apply the `proposed_fix` on disk, run the test suite, commit as `review: <description>`, and note the fix in the PR body. |
-| Critical | Low | Do not apply. Append the finding to the slice planning artifact's `## Specification Debt` section and flag it in the PR body for the reviewer. |
+| Critical | High | Apply the `proposed_fix` on disk, run the test suite, commit as `review: <description>`. |
+| Critical | Low | Do not apply. Append the finding to the slice planning artifact's `## Specification Debt` section. |
 | Important | High | Apply the `proposed_fix` on disk, run the test suite, commit as `review: <description>`. |
 | Important | Low | Do not apply. Append the finding to the slice planning artifact's `## Specification Debt` section. |
-| Minor | Any | Do not apply and do not record as debt. Note in the PR body only. |
+| Minor | Any | Do not apply and do not record as debt. Note in forge's terminal-output **Review Summary** deliverable so the user sees it; do not add to the PR body. |
 
 "Slice planning artifact" above means the `.tasks.md`, `.strike.md`,
 `.spec.md`, or equivalent planning file associated with the slice you were
@@ -317,21 +317,19 @@ When applying a High-confidence fix:
    `review: <brief description of fix>`.
 4. If tests fail, revert the edit, reclassify the finding as **Low
    confidence**, and handle it via the Low-confidence row of the table
-   above (debt for Critical/Important, PR note for Minor). Do not commit a
-   failing fix.
+   above (debt for Critical/Important, terminal-output note for Minor).
+   Do not commit a failing fix.
 
-After all findings have been processed, summarize the outcome:
+After all findings have been processed, summarize the outcome in forge's
+terminal-output **Review Summary** deliverable (not in the PR body):
 
-1. **Escalated items** — Low-confidence Critical findings surfaced to the
-   user in the PR body with the review agent's description.
-2. **Applied fixes** — the list of `review:` commits created by forge with
+1. **Applied fixes** — the list of `review:` commits created by forge with
    the corresponding findings they resolved.
-3. **PR notes** — Minor findings and other review summary content to
-   include in the PR body.
-4. **Recorded debt** — any Low-confidence Important (or reclassified
-   Critical) findings appended to the artifact's `## Specification Debt`
-   section, so reviewers can see them without reading the full agent
-   transcript.
+2. **Recorded debt** — any Low-confidence Critical or Important findings
+   appended to the artifact's `## Specification Debt` section, so future
+   readers see them without scanning the agent transcript.
+3. **Minor notes** — Minor findings that did not warrant a fix or a debt
+   row; surface them once in the terminal output for the user, then drop.
 
 Forge's existing error-handling STOP gates (test failure mid-slice, blocked
 task, complex-fix escalation) are unchanged by the review phase.
@@ -349,8 +347,8 @@ Use the **smithy-maid** sub-agent. Pass it:
 After the sub-agent returns:
 
 1. **Auto-fixable items**: Apply the suggested changes, commit as `maid: <description>`.
-2. **Flagged items**: Include in the PR body under a "Documentation Notes" section.
-3. **Clean**: If no findings, skip the Documentation Notes section in the PR.
+2. **Flagged items**: Surface them in forge's terminal-output **Review Summary** deliverable so the user can decide whether to file follow-up work. Do **not** add a section to the PR body.
+3. **Clean**: No further action needed.
 
 ---
 
@@ -436,25 +434,27 @@ Create the PR with:
 
 - **Title**: `<slice goal>` — concise, under 70 characters, descriptive text only (do NOT reference FR numbers or acceptance scenario IDs in the title — those are spec-internal and meaningless to later readers)
 
+The PR body has **exactly four sections** in both `.tasks.md` and `.strike.md`
+modes — no more. Keep each section scannable: prefer one-line bullets and
+short prose. The diff, commit log, and linked artifact already carry the
+implementation detail; do not restate it in the PR body. In particular, do
+**not** add `## Tasks completed`, `## Review`, or `## Documentation` sections —
+those repeat information that lives in the commits, the artifact's
+`## Specification Debt` table, and the `maid:` commits respectively.
+
 ### `.tasks.md` mode — PR body:
   - **Source**: Link to the spec file and tasks file (relative paths)
-  - **Slice**: Which slice number and its goal
-  - **Addresses**: The FRs and acceptance scenarios covered
-  - **Tasks completed**: Checklist of what was implemented
-  - **Review**: Auto-fixes applied, notes for reviewer (important/minor findings)
-  - **Documentation**: Maid findings — auto-fixes applied and items flagged for review (omit section if clean)
-  - **Validation**: Summary of commands run and their results (run after all code and doc fixes are committed)
+  - **Slice Summary**: Slice number + one-line slice goal
+  - **Addresses**: The FRs and acceptance scenarios covered (one line, comma-separated)
+  - **Validation**: One-line summary of the validation commands and outcomes (e.g. `build ✅ · typecheck ✅ · test ✅ (N passed)`)
 
 This traceability lets reviewers navigate from PR → slice → spec to understand why the code exists.
 
 ### `.strike.md` mode — PR body:
   - **Source**: Link to the `.strike.md` file (relative path)
-  - **Slice**: "Single Slice" with its goal
-  - **Summary**: The strike's Summary section
-  - **Tasks completed**: Checklist of what was implemented
-  - **Review**: Auto-fixes applied, notes for reviewer (important/minor findings)
-  - **Documentation**: Maid findings — auto-fixes applied and items flagged for review (omit section if clean)
-  - **Validation**: Summary of commands run and their results (run after all code and doc fixes are committed)
+  - **Slice Summary**: One-paragraph summary from the strike doc + one-line goal
+  - **Addresses**: The FRs satisfied by the implementation (plus AS if the strike captured them; one line)
+  - **Validation**: One-line summary of the validation commands and outcomes (e.g. `build ✅ · typecheck ✅ · test ✅ (N passed)`)
 
 ---
 
@@ -476,8 +476,9 @@ This traceability lets reviewers navigate from PR → slice → spec to understa
   against contracts and data model, or proceed optimistically.
 - **Sub-agent failure**: If a smithy-implement sub-agent fails after one retry,
   stop and report the issue to the user with the error details.
-- **Review finds no issues**: Proceed directly to PR creation — include
-  "No review findings" in the PR body.
+- **Review finds no issues**: Proceed directly to PR creation. No review
+  section exists in the PR body; the terminal-output **Review Summary**
+  deliverable will simply read "No review findings."
 
 ---
 

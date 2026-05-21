@@ -390,7 +390,7 @@ Scan the files changed between BASE_SHA and HEAD for documentation staleness:
 
 For each stale doc found:
 - If the fix is obvious (e.g., update a parameter name in JSDoc), apply it and commit as `maid: <description>`.
-- If the fix requires judgment (e.g., rewriting a README section), note it for the PR body under "Documentation Notes".
+- If the fix requires judgment (e.g., rewriting a README section), surface it once in the terminal-output deliverable for the user; do not add it to the PR body.
 
 ---
 
@@ -475,25 +475,27 @@ Create the PR with:
 
 - **Title**: `<slice goal>` — concise, under 70 characters, descriptive text only (do NOT reference FR numbers or acceptance scenario IDs in the title — those are spec-internal and meaningless to later readers)
 
+The PR body has **exactly four sections** in both `.tasks.md` and `.strike.md`
+modes — no more. Keep each section scannable: prefer one-line bullets and
+short prose. The diff, commit log, and linked artifact already carry the
+implementation detail; do not restate it in the PR body. In particular, do
+**not** add `## Tasks completed`, `## Review`, or `## Documentation` sections —
+those repeat information that lives in the commits, the artifact's
+`## Specification Debt` table, and the `maid:` commits respectively.
+
 ### `.tasks.md` mode — PR body:
   - **Source**: Link to the spec file and tasks file (relative paths)
-  - **Slice**: Which slice number and its goal
-  - **Addresses**: The FRs and acceptance scenarios covered
-  - **Tasks completed**: Checklist of what was implemented
-  - **Review**: Auto-fixes applied, notes for reviewer (important/minor findings)
-  - **Documentation**: Maid findings — auto-fixes applied and items flagged for review (omit section if clean)
-  - **Validation**: Summary of commands run and their results (run after all code and doc fixes are committed)
+  - **Slice Summary**: Slice number + one-line slice goal
+  - **Addresses**: The FRs and acceptance scenarios covered (one line, comma-separated)
+  - **Validation**: One-line summary of the validation commands and outcomes (e.g. `build ✅ · typecheck ✅ · test ✅ (N passed)`)
 
 This traceability lets reviewers navigate from PR → slice → spec to understand why the code exists.
 
 ### `.strike.md` mode — PR body:
   - **Source**: Link to the `.strike.md` file (relative path)
-  - **Slice**: "Single Slice" with its goal
-  - **Summary**: The strike's Summary section
-  - **Tasks completed**: Checklist of what was implemented
-  - **Review**: Auto-fixes applied, notes for reviewer (important/minor findings)
-  - **Documentation**: Maid findings — auto-fixes applied and items flagged for review (omit section if clean)
-  - **Validation**: Summary of commands run and their results (run after all code and doc fixes are committed)
+  - **Slice Summary**: One-paragraph summary from the strike doc + one-line goal
+  - **Addresses**: The FRs satisfied by the implementation (plus AS if the strike captured them; one line)
+  - **Validation**: One-line summary of the validation commands and outcomes (e.g. `build ✅ · typecheck ✅ · test ✅ (N passed)`)
 
 ---
 
@@ -513,8 +515,9 @@ This traceability lets reviewers navigate from PR → slice → spec to understa
 - **Cross-story dependency not met**: If a required story/slice hasn't been
   implemented, present the dependency to the user with options: wait, stub
   against contracts and data model, or proceed optimistically.
-- **Review finds no issues**: Proceed directly to PR creation — include
-  "No review findings" in the PR body.
+- **Review finds no issues**: Proceed directly to PR creation. No review
+  section exists in the PR body; the terminal-output **Review Summary**
+  deliverable will simply read "No review findings."
 
 ---
 

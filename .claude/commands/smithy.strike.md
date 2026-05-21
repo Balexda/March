@@ -335,11 +335,11 @@ table from the contracts:
 
 | Severity  | Confidence | Action                                                                                                |
 |-----------|------------|-------------------------------------------------------------------------------------------------------|
-| Critical  | High       | Apply the `proposed_fix` to the strike document on disk. Note the fix in the PR body.                 |
-| Critical  | Low        | Do not apply. Append to the strike's `## Specification Debt` section. Flag in PR for the reviewer.    |
+| Critical  | High       | Apply the `proposed_fix` to the strike document on disk.                                              |
+| Critical  | Low        | Do not apply. Append to the strike's `## Specification Debt` section.                                 |
 | Important | High       | Apply the `proposed_fix` to the strike document on disk.                                              |
 | Important | Low        | Do not apply. Append to the strike's `## Specification Debt` section.                                 |
-| Minor     | Any        | Do not apply. Note in the PR body only.                                                               |
+| Minor     | Any        | Do not apply. Surface once in the terminal output for the user; do not add to the PR body.            |
 
 For each Low-confidence finding routed to debt, append a new row to the
 `## Specification Debt` table with the next available `SD-NNN` identifier
@@ -354,8 +354,11 @@ in place using the `proposed_fix`. The commit immediately below will capture
 both the original artifact and the applied fixes in the same diff.
 
 If the agent returns drift findings (assumption-output drift category),
-surface them prominently in the PR body so the reviewer can confirm the
-assumption itself rather than silently accepting an applied fix.
+treat them as Critical for routing — auto-fix only when High confidence and
+the underlying assumption is unambiguous; otherwise append to
+`## Specification Debt` so the reviewer (and future readers of the strike
+artifact) see the assumption flagged without scanning the agent transcript.
+Do not stash drift findings in the PR body.
 
 The review agent never modifies files itself — all on-disk changes are made
 here, by strike.
@@ -372,12 +375,14 @@ here, by strike.
 3. **Create the PR** using the same PR-creation pattern as `smithy-forge`
    (Prefer `mcp__github__create_pull_request` (the GitHub MCP tool); fall back to `gh pr create` only when the MCP server is unavailable.):
    - **Title**: the strike goal, concise and under 70 characters.
-   - **Body**: include the strike summary, goal, link to the
-     `.strike.md` file, and the one-shot output content produced below
-     **excluding the `## PR` section**, since the PR URL is only known
-     after PR creation succeeds. Populate the other sections
-     (`## Summary`, `## Assumptions`, `## Specification Debt`) from the
-     run data captured during Phase 2 and Phase 3.
+   - **Body**: exactly two sections, kept scannable —
+     - **Source**: link to the `.strike.md` file (relative path).
+     - **Slice Summary**: the strike's Summary paragraph followed by the
+       one-line Goal.
+     Do **not** embed the one-shot output's `## Summary`, `## Assumptions`,
+     or `## Specification Debt` sections in the PR body — those already
+     live in the strike artifact (`Source` links to them) and in the run's
+     terminal output. Reviewers click through; the PR body stays parsable.
 4. **Capture the PR URL** returned by the PR-creation call.
 5. **Render the full one-shot output** as the terminal output of this
    run using the shared snippet below. Populate the placeholders from
