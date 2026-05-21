@@ -8,7 +8,9 @@ describe("hostTeardownSubstrate", () => {
     expect(hostTeardownSubstrate.removeContainer).toBe(removeSpawnContainer);
   });
 
-  it("reclaims the checkout through removeSpawnWorktreeExact (exact path, never prune — #155)", () => {
+  // Asserts the wiring only; the exact-path / never-prune behavior (#155) is
+  // covered by worktree-exact.test.ts.
+  it("delegates checkout reclamation to removeSpawnWorktreeExact", () => {
     expect(hostTeardownSubstrate.removeWorktreeExact).toBe(
       removeSpawnWorktreeExact,
     );

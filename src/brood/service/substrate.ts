@@ -26,8 +26,12 @@ import {
 export interface TeardownSubstrate {
   /**
    * Reclaim the spawn's container. Idempotent and best-effort — a missing
-   * container is a successful no-op. Throwing surfaces a failed `container`
-   * step; teardown continues to the later steps regardless.
+   * container is a successful no-op. An implementation MAY throw to signal a
+   * real failure (e.g. an orchestrator API rejecting the delete), which
+   * teardown records as a failed `container` step before continuing to the
+   * later steps; a non-throwing implementation (see {@link hostTeardownSubstrate})
+   * cannot surface its failures this way, so the step reflects "removal
+   * attempted" rather than "removal verified".
    */
   removeContainer(spawnId: string): void;
 
@@ -49,6 +53,14 @@ export interface TeardownSubstrate {
  * through the mounted docker socket (`removeSpawnContainer`); checkout
  * reclamation goes through `removeSpawnWorktreeExact`, which removes ONLY the
  * exact worktree path / branch and NEVER runs `git worktree prune` (#155).
+ *
+ * Caveat: `removeSpawnContainer` is non-throwing by contract — it swallows
+ * every docker failure (daemon down, permissions, "no such container") rather
+ * than throwing. So with this substrate the teardown `container` step always
+ * reports `ok` ("removal attempted"); a host-side docker failure is NOT
+ * observable via the step outcome and must be diagnosed out of band (e.g.
+ * `docker ps -a`). A substrate that needs failures surfaced as a failed step
+ * (e.g. an orchestrator adapter) should throw from `removeContainer` instead.
  */
 export const hostTeardownSubstrate: TeardownSubstrate = {
   removeContainer: removeSpawnContainer,
