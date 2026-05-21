@@ -1,11 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { reconcileBroodEnv, reconcileOtelEnv } from "./index.js";
+import { reconcileBroodEnv, reconcileHeraldEnv, reconcileOtelEnv } from "./index.js";
 import type { LoopMeta } from "./meta.js";
 
 const meta = (over: Record<string, unknown> = {}): LoopMeta =>
   ({
     otel: { enabled: true, endpoint: "http://otel-lgtm:4318" },
     brood_endpoint: "http://brood:9748",
+    herald_endpoint: "http://herald:8818",
     ...over,
   }) as unknown as LoopMeta;
 
@@ -49,5 +50,25 @@ describe("reconcileBroodEnv", () => {
     const env: NodeJS.ProcessEnv = {};
     reconcileBroodEnv(meta({ brood_endpoint: null }), env);
     expect(env.MARCH_BROOD_URL).toBeUndefined();
+  });
+});
+
+describe("reconcileHeraldEnv", () => {
+  it("sets MARCH_HERALD_URL from meta.herald_endpoint when unset", () => {
+    const env: NodeJS.ProcessEnv = {};
+    reconcileHeraldEnv(meta(), env);
+    expect(env.MARCH_HERALD_URL).toBe("http://herald:8818");
+  });
+
+  it("lets an explicit MARCH_HERALD_URL win", () => {
+    const env: NodeJS.ProcessEnv = { MARCH_HERALD_URL: "http://localhost:8818" };
+    reconcileHeraldEnv(meta(), env);
+    expect(env.MARCH_HERALD_URL).toBe("http://localhost:8818");
+  });
+
+  it("no-ops when meta has no herald endpoint (deployment stays on the legacy path)", () => {
+    const env: NodeJS.ProcessEnv = {};
+    reconcileHeraldEnv(meta({ herald_endpoint: null }), env);
+    expect(env.MARCH_HERALD_URL).toBeUndefined();
   });
 });

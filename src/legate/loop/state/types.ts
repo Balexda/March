@@ -2,6 +2,7 @@ import type { LoopMeta } from "../meta.js";
 import type { WorkerSummary } from "../pure/session.js";
 import type { CastraClient } from "../../../castra/client.js";
 import type { BroodTeardownOptions, BroodTeardownResult } from "../clients/brood.js";
+import type { TransitionEvent } from "../clients/herald.js";
 
 /**
  * Two-stage loop contracts.
@@ -66,6 +67,12 @@ export interface HandlerContext {
   persist: (state: LoopState) => void;
   /** Append an action/event record to the action log (+ otel span/log). */
   emit: (event: any) => void;
+  /**
+   * Append a Herald transition event to the unified event log (PR2 cutover; #175),
+   * dual-written alongside state.json during the soak. Fire-and-forget and
+   * undefined when Herald isn't configured, so the legacy path is unchanged.
+   */
+  emitTransition?: (event: TransitionEvent) => void;
   /** Append a human-readable line to the action log. */
   log: (line: string) => void;
 }

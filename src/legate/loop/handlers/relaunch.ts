@@ -193,6 +193,8 @@ export async function apply(
     slice.last_action = ctx.ts;
     slice.last_action_note = "Re-launched steward for PR #" + d.prNumber + " (attempt " + d.attempt + "/" + d.limit + "); new session " + newSessionId;
     counts["relaunch-steward:" + d.sliceId] = d.attempt;
+    ctx.emitTransition?.({ type: "steward.relaunched", sliceId: d.sliceId, sessionId: newSessionId });
+    ctx.emitTransition?.({ type: "retry.counted", key: "relaunch-steward:" + d.sliceId, count: d.attempt });
     res.mutated = true;
     res.actions.push({
       action: "relaunch-steward",
