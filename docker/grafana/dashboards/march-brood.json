@@ -276,7 +276,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum by (outcome) (increase(march_brood_teardowns_total[5m]))",
+          "expr": "sum by (outcome) (increase(march_brood_teardowns_total{profile=~\"$profile\"}[5m]))",
           "legendFormat": "{{outcome}}",
           "refId": "A"
         }
@@ -479,7 +479,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum by (outcome) (rate(march_brood_teardowns_total[$__rate_interval]))",
+          "expr": "sum by (outcome) (rate(march_brood_teardowns_total{profile=~\"$profile\"}[$__rate_interval]))",
           "legendFormat": "{{outcome}}",
           "refId": "A"
         }
@@ -532,7 +532,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum by (kind) (increase(march_brood_teardowns_total[5m]))",
+          "expr": "sum by (kind) (increase(march_brood_teardowns_total{profile=~\"$profile\"}[5m]))",
           "legendFormat": "{{kind}}",
           "refId": "A"
         }
@@ -585,7 +585,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(march_brood_teardown_duration_seconds_bucket[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(march_brood_teardown_duration_seconds_bucket{profile=~\"$profile\"}[$__rate_interval])))",
           "legendFormat": "p95",
           "refId": "A"
         }
@@ -611,7 +611,7 @@
         "type": "loki",
         "uid": "loki"
       },
-      "description": "Brood service logs (pino \u2192 Loki), service.name=march-brood.",
+      "description": "Brood service logs (pino \u2192 Loki), service.name=march-brood. The $profile filter scopes teardown metric panels; on logs it is a no-op until Brood log records carry a profile field (default 'All' matches every line).",
       "gridPos": {
         "h": 9,
         "w": 12,
@@ -634,7 +634,9 @@
             "type": "loki",
             "uid": "loki"
           },
-          "expr": "{service_name=\"march-brood\"} != `/healthz`",
+          "editorMode": "code",
+          "expr": "{service_name=\"march-brood\"} != `/healthz` | profile=~\"$profile\"",
+          "queryType": "range",
           "refId": "A"
         }
       ],
@@ -678,10 +680,33 @@
   "schemaVersion": 39,
   "tags": [
     "march",
-    "brood"
+    "brood",
+    "observability"
   ],
   "templating": {
-    "list": []
+    "list": [
+      {
+        "current": {},
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "definition": "label_values(march_brood_teardowns_total, profile)",
+        "includeAll": true,
+        "allValue": ".*",
+        "label": "profile",
+        "multi": true,
+        "name": "profile",
+        "options": [],
+        "query": {
+          "query": "label_values(march_brood_teardowns_total, profile)",
+          "refId": "PrometheusVariableQueryEditor-VariableQuery"
+        },
+        "refresh": 2,
+        "regex": "",
+        "type": "query"
+      }
+    ]
   },
   "time": {
     "from": "now-1h",

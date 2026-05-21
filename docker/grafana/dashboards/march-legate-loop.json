@@ -15,7 +15,7 @@
       }
     ]
   },
-  "description": "March legate-loop service health: liveness, queue depth (dispatchable/blocked/total), dispatch activity, workers, and forwarded loop logs. Backed by march_legate_* (Prometheus) and march-legate logs (Loki). One container per profile/conductor.",
+  "description": "March legate-loop service health: liveness, queue depth (dispatchable/blocked/total), dispatch activity, workers, forwarded loop logs, and dispatch traces. Backed by march_legate_* (Prometheus), march-legate logs (Loki), and march-legate traces (Tempo). One container per profile/conductor.",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
@@ -1042,6 +1042,64 @@
       ],
       "title": "Loop errors",
       "type": "logs"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 45
+      },
+      "id": 105,
+      "panels": [],
+      "title": "Traces (Tempo)",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "tempo",
+        "uid": "tempo"
+      },
+      "description": "Recent dispatch traces emitted by the loop (service.name=march-legate). One trace per dispatched unit of work (trace id = hash(slice id)); legate.dispatch nests hatchery.spawn -> spawn.start/end/steward.apply + spawn.exec. Click a trace id to open the waterfall.",
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 24,
+        "x": 0,
+        "y": 46
+      },
+      "id": 12,
+      "options": {},
+      "targets": [
+        {
+          "datasource": {
+            "type": "tempo",
+            "uid": "tempo"
+          },
+          "filters": [
+            {
+              "id": "service-name",
+              "operator": "=",
+              "scope": "resource",
+              "tag": "service.name",
+              "value": [
+                "march-legate"
+              ],
+              "valueType": "string"
+            }
+          ],
+          "limit": 50,
+          "queryType": "traceqlSearch",
+          "refId": "A",
+          "tableType": "traces"
+        }
+      ],
+      "title": "Recent dispatch traces",
+      "type": "table"
     }
   ],
   "refresh": "30s",
