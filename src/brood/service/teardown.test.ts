@@ -10,6 +10,7 @@ import {
   teardownSession,
   type TeardownDeps,
 } from "./teardown.js";
+import type { TeardownSubstrate } from "./substrate.js";
 
 const tmpDirs: string[] = [];
 
@@ -44,23 +45,13 @@ function recordingDeps(
   // one to model castra reclaiming the shared worktree.
   const present = new Set<string>();
 
-  const deps: TeardownDeps = {
-    homeDir: home,
-    removeContainer: (spawnId) => {
+  // Substrate adapter (#169): spawn + workspace reclamation behind one
+  // injectable seam, mirroring how teardown depends on it in production.
+  const substrate: TeardownSubstrate = {
+    removeSpawn: (spawnId) => {
       calls.push(`container:${spawnId}`);
     },
-    readContainerLogs: (containerId) => {
-      calls.push(`logs:${containerId}`);
-      return `logs for ${containerId}`;
-    },
-    removeSteward: async (input) => {
-      calls.push(`steward:${input.sessionId}`);
-      if (options.stewardRemovesWorktree) {
-        present.clear();
-      }
-      return { removed: true };
-    },
-    removeWorktreeExact: (_repo, target) => {
+    removeWorkspace: (_repo, target) => {
       // The worktree step passes only `worktreePath`; the branch step passes
       // only `branch`. Record them distinctly so order assertions can tell
       // them apart.
@@ -73,6 +64,22 @@ function recordingDeps(
       worktreeTargets.push(target);
       return { worktreeRemoved: true, branchDeleted: true };
     },
+  };
+
+  const deps: TeardownDeps = {
+    homeDir: home,
+    substrate,
+    readContainerLogs: (containerId) => {
+      calls.push(`logs:${containerId}`);
+      return `logs for ${containerId}`;
+    },
+    removeSteward: async (input) => {
+      calls.push(`steward:${input.sessionId}`);
+      if (options.stewardRemovesWorktree) {
+        present.clear();
+      }
+      return { removed: true };
+    },
     pathExists: (p) => present.has(p),
     ...overrides,
   };
@@ -83,7 +90,7 @@ function recordingDeps(
     removed: present,
     deps: {
       ...deps,
-      // expose a way for tests to seed "present" paths via removeWorktreeExact
+      // expose a way for tests to seed "present" paths via removeWorkspace
     },
   };
 }
@@ -200,8 +207,11 @@ describe.skipIf(!sqliteAvailable)("teardownSession", () => {
     const group = seedSpawnGroup(store);
     const rec = recordingDeps(makeHome());
     rec.deps.pathExists = (p) => p === group.worktreePath;
-    rec.deps.removeContainer = () => {
-      throw new Error("docker daemon down");
+    rec.deps.substrate = {
+      ...rec.deps.substrate!,
+      removeSpawn: () => {
+        throw new Error("docker daemon down");
+      },
     };
 
     const result = await teardownSession(store, group.spawnId, { force: true }, rec.deps);
