@@ -1,15 +1,18 @@
 /**
- * Loop telemetry mapping (#144) — classify the action-log events the loop writes
- * into OpenTelemetry spans and structured logs. Extracted from runtime.ts so the
- * mapping is tested in isolation and the runtime's append() is one-liner wiring.
+ * Loop telemetry mapping (#144) — turn the loop's domain records into the
+ * OpenTelemetry payloads the SDK consumes: action-log events → spans + structured
+ * logs, and the per-tick heartbeat record → the loop-metrics activity. Extracted
+ * from runtime.ts so the mapping is tested in isolation and the runtime side is
+ * one-liner wiring.
  *
- * The actual OTel emit (SDK tracer / OTLP→Loki logger) lives in
- * src/observability/loop-spans.ts and src/observability/logs.ts and is a no-op
- * when telemetry is off; the emitters are injectable so this maps cleanly under
- * test without standing up the SDK.
+ * The actual OTel emit (SDK tracer / OTLP→Loki logger / meter) lives in
+ * src/observability/{loop-spans,logs,loop-metrics}.ts and is a no-op when
+ * telemetry is off; the span/log emitters are injectable so this maps cleanly
+ * under test without standing up the SDK.
  */
 import { emitLoopSpan as defaultEmitLoopSpan } from "../../observability/loop-spans.js";
 import { emitLoopLog as defaultEmitLoopLog, type LoopLogSeverity } from "../../observability/logs.js";
+import type { LoopMetricsSnapshot, LoopTickActivity } from "../../observability/loop-metrics.js";
 
 export type LoopSpanEmitter = typeof defaultEmitLoopSpan;
 export type LoopLogEmitter = typeof defaultEmitLoopLog;
@@ -78,4 +81,52 @@ export function emitActionEventLog(event: any, emit: LoopLogEmitter = defaultEmi
       ...(event.session_id ? { "march.session_id": String(event.session_id) } : {}),
     },
   });
+}
+
+/** Identity for the loop-metrics series + the timing of the tick being folded. */
+export interface HeartbeatMetricsContext {
+  /** Deployment profile label (defaults to "unknown" when empty). */
+  profile?: string;
+  /** Conductor label, pre-resolved by the caller (defaults to "unknown"). */
+  conductor?: string;
+  /** Epoch ms of the just-completed tick (drives the tick.age gauge). */
+  tickAtMs: number;
+  /** Tick wall-clock duration in ms (recorded as the duration histogram, in s). */
+  durationMs: number;
+}
+
+/**
+ * Fold a heartbeat record into the loop-metrics {@link LoopTickActivity} payload
+ * `recordLoopHeartbeat` consumes: snapshot the gauge values + workers-by-state
+ * and read the per-tick counter deltas off the record. Returns `null` when there
+ * is no record yet (nothing to fold). Pure — the caller does the emit.
+ */
+export function buildLoopTickActivity(record: any, ctx: HeartbeatMetricsContext): LoopTickActivity | null {
+  if (!record) return null;
+  const workersByState: Record<string, number> = {};
+  if (record.workers && typeof record.workers === "object") {
+    for (const [state, count] of Object.entries(record.workers)) {
+      if (typeof count === "number") workersByState[state] = count;
+    }
+  }
+  const snapshot: LoopMetricsSnapshot = {
+    profile: ctx.profile || "unknown",
+    conductor: ctx.conductor || "unknown",
+    up: 1,
+    lastTickAtMs: ctx.tickAtMs,
+    queueDispatchable: record.dispatchable_count ?? 0,
+    queueBlocked: record.blocked_count ?? 0,
+    queueTotal: record.pending_total ?? 0,
+    workersByState,
+  };
+  return {
+    snapshot,
+    tickDurationSeconds: ctx.durationMs / 1000,
+    dispatchActions: record.dispatch_action_count ?? 0,
+    dispatchFailures: record.dispatch_failure_count ?? 0,
+    cleanups: record.cleanup_count ?? 0,
+    ghostCleanups: record.ghost_cleanup_count ?? 0,
+    relaunches: record.relaunch_count ?? 0,
+    babysitActions: record.babysit_action_count ?? 0,
+  };
 }

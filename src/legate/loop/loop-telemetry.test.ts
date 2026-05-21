@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { emitActionEventLog, emitActionEventSpan } from "./loop-telemetry.js";
+import { buildLoopTickActivity, emitActionEventLog, emitActionEventSpan } from "./loop-telemetry.js";
 
 describe("emitActionEventSpan", () => {
   it("ignores non-objects and events without a slice_id", () => {
@@ -51,5 +51,47 @@ describe("emitActionEventLog", () => {
     const emit = vi.fn();
     emitActionEventLog({ kind: "dispatch_action", detail: "queued" }, emit);
     expect(emit).toHaveBeenCalledWith(expect.objectContaining({ body: "dispatch_action: queued" }));
+  });
+});
+
+describe("buildLoopTickActivity", () => {
+  const ctx = { profile: "p", conductor: "c", tickAtMs: 1000, durationMs: 2500 };
+
+  it("returns null when there is no heartbeat record", () => {
+    expect(buildLoopTickActivity(null, ctx)).toBeNull();
+  });
+
+  it("maps the record into the loop-metrics activity payload", () => {
+    const record = {
+      workers: { running: 1, idle: 2, error: 0, bogus: "x" },
+      dispatchable_count: 3,
+      blocked_count: 1,
+      pending_total: 5,
+      dispatch_action_count: 2,
+      dispatch_failure_count: 1,
+      cleanup_count: 4,
+      ghost_cleanup_count: 0,
+      relaunch_count: 0,
+      babysit_action_count: 6,
+    };
+    const activity = buildLoopTickActivity(record, ctx)!;
+    expect(activity.snapshot).toEqual({
+      profile: "p",
+      conductor: "c",
+      up: 1,
+      lastTickAtMs: 1000,
+      queueDispatchable: 3,
+      queueBlocked: 1,
+      queueTotal: 5,
+      workersByState: { running: 1, idle: 2, error: 0 }, // non-number 'bogus' dropped
+    });
+    expect(activity.tickDurationSeconds).toBe(2.5);
+    expect(activity).toMatchObject({ dispatchActions: 2, dispatchFailures: 1, cleanups: 4, babysitActions: 6 });
+  });
+
+  it("defaults profile/conductor to 'unknown' and missing counts to 0", () => {
+    const activity = buildLoopTickActivity({}, { profile: "", conductor: undefined, tickAtMs: 0, durationMs: 0 })!;
+    expect(activity.snapshot).toMatchObject({ profile: "unknown", conductor: "unknown", queueTotal: 0, workersByState: {} });
+    expect(activity.dispatchActions).toBe(0);
   });
 });

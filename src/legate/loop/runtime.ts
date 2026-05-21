@@ -21,10 +21,7 @@
  */
 import fs from "node:fs";
 import path from "node:path";
-import {
-  recordLoopHeartbeat,
-  type LoopMetricsSnapshot,
-} from "../../observability/loop-metrics.js";
+import { recordLoopHeartbeat } from "../../observability/loop-metrics.js";
 import { emitLoopLog } from "../../observability/logs.js";
 import {
   getJob,
@@ -48,16 +45,15 @@ import {
   completePendingHatcheryDispatches,
   launchDispatch,
 } from "./handlers/dispatch-ops.js";
-// Pure formatting helpers for the action-log replay + processor requests. #144.
-import {
-  formatBabysitActionLine,
-  formatCleanupFailureLine,
-  formatCleanupLine,
-  formatProcessorRequestLine,
-} from "./pure/format.js";
-// Action-log event → OTel span/log classification (#144). runtime's append()
-// fans an action-log write out to these; the OTel SDK wiring lives behind them.
-import { emitActionEventLog, emitActionEventSpan } from "./loop-telemetry.js";
+// Startup replay formatting (#144): parse + filter + format the recent action
+// events; runtime keeps the file read + header + printing.
+import { recentActionEventLines } from "./pure/replay.js";
+// Legate-judgement requests (#144): event build + dedup + doorbell, behind
+// injected I/O; runtime supplies the concrete sinks.
+import { requestJudgement } from "./judgement.js";
+// Loop domain → OTel payload mapping (#144): action events → spans/logs, and the
+// heartbeat record → the loop-metrics activity. The OTel SDK wiring lives behind.
+import { buildLoopTickActivity, emitActionEventLog, emitActionEventSpan } from "./loop-telemetry.js";
 // Cadence layer (#144): the re-entrancy guard + interval + tick timing. runtime
 // supplies the tick body, error handler, and metrics flush.
 import { createScheduler, type LoopScheduler } from "./scheduler.js";
@@ -209,36 +205,10 @@ function replayRecentActionEvents(limit = 10) {
     if (err && err.code === "ENOENT") return;
     throw err;
   }
-  const events = raw
-    .trim()
-    .split("\n")
-    .filter(Boolean)
-    .map((line) => {
-      try {
-        return JSON.parse(line);
-      } catch {
-        return null;
-      }
-    })
-    .filter((event) => event?.kind === "cleanup" || event?.kind === "cleanup_failure" || event?.kind === "babysit_action" || event?.kind === "dispatch_action" || event?.kind === "recovery_dispatch" || event?.kind === "processor_request")
-    .slice(-limit);
-  if (events.length === 0) return;
-  printText(`[${now()}] replaying ${events.length} recent processor action event(s) to stdout`);
-  for (const event of events) {
-    if (event.kind === "cleanup") {
-      printText(formatCleanupLine(event, "recent action: "));
-    } else if (event.kind === "cleanup_failure") {
-      printText(formatCleanupFailureLine(event, "recent action: "));
-    } else if (event.kind === "babysit_action") {
-      printText(formatBabysitActionLine(event, "recent action: "));
-    } else if (event.kind === "dispatch_action") {
-      printText("[" + event.ts + "] recent action: dispatch " + event.slice_id + ": " + event.detail);
-    } else if (event.kind === "recovery_dispatch") {
-      printText("[" + event.ts + "] recent action: recovery-dispatch " + event.slice_id + ": " + event.detail);
-    } else {
-      printText(formatProcessorRequestLine(event, "recent action: "));
-    }
-  }
+  const lines = recentActionEventLines(raw, limit);
+  if (lines.length === 0) return;
+  printText(`[${now()}] replaying ${lines.length} recent processor action event(s) to stdout`);
+  for (const line of lines) printText(line);
 }
 
 async function sendAgentDeckMessage(sessionId: string, message: string, _wait = false) {
@@ -261,31 +231,15 @@ async function sendDoorbellToLegate() {
   }
 }
 
-async function requestLegateJudgement(input: any) {
-  if (input.slice && input.requestKey && input.slice.last_processor_request_key === input.requestKey) {
-    return null;
-  }
-  const event = {
-    schema_version: 1,
-    ts: input.ts,
-    processor: meta.processor_name,
-    paired_legate: meta.paired_legate,
-    kind: "processor_request",
-    slice_id: input.sliceId,
-    session_id: input.sessionId || null,
-    pr_number: input.pr?.number ?? input.prNumber ?? null,
-    reason: input.reason,
-    detail: input.detail,
-  };
-  append(meta.processor_requests_path, event);
-  append(meta.processor_events_path, event);
-  const delivered = await sendDoorbellToLegate();
-  appendText(meta.processor_log_path, `${formatProcessorRequestLine(event)}${delivered ? "" : " (doorbell delivery failed)"}`);
-  if (input.slice && input.requestKey) {
-    input.slice.last_processor_request_key = input.requestKey;
-    input.slice.last_processor_request_at = input.ts;
-  }
-  return event;
+function requestLegateJudgement(input: any) {
+  return requestJudgement(input, {
+    processorName: meta.processor_name,
+    pairedLegate: meta.paired_legate,
+    appendRequest: (event: any) => append(meta.processor_requests_path, event),
+    appendEvent: (event: any) => append(meta.processor_events_path, event),
+    sendDoorbell: sendDoorbellToLegate,
+    log: (line: string) => appendText(meta.processor_log_path, line),
+  });
 }
 
 // Build the dispatch I/O seam (handlers/dispatch-io.ts). The Hatchery client is
@@ -392,34 +346,13 @@ function logTickError(err: any) {
 // captured on lastHeartbeat (so the gauges + counters stay in sync with what was
 // written to disk). No-op when telemetry is disabled (handled in loop-metrics).
 function flushHeartbeatMetrics(durationMs: number, tickAtMs: number) {
-  const record: any = lastHeartbeat;
-  if (!record) return;
-  const workersByState: Record<string, number> = {};
-  if (record.workers && typeof record.workers === "object") {
-    for (const [state, count] of Object.entries(record.workers)) {
-      if (typeof count === "number") workersByState[state] = count;
-    }
-  }
-  const snapshot: LoopMetricsSnapshot = {
-    profile: meta.profile || "unknown",
-    conductor: meta.paired_legate || meta.loop_name || "unknown",
-    up: 1,
-    lastTickAtMs: tickAtMs,
-    queueDispatchable: record.dispatchable_count ?? 0,
-    queueBlocked: record.blocked_count ?? 0,
-    queueTotal: record.pending_total ?? 0,
-    workersByState,
-  };
-  recordLoopHeartbeat({
-    snapshot,
-    tickDurationSeconds: durationMs / 1000,
-    dispatchActions: record.dispatch_action_count ?? 0,
-    dispatchFailures: record.dispatch_failure_count ?? 0,
-    cleanups: record.cleanup_count ?? 0,
-    ghostCleanups: record.ghost_cleanup_count ?? 0,
-    relaunches: record.relaunch_count ?? 0,
-    babysitActions: record.babysit_action_count ?? 0,
+  const activity = buildLoopTickActivity(lastHeartbeat, {
+    profile: meta.profile,
+    conductor: meta.paired_legate || meta.loop_name,
+    tickAtMs,
+    durationMs,
   });
+  if (activity) recordLoopHeartbeat(activity);
 }
 
 /**
