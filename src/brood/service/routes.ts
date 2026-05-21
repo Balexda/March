@@ -6,7 +6,7 @@ import {
   recordBroodRequest,
 } from "../../observability/brood-metrics.js";
 import { createCastraClientFromEnv } from "../../castra/client.js";
-import type { SessionStore } from "./store.js";
+import type { SessionRepository } from "./repository.js";
 import {
   BroodConflictError,
   BroodNotFoundError,
@@ -23,7 +23,7 @@ import type {
 } from "./types.js";
 
 export interface RoutesOptions {
-  readonly store: SessionStore;
+  readonly store: SessionRepository;
   /** Override teardown (tests). Defaults to the real ordered teardown. */
   readonly teardown?: (
     id: string,

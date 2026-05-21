@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { CLI_VERSION } from "../shared/version.js";
+import type { SessionRepositoryBackend } from "./service/repository.js";
 
 /**
  * Brood service configuration: identity, deterministic port, container/image
@@ -16,6 +17,9 @@ export const BROOD_IMAGE_TAG = `march-brood:${CLI_VERSION}`;
 
 /** Env var holding an explicit port override for the in-container service. */
 export const BROOD_PORT_ENV = "MARCH_BROOD_PORT";
+
+/** Env var selecting the registry backend (`sqlite` default, `postgres` stub). */
+export const BROOD_STORE_ENV = "MARCH_BROOD_STORE";
 
 /**
  * Deterministic loopback port band, matching the legate-loop / castra scheme
@@ -48,4 +52,22 @@ export function resolveBroodPort(
     throw new Error(`Invalid Brood port "${raw}": expected an integer in 1..65535.`);
   }
   return n;
+}
+
+/**
+ * Resolve the registry backend: `MARCH_BROOD_STORE`, else `sqlite`. Throws on an
+ * unrecognized value so a typo fails fast rather than silently falling back.
+ * This is the config seam that selects which {@link SessionRepository} the
+ * service builds — sqlite for local/dev, a managed DB for SaaS (issue #167).
+ */
+export function resolveBroodStoreBackend(
+  env: NodeJS.ProcessEnv = process.env,
+): SessionRepositoryBackend {
+  const raw = env[BROOD_STORE_ENV];
+  if (raw === undefined || raw === "") return "sqlite";
+  const value = raw.trim().toLowerCase();
+  if (value === "sqlite" || value === "postgres") return value;
+  throw new Error(
+    `Invalid ${BROOD_STORE_ENV} "${raw}": expected "sqlite" or "postgres".`,
+  );
 }

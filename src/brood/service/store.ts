@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { getDatabaseSync, type BroodDatabase } from "./sqlite.js";
+import type { SessionRepository } from "./repository.js";
 import type {
   ListSessionsFilter,
   RegisterSessionInput,
@@ -184,8 +185,11 @@ function recordToValues(record: SessionRecord): Array<string | number | null> {
  * verbs), its own persistent store, and its teardown call-outs — it never reads
  * another service's filesystem. The store survives restarts, so there is no
  * filesystem bootstrap to rebuild from `~/.march/spawns`.
+ *
+ * This is the default {@link SessionRepository} backend; callers depend on that
+ * interface (via {@link createSessionRepository}), never this class directly.
  */
-export class SessionStore {
+export class SessionStore implements SessionRepository {
   private readonly db: BroodDatabase;
 
   constructor(options: SessionStoreOptions = {}) {
