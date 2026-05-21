@@ -751,15 +751,22 @@ function buildDirectStewardMessage(item, mergedArchive) {
 // as the initial message. Reliable but slower/less parallel than codex spawn.
 // Returns {launched, sliceId, sessionId, error}. Mutates state.slices on
 // success so babysit/cleanup track the steward like any other.
-async function launchDirectStewardDispatch(state, ts, item, sliceId, mergedArchive) {
+// `opts.branchBase` / `opts.title` let a caller that only holds a slice (not the
+// original smithy item) supply the identity directly — the spawn-error fallback
+// passes slice.branch / slice.worker_title, which equal dispatchBranch(item) /
+// dispatchTitle(item) from the original dispatch, so the -direct branch stays
+// tied to the slice's semantic identity.
+async function launchDirectStewardDispatch(state, ts, item, sliceId, mergedArchive, opts) {
   const repoPath = state?.repo?.path || meta.repo?.path;
   if (typeof repoPath !== "string" || repoPath.length === 0) {
     return { launched: false, error: "repo path is missing" };
   }
-  const bareBranch = dispatchBranch(item) + "-direct";
+  const branchBase = (opts && typeof opts.branchBase === "string" && opts.branchBase) ? opts.branchBase : dispatchBranch(item);
+  const titleBase = (opts && typeof opts.title === "string" && opts.title) ? opts.title : dispatchTitle(item);
+  const bareBranch = branchBase + "-direct";
   const featureBranch = "feature/" + bareBranch;
   const directSliceId = sliceId + "-direct";
-  const title = "direct: " + dispatchTitle(item);
+  const title = "direct: " + titleBase;
   const message = buildDirectStewardMessage(item, mergedArchive);
 
   // Launch via Castra: it runs agent-deck launch, identifies the new session
@@ -1460,6 +1467,68 @@ async function completePendingHatcheryDispatches(state, ts) {
           sessionId: null,
           detail: spawnRecovery.verdict + ": " + spawnRecovery.detail,
         });
+        mutated = true;
+        continue;
+      }
+      // Spawn-error fallback (issue #139): codex has now failed to produce an
+      // applicable patch the full retry budget (verdict spawn-error-persistent)
+      // — for some large-diff artifacts the per-attempt success rate is near
+      // zero, so more retries never land. Rather than escalate to the operator,
+      // fall back ONCE to the no-spawn direct steward dispatch — hand the
+      // /smithy.<verb> command straight to a Claude steward that implements
+      // end-to-end and opens the PR (a larger output window, no patch to apply).
+      // This is the same fallback handleRecoveryDispatch uses after
+      // MAX_RECOVERY_ATTEMPTS; the shared state.direct_dispatch_done guard
+      // (keyed on the original slice id) ensures we never double-fire it.
+      if (spawnRecovery && !spawnRecovery.recovered && spawnRecovery.verdict === "spawn-error-persistent") {
+        state.direct_dispatch_done = state.direct_dispatch_done && typeof state.direct_dispatch_done === "object"
+          ? state.direct_dispatch_done
+          : {};
+        const baseSliceId = slice.original_slice_id || sliceId;
+        const directItem = {
+          next_action: { command: slice.command, arguments: slice.arguments || [] },
+          path: slice.artifact_path || null,
+          title: slice.worker_title || null,
+        };
+        const commandLine = actionCommandLine({ command: slice.command, arguments: slice.arguments || [] });
+        if (!state.direct_dispatch_done[baseSliceId]) {
+          const direct = await launchDirectStewardDispatch(state, ts, directItem, baseSliceId, null, {
+            branchBase: slice.branch || null,
+            title: slice.worker_title || null,
+          });
+          if (direct.launched) {
+            state.direct_dispatch_done[baseSliceId] = ts;
+            delete state.slices[sliceId];
+            actions.push({
+              action: "direct_dispatch",
+              sliceId: direct.sliceId,
+              sessionId: direct.sessionId || null,
+              detail: "codex spawn produced an unapplicable patch for " + sliceId
+                + " (spawn-error budget exhausted); fell back to a no-spawn direct steward dispatch of " + commandLine,
+            });
+            mutated = true;
+            continue;
+          }
+          // Fallback couldn't launch — escalate with both failure modes so the
+          // operator sees the spawn-error history and the launch error.
+          slice.stage = "escalated";
+          slice.last_action = ts;
+          slice.last_action_note = "NEED: codex spawn-error-persistent for " + commandLine
+            + " AND the no-spawn direct steward fallback failed to launch: " + (direct.error || "(unknown)");
+          failures.push({ slice_id: sliceId, command: commandLine, error: slice.last_action_note });
+          queueDispatchEscalation(slice, sliceId, "spawn-error-persistent-direct-failed", spawnRecovery.detail + " | direct fallback error: " + (direct.error || "(unknown)"));
+          mutated = true;
+          continue;
+        }
+        // A direct steward was already dispatched for this artifact and codex is
+        // STILL failing — no fallback left, escalate for a human.
+        slice.stage = "escalated";
+        slice.last_action = ts;
+        slice.last_action_note = "NEED: codex spawn-error-persistent for " + commandLine
+          + " and a no-spawn direct steward fallback was already attempted for " + baseSliceId
+          + "; manual intervention required";
+        failures.push({ slice_id: sliceId, command: commandLine, error: slice.last_action_note });
+        queueDispatchEscalation(slice, sliceId, "spawn-error-persistent-exhausted", spawnRecovery.detail);
         mutated = true;
         continue;
       }
