@@ -8,6 +8,12 @@
 # syntax=docker/dockerfile:1
 ARG NODE_IMAGE=node:22-bookworm-slim
 ARG DOCKER_CLI_VERSION=27.3.1
+# tmux version MUST match the host tmux server Castra drives over the mounted
+# socket: a client cannot speak to a server of a different protocol version
+# ("server exited unexpectedly"). The host runs 3.6a (linuxbrew), newer than
+# bookworm's apt tmux (3.3a), so build it from source. Override to match your
+# host (`tmux -V`).
+ARG TMUX_VERSION=3.6a
 
 # --- build: bundle the CLI (needs dev deps: tsup) ---
 FROM ${NODE_IMAGE} AS build
@@ -21,18 +27,32 @@ RUN npm run build
 # --- runtime ---
 FROM ${NODE_IMAGE} AS runtime
 ARG DOCKER_CLI_VERSION
+ARG TMUX_VERSION
 RUN apt-get update \
   && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
     git \
     jq \
-    tmux \
   && rm -rf /var/lib/apt/lists/*
+# tmux from source, pinned to ${TMUX_VERSION} so the client protocol matches the
+# host tmux server agent-deck drives over the mounted socket. The build deps
+# (which include the libevent/ncurses runtime libs tmux links) are left in place
+# — purging + autoremove strips those runtime libs.
+RUN set -eux; \
+  apt-get update; \
+  apt-get install -y --no-install-recommends build-essential libevent-dev libncurses-dev bison pkg-config; \
+  curl -fsSL "https://github.com/tmux/tmux/releases/download/${TMUX_VERSION}/tmux-${TMUX_VERSION}.tar.gz" -o /tmp/tmux.tgz; \
+  tar -xzf /tmp/tmux.tgz -C /tmp; \
+  cd "/tmp/tmux-${TMUX_VERSION}"; \
+  ./configure; \
+  make -j"$(nproc)"; \
+  make install; \
+  cd /; \
+  rm -rf /tmp/tmux* /var/lib/apt/lists/*; \
+  tmux -V
 # Static docker CLI only (the daemon is the host's, reached via the mounted
-# /var/run/docker.sock). tmux is installed so agent-deck can drive the host
-# tmux server through the mounted socket — keep its version close to the host's
-# to avoid tmux protocol mismatches.
+# /var/run/docker.sock).
 RUN curl -fsSL "https://download.docker.com/linux/static/stable/x86_64/docker-${DOCKER_CLI_VERSION}.tgz" \
     | tar -xz -C /tmp \
   && mv /tmp/docker/docker /usr/local/bin/docker \
