@@ -19,7 +19,7 @@ import {
  * review-thread / CI handling, and post-dispatch re-nudges for parked workers.
  *
  * Two-stage: assess() is PURE. It reads the per-slice PR + recent output that
- * Stage 1 (senseState) already gathered (the Herald-pushable surface) plus the
+ * Stage 1 (senseFromHerald) already gathered (the folded inbox surface) plus the
  * cadence counters living on each slice, and emits a flat list of
  * {@link BabysitDecision}s. apply() performs every send / state mutation /
  * judgement request and persists. Decisions are emitted in original tick order;
@@ -586,6 +586,5 @@ export async function apply(decisions: BabysitDecision[], ctx: HandlerContext, s
     }
   }
 
-  if (res.mutated) ctx.persist(state);
   return res;
 }

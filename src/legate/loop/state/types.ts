@@ -7,14 +7,15 @@ import type { TransitionEvent } from "../clients/herald.js";
 /**
  * Two-stage loop contracts.
  *
- * Stage 1 (`senseState`) does ALL I/O reads into a single immutable-ish
- * {@link LoopState} snapshot. Stage 2 handlers are pure `assess(state) ->
- * Decision[]` + `apply(decisions, ctx, state)` that executes side effects and
- * mutates the snapshot so later handlers see current state without re-polling.
+ * Stage 1 (`senseFromHerald`) drains the Herald inbox into a single
+ * immutable-ish {@link LoopState} snapshot. Stage 2 handlers are pure
+ * `assess(state) -> Decision[]` + `apply(decisions, ctx, state)` that execute
+ * side effects, mutate the snapshot so later handlers see current state without
+ * re-polling, and append transition events to the log (the durable record).
  *
- * This split is what makes the Herald cutover a drop-in: Herald will *push* the
- * per-slice transitions that `senseState` currently polls (`perSlice`), leaving
- * `assess`/`apply` untouched.
+ * Since the Herald cutover (#176) there is no `state.json`: the working state
+ * (`raw`) lives in memory across ticks and is rebuilt from the event-log fold on
+ * cold start, so `assess`/`apply` are untouched by where the snapshot comes from.
  */
 
 /** Per-slice external state — the Herald-pushable surface (today polled). */
@@ -41,7 +42,8 @@ export interface LoopState {
   ts: string;
   statePresent: boolean;
   stateError: string | null;
-  /** Mutable state.json object (slices, archived_slices, repo, …). */
+  /** Mutable in-memory working state (slices, archived_slices, repo, …),
+   *  threaded across ticks and rebuilt from the event-log fold on cold start. */
   raw: any;
   slices: Record<string, any>;
   archived: Record<string, any>;
@@ -63,14 +65,13 @@ export interface HandlerContext {
   castra: CastraClient;
   /** Request teardown of a session via Brood (the teardown authority). */
   broodTeardown: (sessionId: string, opts?: BroodTeardownOptions) => Promise<BroodTeardownResult>;
-  /** Persist the (mutated) state.json. */
-  persist: (state: LoopState) => void;
   /** Append an action/event record to the action log (+ otel span/log). */
   emit: (event: any) => void;
   /**
-   * Append a Herald transition event to the unified event log (PR2 cutover; #175),
-   * dual-written alongside state.json during the soak. Fire-and-forget and
-   * undefined when Herald isn't configured, so the legacy path is unchanged.
+   * Append a Herald transition event to the unified event log (#176). Since
+   * `state.json` was retired this is the SOLE durable record of a transition —
+   * the in-memory working state is rebuilt from these events on cold start.
+   * Fire-and-forget so a Herald write never blocks or breaks a tick.
    */
   emitTransition?: (event: TransitionEvent) => void;
   /** Append a human-readable line to the action log. */

@@ -1,7 +1,4 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
 import type { LoopMeta } from "../legate/loop/meta.js";
 
 // vi.mock is hoisted; close over a mutable handle so each test can route
@@ -59,7 +56,6 @@ describe("buildSenseIo → SenseDeps", () => {
     expect(deps.meta).toBeDefined();
     expect(typeof deps.now()).toBe("string");
     for (const key of [
-      "readStateJson",
       "listSessions",
       "syncDefaultBranch",
       "readSmithyStatus",
@@ -141,20 +137,6 @@ describe("captureRecentSessionOutput", () => {
       }),
     });
     expect(await bad.captureRecentSessionOutput("s1")).toEqual({ output: "", error: "nope" });
-  });
-});
-
-describe("readStateJson", () => {
-  it("returns null when the state file is absent and parses it when present", () => {
-    const absent = createSenseIo({ meta: meta(), castra: fakeCastra() });
-    expect(absent.readStateJson()).toBeNull();
-
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "senseio-"));
-    const statePath = path.join(dir, "state.json");
-    fs.writeFileSync(statePath, JSON.stringify({ slices: { x: 1 } }), "utf-8");
-    const present = createSenseIo({ meta: meta({ legate_state_path: statePath } as Partial<LoopMeta>), castra: fakeCastra() });
-    expect(present.readStateJson()).toEqual({ slices: { x: 1 } });
-    fs.rmSync(dir, { recursive: true, force: true });
   });
 });
 

@@ -34,7 +34,6 @@ function deps(state: LoopState, ctxOver: Partial<HandlerContext> = {}): Coordina
     ts: NOW,
     castra: {} as any,
     broodTeardown: vi.fn(async () => ({ ok: true, notTracked: false, detail: "" })),
-    persist: vi.fn(),
     emit: vi.fn(),
     log: vi.fn(),
     ...ctxOver,

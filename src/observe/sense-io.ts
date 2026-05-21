@@ -1,5 +1,4 @@
 import { execFile } from "node:child_process";
-import fs from "node:fs";
 import { CastraClient } from "../castra/client.js";
 import type { LoopMeta } from "../legate/loop/meta.js";
 import type { SenseDeps } from "../legate/loop/state/sense.js";
@@ -7,8 +6,7 @@ import type { SenseDeps } from "../legate/loop/state/sense.js";
 /**
  * Shared system-observation I/O — the impure reads that turn the live world
  * (gh PR/CI/review state, smithy readiness, git default-branch sync, Castra
- * sessions + output, and the legate's state.json) into the values
- * {@link senseState} folds into a snapshot.
+ * sessions + output) into the values the legate and Herald fold into a snapshot.
  *
  * This was lifted verbatim from the legate loop's `runtime.ts` (the
  * `@ts-nocheck` mechanical lift) so there is ONE tested implementation of the
@@ -20,7 +18,7 @@ import type { SenseDeps } from "../legate/loop/state/sense.js";
  */
 
 export interface SenseIoContext {
-  /** Loaded loop meta (repo path, profile, state.json path, …). */
+  /** Loaded loop meta (repo path, profile, worker group, …). */
   readonly meta: LoopMeta;
   readonly env?: NodeJS.ProcessEnv;
   /** Castra client; defaults to one built from `env`. */
@@ -42,10 +40,9 @@ export interface SyncResult {
  * The shared observation I/O bundle. The legate loop uses {@link toSenseDeps}
  * for Stage 1 and calls {@link listSessions} / {@link queryPrForBabysit} /
  * {@link prMatchesSliceBranch} / {@link syncDefaultBranch} directly from its
- * dispatch/recovery paths; Herald uses {@link toSenseDeps} to feed `senseState`.
+ * dispatch/recovery paths; Herald uses {@link toSenseDeps} to feed `senseObserved`.
  */
 export interface SenseIo {
-  readStateJson(): any;
   listSessions(): Promise<any[] | { error: string }>;
   syncDefaultBranch(state: any): Promise<SyncResult>;
   readSmithyStatus(repoPath: string): Promise<any>;
@@ -53,7 +50,7 @@ export interface SenseIo {
   discoverPrForSlice(slice: any, state: any, sessionId: string): Promise<any>;
   prMatchesSliceBranch(slice: any, pr: any): Promise<boolean>;
   captureRecentSessionOutput(sessionId: string): Promise<{ output: string; error?: string }>;
-  /** Adapt to the injected {@link SenseDeps} contract `senseState` consumes. */
+  /** Adapt to the injected {@link SenseDeps} contract the sense entry points consume. */
   toSenseDeps(): SenseDeps;
 }
 
@@ -84,15 +81,6 @@ function execText(
       },
     );
   });
-}
-
-function readJsonIfPresent(file: string): any {
-  try {
-    return JSON.parse(fs.readFileSync(file, "utf-8"));
-  } catch (err: any) {
-    if (err && err.code === "ENOENT") return null;
-    throw err;
-  }
 }
 
 // Map a Castra session to the agent-deck-shaped object the loop consumes
@@ -169,10 +157,6 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
   const warn = ctx.warn;
   let castraClient = ctx.castra;
   const castra = (): CastraClient => (castraClient ??= new CastraClient({ env }));
-
-  function readStateJson(): any {
-    return readJsonIfPresent(meta.legate_state_path);
-  }
 
   async function listSessions(): Promise<any[] | { error: string }> {
     // Sessions come from Castra (the agent-deck interdiction service), mapped
@@ -417,7 +401,6 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
     return {
       meta,
       now,
-      readStateJson: () => readStateJson(),
       listSessions: () => listSessions(),
       syncDefaultBranch: async (repoPath: string, knownDefault?: string) => {
         await syncDefaultBranch({ repo: { path: repoPath, default_branch: knownDefault } });
@@ -432,7 +415,6 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
   }
 
   return {
-    readStateJson,
     listSessions,
     syncDefaultBranch,
     readSmithyStatus,
@@ -444,7 +426,7 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
   };
 }
 
-/** Convenience: the {@link SenseDeps} for `senseState`, bound to a context. */
+/** Convenience: the {@link SenseDeps} for the sense entry points, bound to a context. */
 export function buildSenseIo(ctx: SenseIoContext): SenseDeps {
   return createSenseIo(ctx).toSenseDeps();
 }

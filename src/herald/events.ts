@@ -9,8 +9,10 @@
  * to a `seq`, and a delta between two points is the events between two `seq`s.
  *
  * This module is the canonical contract shared by BOTH services: Herald folds it
- * to serve `/state`, and the legate folds it (PR2) to rebuild the working state
- * its handlers consume. Keep `EventType` low-cardinality (it is a metric label).
+ * to serve `/state`, and the legate folds it to rebuild the working state its
+ * handlers consume. Since #176 this fold is the SOLE source of system state —
+ * there is no `state.json`; the legate's in-memory working state is rebuilt from
+ * the fold on cold start. Keep `EventType` low-cardinality (it is a metric label).
  */
 
 /** Who wrote an event: Herald observed it, or the legate transitioned it. */
@@ -48,9 +50,10 @@ export type EventBody =
   // ── Observation events (Herald) ─────────────────────────────────────────
   /** Per-tick marker; carries the observe wall-clock for `/status`. */
   | { type: "heartbeat"; observeDurationMs?: number }
-  /** state.json (PR1) / projection read failed. */
+  /** Retired (#176): signalled a state.json read failure. No longer emitted —
+   *  Herald reads its own projection now — but kept for replay of pre-#176 logs. */
   | { type: "state.error"; message: string }
-  /** state.json read recovered after a prior error (clears the latched error). */
+  /** Retired (#176): cleared a latched {@link EventBody} `state.error`. Replay-only. */
   | { type: "state.ok" }
   /** A slice's PR/CI/review state changed (the `queryPrForBabysit` shape). */
   | { type: "slice.pr.changed"; sliceId: string; pr: unknown }
@@ -138,7 +141,8 @@ export function entityRefOf(body: EventBody): EntityRef {
 /** Per-slice projected state — observed facts merged with legate-owned stage. */
 export interface SliceState {
   sliceId: string;
-  /** Legate-owned stage (transition events; undefined until PR2). */
+  /** Legate-owned stage, from the legate's transition events (undefined before
+   *  the slice's first stage transition). */
   stage?: string;
   branch?: string;
   worktreePath?: string;

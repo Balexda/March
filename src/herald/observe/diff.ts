@@ -37,14 +37,9 @@ function toObservedSession(s: any): ObservedSession {
 export function diffObserved(prev: SystemState, loop: LoopState): EventBody[] {
   const out: EventBody[] = [];
 
-  // state.json read error/recovery — edge-triggered so a transient failure does
-  // not stay latched in /status once reads are healthy again (e.g. a repo with
-  // no active slices, where no slice.pr.changed would otherwise clear it).
-  if (loop.stateError && loop.stateError !== prev.stateError) {
-    out.push({ type: "state.error", message: loop.stateError });
-  } else if (!loop.stateError && loop.statePresent && prev.stateError) {
-    out.push({ type: "state.ok" });
-  }
+  // (The `state.error` / `state.ok` events are retired: Herald no longer reads
+  // the legate's state.json, so there is no read to fail. The reducer still folds
+  // those types for replay of pre-#176 logs, but the observer never emits them.)
 
   // Worker bucket counts. summarizeWorkers returns either the buckets or the
   // `{error: string}` unavailable sentinel — the buckets always carry a numeric

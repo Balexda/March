@@ -1,19 +1,14 @@
 import { describe, expect, it, vi } from "vitest";
-import { senseFromHerald, senseState, type SenseDeps } from "./sense.js";
+import { rebuildWorkingState, senseFromHerald, senseObserved, type SenseDeps } from "./sense.js";
 import type { LoopMeta } from "../meta.js";
-import { emptySystemState, type SystemState } from "../../../herald/events.js";
+import { emptySystemState, type SliceState, type SystemState } from "../../../herald/events.js";
 
-const meta = { worker_group: "legate-workers", repo: { path: "/repo" } } as unknown as LoopMeta;
+const meta = { worker_group: "legate-workers", repo: { name: "march", path: "/repo" } } as unknown as LoopMeta;
 
 function deps(over: Partial<SenseDeps> = {}): SenseDeps {
   return {
     meta,
     now: () => "2026-05-20T00:00:00Z",
-    readStateJson: () => ({
-      repo: { path: "/repo", default_branch: "main" },
-      slices: {},
-      archived_slices: {},
-    }),
     listSessions: async () => [],
     syncDefaultBranch: async () => {},
     readSmithyStatus: async () => ({ records: [], graph: {} }),
@@ -23,119 +18,16 @@ function deps(over: Partial<SenseDeps> = {}): SenseDeps {
   };
 }
 
-describe("senseState (Stage 1)", () => {
-  it("assembles a snapshot with workers + smithy queue", async () => {
-    const state = await senseState(
-      deps({
-        listSessions: async () => [{ id: "s1", group: "legate-workers", status: "running" }],
-        readSmithyStatus: async () => ({
-          records: [
-            { path: "a", next_action: { command: "smithy.forge" } },
-            { path: "b", next_action: { command: "smithy.cut" } },
-          ],
-          graph: {},
-        }),
-      }),
-    );
-    expect(state.statePresent).toBe(true);
-    expect(state.workers).toMatchObject({ running: 1 });
-    expect(state.smithy.ok).toBe(true);
-    // both records are ready (no layer constraint) → 2 dispatchable
-    expect(state.smithy.queue).toEqual({ dispatchable: 2, blocked: 0, total: 2 });
-    expect(state.sessionsById.get("s1")).toBeTruthy();
-  });
+function foldedState(over: Partial<SystemState> = {}): SystemState {
+  return { ...emptySystemState(), ...over };
+}
 
-  it("captures state-read errors without throwing", async () => {
-    const state = await senseState(
-      deps({
-        readStateJson: () => {
-          throw new Error("corrupt");
-        },
-      }),
-    );
-    expect(state.statePresent).toBe(false);
-    expect(state.stateError).toBe("corrupt");
-  });
+function slice(over: Partial<SliceState> & { sliceId: string }): SliceState {
+  return { ...over };
+}
 
-  it("surfaces a smithy read failure as smithy.ok=false (non-fatal)", async () => {
-    const state = await senseState(
-      deps({
-        readSmithyStatus: async () => {
-          throw new Error("smithy down");
-        },
-      }),
-    );
-    expect(state.smithy.ok).toBe(false);
-    expect(state.smithy.error).toBe("smithy down");
-  });
-
-  it("fetches per-slice PR + output only for active slices with a live session", async () => {
-    const queryPr = vi.fn(async () => ({ number: 7, state: "OPEN" }));
-    const sessionOutput = vi.fn(async () => ({ output: "log" }));
-    const state = await senseState(
-      deps({
-        readStateJson: () => ({
-          repo: { path: "/repo" },
-          slices: {
-            active: { worker_session_id: "s1", stage: "pr-open" },
-            terminal: { worker_session_id: "s2", stage: "merged" }, // skipped (terminal)
-            noSession: { stage: "implementing" }, // skipped (no session)
-            noLiveSession: { worker_session_id: "s9", stage: "implementing" }, // skipped (session absent)
-          },
-          archived_slices: {},
-        }),
-        listSessions: async () => [
-          { id: "s1", group: "legate-workers", status: "idle" },
-          { id: "s2", group: "legate-workers", status: "idle" },
-        ],
-        queryPr,
-        sessionOutput,
-      }),
-    );
-    expect(Object.keys(state.perSlice)).toEqual(["active"]);
-    expect(state.perSlice.active!.pr).toMatchObject({ number: 7 });
-    expect(queryPr).toHaveBeenCalledTimes(1);
-    expect(sessionOutput).toHaveBeenCalledWith("s1");
-  });
-
-  it("discovers a PR for an implementing slice when queryPr skips", async () => {
-    const discoverPr = vi.fn(async () => ({ number: 42, state: "OPEN" }));
-    const state = await senseState(
-      deps({
-        readStateJson: () => ({
-          repo: { path: "/repo" },
-          slices: { impl: { worker_session_id: "s1", stage: "implementing" } },
-          archived_slices: {},
-        }),
-        listSessions: async () => [{ id: "s1", group: "legate-workers", status: "idle" }],
-        queryPr: async () => ({ skipped: true }),
-        discoverPr,
-        sessionOutput: async () => ({ output: "" }),
-      }),
-    );
-    expect(discoverPr).toHaveBeenCalledWith(expect.anything(), expect.anything(), "/repo", "s1");
-    expect(state.perSlice.impl!.pr).toMatchObject({ number: 42 });
-  });
-
-  it("emits a sync warning but still reads smithy when sync throws", async () => {
-    const warn = vi.fn();
-    const state = await senseState(
-      deps({
-        syncDefaultBranch: async () => {
-          throw new Error("no remote");
-        },
-        warn,
-      }),
-    );
-    expect(warn).toHaveBeenCalled();
-    expect(state.smithy.ok).toBe(true);
-  });
-});
-
-describe("senseFromHerald (Stage 1, Herald cutover)", () => {
-  function foldedState(over: Partial<SystemState> = {}): SystemState {
-    return { ...emptySystemState(), ...over };
-  }
+describe("senseFromHerald (Stage 1, Herald-backed)", () => {
+  const prevRaw = () => ({ repo: { path: "/repo" }, slices: {}, archived_slices: {} });
 
   it("maps the folded projection (sessions/workers/perSlice) into the LoopState", async () => {
     const sys = foldedState({
@@ -149,7 +41,7 @@ describe("senseFromHerald (Stage 1, Herald cutover)", () => {
       },
     });
     const herald = { consume: vi.fn(async () => sys) };
-    const state = await senseFromHerald(deps(), herald);
+    const state = await senseFromHerald(deps(), herald, prevRaw());
 
     // sessions are re-shaped to the agent-deck snake_case form the handlers read.
     expect(state.sessions).toEqual([
@@ -164,22 +56,41 @@ describe("senseFromHerald (Stage 1, Herald cutover)", () => {
     expect(state.perSlice.active!.recentOutput).toEqual({ output: "log" });
   });
 
-  it("still reads the legate-owned working state from state.json (dual-write soak)", async () => {
+  it("threads the in-memory working state across ticks (no state.json)", async () => {
+    const raw = { repo: { path: "/repo" }, slices: { s: { worker_session_id: "x", stage: "implementing" } }, archived_slices: { old: {} } };
     const herald = { consume: vi.fn(async () => emptySystemState()) };
-    const state = await senseFromHerald(
-      deps({
-        readStateJson: () => ({
-          repo: { path: "/repo" },
-          slices: { s: { worker_session_id: "x", stage: "implementing" } },
-          archived_slices: { old: {} },
-        }),
-      }),
-      herald,
-    );
+    const state = await senseFromHerald(deps(), herald, raw);
     expect(state.statePresent).toBe(true);
+    expect(state.raw).toBe(raw); // same object reused, not re-read from disk
+    expect(state.slices).toBe(raw.slices);
     expect(state.slices).toHaveProperty("s");
     expect(state.archived).toHaveProperty("old");
     expect(herald.consume).toHaveBeenCalledOnce();
+  });
+
+  it("rebuilds the working state from the fold on cold start (prevRaw null)", async () => {
+    const sys = foldedState({
+      slices: {
+        live: { sliceId: "live", stage: "implementing", branch: "smithy/forge/x", worktreePath: "/wt/x", sessionId: "sess-1", pr: { number: 9, state: "OPEN" } },
+        done: { sliceId: "done", stage: "merged", branch: "smithy/forge/y", archived: true, pr: { number: 4, state: "MERGED", url: "u" } },
+      },
+      retries: { "spawn-error:live": 2 },
+    });
+    const herald = { consume: vi.fn(async () => sys) };
+    const state = await senseFromHerald(deps(), herald, null);
+
+    expect(state.raw.slices.live).toMatchObject({
+      worker_session_id: "sess-1",
+      branch: "smithy/forge/x",
+      worktree_path: "/wt/x",
+      stage: "implementing",
+      pr: { number: 9, state: "OPEN" },
+    });
+    // archived slices land in archived_slices, not the live set.
+    expect(state.raw.slices).not.toHaveProperty("done");
+    expect(state.raw.archived_slices.done).toMatchObject({ pr_number: 4, pr_url: "u", branch: "smithy/forge/y", terminal_state: "MERGED" });
+    expect(state.raw.transient_retry_counts).toEqual({ "spawn-error:live": 2 });
+    expect(state.raw.repo).toMatchObject({ path: "/repo" });
   });
 
   it("reads smithy ready records WITHOUT syncing (Herald owns the sync)", async () => {
@@ -191,6 +102,7 @@ describe("senseFromHerald (Stage 1, Herald cutover)", () => {
         readSmithyStatus: async () => ({ records: [{ path: "a", next_action: { command: "smithy.forge" } }], graph: {} }),
       }),
       herald,
+      prevRaw(),
     );
     expect(syncDefaultBranch).not.toHaveBeenCalled();
     expect(state.smithy.ok).toBe(true);
@@ -199,7 +111,117 @@ describe("senseFromHerald (Stage 1, Herald cutover)", () => {
 
   it("reports unavailable workers when the fold has none", async () => {
     const herald = { consume: vi.fn(async () => emptySystemState()) };
-    const state = await senseFromHerald(deps(), herald);
+    const state = await senseFromHerald(deps(), herald, prevRaw());
     expect(state.workers).toEqual({ error: "unavailable" });
+  });
+});
+
+describe("rebuildWorkingState", () => {
+  it("restores the slice set + retry counters from the fold", () => {
+    const sys = foldedState({
+      slices: {
+        a: { sliceId: "a", stage: "pr-open", branch: "b-a", worktreePath: "/wt/a", sessionId: "s-a", pr: { number: 1, state: "OPEN" } },
+        gone: { sliceId: "gone", stage: "merged", archived: true, branch: "b-gone", pr: { number: 2, state: "MERGED", url: "uu" } },
+        closed: { sliceId: "closed", archived: true, branch: "b-c", pr: { number: 3, state: "CLOSED" } },
+      },
+      retries: { k: 5 },
+    });
+    const raw = rebuildWorkingState(sys, meta);
+    expect(Object.keys(raw.slices)).toEqual(["a"]);
+    expect(raw.slices.a).toMatchObject({ kind: "smithy", worker_session_id: "s-a", branch: "b-a", worktree_path: "/wt/a", stage: "pr-open" });
+    expect(raw.archived_slices.gone).toMatchObject({ terminal_state: "MERGED", pr_number: 2, pr_url: "uu", branch: "b-gone" });
+    expect(raw.archived_slices.closed).toMatchObject({ terminal_state: "CLOSED", pr_number: 3 });
+    expect(raw.transient_retry_counts).toEqual({ k: 5 });
+    expect(raw.repo).toMatchObject({ name: "march", path: "/repo" });
+  });
+
+  it("carries an escalation reason onto the rebuilt slice note", () => {
+    const sys = foldedState({ slices: { e: { sliceId: "e", stage: "escalated", escalatedReason: "spawn-error" } } });
+    const raw = rebuildWorkingState(sys, meta);
+    expect(raw.slices.e).toMatchObject({ stage: "escalated", last_action_note: "spawn-error" });
+  });
+});
+
+describe("senseObserved (Herald observation Stage 1)", () => {
+  it("observes PR + output for live, non-terminal slices from the projection", async () => {
+    const queryPr = vi.fn(async () => ({ number: 7, state: "OPEN" }));
+    const sessionOutput = vi.fn(async () => ({ output: "log" }));
+    const prev = foldedState({
+      slices: {
+        active: slice({ sliceId: "active", stage: "pr-open", sessionId: "s1", branch: "b-active" }),
+        terminal: slice({ sliceId: "terminal", stage: "merged", sessionId: "s2" }), // skipped (terminal)
+        noSession: slice({ sliceId: "noSession", stage: "implementing" }), // skipped (no session)
+        archived: slice({ sliceId: "archived", sessionId: "s3", archived: true }), // skipped (archived)
+        noLiveSession: slice({ sliceId: "noLiveSession", stage: "implementing", sessionId: "s9" }), // skipped (session absent)
+      },
+    });
+    const state = await senseObserved(
+      deps({
+        listSessions: async () => [
+          { id: "s1", group: "legate-workers", status: "idle" },
+          { id: "s2", group: "legate-workers", status: "idle" },
+          { id: "s3", group: "legate-workers", status: "idle" },
+        ],
+        queryPr,
+        sessionOutput,
+      }),
+      prev,
+    );
+    expect(Object.keys(state.perSlice)).toEqual(["active"]);
+    expect(state.perSlice.active!.pr).toMatchObject({ number: 7 });
+    expect(state.perSlice.active!.recentOutput).toEqual({ output: "log" });
+    expect(queryPr).toHaveBeenCalledTimes(1);
+    expect(sessionOutput).toHaveBeenCalledWith("s1");
+    expect(state.statePresent).toBe(true);
+  });
+
+  it("discovers a PR for an implementing slice when queryPr skips", async () => {
+    const discoverPr = vi.fn(async () => ({ number: 42, state: "OPEN" }));
+    const prev = foldedState({
+      slices: { impl: slice({ sliceId: "impl", stage: "implementing", sessionId: "s1", branch: "b-impl" }) },
+    });
+    const state = await senseObserved(
+      deps({
+        listSessions: async () => [{ id: "s1", group: "legate-workers", status: "idle" }],
+        queryPr: async () => ({ skipped: true }),
+        discoverPr,
+        sessionOutput: async () => ({ output: "" }),
+      }),
+      prev,
+    );
+    expect(discoverPr).toHaveBeenCalledWith(expect.anything(), expect.anything(), "/repo", "s1");
+    expect(state.perSlice.impl!.pr).toMatchObject({ number: 42 });
+  });
+
+  it("assembles workers + smithy queue from the live world", async () => {
+    const state = await senseObserved(
+      deps({
+        listSessions: async () => [{ id: "s1", group: "legate-workers", status: "running" }],
+        readSmithyStatus: async () => ({
+          records: [
+            { path: "a", next_action: { command: "smithy.forge" } },
+            { path: "b", next_action: { command: "smithy.cut" } },
+          ],
+          graph: {},
+        }),
+      }),
+      emptySystemState(),
+    );
+    expect(state.workers).toMatchObject({ running: 1 });
+    expect(state.smithy.ok).toBe(true);
+    expect(state.smithy.queue).toEqual({ dispatchable: 2, blocked: 0, total: 2 });
+  });
+
+  it("surfaces a smithy read failure as smithy.ok=false (non-fatal)", async () => {
+    const state = await senseObserved(
+      deps({
+        readSmithyStatus: async () => {
+          throw new Error("smithy down");
+        },
+      }),
+      emptySystemState(),
+    );
+    expect(state.smithy.ok).toBe(false);
+    expect(state.smithy.error).toBe("smithy down");
   });
 });

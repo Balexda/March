@@ -1,4 +1,4 @@
-import { senseState, type SenseDeps } from "../../legate/loop/state/sense.js";
+import { senseObserved, type SenseDeps } from "../../legate/loop/state/sense.js";
 import type { AppendEventInput, HeraldEvent, SystemState } from "../events.js";
 import { diffObserved } from "./diff.js";
 
@@ -28,11 +28,16 @@ export interface ObserveResult {
  * and append one event per delta to the log (stamped with the observation ts).
  * The store's hot projection advances as a side effect of each append. Returns
  * the appended events + timing so the server can update `/status` and metrics.
+ *
+ * Since the cutover (#176) Herald learns which slices to observe from its OWN
+ * projection (`prev`, fed by the legate's `slice.dispatched` transition events)
+ * rather than reading the legate's `state.json` — {@link senseObserved} takes the
+ * projection and reads the live PR/output for each non-terminal slice.
  */
 export async function runObservation(deps: ObserverDeps): Promise<ObserveResult> {
   const prev = deps.store.projection();
   const started = Date.now();
-  const loop = await senseState(deps.senseDeps);
+  const loop = await senseObserved(deps.senseDeps, prev);
   const durationMs = Date.now() - started;
 
   const appended: HeraldEvent[] = [];

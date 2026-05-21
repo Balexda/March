@@ -12,8 +12,8 @@ and a Docker image.
 ```
             ┌─────────────── Legate loop tick (every ~60s) ───────────────┐
             │  Stage 1 — sense (gather ONE LoopState snapshot):            │
-            │    legacy:  gh / git / smithy + Castra   ─► LoopState        │
-            │    Herald:  drain inbox → fold (#175)    ─► LoopState        │
+            │    drain Herald inbox → fold → LoopState (working state +    │
+            │    observed sessions/PRs); smithy ready read locally         │
             │                          │                                   │
             │  Stage 2 — coordinator (ordered; mutates the same snapshot): │
             │    cleanup → ghost-cleanup → relaunch → babysit → dispatch   │
@@ -33,11 +33,12 @@ The loop is deliberately split into two stages so the I/O and the logic can be
 tested and evolved independently. The split is what made the Herald cutover a
 drop-in (see [`state/types.ts`](./state/types.ts)).
 
-- **Stage 1 — sense** ([`state/sense.ts`](./state/sense.ts)) does *all* the
-  external reads into a single, mostly-immutable [`LoopState`](./state/types.ts)
-  snapshot: `state.json`, the worker sessions, smithy readiness, and the
-  per-slice PR / output (`perSlice`) for active slices. The I/O is injected via
-  `SenseDeps`, so the gathering is fully unit-testable.
+- **Stage 1 — sense** ([`state/sense.ts`](./state/sense.ts)) drains the Herald
+  inbox into a single, mostly-immutable [`LoopState`](./state/types.ts) snapshot:
+  the in-memory working state (`raw`, rebuilt from the fold on cold start), the
+  worker sessions, smithy readiness, and the per-slice PR / output (`perSlice`)
+  for active slices. The I/O is injected via `SenseDeps`, so the gathering is
+  fully unit-testable.
 - **Stage 2 — coordinator** ([`coordinator.ts`](./coordinator.ts)) runs the
   handlers in a fixed order, threading the *same* mutating `LoopState` through
   all of them. Each handler is a pure `assess(state) -> Decision[]` plus an
@@ -62,23 +63,21 @@ must not act on.
 The heartbeat ([`heartbeat.ts`](./heartbeat.ts)) folds the tick's results into a
 record on disk and a snapshot for `GET /status`.
 
-## Stage 1: poll vs. the Herald inbox
+## Stage 1: the Herald inbox (no state.json, #176)
 
-`sense` is a swappable dependency the runtime binds per tick:
+`sense` is [`senseFromHerald`](./state/sense.ts), bound by the runtime per tick:
+it drains Herald's event inbox and folds it into the `LoopState` (sessions /
+workers / per-slice PR+output all come from the fold), and the handlers append
+**transition events** back to Herald via [`clients/herald.ts`](./clients/herald.ts).
 
-- **Legacy (default)** — [`senseState`](./state/sense.ts) polls the world
-  directly: the shared sense I/O in [`../../observe/sense-io.ts`](../../observe/sense-io.ts)
-  (`gh`/`git`/`smithy` + Castra), the same tested implementation Herald uses to
-  observe.
-- **Herald cutover (#175)** — when `MARCH_HERALD_URL` is set,
-  [`senseFromHerald`](./state/sense.ts) instead drains Herald's event inbox and
-  folds it into the `LoopState` (sessions / workers / per-slice PR+output come
-  from the fold), and the handlers dual-write **transition events** back to
-  Herald via [`clients/herald.ts`](./clients/herald.ts). `state.json` stays the
-  legate-owned working state during the soak; smithy *ready records* are still
-  read locally (not yet event-sourced). Unset everywhere ⇒ byte-for-byte the
-  legacy path. See the [Herald README](../../herald/README.md) for the event
-  taxonomy and the rollout plan.
+The legate's **working state** (`raw`: slices, archived_slices, retry counters)
+is held **in memory** across ticks — the Stage-2 handlers mutate it directly — and
+is recorded only as transition events. There is no `state.json`: on a cold start
+`senseFromHerald` rebuilds the working state from the fold (`rebuildWorkingState`,
+seeded by `GET /state?at=<cursor>` + trailing `/events`). The smithy *ready
+records* are still read locally (not event-sourced), without syncing — Herald owns
+the default-branch sync (`MARCH_HERALD_SYNC=1`). See the
+[Herald README](../../herald/README.md) for the event taxonomy.
 
 ## Source layout
 
@@ -95,7 +94,8 @@ src/legate/loop/
   http.ts           Fastify server: GET /healthz, GET /status (read-only today)
   state/
     types.ts        LoopState / HandlerContext / HandlerResult / TickResult
-    sense.ts        Stage 1: senseState (poll) + senseFromHerald (inbox fold)
+    sense.ts        Stage 1: senseFromHerald (legate inbox fold) +
+                    senseObserved (Herald observe) + rebuildWorkingState
     mutations.ts    archiveSlice / dropSlice / dropSession (shared apply mutations)
   handlers/         the ordered Stage-2 handlers (assess + apply), one file each
   clients/
@@ -139,8 +139,9 @@ problem self-heals and only a *persistent* one escalates for operator judgement:
 - stranded-leftover cleanup, codex patch-error retry, and runner-silent recovery,
 - a no-spawn **direct-steward** fallback after repeated codex-spawn failures.
 
-When Herald is configured these transitions also emit `slice.dispatched` /
-`slice.recovery.dispatched` / `slice.escalated` / `retry.counted` events.
+These transitions emit `slice.dispatched` / `slice.recovery.dispatched` /
+`slice.escalated` / `retry.counted` events — the durable record the working state
+is rebuilt from (#176).
 
 ## HTTP API ([`http.ts`](./http.ts))
 
@@ -177,7 +178,8 @@ way when added.
 ## Why two stages (and where this is going)
 
 `src/legate/loop/state/types.ts` documents the contract; `coordinator.ts` injects
-`sense` as a swappable dependency. That seam is the whole point: PR2 (#175) swaps
-the poll for the Herald inbox + dual-writes transition events; PR3 retires
-`state.json` so the Herald fold becomes the sole source of truth and the handlers
-read it directly.
+`sense` as a swappable dependency. That seam is what carried the loop through the
+Herald rollout: PR1 (#177) stood up the observation service, PR2 (#175) swapped the
+poll for the Herald inbox + dual-wrote transition events alongside `state.json`,
+and PR3 (#176) retired `state.json` — the Herald fold is now the sole source of
+truth and the working state is rebuilt from it on cold start.
