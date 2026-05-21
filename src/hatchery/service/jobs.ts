@@ -2,6 +2,8 @@ import { randomUUID } from "node:crypto";
 import {
   decActiveSpawns,
   incActiveSpawns,
+  recordHatcheryDispatch,
+  type DispatchOutcome,
 } from "../../observability/hatchery-metrics.js";
 import { runSpawnInWorker } from "./spawn-runner.js";
 import type { HatcherySpawnResult } from "../spawn-handoff.js";
@@ -105,23 +107,32 @@ export class JobStore {
     record.status = "running";
     record.startedAt = new Date().toISOString();
     incActiveSpawns();
-    this.logger?.info(
-      { job_id: record.id, backend: request.backend, task_name: request.taskName },
-      "spawn job started",
-    );
+    // Common structured fields so every record for this dispatch can be
+    // filtered/correlated in Loki by profile, task type, and slice. pino drops
+    // keys whose value is undefined, so absent request fields just don't appear.
+    const fields = {
+      job_id: record.id,
+      backend: request.backend,
+      task_name: request.taskName,
+      task_type: request.taskType,
+      profile: request.profile,
+      slice_id: request.sliceId,
+    };
+    this.logger?.info(fields, "spawn job started");
     try {
       record.result = await this.executor(request);
       record.status = "succeeded";
       this.logger?.info(
-        { job_id: record.id, spawn_id: record.result.spawnId },
+        { ...fields, spawn_id: record.result.spawnId },
         "spawn job succeeded",
       );
+      this.recordDispatch(request, "success");
       if (this.onSucceeded) {
         try {
           await this.onSucceeded(record.result, request);
         } catch (err) {
           this.logger?.error(
-            { job_id: record.id, err: errorMessage(err) },
+            { ...fields, err: errorMessage(err) },
             "brood registration hook failed",
           );
         }
@@ -129,14 +140,26 @@ export class JobStore {
     } catch (err) {
       record.error = { message: errorMessage(err) };
       record.status = "failed";
-      this.logger?.error(
-        { job_id: record.id, err: errorMessage(err) },
-        "spawn job failed",
-      );
+      this.logger?.error({ ...fields, err: errorMessage(err) }, "spawn job failed");
+      this.recordDispatch(request, "failure");
     } finally {
       record.finishedAt = new Date().toISOString();
       decActiveSpawns();
     }
+  }
+
+  /**
+   * Emit the dispatch-outcome metric for a terminal job. Labels stay
+   * low-cardinality (no spawn/slice ids); absent task type/profile fall back to
+   * `"unknown"` to match spawn-metrics.
+   */
+  private recordDispatch(request: SpawnRequest, outcome: DispatchOutcome): void {
+    recordHatcheryDispatch({
+      backend: request.backend,
+      taskType: request.taskType ?? "unknown",
+      profile: request.profile ?? "unknown",
+      outcome,
+    });
   }
 
   /** Evict terminal jobs whose finishedAt is older than the TTL. Returns count removed. */

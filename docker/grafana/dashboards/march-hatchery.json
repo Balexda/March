@@ -15,7 +15,7 @@
       }
     ]
   },
-  "description": "March Hatchery service: liveness/heartbeat, active spawns, HTTP request RED metrics, spawn success, plus service logs (Loki) and traces (Tempo). Backed by march_hatchery_* (Prometheus), service.name=march-hatchery logs/traces.",
+  "description": "March Hatchery service: liveness/heartbeat, active spawns, HTTP request RED metrics, dispatch error rate, spawn success, plus service logs (Loki) and traces (Tempo). Backed by march_hatchery_* (Prometheus), service.name=march-hatchery logs/traces.",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
@@ -233,7 +233,7 @@
         "type": "prometheus",
         "uid": "prometheus"
       },
-      "description": "Share of HTTP requests that errored (non-2xx/3xx), over the dashboard time range.",
+      "description": "Share of spawn dispatch jobs that failed, over the dashboard time range. Tracks the async job outcome (march_hatchery_dispatches_total) — a POST /spawns returns 202 before the job runs, so HTTP request metrics never reflect a failed dispatch.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -292,13 +292,13 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "sum(increase(march_hatchery_requests_total{outcome=\"error\"}[$__range])) / clamp_min(sum(increase(march_hatchery_requests_total[$__range])), 1)",
+          "expr": "sum(increase(march_hatchery_dispatches_total{outcome=\"failure\"}[$__range])) / clamp_min(sum(increase(march_hatchery_dispatches_total[$__range])), 1)",
           "legendFormat": "error rate",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "Request error rate",
+      "title": "Dispatch error rate",
       "type": "stat"
     },
     {
@@ -826,6 +826,6 @@
   "timezone": "",
   "title": "March \u2014 Hatchery service",
   "uid": "march-hatchery",
-  "version": 1,
+  "version": 2,
   "weekStart": ""
 }
