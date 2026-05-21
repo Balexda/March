@@ -25,6 +25,10 @@ export interface LoopMeta {
   readonly processor_events_path: string;
   readonly legate_conductor_dir: string;
   readonly otel: { readonly enabled: boolean; readonly endpoint: string };
+  /** Brood service endpoint frozen at `march legate init` (null = unconfigured). */
+  readonly brood_endpoint?: string | null;
+  /** Herald service endpoint frozen at `march legate init` (null = unconfigured). */
+  readonly herald_endpoint?: string | null;
   readonly mode: string;
   // Forward-compatible: tolerate fields this build doesn't know about.
   readonly [key: string]: unknown;

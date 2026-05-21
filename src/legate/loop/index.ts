@@ -70,6 +70,22 @@ export function reconcileBroodEnv(meta: LoopMeta, env: NodeJS.ProcessEnv): void 
 }
 
 /**
+ * Reconcile the Herald endpoint the same way (#175): an explicit MARCH_HERALD_URL
+ * env wins, otherwise fall back to `meta.herald_endpoint` frozen at `march legate
+ * init`. The runtime's Herald inbox-consumption + transition-event writes are
+ * gated on MARCH_HERALD_URL (heraldConfigured), and the managed container does
+ * NOT pass it through, so without this the containerized loop would silently stay
+ * on the legacy self-poll path even where Herald is deployed. Unset everywhere =>
+ * the loop is byte-for-byte unchanged.
+ */
+export function reconcileHeraldEnv(meta: LoopMeta, env: NodeJS.ProcessEnv): void {
+  const frozen = (meta as { herald_endpoint?: unknown }).herald_endpoint;
+  if (!env.MARCH_HERALD_URL && typeof frozen === "string" && frozen.trim().length > 0) {
+    env.MARCH_HERALD_URL = frozen.trim();
+  }
+}
+
+/**
  * Run the Legate loop as a long-running service: telemetry + HTTP API + the
  * periodic tick. Resolves only when a shutdown signal flushes telemetry and
  * stops the loop. Used by `march legate loop` inside the managed container.
@@ -81,6 +97,7 @@ export async function runLoop(opts: RunLoopOptions = {}): Promise<void> {
 
   reconcileOtelEnv(meta, env);
   reconcileBroodEnv(meta, env);
+  reconcileHeraldEnv(meta, env);
   const otel = initOtel(env);
   initLoopLogs({ profile: meta.profile, conductor: meta.paired_legate });
   initLoopSpans({ profile: meta.profile });

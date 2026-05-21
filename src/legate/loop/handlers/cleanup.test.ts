@@ -30,6 +30,7 @@ function ctx(teardown: (id: string) => BroodTeardownResult): HandlerContext {
     broodTeardown: vi.fn(async (id: string) => teardown(id)),
     persist: vi.fn(),
     emit: vi.fn(),
+    emitTransition: vi.fn(),
     log: vi.fn(),
   };
 }
@@ -67,6 +68,15 @@ describe("cleanup handler", () => {
     expect(state.raw.slices.s).toBeUndefined();
     expect(state.sessionsById.has("sess")).toBe(false);
     expect(c.persist).toHaveBeenCalled();
+    // #175: a Herald slice.archived transition event is emitted on archive.
+    expect(c.emitTransition).toHaveBeenCalledWith({ type: "slice.archived", sliceId: "s" });
+  });
+
+  it("does NOT emit a transition event when teardown is deferred (no archive)", async () => {
+    const state = withTerminalSlice("MERGED");
+    const c = ctx(notTracked);
+    await apply(assess(state), c, state);
+    expect(c.emitTransition).not.toHaveBeenCalled();
   });
 
   it("apply DEFERS (does not archive) when Brood can't confirm teardown", async () => {

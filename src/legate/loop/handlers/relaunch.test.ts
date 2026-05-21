@@ -29,6 +29,7 @@ function ctx(launch: () => { sessionId: string | null }): HandlerContext & { cas
     broodTeardown: vi.fn(),
     persist: vi.fn(),
     emit: vi.fn(),
+    emitTransition: vi.fn(),
     log: vi.fn(),
   };
 }
@@ -86,6 +87,9 @@ describe("relaunch handler", () => {
     expect(state.raw.transient_retry_counts["relaunch-steward:gone"]).toBe(1);
     expect(res.actions[0]).toMatchObject({ action: "relaunch-steward", sessionId: "fresh" });
     expect(c.persist).toHaveBeenCalled();
+    // #175: Herald steward.relaunched + retry.counted transition events.
+    expect(c.emitTransition).toHaveBeenCalledWith({ type: "steward.relaunched", sliceId: "gone", sessionId: "fresh" });
+    expect(c.emitTransition).toHaveBeenCalledWith({ type: "retry.counted", key: "relaunch-steward:gone", count: 1 });
   });
 
   it("apply records relaunch-failed and skips launch when worktree recreation throws", async () => {

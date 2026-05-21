@@ -69,6 +69,7 @@ export async function apply(decisions: CleanupDecision[], ctx: HandlerContext, s
     archiveSlice(state.raw, d.sliceId, slice, { number: d.prNumber, url: d.prUrl }, d.terminalState, ctx.ts);
     dropSlice(state, d.sliceId);
     dropSession(state, d.sessionId);
+    ctx.emitTransition?.({ type: "slice.archived", sliceId: d.sliceId });
     res.mutated = true;
     const cleanup = {
       schema_version: 1,

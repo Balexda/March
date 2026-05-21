@@ -32,6 +32,7 @@ function ctx(): HandlerContext {
     broodTeardown: vi.fn(),
     persist: vi.fn(),
     emit: vi.fn(),
+    emitTransition: vi.fn(),
     log: vi.fn(),
   };
 }
@@ -156,6 +157,8 @@ describe("babysit apply", () => {
     expect((slice as any).last_processor_action_key).toBe("k");
     expect(res.actions[0]).toMatchObject({ action: "conflict-fix" });
     expect(c.persist).toHaveBeenCalled();
+    // #175: a Herald slice.stage.changed transition event accompanies the move.
+    expect(c.emitTransition).toHaveBeenCalledWith({ type: "slice.stage.changed", sliceId: "s", stage: "pr-resolving-conflicts" });
   });
 
   it("review-fix that fails to send escalates instead of advancing stage", async () => {

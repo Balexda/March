@@ -3,6 +3,7 @@ import type { LoopState, SliceExternalState, SmithyView } from "./types.js";
 import { sessionMatchesSlice, summarizeWorkers } from "../pure/session.js";
 import { isTerminalSlice } from "../pure/slice.js";
 import { readySmithyItems } from "../pure/smithy-graph.js";
+import type { ObservedSession, SystemState } from "../../../herald/events.js";
 
 /**
  * Stage 1: gather every external read into one {@link LoopState} snapshot —
@@ -32,14 +33,24 @@ export interface SenseDeps {
   readonly warn?: (message: string) => void;
 }
 
-async function senseSmithy(deps: SenseDeps, state: any, repoPath: string | undefined): Promise<SmithyView> {
+async function senseSmithy(
+  deps: SenseDeps,
+  state: any,
+  repoPath: string | undefined,
+  opts: { sync?: boolean } = {},
+): Promise<SmithyView> {
   if (typeof repoPath !== "string" || repoPath.length === 0) {
     return { ok: false, error: "repo path is missing", ready: [], queue: { dispatchable: 0, blocked: 0, total: 0 } };
   }
-  try {
-    await deps.syncDefaultBranch(repoPath, state?.repo?.default_branch);
-  } catch (err: any) {
-    deps.warn?.("sync warning: " + (err?.message || String(err)) + " — proceeding against stale local repo");
+  // The Herald sense path passes `sync:false` — Herald owns the default-branch
+  // sync once it's deployed (`MARCH_HERALD_SYNC=1`), so the legate must not also
+  // fetch and fight it. The legacy self-poll path keeps syncing (default true).
+  if (opts.sync !== false) {
+    try {
+      await deps.syncDefaultBranch(repoPath, state?.repo?.default_branch);
+    } catch (err: any) {
+      deps.warn?.("sync warning: " + (err?.message || String(err)) + " — proceeding against stale local repo");
+    }
   }
   let status: any;
   try {
@@ -132,6 +143,97 @@ export async function senseState(deps: SenseDeps): Promise<LoopState> {
     sessionsById,
     workers,
     smithy: await senseSmithy(deps, raw, repoPath),
+    perSlice,
+  };
+}
+
+/** A consumer of the Herald inbox — drains + folds, returning the projection. */
+export interface HeraldInbox {
+  consume(): Promise<SystemState>;
+}
+
+/**
+ * Map a folded {@link ObservedSession} back to the agent-deck-shaped session
+ * object the Stage-2 handlers + `pure/session.ts` helpers consume (snake_case
+ * fields: `worktree_path`, `created_at`, `group`, plus `name` aliasing `title`).
+ */
+function adaptObservedSession(s: ObservedSession): any {
+  return {
+    id: s.id,
+    title: s.title,
+    name: s.title,
+    status: s.status,
+    group: s.group,
+    worktree_path: s.worktreePath,
+    branch: s.branch,
+    created_at: s.createdAt,
+  };
+}
+
+/**
+ * Stage 1, Herald cutover (#175): build the same {@link LoopState} snapshot the
+ * Stage-2 handlers consume, but sourced from the Herald event inbox instead of
+ * the legate's own polling. The expensive per-slice PR/output reads, the Castra
+ * session list, and the worker buckets all come from the folded projection
+ * ({@link HeraldInbox.consume}); the default-branch sync is dropped (Herald owns
+ * it). Two things are still read locally during the PR2 soak:
+ *
+ *   - `raw` / `slices` / `archived` from **state.json** — the legate-owned
+ *     working state, dual-written by the handlers (PR3 retires it for the fold).
+ *   - the smithy **ready records** — the dispatch-ordered set is not yet
+ *     event-sourced (the fold carries only the queue counts), so it's read via
+ *     `smithy status`, but WITHOUT the sync.
+ *
+ * Gated by the runtime on `heraldConfigured(env)` so an unset deployment keeps
+ * {@link senseState} byte-for-byte.
+ */
+export async function senseFromHerald(deps: SenseDeps, herald: HeraldInbox): Promise<LoopState> {
+  const ts = deps.now();
+  let raw: any = null;
+  let stateError: string | null = null;
+  try {
+    raw = deps.readStateJson();
+  } catch (err: any) {
+    stateError = err?.message || String(err);
+  }
+  const slices = raw?.slices && typeof raw.slices === "object" ? raw.slices : {};
+  const archived = raw?.archived_slices && typeof raw.archived_slices === "object" ? raw.archived_slices : {};
+  const repoPath = raw?.repo?.path || deps.meta.repo?.path;
+
+  // Drain + fold the Herald inbox: the observed world (sessions, workers,
+  // per-slice PR/output) instead of polling gh/git/Castra directly.
+  const sys = await herald.consume();
+
+  const sessions = Object.values(sys.sessions).map(adaptObservedSession);
+  const sessionsById = new Map<string, any>();
+  for (const s of sessions) {
+    if (s?.id) sessionsById.set(String(s.id), s);
+    if (s?.title) sessionsById.set(String(s.title), s);
+    if (s?.name) sessionsById.set(String(s.name), s);
+  }
+  const workers = sys.workers ?? { error: "unavailable" };
+
+  const perSlice: Record<string, SliceExternalState> = {};
+  for (const [sliceId, s] of Object.entries(sys.slices)) {
+    const entry: SliceExternalState = {};
+    if (s.pr !== undefined) entry.pr = s.pr;
+    if (s.recentOutput !== undefined) entry.recentOutput = s.recentOutput;
+    if (entry.pr !== undefined || entry.recentOutput !== undefined) perSlice[sliceId] = entry;
+  }
+
+  return {
+    ts,
+    statePresent: Boolean(raw),
+    stateError,
+    raw,
+    slices,
+    archived,
+    repoPath,
+    workerGroup: deps.meta.worker_group,
+    sessions,
+    sessionsById,
+    workers,
+    smithy: await senseSmithy(deps, raw, repoPath, { sync: false }),
     perSlice,
   };
 }
