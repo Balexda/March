@@ -41,7 +41,6 @@ function deps(over: Partial<DispatchDeps> = {}): DispatchDeps {
   return {
     completePending: vi.fn(async () => ({ actions: [], failures: [], mutated: false, notifications: [] })),
     launchDispatch: vi.fn(async () => ({ actions: [{ action: "dispatch" }], failures: [], mutated: true })),
-    recoveryDispatch: vi.fn(async () => ({ actions: [{ action: "recovery_dispatch" }], failures: [], mutated: true })),
     requestJudgement: vi.fn(async (i) => ({ ...i })),
     ...over,
   };
@@ -98,14 +97,15 @@ describe("dispatch apply (orchestration)", () => {
     void item;
   });
 
-  it("routes a MERGED-archive collision through recovery, not fresh dispatch", async () => {
+  it("skips a MERGED-archive collision rather than re-dispatching (recovery deleted)", async () => {
     const item = readyItem("a.spec.md");
     const state = loopState({ smithy: { ok: true, ready: [item], queue: { dispatchable: 1, blocked: 0, total: 1 } } });
     const sliceId = assess(state)[0]!.sliceId;
     (state.raw.archived_slices as any)[sliceId] = { terminal_state: "MERGED", artifact_path: "a.spec.md", command: "smithy.forge", arguments: ["a.spec.md", "1"], pr: { number: 9 } };
+    // The colliding MERGED archive now reads as "already archived" → no decision.
+    expect(assess(state)).toEqual([]);
     const d = deps();
     await apply(assess(state), ctx(), state, d);
-    expect(d.recoveryDispatch).toHaveBeenCalledTimes(1);
     expect(d.launchDispatch).not.toHaveBeenCalled();
   });
 });

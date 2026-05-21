@@ -139,6 +139,9 @@ export function rebuildWorkingState(sys: SystemState, meta: LoopMeta): any {
       pr: pr ?? null,
     };
     if (s.escalatedReason !== undefined) slice.last_action_note = s.escalatedReason;
+    // Restore the Hatchery job id so a slice still in `hatchery-pending` after a
+    // restart can be polled to completion (otherwise the completion poll skips it).
+    if (s.jobId) slice.hatchery = { job_id: s.jobId, backend: "codex" };
     slices[sliceId] = slice;
   }
   return {

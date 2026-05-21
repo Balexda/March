@@ -66,8 +66,9 @@ export type EventBody =
   /** Smithy readiness queue changed. */
   | { type: "smithy.queue.changed"; dispatchable: number; blocked: number; total: number }
   // ── Transition events (legate; emitted from PR2) ────────────────────────
-  /** The legate launched a spawn for a smithy item. */
-  | { type: "slice.dispatched"; sliceId: string; branch?: string; worktreePath?: string; sessionId?: string; item?: unknown }
+  /** The legate launched a spawn for a smithy item. `jobId` is the Hatchery job
+   *  id, persisted so the legate's completion poll survives a restart. */
+  | { type: "slice.dispatched"; sliceId: string; branch?: string; worktreePath?: string; sessionId?: string; jobId?: string; item?: unknown }
   /** The slice moved to a new stage (implementing/pr-open/merged/…). */
   | { type: "slice.stage.changed"; sliceId: string; stage: string }
   /** The slice reached a terminal state and was cleaned up. */
@@ -147,6 +148,9 @@ export interface SliceState {
   branch?: string;
   worktreePath?: string;
   sessionId?: string;
+  /** Hatchery job id from `slice.dispatched`; lets the legate's completion poll
+   *  resume after a restart (a `hatchery-pending` slice needs its job id). */
+  jobId?: string;
   /** Observed PR/CI/review state (the `queryPrForBabysit` shape). */
   pr?: unknown;
   recentOutput?: { output: string; error?: string };
@@ -237,6 +241,7 @@ export function reduce(state: SystemState, event: HeraldEvent): SystemState {
       if (event.branch !== undefined) slice.branch = event.branch;
       if ("worktreePath" in event && event.worktreePath !== undefined) slice.worktreePath = event.worktreePath;
       if ("sessionId" in event && event.sessionId !== undefined) slice.sessionId = event.sessionId;
+      if ("jobId" in event && event.jobId !== undefined) slice.jobId = event.jobId;
       slice.archived = false;
       break;
     }
