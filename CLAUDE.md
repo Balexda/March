@@ -32,8 +32,13 @@ Quick pointers:
   tracks every spawn/steward/legate in a sqlite registry (`~/.march/brood`) and
   **owns teardown**: it removes the container, asks castra (or agent-deck) to
   remove the steward, then removes the worktree/branch by **exact tracked path —
-  never a blanket `git worktree prune`** (issue #155). The Hatchery service
-  registers spawns with it; the legate loop **requests** teardown via
+  never a blanket `git worktree prune`** (issue #155). The container +
+  worktree/branch call-outs are isolated behind a **`TeardownSubstrate` adapter**
+  (`src/brood/service/substrate.ts`, issue #169) so the substrate can be swapped
+  (host docker socket → orchestrator API; host worktree → ephemeral volume); the
+  default `hostTeardownSubstrate` keeps the exact-path / never-prune guarantee,
+  and steward removal still routes through the Castra client. The Hatchery
+  service registers spawns with it; the legate loop **requests** teardown via
   `march brood teardown` instead of pruning. The registry sits behind a
   swappable `SessionRepository` interface (`src/brood/service/repository.ts`):
   callers (routes/teardown/server) depend on the interface, the sqlite
