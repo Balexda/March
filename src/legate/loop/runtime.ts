@@ -1,10 +1,16 @@
-// @ts-nocheck
 /**
- * Legate loop runtime — a near-verbatim lift of the former generated
- * `legate-loop.mjs` (the LEGATE_LOOP_MJS template once in src/legate/init.ts,
- * since deleted in Balexda/March#146). This is now the only loop runtime;
- * `@ts-nocheck` marks it as an intentional mechanical lift whose decomposition +
- * typing is tracked in Balexda/March#144.
+ * Legate loop runtime — the wiring layer of the containerized legate loop. It
+ * binds the two-stage tick (sense → coordinator → heartbeat) to the proven async
+ * I/O seams: Castra (sessions), the Hatchery service client (codex spawns),
+ * Brood (teardown), and Herald (event log + transition writes). The pure logic
+ * lives in the tested modules under pure/ / state/ / handlers/; what remains here
+ * is dispatch/recovery orchestration and the interval scheduler.
+ *
+ * Originally a near-verbatim lift of the generated `legate-loop.mjs` (the
+ * LEGATE_LOOP_MJS template once in src/legate/init.ts, deleted in #146); the
+ * decomposition + typing tracked in #144 removed the `@ts-nocheck` pragma. The
+ * duck-typed slice/item/working-state seams are annotated `any`, matching the
+ * deliberate `Record<string, any>` shapes in state/types.ts and the handlers.
  *
  * Changes from the original .mjs (kept minimal and reviewable):
  *   - meta + interval are injected via configureLoopRuntime() instead of being
@@ -113,7 +119,7 @@ let workingState: any = null;
 // is the SOLE durable record of a legate transition. Fire-and-forget: a Herald
 // write must never break or slow a tick (Herald is the single sequencer and
 // re-folds idempotently on its side).
-function emitTransition(event) {
+function emitTransition(event: any) {
   Promise.resolve()
     .then(() => legateHerald().append(event))
     .catch(() => {});
@@ -161,7 +167,7 @@ function now() {
   return new Date().toISOString();
 }
 
-function append(file, value) {
+function append(file: string, value: any) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.appendFileSync(file, JSON.stringify(value) + "\n", "utf-8");
   if (file === meta.processor_events_path) {
@@ -180,7 +186,7 @@ function append(file, value) {
 // children of that same parent. loop-spans.ts derives those ids from the slice
 // id via the shared trace-ids.ts helpers (CLAUDE.md cross-process contract), so
 // this layer only classifies events into spans.
-function maybeEmitLoopSpan(event) {
+function maybeEmitLoopSpan(event: any) {
   if (!event || typeof event !== "object") return;
   const sliceId = event.slice_id;
   if (!sliceId) return;
@@ -213,7 +219,7 @@ function maybeEmitLoopSpan(event) {
 // slice_id are trace-correlated to their dispatch in Grafana (see logs.ts). The
 // per-tick heartbeat is intentionally NOT logged here — it is captured by the
 // loop metrics instead — and lands on heartbeatEventsPath, not this path.
-function maybeEmitLoopLog(event) {
+function maybeEmitLoopLog(event: any) {
   if (!event || typeof event !== "object" || !event.kind) return;
   const kind = String(event.kind);
   const severity =
@@ -235,7 +241,7 @@ function maybeEmitLoopLog(event) {
   });
 }
 
-function appendText(file, text) {
+function appendText(file: string, text: string) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.appendFileSync(file, text + "\n", "utf-8");
   console.log(text);
@@ -244,12 +250,12 @@ function appendText(file, text) {
 // Heartbeat path: writes to disk for liveness checks but does NOT echo to
 // stdout. The conductor tmux session would otherwise drown out real events
 // with one heartbeat line per tick.
-function appendTextSilent(file, text) {
+function appendTextSilent(file: string, text: string) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.appendFileSync(file, text + "\n", "utf-8");
 }
 
-function printText(text) {
+function printText(text: string) {
   console.log(text);
 }
 
@@ -257,7 +263,7 @@ function replayRecentActionEvents(limit = 10) {
   let raw;
   try {
     raw = fs.readFileSync(meta.processor_events_path, "utf-8");
-  } catch (err) {
+  } catch (err: any) {
     if (err && err.code === "ENOENT") return;
     throw err;
   }
@@ -293,12 +299,11 @@ function replayRecentActionEvents(limit = 10) {
   }
 }
 
-async function sendAgentDeckMessage(sessionId, message, _wait = false) {
+async function sendAgentDeckMessage(sessionId: string, message: string, _wait = false) {
   // Routed through Castra. Castra's send is fire-and-forget (202); the former
   // --wait/--timeout has no equivalent, which is fine — every loop caller used
   // the no-wait path.
   await castra().sendPrompt({ profile: meta.profile, sessionId, prompt: message });
-  return "";
 }
 
 async function sendDoorbellToLegate() {
@@ -314,7 +319,7 @@ async function sendDoorbellToLegate() {
   }
 }
 
-async function requestLegateJudgement(input) {
+async function requestLegateJudgement(input: any) {
   if (input.slice && input.requestKey && input.slice.last_processor_request_key === input.requestKey) {
     return null;
   }
@@ -362,7 +367,7 @@ const MAX_RECOVERY_ATTEMPTS = 2;
 // INSIDE the hatchery container — it bind-mounts the repo + worktree-parent at
 // the identical absolute path. Telemetry is owned by the service; the dispatch
 // trace is correlated server-side via sliceId (the same deterministic-id scheme).
-async function launchHatcheryDispatch(item, opts) {
+async function launchHatcheryDispatch(item: any, opts?: any) {
   const repoPath = meta.repo?.path;
   if (typeof repoPath !== "string" || repoPath.length === 0) {
     throw new Error("repo path is missing");
@@ -399,7 +404,7 @@ async function launchHatcheryDispatch(item, opts) {
 // passes slice.branch / slice.worker_title, which equal dispatchBranch(item) /
 // dispatchTitle(item) from the original dispatch, so the -direct branch stays
 // tied to the slice's semantic identity.
-async function launchDirectStewardDispatch(state, ts, item, sliceId, mergedArchive, opts) {
+async function launchDirectStewardDispatch(state: any, ts: string, item: any, sliceId: string, mergedArchive: any, opts?: any) {
   const repoPath = state?.repo?.path || meta.repo?.path;
   if (typeof repoPath !== "string" || repoPath.length === 0) {
     return { launched: false, error: "repo path is missing" };
@@ -426,7 +431,7 @@ async function launchDirectStewardDispatch(state, ts, item, sliceId, mergedArchi
       model: "opus",
       traceKey: directSliceId,
     });
-  } catch (err) {
+  } catch (err: any) {
     return { launched: false, sliceId: directSliceId, error: "castra launch failed: " + (err?.message || String(err)).slice(0, 200) };
   }
   const newSessionId = launchedSession?.sessionId || null;
@@ -481,7 +486,7 @@ const HATCHERY_PENDING_TIMEOUT_MS = 15 * 60 * 1000;
 // fall through to escalation if the same slice keeps losing the race.
 // Retry limit is 3: each retry costs one tick (60s) + codex spawn time, so
 // if the race won't resolve in 3 tries the operator needs to know.
-function tryRecoverWrongWorktreeRace(state, slice, sliceId, errorText) {
+function tryRecoverWrongWorktreeRace(state: any, slice: any, sliceId: string, errorText: string) {
   if (!parseWrongWorktreeRaceError(errorText)) return null;
   const limit = 3;
   const { exhausted, count } = bumpRetry(transientRetryCounts(state), sliceId, limit);
@@ -509,12 +514,12 @@ function tryRecoverWrongWorktreeRace(state, slice, sliceId, errorText) {
 // exception to "defer to Brood" — the id is named in the error and is provably
 // the thing blocking this exact slice) + prune its worktree, then release the
 // slice for a clean re-dispatch.
-async function tryRecoverSessionCollision(state, slice, sliceId, errorText) {
+async function tryRecoverSessionCollision(state: any, slice: any, sliceId: string, errorText: string) {
   const sessionId = parseSessionCollisionError(errorText);
   if (!sessionId) return null;
   try {
     await castra().removeSession({ profile: meta.profile, sessionId, pruneWorktree: true });
-  } catch (err) {
+  } catch (err: any) {
     return { recovered: false, verdict: "session-collision-remove-failed", detail: "ghost session " + sessionId + " remove failed: " + (err?.message || String(err)).slice(0, 200) };
   }
   delete state.slices[sliceId];
@@ -524,7 +529,7 @@ async function tryRecoverSessionCollision(state, slice, sliceId, errorText) {
 // Codex spawn-error recovery: re-running codex on a patch-apply failure
 // (parseSpawnPatchError) typically produces a different (often correct) output,
 // so retry with a per-slice counter and escalate only if it persists.
-function tryRecoverSpawnPatchError(state, slice, sliceId, errorText) {
+function tryRecoverSpawnPatchError(state: any, slice: any, sliceId: string, errorText: string) {
   if (!parseSpawnPatchError(errorText)) return null;
   // Codex patch errors are deeply non-deterministic — same prompt, different
   // output each run. Give it a generous budget before declaring the artifact
@@ -550,14 +555,14 @@ function tryRecoverSpawnPatchError(state, slice, sliceId, errorText) {
   };
 }
 
-async function completePendingHatcheryDispatches(state, ts) {
-  const actions = [];
-  const failures = [];
-  const notifications = [];
+async function completePendingHatcheryDispatches(state: any, ts: string) {
+  const actions: any[] = [];
+  const failures: any[] = [];
+  const notifications: any[] = [];
   let mutated = false;
-  const slices = state?.slices && typeof state.slices === "object" ? state.slices : {};
+  const slices: Record<string, any> = state?.slices && typeof state.slices === "object" ? state.slices : {};
   const nowMs = Date.parse(ts);
-  const queueDispatchEscalation = (slice, sliceId, reason, error) => {
+  const queueDispatchEscalation = (slice: any, sliceId: string, reason: string, error: any) => {
     // Build a stable requestKey so requestLegateJudgement only fires once per
     // distinct failure mode. Without notification the agent never wakes and
     // the operator sees "loop is silent" while escalated slices pile up
@@ -569,7 +574,7 @@ async function completePendingHatcheryDispatches(state, ts) {
       detail: "Hatchery dispatch for " + actionCommandLine({ command: slice.command, arguments: slice.arguments || [] }) + " escalated: " + reason + ".\n\nError:\n" + String(error || "(no detail)").trim() + "\n\nSlice has been marked escalated (slice.escalated transition event). The loop no longer auto-recovers branch/worktree collisions (Brood owns worktree+branch teardown by exact path, #155): for a 'branch already exists' / diverged-branch error, load legate.unwedge and inspect the stale branch + worktree, then request Brood teardown of the orphan before re-dispatch. Otherwise run legate.error for worker-side recovery.",
     });
   };
-  const escalateStale = (slice, sliceId, reason) => {
+  const escalateStale = (slice: any, sliceId: string, reason: string) => {
     const queuedMs = Date.parse(slice.last_action || "");
     if (!Number.isFinite(queuedMs) || !Number.isFinite(nowMs)) return false;
     if (nowMs - queuedMs <= HATCHERY_PENDING_TIMEOUT_MS) return false;
@@ -611,7 +616,7 @@ async function completePendingHatcheryDispatches(state, ts) {
       // Poll the Hatchery job over HTTP (#144 phase 2b) — the former on-disk
       // result file is gone; the service is the source of truth for the spawn.
       job = await getJob(hatcheryBaseUrl, jobId);
-    } catch (err) {
+    } catch (err: any) {
       // The service is unreachable, or no longer knows this job (a restart
       // dropped it). Treat like a stale job: a transient blip before the
       // timeout just waits; past it the slice is released / escalated.
@@ -627,7 +632,7 @@ async function completePendingHatcheryDispatches(state, ts) {
     }
     // Map the terminal job to the result shape the completion logic below reads:
     // the inner HatcherySpawnResult on success, an { error } on failure.
-    const result = job.status === "failed"
+    const result: any = job.status === "failed"
       ? { error: job.error?.message || "hatchery spawn failed" }
       : (job.result || {});
     if (result.error) {
@@ -808,7 +813,7 @@ async function completePendingHatcheryDispatches(state, ts) {
   return { actions, failures, mutated, notifications };
 }
 
-function stageDispatchMessage(sliceId, result) {
+function stageDispatchMessage(sliceId: string, result: any) {
   const base = meta.legate_conductor_dir;
   if (typeof base !== "string" || base.length === 0) return null;
   const target = path.join(base, "dispatch-msg-" + sliceId + ".md");
@@ -835,10 +840,10 @@ function stageDispatchMessage(sliceId, result) {
 // we stop dispatching and instead nudge the legate agent — at that point a
 // human needs to look (spec is wrong, prompt is failing, or the work is
 // genuinely impossible).
-async function handleRecoveryDispatch(state, ts, item, sliceId, mergedArchive) {
-  const actions = [];
-  const failures = [];
-  const notifications = [];
+async function handleRecoveryDispatch(state: any, ts: string, item: any, sliceId: string, mergedArchive: any) {
+  const actions: any[] = [];
+  const failures: any[] = [];
+  const notifications: any[] = [];
   state.recovery_attempts = state.recovery_attempts && typeof state.recovery_attempts === "object"
     ? state.recovery_attempts
     : {};
@@ -879,7 +884,7 @@ async function handleRecoveryDispatch(state, ts, item, sliceId, mergedArchive) {
             + (direct.error || "(unknown)") + ". Manual intervention required.",
         });
       }
-      return { actions, failures, notifications };
+      return { actions, failures, mutated: true, notifications };
     }
     // Direct dispatch was already attempted and we're STILL being asked to
     // recover this slice (its direct PR merged without finishing, or smithy
@@ -894,7 +899,7 @@ async function handleRecoveryDispatch(state, ts, item, sliceId, mergedArchive) {
         + "inspect the prior PRs and the artifact, then clear state.recovery_attempts[\"" + sliceId + "\"] "
         + "and state.direct_dispatch_done[\"" + sliceId + "\"] to retry.",
     });
-    return { actions, failures, notifications };
+    return { actions, failures, mutated: true, notifications };
   }
 
   try {
@@ -944,7 +949,7 @@ async function handleRecoveryDispatch(state, ts, item, sliceId, mergedArchive) {
         + (mergedArchive?.pr?.number ? "; prior PR #" + mergedArchive.pr.number : ""),
     });
     emitTransition({ type: "slice.recovery.dispatched", sliceId: recoverySliceId, branch: recoveryBranch });
-  } catch (err) {
+  } catch (err: any) {
     const error = err?.message || String(err);
     const existing = state.slices?.[recoverySliceId];
     if (existing && existing.stage === "hatchery-pending") {
@@ -967,16 +972,16 @@ async function handleRecoveryDispatch(state, ts, item, sliceId, mergedArchive) {
       error,
     });
   }
-  return { actions, failures, notifications };
+  return { actions, failures, mutated: true, notifications };
 }
 
 // Fresh-dispatch launch for one ready item: create the hatchery-pending slice,
 // fire the codex spawn, and return the action (or escalate + a notification on a
 // launch throw). The dispatch handler's apply() calls this via DispatchDeps.
-async function launchDispatch(state, ts, item, sliceId) {
-  const actions = [];
-  const failures = [];
-  const notifications = [];
+async function launchDispatch(state: any, ts: string, item: any, sliceId: string) {
+  const actions: any[] = [];
+  const failures: any[] = [];
+  const notifications: any[] = [];
   try {
     const action = item.next_action || {};
     state.slices[sliceId] = {
@@ -1006,7 +1011,7 @@ async function launchDispatch(state, ts, item, sliceId) {
       detail: "queued Hatchery codex spawn job " + launched.jobId + " for " + actionCommandLine(action),
     });
     emitTransition({ type: "slice.dispatched", sliceId, branch: dispatchBranch(item) });
-  } catch (err) {
+  } catch (err: any) {
     const error = err?.message || String(err);
     const existing = state.slices?.[sliceId];
     if (existing && existing.stage === "hatchery-pending") {
@@ -1050,35 +1055,35 @@ async function tick() {
   const senseDeps = senseIo().toSenseDeps();
   const herald = legateHerald();
 
-  const makeContext = (state) => ({
+  const makeContext = (state: any) => ({
     meta,
     ts: state.ts,
     castra: castra(),
     // Brood is a service; broodTeardown hits it over HTTP via the async
     // BroodClient (MARCH_BROOD_URL). No CLI shelling.
-    broodTeardown: (sessionId, opts) => broodTeardownCli(sessionId, opts),
-    emit: (event) => append(meta.processor_events_path, event),
+    broodTeardown: (sessionId: string, opts?: any) => broodTeardownCli(sessionId, opts),
+    emit: (event: any) => append(meta.processor_events_path, event),
     // Herald transition events (#176): the sole durable record of a transition
     // now that state.json is retired. The in-memory working state is mutated by
     // the handlers directly and reconstructed from these events on cold start.
-    emitTransition: (event) => emitTransition(event),
-    log: (line) => appendText(meta.processor_log_path, line),
+    emitTransition: (event: any) => emitTransition(event),
+    log: (line: string) => appendText(meta.processor_log_path, line),
   });
 
   const babysitDeps = {
-    sendMessage: (sessionId, message) => sendAgentDeckMessage(sessionId, message, false),
-    requestJudgement: (input) => requestLegateJudgement(input),
+    sendMessage: (sessionId: string, message: string) => sendAgentDeckMessage(sessionId, message, false),
+    requestJudgement: (input: any) => requestLegateJudgement(input),
   };
 
   const dispatchDeps = {
     // The default-branch sync is owned by Herald (MARCH_HERALD_SYNC); the legate
     // never fetches so it can't fight it.
     syncDefaultBranch: async () => {},
-    completePending: (rawState, ts) => completePendingHatcheryDispatches(rawState, ts),
-    launchDispatch: (rawState, ts, item, sliceId) => launchDispatch(rawState, ts, item, sliceId),
-    recoveryDispatch: (rawState, ts, item, sliceId, mergedArchive) =>
+    completePending: (rawState: any, ts: string) => completePendingHatcheryDispatches(rawState, ts),
+    launchDispatch: (rawState: any, ts: string, item: any, sliceId: string) => launchDispatch(rawState, ts, item, sliceId),
+    recoveryDispatch: (rawState: any, ts: string, item: any, sliceId: string, mergedArchive: any) =>
       handleRecoveryDispatch(rawState, ts, item, sliceId, mergedArchive),
-    requestJudgement: (input) => requestLegateJudgement(input),
+    requestJudgement: (input: any) => requestLegateJudgement(input),
   };
 
   // Stage 1 (#176): drain + fold the Herald inbox into the LoopState. The working
@@ -1109,13 +1114,13 @@ async function tick() {
     append,
     appendText,
     appendTextSilent,
-    setLastHeartbeat: (record) => {
+    setLastHeartbeat: (record: any) => {
       lastHeartbeat = record;
     },
   });
 }
 
-function logTickError(err) {
+function logTickError(err: any) {
   const message = err?.message || String(err);
   emitLoopLog({ severity: "ERROR", body: "processor_error: " + message, eventKind: "processor_error" });
   try {
@@ -1170,7 +1175,7 @@ async function safeTick() {
   const startedAt = Date.now();
   try {
     await tick();
-  } catch (err) {
+  } catch (err: any) {
     logTickError(err);
   } finally {
     _ticking = false;
