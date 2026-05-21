@@ -38,6 +38,18 @@ describe("createScheduler", () => {
     expect(tick).toHaveBeenCalledTimes(2);
   });
 
+  it("never re-throws when onTickError itself throws", async () => {
+    const onTickError = vi.fn(() => { throw new Error("handler boom"); });
+    const tick = vi.fn().mockRejectedValueOnce(new Error("tick boom")).mockResolvedValue(undefined);
+    const s = createScheduler({ tick, onTickError, intervalSeconds: 60 });
+    // safeTick must resolve (not reject) even though onTickError threw...
+    await expect(s.runOnce()).resolves.toBeUndefined();
+    expect(onTickError).toHaveBeenCalledTimes(1);
+    // ...and the guard must have been released, so a later tick still runs.
+    await s.runOnce();
+    expect(tick).toHaveBeenCalledTimes(2);
+  });
+
   it("routes a tick rejection to onTickError and keeps running", async () => {
     const onTickError = vi.fn();
     const tick = vi.fn()

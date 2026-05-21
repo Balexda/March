@@ -50,7 +50,13 @@ export function createScheduler(deps: SchedulerDeps): LoopScheduler {
     try {
       await deps.tick();
     } catch (err) {
-      deps.onTickError(err);
+      try {
+        deps.onTickError(err);
+      } catch {
+        // The error handler itself must never re-throw into the scheduler — a
+        // throw here would reject safeTick and surface as an unhandled rejection
+        // from the `void safeTick()` / setInterval callers.
+      }
     } finally {
       ticking = false;
     }
