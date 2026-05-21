@@ -100,6 +100,7 @@ function ensureInstruments(meter: Meter): void {
     "march.legate.tick.age",
     "Seconds since the last completed tick",
     (s) => Math.max(0, (Date.now() - s.lastTickAtMs) / 1000),
+    "s",
   );
   registerGauge(
     meter,
@@ -138,8 +139,9 @@ function registerGauge(
   name: string,
   description: string,
   read: (snapshot: LoopMetricsSnapshot) => number,
+  unit = "1",
 ): void {
-  const gauge = meter.createObservableGauge(name, { description, unit: "1" });
+  const gauge = meter.createObservableGauge(name, { description, unit });
   gauge.addCallback((result: ObservableResult) => {
     const s = latest;
     if (!s) return;
