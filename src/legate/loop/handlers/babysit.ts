@@ -518,6 +518,7 @@ export async function apply(decisions: BabysitDecision[], ctx: HandlerContext, s
         slice.stage = "pr-open";
         slice.pr_open_at = ts;
         mark(slice, "discover-pr", actionKey("discover-pr", d.pr), "processor discovered PR", ts);
+        ctx.emitTransition?.({ type: "slice.stage.changed", sliceId: d.sliceId, stage: "pr-open" });
         res.actions.push({ action: "discover-pr", sliceId: d.sliceId, sessionId: d.sessionId, pr: d.pr, detail: "discovered worker PR" });
         res.mutated = true;
         break;
@@ -536,6 +537,7 @@ export async function apply(decisions: BabysitDecision[], ctx: HandlerContext, s
         }
         slice.stage = "pr-resolving-conflicts";
         mark(slice, "conflict-fix", d.key, "processor sent conflict-resolution fix", ts);
+        ctx.emitTransition?.({ type: "slice.stage.changed", sliceId: d.sliceId, stage: "pr-resolving-conflicts" });
         res.actions.push({ action: "conflict-fix", sliceId: d.sliceId, sessionId: d.sessionId, pr: d.pr, detail: "sent conflict-resolution prompt" });
         res.mutated = true;
         break;
@@ -565,6 +567,7 @@ export async function apply(decisions: BabysitDecision[], ctx: HandlerContext, s
         }
         slice.stage = "pr-in-fix";
         mark(slice, "review-fix", d.key, "processor sent review-thread /smithy.fix", ts);
+        ctx.emitTransition?.({ type: "slice.stage.changed", sliceId: d.sliceId, stage: "pr-in-fix" });
         res.actions.push({ action: "review-fix", sliceId: d.sliceId, sessionId: d.sessionId, pr: d.pr, detail: d.detail });
         res.mutated = true;
         break;
@@ -576,6 +579,7 @@ export async function apply(decisions: BabysitDecision[], ctx: HandlerContext, s
         slice.stage = "pr-open";
         slice.pr_open_at = ts;
         mark(slice, "pr-open", actionKey("pr-open", d.pr), "processor observed PR all clear", ts);
+        ctx.emitTransition?.({ type: "slice.stage.changed", sliceId: d.sliceId, stage: "pr-open" });
         res.actions.push({ action: "pr-open", sliceId: d.sliceId, sessionId: d.sessionId, pr: d.pr, detail: "observed PR all clear" });
         res.mutated = true;
         break;

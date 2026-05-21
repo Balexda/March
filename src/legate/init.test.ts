@@ -540,6 +540,10 @@ describe("legate module", () => {
         path.join(home, ".agent-deck", "conductor", "march-legate-loop", "legate-loop-heartbeat.ndjson"),
       );
       expect(meta.mode).toBe("terminal-pr-maintenance");
+      // Service endpoints frozen at init for the containerized loop (#155, #175).
+      // Null when the operator's env didn't set them; the key is always present.
+      expect(meta).toHaveProperty("brood_endpoint");
+      expect(meta).toHaveProperty("herald_endpoint");
 
       const rendered = fs.readFileSync(result.templateOutputPath, "utf-8");
       expect(rendered).toContain("processor=march-legate-loop");

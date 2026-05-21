@@ -33,11 +33,13 @@ import { CastraClient } from "../../castra/client.js";
 import type { LoopMeta } from "./meta.js";
 // Decomposed two-stage loop: Stage 1 sense → coordinator (ordered handlers) →
 // heartbeat. runtime now only wires these to the proven I/O seams below.
-import { senseState } from "./state/sense.js";
+import { senseState, senseFromHerald } from "./state/sense.js";
 import { createSenseIo, type SenseIo } from "../../observe/sense-io.js";
 import { runTick as coordinatorRunTick } from "./coordinator.js";
 import { runHeartbeat } from "./heartbeat.js";
 import { broodTeardown as broodTeardownCli } from "./clients/brood.js";
+import { heraldConfigured } from "../../herald/service/client.js";
+import { LegateHerald } from "./clients/herald.js";
 
 // Lazily-built async Castra client (constructed on first use so it reads the
 // CASTRA_URL/token env the container passes in). The loop reaches every
@@ -59,6 +61,32 @@ function senseIo(): SenseIo {
     now,
     warn: (message: string) => appendText(meta.processor_log_path, "[" + now() + "] " + message),
   }));
+}
+
+// Herald inbox/write client (#175). Built lazily on first use, and only when a
+// Herald endpoint is configured (MARCH_HERALD_URL) — otherwise the loop keeps its
+// legacy self-poll sense path and writes nothing to the event log, byte-for-byte
+// unchanged. `_herald === undefined` means "not yet resolved"; `null` means
+// "resolved: not configured".
+let _herald: LegateHerald | null | undefined;
+function legateHerald(): LegateHerald | null {
+  if (_herald !== undefined) return _herald;
+  _herald = heraldConfigured(process.env)
+    ? new LegateHerald({ conductorDir: meta.legate_conductor_dir, env: process.env })
+    : null;
+  return _herald;
+}
+
+// Append a transition event to Herald, dual-written alongside state.json during
+// the PR2 soak. Fire-and-forget: a Herald write must never break or slow a tick
+// (the legate's working state is still state.json until PR3). No-op when Herald
+// isn't configured.
+function emitTransition(event) {
+  const herald = legateHerald();
+  if (!herald) return;
+  Promise.resolve()
+    .then(() => herald.append(event))
+    .catch(() => {});
 }
 
 // Injected at startup by configureLoopRuntime().
@@ -1079,6 +1107,7 @@ function tryRecoverWrongWorktreeRace(state, slice, sliceId, errorText) {
     };
   }
   counts[sliceId] = next;
+  emitTransition({ type: "retry.counted", key: sliceId, count: next });
   deleteHatcheryArtifacts(slice);
   delete state.slices[sliceId];
   return {
@@ -1199,6 +1228,7 @@ async function tryRecoverStrandedLeftover(state, slice, sliceId, errorText, clas
     };
   }
   counts[key] = next;
+  emitTransition({ type: "retry.counted", key, count: next });
   let extra = "";
   if (worktreePath) {
     try {
@@ -1280,6 +1310,7 @@ function tryRecoverSpawnPatchError(state, slice, sliceId, errorText) {
     };
   }
   counts[key] = next;
+  emitTransition({ type: "retry.counted", key, count: next });
   deleteHatcheryArtifacts(slice);
   delete state.slices[sliceId];
   return {
@@ -1325,6 +1356,7 @@ async function completePendingHatcheryDispatches(state, ts) {
     const nextN = prev + 1;
     if (nextN <= limit) {
       counts[key] = nextN;
+      emitTransition({ type: "retry.counted", key, count: nextN });
       actions.push({
         action: "auto-recovered",
         sliceId,
@@ -1338,6 +1370,7 @@ async function completePendingHatcheryDispatches(state, ts) {
     delete counts[key];
     const note = "NEED: Hatchery spawn " + reason + " after " + ageMin + " min and " + limit + " auto-retry attempts; runner is dying repeatedly — manual investigation required";
     slice.stage = "escalated";
+    emitTransition({ type: "slice.escalated", sliceId, reason: "runner-silent-persistent" });
     slice.last_action = ts;
     slice.last_action_note = note;
     failures.push({ slice_id: sliceId, command: actionCommandLine({ command: slice.command, arguments: slice.arguments || [] }), error: note });
@@ -1481,6 +1514,7 @@ async function completePendingHatcheryDispatches(state, ts) {
       const reasonTag = recovery
         ? "branch-collision-" + recovery.verdict
         : (sessionRecovery ? sessionRecovery.verdict : (raceRecovery ? raceRecovery.verdict : (spawnRecovery ? spawnRecovery.verdict : (leftoverRecovery ? leftoverRecovery.verdict : "spawn-error"))));
+      emitTransition({ type: "slice.escalated", sliceId, reason: reasonTag });
       queueDispatchEscalation(slice, sliceId, reasonTag, detail);
       mutated = true;
       continue;
@@ -1493,6 +1527,7 @@ async function completePendingHatcheryDispatches(state, ts) {
     slice.branch = result.branch || manager.branch || slice.branch;
     slice.worktree_path = manager.worktreePath || null;
     slice.stage = "implementing";
+    emitTransition({ type: "slice.stage.changed", sliceId, stage: "implementing" });
     slice.hatchery = {
       ...(slice.hatchery || {}),
       spawn_id: result.spawnId,
@@ -1588,6 +1623,7 @@ async function handleRecoveryDispatch(state, ts, item, sliceId, mergedArchive) {
             + actionCommandLine(item.next_action)
             + (mergedArchive?.pr?.number ? " (prior partial PR #" + mergedArchive.pr.number + ")" : ""),
         });
+        emitTransition({ type: "slice.recovery.dispatched", sliceId: direct.sliceId });
       } else {
         failures.push({ slice_id: sliceId, command: actionCommandLine(item.next_action), error: direct.error || "direct dispatch failed" });
         notifications.push({
@@ -1668,6 +1704,7 @@ async function handleRecoveryDispatch(state, ts, item, sliceId, mergedArchive) {
         + "for " + actionCommandLine(action)
         + (mergedArchive?.pr?.number ? "; prior PR #" + mergedArchive.pr.number : ""),
     });
+    emitTransition({ type: "slice.recovery.dispatched", sliceId: recoverySliceId, branch: recoveryBranch });
   } catch (err) {
     const error = err?.message || String(err);
     const existing = state.slices?.[recoverySliceId];
@@ -1675,6 +1712,7 @@ async function handleRecoveryDispatch(state, ts, item, sliceId, mergedArchive) {
       existing.stage = "escalated";
       existing.last_action = ts;
       existing.last_action_note = "NEED: Hatchery recovery dispatch launch failed: " + error;
+      emitTransition({ type: "slice.escalated", sliceId: recoverySliceId, reason: "hatchery_recovery_dispatch_failed" });
       notifications.push({
         slice: existing, sliceId: recoverySliceId,
         requestKey: "hatchery-failure:" + recoverySliceId + ":launch-throw:" + hashText(error).slice(0, 12),
@@ -1734,6 +1772,7 @@ function launchDispatch(state, ts, item, sliceId) {
       sessionId: null,
       detail: "queued Hatchery codex spawn pid " + (launched.pid || "unknown") + " for " + actionCommandLine(action),
     });
+    emitTransition({ type: "slice.dispatched", sliceId, branch: dispatchBranch(item) });
   } catch (err) {
     const error = err?.message || String(err);
     const existing = state.slices?.[sliceId];
@@ -1741,6 +1780,7 @@ function launchDispatch(state, ts, item, sliceId) {
       existing.stage = "escalated";
       existing.last_action = ts;
       existing.last_action_note = "NEED: Hatchery dispatch launch failed: " + error;
+      emitTransition({ type: "slice.escalated", sliceId, reason: "hatchery_dispatch_failed" });
       notifications.push({
         slice: existing, sliceId,
         requestKey: "hatchery-failure:" + sliceId + ":launch-throw:" + hashText(error).slice(0, 12),
@@ -1774,6 +1814,7 @@ function launchDispatch(state, ts, item, sliceId) {
 async function tick() {
   // Stage 1 reads are the shared observation I/O (src/observe/sense-io.ts).
   const senseDeps = senseIo().toSenseDeps();
+  const herald = legateHerald();
 
   const makeContext = (state) => ({
     meta,
@@ -1784,6 +1825,9 @@ async function tick() {
     broodTeardown: (sessionId, opts) => broodTeardownCli(sessionId, opts),
     persist: (s) => writeJson(meta.legate_state_path, s.raw),
     emit: (event) => append(meta.processor_events_path, event),
+    // Herald transition events (#175), dual-written alongside state.json during
+    // the soak. Undefined when Herald isn't configured so handlers no-op.
+    emitTransition: herald ? (event) => emitTransition(event) : undefined,
     log: (line) => appendText(meta.processor_log_path, line),
   });
 
@@ -1793,7 +1837,9 @@ async function tick() {
   };
 
   const dispatchDeps = {
-    syncDefaultBranch: (rawState) => senseIo().syncDefaultBranch(rawState),
+    // Under Herald, the default-branch sync is owned by Herald (MARCH_HERALD_SYNC);
+    // drop the dispatch-side best-effort re-sync so the legate never fights it.
+    syncDefaultBranch: herald ? async () => {} : (rawState) => senseIo().syncDefaultBranch(rawState),
     completePending: (rawState, ts) => completePendingHatcheryDispatches(rawState, ts),
     launchDispatch: (rawState, ts, item, sliceId) => launchDispatch(rawState, ts, item, sliceId),
     recoveryDispatch: (rawState, ts, item, sliceId, mergedArchive) =>
@@ -1801,8 +1847,15 @@ async function tick() {
     requestJudgement: (input) => requestLegateJudgement(input),
   };
 
+  // Stage 1 cutover (#175): when Herald is configured, drain + fold its event
+  // inbox into the LoopState instead of self-polling gh/git/smithy/Castra;
+  // otherwise keep the legacy senseState path (backward-compatible).
+  const sense = herald
+    ? () => senseFromHerald(senseDeps, herald)
+    : () => senseState(senseDeps);
+
   const out = await coordinatorRunTick({
-    sense: () => senseState(senseDeps),
+    sense,
     makeContext,
     babysit: babysitDeps,
     dispatch: dispatchDeps,

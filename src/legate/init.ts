@@ -744,6 +744,11 @@ function loopMetaFor(input: {
     // teardown (#155) instead of pruning worktrees itself. Null = brood not
     // configured; the loop then removes only the agent-deck session (no prune).
     brood_endpoint: process.env.MARCH_BROOD_URL?.trim() || null,
+    // Herald service endpoint, frozen at init so the containerized loop can
+    // CONSUME the event inbox + write transition events (#175) without env
+    // propagation. Null = herald not configured; the loop keeps its legacy
+    // self-poll sense path (byte-for-byte unchanged).
+    herald_endpoint: process.env.MARCH_HERALD_URL?.trim() || null,
     mode: "terminal-pr-maintenance",
   };
 }

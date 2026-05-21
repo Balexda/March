@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
-import { senseState, type SenseDeps } from "./sense.js";
+import { senseFromHerald, senseState, type SenseDeps } from "./sense.js";
 import type { LoopMeta } from "../meta.js";
+import { emptySystemState, type SystemState } from "../../../herald/events.js";
 
 const meta = { worker_group: "legate-workers", repo: { path: "/repo" } } as unknown as LoopMeta;
 
@@ -128,5 +129,77 @@ describe("senseState (Stage 1)", () => {
     );
     expect(warn).toHaveBeenCalled();
     expect(state.smithy.ok).toBe(true);
+  });
+});
+
+describe("senseFromHerald (Stage 1, Herald cutover)", () => {
+  function foldedState(over: Partial<SystemState> = {}): SystemState {
+    return { ...emptySystemState(), ...over };
+  }
+
+  it("maps the folded projection (sessions/workers/perSlice) into the LoopState", async () => {
+    const sys = foldedState({
+      sessions: {
+        s1: { id: "s1", present: true, status: "running", group: "legate-workers", worktreePath: "/wt/s1", title: "steward-1" },
+      },
+      workers: { waiting: 0, running: 1, idle: 0, error: 0, stopped: 0, other: 0 },
+      slices: {
+        active: { sliceId: "active", stage: "pr-open", pr: { number: 7, state: "OPEN" }, recentOutput: { output: "log" } },
+        bare: { sliceId: "bare" },
+      },
+    });
+    const herald = { consume: vi.fn(async () => sys) };
+    const state = await senseFromHerald(deps(), herald);
+
+    // sessions are re-shaped to the agent-deck snake_case form the handlers read.
+    expect(state.sessions).toEqual([
+      { id: "s1", title: "steward-1", name: "steward-1", status: "running", group: "legate-workers", worktree_path: "/wt/s1", branch: undefined, created_at: undefined },
+    ]);
+    expect(state.sessionsById.get("s1")).toBeTruthy();
+    expect(state.sessionsById.get("steward-1")).toBeTruthy();
+    expect(state.workers).toMatchObject({ running: 1 });
+    // perSlice only carries slices that actually have observed pr/output.
+    expect(Object.keys(state.perSlice)).toEqual(["active"]);
+    expect(state.perSlice.active!.pr).toMatchObject({ number: 7 });
+    expect(state.perSlice.active!.recentOutput).toEqual({ output: "log" });
+  });
+
+  it("still reads the legate-owned working state from state.json (dual-write soak)", async () => {
+    const herald = { consume: vi.fn(async () => emptySystemState()) };
+    const state = await senseFromHerald(
+      deps({
+        readStateJson: () => ({
+          repo: { path: "/repo" },
+          slices: { s: { worker_session_id: "x", stage: "implementing" } },
+          archived_slices: { old: {} },
+        }),
+      }),
+      herald,
+    );
+    expect(state.statePresent).toBe(true);
+    expect(state.slices).toHaveProperty("s");
+    expect(state.archived).toHaveProperty("old");
+    expect(herald.consume).toHaveBeenCalledOnce();
+  });
+
+  it("reads smithy ready records WITHOUT syncing (Herald owns the sync)", async () => {
+    const syncDefaultBranch = vi.fn(async () => {});
+    const herald = { consume: vi.fn(async () => emptySystemState()) };
+    const state = await senseFromHerald(
+      deps({
+        syncDefaultBranch,
+        readSmithyStatus: async () => ({ records: [{ path: "a", next_action: { command: "smithy.forge" } }], graph: {} }),
+      }),
+      herald,
+    );
+    expect(syncDefaultBranch).not.toHaveBeenCalled();
+    expect(state.smithy.ok).toBe(true);
+    expect(state.smithy.queue.dispatchable).toBe(1);
+  });
+
+  it("reports unavailable workers when the fold has none", async () => {
+    const herald = { consume: vi.fn(async () => emptySystemState()) };
+    const state = await senseFromHerald(deps(), herald);
+    expect(state.workers).toEqual({ error: "unavailable" });
   });
 });

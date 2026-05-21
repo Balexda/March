@@ -25,7 +25,7 @@ client, deterministic config, per-service metrics + logger, and a Docker image.
                                               │ ?after=cursor  │ (transitions)
             ┌─────────── Legate (efferent) ───▼───────────────┴──────┐
             │  drain the inbox one event at a time → fold → react →    │
-            │  append transition events (cutover lands in a follow-up) │
+            │  append transition events (PR2 cutover, on MARCH_HERALD_URL) │
             └──────────────────────────────────────────────────────────┘
 ```
 
@@ -154,8 +154,12 @@ Herald is being landed incrementally so the running legate is never at risk:
    refactor, no behavior change).
 2. **PR1 (this service)** — Herald produces observation events; the legate keeps
    polling. Herald is independently deployable and observable.
-3. **PR2** — the legate drains the inbox + writes transition events (cutover),
-   gated on `MARCH_HERALD_URL`.
+3. **PR2 (this change)** — the legate drains the inbox + writes transition events
+   (cutover), gated on `MARCH_HERALD_URL`. When set, Stage-1 sense is sourced from
+   the folded inbox (`senseFromHerald`) instead of self-polling, and handlers
+   dual-write transition events alongside `state.json`. Unset = byte-for-byte the
+   legacy path. The persistent inbox cursor lives in the legate conductor dir
+   (`herald-cursor.json`); the legate seam is `src/legate/loop/clients/herald.ts`.
 4. **PR3** — retire `state.json`; the fold becomes the sole source of truth.
 
 The two-stage loop was built for this split: `src/legate/loop/state/types.ts`
