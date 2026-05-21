@@ -343,12 +343,6 @@ function isWorkerSession(session) {
   return group === meta.worker_group || group.startsWith(meta.worker_group + "/");
 }
 
-function sessionMatchesSlice(session, slice) {
-  const sessionId = String(slice.worker_session_id || "");
-  if (!sessionId) return false;
-  return session.id === sessionId || session.title === sessionId || session.name === sessionId;
-}
-
 function summarizeWorkers(list) {
   if (!Array.isArray(list)) return { error: list.error || "unavailable" };
   const buckets = { waiting: 0, running: 0, idle: 0, error: 0, stopped: 0, other: 0 };
@@ -359,18 +353,6 @@ function summarizeWorkers(list) {
     else buckets.other += 1;
   }
   return buckets;
-}
-
-function workerBySessionId(list) {
-  const out = new Map();
-  if (!Array.isArray(list)) return out;
-  for (const session of list) {
-    if (!isWorkerSession(session)) continue;
-    if (session.id) out.set(String(session.id), session);
-    if (session.title) out.set(String(session.title), session);
-    if (session.name) out.set(String(session.name), session);
-  }
-  return out;
 }
 
 function prNumber(slice) {
@@ -530,65 +512,6 @@ async function queryPrForBabysit(slice, state) {
   };
 }
 
-function removeDispatchMessage(sliceId) {
-  const base = meta.legate_conductor_dir;
-  if (typeof base !== "string" || base.length === 0) return false;
-  const target = path.join(base, `dispatch-msg-${sliceId}.md`);
-  try {
-    fs.rmSync(target, { force: true });
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-async function removeWorkerSession(sessionId) {
-  // Castra DELETE is idempotent: a missing session returns {removed:false}.
-  try {
-    const result = await castra().removeSession({ profile: meta.profile, sessionId, pruneWorktree: true });
-    return result.removed ? { removed: true } : { removed: false, reason: "session_not_found" };
-  } catch (err) {
-    return { error: err?.message || String(err) };
-  }
-}
-
-function archiveSlice(state, sliceId, slice, pr, terminalState, ts) {
-  const archived = state.archived_slices && typeof state.archived_slices === "object"
-    ? state.archived_slices
-    : {};
-  state.archived_slices = archived;
-  const archivedSlice = {
-    pr_number: pr.number ?? slice?.pr?.number ?? null,
-    pr_url: pr.url ?? slice?.pr?.url ?? null,
-    worker_title: slice.worker_title ?? null,
-    branch: slice.branch ?? null,
-    actual_branch: slice.actual_branch ?? null,
-    command: slice.command ?? null,
-    arguments: Array.isArray(slice.arguments)
-      ? slice.arguments.map((arg) => String(arg))
-      : [],
-    artifact_path: slice.artifact_path ?? null,
-    terminal_state: terminalState,
-  };
-  if (terminalState === "MERGED") archivedSlice.merged_at = ts;
-  if (terminalState === "CLOSED") archivedSlice.closed_at = ts;
-  archived[sliceId] = archivedSlice;
-  delete state.slices[sliceId];
-}
-
-
-function actionKey(action, pr, extra = "") {
-  const head = pr?.head_branch || "";
-  return [action, pr?.number || "", pr?.state || "", pr?.mergeable || "", pr?.checks || "", head, extra].join(":");
-}
-
-function workerErrorRequestKey(sessionId, slice, recent) {
-  const stage = slice.stage || "unknown";
-  const pr = prNumber(slice) || "none";
-  const outputHash = hashText(recent.output || recent.error || "");
-  return `worker-error:${sessionId}:${stage}:${pr}:${outputHash}`;
-}
-
 function markSliceAction(slice, action, key, note, ts) {
   slice.last_processor_action = action;
   slice.last_processor_action_key = key;
@@ -599,166 +522,6 @@ function markSliceAction(slice, action, key, note, ts) {
 
 function alreadyDispatched(slice, key) {
   return slice.last_processor_action_key === key;
-}
-
-// Stranded-steward watchdog tuning. A healthy steward typically reaches
-// "gh pr create" within 2-5 minutes after dispatch — review + verification +
-// commit + push + PR all happen in one claude turn. 10 minutes is generous
-// enough to avoid false positives on slow verification suites but tight
-// enough that the operator isn't waiting hours on a session that gave up
-// post-push. After the first nudge, re-nudge every interval until the slice
-// either makes it to "pr-open" or the operator manually intervenes — sonnet
-// often completes one stage per turn (commit, push, gh pr create), so a
-// single nudge typically only advances the workflow one step.
-//
-// alertEscalateMs sends ONE [PROCESSOR] notification to the legate-agent at
-// the 25-min mark so the operator knows the steward is taking unusually
-// long; but the watchdog KEEPS nudging — giving up entirely would strand
-// the slice (operator can manually escalate further if intervention is
-// actually needed).
-function strandedStewardConfig() {
-  return {
-    initialNudgeMs: 10 * 60 * 1000,
-    repeatNudgeMs: 5 * 60 * 1000,
-    alertEscalateMs: 25 * 60 * 1000,
-    message: [
-      "[STRANDED-STEWARD-NUDGE] The deterministic loop sees no PR for this slice yet.",
-      "Resume the Hatchery manager workflow where you left off:",
-      "- If you haven't committed yet: run the verification, commit, push, then open the PR.",
-      "- If you've committed but not pushed: 'git push -u origin <branch>'.",
-      "- If you've pushed but not opened the PR: 'gh pr create' with title/body derived from",
-      "  the artifact path and original request.",
-      "",
-      "OVERRIDE: If a repo-local pr-creation skill is gating PR creation on finding a",
-      "linked GitHub issue, SKIP the issue search. Hatchery dispatches do NOT have a",
-      "tracking issue. Compose the PR body without an issue link and run 'gh pr create'",
-      "now. Mention 'No tracking issue (Hatchery autonomous dispatch)' in the body if",
-      "the skill template requires an explanation.",
-      "",
-      "End your turn ONLY after one of:",
-      "  (a) reporting 'PR: <url>' on the final line, or",
-      "  (b) escalating via 'NEED: <summary> -- <next action>'.",
-      "If a previous turn ended after 'git push' without 'gh pr create', that's the stranded-",
-      "steward bug the loop is nudging you out of. Run 'gh pr create' now.",
-    ].join("\n"),
-  };
-}
-
-// Returns "nudged" if we sent (or re-sent) a nudge this tick, "alert" if
-// this is the first tick past the 25-min budget (one-time operator alert),
-// or null if neither condition is met (too early, or alert already fired).
-// Keeps nudging on every repeat interval regardless of total elapsed time —
-// giving up would strand the slice forever, and the operator can intervene
-// manually if the alert fires.
-function maybeNudgeStrandedSteward(slice, sliceId, sessionId, ts, sendMessage = sendAgentDeckMessage) {
-  if (slice.stage !== "implementing") return null;
-  if (!sessionId) return null;
-  const cfg = strandedStewardConfig();
-  const startedAt = Date.parse(slice.implementing_started_at || slice.last_action || "");
-  const nowMs = Date.parse(ts);
-  if (!Number.isFinite(startedAt) || !Number.isFinite(nowMs)) return null;
-  const elapsed = nowMs - startedAt;
-  if (elapsed < cfg.initialNudgeMs) return null;
-  const nudgedAt = Date.parse(slice.steward_nudge_sent_at || "");
-  // First nudge: at initialNudgeMs.
-  if (!Number.isFinite(nudgedAt)) {
-    try {
-      sendMessage(sessionId, cfg.message, false);
-    } catch {
-      return null;
-    }
-    slice.steward_nudge_sent_at = ts;
-    slice.steward_nudge_count = 1;
-    return "nudged";
-  }
-  // Past the 25-min budget: send ONE operator alert, then keep nudging.
-  // The alert is the operator's signal to manually intervene if desired,
-  // but the watchdog keeps doing its job either way.
-  let alertFired = false;
-  if (elapsed >= cfg.alertEscalateMs && !slice.steward_stranded_escalated_at) {
-    slice.steward_stranded_escalated_at = ts;
-    alertFired = true;
-  }
-  // Re-nudge: every repeatNudgeMs after the previous nudge. No upper bound.
-  if (nowMs - nudgedAt < cfg.repeatNudgeMs) {
-    return alertFired ? "alert" : null;
-  }
-  try {
-    sendMessage(sessionId, cfg.message, false);
-  } catch {
-    return alertFired ? "alert" : null;
-  }
-  slice.steward_nudge_sent_at = ts;
-  slice.steward_nudge_count = (slice.steward_nudge_count || 1) + 1;
-  return alertFired ? "alert" : "nudged";
-}
-
-// Post-dispatch stuck-worker watchdog tuning. Distinct from the stranded-
-// steward watchdog (which fires while a slice is still in "implementing" and
-// has no PR yet). This covers the post-PR-creation case where the loop sent
-// the worker a /smithy.fix or conflict-resolution prompt and the worker
-// session went to waiting/idle without acting — Claude has received the
-// message but parked (likely on a permission prompt, a stuck spinner, or a
-// "task complete" misjudgement). The loop's existing alreadyDispatched dedup
-// keyed off action keys correctly prevents repeat dispatches when nothing
-// changed, but it also prevents *waking the worker back up* when the change
-// the loop wants is the worker actually doing the work.
-function postDispatchNudgeConfig() {
-  return {
-    // First nudge: at this delay after the original dispatch.
-    initialNudgeMs: 5 * 60 * 1000,
-    // Subsequent nudges: every interval thereafter.
-    repeatNudgeMs: 5 * 60 * 1000,
-    // Cumulative nudges per action key before escalating. Three unanswered
-    // re-nudges (~15 min total) is strong evidence the worker is genuinely
-    // stuck on something the loop can't unblock from outside.
-    escalateAfterNudges: 3,
-  };
-}
-
-// Re-deliver the most recent dispatch message when a worker session has been
-// sitting idle/waiting too long after we sent something. Tracks the nudge
-// count under `post_dispatch_nudge_for_key` so when the loop sends a fresh
-// dispatch (different key — new threads, new state), the counter resets.
-// Returns {nudged, escalate, count} for the caller to translate into an
-// action event + optional legate-judgement request.
-function maybePostDispatchNudge(slice, sessionId, workerStatus, ts, key, buildMessage, sendMessage = sendAgentDeckMessage) {
-  if (workerStatus !== "waiting" && workerStatus !== "idle") {
-    return { nudged: false, escalate: false, count: 0 };
-  }
-  if (!sessionId) return { nudged: false, escalate: false, count: 0 };
-  const lastDispatchAt = Date.parse(slice.last_processor_action_at || "");
-  const nowMs = Date.parse(ts);
-  if (!Number.isFinite(lastDispatchAt) || !Number.isFinite(nowMs)) {
-    return { nudged: false, escalate: false, count: 0 };
-  }
-  const cfg = postDispatchNudgeConfig();
-  // Reset nudge state if the action key changed — a new dispatch since the
-  // last nudge state was written invalidates the prior count.
-  if (slice.post_dispatch_nudge_for_key !== key) {
-    slice.post_dispatch_nudge_for_key = key;
-    slice.post_dispatch_nudge_count = 0;
-    slice.post_dispatch_nudge_sent_at = null;
-  }
-  if (nowMs - lastDispatchAt < cfg.initialNudgeMs) {
-    return { nudged: false, escalate: false, count: slice.post_dispatch_nudge_count || 0 };
-  }
-  const currentCount = slice.post_dispatch_nudge_count || 0;
-  if (currentCount >= cfg.escalateAfterNudges) {
-    return { nudged: false, escalate: true, count: currentCount };
-  }
-  const nudgedAt = Date.parse(slice.post_dispatch_nudge_sent_at || "");
-  if (Number.isFinite(nudgedAt) && nowMs - nudgedAt < cfg.repeatNudgeMs) {
-    return { nudged: false, escalate: false, count: currentCount };
-  }
-  try {
-    sendMessage(sessionId, buildMessage(), false);
-  } catch {
-    return { nudged: false, escalate: false, count: currentCount };
-  }
-  slice.post_dispatch_nudge_sent_at = ts;
-  slice.post_dispatch_nudge_count = currentCount + 1;
-  return { nudged: true, escalate: false, count: currentCount + 1 };
 }
 
 async function sendAgentDeckMessage(sessionId, message, _wait = false) {
@@ -779,12 +542,6 @@ function hashText(text) {
   return crypto.createHash("sha256").update(String(text || "")).digest("hex").slice(0, 16);
 }
 
-function hasClaudeLoginBlock(output) {
-  const text = String(output || "");
-  return text.includes("Please run /login") ||
-    text.includes("API Error: 401 Invalid authentication credentials");
-}
-
 async function captureRecentSessionOutput(sessionId) {
   try {
     const output = await castra().sessionOutput(meta.profile, sessionId);
@@ -792,124 +549,6 @@ async function captureRecentSessionOutput(sessionId) {
   } catch (err) {
     return { output: "", error: err?.message || String(err) };
   }
-}
-
-function loginRequiredDetail({ sliceId, slice, sessionId, recent }) {
-  const pr = slice.pr || {};
-  return [
-    "One or more worker sessions are blocked by Claude Code authentication failure:",
-    '"Please run /login · API Error: 401 Invalid authentication credentials"',
-    "",
-    "Please run /login in the Legate agent session. After login completes, invoke the Legate resume flow so the loop can re-check blocked workers and send resume prompts.",
-    "",
-    `slice: ${sliceId}`,
-    `session: ${sessionId}`,
-    `stage: ${slice.stage || "unknown"}`,
-    `PR: ${pr.url || (pr.number ? "#" + pr.number : "none")}`,
-    "",
-    "Recent output:",
-    recent.output || (recent.error ? `<unavailable: ${recent.error}>` : "<empty>"),
-  ].join("\n");
-}
-
-function loginResumeMessage(sliceId, slice) {
-  const pr = slice.pr || {};
-  return `Claude authentication has been refreshed. Resume your previous task from the current repository state.
-
-Current slice: ${sliceId}
-Current stage: ${slice.stage || "unknown"}
-PR: ${pr.url || (pr.number ? "#" + pr.number : "none")}
-
-Re-check the PR, CI, review threads, and working tree before taking action. Continue with the last assigned fix/rebase/conflict-resolution task. If the previous instruction is no longer applicable, summarize the current blocker.`;
-}
-
-function markLoginBlocked({ sliceId, slice, sessionId, recent, ts, requests }) {
-  const outputHash = hashText(recent.output || recent.error || "");
-  if (!slice.login_blocked_at) slice.login_blocked_at = ts;
-  slice.login_blocked_session_id = sessionId;
-  slice.login_blocked_reason = "claude_api_401_login_required";
-  slice.login_blocked_output_hash = outputHash;
-  slice.last_action = ts;
-  slice.last_action_note = "worker blocked on Claude Code login refresh";
-
-  const request = requestLegateJudgement({
-    ts,
-    slice,
-    requestKey: `login-required:${sessionId}:${outputHash}`,
-    sliceId,
-    sessionId,
-    pr: slice.pr || null,
-    reason: "claude_api_401_login_required",
-    detail: loginRequiredDetail({ sliceId, slice, sessionId, recent }),
-  });
-  if (request) requests.push(request);
-}
-
-function clearLoginBlocked(slice) {
-  delete slice.login_blocked_at;
-  delete slice.login_blocked_session_id;
-  delete slice.login_blocked_reason;
-  delete slice.login_blocked_output_hash;
-}
-
-function maybeResumeLoginBlocked({ sliceId, slice, sessionId, recent, ts, actions, requests }) {
-  if (hasClaudeLoginBlock(recent.output)) return { stillBlocked: true, mutated: false };
-
-  if (recent.error) {
-    const request = requestLegateJudgement({
-      ts,
-      slice,
-      requestKey: `login-refresh-unknown:${sessionId}:${hashText(recent.error)}`,
-      sliceId,
-      sessionId,
-      pr: slice.pr || null,
-      reason: "could not verify Claude login refresh",
-      detail: `Could not read worker output to verify login refresh for ${sliceId}: ${recent.error}`,
-    });
-    if (request) requests.push(request);
-    return { stillBlocked: true, mutated: Boolean(request) };
-  }
-
-  const key = [
-    "login-resume",
-    sessionId,
-    slice.stage || "",
-    prNumber(slice) || "",
-    slice.login_blocked_at || "",
-  ].join(":");
-  if (alreadyDispatched(slice, key)) return { stillBlocked: false, mutated: false };
-
-  sendAgentDeckMessage(sessionId, loginResumeMessage(sliceId, slice), false);
-  clearLoginBlocked(slice);
-  markSliceAction(slice, "login-resume", key, "processor sent login-refresh resume prompt", ts);
-  actions.push({
-    action: "login-resume",
-    sliceId,
-    sessionId,
-    pr: slice.pr || null,
-    detail: "sent resume prompt after Claude login refresh",
-  });
-  return { stillBlocked: false, mutated: true };
-}
-
-function workerErrorDetail({ sliceId, slice, worker, sessionId, recent }) {
-  const pr = slice.pr || {};
-  const lines = [
-    "Worker session is in agent-deck error state.",
-    "",
-    `slice: ${sliceId}`,
-    `session: ${sessionId}${worker?.title ? " (" + worker.title + ")" : ""}`,
-    `worker_path: ${worker?.path || slice.worktree_path || "unknown"}`,
-    `stage: ${slice.stage || "unknown"}`,
-    `PR: ${pr.url || (pr.number ? "#" + pr.number : "none")}`,
-    `last_action_note: ${slice.last_action_note || "none"}`,
-    "",
-    "Recent output:",
-    recent.output || (recent.error ? `<unavailable: ${recent.error}>` : "<empty>"),
-    "",
-    "This is not deterministic-safe for the processor. Run legate.error to inspect the worker and choose recovery: resume prompt, direct diagnostic query, restart, login/auth escalation, or operator escalation.",
-  ];
-  return lines.join("\n");
 }
 
 async function sendDoorbellToLegate() {
@@ -966,64 +605,8 @@ function updatePrSnapshot(slice, pr) {
   slice.unresolved_threads = pr.unresolved_threads;
 }
 
-function threadsNeedingResponse(slice, pr) {
-  const openAt = slice.pr_open_at ? Date.parse(slice.pr_open_at) : NaN;
-  return (pr.unresolved_threads || []).filter((thread) => {
-    if (thread.needs_response) return true;
-    if (slice.stage !== "pr-open" && slice.stage) return false;
-    if (!Number.isFinite(openAt)) return true;
-    const last = Date.parse(thread.last_comment_at || "");
-    return Number.isFinite(last) && last > openAt;
-  });
-}
-
-function failedChecksSummary(pr) {
-  const failed = pr.failed_checks || [];
-  if (failed.length === 0) return "No failed-check details were available.";
-  return failed
-    .map((check) => `- ${check.name}${check.url ? ": " + check.url : ""}`)
-    .join("\n");
-}
-
 function prDiscoverySince(slice) {
   return slice.last_action || slice.created_at || slice.dispatched_at || slice.started_at || "";
-}
-
-function reviewThreadsSummary(threads) {
-  return threads
-    .map((thread) => `- ${thread.path || "unknown path"}${thread.line ? ":" + thread.line : ""} by ${thread.last_author || thread.author || "unknown"}: ${thread.body_preview || ""}`)
-    .join("\n");
-}
-
-function conflictMessage(slice, pr, state) {
-  const defaultBranch = state?.repo?.default_branch || "main";
-  const worktree = slice.worktree_path || "<worker worktree>";
-  return `/smithy.fix
-
-PR #${pr.number} is blocked from merging: GitHub reports mergeable=CONFLICTING against origin/${defaultBranch}.
-
-Please rebase onto the latest default and resolve the conflicts:
-
-  cd "${worktree}"
-  git fetch origin
-  git rebase origin/${defaultBranch}
-
-Resolve conflicted files by preserving both the latest default-branch intent and this slice's spec/contracts intent. Then:
-
-  git add <resolved-paths>
-  git rebase --continue
-  git push --force-with-lease
-
-Reply with the new HEAD sha when the push completes. If the conflict reflects a genuine design disagreement, abort the rebase and summarize the conflicting paths and disagreement.`;
-}
-
-function reviewFixMessage(pr, threads) {
-  return `/smithy.fix
-
-Unresolved review threads on PR #${pr.number} need a response. Please address them in the same PR branch and push the fix.
-
-Threads:
-${reviewThreadsSummary(threads)}`;
 }
 
 function addBranchVariants(branches, value) {
@@ -1094,7 +677,6 @@ async function discoverPrForSlice(slice, state, sessionId) {
   }
 }
 
-
 function slugifyDispatchPart(value, fallback = "item") {
   const slug = String(value || "")
     .toLowerCase()
@@ -1126,17 +708,6 @@ function dispatchItemKey(item) {
     command: action.command || "",
     arguments: actionArguments(action),
     path: item?.path || "",
-  });
-}
-
-function sliceActionKey(slice) {
-  if (!slice || typeof slice !== "object") return "";
-  return JSON.stringify({
-    command: slice.command || "",
-    arguments: Array.isArray(slice.arguments)
-      ? slice.arguments.map((arg) => String(arg))
-      : [],
-    path: slice.artifact_path || "",
   });
 }
 
@@ -1226,110 +797,6 @@ function isTerminalSlice(slice) {
   return false;
 }
 
-// Dedup helper for new-dispatch suppression. Stricter than isTerminalSlice:
-// only a successfully merged slice means the artifact is "done" and a fresh
-// dispatch is safe. Escalated / closed-unmerged slices are still load-bearing
-// — they represent unresolved blockers that an operator must clear, and the
-// loop must not silently re-queue the same artifact behind their back.
-function sliceReleasesArtifact(slice) {
-  if (!slice || typeof slice !== "object") return false;
-  if (slice.stage === "merged") return true;
-  if (slice.pr?.state === "MERGED") return true;
-  return false;
-}
-
-function archivedSlices(state) {
-  return state?.archived_slices && typeof state.archived_slices === "object"
-    ? state.archived_slices
-    : {};
-}
-
-// A stub archive entry has no command, no args, and no branch — usually a
-// leftover from an older state-schema migration. dispatchSliceId is
-// deterministic from the item path, so a stub's persisted key collides
-// with the SID of any freshly-computed ready item on the same path, even
-// when no real work was ever recorded for it. Treat stubs as "no info"
-// and fall back to the stronger action_key / branch matchers so we don't
-// silently block fresh dispatches behind ghost archives.
-function isStubArchivedSlice(slice) {
-  if (!slice || typeof slice !== "object") return true;
-  const hasCommand = typeof slice.command === "string" && slice.command.length > 0;
-  const hasBranch = (typeof slice.branch === "string" && slice.branch.length > 0)
-    || (typeof slice.actual_branch === "string" && slice.actual_branch.length > 0);
-  return !hasCommand && !hasBranch;
-}
-
-function alreadyArchivedSlice(state, item, sliceId) {
-  const archived = archivedSlices(state);
-  if (Object.prototype.hasOwnProperty.call(archived, sliceId) && !isStubArchivedSlice(archived[sliceId])) return true;
-  const key = dispatchItemKey(item);
-  const branch = dispatchBranch(item);
-  for (const slice of Object.values(archived)) {
-    if (!slice || typeof slice !== "object") continue;
-    if (sliceActionKey(slice) === key) return true;
-    if (slice.branch && slice.branch === branch) return true;
-    if (slice.actual_branch && slice.actual_branch === branch) return true;
-  }
-  return false;
-}
-
-function alreadyHasInFlightSlice(state, item, sliceId) {
-  if (alreadyArchivedSlice(state, item, sliceId)) return true;
-  return inFlightSliceMatches(state, item, sliceId);
-}
-
-// Live-only portion of the dedup check. Carved out so the recovery-dispatch
-// path can distinguish "blocked because a recovery is already in flight"
-// from "blocked because the prior MERGED archive collides" — the former is
-// correct dedup, the latter is the exact case we want to recover from.
-function inFlightSliceMatches(state, item, sliceId) {
-  const slices = state?.slices && typeof state.slices === "object" ? state.slices : {};
-  const key = dispatchItemKey(item);
-  const branch = dispatchBranch(item);
-  for (const [existingId, slice] of Object.entries(slices)) {
-    if (existingId === sliceId) return true;
-    if (!slice || typeof slice !== "object") continue;
-    if (sliceReleasesArtifact(slice)) continue;
-    // Recovery slice for the same item — its original_slice_id matches
-    // the to-be-dispatched sliceId. Without this, every tick would mint
-    // a new recovery-N attempt for the same in-flight original.
-    if (slice.original_slice_id === sliceId) return true;
-    if (sliceActionKey(slice) === key) return true;
-    if (slice.branch && slice.branch === branch) return true;
-  }
-  return false;
-}
-
-// Returns the matching archived slice ONLY if it terminated in MERGED.
-// Callers use this to detect the partial-merge dedup wedge: smithy says
-// "still ready", the slice id collides with a prior MERGED archive, the
-// loop should fire a recovery dispatch rather than silently filtering.
-// Escalated / closed-unmerged archives intentionally fall through (return
-// null) so they keep blocking re-dispatch — those represent unresolved
-// operator decisions and recovery is not the right tool.
-function blockingMergedArchive(state, item, sliceId) {
-  const archived = archivedSlices(state);
-  const key = dispatchItemKey(item);
-  const branch = dispatchBranch(item);
-  const isMerged = (a) => {
-    if (!a || typeof a !== "object") return false;
-    if (a.terminal_state === "MERGED") return true;
-    if (a.stage === "merged") return true;
-    if (a.pr && a.pr.state === "MERGED") return true;
-    return false;
-  };
-  const direct = archived[sliceId];
-  if (direct && !isStubArchivedSlice(direct) && isMerged(direct)) return direct;
-  for (const slice of Object.values(archived)) {
-    if (!slice || typeof slice !== "object") continue;
-    if (!isMerged(slice)) continue;
-    if (sliceActionKey(slice) === key) return slice;
-    if (slice.branch && slice.branch === branch) return slice;
-    if (slice.actual_branch && slice.actual_branch === branch) return slice;
-  }
-  return null;
-}
-
 // Cap on codex-spawn recovery dispatches per original slice before the loop
 // stops fighting the spawn path. Two attempts is enough to distinguish a
 // fluky worker (first attempt missed the checkbox) from a systemic codex
@@ -1338,154 +805,6 @@ function blockingMergedArchive(state, item, sliceId) {
 // the old mini-legate style of handing the /smithy.<verb> command straight
 // to a Claude steward that does the whole job itself.
 const MAX_RECOVERY_ATTEMPTS = 2;
-
-function graphNodes(status) {
-  return status?.graph?.nodes && typeof status.graph.nodes === "object"
-    ? status.graph.nodes
-    : {};
-}
-
-function graphNode(status, nodeId) {
-  const nodes = graphNodes(status);
-  return nodeId ? nodes[nodeId] || null : null;
-}
-
-function forgeRowId(value) {
-  const raw = String(value || "").trim();
-  if (!raw) return "";
-  return /^[a-zA-Z]/.test(raw) ? raw : "S" + raw;
-}
-
-function forgeNodeId(item) {
-  const args = actionArguments(item?.next_action || {});
-  const tasksPath = args[0] || item?.path || "";
-  const rowId = forgeRowId(args[1]);
-  if (!tasksPath || !rowId) return null;
-  return tasksPath + "#" + rowId;
-}
-
-function recordRowForForgeItem(status, item) {
-  const args = actionArguments(item?.next_action || {});
-  const tasksPath = args[0] || item?.path || "";
-  const rowId = forgeRowId(args[1]);
-  if (!tasksPath || !rowId) return null;
-  const records = Array.isArray(status?.records) ? status.records : [];
-  const record = records.find((candidate) => candidate?.path === tasksPath);
-  const rows = Array.isArray(record?.dependency_order?.rows)
-    ? record.dependency_order.rows
-    : [];
-  return rows.find((row) => String(row?.id || "") === rowId) || null;
-}
-
-function dependencyIds(status, item) {
-  const nodeId = forgeNodeId(item);
-  const node = graphNode(status, nodeId);
-  const row = node?.row || recordRowForForgeItem(status, item) || {};
-  const raw = Array.isArray(row?.depends_on) ? row.depends_on : [];
-  const recordPath = String(node?.record_path || actionArguments(item?.next_action || {})[0] || item?.path || "");
-  return raw
-    .map((dep) => String(dep || "").trim())
-    .filter(Boolean)
-    .map((dep) => dep.includes("#") ? dep : recordPath + "#" + dep);
-}
-
-function dependencyMerged(state, depId) {
-  const archived = state?.archived_slices && typeof state.archived_slices === "object"
-    ? state.archived_slices
-    : {};
-  const live = state?.slices && typeof state.slices === "object" ? state.slices : {};
-  const archivedSlice = archived[depId] || archived[slugifyDispatchPart(depId)];
-  if (archivedSlice && typeof archivedSlice === "object") {
-    if (archivedSlice.terminal_state === "MERGED" || archivedSlice.merged_at) return true;
-  }
-  const liveSlice = live[depId] || live[slugifyDispatchPart(depId)];
-  if (liveSlice && typeof liveSlice === "object") {
-    if (liveSlice.stage === "merged" || liveSlice.pr?.state === "MERGED") return true;
-  }
-  return false;
-}
-
-function itemFromGraphNode(status, node) {
-  const recordPath = String(node?.record_path || "");
-  const row = node?.row && typeof node.row === "object" ? node.row : {};
-  const rowId = String(row.id || "").trim();
-  const rowNumber = rowId.replace(/^[a-zA-Z]+/, "") || rowId;
-  // Look up the matching smithy status record so parent_path / parent_row_id
-  // are populated. Without these, dispatchSliceId(depItem) falls into the
-  // hash-based fallback and produces an ID that cannot match the semantic
-  // ID used when that dep was actually dispatched — leaving merged-archived
-  // deps invisible to dependencySatisfied.
-  const records = Array.isArray(status?.records) ? status.records : [];
-  const record = records.find((candidate) => candidate?.path === recordPath) || {};
-  return {
-    path: recordPath,
-    title: row.title || recordPath,
-    parent_path: record.parent_path || null,
-    parent_row_id: record.parent_row_id || null,
-    next_action: {
-      command: "smithy.forge",
-      arguments: [recordPath, rowNumber],
-    },
-  };
-}
-
-function dependencySatisfied(state, status, depId) {
-  const node = graphNode(status, depId);
-  const nodeStatus = String(node?.status || "").toLowerCase();
-  if (nodeStatus === "done") return true;
-  const depItem = node ? itemFromGraphNode(status, node) : null;
-  const candidates = [
-    depId,
-    depItem ? dispatchSliceId(depItem) : null,
-    slugifyDispatchPart(depId),
-  ].filter(Boolean);
-  return candidates.some((candidate) => dependencyMerged(state, candidate));
-}
-
-function dependenciesClear(state, status, item) {
-  return dependencyIds(status, item).every((depId) => dependencySatisfied(state, status, depId));
-}
-
-function dispatchPriority(item) {
-  const command = String(item?.next_action?.command || "");
-  if (command === "smithy.cut") return 0;
-  if (command === "smithy.forge") return 1;
-  if (command === "smithy.render") return 2;
-  if (command === "smithy.mark") return 3;
-  return 9;
-}
-
-function readyLayerNodeIds(status) {
-  const layers = Array.isArray(status?.graph?.layers) ? status.graph.layers : [];
-  const layer = layers.find((candidate) => Number(candidate?.layer) === 0);
-  const ids = Array.isArray(layer?.node_ids) ? layer.node_ids : [];
-  return new Set(ids.map((id) => String(id)));
-}
-
-function recordGraphNodeId(record) {
-  if (!record || typeof record !== "object") return null;
-  if (record.parent_path && record.parent_row_id) {
-    return String(record.parent_path) + "#" + String(record.parent_row_id);
-  }
-  const action = record.next_action || {};
-  if (String(action.command || "") === "smithy.render") {
-    const args = actionArguments(action);
-    const milestone = args[1] ? "M" + String(args[1]).replace(/^[a-zA-Z]+/, "") : "";
-    return milestone ? String(args[0] || record.path || "") + "#" + milestone : null;
-  }
-  return record.path ? String(record.path) : null;
-}
-
-function readySmithyItems(status) {
-  const records = Array.isArray(status?.records) ? status.records : [];
-  const readyNodes = readyLayerNodeIds(status);
-  return records
-    .filter((record) => record?.next_action && !record.virtual)
-    .filter((record) => ["smithy.render", "smithy.mark", "smithy.cut", "smithy.forge"].includes(String(record.next_action.command || "")))
-    .filter((record) => readyNodes.size === 0 || readyNodes.has(recordGraphNodeId(record)))
-    .map((record, index) => ({ ...record, __index: index }))
-    .sort((a, b) => dispatchPriority(a) - dispatchPriority(b) || a.__index - b.__index);
-}
 
 async function readSmithyStatus(repoPath) {
   // --pending = shorthand for --status in-progress,not-started. Filters out
@@ -2626,8 +1945,6 @@ async function handleRecoveryDispatch(state, ts, item, sliceId, mergedArchive) {
   }
   return { actions, failures, notifications };
 }
-
-
 
 // Fresh-dispatch launch for one ready item: create the hatchery-pending slice,
 // fire the codex spawn, and return the action (or escalate + a notification on a
