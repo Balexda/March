@@ -497,10 +497,13 @@ export async function apply(decisions: BabysitDecision[], ctx: HandlerContext, s
             await deps.sendMessage(d.sessionId, STRANDED_MESSAGE);
             slice.steward_nudge_sent_at = ts;
             slice.steward_nudge_count = d.nextCount;
+            // Record the action only after a successful send so steward_nudge_count
+            // (and the exported metric) counts nudges actually delivered — a
+            // messaging outage must not masquerade as a runaway-nudge loop.
+            res.actions.push({ action: "steward-nudge", sliceId: d.sliceId, sessionId: d.sessionId, detail: d.detail });
           } catch {
-            // send failed — leave counters; next tick retries.
+            // send failed — leave counters unrecorded; next tick retries.
           }
-          res.actions.push({ action: "steward-nudge", sliceId: d.sliceId, sessionId: d.sessionId, detail: d.detail });
         }
         if (d.alert) {
           slice.steward_stranded_escalated_at = ts;
