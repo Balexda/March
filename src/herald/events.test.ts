@@ -64,6 +64,29 @@ describe("reduce / fold", () => {
     expect(archived.slices.s1.archived).toBe(true);
   });
 
+  it("folds slice.steward.attached into sessionId/spawnId/branch/worktree (#213)", () => {
+    seq = 0;
+    const state = foldEvents([
+      ev({ type: "slice.dispatched", sliceId: "s1", branch: "feature/a", jobId: "job-1" }),
+      ev({
+        type: "slice.steward.attached",
+        sliceId: "s1",
+        sessionId: "sess-9",
+        spawnId: "sp-1",
+        branch: "march/spawn/sp-1",
+        worktreePath: "/wt/sp-1",
+      }),
+    ]);
+    expect(state.slices.s1).toMatchObject({
+      sessionId: "sess-9",
+      spawnId: "sp-1",
+      branch: "march/spawn/sp-1",
+      worktreePath: "/wt/sp-1",
+      jobId: "job-1",
+      archived: false,
+    });
+  });
+
   it("slice.stage.changed carries the steward sessionId into the fold (#210)", () => {
     seq = 0;
     const state = foldEvents([
@@ -75,6 +98,12 @@ describe("reduce / fold", () => {
     // A later stage change without a sessionId must not clobber the known link.
     const next = foldEvents([ev({ type: "slice.stage.changed", sliceId: "s1", stage: "pr-open" })], state);
     expect(next.slices.s1).toMatchObject({ stage: "pr-open", sessionId: "sess-9" });
+  });
+
+  it("entityRefOf maps slice.steward.attached to its slice", () => {
+    expect(
+      entityRefOf({ type: "slice.steward.attached", sliceId: "s1", sessionId: "x" }),
+    ).toEqual({ kind: "slice", id: "s1" });
   });
 
   it("state.error sets the error and clears statePresent", () => {

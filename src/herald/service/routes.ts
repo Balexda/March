@@ -35,6 +35,7 @@ const EVENT_TYPES: ReadonlySet<EventType> = new Set<EventType>([
   "workers.changed",
   "smithy.queue.changed",
   "slice.dispatched",
+  "slice.steward.attached",
   "slice.stage.changed",
   "slice.archived",
   "slice.recovery.dispatched",
@@ -48,6 +49,7 @@ const SLICE_TYPES: ReadonlySet<string> = new Set([
   "slice.pr.changed",
   "slice.output.changed",
   "slice.dispatched",
+  "slice.steward.attached",
   "slice.stage.changed",
   "slice.archived",
   "slice.recovery.dispatched",
@@ -99,6 +101,12 @@ export function validateEvent(body: Record<string, unknown>): EventValidation {
     if (typeof body.sessionId !== "string" || body.sessionId.trim().length === 0) {
       return { ok: false, error: `event "${type}" sessionId must be a non-empty string.` };
     }
+  }
+  // slice.steward.attached (#213) is the Hatchery push: sessionId is MANDATORY
+  // (it is the whole point of the event), so require it rather than treating it as
+  // optional like the SESSION_ID_TYPES transitions above.
+  if (type === "slice.steward.attached" && (typeof body.sessionId !== "string" || body.sessionId.trim().length === 0)) {
+    return { ok: false, error: `event "slice.steward.attached" requires a non-empty sessionId.` };
   }
   if (type === "session.changed") {
     const session = body.session as { id?: unknown } | undefined;

@@ -61,6 +61,15 @@ metrics label).
 - **Transition events** (legate-written, emitted at the cutover): `slice.dispatched`,
   `slice.stage.changed`, `slice.archived`, `slice.recovery.dispatched`,
   `steward.relaunched`, `slice.escalated`, `retry.counted`.
+- **Correlation event** (Hatchery-written, #213): `slice.steward.attached` —
+  published at steward launch, carrying `{ sliceId, sessionId, spawnId, branch,
+  worktreePath }`. Hatchery is the single integration point that holds all three
+  ids, so it OWNS this fact; the legate owns stage/lifecycle. The reducer merges
+  `sessionId`/`spawnId`/`branch`/`worktreePath` additively, so the two writers
+  never fight. This is the durable push half of the stranded-steward fix: Herald's
+  projection links the slice to its session within a tick of launch, so gated
+  PR-discovery runs without waiting on the legate's job poll. (It posts over
+  `POST /events`, so the stored `source` is `legate`.)
 
 `reduce(state, event)` folds either kind into a `SystemState` (per-slice stage +
 PR/output, worker counts, smithy queue, sessions, retry counters). Since #176

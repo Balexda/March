@@ -25,6 +25,14 @@ export interface CastraSession {
    * agent-deck doesn't report one.
    */
   readonly status: string;
+  /**
+   * Queryable session metadata stamped at launch (#214) — at minimum `sliceId`,
+   * plus `spawnId`. Castra owns this map (agent-deck has no arbitrary-metadata
+   * store), populated at launch and re-attached on `list`/`show`, so Herald's
+   * pull path can reconcile a session to its slice by exact id rather than the
+   * brittle worktree/title heuristic. Absent for sessions launched without it.
+   */
+  readonly metadata?: Record<string, string>;
 }
 
 /** Stable error codes returned in the API error envelope. */

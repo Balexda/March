@@ -29,6 +29,27 @@ export function sessionMatchesSlice(session: any, slice: any): boolean {
   return session.id === sessionId || session.title === sessionId || session.name === sessionId;
 }
 
+/**
+ * Loose slice↔session reconciliation for Herald's observer when a slice has no
+ * recorded `sessionId` (#210 gate): a missed correlation push (#213) — Herald
+ * down at launch, or a pre-fix slice — degrades to matching a live session by its
+ * worktree path, its branch (with feature/ variants), or a title/name equal to
+ * the slice id, rather than skipping PR discovery entirely. The exact-id match
+ * (`sessionMatchesSlice`) and the self-described metadata match (#214) are tried
+ * first by the caller; this is the last-resort fallback. `slice` carries
+ * `{ sliceId, branch, worktree_path }`.
+ */
+export function looseSessionMatch(session: any, slice: any): boolean {
+  const worktree = String(slice.worktree_path || "");
+  if (worktree && String(session.worktree_path || "") === worktree) return true;
+  const branches = new Set<string>();
+  addBranchVariants(branches, slice.branch);
+  if (branches.size > 0 && branches.has(String(session.branch || ""))) return true;
+  const sliceId = String(slice.sliceId || "");
+  if (sliceId && (session.title === sliceId || session.name === sliceId)) return true;
+  return false;
+}
+
 export function summarizeWorkers(
   list: any,
   workerGroup: string,

@@ -134,6 +134,8 @@ describe("completePendingHatcheryDispatches", () => {
     const out = await completePendingHatcheryDispatches(state, "T", deps({ getJob, emitTransition }));
     expect(state.slices.s).toMatchObject({ stage: "implementing", worker_session_id: "sess-9", branch: "feature/a", worktree_path: "/wt", implementing_started_at: "T" });
     expect(state.slices.s.hatchery).toMatchObject({ spawn_id: "sp-1", artifacts_dir: "/art" });
+    // The handoff transition carries the steward session so a restart's fold
+    // rebuild keeps the slice→session link (#210 latent regression).
     expect(emitTransition).toHaveBeenCalledWith({ type: "slice.stage.changed", sliceId: "s", stage: "implementing", sessionId: "sess-9" });
     expect(out.actions).toEqual([expect.objectContaining({ action: "dispatch-complete", sliceId: "s", sessionId: "sess-9" })]);
     // Retry counters for this slice are cleared; unrelated ones survive.

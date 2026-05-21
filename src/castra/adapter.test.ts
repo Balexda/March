@@ -239,6 +239,94 @@ describe("castra adapter — operations", () => {
     ).toBe(true);
   });
 
+  it("stamps launch metadata, returns it on launch, and re-attaches it on list/show (#214)", () => {
+    let listCalls = 0;
+    childProcessMock.execFileSync.mockImplementation((_cmd: string, args: string[]) => {
+      if (args.includes("list")) {
+        listCalls++;
+        // First list = pre-launch snapshot (empty); later lists report the new
+        // session, but agent-deck does NOT carry our metadata.
+        return listCalls === 1
+          ? "[]"
+          : JSON.stringify([session({ sessionId: "sess-new", group: "g" })]);
+      }
+      if (args.includes("show")) {
+        return JSON.stringify(session({ sessionId: "sess-new", group: "g" }));
+      }
+      return "";
+    });
+    const adapter = createAgentDeckAdapter();
+    const launched = adapter.launch({
+      profile: "march",
+      repoPath: "/repo",
+      branch: "march/spawn/x",
+      title: "Steward",
+      group: "g",
+      metadata: { sliceId: "slice-7", spawnId: "sp-1" },
+    });
+    expect(launched.metadata).toEqual({ sliceId: "slice-7", spawnId: "sp-1" });
+
+    // list re-attaches the Castra-owned metadata even though agent-deck omits it.
+    const listed = adapter.list({ profile: "march" }).find((s) => s.sessionId === "sess-new");
+    expect(listed?.metadata).toEqual({ sliceId: "slice-7", spawnId: "sp-1" });
+    // show does too.
+    expect(adapter.show({ profile: "march", sessionId: "sess-new" }).metadata).toEqual({
+      sliceId: "slice-7",
+      spawnId: "sp-1",
+    });
+  });
+
+  it("backfills an empty branch from the launch branch on list (stale-branch fix #214)", () => {
+    let listCalls = 0;
+    childProcessMock.execFileSync.mockImplementation((_cmd: string, args: string[]) => {
+      if (args.includes("list")) {
+        listCalls++;
+        // agent-deck reports an empty branch for the live session.
+        return listCalls === 1
+          ? "[]"
+          : JSON.stringify([session({ sessionId: "sess-new", group: "g", branch: "" })]);
+      }
+      return "";
+    });
+    const adapter = createAgentDeckAdapter();
+    adapter.launch({
+      profile: "march",
+      repoPath: "/repo",
+      branch: "march/spawn/x",
+      title: "Steward",
+      group: "g",
+    });
+    const listed = adapter.list({ profile: "march" }).find((s) => s.sessionId === "sess-new");
+    expect(listed?.branch).toBe("march/spawn/x");
+  });
+
+  it("forgets a session's metadata after remove", () => {
+    let listCalls = 0;
+    childProcessMock.execFileSync.mockImplementation((_cmd: string, args: string[]) => {
+      if (args.includes("list")) {
+        listCalls++;
+        return listCalls === 1
+          ? "[]"
+          : JSON.stringify([session({ sessionId: "sess-new", group: "g" })]);
+      }
+      return "";
+    });
+    const adapter = createAgentDeckAdapter();
+    adapter.launch({
+      profile: "march",
+      repoPath: "/repo",
+      branch: "march/spawn/x",
+      title: "Steward",
+      group: "g",
+      metadata: { sliceId: "slice-7" },
+    });
+    expect(adapter.remove({ profile: "march", sessionId: "sess-new", pruneWorktree: false })).toEqual({
+      removed: true,
+    });
+    const listed = adapter.list({ profile: "march" }).find((s) => s.sessionId === "sess-new");
+    expect(listed?.metadata).toBeUndefined();
+  });
+
   it("raises a conflict when the launched worktree dir does not match the branch", () => {
     let listCalls = 0;
     childProcessMock.execFileSync.mockImplementation((_cmd: string, args: string[]) => {
