@@ -214,6 +214,44 @@ function stderrText(stderr: unknown): string {
   return "";
 }
 
+/**
+ * Resolve the environment for spawned `agent-deck` processes.
+ *
+ * agent-deck derives a session's `status` by reaching the tmux server and
+ * inspecting the live pane; it locates that server from `$TMUX`, whose first
+ * comma-separated field is the socket path (see agent-deck's
+ * `tmuxSocketFromEnv`). When the Castra service runs *inside* the tmux server
+ * it manages, `$TMUX` is already set and inherited — we pass the environment
+ * through untouched and the happy path is unchanged.
+ *
+ * But when Castra is started *outside* tmux — the #152 container-stack scenario,
+ * or any plain/systemd service — `$TMUX` is absent. agent-deck then can't reach
+ * the server (the status path keys off `$TMUX`, not `$TMUX_TMPDIR`), its
+ * liveness derivation fails, and every live session is reported as
+ * `status="error"` (issue #174). The legate loop's babysit treats that as a
+ * worker error and escalates a healthy steward.
+ *
+ * To make Castra robust to its own launch context, when `$TMUX` is missing we
+ * point agent-deck at the host's default tmux server socket
+ * (`${TMUX_TMPDIR:-/tmp}/tmux-<uid>/default`) by synthesizing a `$TMUX` value.
+ * That's the same socket agent-deck's own `launch` uses, so launches and status
+ * queries consistently target the one shared server the host already runs its
+ * sessions on. Only the socket field is read; the server-pid/session fields are
+ * unused by socket resolution, so `0,0` is fine.
+ */
+export function resolveAgentDeckEnv(
+  env: NodeJS.ProcessEnv,
+  uid: number | undefined,
+): NodeJS.ProcessEnv {
+  if (env.TMUX && env.TMUX.trim()) return env;
+  // No tmux server we can address (e.g. a platform without getuid) — leave the
+  // environment alone rather than synthesize a socket we can't justify.
+  if (uid === undefined) return env;
+  const tmpdir = env.TMUX_TMPDIR?.trim() || "/tmp";
+  const socket = `${tmpdir}/tmux-${uid}/default`;
+  return { ...env, TMUX: `${socket},0,0` };
+}
+
 /** Run `agent-deck <args>` capturing stdout. Throws AgentDeckExecError on failure. */
 function runAgentDeck(args: readonly string[], capture: boolean): string {
   try {
@@ -221,6 +259,7 @@ function runAgentDeck(args: readonly string[], capture: boolean): string {
       encoding: "utf-8",
       stdio: ["ignore", capture ? "pipe" : "ignore", "pipe"],
       maxBuffer: EXEC_MAX_BUFFER,
+      env: resolveAgentDeckEnv(process.env, process.getuid?.()),
     });
     return typeof out === "string" ? out : "";
   } catch (err) {
