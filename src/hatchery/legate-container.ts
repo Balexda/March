@@ -100,8 +100,8 @@ export function renderLegateDockerfile(
     `USER root\n` +
     // Toolchain the deterministic loop shells out to every tick (git/gh for PR +
     // branch state, jq, python3, tmux/openssh for agent-deck-launched workers).
-    // agent-deck itself is bind-mounted from the host (see legateContainerMounts)
-    // — it has no npm/apt distribution.
+    // The loop no longer bind-mounts agent-deck — it reaches interactive sessions
+    // through the Castra service over HTTP (see legateContainerMounts).
     `RUN apt-get update \\\n` +
     ` && apt-get install -y --no-install-recommends bash ca-certificates curl git gnupg jq openssh-client python3 tmux \\\n` +
     ` && rm -rf /var/lib/apt/lists/*\n` +
