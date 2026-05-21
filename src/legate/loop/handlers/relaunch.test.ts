@@ -42,7 +42,7 @@ const eligibleSlice = (over: Record<string, any> = {}) => ({
 });
 
 describe("relaunch handler", () => {
-  it("assess flags eligible slices whose session is gone, respecting filters", () => {
+  it("assess flags eligible slices whose session is gone, respecting filters", async () => {
     const state = loopState({
       slices: {
         gone: eligibleSlice(),
@@ -60,7 +60,7 @@ describe("relaunch handler", () => {
     expect(d.worktreePath).toBe("/home/u/Development/WorkTrees/March/feature-feat-a");
   });
 
-  it("assess stops after the retry limit", () => {
+  it("assess stops after the retry limit", async () => {
     const state = loopState({
       slices: { gone: eligibleSlice() },
       raw: { slices: {}, transient_retry_counts: { "relaunch-steward:gone": 3 } },
@@ -68,12 +68,12 @@ describe("relaunch handler", () => {
     expect(assess(state)).toEqual([]);
   });
 
-  it("apply recreates a missing worktree, launches, sends resume, and rebinds the slice", () => {
+  it("apply recreates a missing worktree, launches, sends resume, and rebinds the slice", async () => {
     const slice = eligibleSlice();
     const state = loopState({ slices: { gone: slice }, raw: { slices: { gone: slice } } });
     const c = ctx(() => ({ sessionId: "fresh" }));
-    const deps: RelaunchDeps = { worktreeExists: vi.fn(() => false), ensureWorktree: vi.fn() };
-    const res = apply(assess(state), c, state, deps);
+    const deps: RelaunchDeps = { worktreeExists: vi.fn(() => false), ensureWorktree: vi.fn(async () => {}) };
+    const res = await apply(assess(state), c, state, deps);
 
     expect(deps.ensureWorktree).toHaveBeenCalledWith(
       "/home/u/Development/WorkTrees/March/feature-feat-a",
@@ -88,17 +88,17 @@ describe("relaunch handler", () => {
     expect(c.persist).toHaveBeenCalled();
   });
 
-  it("apply records relaunch-failed and skips launch when worktree recreation throws", () => {
+  it("apply records relaunch-failed and skips launch when worktree recreation throws", async () => {
     const slice = eligibleSlice();
     const state = loopState({ slices: { gone: slice }, raw: { slices: { gone: slice } } });
     const c = ctx(() => ({ sessionId: "fresh" }));
     const deps: RelaunchDeps = {
       worktreeExists: () => false,
-      ensureWorktree: () => {
+      ensureWorktree: async () => {
         throw new Error("git boom");
       },
     };
-    const res = apply(assess(state), c, state, deps);
+    const res = await apply(assess(state), c, state, deps);
     expect(c.castra.launchSession).not.toHaveBeenCalled();
     expect(res.actions[0]).toMatchObject({ action: "relaunch-failed" });
     expect(slice.worker_session_id).toBe("dead");

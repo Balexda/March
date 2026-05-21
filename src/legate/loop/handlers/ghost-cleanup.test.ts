@@ -31,7 +31,7 @@ function ctx(teardown: () => BroodTeardownResult): HandlerContext {
     meta: {} as any,
     ts: NOW,
     castra: {} as any,
-    broodTeardown: vi.fn(teardown),
+    broodTeardown: vi.fn(async () => teardown()),
     persist: vi.fn(),
     emit: vi.fn(),
     log: vi.fn(),
@@ -39,7 +39,7 @@ function ctx(teardown: () => BroodTeardownResult): HandlerContext {
 }
 
 describe("ghost-cleanup handler", () => {
-  it("assess flags old orphan workers, not active/young/non-worker ones", () => {
+  it("assess flags old orphan workers, not active/young/non-worker ones", async () => {
     const state = loopState({
       slices: { live: { branch: "keep", worker_session_id: "active" } },
       sessions: [
@@ -53,25 +53,25 @@ describe("ghost-cleanup handler", () => {
     expect(assess(state).map((d) => d.sessionId)).toEqual(["ghost"]);
   });
 
-  it("apply tears down ghosts via Brood and drops them from the snapshot", () => {
+  it("apply tears down ghosts via Brood and drops them from the snapshot", async () => {
     const state = loopState({
       sessions: [{ id: "ghost", group: "legate-workers", worktree_path: "/wt/feature-orphan", created_at: OLD }],
       sessionsById: new Map([["ghost", {}]]),
     });
     const c = ctx(() => ({ ok: true, notTracked: false, detail: "" }));
-    const res = apply(assess(state), c, state);
+    const res = await apply(assess(state), c, state);
     expect(c.broodTeardown).toHaveBeenCalledWith("ghost", { force: true, reason: "ghost-steward" });
     expect(res.actions[0]).toMatchObject({ action: "ghost-cleanup", sessionId: "ghost" });
     expect(state.sessionsById.has("ghost")).toBe(false);
   });
 
-  it("apply records a failure (no drop) when teardown can't confirm", () => {
+  it("apply records a failure (no drop) when teardown can't confirm", async () => {
     const state = loopState({
       sessions: [{ id: "ghost", group: "legate-workers", worktree_path: "/wt/feature-orphan", created_at: OLD }],
       sessionsById: new Map([["ghost", {}]]),
     });
     const c = ctx(() => ({ ok: false, notTracked: true, detail: "not tracked by Brood" }));
-    const res = apply(assess(state), c, state);
+    const res = await apply(assess(state), c, state);
     expect(res.actions[0]).toMatchObject({ action: "ghost-cleanup-failed" });
     expect(state.sessionsById.has("ghost")).toBe(true);
   });

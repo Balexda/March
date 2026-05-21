@@ -120,6 +120,28 @@ export class CastraClient {
     this.fetchImpl = options.fetchImpl ?? fetch;
   }
 
+  /** GET /v1/sessions — list sessions (optionally filtered by group). */
+  async listSessions(profile: string, group?: string): Promise<CastraSession[]> {
+    const qs = new URLSearchParams({ profile });
+    if (group) qs.set("group", group);
+    const body = await this.request("GET", `/v1/sessions?${qs.toString()}`, { expectStatus: 200 });
+    const sessions = (body as { sessions?: CastraSession[] }).sessions;
+    return Array.isArray(sessions) ? sessions : [];
+  }
+
+  /** GET /v1/sessions/:id/output — recent session output. */
+  async sessionOutput(profile: string, sessionId: string, lines?: number): Promise<string> {
+    const qs = new URLSearchParams({ profile });
+    if (lines !== undefined) qs.set("lines", String(lines));
+    const body = await this.request(
+      "GET",
+      `/v1/sessions/${encodeURIComponent(sessionId)}/output?${qs.toString()}`,
+      { expectStatus: 200 },
+    );
+    const output = (body as { output?: unknown }).output;
+    return typeof output === "string" ? output : "";
+  }
+
   /** Launch a steward session. Returns the identified session (404/409 → throws). */
   async launchSession(req: LaunchSessionRequest): Promise<CastraSession> {
     const body = await this.request("POST", "/v1/sessions", {

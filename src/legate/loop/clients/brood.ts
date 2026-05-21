@@ -1,42 +1,26 @@
-import { execFileSync } from "node:child_process";
+import { BroodClient, BroodNotFoundError } from "../../../brood/service/client.js";
 import type { SessionRecord } from "../../../brood/service/types.js";
 
 /**
  * The legate loop's seam to Brood — the session-state + teardown authority
- * (Balexda/March#164). The loop's tick is synchronous, and #164 designed the
- * loop→Brood path as the `march brood` CLI (the baked-in `march` shells to the
- * BroodClient which hits the service), so this wraps `march brood teardown|list`
- * via execFileSync rather than introducing a sync HTTP client.
- *
- * The runner is injectable so handlers/tests don't shell out for real.
+ * (Balexda/March#164). Brood runs as a service, so this calls it over HTTP via
+ * the async {@link BroodClient} (set `MARCH_BROOD_URL`). The client is injectable
+ * so handlers/tests don't hit the network.
  */
 
-export interface CliResult {
-  readonly status: number;
-  readonly stdout: string;
-  readonly stderr: string;
+/** Minimal slice of {@link BroodClient} these helpers use — lets tests stub it. */
+export interface BroodSeam {
+  teardown(
+    id: string,
+    request?: { force?: boolean; kill?: boolean; reason?: string },
+  ): Promise<{ id: string; status: string; warnings?: string[] }>;
+  list(filter?: { kind?: SessionRecord["kind"]; status?: SessionRecord["status"] }): Promise<SessionRecord[]>;
 }
 
-export type CliRunner = (args: string[]) => CliResult;
-
-/** Default runner: invoke the baked-in `march` CLI, capturing exit + streams. */
-export const defaultMarchRunner: CliRunner = (args) => {
-  try {
-    const stdout = execFileSync("march", args, {
-      encoding: "utf-8",
-      stdio: ["ignore", "pipe", "pipe"],
-      maxBuffer: 16 * 1024 * 1024,
-    });
-    return { status: 0, stdout: typeof stdout === "string" ? stdout : "", stderr: "" };
-  } catch (err) {
-    const e = err as { status?: number; stdout?: unknown; stderr?: unknown; message?: string };
-    return {
-      status: typeof e.status === "number" ? e.status : 1,
-      stdout: typeof e.stdout === "string" ? e.stdout : "",
-      stderr: typeof e.stderr === "string" ? e.stderr : e.message ?? "",
-    };
-  }
-};
+let _client: BroodClient | undefined;
+function defaultClient(): BroodClient {
+  return (_client ??= new BroodClient());
+}
 
 export interface BroodTeardownOptions {
   readonly force?: boolean;
@@ -45,59 +29,52 @@ export interface BroodTeardownOptions {
 }
 
 export interface BroodTeardownResult {
-  /** Teardown confirmed (CLI exit 0). */
+  /** Teardown confirmed (HTTP 200). */
   readonly ok: boolean;
   /**
-   * Brood has no record of the session (CLI 404). NOT success: the caller should
-   * defer + retry rather than archive over an orphaned steward/worktree.
+   * Brood has no record of the session (HTTP 404). NOT success: the caller should
+   * defer + retry rather than archive over an orphaned steward/worktree (#155).
    */
   readonly notTracked: boolean;
   readonly detail: string;
 }
 
+function summarizeTeardown(res: { id: string; status: string; warnings?: string[] }): string {
+  const warn = res.warnings && res.warnings.length > 0 ? ` (warnings: ${res.warnings.join("; ")})` : "";
+  return `teardown ${res.id}: ${res.status}${warn}`;
+}
+
 /**
- * Request teardown of a session via `march brood teardown <id>`. Returns
- * `ok:true` only on a confirmed teardown; a non-zero exit (incl. the 404
- * "not tracked") yields `ok:false` so cleanup defers instead of archiving.
+ * Request teardown of a session via Brood. Returns `ok:true` only on a confirmed
+ * teardown; a 404 (not-tracked) or any transport/server error yields `ok:false`
+ * so cleanup defers instead of archiving over an orphan.
  */
-export function broodTeardown(
+export async function broodTeardown(
   sessionId: string,
   opts: BroodTeardownOptions = {},
-  run: CliRunner = defaultMarchRunner,
-): BroodTeardownResult {
-  const args = ["brood", "teardown", sessionId];
-  if (opts.force) args.push("--force");
-  if (opts.kill) args.push("--kill");
-  if (opts.reason) args.push("--reason", opts.reason);
-  const res = run(args);
-  if (res.status === 0) {
-    return { ok: true, notTracked: false, detail: res.stdout.trim() };
+  client: BroodSeam = defaultClient(),
+): Promise<BroodTeardownResult> {
+  try {
+    const res = await client.teardown(sessionId, { force: opts.force, kill: opts.kill, reason: opts.reason });
+    return { ok: true, notTracked: false, detail: summarizeTeardown(res) };
+  } catch (err) {
+    if (err instanceof BroodNotFoundError) {
+      return { ok: false, notTracked: true, detail: err.message };
+    }
+    return { ok: false, notTracked: false, detail: err instanceof Error ? err.message : String(err) };
   }
-  const detail = (res.stderr || res.stdout || "").trim();
-  return { ok: false, notTracked: /not tracked by Brood/i.test(detail), detail };
-}
-
-export interface BroodListFilter {
-  readonly kind?: SessionRecord["kind"];
-  readonly status?: SessionRecord["status"];
 }
 
 /**
- * List the sessions Brood tracks via `march brood list --json`. Returns `[]` on
- * any failure (the caller falls back to its other state sources).
+ * List the sessions Brood tracks. Returns `[]` on any failure (the caller falls
+ * back to its other state sources).
  */
-export function broodListSessions(
-  filter: BroodListFilter = {},
-  run: CliRunner = defaultMarchRunner,
-): SessionRecord[] {
-  const args = ["brood", "list", "--json"];
-  if (filter.kind) args.push("--kind", filter.kind);
-  if (filter.status) args.push("--status", filter.status);
-  const res = run(args);
-  if (res.status !== 0 || !res.stdout.trim()) return [];
+export async function broodListSessions(
+  filter: { kind?: SessionRecord["kind"]; status?: SessionRecord["status"] } = {},
+  client: BroodSeam = defaultClient(),
+): Promise<SessionRecord[]> {
   try {
-    const parsed = JSON.parse(res.stdout);
-    return Array.isArray(parsed) ? (parsed as SessionRecord[]) : [];
+    return await client.list(filter);
   } catch {
     return [];
   }

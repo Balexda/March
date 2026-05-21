@@ -33,33 +33,33 @@ function deps(state: LoopState, ctxOver: Partial<HandlerContext> = {}): Coordina
     meta: { profile: "p", worker_group: "legate-workers", processor_name: "loop", paired_legate: "legate" } as any,
     ts: NOW,
     castra: {} as any,
-    broodTeardown: vi.fn(() => ({ ok: true, notTracked: false, detail: "" })),
+    broodTeardown: vi.fn(async () => ({ ok: true, notTracked: false, detail: "" })),
     persist: vi.fn(),
     emit: vi.fn(),
     log: vi.fn(),
     ...ctxOver,
   };
   return {
-    sense: () => state,
+    sense: async () => state,
     makeContext: () => ctx,
-    babysit: { sendMessage: vi.fn(), requestJudgement: vi.fn(() => null) },
+    babysit: { sendMessage: vi.fn(async () => {}), requestJudgement: vi.fn(async () => null) },
     dispatch: {
-      completePending: vi.fn(() => ({ actions: [], failures: [], mutated: false, notifications: [] })),
-      launchDispatch: vi.fn(() => ({ actions: [], failures: [], mutated: false })),
-      recoveryDispatch: vi.fn(() => ({ actions: [], failures: [], mutated: false })),
-      requestJudgement: vi.fn(() => null),
+      completePending: vi.fn(async () => ({ actions: [], failures: [], mutated: false, notifications: [] })),
+      launchDispatch: vi.fn(async () => ({ actions: [], failures: [], mutated: false })),
+      recoveryDispatch: vi.fn(async () => ({ actions: [], failures: [], mutated: false })),
+      requestJudgement: vi.fn(async () => null),
     },
   };
 }
 
 describe("coordinator runTick", () => {
-  it("archives a terminal-PR slice and threads the mutation so babysit can't re-see it", () => {
+  it("archives a terminal-PR slice and threads the mutation so babysit can't re-see it", async () => {
     const state = makeState();
     const babysitSend = vi.fn();
     const d = deps(state);
-    d.babysit = { sendMessage: babysitSend, requestJudgement: vi.fn(() => null) };
+    d.babysit = { sendMessage: babysitSend, requestJudgement: vi.fn(async () => null) };
 
-    const out = runTick(d);
+    const out = await runTick(d);
 
     // cleanup ran first: slice archived, session dropped from the live snapshot.
     expect(out.results.cleanup.actions).toHaveLength(1);
@@ -70,10 +70,10 @@ describe("coordinator runTick", () => {
     expect(babysitSend).not.toHaveBeenCalled();
   });
 
-  it("aggregates a TickResult from the per-handler results + sensed snapshot", () => {
+  it("aggregates a TickResult from the per-handler results + sensed snapshot", async () => {
     const state = makeState();
     state.smithy.queue = { dispatchable: 2, blocked: 1, total: 3 };
-    const out = runTick(deps(state));
+    const out = await await runTick(deps(state));
 
     expect(out.tick).toMatchObject({
       ts: NOW,
@@ -85,10 +85,10 @@ describe("coordinator runTick", () => {
     });
   });
 
-  it("drives the dispatch completion + selection seams", () => {
+  it("drives the dispatch completion + selection seams", async () => {
     const state = makeState();
     const d = deps(state);
-    runTick(d);
+    await runTick(d);
     expect(d.dispatch.completePending).toHaveBeenCalledWith(state.raw, NOW);
   });
 });

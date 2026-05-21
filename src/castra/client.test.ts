@@ -81,6 +81,25 @@ describe("castra client — requests", () => {
     });
   });
 
+  it("lists sessions via GET with the profile + group query", async () => {
+    const fetchImpl = vi.fn(async () => jsonResponse(200, { sessions: [{ sessionId: "s1", group: "g" }] }));
+    const client = new CastraClient({ baseUrl: "http://castra:9264", fetchImpl: fetchImpl as unknown as typeof fetch });
+    const sessions = await client.listSessions("march", "g");
+    expect(sessions).toHaveLength(1);
+    const [url, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe("http://castra:9264/v1/sessions?profile=march&group=g");
+    expect(init.method).toBe("GET");
+  });
+
+  it("reads recent session output via GET", async () => {
+    const fetchImpl = vi.fn(async () => jsonResponse(200, { output: "recent log" }));
+    const client = new CastraClient({ baseUrl: "http://castra:9264", fetchImpl: fetchImpl as unknown as typeof fetch });
+    const output = await client.sessionOutput("march", "s1");
+    expect(output).toBe("recent log");
+    const [url] = fetchImpl.mock.calls[0] as unknown as [string];
+    expect(url).toBe("http://castra:9264/v1/sessions/s1/output?profile=march");
+  });
+
   it("maps a non-2xx envelope to a typed error preserving code + status", async () => {
     const fetchImpl = vi.fn(async () =>
       jsonResponse(409, { error: { code: "conflict", message: "launch race" } }),

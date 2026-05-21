@@ -17,7 +17,7 @@ import * as dispatch from "./handlers/dispatch.js";
 
 export interface CoordinatorDeps {
   /** Stage 1 — gather the snapshot (bound to its SenseDeps). */
-  sense: () => LoopState;
+  sense: () => Promise<LoopState>;
   /** Build the per-tick handler context (Castra/Brood/persist/emit/log). */
   makeContext: (state: LoopState) => HandlerContext;
   babysit: babysit.BabysitDeps;
@@ -59,16 +59,19 @@ function buildTickResult(state: LoopState, r: CoordinatorOutput["results"]): Tic
   };
 }
 
-export function runTick(deps: CoordinatorDeps): CoordinatorOutput {
-  const state = deps.sense();
+export async function runTick(deps: CoordinatorDeps): Promise<CoordinatorOutput> {
+  const state = await deps.sense();
   const ctx = deps.makeContext(state);
 
+  // Awaited in order — each apply mutates the shared snapshot, so a later
+  // handler's assess sees the current world. Do NOT parallelize: the ordering
+  // (cleanup drops a session before babysit reads it) is load-bearing.
   const results = {
-    cleanup: cleanup.apply(cleanup.assess(state), ctx, state),
-    ghost: ghostCleanup.apply(ghostCleanup.assess(state), ctx, state),
-    relaunch: relaunch.apply(relaunch.assess(state), ctx, state, deps.relaunch),
-    babysit: babysit.apply(babysit.assess(state), ctx, state, deps.babysit),
-    dispatch: dispatch.apply(dispatch.assess(state), ctx, state, deps.dispatch),
+    cleanup: await cleanup.apply(cleanup.assess(state), ctx, state),
+    ghost: await ghostCleanup.apply(ghostCleanup.assess(state), ctx, state),
+    relaunch: await relaunch.apply(relaunch.assess(state), ctx, state, deps.relaunch),
+    babysit: await babysit.apply(babysit.assess(state), ctx, state, deps.babysit),
+    dispatch: await dispatch.apply(dispatch.assess(state), ctx, state, deps.dispatch),
   };
 
   return { state, tick: buildTickResult(state, results), results };

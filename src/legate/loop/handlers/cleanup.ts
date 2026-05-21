@@ -42,12 +42,12 @@ export function assess(state: LoopState): CleanupDecision[] {
   return out;
 }
 
-export function apply(decisions: CleanupDecision[], ctx: HandlerContext, state: LoopState): HandlerResult {
+export async function apply(decisions: CleanupDecision[], ctx: HandlerContext, state: LoopState): Promise<HandlerResult> {
   const res = emptyHandlerResult();
   for (const d of decisions) {
     const slice = state.slices[d.sliceId];
     if (!slice) continue;
-    const teardown = ctx.broodTeardown(d.sessionId, {
+    const teardown = await ctx.broodTeardown(d.sessionId, {
       reason: `pr-${d.terminalState.toLowerCase()}`,
     });
     if (!teardown.ok) {

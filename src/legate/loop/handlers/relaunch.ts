@@ -42,14 +42,14 @@ export interface RelaunchDecision {
 /** Side-effect seams for apply — injectable so the git/fs writes are testable. */
 export interface RelaunchDeps {
   worktreeExists: (p: string) => boolean;
-  ensureWorktree: (worktreePath: string, featureBranch: string, repoPath: string) => void;
+  ensureWorktree: (worktreePath: string, featureBranch: string, repoPath: string) => Promise<void>;
 }
 
 const defaultRelaunchDeps: RelaunchDeps = {
   worktreeExists: (p) => fs.existsSync(p),
-  ensureWorktree: (worktreePath, featureBranch, repoPath) => {
+  ensureWorktree: async (worktreePath, featureBranch, repoPath) => {
     fs.mkdirSync(path.dirname(worktreePath), { recursive: true });
-    execText("git", ["worktree", "add", worktreePath, featureBranch], { cwd: repoPath });
+    await execText("git", ["worktree", "add", worktreePath, featureBranch], { cwd: repoPath });
   },
 };
 
@@ -133,12 +133,12 @@ export function assess(state: LoopState): RelaunchDecision[] {
   return out;
 }
 
-export function apply(
+export async function apply(
   decisions: RelaunchDecision[],
   ctx: HandlerContext,
   state: LoopState,
   deps: RelaunchDeps = defaultRelaunchDeps,
-): HandlerResult {
+): Promise<HandlerResult> {
   const res = emptyHandlerResult();
   if (decisions.length === 0) return res;
   const counts = ensureRetryCounts(state.raw);
@@ -146,7 +146,7 @@ export function apply(
   for (const d of decisions) {
     if (!deps.worktreeExists(d.worktreePath)) {
       try {
-        deps.ensureWorktree(d.worktreePath, d.featureBranch, state.repoPath as string);
+        await deps.ensureWorktree(d.worktreePath, d.featureBranch, state.repoPath as string);
       } catch (err) {
         res.actions.push({
           action: "relaunch-failed",
@@ -160,7 +160,7 @@ export function apply(
 
     let newSessionId: string | null = null;
     try {
-      const relaunched = ctx.castra.launchSession({
+      const relaunched = await ctx.castra.launchSession({
         profile: ctx.meta.profile,
         repoPath: state.repoPath as string,
         branch: d.bareBranch,
@@ -181,7 +181,7 @@ export function apply(
     }
 
     try {
-      ctx.castra.sendPrompt({ profile: ctx.meta.profile, sessionId: newSessionId, prompt: stewardResumeMessage(d), traceKey: d.sliceId } as any);
+      await ctx.castra.sendPrompt({ profile: ctx.meta.profile, sessionId: newSessionId, prompt: stewardResumeMessage(d), traceKey: d.sliceId } as any);
     } catch {
       // Best-effort: session is alive; future babysit messages will still reach it.
     }

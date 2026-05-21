@@ -27,7 +27,7 @@ function ctx(teardown: (id: string) => BroodTeardownResult): HandlerContext {
     meta: { processor_name: "loop", paired_legate: "legate" } as any,
     ts: "T",
     castra: {} as any,
-    broodTeardown: vi.fn((id: string) => teardown(id)),
+    broodTeardown: vi.fn(async (id: string) => teardown(id)),
     persist: vi.fn(),
     emit: vi.fn(),
     log: vi.fn(),
@@ -47,7 +47,7 @@ describe("cleanup handler", () => {
     });
   }
 
-  it("assess flags MERGED/CLOSED PRs on active slices, ignores OPEN + sessionless", () => {
+  it("assess flags MERGED/CLOSED PRs on active slices, ignores OPEN + sessionless", async () => {
     expect(assess(withTerminalSlice("MERGED")).map((d) => d.sliceId)).toEqual(["s"]);
     expect(assess(withTerminalSlice("CLOSED")).map((d) => d.terminalState)).toEqual(["CLOSED"]);
     expect(assess(withTerminalSlice("OPEN"))).toEqual([]);
@@ -57,10 +57,10 @@ describe("cleanup handler", () => {
     expect(assess(noSession)).toEqual([]);
   });
 
-  it("apply requests Brood teardown then archives the slice on success", () => {
+  it("apply requests Brood teardown then archives the slice on success", async () => {
     const state = withTerminalSlice("MERGED");
     const c = ctx(ok);
-    const res = apply(assess(state), c, state);
+    const res = await apply(assess(state), c, state);
     expect(c.broodTeardown).toHaveBeenCalledWith("sess", { reason: "pr-merged" });
     expect(res.actions).toHaveLength(1);
     expect(state.raw.archived_slices.s).toMatchObject({ terminal_state: "MERGED", pr_number: 9 });
@@ -69,10 +69,10 @@ describe("cleanup handler", () => {
     expect(c.persist).toHaveBeenCalled();
   });
 
-  it("apply DEFERS (does not archive) when Brood can't confirm teardown", () => {
+  it("apply DEFERS (does not archive) when Brood can't confirm teardown", async () => {
     const state = withTerminalSlice("MERGED");
     const c = ctx(notTracked);
-    const res = apply(assess(state), c, state);
+    const res = await apply(assess(state), c, state);
     expect(res.failures).toHaveLength(1);
     expect(res.actions).toHaveLength(0);
     // slice stays live for retry — NOT archived over an orphan

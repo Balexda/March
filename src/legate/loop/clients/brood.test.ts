@@ -1,38 +1,57 @@
 import { describe, expect, it, vi } from "vitest";
-import { broodListSessions, broodTeardown, type CliResult } from "./brood.js";
+import { broodListSessions, broodTeardown, type BroodSeam } from "./brood.js";
+import { BroodNotFoundError } from "../../../brood/service/client.js";
 
-const ok = (stdout = ""): CliResult => ({ status: 0, stdout, stderr: "" });
-const fail = (stderr: string, status = 1): CliResult => ({ status, stdout: "", stderr });
+function seam(over: Partial<BroodSeam> = {}): BroodSeam {
+  return {
+    teardown: vi.fn(async (id: string) => ({ id, status: "removed", warnings: [] })),
+    list: vi.fn(async () => []),
+    ...over,
+  };
+}
 
-describe("loop brood client (march brood CLI)", () => {
-  it("teardown returns ok on exit 0 and passes flags", () => {
-    const run = vi.fn(() => ok("worktree: ok\n"));
-    const res = broodTeardown("sess-1", { force: true, reason: "merged" }, run);
-    expect(res).toEqual({ ok: true, notTracked: false, detail: "worktree: ok" });
-    expect(run).toHaveBeenCalledWith(["brood", "teardown", "sess-1", "--force", "--reason", "merged"]);
+describe("loop brood client (async BroodClient seam)", () => {
+  it("teardown returns ok on a confirmed teardown and forwards flags", async () => {
+    const client = seam({ teardown: vi.fn(async (id) => ({ id, status: "removed", warnings: ["worktree busy"] })) });
+    const res = await broodTeardown("sess-1", { force: true, reason: "merged" }, client);
+    expect(res).toEqual({ ok: true, notTracked: false, detail: "teardown sess-1: removed (warnings: worktree busy)" });
+    expect(client.teardown).toHaveBeenCalledWith("sess-1", { force: true, kill: undefined, reason: "merged" });
   });
 
-  it("teardown flags a 404 'not tracked' as notTracked (defer, not success)", () => {
-    const run = vi.fn(() => fail('Session "sess-1" is not tracked by Brood; cannot confirm teardown.'));
-    const res = broodTeardown("sess-1", {}, run);
+  it("teardown flags a 404 not-found as notTracked (defer, not success)", async () => {
+    const client = seam({
+      teardown: vi.fn(async () => {
+        throw new BroodNotFoundError('brood has no session "sess-1"');
+      }),
+    });
+    const res = await broodTeardown("sess-1", {}, client);
     expect(res.ok).toBe(false);
     expect(res.notTracked).toBe(true);
   });
 
-  it("teardown reports a generic failure as not-ok, not notTracked", () => {
-    const res = broodTeardown("sess-1", {}, () => fail("brood teardown failed (502)"));
+  it("teardown reports a generic/transport failure as not-ok, not notTracked", async () => {
+    const client = seam({
+      teardown: vi.fn(async () => {
+        throw new Error("Could not reach the brood service (502)");
+      }),
+    });
+    const res = await broodTeardown("sess-1", {}, client);
     expect(res).toMatchObject({ ok: false, notTracked: false });
   });
 
-  it("list parses --json output", () => {
-    const sessions = [{ id: "a", kind: "steward", status: "running" }];
-    const run = vi.fn(() => ok(JSON.stringify(sessions)));
-    expect(broodListSessions({ kind: "steward" }, run)).toEqual(sessions);
-    expect(run).toHaveBeenCalledWith(["brood", "list", "--json", "--kind", "steward"]);
+  it("list forwards the filter and returns the records", async () => {
+    const sessions = [{ id: "a", kind: "steward", status: "running" }] as any;
+    const client = seam({ list: vi.fn(async () => sessions) });
+    expect(await broodListSessions({ kind: "steward" }, client)).toEqual(sessions);
+    expect(client.list).toHaveBeenCalledWith({ kind: "steward" });
   });
 
-  it("list returns [] on failure or unparseable output", () => {
-    expect(broodListSessions({}, () => fail("down"))).toEqual([]);
-    expect(broodListSessions({}, () => ok("not json"))).toEqual([]);
+  it("list returns [] on failure", async () => {
+    const client = seam({
+      list: vi.fn(async () => {
+        throw new Error("down");
+      }),
+    });
+    expect(await broodListSessions({}, client)).toEqual([]);
   });
 });

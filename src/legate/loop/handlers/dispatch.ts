@@ -38,15 +38,15 @@ export interface LaunchResult {
 /** I/O seams — wired to the Hatchery client + git/events at the coordinator. */
 export interface DispatchDeps {
   /** Best-effort default-branch sync (already done in sense; re-run is cheap/no-op-safe). */
-  syncDefaultBranch?: (state: any) => void;
+  syncDefaultBranch?: (state: any) => Promise<void>;
   /** Drain pending Hatchery result files: complete / recover / escalate. */
-  completePending: (state: any, ts: string) => CompletionResult;
+  completePending: (state: any, ts: string) => Promise<CompletionResult>;
   /** Launch a fresh Hatchery codex spawn for a ready item; creates the slice. */
-  launchDispatch: (state: any, ts: string, item: any, sliceId: string) => LaunchResult;
+  launchDispatch: (state: any, ts: string, item: any, sliceId: string) => Promise<LaunchResult>;
   /** Partial-merge recovery dispatch for a ready item colliding with a MERGED archive. */
-  recoveryDispatch: (state: any, ts: string, item: any, sliceId: string, mergedArchive: any) => LaunchResult;
+  recoveryDispatch: (state: any, ts: string, item: any, sliceId: string, mergedArchive: any) => Promise<LaunchResult>;
   /** Fire a legate-judgement request (idempotent by requestKey). */
-  requestJudgement: (input: { ts: string; slice: any; sliceId: string; requestKey: string; reason: string; detail: string }) => any | null;
+  requestJudgement: (input: { ts: string; slice: any; sliceId: string; requestKey: string; reason: string; detail: string }) => Promise<any | null>;
 }
 
 /**
@@ -71,7 +71,7 @@ export function assess(state: LoopState): DispatchDecision[] {
   return out;
 }
 
-export function apply(_decisions: DispatchDecision[], ctx: HandlerContext, state: LoopState, deps: DispatchDeps): HandlerResult {
+export async function apply(_decisions: DispatchDecision[], ctx: HandlerContext, state: LoopState, deps: DispatchDeps): Promise<HandlerResult> {
   const res = emptyHandlerResult();
   if (!state.raw) return res;
   if (!state.raw.slices || typeof state.raw.slices !== "object") state.raw.slices = {};
@@ -80,42 +80,42 @@ export function apply(_decisions: DispatchDecision[], ctx: HandlerContext, state
   // Best-effort: keep local default fresh before re-deriving selection (sense
   // already synced; this is a cheap safety re-run and swallows failures).
   try {
-    deps.syncDefaultBranch?.(state.raw);
+    await deps.syncDefaultBranch?.(state.raw);
   } catch {
     /* fetch failures are noise on a healthy system — never escalate */
   }
 
   // 1. Drain pending Hatchery dispatches (complete / recover / escalate).
-  const completed = deps.completePending(state.raw, ts);
+  const completed = await deps.completePending(state.raw, ts);
   res.actions.push(...completed.actions);
   res.failures.push(...completed.failures);
   if (completed.mutated) res.mutated = true;
-  fireNotifications(deps, ts, completed.notifications, res);
+  await fireNotifications(deps, ts, completed.notifications, res);
 
   // 2. Re-derive selection AFTER completion so a just-freed slice (runner-silent
   //    auto-recovery) isn't blocked by its own stale in-flight entry this tick.
   for (const decision of assess(state)) {
     const out = decision.kind === "recovery"
-      ? deps.recoveryDispatch(state.raw, ts, decision.item, decision.sliceId, decision.mergedArchive)
-      : deps.launchDispatch(state.raw, ts, decision.item, decision.sliceId);
+      ? await deps.recoveryDispatch(state.raw, ts, decision.item, decision.sliceId, decision.mergedArchive)
+      : await deps.launchDispatch(state.raw, ts, decision.item, decision.sliceId);
     res.actions.push(...out.actions);
     res.failures.push(...out.failures);
     if (out.mutated) res.mutated = true;
-    fireNotifications(deps, ts, out.notifications, res);
+    await fireNotifications(deps, ts, out.notifications, res);
   }
 
   if (res.mutated) ctx.persist(state);
   return res;
 }
 
-function fireNotifications(
+async function fireNotifications(
   deps: DispatchDeps,
   ts: string,
   notifications: { slice: any; sliceId: string; requestKey: string; reason: string; detail: string }[] | undefined,
   res: HandlerResult,
-): void {
+): Promise<void> {
   for (const n of notifications || []) {
-    const event = deps.requestJudgement({ ts, slice: n.slice, sliceId: n.sliceId, requestKey: n.requestKey, reason: n.reason, detail: n.detail });
+    const event = await deps.requestJudgement({ ts, slice: n.slice, sliceId: n.sliceId, requestKey: n.requestKey, reason: n.reason, detail: n.detail });
     if (event) {
       res.requests.push(event);
       res.mutated = true;

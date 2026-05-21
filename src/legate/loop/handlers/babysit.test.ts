@@ -38,8 +38,8 @@ function ctx(): HandlerContext {
 
 function deps(over: Partial<BabysitDeps> = {}): BabysitDeps {
   return {
-    sendMessage: vi.fn(),
-    requestJudgement: vi.fn((input) => ({ kind: "processor_request", ...input })),
+    sendMessage: vi.fn(async () => {}),
+    requestJudgement: vi.fn(async (input) => ({ kind: "processor_request", ...input })),
     ...over,
   };
 }
@@ -48,7 +48,7 @@ const session = (id: string, status: string) => ({ id, group: "legate-workers", 
 const kindsOf = (ds: BabysitDecision[]) => ds.map((d) => d.kind);
 
 describe("babysit assess", () => {
-  it("flags a login block from recent output", () => {
+  it("flags a login block from recent output", async () => {
     const state = loopState({
       slices: { s: { worker_session_id: "w", stage: "implementing" } },
       sessions: [session("w", "idle")],
@@ -57,7 +57,7 @@ describe("babysit assess", () => {
     expect(kindsOf(assess(state))).toEqual(["login-block"]);
   });
 
-  it("escalates a worker in error state", () => {
+  it("escalates a worker in error state", async () => {
     const state = loopState({
       slices: { s: { worker_session_id: "w", stage: "pr-open", pr: { number: 1 } } },
       sessions: [session("w", "error")],
@@ -66,7 +66,7 @@ describe("babysit assess", () => {
     expect(kindsOf(assess(state))).toEqual(["worker-error"]);
   });
 
-  it("skips running workers and clears stale worker-error markers", () => {
+  it("skips running workers and clears stale worker-error markers", async () => {
     const state = loopState({
       slices: { s: { worker_session_id: "w", stage: "pr-open", pr: { number: 1 }, worker_error_last_seen_at: "x" } },
       sessions: [session("w", "running")],
@@ -75,7 +75,7 @@ describe("babysit assess", () => {
     expect(kindsOf(assess(state))).toEqual(["clear-worker-error"]);
   });
 
-  it("nudges a stranded steward stuck implementing with no PR", () => {
+  it("nudges a stranded steward stuck implementing with no PR", async () => {
     const state = loopState({
       slices: { s: { worker_session_id: "w", stage: "implementing", implementing_started_at: T_30M_AGO } },
       sessions: [session("w", "waiting")],
@@ -92,7 +92,7 @@ describe("babysit assess", () => {
     expect(assess(state)[0]).toMatchObject({ kind: "steward-nudge", nudge: true, alert: true, nextCount: 2 });
   });
 
-  it("snapshots then sends conflict-fix for a CONFLICTING PR", () => {
+  it("snapshots then sends conflict-fix for a CONFLICTING PR", async () => {
     const state = loopState({
       slices: { s: { worker_session_id: "w", stage: "pr-open", pr: { number: 5 } } },
       sessions: [session("w", "idle")],
@@ -101,7 +101,7 @@ describe("babysit assess", () => {
     expect(kindsOf(assess(state))).toEqual(["pr-snapshot", "conflict-fix"]);
   });
 
-  it("sends review-fix when threads need response", () => {
+  it("sends review-fix when threads need response", async () => {
     const state = loopState({
       slices: { s: { worker_session_id: "w", stage: "pr-open", pr: { number: 5 }, pr_open_at: T_30M_AGO } },
       sessions: [session("w", "idle")],
@@ -115,7 +115,7 @@ describe("babysit assess", () => {
     expect(kindsOf(assess(state))).toEqual(["pr-snapshot", "review-fix"]);
   });
 
-  it("escalates a CI failure for legate judgement", () => {
+  it("escalates a CI failure for legate judgement", async () => {
     const state = loopState({
       slices: { s: { worker_session_id: "w", stage: "pr-open", pr: { number: 5 } } },
       sessions: [session("w", "idle")],
@@ -124,7 +124,7 @@ describe("babysit assess", () => {
     expect(kindsOf(assess(state))).toEqual(["pr-snapshot", "ci-failure"]);
   });
 
-  it("post-dispatch nudges a parked worker on a re-dispatch of the same key", () => {
+  it("post-dispatch nudges a parked worker on a re-dispatch of the same key", async () => {
     const key = ["conflict-fix", 5, "OPEN", "CONFLICTING", "PASS", "", ""].join(":");
     const state = loopState({
       slices: {
@@ -145,12 +145,12 @@ describe("babysit assess", () => {
 });
 
 describe("babysit apply", () => {
-  it("conflict-fix sends the prompt, advances stage, records the action", () => {
+  it("conflict-fix sends the prompt, advances stage, records the action", async () => {
     const slice = { worker_session_id: "w", stage: "pr-open", pr: { number: 5 } };
     const state = loopState({ slices: { s: slice } });
     const c = ctx();
     const d = deps();
-    const res = apply([{ kind: "conflict-fix", sliceId: "s", sessionId: "w", pr: { number: 5 }, key: "k", message: "MSG" }], c, state, d);
+    const res = await apply([{ kind: "conflict-fix", sliceId: "s", sessionId: "w", pr: { number: 5 }, key: "k", message: "MSG" }], c, state, d);
     expect(d.sendMessage).toHaveBeenCalledWith("w", "MSG");
     expect(slice.stage).toBe("pr-resolving-conflicts");
     expect((slice as any).last_processor_action_key).toBe("k");
@@ -158,25 +158,25 @@ describe("babysit apply", () => {
     expect(c.persist).toHaveBeenCalled();
   });
 
-  it("review-fix that fails to send escalates instead of advancing stage", () => {
+  it("review-fix that fails to send escalates instead of advancing stage", async () => {
     const slice: any = { worker_session_id: "w", stage: "pr-open", pr: { number: 5 } };
     const state = loopState({ slices: { s: slice } });
     const d = deps({
-      sendMessage: vi.fn(() => {
+      sendMessage: vi.fn(async () => {
         throw new Error("down");
       }),
     });
-    const res = apply([{ kind: "review-fix", sliceId: "s", sessionId: "w", pr: { number: 5 }, key: "k", message: "M", detail: "x" }], ctx(), state, d);
+    const res = await apply([{ kind: "review-fix", sliceId: "s", sessionId: "w", pr: { number: 5 }, key: "k", message: "M", detail: "x" }], ctx(), state, d);
     expect(slice.stage).toBe("pr-open"); // not advanced
     expect(res.requests).toHaveLength(1);
     expect(res.actions).toHaveLength(0);
   });
 
-  it("worker-error sets markers and fires a deduped judgement request", () => {
+  it("worker-error sets markers and fires a deduped judgement request", async () => {
     const slice: any = { worker_session_id: "w", stage: "pr-open" };
     const state = loopState({ slices: { s: slice } });
     const d = deps();
-    const res = apply([{ kind: "worker-error", sliceId: "s", sessionId: "w", requestKey: "rk", detail: "d" }], ctx(), state, d);
+    const res = await apply([{ kind: "worker-error", sliceId: "s", sessionId: "w", requestKey: "rk", detail: "d" }], ctx(), state, d);
     expect(slice.worker_error_detected_at).toBe(NOW);
     expect(d.requestJudgement).toHaveBeenCalled();
     expect(res.requests).toHaveLength(1);

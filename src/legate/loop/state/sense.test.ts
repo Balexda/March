@@ -13,21 +13,21 @@ function deps(over: Partial<SenseDeps> = {}): SenseDeps {
       slices: {},
       archived_slices: {},
     }),
-    listSessions: () => [],
-    syncDefaultBranch: () => {},
-    readSmithyStatus: () => ({ records: [], graph: {} }),
-    queryPr: () => ({}),
-    sessionOutput: () => ({ output: "" }),
+    listSessions: async () => [],
+    syncDefaultBranch: async () => {},
+    readSmithyStatus: async () => ({ records: [], graph: {} }),
+    queryPr: async () => ({}),
+    sessionOutput: async () => ({ output: "" }),
     ...over,
   };
 }
 
 describe("senseState (Stage 1)", () => {
-  it("assembles a snapshot with workers + smithy queue", () => {
-    const state = senseState(
+  it("assembles a snapshot with workers + smithy queue", async () => {
+    const state = await senseState(
       deps({
-        listSessions: () => [{ id: "s1", group: "legate-workers", status: "running" }],
-        readSmithyStatus: () => ({
+        listSessions: async () => [{ id: "s1", group: "legate-workers", status: "running" }],
+        readSmithyStatus: async () => ({
           records: [
             { path: "a", next_action: { command: "smithy.forge" } },
             { path: "b", next_action: { command: "smithy.cut" } },
@@ -44,8 +44,8 @@ describe("senseState (Stage 1)", () => {
     expect(state.sessionsById.get("s1")).toBeTruthy();
   });
 
-  it("captures state-read errors without throwing", () => {
-    const state = senseState(
+  it("captures state-read errors without throwing", async () => {
+    const state = await senseState(
       deps({
         readStateJson: () => {
           throw new Error("corrupt");
@@ -56,10 +56,10 @@ describe("senseState (Stage 1)", () => {
     expect(state.stateError).toBe("corrupt");
   });
 
-  it("surfaces a smithy read failure as smithy.ok=false (non-fatal)", () => {
-    const state = senseState(
+  it("surfaces a smithy read failure as smithy.ok=false (non-fatal)", async () => {
+    const state = await senseState(
       deps({
-        readSmithyStatus: () => {
+        readSmithyStatus: async () => {
           throw new Error("smithy down");
         },
       }),
@@ -68,10 +68,10 @@ describe("senseState (Stage 1)", () => {
     expect(state.smithy.error).toBe("smithy down");
   });
 
-  it("fetches per-slice PR + output only for active slices with a live session", () => {
-    const queryPr = vi.fn(() => ({ number: 7, state: "OPEN" }));
-    const sessionOutput = vi.fn(() => ({ output: "log" }));
-    const state = senseState(
+  it("fetches per-slice PR + output only for active slices with a live session", async () => {
+    const queryPr = vi.fn(async () => ({ number: 7, state: "OPEN" }));
+    const sessionOutput = vi.fn(async () => ({ output: "log" }));
+    const state = await senseState(
       deps({
         readStateJson: () => ({
           repo: { path: "/repo" },
@@ -83,7 +83,7 @@ describe("senseState (Stage 1)", () => {
           },
           archived_slices: {},
         }),
-        listSessions: () => [
+        listSessions: async () => [
           { id: "s1", group: "legate-workers", status: "idle" },
           { id: "s2", group: "legate-workers", status: "idle" },
         ],
@@ -97,30 +97,30 @@ describe("senseState (Stage 1)", () => {
     expect(sessionOutput).toHaveBeenCalledWith("s1");
   });
 
-  it("discovers a PR for an implementing slice when queryPr skips", () => {
-    const discoverPr = vi.fn(() => ({ number: 42, state: "OPEN" }));
-    const state = senseState(
+  it("discovers a PR for an implementing slice when queryPr skips", async () => {
+    const discoverPr = vi.fn(async () => ({ number: 42, state: "OPEN" }));
+    const state = await senseState(
       deps({
         readStateJson: () => ({
           repo: { path: "/repo" },
           slices: { impl: { worker_session_id: "s1", stage: "implementing" } },
           archived_slices: {},
         }),
-        listSessions: () => [{ id: "s1", group: "legate-workers", status: "idle" }],
-        queryPr: () => ({ skipped: true }),
+        listSessions: async () => [{ id: "s1", group: "legate-workers", status: "idle" }],
+        queryPr: async () => ({ skipped: true }),
         discoverPr,
-        sessionOutput: () => ({ output: "" }),
+        sessionOutput: async () => ({ output: "" }),
       }),
     );
     expect(discoverPr).toHaveBeenCalledWith(expect.anything(), expect.anything(), "/repo", "s1");
     expect(state.perSlice.impl!.pr).toMatchObject({ number: 42 });
   });
 
-  it("emits a sync warning but still reads smithy when sync throws", () => {
+  it("emits a sync warning but still reads smithy when sync throws", async () => {
     const warn = vi.fn();
-    const state = senseState(
+    const state = await senseState(
       deps({
-        syncDefaultBranch: () => {
+        syncDefaultBranch: async () => {
           throw new Error("no remote");
         },
         warn,

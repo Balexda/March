@@ -15,7 +15,7 @@
  *     original raw-OTLP path for now (Balexda/March#145).
  *   - a lastHeartbeat snapshot is exposed for the HTTP /status endpoint.
  */
-import { execFileSync, spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -29,21 +29,22 @@ import {
 } from "../../observability/loop-metrics.js";
 import { emitLoopLog, type LoopLogSeverity } from "../../observability/logs.js";
 import { resolveHatcheryUrl } from "../../hatchery/service/client.js";
-import { SyncCastraClient } from "../../castra/client.js";
+import { CastraClient } from "../../castra/client.js";
 import type { LoopMeta } from "./meta.js";
 // Decomposed two-stage loop: Stage 1 sense → coordinator (ordered handlers) →
 // heartbeat. runtime now only wires these to the proven I/O seams below.
 import { senseState } from "./state/sense.js";
 import { runTick as coordinatorRunTick } from "./coordinator.js";
 import { runHeartbeat } from "./heartbeat.js";
-import { broodTeardown as broodTeardownCli, type CliRunner } from "./clients/brood.js";
+import { broodTeardown as broodTeardownCli } from "./clients/brood.js";
 
-// Lazily-built sync Castra client (constructed on first use so it reads the
+// Lazily-built async Castra client (constructed on first use so it reads the
 // CASTRA_URL/token env the container passes in). The loop reaches every
-// interactive session through Castra rather than agent-deck directly.
-let _castra: SyncCastraClient | undefined;
-function castra(): SyncCastraClient {
-  return (_castra ??= new SyncCastraClient());
+// interactive session through Castra rather than agent-deck directly; all its
+// methods are async (fetch), so every call site below awaits.
+let _castra: CastraClient | undefined;
+function castra(): CastraClient {
+  return (_castra ??= new CastraClient());
 }
 
 // Map a Castra session to the agent-deck-shaped object the lifted loop consumes
@@ -96,8 +97,8 @@ export function getLoopSnapshot(): LoopSnapshot {
 }
 
 /** Run a single tick immediately (used by start + future /tick endpoint). */
-export function runTickOnce(): void {
-  safeTick();
+export async function runTickOnce(): Promise<void> {
+  await safeTick();
 }
 
 function now() {
@@ -246,11 +247,21 @@ function writeJson(file, value) {
   fs.writeFileSync(file, JSON.stringify(value, null, 2) + "\n", "utf-8");
 }
 
+// Async command runner (replaces the former execFileSync). Rejects on non-zero
+// exit with execFileSync-shaped errors (message folds in stderr, plus
+// .stdout/.stderr) so the recovery parsers that read failure text still work.
 function execText(command, args, options = {}) {
-  return execFileSync(command, args, {
-    encoding: "utf-8",
-    stdio: ["ignore", "pipe", "pipe"],
-    ...options,
+  return new Promise((resolve, reject) => {
+    execFile(command, args, { encoding: "utf-8", maxBuffer: 32 * 1024 * 1024, ...options }, (err, stdout, stderr) => {
+      if (err) {
+        err.stdout = stdout;
+        err.stderr = stderr;
+        if (stderr && !String(err.message).includes(stderr)) err.message = err.message + "\n" + stderr;
+        reject(err);
+        return;
+      }
+      resolve(typeof stdout === "string" ? stdout : "");
+    });
   });
 }
 
@@ -310,14 +321,14 @@ function replayRecentActionEvents(limit = 10) {
   }
 }
 
-function agentDeckList() {
+async function agentDeckList() {
   // Sessions come from Castra (the agent-deck interdiction service), mapped back
   // to the agent-deck-shaped objects the rest of the loop consumes
   // (id/status/group/worktree_path/…). On error we return {error} so
   // summarizeWorkers reports "unavailable" exactly as it did for an agent-deck
   // CLI failure.
   try {
-    return castra().listSessions(meta.profile).map(toLoopSession);
+    return (await castra().listSessions(meta.profile)).map(toLoopSession);
   } catch (err) {
     return { error: err?.message || String(err) };
   }
@@ -369,13 +380,13 @@ function prNumber(slice) {
   return null;
 }
 
-function repoOwner(state) {
+async function repoOwner(state) {
   const owner = state?.repo?.owner_with_name;
   if (typeof owner === "string" && owner.length > 0) return owner;
   const repoPath = state?.repo?.path || meta.repo?.path;
   if (typeof repoPath !== "string" || repoPath.length === 0) return null;
   try {
-    const out = execText("gh", ["repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"], {
+    const out = await execText("gh", ["repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"], {
       cwd: repoPath,
     });
     return out.trim() || null;
@@ -384,11 +395,11 @@ function repoOwner(state) {
   }
 }
 
-function ghPrArgs(slice, state, fields) {
+async function ghPrArgs(slice, state, fields) {
   const number = prNumber(slice);
   if (!number) return { skipped: true, reason: "missing_pr_number" };
   const args = ["pr", "view", number, "--json", fields];
-  const owner = repoOwner(state);
+  const owner = await repoOwner(state);
   if (typeof owner === "string" && owner.length > 0) {
     args.push("-R", owner);
   }
@@ -401,10 +412,10 @@ function ghPrArgs(slice, state, fields) {
   return { args, options, owner, number };
 }
 
-function queryPr(slice, state) {
-  const request = ghPrArgs(slice, state, "number,url,state");
+async function queryPr(slice, state) {
+  const request = await ghPrArgs(slice, state, "number,url,state");
   if (request.skipped) return request;
-  const out = execText("gh", request.args, request.options);
+  const out = await execText("gh", request.args, request.options);
   return JSON.parse(out);
 }
 
@@ -430,11 +441,11 @@ function failedChecks(statusCheckRollup) {
     }));
 }
 
-function queryReviewThreads(owner, prNumberValue) {
+async function queryReviewThreads(owner, prNumberValue) {
   if (!owner) return [];
   const [repoOwnerName, repoName] = owner.split("/");
   if (!repoOwnerName || !repoName) return [];
-  const out = execText("gh", [
+  const out = await execText("gh", [
     "api",
     "graphql",
     "-F",
@@ -489,15 +500,15 @@ function queryReviewThreads(owner, prNumberValue) {
     });
 }
 
-function queryPrForBabysit(slice, state) {
-  const request = ghPrArgs(
+async function queryPrForBabysit(slice, state) {
+  const request = await ghPrArgs(
     slice,
     state,
     "number,url,state,mergeable,reviewDecision,statusCheckRollup,headRefName,title,author",
   );
   if (request.skipped) return request;
-  const summary = JSON.parse(execText("gh", request.args, request.options));
-  const threads = queryReviewThreads(request.owner || repoOwner(state), summary.number);
+  const summary = JSON.parse(await execText("gh", request.args, request.options));
+  const threads = await queryReviewThreads(request.owner || await repoOwner(state), summary.number);
   const prAuthor = summary.author?.login || "";
   const annotated = threads.map((thread) => ({
     ...thread,
@@ -531,10 +542,10 @@ function removeDispatchMessage(sliceId) {
   }
 }
 
-function removeWorkerSession(sessionId) {
+async function removeWorkerSession(sessionId) {
   // Castra DELETE is idempotent: a missing session returns {removed:false}.
   try {
-    const result = castra().removeSession({ profile: meta.profile, sessionId, pruneWorktree: true });
+    const result = await castra().removeSession({ profile: meta.profile, sessionId, pruneWorktree: true });
     return result.removed ? { removed: true } : { removed: false, reason: "session_not_found" };
   } catch (err) {
     return { error: err?.message || String(err) };
@@ -750,11 +761,11 @@ function maybePostDispatchNudge(slice, sessionId, workerStatus, ts, key, buildMe
   return { nudged: true, escalate: false, count: currentCount + 1 };
 }
 
-function sendAgentDeckMessage(sessionId, message, _wait = false) {
+async function sendAgentDeckMessage(sessionId, message, _wait = false) {
   // Routed through Castra. Castra's send is fire-and-forget (202); the former
   // --wait/--timeout has no equivalent, which is fine — every loop caller used
   // the no-wait path.
-  castra().sendPrompt({ profile: meta.profile, sessionId, prompt: message });
+  await castra().sendPrompt({ profile: meta.profile, sessionId, prompt: message });
   return "";
 }
 
@@ -774,9 +785,9 @@ function hasClaudeLoginBlock(output) {
     text.includes("API Error: 401 Invalid authentication credentials");
 }
 
-function captureRecentSessionOutput(sessionId) {
+async function captureRecentSessionOutput(sessionId) {
   try {
-    const output = castra().sessionOutput(meta.profile, sessionId);
+    const output = await castra().sessionOutput(meta.profile, sessionId);
     return { output: truncateText(output.trim()) };
   } catch (err) {
     return { output: "", error: err?.message || String(err) };
@@ -901,9 +912,9 @@ function workerErrorDetail({ sliceId, slice, worker, sessionId, recent }) {
   return lines.join("\n");
 }
 
-function sendDoorbellToLegate() {
+async function sendDoorbellToLegate() {
   try {
-    castra().sendPrompt({
+    await castra().sendPrompt({
       profile: meta.profile,
       sessionId: `conductor-${meta.paired_legate}`,
       prompt: "[PROCESSOR]",
@@ -914,7 +925,7 @@ function sendDoorbellToLegate() {
   }
 }
 
-function requestLegateJudgement(input) {
+async function requestLegateJudgement(input) {
   if (input.slice && input.requestKey && input.slice.last_processor_request_key === input.requestKey) {
     return null;
   }
@@ -932,7 +943,7 @@ function requestLegateJudgement(input) {
   };
   append(meta.processor_requests_path, event);
   append(meta.processor_events_path, event);
-  const delivered = sendDoorbellToLegate();
+  const delivered = await sendDoorbellToLegate();
   appendText(meta.processor_log_path, `${formatProcessorRequestLine(event)}${delivered ? "" : " (doorbell delivery failed)"}`);
   if (input.slice && input.requestKey) {
     input.slice.last_processor_request_key = input.requestKey;
@@ -1027,13 +1038,13 @@ function addBranchVariants(branches, value) {
   }
 }
 
-function expectedPrBranches(slice) {
+async function expectedPrBranches(slice) {
   const branches = new Set();
   addBranchVariants(branches, slice.actual_branch);
   addBranchVariants(branches, slice.branch);
   if (slice.worktree_path) {
     try {
-      addBranchVariants(branches, execText("git", ["-C", slice.worktree_path, "branch", "--show-current"]));
+      addBranchVariants(branches, await execText("git", ["-C", slice.worktree_path, "branch", "--show-current"]));
     } catch {
       // Best-effort guard only; branch fields still protect PR discovery.
     }
@@ -1041,33 +1052,33 @@ function expectedPrBranches(slice) {
   return branches;
 }
 
-function prMatchesSliceBranch(slice, pr) {
-  const branches = expectedPrBranches(slice);
+async function prMatchesSliceBranch(slice, pr) {
+  const branches = await expectedPrBranches(slice);
   if (branches.size === 0) return false;
   return branches.has(String(pr?.head_branch || pr?.headRefName || ""));
 }
 
-function discoverPrForSlice(slice, state, sessionId) {
+async function discoverPrForSlice(slice, state, sessionId) {
   const repoPath = state?.repo?.path || meta.repo?.path;
   if (!repoPath) return null;
   try {
-    const output = castra().sessionOutput(meta.profile, sessionId);
+    const output = await castra().sessionOutput(meta.profile, sessionId);
     const matches = output.match(/https:\/\/github\.com\/[^\s/]+\/[^\s/]+\/pull\/([0-9]+)/g) || [];
     if (matches.length > 0) {
       const url = matches[matches.length - 1];
       const number = url.split("/").pop();
-      const pr = queryPrForBabysit({ pr: { number } }, state);
-      return pr?.skipped || !prMatchesSliceBranch(slice, pr) ? null : pr;
+      const pr = await queryPrForBabysit({ pr: { number } }, state);
+      return pr?.skipped || !(await prMatchesSliceBranch(slice, pr)) ? null : pr;
     }
   } catch {
     // fall through to branch-based lookup
   }
   try {
-    const owner = repoOwner(state);
+    const owner = await repoOwner(state);
     const args = ["pr", "list", "--author", "@me", "--state", "open", "--json", "number,url,state,mergeable,headRefName,title,statusCheckRollup,createdAt"];
     if (owner) args.push("-R", owner);
     const options = owner ? {} : { cwd: repoPath };
-    const list = JSON.parse(execText("gh", args, options));
+    const list = JSON.parse(await execText("gh", args, options));
     if (!Array.isArray(list) || list.length === 0) return null;
     const since = prDiscoverySince(slice);
     const candidates = since
@@ -1077,7 +1088,7 @@ function discoverPrForSlice(slice, state, sessionId) {
     const chosen = branchMatches
       .sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")))[0];
     if (!chosen) return null;
-    return queryPrForBabysit({ pr: { number: chosen.number } }, state);
+    return await queryPrForBabysit({ pr: { number: chosen.number } }, state);
   } catch {
     return null;
   }
@@ -1476,18 +1487,18 @@ function readySmithyItems(status) {
     .sort((a, b) => dispatchPriority(a) - dispatchPriority(b) || a.__index - b.__index);
 }
 
-function readSmithyStatus(repoPath) {
+async function readSmithyStatus(repoPath) {
   // --pending = shorthand for --status in-progress,not-started. Filters out
   // all done records up-front (smithy ships a much smaller, dispatch-shaped
   // payload — the prior full output had hundreds of done entries the loop
   // had to wade through). Layer 0 of the returned graph still means "ready
   // to dispatch right now" — a node's dependencies have either landed (and
   // were filtered out by --pending) or never existed.
-  const out = execText("smithy", ["status", "--format", "json", "--pending"], { cwd: repoPath });
+  const out = await execText("smithy", ["status", "--format", "json", "--pending"], { cwd: repoPath });
   return JSON.parse(out);
 }
 
-function syncDefaultBranch(state) {
+async function syncDefaultBranch(state) {
   const repoPath = state?.repo?.path || meta.repo?.path;
   if (typeof repoPath !== "string" || repoPath.length === 0) {
     throw new Error("repo path is missing");
@@ -1495,22 +1506,22 @@ function syncDefaultBranch(state) {
   let defaultBranch = state?.repo?.default_branch;
   if (!defaultBranch) {
     try {
-      defaultBranch = execText("git", ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"], { cwd: repoPath })
+      defaultBranch = (await execText("git", ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"], { cwd: repoPath }))
         .trim()
         .replace(/^origin\//, "");
     } catch {
-      defaultBranch = execText("gh", ["repo", "view", "--json", "defaultBranchRef", "-q", ".defaultBranchRef.name"], { cwd: repoPath }).trim();
+      defaultBranch = (await execText("gh", ["repo", "view", "--json", "defaultBranchRef", "-q", ".defaultBranchRef.name"], { cwd: repoPath })).trim();
     }
   }
   if (!defaultBranch) throw new Error("could not determine default branch");
-  execText("git", ["fetch", "origin", defaultBranch], { cwd: repoPath });
-  execText("git", ["switch", defaultBranch], { cwd: repoPath });
-  execText("git", ["pull", "--ff-only", "origin", defaultBranch], { cwd: repoPath });
+  await execText("git", ["fetch", "origin", defaultBranch], { cwd: repoPath });
+  await execText("git", ["switch", defaultBranch], { cwd: repoPath });
+  await execText("git", ["pull", "--ff-only", "origin", defaultBranch], { cwd: repoPath });
   if (state.repo && !state.repo.default_branch) state.repo.default_branch = defaultBranch;
   return {
     default_branch: defaultBranch,
     synced: true,
-    head: execText("git", ["rev-parse", "HEAD"], { cwd: repoPath }).trim(),
+    head: (await execText("git", ["rev-parse", "HEAD"], { cwd: repoPath })).trim(),
   };
 }
 
@@ -1727,7 +1738,7 @@ function buildDirectStewardMessage(item, mergedArchive) {
 // as the initial message. Reliable but slower/less parallel than codex spawn.
 // Returns {launched, sliceId, sessionId, error}. Mutates state.slices on
 // success so babysit/cleanup track the steward like any other.
-function launchDirectStewardDispatch(state, ts, item, sliceId, mergedArchive) {
+async function launchDirectStewardDispatch(state, ts, item, sliceId, mergedArchive) {
   const repoPath = state?.repo?.path || meta.repo?.path;
   if (typeof repoPath !== "string" || repoPath.length === 0) {
     return { launched: false, error: "repo path is missing" };
@@ -1744,7 +1755,7 @@ function launchDirectStewardDispatch(state, ts, item, sliceId, mergedArchive) {
   // re-dispatches next tick — same as the old client-side race handling.
   let newSessionId = null;
   try {
-    const launched = castra().launchSession({
+    const launched = await castra().launchSession({
       profile: meta.profile,
       repoPath,
       branch: bareBranch,
@@ -1763,7 +1774,7 @@ function launchDirectStewardDispatch(state, ts, item, sliceId, mergedArchive) {
   // Deliver the initial /smithy.<verb> instruction (Castra launch has no message
   // param, so send it as a follow-up).
   try {
-    castra().sendPrompt({ profile: meta.profile, sessionId: newSessionId, prompt: message, traceKey: directSliceId });
+    await castra().sendPrompt({ profile: meta.profile, sessionId: newSessionId, prompt: message, traceKey: directSliceId });
   } catch {
     // Best-effort; babysit will re-nudge if the steward never starts.
   }
@@ -1815,10 +1826,10 @@ function parseBranchCollisionError(text) {
 // Inspect a local branch enough to classify a collision: where its HEAD
 // sits, whether the work already landed on the default branch, and what
 // PRs exist for it. All read-only — caller decides whether to act.
-function inspectCollidedBranch(repoPath, defaultBranch, branchName) {
+async function inspectCollidedBranch(repoPath, defaultBranch, branchName) {
   let head = null;
   try {
-    head = execText("git", ["rev-parse", branchName], { cwd: repoPath }).trim();
+    head = (await execText("git", ["rev-parse", branchName], { cwd: repoPath })).trim();
   } catch {
     // branch doesn't exist locally anymore — nothing to recover.
     return null;
@@ -1826,7 +1837,7 @@ function inspectCollidedBranch(repoPath, defaultBranch, branchName) {
   let isAncestor = false;
   if (defaultBranch) {
     try {
-      execText("git", ["merge-base", "--is-ancestor", branchName, defaultBranch], { cwd: repoPath });
+      await execText("git", ["merge-base", "--is-ancestor", branchName, defaultBranch], { cwd: repoPath });
       isAncestor = true;
     } catch {
       isAncestor = false;
@@ -1835,7 +1846,7 @@ function inspectCollidedBranch(repoPath, defaultBranch, branchName) {
   let prs = [];
   let prsKnown = true;
   try {
-    const out = execText("gh", ["pr", "list", "--head", branchName, "--state", "all", "--json", "number,state"], { cwd: repoPath });
+    const out = await execText("gh", ["pr", "list", "--head", branchName, "--state", "all", "--json", "number,state"], { cwd: repoPath });
     prs = JSON.parse(out);
     if (!Array.isArray(prs)) prs = [];
   } catch {
@@ -1894,10 +1905,10 @@ function deleteHatcheryArtifacts(slice) {
 // Locate the git worktree (if any) that currently has the colliding branch
 // checked out. Returns the worktree's filesystem path, or null when the
 // branch isn't held by a worktree.
-function findWorktreeForBranch(repoPath, branchName) {
+async function findWorktreeForBranch(repoPath, branchName) {
   let out;
   try {
-    out = execText("git", ["worktree", "list", "--porcelain"], { cwd: repoPath });
+    out = await execText("git", ["worktree", "list", "--porcelain"], { cwd: repoPath });
   } catch {
     return null;
   }
@@ -1915,9 +1926,9 @@ function findWorktreeForBranch(repoPath, branchName) {
 // Check whether a worktree path is empty of in-progress work — no
 // uncommitted changes, no untracked files (other than git internals).
 // Conservative: any output from "git status --porcelain" blocks removal.
-function worktreeIsClean(worktreePath) {
+async function worktreeIsClean(worktreePath) {
   try {
-    const out = execText("git", ["status", "--porcelain"], { cwd: worktreePath });
+    const out = await execText("git", ["status", "--porcelain"], { cwd: worktreePath });
     return out.trim().length === 0;
   } catch {
     return false;
@@ -1956,13 +1967,13 @@ function agentDeckSessionHoldsWorktree(worktreePath) {
 // inspects the worktree: when clean AND not held by an active agent-deck
 // session, removes the worktree with "git worktree remove --force" first,
 // then deletes the branch. Anything dirty or session-held escalates.
-function tryRecoverBranchCollision(state, slice, sliceId, errorText) {
+async function tryRecoverBranchCollision(state, slice, sliceId, errorText) {
   const branchName = parseBranchCollisionError(errorText);
   if (!branchName) return null;
   const repoPath = state?.repo?.path || meta.repo?.path;
   if (typeof repoPath !== "string" || repoPath.length === 0) return null;
   const defaultBranch = state?.repo?.default_branch || meta.repo?.default_branch || null;
-  const info = inspectCollidedBranch(repoPath, defaultBranch, branchName);
+  const info = await inspectCollidedBranch(repoPath, defaultBranch, branchName);
   const classification = classifyBranchCollision(info);
   const summary = info
     ? "branch=" + branchName + " head=" + (info.head || "").slice(0, 7) + " ancestor-of-" + (defaultBranch || "default") + "=" + info.isAncestor + " open_prs=[" + classification.open.map((p) => "#" + p.number).join(",") + "] merged_prs=[" + classification.merged.map((p) => "#" + p.number).join(",") + "]"
@@ -1972,29 +1983,29 @@ function tryRecoverBranchCollision(state, slice, sliceId, errorText) {
   }
   let extra = "";
   try {
-    execText("git", ["branch", "-D", branchName], { cwd: repoPath });
+    await execText("git", ["branch", "-D", branchName], { cwd: repoPath });
   } catch (err) {
     // git refuses when the branch is checked out by a worktree. Try to
     // unblock by removing the worktree — but only when it's safe (no
     // uncommitted changes, not held by an active agent-deck session).
-    const worktreePath = findWorktreeForBranch(repoPath, branchName);
+    const worktreePath = await findWorktreeForBranch(repoPath, branchName);
     if (!worktreePath) {
       return { recovered: false, verdict: classification.verdict + "-delete-failed", detail: summary + " | branch delete failed: " + (err?.message || String(err)) };
     }
-    if (!worktreeIsClean(worktreePath)) {
+    if (!await worktreeIsClean(worktreePath)) {
       return { recovered: false, verdict: classification.verdict + "-worktree-dirty", detail: summary + " | branch held by worktree " + worktreePath + " with uncommitted changes; refusing to auto-remove" };
     }
     if (agentDeckSessionHoldsWorktree(worktreePath)) {
       return { recovered: false, verdict: classification.verdict + "-worktree-session", detail: summary + " | branch held by worktree " + worktreePath + " which is still owned by a live agent-deck session; operator must drain that session before re-dispatch" };
     }
     try {
-      execText("git", ["worktree", "remove", "--force", worktreePath], { cwd: repoPath });
+      await execText("git", ["worktree", "remove", "--force", worktreePath], { cwd: repoPath });
     } catch (e2) {
       return { recovered: false, verdict: classification.verdict + "-worktree-remove-failed", detail: summary + " | worktree remove failed: " + (e2?.message || String(e2)) };
     }
     extra = " | worktree " + worktreePath + " removed";
     try {
-      execText("git", ["branch", "-D", branchName], { cwd: repoPath });
+      await execText("git", ["branch", "-D", branchName], { cwd: repoPath });
     } catch (e3) {
       return { recovered: false, verdict: classification.verdict + "-delete-after-worktree-failed", detail: summary + extra + " | second branch delete failed: " + (e3?.message || String(e3)) };
     }
@@ -2055,13 +2066,13 @@ function tryRecoverWrongWorktreeRace(state, slice, sliceId, errorText) {
 // for a PR that matches this slice's expected branch, the work is already
 // in flight on GitHub. Don't escalate — transition the slice directly to
 // pr-open so the loop's normal babysit picks up the PR going forward.
-function tryAdoptOpenPr(state, slice, sliceId, errorText, ts) {
+async function tryAdoptOpenPr(state, slice, sliceId, errorText, ts) {
   const branchName = parseBranchCollisionError(errorText);
   if (!branchName) return null;
   const repoPath = state?.repo?.path || meta.repo?.path;
   if (typeof repoPath !== "string" || repoPath.length === 0) return null;
   const defaultBranch = state?.repo?.default_branch || meta.repo?.default_branch || null;
-  const info = inspectCollidedBranch(repoPath, defaultBranch, branchName);
+  const info = await inspectCollidedBranch(repoPath, defaultBranch, branchName);
   const classification = classifyBranchCollision(info);
   if (classification.verdict !== "open-pr") return null;
   // Pick the first PR matching our slice branch, falling back to the
@@ -2074,7 +2085,7 @@ function tryAdoptOpenPr(state, slice, sliceId, errorText, ts) {
   if (!chosen) return null;
   let hydrated;
   try {
-    hydrated = queryPrForBabysit({ pr: { number: chosen.number } }, state);
+    hydrated = await queryPrForBabysit({ pr: { number: chosen.number } }, state);
   } catch {
     return null;
   }
@@ -2106,7 +2117,7 @@ function tryAdoptOpenPr(state, slice, sliceId, errorText, ts) {
 // loses the prior partial work, but the manager-prompt + stranded-steward
 // watchdog now make stranded leftovers exceptional, so this should rarely
 // fire after the first one-time cleanup.
-function tryRecoverStrandedLeftover(state, slice, sliceId, errorText, classification, info, branchName) {
+async function tryRecoverStrandedLeftover(state, slice, sliceId, errorText, classification, info, branchName) {
   if (!info || info.isAncestor) return null;
   // classifyBranchCollision strips prsKnown from the diverged-unknown return
   // value, so read it from info directly (info comes from inspectCollidedBranch
@@ -2119,7 +2130,7 @@ function tryRecoverStrandedLeftover(state, slice, sliceId, errorText, classifica
   if (typeof repoPath !== "string" || repoPath.length === 0) return null;
   // Refuse if a live agent-deck session still owns the worktree — that
   // means there's an active steward and we'd be racing it.
-  const worktreePath = findWorktreeForBranch(repoPath, branchName);
+  const worktreePath = await findWorktreeForBranch(repoPath, branchName);
   if (worktreePath && agentDeckSessionHoldsWorktree(worktreePath)) return null;
   const limit = 3;
   const counts = transientRetryCounts(state);
@@ -2138,14 +2149,14 @@ function tryRecoverStrandedLeftover(state, slice, sliceId, errorText, classifica
   let extra = "";
   if (worktreePath) {
     try {
-      execText("git", ["worktree", "remove", "--force", worktreePath], { cwd: repoPath });
+      await execText("git", ["worktree", "remove", "--force", worktreePath], { cwd: repoPath });
       extra = " | worktree " + worktreePath + " removed";
     } catch (err) {
       return { recovered: false, verdict: "stranded-leftover-worktree-remove-failed", detail: "worktree remove failed: " + (err?.message || String(err)) };
     }
   }
   try {
-    execText("git", ["branch", "-D", branchName], { cwd: repoPath });
+    await execText("git", ["branch", "-D", branchName], { cwd: repoPath });
   } catch (err) {
     return { recovered: false, verdict: "stranded-leftover-delete-failed", detail: "branch delete failed: " + (err?.message || String(err)) };
   }
@@ -2158,7 +2169,7 @@ function tryRecoverStrandedLeftover(state, slice, sliceId, errorText, classifica
   // GitHub-side dependencies — safe to delete.
   let remoteExtra = "";
   try {
-    execText("git", ["push", "--delete", "origin", branchName], { cwd: repoPath });
+    await execText("git", ["push", "--delete", "origin", branchName], { cwd: repoPath });
     remoteExtra = " | origin/" + branchName + " also deleted";
   } catch (err) {
     const msg = String(err?.message || err || "");
@@ -2225,7 +2236,7 @@ function tryRecoverSpawnPatchError(state, slice, sliceId, errorText) {
   };
 }
 
-function completePendingHatcheryDispatches(state, ts) {
+async function completePendingHatcheryDispatches(state, ts) {
   const actions = [];
   const failures = [];
   const notifications = [];
@@ -2318,7 +2329,7 @@ function completePendingHatcheryDispatches(state, ts) {
       // open PR matching this slice, the work is already in flight on
       // GitHub. Adopt the PR and transition the slice to pr-open instead
       // of escalating — there's nothing to recover.
-      const adoption = tryAdoptOpenPr(state, slice, sliceId, errorText, ts);
+      const adoption = await tryAdoptOpenPr(state, slice, sliceId, errorText, ts);
       if (adoption && adoption.recovered) {
         actions.push({
           action: "auto-recovered",
@@ -2329,7 +2340,7 @@ function completePendingHatcheryDispatches(state, ts) {
         mutated = true;
         continue;
       }
-      const recovery = tryRecoverBranchCollision(state, slice, sliceId, errorText);
+      const recovery = await tryRecoverBranchCollision(state, slice, sliceId, errorText);
       if (recovery && recovery.recovered) {
         actions.push({
           action: "auto-recovered",
@@ -2350,9 +2361,9 @@ function completePendingHatcheryDispatches(state, ts) {
         const branchName = parseBranchCollisionError(errorText);
         const repoPath = state?.repo?.path || meta.repo?.path;
         const defaultBranch = state?.repo?.default_branch || meta.repo?.default_branch || null;
-        const info = branchName ? inspectCollidedBranch(repoPath, defaultBranch, branchName) : null;
+        const info = branchName ? await inspectCollidedBranch(repoPath, defaultBranch, branchName) : null;
         const classification = classifyBranchCollision(info);
-        leftoverRecovery = tryRecoverStrandedLeftover(state, slice, sliceId, errorText, classification, info, branchName);
+        leftoverRecovery = await tryRecoverStrandedLeftover(state, slice, sliceId, errorText, classification, info, branchName);
         if (leftoverRecovery && leftoverRecovery.recovered) {
           actions.push({
             action: "auto-recovered",
@@ -2478,7 +2489,7 @@ function stageDispatchMessage(sliceId, result) {
 // we stop dispatching and instead nudge the legate agent — at that point a
 // human needs to look (spec is wrong, prompt is failing, or the work is
 // genuinely impossible).
-function handleRecoveryDispatch(state, ts, item, sliceId, mergedArchive) {
+async function handleRecoveryDispatch(state, ts, item, sliceId, mergedArchive) {
   const actions = [];
   const failures = [];
   const notifications = [];
@@ -2500,7 +2511,7 @@ function handleRecoveryDispatch(state, ts, item, sliceId, mergedArchive) {
     // style). It's slower but doesn't depend on codex producing an applicable
     // patch, which is the thing that keeps failing.
     if (!state.direct_dispatch_done[sliceId]) {
-      const direct = launchDirectStewardDispatch(state, ts, item, sliceId, mergedArchive);
+      const direct = await launchDirectStewardDispatch(state, ts, item, sliceId, mergedArchive);
       if (direct.launched) {
         state.direct_dispatch_done[sliceId] = ts;
         actions.push({
@@ -2691,28 +2702,12 @@ function launchDispatch(state, ts, item, sliceId) {
 
 // `march` CLI runner for the Brood seam, honoring meta.march_cli_path (the
 // container's baked-in path) and capturing exit + streams for broodTeardown.
-function marchCliRunner(args) {
-  try {
-    const stdout = execFileSync(meta.march_cli_path || "march", args, {
-      encoding: "utf-8",
-      stdio: ["ignore", "pipe", "pipe"],
-      maxBuffer: 16 * 1024 * 1024,
-    });
-    return { status: 0, stdout: typeof stdout === "string" ? stdout : "", stderr: "" };
-  } catch (err) {
-    return {
-      status: typeof err?.status === "number" ? err.status : 1,
-      stdout: typeof err?.stdout === "string" ? err.stdout : "",
-      stderr: typeof err?.stderr === "string" ? err.stderr : (err?.message ?? ""),
-    };
-  }
-}
-
 // Two-stage tick: Stage 1 senseState gathers the snapshot; the coordinator runs
 // the ordered handlers (cleanup → ghost-cleanup → relaunch → babysit → dispatch)
 // as pure assess + effecting apply; the heartbeat writes the record + events and
-// snapshots it for /status. All I/O is wired to the proven seams in this file.
-function tick() {
+// snapshots it for /status. All I/O is wired to the proven async seams in this
+// file (Castra fetch, gh/git/smithy execFile, the Brood HTTP client).
+async function tick() {
   const senseDeps = {
     meta,
     now,
@@ -2731,7 +2726,9 @@ function tick() {
     meta,
     ts: state.ts,
     castra: castra(),
-    broodTeardown: (sessionId, opts) => broodTeardownCli(sessionId, opts, marchCliRunner as CliRunner),
+    // Brood is a service; broodTeardown hits it over HTTP via the async
+    // BroodClient (MARCH_BROOD_URL). No CLI shelling.
+    broodTeardown: (sessionId, opts) => broodTeardownCli(sessionId, opts),
     persist: (s) => writeJson(meta.legate_state_path, s.raw),
     emit: (event) => append(meta.processor_events_path, event),
     log: (line) => appendText(meta.processor_log_path, line),
@@ -2751,7 +2748,7 @@ function tick() {
     requestJudgement: (input) => requestLegateJudgement(input),
   };
 
-  const out = coordinatorRunTick({
+  const out = await coordinatorRunTick({
     sense: () => senseState(senseDeps),
     makeContext,
     babysit: babysitDeps,
@@ -2820,12 +2817,21 @@ function flushHeartbeatMetrics(durationMs: number) {
   });
 }
 
-function safeTick() {
+// Re-entrancy guard: a tick is now async and can outlast the interval (slow
+// gh/git/castra). Overlapping ticks would double-dispatch, so skip a fire while
+// the previous tick is still in flight.
+let _ticking = false;
+
+async function safeTick() {
+  if (_ticking) return;
+  _ticking = true;
   const startedAt = Date.now();
   try {
-    tick();
+    await tick();
   } catch (err) {
     logTickError(err);
+  } finally {
+    _ticking = false;
   }
   lastTickAtMs = Date.now();
   lastTickDurationMs = lastTickAtMs - startedAt;
@@ -2847,8 +2853,8 @@ export function startLoopRuntime(): { stop: () => void } {
     `[${now()}] legate-loop starting in terminal-pr-maintenance mode for ${meta.paired_legate}`,
   );
   replayRecentActionEvents();
-  safeTick();
-  const timer = setInterval(safeTick, Math.max(10, intervalSeconds) * 1000);
+  void safeTick();
+  const timer = setInterval(() => void safeTick(), Math.max(10, intervalSeconds) * 1000);
   return {
     stop: () => clearInterval(timer),
   };

@@ -76,10 +76,10 @@ export interface JudgementInput {
 
 /** Side-effect seams (Castra send + the legate-judgement emitter from events). */
 export interface BabysitDeps {
-  /** Send a prompt to a worker session; throws on transport failure. */
-  sendMessage: (sessionId: string, message: string) => void;
-  /** Append + doorbell a judgement request; returns the event, or null if deduped. */
-  requestJudgement: (input: JudgementInput) => any | null;
+  /** Send a prompt to a worker session; rejects on transport failure. */
+  sendMessage: (sessionId: string, message: string) => Promise<void>;
+  /** Append + doorbell a judgement request; resolves to the event, or null if deduped. */
+  requestJudgement: (input: JudgementInput) => Promise<any | null>;
 }
 
 export type BabysitDecision =
@@ -433,11 +433,11 @@ function clearLoginBlocked(slice: any): void {
   delete slice.login_blocked_output_hash;
 }
 
-export function apply(decisions: BabysitDecision[], ctx: HandlerContext, state: LoopState, deps: BabysitDeps): HandlerResult {
+export async function apply(decisions: BabysitDecision[], ctx: HandlerContext, state: LoopState, deps: BabysitDeps): Promise<HandlerResult> {
   const res = emptyHandlerResult();
   const ts = ctx.ts;
-  const fireRequest = (input: JudgementInput): void => {
-    const event = deps.requestJudgement(input);
+  const fireRequest = async (input: JudgementInput): Promise<void> => {
+    const event = await deps.requestJudgement(input);
     if (event) {
       res.requests.push(event);
       res.mutated = true;
@@ -456,18 +456,18 @@ export function apply(decisions: BabysitDecision[], ctx: HandlerContext, state: 
         slice.login_blocked_output_hash = d.outputHash;
         slice.last_action = ts;
         slice.last_action_note = "worker blocked on Claude Code login refresh";
-        fireRequest({ ts, slice, requestKey: d.requestKey, sliceId: d.sliceId, sessionId: d.sessionId, pr: slice.pr || null, reason: "claude_api_401_login_required", detail: d.detail });
+        await fireRequest({ ts, slice, requestKey: d.requestKey, sliceId: d.sliceId, sessionId: d.sessionId, pr: slice.pr || null, reason: "claude_api_401_login_required", detail: d.detail });
         res.mutated = true;
         break;
       }
       case "login-resume-unverifiable":
-        fireRequest({ ts, slice, requestKey: d.requestKey, sliceId: d.sliceId, sessionId: d.sessionId, pr: slice.pr || null, reason: "could not verify Claude login refresh", detail: d.detail });
+        await fireRequest({ ts, slice, requestKey: d.requestKey, sliceId: d.sliceId, sessionId: d.sessionId, pr: slice.pr || null, reason: "could not verify Claude login refresh", detail: d.detail });
         break;
       case "login-resume-send": {
         try {
-          deps.sendMessage(d.sessionId, d.message);
+          await deps.sendMessage(d.sessionId, d.message);
         } catch (err: any) {
-          fireRequest({ ts, slice, requestKey: `login-resume-send-failed:${d.sessionId}:${slice.login_blocked_at || ""}`, sliceId: d.sliceId, sessionId: d.sessionId, pr: slice.pr || null, reason: "processor failed to send login-refresh resume prompt", detail: err?.message || String(err) });
+          await fireRequest({ ts, slice, requestKey: `login-resume-send-failed:${d.sessionId}:${slice.login_blocked_at || ""}`, sliceId: d.sliceId, sessionId: d.sessionId, pr: slice.pr || null, reason: "processor failed to send login-refresh resume prompt", detail: err?.message || String(err) });
           break;
         }
         clearLoginBlocked(slice);
@@ -479,7 +479,7 @@ export function apply(decisions: BabysitDecision[], ctx: HandlerContext, state: 
       case "worker-error": {
         if (!slice.worker_error_detected_at) slice.worker_error_detected_at = ts;
         slice.worker_error_last_seen_at = ts;
-        fireRequest({ ts, slice, requestKey: d.requestKey, sliceId: d.sliceId, sessionId: d.sessionId, pr: slice.pr || null, reason: "worker_session_error", detail: d.detail });
+        await fireRequest({ ts, slice, requestKey: d.requestKey, sliceId: d.sliceId, sessionId: d.sessionId, pr: slice.pr || null, reason: "worker_session_error", detail: d.detail });
         res.mutated = true;
         break;
       }
@@ -491,7 +491,7 @@ export function apply(decisions: BabysitDecision[], ctx: HandlerContext, state: 
       case "steward-nudge": {
         if (d.nudge) {
           try {
-            deps.sendMessage(d.sessionId, STRANDED_MESSAGE);
+            await deps.sendMessage(d.sessionId, STRANDED_MESSAGE);
             slice.steward_nudge_sent_at = ts;
             slice.steward_nudge_count = d.nextCount;
           } catch {
@@ -500,14 +500,14 @@ export function apply(decisions: BabysitDecision[], ctx: HandlerContext, state: 
         }
         if (d.alert) {
           slice.steward_stranded_escalated_at = ts;
-          fireRequest({ ts, slice, requestKey: d.alertRequestKey, sliceId: d.sliceId, sessionId: d.sessionId, reason: "steward stranded after dispatch (watchdog still nudging)", detail: d.alertDetail });
+          await fireRequest({ ts, slice, requestKey: d.alertRequestKey, sliceId: d.sliceId, sessionId: d.sessionId, reason: "steward stranded after dispatch (watchdog still nudging)", detail: d.alertDetail });
         }
         res.actions.push({ action: "steward-nudge", sliceId: d.sliceId, sessionId: d.sessionId, detail: d.detail });
         res.mutated = true;
         break;
       }
       case "query-failed":
-        fireRequest({ ts, slice, requestKey: d.requestKey, sliceId: d.sliceId, sessionId: d.sessionId, prNumber: d.prNumber, reason: "processor could not query PR state", detail: d.detail });
+        await fireRequest({ ts, slice, requestKey: d.requestKey, sliceId: d.sliceId, sessionId: d.sessionId, prNumber: d.prNumber, reason: "processor could not query PR state", detail: d.detail });
         break;
       case "pr-snapshot":
         snapshot(slice, d.pr);
@@ -522,16 +522,16 @@ export function apply(decisions: BabysitDecision[], ctx: HandlerContext, state: 
         res.mutated = true;
         break;
       case "unknown-pr-state":
-        fireRequest({ ts, slice, requestKey: d.requestKey, sliceId: d.sliceId, sessionId: d.sessionId, pr: d.pr, reason: "unknown PR state", detail: d.detail });
+        await fireRequest({ ts, slice, requestKey: d.requestKey, sliceId: d.sliceId, sessionId: d.sessionId, pr: d.pr, reason: "unknown PR state", detail: d.detail });
         break;
       case "conflict-persisted":
-        fireRequest({ ts, slice, requestKey: d.requestKey, sliceId: d.sliceId, sessionId: d.sessionId, pr: d.pr, reason: "merge conflict persisted after processor prompt", detail: d.detail });
+        await fireRequest({ ts, slice, requestKey: d.requestKey, sliceId: d.sliceId, sessionId: d.sessionId, pr: d.pr, reason: "merge conflict persisted after processor prompt", detail: d.detail });
         break;
       case "conflict-fix": {
         try {
-          deps.sendMessage(d.sessionId, d.message);
+          await deps.sendMessage(d.sessionId, d.message);
         } catch (err: any) {
-          fireRequest({ ts, slice, requestKey: actionKey("conflict-send-failed", d.pr), sliceId: d.sliceId, sessionId: d.sessionId, pr: d.pr, reason: "processor failed to send conflict-resolution prompt", detail: err?.message || String(err) });
+          await fireRequest({ ts, slice, requestKey: actionKey("conflict-send-failed", d.pr), sliceId: d.sliceId, sessionId: d.sessionId, pr: d.pr, reason: "processor failed to send conflict-resolution prompt", detail: err?.message || String(err) });
           break;
         }
         slice.stage = "pr-resolving-conflicts";
@@ -542,7 +542,7 @@ export function apply(decisions: BabysitDecision[], ctx: HandlerContext, state: 
       }
       case "post-dispatch-nudge": {
         try {
-          deps.sendMessage(d.sessionId, d.message);
+          await deps.sendMessage(d.sessionId, d.message);
         } catch {
           break;
         }
@@ -554,13 +554,13 @@ export function apply(decisions: BabysitDecision[], ctx: HandlerContext, state: 
         break;
       }
       case "nudge-exhausted":
-        fireRequest({ ts, slice, requestKey: d.requestKey, sliceId: d.sliceId, sessionId: d.sessionId, pr: d.pr, reason: d.reason, detail: d.detail });
+        await fireRequest({ ts, slice, requestKey: d.requestKey, sliceId: d.sliceId, sessionId: d.sessionId, pr: d.pr, reason: d.reason, detail: d.detail });
         break;
       case "review-fix": {
         try {
-          deps.sendMessage(d.sessionId, d.message);
+          await deps.sendMessage(d.sessionId, d.message);
         } catch (err: any) {
-          fireRequest({ ts, slice, requestKey: actionKey("review-send-failed", d.pr, d.key), sliceId: d.sliceId, sessionId: d.sessionId, pr: d.pr, reason: "processor failed to send review-thread /smithy.fix", detail: err?.message || String(err) });
+          await fireRequest({ ts, slice, requestKey: actionKey("review-send-failed", d.pr, d.key), sliceId: d.sliceId, sessionId: d.sessionId, pr: d.pr, reason: "processor failed to send review-thread /smithy.fix", detail: err?.message || String(err) });
           break;
         }
         slice.stage = "pr-in-fix";
@@ -570,7 +570,7 @@ export function apply(decisions: BabysitDecision[], ctx: HandlerContext, state: 
         break;
       }
       case "ci-failure":
-        fireRequest({ ts, slice, requestKey: d.requestKey, sliceId: d.sliceId, sessionId: d.sessionId, pr: d.pr, reason: "CI failure requires Legate judgement", detail: d.detail });
+        await fireRequest({ ts, slice, requestKey: d.requestKey, sliceId: d.sliceId, sessionId: d.sessionId, pr: d.pr, reason: "CI failure requires Legate judgement", detail: d.detail });
         break;
       case "pr-open-clear":
         slice.stage = "pr-open";

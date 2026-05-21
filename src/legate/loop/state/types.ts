@@ -1,6 +1,6 @@
 import type { LoopMeta } from "../meta.js";
 import type { WorkerSummary } from "../pure/session.js";
-import type { SyncCastraClient } from "../../../castra/client.js";
+import type { CastraClient } from "../../../castra/client.js";
 import type { BroodTeardownOptions, BroodTeardownResult } from "../clients/brood.js";
 
 /**
@@ -59,9 +59,9 @@ export interface LoopState {
 export interface HandlerContext {
   meta: LoopMeta;
   ts: string;
-  castra: SyncCastraClient;
+  castra: CastraClient;
   /** Request teardown of a session via Brood (the teardown authority). */
-  broodTeardown: (sessionId: string, opts?: BroodTeardownOptions) => BroodTeardownResult;
+  broodTeardown: (sessionId: string, opts?: BroodTeardownOptions) => Promise<BroodTeardownResult>;
   /** Persist the (mutated) state.json. */
   persist: (state: LoopState) => void;
   /** Append an action/event record to the action log (+ otel span/log). */

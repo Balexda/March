@@ -18,32 +18,32 @@ export interface SenseDeps {
   /** Read + parse state.json; return null when absent, throw on a real error. */
   readonly readStateJson: () => any;
   /** Castra session list, mapped to agent-deck-shaped objects (or `{error}`). */
-  readonly listSessions: () => any[] | { error: string };
+  readonly listSessions: () => Promise<any[] | { error: string }>;
   /** Best-effort default-branch sync before reading smithy (keeps status fresh). */
-  readonly syncDefaultBranch: (repoPath: string, knownDefault?: string) => void;
-  readonly readSmithyStatus: (repoPath: string) => any;
+  readonly syncDefaultBranch: (repoPath: string, knownDefault?: string) => Promise<void>;
+  readonly readSmithyStatus: (repoPath: string) => Promise<any>;
   /** Per-slice PR state (queryPrForBabysit) for an active slice. */
-  readonly queryPr: (slice: any, state: any, repoPath: string | undefined) => any;
+  readonly queryPr: (slice: any, state: any, repoPath: string | undefined) => Promise<any>;
   /** Branch/output-based PR discovery for an implementing slice with no PR yet. */
-  readonly discoverPr?: (slice: any, state: any, repoPath: string | undefined, sessionId: string) => any;
+  readonly discoverPr?: (slice: any, state: any, repoPath: string | undefined, sessionId: string) => Promise<any>;
   /** Recent session output for login/error detection. */
-  readonly sessionOutput: (sessionId: string) => { output: string; error?: string };
+  readonly sessionOutput: (sessionId: string) => Promise<{ output: string; error?: string }>;
   /** Sink for non-fatal sync/sense warnings (so they surface in the action log). */
   readonly warn?: (message: string) => void;
 }
 
-function senseSmithy(deps: SenseDeps, state: any, repoPath: string | undefined): SmithyView {
+async function senseSmithy(deps: SenseDeps, state: any, repoPath: string | undefined): Promise<SmithyView> {
   if (typeof repoPath !== "string" || repoPath.length === 0) {
     return { ok: false, error: "repo path is missing", ready: [], queue: { dispatchable: 0, blocked: 0, total: 0 } };
   }
   try {
-    deps.syncDefaultBranch(repoPath, state?.repo?.default_branch);
+    await deps.syncDefaultBranch(repoPath, state?.repo?.default_branch);
   } catch (err: any) {
     deps.warn?.("sync warning: " + (err?.message || String(err)) + " — proceeding against stale local repo");
   }
   let status: any;
   try {
-    status = deps.readSmithyStatus(repoPath);
+    status = await deps.readSmithyStatus(repoPath);
   } catch (err: any) {
     return { ok: false, error: err?.message || String(err), ready: [], queue: { dispatchable: 0, blocked: 0, total: 0 } };
   }
@@ -63,7 +63,7 @@ function senseSmithy(deps: SenseDeps, state: any, repoPath: string | undefined):
   };
 }
 
-export function senseState(deps: SenseDeps): LoopState {
+export async function senseState(deps: SenseDeps): Promise<LoopState> {
   const ts = deps.now();
   let raw: any = null;
   let stateError: string | null = null;
@@ -76,7 +76,7 @@ export function senseState(deps: SenseDeps): LoopState {
   const archived = raw?.archived_slices && typeof raw.archived_slices === "object" ? raw.archived_slices : {};
   const repoPath = raw?.repo?.path || deps.meta.repo?.path;
 
-  const sessionList = deps.listSessions();
+  const sessionList = await deps.listSessions();
   const sessions = Array.isArray(sessionList) ? sessionList : [];
   const sessionsById = new Map<string, any>();
   for (const s of sessions) {
@@ -99,19 +99,19 @@ export function senseState(deps: SenseDeps): LoopState {
       if (isTerminalSlice(slice)) continue;
       const entry: SliceExternalState = {};
       try {
-        let pr = deps.queryPr(slice, raw, repoPath);
+        let pr = await deps.queryPr(slice, raw, repoPath);
         // Implementing slice with no PR yet: queryPr skips (no number to query),
         // so fall back to branch/output-based discovery — Stage 1 owns the read
         // so babysit's assess can treat "discovered" and "queried" uniformly.
         if ((!pr || pr.skipped) && slice.stage === "implementing" && !slice.pr?.number && deps.discoverPr) {
-          pr = deps.discoverPr(slice, raw, repoPath, sessionId) ?? pr;
+          pr = (await deps.discoverPr(slice, raw, repoPath, sessionId)) ?? pr;
         }
         entry.pr = pr;
       } catch (err: any) {
         entry.pr = { error: err?.message || String(err) };
       }
       try {
-        entry.recentOutput = deps.sessionOutput(sessionId);
+        entry.recentOutput = await deps.sessionOutput(sessionId);
       } catch (err: any) {
         entry.recentOutput = { output: "", error: err?.message || String(err) };
       }
@@ -131,7 +131,7 @@ export function senseState(deps: SenseDeps): LoopState {
     sessions,
     sessionsById,
     workers,
-    smithy: senseSmithy(deps, raw, repoPath),
+    smithy: await senseSmithy(deps, raw, repoPath),
     perSlice,
   };
 }

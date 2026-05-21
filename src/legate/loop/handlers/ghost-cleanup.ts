@@ -53,10 +53,10 @@ export function assess(state: LoopState): GhostDecision[] {
   return out;
 }
 
-export function apply(decisions: GhostDecision[], ctx: HandlerContext, state: LoopState): HandlerResult {
+export async function apply(decisions: GhostDecision[], ctx: HandlerContext, state: LoopState): Promise<HandlerResult> {
   const res = emptyHandlerResult();
   for (const d of decisions) {
-    const teardown = ctx.broodTeardown(d.sessionId, { force: true, reason: "ghost-steward" });
+    const teardown = await ctx.broodTeardown(d.sessionId, { force: true, reason: "ghost-steward" });
     if (teardown.ok) {
       dropSession(state, d.sessionId);
       res.mutated = true;
