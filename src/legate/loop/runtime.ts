@@ -17,7 +17,6 @@
  *   - a lastHeartbeat snapshot is exposed for the HTTP /status endpoint.
  */
 import { execFile, spawn } from "node:child_process";
-import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import {
@@ -37,6 +36,28 @@ import { runTick as coordinatorRunTick } from "./coordinator.js";
 import { runHeartbeat } from "./heartbeat.js";
 import { broodTeardown as broodTeardownCli } from "./clients/brood.js";
 import { LegateHerald } from "./clients/herald.js";
+// Pure helpers (deduplicated from the lifted runtime — these used to be inline
+// copies; the canonical, unit-tested versions live under pure/). #144.
+import {
+  actionArguments,
+  actionCommandLine,
+  dispatchBranch,
+  dispatchIdentity,
+  dispatchSliceId,
+  dispatchTitle,
+} from "./pure/dispatch-id.js";
+import {
+  buildDirectStewardMessage,
+  buildSmithyRecoverySpawnPrompt,
+  buildSmithySpawnPrompt,
+} from "./pure/messages.js";
+import {
+  formatBabysitActionLine,
+  formatCleanupFailureLine,
+  formatCleanupLine,
+  formatProcessorRequestLine,
+} from "./pure/format.js";
+import { hashText } from "./pure/hash.js";
 
 // Lazily-built async Castra client (constructed on first use so it reads the
 // CASTRA_URL/token env the container passes in). The loop reaches every
@@ -239,22 +260,6 @@ function execText(command, args, options = {}) {
   });
 }
 
-function formatCleanupLine(event, prefix = "") {
-  return `[${event.ts}] ${prefix}cleaned up ${event.slice_id} PR #${event.pr_number} ${event.pr_state}: removed session ${event.session_id}, pruned worktree`;
-}
-
-function formatCleanupFailureLine(event, prefix = "") {
-  return `[${event.ts}] ${prefix}cleanup failed ${event.slice_id || "unknown"}${event.pr_state ? " PR " + event.pr_state : ""}: ${event.error}`;
-}
-
-function formatBabysitActionLine(event, prefix = "") {
-  return `[${event.ts}] ${prefix}babysit ${event.action} ${event.slice_id} PR #${event.pr_number}: ${event.detail}`;
-}
-
-function formatProcessorRequestLine(event, prefix = "") {
-  return `[${event.ts}] ${prefix}requested legate judgement for ${event.slice_id || "unknown"}${event.pr_number ? " PR #" + event.pr_number : ""}: ${event.reason}`;
-}
-
 function replayRecentActionEvents(limit = 10) {
   let raw;
   try {
@@ -295,27 +300,6 @@ function replayRecentActionEvents(limit = 10) {
   }
 }
 
-function sessionGroup(session) {
-  return session.group || session.group_path || "";
-}
-
-function isWorkerSession(session) {
-  const group = sessionGroup(session);
-  return group === meta.worker_group || group.startsWith(meta.worker_group + "/");
-}
-
-function summarizeWorkers(list) {
-  if (!Array.isArray(list)) return { error: list.error || "unavailable" };
-  const buckets = { waiting: 0, running: 0, idle: 0, error: 0, stopped: 0, other: 0 };
-  for (const session of list) {
-    if (!isWorkerSession(session)) continue;
-    const status = session.status || "other";
-    if (Object.prototype.hasOwnProperty.call(buckets, status)) buckets[status] += 1;
-    else buckets.other += 1;
-  }
-  return buckets;
-}
-
 function markSliceAction(slice, action, key, note, ts) {
   slice.last_processor_action = action;
   slice.last_processor_action_key = key;
@@ -324,20 +308,12 @@ function markSliceAction(slice, action, key, note, ts) {
   slice.last_action_note = note;
 }
 
-function alreadyDispatched(slice, key) {
-  return slice.last_processor_action_key === key;
-}
-
 async function sendAgentDeckMessage(sessionId, message, _wait = false) {
   // Routed through Castra. Castra's send is fire-and-forget (202); the former
   // --wait/--timeout has no equivalent, which is fine — every loop caller used
   // the no-wait path.
   await castra().sendPrompt({ profile: meta.profile, sessionId, prompt: message });
   return "";
-}
-
-function hashText(text) {
-  return crypto.createHash("sha256").update(String(text || "")).digest("hex").slice(0, 16);
 }
 
 async function sendDoorbellToLegate() {
@@ -394,126 +370,6 @@ function updatePrSnapshot(slice, pr) {
   slice.unresolved_threads = pr.unresolved_threads;
 }
 
-function slugifyDispatchPart(value, fallback = "item") {
-  const slug = String(value || "")
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 56);
-  return slug || fallback;
-}
-
-function smithyVerb(command) {
-  return String(command || "").replace(/^smithy\./, "");
-}
-
-function actionArguments(action) {
-  return Array.isArray(action?.arguments)
-    ? action.arguments.map((arg) => String(arg))
-    : [];
-}
-
-function actionCommandLine(action) {
-  const command = String(action?.command || "");
-  const args = actionArguments(action);
-  return ["/" + command, ...args].join(" ").trim();
-}
-
-function dispatchItemKey(item) {
-  const action = item?.next_action || {};
-  return JSON.stringify({
-    command: action.command || "",
-    arguments: actionArguments(action),
-    path: item?.path || "",
-  });
-}
-
-// Strip a known artifact suffix from a basename so the leftover is a short,
-// readable spec / RFC / features-file slug. Returns null if the suffix isn't
-// recognized so we can fall back to the hash-based name rather than misderive.
-function dispatchArtifactSlug(filename) {
-  if (typeof filename !== "string" || filename.length === 0) return null;
-  const base = filename.split("/").pop() || "";
-  const m = base.match(/^(.+?)\.(?:spec|rfc|features|tasks)\.md$/);
-  return m ? m[1] : null;
-}
-
-// Derive a structured identity (spec/RFC slug + US/M row + slice/feature/
-// milestone index) for a smithy status record. Produces a short, semantic
-// stem that mirrors how operators already hand-name slices ("us6-s1",
-// "spawn-dispatch-us7"). Returns the legacy hash-based stem only when the
-// record lacks the structure to derive a meaningful name — in that case
-// behavior is identical to the pre-refactor scheme.
-//
-// Branch / slice ID collisions are intentional under this scheme: the same
-// spec + US + slice yields the same name on every dispatch, so a collision
-// means "this is a re-attempt of the same logical work", which is exactly
-// what the loop's branch-collision recovery wants to surface (vs. an opaque
-// hash that hides whether the collision is meaningful).
-function dispatchIdentity(item) {
-  const action = item?.next_action || {};
-  const verb = smithyVerb(action.command);
-  const args = actionArguments(action);
-  const parentSlug = dispatchArtifactSlug(item?.parent_path);
-  const row = String(item?.parent_row_id || "").trim().toLowerCase();
-  const numericTail = (s) => String(s || "").replace(/[^0-9]/g, "");
-  let stem = null;
-  if (verb === "forge" && parentSlug && row) {
-    const slice = numericTail(args[1]);
-    stem = parentSlug + "-" + row + (slice ? "-s" + slice : "");
-  } else if (verb === "cut" && parentSlug && row) {
-    const slice = numericTail(args[1]);
-    stem = parentSlug + "-" + row + (slice ? "-s" + slice : "");
-  } else if (verb === "mark" && parentSlug && row) {
-    const feature = numericTail(args[1]);
-    stem = parentSlug + "-" + row + (feature ? "-f" + feature : "");
-  } else if (verb === "render") {
-    const rfcSlug = dispatchArtifactSlug(args[0]) || parentSlug;
-    const milestone = numericTail(args[1]);
-    if (rfcSlug && milestone) stem = rfcSlug + "-m" + milestone;
-  }
-  if (stem) {
-    return { stem: slugifyDispatchPart(stem, "smithy"), verb, hash: null, semantic: true };
-  }
-  // Fallback: original hash-based scheme. Keeps dispatch working for records
-  // without parent_path / parent_row_id structure. Order is preserved
-  // exactly so existing state.json / archive entries keyed by the legacy
-  // ID continue to match: dispatchSliceId is "<stem>-<verb>-<hash>",
-  // dispatchBranch is "smithy/<verb>/<stem>-<hash>".
-  const basis = [item?.path || item?.title || "smithy", ...args].join(" ");
-  const truncStem = slugifyDispatchPart(basis, "smithy").slice(0, 44);
-  const hash = hashText(dispatchItemKey(item)).slice(0, 8);
-  return { stem: truncStem, verb, hash, semantic: false };
-}
-
-function dispatchSliceId(item) {
-  const { stem, verb, hash, semantic } = dispatchIdentity(item);
-  const verbSlug = slugifyDispatchPart(verb, "step");
-  return semantic ? stem + "-" + verbSlug : stem + "-" + verbSlug + "-" + hash;
-}
-
-function dispatchTitle(item) {
-  const action = item?.next_action || {};
-  const verb = smithyVerb(action.command);
-  const title = item?.title || item?.path || actionArguments(action).join(" ");
-  return verb + ": " + String(title || "smithy work").slice(0, 80);
-}
-
-function dispatchBranch(item) {
-  const { stem, verb, hash, semantic } = dispatchIdentity(item);
-  const verbSlug = slugifyDispatchPart(verb, "step");
-  return semantic
-    ? "smithy/" + verbSlug + "/" + stem
-    : "smithy/" + verbSlug + "/" + stem + "-" + hash;
-}
-
-function isTerminalSlice(slice) {
-  if (!slice || typeof slice !== "object") return true;
-  if (slice.stage === "merged" || slice.stage === "escalated") return true;
-  if (slice.pr?.state === "MERGED" || slice.pr?.state === "CLOSED") return true;
-  return false;
-}
-
 // Cap on codex-spawn recovery dispatches per original slice before the loop
 // stops fighting the spawn path. Two attempts is enough to distinguish a
 // fluky worker (first attempt missed the checkbox) from a systemic codex
@@ -522,68 +378,6 @@ function isTerminalSlice(slice) {
 // the old mini-legate style of handing the /smithy.<verb> command straight
 // to a Claude steward that does the whole job itself.
 const MAX_RECOVERY_ATTEMPTS = 2;
-
-function buildSmithySpawnPrompt(item) {
-  const commandLine = actionCommandLine(item.next_action);
-  return [
-    "Complete this Smithy workflow step and produce a git patch.",
-    "",
-    "Smithy command:",
-    commandLine,
-    "",
-    "Artifact:",
-    item.path || item.title || "(unknown)",
-    "",
-    "Rules:",
-    "- Implement only this one Smithy step.",
-    "- Do not chain into the next Smithy step.",
-    "- Make the smallest coherent patch needed for this step.",
-    "- Every acceptance criterion the step lists must be satisfied by the patch.",
-    "  Do not produce a partial patch and rely on a follow-up — the deterministic",
-    "  loop dedups future dispatches off the merged slice id and a partial merge",
-    "  is silently abandoned.",
-    "- Flip the matching tasks.md row(s) from `[ ]` to `[x]` in the same patch.",
-    "  The check-state is the loop's only durable signal that this slice is done.",
-    "- Leave PR creation to the Hatchery manager session.",
-  ].join("\n");
-}
-
-// Recovery-dispatch prompt: a layer-0 ready item collided with a prior
-// MERGED archive entry. The prior PR shipped a partial slice that left the
-// matching tasks.md row `[ ]`, so the loop's dedup silently filtered the
-// item until this path was added. Frame the work as cleanup: either finish
-// the remaining acceptance criteria or open a checkbox-only fix PR.
-function buildSmithyRecoverySpawnPrompt(item, mergedArchive, attempt) {
-  const commandLine = actionCommandLine(item.next_action);
-  const priorPr = mergedArchive?.pr || {};
-  const priorPrLine = priorPr.number
-    ? "Prior merged PR: #" + priorPr.number + (priorPr.url ? " (" + priorPr.url + ")" : "")
-    : "Prior merged slice: " + (mergedArchive?.branch || mergedArchive?.actual_branch || "(branch unknown)");
-  return [
-    "RECOVERY DISPATCH (attempt " + attempt + "). The slice listed below was",
-    "previously merged via the prior PR — but the merge was partial: smithy",
-    "still reports the tasks.md row as ready, which means at least one",
-    "checkbox is still `[ ]` and/or an acceptance criterion is unmet.",
-    "",
-    priorPrLine,
-    "",
-    "Smithy command:",
-    commandLine,
-    "",
-    "Artifact:",
-    item.path || item.title || "(unknown)",
-    "",
-    "Rules:",
-    "- Read the artifact and the prior merged diff (`gh pr view <num> --json files`",
-    "  if you have the number). Identify what shipped vs. what is still missing.",
-    "- If acceptance criteria are unmet: implement them now. Smallest coherent patch.",
-    "- If the work is actually done and only the checkbox was missed: open a",
-    "  checkbox-only cleanup PR that flips the row from `[ ]` to `[x]`.",
-    "- Either way, the patch MUST flip the matching tasks.md row(s).",
-    "- Do not re-implement work the prior PR already shipped — don't churn.",
-    "- Leave PR creation to the Hatchery manager session.",
-  ].join("\n");
-}
 
 function hatcheryResultPath(sliceId) {
   return path.join(meta.legate_conductor_dir || here, "hatchery-result-" + sliceId + ".json");
@@ -697,38 +491,6 @@ function launchHatcheryDispatch(item, resultPath, logPath, opts) {
   });
   child.unref();
   return { pid: child.pid || null, requestPath };
-}
-
-// Initial message handed to a direct-steward dispatch (no-spawn fallback).
-// The steward runs the /smithy.<verb> command itself and carries it all the
-// way to an open PR — the pre-Hatchery mini-legate flow. `mergedArchive` is
-// present when this is the fallback after recovery spawns failed; null on a
-// first-class direct dispatch.
-function buildDirectStewardMessage(item, mergedArchive) {
-  const commandLine = actionCommandLine(item.next_action);
-  const priorPr = mergedArchive?.pr || {};
-  const priorLine = priorPr.number
-    ? "A prior PR (#" + priorPr.number + ") merged for this artifact but left it incomplete — smithy still reports it as pending."
-    : "";
-  return [
-    "[DIRECT DISPATCH — no spawn] The Hatchery codex spawn path failed",
-    "repeatedly for this slice, so the loop is handing you the Smithy command",
-    "directly. Implement it yourself, end-to-end — do not wait for a patch.",
-    priorLine,
-    "",
-    "Run this Smithy command and carry it through to an open PR:",
-    commandLine,
-    "",
-    "Artifact: " + (item.path || item.title || "(unknown)"),
-    "",
-    "Requirements:",
-    "- Satisfy every acceptance criterion the step lists.",
-    "- Flip the matching tasks.md row(s) from `[ ]` to `[x]` in the same change.",
-    "- Commit, push, and open the PR yourself (`gh pr create`).",
-    "- Report the PR URL on the final line as `PR: <url>`.",
-    "- If genuinely blocked, escalate via `NEED: <summary> — <next action>`",
-    "  instead of ending your turn silently.",
-  ].filter((line) => line !== "").join("\n");
 }
 
 // Direct-steward dispatch: the no-spawn fallback. Launches a plain Claude
