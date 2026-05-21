@@ -29,6 +29,17 @@ export function errorMessage(err: unknown): string {
   return String(err);
 }
 
+/**
+ * Drop keys whose value is undefined so the structured log shape stays
+ * consistent regardless of the JobLogger implementation (pino already omits
+ * undefined keys, but the interface is logger-agnostic).
+ */
+function omitUndefined<T extends Record<string, unknown>>(obj: T): Partial<T> {
+  return Object.fromEntries(
+    Object.entries(obj).filter(([, v]) => v !== undefined),
+  ) as Partial<T>;
+}
+
 export interface JobStoreOptions {
   readonly executor?: SpawnExecutor;
   readonly logger?: JobLogger;
@@ -108,16 +119,17 @@ export class JobStore {
     record.startedAt = new Date().toISOString();
     incActiveSpawns();
     // Common structured fields so every record for this dispatch can be
-    // filtered/correlated in Loki by profile, task type, and slice. pino drops
-    // keys whose value is undefined, so absent request fields just don't appear.
-    const fields = {
+    // filtered/correlated in Loki by profile, task type, and slice. Undefined
+    // request fields are dropped so the log shape is consistent across logger
+    // implementations.
+    const fields = omitUndefined({
       job_id: record.id,
       backend: request.backend,
       task_name: request.taskName,
       task_type: request.taskType,
       profile: request.profile,
       slice_id: request.sliceId,
-    };
+    });
     this.logger?.info(fields, "spawn job started");
     try {
       record.result = await this.executor(request);
@@ -150,14 +162,15 @@ export class JobStore {
 
   /**
    * Emit the dispatch-outcome metric for a terminal job. Labels stay
-   * low-cardinality (no spawn/slice ids); absent task type/profile fall back to
-   * `"unknown"` to match spawn-metrics.
+   * low-cardinality (no spawn/slice ids); task type/profile are trimmed and
+   * default to `"unknown"` — mirroring `runHatcherySpawn` — so blank or
+   * whitespace values don't fragment the metric series.
    */
   private recordDispatch(request: SpawnRequest, outcome: DispatchOutcome): void {
     recordHatcheryDispatch({
       backend: request.backend,
-      taskType: request.taskType ?? "unknown",
-      profile: request.profile ?? "unknown",
+      taskType: request.taskType?.trim() || "unknown",
+      profile: request.profile?.trim() || "unknown",
       outcome,
     });
   }

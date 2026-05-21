@@ -99,6 +99,19 @@ describe("JobStore", () => {
     });
   });
 
+  it("omits undefined optional fields from the log record", async () => {
+    const { logger, calls } = recordingLogger();
+    // `request` carries no profile/taskType/taskName/sliceId.
+    const store = new JobStore({ executor: async () => fakeResult(), logger });
+    const record = store.create(request);
+    await vi.waitFor(() => expect(store.get(record.id)?.status).toBe("succeeded"));
+
+    const start = calls.find((c) => c.msg === "spawn job started")!;
+    expect(start.obj).toEqual({ job_id: record.id, backend: "codex" });
+    expect(Object.keys(start.obj)).not.toContain("profile");
+    expect(Object.keys(start.obj)).not.toContain("task_type");
+  });
+
   it("logs the structured fields on the failure record", async () => {
     const { logger, calls } = recordingLogger();
     const store = new JobStore({
