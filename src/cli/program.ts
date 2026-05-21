@@ -289,24 +289,12 @@ legate
   )
   .option("--no-setup", "Render the template only; skip `agent-deck conductor setup`")
   .option(
-    "--with-container",
-    "Build and launch the Hatchery-managed Legate container after setup",
-  )
-  .option(
     "--no-processor",
     "Deprecated alias for --no-loop",
   )
   .option(
     "--no-loop",
-    "Skip deploying the paired deterministic Legate loop conductor",
-  )
-  .option(
-    "--processor-only",
-    "Deprecated alias for --loop-only",
-  )
-  .option(
-    "--loop-only",
-    "Deploy only the paired deterministic loop conductor; do not create or start the Claude Legate agent",
+    "Skip deploying the paired deterministic Legate loop service container",
   )
   .option(
     "--no-bridge-check",
@@ -321,39 +309,13 @@ legate
     effort?: string;
     heartbeatInterval?: string;
     setup?: boolean; // commander negates --no-setup into setup=false
-    withContainer?: boolean;
     processor?: boolean; // commander negates --no-processor into processor=false
-    processorOnly?: boolean;
     loop?: boolean; // commander negates --no-loop into loop=false
-    loopOnly?: boolean;
     bridgeCheck?: boolean; // commander negates --no-bridge-check into bridgeCheck=false
   }) => {
     commandHandled = true;
 
     const loopDisabled = opts.loop === false || opts.processor === false;
-    const loopOnly = opts.loopOnly === true || opts.processorOnly === true;
-
-    if (loopOnly && loopDisabled) {
-      process.stderr.write(
-        "`--loop-only` cannot be combined with `--no-loop`.\n",
-      );
-      process.exitCode = USAGE_ERROR;
-      return;
-    }
-    if (loopOnly && opts.withContainer) {
-      process.stderr.write(
-        "`--loop-only` cannot be combined with `--with-container`.\n",
-      );
-      process.exitCode = USAGE_ERROR;
-      return;
-    }
-    if (opts.withContainer && loopDisabled) {
-      process.stderr.write(
-        "`--with-container` cannot be combined with `--no-loop`.\n",
-      );
-      process.exitCode = USAGE_ERROR;
-      return;
-    }
 
     // 1. Detect repo root. Legate is per-repo, so this is mandatory. Three
     //    distinct failures need distinct messages — pointing the user at
@@ -398,8 +360,10 @@ legate
 
     // 2. Verify agent-deck is on PATH when we'll actually invoke it.
     const willRunSetup = opts.setup !== false;
-    const willRunClaudeConductorSetup = willRunSetup && !loopOnly;
-    if (opts.withContainer) {
+    // The deterministic loop runs as a Hatchery-managed container — the only
+    // loop runtime — so Docker is required whenever setup will launch it.
+    const willLaunchLoopContainer = willRunSetup && !loopDisabled;
+    if (willLaunchLoopContainer) {
       if (!isFinderAvailable()) {
         process.stderr.write(
           "Cannot verify Docker is installed: path-search utility unavailable.\n",
@@ -409,7 +373,7 @@ legate
       }
       if (!isOnPath("docker")) {
         process.stderr.write(
-          "Docker not found on PATH — required for `march legate init --with-container`.\n",
+          "Docker not found on PATH — required to launch the Legate loop service container (pass --no-loop or --no-setup to skip).\n",
         );
         process.exitCode = ERROR;
         return;
@@ -436,7 +400,7 @@ legate
       //    delivers heartbeats; without it, the conductor is functional
       //    but inert. Failing here is preferable to deploying a conductor
       //    that silently never wakes up. Skipped under --no-bridge-check.
-      if (willRunClaudeConductorSetup && opts.bridgeCheck !== false) {
+      if (opts.bridgeCheck !== false) {
         const check = checkBridgeRequirements();
         if (!check.ok) {
           process.stderr.write(check.message + "\n");
@@ -458,11 +422,8 @@ legate
         effort: opts.effort,
         heartbeatInterval: opts.heartbeatInterval,
         runSetup: willRunSetup,
-        loop: loopOnly ? true : !loopDisabled,
-        loopOnly,
-        processor: loopOnly ? true : !loopDisabled,
-        processorOnly: loopOnly,
-        withContainer: opts.withContainer === true,
+        loop: !loopDisabled,
+        processor: !loopDisabled,
       });
       console.log(result.summary);
       process.exitCode = SUCCESS;

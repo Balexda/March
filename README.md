@@ -23,7 +23,7 @@ npm install -g @balexda/march
 march init
 ```
 
-Requires Node 20 or 22. `march spawn dispatch` additionally requires `git` and `docker` on `PATH`. `march legate init` requires `git`, [`agent-deck`](https://github.com/asheshgoplani/agent-deck), and Python 3.9+ for agent-deck's conductor bridge; `march legate init --with-container` also requires Docker and runs the deterministic Legate loop inside the managed container.
+Requires Node 20 or 22. `march spawn dispatch` additionally requires `git` and `docker` on `PATH`. `march legate init` requires `git`, [`agent-deck`](https://github.com/asheshgoplani/agent-deck), and Python 3.9+ for agent-deck's conductor bridge, plus Docker — it runs the deterministic Legate loop as a service inside the Hatchery-managed container (the only loop runtime). Pass `--no-loop` or `--no-setup` to skip the container.
 
 ## Supported AI Assistants
 
@@ -38,7 +38,7 @@ Requires Node 20 or 22. `march spawn dispatch` additionally requires `git` and `
 | `march spawn dispatch` | Create a worktree, snapshot it as a Docker build context, build `march-spawn-<id>`, launch the container with hardened security configuration, and transition the SpawnRecord to `"running"`. |
 | `march hatchery serve` | Run the Hatchery service (Fastify HTTP API) — the single long-running container that performs spawns. The container entrypoint. |
 | `march hatchery spawn` | Run a one-shot spawn and hand its patch to an agent-deck manager. A thin client that posts to the Hatchery service (`MARCH_HATCHERY_URL`, default `http://localhost:8080`). |
-| `march legate init` | Set up a per-repo Legate agent plus paired deterministic loop for the Smithy plan→PR→fix workflow on top of [agent-deck](https://github.com/asheshgoplani/agent-deck). Pass `--with-container` to run the loop in the Hatchery-managed Legate container while the agent-deck loop pane tails its logs. |
+| `march legate init` | Set up a per-repo Legate agent plus paired deterministic loop for the Smithy plan→PR→fix workflow on top of [agent-deck](https://github.com/asheshgoplani/agent-deck). The loop runs as a service inside the Hatchery-managed Legate container (the only loop runtime); use `--no-loop` or `--no-setup` to skip it. |
 | `march version` | Print the installed CLI version. |
 | `march help [command]` | Show help for a command. |
 
