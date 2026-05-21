@@ -20,6 +20,7 @@ import {
   expectedWorktreeDirName,
   parseAgentDeckSession,
   pickLaunchedSession,
+  resolveAgentDeckEnv,
 } from "./adapter.js";
 import {
   CastraAgentDeckError,
@@ -142,6 +143,53 @@ describe("castra adapter — pure parsers", () => {
     expect(parsed?.sessionId).toBe("abc");
     expect(parsed?.worktreePath).toBe("/repo/feature-march-spawn-x");
     expect(parsed?.status).toBe("idle");
+  });
+});
+
+describe("castra adapter — agent-deck tmux env (issue #174)", () => {
+  it("passes the environment through untouched when $TMUX is already set", () => {
+    const env = { TMUX: "/tmp/tmux-1000/default,693,0", PATH: "/usr/bin" };
+    expect(resolveAgentDeckEnv(env, 1000)).toBe(env);
+  });
+
+  it("synthesizes $TMUX at the default socket when it is absent", () => {
+    const resolved = resolveAgentDeckEnv({ PATH: "/usr/bin" }, 1000);
+    expect(resolved.TMUX).toBe("/tmp/tmux-1000/default,0,0");
+    // Existing vars are preserved (we don't replace the whole environment).
+    expect(resolved.PATH).toBe("/usr/bin");
+  });
+
+  it("treats a blank $TMUX as absent and synthesizes one", () => {
+    expect(resolveAgentDeckEnv({ TMUX: "   " }, 1000).TMUX).toBe(
+      "/tmp/tmux-1000/default,0,0",
+    );
+  });
+
+  it("honors $TMUX_TMPDIR for the socket directory", () => {
+    expect(resolveAgentDeckEnv({ TMUX_TMPDIR: "/run/tmux" }, 1000).TMUX).toBe(
+      "/run/tmux/tmux-1000/default,0,0",
+    );
+  });
+
+  it("leaves the environment untouched when the uid is unknown", () => {
+    const env = { PATH: "/usr/bin" };
+    expect(resolveAgentDeckEnv(env, undefined)).toBe(env);
+  });
+
+  it("hands the resolved env (with $TMUX) to the spawned agent-deck", () => {
+    vi.stubEnv("TMUX", "");
+    vi.stubEnv("TMUX_TMPDIR", "");
+    childProcessMock.execFileSync.mockReset();
+    childProcessMock.execFileSync.mockReturnValue("[]");
+    try {
+      createAgentDeckAdapter().list({ profile: "march" });
+      const opts = childProcessMock.execFileSync.mock.calls[0]?.[2] as {
+        env?: NodeJS.ProcessEnv;
+      };
+      expect(opts.env?.TMUX).toMatch(/\/tmux-\d+\/default,0,0$/);
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 });
 
