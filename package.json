@@ -14,6 +14,7 @@
     "build:hatchery-image": "docker build -t march-hatchery:latest -f docker/hatchery.Dockerfile .",
     "build:castra-image": "docker build -t march-castra:latest -f docker/castra.Dockerfile .",
     "build:brood-image": "docker build -t march-brood:latest -f docker/brood.Dockerfile .",
+    "build:herald-image": "docker build -t march-herald:latest -f docker/herald.Dockerfile .",
     "start": "node dist/cli.js",
     "typecheck": "tsc --noEmit"
   },

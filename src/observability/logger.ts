@@ -40,6 +40,13 @@ export function resolveBroodLogFilePath(
   return resolveServiceLogFilePath("brood.jsonl", "MARCH_BROOD_LOG_DIR", env);
 }
 
+/** Herald service log file: `$MARCH_HERALD_LOG_DIR/herald.jsonl`. */
+export function resolveHeraldLogFilePath(
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  return resolveServiceLogFilePath("herald.jsonl", "MARCH_HERALD_LOG_DIR", env);
+}
+
 /**
  * Map a pino numeric level to its OpenTelemetry severity. pino levels:
  * trace=10 debug=20 info=30 warn=40 error=50 fatal=60. Exported for testing.
@@ -202,6 +209,29 @@ export function createBroodLogger(
   return createServiceLogger({
     serviceName: options.name ?? "march-brood",
     logFilePath: options.logFilePath ?? resolveBroodLogFilePath(env),
+    level: options.level,
+    env,
+    sync: options.sync,
+  });
+}
+
+export interface HeraldLoggerOptions {
+  readonly logFilePath?: string;
+  readonly name?: string;
+  readonly level?: LevelWithSilent;
+  readonly env?: NodeJS.ProcessEnv;
+  /** Synchronous file writes. Default false (buffered); set true in tests/CI. */
+  readonly sync?: boolean;
+}
+
+/** Herald service logger (`march-herald` → `herald.jsonl`). */
+export function createHeraldLogger(
+  options: HeraldLoggerOptions = {},
+): PinoLogger {
+  const env = options.env ?? process.env;
+  return createServiceLogger({
+    serviceName: options.name ?? "march-herald",
+    logFilePath: options.logFilePath ?? resolveHeraldLogFilePath(env),
     level: options.level,
     env,
     sync: options.sync,

@@ -806,6 +806,86 @@ brood
     }
   });
 
+const herald = program
+  .command("herald")
+  .description("Manage Herald system-state observation (heartbeat + event log)");
+
+herald
+  .command("serve")
+  .description("Run the Herald service (HTTP API + observe loop). Container entrypoint.")
+  .option(
+    "--port <port>",
+    "Port to listen on (default: MARCH_HERALD_PORT or the deterministic 8800–9799 port)",
+  )
+  .option("--host <host>", "Bind host (default 0.0.0.0)")
+  .option("--meta <path>", "Path to the meta JSON (else MARCH_HERALD_META / MARCH_LEGATE_LOOP_META)")
+  .action(async (opts: { port?: string; host?: string; meta?: string }) => {
+    commandHandled = true;
+    const { startServer } = await import("../herald/service/server.js");
+    const port = opts.port ? Number(opts.port) : undefined;
+    // Resolves only when the service shuts down (SIGTERM/SIGINT).
+    await startServer({ port, host: opts.host, metaPath: opts.meta });
+    process.exitCode = SUCCESS;
+  });
+
+herald
+  .command("events")
+  .description("Print events Herald has recorded (the inbox the legate drains)")
+  .option("--after <seq>", "Only events after this sequence number", "0")
+  .option("--limit <n>", "Max events to print", "100")
+  .option("--json", "Print events as JSON")
+  .action(async (opts: { after?: string; limit?: string; json?: boolean }) => {
+    commandHandled = true;
+    const { HeraldClient, HeraldClientError } = await import("../herald/service/client.js");
+    try {
+      const page = await new HeraldClient().events({
+        after: Number(opts.after ?? 0),
+        limit: Number(opts.limit ?? 100),
+      });
+      if (opts.json) {
+        console.log(JSON.stringify(page.events, null, 2));
+      } else if (page.events.length === 0) {
+        console.log("No events.");
+      } else {
+        for (const e of page.events) {
+          console.log(`${e.seq}\t${e.ts}\t${e.source}\t${e.type}`);
+        }
+      }
+      process.exitCode = SUCCESS;
+    } catch (err) {
+      const message = err instanceof HeraldClientError ? err.message : (err as Error).message;
+      process.stderr.write(message + "\n");
+      process.exitCode = ERROR;
+    }
+  });
+
+herald
+  .command("state")
+  .description("Print Herald's current observed-state projection")
+  .option("--at <seq>", "Project state as of this sequence number")
+  .option("--json", "Print the projection as JSON")
+  .action(async (opts: { at?: string; json?: boolean }) => {
+    commandHandled = true;
+    const { HeraldClient, HeraldClientError } = await import("../herald/service/client.js");
+    try {
+      const state = await new HeraldClient().state(opts.at ? Number(opts.at) : undefined);
+      if (opts.json) {
+        console.log(JSON.stringify(state, null, 2));
+      } else {
+        console.log(
+          `seq=${state.seq} slices=${Object.keys(state.slices).length} ` +
+            `sessions=${Object.keys(state.sessions).length} ` +
+            `smithy=${state.smithy.dispatchable}/${state.smithy.blocked}/${state.smithy.total} (dispatchable/blocked/total)`,
+        );
+      }
+      process.exitCode = SUCCESS;
+    } catch (err) {
+      const message = err instanceof HeraldClientError ? err.message : (err as Error).message;
+      process.stderr.write(message + "\n");
+      process.exitCode = ERROR;
+    }
+  });
+
 program
   .command("spawn [subcommand]")
   .description("Spawn a new environment")

@@ -1,0 +1,87 @@
+# Herald service — the system-state observation service (heartbeat + event log).
+#
+#   # 1. observability stack first (creates the `march` network):
+#   docker compose -f docker/otel-lgtm.docker-compose.yml up -d
+#   # 2. build + run herald (from the repo root):
+#   npm run build:herald-image
+#   docker compose -f docker/herald.docker-compose.yml up -d
+#
+# Point the legate at this service (so it drains the inbox in a follow-up PR):
+#   export MARCH_HERALD_URL=http://localhost:8818
+#
+# HOST-SPECIFIC CONFIG (override via env or a .env file next to this compose):
+#   MARCH_HOST_HOME   host HOME, bind-mounted at the IDENTICAL path so repos,
+#                     worktrees, ~/.march/herald (the event log) and the gh/git/
+#                     ssh credentials resolve to the same absolute paths inside
+#                     the container.
+#   MARCH_HOST_UID    host uid that owns those files (run-as).
+#   MARCH_HOST_GID    host primary gid for those files (defaults to the uid).
+#   MARCH_HERALD_META path to legate-loop-meta.json (Herald observes the same
+#                     deployment as the legate). Defaults to MARCH_LEGATE_LOOP_META.
+#   MARCH_HERALD_SYNC set to 1 to let Herald own the default-branch git sync.
+#                     LEFT UNSET here (PR1 default = read-only) so Herald never
+#                     fights a still-polling legate.
+#   CASTRA_URL        castra base URL (default http://castra:9264 on the `march`
+#                     network) — Herald lists sessions / reads output via castra.
+#   CASTRA_API_TOKEN  bearer token — must match the castra service's token.
+#
+# SECURITY: this mounts your HOME (read for repos + creds; Herald writes only
+# ~/.march/herald and its log). It does NOT mount the docker socket — Herald
+# observes, it never tears anything down. The port is bound to localhost only;
+# never expose it publicly, never publish this image.
+name: march-herald
+
+services:
+  herald:
+    build:
+      context: ..
+      dockerfile: docker/herald.Dockerfile
+    image: march-herald:latest
+    container_name: march-herald
+    restart: unless-stopped
+    command: ["herald", "serve"]
+    # Run as the host user so mounted files are accessible.
+    user: "${MARCH_HOST_UID:-1000}:${MARCH_HOST_GID:-${MARCH_HOST_UID:-1000}}"
+    ports:
+      - "127.0.0.1:8818:8818" # localhost only — never public (deterministic herald port)
+    environment:
+      - MARCH_OTEL=1
+      - MARCH_OTEL_ENDPOINT=http://otel-lgtm:4318
+      - MARCH_OTEL_SERVICE_NAME=march-herald
+      - MARCH_HERALD_PORT=8818
+      - MARCH_HERALD_LOG_DIR=/march/logs
+      # os.homedir() resolves from HOME -> the event log (~/.march/herald) and the
+      # repo/worktree paths land on the mounted host HOME at identical paths.
+      - HOME=${MARCH_HOST_HOME:-/home/jmbattista}
+      # Herald observes the same deployment as the legate; reuse its meta.
+      - MARCH_HERALD_META=${MARCH_HERALD_META:-${MARCH_LEGATE_LOOP_META:-}}
+      # PR1: read-only. Set to 1 at the PR2 cutover when Herald owns the git sync.
+      - MARCH_HERALD_SYNC=${MARCH_HERALD_SYNC:-}
+      # Reach castra over the shared `march` network; the bearer token must match
+      # castra's. (CASTRA_URL / CASTRA_API_TOKEN are the names the shared
+      # CastraClient reads.)
+      - CASTRA_URL=${CASTRA_URL:-http://castra:${CASTRA_PORT:-9264}}
+      - CASTRA_API_TOKEN=${CASTRA_API_TOKEN:?CASTRA_API_TOKEN must match the castra service token}
+    volumes:
+      # Whole HOME at the identical path: repos, worktrees, ~/.march/herald (the
+      # sqlite event log) and ~/.config/gh, .gitconfig, .ssh for gh/git. No
+      # docker socket — Herald never touches Docker.
+      - ${MARCH_HOST_HOME:-/home/jmbattista}:${MARCH_HOST_HOME:-/home/jmbattista}
+      # Durable service log file (also shipped to otel-lgtm via OTLP logs).
+      - march-herald-logs:/march/logs
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8818/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
+    networks:
+      - march
+
+networks:
+  march:
+    external: true
+    name: march
+
+volumes:
+  march-herald-logs:
