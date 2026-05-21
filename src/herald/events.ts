@@ -69,8 +69,10 @@ export type EventBody =
   /** The legate launched a spawn for a smithy item. `jobId` is the Hatchery job
    *  id, persisted so the legate's completion poll survives a restart. */
   | { type: "slice.dispatched"; sliceId: string; branch?: string; worktreePath?: string; sessionId?: string; jobId?: string; item?: unknown }
-  /** The slice moved to a new stage (implementing/pr-open/merged/…). */
-  | { type: "slice.stage.changed"; sliceId: string; stage: string }
+  /** The slice moved to a new stage (implementing/pr-open/merged/…). Carries the
+   *  steward `sessionId` on the implementing handoff so the fold learns the
+   *  slice→session link Herald's PR discovery is gated on (#210). */
+  | { type: "slice.stage.changed"; sliceId: string; stage: string; sessionId?: string }
   /** The slice reached a terminal state and was cleaned up. */
   | { type: "slice.archived"; sliceId: string }
   /** A partial-merge / branch-collision recovery dispatch. */
@@ -245,9 +247,14 @@ export function reduce(state: SystemState, event: HeraldEvent): SystemState {
       slice.archived = false;
       break;
     }
-    case "slice.stage.changed":
-      sliceOf(state, event.sliceId).stage = event.stage;
+    case "slice.stage.changed": {
+      const slice = sliceOf(state, event.sliceId);
+      slice.stage = event.stage;
+      // Mirror slice.dispatched: only set when present so a stage transition
+      // without a sessionId never clobbers a known link (#210).
+      if (event.sessionId !== undefined) slice.sessionId = event.sessionId;
       break;
+    }
     case "slice.archived":
       sliceOf(state, event.sliceId).archived = true;
       break;

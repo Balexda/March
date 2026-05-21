@@ -83,6 +83,14 @@ export function validateEvent(body: Record<string, unknown>): EventValidation {
   if (SLICE_TYPES.has(type) && (typeof body.sliceId !== "string" || body.sliceId.length === 0)) {
     return { ok: false, error: `event "${type}" requires a non-empty sliceId.` };
   }
+  // The implementing handoff carries the steward sessionId so Herald's fold
+  // learns the slice→session link PR discovery is gated on (#210). Optional, but
+  // when present it must be a non-empty string.
+  if (type === "slice.stage.changed" && body.sessionId !== undefined) {
+    if (typeof body.sessionId !== "string" || body.sessionId.length === 0) {
+      return { ok: false, error: `event "slice.stage.changed" sessionId must be a non-empty string.` };
+    }
+  }
   if (type === "session.changed") {
     const session = body.session as { id?: unknown } | undefined;
     if (!session || typeof session.id !== "string" || session.id.length === 0) {
