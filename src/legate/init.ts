@@ -3535,8 +3535,9 @@ function completePendingHatcheryDispatches(state, ts) {
       }
       // Spawn-error recovery: corrupt-patch and "already exists in index"
       // failures originate in codex's output and are typically transient
-      // (re-running produces different output). Retry up to 3 times via
-      // the same transient_retry_counts machinery.
+      // (re-running produces different output). Retry up to 10 times via
+      // the same transient_retry_counts machinery, then fall back to a
+      // no-spawn direct steward dispatch (below) instead of escalating.
       const spawnRecovery = (recovery || raceRecovery) ? null : tryRecoverSpawnPatchError(state, slice, sliceId, errorText);
       if (spawnRecovery && spawnRecovery.recovered) {
         actions.push({
