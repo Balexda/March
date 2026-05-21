@@ -3,7 +3,36 @@
 **Spec Folder**: `2026-04-11-002-spawn-dispatch`
 **Branch**: `2026-04-11-002-spawn-dispatch`
 **Created**: 2026-04-11
-**Status**: Draft  |  **Implementation status (2026-05-16)**: **Done (realized)** for the dispatch pipeline itself (`src/spawn/` and `src/brood/spawn-record.ts`). Patch extraction and PR creation have been **extended** in `src/hatchery/spawn-handoff.ts` with a Steward (Claude Code agent-deck session) handoff that this spec did not anticipate. The Steward role will be formalized in a Stage B spec; see RFC [Accelerated Work & Reordering](../../docs/rfcs/2026-001-march-orchestration-platform/march-orchestration-platform.rfc.md#accelerated-work--reordering-2026-05).
+**Status**: Draft  |  **Implementation status (2026-05-16)**: **Done (realized)** for the dispatch pipeline itself (`src/spawn/` and `src/brood/spawn-record.ts`). Patch extraction and PR creation have been **extended** in `src/hatchery/spawn-handoff.ts` with a Steward — an interactive `agent-deck` session **hosted in Castra**, launched via the Castra HTTP API — that this spec did not anticipate. The Steward role will be formalized in a Stage B spec; see RFC [Accelerated Work & Reordering](../../docs/rfcs/2026-001-march-orchestration-platform/march-orchestration-platform.rfc.md#accelerated-work--reordering-2026-05).
+
+> **Architecture note — reconcile with the container-service split (2026-05).**
+> This spec describes the M1 dispatch flow as a single in-process `march spawn
+> dispatch` CLI invocation that creates a worktree, builds an image, launches a
+> container, waits, writes a SpawnRecord JSON file, and self-manages cleanup on
+> failure. That shape has since moved; read the spec with these corrections:
+> - **Execution location:** the spawn flow now runs inside the **Hatchery
+>   containerized Fastify service** (`march hatchery serve`); `march hatchery
+>   spawn` is a thin HTTP client. "All within a single CLI invocation" (SC-001) is
+>   now "the client POSTs to the Hatchery service, which performs the stages."
+> - **Teardown ownership:** worktree / branch / container reclamation is owned by
+>   **Brood** (the session-state + teardown authority), which removes by **exact
+>   tracked path — never `git worktree prune`** (#155), behind the
+>   `TeardownSubstrate` adapter. The Hatchery **registers each spawn with Brood at
+>   launch**; failure-path teardown is **requested from Brood** (`march brood
+>   teardown`), not performed inline by the dispatcher. Every "reverse-order
+>   cleanup" / `removeSpawnWorktree` / in-process `docker rm` in the task files
+>   should be read against this ownership boundary.
+> - **Spawn vs. Steward:** the headless `claude -p` container this spec describes
+>   is the **Spawn** (one-shot patch producer). Integration of that patch —
+>   review/test/commit/push/PR — is the **Steward**, an interactive session
+>   hosted in **Castra** and driven over the Castra HTTP API. Feature 6's "hand
+>   off to backend" is the Spawn's own prompt delivery, *not* the Steward handoff.
+> - **State store:** session state is the **Brood SQLite registry**
+>   (`~/.march/brood`, behind `SessionRepository`); the `~/.march/spawns/<id>.json`
+>   flat file is legacy/forward-compatible shape, not the canonical store.
+> - **Live services:** Hatchery, Brood, and Herald are live services today, not
+>   future "Milestone 2/3/4" work; Herald is event-sourced **observation**, not an
+>   "event bus."
 **Input**: `docs/rfcs/2026-001-march-orchestration-platform/march-orchestration-platform.rfc.md` — Milestone 1: Spawn
 **Source Feature Map**: `docs/rfcs/2026-001-march-orchestration-platform/01-spawn.features.md` — Feature 2: Spawn Dispatch
 
@@ -227,7 +256,7 @@ As an operator, I want `march spawn dispatch` to wait for the container to finis
 - Multi-backend selection and polymorphic backend interface (Feature 3: Multi-Backend Execution Interface).
 - Formal threat model evaluation and security hardening (Feature 4: Spawn Sandbox Security).
 - Declarative container profile configuration (Milestone 2: Hatchery).
-- Worktree and container cleanup after merge (Milestone 3: Brood).
+- Worktree and container cleanup after merge — owned by **Brood**, the live session-state + teardown authority (removes by exact tracked path, never `git worktree prune`; requested via `march brood teardown`). Note: failure-path teardown of a registered spawn is likewise a Brood request, not inline dispatcher cleanup (see the architecture note above).
 - Streaming or real-time output observation during spawn execution.
 - Customizable resource limits (hardcoded defaults only in Feature 2).
 
@@ -235,7 +264,7 @@ As an operator, I want `march spawn dispatch` to wait for the container to finis
 
 ### Measurable Outcomes
 
-- **SC-001**: `march spawn dispatch --prompt-file <path>` from inside a git repo creates a worktree, builds a Docker image, launches a container, waits for exit, and writes a SpawnRecord — all within a single CLI invocation.
+- **SC-001**: `march spawn dispatch --prompt-file <path>` from inside a git repo creates a worktree, builds a Docker image, launches a container, waits for exit, and records the spawn. *(Container-service split: the spawn flow now runs inside the Hatchery service — `march hatchery spawn` POSTs to `march hatchery serve`, which performs these stages and registers the spawn with Brood; the SpawnRecord JSON is superseded by the Brood registry. The original "single in-process CLI invocation" framing is the M1 form.)*
 - **SC-002**: The spawned container has no bind mounts to the host filesystem (verified via `docker inspect`).
 - **SC-003**: The spawned container runs with `--cap-drop=ALL` and as a non-root user (verified via `docker inspect`).
 - **SC-004**: The spawned container receives only whitelisted environment variables (verified via `docker inspect`).

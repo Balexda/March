@@ -5,6 +5,30 @@
 **Created**: 2026-05-12
 **Status (2026-05-16)**: **Not started** as written. Some primitives (`src/brood/spawn-record.ts`, `src/brood/worktree.ts`) exist from M1; ad-hoc container management for Legate + Steward currently lives in `src/hatchery/legate-container.ts` and `src/hatchery/spawn-handoff.ts` and should migrate here once the CLI surface (F2/F3) lands. Stage B spec #3 in the RFC backlog (brood lifecycle CLI) maps onto F2/F3 of this map and additionally formalizes Steward container lifecycle. See RFC [Accelerated Work & Reordering](march-orchestration-platform.rfc.md#accelerated-work--reordering-2026-05).
 
+> **Architecture note — superseded by the container-service split (2026-05).**
+> Brood has since shipped as a **containerized Fastify service** (`march brood
+> serve`) — the session-state + lifecycle/**teardown authority** — which changes
+> the *mechanism* of several features below even though the feature decomposition
+> still holds. Read the F1–F6 descriptions with these corrections:
+> - **State store (F1):** session state lives in a **SQLite registry at
+>   `~/.march/brood`** behind a swappable `SessionRepository` interface (sqlite
+>   default; `postgres` is a typed, not-yet-implemented SaaS extension point via
+>   `MARCH_BROOD_STORE`) — not a read-and-derive layer over per-spawn JSON files.
+>   The registry tracks every spawn / steward / legate; the Hatchery registers
+>   each spawn with Brood at launch.
+> - **CLI (F2/F3):** the verbs are HTTP clients of the service (`march brood
+>   list` / `teardown`; set `MARCH_BROOD_URL`); state and Docker reconciliation
+>   live behind the service, not in the CLI process.
+> - **Teardown (F3):** Brood owns teardown and removes in order — container → ask
+>   **Castra** to remove the steward → worktree/branch by **exact tracked path,
+>   never `git worktree prune`** (issue #155) — behind a swappable
+>   `TeardownSubstrate` adapter (default `hostTeardownSubstrate`, issue #169). The
+>   legate loop **requests** teardown via `march brood teardown`.
+> - **Interactive sessions (F5):** the Steward and the interactive Legate session
+>   are quartered in **Castra** (agent-deck behind an HTTP API). Brood removes the
+>   steward by asking Castra; attach/sessions delegate to Castra rather than Brood
+>   exec-ing `tmux` directly.
+
 ## Philosophy hook
 
 Brood's role in the system, per [`docs/operating-philosophy.md`](../../operating-philosophy.md), is to eliminate operator intervention in *cleanup and lifecycle* — the operator does not manually remove containers, prune worktrees, archive logs, or reconcile orphaned branches. Every feature in this map should be checked against that role: if a feature here makes the operator more involved in lifecycle decisions, it is probably solving a different problem and belongs elsewhere.
@@ -13,7 +37,7 @@ Brood's role in the system, per [`docs/operating-philosophy.md`](../../operating
 
 When this feature map was drafted (2026-05-12) it assumed Spawn was the only containerized session type Brood would manage in M3. Bootstrap acceleration has since introduced two additional containerized session types that Brood will also need to own:
 
-- **Steward sessions** — Claude Code agent-deck sessions launched per spawn by `src/hatchery/spawn-handoff.ts`, running under the `pr-management` profile (when Hatchery profiles land). One steward per spawn; lifecycle bounded by review/test/commit/push/PR.
+- **Steward sessions** — interactive `agent-deck` sessions **hosted in Castra**, launched per spawn by `src/hatchery/spawn-handoff.ts` via the Castra HTTP API, running under the `pr-management` profile (when Hatchery profiles land). One steward per spawn; lifecycle bounded by review/test/commit/push/PR. Brood tears these down by **asking Castra to remove the session**, not by managing an agent-deck container directly.
 - **Legate containers** — the `legate-agent` + `legate-loop` pair, currently managed ad-hoc by `src/hatchery/legate-container.ts`. Long-lived; one per operator workspace.
 
 These don't invalidate the F1–F6 decomposition below — Spawn-focused Brood is still the right Basic milestone — but they create a Stage B follow-on. Spec #4 in the RFC backlog ("steward role formalization") and the implicit migration of `legate-container.ts` into Brood will extend the `SpawnView` / `SessionRecord` shape with a discriminated `kind` (`spawn` | `steward` | `legate`) once a second session type actually needs CLI surface. Until then, F1–F6 stay scoped to spawns, and the additional session types are managed by their accelerated code paths.
@@ -44,7 +68,7 @@ F5 (Interactive Session Attach Helper) already anticipates this: its `march/<nam
 
 ### Feature 3: Lifecycle Teardown
 
-**Description**: `march brood teardown <id>` plus the `src/spawn-disposal.ts` library that owns success-path disposal of a spawn's runtime artifacts. Reuses the idempotent M1 helpers `removeSpawnContainer` (`src/container-launch.ts`) and `removeSpawnWorktree` (`src/worktree.ts`); deletes the spawn branch via the same git primitive M1's rollback path already uses. Cleanup order is **container → worktree → branch**. Before deleting the worktree, teardown captures `docker logs` output to `~/.march/spawns/archive/<id>/container.log`, snapshots the live SpawnRecord JSON to `~/.march/spawns/archive/<id>/record.json`, and copies the spawn's known structured-JSON output file (the M1 extraction artifact at its designated worktree-internal path) into `~/.march/spawns/archive/<id>/artifacts/` — no recursive copy of the worktree. The live SpawnRecord JSON at `~/.march/spawns/<id>.json` is left in place; "disposed" is *derived* in F1 from "JSON present, container/worktree absent" rather than persisted as a new status value. `--force` is required to tear down a `running` spawn; without it the verb refuses unless docker reports the container is already gone. Teardown is idempotent: a second invocation against an already-torn-down spawn is a no-op.
+**Description**: `march brood teardown <id>` plus the `src/spawn-disposal.ts` library that owns success-path disposal of a spawn's runtime artifacts. Reuses the idempotent M1 helpers `removeSpawnContainer` (`src/container-launch.ts`) and `removeSpawnWorktree` (`src/worktree.ts`); deletes the spawn branch via the same git primitive M1's rollback path already uses. Cleanup order is **container → (ask Castra to remove the steward) → worktree → branch**, with the worktree/branch removed by **exact tracked path — never `git worktree prune`** (#155), behind the `TeardownSubstrate` adapter (see the architecture note above). Before deleting the worktree, teardown captures `docker logs` output to `~/.march/spawns/archive/<id>/container.log`, snapshots the live SpawnRecord JSON to `~/.march/spawns/archive/<id>/record.json`, and copies the spawn's known structured-JSON output file (the M1 extraction artifact at its designated worktree-internal path) into `~/.march/spawns/archive/<id>/artifacts/` — no recursive copy of the worktree. The live SpawnRecord JSON at `~/.march/spawns/<id>.json` is left in place; "disposed" is *derived* in F1 from "JSON present, container/worktree absent" rather than persisted as a new status value. `--force` is required to tear down a `running` spawn; without it the verb refuses unless docker reports the container is already gone. Teardown is idempotent: a second invocation against an already-torn-down spawn is a no-op.
 
 **User-Facing Value**: Satisfies "Sessions can be torn down cleanly, with output preserved." Operators reclaim disk, branches, and containers with one verb; the structured-JSON output the spawn produced (plus its container log snapshot) survives indefinitely in the archive directory.
 
@@ -116,6 +140,6 @@ Direction must be either `depends on` or `depended upon by`.
 |------------|-----------|-------|
 | Milestone 1: Spawn | depends on | F1 extends `SpawnRecord` (`src/spawn-record.ts`) with `failureReason` and reads the JSON files M1 writes. F3 reuses M1's `removeSpawnContainer` (`src/container-launch.ts`) and `removeSpawnWorktree` (`src/worktree.ts`) helpers. F6 deploys via M1 F1's `march init` skill-deployment pipeline. M3 does NOT redo M1 F6's PR-integration work — the RFC's "Code review via GitHub" design consideration ("Integration tooling (part of Brood or a dedicated component)") is satisfied entirely by M1 F6. |
 | Milestone 2: Hatchery | depends on | Loose dependency: F1 tolerates SpawnRecords both with and without an M2 F5 `profile` field — M3 begins safely even if M2 F5 has not yet landed. F6's skill catalog accumulates onto the M2 F6 skill set; deployment plumbing is unchanged. |
-| Milestone 4: Herald | depended upon by | F1's `docker inspect`-based liveness reconciliation is a poll-time approximation of what Herald will deliver as event-driven status transitions. When M4 lands, F1's reconciliation sub-capability can be replaced with Herald subscriptions; the `SpawnView` API need not change. |
+| Milestone 4: Herald | depended upon by | F1's `docker inspect`-based liveness reconciliation is a poll-time approximation of what Herald delivers as event-driven status transitions. Herald has since shipped as the event-sourced observation service (it observes the world and never touches Docker; Brood remains the Docker-owning side), so F1's reconciliation sub-capability can be informed by Herald events; the `SpawnView` API need not change. |
 | Milestone 5: Legate | depended upon by | F5's `march/` tmux namespace is the forward contract M5 will register Legate under. The first `march/<name>` tmux session in the system will be Legate's (as of 2026-05-16, the accelerated `legate-agent` already runs in a tmux/agent-deck conductor session — its container lifecycle currently lives in `src/hatchery/legate-container.ts` and will migrate into Brood in the Stage B follow-on described in the Accelerated context). F6's "pseudo-legate" orientation skill is replaced by real Legate orchestration when M5 lands. |
-| Hatchery: Spawn-Handoff / Steward (2026-05 accelerated) | depended upon by | The Steward sessions launched by `src/hatchery/spawn-handoff.ts` are containerized Claude Code agent-deck sessions whose lifecycle Brood will eventually own (Stage B spec #4: steward role formalization). Out of scope for the M3 Basic milestone; in scope for the Stage B follow-on. |
+| Hatchery: Spawn-Handoff / Steward (2026-05 accelerated) | depended upon by | The Steward sessions launched by `src/hatchery/spawn-handoff.ts` are interactive `agent-deck` sessions **hosted in Castra**; Brood owns their teardown by **asking Castra to remove the session** (Stage B spec #4: steward role formalization). Out of scope for the M3 Basic milestone; in scope for the Stage B follow-on. |

@@ -87,6 +87,24 @@ interface SpawnBackend {
 
 No `validateAuth`, no `parseExitCode`, no `cliCommand`. The interface is deliberately closed at these four members; backends with non-env-var auth or differing exit-code semantics motivate a separate feature, not an in-place extension.
 
+> **Divergence note (2026-05-16) — shipped interface has a fifth, required member.**
+> The actual second backend is **Codex, not Gemini** (see the spec's divergence
+> note and `src/spawn/backends.ts`). Codex authenticates via a **credential
+> mount** rather than an env var, so the shipped `SpawnBackend` carries a fifth
+> **required** member, `credentialMounts: readonly BackendCredentialMountSpec[]`,
+> alongside `requiredEnvVars`. **Both fields are always present** (each an array);
+> a backend populates `requiredEnvVars` (env-var auth — Claude:
+> `["ANTHROPIC_API_KEY"]`, `credentialMounts: []`) **or** `credentialMounts`
+> (credential-mount auth — Codex: `requiredEnvVars: []`, `credentialMounts: [...]`),
+> with the other empty. Each `BackendCredentialMountSpec` carries the mount `name`,
+> a read-only in-container `containerPath`, an `env` map, and a
+> `resolveHostPath(env)` resolver — so the host path is backend-declared, never
+> operator-authored (operating-philosophy rule 2: minimum required access through a
+> typed field). This is a first-class, typed capability — an in-place addition, not
+> the "separate feature" the four-member closure anticipated. Read "closed at four
+> members" as "five required members." The `geminiBackend` rows below are
+> historical; the live registry is `claudeCodeBackend` + `codexBackend`.
+
 #### Concrete Implementations
 
 **`claudeCodeBackend`**
@@ -144,13 +162,22 @@ The registry construction rejects duplicate `name` entries — a coding-error gu
 #### Algorithm
 
 ```
-for each var in selectedBackend.requiredEnvVars:
+for each var in selectedBackend.requiredEnvVars:        # empty for credential-mount backends
   if process.env[var] is undefined or "":
     record `var` as missing
+for each mount in selectedBackend.credentialMounts:     # empty for env-var backends; e.g. Codex CODEX_HOME
+  if mount.resolveHostPath(process.env) is absent or unreadable:
+    record the credential mount as missing
 if any missing:
-  print "Backend '<name>' requires <vars>: missing <missing-list>. Set the variable(s) and re-run."
+  print "Backend '<name>' requires <vars/credential dirs>: missing <missing-list>. Set the variable(s) / make the directory readable and re-run."
   exit USAGE_ERROR (2)
 ```
+
+> **Divergence note (2026-05-16).** The pre-flight iterates whichever of the two
+> always-present lists is non-empty: env-var backends are checked against
+> `process.env`; credential-mount backends (Codex) are checked for the presence and
+> readability of each mount's resolved host source directory
+> (`mount.resolveHostPath(process.env)`). Both keep the no-value-echo guarantee.
 
 #### Error message format
 
@@ -221,7 +248,7 @@ F2's `spawn-dispatch.contracts.md` contains forward-pointers F3 resolves:
 
 ## Events / Hooks
 
-No events or hooks are introduced by F3. The Herald event bus (Milestone 4) defines the event system. F3's modifications stay within the dispatch action and the SpawnRecord shape.
+No events or hooks are introduced by F3. Herald (the shipped event-sourced observation service) defines the system event log. F3's modifications stay within the dispatch action and the SpawnRecord shape.
 
 ## Integration Boundaries
 
@@ -230,6 +257,6 @@ No events or hooks are introduced by F3. The Herald event bus (Milestone 4) defi
 - **Feature 5 (Spawn Output Extraction)**: F5 owns exit-code interpretation (which is why `parseExitCode` is not a F3 interface method). F5 reads `SpawnRecord.backend` to know which backend produced the JSON envelope and adapts its parsing accordingly. F3 guarantees `SpawnRecord.backend` accurately reflects the actual backend (US7).
 - **Feature 6 (PR Integration)**: F6 reads `SpawnRecord.backend` for PR metadata (e.g., "Spawn ran on Gemini"). F3's US7 makes this read meaningful for non-Claude-Code spawns.
 - **Milestone 2 (Hatchery)**: M2 layers declarative per-profile configuration on top of F3's primitives. The `--backend` flag and `MARCH_BACKEND` env var continue to work; M2 may add a `--profile` flag whose resolution can override or constrain backend selection. No coexistence design is needed in M1.
-- **Milestone 3 (Brood)**: Brood's session-management code reads `SpawnRecord.backend` for status reporting and rate-limit handling per RFC Appendix C6. F3's US7 guarantees the field reflects the actual backend.
+- **Brood (shipped session-state + teardown authority)**: Brood reads `SpawnRecord.backend` for status reporting and rate-limit handling per RFC Appendix C6; the Hatchery service also registers each spawn (with its `backend`) with Brood at launch. F3's US7 guarantees the field reflects the actual backend.
 - **Docker CLI**: Unchanged — F3 does not change how the dispatch action invokes Docker, only which image tag, env-flag list, and entrypoint argv are passed.
 - **External base image provisioning**: `march-gemini-base:latest` is operationally provisioned (mirroring F2's `march-base:latest` contract). F3 references the tag but does not build the image; the image build/publish process is not part of this feature.

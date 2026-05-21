@@ -9,7 +9,13 @@
 
 ## Slice 1: No-Args Output Completeness
 
-**Goal**: The `march` no-args invocation verifiably lists all five registered commands — `init`, `update`, `help`, `version`, and `spawn` — in its combined output, locking the two-tier listing contract against regression.
+**Goal**: The `march` no-args invocation verifiably lists the M1 foundation commands — `init`, `update`, `help`, `version`, and the `spawn` system stub — in its combined output, locking the two-tier listing contract against regression.
+
+> **Note (2026-05):** "all five registered commands" was the M1 surface. The realized
+> CLI (`src/cli/program.ts`) registers additional system namespaces — `hatchery`,
+> `brood`, `herald`, `castra`, `legate` — added by later milestones. The
+> contains-assertions below should be read as a **non-exhaustive subset check**
+> (these names are present), not a closed "exactly five" enumeration.
 
 **Justification**: Commander's `program.outputHelp()` already outputs all registered commands when no args are given. The existing test checks exit code 2 and that the output matches `/usage|Usage/i` but asserts no specific command names. This slice adds content assertions that make the two-tier structure a machine-verified property of the CLI — it delivers a working, regression-guarded behavioral contract rather than disconnected scaffolding.
 

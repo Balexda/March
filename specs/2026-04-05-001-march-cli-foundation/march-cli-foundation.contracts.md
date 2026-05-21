@@ -189,11 +189,13 @@ Feature 1 owns the top-level command dispatch table. The CLI has two command tie
 | System | Owner | Description |
 |--------|-------|-------------|
 | `spawn` | Features 2-6 | Spawn operations (dispatch, status, output). Stub in Feature 1. |
-| `hatchery` | Milestone 2 | Container profile management. Reserved, not implemented. |
-| `brood` | Milestone 3 | Session lifecycle management. Reserved, not implemented. |
-| `herald` | Milestone 4 | Event bus operations. Reserved, not implemented. |
+| `hatchery` | Milestone 2 | Containerized spawn-flow service. `serve` runs the flow; `spawn` is a thin HTTP client driving the steward via Castra and registering with Brood. **Shipped.** |
+| `brood` | Milestone 3 | Session-state + teardown authority (container service; `serve`, `teardown`, `list`). **Shipped.** |
+| `herald` | Milestone 4 | System-state observation, event-sourced log (container service; `serve`, `events`, `state`). **Shipped.** |
+| `castra` | Castra (#153) | Interactive-sessions host fronting agent-deck over HTTP (`serve`). **Shipped.** |
+| `legate` | Milestone 5 | Instrumented dispatch loop (container service; `init`, `loop`). **Shipped (provisional).** |
 
-Verbs within a system namespace are owned by the feature that implements them (e.g., `march spawn dispatch` is owned by Feature 2). The dispatch mechanism must support adding new systems and verbs without modifying the core dispatch logic (implementation decision — not prescribed here).
+Verbs within a system namespace are owned by the feature that implements them (e.g., `march spawn dispatch` is owned by Feature 2). Each containerized service additionally exposes a long-running `serve` verb (the Fastify container entrypoint) and thin HTTP-client verbs for cross-service requests (e.g. `march brood teardown`). The dispatch mechanism must support adding new systems and verbs without modifying the core dispatch logic (implementation decision — not prescribed here).
 
 ---
 
@@ -230,7 +232,7 @@ Skill content is authored during Features 2-6 implementation. Feature 1 deploys 
 
 ## Events / Hooks
 
-No events or hooks are introduced by Feature 1. The Herald event bus (Milestone 4) will define the event system.
+No events or hooks are introduced by Feature 1. Herald (the shipped event-sourced observation service) defines the system event log — an append-only, seq-ordered log the legate drains via `GET /events?after=<cursor>`; it is the single sequencer, read-only by default, and never touches Docker (not an "event bus").
 
 ## Integration Boundaries
 

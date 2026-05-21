@@ -5,6 +5,17 @@
 **Contracts**: `specs/2026-04-11-002-spawn-dispatch/spawn-dispatch.contracts.md`
 **Story Number**: 06
 
+**Slice status (2026-05): Done (realized).** Slices are checked off because this functionality shipped — reorganized into the Hatchery service + Castra-driven flow (`src/spawn/`, `src/hatchery/spawn-handoff.ts`), not necessarily implemented step-for-step as written below. Marked done so it no longer reads as pending/dispatchable in `smithy status`. See the architecture banner in `spawn-dispatch.spec.md`.
+
+> **Terminology note (2026-05).** "Hand off to backend" here means delivering the
+> finalized prompt into the **Spawn's own headless container** (the one-shot
+> `claude -p` patch producer) — it is *not* the **Steward handoff**. The Steward
+> is a separate, later step: an interactive `agent-deck` session hosted in
+> **Castra** that takes the spawn's *extracted patch* and drives
+> review/test/commit/push/PR (`src/hatchery/spawn-handoff.ts`, via the Castra HTTP
+> API). Do not conflate the two: this story is Spawn-side prompt delivery; the
+> Steward handoff is patch-side integration.
+
 ---
 
 ## Slice 1: Finalize Prompt and Define Backend Contract
@@ -17,7 +28,7 @@
 
 ### Tasks
 
-- [ ] **Resolve raw prompt from `--prompt-file`, `--prompt`, or stdin**
+- [x] **Resolve raw prompt from `--prompt-file`, `--prompt`, or stdin**
 
   Add a prompt-ingestion module under `src/` that resolves the operator's raw prompt from one of three sources with the precedence defined in the contracts' `march spawn dispatch` Inputs table. The module must work against today's flat `program.command("spawn [subcommand]")` Commander stub in `src/cli.ts`; the implementer chooses whether to register Commander options on the existing command or parse `process.argv` directly, but must not introduce the Commander subcommand-group refactor that User Story 1 owns. Resolution failures must follow the contracts' Error Conditions table.
 
@@ -31,7 +42,7 @@
   - Existing Stages 1–3 of `march spawn dispatch` continue to run unchanged when a valid prompt source is supplied
   - Unit tests exercise each source, the precedence order, and the missing-file/no-source error paths against real temp files and a fake readable stream — no mocking of the module internals
 
-- [ ] **Define `SpawnBackend` interface with hardcoded Claude Code implementation**
+- [x] **Define `SpawnBackend` interface with hardcoded Claude Code implementation**
 
   Extend `src/spawn-config.ts` (per the file's existing header comment, which already pre-announces this growth) with the `SpawnBackend` interface from the contracts' SpawnBackend Interface section and a single hardcoded Claude Code implementation. The implementation's `buildEntrypoint(promptFilePath)` must return the exact command array specified in the contracts' Claude Code Implementation block. `BASE_IMAGE` must remain consistent with `claudeCodeBackend.baseImage` so existing imports from `src/cli.ts` and `src/snapshot-build.ts` continue to work. AS 6.5 is satisfied by the entrypoint this implementation returns.
 
@@ -41,7 +52,7 @@
   - Existing consumers of `BASE_IMAGE` (dispatch action, Dockerfile generator) continue to compile and pass tests without import-path churn
   - Unit tests assert the entrypoint array returned for a representative prompt path and the field values for `name`, `baseImage`, and `requiredEnvVars`
 
-- [ ] **Finalize raw prompt with spawn ID and container working directory**
+- [x] **Finalize raw prompt with spawn ID and container working directory**
 
   Add a pure finalization helper alongside the prompt-ingestion module that takes the raw prompt plus the spawn context (spawn ID, container working directory) and returns the finalized prompt string the backend will see. The container working directory must be derived from the Dockerfile `WORKDIR` declared in `src/snapshot-build.ts` rather than hardcoded as a separate literal. AS 6.3 is satisfied by the finalization output.
 
@@ -51,7 +62,7 @@
   - The container working directory referenced in the finalized prompt matches the Dockerfile's `WORKDIR` (single source of truth)
   - Unit tests assert the finalized output contains all three required pieces (raw prompt, spawn ID, working directory) for representative inputs
 
-- [ ] **Implement Stage 5 prompt handoff into the running container**
+- [x] **Implement Stage 5 prompt handoff into the running container**
 
   Add a Stage 5 handoff helper that takes a `containerId` (produced by Stage 4 Launch — owned by Story 5) and the finalized prompt string from Task 3 and writes the prompt into the running container at the path consumed by `claudeCodeBackend.buildEntrypoint`. Per the spec's Critical Assumption and the contracts' Stage 5 row ("Write finalized prompt to container, invoke backend CLI"), the prompt is delivered to the running container at handoff time — it is NOT baked into the image. The Image Build template (`FROM/COPY/WORKDIR`) in `src/snapshot-build.ts`, the `createBuildContext` output in `src/snapshot.ts`, and the Snapshot Exclusion List MUST remain untouched. The helper is exported but not wired into `src/cli.ts`'s dispatch action; the wiring lands in Story 5 alongside the Stage 4 Launch integration so the call sequence (launch → handoff → wait) is added in one place. See SD-002 for the exact handoff mechanism the helper uses (`docker cp` vs. `docker exec`) and SD-003 for how Story 5 will sequence the launch and handoff so the entrypoint does not race the prompt write.
 
@@ -63,7 +74,7 @@
   - The helper is exported from its module but is not invoked from the dispatch action; the post-Stage-3 fallthrough placeholder remains in place
   - Unit tests exercise the helper against a stubbed Docker invocation; an integration test gated on a "docker available" check round-trips the prompt through a real container started for the test (mirroring US4's docker-stub-vs-real-daemon pattern) and asserts the file contents inside the container post-handoff
 
-- [ ] **Persist raw prompt onto SpawnRecord before backend handoff**
+- [x] **Persist raw prompt onto SpawnRecord before backend handoff**
 
   Add an `updateSpawnRecordPrompt` helper to `src/spawn-record.ts` alongside the existing `updateSpawnRecordImageId` helper. The helper reads the existing record, sets the `prompt` field to the operator's raw prompt, and writes the record back atomically (temp file + rename) following the existing helpers' pattern. Wire the call into the dispatch action in `src/cli.ts` between prompt resolution (Task 1) and Stage 4 (Launch — owned by Story 5) so the record is data-model-conformant before any downstream consumer reads it. This closes SD-004 from `03-isolated-worktree-and-branch.tasks.md`.
 
