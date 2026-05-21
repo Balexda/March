@@ -76,11 +76,11 @@ export function runHeartbeat(out: CoordinatorOutput, deps: HeartbeatDeps): any {
   }
   for (const a of out.results.ghost.actions) {
     event(meta.processor_events_path, { ...base, kind: "ghost_cleanup", action: a.action, session_id: a.sessionId, title: a.title, detail: a.detail });
-    log("[" + ts + "] " + a.action + " " + a.sessionId + " " + (a.title || "") + ": " + a.detail + "\n");
+    log("[" + ts + "] " + a.action + " " + a.sessionId + " " + (a.title || "") + ": " + a.detail);
   }
   for (const a of out.results.relaunch.actions) {
     event(meta.processor_events_path, { ...base, kind: "steward_relaunch", action: a.action, slice_id: a.sliceId, session_id: a.sessionId, detail: a.detail });
-    log("[" + ts + "] " + a.action + " " + a.sliceId + ": " + a.detail + "\n");
+    log("[" + ts + "] " + a.action + " " + a.sliceId + ": " + a.detail);
   }
   for (const a of out.results.babysit.actions) {
     const e = { ...base, kind: "babysit_action", action: a.action, slice_id: a.sliceId, session_id: a.sessionId, pr_number: a.pr?.number ?? null, pr_url: a.pr?.url ?? null, detail: a.detail };
