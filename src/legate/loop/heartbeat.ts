@@ -45,6 +45,8 @@ export function buildHeartbeatRecord(out: CoordinatorOutput, meta: { processor_n
     ghost_cleanup_count: t.ghostCleanupCount,
     relaunch_count: t.relaunchCount,
     babysit_action_count: t.babysitActionCount,
+    steward_nudge_count: t.stewardNudgeCount,
+    steward_stranded_count: t.stewardStrandedCount,
     processor_request_count: t.processorRequestCount,
     dispatch_action_count: t.dispatchActionCount,
     dispatch_failure_count: t.dispatchFailureCount,
@@ -100,7 +102,7 @@ export function runHeartbeat(out: CoordinatorOutput, deps: HeartbeatDeps): any {
 
   deps.appendTextSilent(
     deps.heartbeatLogPath,
-    `[${ts}] heartbeat slice_count=${record.slice_count} archived=${record.archived_slice_count} cleanups=${record.cleanup_count} ghost_cleanups=${record.ghost_cleanup_count} relaunches=${record.relaunch_count} babysit_actions=${record.babysit_action_count} dispatches=${record.dispatch_action_count} processor_requests=${record.processor_request_count} workers=${JSON.stringify(record.workers)}${record.state_error ? " state_error=" + record.state_error : ""}`,
+    `[${ts}] heartbeat slice_count=${record.slice_count} archived=${record.archived_slice_count} cleanups=${record.cleanup_count} ghost_cleanups=${record.ghost_cleanup_count} relaunches=${record.relaunch_count} babysit_actions=${record.babysit_action_count} steward_nudges=${record.steward_nudge_count} steward_stranded=${record.steward_stranded_count} dispatches=${record.dispatch_action_count} processor_requests=${record.processor_request_count} workers=${JSON.stringify(record.workers)}${record.state_error ? " state_error=" + record.state_error : ""}`,
   );
 
   deps.recordMetrics?.(record);

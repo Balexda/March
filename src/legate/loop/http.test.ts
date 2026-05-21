@@ -22,6 +22,8 @@ const heartbeat = {
   ghost_cleanup_count: 0,
   relaunch_count: 0,
   babysit_action_count: 3,
+  steward_nudge_count: 12,
+  steward_stranded_count: 2,
   dispatch_action_count: 2,
   dispatch_failure_count: 1,
   dispatchable_count: 2,
@@ -43,7 +45,7 @@ describe("loop http (fastify)", () => {
       queue: { dispatchable: 2, blocked: 1, total: 5 },
       slices: { total: 4, archived: 2 },
       last_tick_duration_ms: 420,
-      counters: { dispatch: 2, dispatch_failure: 1, babysit: 3, cleanup: 1 },
+      counters: { dispatch: 2, dispatch_failure: 1, babysit: 3, cleanup: 1, steward_nudge: 12, steward_stranded: 2 },
       state_present: true,
     });
   });

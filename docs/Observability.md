@@ -196,7 +196,17 @@ These answer "is the loop alive?" and "how deep is the queue?".
 | `march.legate.workers` (gauge) | `march_legate_workers` | worker sessions by `state` |
 | `march.legate.dispatch.actions` (counter) | `march_legate_dispatch_actions_total` | dispatch actions taken |
 | `march.legate.dispatch.failures` (counter) | `march_legate_dispatch_failures_total` | dispatch failures |
-| `march.legate.cleanup.actions` (counter) | `march_legate_cleanup_actions_total` | maintenance actions by `action` |
+| `march.legate.loop.actions` (counter) | `march_legate_loop_actions_total` | non-dispatch loop actions by `action`: `cleanup`, `ghost_cleanup`, `relaunch`, `babysit`, `steward_nudge`, `steward_stranded` |
+
+> Gauges carry no `unit`: the OTel→Prometheus bridge exports a `unit: "1"`
+> instrument with a `_ratio` suffix (e.g. `march_legate_loop_up_ratio`), which
+> both mislabels a count and silently broke every gauge panel + the `$profile`
+> dropdown (#205). Dimensionless counts/booleans are therefore declared without a
+> unit so the exported series names match this table. The `steward_nudge` /
+> `steward_stranded` action kinds (#212) make a runaway stranded-steward watchdog
+> visible as a rate on the dashboard's **Stewards** row instead of only in the log
+> file; per-steward detail (which steward, nudge count) stays in the logs/traces
+> to keep the `action` label low-cardinality.
 
 ### Logs
 

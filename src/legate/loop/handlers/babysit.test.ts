@@ -182,4 +182,57 @@ describe("babysit apply", () => {
     expect(d.requestJudgement).toHaveBeenCalled();
     expect(res.requests).toHaveLength(1);
   });
+
+  it("steward-nudge (no alert) sends the prod and records only a steward-nudge action", async () => {
+    const slice: any = { worker_session_id: "w", stage: "implementing" };
+    const state = loopState({ slices: { s: slice } });
+    const d = deps();
+    const res = await apply(
+      [{ kind: "steward-nudge", sliceId: "s", sessionId: "w", nudge: true, alert: false, nextCount: 1, detail: "n", alertRequestKey: "ak", alertDetail: "ad" }],
+      ctx(),
+      state,
+      d,
+    );
+    expect(d.sendMessage).toHaveBeenCalledWith("w", expect.any(String));
+    expect(slice.steward_nudge_count).toBe(1);
+    expect(res.actions.map((a) => a.action)).toEqual(["steward-nudge"]);
+    expect(res.requests).toHaveLength(0);
+  });
+
+  it("steward-nudge does NOT record an action when the send fails (no phantom nudges)", async () => {
+    const slice: any = { worker_session_id: "w", stage: "implementing" };
+    const state = loopState({ slices: { s: slice } });
+    const d = deps({
+      sendMessage: vi.fn(async () => {
+        throw new Error("castra down");
+      }),
+    });
+    const res = await apply(
+      [{ kind: "steward-nudge", sliceId: "s", sessionId: "w", nudge: true, alert: false, nextCount: 1, detail: "n", alertRequestKey: "ak", alertDetail: "ad" }],
+      ctx(),
+      state,
+      d,
+    );
+    // Send threw → no nudge counted, counters untouched; the next tick retries.
+    expect(res.actions).toHaveLength(0);
+    expect(slice.steward_nudge_count).toBeUndefined();
+    expect(slice.steward_nudge_sent_at).toBeUndefined();
+  });
+
+  it("steward-nudge with alert records nudge + a distinct steward-stranded escalation", async () => {
+    const slice: any = { worker_session_id: "w", stage: "implementing" };
+    const state = loopState({ slices: { s: slice } });
+    const d = deps();
+    const res = await apply(
+      [{ kind: "steward-nudge", sliceId: "s", sessionId: "w", nudge: true, alert: true, nextCount: 2, detail: "n", alertRequestKey: "ak", alertDetail: "ad" }],
+      ctx(),
+      state,
+      d,
+    );
+    expect(slice.steward_stranded_escalated_at).toBe(NOW);
+    expect(res.actions.map((a) => a.action)).toEqual(["steward-nudge", "steward-stranded"]);
+    // The escalation fires a deduped judgement request for the operator.
+    expect(d.requestJudgement).toHaveBeenCalled();
+    expect(res.requests).toHaveLength(1);
+  });
 });

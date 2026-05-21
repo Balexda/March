@@ -128,5 +128,7 @@ export function buildLoopTickActivity(record: any, ctx: HeartbeatMetricsContext)
     ghostCleanups: record.ghost_cleanup_count ?? 0,
     relaunches: record.relaunch_count ?? 0,
     babysitActions: record.babysit_action_count ?? 0,
+    stewardNudges: record.steward_nudge_count ?? 0,
+    stewardStranded: record.steward_stranded_count ?? 0,
   };
 }
