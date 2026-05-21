@@ -16,7 +16,6 @@
  *     trace-ids.ts helpers (Balexda/March#145).
  *   - a lastHeartbeat snapshot is exposed for the HTTP /status endpoint.
  */
-import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import {
@@ -25,7 +24,12 @@ import {
 } from "../../observability/loop-metrics.js";
 import { emitLoopLog, type LoopLogSeverity } from "../../observability/logs.js";
 import { emitLoopSpan } from "../../observability/loop-spans.js";
-import { resolveHatcheryUrl } from "../../hatchery/service/client.js";
+import {
+  getJob,
+  HatcheryClientError,
+  postSpawn,
+  resolveHatcheryUrl,
+} from "../../hatchery/service/client.js";
 import { CastraClient } from "../../castra/client.js";
 import type { LoopMeta } from "./meta.js";
 // Decomposed two-stage loop: Stage 1 sense → coordinator (ordered handlers) →
@@ -361,74 +365,19 @@ function updatePrSnapshot(slice, pr) {
 // to a Claude steward that does the whole job itself.
 const MAX_RECOVERY_ATTEMPTS = 2;
 
-function hatcheryResultPath(sliceId) {
-  return path.join(meta.legate_conductor_dir || here, "hatchery-result-" + sliceId + ".json");
-}
-
-function hatcheryLogPath(sliceId) {
-  return path.join(meta.legate_conductor_dir || here, "hatchery-result-" + sliceId + ".log");
-}
-
-function hatcheryRequestPath(sliceId) {
-  return path.join(meta.legate_conductor_dir || here, "hatchery-request-" + sliceId + ".json");
-}
-
-function hatcheryRunnerCode() {
-  // Detached runner: POSTs the spawn to the Hatchery SERVICE over HTTP and polls
-  // the job to completion, writing the same result-file shapes the old CLI runner
-  // did — a HatcherySpawnResult JSON on success, { error } on failure — so all of
-  // completePendingHatcheryDispatches' completion/recovery logic is unchanged.
-  // (Network calls replace the former `march hatchery spawn` CLI exec.)
-  //
-  // Wrapped in try/catch so any runner-side crash still produces a result file;
-  // otherwise a dead runner strands the slice in hatchery-pending until the
-  // stale timeout. resultPath/logPath come as their own argv entries so the
-  // crash guard has somewhere to write even if the request file fails to parse.
-  // Anywhere the runner SOURCE needs a backslash-n we write `\\n` (this is a
-  // normal .ts string now, not nested in another template literal).
-  return [
-    'const fs = require("node:fs");',
-    'const requestPath = process.argv[1];',
-    'const resultPath = process.argv[2];',
-    'const logPath = process.argv[3];',
-    'const POLL_MS = 2000;',
-    'const TIMEOUT_MS = 3900000;',
-    'const sleep = (ms) => new Promise((r) => setTimeout(r, ms));',
-    'const writeResult = (obj) => fs.writeFileSync(resultPath, JSON.stringify(obj) + "\\n", "utf-8");',
-    '(async () => {',
-    '  try {',
-    '    const request = JSON.parse(fs.readFileSync(requestPath, "utf-8"));',
-    '    const base = String(request.baseUrl || "http://localhost:8080").replace(/\\/+$/, "");',
-    '    const postRes = await fetch(base + "/spawns", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(request.spawn) });',
-    '    const postText = await postRes.text();',
-    '    if (postRes.status !== 202) {',
-    '      let m = postText; try { m = JSON.parse(postText).error || postText; } catch {}',
-    '      writeResult({ error: "hatchery POST /spawns failed (" + postRes.status + "): " + m, exitCode: null });',
-    '      process.exit(1);',
-    '    }',
-    '    const id = JSON.parse(postText).id;',
-    '    const deadline = Date.now() + TIMEOUT_MS;',
-    '    for (;;) {',
-    '      await sleep(POLL_MS);',
-    '      let getRes;',
-    '      try { getRes = await fetch(base + "/spawns/" + id); } catch (e) { if (Date.now() >= deadline) throw e; continue; }',
-    '      if (getRes.status !== 200) { if (Date.now() >= deadline) { writeResult({ error: "hatchery GET /spawns/" + id + " failed (" + getRes.status + ")", exitCode: null }); process.exit(1); } continue; }',
-    '      const rec = JSON.parse(await getRes.text());',
-    '      if (rec.status === "succeeded") { writeResult(rec.result || {}); process.exit(0); }',
-    '      if (rec.status === "failed") { writeResult({ error: (rec.error && rec.error.message) || "hatchery spawn failed", exitCode: null }); process.exit(1); }',
-    '      if (Date.now() >= deadline) { writeResult({ error: "timed out waiting for hatchery job " + id, exitCode: null }); process.exit(1); }',
-    '    }',
-    '  } catch (err) {',
-    '    const message = (err && err.stack) ? err.stack : String(err);',
-    '    try { writeResult({ error: "hatchery runner crashed: " + message, exitCode: null }); } catch {}',
-    '    try { if (logPath) fs.appendFileSync(logPath, "runner crash: " + message + "\\n"); } catch {}',
-    '    process.exit(1);',
-    '  }',
-    '})();',
-  ].join("\n");
-}
-
-function launchHatcheryDispatch(item, resultPath, logPath, opts) {
+// Launch a codex spawn through the Hatchery SERVICE (#144 phase 2b). POSTs the
+// spawn request via the async Hatchery client and returns the server job id;
+// completePendingHatcheryDispatches polls that id with getJob() across ticks
+// until the job reaches a terminal state. This replaced the former detached
+// `node -e` runner + on-disk result-file IPC — there is no subprocess and no
+// result/request/log files; the loop talks to the service directly over HTTP.
+//
+// POST /spawns returns 202 immediately (the server runs the spawn in the
+// background), so this stays non-blocking for the tick. repoPath must be valid
+// INSIDE the hatchery container — it bind-mounts the repo + worktree-parent at
+// the identical absolute path. Telemetry is owned by the service; the dispatch
+// trace is correlated server-side via sliceId (the same deterministic-id scheme).
+async function launchHatcheryDispatch(item, opts) {
   const repoPath = meta.repo?.path;
   if (typeof repoPath !== "string" || repoPath.length === 0) {
     throw new Error("repo path is missing");
@@ -438,11 +387,6 @@ function launchHatcheryDispatch(item, resultPath, logPath, opts) {
   const title = opts?.titleOverride || dispatchTitle(item);
   const prompt = opts?.promptOverride || buildSmithySpawnPrompt(item);
   const requestSliceId = opts?.requestSliceIdOverride || dispatchSliceId(item);
-  // Wire shape for POST /spawns (Hatchery service). repoPath must be valid INSIDE
-  // the hatchery container — it bind-mounts the repo + worktree-parent at the
-  // identical absolute path. Telemetry is now owned by the service, so we no
-  // longer pass MARCH_OTEL down; the dispatch trace is correlated server-side via
-  // sliceId (the same deterministic-id scheme).
   const spawnRequest = {
     prompt,
     backend: "codex",
@@ -456,23 +400,8 @@ function launchHatcheryDispatch(item, resultPath, logPath, opts) {
     taskName: dispatchIdent.stem,
     sliceId: requestSliceId,
   };
-  fs.mkdirSync(path.dirname(resultPath), { recursive: true });
-  fs.writeFileSync(resultPath, "", "utf-8");
-  const requestPath = hatcheryRequestPath(requestSliceId);
-  const requestBody = {
-    baseUrl: resolveHatcheryUrl(process.env),
-    spawn: spawnRequest,
-    resultPath,
-    logPath,
-  };
-  fs.writeFileSync(requestPath, JSON.stringify(requestBody) + "\n", "utf-8");
-  const child = spawn(process.execPath, ["-e", hatcheryRunnerCode(), requestPath, resultPath, logPath], {
-    cwd: repoPath,
-    detached: true,
-    stdio: ["ignore", "ignore", "ignore"],
-  });
-  child.unref();
-  return { pid: child.pid || null, requestPath };
+  const created = await postSpawn(resolveHatcheryUrl(process.env), spawnRequest);
+  return { jobId: created.id };
 }
 
 // Direct-steward dispatch: the no-spawn fallback. Launches a plain Claude
@@ -568,16 +497,6 @@ function parseSessionCollisionError(text) {
   return m ? m[1].trim() : null;
 }
 
-function deleteHatcheryArtifacts(slice) {
-  const remove = (p) => {
-    if (typeof p !== "string" || p.length === 0) return;
-    try { fs.unlinkSync(p); } catch { /* best effort */ }
-  };
-  remove(slice?.hatchery?.hatchery_request_path);
-  remove(slice?.hatchery?.hatchery_result_path);
-  remove(slice?.hatchery?.hatchery_log_path);
-}
-
 // Match the launchAgentDeckManager wrong-worktree refusal — the upstream
 // n→n-1 agent-deck launch race where pickLaunchedSession attaches to the
 // wrong sibling session. The error text is the contract; if it changes in
@@ -617,7 +536,6 @@ function tryRecoverWrongWorktreeRace(state, slice, sliceId, errorText) {
   }
   counts[sliceId] = next;
   emitTransition({ type: "retry.counted", key: sliceId, count: next });
-  deleteHatcheryArtifacts(slice);
   delete state.slices[sliceId];
   return {
     recovered: true,
@@ -642,7 +560,6 @@ async function tryRecoverSessionCollision(state, slice, sliceId, errorText) {
   } catch (err) {
     return { recovered: false, verdict: "session-collision-remove-failed", detail: "ghost session " + sessionId + " remove failed: " + (err?.message || String(err)).slice(0, 200) };
   }
-  deleteHatcheryArtifacts(slice);
   delete state.slices[sliceId];
   return { recovered: true, verdict: "session-collision", detail: "removed colliding ghost session " + sessionId + " (worktree pruned); slice released for re-dispatch" };
 }
@@ -683,7 +600,6 @@ function tryRecoverSpawnPatchError(state, slice, sliceId, errorText) {
   }
   counts[key] = next;
   emitTransition({ type: "retry.counted", key, count: next });
-  deleteHatcheryArtifacts(slice);
   delete state.slices[sliceId];
   return {
     recovered: true,
@@ -708,7 +624,7 @@ async function completePendingHatcheryDispatches(state, ts) {
     notifications.push({
       slice, sliceId, requestKey: key,
       reason: "hatchery_dispatch_failed",
-      detail: "Hatchery dispatch for " + actionCommandLine({ command: slice.command, arguments: slice.arguments || [] }) + " escalated: " + reason + ".\n\nError:\n" + String(error || "(no detail)").trim() + "\n\nSlice has been marked escalated (slice.escalated transition event). If reason is 'spawn-error' with 'branch ... already exists' or any 'branch-collision-*' verdict, load legate.unwedge and run inspect-partial-work.sh / clean-stale-branch.sh — the loop auto-recovers orphan-ref and post-merge-stale cases, but anything with an open PR or unknown divergence reaches here for operator inspection. Otherwise run legate.error for worker-side recovery.",
+      detail: "Hatchery dispatch for " + actionCommandLine({ command: slice.command, arguments: slice.arguments || [] }) + " escalated: " + reason + ".\n\nError:\n" + String(error || "(no detail)").trim() + "\n\nSlice has been marked escalated (slice.escalated transition event). The loop no longer auto-recovers branch/worktree collisions (Brood owns worktree+branch teardown by exact path, #155): for a 'branch already exists' / diverged-branch error, load legate.unwedge and inspect the stale branch + worktree, then request Brood teardown of the orphan before re-dispatch. Otherwise run legate.error for worker-side recovery.",
     });
   };
   const escalateStale = (slice, sliceId, reason) => {
@@ -716,14 +632,13 @@ async function completePendingHatcheryDispatches(state, ts) {
     if (!Number.isFinite(queuedMs) || !Number.isFinite(nowMs)) return false;
     if (nowMs - queuedMs <= HATCHERY_PENDING_TIMEOUT_MS) return false;
     const ageMin = Math.round((nowMs - queuedMs) / 60000);
-    // Runner-silent recovery: the hatchery runner died before writing its
-    // result file (almost always because the loop conductor was restarted
-    // mid-spawn — detached:true doesnt fully insulate from tmux's session-
-    // kill cascade). This is transient. Auto-clear the slice and let it
-    // re-dispatch, capped by a per-slice retry counter.
+    // The Hatchery job never reached a terminal state within the timeout —
+    // the spawn service lost the job (a restart mid-spawn) or is wedged. This
+    // is usually transient, so auto-clear the slice and let it re-dispatch,
+    // capped by a per-slice retry counter; only a repeat offender escalates.
     const limit = 3;
     const counts = transientRetryCounts(state);
-    const key = "runner-silent:" + sliceId;
+    const key = "hatchery-stale:" + sliceId;
     const prev = Number.isFinite(counts[key]) ? counts[key] : 0;
     const nextN = prev + 1;
     if (nextN <= limit) {
@@ -733,50 +648,50 @@ async function completePendingHatcheryDispatches(state, ts) {
         action: "auto-recovered",
         sliceId,
         sessionId: null,
-        detail: "runner-silent (" + reason + ") after " + ageMin + " min — likely loop restart killed the runner (attempt " + nextN + "/" + limit + "); slice released for re-dispatch",
+        detail: "hatchery job " + reason + " after " + ageMin + " min (attempt " + nextN + "/" + limit + "); slice released for re-dispatch",
       });
-      deleteHatcheryArtifacts(slice);
       delete state.slices[sliceId];
       return true;
     }
     delete counts[key];
-    const note = "NEED: Hatchery spawn " + reason + " after " + ageMin + " min and " + limit + " auto-retry attempts; runner is dying repeatedly — manual investigation required";
+    const note = "NEED: Hatchery job " + reason + " after " + ageMin + " min and " + limit + " auto-retry attempts; the spawn service is not completing the job — manual investigation required";
     slice.stage = "escalated";
-    emitTransition({ type: "slice.escalated", sliceId, reason: "runner-silent-persistent" });
+    emitTransition({ type: "slice.escalated", sliceId, reason: "hatchery-stale-persistent" });
     slice.last_action = ts;
     slice.last_action_note = note;
     failures.push({ slice_id: sliceId, command: actionCommandLine({ command: slice.command, arguments: slice.arguments || [] }), error: note });
-    queueDispatchEscalation(slice, sliceId, "runner-silent-persistent", note);
+    queueDispatchEscalation(slice, sliceId, "hatchery-stale-persistent", note);
     return true;
   };
+  const hatcheryBaseUrl = resolveHatcheryUrl(process.env);
   for (const [sliceId, slice] of Object.entries(slices)) {
     if (!slice || typeof slice !== "object" || slice.stage !== "hatchery-pending") continue;
-    const resultPath = slice.hatchery?.hatchery_result_path;
-    if (typeof resultPath !== "string" || resultPath.length === 0) continue;
-    let raw;
+    const jobId = slice.hatchery?.job_id;
+    if (typeof jobId !== "string" || jobId.length === 0) continue;
+    let job;
     try {
-      raw = fs.readFileSync(resultPath, "utf-8").trim();
+      // Poll the Hatchery job over HTTP (#144 phase 2b) — the former on-disk
+      // result file is gone; the service is the source of truth for the spawn.
+      job = await getJob(hatcheryBaseUrl, jobId);
     } catch (err) {
-      if (err && err.code === "ENOENT") {
-        if (escalateStale(slice, sliceId, "produced no result file")) mutated = true;
-        continue;
-      }
-      failures.push({ slice_id: sliceId, command: actionCommandLine({ command: slice.command, arguments: slice.arguments || [] }), error: err?.message || String(err) });
+      // The service is unreachable, or no longer knows this job (a restart
+      // dropped it). Treat like a stale job: a transient blip before the
+      // timeout just waits; past it the slice is released / escalated.
+      const reason = err instanceof HatcheryClientError ? "is unreachable" : "lookup failed";
+      if (escalateStale(slice, sliceId, reason)) mutated = true;
       continue;
     }
-    if (!raw) {
-      // Empty result file = launchHatcheryDispatch wrote the placeholder but
-      // the runner died before writing real content. Same failure mode as a
-      // missing file; treat it the same way once the timeout has elapsed.
-      if (escalateStale(slice, sliceId, "left an empty result file")) mutated = true;
+    if (job.status !== "succeeded" && job.status !== "failed") {
+      // Still pending/running — wait for it. If it never reaches a terminal
+      // state within the timeout, escalateStale treats it as a wedged job.
+      if (escalateStale(slice, sliceId, "did not reach a terminal state")) mutated = true;
       continue;
     }
-    let result;
-    try {
-      result = JSON.parse(raw);
-    } catch {
-      continue;
-    }
+    // Map the terminal job to the result shape the completion logic below reads:
+    // the inner HatcherySpawnResult on success, an { error } on failure.
+    const result = job.status === "failed"
+      ? { error: job.error?.message || "hatchery spawn failed" }
+      : (job.result || {});
     if (result.error) {
       const errorText = String(result.error).trim();
       // Branch/worktree-collision recovery (auto-delete, open-PR adoption,
@@ -1048,9 +963,6 @@ async function handleRecoveryDispatch(state, ts, item, sliceId, mergedArchive) {
     // syncDefaultBranch already ran at the top of runDispatch; no need
     // to re-fetch per recovery dispatch.
     const action = item.next_action || {};
-    const resultPath = hatcheryResultPath(recoverySliceId);
-    const logPath = hatcheryLogPath(recoverySliceId);
-    const requestPath = hatcheryRequestPath(recoverySliceId);
     const recoveryBranch = dispatchBranch(item) + "-recovery-" + attempt;
     const recoveryTitle = "recovery(" + attempt + "): " + dispatchTitle(item);
     state.slices[recoverySliceId] = {
@@ -1067,9 +979,6 @@ async function handleRecoveryDispatch(state, ts, item, sliceId, mergedArchive) {
       artifact_path: item.path || null,
       hatchery: {
         backend: "codex",
-        hatchery_result_path: resultPath,
-        hatchery_request_path: requestPath,
-        hatchery_log_path: logPath,
       },
       original_slice_id: sliceId,
       recovery_attempt: attempt,
@@ -1080,17 +989,18 @@ async function handleRecoveryDispatch(state, ts, item, sliceId, mergedArchive) {
       last_action_note: "Queued Hatchery recovery codex spawn (attempt " + attempt + ") for " + actionCommandLine(action),
     };
     state.recovery_attempts[sliceId] = attempt;
-    const launched = launchHatcheryDispatch(item, resultPath, logPath, {
+    const launched = await launchHatcheryDispatch(item, {
       branchOverride: recoveryBranch,
       titleOverride: recoveryTitle,
       promptOverride: buildSmithyRecoverySpawnPrompt(item, mergedArchive, attempt),
       requestSliceIdOverride: recoverySliceId,
     });
+    state.slices[recoverySliceId].hatchery.job_id = launched.jobId;
     actions.push({
       action: "recovery_dispatch",
       sliceId: recoverySliceId,
       sessionId: null,
-      detail: "queued Hatchery recovery codex spawn pid " + (launched.pid || "unknown")
+      detail: "queued Hatchery recovery codex spawn job " + launched.jobId
         + " (attempt " + attempt + " of " + MAX_RECOVERY_ATTEMPTS + ") "
         + "for " + actionCommandLine(action)
         + (mergedArchive?.pr?.number ? "; prior PR #" + mergedArchive.pr.number : ""),
@@ -1125,15 +1035,12 @@ async function handleRecoveryDispatch(state, ts, item, sliceId, mergedArchive) {
 // Fresh-dispatch launch for one ready item: create the hatchery-pending slice,
 // fire the codex spawn, and return the action (or escalate + a notification on a
 // launch throw). The dispatch handler's apply() calls this via DispatchDeps.
-function launchDispatch(state, ts, item, sliceId) {
+async function launchDispatch(state, ts, item, sliceId) {
   const actions = [];
   const failures = [];
   const notifications = [];
   try {
     const action = item.next_action || {};
-    const resultPath = hatcheryResultPath(sliceId);
-    const logPath = hatcheryLogPath(sliceId);
-    const requestPath = hatcheryRequestPath(sliceId);
     state.slices[sliceId] = {
       kind: "smithy",
       worker_session_id: null,
@@ -1148,19 +1055,17 @@ function launchDispatch(state, ts, item, sliceId) {
       artifact_path: item.path || null,
       hatchery: {
         backend: "codex",
-        hatchery_result_path: resultPath,
-        hatchery_request_path: requestPath,
-        hatchery_log_path: logPath,
       },
       last_action: ts,
       last_action_note: "Queued Hatchery codex spawn for " + actionCommandLine(action),
     };
-    const launched = launchHatcheryDispatch(item, resultPath, logPath);
+    const launched = await launchHatcheryDispatch(item);
+    state.slices[sliceId].hatchery.job_id = launched.jobId;
     actions.push({
       action: "dispatch",
       sliceId,
       sessionId: null,
-      detail: "queued Hatchery codex spawn pid " + (launched.pid || "unknown") + " for " + actionCommandLine(action),
+      detail: "queued Hatchery codex spawn job " + launched.jobId + " for " + actionCommandLine(action),
     });
     emitTransition({ type: "slice.dispatched", sliceId, branch: dispatchBranch(item) });
   } catch (err) {

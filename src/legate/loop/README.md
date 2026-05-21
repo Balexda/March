@@ -118,7 +118,8 @@ The loop owns *decisions*; the doing is delegated to the other March services,
 each behind an injectable seam so the handlers stay unit-testable:
 
 - **Hatchery** — codex spawns for fresh dispatches. The loop POSTs to the
-  Hatchery service via a detached runner and polls the result file
+  Hatchery service with the async client (`postSpawn`), records the returned job
+  id on the slice, and polls it across ticks (`getJob`) until terminal
   (`runtime.ts`).
 - **Brood** — the session-state + **teardown authority** ([#155](https://github.com/Balexda/March/issues/155)).
   The loop *requests* teardown ([`clients/brood.ts`](./clients/brood.ts)); it
@@ -130,18 +131,24 @@ each behind an injectable seam so the handlers stay unit-testable:
 
 ## Recovery machinery
 
-Most of [`runtime.ts`](./runtime.ts) is auto-recovery for the messy realities of
+Part of [`runtime.ts`](./runtime.ts) is auto-recovery for the messy realities of
 the spawn path, each gated behind a per-slice retry counter so a transient
-problem self-heals and only a *persistent* one escalates for operator judgement:
+problem self-heals and only a *persistent* one escalates for operator judgement.
+Since #144 the loop only recovers things it can fix **through a service or its own
+in-memory state** — it no longer does git/gh worktree+branch surgery of its own:
 
-- branch-collision classification + safe auto-delete (orphan-ref / post-merge-stale),
-- open-PR adoption, ghost-session reclamation, wrong-worktree launch-race release,
-- stranded-leftover cleanup, codex patch-error retry, and runner-silent recovery,
+- ghost-session reclamation (removes the colliding session via Castra),
+- wrong-worktree launch-race release and codex patch-error retry (in-memory
+  retry-counter releases that re-dispatch the slice),
+- stale-job recovery (a Hatchery job that never reaches a terminal state),
 - a no-spawn **direct-steward** fallback after repeated codex-spawn failures.
 
-These transitions emit `slice.dispatched` / `slice.recovery.dispatched` /
-`slice.escalated` / `retry.counted` events — the durable record the working state
-is rebuilt from (#176).
+Branch/worktree collisions (`branch already exists`, diverged leftovers) are **no
+longer auto-recovered** — worktree+branch teardown by exact path is Brood's
+authority ([#155](https://github.com/Balexda/March/issues/155)), so these escalate
+to the operator instead. These transitions emit `slice.dispatched` /
+`slice.recovery.dispatched` / `slice.escalated` / `retry.counted` events — the
+durable record the working state is rebuilt from (#176).
 
 ## HTTP API ([`http.ts`](./http.ts))
 
