@@ -58,7 +58,7 @@ How each emitter reaches the collector:
 ### Enabling it for a Legate deployment
 
 The Legate loop freezes its telemetry config into its meta file at
-`march legate init` time (so the standalone loop process needs no env at
+`march legate init` time (so the loop service container needs no env at
 runtime). The loop dispatches by POSTing to the Hatchery service over HTTP
 (`MARCH_HATCHERY_URL`), and that service emits its own spawn telemetry. So **set
 the env before `init`, and keep it set in the environment the loop runs in**:

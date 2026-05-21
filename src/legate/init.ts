@@ -717,7 +717,7 @@ function loopMetaFor(input: {
     ),
     legate_conductor_dir: input.legateConductorDir,
     // Telemetry config captured at init time from the operator's env, so the
-    // standalone loop process emits without needing env propagation.
+    // loop service container emits without needing env propagation.
     otel: {
       enabled: process.env.MARCH_OTEL === "1",
       endpoint: (
@@ -726,7 +726,7 @@ function loopMetaFor(input: {
         "http://localhost:4318"
       ).replace(/\/+$/, ""),
     },
-    // Brood service endpoint, frozen at init so the standalone loop can REQUEST
+    // Brood service endpoint, frozen at init so the loop service can REQUEST
     // teardown (#155) instead of pruning worktrees itself. Null = brood not
     // configured; the loop then removes only the agent-deck session (no prune).
     brood_endpoint: process.env.MARCH_BROOD_URL?.trim() || null,
