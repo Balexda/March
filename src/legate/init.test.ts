@@ -445,6 +445,21 @@ describe("legate module", () => {
       expect(loop).toContain("DIRECT DISPATCH — no spawn");
       expect(loop).toContain("direct-dispatch");
       expect(loop).toContain('dispatch_mode: "direct-steward"');
+      // Spawn-error fallback (#139): when codex exhausts its patch-retry budget
+      // (verdict spawn-error-persistent) — common for large-diff artifacts whose
+      // per-attempt success rate is near zero — the loop must route into the
+      // SAME no-spawn direct steward dispatch instead of escalating. The
+      // completion drain (not just handleRecoveryDispatch) now reaches the
+      // fallback, guarded by the shared state.direct_dispatch_done so it fires
+      // at most once before final escalation.
+      expect(loop).toContain('spawnRecovery.verdict === "spawn-error-persistent"');
+      expect(loop).toContain("spawn-error budget exhausted");
+      expect(loop).toContain("spawn-error-persistent-direct-failed");
+      expect(loop).toContain("spawn-error-persistent-exhausted");
+      // The fallback launches via the slice's own identity (branchBase/title)
+      // since the completion drain holds a slice, not the original smithy item.
+      expect(loop).toContain("branchBase: slice.branch");
+      expect(loop).toContain("opts.branchBase");
       // The replaced master-advance reset must be fully gone.
       expect(loop).not.toContain("recovery_exhausted_at_head");
       expect(loop).not.toContain("recovery_reset");
@@ -1165,6 +1180,63 @@ describe("legate module", () => {
 
       // Non-matching errors return null and don't touch state.
       expect(recover(state, state.slices.s1, "s1", "agent-deck manager launch failed:\nError: branch 'x' already exists")).toBeNull();
+    });
+
+    it("launchDirectStewardDispatch honors opts.branchBase/opts.title for the spawn-error fallback (#139)", async () => {
+      // The spawn-error fallback (issue #139) routes a spawn-error-persistent
+      // verdict into launchDirectStewardDispatch from the completion drain,
+      // which holds a slice rather than the original smithy item. It therefore
+      // passes the slice's stored identity (slice.branch / slice.worker_title)
+      // through opts so the -direct branch stays tied to the slice's semantic
+      // identity. Verify the override takes precedence over dispatchBranch/
+      // dispatchTitle, and that the no-opts path still derives from them.
+      const loop = fs.readFileSync(await stageLoop(makeTmpDir()), "utf-8");
+      const src = loop.match(/function launchDirectStewardDispatch\([^)]*\)\s*\{[\s\S]+?\n\}/);
+      if (!src) throw new Error("could not extract launchDirectStewardDispatch");
+      const params = [
+        "meta", "dispatchBranch", "dispatchTitle", "buildDirectStewardMessage",
+        "agentDeckList", "isWorkerSession", "execFileSync", "path",
+        "actionArguments", "actionCommandLine",
+      ];
+      // eslint-disable-next-line @typescript-eslint/no-implied-eval
+      const factory = new Function(...params, `${src[0]}; return launchDirectStewardDispatch;`);
+      const metaStub = { repo: { path: "/repo/March" }, profile: "smithy", worker_group: "legate-workers" };
+      const argsOf = (a: any) => (Array.isArray(a?.arguments) ? a.arguments.map(String) : []);
+      // Two-call agent-deck list stub: empty before launch, one new worker after.
+      const listStub = () => { let n = 0; return () => (n++ === 0 ? [] : [{ id: "sess-new", group: "legate-workers" }]); };
+      const item = { next_action: { command: "smithy.forge", arguments: ["specs/x.tasks.md", "2"] }, path: "specs/x.tasks.md", title: "forge: x" };
+
+      // With opts: dispatchBranch/dispatchTitle must NOT be consulted, so make
+      // them throw — a regression that drops the override fails loudly here.
+      const boom = () => { throw new Error("dispatchBranch/dispatchTitle must not be called when opts supplies identity"); };
+      const withOpts = factory(
+        metaStub, boom, boom, () => "steward message",
+        listStub(), () => true, () => "", path, argsOf, () => "/smithy.forge specs/x.tasks.md 2",
+      ) as (...a: any[]) => any;
+      const state1: any = { repo: { path: "/repo/March" }, slices: {} };
+      const res1 = withOpts(state1, "2026-05-20T00:00:00.000Z", item, "x-us1-s2-forge", null, {
+        branchBase: "smithy/forge/x-us1-s2",
+        title: "forge: expand evals",
+      });
+      expect(res1).toMatchObject({ launched: true, sliceId: "x-us1-s2-forge-direct", sessionId: "sess-new" });
+      const created = state1.slices["x-us1-s2-forge-direct"];
+      expect(created.branch).toBe("smithy/forge/x-us1-s2-direct");
+      expect(created.actual_branch).toBe("feature/smithy/forge/x-us1-s2-direct");
+      expect(created.worker_title).toBe("direct: forge: expand evals");
+      expect(created.dispatch_mode).toBe("direct-steward");
+      expect(created.original_slice_id).toBe("x-us1-s2-forge");
+
+      // Without opts: the branch/title fall back to dispatchBranch/dispatchTitle
+      // (unchanged behavior for handleRecoveryDispatch's existing call site).
+      const noOpts = factory(
+        metaStub, () => "derived/branch", () => "derived title", () => "msg",
+        listStub(), () => true, () => "", path, argsOf, () => "/cmd",
+      ) as (...a: any[]) => any;
+      const state2: any = { repo: { path: "/repo/March" }, slices: {} };
+      const res2 = noOpts(state2, "t", item, "sid", null, undefined);
+      expect(res2.launched).toBe(true);
+      expect(state2.slices["sid-direct"].branch).toBe("derived/branch-direct");
+      expect(state2.slices["sid-direct"].worker_title).toBe("direct: derived title");
     });
 
     it("runGhostStewardCleanup leaves active sessions alone and skips young sessions", async () => {
