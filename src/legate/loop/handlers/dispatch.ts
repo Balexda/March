@@ -1,24 +1,25 @@
 import type { HandlerContext, HandlerResult, LoopState } from "../state/types.js";
 import { emptyHandlerResult } from "../state/types.js";
 import { dispatchSliceId } from "../pure/dispatch-id.js";
-import { alreadyArchivedSlice, blockingMergedArchive, inFlightSliceMatches } from "../pure/slice.js";
+import { alreadyArchivedSlice, inFlightSliceMatches } from "../pure/slice.js";
 
 /**
  * Dispatch: turn smithy's layer-0 ready items into Hatchery codex spawns.
  *
  * Two-stage: assess() is PURE selection over the smithy-ready set that Stage 1
  * already computed (`state.smithy.ready`) plus the live-slice/archive dedup
- * matchers — it decides which items dispatch fresh and which need partial-merge
- * recovery, emitting nothing for items already in-flight or archived. apply()
- * first drains completed Hatchery result files, then launches the selected
- * spawns. The intricate spawn/completion/recovery I/O stays behind injected
- * seams ({@link DispatchDeps}) so the selection logic is unit-testable and the
+ * matchers — it decides which items dispatch fresh, emitting nothing for items
+ * already in-flight or archived (a prior MERGED archive that collides counts as
+ * archived, so it is skipped, not auto-recovered: the partial-merge recovery
+ * dispatch was deleted in #144 along with the rest of the loop's recovery
+ * surgery). apply() first drains completed Hatchery jobs, then launches the
+ * selected spawns. The spawn/completion I/O stays behind injected seams
+ * ({@link DispatchDeps}) so the selection logic is unit-testable and the
  * orchestration is wired to the Hatchery client at the seam.
  */
 
 export type DispatchDecision =
-  | { kind: "dispatch"; sliceId: string; item: any }
-  | { kind: "recovery"; sliceId: string; item: any; mergedArchive: any };
+  | { kind: "dispatch"; sliceId: string; item: any };
 
 /** Result of draining the pending Hatchery dispatches (run inside apply). */
 export interface CompletionResult {
@@ -43,16 +44,15 @@ export interface DispatchDeps {
   completePending: (state: any, ts: string) => Promise<CompletionResult>;
   /** Launch a fresh Hatchery codex spawn for a ready item; creates the slice. */
   launchDispatch: (state: any, ts: string, item: any, sliceId: string) => Promise<LaunchResult>;
-  /** Partial-merge recovery dispatch for a ready item colliding with a MERGED archive. */
-  recoveryDispatch: (state: any, ts: string, item: any, sliceId: string, mergedArchive: any) => Promise<LaunchResult>;
   /** Fire a legate-judgement request (idempotent by requestKey). */
   requestJudgement: (input: { ts: string; slice: any; sliceId: string; requestKey: string; reason: string; detail: string }) => Promise<any | null>;
 }
 
 /**
- * Pure: which ready items to act on, and how. Mirrors the runDispatch ready loop
- * — live-slice dedup first, then partial-merge recovery (MERGED archive
- * collision), then the catch-all archive skip; everything else dispatches fresh.
+ * Pure: which ready items to dispatch. Live-slice dedup first, then the archive
+ * skip (which subsumes the former partial-merge recovery case — a colliding
+ * MERGED archive matches `alreadyArchivedSlice`, so it is skipped rather than
+ * re-dispatched); everything else dispatches fresh.
  */
 export function assess(state: LoopState): DispatchDecision[] {
   const out: DispatchDecision[] = [];
@@ -60,11 +60,6 @@ export function assess(state: LoopState): DispatchDecision[] {
   for (const item of state.smithy.ready) {
     const sliceId = dispatchSliceId(item);
     if (inFlightSliceMatches(state.raw, item, sliceId)) continue;
-    const blockingMerged = blockingMergedArchive(state.raw, item, sliceId);
-    if (blockingMerged) {
-      out.push({ kind: "recovery", sliceId, item, mergedArchive: blockingMerged });
-      continue;
-    }
     if (alreadyArchivedSlice(state.raw, item, sliceId)) continue;
     out.push({ kind: "dispatch", sliceId, item });
   }
@@ -92,12 +87,10 @@ export async function apply(_decisions: DispatchDecision[], ctx: HandlerContext,
   if (completed.mutated) res.mutated = true;
   await fireNotifications(deps, ts, completed.notifications, res);
 
-  // 2. Re-derive selection AFTER completion so a just-freed slice (runner-silent
-  //    auto-recovery) isn't blocked by its own stale in-flight entry this tick.
+  // 2. Re-derive selection AFTER completion so a slice freed this tick isn't
+  //    blocked by its own stale in-flight entry.
   for (const decision of assess(state)) {
-    const out = decision.kind === "recovery"
-      ? await deps.recoveryDispatch(state.raw, ts, decision.item, decision.sliceId, decision.mergedArchive)
-      : await deps.launchDispatch(state.raw, ts, decision.item, decision.sliceId);
+    const out = await deps.launchDispatch(state.raw, ts, decision.item, decision.sliceId);
     res.actions.push(...out.actions);
     res.failures.push(...out.failures);
     if (out.mutated) res.mutated = true;

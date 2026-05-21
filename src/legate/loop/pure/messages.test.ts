@@ -1,7 +1,5 @@
 import { describe, expect, it } from "vitest";
 import {
-  buildDirectStewardMessage,
-  buildSmithyRecoverySpawnPrompt,
   buildSmithySpawnPrompt,
   conflictMessage,
   failedChecksSummary,
@@ -18,17 +16,6 @@ describe("messages pure builders", () => {
     expect(p).toContain("/smithy.forge docs/x.tasks.md 1");
     expect(p).toContain("docs/x.tasks.md");
     expect(p).toContain("[ ]` to `[x]`");
-  });
-
-  it("recovery prompt references the prior merged PR and attempt", () => {
-    const p = buildSmithyRecoverySpawnPrompt(item, { pr: { number: 42, url: "u" } }, 2);
-    expect(p).toContain("RECOVERY DISPATCH (attempt 2)");
-    expect(p).toContain("Prior merged PR: #42 (u)");
-  });
-
-  it("direct-steward message drops the prior-PR line when absent", () => {
-    expect(buildDirectStewardMessage(item, null)).not.toContain("A prior PR");
-    expect(buildDirectStewardMessage(item, { pr: { number: 7 } })).toContain("A prior PR (#7)");
   });
 
   it("conflictMessage targets the repo default branch + worktree", () => {
