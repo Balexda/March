@@ -21,6 +21,8 @@ function activity(overrides: Partial<LoopTickActivity> = {}): LoopTickActivity {
     ghostCleanups: 0,
     relaunches: 0,
     babysitActions: 0,
+    stewardNudges: 0,
+    stewardStranded: 0,
     ...overrides,
   };
 }
@@ -40,7 +42,14 @@ describe("loop-metrics", () => {
     initOtel({ MARCH_OTEL: "1", MARCH_OTEL_ENDPOINT: "http://localhost:4318" });
     expect(() =>
       recordLoopHeartbeat(
-        activity({ dispatchFailures: 2, cleanups: 1, ghostCleanups: 1, babysitActions: 3 }),
+        activity({
+          dispatchFailures: 2,
+          cleanups: 1,
+          ghostCleanups: 1,
+          babysitActions: 3,
+          stewardNudges: 4,
+          stewardStranded: 1,
+        }),
       ),
     ).not.toThrow();
   });

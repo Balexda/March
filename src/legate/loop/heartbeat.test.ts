@@ -21,6 +21,8 @@ function out(over: Partial<CoordinatorOutput["results"]> = {}, tickOver: any = {
       ghostCleanupCount: 0,
       relaunchCount: 0,
       babysitActionCount: 1,
+      stewardNudgeCount: 0,
+      stewardStrandedCount: 0,
       processorRequestCount: 2,
       dispatchActionCount: 1,
       dispatchFailureCount: 0,
@@ -56,13 +58,15 @@ function deps(): HeartbeatDeps & { events: any[]; logs: string[] } {
 
 describe("buildHeartbeatRecord", () => {
   it("maps the TickResult into the durable record shape", () => {
-    const record = buildHeartbeatRecord(out(), META);
+    const record = buildHeartbeatRecord(out({}, { stewardNudgeCount: 4, stewardStrandedCount: 1 }), META);
     expect(record).toMatchObject({
       kind: "heartbeat",
       mode: "terminal-pr-maintenance",
       slice_count: 2,
       archived_slice_count: 1,
       babysit_action_count: 1,
+      steward_nudge_count: 4,
+      steward_stranded_count: 1,
       processor_request_count: 2,
       dispatchable_count: 3,
       blocked_count: 2,

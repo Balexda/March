@@ -489,6 +489,9 @@ export async function apply(decisions: BabysitDecision[], ctx: HandlerContext, s
         res.mutated = true;
         break;
       case "steward-nudge": {
+        // The nudge and the escalation are recorded as distinct actions so each
+        // is metricized on its own (#212): a runaway watchdog shows up as a
+        // sustained `steward-nudge` rate, an escalation as `steward-stranded`.
         if (d.nudge) {
           try {
             await deps.sendMessage(d.sessionId, STRANDED_MESSAGE);
@@ -497,12 +500,13 @@ export async function apply(decisions: BabysitDecision[], ctx: HandlerContext, s
           } catch {
             // send failed — leave counters; next tick retries.
           }
+          res.actions.push({ action: "steward-nudge", sliceId: d.sliceId, sessionId: d.sessionId, detail: d.detail });
         }
         if (d.alert) {
           slice.steward_stranded_escalated_at = ts;
           await fireRequest({ ts, slice, requestKey: d.alertRequestKey, sliceId: d.sliceId, sessionId: d.sessionId, reason: "steward stranded after dispatch (watchdog still nudging)", detail: d.alertDetail });
+          res.actions.push({ action: "steward-stranded", sliceId: d.sliceId, sessionId: d.sessionId, detail: d.alertDetail });
         }
-        res.actions.push({ action: "steward-nudge", sliceId: d.sliceId, sessionId: d.sessionId, detail: d.detail });
         res.mutated = true;
         break;
       }

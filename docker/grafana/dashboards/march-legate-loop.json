@@ -832,6 +832,157 @@
         "x": 0,
         "y": 26
       },
+      "id": 106,
+      "panels": [],
+      "title": "Loop actions",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "Loop actions per second broken down by kind. dispatch/dispatch_failure come from march_legate_dispatch_*; every other kind (cleanup, ghost_cleanup, relaunch, babysit, steward_nudge, steward_stranded) is the action label on march_legate_loop_actions_total. A sustained steward_nudge line with no matching dispatch is a stuck/runaway watchdog.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "per sec",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 15,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "unit": "short"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "dispatch_failure"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "red",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "steward_stranded"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "orange",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 27
+      },
+      "id": 13,
+      "options": {
+        "legend": {
+          "calcs": [
+            "sum"
+          ],
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "12.2.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "sum by (action) (rate(march_legate_loop_actions_total{profile=~\"$profile\", conductor=~\"$conductor\"}[$__rate_interval]))",
+          "legendFormat": "{{action}}",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(march_legate_dispatch_actions_total{profile=~\"$profile\", conductor=~\"$conductor\"}[$__rate_interval]))",
+          "legendFormat": "dispatch",
+          "range": true,
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(march_legate_dispatch_failures_total{profile=~\"$profile\", conductor=~\"$conductor\"}[$__rate_interval]))",
+          "legendFormat": "dispatch_failure",
+          "range": true,
+          "refId": "C"
+        }
+      ],
+      "title": "Loop actions by kind",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 35
+      },
       "id": 103,
       "panels": [],
       "title": "Workers",
@@ -919,7 +1070,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 27
+        "y": 36
       },
       "id": 9,
       "options": {
@@ -960,7 +1111,270 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 35
+        "y": 44
+      },
+      "id": 107,
+      "panels": [],
+      "title": "Stewards",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "Active steward (worker) sessions right now, summed across states. The per-state breakdown is the Workers-by-state panel above.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 0,
+        "y": 45
+      },
+      "id": 14,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "pluginVersion": "12.2.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "sum(march_legate_workers{profile=~\"$profile\", conductor=~\"$conductor\"})",
+          "legendFormat": "active stewards",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Active stewards",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "Stranded-steward nudges per second (watchdog re-prodding a steward stuck implementing with no PR). A flat-zero is healthy; a sustained line is a runaway nudge loop — the failure mode that was previously only visible by grepping the log file.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "nudges/sec",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 15,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 6,
+        "y": 45
+      },
+      "id": 15,
+      "options": {
+        "legend": {
+          "calcs": [
+            "sum",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "12.2.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "sum by (conductor) (rate(march_legate_loop_actions_total{action=\"steward_nudge\", profile=~\"$profile\", conductor=~\"$conductor\"}[$__rate_interval]))",
+          "legendFormat": "{{conductor}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Stranded-steward nudge rate",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "Stranded-steward escalations per second (operator alert raised when a nudged steward is still stranded past the alert budget). Any nonzero value means a steward needs manual recovery.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "per sec",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 15,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "unit": "short"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "escalations"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "red",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 18,
+        "y": 45
+      },
+      "id": 16,
+      "options": {
+        "legend": {
+          "calcs": [
+            "sum"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "12.2.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(march_legate_loop_actions_total{action=\"steward_stranded\", profile=~\"$profile\", conductor=~\"$conductor\"}[$__rate_interval]))",
+          "legendFormat": "escalations",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Steward escalations",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 53
       },
       "id": 104,
       "panels": [],
@@ -977,7 +1391,7 @@
         "h": 9,
         "w": 16,
         "x": 0,
-        "y": 36
+        "y": 54
       },
       "id": 10,
       "options": {
@@ -1015,7 +1429,7 @@
         "h": 9,
         "w": 8,
         "x": 16,
-        "y": 36
+        "y": 54
       },
       "id": 11,
       "options": {
@@ -1049,7 +1463,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 45
+        "y": 63
       },
       "id": 105,
       "panels": [],
@@ -1070,7 +1484,7 @@
         "h": 10,
         "w": 24,
         "x": 0,
-        "y": 46
+        "y": 64
       },
       "id": 12,
       "options": {},
@@ -1117,7 +1531,7 @@
           "type": "prometheus",
           "uid": "prometheus"
         },
-        "definition": "label_values(march_legate_loop_up, profile)",
+        "definition": "label_values(march_legate_loop_heartbeats_total, profile)",
         "includeAll": true,
         "allValue": ".*",
         "label": "profile",
@@ -1125,7 +1539,7 @@
         "name": "profile",
         "options": [],
         "query": {
-          "query": "label_values(march_legate_loop_up, profile)",
+          "query": "label_values(march_legate_loop_heartbeats_total, profile)",
           "refId": "PrometheusVariableQueryEditor-VariableQuery"
         },
         "refresh": 2,
@@ -1138,7 +1552,7 @@
           "type": "prometheus",
           "uid": "prometheus"
         },
-        "definition": "label_values(march_legate_loop_up, conductor)",
+        "definition": "label_values(march_legate_loop_heartbeats_total, conductor)",
         "includeAll": true,
         "allValue": ".*",
         "label": "conductor",
@@ -1146,7 +1560,7 @@
         "name": "conductor",
         "options": [],
         "query": {
-          "query": "label_values(march_legate_loop_up, conductor)",
+          "query": "label_values(march_legate_loop_heartbeats_total, conductor)",
           "refId": "PrometheusVariableQueryEditor-VariableQuery"
         },
         "refresh": 2,

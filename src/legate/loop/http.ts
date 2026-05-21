@@ -47,6 +47,8 @@ export function buildStatus(ctx: LoopHttpContext): Record<string, unknown> {
       ghost_cleanup: r?.ghost_cleanup_count ?? 0,
       relaunch: r?.relaunch_count ?? 0,
       babysit: r?.babysit_action_count ?? 0,
+      steward_nudge: r?.steward_nudge_count ?? 0,
+      steward_stranded: r?.steward_stranded_count ?? 0,
       dispatch: r?.dispatch_action_count ?? 0,
       dispatch_failure: r?.dispatch_failure_count ?? 0,
     },

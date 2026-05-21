@@ -103,7 +103,12 @@ export interface TickResult {
   cleanupFailureCount: number;
   ghostCleanupCount: number;
   relaunchCount: number;
+  /** Babysit actions excluding the steward-nudge family (counted separately below). */
   babysitActionCount: number;
+  /** Stranded-steward nudges sent this tick. */
+  stewardNudgeCount: number;
+  /** Stranded-steward escalations raised this tick. */
+  stewardStrandedCount: number;
   processorRequestCount: number;
   dispatchActionCount: number;
   dispatchFailureCount: number;

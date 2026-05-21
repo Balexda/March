@@ -13,13 +13,17 @@ import { getActiveOtel } from "./otel.js";
  * OTel SDK meter (no raw OTLP), tagged with the deployment `profile` and the
  * `conductor` name so a real deployment's series can be filtered from test/integ
  * runs. Cardinality is deliberately bounded: the only labels are `profile`,
- * `conductor`, and (on the workers gauge) the bounded worker `state`. Per-slice
- * detail belongs in traces/logs, never here.
+ * `conductor`, the bounded worker `state` (on the workers gauge), and the bounded
+ * `action` kind (on the loop-actions counter). Per-slice detail — which steward,
+ * how many nudges — belongs in traces/logs, never here.
  *
- * Cumulative activity (heartbeats, dispatch/cleanup actions, failures) are
- * counters incremented by each tick's delta; current-state values (up, queue
- * depth, worker counts, tick age) are observable gauges whose callbacks read the
- * latest {@link LoopMetricsSnapshot}.
+ * Cumulative activity (heartbeats, dispatch actions/failures, and the loop
+ * lifecycle actions by kind: cleanup/ghost_cleanup/relaunch/babysit/steward_nudge/
+ * steward_stranded) are counters incremented by each tick's delta; current-state
+ * values (up, queue depth, worker counts, tick age) are observable gauges whose
+ * callbacks read the latest {@link LoopMetricsSnapshot}. Gauges carry no `unit`:
+ * the OTel→Prometheus bridge appends `_ratio` to a `unit: "1"` gauge, which both
+ * mislabels a count and broke every gauge panel + the `$profile` dropdown (#205).
  */
 
 /** Current-state values reported by the observable gauges. */
@@ -50,6 +54,10 @@ export interface LoopTickActivity {
   readonly ghostCleanups: number;
   readonly relaunches: number;
   readonly babysitActions: number;
+  /** Stranded-steward nudges sent this tick (the watchdog re-prodding a steward). */
+  readonly stewardNudges: number;
+  /** Stranded-steward escalations raised this tick (operator alert). */
+  readonly stewardStranded: number;
 }
 
 // OTel instruments must be created once per Meter and reused. Cache them keyed by
@@ -59,7 +67,7 @@ let cachedMeter: Meter | undefined;
 let heartbeats: Counter | undefined;
 let dispatchActions: Counter | undefined;
 let dispatchFailures: Counter | undefined;
-let cleanupActions: Counter | undefined;
+let loopActions: Counter | undefined;
 let tickDuration: Histogram | undefined;
 
 // The observable gauges read this holder; updated on every recordLoopHeartbeat.
@@ -85,8 +93,12 @@ function ensureInstruments(meter: Meter): void {
     description: "Count of dispatch failures",
     unit: "1",
   });
-  cleanupActions = meter.createCounter("march.legate.cleanup.actions", {
-    description: "Count of loop maintenance actions by kind",
+  // One counter for every non-dispatch loop action, split by the bounded
+  // `action` label (cleanup, ghost_cleanup, relaunch, babysit, steward_nudge,
+  // steward_stranded). Keep `action` low-cardinality — it backs the "Loop
+  // actions by kind" panel and is a metric label.
+  loopActions = meter.createCounter("march.legate.loop.actions", {
+    description: "Count of loop lifecycle actions by kind",
     unit: "1",
   });
   tickDuration = meter.createHistogram("march.legate.tick.duration", {
@@ -94,6 +106,10 @@ function ensureInstruments(meter: Meter): void {
     unit: "s",
   });
 
+  // Gauges export count/boolean values, not ratios — so they carry no `unit`.
+  // (A `unit: "1"` instrument is exported by the OTel→Prometheus bridge with a
+  // `_ratio` suffix, which both mislabels a count and broke every gauge panel +
+  // the $profile dropdown on the dashboard — see #205.)
   registerGauge(meter, "march.legate.loop.up", "1 while the loop is alive", (s) => s.up);
   registerGauge(
     meter,
@@ -123,7 +139,7 @@ function ensureInstruments(meter: Meter): void {
 
   const workers: ObservableGauge = meter.createObservableGauge(
     "march.legate.workers",
-    { description: "Worker sessions by state", unit: "1" },
+    { description: "Worker sessions by state" },
   );
   workers.addCallback((result: ObservableResult) => {
     const s = latest;
@@ -139,9 +155,9 @@ function registerGauge(
   name: string,
   description: string,
   read: (snapshot: LoopMetricsSnapshot) => number,
-  unit = "1",
+  unit?: string,
 ): void {
-  const gauge = meter.createObservableGauge(name, { description, unit });
+  const gauge = meter.createObservableGauge(name, unit ? { description, unit } : { description });
   gauge.addCallback((result: ObservableResult) => {
     const s = latest;
     if (!s) return;
@@ -166,11 +182,15 @@ export function recordLoopHeartbeat(activity: LoopTickActivity): void {
   tickDuration!.record(activity.tickDurationSeconds, attrs);
   if (activity.dispatchActions) dispatchActions!.add(activity.dispatchActions, attrs);
   if (activity.dispatchFailures) dispatchFailures!.add(activity.dispatchFailures, attrs);
-  if (activity.cleanups) cleanupActions!.add(activity.cleanups, { ...attrs, action: "cleanup" });
+  if (activity.cleanups) loopActions!.add(activity.cleanups, { ...attrs, action: "cleanup" });
   if (activity.ghostCleanups)
-    cleanupActions!.add(activity.ghostCleanups, { ...attrs, action: "ghost_cleanup" });
+    loopActions!.add(activity.ghostCleanups, { ...attrs, action: "ghost_cleanup" });
   if (activity.relaunches)
-    cleanupActions!.add(activity.relaunches, { ...attrs, action: "relaunch" });
+    loopActions!.add(activity.relaunches, { ...attrs, action: "relaunch" });
   if (activity.babysitActions)
-    cleanupActions!.add(activity.babysitActions, { ...attrs, action: "babysit" });
+    loopActions!.add(activity.babysitActions, { ...attrs, action: "babysit" });
+  if (activity.stewardNudges)
+    loopActions!.add(activity.stewardNudges, { ...attrs, action: "steward_nudge" });
+  if (activity.stewardStranded)
+    loopActions!.add(activity.stewardStranded, { ...attrs, action: "steward_stranded" });
 }

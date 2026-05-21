@@ -40,6 +40,10 @@ export interface CoordinatorOutput {
 const countAction = (res: HandlerResult, action: string): number => res.actions.filter((a) => a?.action === action).length;
 
 function buildTickResult(state: LoopState, r: CoordinatorOutput["results"]): TickResult {
+  // The steward-nudge family rides in on the babysit handler's actions but is
+  // metricized on its own (#212), so split it out of the babysit umbrella count.
+  const stewardNudgeCount = countAction(r.babysit, "steward-nudge");
+  const stewardStrandedCount = countAction(r.babysit, "steward-stranded");
   return {
     ts: state.ts,
     statePresent: state.statePresent,
@@ -52,7 +56,9 @@ function buildTickResult(state: LoopState, r: CoordinatorOutput["results"]): Tic
     cleanupFailureCount: r.cleanup.failures.length,
     ghostCleanupCount: countAction(r.ghost, "ghost-cleanup"),
     relaunchCount: countAction(r.relaunch, "relaunch-steward"),
-    babysitActionCount: r.babysit.actions.length,
+    babysitActionCount: r.babysit.actions.length - stewardNudgeCount - stewardStrandedCount,
+    stewardNudgeCount,
+    stewardStrandedCount,
     processorRequestCount: r.babysit.requests.length + r.dispatch.requests.length,
     dispatchActionCount: r.dispatch.actions.length,
     dispatchFailureCount: r.dispatch.failures.length,

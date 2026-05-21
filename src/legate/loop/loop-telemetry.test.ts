@@ -73,6 +73,8 @@ describe("buildLoopTickActivity", () => {
       ghost_cleanup_count: 0,
       relaunch_count: 0,
       babysit_action_count: 6,
+      steward_nudge_count: 7,
+      steward_stranded_count: 1,
     };
     const activity = buildLoopTickActivity(record, ctx)!;
     expect(activity.snapshot).toEqual({
@@ -86,12 +88,21 @@ describe("buildLoopTickActivity", () => {
       workersByState: { running: 1, idle: 2, error: 0 }, // non-number 'bogus' dropped
     });
     expect(activity.tickDurationSeconds).toBe(2.5);
-    expect(activity).toMatchObject({ dispatchActions: 2, dispatchFailures: 1, cleanups: 4, babysitActions: 6 });
+    expect(activity).toMatchObject({
+      dispatchActions: 2,
+      dispatchFailures: 1,
+      cleanups: 4,
+      babysitActions: 6,
+      stewardNudges: 7,
+      stewardStranded: 1,
+    });
   });
 
   it("defaults profile/conductor to 'unknown' and missing counts to 0", () => {
     const activity = buildLoopTickActivity({}, { profile: "", conductor: undefined, tickAtMs: 0, durationMs: 0 })!;
     expect(activity.snapshot).toMatchObject({ profile: "unknown", conductor: "unknown", queueTotal: 0, workersByState: {} });
     expect(activity.dispatchActions).toBe(0);
+    expect(activity.stewardNudges).toBe(0);
+    expect(activity.stewardStranded).toBe(0);
   });
 });

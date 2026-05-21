@@ -89,4 +89,36 @@ describe("coordinator runTick", () => {
     await runTick(d);
     expect(d.dispatch.completePending).toHaveBeenCalledWith(state.raw, NOW);
   });
+
+  it("counts steward-nudge actions separately from the babysit umbrella (#212)", async () => {
+    const raw = {
+      // 30min stranded in 'implementing' with no PR → babysit fires a first nudge.
+      slices: { stuck: { worker_session_id: "w", stage: "implementing", implementing_started_at: "2026-05-20T00:30:00Z" } },
+      archived_slices: {},
+      repo: { path: "/repo" },
+    };
+    const state: LoopState = {
+      ts: NOW,
+      statePresent: true,
+      stateError: null,
+      raw,
+      slices: raw.slices,
+      archived: raw.archived_slices,
+      repoPath: "/repo",
+      workerGroup: "legate-workers",
+      sessions: [{ id: "w", group: "legate-workers", status: "waiting" }],
+      sessionsById: new Map([["w", { id: "w" }]]),
+      workers: { waiting: 1, running: 0, idle: 0, error: 0, stopped: 0, other: 0 },
+      smithy: { ok: true, ready: [], queue: { dispatchable: 0, blocked: 0, total: 0 } },
+      perSlice: { stuck: { recentOutput: { output: "" } } },
+    };
+
+    const out = await runTick(deps(state));
+
+    expect(out.results.babysit.actions.map((a) => a.action)).toEqual(["steward-nudge"]);
+    expect(out.tick.stewardNudgeCount).toBe(1);
+    expect(out.tick.stewardStrandedCount).toBe(0);
+    // The nudge is metricized on its own, so it is NOT double-counted as babysit.
+    expect(out.tick.babysitActionCount).toBe(0);
+  });
 });
