@@ -50,6 +50,8 @@ export type EventBody =
   | { type: "heartbeat"; observeDurationMs?: number }
   /** state.json (PR1) / projection read failed. */
   | { type: "state.error"; message: string }
+  /** state.json read recovered after a prior error (clears the latched error). */
+  | { type: "state.ok" }
   /** A slice's PR/CI/review state changed (the `queryPrForBabysit` shape). */
   | { type: "slice.pr.changed"; sliceId: string; pr: unknown }
   /** A slice's recent session output changed (login/error detection). */
@@ -128,6 +130,7 @@ export function entityRefOf(body: EventBody): EntityRef {
       return { kind: "slice", id: body.key };
     case "heartbeat":
     case "state.error":
+    case "state.ok":
       return { kind: "system", id: "all" };
   }
 }
@@ -194,6 +197,10 @@ export function reduce(state: SystemState, event: HeraldEvent): SystemState {
     case "state.error":
       state.stateError = event.message;
       state.statePresent = false;
+      break;
+    case "state.ok":
+      state.stateError = null;
+      state.statePresent = true;
       break;
     case "slice.pr.changed":
       sliceOf(state, event.sliceId).pr = event.pr;

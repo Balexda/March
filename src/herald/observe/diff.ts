@@ -37,9 +37,13 @@ function toObservedSession(s: any): ObservedSession {
 export function diffObserved(prev: SystemState, loop: LoopState): EventBody[] {
   const out: EventBody[] = [];
 
-  // state.json read error (only on transition into error).
+  // state.json read error/recovery — edge-triggered so a transient failure does
+  // not stay latched in /status once reads are healthy again (e.g. a repo with
+  // no active slices, where no slice.pr.changed would otherwise clear it).
   if (loop.stateError && loop.stateError !== prev.stateError) {
     out.push({ type: "state.error", message: loop.stateError });
+  } else if (!loop.stateError && loop.statePresent && prev.stateError) {
+    out.push({ type: "state.ok" });
   }
 
   // Worker bucket counts. summarizeWorkers returns either the buckets or the

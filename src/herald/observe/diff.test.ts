@@ -87,6 +87,17 @@ describe("diffObserved", () => {
     expect(bodies).toContainEqual({ type: "state.error", message: "bad json" });
   });
 
+  it("emits state.ok when a prior error recovers (and the reducer clears it)", () => {
+    const errored = applyDiff(emptySystemState(), loop({ statePresent: false, stateError: "bad json" }));
+    expect(errored.stateError).toBe("bad json");
+    // A later healthy read with no slice change must clear the latched error.
+    const bodies = diffObserved(errored, loop({ statePresent: true, stateError: null }));
+    expect(bodies).toContainEqual({ type: "state.ok" });
+    const recovered = applyDiff(errored, loop({ statePresent: true, stateError: null }));
+    expect(recovered.stateError).toBeNull();
+    expect(recovered.statePresent).toBe(true);
+  });
+
   it("skips workers when Castra was unavailable ({error})", () => {
     const bodies = diffObserved(emptySystemState(), loop({ workers: { error: "unavailable" } as any }));
     expect(bodies.map((b) => b.type)).not.toContain("workers.changed");

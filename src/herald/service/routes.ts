@@ -28,6 +28,7 @@ const MAX_EVENTS_LIMIT = 1000;
 const EVENT_TYPES: ReadonlySet<EventType> = new Set<EventType>([
   "heartbeat",
   "state.error",
+  "state.ok",
   "slice.pr.changed",
   "slice.output.changed",
   "session.changed",
