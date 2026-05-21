@@ -259,6 +259,35 @@ describe("legate-container", () => {
     expect(args.at(-1)).toContain("exec march legate loop");
   });
 
+  it("joins a Docker network when one is configured, and omits --network otherwise", () => {
+    const home = makeTmpDir();
+    const conductor = path.join(home, ".agent-deck", "conductor", "legate-smithy");
+    fs.mkdirSync(conductor, { recursive: true });
+    const common = {
+      conductorName: "legate-smithy",
+      profile: "smithy",
+      repoPath: home,
+      conductorDir: conductor,
+      homeDir: home,
+      imageTag: "march-legate:test",
+      dockerSocketPath: path.join(home, "missing.sock"),
+    };
+
+    const withNet = buildLegateContainerRunArgs({ ...common, network: "march" });
+    const i = withNet.indexOf("--network");
+    expect(i).toBeGreaterThan(-1);
+    expect(withNet[i + 1]).toBe("march");
+
+    const prev = process.env.MARCH_LEGATE_NETWORK;
+    delete process.env.MARCH_LEGATE_NETWORK;
+    try {
+      const noNet = buildLegateContainerRunArgs(common);
+      expect(noNet).not.toContain("--network");
+    } finally {
+      if (prev !== undefined) process.env.MARCH_LEGATE_NETWORK = prev;
+    }
+  });
+
   it("orders ssh identities ed25519-first and is null without keys", () => {
     const home = makeTmpDir();
     expect(gitSshCommandForMountedKeys(home)).toBeNull(); // no ~/.ssh

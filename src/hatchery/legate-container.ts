@@ -306,12 +306,19 @@ export interface LegateContainerRunArgsInput
   readonly conductorName: string;
   readonly profile: string;
   readonly imageTag?: string;
+  /**
+   * Docker network to join (defaults to `MARCH_LEGATE_NETWORK`). On the
+   * containerized stack this must be the shared `march` network so the loop can
+   * reach Castra/Brood/Hatchery/otel-lgtm by container name.
+   */
+  readonly network?: string;
 }
 
 export function buildLegateContainerRunArgs(
   input: LegateContainerRunArgsInput,
 ): string[] {
   const imageTag = input.imageTag ?? LEGATE_IMAGE_TAG;
+  const network = input.network ?? process.env.MARCH_LEGATE_NETWORK?.trim();
   const args = [
     "run",
     "-d",
@@ -319,9 +326,15 @@ export function buildLegateContainerRunArgs(
     legateContainerName(input.conductorName),
     "--restart",
     "unless-stopped",
-    "--workdir",
-    input.loopConductorDir ?? input.conductorDir,
   ];
+  // Join a Docker network so the loop reaches the March services
+  // (Castra/Brood/Hatchery/otel-lgtm) by container name. Required on the
+  // containerized stack: those services publish on the host's 127.0.0.1 only, so
+  // a loop container on the default bridge can reach none of them — and
+  // host.docker.internal can't hit a loopback-bound publish either. Opt-in and
+  // backward compatible: unset => no --network (the legacy single-host deploy).
+  if (network) args.push("--network", network);
+  args.push("--workdir", input.loopConductorDir ?? input.conductorDir);
 
   if (typeof process.getuid === "function" && typeof process.getgid === "function") {
     args.push("--user", `${process.getuid()}:${process.getgid()}`);
