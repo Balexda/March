@@ -16,7 +16,7 @@
  *     trace-ids.ts helpers (Balexda/March#145).
  *   - a lastHeartbeat snapshot is exposed for the HTTP /status endpoint.
  */
-import { execFile, spawn } from "node:child_process";
+import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import {
@@ -240,24 +240,6 @@ function appendTextSilent(file, text) {
 
 function printText(text) {
   console.log(text);
-}
-
-// Async command runner (replaces the former execFileSync). Rejects on non-zero
-// exit with execFileSync-shaped errors (message folds in stderr, plus
-// .stdout/.stderr) so the recovery parsers that read failure text still work.
-function execText(command, args, options = {}) {
-  return new Promise((resolve, reject) => {
-    execFile(command, args, { encoding: "utf-8", maxBuffer: 32 * 1024 * 1024, ...options }, (err, stdout, stderr) => {
-      if (err) {
-        err.stdout = stdout;
-        err.stderr = stderr;
-        if (stderr && !String(err.message).includes(stderr)) err.message = err.message + "\n" + stderr;
-        reject(err);
-        return;
-      }
-      resolve(typeof stdout === "string" ? stdout : "");
-    });
-  });
 }
 
 function replayRecentActionEvents(limit = 10) {
@@ -576,20 +558,6 @@ async function launchDirectStewardDispatch(state, ts, item, sliceId, mergedArchi
 // codex spawn completes within a couple of minutes.
 const HATCHERY_PENDING_TIMEOUT_MS = 15 * 60 * 1000;
 
-// Pull the branch name out of a hatchery spawn error. Git emits at least
-// two forms for the same underlying condition:
-//   "branch 'feature/...' already exists"            (git branch -b on an existing branch)
-//   "fatal: a branch named 'feature/...' already exists"  (git checkout -b / worktree add -b)
-// Returns null when the error isn't a branch collision so callers fall
-// through to the normal escalation path.
-function parseBranchCollisionError(text) {
-  const s = String(text || "");
-  const named = s.match(/branch named '([^']+)' already exists/);
-  if (named) return named[1];
-  const direct = s.match(/branch '([^']+)' already exists/);
-  return direct ? direct[1] : null;
-}
-
 // agent-deck reports a colliding steward session as
 // "session already exists: <title> (<sessionId>)". Extract the trailing
 // session id so the loop can reclaim the ghost and re-dispatch.
@@ -600,69 +568,6 @@ function parseSessionCollisionError(text) {
   return m ? m[1].trim() : null;
 }
 
-// Inspect a local branch enough to classify a collision: where its HEAD
-// sits, whether the work already landed on the default branch, and what
-// PRs exist for it. All read-only — caller decides whether to act.
-async function inspectCollidedBranch(repoPath, defaultBranch, branchName) {
-  let head = null;
-  try {
-    head = (await execText("git", ["rev-parse", branchName], { cwd: repoPath })).trim();
-  } catch {
-    // branch doesn't exist locally anymore — nothing to recover.
-    return null;
-  }
-  let isAncestor = false;
-  if (defaultBranch) {
-    try {
-      await execText("git", ["merge-base", "--is-ancestor", branchName, defaultBranch], { cwd: repoPath });
-      isAncestor = true;
-    } catch {
-      isAncestor = false;
-    }
-  }
-  let prs = [];
-  let prsKnown = true;
-  try {
-    const out = await execText("gh", ["pr", "list", "--head", branchName, "--state", "all", "--json", "number,state"], { cwd: repoPath });
-    prs = JSON.parse(out);
-    if (!Array.isArray(prs)) prs = [];
-  } catch {
-    // gh failures (auth, network) mean we cannot prove that no open PR
-    // exists. Track that explicitly so classifyBranchCollision refuses
-    // the autoSafe verdicts — otherwise an ancestor-of-master branch
-    // would auto-delete without the open-PR check actually succeeding.
-    prs = [];
-    prsKnown = false;
-  }
-  return { head, isAncestor, prs, prsKnown };
-}
-
-function classifyBranchCollision(info) {
-  if (!info) return { verdict: "no-such-branch", autoSafe: false };
-  const open = info.prs.filter((p) => p && p.state === "OPEN");
-  const merged = info.prs.filter((p) => p && p.state === "MERGED");
-  // If we couldn't verify the PR list, refuse the autoSafe verdicts —
-  // an ancestor-of-master branch might still have an open PR we can't
-  // see. Escalate so the operator or agent can investigate.
-  if (info.prsKnown === false) {
-    return { verdict: "pr-lookup-unknown", autoSafe: false, open, merged };
-  }
-  if (open.length > 0) {
-    return { verdict: "open-pr", autoSafe: false, open, merged };
-  }
-  if (info.isAncestor) {
-    // Branch HEAD is already an ancestor of the default branch — there's no
-    // diverged work to lose. Safe to delete.
-    return { verdict: "orphan-ref", autoSafe: true, open, merged };
-  }
-  if (merged.length > 0) {
-    // PR was squash-merged so HEAD isn't an ancestor, but the work landed.
-    // Safe to delete the stale ref.
-    return { verdict: "post-merge-stale", autoSafe: true, open, merged };
-  }
-  return { verdict: "diverged-unknown", autoSafe: false, open, merged };
-}
-
 function deleteHatcheryArtifacts(slice) {
   const remove = (p) => {
     if (typeof p !== "string" || p.length === 0) return;
@@ -671,128 +576,6 @@ function deleteHatcheryArtifacts(slice) {
   remove(slice?.hatchery?.hatchery_request_path);
   remove(slice?.hatchery?.hatchery_result_path);
   remove(slice?.hatchery?.hatchery_log_path);
-}
-
-// Attempt to recover from a "branch already exists" dispatch failure
-// without operator help. Reads classifyBranchCollision; for verdicts marked
-// autoSafe, deletes the stale branch and removes the slice from state so the
-// loop re-dispatches it on the next tick. For everything else, returns the
-// verdict + detail string so the caller can include them in the escalation
-// notification.
-// Locate the git worktree (if any) that currently has the colliding branch
-// checked out. Returns the worktree's filesystem path, or null when the
-// branch isn't held by a worktree.
-async function findWorktreeForBranch(repoPath, branchName) {
-  let out;
-  try {
-    out = await execText("git", ["worktree", "list", "--porcelain"], { cwd: repoPath });
-  } catch {
-    return null;
-  }
-  const blocks = out.split("\n\n");
-  for (const block of blocks) {
-    const wt = block.match(/^worktree (.+)$/m);
-    const br = block.match(/^branch refs\/heads\/(.+)$/m);
-    if (wt && br && br[1].trim() === branchName) {
-      return wt[1].trim();
-    }
-  }
-  return null;
-}
-
-// Check whether a worktree path is empty of in-progress work — no
-// uncommitted changes, no untracked files (other than git internals).
-// Conservative: any output from "git status --porcelain" blocks removal.
-async function worktreeIsClean(worktreePath) {
-  try {
-    const out = await execText("git", ["status", "--porcelain"], { cwd: worktreePath });
-    return out.trim().length === 0;
-  } catch {
-    return false;
-  }
-}
-
-// Check whether any agent-deck session in our worker group is currently
-// pointing at this worktree. If a live session holds it, the worker may
-// still be doing real work — never remove.
-async function agentDeckSessionHoldsWorktree(worktreePath) {
-  try {
-    // listSessions() is async (Castra fetch) — await it before the Array.isArray
-    // guard, or the guard sees a Promise (never an array), always returns false,
-    // and a live session holding this worktree would never block removal.
-    const list = await senseIo().listSessions();
-    if (!Array.isArray(list)) return false;
-    return list.some((session) => {
-      // Match the hatchery session parser's field-name precedence
-      // (src/hatchery/spawn-handoff.ts:parseAgentDeckSession) so we never
-      // refuse to recognize a live session because it exposes the
-      // worktree as a different key — e.g. older "path", current
-      // snake_case "worktree_path", or camelCase "worktreePath".
-      const path = String(session?.worktree_path || session?.path || session?.worktreePath || "");
-      return path === worktreePath;
-    });
-  } catch {
-    return false;
-  }
-}
-
-// Attempt to recover from a "branch already exists" dispatch failure
-// without operator help. Reads classifyBranchCollision; for verdicts marked
-// autoSafe, deletes the stale branch and removes the slice from state so the
-// loop re-dispatches it on the next tick. For everything else, returns the
-// verdict + detail string so the caller can include them in the escalation
-// notification.
-//
-// If "git branch -D" fails because the branch is checked out in a worktree,
-// inspects the worktree: when clean AND not held by an active agent-deck
-// session, removes the worktree with "git worktree remove --force" first,
-// then deletes the branch. Anything dirty or session-held escalates.
-async function tryRecoverBranchCollision(state, slice, sliceId, errorText) {
-  const branchName = parseBranchCollisionError(errorText);
-  if (!branchName) return null;
-  const repoPath = state?.repo?.path || meta.repo?.path;
-  if (typeof repoPath !== "string" || repoPath.length === 0) return null;
-  const defaultBranch = state?.repo?.default_branch || meta.repo?.default_branch || null;
-  const info = await inspectCollidedBranch(repoPath, defaultBranch, branchName);
-  const classification = classifyBranchCollision(info);
-  const summary = info
-    ? "branch=" + branchName + " head=" + (info.head || "").slice(0, 7) + " ancestor-of-" + (defaultBranch || "default") + "=" + info.isAncestor + " open_prs=[" + classification.open.map((p) => "#" + p.number).join(",") + "] merged_prs=[" + classification.merged.map((p) => "#" + p.number).join(",") + "]"
-    : "branch=" + branchName + " (no local ref)";
-  if (!classification.autoSafe) {
-    return { recovered: false, verdict: classification.verdict, detail: summary };
-  }
-  let extra = "";
-  try {
-    await execText("git", ["branch", "-D", branchName], { cwd: repoPath });
-  } catch (err) {
-    // git refuses when the branch is checked out by a worktree. Try to
-    // unblock by removing the worktree — but only when it's safe (no
-    // uncommitted changes, not held by an active agent-deck session).
-    const worktreePath = await findWorktreeForBranch(repoPath, branchName);
-    if (!worktreePath) {
-      return { recovered: false, verdict: classification.verdict + "-delete-failed", detail: summary + " | branch delete failed: " + (err?.message || String(err)) };
-    }
-    if (!await worktreeIsClean(worktreePath)) {
-      return { recovered: false, verdict: classification.verdict + "-worktree-dirty", detail: summary + " | branch held by worktree " + worktreePath + " with uncommitted changes; refusing to auto-remove" };
-    }
-    if (await agentDeckSessionHoldsWorktree(worktreePath)) {
-      return { recovered: false, verdict: classification.verdict + "-worktree-session", detail: summary + " | branch held by worktree " + worktreePath + " which is still owned by a live agent-deck session; operator must drain that session before re-dispatch" };
-    }
-    try {
-      await execText("git", ["worktree", "remove", "--force", worktreePath], { cwd: repoPath });
-    } catch (e2) {
-      return { recovered: false, verdict: classification.verdict + "-worktree-remove-failed", detail: summary + " | worktree remove failed: " + (e2?.message || String(e2)) };
-    }
-    extra = " | worktree " + worktreePath + " removed";
-    try {
-      await execText("git", ["branch", "-D", branchName], { cwd: repoPath });
-    } catch (e3) {
-      return { recovered: false, verdict: classification.verdict + "-delete-after-worktree-failed", detail: summary + extra + " | second branch delete failed: " + (e3?.message || String(e3)) };
-    }
-  }
-  deleteHatcheryArtifacts(slice);
-  delete state.slices[sliceId];
-  return { recovered: true, verdict: classification.verdict, detail: summary + extra + " | branch deleted, slice released for re-dispatch" };
 }
 
 // Match the launchAgentDeckManager wrong-worktree refusal — the upstream
@@ -843,10 +626,6 @@ function tryRecoverWrongWorktreeRace(state, slice, sliceId, errorText) {
   };
 }
 
-// Adopt-open-PR recovery: when the branch collision verdict is "open-pr"
-// for a PR that matches this slice's expected branch, the work is already
-// in flight on GitHub. Don't escalate — transition the slice directly to
-// pr-open so the loop's normal babysit picks up the PR going forward.
 // Session-collision recovery: the steward launch failed because an agent-deck
 // session with this slice's title already exists — a ghost left by a previous
 // launch that died after creating the session (Brood never registered it, so
@@ -866,139 +645,6 @@ async function tryRecoverSessionCollision(state, slice, sliceId, errorText) {
   deleteHatcheryArtifacts(slice);
   delete state.slices[sliceId];
   return { recovered: true, verdict: "session-collision", detail: "removed colliding ghost session " + sessionId + " (worktree pruned); slice released for re-dispatch" };
-}
-
-async function tryAdoptOpenPr(state, slice, sliceId, errorText, ts) {
-  const branchName = parseBranchCollisionError(errorText);
-  if (!branchName) return null;
-  const repoPath = state?.repo?.path || meta.repo?.path;
-  if (typeof repoPath !== "string" || repoPath.length === 0) return null;
-  const defaultBranch = state?.repo?.default_branch || meta.repo?.default_branch || null;
-  const info = await inspectCollidedBranch(repoPath, defaultBranch, branchName);
-  const classification = classifyBranchCollision(info);
-  if (classification.verdict !== "open-pr") return null;
-  // Pick the first PR matching our slice branch, falling back to the
-  // first open PR on the branch (the names diverge slightly between the
-  // smithy dispatch branch slug and the actual feature/* git ref).
-  const candidates = classification.open || [];
-  const tentativeSlice = { branch: slice.branch || branchName };
-  // prMatchesSliceBranch is async — Array.find on the raw Promise would match
-  // the first candidate unconditionally (a Promise is always truthy), adopting a
-  // PR on the wrong branch. Resolve every predicate first, then pick the match.
-  const matchFlags = await Promise.all(
-    candidates.map((p) => senseIo().prMatchesSliceBranch(tentativeSlice, p)),
-  );
-  let chosen = candidates.find((_p, i) => matchFlags[i]);
-  if (!chosen) chosen = candidates[0];
-  if (!chosen) return null;
-  let hydrated;
-  try {
-    hydrated = await senseIo().queryPrForBabysit({ pr: { number: chosen.number } }, state);
-  } catch {
-    return null;
-  }
-  if (!hydrated || hydrated.skipped) return null;
-  // Transition the slice to pr-open with the discovered PR.
-  slice.stage = "pr-open";
-  slice.pr_open_at = ts;
-  slice.branch = branchName.replace(/^feature\//, "");
-  slice.last_action = ts;
-  slice.last_action_note = "Adopted existing open PR #" + chosen.number;
-  updatePrSnapshot(slice, hydrated);
-  deleteHatcheryArtifacts(slice);
-  return {
-    recovered: true,
-    verdict: "open-pr-adopted",
-    detail: "branch=" + branchName + " head=" + (info?.head || "").slice(0, 7) + " | adopted PR #" + chosen.number + " (" + (hydrated.url || "") + ")",
-  };
-}
-
-// Stranded-leftover recovery: a branch with diverged commits, no PR (open
-// or merged), and no live agent-deck session owning its worktree is almost
-// always the leftover of a previous stranded steward — the steward
-// committed and pushed, then exited before opening the PR, and the slice
-// was cleared or the steward record removed. The branch is "orphaned
-// work" from the loop's perspective: re-dispatching produces fresh
-// content; preserving it requires operator action (open the PR manually).
-// Conservative auto-recovery: delete the branch + worktree, bump a retry
-// counter, and let the new dispatch produce a clean steward run. This
-// loses the prior partial work, but the manager-prompt + stranded-steward
-// watchdog now make stranded leftovers exceptional, so this should rarely
-// fire after the first one-time cleanup.
-async function tryRecoverStrandedLeftover(state, slice, sliceId, errorText, classification, info, branchName) {
-  if (!info || info.isAncestor) return null;
-  // classifyBranchCollision strips prsKnown from the diverged-unknown return
-  // value, so read it from info directly (info comes from inspectCollidedBranch
-  // which sets prsKnown explicitly based on whether the gh pr list succeeded).
-  if (!info.prsKnown) return null;
-  if ((classification.open || []).length > 0) return null;
-  if ((classification.merged || []).length > 0) return null;
-  if (classification.verdict !== "diverged-unknown") return null;
-  const repoPath = state?.repo?.path || meta.repo?.path;
-  if (typeof repoPath !== "string" || repoPath.length === 0) return null;
-  // Refuse if a live agent-deck session still owns the worktree — that
-  // means there's an active steward and we'd be racing it.
-  const worktreePath = await findWorktreeForBranch(repoPath, branchName);
-  if (worktreePath && await agentDeckSessionHoldsWorktree(worktreePath)) return null;
-  const limit = 3;
-  const counts = transientRetryCounts(state);
-  const key = "stranded-leftover:" + sliceId;
-  const prev = Number.isFinite(counts[key]) ? counts[key] : 0;
-  const next = prev + 1;
-  if (next > limit) {
-    delete counts[key];
-    return {
-      recovered: false,
-      verdict: "stranded-leftover-persistent",
-      detail: "stranded-leftover cleanup recurred " + next + " times for " + branchName + "; auto-release exhausted, escalating for operator review",
-    };
-  }
-  counts[key] = next;
-  emitTransition({ type: "retry.counted", key, count: next });
-  let extra = "";
-  if (worktreePath) {
-    try {
-      await execText("git", ["worktree", "remove", "--force", worktreePath], { cwd: repoPath });
-      extra = " | worktree " + worktreePath + " removed";
-    } catch (err) {
-      return { recovered: false, verdict: "stranded-leftover-worktree-remove-failed", detail: "worktree remove failed: " + (err?.message || String(err)) };
-    }
-  }
-  try {
-    await execText("git", ["branch", "-D", branchName], { cwd: repoPath });
-  } catch (err) {
-    return { recovered: false, verdict: "stranded-leftover-delete-failed", detail: "branch delete failed: " + (err?.message || String(err)) };
-  }
-  // Delete the remote branch too. If we leave it behind, the re-dispatched
-  // steward will push to a remote ref that diverged from the new local
-  // branch (since the new local branch starts from origin/master while the
-  // remote stranded ref still has the prior steward's commits). The result
-  // is a push rejection on the new steward. The stranded-leftover verdict
-  // already confirms no PR references this ref, so the remote ref has no
-  // GitHub-side dependencies — safe to delete.
-  let remoteExtra = "";
-  try {
-    await execText("git", ["push", "--delete", "origin", branchName], { cwd: repoPath });
-    remoteExtra = " | origin/" + branchName + " also deleted";
-  } catch (err) {
-    const msg = String(err?.message || err || "");
-    // "remote ref does not exist" is fine — nothing to delete.
-    if (/remote ref does not exist|src refspec.*does not match/i.test(msg)) {
-      remoteExtra = " | no remote ref (already absent)";
-    } else {
-      // Otherwise surface the failure but don't roll back the local delete —
-      // the loop will retry the dispatch and the same recovery will run
-      // again. Note the failure for diagnosis.
-      remoteExtra = " | WARNING remote ref delete failed: " + msg.slice(0, 200);
-    }
-  }
-  deleteHatcheryArtifacts(slice);
-  delete state.slices[sliceId];
-  return {
-    recovered: true,
-    verdict: "stranded-leftover",
-    detail: "branch=" + branchName + " head=" + (info.head || "").slice(0, 7) + " no PR, no live session (attempt " + next + "/" + limit + ")" + extra + remoteExtra + " | slice released for re-dispatch",
-  };
 }
 
 // Codex spawn-error recovery: when 'git apply --index' rejects the patch
@@ -1133,27 +779,16 @@ async function completePendingHatcheryDispatches(state, ts) {
     }
     if (result.error) {
       const errorText = String(result.error).trim();
-      // Auto-recover branch-collision failures when the branch is provably
-      // safe to delete (HEAD on default branch, or merged-PR + no open PR).
-      // Anything ambiguous falls through to escalation with the verdict
-      // included in the detail so the agent / operator has the full context.
-      // Branch-collision adoption: if the colliding branch already has an
-      // open PR matching this slice, the work is already in flight on
-      // GitHub. Adopt the PR and transition the slice to pr-open instead
-      // of escalating — there's nothing to recover.
-      const adoption = await tryAdoptOpenPr(state, slice, sliceId, errorText, ts);
-      if (adoption && adoption.recovered) {
-        actions.push({
-          action: "auto-recovered",
-          sliceId,
-          sessionId: null,
-          detail: "branch-collision " + adoption.verdict + ": " + adoption.detail,
-        });
-        mutated = true;
-        continue;
-      }
+      // Branch/worktree-collision recovery (auto-delete, open-PR adoption,
+      // stranded-leftover cleanup) was removed in #144 phase 2 — the legate no
+      // longer reads or mutates git branches/worktrees directly (Brood owns that,
+      // #155). Such collisions now escalate to the operator below. The two
+      // recoveries kept here act only through services / in-memory state:
+      // ghost-session reclamation goes through Castra, and wrong-worktree-race /
+      // spawn-patch retries are pure retry-counter releases.
+      //
       // Ghost-session collision (agent-deck "session already exists"): reclaim
-      // the named ghost so the slice can re-dispatch with a fresh steward.
+      // the named ghost via Castra so the slice can re-dispatch with a fresh steward.
       const sessionRecovery = await tryRecoverSessionCollision(state, slice, sliceId, errorText);
       if (sessionRecovery && sessionRecovery.recovered) {
         actions.push({
@@ -1165,47 +800,15 @@ async function completePendingHatcheryDispatches(state, ts) {
         mutated = true;
         continue;
       }
-      const recovery = await tryRecoverBranchCollision(state, slice, sliceId, errorText);
-      if (recovery && recovery.recovered) {
-        actions.push({
-          action: "auto-recovered",
-          sliceId,
-          sessionId: null,
-          detail: "branch-collision " + recovery.verdict + " auto-recovered: " + recovery.detail,
-        });
-        mutated = true;
-        continue;
-      }
-      // Stranded-leftover recovery: a diverged branch with no PR and no
-      // live session is almost always the residue of a previous stranded
-      // steward. The branch-collision path above refused (verdict was
-      // diverged-unknown, not autoSafe). Try the leftover cleanup with a
-      // retry counter so a persistent diverged-unknown still escalates.
-      let leftoverRecovery = null;
-      if (recovery && recovery.verdict === "diverged-unknown") {
-        const branchName = parseBranchCollisionError(errorText);
-        const repoPath = state?.repo?.path || meta.repo?.path;
-        const defaultBranch = state?.repo?.default_branch || meta.repo?.default_branch || null;
-        const info = branchName ? await inspectCollidedBranch(repoPath, defaultBranch, branchName) : null;
-        const classification = classifyBranchCollision(info);
-        leftoverRecovery = await tryRecoverStrandedLeftover(state, slice, sliceId, errorText, classification, info, branchName);
-        if (leftoverRecovery && leftoverRecovery.recovered) {
-          actions.push({
-            action: "auto-recovered",
-            sliceId,
-            sessionId: null,
-            detail: leftoverRecovery.verdict + ": " + leftoverRecovery.detail,
-          });
-          mutated = true;
-          continue;
-        }
-      }
-      // Race-victim recovery runs only when branch-collision recovery had
-      // nothing to do with the error. Order matters: a wrong-worktree
-      // error never carries a "branch already exists" substring, so the
-      // two paths are mutually exclusive — but checking branch-collision
-      // first keeps the existing recovery behavior untouched.
-      const raceRecovery = recovery ? null : tryRecoverWrongWorktreeRace(state, slice, sliceId, errorText);
+      // Branch/worktree-collision auto-recovery was removed in #144 phase 2: the
+      // legate no longer does its own git/gh worktree+branch forensics or surgery
+      // (that is Brood's exact-path teardown authority, #155). A "branch already
+      // exists" / diverged-leftover collision now falls straight through to the
+      // operator escalation below instead of being auto-deleted.
+      //
+      // Wrong-worktree launch-race recovery (state-only; no git surgery): the
+      // upstream agent-deck launch race auto-releases the slice for re-dispatch.
+      const raceRecovery = tryRecoverWrongWorktreeRace(state, slice, sliceId, errorText);
       if (raceRecovery && raceRecovery.recovered) {
         actions.push({
           action: "auto-recovered",
@@ -1221,7 +824,7 @@ async function completePendingHatcheryDispatches(state, ts) {
       // (re-running produces different output). Retry up to 10 times via
       // the same transient_retry_counts machinery, then fall back to a
       // no-spawn direct steward dispatch (below) instead of escalating.
-      const spawnRecovery = (recovery || raceRecovery) ? null : tryRecoverSpawnPatchError(state, slice, sliceId, errorText);
+      const spawnRecovery = raceRecovery ? null : tryRecoverSpawnPatchError(state, slice, sliceId, errorText);
       if (spawnRecovery && spawnRecovery.recovered) {
         actions.push({
           action: "auto-recovered",
@@ -1294,15 +897,15 @@ async function completePendingHatcheryDispatches(state, ts) {
         mutated = true;
         continue;
       }
-      const effectiveRecovery = recovery || raceRecovery || spawnRecovery || leftoverRecovery || sessionRecovery;
+      const effectiveRecovery = raceRecovery || spawnRecovery || sessionRecovery;
       const detail = effectiveRecovery ? errorText + "\n\nLoop verdict: " + effectiveRecovery.detail : errorText;
       slice.stage = "escalated";
       slice.last_action = ts;
       slice.last_action_note = "NEED: Hatchery dispatch failed: " + detail;
       failures.push({ slice_id: sliceId, command: actionCommandLine({ command: slice.command, arguments: slice.arguments || [] }), error: detail });
-      const reasonTag = recovery
-        ? "branch-collision-" + recovery.verdict
-        : (sessionRecovery ? sessionRecovery.verdict : (raceRecovery ? raceRecovery.verdict : (spawnRecovery ? spawnRecovery.verdict : (leftoverRecovery ? leftoverRecovery.verdict : "spawn-error"))));
+      const reasonTag = sessionRecovery
+        ? sessionRecovery.verdict
+        : (raceRecovery ? raceRecovery.verdict : (spawnRecovery ? spawnRecovery.verdict : "spawn-error"));
       emitTransition({ type: "slice.escalated", sliceId, reason: reasonTag });
       queueDispatchEscalation(slice, sliceId, reasonTag, detail);
       mutated = true;
@@ -1756,24 +1359,4 @@ export function startLoopRuntime(): { stop: () => void } {
   };
 }
 
-// --- Test seam (issue #178) ---------------------------------------------
-// runtime.ts is the @ts-nocheck lifted loop; its recovery helpers close over
-// the module-global `meta` + the lazily-built `senseIo` bundle, so the focused
-// async-fix tests inject a fake senseIo (and minimal meta) to drive the
-// now-active await paths — the session-holds-worktree guard and the
-// adopt-open-PR branch match — without standing up Castra or git. Production
-// code never imports this; it exists only so the dormant logic these fixes
-// activate has direct coverage.
-export const __test = {
-  setSenseIo(io: SenseIo | undefined): void {
-    _senseIo = io;
-  },
-  setMeta(loadedMeta: unknown): void {
-    meta = loadedMeta;
-  },
-  agentDeckSessionHoldsWorktree: (worktreePath: string): Promise<boolean> =>
-    agentDeckSessionHoldsWorktree(worktreePath),
-  tryAdoptOpenPr: (state: any, slice: any, sliceId: string, errorText: string, ts: string): Promise<any> =>
-    tryAdoptOpenPr(state, slice, sliceId, errorText, ts),
-};
 
