@@ -87,20 +87,23 @@ interface SpawnBackend {
 
 No `validateAuth`, no `parseExitCode`, no `cliCommand`. The interface is deliberately closed at these four members; backends with non-env-var auth or differing exit-code semantics motivate a separate feature, not an in-place extension.
 
-> **Divergence note (2026-05-16) — shipped interface has a fifth, optional member.**
+> **Divergence note (2026-05-16) — shipped interface has a fifth, required member.**
 > The actual second backend is **Codex, not Gemini** (see the spec's divergence
 > note and `src/spawn/backends.ts`). Codex authenticates via a **credential
-> mount**, not an env var, so the shipped `SpawnBackend` carries an optional
-> `credentialMount?: BackendCredentialMountSpec` member alongside
-> `requiredEnvVars` — a backend declares **either** required env vars **or** a
-> credential-mount spec (host source dir, read-only container mount path,
-> in-container copy target). This is a first-class, **typed** backend capability
-> (operating-philosophy rule 2: minimum required access through a typed field, not
-> an operator-authored exception), so it is an in-place addition rather than the
-> "separate feature" the four-member closure anticipated. Read "closed at four
-> members" as "four required + one optional credential-mount member." The
-> `geminiBackend` rows below are historical; the live registry is
-> `claudeCodeBackend` + `codexBackend`.
+> mount** rather than an env var, so the shipped `SpawnBackend` carries a fifth
+> **required** member, `credentialMounts: readonly BackendCredentialMountSpec[]`,
+> alongside `requiredEnvVars`. **Both fields are always present** (each an array);
+> a backend populates `requiredEnvVars` (env-var auth — Claude:
+> `["ANTHROPIC_API_KEY"]`, `credentialMounts: []`) **or** `credentialMounts`
+> (credential-mount auth — Codex: `requiredEnvVars: []`, `credentialMounts: [...]`),
+> with the other empty. Each `BackendCredentialMountSpec` carries the mount `name`,
+> a read-only in-container `containerPath`, an `env` map, and a
+> `resolveHostPath(env)` resolver — so the host path is backend-declared, never
+> operator-authored (operating-philosophy rule 2: minimum required access through a
+> typed field). This is a first-class, typed capability — an in-place addition, not
+> the "separate feature" the four-member closure anticipated. Read "closed at four
+> members" as "five required members." The `geminiBackend` rows below are
+> historical; the live registry is `claudeCodeBackend` + `codexBackend`.
 
 #### Concrete Implementations
 
@@ -159,22 +162,22 @@ The registry construction rejects duplicate `name` entries — a coding-error gu
 #### Algorithm
 
 ```
-if selectedBackend.requiredEnvVars present:
-  for each var in selectedBackend.requiredEnvVars:
-    if process.env[var] is undefined or "":
-      record `var` as missing
-if selectedBackend.credentialMount present:          # e.g. Codex CODEX_HOME
-  if host source dir is absent or unreadable:
+for each var in selectedBackend.requiredEnvVars:        # empty for credential-mount backends
+  if process.env[var] is undefined or "":
+    record `var` as missing
+for each mount in selectedBackend.credentialMounts:     # empty for env-var backends; e.g. Codex CODEX_HOME
+  if mount.resolveHostPath(process.env) is absent or unreadable:
     record the credential mount as missing
 if any missing:
-  print "Backend '<name>' requires <vars/credential dir>: missing <missing-list>. Set the variable(s) / make the directory readable and re-run."
+  print "Backend '<name>' requires <vars/credential dirs>: missing <missing-list>. Set the variable(s) / make the directory readable and re-run."
   exit USAGE_ERROR (2)
 ```
 
-> **Divergence note (2026-05-16).** The pre-flight is generalized to branch on the
-> backend's auth model: env-var backends are checked against `process.env`;
-> credential-mount backends (Codex) are checked for the presence and readability
-> of the host source directory. Both keep the no-value-echo guarantee.
+> **Divergence note (2026-05-16).** The pre-flight iterates whichever of the two
+> always-present lists is non-empty: env-var backends are checked against
+> `process.env`; credential-mount backends (Codex) are checked for the presence and
+> readability of each mount's resolved host source directory
+> (`mount.resolveHostPath(process.env)`). Both keep the no-value-echo guarantee.
 
 #### Error message format
 
