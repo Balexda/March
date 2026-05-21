@@ -422,7 +422,6 @@ async function launchDirectStewardDispatch(state, ts, item, sliceId, mergedArchi
   const branchBase = (opts && typeof opts.branchBase === "string" && opts.branchBase) ? opts.branchBase : dispatchBranch(item);
   const titleBase = (opts && typeof opts.title === "string" && opts.title) ? opts.title : dispatchTitle(item);
   const bareBranch = branchBase + "-direct";
-  const featureBranch = "feature/" + bareBranch;
   const directSliceId = sliceId + "-direct";
   const title = "direct: " + titleBase;
   const message = buildDirectStewardMessage(item, mergedArchive);
@@ -431,9 +430,9 @@ async function launchDirectStewardDispatch(state, ts, item, sliceId, mergedArchi
   // (with the worktree-race conflict guard), and sets auto-mode server-side, then
   // returns the session. A 409 (conflict) surfaces as a launch error so the slice
   // re-dispatches next tick — same as the old client-side race handling.
-  let newSessionId = null;
+  let launchedSession = null;
   try {
-    const launched = await castra().launchSession({
+    launchedSession = await castra().launchSession({
       profile: meta.profile,
       repoPath,
       branch: bareBranch,
@@ -442,10 +441,10 @@ async function launchDirectStewardDispatch(state, ts, item, sliceId, mergedArchi
       model: "opus",
       traceKey: directSliceId,
     });
-    newSessionId = launched.sessionId;
   } catch (err) {
     return { launched: false, sliceId: directSliceId, error: "castra launch failed: " + (err?.message || String(err)).slice(0, 200) };
   }
+  const newSessionId = launchedSession?.sessionId || null;
   if (!newSessionId) {
     return { launched: false, sliceId: directSliceId, error: "castra launch returned no identifiable new session" };
   }
@@ -457,14 +456,17 @@ async function launchDirectStewardDispatch(state, ts, item, sliceId, mergedArchi
     // Best-effort; babysit will re-nudge if the steward never starts.
   }
   const action = item.next_action || {};
-  const worktreesParent = path.join(path.dirname(repoPath), "WorkTrees", path.basename(repoPath));
+  // Castra owns the checkout (#144 phase 2c): take the worktree path + real
+  // branch from the validated launch response instead of reconstructing the
+  // WorkTrees/feature-* layout here. Mirrors the Hatchery completion path, which
+  // also reads worktreePath/branch off the spawn result and tolerates null.
   state.slices[directSliceId] = {
     kind: "smithy",
     worker_session_id: newSessionId,
     worker_title: title,
     branch: bareBranch,
-    actual_branch: featureBranch,
-    worktree_path: path.join(worktreesParent, "feature-" + bareBranch.replace(/\//g, "-")),
+    actual_branch: launchedSession.branch || null,
+    worktree_path: launchedSession.worktreePath || null,
     stage: "implementing",
     implementing_started_at: ts,
     pr: null,
