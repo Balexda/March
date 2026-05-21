@@ -1,6 +1,6 @@
 {
   "annotations": { "list": [] },
-  "description": "RED metrics for the Castra interactive-sessions host (march-castra): request rate, errors, and latency by route and profile.",
+  "description": "RED metrics for the Castra interactive-sessions host (march-castra): request rate, errors, and latency by route and profile, plus service logs (Loki) and request traces (Tempo).",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 0,
@@ -157,6 +157,62 @@
           "refId": "A"
         }
       ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 24 },
+      "id": 8,
+      "title": "Logs & traces",
+      "type": "row",
+      "panels": []
+    },
+    {
+      "datasource": { "type": "loki", "uid": "loki" },
+      "description": "Castra service logs (service.name=march-castra). The $profile filter is a no-op until Castra logs carry a profile field; /healthz liveness lines are dropped.",
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 25 },
+      "id": 9,
+      "options": {
+        "dedupStrategy": "none",
+        "enableLogDetails": true,
+        "prettifyLogMessage": false,
+        "showLabels": false,
+        "showTime": true,
+        "sortOrder": "Descending",
+        "wrapLogMessage": true
+      },
+      "targets": [
+        {
+          "datasource": { "type": "loki", "uid": "loki" },
+          "editorMode": "code",
+          "expr": "{service_name=\"march-castra\"} != `/healthz` | profile=~\"$profile\"",
+          "queryType": "range",
+          "refId": "A"
+        }
+      ],
+      "title": "Castra service logs",
+      "type": "logs"
+    },
+    {
+      "datasource": { "type": "tempo", "uid": "tempo" },
+      "description": "Recent Castra request traces (service.name=march-castra). Mutating ops (launch/send/set/remove) emit castra.<op> spans; with an x-march-slice-id header they nest under the dispatch trace. Click a trace id for the waterfall.",
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 25 },
+      "id": 10,
+      "options": {},
+      "targets": [
+        {
+          "datasource": { "type": "tempo", "uid": "tempo" },
+          "filters": [
+            { "id": "service-name", "operator": "=", "scope": "resource", "tag": "service.name", "value": ["march-castra"], "valueType": "string" }
+          ],
+          "limit": 50,
+          "queryType": "traceqlSearch",
+          "refId": "A",
+          "tableType": "traces"
+        }
+      ],
+      "title": "Recent Castra traces",
+      "type": "table"
     }
   ],
   "refresh": "30s",

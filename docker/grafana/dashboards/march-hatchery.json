@@ -584,7 +584,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "sum(increase(march_spawn_runs_total{outcome=\"success\"}[$__range])) / clamp_min(sum(increase(march_spawn_runs_total[$__range])), 1)",
+          "expr": "sum(increase(march_spawn_runs_total{backend=~\"$backend\", task_type=~\"$task_type\", profile=~\"$profile\", outcome=\"success\"}[$__range])) / clamp_min(sum(increase(march_spawn_runs_total{backend=~\"$backend\", task_type=~\"$task_type\", profile=~\"$profile\"}[$__range])), 1)",
           "legendFormat": "success rate",
           "range": true,
           "refId": "A"
@@ -681,7 +681,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "sum by (outcome) (rate(march_spawn_runs_total[$__rate_interval]))",
+          "expr": "sum by (outcome) (rate(march_spawn_runs_total{backend=~\"$backend\", task_type=~\"$task_type\", profile=~\"$profile\"}[$__rate_interval]))",
           "legendFormat": "spawns/sec {{outcome}}",
           "range": true,
           "refId": "B"
@@ -708,7 +708,7 @@
         "type": "loki",
         "uid": "loki"
       },
-      "description": "Hatchery service logs (shipped from the JSONL log file via OTLP). If no lines appear, check the service_name label in Explore \u2014 otel-lgtm derives it from the service.name resource attribute.",
+      "description": "Hatchery service logs (shipped from the JSONL log file via OTLP). If no lines appear, check the service_name label in Explore \u2014 otel-lgtm derives it from the service.name resource attribute. The $profile / $task_type filters are no-ops until issue #171 adds those structured fields to Hatchery logs (with the default 'All' they match every line); they activate once a specific value is selected.",
       "gridPos": {
         "h": 10,
         "w": 24,
@@ -732,7 +732,7 @@
             "uid": "loki"
           },
           "editorMode": "code",
-          "expr": "{service_name=\"march-hatchery\"} != `/healthz`",
+          "expr": "{service_name=\"march-hatchery\"} != `/healthz` | profile=~\"$profile\" | task_type=~\"$task_type\"",
           "queryType": "range",
           "refId": "A"
         }
@@ -810,6 +810,69 @@
         "options": [],
         "query": {
           "query": "label_values(march_hatchery_requests_total, route)",
+          "refId": "PrometheusVariableQueryEditor-VariableQuery"
+        },
+        "refresh": 2,
+        "regex": "",
+        "type": "query"
+      },
+      {
+        "current": {},
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "definition": "label_values(march_spawn_runs_total, backend)",
+        "includeAll": true,
+        "allValue": ".*",
+        "label": "backend",
+        "multi": true,
+        "name": "backend",
+        "options": [],
+        "query": {
+          "query": "label_values(march_spawn_runs_total, backend)",
+          "refId": "PrometheusVariableQueryEditor-VariableQuery"
+        },
+        "refresh": 2,
+        "regex": "",
+        "type": "query"
+      },
+      {
+        "current": {},
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "definition": "label_values(march_spawn_runs_total, task_type)",
+        "includeAll": true,
+        "allValue": ".*",
+        "label": "task type",
+        "multi": true,
+        "name": "task_type",
+        "options": [],
+        "query": {
+          "query": "label_values(march_spawn_runs_total, task_type)",
+          "refId": "PrometheusVariableQueryEditor-VariableQuery"
+        },
+        "refresh": 2,
+        "regex": "",
+        "type": "query"
+      },
+      {
+        "current": {},
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "definition": "label_values(march_spawn_runs_total, profile)",
+        "includeAll": true,
+        "allValue": ".*",
+        "label": "profile",
+        "multi": true,
+        "name": "profile",
+        "options": [],
+        "query": {
+          "query": "label_values(march_spawn_runs_total, profile)",
           "refId": "PrometheusVariableQueryEditor-VariableQuery"
         },
         "refresh": 2,
