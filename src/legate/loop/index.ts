@@ -42,6 +42,14 @@ export function reconcileOtelEnv(meta: LoopMeta, env: NodeJS.ProcessEnv): void {
   if (!env.MARCH_OTEL_ENDPOINT && !env.OTEL_EXPORTER_OTLP_ENDPOINT && meta.otel?.endpoint) {
     env.MARCH_OTEL_ENDPOINT = meta.otel.endpoint;
   }
+  // The loop's identity for traces/metrics/logs. The "March — Legate loop
+  // service" dashboard filters `service_name="march-legate"` (profile/conductor
+  // are labels), so default to it here rather than relying on the operator —
+  // otherwise initOtel falls back to the generic "march" and the dashboard's
+  // panels, profile dropdown, and Loki logs panel all come up empty.
+  if (!env.MARCH_OTEL_SERVICE_NAME?.trim()) {
+    env.MARCH_OTEL_SERVICE_NAME = "march-legate";
+  }
 }
 
 /**

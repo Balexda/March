@@ -226,6 +226,9 @@ describe("legate-container", () => {
     ]);
     expect(args).toContain("--workdir");
     expect(args).toContain(loop);
+    // The sibling worktrees dir (<repoParent>/WorkTrees/<repoName>) is mounted so
+    // recovery/babysit/relaunch can manage steward worktrees.
+    expect(args.join("\n")).toContain(path.join(path.dirname(repo), "WorkTrees", path.basename(repo)));
     expect(args).toContain(`HOME=${LEGATE_CONTAINER_HOME}`);
     expect(args).toContain("MARCH_LEGATE_CONTAINER=1");
     expect(args).toContain("ANTHROPIC_API_KEY");

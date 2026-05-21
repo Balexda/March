@@ -253,6 +253,15 @@ export function legateContainerMounts(
 ): LegateContainerMount[] {
   const mounts: LegateContainerMount[] = [];
   addMountIfPresent(mounts, input.repoPath, input.repoPath, true);
+  // Steward worktrees live in a SIBLING dir (agent-deck convention:
+  // <repoParent>/WorkTrees/<repoName>), not under repoPath. Mount it at the
+  // identical path so the loop's branch-collision recovery, babysit, and
+  // relaunch can inspect + manage the worktrees Castra creates there — without
+  // it `worktreeIsClean` can't reach them and every collision escalates as
+  // "worktree-dirty". Mounted required (ensureLegateContainer mkdir's it) so new
+  // worktrees appear live.
+  const worktreesDir = path.join(path.dirname(input.repoPath), "WorkTrees", path.basename(input.repoPath));
+  addMountIfPresent(mounts, worktreesDir, worktreesDir, true);
   addMountIfPresent(mounts, input.conductorDir, input.conductorDir, true);
   if (input.loopConductorDir && input.loopConductorDir !== input.conductorDir) {
     addMountIfPresent(mounts, input.loopConductorDir, input.loopConductorDir, true);
@@ -404,6 +413,17 @@ export function ensureLegateContainer(
 ): LegateContainerResult {
   const imageTag = input.imageTag ?? LEGATE_IMAGE_TAG;
   const containerName = legateContainerName(input.conductorName);
+  // The worktrees dir is a required bind mount (type=bind needs the source to
+  // exist); create it so new repos / fresh hosts don't fail the run, and so
+  // worktrees Castra creates later show up live in the loop container.
+  try {
+    fs.mkdirSync(
+      path.join(path.dirname(input.repoPath), "WorkTrees", path.basename(input.repoPath)),
+      { recursive: true },
+    );
+  } catch {
+    // Best-effort: a non-creatable path surfaces as a docker run mount error.
+  }
   const contextPath = fs.mkdtempSync(path.join(os.tmpdir(), "march-legate-image-"));
   const dockerfilePath = writeLegateDockerfile(
     contextPath,

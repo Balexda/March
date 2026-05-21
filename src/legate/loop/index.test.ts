@@ -20,6 +20,16 @@ describe("reconcileOtelEnv", () => {
     reconcileOtelEnv(meta(), explicit);
     expect(explicit.MARCH_OTEL_ENDPOINT).toBe("http://host:4318");
   });
+
+  it("defaults the service name to march-legate (dashboard contract), env wins", () => {
+    const fresh: NodeJS.ProcessEnv = {};
+    reconcileOtelEnv(meta(), fresh);
+    expect(fresh.MARCH_OTEL_SERVICE_NAME).toBe("march-legate");
+
+    const explicit: NodeJS.ProcessEnv = { MARCH_OTEL_SERVICE_NAME: "custom" };
+    reconcileOtelEnv(meta(), explicit);
+    expect(explicit.MARCH_OTEL_SERVICE_NAME).toBe("custom");
+  });
 });
 
 describe("reconcileBroodEnv", () => {
