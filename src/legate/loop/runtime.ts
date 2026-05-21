@@ -62,6 +62,13 @@ import {
   formatProcessorRequestLine,
 } from "./pure/format.js";
 import { hashText } from "./pure/hash.js";
+import {
+  bumpRetry,
+  parseSessionCollisionError,
+  parseSpawnPatchError,
+  parseWrongWorktreeRaceError,
+  transientRetryCounts,
+} from "./pure/recovery.js";
 
 // Lazily-built async Castra client (constructed on first use so it reads the
 // CASTRA_URL/token env the container passes in). The loop reaches every
@@ -286,14 +293,6 @@ function replayRecentActionEvents(limit = 10) {
   }
 }
 
-function markSliceAction(slice, action, key, note, ts) {
-  slice.last_processor_action = action;
-  slice.last_processor_action_key = key;
-  slice.last_processor_action_at = ts;
-  slice.last_action = ts;
-  slice.last_action_note = note;
-}
-
 async function sendAgentDeckMessage(sessionId, message, _wait = false) {
   // Routed through Castra. Castra's send is fire-and-forget (202); the former
   // --wait/--timeout has no equivalent, which is fine — every loop caller used
@@ -340,20 +339,6 @@ async function requestLegateJudgement(input) {
     input.slice.last_processor_request_at = input.ts;
   }
   return event;
-}
-
-function updatePrSnapshot(slice, pr) {
-  slice.pr = {
-    number: pr.number,
-    url: pr.url,
-    state: pr.state,
-    checks: pr.checks,
-    mergeable: pr.mergeable,
-  };
-  if (pr.head_branch) slice.actual_branch = pr.head_branch;
-  slice.thread_count = pr.thread_count;
-  slice.needs_response_count = pr.needs_response_count;
-  slice.unresolved_threads = pr.unresolved_threads;
 }
 
 // Cap on codex-spawn recovery dispatches per original slice before the loop
@@ -489,32 +474,6 @@ async function launchDirectStewardDispatch(state, ts, item, sliceId, mergedArchi
 // codex spawn completes within a couple of minutes.
 const HATCHERY_PENDING_TIMEOUT_MS = 15 * 60 * 1000;
 
-// agent-deck reports a colliding steward session as
-// "session already exists: <title> (<sessionId>)". Extract the trailing
-// session id so the loop can reclaim the ghost and re-dispatch.
-function parseSessionCollisionError(text) {
-  const s = String(text || "");
-  if (!/session already exists/i.test(s)) return null;
-  const m = s.match(/\(([0-9a-fA-F]+-[0-9]+)\)\s*$/) || s.match(/\(([^()]+)\)\s*$/);
-  return m ? m[1].trim() : null;
-}
-
-// Match the launchAgentDeckManager wrong-worktree refusal — the upstream
-// n→n-1 agent-deck launch race where pickLaunchedSession attaches to the
-// wrong sibling session. The error text is the contract; if it changes in
-// spawn-handoff.ts, update the regex here in lockstep.
-function parseWrongWorktreeRaceError(text) {
-  const s = String(text || "");
-  return /agent-deck manager session "[^"]+" attached to worktree "[^"]+" but this launch requested branch/.test(s);
-}
-
-function transientRetryCounts(state) {
-  if (!state.transient_retry_counts || typeof state.transient_retry_counts !== "object") {
-    state.transient_retry_counts = {};
-  }
-  return state.transient_retry_counts;
-}
-
 // Race-victim recovery: the wrong-worktree refusal is by design transient
 // (the race resolves once concurrent launches finish), so escalating would
 // strand the slice on operator review for a problem that fixes itself.
@@ -525,24 +484,20 @@ function transientRetryCounts(state) {
 function tryRecoverWrongWorktreeRace(state, slice, sliceId, errorText) {
   if (!parseWrongWorktreeRaceError(errorText)) return null;
   const limit = 3;
-  const counts = transientRetryCounts(state);
-  const prev = Number.isFinite(counts[sliceId]) ? counts[sliceId] : 0;
-  const next = prev + 1;
-  if (next > limit) {
-    delete counts[sliceId];
+  const { exhausted, count } = bumpRetry(transientRetryCounts(state), sliceId, limit);
+  if (exhausted) {
     return {
       recovered: false,
       verdict: "wrong-worktree-race-persistent",
-      detail: "wrong-worktree race recurred " + next + " times for this slice; auto-release exhausted, escalating for operator review",
+      detail: "wrong-worktree race recurred " + count + " times for this slice; auto-release exhausted, escalating for operator review",
     };
   }
-  counts[sliceId] = next;
-  emitTransition({ type: "retry.counted", key: sliceId, count: next });
+  emitTransition({ type: "retry.counted", key: sliceId, count });
   delete state.slices[sliceId];
   return {
     recovered: true,
     verdict: "wrong-worktree-race",
-    detail: "agent-deck launch race detected (attempt " + next + "/" + limit + "); slice released for re-dispatch on next tick",
+    detail: "agent-deck launch race detected (attempt " + count + "/" + limit + "); slice released for re-dispatch on next tick",
   };
 }
 
@@ -566,20 +521,9 @@ async function tryRecoverSessionCollision(state, slice, sliceId, errorText) {
   return { recovered: true, verdict: "session-collision", detail: "removed colliding ghost session " + sessionId + " (worktree pruned); slice released for re-dispatch" };
 }
 
-// Codex spawn-error recovery: when 'git apply --index' rejects the patch
-// codex produced — usually because codex truncated its output mid-diff
-// ("corrupt patch at ...:N") or generated a patch that re-creates an
-// existing file ("already exists in index") — re-running codex with the
-// same prompt typically produces a different (often correct) output. Add
-// a per-slice retry counter and escalate only if it persists.
-function parseSpawnPatchError(text) {
-  const s = String(text || "");
-  if (/git apply --index failed/.test(s)) return true;
-  if (/corrupt patch at /.test(s)) return true;
-  if (/already exists in index/.test(s)) return true;
-  return false;
-}
-
+// Codex spawn-error recovery: re-running codex on a patch-apply failure
+// (parseSpawnPatchError) typically produces a different (often correct) output,
+// so retry with a per-slice counter and escalate only if it persists.
 function tryRecoverSpawnPatchError(state, slice, sliceId, errorText) {
   if (!parseSpawnPatchError(errorText)) return null;
   // Codex patch errors are deeply non-deterministic — same prompt, different
@@ -588,25 +532,21 @@ function tryRecoverSpawnPatchError(state, slice, sliceId, errorText) {
   // (~2-3 min), and we'd rather burn an hour of compute than strand a slice
   // that would have succeeded on attempt 7.
   const limit = 10;
-  const counts = transientRetryCounts(state);
   const key = "spawn-error:" + sliceId;
-  const prev = Number.isFinite(counts[key]) ? counts[key] : 0;
-  const next = prev + 1;
-  if (next > limit) {
-    delete counts[key];
+  const { exhausted, count } = bumpRetry(transientRetryCounts(state), key, limit);
+  if (exhausted) {
     return {
       recovered: false,
       verdict: "spawn-error-persistent",
-      detail: "codex spawn produced an unapplicable patch " + next + " times for this slice; auto-release exhausted, escalating for operator review",
+      detail: "codex spawn produced an unapplicable patch " + count + " times for this slice; auto-release exhausted, escalating for operator review",
     };
   }
-  counts[key] = next;
-  emitTransition({ type: "retry.counted", key, count: next });
+  emitTransition({ type: "retry.counted", key, count });
   delete state.slices[sliceId];
   return {
     recovered: true,
     verdict: "spawn-error-retry",
-    detail: "codex spawn patch error (attempt " + next + "/" + limit + "); slice released for re-dispatch on next tick",
+    detail: "codex spawn patch error (attempt " + count + "/" + limit + "); slice released for re-dispatch on next tick",
   };
 }
 
@@ -639,23 +579,19 @@ async function completePendingHatcheryDispatches(state, ts) {
     // is usually transient, so auto-clear the slice and let it re-dispatch,
     // capped by a per-slice retry counter; only a repeat offender escalates.
     const limit = 3;
-    const counts = transientRetryCounts(state);
     const key = "hatchery-stale:" + sliceId;
-    const prev = Number.isFinite(counts[key]) ? counts[key] : 0;
-    const nextN = prev + 1;
-    if (nextN <= limit) {
-      counts[key] = nextN;
-      emitTransition({ type: "retry.counted", key, count: nextN });
+    const { exhausted, count } = bumpRetry(transientRetryCounts(state), key, limit);
+    if (!exhausted) {
+      emitTransition({ type: "retry.counted", key, count });
       actions.push({
         action: "auto-recovered",
         sliceId,
         sessionId: null,
-        detail: "hatchery job " + reason + " after " + ageMin + " min (attempt " + nextN + "/" + limit + "); slice released for re-dispatch",
+        detail: "hatchery job " + reason + " after " + ageMin + " min (attempt " + count + "/" + limit + "); slice released for re-dispatch",
       });
       delete state.slices[sliceId];
       return true;
     }
-    delete counts[key];
     const note = "NEED: Hatchery job " + reason + " after " + ageMin + " min and " + limit + " auto-retry attempts; the spawn service is not completing the job — manual investigation required";
     slice.stage = "escalated";
     emitTransition({ type: "slice.escalated", sliceId, reason: "hatchery-stale-persistent" });
@@ -849,7 +785,7 @@ async function completePendingHatcheryDispatches(state, ts) {
     slice.last_action = ts;
     slice.last_action_note = "Hatchery codex spawn completed and handed off to manager";
     // Stable handoff timestamp so stranded-steward detection can measure
-    // elapsed time without being reset by subsequent markSliceAction calls.
+    // elapsed time without being reset by subsequent last_action updates.
     slice.implementing_started_at = ts;
     // Clear ALL transient retry counters for this slice — wrong-worktree
     // race (keyed plain), spawn-error, stranded-leftover, runner-silent
