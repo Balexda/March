@@ -97,7 +97,7 @@ grouping.
 
 | span | emitted by | where |
 |---|---|---|
-| `legate.dispatch` | Legate loop | loop service (`maybeEmitLoopSpan`, `src/legate/loop/runtime.ts`) |
+| `legate.dispatch` | Legate loop | loop service (`emitLoopSpan`, `src/observability/loop-spans.ts`; classified by `maybeEmitLoopSpan` in `src/legate/loop/runtime.ts`) |
 | `legate.babysit` | Legate loop | loop service |
 | `legate.cleanup` | Legate loop | loop service |
 | `hatchery.spawn` | orchestrator | `runHatcherySpawn` |
@@ -344,24 +344,30 @@ machinery, update the signals in lock-step:
 
 - **New loop lifecycle action or dispatch path** (a new `kind`/`action` in the
   loop's event stream) → add a branch to `maybeEmitLoopSpan` in
-  [`src/legate/loop/runtime.ts`](../src/legate/loop/runtime.ts) so it emits a span
-  keyed off the slice id. Root spans for a *new dispatched unit of work* should
-  claim `otelSpanId(sliceId)`; lifecycle actions on an existing dispatch should
-  nest under it via `parentSpanId`. Action events flowing through `append` are
-  also forwarded to Loki by `maybeEmitLoopLog` — add the kind there too if it
-  should show in the logs panels.
+  [`src/legate/loop/runtime.ts`](../src/legate/loop/runtime.ts) that calls
+  `emitLoopSpan` ([`src/observability/loop-spans.ts`](../src/observability/loop-spans.ts),
+  the OTel SDK tracer) keyed off the slice id. A *new dispatched unit of work* is
+  a root span (`root: true`) — it claims `spanIdForDispatch(sliceId)` so the
+  orchestrator's spans nest beneath it; a lifecycle action on an existing
+  dispatch is a child (`root: false`) under that same deterministic parent.
+  Action events flowing through `append` are also forwarded to Loki by
+  `maybeEmitLoopLog` — add the kind there too if it should show in the logs panels.
 - **New failure mode** → emit an **errored** span (and, where the orchestrator
   runs, the appropriate metric `outcome`) so the failure shows up rather than
   silently vanishing. Recovery and direct-steward dispatches are the worked
   example.
 - **A new process joins a trace** → reuse the deterministic id helpers so its
-  spans land in the right trace. The loop service and the in-container emitter now
-  both reuse [`src/observability/trace-ids.ts`](../src/observability/trace-ids.ts)
-  (the loop's `otelTraceId`/`otelSpanId` in
-  [`src/legate/loop/runtime.ts`](../src/legate/loop/runtime.ts) delegate to it;
-  [`src/observability/in-spawn-emitter.ts`](../src/observability/in-spawn-emitter.ts)
-  keeps a stand-alone copy since it ships into a no-`node_modules` container).
-  Keep them aligned — the cross-process test in `init.test.ts` locks this in.
+  spans land in the right trace. The loop service emits its spans through the OTel
+  SDK ([`src/observability/loop-spans.ts`](../src/observability/loop-spans.ts)),
+  reusing [`src/observability/trace-ids.ts`](../src/observability/trace-ids.ts) for
+  the trace id and the deterministic parent span id; because the SDK assigns span
+  ids itself, the root `legate.dispatch` span pins its id via the
+  [`DeterministicIdGenerator`](../src/observability/deterministic-id-generator.ts)
+  installed on the tracer provider. The in-container emitter
+  ([`src/observability/in-spawn-emitter.ts`](../src/observability/in-spawn-emitter.ts))
+  keeps a stand-alone raw-OTLP copy of the id derivation since it ships into a
+  no-`node_modules` container without the SDK. Keep them aligned — the
+  cross-process test in `init.test.ts` locks this in.
 - **New metric or label** → spawn metrics in
   [`src/observability/spawn-metrics.ts`](../src/observability/spawn-metrics.ts);
   Hatchery service metrics in

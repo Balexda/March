@@ -21,6 +21,7 @@ import {
   ATTR_SERVICE_VERSION,
 } from "@opentelemetry/semantic-conventions";
 import { CLI_VERSION } from "../shared/version.js";
+import { deterministicIdGenerator } from "./deterministic-id-generator.js";
 
 const INSTRUMENTATION_SCOPE = "march";
 const DEFAULT_ENDPOINT = "http://localhost:4318";
@@ -95,6 +96,11 @@ export function initOtel(env: NodeJS.ProcessEnv = process.env): OtelHandle {
 
   const tracerProvider = new BasicTracerProvider({
     resource,
+    // Pinnable id generator: random by default, but lets the Legate loop force
+    // `legate.dispatch`'s deterministic root span id so cross-process spans nest
+    // beneath it. A no-op for callers that never force ids. See
+    // deterministic-id-generator.ts.
+    idGenerator: deterministicIdGenerator,
     spanProcessors: [
       new BatchSpanProcessor(new OTLPTraceExporter({ url: `${base}/v1/traces` })),
     ],

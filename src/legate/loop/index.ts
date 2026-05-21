@@ -1,5 +1,6 @@
 import { initOtel, getActiveOtel } from "../../observability/otel.js";
 import { initLoopLogs } from "../../observability/logs.js";
+import { initLoopSpans } from "../../observability/loop-spans.js";
 import { loadMeta, resolveIntervalSeconds, type LoopMeta } from "./meta.js";
 import {
   configureLoopRuntime,
@@ -32,10 +33,11 @@ function resolvePort(opts: RunLoopOptions, env: NodeJS.ProcessEnv): number {
 }
 
 /**
- * Reconcile telemetry config so both signal paths agree: an explicit MARCH_OTEL
- * env wins, otherwise fall back to the meta frozen at `march legate init`. The
- * SDK (metrics + logs) reads env via initOtel; the loop's raw-OTLP dispatch
- * spans read meta.otel — keep them aligned so they're on or off together.
+ * Reconcile telemetry config so the SDK comes up correctly: an explicit
+ * MARCH_OTEL env wins, otherwise fall back to the meta frozen at `march legate
+ * init`. All three loop signals — metrics, logs, and dispatch spans — go through
+ * the OTel SDK, which reads this env via initOtel, so reconciling it here is what
+ * turns the whole loop's telemetry on or off together.
  */
 export function reconcileOtelEnv(meta: LoopMeta, env: NodeJS.ProcessEnv): void {
   if (env.MARCH_OTEL == null && meta.otel?.enabled) env.MARCH_OTEL = "1";
@@ -81,6 +83,7 @@ export async function runLoop(opts: RunLoopOptions = {}): Promise<void> {
   reconcileBroodEnv(meta, env);
   const otel = initOtel(env);
   initLoopLogs({ profile: meta.profile, conductor: meta.paired_legate });
+  initLoopSpans({ profile: meta.profile });
 
   configureLoopRuntime(meta, { intervalSeconds: resolveIntervalSeconds(env) });
 
