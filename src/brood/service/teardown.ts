@@ -2,17 +2,11 @@ import fs from "node:fs";
 import path from "node:path";
 import { recordBroodTeardown } from "../../observability/brood-metrics.js";
 import { startBroodSpan } from "../../observability/brood-trace.js";
-import {
-  readSpawnContainerLogs,
-  removeSpawnContainer,
-} from "../../spawn/container-launch.js";
-import {
-  removeSpawnWorktreeExact,
-  type RemoveWorktreeResult,
-} from "../worktree.js";
+import { readSpawnContainerLogs } from "../../spawn/container-launch.js";
 import { createCastraClientFromEnv } from "../../castra/client.js";
 import type { SessionRepository } from "./repository.js";
 import { broodArchiveDir } from "./store.js";
+import { hostTeardownSubstrate, type TeardownSubstrate } from "./substrate.js";
 import type {
   SessionRecord,
   TeardownRequest,
@@ -38,16 +32,17 @@ export class BroodConflictError extends Error {
 
 /** Side-effecting operations, injectable so teardown is unit-testable. */
 export interface TeardownDeps {
-  removeContainer?: (spawnId: string) => void;
+  /**
+   * Substrate adapter for container + worktree/branch reclamation. Defaults to
+   * {@link hostTeardownSubstrate}; swap it to retarget teardown at another
+   * substrate (e.g. an orchestrator API + ephemeral volume). See `substrate.ts`.
+   */
+  substrate?: TeardownSubstrate;
   readContainerLogs?: (containerId: string) => string;
   removeSteward?: (input: {
     sessionId: string;
     profile?: string;
   }) => Promise<{ removed: boolean }>;
-  removeWorktreeExact?: (
-    repoRoot: string,
-    target: { worktreePath?: string; branch?: string },
-  ) => RemoveWorktreeResult;
   pathExists?: (p: string) => boolean;
   homeDir?: string;
   now?: () => string;
@@ -56,16 +51,12 @@ export interface TeardownDeps {
 }
 
 interface ResolvedDeps {
-  removeContainer: (spawnId: string) => void;
+  substrate: TeardownSubstrate;
   readContainerLogs: (containerId: string) => string;
   removeSteward: (input: {
     sessionId: string;
     profile?: string;
   }) => Promise<{ removed: boolean }>;
-  removeWorktreeExact: (
-    repoRoot: string,
-    target: { worktreePath?: string; branch?: string },
-  ) => RemoveWorktreeResult;
   pathExists: (p: string) => boolean;
   homeDir?: string;
   now: () => string;
@@ -93,10 +84,9 @@ async function defaultRemoveSteward(input: {
 
 function resolveDeps(deps: TeardownDeps): ResolvedDeps {
   return {
-    removeContainer: deps.removeContainer ?? removeSpawnContainer,
+    substrate: deps.substrate ?? hostTeardownSubstrate,
     readContainerLogs: deps.readContainerLogs ?? readSpawnContainerLogs,
     removeSteward: deps.removeSteward ?? defaultRemoveSteward,
-    removeWorktreeExact: deps.removeWorktreeExact ?? removeSpawnWorktreeExact,
     pathExists: deps.pathExists ?? fs.existsSync,
     homeDir: deps.homeDir,
     now: deps.now ?? (() => new Date().toISOString()),
@@ -212,7 +202,7 @@ export async function teardownSession(
   // 2. Container.
   if (spawn) {
     try {
-      d.removeContainer(spawn.id);
+      d.substrate.removeContainer(spawn.id);
       steps.push({ step: "container", outcome: "ok" });
     } catch (err) {
       steps.push({ step: "container", outcome: "failed", detail: message(err) });
@@ -262,7 +252,7 @@ export async function teardownSession(
         detail: "already removed",
       });
     } else {
-      const res = d.removeWorktreeExact(primary.repoPath, {
+      const res = d.substrate.removeWorktreeExact(primary.repoPath, {
         worktreePath: primary.worktreePath,
       });
       if (res.worktreeRemoved) {
@@ -284,7 +274,7 @@ export async function teardownSession(
       detail: "deferred: steward removal failed",
     });
   } else if (primary.branch && primary.repoPath) {
-    const res = d.removeWorktreeExact(primary.repoPath, {
+    const res = d.substrate.removeWorktreeExact(primary.repoPath, {
       branch: primary.branch,
     });
     if (res.branchDeleted) {
