@@ -47,7 +47,7 @@
   - The F4 spec continues to cite the F3 supersession required by US2 AS 2.4; no separate F3 artifact rewrite is required in this slice.
   - If the Codex host set is confirmed, SD-008 is marked resolved with the value implemented in `codexBackend.allowedEgressHosts`.
   - If the Codex host set cannot be confirmed without network/runtime access, the implementation uses the documented placeholder and SD-008 remains open with the blocker stated; the PR body must call out the residual risk.
-  - The tasks file row for this slice is checked only after the code, tests, and any SD-008 artifact update are complete.
+  - This slice's task checkboxes are checked only after the code, tests, and any SD-008 artifact update are complete.
 
 **PR Outcome**: `SpawnBackend` exposes the F4 `allowedEgressHosts` member as part of the backend contract, both shipped backends declare their egress host sets from the backend single source of truth, tests enforce the 6-member shape and concrete values, and US1 can configure its proxy sidecar from `selectedBackend.allowedEgressHosts` without adding a global allowlist.
 
@@ -57,7 +57,7 @@
 
 | ID | Description | Source Category | Impact | Confidence | Status | Resolution |
 |----|-------------|-----------------|--------|------------|--------|------------|
-| SD-008 | inherited from spec: Codex backend `allowedEgressHosts` hostname set is not pinned. Replaces SD-001, which was Gemini-specific and is now moot. The implementation slice must either confirm the Codex CLI host set and resolve this debt in the spec, or explicitly carry the placeholder risk forward in the PR body if the runtime cannot be measured. | Integration | High | Low | inherited | - |
+| SD-008 | inherited from spec: Codex backend `allowedEgressHosts` hostname set is not pinned. Replaces SD-001, which was Gemini-specific and is now moot. The implementation slice must either confirm the Codex CLI host set and resolve this debt in the spec, or explicitly carry the placeholder risk forward in the PR body if the runtime cannot be measured. | Integration | High | Low | inherited | — |
 
 ---
 
@@ -67,7 +67,7 @@ Recommended implementation sequence:
 
 | ID | Title | Depends On | Artifact |
 |----|-------|------------|----------|
-| S1 | Backend-Owned Egress Host Declarations | - | - |
+| S1 | Backend-Owned Egress Host Declarations | — | — |
 
 ### Cross-Story Dependencies
 
