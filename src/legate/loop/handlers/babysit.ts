@@ -104,8 +104,8 @@ export type BabysitDecision =
   | { kind: "conflict-fix"; sliceId: string; sessionId: string; pr: any; key: string; message: string }
   | { kind: "post-dispatch-nudge"; sliceId: string; sessionId: string; pr: any; key: string; count: number; message: string; detail: string }
   | { kind: "nudge-exhausted"; sliceId: string; sessionId: string; pr: any; requestKey: string; reason: string; detail: string }
-  | { kind: "review-fix"; sliceId: string; sessionId: string; pr: any; key: string; message: string; detail: string; threadIds: string[] }
-  | { kind: "review-fix-exhausted"; sliceId: string; sessionId: string; pr: any; requestKey: string; reason: string; detail: string }
+  | { kind: "review-fix"; sliceId: string; sessionId: string; pr: any; key: string; message: string; detail: string; threadIds: string[]; commentIds: string[] }
+  | { kind: "review-fix-exhausted"; sliceId: string; sessionId: string; pr: any; requestKey: string; reason: string; detail: string; commentIds: string[] }
   | { kind: "ci-failure"; sliceId: string; sessionId: string; pr: any; requestKey: string; detail: string }
   | { kind: "pr-open-clear"; sliceId: string; sessionId: string; pr: any };
 
@@ -441,6 +441,7 @@ function evaluatePr(
         requestKey: actionKey("review-fix-rounds-exhausted", pr, exhausted.map((thread: any) => String(thread.id)).join(",")),
         reason: "review_fix_rounds_exhausted",
         detail: `PR #${pr.number} has ${exhausted.length} review thread(s) still unresolved after ${REVIEW_FIX_MAX_ROUNDS} /smithy.fix round(s) each. This is likely a genuine review dispute or a stuck worker, not something the loop should keep poking. Operator should review the threads and resolve them, re-instruct the steward, or close the slice.`,
+        commentIds: commentIdsAcross(exhausted),
       });
     }
 
@@ -456,6 +457,7 @@ function evaluatePr(
         message: reviewFixMessage(pr, dispatchable),
         detail: `sent /smithy.fix for ${dispatchable.length} review thread(s) (${newIds.length} new comment(s))`,
         threadIds: dispatchable.map((thread: any) => String(thread.id)),
+        commentIds: commentIdsAcross(dispatchable),
       });
     }
     return;
@@ -498,11 +500,13 @@ function snapshot(slice: any, pr: any): void {
   slice.thread_count = pr.thread_count;
   slice.needs_response_count = pr.needs_response_count;
   slice.unresolved_threads = pr.unresolved_threads;
-  // Fold every observed comment id into the review-fix dedup set (#224). assess
-  // runs first against the PRIOR value, so a comment present last tick is already
-  // "seen" and only a genuinely new id triggers /smithy.fix; resolved threads
-  // drop out of unresolved_threads and thus out of the set, keeping it bounded.
-  slice.review_fix_seen_comment_ids = commentIdsAcross(pr.unresolved_threads || []);
+}
+
+/** Fold handled comment ids into the review-fix dedup set, union-merged so a
+ *  comment is only ever recorded as seen once it has actually been dispatched
+ *  for (or escalated) — never speculatively before a send that may fail (#224). */
+function markCommentsSeen(slice: any, commentIds: string[]): void {
+  slice.review_fix_seen_comment_ids = [...new Set([...(slice.review_fix_seen_comment_ids || []).map((id: any) => String(id)), ...commentIds])];
 }
 
 function clearLoginBlocked(slice: any): void {
@@ -652,8 +656,11 @@ export async function apply(decisions: BabysitDecision[], ctx: HandlerContext, s
           break;
         }
         slice.stage = "pr-in-fix";
-        // Count this distinct round against each dispatched thread's safety cap
-        // (#224) and clear any prior exhaustion marker — we just dispatched anew.
+        // Only NOW — after a successful send — record these comments as seen, so
+        // a transient send failure above is retried next tick instead of being
+        // silently dropped (#224). Count this distinct round against each
+        // dispatched thread's safety cap and clear any prior exhaustion marker.
+        markCommentsSeen(slice, d.commentIds || []);
         const rounds: Record<string, number> = slice.review_fix_rounds || (slice.review_fix_rounds = {});
         for (const threadId of d.threadIds || []) rounds[threadId] = (rounds[threadId] || 0) + 1;
         delete slice.review_fix_escalated_at;
@@ -666,8 +673,10 @@ export async function apply(decisions: BabysitDecision[], ctx: HandlerContext, s
       case "review-fix-exhausted":
         // Latch so the no-new-comment branch stops re-nudging /smithy.fix for a
         // thread set we just told the operator to take over (#224). Cleared on
-        // the next genuine dispatch or when the PR goes all-clear.
+        // the next genuine dispatch or when the PR goes all-clear. Mark the
+        // escalated comments seen so the escalation isn't recomputed every tick.
         slice.review_fix_escalated_at = ts;
+        markCommentsSeen(slice, d.commentIds || []);
         await fireRequest({ ts, slice, requestKey: d.requestKey, sliceId: d.sliceId, sessionId: d.sessionId, pr: d.pr, reason: d.reason, detail: d.detail });
         res.mutated = true;
         break;

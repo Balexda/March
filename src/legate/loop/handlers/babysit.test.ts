@@ -167,7 +167,7 @@ describe("babysit apply", () => {
         throw new Error("down");
       }),
     });
-    const res = await apply([{ kind: "review-fix", sliceId: "s", sessionId: "w", pr: { number: 5 }, key: "k", message: "M", detail: "x", threadIds: ["t1"] }], ctx(), state, d);
+    const res = await apply([{ kind: "review-fix", sliceId: "s", sessionId: "w", pr: { number: 5 }, key: "k", message: "M", detail: "x", threadIds: ["t1"], commentIds: ["c1"] }], ctx(), state, d);
     expect(slice.stage).toBe("pr-open"); // not advanced
     expect(res.requests).toHaveLength(1);
     expect(res.actions).toHaveLength(0);
@@ -290,23 +290,58 @@ describe("babysit review-fix comment-id dedup (#224)", () => {
     expect(kindsOf(assess(state))).toEqual(["pr-snapshot", "review-fix"]);
   });
 
-  it("snapshot folds observed comment ids into the seen set", async () => {
+  it("pr-snapshot does NOT mark comments seen (only a successful dispatch does)", async () => {
+    // Regression for the P1 (#227 review): seen must not be set speculatively in
+    // snapshot() before the review-fix send, or a transient send failure drops work.
     const slice: any = { worker_session_id: "w", stage: "pr-open" };
     const state = loopState({ slices: { s: slice } });
     await apply(
-      [{ kind: "pr-snapshot", sliceId: "s", pr: { number: 5, unresolved_threads: [{ id: "t1", comment_ids: ["c1", "c2"] }, { id: "t2", comment_ids: ["c3"] }] } }],
+      [{ kind: "pr-snapshot", sliceId: "s", pr: { number: 5, unresolved_threads: [{ id: "t1", comment_ids: ["c1", "c2"] }] } }],
       ctx(),
       state,
       deps(),
     );
-    expect(slice.review_fix_seen_comment_ids).toEqual(["c1", "c2", "c3"]);
+    expect(slice.review_fix_seen_comment_ids).toBeUndefined();
+  });
+
+  it("review-fix folds dispatched comment ids into the seen set on a successful send", async () => {
+    const slice: any = { worker_session_id: "w", stage: "pr-open", review_fix_seen_comment_ids: ["c0"] };
+    const state = loopState({ slices: { s: slice } });
+    await apply(
+      [{ kind: "review-fix", sliceId: "s", sessionId: "w", pr: { number: 5 }, key: "k", message: "M", detail: "x", threadIds: ["t1"], commentIds: ["c1", "c2"] }],
+      ctx(),
+      state,
+      deps(),
+    );
+    expect(slice.review_fix_seen_comment_ids).toEqual(["c0", "c1", "c2"]);
+  });
+
+  it("review-fix does NOT mark comments seen when the send fails (retries next tick)", async () => {
+    const slice: any = { worker_session_id: "w", stage: "pr-open" };
+    const state = loopState({ slices: { s: slice } });
+    const d = deps({
+      sendMessage: vi.fn(async () => {
+        throw new Error("castra down");
+      }),
+    });
+    const res = await apply(
+      [{ kind: "review-fix", sliceId: "s", sessionId: "w", pr: { number: 5 }, key: "k", message: "M", detail: "x", threadIds: ["t1"], commentIds: ["c1", "c2"] }],
+      ctx(),
+      state,
+      d,
+    );
+    // Send threw → comments are not "seen", the round is not counted, and the
+    // failure is escalated; the next tick can re-dispatch the same comments.
+    expect(slice.review_fix_seen_comment_ids).toBeUndefined();
+    expect(slice.review_fix_rounds).toBeUndefined();
+    expect(res.requests).toHaveLength(1);
   });
 
   it("review-fix apply counts a distinct round per dispatched thread", async () => {
     const slice: any = { worker_session_id: "w", stage: "pr-open", review_fix_rounds: { t1: 1 } };
     const state = loopState({ slices: { s: slice } });
     await apply(
-      [{ kind: "review-fix", sliceId: "s", sessionId: "w", pr: { number: 5 }, key: "k", message: "M", detail: "x", threadIds: ["t1", "t2"] }],
+      [{ kind: "review-fix", sliceId: "s", sessionId: "w", pr: { number: 5 }, key: "k", message: "M", detail: "x", threadIds: ["t1", "t2"], commentIds: ["c1", "c2"] }],
       ctx(),
       state,
       deps(),
@@ -328,7 +363,7 @@ describe("babysit review-fix comment-id dedup (#224)", () => {
     const state = loopState({ slices: { s: slice } });
     const d = deps();
     const res = await apply(
-      [{ kind: "review-fix-exhausted", sliceId: "s", sessionId: "w", pr: { number: 5 }, requestKey: "rk", reason: "review_fix_rounds_exhausted", detail: "x" }],
+      [{ kind: "review-fix-exhausted", sliceId: "s", sessionId: "w", pr: { number: 5 }, requestKey: "rk", reason: "review_fix_rounds_exhausted", detail: "x", commentIds: ["c1"] }],
       ctx(),
       state,
       d,
