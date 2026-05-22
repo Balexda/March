@@ -212,6 +212,8 @@ describe("queryPrForBabysit", () => {
       author: "reviewer",
       needs_response: true,
       body_preview: "please fix",
+      // #224: every comment's databaseId, for comment-id-based review-fix dedup.
+      comment_ids: [11],
     });
   });
 

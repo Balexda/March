@@ -38,6 +38,13 @@ const STRANDED = { initialNudgeMs: 10 * 60 * 1000, repeatNudgeMs: 5 * 60 * 1000,
 // 5min, every 5min, escalating after 3 unanswered re-nudges (~15min).
 const POST_DISPATCH = { initialNudgeMs: 5 * 60 * 1000, repeatNudgeMs: 5 * 60 * 1000, escalateAfterNudges: 3 };
 
+// Review-fix safety cap (#224): the most DISTINCT /smithy.fix rounds the loop
+// will dispatch for a single review thread. A round = one dispatch that included
+// a genuinely new (unseen) comment on that thread. A thread that won't clear
+// after this many rounds is a real review dispute or a stuck worker — escalate
+// to the operator rather than keep poking the steward.
+const REVIEW_FIX_MAX_ROUNDS = 3;
+
 const STRANDED_MESSAGE = [
   "[STRANDED-STEWARD-NUDGE] The deterministic loop sees no PR for this slice yet.",
   "Resume the Hatchery manager workflow where you left off:",
@@ -102,7 +109,8 @@ export type BabysitDecision =
   | { kind: "conflict-fix"; sliceId: string; sessionId: string; pr: any; key: string; message: string }
   | { kind: "post-dispatch-nudge"; sliceId: string; sessionId: string; pr: any; key: string; count: number; message: string; detail: string }
   | { kind: "nudge-exhausted"; sliceId: string; sessionId: string; pr: any; requestKey: string; reason: string; detail: string }
-  | { kind: "review-fix"; sliceId: string; sessionId: string; pr: any; key: string; message: string; detail: string }
+  | { kind: "review-fix"; sliceId: string; sessionId: string; pr: any; key: string; message: string; detail: string; threadIds: string[]; commentIds: string[] }
+  | { kind: "review-fix-exhausted"; sliceId: string; sessionId: string; pr: any; requestKey: string; reason: string; detail: string; commentIds: string[] }
   | { kind: "ci-failure"; sliceId: string; sessionId: string; pr: any; requestKey: string; detail: string }
   | { kind: "pr-open-clear"; sliceId: string; sessionId: string; pr: any };
 
@@ -125,6 +133,27 @@ function hasClaudeLoginBlock(output: any): boolean {
 
 function alreadyDispatched(slice: any, key: string): boolean {
   return slice.last_processor_action_key === key;
+}
+
+/**
+ * Every review-comment id on a thread, as strings (#224). Falls back to the
+ * thread id — which IS the first comment's databaseId — when sense-io did not
+ * carry the per-comment list (older snapshots / hand-built test fixtures), so a
+ * thread always contributes at least one id.
+ */
+function threadCommentIds(thread: any): string[] {
+  const raw = Array.isArray(thread?.comment_ids) ? thread.comment_ids : [];
+  const ids = raw.map((id: any) => String(id)).filter((id: string) => id.length > 0 && id !== "null" && id !== "undefined");
+  if (ids.length > 0) return ids;
+  const fallback = thread?.id;
+  return fallback != null && String(fallback).length > 0 ? [String(fallback)] : [];
+}
+
+/** Distinct review-comment ids across a set of threads. */
+function commentIdsAcross(threads: any[]): string[] {
+  const ids = new Set<string>();
+  for (const thread of threads) for (const id of threadCommentIds(thread)) ids.add(id);
+  return [...ids];
 }
 
 function minutesSince(ts: string, since: string | undefined): number {
@@ -299,6 +328,10 @@ function evaluatePr(
     out.push({ kind: "pr-snapshot", sliceId, pr });
   }
 
+  // Merged/closed PR short-circuit (#224): a merged PR must stop being babysat
+  // regardless of thread state — no review-fix, no conflict-fix, no CI poke —
+  // so a PR waiting on a default-branch sync can't keep getting prodded. The
+  // pr-snapshot above already recorded its terminal state for cleanup to act on.
   if (pr.state === "MERGED" || pr.state === "CLOSED") return;
   if (pr.state !== "OPEN") {
     out.push({ kind: "unknown-pr-state", sliceId, sessionId, pr, requestKey: actionKey("unknown-pr-state", pr), detail: `state=${pr.state}` });
@@ -353,42 +386,85 @@ function evaluatePr(
 
   const neededThreads = threadsNeedingResponse(evalSlice, pr);
   if (neededThreads.length > 0) {
-    const key = actionKey("review-fix", pr, neededThreads.map((t: any) => `${t.id || ""}@${t.last_comment_at || ""}`).join(","));
-    if (alreadyDispatched(slice, key)) {
-      const nd = postDispatchNudge(slice, workerStatus, ts, key);
-      if (nd.nudge) {
-        out.push({
-          kind: "post-dispatch-nudge",
-          sliceId,
-          sessionId,
-          pr,
-          key,
-          count: nd.count,
-          message: reviewFixMessage(pr, neededThreads),
-          detail: `re-sent /smithy.fix (nudge ${nd.count}/${POST_DISPATCH.escalateAfterNudges}) — worker ${workerStatus} ${minutesSince(ts, slice.last_processor_action_at)}min after dispatch`,
-        });
-      } else if (nd.escalate) {
-        out.push({
-          kind: "nudge-exhausted",
-          sliceId,
-          sessionId,
-          pr,
-          requestKey: actionKey("review-nudges-exhausted", pr, key),
-          reason: "worker_unresponsive_after_review_fix",
-          detail: `Sent ${nd.count} /smithy.fix nudges to PR #${pr.number} worker (session ${sessionId}) and still ${workerStatus} with ${neededThreads.length} thread(s) needing response. Likely parked at a permission prompt or a stuck spinner. Operator should attach and inspect, or close the slice if the worker is unrecoverable.`,
-        });
+    // Dedup by review-comment id, not last_comment_at (#224). The old key
+    // (`thread.id@last_comment_at`) churned on every reply, so a steward
+    // addressing a thread (push + reply) re-armed /smithy.fix forever. Instead
+    // remember the comment ids already dispatched for (refreshed each tick from
+    // the observed unresolved threads — see snapshot()) and only fire on
+    // genuinely new (unseen) ids — any author. A fixed-but-unresolved thread
+    // contributes no new id, so it stops triggering; the steward's own reply,
+    // once observed, is already in `seen` and never re-triggers.
+    const seen = new Set<string>((slice.review_fix_seen_comment_ids || []).map((id: any) => String(id)));
+    const threadsWithNew = neededThreads.filter((thread: any) => threadCommentIds(thread).some((id) => !seen.has(id)));
+
+    if (threadsWithNew.length === 0) {
+      // No unseen comments on any needed thread. Never start a fresh /smithy.fix
+      // here — only re-nudge a worker that parked after a review-fix dispatch it
+      // never acted on (the genuine stuck-worker case), bounded + escalating.
+      if (slice.last_processor_action === "review-fix" && !slice.review_fix_escalated_at) {
+        const key = slice.last_processor_action_key || actionKey("review-fix", pr);
+        const nd = postDispatchNudge(slice, workerStatus, ts, key);
+        if (nd.nudge) {
+          out.push({
+            kind: "post-dispatch-nudge",
+            sliceId,
+            sessionId,
+            pr,
+            key,
+            count: nd.count,
+            message: reviewFixMessage(pr, neededThreads),
+            detail: `re-sent /smithy.fix (nudge ${nd.count}/${POST_DISPATCH.escalateAfterNudges}) — worker ${workerStatus} ${minutesSince(ts, slice.last_processor_action_at)}min after dispatch`,
+          });
+        } else if (nd.escalate) {
+          out.push({
+            kind: "nudge-exhausted",
+            sliceId,
+            sessionId,
+            pr,
+            requestKey: actionKey("review-nudges-exhausted", pr, key),
+            reason: "worker_unresponsive_after_review_fix",
+            detail: `Sent ${nd.count} /smithy.fix nudges to PR #${pr.number} worker (session ${sessionId}) and still ${workerStatus} with ${neededThreads.length} thread(s) needing response. Likely parked at a permission prompt or a stuck spinner. Operator should attach and inspect, or close the slice if the worker is unrecoverable.`,
+          });
+        }
       }
       return;
     }
-    out.push({
-      kind: "review-fix",
-      sliceId,
-      sessionId,
-      pr,
-      key,
-      message: reviewFixMessage(pr, neededThreads),
-      detail: `sent /smithy.fix for ${neededThreads.length} review thread(s)`,
-    });
+
+    // New, unseen comments exist. Bound distinct /smithy.fix rounds per thread
+    // (#224): beyond REVIEW_FIX_MAX_ROUNDS, a thread that won't clear is a
+    // genuine dispute or a stuck worker — escalate instead of re-dispatching.
+    const rounds: Record<string, number> = slice.review_fix_rounds || {};
+    const dispatchable = threadsWithNew.filter((thread: any) => (rounds[String(thread.id)] || 0) < REVIEW_FIX_MAX_ROUNDS);
+    const exhausted = threadsWithNew.filter((thread: any) => (rounds[String(thread.id)] || 0) >= REVIEW_FIX_MAX_ROUNDS);
+
+    if (exhausted.length > 0) {
+      out.push({
+        kind: "review-fix-exhausted",
+        sliceId,
+        sessionId,
+        pr,
+        requestKey: actionKey("review-fix-rounds-exhausted", pr, exhausted.map((thread: any) => String(thread.id)).join(",")),
+        reason: "review_fix_rounds_exhausted",
+        detail: `PR #${pr.number} has ${exhausted.length} review thread(s) still unresolved after ${REVIEW_FIX_MAX_ROUNDS} /smithy.fix round(s) each. This is likely a genuine review dispute or a stuck worker, not something the loop should keep poking. Operator should review the threads and resolve them, re-instruct the steward, or close the slice.`,
+        commentIds: commentIdsAcross(exhausted),
+      });
+    }
+
+    if (dispatchable.length > 0) {
+      const newIds = commentIdsAcross(dispatchable).filter((id) => !seen.has(id));
+      const key = actionKey("review-fix", pr, [...newIds].sort().join(","));
+      out.push({
+        kind: "review-fix",
+        sliceId,
+        sessionId,
+        pr,
+        key,
+        message: reviewFixMessage(pr, dispatchable),
+        detail: `sent /smithy.fix for ${dispatchable.length} review thread(s) (${newIds.length} new comment(s))`,
+        threadIds: dispatchable.map((thread: any) => String(thread.id)),
+        commentIds: commentIdsAcross(dispatchable),
+      });
+    }
     return;
   }
 
@@ -429,6 +505,13 @@ function snapshot(slice: any, pr: any): void {
   slice.thread_count = pr.thread_count;
   slice.needs_response_count = pr.needs_response_count;
   slice.unresolved_threads = pr.unresolved_threads;
+}
+
+/** Fold handled comment ids into the review-fix dedup set, union-merged so a
+ *  comment is only ever recorded as seen once it has actually been dispatched
+ *  for (or escalated) — never speculatively before a send that may fail (#224). */
+function markCommentsSeen(slice: any, commentIds: string[]): void {
+  slice.review_fix_seen_comment_ids = [...new Set([...(slice.review_fix_seen_comment_ids || []).map((id: any) => String(id)), ...commentIds])];
 }
 
 function clearLoginBlocked(slice: any): void {
@@ -578,18 +661,40 @@ export async function apply(decisions: BabysitDecision[], ctx: HandlerContext, s
           break;
         }
         slice.stage = "pr-in-fix";
+        // Only NOW — after a successful send — record these comments as seen, so
+        // a transient send failure above is retried next tick instead of being
+        // silently dropped (#224). Count this distinct round against each
+        // dispatched thread's safety cap and clear any prior exhaustion marker.
+        markCommentsSeen(slice, d.commentIds || []);
+        const rounds: Record<string, number> = slice.review_fix_rounds || (slice.review_fix_rounds = {});
+        for (const threadId of d.threadIds || []) rounds[threadId] = (rounds[threadId] || 0) + 1;
+        delete slice.review_fix_escalated_at;
         mark(slice, "review-fix", d.key, "processor sent review-thread /smithy.fix", ts);
         ctx.emitTransition?.({ type: "slice.stage.changed", sliceId: d.sliceId, stage: "pr-in-fix" });
         res.actions.push({ action: "review-fix", sliceId: d.sliceId, sessionId: d.sessionId, pr: d.pr, detail: d.detail });
         res.mutated = true;
         break;
       }
+      case "review-fix-exhausted":
+        // Latch so the no-new-comment branch stops re-nudging /smithy.fix for a
+        // thread set we just told the operator to take over (#224). Cleared on
+        // the next genuine dispatch or when the PR goes all-clear. Mark the
+        // escalated comments seen so the escalation isn't recomputed every tick.
+        slice.review_fix_escalated_at = ts;
+        markCommentsSeen(slice, d.commentIds || []);
+        await fireRequest({ ts, slice, requestKey: d.requestKey, sliceId: d.sliceId, sessionId: d.sessionId, pr: d.pr, reason: d.reason, detail: d.detail });
+        res.mutated = true;
+        break;
       case "ci-failure":
         await fireRequest({ ts, slice, requestKey: d.requestKey, sliceId: d.sliceId, sessionId: d.sessionId, pr: d.pr, reason: "CI failure requires Legate judgement", detail: d.detail });
         break;
       case "pr-open-clear":
         slice.stage = "pr-open";
         slice.pr_open_at = ts;
+        // PR is all-clear: reset the per-thread round counters and clear the
+        // exhaustion latch so a future review thread starts a fresh budget (#224).
+        delete slice.review_fix_rounds;
+        delete slice.review_fix_escalated_at;
         mark(slice, "pr-open", actionKey("pr-open", d.pr), "processor observed PR all clear", ts);
         ctx.emitTransition?.({ type: "slice.stage.changed", sliceId: d.sliceId, stage: "pr-open" });
         res.actions.push({ action: "pr-open", sliceId: d.sliceId, sessionId: d.sessionId, pr: d.pr, detail: "observed PR all clear" });

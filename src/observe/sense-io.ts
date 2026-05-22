@@ -259,6 +259,12 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
           last_author: last.author?.login,
           last_comment_at: last.createdAt,
           comment_count: comments.length,
+          // Every comment's databaseId, so the legate can dedup /smithy.fix by
+          // comment id rather than last_comment_at (#224). A reply does carry a
+          // new, previously-unseen id; the dedup comes from the legate
+          // persisting the ids it has already dispatched for across ticks, so a
+          // thread's churning last_comment_at no longer re-arms the dispatch.
+          comment_ids: comments.map((comment: any) => comment.databaseId).filter((id: any) => id != null),
         };
       });
   }
