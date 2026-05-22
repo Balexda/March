@@ -193,6 +193,92 @@ describe("senseObserved (Herald observation Stage 1)", () => {
     expect(state.perSlice.impl!.pr).toMatchObject({ number: 42 });
   });
 
+  it("matches a recorded sessionId only against session id, never title/name", async () => {
+    const queryPr = vi.fn(async () => ({ number: 7, state: "OPEN" }));
+    const sessionOutput = vi.fn(async () => ({ output: "log" }));
+    const prev = foldedState({
+      slices: { impl: slice({ sliceId: "impl", stage: "implementing", sessionId: "s1" }) },
+    });
+    const state = await senseObserved(
+      deps({
+        listSessions: async () => [
+          // A decoy whose TITLE equals the recorded id but with a different real id.
+          { id: "decoy", title: "s1", group: "legate-workers", status: "idle" },
+          // The authoritative session.
+          { id: "s1", group: "legate-workers", status: "idle" },
+        ],
+        queryPr,
+        sessionOutput,
+      }),
+      prev,
+    );
+    // Discovery/output read against the real id, not the title-decoy.
+    expect(sessionOutput).toHaveBeenCalledWith("s1");
+    expect(state.perSlice.impl!.pr).toMatchObject({ number: 7 });
+  });
+
+  it("skips a slice whose recorded sessionId only matches a session title (no real id match)", async () => {
+    const prev = foldedState({
+      slices: { impl: slice({ sliceId: "impl", stage: "implementing", sessionId: "s1" }) },
+    });
+    const state = await senseObserved(
+      deps({
+        // Only a title-decoy is live; the real session id is gone.
+        listSessions: async () => [{ id: "decoy", title: "s1", group: "legate-workers", status: "idle" }],
+        queryPr: async () => ({ number: 7 }),
+      }),
+      prev,
+    );
+    expect(state.perSlice.impl).toBeUndefined();
+  });
+
+  it("reconciles a slice with no recorded sessionId by Castra session metadata (#214 pull)", async () => {
+    const discoverPr = vi.fn(async () => ({ number: 99, state: "OPEN" }));
+    const prev = foldedState({
+      // The push (#213) was missed: the slice has no sessionId in the fold.
+      slices: { impl: slice({ sliceId: "impl", stage: "implementing", branch: "b-impl" }) },
+    });
+    const state = await senseObserved(
+      deps({
+        listSessions: async () => [
+          // The session self-describes its slice via Castra metadata.
+          { id: "ad-9", group: "legate-workers", status: "idle", metadata: { sliceId: "impl" } },
+        ],
+        queryPr: async () => ({ skipped: true }),
+        discoverPr,
+        sessionOutput: async () => ({ output: "" }),
+      }),
+      prev,
+    );
+    // Discovery runs against the metadata-resolved session id, not skipped.
+    expect(discoverPr).toHaveBeenCalledWith(expect.anything(), expect.anything(), "/repo", "ad-9");
+    expect(state.perSlice.impl!.pr).toMatchObject({ number: 99 });
+  });
+
+  it("degrades to a worktree/branch match when sessionId is absent (#210 gate)", async () => {
+    const discoverPr = vi.fn(async () => ({ number: 203, state: "OPEN" }));
+    const prev = foldedState({
+      slices: {
+        impl: slice({ sliceId: "impl", stage: "implementing", branch: "smithy/forge/x", worktreePath: "/wt/x" }),
+      },
+    });
+    const state = await senseObserved(
+      deps({
+        listSessions: async () => [
+          // No metadata and no matching id — only the worktree/branch line up,
+          // exactly the stranded-steward case from #210.
+          { id: "ad-7", group: "legate-workers", status: "idle", branch: "feature/smithy/forge/x", worktree_path: "/wt/x" },
+        ],
+        queryPr: async () => ({ skipped: true }),
+        discoverPr,
+        sessionOutput: async () => ({ output: "" }),
+      }),
+      prev,
+    );
+    expect(discoverPr).toHaveBeenCalledWith(expect.anything(), expect.anything(), "/repo", "ad-7");
+    expect(state.perSlice.impl!.pr).toMatchObject({ number: 203 });
+  });
+
   it("assembles workers + smithy queue from the live world", async () => {
     const state = await senseObserved(
       deps({

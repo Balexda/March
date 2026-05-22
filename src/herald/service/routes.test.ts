@@ -41,6 +41,13 @@ describe("validateEvent", () => {
     // Absent sessionId is still fine (it is optional on these events).
     expect(validateEvent({ type: "slice.dispatched", sliceId: "s1" })).toMatchObject({ ok: true });
   });
+  it("requires sliceId + sessionId for slice.steward.attached (#213)", () => {
+    expect(validateEvent({ type: "slice.steward.attached", sessionId: "x" })).toMatchObject({ ok: false });
+    expect(validateEvent({ type: "slice.steward.attached", sliceId: "s1" })).toMatchObject({ ok: false });
+    expect(
+      validateEvent({ type: "slice.steward.attached", sliceId: "s1", sessionId: "x", spawnId: "sp" }),
+    ).toMatchObject({ ok: true });
+  });
   it("forces source to legate (cannot spoof a herald observation event)", () => {
     const v = validateEvent({ type: "heartbeat" });
     expect(v.ok && v.input.source).toBe("legate");

@@ -75,6 +75,13 @@ export interface LaunchSessionRequest {
   readonly model?: string;
   /** Dispatch trace key forwarded as x-march-slice-id so spans share one trace. */
   readonly traceKey?: string;
+  /**
+   * Queryable session metadata (e.g. `{ sliceId, spawnId }`) Castra stores and
+   * surfaces on {@link CastraSession} from `listSessions`/`show` (#214). Lets
+   * Herald reconcile a session to its slice by exact id. Distinct from
+   * `traceKey`, which is only forwarded as a span-correlation header.
+   */
+  readonly metadata?: Record<string, string>;
 }
 
 export interface SendPromptRequest {
@@ -153,6 +160,7 @@ export class CastraClient {
         title: req.title,
         ...(req.group ? { group: req.group } : {}),
         ...(req.model ? { model: req.model } : {}),
+        ...(req.metadata ? { metadata: req.metadata } : {}),
       },
       expectStatus: 201,
     });
@@ -307,6 +315,7 @@ export class SyncCastraClient {
         ...(req.group ? { group: req.group } : {}),
         ...(req.model ? { model: req.model } : {}),
         ...(req.createBranch === false ? { createBranch: false } : {}),
+        ...(req.metadata ? { metadata: req.metadata } : {}),
       },
       expectStatus: 201,
     });

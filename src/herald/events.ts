@@ -69,9 +69,19 @@ export type EventBody =
   /** The legate launched a spawn for a smithy item. `jobId` is the Hatchery job
    *  id, persisted so the legate's completion poll survives a restart. */
   | { type: "slice.dispatched"; sliceId: string; branch?: string; worktreePath?: string; sessionId?: string; jobId?: string; item?: unknown }
+  /**
+   * Hatchery launched the steward and learned the slice↔session↔spawn pairing
+   * (#213). Hatchery is the single integration point that holds all three ids, so
+   * it OWNS this correlation fact and publishes it at launch — independent of the
+   * legate's job-poll cadence. The reducer merges `sessionId`/`spawnId`/`branch`/
+   * `worktreePath` additively, so this writer never fights the legate (which owns
+   * stage/lifecycle). `EventType` stays low-cardinality (it is a metric label).
+   */
+  | { type: "slice.steward.attached"; sliceId: string; sessionId: string; spawnId?: string; branch?: string; worktreePath?: string }
   /** The slice moved to a new stage (implementing/pr-open/merged/…). Carries the
    *  steward `sessionId` on the implementing handoff so the fold learns the
-   *  slice→session link Herald's PR discovery is gated on (#210). */
+   *  slice→session link Herald's PR discovery is gated on (#210) and a restart's
+   *  rebuild keeps it (the latent #210 regression). */
   | { type: "slice.stage.changed"; sliceId: string; stage: string; sessionId?: string }
   /** The slice reached a terminal state and was cleaned up. */
   | { type: "slice.archived"; sliceId: string }
@@ -120,6 +130,7 @@ export function entityRefOf(body: EventBody): EntityRef {
     case "slice.pr.changed":
     case "slice.output.changed":
     case "slice.dispatched":
+    case "slice.steward.attached":
     case "slice.stage.changed":
     case "slice.archived":
     case "slice.recovery.dispatched":
@@ -150,6 +161,9 @@ export interface SliceState {
   branch?: string;
   worktreePath?: string;
   sessionId?: string;
+  /** Hatchery spawn id from `slice.steward.attached` (#213) — the spawn that owns
+   *  this slice's steward, for teardown-by-slice. */
+  spawnId?: string;
   /** Hatchery job id from `slice.dispatched`; lets the legate's completion poll
    *  resume after a restart (a `hatchery-pending` slice needs its job id). */
   jobId?: string;
@@ -247,11 +261,21 @@ export function reduce(state: SystemState, event: HeraldEvent): SystemState {
       slice.archived = false;
       break;
     }
+    case "slice.steward.attached": {
+      const slice = sliceOf(state, event.sliceId);
+      slice.sessionId = event.sessionId;
+      if (event.spawnId !== undefined) slice.spawnId = event.spawnId;
+      if (event.branch !== undefined) slice.branch = event.branch;
+      if (event.worktreePath !== undefined) slice.worktreePath = event.worktreePath;
+      slice.archived = false;
+      break;
+    }
     case "slice.stage.changed": {
       const slice = sliceOf(state, event.sliceId);
       slice.stage = event.stage;
       // Mirror slice.dispatched: only set when present so a stage transition
-      // without a sessionId never clobbers a known link (#210).
+      // without a sessionId never clobbers a known link (#210). The handoff
+      // transition carries it so a restart's rebuild keeps the slice→session link.
       if (event.sessionId !== undefined) slice.sessionId = event.sessionId;
       break;
     }

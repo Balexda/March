@@ -52,6 +52,7 @@ import {
   DEFAULT_MANAGER_MODEL,
 } from "./defaults.js";
 import { registerStewardLaunchWithBrood } from "./service/brood-registration.js";
+import { publishStewardAttachedToHerald } from "./service/herald-registration.js";
 
 export {
   DEFAULT_AGENT_DECK_PROFILE,
@@ -370,6 +371,8 @@ export async function launchAgentDeckManager(
     readonly group: string;
     readonly profile: string;
     readonly traceKey?: string;
+    /** Dispatch slice id, stamped into the session's queryable metadata (#214). */
+    readonly sliceId?: string;
   },
   castra: CastraClient = createCastraClientFromEnv(),
 ): Promise<AgentDeckManagerSession> {
@@ -383,6 +386,12 @@ export async function launchAgentDeckManager(
       group: input.group,
       model: DEFAULT_MANAGER_MODEL,
       traceKey: input.traceKey,
+      // Self-describe the session so Herald's pull path can reconcile it to its
+      // slice by exact id, not the brittle worktree/title heuristic (#214).
+      metadata: {
+        spawnId: input.spawnId,
+        ...(input.sliceId ? { sliceId: input.sliceId } : {}),
+      },
     });
   } catch (err) {
     throw new HatcherySpawnError(
@@ -563,6 +572,7 @@ export async function runHatcherySpawn(
           group,
           profile: agentDeckProfile,
           traceKey,
+          sliceId: sliceId || undefined,
         },
         castra,
       ),
@@ -603,6 +613,22 @@ export async function runHatcherySpawn(
         backend: input.backend.name,
         profile: agentDeckProfile,
         group,
+      }),
+    );
+
+    // Publish the slice↔session↔spawn correlation to Herald NOW, at launch (#213),
+    // the push half of the durable stranded-steward fix. Hatchery owns these facts
+    // (it alone holds all three ids); Herald's projection then links the slice to
+    // its steward within a tick, so gated PR-discovery runs without waiting on the
+    // legate's job poll. Best-effort and MARCH_HERALD_URL-gated, mirroring the
+    // Brood push; a no-op for ad-hoc spawns with no sliceId.
+    await dispatch.spanAsync("herald.publish", () =>
+      publishStewardAttachedToHerald({
+        sliceId,
+        sessionId: stewardSessionId,
+        spawnId,
+        branch,
+        worktreePath: managerWorktree,
       }),
     );
 

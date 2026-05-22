@@ -81,6 +81,38 @@ describe("castra client — requests", () => {
     });
   });
 
+  it("forwards session metadata in the launch body (#214)", async () => {
+    const fetchImpl = vi.fn(async () =>
+      jsonResponse(201, {
+        session: {
+          sessionId: "s1",
+          title: "Steward",
+          group: "g",
+          branch: "march/spawn/x",
+          worktreePath: "/wt/x",
+          createdAt: "2026-05-20T00:00:00Z",
+          metadata: { sliceId: "slice-1", spawnId: "sp-1" },
+        },
+      }),
+    );
+    const client = new CastraClient({
+      baseUrl: "http://castra:9264",
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+    const session = await client.launchSession({
+      profile: "march",
+      repoPath: "/repo",
+      branch: "march/spawn/x",
+      title: "Steward",
+      metadata: { sliceId: "slice-1", spawnId: "sp-1" },
+    });
+    expect(session.metadata).toEqual({ sliceId: "slice-1", spawnId: "sp-1" });
+    const [, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
+    expect(JSON.parse(init.body as string)).toMatchObject({
+      metadata: { sliceId: "slice-1", spawnId: "sp-1" },
+    });
+  });
+
   it("lists sessions via GET with the profile + group query", async () => {
     const fetchImpl = vi.fn(async () => jsonResponse(200, { sessions: [{ sessionId: "s1", group: "g" }] }));
     const client = new CastraClient({ baseUrl: "http://castra:9264", fetchImpl: fetchImpl as unknown as typeof fetch });

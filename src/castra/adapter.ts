@@ -304,6 +304,10 @@ export interface LaunchSessionInput {
   readonly model?: string;
   /** False attaches to an existing worktree/branch (steward relaunch). Default true. */
   readonly createBranch?: boolean;
+  /** Queryable session metadata (e.g. `{ sliceId, spawnId }`) Castra stores and
+   *  re-attaches on list/show (#214). agent-deck has no arbitrary-metadata store,
+   *  so Castra keeps its own `sessionId → payload` map. */
+  readonly metadata?: Record<string, string>;
 }
 
 /**
@@ -331,9 +335,28 @@ export interface AgentDeckAdapter {
 }
 
 export function createAgentDeckAdapter(): AgentDeckAdapter {
+  // Castra-owned session metadata + last-known branch, keyed by session id (#214).
+  // agent-deck cannot store arbitrary metadata, so Castra populates this at launch
+  // and re-attaches it on list/show. The branch is captured so a session whose
+  // agent-deck snapshot reports an empty `branch` still surfaces the one it was
+  // launched on (the stale-empty-branch symptom). In-memory: rebuilt on the next
+  // launch after a Castra restart; the durable correlation lives in Herald's fold
+  // via the #213 push, this is the self-healing pull-path backstop.
+  const sessionMeta = new Map<string, { metadata?: Record<string, string>; branch?: string }>();
+
+  /** Re-attach stored metadata + backfill an empty branch onto a snapshot session. */
+  function enrich(session: CastraSession): CastraSession {
+    const stored = sessionMeta.get(session.sessionId);
+    if (!stored) return session;
+    const metadata = session.metadata ?? stored.metadata;
+    const branch = session.branch || stored.branch || "";
+    if (metadata === session.metadata && branch === session.branch) return session;
+    return { ...session, branch, ...(metadata ? { metadata } : {}) };
+  }
+
   return {
     list({ profile, group }) {
-      const sessions = listSnapshot(profile);
+      const sessions = listSnapshot(profile).map(enrich);
       return group ? sessions.filter((s) => s.group === group) : sessions;
     },
 
@@ -405,14 +428,22 @@ export function createAgentDeckAdapter(): AgentDeckAdapter {
         // Swallow — see comment above.
       }
 
+      const branch = launched.branch || input.branch;
+      // Record the correlation metadata + launch branch so subsequent list/show
+      // can self-describe this session (#214).
+      sessionMeta.set(launched.sessionId, {
+        ...(input.metadata ? { metadata: input.metadata } : {}),
+        branch,
+      });
       return {
         sessionId: launched.sessionId,
         title: launched.title || input.title,
         group: launched.group || input.group,
-        branch: launched.branch || input.branch,
+        branch,
         worktreePath,
         createdAt: launched.createdAt,
         status: launched.status,
+        ...(input.metadata ? { metadata: input.metadata } : {}),
       };
     },
 
@@ -421,7 +452,7 @@ export function createAgentDeckAdapter(): AgentDeckAdapter {
       if (!session) {
         throw new CastraNotFoundError(`session "${sessionId}" not found.`);
       }
-      return session;
+      return enrich(session);
     },
 
     send({ profile, sessionId, prompt }) {
@@ -455,6 +486,7 @@ export function createAgentDeckAdapter(): AgentDeckAdapter {
     remove({ profile, sessionId, pruneWorktree }) {
       try {
         runAgentDeck(buildSessionRemoveArgs(profile, sessionId, pruneWorktree), false);
+        sessionMeta.delete(sessionId);
         return { removed: true };
       } catch (err) {
         const stderr = (err as AgentDeckExecError).stderr ?? "";

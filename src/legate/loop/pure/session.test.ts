@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   addBranchVariants,
   isWorkerSession,
+  looseSessionMatch,
   prMatchesBranches,
   prNumber,
   sessionMatchesSlice,
@@ -21,6 +22,27 @@ describe("session pure helpers", () => {
     expect(sessionMatchesSlice({ title: "s1" }, { worker_session_id: "s1" })).toBe(true);
     expect(sessionMatchesSlice({ id: "x" }, { worker_session_id: "s1" })).toBe(false);
     expect(sessionMatchesSlice({ id: "x" }, {})).toBe(false);
+  });
+
+  it("loosely matches a session to a slice by worktree, branch variants, or title (#210 gate)", () => {
+    // Worktree match.
+    expect(
+      looseSessionMatch({ worktree_path: "/wt/a" }, { worktree_path: "/wt/a" }),
+    ).toBe(true);
+    // Branch match, including the feature/ variant the steward actually runs on.
+    expect(
+      looseSessionMatch({ branch: "feature/smithy/x" }, { branch: "smithy/x" }),
+    ).toBe(true);
+    expect(
+      looseSessionMatch({ branch: "smithy/x" }, { branch: "feature/smithy/x" }),
+    ).toBe(true);
+    // Title/name equal to the slice id.
+    expect(looseSessionMatch({ title: "slice-7" }, { sliceId: "slice-7" })).toBe(true);
+    expect(looseSessionMatch({ name: "slice-7" }, { sliceId: "slice-7" })).toBe(true);
+    // No common signal → no match (and empties never cross-match).
+    expect(looseSessionMatch({ branch: "other" }, { branch: "smithy/x" })).toBe(false);
+    expect(looseSessionMatch({ worktree_path: "" }, { worktree_path: "" })).toBe(false);
+    expect(looseSessionMatch({}, { sliceId: "" })).toBe(false);
   });
 
   it("summarizes workers by status, bucketing unknowns to other", () => {

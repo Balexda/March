@@ -243,7 +243,8 @@ export async function completePendingHatcheryDispatches(state: any, ts: string, 
     };
     // Carry the steward sessionId on the transition so Herald's fold learns the
     // slice→session link (#210). Without it Herald's PR-discovery gate skips the
-    // steward forever, leaving real PRs stranded in an endless nudge loop.
+    // steward forever, leaving real PRs stranded in an endless nudge loop. A
+    // restart's rebuild keeps the link too. Complements the Hatchery push (#213).
     deps.emitTransition({ type: "slice.stage.changed", sliceId, stage: "implementing", sessionId: manager.sessionId || undefined });
     // Clear any transient retry counters for this slice — it cleanly transitioned
     // to implementing, so prior transient failures no longer matter.

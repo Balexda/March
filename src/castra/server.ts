@@ -195,6 +195,16 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
             group: groupSchema,
             model: { type: "string", minLength: 1 },
             createBranch: { type: "boolean" },
+            // Queryable session metadata (#214): a small string→string map Castra
+            // stores and returns from listSessions/show. Bounded on key length,
+            // value length, AND entry count so it stays a correlation map, not
+            // arbitrary blob storage / an unbounded request.
+            metadata: {
+              type: "object",
+              maxProperties: 16,
+              propertyNames: { type: "string", maxLength: 64 },
+              additionalProperties: { type: "string", maxLength: 256 },
+            },
           },
         },
       },
@@ -208,6 +218,7 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
         group?: string;
         model?: string;
         createBranch?: boolean;
+        metadata?: Record<string, string>;
       };
       const session = withCastraSpan(
         {
@@ -224,6 +235,7 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
             group: body.group ?? CASTRA_DEFAULT_GROUP,
             model: body.model,
             createBranch: body.createBranch,
+            metadata: body.metadata,
           }),
       );
       return reply.code(201).send({ session });

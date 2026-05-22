@@ -1,6 +1,6 @@
 import type { LoopMeta } from "../meta.js";
 import type { LoopState, SliceExternalState, SmithyView } from "./types.js";
-import { sessionMatchesSlice, summarizeWorkers } from "../pure/session.js";
+import { looseSessionMatch, summarizeWorkers } from "../pure/session.js";
 import { isTerminalSlice } from "../pure/slice.js";
 import { readySmithyItems } from "../pure/smithy-graph.js";
 import type { ObservedSession, SystemState } from "../../../herald/events.js";
@@ -215,6 +215,37 @@ export async function senseFromHerald(deps: SenseDeps, herald: HeraldInbox, prev
 }
 
 /**
+ * Reconcile a projection slice to a live Castra session, in priority order:
+ *
+ *   1. **Exact recorded id** — the slice's `sessionId` from a correlation event
+ *      (#213 push, #214 metadata, or the handoff transition). When present this
+ *      is authoritative; if no live session carries it the steward is gone, so we
+ *      return null rather than mis-attaching by a looser heuristic.
+ *   2. **Self-described metadata** (#214) — a session whose `metadata.sliceId`
+ *      equals this slice. Exact, and survives a missed push.
+ *   3. **Loose worktree/branch/title match** (#210 gate) — the last-resort
+ *      fallback so a missing id degrades to match-by-worktree, not skip-discovery.
+ */
+export function resolveSliceSession(
+  sessions: any[],
+  sliceId: string,
+  s: { sessionId?: string; branch?: string; worktreePath?: string },
+): any | null {
+  const recordedId = String(s.sessionId || "");
+  if (recordedId) {
+    // Authoritative: match the session id EXACTLY. The result's `id` is used as
+    // the effective sessionId for PR/output reads, so matching `title`/`name`
+    // here (as `sessionMatchesSlice` does) could attach the slice to the wrong
+    // steward if another live session's title happened to equal the recorded id.
+    return sessions.find((sx) => String(sx?.id ?? "") === recordedId) ?? null;
+  }
+  const byMeta = sessions.find((sx) => sx?.metadata?.sliceId === sliceId);
+  if (byMeta) return byMeta;
+  const loose = { sliceId, branch: s.branch, worktree_path: s.worktreePath };
+  return sessions.find((sx) => looseSessionMatch(sx, loose)) ?? null;
+}
+
+/**
  * Stage 1 for the Herald observation service (#176): assemble the observed
  * {@link LoopState} the diff folds into events, sourcing the slices-to-observe
  * from Herald's OWN projection (`prev`, fed by the legate's `slice.dispatched`
@@ -248,8 +279,16 @@ export async function senseObserved(deps: SenseDeps, prev: SystemState): Promise
   const perSlice: Record<string, SliceExternalState> = {};
   for (const [sliceId, s] of Object.entries(prev.slices)) {
     if (s.archived) continue;
-    const sessionId = String(s.sessionId || "");
-    if (!sessionId) continue;
+    // Resolve the steward session for this slice. A slice with a recorded
+    // sessionId (#213 push / #214 metadata / handoff transition) matches by exact
+    // id; a slice WITHOUT one degrades to Castra's self-described metadata (#214)
+    // and then a worktree/branch/title match (#210 gate) instead of skipping
+    // discovery entirely — which is what stranded stewards whose PRs were never
+    // adopted (the #210 bug). If nothing resolves, there is no live session to
+    // observe, so skip.
+    const session = resolveSliceSession(sessions, sliceId, s);
+    if (!session) continue;
+    const sessionId = String(session.id);
     const sliceLike = {
       pr: s.pr,
       branch: s.branch,
@@ -257,7 +296,6 @@ export async function senseObserved(deps: SenseDeps, prev: SystemState): Promise
       worker_session_id: sessionId,
       stage: s.stage,
     };
-    if (!sessions.some((sx) => sessionMatchesSlice(sx, sliceLike))) continue;
     if (isTerminalSlice(sliceLike)) continue;
     const entry: SliceExternalState = {};
     try {

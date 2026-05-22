@@ -95,6 +95,9 @@ function toLoopSession(s: any) {
     branch: s.branch,
     worktree_path: s.worktreePath,
     created_at: s.createdAt,
+    // Carry Castra's self-described metadata (#214) so Herald's observer can
+    // reconcile a session to its slice by exact sliceId (`senseObserved`).
+    metadata: s.metadata,
   };
 }
 
