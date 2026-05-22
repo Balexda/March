@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { recordCastraRequest, statusClass, withCastraSpan } from "./metrics.js";
+import {
+  recordCastraRequest,
+  startCastraHeartbeat,
+  statusClass,
+  withCastraSpan,
+} from "./metrics.js";
 
 describe("castra metrics", () => {
   it("maps status codes to a status class", () => {
@@ -32,5 +37,11 @@ describe("castra metrics", () => {
         throw new Error("boom");
       }),
     ).toThrow("boom");
+  });
+
+  it("startCastraHeartbeat returns a no-op stopper when disabled", () => {
+    const stop = startCastraHeartbeat(10);
+    expect(typeof stop).toBe("function");
+    expect(() => stop()).not.toThrow();
   });
 });

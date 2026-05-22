@@ -1,5 +1,6 @@
 import { randomUUID, timingSafeEqual } from "node:crypto";
 import Fastify, {
+  type FastifyBaseLogger,
   type FastifyInstance,
   type FastifyRequest,
 } from "fastify";
@@ -35,8 +36,13 @@ export interface BuildServerOptions {
    * posture rather than a silent hole.
    */
   readonly token?: string;
-  /** Fastify logger config; defaults to off (callers/tests opt in). */
-  readonly logger?: boolean;
+  /**
+   * Fastify logger. Pass a pino instance (the serve entry passes
+   * `createCastraLogger()` so request logs ship to Loki under
+   * `service_name=march-castra`) or a boolean. Defaults to off so callers/tests
+   * opt in.
+   */
+  readonly logger?: FastifyBaseLogger | boolean;
   /** Process start time for `/status` uptime; defaults to now. */
   readonly startedAt?: number;
 }
@@ -89,7 +95,13 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
   const token = options.token?.trim() || undefined;
   const startedAt = options.startedAt ?? Date.now();
 
-  const app = Fastify({ logger: options.logger ?? false });
+  // A logger instance wires through Fastify's `loggerInstance`; a boolean (or
+  // the off default) goes through `logger` so request logs stay disabled.
+  const loggerOption = options.logger ?? false;
+  const app =
+    typeof loggerOption === "boolean"
+      ? Fastify({ logger: loggerOption })
+      : Fastify({ loggerInstance: loggerOption });
 
   // Auth: gate every /v1/* route behind the shared bearer token. Health/status
   // stay open. Skipped entirely when no token is configured.

@@ -19,6 +19,46 @@
     {
       "collapsed": false,
       "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "id": 11,
+      "title": "Service health",
+      "type": "row",
+      "panels": []
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "description": "Heartbeat ticks in the last 5m. Castra emits one tick every 15s; >0 means it is alive and exporting metrics. Global (one shared host) — not filtered by profile.",
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "thresholds" }, "mappings": [], "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }, { "color": "green", "value": 1 }] }, "unit": "short" },
+        "overrides": []
+      },
+      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 1 },
+      "id": 12,
+      "options": { "colorMode": "background", "graphMode": "none", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "auto" },
+      "title": "Heartbeat (5m)",
+      "type": "stat",
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "prometheus" }, "editorMode": "code", "expr": "sum(increase(march_castra_heartbeat_total[5m]))", "refId": "A" }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "description": "Process uptime of the Castra service.",
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "thresholds" }, "mappings": [], "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] }, "unit": "s" },
+        "overrides": []
+      },
+      "gridPos": { "h": 6, "w": 6, "x": 6, "y": 1 },
+      "id": 13,
+      "options": { "colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "auto" },
+      "title": "Uptime",
+      "type": "stat",
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "prometheus" }, "editorMode": "code", "expr": "max(march_castra_uptime_seconds)", "refId": "A" }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 7 },
       "id": 1,
       "title": "Castra API (RED)",
       "type": "row",
@@ -30,7 +70,7 @@
         "defaults": { "unit": "reqps", "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] } },
         "overrides": []
       },
-      "gridPos": { "h": 7, "w": 6, "x": 0, "y": 1 },
+      "gridPos": { "h": 7, "w": 6, "x": 0, "y": 8 },
       "id": 2,
       "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false } },
       "title": "Request rate",
@@ -55,7 +95,7 @@
         },
         "overrides": []
       },
-      "gridPos": { "h": 7, "w": 6, "x": 6, "y": 1 },
+      "gridPos": { "h": 7, "w": 6, "x": 6, "y": 8 },
       "id": 3,
       "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false } },
       "title": "Error ratio (5xx)",
@@ -73,7 +113,7 @@
     {
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "fieldConfig": { "defaults": { "unit": "reqps", "custom": { "drawStyle": "line", "fillOpacity": 10, "stacking": { "mode": "normal", "group": "A" } } }, "overrides": [] },
-      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 1 },
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 8 },
       "id": 4,
       "options": { "legend": { "calcs": [], "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
       "title": "Request rate by status class",
@@ -91,7 +131,7 @@
     {
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "fieldConfig": { "defaults": { "unit": "s", "custom": { "drawStyle": "line", "fillOpacity": 10 } }, "overrides": [] },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 15 },
       "id": 5,
       "options": { "legend": { "calcs": [], "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
       "title": "Request duration percentiles",
@@ -123,7 +163,7 @@
     {
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 15 },
       "id": 6,
       "options": { "showHeader": true },
       "title": "Requests by route & status class (in range)",
@@ -143,7 +183,7 @@
     {
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "fieldConfig": { "defaults": { "unit": "s", "custom": { "drawStyle": "line", "fillOpacity": 10 } }, "overrides": [] },
-      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 16 },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 23 },
       "id": 7,
       "options": { "legend": { "calcs": [], "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
       "title": "p95 request duration by route",
@@ -160,7 +200,7 @@
     },
     {
       "collapsed": false,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 24 },
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 31 },
       "id": 8,
       "title": "Logs & traces",
       "type": "row",
@@ -169,7 +209,7 @@
     {
       "datasource": { "type": "loki", "uid": "loki" },
       "description": "Castra service logs (service.name=march-castra). The $profile filter is a no-op until Castra logs carry a profile field; /healthz liveness lines are dropped.",
-      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 25 },
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 32 },
       "id": 9,
       "options": {
         "dedupStrategy": "none",
@@ -196,7 +236,7 @@
       "datasource": { "type": "tempo", "uid": "tempo" },
       "description": "Recent Castra request traces (service.name=march-castra). Mutating ops (launch/send/set/remove) emit castra.<op> spans; with an x-march-slice-id header they nest under the dispatch trace. Click a trace id for the waterfall.",
       "fieldConfig": { "defaults": {}, "overrides": [] },
-      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 25 },
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 32 },
       "id": 10,
       "options": {},
       "targets": [

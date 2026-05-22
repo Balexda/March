@@ -1,4 +1,6 @@
+import { createCastraLogger } from "../observability/logger.js";
 import { initOtel } from "../observability/otel.js";
+import { startCastraHeartbeat } from "./metrics.js";
 import { buildServer } from "./server.js";
 import {
   CASTRA_SERVICE_NAME,
@@ -31,7 +33,13 @@ export async function runCastraServer(options: RunCastraServerOptions = {}): Pro
   const host = options.host ?? "127.0.0.1";
   const token = options.token ?? process.env[CASTRA_TOKEN_ENV];
 
-  const app = buildServer({ token, logger: true, startedAt: Date.now() });
+  // Wire the OTLP pino logger so request logs ship to Loki under
+  // service_name=march-castra (mirrors Brood/Hatchery/Herald).
+  const app = buildServer({
+    token,
+    logger: createCastraLogger(),
+    startedAt: Date.now(),
+  });
 
   if (!token) {
     app.log.warn(
@@ -39,6 +47,10 @@ export async function runCastraServer(options: RunCastraServerOptions = {}): Pro
         "and do not publish the port on a public interface.",
     );
   }
+
+  // Liveness heartbeat + uptime gauge — gives Castra an UP/down tile like the
+  // other services. No-op when telemetry is disabled.
+  const stopHeartbeat = startCastraHeartbeat();
 
   await app.listen({ port, host });
   app.log.info(`castra listening on http://${host}:${port}`);
@@ -51,6 +63,7 @@ export async function runCastraServer(options: RunCastraServerOptions = {}): Pro
       app.log.info(`received ${signal}, shutting down`);
       void (async () => {
         try {
+          stopHeartbeat();
           await app.close();
         } finally {
           await otel.shutdown();

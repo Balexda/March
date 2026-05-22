@@ -47,6 +47,13 @@ export function resolveHeraldLogFilePath(
   return resolveServiceLogFilePath("herald.jsonl", "MARCH_HERALD_LOG_DIR", env);
 }
 
+/** Castra service log file: `$MARCH_CASTRA_LOG_DIR/castra.jsonl`. */
+export function resolveCastraLogFilePath(
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  return resolveServiceLogFilePath("castra.jsonl", "MARCH_CASTRA_LOG_DIR", env);
+}
+
 /**
  * Map a pino numeric level to its OpenTelemetry severity. pino levels:
  * trace=10 debug=20 info=30 warn=40 error=50 fatal=60. Exported for testing.
@@ -232,6 +239,29 @@ export function createHeraldLogger(
   return createServiceLogger({
     serviceName: options.name ?? "march-herald",
     logFilePath: options.logFilePath ?? resolveHeraldLogFilePath(env),
+    level: options.level,
+    env,
+    sync: options.sync,
+  });
+}
+
+export interface CastraLoggerOptions {
+  readonly logFilePath?: string;
+  readonly name?: string;
+  readonly level?: LevelWithSilent;
+  readonly env?: NodeJS.ProcessEnv;
+  /** Synchronous file writes. Default false (buffered); set true in tests/CI. */
+  readonly sync?: boolean;
+}
+
+/** Castra service logger (`march-castra` → `castra.jsonl`). */
+export function createCastraLogger(
+  options: CastraLoggerOptions = {},
+): PinoLogger {
+  const env = options.env ?? process.env;
+  return createServiceLogger({
+    serviceName: options.name ?? "march-castra",
+    logFilePath: options.logFilePath ?? resolveCastraLogFilePath(env),
     level: options.level,
     env,
     sync: options.sync,
