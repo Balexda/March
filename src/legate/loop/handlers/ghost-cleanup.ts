@@ -57,8 +57,9 @@ export async function apply(decisions: GhostDecision[], ctx: HandlerContext, sta
   const res = emptyHandlerResult();
   for (const d of decisions) {
     // A ghost steward has no slice, so it keys its trace off the session id — the
-    // same key the legate.ghost-cleanup action span uses — so brood.teardown nests
-    // under it instead of orphaning a root (#234).
+    // same key the legate.ghost-cleanup action span uses — so brood.teardown shares
+    // that trace (sibling under the deterministic session anchor) instead of
+    // orphaning a separate root (#234).
     const teardown = await ctx.broodTeardown(d.sessionId, { force: true, reason: "ghost-steward", traceKey: d.sessionId });
     if (teardown.ok) {
       dropSession(state, d.sessionId);

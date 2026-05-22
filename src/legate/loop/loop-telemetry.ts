@@ -31,8 +31,9 @@ export function emitActionEventSpan(event: any, emit: LoopSpanEmitter = defaultE
   if (!event || typeof event !== "object") return;
 
   // Ghost-steward cleanup isn't tied to a slice, so it keys its trace off the
-  // session id (the same key the runtime gives brood.teardown) — its brood.teardown
-  // nests under this span. Handled before the slice-id guard since the event
+  // session id — the same key the runtime gives brood.teardown — so the two share
+  // one trace (siblings under the deterministic session anchor) instead of each
+  // orphaning a separate root. Handled before the slice-id guard since the event
   // carries no slice_id. A `*-failed` action marks the span errored.
   if (event.kind === "ghost_cleanup") {
     const sessionId = event.session_id;
