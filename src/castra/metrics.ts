@@ -22,13 +22,23 @@ export interface RecordCastraRequestInput {
   readonly durationSeconds: number;
 }
 
+/** How often `startCastraHeartbeat` ticks the liveness counter. */
+const HEARTBEAT_INTERVAL_MS = 15000;
+
 // OTel expects each instrument created once and reused; cache keyed by Meter so
 // a fresh initOtel (e.g. between tests) rebuilds against the new provider.
 let cachedMeter: Meter | undefined;
 let requestsCounter: Counter | undefined;
 let durationHistogram: Histogram | undefined;
+let heartbeatCounter: Counter | undefined;
 
-function castraInstruments(meter: Meter): { counter: Counter; histogram: Histogram } {
+interface CastraInstruments {
+  counter: Counter;
+  histogram: Histogram;
+  heartbeat: Counter;
+}
+
+function castraInstruments(meter: Meter): CastraInstruments {
   if (meter !== cachedMeter) {
     cachedMeter = meter;
     requestsCounter = meter.createCounter("march.castra.requests", {
@@ -39,8 +49,24 @@ function castraInstruments(meter: Meter): { counter: Counter; histogram: Histogr
       description: "Castra API request wall-clock duration",
       unit: "s",
     });
+    heartbeatCounter = meter.createCounter("march.castra.heartbeat", {
+      description: "Liveness heartbeat ticks emitted by the castra service",
+      unit: "1",
+    });
+    // Uptime as an observable gauge — registered once per meter alongside the
+    // other instruments so a fresh provider re-attaches the callback.
+    meter
+      .createObservableGauge("march.castra.uptime", {
+        description: "Castra service process uptime",
+        unit: "s",
+      })
+      .addCallback((result) => result.observe(process.uptime()));
   }
-  return { counter: requestsCounter!, histogram: durationHistogram! };
+  return {
+    counter: requestsCounter!,
+    histogram: durationHistogram!,
+    heartbeat: heartbeatCounter!,
+  };
 }
 
 export function recordCastraRequest(input: RecordCastraRequestInput): void {
@@ -59,6 +85,24 @@ export function recordCastraRequest(input: RecordCastraRequestInput): void {
   histogram.record(input.durationSeconds, attributes);
 }
 
+/**
+ * Start the periodic liveness heartbeat (and register the uptime gauge).
+ * Returns a stop function. No-op (returns a no-op stopper) when telemetry is
+ * disabled. The interval is unref'd so it never keeps the process alive.
+ * Mirrors `startHeartbeat`/`startBroodHeartbeat`.
+ */
+export function startCastraHeartbeat(
+  intervalMs: number = HEARTBEAT_INTERVAL_MS,
+): () => void {
+  const otel = getActiveOtel();
+  if (!otel.enabled) return () => {};
+  const { heartbeat } = castraInstruments(otel.getMeter());
+  heartbeat.add(1); // tick immediately so liveness is visible before the first interval
+  const timer = setInterval(() => heartbeat.add(1), intervalMs);
+  timer.unref();
+  return () => clearInterval(timer);
+}
+
 /** Map an HTTP status code to its status class label. */
 export function statusClass(status: number): string {
   return `${Math.floor(status / 100)}xx`;
@@ -75,19 +119,34 @@ export interface CastraSpanInput {
   readonly attributes?: Attributes;
 }
 
+/** The `castra.<op>` span's trace ids, for explicit log correlation. */
+export interface CastraSpanContext {
+  readonly traceId: string;
+  readonly spanId: string;
+}
+
 /**
  * Run a mutating operation inside a `castra.<op>` span. No-op (just runs `fn`)
  * when telemetry is disabled. Records the exception and marks the span errored
  * if `fn` throws, so failures surface in traces rather than vanishing.
+ *
+ * `fn` receives the span's `{ traceId, spanId }` (or `undefined` when telemetry
+ * is off). The handler attaches them to its log line EXPLICITLY — this codebase
+ * registers no OTel ContextManager, so `getActiveSpan` (and thus the pino
+ * traceMixin) can't pick them up; explicit attach is what makes Grafana's "Logs
+ * for this span" resolve, mirroring `emitLoopLog`.
  */
-export function withCastraSpan<T>(input: CastraSpanInput, fn: () => T): T {
+export function withCastraSpan<T>(
+  input: CastraSpanInput,
+  fn: (span: CastraSpanContext | undefined) => T,
+): T {
   const dispatch = startDispatchSpan({
     traceKey: input.traceKey,
     rootName: `castra.${input.op}`,
     attributes: input.attributes,
   });
   try {
-    const result = fn();
+    const result = fn(dispatch.spanContext());
     dispatch.end();
     return result;
   } catch (err) {

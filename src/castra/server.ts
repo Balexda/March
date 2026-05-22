@@ -1,5 +1,6 @@
 import { randomUUID, timingSafeEqual } from "node:crypto";
 import Fastify, {
+  type FastifyBaseLogger,
   type FastifyInstance,
   type FastifyRequest,
 } from "fastify";
@@ -14,7 +15,12 @@ import {
   createAgentDeckAdapter,
   type AgentDeckAdapter,
 } from "./adapter.js";
-import { recordCastraRequest, statusClass, withCastraSpan } from "./metrics.js";
+import {
+  type CastraSpanContext,
+  recordCastraRequest,
+  statusClass,
+  withCastraSpan,
+} from "./metrics.js";
 import {
   CastraAgentDeckError,
   CastraConflictError,
@@ -35,8 +41,13 @@ export interface BuildServerOptions {
    * posture rather than a silent hole.
    */
   readonly token?: string;
-  /** Fastify logger config; defaults to off (callers/tests opt in). */
-  readonly logger?: boolean;
+  /**
+   * Fastify logger. Pass a pino instance (the serve entry passes
+   * `createCastraLogger()` so request logs ship to Loki under
+   * `service_name=march-castra`) or a boolean. Defaults to off so callers/tests
+   * opt in.
+   */
+  readonly logger?: FastifyBaseLogger | boolean;
   /** Process start time for `/status` uptime; defaults to now. */
   readonly startedAt?: number;
 }
@@ -66,10 +77,40 @@ function extractProfile(request: FastifyRequest): string {
   return "unknown";
 }
 
-function traceKeyFor(request: FastifyRequest): string {
+/** The dispatch slice id from the x-march-slice-id header, when the caller set it. */
+function sliceIdFrom(request: FastifyRequest): string | undefined {
   const header = request.headers[SLICE_ID_HEADER];
-  if (typeof header === "string" && header) return header;
-  return `castra-${randomUUID()}`;
+  return typeof header === "string" && header ? header : undefined;
+}
+
+function traceKeyFor(request: FastifyRequest): string {
+  return sliceIdFrom(request) ?? `castra-${randomUUID()}`;
+}
+
+/** Max prompt chars recorded on a span/log — a preview for investigation, never the full body. */
+const MESSAGE_PREVIEW_MAX = 200;
+
+function messagePreview(prompt: string): string {
+  return prompt.length > MESSAGE_PREVIEW_MAX
+    ? `${prompt.slice(0, MESSAGE_PREVIEW_MAX)}…`
+    : prompt;
+}
+
+/** A `march.slice_id` attribute fragment, present only when the header was set. */
+function sliceAttr(sliceId: string | undefined): { "march.slice_id"?: string } {
+  return sliceId ? { "march.slice_id": sliceId } : {};
+}
+
+/**
+ * Trace-context log fields for the `castra.<op>` span. Attached EXPLICITLY (no
+ * ContextManager is registered, so the pino traceMixin sees no active span);
+ * the pino→OTel bridge promotes these to the log record's trace context so
+ * Grafana's "Logs for this span" resolves. Empty when telemetry is off.
+ */
+function traceLogFields(
+  span: CastraSpanContext | undefined,
+): { trace_id?: string; span_id?: string } {
+  return span ? { trace_id: span.traceId, span_id: span.spanId } : {};
 }
 
 function bearerMatches(authorization: string | undefined, token: string): boolean {
@@ -89,7 +130,13 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
   const token = options.token?.trim() || undefined;
   const startedAt = options.startedAt ?? Date.now();
 
-  const app = Fastify({ logger: options.logger ?? false });
+  // A logger instance wires through Fastify's `loggerInstance`; a boolean (or
+  // the off default) goes through `logger` so request logs stay disabled.
+  const loggerOption = options.logger ?? false;
+  const app =
+    typeof loggerOption === "boolean"
+      ? Fastify({ logger: loggerOption })
+      : Fastify({ loggerInstance: loggerOption });
 
   // Auth: gate every /v1/* route behind the shared bearer token. Health/status
   // stay open. Skipped entirely when no token is configured.
@@ -220,14 +267,19 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
         createBranch?: boolean;
         metadata?: Record<string, string>;
       };
+      const sliceId = sliceIdFrom(request);
       const session = withCastraSpan(
         {
           op: "launch",
           traceKey: traceKeyFor(request),
-          attributes: { "march.profile": body.profile, "castra.branch": body.branch },
+          attributes: {
+            "march.profile": body.profile,
+            "castra.branch": body.branch,
+            ...sliceAttr(sliceId),
+          },
         },
-        () =>
-          adapter.launch({
+        (span) => {
+          const launched = adapter.launch({
             profile: body.profile,
             repoPath: body.repoPath,
             branch: body.branch,
@@ -236,7 +288,20 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
             model: body.model,
             createBranch: body.createBranch,
             metadata: body.metadata,
-          }),
+          });
+          request.log.info(
+            {
+              "castra.op": "launch",
+              "castra.session_id": launched.sessionId,
+              "march.profile": body.profile,
+              "castra.branch": body.branch,
+              ...sliceAttr(sliceId),
+              ...traceLogFields(span),
+            },
+            "castra session launched",
+          );
+          return launched;
+        },
       );
       return reply.code(201).send({ session });
     },
@@ -276,9 +341,23 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
     async (request, reply) => {
       const { id } = request.params as { id: string };
       const { profile, prompt } = request.body as { profile: string; prompt: string };
+      const sliceId = sliceIdFrom(request);
+      const sendFields = {
+        "march.profile": profile,
+        "castra.session_id": id,
+        "castra.message_bytes": Buffer.byteLength(prompt, "utf8"),
+        "castra.message_preview": messagePreview(prompt),
+        ...sliceAttr(sliceId),
+      };
       withCastraSpan(
-        { op: "send", traceKey: traceKeyFor(request), attributes: { "march.profile": profile } },
-        () => adapter.send({ profile, sessionId: id, prompt }),
+        { op: "send", traceKey: traceKeyFor(request), attributes: sendFields },
+        (span) => {
+          request.log.info(
+            { "castra.op": "send", ...sendFields, ...traceLogFields(span) },
+            "castra send accepted",
+          );
+          return adapter.send({ profile, sessionId: id, prompt });
+        },
       );
       return reply.code(202).send({ ok: true });
     },
@@ -329,9 +408,22 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
         key: string;
         value: string;
       };
+      const sliceId = sliceIdFrom(request);
+      const setFields = {
+        "march.profile": profile,
+        "castra.session_id": id,
+        "castra.set_key": key,
+        ...sliceAttr(sliceId),
+      };
       withCastraSpan(
-        { op: "set", traceKey: traceKeyFor(request), attributes: { "march.profile": profile } },
-        () => adapter.set({ profile, sessionId: id, key, value }),
+        { op: "set", traceKey: traceKeyFor(request), attributes: setFields },
+        (span) => {
+          request.log.info(
+            { "castra.op": "set", ...setFields, ...traceLogFields(span) },
+            "castra session set",
+          );
+          return adapter.set({ profile, sessionId: id, key, value });
+        },
       );
       return { ok: true };
     },
@@ -358,9 +450,22 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
         profile: string;
         pruneWorktree?: boolean;
       };
+      const sliceId = sliceIdFrom(request);
+      const removeFields = {
+        "march.profile": profile,
+        "castra.session_id": id,
+        "castra.prune_worktree": pruneWorktree ?? false,
+        ...sliceAttr(sliceId),
+      };
       const result = withCastraSpan(
-        { op: "remove", traceKey: traceKeyFor(request), attributes: { "march.profile": profile } },
-        () => adapter.remove({ profile, sessionId: id, pruneWorktree: pruneWorktree ?? false }),
+        { op: "remove", traceKey: traceKeyFor(request), attributes: removeFields },
+        (span) => {
+          request.log.info(
+            { "castra.op": "remove", ...removeFields, ...traceLogFields(span) },
+            "castra session removed",
+          );
+          return adapter.remove({ profile, sessionId: id, pruneWorktree: pruneWorktree ?? false });
+        },
       );
       return { ok: true, removed: result.removed };
     },

@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { Writable } from "node:stream";
-import { trace } from "@opentelemetry/api";
+import { context as otelContext, trace, TraceFlags } from "@opentelemetry/api";
 import { SeverityNumber } from "@opentelemetry/api-logs";
 import pino from "pino";
 import { getActiveOtel, otelEnabled } from "./otel.js";
@@ -47,6 +47,13 @@ export function resolveHeraldLogFilePath(
   return resolveServiceLogFilePath("herald.jsonl", "MARCH_HERALD_LOG_DIR", env);
 }
 
+/** Castra service log file: `$MARCH_CASTRA_LOG_DIR/castra.jsonl`. */
+export function resolveCastraLogFilePath(
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  return resolveServiceLogFilePath("castra.jsonl", "MARCH_CASTRA_LOG_DIR", env);
+}
+
 /**
  * Map a pino numeric level to its OpenTelemetry severity. pino levels:
  * trace=10 debug=20 info=30 warn=40 error=50 fatal=60. Exported for testing.
@@ -86,11 +93,30 @@ export function emitOtelLogLine(line: string): void {
   const timestamp = typeof record.time === "number" ? record.time : Date.now();
   const body = typeof record.msg === "string" ? record.msg : "";
 
+  // Pull the trace ids out (injected by traceMixin from the active span) and
+  // carry them as the log record's TRACE CONTEXT — not just attributes — so the
+  // OTLP collector associates the line with its span and Grafana's "Logs for
+  // this span" resolves. Mirrors emitLoopLog in observability/logs.ts.
+  const recordTraceId = typeof record.trace_id === "string" ? record.trace_id : undefined;
+  const recordSpanId = typeof record.span_id === "string" ? record.span_id : undefined;
+
   const attributes: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(record)) {
     if (key === "level" || key === "time" || key === "msg") continue;
+    // trace_id/span_id move into the trace context below; don't duplicate them.
+    if (key === "trace_id" || key === "span_id") continue;
     if (value === undefined) continue;
     attributes[key] = value;
+  }
+
+  let logContext = otelContext.active();
+  if (recordTraceId && recordSpanId) {
+    logContext = trace.setSpanContext(logContext, {
+      traceId: recordTraceId,
+      spanId: recordSpanId,
+      traceFlags: TraceFlags.SAMPLED,
+      isRemote: true,
+    });
   }
 
   otel.getLogger().emit({
@@ -100,6 +126,7 @@ export function emitOtelLogLine(line: string): void {
     timestamp,
     // api-logs accepts maps/arrays as AnyValue; pino serializers can nest.
     attributes: attributes as Record<string, never>,
+    context: logContext,
   });
 }
 
@@ -232,6 +259,29 @@ export function createHeraldLogger(
   return createServiceLogger({
     serviceName: options.name ?? "march-herald",
     logFilePath: options.logFilePath ?? resolveHeraldLogFilePath(env),
+    level: options.level,
+    env,
+    sync: options.sync,
+  });
+}
+
+export interface CastraLoggerOptions {
+  readonly logFilePath?: string;
+  readonly name?: string;
+  readonly level?: LevelWithSilent;
+  readonly env?: NodeJS.ProcessEnv;
+  /** Synchronous file writes. Default false (buffered); set true in tests/CI. */
+  readonly sync?: boolean;
+}
+
+/** Castra service logger (`march-castra` → `castra.jsonl`). */
+export function createCastraLogger(
+  options: CastraLoggerOptions = {},
+): PinoLogger {
+  const env = options.env ?? process.env;
+  return createServiceLogger({
+    serviceName: options.name ?? "march-castra",
+    logFilePath: options.logFilePath ?? resolveCastraLogFilePath(env),
     level: options.level,
     env,
     sync: options.sync,

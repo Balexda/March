@@ -3,9 +3,11 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
+  createCastraLogger,
   createHatcheryLogger,
   emitOtelLogLine,
   pinoLevelToSeverity,
+  resolveCastraLogFilePath,
   resolveHatcheryLogFilePath,
 } from "./logger.js";
 import { SeverityNumber } from "@opentelemetry/api-logs";
@@ -20,6 +22,20 @@ describe("resolveHatcheryLogFilePath", () => {
   it("falls back to HOME/.march/logs", () => {
     expect(resolveHatcheryLogFilePath({ HOME: "/home/u" })).toBe(
       path.join("/home/u", ".march", "logs", "hatchery.jsonl"),
+    );
+  });
+});
+
+describe("resolveCastraLogFilePath", () => {
+  it("prefers MARCH_CASTRA_LOG_DIR", () => {
+    expect(
+      resolveCastraLogFilePath({ MARCH_CASTRA_LOG_DIR: "/march/logs" }),
+    ).toBe(path.join("/march/logs", "castra.jsonl"));
+  });
+
+  it("falls back to HOME/.march/logs", () => {
+    expect(resolveCastraLogFilePath({ HOME: "/home/u" })).toBe(
+      path.join("/home/u", ".march", "logs", "castra.jsonl"),
     );
   });
 });
@@ -46,6 +62,20 @@ describe("emitOtelLogLine", () => {
   it("ignores malformed lines without throwing", () => {
     expect(() => emitOtelLogLine("not json")).not.toThrow();
     expect(() => emitOtelLogLine("")).not.toThrow();
+  });
+
+  it("accepts lines carrying trace_id/span_id without throwing", () => {
+    expect(() =>
+      emitOtelLogLine(
+        JSON.stringify({
+          level: 30,
+          time: 1,
+          msg: "castra send accepted",
+          trace_id: "0af7651916cd43dd8448eb211c80319c",
+          span_id: "b7ad6b7169203331",
+        }),
+      ),
+    ).not.toThrow();
   });
 });
 
@@ -78,5 +108,37 @@ describe("createHatcheryLogger", () => {
     expect(lines[0].msg).toBe("spawn started");
     expect(lines[0].job_id).toBe("abc");
     expect(lines[0].level).toBe(30);
+  });
+});
+
+describe("createCastraLogger", () => {
+  let dir: string;
+
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), "march-castra-log-"));
+  });
+  afterEach(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("writes JSONL tagged march-castra even when telemetry is off", () => {
+    const logFilePath = path.join(dir, "nested", "castra.jsonl");
+    const logger = createCastraLogger({
+      logFilePath,
+      env: {}, // MARCH_OTEL unset -> file sink only
+      sync: true,
+    });
+    logger.info({ profile: "march" }, "session launched");
+
+    const lines = fs
+      .readFileSync(logFilePath, "utf-8")
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .map((l) => JSON.parse(l) as Record<string, unknown>);
+    expect(lines).toHaveLength(1);
+    expect(lines[0].name).toBe("march-castra");
+    expect(lines[0].msg).toBe("session launched");
+    expect(lines[0].profile).toBe("march");
   });
 });

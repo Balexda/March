@@ -27,6 +27,14 @@ export interface StartDispatchSpanInput {
  */
 export interface DispatchTrace {
   readonly enabled: boolean;
+  /**
+   * The root span's `{ traceId, spanId }`, or `undefined` when telemetry is off.
+   * Callers attach these to log records EXPLICITLY (this codebase registers no
+   * OTel ContextManager, so `context.with`/`getActiveSpan` can't carry them) so
+   * the line correlates to this span — Grafana's "Logs for this span". Mirrors
+   * how {@link traceIdForDispatch}/{@link spanIdForDispatch} feed `emitLoopLog`.
+   */
+  spanContext(): { traceId: string; spanId: string } | undefined;
   span<T>(name: string, fn: () => T, attributes?: Attributes): T;
   /**
    * Async sibling of {@link span}: brackets a child span around an awaited
@@ -45,6 +53,7 @@ export interface DispatchTrace {
 
 const NOOP_TRACE: DispatchTrace = {
   enabled: false,
+  spanContext: () => undefined,
   span: (_name, fn) => fn(),
   spanAsync: (_name, fn) => fn(),
   setAttributes: () => {},
@@ -80,6 +89,10 @@ export function startDispatchSpan(input: StartDispatchSpanInput): DispatchTrace 
 
   return {
     enabled: true,
+    spanContext() {
+      const sc = root.spanContext();
+      return { traceId: sc.traceId, spanId: sc.spanId };
+    },
     span<T>(name: string, fn: () => T, attributes?: Attributes): T {
       const child = tracer.startSpan(name, { attributes }, rootCtx);
       try {

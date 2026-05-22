@@ -442,12 +442,65 @@
     },
     {
       "datasource": {
-        "type": "grafana",
-        "uid": "-- Grafana --"
+        "type": "prometheus",
+        "uid": "prometheus"
       },
-      "description": "Castra interactive-session host. No heartbeat/uptime metric exists yet — tracked by #207. Shown as a neutral placeholder so the row never reports a false green.",
+      "description": "Castra interactive-session host. UP when it has emitted heartbeats in the last 5m. Global (one shared host) — not filtered by profile.",
       "fieldConfig": {
-        "defaults": {},
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [
+            {
+              "type": "special",
+              "options": {
+                "match": "null",
+                "result": {
+                  "text": "DOWN",
+                  "index": 0
+                }
+              }
+            },
+            {
+              "type": "range",
+              "options": {
+                "from": 0,
+                "to": 0,
+                "result": {
+                  "text": "DOWN",
+                  "index": 1
+                }
+              }
+            },
+            {
+              "type": "range",
+              "options": {
+                "from": 0.0001,
+                "to": 1000000000,
+                "result": {
+                  "text": "UP",
+                  "index": 2
+                }
+              }
+            }
+          ],
+          "noValue": "DOWN",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 0.0001
+              }
+            ]
+          },
+          "unit": "short"
+        },
         "overrides": []
       },
       "gridPos": {
@@ -458,17 +511,35 @@
       },
       "id": 5,
       "options": {
-        "code": {
-          "language": "plaintext",
-          "showLineNumbers": false,
-          "showMiniMap": false
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
         },
-        "content": "### Castra\n\n**no metric (#207)**\n\nNo heartbeat/uptime metric yet.",
-        "mode": "markdown"
+        "textMode": "value_and_name"
       },
       "pluginVersion": "12.2.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "sum(increase(march_castra_heartbeat_total[5m]))",
+          "legendFormat": "Castra",
+          "range": true,
+          "refId": "A"
+        }
+      ],
       "title": "Castra",
-      "type": "text"
+      "type": "stat"
     },
     {
       "collapsed": false,

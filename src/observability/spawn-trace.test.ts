@@ -13,6 +13,11 @@ describe("spawn-trace (disabled)", () => {
     expect(result).toBe(42);
   });
 
+  it("spanContext is undefined when disabled", () => {
+    const dispatch = startDispatchSpan({ traceKey: "k", rootName: "hatchery.spawn" });
+    expect(dispatch.spanContext()).toBeUndefined();
+  });
+
   it("propagates exceptions from the wrapped function", () => {
     const dispatch = startDispatchSpan({
       traceKey: "k",

@@ -118,6 +118,8 @@ warning if it runs without a token — acceptable only for a single-user dev box
 
 ## Observability
 
-The service reports `service.name=march-castra` and emits RED metrics + per-op
-spans — see [`Observability.md`](Observability.md) and the **March — Castra
-sessions host** Grafana dashboard. All telemetry is a no-op unless `MARCH_OTEL=1`.
+The service reports `service.name=march-castra` and emits RED metrics, a
+liveness heartbeat + uptime gauge, per-op spans, and request logs (via the OTLP
+pino logger) — see [`Observability.md`](Observability.md) and the **March —
+Castra sessions host** Grafana dashboard. All telemetry is a no-op unless
+`MARCH_OTEL=1`.

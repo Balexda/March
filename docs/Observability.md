@@ -208,11 +208,31 @@ and prompt bodies stay out of metrics (they belong in spans/logs).
 |---|---|---|
 | `march.castra.requests` (counter) | `march_castra_requests_total` | API requests by route + outcome |
 | `march.castra.request.duration` (histogram, `s`) | `march_castra_request_duration_seconds_{bucket,count,sum}` | API request wall-clock duration |
+| `march.castra.heartbeat` (counter) | `march_castra_heartbeat_total` | Liveness ticks (one every 15s while serving) |
+| `march.castra.uptime` (observable gauge, `s`) | `march_castra_uptime_seconds` | Process uptime of the Castra service |
 
 `outcome` is `success` (status < 500) or `failure`. Mutating requests
-(`launch`/`send`/`set`/`remove`) also emit a `castra.<op>` span; when the caller
-passes an `x-march-slice-id` header, the span keys off that dispatch slice id so
-it nests under the existing per-dispatch trace.
+(`launch`/`send`/`set`/`remove`) also emit a `castra.<op>` span carrying
+investigation-friendly attributes (these are span attributes, **not** metric
+labels, so high-cardinality values are fine): `castra.session_id`,
+`march.slice_id` (when the `x-march-slice-id` header is present),
+`castra.branch` (launch), and a truncated `castra.message_preview` +
+`castra.message_bytes` (send). When the caller passes `x-march-slice-id`, the
+span keys off that dispatch slice id so it nests under the existing per-dispatch
+trace; without it the span is a standalone root (the legate populating the slice
+header on **all** sends — not just dispatch — and emitting the parent loop-action
+span is a separate legate-side change).
+
+`castra serve` also ships request logs through the OTLP pino logger
+(`createCastraLogger`, `service.name=march-castra`) and starts a periodic
+heartbeat — giving Castra the same Service-health row (heartbeat / uptime) and
+Loki logs panel as the other services. Each `castra.<op>` emits one structured
+log line carrying the span's `trace_id`/`span_id`, attached **explicitly** from
+`DispatchTrace.spanContext()` — this codebase registers no OTel ContextManager,
+so the pino `traceMixin` sees no active span and `context.with` can't propagate
+one; explicit attach (the same approach as `emitLoopLog`) is what works. The
+pino→OTel bridge then promotes those ids to the log record's trace context, which
+is what makes Grafana's "Logs for this span" resolve for a `castra.*` span.
 
 #### Loop heartbeat metrics
 
@@ -379,7 +399,8 @@ forwarded loop logs (Loki, with trace links). It is filtered by `profile` /
 
 A third dashboard,
 [`docker/grafana/dashboards/march-castra.json`](../docker/grafana/dashboards/march-castra.json)
-("**March — Castra sessions host**"), shows the Castra API's RED metrics:
+("**March — Castra sessions host**"), opens with a Service-health row
+(heartbeat / uptime) and then shows the Castra API's RED metrics:
 request rate, 5xx error ratio, rate by status class, duration percentiles
 (p50/p95/p99), a route × status-class table, and p95 by route — with `profile`
 and `route` template variables.
@@ -388,9 +409,8 @@ The **Work Status** dashboard,
 [`docker/grafana/dashboards/march-work-status.json`](../docker/grafana/dashboards/march-work-status.json)
 ("**March — Work Status**", uid `march-work-status`), answers "where is the work
 right now" at a glance — no logs, no per-service RED. A service up/down row
-(Brood / Hatchery / Herald via their `_heartbeat_total`, Legate loop via
-`march_legate_loop_up`, plus a Castra placeholder that reads "no metric (#207)"
-rather than a false green) sits above the work buckets: **Dispatchable**
+(Brood / Hatchery / Herald / Castra via their `_heartbeat_total`, Legate loop via
+`march_legate_loop_up`) sits above the work buckets: **Dispatchable**
 (the #219-corrected `march_legate_queue_dispatchable`), **In spawn**
 (`slices{stage="hatchery-pending"}`), **In steward**
 (`implementing`+`pr-in-fix`+`pr-resolving-conflicts`), **Waiting for merge**
