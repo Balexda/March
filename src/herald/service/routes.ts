@@ -4,6 +4,7 @@ import {
   outcomeFromStatus,
   recordHeraldRequest,
 } from "../../observability/herald-metrics.js";
+import { startHeraldSpan } from "../../observability/herald-trace.js";
 import { createCastraClientFromEnv } from "../../castra/client.js";
 import type { EventStore } from "./store.js";
 import type { AppendEventInput, EventType } from "../events.js";
@@ -128,7 +129,27 @@ export async function registerRoutes(
 
   // Record every request keyed by route TEMPLATE (not the concrete path) to
   // keep metric cardinality bounded — the same rule the other services use.
+  // Requests are spanned SPARINGLY (the high-frequency GET /events drain and
+  // health polls would otherwise drown the traces): only mutations (POST) and
+  // 5xx failures get a span — the cases worth seeing in a debug trace. Read
+  // volume is left to the RED metrics above. The span is synthesized at response
+  // time with the real duration, nesting under any inbound traceparent.
   app.addHook("onResponse", async (request, reply) => {
+    const status = reply.statusCode;
+    if (request.method === "POST" || status >= 500) {
+      const tp = request.headers["traceparent"];
+      const traceparent = Array.isArray(tp) ? tp[0] : tp;
+      startHeraldSpan({
+        name: "herald.request",
+        traceparent,
+        startTimeMs: Date.now() - reply.elapsedTime,
+        attributes: {
+          "http.method": request.method,
+          "http.route": request.routeOptions.url ?? "unknown",
+          "http.status_code": status,
+        },
+      }).end({ error: status >= 500 });
+    }
     recordHeraldRequest({
       route: request.routeOptions.url ?? "unknown",
       method: request.method,
