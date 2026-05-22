@@ -54,7 +54,7 @@ must not act on.
 
 | Handler | What it does |
 |---------|--------------|
-| [`cleanup`](./handlers/cleanup.ts) | A slice whose PR is `MERGED`/`CLOSED` is done → request Brood teardown, then archive the slice. Defers (never archives over an orphan) if Brood can't confirm. |
+| [`cleanup`](./handlers/cleanup.ts) | A slice whose PR is `MERGED`/`CLOSED` is done → request Brood teardown, then archive the slice. On a Brood 404 ([#225](https://github.com/Balexda/March/issues/225)): if the steward is still live in Castra, reconcile it into Brood from the observation (exact worktree/branch path, [#155](https://github.com/Balexda/March/issues/155)) and re-tear-down; if it's genuinely gone, archive idempotently. A real teardown failure defers (never archives over an orphan) and escalates to the operator after `MAX_CLEANUP_ATTEMPTS` instead of retrying forever. |
 | [`ghost-cleanup`](./handlers/ghost-cleanup.ts) | A worker session whose worktree isn't tracked by any non-terminal slice (and old enough to not be a launch race) is an orphan → request Brood teardown. |
 | [`relaunch`](./handlers/relaunch.ts) | A non-terminal slice with an open PR but a vanished worker → re-attach a fresh opus steward to the existing worktree/branch. Throttled per slice. |
 | [`babysit`](./handlers/babysit.ts) | The steward watchdog: login-block recovery, worker-error escalation, stranded-steward nudges, PR discovery, conflict / review-thread / CI handling, post-dispatch re-nudges. |

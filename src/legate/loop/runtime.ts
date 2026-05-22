@@ -36,7 +36,7 @@ import { senseFromHerald } from "./state/sense.js";
 import { createSenseIo, type SenseIo } from "../../observe/sense-io.js";
 import { runTick as coordinatorRunTick } from "./coordinator.js";
 import { runHeartbeat } from "./heartbeat.js";
-import { broodTeardown as broodTeardownCli } from "./clients/brood.js";
+import { broodRegister as broodRegisterCli, broodTeardown as broodTeardownCli } from "./clients/brood.js";
 import { LegateHerald } from "./clients/herald.js";
 // Dispatch ops (ask Hatchery to spawn / poll a job to completion). The legate's
 // effecting dispatch logic, behind the DispatchIoDeps seam built below. #144.
@@ -275,6 +275,12 @@ async function tick() {
     // Brood is a service; broodTeardown hits it over HTTP via the async
     // BroodClient (MARCH_BROOD_URL). No CLI shelling.
     broodTeardown: (sessionId: string, opts?: any) => broodTeardownCli(sessionId, opts),
+    // Reconcile an orphaned/untracked steward back into Brood's registry (#225)
+    // so its teardown runs through Brood's exact-path reclamation (#155).
+    broodRegister: (input: any) => broodRegisterCli(input),
+    // Operator escalation (rings the doorbell + records a processor_request),
+    // used by cleanup to stop deferring a stuck teardown forever (#225).
+    requestJudgement: (input: any) => requestLegateJudgement(input),
     emit: (event: any) => append(meta.processor_events_path, event),
     // Herald transition events (#176): the sole durable record of a transition
     // now that state.json is retired. The in-memory working state is mutated by

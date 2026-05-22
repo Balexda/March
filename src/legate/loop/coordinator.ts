@@ -64,7 +64,7 @@ function buildTickResult(state: LoopState, r: CoordinatorOutput["results"]): Tic
     babysitActionCount: r.babysit.actions.length - stewardNudgeCount - stewardStrandedCount,
     stewardNudgeCount,
     stewardStrandedCount,
-    processorRequestCount: r.babysit.requests.length + r.dispatch.requests.length,
+    processorRequestCount: r.cleanup.requests.length + r.babysit.requests.length + r.dispatch.requests.length,
     dispatchActionCount: r.dispatch.actions.length,
     dispatchFailureCount: r.dispatch.failures.length,
   };
