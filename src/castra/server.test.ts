@@ -167,6 +167,17 @@ describe("castra server", () => {
       expect(adapter.send).toHaveBeenCalledWith({ profile: "march", sessionId: "sess-1", prompt: "go" });
     });
 
+    it("POST /v1/sessions/:id/send accepts an x-march-slice-id header (span/log correlation)", async () => {
+      const res = await app.inject({
+        method: "POST",
+        url: "/v1/sessions/sess-1/send",
+        headers: { "x-march-slice-id": "my-slice-us1-forge" },
+        payload: { profile: "march", prompt: "go" },
+      });
+      expect(res.statusCode).toBe(202);
+      expect(adapter.send).toHaveBeenCalledWith({ profile: "march", sessionId: "sess-1", prompt: "go" });
+    });
+
     it("POST /v1/sessions/:id/set rejects a non-allowlisted key with 400", async () => {
       const res = await app.inject({
         method: "POST",

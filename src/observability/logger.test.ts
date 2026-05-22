@@ -63,6 +63,20 @@ describe("emitOtelLogLine", () => {
     expect(() => emitOtelLogLine("not json")).not.toThrow();
     expect(() => emitOtelLogLine("")).not.toThrow();
   });
+
+  it("accepts lines carrying trace_id/span_id without throwing", () => {
+    expect(() =>
+      emitOtelLogLine(
+        JSON.stringify({
+          level: 30,
+          time: 1,
+          msg: "castra send accepted",
+          trace_id: "0af7651916cd43dd8448eb211c80319c",
+          span_id: "b7ad6b7169203331",
+        }),
+      ),
+    ).not.toThrow();
+  });
 });
 
 describe("createHatcheryLogger", () => {

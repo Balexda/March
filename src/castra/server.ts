@@ -72,10 +72,28 @@ function extractProfile(request: FastifyRequest): string {
   return "unknown";
 }
 
-function traceKeyFor(request: FastifyRequest): string {
+/** The dispatch slice id from the x-march-slice-id header, when the caller set it. */
+function sliceIdFrom(request: FastifyRequest): string | undefined {
   const header = request.headers[SLICE_ID_HEADER];
-  if (typeof header === "string" && header) return header;
-  return `castra-${randomUUID()}`;
+  return typeof header === "string" && header ? header : undefined;
+}
+
+function traceKeyFor(request: FastifyRequest): string {
+  return sliceIdFrom(request) ?? `castra-${randomUUID()}`;
+}
+
+/** Max prompt chars recorded on a span/log — a preview for investigation, never the full body. */
+const MESSAGE_PREVIEW_MAX = 200;
+
+function messagePreview(prompt: string): string {
+  return prompt.length > MESSAGE_PREVIEW_MAX
+    ? `${prompt.slice(0, MESSAGE_PREVIEW_MAX)}…`
+    : prompt;
+}
+
+/** A `march.slice_id` attribute fragment, present only when the header was set. */
+function sliceAttr(sliceId: string | undefined): { "march.slice_id"?: string } {
+  return sliceId ? { "march.slice_id": sliceId } : {};
 }
 
 function bearerMatches(authorization: string | undefined, token: string): boolean {
@@ -232,14 +250,19 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
         createBranch?: boolean;
         metadata?: Record<string, string>;
       };
+      const sliceId = sliceIdFrom(request);
       const session = withCastraSpan(
         {
           op: "launch",
           traceKey: traceKeyFor(request),
-          attributes: { "march.profile": body.profile, "castra.branch": body.branch },
+          attributes: {
+            "march.profile": body.profile,
+            "castra.branch": body.branch,
+            ...sliceAttr(sliceId),
+          },
         },
-        () =>
-          adapter.launch({
+        () => {
+          const launched = adapter.launch({
             profile: body.profile,
             repoPath: body.repoPath,
             branch: body.branch,
@@ -248,7 +271,19 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
             model: body.model,
             createBranch: body.createBranch,
             metadata: body.metadata,
-          }),
+          });
+          request.log.info(
+            {
+              "castra.op": "launch",
+              "castra.session_id": launched.sessionId,
+              "march.profile": body.profile,
+              "castra.branch": body.branch,
+              ...sliceAttr(sliceId),
+            },
+            "castra session launched",
+          );
+          return launched;
+        },
       );
       return reply.code(201).send({ session });
     },
@@ -288,9 +323,20 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
     async (request, reply) => {
       const { id } = request.params as { id: string };
       const { profile, prompt } = request.body as { profile: string; prompt: string };
+      const sliceId = sliceIdFrom(request);
+      const sendFields = {
+        "march.profile": profile,
+        "castra.session_id": id,
+        "castra.message_bytes": Buffer.byteLength(prompt, "utf8"),
+        "castra.message_preview": messagePreview(prompt),
+        ...sliceAttr(sliceId),
+      };
       withCastraSpan(
-        { op: "send", traceKey: traceKeyFor(request), attributes: { "march.profile": profile } },
-        () => adapter.send({ profile, sessionId: id, prompt }),
+        { op: "send", traceKey: traceKeyFor(request), attributes: sendFields },
+        () => {
+          request.log.info({ "castra.op": "send", ...sendFields }, "castra send accepted");
+          return adapter.send({ profile, sessionId: id, prompt });
+        },
       );
       return reply.code(202).send({ ok: true });
     },
@@ -341,9 +387,19 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
         key: string;
         value: string;
       };
+      const sliceId = sliceIdFrom(request);
+      const setFields = {
+        "march.profile": profile,
+        "castra.session_id": id,
+        "castra.set_key": key,
+        ...sliceAttr(sliceId),
+      };
       withCastraSpan(
-        { op: "set", traceKey: traceKeyFor(request), attributes: { "march.profile": profile } },
-        () => adapter.set({ profile, sessionId: id, key, value }),
+        { op: "set", traceKey: traceKeyFor(request), attributes: setFields },
+        () => {
+          request.log.info({ "castra.op": "set", ...setFields }, "castra session set");
+          return adapter.set({ profile, sessionId: id, key, value });
+        },
       );
       return { ok: true };
     },
@@ -370,9 +426,19 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
         profile: string;
         pruneWorktree?: boolean;
       };
+      const sliceId = sliceIdFrom(request);
+      const removeFields = {
+        "march.profile": profile,
+        "castra.session_id": id,
+        "castra.prune_worktree": pruneWorktree ?? false,
+        ...sliceAttr(sliceId),
+      };
       const result = withCastraSpan(
-        { op: "remove", traceKey: traceKeyFor(request), attributes: { "march.profile": profile } },
-        () => adapter.remove({ profile, sessionId: id, pruneWorktree: pruneWorktree ?? false }),
+        { op: "remove", traceKey: traceKeyFor(request), attributes: removeFields },
+        () => {
+          request.log.info({ "castra.op": "remove", ...removeFields }, "castra session removed");
+          return adapter.remove({ profile, sessionId: id, pruneWorktree: pruneWorktree ?? false });
+        },
       );
       return { ok: true, removed: result.removed };
     },

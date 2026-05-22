@@ -1,4 +1,5 @@
 import {
+  context as otelContext,
   ROOT_CONTEXT,
   SpanStatusCode,
   TraceFlags,
@@ -27,6 +28,14 @@ export interface StartDispatchSpanInput {
  */
 export interface DispatchTrace {
   readonly enabled: boolean;
+  /**
+   * Run `fn` with the root span installed as the active span in the OTel
+   * context. Logs emitted inside `fn` (e.g. via the service's pino logger, whose
+   * mixin reads {@link trace.getActiveSpan}) then carry this span's trace/span
+   * ids, so Grafana's "Logs for this span" resolves. No-op passthrough when
+   * telemetry is disabled.
+   */
+  runActive<T>(fn: () => T): T;
   span<T>(name: string, fn: () => T, attributes?: Attributes): T;
   /**
    * Async sibling of {@link span}: brackets a child span around an awaited
@@ -45,6 +54,7 @@ export interface DispatchTrace {
 
 const NOOP_TRACE: DispatchTrace = {
   enabled: false,
+  runActive: (fn) => fn(),
   span: (_name, fn) => fn(),
   spanAsync: (_name, fn) => fn(),
   setAttributes: () => {},
@@ -80,6 +90,9 @@ export function startDispatchSpan(input: StartDispatchSpanInput): DispatchTrace 
 
   return {
     enabled: true,
+    runActive<T>(fn: () => T): T {
+      return otelContext.with(rootCtx, fn);
+    },
     span<T>(name: string, fn: () => T, attributes?: Attributes): T {
       const child = tracer.startSpan(name, { attributes }, rootCtx);
       try {

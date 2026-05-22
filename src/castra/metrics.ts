@@ -123,6 +123,10 @@ export interface CastraSpanInput {
  * Run a mutating operation inside a `castra.<op>` span. No-op (just runs `fn`)
  * when telemetry is disabled. Records the exception and marks the span errored
  * if `fn` throws, so failures surface in traces rather than vanishing.
+ *
+ * `fn` runs with the span installed as the active context, so any logs emitted
+ * inside it (the handler's `request.log`) carry this span's trace/span ids and
+ * resolve Grafana's "Logs for this span".
  */
 export function withCastraSpan<T>(input: CastraSpanInput, fn: () => T): T {
   const dispatch = startDispatchSpan({
@@ -131,7 +135,7 @@ export function withCastraSpan<T>(input: CastraSpanInput, fn: () => T): T {
     attributes: input.attributes,
   });
   try {
-    const result = fn();
+    const result = dispatch.runActive(fn);
     dispatch.end();
     return result;
   } catch (err) {

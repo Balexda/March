@@ -175,13 +175,25 @@ and prompt bodies stay out of metrics (they belong in spans/logs).
 | `march.castra.uptime` (observable gauge, `s`) | `march_castra_uptime_seconds` | Process uptime of the Castra service |
 
 `outcome` is `success` (status < 500) or `failure`. Mutating requests
-(`launch`/`send`/`set`/`remove`) also emit a `castra.<op>` span; when the caller
-passes an `x-march-slice-id` header, the span keys off that dispatch slice id so
-it nests under the existing per-dispatch trace. `castra serve` also ships request
-logs through the OTLP pino logger (`createCastraLogger`,
-`service.name=march-castra`) and starts a periodic heartbeat — giving Castra the
-same Service-health row (heartbeat / uptime) and Loki logs panel as the other
-services.
+(`launch`/`send`/`set`/`remove`) also emit a `castra.<op>` span carrying
+investigation-friendly attributes (these are span attributes, **not** metric
+labels, so high-cardinality values are fine): `castra.session_id`,
+`march.slice_id` (when the `x-march-slice-id` header is present),
+`castra.branch` (launch), and a truncated `castra.message_preview` +
+`castra.message_bytes` (send). When the caller passes `x-march-slice-id`, the
+span keys off that dispatch slice id so it nests under the existing per-dispatch
+trace; without it the span is a standalone root (the legate populating the slice
+header on **all** sends — not just dispatch — and emitting the parent loop-action
+span is a separate legate-side change).
+
+`castra serve` also ships request logs through the OTLP pino logger
+(`createCastraLogger`, `service.name=march-castra`) and starts a periodic
+heartbeat — giving Castra the same Service-health row (heartbeat / uptime) and
+Loki logs panel as the other services. Each `castra.<op>` emits one structured
+log line **inside the span's active context**, so the record carries
+`trace_id`/`span_id`; the pino→OTel bridge now attaches those ids as the log
+record's trace context (mirroring `emitLoopLog`), which is what makes Grafana's
+"Logs for this span" resolve for a `castra.*` span.
 
 #### Loop heartbeat metrics
 

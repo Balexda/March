@@ -13,6 +13,11 @@ describe("spawn-trace (disabled)", () => {
     expect(result).toBe(42);
   });
 
+  it("runActive runs the wrapped function and returns its value when disabled", () => {
+    const dispatch = startDispatchSpan({ traceKey: "k", rootName: "hatchery.spawn" });
+    expect(dispatch.runActive(() => "ok")).toBe("ok");
+  });
+
   it("propagates exceptions from the wrapped function", () => {
     const dispatch = startDispatchSpan({
       traceKey: "k",
