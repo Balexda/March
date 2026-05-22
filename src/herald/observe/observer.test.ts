@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { runObservation, type ObserveStore } from "./observer.js";
-import { emptySystemState, foldEvents, reduce, type AppendEventInput, type HeraldEvent, type SystemState } from "../events.js";
+import { describeChangeSpan, runObservation, type ObserveStore } from "./observer.js";
+import { emptySystemState, foldEvents, reduce, type AppendEventInput, type EventBody, type HeraldEvent, type SystemState } from "../events.js";
 import type { SenseDeps } from "../../legate/loop/state/sense.js";
 import type { LoopMeta } from "../../legate/loop/meta.js";
 
@@ -90,6 +90,20 @@ describe("runObservation", () => {
     expect(store.projection().slices.x!.pr).toMatchObject({ number: 12 });
   });
 
+  it("does not throw while emitting change spans (no-op when telemetry off)", async () => {
+    const store = fakeStore();
+    store.append({ source: "legate", type: "slice.dispatched", sliceId: "x", branch: "smithy/forge/x", sessionId: "w1" } as AppendEventInput);
+    await expect(
+      runObservation({
+        store,
+        senseDeps: senseDeps({
+          listSessions: async () => [{ id: "w1", group: "legate-workers", status: "idle" }],
+          queryPr: async () => ({ number: 7, state: "OPEN" }),
+        }),
+      }),
+    ).resolves.toBeDefined();
+  });
+
   it("stamps appended events with the observation ts", async () => {
     const store = fakeStore();
     const result = await runObservation({
@@ -99,5 +113,39 @@ describe("runObservation", () => {
     for (const e of result.appended) expect(e.ts).toBe("2026-05-20T09:09:09Z");
     // sanity: the events fold back to the same projection the store holds
     expect(foldEvents(store.events).seq).toBe(store.projection().seq);
+  });
+});
+
+describe("describeChangeSpan", () => {
+  const base = emptySystemState();
+
+  it("names a PR opened/merged/closed from the new state, defaulting to changed", () => {
+    const opened = describeChangeSpan(base, { type: "slice.pr.changed", sliceId: "s1", pr: { number: 3, state: "OPEN" } });
+    expect(opened?.name).toBe("herald.pr.opened");
+    expect(opened?.dispatchKey).toBe("s1");
+    expect(opened?.attributes).toMatchObject({ "march.slice_id": "s1", "march.pr_number": 3, "march.pr_state": "OPEN" });
+
+    expect(describeChangeSpan(base, { type: "slice.pr.changed", sliceId: "s1", pr: { state: "MERGED" } })?.name).toBe("herald.pr.merged");
+    expect(describeChangeSpan(base, { type: "slice.pr.changed", sliceId: "s1", pr: { state: "CLOSED" } })?.name).toBe("herald.pr.closed");
+  });
+
+  it("treats a PR already-open in the prior projection as a generic change, not a re-open", () => {
+    const prev: SystemState = { ...emptySystemState(), slices: { s1: { sliceId: "s1", pr: { state: "OPEN" } } } };
+    expect(describeChangeSpan(prev, { type: "slice.pr.changed", sliceId: "s1", pr: { number: 3, state: "OPEN" } })?.name).toBe("herald.pr.changed");
+  });
+
+  it("nests slice-scoped changes (dispatchKey set) and leaves system changes standalone", () => {
+    expect(describeChangeSpan(base, { type: "slice.output.changed", sliceId: "s1", recentOutput: { output: "x" } })?.dispatchKey).toBe("s1");
+    expect(describeChangeSpan(base, { type: "workers.changed", workers: { waiting: 0, running: 1, idle: 0, error: 0, stopped: 0, other: 0 } })?.dispatchKey).toBeUndefined();
+    expect(describeChangeSpan(base, { type: "smithy.queue.changed", dispatchable: 1, blocked: 0, total: 2 })?.name).toBe("herald.queue.changed");
+  });
+
+  it("flags output that carries an error", () => {
+    const span = describeChangeSpan(base, { type: "slice.output.changed", sliceId: "s1", recentOutput: { output: "boom", error: "login required" } });
+    expect(span?.attributes).toMatchObject({ "march.output_error": true });
+  });
+
+  it("returns undefined for non-observed event types", () => {
+    expect(describeChangeSpan(base, { type: "heartbeat" } as EventBody)).toBeUndefined();
   });
 });

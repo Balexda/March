@@ -6,15 +6,25 @@ import {
   type Attributes,
 } from "@opentelemetry/api";
 import { getActiveOtel } from "./otel.js";
+import { spanIdForDispatch, traceIdForDispatch } from "./trace-ids.js";
 
 /**
- * A herald span (e.g. `herald.request`, `herald.observe`). No-op when telemetry
- * is off, so callers can wrap work unconditionally with zero behavioural impact.
+ * A herald span. No-op when telemetry is off, so callers can wrap work
+ * unconditionally with zero behavioural impact.
+ *
+ * Two flavours, both produced by {@link startHeraldSpan}:
+ *  - **Change spans** (`herald.pr.merged`, `herald.output.changed`, …): one per
+ *    state change Herald observes. Slice-scoped changes nest as CHILDREN of the
+ *    slice's dispatch trace (via `dispatchKey`) so they share the trace with
+ *    `legate.dispatch → hatchery.spawn`; system changes (workers/queue/session)
+ *    have no dispatch trace and stand alone.
+ *  - **Request spans** (`herald.request`): synthesized at response time for
+ *    mutations / 5xx only (reads and health polls are left to metrics).
  */
 export interface HeraldSpan {
   readonly enabled: boolean;
   setAttributes(attributes: Attributes): void;
-  end(opts?: { error?: boolean }): void;
+  end(opts?: { error?: boolean; endTimeMs?: number }): void;
 }
 
 const NOOP: HeraldSpan = {
@@ -35,33 +45,45 @@ function parseTraceparent(
 }
 
 export interface StartHeraldSpanInput {
-  /** Span name, e.g. `"herald.request"` or `"herald.observe"`. */
+  /** Span name, e.g. `"herald.pr.merged"` or `"herald.request"`. Low-cardinality. */
   readonly name: string;
   /**
-   * Inbound W3C traceparent (from the caller) to nest this span under. When it
-   * is absent or malformed the span starts a FRESH root trace — which is what
-   * surfaces march-herald in Tempo for internally-initiated work like the
-   * periodic observe tick.
+   * Deterministic dispatch key (the slice id). When set, the span nests as a
+   * CHILD of that slice's dispatch trace — `traceIdForDispatch(key)` with parent
+   * `spanIdForDispatch(key)`, the same virtual parent `legate.dispatch` claims as
+   * its root. The child takes a fresh (random) span id, so it is always a child
+   * and NEVER the root — the legate stays the trace's sole originator.
+   */
+  readonly dispatchKey?: string;
+  /**
+   * Inbound W3C traceparent to nest under. Used only when `dispatchKey` is
+   * absent. When both are absent the span starts a fresh root trace.
    */
   readonly traceparent?: string;
   readonly attributes?: Attributes;
+  /** Backdated start (epoch ms) — lets a response-time hook give a request span its real duration. */
+  readonly startTimeMs?: number;
 }
 
 /**
- * Start a herald span. When the caller supplies a valid `traceparent` the span
- * nests under that remote trace (so a legate-initiated request lands in the
- * originating trace); otherwise it begins a new root trace. No-op when telemetry
- * is disabled.
+ * Start a herald span. Parent precedence: `dispatchKey` (nest under the slice's
+ * dispatch trace) → `traceparent` (nest under the caller) → fresh root. No-op
+ * when telemetry is disabled.
  */
 export function startHeraldSpan(input: StartHeraldSpanInput): HeraldSpan {
   const otel = getActiveOtel();
   if (!otel.enabled) return NOOP;
 
   const tracer = otel.getTracer();
-  const parent = parseTraceparent(input.traceparent);
-  // Anchor on ROOT_CONTEXT either way: with a parent span context to nest under
-  // the inbound trace, or bare so the span is a fresh root (never accidentally a
-  // child of some ambient active span).
+  const parent = input.dispatchKey
+    ? {
+        traceId: traceIdForDispatch(input.dispatchKey),
+        spanId: spanIdForDispatch(input.dispatchKey),
+      }
+    : parseTraceparent(input.traceparent);
+  // With a parent, anchor a remote span context on ROOT_CONTEXT so the span
+  // nests as a child; without one, ROOT_CONTEXT alone makes it a fresh root
+  // (never an accidental child of some ambient active span).
   const parentCtx = parent
     ? trace.setSpanContext(ROOT_CONTEXT, {
         traceId: parent.traceId,
@@ -72,7 +94,7 @@ export function startHeraldSpan(input: StartHeraldSpanInput): HeraldSpan {
     : ROOT_CONTEXT;
   const span = tracer.startSpan(
     input.name,
-    { attributes: input.attributes },
+    { attributes: input.attributes, startTime: input.startTimeMs },
     parentCtx,
   );
 
@@ -81,9 +103,9 @@ export function startHeraldSpan(input: StartHeraldSpanInput): HeraldSpan {
     setAttributes(attributes: Attributes) {
       span.setAttributes(attributes);
     },
-    end(opts?: { error?: boolean }) {
+    end(opts?: { error?: boolean; endTimeMs?: number }) {
       if (opts?.error) span.setStatus({ code: SpanStatusCode.ERROR });
-      span.end();
+      span.end(opts?.endTimeMs);
     },
   };
 }

@@ -1,10 +1,10 @@
-import type { FastifyInstance, FastifyRequest } from "fastify";
+import type { FastifyInstance } from "fastify";
 import { isFinderAvailable, isOnPath } from "../../shared/deps.js";
 import {
   outcomeFromStatus,
   recordHeraldRequest,
 } from "../../observability/herald-metrics.js";
-import { startHeraldSpan, type HeraldSpan } from "../../observability/herald-trace.js";
+import { startHeraldSpan } from "../../observability/herald-trace.js";
 import { createCastraClientFromEnv } from "../../castra/client.js";
 import type { EventStore } from "./store.js";
 import type { AppendEventInput, EventType } from "../events.js";
@@ -127,36 +127,28 @@ export async function registerRoutes(
     opts.getObserveStatus ??
     (() => ({ lastObserveAtMs: null, lastObserveDurationMs: null }));
 
-  // Per-request span: start on inbound, end on response. Nests under the
-  // caller's W3C traceparent when present (so a legate-initiated request lands in
-  // the originating trace), else a fresh root trace — this is what makes
-  // march-herald appear in Tempo and populates the dashboard's Recent traces.
-  // Attributes are kept low-cardinality (route TEMPLATE, method, status code).
-  const requestSpans = new WeakMap<FastifyRequest, HeraldSpan>();
-  app.addHook("onRequest", async (request) => {
-    const tp = request.headers["traceparent"];
-    const traceparent = Array.isArray(tp) ? tp[0] : tp;
-    requestSpans.set(
-      request,
+  // Record every request keyed by route TEMPLATE (not the concrete path) to
+  // keep metric cardinality bounded — the same rule the other services use.
+  // Requests are spanned SPARINGLY (the high-frequency GET /events drain and
+  // health polls would otherwise drown the traces): only mutations (POST) and
+  // 5xx failures get a span — the cases worth seeing in a debug trace. Read
+  // volume is left to the RED metrics above. The span is synthesized at response
+  // time with the real duration, nesting under any inbound traceparent.
+  app.addHook("onResponse", async (request, reply) => {
+    const status = reply.statusCode;
+    if (request.method === "POST" || status >= 500) {
+      const tp = request.headers["traceparent"];
+      const traceparent = Array.isArray(tp) ? tp[0] : tp;
       startHeraldSpan({
         name: "herald.request",
         traceparent,
+        startTimeMs: Date.now() - reply.elapsedTime,
         attributes: {
           "http.method": request.method,
           "http.route": request.routeOptions.url ?? "unknown",
+          "http.status_code": status,
         },
-      }),
-    );
-  });
-
-  // Record every request keyed by route TEMPLATE (not the concrete path) to
-  // keep metric cardinality bounded — the same rule the other services use.
-  app.addHook("onResponse", async (request, reply) => {
-    const span = requestSpans.get(request);
-    if (span) {
-      span.setAttributes({ "http.status_code": reply.statusCode });
-      span.end({ error: reply.statusCode >= 500 });
-      requestSpans.delete(request);
+      }).end({ error: status >= 500 });
     }
     recordHeraldRequest({
       route: request.routeOptions.url ?? "unknown",
