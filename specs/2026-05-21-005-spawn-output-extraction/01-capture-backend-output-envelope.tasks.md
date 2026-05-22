@@ -39,7 +39,7 @@
   - Tests cover over-limit output and assert both the bounded length behavior and `truncated: true`.
   - Existing spawn, Hatchery, and Brood tests continue to pass.
 
-**PR Outcome**: The spawn subsystem can capture bounded backend output for a completed successful spawn through an injected source adapter and can fail cleanly when output cannot be read or exceeds the configured capture limit. Later slices can parse and validate this envelope without touching container logs directly.
+**PR Outcome**: The spawn subsystem can capture bounded backend output for a completed successful spawn through an injected source adapter — bounding over-limit output deterministically and reporting `truncated: true` rather than failing (US1 AS 1.5) — and can fail cleanly when output cannot be read. Later slices can parse and validate this envelope without touching container logs directly.
 
 ---
 
