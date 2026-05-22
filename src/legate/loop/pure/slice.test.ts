@@ -2,13 +2,19 @@ import { describe, expect, it } from "vitest";
 import {
   alreadyArchivedSlice,
   blockingMergedArchive,
+  DISPATCH_RECOVERY_LIMIT,
   dispatchableReady,
+  escalatedRecoverable,
   inFlightSliceMatches,
   isStubArchivedSlice,
   isTerminalSlice,
+  recoverableEscalations,
+  recoveryAttemptKey,
+  recoveryBudgetExhausted,
   sliceReleasesArtifact,
   summarizeSlicesByStage,
 } from "./slice.js";
+import { dispatchSliceId } from "./dispatch-id.js";
 
 const item = {
   path: "docs/x.tasks.md",
@@ -156,4 +162,66 @@ describe("slice pure helpers", () => {
   });
 
   void ITEM_BRANCH;
+});
+
+describe("recoverableEscalations (#211 bounded auto-recovery)", () => {
+  const SID = dispatchSliceId(item);
+  const recoverableSlice = () => ({
+    stage: "escalated",
+    escalated_reason: "hatchery_dispatch_failed",
+    command: "smithy.forge",
+    arguments: ["docs/x.tasks.md", "1"],
+    artifact_path: "docs/x.tasks.md",
+  });
+
+  it("escalatedRecoverable is true only for the recoverable allowlist", () => {
+    expect(escalatedRecoverable(recoverableSlice())).toBe(true);
+    expect(escalatedRecoverable({ stage: "escalated", escalated_reason: "needs_human" })).toBe(false);
+    expect(escalatedRecoverable({ stage: "implementing", escalated_reason: "hatchery_dispatch_failed" })).toBe(false);
+    expect(escalatedRecoverable(null)).toBe(false);
+  });
+
+  it("selects a ready item wedged behind a recoverable escalation, attempt = used+1", () => {
+    const state = { slices: { [SID]: recoverableSlice() }, archived_slices: {}, transient_retry_counts: {} };
+    expect(recoverableEscalations(state, [item])).toEqual([
+      { item, sliceId: SID, attempt: 1, limit: DISPATCH_RECOVERY_LIMIT },
+    ]);
+  });
+
+  it("counts the existing budget: a prior attempt yields attempt 2", () => {
+    const state = { slices: { [SID]: recoverableSlice() }, archived_slices: {}, transient_retry_counts: { [recoveryAttemptKey(SID)]: 1 } };
+    expect(recoverableEscalations(state, [item])[0]).toMatchObject({ attempt: 2 });
+  });
+
+  it("stops at the budget — no decision once the limit is reached", () => {
+    const state = { slices: { [SID]: recoverableSlice() }, archived_slices: {}, transient_retry_counts: { [recoveryAttemptKey(SID)]: DISPATCH_RECOVERY_LIMIT } };
+    expect(recoverableEscalations(state, [item])).toEqual([]);
+  });
+
+  it("ignores a non-recoverable escalation reason", () => {
+    const state = { slices: { [SID]: { ...recoverableSlice(), escalated_reason: "real_spawn_error" } }, archived_slices: {}, transient_retry_counts: {} };
+    expect(recoverableEscalations(state, [item])).toEqual([]);
+  });
+
+  it("does not fight a terminal archive that also blocks the item", () => {
+    const state = {
+      slices: { [SID]: recoverableSlice() },
+      archived_slices: { [SID]: { terminal_state: "MERGED", command: "smithy.forge", branch: "x" } },
+      transient_retry_counts: {},
+    };
+    expect(recoverableEscalations(state, [item])).toEqual([]);
+  });
+
+  it("disjoint from dispatchableReady: the escalated item is never both", () => {
+    const state = { slices: { [SID]: recoverableSlice() }, archived_slices: {}, transient_retry_counts: {} };
+    expect(dispatchableReady(state, [item])).toEqual([]);
+    expect(recoverableEscalations(state, [item])).toHaveLength(1);
+  });
+
+  it("recoveryBudgetExhausted flips only at/over the limit", () => {
+    expect(recoveryBudgetExhausted({ transient_retry_counts: {} }, "x")).toBe(false);
+    expect(recoveryBudgetExhausted({ transient_retry_counts: { [recoveryAttemptKey("x")]: 0 } }, "x")).toBe(false);
+    expect(recoveryBudgetExhausted({ transient_retry_counts: { [recoveryAttemptKey("x")]: DISPATCH_RECOVERY_LIMIT - 1 } }, "x")).toBe(false);
+    expect(recoveryBudgetExhausted({ transient_retry_counts: { [recoveryAttemptKey("x")]: DISPATCH_RECOVERY_LIMIT } }, "x")).toBe(true);
+  });
 });

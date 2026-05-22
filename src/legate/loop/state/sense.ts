@@ -144,7 +144,12 @@ export function rebuildWorkingState(sys: SystemState, meta: LoopMeta): any {
       stage: s.stage,
       pr: pr ?? null,
     };
-    if (s.escalatedReason !== undefined) slice.last_action_note = s.escalatedReason;
+    if (s.escalatedReason !== undefined) {
+      slice.last_action_note = s.escalatedReason;
+      // Restore the structured class too so bounded auto-recovery (#211) can tell a
+      // recoverable escalation from a terminal one after a cold start.
+      slice.escalated_reason = s.escalatedReason;
+    }
     // Restore the Hatchery job id so a slice still in `hatchery-pending` after a
     // restart can be polled to completion (otherwise the completion poll skips it).
     if (s.jobId) slice.hatchery = { job_id: s.jobId, backend: "codex" };

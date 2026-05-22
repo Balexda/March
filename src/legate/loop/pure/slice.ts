@@ -130,6 +130,127 @@ export function dispatchableReady<T>(state: any, ready: readonly T[] | undefined
 }
 
 /**
+ * Bounded auto-recovery for recoverable escalations (#211).
+ *
+ * A spawn that fails at the dispatch stage escalates with
+ * `escalatedReason: hatchery_dispatch_failed` and — pre-#211 — sat operator-only
+ * forever, wedging a still-ready smithy item behind it. The whole
+ * `hatchery_dispatch_failed` family is *recoverable* by a fresh re-dispatch:
+ *
+ *   - a bad worker patch (the actual #211 root cause: a truncated diff / a
+ *     new-file-on-existing) — codex is non-deterministic, so another worker gets
+ *     a clean shot;
+ *   - an orphan-branch collision — now collision-free since #216 deletes the
+ *     orphan branch on the failed-spawn rollback;
+ *   - a Hatchery job-lookup 404 after a service restart — a re-dispatch mints a
+ *     fresh job.
+ *
+ * Recovery is gated by an ALLOWLIST of reasons (so any *other* future escalation
+ * reason defaults to operator-only, fail-safe) and BOUNDED by a per-slice retry
+ * counter — the same durable {@link transient_retry_counts} the relaunch handler
+ * uses, folded via `retry.counted` and restored from the Herald fold on restart.
+ * After {@link DISPATCH_RECOVERY_LIMIT} attempts the slice falls back to the
+ * operator-only escalation it had before, so a genuinely-terminal failure (a
+ * patch that is bad every time, a real config error) can never loop forever.
+ */
+export const RECOVERABLE_ESCALATION_REASONS = new Set<string>(["hatchery_dispatch_failed"]);
+
+/**
+ * How many times the loop auto-re-dispatches a recoverable escalation before
+ * leaving it operator-only. Two: a deterministic failure that survives two fresh
+ * workers is almost certainly not transient, so a human should look. Total spawn
+ * attempts for a slice are 1 (original) + {@link DISPATCH_RECOVERY_LIMIT}.
+ */
+export const DISPATCH_RECOVERY_LIMIT = 2;
+
+/** Durable retry-counter key for a slice's auto-recovery budget. Suffixed with
+ *  the slice id so completePending's success-path cleanup (`endsWith(":"+id)`)
+ *  clears it — emitting a durable `retry.counted` 0 so the reset survives a
+ *  restart (the fold has no separate clear event) — once the slice transitions
+ *  cleanly. */
+export function recoveryAttemptKey(sliceId: string): string {
+  return "dispatch-recovery:" + sliceId;
+}
+
+/**
+ * True once a slice has used its full auto-recovery budget — i.e. the loop has
+ * re-dispatched it {@link DISPATCH_RECOVERY_LIMIT} times and the latest attempt
+ * still failed. The escalate paths use this to decide whether a dispatch failure
+ * is still the loop's to retry (within budget → no operator notification) or has
+ * become genuinely operator-only (budget exhausted → escalate for judgement), so
+ * an operator is pinged once at the end rather than on every recoverable failure.
+ */
+export function recoveryBudgetExhausted(state: any, sliceId: string): boolean {
+  const counts = state?.transient_retry_counts && typeof state.transient_retry_counts === "object" ? state.transient_retry_counts : {};
+  const used = Number.isFinite(counts[recoveryAttemptKey(sliceId)]) ? counts[recoveryAttemptKey(sliceId)] : 0;
+  return used >= DISPATCH_RECOVERY_LIMIT;
+}
+
+/** True when a slice is escalated for a reason the loop is allowed to auto-recover. */
+export function escalatedRecoverable(slice: any): boolean {
+  if (!slice || typeof slice !== "object") return false;
+  if (slice.stage !== "escalated") return false;
+  return RECOVERABLE_ESCALATION_REASONS.has(slice.escalated_reason);
+}
+
+/**
+ * Live blocker OTHER than the escalated slice we're recovering. The escalated
+ * slice is keyed at the item's deterministic id (`dispatchSliceId`), so this is
+ * {@link inFlightSliceMatches} minus that self-match — a guard so recovery never
+ * re-dispatches over a genuinely active worker that happens to share the branch.
+ */
+function otherLiveBlocker(state: any, item: any, sliceId: string): boolean {
+  const slices = state?.slices && typeof state.slices === "object" ? state.slices : {};
+  const key = dispatchItemKey(item);
+  const branch = dispatchBranch(item);
+  for (const [existingId, slice] of Object.entries(slices) as [string, any][]) {
+    if (existingId === sliceId) continue;
+    if (!slice || typeof slice !== "object") continue;
+    if (sliceReleasesArtifact(slice)) continue;
+    if (slice.original_slice_id === sliceId) return true;
+    if (sliceActionKey(slice) === key) return true;
+    if (slice.branch && slice.branch === branch) return true;
+  }
+  return false;
+}
+
+/** A still-ready smithy item whose deterministic slice is recoverably escalated
+ *  and within the retry budget — i.e. a candidate for auto re-dispatch. */
+export interface RecoverableEscalation {
+  readonly item: any;
+  readonly sliceId: string;
+  /** This attempt's 1-based count (== the persisted counter after apply). */
+  readonly attempt: number;
+  readonly limit: number;
+}
+
+/**
+ * The subset of smithy layer-0 ready items the loop should AUTO-RECOVER this tick:
+ * each item whose deterministic slice is escalated for a {@link
+ * RECOVERABLE_ESCALATION_REASONS recoverable reason}, is within the {@link
+ * DISPATCH_RECOVERY_LIMIT retry budget}, is not blocked by a terminal archive
+ * decision (a MERGED/ESCALATED/CLOSED archive keeps blocking — we never fight an
+ * operator's archive), and has no OTHER live blocker. Disjoint from {@link
+ * dispatchableReady}: an escalated slice reads as in-flight there, so the same
+ * item is never both a fresh dispatch and a recovery in one tick.
+ */
+export function recoverableEscalations(state: any, ready: readonly any[] | undefined): RecoverableEscalation[] {
+  const slices = state?.slices && typeof state.slices === "object" ? state.slices : {};
+  const counts = state?.transient_retry_counts && typeof state.transient_retry_counts === "object" ? state.transient_retry_counts : {};
+  const out: RecoverableEscalation[] = [];
+  for (const item of ready ?? []) {
+    const sliceId = dispatchSliceId(item);
+    if (!escalatedRecoverable(slices[sliceId])) continue;
+    const used = Number.isFinite(counts[recoveryAttemptKey(sliceId)]) ? counts[recoveryAttemptKey(sliceId)] : 0;
+    if (used >= DISPATCH_RECOVERY_LIMIT) continue;
+    if (alreadyArchivedSlice(state, item, sliceId)) continue;
+    if (otherLiveBlocker(state, item, sliceId)) continue;
+    out.push({ item, sliceId, attempt: used + 1, limit: DISPATCH_RECOVERY_LIMIT });
+  }
+  return out;
+}
+
+/**
  * The fixed slice-lifecycle vocabulary — the low-cardinality `stage` label set
  * for the `march.legate.slices` gauge (#220). Any slice stage outside this set
  * (a typo, a future stage, a transient `merged` before cleanup archives it) is
