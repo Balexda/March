@@ -108,11 +108,51 @@ describe("slice pure helpers", () => {
       g: { stage: "escalated" },
     };
     const { byStage, readyToMerge } = summarizeSlicesByStage(slices);
-    expect(byStage).toEqual({ "hatchery-pending": 1, implementing: 1, "pr-open": 4, escalated: 1 });
+    // All canonical stages are pre-seeded to 0 so empty stages still report 0
+    // (not "no data") on the dashboard.
+    expect(byStage).toEqual({
+      "hatchery-pending": 1,
+      implementing: 1,
+      "pr-open": 4,
+      "pr-in-fix": 0,
+      "pr-resolving-conflicts": 0,
+      escalated: 1,
+    });
     // per-stage tallies sum to the non-archived slice count
     expect(Object.values(byStage).reduce((a, b) => a + b, 0)).toBe(Object.keys(slices).length);
     expect(readyToMerge).toBe(1); // only c qualifies
-    expect(summarizeSlicesByStage(undefined)).toEqual({ byStage: {}, readyToMerge: 0 });
+  });
+
+  it("summarizeSlicesByStage buckets unknown stages and gates unknown thread debt (#220)", () => {
+    const slices = {
+      typo: { stage: "implmenting" }, // typo / unexpected stage → 'other', not a new series
+      merged: { stage: "merged" }, // transient terminal stage → 'other'
+      // Cold-start pr-open: pr restored from the fold but the flattened
+      // needs_response_count is absent → unknown debt, must NOT count as ready.
+      cold: { stage: "pr-open", pr: { checks: "PASS", mergeable: "MERGEABLE" } },
+      // Same, but the PR snapshot still carries the count → falls back to it.
+      nested: { stage: "pr-open", pr: { checks: "PASS", mergeable: "MERGEABLE", needs_response_count: 0 } },
+    };
+    const { byStage, readyToMerge } = summarizeSlicesByStage(slices);
+    expect(byStage.other).toBe(2); // typo + merged bucketed together
+    expect(byStage).not.toHaveProperty("implmenting");
+    expect(byStage).not.toHaveProperty("merged");
+    expect(byStage["pr-open"]).toBe(2);
+    expect(readyToMerge).toBe(1); // only `nested` (explicit 0); `cold` is unknown
+  });
+
+  it("summarizeSlicesByStage pre-seeds all stages to 0 for an empty slice set", () => {
+    expect(summarizeSlicesByStage(undefined)).toEqual({
+      byStage: {
+        "hatchery-pending": 0,
+        implementing: 0,
+        "pr-open": 0,
+        "pr-in-fix": 0,
+        "pr-resolving-conflicts": 0,
+        escalated: 0,
+      },
+      readyToMerge: 0,
+    });
   });
 
   void ITEM_BRANCH;
