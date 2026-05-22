@@ -90,7 +90,9 @@ export function startBroodSpan(input: StartBroodSpanInput): BroodSpan {
     parentCtx,
   );
   // Context carrying this span as the active parent, so children nest under it.
-  const spanCtx = trace.setSpan(ROOT_CONTEXT, span);
+  // Built from `parentCtx` (not ROOT_CONTEXT) so children inherit any propagated
+  // context values, matching the spawn-trace.ts pattern.
+  const spanCtx = trace.setSpan(parentCtx, span);
 
   return {
     enabled: true,
