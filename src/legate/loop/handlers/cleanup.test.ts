@@ -147,10 +147,45 @@ describe("cleanup handler", () => {
     expect(state.raw.archived_slices.s).toBeUndefined();
   });
 
+  it("defers (does not archive) a 404 reconcile when the observation lacks an exact worktree path (#155)", async () => {
+    const state = withTerminalSlice("MERGED");
+    // Live, but no worktree_path → Brood could not reclaim by exact path.
+    state.sessionsById.set("sess", { id: "sess", group: "legate-workers", branch: "feature/x" });
+    const c = ctx(notTracked(), { register: registered });
+    const res = await apply(assess(state), c, state);
+    expect(c.broodRegister).not.toHaveBeenCalled();
+    expect(res.failures).toHaveLength(1);
+    expect(res.actions).toHaveLength(0);
+    expect(state.raw.slices.s).toBeTruthy();
+    expect(state.raw.archived_slices.s).toBeUndefined();
+  });
+
+  it("reconciles by canonical session id even when the slice matched by alias (P1)", async () => {
+    // Slice references the session by its title alias; the canonical id is "real-id".
+    const session = { id: "real-id", title: "sess", group: "legate-workers", branch: "feature/x", worktree_path: "/repo/.wt/x" };
+    const sessionsById = new Map<string, any>([
+      ["real-id", session],
+      ["sess", session], // alias key (sense.ts maps id, title, and name)
+    ]);
+    const state = loopState({
+      raw: { slices: { s: { worker_session_id: "sess" } }, archived_slices: {} },
+      slices: { s: { worker_session_id: "sess" } },
+      sessions: [session],
+      sessionsById,
+      perSlice: { s: { pr: { number: 9, url: "u", state: "MERGED" } } },
+    });
+    const c = ctx([notTracked(), ok()], { register: registered });
+    await apply(assess(state), c, state);
+    // Registered + torn down under the CANONICAL id, never the alias.
+    expect(c.broodRegister).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "real-id", agentDeckSessionId: "real-id" }),
+    );
+    expect(c.broodTeardown).toHaveBeenNthCalledWith(2, "real-id", { force: true, reason: "pr-merged" });
+  });
+
   it("escalates to the operator after MAX_CLEANUP_ATTEMPTS instead of retrying forever (#225)", async () => {
     const state = withTerminalSlice("MERGED");
-    const judge = vi.fn();
-    const c = ctx(failed(), { requestJudgement: judge });
+    const c = ctx(failed(), { requestJudgement: () => ({ kind: "processor_request" }) });
     // Pre-load the attempt counter so this tick crosses the threshold.
     state.slices.s.cleanup_attempts = MAX_CLEANUP_ATTEMPTS - 1;
     const res = await apply(assess(state), c, state);
@@ -158,13 +193,25 @@ describe("cleanup handler", () => {
       expect.objectContaining({ reason: "cleanup-stuck", requestKey: "cleanup-stuck:s", sliceId: "s" }),
     );
     expect(res.failures[0]).toMatchObject({ escalated: true, attempts: MAX_CLEANUP_ATTEMPTS });
+    // The fired request is counted (pushed to res.requests), mirroring babysit/dispatch.
+    expect(res.requests).toHaveLength(1);
     // Still deferred (not archived) — escalation surfaces it, doesn't archive over an orphan.
     expect(state.raw.slices.s).toBeTruthy();
   });
 
+  it("does not mark escalated (or count a request) when requestJudgement dedups to null", async () => {
+    const state = withTerminalSlice("MERGED");
+    const c = ctx(failed(), { requestJudgement: () => null });
+    state.slices.s.cleanup_attempts = MAX_CLEANUP_ATTEMPTS - 1;
+    const res = await apply(assess(state), c, state);
+    expect(c.requestJudgement).toHaveBeenCalled();
+    expect(res.failures[0].escalated).toBeUndefined();
+    expect(res.requests).toHaveLength(0);
+  });
+
   it("does NOT escalate before the threshold", async () => {
     const state = withTerminalSlice("MERGED");
-    const c = ctx(failed(), { requestJudgement: vi.fn() });
+    const c = ctx(failed(), { requestJudgement: () => ({ kind: "processor_request" }) });
     const res = await apply(assess(state), c, state);
     expect(c.requestJudgement).not.toHaveBeenCalled();
     expect(res.failures[0].escalated).toBeUndefined();

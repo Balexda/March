@@ -70,17 +70,35 @@ export async function apply(decisions: CleanupDecision[], ctx: HandlerContext, s
     if (!teardown.ok && teardown.notTracked) {
       const live = liveSession(state, d.sessionId);
       if (live) {
-        // Reconcile: back-fill the orphan into Brood from the Castra observation
-        // so Brood owns its teardown by EXACT worktree/branch path (#155 — never
-        // a blanket prune), then re-request teardown so the reap runs there.
-        const reg = ctx.broodRegister
-          ? await ctx.broodRegister(reconcileInput(d, live, state, ctx))
-          : { ok: false, detail: "broodRegister unavailable" };
-        if (reg.ok) {
-          ctx.log(`cleanup reconciled untracked steward ${d.sessionId} into Brood (${d.sliceId}); retrying teardown`);
-          teardown = await ctx.broodTeardown(d.sessionId, { force: true, reason });
+        // Address the steward by its CANONICAL id: the slice may have matched it
+        // by a title/name alias (assess() allows that), so reconciling/tearing
+        // down under the alias would have Brood ask Castra to remove the wrong
+        // session id — leaving the real steward live while the slice archives.
+        const canonicalId = String(live.id || d.sessionId);
+        const worktreePath = live.worktree_path ? String(live.worktree_path) : "";
+        if (!worktreePath || !state.repoPath) {
+          // Without the exact worktree path (+ repo root) Brood's teardown would
+          // skip worktree/branch removal yet still return ok, so cleanup would
+          // archive over a leaked workspace (#155). Treat as a real teardown
+          // failure: defer + escalate rather than register an incomplete record.
+          teardown = {
+            ok: false,
+            notTracked: false,
+            detail: `cannot reconcile ${canonicalId}: observation lacks an exact worktree path for #155-safe teardown`,
+          };
         } else {
-          teardown = { ok: false, notTracked: false, detail: `reconcile failed: ${reg.detail}` };
+          // Reconcile: back-fill the orphan into Brood from the Castra observation
+          // so Brood owns its teardown by EXACT worktree/branch path (#155 — never
+          // a blanket prune), then re-request teardown so the reap runs there.
+          const reg = ctx.broodRegister
+            ? await ctx.broodRegister(reconcileInput(canonicalId, live, worktreePath, state.repoPath, ctx))
+            : { ok: false, detail: "broodRegister unavailable" };
+          if (reg.ok) {
+            ctx.log(`cleanup reconciled untracked steward ${canonicalId} into Brood (${d.sliceId}); retrying teardown`);
+            teardown = await ctx.broodTeardown(canonicalId, { force: true, reason });
+          } else {
+            teardown = { ok: false, notTracked: false, detail: `reconcile failed: ${reg.detail}` };
+          }
         }
       } else {
         // Genuinely gone: Castra has no such session, so there is nothing to
@@ -112,7 +130,7 @@ export async function apply(decisions: CleanupDecision[], ctx: HandlerContext, s
         error: teardown.detail || "brood teardown did not confirm",
       };
       if (attempts >= MAX_CLEANUP_ATTEMPTS && ctx.requestJudgement) {
-        await ctx.requestJudgement({
+        const event = await ctx.requestJudgement({
           ts: ctx.ts,
           slice,
           requestKey: `cleanup-stuck:${d.sliceId}`,
@@ -122,7 +140,13 @@ export async function apply(decisions: CleanupDecision[], ctx: HandlerContext, s
           reason: "cleanup-stuck",
           detail: `PR ${d.terminalState} teardown unconfirmed after ${attempts} attempts: ${teardown.detail}`,
         });
-        failure.escalated = true;
+        // requestJudgement dedups per requestKey and returns null on a repeat —
+        // only record the escalation (and count the request) when it actually
+        // fired, mirroring babysit/dispatch.
+        if (event) {
+          failure.escalated = true;
+          res.requests.push(event);
+        }
       }
       res.failures.push(failure);
       continue;
@@ -142,22 +166,24 @@ function liveSession(state: LoopState, sessionId: string): any | undefined {
 
 /**
  * Build the registry back-fill for an orphaned steward from the live Castra
- * observation. The worktree/branch are the EXACT paths Castra reports for the
- * live session, so Brood's teardown removes them by exact path (#155). repoPath
- * is the deployment's source root; profile comes from the loop meta (Castra
- * teardown needs a concrete profile).
+ * observation. `canonicalId` (the session's real id) keys both the registry row
+ * and `agentDeckSessionId` so teardown addresses the real session, not an alias.
+ * `worktreePath`/`repoPath` are validated present by the caller — the EXACT
+ * paths needed for #155-safe reclamation; `branch` is the exact branch when
+ * observed; profile comes from the loop meta (Castra teardown needs a concrete
+ * profile).
  */
-function reconcileInput(d: CleanupDecision, live: any, state: LoopState, ctx: HandlerContext) {
+function reconcileInput(canonicalId: string, live: any, worktreePath: string, repoPath: string, ctx: HandlerContext) {
   return {
-    id: d.sessionId,
+    id: canonicalId,
     kind: "steward" as const,
     status: "running" as const,
-    agentDeckSessionId: d.sessionId,
+    agentDeckSessionId: canonicalId,
     profile: ctx.meta.profile,
+    repoPath,
+    worktreePath,
     ...(live.group ? { group: String(live.group) } : {}),
-    ...(state.repoPath ? { repoPath: state.repoPath } : {}),
     ...(live.branch ? { branch: String(live.branch) } : {}),
-    ...(live.worktree_path ? { worktreePath: String(live.worktree_path) } : {}),
   };
 }
 
