@@ -122,6 +122,43 @@ still surfaces as a trace even though no `hatchery.spawn` was ever emitted.
 
 Every span also carries `march.profile` — see [Profiles](#profiles-isolating-testinteg-telemetry).
 
+#### Herald observation spans
+
+Herald joins the same per-slice trace from the **observe** side. It emits one
+span *per state change it detects* — named for **what changed**, never a generic
+per-tick "observe" (a timeline of eight identical `herald.observe` lines tells
+you nothing):
+
+| span | when |
+|---|---|
+| `herald.pr.opened` / `herald.pr.merged` / `herald.pr.closed` / `herald.pr.changed` | a slice's PR state changed (name picked from the new state vs. the prior projection) |
+| `herald.output.changed` | a slice's recent session output changed (`march.output_error=true` when it carries a login/error) |
+| `herald.session.changed` | a worker session appeared / changed status / disappeared |
+| `herald.workers.changed` / `herald.queue.changed` | worker bucket counts or the smithy readiness queue moved |
+| `herald.observe.failed` | the tick threw (errored span) |
+| `herald.request` | an inbound mutation (`POST /events`) or a `5xx` only |
+
+**Slice-scoped** changes (`herald.pr.*`, `herald.output.changed`) carry
+`march.slice_id` and nest as **children** of that slice's dispatch trace via
+`traceIdForDispatch(sliceId)` ([`src/observability/herald-trace.ts`](../src/observability/herald-trace.ts)),
+so a single slice's trace reads end-to-end across `legate.dispatch → hatchery.spawn
+→ steward.send → herald.pr.merged`. **System-wide** changes
+(workers/queue/session) have no dispatch trace and stand alone. The semantic
+name→event mapping lives in `describeChangeSpan`
+([`src/herald/observe/observer.ts`](../src/herald/observe/observer.ts)).
+
+Two deliberate properties:
+
+- **Change-driven, like the event log itself.** A no-change tick emits *nothing*;
+  Herald spans appear only on activity. The high-frequency `GET /events` drain and
+  health polls are likewise left to the RED metrics, not traced. (Liveness is the
+  heartbeat metric, not a per-tick span.)
+- **Herald never originates a dispatch trace.** Its slice spans are always
+  children pointing at `spanIdForDispatch(sliceId)` — they never claim that id —
+  so `legate.dispatch` stays the sole root. The one exception: if the legate
+  restarts mid-slice its root span is not re-emitted, so later Herald spans on
+  that slice show against a missing root.
+
 ### Metrics
 
 Tagged `{backend, task_type, profile, outcome}`. `spawn_id` / `slice_id` are
@@ -386,6 +423,36 @@ in the traces table. If panels are empty, confirm `MARCH_OTEL=1` was set for the
 emitting process and that its endpoint resolves from where it runs (host vs.
 container).
 
+## Debugging a stuck task with traces
+
+A stuck slice has **one trace** — its dispatch trace, keyed by the slice id
+(`trace id = sha256("march.trace:" + sliceId)[:32]`). In Grafana → Explore →
+Tempo, search by attribute:
+
+```traceql
+{ .march.slice_id = "<sliceId>" }
+```
+
+Open the trace and read it top to bottom — the timeline *is* the slice's life
+across every service, in causal order. The diagnosis is almost always a **gap**:
+a leg whose span is **absent**, **errored**, or carries the **wrong attributes**.
+
+| symptom in the trace | reading |
+|---|---|
+| `legate.dispatch` (root) errored / wrong `march.action`, `march.dispatch_mode`, `march.task.type` | the legate didn't dispatch, or dispatched the wrong command |
+| `hatchery.spawn` / `spawn.*` errored or absent | the container/image/patch step failed before the agent ran |
+| `steward.send` / `castra.send` errored or absent | the prompt never reached the steward (e.g. Castra rejected it) |
+| `herald.pr.opened` present but **no** `herald.pr.merged` | Herald never observed the merge-ready state — cross-check the PR on GitHub to tell a real not-ready from an observation gap |
+| the trace simply **can't** answer "where did it stall" | that silence is itself the bug — see below |
+
+**Treat a blind spot as a telemetry defect, not bad luck.** If the trace can't
+locate the stall, the fix is to make the silent boundary visible: add or enrich a
+span where the slice goes dark — a new `march.*` attribute that would have
+disambiguated, an **errored** span on a newly-discovered failure mode, or a
+brand-new span for a path that emits nothing today — following the rules in
+[Keeping observability current](#keeping-observability-current). The goal is that
+every "stuck task" question is answerable from its one trace.
+
 ## Keeping observability current
 
 Telemetry only stays useful if it tracks the code. When you change the dispatch
@@ -405,6 +472,17 @@ machinery, update the signals in lock-step:
   runs, the appropriate metric `outcome`) so the failure shows up rather than
   silently vanishing. Recovery and direct-steward dispatches are the worked
   example.
+- **New Herald observation (a new change Herald can detect)** → map it to a
+  *semantic* span in `describeChangeSpan`
+  ([`src/herald/observe/observer.ts`](../src/herald/observe/observer.ts)) named for
+  *what changed* (not a generic "observe"), keep the name set low-cardinality, and
+  put the slice id in `march.slice_id`. If it is slice-scoped, pass
+  `dispatchKey: sliceId` to `startHeraldSpan`
+  ([`src/observability/herald-trace.ts`](../src/observability/herald-trace.ts)) so
+  it nests in the slice's dispatch trace as a **child** (never a root — the legate
+  owns the root); system-wide changes stand alone. Span only on *activity* (a
+  no-change tick stays silent), and emit an errored `herald.observe.failed` when a
+  tick throws.
 - **A new process joins a trace** → reuse the deterministic id helpers so its
   spans land in the right trace. The loop service emits its spans through the OTel
   SDK ([`src/observability/loop-spans.ts`](../src/observability/loop-spans.ts)),
@@ -416,7 +494,12 @@ machinery, update the signals in lock-step:
   ([`src/observability/in-spawn-emitter.ts`](../src/observability/in-spawn-emitter.ts))
   keeps a stand-alone raw-OTLP copy of the id derivation since it ships into a
   no-`node_modules` container without the SDK. Keep them aligned — the
-  cross-process test in `init.test.ts` locks this in.
+  cross-process test in `init.test.ts` locks this in. A *service* that observes or
+  acts on an existing slice nests on the same deterministic id rather than starting
+  its own root: Herald via
+  [`herald-trace.ts`](../src/observability/herald-trace.ts) (`dispatchKey`), brood
+  teardown via [`brood-trace.ts`](../src/observability/brood-trace.ts), and Castra
+  via the `x-march-slice-id` header it keys `castra.<op>` spans off.
 - **New metric or label** → spawn metrics in
   [`src/observability/spawn-metrics.ts`](../src/observability/spawn-metrics.ts);
   Hatchery service metrics in

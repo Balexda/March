@@ -22,7 +22,15 @@ Quick pointers:
   only) → `src/observability/spawn-metrics.ts` (spawns) or
   `src/observability/hatchery-metrics.ts` (the Hatchery service); new logs → the
   pino logger in `src/observability/logger.ts` (file sink + OTLP, no-op when
-  off); then the dashboards under `docker/grafana/`.
+  off); then the dashboards under `docker/grafana/`. **Each slice is one trace**
+  keyed by its id (`traceIdForDispatch`): `legate.dispatch` (root) →
+  `hatchery.spawn`/`spawn.*`/`steward.send` → Herald's `herald.pr.*` /
+  `herald.output.changed`. Service-side spans that observe or act on a slice nest
+  on the deterministic id as **children** (never claiming root) — Herald via
+  `src/observability/herald-trace.ts`, brood via `brood-trace.ts`, Castra via the
+  `x-march-slice-id` header. Debugging a stuck task = reading that one trace for
+  the absent/errored/wrong-attribute leg; if it can't answer "where did it stall",
+  that gap is itself the fix (see the debug + maintenance sections of the guide).
 - **Hatchery is a containerized service:** `march hatchery serve` (Fastify) under
   `src/hatchery/service/` runs the spawn flow; `march hatchery spawn` is a thin
   HTTP client. Image/compose: `docker/hatchery.Dockerfile`,
