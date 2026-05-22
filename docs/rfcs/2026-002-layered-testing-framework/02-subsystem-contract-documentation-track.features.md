@@ -186,7 +186,7 @@ specced and cut in parallel; F6 integrates last because it invokes F5's verdict.
 | ID | Title | Depends On | Artifact |
 |----|-------|-----------|----------|
 | F1 | Contract Scaffold & Required-Section Schema | — | specs/2026-05-21-005-contract-scaffold-required-section-schema/ |
-| F2 | Containerized-Service Contracts (Hatchery, Brood, Herald, Castra) | F1 | — |
+| F2 | Containerized-Service Contracts (Hatchery, Brood, Herald, Castra) | F1 | specs/2026-05-22-006-containerized-service-contracts-hatchery-brood-herald-castra/ |
 | F3 | TypeScript-Surface Contracts (Spawn, Legate) | F1 | — |
 | F4 | Steward Contract (Castra-Consumer Surface) | F1 | — |
 | F5 | Contract Presence & Freshness Check | F1 | — |
