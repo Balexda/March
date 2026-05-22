@@ -25,6 +25,22 @@ describe("spawn-trace (disabled)", () => {
     ).toThrow("boom");
   });
 
+  it("spanAsync runs the wrapped async function and returns its value when disabled", async () => {
+    const dispatch = startDispatchSpan({ traceKey: "k", rootName: "hatchery.spawn" });
+    await expect(
+      dispatch.spanAsync("manager.launch", async () => 7),
+    ).resolves.toBe(7);
+  });
+
+  it("spanAsync propagates rejections from the wrapped async function", async () => {
+    const dispatch = startDispatchSpan({ traceKey: "k", rootName: "hatchery.spawn" });
+    await expect(
+      dispatch.spanAsync("steward.send", async () => {
+        throw new Error("send boom");
+      }),
+    ).rejects.toThrow("send boom");
+  });
+
   it("has no traceparent and a safe no-op end when disabled", () => {
     const dispatch = startDispatchSpan({ traceKey: "k", rootName: "r" });
     expect(dispatch.traceparent()).toBeUndefined();

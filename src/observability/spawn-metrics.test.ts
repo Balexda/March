@@ -19,4 +19,17 @@ describe("spawn-metrics", () => {
       }),
     ).not.toThrow();
   });
+
+  it("accepts a failureStage on a failure record without throwing when disabled", () => {
+    expect(() =>
+      recordSpawnRun({
+        backend: "codex",
+        taskType: "cut",
+        profile: "march",
+        outcome: "failure",
+        failureStage: "patch_apply",
+        durationSeconds: 0.3,
+      }),
+    ).not.toThrow();
+  });
 });

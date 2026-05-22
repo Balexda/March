@@ -28,6 +28,14 @@ export interface StartDispatchSpanInput {
 export interface DispatchTrace {
   readonly enabled: boolean;
   span<T>(name: string, fn: () => T, attributes?: Attributes): T;
+  /**
+   * Async sibling of {@link span}: brackets a child span around an awaited
+   * function (a cross-system seam such as a Castra/Brood HTTP call). The span
+   * stays open until the promise settles, recording an exception + ERROR status
+   * on rejection. Use this — never `span` — for anything that returns a promise,
+   * because `span` would end the child before the work completes.
+   */
+  spanAsync<T>(name: string, fn: () => Promise<T>, attributes?: Attributes): Promise<T>;
   setAttributes(attributes: Attributes): void;
   recordException(err: unknown): void;
   /** W3C traceparent of the root span, for propagation into the spawn sandbox. */
@@ -38,6 +46,7 @@ export interface DispatchTrace {
 const NOOP_TRACE: DispatchTrace = {
   enabled: false,
   span: (_name, fn) => fn(),
+  spanAsync: (_name, fn) => fn(),
   setAttributes: () => {},
   recordException: () => {},
   traceparent: () => undefined,
@@ -75,6 +84,26 @@ export function startDispatchSpan(input: StartDispatchSpanInput): DispatchTrace 
       const child = tracer.startSpan(name, { attributes }, rootCtx);
       try {
         const result = fn();
+        child.end();
+        return result;
+      } catch (err) {
+        child.recordException(err as Error);
+        child.setStatus({
+          code: SpanStatusCode.ERROR,
+          message: (err as Error)?.message,
+        });
+        child.end();
+        throw err;
+      }
+    },
+    async spanAsync<T>(
+      name: string,
+      fn: () => Promise<T>,
+      attributes?: Attributes,
+    ): Promise<T> {
+      const child = tracer.startSpan(name, { attributes }, rootCtx);
+      try {
+        const result = await fn();
         child.end();
         return result;
       } catch (err) {

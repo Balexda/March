@@ -24,7 +24,7 @@ import {
   removeSpawnImage,
   writeSpawnDockerfile,
 } from "../spawn/snapshot-build.js";
-import { generateSpawnId } from "../brood/worktree.js";
+import { generateSpawnId, removeSpawnWorktree } from "../brood/worktree.js";
 import {
   markSpawnRecordFailed,
   markSpawnRecordRunning,
@@ -36,7 +36,10 @@ import {
   writeInitialSpawnRecord,
 } from "../brood/spawn-record.js";
 import { startDispatchSpan } from "../observability/spawn-trace.js";
-import { recordSpawnRun } from "../observability/spawn-metrics.js";
+import {
+  recordSpawnRun,
+  type SpawnFailureStage,
+} from "../observability/spawn-metrics.js";
 import { buildSpawnOtelContext } from "../observability/in-spawn-emitter.js";
 import {
   CastraClient,
@@ -124,6 +127,18 @@ export function hatcherySpawnLogDir(
 
 export function managerBranchName(spawnId: string): string {
   return `march/spawn/${spawnId}`;
+}
+
+/**
+ * The local branch ref agent-deck/castra actually creates for a manager
+ * session: a `feature/` prefix on the bare dispatch branch. The dispatched
+ * `branch` is the symbolic name (e.g. `smithy/cut/01-spawn-f3-s3`); the real
+ * local ref is `feature/smithy/cut/01-spawn-f3-s3`. Idempotent when `branch`
+ * is already prefixed. Used by the failed-spawn rollback to delete the orphan
+ * branch Castra's worktree-prune leaves behind (issue #211).
+ */
+export function orphanManagerBranch(branch: string): string {
+  return "feature/" + branch.replace(/^feature\//, "");
 }
 
 export function buildSpawnPatchPrompt(operatorPrompt: string): string {
@@ -531,21 +546,30 @@ export async function runHatcherySpawn(
   let containerId: string | undefined;
   let logs = "";
   let handedOff = false;
+  // Lifecycle stage tracker: advanced as the handoff progresses so the finally
+  // block (and the rollback span) can report WHICH step failed when a step
+  // throws — the container can exit 0 yet a later step fail (issue #211), so
+  // outcome must be derived from `handedOff`, not the exit code. `"none"` is
+  // recorded on success.
+  let stage: SpawnFailureStage = "manager_launch";
   try {
-    manager = await launchAgentDeckManager(
-      {
-        repoPath: input.repoPath,
-        spawnId,
-        branch,
-        title,
-        group,
-        profile: agentDeckProfile,
-        traceKey,
-      },
-      castra,
+    manager = await dispatch.spanAsync("manager.launch", () =>
+      launchAgentDeckManager(
+        {
+          repoPath: input.repoPath,
+          spawnId,
+          branch,
+          title,
+          group,
+          profile: agentDeckProfile,
+          traceKey,
+        },
+        castra,
+      ),
     );
 
     const spawnPrompt = buildSpawnPatchPrompt(input.prompt);
+    stage = "record_init";
 
     writeInitialSpawnRecord({
       id: spawnId,
@@ -567,33 +591,41 @@ export async function runHatcherySpawn(
     // so ghost-cleanup can reclaim it instead of deferring on a "registration gap".
     // Best-effort and MARCH_BROOD_URL-gated: a missing/unreachable registry never
     // fails the dispatch. The onSucceeded hook later enriches this row.
-    await registerStewardLaunchWithBrood({
-      spawnId,
-      stewardSessionId: manager.sessionId,
-      repoPath: input.repoPath,
-      branch,
-      worktreePath: manager.worktreePath,
-      backend: input.backend.name,
-      profile: agentDeckProfile,
-      group,
+    const stewardSessionId = manager.sessionId;
+    const managerWorktree = manager.worktreePath;
+    await dispatch.spanAsync("brood.register", () =>
+      registerStewardLaunchWithBrood({
+        spawnId,
+        stewardSessionId,
+        repoPath: input.repoPath,
+        branch,
+        worktreePath: managerWorktree,
+        backend: input.backend.name,
+        profile: agentDeckProfile,
+        group,
+      }),
+    );
+
+    stage = "image_build";
+    dispatch.span("image.build", () => {
+      const handle = createBuildContext(managerWorktree);
+      try {
+        const dockerfilePath = writeSpawnDockerfile(
+          handle.contextPath,
+          input.backend.baseImage,
+        );
+        const imageTag = buildSpawnImage({
+          spawnId,
+          contextPath: handle.contextPath,
+          dockerfilePath,
+        });
+        updateSpawnRecordImageId(spawnId, imageTag, input.homeDir);
+      } finally {
+        handle.cleanup();
+      }
     });
 
-    const handle = createBuildContext(manager.worktreePath);
-    try {
-      const dockerfilePath = writeSpawnDockerfile(
-        handle.contextPath,
-        input.backend.baseImage,
-      );
-      const imageTag = buildSpawnImage({
-        spawnId,
-        contextPath: handle.contextPath,
-        dockerfilePath,
-      });
-      updateSpawnRecordImageId(spawnId, imageTag, input.homeDir);
-    } finally {
-      handle.cleanup();
-    }
-
+    stage = "container_run";
     dispatch.span("spawn.start", () => {
       const otelCtx = buildSpawnOtelContext({
         traceparent: dispatch.traceparent(),
@@ -642,6 +674,9 @@ export async function runHatcherySpawn(
       );
     }
 
+    // Patch extraction is pure in-process parsing — not a cross-system seam, so
+    // it gets no span; the stage tracker still classifies a no-patch failure.
+    stage = "patch_extract";
     let patch: string;
     try {
       patch = extractPatchFromSpawnOutput(logs);
@@ -667,6 +702,7 @@ export async function runHatcherySpawn(
       managerPrompt,
       metadata: metadataFor(input, manager, spawnId, branch, waitResult.exitCode, startedAt),
     });
+    stage = "patch_apply";
     const managerWorktreePath = manager.worktreePath;
     dispatch.span("steward.apply", () => {
       applyPatchToManagerWorktree({
@@ -674,14 +710,17 @@ export async function runHatcherySpawn(
         worktreePath: managerWorktreePath,
       });
     });
-    await sendPromptToAgentDeckManager(
-      {
-        sessionId: manager.sessionId,
-        prompt: managerPrompt,
-        profile: agentDeckProfile,
-        traceKey,
-      },
-      castra,
+    stage = "steward_send";
+    await dispatch.spanAsync("steward.send", () =>
+      sendPromptToAgentDeckManager(
+        {
+          sessionId: stewardSessionId,
+          prompt: managerPrompt,
+          profile: agentDeckProfile,
+          traceKey,
+        },
+        castra,
+      ),
     );
     handedOff = true;
 
@@ -709,18 +748,41 @@ export async function runHatcherySpawn(
         // Preserve the original error.
       }
     }
-    if (containerId) removeSpawnContainer(spawnId);
-    removeSpawnImage(spawnId);
-    if (manager && !handedOff) {
-      await removeAgentDeckManager(
-        {
-          sessionId: manager.sessionId,
-          profile: agentDeckProfile,
-          traceKey,
-        },
-        castra,
-      );
-    }
+    // Roll back the partial spawn as ONE conceptual action — it crosses several
+    // seams (Docker rm, Castra removeSession, git branch -D), so it gets a
+    // single span tagged with the stage that triggered it, not one span per
+    // call. Best-effort throughout; never mask the original failure.
+    const mgr = manager;
+    await dispatch.spanAsync(
+      "spawn.rollback",
+      async () => {
+        if (containerId) removeSpawnContainer(spawnId);
+        removeSpawnImage(spawnId);
+        if (mgr && !handedOff) {
+          await removeAgentDeckManager(
+            { sessionId: mgr.sessionId, profile: agentDeckProfile, traceKey },
+            castra,
+          );
+          // Castra's removeSession prunes the worktree but LEAVES the local
+          // branch behind. A later re-dispatch of the same slice would then
+          // collide on "branch already exists" and strand the slice
+          // operator-only (issue #211). Remove the orphan branch (and the
+          // worktree, idempotently) by EXACT path via the rollback helper — it
+          // never runs a blanket `git worktree prune` (#155).
+          try {
+            removeSpawnWorktree(input.repoPath, {
+              spawnId,
+              branch: orphanManagerBranch(branch),
+              worktreePath: mgr.worktreePath,
+            });
+          } catch {
+            // Swallowed — removeSpawnWorktree surfaces its own incomplete-
+            // rollback warning; preserve the original failure below.
+          }
+        }
+      },
+      { "march.failure_stage": stage },
+    );
     if (
       err instanceof SnapshotError ||
       err instanceof BuildError ||
@@ -732,17 +794,24 @@ export async function runHatcherySpawn(
     }
     throw new HatcherySpawnError((err as Error).message);
   } finally {
-    const outcome: "success" | "failure" =
-      exitCode === 0 ? "success" : "failure";
+    // Outcome is the real HANDOFF result, not the container exit code: a 0 exit
+    // followed by a failed patch-apply / steward-send is a FAILED spawn (issue
+    // #211). `handedOff` is set only after the final send succeeds, so it is the
+    // single source of truth here.
+    const failed = !handedOff;
     if (exitCode !== undefined) {
       dispatch.setAttributes({ "march.exit_code": exitCode });
     }
-    dispatch.end({ error: outcome !== "success" });
+    if (failed) {
+      dispatch.setAttributes({ "march.failure_stage": stage });
+    }
+    dispatch.end({ error: failed });
     recordSpawnRun({
       backend: input.backend.name,
       taskType,
       profile,
-      outcome,
+      outcome: failed ? "failure" : "success",
+      failureStage: failed ? stage : undefined,
       durationSeconds: (Date.now() - startMs) / 1000,
     });
   }

@@ -3,7 +3,33 @@ import { getActiveOtel } from "./otel.js";
 
 export type SpawnOutcome = "success" | "failure";
 
-/** A spawn succeeded only if its container exited 0. */
+/**
+ * Lifecycle stage a spawn failed at — a LOW-CARDINALITY metric label and span
+ * attribute. A spawn's container can exit 0 yet the dispatch still fail in a
+ * later step (patch extraction, `git apply`, the steward send-off): keying
+ * outcome off the container exit code alone mislabels those as success
+ * (issue #211). Tracking the stage makes "where do spawns break" answerable in
+ * Grafana/Tempo. `"none"` is recorded on success. Keep this enum bounded — it
+ * is a metric label, so it must never carry ids or free text.
+ */
+export type SpawnFailureStage =
+  | "manager_launch"
+  | "record_init"
+  | "image_build"
+  | "container_run"
+  | "patch_extract"
+  | "patch_apply"
+  | "steward_send"
+  | "rollback";
+
+/**
+ * Maps a container exit code to an outcome. NOTE: this reflects only whether
+ * the CONTAINER exited cleanly — it is NOT the dispatch outcome, because the
+ * handoff has post-container steps (patch extraction, `git apply`, steward
+ * send) that can fail after a 0 exit. Use the real handoff result for
+ * {@link recordSpawnRun}; this helper remains for callers that genuinely want
+ * the container-exit classification.
+ */
 export function outcomeFromExitCode(exitCode: number): SpawnOutcome {
   return exitCode === 0 ? "success" : "failure";
 }
@@ -19,6 +45,11 @@ export interface RecordSpawnRunInput {
    */
   readonly profile: string;
   readonly outcome: SpawnOutcome;
+  /**
+   * Which lifecycle stage failed, for `outcome: "failure"`. Omitted (recorded
+   * as `"none"`) on success. Bounded enum — safe as a metric label.
+   */
+  readonly failureStage?: SpawnFailureStage;
   readonly durationSeconds: number;
 }
 
@@ -66,6 +97,7 @@ export function recordSpawnRun(input: RecordSpawnRunInput): void {
     task_type: input.taskType,
     profile: input.profile,
     outcome: input.outcome,
+    failure_stage: input.failureStage ?? "none",
   };
   counter.add(1, attributes);
   histogram.record(input.durationSeconds, attributes);
