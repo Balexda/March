@@ -167,7 +167,7 @@ describe("babysit apply", () => {
         throw new Error("down");
       }),
     });
-    const res = await apply([{ kind: "review-fix", sliceId: "s", sessionId: "w", pr: { number: 5 }, key: "k", message: "M", detail: "x" }], ctx(), state, d);
+    const res = await apply([{ kind: "review-fix", sliceId: "s", sessionId: "w", pr: { number: 5 }, key: "k", message: "M", detail: "x", threadIds: ["t1"] }], ctx(), state, d);
     expect(slice.stage).toBe("pr-open"); // not advanced
     expect(res.requests).toHaveLength(1);
     expect(res.actions).toHaveLength(0);
@@ -234,5 +234,142 @@ describe("babysit apply", () => {
     // The escalation fires a deduped judgement request for the operator.
     expect(d.requestJudgement).toHaveBeenCalled();
     expect(res.requests).toHaveLength(1);
+  });
+});
+
+// #224: review-fix must dedup by review-comment id, not last_comment_at, so a
+// steward addressing a thread (push + reply) cannot re-arm /smithy.fix forever.
+describe("babysit review-fix comment-id dedup (#224)", () => {
+  const prWith = (over: Record<string, any>) => ({
+    number: 5,
+    state: "OPEN",
+    mergeable: "MERGEABLE",
+    checks: "PASS",
+    ...over,
+  });
+  const reviewState = (sliceOver: Record<string, any>, threads: any[], status = "idle") =>
+    loopState({
+      slices: { s: { worker_session_id: "w", stage: "pr-open", pr: { number: 5 }, pr_open_at: T_30M_AGO, ...sliceOver } },
+      sessions: [session("w", status)],
+      perSlice: { s: { recentOutput: { output: "" }, pr: prWith({ unresolved_threads: threads }) } },
+    });
+
+  it("does not re-fire when every needed-thread comment id is already seen", () => {
+    // The thread is still unresolved + needs_response, but its only comment was
+    // already dispatched for (the steward fixed/declined + replied, no new id).
+    const state = reviewState(
+      { review_fix_seen_comment_ids: ["c1"] },
+      [{ id: "t1", needs_response: true, comment_ids: ["c1"] }],
+    );
+    expect(kindsOf(assess(state))).toEqual(["pr-snapshot"]);
+  });
+
+  it("treats the steward's own reply (a seen id) as no new work", () => {
+    // c2 is the steward's reply; both ids are already in the seen set, so the
+    // reply does not re-arm the dispatch for the thread.
+    const state = reviewState(
+      { review_fix_seen_comment_ids: ["c1", "c2"] },
+      [{ id: "t1", needs_response: true, comment_ids: ["c1", "c2"] }],
+    );
+    expect(kindsOf(assess(state))).toEqual(["pr-snapshot"]);
+  });
+
+  it("re-fires only for a genuinely new (unseen) comment id", () => {
+    const state = reviewState(
+      { review_fix_seen_comment_ids: ["c1"] },
+      [{ id: "t1", needs_response: true, comment_ids: ["c1", "c2"] }],
+    );
+    const ds = assess(state);
+    expect(kindsOf(ds)).toEqual(["pr-snapshot", "review-fix"]);
+    expect(ds.find((d) => d.kind === "review-fix")).toMatchObject({ threadIds: ["t1"] });
+  });
+
+  it("falls back to the thread id as the comment id when comment_ids is absent", () => {
+    // First dispatch (nothing seen) still fires for a legacy thread shape.
+    const state = reviewState({}, [{ id: "t1", needs_response: true }]);
+    expect(kindsOf(assess(state))).toEqual(["pr-snapshot", "review-fix"]);
+  });
+
+  it("snapshot folds observed comment ids into the seen set", async () => {
+    const slice: any = { worker_session_id: "w", stage: "pr-open" };
+    const state = loopState({ slices: { s: slice } });
+    await apply(
+      [{ kind: "pr-snapshot", sliceId: "s", pr: { number: 5, unresolved_threads: [{ id: "t1", comment_ids: ["c1", "c2"] }, { id: "t2", comment_ids: ["c3"] }] } }],
+      ctx(),
+      state,
+      deps(),
+    );
+    expect(slice.review_fix_seen_comment_ids).toEqual(["c1", "c2", "c3"]);
+  });
+
+  it("review-fix apply counts a distinct round per dispatched thread", async () => {
+    const slice: any = { worker_session_id: "w", stage: "pr-open", review_fix_rounds: { t1: 1 } };
+    const state = loopState({ slices: { s: slice } });
+    await apply(
+      [{ kind: "review-fix", sliceId: "s", sessionId: "w", pr: { number: 5 }, key: "k", message: "M", detail: "x", threadIds: ["t1", "t2"] }],
+      ctx(),
+      state,
+      deps(),
+    );
+    expect(slice.review_fix_rounds).toEqual({ t1: 2, t2: 1 });
+  });
+
+  it("escalates instead of re-dispatching once a thread hits the round cap", () => {
+    // c2 is new, but t1 already had 3 rounds → escalate to operator, no dispatch.
+    const state = reviewState(
+      { review_fix_seen_comment_ids: ["c1"], review_fix_rounds: { t1: 3 } },
+      [{ id: "t1", needs_response: true, comment_ids: ["c1", "c2"] }],
+    );
+    expect(kindsOf(assess(state))).toEqual(["pr-snapshot", "review-fix-exhausted"]);
+  });
+
+  it("review-fix-exhausted fires a judgement request and latches the escalation", async () => {
+    const slice: any = { worker_session_id: "w", stage: "pr-in-fix" };
+    const state = loopState({ slices: { s: slice } });
+    const d = deps();
+    const res = await apply(
+      [{ kind: "review-fix-exhausted", sliceId: "s", sessionId: "w", pr: { number: 5 }, requestKey: "rk", reason: "review_fix_rounds_exhausted", detail: "x" }],
+      ctx(),
+      state,
+      d,
+    );
+    expect(slice.review_fix_escalated_at).toBe(NOW);
+    expect(d.requestJudgement).toHaveBeenCalled();
+    expect(res.requests).toHaveLength(1);
+  });
+
+  it("re-nudges a parked worker after a real review-fix dispatch with no new comments", () => {
+    const state = reviewState(
+      { stage: "pr-in-fix", review_fix_seen_comment_ids: ["c1"], last_processor_action: "review-fix", last_processor_action_key: "rk", last_processor_action_at: T_30M_AGO },
+      [{ id: "t1", needs_response: true, comment_ids: ["c1"] }],
+    );
+    expect(assess(state).find((d) => d.kind === "post-dispatch-nudge")).toMatchObject({ count: 1 });
+  });
+
+  it("does NOT re-nudge when the last action was not a review-fix (fixed+replied steady state)", () => {
+    // Worker idle, threads seen, but the loop never dispatched a review-fix for
+    // this set — so it must not start poking /smithy.fix.
+    const state = reviewState(
+      { review_fix_seen_comment_ids: ["c1"], last_processor_action: "pr-open", last_processor_action_at: T_30M_AGO },
+      [{ id: "t1", needs_response: true, comment_ids: ["c1"] }],
+    );
+    expect(kindsOf(assess(state))).toEqual(["pr-snapshot"]);
+  });
+
+  it("does not babysit review threads on a MERGED PR", () => {
+    const state = reviewState(
+      {},
+      [{ id: "t1", needs_response: true, comment_ids: ["c1"] }],
+    );
+    (state.perSlice.s.pr as any).state = "MERGED";
+    expect(kindsOf(assess(state))).toEqual(["pr-snapshot"]);
+  });
+
+  it("pr-open-clear resets the per-thread round budget and clears the escalation latch", async () => {
+    const slice: any = { worker_session_id: "w", stage: "pr-in-fix", review_fix_rounds: { t1: 3 }, review_fix_escalated_at: T_30M_AGO };
+    const state = loopState({ slices: { s: slice } });
+    await apply([{ kind: "pr-open-clear", sliceId: "s", sessionId: "w", pr: { number: 5 } }], ctx(), state, deps());
+    expect(slice.review_fix_rounds).toBeUndefined();
+    expect(slice.review_fix_escalated_at).toBeUndefined();
   });
 });

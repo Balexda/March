@@ -259,6 +259,10 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
           last_author: last.author?.login,
           last_comment_at: last.createdAt,
           comment_count: comments.length,
+          // Every comment's databaseId, so the legate can dedup /smithy.fix by
+          // comment id instead of last_comment_at (#224): a steward's reply
+          // advances last_comment_at but adds a known id, not an unseen one.
+          comment_ids: comments.map((comment: any) => comment.databaseId).filter((id: any) => id != null),
         };
       });
   }
