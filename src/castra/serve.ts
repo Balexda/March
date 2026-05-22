@@ -48,12 +48,14 @@ export async function runCastraServer(options: RunCastraServerOptions = {}): Pro
     );
   }
 
-  // Liveness heartbeat + uptime gauge — gives Castra an UP/down tile like the
-  // other services. No-op when telemetry is disabled.
-  const stopHeartbeat = startCastraHeartbeat();
-
   await app.listen({ port, host });
   app.log.info(`castra listening on http://${host}:${port}`);
+
+  // Liveness heartbeat + uptime gauge — gives Castra an UP/down tile like the
+  // other services. No-op when telemetry is disabled. Started only AFTER a
+  // successful listen() so a bind failure can't leak an unref'd timer emitting
+  // false "UP" telemetry (the shutdown path that stops it never runs on throw).
+  const stopHeartbeat = startCastraHeartbeat();
 
   await new Promise<void>((resolve) => {
     let shuttingDown = false;
