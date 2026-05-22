@@ -1,7 +1,10 @@
 import fs from "node:fs";
 import path from "node:path";
 import { recordBroodTeardown } from "../../observability/brood-metrics.js";
-import { startBroodSpan } from "../../observability/brood-trace.js";
+import {
+  startBroodSpan,
+  type BroodChildSpan,
+} from "../../observability/brood-trace.js";
 import { readSpawnContainerLogs } from "../../spawn/container-launch.js";
 import { createCastraClientFromEnv } from "../../castra/client.js";
 import type { SessionRepository } from "./repository.js";
@@ -164,7 +167,11 @@ export async function teardownSession(
     attributes: {
       "march.session.id": primary.id,
       "march.session.kind": primary.kind,
+      ...(spawn ? { "march.spawn.id": spawn.id } : {}),
       ...(steward ? { "march.steward.id": steward.id } : {}),
+      ...(primary.worktreePath
+        ? { "march.worktree.path": primary.worktreePath }
+        : {}),
     },
   });
 
@@ -200,16 +207,26 @@ export async function teardownSession(
   }
 
   // 2. Container.
-  if (spawn) {
-    try {
-      d.substrate.removeSpawn(spawn.id);
-      steps.push({ step: "container", outcome: "ok" });
-    } catch (err) {
-      steps.push({ step: "container", outcome: "failed", detail: message(err) });
-      warnings.push(`container removal failed: ${message(err)}`);
+  {
+    const child = span.startChild("brood.teardown.container", {
+      ...(spawn ? { "march.spawn.id": spawn.id } : {}),
+    });
+    if (spawn) {
+      try {
+        d.substrate.removeSpawn(spawn.id);
+        steps.push({ step: "container", outcome: "ok" });
+      } catch (err) {
+        steps.push({
+          step: "container",
+          outcome: "failed",
+          detail: message(err),
+        });
+        warnings.push(`container removal failed: ${message(err)}`);
+      }
+    } else {
+      steps.push({ step: "container", outcome: "skipped" });
     }
-  } else {
-    steps.push({ step: "container", outcome: "skipped" });
+    endStepSpan(child, steps[steps.length - 1]!);
   }
 
   // 3. Steward (await — Castra owns the agent-deck session and may reclaim the
@@ -217,74 +234,94 @@ export async function teardownSession(
   //    proceed to remove the worktree — that would pull the checkout out from
   //    under a still-live session. Defer the worktree/branch and retry next tick.
   let stewardRemovalFailed = false;
-  if (steward) {
-    try {
-      const res = await d.removeSteward({
-        sessionId: steward.agentDeckSessionId ?? steward.id,
-        profile: steward.profile,
-      });
-      steps.push({
-        step: "steward",
-        outcome: res.removed ? "ok" : "skipped",
-        detail: res.removed ? undefined : "already gone",
-      });
-    } catch (err) {
-      stewardRemovalFailed = true;
-      steps.push({ step: "steward", outcome: "failed", detail: message(err) });
-      warnings.push(`steward removal failed: ${message(err)}`);
+  {
+    const child = span.startChild("brood.teardown.steward", {
+      ...(steward ? { "march.steward.id": steward.id } : {}),
+    });
+    if (steward) {
+      try {
+        const res = await d.removeSteward({
+          sessionId: steward.agentDeckSessionId ?? steward.id,
+          profile: steward.profile,
+        });
+        steps.push({
+          step: "steward",
+          outcome: res.removed ? "ok" : "skipped",
+          detail: res.removed ? undefined : "already gone",
+        });
+      } catch (err) {
+        stewardRemovalFailed = true;
+        steps.push({ step: "steward", outcome: "failed", detail: message(err) });
+        warnings.push(`steward removal failed: ${message(err)}`);
+      }
+    } else {
+      steps.push({ step: "steward", outcome: "skipped" });
     }
-  } else {
-    steps.push({ step: "steward", outcome: "skipped" });
+    endStepSpan(child, steps[steps.length - 1]!);
   }
 
   // 4. Worktree (re-check after steward; Castra may already have removed it).
-  if (stewardRemovalFailed) {
-    steps.push({
-      step: "worktree",
-      outcome: "skipped",
-      detail: "deferred: steward removal failed",
+  {
+    const child = span.startChild("brood.teardown.worktree", {
+      ...(primary.worktreePath
+        ? { "march.worktree.path": primary.worktreePath }
+        : {}),
     });
-  } else if (primary.worktreePath && primary.repoPath) {
-    if (!d.pathExists(primary.worktreePath)) {
+    if (stewardRemovalFailed) {
       steps.push({
         step: "worktree",
         outcome: "skipped",
-        detail: "already removed",
+        detail: "deferred: steward removal failed",
       });
-    } else {
-      const res = d.substrate.removeWorkspace(primary.repoPath, {
-        worktreePath: primary.worktreePath,
-      });
-      if (res.worktreeRemoved) {
-        steps.push({ step: "worktree", outcome: "ok" });
+    } else if (primary.worktreePath && primary.repoPath) {
+      if (!d.pathExists(primary.worktreePath)) {
+        steps.push({
+          step: "worktree",
+          outcome: "skipped",
+          detail: "already removed",
+        });
       } else {
-        steps.push({ step: "worktree", outcome: "failed" });
-        warnings.push(`worktree "${primary.worktreePath}" may still exist`);
+        const res = d.substrate.removeWorkspace(primary.repoPath, {
+          worktreePath: primary.worktreePath,
+        });
+        if (res.worktreeRemoved) {
+          steps.push({ step: "worktree", outcome: "ok" });
+        } else {
+          steps.push({ step: "worktree", outcome: "failed" });
+          warnings.push(`worktree "${primary.worktreePath}" may still exist`);
+        }
       }
+    } else {
+      steps.push({ step: "worktree", outcome: "skipped" });
     }
-  } else {
-    steps.push({ step: "worktree", outcome: "skipped" });
+    endStepSpan(child, steps[steps.length - 1]!);
   }
 
   // 5. Branch.
-  if (stewardRemovalFailed) {
-    steps.push({
-      step: "branch",
-      outcome: "skipped",
-      detail: "deferred: steward removal failed",
+  {
+    const child = span.startChild("brood.teardown.branch", {
+      ...(primary.branch ? { "march.branch": primary.branch } : {}),
     });
-  } else if (primary.branch && primary.repoPath) {
-    const res = d.substrate.removeWorkspace(primary.repoPath, {
-      branch: primary.branch,
-    });
-    if (res.branchDeleted) {
-      steps.push({ step: "branch", outcome: "ok" });
+    if (stewardRemovalFailed) {
+      steps.push({
+        step: "branch",
+        outcome: "skipped",
+        detail: "deferred: steward removal failed",
+      });
+    } else if (primary.branch && primary.repoPath) {
+      const res = d.substrate.removeWorkspace(primary.repoPath, {
+        branch: primary.branch,
+      });
+      if (res.branchDeleted) {
+        steps.push({ step: "branch", outcome: "ok" });
+      } else {
+        steps.push({ step: "branch", outcome: "failed" });
+        warnings.push(`branch "${primary.branch}" may still exist`);
+      }
     } else {
-      steps.push({ step: "branch", outcome: "failed" });
-      warnings.push(`branch "${primary.branch}" may still exist`);
+      steps.push({ step: "branch", outcome: "skipped" });
     }
-  } else {
-    steps.push({ step: "branch", outcome: "skipped" });
+    endStepSpan(child, steps[steps.length - 1]!);
   }
 
   // 6. Mark torndown — but only when the steward was actually removed. If it
@@ -327,4 +364,26 @@ export async function teardownSession(
 
 function message(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+/**
+ * Map a recorded teardown step to the child-span outcome vocabulary
+ * (removed / not-found / deferred / failed). `deferred` marks a step held back
+ * because an earlier step (steward removal) failed; `not-found` covers
+ * nothing-to-reclaim / already-gone.
+ */
+function stepSpanOutcome(step: TeardownStep): string {
+  if (step.outcome === "ok") return "removed";
+  if (step.outcome === "failed") return "failed";
+  return step.detail?.startsWith("deferred") ? "deferred" : "not-found";
+}
+
+/** Stamp a sub-step child span with its outcome (+detail) and end it. */
+function endStepSpan(child: BroodChildSpan, step: TeardownStep): void {
+  child.setAttributes({
+    "march.teardown.step": step.step,
+    "march.teardown.outcome": stepSpanOutcome(step),
+    ...(step.detail ? { "march.teardown.detail": step.detail } : {}),
+  });
+  child.end({ error: step.outcome === "failed" });
 }

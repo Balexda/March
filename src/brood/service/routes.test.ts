@@ -1,5 +1,7 @@
 import Fastify, { type FastifyInstance } from "fastify";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import type { Span } from "@opentelemetry/sdk-trace-base";
+import { getActiveOtel, initOtel } from "../../observability/otel.js";
 import { registerRoutes } from "./routes.js";
 import { sqliteAvailable } from "./sqlite.js";
 import { SessionStore } from "./store.js";
@@ -180,6 +182,47 @@ describe.skipIf(!sqliteAvailable)("brood routes", () => {
     expect(spawns.json().sessions.map((s: { id: string }) => s.id)).toEqual(["spawn-1"]);
     const children = await app.inject({ method: "GET", url: "/sessions?parentId=spawn-1" });
     expect(children.json().sessions.map((s: { id: string }) => s.id)).toEqual(["steward-1"]);
+  });
+
+  it("POST /sessions emits a brood.register span nested under the inbound traceparent", async () => {
+    initOtel({ MARCH_OTEL: "1", MARCH_OTEL_ENDPOINT: "http://localhost:4318" });
+    const created: Span[] = [];
+    const tracer = getActiveOtel().getTracer();
+    const real = tracer.startSpan.bind(tracer);
+    vi.spyOn(tracer, "startSpan").mockImplementation(
+      (...args: Parameters<typeof real>) => {
+        const span = real(...args) as Span;
+        created.push(span);
+        return span;
+      },
+    );
+    try {
+      const { app } = await buildApp();
+      const traceId = "0af7651916cd43dd8448eb211c80319c";
+      const spanId = "b7ad6b7169203331";
+      const res = await app.inject({
+        method: "POST",
+        url: "/sessions",
+        headers: { traceparent: `00-${traceId}-${spanId}-01` },
+        payload: { id: "s1", kind: "spawn", worktreePath: "/wt/s1" },
+      });
+      expect(res.statusCode).toBe(201);
+
+      const span = created.find((s) => s.name === "brood.register");
+      expect(span).toBeDefined();
+      // Nests under the caller's trace (issue #233 acceptance criterion).
+      expect(span!.spanContext().traceId).toBe(traceId);
+      expect(span!.parentSpanContext?.spanId).toBe(spanId);
+      expect(span!.attributes).toMatchObject({
+        "march.session.id": "s1",
+        "march.session.kind": "spawn",
+        "march.spawn.id": "s1",
+        "march.worktree.path": "/wt/s1",
+      });
+    } finally {
+      vi.restoreAllMocks();
+      initOtel({});
+    }
   });
 
   it("POST /sessions/:id/teardown returns the result and maps errors", async () => {

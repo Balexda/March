@@ -5,6 +5,7 @@ import {
   outcomeFromStatus,
   recordBroodRequest,
 } from "../../observability/brood-metrics.js";
+import { startBroodSpan } from "../../observability/brood-trace.js";
 import { createCastraClientFromEnv } from "../../castra/client.js";
 import type { SessionRepository } from "./repository.js";
 import {
@@ -131,6 +132,14 @@ function asString(value: unknown): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
+/** First inbound W3C `traceparent` header value, if any (dedup array form). */
+function inboundTraceparent(
+  headers: Record<string, string | string[] | undefined>,
+): string | undefined {
+  const tp = headers["traceparent"];
+  return Array.isArray(tp) ? tp[0] : tp;
+}
+
 export async function registerRoutes(
   app: FastifyInstance,
   opts: RoutesOptions,
@@ -174,9 +183,32 @@ export async function registerRoutes(
       reply.code(400);
       return { error: validation.error };
     }
-    const record = store.register(validation.input);
-    reply.code(201);
-    return record;
+    // Server-side register span — nests under the inbound traceparent the
+    // BroodClient sends so the Hatchery's client-side `brood.register` and this
+    // handler land in one trace (#233).
+    const { input } = validation;
+    const span = startBroodSpan({
+      name: "brood.register",
+      key: input.id,
+      traceparent: inboundTraceparent(request.headers),
+      attributes: {
+        "march.session.id": input.id,
+        "march.session.kind": input.kind,
+        ...(input.kind === "spawn" ? { "march.spawn.id": input.id } : {}),
+        ...(input.worktreePath
+          ? { "march.worktree.path": input.worktreePath }
+          : {}),
+      },
+    });
+    try {
+      const record = store.register(input);
+      span.end();
+      reply.code(201);
+      return record;
+    } catch (err) {
+      span.end({ error: true });
+      throw err;
+    }
   });
 
   app.get("/sessions", async (request) => {
@@ -245,8 +277,7 @@ export async function registerRoutes(
   app.post("/sessions/:id/teardown", async (request, reply) => {
     const { id } = request.params as { id: string };
     const body = (request.body ?? {}) as TeardownRequest;
-    const tp = request.headers["traceparent"];
-    const traceparent = Array.isArray(tp) ? tp[0] : tp;
+    const traceparent = inboundTraceparent(request.headers);
     try {
       return await teardown(
         id,

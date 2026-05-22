@@ -8,19 +8,37 @@ import {
 import { getActiveOtel } from "./otel.js";
 import { spanIdForDispatch, traceIdForDispatch } from "./trace-ids.js";
 
+/** A child span nested under a {@link BroodSpan} (e.g. one teardown sub-step). */
+export interface BroodChildSpan {
+  setAttributes(attributes: Attributes): void;
+  end(opts?: { error?: boolean }): void;
+}
+
 /** A brood lifecycle span (e.g. `brood.teardown`). No-op when telemetry is off. */
 export interface BroodSpan {
   readonly enabled: boolean;
   /** Record an ordered, timestamped step on the span. */
   event(name: string, attributes?: Attributes): void;
   setAttributes(attributes: Attributes): void;
+  /**
+   * Start a child span nested under this one — e.g. a teardown sub-step
+   * (`brood.teardown.worktree`) whose duration and outcome should be
+   * independently visible. Returns a no-op when telemetry is disabled.
+   */
+  startChild(name: string, attributes?: Attributes): BroodChildSpan;
   end(opts?: { error?: boolean }): void;
 }
+
+const NOOP_CHILD: BroodChildSpan = {
+  setAttributes: () => {},
+  end: () => {},
+};
 
 const NOOP: BroodSpan = {
   enabled: false,
   event: () => {},
   setAttributes: () => {},
+  startChild: () => NOOP_CHILD,
   end: () => {},
 };
 
@@ -71,6 +89,8 @@ export function startBroodSpan(input: StartBroodSpanInput): BroodSpan {
     { attributes: input.attributes },
     parentCtx,
   );
+  // Context carrying this span as the active parent, so children nest under it.
+  const spanCtx = trace.setSpan(ROOT_CONTEXT, span);
 
   return {
     enabled: true,
@@ -79,6 +99,18 @@ export function startBroodSpan(input: StartBroodSpanInput): BroodSpan {
     },
     setAttributes(attributes: Attributes) {
       span.setAttributes(attributes);
+    },
+    startChild(name: string, attributes?: Attributes): BroodChildSpan {
+      const child = tracer.startSpan(name, { attributes }, spanCtx);
+      return {
+        setAttributes(attrs: Attributes) {
+          child.setAttributes(attrs);
+        },
+        end(opts?: { error?: boolean }) {
+          if (opts?.error) child.setStatus({ code: SpanStatusCode.ERROR });
+          child.end();
+        },
+      };
     },
     end(opts?: { error?: boolean }) {
       if (opts?.error) span.setStatus({ code: SpanStatusCode.ERROR });
