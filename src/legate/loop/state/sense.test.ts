@@ -109,6 +109,36 @@ describe("senseFromHerald (Stage 1, Herald-backed)", () => {
     expect(state.smithy.queue.dispatchable).toBe(1);
   });
 
+  it("dispatchable excludes ready items already in-flight/escalated, keeps total (#219)", async () => {
+    // One ready item ("a"); the working state already has it implementing and an
+    // escalated slice ("b"). Raw ready=2 but neither dispatches → dispatchable 0,
+    // while blocked/total stay the smithy planning view.
+    const raw = {
+      repo: { path: "/repo" },
+      slices: {
+        a: { stage: "implementing", command: "smithy.forge", artifact_path: "a" },
+        b: { stage: "escalated", command: "smithy.forge", artifact_path: "b" },
+      },
+      archived_slices: {},
+    };
+    const herald = { consume: vi.fn(async () => emptySystemState()) };
+    const state = await senseFromHerald(
+      deps({
+        readSmithyStatus: async () => ({
+          records: [
+            { path: "a", next_action: { command: "smithy.forge" } },
+            { path: "b", next_action: { command: "smithy.forge" } },
+          ],
+          graph: {},
+        }),
+      }),
+      herald,
+      raw,
+    );
+    expect(state.smithy.ready).toHaveLength(2);
+    expect(state.smithy.queue).toEqual({ dispatchable: 0, blocked: 0, total: 2 });
+  });
+
   it("reports unavailable workers when the fold has none", async () => {
     const herald = { consume: vi.fn(async () => emptySystemState()) };
     const state = await senseFromHerald(deps(), herald, prevRaw());

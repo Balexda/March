@@ -1,7 +1,7 @@
 import type { HandlerContext, HandlerResult, LoopState } from "../state/types.js";
 import { emptyHandlerResult } from "../state/types.js";
 import { dispatchSliceId } from "../pure/dispatch-id.js";
-import { alreadyArchivedSlice, inFlightSliceMatches } from "../pure/slice.js";
+import { dispatchableReady } from "../pure/slice.js";
 
 /**
  * Dispatch: turn smithy's layer-0 ready items into Hatchery codex spawns.
@@ -52,18 +52,17 @@ export interface DispatchDeps {
  * Pure: which ready items to dispatch. Live-slice dedup first, then the archive
  * skip (which subsumes the former partial-merge recovery case — a colliding
  * MERGED archive matches `alreadyArchivedSlice`, so it is skipped rather than
- * re-dispatched); everything else dispatches fresh.
+ * re-dispatched); everything else dispatches fresh. The selection is the shared
+ * {@link dispatchableReady} (`pure/slice.ts`) so the "dispatchable now" metric
+ * (#219) reports the same set this handler launches.
  */
 export function assess(state: LoopState): DispatchDecision[] {
-  const out: DispatchDecision[] = [];
-  if (!state.smithy.ok) return out;
-  for (const item of state.smithy.ready) {
-    const sliceId = dispatchSliceId(item);
-    if (inFlightSliceMatches(state.raw, item, sliceId)) continue;
-    if (alreadyArchivedSlice(state.raw, item, sliceId)) continue;
-    out.push({ kind: "dispatch", sliceId, item });
-  }
-  return out;
+  if (!state.smithy.ok) return [];
+  return dispatchableReady(state.raw, state.smithy.ready).map((item) => ({
+    kind: "dispatch",
+    sliceId: dispatchSliceId(item),
+    item,
+  }));
 }
 
 export async function apply(_decisions: DispatchDecision[], ctx: HandlerContext, state: LoopState, deps: DispatchDeps): Promise<HandlerResult> {

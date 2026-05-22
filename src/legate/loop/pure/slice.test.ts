@@ -2,10 +2,12 @@ import { describe, expect, it } from "vitest";
 import {
   alreadyArchivedSlice,
   blockingMergedArchive,
+  dispatchableReady,
   inFlightSliceMatches,
   isStubArchivedSlice,
   isTerminalSlice,
   sliceReleasesArtifact,
+  summarizeSlicesByStage,
 } from "./slice.js";
 
 const item = {
@@ -75,6 +77,42 @@ describe("slice pure helpers", () => {
       },
     };
     expect(blockingMergedArchive(escalatedArchive, item, "x")).toBeNull();
+  });
+
+  it("dispatchableReady drops ready items already in-flight or archived (#219)", () => {
+    // No live/archived slices → the item is fresh-dispatchable.
+    expect(dispatchableReady({ slices: {}, archived_slices: {} }, [item])).toEqual([item]);
+    // An in-flight (implementing) slice matching the item's action key → not dispatchable.
+    const inFlight = {
+      slices: { s: { stage: "implementing", command: "smithy.forge", arguments: ["docs/x.tasks.md", "1"], artifact_path: "docs/x.tasks.md" } },
+      archived_slices: {},
+    };
+    expect(dispatchableReady(inFlight, [item])).toEqual([]);
+    // An escalated slice still holds the artifact (not MERGED) → not dispatchable.
+    const escalated = {
+      slices: { s: { stage: "escalated", command: "smithy.forge", arguments: ["docs/x.tasks.md", "1"], artifact_path: "docs/x.tasks.md" } },
+      archived_slices: {},
+    };
+    expect(dispatchableReady(escalated, [item])).toEqual([]);
+    expect(dispatchableReady({}, undefined)).toEqual([]);
+  });
+
+  it("summarizeSlicesByStage tallies by stage and derives ready-to-merge (#220)", () => {
+    const slices = {
+      a: { stage: "hatchery-pending" },
+      b: { stage: "implementing" },
+      c: { stage: "pr-open", pr: { checks: "PASS", mergeable: "MERGEABLE" }, needs_response_count: 0 }, // ready
+      d: { stage: "pr-open", pr: { checks: "FAIL", mergeable: "MERGEABLE" }, needs_response_count: 0 }, // failing checks
+      e: { stage: "pr-open", pr: { checks: "PASS", mergeable: "CONFLICTING" }, needs_response_count: 0 }, // conflicting
+      f: { stage: "pr-open", pr: { checks: "PASS", mergeable: "MERGEABLE" }, needs_response_count: 2 }, // threads owed
+      g: { stage: "escalated" },
+    };
+    const { byStage, readyToMerge } = summarizeSlicesByStage(slices);
+    expect(byStage).toEqual({ "hatchery-pending": 1, implementing: 1, "pr-open": 4, escalated: 1 });
+    // per-stage tallies sum to the non-archived slice count
+    expect(Object.values(byStage).reduce((a, b) => a + b, 0)).toBe(Object.keys(slices).length);
+    expect(readyToMerge).toBe(1); // only c qualifies
+    expect(summarizeSlicesByStage(undefined)).toEqual({ byStage: {}, readyToMerge: 0 });
   });
 
   void ITEM_BRANCH;

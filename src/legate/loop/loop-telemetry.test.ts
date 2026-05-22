@@ -67,6 +67,8 @@ describe("buildLoopTickActivity", () => {
       dispatchable_count: 3,
       blocked_count: 1,
       pending_total: 5,
+      slices_by_stage: { implementing: 2, "pr-open": 1, bogus: "x" },
+      ready_to_merge_count: 1,
       dispatch_action_count: 2,
       dispatch_failure_count: 1,
       cleanup_count: 4,
@@ -86,6 +88,8 @@ describe("buildLoopTickActivity", () => {
       queueBlocked: 1,
       queueTotal: 5,
       workersByState: { running: 1, idle: 2, error: 0 }, // non-number 'bogus' dropped
+      slicesByStage: { implementing: 2, "pr-open": 1 }, // non-number 'bogus' dropped
+      readyToMerge: 1,
     });
     expect(activity.tickDurationSeconds).toBe(2.5);
     expect(activity).toMatchObject({
@@ -100,7 +104,7 @@ describe("buildLoopTickActivity", () => {
 
   it("defaults profile/conductor to 'unknown' and missing counts to 0", () => {
     const activity = buildLoopTickActivity({}, { profile: "", conductor: undefined, tickAtMs: 0, durationMs: 0 })!;
-    expect(activity.snapshot).toMatchObject({ profile: "unknown", conductor: "unknown", queueTotal: 0, workersByState: {} });
+    expect(activity.snapshot).toMatchObject({ profile: "unknown", conductor: "unknown", queueTotal: 0, workersByState: {}, slicesByStage: {}, readyToMerge: 0 });
     expect(activity.dispatchActions).toBe(0);
     expect(activity.stewardNudges).toBe(0);
     expect(activity.stewardStranded).toBe(0);

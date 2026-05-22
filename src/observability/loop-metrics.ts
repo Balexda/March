@@ -13,8 +13,9 @@ import { getActiveOtel } from "./otel.js";
  * OTel SDK meter (no raw OTLP), tagged with the deployment `profile` and the
  * `conductor` name so a real deployment's series can be filtered from test/integ
  * runs. Cardinality is deliberately bounded: the only labels are `profile`,
- * `conductor`, the bounded worker `state` (on the workers gauge), and the bounded
- * `action` kind (on the loop-actions counter). Per-slice detail — which steward,
+ * `conductor`, the bounded worker `state` (on the workers gauge), the bounded
+ * lifecycle `stage` (on the slices gauge, #220), and the bounded `action` kind
+ * (on the loop-actions counter). Per-slice detail — which steward,
  * how many nudges — belongs in traces/logs, never here.
  *
  * Cumulative activity (heartbeats, dispatch actions/failures, and the loop
@@ -42,6 +43,10 @@ export interface LoopMetricsSnapshot {
   readonly queueTotal: number;
   /** Worker counts keyed by bounded state (running/idle/waiting/error/...). */
   readonly workersByState: Readonly<Record<string, number>>;
+  /** Non-archived slice counts keyed by bounded lifecycle stage (#220). */
+  readonly slicesByStage: Readonly<Record<string, number>>;
+  /** Derived: pr-open slices clean+mergeable with no threads owed (#220). */
+  readonly readyToMerge: number;
 }
 
 /** Per-tick deltas folded into the cumulative counters + the duration histogram. */
@@ -148,6 +153,31 @@ function ensureInstruments(meter: Meter): void {
       result.observe(count, { ...base(s), state });
     }
   });
+
+  // Non-archived slices by lifecycle stage (#220) — the work-by-stage view that
+  // workers{state} (Castra session status) cannot express. `stage` is a metric
+  // label: keep it the fixed lifecycle vocabulary (hatchery-pending/implementing/
+  // pr-open/pr-in-fix/pr-resolving-conflicts/escalated). No unit ⇒ exported as
+  // `march_legate_slices{stage}` with no suffix.
+  const slices: ObservableGauge = meter.createObservableGauge(
+    "march.legate.slices",
+    { description: "Non-archived slices by lifecycle stage" },
+  );
+  slices.addCallback((result: ObservableResult) => {
+    const s = latest;
+    if (!s) return;
+    for (const [stage, count] of Object.entries(s.slicesByStage)) {
+      result.observe(count, { ...base(s), stage });
+    }
+  });
+  // Derived "waiting for merge": pr-open slices that are clean + mergeable with no
+  // threads owed. Exported as `march_legate_slices_ready_to_merge` (no suffix).
+  registerGauge(
+    meter,
+    "march.legate.slices.ready_to_merge",
+    "Slices ready to merge (pr-open, clean checks, mergeable, no threads owed)",
+    (s) => s.readyToMerge,
+  );
 }
 
 function registerGauge(

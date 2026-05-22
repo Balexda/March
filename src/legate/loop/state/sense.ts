@@ -1,7 +1,7 @@
 import type { LoopMeta } from "../meta.js";
 import type { LoopState, SliceExternalState, SmithyView } from "./types.js";
 import { looseSessionMatch, summarizeWorkers } from "../pure/session.js";
-import { isTerminalSlice } from "../pure/slice.js";
+import { dispatchableReady, isTerminalSlice } from "../pure/slice.js";
 import { readySmithyItems } from "../pure/smithy-graph.js";
 import type { ObservedSession, SystemState } from "../../../herald/events.js";
 
@@ -70,12 +70,18 @@ async function senseSmithy(
   const candidates = Array.isArray(status?.records)
     ? status.records.filter((r: any) => r && r.next_action && !r.virtual)
     : [];
+  // "Dispatchable now" is what the loop would actually dispatch this tick: ready
+  // MINUS in-flight/archived, the same dedup the dispatcher's assess() applies
+  // (#219). Raw `ready.length` over-counts — smithy keeps a slice ready until its
+  // PR merges, so stewarded and escalated slices stay in the ready set. Keep
+  // blocked/total as the smithy planning view.
+  const dispatchable = dispatchableReady(state, ready).length;
   return {
     ok: true,
     status,
     ready,
     queue: {
-      dispatchable: ready.length,
+      dispatchable,
       total: candidates.length,
       blocked: Math.max(0, candidates.length - ready.length),
     },

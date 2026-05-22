@@ -120,5 +120,8 @@ describe("coordinator runTick", () => {
     expect(out.tick.stewardStrandedCount).toBe(0);
     // The nudge is metricized on its own, so it is NOT double-counted as babysit.
     expect(out.tick.babysitActionCount).toBe(0);
+    // The slice stays implementing → it shows up in the by-stage tally (#220).
+    expect(out.tick.slicesByStage).toEqual({ implementing: 1 });
+    expect(out.tick.readyToMergeCount).toBe(0);
   });
 });

@@ -13,6 +13,8 @@ function activity(overrides: Partial<LoopTickActivity> = {}): LoopTickActivity {
       queueBlocked: 1,
       queueTotal: 5,
       workersByState: { running: 1, idle: 2 },
+      slicesByStage: { implementing: 1, "pr-open": 2 },
+      readyToMerge: 1,
     },
     tickDurationSeconds: 0.4,
     dispatchActions: 1,
