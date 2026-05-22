@@ -99,6 +99,10 @@ export interface TickResult {
   archivedSliceCount: number;
   workers: WorkerSummary | { error: string };
   queue: { dispatchable: number; blocked: number; total: number };
+  /** Non-archived slice counts keyed by lifecycle stage (#220 gauge source). */
+  slicesByStage: Record<string, number>;
+  /** Derived: pr-open slices with clean checks, no conflicts, no threads owed. */
+  readyToMergeCount: number;
   cleanupCount: number;
   cleanupFailureCount: number;
   ghostCleanupCount: number;

@@ -4,6 +4,7 @@ import * as ghostCleanup from "./handlers/ghost-cleanup.js";
 import * as relaunch from "./handlers/relaunch.js";
 import * as babysit from "./handlers/babysit.js";
 import * as dispatch from "./handlers/dispatch.js";
+import { summarizeSlicesByStage } from "./pure/slice.js";
 
 /**
  * Stage 2 orchestration. runTick senses once, then runs the handlers in the
@@ -44,6 +45,8 @@ function buildTickResult(state: LoopState, r: CoordinatorOutput["results"]): Tic
   // metricized on its own (#212), so split it out of the babysit umbrella count.
   const stewardNudgeCount = countAction(r.babysit, "steward-nudge");
   const stewardStrandedCount = countAction(r.babysit, "steward-stranded");
+  // Tally after all handlers ran so stages/PR snapshots reflect this tick (#220).
+  const { byStage, readyToMerge } = summarizeSlicesByStage(state.slices);
   return {
     ts: state.ts,
     statePresent: state.statePresent,
@@ -52,6 +55,8 @@ function buildTickResult(state: LoopState, r: CoordinatorOutput["results"]): Tic
     archivedSliceCount: Object.keys(state.archived).length,
     workers: state.workers,
     queue: state.smithy.queue,
+    slicesByStage: byStage,
+    readyToMergeCount: readyToMerge,
     cleanupCount: r.cleanup.actions.length,
     cleanupFailureCount: r.cleanup.failures.length,
     ghostCleanupCount: countAction(r.ghost, "ghost-cleanup"),

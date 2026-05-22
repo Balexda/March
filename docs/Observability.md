@@ -190,10 +190,12 @@ These answer "is the loop alive?" and "how deep is the queue?".
 | `march.legate.loop.heartbeats` (counter) | `march_legate_loop_heartbeats_total` | completed ticks |
 | `march.legate.tick.age` (gauge, `s`) | `march_legate_tick_age_seconds` | seconds since last tick (staleness) |
 | `march.legate.tick.duration` (histogram, `s`) | `march_legate_tick_duration_seconds_{bucket,count,sum}` | tick wall-clock |
-| `march.legate.queue.dispatchable` (gauge) | `march_legate_queue_dispatchable` | tasks ready to dispatch now |
+| `march.legate.queue.dispatchable` (gauge) | `march_legate_queue_dispatchable` | tasks the loop would dispatch this tick (ready − in-flight; #219) |
 | `march.legate.queue.blocked` (gauge) | `march_legate_queue_blocked` | pending tasks blocked on deps |
 | `march.legate.queue.total` (gauge) | `march_legate_queue_total` | total pending tasks |
 | `march.legate.workers` (gauge) | `march_legate_workers` | worker sessions by `state` |
+| `march.legate.slices` (gauge) | `march_legate_slices` | non-archived slices by lifecycle `stage` (#220) |
+| `march.legate.slices.ready_to_merge` (gauge) | `march_legate_slices_ready_to_merge` | `pr-open` slices clean+mergeable, no threads owed (#220) |
 | `march.legate.dispatch.actions` (counter) | `march_legate_dispatch_actions_total` | dispatch actions taken |
 | `march.legate.dispatch.failures` (counter) | `march_legate_dispatch_failures_total` | dispatch failures |
 | `march.legate.loop.actions` (counter) | `march_legate_loop_actions_total` | non-dispatch loop actions by `action`: `cleanup`, `ghost_cleanup`, `relaunch`, `babysit`, `steward_nudge`, `steward_stranded` |
@@ -207,6 +209,22 @@ These answer "is the loop alive?" and "how deep is the queue?".
 > visible as a rate on the dashboard's **Stewards** row instead of only in the log
 > file; per-steward detail (which steward, nudge count) stays in the logs/traces
 > to keep the `action` label low-cardinality.
+
+> **`dispatchable` is ready − in-flight (#219).** It is driven by the same dedup
+> the dispatcher applies (`dispatchableReady` in
+> [`src/legate/loop/pure/slice.ts`](../src/legate/loop/pure/slice.ts), shared with
+> `dispatch.assess()`), not the raw `smithy status` ready count. Smithy keeps a
+> slice in its ready layer until the slice's PR merges, so stewarded and escalated
+> slices stay "ready" — counting them would over-report dispatchable. Escalated
+> slices are in-flight (terminal until operator), so they surface in
+> `march_legate_slices{stage="escalated"}`, not here.
+
+> **`march_legate_slices{stage}` (#220)** is the work-by-stage view that
+> `workers{state}` (keyed by Castra session status) cannot express. `stage` is a
+> metric label — keep it the fixed lifecycle vocabulary (`hatchery-pending`,
+> `implementing`, `pr-open`, `pr-in-fix`, `pr-resolving-conflicts`, `escalated`);
+> the per-stage values sum to the loop's non-archived slice count. It powers the
+> **Work Status** dashboard (below).
 
 ### Logs
 
@@ -327,7 +345,24 @@ A third dashboard,
 ("**March — Castra sessions host**"), shows the Castra API's RED metrics:
 request rate, 5xx error ratio, rate by status class, duration percentiles
 (p50/p95/p99), a route × status-class table, and p95 by route — with `profile`
-and `route` template variables. All dashboards land in the same **March** folder
+and `route` template variables.
+
+The **Work Status** dashboard,
+[`docker/grafana/dashboards/march-work-status.json`](../docker/grafana/dashboards/march-work-status.json)
+("**March — Work Status**", uid `march-work-status`), answers "where is the work
+right now" at a glance — no logs, no per-service RED. A service up/down row
+(Brood / Hatchery / Herald via their `_heartbeat_total`, Legate loop via
+`march_legate_loop_up`, plus a Castra placeholder that reads "no metric (#207)"
+rather than a false green) sits above the work buckets: **Dispatchable**
+(the #219-corrected `march_legate_queue_dispatchable`), **In spawn**
+(`slices{stage="hatchery-pending"}`), **In steward**
+(`implementing`+`pr-in-fix`+`pr-resolving-conflicts`), **Waiting for merge**
+(`march_legate_slices_ready_to_merge`), **Escalated**
+(`slices{stage="escalated"}`), **Blocked** (`march_legate_queue_blocked`), and
+**Total remaining** (`march_legate_queue_total`) — followed by a stacked
+work-by-stage timeseries. Filtered by `profile` only.
+
+All dashboards land in the same **March** folder
 (the provider loads every JSON under `/etc/march/dashboards`, so dropping the file
 in is all that's needed).
 

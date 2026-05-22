@@ -109,6 +109,12 @@ export function buildLoopTickActivity(record: any, ctx: HeartbeatMetricsContext)
       if (typeof count === "number") workersByState[state] = count;
     }
   }
+  const slicesByStage: Record<string, number> = {};
+  if (record.slices_by_stage && typeof record.slices_by_stage === "object") {
+    for (const [stage, count] of Object.entries(record.slices_by_stage)) {
+      if (typeof count === "number") slicesByStage[stage] = count;
+    }
+  }
   const snapshot: LoopMetricsSnapshot = {
     profile: ctx.profile || "unknown",
     conductor: ctx.conductor || "unknown",
@@ -118,6 +124,8 @@ export function buildLoopTickActivity(record: any, ctx: HeartbeatMetricsContext)
     queueBlocked: record.blocked_count ?? 0,
     queueTotal: record.pending_total ?? 0,
     workersByState,
+    slicesByStage,
+    readyToMerge: record.ready_to_merge_count ?? 0,
   };
   return {
     snapshot,

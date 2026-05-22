@@ -1,4 +1,4 @@
-import { dispatchBranch, dispatchItemKey, sliceActionKey } from "./dispatch-id.js";
+import { dispatchBranch, dispatchItemKey, dispatchSliceId, sliceActionKey } from "./dispatch-id.js";
 
 /**
  * Pure slice/archive reasoning: terminal detection and the dedup/recovery
@@ -114,4 +114,84 @@ export function blockingMergedArchive(state: any, item: any, sliceId: string): a
     if ((slice as any).actual_branch && (slice as any).actual_branch === branch) return slice;
   }
   return null;
+}
+
+/**
+ * The subset of smithy layer-0 ready items that would dispatch FRESH this tick:
+ * ready minus anything already in-flight or archived — the exact dedup
+ * {@link assess} (`handlers/dispatch.ts`) applies before launching a spawn. Shared
+ * so the "dispatchable now" metric (#219) is driven by the dispatcher's selection
+ * rather than the raw `ready.length`, which over-counts work the loop has already
+ * dispatched (escalated slices stay in-flight until merge, so they correctly do
+ * NOT count here — they belong in the escalated bucket).
+ */
+export function dispatchableReady<T>(state: any, ready: readonly T[] | undefined): T[] {
+  return (ready ?? []).filter((item) => !alreadyHasInFlightSlice(state, item, dispatchSliceId(item)));
+}
+
+/**
+ * The fixed slice-lifecycle vocabulary — the low-cardinality `stage` label set
+ * for the `march.legate.slices` gauge (#220). Any slice stage outside this set
+ * (a typo, a future stage, a transient `merged` before cleanup archives it) is
+ * bucketed under {@link OTHER_STAGE} so a stray value can never blow up the
+ * exported series cardinality.
+ */
+export const SLICE_STAGES = [
+  "hatchery-pending",
+  "implementing",
+  "pr-open",
+  "pr-in-fix",
+  "pr-resolving-conflicts",
+  "escalated",
+] as const;
+
+/** Catch-all bucket for any stage outside {@link SLICE_STAGES}. */
+export const OTHER_STAGE = "other";
+
+const STAGE_ALLOWLIST = new Set<string>(SLICE_STAGES);
+
+/** Per-stage slice tally plus the derived ready-to-merge count (#220). */
+export interface SliceStageSummary {
+  /** Count of non-archived slices keyed by lifecycle `stage` (a metric label). */
+  readonly byStage: Record<string, number>;
+  /** Slices `pr-open` with passing checks, no conflicts, and no threads owed. */
+  readonly readyToMerge: number;
+}
+
+/**
+ * Tally the loop's working slices by lifecycle `stage` and derive how many are
+ * ready to merge (#220). Pure: reads only the in-memory working `slices` record
+ * (after the tick's handlers have run, so stages/PR snapshots are current).
+ *
+ * `stage` is a metric label, so it is normalized to the fixed {@link SLICE_STAGES}
+ * allowlist (anything else → {@link OTHER_STAGE}) to keep cardinality bounded, and
+ * every allowed stage is **pre-seeded to 0** so the gauge observes the full label
+ * set each tick — a dashboard tile then reads `0`, not "no data", when a stage is
+ * empty.
+ *
+ * `readyToMerge` mirrors babysit's "all clear" gate (`handlers/babysit.ts`): a
+ * `pr-open` slice whose PR has passing checks, is not CONFLICTING, and owes no
+ * thread responses. Thread debt must be an **explicit** `0` (from the flattened
+ * `needs_response_count` babysit writes, or the PR snapshot it was derived from):
+ * after a cold start `rebuildWorkingState` restores `slice.pr` but not the
+ * flattened counter, so a missing value is treated as "unknown", not "zero", to
+ * avoid overstating the metric.
+ */
+export function summarizeSlicesByStage(slices: Record<string, any> | undefined): SliceStageSummary {
+  const byStage: Record<string, number> = {};
+  for (const stage of SLICE_STAGES) byStage[stage] = 0; // pre-seed so dashboards show 0, not "no data"
+  let readyToMerge = 0;
+  for (const slice of Object.values(slices ?? {})) {
+    if (!slice || typeof slice !== "object") continue;
+    const raw = typeof slice.stage === "string" ? slice.stage : "";
+    const stage = STAGE_ALLOWLIST.has(raw) ? raw : OTHER_STAGE;
+    byStage[stage] = (byStage[stage] ?? 0) + 1;
+    if (stage === "pr-open" && slice.pr?.checks === "PASS" && slice.pr?.mergeable !== "CONFLICTING") {
+      // Require an explicit 0 — undefined (e.g. post-cold-start, before babysit
+      // re-derives it) is "unknown thread debt", not "no threads owed".
+      const owed = slice.needs_response_count ?? slice.pr?.needs_response_count;
+      if (owed === 0) readyToMerge++;
+    }
+  }
+  return { byStage, readyToMerge };
 }

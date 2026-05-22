@@ -16,6 +16,8 @@ function out(over: Partial<CoordinatorOutput["results"]> = {}, tickOver: any = {
       archivedSliceCount: 1,
       workers: { waiting: 0, running: 1, idle: 0, error: 0, stopped: 0, other: 0 },
       queue: { dispatchable: 3, blocked: 2, total: 5 },
+      slicesByStage: { implementing: 1, "pr-open": 1 },
+      readyToMergeCount: 1,
       cleanupCount: 1,
       cleanupFailureCount: 0,
       ghostCleanupCount: 0,
@@ -71,6 +73,8 @@ describe("buildHeartbeatRecord", () => {
       dispatchable_count: 3,
       blocked_count: 2,
       pending_total: 5,
+      slices_by_stage: { implementing: 1, "pr-open": 1 },
+      ready_to_merge_count: 1,
     });
   });
 });
