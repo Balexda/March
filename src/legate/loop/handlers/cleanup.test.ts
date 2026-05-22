@@ -78,7 +78,7 @@ describe("cleanup handler", () => {
     const state = withTerminalSlice("MERGED");
     const c = ctx(ok());
     const res = await apply(assess(state), c, state);
-    expect(c.broodTeardown).toHaveBeenCalledWith("sess", { reason: "pr-merged" });
+    expect(c.broodTeardown).toHaveBeenCalledWith("sess", { reason: "pr-merged", traceKey: "s" });
     expect(res.actions).toHaveLength(1);
     expect(state.raw.archived_slices.s).toMatchObject({ terminal_state: "MERGED", pr_number: 9 });
     expect(state.raw.slices.s).toBeUndefined();
@@ -105,7 +105,7 @@ describe("cleanup handler", () => {
       }),
     );
     // Retry teardown forced after reconcile.
-    expect(c.broodTeardown).toHaveBeenNthCalledWith(2, "sess", { force: true, reason: "pr-merged" });
+    expect(c.broodTeardown).toHaveBeenNthCalledWith(2, "sess", { force: true, reason: "pr-merged", traceKey: "s" });
     expect(res.actions).toHaveLength(1);
     expect(res.actions[0]).toMatchObject({ removed: true });
     expect(state.raw.archived_slices.s).toMatchObject({ terminal_state: "MERGED" });
@@ -180,7 +180,7 @@ describe("cleanup handler", () => {
     expect(c.broodRegister).toHaveBeenCalledWith(
       expect.objectContaining({ id: "real-id", agentDeckSessionId: "real-id" }),
     );
-    expect(c.broodTeardown).toHaveBeenNthCalledWith(2, "real-id", { force: true, reason: "pr-merged" });
+    expect(c.broodTeardown).toHaveBeenNthCalledWith(2, "real-id", { force: true, reason: "pr-merged", traceKey: "s" });
   });
 
   it("escalates to the operator after MAX_CLEANUP_ATTEMPTS instead of retrying forever (#225)", async () => {

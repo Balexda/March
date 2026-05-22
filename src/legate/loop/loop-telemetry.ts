@@ -29,6 +29,25 @@ export type LoopLogEmitter = typeof defaultEmitLoopLog;
  */
 export function emitActionEventSpan(event: any, emit: LoopSpanEmitter = defaultEmitLoopSpan): void {
   if (!event || typeof event !== "object") return;
+
+  // Ghost-steward cleanup isn't tied to a slice, so it keys its trace off the
+  // session id (the same key the runtime gives brood.teardown) — its brood.teardown
+  // nests under this span. Handled before the slice-id guard since the event
+  // carries no slice_id. A `*-failed` action marks the span errored.
+  if (event.kind === "ghost_cleanup") {
+    const sessionId = event.session_id;
+    if (!sessionId) return;
+    const failed = typeof event.action === "string" && event.action.endsWith("-failed");
+    emit({
+      name: "legate.ghost-cleanup",
+      traceKey: String(sessionId),
+      root: false,
+      error: failed,
+      attributes: { "march.session_id": String(sessionId), "march.action": event.action || "" },
+    });
+    return;
+  }
+
   const sliceId = event.slice_id;
   if (!sliceId) return;
   if (event.kind === "dispatch_action" && event.action === "dispatch") {
@@ -51,6 +70,22 @@ export function emitActionEventSpan(event: any, emit: LoopSpanEmitter = defaultE
     emit({ name: "legate.babysit", traceKey: sliceId, root: false, attributes: { "march.slice_id": sliceId, "march.action": event.action || "", "march.pr_number": event.pr_number || "" } });
   } else if (event.kind === "cleanup") {
     emit({ name: "legate.cleanup", traceKey: sliceId, root: false, attributes: { "march.slice_id": sliceId, "march.pr_state": event.pr_state || "" } });
+  } else if (event.kind === "steward_relaunch") {
+    // Re-launching a steward is a lifecycle action on the slice's existing
+    // dispatch, so it nests under that same deterministic parent. relaunch-failed
+    // marks the span errored.
+    const failed = typeof event.action === "string" && event.action.endsWith("-failed");
+    emit({
+      name: "legate.relaunch",
+      traceKey: sliceId,
+      root: false,
+      error: failed,
+      attributes: {
+        "march.slice_id": sliceId,
+        "march.action": event.action || "",
+        ...(event.session_id ? { "march.session_id": String(event.session_id) } : {}),
+      },
+    });
   }
 }
 

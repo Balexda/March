@@ -77,7 +77,12 @@ export interface JudgementInput {
 /** Side-effect seams (Castra send + the legate-judgement emitter from events). */
 export interface BabysitDeps {
   /** Send a prompt to a worker session; rejects on transport failure. */
-  sendMessage: (sessionId: string, message: string) => Promise<void>;
+  /**
+   * Send a prompt to a steward. `traceKey` (the slice id) forwards as the Castra
+   * span-correlation header so the babysit `/smithy.fix` castra.send nests under
+   * the slice's trace instead of orphaning a root (#234).
+   */
+  sendMessage: (sessionId: string, message: string, traceKey?: string) => Promise<void>;
   /** Append + doorbell a judgement request; resolves to the event, or null if deduped. */
   requestJudgement: (input: JudgementInput) => Promise<any | null>;
 }
@@ -465,7 +470,7 @@ export async function apply(decisions: BabysitDecision[], ctx: HandlerContext, s
         break;
       case "login-resume-send": {
         try {
-          await deps.sendMessage(d.sessionId, d.message);
+          await deps.sendMessage(d.sessionId, d.message, d.sliceId);
         } catch (err: any) {
           await fireRequest({ ts, slice, requestKey: `login-resume-send-failed:${d.sessionId}:${slice.login_blocked_at || ""}`, sliceId: d.sliceId, sessionId: d.sessionId, pr: slice.pr || null, reason: "processor failed to send login-refresh resume prompt", detail: err?.message || String(err) });
           break;
@@ -494,7 +499,7 @@ export async function apply(decisions: BabysitDecision[], ctx: HandlerContext, s
         // sustained `steward-nudge` rate, an escalation as `steward-stranded`.
         if (d.nudge) {
           try {
-            await deps.sendMessage(d.sessionId, STRANDED_MESSAGE);
+            await deps.sendMessage(d.sessionId, STRANDED_MESSAGE, d.sliceId);
             slice.steward_nudge_sent_at = ts;
             slice.steward_nudge_count = d.nextCount;
             // Record the action only after a successful send so steward_nudge_count
@@ -537,7 +542,7 @@ export async function apply(decisions: BabysitDecision[], ctx: HandlerContext, s
         break;
       case "conflict-fix": {
         try {
-          await deps.sendMessage(d.sessionId, d.message);
+          await deps.sendMessage(d.sessionId, d.message, d.sliceId);
         } catch (err: any) {
           await fireRequest({ ts, slice, requestKey: actionKey("conflict-send-failed", d.pr), sliceId: d.sliceId, sessionId: d.sessionId, pr: d.pr, reason: "processor failed to send conflict-resolution prompt", detail: err?.message || String(err) });
           break;
@@ -551,7 +556,7 @@ export async function apply(decisions: BabysitDecision[], ctx: HandlerContext, s
       }
       case "post-dispatch-nudge": {
         try {
-          await deps.sendMessage(d.sessionId, d.message);
+          await deps.sendMessage(d.sessionId, d.message, d.sliceId);
         } catch {
           break;
         }
@@ -567,7 +572,7 @@ export async function apply(decisions: BabysitDecision[], ctx: HandlerContext, s
         break;
       case "review-fix": {
         try {
-          await deps.sendMessage(d.sessionId, d.message);
+          await deps.sendMessage(d.sessionId, d.message, d.sliceId);
         } catch (err: any) {
           await fireRequest({ ts, slice, requestKey: actionKey("review-send-failed", d.pr, d.key), sliceId: d.sliceId, sessionId: d.sessionId, pr: d.pr, reason: "processor failed to send review-thread /smithy.fix", detail: err?.message || String(err) });
           break;
