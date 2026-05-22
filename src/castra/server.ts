@@ -15,7 +15,12 @@ import {
   createAgentDeckAdapter,
   type AgentDeckAdapter,
 } from "./adapter.js";
-import { recordCastraRequest, statusClass, withCastraSpan } from "./metrics.js";
+import {
+  type CastraSpanContext,
+  recordCastraRequest,
+  statusClass,
+  withCastraSpan,
+} from "./metrics.js";
 import {
   CastraAgentDeckError,
   CastraConflictError,
@@ -94,6 +99,18 @@ function messagePreview(prompt: string): string {
 /** A `march.slice_id` attribute fragment, present only when the header was set. */
 function sliceAttr(sliceId: string | undefined): { "march.slice_id"?: string } {
   return sliceId ? { "march.slice_id": sliceId } : {};
+}
+
+/**
+ * Trace-context log fields for the `castra.<op>` span. Attached EXPLICITLY (no
+ * ContextManager is registered, so the pino traceMixin sees no active span);
+ * the pino→OTel bridge promotes these to the log record's trace context so
+ * Grafana's "Logs for this span" resolves. Empty when telemetry is off.
+ */
+function traceLogFields(
+  span: CastraSpanContext | undefined,
+): { trace_id?: string; span_id?: string } {
+  return span ? { trace_id: span.traceId, span_id: span.spanId } : {};
 }
 
 function bearerMatches(authorization: string | undefined, token: string): boolean {
@@ -261,7 +278,7 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
             ...sliceAttr(sliceId),
           },
         },
-        () => {
+        (span) => {
           const launched = adapter.launch({
             profile: body.profile,
             repoPath: body.repoPath,
@@ -279,6 +296,7 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
               "march.profile": body.profile,
               "castra.branch": body.branch,
               ...sliceAttr(sliceId),
+              ...traceLogFields(span),
             },
             "castra session launched",
           );
@@ -333,8 +351,11 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
       };
       withCastraSpan(
         { op: "send", traceKey: traceKeyFor(request), attributes: sendFields },
-        () => {
-          request.log.info({ "castra.op": "send", ...sendFields }, "castra send accepted");
+        (span) => {
+          request.log.info(
+            { "castra.op": "send", ...sendFields, ...traceLogFields(span) },
+            "castra send accepted",
+          );
           return adapter.send({ profile, sessionId: id, prompt });
         },
       );
@@ -396,8 +417,11 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
       };
       withCastraSpan(
         { op: "set", traceKey: traceKeyFor(request), attributes: setFields },
-        () => {
-          request.log.info({ "castra.op": "set", ...setFields }, "castra session set");
+        (span) => {
+          request.log.info(
+            { "castra.op": "set", ...setFields, ...traceLogFields(span) },
+            "castra session set",
+          );
           return adapter.set({ profile, sessionId: id, key, value });
         },
       );
@@ -435,8 +459,11 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
       };
       const result = withCastraSpan(
         { op: "remove", traceKey: traceKeyFor(request), attributes: removeFields },
-        () => {
-          request.log.info({ "castra.op": "remove", ...removeFields }, "castra session removed");
+        (span) => {
+          request.log.info(
+            { "castra.op": "remove", ...removeFields, ...traceLogFields(span) },
+            "castra session removed",
+          );
           return adapter.remove({ profile, sessionId: id, pruneWorktree: pruneWorktree ?? false });
         },
       );

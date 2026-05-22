@@ -119,23 +119,34 @@ export interface CastraSpanInput {
   readonly attributes?: Attributes;
 }
 
+/** The `castra.<op>` span's trace ids, for explicit log correlation. */
+export interface CastraSpanContext {
+  readonly traceId: string;
+  readonly spanId: string;
+}
+
 /**
  * Run a mutating operation inside a `castra.<op>` span. No-op (just runs `fn`)
  * when telemetry is disabled. Records the exception and marks the span errored
  * if `fn` throws, so failures surface in traces rather than vanishing.
  *
- * `fn` runs with the span installed as the active context, so any logs emitted
- * inside it (the handler's `request.log`) carry this span's trace/span ids and
- * resolve Grafana's "Logs for this span".
+ * `fn` receives the span's `{ traceId, spanId }` (or `undefined` when telemetry
+ * is off). The handler attaches them to its log line EXPLICITLY — this codebase
+ * registers no OTel ContextManager, so `getActiveSpan` (and thus the pino
+ * traceMixin) can't pick them up; explicit attach is what makes Grafana's "Logs
+ * for this span" resolve, mirroring `emitLoopLog`.
  */
-export function withCastraSpan<T>(input: CastraSpanInput, fn: () => T): T {
+export function withCastraSpan<T>(
+  input: CastraSpanInput,
+  fn: (span: CastraSpanContext | undefined) => T,
+): T {
   const dispatch = startDispatchSpan({
     traceKey: input.traceKey,
     rootName: `castra.${input.op}`,
     attributes: input.attributes,
   });
   try {
-    const result = dispatch.runActive(fn);
+    const result = fn(dispatch.spanContext());
     dispatch.end();
     return result;
   } catch (err) {

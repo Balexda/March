@@ -190,10 +190,12 @@ span is a separate legate-side change).
 (`createCastraLogger`, `service.name=march-castra`) and starts a periodic
 heartbeat — giving Castra the same Service-health row (heartbeat / uptime) and
 Loki logs panel as the other services. Each `castra.<op>` emits one structured
-log line **inside the span's active context**, so the record carries
-`trace_id`/`span_id`; the pino→OTel bridge now attaches those ids as the log
-record's trace context (mirroring `emitLoopLog`), which is what makes Grafana's
-"Logs for this span" resolve for a `castra.*` span.
+log line carrying the span's `trace_id`/`span_id`, attached **explicitly** from
+`DispatchTrace.spanContext()` — this codebase registers no OTel ContextManager,
+so the pino `traceMixin` sees no active span and `context.with` can't propagate
+one; explicit attach (the same approach as `emitLoopLog`) is what works. The
+pino→OTel bridge then promotes those ids to the log record's trace context, which
+is what makes Grafana's "Logs for this span" resolve for a `castra.*` span.
 
 #### Loop heartbeat metrics
 

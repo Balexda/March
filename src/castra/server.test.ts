@@ -1,3 +1,6 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { buildServer } from "./server.js";
 import type { AgentDeckAdapter } from "./adapter.js";
@@ -7,6 +10,9 @@ import {
   CastraNotFoundError,
   type CastraSession,
 } from "./types.js";
+import { createCastraLogger } from "../observability/logger.js";
+import { initOtel } from "../observability/otel.js";
+import { traceIdForDispatch } from "../observability/trace-ids.js";
 import type { FastifyInstance } from "fastify";
 
 const SAMPLE: CastraSession = {
@@ -259,6 +265,55 @@ describe("castra server", () => {
       const res = await app.inject({ method: "GET", url: "/v1/nope" });
       expect(res.statusCode).toBe(404);
       expect(res.json().error.code).toBe("not_found");
+    });
+  });
+
+  // The fix for #207's "Logs for this span": with no OTel ContextManager
+  // registered, the in-span log must carry the span's trace ids EXPLICITLY.
+  // Exercise the full Fastify+pino path and assert the JSONL line proves it.
+  describe("trace-correlated logs", () => {
+    let dir: string;
+
+    beforeEach(() => {
+      dir = fs.mkdtempSync(path.join(os.tmpdir(), "march-castra-corr-"));
+      initOtel({ MARCH_OTEL: "1", MARCH_OTEL_ENDPOINT: "http://localhost:4318" });
+    });
+    afterEach(() => {
+      initOtel({}); // restore the no-op handle for other suites
+      fs.rmSync(dir, { recursive: true, force: true });
+    });
+
+    it("the 'castra send accepted' log carries the castra.send span's trace_id/span_id", async () => {
+      const logFilePath = path.join(dir, "castra.jsonl");
+      // env:{} keeps the OTLP bridge off (no collector in CI); the file sink
+      // records the same pino line the bridge would forward.
+      const logger = createCastraLogger({ logFilePath, env: {}, sync: true });
+      app = buildServer({ adapter: fakeAdapter(), logger });
+
+      const res = await app.inject({
+        method: "POST",
+        url: "/v1/sessions/sess-1/send",
+        headers: { "x-march-slice-id": "slice-abc" },
+        payload: { profile: "march", prompt: "hello there" },
+      });
+      expect(res.statusCode).toBe(202);
+      await app.close();
+
+      const sendLine = fs
+        .readFileSync(logFilePath, "utf-8")
+        .trim()
+        .split("\n")
+        .filter(Boolean)
+        .map((l) => JSON.parse(l) as Record<string, unknown>)
+        .find((l) => l.msg === "castra send accepted");
+
+      expect(sendLine).toBeDefined();
+      // The slice-keyed deterministic trace, so the line shares the slice's trace.
+      expect(sendLine!.trace_id).toBe(traceIdForDispatch("slice-abc"));
+      expect(sendLine!.span_id).toMatch(/^[0-9a-f]{16}$/);
+      expect(sendLine!["castra.session_id"]).toBe("sess-1");
+      expect(sendLine!["march.slice_id"]).toBe("slice-abc");
+      expect(sendLine!["castra.message_bytes"]).toBe(11);
     });
   });
 });

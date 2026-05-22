@@ -13,9 +13,9 @@ describe("spawn-trace (disabled)", () => {
     expect(result).toBe(42);
   });
 
-  it("runActive runs the wrapped function and returns its value when disabled", () => {
+  it("spanContext is undefined when disabled", () => {
     const dispatch = startDispatchSpan({ traceKey: "k", rootName: "hatchery.spawn" });
-    expect(dispatch.runActive(() => "ok")).toBe("ok");
+    expect(dispatch.spanContext()).toBeUndefined();
   });
 
   it("propagates exceptions from the wrapped function", () => {
