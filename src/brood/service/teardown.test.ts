@@ -1,7 +1,9 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import type { Span } from "@opentelemetry/sdk-trace-base";
+import { getActiveOtel, initOtel } from "../../observability/otel.js";
 import { sqliteAvailable } from "./sqlite.js";
 import { broodArchiveDir, SessionStore } from "./store.js";
 import {
@@ -316,6 +318,86 @@ describe.skipIf(!sqliteAvailable)("teardownSession", () => {
     expect(rec.worktreeTargets.some((t) => t.worktreePath)).toBe(false);
     // ...and the registry row is left retryable (not torndown).
     expect(store.get(group.spawnId)?.status).toBe("tearing-down");
+    store.close();
+  });
+});
+
+/** Spy on the active tracer so we can inspect the spans teardown creates. */
+function captureSpans(): Span[] {
+  const tracer = getActiveOtel().getTracer();
+  const created: Span[] = [];
+  const real = tracer.startSpan.bind(tracer);
+  vi.spyOn(tracer, "startSpan").mockImplementation(
+    (...args: Parameters<typeof real>) => {
+      const span = real(...args) as Span;
+      created.push(span);
+      return span;
+    },
+  );
+  return created;
+}
+
+describe.skipIf(!sqliteAvailable)("teardownSession tracing", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    initOtel({});
+  });
+
+  it("child-spans each reclamation sub-step under brood.teardown with an outcome", async () => {
+    initOtel({ MARCH_OTEL: "1", MARCH_OTEL_ENDPOINT: "http://localhost:4318" });
+    const created = captureSpans();
+    const store = new SessionStore({ dbPath: ":memory:" });
+    const group = seedSpawnGroup(store);
+    const rec = recordingDeps(makeHome());
+    rec.deps.pathExists = (p) => p === group.worktreePath;
+
+    await teardownSession(store, group.spawnId, { force: true }, rec.deps);
+
+    const parent = created.find((s) => s.name === "brood.teardown");
+    expect(parent).toBeDefined();
+    const children = created.filter((s) => s.name.startsWith("brood.teardown."));
+    const byName = new Map(children.map((c) => [c.name, c]));
+    // Each sub-step is a child of the teardown span...
+    for (const name of [
+      "brood.teardown.container",
+      "brood.teardown.steward",
+      "brood.teardown.worktree",
+      "brood.teardown.branch",
+    ]) {
+      const child = byName.get(name);
+      expect(child, name).toBeDefined();
+      expect(child!.parentSpanContext?.spanId).toBe(parent!.spanContext().spanId);
+      expect(child!.attributes["march.teardown.outcome"]).toBe("removed");
+    }
+    expect(byName.get("brood.teardown.worktree")!.attributes["march.worktree.path"]).toBe(
+      group.worktreePath,
+    );
+    store.close();
+  });
+
+  it("marks the steward span errored and worktree/branch deferred when steward removal fails", async () => {
+    initOtel({ MARCH_OTEL: "1", MARCH_OTEL_ENDPOINT: "http://localhost:4318" });
+    const created = captureSpans();
+    const store = new SessionStore({ dbPath: ":memory:" });
+    const group = seedSpawnGroup(store);
+    const rec = recordingDeps(makeHome());
+    rec.deps.pathExists = (p) => p === group.worktreePath;
+    rec.deps.removeSteward = async () => {
+      throw new Error("Could not reach Castra");
+    };
+
+    await teardownSession(store, group.spawnId, { force: true }, rec.deps);
+
+    const byName = new Map(created.map((c) => [c.name, c]));
+    expect(byName.get("brood.teardown.steward")!.attributes["march.teardown.outcome"]).toBe(
+      "failed",
+    );
+    expect(byName.get("brood.teardown.worktree")!.attributes["march.teardown.outcome"]).toBe(
+      "deferred",
+    );
+    expect(byName.get("brood.teardown.branch")!.attributes["march.teardown.outcome"]).toBe(
+      "deferred",
+    );
     store.close();
   });
 });
