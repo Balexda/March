@@ -30,7 +30,7 @@ import {
 } from "../pure/dispatch-id.js";
 import { buildSmithySpawnPrompt } from "../pure/messages.js";
 import { hashText } from "../pure/hash.js";
-import { DISPATCH_RECOVERY_LIMIT, recoveryAttemptKey } from "../pure/slice.js";
+import { DISPATCH_RECOVERY_LIMIT, recoveryAttemptKey, recoveryBudgetExhausted } from "../pure/slice.js";
 
 /** A judgement-request notification (the dispatch handler fires these). */
 export interface DispatchNotification {
@@ -136,14 +136,20 @@ export async function launchDispatch(state: any, ts: string, item: any, sliceId:
       existing.last_action = ts;
       existing.last_action_note = "NEED: Hatchery dispatch launch failed: " + error;
       deps.emitTransition({ type: "slice.escalated", sliceId, reason: "hatchery_dispatch_failed" });
-      notifications.push({
-        slice: existing, sliceId,
-        requestKey: "hatchery-failure:" + sliceId + ":launch-throw:" + hashText(error).slice(0, 12),
-        reason: "hatchery_dispatch_failed",
-        detail: "Hatchery dispatch launch threw for " + actionCommandLine(action) + ".\n\nError:\n" + error
-          + "\n\nThe loop auto-recovers this class up to " + DISPATCH_RECOVERY_LIMIT + " times; if you are seeing this the"
-          + " budget is exhausted. For 'branch already exists' surface this via legate.unwedge; otherwise legate.error.",
-      });
+      // Only bother the operator once auto-recovery is out of budget — within
+      // budget the loop re-dispatches this slice itself (#211), so a judgement
+      // request here would escalate prematurely and defeat bounded recovery. The
+      // failure is still logged + counted below regardless.
+      if (recoveryBudgetExhausted(state, sliceId)) {
+        notifications.push({
+          slice: existing, sliceId,
+          requestKey: "hatchery-failure:" + sliceId + ":launch-throw:" + hashText(error).slice(0, 12),
+          reason: "hatchery_dispatch_failed",
+          detail: "Hatchery dispatch launch threw for " + actionCommandLine(action) + ".\n\nError:\n" + error
+            + "\n\nThe loop auto-recovered this class " + DISPATCH_RECOVERY_LIMIT + " times and it still failed, so the"
+            + " slice is now operator-only. For 'branch already exists' surface this via legate.unwedge; otherwise legate.error.",
+        });
+      }
     }
     failures.push({ slice_id: sliceId, command: actionCommandLine(action), error });
     deps.emit({
@@ -243,17 +249,23 @@ export async function completePendingHatcheryDispatches(state: any, ts: string, 
     deps.emitTransition({ type: "slice.escalated", sliceId, reason: "hatchery_dispatch_failed" });
     const commandLine = actionCommandLine({ command: slice.command, arguments: slice.arguments || [] });
     failures.push({ slice_id: sliceId, command: commandLine, error: errorText });
-    // Stable requestKey so the judgement request fires once per distinct failure.
-    notifications.push({
-      slice, sliceId,
-      requestKey: "hatchery-failure:" + sliceId + ":" + hashText(errorText).slice(0, 12),
-      reason: "hatchery_dispatch_failed",
-      detail: "Hatchery dispatch for " + commandLine + " failed and was escalated.\n\nError:\n" + errorText.trim()
-        + "\n\nThe loop auto-recovers recoverable dispatch failures up to " + DISPATCH_RECOVERY_LIMIT + " times before"
-        + " leaving the slice operator-only — if you are seeing this judgement request the budget is exhausted. A"
-        + " 'branch already exists' / diverged-branch collision needs legate.unwedge + a Brood teardown of the orphan"
-        + " branch/worktree (#155) before re-dispatch; otherwise run legate.error for worker-side recovery.",
-    });
+    // Only escalate to the operator once auto-recovery is out of budget. Within
+    // budget the loop re-dispatches this slice itself (#211) on this same tick, so
+    // a judgement request here fires before recovery runs and would prompt the
+    // operator to intervene prematurely. The failure is still recorded above.
+    if (recoveryBudgetExhausted(state, sliceId)) {
+      // Stable requestKey so the judgement request fires once per distinct failure.
+      notifications.push({
+        slice, sliceId,
+        requestKey: "hatchery-failure:" + sliceId + ":" + hashText(errorText).slice(0, 12),
+        reason: "hatchery_dispatch_failed",
+        detail: "Hatchery dispatch for " + commandLine + " failed and was escalated.\n\nError:\n" + errorText.trim()
+          + "\n\nThe loop auto-recovered this " + DISPATCH_RECOVERY_LIMIT + " times and it still failed, so the slice is"
+          + " now operator-only. A 'branch already exists' / diverged-branch collision needs legate.unwedge + a Brood"
+          + " teardown of the orphan branch/worktree (#155) before re-dispatch; otherwise run legate.error for"
+          + " worker-side recovery.",
+      });
+    }
     mutated = true;
   };
 
@@ -317,11 +329,19 @@ export async function completePendingHatcheryDispatches(state: any, ts: string, 
     // restart's rebuild keeps the link too. Complements the Hatchery push (#213).
     deps.emitTransition({ type: "slice.stage.changed", sliceId, stage: "implementing", sessionId: manager.sessionId || undefined });
     // Clear any transient retry counters for this slice — it cleanly transitioned
-    // to implementing, so prior transient failures no longer matter.
+    // to implementing, so prior transient failures no longer matter. The fold has
+    // no clear event, so emit a durable retry.counted(0) per cleared key; without
+    // it the counter would reappear from sys.retries on a cold start and could
+    // wrongly deny recovery to a later re-incarnation of the same slice id (#211).
     if (state.transient_retry_counts && typeof state.transient_retry_counts === "object") {
-      delete state.transient_retry_counts[sliceId];
+      const cleared: string[] = [];
+      if (Object.prototype.hasOwnProperty.call(state.transient_retry_counts, sliceId)) cleared.push(sliceId);
       for (const k of Object.keys(state.transient_retry_counts)) {
-        if (k.endsWith(":" + sliceId)) delete state.transient_retry_counts[k];
+        if (k.endsWith(":" + sliceId)) cleared.push(k);
+      }
+      for (const k of cleared) {
+        delete state.transient_retry_counts[k];
+        deps.emitTransition({ type: "retry.counted", key: k, count: 0 });
       }
     }
     actions.push({

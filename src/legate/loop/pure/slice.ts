@@ -165,9 +165,25 @@ export const DISPATCH_RECOVERY_LIMIT = 2;
 
 /** Durable retry-counter key for a slice's auto-recovery budget. Suffixed with
  *  the slice id so completePending's success-path cleanup (`endsWith(":"+id)`)
- *  clears it once the slice transitions cleanly. */
+ *  clears it — emitting a durable `retry.counted` 0 so the reset survives a
+ *  restart (the fold has no separate clear event) — once the slice transitions
+ *  cleanly. */
 export function recoveryAttemptKey(sliceId: string): string {
   return "dispatch-recovery:" + sliceId;
+}
+
+/**
+ * True once a slice has used its full auto-recovery budget — i.e. the loop has
+ * re-dispatched it {@link DISPATCH_RECOVERY_LIMIT} times and the latest attempt
+ * still failed. The escalate paths use this to decide whether a dispatch failure
+ * is still the loop's to retry (within budget → no operator notification) or has
+ * become genuinely operator-only (budget exhausted → escalate for judgement), so
+ * an operator is pinged once at the end rather than on every recoverable failure.
+ */
+export function recoveryBudgetExhausted(state: any, sliceId: string): boolean {
+  const counts = state?.transient_retry_counts && typeof state.transient_retry_counts === "object" ? state.transient_retry_counts : {};
+  const used = Number.isFinite(counts[recoveryAttemptKey(sliceId)]) ? counts[recoveryAttemptKey(sliceId)] : 0;
+  return used >= DISPATCH_RECOVERY_LIMIT;
 }
 
 /** True when a slice is escalated for a reason the loop is allowed to auto-recover. */

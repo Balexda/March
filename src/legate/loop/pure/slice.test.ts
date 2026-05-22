@@ -10,6 +10,7 @@ import {
   isTerminalSlice,
   recoverableEscalations,
   recoveryAttemptKey,
+  recoveryBudgetExhausted,
   sliceReleasesArtifact,
   summarizeSlicesByStage,
 } from "./slice.js";
@@ -215,5 +216,12 @@ describe("recoverableEscalations (#211 bounded auto-recovery)", () => {
     const state = { slices: { [SID]: recoverableSlice() }, archived_slices: {}, transient_retry_counts: {} };
     expect(dispatchableReady(state, [item])).toEqual([]);
     expect(recoverableEscalations(state, [item])).toHaveLength(1);
+  });
+
+  it("recoveryBudgetExhausted flips only at/over the limit", () => {
+    expect(recoveryBudgetExhausted({ transient_retry_counts: {} }, "x")).toBe(false);
+    expect(recoveryBudgetExhausted({ transient_retry_counts: { [recoveryAttemptKey("x")]: 0 } }, "x")).toBe(false);
+    expect(recoveryBudgetExhausted({ transient_retry_counts: { [recoveryAttemptKey("x")]: DISPATCH_RECOVERY_LIMIT - 1 } }, "x")).toBe(false);
+    expect(recoveryBudgetExhausted({ transient_retry_counts: { [recoveryAttemptKey("x")]: DISPATCH_RECOVERY_LIMIT } }, "x")).toBe(true);
   });
 });
