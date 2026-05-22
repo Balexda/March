@@ -1,4 +1,5 @@
 import { senseObserved, type SenseDeps } from "../../legate/loop/state/sense.js";
+import { startHeraldSpan } from "../../observability/herald-trace.js";
 import type { AppendEventInput, HeraldEvent, SystemState } from "../events.js";
 import { diffObserved } from "./diff.js";
 
@@ -35,16 +36,29 @@ export interface ObserveResult {
  * projection and reads the live PR/output for each non-terminal slice.
  */
 export async function runObservation(deps: ObserverDeps): Promise<ObserveResult> {
-  const prev = deps.store.projection();
-  const started = Date.now();
-  const loop = await senseObserved(deps.senseDeps, prev);
-  const durationMs = Date.now() - started;
+  // The tick is internally initiated (no inbound traceparent), so this is a
+  // fresh root span — the trace that surfaces march-herald's observation work.
+  const span = startHeraldSpan({ name: "herald.observe" });
+  try {
+    const prev = deps.store.projection();
+    const started = Date.now();
+    const loop = await senseObserved(deps.senseDeps, prev);
+    const durationMs = Date.now() - started;
 
-  const appended: HeraldEvent[] = [];
-  for (const body of diffObserved(prev, loop)) {
-    appended.push(
-      deps.store.append({ source: "herald", ts: loop.ts, ...body } as AppendEventInput),
-    );
+    const appended: HeraldEvent[] = [];
+    for (const body of diffObserved(prev, loop)) {
+      appended.push(
+        deps.store.append({ source: "herald", ts: loop.ts, ...body } as AppendEventInput),
+      );
+    }
+    span.setAttributes({
+      "herald.observe.duration_ms": durationMs,
+      "herald.observe.appended": appended.length,
+    });
+    span.end();
+    return { observedAt: loop.ts, durationMs, appended };
+  } catch (err) {
+    span.end({ error: true });
+    throw err;
   }
-  return { observedAt: loop.ts, durationMs, appended };
 }
