@@ -151,7 +151,7 @@ describe("babysit apply", () => {
     const c = ctx();
     const d = deps();
     const res = await apply([{ kind: "conflict-fix", sliceId: "s", sessionId: "w", pr: { number: 5 }, key: "k", message: "MSG" }], c, state, d);
-    expect(d.sendMessage).toHaveBeenCalledWith("w", "MSG");
+    expect(d.sendMessage).toHaveBeenCalledWith("w", "MSG", "s");
     expect(slice.stage).toBe("pr-resolving-conflicts");
     expect((slice as any).last_processor_action_key).toBe("k");
     expect(res.actions[0]).toMatchObject({ action: "conflict-fix" });
@@ -193,7 +193,7 @@ describe("babysit apply", () => {
       state,
       d,
     );
-    expect(d.sendMessage).toHaveBeenCalledWith("w", expect.any(String));
+    expect(d.sendMessage).toHaveBeenCalledWith("w", expect.any(String), "s");
     expect(slice.steward_nudge_count).toBe(1);
     expect(res.actions.map((a) => a.action)).toEqual(["steward-nudge"]);
     expect(res.requests).toHaveLength(0);

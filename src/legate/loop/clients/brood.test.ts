@@ -1,6 +1,7 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { broodListSessions, broodRegister, broodTeardown, type BroodSeam } from "./brood.js";
 import { BroodNotFoundError } from "../../../brood/service/client.js";
+import { buildTraceparent, spanIdForDispatch, traceIdForDispatch } from "../../../observability/trace-ids.js";
 
 function seam(over: Partial<BroodSeam> = {}): BroodSeam {
   return {
@@ -38,6 +39,39 @@ describe("loop brood client (async BroodClient seam)", () => {
     });
     const res = await broodTeardown("sess-1", {}, client);
     expect(res).toMatchObject({ ok: false, notTracked: false });
+  });
+
+  describe("traceparent propagation (#234)", () => {
+    afterEach(() => vi.unstubAllGlobals());
+
+    const okResponse = (): Response =>
+      new Response(JSON.stringify({ id: "sess-1", status: "removed" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+
+    it("derives a deterministic traceparent from traceKey and sends it on the default client", async () => {
+      const fetchMock = vi.fn(async (_url: string | URL, _init?: RequestInit) => okResponse());
+      vi.stubGlobal("fetch", fetchMock);
+
+      // No injected client → broodTeardown builds a traceparent-bearing BroodClient.
+      const res = await broodTeardown("sess-1", { reason: "merged", traceKey: "slice-x" });
+      expect(res.ok).toBe(true);
+
+      const headers = (fetchMock.mock.calls[0]?.[1]?.headers ?? {}) as Record<string, string>;
+      expect(headers.traceparent).toBe(
+        buildTraceparent(traceIdForDispatch("slice-x"), spanIdForDispatch("slice-x")),
+      );
+    });
+
+    it("sends no traceparent when neither traceKey nor traceparent is given", async () => {
+      const fetchMock = vi.fn(async (_url: string | URL, _init?: RequestInit) => okResponse());
+      vi.stubGlobal("fetch", fetchMock);
+
+      await broodTeardown("sess-1", { reason: "merged" });
+      const headers = (fetchMock.mock.calls[0]?.[1]?.headers ?? {}) as Record<string, string>;
+      expect(headers.traceparent).toBeUndefined();
+    });
   });
 
   it("list forwards the filter and returns the records", async () => {

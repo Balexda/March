@@ -1,5 +1,10 @@
 import { BroodClient, BroodNotFoundError } from "../../../brood/service/client.js";
 import type { RegisterSessionInput, SessionRecord } from "../../../brood/service/types.js";
+import {
+  buildTraceparent,
+  spanIdForDispatch,
+  traceIdForDispatch,
+} from "../../../observability/trace-ids.js";
 
 /**
  * The legate loop's seam to Brood — the session-state + teardown authority
@@ -27,6 +32,45 @@ export interface BroodTeardownOptions {
   readonly force?: boolean;
   readonly kill?: boolean;
   readonly reason?: string;
+  /**
+   * Trace key identifying the trace this teardown belongs to — the slice id for a
+   * terminal-PR cleanup, the session id for a ghost-steward cleanup. Translated to
+   * a W3C `traceparent` (via the deterministic per-key ids shared across
+   * processes, AGENTS.md) so brood.teardown's spans nest under the same trace as
+   * the legate.cleanup / legate.ghost-cleanup action span instead of orphaning a
+   * root (#234). Ignored when `traceparent` is set directly.
+   */
+  readonly traceKey?: string;
+  /** Explicit W3C traceparent; wins over {@link traceKey} when both are present. */
+  readonly traceparent?: string;
+}
+
+/**
+ * Resolve the W3C traceparent for a teardown: an explicit `traceparent` wins,
+ * else it is derived from `traceKey` using the same deterministic trace/span ids
+ * (`traceIdForDispatch` / `spanIdForDispatch`) that the loop's action spans and
+ * the dispatch path's castra.launch use, so brood.teardown joins the slice's
+ * trace under its dispatch anchor (#234). Returns undefined when neither is set.
+ */
+function teardownTraceparent(opts: BroodTeardownOptions): string | undefined {
+  if (opts.traceparent) return opts.traceparent;
+  if (opts.traceKey) {
+    return buildTraceparent(
+      traceIdForDispatch(opts.traceKey),
+      spanIdForDispatch(opts.traceKey),
+    );
+  }
+  return undefined;
+}
+
+/**
+ * Pick the Brood client for a teardown: a fresh traceparent-bearing client when
+ * the caller supplied a trace key/parent (so brood's spans join the trace), else
+ * the shared default client. A caller-injected client (tests) always wins.
+ */
+function teardownClient(opts: BroodTeardownOptions): BroodSeam {
+  const traceparent = teardownTraceparent(opts);
+  return traceparent ? new BroodClient({ traceparent }) : defaultClient();
 }
 
 export interface BroodTeardownResult {
@@ -53,10 +97,14 @@ function summarizeTeardown(res: { id: string; status: string; warnings?: string[
 export async function broodTeardown(
   sessionId: string,
   opts: BroodTeardownOptions = {},
-  client: BroodSeam = defaultClient(),
+  client?: BroodSeam,
 ): Promise<BroodTeardownResult> {
+  // Default client carries the slice/session traceparent so brood's teardown
+  // spans nest under the action span's trace (#234); a caller-injected client
+  // (tests) is used as-is.
+  const c = client ?? teardownClient(opts);
   try {
-    const res = await client.teardown(sessionId, { force: opts.force, kill: opts.kill, reason: opts.reason });
+    const res = await c.teardown(sessionId, { force: opts.force, kill: opts.kill, reason: opts.reason });
     return { ok: true, notTracked: false, detail: summarizeTeardown(res) };
   } catch (err) {
     if (err instanceof BroodNotFoundError) {

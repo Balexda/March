@@ -19,15 +19,25 @@ import { spanIdForDispatch, traceIdForDispatch } from "./trace-ids.js";
  *
  * `legate.dispatch` is the trace's **root**: it claims the deterministic span id
  * ({@link spanIdForDispatch}) so the orchestrator spans (which set that id as
- * their parent) nest beneath it. `legate.babysit` / `legate.cleanup` are
- * lifecycle actions on an existing dispatch, so they nest as children of that
- * same deterministic parent. No-op when telemetry is disabled.
+ * their parent) nest beneath it. The non-dispatch lifecycle actions
+ * (`legate.babysit` / `legate.cleanup` / `legate.relaunch` /
+ * `legate.ghost-cleanup`) nest as children of that same deterministic parent —
+ * and the runtime gives their downstream brood.teardown / castra.send the same
+ * deterministic trace context (#234) so those join the trace too rather than
+ * orphaning a root. (`legate.ghost-cleanup` keys off the session id since a ghost
+ * steward belongs to no slice.) No-op when telemetry is disabled.
  */
 
 export interface LoopSpanInput {
-  /** Span name: "legate.dispatch" | "legate.babysit" | "legate.cleanup". */
+  /**
+   * Span name: "legate.dispatch" | "legate.babysit" | "legate.cleanup" |
+   * "legate.relaunch" | "legate.ghost-cleanup".
+   */
   readonly name: string;
-  /** Dispatch key (slice id) that determines the trace + deterministic ids. */
+  /**
+   * Key that determines the trace + deterministic ids — the slice id for
+   * slice-scoped actions, the session id for ghost-cleanup (no slice).
+   */
   readonly traceKey: string;
   /**
    * `true` for a `legate.dispatch` root span (claims `spanIdForDispatch` so

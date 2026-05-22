@@ -211,11 +211,14 @@ function replayRecentActionEvents(limit = 10) {
   for (const line of lines) printText(line);
 }
 
-async function sendAgentDeckMessage(sessionId: string, message: string, _wait = false) {
+async function sendAgentDeckMessage(sessionId: string, message: string, traceKey?: string) {
   // Routed through Castra. Castra's send is fire-and-forget (202); the former
   // --wait/--timeout has no equivalent, which is fine — every loop caller used
-  // the no-wait path.
-  await castra().sendPrompt({ profile: meta.profile, sessionId, prompt: message });
+  // the no-wait path. traceKey (the slice id) forwards as the x-march-slice-id
+  // span-correlation header so the babysit /smithy.fix castra.send nests under the
+  // slice's trace instead of orphaning a root (#234) — the same correlation the
+  // dispatch path's castra.launch/send already carries.
+  await castra().sendPrompt({ profile: meta.profile, sessionId, prompt: message, traceKey });
 }
 
 async function sendDoorbellToLegate() {
@@ -290,7 +293,7 @@ async function tick() {
   });
 
   const babysitDeps = {
-    sendMessage: (sessionId: string, message: string) => sendAgentDeckMessage(sessionId, message, false),
+    sendMessage: (sessionId: string, message: string, traceKey?: string) => sendAgentDeckMessage(sessionId, message, traceKey),
     requestJudgement: (input: any) => requestLegateJudgement(input),
   };
 

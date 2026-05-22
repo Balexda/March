@@ -62,7 +62,9 @@ export async function apply(decisions: CleanupDecision[], ctx: HandlerContext, s
     if (!slice) continue;
     const reason = `pr-${d.terminalState.toLowerCase()}`;
 
-    let teardown = await ctx.broodTeardown(d.sessionId, { reason });
+    // traceKey = slice id: brood.teardown's spans nest under this slice's trace
+    // (the same anchor as the legate.cleanup action span) instead of orphaning (#234).
+    let teardown = await ctx.broodTeardown(d.sessionId, { reason, traceKey: d.sliceId });
 
     // 404 not-tracked: Brood has no record of this session. Distinguish a
     // live-but-untracked steward from one that's genuinely gone (#225) — a
@@ -95,7 +97,7 @@ export async function apply(decisions: CleanupDecision[], ctx: HandlerContext, s
             : { ok: false, detail: "broodRegister unavailable" };
           if (reg.ok) {
             ctx.log(`cleanup reconciled untracked steward ${canonicalId} into Brood (${d.sliceId}); retrying teardown`);
-            teardown = await ctx.broodTeardown(canonicalId, { force: true, reason });
+            teardown = await ctx.broodTeardown(canonicalId, { force: true, reason, traceKey: d.sliceId });
           } else {
             teardown = { ok: false, notTracked: false, detail: `reconcile failed: ${reg.detail}` };
           }

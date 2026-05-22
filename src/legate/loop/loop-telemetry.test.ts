@@ -28,6 +28,36 @@ describe("emitActionEventSpan", () => {
     expect(emit).toHaveBeenNthCalledWith(1, expect.objectContaining({ name: "legate.babysit", root: false }));
     expect(emit).toHaveBeenNthCalledWith(2, expect.objectContaining({ name: "legate.cleanup", root: false }));
   });
+
+  it("emits a non-root legate.relaunch span keyed by the slice id", () => {
+    const emit = vi.fn();
+    emitActionEventSpan({ kind: "steward_relaunch", slice_id: "s", session_id: "w", action: "relaunch-steward" }, emit);
+    expect(emit).toHaveBeenCalledWith(
+      expect.objectContaining({ name: "legate.relaunch", traceKey: "s", root: false, error: false }),
+    );
+  });
+
+  it("marks a relaunch-failed span errored", () => {
+    const emit = vi.fn();
+    emitActionEventSpan({ kind: "steward_relaunch", slice_id: "s", action: "relaunch-failed" }, emit);
+    expect(emit).toHaveBeenCalledWith(expect.objectContaining({ name: "legate.relaunch", root: false, error: true }));
+  });
+
+  it("emits a legate.ghost-cleanup span keyed by the session id (no slice_id)", () => {
+    const emit = vi.fn();
+    emitActionEventSpan({ kind: "ghost_cleanup", session_id: "w", action: "ghost-cleanup" }, emit);
+    expect(emit).toHaveBeenCalledWith(
+      expect.objectContaining({ name: "legate.ghost-cleanup", traceKey: "w", root: false, error: false }),
+    );
+  });
+
+  it("marks a ghost-cleanup-failed span errored and ignores one with no session id", () => {
+    const emit = vi.fn();
+    emitActionEventSpan({ kind: "ghost_cleanup", session_id: "w", action: "ghost-cleanup-failed" }, emit);
+    emitActionEventSpan({ kind: "ghost_cleanup", action: "ghost-cleanup" }, emit);
+    expect(emit).toHaveBeenCalledTimes(1);
+    expect(emit).toHaveBeenCalledWith(expect.objectContaining({ name: "legate.ghost-cleanup", error: true }));
+  });
 });
 
 describe("emitActionEventLog", () => {

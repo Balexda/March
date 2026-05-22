@@ -59,7 +59,7 @@ describe("ghost-cleanup handler", () => {
     });
     const c = ctx(() => ({ ok: true, notTracked: false, detail: "" }));
     const res = await apply(assess(state), c, state);
-    expect(c.broodTeardown).toHaveBeenCalledWith("ghost", { force: true, reason: "ghost-steward" });
+    expect(c.broodTeardown).toHaveBeenCalledWith("ghost", { force: true, reason: "ghost-steward", traceKey: "ghost" });
     expect(res.actions[0]).toMatchObject({ action: "ghost-cleanup", sessionId: "ghost" });
     expect(state.sessionsById.has("ghost")).toBe(false);
   });
