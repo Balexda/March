@@ -29,6 +29,7 @@ export interface SpawnBackend {
   readonly requiredEnvVars: readonly string[];
   readonly credentialMounts: readonly BackendCredentialMountSpec[];
   buildEntrypoint(promptFilePath: string): readonly string[];
+  readonly allowedEgressHosts: readonly string[];
 }
 
 export const claudeCodeBackend: SpawnBackend = {
@@ -43,6 +44,7 @@ export const claudeCodeBackend: SpawnBackend = {
       `claude -p "$(cat ${promptFilePath})" --output-format json --dangerously-skip-permissions --bare --no-session-persistence`,
     ];
   },
+  allowedEgressHosts: ["api.anthropic.com"],
 };
 
 export const codexBackend: SpawnBackend = {
@@ -71,6 +73,7 @@ export const codexBackend: SpawnBackend = {
       `cp -R /march/codex-auth/. /march/codex-home/ && chmod -R u+rwX /march/codex-home && codex exec --json --ephemeral --ignore-rules --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --cd ${CONTAINER_WORKDIR} - < ${promptFilePath}`,
     ];
   },
+  allowedEgressHosts: ["chatgpt.com"],
 };
 
 const BACKENDS: Readonly<Record<string, SpawnBackend>> = {

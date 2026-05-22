@@ -17,7 +17,7 @@
 
 ### Tasks
 
-- [ ] **Add `allowedEgressHosts` to the live backend interface and concrete backends**
+- [x] **Add `allowedEgressHosts` to the live backend interface and concrete backends**
 
   Update `src/spawn/backends.ts` so `SpawnBackend` includes `allowedEgressHosts: readonly string[]` alongside the five existing members. Populate `claudeCodeBackend.allowedEgressHosts` with the F4-specified Claude Code host and populate `codexBackend.allowedEgressHosts` with the resolved Codex hostname set from SD-008.
 
@@ -29,7 +29,7 @@
   - Existing exports and backend selection behavior remain unchanged except for the added field.
   - No new global network-policy constant or parallel backend-network registry is introduced.
 
-- [ ] **Extend backend tests for the six-member contract and egress values**
+- [x] **Extend backend tests for the six-member contract and egress values**
 
   Update the existing backend test coverage so the new field is verified on concrete backends and on plain object fixtures satisfying `SpawnBackend`. Keep the coverage local to `src/spawn/backends.test.ts` unless an existing consumer test needs a type fixture updated to compile.
 
@@ -39,7 +39,7 @@
   - Any fixture backend used by Hatchery or spawn tests is updated to include `allowedEgressHosts`, proving future backend additions must provide the field at compile time (US2 AS 2.6).
   - Existing backend registry, backend-selection, credential-mount, and credential pre-flight tests still pass with the added field.
 
-- [ ] **Record the F3 supersession and SD-008 outcome in the story artifact**
+- [x] **Record the F3 supersession and SD-008 outcome in the story artifact**
 
   Keep the story's artifact state consistent with the implementation by ensuring the F4 spec remains explicit that this 6th member supersedes F3's closed 4-member decision and by resolving or carrying forward SD-008 based on the Codex host investigation performed for this slice.
 

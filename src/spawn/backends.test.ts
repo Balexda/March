@@ -13,9 +13,34 @@ import {
   missingRequiredEnvVars,
   resolveBackendSelection,
   resolveCredentialMounts,
+  type SpawnBackend,
 } from "./backends.js";
 
+const expectedBackendKeys = [
+  "allowedEgressHosts",
+  "baseImage",
+  "buildEntrypoint",
+  "credentialMounts",
+  "name",
+  "requiredEnvVars",
+];
+
 describe("spawn backends", () => {
+  it("keeps the SpawnBackend contract at the F4 six-member surface", () => {
+    const fixtureBackend: SpawnBackend = {
+      name: "fixture",
+      baseImage: "fixture-image:latest",
+      requiredEnvVars: [],
+      credentialMounts: [],
+      buildEntrypoint: () => ["sh", "-c", "true"],
+      allowedEgressHosts: ["api.example.test"],
+    };
+
+    for (const backend of [claudeCodeBackend, codexBackend, fixtureBackend]) {
+      expect(Object.keys(backend).sort()).toEqual(expectedBackendKeys);
+    }
+  });
+
   it("lists registered backend names in stable order", () => {
     expect(listBackends()).toEqual(["claude-code", "codex"]);
   });
@@ -53,6 +78,7 @@ describe("spawn backends", () => {
     expect(claudeCodeBackend.baseImage).toBe("march-spawn-claude:latest");
     expect(claudeCodeBackend.requiredEnvVars).toEqual(["ANTHROPIC_API_KEY"]);
     expect(claudeCodeBackend.credentialMounts).toEqual([]);
+    expect(claudeCodeBackend.allowedEgressHosts).toEqual(["api.anthropic.com"]);
     expect(claudeCodeBackend.buildEntrypoint("/march/prompt.txt")).toEqual([
       "sh",
       "-c",
@@ -63,6 +89,7 @@ describe("spawn backends", () => {
   it("defines the Codex exec backend for ChatGPT session auth", () => {
     expect(codexBackend.baseImage).toBe("march-spawn-codex:latest");
     expect(codexBackend.requiredEnvVars).toEqual([]);
+    expect(codexBackend.allowedEgressHosts).toEqual(["chatgpt.com"]);
     expect(codexBackend.buildEntrypoint("/march/prompt.txt")).toEqual([
       "sh",
       "-c",
