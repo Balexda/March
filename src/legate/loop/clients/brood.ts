@@ -1,5 +1,5 @@
 import { BroodClient, BroodNotFoundError } from "../../../brood/service/client.js";
-import type { SessionRecord } from "../../../brood/service/types.js";
+import type { RegisterSessionInput, SessionRecord } from "../../../brood/service/types.js";
 
 /**
  * The legate loop's seam to Brood — the session-state + teardown authority
@@ -15,6 +15,7 @@ export interface BroodSeam {
     request?: { force?: boolean; kill?: boolean; reason?: string },
   ): Promise<{ id: string; status: string; warnings?: string[] }>;
   list(filter?: { kind?: SessionRecord["kind"]; status?: SessionRecord["status"] }): Promise<SessionRecord[]>;
+  register(input: RegisterSessionInput): Promise<SessionRecord>;
 }
 
 let _client: BroodClient | undefined;
@@ -62,6 +63,32 @@ export async function broodTeardown(
       return { ok: false, notTracked: true, detail: err.message };
     }
     return { ok: false, notTracked: false, detail: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+export interface BroodRegisterResult {
+  /** The session is now in Brood's registry (idempotent upsert succeeded). */
+  readonly ok: boolean;
+  readonly detail: string;
+}
+
+/**
+ * Back-fill a live-but-untracked session into Brood's registry. Used to
+ * reconcile an orphaned steward (one Brood never learned about — predating or
+ * bypassing the Hatchery push, #218) from the Castra observation so Brood owns
+ * its teardown by exact path (#155, #225). Idempotent (Brood upserts on `id`);
+ * any failure yields `ok:false` so the caller can defer rather than archive over
+ * an orphan it couldn't register.
+ */
+export async function broodRegister(
+  input: RegisterSessionInput,
+  client: BroodSeam = defaultClient(),
+): Promise<BroodRegisterResult> {
+  try {
+    const rec = await client.register(input);
+    return { ok: true, detail: `registered ${rec.id} (${rec.kind})` };
+  } catch (err) {
+    return { ok: false, detail: err instanceof Error ? err.message : String(err) };
   }
 }
 

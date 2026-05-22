@@ -1,7 +1,9 @@
 import type { LoopMeta } from "../meta.js";
 import type { WorkerSummary } from "../pure/session.js";
 import type { CastraClient } from "../../../castra/client.js";
-import type { BroodTeardownOptions, BroodTeardownResult } from "../clients/brood.js";
+import type { BroodRegisterResult, BroodTeardownOptions, BroodTeardownResult } from "../clients/brood.js";
+import type { RegisterSessionInput } from "../../../brood/service/types.js";
+import type { JudgementInput } from "../judgement.js";
 import type { TransitionEvent } from "../clients/herald.js";
 
 /**
@@ -65,6 +67,18 @@ export interface HandlerContext {
   castra: CastraClient;
   /** Request teardown of a session via Brood (the teardown authority). */
   broodTeardown: (sessionId: string, opts?: BroodTeardownOptions) => Promise<BroodTeardownResult>;
+  /**
+   * Back-fill a live-but-untracked session into Brood's registry so Brood owns
+   * its teardown by exact path (#155, #225). Optional so tests/handlers that
+   * never reconcile can omit it.
+   */
+  broodRegister?: (input: RegisterSessionInput) => Promise<BroodRegisterResult>;
+  /**
+   * Escalate to the legate operator when a handler can't proceed deterministically
+   * (rings the doorbell + records a `processor_request`, deduped by `requestKey`).
+   * Optional so tests/handlers that never escalate can omit it.
+   */
+  requestJudgement?: (input: JudgementInput) => Promise<any | null>;
   /** Append an action/event record to the action log (+ otel span/log). */
   emit: (event: any) => void;
   /**
