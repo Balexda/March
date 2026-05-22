@@ -165,10 +165,12 @@ describe("rebuildWorkingState", () => {
     expect(raw.repo).toMatchObject({ name: "march", path: "/repo" });
   });
 
-  it("carries an escalation reason onto the rebuilt slice note", () => {
-    const sys = foldedState({ slices: { e: { sliceId: "e", stage: "escalated", escalatedReason: "spawn-error" } } });
+  it("carries an escalation reason onto the rebuilt slice note + structured class (#211)", () => {
+    const sys = foldedState({ slices: { e: { sliceId: "e", stage: "escalated", escalatedReason: "hatchery_dispatch_failed" } } });
     const raw = rebuildWorkingState(sys, meta);
-    expect(raw.slices.e).toMatchObject({ stage: "escalated", last_action_note: "spawn-error" });
+    // The structured field lets bounded auto-recovery (#211) tell a recoverable
+    // escalation from a terminal one after a cold start, not just the human note.
+    expect(raw.slices.e).toMatchObject({ stage: "escalated", last_action_note: "hatchery_dispatch_failed", escalated_reason: "hatchery_dispatch_failed" });
   });
 });
 

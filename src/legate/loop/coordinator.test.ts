@@ -45,6 +45,7 @@ function deps(state: LoopState, ctxOver: Partial<HandlerContext> = {}): Coordina
     dispatch: {
       completePending: vi.fn(async () => ({ actions: [], failures: [], mutated: false, notifications: [] })),
       launchDispatch: vi.fn(async () => ({ actions: [], failures: [], mutated: false })),
+      recoverDispatch: vi.fn(async () => ({ actions: [], failures: [], mutated: false })),
       requestJudgement: vi.fn(async () => null),
     },
   };

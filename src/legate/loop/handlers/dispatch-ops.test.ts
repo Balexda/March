@@ -4,7 +4,9 @@ import {
   completePendingHatcheryDispatches,
   launchDispatch,
   launchHatcheryDispatch,
+  recoverDispatch,
 } from "./dispatch-ops.js";
+import { recoveryAttemptKey } from "../pure/slice.js";
 
 function deps(over: Partial<DispatchIoDeps> = {}): DispatchIoDeps {
   return {
@@ -147,9 +149,11 @@ describe("completePendingHatcheryDispatches", () => {
     const emitTransition = vi.fn();
     const out = await completePendingHatcheryDispatches(state, "T", deps({ getJob: vi.fn(async () => ({ status: "failed", error: { message: "git apply --index failed" } })), emitTransition }));
     expect(state.slices.s.stage).toBe("escalated");
+    // Tags the recoverable class so bounded auto-recovery (#211) can re-dispatch it.
+    expect(state.slices.s.escalated_reason).toBe("hatchery_dispatch_failed");
     expect(out.failures[0]).toMatchObject({ slice_id: "s" });
     expect(out.notifications[0]).toMatchObject({ sliceId: "s", reason: "hatchery_dispatch_failed" });
-    expect(out.notifications[0].detail).toContain("does not auto-recover");
+    expect(out.notifications[0].detail).toContain("auto-recovers");
     expect(emitTransition).toHaveBeenCalledWith(expect.objectContaining({ type: "slice.escalated", sliceId: "s" }));
   });
 
@@ -158,5 +162,50 @@ describe("completePendingHatcheryDispatches", () => {
     const out = await completePendingHatcheryDispatches(state, "T", deps({ getJob: vi.fn(async () => ({ status: "succeeded", result: { error: "session already exists: t (ghost-1)" } })) }));
     expect(state.slices.s.stage).toBe("escalated");
     expect(out.notifications[0].sliceId).toBe("s");
+  });
+});
+
+describe("recoverDispatch (#211 bounded auto-recovery)", () => {
+  // An escalated slice keyed at the item's deterministic slice id.
+  const escalated = () => ({ stage: "escalated", escalated_reason: "hatchery_dispatch_failed", command: "smithy.forge", arguments: ["specs/a.spec.md", "1"] });
+
+  it("re-dispatches via the fresh-launch path: clean hatchery-pending slice + new job id", async () => {
+    const state: any = { slices: { s: escalated() }, transient_retry_counts: {} };
+    const postSpawn = vi.fn(async () => ({ id: "job-99" }));
+    const out = await recoverDispatch(state, "T", item(), "s", 1, deps({ postSpawn }));
+    // launchDispatch overwrote the escalated slice with a clean pending one.
+    expect(state.slices.s).toMatchObject({ stage: "hatchery-pending", hatchery: { job_id: "job-99" } });
+    expect(state.slices.s.escalated_reason).toBeUndefined();
+    expect(out.actions[0]).toMatchObject({ action: "dispatch-recovery" });
+    expect(out.actions[0].detail).toContain("auto-recovery attempt 1/");
+  });
+
+  it("persists the bumped retry counter and emits retry.counted + recovery.dispatched + the stage clear", async () => {
+    const state: any = { slices: { s: escalated() }, transient_retry_counts: {} };
+    const emitTransition = vi.fn();
+    await recoverDispatch(state, "T", item(), "s", 2, deps({ emitTransition }));
+    expect(state.transient_retry_counts[recoveryAttemptKey("s")]).toBe(2);
+    expect(emitTransition).toHaveBeenCalledWith({ type: "retry.counted", key: recoveryAttemptKey("s"), count: 2 });
+    expect(emitTransition).toHaveBeenCalledWith(expect.objectContaining({ type: "slice.recovery.dispatched", sliceId: "s" }));
+    // Fold-correctness: the escalated stage is explicitly reset to hatchery-pending.
+    expect(emitTransition).toHaveBeenCalledWith({ type: "slice.stage.changed", sliceId: "s", stage: "hatchery-pending" });
+  });
+
+  it("emits a recovery_dispatch action-log event so the (replay-only) recovery span re-lights", async () => {
+    const state: any = { slices: { s: escalated() }, transient_retry_counts: {} };
+    const emit = vi.fn();
+    await recoverDispatch(state, "T", item(), "s", 1, deps({ emit }));
+    expect(emit).toHaveBeenCalledWith(expect.objectContaining({ kind: "recovery_dispatch", slice_id: "s", action: "recovery_dispatch" }));
+  });
+
+  it("counts the attempt even when the re-launch POST throws (so the budget can't be bypassed) and re-escalates", async () => {
+    const state: any = { slices: { s: escalated() }, transient_retry_counts: {} };
+    const emitTransition = vi.fn();
+    const out = await recoverDispatch(state, "T", item(), "s", 1, deps({ emitTransition, postSpawn: vi.fn(async () => { throw new Error("hatchery 500"); }) }));
+    expect(state.transient_retry_counts[recoveryAttemptKey("s")]).toBe(1);
+    // launchDispatch's own catch re-escalated; we must NOT then clear the stage.
+    expect(state.slices.s.stage).toBe("escalated");
+    expect(emitTransition).not.toHaveBeenCalledWith({ type: "slice.stage.changed", sliceId: "s", stage: "hatchery-pending" });
+    expect(out.failures).toHaveLength(1);
   });
 });

@@ -44,6 +44,7 @@ import type { DispatchIoDeps } from "./handlers/dispatch-io.js";
 import {
   completePendingHatcheryDispatches,
   launchDispatch,
+  recoverDispatch,
 } from "./handlers/dispatch-ops.js";
 // Startup replay formatting (#144): parse + filter + format the recent action
 // events; runtime keeps the file read + header + printing.
@@ -304,6 +305,7 @@ async function tick() {
     syncDefaultBranch: async () => {},
     completePending: (rawState: any, ts: string) => completePendingHatcheryDispatches(rawState, ts, ioDeps),
     launchDispatch: (rawState: any, ts: string, item: any, sliceId: string) => launchDispatch(rawState, ts, item, sliceId, ioDeps),
+    recoverDispatch: (rawState: any, ts: string, item: any, sliceId: string, attempt: number) => recoverDispatch(rawState, ts, item, sliceId, attempt, ioDeps),
     requestJudgement: (input: any) => requestLegateJudgement(input),
   };
 

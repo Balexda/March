@@ -144,11 +144,34 @@ in-memory state** — it no longer does git/gh worktree+branch surgery of its ow
 - a no-spawn **direct-steward** fallback after repeated codex-spawn failures.
 
 Branch/worktree collisions (`branch already exists`, diverged leftovers) are **no
-longer auto-recovered** — worktree+branch teardown by exact path is Brood's
-authority ([#155](https://github.com/Balexda/March/issues/155)), so these escalate
-to the operator instead. These transitions emit `slice.dispatched` /
-`slice.recovery.dispatched` / `slice.escalated` / `retry.counted` events — the
-durable record the working state is rebuilt from (#176).
+longer auto-recovered with git surgery** — worktree+branch teardown by exact path
+is Brood's authority ([#155](https://github.com/Balexda/March/issues/155)).
+
+**Bounded auto-recovery of recoverable escalations
+([#211](https://github.com/Balexda/March/issues/211)).** A spawn that fails at the
+dispatch stage escalates with `escalatedReason: hatchery_dispatch_failed` — the
+whole family (a bad worker patch, an orphan-branch collision now cleaned up at the
+failure site by [#216](https://github.com/Balexda/March/pull/216), a Hatchery
+job-lookup 404 after a restart). Rather than stranding the still-ready smithy item
+operator-only forever, the dispatch handler re-dispatches it through the **same**
+fresh-launch path (`recoverDispatch` → `launchDispatch`), gated two ways:
+
+- an **allowlist** of recoverable reasons (`RECOVERABLE_ESCALATION_REASONS`) — any
+  *other* escalation reason stays operator-only, fail-safe;
+- a **per-slice budget** (`DISPATCH_RECOVERY_LIMIT`, the durable
+  `transient_retry_counts` keyed `dispatch-recovery:<sliceId>`). After the limit
+  the slice falls back to the operator-only escalation, so a genuinely-terminal
+  failure can't loop.
+
+The recoverable class is selected by the pure `recoverableEscalations`
+(`pure/slice.ts`), disjoint from `dispatchableReady` (an escalated slice reads as
+in-flight there). `#216` guarantees the re-dispatch is collision-free; teardown
+still routes through Brood (#155), never a worktree prune here.
+
+These transitions emit `slice.dispatched` / `slice.recovery.dispatched` /
+`slice.escalated` / `retry.counted` events — the durable record the working state
+is rebuilt from (#176) — and a `recovery_dispatch` action-log event that re-lights
+the (previously replay-only) recovery dispatch span.
 
 ## HTTP API ([`http.ts`](./http.ts))
 

@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { apply, assess, type DispatchDeps } from "./dispatch.js";
 import type { HandlerContext, LoopState } from "../state/types.js";
+import { dispatchSliceId } from "../pure/dispatch-id.js";
+import { DISPATCH_RECOVERY_LIMIT, recoveryAttemptKey } from "../pure/slice.js";
 
 function loopState(over: Partial<LoopState> = {}): LoopState {
   const raw = { slices: {}, archived_slices: {}, repo: { path: "/repo" }, ...((over as any).raw || {}) };
@@ -41,6 +43,7 @@ function deps(over: Partial<DispatchDeps> = {}): DispatchDeps {
   return {
     completePending: vi.fn(async () => ({ actions: [], failures: [], mutated: false, notifications: [] })),
     launchDispatch: vi.fn(async () => ({ actions: [{ action: "dispatch" }], failures: [], mutated: true })),
+    recoverDispatch: vi.fn(async () => ({ actions: [{ action: "dispatch-recovery" }], failures: [], mutated: true })),
     requestJudgement: vi.fn(async (i) => ({ ...i })),
     ...over,
   };
@@ -65,6 +68,63 @@ describe("dispatch assess (pure selection)", () => {
   it("returns nothing when smithy read failed", async () => {
     const state = loopState({ smithy: { ok: false, error: "down", ready: [readyItem("a")], queue: { dispatchable: 0, blocked: 0, total: 0 } } });
     expect(assess(state)).toEqual([]);
+  });
+});
+
+describe("dispatch assess (#211 bounded auto-recovery)", () => {
+  // Seed a recoverably-escalated slice at the item's deterministic slice id.
+  const seedEscalated = (state: LoopState, item: any, over: any = {}) => {
+    const sliceId = dispatchSliceId(item);
+    (state.raw.slices as any)[sliceId] = {
+      stage: "escalated",
+      escalated_reason: "hatchery_dispatch_failed",
+      command: "smithy.forge",
+      arguments: [item.path, "1"],
+      artifact_path: item.path,
+      ...over,
+    };
+    return sliceId;
+  };
+
+  it("emits a recover decision for a still-ready item wedged behind a recoverable escalation", async () => {
+    const item = readyItem("a.spec.md");
+    const state = loopState({ smithy: { ok: true, ready: [item], queue: { dispatchable: 0, blocked: 0, total: 1 } } });
+    const sliceId = seedEscalated(state, item);
+    expect(assess(state)).toEqual([{ kind: "recover", sliceId, item, attempt: 1 }]);
+  });
+
+  it("does NOT recover once the retry budget is exhausted (stays operator-only)", async () => {
+    const item = readyItem("a.spec.md");
+    const state = loopState({ smithy: { ok: true, ready: [item], queue: { dispatchable: 0, blocked: 0, total: 1 } } });
+    const sliceId = seedEscalated(state, item);
+    (state.raw as any).transient_retry_counts = { [recoveryAttemptKey(sliceId)]: DISPATCH_RECOVERY_LIMIT };
+    expect(assess(state)).toEqual([]);
+  });
+
+  it("does NOT recover a non-recoverable escalation reason (fail-safe allowlist)", async () => {
+    const item = readyItem("a.spec.md");
+    const state = loopState({ smithy: { ok: true, ready: [item], queue: { dispatchable: 0, blocked: 0, total: 1 } } });
+    seedEscalated(state, item, { escalated_reason: "needs_human_judgement" });
+    expect(assess(state)).toEqual([]);
+  });
+
+  it("does NOT recover when a terminal MERGED archive also blocks the item", async () => {
+    const item = readyItem("a.spec.md");
+    const state = loopState({ smithy: { ok: true, ready: [item], queue: { dispatchable: 0, blocked: 0, total: 1 } } });
+    const sliceId = seedEscalated(state, item);
+    (state.raw.archived_slices as any)[sliceId] = { terminal_state: "MERGED", artifact_path: "a.spec.md", command: "smithy.forge", arguments: ["a.spec.md", "1"], pr: { number: 9 } };
+    expect(assess(state)).toEqual([]);
+  });
+
+  it("routes a recover decision to recoverDispatch (not launchDispatch) in apply", async () => {
+    const item = readyItem("a.spec.md");
+    const state = loopState({ smithy: { ok: true, ready: [item], queue: { dispatchable: 0, blocked: 0, total: 1 } } });
+    const sliceId = seedEscalated(state, item);
+    const d = deps();
+    const res = await apply(assess(state), ctx(), state, d);
+    expect(d.recoverDispatch).toHaveBeenCalledWith(state.raw, "T", item, sliceId, 1);
+    expect(d.launchDispatch).not.toHaveBeenCalled();
+    expect(res.actions.some((a) => a.action === "dispatch-recovery")).toBe(true);
   });
 });
 

@@ -30,6 +30,7 @@ import {
 } from "../pure/dispatch-id.js";
 import { buildSmithySpawnPrompt } from "../pure/messages.js";
 import { hashText } from "../pure/hash.js";
+import { DISPATCH_RECOVERY_LIMIT, recoveryAttemptKey } from "../pure/slice.js";
 
 /** A judgement-request notification (the dispatch handler fires these). */
 export interface DispatchNotification {
@@ -129,6 +130,9 @@ export async function launchDispatch(state: any, ts: string, item: any, sliceId:
     const existing = state.slices?.[sliceId];
     if (existing && existing.stage === "hatchery-pending") {
       existing.stage = "escalated";
+      // Tag the recoverable class so the loop's bounded auto-recovery (#211) can
+      // re-dispatch this slice; survives a restart via rebuildWorkingState.
+      existing.escalated_reason = "hatchery_dispatch_failed";
       existing.last_action = ts;
       existing.last_action_note = "NEED: Hatchery dispatch launch failed: " + error;
       deps.emitTransition({ type: "slice.escalated", sliceId, reason: "hatchery_dispatch_failed" });
@@ -136,7 +140,9 @@ export async function launchDispatch(state: any, ts: string, item: any, sliceId:
         slice: existing, sliceId,
         requestKey: "hatchery-failure:" + sliceId + ":launch-throw:" + hashText(error).slice(0, 12),
         reason: "hatchery_dispatch_failed",
-        detail: "Hatchery dispatch launch threw for " + actionCommandLine(action) + ".\n\nError:\n" + error + "\n\nSlice is escalated. For 'branch already exists' surface this via legate.unwedge; otherwise legate.error.",
+        detail: "Hatchery dispatch launch threw for " + actionCommandLine(action) + ".\n\nError:\n" + error
+          + "\n\nThe loop auto-recovers this class up to " + DISPATCH_RECOVERY_LIMIT + " times; if you are seeing this the"
+          + " budget is exhausted. For 'branch already exists' surface this via legate.unwedge; otherwise legate.error.",
       });
     }
     failures.push({ slice_id: sliceId, command: actionCommandLine(action), error });
@@ -155,6 +161,66 @@ export async function launchDispatch(state: any, ts: string, item: any, sliceId:
   return { actions, failures, mutated: true, notifications };
 }
 
+// Bounded auto-recovery (#211): re-dispatch a slice that escalated for a
+// recoverable class (`hatchery_dispatch_failed`) by reusing the EXACT fresh-launch
+// path. launchDispatch overwrites the escalated slice with a clean hatchery-pending
+// slice and fires a new codex spawn, so the recovered slice flows back through the
+// normal completion poll. #216 already removed any orphan branch/worktree on the
+// failed-spawn rollback, so the re-dispatch is collision-free; teardown stays
+// Brood's exact-path job (#155), never a worktree prune here. The retry counter is
+// persisted (and folded via retry.counted) BEFORE re-launching so a crash
+// mid-recovery can't reset the budget and loop forever; the budget itself is
+// enforced upstream by recoverableEscalations (pure/slice.ts).
+export async function recoverDispatch(
+  state: any,
+  ts: string,
+  item: any,
+  sliceId: string,
+  attempt: number,
+  deps: DispatchIoDeps,
+): Promise<DispatchOutcome> {
+  if (!state.transient_retry_counts || typeof state.transient_retry_counts !== "object") {
+    state.transient_retry_counts = {};
+  }
+  const key = recoveryAttemptKey(sliceId);
+  state.transient_retry_counts[key] = attempt;
+  deps.emitTransition({ type: "retry.counted", key, count: attempt });
+  deps.emitTransition({ type: "slice.recovery.dispatched", sliceId, branch: dispatchBranch(item) });
+  deps.log("[" + ts + "] auto-recovery re-dispatch " + sliceId + " (attempt " + attempt + "/" + DISPATCH_RECOVERY_LIMIT + ")");
+
+  const out = await launchDispatch(state, ts, item, sliceId, deps);
+
+  // launchDispatch records a "dispatch" action + a generic note; re-tag it so the
+  // operator/telemetry see this was an auto-recovery, and surface it on the
+  // (currently replay-only) recovery_dispatch action-log path → recovery span.
+  for (const a of out.actions) {
+    if (a.action === "dispatch") {
+      a.action = "dispatch-recovery";
+      a.detail = "auto-recovery attempt " + attempt + "/" + DISPATCH_RECOVERY_LIMIT + ": " + a.detail;
+      deps.emit({
+        schema_version: 1,
+        ts,
+        processor: deps.meta.processor_name,
+        paired_legate: deps.meta.paired_legate,
+        kind: "recovery_dispatch",
+        action: "recovery_dispatch",
+        slice_id: sliceId,
+        detail: a.detail,
+      });
+    }
+  }
+
+  // The slice was `escalated` in the Herald fold; slice.dispatched alone does not
+  // reset stage, so emit the stage transition explicitly when the re-launch landed
+  // it in hatchery-pending. This keeps the fold correct so a restart mid-recovery
+  // resumes the completion poll instead of re-recovering. If launchDispatch's own
+  // catch re-escalated (the POST threw), the slice is escalated again — leave it.
+  if (state.slices?.[sliceId]?.stage === "hatchery-pending") {
+    deps.emitTransition({ type: "slice.stage.changed", sliceId, stage: "hatchery-pending" });
+  }
+  return out;
+}
+
 // Drain in-flight Hatchery dispatches: poll each hatchery-pending slice's job and
 // either promote it to `implementing` (success) or escalate it for judgement
 // (failure). Non-terminal jobs and transient lookup failures just wait for the
@@ -169,6 +235,9 @@ export async function completePendingHatcheryDispatches(state: any, ts: string, 
 
   const escalate = (slice: any, sliceId: string, errorText: string) => {
     slice.stage = "escalated";
+    // Tag the recoverable class so the loop's bounded auto-recovery (#211) can
+    // re-dispatch this slice; survives a restart via rebuildWorkingState.
+    slice.escalated_reason = "hatchery_dispatch_failed";
     slice.last_action = ts;
     slice.last_action_note = "NEED: Hatchery dispatch failed: " + errorText;
     deps.emitTransition({ type: "slice.escalated", sliceId, reason: "hatchery_dispatch_failed" });
@@ -180,9 +249,10 @@ export async function completePendingHatcheryDispatches(state: any, ts: string, 
       requestKey: "hatchery-failure:" + sliceId + ":" + hashText(errorText).slice(0, 12),
       reason: "hatchery_dispatch_failed",
       detail: "Hatchery dispatch for " + commandLine + " failed and was escalated.\n\nError:\n" + errorText.trim()
-        + "\n\nThe loop does not auto-recover spawn failures. Inspect the error: a 'branch already exists' / diverged-branch"
-        + " collision needs legate.unwedge + a Brood teardown of the orphan branch/worktree (#155) before re-dispatch;"
-        + " otherwise run legate.error for worker-side recovery.",
+        + "\n\nThe loop auto-recovers recoverable dispatch failures up to " + DISPATCH_RECOVERY_LIMIT + " times before"
+        + " leaving the slice operator-only — if you are seeing this judgement request the budget is exhausted. A"
+        + " 'branch already exists' / diverged-branch collision needs legate.unwedge + a Brood teardown of the orphan"
+        + " branch/worktree (#155) before re-dispatch; otherwise run legate.error for worker-side recovery.",
     });
     mutated = true;
   };
