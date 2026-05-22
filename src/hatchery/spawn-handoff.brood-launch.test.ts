@@ -57,6 +57,7 @@ const backend: SpawnBackend = {
   requiredEnvVars: [],
   credentialMounts: [],
   buildEntrypoint: () => ["sh", "-c", "true"],
+  allowedEgressHosts: ["chatgpt.com"],
 };
 
 const tmpDirs: string[] = [];
