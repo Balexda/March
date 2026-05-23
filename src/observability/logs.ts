@@ -82,3 +82,50 @@ export function emitLoopLog(input: LoopLogInput): void {
     context,
   });
 }
+
+export interface SpawnLogInput {
+  readonly severity: LoopLogSeverity;
+  readonly body: string;
+  /**
+   * The dispatch/child span's `{ traceId, spanId }` (from
+   * {@link DispatchTrace.spanContext} or a {@link DispatchSpanHandle}). Attached
+   * as the log's TRACE CONTEXT so Grafana's "Logs for this span" resolves. Both
+   * are required to correlate; omit them for an uncorrelated line.
+   */
+  readonly traceId?: string;
+  readonly spanId?: string;
+  readonly attributes?: Attributes;
+}
+
+/**
+ * Spawn-side sibling of {@link emitLoopLog}: emits a structured log correlated to
+ * a dispatch span by EXPLICIT trace/span ids. The Hatchery has no loop
+ * profile/conductor defaults and holds the ids directly (the dispatch trace is
+ * deterministic), so unlike {@link emitLoopLog} the caller passes the
+ * `{ traceId, spanId }` rather than re-deriving them from a slice id. This is the
+ * only way a Hatchery log lands under "Logs for this span" — the codebase
+ * registers no OTel ContextManager, so the active span never carries through.
+ * No-op when telemetry is disabled.
+ */
+export function emitSpawnLog(input: SpawnLogInput): void {
+  const otel = getActiveOtel();
+  if (!otel.enabled) return;
+
+  let context = otelContext.active();
+  if (input.traceId && input.spanId) {
+    context = trace.setSpanContext(context, {
+      traceId: input.traceId,
+      spanId: input.spanId,
+      traceFlags: TraceFlags.SAMPLED,
+      isRemote: true,
+    });
+  }
+
+  otel.getLogger().emit({
+    severityNumber: SEVERITY[input.severity],
+    severityText: input.severity,
+    body: input.body,
+    attributes: input.attributes ?? {},
+    context,
+  });
+}

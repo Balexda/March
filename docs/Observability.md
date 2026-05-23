@@ -99,7 +99,8 @@ grouping.
 | `hatchery.spawn` | orchestrator | `runHatcherySpawn` |
 | `spawn.start` | orchestrator | container create/start |
 | `spawn.end` | orchestrator | `waitForSpawnContainer` |
-| `steward.apply` | orchestrator | `applyPatchToManagerWorktree` |
+| `steward.apply` | orchestrator | `applyPatchToManagerWorktree` (carries `march.patch.*` diff-stat + the offending path/reject on failure) |
+| `spawn.self_heal` | orchestrator | orphan-branch cleanup after a `manager.launch` "branch already exists" collision — carries `march.self_heal.verdict` (#243) |
 | `spawn.exec` | **inside the sandbox** | wrapped backend entrypoint |
 
 The human `march spawn dispatch` path emits `spawn.dispatch` → `spawn.start` /
@@ -461,6 +462,8 @@ a leg whose span is **absent**, **errored**, or carries the **wrong attributes**
 |---|---|
 | `legate.dispatch` (root) errored / wrong `march.action`, `march.dispatch_mode`, `march.task.type` | the legate didn't dispatch, or dispatched the wrong command |
 | `hatchery.spawn` / `spawn.*` errored or absent | the container/image/patch step failed before the agent ran |
+| `steward.apply` errored | the worker's patch didn't apply (even via `--3way`); read `march.patch.offending_path` / `march.patch.reject` on the span, or the trace-correlated `steward_apply_failed` log for the full git stderr (#244) |
+| `spawn.self_heal` with `march.self_heal.verdict = unsafe:*` | a `manager.launch` branch collision was left in place (open PR / diverged) and escalated; `safe:*` means it was auto-removed and the next dispatch re-creates it cleanly (#243) |
 | `steward.send` / `castra.send` errored or absent | the prompt never reached the steward (e.g. Castra rejected it) |
 | `herald.pr.opened` present but **no** `herald.pr.merged` | Herald never observed the merge-ready state — cross-check the PR on GitHub to tell a real not-ready from an observation gap |
 | the trace simply **can't** answer "where did it stall" | that silence is itself the bug — see below |
