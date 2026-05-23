@@ -40,6 +40,7 @@ const EVENT_TYPES: ReadonlySet<EventType> = new Set<EventType>([
   "slice.stage.changed",
   "slice.archived",
   "slice.recovery.dispatched",
+  "slice.recovery.requested",
   "steward.relaunched",
   "slice.escalated",
   "retry.counted",
@@ -54,6 +55,7 @@ const SLICE_TYPES: ReadonlySet<string> = new Set([
   "slice.stage.changed",
   "slice.archived",
   "slice.recovery.dispatched",
+  "slice.recovery.requested",
   "steward.relaunched",
   "slice.escalated",
 ]);

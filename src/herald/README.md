@@ -61,6 +61,15 @@ metrics label).
 - **Transition events** (legate-written, emitted at the cutover): `slice.dispatched`,
   `slice.stage.changed`, `slice.archived`, `slice.recovery.dispatched`,
   `steward.relaunched`, `slice.escalated`, `retry.counted`.
+- **Operator-command event** (operator-written via `POST /events`, #238):
+  `slice.recovery.requested` — appended by `march legate recover <sliceId>` (or the
+  `legate.unwedge` skill) to un-wedge an escalated slice whose bounded-recovery
+  budget (#211) is spent. The reducer **drops** the slice from the fold and clears
+  its retry counters so a cold-start rebuild reconstructs no blocking entry; the
+  warm loop reconciles its in-memory working state off the *drained* request (the
+  fold can't reach the running loop on its own — warm-loop invisibility) and
+  re-dispatches the still-ready smithy work fresh. (Like the other `POST /events`
+  writers the stored `source` is `legate`.)
 - **Correlation event** (Hatchery-written, #213): `slice.steward.attached` —
   published at steward launch, carrying `{ sliceId, sessionId, spawnId, branch,
   worktreePath }`. Hatchery is the single integration point that holds all three

@@ -87,6 +87,18 @@ export type EventBody =
   | { type: "slice.archived"; sliceId: string }
   /** A partial-merge / branch-collision recovery dispatch. */
   | { type: "slice.recovery.dispatched"; sliceId: string; branch?: string; item?: unknown }
+  /**
+   * Operator-triggered request to recover an escalated slice (#238). Unlike
+   * `slice.recovery.dispatched` (the loop's own bounded auto-recovery, #211), this
+   * is appended by an operator (`march legate recover <sliceId>`, or the
+   * `legate.unwedge` skill) to un-wedge a slice whose recovery budget is exhausted
+   * and which therefore has no internal re-dispatch path. The reducer DROPS the
+   * slice from the fold and clears its retry counters so a cold-start rebuild no
+   * longer reconstructs a blocking entry; the warm loop reconciles its in-memory
+   * working state from the drained request (the cold-start fold alone can't reach
+   * it — warm-loop invisibility, #238). The still-ready smithy work then dispatches
+   * fresh on the next tick. */
+  | { type: "slice.recovery.requested"; sliceId: string }
   /** A stalled steward was relaunched. */
   | { type: "steward.relaunched"; sliceId: string; sessionId?: string }
   /** The slice was escalated for legate judgement. */
@@ -134,6 +146,7 @@ export function entityRefOf(body: EventBody): EntityRef {
     case "slice.stage.changed":
     case "slice.archived":
     case "slice.recovery.dispatched":
+    case "slice.recovery.requested":
     case "steward.relaunched":
     case "slice.escalated":
       return { kind: "slice", id: body.sliceId };
@@ -282,6 +295,18 @@ export function reduce(state: SystemState, event: HeraldEvent): SystemState {
     case "slice.archived":
       sliceOf(state, event.sliceId).archived = true;
       break;
+    case "slice.recovery.requested": {
+      // Operator recovery (#238): forget the escalated incarnation entirely so a
+      // cold-start rebuild produces no blocking slices/archived/budget entry for
+      // it. The deterministic slice id is re-derived from the artifact, so the
+      // subsequent fresh dispatch re-creates this slice clean. Clearing the
+      // retry counters resets the bounded-recovery budget (#211) too.
+      delete state.slices[event.sliceId];
+      for (const key of Object.keys(state.retries)) {
+        if (key === event.sliceId || key.endsWith(":" + event.sliceId)) delete state.retries[key];
+      }
+      break;
+    }
     case "steward.relaunched":
       if (event.sessionId !== undefined) sliceOf(state, event.sliceId).sessionId = event.sessionId;
       break;

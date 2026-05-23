@@ -415,6 +415,22 @@ const AGENT_DECK_READ_ALLOWS = [
   "Bash(agent-deck * conductor status *)",
 ] as const;
 
+/**
+ * `march` CLI patterns the conductor needs since the legate loop is Herald-backed
+ * and there is no `state.json` to read (#176). `legate.unwedge` reads the
+ * escalated slice from Herald (`march herald state --json`) and un-wedges it with
+ * `march legate recover <sliceId>` instead of editing a state file (#238). Like
+ * {@link AGENT_DECK_READ_ALLOWS} these are belt-and-suspenders so a heartbeat-time
+ * invocation never stalls on a permission prompt — `recover` is the one mutation,
+ * deliberately allowed because it is the *only* deterministic escalation-recovery
+ * action and is itself just an append to the event log.
+ */
+const MARCH_CLI_ALLOWS = [
+  "Bash(march herald state *)",
+  "Bash(march herald events *)",
+  "Bash(march legate recover *)",
+] as const;
+
 export interface LegateInitOptions {
   /** Absolute path to the repository the conductor will manage. */
   repoPath: string;
@@ -909,6 +925,7 @@ async function writeNarrowSettings(
         "Write(./**)",
         ...scriptAllows,
         ...AGENT_DECK_READ_ALLOWS,
+        ...MARCH_CLI_ALLOWS,
       ],
     },
   };

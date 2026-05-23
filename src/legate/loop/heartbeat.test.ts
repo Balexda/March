@@ -35,6 +35,7 @@ function out(over: Partial<CoordinatorOutput["results"]> = {}, tickOver: any = {
       ghost: emptyHandlerResult(),
       relaunch: emptyHandlerResult(),
       babysit: emptyHandlerResult(),
+      recovery: emptyHandlerResult(),
       dispatch: emptyHandlerResult(),
       ...over,
     },

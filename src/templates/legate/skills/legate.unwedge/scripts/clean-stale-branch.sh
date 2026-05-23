@@ -1,48 +1,52 @@
 #!/usr/bin/env bash
-# legate.unwedge skill: delete a stale local branch and clear its escalated
-# slice from state.json so the deterministic loop re-dispatches the artifact
-# on the next tick. Safety re-validation happens here, NOT in the caller —
-# this script must refuse to delete a branch with an open PR or with
-# diverged work whose status isn't a merged PR.
+# legate.unwedge skill: delete a stale local branch and request recovery of its
+# escalated slice so the deterministic loop re-dispatches the artifact on its next
+# tick. Safety re-validation happens here, NOT in the caller — this script must
+# refuse to delete a branch with an open PR or with diverged work whose status
+# isn't a merged PR.
+#
+# Since the legate loop is Herald-backed (#176) there is no state.json to edit:
+# recovery is an EVENT. After cleaning the local branch this script appends a
+# `slice.recovery.requested` event via `march legate recover <slice-id>` (#238).
+# The running loop drops the escalated slice from its working state and
+# re-dispatches the still-ready smithy work fresh — no restart, no state surgery.
 #
 # Usage:
-#   clean-stale-branch.sh <repo-path> <branch-name> <state-json-path> <slice-id>
+#   clean-stale-branch.sh <repo-path> <branch-name> <slice-id>
 #
 # Exit:
-#   0 cleaned successfully
-#   1 refused (operator/agent must reconcile manually — prints reason on stderr)
+#   0 cleaned successfully (+ recovery requested)
+#   1 refused, or recovery request failed (prints reason on stderr)
 #   2 invalid input or environment
 #
-# Stdout: one line per action taken (branch deleted, slice removed, files removed).
+# Stdout: one line per action taken (branch deleted, recovery requested).
 set -euo pipefail
 
-if [[ $# -ne 4 ]]; then
-  echo "usage: clean-stale-branch.sh <repo-path> <branch-name> <state-json-path> <slice-id>" >&2
+if [[ $# -ne 3 ]]; then
+  echo "usage: clean-stale-branch.sh <repo-path> <branch-name> <slice-id>" >&2
   exit 2
 fi
 
 REPO="$1"
 BRANCH="$2"
-STATE="$3"
-SLICE_ID="$4"
+SLICE_ID="$3"
 
 if [[ ! -d "$REPO/.git" ]]; then
   echo "error: $REPO is not a git checkout" >&2
   exit 2
 fi
-if [[ ! -f "$STATE" ]]; then
-  echo "error: state file $STATE not found" >&2
+if [[ -z "$SLICE_ID" ]]; then
+  echo "error: slice id must not be empty" >&2
   exit 2
 fi
 
 cd "$REPO"
 
-# We do not trust upstream callers to have validated safety. Extract two small
-# python helpers to temp files so the heredoc-in-command-substitution and
-# heredoc-as-stdin patterns don't collide on a single PY marker.
+# We do not trust upstream callers to have validated safety. Extract the safety
+# validator to a temp file so the heredoc-in-command-substitution pattern doesn't
+# collide with anything else.
 TMP_VALIDATOR="$(mktemp -t unwedge.validate.XXXXXX.py)"
-TMP_MUTATOR="$(mktemp -t unwedge.mutate.XXXXXX.py)"
-trap 'rm -f "$TMP_VALIDATOR" "$TMP_MUTATOR"' EXIT
+trap 'rm -f "$TMP_VALIDATOR"' EXIT
 
 cat > "$TMP_VALIDATOR" <<'PYVALIDATE'
 import json, subprocess, sys
@@ -110,42 +114,14 @@ else
   exit 2
 fi
 
-cat > "$TMP_MUTATOR" <<'PYMUTATE'
-import json, os, sys, tempfile
-
-state_path, slice_id = sys.argv[1], sys.argv[2]
-with open(state_path, "r") as f:
-    state = json.load(f)
-slices = state.get("slices") or {}
-slice_data = slices.pop(slice_id, None)
-if slice_data is None:
-    print(f"noop: slice {slice_id} not in state.slices")
-    sys.exit(0)
-hatchery = slice_data.get("hatchery") or {}
-removed = []
-for key in ("hatchery_request_path", "hatchery_result_path", "hatchery_log_path"):
-    p = hatchery.get(key)
-    if isinstance(p, str) and p:
-        try:
-            os.unlink(p)
-            removed.append(p)
-        except FileNotFoundError:
-            pass
-        except OSError as e:
-            print(f"warning: failed to remove {p}: {e}", file=sys.stderr)
-fd, tmp = tempfile.mkstemp(prefix="state.", suffix=".json", dir=os.path.dirname(state_path) or ".")
-try:
-    with os.fdopen(fd, "w") as f:
-        json.dump(state, f, indent=2)
-    os.replace(tmp, state_path)
-finally:
-    if os.path.exists(tmp):
-        os.unlink(tmp)
-print(f"cleared slice: {slice_id}")
-for p in removed:
-    print(f"removed hatchery artifact: {p}")
-PYMUTATE
-
-python3 "$TMP_MUTATOR" "$STATE" "$SLICE_ID"
-
-echo "done. loop will re-dispatch $SLICE_ID on next tick."
+# Recovery is an event, not a state-file edit (#176/#238). Append it via the CLI;
+# the running loop honors it on its next tick. Idempotent on the loop side, but if
+# it fails (Herald unreachable) the branch is already cleaned, so surface the exact
+# retry command rather than silently leaving the slice wedged.
+if march legate recover "$SLICE_ID"; then
+  echo "done. requested recovery of $SLICE_ID — loop will re-dispatch on next tick."
+else
+  echo "error: branch cleaned but 'march legate recover $SLICE_ID' failed." >&2
+  echo "re-run once Herald is reachable: march legate recover $SLICE_ID" >&2
+  exit 1
+fi
