@@ -97,10 +97,10 @@ Recommended implementation sequence:
 
 | ID | Title | Depends On | Artifact |
 |----|-------|-----------|----------|
-| US1 | Declare the Frozen Test Tag Vocabulary | - | - |
-| US2 | Fail Loudly on Untagged or Mis-tagged Test Files | US1 | - |
-| US3 | Preserve Existing Test Scope While Tagging the Baseline | US1, US2 | - |
-| US4 | Keep Operator Documentation Aligned With the New Taxonomy | US1, US3 | - |
+| US1 | Declare the Frozen Test Tag Vocabulary | — | — |
+| US2 | Fail Loudly on Untagged or Mis-tagged Test Files | US1 | — |
+| US3 | Preserve Existing Test Scope While Tagging the Baseline | US1, US2 | — |
+| US4 | Keep Operator Documentation Aligned With the New Taxonomy | US1, US3 | — |
 
 ## Requirements *(mandatory)*
 
@@ -110,7 +110,7 @@ Recommended implementation sequence:
 - **FR-002**: The tag block MUST contain exactly one scope tag from `@l0`, `@l1`, `@l2`, and `@l3`.
 - **FR-003**: The tag block MUST contain exactly one determinism tag from `@deterministic` and `@stochastic`.
 - **FR-004**: The tag block MUST contain exactly one execution-channel tag from `@ci` and `@scheduled`.
-- **FR-005**: The coverage lint MUST scan the whole repository for `*.test.ts` files outside generated dependency directories.
+- **FR-005**: The coverage lint MUST scan the whole repository for `*.test.ts` files outside the generated dependency directories — `node_modules/`, `dist/`, and `.git/`. This explicit set is the normative discovery-exclusion definition referenced by the data model and contracts.
 - **FR-006**: The coverage lint MUST exit non-zero when a test file is missing any required axis.
 - **FR-007**: The coverage lint MUST exit non-zero when a test file declares conflicting or duplicate tags for an axis.
 - **FR-008**: Coverage-lint diagnostics MUST include the offending repo-relative path and the invalid or missing axis.

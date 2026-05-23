@@ -12,7 +12,7 @@ Purpose: Represents one vitest test module that must declare its taxonomy tuple.
 
 | Field | Type | Required | Notes |
 |-------|------|----------|-------|
-| `path` | repo-relative path | Yes | Matches `**/*.test.ts` outside generated dependency directories. |
+| `path` | repo-relative path | Yes | Matches `**/*.test.ts` outside the generated dependency directories defined by spec FR-005 (`node_modules/`, `dist/`, `.git/`). |
 | `tagBlock` | leading comment block | Yes | Must appear before imports or executable code. |
 | `scopeTag` | enum | Yes | One of `@l0`, `@l1`, `@l2`, `@l3`. |
 | `determinismTag` | enum | Yes | One of `@deterministic`, `@stochastic`. |
@@ -37,7 +37,8 @@ Purpose: Stores the visible taxonomy declaration for a test file.
 
 Validation rules:
 - Empty arrays are missing-axis failures.
-- Arrays with length greater than one are duplicate or conflicting-axis failures.
+- An array containing the same tag more than once is a `duplicate` failure for that axis.
+- An array containing two or more distinct tags from the same axis is a `conflicting` failure for that axis.
 - Unknown tags do not satisfy any axis.
 
 ### 3) Coverage Lint Verdict

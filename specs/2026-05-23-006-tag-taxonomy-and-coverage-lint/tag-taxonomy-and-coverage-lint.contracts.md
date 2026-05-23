@@ -61,7 +61,7 @@ npm run test:taxonomy
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `repoRoot` | path | Yes | Root used to discover `*.test.ts` files. |
-| `testFiles` | path set | Yes | All matching test files outside generated dependency directories. |
+| `testFiles` | path set | Yes | All matching test files outside the generated dependency directories defined by spec FR-005 (`node_modules/`, `dist/`, `.git/`). |
 | `validAxes` | vocabulary | Yes | Frozen scope, determinism, and execution-channel tag sets. |
 
 #### Outputs
@@ -76,7 +76,8 @@ npm run test:taxonomy
 | Condition | Response | Description |
 |-----------|----------|-------------|
 | Untagged test file | Non-zero exit with missing axes | Prevents silent CI miscategorization. |
-| Duplicate axis tag | Non-zero exit naming the axis | Prevents ambiguous staged-script filtering. |
+| Duplicate axis tag (same tag repeated) | Non-zero exit naming the axis and the `duplicate` reason | Prevents ambiguous staged-script filtering. |
+| Conflicting axis tags (distinct tags in one axis) | Non-zero exit naming the axis and the `conflicting` reason | Prevents ambiguous staged-script filtering. |
 | Unknown taxonomy tag | Non-zero exit if it replaces a required axis | Extending the vocabulary requires an explicit future spec. |
 
 ### Documentation Baseline
