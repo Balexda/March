@@ -123,7 +123,7 @@ Recommended implementation sequence:
 ### Key Entities
 
 - **Tag Block**: The leading comment block in a `*.test.ts` file that declares one tag from each required axis.
-- **Scope Tag**: One of `@l0`, `@l1`, `@l2`, or `@l3`, identifying the boundary the file exercises.
+- **Scope Tag**: One of `@l0` (unit), `@l1` (subsystem), `@l2` (cross-subsystem), or `@l3` (system), identifying the boundary the file exercises.
 - **Determinism Tag**: One of `@deterministic` or `@stochastic`, identifying whether assertions are replayable exactly or live-output tolerant.
 - **Execution-Channel Tag**: One of `@ci` or `@scheduled`, identifying where the file is allowed to run unattended.
 - **Coverage Lint**: The repository check that validates tag-block coverage and conflicts for every vitest test file.

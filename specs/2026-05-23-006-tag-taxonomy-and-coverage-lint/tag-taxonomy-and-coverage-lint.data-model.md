@@ -14,7 +14,7 @@ Purpose: Represents one vitest test module that must declare its taxonomy tuple.
 |-------|------|----------|-------|
 | `path` | repo-relative path | Yes | Matches `**/*.test.ts` outside the generated dependency directories defined by spec FR-005 (`node_modules/`, `dist/`, `.git/`). |
 | `tagBlock` | leading comment block | Yes | Must appear before imports or executable code. |
-| `scopeTag` | enum | Yes | One of `@l0`, `@l1`, `@l2`, `@l3`. |
+| `scopeTag` | enum | Yes | One of `@l0` (unit), `@l1` (subsystem), `@l2` (cross-subsystem), `@l3` (system). |
 | `determinismTag` | enum | Yes | One of `@deterministic`, `@stochastic`. |
 | `executionChannelTag` | enum | Yes | One of `@ci`, `@scheduled`. |
 

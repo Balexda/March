@@ -24,7 +24,7 @@ This feature introduces a repository-local test taxonomy contract. The runtime b
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `scopeTag` | enum | Yes | Exactly one of `@l0`, `@l1`, `@l2`, `@l3`. |
+| `scopeTag` | enum | Yes | Exactly one of `@l0` (unit), `@l1` (subsystem), `@l2` (cross-subsystem), `@l3` (system). |
 | `determinismTag` | enum | Yes | Exactly one of `@deterministic`, `@stochastic`. |
 | `executionChannelTag` | enum | Yes | Exactly one of `@ci`, `@scheduled`. |
 
