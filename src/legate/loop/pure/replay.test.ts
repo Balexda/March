@@ -37,6 +37,7 @@ describe("recentActionEventLines", () => {
       { kind: "cleanup_failure", ts: "T", slice_id: "s", error: "boom" },
       { kind: "babysit_action", ts: "T", action: "nudge", slice_id: "s", pr_number: 2, detail: "d" },
       { kind: "recovery_dispatch", ts: "T", slice_id: "s", detail: "re" },
+      { kind: "slice_recovery", ts: "T", slice_id: "s", detail: "operator recovery: cleared escalated slice for fresh re-dispatch" },
       { kind: "processor_request", ts: "T", slice_id: "s", reason: "needs review" },
     );
     expect(recentActionEventLines(raw)).toEqual([
@@ -44,6 +45,7 @@ describe("recentActionEventLines", () => {
       "[T] recent action: cleanup failed s: boom",
       "[T] recent action: babysit nudge s PR #2: d",
       "[T] recent action: recovery-dispatch s: re",
+      "[T] recent action: slice-recovery s: operator recovery: cleared escalated slice for fresh re-dispatch",
       "[T] recent action: requested legate judgement for s: needs review",
     ]);
   });

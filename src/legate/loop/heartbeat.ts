@@ -95,6 +95,12 @@ export function runHeartbeat(out: CoordinatorOutput, deps: HeartbeatDeps): any {
     event(meta.processor_events_path, { ...base, kind: "babysit_failure", ...failure });
     log(`[${ts}] babysit failed ${failure.slice_id || "unknown"}: ${failure.error}`);
   }
+  // recovery runs before dispatch in the pipeline; append its actions here so the
+  // action-log ordering matches the handler order within the tick (#238).
+  for (const a of out.results.recovery.actions) {
+    event(meta.processor_events_path, { ...base, kind: "slice_recovery", action: a.action, slice_id: a.sliceId, detail: a.detail });
+    log("[" + ts + "] " + a.action + " " + a.sliceId + ": " + a.detail);
+  }
   for (const a of out.results.dispatch.actions) {
     const isRecovery = a.action === "recovery_dispatch" || a.action === "direct_dispatch";
     const prefix = a.action === "recovery_dispatch" ? "recovery-dispatch" : a.action === "direct_dispatch" ? "direct-dispatch" : "dispatch";

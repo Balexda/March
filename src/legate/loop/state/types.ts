@@ -58,6 +58,14 @@ export interface LoopState {
   workers: WorkerSummary | { error: string };
   smithy: SmithyView;
   perSlice: Record<string, SliceExternalState>;
+  /**
+   * Slice ids whose operator recovery (`slice.recovery.requested`, #238) was
+   * drained from the Herald inbox THIS tick. The recovery handler reconciles the
+   * in-memory `raw` for these (drops the slice + clears its budget) so the
+   * still-ready smithy work re-dispatches fresh — acting on the drain is what
+   * defeats warm-loop invisibility (the fold alone can't reach the warm `raw`).
+   */
+  recoveryRequests?: string[];
 }
 
 /** Side-effect dependencies handed to each handler's `apply`. */

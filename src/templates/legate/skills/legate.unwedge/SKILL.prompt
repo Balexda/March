@@ -1,12 +1,14 @@
 ---
 name: legate.unwedge
-description: "Mini-legate's skill for unwedging hatchery dispatch failures that left behind stale local branches or revealed partial-work scenarios. Use when the deterministic loop sends a [PROCESSOR] request with reason starting with 'hatchery_dispatch_failed' or 'branch-collision', or when state.json shows a slice escalated with last_action_note containing 'branch ... already exists'. Inspects the colliding branch, classifies the collision (orphan-ref, post-merge-stale, open-pr, diverged-unknown), and either cleans it autonomously or escalates with the verdict so the operator/agent can act."
+description: "Mini-legate's skill for unwedging hatchery dispatch failures that left behind stale local branches or revealed partial-work scenarios. Use when the deterministic loop sends a [PROCESSOR] request with reason starting with 'hatchery_dispatch_failed' or 'branch-collision', or when `march herald state --json` shows a slice escalated with escalatedReason 'hatchery_dispatch_failed'. Inspects the colliding branch, classifies the collision (orphan-ref, post-merge-stale, open-pr, diverged-unknown), and either cleans it autonomously (deleting the local branch and requesting recovery so the loop re-dispatches) or escalates with the verdict so the operator/agent can act."
 allowed-tools: Bash(.claude/skills/legate.unwedge/scripts/inspect-partial-work.sh:*) Bash(.claude/skills/legate.unwedge/scripts/clean-stale-branch.sh:*)
 ---
 
 # Skill: legate.unwedge (hatchery branch-collision + partial-work recovery)
 
-The deterministic loop now auto-recovers the most common branch-collision failures (HEAD-on-default-branch orphan refs and post-merge stale refs with no open PR). For everything else — open PRs, diverged HEADs with no PR record, or the partial-work scenario where smithy keeps reporting a slice as ready even after its PR landed — the loop escalates here.
+The deterministic loop now auto-recovers the most common branch-collision failures (HEAD-on-default-branch orphan refs and post-merge stale refs with no open PR), and bounded auto-recovery re-dispatches `hatchery_dispatch_failed` escalations a couple of times on its own (#211). For everything past that budget — open PRs, diverged HEADs with no PR record, the partial-work scenario where smithy keeps reporting a slice as ready even after its PR landed, or an escalation that exhausted its auto-recovery budget — the loop escalates here, because once a slice escalates with its budget spent there is no *automatic* re-dispatch path: it takes an explicit operator recovery to unblock it (#238).
+
+The loop is Herald-backed (#176): there is **no `state.json`**. Read the escalated slice from `march herald state --json`, and recover it by appending an event — never by editing a state file. `clean-stale-branch.sh` deletes the stale local branch and then runs `march legate recover <slice-id>`, which the running loop honors on its next tick (it drops the escalated slice and re-dispatches the still-ready smithy work fresh).
 
 Load via `Skill(skill="legate.unwedge")` before invoking any script. The classifier registers the allowed-tools for the rest of the session.
 
@@ -17,7 +19,7 @@ Load via `Skill(skill="legate.unwedge")` before invoking any script. The classif
 Run this skill when any of these happen:
 
 - The loop sends `[PROCESSOR]` and the newest relevant request in `legate-loop-requests.ndjson` has `reason` starting with `hatchery_dispatch_failed` or `branch-collision`.
-- `state.json` shows a slice with `stage: "escalated"` and `last_action_note` containing `branch '<branch>' already exists`.
+- `march herald state --json` shows a slice with `stage: "escalated"` and `escalatedReason: "hatchery_dispatch_failed"` (the loop's auto-recovery budget for it is spent — confirm via the processor request's detail, which says so when it escalates to you).
 - The operator asks you to investigate a stuck dispatch.
 
 Do **not** run this skill for normal CI failures, merge conflicts, or review comments. Those stay in `legate.babysit`.
@@ -26,8 +28,8 @@ Do **not** run this skill for normal CI failures, merge conflicts, or review com
 
 ## Inputs to read
 
-1. `state.json` — locate the escalated slice by id. `command` + `arguments` are the smithy invocation; `last_action_note` typically includes the loop's verdict + branch-state summary, and **the actual git branch (with the `feature/` prefix agent-deck adds) is parsed from `last_action_note` or the most recent `hatchery_dispatch_failed` processor request**. Prefer that branch when inspecting / cleaning; the slice's own `branch` field is the symbolic dispatch branch (e.g. `smithy/forge/...`) and will not match the real local ref you need to operate on.
-2. `~/.agent-deck/conductor/{{LOOP_NAME}}/legate-loop-requests.ndjson` — read the latest `hatchery_dispatch_failed` / `branch-collision-*` entry for the structured detail the loop already gathered.
+1. `march herald state --json` — locate the escalated slice by id under `.slices`. The fold carries `stage` (`escalated`), `escalatedReason` (`hatchery_dispatch_failed`), and `branch` (the symbolic dispatch branch, e.g. `smithy/forge/...`). The fold does **not** carry the smithy `command`/`arguments` — read those from the processor request (next input) and from `smithy status`.
+2. `~/.agent-deck/conductor/{{LOOP_NAME}}/legate-loop-requests.ndjson` — read the latest `hatchery_dispatch_failed` / `branch-collision-*` entry for the structured detail the loop already gathered. **The actual git branch (with the `feature/` prefix agent-deck adds) is parsed from this request's detail.** Prefer that branch when inspecting / cleaning; the slice's symbolic `branch` from Herald (e.g. `smithy/forge/...`) will not match the real local ref you need to operate on.
 3. The colliding branch in `{{REPO_PATH}}` — never trust a stale verdict, re-run `inspect-partial-work.sh` if any time has elapsed.
 
 ---
@@ -52,16 +54,16 @@ The loop should have handled these autonomously. If you reach this branch, it li
 
 ```bash
 .claude/skills/legate.unwedge/scripts/clean-stale-branch.sh \
-  "{{REPO_PATH}}" "<branch>" "$HOME/.agent-deck/conductor/{{CONDUCTOR_NAME}}/state.json" "<slice-id>"
+  "{{REPO_PATH}}" "<branch>" "<slice-id>"
 ```
 
-The script re-validates safety conditions before acting. If it exits non-zero with `refused`, do **not** retry — classify as `open-pr` or `diverged-unknown` instead.
+The script re-validates safety conditions before acting, deletes the stale local branch, then runs `march legate recover <slice-id>` so the loop drops the escalated slice and re-dispatches the still-ready smithy work on its next tick. Exit codes distinguish the two failure modes: **exit 1 = refused** (branch unsafe — do **not** retry; classify as `open-pr` or `diverged-unknown` instead), **exit 3 = branch cleaned but the recovery request failed** (Herald unreachable — re-run `march legate recover <slice-id>` once Herald is back; do not re-delete the branch).
 
 Record in `task-log.md`:
 
 ```markdown
 ## YYYY-MM-DD HH:MM — Hatchery branch unwedge
-- <slice-id> branch=<branch> verdict=<verdict>; cleared. Loop will re-dispatch.
+- <slice-id> branch=<branch> verdict=<verdict>; cleared + recovery requested. Loop will re-dispatch.
 ```
 
 Reply `[STATUS]` with the slice id + verdict + "cleared for re-dispatch".
@@ -104,16 +106,18 @@ Autonomous corrective dispatch is not yet implemented (see march issue #<n>). Op
 
 ## State Updates
 
-After any recovery action, update the slice (only if it still exists in `state.slices`):
+There is **no `state.json`** to update (#176). The legate loop owns the slice's
+working state and rebuilds it from the Herald event log; you change that state
+only by appending events, never by editing a file. `clean-stale-branch.sh` already
+does this for you — its `march legate recover <slice-id>` appends the
+`slice.recovery.requested` event that drops the escalated slice and re-dispatches
+it.
 
-- `worker_error_handled_at = <ISO-8601 now>`
-- `worker_error_resolution` = one of `cleaned-orphan-ref`, `cleaned-post-merge-stale`, `escalated-open-pr`, `escalated-diverged-unknown`, `escalated-partial-work`
-- `last_action = <ISO-8601 now>`
-- `last_action_note = "legate.unwedge: <verdict> — <action taken>"`
-
-Note that `clean-stale-branch.sh` deletes the slice on success; in that case there's nothing to update.
-
-Append a short `task-log.md` entry as shown above.
+So the only record you write by hand is the operator-facing log: append a short
+`task-log.md` entry as shown above (`<slice-id> branch=<branch> verdict=<verdict>;
+cleared + recovery requested`). For an escalation you did **not** clean (open-pr /
+diverged-unknown / partial-work), log the verdict and the `NEED:` you raised
+instead.
 
 ---
 
@@ -122,14 +126,16 @@ Append a short `task-log.md` entry as shown above.
 | Operation | Script | Notes |
 |---|---|---|
 | Inspect partial-work / branch collision | `inspect-partial-work.sh <repo-path> <branch>` | Read-only. Prints HEAD, ancestry, PR list, merged-PR body + diff stat. |
-| Clean stale branch + clear slice | `clean-stale-branch.sh <repo-path> <branch> <state.json> <slice-id>` | Refuses unless verdict is orphan-ref or post-merge-stale. Atomic state.json write. |
+| Clean stale branch + request recovery | `clean-stale-branch.sh <repo-path> <branch> <slice-id>` | Refuses unless verdict is orphan-ref or post-merge-stale. Deletes the local branch, then `march legate recover <slice-id>` so the loop re-dispatches. No state file. |
+| Read escalated slice state | `march herald state --json` | The Herald fold (`.slices[<id>]`): `stage`, `escalatedReason`, symbolic `branch`. |
+| Request recovery directly | `march legate recover <slice-id>` | Appends `slice.recovery.requested`; the loop drops the slice + re-dispatches. Use when there is no branch to clean (e.g. a Hatchery 404). |
 
 ---
 
 ## Safety Rules
 
 - Never delete a branch that has any open PR, regardless of what the loop's escalation detail says. Re-validate every time.
-- Never edit `state.json` by hand. Use `clean-stale-branch.sh` (atomic rename) or escalate.
+- There is no `state.json` to edit (#176). Recover only by appending the event — via `clean-stale-branch.sh` (which calls `march legate recover`) or `march legate recover <slice-id>` directly. Never reach into the loop's working state or Herald's sqlite by hand.
 - Never `git push --delete` the remote branch from this skill — only delete local refs. Remote branches associated with merged PRs should be cleaned up by the PR-cleanup flow, not here.
-- If `clean-stale-branch.sh` exits non-zero, do **not** retry. Read the stderr verdict and escalate.
-- For `partial-work`, do **not** attempt to manually re-dispatch via `agent-deck session send` or by editing `state.json`. Spawn would go through `march hatchery spawn` and that's outside this skill's scope today.
+- If `clean-stale-branch.sh` exits **1** (`refused`), do **not** retry — read the stderr verdict and escalate. If it exits **3**, the branch is already cleaned but recovery wasn't requested — re-run `march legate recover <slice-id>` once Herald is reachable (do not re-delete the branch).
+- For `partial-work`, do **not** attempt to manually re-dispatch via `agent-deck session send`. A corrective spawn goes through `march hatchery spawn` and that's outside this skill's scope today; `march legate recover` only re-runs the *same* scope, which likely reproduces the partial result.

@@ -48,6 +48,11 @@ describe("validateEvent", () => {
       validateEvent({ type: "slice.steward.attached", sliceId: "s1", sessionId: "x", spawnId: "sp" }),
     ).toMatchObject({ ok: true });
   });
+  it("accepts slice.recovery.requested with a sliceId, rejects it without (#238)", () => {
+    expect(validateEvent({ type: "slice.recovery.requested" })).toMatchObject({ ok: false });
+    expect(validateEvent({ type: "slice.recovery.requested", sliceId: "" })).toMatchObject({ ok: false });
+    expect(validateEvent({ type: "slice.recovery.requested", sliceId: "s1" })).toMatchObject({ ok: true });
+  });
   it("forces source to legate (cannot spoof a herald observation event)", () => {
     const v = validateEvent({ type: "heartbeat" });
     expect(v.ok && v.input.source).toBe("legate");

@@ -48,9 +48,10 @@ drop-in (see [`state/types.ts`](./state/types.ts)).
 
 ### The handler pipeline (order is load-bearing)
 
-`cleanup → ghost-cleanup → relaunch → babysit → dispatch`, awaited in order.
-Do **not** parallelize — earlier handlers drop sessions/slices that later ones
-must not act on.
+`cleanup → ghost-cleanup → relaunch → babysit → recovery → dispatch`, awaited in
+order. Do **not** parallelize — earlier handlers drop sessions/slices that later
+ones must not act on (and `recovery` must run before `dispatch` so the slice it
+drops frees the still-ready item for a fresh re-dispatch this same tick).
 
 | Handler | What it does |
 |---------|--------------|
@@ -58,7 +59,8 @@ must not act on.
 | [`ghost-cleanup`](./handlers/ghost-cleanup.ts) | A worker session whose worktree isn't tracked by any non-terminal slice (and old enough to not be a launch race) is an orphan → request Brood teardown. |
 | [`relaunch`](./handlers/relaunch.ts) | A non-terminal slice with an open PR but a vanished worker → re-attach a fresh opus steward to the existing worktree/branch. Throttled per slice. |
 | [`babysit`](./handlers/babysit.ts) | The steward watchdog: login-block recovery, worker-error escalation, stranded-steward nudges, PR discovery, conflict / review-thread / CI handling, post-dispatch re-nudges. |
-| [`dispatch`](./handlers/dispatch.ts) | Smithy's layer-0 ready items → Hatchery codex spawns; drains completed spawns; partial-merge / branch-collision recovery. |
+| [`recovery`](./handlers/recovery.ts) | Operator recovery ([#238](https://github.com/Balexda/March/issues/238)): drains `slice.recovery.requested` from the Herald inbox and drops the named slice from the in-memory working state (both `slices` and `archived_slices`) + clears its retry budget, so the still-ready smithy work re-dispatches fresh. Acting on the *drained* request is what reaches the warm loop — the request's fold edit alone never does (warm-loop invisibility). |
+| [`dispatch`](./handlers/dispatch.ts) | Smithy's layer-0 ready items → Hatchery codex spawns; drains completed spawns; bounded auto-recovery of recoverable escalations (#211). |
 
 The heartbeat ([`heartbeat.ts`](./heartbeat.ts)) folds the tick's results into a
 record on disk and a snapshot for `GET /status`.
@@ -172,6 +174,23 @@ These transitions emit `slice.dispatched` / `slice.recovery.dispatched` /
 `slice.escalated` / `retry.counted` events — the durable record the working state
 is rebuilt from (#176) — and a `recovery_dispatch` action-log event that re-lights
 the (previously replay-only) recovery dispatch span.
+
+**Operator recovery of a spent-budget escalation
+([#238](https://github.com/Balexda/March/issues/238)).** Bounded auto-recovery
+deliberately stops once the per-slice budget is exhausted: the slice stays
+`escalated` and operator-only, and — because an escalated slice reads as in-flight
+— it keeps de-duping the still-ready smithy work, with no internal path back. The
+[`recovery`](./handlers/recovery.ts) handler is that path: an operator appends
+`slice.recovery.requested` (via `march legate recover <sliceId>` or the
+`legate.unwedge` skill); the handler drains it from the inbox and drops the slice
+from the in-memory working state + clears its budget, so `dispatchableReady`
+re-selects the item and `dispatch` re-launches it **fresh** the same tick. Acting
+during the drain is required: the request's reducer drops the slice from the
+durable fold (so a cold-start rebuild is also clean), but the warm loop's `raw` is
+threaded in memory and only rebuilt from the fold on a cold start, so a fold edit
+alone never reaches the running loop. No transition event is emitted by the
+handler — the `slice.recovery.requested` (operator) and the ensuing fresh
+`slice.dispatched` are the durable record.
 
 ## HTTP API ([`http.ts`](./http.ts))
 

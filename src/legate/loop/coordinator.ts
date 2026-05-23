@@ -3,13 +3,14 @@ import * as cleanup from "./handlers/cleanup.js";
 import * as ghostCleanup from "./handlers/ghost-cleanup.js";
 import * as relaunch from "./handlers/relaunch.js";
 import * as babysit from "./handlers/babysit.js";
+import * as recovery from "./handlers/recovery.js";
 import * as dispatch from "./handlers/dispatch.js";
 import { summarizeSlicesByStage } from "./pure/slice.js";
 
 /**
  * Stage 2 orchestration. runTick senses once, then runs the handlers in the
- * fixed order cleanup → ghost-cleanup → relaunch → babysit → dispatch, each as
- * pure assess() + effecting apply(), threading the SAME mutating {@link LoopState}
+ * fixed order cleanup → ghost-cleanup → relaunch → babysit → recovery → dispatch,
+ * each as pure assess() + effecting apply(), threading the SAME mutating {@link LoopState}
  * through all of them. Because apply() mutates the snapshot in place (drops a
  * cleaned session, archives a slice), a later handler's assess() sees the current
  * world without re-polling — this replaces the monolith's habit of re-listing
@@ -34,6 +35,7 @@ export interface CoordinatorOutput {
     ghost: HandlerResult;
     relaunch: HandlerResult;
     babysit: HandlerResult;
+    recovery: HandlerResult;
     dispatch: HandlerResult;
   };
 }
@@ -82,6 +84,9 @@ export async function runTick(deps: CoordinatorDeps): Promise<CoordinatorOutput>
     ghost: await ghostCleanup.apply(ghostCleanup.assess(state), ctx, state),
     relaunch: await relaunch.apply(relaunch.assess(state), ctx, state, deps.relaunch),
     babysit: await babysit.apply(babysit.assess(state), ctx, state, deps.babysit),
+    // Operator recovery (#238) runs BEFORE dispatch so the dropped slice frees the
+    // still-ready smithy item for a fresh re-dispatch on this same tick.
+    recovery: await recovery.apply(recovery.assess(state), ctx, state),
     dispatch: await dispatch.apply(dispatch.assess(state), ctx, state, deps.dispatch),
   };
 

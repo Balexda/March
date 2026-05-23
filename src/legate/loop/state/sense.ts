@@ -91,6 +91,12 @@ async function senseSmithy(
 /** A consumer of the Herald inbox — drains + folds, returning the projection. */
 export interface HeraldInbox {
   consume(): Promise<SystemState>;
+  /**
+   * Slice ids whose operator `slice.recovery.requested` (#238) was drained in the
+   * most recent {@link consume}. Optional so test stubs and pre-#238 callers can
+   * omit it; the loop reconciles its in-memory working state for these.
+   */
+  takeRecoveryRequests?(): string[];
 }
 
 /**
@@ -125,6 +131,10 @@ export function rebuildWorkingState(sys: SystemState, meta: LoopMeta): any {
   const slices: Record<string, any> = {};
   const archivedSlices: Record<string, any> = {};
   for (const [sliceId, s] of Object.entries(sys.slices)) {
+    // A recovered (tombstoned) slice (#238) carries no live/archived facts and must
+    // not block re-dispatch — skip it so the rebuild reconstructs nothing for it; a
+    // fresh dispatch re-creates it clean.
+    if (s.recovered) continue;
     const pr = s.pr as any;
     const prState = pr?.state;
     if (s.archived) {
@@ -222,6 +232,9 @@ export async function senseFromHerald(deps: SenseDeps, herald: HeraldInbox, prev
     workers,
     smithy: await senseSmithy(deps, raw, repoPath, { sync: false }),
     perSlice,
+    // Operator recovery requests drained this tick (#238) — the recovery handler
+    // reconciles `raw` for these so the still-ready smithy work re-dispatches.
+    recoveryRequests: herald.takeRecoveryRequests?.() ?? [],
   };
 }
 

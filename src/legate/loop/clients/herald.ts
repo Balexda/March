@@ -70,6 +70,15 @@ export class LegateHerald {
   private cursor: number;
   /** Accumulated fold; null until the first {@link consume} seeds it. */
   private state: SystemState | null = null;
+  /**
+   * Slice ids whose operator `slice.recovery.requested` (#238) was drained in the
+   * most recent {@link consume}. The reducer drops the slice from the fold, so the
+   * fold alone leaves no marker for the warm loop to reconcile its IN-MEMORY
+   * working state from (warm-loop invisibility). This captures the request off the
+   * drain so the loop can drop the slice from `raw` and re-dispatch it this tick.
+   * {@link takeRecoveryRequests} returns and clears it.
+   */
+  private recoveryRequests: string[] = [];
 
   constructor(opts: LegateHeraldOptions) {
     this.client = opts.client ?? new HeraldClient({ env: opts.env });
@@ -123,6 +132,9 @@ export class LegateHerald {
    * running Stage-2 handlers against a partial one.
    */
   async consume(): Promise<SystemState> {
+    // Recovery requests are scoped to THIS drain — reset before folding so
+    // takeRecoveryRequests() reflects only what was drained this tick.
+    this.recoveryRequests = [];
     if (this.state === null) {
       this.state = this.cursor > 0 ? await this.client.state(this.cursor) : emptySystemState();
       // Recover from a stale/corrupt cursor: the seeded fold reflects at most
@@ -135,7 +147,10 @@ export class LegateHerald {
     }
     for (;;) {
       const page = await this.client.events({ after: this.cursor, limit: this.pageLimit });
-      for (const event of page.events) reduce(this.state, event as HeraldEvent);
+      for (const event of page.events) {
+        if (event.type === "slice.recovery.requested") this.recoveryRequests.push(event.sliceId);
+        reduce(this.state, event as HeraldEvent);
+      }
       if (page.lastSeq > this.cursor) {
         this.cursor = page.lastSeq;
         this.persistCursor();
@@ -144,6 +159,19 @@ export class LegateHerald {
       if (page.events.length < this.pageLimit) break;
     }
     return this.state;
+  }
+
+  /**
+   * Return (and clear) the slice ids whose operator `slice.recovery.requested`
+   * (#238) was drained in the most recent {@link consume}. The warm loop drops
+   * each from its in-memory working state so the still-ready smithy work
+   * re-dispatches fresh this tick — the durable fold can't carry this to the warm
+   * loop on its own (the reducer dropped the slice; warm-loop invisibility).
+   */
+  takeRecoveryRequests(): string[] {
+    const requests = this.recoveryRequests;
+    this.recoveryRequests = [];
+    return requests;
   }
 
   /**

@@ -466,6 +466,33 @@ legate
     }
   });
 
+legate
+  .command("recover <sliceId>")
+  .description(
+    "Recover an escalated slice: append a recovery request so the running loop drops it and re-dispatches the still-ready smithy work fresh (no restart, no manual state surgery). Resolves Herald via MARCH_HERALD_URL.",
+  )
+  .action(async (sliceId: string) => {
+    commandHandled = true;
+    const id = (sliceId ?? "").trim();
+    if (id.length === 0) {
+      process.stderr.write("Provide a non-empty <sliceId> to recover.\n");
+      process.exitCode = ERROR;
+      return;
+    }
+    const { HeraldClient, HeraldClientError } = await import("../herald/service/client.js");
+    try {
+      const event = await new HeraldClient().append({ type: "slice.recovery.requested", sliceId: id });
+      console.log(
+        `Requested recovery of ${id} (seq=${event.seq}). The loop will drop the escalated slice and re-dispatch it on its next tick.`,
+      );
+      process.exitCode = SUCCESS;
+    } catch (err) {
+      const message = err instanceof HeraldClientError ? err.message : (err as Error).message;
+      process.stderr.write(message + "\n");
+      process.exitCode = ERROR;
+    }
+  });
+
 const hatchery = program
   .command("hatchery")
   .description("Manage Hatchery container/profile workflows");

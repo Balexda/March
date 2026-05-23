@@ -20,6 +20,7 @@ const REPLAY_KINDS: ReadonlySet<string> = new Set([
   "babysit_action",
   "dispatch_action",
   "recovery_dispatch",
+  "slice_recovery",
   "processor_request",
 ]);
 
@@ -61,6 +62,9 @@ function formatReplayLine(event: any): string {
   }
   if (event.kind === "recovery_dispatch") {
     return "[" + event.ts + "] recent action: recovery-dispatch " + event.slice_id + ": " + event.detail;
+  }
+  if (event.kind === "slice_recovery") {
+    return "[" + event.ts + "] recent action: slice-recovery " + event.slice_id + ": " + event.detail;
   }
   return formatProcessorRequestLine(event, "recent action: ");
 }

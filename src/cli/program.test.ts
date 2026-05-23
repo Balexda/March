@@ -157,9 +157,28 @@ describe("march CLI", () => {
       expect(result.exitCode).toBe(2);
       const combined = result.stdout + result.stderr;
       expect(combined).toContain("Usage: march legate");
-      // The help should list `init` and `loop` as known subcommands.
+      // The help should list `init`, `loop`, and `recover` as known subcommands.
       expect(combined).toMatch(/^\s+init\b/m);
       expect(combined).toMatch(/^\s+loop\b/m);
+      expect(combined).toMatch(/^\s+recover\b/m);
+    });
+
+    it("`march legate recover --help` exits 0 and prints the recover usage", () => {
+      const result = run(["legate", "recover", "--help"]);
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain("Usage: march legate recover");
+      expect(result.stdout).toContain("sliceId");
+    });
+
+    it("`march legate recover <sliceId>` exits 1 with a reach error when Herald is down", () => {
+      // Point at a closed port so the append fails fast with a connection error,
+      // exercising the recover action's Herald round-trip + error path.
+      const result = runWithEnv(
+        ["legate", "recover", "some-slice"],
+        { ...process.env, MARCH_HERALD_URL: "http://127.0.0.1:1" },
+      );
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toContain("Could not reach the herald service");
     });
 
     it("`march legate loop --help` exits 0 and prints the loop service flag surface", () => {

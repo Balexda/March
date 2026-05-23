@@ -35,6 +35,7 @@ function out(over: Partial<CoordinatorOutput["results"]> = {}, tickOver: any = {
       ghost: emptyHandlerResult(),
       relaunch: emptyHandlerResult(),
       babysit: emptyHandlerResult(),
+      recovery: emptyHandlerResult(),
       dispatch: emptyHandlerResult(),
       ...over,
     },
@@ -105,5 +106,24 @@ describe("runHeartbeat", () => {
     expect(kinds).toContain("cleanup");
     expect(kinds).toContain("babysit_action");
     expect(kinds).toContain("recovery_dispatch");
+  });
+
+  it("appends recovery actions in pipeline order: after babysit, before dispatch (#238)", () => {
+    const babysit = emptyHandlerResult();
+    babysit.actions.push({ action: "review-fix", sliceId: "b", sessionId: "x", pr: { number: 9 }, detail: "d" });
+    const recovery = emptyHandlerResult();
+    recovery.actions.push({ action: "slice-recovery", sliceId: "r", detail: "operator recovery: cleared escalated slice for fresh re-dispatch" });
+    const dispatch = emptyHandlerResult();
+    dispatch.actions.push({ action: "dispatch", sliceId: "d", sessionId: null, detail: "queued" });
+
+    const d = deps();
+    runHeartbeat(out({ babysit, recovery, dispatch }), d);
+
+    const slice = d.events.find((e) => e.kind === "slice_recovery");
+    expect(slice).toMatchObject({ kind: "slice_recovery", action: "slice-recovery", slice_id: "r", detail: expect.stringContaining("cleared escalated slice") });
+    // Ordering: babysit_action < slice_recovery < dispatch_action in the event stream.
+    const kinds = d.events.map((e) => e.kind);
+    expect(kinds.indexOf("babysit_action")).toBeLessThan(kinds.indexOf("slice_recovery"));
+    expect(kinds.indexOf("slice_recovery")).toBeLessThan(kinds.indexOf("dispatch_action"));
   });
 });

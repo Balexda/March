@@ -143,6 +143,49 @@ describe("LegateHerald.consume", () => {
   });
 });
 
+describe("LegateHerald.takeRecoveryRequests (#238)", () => {
+  it("captures recovery-request slice ids drained this consume, then clears them", async () => {
+    const events = vi.fn(async () => ({
+      events: [
+        ev(1, { type: "slice.escalated", sliceId: "s1", reason: "hatchery_dispatch_failed" } as any),
+        ev(2, { type: "slice.recovery.requested", sliceId: "s1" } as any),
+      ],
+      lastSeq: 2,
+    }));
+    const herald = new LegateHerald({ conductorDir: dir, client: stubClient({ events }) });
+
+    await herald.consume();
+    expect(herald.takeRecoveryRequests()).toEqual(["s1"]);
+    // "take" semantics: a second read after no new drain returns nothing.
+    expect(herald.takeRecoveryRequests()).toEqual([]);
+  });
+
+  it("scopes recovery requests to the most recent consume (resets each drain)", async () => {
+    const events = vi
+      .fn()
+      .mockResolvedValueOnce({ events: [ev(1, { type: "slice.recovery.requested", sliceId: "s1" } as any)], lastSeq: 1 })
+      .mockResolvedValueOnce({ events: [ev(2, { type: "heartbeat" } as any)], lastSeq: 2 });
+    const herald = new LegateHerald({ conductorDir: dir, client: stubClient({ events: events as any }) });
+
+    await herald.consume();
+    await herald.consume(); // a later drain with no recovery request must clear the prior one
+    expect(herald.takeRecoveryRequests()).toEqual([]);
+  });
+
+  it("collects multiple recovery requests in one drain", async () => {
+    const events = vi.fn(async () => ({
+      events: [
+        ev(1, { type: "slice.recovery.requested", sliceId: "s1" } as any),
+        ev(2, { type: "slice.recovery.requested", sliceId: "s2" } as any),
+      ],
+      lastSeq: 2,
+    }));
+    const herald = new LegateHerald({ conductorDir: dir, client: stubClient({ events }) });
+    await herald.consume();
+    expect(herald.takeRecoveryRequests()).toEqual(["s1", "s2"]);
+  });
+});
+
 describe("LegateHerald.append", () => {
   it("delegates a transition event to the client write-path", async () => {
     const append = vi.fn(async (b: unknown) => ev(9, b as any));

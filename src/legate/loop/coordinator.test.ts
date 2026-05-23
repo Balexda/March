@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { runTick, type CoordinatorDeps } from "./coordinator.js";
 import type { HandlerContext, LoopState } from "./state/types.js";
+import { dispatchSliceId } from "./pure/dispatch-id.js";
 
 const NOW = "2026-05-20T01:00:00Z";
 
@@ -89,6 +90,55 @@ describe("coordinator runTick", () => {
     const d = deps(state);
     await runTick(d);
     expect(d.dispatch.completePending).toHaveBeenCalledWith(state.raw, NOW);
+  });
+
+  it("recovers an escalated slice to a FRESH re-dispatch in the same tick (#238)", async () => {
+    // A still-ready smithy item whose deterministic slice is escalated with its
+    // recovery budget exhausted — the wedge #238 describes.
+    const item = { path: "a.spec.md", next_action: { command: "smithy.forge", arguments: ["a.spec.md", "1"] }, parent_path: "a.spec.md" };
+    const sliceId = dispatchSliceId(item);
+    const raw = {
+      slices: {
+        [sliceId]: {
+          stage: "escalated",
+          escalated_reason: "hatchery_dispatch_failed",
+          command: "smithy.forge",
+          arguments: ["a.spec.md", "1"],
+          artifact_path: "a.spec.md",
+        },
+      },
+      archived_slices: {},
+      transient_retry_counts: { ["dispatch-recovery:" + sliceId]: 2 },
+      repo: { path: "/repo" },
+    };
+    const state: LoopState = {
+      ts: NOW,
+      statePresent: true,
+      stateError: null,
+      raw,
+      slices: raw.slices,
+      archived: raw.archived_slices,
+      repoPath: "/repo",
+      workerGroup: "legate-workers",
+      sessions: [],
+      sessionsById: new Map(),
+      workers: { waiting: 0, running: 0, idle: 0, error: 0, stopped: 0, other: 0 },
+      smithy: { ok: true, ready: [item], queue: { dispatchable: 0, blocked: 0, total: 1 } },
+      perSlice: {},
+      recoveryRequests: [sliceId],
+    };
+
+    const d = deps(state);
+    const out = await runTick(d);
+
+    // recovery dropped the escalated slice + cleared its budget...
+    expect(out.results.recovery.actions).toEqual([
+      { action: "slice-recovery", sliceId, detail: expect.stringContaining("cleared escalated slice") },
+    ]);
+    expect(state.raw.transient_retry_counts["dispatch-recovery:" + sliceId]).toBeUndefined();
+    // ...so dispatch re-selected it as a FRESH launch (not the #211 recover path).
+    expect(d.dispatch.launchDispatch).toHaveBeenCalledWith(state.raw, NOW, item, sliceId);
+    expect(d.dispatch.recoverDispatch).not.toHaveBeenCalled();
   });
 
   it("counts steward-nudge actions separately from the babysit umbrella (#212)", async () => {
