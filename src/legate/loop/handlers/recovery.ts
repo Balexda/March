@@ -13,61 +13,56 @@ import { dropRecoveredSlice } from "../state/mutations.js";
  * This handler reconciles the loop's IN-MEMORY working state for each request:
  * it drops the slice from both the live and archived sets and clears its retry
  * budget. Acting here — during the tick the request is drained — is what defeats
- * warm-loop invisibility: the request's reducer drops the slice from the durable
- * fold, but the warm loop's `raw` is threaded in memory and only rebuilt from the
- * fold on a cold start, so a fold edit alone never reaches the running loop (gap
- * #3 in #238). With the slice dropped, the dispatcher's `dispatchableReady`
- * re-selects the still-ready item and re-launches it FRESH on this same tick (the
- * dispatch handler runs after this one).
+ * warm-loop invisibility: the request's reducer tombstones the slice in the
+ * durable fold, but the warm loop's `raw` is threaded in memory and only rebuilt
+ * from the fold on a cold start, so a fold edit alone never reaches the running
+ * loop (gap #3 in #238). With the slice dropped, the dispatcher's
+ * `dispatchableReady` re-selects the still-ready item and re-launches it FRESH on
+ * this same tick (the dispatch handler runs after this one).
  *
  * Pure `assess` + effecting `apply`, deps-free like cleanup/ghost-cleanup — the
- * only effects are the in-memory drop and an action-log record for observability.
- * No transition event is emitted: the `slice.recovery.requested` is already in the
- * durable log (operator-appended) and the ensuing fresh `slice.dispatched` is the
- * durable record of the re-dispatch.
+ * only effect is the in-memory drop. The action records it returns are appended to
+ * the action log by {@link runHeartbeat} in pipeline order alongside every other
+ * handler's actions (this handler does NOT write the log directly, so per-tick
+ * action ordering stays consistent). No transition event is emitted: the
+ * `slice.recovery.requested` is already in the durable log (operator-appended) and
+ * the ensuing fresh `slice.dispatched` is the durable record of the re-dispatch.
  */
 
 export interface RecoveryDecision {
   readonly sliceId: string;
-  /** Whether the slice was actually tracked in `raw` (false = already gone/unknown). */
-  readonly present: boolean;
 }
 
-/** Pure: one decision per recovery request drained this tick. */
+/**
+ * Pure: one decision per DISTINCT recovery request drained this tick. De-duped so
+ * an operator appending several `slice.recovery.requested` for the same slice
+ * before the next tick produces a single recovery action (the drop is idempotent,
+ * but a duplicate action would misreport the work done).
+ */
 export function assess(state: LoopState): RecoveryDecision[] {
-  const requests = state.recoveryRequests ?? [];
-  const slices = state.raw?.slices && typeof state.raw.slices === "object" ? state.raw.slices : {};
-  const archived =
-    state.raw?.archived_slices && typeof state.raw.archived_slices === "object" ? state.raw.archived_slices : {};
-  return requests.map((sliceId) => ({
-    sliceId,
-    present:
-      Object.prototype.hasOwnProperty.call(slices, sliceId) ||
-      Object.prototype.hasOwnProperty.call(archived, sliceId),
-  }));
+  const seen = new Set<string>();
+  const out: RecoveryDecision[] = [];
+  for (const sliceId of state.recoveryRequests ?? []) {
+    if (seen.has(sliceId)) continue;
+    seen.add(sliceId);
+    out.push({ sliceId });
+  }
+  return out;
 }
 
-export async function apply(decisions: RecoveryDecision[], ctx: HandlerContext, state: LoopState): Promise<HandlerResult> {
+export async function apply(decisions: RecoveryDecision[], _ctx: HandlerContext, state: LoopState): Promise<HandlerResult> {
   const res = emptyHandlerResult();
   if (!state.raw) return res;
-  for (const d of decisions) {
-    dropRecoveredSlice(state.raw, d.sliceId);
+  for (const { sliceId } of decisions) {
+    // "cleared" reflects whether a slice was actually tracked, computed from the
+    // drop itself (not a pre-apply snapshot) so the report can't claim a slice was
+    // cleared when nothing was there.
+    const cleared = dropRecoveredSlice(state.raw, sliceId);
     res.mutated = true;
-    const detail = d.present
+    const detail = cleared
       ? "operator recovery: cleared escalated slice for fresh re-dispatch"
       : "operator recovery: no tracked slice to clear (already recovered or unknown) — re-dispatch will proceed if still ready";
-    res.actions.push({ action: "slice-recovery", sliceId: d.sliceId, detail });
-    ctx.emit({
-      schema_version: 1,
-      ts: ctx.ts,
-      processor: ctx.meta.processor_name,
-      paired_legate: ctx.meta.paired_legate,
-      kind: "slice_recovery",
-      action: "slice-recovery",
-      slice_id: d.sliceId,
-      detail,
-    });
-    ctx.log("[" + ctx.ts + "] " + detail + " (" + d.sliceId + ")");
+    res.actions.push({ action: "slice-recovery", sliceId, detail });
   }
   return res;
 }

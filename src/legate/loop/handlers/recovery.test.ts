@@ -40,21 +40,14 @@ describe("recovery assess", () => {
     expect(assess(loopState({ recoveryRequests: [] }))).toEqual([]);
   });
 
-  it("marks a tracked escalated slice present, an unknown one absent", () => {
-    const state = loopState({
-      recoveryRequests: ["live", "archived", "ghost"],
-      raw: {
-        slices: { live: { stage: "escalated" } },
-        archived_slices: { archived: { terminal_state: "CLOSED" } },
-        transient_retry_counts: {},
-        repo: { path: "/repo" },
-      },
-    });
-    expect(assess(state)).toEqual([
-      { sliceId: "live", present: true },
-      { sliceId: "archived", present: true },
-      { sliceId: "ghost", present: false },
-    ]);
+  it("emits one decision per request, in order", () => {
+    const state = loopState({ recoveryRequests: ["a", "b"] });
+    expect(assess(state)).toEqual([{ sliceId: "a" }, { sliceId: "b" }]);
+  });
+
+  it("de-dups repeated requests for the same slice in one tick", () => {
+    const state = loopState({ recoveryRequests: ["a", "a", "b", "a"] });
+    expect(assess(state)).toEqual([{ sliceId: "a" }, { sliceId: "b" }]);
   });
 });
 
@@ -70,18 +63,29 @@ describe("recovery apply", () => {
         repo: { path: "/repo" },
       },
     });
-    const c = ctx();
-    const res = await apply(assess(state), c, state);
+    const res = await apply(assess(state), ctx(), state);
 
     expect(state.raw.slices[sliceId]).toBeUndefined();
     // state.slices mirrors raw.slices (same reference), so it is gone there too.
     expect(state.slices[sliceId]).toBeUndefined();
     expect(state.raw.transient_retry_counts[recoveryAttemptKey(sliceId)]).toBeUndefined();
     expect(res.mutated).toBe(true);
+    // The action is RETURNED (not written directly) so runHeartbeat appends it in
+    // pipeline order; "cleared" is derived from the drop, not a pre-apply snapshot.
     expect(res.actions).toEqual([
       { action: "slice-recovery", sliceId, detail: expect.stringContaining("cleared escalated slice") },
     ]);
-    expect(c.emit).toHaveBeenCalledWith(expect.objectContaining({ kind: "slice_recovery", slice_id: sliceId }));
+  });
+
+  it("does not write the action log directly (heartbeat owns ordering)", async () => {
+    const state = loopState({
+      recoveryRequests: ["s1"],
+      raw: { slices: { s1: { stage: "escalated" } }, archived_slices: {}, transient_retry_counts: {}, repo: { path: "/repo" } },
+    });
+    const c = ctx();
+    await apply(assess(state), c, state);
+    expect(c.emit).not.toHaveBeenCalled();
+    expect(c.log).not.toHaveBeenCalled();
   });
 
   it("drops a slice that was archived (un-archives it for re-dispatch)", async () => {
@@ -99,13 +103,12 @@ describe("recovery apply", () => {
     expect(state.raw.archived_slices[sliceId]).toBeUndefined();
   });
 
-  it("is a tolerant no-op (still mutated/logged) for an unknown slice", async () => {
+  it("is a tolerant no-op (still mutated) reporting no tracked slice for an unknown slice", async () => {
     const state = loopState({ recoveryRequests: ["ghost"] });
-    const c = ctx();
-    const res = await apply(assess(state), c, state);
+    const res = await apply(assess(state), ctx(), state);
     expect(res.actions[0]).toMatchObject({ action: "slice-recovery", sliceId: "ghost" });
     expect(res.actions[0].detail).toContain("no tracked slice");
-    expect(c.emit).toHaveBeenCalledOnce();
+    expect(res.mutated).toBe(true);
   });
 
   it("only clears retry counters keyed to the recovered slice", async () => {
