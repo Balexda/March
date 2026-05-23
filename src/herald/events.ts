@@ -185,6 +185,15 @@ export interface SliceState {
   recentOutput?: { output: string; error?: string };
   archived?: boolean;
   escalatedReason?: string;
+  /**
+   * Tombstone set by `slice.recovery.requested` (#238): the operator recovered this
+   * slice, so it carries no live/archived facts and must not block re-dispatch.
+   * Observation deltas (`slice.pr.changed`/`slice.output.changed`) that were
+   * snapshotted before the recovery and sequenced after it are ignored while this
+   * is set, so a stale delta can't resurrect a ghost in-flight slice on a
+   * cold-start rebuild. A fresh `slice.dispatched` clears it.
+   */
+  recovered?: boolean;
 }
 
 /** The folded system state — the projection both services read. */
@@ -240,12 +249,18 @@ export function reduce(state: SystemState, event: HeraldEvent): SystemState {
       state.statePresent = true;
       break;
     case "slice.pr.changed":
-      sliceOf(state, event.sliceId).pr = event.pr;
+      // Skip a recovered (tombstoned) slice so a stale observation delta can't
+      // resurrect a ghost in-flight slice after recovery (#238).
+      if (!state.slices[event.sliceId]?.recovered) {
+        sliceOf(state, event.sliceId).pr = event.pr;
+      }
       state.statePresent = true;
       state.stateError = null;
       break;
     case "slice.output.changed":
-      sliceOf(state, event.sliceId).recentOutput = event.recentOutput;
+      if (!state.slices[event.sliceId]?.recovered) {
+        sliceOf(state, event.sliceId).recentOutput = event.recentOutput;
+      }
       break;
     case "session.changed":
       if (event.session.present) {
@@ -272,6 +287,7 @@ export function reduce(state: SystemState, event: HeraldEvent): SystemState {
       if ("sessionId" in event && event.sessionId !== undefined) slice.sessionId = event.sessionId;
       if ("jobId" in event && event.jobId !== undefined) slice.jobId = event.jobId;
       slice.archived = false;
+      delete slice.recovered; // a fresh dispatch re-establishes the slice (#238)
       break;
     }
     case "slice.steward.attached": {
@@ -281,6 +297,7 @@ export function reduce(state: SystemState, event: HeraldEvent): SystemState {
       if (event.branch !== undefined) slice.branch = event.branch;
       if (event.worktreePath !== undefined) slice.worktreePath = event.worktreePath;
       slice.archived = false;
+      delete slice.recovered; // a steward attach re-establishes the slice (#238)
       break;
     }
     case "slice.stage.changed": {
@@ -296,12 +313,15 @@ export function reduce(state: SystemState, event: HeraldEvent): SystemState {
       sliceOf(state, event.sliceId).archived = true;
       break;
     case "slice.recovery.requested": {
-      // Operator recovery (#238): forget the escalated incarnation entirely so a
-      // cold-start rebuild produces no blocking slices/archived/budget entry for
-      // it. The deterministic slice id is re-derived from the artifact, so the
-      // subsequent fresh dispatch re-creates this slice clean. Clearing the
-      // retry counters resets the bounded-recovery budget (#211) too.
-      delete state.slices[event.sliceId];
+      // Operator recovery (#238): replace the escalated incarnation with a
+      // tombstone so a cold-start rebuild produces no blocking slices/archived/
+      // budget entry for it, AND so a stale observation delta (snapshotted before
+      // the recovery, sequenced after it) can't resurrect a ghost in-flight slice
+      // — the pr.changed/output.changed folds skip a tombstoned slice. The
+      // deterministic slice id is re-derived from the artifact, so the subsequent
+      // fresh `slice.dispatched` clears the tombstone and re-creates it clean.
+      // Clearing the retry counters resets the bounded-recovery budget (#211).
+      state.slices[event.sliceId] = { sliceId: event.sliceId, recovered: true };
       for (const key of Object.keys(state.retries)) {
         if (key === event.sliceId || key.endsWith(":" + event.sliceId)) delete state.retries[key];
       }

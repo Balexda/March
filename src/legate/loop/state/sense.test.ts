@@ -172,6 +172,19 @@ describe("rebuildWorkingState", () => {
     // escalation from a terminal one after a cold start, not just the human note.
     expect(raw.slices.e).toMatchObject({ stage: "escalated", last_action_note: "hatchery_dispatch_failed", escalated_reason: "hatchery_dispatch_failed" });
   });
+
+  it("skips recovered (tombstoned) slices so they don't block re-dispatch (#238)", () => {
+    const sys = foldedState({
+      slices: {
+        live: { sliceId: "live", stage: "pr-open", branch: "b-live", pr: { number: 1, state: "OPEN" } },
+        tomb: { sliceId: "tomb", recovered: true },
+      },
+    });
+    const raw = rebuildWorkingState(sys, meta);
+    // The tombstone is reconstructed into neither the live nor the archived set.
+    expect(Object.keys(raw.slices)).toEqual(["live"]);
+    expect(raw.archived_slices.tomb).toBeUndefined();
+  });
 });
 
 describe("senseObserved (Herald observation Stage 1)", () => {

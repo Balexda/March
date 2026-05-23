@@ -106,7 +106,7 @@ describe("reduce / fold", () => {
     ).toEqual({ kind: "slice", id: "s1" });
   });
 
-  it("slice.recovery.requested drops the escalated slice + clears its budget from the fold (#238)", () => {
+  it("slice.recovery.requested tombstones the escalated slice + clears its budget (#238)", () => {
     seq = 0;
     // An escalated slice with an exhausted recovery budget — no internal re-dispatch path.
     const escalated = foldEvents([
@@ -118,20 +118,36 @@ describe("reduce / fold", () => {
     expect(escalated.retries["dispatch-recovery:s1"]).toBe(2);
 
     const recovered = foldEvents([ev({ type: "slice.recovery.requested", sliceId: "s1" })], escalated);
-    // The slice is gone from the fold so a cold-start rebuild reconstructs nothing
-    // blocking, and its bounded-recovery budget is cleared.
-    expect(recovered.slices.s1).toBeUndefined();
+    // The slice is replaced by a bare tombstone carrying no blocking facts, and its
+    // bounded-recovery budget is cleared. rebuildWorkingState skips tombstones, so a
+    // cold-start rebuild reconstructs nothing blocking.
+    expect(recovered.slices.s1).toEqual({ sliceId: "s1", recovered: true });
     expect(recovered.retries["dispatch-recovery:s1"]).toBeUndefined();
   });
 
-  it("slice.recovery.requested is a no-op for an unknown slice", () => {
+  it("slice.recovery.requested tombstones even an unknown slice (guards in-flight stale deltas)", () => {
     seq = 0;
     const state = foldEvents([ev({ type: "slice.recovery.requested", sliceId: "ghost" })]);
-    expect(state.slices.ghost).toBeUndefined();
+    expect(state.slices.ghost).toEqual({ sliceId: "ghost", recovered: true });
     expect(state.seq).toBe(1);
   });
 
-  it("a fresh dispatch after recovery re-creates the slice clean", () => {
+  it("ignores a stale observation delta for a recovered slice — no resurrection (#238)", () => {
+    seq = 0;
+    // A stale pr/output delta sequenced AFTER the recovery (observe tick snapshotted
+    // the slice before it was recovered) must not rebuild a ghost in-flight slice.
+    const recovered = foldEvents([
+      ev({ type: "slice.dispatched", sliceId: "s1", branch: "feature/a", jobId: "job-1" }),
+      ev({ type: "slice.escalated", sliceId: "s1", reason: "hatchery_dispatch_failed" }),
+      ev({ type: "slice.recovery.requested", sliceId: "s1" }),
+      ev({ type: "slice.pr.changed", sliceId: "s1", pr: { number: 7, state: "OPEN" } }),
+      ev({ type: "slice.output.changed", sliceId: "s1", recentOutput: { output: "stale" } }),
+    ]);
+    // Still a bare tombstone — the stale pr/output were dropped.
+    expect(recovered.slices.s1).toEqual({ sliceId: "s1", recovered: true });
+  });
+
+  it("a fresh dispatch after recovery clears the tombstone and re-creates the slice clean", () => {
     seq = 0;
     const recovered = foldEvents([
       ev({ type: "slice.escalated", sliceId: "s1", reason: "hatchery_dispatch_failed" }),
@@ -139,8 +155,12 @@ describe("reduce / fold", () => {
       ev({ type: "slice.dispatched", sliceId: "s1", branch: "feature/a", jobId: "job-2" }),
     ]);
     expect(recovered.slices.s1).toMatchObject({ branch: "feature/a", jobId: "job-2", archived: false });
+    expect(recovered.slices.s1.recovered).toBeUndefined();
     expect(recovered.slices.s1.stage).toBeUndefined();
     expect(recovered.slices.s1.escalatedReason).toBeUndefined();
+    // A post-redispatch observation delta now updates normally (tombstone cleared).
+    const observed = foldEvents([ev({ type: "slice.pr.changed", sliceId: "s1", pr: { number: 8, state: "OPEN" } })], recovered);
+    expect(observed.slices.s1.pr).toEqual({ number: 8, state: "OPEN" });
   });
 
   it("entityRefOf maps slice.recovery.requested to its slice", () => {

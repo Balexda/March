@@ -131,6 +131,10 @@ export function rebuildWorkingState(sys: SystemState, meta: LoopMeta): any {
   const slices: Record<string, any> = {};
   const archivedSlices: Record<string, any> = {};
   for (const [sliceId, s] of Object.entries(sys.slices)) {
+    // A recovered (tombstoned) slice (#238) carries no live/archived facts and must
+    // not block re-dispatch — skip it so the rebuild reconstructs nothing for it; a
+    // fresh dispatch re-creates it clean.
+    if (s.recovered) continue;
     const pr = s.pr as any;
     const prState = pr?.state;
     if (s.archived) {
