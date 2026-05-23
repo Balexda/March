@@ -14,10 +14,11 @@
 # Usage:
 #   clean-stale-branch.sh <repo-path> <branch-name> <slice-id>
 #
-# Exit:
+# Exit (distinct so callers can tell "do not retry" from "retry recover"):
 #   0 cleaned successfully (+ recovery requested)
-#   1 refused, or recovery request failed (prints reason on stderr)
+#   1 refused — branch unsafe to delete; operator must reconcile (do NOT retry)
 #   2 invalid input or environment
+#   3 branch cleaned but `march legate recover` failed — re-run it once Herald is reachable
 #
 # Stdout: one line per action taken (branch deleted, recovery requested).
 set -euo pipefail
@@ -121,7 +122,9 @@ fi
 if march legate recover "$SLICE_ID"; then
   echo "done. requested recovery of $SLICE_ID — loop will re-dispatch on next tick."
 else
+  # Distinct from a safety refusal (exit 1): the branch IS cleaned, so the operator
+  # should re-run recover (idempotent) once Herald is back, not reconcile by hand.
   echo "error: branch cleaned but 'march legate recover $SLICE_ID' failed." >&2
   echo "re-run once Herald is reachable: march legate recover $SLICE_ID" >&2
-  exit 1
+  exit 3
 fi
