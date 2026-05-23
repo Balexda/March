@@ -62,7 +62,7 @@ Recommended specification sequence:
 
 | ID | Title | Depends On | Artifact |
 |----|-------|-----------|----------|
-| F1 | Tag Taxonomy & Coverage Lint | — | — |
+| F1 | Tag Taxonomy & Coverage Lint | — | `specs/2026-05-23-006-tag-taxonomy-and-coverage-lint` |
 | F3 | Quarantine Routing Scaffold | — | — |
 | F4 | Test Layer Migration Policy | F1 | — |
 | F2 | Staged CI Pipeline | F1, F3 | — |
