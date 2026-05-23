@@ -13,7 +13,7 @@
 
 **Justification**: The backend object and default registration must land together to make the refactor observable and testable without introducing a partially wired abstraction. This slice proves the real Claude path satisfies the backend contract before later stories route dispatch stages through the selected backend.
 
-**Addresses**: FR-007, FR-017; Acceptance Scenarios 3.1, 3.2, 3.3, 3.5
+**Addresses**: FR-007, FR-017; Acceptance Scenarios 3.1, 3.2, 3.3, 3.4, 3.5
 
 ### Tasks
 
