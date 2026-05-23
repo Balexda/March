@@ -4,6 +4,7 @@ import {
   TraceFlags,
   trace,
   type Attributes,
+  type Span,
 } from "@opentelemetry/api";
 import { getActiveOtel } from "./otel.js";
 import {
@@ -21,6 +22,36 @@ export interface StartDispatchSpanInput {
 }
 
 /**
+ * Handle passed to a `span()`/`spanAsync()` callback so the body can enrich its
+ * OWN child span — set attributes discovered mid-run (a patch diff-stat, a git
+ * reject) and read the child's `{ traceId, spanId }` to correlate a log line to
+ * THIS span (not just the root). Mirrors how {@link withCastraSpan} hands its
+ * callback the span context; both are needed because this codebase registers no
+ * OTel ContextManager, so a log must attach the ids explicitly. All methods are
+ * no-ops when telemetry is disabled.
+ */
+export interface DispatchSpanHandle {
+  setAttributes(attributes: Attributes): void;
+  spanContext(): { traceId: string; spanId: string } | undefined;
+}
+
+const NOOP_SPAN_HANDLE: DispatchSpanHandle = {
+  setAttributes: () => {},
+  spanContext: () => undefined,
+};
+
+/** Wrap a live child span in the {@link DispatchSpanHandle} the callback sees. */
+function childHandle(child: Span): DispatchSpanHandle {
+  return {
+    setAttributes: (attributes) => child.setAttributes(attributes),
+    spanContext: () => {
+      const sc = child.spanContext();
+      return { traceId: sc.traceId, spanId: sc.spanId };
+    },
+  };
+}
+
+/**
  * A per-dispatch trace whose id is derived deterministically from the dispatch
  * key. `span()` runs a function inside a child span (the lifecycle "actions":
  * spawn.start, spawn.end, steward.apply, ...). No-op when telemetry is disabled.
@@ -35,7 +66,7 @@ export interface DispatchTrace {
    * how {@link traceIdForDispatch}/{@link spanIdForDispatch} feed `emitLoopLog`.
    */
   spanContext(): { traceId: string; spanId: string } | undefined;
-  span<T>(name: string, fn: () => T, attributes?: Attributes): T;
+  span<T>(name: string, fn: (span: DispatchSpanHandle) => T, attributes?: Attributes): T;
   /**
    * Async sibling of {@link span}: brackets a child span around an awaited
    * function (a cross-system seam such as a Castra/Brood HTTP call). The span
@@ -43,7 +74,11 @@ export interface DispatchTrace {
    * on rejection. Use this — never `span` — for anything that returns a promise,
    * because `span` would end the child before the work completes.
    */
-  spanAsync<T>(name: string, fn: () => Promise<T>, attributes?: Attributes): Promise<T>;
+  spanAsync<T>(
+    name: string,
+    fn: (span: DispatchSpanHandle) => Promise<T>,
+    attributes?: Attributes,
+  ): Promise<T>;
   setAttributes(attributes: Attributes): void;
   recordException(err: unknown): void;
   /** W3C traceparent of the root span, for propagation into the spawn sandbox. */
@@ -54,8 +89,8 @@ export interface DispatchTrace {
 const NOOP_TRACE: DispatchTrace = {
   enabled: false,
   spanContext: () => undefined,
-  span: (_name, fn) => fn(),
-  spanAsync: (_name, fn) => fn(),
+  span: (_name, fn) => fn(NOOP_SPAN_HANDLE),
+  spanAsync: (_name, fn) => fn(NOOP_SPAN_HANDLE),
   setAttributes: () => {},
   recordException: () => {},
   traceparent: () => undefined,
@@ -93,10 +128,10 @@ export function startDispatchSpan(input: StartDispatchSpanInput): DispatchTrace 
       const sc = root.spanContext();
       return { traceId: sc.traceId, spanId: sc.spanId };
     },
-    span<T>(name: string, fn: () => T, attributes?: Attributes): T {
+    span<T>(name: string, fn: (span: DispatchSpanHandle) => T, attributes?: Attributes): T {
       const child = tracer.startSpan(name, { attributes }, rootCtx);
       try {
-        const result = fn();
+        const result = fn(childHandle(child));
         child.end();
         return result;
       } catch (err) {
@@ -111,12 +146,12 @@ export function startDispatchSpan(input: StartDispatchSpanInput): DispatchTrace 
     },
     async spanAsync<T>(
       name: string,
-      fn: () => Promise<T>,
+      fn: (span: DispatchSpanHandle) => Promise<T>,
       attributes?: Attributes,
     ): Promise<T> {
       const child = tracer.startSpan(name, { attributes }, rootCtx);
       try {
-        const result = await fn();
+        const result = await fn(childHandle(child));
         child.end();
         return result;
       } catch (err) {
