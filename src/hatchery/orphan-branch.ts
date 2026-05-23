@@ -72,12 +72,17 @@ interface PrRecord {
  * `clean-stale-branch.sh` validator in TypeScript so the Hatchery self-heal can
  * call it in-process. The verdict ladder (refuse > safe), in order:
  *   1. branch absent          -> `absent` (nothing to do)
- *   2. PR list unknown        -> `unsafe:pr-lookup-unknown` (a hidden open PR
- *      might exist; refuse rather than guess)
- *   3. open PR on the branch  -> `unsafe:open-pr` (this is #173's adopt path)
- *   4. ancestor of default    -> `safe:orphan-ref` (no unique commits)
- *   5. merged PR on the branch -> `safe:post-merge-stale`
- *   6. otherwise              -> `unsafe:diverged` (unmerged unique work)
+ *   2. NOT on any remote (#249): no PR is possible, decide from local git alone
+ *      (no `gh`) — ancestor of default -> `safe:orphan-ref`; else
+ *      `unsafe:diverged`. The common case (manager branches are never pushed),
+ *      and the only path that works in the gh-less hatchery container.
+ *   3. on a remote, PR list unknown -> `unsafe:pr-lookup-unknown` (a hidden open
+ *      PR might exist; refuse rather than guess). This forge-dependent path moves
+ *      to Statio / the legate side (#250); hatchery keeps it as a stopgap only.
+ *   4. open PR on the branch  -> `unsafe:open-pr` (this is #173's adopt path)
+ *   5. ancestor of default    -> `safe:orphan-ref` (no unique commits)
+ *   6. merged PR on the branch -> `safe:post-merge-stale`
+ *   7. otherwise              -> `unsafe:diverged` (unmerged unique work)
  */
 export function classifyBranchSafety(
   repoRoot: string,
@@ -111,6 +116,31 @@ export function classifyBranchSafety(
     run("git", ["merge-base", "--is-ancestor", branch, defaultBranch], repoRoot)
       .code === 0;
 
+  // No-remote fast-path (#249): a branch that exists on no remote cannot have an
+  // open PR, so its safety is decidable from LOCAL git alone — no `gh`. This is
+  // the case that matters in the deployed hatchery: the container ships no `gh`
+  // (so the forge lookup below always returns `pr-lookup-unknown` and the #243
+  // self-heal would refuse forever), and spawn manager branches are never pushed,
+  // so this covers ~all real spawn-orphan collisions with zero forge calls.
+  // `git ls-remote --exit-code` exits non-zero when the ref is absent on origin
+  // (or origin is unreachable); per the issue we treat any non-zero as "no PR
+  // possible" and classify by local ancestry.
+  const onRemote =
+    run(
+      "git",
+      ["ls-remote", "--exit-code", "origin", `refs/heads/${branch}`],
+      repoRoot,
+    ).code === 0;
+  if (!onRemote) {
+    return isAncestor
+      ? { kind: "safe", reason: "orphan-ref" }
+      : { kind: "unsafe", reason: "diverged" };
+  }
+
+  // On-remote branches need forge truth (an open PR must not be deleted — that is
+  // #173's adopt path). Hatchery keeps the conservative `gh` / `pr-lookup-unknown`
+  // behavior here only as a stopgap; ownership of this forge-dependent decision
+  // moves to the Statio extraction / legate side (#250). Hatchery must not own it.
   const prCall = run(
     "gh",
     ["pr", "list", "--head", branch, "--state", "all", "--json", "number,state"],
