@@ -76,7 +76,7 @@
 | F3 | Multi-Backend Execution Interface  | F2         | `specs/2026-05-10-003-multi-backend-execution-interface/` |
 | F4 | Spawn Sandbox Security             | F2         | `specs/2026-05-12-004-spawn-sandbox-security/` |
 | F5 | Spawn Output Extraction            | F2         | `specs/2026-05-21-005-spawn-output-extraction/` |
-| F6 | PR Integration                     | F5         | —                                            |
+| F6 | PR Integration                     | F5         | `specs/2026-05-24-006-pr-integration/`       |
 
 ## Cross-Milestone Dependencies
 
