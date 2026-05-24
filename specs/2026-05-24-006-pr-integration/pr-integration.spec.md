@@ -11,11 +11,11 @@
 
 ### Session 2026-05-24
 
-- The referenced feature map and RFC were not present in this workspace; this spec is derived from the existing Feature 2, Feature 3, Feature 5 specs and live Hatchery, Brood, Castra, Herald, and Legate boundaries.
+- The referenced feature map and RFC were unavailable in the original sandbox draft; both are present in this repository, and this spec has now been reconciled against `docs/rfcs/2026-001-march-orchestration-platform/01-spawn.features.md` (Feature 6) and the existing Feature 2, Feature 3, and Feature 5 specs plus the live Hatchery, Brood, Castra, Herald, and Legate boundaries.
 - Feature 6 consumes only successful Feature 5 `ExtractionResult` values. It does not parse raw backend logs, bypass patch validation, or apply arbitrary spawn output. `[Critical Assumption]`
 - PR integration is performed by a Steward session hosted through Castra and driven by Hatchery; March must avoid interactive prompts inside the autonomous path and must surface escalations as terminal diagnostics or events.
 - PR integration creates reviewable GitHub pull requests from validated patch artifacts. It does not merge PRs, modify the operator's main checkout directly, or perform post-merge cleanup.
-- Existing product guidance in `docs/vision.md` and `docs/operating-philosophy.md` could not be read because the files are absent from this workspace. The spec follows the rules quoted in `AGENTS.md`: no interactive surfaces inside autonomous components, minimum required access, and clean exits instead of hangs.
+- `docs/vision.md` and `docs/operating-philosophy.md` were unreadable in the original sandbox draft; both are present in this repository, and the spec has been confirmed consistent with their operating principles — no interactive surfaces inside autonomous components, minimum required access, and clean exits instead of hangs (also codified in `AGENTS.md`).
 
 ## Artifact Hierarchy
 
@@ -180,7 +180,7 @@ Recommended implementation sequence:
 
 | ID | Description | Source Category | Impact | Confidence | Status | Resolution |
 |----|-------------|-----------------|--------|------------|--------|------------|
-| SD-001 | The authoritative Feature 6 description and RFC were unavailable in this workspace, so this spec must be reconciled against `docs/rfcs/2026-001-march-orchestration-platform/01-spawn.features.md` before cutting tasks. | Constraints | High | Medium | open | — |
+| SD-001 | The authoritative Feature 6 description and RFC were unavailable in the original sandbox draft, so this spec needed reconciliation against `docs/rfcs/2026-001-march-orchestration-platform/01-spawn.features.md` before cutting tasks. | Constraints | High | Medium | resolved | Resolved 2026-05-24 — feature map and RFC are present in the repo; spec reconciled against Feature 6 and confirmed consistent. |
 | SD-002 | The exact persistence owner for `PrIntegrationResult` must be confirmed against the live Brood registry and any Herald projection expectations before implementation tasks are cut. | Domain & Data Model | Medium | Medium | open | — |
 | SD-003 | The exact verification commands to run before PR creation are not specified here; implementation planning must decide whether to run repository defaults, spec-provided checks, or no verification in the initial slice. | Functional Scope | Medium | Medium | open | — |
 

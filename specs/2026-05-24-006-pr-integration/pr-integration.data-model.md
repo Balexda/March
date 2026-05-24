@@ -14,15 +14,16 @@ Purpose: Represents one request to integrate a validated patch for a recorded sp
 |-------|------|----------|-------|
 | `spawnId` | string | Yes | Identifier of the spawn whose output is being integrated. |
 | `backend` | `"claude-code" \| "codex"` | Yes | Backend recorded by spawn lifecycle state and extraction. |
-| `extractionResultId` | string | Yes | Stable reference to the successful extraction result. |
-| `patchSha256` | string | Yes | Digest of the validated patch, used for idempotent retry checks. |
+| `extractionResult` | `ExtractionResult` | Yes | Resolved successful Feature 5 result; carries the validated patch text, touched paths, and patch digest. |
+| `patchSha256` | string | Yes | Digest of the validated patch (from `extractionResult`), used for idempotent retry checks. |
 | `integrationBranch` | string | Yes | Branch that receives the commit and is pushed for review. |
 | `worktreePath` | string | Yes | Integration worktree where the patch may be applied. |
 | `baseBranch` | string | Yes | Pull request target branch resolved for the repository. |
+| `timeoutSeconds` | number | Yes | Bound for autonomous integration work. |
 | `requestedAt` | ISO-8601 timestamp | Yes | Time integration was requested. |
 
 Validation rules:
-- `spawnId`, `backend`, and `patchSha256` must match the successful extraction result.
+- `spawnId`, `backend`, and `patchSha256` must match `extractionResult`.
 - `worktreePath` must identify the spawn or Steward integration worktree, not the operator's main checkout.
 - `integrationBranch` must be used exactly as recorded.
 

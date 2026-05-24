@@ -11,10 +11,10 @@ These named types appear in the signatures below. Field-level validation rules l
 | Type | Kind | Shape |
 |------|------|-------|
 | `ExtractionResult` | input | Successful Feature 5 result containing spawn ID, backend, validated patch, touched paths, and patch digest. |
-| `PullRequestIntegrationInput` | input | `{ spawnId: string; extractionResultId: string; integrationBranch: string; worktreePath: string; baseBranch: string }` plus extraction metadata. |
-| `PatchApplicationResult` | result | `{ status: "applied" \| "failed"; touchedPaths: string[]; diagnostic?: string }`. |
-| `IntegrationCommit` | value | `{ branch: string; commitSha: string; patchSha256: string }`. |
-| `PullRequestRecord` | value | `{ provider: "github"; repository: string; number: number; url: string; headBranch: string; baseBranch: string; state: string }`. |
+| `PullRequestIntegrationInput` | input | `{ spawnId: string; backend: "claude-code" \| "codex"; extractionResult: ExtractionResult; integrationBranch: string; worktreePath: string; baseBranch: string; timeoutSeconds: number; requestedAt: string }`. |
+| `PatchApplicationResult` | result | `{ spawnId: string; status: "applied" \| "failed"; touchedPaths: string[]; diagnostic?: string; appliedAt?: string }`. |
+| `IntegrationCommit` | value | `{ spawnId: string; branch: string; commitSha: string; patchSha256: string; committedAt: string }`. |
+| `PullRequestRecord` | value | `{ provider: "github"; repository: string; number: number; url: string; headBranch: string; baseBranch: string; state: "open" \| "closed" \| "merged"; createdAt?: string; observedAt: string }`. |
 | `PrIntegrationResult` | result | Terminal success or failure state for orchestration. |
 
 ## Interfaces
@@ -36,10 +36,12 @@ integratePullRequest(input: PullRequestIntegrationInput): PrIntegrationResult
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `spawnId` | string | Yes | Spawn whose successful extraction is being integrated. |
+| `backend` | `"claude-code" \| "codex"` | Yes | Backend recorded by spawn lifecycle state and extraction. |
 | `extractionResult` | ExtractionResult | Yes | Successful Feature 5 output containing the validated patch. |
 | `integrationBranch` | string | Yes | Branch to apply, commit, push, and use as PR head. |
 | `worktreePath` | string | Yes | Integration worktree path where the patch may be applied. |
 | `baseBranch` | string | Yes | Target branch for the pull request. |
+| `requestedAt` | ISO-8601 timestamp | Yes | Time integration was requested. |
 | `timeoutSeconds` | number | Yes | Bound for autonomous integration work. |
 
 #### Outputs
