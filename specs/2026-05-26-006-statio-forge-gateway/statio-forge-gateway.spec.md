@@ -270,8 +270,11 @@ remaining reads build on them; US6 packages and instruments the result.
 - **FR-001**: Statio MUST expose the v1 read surface — `repoInfo`, `listPrs`,
   `getPr`, `reviewThreads` — over HTTP, each mapping to the corresponding `gh`
   invocation performed in `src/observe/sense-io.ts` today.
-- **FR-002**: Statio MUST be the only component that shells `gh`; it MUST NOT
-  abstract or perform `git` operations.
+- **FR-002**: Statio MUST be the forge gateway — the *intended* single owner of
+  `gh` once consumers are cut over — and MUST NOT abstract or perform `git`
+  operations. The single-`gh`-owner end state is reached by the Herald and Legate
+  cutover follow-ons (see FR-019); this foundation spec stands Statio up alongside
+  the existing `gh` call sites and does not yet make Statio the only `gh` caller.
 - **FR-003**: Statio MUST be stateless — it MUST hold no event log, registry, or
   fold of system state, and MUST NOT be a place consumers read "current state"
   from.
