@@ -6,8 +6,9 @@ Statio defines the boundary between March consumers and the forge (`gh`). It
 exposes a swappable `ForgeClient` interface (the consumer-facing seam, Castra's
 adapter analogue), a bearer-token HTTP API that realizes it, and a uniform error
 model. v1 is reads only; mutations (v2) extend the same interface in a later
-Stage B follow-on. These
-contracts mirror Castra's `src/castra/{types,client,server,config}.ts`.
+Stage B follow-on. These contracts mirror Castra's
+`src/castra/{types,client,server,config}.ts` — except Statio is **async-only**
+(no `SyncStatioClient`; the Legate cutover adapts to async).
 
 ## Types
 
@@ -31,10 +32,10 @@ live there.
 ### ForgeClient (the consumer seam)
 
 **Purpose**: One typed, mockable interface for all forge reads, depended on by
-consumers instead of assembling `gh` argv. Realized by both the async (`fetch`)
-and sync (`curl`) HTTP clients and by an in-process test double.
+consumers instead of assembling `gh` argv. Realized by the async (`fetch`) HTTP
+client and by an in-process test double.
 **Consumers**: Herald `sense-io` (Herald cutover follow-on), legate loop / recovery (Legate cutover follow-on), their tests.
-**Providers**: `StatioClient` (async), `SyncStatioClient` (sync), test fakes.
+**Providers**: `StatioClient` (async), test fakes.
 
 #### Signature
 
@@ -46,8 +47,8 @@ interface ForgeClient {
   reviewThreads(prNumber: number): Promise<ReviewThread[]>;
   reachable(): Promise<boolean>;
 }
-// SyncStatioClient exposes the identical methods with synchronous return types
-// (RepoInfo, PullRequestListItem[], …) for the legate loop's synchronous tick.
+// Async-only: every method returns a Promise. Unlike Castra there is no
+// SyncStatioClient; the legate loop's tick consumes the async client directly.
 ```
 
 #### Inputs
@@ -79,7 +80,7 @@ Each method returns the corresponding wire entity (see the data model).
 ### Statio HTTP API
 
 **Purpose**: The bearer-token HTTP surface realizing `ForgeClient`.
-**Consumers**: the HTTP clients above.
+**Consumers**: the HTTP client above.
 **Providers**: `march statio serve` (Fastify).
 
 JSON in/out. All `/v1/*` routes require `Authorization: Bearer <MARCH_STATIO_TOKEN>`;
@@ -111,7 +112,7 @@ correlation. Every non-2xx response is the uniform `ForgeErrorBody`.
 
 **Purpose**: Deterministic port, env var names, service name, identifier
 validation (the `src/statio/config.ts` analogue of Castra's config).
-**Consumers**: service entrypoint, both clients.
+**Consumers**: service entrypoint, the async client.
 **Providers**: `src/statio/config.ts`.
 
 #### Signature

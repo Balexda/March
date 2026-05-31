@@ -28,9 +28,12 @@
   state. Herald remains the observation authority; Legate the decision authority.
   An optional short read cache is a latency/rate-limit concern, never a source of
   truth (the resilience seam, default-off in this foundation spec).
-- The reference implementation is **Castra** (`src/castra/`, [`docs/Castra.md`])
-  — service + async/sync clients + swappable adapter + uniform error envelope +
-  deterministic port + bearer-token `/v1/*` + OTel telemetry. Statio mirrors it.
+- The reference implementation is **Castra** (`src/castra/`,
+  [`docs/Castra.md`](../../docs/Castra.md)) — service + typed async client +
+  swappable adapter + uniform error envelope + deterministic port + bearer-token
+  `/v1/*` + OTel telemetry. Statio mirrors it (Castra also ships a sync client for
+  the legate's synchronous tick; Statio is **async-only** — the Legate cutover
+  goes async rather than carrying a `curl`-based sync client).
 - Forge facts produced by Statio must be **behavior-preserving** relative to the
   current `gh` output `sense-io.ts` consumes, so the Herald cutover changes only the
   transport, not the observed shape.
@@ -160,20 +163,18 @@ author/timestamp, the comment count, and the full list of comment ids.
 
 ### User Story 5: Reach the Gateway Over HTTP With Auth and Uniform Typed Errors (Priority: P1)
 
-As a consuming service (async event loop or synchronous legate tick), I want to
-reach Statio over HTTP with a bearer token, a typed client, and a uniform error
-envelope so that I can call typed methods and branch on stable error codes without
-a live `gh` in my own image.
+As a consuming service, I want to reach Statio over HTTP with a bearer token, a
+typed async client, and a uniform error envelope so that I can call typed methods
+and branch on stable error codes without a live `gh` in my own image.
 
-**Why this priority**: The transport, auth, error model, and the async+sync client
-pair are what make every read above consumable. Without them the reads are
+**Why this priority**: The transport, auth, error model, and the typed async client
+are what make every read above consumable. Without them the reads are
 unreachable.
 
 **Independent Test**: Start the service; call a `/v1/*` route without a token
 (expect `401 unauthorized`), with the token (expect `200`), and an unknown route
-(expect `404 not_found`). Exercise both the async (`fetch`) and sync (`curl`)
-clients against the same routes and verify identical typed results and error
-mapping.
+(expect `404 not_found`). Exercise the async (`fetch`) client against the same
+routes and verify typed results and error mapping.
 
 **Acceptance Scenarios**:
 
@@ -188,9 +189,9 @@ mapping.
 4. **Given** a request carries an `x-march-slice-id` header, **When** Statio
    handles it, **Then** the slice id is available for span correlation (the trace
    nests as a child, not a new root).
-5. **Given** both the async and sync clients, **When** they call the same route,
-   **Then** they resolve URL/token from `MARCH_STATIO_URL` / `MARCH_STATIO_TOKEN`,
-   return the same wire types, and map errors identically.
+5. **Given** the async client, **When** it calls a route, **Then** it resolves
+   URL/token from `MARCH_STATIO_URL` / `MARCH_STATIO_TOKEN`, returns the wire
+   types, and maps the error envelope to a typed `StatioClientError`.
 6. **Given** a `reachable()` probe, **When** the token is wrong or `gh` is down,
    **Then** the probe reports not-ready (it exercises the authenticated `/v1/*`
    surface, not just open `/healthz`) and never throws.
@@ -289,9 +290,10 @@ remaining reads build on them; US6 packages and instruments the result.
   MUST be open.
 - **FR-008**: Statio MUST expose named, allow-listed read methods only — it MUST
   NOT expose an arbitrary `gh api` passthrough.
-- **FR-009**: Statio MUST ship both an async (`fetch`) and a synchronous (`curl`)
-  client, both implementing the `ForgeClient` interface and sharing URL/token
-  resolution, the slice-id header, the error envelope, and the wire types.
+- **FR-009**: Statio MUST ship a typed async (`fetch`) client implementing the
+  `ForgeClient` interface, owning URL/token resolution, the slice-id header, the
+  error envelope, and the wire types. (No sync/`curl` client — unlike Castra,
+  Statio is async-only; the Legate cutover adapts to async.)
 - **FR-010**: Clients MUST resolve the base URL from `MARCH_STATIO_URL` (falling
   back to `http://localhost:<deterministic-port>`) and the token from
   `MARCH_STATIO_TOKEN`, and MUST map the non-2xx envelope to a typed
@@ -381,8 +383,8 @@ remaining reads build on them; US6 packages and instruments the result.
   `reviewThreads`).
 - **SC-003**: `/v1/*` requires the bearer token (401 without it); `/healthz` and
   `/status` are open; every non-2xx is the uniform envelope with a stable code.
-- **SC-004**: Both the async and sync clients call the same routes and return
-  identical typed results and error mappings.
+- **SC-004**: The async client calls each v1 route and returns typed results, with
+  every non-2xx mapped to a typed `StatioClientError` carrying `code` and `status`.
 - **SC-005**: `docker compose up` brings Statio up on the `march` network at the
   deterministic port, refuses to start without the token, and (with `MARCH_OTEL=1`)
   shows RED metrics, heartbeat/uptime, spans, and logs on the Statio Grafana
