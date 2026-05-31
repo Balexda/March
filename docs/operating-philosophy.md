@@ -87,5 +87,6 @@ Specs and feature maps that explicitly invoke this philosophy:
 
 - `specs/2026-05-12-004-spawn-sandbox-security/spawn-sandbox-security.spec.md` — "Design philosophy (2026-05-16)" section. Applied to F4's typed-exception bind-mount validator and credential-mount pre-flight (rule 2: minimum required access, not zero access).
 - `docs/rfcs/2026-001-march-orchestration-platform/march-orchestration-platform.rfc.md` — "Operating Philosophy" section. Summarizes this document and the vision; specs that cite the RFC indirectly cite both.
+- `specs/2026-05-26-006-statio-forge-gateway/statio-forge-gateway.spec.md` — Statio (the forge gateway). Like Castra, an infrastructure seam with no row in the per-component table; invokes all three rules of thumb in its Clarifications section (no interactive surfaces — `gh` auth provisioned at deploy, not negotiated per request; minimum required access — Statio is the only forge-credentialed image; clean exits — timeout-bounded `gh`, `forge_error` envelope never a hang).
 
 When you cite this document from a new spec, add the spec to this list with one line on which rule(s) it invokes and where.
