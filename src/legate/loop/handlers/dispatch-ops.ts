@@ -216,14 +216,11 @@ export async function recoverDispatch(
     }
   }
 
-  // The slice was `escalated` in the Herald fold; slice.dispatched alone does not
-  // reset stage, so emit the stage transition explicitly when the re-launch landed
-  // it in hatchery-pending. This keeps the fold correct so a restart mid-recovery
-  // resumes the completion poll instead of re-recovering. If launchDispatch's own
-  // catch re-escalated (the POST threw), the slice is escalated again — leave it.
-  if (state.slices?.[sliceId]?.stage === "hatchery-pending") {
-    deps.emitTransition({ type: "slice.stage.changed", sliceId, stage: "hatchery-pending" });
-  }
+  // The slice.recovery.dispatched event above already moved the fold to
+  // hatchery-pending (its reducer sets stage), so no compensating
+  // slice.stage.changed is needed — a restart mid-recovery rebuilds straight
+  // into the completion poll (#255). If launchDispatch's own catch re-escalated
+  // (the POST threw), the slice.escalated event left it escalated — correct.
   return out;
 }
 

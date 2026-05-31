@@ -211,15 +211,18 @@ describe("recoverDispatch (#211 bounded auto-recovery)", () => {
     expect(out.actions[0].detail).toContain("auto-recovery attempt 1/");
   });
 
-  it("persists the bumped retry counter and emits retry.counted + recovery.dispatched + the stage clear", async () => {
+  it("persists the bumped retry counter and emits retry.counted + recovery.dispatched, no stage clear (#255)", async () => {
     const state: any = { slices: { s: escalated() }, transient_retry_counts: {} };
     const emitTransition = vi.fn();
     await recoverDispatch(state, "T", item(), "s", 2, deps({ emitTransition }));
     expect(state.transient_retry_counts[recoveryAttemptKey("s")]).toBe(2);
     expect(emitTransition).toHaveBeenCalledWith({ type: "retry.counted", key: recoveryAttemptKey("s"), count: 2 });
     expect(emitTransition).toHaveBeenCalledWith(expect.objectContaining({ type: "slice.recovery.dispatched", sliceId: "s" }));
-    // Fold-correctness: the escalated stage is explicitly reset to hatchery-pending.
-    expect(emitTransition).toHaveBeenCalledWith({ type: "slice.stage.changed", sliceId: "s", stage: "hatchery-pending" });
+    // The recovery.dispatched reducer sets stage=hatchery-pending in the fold, so the
+    // dispatch path emits no compensating slice.stage.changed (#255); the in-memory
+    // warm state is still hatchery-pending (launchDispatch sets it).
+    expect(emitTransition).not.toHaveBeenCalledWith({ type: "slice.stage.changed", sliceId: "s", stage: "hatchery-pending" });
+    expect(state.slices.s.stage).toBe("hatchery-pending");
   });
 
   it("emits a recovery_dispatch action-log event so the (replay-only) recovery span re-lights", async () => {

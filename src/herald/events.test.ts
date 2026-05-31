@@ -64,6 +64,17 @@ describe("reduce / fold", () => {
     expect(archived.slices.s1.archived).toBe(true);
   });
 
+  it("sets stage to hatchery-pending on dispatch and recovery dispatch (#255)", () => {
+    seq = 0;
+    // The dispatch event itself means the slice is hatchery-pending, so a cold-start
+    // fold reproduces the warm-tick stage instead of a stage-less slice the
+    // completion poll skips.
+    const dispatched = foldEvents([ev({ type: "slice.dispatched", sliceId: "s1", branch: "feature/a", jobId: "job-1" })]);
+    expect(dispatched.slices.s1.stage).toBe("hatchery-pending");
+    const recovered = foldEvents([ev({ type: "slice.recovery.dispatched", sliceId: "s2", branch: "feature/b" })]);
+    expect(recovered.slices.s2.stage).toBe("hatchery-pending");
+  });
+
   it("folds slice.steward.attached into sessionId/spawnId/branch/worktree (#213)", () => {
     seq = 0;
     const state = foldEvents([
@@ -156,7 +167,8 @@ describe("reduce / fold", () => {
     ]);
     expect(recovered.slices.s1).toMatchObject({ branch: "feature/a", jobId: "job-2", archived: false });
     expect(recovered.slices.s1.recovered).toBeUndefined();
-    expect(recovered.slices.s1.stage).toBeUndefined();
+    // The fresh dispatch re-creates the slice in hatchery-pending (#255).
+    expect(recovered.slices.s1.stage).toBe("hatchery-pending");
     expect(recovered.slices.s1.escalatedReason).toBeUndefined();
     // A post-redispatch observation delta now updates normally (tombstone cleared).
     const observed = foldEvents([ev({ type: "slice.pr.changed", sliceId: "s1", pr: { number: 8, state: "OPEN" } })], recovered);

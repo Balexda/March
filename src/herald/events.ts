@@ -282,6 +282,11 @@ export function reduce(state: SystemState, event: HeraldEvent): SystemState {
     case "slice.dispatched":
     case "slice.recovery.dispatched": {
       const slice = sliceOf(state, event.sliceId);
+      // The dispatch *is* the slice entering hatchery-pending, so the fold
+      // records the stage here. A cold-start rebuild then reproduces the same
+      // working state a warm tick holds, instead of a stage-less slice the
+      // completion poll silently skips (#255).
+      slice.stage = "hatchery-pending";
       if (event.branch !== undefined) slice.branch = event.branch;
       if ("worktreePath" in event && event.worktreePath !== undefined) slice.worktreePath = event.worktreePath;
       if ("sessionId" in event && event.sessionId !== undefined) slice.sessionId = event.sessionId;
