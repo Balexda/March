@@ -1,6 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
 import type { DispatchIoDeps } from "./dispatch-io.js";
-import { emptySystemState, reduceEvent } from "../../../herald/events.js";
 import {
   completePendingHatcheryDispatches,
   launchDispatch,

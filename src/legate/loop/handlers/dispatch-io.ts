@@ -30,4 +30,12 @@ export interface DispatchIoDeps {
   postSpawn: (request: any) => Promise<{ id?: string }>;
   /** Poll a Hatchery job by id; resolves to the job (status/result/error). */
   getJob: (jobId: string) => Promise<any>;
+  /**
+   * Discover the slice's own open PR via the shared sense I/O (branch-variant
+   * matched, identical to Herald/babysit). Used by the #173 branch-collision
+   * adopt path: when a re-dispatch hits a branch that already has this slice's
+   * open PR, the legate adopts the PR instead of escalating. Returns the
+   * babysit-shaped PR snapshot, or null when no matching open PR exists.
+   */
+  discoverPr?: (slice: any, state: any, sessionId?: string) => Promise<any>;
 }
