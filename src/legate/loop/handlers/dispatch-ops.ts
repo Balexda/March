@@ -49,6 +49,82 @@ export interface DispatchOutcome {
   notifications: DispatchNotification[];
 }
 
+// #173: adopt the slice's own open PR on a branch-collision instead of escalating.
+//
+// When the loop re-dispatches a slice whose branch is already alive with an open
+// PR, the spawn fails with "branch '<name>' already exists". Hatchery's #245
+// self-heal correctly REFUSES to delete that branch when it is unsafe (open-pr /
+// diverged) — protecting real work — and surfaces the collision rather than
+// reconciling it: the forge-truth decision (an open PR must not be deleted) is the
+// legate's to make, not hatchery's (orphan-branch.ts:140-143; ownership moves to
+// the Statio extraction / legate side per #250). So here, on ANY branch-collision,
+// we ask the shared sense I/O whether a matching open PR exists for this slice's
+// expected branches (branch-variant matched, identical to Herald/babysit — no
+// duplicated gh logic). If it does, the colliding branch HAS our PR: adopt it
+// (stage → "pr-open", slice.pr ← snapshot) and emit the matching fold transitions
+// so the existing babysit pipeline drives it to merge with no fresh dispatch and no
+// destructive cleanup. The caller falls through to its normal escalate path when
+// this returns null (not a collision, or a genuine orphan branch with no open PR).
+//
+// Returns the adopt action to record, or null when nothing was adopted.
+async function adoptOpenPrOnCollision(
+  state: any,
+  ts: string,
+  sliceId: string,
+  errorText: string,
+  deps: DispatchIoDeps,
+): Promise<any | null> {
+  // Lookup-based detection (cleaner + self-correcting than string-matching the
+  // unsafe-to-remove verdict): only a "branch already exists" collision can be an
+  // adopt candidate; everything else escalates as before.
+  if (!/already exists/i.test(errorText)) return null;
+  const slice = state.slices?.[sliceId];
+  if (!slice || typeof slice !== "object") return null;
+  let pr: any;
+  try {
+    // Pass the steward sessionId when the fold already knows it (#210); the shared
+    // discovery falls back to branch-variant `gh pr list` matching when it is
+    // absent, which is the common collision case (the re-dispatch cleared it).
+    pr = await deps.discoverPr(slice, state, slice.worker_session_id || "");
+  } catch {
+    return null;
+  }
+  const number = pr?.number;
+  // A genuine orphan branch (no matching open PR) → no adoption; let the caller
+  // escalate exactly as it does today. Guard state too: discovery's session-output
+  // path can surface a non-open PR.
+  if (!pr || pr.skipped || typeof number !== "number" || !(number > 0)) return null;
+  if (pr.state && String(pr.state).toUpperCase() !== "OPEN") return null;
+
+  // Adopt: hand the slice to babysit's pr-open → fix → merge pipeline.
+  slice.stage = "pr-open";
+  slice.pr = pr;
+  // Clear any escalation residue from a prior incarnation — adoption resolves the
+  // situation cleanly, so the slice must not read as operator-only.
+  slice.escalated_reason = undefined;
+  slice.last_action = ts;
+  slice.last_action_note = "Adopted existing open PR #" + number + " on branch-collision (#173)";
+  // The fold is authoritative: record stage + PR as transitions, never in-memory
+  // only (#255). Carry the steward sessionId when known so the durable slice→
+  // session link (#210/#218) keeps holding; omit it otherwise (babysit + PR
+  // discovery do not require it for an open PR).
+  const sessionId = slice.worker_session_id || undefined;
+  deps.emitTransition({
+    type: "slice.stage.changed",
+    sliceId,
+    stage: "pr-open",
+    ...(sessionId ? { sessionId } : {}),
+  });
+  deps.emitTransition({ type: "slice.pr.changed", sliceId, pr });
+  deps.log("[" + ts + "] dispatch " + sliceId + ": adopted existing open PR #" + number + " from branch-collision");
+  return {
+    action: "adopt-pr",
+    sliceId,
+    sessionId: slice.worker_session_id || null,
+    detail: "adopted existing open PR #" + number + " from branch-collision",
+  };
+}
+
 // Launch a codex spawn through the Hatchery SERVICE. POSTs the spawn request via
 // the async Hatchery client and returns the server job id;
 // completePendingHatcheryDispatches polls that id with getJob() across ticks
@@ -127,6 +203,13 @@ export async function launchDispatch(state: any, ts: string, item: any, sliceId:
     deps.emitTransition({ type: "slice.dispatched", sliceId, branch: dispatchBranch(item), jobId: launched.jobId });
   } catch (err: any) {
     const error = err?.message || String(err);
+    // #173: if the launch collided with a branch that already has this slice's
+    // open PR, adopt the PR and let babysit drive it — no escalate, no cleanup.
+    const adopted = await adoptOpenPrOnCollision(state, ts, sliceId, error, deps);
+    if (adopted) {
+      actions.push(adopted);
+      return { actions, failures, mutated: true, notifications };
+    }
     const existing = state.slices?.[sliceId];
     if (existing && existing.stage === "hatchery-pending") {
       existing.stage = "escalated";
@@ -294,6 +377,16 @@ export async function completePendingHatcheryDispatches(state: any, ts: string, 
     }
     if (job.status === "failed" || job.result?.error) {
       const errorText = String(job.status === "failed" ? (job.error?.message || "hatchery spawn failed") : job.result.error).trim();
+      // #173: a background spawn that failed because the branch already has this
+      // slice's open PR is an adopt, not an escalate. The async service model
+      // surfaces the collision here (the spawn runs after POST /spawns' 202), so
+      // the same forge-truth check that guards the launch path guards this one.
+      const adopted = await adoptOpenPrOnCollision(state, ts, sliceId, errorText, deps);
+      if (adopted) {
+        actions.push(adopted);
+        mutated = true;
+        continue;
+      }
       escalate(slice, sliceId, errorText);
       continue;
     }
