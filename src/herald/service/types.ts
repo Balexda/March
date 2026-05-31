@@ -11,6 +11,12 @@ export interface EventStoreOptions {
   readonly dbPath?: string;
   /** Write a snapshot every N appends (cold-start fast-forward). Default 256. */
   readonly snapshotEvery?: number;
+  /**
+   * Profile stamped on appends that carry none, and used to backfill legacy v1
+   * rows on the schema-2 migration. The server sets this to the single-profile
+   * deployment's profile (from meta); tests/default use {@link DEFAULT_PROFILE}.
+   */
+  readonly defaultProfile?: string;
 }
 
 /** Parsed/validated `GET /events` query. */

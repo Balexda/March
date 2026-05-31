@@ -111,21 +111,32 @@ export type EventType = EventBody["type"];
 
 /** Storage/transport envelope assigned by the event store. */
 export interface EventEnvelope {
-  /** Monotonic sequence assigned on append — the ordering key and inbox cursor. */
+  /** Monotonic sequence assigned on append — the ordering key and inbox cursor.
+   *  ONE global seq across all profiles (the stream is multiplexed; the legate
+   *  keeps a single cursor and routes each event to its profile's fold). */
   seq: number;
   /** Stable event id (uuid); append is idempotent on it. */
   id: string;
   /** ISO8601 observation/transition time. */
   ts: string;
   source: EventSource;
+  /**
+   * The profile this event belongs to. Events are folded PER profile so slices
+   * from different profiles — whose deterministic `sliceId`s are only unique
+   * within a repo and can therefore collide — never clobber each other. The
+   * store fills this from the producer's `profile` (or its configured default).
+   */
+  profile: string;
 }
 
 /** A fully-materialized event (envelope + body). */
 export type HeraldEvent = EventEnvelope & EventBody;
 
-/** What a producer hands to the store; seq/id/ts are filled in if absent. */
+/** What a producer hands to the store; seq/id/ts and `profile` are filled in if absent. */
 export type AppendEventInput = EventBody & {
   source: EventSource;
+  /** The owning profile. Omit to let the store stamp its configured default. */
+  profile?: string;
   id?: string;
   ts?: string;
 };
@@ -368,4 +379,45 @@ export function foldEvents(events: Iterable<HeraldEvent>, base?: SystemState): S
   const state = base ? structuredClone(base) : emptySystemState();
   for (const event of events) reduce(state, event);
   return state;
+}
+
+/**
+ * The multi-profile projection: one {@link SystemState} per profile. A single
+ * legate drives N profiles and Herald observes N profiles, so the fold is keyed
+ * first on `event.profile`. This is what structurally prevents cross-profile
+ * sliceId collisions — each profile folds into its own isolated `SystemState`.
+ * `seq`/`ts` track the last event folded across ALL profiles (the global stream).
+ */
+export interface MultiProfileState {
+  seq: number;
+  ts: string;
+  byProfile: Record<string, SystemState>;
+}
+
+/** A fresh, empty multi-profile projection. */
+export function emptyMultiProfileState(): MultiProfileState {
+  return { seq: 0, ts: "", byProfile: {} };
+}
+
+/**
+ * Fold one event into the multi-profile projection: select (creating if absent)
+ * the event's profile bucket and apply the existing per-profile {@link reduce}.
+ * Mutates and returns `multi`.
+ */
+export function reduceMulti(multi: MultiProfileState, event: HeraldEvent): MultiProfileState {
+  const sys = (multi.byProfile[event.profile] ??= emptySystemState());
+  reduce(sys, event);
+  multi.seq = event.seq;
+  multi.ts = event.ts;
+  return multi;
+}
+
+/** Fold a sequence of events into a multi-profile projection from `base`/empty. */
+export function foldEventsMulti(
+  events: Iterable<HeraldEvent>,
+  base?: MultiProfileState,
+): MultiProfileState {
+  const multi = base ? structuredClone(base) : emptyMultiProfileState();
+  for (const event of events) reduceMulti(multi, event);
+  return multi;
 }

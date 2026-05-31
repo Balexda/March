@@ -61,10 +61,13 @@ export function loadMeta(metaPath: string): LoopMeta {
   return parsed as LoopMeta;
 }
 
-/** Resolve the tick interval from env, mirroring the original .mjs default of 60s. */
+/** Resolve the tick interval from env, mirroring the original .mjs default of 60s.
+ *  `MARCH_LEGATE_INTERVAL_SECONDS` is the current name; the `_LOOP_` form is kept
+ *  as a one-release back-compat alias. */
 export function resolveIntervalSeconds(env: NodeJS.ProcessEnv = process.env): number {
   const raw = Number(
-    env.MARCH_LEGATE_LOOP_INTERVAL_SECONDS ||
+    env.MARCH_LEGATE_INTERVAL_SECONDS ||
+      env.MARCH_LEGATE_LOOP_INTERVAL_SECONDS ||
       env.MARCH_PROCESSOR_INTERVAL_SECONDS ||
       "60",
   );

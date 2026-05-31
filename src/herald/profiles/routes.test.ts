@@ -1,0 +1,91 @@
+import { afterEach, describe, expect, it } from "vitest";
+import Fastify, { type FastifyInstance } from "fastify";
+import { sqliteAvailable } from "../service/sqlite.js";
+import { registerProfileRoutes, validateRegisterProfile } from "./routes.js";
+import { ProfileStore } from "./store.js";
+
+async function buildApp(): Promise<{ app: FastifyInstance; store: ProfileStore }> {
+  const store = new ProfileStore({ dbPath: ":memory:" });
+  const app = Fastify();
+  await registerProfileRoutes(app, { store });
+  return { app, store };
+}
+
+const body = (over: Record<string, unknown> = {}) => ({
+  profile: "march",
+  repoName: "March",
+  repoPath: "/home/u/Development/March",
+  workerGroup: "march-workers",
+  ...over,
+});
+
+describe("validateRegisterProfile", () => {
+  it("requires profile/repoName/repoPath/workerGroup", () => {
+    expect(validateRegisterProfile({})).toMatchObject({ ok: false });
+    expect(validateRegisterProfile({ profile: "march" })).toMatchObject({ ok: false });
+    expect(validateRegisterProfile(body())).toMatchObject({ ok: true });
+  });
+  it("rejects an invalid profile name", () => {
+    expect(validateRegisterProfile(body({ profile: "-bad" }))).toMatchObject({ ok: false });
+    expect(validateRegisterProfile(body({ profile: "a".repeat(65) }))).toMatchObject({ ok: false });
+    expect(validateRegisterProfile(body({ profile: "ok.name-1" }))).toMatchObject({ ok: true });
+  });
+});
+
+describe.skipIf(!sqliteAvailable)("profile routes", () => {
+  let close: (() => Promise<void>) | undefined;
+  afterEach(async () => {
+    if (close) await close();
+    close = undefined;
+  });
+
+  it("POST /profiles registers, GET /profiles lists, GET /profiles/:p fetches", async () => {
+    const { app, store } = await buildApp();
+    close = async () => {
+      await app.close();
+      store.close();
+    };
+    const post = await app.inject({ method: "POST", url: "/profiles", payload: body() });
+    expect(post.statusCode).toBe(201);
+    expect(post.json()).toMatchObject({ profile: "march", status: "active" });
+
+    const list = await app.inject({ method: "GET", url: "/profiles" });
+    expect(list.json().profiles.map((p: { profile: string }) => p.profile)).toEqual(["march"]);
+
+    const one = await app.inject({ method: "GET", url: "/profiles/march" });
+    expect(one.statusCode).toBe(200);
+    expect(one.json()).toMatchObject({ repoName: "March" });
+
+    const missing = await app.inject({ method: "GET", url: "/profiles/ghost" });
+    expect(missing.statusCode).toBe(404);
+  });
+
+  it("POST /profiles with a bad body returns 400", async () => {
+    const { app, store } = await buildApp();
+    close = async () => {
+      await app.close();
+      store.close();
+    };
+    const post = await app.inject({ method: "POST", url: "/profiles", payload: { profile: "march" } });
+    expect(post.statusCode).toBe(400);
+  });
+
+  it("DELETE /profiles/:p soft-removes; ?all=1 still surfaces it", async () => {
+    const { app, store } = await buildApp();
+    close = async () => {
+      await app.close();
+      store.close();
+    };
+    await app.inject({ method: "POST", url: "/profiles", payload: body() });
+    const del = await app.inject({ method: "DELETE", url: "/profiles/march" });
+    expect(del.statusCode).toBe(200);
+    expect(del.json()).toMatchObject({ status: "removed" });
+
+    expect((await app.inject({ method: "GET", url: "/profiles" })).json().profiles).toEqual([]);
+    const all = await app.inject({ method: "GET", url: "/profiles?all=1" });
+    expect(all.json().profiles.map((p: { profile: string }) => p.profile)).toEqual(["march"]);
+
+    const delMissing = await app.inject({ method: "DELETE", url: "/profiles/ghost" });
+    expect(delMissing.statusCode).toBe(404);
+  });
+});

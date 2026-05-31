@@ -1,37 +1,32 @@
 import Fastify, { type FastifyInstance } from "fastify";
-import type { LoopMeta } from "./meta.js";
 import type { LoopSnapshot } from "./runtime.js";
 
 /**
- * HTTP API for the Legate loop service, built on Fastify. The legate-agent (a
- * Claude conductor on the host) calls this to read loop state deterministically
- * rather than scraping logs. Today it exposes read-only liveness/status;
- * deterministic ACTION routes (POST /tick, /dispatch, ...) register the same way
- * (Balexda/March#147). Security model: the server binds `0.0.0.0` inside the
- * container so Docker's loopback port publish can reach it; the host publishes
- * only on loopback, so the API is never exposed beyond the host.
+ * HTTP API for the profile-agnostic Legate service, built on Fastify. The
+ * legate-agent (a Claude conductor on the host) calls this to read loop state
+ * deterministically rather than scraping logs. One container drives N profiles,
+ * so `/status?profile=<p>` returns one profile's tick state and bare `/status`
+ * returns the per-profile breakdown. Security model: the server binds `0.0.0.0`
+ * inside the container so Docker's loopback port publish can reach it; the host
+ * publishes only on loopback, so the API is never exposed beyond the host.
  */
 
 export interface LoopHttpContext {
-  readonly meta: LoopMeta;
   readonly startedAtMs: number;
   readonly getSnapshot: () => LoopSnapshot;
 }
 
-/** Build the /status payload from the latest heartbeat snapshot (pure; testable). */
-export function buildStatus(ctx: LoopHttpContext): Record<string, unknown> {
-  const snap = ctx.getSnapshot();
-  const r: any = snap.lastHeartbeat;
+/** Per-profile status from a heartbeat record + tick timing (pure; testable). */
+export function statusForRecord(
+  r: any,
+  tick: { lastTickAtMs: number; lastTickDurationMs: number },
+): Record<string, unknown> {
   const ageSeconds =
-    snap.lastTickAtMs > 0 ? Math.round((Date.now() - snap.lastTickAtMs) / 100) / 10 : null;
+    tick.lastTickAtMs > 0 ? Math.round((Date.now() - tick.lastTickAtMs) / 100) / 10 : null;
   return {
-    ok: true,
-    profile: ctx.meta.profile,
-    conductor: ctx.meta.paired_legate,
-    mode: ctx.meta.mode,
     last_tick_at: r?.ts ?? null,
     last_tick_age_seconds: ageSeconds,
-    last_tick_duration_ms: snap.lastTickDurationMs || null,
+    last_tick_duration_ms: tick.lastTickDurationMs || null,
     queue: {
       dispatchable: r?.dispatchable_count ?? 0,
       blocked: r?.blocked_count ?? 0,
@@ -57,6 +52,22 @@ export function buildStatus(ctx: LoopHttpContext): Record<string, unknown> {
   };
 }
 
+/** Build the /status payload. With `profile`, that profile's status; else all. */
+export function buildStatus(ctx: LoopHttpContext, profile?: string): Record<string, unknown> {
+  const snap = ctx.getSnapshot();
+  const tick = { lastTickAtMs: snap.lastTickAtMs, lastTickDurationMs: snap.lastTickDurationMs };
+  if (profile) {
+    const entry = snap.byProfile[profile];
+    if (!entry) return { ok: false, error: `unknown profile "${profile}".`, profiles: snap.profiles };
+    return { ok: true, profile, ...statusForRecord(entry.lastHeartbeat, tick) };
+  }
+  const byProfile: Record<string, unknown> = {};
+  for (const p of snap.profiles) {
+    byProfile[p] = statusForRecord(snap.byProfile[p].lastHeartbeat, tick);
+  }
+  return { ok: true, profiles: snap.profiles, by_profile: byProfile };
+}
+
 /** Build the Fastify app with the loop routes registered. Exported for tests (inject). */
 export function buildLoopServer(ctx: LoopHttpContext): FastifyInstance {
   const app = Fastify({ logger: false });
@@ -65,11 +76,15 @@ export function buildLoopServer(ctx: LoopHttpContext): FastifyInstance {
     status: "ok",
     pid: process.pid,
     uptime_seconds: Math.round((Date.now() - ctx.startedAtMs) / 1000),
-    profile: ctx.meta.profile,
-    conductor: ctx.meta.paired_legate,
+    profiles: ctx.getSnapshot().profiles,
   }));
 
-  app.get("/status", async () => buildStatus(ctx));
+  app.get("/status", async (request) => {
+    const query = (request.query ?? {}) as Record<string, string | undefined>;
+    const profile =
+      typeof query.profile === "string" && query.profile.length > 0 ? query.profile : undefined;
+    return buildStatus(ctx, profile);
+  });
 
   return app;
 }

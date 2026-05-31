@@ -1,5 +1,5 @@
 import { heraldPort } from "../config.js";
-import type { HeraldEvent, SystemState } from "../events.js";
+import type { HeraldEvent, MultiProfileState, SystemState } from "../events.js";
 import type { EventsPage } from "./types.js";
 
 export class HeraldClientError extends Error {
@@ -146,14 +146,31 @@ export class HeraldClient {
     return body as HeraldEvent;
   }
 
-  /** The current projection (or, with `at`, the projection as of a seq). */
-  async state(at?: number): Promise<SystemState> {
-    const qs = at !== undefined ? `?at=${at}` : "";
-    const { status, body } = await this.request("GET", `/state${qs}`);
+  /** The current projection (or, with `at`, the projection as of a seq). When
+   *  `profile` is given, that profile's SystemState; otherwise the default
+   *  profile's (back-compat single-profile view). */
+  async state(at?: number, profile?: string): Promise<SystemState> {
+    const params = new URLSearchParams();
+    if (at !== undefined) params.set("at", String(at));
+    if (profile !== undefined) params.set("profile", profile);
+    const qs = params.toString();
+    const { status, body } = await this.request("GET", `/state${qs ? `?${qs}` : ""}`);
     if (status !== 200) {
       throw new HeraldClientError(bodyError(body, `herald GET /state failed (${status})`));
     }
     return body as SystemState;
+  }
+
+  /** The full multi-profile projection (or, with `at`, as of a seq). The legate's
+   *  single-cursor cold-start seed for every profile in one round-trip. */
+  async stateAll(at?: number): Promise<MultiProfileState> {
+    const params = new URLSearchParams({ all: "1" });
+    if (at !== undefined) params.set("at", String(at));
+    const { status, body } = await this.request("GET", `/state?${params.toString()}`);
+    if (status !== 200) {
+      throw new HeraldClientError(bodyError(body, `herald GET /state?all failed (${status})`));
+    }
+    return body as MultiProfileState;
   }
 
   /** The events that moved state from `from` to `to` (default `to` = latest). */

@@ -1,17 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { buildLoopServer, buildStatus, type LoopHttpContext } from "./http.js";
-import type { LoopMeta } from "./meta.js";
 import type { LoopSnapshot } from "./runtime.js";
-
-const meta = {
-  profile: "smithy",
-  paired_legate: "demo-legate",
-  mode: "terminal-pr-maintenance",
-} as unknown as LoopMeta;
-
-function ctxWith(snapshot: LoopSnapshot): LoopHttpContext {
-  return { meta, startedAtMs: Date.now() - 5000, getSnapshot: () => snapshot };
-}
 
 const heartbeat = {
   ts: "2026-05-19T00:00:00.000Z",
@@ -33,15 +22,27 @@ const heartbeat = {
   state_error: null,
 };
 
+function snapshot(over: Partial<LoopSnapshot> = {}): LoopSnapshot {
+  const byProfile = over.byProfile ?? { smithy: { lastHeartbeat: heartbeat } };
+  return {
+    byProfile,
+    profiles: over.profiles ?? Object.keys(byProfile),
+    lastTickAtMs: over.lastTickAtMs ?? Date.now(),
+    lastTickDurationMs: over.lastTickDurationMs ?? 420,
+    lastHeartbeat: over.lastHeartbeat ?? Object.values(byProfile)[0]?.lastHeartbeat ?? null,
+  };
+}
+
+function ctxWith(snap: LoopSnapshot): LoopHttpContext {
+  return { startedAtMs: Date.now() - 5000, getSnapshot: () => snap };
+}
+
 describe("loop http (fastify)", () => {
-  it("builds a /status payload from the latest heartbeat", () => {
-    const status = buildStatus(
-      ctxWith({ lastHeartbeat: heartbeat, lastTickAtMs: Date.now(), lastTickDurationMs: 420 }),
-    );
+  it("builds a per-profile /status payload from that profile's heartbeat", () => {
+    const status = buildStatus(ctxWith(snapshot()), "smithy");
     expect(status).toMatchObject({
       ok: true,
       profile: "smithy",
-      conductor: "demo-legate",
       queue: { dispatchable: 2, blocked: 1, total: 5 },
       slices: { total: 4, archived: 2 },
       last_tick_duration_ms: 420,
@@ -50,9 +51,21 @@ describe("loop http (fastify)", () => {
     });
   });
 
+  it("bare /status returns the per-profile breakdown", () => {
+    const status = buildStatus(ctxWith(snapshot()));
+    expect(status).toMatchObject({ ok: true, profiles: ["smithy"] });
+    expect((status as any).by_profile.smithy.queue.dispatchable).toBe(2);
+  });
+
+  it("an unknown profile reports not-ok with the known profile list", () => {
+    const status = buildStatus(ctxWith(snapshot()), "ghost");
+    expect(status).toMatchObject({ ok: false, profiles: ["smithy"] });
+  });
+
   it("returns safe defaults before the first tick", () => {
     const status = buildStatus(
-      ctxWith({ lastHeartbeat: null, lastTickAtMs: 0, lastTickDurationMs: 0 }),
+      ctxWith(snapshot({ byProfile: { smithy: { lastHeartbeat: null } }, lastTickAtMs: 0, lastTickDurationMs: 0 })),
+      "smithy",
     );
     expect(status).toMatchObject({
       queue: { dispatchable: 0, blocked: 0, total: 0 },
@@ -62,15 +75,14 @@ describe("loop http (fastify)", () => {
   });
 
   it("serves /healthz and /status, 404 for unknown routes", async () => {
-    const app = buildLoopServer(
-      ctxWith({ lastHeartbeat: heartbeat, lastTickAtMs: Date.now(), lastTickDurationMs: 1 }),
-    );
+    const app = buildLoopServer(ctxWith(snapshot({ lastTickDurationMs: 1 })));
     try {
       const health = await app.inject({ method: "GET", url: "/healthz" });
       expect(health.statusCode).toBe(200);
       expect(health.json().status).toBe("ok");
+      expect(health.json().profiles).toEqual(["smithy"]);
 
-      const status = await app.inject({ method: "GET", url: "/status" });
+      const status = await app.inject({ method: "GET", url: "/status?profile=smithy" });
       expect(status.statusCode).toBe(200);
       expect(status.json().queue.dispatchable).toBe(2);
 

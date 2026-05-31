@@ -1,16 +1,19 @@
 import { describe, expect, it } from "vitest";
 import {
+  emptyMultiProfileState,
   emptySystemState,
   entityRefOf,
   foldEvents,
+  foldEventsMulti,
   reduce,
+  reduceMulti,
   type HeraldEvent,
 } from "./events.js";
 
 let seq = 0;
 function ev(body: any): HeraldEvent {
   seq += 1;
-  return { seq, id: `e${seq}`, ts: `2026-05-20T00:00:0${seq % 10}Z`, source: "herald", ...body };
+  return { seq, id: `e${seq}`, ts: `2026-05-20T00:00:0${seq % 10}Z`, source: "herald", profile: body.profile ?? "p", ...body };
 }
 
 describe("entityRefOf", () => {
@@ -249,8 +252,51 @@ describe("reduce / fold", () => {
 
   it("reduce advances seq/ts to the last event", () => {
     const state = emptySystemState();
-    reduce(state, { seq: 42, id: "e", ts: "2026-05-20T12:00:00Z", source: "herald", type: "heartbeat" });
+    reduce(state, { seq: 42, id: "e", ts: "2026-05-20T12:00:00Z", source: "herald", profile: "p", type: "heartbeat" });
     expect(state.seq).toBe(42);
     expect(state.ts).toBe("2026-05-20T12:00:00Z");
+  });
+});
+
+describe("reduceMulti / foldEventsMulti", () => {
+  it("folds events into disjoint per-profile buckets — colliding sliceIds never clash", () => {
+    seq = 0;
+    const multi = foldEventsMulti([
+      ev({ profile: "a", type: "slice.dispatched", sliceId: "s1", branch: "a/s1" }),
+      ev({ profile: "b", type: "slice.dispatched", sliceId: "s1", branch: "b/s1" }),
+      ev({ profile: "a", type: "slice.stage.changed", sliceId: "s1", stage: "pr-open" }),
+    ]);
+    // Same sliceId "s1" in both profiles, but isolated state.
+    expect(multi.byProfile.a.slices.s1.branch).toBe("a/s1");
+    expect(multi.byProfile.a.slices.s1.stage).toBe("pr-open");
+    expect(multi.byProfile.b.slices.s1.branch).toBe("b/s1");
+    expect(multi.byProfile.b.slices.s1.stage).toBeUndefined();
+  });
+
+  it("tracks the global seq/ts across profiles", () => {
+    seq = 0;
+    const multi = foldEventsMulti([
+      ev({ profile: "a", type: "heartbeat" }),
+      ev({ profile: "b", type: "heartbeat" }),
+    ]);
+    expect(multi.seq).toBe(2);
+    expect(Object.keys(multi.byProfile).sort()).toEqual(["a", "b"]);
+  });
+
+  it("reduceMulti mutates and returns the same multi-state", () => {
+    const multi = emptyMultiProfileState();
+    const out = reduceMulti(multi, ev({ profile: "z", type: "heartbeat" }));
+    expect(out).toBe(multi);
+    expect(multi.byProfile.z).toBeDefined();
+  });
+
+  it("foldEventsMulti does not mutate the base", () => {
+    seq = 0;
+    const base = foldEventsMulti([ev({ profile: "a", type: "heartbeat" })]);
+    const baseSeq = base.seq;
+    const next = foldEventsMulti([ev({ profile: "b", type: "heartbeat" })], base);
+    expect(base.seq).toBe(baseSeq);
+    expect(Object.keys(base.byProfile)).toEqual(["a"]);
+    expect(Object.keys(next.byProfile).sort()).toEqual(["a", "b"]);
   });
 });

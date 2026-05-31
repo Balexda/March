@@ -329,7 +329,7 @@ describe("legate module", () => {
       expect(rendered).toContain("processor=march-legate-loop");
       expect(result.summary).toContain("Loop:");
       expect(result.summary).toContain("march-legate-loop");
-      expect(result.summary).toContain("loop container deferred — run setup first");
+      expect(result.summary).toContain("registration deferred — run setup first");
     });
 
     it("stages legate.unwedge skill with inspect + clean-stale scripts", async () => {
@@ -456,7 +456,7 @@ describe("legate module", () => {
       expect(result.summary).toContain("disabled (--no-loop)");
     });
 
-    it("runs the loop as a service in a managed container with no agent-deck loop session", async () => {
+    it("registers the profile + ensures the shared compose service (no per-profile container, no agent-deck loop session)", async () => {
       const home = makeTmpDir();
       const binDir = makeTmpDir();
       const commandLog = path.join(home, "commands.log");
@@ -491,28 +491,29 @@ describe("legate module", () => {
 
       const oldPath = process.env.PATH;
       const oldHome = process.env.HOME;
+      const oldHerald = process.env.MARCH_HERALD_URL;
       process.env.PATH = [binDir, oldPath ?? ""].join(path.delimiter);
       process.env.HOME = home;
+      // Point Herald at a closed port so registration fails fast (best-effort).
+      process.env.MARCH_HERALD_URL = "http://127.0.0.1:1";
       try {
         const result = await initLegate({
           repoPath: "/some/repo/March",
           homeDir: home,
         });
 
-        expect(result.legateContainer?.containerId).toBe("container-id-managed");
-        // The container reads its meta from the staged loop dir.
+        // The shared compose service is ensured (idempotent docker compose up -d),
+        // not a per-profile `docker run`.
+        expect(result.legateService?.serviceEnsured).toBe(true);
+        const log = fs.readFileSync(commandLog, "utf-8");
+        expect(log).toContain("compose -f");
+        expect(log).toContain("legate.docker-compose.yml up -d");
+        // No per-profile container is launched any more.
+        expect(log).not.toContain("docker run -d --name march-legate");
+        // The staged meta sidecar still exists (Herald seed / back-compat).
         expect(
           fs.existsSync(path.join(result.loopConductorDir!, "legate-loop-meta.json")),
         ).toBe(true);
-        const log = fs.readFileSync(commandLog, "utf-8");
-        expect(log).toContain(
-          "docker run -d --name march-legate-march-legate-agent",
-        );
-        // The loop now runs as a service via the baked-in CLI, not raw node, and
-        // publishes its HTTP API on a loopback host port.
-        expect(log).toContain("exec march legate loop");
-        expect(log).not.toContain('exec node "');
-        expect(log).toContain("-p 127.0.0.1:");
         // No agent-deck conductor session is created/configured for the loop.
         expect(log).not.toContain("conductor setup march-legate-loop");
         expect(log).not.toContain(
@@ -527,6 +528,8 @@ describe("legate module", () => {
       } finally {
         process.env.PATH = oldPath;
         process.env.HOME = oldHome;
+        if (oldHerald === undefined) delete process.env.MARCH_HERALD_URL;
+        else process.env.MARCH_HERALD_URL = oldHerald;
       }
     });
 

@@ -1,5 +1,8 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { sqliteAvailable } from "./sqlite.js";
+import { getDatabaseSync, sqliteAvailable } from "./sqlite.js";
 import { EventStore } from "./store.js";
 import type { AppendEventInput, EventBody } from "../events.js";
 
@@ -96,5 +99,81 @@ describe.skipIf(!sqliteAvailable)("EventStore", () => {
     expect((proj.slices.s1.pr as any).state).toBe("OPEN");
     expect(proj.seq).toBe(3);
     b.close();
+  });
+});
+
+describe.skipIf(!sqliteAvailable)("EventStore multi-profile", () => {
+  const legate = (profile: string, body: EventBody): AppendEventInput =>
+    ({ source: "legate", profile, ...body } as AppendEventInput);
+
+  it("folds per profile — a sliceId shared across profiles never collides", () => {
+    const store = makeStore();
+    store.append(legate("a", { type: "slice.dispatched", sliceId: "s1", branch: "a/s1" }));
+    store.append(legate("b", { type: "slice.dispatched", sliceId: "s1", branch: "b/s1" }));
+    store.append(legate("a", { type: "slice.stage.changed", sliceId: "s1", stage: "pr-open" }));
+    expect(store.projectionFor("a").slices.s1.branch).toBe("a/s1");
+    expect(store.projectionFor("a").slices.s1.stage).toBe("pr-open");
+    expect(store.projectionFor("b").slices.s1.branch).toBe("b/s1");
+    expect(store.projectionFor("b").slices.s1.stage).toBeUndefined();
+    expect(Object.keys(store.multiProjection().byProfile).sort()).toEqual(["a", "b"]);
+    store.close();
+  });
+
+  it("readAfter returns the whole multiplexed stream, or one profile when filtered", () => {
+    const store = makeStore();
+    store.append(legate("a", { type: "heartbeat" }));
+    store.append(legate("b", { type: "heartbeat" }));
+    store.append(legate("a", { type: "heartbeat" }));
+    expect(store.readAfter(0, 100).map((e) => e.profile)).toEqual(["a", "b", "a"]);
+    expect(store.readAfter(0, 100, "a").map((e) => e.seq)).toEqual([1, 3]);
+    store.close();
+  });
+
+  it("stateAtFor reconstructs one profile's projection up to a seq", () => {
+    const store = makeStore();
+    store.append(legate("a", { type: "smithy.queue.changed", dispatchable: 1, blocked: 0, total: 1 }));
+    store.append(legate("b", { type: "smithy.queue.changed", dispatchable: 9, blocked: 0, total: 9 }));
+    store.append(legate("a", { type: "smithy.queue.changed", dispatchable: 5, blocked: 0, total: 5 }));
+    expect(store.stateAtFor("a", 1).smithy.dispatchable).toBe(1);
+    expect(store.stateAtFor("a", 3).smithy.dispatchable).toBe(5);
+    expect(store.stateAtFor("b", 3).smithy.dispatchable).toBe(9);
+    store.close();
+  });
+
+  it("defaults untagged appends to the configured default profile", () => {
+    const store = new EventStore({ dbPath: ":memory:", defaultProfile: "march" });
+    store.append({ source: "legate", type: "slice.dispatched", sliceId: "s1", branch: "x" } as AppendEventInput);
+    expect(store.readAfter(0, 10)[0].profile).toBe("march");
+    expect(store.projection().slices.s1.branch).toBe("x"); // projection() = default profile
+    expect(store.projectionFor("march").slices.s1.branch).toBe("x");
+    store.close();
+  });
+
+  it("migrates a v1 DB by adding + backfilling the profile column", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "herald-migrate-"));
+    const dbPath = path.join(dir, "events.db");
+    // Build a pre-profile (v1) database by hand.
+    const DB = getDatabaseSync();
+    const raw = new DB(dbPath);
+    raw.exec(`
+      CREATE TABLE events (
+        seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, type TEXT NOT NULL,
+        entity_kind TEXT NOT NULL, entity_id TEXT NOT NULL, source TEXT NOT NULL,
+        ts TEXT NOT NULL, payload TEXT NOT NULL
+      );
+      CREATE TABLE snapshots (seq INTEGER PRIMARY KEY, state TEXT NOT NULL, created_at TEXT NOT NULL);
+      CREATE TABLE schema_meta (version INTEGER NOT NULL);
+    `);
+    raw.prepare("INSERT INTO schema_meta (version) VALUES (1)").run();
+    raw
+      .prepare("INSERT INTO events (id, type, entity_kind, entity_id, source, ts, payload) VALUES (?, ?, ?, ?, ?, ?, ?)")
+      .run("e1", "slice.dispatched", "slice", "s1", "legate", "t1", JSON.stringify({ type: "slice.dispatched", sliceId: "s1", branch: "x" }));
+    raw.close();
+
+    const store = new EventStore({ dbPath, defaultProfile: "march" });
+    expect(store.readAfter(0, 10)[0].profile).toBe("march");
+    expect(store.projectionFor("march").slices.s1.branch).toBe("x");
+    store.close();
+    fs.rmSync(dir, { recursive: true, force: true });
   });
 });
