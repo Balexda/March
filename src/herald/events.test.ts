@@ -64,15 +64,46 @@ describe("reduce / fold", () => {
     expect(archived.slices.s1.archived).toBe(true);
   });
 
-  it("sets stage to hatchery-pending on dispatch and recovery dispatch (#255)", () => {
+  it("slice.dispatched sets stage to hatchery-pending and clears any escalation (#255)", () => {
     seq = 0;
-    // The dispatch event itself means the slice is hatchery-pending, so a cold-start
-    // fold reproduces the warm-tick stage instead of a stage-less slice the
+    // The job-bearing dispatch event itself means the slice is hatchery-pending, so a
+    // cold-start fold reproduces the warm-tick stage instead of a stage-less slice the
     // completion poll skips.
     const dispatched = foldEvents([ev({ type: "slice.dispatched", sliceId: "s1", branch: "feature/a", jobId: "job-1" })]);
     expect(dispatched.slices.s1.stage).toBe("hatchery-pending");
-    const recovered = foldEvents([ev({ type: "slice.recovery.dispatched", sliceId: "s2", branch: "feature/b" })]);
-    expect(recovered.slices.s2.stage).toBe("hatchery-pending");
+    // Re-dispatching a previously escalated slice clears the stale escalation reason,
+    // so the fold never holds the impossible "pending-but-escalated" state.
+    const redispatched = foldEvents([
+      ev({ type: "slice.escalated", sliceId: "s1", reason: "hatchery_dispatch_failed" }),
+      ev({ type: "slice.dispatched", sliceId: "s1", branch: "feature/a", jobId: "job-2" }),
+    ]);
+    expect(redispatched.slices.s1.stage).toBe("hatchery-pending");
+    expect(redispatched.slices.s1.escalatedReason).toBeUndefined();
+  });
+
+  it("slice.recovery.dispatched does NOT mark the slice pending until the job-bearing dispatch (#255)", () => {
+    seq = 0;
+    // recoverDispatch emits slice.recovery.dispatched BEFORE launchDispatch queues the
+    // new Hatchery job (and its slice.dispatched with the jobId). If recovery.dispatched
+    // marked the slice hatchery-pending, a restart in that gap would rebuild a job-less
+    // pending slice the completion poll skips forever — and bounded auto-recovery would
+    // no longer see it as escalated. So recovery.dispatched must NOT set stage.
+    const midRecovery = foldEvents([
+      ev({ type: "slice.escalated", sliceId: "s1", reason: "hatchery_dispatch_failed" }),
+      ev({ type: "slice.recovery.dispatched", sliceId: "s1", branch: "feature/a" }),
+    ]);
+    expect(midRecovery.slices.s1.stage).toBe("escalated");
+    expect(midRecovery.slices.s1.escalatedReason).toBe("hatchery_dispatch_failed");
+    expect(midRecovery.slices.s1.jobId).toBeUndefined();
+
+    // Once the inner slice.dispatched lands (with the new jobId), the slice is pending
+    // and pollable, and the stale escalation is cleared.
+    const recovered = foldEvents([
+      ev({ type: "slice.dispatched", sliceId: "s1", branch: "feature/a", jobId: "job-2" }),
+    ], midRecovery);
+    expect(recovered.slices.s1.stage).toBe("hatchery-pending");
+    expect(recovered.slices.s1.jobId).toBe("job-2");
+    expect(recovered.slices.s1.escalatedReason).toBeUndefined();
   });
 
   it("folds slice.steward.attached into sessionId/spawnId/branch/worktree (#213)", () => {
