@@ -147,6 +147,19 @@ describe("senseFromHerald (Stage 1, Herald-backed)", () => {
 });
 
 describe("rebuildWorkingState", () => {
+  it("a dispatched-only slice rebuilds into hatchery-pending with its job id (#255)", () => {
+    // After a dispatch the fold carries the slice as hatchery-pending + its job id
+    // (see the reducer test in events.test.ts). A cold-start rebuild must reproduce
+    // that warm-tick shape — stage + hatchery.job_id — or the completion poll
+    // (stage !== "hatchery-pending") skips it and the slice is stranded.
+    const sys = foldedState({
+      slices: { s1: slice({ sliceId: "s1", stage: "hatchery-pending", branch: "feat/s1", jobId: "job-1" }) },
+    });
+    const raw = rebuildWorkingState(sys, meta);
+    expect(raw.slices.s1.stage).toBe("hatchery-pending");
+    expect(raw.slices.s1.hatchery).toEqual({ job_id: "job-1", backend: "codex" });
+  });
+
   it("restores the slice set + retry counters from the fold", () => {
     const sys = foldedState({
       slices: {

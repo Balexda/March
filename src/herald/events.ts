@@ -282,6 +282,20 @@ export function reduce(state: SystemState, event: HeraldEvent): SystemState {
     case "slice.dispatched":
     case "slice.recovery.dispatched": {
       const slice = sliceOf(state, event.sliceId);
+      // A fresh slice.dispatched carries the Hatchery job id and *is* the slice
+      // entering hatchery-pending, so record the stage (and clear any prior
+      // escalation) — a cold-start rebuild then reproduces the warm-tick shape
+      // instead of a stage-less slice the completion poll skips (#255).
+      // slice.recovery.dispatched is emitted BEFORE the job-bearing
+      // slice.dispatched (recoverDispatch -> launchDispatch), so it must NOT mark
+      // the slice pending: a restart in that gap would otherwise rebuild a
+      // job-less hatchery-pending slice that the poll skips forever (and that
+      // bounded auto-recovery no longer sees as escalated). The inner
+      // slice.dispatched sets the stage once the job id exists.
+      if (event.type === "slice.dispatched") {
+        slice.stage = "hatchery-pending";
+        delete slice.escalatedReason;
+      }
       if (event.branch !== undefined) slice.branch = event.branch;
       if ("worktreePath" in event && event.worktreePath !== undefined) slice.worktreePath = event.worktreePath;
       if ("sessionId" in event && event.sessionId !== undefined) slice.sessionId = event.sessionId;
