@@ -470,7 +470,7 @@ legate
   )
   .option(
     "--profile <profile>",
-    "Profile the slice belongs to (sliceIds are only unique within a profile). Defaults to the single-profile deployment when omitted.",
+    "Profile the slice belongs to (sliceIds are only unique within a profile). When omitted, the sole registered profile is used; required if more than one is registered.",
   )
   .action(async (sliceId: string, opts: { profile?: string }) => {
     commandHandled = true;
@@ -481,15 +481,39 @@ legate
       return;
     }
     const { HeraldClient, HeraldClientError } = await import("../herald/service/client.js");
+    const { ProfileClient } = await import("../herald/profiles/client.js");
     try {
-      const profile = opts.profile?.trim();
+      // Resolve the owning profile so the event is stamped with it — otherwise
+      // Herald stamps its store default and the legate's per-profile
+      // takeRecoveryRequests(meta.profile) never sees it (the slice stays stuck).
+      let profile = opts.profile?.trim();
+      if (!profile) {
+        const active = await new ProfileClient().list();
+        if (active.length === 1) {
+          profile = active[0].profile;
+        } else if (active.length === 0) {
+          process.stderr.write(
+            "No profiles are registered with Herald — nothing to recover. " +
+              "Register one with `march legate init` / `march profile register`.\n",
+          );
+          process.exitCode = ERROR;
+          return;
+        } else {
+          process.stderr.write(
+            `Multiple profiles are registered (${active.map((p) => p.profile).join(", ")}); ` +
+              "pass --profile <profile> to disambiguate which one owns the slice.\n",
+          );
+          process.exitCode = ERROR;
+          return;
+        }
+      }
       const event = await new HeraldClient().append({
         type: "slice.recovery.requested",
         sliceId: id,
-        ...(profile ? { profile } : {}),
+        profile,
       });
       console.log(
-        `Requested recovery of ${id}${profile ? ` (profile=${profile})` : ""} (seq=${event.seq}). ` +
+        `Requested recovery of ${id} (profile=${profile}) (seq=${event.seq}). ` +
           `The legate will drop the escalated slice and re-dispatch it on its next tick.`,
       );
       process.exitCode = SUCCESS;
