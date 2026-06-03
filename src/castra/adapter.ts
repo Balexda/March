@@ -150,6 +150,52 @@ export function parseAgentDeckSession(
 }
 
 /**
+ * Derive the current branch of a session's working directory by reading its git
+ * head (#264). Castra owns the agent-deck session enumeration and already knows
+ * each session's `path`, so it is the right place to make the session record
+ * self-describing: every downstream consumer (Herald observer, legate cleanup /
+ * babysit / relaunch) reads `session.branch` without re-deriving it.
+ *
+ * Contract:
+ *   - non-existent / non-git directory → `""`
+ *   - detached HEAD (`branch --show-current` is empty) → `""` (never a bare SHA)
+ *   - otherwise the trimmed branch name
+ *
+ * Any git failure (missing path, not a work tree, git absent) collapses to `""`
+ * — an empty branch is always a valid, additive answer, never an error.
+ */
+export function deriveWorktreeBranch(worktreePath: string): string {
+  if (!worktreePath) return "";
+  let insideWorkTree: string;
+  try {
+    insideWorkTree = runGit([
+      "-C",
+      worktreePath,
+      "rev-parse",
+      "--is-inside-work-tree",
+    ]);
+  } catch {
+    return "";
+  }
+  if (insideWorkTree.trim() !== "true") return "";
+  try {
+    return runGit(["-C", worktreePath, "branch", "--show-current"]).trim();
+  } catch {
+    return "";
+  }
+}
+
+/** Run `git <args>` capturing stdout. Throws on non-zero exit / spawn failure. */
+function runGit(args: readonly string[]): string {
+  const out = execFileSync("git", args as string[], {
+    encoding: "utf-8",
+    stdio: ["ignore", "pipe", "ignore"],
+    maxBuffer: EXEC_MAX_BUFFER,
+  });
+  return typeof out === "string" ? out : "";
+}
+
+/**
  * Derive the worktree directory name agent-deck creates for a branch: its
  * `--worktree` flag produces `feature-<branch>` with "/" rewritten to "-".
  * Copied from spawn-handoff.ts.
@@ -344,12 +390,41 @@ export function createAgentDeckAdapter(): AgentDeckAdapter {
   // via the #213 push, this is the self-healing pull-path backstop.
   const sessionMeta = new Map<string, { metadata?: Record<string, string>; branch?: string }>();
 
-  /** Re-attach stored metadata + backfill an empty branch onto a snapshot session. */
+  // Per-session derived-branch cache (#264), keyed by session id. The working
+  // directory's branch rarely changes mid-session, so we derive it once via git
+  // and reuse the result for the session's lifetime. The cached `path` is part of
+  // the validity check: a session restart yields a fresh id (cache miss), and a
+  // path mutation under a reused id re-derives — so the cache never serves a hard
+  // miss across a restart, only an at-most-one-tick-stale read mid-session.
+  const branchCache = new Map<string, { path: string; branch: string }>();
+
+  /**
+   * Resolve a session's branch, deriving it from the working directory when
+   * neither the agent-deck snapshot nor the launch-time record carries one (the
+   * legacy-session case the #264 link gap depends on). Git is consulted at most
+   * once per (session id, path) pair.
+   */
+  function resolveBranch(session: CastraSession, storedBranch?: string): string {
+    const known = session.branch || storedBranch || "";
+    if (known) return known;
+    const path = session.worktreePath;
+    if (!path) return "";
+    const cached = branchCache.get(session.sessionId);
+    if (cached && cached.path === path) return cached.branch;
+    const branch = deriveWorktreeBranch(path);
+    branchCache.set(session.sessionId, { path, branch });
+    return branch;
+  }
+
+  /**
+   * Re-attach stored metadata, backfill an empty branch from the launch record
+   * (#214), and — for sessions with no recorded branch at all — derive it from
+   * the working directory's git head (#264).
+   */
   function enrich(session: CastraSession): CastraSession {
     const stored = sessionMeta.get(session.sessionId);
-    if (!stored) return session;
-    const metadata = session.metadata ?? stored.metadata;
-    const branch = session.branch || stored.branch || "";
+    const metadata = session.metadata ?? stored?.metadata;
+    const branch = resolveBranch(session, stored?.branch);
     if (metadata === session.metadata && branch === session.branch) return session;
     return { ...session, branch, ...(metadata ? { metadata } : {}) };
   }
@@ -487,6 +562,7 @@ export function createAgentDeckAdapter(): AgentDeckAdapter {
       try {
         runAgentDeck(buildSessionRemoveArgs(profile, sessionId, pruneWorktree), false);
         sessionMeta.delete(sessionId);
+        branchCache.delete(sessionId);
         return { removed: true };
       } catch (err) {
         const stderr = (err as AgentDeckExecError).stderr ?? "";

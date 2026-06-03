@@ -16,6 +16,15 @@ export interface CastraSession {
   readonly sessionId: string;
   readonly title: string;
   readonly group: string;
+  /**
+   * The session's current branch. Always present; `""` when unknown. Castra
+   * enriches this at the gateway (#264): when neither agent-deck's snapshot nor
+   * the launch-time record carries a branch, Castra derives it from the working
+   * directory's git head (`git -C <path> branch --show-current`), so legacy
+   * sessions whose snapshot reports `branch: ""` still surface the real branch
+   * for `looseSessionMatch` to compare against. `""` for a non-git directory or
+   * a detached HEAD (never a bare SHA).
+   */
   readonly branch: string;
   readonly worktreePath: string;
   readonly createdAt: string;
