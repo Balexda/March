@@ -149,7 +149,7 @@ Recommended implementation sequence:
 | ID | Description | Source Category | Impact | Confidence | Status | Resolution |
 |----|-------------|-----------------|--------|------------|--------|------------|
 | SD-001 | Initial draft was uncertain whether the source feature map and RFC were available; both are present in the repo, and the F5 scope (sequential handoff, JSON retrieval, structure validation, patch parsing, untrusted-input/A6 defense) was reconciled against `docs/rfcs/2026-001-march-orchestration-platform/01-spawn.features.md`. | Constraints | High | Medium | resolved | Spec confirmed against the present feature map and RFC; dependency wording matches the F5 row. |
-| SD-002 | The exact storage location for `ExtractionResult` must be reconciled with the live Brood registry and any legacy SpawnRecord JSON compatibility expectations before cutting implementation tasks. | Domain & Data Model | Medium | Medium | open | — |
+| SD-002 | The exact storage location for `ExtractionResult` must be reconciled with the live Brood registry and any legacy SpawnRecord JSON compatibility expectations before cutting implementation tasks. | Domain & Data Model | Medium | Medium | resolved | Resolved by the US3 cut (`03-persist-extraction-result.tasks.md`): Brood owns the current persisted `ExtractionResult` on the spawn lifecycle row; legacy `~/.march/spawns/<id>.json` compatibility remains read-through/fallback only. |
 
 ## Out of Scope
 
