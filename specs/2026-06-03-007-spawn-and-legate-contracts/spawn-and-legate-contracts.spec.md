@@ -87,9 +87,9 @@ Recommended implementation sequence:
 
 | ID | Title | Depends On | Artifact |
 |----|-------|-----------|----------|
-| US1 | Document Spawn Dispatch Contract | - | - |
-| US2 | Document Legate Loop Contract | - | - |
-| US3 | Record Cross-Contract Ownership Boundaries | US1, US2 | - |
+| US1 | Document Spawn Dispatch Contract | — | — |
+| US2 | Document Legate Loop Contract | — | — |
+| US3 | Record Cross-Contract Ownership Boundaries | US1, US2 | — |
 
 ## Requirements *(mandatory)*
 
@@ -108,6 +108,7 @@ Recommended implementation sequence:
 - **FR-011**: The Legate contract MUST document error modes for missing service readiness, invalid event streams, duplicate or stale slice state, Hatchery dispatch failure, Castra or steward loss, timeout, and cleanup failure.
 - **FR-012**: Both contracts MUST name cross-contract ownership boundaries without re-documenting Feature 2's HTTP route details or Feature 4's Steward role interface.
 - **FR-013**: This feature MUST NOT implement contract checkers, freshness globs, AUTOGEN generation, CI enforcement, runtime route changes, loop behavior changes, or Steward-specific contract content.
+- **FR-014**: Each authored contract's `## Public Interface` MUST document the subsystem's exported-signature-level TypeScript surface — the entrypoint types and functions of the subsystem module (Spawn's dispatch/execution entrypoints; Legate's loop/serve entrypoints) — as human-authored prose, so the documented interface covers the exported surface that F7's AUTOGEN block later reconciles and not only dispatch metadata or command/process behavior.
 
 ### Key Entities
 
