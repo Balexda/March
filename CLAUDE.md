@@ -77,6 +77,25 @@ Quick pointers:
   then `docker/grafana/dashboards/march-herald.json`. Image/compose:
   `docker/herald.Dockerfile`, `docker/herald.docker-compose.yml`. Set
   `MARCH_HERALD_URL` so the legate reaches it.
+- **Legate is a profile-agnostic containerized service:** `march legate serve`
+  (Fastify HTTP + the deterministic two-stage tick) under `src/legate/loop/` runs
+  as a **single shared `march-legate` container** (`docker/legate.Dockerfile`,
+  `docker/legate.docker-compose.yml`) that drives **every registered profile** —
+  not one container per profile. Each tick it lists profiles from **Herald's
+  profile registry** (the source of truth: `src/herald/profiles/` —
+  store/routes/client, its own `~/.march/herald/profiles.db`, designed to be
+  lifted into a standalone profile service later), drains the **single
+  multiplexed Herald event stream once** (one cursor, `event.profile` on the
+  envelope routes each event to that profile's fold via `reduceMulti`), then runs
+  the coordinator per profile against isolated working state — each profile in its
+  own try/catch so one bad repo can't stall the others. `march legate init <repo>`
+  **registers** the profile with Herald (`POST /profiles`) and ensures the shared
+  service is up; `march profile register|list|remove` manage profiles directly.
+  Herald's observer iterates the same registry. The old per-profile
+  hatchery-launched container + `legate-loop-meta.json` are retired (the meta
+  survives only as a legacy registry seed via `MARCH_HERALD_META`). Set
+  `MARCH_HERALD_URL`/`MARCH_BROOD_URL`/`MARCH_HATCHERY_URL`/`CASTRA_URL` so the
+  container reaches the services.
 
 ## Verification
 

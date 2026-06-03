@@ -14,6 +14,13 @@ import { loadMeta, resolveIntervalSeconds, type LoopMeta } from "../../legate/lo
 import type { SenseDeps } from "../../legate/loop/state/sense.js";
 import { resolveHeraldPort } from "../config.js";
 import { registerRoutes, type ObserveStatus } from "./routes.js";
+import { registerProfileRoutes } from "../profiles/routes.js";
+import { ProfileStore } from "../profiles/store.js";
+import type {
+  ProfileRecord,
+  ProfileStoreOptions,
+  RegisterProfileInput,
+} from "../profiles/types.js";
 import { runObservation } from "../observe/observer.js";
 import { EventStore } from "./store.js";
 import type { EventStoreOptions } from "./types.js";
@@ -22,6 +29,9 @@ export interface BuildServerOptions {
   /** Provide a pre-built store (e.g. an in-memory one) for tests. */
   readonly store?: EventStore;
   readonly storeOptions?: EventStoreOptions;
+  /** Provide a pre-built profile registry (e.g. an in-memory one) for tests. */
+  readonly profileStore?: ProfileStore;
+  readonly profileStoreOptions?: ProfileStoreOptions;
   readonly logger?: FastifyBaseLogger;
   /** Server-owned observe-status getter for `/status`. */
   readonly getObserveStatus?: () => ObserveStatus;
@@ -30,33 +40,64 @@ export interface BuildServerOptions {
 export interface HeraldServer {
   readonly app: FastifyInstance;
   readonly store: EventStore;
+  readonly profileStore: ProfileStore;
 }
 
-/** Build the Fastify app + event store. Testable in-process via `app.inject()`. */
+/** Build the Fastify app + event store + profile registry. Testable via `app.inject()`. */
 export async function buildServer(
   options: BuildServerOptions = {},
 ): Promise<HeraldServer> {
   const logger = options.logger ?? createHeraldLogger();
   const store = options.store ?? new EventStore(options.storeOptions);
+  const profileStore =
+    options.profileStore ?? new ProfileStore(options.profileStoreOptions);
   const app = Fastify({ loggerInstance: logger });
   await registerRoutes(app, { store, getObserveStatus: options.getObserveStatus });
-  return { app, store };
+  await registerProfileRoutes(app, { store: profileStore });
+  return { app, store, profileStore };
+}
+
+/** The per-profile subset of a legate meta, for seeding the registry. */
+function profileInputFromMeta(meta: LoopMeta): RegisterProfileInput {
+  return {
+    profile: meta.profile,
+    repoName: meta.repo.name,
+    repoPath: meta.repo.path,
+    workerGroup: meta.worker_group,
+    conductorName: meta.paired_legate,
+    broodEndpoint: meta.brood_endpoint ?? null,
+    marchCliPath: meta.march_cli_path ?? null,
+    mode: meta.mode,
+  };
+}
+
+/**
+ * Build a minimal {@link LoopMeta}-shaped object from a registry record. The
+ * sense I/O only reads `profile`, `repo.path`, and `worker_group`, so this carries
+ * exactly those (the rest of LoopMeta is irrelevant to observation).
+ */
+function metaForProfile(rec: ProfileRecord): LoopMeta {
+  return {
+    profile: rec.profile,
+    repo: { name: rec.repoName, path: rec.repoPath },
+    worker_group: rec.workerGroup,
+    paired_legate: rec.conductorName ?? rec.profile,
+    brood_endpoint: rec.broodEndpoint ?? null,
+    march_cli_path: rec.marchCliPath ?? null,
+    mode: rec.mode ?? "",
+  } as unknown as LoopMeta;
 }
 
 /** Resolve the meta path: explicit, else `MARCH_HERALD_META`, else the legate's. */
 function resolveMetaPath(
   explicit?: string,
   env: NodeJS.ProcessEnv = process.env,
-): string {
+): string | null {
   const fromEnv = env.MARCH_HERALD_META?.trim() || env.MARCH_LEGATE_LOOP_META?.trim();
-  const metaPath = explicit?.trim() || fromEnv;
-  if (!metaPath) {
-    throw new Error(
-      "Herald meta not found. Pass --meta, set MARCH_HERALD_META, or set " +
-        "MARCH_LEGATE_LOOP_META (Herald observes the same deployment as the legate).",
-    );
-  }
-  return metaPath;
+  // Optional now: profiles come from Herald's own registry (populated by
+  // `march legate init`). A meta, when present, is only a LEGACY seed used to
+  // bootstrap one profile on first boot when the registry is empty.
+  return explicit?.trim() || fromEnv || null;
 }
 
 /** True when Herald owns the default-branch git sync (PR1 default: off/read-only). */
@@ -96,7 +137,10 @@ export async function startServer(
 ): Promise<void> {
   const port = resolveHeraldPort(options.port);
   const host = options.host ?? "0.0.0.0";
-  const meta = loadMeta(resolveMetaPath(options.metaPath));
+  // Meta is optional now: profiles come from Herald's registry. When present it is
+  // a LEGACY seed for bootstrapping one profile on first boot.
+  const metaPath = resolveMetaPath(options.metaPath);
+  const meta = metaPath ? loadMeta(metaPath) : null;
   const intervalMs = (options.intervalSeconds ?? resolveIntervalSeconds()) * 1000;
 
   const status: { lastObserveAtMs: number | null; lastObserveDurationMs: number | null } = {
@@ -104,8 +148,24 @@ export async function startServer(
     lastObserveDurationMs: null,
   };
 
-  const { app, store } = await buildServer({ getObserveStatus: () => status });
-  const senseDeps = buildObserveSenseDeps(meta, app);
+  const { app, store, profileStore } = await buildServer({
+    getObserveStatus: () => status,
+    storeOptions: { defaultProfile: meta?.profile },
+  });
+  // Seed the registry from a legacy single meta so a Herald booted the old way
+  // (one MARCH_HERALD_META deployment) auto-populates one profile row. Idempotent
+  // and best-effort — a registry that already has profiles is left untouched, and
+  // a meta-less boot just relies on `march legate init` to register profiles.
+  try {
+    if (meta && profileStore.count() === 0) {
+      profileStore.register(profileInputFromMeta(meta));
+    }
+  } catch (err) {
+    app.log.warn(
+      { err: err instanceof Error ? err.message : String(err) },
+      "herald could not seed the profile registry from meta",
+    );
+  }
   const stopHeartbeat = startHeraldHeartbeat();
 
   let ticking = false;
@@ -113,18 +173,37 @@ export async function startServer(
     if (ticking) return;
     ticking = true;
     try {
-      const result = await runObservation({ store, senseDeps });
-      status.lastObserveAtMs = Date.now();
-      status.lastObserveDurationMs = result.durationMs;
+      // Observe every registered profile this tick. Each profile is isolated in
+      // its own try/catch so one bad repo (gh outage, missing path) can't stall
+      // the others or abort the interval.
+      const profiles = profileStore.list();
+      let appendedTotal = 0;
+      let maxDurationMs = 0;
       const eventsByType: Record<string, number> = {};
-      for (const e of result.appended) eventsByType[e.type] = (eventsByType[e.type] ?? 0) + 1;
-      recordHeraldObserve({ durationSeconds: result.durationMs / 1000, eventsByType });
-      if (result.appended.length > 0) {
-        app.log.info({ count: result.appended.length, lastSeq: store.lastSeq() }, "herald observed changes");
+      for (const rec of profiles) {
+        try {
+          const senseDeps = buildObserveSenseDeps(metaForProfile(rec), app);
+          const result = await runObservation({ store, senseDeps, profile: rec.profile });
+          maxDurationMs = Math.max(maxDurationMs, result.durationMs);
+          for (const e of result.appended) eventsByType[e.type] = (eventsByType[e.type] ?? 0) + 1;
+          appendedTotal += result.appended.length;
+        } catch (err) {
+          recordHeraldObserveError();
+          app.log.error(
+            { profile: rec.profile, err: err instanceof Error ? err.message : String(err) },
+            "herald observe tick failed for profile",
+          );
+        }
       }
-    } catch (err) {
-      recordHeraldObserveError();
-      app.log.error({ err: err instanceof Error ? err.message : String(err) }, "herald observe tick failed");
+      status.lastObserveAtMs = Date.now();
+      status.lastObserveDurationMs = maxDurationMs;
+      recordHeraldObserve({ durationSeconds: maxDurationMs / 1000, eventsByType });
+      if (appendedTotal > 0) {
+        app.log.info(
+          { count: appendedTotal, profiles: profiles.length, lastSeq: store.lastSeq() },
+          "herald observed changes",
+        );
+      }
     } finally {
       ticking = false;
     }
@@ -152,6 +231,11 @@ export async function startServer(
     }
     try {
       store.close();
+    } catch {
+      // best-effort
+    }
+    try {
+      profileStore.close();
     } catch {
       // best-effort
     }

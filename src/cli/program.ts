@@ -266,11 +266,11 @@ program
 // user sees either help or a precise unknown-command message.
 const legate = program
   .command("legate")
-  .description("Manage the per-repo Legate agent and deterministic loop");
+  .description("Manage Legate agents + the shared profile-agnostic Legate service");
 
 legate
   .command("init")
-  .description("Set up a Legate agent and deterministic loop for the current repository")
+  .description("Set up a Legate agent and register this repo's profile with the shared Legate service")
   .option("-p, --profile <profile>", "agent-deck profile (default: derived from repo basename)")
   .option("-n, --name <name>", "Legate agent conductor name (default: <repo-slug>-legate-agent)")
   .option("-d, --description <description>", "Legate agent conductor description")
@@ -438,19 +438,16 @@ legate
   });
 
 legate
-  .command("loop")
+  .command("serve")
+  .alias("loop") // back-compat: `march legate loop` (the pre-rename name / baked image startup)
   .description(
-    "Run the deterministic Legate loop as a long-running service (used inside the managed container)",
-  )
-  .option(
-    "--meta <path>",
-    "Path to legate-loop-meta.json (default: $MARCH_LEGATE_LOOP_META or ./legate-loop-meta.json)",
+    "Run the profile-agnostic Legate as a long-running service driving every registered profile (used inside the managed container)",
   )
   .option(
     "--port <port>",
-    `HTTP API port, bound to loopback (default: $MARCH_LEGATE_LOOP_PORT or ${DEFAULT_LOOP_PORT})`,
+    `HTTP API port, bound to loopback (default: $MARCH_LEGATE_PORT or ${DEFAULT_LOOP_PORT})`,
   )
-  .action(async (opts: { meta?: string; port?: string }) => {
+  .action(async (opts: { port?: string }) => {
     commandHandled = true;
     const port = opts.port ? Number(opts.port) : undefined;
     if (opts.port !== undefined && (!Number.isFinite(port) || (port as number) <= 0)) {
@@ -459,7 +456,7 @@ legate
       return;
     }
     try {
-      await runLoop({ metaPath: opts.meta, port });
+      await runLoop({ port });
     } catch (err) {
       console.error((err as Error).message);
       process.exitCode = ERROR;
@@ -469,9 +466,13 @@ legate
 legate
   .command("recover <sliceId>")
   .description(
-    "Recover an escalated slice: append a recovery request so the running loop drops it and re-dispatches the still-ready smithy work fresh (no restart, no manual state surgery). Resolves Herald via MARCH_HERALD_URL.",
+    "Recover an escalated slice: append a recovery request so the running legate drops it and re-dispatches the still-ready smithy work fresh (no restart, no manual state surgery). Resolves Herald via MARCH_HERALD_URL.",
   )
-  .action(async (sliceId: string) => {
+  .option(
+    "--profile <profile>",
+    "Profile the slice belongs to (sliceIds are only unique within a profile). When omitted, the sole registered profile is used; required if more than one is registered.",
+  )
+  .action(async (sliceId: string, opts: { profile?: string }) => {
     commandHandled = true;
     const id = (sliceId ?? "").trim();
     if (id.length === 0) {
@@ -480,15 +481,135 @@ legate
       return;
     }
     const { HeraldClient, HeraldClientError } = await import("../herald/service/client.js");
+    const { ProfileClient } = await import("../herald/profiles/client.js");
     try {
-      const event = await new HeraldClient().append({ type: "slice.recovery.requested", sliceId: id });
+      // Resolve the owning profile so the event is stamped with it — otherwise
+      // Herald stamps its store default and the legate's per-profile
+      // takeRecoveryRequests(meta.profile) never sees it (the slice stays stuck).
+      let profile = opts.profile?.trim();
+      if (!profile) {
+        const active = await new ProfileClient().list();
+        if (active.length === 1) {
+          profile = active[0].profile;
+        } else if (active.length === 0) {
+          process.stderr.write(
+            "No profiles are registered with Herald — nothing to recover. " +
+              "Register one with `march legate init` / `march profile register`.\n",
+          );
+          process.exitCode = ERROR;
+          return;
+        } else {
+          process.stderr.write(
+            `Multiple profiles are registered (${active.map((p) => p.profile).join(", ")}); ` +
+              "pass --profile <profile> to disambiguate which one owns the slice.\n",
+          );
+          process.exitCode = ERROR;
+          return;
+        }
+      }
+      const event = await new HeraldClient().append({
+        type: "slice.recovery.requested",
+        sliceId: id,
+        profile,
+      });
       console.log(
-        `Requested recovery of ${id} (seq=${event.seq}). The loop will drop the escalated slice and re-dispatch it on its next tick.`,
+        `Requested recovery of ${id} (profile=${profile}) (seq=${event.seq}). ` +
+          `The legate will drop the escalated slice and re-dispatch it on its next tick.`,
       );
       process.exitCode = SUCCESS;
     } catch (err) {
       const message = err instanceof HeraldClientError ? err.message : (err as Error).message;
       process.stderr.write(message + "\n");
+      process.exitCode = ERROR;
+    }
+  });
+
+// Profile registry — Herald is the source of truth for which profiles the single
+// march-legate service drives. `march legate init` registers automatically; these
+// verbs manage profiles directly (and are the clean seam for a future profile service).
+const profile = program
+  .command("profile")
+  .description("Manage the profiles the shared Legate service drives (registered in Herald)");
+
+profile
+  .command("list")
+  .description("List the profiles registered with Herald. Resolves Herald via MARCH_HERALD_URL.")
+  .option("--all", "Include soft-removed profiles")
+  .action(async (opts: { all?: boolean }) => {
+    commandHandled = true;
+    const { ProfileClient } = await import("../herald/profiles/client.js");
+    const { HeraldClientError } = await import("../herald/service/client.js");
+    try {
+      const profiles = await new ProfileClient().list({ includeRemoved: Boolean(opts.all) });
+      if (profiles.length === 0) {
+        console.log("No profiles registered.");
+      } else {
+        for (const p of profiles) {
+          console.log(`${p.profile}\t${p.status}\t${p.repoPath}\t(${p.workerGroup})`);
+        }
+      }
+      process.exitCode = SUCCESS;
+    } catch (err) {
+      process.stderr.write(
+        (err instanceof HeraldClientError ? err.message : (err as Error).message) + "\n",
+      );
+      process.exitCode = ERROR;
+    }
+  });
+
+profile
+  .command("register")
+  .description("Register/upsert a profile with Herald. Resolves Herald via MARCH_HERALD_URL.")
+  .requiredOption("-p, --profile <profile>", "Profile name")
+  .requiredOption("--repo-path <path>", "Absolute path to the repo checkout")
+  .option("--repo-name <name>", "Repo name (default: basename of --repo-path)")
+  .option("-g, --worker-group <group>", "Worker session group", "legate-workers")
+  .option("-n, --conductor <name>", "Paired legate-agent conductor name")
+  .action(async (opts: {
+    profile: string;
+    repoPath: string;
+    repoName?: string;
+    workerGroup: string;
+    conductor?: string;
+  }) => {
+    commandHandled = true;
+    const { registerProfile } = await import("../legate/profile-register.js");
+    const pathMod = await import("node:path");
+    const result = await registerProfile({
+      profile: opts.profile.trim(),
+      repoPath: opts.repoPath,
+      repoName: opts.repoName ?? pathMod.basename(opts.repoPath),
+      workerGroup: opts.workerGroup,
+      conductorName: opts.conductor,
+    });
+    if (result.record) {
+      console.log(result.note);
+      process.exitCode = SUCCESS;
+    } else {
+      process.stderr.write(result.note + "\n");
+      process.exitCode = ERROR;
+    }
+  });
+
+profile
+  .command("remove <profile>")
+  .description("Soft-remove a profile (the service stops driving it next tick). Resolves Herald via MARCH_HERALD_URL.")
+  .action(async (profileName: string) => {
+    commandHandled = true;
+    const { ProfileClient } = await import("../herald/profiles/client.js");
+    const { HeraldClientError, HeraldNotFoundError } = await import("../herald/service/client.js");
+    try {
+      const record = await new ProfileClient().remove(profileName.trim());
+      console.log(`Removed profile "${record.profile}" (status=${record.status}).`);
+      process.exitCode = SUCCESS;
+    } catch (err) {
+      if (err instanceof HeraldNotFoundError) {
+        process.stderr.write(`Unknown profile "${profileName}".\n`);
+      } else {
+        process.stderr.write(
+          (err instanceof HeraldClientError ? err.message : (err as Error).message) + "\n",
+        );
+      }
       process.exitCode = ERROR;
     }
   });

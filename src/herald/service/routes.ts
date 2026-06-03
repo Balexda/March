@@ -189,7 +189,11 @@ export async function registerRoutes(
       return { error: "limit must be a positive integer." };
     }
     if (limit > MAX_EVENTS_LIMIT) limit = MAX_EVENTS_LIMIT;
-    const events = store.readAfter(after, limit);
+    // The legate drains the whole multiplexed stream (one cursor); `?profile=`
+    // is an operator/debug filter only.
+    const profile =
+      typeof query.profile === "string" && query.profile.length > 0 ? query.profile : undefined;
+    const events = store.readAfter(after, limit, profile);
     const lastSeq = events.length > 0 ? events[events.length - 1].seq : after;
     return { events, lastSeq };
   });
@@ -206,18 +210,30 @@ export async function registerRoutes(
     return event;
   });
 
-  // The current projection (fold of the whole log), or as-of a `seq`.
+  // The projection, or as-of a `seq`. `?profile=` → that profile's SystemState
+  // (the legate's per-profile cold-start); `?all=1` → the full MultiProfileState;
+  // bare → the default profile's SystemState (back-compat single-profile view).
   app.get("/state", async (request, reply) => {
     const query = (request.query ?? {}) as Record<string, string | undefined>;
+    let at: number | undefined;
     if (query.at !== undefined && query.at !== "") {
-      const at = parseNonNegInt(query.at, 0);
-      if (at === null) {
+      const parsed = parseNonNegInt(query.at, 0);
+      if (parsed === null) {
         reply.code(400);
         return { error: "at must be a non-negative integer." };
       }
-      return store.stateAt(at);
+      at = parsed;
     }
-    return store.projection();
+    const all = query.all === "1" || query.all === "true";
+    const profile =
+      typeof query.profile === "string" && query.profile.length > 0 ? query.profile : undefined;
+    if (all) {
+      return at !== undefined ? store.multiStateAt(at) : store.multiProjection();
+    }
+    if (profile) {
+      return at !== undefined ? store.stateAtFor(profile, at) : store.projectionFor(profile);
+    }
+    return at !== undefined ? store.stateAt(at) : store.projection();
   });
 
   // The events that moved state from `from` to `to` (default `to` = latest).
@@ -237,14 +253,35 @@ export async function registerRoutes(
       reply.code(400);
       return { error: "from must be <= to." };
     }
-    return { from, to, events: store.range(from, to) };
+    const profile =
+      typeof query.profile === "string" && query.profile.length > 0 ? query.profile : undefined;
+    const events = store.range(from, to);
+    return { from, to, events: profile ? events.filter((e) => e.profile === profile) : events };
   });
 
-  // Heartbeat/observe summary — mirrors the legate loop's GET /status.
+  // Heartbeat/observe summary — mirrors the legate loop's GET /status, now with a
+  // per-profile breakdown. Top-level workers/smithy reflect the default profile
+  // (back-compat); `profiles`/`by_profile` cover the multi-profile deployment.
   app.get("/status", async () => {
-    const proj = store.projection();
+    const multi = store.multiProjection();
+    const def = store.projection();
     const observe = getObserveStatus();
     const nowMs = Date.now();
+    const profiles = Object.keys(multi.byProfile).sort();
+    const byProfile: Record<string, unknown> = {};
+    let slicesObserved = 0;
+    for (const p of profiles) {
+      const s = multi.byProfile[p];
+      const sliceCount = Object.keys(s.slices).length;
+      slicesObserved += sliceCount;
+      byProfile[p] = {
+        slices_observed: sliceCount,
+        workers: s.workers,
+        smithy: s.smithy,
+        state_present: s.statePresent,
+        state_error: s.stateError,
+      };
+    }
     return {
       ok: true,
       last_observe_at: observe.lastObserveAtMs ? new Date(observe.lastObserveAtMs).toISOString() : null,
@@ -254,11 +291,13 @@ export async function registerRoutes(
       last_observe_duration_ms: observe.lastObserveDurationMs,
       event_count: store.count(),
       last_seq: store.lastSeq(),
-      workers: proj.workers,
-      smithy: proj.smithy,
-      slices_observed: Object.keys(proj.slices).length,
-      state_present: proj.statePresent,
-      state_error: proj.stateError,
+      profiles,
+      by_profile: byProfile,
+      slices_observed: slicesObserved,
+      workers: def.workers,
+      smithy: def.smithy,
+      state_present: def.statePresent,
+      state_error: def.stateError,
     };
   });
 }

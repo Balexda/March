@@ -6,6 +6,8 @@ import type { LoopMeta } from "../../legate/loop/meta.js";
 
 const meta = { worker_group: "legate-workers", repo: { path: "/repo" } } as unknown as LoopMeta;
 
+const PROFILE = "p";
+
 /** An in-memory store double that folds appended events into a hot projection. */
 function fakeStore(): ObserveStore & { events: HeraldEvent[]; projection(): SystemState } {
   const events: HeraldEvent[] = [];
@@ -14,9 +16,11 @@ function fakeStore(): ObserveStore & { events: HeraldEvent[]; projection(): Syst
   return {
     events,
     projection: () => structuredClone(hot),
+    // Single-profile double: every profile resolves to the one hot projection.
+    projectionFor: () => structuredClone(hot),
     append(input: AppendEventInput): HeraldEvent {
       seq += 1;
-      const ev = { ...input, seq, id: `e${seq}`, ts: input.ts ?? "t" } as HeraldEvent;
+      const ev = { ...input, seq, id: `e${seq}`, ts: input.ts ?? "t", profile: input.profile ?? PROFILE } as HeraldEvent;
       events.push(ev);
       reduce(hot, ev);
       return ev;
@@ -42,6 +46,7 @@ describe("runObservation", () => {
     const store = fakeStore();
     const result = await runObservation({
       store,
+      profile: PROFILE,
       senseDeps: senseDeps({
         listSessions: async () => [{ id: "w1", group: "legate-workers", status: "running" }],
         readSmithyStatus: async () => ({
@@ -65,9 +70,9 @@ describe("runObservation", () => {
     const deps = senseDeps({
       listSessions: async () => [{ id: "w1", group: "legate-workers", status: "running" }],
     });
-    const first = await runObservation({ store, senseDeps: deps });
+    const first = await runObservation({ store, profile: PROFILE, senseDeps: deps });
     expect(first.appended.length).toBeGreaterThan(0);
-    const second = await runObservation({ store, senseDeps: deps });
+    const second = await runObservation({ store, profile: PROFILE, senseDeps: deps });
     expect(second.appended).toEqual([]);
   });
 
@@ -78,6 +83,7 @@ describe("runObservation", () => {
     store.append({ source: "legate", type: "slice.dispatched", sliceId: "x", branch: "smithy/forge/x", sessionId: "w1" } as AppendEventInput);
     const result = await runObservation({
       store,
+      profile: PROFILE,
       senseDeps: senseDeps({
         listSessions: async () => [{ id: "w1", group: "legate-workers", status: "idle" }],
         queryPr: async () => ({ number: 12, state: "OPEN" }),
@@ -96,6 +102,7 @@ describe("runObservation", () => {
     await expect(
       runObservation({
         store,
+        profile: PROFILE,
         senseDeps: senseDeps({
           listSessions: async () => [{ id: "w1", group: "legate-workers", status: "idle" }],
           queryPr: async () => ({ number: 7, state: "OPEN" }),
@@ -108,6 +115,7 @@ describe("runObservation", () => {
     const store = fakeStore();
     const result = await runObservation({
       store,
+      profile: PROFILE,
       senseDeps: senseDeps({ now: () => "2026-05-20T09:09:09Z" }),
     });
     for (const e of result.appended) expect(e.ts).toBe("2026-05-20T09:09:09Z");

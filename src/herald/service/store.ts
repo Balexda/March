@@ -4,19 +4,25 @@ import os from "node:os";
 import path from "node:path";
 import { getDatabaseSync, type HeraldDatabase } from "./sqlite.js";
 import {
+  emptyMultiProfileState,
   emptySystemState,
   entityRefOf,
-  foldEvents,
-  reduce,
+  foldEventsMulti,
+  reduceMulti,
   type AppendEventInput,
   type EventBody,
   type HeraldEvent,
+  type MultiProfileState,
   type SystemState,
 } from "../events.js";
 import type { EventStoreOptions } from "./types.js";
 
-/** Event-store schema version. Bumped only on a breaking migration. */
-export const HERALD_SCHEMA_VERSION = 1;
+/** Event-store schema version. Bumped to 2 when the `profile` column landed. */
+export const HERALD_SCHEMA_VERSION = 2;
+
+/** Profile stamped on events whose producer set none (and on legacy v1 rows at
+ *  migration when no deployment profile is known). */
+export const DEFAULT_PROFILE = "default";
 
 const DEFAULT_SNAPSHOT_EVERY = 256;
 
@@ -39,6 +45,7 @@ CREATE TABLE IF NOT EXISTS events (
   entity_id    TEXT NOT NULL,
   source       TEXT NOT NULL,
   ts           TEXT NOT NULL,
+  profile      TEXT NOT NULL DEFAULT '',
   payload      TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_events_entity ON events(entity_kind, entity_id, seq);
@@ -57,6 +64,7 @@ interface EventRow {
   type: string;
   source: string;
   ts: string;
+  profile: string;
   payload: string;
 }
 
@@ -67,6 +75,7 @@ function rowToEvent(row: EventRow): HeraldEvent {
     id: row.id,
     ts: row.ts,
     source: row.source as HeraldEvent["source"],
+    profile: row.profile,
     ...body,
   } as HeraldEvent;
 }
@@ -92,7 +101,10 @@ function bodyOf(input: AppendEventInput): EventBody {
 export class EventStore {
   private readonly db: HeraldDatabase;
   private readonly snapshotEvery: number;
-  private hot: SystemState;
+  /** Profile stamped on appends/legacy rows that carry none. */
+  readonly defaultProfile: string;
+  /** Hot multi-profile projection, advanced on each append. */
+  private hot: MultiProfileState;
   private appendsSinceSnapshot = 0;
 
   constructor(options: EventStoreOptions = {}) {
@@ -107,11 +119,17 @@ export class EventStore {
     }
     this.db.exec("PRAGMA busy_timeout = 5000;");
     this.snapshotEvery = options.snapshotEvery ?? DEFAULT_SNAPSHOT_EVERY;
+    this.defaultProfile = options.defaultProfile ?? DEFAULT_PROFILE;
     this.migrate();
     this.hot = this.rebuildProjection();
   }
 
   private migrate(): void {
+    // CREATE_TABLE_SQL is no-op on an existing DB (IF NOT EXISTS); a fresh DB
+    // gets the v2 `events` table WITH the profile column. The profile index is
+    // created at the END (below), after the column is guaranteed to exist — it
+    // cannot live in CREATE_TABLE_SQL because that also runs against a v1 table
+    // that lacks the column.
     this.db.exec(CREATE_TABLE_SQL);
     const row = this.db
       .prepare("SELECT version FROM schema_meta LIMIT 1")
@@ -120,38 +138,58 @@ export class EventStore {
       this.db
         .prepare("INSERT INTO schema_meta (version) VALUES (?)")
         .run(HERALD_SCHEMA_VERSION);
+    } else if (row.version < 2) {
+      // v1 → v2: the `profile` column landed. An existing v1 DB needs the ALTER
+      // plus a backfill of the single pre-multi-profile deployment's events to
+      // the default profile.
+      const hasProfile = (
+        this.db.prepare("PRAGMA table_info(events)").all() as Array<{ name: string }>
+      ).some((c) => c.name === "profile");
+      if (!hasProfile) {
+        this.db.exec("ALTER TABLE events ADD COLUMN profile TEXT NOT NULL DEFAULT ''");
+      }
+      this.db
+        .prepare("UPDATE events SET profile = ? WHERE profile = '' OR profile IS NULL")
+        .run(this.defaultProfile);
+      // Old snapshots are single-profile `SystemState` blobs (incompatible shape);
+      // drop them — they are a regenerable optimization and rebuildProjection
+      // re-folds from the events.
+      this.db.exec("DELETE FROM snapshots");
+      this.db.prepare("UPDATE schema_meta SET version = ?").run(HERALD_SCHEMA_VERSION);
     }
-    // Future breaking changes branch on `row.version` here.
+    // The profile column now exists on every path — index it.
+    this.db.exec("CREATE INDEX IF NOT EXISTS idx_events_profile_seq ON events(profile, seq)");
   }
 
-  /** Rebuild the full projection from the latest snapshot + trailing events. */
-  private rebuildProjection(): SystemState {
+  /** Rebuild the multi-profile projection from the latest snapshot + trailing events. */
+  private rebuildProjection(): MultiProfileState {
     const snap = this.db
       .prepare("SELECT seq, state FROM snapshots ORDER BY seq DESC LIMIT 1")
       .get() as { seq: number; state: string } | undefined;
-    const base = snap ? (JSON.parse(snap.state) as SystemState) : emptySystemState();
+    const base = snap ? (JSON.parse(snap.state) as MultiProfileState) : emptyMultiProfileState();
     const fromSeq = snap ? snap.seq : 0;
     const trailing = this.readAfter(fromSeq, Number.MAX_SAFE_INTEGER);
-    return foldEvents(trailing, base);
+    return foldEventsMulti(trailing, base);
   }
 
   /**
-   * Append an event. Assigns a monotonic `seq`; fills `id` (uuid) and `ts`
-   * (now) when absent. Idempotent on `id` — a duplicate append returns the
-   * existing row and does not re-fold.
+   * Append an event. Assigns a monotonic `seq`; fills `id` (uuid), `ts` (now)
+   * and `profile` (the store default) when absent. Idempotent on `id` — a
+   * duplicate append returns the existing row and does not re-fold.
    */
   append(input: AppendEventInput): HeraldEvent {
     const id = input.id ?? crypto.randomUUID();
     const ts = input.ts ?? new Date().toISOString();
+    const profile = input.profile && input.profile.length > 0 ? input.profile : this.defaultProfile;
     const body = bodyOf(input);
     const ref = entityRefOf(body);
 
     const result = this.db
       .prepare(
-        `INSERT OR IGNORE INTO events (id, type, entity_kind, entity_id, source, ts, payload)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT OR IGNORE INTO events (id, type, entity_kind, entity_id, source, ts, profile, payload)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(id, body.type, ref.kind, ref.id, input.source, ts, JSON.stringify(body));
+      .run(id, body.type, ref.kind, ref.id, input.source, ts, profile, JSON.stringify(body));
 
     if (result.changes === 0) {
       // Duplicate id — return the already-stored event unchanged.
@@ -162,19 +200,27 @@ export class EventStore {
     }
 
     const seq = Number(result.lastInsertRowid);
-    const event: HeraldEvent = { seq, id, ts, source: input.source, ...body } as HeraldEvent;
-    reduce(this.hot, event);
+    const event: HeraldEvent = { seq, id, ts, source: input.source, profile, ...body } as HeraldEvent;
+    reduceMulti(this.hot, event);
     if (++this.appendsSinceSnapshot >= this.snapshotEvery) {
       this.writeSnapshot();
     }
     return event;
   }
 
-  /** Events with `seq` strictly greater than `afterSeq`, oldest first. The inbox. */
-  readAfter(afterSeq: number, limit: number): HeraldEvent[] {
-    const rows = this.db
-      .prepare("SELECT * FROM events WHERE seq > ? ORDER BY seq ASC LIMIT ?")
-      .all(afterSeq, limit) as unknown as EventRow[];
+  /**
+   * Events with `seq` strictly greater than `afterSeq`, oldest first. The inbox.
+   * The legate drains the WHOLE (multiplexed) stream with one cursor; an optional
+   * `profile` filter is for operators/observability only.
+   */
+  readAfter(afterSeq: number, limit: number, profile?: string): HeraldEvent[] {
+    const rows = profile
+      ? (this.db
+          .prepare("SELECT * FROM events WHERE seq > ? AND profile = ? ORDER BY seq ASC LIMIT ?")
+          .all(afterSeq, profile, limit) as unknown as EventRow[])
+      : (this.db
+          .prepare("SELECT * FROM events WHERE seq > ? ORDER BY seq ASC LIMIT ?")
+          .all(afterSeq, limit) as unknown as EventRow[]);
     return rows.map(rowToEvent);
   }
 
@@ -198,19 +244,40 @@ export class EventStore {
     return row.c;
   }
 
-  /** The current projection (fold of every event). Returns a defensive clone. */
-  projection(): SystemState {
+  /** The full multi-profile projection (fold of every event). Defensive clone. */
+  multiProjection(): MultiProfileState {
     return structuredClone(this.hot);
   }
 
-  /** The projection as of `seq` (snapshot at-or-before `seq`, folded forward). */
-  stateAt(seq: number): SystemState {
+  /** The projection for one profile (empty when the profile has no events yet). */
+  projectionFor(profile: string): SystemState {
+    const sys = this.hot.byProfile[profile];
+    return sys ? structuredClone(sys) : emptySystemState();
+  }
+
+  /** The default profile's projection — back-compat single-profile view. */
+  projection(): SystemState {
+    return this.projectionFor(this.defaultProfile);
+  }
+
+  /** The multi-profile projection as of `seq` (snapshot ≤ `seq`, folded forward). */
+  multiStateAt(seq: number): MultiProfileState {
     const snap = this.db
       .prepare("SELECT seq, state FROM snapshots WHERE seq <= ? ORDER BY seq DESC LIMIT 1")
       .get(seq) as { seq: number; state: string } | undefined;
-    const base = snap ? (JSON.parse(snap.state) as SystemState) : emptySystemState();
+    const base = snap ? (JSON.parse(snap.state) as MultiProfileState) : emptyMultiProfileState();
     const fromSeq = snap ? snap.seq : 0;
-    return foldEvents(this.range(fromSeq, seq), base);
+    return foldEventsMulti(this.range(fromSeq, seq), base);
+  }
+
+  /** One profile's projection as of `seq` (the legate's per-profile cold-start). */
+  stateAtFor(profile: string, seq: number): SystemState {
+    return this.multiStateAt(seq).byProfile[profile] ?? emptySystemState();
+  }
+
+  /** The default profile's projection as of `seq` — back-compat single view. */
+  stateAt(seq: number): SystemState {
+    return this.stateAtFor(this.defaultProfile, seq);
   }
 
   /** Persist the current projection as a snapshot for fast cold-start. */

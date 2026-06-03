@@ -157,9 +157,9 @@ describe("march CLI", () => {
       expect(result.exitCode).toBe(2);
       const combined = result.stdout + result.stderr;
       expect(combined).toContain("Usage: march legate");
-      // The help should list `init`, `loop`, and `recover` as known subcommands.
+      // The help should list `init`, `serve` (alias `loop`), and `recover`.
       expect(combined).toMatch(/^\s+init\b/m);
-      expect(combined).toMatch(/^\s+loop\b/m);
+      expect(combined).toMatch(/^\s+serve\|loop\b/m);
       expect(combined).toMatch(/^\s+recover\b/m);
     });
 
@@ -181,15 +181,14 @@ describe("march CLI", () => {
       expect(result.stderr).toContain("Could not reach the herald service");
     });
 
-    it("`march legate loop --help` exits 0 and prints the loop service flag surface", () => {
-      const result = run(["legate", "loop", "--help"]);
+    it("`march legate serve --help` exits 0 and prints the service flag surface", () => {
+      const result = run(["legate", "serve", "--help"]);
       expect(result.exitCode).toBe(0);
-      expect(result.stdout).toContain("Usage: march legate loop");
-      expect(result.stdout).toContain("--meta");
+      expect(result.stdout).toContain("Usage: march legate serve");
       expect(result.stdout).toContain("--port");
     });
 
-    it("`march legate loop --port bogus` exits with an invalid-port error", () => {
+    it("`march legate loop` still routes to serve via the back-compat alias", () => {
       const result = run(["legate", "loop", "--port", "bogus"]);
       expect(result.exitCode).not.toBe(0);
       expect(result.stdout + result.stderr).toContain("Invalid --port");

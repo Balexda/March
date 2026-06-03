@@ -1,7 +1,8 @@
 import { initOtel, getActiveOtel } from "../../observability/otel.js";
 import { initLoopLogs } from "../../observability/logs.js";
 import { initLoopSpans } from "../../observability/loop-spans.js";
-import { loadMeta, resolveIntervalSeconds, type LoopMeta } from "./meta.js";
+import { resolveIntervalSeconds } from "./meta.js";
+import { ProfileClient } from "../../herald/profiles/client.js";
 import {
   configureLoopRuntime,
   getLoopSnapshot,
@@ -11,98 +12,51 @@ import { startLoopHttpServer } from "./http.js";
 
 export const DEFAULT_LOOP_PORT = 8787;
 
+/** OTel/log identity for the single, profile-agnostic legate service. */
+export const LEGATE_SERVICE_NAME = "march-legate";
+
 export interface RunLoopOptions {
-  readonly metaPath?: string;
   readonly port?: number;
   readonly env?: NodeJS.ProcessEnv;
 }
 
-/** Resolve the meta path: explicit flag -> env -> cwd/legate-loop-meta.json. */
-export function resolveMetaPath(
-  opts: { metaPath?: string },
-  env: NodeJS.ProcessEnv = process.env,
-): string {
-  if (opts.metaPath && opts.metaPath.trim()) return opts.metaPath.trim();
-  if (env.MARCH_LEGATE_LOOP_META?.trim()) return env.MARCH_LEGATE_LOOP_META.trim();
-  return `${process.cwd()}/legate-loop-meta.json`;
-}
-
 function resolvePort(opts: RunLoopOptions, env: NodeJS.ProcessEnv): number {
-  const explicit = opts.port ?? Number(env.MARCH_LEGATE_LOOP_PORT);
+  const explicit =
+    opts.port ?? Number(env.MARCH_LEGATE_PORT ?? env.MARCH_LEGATE_LOOP_PORT);
   return Number.isFinite(explicit) && explicit! > 0 ? Number(explicit) : DEFAULT_LOOP_PORT;
 }
 
 /**
- * Reconcile telemetry config so the SDK comes up correctly: an explicit
- * MARCH_OTEL env wins, otherwise fall back to the meta frozen at `march legate
- * init`. All three loop signals — metrics, logs, and dispatch spans — go through
- * the OTel SDK, which reads this env via initOtel, so reconciling it here is what
- * turns the whole loop's telemetry on or off together.
+ * Reconcile telemetry identity so the SDK comes up correctly. The container sets
+ * MARCH_OTEL / MARCH_OTEL_ENDPOINT via compose; here we only default the service
+ * name so the "March — Legate" dashboard (which filters `service_name="march-legate"`
+ * with profile as a label) comes up populated.
  */
-export function reconcileOtelEnv(meta: LoopMeta, env: NodeJS.ProcessEnv): void {
-  if (env.MARCH_OTEL == null && meta.otel?.enabled) env.MARCH_OTEL = "1";
-  if (!env.MARCH_OTEL_ENDPOINT && !env.OTEL_EXPORTER_OTLP_ENDPOINT && meta.otel?.endpoint) {
-    env.MARCH_OTEL_ENDPOINT = meta.otel.endpoint;
-  }
-  // The loop's identity for traces/metrics/logs. The "March — Legate loop
-  // service" dashboard filters `service_name="march-legate"` (profile/conductor
-  // are labels), so default to it here rather than relying on the operator —
-  // otherwise initOtel falls back to the generic "march" and the dashboard's
-  // panels, profile dropdown, and Loki logs panel all come up empty.
+export function reconcileOtelEnv(env: NodeJS.ProcessEnv): void {
   if (!env.MARCH_OTEL_SERVICE_NAME?.trim()) {
-    env.MARCH_OTEL_SERVICE_NAME = "march-legate";
+    env.MARCH_OTEL_SERVICE_NAME = LEGATE_SERVICE_NAME;
   }
 }
 
 /**
- * Reconcile the Brood endpoint the same way: an explicit MARCH_BROOD_URL env
- * wins, otherwise fall back to `meta.brood_endpoint` frozen at `march legate
- * init`. The runtime's BroodClient reads MARCH_BROOD_URL, and the managed
- * container does NOT pass it through, so without this the containerized loop
- * would default to localhost:9748 and never reach the Brood service — cleanup /
- * ghost-cleanup would defer forever.
- */
-export function reconcileBroodEnv(meta: LoopMeta, env: NodeJS.ProcessEnv): void {
-  const frozen = (meta as { brood_endpoint?: unknown }).brood_endpoint;
-  if (!env.MARCH_BROOD_URL && typeof frozen === "string" && frozen.trim().length > 0) {
-    env.MARCH_BROOD_URL = frozen.trim();
-  }
-}
-
-/**
- * Reconcile the Herald endpoint the same way (#175): an explicit MARCH_HERALD_URL
- * env wins, otherwise fall back to `meta.herald_endpoint` frozen at `march legate
- * init`. The runtime's Herald inbox-consumption + transition-event writes are
- * gated on MARCH_HERALD_URL (heraldConfigured), and the managed container does
- * NOT pass it through, so without this the containerized loop would silently stay
- * on the legacy self-poll path even where Herald is deployed. Unset everywhere =>
- * the loop is byte-for-byte unchanged.
- */
-export function reconcileHeraldEnv(meta: LoopMeta, env: NodeJS.ProcessEnv): void {
-  const frozen = (meta as { herald_endpoint?: unknown }).herald_endpoint;
-  if (!env.MARCH_HERALD_URL && typeof frozen === "string" && frozen.trim().length > 0) {
-    env.MARCH_HERALD_URL = frozen.trim();
-  }
-}
-
-/**
- * Run the Legate loop as a long-running service: telemetry + HTTP API + the
- * periodic tick. Resolves only when a shutdown signal flushes telemetry and
- * stops the loop. Used by `march legate loop` inside the managed container.
+ * Run the profile-agnostic Legate service: telemetry + HTTP API + the periodic
+ * multi-profile tick. Profiles come from Herald's registry (the source of truth),
+ * refreshed each tick; the Herald/Brood/Hatchery/Castra endpoints come from the
+ * container env (compose). Resolves only when a shutdown signal flushes telemetry
+ * and stops the loop. Used by `march legate serve` inside the managed container.
  */
 export async function runLoop(opts: RunLoopOptions = {}): Promise<void> {
   const env = opts.env ?? process.env;
-  const metaPath = resolveMetaPath(opts, env);
-  const meta = loadMeta(metaPath);
 
-  reconcileOtelEnv(meta, env);
-  reconcileBroodEnv(meta, env);
-  reconcileHeraldEnv(meta, env);
+  reconcileOtelEnv(env);
   const otel = initOtel(env);
-  initLoopLogs({ profile: meta.profile, conductor: meta.paired_legate });
-  initLoopSpans({ profile: meta.profile });
+  // One container, many profiles — the log/span identity is the service, not a
+  // single profile (per-profile labels ride the heartbeat metric activity).
+  initLoopLogs({ profile: LEGATE_SERVICE_NAME, conductor: LEGATE_SERVICE_NAME });
+  initLoopSpans({ profile: LEGATE_SERVICE_NAME });
 
-  configureLoopRuntime(meta, { intervalSeconds: resolveIntervalSeconds(env) });
+  const profileClient = new ProfileClient({ env });
+  configureLoopRuntime({ profileClient, intervalSeconds: resolveIntervalSeconds(env), env });
 
   const startedAtMs = Date.now();
   const port = resolvePort(opts, env);
@@ -111,26 +65,20 @@ export async function runLoop(opts: RunLoopOptions = {}): Promise<void> {
   // eth0, not its loopback) can reach the server; host-side loopback publishing
   // is what keeps it private. On a bare host, default to loopback.
   const host =
+    env.MARCH_LEGATE_HOST?.trim() ||
     env.MARCH_LEGATE_LOOP_HOST?.trim() ||
     (env.MARCH_LEGATE_CONTAINER === "1" ? "0.0.0.0" : "127.0.0.1");
-  const server = await startLoopHttpServer(
-    { meta, startedAtMs, getSnapshot: getLoopSnapshot },
-    port,
-    host,
-  );
+  const server = await startLoopHttpServer({ startedAtMs, getSnapshot: getLoopSnapshot }, port, host);
 
   const loop = startLoopRuntime();
-  console.log(
-    `March Legate loop service listening on http://${host}:${port} ` +
-      `(profile=${meta.profile} conductor=${meta.paired_legate})`,
-  );
+  console.log(`March Legate service listening on http://${host}:${port} (profile-agnostic)`);
 
   await new Promise<void>((resolve) => {
     let shuttingDown = false;
     const shutdown = async (signal: string) => {
       if (shuttingDown) return;
       shuttingDown = true;
-      console.log(`March Legate loop received ${signal}; shutting down`);
+      console.log(`March Legate received ${signal}; shutting down`);
       loop.stop();
       await server.close();
       await otel.shutdown();

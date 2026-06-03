@@ -6,10 +6,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Dotprompt } from "dotprompt";
 import { FINDER_BIN, isFinderAvailable, isOnPath } from "../shared/deps.js";
-import {
-  ensureLegateContainer,
-  type LegateContainerResult,
-} from "../hatchery/legate-container.js";
+import { ensureLegateService, registerProfile } from "./profile-register.js";
 
 export class LegateError extends Error {
   constructor(message: string) {
@@ -548,8 +545,16 @@ export interface LegateInitResult {
    * is false (override write is gated on setup having run).
    */
   heartbeatOverrideWritten: boolean;
-  /** Hatchery-managed Legate loop service container launched during setup. */
-  legateContainer?: LegateContainerResult;
+  /**
+   * Outcome of registering this profile with Herald + ensuring the shared
+   * `march-legate` compose service. Replaces the old per-profile container launch.
+   */
+  legateService?: {
+    /** True when the profile was registered with Herald's registry. */
+    readonly registered: boolean;
+    /** True when `docker compose up -d` for the legate service ran. */
+    readonly serviceEnsured: boolean;
+  };
   summary: string;
 }
 
@@ -1721,7 +1726,7 @@ export async function initLegate(
   let autoModeConfigured = false;
   let bridgeActive = false;
   let heartbeatOverrideWritten = false;
-  let legateContainer: LegateContainerResult | undefined;
+  let legateService: { registered: boolean; serviceEnsured: boolean } | undefined;
   let deploymentResults: { name: LegateSkillName; deployed: boolean }[] = [];
   const postSetupWarnings: string[] = [];
   if (runLegateSetup) {
@@ -1955,12 +1960,12 @@ export async function initLegate(
   }
 
   if (runProcessorSetup) {
-    // The loop runs as a long-running service inside its own Hatchery-managed
-    // container (`march legate loop`) — the only loop runtime (the legacy
-    // `node legate-loop.mjs` agent-deck session was removed in
-    // Balexda/March#146). There is NO agent-deck conductor session for the
-    // loop; we only stage the meta the container mounts and reads, then launch
-    // the container.
+    // The legate is now a SINGLE profile-agnostic compose service (`march legate
+    // serve`) that drives every registered profile — not a per-profile container.
+    // So setup (a) registers this profile with Herald's registry (the source of
+    // truth the running service reads each tick) and (b) ensures the shared
+    // `march-legate` service is up. The staged meta is kept only as a back-compat
+    // sidecar / Herald seed; it is no longer the loop's runtime contract.
     try {
       await copyLoopMetaIntoConductor(loopStagingDir, loopConductorDir);
       processorSetupRan = true;
@@ -1971,21 +1976,25 @@ export async function initLegate(
       );
     }
     if (processorSetupRan) {
-      try {
-        legateContainer = ensureLegateContainer({
-          conductorName,
+      const reg = await registerProfile(
+        {
           profile,
+          repoName,
           repoPath,
-          conductorDir,
-          loopConductorDir,
-          homeDir: home,
-        });
-        processorConfigured = true;
-      } catch (err) {
-        throw new LegateError(
-          `Failed to launch Hatchery Legate container: ${(err as Error).message}`,
-        );
-      }
+          workerGroup,
+          conductorName,
+          marchCliPath: process.argv[1] ? path.resolve(process.argv[1]) : null,
+          mode: "terminal-pr-maintenance",
+        },
+        { env: process.env },
+      );
+      if (!reg.record) postSetupWarnings.push(reg.note);
+      const svc = ensureLegateService();
+      if (!svc.ran) postSetupWarnings.push(svc.note);
+      legateService = { registered: reg.record != null, serviceEnsured: svc.ran };
+      // "Configured" once the profile is known to the registry (the service can
+      // be brought up separately via the standup recipe).
+      processorConfigured = reg.record != null;
     }
   }
 
@@ -2006,10 +2015,10 @@ export async function initLegate(
     : `${LEGATE_SKILLS.join(", ")} staged at ${skillsStagedDir} (copied into conductor on setup)`;
   const loopLine = processorEnabled
     ? processorConfigured
-      ? `${loopName} (loop service in ${legateContainer?.containerName ?? "container"}; HTTP http://127.0.0.1:${legateContainer?.hostPort ?? "?"})`
+      ? `profile "${profile}" registered with Herald; driven by the shared march-legate service`
       : runProcessorSetup
-        ? `${loopName} staged/configuration incomplete — see warnings`
-        : `${loopName} (loop container deferred — run setup first)`
+        ? `${loopName} staged/registration incomplete — see warnings`
+        : `${loopName} (registration deferred — run setup first)`
     : "disabled (--no-loop)";
   const legateStatus = setupRan ? "configured" : "rendered";
 
@@ -2044,15 +2053,14 @@ export async function initLegate(
     }`,
     `  Heartbeat:      ${
       setupRan
-        ? "disabled for legate-agent; legate-loop owns ticks"
+        ? "disabled for legate-agent; the march-legate service owns ticks"
         : "disabled for legate-agent (deferred — run setup first)"
     }`,
-    `  Container:      ${
-      legateContainer
-        ? `${legateContainer.containerName} (${legateContainer.containerId || "id unavailable"}) using ${legateContainer.imageTag}${
-            legateContainer.replaced ? " — replaced existing container" : ""
-          }`
-        : "not launched"
+    `  Service:        ${
+      legateService
+        ? `${legateService.registered ? "profile registered" : "registration FAILED — see warnings"}; ` +
+          `${legateService.serviceEnsured ? "march-legate service ensured" : "service not ensured — see warnings"}`
+        : "not configured"
     }`,
     `  Skills:         ${skillsLine}`,
     "",
@@ -2128,7 +2136,7 @@ export async function initLegate(
     bridgeActive,
     heartbeatInterval,
     heartbeatOverrideWritten,
-    ...(legateContainer ? { legateContainer } : {}),
+    ...(legateService ? { legateService } : {}),
     summary: summaryLines.join("\n"),
   };
 }

@@ -16,8 +16,11 @@
 #                     the container.
 #   MARCH_HOST_UID    host uid that owns those files (run-as).
 #   MARCH_HOST_GID    host primary gid for those files (defaults to the uid).
-#   MARCH_HERALD_META path to legate-loop-meta.json (Herald observes the same
-#                     deployment as the legate). Defaults to MARCH_LEGATE_LOOP_META.
+#   MARCH_HERALD_META LEGACY seed only: path to a single legate meta used to
+#                     bootstrap ONE profile into Herald's registry on first boot
+#                     when the registry is empty. Optional now that profiles are
+#                     registered via `march legate init` (Herald is the source of
+#                     truth). Defaults to MARCH_LEGATE_LOOP_META.
 #   MARCH_HERALD_SYNC set to 1 to let Herald own the default-branch git sync.
 #                     LEFT UNSET here (PR1 default = read-only) so Herald never
 #                     fights a still-polling legate.

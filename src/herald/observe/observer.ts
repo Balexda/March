@@ -6,14 +6,18 @@ import { diffObserved } from "./diff.js";
 
 /** The slice of {@link EventStore} the observer needs. */
 export interface ObserveStore {
-  projection(): SystemState;
+  projectionFor(profile: string): SystemState;
   append(input: AppendEventInput): HeraldEvent;
 }
 
 export interface ObserverDeps {
-  /** The Stage-1 sense I/O (built via `buildSenseIo` in src/observe/sense-io.ts). */
+  /** The Stage-1 sense I/O (built via `buildSenseIo` in src/observe/sense-io.ts).
+   *  Built PER profile by the server, from that profile's registry record. */
   readonly senseDeps: SenseDeps;
   readonly store: ObserveStore;
+  /** The profile being observed this tick — events are stamped with it and the
+   *  `prev` projection is read from its bucket. */
+  readonly profile: string;
 }
 
 export interface ObserveResult {
@@ -131,7 +135,7 @@ export function describeChangeSpan(
  * projection and reads the live PR/output for each non-terminal slice.
  */
 export async function runObservation(deps: ObserverDeps): Promise<ObserveResult> {
-  const prev = deps.store.projection();
+  const prev = deps.store.projectionFor(deps.profile);
   const started = Date.now();
   try {
     const loop = await senseObserved(deps.senseDeps, prev);
@@ -146,14 +150,16 @@ export async function runObservation(deps: ObserverDeps): Promise<ObserveResult>
     const appended: HeraldEvent[] = [];
     bodies.forEach((body, i) => {
       appended.push(
-        deps.store.append({ source: "herald", ts: loop.ts, ...body } as AppendEventInput),
+        deps.store.append({ source: "herald", ts: loop.ts, profile: deps.profile, ...body } as AppendEventInput),
       );
       const change = spans[i];
       if (change) {
         startHeraldSpan({
           name: change.name,
           dispatchKey: change.dispatchKey,
-          attributes: change.attributes,
+          // `march.profile` is a span ATTRIBUTE (cardinality-tolerant), never a
+          // metric label — keeps the low-cardinality metric contract intact.
+          attributes: { ...change.attributes, "march.profile": deps.profile },
           startTimeMs: started,
         }).end({ endTimeMs: senseEndMs });
       }

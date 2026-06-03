@@ -2,10 +2,12 @@ import fs from "node:fs";
 import path from "node:path";
 import { HeraldClient } from "../../../herald/service/client.js";
 import {
+  emptyMultiProfileState,
   emptySystemState,
-  reduce,
+  reduceMulti,
   type EventBody,
   type HeraldEvent,
+  type MultiProfileState,
   type SystemState,
 } from "../../../herald/events.js";
 
@@ -15,15 +17,18 @@ import {
  * via the {@link HeraldClient} (set `MARCH_HERALD_URL`). It wraps the client with
  * the two pieces of state the inbox protocol needs:
  *
- *   1. A **persistent cursor** — the last consumed `seq`, written under the
- *      conductor dir (`~/.march/legate/<conductor>/herald-cursor.json`) so a loop
- *      restart resumes where it left off instead of re-folding the whole log.
- *   2. An in-memory **folded projection** — the {@link SystemState} the consumed
- *      events fold into via the shared reducer in `herald/events.ts`. The legate's
- *      Stage-1 adapter (`senseFromHerald`) reads this instead of self-polling.
+ *   1. A **single persistent cursor** — the last consumed `seq` over the ONE
+ *      multiplexed (all-profiles) event stream, written container-wide
+ *      (`~/.march/legate/herald-cursor.json`) so a restart resumes where it left
+ *      off instead of re-folding the whole log. Herald assigns one global `seq`,
+ *      so one cursor is correct no matter how many profiles the legate drives.
+ *   2. An in-memory **multi-profile folded projection** — the consumed events fold
+ *      into {@link MultiProfileState} (per-profile {@link SystemState}) via the
+ *      shared reducer. The legate ticks each profile against its own bucket, so a
+ *      sliceId shared across profiles never collides.
  *
  * Plus the write path: {@link append} posts the legate's transition events to
- * `POST /events` (Herald assigns the seq).
+ * `POST /events` (Herald assigns the seq), stamped with the owning profile.
  */
 
 /** The legate-written subset of the taxonomy (the transition events). */
@@ -52,8 +57,8 @@ export const HERALD_CURSOR_FILE = "herald-cursor.json";
 export const HERALD_DRAIN_PAGE_LIMIT = 1000;
 
 export interface LegateHeraldOptions {
-  /** Directory the cursor file lives in (the legate conductor dir). */
-  readonly conductorDir: string;
+  /** Directory the single (container-wide) cursor file lives in. */
+  readonly stateDir: string;
   /** Injected HTTP client (defaults to a real {@link HeraldClient}). */
   readonly client?: HeraldClient;
   /** Env used to resolve the Herald URL when no client is injected. */
@@ -66,23 +71,24 @@ export class LegateHerald {
   private readonly client: HeraldClient;
   private readonly cursorPath: string;
   private readonly pageLimit: number;
-  /** Last consumed seq (the inbox cursor); persisted across restarts. */
+  /** Last consumed seq over the ONE multiplexed stream; persisted across restarts. */
   private cursor: number;
-  /** Accumulated fold; null until the first {@link consume} seeds it. */
-  private state: SystemState | null = null;
+  /** Accumulated multi-profile fold; null until the first {@link consume} seeds it. */
+  private multi: MultiProfileState | null = null;
   /**
-   * Slice ids whose operator `slice.recovery.requested` (#238) was drained in the
-   * most recent {@link consume}. The reducer drops the slice from the fold, so the
-   * fold alone leaves no marker for the warm loop to reconcile its IN-MEMORY
-   * working state from (warm-loop invisibility). This captures the request off the
-   * drain so the loop can drop the slice from `raw` and re-dispatch it this tick.
-   * {@link takeRecoveryRequests} returns and clears it.
+   * Per-profile slice ids whose operator `slice.recovery.requested` (#238) was
+   * drained in the most recent {@link consume}. The reducer drops the slice from
+   * the fold, so the fold alone leaves no marker for the warm loop to reconcile
+   * its IN-MEMORY working state from (warm-loop invisibility). This captures the
+   * request off the drain, keyed by profile, so the loop can drop the slice from
+   * that profile's `raw` and re-dispatch it. {@link takeRecoveryRequests} returns
+   * and clears one profile's list.
    */
-  private recoveryRequests: string[] = [];
+  private recoveryRequests = new Map<string, string[]>();
 
   constructor(opts: LegateHeraldOptions) {
     this.client = opts.client ?? new HeraldClient({ env: opts.env });
-    this.cursorPath = path.join(opts.conductorDir, HERALD_CURSOR_FILE);
+    this.cursorPath = path.join(opts.stateDir, HERALD_CURSOR_FILE);
     this.pageLimit = opts.pageLimit ?? HERALD_DRAIN_PAGE_LIMIT;
     this.cursor = this.loadCursor();
   }
@@ -92,9 +98,14 @@ export class LegateHerald {
     return this.cursor;
   }
 
-  /** The accumulated projection, or null before the first {@link consume}. */
-  get projection(): SystemState | null {
-    return this.state;
+  /** The accumulated multi-profile projection, or null before the first {@link consume}. */
+  get projection(): MultiProfileState | null {
+    return this.multi;
+  }
+
+  /** One profile's folded SystemState (empty when the profile has no events yet). */
+  snapshotFor(profile: string): SystemState {
+    return this.multi?.byProfile[profile] ?? emptySystemState();
   }
 
   private loadCursor(): number {
@@ -131,25 +142,29 @@ export class LegateHerald {
    * returning, so each tick folds a fully up-to-date projection rather than
    * running Stage-2 handlers against a partial one.
    */
-  async consume(): Promise<SystemState> {
+  async consume(): Promise<MultiProfileState> {
     // Recovery requests are scoped to THIS drain — reset before folding so
     // takeRecoveryRequests() reflects only what was drained this tick.
-    this.recoveryRequests = [];
-    if (this.state === null) {
-      this.state = this.cursor > 0 ? await this.client.state(this.cursor) : emptySystemState();
+    this.recoveryRequests = new Map();
+    if (this.multi === null) {
+      this.multi = this.cursor > 0 ? await this.client.stateAll(this.cursor) : emptyMultiProfileState();
       // Recover from a stale/corrupt cursor: the seeded fold reflects at most
       // its own seq, so reading after a higher persisted cursor would skip every
       // future event and wedge the consumer. Clamp down to what we actually have.
-      if (this.state.seq < this.cursor) {
-        this.cursor = this.state.seq;
+      if (this.multi.seq < this.cursor) {
+        this.cursor = this.multi.seq;
         this.persistCursor();
       }
     }
     for (;;) {
       const page = await this.client.events({ after: this.cursor, limit: this.pageLimit });
       for (const event of page.events) {
-        if (event.type === "slice.recovery.requested") this.recoveryRequests.push(event.sliceId);
-        reduce(this.state, event as HeraldEvent);
+        if (event.type === "slice.recovery.requested") {
+          const list = this.recoveryRequests.get(event.profile) ?? [];
+          list.push(event.sliceId);
+          this.recoveryRequests.set(event.profile, list);
+        }
+        reduceMulti(this.multi, event as HeraldEvent);
       }
       if (page.lastSeq > this.cursor) {
         this.cursor = page.lastSeq;
@@ -158,27 +173,29 @@ export class LegateHerald {
       // A short page means we've reached the tail; a full page may have more.
       if (page.events.length < this.pageLimit) break;
     }
-    return this.state;
+    return this.multi;
   }
 
   /**
-   * Return (and clear) the slice ids whose operator `slice.recovery.requested`
-   * (#238) was drained in the most recent {@link consume}. The warm loop drops
-   * each from its in-memory working state so the still-ready smithy work
-   * re-dispatches fresh this tick — the durable fold can't carry this to the warm
-   * loop on its own (the reducer dropped the slice; warm-loop invisibility).
+   * Return (and clear) one profile's slice ids whose operator
+   * `slice.recovery.requested` (#238) was drained in the most recent
+   * {@link consume}. The warm loop drops each from that profile's in-memory
+   * working state so the still-ready smithy work re-dispatches fresh this tick —
+   * the durable fold can't carry this to the warm loop on its own (the reducer
+   * dropped the slice; warm-loop invisibility).
    */
-  takeRecoveryRequests(): string[] {
-    const requests = this.recoveryRequests;
-    this.recoveryRequests = [];
+  takeRecoveryRequests(profile: string): string[] {
+    const requests = this.recoveryRequests.get(profile) ?? [];
+    this.recoveryRequests.delete(profile);
     return requests;
   }
 
   /**
-   * Append a transition event (the legate write-path). Herald forces the source
-   * to `legate` and assigns the seq. Returns the stored event.
+   * Append a transition event (the legate write-path), stamped with the owning
+   * profile. Herald forces the source to `legate` and assigns the seq. Returns
+   * the stored event.
    */
-  async append(event: TransitionEvent): Promise<HeraldEvent> {
-    return this.client.append(event);
+  async append(profile: string, event: TransitionEvent): Promise<HeraldEvent> {
+    return this.client.append({ ...event, profile });
   }
 }

@@ -1,25 +1,19 @@
 /**
- * Legate loop runtime — the wiring layer of the containerized legate loop. It
- * binds the two-stage tick (sense → coordinator → heartbeat) to the proven async
- * I/O seams: Castra (sessions), the Hatchery service client (codex spawns),
- * Brood (teardown), and Herald (event log + transition writes). The decision and
- * effecting logic lives in the tested modules under pure/ / state/ / handlers/;
- * what remains here is composition: build the deps, run the coordinator, schedule
- * the interval.
+ * Legate runtime — the wiring layer of the containerized, profile-agnostic legate
+ * service. ONE container drives N profiles: each tick lists the registered
+ * profiles from Herald (the source of truth), drains the single multiplexed
+ * Herald stream once, then runs the proven two-stage tick (sense → coordinator →
+ * heartbeat) for EACH profile against its own isolated working state. Every
+ * profile's tick is wrapped in its own try/catch so one bad repo (gh outage,
+ * missing path) can't stall the others.
  *
- * The dispatch path (ask Hatchery to spawn, poll a job to completion, escalate a
- * failure) lives in handlers/dispatch-ops.ts behind handlers/dispatch-io.ts; the
- * loop's old recovery surgery (codex retries, ghost-session reclamation, no-spawn
- * direct-steward fallback) was deleted in #144 — the legate asks services to act
- * and records the transition; it does not recover on their behalf.
- *
- * Originally a near-verbatim lift of the generated `legate-loop.mjs` (the
- * LEGATE_LOOP_MJS template once in src/legate/init.ts, deleted in #146); the
- * decomposition + typing tracked in #144 removed the `@ts-nocheck` pragma. The
- * duck-typed slice/item/working-state seams are annotated `any`, matching the
- * deliberate `Record<string, any>` shapes in state/types.ts and the handlers.
+ * The decision and effecting logic lives in the tested modules under
+ * pure/ / state/ / handlers/ (they already take `meta` + deps as params, so they
+ * are profile-agnostic); what remains here is composition: build the per-profile
+ * deps, run the coordinator, schedule the interval.
  */
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { recordLoopHeartbeat } from "../../observability/loop-metrics.js";
 import { emitLoopLog } from "../../observability/logs.js";
@@ -29,11 +23,13 @@ import {
   resolveHatcheryUrl,
 } from "../../hatchery/service/client.js";
 import { CastraClient } from "../../castra/client.js";
-import type { LoopMeta } from "./meta.js";
+import { ProfileClient } from "../../herald/profiles/client.js";
+import type { ProfileRecord } from "../../herald/profiles/types.js";
+import { legateStateDir, metaForProfileRecord } from "../profile-paths.js";
 // Decomposed two-stage loop: Stage 1 sense → coordinator (ordered handlers) →
 // heartbeat. runtime now only wires these to the proven I/O seams below.
-import { senseFromHerald } from "./state/sense.js";
-import { createSenseIo, type SenseIo } from "../../observe/sense-io.js";
+import { senseFromHerald, type HeraldInbox } from "./state/sense.js";
+import { createSenseIo } from "../../observe/sense-io.js";
 import { runTick as coordinatorRunTick } from "./coordinator.js";
 import { runHeartbeat } from "./heartbeat.js";
 import { broodRegister as broodRegisterCli, broodTeardown as broodTeardownCli } from "./clients/brood.js";
@@ -46,9 +42,6 @@ import {
   launchDispatch,
   recoverDispatch,
 } from "./handlers/dispatch-ops.js";
-// Startup replay formatting (#144): parse + filter + format the recent action
-// events; runtime keeps the file read + header + printing.
-import { recentActionEventLines } from "./pure/replay.js";
 // Legate-judgement requests (#144): event build + dedup + doorbell, behind
 // injected I/O; runtime supplies the concrete sinks.
 import { requestJudgement } from "./judgement.js";
@@ -59,64 +52,55 @@ import { buildLoopTickActivity, emitActionEventLog, emitActionEventSpan } from "
 // supplies the tick body, error handler, and metrics flush.
 import { createScheduler, type LoopScheduler } from "./scheduler.js";
 
+// ── Container-wide singletons (shared across all profiles) ──────────────────
+
 // Lazily-built async Castra client (constructed on first use so it reads the
-// CASTRA_URL/token env the container passes in). The loop reaches every
-// interactive session through Castra rather than agent-deck directly; all its
-// methods are async (fetch), so every call site below awaits.
+// CASTRA_URL/token env the container passes in). Profile is a per-call arg.
 let _castra: CastraClient | undefined;
 function castra(): CastraClient {
   return (_castra ??= new CastraClient());
 }
 
-// Shared system-observation I/O (gh/git/smithy/Castra reads). Lifted into
-// src/observe/sense-io.ts so the legate loop and the Herald service share one
-// tested implementation; built lazily so it reads the configured meta + env.
-let _senseIo: SenseIo | undefined;
-function senseIo(): SenseIo {
-  return (_senseIo ??= createSenseIo({
-    meta,
-    castra: castra(),
-    now,
-    warn: (message: string) => appendText(meta.processor_log_path, "[" + now() + "] " + message),
-  }));
-}
-
-// Herald inbox/write client (#175, #176). Built lazily on first use. Since
-// state.json was retired (#176) the legate is unconditionally Herald-backed:
-// Stage 1 drains the inbox and the working state is the event-log fold, so the
-// client always exists (it resolves MARCH_HERALD_URL, defaulting to the
-// deterministic local Herald port).
+// The single Herald inbox/write client (#175, #176). ONE cursor over the ONE
+// multiplexed (all-profiles) event stream — built lazily so it reads
+// MARCH_HERALD_URL. The per-profile fold is read via herald.snapshotFor(profile).
 let _herald: LegateHerald | undefined;
 function legateHerald(): LegateHerald {
-  return (_herald ??= new LegateHerald({ conductorDir: meta.legate_conductor_dir, env: process.env }));
+  return (_herald ??= new LegateHerald({ stateDir: legateStateDir(homeDir), env }));
 }
 
-// In-memory working state (the former state.json `raw`): slices, archived_slices,
-// repo, transient retry counters. Threaded across ticks — the Stage-2 handlers
-// mutate it in place — and rebuilt from the Herald fold on cold start (#176). Its
-// durable backing is the event log: every mutation that matters is mirrored by an
-// emitTransition, so a restart reconstructs it from snapshot + trailing events.
-let workingState: any = null;
+// ── Per-profile runtime state ───────────────────────────────────────────────
 
-// Append a transition event to Herald. Since state.json was retired (#176) this
-// is the SOLE durable record of a legate transition. Fire-and-forget: a Herald
-// write must never break or slow a tick (Herald is the single sequencer and
-// re-folds idempotently on its side).
-function emitTransition(event: any) {
-  Promise.resolve()
-    .then(() => legateHerald().append(event))
-    .catch(() => {});
+interface ProfileRuntime {
+  /** The loose LoopMeta the runtime + handlers consume (paths/repo/profile/…). */
+  meta: any;
+  /** In-memory working state (the former state.json `raw`), threaded across ticks
+   *  for THIS profile; rebuilt from the profile's Herald fold on cold start. */
+  workingState: any;
+  /** Latest heartbeat record for this profile (HTTP /status + metric gauges). */
+  lastHeartbeat: any;
 }
 
-// Injected at startup by configureLoopRuntime().
-let meta: any;
-let heartbeatLogPath: string;
-let heartbeatEventsPath: string;
+const runtimes = new Map<string, ProfileRuntime>();
+
+/** Build (or refresh the meta of) a profile's runtime context. */
+function runtimeFor(rec: ProfileRecord): ProfileRuntime {
+  const meta = metaForProfileRecord(rec, { homeDir, env });
+  let rt = runtimes.get(rec.profile);
+  if (!rt) {
+    rt = { meta, workingState: null, lastHeartbeat: null };
+    runtimes.set(rec.profile, rt);
+  } else {
+    rt.meta = meta; // pick up registry edits (repo path / worker group / …)
+  }
+  return rt;
+}
+
+// ── Injected at startup by configureLoopRuntime() ───────────────────────────
+let profileClient: ProfileClient;
 let intervalSeconds = 60;
-
-// Latest tick snapshot for the HTTP API + observable metric gauges. Tick timing
-// (lastTickAtMs / lastTickDurationMs) is owned by the scheduler.
-let lastHeartbeat: any = null;
+let homeDir: string = os.homedir();
+let env: NodeJS.ProcessEnv = process.env;
 
 // The cadence driver, built lazily on first start/tick (after configureLoopRuntime
 // has set the interval). Owns the re-entrancy guard, the interval, and tick timing.
@@ -125,40 +109,45 @@ function scheduler(): LoopScheduler {
   return (_scheduler ??= createScheduler({
     tick,
     onTickError: logTickError,
-    onTickComplete: (durationMs: number, tickAtMs: number) => {
-      try {
-        flushHeartbeatMetrics(durationMs, tickAtMs);
-      } catch {
-        // Telemetry must never break the loop.
-      }
-    },
+    onTickComplete: () => {},
     intervalSeconds,
   }));
 }
 
-/** Wire the runtime to a loaded meta + tick interval. Call once before start. */
-export function configureLoopRuntime(
-  loadedMeta: LoopMeta,
-  opts: { intervalSeconds: number },
-): void {
-  meta = loadedMeta;
-  heartbeatLogPath = meta.loop_heartbeat_log_path || meta.processor_log_path;
-  heartbeatEventsPath = meta.loop_heartbeat_events_path || meta.processor_events_path;
+/** Wire the runtime to the profile registry + tick interval. Call once before start. */
+export function configureLoopRuntime(opts: {
+  profileClient: ProfileClient;
+  intervalSeconds: number;
+  homeDir?: string;
+  env?: NodeJS.ProcessEnv;
+}): void {
+  profileClient = opts.profileClient;
   intervalSeconds = opts.intervalSeconds;
+  if (opts.homeDir) homeDir = opts.homeDir;
+  if (opts.env) env = opts.env;
 }
 
 export interface LoopSnapshot {
-  readonly lastHeartbeat: any;
+  /** Per-profile latest heartbeat record. */
+  readonly byProfile: Record<string, { lastHeartbeat: any }>;
+  readonly profiles: string[];
   readonly lastTickAtMs: number;
   readonly lastTickDurationMs: number;
+  /** Back-compat: an arbitrary profile's heartbeat (first registered). */
+  readonly lastHeartbeat: any;
 }
 
 /** Latest tick snapshot, consumed by the HTTP /status endpoint. */
 export function getLoopSnapshot(): LoopSnapshot {
+  const byProfile: Record<string, { lastHeartbeat: any }> = {};
+  for (const [profile, rt] of runtimes) byProfile[profile] = { lastHeartbeat: rt.lastHeartbeat };
+  const profiles = Object.keys(byProfile);
   return {
-    lastHeartbeat,
+    byProfile,
+    profiles,
     lastTickAtMs: _scheduler?.lastTickAtMs ?? 0,
     lastTickDurationMs: _scheduler?.lastTickDurationMs ?? 0,
+    lastHeartbeat: profiles.length > 0 ? byProfile[profiles[0]].lastHeartbeat : null,
   };
 }
 
@@ -171,7 +160,7 @@ function now() {
   return new Date().toISOString();
 }
 
-function append(file: string, value: any) {
+function append(meta: any, file: string, value: any) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.appendFileSync(file, JSON.stringify(value) + "\n", "utf-8");
   if (file === meta.processor_events_path) {
@@ -194,35 +183,14 @@ function appendTextSilent(file: string, text: string) {
   fs.appendFileSync(file, text + "\n", "utf-8");
 }
 
-function printText(text: string) {
-  console.log(text);
-}
-
-function replayRecentActionEvents(limit = 10) {
-  let raw;
-  try {
-    raw = fs.readFileSync(meta.processor_events_path, "utf-8");
-  } catch (err: any) {
-    if (err && err.code === "ENOENT") return;
-    throw err;
-  }
-  const lines = recentActionEventLines(raw, limit);
-  if (lines.length === 0) return;
-  printText(`[${now()}] replaying ${lines.length} recent processor action event(s) to stdout`);
-  for (const line of lines) printText(line);
-}
-
-async function sendAgentDeckMessage(sessionId: string, message: string, traceKey?: string) {
-  // Routed through Castra. Castra's send is fire-and-forget (202); the former
-  // --wait/--timeout has no equivalent, which is fine — every loop caller used
-  // the no-wait path. traceKey (the slice id) forwards as the x-march-slice-id
+async function sendAgentDeckMessage(meta: any, sessionId: string, message: string, traceKey?: string) {
+  // Routed through Castra. traceKey (the slice id) forwards as the x-march-slice-id
   // span-correlation header so the babysit /smithy.fix castra.send nests under the
-  // slice's trace instead of orphaning a root (#234) — the same correlation the
-  // dispatch path's castra.launch/send already carries.
+  // slice's trace instead of orphaning a root (#234).
   await castra().sendPrompt({ profile: meta.profile, sessionId, prompt: message, traceKey });
 }
 
-async function sendDoorbellToLegate() {
+async function sendDoorbellToLegate(meta: any) {
   try {
     await castra().sendPrompt({
       profile: meta.profile,
@@ -235,84 +203,93 @@ async function sendDoorbellToLegate() {
   }
 }
 
-function requestLegateJudgement(input: any) {
+function requestLegateJudgement(meta: any, input: any) {
   return requestJudgement(input, {
     processorName: meta.processor_name,
     pairedLegate: meta.paired_legate,
-    appendRequest: (event: any) => append(meta.processor_requests_path, event),
-    appendEvent: (event: any) => append(meta.processor_events_path, event),
-    sendDoorbell: sendDoorbellToLegate,
+    appendRequest: (event: any) => append(meta, meta.processor_requests_path, event),
+    appendEvent: (event: any) => append(meta, meta.processor_events_path, event),
+    sendDoorbell: () => sendDoorbellToLegate(meta),
     log: (line: string) => appendText(meta.processor_log_path, line),
   });
 }
 
-// Build the dispatch I/O seam (handlers/dispatch-io.ts). The Hatchery client is
-// bound to the resolved base URL here; the action-log + Herald writes reuse the
-// runtime's append/emitTransition so the OTel span/log side-effects still fire.
-function dispatchIoDeps(): DispatchIoDeps {
-  const hatcheryUrl = resolveHatcheryUrl(process.env);
+// Append a transition event to Herald for `profile`. Fire-and-forget: a Herald
+// write must never break or slow a tick (Herald is the single sequencer and
+// re-folds idempotently on its side).
+function emitTransition(profile: string, event: any) {
+  Promise.resolve()
+    .then(() => legateHerald().append(profile, event))
+    .catch(() => {});
+}
+
+// Build the dispatch I/O seam (handlers/dispatch-io.ts) for one profile.
+function dispatchIoDeps(meta: any): DispatchIoDeps {
+  const hatcheryUrl = resolveHatcheryUrl(env);
   return {
     meta,
-    emitTransition: (event: any) => emitTransition(event),
-    emit: (event: any) => append(meta.processor_events_path, event),
+    emitTransition: (event: any) => emitTransition(meta.profile, event),
+    emit: (event: any) => append(meta, meta.processor_events_path, event),
     log: (line: string) => appendText(meta.processor_log_path, line),
     postSpawn: (request: any) => postSpawn(hatcheryUrl, request),
     getJob: (jobId: string) => getJob(hatcheryUrl, jobId),
   };
 }
 
-// Two-stage tick: Stage 1 senseFromHerald drains the inbox + folds the working
-// state; the coordinator runs the ordered handlers (cleanup → ghost-cleanup →
-// relaunch → babysit → dispatch) as pure assess + effecting apply; the heartbeat
-// writes the record + events and snapshots it for /status. All I/O is wired to
-// the proven async seams in this file (Castra fetch, the Hatchery + Brood HTTP
-// clients, Herald).
-async function tick() {
-  // Stage 1 reads are the shared observation I/O (src/observe/sense-io.ts).
-  const senseDeps = senseIo().toSenseDeps();
+/**
+ * Run the two-stage tick for ONE profile against its isolated working state. The
+ * shared Herald stream has already been drained this tick; this reads the
+ * profile's folded bucket via `herald.snapshotFor(profile)`.
+ */
+async function tickProfile(rt: ProfileRuntime): Promise<void> {
+  const meta = rt.meta;
+  const startedMs = Date.now();
   const herald = legateHerald();
+  const senseDeps = createSenseIo({
+    meta,
+    castra: castra(),
+    now,
+    warn: (message: string) => appendText(meta.processor_log_path, "[" + now() + "] " + message),
+  }).toSenseDeps();
+
+  // Per-profile inbox adapter over the already-drained shared fold (no re-drain).
+  const inbox: HeraldInbox = {
+    consume: async () => herald.snapshotFor(meta.profile),
+    takeRecoveryRequests: () => herald.takeRecoveryRequests(meta.profile),
+  };
 
   const makeContext = (state: any) => ({
     meta,
     ts: state.ts,
     castra: castra(),
-    // Brood is a service; broodTeardown hits it over HTTP via the async
-    // BroodClient (MARCH_BROOD_URL). No CLI shelling.
     broodTeardown: (sessionId: string, opts?: any) => broodTeardownCli(sessionId, opts),
-    // Reconcile an orphaned/untracked steward back into Brood's registry (#225)
-    // so its teardown runs through Brood's exact-path reclamation (#155).
     broodRegister: (input: any) => broodRegisterCli(input),
-    // Operator escalation (rings the doorbell + records a processor_request),
-    // used by cleanup to stop deferring a stuck teardown forever (#225).
-    requestJudgement: (input: any) => requestLegateJudgement(input),
-    emit: (event: any) => append(meta.processor_events_path, event),
-    // Herald transition events (#176): the sole durable record of a transition
-    // now that state.json is retired. The in-memory working state is mutated by
-    // the handlers directly and reconstructed from these events on cold start.
-    emitTransition: (event: any) => emitTransition(event),
+    requestJudgement: (input: any) => requestLegateJudgement(meta, input),
+    emit: (event: any) => append(meta, meta.processor_events_path, event),
+    emitTransition: (event: any) => emitTransition(meta.profile, event),
     log: (line: string) => appendText(meta.processor_log_path, line),
   });
 
   const babysitDeps = {
-    sendMessage: (sessionId: string, message: string, traceKey?: string) => sendAgentDeckMessage(sessionId, message, traceKey),
-    requestJudgement: (input: any) => requestLegateJudgement(input),
+    sendMessage: (sessionId: string, message: string, traceKey?: string) =>
+      sendAgentDeckMessage(meta, sessionId, message, traceKey),
+    requestJudgement: (input: any) => requestLegateJudgement(meta, input),
   };
 
-  const ioDeps = dispatchIoDeps();
+  const ioDeps = dispatchIoDeps(meta);
   const dispatchDeps = {
     // The default-branch sync is owned by Herald (MARCH_HERALD_SYNC); the legate
     // never fetches so it can't fight it.
     syncDefaultBranch: async () => {},
     completePending: (rawState: any, ts: string) => completePendingHatcheryDispatches(rawState, ts, ioDeps),
-    launchDispatch: (rawState: any, ts: string, item: any, sliceId: string) => launchDispatch(rawState, ts, item, sliceId, ioDeps),
-    recoverDispatch: (rawState: any, ts: string, item: any, sliceId: string, attempt: number) => recoverDispatch(rawState, ts, item, sliceId, attempt, ioDeps),
-    requestJudgement: (input: any) => requestLegateJudgement(input),
+    launchDispatch: (rawState: any, ts: string, item: any, sliceId: string) =>
+      launchDispatch(rawState, ts, item, sliceId, ioDeps),
+    recoverDispatch: (rawState: any, ts: string, item: any, sliceId: string, attempt: number) =>
+      recoverDispatch(rawState, ts, item, sliceId, attempt, ioDeps),
+    requestJudgement: (input: any) => requestLegateJudgement(meta, input),
   };
 
-  // Stage 1 (#176): drain + fold the Herald inbox into the LoopState. The working
-  // state `raw` is the in-memory `workingState` threaded across ticks (null on
-  // cold start, when senseFromHerald rebuilds it from the fold).
-  const sense = () => senseFromHerald(senseDeps, herald, workingState);
+  const sense = () => senseFromHerald(senseDeps, inbox, rt.workingState);
 
   const out = await coordinatorRunTick({
     sense,
@@ -321,9 +298,7 @@ async function tick() {
     dispatch: dispatchDeps,
   });
 
-  // Keep the working state across ticks: the handlers mutated out.state.raw in
-  // place; on cold start senseFromHerald rebuilt it, so capture the reference.
-  workingState = out.state.raw;
+  rt.workingState = out.state.raw;
 
   runHeartbeat(out, {
     meta: {
@@ -332,51 +307,85 @@ async function tick() {
       processor_events_path: meta.processor_events_path,
       processor_log_path: meta.processor_log_path,
     },
-    heartbeatEventsPath,
-    heartbeatLogPath,
-    append,
+    heartbeatEventsPath: meta.loop_heartbeat_events_path || meta.processor_events_path,
+    heartbeatLogPath: meta.loop_heartbeat_log_path || meta.processor_log_path,
+    append: (file: string, value: any) => append(meta, file, value),
     appendText,
     appendTextSilent,
     setLastHeartbeat: (record: any) => {
-      lastHeartbeat = record;
+      rt.lastHeartbeat = record;
     },
   });
-}
 
-function logTickError(err: any) {
-  const message = err?.message || String(err);
-  emitLoopLog({ severity: "ERROR", body: "processor_error: " + message, eventKind: "processor_error" });
+  // Fold this profile's tick into the OTel heartbeat metrics (per-profile label).
   try {
-    appendText(meta.processor_log_path, `[${now()}] processor_error=${message}`);
+    const activity = buildLoopTickActivity(rt.lastHeartbeat, {
+      profile: meta.profile,
+      conductor: meta.paired_legate || meta.loop_name,
+      tickAtMs: startedMs,
+      durationMs: Date.now() - startedMs,
+    });
+    if (activity) recordLoopHeartbeat(activity);
   } catch {
-    console.error(`[${now()}] processor_error=${message}`);
+    // Telemetry must never break the loop.
   }
 }
 
-// Fold the just-completed tick into the OTel heartbeat metrics. Reads the record
-// captured on lastHeartbeat (so the gauges + counters stay in sync with what was
-// written to disk). No-op when telemetry is disabled (handled in loop-metrics).
-function flushHeartbeatMetrics(durationMs: number, tickAtMs: number) {
-  const activity = buildLoopTickActivity(lastHeartbeat, {
-    profile: meta.profile,
-    conductor: meta.paired_legate || meta.loop_name,
-    tickAtMs,
-    durationMs,
-  });
-  if (activity) recordLoopHeartbeat(activity);
+// Multi-profile tick: list the registered profiles, drain the shared Herald
+// stream ONCE, then run each profile's two-stage tick isolated in try/catch.
+async function tick() {
+  let profiles: ProfileRecord[];
+  try {
+    profiles = await profileClient.list();
+  } catch (err: any) {
+    // Registry unreachable — skip this tick rather than wedge; the next tick retries.
+    emitLoopLog({
+      severity: "ERROR",
+      body: "profile_list_failed: " + (err?.message || String(err)),
+      eventKind: "processor_error",
+    });
+    return;
+  }
+
+  // GC runtimes for profiles that are no longer registered (removed/disabled).
+  const active = new Set(profiles.map((p) => p.profile));
+  for (const profile of [...runtimes.keys()]) if (!active.has(profile)) runtimes.delete(profile);
+
+  // One drain of the single multiplexed stream feeds every profile's fold.
+  try {
+    await legateHerald().consume();
+  } catch (err: any) {
+    emitLoopLog({
+      severity: "ERROR",
+      body: "herald_drain_failed: " + (err?.message || String(err)),
+      eventKind: "processor_error",
+    });
+    return;
+  }
+
+  for (const rec of profiles) {
+    const rt = runtimeFor(rec);
+    try {
+      await tickProfile(rt);
+    } catch (err: any) {
+      logTickError(err, rec.profile);
+    }
+  }
+}
+
+function logTickError(err: any, profile?: string) {
+  const message = err?.message || String(err);
+  const body = profile ? `processor_error[${profile}]: ${message}` : "processor_error: " + message;
+  emitLoopLog({ severity: "ERROR", body, eventKind: "processor_error" });
+  console.error(`[${now()}] ${body}`);
 }
 
 /**
- * Start the periodic loop. Mirrors the original .mjs bootstrap: log a startup
- * line, replay recent action events, then hand off to the scheduler (which runs
- * an immediate tick and schedules the interval). Returns a handle to stop the
- * timer for graceful shutdown.
+ * Start the periodic loop: log a startup line, replay each profile's recent
+ * action events, then hand off to the scheduler (which runs an immediate tick and
+ * schedules the interval). Returns a handle to stop the timer for graceful shutdown.
  */
 export function startLoopRuntime(): { stop: () => void } {
-  appendText(
-    meta.processor_log_path,
-    `[${now()}] legate-loop starting in terminal-pr-maintenance mode for ${meta.paired_legate}`,
-  );
-  replayRecentActionEvents();
+  console.log(`[${now()}] march-legate starting in terminal-pr-maintenance mode (profile-agnostic)`);
   return scheduler().start();
 }
