@@ -64,7 +64,7 @@ Purpose: The stable predicate Feature 2's four staged scripts consume to exclude
 | `mechanism` | enum | Yes | `directory-path` — never `tag-predicate`. |
 
 Validation rules:
-- The contract is a directory path, independent of the tag taxonomy and of the routing primitive's source-tree location (SD-101 / SD-103).
+- The contract is a directory path, independent of the tag taxonomy and of the routing primitive's source-tree location (SD-001 / SD-002, inherited from feature-map SD-101 / SD-103).
 - All four staged scripts must honor the same exclusion path.
 - The exclusion takes precedence when a quarantined path would otherwise match a script's selection glob.
 

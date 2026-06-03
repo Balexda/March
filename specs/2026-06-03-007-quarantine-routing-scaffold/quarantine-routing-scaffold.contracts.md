@@ -2,7 +2,7 @@
 
 ## Overview
 
-This feature introduces three repository-local contracts: the quarantine routing primitive (park/restore a test), the directory-path exclusion contract that Feature 2's staged scripts consume, and the generated `tests/quarantine/INDEX.md` roster. All contracts are filesystem- and command-level — no March runtime dispatch, event-bus messages, or OpenTelemetry spans are added, because quarantine routing does not change spawn/lifecycle behavior.
+This feature introduces four repository-local contracts: the quarantine routing primitive (park/restore a test), the directory-path exclusion contract that Feature 2's staged scripts consume, the generated `tests/quarantine/INDEX.md` roster, and the `CONTRIBUTING.md` quarantine documentation. All contracts are filesystem- and command-level — no March runtime dispatch, event-bus messages, or OpenTelemetry spans are added, because quarantine routing does not change spawn/lifecycle behavior.
 
 ## Interfaces
 
@@ -10,7 +10,7 @@ This feature introduces three repository-local contracts: the quarantine routing
 
 **Purpose**: Parks a failing test into `tests/quarantine/` (and restores it back out) without deleting or silencing it, then regenerates the roster.
 **Consumers**: The Operator, contributors, and (later) the M6 cassette-refresh workflow.
-**Providers**: The repository routing primitive (`quarantine.ts` or equivalent; its source-tree location is open per SD-101).
+**Providers**: The repository routing primitive (`quarantine.ts` or equivalent; its source-tree location is open per SD-001, inherited from feature-map SD-101).
 
 #### Signature
 

@@ -14,7 +14,7 @@
 - This feature is the **M1 quarantine scaffold only**: a `tests/quarantine/` directory, a routing primitive that parks a failing test there without deleting it, a directory-path exclusion contract the staged scripts consume, and a generated `tests/quarantine/INDEX.md` roster. The one-week SLA timer, overdue alerts, and weekly-report wiring are M6 and explicitly out of scope. [Critical Assumption]
 - The exclusion mechanism is **directory-path based**, not tag based: a test is quarantined by virtue of living under `tests/quarantine/`, and the four staged scripts (Feature 2) exclude that path. Tag taxonomy (Feature 1) classifies a test's layer/determinism/channel; it does not decide quarantine membership.
 - Quarantine is a **visible state, not a hiding place** (RFC §Design Considerations): parking a test must be cheap, but the parked test is never silenced — it remains in the repository and visible on the generated roster.
-- The **source-tree location of the routing primitive** (`src/testing/` vs. `tests/support/` vs. co-located under `tests/quarantine/`) is the open inherited decision SD-101 and is left to implementation; the `tests/quarantine/` directory path itself is pinned by the RFC M1 criteria and is the stable contract Feature 2 consumes (per SD-103, the directory-path contract is independent of the primitive's source location).
+- The **source-tree location of the routing primitive** (`src/testing/` vs. `tests/support/` vs. co-located under `tests/quarantine/`) is the open decision tracked locally as SD-001 (inherited from feature-map SD-101) and is left to implementation; the `tests/quarantine/` directory path itself is pinned by the RFC M1 criteria and is the stable contract Feature 2 consumes (per SD-002, inherited from feature-map SD-103, the directory-path contract is independent of the primitive's source location).
 - All routing operations are **non-interactive** (operating-philosophy rule 1): parking and restoring a test, and regenerating the index, run from a single non-interactive command with no TTY-bound prompt.
 
 ## Artifact Hierarchy
@@ -134,7 +134,7 @@ Recommended implementation sequence:
 
 - F3 is independent of Feature 1 (the feature map specs them in parallel); if a parked test already carries a Feature 1 tag tuple it is preserved, but F3 neither requires nor validates tags.
 - Feature 2's staged scripts consume this feature's directory-path exclusion contract; this feature defines the path, Feature 2 wires the exclusion into the scripts.
-- The RFC pins the `tests/quarantine/` directory path and the generated `tests/quarantine/INDEX.md`; only the routing primitive's source-tree location is open (SD-101).
+- The RFC pins the `tests/quarantine/` directory path and the generated `tests/quarantine/INDEX.md`; only the routing primitive's source-tree location is open (SD-001, inherited from feature-map SD-101).
 - Quarantine is temporary by policy; M1 provides the scaffold and visible roster, and M6 adds the SLA clock that enforces resolution.
 
 ## Specification Debt
@@ -150,7 +150,7 @@ Recommended implementation sequence:
 - Defining the four staged npm scripts and the CI fan-out (Feature 2).
 - The tag taxonomy and whole-repo coverage lint (Feature 1).
 - Authoring any new stochastic or scheduled tests, or any cassette runtime.
-- Pinning the source-tree location of the routing primitive (SD-101).
+- Pinning the source-tree location of the routing primitive (SD-001, inherited from feature-map SD-101).
 
 ## Success Criteria *(mandatory)*
 
