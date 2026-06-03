@@ -320,14 +320,31 @@ export async function senseObserved(deps: SenseDeps, prev: SystemState): Promise
       worker_session_id: sessionId,
       stage: s.stage,
     };
-    if (isTerminalSlice(sliceLike)) continue;
+    // #173: escalated slices are "terminal" for in-flight purposes (isTerminalSlice),
+    // but Herald must still OBSERVE an open PR on an escalated slice's branch so the
+    // legate can adopt it from the fold on the next branch-collision. So keep an
+    // escalated slice that still has a branch (and isn't recovered/tombstoned) in
+    // the observation set; every other terminal slice (merged / terminal PR) is
+    // skipped as before.
+    const observeEscalated = sliceLike.stage === "escalated" && !!sliceLike.branch && !s.recovered;
+    if (isTerminalSlice(sliceLike) && !observeEscalated) continue;
     const entry: SliceExternalState = {};
     try {
       let pr = await deps.queryPr(sliceLike, state, repoPath);
-      // Implementing slice with no PR yet: queryPr skips (no number to query),
-      // so fall back to branch/output-based discovery so the legate sees the PR
-      // appear in its inbox uniformly.
-      if ((!pr || pr.skipped) && s.stage === "implementing" && !(s.pr as any)?.number && deps.discoverPr) {
+      // No PR snapshot yet: queryPr skips (no number to query), so fall back to
+      // branch/output-based discovery so the legate sees the PR appear in its
+      // inbox uniformly. Observe for an implementing slice (the original case) AND
+      // for an escalated slice with a known branch (#173): an escalated/diverged
+      // slice may have an open PR from an EARLIER dispatch that the legate must
+      // adopt on the next branch-collision — and it only learns of it from this
+      // observation. Recovered (tombstoned, #238/#239) slices are excluded; they
+      // are re-observed once the recovery's fresh dispatch lands them back in
+      // hatchery-pending → implementing.
+      const needsPrObservation =
+        (!pr || pr.skipped) &&
+        !(s.pr as any)?.number &&
+        (s.stage === "implementing" || (s.stage === "escalated" && !!s.branch && !s.recovered));
+      if (needsPrObservation && deps.discoverPr) {
         pr = (await deps.discoverPr(sliceLike, state, repoPath, sessionId)) ?? pr;
       }
       entry.pr = pr;

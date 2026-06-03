@@ -16,7 +16,6 @@ function deps(over: Partial<DispatchIoDeps> = {}): DispatchIoDeps {
     log: vi.fn(),
     postSpawn: vi.fn(async () => ({ id: "job-1" })),
     getJob: vi.fn(async () => ({ status: "running" })),
-    findOpenPr: vi.fn(async () => null),
     ...over,
   };
 }

@@ -251,6 +251,51 @@ describe("senseObserved (Herald observation Stage 1)", () => {
     expect(state.perSlice.impl!.pr).toMatchObject({ number: 42 });
   });
 
+  it("discovers a PR for an ESCALATED slice with a branch (#173 adopt observation)", async () => {
+    // Regression for #173: an escalated/diverged slice may have an open PR from an
+    // earlier dispatch that the legate must adopt on the next collision. Without the
+    // gate lift (stage === "implementing" only) Herald never re-checks the branch
+    // and the PR stays invisible — discoverPr would not be called for this slice.
+    const discoverPr = vi.fn(async () => ({ number: 240, state: "OPEN" }));
+    const prev = foldedState({
+      slices: { esc: slice({ sliceId: "esc", stage: "escalated", sessionId: "s1", branch: "feature/foo" }) },
+    });
+    const state = await senseObserved(
+      deps({
+        listSessions: async () => [{ id: "s1", group: "legate-workers", status: "idle" }],
+        queryPr: async () => ({ skipped: true }),
+        discoverPr,
+        sessionOutput: async () => ({ output: "" }),
+      }),
+      prev,
+    );
+    expect(discoverPr).toHaveBeenCalled();
+    expect(state.perSlice.esc!.pr).toMatchObject({ number: 240 });
+  });
+
+  it("does NOT observe a PR for an escalated slice with no branch, or a recovered (tombstoned) one", async () => {
+    const discoverPr = vi.fn(async () => ({ number: 240, state: "OPEN" }));
+    const prev = foldedState({
+      slices: {
+        noBranch: slice({ sliceId: "noBranch", stage: "escalated", sessionId: "s1" }),
+        recovered: slice({ sliceId: "recovered", stage: "escalated", sessionId: "s2", branch: "feature/bar", recovered: true }),
+      },
+    });
+    await senseObserved(
+      deps({
+        listSessions: async () => [
+          { id: "s1", group: "legate-workers", status: "idle" },
+          { id: "s2", group: "legate-workers", status: "idle" },
+        ],
+        queryPr: async () => ({ skipped: true }),
+        discoverPr,
+        sessionOutput: async () => ({ output: "" }),
+      }),
+      prev,
+    );
+    expect(discoverPr).not.toHaveBeenCalled();
+  });
+
   it("matches a recorded sessionId only against session id, never title/name", async () => {
     const queryPr = vi.fn(async () => ({ number: 7, state: "OPEN" }));
     const sessionOutput = vi.fn(async () => ({ output: "log" }));
