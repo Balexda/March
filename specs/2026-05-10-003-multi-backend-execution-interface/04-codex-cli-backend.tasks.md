@@ -27,7 +27,7 @@
   - `codexBackend.requiredEnvVars` is an empty readonly list because Codex authenticates via credential mount rather than `GEMINI_API_KEY`.
   - `codexBackend.credentialMounts` declares a read-only Codex credential directory mount resolved from `CODEX_HOME`, with a fallback to the host Codex home under `HOME`, and exposes the in-container `CODEX_HOME` value needed by the entrypoint.
   - `codexBackend.buildEntrypoint("/march/prompt.txt")` returns an argv that copies mounted credentials into the in-container Codex home and runs `codex exec` headlessly against the prompt file. The entrypoint does not use Gemini flags and does not add Docker-in-Docker sandboxing.
-  - If the live `SpawnBackend` surface includes `allowedEgressHosts`, Codex declares the ChatGPT/Codex service host metadata there without broadening Claude's egress metadata.
+  - `codexBackend.allowedEgressHosts` declares the ChatGPT/Codex service host(s). `allowedEgressHosts` is a required field on the live `SpawnBackend` surface (`src/spawn/backends.ts`), so Codex MUST populate it — egress metadata is not optional — without broadening Claude's egress metadata.
 
 - [ ] **Register Codex in the backend registry**
 
