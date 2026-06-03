@@ -1,0 +1,10 @@
+{
+  "lastSeq": 747,
+  "events": [
+    { "seq": 711, "id": "a1", "ts": "2026-06-03T07:38:10.000Z", "source": "herald", "profile": "march", "type": "smithy.queue.changed", "dispatchable": 5, "blocked": 13, "total": 18 },
+    { "seq": 740, "id": "a2", "ts": "2026-06-03T07:38:19.000Z", "source": "legate", "profile": "march", "type": "slice.escalated", "sliceId": "01-spawn-f5-s3-cut", "reason": "hatchery_dispatch_failed" },
+    { "seq": 741, "id": "a3", "ts": "2026-06-03T07:38:19.100Z", "source": "legate", "profile": "march", "type": "slice.escalated", "sliceId": "layered-testing-framework-m1-f3-mark", "reason": "hatchery_dispatch_failed" },
+    { "seq": 745, "id": "a4", "ts": "2026-06-03T08:00:00.000Z", "source": "herald", "profile": "march", "type": "heartbeat", "observeDurationMs": 120 },
+    { "seq": 747, "id": "a5", "ts": "2026-06-03T08:05:00.000Z", "source": "legate", "profile": "march", "type": "slice.steward.attached", "sliceId": "01-spawn-f5-s2-cut", "sessionId": "e3bde73d-1779515948", "admin": true, "operator": "jmbattista", "note": "legacy slice pre-#213; unstick PR #240" }
+  ]
+}
