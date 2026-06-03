@@ -19,7 +19,7 @@
 
 - [ ] **Derive Stage 1 and Snapshot images from the selected backend**
 
-  Update the dispatch action and snapshot build boundary so the dependency check and generated Dockerfile consume the resolved backend's `baseImage`. Keep backend selection itself scoped to the already-existing resolution surface; do not add new `--backend` parsing, env-var fallback behavior, or auth pre-flight exits in this slice.
+  Update the dispatch action and snapshot build boundary so the dependency check and generated Dockerfile consume the resolved backend's `baseImage`. Consume the backend already produced by the repo's existing selection surface (the current `--backend`/`MARCH_BACKEND`/default resolution) as-is — this slice does not touch that resolution behavior. No changes to `--backend` parsing, env-var fallback behavior, or auth pre-flight exits belong in this slice.
 
   _Acceptance criteria:_
   - Stage 1 dependency validation checks `selectedBackend.baseImage`, satisfying AS 5.1.
@@ -45,8 +45,8 @@
 
   _Acceptance criteria:_
   - `SpawnConfig` exposes only `capDrop`, `user`, `networkMode`, `memoryLimit`, `cpuLimit`, and `timeoutSeconds`, satisfying AS 5.4.
-  - Searches for the old `envWhitelist` field find no production references.
-  - Searches for the old global image constant find no dispatch dependency-check, snapshot `FROM`, or launch fixture path that forces every spawn through one image, satisfying AS 5.5.
+  - No production references to the old `envWhitelist` field remain.
+  - No dispatch dependency-check, snapshot `FROM`, or launch fixture path references the old global image constant to force every spawn through one image, satisfying AS 5.5.
   - Claude behavioral preservation tests continue to assert the same image/env/entrypoint values through `claudeCodeBackend`.
   - The slice does not change SpawnRecord backend population; US7 owns record traceability.
 
