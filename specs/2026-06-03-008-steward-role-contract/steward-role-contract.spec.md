@@ -11,7 +11,7 @@
 
 ### Session 2026-06-03
 
-- The current Hatchery snapshot does not contain the source RFC, feature map, `docs/` tree, or Git metadata. This spec is derived from the adjacent M2 Feature 1-3 specs and live Steward-related boundaries in Hatchery, Brood, Herald, Castra, Spawn, and Legate. [Critical Assumption]
+- The source RFC, feature map, and `docs/` tree are present in this repository. This spec is derived from them together with the adjacent M2 Feature 1-3 specs and the live Steward-related boundaries in Hatchery, Brood, Herald, Castra, Spawn, and Legate.
 - The slice is documentation-only: it authors the Steward role contract artifact but does not implement patch application, PR creation, presence checks, freshness checks, AUTOGEN extraction, CI changes, or runtime behavior.
 - Steward is a role-level contract for the Castra-hosted manager session that turns validated spawn output into a git-indexed patch and PR-ready branch state. It is not a standalone TypeScript subsystem with its own service routes.
 - The contract consumes Feature 1's required section schema: `## Public Interface`, `## Invariants`, and `## Error Modes`.
@@ -65,7 +65,7 @@ As the Operator, I want Steward's lifecycle and cleanup boundaries documented so
 
 **Acceptance Scenarios**:
 
-1. **Given** a Steward session is launched, **When** the contract documents tracking, **Then** it states that the steward id, spawn id, slice id, profile, branch, and worktree facts are publishable to Brood and Herald for later observation.
+1. **Given** a Steward session is launched, **When** the contract documents tracking, **Then** it states that the steward session id, spawn id, slice id, profile, branch, and worktree facts are publishable to Brood and Herald for later observation.
 2. **Given** Steward removal is requested, **When** the contract describes cleanup, **Then** it states that Castra owns removing the interactive session while Brood owns exact worktree and branch cleanup ordering.
 3. **Given** a Steward session disappears, stalls, or becomes unreachable, **When** Legate or Brood observes it, **Then** the contract identifies the observable failure state and forbids waiting forever on input the role cannot receive.
 
