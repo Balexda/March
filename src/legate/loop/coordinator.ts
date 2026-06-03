@@ -4,12 +4,14 @@ import * as ghostCleanup from "./handlers/ghost-cleanup.js";
 import * as relaunch from "./handlers/relaunch.js";
 import * as babysit from "./handlers/babysit.js";
 import * as recovery from "./handlers/recovery.js";
+import * as adoptFromFold from "./handlers/adopt-from-fold.js";
 import * as dispatch from "./handlers/dispatch.js";
 import { summarizeSlicesByStage } from "./pure/slice.js";
 
 /**
- * Stage 2 orchestration. runTick senses once, then runs the handlers in the
- * fixed order cleanup → ghost-cleanup → relaunch → babysit → recovery → dispatch,
+ * Stage 2 orchestration. runTick senses once, then runs the handlers in the fixed
+ * order cleanup → ghost-cleanup → relaunch → babysit → recovery → adopt-from-fold →
+ * dispatch,
  * each as pure assess() + effecting apply(), threading the SAME mutating {@link LoopState}
  * through all of them. Because apply() mutates the snapshot in place (drops a
  * cleaned session, archives a slice), a later handler's assess() sees the current
@@ -36,6 +38,7 @@ export interface CoordinatorOutput {
     relaunch: HandlerResult;
     babysit: HandlerResult;
     recovery: HandlerResult;
+    adoptFromFold: HandlerResult;
     dispatch: HandlerResult;
   };
 }
@@ -87,6 +90,10 @@ export async function runTick(deps: CoordinatorDeps): Promise<CoordinatorOutput>
     // Operator recovery (#238) runs BEFORE dispatch so the dropped slice frees the
     // still-ready smithy item for a fresh re-dispatch on this same tick.
     recovery: await recovery.apply(recovery.assess(state), ctx, state),
+    // #173: adopt-from-fold runs BEFORE dispatch so an escalated slice whose branch
+    // Herald observed an open PR on is transitioned to pr-open here, and dispatch's
+    // recoverableEscalations no longer re-dispatches it (no collision needed).
+    adoptFromFold: await adoptFromFold.apply(adoptFromFold.assess(state), ctx, state),
     dispatch: await dispatch.apply(dispatch.assess(state), ctx, state, deps.dispatch),
   };
 

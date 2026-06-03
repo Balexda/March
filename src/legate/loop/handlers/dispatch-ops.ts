@@ -49,6 +49,79 @@ export interface DispatchOutcome {
   notifications: DispatchNotification[];
 }
 
+// #173: adopt the slice's own open PR on a branch-collision instead of escalating.
+//
+// When the loop re-dispatches a slice whose branch is already alive with an open
+// PR, the spawn fails with "branch '<name>' already exists". Hatchery's #245
+// self-heal correctly REFUSES to delete that branch when it is unsafe (open-pr /
+// diverged) — protecting real work — and surfaces the collision rather than
+// reconciling it: the forge-truth decision (an open PR must not be deleted) is the
+// legate's to make, not hatchery's (orphan-branch.ts:140-143).
+//
+// This is a FOLD READ — no forge I/O from the loop. Herald is the observer (per
+// CLAUDE.md): it watches every tracked branch (including escalated slices, #173)
+// and emits `slice.pr.changed`, which the legate folds into `slice.pr`. So on a
+// collision we simply read `slice.pr`: if the fold already carries the slice's
+// open PR, adopt it (stage → "pr-open") and hand off to babysit's pr-open → fix →
+// merge pipeline. The caller falls through to its normal escalate path when this
+// returns null (not a collision, or no observed open PR yet).
+//
+// Eventual-consistency window: the FIRST collision after a fresh dispatch may see
+// `slice.pr == null` (Herald has not observed the branch yet) → returns null → the
+// caller escalates as today. Bounded auto-recovery (#211) re-dispatches on the next
+// tick, by which point Herald has published `slice.pr.changed` and the fold
+// reflects it, so the adopt fires then. That one extra escalate event is the
+// accepted cost of keeping forge I/O in Herald and out of the legate's hot path.
+//
+// Returns the adopt action to record, or null when nothing was adopted.
+async function adoptOpenPrOnCollision(
+  state: any,
+  ts: string,
+  sliceId: string,
+  errorText: string,
+  deps: DispatchIoDeps,
+): Promise<any | null> {
+  // Only a "branch already exists" collision is an adopt candidate; everything
+  // else escalates as before.
+  if (!/already exists/i.test(errorText)) return null;
+  const slice = state.slices?.[sliceId];
+  if (!slice || typeof slice !== "object") return null;
+
+  // Fold read — Herald owns PR discovery and emits `slice.pr.changed`; the legate
+  // never calls gh from the loop. A genuine orphan branch (or a not-yet-observed
+  // PR) leaves slice.pr null → no adoption, the caller escalates as today.
+  const pr = slice.pr;
+  const number = pr?.number;
+  if (!pr || typeof number !== "number" || !(number > 0)) return null;
+  if (pr.state && String(pr.state).toUpperCase() !== "OPEN") return null;
+
+  // Adopt: hand the slice to babysit's pr-open → fix → merge pipeline.
+  slice.stage = "pr-open";
+  // Clear any escalation residue — adoption resolves the situation cleanly, so the
+  // slice must not read as operator-only.
+  slice.escalated_reason = undefined;
+  slice.last_action = ts;
+  slice.last_action_note = "Adopted existing open PR #" + number + " on branch-collision (#173)";
+  // Record the stage transition in the fold (#255). No `slice.pr.changed` re-emit:
+  // Herald owns that event class and the fold already carries the PR, so emitting
+  // it here would double-count the observation. Carry the steward sessionId when
+  // known so the durable slice→session link (#210/#218) keeps holding.
+  const sessionId = slice.worker_session_id || undefined;
+  deps.emitTransition({
+    type: "slice.stage.changed",
+    sliceId,
+    stage: "pr-open",
+    ...(sessionId ? { sessionId } : {}),
+  });
+  deps.log("[" + ts + "] dispatch " + sliceId + ": adopted PR #" + number + " on branch-collision");
+  return {
+    action: "adopt-pr",
+    sliceId,
+    sessionId: slice.worker_session_id || null,
+    detail: "adopted existing open PR #" + number + " from branch-collision",
+  };
+}
+
 // Launch a codex spawn through the Hatchery SERVICE. POSTs the spawn request via
 // the async Hatchery client and returns the server job id;
 // completePendingHatcheryDispatches polls that id with getJob() across ticks
@@ -97,6 +170,13 @@ export async function launchDispatch(state: any, ts: string, item: any, sliceId:
   const failures: any[] = [];
   const notifications: DispatchNotification[] = [];
   const action = item.next_action || {};
+  // #173: carry forward any open-PR snapshot Herald already observed for this
+  // slice id (folded onto the prior incarnation via slice.pr.changed) across the
+  // re-create, so the branch-collision adopt path can read it from the fold. A
+  // truly fresh dispatch has no prior slice, so this is null and behavior is
+  // unchanged. Without this, re-creating the slice with pr:null would clobber the
+  // observation before the collision is seen and adoption could never fire.
+  const observedPr = state.slices?.[sliceId]?.pr ?? null;
   try {
     state.slices[sliceId] = {
       kind: "smithy",
@@ -106,7 +186,7 @@ export async function launchDispatch(state: any, ts: string, item: any, sliceId:
       actual_branch: null,
       worktree_path: null,
       stage: "hatchery-pending",
-      pr: null,
+      pr: observedPr,
       command: action.command,
       arguments: actionArguments(action),
       artifact_path: item.path || null,
@@ -127,6 +207,13 @@ export async function launchDispatch(state: any, ts: string, item: any, sliceId:
     deps.emitTransition({ type: "slice.dispatched", sliceId, branch: dispatchBranch(item), jobId: launched.jobId });
   } catch (err: any) {
     const error = err?.message || String(err);
+    // #173: if the launch collided with a branch that already has this slice's
+    // open PR, adopt the PR and let babysit drive it — no escalate, no cleanup.
+    const adopted = await adoptOpenPrOnCollision(state, ts, sliceId, error, deps);
+    if (adopted) {
+      actions.push(adopted);
+      return { actions, failures, mutated: true, notifications };
+    }
     const existing = state.slices?.[sliceId];
     if (existing && existing.stage === "hatchery-pending") {
       existing.stage = "escalated";
@@ -294,6 +381,16 @@ export async function completePendingHatcheryDispatches(state: any, ts: string, 
     }
     if (job.status === "failed" || job.result?.error) {
       const errorText = String(job.status === "failed" ? (job.error?.message || "hatchery spawn failed") : job.result.error).trim();
+      // #173: a background spawn that failed because the branch already has this
+      // slice's open PR is an adopt, not an escalate. The async service model
+      // surfaces the collision here (the spawn runs after POST /spawns' 202), so
+      // the same forge-truth check that guards the launch path guards this one.
+      const adopted = await adoptOpenPrOnCollision(state, ts, sliceId, errorText, deps);
+      if (adopted) {
+        actions.push(adopted);
+        mutated = true;
+        continue;
+      }
       escalate(slice, sliceId, errorText);
       continue;
     }

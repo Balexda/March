@@ -251,6 +251,90 @@ describe("senseObserved (Herald observation Stage 1)", () => {
     expect(state.perSlice.impl!.pr).toMatchObject({ number: 42 });
   });
 
+  it("discovers a PR for an ESCALATED slice with a branch (#173 adopt observation)", async () => {
+    // Regression for #173: an escalated/diverged slice may have an open PR from an
+    // earlier dispatch that the legate must adopt on the next collision. Without the
+    // gate lift (stage === "implementing" only) Herald never re-checks the branch
+    // and the PR stays invisible — discoverPr would not be called for this slice.
+    const discoverPr = vi.fn(async () => ({ number: 240, state: "OPEN" }));
+    const prev = foldedState({
+      slices: { esc: slice({ sliceId: "esc", stage: "escalated", sessionId: "s1", branch: "feature/foo" }) },
+    });
+    const state = await senseObserved(
+      deps({
+        listSessions: async () => [{ id: "s1", group: "legate-workers", status: "idle" }],
+        queryPr: async () => ({ skipped: true }),
+        discoverPr,
+        sessionOutput: async () => ({ output: "" }),
+      }),
+      prev,
+    );
+    expect(discoverPr).toHaveBeenCalled();
+    expect(state.perSlice.esc!.pr).toMatchObject({ number: 240 });
+  });
+
+  it("does NOT observe a PR for an escalated slice with no branch, or a recovered (tombstoned) one", async () => {
+    const discoverPr = vi.fn(async () => ({ number: 240, state: "OPEN" }));
+    const prev = foldedState({
+      slices: {
+        noBranch: slice({ sliceId: "noBranch", stage: "escalated", sessionId: "s1" }),
+        recovered: slice({ sliceId: "recovered", stage: "escalated", sessionId: "s2", branch: "feature/bar", recovered: true }),
+      },
+    });
+    await senseObserved(
+      deps({
+        listSessions: async () => [
+          { id: "s1", group: "legate-workers", status: "idle" },
+          { id: "s2", group: "legate-workers", status: "idle" },
+        ],
+        queryPr: async () => ({ skipped: true }),
+        discoverPr,
+        sessionOutput: async () => ({ output: "" }),
+      }),
+      prev,
+    );
+    expect(discoverPr).not.toHaveBeenCalled();
+  });
+
+  it("observes the PR for an escalated slice with a branch but NO live session (#173)", async () => {
+    // The original steward died long ago; the slice is escalated with an open PR
+    // still on origin. PR observation needs only the branch, so the upstream
+    // !session guard must not skip it — otherwise the new escalated gate is dead
+    // code and the legate's adopt-from-fold path never sees the PR.
+    const discoverPr = vi.fn(async () => ({ number: 240, state: "OPEN" }));
+    const sessionOutput = vi.fn(async () => ({ output: "x" }));
+    const prev = foldedState({
+      slices: { esc: slice({ sliceId: "esc", stage: "escalated", branch: "feature/foo" }) }, // no sessionId
+    });
+    const state = await senseObserved(
+      deps({
+        listSessions: async () => [], // no live sessions at all
+        queryPr: async () => ({ skipped: true }),
+        discoverPr,
+        sessionOutput,
+      }),
+      prev,
+    );
+    expect(discoverPr).toHaveBeenCalled();
+    expect(state.perSlice.esc!.pr).toMatchObject({ number: 240 });
+    // No session → output observation is skipped gracefully (not called, no entry).
+    expect(sessionOutput).not.toHaveBeenCalled();
+    expect(state.perSlice.esc!.recentOutput).toBeUndefined();
+  });
+
+  it("still skips a NON-escalated slice with no live session", async () => {
+    const discoverPr = vi.fn(async () => ({ number: 1, state: "OPEN" }));
+    const prev = foldedState({
+      slices: { impl: slice({ sliceId: "impl", stage: "implementing", branch: "feature/bar" }) }, // no session
+    });
+    const state = await senseObserved(
+      deps({ listSessions: async () => [], queryPr: async () => ({ skipped: true }), discoverPr }),
+      prev,
+    );
+    expect(discoverPr).not.toHaveBeenCalled();
+    expect(state.perSlice.impl).toBeUndefined();
+  });
+
   it("matches a recorded sessionId only against session id, never title/name", async () => {
     const queryPr = vi.fn(async () => ({ number: 7, state: "OPEN" }));
     const sessionOutput = vi.fn(async () => ({ output: "log" }));

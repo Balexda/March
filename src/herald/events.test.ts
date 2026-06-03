@@ -106,6 +106,26 @@ describe("reduce / fold", () => {
     expect(recovered.slices.s1.escalatedReason).toBeUndefined();
   });
 
+  it("folds slice.pr.changed onto an escalated (not recovered) slice — the #173 adopt-from-fold path", () => {
+    seq = 0;
+    // An escalated slice whose branch Herald observed an open PR on. The reducer
+    // must accept the observation (only recovered/tombstoned slices are skipped, see
+    // the #238 test below) so the legate can adopt it from the fold on the next
+    // branch-collision.
+    const escalated = foldEvents([
+      ev({ type: "slice.dispatched", sliceId: "s1", branch: "feature/a", jobId: "job-1" }),
+      ev({ type: "slice.escalated", sliceId: "s1", reason: "hatchery_dispatch_failed" }),
+    ]);
+    expect(escalated.slices.s1).toMatchObject({ stage: "escalated", escalatedReason: "hatchery_dispatch_failed" });
+
+    const observed = foldEvents(
+      [ev({ type: "slice.pr.changed", sliceId: "s1", pr: { number: 240, state: "OPEN" } })],
+      escalated,
+    );
+    expect(observed.slices.s1.pr).toEqual({ number: 240, state: "OPEN" });
+    expect(observed.slices.s1.stage).toBe("escalated");
+  });
+
   it("folds slice.steward.attached into sessionId/spawnId/branch/worktree (#213)", () => {
     seq = 0;
     const state = foldEvents([

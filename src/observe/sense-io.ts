@@ -350,7 +350,13 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
       const options = owner ? {} : { cwd: repoPath };
       const list = JSON.parse(await execText("gh", args, options));
       if (!Array.isArray(list) || list.length === 0) return null;
-      const since = prDiscoverySince(slice);
+      // #173: an escalated slice's last_action is the escalation timestamp, not a
+      // fresh dispatch, so the recency floor would wrongly exclude an open PR
+      // opened during an EARLIER dispatch — the exact branch-collision adopt case
+      // Herald must observe so the legate can adopt from the fold. Skip the floor
+      // for escalated slices; the branch-variant match below is then the sole gate.
+      // The floor still scopes the implementing/babysit discovery path.
+      const since = slice?.stage === "escalated" ? null : prDiscoverySince(slice);
       const candidates = since
         ? list.filter((candidate: any) => String(candidate.createdAt || "") >= since)
         : list;

@@ -311,8 +311,15 @@ export async function senseObserved(deps: SenseDeps, prev: SystemState): Promise
     // adopted (the #210 bug). If nothing resolves, there is no live session to
     // observe, so skip.
     const session = resolveSliceSession(sessions, sliceId, s);
-    if (!session) continue;
-    const sessionId = String(session.id);
+    // #173: PR observation needs only the slice's branch, not a live steward. An
+    // escalated slice whose original steward died (no session resolves) but whose
+    // branch still has an open PR is the exact adopt case, so do NOT bail on
+    // !session for it. Implementing/babysit observation still depends on a live
+    // session (it reads session output), so a non-escalated slice with no session
+    // is skipped as before.
+    const observeEscalatedNoSession = !session && s.stage === "escalated" && !!s.branch && !s.recovered;
+    if (!session && !observeEscalatedNoSession) continue;
+    const sessionId = session ? String(session.id) : "";
     const sliceLike = {
       pr: s.pr,
       branch: s.branch,
@@ -320,24 +327,47 @@ export async function senseObserved(deps: SenseDeps, prev: SystemState): Promise
       worker_session_id: sessionId,
       stage: s.stage,
     };
-    if (isTerminalSlice(sliceLike)) continue;
+    // #173: escalated slices are "terminal" for in-flight purposes (isTerminalSlice),
+    // but Herald must still OBSERVE an open PR on an escalated slice's branch so the
+    // legate can adopt it from the fold on the next branch-collision. So keep an
+    // escalated slice that still has a branch (and isn't recovered/tombstoned) in
+    // the observation set; every other terminal slice (merged / terminal PR) is
+    // skipped as before.
+    const observeEscalated = sliceLike.stage === "escalated" && !!sliceLike.branch && !s.recovered;
+    if (isTerminalSlice(sliceLike) && !observeEscalated) continue;
     const entry: SliceExternalState = {};
     try {
       let pr = await deps.queryPr(sliceLike, state, repoPath);
-      // Implementing slice with no PR yet: queryPr skips (no number to query),
-      // so fall back to branch/output-based discovery so the legate sees the PR
-      // appear in its inbox uniformly.
-      if ((!pr || pr.skipped) && s.stage === "implementing" && !(s.pr as any)?.number && deps.discoverPr) {
+      // No PR snapshot yet: queryPr skips (no number to query), so fall back to
+      // branch/output-based discovery so the legate sees the PR appear in its
+      // inbox uniformly. Observe for an implementing slice (the original case) AND
+      // for an escalated slice with a known branch (#173): an escalated/diverged
+      // slice may have an open PR from an EARLIER dispatch that the legate must
+      // adopt on the next branch-collision — and it only learns of it from this
+      // observation. Recovered (tombstoned, #238/#239) slices are excluded; they
+      // are re-observed once the recovery's fresh dispatch lands them back in
+      // hatchery-pending → implementing.
+      const needsPrObservation =
+        (!pr || pr.skipped) &&
+        !(s.pr as any)?.number &&
+        (s.stage === "implementing" || (s.stage === "escalated" && !!s.branch && !s.recovered));
+      if (needsPrObservation && deps.discoverPr) {
         pr = (await deps.discoverPr(sliceLike, state, repoPath, sessionId)) ?? pr;
       }
       entry.pr = pr;
     } catch (err: any) {
       entry.pr = { error: err?.message || String(err) };
     }
-    try {
-      entry.recentOutput = await deps.sessionOutput(sessionId);
-    } catch (err: any) {
-      entry.recentOutput = { output: "", error: err?.message || String(err) };
+    // Output observation needs a live session (Castra session output). Skip it
+    // gracefully for an escalated slice with no session — there is no worker to
+    // read from; the PR observation above is enough for the adopt path, and output
+    // deltas resume once a fresh steward attaches.
+    if (session) {
+      try {
+        entry.recentOutput = await deps.sessionOutput(sessionId);
+      } catch (err: any) {
+        entry.recentOutput = { output: "", error: err?.message || String(err) };
+      }
     }
     perSlice[sliceId] = entry;
   }

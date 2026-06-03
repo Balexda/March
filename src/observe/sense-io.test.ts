@@ -312,6 +312,74 @@ describe("discoverPrForSlice (branch-based lookup)", () => {
   });
 });
 
+describe("discoverPrForSlice escalated-slice floor skip (#173)", () => {
+  // An escalated slice's last_action is the escalation timestamp; the open PR it
+  // must adopt was opened during an EARLIER dispatch, so it predates last_action.
+  // discoverPrForSlice skips the prDiscoverySince floor for escalated slices so
+  // Herald can observe that PR (the legate then adopts from the fold). The floor
+  // still applies to the implementing/babysit discovery path.
+  const routeBranchPr = (created: string) =>
+    routeExec((cmd, args) => {
+      if (cmd === "gh" && args.includes("list")) {
+        return JSON.stringify([
+          { number: 42, url: "https://github.com/octo/march/pull/42", state: "OPEN", headRefName: "feature/right", title: "Ours", createdAt: created },
+        ]);
+      }
+      if (cmd === "gh" && args.includes("view")) {
+        return JSON.stringify({
+          number: 42,
+          url: "https://github.com/octo/march/pull/42",
+          state: "OPEN",
+          mergeable: "MERGEABLE",
+          headRefName: "feature/right",
+          title: "Ours",
+          author: { login: "me" },
+          statusCheckRollup: [],
+        });
+      }
+      if (args.includes("graphql")) {
+        return JSON.stringify({ data: { repository: { pullRequest: { reviewThreads: { nodes: [] } } } } });
+      }
+      return "";
+    });
+
+  const state = () => ({ repo: { path: "/repo", owner_with_name: "octo/march" } });
+  const PR_CREATED = "2026-05-20T01:00:00Z"; // BEFORE the slice's last_action below
+  const LAST_ACTION = "2026-05-25T00:00:00Z";
+
+  it("finds the branch's open PR for an escalated slice even though it predates last_action", async () => {
+    routeBranchPr(PR_CREATED);
+    const io = createSenseIo({ meta: meta(), castra: fakeCastra({ sessionOutput: async () => "" }) });
+    const slice = { branch: "feature/right", last_action: LAST_ACTION, stage: "escalated" };
+    const pr = await io.discoverPrForSlice(slice, state(), "sess-x");
+    expect(pr).not.toBeNull();
+    expect(pr.number).toBe(42);
+    expect(pr.head_branch).toBe("feature/right");
+  });
+
+  it("still floors candidates by last_action for a non-escalated (implementing) slice", async () => {
+    routeBranchPr(PR_CREATED);
+    const io = createSenseIo({ meta: meta(), castra: fakeCastra({ sessionOutput: async () => "" }) });
+    const slice = { branch: "feature/right", last_action: LAST_ACTION, stage: "implementing" };
+    // The since floor excludes the older PR — original behavior preserved.
+    expect(await io.discoverPrForSlice(slice, state(), "sess-x")).toBeNull();
+  });
+
+  it("returns null for an escalated slice when no open PR matches its branch", async () => {
+    routeExec((cmd, args) => {
+      if (cmd === "gh" && args.includes("list")) {
+        return JSON.stringify([
+          { number: 99, url: "https://github.com/octo/march/pull/99", state: "OPEN", headRefName: "feature/wrong", title: "Unrelated", createdAt: PR_CREATED },
+        ]);
+      }
+      return "";
+    });
+    const io = createSenseIo({ meta: meta(), castra: fakeCastra({ sessionOutput: async () => "" }) });
+    const slice = { branch: "feature/right", last_action: LAST_ACTION, stage: "escalated" };
+    expect(await io.discoverPrForSlice(slice, state(), "sess-x")).toBeNull();
+  });
+});
+
 describe("syncDefaultBranch (via SenseDeps)", () => {
   it("fetches/switches/pulls the known default branch and resolves void", async () => {
     const calls: string[][] = [];
