@@ -144,6 +144,83 @@ describe("senseFromHerald (Stage 1, Herald-backed)", () => {
     const state = await senseFromHerald(deps(), herald, prevRaw());
     expect(state.workers).toEqual({ error: "unavailable" });
   });
+
+  it("folds a drained slice.steward.attached into the running working state without a restart (#265)", async () => {
+    // A slice the legate already dispatched but whose worker_session_id is still
+    // empty (the #230/#240 case). The attach arrives mid-run via the inbox.
+    const raw = {
+      repo: { path: "/repo" },
+      slices: { X: { kind: "smithy", worker_session_id: null, stage: "pr-open", branch: null, worktree_path: null } },
+      archived_slices: {},
+    };
+    const herald = {
+      consume: vi.fn(async () => emptySystemState()),
+      takeStewardAttachments: vi.fn(() => [
+        { sliceId: "X", sessionId: "sess-9", branch: "smithy/cut/x", worktreePath: "/wt/x" },
+      ]),
+    };
+    const state = await senseFromHerald(deps(), herald, raw);
+    expect(state.raw.slices.X).toMatchObject({
+      worker_session_id: "sess-9",
+      branch: "smithy/cut/x",
+      worktree_path: "/wt/x",
+      stage: "pr-open", // untouched — stage flows from its own events
+    });
+  });
+
+  it("clears a recovery tombstone when a steward attaches mid-run (#265, mirrors the reducer)", async () => {
+    const raw = {
+      repo: { path: "/repo" },
+      slices: { X: { kind: "smithy", worker_session_id: null, recovered: true } },
+      archived_slices: {},
+    };
+    const herald = {
+      consume: vi.fn(async () => emptySystemState()),
+      takeStewardAttachments: vi.fn(() => [{ sliceId: "X", sessionId: "sess-9" }]),
+    };
+    const state = await senseFromHerald(deps(), herald, raw);
+    expect(state.raw.slices.X.worker_session_id).toBe("sess-9");
+    expect(state.raw.slices.X).not.toHaveProperty("recovered");
+  });
+
+  it("ignores an attachment for a slice absent from the working state (cold rebuild covers it)", async () => {
+    const raw = { repo: { path: "/repo" }, slices: {}, archived_slices: {} };
+    const herald = {
+      consume: vi.fn(async () => emptySystemState()),
+      takeStewardAttachments: vi.fn(() => [{ sliceId: "ghost", sessionId: "sess-9" }]),
+    };
+    const state = await senseFromHerald(deps(), herald, raw);
+    expect(state.raw.slices).not.toHaveProperty("ghost");
+  });
+
+  it("warm fold of slice.steward.attached converges with a cold-start rebuild of the same fold (#265)", async () => {
+    // The complete fold once the attach has landed: dispatched + steward attached.
+    const fullFold = foldedState({
+      slices: {
+        X: { sliceId: "X", stage: "implementing", branch: "b", worktreePath: "/wt", sessionId: "sess-9" },
+      },
+    });
+    // Cold start: rebuild the whole working state from the full fold.
+    const cold = await senseFromHerald(deps(), { consume: vi.fn(async () => fullFold) }, null);
+
+    // Warm: prevRaw was built from the fold BEFORE the attach (no session/branch/
+    // worktree), then this tick drains the attach and folds it in.
+    const preFold = foldedState({ slices: { X: { sliceId: "X", stage: "implementing" } } });
+    const warmRaw = rebuildWorkingState(preFold, meta);
+    const warm = await senseFromHerald(
+      deps(),
+      {
+        consume: vi.fn(async () => fullFold),
+        takeStewardAttachments: vi.fn(() => [
+          { sliceId: "X", sessionId: "sess-9", branch: "b", worktreePath: "/wt" },
+        ]),
+      },
+      warmRaw,
+    );
+
+    // The warm-reconciled slice equals the cold-start one — the two paths agree.
+    expect(warm.raw.slices.X).toEqual(cold.raw.slices.X);
+  });
 });
 
 describe("rebuildWorkingState", () => {

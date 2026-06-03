@@ -256,6 +256,7 @@ async function tickProfile(rt: ProfileRuntime): Promise<void> {
   const inbox: HeraldInbox = {
     consume: async () => herald.snapshotFor(meta.profile),
     takeRecoveryRequests: () => herald.takeRecoveryRequests(meta.profile),
+    takeStewardAttachments: () => herald.takeStewardAttachments(meta.profile),
   };
 
   const makeContext = (state: any) => ({

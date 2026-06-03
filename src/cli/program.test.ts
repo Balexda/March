@@ -295,6 +295,23 @@ describe("march CLI", () => {
       expect(result.stderr).not.toContain("unknown command 'herald'");
       expect(result.stdout + result.stderr).toContain("Usage: march herald");
     });
+
+    it("`march herald admin event --help` exits 0 and prints the admin-event flag surface (#265)", () => {
+      const result = run(["herald", "admin", "event", "--help"]);
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain("Usage: march herald admin event");
+      expect(result.stdout).toContain("--profile");
+      expect(result.stdout).toContain("--type");
+      expect(result.stdout).toContain("--slice-id");
+      expect(result.stdout).toContain("--session-id");
+      expect(result.stdout).toContain("--note");
+    });
+
+    it("`march herald admin event` fails fast on missing required flags, before any network (#265)", () => {
+      const result = run(["herald", "admin", "event", "--yes"]);
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toMatch(/--profile is required/);
+    });
   });
 
   describe("march castra", () => {

@@ -5,6 +5,7 @@ import {
   recordHeraldRequest,
 } from "../../observability/herald-metrics.js";
 import { startHeraldSpan } from "../../observability/herald-trace.js";
+import { recordHeraldAdminEvent } from "../../observability/herald-metrics.js";
 import { createCastraClientFromEnv } from "../../castra/client.js";
 import type { EventStore } from "./store.js";
 import type { AppendEventInput, EventType } from "../events.js";
@@ -21,6 +22,23 @@ export interface RoutesOptions {
   readonly store: EventStore;
   /** Returns the latest observe-status snapshot (server-owned, in-memory). */
   readonly getObserveStatus?: () => ObserveStatus;
+  /**
+   * Env source for the break-glass admin token (#265). Defaults to
+   * `process.env`; injectable so tests toggle the gate without mutating the
+   * process environment.
+   */
+  readonly env?: NodeJS.ProcessEnv;
+}
+
+/** Env var gating the break-glass `POST /admin/events` endpoint (#265). */
+export const HERALD_ADMIN_TOKEN_ENV = "MARCH_HERALD_ADMIN_TOKEN";
+
+/** Extract a `Bearer <token>` value from an Authorization header, or null. */
+function bearerToken(header: string | string[] | undefined): string | null {
+  const raw = Array.isArray(header) ? header[0] : header;
+  if (typeof raw !== "string") return null;
+  const match = /^Bearer\s+(.+)$/i.exec(raw.trim());
+  return match ? match[1].trim() : null;
 }
 
 const DEFAULT_EVENTS_LIMIT = 100;
@@ -125,6 +143,7 @@ export async function registerRoutes(
   opts: RoutesOptions,
 ): Promise<void> {
   const { store } = opts;
+  const env = opts.env ?? process.env;
   const getObserveStatus =
     opts.getObserveStatus ??
     (() => ({ lastObserveAtMs: null, lastObserveDurationMs: null }));
@@ -208,6 +227,72 @@ export async function registerRoutes(
     const event = store.append(validation.input);
     reply.code(201);
     return event;
+  });
+
+  // Break-glass operator endpoint (#265): author a corrective event into the
+  // fold through the normal pipeline (validated, sequenced, audited) instead of
+  // hand-editing the sqlite log or growing dead auto-heal code in the legate.
+  //
+  // The token (MARCH_HERALD_ADMIN_TOKEN) is read PER REQUEST so the gate tracks
+  // the live env: UNSET → the route 404s (invisible by default — prod leaves it
+  // unset); SET but the Bearer is missing/wrong → 401. Read at request time so a
+  // single long-lived server can be armed and disarmed without a restart.
+  app.post("/admin/events", async (request, reply) => {
+    const expected = env[HERALD_ADMIN_TOKEN_ENV]?.trim();
+    if (!expected) {
+      reply.code(404);
+      return { error: "not found" };
+    }
+    if (bearerToken(request.headers["authorization"]) !== expected) {
+      reply.code(401);
+      return { error: "invalid or missing admin bearer token." };
+    }
+    const body = (request.body ?? {}) as Record<string, unknown>;
+    const profile = typeof body.profile === "string" ? body.profile.trim() : "";
+    const operator = typeof body.operator === "string" ? body.operator.trim() : "";
+    const note = typeof body.note === "string" ? body.note.trim() : "";
+    if (!profile) {
+      reply.code(422);
+      return { error: "profile is required." };
+    }
+    if (!operator) {
+      reply.code(422);
+      return { error: "operator is required." };
+    }
+    if (!note) {
+      reply.code(422);
+      return { error: "note is required." };
+    }
+    // Reuse the SAME union validator POST /events uses — reducer-safe by
+    // construction; an operator cannot author an out-of-taxonomy event (the
+    // forensic admin.event.appended type is intentionally absent from the
+    // validator's accepted set, so it can't be posted here either).
+    const validation = validateEvent((body.event ?? {}) as Record<string, unknown>);
+    if (!validation.ok) {
+      reply.code(422);
+      return { error: validation.error };
+    }
+    // Stamp the corrective event with the audit attributes (admin/operator/note)
+    // and the operator-chosen profile; it folds by its own type, identically to a
+    // normal append.
+    const appended = store.append({ ...validation.input, profile }, { operator, note });
+    // Pair it with a forensic audit row so the log is self-describing even to
+    // tooling that only reads events and never inspects the audit columns.
+    const auditRow = store.append({
+      type: "admin.event.appended",
+      appendedSeq: appended.seq,
+      operator,
+      note,
+      source: "legate",
+      profile,
+    });
+    recordHeraldAdminEvent(appended.type);
+    request.log.info(
+      { operator, note, eventType: appended.type, profile, seq: appended.seq, auditSeq: auditRow.seq },
+      "herald admin event appended",
+    );
+    reply.code(200);
+    return { seq: appended.seq, auditSeq: auditRow.seq };
   });
 
   // The projection, or as-of a `seq`. `?profile=` → that profile's SystemState

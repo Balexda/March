@@ -160,6 +160,48 @@ Two deliberate properties:
   restarts mid-slice its root span is not re-emitted, so later Herald spans on
   that slice show against a missing root.
 
+#### Herald break-glass admin endpoint (`POST /admin/events`, #265)
+
+When a since-fixed bug leaves the fold in a state the current code cannot reach
+naturally (e.g. a pre-#213 slice with an empty `worker_session_id`), the operator
+authors the missing event **through the normal pipeline** rather than hand-editing
+the sqlite log or growing dead auto-heal code in the legate loop. `POST
+/admin/events` validates the inner event against the same discriminated-union
+validator `POST /events` uses, allocates a `seq` from Herald's single sequencer,
+stamps the row with audit columns (`admin`/`operator`/`note`), and appends a paired
+forensic `admin.event.appended` audit row. The corrective event then folds by its
+own type — identically to a producer-emitted one — and the reducer ignores the
+audit row.
+
+- **Gate.** The endpoint is gated on `MARCH_HERALD_ADMIN_TOKEN`. **Unset → the
+  route 404s and is invisible** (prod leaves it unset; the token is read per
+  request, so a long-lived Herald is armed/disarmed without a restart). Set but the
+  `Authorization: Bearer …` is missing/wrong → 401. It is a *separate* token from
+  any legate/observer credential.
+- **Observability.** Each append increments `march.herald.admin.events`
+  (`march_herald_admin_events_total`, labelled `event_type`) and writes a pino
+  `info` line carrying the operator + note. The mutation is also spanned as
+  `herald.request` like any other `POST`.
+- **Operator workflow.** Set the token for the intervention window only, then unset
+  it again:
+  ```bash
+  export MARCH_HERALD_URL=http://localhost:8818
+  export MARCH_HERALD_ADMIN_TOKEN=<token also set on the herald container>
+  march herald admin event \
+    --profile march \
+    --type slice.steward.attached \
+    --slice-id 01-spawn-f5-s2-cut \
+    --session-id e3bde73d-1779515948 \
+    --worktree-path /home/jmbattista/Development/WorkTrees/March/feature-smithy-cut-01-spawn-f5-s2 \
+    --branch smithy/cut/01-spawn-f5-s2 \
+    --note "legacy slice pre-#213; unstick PR #240"
+  ```
+  The CLI echoes the JSON body and prompts for confirmation (`--yes` to skip),
+  prints the appended seq, and the next legate tick picks up the populated
+  `worker_session_id`. Adding the token to `docker/herald.docker-compose.yml` is
+  the commented-out `MARCH_HERALD_ADMIN_TOKEN` line — uncomment, recreate the
+  container, do the intervention, then comment it out and recreate again.
+
 ### Metrics
 
 Tagged `{backend, task_type, profile, outcome}`. `spawn_id` / `slice_id` are

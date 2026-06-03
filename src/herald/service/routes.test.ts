@@ -6,10 +6,11 @@ import { EventStore } from "./store.js";
 
 async function buildApp(
   getObserveStatus?: () => ObserveStatus,
+  env?: NodeJS.ProcessEnv,
 ): Promise<{ app: FastifyInstance; store: EventStore }> {
   const store = new EventStore({ dbPath: ":memory:" });
   const app = Fastify();
-  await registerRoutes(app, { store, getObserveStatus });
+  await registerRoutes(app, { store, getObserveStatus, env });
   return { app, store };
 }
 
@@ -137,5 +138,170 @@ describe.skipIf(!sqliteAvailable)("herald routes", () => {
     expect([200, 503]).toContain(res.statusCode);
     expect(res.json()).toHaveProperty("git");
     expect(res.json()).toHaveProperty("smithy");
+  });
+});
+
+describe.skipIf(!sqliteAvailable)("POST /admin/events (#265)", () => {
+  let close: (() => Promise<void>) | undefined;
+  afterEach(async () => {
+    if (close) await close();
+    close = undefined;
+  });
+
+  const stewardEvent = {
+    type: "slice.steward.attached",
+    sliceId: "01-spawn-f5-s2-cut",
+    sessionId: "e3bde73d-1779515948",
+    worktreePath: "/home/op/wt/feature-x",
+    branch: "smithy/cut/01-spawn-f5-s2",
+  };
+  const adminBody = (event: Record<string, unknown> = stewardEvent) => ({
+    profile: "march",
+    event,
+    operator: "jmbattista",
+    note: "legacy slice pre-#213; unstick PR #240",
+  });
+
+  it("404s (invisible) when MARCH_HERALD_ADMIN_TOKEN is unset — not 401", async () => {
+    const { app, store } = await buildApp(undefined, {});
+    close = async () => { await app.close(); store.close(); };
+    const res = await app.inject({
+      method: "POST",
+      url: "/admin/events",
+      headers: { authorization: "Bearer anything" },
+      payload: adminBody(),
+    });
+    expect(res.statusCode).toBe(404);
+    expect(store.count()).toBe(0);
+  });
+
+  it("401s when the token is set but the Bearer is missing or wrong", async () => {
+    const { app, store } = await buildApp(undefined, { MARCH_HERALD_ADMIN_TOKEN: "s3cret" });
+    close = async () => { await app.close(); store.close(); };
+    const missing = await app.inject({ method: "POST", url: "/admin/events", payload: adminBody() });
+    expect(missing.statusCode).toBe(401);
+    const wrong = await app.inject({
+      method: "POST",
+      url: "/admin/events",
+      headers: { authorization: "Bearer nope" },
+      payload: adminBody(),
+    });
+    expect(wrong.statusCode).toBe(401);
+    expect(store.count()).toBe(0);
+  });
+
+  it("200s on a valid event: appends with audit columns + a paired audit row", async () => {
+    const { app, store } = await buildApp(undefined, { MARCH_HERALD_ADMIN_TOKEN: "s3cret" });
+    close = async () => { await app.close(); store.close(); };
+    const res = await app.inject({
+      method: "POST",
+      url: "/admin/events",
+      headers: { authorization: "Bearer s3cret" },
+      payload: adminBody(),
+    });
+    expect(res.statusCode).toBe(200);
+    const { seq, auditSeq } = res.json();
+    expect(seq).toBe(1);
+    expect(auditSeq).toBe(2);
+
+    // Two rows: the corrective event + its paired audit row.
+    expect(store.count()).toBe(2);
+    const events = store.readAfter(0, 10);
+    const corrective = events.find((e) => e.seq === seq)!;
+    expect(corrective.type).toBe("slice.steward.attached");
+    // Audit columns are surfaced on the corrective row.
+    expect(corrective.admin).toBe(true);
+    expect(corrective.operator).toBe("jmbattista");
+    expect(corrective.note).toContain("unstick PR #240");
+    // It folds: worker session is now populated in the projection.
+    expect(store.projectionFor("march").slices["01-spawn-f5-s2-cut"].sessionId).toBe(
+      "e3bde73d-1779515948",
+    );
+
+    // The paired audit row references the appended seq and is reducer-inert.
+    const audit = events.find((e) => e.seq === auditSeq)! as unknown as {
+      type: string;
+      appendedSeq: number;
+      operator: string;
+      note: string;
+    };
+    expect(audit.type).toBe("admin.event.appended");
+    expect(audit.appendedSeq).toBe(seq);
+    expect(audit.operator).toBe("jmbattista");
+  });
+
+  it("422s on a malformed event with the validator message", async () => {
+    const { app, store } = await buildApp(undefined, { MARCH_HERALD_ADMIN_TOKEN: "s3cret" });
+    close = async () => { await app.close(); store.close(); };
+    // slice.steward.attached requires a non-empty sessionId.
+    const res = await app.inject({
+      method: "POST",
+      url: "/admin/events",
+      headers: { authorization: "Bearer s3cret" },
+      payload: adminBody({ type: "slice.steward.attached", sliceId: "s1" }),
+    });
+    expect(res.statusCode).toBe(422);
+    expect(res.json().error).toMatch(/sessionId/);
+    // An out-of-taxonomy type is rejected too (the audit type can't be authored).
+    const audit = await app.inject({
+      method: "POST",
+      url: "/admin/events",
+      headers: { authorization: "Bearer s3cret" },
+      payload: adminBody({ type: "admin.event.appended", appendedSeq: 1, operator: "x", note: "y" }),
+    });
+    expect(audit.statusCode).toBe(422);
+    expect(store.count()).toBe(0);
+  });
+
+  it("folds identically to the same event posted via POST /events", async () => {
+    // Via the admin break-glass endpoint.
+    const admin = await buildApp(undefined, { MARCH_HERALD_ADMIN_TOKEN: "s3cret" });
+    // Via the normal legate write path.
+    const legate = await buildApp(undefined, {});
+    close = async () => {
+      await admin.app.close();
+      admin.store.close();
+      await legate.app.close();
+      legate.store.close();
+    };
+
+    const adminRes = await admin.app.inject({
+      method: "POST",
+      url: "/admin/events",
+      headers: { authorization: "Bearer s3cret" },
+      payload: adminBody(),
+    });
+    expect(adminRes.statusCode).toBe(200);
+    const legateRes = await legate.app.inject({
+      method: "POST",
+      url: "/events",
+      payload: { source: "legate", profile: "march", ...stewardEvent },
+    });
+    expect(legateRes.statusCode).toBe(201);
+
+    // The slice projection (envelope-independent) is identical — the corrective
+    // event reduces by its own type, and the paired audit row is reducer-inert.
+    const adminSlice = admin.store.projectionFor("march").slices["01-spawn-f5-s2-cut"];
+    const legateSlice = legate.store.projectionFor("march").slices["01-spawn-f5-s2-cut"];
+    expect(adminSlice).toEqual(legateSlice);
+  });
+
+  it("422s when profile/operator/note are missing", async () => {
+    const { app, store } = await buildApp(undefined, { MARCH_HERALD_ADMIN_TOKEN: "s3cret" });
+    close = async () => { await app.close(); store.close(); };
+    for (const bad of [
+      { event: stewardEvent, operator: "x", note: "y" }, // no profile
+      { profile: "march", event: stewardEvent, note: "y" }, // no operator
+      { profile: "march", event: stewardEvent, operator: "x" }, // no note
+    ]) {
+      const res = await app.inject({
+        method: "POST",
+        url: "/admin/events",
+        headers: { authorization: "Bearer s3cret" },
+        payload: bad,
+      });
+      expect(res.statusCode).toBe(422);
+    }
+    expect(store.count()).toBe(0);
   });
 });

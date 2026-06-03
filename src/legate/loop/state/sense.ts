@@ -88,6 +88,23 @@ async function senseSmithy(
   };
 }
 
+/**
+ * A `slice.steward.attached` (#213) drained in the most recent {@link
+ * HeraldInbox.consume}. Hatchery (and, via #265, the break-glass admin endpoint)
+ * authors this event — NOT the legate — so the warm in-memory working state never
+ * learns of it through the handlers; only the durable fold carries it, and the
+ * fold alone reaches the warm loop on the next tick (warm-loop invisibility, the
+ * same shape as `slice.recovery.requested`). The inbox surfaces the incremental
+ * attachments so {@link senseFromHerald} can reconcile `raw.slices` mid-run,
+ * matching what the cold-start {@link rebuildWorkingState} already maps.
+ */
+export interface StewardAttachment {
+  readonly sliceId: string;
+  readonly sessionId: string;
+  readonly branch?: string;
+  readonly worktreePath?: string;
+}
+
 /** A consumer of the Herald inbox — drains + folds, returning the projection. */
 export interface HeraldInbox {
   consume(): Promise<SystemState>;
@@ -97,6 +114,37 @@ export interface HeraldInbox {
    * omit it; the loop reconciles its in-memory working state for these.
    */
   takeRecoveryRequests?(): string[];
+  /**
+   * `slice.steward.attached` events (#213/#265) drained in the most recent
+   * {@link consume}. Optional so test stubs can omit it; {@link senseFromHerald}
+   * folds them into the running `raw.slices` so a mid-run attach (Hatchery push or
+   * an operator admin event) takes effect on the next tick without a restart.
+   */
+  takeStewardAttachments?(): StewardAttachment[];
+}
+
+/**
+ * Fold the incremental `slice.steward.attached` deltas drained this tick into the
+ * running working state (#265). Mirrors the steward-attached mapping in
+ * {@link rebuildWorkingState} / the events.ts reducer so the warm path and a
+ * cold-start rebuild converge on the same `worker_session_id`/`branch`/
+ * `worktree_path`. Only the slice→session correlation fields are touched — never
+ * `stage`/`archived`/`pr`, which flow from their own (legate-authored) events.
+ */
+function applyStewardAttachments(slices: Record<string, any>, attachments: StewardAttachment[]): void {
+  for (const att of attachments) {
+    // The attach targets a slice the legate already dispatched (so it is present
+    // in `raw.slices`); the cold-start rebuild reconstructs any slice the warm
+    // state is missing, so skipping an unknown one here can't lose the fact.
+    const slice = slices[att.sliceId];
+    if (!slice) continue;
+    slice.worker_session_id = att.sessionId;
+    if (att.branch !== undefined) slice.branch = att.branch;
+    if (att.worktreePath !== undefined) slice.worktree_path = att.worktreePath;
+    // A steward attach re-establishes the slice — clear any recovery tombstone,
+    // mirroring the reducer (events.ts) so cold/warm agree.
+    if (slice.recovered) delete slice.recovered;
+  }
 }
 
 /**
@@ -200,6 +248,14 @@ export async function senseFromHerald(deps: SenseDeps, herald: HeraldInbox, prev
   const slices = raw.slices;
   const archived = raw.archived_slices;
   const repoPath = raw.repo?.path || deps.meta.repo?.path;
+
+  // Fold this tick's `slice.steward.attached` deltas (#213/#265) into the running
+  // working state. Hatchery/the admin endpoint — not the legate — authors them, so
+  // without this the warm loop keeps acting on a stale (often empty)
+  // `worker_session_id` until a restart. On cold start `rebuildWorkingState`
+  // already mapped them from the full fold, so re-applying the post-cursor subset
+  // is idempotent (same sessionId).
+  applyStewardAttachments(slices, herald.takeStewardAttachments?.() ?? []);
 
   const sessions = Object.values(sys.sessions).map(adaptObservedSession);
   const sessionsById = new Map<string, any>();

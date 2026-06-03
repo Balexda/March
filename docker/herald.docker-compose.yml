@@ -24,6 +24,12 @@
 #   MARCH_HERALD_SYNC set to 1 to let Herald own the default-branch git sync.
 #                     LEFT UNSET here (PR1 default = read-only) so Herald never
 #                     fights a still-polling legate.
+#   MARCH_HERALD_ADMIN_TOKEN
+#                     break-glass operator token for POST /admin/events (#265).
+#                     LEAVE UNSET in prod — while unset the admin route 404s and is
+#                     invisible. Set it ONLY for the window an operator needs to
+#                     author a corrective event (`march herald admin event ...`),
+#                     then UNSET it again. Distinct from any legate/observer token.
 #   CASTRA_URL        castra base URL (default http://castra:9264 on the `march`
 #                     network) — Herald lists sessions / reads output via castra.
 #   CASTRA_API_TOKEN  bearer token — must match the castra service's token.
@@ -60,6 +66,10 @@ services:
       - MARCH_HERALD_META=${MARCH_HERALD_META:-${MARCH_LEGATE_LOOP_META:-}}
       # PR1: read-only. Set to 1 at the PR2 cutover when Herald owns the git sync.
       - MARCH_HERALD_SYNC=${MARCH_HERALD_SYNC:-}
+      # Break-glass admin endpoint (#265): UNSET by default so POST /admin/events
+      # 404s and is invisible. Uncomment + set ONLY while an operator is authoring a
+      # corrective event, then comment it out again and recreate the container.
+      - MARCH_HERALD_ADMIN_TOKEN=${MARCH_HERALD_ADMIN_TOKEN:-}
       # Reach castra over the shared `march` network; the bearer token must match
       # castra's. (CASTRA_URL / CASTRA_API_TOKEN are the names the shared
       # CastraClient reads.)

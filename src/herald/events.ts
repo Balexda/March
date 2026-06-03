@@ -104,7 +104,19 @@ export type EventBody =
   /** The slice was escalated for legate judgement. */
   | { type: "slice.escalated"; sliceId: string; reason?: string }
   /** A transient auto-recovery retry counter was bumped. */
-  | { type: "retry.counted"; key: string; count: number };
+  | { type: "retry.counted"; key: string; count: number }
+  // ── Audit events (Herald break-glass admin endpoint, #265) ──────────────
+  /**
+   * Forensic record paired with every operator-authored admin append (the
+   * `POST /admin/events` break-glass path). It carries the `seq` of the event the
+   * operator just appended (named {@link appendedSeq} so it never collides with
+   * this audit event's own envelope `seq`) plus the operator + note, so the log is
+   * self-describing even to tooling that only reads events and never inspects the
+   * `admin`/`operator`/`note` columns. The reducer IGNORES it for state — it is
+   * forensics-only. It is intentionally NOT in `POST /events`' accepted set: only
+   * the admin route authors it, never a client.
+   */
+  | { type: "admin.event.appended"; appendedSeq: number; operator: string; note: string };
 
 /** The discriminator values — also the `march.herald.events` metric labels. */
 export type EventType = EventBody["type"];
@@ -127,6 +139,16 @@ export interface EventEnvelope {
    * store fills this from the producer's `profile` (or its configured default).
    */
   profile: string;
+  /**
+   * Audit attributes set ONLY on operator-authored rows from the break-glass
+   * `POST /admin/events` endpoint (#265). Absent (undefined) on every normal
+   * observation/transition append. They survive the fold as forensic metadata —
+   * the reducer never reads them — so an operator-authored corrective event is
+   * always distinguishable from one the producer services emitted.
+   */
+  admin?: boolean;
+  operator?: string;
+  note?: string;
 }
 
 /** A fully-materialized event (envelope + body). */
@@ -172,6 +194,7 @@ export function entityRefOf(body: EventBody): EntityRef {
     case "heartbeat":
     case "state.error":
     case "state.ok":
+    case "admin.event.appended":
       return { kind: "system", id: "all" };
   }
 }
@@ -363,6 +386,11 @@ export function reduce(state: SystemState, event: HeraldEvent): SystemState {
     }
     case "retry.counted":
       state.retries[event.key] = event.count;
+      break;
+    case "admin.event.appended":
+      // Forensics-only (#265): the paired audit row never moves system state.
+      // The corrective event it records is folded by its OWN type. Still advance
+      // seq/ts below so the projection's cursor tracks every appended row.
       break;
   }
   state.seq = event.seq;

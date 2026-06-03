@@ -174,7 +174,60 @@ describe.skipIf(!sqliteAvailable)("EventStore multi-profile", () => {
     const store = new EventStore({ dbPath, defaultProfile: "march" });
     expect(store.readAfter(0, 10)[0].profile).toBe("march");
     expect(store.projectionFor("march").slices.s1.branch).toBe("x");
+    // v1 → v3 also adds the audit columns; the legacy row carries no audit attrs.
+    expect(store.readAfter(0, 10)[0].admin).toBeUndefined();
     store.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+describe.skipIf(!sqliteAvailable)("EventStore admin audit columns (#265)", () => {
+  const steward = (): AppendEventInput =>
+    ({
+      source: "legate",
+      profile: "march",
+      type: "slice.steward.attached",
+      sliceId: "s1",
+      sessionId: "sess-1",
+    } as AppendEventInput);
+
+  it("stamps admin/operator/note when an audit is given, and surfaces them on read", () => {
+    const store = makeStore();
+    const event = store.append(steward(), { operator: "op", note: "why" });
+    expect(event.admin).toBe(true);
+    expect(event.operator).toBe("op");
+    expect(event.note).toBe("why");
+    // Read back from storage carries the same audit attrs.
+    const read = store.readAfter(0, 10)[0];
+    expect(read.admin).toBe(true);
+    expect(read.operator).toBe("op");
+    expect(read.note).toBe("why");
+    // The corrective event still folds by its own type.
+    expect(store.projectionFor("march").slices.s1.sessionId).toBe("sess-1");
+    store.close();
+  });
+
+  it("leaves admin attrs absent on a normal (non-audit) append", () => {
+    const store = makeStore();
+    store.append(steward());
+    const read = store.readAfter(0, 10)[0];
+    expect(read.admin).toBeUndefined();
+    expect(read.operator).toBeUndefined();
+    expect(read.note).toBeUndefined();
+    store.close();
+  });
+
+  it("persists audit columns across a reopen (file-backed)", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "herald-audit-"));
+    const dbPath = path.join(dir, "events.db");
+    const first = new EventStore({ dbPath, defaultProfile: "march" });
+    first.append(steward(), { operator: "op", note: "why" });
+    first.close();
+    const reopened = new EventStore({ dbPath, defaultProfile: "march" });
+    const read = reopened.readAfter(0, 10)[0];
+    expect(read.admin).toBe(true);
+    expect(read.operator).toBe("op");
+    reopened.close();
     fs.rmSync(dir, { recursive: true, force: true });
   });
 });
