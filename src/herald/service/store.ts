@@ -17,8 +17,9 @@ import {
 } from "../events.js";
 import type { EventStoreOptions } from "./types.js";
 
-/** Event-store schema version. Bumped to 2 when the `profile` column landed. */
-export const HERALD_SCHEMA_VERSION = 2;
+/** Event-store schema version. Bumped to 2 when the `profile` column landed;
+ *  to 3 when the `admin`/`operator`/`note` audit columns landed (#265). */
+export const HERALD_SCHEMA_VERSION = 3;
 
 /** Profile stamped on events whose producer set none (and on legacy v1 rows at
  *  migration when no deployment profile is known). */
@@ -46,7 +47,10 @@ CREATE TABLE IF NOT EXISTS events (
   source       TEXT NOT NULL,
   ts           TEXT NOT NULL,
   profile      TEXT NOT NULL DEFAULT '',
-  payload      TEXT NOT NULL
+  payload      TEXT NOT NULL,
+  admin        INTEGER NOT NULL DEFAULT 0,
+  operator     TEXT,
+  note         TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_events_entity ON events(entity_kind, entity_id, seq);
 CREATE INDEX IF NOT EXISTS idx_events_type ON events(type, seq);
@@ -66,11 +70,14 @@ interface EventRow {
   ts: string;
   profile: string;
   payload: string;
+  admin: number;
+  operator: string | null;
+  note: string | null;
 }
 
 function rowToEvent(row: EventRow): HeraldEvent {
   const body = JSON.parse(row.payload) as EventBody;
-  return {
+  const event = {
     seq: row.seq,
     id: row.id,
     ts: row.ts,
@@ -78,6 +85,21 @@ function rowToEvent(row: EventRow): HeraldEvent {
     profile: row.profile,
     ...body,
   } as HeraldEvent;
+  // Surface the audit columns only on operator-authored rows (#265) so they are
+  // never present on normal events; the spread of `body` cannot collide because
+  // the audit fields live in the envelope, never in any event body.
+  if (row.admin) {
+    event.admin = true;
+    if (row.operator !== null) event.operator = row.operator;
+    if (row.note !== null) event.note = row.note;
+  }
+  return event;
+}
+
+/** Audit attributes stamped on an operator-authored admin append (#265). */
+export interface AppendAudit {
+  readonly operator: string;
+  readonly note: string;
 }
 
 /** The body half of an event (everything the producer sets minus the envelope). */
@@ -157,6 +179,26 @@ export class EventStore {
       this.db.exec("DELETE FROM snapshots");
       this.db.prepare("UPDATE schema_meta SET version = ?").run(HERALD_SCHEMA_VERSION);
     }
+    // v2 → v3: the `admin`/`operator`/`note` audit columns landed (#265). A v1 DB
+    // already gets them via the v1→v2 branch's recreate path? No — that branch only
+    // ALTERs `profile`. So add the audit columns idempotently here for any pre-v3
+    // DB (covers both a v2 DB upgrading and a v1 DB that just ran the block above).
+    // No backfill: existing rows are non-admin, and the column DEFAULTs encode that.
+    const cols = (
+      this.db.prepare("PRAGMA table_info(events)").all() as Array<{ name: string }>
+    ).map((c) => c.name);
+    if (!cols.includes("admin")) {
+      this.db.exec("ALTER TABLE events ADD COLUMN admin INTEGER NOT NULL DEFAULT 0");
+    }
+    if (!cols.includes("operator")) {
+      this.db.exec("ALTER TABLE events ADD COLUMN operator TEXT");
+    }
+    if (!cols.includes("note")) {
+      this.db.exec("ALTER TABLE events ADD COLUMN note TEXT");
+    }
+    if (row?.version !== undefined && row.version < HERALD_SCHEMA_VERSION) {
+      this.db.prepare("UPDATE schema_meta SET version = ?").run(HERALD_SCHEMA_VERSION);
+    }
     // The profile column now exists on every path — index it.
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_events_profile_seq ON events(profile, seq)");
   }
@@ -176,8 +218,13 @@ export class EventStore {
    * Append an event. Assigns a monotonic `seq`; fills `id` (uuid), `ts` (now)
    * and `profile` (the store default) when absent. Idempotent on `id` — a
    * duplicate append returns the existing row and does not re-fold.
+   *
+   * When `audit` is given (the break-glass `POST /admin/events` path, #265) the
+   * row is stamped `admin=1` with the operator + note for forensics. These are
+   * envelope columns, never folded — the corrective event still reduces by its
+   * own type, so an admin-authored event folds identically to a normal one.
    */
-  append(input: AppendEventInput): HeraldEvent {
+  append(input: AppendEventInput, audit?: AppendAudit): HeraldEvent {
     const id = input.id ?? crypto.randomUUID();
     const ts = input.ts ?? new Date().toISOString();
     const profile = input.profile && input.profile.length > 0 ? input.profile : this.defaultProfile;
@@ -186,10 +233,22 @@ export class EventStore {
 
     const result = this.db
       .prepare(
-        `INSERT OR IGNORE INTO events (id, type, entity_kind, entity_id, source, ts, profile, payload)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT OR IGNORE INTO events (id, type, entity_kind, entity_id, source, ts, profile, payload, admin, operator, note)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(id, body.type, ref.kind, ref.id, input.source, ts, profile, JSON.stringify(body));
+      .run(
+        id,
+        body.type,
+        ref.kind,
+        ref.id,
+        input.source,
+        ts,
+        profile,
+        JSON.stringify(body),
+        audit ? 1 : 0,
+        audit ? audit.operator : null,
+        audit ? audit.note : null,
+      );
 
     if (result.changes === 0) {
       // Duplicate id — return the already-stored event unchanged.
@@ -201,6 +260,11 @@ export class EventStore {
 
     const seq = Number(result.lastInsertRowid);
     const event: HeraldEvent = { seq, id, ts, source: input.source, profile, ...body } as HeraldEvent;
+    if (audit) {
+      event.admin = true;
+      event.operator = audit.operator;
+      event.note = audit.note;
+    }
     reduceMulti(this.hot, event);
     if (++this.appendsSinceSnapshot >= this.snapshotEvery) {
       this.writeSnapshot();

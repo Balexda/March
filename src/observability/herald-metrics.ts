@@ -27,6 +27,7 @@ let requestsCounter: Counter | undefined;
 let requestDuration: Histogram | undefined;
 let observeDuration: Histogram | undefined;
 let eventsCounter: Counter | undefined;
+let adminEventsCounter: Counter | undefined;
 let observeErrors: Counter | undefined;
 let heartbeatCounter: Counter | undefined;
 
@@ -35,6 +36,7 @@ interface HeraldInstruments {
   requestDuration: Histogram;
   observeDuration: Histogram;
   events: Counter;
+  adminEvents: Counter;
   observeErrors: Counter;
   heartbeat: Counter;
 }
@@ -58,6 +60,10 @@ function heraldInstruments(meter: Meter): HeraldInstruments {
       description: "Count of change events Herald appended, by type",
       unit: "1",
     });
+    adminEventsCounter = meter.createCounter("march.herald.admin.events", {
+      description: "Count of operator-authored break-glass admin events appended, by event_type",
+      unit: "1",
+    });
     observeErrors = meter.createCounter("march.herald.observe.errors", {
       description: "Count of failed Herald observe ticks",
       unit: "1",
@@ -78,6 +84,7 @@ function heraldInstruments(meter: Meter): HeraldInstruments {
     requestDuration: requestDuration!,
     observeDuration: observeDuration!,
     events: eventsCounter!,
+    adminEvents: adminEventsCounter!,
     observeErrors: observeErrors!,
     heartbeat: heartbeatCounter!,
   };
@@ -106,6 +113,17 @@ export function recordHeraldObserve(input: RecordHeraldObserveInput): void {
   for (const [type, count] of Object.entries(input.eventsByType)) {
     if (count > 0) instruments.events.add(count, { type });
   }
+}
+
+/**
+ * Record one operator-authored break-glass admin append (#265): increments
+ * `march.herald.admin.events` labelled by the appended event's `type` (kept
+ * low-cardinality — it is a metric label). No-op when telemetry is disabled.
+ */
+export function recordHeraldAdminEvent(eventType: string): void {
+  const otel = getActiveOtel();
+  if (!otel.enabled) return;
+  heraldInstruments(otel.getMeter()).adminEvents.add(1, { event_type: eventType });
 }
 
 /** Record one failed observe tick. No-op when disabled. */

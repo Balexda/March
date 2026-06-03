@@ -995,6 +995,72 @@ herald
     }
   });
 
+const heraldAdmin = herald
+  .command("admin")
+  .description(
+    "Operator break-glass actions (gated by MARCH_HERALD_ADMIN_TOKEN; the endpoint 404s when unset)",
+  );
+
+heraldAdmin
+  .command("event")
+  .description("Author a corrective event into Herald's fold (validated, sequenced, audited)")
+  .option("--profile <profile>", "Owning profile the event folds into")
+  .option("--type <type>", "Event type (e.g. slice.steward.attached)")
+  .option("--note <note>", "Audit note: why this corrective event is being authored")
+  .option("--operator <name>", "Operator id for the audit trail (default: $USER)")
+  .option("--slice-id <id>", "slice.steward.attached: the slice id")
+  .option("--session-id <id>", "slice.steward.attached: the steward session id")
+  .option("--worktree-path <path>", "slice.steward.attached: the worktree path")
+  .option("--branch <branch>", "slice.steward.attached: the branch")
+  .option("--yes", "Skip the confirmation prompt")
+  .action(
+    async (opts: {
+      profile?: string;
+      type?: string;
+      note?: string;
+      operator?: string;
+      sliceId?: string;
+      sessionId?: string;
+      worktreePath?: string;
+      branch?: string;
+      yes?: boolean;
+    }) => {
+      commandHandled = true;
+      const { HeraldClient, HeraldClientError } = await import("../herald/service/client.js");
+      const { buildAdminEventBody } = await import("../herald/service/admin.js");
+      try {
+        const body = buildAdminEventBody({
+          profile: opts.profile,
+          type: opts.type,
+          note: opts.note,
+          operator: opts.operator ?? process.env.USER,
+          sliceId: opts.sliceId,
+          sessionId: opts.sessionId,
+          worktreePath: opts.worktreePath,
+          branch: opts.branch,
+        });
+        // Echo the exact JSON before sending — the operator confirms what folds.
+        console.log(JSON.stringify(body, null, 2));
+        const skipPrompt = opts.yes || program.opts().yes;
+        if (!skipPrompt) {
+          const ok = await confirm("Author this admin event into Herald's fold?");
+          if (!ok) {
+            process.stderr.write("Aborted.\n");
+            process.exitCode = ERROR;
+            return;
+          }
+        }
+        const result = await new HeraldClient().adminEvent(body);
+        console.log(`Appended seq=${result.seq} (audit seq=${result.auditSeq}).`);
+        process.exitCode = SUCCESS;
+      } catch (err) {
+        const message = err instanceof HeraldClientError ? err.message : (err as Error).message;
+        process.stderr.write(message + "\n");
+        process.exitCode = ERROR;
+      }
+    },
+  );
+
 program
   .command("spawn [subcommand]")
   .description("Spawn a new environment")

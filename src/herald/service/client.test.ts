@@ -67,6 +67,47 @@ describe("HeraldClient", () => {
     expect((init.headers as Record<string, string>).traceparent).toBe("00-abc-def-01");
   });
 
+  it("adminEvent() POSTs /admin/events with the Bearer token and returns the seqs", async () => {
+    const fetchImpl = vi.fn(async (..._args: unknown[]) => jsonResponse(200, { seq: 11, auditSeq: 12 }));
+    const client = new HeraldClient({
+      baseUrl: "http://herald",
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      adminToken: "s3cret",
+    });
+    const result = await client.adminEvent({
+      profile: "march",
+      event: { type: "slice.steward.attached", sliceId: "s1", sessionId: "sess-1" },
+      operator: "op",
+      note: "why",
+    });
+    expect(result).toEqual({ seq: 11, auditSeq: 12 });
+    expect(fetchImpl.mock.calls[0][0]).toBe("http://herald/admin/events");
+    const init = fetchImpl.mock.calls[0][1] as RequestInit;
+    expect((init.headers as Record<string, string>).authorization).toBe("Bearer s3cret");
+  });
+
+  it("adminEvent() reads the token from MARCH_HERALD_ADMIN_TOKEN, else errors", async () => {
+    const fetchImpl = vi.fn(async (..._args: unknown[]) => jsonResponse(200, { seq: 1, auditSeq: 2 }));
+    const fromEnv = new HeraldClient({
+      baseUrl: "http://herald",
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      env: { MARCH_HERALD_ADMIN_TOKEN: "envtok" } as NodeJS.ProcessEnv,
+    });
+    await fromEnv.adminEvent({ profile: "march", event: { type: "heartbeat" }, operator: "op", note: "n" });
+    expect(((fetchImpl.mock.calls[0][1] as RequestInit).headers as Record<string, string>).authorization).toBe(
+      "Bearer envtok",
+    );
+
+    const noToken = new HeraldClient({
+      baseUrl: "http://herald",
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      env: {} as NodeJS.ProcessEnv,
+    });
+    await expect(
+      noToken.adminEvent({ profile: "march", event: { type: "heartbeat" }, operator: "op", note: "n" }),
+    ).rejects.toBeInstanceOf(HeraldClientError);
+  });
+
   it("raises HeraldUnavailableError on a connection failure", async () => {
     const fetchImpl = vi.fn(async (..._args: unknown[]) => {
       throw new TypeError("fetch failed");
