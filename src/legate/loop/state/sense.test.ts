@@ -296,6 +296,45 @@ describe("senseObserved (Herald observation Stage 1)", () => {
     expect(discoverPr).not.toHaveBeenCalled();
   });
 
+  it("observes the PR for an escalated slice with a branch but NO live session (#173)", async () => {
+    // The original steward died long ago; the slice is escalated with an open PR
+    // still on origin. PR observation needs only the branch, so the upstream
+    // !session guard must not skip it — otherwise the new escalated gate is dead
+    // code and the legate's adopt-from-fold path never sees the PR.
+    const discoverPr = vi.fn(async () => ({ number: 240, state: "OPEN" }));
+    const sessionOutput = vi.fn(async () => ({ output: "x" }));
+    const prev = foldedState({
+      slices: { esc: slice({ sliceId: "esc", stage: "escalated", branch: "feature/foo" }) }, // no sessionId
+    });
+    const state = await senseObserved(
+      deps({
+        listSessions: async () => [], // no live sessions at all
+        queryPr: async () => ({ skipped: true }),
+        discoverPr,
+        sessionOutput,
+      }),
+      prev,
+    );
+    expect(discoverPr).toHaveBeenCalled();
+    expect(state.perSlice.esc!.pr).toMatchObject({ number: 240 });
+    // No session → output observation is skipped gracefully (not called, no entry).
+    expect(sessionOutput).not.toHaveBeenCalled();
+    expect(state.perSlice.esc!.recentOutput).toBeUndefined();
+  });
+
+  it("still skips a NON-escalated slice with no live session", async () => {
+    const discoverPr = vi.fn(async () => ({ number: 1, state: "OPEN" }));
+    const prev = foldedState({
+      slices: { impl: slice({ sliceId: "impl", stage: "implementing", branch: "feature/bar" }) }, // no session
+    });
+    const state = await senseObserved(
+      deps({ listSessions: async () => [], queryPr: async () => ({ skipped: true }), discoverPr }),
+      prev,
+    );
+    expect(discoverPr).not.toHaveBeenCalled();
+    expect(state.perSlice.impl).toBeUndefined();
+  });
+
   it("matches a recorded sessionId only against session id, never title/name", async () => {
     const queryPr = vi.fn(async () => ({ number: 7, state: "OPEN" }));
     const sessionOutput = vi.fn(async () => ({ output: "log" }));

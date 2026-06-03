@@ -311,8 +311,15 @@ export async function senseObserved(deps: SenseDeps, prev: SystemState): Promise
     // adopted (the #210 bug). If nothing resolves, there is no live session to
     // observe, so skip.
     const session = resolveSliceSession(sessions, sliceId, s);
-    if (!session) continue;
-    const sessionId = String(session.id);
+    // #173: PR observation needs only the slice's branch, not a live steward. An
+    // escalated slice whose original steward died (no session resolves) but whose
+    // branch still has an open PR is the exact adopt case, so do NOT bail on
+    // !session for it. Implementing/babysit observation still depends on a live
+    // session (it reads session output), so a non-escalated slice with no session
+    // is skipped as before.
+    const observeEscalatedNoSession = !session && s.stage === "escalated" && !!s.branch && !s.recovered;
+    if (!session && !observeEscalatedNoSession) continue;
+    const sessionId = session ? String(session.id) : "";
     const sliceLike = {
       pr: s.pr,
       branch: s.branch,
@@ -351,10 +358,16 @@ export async function senseObserved(deps: SenseDeps, prev: SystemState): Promise
     } catch (err: any) {
       entry.pr = { error: err?.message || String(err) };
     }
-    try {
-      entry.recentOutput = await deps.sessionOutput(sessionId);
-    } catch (err: any) {
-      entry.recentOutput = { output: "", error: err?.message || String(err) };
+    // Output observation needs a live session (Castra session output). Skip it
+    // gracefully for an escalated slice with no session — there is no worker to
+    // read from; the PR observation above is enough for the adopt path, and output
+    // deltas resume once a fresh steward attaches.
+    if (session) {
+      try {
+        entry.recentOutput = await deps.sessionOutput(sessionId);
+      } catch (err: any) {
+        entry.recentOutput = { output: "", error: err?.message || String(err) };
+      }
     }
     perSlice[sliceId] = entry;
   }
