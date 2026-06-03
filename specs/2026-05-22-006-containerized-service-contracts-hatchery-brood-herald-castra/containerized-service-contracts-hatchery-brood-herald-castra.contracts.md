@@ -150,8 +150,8 @@ GET  /status
 | `POST /events.body.sessionId` | string | Conditional | Required for `slice.steward.attached`; validated when present on session-aware transition events. |
 | `POST /events.body.session.id` | string | Conditional | Required for `session.changed`. |
 | `GET /state.query.at` | non-negative integer | No | Optional projection sequence. |
-| `GET /state/delta.query.from` | non-negative integer | No | Start sequence; defaults to 0. |
-| `GET /state/delta.query.to` | non-negative integer | No | End sequence; defaults to latest. |
+| `GET /state/delta.query.from` | non-negative integer | No | Exclusive lower bound; defaults to 0. |
+| `GET /state/delta.query.to` | non-negative integer | No | Inclusive upper bound; defaults to latest. |
 
 #### Outputs
 
@@ -164,7 +164,7 @@ GET  /status
 | `GET /events.lastSeq` | number | Last returned sequence, or the input cursor when no events are returned. |
 | `POST /events` | event envelope | Stored event with server-assigned sequence/id/timestamp when absent. |
 | `GET /state` | system state | Current or as-of projection. |
-| `GET /state/delta.events` | event array | Events in the requested inclusive range. |
+| `GET /state/delta.events` | event array | Events in the half-open range `(from, to]` — `seq` strictly greater than `from` and less than or equal to `to`. |
 | `GET /status` | status summary | Observation age/duration, event count, last sequence, workers, smithy, slice count, and state flags. |
 
 #### Error Conditions

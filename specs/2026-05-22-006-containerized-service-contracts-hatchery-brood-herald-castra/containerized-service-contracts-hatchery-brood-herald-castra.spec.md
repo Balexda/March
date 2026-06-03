@@ -1,7 +1,7 @@
 # Feature Specification: Containerized-Service Contracts (Hatchery, Brood, Herald, Castra)
 
 **Spec Folder**: `2026-05-22-006-containerized-service-contracts-hatchery-brood-herald-castra`
-**Branch**: `2026-05-22-006-containerized-service-contracts-hatchery-brood-herald-castra`
+**Branch**: `feature/smithy/mark/layered-testing-framework-m2-f2`
 **Created**: 2026-05-22
 **Status**: Draft
 **Input**: `docs/rfcs/2026-002-layered-testing-framework/02-subsystem-contract-documentation-track.features.md` Feature 2, with RFC context from `docs/rfcs/2026-002-layered-testing-framework/layered-testing-framework.rfc.md`.
