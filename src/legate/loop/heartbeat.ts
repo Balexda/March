@@ -101,6 +101,12 @@ export function runHeartbeat(out: CoordinatorOutput, deps: HeartbeatDeps): any {
     event(meta.processor_events_path, { ...base, kind: "slice_recovery", action: a.action, slice_id: a.sliceId, detail: a.detail });
     log("[" + ts + "] " + a.action + " " + a.sliceId + ": " + a.detail);
   }
+  // #173 adopt-from-fold runs between recovery and dispatch; keep its action-log
+  // ordering consistent with the handler order within the tick.
+  for (const a of out.results.adoptFromFold.actions) {
+    event(meta.processor_events_path, { ...base, kind: "adopt_from_fold", action: a.action, slice_id: a.sliceId, session_id: a.sessionId, detail: a.detail });
+    log("[" + ts + "] " + a.action + " " + a.sliceId + ": " + a.detail);
+  }
   for (const a of out.results.dispatch.actions) {
     const isRecovery = a.action === "recovery_dispatch" || a.action === "direct_dispatch";
     const prefix = a.action === "recovery_dispatch" ? "recovery-dispatch" : a.action === "direct_dispatch" ? "direct-dispatch" : "dispatch";
