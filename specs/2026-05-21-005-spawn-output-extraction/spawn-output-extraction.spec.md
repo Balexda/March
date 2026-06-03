@@ -110,7 +110,7 @@ Recommended implementation sequence:
 | US1 | Capture Backend Output Envelope | — | — |
 | US2 | Validate Patch Payload | US1 | — |
 | US3 | Persist Extraction Result | US2 | — |
-| US4 | Hand Off Valid Patch to Steward Boundary | US3 | — |
+| US4 | Hand Off Valid Patch to Steward Boundary | US3 | specs/2026-05-21-005-spawn-output-extraction/04-hand-off-valid-patch-to-steward-boundary.tasks.md |
 
 ## Requirements
 
