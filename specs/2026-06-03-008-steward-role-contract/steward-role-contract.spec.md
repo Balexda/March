@@ -83,7 +83,7 @@ As a contract maintainer, I want the Steward contract to name its consumer/provi
 
 1. **Given** Steward depends on Spawn output validation, **When** a maintainer reads the contract, **Then** it distinguishes Steward-owned application behavior from Spawn-owned validation behavior.
 2. **Given** Steward is launched and removed through Castra, **When** a maintainer reads the contract, **Then** it distinguishes Steward-owned role semantics from Castra-owned HTTP/session routes.
-3. **Given** freshness tooling lands later, **When** it maps Steward sources, **Then** it can bind Steward to Hatchery handoff, Castra-consumer prompts, Brood/Herald registration, and Legate babysit surfaces rather than a nonexistent standalone module.
+3. **Given** freshness tooling lands later, **When** it maps Steward sources, **Then** it binds Steward to the non-overlapping partition the feature map pins — `src/castra/client.ts` plus `src/hatchery/spawn-handoff.ts` — rather than a nonexistent standalone module, leaving the Castra server route surface (`src/castra/server.ts`) and the Brood/Herald/Legate service and loop surfaces owned by F2/F3 so freshness requirements do not overlap.
 
 ### Edge Cases
 
@@ -114,6 +114,7 @@ Recommended implementation sequence:
 - **FR-002**: The authored contract MUST include `## Public Interface`, `## Invariants`, and `## Error Modes` as H2 sections.
 - **FR-003**: The authored contract MUST place an empty `<!-- BEGIN AUTOGEN -->` / `<!-- END AUTOGEN -->` marker pair inside `## Public Interface`.
 - **FR-004**: The Steward contract MUST document required launch inputs: validated patch output, target worktree, target branch, spawn id, slice id, session/profile metadata, and role prompt context.
+- **FR-004a**: The Steward `## Public Interface` MUST pin the Castra session-launch consumer surface — the `launch`, `send`, `output`, and `remove` methods of `src/castra/client.ts` as consumed by `src/hatchery/spawn-handoff.ts` — naming those methods explicitly rather than documenting only the data envelope, while cross-referencing Castra's contract for the server-side `/v1/sessions*` wire shapes instead of restating them.
 - **FR-005**: The Steward contract MUST state that failed, malformed, missing, ambiguous, unsafe, or no-op spawn output is not eligible for Steward launch.
 - **FR-006**: The Steward contract MUST document patch-application behavior, including index-aware application, conflict/failure handling, dirty-worktree constraints, and bounded diagnostics.
 - **FR-007**: The Steward contract MUST document PR-ready outcome semantics without requiring this feature to create, push, or merge a PR.
