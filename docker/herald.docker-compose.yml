@@ -69,7 +69,7 @@ services:
       # Break-glass admin endpoint (#265): UNSET by default so POST /admin/events
       # 404s and is invisible. Uncomment + set ONLY while an operator is authoring a
       # corrective event, then comment it out again and recreate the container.
-      # - MARCH_HERALD_ADMIN_TOKEN=${MARCH_HERALD_ADMIN_TOKEN:-}
+      - MARCH_HERALD_ADMIN_TOKEN=${MARCH_HERALD_ADMIN_TOKEN:-}
       # Reach castra over the shared `march` network; the bearer token must match
       # castra's. (CASTRA_URL / CASTRA_API_TOKEN are the names the shared
       # CastraClient reads.)

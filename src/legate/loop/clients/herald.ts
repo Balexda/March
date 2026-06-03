@@ -10,6 +10,7 @@ import {
   type MultiProfileState,
   type SystemState,
 } from "../../../herald/events.js";
+import type { StewardAttachment } from "../state/sense.js";
 
 /**
  * The legate loop's seam to Herald — the system-state observation service and
@@ -85,6 +86,16 @@ export class LegateHerald {
    * and clears one profile's list.
    */
   private recoveryRequests = new Map<string, string[]>();
+  /**
+   * Per-profile `slice.steward.attached` events (#213/#265) drained in the most
+   * recent {@link consume}. Hatchery / the admin endpoint authors these (not the
+   * legate), so the warm loop only learns of a mid-run attach through the fold —
+   * and the fold alone reaches the warm loop next tick. Captured off the drain,
+   * keyed by profile, so {@link senseFromHerald} folds them into that profile's
+   * `raw.slices` without a restart. {@link takeStewardAttachments} returns and
+   * clears one profile's list. Same shape as {@link recoveryRequests}.
+   */
+  private stewardAttachments = new Map<string, StewardAttachment[]>();
 
   constructor(opts: LegateHeraldOptions) {
     this.client = opts.client ?? new HeraldClient({ env: opts.env });
@@ -143,9 +154,10 @@ export class LegateHerald {
    * running Stage-2 handlers against a partial one.
    */
   async consume(): Promise<MultiProfileState> {
-    // Recovery requests are scoped to THIS drain — reset before folding so
-    // takeRecoveryRequests() reflects only what was drained this tick.
+    // Recovery requests + steward attachments are scoped to THIS drain — reset
+    // before folding so the take*() side-channels reflect only this tick's events.
     this.recoveryRequests = new Map();
+    this.stewardAttachments = new Map();
     if (this.multi === null) {
       this.multi = this.cursor > 0 ? await this.client.stateAll(this.cursor) : emptyMultiProfileState();
       // Recover from a stale/corrupt cursor: the seeded fold reflects at most
@@ -163,6 +175,16 @@ export class LegateHerald {
           const list = this.recoveryRequests.get(event.profile) ?? [];
           list.push(event.sliceId);
           this.recoveryRequests.set(event.profile, list);
+        }
+        if (event.type === "slice.steward.attached") {
+          const list = this.stewardAttachments.get(event.profile) ?? [];
+          list.push({
+            sliceId: event.sliceId,
+            sessionId: event.sessionId,
+            branch: event.branch,
+            worktreePath: event.worktreePath,
+          });
+          this.stewardAttachments.set(event.profile, list);
         }
         reduceMulti(this.multi, event as HeraldEvent);
       }
@@ -188,6 +210,19 @@ export class LegateHerald {
     const requests = this.recoveryRequests.get(profile) ?? [];
     this.recoveryRequests.delete(profile);
     return requests;
+  }
+
+  /**
+   * Return (and clear) one profile's `slice.steward.attached` events (#213/#265)
+   * drained in the most recent {@link consume}. {@link senseFromHerald} folds the
+   * slice→session correlation into that profile's in-memory `raw.slices` so a
+   * mid-run attach (Hatchery push or operator admin event) takes effect on the
+   * next tick — the durable fold can't carry this to the warm loop on its own.
+   */
+  takeStewardAttachments(profile: string): StewardAttachment[] {
+    const attachments = this.stewardAttachments.get(profile) ?? [];
+    this.stewardAttachments.delete(profile);
+    return attachments;
   }
 
   /**

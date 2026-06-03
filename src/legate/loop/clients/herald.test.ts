@@ -207,6 +207,53 @@ describe("LegateHerald.takeRecoveryRequests (#238)", () => {
   });
 });
 
+describe("LegateHerald.takeStewardAttachments (#213/#265)", () => {
+  it("surfaces slice.steward.attached drained this consume per profile, then clears them", async () => {
+    const events = vi.fn(async () => ({
+      events: [
+        ev(1, {
+          profile: "p",
+          type: "slice.steward.attached",
+          sliceId: "s1",
+          sessionId: "sess-9",
+          branch: "smithy/cut/s1",
+          worktreePath: "/wt/s1",
+        } as any),
+      ],
+      lastSeq: 1,
+    }));
+    const herald = new LegateHerald({ stateDir: dir, client: stubClient({ events }) });
+
+    await herald.consume();
+    expect(herald.takeStewardAttachments("p")).toEqual([
+      { sliceId: "s1", sessionId: "sess-9", branch: "smithy/cut/s1", worktreePath: "/wt/s1" },
+    ]);
+    // "take" semantics: a second read after no new drain returns nothing.
+    expect(herald.takeStewardAttachments("p")).toEqual([]);
+  });
+
+  it("scopes attachments to the most recent consume and keys them by profile", async () => {
+    const events = vi
+      .fn()
+      .mockResolvedValueOnce({
+        events: [
+          ev(1, { profile: "a", type: "slice.steward.attached", sliceId: "s1", sessionId: "x" } as any),
+          ev(2, { profile: "b", type: "slice.steward.attached", sliceId: "s2", sessionId: "y" } as any),
+        ],
+        lastSeq: 2,
+      })
+      .mockResolvedValueOnce({ events: [ev(3, { type: "heartbeat" } as any)], lastSeq: 3 });
+    const herald = new LegateHerald({ stateDir: dir, client: stubClient({ events: events as any }) });
+
+    await herald.consume();
+    expect(herald.takeStewardAttachments("a")).toEqual([{ sliceId: "s1", sessionId: "x", branch: undefined, worktreePath: undefined }]);
+    expect(herald.takeStewardAttachments("b")).toEqual([{ sliceId: "s2", sessionId: "y", branch: undefined, worktreePath: undefined }]);
+    // Next drain has no attachments — the side-channel resets.
+    await herald.consume();
+    expect(herald.takeStewardAttachments("a")).toEqual([]);
+  });
+});
+
 describe("LegateHerald.append", () => {
   it("delegates a transition event to the client write-path, stamped with the profile", async () => {
     const append = vi.fn(async (b: unknown) => ev(9, b as any));
