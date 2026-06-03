@@ -37,5 +37,5 @@ export interface DispatchIoDeps {
    * open PR, the legate adopts the PR instead of escalating. Returns the
    * babysit-shaped PR snapshot, or null when no matching open PR exists.
    */
-  discoverPr?: (slice: any, state: any, sessionId?: string) => Promise<any>;
+  discoverPr: (slice: any, state: any, sessionId?: string) => Promise<any>;
 }

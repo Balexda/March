@@ -21,7 +21,6 @@
  * imported directly. Each op unit-tests against fakes.
  */
 import type { DispatchIoDeps } from "./dispatch-io.js";
-import { createSenseIo } from "../../../observe/sense-io.js";
 import {
   actionArguments,
   actionCommandLine,
@@ -83,17 +82,12 @@ async function adoptOpenPrOnCollision(
   if (!slice || typeof slice !== "object") return null;
   let pr: any;
   try {
-    // Discovery routes through the shared sense I/O (branch-variant matched,
-    // identical to Herald/babysit). It is injectable via deps.discoverPr (tests
-    // stub it); in production deps doesn't carry it, so fall back to building the
-    // sense I/O from meta here. Pass the steward sessionId when the fold already
-    // knows it (#210); discovery falls back to branch-variant `gh pr list`
-    // matching when it is absent, the common collision case (re-dispatch cleared it).
-    const discover =
-      deps.discoverPr ??
-      ((s: any, st: any, sid?: string) =>
-        createSenseIo({ meta: deps.meta, env: process.env }).discoverPrForSlice(s, st, sid ?? ""));
-    pr = await discover(slice, state, slice.worker_session_id || "");
+    // Discovery routes through the injected deps.discoverPr — the shared sense I/O
+    // (branch-variant matched, identical to Herald/babysit), wired from runtime's
+    // senseIo() singleton. Pass the steward sessionId when the fold already knows
+    // it (#210); discovery falls back to branch-variant `gh pr list` matching when
+    // it is absent, the common collision case (the re-dispatch cleared it).
+    pr = await deps.discoverPr(slice, state, slice.worker_session_id || "");
   } catch {
     return null;
   }

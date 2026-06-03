@@ -258,6 +258,11 @@ function dispatchIoDeps(): DispatchIoDeps {
     log: (line: string) => appendText(meta.processor_log_path, line),
     postSpawn: (request: any) => postSpawn(hatcheryUrl, request),
     getJob: (jobId: string) => getJob(hatcheryUrl, jobId),
+    // #173: the slice's open-PR discovery for the branch-collision adopt path,
+    // wired from the shared sense I/O singleton (branch-variant matched, identical
+    // to Herald/babysit). Empty sessionId falls back to `gh pr list` branch match.
+    discoverPr: (slice: any, state: any, sessionId?: string) =>
+      senseIo().discoverPrForSlice(slice, state, sessionId ?? ""),
   };
 }
 
