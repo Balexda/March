@@ -114,7 +114,8 @@ describe.skipIf(!sqliteAvailable)("EventStore multi-profile", () => {
     expect(store.projectionFor("a").slices.s1.branch).toBe("a/s1");
     expect(store.projectionFor("a").slices.s1.stage).toBe("pr-open");
     expect(store.projectionFor("b").slices.s1.branch).toBe("b/s1");
-    expect(store.projectionFor("b").slices.s1.stage).toBeUndefined();
+    // B holds its own dispatch stage (hatchery-pending, #255), not A's leaked pr-open.
+    expect(store.projectionFor("b").slices.s1.stage).toBe("hatchery-pending");
     expect(Object.keys(store.multiProjection().byProfile).sort()).toEqual(["a", "b"]);
     store.close();
   });

@@ -266,11 +266,13 @@ describe("reduceMulti / foldEventsMulti", () => {
       ev({ profile: "b", type: "slice.dispatched", sliceId: "s1", branch: "b/s1" }),
       ev({ profile: "a", type: "slice.stage.changed", sliceId: "s1", stage: "pr-open" }),
     ]);
-    // Same sliceId "s1" in both profiles, but isolated state.
+    // Same sliceId "s1" in both profiles, but isolated state: profile A advanced
+    // to pr-open while B holds its own dispatch stage (hatchery-pending, #255) —
+    // A's stage.changed never leaked into B's bucket.
     expect(multi.byProfile.a.slices.s1.branch).toBe("a/s1");
     expect(multi.byProfile.a.slices.s1.stage).toBe("pr-open");
     expect(multi.byProfile.b.slices.s1.branch).toBe("b/s1");
-    expect(multi.byProfile.b.slices.s1.stage).toBeUndefined();
+    expect(multi.byProfile.b.slices.s1.stage).toBe("hatchery-pending");
   });
 
   it("tracks the global seq/ts across profiles", () => {
