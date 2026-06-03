@@ -196,7 +196,7 @@ As an operator (and Feature 6 — PR Integration — as a downstream consumer), 
 |-----|----------------------------------------------------------------|------------|----------|
 | US2 | SpawnBackend Interface and Registry                            | —          | specs/2026-05-10-003-multi-backend-execution-interface/02-spawnbackend-interface-and-registry.tasks.md |
 | US3 | Claude Code Backend (Refactor with Behavioral Preservation)    | US2        | specs/2026-05-10-003-multi-backend-execution-interface/03-claude-code-backend-refactor-with-behavioral-preservation.tasks.md |
-| US4 | Gemini CLI Backend                                             | US2        | —        |
+| US4 | Gemini CLI Backend                                             | US2        | specs/2026-05-10-003-multi-backend-execution-interface/04-codex-cli-backend.tasks.md |
 | US5 | Per-Backend Image and Env Derivation in the Dispatch Pipeline  | US3, US4   | —        |
 | US1 | Backend Selection at Dispatch Time                             | US5        | —        |
 | US6 | Per-Backend Auth Pre-Flight Validation                         | US1        | —        |
