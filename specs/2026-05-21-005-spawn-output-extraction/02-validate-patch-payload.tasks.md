@@ -13,7 +13,7 @@
 
 **Justification**: User Story 2 is the security gate between autonomous spawn output and any downstream repository mutation. The backend envelope checks and patch path checks need to land together because AS 2.1-2.6 verify the same rejection boundary: untrusted output must fail closed before any handoff. Persistence and Hatchery consumption stay in US3 and US4.
 
-**Addresses**: FR-004, FR-005, FR-006, FR-007, FR-008, FR-011, FR-013; Acceptance Scenarios 2.1, 2.2, 2.3, 2.4, 2.5, 2.6
+**Addresses**: FR-004, FR-005, FR-006, FR-007, FR-008, FR-010, FR-011, FR-013; Acceptance Scenarios 2.1, 2.2, 2.3, 2.4, 2.5, 2.6
 
 ### Tasks
 
@@ -68,7 +68,7 @@
 | ID | Description | Source Category | Impact | Confidence | Status | Resolution |
 |----|-------------|-----------------|--------|------------|--------|------------|
 | SD-001 | inherited from spec: Initial draft was uncertain whether the source feature map and RFC were available; both are present in the repo, and the F5 scope was reconciled against `docs/rfcs/2026-001-march-orchestration-platform/01-spawn.features.md`. | Constraints | High | Medium | resolved | Spec confirmed against the present feature map and RFC; dependency wording matches the F5 row. |
-| SD-002 | inherited from spec: The exact storage location for `ExtractionResult` must be reconciled with the live Brood registry and any legacy SpawnRecord JSON compatibility expectations before cutting implementation tasks. | Domain & Data Model | Medium | Medium | open | - |
+| SD-002 | inherited from spec: The exact storage location for `ExtractionResult` must be reconciled with the live Brood registry and any legacy SpawnRecord JSON compatibility expectations before cutting implementation tasks. | Domain & Data Model | Medium | Medium | open | — |
 
 _SD-002 does not block US2. This story validates payloads but does not persist `ExtractionResult`; US3 must resolve the storage boundary before implementation._
 
@@ -80,7 +80,7 @@ Recommended implementation sequence:
 
 | ID | Title | Depends On | Artifact |
 |----|-------|-----------|----------|
-| S1 | Backend Envelope and Patch Payload Validation | US1 | - |
+| S1 | Backend Envelope and Patch Payload Validation | US1 | — |
 
 ### Cross-Story Dependencies
 
