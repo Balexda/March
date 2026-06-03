@@ -26,6 +26,7 @@
   - A succeeded extraction result exposes only validated patch text, digest, touched paths, backend, spawn id, and extraction timestamp as handoff input (AS 4.1).
   - Failed extraction state prevents Steward patch application launch and reports bounded failure metadata (AS 4.2, FR-011).
   - Missing extraction state is treated as not eligible and exits cleanly with a bounded diagnostic, not a hang or prompt for operator input (FR-014).
+  - The handoff eligibility decision participates in the slice trace (keyed by `traceIdForDispatch`, nesting as a child on the `hatchery.spawn` → `steward.send` leg, never claiming root): an eligible decision emits a child span, and the failed and missing refusal paths emit *errored* spans so a refused Steward handoff is visible in the trace rather than silently absent (AGENTS.md observability lock-step; new lifecycle action / new failure mode).
 
 - [ ] **Reject empty validated patches at the handoff boundary**
 
@@ -34,8 +35,10 @@
   _Acceptance criteria:_
   - Empty, whitespace-only, or normalized no-op patch text in a successful extraction result fails handoff eligibility (AS 4.4, FR-008).
   - The no-op failure records a bounded Hatchery diagnostic and does not expose raw backend output.
+  - The no-op refusal emits an *errored* span on the slice trace (consistent with the failed/missing refusal paths above), keeping refused handoffs observable.
   - The guard does not re-parse backend envelopes or bypass the persisted extraction status.
   - Tests cover succeeded, failed, missing, and no-op extraction readiness decisions without Docker, Castra, or a live Steward session.
+  - Tests assert the eligibility decision emits the expected span and that the failed, missing, and no-op refusal paths emit errored spans (low-cardinality attributes only).
 
 **PR Outcome**: Hatchery can decide whether a spawn is eligible for Steward handoff from the persisted extraction result alone. Only successful non-empty validated patches reach the handoff input, while failed, missing, or no-op extraction results stop with bounded diagnostics and no Steward patch-application launch.
 
