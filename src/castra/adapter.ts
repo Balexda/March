@@ -395,7 +395,11 @@ export function createAgentDeckAdapter(): AgentDeckAdapter {
   // and reuse the result for the session's lifetime. The cached `path` is part of
   // the validity check: a session restart yields a fresh id (cache miss), and a
   // path mutation under a reused id re-derives — so the cache never serves a hard
-  // miss across a restart, only an at-most-one-tick-stale read mid-session.
+  // miss across a restart. A branch change *within* one (id, path) — rare, since
+  // agent-deck pins a steward to its worktree — is deliberately not observed: the
+  // cached value is held until the id or path changes (or `remove` clears it), not
+  // re-checked each tick. Serving the first-seen branch for the session's lifetime
+  // is the accepted tradeoff for not shelling git on every list.
   const branchCache = new Map<string, { path: string; branch: string }>();
 
   /**
