@@ -104,7 +104,7 @@ Recommended implementation sequence:
 
 | ID | Title | Depends On | Artifact |
 |----|-------|------------|----------|
-| S1 | Brood-Owned Extraction Result Persistence | US2 | — |
+| S1 | Brood-Owned Extraction Result Persistence | — | — |
 | S2 | Lifecycle Read Contract for PR Readiness | S1 | — |
 
 ### Cross-Story Dependencies
