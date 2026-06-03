@@ -48,6 +48,7 @@ export interface SenseIo {
   readSmithyStatus(repoPath: string): Promise<any>;
   queryPrForBabysit(slice: any, state: any): Promise<any>;
   discoverPrForSlice(slice: any, state: any, sessionId: string): Promise<any>;
+  findOpenPrOnExpectedBranch(slice: any, state: any): Promise<any>;
   prMatchesSliceBranch(slice: any, pr: any): Promise<boolean>;
   captureRecentSessionOutput(sessionId: string): Promise<{ output: string; error?: string }>;
   /** Adapt to the injected {@link SenseDeps} contract the sense entry points consume. */
@@ -371,6 +372,42 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
     }
   }
 
+  // #173 adopt path: find the slice's own open PR by EXPECTED BRANCH only — no
+  // `prDiscoverySince` date filter. discoverPrForSlice intentionally floors its
+  // candidate list at the slice's last_action so a freshly-dispatched slice does
+  // not adopt a stale PR; but the branch-collision adopt case is the exact
+  // inverse — the PR was opened during an EARLIER dispatch (before this
+  // re-dispatch's last_action), so the since filter would always exclude it and
+  // the adoption would silently no-op. Here the branch-variant match is the sole
+  // gate (identical matching to discoverPrForSlice / Herald / babysit). Returns
+  // the babysit-shaped snapshot, or null when no matching open PR exists.
+  // discoverPrForSlice is deliberately left unchanged.
+  async function findOpenPrOnExpectedBranch(slice: any, state: any): Promise<any> {
+    const repoPath = state?.repo?.path || meta.repo?.path;
+    if (!repoPath) return null;
+    try {
+      const owner = await repoOwner(state);
+      const args = ["pr", "list", "--author", "@me", "--state", "open", "--json", "number,url,state,mergeable,headRefName,title,statusCheckRollup,createdAt"];
+      if (owner) args.push("-R", owner);
+      const options = owner ? {} : { cwd: repoPath };
+      const list = JSON.parse(await execText("gh", args, options));
+      if (!Array.isArray(list) || list.length === 0) return null;
+      // prMatchesSliceBranch is async — await every predicate, then keep only the
+      // candidates whose resolved boolean is true (filtering on the raw Promise
+      // would pass every candidate and could adopt a PR on the wrong branch).
+      const matchFlags = await Promise.all(
+        list.map((candidate: any) => prMatchesSliceBranch(slice, candidate)),
+      );
+      const branchMatches = list.filter((_candidate: any, i: number) => matchFlags[i]);
+      const chosen = branchMatches
+        .sort((a: any, b: any) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")))[0];
+      if (!chosen) return null;
+      return await queryPrForBabysit({ pr: { number: chosen.number } }, state);
+    } catch {
+      return null;
+    }
+  }
+
   async function readSmithyStatus(repoPath: string): Promise<any> {
     // --pending = shorthand for --status in-progress,not-started. Filters out
     // all done records up-front. Layer 0 of the returned graph still means
@@ -429,6 +466,7 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
     readSmithyStatus,
     queryPrForBabysit,
     discoverPrForSlice,
+    findOpenPrOnExpectedBranch,
     prMatchesSliceBranch,
     captureRecentSessionOutput,
     toSenseDeps,

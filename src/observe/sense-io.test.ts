@@ -312,6 +312,83 @@ describe("discoverPrForSlice (branch-based lookup)", () => {
   });
 });
 
+describe("findOpenPrOnExpectedBranch (#173 adopt path — no created-at floor)", () => {
+  // The branch-collision adopt target was opened during an EARLIER dispatch, so
+  // its createdAt predates the re-dispatched slice's last_action. discoverPrForSlice's
+  // prDiscoverySince filter would exclude it (the silent no-op this fix repairs);
+  // findOpenPrOnExpectedBranch must still find it by branch.
+  const routeBranchPr = (created: string) =>
+    routeExec((cmd, args) => {
+      if (cmd === "gh" && args.includes("list")) {
+        return JSON.stringify([
+          {
+            number: 42,
+            url: "https://github.com/octo/march/pull/42",
+            state: "OPEN",
+            headRefName: "feature/right",
+            title: "Ours",
+            createdAt: created,
+          },
+        ]);
+      }
+      if (cmd === "gh" && args.includes("view")) {
+        return JSON.stringify({
+          number: 42,
+          url: "https://github.com/octo/march/pull/42",
+          state: "OPEN",
+          mergeable: "MERGEABLE",
+          headRefName: "feature/right",
+          title: "Ours",
+          author: { login: "me" },
+          statusCheckRollup: [],
+        });
+      }
+      if (args.includes("graphql")) {
+        return JSON.stringify({ data: { repository: { pullRequest: { reviewThreads: { nodes: [] } } } } });
+      }
+      return "";
+    });
+
+  const slice = () => ({ branch: "feature/right", last_action: "2026-05-25T00:00:00Z" });
+  const state = () => ({ repo: { path: "/repo", owner_with_name: "octo/march" } });
+
+  it("adopts a branch-matching PR created BEFORE the slice's last_action", async () => {
+    routeBranchPr("2026-05-20T01:00:00Z");
+    const io = createSenseIo({ meta: meta(), castra: fakeCastra() });
+    const pr = await io.findOpenPrOnExpectedBranch(slice(), state());
+    expect(pr).not.toBeNull();
+    expect(pr.number).toBe(42);
+    expect(pr.head_branch).toBe("feature/right");
+  });
+
+  it("regression guard: discoverPrForSlice's since filter excludes that same PR", async () => {
+    routeBranchPr("2026-05-20T01:00:00Z");
+    const io = createSenseIo({ meta: meta(), castra: fakeCastra({ sessionOutput: async () => "" }) });
+    // Confirms the bug the new helper avoids: the date floor drops the adopt target.
+    expect(await io.discoverPrForSlice(slice(), state(), "sess-x")).toBeNull();
+  });
+
+  it("returns null when no open PR matches the slice branch", async () => {
+    routeExec((cmd, args) => {
+      if (cmd === "gh" && args.includes("list")) {
+        return JSON.stringify([
+          {
+            number: 99,
+            url: "https://github.com/octo/march/pull/99",
+            state: "OPEN",
+            headRefName: "feature/wrong",
+            title: "Unrelated",
+            createdAt: "2026-05-20T10:00:00Z",
+          },
+        ]);
+      }
+      return "";
+    });
+    const io = createSenseIo({ meta: meta(), castra: fakeCastra() });
+    expect(await io.findOpenPrOnExpectedBranch(slice(), state())).toBeNull();
+  });
+});
+
 describe("syncDefaultBranch (via SenseDeps)", () => {
   it("fetches/switches/pulls the known default branch and resolves void", async () => {
     const calls: string[][] = [];

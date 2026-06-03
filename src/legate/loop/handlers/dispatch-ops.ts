@@ -82,12 +82,12 @@ async function adoptOpenPrOnCollision(
   if (!slice || typeof slice !== "object") return null;
   let pr: any;
   try {
-    // Discovery routes through the injected deps.discoverPr — the shared sense I/O
+    // Discovery routes through the injected deps.findOpenPr — the shared sense I/O
     // (branch-variant matched, identical to Herald/babysit), wired from runtime's
-    // senseIo() singleton. Pass the steward sessionId when the fold already knows
-    // it (#210); discovery falls back to branch-variant `gh pr list` matching when
-    // it is absent, the common collision case (the re-dispatch cleared it).
-    pr = await deps.discoverPr(slice, state, slice.worker_session_id || "");
+    // senseIo() singleton. It matches the slice's open PR by EXPECTED BRANCH with
+    // NO created-at floor: the adopt target was opened during an EARLIER dispatch,
+    // so discoverPrForSlice's prDiscoverySince filter would wrongly exclude it.
+    pr = await deps.findOpenPr(slice, state);
   } catch {
     return null;
   }

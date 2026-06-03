@@ -4,7 +4,7 @@ import { completePendingHatcheryDispatches, launchDispatch } from "./dispatch-op
 import { emptySystemState, reduce } from "../../../herald/events.js";
 
 // #173: the legate adopts a slice's own open PR on a branch-collision instead of
-// escalating it. Discovery is injected via deps.discoverPr so these tests never
+// escalating it. Discovery is injected via deps.findOpenPr so these tests never
 // shell out; the production fallback (build sense I/O from meta) is covered by the
 // branch-variant parity test in observe/sense-io.test.ts.
 
@@ -14,7 +14,7 @@ const COLLISION =
   "Castra session launch failed: agent-deck launch failed:\n  Error: branch " +
   "'feature/foo' already exists\nOrphan branch was NOT auto-removed: unsafe to remove (open-pr).";
 
-// A babysit-shaped PR snapshot (what discoverPr / queryPrForBabysit returns).
+// A babysit-shaped PR snapshot (what findOpenPr / queryPrForBabysit returns).
 const PR = {
   number: 230,
   url: "https://github.com/o/r/pull/230",
@@ -32,7 +32,7 @@ function deps(over: Partial<DispatchIoDeps> = {}): DispatchIoDeps {
     log: vi.fn(),
     postSpawn: vi.fn(async () => ({ id: "job-1" })),
     getJob: vi.fn(async () => ({ status: "running" })),
-    discoverPr: vi.fn(async () => null),
+    findOpenPr: vi.fn(async () => null),
     ...over,
   };
 }
@@ -48,8 +48,8 @@ const recordsOf = (d: DispatchIoDeps) => (d.emit as any).mock.calls.map((c: any[
 
 describe("launchDispatch branch-collision adopt (#173)", () => {
   it("adopts the slice's open PR on a branch-collision instead of escalating", async () => {
-    const discoverPr = vi.fn(async () => PR);
-    const d = deps({ postSpawn: vi.fn(async () => { throw new Error(COLLISION); }), discoverPr });
+    const findOpenPr = vi.fn(async () => PR);
+    const d = deps({ postSpawn: vi.fn(async () => { throw new Error(COLLISION); }), findOpenPr });
     const state: any = { slices: {} };
     const out = await launchDispatch(state, "T", item(), "s", d);
 
@@ -68,7 +68,7 @@ describe("launchDispatch branch-collision adopt (#173)", () => {
   });
 
   it("falls through to escalate when the collision has no matching open PR", async () => {
-    const d = deps({ postSpawn: vi.fn(async () => { throw new Error(COLLISION); }), discoverPr: vi.fn(async () => null) });
+    const d = deps({ postSpawn: vi.fn(async () => { throw new Error(COLLISION); }), findOpenPr: vi.fn(async () => null) });
     const state: any = { slices: {} };
     await launchDispatch(state, "T", item(), "s", d);
     // Unchanged escalate behavior for a genuine orphan branch.
@@ -78,11 +78,11 @@ describe("launchDispatch branch-collision adopt (#173)", () => {
   });
 
   it("does not adopt (or even look up a PR) when the failure is not a branch-collision", async () => {
-    const discoverPr = vi.fn(async () => PR);
-    const d = deps({ postSpawn: vi.fn(async () => { throw new Error("hatchery 500"); }), discoverPr });
+    const findOpenPr = vi.fn(async () => PR);
+    const d = deps({ postSpawn: vi.fn(async () => { throw new Error("hatchery 500"); }), findOpenPr });
     const state: any = { slices: {} };
     await launchDispatch(state, "T", item(), "s", d);
-    expect(discoverPr).not.toHaveBeenCalled();
+    expect(findOpenPr).not.toHaveBeenCalled();
     expect(state.slices.s.stage).toBe("escalated");
   });
 });
@@ -100,7 +100,7 @@ describe("completePendingHatcheryDispatches branch-collision adopt (#173)", () =
   it("adopts on a background-spawn branch-collision instead of escalating", async () => {
     const d = deps({
       getJob: vi.fn(async () => ({ status: "failed", error: { message: COLLISION } })),
-      discoverPr: vi.fn(async () => PR),
+      findOpenPr: vi.fn(async () => PR),
     });
     const state: any = { slices: { s: pending() } };
     const out = await completePendingHatcheryDispatches(state, "T", d);
@@ -112,18 +112,18 @@ describe("completePendingHatcheryDispatches branch-collision adopt (#173)", () =
   it("still escalates a background-spawn failure that is not a branch-collision", async () => {
     const d = deps({
       getJob: vi.fn(async () => ({ status: "failed", error: { message: "git apply --index failed" } })),
-      discoverPr: vi.fn(async () => PR),
+      findOpenPr: vi.fn(async () => PR),
     });
     const state: any = { slices: { s: pending() } };
     await completePendingHatcheryDispatches(state, "T", d);
     expect(state.slices.s.stage).toBe("escalated");
-    expect((d.discoverPr as any)).not.toHaveBeenCalled();
+    expect((d.findOpenPr as any)).not.toHaveBeenCalled();
   });
 
   it("carries the steward sessionId on the adopt stage transition when the fold knows it", async () => {
     const d = deps({
       getJob: vi.fn(async () => ({ status: "failed", error: { message: COLLISION } })),
-      discoverPr: vi.fn(async () => PR),
+      findOpenPr: vi.fn(async () => PR),
     });
     const state: any = { slices: { s: pending({ worker_session_id: "sess-7" }) } };
     await completePendingHatcheryDispatches(state, "T", d);
@@ -133,7 +133,7 @@ describe("completePendingHatcheryDispatches branch-collision adopt (#173)", () =
 
 describe("adopt transitions survive a cold-start fold rebuild (#173/#255)", () => {
   it("rebuilds the slice as pr-open with its PR from the emitted transitions", async () => {
-    const d = deps({ postSpawn: vi.fn(async () => { throw new Error(COLLISION); }), discoverPr: vi.fn(async () => PR) });
+    const d = deps({ postSpawn: vi.fn(async () => { throw new Error(COLLISION); }), findOpenPr: vi.fn(async () => PR) });
     const state: any = { slices: {} };
     await launchDispatch(state, "T", item(), "s", d);
 
