@@ -31,7 +31,7 @@ quarantine.restore(quarantinedPath) -> originPath
 | Field | Type | Description |
 |-------|------|-------------|
 | `quarantinedPath` | repo-relative path | New location under `tests/quarantine/` after parking. |
-| `originPath` | repo-relative path | Location the test returns to on restore. |
+| `originPath` | repo-relative path | Location the test is restored to; recorded at park time and persisted in the index so restore is deterministic. |
 | `indexRegenerated` | boolean | Whether `tests/quarantine/INDEX.md` was rewritten to match. |
 
 #### Error Conditions
@@ -39,6 +39,7 @@ quarantine.restore(quarantinedPath) -> originPath
 | Condition | Response | Description |
 |-----------|----------|-------------|
 | Target is not a test file | Non-zero exit, no move | Only `*.test.ts` files may be parked. |
+| Origin not recorded at park time | Non-zero exit | `park` must persist `originPath`; restore cannot deterministically recover a guessed origin. |
 | Target already quarantined | Deterministic no-op or non-zero exit | Never hang; report the existing state. |
 | Restore target not in quarantine | Non-zero exit | Cannot restore a file that is not parked. |
 | Interactive prompt required | Disallowed | The primitive must run non-interactively (operating-philosophy rule 1). |
@@ -97,7 +98,7 @@ generate-index(tests/quarantine/) -> tests/quarantine/INDEX.md
 | Field | Type | Description |
 |-------|------|-------------|
 | `indexPath` | repo-relative path | `tests/quarantine/INDEX.md`. |
-| `entries` | list of repo-relative paths | One row per currently quarantined test; empty when none are parked. |
+| `entries` | list of `{ path, originPath }` | One row per currently quarantined test, recording its quarantined path and origin path; empty when none are parked. |
 
 #### Error Conditions
 

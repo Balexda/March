@@ -26,13 +26,15 @@ Purpose: A single test file that has been routed into the quarantine directory a
 | Field | Type | Required | Notes |
 |-------|------|----------|-------|
 | `path` | repo-relative path | Yes | Resolves under `tests/quarantine/`. |
-| `originPath` | repo-relative path | No | Where the test lived before parking, when recoverable, to support restore. |
-| `tagTuple` | scope + determinism + channel | Yes | The Feature 1 tag tuple, preserved unchanged when the file is parked. |
+| `originPath` | repo-relative path | Yes | The location the test was parked from, recorded at park time so restore is deterministic. Surfaced in the generated index. |
+| `tagTuple` | scope + determinism + channel | No | The Feature 1 tag tuple, preserved unchanged **if the file already carries one**. F3 does not require, add, or validate tags — tag coverage is Feature 1's concern, and F3 is independent of F1 (they spec in parallel). |
 | `body` | test source | Yes | Preserved verbatim — never skipped, deleted, or commented out. |
 
 Validation rules:
 - A quarantined test must physically reside under `tests/quarantine/`.
-- The test body and its tag tuple are preserved exactly as they were before parking.
+- The test body is preserved verbatim when the file is parked.
+- If the file already carries a Feature 1 tag tuple, that tuple is preserved unchanged; F3 neither requires nor validates tag presence, so a test parked before Feature 1 has tagged the repo is still valid.
+- `originPath` must be recorded when a test is parked, so `restore` can return the test to its exact prior location deterministically.
 - A quarantined test must not be in any non-quarantine test location simultaneously.
 
 ### 3) Quarantine Index (`tests/quarantine/INDEX.md`)
@@ -42,11 +44,12 @@ Purpose: The generated, human-visible roster of currently quarantined tests. It 
 | Field | Type | Required | Notes |
 |-------|------|----------|-------|
 | `path` | repo-relative path | Yes | Fixed at `tests/quarantine/INDEX.md`. |
-| `entries` | list of repo-relative paths | Yes | One per currently quarantined test; empty list is valid. |
+| `entries` | list of `{ path, originPath }` | Yes | One per currently quarantined test, each recording its quarantined path and its origin path; empty list is valid. |
 | `generated` | boolean | Yes | Always derived from directory contents, never hand-edited. |
 
 Validation rules:
 - Entries equal exactly the set of quarantined test files at generation time — no stale or missing rows.
+- Each entry records the test's `originPath` so the roster is sufficient to restore any parked test without guessing its prior location.
 - Regeneration after a directory change yields an index consistent with the new contents.
 - An empty quarantine directory yields a valid index that reports zero quarantined tests.
 

@@ -87,7 +87,7 @@ As the Operator, I want `CONTRIBUTING.md` to describe the quarantine routing pri
 
 ### Edge Cases
 
-- A test moved into `tests/quarantine/` retains its Feature 1 tag tuple; the tags travel with the file.
+- A test moved into `tests/quarantine/` that already carries a Feature 1 tag tuple keeps it — the tags travel with the file unchanged. A test parked before Feature 1 has tagged the repo is still valid; F3 does not require tags.
 - The index is regenerated when quarantine contents change so the roster cannot drift from the directory.
 - An empty `tests/quarantine/` directory still produces a valid `INDEX.md`.
 - A quarantined test path overlaps a staged script's selection glob — the directory-path exclusion must take precedence so the parked test is not selected.
@@ -114,7 +114,8 @@ Recommended implementation sequence:
 - **FR-003**: A quarantined test MUST remain present in the repository and MUST NOT be skipped, commented out, or otherwise silenced.
 - **FR-004**: Quarantined tests MUST be excluded from all four staged scripts (`test:l0`, `test:l1`, `test:l2-cassette`, `test:l3-cassette`).
 - **FR-005**: The exclusion MUST be expressed as a stable directory-path contract (`tests/quarantine/`) that Feature 2's staged scripts consume, independent of the tag taxonomy.
-- **FR-006**: A `tests/quarantine/INDEX.md` MUST be generated to list the currently quarantined test files by repo-relative path.
+- **FR-006**: A `tests/quarantine/INDEX.md` MUST be generated to list the currently quarantined test files, recording each test's quarantined path and its origin path.
+- **FR-006a**: The routing primitive MUST record each parked test's origin path at park time (and surface it in `INDEX.md`) so a test can be restored to its exact prior location deterministically, without guessing.
 - **FR-007**: `INDEX.md` MUST be regenerated from the directory contents so the roster cannot drift from what is actually quarantined.
 - **FR-008**: The routing primitive and index generation MUST run non-interactively (no TTY-bound confirmation), per operating-philosophy rule 1.
 - **FR-009**: `CONTRIBUTING.md` MUST reference the `tests/quarantine/` directory and the quarantine routing primitive, including how to park a test.
@@ -131,7 +132,7 @@ Recommended implementation sequence:
 
 ## Assumptions
 
-- Feature 1's tag taxonomy lands first; a quarantined test keeps the tag tuple it carried before parking.
+- F3 is independent of Feature 1 (the feature map specs them in parallel); if a parked test already carries a Feature 1 tag tuple it is preserved, but F3 neither requires nor validates tags.
 - Feature 2's staged scripts consume this feature's directory-path exclusion contract; this feature defines the path, Feature 2 wires the exclusion into the scripts.
 - The RFC pins the `tests/quarantine/` directory path and the generated `tests/quarantine/INDEX.md`; only the routing primitive's source-tree location is open (SD-101).
 - Quarantine is temporary by policy; M1 provides the scaffold and visible roster, and M6 adds the SLA clock that enforces resolution.
