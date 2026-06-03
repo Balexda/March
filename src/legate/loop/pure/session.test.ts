@@ -45,6 +45,23 @@ describe("session pure helpers", () => {
     expect(looseSessionMatch({}, { sliceId: "" })).toBe(false);
   });
 
+  it("matches the #264 legacy slice once Castra populates session.branch from git", () => {
+    // The exact #173/#240 scenario: a slice with only a branch recorded (no
+    // sessionId, no worktree_path) against the live steward whose branch — empty
+    // in agent-deck's snapshot — is now derived by Castra from the working dir
+    // (`feature/` variant). The legate code is unchanged; this asserts the
+    // branch-comparison path "just starts working" once the data is present.
+    expect(
+      looseSessionMatch(
+        {
+          branch: "feature/smithy/cut/01-spawn-f5-s2",
+          worktree_path: "/home/me/Development/WorkTrees/March/feature-smithy-cut-01-spawn-f5-s2",
+        },
+        { branch: "smithy/cut/01-spawn-f5-s2", sliceId: "01-spawn-f5-s2-cut" },
+      ),
+    ).toBe(true);
+  });
+
   it("summarizes workers by status, bucketing unknowns to other", () => {
     const list = [
       { group: "legate-workers", status: "running" },

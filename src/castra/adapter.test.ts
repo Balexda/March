@@ -300,6 +300,96 @@ describe("castra adapter — operations", () => {
     expect(listed?.branch).toBe("march/spawn/x");
   });
 
+  it("derives an empty session branch from the working directory's git head (#264)", () => {
+    childProcessMock.execFileSync.mockImplementation((cmd: string, args: string[]) => {
+      if (cmd === "agent-deck" && args.includes("list")) {
+        return JSON.stringify([
+          session({ sessionId: "legacy", group: "g", branch: "", worktreePath: "/wt/legacy" }),
+        ]);
+      }
+      if (cmd === "git" && args.includes("--is-inside-work-tree")) return "true\n";
+      if (cmd === "git" && args.includes("--show-current")) return "feature/smithy/cut/01\n";
+      return "";
+    });
+    const adapter = createAgentDeckAdapter();
+    const listed = adapter.list({ profile: "march" }).find((s) => s.sessionId === "legacy");
+    expect(listed?.branch).toBe("feature/smithy/cut/01");
+  });
+
+  it("returns an empty branch for a non-git working directory (#264)", () => {
+    childProcessMock.execFileSync.mockImplementation((cmd: string, args: string[]) => {
+      if (cmd === "agent-deck" && args.includes("list")) {
+        return JSON.stringify([
+          session({ sessionId: "nogit", group: "g", branch: "", worktreePath: "/tmp/plain" }),
+        ]);
+      }
+      if (cmd === "git") throw execError("not a git repository");
+      return "";
+    });
+    const adapter = createAgentDeckAdapter();
+    const listed = adapter.list({ profile: "march" }).find((s) => s.sessionId === "nogit");
+    expect(listed?.branch).toBe("");
+  });
+
+  it("returns an empty branch for a detached HEAD checkout (#264)", () => {
+    childProcessMock.execFileSync.mockImplementation((cmd: string, args: string[]) => {
+      if (cmd === "agent-deck" && args.includes("list")) {
+        return JSON.stringify([
+          session({ sessionId: "detached", group: "g", branch: "", worktreePath: "/wt/detached" }),
+        ]);
+      }
+      if (cmd === "git" && args.includes("--is-inside-work-tree")) return "true\n";
+      // Detached HEAD: `branch --show-current` prints nothing.
+      if (cmd === "git" && args.includes("--show-current")) return "\n";
+      return "";
+    });
+    const adapter = createAgentDeckAdapter();
+    const listed = adapter.list({ profile: "march" }).find((s) => s.sessionId === "detached");
+    expect(listed?.branch).toBe("");
+  });
+
+  it("caches the derived branch for the session lifetime — git runs once across calls (#264)", () => {
+    childProcessMock.execFileSync.mockImplementation((cmd: string, args: string[]) => {
+      if (cmd === "agent-deck" && args.includes("list")) {
+        return JSON.stringify([
+          session({ sessionId: "cached", group: "g", branch: "", worktreePath: "/wt/cached" }),
+        ]);
+      }
+      if (cmd === "git" && args.includes("--is-inside-work-tree")) return "true\n";
+      if (cmd === "git" && args.includes("--show-current")) return "feature/x\n";
+      return "";
+    });
+    const adapter = createAgentDeckAdapter();
+    expect(adapter.list({ profile: "march" })[0]?.branch).toBe("feature/x");
+    expect(adapter.list({ profile: "march" })[0]?.branch).toBe("feature/x");
+    const gitShowCurrentCalls = childProcessMock.execFileSync.mock.calls.filter(
+      (c) => c[0] === "git" && Array.isArray(c[1]) && c[1].includes("--show-current"),
+    );
+    expect(gitShowCurrentCalls).toHaveLength(1);
+  });
+
+  it("re-derives the branch after the session is removed (cache invalidation #264)", () => {
+    childProcessMock.execFileSync.mockImplementation((cmd: string, args: string[]) => {
+      if (cmd === "agent-deck" && args.includes("list")) {
+        return JSON.stringify([
+          session({ sessionId: "recycle", group: "g", branch: "", worktreePath: "/wt/recycle" }),
+        ]);
+      }
+      if (cmd === "git" && args.includes("--is-inside-work-tree")) return "true\n";
+      if (cmd === "git" && args.includes("--show-current")) return "feature/x\n";
+      return "";
+    });
+    const adapter = createAgentDeckAdapter();
+    adapter.list({ profile: "march" });
+    adapter.remove({ profile: "march", sessionId: "recycle", pruneWorktree: false });
+    adapter.list({ profile: "march" });
+    const gitShowCurrentCalls = childProcessMock.execFileSync.mock.calls.filter(
+      (c) => c[0] === "git" && Array.isArray(c[1]) && c[1].includes("--show-current"),
+    );
+    // Once before remove, once after — the cache was invalidated on remove.
+    expect(gitShowCurrentCalls).toHaveLength(2);
+  });
+
   it("forgets a session's metadata after remove", () => {
     let listCalls = 0;
     childProcessMock.execFileSync.mockImplementation((_cmd: string, args: string[]) => {
