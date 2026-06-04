@@ -38,11 +38,12 @@ const SPAWN_ID = "20260504-abc123";
 const CONTAINER_NAME = `march-spawn-${SPAWN_ID}`;
 const IMAGE_TAG = `march-spawn-${SPAWN_ID}`;
 
-const EXPECTED_ENTRYPOINT = [
-  "sh",
-  "-c",
-  `claude -p "$(cat ${CONTAINER_PROMPT_PATH})" --output-format json --dangerously-skip-permissions --bare --no-session-persistence`,
-];
+// The backend composes its agent command inside the deterministic git
+// scaffold; container-launch must pass that argv through byte-for-byte (the
+// scaffold's exact shape is covered in backends.test.ts).
+const EXPECTED_ENTRYPOINT = claudeCodeBackend.buildEntrypoint(
+  CONTAINER_PROMPT_PATH,
+);
 
 const CODEX_HOME = "/tmp/march-test-codex-home";
 
@@ -169,8 +170,8 @@ describe("container-launch", () => {
       expect(entrypoint).toEqual(EXPECTED_ENTRYPOINT);
       const shellCmd = entrypoint[2];
       expect(shellCmd).toContain("$(cat /march/prompt.txt)");
-      expect(shellCmd).toMatch(
-        /--output-format json --dangerously-skip-permissions --bare --no-session-persistence$/,
+      expect(shellCmd).toContain(
+        "--output-format json --dangerously-skip-permissions --bare --no-session-persistence",
       );
     });
 
@@ -325,11 +326,12 @@ describe("container-launch", () => {
 
       const imageIdx = argList.lastIndexOf(IMAGE_TAG);
       const entrypoint = argList.slice(imageIdx + 1);
-      expect(entrypoint).toEqual([
-        "sh",
-        "-c",
+      expect(entrypoint).toEqual(
+        codexBackend.buildEntrypoint(CONTAINER_PROMPT_PATH),
+      );
+      expect(entrypoint[2]).toContain(
         `cp -R /march/codex-auth/. /march/codex-home/ && chmod -R u+rwX /march/codex-home && codex exec --json --ephemeral --ignore-rules --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --cd /march/workspace - < ${CONTAINER_PROMPT_PATH}`,
-      ]);
+      );
     });
 
     it("keeps launchSpawnContainer as a compatibility alias for create", () => {

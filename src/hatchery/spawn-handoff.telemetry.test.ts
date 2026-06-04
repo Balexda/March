@@ -88,9 +88,14 @@ vi.mock("../spawn/container-launch.js", () => {
     copyOtelEmitterToContainer: vi.fn(),
     startSpawnContainer: vi.fn(),
     waitForSpawnContainer: vi.fn(() => ({ exitCode: 0 })),
-    // A valid unified diff so patch extraction succeeds and we reach git apply.
+    // A valid unified diff on the deterministic sentinel line so patch
+    // extraction succeeds and we reach git apply.
     readSpawnContainerLogs: vi.fn(
-      () => "diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1 +1 @@\n-a\n+b\n",
+      () =>
+        `__MARCH_PATCH_B64__:${Buffer.from(
+          "diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1 +1 @@\n-a\n+b\n",
+          "utf-8",
+        ).toString("base64")}`,
     ),
     removeSpawnContainer: vi.fn(),
   };

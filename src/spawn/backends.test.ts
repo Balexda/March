@@ -79,22 +79,46 @@ describe("spawn backends", () => {
     expect(claudeCodeBackend.requiredEnvVars).toEqual(["ANTHROPIC_API_KEY"]);
     expect(claudeCodeBackend.credentialMounts).toEqual([]);
     expect(claudeCodeBackend.allowedEgressHosts).toEqual(["api.anthropic.com"]);
-    expect(claudeCodeBackend.buildEntrypoint("/march/prompt.txt")).toEqual([
-      "sh",
-      "-c",
+    const entrypoint = claudeCodeBackend.buildEntrypoint("/march/prompt.txt");
+    expect(entrypoint.slice(0, 2)).toEqual(["sh", "-c"]);
+    expect(entrypoint[2]).toContain(
       'claude -p "$(cat /march/prompt.txt)" --output-format json --dangerously-skip-permissions --bare --no-session-persistence',
-    ]);
+    );
   });
 
   it("defines the Codex exec backend for ChatGPT session auth", () => {
     expect(codexBackend.baseImage).toBe("march-spawn-codex:latest");
     expect(codexBackend.requiredEnvVars).toEqual([]);
     expect(codexBackend.allowedEgressHosts).toEqual(["chatgpt.com"]);
-    expect(codexBackend.buildEntrypoint("/march/prompt.txt")).toEqual([
-      "sh",
-      "-c",
+    const entrypoint = codexBackend.buildEntrypoint("/march/prompt.txt");
+    expect(entrypoint.slice(0, 2)).toEqual(["sh", "-c"]);
+    // The credential-mount `cp` prelude and the codex exec command are both
+    // preserved verbatim inside the git scaffold.
+    expect(entrypoint[2]).toContain(
       `cp -R /march/codex-auth/. /march/codex-home/ && chmod -R u+rwX /march/codex-home && codex exec --json --ephemeral --ignore-rules --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --cd ${CONTAINER_WORKDIR} - < /march/prompt.txt`,
-    ]);
+    );
+  });
+
+  it("wraps each backend's agent command in the git commit/diff scaffold", () => {
+    for (const backend of [claudeCodeBackend, codexBackend]) {
+      const [shell, flag, script] = backend.buildEntrypoint("/march/prompt.txt");
+      expect([shell, flag]).toEqual(["sh", "-c"]);
+      // Init a real container-local repo with a fixed commit identity.
+      expect(script).toContain("git init -q");
+      expect(script).toContain('git config user.email "spawn@march.local"');
+      expect(script).toContain('git config user.name "March Spawn"');
+      // Capture a base commit before the agent runs, diff base..HEAD after.
+      expect(script).toContain("__march_base=$(git rev-parse HEAD)");
+      expect(script).toContain('git diff "$__march_base".."$__march_head"');
+      // Emit the patch on the sentinel line, base64-encoded.
+      expect(script).toContain("__MARCH_PATCH_B64__");
+      expect(script).toContain("base64");
+      // A clean no-op fails clearly; a forgotten commit is captured.
+      expect(script).toContain("worker produced no commit");
+      expect(script).toContain("spawn: capture uncommitted changes");
+      // The worker never pushes or opens a PR — no `gh` anywhere.
+      expect(script).not.toMatch(/\bgh\b/);
+    }
   });
 
   it("resolves Codex credential mounts from CODEX_HOME", () => {

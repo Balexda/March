@@ -202,10 +202,21 @@ exit 0
     return binDir;
   }
 
-  // Backslash-n sequences (not real newlines) so the stub emits a single JSON
-  // line; runHatcherySpawn's JSON patch extractor turns them into newlines.
-  const PATCH_LOGS =
-    '{"patch":"diff --git a/generated.txt b/generated.txt\\nnew file mode 100644\\nindex 0000000..c1827f0\\n--- /dev/null\\n+++ b/generated.txt\\n@@ -0,0 +1 @@\\n+generated\\n"}';
+  // The deterministic in-container wrapper prints the patch on a single
+  // `__MARCH_PATCH_B64__:<base64>` line after the agent commits. Mirror that:
+  // the stub's `docker logs` emits exactly that line, and extraction decodes it.
+  const PATCH_DIFF =
+    "diff --git a/generated.txt b/generated.txt\n" +
+    "new file mode 100644\n" +
+    "index 0000000..c1827f0\n" +
+    "--- /dev/null\n" +
+    "+++ b/generated.txt\n" +
+    "@@ -0,0 +1 @@\n" +
+    "+generated\n";
+  const PATCH_LOGS = `__MARCH_PATCH_B64__:${Buffer.from(
+    PATCH_DIFF,
+    "utf-8",
+  ).toString("base64")}`;
 
   function startService(env: {
     repoParent: string;
@@ -354,7 +365,7 @@ exit 0
     const id = await submit(repoRoot);
     const job = await poll(id);
     expect(job.status).toBe("failed");
-    expect(job.error?.message).toContain("no git patch");
+    expect(job.error?.message).toContain("no committed patch");
 
     const logsRoot = path.join(home, ".march", "logs", "hatchery-spawns");
     const handoffDir = path.join(logsRoot, fs.readdirSync(logsRoot)[0]);

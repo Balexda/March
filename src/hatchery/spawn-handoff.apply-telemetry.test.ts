@@ -65,6 +65,9 @@ vi.mock("../spawn/snapshot-build.js", () => {
 // A new-file patch for `f`, which already exists in the base — conflicts.
 const CONFLICTING_PATCH =
   "diff --git a/f b/f\nnew file mode 100644\nindex 0000000..deadbee\n--- /dev/null\n+++ b/f\n@@ -0,0 +1 @@\n+totally different content\n";
+// The worker now emits the patch on the deterministic sentinel line (base64),
+// not as raw `agent_message` text — mirror that so extraction yields the patch.
+const SPAWN_LOG = `__MARCH_PATCH_B64__:${Buffer.from(CONFLICTING_PATCH, "utf-8").toString("base64")}`;
 
 vi.mock("../spawn/container-launch.js", () => {
   class LaunchError extends Error {}
@@ -75,7 +78,7 @@ vi.mock("../spawn/container-launch.js", () => {
     copyOtelEmitterToContainer: vi.fn(),
     startSpawnContainer: vi.fn(),
     waitForSpawnContainer: vi.fn(() => ({ exitCode: 0 })),
-    readSpawnContainerLogs: vi.fn(() => CONFLICTING_PATCH),
+    readSpawnContainerLogs: vi.fn(() => SPAWN_LOG),
     removeSpawnContainer: vi.fn(),
   };
 });
