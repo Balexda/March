@@ -1,6 +1,8 @@
 FROM node:22-bookworm-slim
 
-ARG CLAUDE_CODE_VERSION=latest
+# Pinned for reproducible builds (mirrors CODEX_VERSION in spawn-codex). Bump
+# intentionally when rolling forward to a new known-good release.
+ARG CLAUDE_CODE_VERSION=2.1.163
 
 # git: required so the in-container spawn wrapper can init a repo, commit the
 # agent's work, and produce the patch via `git diff` (the worker never
