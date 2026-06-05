@@ -4,12 +4,18 @@ import os from "node:os";
 import path from "node:path";
 import {
   buildManagerPrompt,
-  buildSpawnPatchPrompt,
+  buildSpawnCommitPrompt,
   createHatcherySpawnArtifacts,
   extractPatchFromSpawnOutput,
   hatcherySpawnLogDir,
   managerBranchName,
 } from "./spawn-handoff.js";
+import { PATCH_SENTINEL } from "../spawn/backends.js";
+
+/** Encode a patch the way the in-container wrapper does: one sentinel line. */
+function sentinelLine(patch: string): string {
+  return `${PATCH_SENTINEL}:${Buffer.from(patch, "utf-8").toString("base64")}`;
+}
 
 // The launched-session race guard + worktree-dir derivation now live in the
 // Castra adapter (src/castra/adapter.ts) — the Hatchery drives launches through
@@ -41,149 +47,45 @@ describe("spawn-handoff", () => {
     );
   });
 
-  it("wraps the operator prompt with patch-output instructions", () => {
-    const prompt = buildSpawnPatchPrompt("Change the README.");
+  it("instructs the worker to commit (not hand-write a patch) and never use gh", () => {
+    const prompt = buildSpawnCommitPrompt("Change the README.");
     expect(prompt).toContain("Operator request:\nChange the README.");
-    expect(prompt).toContain("diff --git");
-    expect(prompt).toContain("git apply --index");
     expect(prompt).toContain("Hatchery instructions:");
+    expect(prompt).toContain("git add -A && git commit");
+    expect(prompt).toContain("`[ ]` to `[x]`");
+    // The worker must not push, open a PR, run gh, or hand-render a patch.
+    expect(prompt).toMatch(/Do NOT push.*`gh`/s);
+    expect(prompt).toMatch(/Do NOT hand-write, print, or paste a diff\/patch/);
+    expect(prompt).not.toContain("git apply");
   });
 
-  it("extracts a patch from raw diff output", () => {
-    const patch = extractPatchFromSpawnOutput(
-      "notes before\n" +
-        "diff --git a/README.md b/README.md\n" +
-        "--- a/README.md\n" +
-        "+++ b/README.md\n" +
-        "@@ -1 +1 @@\n" +
-        "-old\n" +
-        "+new\n",
-    );
-    expect(patch.startsWith("diff --git")).toBe(true);
-    expect(patch).toContain("+new");
+  it("decodes the base64 patch from the wrapper's sentinel line", () => {
+    const fullPatch =
+      "diff --git a/README.md b/README.md\n" +
+      "--- a/README.md\n" +
+      "+++ b/README.md\n" +
+      "@@ -1 +1 @@\n" +
+      "-old\n" +
+      "+new\n";
+    const output = [
+      '{"type":"turn.started"}',
+      '{"type":"item.completed","item":{"type":"agent_message","text":"Committed the change."}}',
+      sentinelLine(fullPatch),
+    ].join("\n");
+    expect(extractPatchFromSpawnOutput(output)).toBe(fullPatch);
   });
 
-  it("extracts a patch from JSONL output", () => {
-    const patch = extractPatchFromSpawnOutput(
-      [
-        JSON.stringify({ event: "started" }),
-        JSON.stringify({
-          result: {
-            patch:
-              "diff --git a/file.txt b/file.txt\n--- a/file.txt\n+++ b/file.txt\n",
-          },
-        }),
-      ].join("\n"),
-    );
-    expect(patch).toContain("diff --git a/file.txt b/file.txt");
+  it("reads the LAST sentinel line when more than one is present", () => {
+    const stale = "diff --git a/old b/old\n--- a/old\n+++ b/old\n";
+    const fresh = "diff --git a/new b/new\n--- a/new\n+++ b/new\n";
+    const output = [sentinelLine(stale), "noise", sentinelLine(fresh)].join("\n");
+    expect(extractPatchFromSpawnOutput(output)).toBe(fresh);
   });
 
-  it("extracts a fenced patch from Codex JSONL agent messages without trailing event JSON", () => {
-    const patch = extractPatchFromSpawnOutput(
-      [
-        JSON.stringify({ type: "turn.started" }),
-        JSON.stringify({
-          type: "item.completed",
-          item: {
-            type: "agent_message",
-            text:
-              "Created docs/README.md.\n\n```diff\n" +
-              "diff --git a/docs/README.md b/docs/README.md\n" +
-              "new file mode 100644\n" +
-              "--- /dev/null\n" +
-              "+++ b/docs/README.md\n" +
-              "@@ -0,0 +1 @@\n" +
-              "+hello\n" +
-              "```",
-          },
-        }),
-        JSON.stringify({ type: "turn.completed" }),
-      ].join("\n"),
-    );
-
-    expect(patch).toBe(
-      "diff --git a/docs/README.md b/docs/README.md\n" +
-        "new file mode 100644\n" +
-        "--- /dev/null\n" +
-        "+++ b/docs/README.md\n" +
-        "@@ -0,0 +1 @@\n" +
-        "+hello\n",
-    );
-  });
-
-  it("extracts a fenced patch whose body contains nested ```ts fences (added file contents)", () => {
-    // Reproduces issue #131: codex emits a ```diff fence whose patch body
-    // adds files containing their own ```ts/```diff fences. The closing ``` of
-    // the OUTER fence is the only one preceded by a newline (inner fences are
-    // prefixed by `+` because they are patch-added lines). Naive non-greedy
-    // matching stops at the first inner fence and truncates the patch.
-    const patch = extractPatchFromSpawnOutput(
-      JSON.stringify({
-        type: "item.completed",
-        item: {
-          type: "agent_message",
-          text:
-            "Done.\n\n```diff\n" +
-            "diff --git a/docs/api.md b/docs/api.md\n" +
-            "new file mode 100644\n" +
-            "--- /dev/null\n" +
-            "+++ b/docs/api.md\n" +
-            "@@ -0,0 +1,7 @@\n" +
-            "+# API\n" +
-            "+\n" +
-            "+```ts\n" +
-            "+export function foo(): void;\n" +
-            "+```\n" +
-            "+\n" +
-            "+End.\n" +
-            "```",
-        },
-      }),
-    );
-
-    expect(patch).toContain("export function foo(): void;");
-    expect(patch).toContain("+End.");
-    expect(patch).toContain("+```ts");
-    expect(patch.startsWith("diff --git a/docs/api.md")).toBe(true);
-    // The patch must not be truncated at the inner ```ts fence.
-    expect(patch).not.toMatch(/\n```\s*$/);
-  });
-
-  it("accepts an indented closing fence (CommonMark allows up to 3 spaces)", () => {
-    // Defensive regression coverage for PR #135 review: a closing fence may
-    // be written with leading spaces or tabs. The outer fence must still
-    // match so we don't fall through to the raw `diff --git` marker path,
-    // which would return the closing backticks and trailing prose verbatim
-    // and produce an invalid patch.
-    const patch = extractPatchFromSpawnOutput(
-      JSON.stringify({
-        type: "item.completed",
-        item: {
-          type: "agent_message",
-          text:
-            "Here:\n\n```diff\n" +
-            "diff --git a/x b/x\n" +
-            "--- a/x\n" +
-            "+++ b/x\n" +
-            "@@ -1 +1 @@\n" +
-            "-a\n" +
-            "+b\n" +
-            "   ```\n" + // indented closing fence
-            "trailing prose that must not leak into the patch",
-        },
-      }),
-    );
-
-    expect(patch.startsWith("diff --git a/x b/x")).toBe(true);
-    expect(patch).not.toContain("```");
-    expect(patch).not.toContain("trailing prose");
-    expect(patch.endsWith("+b\n")).toBe(true);
-  });
-
-  it("preserves a trailing whitespace-only context line at the end of the patch", () => {
-    // Reproduces issue #131: a hunk header like `@@ -43,7 +43,7 @@` requires
-    // 7 lines on each side; if the final line is a blank context line (just
-    // " \n"), trimEnd() strips it and git apply fails with "corrupt patch".
+  it("preserves a trailing whitespace-only context line through base64 decode", () => {
+    // A hunk header like `@@ -1,3 +1,3 @@` requires 3 lines on each side; if the
+    // final line is a blank context line (just " \n"), dropping it makes git
+    // apply reject the patch as corrupt. base64 round-trips bytes exactly.
     const fullPatch =
       "diff --git a/file.md b/file.md\n" +
       "--- a/file.md\n" +
@@ -191,20 +93,36 @@ describe("spawn-handoff", () => {
       "@@ -1,3 +1,3 @@\n" +
       "-old line\n" +
       "+new line\n" +
-      " \n"; // trailing blank context line — must survive extraction
-    const patch = extractPatchFromSpawnOutput(
-      JSON.stringify({
-        type: "item.completed",
-        item: {
-          type: "agent_message",
-          text: "Result:\n\n```diff\n" + fullPatch + "```",
-        },
-      }),
-    );
+      " \n";
+    expect(extractPatchFromSpawnOutput(sentinelLine(fullPatch))).toBe(fullPatch);
+  });
 
-    // The blank context line " \n" must be preserved so git apply sees the
-    // hunk's full line count.
-    expect(patch).toBe(fullPatch);
+  it("throws a clear error when no sentinel line is present", () => {
+    expect(() =>
+      extractPatchFromSpawnOutput(
+        '{"type":"agent_message","text":"I made some changes."}\n',
+      ),
+    ).toThrow(/no committed patch/);
+    expect(() => extractPatchFromSpawnOutput("")).toThrow(PATCH_SENTINEL);
+  });
+
+  it("rejects a decoded payload that is not a git diff", () => {
+    expect(() =>
+      extractPatchFromSpawnOutput(sentinelLine("not actually a diff\n")),
+    ).toThrow(/did not decode to a git diff/);
+  });
+
+  it("rejects a patch that touches an absolute or parent-escaping path", () => {
+    const absolute =
+      "diff --git a/etc/passwd b//etc/passwd\n--- a/etc/passwd\n+++ b//etc/passwd\n";
+    expect(() => extractPatchFromSpawnOutput(sentinelLine(absolute))).toThrow(
+      /unsafe path/,
+    );
+    const escape =
+      "diff --git a/../outside b/../outside\n--- a/../outside\n+++ b/../outside\n";
+    expect(() => extractPatchFromSpawnOutput(sentinelLine(escape))).toThrow(
+      /unsafe path/,
+    );
   });
 
   it("manager prompt enumerates push and PR creation as separate atomic steps", () => {

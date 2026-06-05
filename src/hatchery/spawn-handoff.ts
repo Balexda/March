@@ -5,6 +5,7 @@ import path from "node:path";
 import {
   missingCredentialMounts,
   missingRequiredEnvVars,
+  PATCH_SENTINEL,
   type SpawnBackend,
 } from "../spawn/backends.js";
 import {
@@ -248,31 +249,89 @@ function selfHealManagerLaunchCollision(input: {
   return { orphanBranch, verdict, removed };
 }
 
-export function buildSpawnPatchPrompt(operatorPrompt: string): string {
+export function buildSpawnCommitPrompt(operatorPrompt: string): string {
   return [
     "Operator request:",
     operatorPrompt.trimEnd(),
     "",
     "Hatchery instructions:",
-    "- Complete only the operator request above.",
-    "- When the change is complete, emit the full result as a git patch.",
-    "- The patch must be applicable from the repository root with `git apply --index`.",
-    "- Prefer a standard unified git diff beginning with `diff --git`.",
+    "- You are working inside a git repository at the current directory.",
+    "- Complete only the operator request above by editing files in the working tree.",
+    "- When the change is complete, COMMIT it:",
+    '    git add -A && git commit -m "<short summary of the change>"',
+    "- In that same commit, flip every `tasks.md` row this work completes from",
+    "  `[ ]` to `[x]`.",
+    "- Do NOT push, open a pull request, or run `gh` — a separate steward session",
+    "  handles delivery. Do NOT hand-write, print, or paste a diff/patch; the",
+    "  commit you make is the only deliverable.",
+    "- If the request requires no change, make no commit and leave the tree clean.",
+    "- Optionally end with a one-line summary of what you changed.",
   ].join("\n");
 }
 
 export function extractPatchFromSpawnOutput(output: string): string {
-  const jsonPatch = extractPatchFromJsonOutput(output);
-  if (jsonPatch) return jsonPatch;
-
-  const markerIndex = output.indexOf("diff --git ");
-  if (markerIndex >= 0) {
-    return normalizeTrailingNewline(output.slice(markerIndex));
+  // The deterministic in-container wrapper prints
+  // `__MARCH_PATCH_B64__:<base64 of git diff base..HEAD>` as its final stdout
+  // line, after the agent has committed its work. Decode that — we never scrape
+  // the agent's free-text `agent_message`, which truncated on large patches and
+  // produced the downstream "corrupt patch" failure (the bug this fix removes).
+  const encoded = lastPatchSentinel(output);
+  if (encoded === null) {
+    throw new HatcherySpawnError(
+      `Spawn produced no committed patch: the \`${PATCH_SENTINEL}\` sentinel line ` +
+        "was absent from its output. The worker is expected to commit its change in " +
+        "the container-local git repo; the wrapper then emits the patch.",
+    );
   }
 
-  throw new HatcherySpawnError(
-    "Spawn completed but no git patch was found in its output. Expected a JSON/JSONL `patch` field or raw output beginning with `diff --git`.",
-  );
+  const patch = Buffer.from(encoded, "base64").toString("utf-8");
+  if (patch.trim().length === 0) {
+    throw new HatcherySpawnError(
+      "Spawn emitted an empty committed patch; the worker produced no diff.",
+    );
+  }
+  if (!patch.includes("diff --git ")) {
+    throw new HatcherySpawnError(
+      "Spawn patch sentinel did not decode to a git diff (no `diff --git` header). " +
+        "The wrapper output may be corrupted.",
+    );
+  }
+  assertPatchPathsSafe(patch);
+  return normalizeTrailingNewline(patch);
+}
+
+const PATCH_SENTINEL_RE = new RegExp(`^${PATCH_SENTINEL}:(.*)$`);
+
+/** The base64 payload of the LAST patch-sentinel line, or null if none. */
+function lastPatchSentinel(output: string): string | null {
+  const lines = output.split(/\r?\n/);
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const match = lines[i].match(PATCH_SENTINEL_RE);
+    if (match) return match[1].trim();
+  }
+  return null;
+}
+
+/**
+ * Reject a decoded patch that touches an absolute path or escapes the worktree
+ * via `..` (the 2026-05-21-005 spec's untrusted-input contract). A patch from
+ * `git diff` is always repo-relative, so this only fires on a tampered or
+ * malformed sentinel — but it keeps the downstream `git apply` from writing
+ * outside the manager worktree.
+ */
+function assertPatchPathsSafe(patch: string): void {
+  const headerRe = /^diff --git a\/(.+?) b\/(.+)$/gm;
+  let match: RegExpExecArray | null;
+  while ((match = headerRe.exec(patch)) !== null) {
+    for (const candidate of [match[1], match[2]]) {
+      if (candidate.startsWith("/") || candidate.split("/").includes("..")) {
+        throw new HatcherySpawnError(
+          `Spawn patch references an unsafe path "${candidate}" ` +
+            "(absolute or parent-directory escape); refusing to apply.",
+        );
+      }
+    }
+  }
 }
 
 // Strip only trailing newlines, then add exactly one. Unlike trimEnd(), this
@@ -283,92 +342,6 @@ function normalizeTrailingNewline(text: string): string {
   let end = text.length;
   while (end > 0 && text.charCodeAt(end - 1) === 0x0a) end--;
   return text.slice(0, end) + "\n";
-}
-
-function extractPatchFromJsonOutput(output: string): string | null {
-  const trimmed = output.trim();
-  if (!trimmed) return null;
-
-  const whole = parseJsonMaybe(trimmed);
-  const wholePatch = patchFromJsonValue(whole, { scanStrings: false });
-  if (wholePatch) return wholePatch;
-
-  for (const line of trimmed.split(/\r?\n/).reverse()) {
-    const parsed = parseJsonMaybe(line.trim());
-    const patch = patchFromJsonValue(parsed, { scanStrings: true });
-    if (patch) return patch;
-  }
-
-  return null;
-}
-
-function parseJsonMaybe(text: string): unknown {
-  if (!text.startsWith("{") && !text.startsWith("[")) return undefined;
-  try {
-    return JSON.parse(text) as unknown;
-  } catch {
-    return undefined;
-  }
-}
-
-function patchFromJsonValue(
-  value: unknown,
-  options: { readonly scanStrings: boolean },
-): string | null {
-  if (typeof value === "string") {
-    return options.scanStrings ? patchFromText(value) : null;
-  }
-  if (!value || typeof value !== "object") return null;
-  if (Array.isArray(value)) {
-    for (const item of value.slice().reverse()) {
-      const patch = patchFromJsonValue(item, options);
-      if (patch) return patch;
-    }
-    return null;
-  }
-
-  const record = value as Record<string, unknown>;
-  for (const key of ["patch", "diff", "git_patch", "gitPatch"]) {
-    const raw = record[key];
-    if (typeof raw === "string") {
-      const patch = patchFromText(raw);
-      if (patch) return patch;
-    }
-  }
-
-  for (const key of [
-    "result",
-    "output",
-    "message",
-    "data",
-    "item",
-    "text",
-    "aggregated_output",
-    "content",
-  ]) {
-    const patch = patchFromJsonValue(record[key], options);
-    if (patch) return patch;
-  }
-
-  return null;
-}
-
-function patchFromText(text: string): string | null {
-  // Require the closing fence to be at line start, optionally indented with
-  // spaces or tabs (CommonMark allows up to 3 spaces of indentation on the
-  // closing fence). Inner ```ts / ```diff fences embedded as added patch
-  // lines are prefixed by `+` (or `-`/space-then-content for context), so
-  // they fail this anchor and don't terminate the match. Only the outer
-  // closing fence on its own line matches.
-  const fenced = text.match(
-    /```(?:diff|patch)?[^\n]*\n([\s\S]*?diff --git [\s\S]*?)\n[ \t]*```[ \t]*(?:\r?\n|\r|$)/,
-  );
-  if (fenced?.[1]) return normalizeTrailingNewline(fenced[1]);
-
-  const markerIndex = text.indexOf("diff --git ");
-  if (markerIndex >= 0) return normalizeTrailingNewline(text.slice(markerIndex));
-
-  return null;
 }
 
 export function buildManagerPrompt(input: {
@@ -800,7 +773,7 @@ export async function runHatcherySpawn(
       ),
     );
 
-    const spawnPrompt = buildSpawnPatchPrompt(input.prompt);
+    const spawnPrompt = buildSpawnCommitPrompt(input.prompt);
     stage = "record_init";
 
     writeInitialSpawnRecord({
