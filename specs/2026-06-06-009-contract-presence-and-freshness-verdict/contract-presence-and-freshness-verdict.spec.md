@@ -1,7 +1,7 @@
 # Feature Specification: Contract Presence and Freshness Verdict
 
 **Spec Folder**: `2026-06-06-009-contract-presence-and-freshness-verdict`
-**Branch**: `master`
+**Branch**: `feature/smithy/mark/layered-testing-framework-m2-f5`
 **Created**: 2026-06-06
 **Status**: Draft
 **Input**: `docs/rfcs/2026-002-layered-testing-framework/02-subsystem-contract-documentation-track.features.md` Feature 5, with inferred context from adjacent M2 Feature 1-4 specs.
@@ -11,7 +11,7 @@
 
 ### Session 2026-06-06
 
-- The source RFC, feature map, and `docs/` tree are not present in this checkout. This spec is derived from the adjacent M2 Feature 1-4 specs and the live repository layout. [Critical Assumption]
+- The source feature map (`docs/rfcs/2026-002-layered-testing-framework/02-subsystem-contract-documentation-track.features.md`) is present in this checkout, and this spec was reconciled against its explicit Feature 5 prose. Adjacent M2 Feature 1-4 specs and the live repository layout supplied additional context.
 - Feature 1 defines the required contract section schema and freshness configuration shape. Features 2, 3, and 4 author the Hatchery, Brood, Herald, Castra, Spawn, Legate, and Steward contract artifacts. This feature consumes those artifacts and specifies deterministic local verdict tooling.
 - The verdict is local and non-interactive: it reports contract presence, required-section compliance, freshness-config validity, and source/contract drift as clean pass/fail output. It does not prompt the operator or block on unavailable input.
 - This feature owns populated freshness mappings for the M2 contract set. Smithy-agent enforcement, CI wiring, and AUTOGEN extraction remain later features.
@@ -99,18 +99,18 @@ Recommended implementation sequence:
 
 | ID | Title | Depends On | Artifact |
 |----|-------|-----------|----------|
-| US1 | Validate Required Contract Presence | - | - |
-| US2 | Populate and Validate Contract Freshness Mapping | US1 | - |
-| US3 | Report Source and Contract Freshness Drift | US1, US2 | - |
-| US4 | Provide Deterministic Local Verdict Output | US1, US2, US3 | - |
+| US1 | Validate Required Contract Presence | — | — |
+| US2 | Populate and Validate Contract Freshness Mapping | US1 | — |
+| US3 | Report Source and Contract Freshness Drift | US1, US2 | — |
+| US4 | Provide Deterministic Local Verdict Output | US1, US2, US3 | — |
 
 ## Requirements *(mandatory)*
 
 ### Functional Requirements
 
-- **FR-001**: The system MUST provide a local contract verdict command reachable through an `npm run` script.
+- **FR-001**: The system MUST provide a local contract verdict command reachable through the `npm run docs:contracts:check` script (the entrypoint name committed by the Feature 5 feature map).
 - **FR-002**: The verdict command MUST check for required contract artifacts at `docs/subsystems/hatchery/contract.md`, `docs/subsystems/brood/contract.md`, `docs/subsystems/herald/contract.md`, `docs/subsystems/castra/contract.md`, `docs/subsystems/spawn/contract.md`, `docs/subsystems/legate/contract.md`, and `docs/subsystems/steward/contract.md`.
-- **FR-003**: Each checked contract MUST contain exactly one H2 `## Public Interface`, exactly one H2 `## Invariants`, and exactly one H2 `## Error Modes`.
+- **FR-003**: Each checked contract MUST contain exactly one H2 `## Public Interface`, exactly one H2 `## Invariants`, and exactly one H2 `## Error Modes`. Uniqueness is intentional: it keeps section lookup unambiguous for the presence check and downstream AUTOGEN/marker placement, so a duplicated required heading is a verdict failure rather than a tolerated case.
 - **FR-004**: Required-heading detection MUST parse Markdown headings rather than matching arbitrary body text.
 - **FR-005**: The system MUST author and validate `docs/subsystems/contract-freshness.config.json` with populated entries for the required M2 contracts.
 - **FR-006**: Each freshness config entry MUST contain a stable `name`, `contractPath`, and non-empty `publicSourcePaths` selector list.
@@ -143,7 +143,7 @@ Recommended implementation sequence:
 
 | ID | Description | Source Category | Impact | Confidence | Status | Resolution |
 |----|-------------|-----------------|--------|------------|--------|------------|
-| SD-001 | The exact Feature 5 title and source feature-map prose are unavailable in this checkout. This spec infers the feature from M2 Feature 1's explicit F5 scope and Features 2-4's references to future presence/freshness tooling. | Source Artifact Availability | Medium | Medium | open | Reconcile title and wording when `docs/rfcs/2026-002-layered-testing-framework/02-subsystem-contract-documentation-track.features.md` is restored. |
+| SD-001 | Earlier drafting assumed the source feature map was unavailable; it is in fact present in-repo, and this spec was reconciled against its explicit Feature 5 prose ("Contract Presence & Freshness Check", `npm run docs:contracts:check`). | Source Artifact Availability | Low | High | resolved | Reconciled against `docs/rfcs/2026-002-layered-testing-framework/02-subsystem-contract-documentation-track.features.md` Feature 5; no further action. |
 | SD-002 | The implementation must choose whether the verdict output is JSON, stable text, or both. The spec requires stable bounded diagnostics but leaves transport shape to slicing. | Interface Shape | Low | Medium | open | Resolve during task slicing before implementation. |
 
 ## Out of Scope

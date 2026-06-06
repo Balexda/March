@@ -15,10 +15,10 @@ This feature defines a repository-local verdict boundary for subsystem contracts
 #### Signature
 
 ```text
-npm run <contract-verdict-script> [-- optional changed-file input or diff-base options]
+npm run docs:contracts:check [-- optional changed-file input or diff-base options]
 ```
 
-The final script name is selected during implementation slicing. The interface contract is that callers use `npm run`, not an ad hoc binary invocation.
+The entrypoint name `docs:contracts:check` is fixed by the Feature 5 feature map. The interface contract is that callers use this `npm run` script, not an ad hoc binary invocation.
 
 #### Inputs
 

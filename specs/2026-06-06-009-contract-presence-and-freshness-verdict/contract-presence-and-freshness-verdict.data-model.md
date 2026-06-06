@@ -87,7 +87,23 @@ Validation rules:
 - Diagnostics are bounded and do not include unbounded file contents.
 - Output ordering is deterministic by category, contract name, and path.
 
-### 6) Verdict Diagnostic (`verdict_diagnostic`)
+### 6) Check Result (`check_result`)
+
+Purpose: Represents the outcome of one verdict category so the overall `contract_verdict.status` is the fold of its checks.
+
+| Field | Type | Required | Notes |
+|-------|------|----------|-------|
+| `category` | enum | Yes | `presence`, `section-schema`, `config`, or `freshness`. |
+| `status` | enum | Yes | `pass` or `fail`, matching the `contract_verdict` vocabulary. |
+| `checkedCount` | integer | Yes | Number of contracts, config entries, or changed paths evaluated in this category. |
+| `diagnostics` | `VerdictDiagnostic[]` | Yes on fail | The category's bounded findings; empty when the category passes. |
+
+Validation rules:
+- Exactly one Check Result exists per category the verdict evaluates.
+- A Check Result is `fail` when it holds one or more diagnostics, and `pass` otherwise.
+- The overall `contract_verdict.status` is `fail` if any Check Result is `fail`.
+
+### 7) Verdict Diagnostic (`verdict_diagnostic`)
 
 Purpose: Captures one actionable failure without requiring interactive triage.
 
@@ -116,11 +132,11 @@ Validation rules:
 
 ### Contract verdict lifecycle
 
-1. `not_evaluated` -> `passing`
+1. `not_evaluated` -> `pass`
    - Trigger: Required contracts exist, required sections are valid, the freshness config is valid, and changed public sources have matching contract changes.
    - Effects: The local command exits zero.
 
-2. `not_evaluated` -> `failing`
+2. `not_evaluated` -> `fail`
    - Trigger: Any presence, section schema, config, or freshness check fails.
    - Effects: The local command exits non-zero with bounded diagnostics.
 
