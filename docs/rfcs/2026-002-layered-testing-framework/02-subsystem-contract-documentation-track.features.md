@@ -189,7 +189,7 @@ specced and cut in parallel; F6 integrates last because it invokes F5's verdict.
 | F2 | Containerized-Service Contracts (Hatchery, Brood, Herald, Castra) | F1 | specs/2026-05-22-006-containerized-service-contracts-hatchery-brood-herald-castra/ |
 | F3 | TypeScript-Surface Contracts (Spawn, Legate) | F1 | specs/2026-06-03-007-spawn-and-legate-contracts/ |
 | F4 | Steward Contract (Castra-Consumer Surface) | F1 | specs/2026-06-03-008-steward-role-contract/ |
-| F5 | Contract Presence & Freshness Check | F1 | — |
+| F5 | Contract Presence & Freshness Check | F1 | specs/2026-06-06-009-contract-presence-and-freshness-verdict/ |
 | F7 | TypeScript Public-Interface Autogen Tool | F1 | — |
 | F6 | Contract-Freshness Enforcement Directive | F1, F5 | — |
 
