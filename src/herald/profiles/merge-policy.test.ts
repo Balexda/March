@@ -93,6 +93,16 @@ describe("validateMergePolicy", () => {
   it("rejects a non-object byTaskType", () => {
     expect(validateMergePolicy({ byTaskType: [] }).ok).toBe(false);
   });
+
+  it("rejects prototype-pollution task-type keys", () => {
+    for (const key of ["__proto__", "constructor", "prototype"]) {
+      const result = validateMergePolicy({ byTaskType: { [key]: { approval: false } } });
+      expect(result.ok).toBe(false);
+    }
+    // A normal policy parsed from JSON does not pollute Object.prototype.
+    parseMergePolicy('{"byTaskType":{"__proto__":{"approval":false}}}');
+    expect(({} as Record<string, unknown>).approval).toBeUndefined();
+  });
 });
 
 describe("parseMergePolicy", () => {

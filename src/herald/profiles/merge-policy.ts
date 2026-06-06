@@ -129,8 +129,14 @@ export function validateMergePolicy(
     if (!isPlainObject(value.byTaskType)) {
       return { ok: false, error: "merge policy byTaskType must be an object keyed by task type." };
     }
-    const byTaskType: Record<string, Partial<MergeRequirements>> = {};
+    // Null-prototype map so an untrusted task-type key can't pollute the
+    // prototype chain; also reject the dangerous names outright (they are not
+    // valid smithy verbs anyway). This input arrives over HTTP (POST /profiles).
+    const byTaskType: Record<string, Partial<MergeRequirements>> = Object.create(null);
     for (const [taskType, requirements] of Object.entries(value.byTaskType)) {
+      if (taskType === "__proto__" || taskType === "constructor" || taskType === "prototype") {
+        return { ok: false, error: `merge policy byTaskType has reserved key "${taskType}".` };
+      }
       const result = validateRequirements(requirements, `merge policy byTaskType.${taskType}`);
       if (!result.ok) return result;
       byTaskType[taskType] = result.requirements;
