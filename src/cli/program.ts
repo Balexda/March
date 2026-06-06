@@ -635,11 +635,18 @@ mergePolicyCmd
         process.exitCode = ERROR;
         return;
       }
-      if (!record.mergePolicy) {
+      // An empty policy ({} — what `--clear` stores) resolves to all-required,
+      // so report it as "no policy set" rather than printing a misleading {}.
+      const mp = record.mergePolicy;
+      const hasPolicy =
+        !!mp &&
+        ((mp.defaults && Object.keys(mp.defaults).length > 0) ||
+          (mp.byTaskType && Object.keys(mp.byTaskType).length > 0));
+      if (!hasPolicy) {
         console.log(`${record.profile}: all requirements enforced (no policy set).`);
       } else {
         console.log(`${record.profile}:`);
-        console.log(JSON.stringify(record.mergePolicy, null, 2));
+        console.log(JSON.stringify(mp, null, 2));
       }
       process.exitCode = SUCCESS;
     } catch (err) {
