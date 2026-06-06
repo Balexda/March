@@ -2,7 +2,7 @@
 
 ## Overview
 
-This feature introduces **no programmatic interfaces, APIs, events, or OpenTelemetry spans**. Its single artifact is a written policy in `CONTRIBUTING.md`. The "contract" it establishes is a human one: a documented, citable rule that PR authors and reviewers consume to classify changes to three governed vitest tests. This file records that human contract and the boundaries the policy must respect with adjacent features.
+This feature introduces **no programmatic interfaces, APIs, events, or OpenTelemetry spans**. Its single artifact is a written policy in `CONTRIBUTING.md`. The "contract" it establishes is a human one: a documented, citable rule that PR authors and reviewers consume to classify changes to the two governed vitest tests. This file records that human contract and the boundaries the policy must respect with adjacent features.
 
 ## Interfaces
 
@@ -26,8 +26,8 @@ This is a reading-comprehension contract, not a callable function: the classific
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `governedPath` | enum path | Yes | One of the three governed vitest files. |
-| `changedSurface` | enum | Yes | Assertions, mocked process behavior, fixtures, subsystem boundary, production behavior, or a non-semantic edit. |
+| `governedPath` | enum path | Yes | One of the two governed vitest files (`src/spawn/container-launch.test.ts`, `src/spawn/snapshot-build.test.ts`). |
+| `changedSurface` | enum | Yes | An edit to the governed test file: its assertions, mocked process behavior, fixtures, the subsystem boundary it drives, or a non-semantic edit. A change that does not edit a governed test file is not an input to this contract. |
 
 #### Outputs
 
@@ -50,7 +50,7 @@ None. This feature adds no runtime events, metrics, logs, or spans. It is docume
 
 ## Integration Boundaries
 
-- **Feature 1 (Tag Taxonomy & Coverage Lint)**: Supplies the `@l2 @deterministic @ci` tags on the three governed files and the corrected "mocks `node:child_process`, no real Docker" premise. This feature records those facts; it does not assign tags or change the lint.
+- **Feature 1 (Tag Taxonomy & Coverage Lint)**: Supplies the `@l2 @deterministic @ci` tags on the governed files and the corrected "mocks `node:child_process`, no real Docker" premise. This feature records those facts; it does not assign tags or change the lint. (Feature 1's spec also tagged the since-deleted `src/hatchery/legate-container.test.ts` — see spec SD-002.)
 - **Feature 2 (Staged CI Pipeline)**: Owns the staged npm scripts and CI fan-out. A scenario ported on a material change runs through Feature 2's existing L2 path; this feature defines no new script or job.
 - **Feature 3 (Quarantine Routing Scaffold)**: Owns `tests/quarantine/`. This feature defines no parking mechanism and references quarantine only if a contributor independently chooses it.
 - **RFC cassette substrate (M3+)**: A real Cucumber.js port consumes the step-definition library and cassette infrastructure delivered later. This feature names the port as the required outcome of a material change but does not build that infrastructure.

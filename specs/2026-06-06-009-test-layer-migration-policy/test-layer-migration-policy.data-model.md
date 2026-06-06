@@ -13,14 +13,14 @@ Purpose: The `CONTRIBUTING.md` section that states the migration trigger and rec
 | Field | Type | Required | Notes |
 |-------|------|----------|-------|
 | `heading` | text | Yes | The "Test Layer Migration" heading under `## Testing`. |
-| `governedSet` | path list | Yes | The three governed vitest file paths. |
+| `governedSet` | path list | Yes | The two governed vitest file paths (`src/spawn/container-launch.test.ts`, `src/spawn/snapshot-build.test.ts`). |
 | `triggeringConditions` | enumerated text | Yes | Verbatim list of material-change conditions. |
 | `nonMaterialConditions` | enumerated text | Yes | Verbatim list of non-triggering change classes. |
 | `startingState` | text | Yes | The corrected `@l2` / mocks-`node:child_process` / no-real-Docker premise. |
 
 Validation rules:
 - The section lives in `CONTRIBUTING.md`, not in a generated manifest or runtime store.
-- The governed set is fixed at exactly the three named files for this feature.
+- The governed set is fixed at exactly the two surviving named files for this feature (the RFC/feature-map baseline's third file, `src/hatchery/legate-container.test.ts`, was deleted in #256 — see spec SD-002).
 - The conditions are written so a material/non-material classification is reproducible from the text alone.
 
 ### 2) Governed Legacy L2 Test (referenced, not stored)
@@ -29,12 +29,12 @@ Purpose: One of the three pre-existing vitest files the policy governs.
 
 | Field | Type | Required | Notes |
 |-------|------|----------|-------|
-| `path` | enum path | Yes | `src/spawn/container-launch.test.ts`, `src/spawn/snapshot-build.test.ts`, or `src/hatchery/legate-container.test.ts`. |
+| `path` | enum path | Yes | `src/spawn/container-launch.test.ts` or `src/spawn/snapshot-build.test.ts`. |
 | `tags` | text | Yes | `@l2 @deterministic @ci` (assigned by Feature 1, recorded here). |
 | `mockSurface` | text | Yes | Mocks `node:child_process`; exercises no real Docker. |
 
 Validation rules:
-- Only these three files are governed by this feature.
+- Only these two surviving files are governed by this feature; the baseline's `src/hatchery/legate-container.test.ts` was deleted in #256 and is excluded (spec SD-002).
 - The tag and mock-surface facts are inherited from Feature 1 and recorded, not re-decided.
 
 ### 3) Migration Trigger (decision, not stored)
@@ -53,7 +53,7 @@ Validation rules:
 
 ## Relationships
 
-- A Test Layer Migration Policy references exactly three Governed Legacy L2 Tests.
+- A Test Layer Migration Policy references exactly two Governed Legacy L2 Tests.
 - A Migration Trigger is evaluated against one Governed Legacy L2 Test using the policy's conditions.
 
 ## State Transitions
