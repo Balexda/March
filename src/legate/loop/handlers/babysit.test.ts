@@ -189,6 +189,27 @@ describe("babysit auto-merge gate", () => {
     expect(kindsOf(assess(state))).toEqual(["pr-snapshot", "pr-auto-merge"]);
   });
 
+  it("derives the cut verb from the branch when command is absent (cold-start fold)", () => {
+    // The Herald fold is thin and drops `command`; the gate must still relax via
+    // the fold-durable branch `smithy/cut/…`.
+    const state = allClearState(
+      { human_approval_count: 0 },
+      { command: undefined, branch: "smithy/cut/01-spawn-f3-s6" },
+    );
+    state.mergePolicy = { byTaskType: { cut: { approval: false } } };
+    expect(kindsOf(assess(state))).toEqual(["pr-snapshot", "pr-auto-merge"]);
+  });
+
+  it("derives the cut verb from the sliceId suffix when command and branch are absent", () => {
+    const state = loopState({
+      slices: { "01-spawn-f3-s6-cut": { worker_session_id: "w", stage: "pr-open", pr: { number: 5 } } },
+      sessions: [session("w", "idle")],
+      perSlice: { "01-spawn-f3-s6-cut": { recentOutput: { output: "" }, pr: clearPr({ human_approval_count: 0 }) } },
+    });
+    state.mergePolicy = { byTaskType: { cut: { approval: false } } };
+    expect(kindsOf(assess(state))).toEqual(["pr-snapshot", "pr-auto-merge"]);
+  });
+
   it("does NOT relax a non-cut PR under a cut-only policy", () => {
     const state = allClearState({ human_approval_count: 0 }, { command: "smithy.forge" });
     state.mergePolicy = { byTaskType: { cut: { approval: false } } };

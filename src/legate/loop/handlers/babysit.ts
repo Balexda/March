@@ -132,12 +132,24 @@ function actionKey(action: string, pr: any, extra = ""): string {
   return [action, pr?.number || "", pr?.state || "", pr?.mergeable || "", pr?.checks || "", pr?.head_branch || "", extra].join(":");
 }
 
-/** The smithy verb a slice's `command` names ("smithy.cut" → "cut"), used to key
- *  the per-task-type merge policy. Undefined for non-smithy / unrecognized
- *  commands → resolveMergeRequirements falls back to all-required. */
-function taskTypeFromCommand(command: any): string | undefined {
-  const match = String(command || "").match(/^smithy\.([a-z0-9_-]+)/i);
-  return match ? match[1] : undefined;
+/**
+ * The smithy verb that keys a slice's per-task-type merge policy (e.g. "cut").
+ * Tries, in order, the signals available on a slice — `command` is set at
+ * dispatch on a warm loop, but the Herald fold is deliberately thin and does NOT
+ * carry it, so after a cold-start rebuild we must fall back to the fold-durable
+ * branch (`smithy/<verb>/…`) and the sliceId suffix (`…-<verb>`), both of which
+ * the dispatch-id scheme guarantees. Undefined for non-smithy / unrecognized
+ * shapes → resolveMergeRequirements falls back to all-required.
+ */
+function taskTypeForSlice(sliceId: string, slice: any): string | undefined {
+  const fromCommand = String(slice?.command || "").match(/^smithy\.([a-z0-9_-]+)/i);
+  if (fromCommand) return fromCommand[1].toLowerCase();
+  const branch = String(slice?.actual_branch || slice?.branch || "");
+  const fromBranch = branch.match(/(?:^|\/)smithy\/([a-z0-9_-]+)\//i);
+  if (fromBranch) return fromBranch[1].toLowerCase();
+  const fromId = String(sliceId || "").match(/-(cut|forge|mark|render|fix|strike)$/i);
+  if (fromId) return fromId[1].toLowerCase();
+  return undefined;
 }
 
 function workerErrorRequestKey(sessionId: string, slice: any, recent: any): string {
@@ -510,7 +522,7 @@ function evaluatePr(
     // precondition, enforce the human-review requirements — relaxable per task
     // type by the profile's merge policy (e.g. cut drops the approval gate). An
     // unknown verb / no policy resolves to all-required.
-    const req = resolveMergeRequirements(state.mergePolicy, taskTypeFromCommand(slice.command));
+    const req = resolveMergeRequirements(state.mergePolicy, taskTypeForSlice(sliceId, slice));
     const approvalOk = !req.approval || Number(pr.human_approval_count ?? 0) >= 1;
     const crOk = !req.changesRequested || Number(pr.changes_requested_count ?? 0) === 0;
     if (approvalOk && crOk && pr.head_sha) {
