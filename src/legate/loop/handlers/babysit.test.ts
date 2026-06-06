@@ -153,6 +153,7 @@ describe("babysit auto-merge gate", () => {
     checks: "PASS",
     needs_response_count: 0,
     head_sha: "abc123",
+    merge_state_status: "clean",
     human_approval_count: 0,
     changes_requested_count: 0,
     ...over,
@@ -219,6 +220,13 @@ describe("babysit auto-merge gate", () => {
   it("does NOT auto-merge without a head_sha to pin", () => {
     const state = allClearState({ human_approval_count: 1, head_sha: null });
     expect(kindsOf(assess(state))).toEqual(["pr-snapshot"]);
+  });
+
+  it("does NOT auto-merge unless GitHub's merge state is clean", () => {
+    for (const mss of ["blocked", "behind", "draft", "unstable", "unknown", null]) {
+      const state = allClearState({ human_approval_count: 1, merge_state_status: mss });
+      expect(kindsOf(assess(state))).toEqual(["pr-snapshot"]);
+    }
   });
 
   it("apply pr-auto-merge calls mergePr with the pinned head SHA and marks the slice merged", async () => {

@@ -350,7 +350,7 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
       mergeable: summary.mergeable,
       head_branch: summary.headRefName,
       head_sha: graphql.headRefOid,
-      merge_state_status: graphql.mergeStateStatus,
+      merge_state_status: graphql.mergeStateStatus ? String(graphql.mergeStateStatus).toLowerCase() : null,
       title: summary.title,
       review_decision: summary.reviewDecision,
       checks: checksSummary(summary.statusCheckRollup),

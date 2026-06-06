@@ -246,7 +246,7 @@ describe("queryPrForBabysit", () => {
       state: "OPEN",
       head_branch: "feature/a",
       head_sha: "abc123",
-      merge_state_status: "BLOCKED",
+      merge_state_status: "blocked",
       review_decision: "CHANGES_REQUESTED",
       checks: "FAIL",
       thread_count: 1,

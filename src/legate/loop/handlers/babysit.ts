@@ -525,10 +525,20 @@ function evaluatePr(
     const req = resolveMergeRequirements(state.mergePolicy, taskTypeForSlice(sliceId, slice));
     const approvalOk = !req.approval || Number(pr.human_approval_count ?? 0) >= 1;
     const crOk = !req.changesRequested || Number(pr.changes_requested_count ?? 0) === 0;
-    if (approvalOk && crOk && pr.head_sha) {
-      // Pin the merge to the observed head SHA and dedup on it so a single
-      // (possibly transient-failing) attempt per SHA never hammers `gh pr merge`.
-      const key = actionKey("pr-auto-merge", pr, String(pr.head_sha));
+    // Only attempt the merge when GitHub itself says the button is available
+    // (mergeStateStatus == clean) — this enforces the repo's own branch-protection
+    // rules and avoids dispatching a merge GitHub will reject (DRAFT/BLOCKED/BEHIND).
+    const mergeStateOk = String(pr.merge_state_status || "").toLowerCase() === "clean";
+    if (approvalOk && crOk && mergeStateOk && pr.head_sha) {
+      // Dedup on every gate-relevant dynamic field, not head_sha alone (#283
+      // review): a failed/transient attempt must re-arm if the merge state clears,
+      // an approval is added, or a CR is dismissed without a new push — otherwise
+      // the PR could stay stuck in pr-open until the head SHA changes.
+      const key = actionKey(
+        "pr-auto-merge",
+        pr,
+        [pr.head_sha, pr.merge_state_status, pr.human_approval_count ?? "", pr.changes_requested_count ?? ""].join("|"),
+      );
       if (!alreadyDispatched(slice, key)) {
         out.push({ kind: "pr-auto-merge", sliceId, sessionId, pr, key });
       }
