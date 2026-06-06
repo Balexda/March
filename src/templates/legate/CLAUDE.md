@@ -184,9 +184,10 @@ The CLAUDE.prompt loads skills in this order on every heartbeat:
 1. `legate.resume` — clear any "Resume from summary" pickers before anything else tries to send keystrokes.
 2. `legate.error` — handle opaque worker `error` sessions escalated by the processor or reported by agent-deck.
 3. `legate.babysit` — handle PR judgement escalations from the loop.
-4. `legate.merge` — auto-squash-merge gated PRs from this tick.
 
-The deterministic loop runs beside the Claude agent. It performs terminal PR cleanup, mirrors the deterministic babysit subset, and picks up Smithy new work through Hatchery. Failed CI, persistent conflicts, opaque worker errors, auth blocks, sync failures, and Hatchery dispatch failures are escalated to the Legate agent.
+Auto-squash-merge is **no longer a conductor skill**. The deterministic legate service owns the gated merge: it reads the profile's per-task-type merge policy from Herald and runs `gh pr merge` itself when a `pr-open` slice clears the gate. The conductor never merges.
+
+The deterministic loop runs beside the Claude agent. It performs terminal PR cleanup, the gated auto-merge, mirrors the deterministic babysit subset, and picks up Smithy new work through Hatchery. Failed CI, persistent conflicts, opaque worker errors, auth blocks, sync failures, and Hatchery dispatch failures are escalated to the Legate agent.
 
 `legate.issue` is not in the heartbeat order; it's triggered by operator message.
 

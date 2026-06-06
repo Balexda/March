@@ -20,9 +20,6 @@ src/templates/legate/
     ├── legate.babysit/                 ← PR judgement escalations
     │   ├── SKILL.prompt                ← CI classification, repeated conflicts, send failures
     │   └── scripts/                    ← babysit-pr, send-to-worker, request-rebase, …
-    ├── legate.merge/                   ← auto-squash-merge under a strict gate
-    │   ├── SKILL.prompt                ← gate conditions, per-candidate readiness check, squash-merge
-    │   └── scripts/                    ← check-merge-readiness, squash-merge-pr
     └── legate.issue/                   ← operator-driven GitHub-issue intake
         ├── SKILL.prompt                ← parse → fetch → sync → launch → record protocol
         └── scripts/                    ← fetch-issue, sync-default-branch, launch-issue-worker
@@ -165,7 +162,6 @@ This flips the conductor's auto-mode flag; agent-deck's launcher emits `--permis
       "Skill(legate.resume:*)",
       "Skill(legate.error:*)",
       "Skill(legate.babysit:*)",
-      "Skill(legate.merge:*)",
       "Skill(legate.issue:*)",
       "Read(./**)",
       "Edit(./**)",
@@ -175,8 +171,6 @@ This flips the conductor's auto-mode flag; agent-deck's launcher emits `--permis
       "Bash(.claude/skills/legate.resume/scripts/select-resume-summary.sh *)",
       "Bash(.claude/skills/legate.resume/scripts/nudge-resumed-worker.sh *)",
       "Bash(.claude/skills/legate.babysit/scripts/babysit-pr.sh *)",
-      "Bash(.claude/skills/legate.merge/scripts/check-merge-readiness.sh *)",
-      "Bash(.claude/skills/legate.merge/scripts/squash-merge-pr.sh *)",
       "Bash(.claude/skills/legate.issue/scripts/launch-issue-worker.sh *)",
       "...one Bash(...) entry per deployed script...",
       "Bash(agent-deck * session show *)",

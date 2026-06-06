@@ -25,11 +25,13 @@ import {
 import { CastraClient } from "../../castra/client.js";
 import { ProfileClient } from "../../herald/profiles/client.js";
 import type { ProfileRecord } from "../../herald/profiles/types.js";
+import type { MergePolicy } from "../../herald/profiles/merge-policy.js";
 import { legateStateDir, metaForProfileRecord } from "../profile-paths.js";
 // Decomposed two-stage loop: Stage 1 sense → coordinator (ordered handlers) →
 // heartbeat. runtime now only wires these to the proven I/O seams below.
 import { senseFromHerald, type HeraldInbox } from "./state/sense.js";
 import { createSenseIo } from "../../observe/sense-io.js";
+import { execText } from "./clients/exec.js";
 import { runTick as coordinatorRunTick } from "./coordinator.js";
 import { runHeartbeat } from "./heartbeat.js";
 import { broodRegister as broodRegisterCli, broodTeardown as broodTeardownCli } from "./clients/brood.js";
@@ -79,6 +81,9 @@ interface ProfileRuntime {
   workingState: any;
   /** Latest heartbeat record for this profile (HTTP /status + metric gauges). */
   lastHeartbeat: any;
+  /** The profile's per-task-type merge policy, refreshed from the registry each
+   *  tick (undefined = all merge requirements enforced). */
+  mergePolicy?: MergePolicy;
 }
 
 const runtimes = new Map<string, ProfileRuntime>();
@@ -88,10 +93,11 @@ function runtimeFor(rec: ProfileRecord): ProfileRuntime {
   const meta = metaForProfileRecord(rec, { homeDir, env });
   let rt = runtimes.get(rec.profile);
   if (!rt) {
-    rt = { meta, workingState: null, lastHeartbeat: null };
+    rt = { meta, workingState: null, lastHeartbeat: null, mergePolicy: rec.mergePolicy };
     runtimes.set(rec.profile, rt);
   } else {
     rt.meta = meta; // pick up registry edits (repo path / worker group / …)
+    rt.mergePolicy = rec.mergePolicy; // pick up live merge-policy edits each tick
   }
   return rt;
 }
@@ -190,6 +196,28 @@ async function sendAgentDeckMessage(meta: any, sessionId: string, message: strin
   await castra().sendPrompt({ profile: meta.profile, sessionId, prompt: message, traceKey });
 }
 
+/**
+ * The legate service's auto-merge action: `gh pr merge --squash --match-head-commit`.
+ * `--match-head-commit` pins the merge to the SHA the gate observed, so a worker
+ * push between observe and merge fails cleanly (the gate re-evaluates next tick)
+ * rather than merging an unreviewed commit. Runs in the profile's repo checkout.
+ */
+async function squashMergePr(input: { prNumber: number | string; headSha: string; repoPath?: string }): Promise<{
+  merged: boolean;
+  mergeSha?: string;
+  error?: string;
+}> {
+  const args = ["pr", "merge", String(input.prNumber), "--squash", "--match-head-commit", input.headSha];
+  const options: { cwd?: string } = {};
+  if (input.repoPath) options.cwd = input.repoPath;
+  try {
+    await execText("gh", args, options);
+    return { merged: true };
+  } catch (err: any) {
+    return { merged: false, error: err?.message || String(err) };
+  }
+}
+
 async function sendDoorbellToLegate(meta: any) {
   try {
     await castra().sendPrompt({
@@ -275,6 +303,8 @@ async function tickProfile(rt: ProfileRuntime): Promise<void> {
     sendMessage: (sessionId: string, message: string, traceKey?: string) =>
       sendAgentDeckMessage(meta, sessionId, message, traceKey),
     requestJudgement: (input: any) => requestLegateJudgement(meta, input),
+    mergePr: (input: { prNumber: number | string; headSha: string; repoPath?: string }) =>
+      squashMergePr(input),
   };
 
   const ioDeps = dispatchIoDeps(meta);
@@ -290,7 +320,12 @@ async function tickProfile(rt: ProfileRuntime): Promise<void> {
     requestJudgement: (input: any) => requestLegateJudgement(meta, input),
   };
 
-  const sense = () => senseFromHerald(senseDeps, inbox, rt.workingState);
+  const sense = async () => {
+    const state = await senseFromHerald(senseDeps, inbox, rt.workingState);
+    // Hand the profile's live merge policy to the auto-merge gate (babysit).
+    state.mergePolicy = rt.mergePolicy;
+    return state;
+  };
 
   const out = await coordinatorRunTick({
     sense,

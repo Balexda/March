@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { getDatabaseSync, type HeraldDatabase } from "../service/sqlite.js";
+import { parseMergePolicy } from "./merge-policy.js";
 import type {
   ListProfilesOptions,
   ProfileRecord,
@@ -10,8 +11,9 @@ import type {
   RegisterProfileInput,
 } from "./types.js";
 
-/** Profile-registry schema version. Bumped only on a breaking migration. */
-export const PROFILE_SCHEMA_VERSION = 1;
+/** Profile-registry schema version. Bumped only on a breaking migration.
+ *  v2 added the nullable `merge_policy` TEXT column (per-task-type merge gates). */
+export const PROFILE_SCHEMA_VERSION = 2;
 
 /**
  * Absolute path to the profile-registry sqlite file. Deliberately a SEPARATE
@@ -33,6 +35,7 @@ const COLUMNS = [
   "brood_endpoint",
   "march_cli_path",
   "mode",
+  "merge_policy",
   "status",
   "created_at",
   "updated_at",
@@ -48,6 +51,7 @@ CREATE TABLE IF NOT EXISTS profiles (
   brood_endpoint TEXT,
   march_cli_path TEXT,
   mode           TEXT,
+  merge_policy   TEXT,
   status         TEXT NOT NULL DEFAULT 'active',
   created_at     TEXT NOT NULL,
   updated_at     TEXT NOT NULL
@@ -93,6 +97,8 @@ function rowToRecord(row: SqliteRow): ProfileRecord {
     const value = row[column];
     if (value != null) (record as unknown as Record<string, unknown>)[field] = value;
   }
+  const mergePolicy = parseMergePolicy(row.merge_policy as string | null);
+  if (mergePolicy) (record as unknown as Record<string, unknown>).mergePolicy = mergePolicy;
   return record;
 }
 
@@ -106,6 +112,7 @@ function recordToValues(record: ProfileRecord): Array<string | null> {
     record.broodEndpoint ?? null,
     record.marchCliPath ?? null,
     record.mode ?? null,
+    record.mergePolicy != null ? JSON.stringify(record.mergePolicy) : null,
     record.status,
     record.createdAt,
     record.updatedAt,
@@ -141,11 +148,31 @@ export class ProfileStore {
       .prepare("SELECT version FROM profile_schema_meta LIMIT 1")
       .get() as { version?: number } | undefined;
     if (row?.version === undefined) {
+      // Fresh DB: CREATE_TABLE_SQL already includes every column, so just stamp
+      // the current version.
       this.db
         .prepare("INSERT INTO profile_schema_meta (version) VALUES (?)")
         .run(PROFILE_SCHEMA_VERSION);
+      return;
+    }
+
+    // v1 → v2: add the `merge_policy` column. CREATE_TABLE_SQL above is a no-op
+    // on an existing table, so an old DB still lacks the column — add it with an
+    // `ALTER` guarded by a column-existence check (a fresh DB created from the
+    // current CREATE_TABLE_SQL already has it, and an unguarded ALTER would throw
+    // "duplicate column name").
+    if (row.version < 2) {
+      if (!this.hasColumn("profiles", "merge_policy")) {
+        this.db.exec("ALTER TABLE profiles ADD COLUMN merge_policy TEXT;");
+      }
+      this.db.prepare("UPDATE profile_schema_meta SET version = ?").run(2);
     }
     // Future breaking changes branch on `row.version` here.
+  }
+
+  private hasColumn(table: string, column: string): boolean {
+    const cols = this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+    return cols.some((c) => c.name === column);
   }
 
   /** Register a profile, or merge new fields into an existing one (idempotent). */
@@ -161,6 +188,9 @@ export class ProfileStore {
       broodEndpoint: input.broodEndpoint ?? existing?.broodEndpoint,
       marchCliPath: input.marchCliPath ?? existing?.marchCliPath,
       mode: input.mode ?? existing?.mode,
+      // Preserve an existing policy when a plain re-register (e.g. `march legate
+      // init`) omits it; an explicit policy on the input replaces it.
+      mergePolicy: input.mergePolicy ?? existing?.mergePolicy,
       // A re-register defaults to reactivating (status omitted → active), so
       // `march legate init` on a previously-removed profile brings it back.
       status: input.status ?? "active",

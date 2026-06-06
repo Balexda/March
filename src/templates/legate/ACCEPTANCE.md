@@ -82,16 +82,18 @@ The shorthand `<conductor-dir>` means `~/.agent-deck/conductor/<conductor-name>/
 - Verify: a slice in `pr-in-fix` with `last_author == pr_author` should NOT be re-dispatched mid-fix-cycle; the override only applies to `pr-open` slices where reviewer ≡ operator ≡ worker identity.
 - Failure: catching `pr-in-fix` slices in the override causes mid-flight fix-loop interruption.
 
-## E. Merge gating (`legate.merge`)
+## E. Merge gating (deterministic legate service)
 
-**E1. Auto-merge only fires when every gate condition is satisfied.**
-- Required: `checks == "PASS"` AND `mergeable == "MERGEABLE"` AND `mergeStateStatus == "clean"` AND `≥1 human approval` AND `0 outstanding CHANGES_REQUESTED`.
-- Verify: run `check-merge-readiness.sh <repo> <pr>` against a candidate PR. Output JSON shows each gate; merge dispatches only when all pass.
-- Failure: an auto-merge on a PR missing a human approval is a permission-bypass class bug — escalate via `NEED:` instead.
+The auto-squash-merge gate lives in the legate *service* (`src/legate/loop/handlers/babysit.ts`), not a conductor skill — it has Herald access and reads the profile's per-task-type merge policy.
 
-**E2. Babysit never calls `gh pr merge`.**
-- Verify: grep `<conductor-dir>/.claude/skills/legate.babysit/` for `gh pr merge` — should return no results. Only `legate.merge/scripts/squash-merge-pr.sh` is allowed to merge.
-- Failure: if babysit gains merge authority, the strict gate is bypassed.
+**E1. Auto-merge only fires when every effective gate condition is satisfied.**
+- Required (precondition): `checks == "PASS"` AND `mergeable != "CONFLICTING"` AND `needs_response_count == 0`. Plus the human-review gates — `≥1 human approval` AND `0 outstanding CHANGES_REQUESTED` — *unless relaxed* for the slice's task type by the profile's merge policy.
+- Verify: with a profile whose policy drops `approval` for `cut`, a `cut` PR that is all-clear with zero approvals auto-merges; a non-`cut` PR in the same state does not (it waits for an approval).
+- Failure: an auto-merge on a PR whose *effective* requirements aren't met is a permission-bypass class bug.
+
+**E2. The conductor never calls `gh pr merge`.**
+- Verify: grep `<conductor-dir>/.claude/skills/` for `gh pr merge` — should return no results (the `legate.merge` skill is retired). Only the legate service merges.
+- Failure: if a conductor skill gains merge authority, the gate is bypassed and double-merge becomes possible.
 
 ## F. Cleanup (deterministic loop)
 

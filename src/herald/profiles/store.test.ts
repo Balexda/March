@@ -1,5 +1,8 @@
-import { describe, expect, it } from "vitest";
-import { sqliteAvailable } from "../service/sqlite.js";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
+import { getDatabaseSync, sqliteAvailable } from "../service/sqlite.js";
 import { ProfileStore } from "./store.js";
 import type { RegisterProfileInput } from "./types.js";
 
@@ -73,5 +76,92 @@ describe.skipIf(!sqliteAvailable)("ProfileStore", () => {
     const store = makeStore();
     expect(store.remove("ghost")).toBeUndefined();
     store.close();
+  });
+
+  it("round-trips a merge policy through register/get", () => {
+    const store = makeStore();
+    const policy = { byTaskType: { cut: { approval: false } } };
+    const rec = store.register(input({ mergePolicy: policy }));
+    expect(rec.mergePolicy).toEqual(policy);
+    expect(store.get("march")?.mergePolicy).toEqual(policy);
+    store.close();
+  });
+
+  it("a profile without a policy reads back as undefined (all-required)", () => {
+    const store = makeStore();
+    store.register(input());
+    expect(store.get("march")?.mergePolicy).toBeUndefined();
+    store.close();
+  });
+
+  it("a plain re-register preserves an existing merge policy", () => {
+    const store = makeStore();
+    const policy = { byTaskType: { cut: { approval: false } } };
+    store.register(input({ mergePolicy: policy }));
+    // Re-register without a policy (the `march legate init` shape).
+    const back = store.register(input({ workerGroup: "renamed" }));
+    expect(back.workerGroup).toBe("renamed");
+    expect(back.mergePolicy).toEqual(policy);
+    store.close();
+  });
+});
+
+describe.skipIf(!sqliteAvailable)("ProfileStore migration", () => {
+  const tmpDirs: string[] = [];
+  afterEach(() => {
+    for (const dir of tmpDirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  function v1DbPath(): string {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "profiles-mig-"));
+    tmpDirs.push(dir);
+    const dbPath = path.join(dir, "profiles.db");
+    const DatabaseSync = getDatabaseSync();
+    const db = new DatabaseSync(dbPath);
+    // Recreate the v1 schema: no merge_policy column, version pinned to 1.
+    db.exec(`
+      CREATE TABLE profiles (
+        profile        TEXT PRIMARY KEY,
+        repo_name      TEXT NOT NULL,
+        repo_path      TEXT NOT NULL,
+        worker_group   TEXT NOT NULL,
+        conductor_name TEXT,
+        brood_endpoint TEXT,
+        march_cli_path TEXT,
+        mode           TEXT,
+        status         TEXT NOT NULL DEFAULT 'active',
+        created_at     TEXT NOT NULL,
+        updated_at     TEXT NOT NULL
+      );
+      CREATE TABLE profile_schema_meta (version INTEGER NOT NULL);
+      INSERT INTO profile_schema_meta (version) VALUES (1);
+      INSERT INTO profiles (profile, repo_name, repo_path, worker_group, status, created_at, updated_at)
+        VALUES ('legacy', 'Legacy', '/legacy', 'legacy-workers', 'active', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');
+    `);
+    db.close();
+    return dbPath;
+  }
+
+  it("upgrades a v1 DB: adds merge_policy, preserves existing rows", () => {
+    const dbPath = v1DbPath();
+    const store = new ProfileStore({ dbPath });
+    const legacy = store.get("legacy");
+    expect(legacy?.repoName).toBe("Legacy");
+    expect(legacy?.mergePolicy).toBeUndefined();
+    // The new column is writable post-migration.
+    const policy = { byTaskType: { cut: { approval: false } } };
+    store.register({
+      profile: "legacy",
+      repoName: "Legacy",
+      repoPath: "/legacy",
+      workerGroup: "legacy-workers",
+      mergePolicy: policy,
+    });
+    expect(store.get("legacy")?.mergePolicy).toEqual(policy);
+    store.close();
+    // Re-opening the same file is a no-op migration (version already 2).
+    const reopened = new ProfileStore({ dbPath });
+    expect(reopened.get("legacy")?.mergePolicy).toEqual(policy);
+    reopened.close();
   });
 });

@@ -4,10 +4,10 @@ You run under Claude Code's `--permission-mode auto`. The classifier evaluates e
 
 ### Tool calls the loop produces (the audited, pre-approved set)
 
-- The five legate skills' scripts (`.claude/skills/legate.resume/scripts/<each>.sh`, `.claude/skills/legate.error/scripts/<each>.sh`, `.claude/skills/legate.babysit/scripts/<each>.sh`, `.claude/skills/legate.merge/scripts/<each>.sh`, `.claude/skills/legate.issue/scripts/<each>.sh`) — see each `SKILL.prompt` for the operation reference.
+- The four legate skills' scripts (`.claude/skills/legate.resume/scripts/<each>.sh`, `.claude/skills/legate.error/scripts/<each>.sh`, `.claude/skills/legate.babysit/scripts/<each>.sh`, `.claude/skills/legate.issue/scripts/<each>.sh`) — see each `SKILL.prompt` for the operation reference. (Auto-squash-merge is owned by the deterministic legate service, not a conductor skill.)
 - `Read(state.json)`, `Read(task-log.md)`, `Read(LEARNINGS.md)`, `Read(POLICY.md)`, `Read(meta.json)`, `Read(CLAUDE.md)`, `Read(.claude/skills/<skill>/SKILL.md)` — your own state and the deployed skill files.
 - `Edit(LEARNINGS.md)` for operator-curated notes and `Write(...)` for per-action message files such as `fix-msg-<slice-id>.md` / `resume-msg-<slice-id>.md`. Routine `state.json` and `task-log.md` writes are owned by the deterministic loop.
-- `Skill(legate.resume)` / `Skill(legate.error)` / `Skill(legate.babysit)` / `Skill(legate.merge)` / `Skill(legate.issue)` — load the skill before invoking its scripts.
+- `Skill(legate.resume)` / `Skill(legate.error)` / `Skill(legate.babysit)` / `Skill(legate.issue)` — load the skill before invoking its scripts.
 
 These scripts are committed, audited, and idempotent. Treat them as part of the system, not as bash you compose on the fly.
 
@@ -51,6 +51,6 @@ The wrong form is one Bash call whose body contains `&` and `wait`. The classifi
 
 When you start a fresh session (after `march legate init` or `agent-deck session restart`), confirm alignment in your first reply:
 
-> "Online for {{REPO_NAME}} ({{PROFILE}}). Skills available: legate.resume, legate.error, legate.babysit, legate.merge, legate.issue. Will not invoke anything outside their scripts without escalating."
+> "Online for {{REPO_NAME}} ({{PROFILE}}). Skills available: legate.resume, legate.error, legate.babysit, legate.issue. Will not invoke anything outside their scripts without escalating."
 
 This primes the classifier with explicit alignment context for the rest of the session.

@@ -9,6 +9,8 @@
  * service" without untangling it from the event log.
  */
 
+import type { MergePolicy } from "./merge-policy.js";
+
 /** Lifecycle status. `removed` is a soft-delete: the observer/legate stop
  *  iterating it, but its event history stays foldable. */
 export type ProfileStatus = "active" | "removed";
@@ -27,6 +29,8 @@ export interface ProfileRecord {
   /** Path to the march CLI on the host (null = resolve from PATH). */
   readonly marchCliPath?: string | null;
   readonly mode?: string;
+  /** Per-task-type override of the human-review merge gates (undefined = all required). */
+  readonly mergePolicy?: MergePolicy;
   readonly status: ProfileStatus;
   readonly createdAt: string;
   readonly updatedAt: string;
@@ -42,6 +46,7 @@ export interface RegisterProfileInput {
   readonly broodEndpoint?: string | null;
   readonly marchCliPath?: string | null;
   readonly mode?: string;
+  readonly mergePolicy?: MergePolicy;
   readonly status?: ProfileStatus;
 }
 

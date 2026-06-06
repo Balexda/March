@@ -2,6 +2,7 @@ import type { HandlerContext, HandlerResult, LoopState } from "../state/types.js
 import { emptyHandlerResult } from "../state/types.js";
 import { prNumber, workerBySessionId } from "../pure/session.js";
 import { hashText } from "../pure/hash.js";
+import { resolveMergeRequirements } from "../../../herald/profiles/merge-policy.js";
 import {
   conflictMessage,
   failedChecksSummary,
@@ -92,6 +93,16 @@ export interface BabysitDeps {
   sendMessage: (sessionId: string, message: string, traceKey?: string) => Promise<void>;
   /** Append + doorbell a judgement request; resolves to the event, or null if deduped. */
   requestJudgement: (input: JudgementInput) => Promise<any | null>;
+  /**
+   * Squash-merge a gated PR (`gh pr merge --squash --match-head-commit`). Optional
+   * so handlers/tests that never auto-merge can omit it; a `pr-auto-merge` decision
+   * with no `mergePr` seam escalates to the operator instead of merging.
+   */
+  mergePr?: (input: { prNumber: number | string; headSha: string; repoPath?: string }) => Promise<{
+    merged: boolean;
+    mergeSha?: string;
+    error?: string;
+  }>;
 }
 
 export type BabysitDecision =
@@ -112,12 +123,21 @@ export type BabysitDecision =
   | { kind: "review-fix"; sliceId: string; sessionId: string; pr: any; key: string; message: string; detail: string; threadIds: string[]; commentIds: string[] }
   | { kind: "review-fix-exhausted"; sliceId: string; sessionId: string; pr: any; requestKey: string; reason: string; detail: string; commentIds: string[] }
   | { kind: "ci-failure"; sliceId: string; sessionId: string; pr: any; requestKey: string; detail: string }
-  | { kind: "pr-open-clear"; sliceId: string; sessionId: string; pr: any };
+  | { kind: "pr-open-clear"; sliceId: string; sessionId: string; pr: any }
+  | { kind: "pr-auto-merge"; sliceId: string; sessionId: string; pr: any; key: string };
 
 // ---- pure helpers ---------------------------------------------------------
 
 function actionKey(action: string, pr: any, extra = ""): string {
   return [action, pr?.number || "", pr?.state || "", pr?.mergeable || "", pr?.checks || "", pr?.head_branch || "", extra].join(":");
+}
+
+/** The smithy verb a slice's `command` names ("smithy.cut" → "cut"), used to key
+ *  the per-task-type merge policy. Undefined for non-smithy / unrecognized
+ *  commands → resolveMergeRequirements falls back to all-required. */
+function taskTypeFromCommand(command: any): string | undefined {
+  const match = String(command || "").match(/^smithy\.([a-z0-9_-]+)/i);
+  return match ? match[1] : undefined;
 }
 
 function workerErrorRequestKey(sessionId: string, slice: any, recent: any): string {
@@ -481,8 +501,25 @@ function evaluatePr(
   }
 
   if (pr.checks === "PASS" && pr.needs_response_count === 0 && pr.mergeable !== "CONFLICTING") {
+    // Record the one-time transition into the all-clear `pr-open` stage (the loop
+    // confirmed CI/threads/conflicts). This happens regardless of the merge gate.
     if (TERMINAL_RESET_STAGES.includes(slice.stage)) {
       out.push({ kind: "pr-open-clear", sliceId, sessionId, pr });
+    }
+    // Auto-merge gate (#merge-requirements-by-type): on top of the all-clear
+    // precondition, enforce the human-review requirements — relaxable per task
+    // type by the profile's merge policy (e.g. cut drops the approval gate). An
+    // unknown verb / no policy resolves to all-required.
+    const req = resolveMergeRequirements(state.mergePolicy, taskTypeFromCommand(slice.command));
+    const approvalOk = !req.approval || Number(pr.human_approval_count ?? 0) >= 1;
+    const crOk = !req.changesRequested || Number(pr.changes_requested_count ?? 0) === 0;
+    if (approvalOk && crOk && pr.head_sha) {
+      // Pin the merge to the observed head SHA and dedup on it so a single
+      // (possibly transient-failing) attempt per SHA never hammers `gh pr merge`.
+      const key = actionKey("pr-auto-merge", pr, String(pr.head_sha));
+      if (!alreadyDispatched(slice, key)) {
+        out.push({ kind: "pr-auto-merge", sliceId, sessionId, pr, key });
+      }
     }
     return;
   }
@@ -700,6 +737,39 @@ export async function apply(decisions: BabysitDecision[], ctx: HandlerContext, s
         res.actions.push({ action: "pr-open", sliceId: d.sliceId, sessionId: d.sessionId, pr: d.pr, detail: "observed PR all clear" });
         res.mutated = true;
         break;
+      case "pr-auto-merge": {
+        if (!deps.mergePr) {
+          // No merge seam wired — surface it rather than silently stalling.
+          await fireRequest({ ts, slice, requestKey: actionKey("auto-merge-unconfigured", d.pr, String(d.pr.head_sha)), sliceId: d.sliceId, sessionId: d.sessionId, pr: d.pr, reason: "auto_merge_unconfigured", detail: `PR #${d.pr.number} cleared the merge gate but no merge seam is configured.` });
+          break;
+        }
+        // Mark BEFORE awaiting so a failed/transient attempt isn't retried against
+        // the same head SHA every tick (dedup key includes head_sha). A new worker
+        // push changes the SHA → a fresh key → a fresh attempt.
+        mark(slice, "pr-auto-merge", d.key, `auto-merging PR #${d.pr.number} (squash, sha=${d.pr.head_sha})`, ts);
+        let result: { merged: boolean; mergeSha?: string; error?: string };
+        try {
+          result = await deps.mergePr({ prNumber: d.pr.number, headSha: String(d.pr.head_sha), repoPath: state.repoPath });
+        } catch (err: any) {
+          result = { merged: false, error: err?.message || String(err) };
+        }
+        if (result.merged) {
+          slice.stage = "merged";
+          if (slice.pr) slice.pr.state = "MERGED";
+          slice.last_action_note = `merged via legate auto-merge — squash, sha=${result.mergeSha || d.pr.head_sha}`;
+          ctx.emitTransition?.({ type: "slice.stage.changed", sliceId: d.sliceId, stage: "merged" });
+          res.actions.push({ action: "pr-auto-merge", sliceId: d.sliceId, sessionId: d.sessionId, pr: d.pr, detail: `squash-merged PR #${d.pr.number} (sha=${result.mergeSha || d.pr.head_sha})` });
+          res.mutated = true;
+        } else {
+          // Merge failed (head-SHA race, transient gh error, repo rule). Leave the
+          // slice at pr-open and escalate; cleanup will sweep it if it actually
+          // merged out-of-band, the gate re-evaluates next tick otherwise.
+          slice.last_action_note = `auto-merge failed: ${result.error || "unknown error"}`;
+          await fireRequest({ ts, slice, requestKey: actionKey("auto-merge-failed", d.pr, String(d.pr.head_sha)), sliceId: d.sliceId, sessionId: d.sessionId, pr: d.pr, reason: "auto_merge_failed", detail: `auto-merge of PR #${d.pr.number} failed: ${result.error || "unknown error"}` });
+          res.mutated = true;
+        }
+        break;
+      }
     }
   }
 

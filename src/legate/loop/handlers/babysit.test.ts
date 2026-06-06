@@ -144,6 +144,95 @@ describe("babysit assess", () => {
   });
 });
 
+describe("babysit auto-merge gate", () => {
+  const clearPr = (over: Record<string, unknown> = {}) => ({
+    number: 5,
+    url: "u",
+    state: "OPEN",
+    mergeable: "MERGEABLE",
+    checks: "PASS",
+    needs_response_count: 0,
+    head_sha: "abc123",
+    human_approval_count: 0,
+    changes_requested_count: 0,
+    ...over,
+  });
+  const allClearState = (over: Record<string, unknown> = {}, sliceOver: Record<string, unknown> = {}) =>
+    loopState({
+      slices: { s: { worker_session_id: "w", stage: "pr-open", pr: { number: 5 }, command: "smithy.forge", ...sliceOver } },
+      sessions: [session("w", "idle")],
+      perSlice: { s: { recentOutput: { output: "" }, pr: clearPr(over) } },
+    });
+
+  it("auto-merges an all-clear PR that has a human approval (default policy)", () => {
+    const state = allClearState({ human_approval_count: 1 });
+    const ds = assess(state);
+    expect(kindsOf(ds)).toEqual(["pr-snapshot", "pr-auto-merge"]);
+  });
+
+  it("does NOT auto-merge an all-clear PR with zero approvals (default requires approval)", () => {
+    const state = allClearState({ human_approval_count: 0 });
+    expect(kindsOf(assess(state))).toEqual(["pr-snapshot"]);
+  });
+
+  it("does NOT auto-merge when an approval exists but a change is requested (default)", () => {
+    const state = allClearState({ human_approval_count: 1, changes_requested_count: 1 });
+    expect(kindsOf(assess(state))).toEqual(["pr-snapshot"]);
+  });
+
+  it("auto-merges a cut PR with zero approvals when the policy relaxes approval for cut", () => {
+    const state = allClearState(
+      { human_approval_count: 0 },
+      { command: "smithy.cut" },
+    );
+    state.mergePolicy = { byTaskType: { cut: { approval: false } } };
+    expect(kindsOf(assess(state))).toEqual(["pr-snapshot", "pr-auto-merge"]);
+  });
+
+  it("does NOT relax a non-cut PR under a cut-only policy", () => {
+    const state = allClearState({ human_approval_count: 0 }, { command: "smithy.forge" });
+    state.mergePolicy = { byTaskType: { cut: { approval: false } } };
+    expect(kindsOf(assess(state))).toEqual(["pr-snapshot"]);
+  });
+
+  it("does NOT auto-merge without a head_sha to pin", () => {
+    const state = allClearState({ human_approval_count: 1, head_sha: null });
+    expect(kindsOf(assess(state))).toEqual(["pr-snapshot"]);
+  });
+
+  it("apply pr-auto-merge calls mergePr with the pinned head SHA and marks the slice merged", async () => {
+    const slice = { worker_session_id: "w", stage: "pr-open", pr: { number: 5 }, command: "smithy.cut" };
+    const state = loopState({ slices: { s: slice } });
+    const mergePr = vi.fn(async () => ({ merged: true, mergeSha: "deadbeef" }));
+    const d: BabysitDecision = { kind: "pr-auto-merge", sliceId: "s", sessionId: "w", pr: { number: 5, url: "u", head_sha: "abc123" }, key: "k" };
+    const res = await apply([d], ctx(), state, deps({ mergePr }));
+    expect(mergePr).toHaveBeenCalledWith({ prNumber: 5, headSha: "abc123", repoPath: "/repo" });
+    expect((state.slices.s as any).stage).toBe("merged");
+    expect((state.slices.s as any).pr.state).toBe("MERGED");
+    expect(res.actions.map((a) => a.action)).toContain("pr-auto-merge");
+  });
+
+  it("apply pr-auto-merge escalates and does not advance stage when the merge fails", async () => {
+    const slice = { worker_session_id: "w", stage: "pr-open", pr: { number: 5 }, command: "smithy.cut" };
+    const state = loopState({ slices: { s: slice } });
+    const mergePr = vi.fn(async () => ({ merged: false, error: "head sha mismatch" }));
+    const requestJudgement = vi.fn(async (input) => ({ kind: "processor_request", ...input }));
+    const d: BabysitDecision = { kind: "pr-auto-merge", sliceId: "s", sessionId: "w", pr: { number: 5, url: "u", head_sha: "abc123" }, key: "k" };
+    await apply([d], ctx(), state, deps({ mergePr, requestJudgement }));
+    expect((state.slices.s as any).stage).toBe("pr-open");
+    expect(requestJudgement).toHaveBeenCalledWith(expect.objectContaining({ reason: "auto_merge_failed" }));
+  });
+
+  it("apply pr-auto-merge escalates when no merge seam is configured", async () => {
+    const slice = { worker_session_id: "w", stage: "pr-open", pr: { number: 5 } };
+    const state = loopState({ slices: { s: slice } });
+    const requestJudgement = vi.fn(async (input) => ({ kind: "processor_request", ...input }));
+    const d: BabysitDecision = { kind: "pr-auto-merge", sliceId: "s", sessionId: "w", pr: { number: 5, url: "u", head_sha: "abc123" }, key: "k" };
+    await apply([d], ctx(), state, deps({ mergePr: undefined, requestJudgement }));
+    expect(requestJudgement).toHaveBeenCalledWith(expect.objectContaining({ reason: "auto_merge_unconfigured" }));
+  });
+});
+
 describe("babysit apply", () => {
   it("conflict-fix sends the prompt, advances stage, records the action", async () => {
     const slice = { worker_session_id: "w", stage: "pr-open", pr: { number: 5 } };
