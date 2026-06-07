@@ -18,6 +18,17 @@ export interface ObserverDeps {
   /** The profile being observed this tick — events are stamped with it and the
    *  `prev` projection is read from its bucket. */
   readonly profile: string;
+  /**
+   * Default-branch git sync for this profile (#300). Herald owns the sync, so it
+   * fetches + fast-forwards origin's default branch BEFORE reading `smithy status`
+   * — that is what makes freshly-merged work (e.g. a merged cut's `tasks.md`)
+   * surface in the next observation. Wired by the server ONLY when Herald is in
+   * sync mode (`MARCH_HERALD_SYNC=1`); `undefined` in read-only mode, where the
+   * observation runs against the local checkout as-is. A failure is logged +
+   * isolated (never fatal to the tick) so one diverged/offline repo can't stall
+   * the others.
+   */
+  readonly syncDefaultBranch?: (repoPath: string, knownDefault?: string) => Promise<void>;
 }
 
 export interface ObserveResult {
@@ -134,8 +145,37 @@ export function describeChangeSpan(
  * rather than reading the legate's `state.json` — {@link senseObserved} takes the
  * projection and reads the live PR/output for each non-terminal slice.
  */
+/**
+ * Run this profile's default-branch sync before the observation read (#300),
+ * when Herald is in sync mode (`deps.syncDefaultBranch` wired). The sync is
+ * best-effort: a failure (gh outage, diverged local that won't fast-forward) is
+ * logged through the sense warn sink and swallowed so the tick still observes the
+ * local checkout, and one repo's sync failure can't stall the profile or block
+ * the others. No-op when sync is disabled or the repo path is unknown.
+ */
+async function syncDefaultBranchBeforeObserve(deps: ObserverDeps): Promise<void> {
+  if (!deps.syncDefaultBranch) return;
+  const repoPath = deps.senseDeps.meta.repo?.path;
+  if (typeof repoPath !== "string" || repoPath.length === 0) return;
+  try {
+    await deps.syncDefaultBranch(repoPath);
+  } catch (err) {
+    deps.senseDeps.warn?.(
+      `default-branch sync failed for ${deps.profile}: ` +
+        (err instanceof Error ? err.message : String(err)) +
+        " — observing against stale local repo",
+    );
+  }
+}
+
 export async function runObservation(deps: ObserverDeps): Promise<ObserveResult> {
   const prev = deps.store.projectionFor(deps.profile);
+  // Herald owns the default-branch sync (#300): pull origin's default branch
+  // BEFORE the read so a freshly auto-merged cut's `tasks.md` surfaces in this
+  // tick's `smithy status` (rather than drifting behind until an operator pulls).
+  // Wired only in sync mode; a sync failure is logged + isolated so it can never
+  // stall the observation or the other profiles' ticks.
+  await syncDefaultBranchBeforeObserve(deps);
   const started = Date.now();
   try {
     const loop = await senseObserved(deps.senseDeps, prev);

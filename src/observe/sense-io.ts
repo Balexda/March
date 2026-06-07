@@ -39,8 +39,10 @@ export interface SyncResult {
 /**
  * The shared observation I/O bundle. The legate loop uses {@link toSenseDeps}
  * for Stage 1 and calls {@link listSessions} / {@link queryPrForBabysit} /
- * {@link prMatchesSliceBranch} / {@link syncDefaultBranch} directly from its
- * dispatch/recovery paths; Herald uses {@link toSenseDeps} to feed `senseObserved`.
+ * {@link prMatchesSliceBranch} directly from its dispatch/recovery paths. Herald
+ * uses {@link toSenseDeps} to feed `senseObserved` AND calls {@link
+ * syncDefaultBranch} from its observe path — Herald owns the default-branch git
+ * sync (`MARCH_HERALD_SYNC`, #300), so the sync is no longer part of SenseDeps.
  */
 export interface SenseIo {
   listSessions(): Promise<any[] | { error: string }>;
@@ -481,9 +483,9 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
       meta,
       now,
       listSessions: () => listSessions(),
-      syncDefaultBranch: async (repoPath: string, knownDefault?: string) => {
-        await syncDefaultBranch({ repo: { path: repoPath, default_branch: knownDefault } });
-      },
+      // The default-branch git sync is NOT part of the injected SenseDeps anymore
+      // (#300): Herald owns it and calls the bundle's `syncDefaultBranch` directly
+      // from its observe path; the legate never syncs.
       readSmithyStatus: (repoPath: string) => readSmithyStatus(repoPath),
       queryPr: (slice: any, state: any) => queryPrForBabysit(slice, state),
       discoverPr: (slice: any, state: any, _repoPath: string | undefined, sessionId: string) =>

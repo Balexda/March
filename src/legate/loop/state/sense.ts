@@ -27,8 +27,6 @@ export interface SenseDeps {
   readonly now: () => string;
   /** Castra session list, mapped to agent-deck-shaped objects (or `{error}`). */
   readonly listSessions: () => Promise<any[] | { error: string }>;
-  /** Best-effort default-branch sync before reading smithy (keeps status fresh). */
-  readonly syncDefaultBranch: (repoPath: string, knownDefault?: string) => Promise<void>;
   readonly readSmithyStatus: (repoPath: string) => Promise<any>;
   /** Per-slice PR state (queryPrForBabysit) for an active slice. */
   readonly queryPr: (slice: any, state: any, repoPath: string | undefined) => Promise<any>;
@@ -36,29 +34,23 @@ export interface SenseDeps {
   readonly discoverPr?: (slice: any, state: any, repoPath: string | undefined, sessionId: string) => Promise<any>;
   /** Recent session output for login/error detection. */
   readonly sessionOutput: (sessionId: string) => Promise<{ output: string; error?: string }>;
-  /** Sink for non-fatal sync/sense warnings (so they surface in the action log). */
+  /** Sink for non-fatal sense warnings (so they surface in the action log). */
   readonly warn?: (message: string) => void;
 }
 
+/**
+ * Read the smithy graph for the local checkout. This is a pure READ — neither
+ * the legate nor Herald syncs here. Herald owns the default-branch git sync and
+ * performs it in its observe path before this read (#300); the legate never
+ * fetches, so it can't fight Herald.
+ */
 async function senseSmithy(
   deps: SenseDeps,
   state: any,
   repoPath: string | undefined,
-  opts: { sync?: boolean } = {},
 ): Promise<SmithyView> {
   if (typeof repoPath !== "string" || repoPath.length === 0) {
     return { ok: false, error: "repo path is missing", ready: [], queue: { dispatchable: 0, blocked: 0, total: 0 } };
-  }
-  // The legate's Herald sense path passes `sync:false` — Herald owns the
-  // default-branch sync (`MARCH_HERALD_SYNC=1`), so the legate must not also
-  // fetch and fight it. Herald's own observe path syncs (its `syncDefaultBranch`
-  // is itself the no-op when read-only), so it leaves the default (true).
-  if (opts.sync !== false) {
-    try {
-      await deps.syncDefaultBranch(repoPath, state?.repo?.default_branch);
-    } catch (err: any) {
-      deps.warn?.("sync warning: " + (err?.message || String(err)) + " — proceeding against stale local repo");
-    }
   }
   let status: any;
   try {
@@ -288,7 +280,7 @@ export async function senseFromHerald(deps: SenseDeps, herald: HeraldInbox, prev
     sessions,
     sessionsById,
     workers,
-    smithy: await senseSmithy(deps, raw, repoPath, { sync: false }),
+    smithy: await senseSmithy(deps, raw, repoPath),
     perSlice,
     // Operator recovery requests drained this tick (#238) — the recovery handler
     // reconciles `raw` for these so the still-ready smithy work re-dispatches.
@@ -334,9 +326,10 @@ export function resolveSliceSession(
  * transition events) instead of reading the legate's `state.json`. For every
  * non-terminal slice with a live worker session it reads the PR/CI/review state
  * and recent session output — the per-slice surface the legate then drains from
- * the inbox. The world reads (sessions, workers, smithy) are unchanged; the git
- * sync runs through `deps.syncDefaultBranch`, itself a no-op unless Herald is in
- * sync mode.
+ * the inbox. The world reads (sessions, workers, smithy) are pure reads here;
+ * the default-branch git sync that keeps the local checkout fresh is owned by
+ * Herald's observe path (`runObservation`, gated by `MARCH_HERALD_SYNC`) and
+ * runs BEFORE this read, not inside it (#300).
  */
 export async function senseObserved(deps: SenseDeps, prev: SystemState): Promise<LoopState> {
   const ts = deps.now();

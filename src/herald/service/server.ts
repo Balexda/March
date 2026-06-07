@@ -9,7 +9,7 @@ import {
   recordHeraldObserveError,
   startHeraldHeartbeat,
 } from "../../observability/herald-metrics.js";
-import { buildSenseIo } from "../../observe/sense-io.js";
+import { createSenseIo } from "../../observe/sense-io.js";
 import { loadMeta, resolveIntervalSeconds, type LoopMeta } from "../../legate/loop/meta.js";
 import type { SenseDeps } from "../../legate/loop/state/sense.js";
 import { resolveHeraldPort } from "../config.js";
@@ -105,16 +105,34 @@ function syncEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
   return (env.MARCH_HERALD_SYNC ?? "").trim() === "1";
 }
 
-/** Build the observe sense deps; in read-only mode the git sync is a no-op. */
-function buildObserveSenseDeps(meta: LoopMeta, app: FastifyInstance): SenseDeps {
-  const deps = buildSenseIo({
+/** A profile's observe deps: the read-only {@link SenseDeps} plus the optional
+ *  Herald-owned default-branch sync (#300, wired only in sync mode). */
+interface ObserveDeps {
+  readonly senseDeps: SenseDeps;
+  readonly syncDefaultBranch?: (repoPath: string, knownDefault?: string) => Promise<void>;
+}
+
+/**
+ * Build a profile's observe deps. `senseDeps` is always a pure read. The
+ * default-branch sync is attached ONLY when Herald owns it (`MARCH_HERALD_SYNC=1`,
+ * #300): the observer fetches + fast-forwards origin's default branch before each
+ * read so freshly-merged work surfaces. In read-only mode `syncDefaultBranch` is
+ * undefined — Herald never runs `git fetch/switch/pull` (it must not fight a
+ * still-polling legate) and reads the local repo as-is.
+ */
+function buildObserveDeps(meta: LoopMeta, app: FastifyInstance): ObserveDeps {
+  const io = createSenseIo({
     meta,
     warn: (message: string) => app.log.warn({ component: "observe" }, message),
   });
-  if (syncEnabled()) return deps;
-  // Read-only: never run `git fetch/switch/pull` (it must not fight a still-
-  // polling legate). Smithy is read against the local repo as-is.
-  return { ...deps, syncDefaultBranch: async () => {} };
+  const senseDeps = io.toSenseDeps();
+  if (!syncEnabled()) return { senseDeps };
+  return {
+    senseDeps,
+    syncDefaultBranch: async (repoPath: string, knownDefault?: string) => {
+      await io.syncDefaultBranch({ repo: { path: repoPath, default_branch: knownDefault } });
+    },
+  };
 }
 
 export interface StartServerOptions {
@@ -182,8 +200,8 @@ export async function startServer(
       const eventsByType: Record<string, number> = {};
       for (const rec of profiles) {
         try {
-          const senseDeps = buildObserveSenseDeps(metaForProfile(rec), app);
-          const result = await runObservation({ store, senseDeps, profile: rec.profile });
+          const { senseDeps, syncDefaultBranch } = buildObserveDeps(metaForProfile(rec), app);
+          const result = await runObservation({ store, senseDeps, profile: rec.profile, syncDefaultBranch });
           maxDurationMs = Math.max(maxDurationMs, result.durationMs);
           for (const e of result.appended) eventsByType[e.type] = (eventsByType[e.type] ?? 0) + 1;
           appendedTotal += result.appended.length;

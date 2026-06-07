@@ -57,7 +57,6 @@ describe("buildSenseIo → SenseDeps", () => {
     expect(typeof deps.now()).toBe("string");
     for (const key of [
       "listSessions",
-      "syncDefaultBranch",
       "readSmithyStatus",
       "queryPr",
       "discoverPr",
@@ -65,6 +64,9 @@ describe("buildSenseIo → SenseDeps", () => {
     ] as const) {
       expect(typeof (deps as unknown as Record<string, unknown>)[key]).toBe("function");
     }
+    // The default-branch sync is Herald-owned (#300) and no longer part of the
+    // injected SenseDeps — only the raw bundle (`createSenseIo`) exposes it.
+    expect((deps as unknown as Record<string, unknown>).syncDefaultBranch).toBeUndefined();
   });
 
   it("omits warn when not provided and includes it when provided", () => {
@@ -427,19 +429,36 @@ describe("discoverPrForSlice escalated-slice floor skip (#173)", () => {
   });
 });
 
-describe("syncDefaultBranch (via SenseDeps)", () => {
-  it("fetches/switches/pulls the known default branch and resolves void", async () => {
+describe("syncDefaultBranch (Herald-owned, via the raw bundle — #300)", () => {
+  it("fetches/switches/pulls the known default branch and returns the result", async () => {
     const calls: string[][] = [];
     routeExec((cmd, args) => {
       calls.push([cmd, ...args]);
       if (args.includes("rev-parse")) return "deadbeef\n";
       return "";
     });
-    const deps = buildSenseIo({ meta: meta(), castra: fakeCastra() });
-    await expect(deps.syncDefaultBranch("/repo", "main")).resolves.toBeUndefined();
+    const io = createSenseIo({ meta: meta(), castra: fakeCastra() });
+    const result = await io.syncDefaultBranch({ repo: { path: "/repo", default_branch: "main" } });
+    expect(result).toMatchObject({ default_branch: "main", synced: true, head: "deadbeef" });
     const joined = calls.map((c) => c.join(" "));
     expect(joined).toContain("git fetch origin main");
     expect(joined).toContain("git switch main");
     expect(joined).toContain("git pull --ff-only origin main");
+  });
+
+  it("resolves a non-`main` default (e.g. master) via origin/HEAD when none is known", async () => {
+    const calls: string[][] = [];
+    routeExec((cmd, args) => {
+      calls.push([cmd, ...args]);
+      if (args.includes("symbolic-ref")) return "origin/master\n";
+      if (args.includes("rev-parse")) return "cafe\n";
+      return "";
+    });
+    const io = createSenseIo({ meta: meta(), castra: fakeCastra() });
+    const result = await io.syncDefaultBranch({ repo: { path: "/repo" } });
+    expect(result).toMatchObject({ default_branch: "master", synced: true });
+    const joined = calls.map((c) => c.join(" "));
+    expect(joined).toContain("git fetch origin master");
+    expect(joined).toContain("git pull --ff-only origin master");
   });
 });
