@@ -139,6 +139,33 @@ describe("senseFromHerald (Stage 1, Herald-backed)", () => {
     expect(state.smithy.queue).toEqual({ dispatchable: 0, blocked: 0, total: 2 });
   });
 
+  it("dispatches a brand-new orphan layer-0 spec and reports true dependency-blocking (#289)", async () => {
+    // A brand-new orphaned spec whose cut targets a layer-0 row (US3) plus a
+    // dependency-blocked spec whose cut targets a layer-2 row. The orphan must
+    // dispatch (ready+dispatchable), and `blocked` must count ONLY the real
+    // unmet-deps item — not the old `total − ready` residual.
+    const status = {
+      graph: {
+        layers: [
+          { layer: 0, node_ids: ["specs/statio/statio.spec.md#US3"] },
+          { layer: 2, node_ids: ["specs/blocked/blocked.spec.md#US1"] },
+        ],
+      },
+      records: [
+        { path: "specs/statio/statio.spec.md", next_action: { command: "smithy.cut", arguments: ["specs/statio", "3"] } },
+        { path: "specs/blocked/blocked.spec.md", next_action: { command: "smithy.cut", arguments: ["specs/blocked", "1"] } },
+      ],
+    };
+    const herald = { consume: vi.fn(async () => emptySystemState()) };
+    const state = await senseFromHerald(
+      deps({ readSmithyStatus: async () => status }),
+      herald,
+      { repo: { path: "/repo" }, slices: {}, archived_slices: {} },
+    );
+    expect(state.smithy.ready.map((r: any) => r.path)).toEqual(["specs/statio/statio.spec.md"]);
+    expect(state.smithy.queue).toEqual({ dispatchable: 1, blocked: 1, total: 2 });
+  });
+
   it("reports unavailable workers when the fold has none", async () => {
     const herald = { consume: vi.fn(async () => emptySystemState()) };
     const state = await senseFromHerald(deps(), herald, prevRaw());

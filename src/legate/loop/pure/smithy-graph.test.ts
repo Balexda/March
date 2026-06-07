@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  blockedSmithyItems,
   dependenciesClear,
   dependencyIds,
   dependencyMerged,
@@ -57,6 +58,113 @@ describe("smithy-graph pure helpers", () => {
       recordGraphNodeId({ path: "x", next_action: { command: "smithy.render", arguments: ["rfc.md", "2"] } }),
     ).toBe("rfc.md#M2");
     expect(recordGraphNodeId({ path: "z", next_action: { command: "smithy.cut" } })).toBe("z");
+  });
+
+  it("recordGraphNodeId maps a next_action to the ROW it targets, not the parent (#289)", () => {
+    // smithy.cut decomposes a spec user story → the spec's own row node, even for
+    // an ORPHANED spec with no feature parent (the #289 drop case).
+    expect(
+      recordGraphNodeId({
+        path: "specs/statio/statio.spec.md",
+        next_action: { command: "smithy.cut", arguments: ["specs/statio", "3"] },
+      }),
+    ).toBe("specs/statio/statio.spec.md#US3");
+    // smithy.mark targets a features-file feature row.
+    expect(
+      recordGraphNodeId({
+        path: "rfc/01-spawn.features.md",
+        next_action: { command: "smithy.mark", arguments: ["rfc/01-spawn.features.md", "2"] },
+      }),
+    ).toBe("rfc/01-spawn.features.md#F2");
+    // smithy.forge implements a user story's slice → the parent US node.
+    expect(
+      recordGraphNodeId({
+        path: "specs/x/01-foo.tasks.md",
+        parent_path: "specs/x/x.spec.md",
+        parent_row_id: "US4",
+        next_action: { command: "smithy.forge", arguments: ["specs/x/01-foo.tasks.md", "1"] },
+      }),
+    ).toBe("specs/x/x.spec.md#US4");
+  });
+
+  it("recordGraphNodeId honors the record's dependency_order id_prefix", () => {
+    expect(
+      recordGraphNodeId({
+        path: "specs/y/y.spec.md",
+        dependency_order: { id_prefix: "US" },
+        next_action: { command: "smithy.cut", arguments: ["specs/y", "US7"] },
+      }),
+    ).toBe("specs/y/y.spec.md#US7");
+  });
+
+  it("readySmithyItems includes a brand-new orphaned layer-0 spec (#289 regression)", () => {
+    // The spec has NO feature parent; its only ready row (US3) is the cut target,
+    // and that row sits in layer 0. The old parent-based node id fell through to
+    // the bare spec path and never matched layer-0, so the spec was dropped.
+    const status = {
+      graph: {
+        layers: [
+          { layer: 0, node_ids: ["specs/statio/statio.spec.md#US3"] },
+          { layer: 1, node_ids: ["specs/statio/statio.spec.md#US1"] },
+        ],
+      },
+      records: [
+        {
+          path: "specs/statio/statio.spec.md",
+          next_action: { command: "smithy.cut", arguments: ["specs/statio", "3"] },
+        },
+      ],
+    };
+    expect(readySmithyItems(status).map((r) => r.path)).toEqual(["specs/statio/statio.spec.md"]);
+  });
+
+  it("readySmithyItems excludes a cut whose target row is layer>0 even if its parent feature is layer-0 (no false positives)", () => {
+    // Parent feature F4 is layer-0, but the cut targets spec row US3 which sits at
+    // layer 1 — mapping to the parent (the old behavior) wrongly reported it ready.
+    const status = {
+      graph: {
+        layers: [
+          { layer: 0, node_ids: ["rfc/01-spawn.features.md#F4"] },
+          { layer: 1, node_ids: ["specs/sandbox/sandbox.spec.md#US3"] },
+        ],
+      },
+      records: [
+        {
+          path: "specs/sandbox/sandbox.spec.md",
+          parent_path: "rfc/01-spawn.features.md",
+          parent_row_id: "F4",
+          next_action: { command: "smithy.cut", arguments: ["specs/sandbox", "3"] },
+        },
+      ],
+    };
+    expect(readySmithyItems(status)).toHaveLength(0);
+  });
+
+  it("blockedSmithyItems is the true layer>0 set, excluding layer-0/unmappable/done", () => {
+    const status = {
+      graph: {
+        layers: [
+          { layer: 0, node_ids: ["specs/ready/ready.spec.md#US1"] },
+          { layer: 2, node_ids: ["specs/blocked/blocked.spec.md#US1"] },
+        ],
+      },
+      records: [
+        // layer 0 → ready, not blocked
+        { path: "specs/ready/ready.spec.md", next_action: { command: "smithy.cut", arguments: ["specs/ready", "1"] } },
+        // layer 2 → blocked
+        { path: "specs/blocked/blocked.spec.md", next_action: { command: "smithy.cut", arguments: ["specs/blocked", "1"] } },
+        // node not in the partition → unmappable, not provably blocked
+        { path: "specs/orphan/orphan.spec.md", next_action: { command: "smithy.cut", arguments: ["specs/orphan", "1"] } },
+        // done records carry no next_action → excluded
+        { path: "specs/done/done.spec.md", next_action: null },
+      ],
+    };
+    expect(blockedSmithyItems(status).map((r) => r.path)).toEqual(["specs/blocked/blocked.spec.md"]);
+  });
+
+  it("blockedSmithyItems is empty when there is no dependency graph", () => {
+    const status = { records: [{ path: "a", next_action: { command: "smithy.forge" } }] };
+    expect(blockedSmithyItems(status)).toEqual([]);
   });
 
   it("readyLayerNodeIds reads layer 0 ids", () => {

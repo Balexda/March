@@ -2,7 +2,7 @@ import type { LoopMeta } from "../meta.js";
 import type { LoopState, SliceExternalState, SmithyView } from "./types.js";
 import { looseSessionMatch, summarizeWorkers } from "../pure/session.js";
 import { dispatchableReady, isTerminalSlice } from "../pure/slice.js";
-import { readySmithyItems } from "../pure/smithy-graph.js";
+import { blockedSmithyItems, readySmithyItems } from "../pure/smithy-graph.js";
 import type { ObservedSession, SystemState } from "../../../herald/events.js";
 
 /**
@@ -73,9 +73,13 @@ async function senseSmithy(
   // "Dispatchable now" is what the loop would actually dispatch this tick: ready
   // MINUS in-flight/archived, the same dedup the dispatcher's assess() applies
   // (#219). Raw `ready.length` over-counts — smithy keeps a slice ready until its
-  // PR merges, so stewarded and escalated slices stay in the ready set. Keep
-  // blocked/total as the smithy planning view.
+  // PR merges, so stewarded and escalated slices stay in the ready set.
   const dispatchable = dispatchableReady(state, ready).length;
+  // `blocked` is the TRUE dependency-blocked set — items whose smithy graph node
+  // has unmet deps (layer > 0) — NOT the old `total − ready` residual that
+  // mislabeled done/in-flight/unmappable work as blocked (#289). `total` stays the
+  // smithy planning view (every record with a pending next action).
+  const blocked = blockedSmithyItems(status).length;
   return {
     ok: true,
     status,
@@ -83,7 +87,7 @@ async function senseSmithy(
     queue: {
       dispatchable,
       total: candidates.length,
-      blocked: Math.max(0, candidates.length - ready.length),
+      blocked,
     },
   };
 }
