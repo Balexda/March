@@ -254,7 +254,7 @@ Recommended implementation sequence:
 
 | ID | Title | Depends On | Artifact |
 |----|-------|------------|----------|
-| US3 | Resolve Repository Identity and Default Branch | — | — |
+| US3 | Resolve Repository Identity and Default Branch | — | specs/2026-05-26-006-statio-forge-gateway/03-resolve-repository-identity-and-default-branch.tasks.md |
 | US5 | Reach the Gateway Over HTTP With Auth and Uniform Typed Errors | — | — |
 | US1 | Read a Pull Request's State Through the Gateway | US3, US5 | — |
 | US2 | Discover and List Pull Requests | US3, US5 | — |
