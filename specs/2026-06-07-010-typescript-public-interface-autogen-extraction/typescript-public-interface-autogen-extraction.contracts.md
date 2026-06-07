@@ -15,11 +15,11 @@ This feature defines a repository-local AUTOGEN extraction boundary. The command
 #### Signature
 
 ```text
-npm run docs:contracts:autogen -- --check
-npm run docs:contracts:autogen -- --write
+npm run docs:contracts:extract -- --check
+npm run docs:contracts:extract -- --write
 ```
 
-The exact npm script name is provisional because the source Feature 7 prose is unavailable in this checkout. The stable interface contract is that callers use an npm-run command with explicit check and write modes, not an ad hoc live-service operation.
+The npm script name `docs:contracts:extract` is fixed by the Feature 7 source map (`docs/rfcs/2026-002-layered-testing-framework/02-subsystem-contract-documentation-track.features.md`). The stable interface contract is that callers use this npm-run command with explicit check and write modes, not an ad hoc live-service operation.
 
 #### Inputs
 
