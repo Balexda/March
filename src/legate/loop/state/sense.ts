@@ -2,7 +2,7 @@ import type { LoopMeta } from "../meta.js";
 import type { LoopState, SliceExternalState, SmithyView } from "./types.js";
 import { looseSessionMatch, summarizeWorkers } from "../pure/session.js";
 import { dispatchableReady, isTerminalSlice } from "../pure/slice.js";
-import { blockedSmithyItems, readySmithyItems } from "../pure/smithy-graph.js";
+import { actionableLayer0Items, queueDepth, readySmithyItems } from "../pure/smithy-graph.js";
 import type { ObservedSession, SystemState } from "../../../herald/events.js";
 
 /**
@@ -66,27 +66,25 @@ async function senseSmithy(
   } catch (err: any) {
     return { ok: false, error: err?.message || String(err), ready: [], queue: { dispatchable: 0, blocked: 0, total: 0 } };
   }
+  // `ready` drives the actual dispatch this tick — smithy serializes work per
+  // record (one `next_action` each), so the loop paces itself through the layer-0
+  // frontier rather than spawning a steward for every ready node at once.
   const ready = readySmithyItems(status);
-  const candidates = Array.isArray(status?.records)
-    ? status.records.filter((r: any) => r && r.next_action && !r.virtual)
-    : [];
-  // "Dispatchable now" is what the loop would actually dispatch this tick: ready
-  // MINUS in-flight/archived, the same dedup the dispatcher's assess() applies
-  // (#219). Raw `ready.length` over-counts — smithy keeps a slice ready until its
-  // PR merges, so stewarded and escalated slices stay in the ready set.
-  const dispatchable = dispatchableReady(state, ready).length;
-  // `blocked` is the TRUE dependency-blocked set — items whose smithy graph node
-  // has unmet deps (layer > 0) — NOT the old `total − ready` residual that
-  // mislabeled done/in-flight/unmappable work as blocked (#289). `total` stays the
-  // smithy planning view (every record with a pending next action).
-  const blocked = blockedSmithyItems(status).length;
+  // The queue METRIC, by contrast, is measured at the smithy graph's NODE level so
+  // the dashboard reflects the true dependency frontier, not the one-next-action-
+  // per-record collapse (#289). `dispatchable` = the actionable layer-0 nodes a
+  // steward could be launched on now, MINUS work already in-flight/archived (the
+  // same dedup `assess()` applies). `blocked` = the next wave (layer 1, one dep
+  // away). `total` = the deep backlog (layer ≥ 2).
+  const dispatchable = dispatchableReady(state, actionableLayer0Items(status)).length;
+  const { blocked, total } = queueDepth(status);
   return {
     ok: true,
     status,
     ready,
     queue: {
       dispatchable,
-      total: candidates.length,
+      total,
       blocked,
     },
   };

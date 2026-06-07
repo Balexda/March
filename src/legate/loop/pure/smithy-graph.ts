@@ -215,20 +215,140 @@ export function readySmithyItems(status: any): any[] {
 }
 
 /**
- * The records smithy considers genuinely dependency-BLOCKED: a dispatchable next
- * action whose target node sits at a layer > 0 (it has at least one unmet
- * dependency in Smithy's graph). This is the true "blocked" set — NOT the residual
- * `total − ready`, which mislabeled done/in-flight/unmappable work as blocked
- * (#289). Done records carry no `next_action` (excluded); in-flight ready work
- * sits at layer 0 (excluded); a record whose node isn't in the layer partition is
- * unmappable, not provably blocked, so it is excluded too. With no layer graph
- * present nothing is provably blocked.
+ * The legate measures its work queue at the smithy graph's NODE (row) level, not
+ * the record level. Smithy surfaces only ONE `next_action` per record, but the
+ * dependency graph keys every row (`<artifact-file>#<rowId>`) as its own node — so
+ * a spec with three independent layer-0 user stories is three dispatchable units
+ * even though its record emits a single next action. Counting records collapses
+ * that frontier (#289); counting nodes restores it.
  */
-export function blockedSmithyItems(status: any): any[] {
+
+/** A pending (not-`done`) graph node together with the layer it sits in. */
+export interface PendingNode {
+  readonly id: string;
+  readonly layer: number;
+  readonly node: any;
+}
+
+/** Every graph node whose status is not `done`, tagged with its layer. The legate
+ *  reads `smithy status … --pending`, so done nodes are already filtered out; the
+ *  status guard is a belt-and-suspenders for a full (non-pending) payload. */
+export function pendingGraphNodes(status: any): PendingNode[] {
+  const nodes = graphNodes(status);
   const layers = nodeLayers(status);
-  if (layers.size === 0) return [];
-  return dispatchRecords(status).filter((record: any) => {
-    const layer = layers.get(recordGraphNodeId(record)!);
-    return layer !== undefined && layer > 0;
-  });
+  const out: PendingNode[] = [];
+  for (const [id, node] of Object.entries(nodes)) {
+    if (String((node as any)?.status) === "done") continue;
+    const layer = layers.get(id);
+    if (layer === undefined) continue;
+    out.push({ id, layer, node });
+  }
+  return out;
+}
+
+/** Classify a node by its row id prefix: user story / task slice / feature /
+ *  milestone. "US" must be tested before "S" (both start with letters that
+ *  overlap). */
+function nodeRowKind(node: any): "US" | "S" | "F" | "M" | "other" {
+  const rid = String(node?.row?.id || "").toUpperCase();
+  if (rid.startsWith("US")) return "US";
+  if (rid.startsWith("S")) return "S";
+  if (rid.startsWith("F")) return "F";
+  if (rid.startsWith("M")) return "M";
+  return "other";
+}
+
+/** Index `status.records` by their `path`. */
+function recordsByPath(status: any): Map<string, any> {
+  const m = new Map<string, any>();
+  for (const r of Array.isArray(status?.records) ? status.records : []) {
+    if (r?.path) m.set(String(r.path), r);
+  }
+  return m;
+}
+
+/** Map each graph node id → the record whose `next_action` currently targets it
+ *  (the first such record wins). A node present here is one smithy would act on
+ *  right now; a node absent here is either a sibling row the record's single next
+ *  action didn't surface, or a container whose work has flowed to its children. */
+function recordsByTargetNode(status: any): Map<string, any> {
+  const m = new Map<string, any>();
+  for (const r of dispatchRecords(status)) {
+    const id = recordGraphNodeId(r);
+    if (id && !m.has(id)) m.set(id, r);
+  }
+  return m;
+}
+
+/**
+ * The dispatch item for an actionable layer-0 node: the record whose `next_action`
+ * targets it when one exists (so the derived slice id / branch match a real
+ * dispatch EXACTLY — letting the in-flight dedup recognize it), else a synthesized
+ * `smithy.cut` for that spec user story — a sibling row beyond the spec record's
+ * single surfaced cut. Returns null when no runnable item can be built.
+ */
+function dispatchItemForNode(
+  byPath: Map<string, any>,
+  byTarget: Map<string, any>,
+  n: PendingNode,
+): any | null {
+  const direct = byTarget.get(n.id);
+  if (direct) return direct;
+  if (nodeRowKind(n.node) === "US") {
+    const recordPath = String(n.node?.record_path || "");
+    if (!recordPath) return null;
+    const rec = byPath.get(recordPath) || {};
+    const num = rowNumber(n.node?.row?.id);
+    if (!num) return null;
+    const specDir = recordPath.replace(/\/[^/]+$/, "");
+    return {
+      path: recordPath,
+      parent_path: rec.parent_path ?? null,
+      parent_row_id: rec.parent_row_id ?? null,
+      title: n.node?.row?.title,
+      next_action: { command: "smithy.cut", arguments: [specDir, num] },
+    };
+  }
+  return null;
+}
+
+/**
+ * The dispatch items for every ACTIONABLE layer-0 node — the work a steward can be
+ * launched on right now. A layer-0 node is actionable when it is a spec user-story
+ * (US) or task-slice (S) row (the cut/forge units), OR when some record's
+ * `next_action` targets it directly (covers a runnable render/mark). Pure feature/
+ * milestone CONTAINER nodes — whose child artifact already exists, so their real
+ * work lives at deeper layers — are excluded. Subtract in-flight/archived work with
+ * {@link dispatchableReady} to get the "dispatchable now" count.
+ */
+export function actionableLayer0Items(status: any): any[] {
+  const pending = pendingGraphNodes(status);
+  // No dependency graph (older smithy, or a graph-less payload) → fall back to the
+  // record-level ready set so the frontier is never silently zeroed; with a graph
+  // present, expand to the node-level actionable set.
+  if (pending.length === 0) return readySmithyItems(status);
+  const byPath = recordsByPath(status);
+  const byTarget = recordsByTargetNode(status);
+  const out: any[] = [];
+  for (const n of pending) {
+    if (n.layer !== 0) continue;
+    const kind = nodeRowKind(n.node);
+    if (!(kind === "US" || kind === "S" || byTarget.has(n.id))) continue;
+    const item = dispatchItemForNode(byPath, byTarget, n);
+    if (item) out.push(item);
+  }
+  return out;
+}
+
+/** Pending-node queue depth by dependency layer: `blocked` is the next wave (layer
+ *  1, one dependency away), `total` is the deep backlog (layer ≥ 2). Layer-0 is the
+ *  dispatchable frontier, counted separately via {@link actionableLayer0Items}. */
+export function queueDepth(status: any): { blocked: number; total: number } {
+  let blocked = 0;
+  let total = 0;
+  for (const n of pendingGraphNodes(status)) {
+    if (n.layer === 1) blocked++;
+    else if (n.layer >= 2) total++;
+  }
+  return { blocked, total };
 }

@@ -559,7 +559,7 @@
         "type": "prometheus",
         "uid": "prometheus"
       },
-      "description": "Ready - in-flight: what the loop would actually dispatch this tick (the #219-corrected march_legate_queue_dispatchable). Stewarded and escalated slices are excluded — they are in-flight until merge.",
+      "description": "The smithy dependency frontier: actionable layer-0 graph nodes minus work already in-flight/archived (march_legate_queue_dispatchable). Measured at the node level (#289) so a spec's independent layer-0 user stories each count — not one-per-record. Stewarded/escalated slices are excluded (in-flight until merge).",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -878,7 +878,7 @@
         "type": "prometheus",
         "uid": "prometheus"
       },
-      "description": "Pending work whose dependencies are not yet met: march_legate_queue_blocked (the smithy planning view).",
+      "description": "The next wave: pending graph nodes one dependency layer away (layer 1) — work that unblocks as the current frontier merges (march_legate_queue_blocked, #289). NOT the old total − ready residual.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -945,7 +945,7 @@
         "type": "prometheus",
         "uid": "prometheus"
       },
-      "description": "Total tracked work remaining: march_legate_queue_total (the smithy planning view). Reconciles as dispatchable + in-spawn + in-steward + waiting-for-merge + escalated + blocked.",
+      "description": "Deep backlog: pending graph nodes two or more dependency layers down (layer ≥ 2), waiting behind the frontier and the next wave (march_legate_queue_total, #289).",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -1000,7 +1000,7 @@
           "refId": "A"
         }
       ],
-      "title": "Total remaining",
+      "title": "Backlog (L2+)",
       "type": "stat"
     },
     {
