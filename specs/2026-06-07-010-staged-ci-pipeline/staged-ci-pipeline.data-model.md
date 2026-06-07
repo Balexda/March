@@ -51,7 +51,7 @@ Purpose: Represents a named CI job that reports one layer independently.
 | `jobName` | text | Yes | `l0`, `l1`, `l2-cassette`, or `l3-cassette`. |
 | `command` | npm command | Yes | The single `npm run test:<layer>` command the job invokes. |
 | `gateRole` | enum | Yes | `l0` is the fail-fast gate; the others are parallel fan-out. |
-| `dependsOn` | job reference | Yes | `l1`/`l2-cassette`/`l3-cassette` depend on `l0` succeeding; `l0` depends on nothing. |
+| `dependsOn` | job reference | Yes | Always present, using the sentinel `—` for `l0` (no dependency); `l1`/`l2-cassette`/`l3-cassette` set it to `l0` (they start only after `l0` succeeds). |
 | `nodeVersion` | matrix value | Yes | Preserves the existing Node 20/22 build matrix. |
 | `result` | enum | Yes | `pass` or `fail`. |
 
@@ -74,15 +74,19 @@ Validation rules:
 ### Staged gate lifecycle
 
 1. `gateRunning` → `gateFailed`
-   - Trigger: The `l0` layer fails (a broken-fundamentals stop-the-build) or a staged script hits an untagged-but-matched file.
+   - Trigger: The `l0` layer fails — a failing `l0` test or the `l0` script's untagged-but-matched guard tripping (a broken-fundamentals stop-the-build).
    - Effects: The `l0` job fails, the parallel fan-out jobs do not run, and the PR gate is red.
 
-2. `fanOutRunning` → `layerFailed`
-   - Trigger: A selected test in `l1`, `l2-cassette`, or `l3-cassette` fails.
-   - Effects: The corresponding CI job exits non-zero and the PR gate is red, with the failing layer named on the pipeline graph.
+2. `gateRunning` → `fanOutRunning`
+   - Trigger: `l0` passes.
+   - Effects: `l1`, `l2-cassette`, and `l3-cassette` start in parallel.
 
-3. `running` → `passed`
-   - Trigger: `l0` passes and every parallel fan-out job passes across the Node matrix.
+3. `fanOutRunning` → `layerFailed`
+   - Trigger: A fan-out layer fails — a failing test or that script's untagged-but-matched guard tripping in `l1`, `l2-cassette`, or `l3-cassette`.
+   - Effects: The corresponding CI job exits non-zero and the PR gate is red, with the failing layer named on the pipeline graph. The guard fails the specific fan-out job, not the already-passed `l0` gate.
+
+4. `fanOutRunning` → `passed`
+   - Trigger: Every parallel fan-out job passes across the Node matrix.
    - Effects: The deterministic PR gate is satisfied, equivalent to `npm test`.
 
 ## Identity & Uniqueness
