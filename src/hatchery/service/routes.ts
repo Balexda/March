@@ -50,6 +50,7 @@ export function validateSpawnRequest(
       taskType: body.taskType,
       taskName: body.taskName,
       sliceId: body.sliceId,
+      toolchain: body.toolchain,
     },
   };
 }

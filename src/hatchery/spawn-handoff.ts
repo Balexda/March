@@ -19,6 +19,7 @@ import {
   waitForSpawnContainer,
 } from "../spawn/container-launch.js";
 import { createBuildContext, SnapshotError } from "../spawn/snapshot.js";
+import { resolveToolchain, resolveToolchainImage } from "../spawn/toolchain.js";
 import {
   buildSpawnImage,
   BuildError,
@@ -98,6 +99,13 @@ export interface HatcherySpawnOptions {
   readonly taskName?: string;
   /** Dispatch slice id; hashed into the trace id so all spans share one trace. */
   readonly sliceId?: string;
+  /**
+   * Per-profile worker toolchain override (issue #287). `auto`/undefined →
+   * auto-detect the stack from the snapshot's marker files; an explicit value
+   * (`jvm`, `node`) forces the toolchain layer image. Resolves the spawn's base
+   * image to `f(agent, toolchain)` so non-node repos can build in-container.
+   */
+  readonly toolchain?: string;
 }
 
 export interface AgentDeckManagerSession {
@@ -828,12 +836,29 @@ export async function runHatcherySpawn(
     );
 
     stage = "image_build";
-    dispatch.span("image.build", () => {
+    dispatch.span("image.build", (buildSpan) => {
       const handle = createBuildContext(managerWorktree);
       try {
+        // Pick the toolchain layer image for this (agent, repo): an explicit
+        // profile override wins, else auto-detect from the snapshot's marker
+        // files. Node repos resolve to the unchanged base image (no layer), so
+        // this is a no-op for today's node-only flow. The snapshot already
+        // mirrors the worktree's tracked files, so detect against it.
+        const resolvedToolchain = resolveToolchain(
+          input.toolchain,
+          handle.contextPath,
+        );
+        const baseImage = resolveToolchainImage(
+          input.backend.baseImage,
+          resolvedToolchain.toolchain,
+        );
+        buildSpan.setAttributes({
+          "march.toolchain": resolvedToolchain.toolchain,
+          "march.toolchain.source": resolvedToolchain.source,
+        });
         const dockerfilePath = writeSpawnDockerfile(
           handle.contextPath,
-          input.backend.baseImage,
+          baseImage,
         );
         const imageTag = buildSpawnImage({
           spawnId,

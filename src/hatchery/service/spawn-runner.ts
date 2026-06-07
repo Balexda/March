@@ -98,6 +98,7 @@ export async function runSpawnWorkerBody(data: SpawnWorkerData): Promise<void> {
       taskType: request.taskType,
       taskName: request.taskName,
       sliceId: request.sliceId,
+      toolchain: request.toolchain,
     });
     message = { ok: true, result };
   } catch (err) {

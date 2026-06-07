@@ -12,6 +12,8 @@
     "build": "tsup src/cli.ts --format esm --clean",
     "build:spawn-claude-image": "docker build -t march-spawn-claude:latest -f docker/spawn-claude.Dockerfile docker",
     "build:spawn-codex-image": "docker build -t march-spawn-codex:latest -f docker/spawn-codex.Dockerfile docker",
+    "build:spawn-claude-jvm-image": "docker build -t march-spawn-claude-jvm:latest -f docker/spawn-claude-jvm.Dockerfile docker",
+    "build:spawn-codex-jvm-image": "docker build -t march-spawn-codex-jvm:latest -f docker/spawn-codex-jvm.Dockerfile docker",
     "build:hatchery-image": "docker build -t march-hatchery:latest -f docker/hatchery.Dockerfile .",
     "build:castra-image": "docker build -t march-castra:latest -f docker/castra.Dockerfile .",
     "build:brood-image": "docker build -t march-brood:latest -f docker/brood.Dockerfile .",

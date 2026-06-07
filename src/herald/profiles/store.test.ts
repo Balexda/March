@@ -104,6 +104,30 @@ describe.skipIf(!sqliteAvailable)("ProfileStore", () => {
     expect(back.mergePolicy).toEqual(policy);
     store.close();
   });
+
+  it("round-trips a toolchain through register/get", () => {
+    const store = makeStore();
+    const rec = store.register(input({ toolchain: "jvm" }));
+    expect(rec.toolchain).toBe("jvm");
+    expect(store.get("march")?.toolchain).toBe("jvm");
+    store.close();
+  });
+
+  it("a profile without a toolchain reads back as undefined (auto)", () => {
+    const store = makeStore();
+    store.register(input());
+    expect(store.get("march")?.toolchain).toBeUndefined();
+    store.close();
+  });
+
+  it("a plain re-register preserves an existing toolchain", () => {
+    const store = makeStore();
+    store.register(input({ toolchain: "jvm" }));
+    const back = store.register(input({ workerGroup: "renamed" }));
+    expect(back.workerGroup).toBe("renamed");
+    expect(back.toolchain).toBe("jvm");
+    store.close();
+  });
 });
 
 describe.skipIf(!sqliteAvailable)("ProfileStore migration", () => {
@@ -162,6 +186,58 @@ describe.skipIf(!sqliteAvailable)("ProfileStore migration", () => {
     // Re-opening the same file is a no-op migration (version already 2).
     const reopened = new ProfileStore({ dbPath });
     expect(reopened.get("legacy")?.mergePolicy).toEqual(policy);
+    reopened.close();
+  });
+
+  function v2DbPath(): string {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "profiles-mig-"));
+    tmpDirs.push(dir);
+    const dbPath = path.join(dir, "profiles.db");
+    const DatabaseSync = getDatabaseSync();
+    const db = new DatabaseSync(dbPath);
+    // Recreate the v2 schema: has merge_policy but no toolchain, version 2.
+    db.exec(`
+      CREATE TABLE profiles (
+        profile        TEXT PRIMARY KEY,
+        repo_name      TEXT NOT NULL,
+        repo_path      TEXT NOT NULL,
+        worker_group   TEXT NOT NULL,
+        conductor_name TEXT,
+        brood_endpoint TEXT,
+        march_cli_path TEXT,
+        mode           TEXT,
+        merge_policy   TEXT,
+        status         TEXT NOT NULL DEFAULT 'active',
+        created_at     TEXT NOT NULL,
+        updated_at     TEXT NOT NULL
+      );
+      CREATE TABLE profile_schema_meta (version INTEGER NOT NULL);
+      INSERT INTO profile_schema_meta (version) VALUES (2);
+      INSERT INTO profiles (profile, repo_name, repo_path, worker_group, status, created_at, updated_at)
+        VALUES ('legacy', 'Legacy', '/legacy', 'legacy-workers', 'active', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');
+    `);
+    db.close();
+    return dbPath;
+  }
+
+  it("upgrades a v2 DB: adds toolchain, preserves existing rows", () => {
+    const dbPath = v2DbPath();
+    const store = new ProfileStore({ dbPath });
+    const legacy = store.get("legacy");
+    expect(legacy?.repoName).toBe("Legacy");
+    expect(legacy?.toolchain).toBeUndefined();
+    // The new column is writable post-migration.
+    store.register({
+      profile: "legacy",
+      repoName: "Legacy",
+      repoPath: "/legacy",
+      workerGroup: "legacy-workers",
+      toolchain: "jvm",
+    });
+    expect(store.get("legacy")?.toolchain).toBe("jvm");
+    store.close();
+    const reopened = new ProfileStore({ dbPath });
+    expect(reopened.get("legacy")?.toolchain).toBe("jvm");
     reopened.close();
   });
 });

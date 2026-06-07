@@ -566,22 +566,38 @@ profile
   .option("--repo-name <name>", "Repo name (default: basename of --repo-path)")
   .option("-g, --worker-group <group>", "Worker session group", "legate-workers")
   .option("-n, --conductor <name>", "Paired legate-agent conductor name")
+  .option(
+    "--toolchain <toolchain>",
+    "Worker toolchain for this profile's spawns: auto (default) | node | jvm",
+  )
   .action(async (opts: {
     profile: string;
     repoPath: string;
     repoName?: string;
     workerGroup: string;
     conductor?: string;
+    toolchain?: string;
   }) => {
     commandHandled = true;
     const { registerProfile } = await import("../legate/profile-register.js");
+    const { isToolchainSelection, TOOLCHAIN_SELECTIONS } = await import(
+      "../spawn/toolchain.js"
+    );
     const pathMod = await import("node:path");
+    if (opts.toolchain !== undefined && !isToolchainSelection(opts.toolchain)) {
+      process.stderr.write(
+        `Invalid --toolchain "${opts.toolchain}": expected one of ${TOOLCHAIN_SELECTIONS.join(", ")}.\n`,
+      );
+      process.exitCode = ERROR;
+      return;
+    }
     const result = await registerProfile({
       profile: opts.profile.trim(),
       repoPath: opts.repoPath,
       repoName: opts.repoName ?? pathMod.basename(opts.repoPath),
       workerGroup: opts.workerGroup,
       conductorName: opts.conductor,
+      toolchain: opts.toolchain,
     });
     if (result.record) {
       console.log(result.note);
@@ -791,6 +807,10 @@ hatchery
   .option("--task-type <type>", "Task type (smithy verb) for telemetry tagging")
   .option("--task-name <name>", "Task name (work-item slug) for telemetry tagging")
   .option("--slice-id <id>", "Dispatch slice id; hashed into the telemetry trace id")
+  .option(
+    "--toolchain <toolchain>",
+    "Worker toolchain: auto (default, detect from repo) | node | jvm",
+  )
   .option("--json", "Print the Hatchery spawn result as JSON")
   .action(async (opts: {
     backend?: string;
@@ -804,6 +824,7 @@ hatchery
     taskType?: string;
     taskName?: string;
     sliceId?: string;
+    toolchain?: string;
     json?: boolean;
   }) => {
     commandHandled = true;
@@ -835,6 +856,19 @@ hatchery
       return;
     }
 
+    if (opts.toolchain !== undefined) {
+      const { isToolchainSelection, TOOLCHAIN_SELECTIONS } = await import(
+        "../spawn/toolchain.js"
+      );
+      if (!isToolchainSelection(opts.toolchain)) {
+        process.stderr.write(
+          `Invalid --toolchain "${opts.toolchain}": expected one of ${TOOLCHAIN_SELECTIONS.join(", ")}.\n`,
+        );
+        process.exitCode = USAGE_ERROR;
+        return;
+      }
+    }
+
     let repoRoot: string;
     try {
       repoRoot = execFileSync("git", ["rev-parse", "--show-toplevel"], {
@@ -861,6 +895,7 @@ hatchery
         taskType: opts.taskType,
         taskName: opts.taskName,
         sliceId: opts.sliceId,
+        toolchain: opts.toolchain,
       });
       if (job.status === "succeeded" && job.result) {
         // stdout carries ONLY the result (the legate loop JSON.parses it).

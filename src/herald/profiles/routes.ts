@@ -1,4 +1,5 @@
 import type { FastifyInstance } from "fastify";
+import { isToolchainSelection, TOOLCHAIN_SELECTIONS } from "../../spawn/toolchain.js";
 import { validateMergePolicy } from "./merge-policy.js";
 import type { ProfileStore } from "./store.js";
 import type { RegisterProfileInput } from "./types.js";
@@ -46,6 +47,17 @@ export function validateRegisterProfile(
     mergePolicy = result.policy;
   }
 
+  let toolchain: string | undefined;
+  if (body.toolchain !== undefined && body.toolchain !== null) {
+    if (typeof body.toolchain !== "string" || !isToolchainSelection(body.toolchain)) {
+      return {
+        ok: false,
+        error: `invalid toolchain "${String(body.toolchain)}": expected one of ${TOOLCHAIN_SELECTIONS.join(", ")}.`,
+      };
+    }
+    toolchain = body.toolchain;
+  }
+
   const input: RegisterProfileInput = {
     profile,
     repoName,
@@ -58,6 +70,7 @@ export function validateRegisterProfile(
       typeof body.marchCliPath === "string" ? body.marchCliPath : undefined,
     mode: requireString(body, "mode") ?? undefined,
     mergePolicy,
+    toolchain,
   };
   return { ok: true, input };
 }
