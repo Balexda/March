@@ -130,10 +130,11 @@ export function nodeLayers(status: any): Map<string, number> {
   return out;
 }
 
-/** The smithy verbs the legate dispatches, in declaration order. */
+/** The set of smithy verbs the legate can dispatch (membership checks only;
+ *  dispatch ordering is decided by {@link dispatchPriority}, not this order). */
 export const DISPATCH_COMMANDS = ["smithy.render", "smithy.mark", "smithy.cut", "smithy.forge"] as const;
 
-/** Strip everything but the trailing digits (e.g. "US3"/"3" → "3"). */
+/** Strip all non-digit characters, leaving just the digits (e.g. "US3"/"3" → "3"). */
 function rowNumber(value: unknown): string {
   return String(value || "").replace(/[^0-9]/g, "");
 }
