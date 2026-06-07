@@ -4,14 +4,14 @@
 **Branch**: `feature/smithy/mark/layered-testing-framework-m2-f7`
 **Created**: 2026-06-07
 **Status**: Draft
-**Input**: `docs/rfcs/2026-002-layered-testing-framework/02-subsystem-contract-documentation-track.features.md` Feature 7, inferred from adjacent M2 contract-track specs because the source feature map is absent from this checkout.
+**Input**: `docs/rfcs/2026-002-layered-testing-framework/02-subsystem-contract-documentation-track.features.md` Feature 7: TypeScript Public-Interface Autogen Tool, reconciled against the source feature map present in this checkout.
 **Source Feature Map**: `docs/rfcs/2026-002-layered-testing-framework/02-subsystem-contract-documentation-track.features.md` - Feature 7: TypeScript Public Interface AUTOGEN Extraction
 
 ## Clarifications
 
 ### Session 2026-06-07
 
-- The requested source feature map and `docs/` tree are not present in this checkout. This spec is derived from the existing M2 contract-track specs and their repeated references to Feature 7 as the AUTOGEN extraction feature. [Critical Assumption]
+- This spec is reconciled against the source feature map (`docs/rfcs/2026-002-layered-testing-framework/02-subsystem-contract-documentation-track.features.md`), whose Feature 7 entry defines the autogen extraction tool and pins its runnable command as `npm run docs:contracts:extract`.
 - Feature 1 defines the `<!-- BEGIN AUTOGEN -->` / `<!-- END AUTOGEN -->` marker convention inside `## Public Interface`. Features 2, 3, and 4 reserve empty marker pairs in subsystem contracts. Feature 5 explicitly excludes AUTOGEN extraction and generated signature replacement.
 - This feature defines deterministic local extraction and replacement for exported TypeScript public surfaces. It does not author contract prose, change runtime subsystem behavior, introduce Smithy-agent enforcement, or wire CI.
 - The extraction tool supports March's low-intervention model from `docs/vision.md` and `docs/operating-philosophy.md`: it must complete from local filesystem inputs, fail with bounded diagnostics, and never prompt inside an autonomous component.
@@ -147,8 +147,8 @@ Recommended implementation sequence:
 
 | ID | Description | Source Category | Impact | Confidence | Status | Resolution |
 |----|-------------|-----------------|--------|------------|--------|------------|
-| SD-001 | The source Feature 7 prose is unavailable in this checkout, so the exact feature title and command name are inferred from adjacent specs rather than confirmed from the feature map. | Source Artifact Availability | Medium | Medium | open | — |
-| SD-002 | The spec requires a local command with check and write modes, but the exact npm script name is not confirmed because the source feature map is unavailable. | Interface Shape | Low | Medium | open | — |
+| SD-001 | The source Feature 7 prose is unavailable in this checkout, so the exact feature title and command name are inferred from adjacent specs rather than confirmed from the feature map. | Source Artifact Availability | Medium | Medium | resolved | Resolved 2026-06-07 — the source feature map is present in this checkout; Feature 7's title and command (`npm run docs:contracts:extract`) are confirmed against `docs/rfcs/2026-002-layered-testing-framework/02-subsystem-contract-documentation-track.features.md`. |
+| SD-002 | The spec requires a local command with check and write modes, but the exact npm script name is not confirmed because the source feature map is unavailable. | Interface Shape | Low | Medium | resolved | Resolved 2026-06-07 — the feature map pins the command as `npm run docs:contracts:extract`; the contracts artifact now uses that name. |
 
 ## Out of Scope
 
