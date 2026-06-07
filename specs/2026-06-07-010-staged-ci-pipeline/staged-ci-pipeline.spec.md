@@ -134,7 +134,7 @@ Recommended implementation sequence:
 - **Layered Test Script**: An npm script that runs one deterministic CI scope selected by the test tag tuple, excluding quarantine.
 - **Aggregate Deterministic Gate**: The rebuilt `npm test` that runs the four staged scripts sequentially, failing fast on the first failure.
 - **Staged CI Job**: A named CI job (`l0` gate, then parallel `l1`/`l2-cassette`/`l3-cassette`) whose failure points to one specific layer.
-- **Tag-Based Selector**: The selection rule that maps Feature 1 tag blocks to layer-specific execution, including the untagged-but-matched guard.
+- **Tag-Based Selector**: The per-script selection behavior — realized as the `selector` and `untaggedGuard` fields of the Layered Test Script in the data model, not a separately stored entity — that maps Feature 1 tag blocks to layer-specific execution and fails on an untagged-but-matched file.
 
 ## Assumptions
 
