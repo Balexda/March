@@ -129,6 +129,60 @@ describe("reduce / fold", () => {
     expect(observed.slices.s1.stage).toBe("escalated");
   });
 
+  it("keeps a known PR number when a branch-deleted None observation arrives (#288)", () => {
+    seq = 0;
+    // The slice tracked an open PR by number for many ticks; then the PR merged,
+    // its branch was deleted, and Herald's branch-rediscovery fallback came back
+    // empty — a numberless `{skipped}` observation. Folding it would null the PR
+    // and strand the slice forever (it then re-discovers by a branch that no
+    // longer exists). The reducer must keep the known number instead.
+    const tracked = foldEvents([
+      ev({ type: "slice.pr.changed", sliceId: "s1", pr: { number: 276, state: "OPEN" } }),
+    ]);
+    const blipped = foldEvents(
+      [ev({ type: "slice.pr.changed", sliceId: "s1", pr: { skipped: true, reason: "missing_pr_number" } })],
+      tracked,
+    );
+    expect(blipped.slices.s1.pr).toEqual({ number: 276, state: "OPEN" });
+
+    // The very next by-number query observes the merge — that terminal fact is
+    // concrete (carries a number + MERGED), so it DOES fold through.
+    const merged = foldEvents(
+      [ev({ type: "slice.pr.changed", sliceId: "s1", pr: { number: 276, state: "MERGED" } })],
+      blipped,
+    );
+    expect(merged.slices.s1.pr).toEqual({ number: 276, state: "MERGED" });
+  });
+
+  it("never regresses a terminal PR back to a non-terminal blip (#288)", () => {
+    seq = 0;
+    const merged = foldEvents([
+      ev({ type: "slice.pr.changed", sliceId: "s1", pr: { number: 9, state: "MERGED" } }),
+    ]);
+    // A numberless error/None snapshot must not un-merge the slice and un-archive it.
+    const afterError = foldEvents(
+      [ev({ type: "slice.pr.changed", sliceId: "s1", pr: { error: "gh timed out" } })],
+      merged,
+    );
+    expect(afterError.slices.s1.pr).toEqual({ number: 9, state: "MERGED" });
+  });
+
+  it("still records the FIRST PR observation when none was known yet (#288 guard is regression-only)", () => {
+    seq = 0;
+    // No prior PR → even a numberless `{skipped}` snapshot is recorded (the guard
+    // only blocks REGRESSIONS of an already-known PR, so "no PR yet" still folds).
+    const first = foldEvents([
+      ev({ type: "slice.pr.changed", sliceId: "s1", pr: { skipped: true, reason: "missing_pr_number" } }),
+    ]);
+    expect(first.slices.s1.pr).toEqual({ skipped: true, reason: "missing_pr_number" });
+    // …and a real discovered PR replaces it normally.
+    const discovered = foldEvents(
+      [ev({ type: "slice.pr.changed", sliceId: "s1", pr: { number: 5, state: "OPEN" } })],
+      first,
+    );
+    expect(discovered.slices.s1.pr).toEqual({ number: 5, state: "OPEN" });
+  });
+
   it("folds slice.steward.attached into sessionId/spawnId/branch/worktree (#213)", () => {
     seq = 0;
     const state = foldEvents([

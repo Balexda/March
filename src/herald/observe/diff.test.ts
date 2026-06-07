@@ -82,6 +82,41 @@ describe("diffObserved", () => {
     expect(changed).toEqual([{ type: "slice.pr.changed", sliceId: "s1", pr: { number: 1, state: "MERGED" } }]);
   });
 
+  it("suppresses a None observation that would null a known PR number (#288)", () => {
+    // A slice tracked an open PR by number; the PR then merged and its branch was
+    // deleted, so the branch-rediscovery fallback returned a numberless `{skipped}`.
+    // Emitting that would overwrite the tracked number and strand the slice — so
+    // the diff suppresses it and the PR stays tracked by number.
+    const prevState = applyDiff(emptySystemState(), loop({
+      perSlice: { s1: { pr: { number: 276, state: "OPEN" } } },
+    }));
+    expect(diffObserved(prevState, loop({
+      perSlice: { s1: { pr: { skipped: true, reason: "missing_pr_number" } } },
+    }))).toEqual([]);
+  });
+
+  it("still emits the terminal MERGED once the by-number query observes it (#288)", () => {
+    // The PR stays tracked by number, so the next tick's by-number query returns
+    // MERGED — a concrete observation that is NOT a regression, so it emits and the
+    // legate can archive.
+    const prevState = applyDiff(emptySystemState(), loop({
+      perSlice: { s1: { pr: { number: 276, state: "OPEN" } } },
+    }));
+    const merged = diffObserved(prevState, loop({
+      perSlice: { s1: { pr: { number: 276, state: "MERGED" } } },
+    }));
+    expect(merged).toEqual([{ type: "slice.pr.changed", sliceId: "s1", pr: { number: 276, state: "MERGED" } }]);
+  });
+
+  it("does not suppress the FIRST PR observation when no PR was known (#288 guard is regression-only)", () => {
+    // No prior PR → even a numberless snapshot still emits; the guard only blocks
+    // regressions of an already-known PR.
+    const bodies = diffObserved(emptySystemState(), loop({
+      perSlice: { s1: { pr: { skipped: true, reason: "missing_pr_number" } } },
+    }));
+    expect(bodies).toContainEqual({ type: "slice.pr.changed", sliceId: "s1", pr: { skipped: true, reason: "missing_pr_number" } });
+  });
+
   it("no longer emits state.error / state.ok (Herald does not read state.json, #176)", () => {
     // Even with a stateError on the snapshot, the retired emission is gone; the
     // reducer still folds those types for replay of pre-#176 logs.

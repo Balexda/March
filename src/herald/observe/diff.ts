@@ -1,10 +1,11 @@
 import type { LoopState } from "../../legate/loop/state/types.js";
 import { isWorkerSession, type WorkerSummary } from "../../legate/loop/pure/session.js";
-import type {
-  EventBody,
-  ObservedSession,
-  SystemState,
-  WorkerCounts,
+import {
+  prObservationRegresses,
+  type EventBody,
+  type ObservedSession,
+  type SystemState,
+  type WorkerCounts,
 } from "../events.js";
 
 /**
@@ -87,7 +88,19 @@ export function diffObserved(prev: SystemState, loop: LoopState): EventBody[] {
   // Per-slice PR + recent-output observations.
   for (const [sliceId, ext] of Object.entries(loop.perSlice)) {
     const prior = prev.slices[sliceId];
-    if (ext.pr !== undefined && !jsonEq(prior?.pr, ext.pr)) {
+    // Suppress an observation that would REGRESS a known PR back to a numberless
+    // None snapshot (#288): a merged PR's branch is deleted, so the branch-
+    // rediscovery fallback returns `{skipped: missing_pr_number}` — emitting that
+    // would overwrite the tracked PR number and strand the slice (it then
+    // re-discovers by a branch that no longer exists, forever). The PR stays
+    // tracked by number, so the next tick's by-number query still observes the
+    // terminal MERGED/CLOSED. The reducer holds the same guard for replay/the
+    // legate's fold; suppressing here keeps the log itself free of None blips.
+    if (
+      ext.pr !== undefined &&
+      !jsonEq(prior?.pr, ext.pr) &&
+      !prObservationRegresses(prior?.pr, ext.pr)
+    ) {
       out.push({ type: "slice.pr.changed", sliceId, pr: ext.pr });
     }
     if (ext.recentOutput !== undefined && !jsonEq(prior?.recentOutput, ext.recentOutput)) {
