@@ -200,7 +200,7 @@ As an operator (and Feature 6 — PR Integration — as a downstream consumer), 
 | US5 | Per-Backend Image and Env Derivation in the Dispatch Pipeline  | US3, US4   | specs/2026-05-10-003-multi-backend-execution-interface/05-per-backend-image-and-env-derivation-in-the-dispatch-pipeline.tasks.md |
 | US1 | Backend Selection at Dispatch Time                             | US5        | specs/2026-05-10-003-multi-backend-execution-interface/01-backend-selection-at-dispatch-time.tasks.md |
 | US6 | Per-Backend Auth Pre-Flight Validation                         | US1        | specs/2026-05-10-003-multi-backend-execution-interface/06-per-backend-auth-pre-flight-validation.tasks.md |
-| US7 | SpawnRecord Backend Traceability                               | US1        | —        |
+| US7 | SpawnRecord Backend Traceability                               | US1        | specs/2026-05-10-003-multi-backend-execution-interface/07-spawnrecord-backend-traceability.tasks.md |
 
 ## Requirements
 
