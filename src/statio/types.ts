@@ -19,7 +19,7 @@ export interface ListPrsRequest {
   readonly state?: ListPrsState;
 }
 
-export type CheckRollup = "NONE" | "FAIL" | "PENDING" | "PASS" | string;
+export type CheckRollup = "NONE" | "FAIL" | "PENDING" | "PASS";
 
 export interface CheckSummary {
   readonly name: string;
