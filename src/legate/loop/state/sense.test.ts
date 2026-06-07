@@ -109,10 +109,11 @@ describe("senseFromHerald (Stage 1, Herald-backed)", () => {
     expect(state.smithy.queue.dispatchable).toBe(1);
   });
 
-  it("dispatchable excludes ready items already in-flight/escalated, keeps total (#219)", async () => {
+  it("dispatchable excludes ready items already in-flight/escalated (#219, graph-less fallback)", async () => {
     // One ready item ("a"); the working state already has it implementing and an
-    // escalated slice ("b"). Raw ready=2 but neither dispatches → dispatchable 0,
-    // while blocked/total stay the smithy planning view.
+    // escalated slice ("b"). Raw ready=2 but neither dispatches → dispatchable 0.
+    // Without a dependency graph the node-level depth metric has nothing to
+    // classify, so blocked/total are 0 (the frontier falls back to records).
     const raw = {
       repo: { path: "/repo" },
       slices: {
@@ -136,7 +137,44 @@ describe("senseFromHerald (Stage 1, Herald-backed)", () => {
       raw,
     );
     expect(state.smithy.ready).toHaveLength(2);
-    expect(state.smithy.queue).toEqual({ dispatchable: 0, blocked: 0, total: 2 });
+    expect(state.smithy.queue).toEqual({ dispatchable: 0, blocked: 0, total: 0 });
+  });
+
+  it("measures the queue at the graph-node level: L0 frontier dispatchable, L1 blocked, L2+ total (#289)", async () => {
+    // A brand-new orphaned spec with three independent layer-0 user stories
+    // (US3/US5/US6) — the record surfaces only `cut US3`, but all three are
+    // dispatchable frontier work. US1 is layer 1 (blocked, one dep away); a deep
+    // feature sits at layer 2 (backlog). The old record-level count collapsed the
+    // frontier to 1 and reported a `total − ready` residual as blocked.
+    const status = {
+      graph: {
+        nodes: {
+          "specs/statio/statio.spec.md#US3": { record_path: "specs/statio/statio.spec.md", row: { id: "US3", depends_on: [] }, status: "not-started" },
+          "specs/statio/statio.spec.md#US5": { record_path: "specs/statio/statio.spec.md", row: { id: "US5", depends_on: [] }, status: "not-started" },
+          "specs/statio/statio.spec.md#US6": { record_path: "specs/statio/statio.spec.md", row: { id: "US6", depends_on: [] }, status: "not-started" },
+          "specs/statio/statio.spec.md#US1": { record_path: "specs/statio/statio.spec.md", row: { id: "US1", depends_on: ["US3"] }, status: "not-started" },
+          "rfc/01.features.md#F9": { record_path: "rfc/01.features.md", row: { id: "F9", depends_on: ["F1"] }, status: "not-started" },
+        },
+        layers: [
+          { layer: 0, node_ids: ["specs/statio/statio.spec.md#US3", "specs/statio/statio.spec.md#US5", "specs/statio/statio.spec.md#US6"] },
+          { layer: 1, node_ids: ["specs/statio/statio.spec.md#US1"] },
+          { layer: 2, node_ids: ["rfc/01.features.md#F9"] },
+        ],
+      },
+      records: [
+        { path: "specs/statio/statio.spec.md", dependency_order: { id_prefix: "US" }, next_action: { command: "smithy.cut", arguments: ["specs/statio", "3"] } },
+      ],
+    };
+    const herald = { consume: vi.fn(async () => emptySystemState()) };
+    const state = await senseFromHerald(
+      deps({ readSmithyStatus: async () => status }),
+      herald,
+      { repo: { path: "/repo" }, slices: {}, archived_slices: {} },
+    );
+    // The orphaned spec still dispatches (its record is in the dispatch `ready` set).
+    expect(state.smithy.ready.map((r: any) => r.path)).toEqual(["specs/statio/statio.spec.md"]);
+    // Frontier = 3 user stories, blocked = the 1 layer-1 story, backlog = the 1 layer-2 node.
+    expect(state.smithy.queue).toEqual({ dispatchable: 3, blocked: 1, total: 1 });
   });
 
   it("reports unavailable workers when the fold has none", async () => {
@@ -514,7 +552,9 @@ describe("senseObserved (Herald observation Stage 1)", () => {
     );
     expect(state.workers).toMatchObject({ running: 1 });
     expect(state.smithy.ok).toBe(true);
-    expect(state.smithy.queue).toEqual({ dispatchable: 2, blocked: 0, total: 2 });
+    // Graph-less status → frontier falls back to records (2 dispatchable); the
+    // node-level depth buckets have nothing to classify, so blocked/total are 0.
+    expect(state.smithy.queue).toEqual({ dispatchable: 2, blocked: 0, total: 0 });
   });
 
   it("surfaces a smithy read failure as smithy.ok=false (non-fatal)", async () => {
