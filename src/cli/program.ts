@@ -584,7 +584,10 @@ profile
       "../spawn/toolchain.js"
     );
     const pathMod = await import("node:path");
-    if (opts.toolchain !== undefined && !isToolchainSelection(opts.toolchain)) {
+    // Trim so `--toolchain "jvm "` is accepted (mirrors the other trimmed inputs)
+    // and no accidental whitespace is stored on the profile record.
+    const toolchain = opts.toolchain?.trim();
+    if (toolchain !== undefined && !isToolchainSelection(toolchain)) {
       process.stderr.write(
         `Invalid --toolchain "${opts.toolchain}": expected one of ${TOOLCHAIN_SELECTIONS.join(", ")}.\n`,
       );
@@ -597,7 +600,7 @@ profile
       repoName: opts.repoName ?? pathMod.basename(opts.repoPath),
       workerGroup: opts.workerGroup,
       conductorName: opts.conductor,
-      toolchain: opts.toolchain,
+      toolchain,
     });
     if (result.record) {
       console.log(result.note);
@@ -856,11 +859,14 @@ hatchery
       return;
     }
 
-    if (opts.toolchain !== undefined) {
+    // Trim so a stray-whitespace value isn't rejected and isn't forwarded to the
+    // hatchery service in the request payload.
+    const toolchain = opts.toolchain?.trim();
+    if (toolchain !== undefined) {
       const { isToolchainSelection, TOOLCHAIN_SELECTIONS } = await import(
         "../spawn/toolchain.js"
       );
-      if (!isToolchainSelection(opts.toolchain)) {
+      if (!isToolchainSelection(toolchain)) {
         process.stderr.write(
           `Invalid --toolchain "${opts.toolchain}": expected one of ${TOOLCHAIN_SELECTIONS.join(", ")}.\n`,
         );
@@ -895,7 +901,7 @@ hatchery
         taskType: opts.taskType,
         taskName: opts.taskName,
         sliceId: opts.sliceId,
-        toolchain: opts.toolchain,
+        toolchain,
       });
       if (job.status === "succeeded" && job.result) {
         // stdout carries ONLY the result (the legate loop JSON.parses it).

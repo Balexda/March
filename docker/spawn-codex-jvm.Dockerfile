@@ -7,12 +7,14 @@
 # profile's toolchain resolves to `jvm` (see src/spawn/toolchain.ts —
 # `resolveToolchainImage` derives this tag as `march-spawn-codex-jvm:latest`).
 #
-# We install only the JDK. The repo's own `./gradlew` wrapper resolves and
-# downloads its pinned Gradle (and Maven projects use their wrapper / system
-# Maven), so we don't bake a Gradle/Maven version and risk drifting from the
-# repo's pin — repo-faithful resolution, per the issue. Dependency + Gradle
-# downloads work because spawns currently run on the open `bridge` network; the
-# bounded two-phase egress posture is a later phase of #287.
+# We install the JDK plus Maven (so a `pom.xml` repo, which the toolchain
+# auto-detect classifies as `jvm`, actually has an `mvn` binary to build with).
+# We do NOT bake a Gradle version: the repo's own `./gradlew` wrapper resolves
+# and downloads its pinned Gradle — repo-faithful resolution, per the issue. A
+# Maven project's pinned version likewise comes from its own `mvnw` wrapper when
+# present; the system `mvn` is the fallback for repos without one. Dependency +
+# wrapper downloads work because spawns currently run on the open `bridge`
+# network; the bounded two-phase egress posture is a later phase of #287.
 FROM march-spawn-codex:latest
 
 # Adoptium Temurin 21 (LTS) — a current, widely-targeted JDK for Kotlin/Gradle.
@@ -32,10 +34,17 @@ RUN apt-get update \
   && echo "deb [signed-by=/etc/apt/keyrings/adoptium.gpg] https://packages.adoptium.net/artifactory/deb $(. /etc/os-release && echo "$VERSION_CODENAME") main" \
     > /etc/apt/sources.list.d/adoptium.list \
   && apt-get update \
-  && apt-get install -y --no-install-recommends "temurin-${JAVA_MAJOR}-jdk" \
+  && apt-get install -y --no-install-recommends \
+    "temurin-${JAVA_MAJOR}-jdk" \
+    maven \
   && rm -rf /var/lib/apt/lists/*
 
-ENV JAVA_HOME=/usr/lib/jvm/temurin-${JAVA_MAJOR}-jdk-amd64
+# The Temurin deb installs to an arch-suffixed path (…-jdk-amd64 / …-jdk-arm64).
+# Symlink it to a stable, arch-independent location so JAVA_HOME is correct on
+# any build/run architecture (the base image is multi-arch).
+RUN ln -sfn "/usr/lib/jvm/temurin-${JAVA_MAJOR}-jdk-$(dpkg --print-architecture)" \
+    /usr/lib/jvm/temurin-current
+ENV JAVA_HOME=/usr/lib/jvm/temurin-current
 ENV PATH=${JAVA_HOME}/bin:${PATH}
 
 # Gradle writes its caches/wrapper here; make it writable for the unprivileged

@@ -68,6 +68,23 @@ describe("validateSpawnRequest", () => {
       request: expect.objectContaining({ prompt: "x", backend: "codex", repoPath: "/r" }),
     });
   });
+
+  it("accepts a valid toolchain", () => {
+    const r = validateSpawnRequest({ prompt: "x", backend: "codex", repoPath: "/r", toolchain: "jvm" });
+    expect(r).toMatchObject({ ok: true, request: { toolchain: "jvm" } });
+  });
+
+  it("rejects an unknown toolchain string at the HTTP boundary", () => {
+    const r = validateSpawnRequest({ prompt: "x", backend: "codex", repoPath: "/r", toolchain: "rust" });
+    expect(r.ok).toBe(false);
+  });
+
+  it("rejects a non-string toolchain (would crash resolveToolchain)", () => {
+    // A raw HTTP body can carry any JSON type; `7`/`{}` must not reach
+    // resolveToolchain() where `override?.trim()` would throw.
+    expect(validateSpawnRequest({ prompt: "x", backend: "codex", repoPath: "/r", toolchain: 7 as unknown as string }).ok).toBe(false);
+    expect(validateSpawnRequest({ prompt: "x", backend: "codex", repoPath: "/r", toolchain: {} as unknown as string }).ok).toBe(false);
+  });
 });
 
 describe("routes", () => {

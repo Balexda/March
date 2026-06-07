@@ -7,8 +7,9 @@
 # profile's toolchain resolves to `jvm` (see src/spawn/toolchain.ts —
 # `resolveToolchainImage` derives this tag as `march-spawn-claude-jvm:latest`).
 #
-# We install only the JDK; the repo's own `./gradlew` wrapper resolves its
-# pinned Gradle. See docker/spawn-codex-jvm.Dockerfile for the full rationale.
+# We install the JDK plus Maven so both Gradle (`./gradlew`) and Maven (`mvn` /
+# `./mvnw`) repos can build. See docker/spawn-codex-jvm.Dockerfile for the full
+# rationale.
 FROM march-spawn-claude:latest
 
 ARG JAVA_MAJOR=21
@@ -25,10 +26,15 @@ RUN apt-get update \
   && echo "deb [signed-by=/etc/apt/keyrings/adoptium.gpg] https://packages.adoptium.net/artifactory/deb $(. /etc/os-release && echo "$VERSION_CODENAME") main" \
     > /etc/apt/sources.list.d/adoptium.list \
   && apt-get update \
-  && apt-get install -y --no-install-recommends "temurin-${JAVA_MAJOR}-jdk" \
+  && apt-get install -y --no-install-recommends \
+    "temurin-${JAVA_MAJOR}-jdk" \
+    maven \
   && rm -rf /var/lib/apt/lists/*
 
-ENV JAVA_HOME=/usr/lib/jvm/temurin-${JAVA_MAJOR}-jdk-amd64
+# Arch-independent JAVA_HOME — see docker/spawn-codex-jvm.Dockerfile.
+RUN ln -sfn "/usr/lib/jvm/temurin-${JAVA_MAJOR}-jdk-$(dpkg --print-architecture)" \
+    /usr/lib/jvm/temurin-current
+ENV JAVA_HOME=/usr/lib/jvm/temurin-current
 ENV PATH=${JAVA_HOME}/bin:${PATH}
 
 ENV GRADLE_USER_HOME=/march/.gradle
