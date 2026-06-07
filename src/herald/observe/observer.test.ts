@@ -138,6 +138,30 @@ describe("runObservation", () => {
     expect(store.projection().slices.x!.pr).toMatchObject({ number: 276, state: "OPEN" });
   });
 
+  it("surfaces a query error on a tracked PR without losing the number (#292 review)", async () => {
+    const store = fakeStore();
+    store.append({ source: "legate", type: "slice.dispatched", sliceId: "x", branch: "smithy/forge/x", sessionId: "w1" } as AppendEventInput);
+    const deps = (queryPr: SenseDeps["queryPr"]) =>
+      senseDeps({
+        listSessions: async () => [{ id: "w1", group: "legate-workers", status: "idle" }],
+        queryPr,
+        sessionOutput: async () => ({ output: "" }),
+      });
+    await runObservation({ store, profile: PROFILE, senseDeps: deps(async () => ({ number: 276, state: "OPEN" })) });
+    // The next by-number query fails (auth/rate/network). senseObserved records
+    // `{error}`; the fold must surface it (so the legate's babysit acts) yet keep
+    // the number so the slice stays queryable.
+    const errored = await runObservation({
+      store,
+      profile: PROFILE,
+      senseDeps: deps(async () => {
+        throw new Error("gh: rate limited");
+      }),
+    });
+    expect(errored.appended.map((e) => e.type)).toContain("slice.pr.changed");
+    expect(store.projection().slices.x!.pr).toMatchObject({ number: 276, state: "OPEN", error: "gh: rate limited" });
+  });
+
   it("does not throw while emitting change spans (no-op when telemetry off)", async () => {
     const store = fakeStore();
     store.append({ source: "legate", type: "slice.dispatched", sliceId: "x", branch: "smithy/forge/x", sessionId: "w1" } as AppendEventInput);

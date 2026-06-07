@@ -1,7 +1,7 @@
 import type { LoopState } from "../../legate/loop/state/types.js";
 import { isWorkerSession, type WorkerSummary } from "../../legate/loop/pure/session.js";
 import {
-  prObservationRegresses,
+  nextPrSnapshot,
   type EventBody,
   type ObservedSession,
   type SystemState,
@@ -88,19 +88,14 @@ export function diffObserved(prev: SystemState, loop: LoopState): EventBody[] {
   // Per-slice PR + recent-output observations.
   for (const [sliceId, ext] of Object.entries(loop.perSlice)) {
     const prior = prev.slices[sliceId];
-    // Suppress an observation that would REGRESS a known PR back to a numberless
-    // None snapshot (#288): a merged PR's branch is deleted, so the branch-
-    // rediscovery fallback returns `{skipped: missing_pr_number}` — emitting that
-    // would overwrite the tracked PR number and strand the slice (it then
-    // re-discovers by a branch that no longer exists, forever). The PR stays
-    // tracked by number, so the next tick's by-number query still observes the
-    // terminal MERGED/CLOSED. The reducer holds the same guard for replay/the
-    // legate's fold; suppressing here keeps the log itself free of None blips.
-    if (
-      ext.pr !== undefined &&
-      !jsonEq(prior?.pr, ext.pr) &&
-      !prObservationRegresses(prior?.pr, ext.pr)
-    ) {
+    // Emit a slice.pr.changed iff the observation would actually CHANGE the stored
+    // PR snapshot under the #288 monotonic-fold rules ({@link nextPrSnapshot}, the
+    // SAME rule the reducer applies). This suppresses the branch-deletion None blip
+    // (a merged PR's branch is deleted, so rediscovery returns `{skipped}` — folding
+    // it would null the tracked number and strand the slice) yet still emits a
+    // concrete MERGED/CLOSED and a surfaced query error, and stays idempotent (a
+    // repeated identical observation folds to the same value → no event).
+    if (ext.pr !== undefined && !jsonEq(prior?.pr, nextPrSnapshot(prior?.pr, ext.pr))) {
       out.push({ type: "slice.pr.changed", sliceId, pr: ext.pr });
     }
     if (ext.recentOutput !== undefined && !jsonEq(prior?.recentOutput, ext.recentOutput)) {

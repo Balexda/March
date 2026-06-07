@@ -117,6 +117,28 @@ describe("diffObserved", () => {
     expect(bodies).toContainEqual({ type: "slice.pr.changed", sliceId: "s1", pr: { skipped: true, reason: "missing_pr_number" } });
   });
 
+  it("emits a query error against a tracked PR (surfaces query-failed) and keeps the number (#292 review)", () => {
+    const prevState = applyDiff(emptySystemState(), loop({
+      perSlice: { s1: { pr: { number: 276, state: "OPEN" } } },
+    }));
+    // The error observation is NOT suppressed — it must reach the legate so babysit
+    // can emit query-failed (a real auth/rate failure must surface).
+    const errored = diffObserved(prevState, loop({ perSlice: { s1: { pr: { error: "gh: rate limited" } } } }));
+    expect(errored).toEqual([{ type: "slice.pr.changed", sliceId: "s1", pr: { error: "gh: rate limited" } }]);
+    // …and folding it keeps the number/state while attaching the error.
+    const folded = applyDiff(prevState, loop({ perSlice: { s1: { pr: { error: "gh: rate limited" } } } }));
+    expect(folded.slices.s1.pr).toEqual({ number: 276, state: "OPEN", error: "gh: rate limited" });
+  });
+
+  it("is idempotent on a repeated identical query error (#292 review)", () => {
+    const prevState = applyDiff(emptySystemState(), loop({
+      perSlice: { s1: { pr: { number: 1, state: "OPEN" } } },
+    }));
+    const afterErr = applyDiff(prevState, loop({ perSlice: { s1: { pr: { error: "boom" } } } }));
+    // The same error again folds to the same snapshot → no second event.
+    expect(diffObserved(afterErr, loop({ perSlice: { s1: { pr: { error: "boom" } } } }))).toEqual([]);
+  });
+
   it("no longer emits state.error / state.ok (Herald does not read state.json, #176)", () => {
     // Even with a stateError on the snapshot, the retired emission is gone; the
     // reducer still folds those types for replay of pre-#176 logs.

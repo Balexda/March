@@ -159,12 +159,50 @@ describe("reduce / fold", () => {
     const merged = foldEvents([
       ev({ type: "slice.pr.changed", sliceId: "s1", pr: { number: 9, state: "MERGED" } }),
     ]);
-    // A numberless error/None snapshot must not un-merge the slice and un-archive it.
+    // A numberless error/None snapshot must not un-merge the slice and un-archive it
+    // — and an error against an ALREADY-terminal PR is dropped clean (no point
+    // surfacing query-failed on a merged PR), not attached.
     const afterError = foldEvents(
       [ev({ type: "slice.pr.changed", sliceId: "s1", pr: { error: "gh timed out" } })],
       merged,
     );
     expect(afterError.slices.s1.pr).toEqual({ number: 9, state: "MERGED" });
+  });
+
+  it("surfaces a transient query error on a known OPEN PR without losing the number (#292 review)", () => {
+    seq = 0;
+    const tracked = foldEvents([
+      ev({ type: "slice.pr.changed", sliceId: "s1", pr: { number: 276, state: "OPEN" } }),
+    ]);
+    // A `gh pr view` failure (auth/rate/network) against a tracked PR must NOT be
+    // swallowed: the number/state are kept (so it stays queryable next tick, #288)
+    // AND the error is attached (so the legate's babysit emits its `query-failed`
+    // action instead of acting on a silently-stale OPEN snapshot).
+    const errored = foldEvents(
+      [ev({ type: "slice.pr.changed", sliceId: "s1", pr: { error: "gh: rate limited" } })],
+      tracked,
+    );
+    expect(errored.slices.s1.pr).toEqual({ number: 276, state: "OPEN", error: "gh: rate limited" });
+    // A later successful query is concrete, so it wins and clears the error.
+    const recovered = foldEvents(
+      [ev({ type: "slice.pr.changed", sliceId: "s1", pr: { number: 276, state: "MERGED" } })],
+      errored,
+    );
+    expect(recovered.slices.s1.pr).toEqual({ number: 276, state: "MERGED" });
+  });
+
+  it("treats a PR number of '0' as no number, not a concrete observation (#292 review)", () => {
+    seq = 0;
+    // An observation carrying the invalid number "0" must not count as concrete —
+    // it would otherwise defeat the regression guard and overwrite a real tracked PR.
+    const tracked = foldEvents([
+      ev({ type: "slice.pr.changed", sliceId: "s1", pr: { number: 7, state: "OPEN" } }),
+    ]);
+    const bogus = foldEvents(
+      [ev({ type: "slice.pr.changed", sliceId: "s1", pr: { number: "0", state: "OPEN" } })],
+      tracked,
+    );
+    expect(bogus.slices.s1.pr).toEqual({ number: 7, state: "OPEN" });
   });
 
   it("still records the FIRST PR observation when none was known yet (#288 guard is regression-only)", () => {
