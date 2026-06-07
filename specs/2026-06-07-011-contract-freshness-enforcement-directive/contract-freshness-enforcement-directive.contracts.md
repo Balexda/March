@@ -71,7 +71,7 @@ sessions.
 
 ```text
 category: <presence|section-schema|config|freshness|invocation>
-ownerName: <optional owner>
+name: <optional owner>
 sourcePath: <optional repo-relative source path>
 contractPath: <optional repo-relative contract path>
 message: <bounded diagnostic>
@@ -89,7 +89,7 @@ message: <bounded diagnostic>
 | Field | Type | Description |
 |-------|------|-------------|
 | `category` | string | Stable failure category. |
-| `ownerName` | string | Contract owner when known. |
+| `name` | string | Contract owner when known. Mirrors F5's verdict diagnostic `name` field unchanged. |
 | `sourcePath` | repo-relative path | Source path when relevant. |
 | `contractPath` | repo-relative path | Contract path when relevant. |
 | `message` | bounded text | Concise failure explanation. |

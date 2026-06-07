@@ -77,7 +77,7 @@ guidance.
 | Field | Type | Required | Notes |
 |-------|------|----------|-------|
 | `category` | enum/string | Yes | Verdict category: presence, section-schema, config, freshness, or invocation. |
-| `ownerName` | string | Conditional | Present when the verdict associates the finding with a configured owner. |
+| `name` | string | Conditional | Present when the verdict associates the finding with a configured owner. Field name matches F5's `verdict_diagnostic.name` exactly, since the verdict is consumed unchanged. |
 | `sourcePath` | repo-relative path | Conditional | Present for source-drift findings. |
 | `contractPath` | repo-relative path | Conditional | Present for contract-related findings. |
 | `message` | bounded text | Yes | Concise diagnostic from the verdict or invocation wrapper. |
@@ -111,26 +111,29 @@ Validation rules:
 - One Enforcement Directive creates zero or more Contract Verdict Invocations across PRs.
 - One Contract Verdict Invocation produces one Enforcement Result.
 - One failed Enforcement Result contains one or more Verdict Diagnostics.
-- One SD-002 Decision Record governs how every Enforcement Result is acted on (block vs allow).
+- One SD-002 Decision Record provides milestone-scoped decision context for the directive (it records that the vehicle is a Smithy-agent directive, not a CI workflow). It does not switch runtime behavior: blocking is driven by the Enforcement Result's `blocksCompletion`, and whether enforcement is review-advisory or merge-blocking is left unsettled by SD-011.
 
 ## State Transitions
 
 ### Enforcement result lifecycle
 
-1. `pending` → `passed`
+`pending` is the pre-resolution phase before the verdict runs; the two terminal
+states are the `enforcement_result.status` values `pass` and `fail`.
+
+1. `pending` → `pass`
    - Trigger: The verdict command exits `0`.
    - Effects: The directive records the contract-enforcement step as satisfied for the PR.
 
-2. `pending` → `failed`
+2. `pending` → `fail`
    - Trigger: The verdict exits non-zero, cannot be executed, times out, or emits malformed output.
    - Effects: The directive blocks completion and reports bounded diagnostics.
 
-3. `failed` → `passed`
+3. `fail` → `pass`
    - Trigger: A later repair updates the drifted contract or source and reruns the verdict successfully.
    - Effects: The PR can proceed only after the new passing result.
 
 ## Identity & Uniqueness
 
 - A Contract Verdict Invocation is identified by `(repoRoot, command, changedFileInput, run id)` for audit purposes.
-- A Verdict Diagnostic is uniquely identified within one result by `(category, ownerName, sourcePath, contractPath, message)`.
+- A Verdict Diagnostic is uniquely identified within one result by `(category, name, sourcePath, contractPath, message)`.
 - The SD-002 Decision Record is a single, milestone-scoped record keyed by `(milestone, chosenVehicle)`.
