@@ -96,6 +96,72 @@ describe("runObservation", () => {
     expect(store.projection().slices.x!.pr).toMatchObject({ number: 12 });
   });
 
+  it("emits the terminal MERGED for a tracked PR whose branch is gone (#288)", async () => {
+    const store = fakeStore();
+    store.append({ source: "legate", type: "slice.dispatched", sliceId: "x", branch: "smithy/forge/x", sessionId: "w1" } as AppendEventInput);
+    const deps = (pr: unknown) =>
+      senseDeps({
+        listSessions: async () => [{ id: "w1", group: "legate-workers", status: "idle" }],
+        queryPr: async () => pr as any,
+        sessionOutput: async () => ({ output: "building" }),
+      });
+    // Tick 1: the PR is OPEN, tracked by number.
+    await runObservation({ store, profile: PROFILE, senseDeps: deps({ number: 276, state: "OPEN" }) });
+    expect(store.projection().slices.x!.pr).toMatchObject({ number: 276, state: "OPEN" });
+    // Tick 2: the PR merged. Its branch/steward are gone, but the number still
+    // resolves to MERGED — that terminal fact must reach the log so the legate archives.
+    const merged = await runObservation({ store, profile: PROFILE, senseDeps: deps({ number: 276, state: "MERGED" }) });
+    expect(merged.appended.map((e) => e.type)).toContain("slice.pr.changed");
+    expect(store.projection().slices.x!.pr).toMatchObject({ number: 276, state: "MERGED" });
+  });
+
+  it("suppresses a None blip that would null a tracked PR number (#288)", async () => {
+    const store = fakeStore();
+    store.append({ source: "legate", type: "slice.dispatched", sliceId: "x", branch: "smithy/forge/x", sessionId: "w1" } as AppendEventInput);
+    const deps = (pr: unknown) =>
+      senseDeps({
+        listSessions: async () => [{ id: "w1", group: "legate-workers", status: "idle" }],
+        queryPr: async () => pr as any,
+        sessionOutput: async () => ({ output: "building" }),
+      });
+    // Tick 1: PR tracked by number.
+    await runObservation({ store, profile: PROFILE, senseDeps: deps({ number: 276, state: "OPEN" }) });
+    // Tick 2: a transient numberless None observation (e.g. the branch was deleted
+    // and rediscovery came back empty) must NOT null the tracked PR — no event, and
+    // the projection keeps the number so the next by-number query can still see MERGED.
+    const blip = await runObservation({
+      store,
+      profile: PROFILE,
+      senseDeps: deps({ skipped: true, reason: "missing_pr_number" }),
+    });
+    expect(blip.appended.map((e) => e.type)).not.toContain("slice.pr.changed");
+    expect(store.projection().slices.x!.pr).toMatchObject({ number: 276, state: "OPEN" });
+  });
+
+  it("surfaces a query error on a tracked PR without losing the number (#292 review)", async () => {
+    const store = fakeStore();
+    store.append({ source: "legate", type: "slice.dispatched", sliceId: "x", branch: "smithy/forge/x", sessionId: "w1" } as AppendEventInput);
+    const deps = (queryPr: SenseDeps["queryPr"]) =>
+      senseDeps({
+        listSessions: async () => [{ id: "w1", group: "legate-workers", status: "idle" }],
+        queryPr,
+        sessionOutput: async () => ({ output: "" }),
+      });
+    await runObservation({ store, profile: PROFILE, senseDeps: deps(async () => ({ number: 276, state: "OPEN" })) });
+    // The next by-number query fails (auth/rate/network). senseObserved records
+    // `{error}`; the fold must surface it (so the legate's babysit acts) yet keep
+    // the number so the slice stays queryable.
+    const errored = await runObservation({
+      store,
+      profile: PROFILE,
+      senseDeps: deps(async () => {
+        throw new Error("gh: rate limited");
+      }),
+    });
+    expect(errored.appended.map((e) => e.type)).toContain("slice.pr.changed");
+    expect(store.projection().slices.x!.pr).toMatchObject({ number: 276, state: "OPEN", error: "gh: rate limited" });
+  });
+
   it("does not throw while emitting change spans (no-op when telemetry off)", async () => {
     const store = fakeStore();
     store.append({ source: "legate", type: "slice.dispatched", sliceId: "x", branch: "smithy/forge/x", sessionId: "w1" } as AppendEventInput);

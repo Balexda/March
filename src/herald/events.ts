@@ -265,6 +265,80 @@ function sliceOf(state: SystemState, sliceId: string): SliceState {
   return (state.slices[sliceId] ??= { sliceId });
 }
 
+/** The PR number on an observed PR snapshot (the `queryPrForBabysit` shape), or
+ *  null when the snapshot carries none (`undefined` / `{skipped}` / `{error}`). */
+export function prSnapshotNumber(pr: unknown): number | null {
+  const n = (pr as { number?: unknown } | undefined)?.number;
+  if (typeof n === "number" && Number.isInteger(n) && n > 0) return n;
+  // Match the numeric path: a PR number is a positive integer, so reject "0"
+  // (and any other non-positive string) instead of treating it as concrete.
+  if (typeof n === "string" && /^[0-9]+$/.test(n)) {
+    const parsed = Number(n);
+    return parsed > 0 ? parsed : null;
+  }
+  return null;
+}
+
+/** True when an observed PR snapshot carries a query error — the transient
+ *  `{error}` shape `queryPrForBabysit` returns when a `gh pr view` throws
+ *  (auth / rate-limit / network). Distinct from a numberless None blip. */
+export function prSnapshotErrored(pr: unknown): boolean {
+  const err = (pr as { error?: unknown } | undefined)?.error;
+  return err !== undefined && err !== null && err !== "";
+}
+
+/** True when an observed PR snapshot is in a terminal state (MERGED/CLOSED). */
+export function isTerminalPrSnapshot(pr: unknown): boolean {
+  const state = (pr as { state?: unknown } | undefined)?.state;
+  return state === "MERGED" || state === "CLOSED";
+}
+
+/**
+ * True when replacing the observed PR `prior` with `next` would REGRESS a known
+ * PR — i.e. `prior` carries a number or is terminal, but `next` has neither
+ * (a `{skipped: missing_pr_number}` / `{error}` / numberless snapshot).
+ *
+ * This is the merge-detection guard (#288): once a PR has merged, its branch is
+ * deleted, so Herald's branch-rediscovery fallback comes back empty and produces
+ * a numberless "None" observation. Folding that would overwrite the tracked PR
+ * number and strand the slice — it then re-discovers forever by a branch that no
+ * longer exists and never observes the terminal MERGED. A merged PR's number,
+ * however, stays queryable (`gh pr view <n>` returns MERGED forever), so keeping
+ * the number is exactly what lets the next by-number query reach the merge. A
+ * *concrete* observation (carrying a number, or a terminal state) is never a
+ * regression, so OPEN→MERGED/CLOSED still folds through normally.
+ */
+export function prObservationRegresses(prior: unknown, next: unknown): boolean {
+  const priorKnown = prSnapshotNumber(prior) !== null || isTerminalPrSnapshot(prior);
+  const nextConcrete = prSnapshotNumber(next) !== null || isTerminalPrSnapshot(next);
+  return priorKnown && !nextConcrete;
+}
+
+/**
+ * Resolve the PR snapshot to STORE given the prior stored snapshot and a new
+ * observation. Centralizes the #288 monotonic-fold rules so the diff (what event
+ * to emit) and the reducer (what to fold) can never disagree — the diff emits iff
+ * this would change the stored value, and the reducer assigns exactly this:
+ *
+ *  - a CONCRETE observation (carries a number, or is terminal MERGED/CLOSED)
+ *    always wins, so OPEN→MERGED/CLOSED still folds through;
+ *  - a transient `{error}` against a KNOWN, non-terminal PR keeps the tracked
+ *    number/state but ATTACHES the error, so the slice stays queryable next tick
+ *    (#288) yet the legate's babysit still emits its `query-failed` action instead
+ *    of silently acting on a stale OPEN snapshot (a real auth/rate/network failure
+ *    must surface). A subsequent success clears the error (it is a concrete win);
+ *  - any other regression — a numberless None blip from a deleted branch, or an
+ *    error against an already-terminal PR — keeps the prior snapshot untouched.
+ */
+export function nextPrSnapshot(prior: unknown, next: unknown): unknown {
+  if (next === undefined) return prior;
+  if (!prObservationRegresses(prior, next)) return next;
+  if (prSnapshotErrored(next) && prior !== undefined && !isTerminalPrSnapshot(prior)) {
+    return { ...(prior as Record<string, unknown>), error: (next as { error?: unknown }).error };
+  }
+  return prior;
+}
+
 /**
  * Fold one event into the projection. Mutates and returns `state` (the hot
  * projection is updated in place each tick); use {@link foldEvents} for an
@@ -282,15 +356,20 @@ export function reduce(state: SystemState, event: HeraldEvent): SystemState {
       state.stateError = null;
       state.statePresent = true;
       break;
-    case "slice.pr.changed":
+    case "slice.pr.changed": {
       // Skip a recovered (tombstoned) slice so a stale observation delta can't
-      // resurrect a ghost in-flight slice after recovery (#238).
+      // resurrect a ghost in-flight slice after recovery (#238). Otherwise fold the
+      // observation through the monotonic-fold rules (#288): a branch-deletion None
+      // blip can't null a known PR, but a concrete state (number / MERGED / CLOSED)
+      // and a surfaced query error both flow through. See {@link nextPrSnapshot}.
       if (!state.slices[event.sliceId]?.recovered) {
-        sliceOf(state, event.sliceId).pr = event.pr;
+        const slice = sliceOf(state, event.sliceId);
+        slice.pr = nextPrSnapshot(slice.pr, event.pr);
       }
       state.statePresent = true;
       state.stateError = null;
       break;
+    }
     case "slice.output.changed":
       if (!state.slices[event.sliceId]?.recovered) {
         sliceOf(state, event.sliceId).recentOutput = event.recentOutput;
