@@ -130,6 +130,41 @@ function failedChecks(statusCheckRollup: any) {
     }));
 }
 
+/**
+ * Reduce a PR's `reviews` nodes to human (non-bot) approval / changes-requested
+ * counts — the data the legate's merge gate needs. Mirrors the jq the (retired)
+ * `check-merge-readiness.sh` ran:
+ *  - a review is a bot's when `author.__typename === "Bot"` or its login ends in
+ *    `[bot]` (covers GitHub Apps that present as Users, e.g. Copilot);
+ *  - per human, only the latest non-COMMENTED/PENDING/DISMISSED review counts, so
+ *    a stale CHANGES_REQUESTED later superseded by an APPROVED doesn't block.
+ * Pure (no I/O) so it can be unit-tested without `gh`.
+ */
+export function summarizeReviews(
+  reviewNodes: any,
+): { human_approval_count: number; changes_requested_count: number } {
+  const nodes = Array.isArray(reviewNodes) ? reviewNodes : [];
+  const isBot = (node: any): boolean =>
+    node?.author?.__typename === "Bot" || String(node?.author?.login || "").endsWith("[bot]");
+  const meaningful = nodes
+    .filter((node) => !isBot(node))
+    .filter((node) => !["COMMENTED", "PENDING", "DISMISSED"].includes(String(node?.state)));
+  // Latest meaningful review per human login (by submittedAt).
+  const latestByLogin = new Map<string, any>();
+  for (const node of [...meaningful].sort((a, b) =>
+    String(a?.submittedAt).localeCompare(String(b?.submittedAt)),
+  )) {
+    latestByLogin.set(String(node?.author?.login || ""), node);
+  }
+  let approvals = 0;
+  let changesRequested = 0;
+  for (const node of latestByLogin.values()) {
+    if (node?.state === "APPROVED") approvals++;
+    else if (node?.state === "CHANGES_REQUESTED") changesRequested++;
+  }
+  return { human_approval_count: approvals, changes_requested_count: changesRequested };
+}
+
 function truncateText(text: any, max = 4000): string {
   const value = String(text || "");
   if (value.length <= max) return value;
@@ -204,10 +239,14 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
     return { args, options, owner, number };
   }
 
-  async function queryReviewThreads(owner: string | null, prNumberValue: any): Promise<any[]> {
-    if (!owner) return [];
+  async function queryReviewThreads(
+    owner: string | null,
+    prNumberValue: any,
+  ): Promise<{ threads: any[]; reviews: any[]; headRefOid: string | null; mergeStateStatus: string | null }> {
+    const empty = { threads: [], reviews: [], headRefOid: null, mergeStateStatus: null };
+    if (!owner) return empty;
     const [repoOwnerName, repoName] = owner.split("/");
-    if (!repoOwnerName || !repoName) return [];
+    if (!repoOwnerName || !repoName) return empty;
     const out = await execText("gh", [
       "api",
       "graphql",
@@ -218,9 +257,22 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
       "-F",
       `pr=${prNumberValue}`,
       "-f",
+      // One graphql call also fetches headRefOid (to pin --match-head-commit on the
+      // merge), mergeStateStatus (not exposed by `gh pr view --json`), and the
+      // reviews array with author type (for human approval / changes-requested
+      // counting) — all the data the legate's merge gate needs.
       `query=query($owner: String!, $name: String!, $pr: Int!) {
   repository(owner: $owner, name: $name) {
     pullRequest(number: $pr) {
+      headRefOid
+      mergeStateStatus
+      reviews(first: 100) {
+        nodes {
+          state
+          submittedAt
+          author { login __typename }
+        }
+      }
       reviewThreads(first: 100) {
         nodes {
           isResolved
@@ -241,8 +293,9 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
 }`,
     ]);
     const parsed = JSON.parse(out);
-    const nodes = parsed?.data?.repository?.pullRequest?.reviewThreads?.nodes || [];
-    return nodes
+    const pr = parsed?.data?.repository?.pullRequest || {};
+    const nodes = pr?.reviewThreads?.nodes || [];
+    const threads = nodes
       .filter((thread: any) => thread && thread.isResolved === false)
       .map((thread: any) => {
         const comments = Array.isArray(thread.comments?.nodes)
@@ -267,6 +320,12 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
           comment_ids: comments.map((comment: any) => comment.databaseId).filter((id: any) => id != null),
         };
       });
+    return {
+      threads,
+      reviews: pr?.reviews?.nodes || [],
+      headRefOid: pr?.headRefOid || null,
+      mergeStateStatus: pr?.mergeStateStatus || null,
+    };
   }
 
   async function queryPrForBabysit(slice: any, state: any): Promise<any> {
@@ -277,18 +336,21 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
     );
     if (request.skipped) return request;
     const summary = JSON.parse(await execText("gh", request.args, request.options));
-    const threads = await queryReviewThreads(request.owner || (await repoOwner(state)), summary.number);
+    const graphql = await queryReviewThreads(request.owner || (await repoOwner(state)), summary.number);
     const prAuthor = summary.author?.login || "";
-    const annotated = threads.map((thread: any) => ({
+    const annotated = graphql.threads.map((thread: any) => ({
       ...thread,
       needs_response: thread.last_author !== prAuthor,
     }));
+    const reviewSummary = summarizeReviews(graphql.reviews);
     return {
       number: summary.number,
       url: summary.url,
       state: summary.state,
       mergeable: summary.mergeable,
       head_branch: summary.headRefName,
+      head_sha: graphql.headRefOid,
+      merge_state_status: graphql.mergeStateStatus ? String(graphql.mergeStateStatus).toLowerCase() : null,
       title: summary.title,
       review_decision: summary.reviewDecision,
       checks: checksSummary(summary.statusCheckRollup),
@@ -296,6 +358,8 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
       unresolved_threads: annotated,
       thread_count: annotated.length,
       needs_response_count: annotated.filter((thread: any) => thread.needs_response).length,
+      human_approval_count: reviewSummary.human_approval_count,
+      changes_requested_count: reviewSummary.changes_requested_count,
     };
   }
 

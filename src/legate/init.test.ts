@@ -1438,8 +1438,9 @@ describe("legate module", () => {
       expect(prompt).toContain("legate.resume");
       expect(prompt).toContain("legate.error");
       expect(prompt).toContain("legate.babysit");
-      expect(prompt).toContain("legate.merge");
       expect(prompt).toContain("legate.issue");
+      // legate.merge retired — auto-merge moved into the legate service.
+      expect(prompt).not.toContain("legate.merge");
       // Defers strict mechanics to CLAUDE.md.
       expect(prompt).toMatch(/CLAUDE\.md is the authoritative spec/);
     });
@@ -1449,7 +1450,7 @@ describe("legate module", () => {
       expect(prompt).toMatch(/On this turn:/);
       expect(prompt).toMatch(/cold-start acknowledgement/);
       expect(prompt).toMatch(
-        /Online for March \(march\)\. Skills available: legate\.resume, legate\.error, legate\.babysit, legate\.merge, legate\.issue, legate\.unwedge\./,
+        /Online for March \(march\)\. Skills available: legate\.resume, legate\.error, legate\.babysit, legate\.issue, legate\.unwedge\./,
       );
       expect(prompt).toMatch(
         /Wait for a \[PROCESSOR\] loop escalation or operator message/,

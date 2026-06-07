@@ -2,6 +2,7 @@ import type { HandlerContext, HandlerResult, LoopState } from "../state/types.js
 import { emptyHandlerResult } from "../state/types.js";
 import { prNumber, workerBySessionId } from "../pure/session.js";
 import { hashText } from "../pure/hash.js";
+import { resolveMergeRequirements } from "../../../herald/profiles/merge-policy.js";
 import {
   conflictMessage,
   failedChecksSummary,
@@ -92,6 +93,16 @@ export interface BabysitDeps {
   sendMessage: (sessionId: string, message: string, traceKey?: string) => Promise<void>;
   /** Append + doorbell a judgement request; resolves to the event, or null if deduped. */
   requestJudgement: (input: JudgementInput) => Promise<any | null>;
+  /**
+   * Squash-merge a gated PR (`gh pr merge --squash --match-head-commit`). Optional
+   * so handlers/tests that never auto-merge can omit it; a `pr-auto-merge` decision
+   * with no `mergePr` seam escalates to the operator instead of merging.
+   */
+  mergePr?: (input: { prNumber: number | string; headSha: string; repoPath?: string }) => Promise<{
+    merged: boolean;
+    mergeSha?: string;
+    error?: string;
+  }>;
 }
 
 export type BabysitDecision =
@@ -112,12 +123,33 @@ export type BabysitDecision =
   | { kind: "review-fix"; sliceId: string; sessionId: string; pr: any; key: string; message: string; detail: string; threadIds: string[]; commentIds: string[] }
   | { kind: "review-fix-exhausted"; sliceId: string; sessionId: string; pr: any; requestKey: string; reason: string; detail: string; commentIds: string[] }
   | { kind: "ci-failure"; sliceId: string; sessionId: string; pr: any; requestKey: string; detail: string }
-  | { kind: "pr-open-clear"; sliceId: string; sessionId: string; pr: any };
+  | { kind: "pr-open-clear"; sliceId: string; sessionId: string; pr: any }
+  | { kind: "pr-auto-merge"; sliceId: string; sessionId: string; pr: any; key: string };
 
 // ---- pure helpers ---------------------------------------------------------
 
 function actionKey(action: string, pr: any, extra = ""): string {
   return [action, pr?.number || "", pr?.state || "", pr?.mergeable || "", pr?.checks || "", pr?.head_branch || "", extra].join(":");
+}
+
+/**
+ * The smithy verb that keys a slice's per-task-type merge policy (e.g. "cut").
+ * Tries, in order, the signals available on a slice — `command` is set at
+ * dispatch on a warm loop, but the Herald fold is deliberately thin and does NOT
+ * carry it, so after a cold-start rebuild we must fall back to the fold-durable
+ * branch (`smithy/<verb>/…`) and the sliceId suffix (`…-<verb>`), both of which
+ * the dispatch-id scheme guarantees. Undefined for non-smithy / unrecognized
+ * shapes → resolveMergeRequirements falls back to all-required.
+ */
+function taskTypeForSlice(sliceId: string, slice: any): string | undefined {
+  const fromCommand = String(slice?.command || "").match(/^smithy\.([a-z0-9_-]+)/i);
+  if (fromCommand) return fromCommand[1].toLowerCase();
+  const branch = String(slice?.actual_branch || slice?.branch || "");
+  const fromBranch = branch.match(/(?:^|\/)smithy\/([a-z0-9_-]+)\//i);
+  if (fromBranch) return fromBranch[1].toLowerCase();
+  const fromId = String(sliceId || "").match(/-(cut|forge|mark|render|fix|strike)$/i);
+  if (fromId) return fromId[1].toLowerCase();
+  return undefined;
 }
 
 function workerErrorRequestKey(sessionId: string, slice: any, recent: any): string {
@@ -481,8 +513,35 @@ function evaluatePr(
   }
 
   if (pr.checks === "PASS" && pr.needs_response_count === 0 && pr.mergeable !== "CONFLICTING") {
+    // Record the one-time transition into the all-clear `pr-open` stage (the loop
+    // confirmed CI/threads/conflicts). This happens regardless of the merge gate.
     if (TERMINAL_RESET_STAGES.includes(slice.stage)) {
       out.push({ kind: "pr-open-clear", sliceId, sessionId, pr });
+    }
+    // Auto-merge gate (#merge-requirements-by-type): on top of the all-clear
+    // precondition, enforce the human-review requirements — relaxable per task
+    // type by the profile's merge policy (e.g. cut drops the approval gate). An
+    // unknown verb / no policy resolves to all-required.
+    const req = resolveMergeRequirements(state.mergePolicy, taskTypeForSlice(sliceId, slice));
+    const approvalOk = !req.approval || Number(pr.human_approval_count ?? 0) >= 1;
+    const crOk = !req.changesRequested || Number(pr.changes_requested_count ?? 0) === 0;
+    // Only attempt the merge when GitHub itself says the button is available
+    // (mergeStateStatus == clean) — this enforces the repo's own branch-protection
+    // rules and avoids dispatching a merge GitHub will reject (DRAFT/BLOCKED/BEHIND).
+    const mergeStateOk = String(pr.merge_state_status || "").toLowerCase() === "clean";
+    if (approvalOk && crOk && mergeStateOk && pr.head_sha) {
+      // Dedup on every gate-relevant dynamic field, not head_sha alone (#283
+      // review): a failed/transient attempt must re-arm if the merge state clears,
+      // an approval is added, or a CR is dismissed without a new push — otherwise
+      // the PR could stay stuck in pr-open until the head SHA changes.
+      const key = actionKey(
+        "pr-auto-merge",
+        pr,
+        [pr.head_sha, pr.merge_state_status, pr.human_approval_count ?? "", pr.changes_requested_count ?? ""].join("|"),
+      );
+      if (!alreadyDispatched(slice, key)) {
+        out.push({ kind: "pr-auto-merge", sliceId, sessionId, pr, key });
+      }
     }
     return;
   }
@@ -700,6 +759,39 @@ export async function apply(decisions: BabysitDecision[], ctx: HandlerContext, s
         res.actions.push({ action: "pr-open", sliceId: d.sliceId, sessionId: d.sessionId, pr: d.pr, detail: "observed PR all clear" });
         res.mutated = true;
         break;
+      case "pr-auto-merge": {
+        if (!deps.mergePr) {
+          // No merge seam wired — surface it rather than silently stalling.
+          await fireRequest({ ts, slice, requestKey: actionKey("auto-merge-unconfigured", d.pr, String(d.pr.head_sha)), sliceId: d.sliceId, sessionId: d.sessionId, pr: d.pr, reason: "auto_merge_unconfigured", detail: `PR #${d.pr.number} cleared the merge gate but no merge seam is configured.` });
+          break;
+        }
+        // Mark BEFORE awaiting so a failed/transient attempt isn't retried against
+        // the same head SHA every tick (dedup key includes head_sha). A new worker
+        // push changes the SHA → a fresh key → a fresh attempt.
+        mark(slice, "pr-auto-merge", d.key, `auto-merging PR #${d.pr.number} (squash, sha=${d.pr.head_sha})`, ts);
+        let result: { merged: boolean; mergeSha?: string; error?: string };
+        try {
+          result = await deps.mergePr({ prNumber: d.pr.number, headSha: String(d.pr.head_sha), repoPath: state.repoPath });
+        } catch (err: any) {
+          result = { merged: false, error: err?.message || String(err) };
+        }
+        if (result.merged) {
+          slice.stage = "merged";
+          if (slice.pr) slice.pr.state = "MERGED";
+          slice.last_action_note = `merged via legate auto-merge — squash, sha=${result.mergeSha || d.pr.head_sha}`;
+          ctx.emitTransition?.({ type: "slice.stage.changed", sliceId: d.sliceId, stage: "merged" });
+          res.actions.push({ action: "pr-auto-merge", sliceId: d.sliceId, sessionId: d.sessionId, pr: d.pr, detail: `squash-merged PR #${d.pr.number} (sha=${result.mergeSha || d.pr.head_sha})` });
+          res.mutated = true;
+        } else {
+          // Merge failed (head-SHA race, transient gh error, repo rule). Leave the
+          // slice at pr-open and escalate; cleanup will sweep it if it actually
+          // merged out-of-band, the gate re-evaluates next tick otherwise.
+          slice.last_action_note = `auto-merge failed: ${result.error || "unknown error"}`;
+          await fireRequest({ ts, slice, requestKey: actionKey("auto-merge-failed", d.pr, String(d.pr.head_sha)), sliceId: d.sliceId, sessionId: d.sessionId, pr: d.pr, reason: "auto_merge_failed", detail: `auto-merge of PR #${d.pr.number} failed: ${result.error || "unknown error"}` });
+          res.mutated = true;
+        }
+        break;
+      }
     }
   }
 

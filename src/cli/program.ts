@@ -24,6 +24,7 @@ import {
   initLegate,
   LegateError,
 } from "../legate/init.js";
+import type { MergePolicy } from "../herald/profiles/merge-policy.js";
 import { DEFAULT_MANAGER_GROUP } from "../hatchery/spawn-handoff.js";
 import { DEFAULT_LOOP_PORT, runLoop } from "../legate/loop/index.js";
 import {
@@ -610,6 +611,152 @@ profile
           (err instanceof HeraldClientError ? err.message : (err as Error).message) + "\n",
         );
       }
+      process.exitCode = ERROR;
+    }
+  });
+
+// Per-task-type merge policy on a profile. The legate service reads this live
+// each tick, so changes take effect on the next tick — no re-init needed.
+const mergePolicyCmd = profile
+  .command("merge-policy")
+  .description("Inspect/configure a profile's per-task-type merge requirements");
+
+mergePolicyCmd
+  .command("show <profile>")
+  .description("Show a profile's merge policy. Resolves Herald via MARCH_HERALD_URL.")
+  .action(async (profileName: string) => {
+    commandHandled = true;
+    const { ProfileClient } = await import("../herald/profiles/client.js");
+    const { HeraldClientError } = await import("../herald/service/client.js");
+    try {
+      const record = await new ProfileClient().get(profileName.trim());
+      if (!record) {
+        process.stderr.write(`Unknown profile "${profileName}".\n`);
+        process.exitCode = ERROR;
+        return;
+      }
+      // An empty policy ({} — what `--clear` stores) resolves to all-required,
+      // so report it as "no policy set" rather than printing a misleading {}.
+      const mp = record.mergePolicy;
+      const hasPolicy =
+        !!mp &&
+        ((mp.defaults && Object.keys(mp.defaults).length > 0) ||
+          (mp.byTaskType && Object.keys(mp.byTaskType).length > 0));
+      if (!hasPolicy) {
+        console.log(`${record.profile}: all requirements enforced (no policy set).`);
+      } else {
+        console.log(`${record.profile}:`);
+        console.log(JSON.stringify(mp, null, 2));
+      }
+      process.exitCode = SUCCESS;
+    } catch (err) {
+      process.stderr.write(
+        (err instanceof HeraldClientError ? err.message : (err as Error).message) + "\n",
+      );
+      process.exitCode = ERROR;
+    }
+  });
+
+mergePolicyCmd
+  .command("set <profile>")
+  .description("Relax merge requirements for a profile. Resolves Herald via MARCH_HERALD_URL.")
+  .option("--task-type <verb>", "Apply the override to one smithy verb (e.g. cut); default: all task types")
+  .option("--no-approval", "Do not require a human approval")
+  .option("--no-changes-requested", "Do not require changes-requested reviews to be resolved")
+  .option("--json <json>", "Replace the entire policy from a JSON string")
+  .option("--clear", "Clear the policy (all requirements enforced)")
+  .action(async (profileName: string, opts: {
+    taskType?: string;
+    approval: boolean;
+    changesRequested: boolean;
+    json?: string;
+    clear?: boolean;
+  }) => {
+    commandHandled = true;
+    const { ProfileClient } = await import("../herald/profiles/client.js");
+    const { HeraldClientError } = await import("../herald/service/client.js");
+    const { validateMergePolicy } = await import("../herald/profiles/merge-policy.js");
+    try {
+      const client = new ProfileClient();
+      const existing = await client.get(profileName.trim());
+      if (!existing) {
+        process.stderr.write(`Unknown profile "${profileName}".\n`);
+        process.exitCode = ERROR;
+        return;
+      }
+
+      let policy: MergePolicy;
+      if (opts.clear) {
+        // Empty policy => every requirement falls back to the all-required default.
+        policy = {};
+      } else if (opts.json !== undefined) {
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(opts.json);
+        } catch (err) {
+          process.stderr.write(`--json is not valid JSON: ${(err as Error).message}\n`);
+          process.exitCode = ERROR;
+          return;
+        }
+        const validated = validateMergePolicy(parsed);
+        if (!validated.ok) {
+          process.stderr.write(`${validated.error}\n`);
+          process.exitCode = ERROR;
+          return;
+        }
+        policy = validated.policy;
+      } else {
+        // Build the override from the convenience flags. A negatable option is
+        // only "set" when its value is false (the relax case).
+        const override: Record<string, boolean> = {};
+        if (opts.approval === false) override.approval = false;
+        if (opts.changesRequested === false) override.changesRequested = false;
+        if (Object.keys(override).length === 0) {
+          process.stderr.write(
+            "Nothing to set — pass --no-approval, --no-changes-requested, --json, or --clear.\n",
+          );
+          process.exitCode = ERROR;
+          return;
+        }
+        const merged = structuredClone(existing.mergePolicy ?? {}) as {
+          defaults?: Record<string, boolean>;
+          byTaskType?: Record<string, Record<string, boolean>>;
+        };
+        if (opts.taskType) {
+          merged.byTaskType = {
+            ...(merged.byTaskType ?? {}),
+            [opts.taskType]: { ...(merged.byTaskType?.[opts.taskType] ?? {}), ...override },
+          };
+        } else {
+          merged.defaults = { ...(merged.defaults ?? {}), ...override };
+        }
+        const validated = validateMergePolicy(merged);
+        if (!validated.ok) {
+          process.stderr.write(`${validated.error}\n`);
+          process.exitCode = ERROR;
+          return;
+        }
+        policy = validated.policy;
+      }
+
+      const record = await client.register({
+        profile: existing.profile,
+        repoName: existing.repoName,
+        repoPath: existing.repoPath,
+        workerGroup: existing.workerGroup,
+        conductorName: existing.conductorName,
+        broodEndpoint: existing.broodEndpoint,
+        marchCliPath: existing.marchCliPath,
+        mode: existing.mode,
+        mergePolicy: policy,
+      });
+      console.log(`Updated merge policy for "${record.profile}":`);
+      console.log(JSON.stringify(record.mergePolicy ?? {}, null, 2));
+      process.exitCode = SUCCESS;
+    } catch (err) {
+      process.stderr.write(
+        (err instanceof HeraldClientError ? err.message : (err as Error).message) + "\n",
+      );
       process.exitCode = ERROR;
     }
   });

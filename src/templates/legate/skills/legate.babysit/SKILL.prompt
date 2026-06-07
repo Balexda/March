@@ -153,6 +153,6 @@ Do not use this skill to launch new workers. Smithy dispatch belongs to the loop
 
 - One Smithy step equals one PR. Never chain into new work from this skill.
 - `/smithy.fix` reuses the existing worker and PR.
-- Merge decisions belong to `legate.merge` or the operator.
+- Merge decisions belong to the deterministic legate service (gated auto-merge) or the operator.
 - Discovery, routine review-thread fixes, first conflict prompts, and all-clear transitions belong to the deterministic loop.
 - If acting would bypass a merge gate or duplicate a loop action, stop and surface `NEED:`.

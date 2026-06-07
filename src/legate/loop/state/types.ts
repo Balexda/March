@@ -5,6 +5,7 @@ import type { BroodRegisterResult, BroodTeardownOptions, BroodTeardownResult } f
 import type { RegisterSessionInput } from "../../../brood/service/types.js";
 import type { JudgementInput } from "../judgement.js";
 import type { TransitionEvent } from "../clients/herald.js";
+import type { MergePolicy } from "../../../herald/profiles/merge-policy.js";
 
 /**
  * Two-stage loop contracts.
@@ -52,6 +53,9 @@ export interface LoopState {
   repoPath: string | undefined;
   /** The deployment's worker group (for session classification in handlers). */
   workerGroup: string;
+  /** The profile's per-task-type merge policy (undefined = all requirements
+   *  enforced). Read by babysit's auto-merge gate; set per-profile each tick. */
+  mergePolicy?: MergePolicy;
   /** Agent-deck-shaped sessions (mapped from Castra). */
   sessions: any[];
   sessionsById: Map<string, any>;

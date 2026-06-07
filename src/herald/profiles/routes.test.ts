@@ -30,6 +30,16 @@ describe("validateRegisterProfile", () => {
     expect(validateRegisterProfile(body({ profile: "a".repeat(65) }))).toMatchObject({ ok: false });
     expect(validateRegisterProfile(body({ profile: "ok.name-1" }))).toMatchObject({ ok: true });
   });
+  it("accepts a valid merge policy and normalizes it onto the input", () => {
+    const result = validateRegisterProfile(body({ mergePolicy: { byTaskType: { cut: { approval: false } } } }));
+    expect(result).toMatchObject({ ok: true, input: { mergePolicy: { byTaskType: { cut: { approval: false } } } } });
+  });
+  it("rejects a malformed merge policy", () => {
+    expect(validateRegisterProfile(body({ mergePolicy: { byTaskType: { cut: { checks: false } } } }))).toMatchObject({
+      ok: false,
+    });
+    expect(validateRegisterProfile(body({ mergePolicy: 42 }))).toMatchObject({ ok: false });
+  });
 });
 
 describe.skipIf(!sqliteAvailable)("profile routes", () => {
@@ -68,6 +78,28 @@ describe.skipIf(!sqliteAvailable)("profile routes", () => {
     };
     const post = await app.inject({ method: "POST", url: "/profiles", payload: { profile: "march" } });
     expect(post.statusCode).toBe(400);
+  });
+
+  it("POST /profiles round-trips a merge policy; a malformed policy is 400", async () => {
+    const { app, store } = await buildApp();
+    close = async () => {
+      await app.close();
+      store.close();
+    };
+    const policy = { byTaskType: { cut: { approval: false } } };
+    const ok = await app.inject({ method: "POST", url: "/profiles", payload: body({ mergePolicy: policy }) });
+    expect(ok.statusCode).toBe(201);
+    expect(ok.json()).toMatchObject({ mergePolicy: policy });
+
+    const fetched = await app.inject({ method: "GET", url: "/profiles/march" });
+    expect(fetched.json()).toMatchObject({ mergePolicy: policy });
+
+    const bad = await app.inject({
+      method: "POST",
+      url: "/profiles",
+      payload: body({ mergePolicy: { byTaskType: { cut: { checks: false } } } }),
+    });
+    expect(bad.statusCode).toBe(400);
   });
 
   it("DELETE /profiles/:p soft-removes; ?all=1 still surfaces it", async () => {

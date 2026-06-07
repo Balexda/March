@@ -375,7 +375,10 @@ export const LEGATE_SKILLS = [
   "legate.resume",
   "legate.error",
   "legate.babysit",
-  "legate.merge",
+  // legate.merge retired: the auto-squash-merge gate moved into the legate
+  // SERVICE (src/legate/loop/handlers/babysit.ts), which has Herald access and
+  // reads the profile's per-task-type merge policy live. Keeping the conductor
+  // skill would risk a double-merge.
   "legate.issue",
   "legate.unwedge",
 ] as const;
@@ -1416,16 +1419,17 @@ What you operate on:
 - gh CLI — source of truth for high-level PR state.
 - The smithy.pr-review skill — source of truth for unresolved inline review threads.
 
-Six skills carry the Claude-side mechanics. Load each once on this turn so the auto-mode classifier registers their allowed-tools:
+Five skills carry the Claude-side mechanics. Load each once on this turn so the auto-mode classifier registers their allowed-tools:
 - legate.resume — worker session-restart recovery and Resume-from-summary picker clearing.
 - legate.error — opaque worker error recovery via inspection, login escalation, restart, or diagnostic prompt.
 - legate.babysit — PR judgement escalations from the deterministic loop (CI classification, repeated conflicts, send failures).
-- legate.merge — strict-gate auto-squash-merge.
 - legate.issue — operator-driven GitHub issue intake.
 - legate.unwedge — hatchery branch-collision + partial-work recovery (loop auto-recovers the safe cases; this skill handles open-PR / diverged-unknown / partial-work).
 
+Auto-squash-merge is NOT a conductor skill: the deterministic legate service owns the gated merge (it reads the profile's per-task-type merge policy and runs gh pr merge itself). Do not merge PRs from here.
+
 Auto-mode alignment — your routine actions are exactly:
-(a) Skill() to load one of the six skills above;
+(a) Skill() to load one of the five skills above;
 (b) bash invocation of a script under .claude/skills/legate.*/scripts/;
 (c) Read of state.json, task-log.md, LEARNINGS.md, POLICY.md, CLAUDE.md, meta.json, legate-loop logs/requests, or */SKILL.md inside this conductor dir;
 (d) a [STATUS] or NEED: reply to a loop escalation or operator message.
@@ -1436,8 +1440,8 @@ Anything else escalates via NEED: rather than executing — inline python3 -c / 
 
 On this turn:
 1. Read CLAUDE.md end-to-end.
-2. Run its cold-start checklist (read state.json if present; load legate.resume, legate.error, legate.babysit, legate.merge, legate.issue, and legate.unwedge once via the Skill tool). Do not edit state.json or task-log.md on cold start.
-3. Reply with the cold-start acknowledgement: "Online for {REPO_NAME} ({PROFILE}). Skills available: legate.resume, legate.error, legate.babysit, legate.merge, legate.issue, legate.unwedge. Will not invoke anything outside their scripts without escalating."
+2. Run its cold-start checklist (read state.json if present; load legate.resume, legate.error, legate.babysit, legate.issue, and legate.unwedge once via the Skill tool). Do not edit state.json or task-log.md on cold start.
+3. Reply with the cold-start acknowledgement: "Online for {REPO_NAME} ({PROFILE}). Skills available: legate.resume, legate.error, legate.babysit, legate.issue, legate.unwedge. Will not invoke anything outside their scripts without escalating."
 4. Wait for a [PROCESSOR] loop escalation or operator message. Do not poll on your own.`;
 
 /**

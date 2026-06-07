@@ -7,7 +7,7 @@ const childProcessMock = { execFile: vi.fn() };
 vi.mock("node:child_process", () => ({ execFile: childProcessMock.execFile }));
 
 // Import under test AFTER vi.mock so the stub is applied to its imports.
-const { buildSenseIo, createSenseIo } = await import("./sense-io.js");
+const { buildSenseIo, createSenseIo, summarizeReviews } = await import("./sense-io.js");
 
 /** Route execFile by command+args to canned stdout. */
 function routeExec(router: (cmd: string, args: string[]) => string): void {
@@ -140,6 +140,42 @@ describe("captureRecentSessionOutput", () => {
   });
 });
 
+describe("summarizeReviews", () => {
+  it("counts a human approval, excludes bots", () => {
+    expect(
+      summarizeReviews([
+        { state: "APPROVED", submittedAt: "2026-05-20T01:00:00Z", author: { login: "alice", __typename: "User" } },
+        { state: "APPROVED", submittedAt: "2026-05-20T02:00:00Z", author: { login: "copilot", __typename: "Bot" } },
+        { state: "APPROVED", submittedAt: "2026-05-20T03:00:00Z", author: { login: "dependabot[bot]", __typename: "User" } },
+      ]),
+    ).toEqual({ human_approval_count: 1, changes_requested_count: 0 });
+  });
+
+  it("uses each human's latest non-COMMENTED review (approval supersedes earlier CR)", () => {
+    expect(
+      summarizeReviews([
+        { state: "CHANGES_REQUESTED", submittedAt: "2026-05-20T01:00:00Z", author: { login: "bob", __typename: "User" } },
+        { state: "COMMENTED", submittedAt: "2026-05-20T02:00:00Z", author: { login: "bob", __typename: "User" } },
+        { state: "APPROVED", submittedAt: "2026-05-20T03:00:00Z", author: { login: "bob", __typename: "User" } },
+      ]),
+    ).toEqual({ human_approval_count: 1, changes_requested_count: 0 });
+  });
+
+  it("counts an outstanding changes-requested", () => {
+    expect(
+      summarizeReviews([
+        { state: "APPROVED", submittedAt: "2026-05-20T01:00:00Z", author: { login: "alice", __typename: "User" } },
+        { state: "CHANGES_REQUESTED", submittedAt: "2026-05-20T02:00:00Z", author: { login: "bob", __typename: "User" } },
+      ]),
+    ).toEqual({ human_approval_count: 1, changes_requested_count: 1 });
+  });
+
+  it("handles empty / non-array input", () => {
+    expect(summarizeReviews([])).toEqual({ human_approval_count: 0, changes_requested_count: 0 });
+    expect(summarizeReviews(undefined)).toEqual({ human_approval_count: 0, changes_requested_count: 0 });
+  });
+});
+
 describe("queryPrForBabysit", () => {
   it("assembles the babysit PR shape from gh pr view + review-thread graphql", async () => {
     routeExec((_cmd, args) => {
@@ -148,6 +184,13 @@ describe("queryPrForBabysit", () => {
           data: {
             repository: {
               pullRequest: {
+                headRefOid: "abc123",
+                mergeStateStatus: "BLOCKED",
+                reviews: {
+                  nodes: [
+                    { state: "APPROVED", submittedAt: "2026-05-20T04:00:00Z", author: { login: "alice", __typename: "User" } },
+                  ],
+                },
                 reviewThreads: {
                   nodes: [
                     {
@@ -202,10 +245,14 @@ describe("queryPrForBabysit", () => {
       number: 42,
       state: "OPEN",
       head_branch: "feature/a",
+      head_sha: "abc123",
+      merge_state_status: "blocked",
       review_decision: "CHANGES_REQUESTED",
       checks: "FAIL",
       thread_count: 1,
       needs_response_count: 1,
+      human_approval_count: 1,
+      changes_requested_count: 0,
     });
     expect(pr.failed_checks).toEqual([{ name: "lint", url: "http://ci/lint" }]);
     expect(pr.unresolved_threads[0]).toMatchObject({

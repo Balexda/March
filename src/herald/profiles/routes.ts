@@ -1,4 +1,5 @@
 import type { FastifyInstance } from "fastify";
+import { validateMergePolicy } from "./merge-policy.js";
 import type { ProfileStore } from "./store.js";
 import type { RegisterProfileInput } from "./types.js";
 
@@ -38,6 +39,13 @@ export function validateRegisterProfile(
   const workerGroup = requireString(body, "workerGroup");
   if (!workerGroup) return { ok: false, error: "workerGroup is required." };
 
+  let mergePolicy: RegisterProfileInput["mergePolicy"];
+  if (body.mergePolicy !== undefined && body.mergePolicy !== null) {
+    const result = validateMergePolicy(body.mergePolicy);
+    if (!result.ok) return { ok: false, error: result.error };
+    mergePolicy = result.policy;
+  }
+
   const input: RegisterProfileInput = {
     profile,
     repoName,
@@ -49,6 +57,7 @@ export function validateRegisterProfile(
     marchCliPath:
       typeof body.marchCliPath === "string" ? body.marchCliPath : undefined,
     mode: requireString(body, "mode") ?? undefined,
+    mergePolicy,
   };
   return { ok: true, input };
 }
