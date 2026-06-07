@@ -65,7 +65,7 @@ Recommended specification sequence:
 | F1 | Tag Taxonomy & Coverage Lint | — | `specs/2026-05-23-006-tag-taxonomy-and-coverage-lint` |
 | F3 | Quarantine Routing Scaffold | — | `specs/2026-06-03-007-quarantine-routing-scaffold` |
 | F4 | Test Layer Migration Policy | F1 | `specs/2026-06-06-009-test-layer-migration-policy` |
-| F2 | Staged CI Pipeline | F1, F3 | — |
+| F2 | Staged CI Pipeline | F1, F3 | `specs/2026-06-07-010-staged-ci-pipeline` |
 
 The tag vocabulary is frozen by the RFC, so it is a contract rather than a deliverable: F1 and F3 have no prerequisites and can be specced in parallel. F2 (the merged staged CI pipeline) depends on F1's tag encoding (to filter by tag) and on F3's directory-path contract (to exclude quarantined tests). F4 couples to F1's day-one tag disposition of the three tests. Operator-doc updates are not a separate feature — each feature keeps the relevant `CONTRIBUTING.md` references current as it lands, and F1 carries the one-time `docs/testing-strategy.md` trim.
 
