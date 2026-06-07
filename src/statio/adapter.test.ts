@@ -77,8 +77,30 @@ describe("statio gh forge adapter — repoInfo", () => {
   it("parses only the expected repo metadata shape", () => {
     expect(() => parseRepoInfoGhJson("not-json")).toThrow(StatioForgeError);
     expect(() => parseRepoInfoGhJson("[]")).toThrow(StatioForgeError);
-    expect(() =>
+  });
+
+  it("normalizes a missing or empty owner to the owner-unavailable fallback", () => {
+    expect(
       parseRepoInfoGhJson(JSON.stringify({ nameWithOwner: "", defaultBranchRef: { name: "main" } })),
-    ).toThrow(StatioForgeError);
+    ).toEqual({ owner: "", defaultBranch: "main" });
+    expect(
+      parseRepoInfoGhJson(JSON.stringify({ defaultBranchRef: { name: "main" } })),
+    ).toEqual({ owner: "", defaultBranch: "main" });
+  });
+
+  it("treats an unsplittable owner as owner-unavailable", async () => {
+    const adapter = createGhForgeAdapter({
+      runCommand: runnerReturning(
+        JSON.stringify({
+          nameWithOwner: "no-slash-here",
+          defaultBranchRef: { name: "main" },
+        }),
+      ),
+    });
+
+    await expect(adapter.repoInfo()).resolves.toEqual({
+      owner: "",
+      defaultBranch: "main",
+    });
   });
 });

@@ -26,6 +26,25 @@ export function buildRepoInfoArgs(): string[] {
   return ["repo", "view", "--json", "nameWithOwner,defaultBranchRef"];
 }
 
+/**
+ * Normalize `gh`'s `nameWithOwner` to the data model's `owner` field.
+ *
+ * The data model permits an empty `owner` as the documented "owner unavailable"
+ * fallback signal, and treats an owner that is not splittable into `owner/name`
+ * as unavailable downstream rather than a hard failure. A missing, empty, or
+ * unsplittable value therefore normalizes to `""` instead of throwing.
+ */
+function normalizeOwner(value: unknown): string {
+  if (typeof value !== "string") {
+    return "";
+  }
+  const slash = value.indexOf("/");
+  if (slash <= 0 || slash === value.length - 1) {
+    return "";
+  }
+  return value;
+}
+
 export function parseRepoInfoGhJson(text: string): RepoInfo {
   let parsed: unknown;
   try {
@@ -38,16 +57,13 @@ export function parseRepoInfoGhJson(text: string): RepoInfo {
     throw new StatioForgeError("gh repo view returned malformed repository metadata.");
   }
   const record = parsed as Record<string, unknown>;
-  const owner = record.nameWithOwner;
+  const owner = normalizeOwner(record.nameWithOwner);
   const defaultBranchRef = record.defaultBranchRef;
   const defaultBranch =
     defaultBranchRef && typeof defaultBranchRef === "object" && !Array.isArray(defaultBranchRef)
       ? (defaultBranchRef as Record<string, unknown>).name
       : undefined;
 
-  if (typeof owner !== "string" || owner.length === 0) {
-    throw new StatioForgeError("gh repo view did not return a repository owner.");
-  }
   if (typeof defaultBranch !== "string" || defaultBranch.length === 0) {
     throw new StatioForgeError("gh repo view did not return a default branch.");
   }
