@@ -1,5 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import { getBackend, listBackends } from "../../spawn/backends.js";
+import { isToolchainSelection, TOOLCHAIN_SELECTIONS } from "../../spawn/toolchain.js";
 import { isFinderAvailable, isOnPath } from "../../shared/deps.js";
 import { createCastraClientFromEnv } from "../../castra/client.js";
 import {
@@ -36,6 +37,21 @@ export function validateSpawnRequest(
   const repoPath = typeof body.repoPath === "string" ? body.repoPath.trim() : "";
   if (!repoPath) return { ok: false, error: "repoPath is required." };
 
+  // Validate the toolchain at the HTTP boundary against the same allow-list the
+  // CLI/profile route use. Untrusted input reaches resolveToolchain() server-
+  // side, where a non-string would throw on `override?.trim()`; a typo string
+  // would silently run the wrong (auto-detected) image. Reject both up front.
+  let toolchain: string | undefined;
+  if (body.toolchain !== undefined && body.toolchain !== null) {
+    if (typeof body.toolchain !== "string" || !isToolchainSelection(body.toolchain)) {
+      return {
+        ok: false,
+        error: `invalid toolchain "${String(body.toolchain)}": expected one of ${TOOLCHAIN_SELECTIONS.join(", ")}.`,
+      };
+    }
+    toolchain = body.toolchain;
+  }
+
   return {
     ok: true,
     request: {
@@ -50,6 +66,7 @@ export function validateSpawnRequest(
       taskType: body.taskType,
       taskName: body.taskName,
       sliceId: body.sliceId,
+      toolchain,
     },
   };
 }

@@ -31,6 +31,13 @@ export interface ProfileRecord {
   readonly mode?: string;
   /** Per-task-type override of the human-review merge gates (undefined = all required). */
   readonly mergePolicy?: MergePolicy;
+  /**
+   * Worker toolchain selection for this profile's spawns (issue #287). One of
+   * `auto` (default — detect the stack from repo markers), `node`, or `jvm`.
+   * Resolves the spawn's base image to `f(agent, toolchain)` so non-node repos
+   * (e.g. Kotlin/Gradle) can build in-container. Undefined = `auto`.
+   */
+  readonly toolchain?: string;
   readonly status: ProfileStatus;
   readonly createdAt: string;
   readonly updatedAt: string;
@@ -47,6 +54,8 @@ export interface RegisterProfileInput {
   readonly marchCliPath?: string | null;
   readonly mode?: string;
   readonly mergePolicy?: MergePolicy;
+  /** Worker toolchain selection (issue #287): `auto` (default) | `node` | `jvm`. */
+  readonly toolchain?: string;
   readonly status?: ProfileStatus;
 }
 

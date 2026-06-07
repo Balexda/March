@@ -12,8 +12,9 @@ import type {
 } from "./types.js";
 
 /** Profile-registry schema version. Bumped only on a breaking migration.
- *  v2 added the nullable `merge_policy` TEXT column (per-task-type merge gates). */
-export const PROFILE_SCHEMA_VERSION = 2;
+ *  v2 added the nullable `merge_policy` TEXT column (per-task-type merge gates).
+ *  v3 added the nullable `toolchain` TEXT column (issue #287 worker toolchain). */
+export const PROFILE_SCHEMA_VERSION = 3;
 
 /**
  * Absolute path to the profile-registry sqlite file. Deliberately a SEPARATE
@@ -36,6 +37,7 @@ const COLUMNS = [
   "march_cli_path",
   "mode",
   "merge_policy",
+  "toolchain",
   "status",
   "created_at",
   "updated_at",
@@ -52,6 +54,7 @@ CREATE TABLE IF NOT EXISTS profiles (
   march_cli_path TEXT,
   mode           TEXT,
   merge_policy   TEXT,
+  toolchain      TEXT,
   status         TEXT NOT NULL DEFAULT 'active',
   created_at     TEXT NOT NULL,
   updated_at     TEXT NOT NULL
@@ -92,6 +95,7 @@ function rowToRecord(row: SqliteRow): ProfileRecord {
     ["broodEndpoint", "brood_endpoint"],
     ["marchCliPath", "march_cli_path"],
     ["mode", "mode"],
+    ["toolchain", "toolchain"],
   ];
   for (const [field, column] of optional) {
     const value = row[column];
@@ -113,6 +117,7 @@ function recordToValues(record: ProfileRecord): Array<string | null> {
     record.marchCliPath ?? null,
     record.mode ?? null,
     record.mergePolicy != null ? JSON.stringify(record.mergePolicy) : null,
+    record.toolchain ?? null,
     record.status,
     record.createdAt,
     record.updatedAt,
@@ -167,6 +172,14 @@ export class ProfileStore {
       }
       this.db.prepare("UPDATE profile_schema_meta SET version = ?").run(2);
     }
+    // v2 → v3: add the nullable `toolchain` column (issue #287). Same guarded
+    // ALTER pattern as merge_policy — a no-op on a fresh DB that already has it.
+    if (row.version < 3) {
+      if (!this.hasColumn("profiles", "toolchain")) {
+        this.db.exec("ALTER TABLE profiles ADD COLUMN toolchain TEXT;");
+      }
+      this.db.prepare("UPDATE profile_schema_meta SET version = ?").run(3);
+    }
     // Future breaking changes branch on `row.version` here.
   }
 
@@ -191,6 +204,9 @@ export class ProfileStore {
       // Preserve an existing policy when a plain re-register (e.g. `march legate
       // init`) omits it; an explicit policy on the input replaces it.
       mergePolicy: input.mergePolicy ?? existing?.mergePolicy,
+      // Preserve an existing toolchain when a plain re-register omits it; an
+      // explicit value on the input replaces it (mirrors mergePolicy above).
+      toolchain: input.toolchain ?? existing?.toolchain,
       // A re-register defaults to reactivating (status omitted → active), so
       // `march legate init` on a previously-removed profile brings it back.
       status: input.status ?? "active",

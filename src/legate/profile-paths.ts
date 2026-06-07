@@ -59,5 +59,8 @@ export function metaForProfileRecord(
     brood_endpoint: rec.broodEndpoint ?? null,
     herald_endpoint: env.MARCH_HERALD_URL ?? null,
     mode: rec.mode ?? "terminal-pr-maintenance",
+    // Worker toolchain override (issue #287); the dispatch handler passes it on
+    // the spawn request so hatchery picks the right toolchain layer image.
+    toolchain: rec.toolchain ?? null,
   } as unknown as LoopMeta;
 }

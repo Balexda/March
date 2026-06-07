@@ -19,6 +19,8 @@ export interface SpawnRequest {
   readonly taskType?: string;
   readonly taskName?: string;
   readonly sliceId?: string;
+  /** Per-profile worker toolchain override (issue #287); `auto`/undefined → detect. */
+  readonly toolchain?: string;
 }
 
 export type JobStatus = "pending" | "running" | "succeeded" | "failed";

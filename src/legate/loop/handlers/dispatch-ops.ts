@@ -147,6 +147,9 @@ export async function launchHatcheryDispatch(item: any, sliceId: string, deps: D
     profile: deps.meta.profile,
     taskType: dispatchIdent.verb,
     taskName: dispatchIdent.stem,
+    // Per-profile worker toolchain override (issue #287); undefined/`auto` lets
+    // hatchery auto-detect the stack from the snapshot's marker files.
+    toolchain: typeof deps.meta.toolchain === "string" ? deps.meta.toolchain : undefined,
     // Use the caller's slice id so the spawn, the in-memory slice, and the emitted
     // transitions all correlate under one id (single source of truth).
     sliceId,

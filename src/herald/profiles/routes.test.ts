@@ -40,6 +40,22 @@ describe("validateRegisterProfile", () => {
     });
     expect(validateRegisterProfile(body({ mergePolicy: 42 }))).toMatchObject({ ok: false });
   });
+  it("accepts a valid toolchain and carries it onto the input", () => {
+    expect(validateRegisterProfile(body({ toolchain: "jvm" }))).toMatchObject({
+      ok: true,
+      input: { toolchain: "jvm" },
+    });
+    expect(validateRegisterProfile(body({ toolchain: "auto" }))).toMatchObject({ ok: true });
+  });
+  it("rejects an unknown toolchain", () => {
+    expect(validateRegisterProfile(body({ toolchain: "rust" }))).toMatchObject({ ok: false });
+    expect(validateRegisterProfile(body({ toolchain: 7 }))).toMatchObject({ ok: false });
+  });
+  it("omits toolchain when not provided", () => {
+    const result = validateRegisterProfile(body());
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.input.toolchain).toBeUndefined();
+  });
 });
 
 describe.skipIf(!sqliteAvailable)("profile routes", () => {
