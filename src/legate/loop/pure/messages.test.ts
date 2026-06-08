@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildSmithySpawnPrompt,
+  ciFixMessage,
   conflictMessage,
   failedChecksSummary,
   prDiscoverySince,
@@ -23,6 +24,19 @@ describe("messages pure builders", () => {
     expect(m).toContain("origin/trunk");
     expect(m).toContain('cd "/wt"');
     expect(m).toContain("PR #9");
+  });
+
+  it("ciFixMessage rebases onto the default and lists the failed checks (#303)", () => {
+    const m = ciFixMessage(
+      { worktree_path: "/wt" },
+      { number: 9, failed_checks: [{ name: "validate", url: "http://ci/1" }] },
+      { repo: { default_branch: "trunk" } },
+    );
+    expect(m).toContain("/smithy.fix");
+    expect(m).toContain("PR #9 has failing CI");
+    expect(m).toContain("git rebase origin/trunk");
+    expect(m).toContain('cd "/wt"');
+    expect(m).toContain("- validate: http://ci/1");
   });
 
   it("threadsNeedingResponse honors needs_response and pr-open recency", () => {

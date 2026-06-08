@@ -87,6 +87,25 @@ Resolve conflicted files by preserving both the latest default-branch intent and
 Reply with the new HEAD sha when the push completes. If the conflict reflects a genuine design disagreement, abort the rebase and summarize the conflicting paths and disagreement.`;
 }
 
+export function ciFixMessage(slice: any, pr: any, state: any): string {
+  const defaultBranch = state?.repo?.default_branch || "main";
+  const worktree = slice.worktree_path || "<worker worktree>";
+  return `/smithy.fix
+
+PR #${pr.number} has failing CI. Before assuming a real defect, rebase onto the latest default — this clears the common stale-main case — then re-run and fix any genuine failures:
+
+  cd "${worktree}"
+  git fetch origin
+  git rebase origin/${defaultBranch}
+  # resolve any conflicts, then:
+  git push --force-with-lease
+
+Failed checks:
+${failedChecksSummary(pr)}
+
+After the rebase, open each failed check's log (linked above), reproduce the failure locally, fix it in this PR branch, and push. Reply with the new HEAD sha once CI is green. If a check is failing for a reason outside this PR's diff (a genuine flake or an unrelated default-branch breakage), summarize which check and why so a human can decide.`;
+}
+
 export function reviewFixMessage(pr: any, threads: any[]): string {
   return `/smithy.fix
 

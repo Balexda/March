@@ -4,6 +4,7 @@ import { prNumber, workerBySessionId } from "../pure/session.js";
 import { hashText } from "../pure/hash.js";
 import { resolveMergeRequirements } from "../../../herald/profiles/merge-policy.js";
 import {
+  ciFixMessage,
   conflictMessage,
   failedChecksSummary,
   loginRequiredDetail,
@@ -45,6 +46,15 @@ const POST_DISPATCH = { initialNudgeMs: 5 * 60 * 1000, repeatNudgeMs: 5 * 60 * 1
 // after this many rounds is a real review dispute or a stuck worker — escalate
 // to the operator rather than keep poking the steward.
 const REVIEW_FIX_MAX_ROUNDS = 3;
+
+// CI-fix bound (#303): failing CI gets a deterministic steward fix first
+// (rebase onto the synced default + /smithy.fix with the failed-check summary),
+// mirroring the conflict path, rather than escalating straight to the
+// legate-agent. A "round" is one /smithy.fix dispatch against a distinct failing
+// head SHA — so it counts genuine worker attempts, not CI re-runs of the same
+// commit. After this many rounds still fail to clear CI, escalate to the
+// legate-agent ONCE (the real-PR-diff-failure case that needs human judgement).
+const CI_FIX_MAX_ROUNDS = 2;
 
 const STRANDED_MESSAGE = [
   "[STRANDED-STEWARD-NUDGE] The deterministic loop sees no PR for this slice yet.",
@@ -122,6 +132,7 @@ export type BabysitDecision =
   | { kind: "nudge-exhausted"; sliceId: string; sessionId: string; pr: any; requestKey: string; reason: string; detail: string }
   | { kind: "review-fix"; sliceId: string; sessionId: string; pr: any; key: string; message: string; detail: string; threadIds: string[]; commentIds: string[] }
   | { kind: "review-fix-exhausted"; sliceId: string; sessionId: string; pr: any; requestKey: string; reason: string; detail: string; commentIds: string[] }
+  | { kind: "ci-fix"; sliceId: string; sessionId: string; pr: any; key: string; message: string; detail: string }
   | { kind: "ci-failure"; sliceId: string; sessionId: string; pr: any; requestKey: string; detail: string }
   | { kind: "pr-open-clear"; sliceId: string; sessionId: string; pr: any }
   | { kind: "pr-auto-merge"; sliceId: string; sessionId: string; pr: any; key: string };
@@ -501,13 +512,66 @@ function evaluatePr(
   }
 
   if (pr.checks === "FAIL") {
+    // Fix-first, escalate-on-persist — the conflict path's shape applied to CI
+    // (#303). "Ask the steward to rebase + /smithy.fix" is safe to attempt
+    // deterministically and clears the common stale-main / fixable-failure
+    // cases; the legate-agent is only needed once bounded attempts don't take.
+    const key = actionKey("ci-fix", pr, String(pr.head_sha || ""));
+    if (alreadyDispatched(slice, key)) {
+      // A ci-fix for THIS head SHA already went out; the same SHA is still
+      // failing. Only re-nudge a worker that parked without pushing a fix
+      // (bounded + escalating) — don't count it as a fresh attempt.
+      const nd = postDispatchNudge(slice, workerStatus, ts, key);
+      if (nd.nudge) {
+        out.push({
+          kind: "post-dispatch-nudge",
+          sliceId,
+          sessionId,
+          pr,
+          key,
+          count: nd.count,
+          message: ciFixMessage(slice, pr, state.raw),
+          detail: `re-sent ci-fix prompt (nudge ${nd.count}/${POST_DISPATCH.escalateAfterNudges}) — worker ${workerStatus}`,
+        });
+      } else if (nd.escalate) {
+        out.push({
+          kind: "nudge-exhausted",
+          sliceId,
+          sessionId,
+          pr,
+          requestKey: actionKey("ci-nudges-exhausted", pr, key),
+          reason: "worker_unresponsive_after_ci_fix",
+          detail: `Sent ${nd.count} ci-fix nudges to PR #${pr.number} worker (session ${sessionId}); still ${workerStatus} with failing CI. Operator should attach and inspect.`,
+        });
+      }
+      return;
+    }
+    const rounds = Number(slice.ci_fix_rounds || 0);
+    if (rounds >= CI_FIX_MAX_ROUNDS) {
+      // Bounded steward attempts exhausted (a fresh failing head SHA after
+      // CI_FIX_MAX_ROUNDS /smithy.fix rounds). This is the real-PR-diff-failure
+      // case — escalate to the legate-agent for human judgement, exactly once.
+      if (!slice.ci_fix_escalated_at) {
+        out.push({
+          kind: "ci-failure",
+          sliceId,
+          sessionId,
+          pr,
+          requestKey: actionKey("ci-failure", pr, (pr.failed_checks || []).map((c: any) => `${c.name}:${c.url || ""}`).join(",")),
+          detail: `PR #${pr.number} still has failing CI after ${rounds} deterministic steward fix round(s) (rebase + /smithy.fix). This looks like a real PR-diff failure, not stale-main or a flake the loop can clear on its own. Failed checks:\n${failedChecksSummary(pr)}`,
+        });
+      }
+      return;
+    }
+    // Dispatch the steward to fix it first.
     out.push({
-      kind: "ci-failure",
+      kind: "ci-fix",
       sliceId,
       sessionId,
       pr,
-      requestKey: actionKey("ci-failure", pr, (pr.failed_checks || []).map((c: any) => `${c.name}:${c.url || ""}`).join(",")),
-      detail: `PR #${pr.number} has failing CI. The deterministic loop cannot distinguish stale-main, transient flake, and real PR-diff failure safely. Failed checks:\n${failedChecksSummary(pr)}`,
+      key,
+      message: ciFixMessage(slice, pr, state.raw),
+      detail: `sent ci-fix /smithy.fix (round ${rounds + 1}/${CI_FIX_MAX_ROUNDS}) for failing CI on PR #${pr.number}`,
     });
     return;
   }
@@ -744,8 +808,27 @@ export async function apply(decisions: BabysitDecision[], ctx: HandlerContext, s
         await fireRequest({ ts, slice, requestKey: d.requestKey, sliceId: d.sliceId, sessionId: d.sessionId, pr: d.pr, reason: d.reason, detail: d.detail });
         res.mutated = true;
         break;
+      case "ci-fix": {
+        try {
+          await deps.sendMessage(d.sessionId, d.message, d.sliceId);
+        } catch (err: any) {
+          await fireRequest({ ts, slice, requestKey: actionKey("ci-fix-send-failed", d.pr), sliceId: d.sliceId, sessionId: d.sessionId, pr: d.pr, reason: "processor failed to send CI-fix prompt", detail: err?.message || String(err) });
+          break;
+        }
+        slice.stage = "pr-in-rerun";
+        // Count this round only after a successful send so a transient outage is
+        // retried next tick rather than burning an attempt against the budget.
+        slice.ci_fix_rounds = Number(slice.ci_fix_rounds || 0) + 1;
+        mark(slice, "ci-fix", d.key, "processor sent CI-failure fix", ts);
+        ctx.emitTransition?.({ type: "slice.stage.changed", sliceId: d.sliceId, stage: "pr-in-rerun" });
+        res.actions.push({ action: "ci-fix", sliceId: d.sliceId, sessionId: d.sessionId, pr: d.pr, detail: d.detail });
+        res.mutated = true;
+        break;
+      }
       case "ci-failure":
+        slice.ci_fix_escalated_at = ts;
         await fireRequest({ ts, slice, requestKey: d.requestKey, sliceId: d.sliceId, sessionId: d.sessionId, pr: d.pr, reason: "CI failure requires Legate judgement", detail: d.detail });
+        res.mutated = true;
         break;
       case "pr-open-clear":
         slice.stage = "pr-open";
@@ -754,6 +837,9 @@ export async function apply(decisions: BabysitDecision[], ctx: HandlerContext, s
         // exhaustion latch so a future review thread starts a fresh budget (#224).
         delete slice.review_fix_rounds;
         delete slice.review_fix_escalated_at;
+        // Same for the CI-fix budget (#303): a later CI failure starts fresh.
+        delete slice.ci_fix_rounds;
+        delete slice.ci_fix_escalated_at;
         mark(slice, "pr-open", actionKey("pr-open", d.pr), "processor observed PR all clear", ts);
         ctx.emitTransition?.({ type: "slice.stage.changed", sliceId: d.sliceId, stage: "pr-open" });
         res.actions.push({ action: "pr-open", sliceId: d.sliceId, sessionId: d.sessionId, pr: d.pr, detail: "observed PR all clear" });
