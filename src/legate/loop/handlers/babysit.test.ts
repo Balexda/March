@@ -115,13 +115,60 @@ describe("babysit assess", () => {
     expect(kindsOf(assess(state))).toEqual(["pr-snapshot", "review-fix"]);
   });
 
-  it("escalates a CI failure for legate judgement", async () => {
+  it("dispatches a steward ci-fix on the first failing CI, before any legate judgement (#303)", async () => {
     const state = loopState({
       slices: { s: { worker_session_id: "w", stage: "pr-open", pr: { number: 5 } } },
       sessions: [session("w", "idle")],
-      perSlice: { s: { recentOutput: { output: "" }, pr: { number: 5, state: "OPEN", mergeable: "MERGEABLE", checks: "FAIL", needs_response_count: 0 } } },
+      perSlice: { s: { recentOutput: { output: "" }, pr: { number: 5, state: "OPEN", mergeable: "MERGEABLE", checks: "FAIL", needs_response_count: 0, head_sha: "sha1" } } },
+    });
+    expect(kindsOf(assess(state))).toEqual(["pr-snapshot", "ci-fix"]);
+  });
+
+  it("escalates failing CI to legate judgement only after the bounded steward rounds are spent (#303)", async () => {
+    // Two rounds already spent, and this is a fresh failing head SHA (not the
+    // one last dispatched against) → no more steward attempts, escalate once.
+    const state = loopState({
+      slices: {
+        s: {
+          worker_session_id: "w",
+          stage: "pr-in-rerun",
+          pr: { number: 5 },
+          ci_fix_rounds: 2,
+          last_processor_action: "ci-fix",
+          last_processor_action_key: ["ci-fix", 5, "OPEN", "MERGEABLE", "FAIL", "", "shaPREV"].join(":"),
+        },
+      },
+      sessions: [session("w", "idle")],
+      perSlice: { s: { recentOutput: { output: "" }, pr: { number: 5, state: "OPEN", mergeable: "MERGEABLE", checks: "FAIL", needs_response_count: 0, head_sha: "shaNEW" } } },
     });
     expect(kindsOf(assess(state))).toEqual(["pr-snapshot", "ci-failure"]);
+
+    // Once the escalation latch is set, it does not fire again (escalate once).
+    (state.slices.s as any).ci_fix_escalated_at = NOW;
+    expect(kindsOf(assess(state))).toEqual(["pr-snapshot"]);
+  });
+
+  it("re-nudges a parked worker on the same failing head SHA instead of burning a fresh ci-fix round (#303)", async () => {
+    const key = ["ci-fix", 5, "OPEN", "MERGEABLE", "FAIL", "", "sha1"].join(":");
+    const state = loopState({
+      slices: {
+        s: {
+          worker_session_id: "w",
+          stage: "pr-in-rerun",
+          pr: { number: 5 },
+          ci_fix_rounds: 1,
+          last_processor_action: "ci-fix",
+          last_processor_action_key: key,
+          last_processor_action_at: T_30M_AGO,
+        },
+      },
+      sessions: [session("w", "idle")],
+      perSlice: { s: { recentOutput: { output: "" }, pr: { number: 5, state: "OPEN", mergeable: "MERGEABLE", checks: "FAIL", needs_response_count: 0, head_sha: "sha1" } } },
+    });
+    const ds = assess(state);
+    expect(ds.find((d) => d.kind === "post-dispatch-nudge")).toMatchObject({ count: 1 });
+    expect(ds.find((d) => d.kind === "ci-fix")).toBeUndefined();
+    expect(ds.find((d) => d.kind === "ci-failure")).toBeUndefined();
   });
 
   it("post-dispatch nudges a parked worker on a re-dispatch of the same key", async () => {
@@ -275,6 +322,43 @@ describe("babysit apply", () => {
     expect(res.actions[0]).toMatchObject({ action: "conflict-fix" });
     // #175: a Herald slice.stage.changed transition event accompanies the move.
     expect(c.emitTransition).toHaveBeenCalledWith({ type: "slice.stage.changed", sliceId: "s", stage: "pr-resolving-conflicts" });
+  });
+
+  it("ci-fix sends the prompt, advances stage, counts the round (#303)", async () => {
+    const slice: any = { worker_session_id: "w", stage: "pr-open", pr: { number: 5 } };
+    const state = loopState({ slices: { s: slice } });
+    const c = ctx();
+    const d = deps();
+    const res = await apply([{ kind: "ci-fix", sliceId: "s", sessionId: "w", pr: { number: 5 }, key: "k", message: "MSG", detail: "x" }], c, state, d);
+    expect(d.sendMessage).toHaveBeenCalledWith("w", "MSG", "s");
+    expect(slice.stage).toBe("pr-in-rerun");
+    expect(slice.ci_fix_rounds).toBe(1);
+    expect(slice.last_processor_action_key).toBe("k");
+    expect(res.actions[0]).toMatchObject({ action: "ci-fix" });
+    expect(c.emitTransition).toHaveBeenCalledWith({ type: "slice.stage.changed", sliceId: "s", stage: "pr-in-rerun" });
+  });
+
+  it("ci-fix that fails to send escalates instead of advancing stage or counting a round (#303)", async () => {
+    const slice: any = { worker_session_id: "w", stage: "pr-open", pr: { number: 5 } };
+    const state = loopState({ slices: { s: slice } });
+    const d = deps({
+      sendMessage: vi.fn(async () => {
+        throw new Error("down");
+      }),
+    });
+    const res = await apply([{ kind: "ci-fix", sliceId: "s", sessionId: "w", pr: { number: 5 }, key: "k", message: "M", detail: "x" }], ctx(), state, d);
+    expect(slice.stage).toBe("pr-open"); // not advanced
+    expect(slice.ci_fix_rounds).toBeUndefined(); // round not counted
+    expect(res.requests).toHaveLength(1);
+    expect(res.actions).toHaveLength(0);
+  });
+
+  it("ci-failure escalation latches ci_fix_escalated_at so it fires once (#303)", async () => {
+    const slice: any = { worker_session_id: "w", stage: "pr-in-rerun", pr: { number: 5 }, ci_fix_rounds: 2 };
+    const state = loopState({ slices: { s: slice } });
+    const res = await apply([{ kind: "ci-failure", sliceId: "s", sessionId: "w", pr: { number: 5 }, requestKey: "rk", detail: "d" }], ctx(), state, deps());
+    expect(slice.ci_fix_escalated_at).toBe(NOW);
+    expect(res.requests).toHaveLength(1);
   });
 
   it("review-fix that fails to send escalates instead of advancing stage", async () => {
