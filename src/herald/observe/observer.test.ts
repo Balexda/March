@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { describeChangeSpan, runObservation, type ObserveStore } from "./observer.js";
 import { emptySystemState, foldEvents, reduce, type AppendEventInput, type EventBody, type HeraldEvent, type SystemState } from "../events.js";
 import type { SenseDeps } from "../../legate/loop/state/sense.js";
@@ -33,7 +33,6 @@ function senseDeps(over: Partial<SenseDeps> = {}): SenseDeps {
     meta,
     now: () => "2026-05-20T00:00:00Z",
     listSessions: async () => [],
-    syncDefaultBranch: async () => {},
     readSmithyStatus: async () => ({ records: [], graph: {} }),
     queryPr: async () => ({}),
     sessionOutput: async () => ({ output: "" }),
@@ -175,6 +174,79 @@ describe("runObservation", () => {
         }),
       }),
     ).resolves.toBeDefined();
+  });
+
+  it("syncs the default branch before observing when sync is wired (#300)", async () => {
+    const store = fakeStore();
+    const order: string[] = [];
+    const syncDefaultBranch = vi.fn(async (repoPath: string) => {
+      order.push(`sync:${repoPath}`);
+    });
+    await runObservation({
+      store,
+      profile: PROFILE,
+      syncDefaultBranch,
+      senseDeps: senseDeps({
+        readSmithyStatus: async () => {
+          order.push("read");
+          return { records: [], graph: {} };
+        },
+      }),
+    });
+    // The sync runs once, for this profile's repo path, BEFORE the smithy read.
+    expect(syncDefaultBranch).toHaveBeenCalledTimes(1);
+    expect(syncDefaultBranch).toHaveBeenCalledWith("/repo");
+    expect(order).toEqual(["sync:/repo", "read"]);
+  });
+
+  it("does not sync when sync is not wired (read-only mode, MARCH_HERALD_SYNC off)", async () => {
+    const store = fakeStore();
+    // No syncDefaultBranch on the deps → Herald never fetches; the read still runs.
+    const result = await runObservation({ store, profile: PROFILE, senseDeps: senseDeps() });
+    expect(result.observedAt).toBe("2026-05-20T00:00:00Z");
+  });
+
+  it("isolates a sync failure but makes it LOUD: warn + stderr, still observes, never throws (#300/#301)", async () => {
+    const store = fakeStore();
+    const warn = vi.fn();
+    const readSmithyStatus = vi.fn(async () => ({ records: [], graph: {} }));
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      const result = await runObservation({
+        store,
+        profile: PROFILE,
+        syncDefaultBranch: async () => {
+          throw new Error("cannot run ssh: No such file or directory");
+        },
+        senseDeps: senseDeps({ warn, readSmithyStatus }),
+      });
+      // Sync threw, but the tick completed against the local repo (read still ran).
+      expect(readSmithyStatus).toHaveBeenCalled();
+      expect(result.observedAt).toBe("2026-05-20T00:00:00Z");
+      // Channel 1: structured warn (→ herald.jsonl + OTLP).
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn.mock.calls[0]![0]).toContain("default-branch sync failed for p");
+      expect(warn.mock.calls[0]![0]).toContain("cannot run ssh");
+      // Channel 2: stderr (→ `docker logs march-herald`, which the pino file
+      // logger never reaches — the silence that hid the original bug).
+      expect(stderr).toHaveBeenCalledTimes(1);
+      expect(String(stderr.mock.calls[0]![0])).toContain("[herald] default-branch sync failed for p");
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
+  it("skips the sync when the profile's repo path is unknown", async () => {
+    const store = fakeStore();
+    const syncDefaultBranch = vi.fn(async () => {});
+    const noPathMeta = { worker_group: "legate-workers", repo: {} } as unknown as typeof meta;
+    await runObservation({
+      store,
+      profile: PROFILE,
+      syncDefaultBranch,
+      senseDeps: senseDeps({ meta: noPathMeta }),
+    });
+    expect(syncDefaultBranch).not.toHaveBeenCalled();
   });
 
   it("stamps appended events with the observation ts", async () => {

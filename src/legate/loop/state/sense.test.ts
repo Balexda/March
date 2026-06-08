@@ -10,7 +10,6 @@ function deps(over: Partial<SenseDeps> = {}): SenseDeps {
     meta,
     now: () => "2026-05-20T00:00:00Z",
     listSessions: async () => [],
-    syncDefaultBranch: async () => {},
     readSmithyStatus: async () => ({ records: [], graph: {} }),
     queryPr: async () => ({}),
     sessionOutput: async () => ({ output: "" }),
@@ -93,18 +92,16 @@ describe("senseFromHerald (Stage 1, Herald-backed)", () => {
     expect(state.raw.repo).toMatchObject({ path: "/repo" });
   });
 
-  it("reads smithy ready records WITHOUT syncing (Herald owns the sync)", async () => {
-    const syncDefaultBranch = vi.fn(async () => {});
+  it("reads smithy ready records as a pure read (Herald owns the sync, #300)", async () => {
+    // SenseDeps no longer carries a syncDefaultBranch — the legate never fetches
+    // (Herald owns the default-branch sync). The smithy read is pure and still
+    // surfaces the ready set from whatever the local checkout reports.
+    const readSmithyStatus = vi.fn(async () => ({ records: [{ path: "a", next_action: { command: "smithy.forge" } }], graph: {} }));
+    const sense = deps({ readSmithyStatus });
+    expect(sense).not.toHaveProperty("syncDefaultBranch");
     const herald = { consume: vi.fn(async () => emptySystemState()) };
-    const state = await senseFromHerald(
-      deps({
-        syncDefaultBranch,
-        readSmithyStatus: async () => ({ records: [{ path: "a", next_action: { command: "smithy.forge" } }], graph: {} }),
-      }),
-      herald,
-      prevRaw(),
-    );
-    expect(syncDefaultBranch).not.toHaveBeenCalled();
+    const state = await senseFromHerald(sense, herald, prevRaw());
+    expect(readSmithyStatus).toHaveBeenCalledWith("/repo");
     expect(state.smithy.ok).toBe(true);
     expect(state.smithy.queue.dispatchable).toBe(1);
   });

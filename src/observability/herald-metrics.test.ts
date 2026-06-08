@@ -4,6 +4,7 @@ import {
   recordHeraldObserve,
   recordHeraldObserveError,
   recordHeraldRequest,
+  recordHeraldSync,
   startHeraldHeartbeat,
 } from "./herald-metrics.js";
 
@@ -21,6 +22,8 @@ describe("herald-metrics", () => {
       recordHeraldObserve({ durationSeconds: 0.2, eventsByType: { "slice.pr.changed": 2, heartbeat: 0 } }),
     ).not.toThrow();
     expect(() => recordHeraldObserveError()).not.toThrow();
+    expect(() => recordHeraldSync("ok")).not.toThrow();
+    expect(() => recordHeraldSync("error")).not.toThrow();
   });
 
   it("startHeraldHeartbeat returns a no-op stopper when disabled", () => {

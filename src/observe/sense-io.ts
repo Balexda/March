@@ -37,10 +37,39 @@ export interface SyncResult {
 }
 
 /**
+ * Per-invocation `git -c …` config that rewrites GitHub SSH remotes to
+ * token-authenticated HTTPS, so a container with no ssh client / key / agent can
+ * still fetch over the network (#300/#301 live-validation: the `march-herald`
+ * image has no openssh, and `$HOME/.ssh` carried only a `config`, so
+ * `git fetch origin` died with "cannot run ssh"). The token is the same
+ * `GH_TOKEN` / `GITHUB_TOKEN` the rest of the stack uses for GitHub — passed
+ * PER COMMAND (never written to the repo's config / disk), so it isn't
+ * persisted. Returns `[]` when no token is set, in which case git uses the
+ * remote as-is (unchanged behaviour — host-credential / SSH paths still work).
+ *
+ * Both the scp-short (`git@github.com:`) and `ssh://` remote forms are rewritten
+ * to the SAME authenticated HTTPS base; git accumulates the repeated multi-valued
+ * `insteadOf` entries (verified) so both rules apply.
+ */
+export function gitHubAuthConfigArgs(env: NodeJS.ProcessEnv = process.env): string[] {
+  const token = (env.GH_TOKEN || env.GITHUB_TOKEN || "").trim();
+  if (!token) return [];
+  const https = `https://x-access-token:${token}@github.com/`;
+  return [
+    "-c",
+    `url.${https}.insteadOf=git@github.com:`,
+    "-c",
+    `url.${https}.insteadOf=ssh://git@github.com/`,
+  ];
+}
+
+/**
  * The shared observation I/O bundle. The legate loop uses {@link toSenseDeps}
  * for Stage 1 and calls {@link listSessions} / {@link queryPrForBabysit} /
- * {@link prMatchesSliceBranch} / {@link syncDefaultBranch} directly from its
- * dispatch/recovery paths; Herald uses {@link toSenseDeps} to feed `senseObserved`.
+ * {@link prMatchesSliceBranch} directly from its dispatch/recovery paths. Herald
+ * uses {@link toSenseDeps} to feed `senseObserved` AND calls {@link
+ * syncDefaultBranch} from its observe path — Herald owns the default-branch git
+ * sync (`MARCH_HERALD_SYNC`, #300), so the sync is no longer part of SenseDeps.
  */
 export interface SenseIo {
   listSessions(): Promise<any[] | { error: string }>;
@@ -465,9 +494,12 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
       }
     }
     if (!defaultBranch) throw new Error("could not determine default branch");
-    await execText("git", ["fetch", "origin", defaultBranch], { cwd: repoPath });
+    // Network ops (fetch/pull) get the SSH→HTTPS-token rewrite so they work in a
+    // container with no ssh client/key; `switch` is local and needs no auth.
+    const auth = gitHubAuthConfigArgs(env);
+    await execText("git", [...auth, "fetch", "origin", defaultBranch], { cwd: repoPath });
     await execText("git", ["switch", defaultBranch], { cwd: repoPath });
-    await execText("git", ["pull", "--ff-only", "origin", defaultBranch], { cwd: repoPath });
+    await execText("git", [...auth, "pull", "--ff-only", "origin", defaultBranch], { cwd: repoPath });
     if (state?.repo && !state.repo.default_branch) state.repo.default_branch = defaultBranch;
     return {
       default_branch: defaultBranch,
@@ -481,9 +513,9 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
       meta,
       now,
       listSessions: () => listSessions(),
-      syncDefaultBranch: async (repoPath: string, knownDefault?: string) => {
-        await syncDefaultBranch({ repo: { path: repoPath, default_branch: knownDefault } });
-      },
+      // The default-branch git sync is NOT part of the injected SenseDeps anymore
+      // (#300): Herald owns it and calls the bundle's `syncDefaultBranch` directly
+      // from its observe path; the legate never syncs.
       readSmithyStatus: (repoPath: string) => readSmithyStatus(repoPath),
       queryPr: (slice: any, state: any) => queryPrForBabysit(slice, state),
       discoverPr: (slice: any, state: any, _repoPath: string | undefined, sessionId: string) =>

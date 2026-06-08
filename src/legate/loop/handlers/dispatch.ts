@@ -44,8 +44,6 @@ export interface LaunchResult {
 
 /** I/O seams — wired to the Hatchery client + git/events at the coordinator. */
 export interface DispatchDeps {
-  /** Best-effort default-branch sync (already done in sense; re-run is cheap/no-op-safe). */
-  syncDefaultBranch?: (state: any) => Promise<void>;
   /** Drain pending Hatchery result files: complete / recover / escalate. */
   completePending: (state: any, ts: string) => Promise<CompletionResult>;
   /** Launch a fresh Hatchery codex spawn for a ready item; creates the slice. */
@@ -85,13 +83,8 @@ export async function apply(_decisions: DispatchDecision[], ctx: HandlerContext,
   if (!state.raw.slices || typeof state.raw.slices !== "object") state.raw.slices = {};
   const ts = ctx.ts;
 
-  // Best-effort: keep local default fresh before re-deriving selection (sense
-  // already synced; this is a cheap safety re-run and swallows failures).
-  try {
-    await deps.syncDefaultBranch?.(state.raw);
-  } catch {
-    /* fetch failures are noise on a healthy system — never escalate */
-  }
+  // The default-branch sync is owned by Herald (`MARCH_HERALD_SYNC`, #300); the
+  // legate never fetches, so dispatch reads the local checkout as-is.
 
   // 1. Drain pending Hatchery dispatches (complete / recover / escalate).
   const completed = await deps.completePending(state.raw, ts);

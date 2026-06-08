@@ -29,6 +29,7 @@ let observeDuration: Histogram | undefined;
 let eventsCounter: Counter | undefined;
 let adminEventsCounter: Counter | undefined;
 let observeErrors: Counter | undefined;
+let syncCounter: Counter | undefined;
 let heartbeatCounter: Counter | undefined;
 
 interface HeraldInstruments {
@@ -38,6 +39,7 @@ interface HeraldInstruments {
   events: Counter;
   adminEvents: Counter;
   observeErrors: Counter;
+  sync: Counter;
   heartbeat: Counter;
 }
 
@@ -68,6 +70,10 @@ function heraldInstruments(meter: Meter): HeraldInstruments {
       description: "Count of failed Herald observe ticks",
       unit: "1",
     });
+    syncCounter = meter.createCounter("march.herald.sync", {
+      description: "Count of Herald default-branch git syncs by outcome (ok|error)",
+      unit: "1",
+    });
     heartbeatCounter = meter.createCounter("march.herald.heartbeat", {
       description: "Liveness heartbeat ticks emitted by the herald service",
       unit: "1",
@@ -86,6 +92,7 @@ function heraldInstruments(meter: Meter): HeraldInstruments {
     events: eventsCounter!,
     adminEvents: adminEventsCounter!,
     observeErrors: observeErrors!,
+    sync: syncCounter!,
     heartbeat: heartbeatCounter!,
   };
 }
@@ -131,6 +138,19 @@ export function recordHeraldObserveError(): void {
   const otel = getActiveOtel();
   if (!otel.enabled) return;
   heraldInstruments(otel.getMeter()).observeErrors.add(1);
+}
+
+/**
+ * Record one Herald default-branch git sync, labelled by `outcome` (`ok` |
+ * `error`, low-cardinality). This is the durable, queryable signal that a sync
+ * happened — and, critically, the LOUD failure signal so a broken sync can't
+ * regress silently the way #299/#300 originally hid (`march.herald.sync{outcome="error"}`
+ * climbing while the default branch stays behind). No-op when telemetry is disabled.
+ */
+export function recordHeraldSync(outcome: "ok" | "error"): void {
+  const otel = getActiveOtel();
+  if (!otel.enabled) return;
+  heraldInstruments(otel.getMeter()).sync.add(1, { outcome });
 }
 
 /**
