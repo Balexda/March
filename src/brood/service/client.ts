@@ -1,4 +1,5 @@
 import { broodPort } from "../config.js";
+import type { SweepResult } from "./steward-removal.js";
 import type {
   ListSessionsFilter,
   RegisterSessionInput,
@@ -211,5 +212,17 @@ export class BroodClient {
       );
     }
     return body as TeardownResult;
+  }
+
+  /**
+   * Reap already-leaked Castra stewards (#304) — sessions Brood marked
+   * `torndown` but still live in Castra. Idempotent; returns what was reaped.
+   */
+  async sweep(): Promise<SweepResult> {
+    const { status, body } = await this.request("POST", "/sweep");
+    if (status !== 200) {
+      throw new BroodClientError(bodyError(body, `brood sweep failed (${status})`));
+    }
+    return body as SweepResult;
   }
 }

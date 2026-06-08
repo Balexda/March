@@ -5,22 +5,23 @@ import { getActiveOtel, initOtel } from "../../observability/otel.js";
 import { registerRoutes } from "./routes.js";
 import { sqliteAvailable } from "./sqlite.js";
 import { SessionStore } from "./store.js";
+import type { CastraStewardGateway } from "./steward-removal.js";
 import { BroodConflictError, BroodNotFoundError } from "./teardown.js";
 import type { TeardownRequest, TeardownResult } from "./types.js";
 
 const apps: FastifyInstance[] = [];
 const stores: SessionStore[] = [];
 
-async function buildApp(teardown?: (
-  id: string,
-  request: TeardownRequest,
-) => Promise<TeardownResult>): Promise<{
+async function buildApp(
+  teardown?: (id: string, request: TeardownRequest) => Promise<TeardownResult>,
+  stewardGateway?: CastraStewardGateway,
+): Promise<{
   app: FastifyInstance;
   store: SessionStore;
 }> {
   const store = new SessionStore({ dbPath: ":memory:" });
   const app = Fastify();
-  await registerRoutes(app, { store, teardown });
+  await registerRoutes(app, { store, teardown, stewardGateway });
   apps.push(app);
   stores.push(store);
   return { app, store };
@@ -242,5 +243,44 @@ describe.skipIf(!sqliteAvailable)("brood routes", () => {
     expect(ok.json()).toEqual(okResult);
     expect((await app.inject({ method: "POST", url: "/sessions/missing/teardown", payload: {} })).statusCode).toBe(404);
     expect((await app.inject({ method: "POST", url: "/sessions/live/teardown", payload: {} })).statusCode).toBe(409);
+  });
+
+  it("POST /sweep reaps leaked Castra stewards via the gateway (#304)", async () => {
+    const removed: string[] = [];
+    const gateway: CastraStewardGateway = {
+      async listSessions() {
+        return [
+          {
+            sessionId: "leaked",
+            title: "",
+            group: "",
+            branch: "feature/x",
+            worktreePath: "/wt/aaa",
+            createdAt: "",
+            status: "waiting",
+          },
+        ];
+      },
+      async removeSession({ sessionId }) {
+        removed.push(sessionId);
+        return { removed: true };
+      },
+    };
+    const { app, store } = await buildApp(undefined, gateway);
+    store.register({
+      id: "steward-old",
+      kind: "steward",
+      agentDeckSessionId: "steward-old",
+      profile: "smithy",
+      worktreePath: "/wt/aaa",
+      status: "torndown",
+    });
+
+    const res = await app.inject({ method: "POST", url: "/sweep" });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().reaped.map((r: { sessionId: string }) => r.sessionId)).toEqual([
+      "leaked",
+    ]);
+    expect(removed).toEqual(["leaked"]);
   });
 });

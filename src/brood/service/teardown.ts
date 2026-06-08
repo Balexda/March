@@ -6,8 +6,12 @@ import {
   type BroodChildSpan,
 } from "../../observability/brood-trace.js";
 import { readSpawnContainerLogs } from "../../spawn/container-launch.js";
-import { createCastraClientFromEnv } from "../../castra/client.js";
 import type { SessionRepository } from "./repository.js";
+import {
+  defaultStewardGateway,
+  removeStewardViaCastra,
+  type StewardRemovalResult,
+} from "./steward-removal.js";
 import { broodArchiveDir } from "./store.js";
 import { hostTeardownSubstrate, type TeardownSubstrate } from "./substrate.js";
 import type {
@@ -42,10 +46,19 @@ export interface TeardownDeps {
    */
   substrate?: TeardownSubstrate;
   readContainerLogs?: (containerId: string) => string;
+  /**
+   * Remove the steward from Castra. Resolves the real live session(s) for the
+   * steward's worktree and returns a verifying outcome (`removed`/`absent`/
+   * `failed`) — teardown marks `torndown` only on the first two and DEFERS on
+   * `failed`. Defaults to {@link removeStewardViaCastra} over the env Castra
+   * client. See `steward-removal.ts` for the #304 id-mismatch rationale.
+   */
   removeSteward?: (input: {
     sessionId: string;
     profile?: string;
-  }) => Promise<{ removed: boolean }>;
+    worktreePath?: string;
+    branch?: string;
+  }) => Promise<StewardRemovalResult>;
   pathExists?: (p: string) => boolean;
   homeDir?: string;
   now?: () => string;
@@ -59,7 +72,9 @@ interface ResolvedDeps {
   removeSteward: (input: {
     sessionId: string;
     profile?: string;
-  }) => Promise<{ removed: boolean }>;
+    worktreePath?: string;
+    branch?: string;
+  }) => Promise<StewardRemovalResult>;
   pathExists: (p: string) => boolean;
   homeDir?: string;
   now: () => string;
@@ -67,22 +82,23 @@ interface ResolvedDeps {
 
 /**
  * Default steward removal — delegate to Castra (#153/#165), the interactive-
- * sessions host that owns agent-deck. Brood owns the worktree, so it asks Castra
- * to remove the session WITHOUT pruning the worktree (`pruneWorktree: false`)
- * and removes the worktree itself by exact path afterward. Throws
- * `CastraClientError` when Castra is unreachable — teardown then defers the
- * worktree/branch removal rather than orphaning a live session's checkout.
+ * sessions host that owns agent-deck. Brood owns the worktree, so removal asks
+ * Castra to drop the session WITHOUT pruning the worktree (`pruneWorktree:
+ * false`) and Brood removes the worktree itself by exact path afterward.
+ *
+ * Resolves the steward's REAL live session id from Castra's session list by exact
+ * worktree match rather than trusting the tracked id, which goes stale after a
+ * legate relaunch re-keys the steward (issue #304). Returns a verifying outcome:
+ * `failed` (Castra unreachable / removal errored) makes teardown DEFER instead of
+ * leaking; `absent` means Castra confirmed no session for this worktree.
  */
 async function defaultRemoveSteward(input: {
   sessionId: string;
   profile?: string;
-}): Promise<{ removed: boolean }> {
-  const castra = createCastraClientFromEnv();
-  return castra.removeSession({
-    profile: input.profile ?? "",
-    sessionId: input.sessionId,
-    pruneWorktree: false,
-  });
+  worktreePath?: string;
+  branch?: string;
+}): Promise<StewardRemovalResult> {
+  return removeStewardViaCastra(defaultStewardGateway(), input);
 }
 
 function resolveDeps(deps: TeardownDeps): ResolvedDeps {
@@ -243,12 +259,29 @@ export async function teardownSession(
         const res = await d.removeSteward({
           sessionId: steward.agentDeckSessionId ?? steward.id,
           profile: steward.profile,
+          // The spawn (`primary`) carries the canonical worktree/branch the
+          // steward shares; fall back to the steward row. Worktree is the
+          // #155-safe match key Castra removal resolves the real id from (#304).
+          worktreePath: primary.worktreePath ?? steward.worktreePath,
+          branch: primary.branch ?? steward.branch,
         });
-        steps.push({
-          step: "steward",
-          outcome: res.removed ? "ok" : "skipped",
-          detail: res.removed ? undefined : "already gone",
-        });
+        if (res.outcome === "failed") {
+          // Castra unreachable or the real session is still live — DEFER the
+          // worktree/branch removal and leave the row retryable. Do NOT mark
+          // torndown over an unconfirmed Castra removal (#304).
+          stewardRemovalFailed = true;
+          steps.push({ step: "steward", outcome: "failed", detail: res.detail });
+          warnings.push(`steward removal failed: ${res.detail ?? "unconfirmed"}`);
+        } else {
+          // `removed` — a real session was reaped; `absent` — Castra verified no
+          // session for this worktree. Either way the steward is gone, so it is
+          // safe to reclaim the worktree and mark torndown.
+          steps.push({
+            step: "steward",
+            outcome: res.outcome === "removed" ? "ok" : "skipped",
+            detail: res.outcome === "removed" ? res.detail : "already gone",
+          });
+        }
       } catch (err) {
         stewardRemovalFailed = true;
         steps.push({ step: "steward", outcome: "failed", detail: message(err) });

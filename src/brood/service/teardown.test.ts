@@ -80,7 +80,7 @@ function recordingDeps(
       if (options.stewardRemovesWorktree) {
         present.clear();
       }
-      return { removed: true };
+      return { outcome: "removed", removedIds: [input.sessionId] };
     },
     pathExists: (p) => present.has(p),
     ...overrides,
@@ -178,7 +178,7 @@ describe.skipIf(!sqliteAvailable)("teardownSession", () => {
     rec.deps.removeSteward = async (input) => {
       rec.calls.push(`steward:${input.sessionId}`);
       present = false; // castra reclaimed the shared worktree
-      return { removed: true };
+      return { outcome: "removed", removedIds: [input.sessionId] };
     };
 
     const result = await teardownSession(store, group.spawnId, { force: true }, rec.deps);
@@ -318,6 +318,52 @@ describe.skipIf(!sqliteAvailable)("teardownSession", () => {
     expect(rec.worktreeTargets.some((t) => t.worktreePath)).toBe(false);
     // ...and the registry row is left retryable (not torndown).
     expect(store.get(group.spawnId)?.status).toBe("tearing-down");
+    store.close();
+  });
+
+  it("defers (does not mark torndown) when steward removal returns failed", async () => {
+    // The verifying removal couldn't confirm Castra dropped the session — Brood
+    // must NOT mark torndown over an unconfirmed removal (#304).
+    const store = new SessionStore({ dbPath: ":memory:" });
+    const group = seedSpawnGroup(store);
+    const rec = recordingDeps(makeHome());
+    rec.deps.pathExists = (p) => p === group.worktreePath;
+    rec.deps.removeSteward = async () => ({
+      outcome: "failed",
+      detail: "castra list failed: Could not reach Castra",
+      removedIds: [],
+    });
+
+    const result = await teardownSession(store, group.spawnId, { force: true }, rec.deps);
+
+    expect(result.status).toBe("tearing-down");
+    expect(result.steps.find((s) => s.step === "steward")?.outcome).toBe("failed");
+    expect(result.steps.find((s) => s.step === "worktree")?.detail).toContain("deferred");
+    expect(store.get(group.spawnId)?.status).toBe("tearing-down");
+    expect(store.get(group.stewardId)?.status).not.toBe("torndown");
+    store.close();
+  });
+
+  it("marks torndown and passes the worktree match key when the steward is verified absent", async () => {
+    // `absent` = Castra confirmed no session for this worktree → safe to reclaim.
+    const store = new SessionStore({ dbPath: ":memory:" });
+    const group = seedSpawnGroup(store);
+    const rec = recordingDeps(makeHome());
+    rec.deps.pathExists = (p) => p === group.worktreePath;
+    let received: { worktreePath?: string; branch?: string } | undefined;
+    rec.deps.removeSteward = async (input) => {
+      received = { worktreePath: input.worktreePath, branch: input.branch };
+      return { outcome: "absent", removedIds: [] };
+    };
+
+    const result = await teardownSession(store, group.spawnId, { force: true }, rec.deps);
+
+    // Teardown handed the spawn's exact worktree/branch as the match key (#304).
+    expect(received?.worktreePath).toBe(group.worktreePath);
+    expect(received?.branch).toBe(group.branch);
+    expect(result.steps.find((s) => s.step === "steward")?.outcome).toBe("skipped");
+    expect(result.status).toBe("torndown");
+    expect(store.get(group.stewardId)?.status).toBe("torndown");
     store.close();
   });
 });

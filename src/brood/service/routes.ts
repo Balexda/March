@@ -9,6 +9,11 @@ import { startBroodSpan } from "../../observability/brood-trace.js";
 import { createCastraClientFromEnv } from "../../castra/client.js";
 import type { SessionRepository } from "./repository.js";
 import {
+  defaultStewardGateway,
+  sweepLeakedStewards,
+  type CastraStewardGateway,
+} from "./steward-removal.js";
+import {
   BroodConflictError,
   BroodNotFoundError,
   teardownSession,
@@ -31,6 +36,8 @@ export interface RoutesOptions {
     request: TeardownRequest,
     traceparent?: string,
   ) => Promise<TeardownResult>;
+  /** Override the Castra gateway the sweep uses (tests). Defaults to env client. */
+  readonly stewardGateway?: CastraStewardGateway;
 }
 
 const SESSION_KINDS: readonly SessionKind[] = ["spawn", "steward", "legate"];
@@ -272,6 +279,14 @@ export async function registerRoutes(
       return { error: `No session with id "${id}".` };
     }
     return record;
+  });
+
+  // Reap already-leaked Castra stewards (#304): sessions Brood marked `torndown`
+  // but that are still live in Castra because an earlier teardown removed the
+  // wrong id. Idempotent and safe to call periodically or by hand.
+  app.post("/sweep", async () => {
+    const gateway = opts.stewardGateway ?? defaultStewardGateway();
+    return sweepLeakedStewards(store, gateway);
   });
 
   app.post("/sessions/:id/teardown", async (request, reply) => {

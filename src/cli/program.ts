@@ -1068,6 +1068,45 @@ brood
   );
 
 brood
+  .command("sweep")
+  .description(
+    "Reap leaked Castra stewards (Brood=torndown but still live in Castra)",
+  )
+  .option("--json", "Print the sweep result as JSON")
+  .action(async (opts: { json?: boolean }) => {
+    commandHandled = true;
+    const { BroodClient, BroodClientError } = await import(
+      "../brood/service/client.js"
+    );
+    try {
+      const result = await new BroodClient().sweep();
+      if (opts.json) {
+        console.log(JSON.stringify(result, null, 2));
+      } else {
+        for (const reaped of result.reaped) {
+          console.log(
+            `reaped ${reaped.sessionId} (${reaped.profile}) ${reaped.worktreePath}`,
+          );
+        }
+        for (const failure of result.failures) {
+          process.stderr.write(
+            `failed ${failure.sessionId} (${failure.profile}): ${failure.detail}\n`,
+          );
+        }
+        console.log(
+          `swept ${result.scannedProfiles.length} profile(s): ${result.reaped.length} reaped, ${result.failures.length} failed`,
+        );
+      }
+      process.exitCode = SUCCESS;
+    } catch (err) {
+      const message =
+        err instanceof BroodClientError ? err.message : (err as Error).message;
+      process.stderr.write(message + "\n");
+      process.exitCode = ERROR;
+    }
+  });
+
+brood
   .command("list")
   .description("List sessions Brood is tracking")
   .option("--kind <kind>", "Filter by kind: spawn | steward | legate")
