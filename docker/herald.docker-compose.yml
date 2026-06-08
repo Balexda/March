@@ -21,9 +21,20 @@
 #                     when the registry is empty. Optional now that profiles are
 #                     registered via `march legate init` (Herald is the source of
 #                     truth). Defaults to MARCH_LEGATE_LOOP_META.
-#   MARCH_HERALD_SYNC set to 1 to let Herald own the default-branch git sync.
-#                     LEFT UNSET here (PR1 default = read-only) so Herald never
-#                     fights a still-polling legate.
+#   MARCH_HERALD_SYNC set to 1 to let Herald own the default-branch git sync —
+#                     each observe tick Herald fetches + fast-forwards every
+#                     profile's default branch so freshly-merged work surfaces
+#                     (#300). Leave UNSET only if a legacy legate is still
+#                     syncing; in the current model the legate never syncs, so
+#                     production should set this to 1.
+#   GH_TOKEN / GITHUB_TOKEN
+#                     GitHub token (the same one the rest of the stack uses).
+#                     With MARCH_HERALD_SYNC=1 Herald rewrites SSH remotes
+#                     (git@github.com:…) to token-authenticated HTTPS at fetch
+#                     time (#301), so the container needs NO ssh client / key /
+#                     agent. Required for private repos and for any host whose
+#                     remotes are SSH-configured; without a token Herald falls
+#                     back to the remote as-is (SSH), which fails in this image.
 #   MARCH_HERALD_ADMIN_TOKEN
 #                     break-glass operator token for POST /admin/events (#265).
 #                     LEAVE UNSET in prod — while unset the admin route 404s and is
@@ -64,8 +75,13 @@ services:
       - HOME=${MARCH_HOST_HOME:-/home/jmbattista}
       # Herald observes the same deployment as the legate; reuse its meta.
       - MARCH_HERALD_META=${MARCH_HERALD_META:-${MARCH_LEGATE_LOOP_META:-}}
-      # PR1: read-only. Set to 1 at the PR2 cutover when Herald owns the git sync.
+      # Set to 1 so Herald owns the default-branch git sync (#300). The legate no
+      # longer syncs, so production should enable this.
       - MARCH_HERALD_SYNC=${MARCH_HERALD_SYNC:-}
+      # GitHub token: with sync on, Herald rewrites SSH remotes to token-auth
+      # HTTPS at fetch time (#301) so no ssh client/key is needed in-container.
+      - GH_TOKEN=${GH_TOKEN:-}
+      - GITHUB_TOKEN=${GITHUB_TOKEN:-}
       # Break-glass admin endpoint (#265): UNSET by default so POST /admin/events
       # 404s and is invisible. Uncomment + set ONLY while an operator is authoring a
       # corrective event, then comment it out again and recreate the container.

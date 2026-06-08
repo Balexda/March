@@ -7,7 +7,7 @@ const childProcessMock = { execFile: vi.fn() };
 vi.mock("node:child_process", () => ({ execFile: childProcessMock.execFile }));
 
 // Import under test AFTER vi.mock so the stub is applied to its imports.
-const { buildSenseIo, createSenseIo, summarizeReviews } = await import("./sense-io.js");
+const { buildSenseIo, createSenseIo, gitHubAuthConfigArgs, summarizeReviews } = await import("./sense-io.js");
 
 /** Route execFile by command+args to canned stdout. */
 function routeExec(router: (cmd: string, args: string[]) => string): void {
@@ -460,5 +460,66 @@ describe("syncDefaultBranch (Herald-owned, via the raw bundle — #300)", () => 
     const joined = calls.map((c) => c.join(" "));
     expect(joined).toContain("git fetch origin master");
     expect(joined).toContain("git pull --ff-only origin master");
+  });
+
+  it("rewrites SSH remotes to token-auth HTTPS on the network ops when a token is set (#301)", async () => {
+    const calls: string[][] = [];
+    routeExec((cmd, args) => {
+      calls.push([cmd, ...args]);
+      if (args.includes("rev-parse")) return "deadbeef\n";
+      return "";
+    });
+    // env-injected token → the fetch/pull carry the insteadOf rewrite; the local
+    // `switch` does not need auth.
+    const io = createSenseIo({ meta: meta(), castra: fakeCastra(), env: { GH_TOKEN: "ghs_abc" } as NodeJS.ProcessEnv });
+    await io.syncDefaultBranch({ repo: { path: "/repo", default_branch: "main" } });
+    const fetch = calls.find((c) => c.includes("fetch"))!;
+    const pull = calls.find((c) => c.includes("pull"))!;
+    const sw = calls.find((c) => c.includes("switch"))!;
+    const rewrite = "url.https://x-access-token:ghs_abc@github.com/.insteadOf=git@github.com:";
+    expect(fetch).toContain(rewrite);
+    expect(pull).toContain(rewrite);
+    // The rewrite precedes the subcommand (it is a top-level `git -c` flag).
+    expect(fetch.indexOf("-c")).toBeLessThan(fetch.indexOf("fetch"));
+    expect(sw).not.toContain(rewrite);
+  });
+
+  it("emits no rewrite when no token is set (falls back to the remote as-is)", async () => {
+    const calls: string[][] = [];
+    routeExec((cmd, args) => {
+      calls.push([cmd, ...args]);
+      if (args.includes("rev-parse")) return "deadbeef\n";
+      return "";
+    });
+    const io = createSenseIo({ meta: meta(), castra: fakeCastra(), env: {} as NodeJS.ProcessEnv });
+    await io.syncDefaultBranch({ repo: { path: "/repo", default_branch: "main" } });
+    const fetch = calls.find((c) => c.includes("fetch"))!;
+    expect(fetch).toEqual(["git", "fetch", "origin", "main"]);
+  });
+});
+
+describe("gitHubAuthConfigArgs (#301)", () => {
+  it("emits accumulating insteadOf rewrites for both SSH remote forms when a token is set", () => {
+    const args = gitHubAuthConfigArgs({ GH_TOKEN: "tok" } as NodeJS.ProcessEnv);
+    expect(args).toEqual([
+      "-c",
+      "url.https://x-access-token:tok@github.com/.insteadOf=git@github.com:",
+      "-c",
+      "url.https://x-access-token:tok@github.com/.insteadOf=ssh://git@github.com/",
+    ]);
+  });
+
+  it("prefers GH_TOKEN over GITHUB_TOKEN, and trims", () => {
+    const args = gitHubAuthConfigArgs({ GH_TOKEN: " a ", GITHUB_TOKEN: "b" } as NodeJS.ProcessEnv);
+    expect(args[1]).toContain("x-access-token:a@github.com");
+  });
+
+  it("falls back to GITHUB_TOKEN when GH_TOKEN is absent", () => {
+    const args = gitHubAuthConfigArgs({ GITHUB_TOKEN: "b" } as NodeJS.ProcessEnv);
+    expect(args[1]).toContain("x-access-token:b@github.com");
+  });
+
+  it("returns [] when neither token is set", () => {
+    expect(gitHubAuthConfigArgs({} as NodeJS.ProcessEnv)).toEqual([]);
   });
 });

@@ -1,5 +1,6 @@
 import { senseObserved, type SenseDeps } from "../../legate/loop/state/sense.js";
 import { startHeraldSpan } from "../../observability/herald-trace.js";
+import { recordHeraldSync } from "../../observability/herald-metrics.js";
 import type { Attributes } from "@opentelemetry/api";
 import type { AppendEventInput, EventBody, HeraldEvent, SystemState } from "../events.js";
 import { diffObserved } from "./diff.js";
@@ -148,10 +149,18 @@ export function describeChangeSpan(
 /**
  * Run this profile's default-branch sync before the observation read (#300),
  * when Herald is in sync mode (`deps.syncDefaultBranch` wired). The sync is
- * best-effort: a failure (gh outage, diverged local that won't fast-forward) is
- * logged through the sense warn sink and swallowed so the tick still observes the
- * local checkout, and one repo's sync failure can't stall the profile or block
- * the others. No-op when sync is disabled or the repo path is unknown.
+ * best-effort: a failure (no GitHub auth, gh outage, diverged local that won't
+ * fast-forward) is swallowed so the tick still observes the local checkout, and
+ * one repo's sync failure can't stall the profile or block the others. No-op when
+ * sync is disabled or the repo path is unknown.
+ *
+ * A failure is made LOUD on every channel (#301 live-validation: the original
+ * silence is exactly how the bug hid). It hits (1) the structured warn log
+ * (`herald.jsonl` + OTLP), (2) the `march.herald.sync{outcome="error"}` metric
+ * (queryable in Grafana), and (3) the process stderr so `docker logs march-herald`
+ * surfaces it — because the service's pino logger writes only to a file/OTLP, not
+ * the container's stdout/stderr. A success records `outcome="ok"` so a working
+ * sync is visible too.
  */
 async function syncDefaultBranchBeforeObserve(deps: ObserverDeps): Promise<void> {
   if (!deps.syncDefaultBranch) return;
@@ -159,12 +168,14 @@ async function syncDefaultBranchBeforeObserve(deps: ObserverDeps): Promise<void>
   if (typeof repoPath !== "string" || repoPath.length === 0) return;
   try {
     await deps.syncDefaultBranch(repoPath);
+    recordHeraldSync("ok");
   } catch (err) {
-    deps.senseDeps.warn?.(
-      `default-branch sync failed for ${deps.profile}: ` +
-        (err instanceof Error ? err.message : String(err)) +
-        " — observing against stale local repo",
-    );
+    const detail = err instanceof Error ? err.message : String(err);
+    const message = `default-branch sync failed for ${deps.profile}: ${detail} — observing against stale local repo`;
+    deps.senseDeps.warn?.(message);
+    recordHeraldSync("error");
+    // Bypass the file-only pino logger so the failure is visible in `docker logs`.
+    process.stderr.write(`[herald] ${message}\n`);
   }
 }
 

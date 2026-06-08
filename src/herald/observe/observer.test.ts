@@ -206,24 +206,34 @@ describe("runObservation", () => {
     expect(result.observedAt).toBe("2026-05-20T00:00:00Z");
   });
 
-  it("isolates a sync failure: logs via warn, still observes, never throws (#300)", async () => {
+  it("isolates a sync failure but makes it LOUD: warn + stderr, still observes, never throws (#300/#301)", async () => {
     const store = fakeStore();
     const warn = vi.fn();
     const readSmithyStatus = vi.fn(async () => ({ records: [], graph: {} }));
-    const result = await runObservation({
-      store,
-      profile: PROFILE,
-      syncDefaultBranch: async () => {
-        throw new Error("git pull --ff-only: diverged");
-      },
-      senseDeps: senseDeps({ warn, readSmithyStatus }),
-    });
-    // Sync threw, but the tick completed against the local repo (read still ran).
-    expect(readSmithyStatus).toHaveBeenCalled();
-    expect(result.observedAt).toBe("2026-05-20T00:00:00Z");
-    expect(warn).toHaveBeenCalledTimes(1);
-    expect(warn.mock.calls[0]![0]).toContain("default-branch sync failed for p");
-    expect(warn.mock.calls[0]![0]).toContain("diverged");
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      const result = await runObservation({
+        store,
+        profile: PROFILE,
+        syncDefaultBranch: async () => {
+          throw new Error("cannot run ssh: No such file or directory");
+        },
+        senseDeps: senseDeps({ warn, readSmithyStatus }),
+      });
+      // Sync threw, but the tick completed against the local repo (read still ran).
+      expect(readSmithyStatus).toHaveBeenCalled();
+      expect(result.observedAt).toBe("2026-05-20T00:00:00Z");
+      // Channel 1: structured warn (→ herald.jsonl + OTLP).
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn.mock.calls[0]![0]).toContain("default-branch sync failed for p");
+      expect(warn.mock.calls[0]![0]).toContain("cannot run ssh");
+      // Channel 2: stderr (→ `docker logs march-herald`, which the pino file
+      // logger never reaches — the silence that hid the original bug).
+      expect(stderr).toHaveBeenCalledTimes(1);
+      expect(String(stderr.mock.calls[0]![0])).toContain("[herald] default-branch sync failed for p");
+    } finally {
+      stderr.mockRestore();
+    }
   });
 
   it("skips the sync when the profile's repo path is unknown", async () => {
