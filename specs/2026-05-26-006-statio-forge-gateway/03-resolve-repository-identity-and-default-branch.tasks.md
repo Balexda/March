@@ -17,7 +17,7 @@
 
 ### Tasks
 
-- [ ] **Define Statio repo metadata types**
+- [x] **Define Statio repo metadata types**
 
   Add the US3-facing Statio types and errors under `src/statio/`, following the Castra service boundary pattern without adding command logic to `src/cli.ts`. Keep the scope to `RepoInfo`, the forge read seam needed by `repoInfo()`, and the error shape required by the contracts and AS 3.3.
 
@@ -27,7 +27,7 @@
   - Forge failures can be represented as `forge_error` without throwing uncaught dependency details
   - No existing `gh` call site or consumer behavior is changed
 
-- [ ] **Implement `repoInfo()` through `gh repo view`**
+- [x] **Implement `repoInfo()` through `gh repo view`**
 
   Add the Statio forge adapter logic under `src/statio/` to resolve repository metadata from the existing working repo context. It should shape one `gh repo view` result into `RepoInfo`, bound the command execution, and satisfy AS 3.1-3.3 without adding a second caller-side round trip for the default branch.
 

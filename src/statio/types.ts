@@ -3,11 +3,15 @@
  *
  * Statio is the async HTTP boundary between March consumers and forge reads.
  * These shapes mirror the US5 contracts and are intentionally transport-only:
- * no current `gh` consumer is cut over by this slice.
+ * no current `gh` consumer is cut over by this slice. US3 adds the in-process
+ * `gh repo view` read seam (see `adapter.ts`) behind the same `RepoInfo` shape.
  */
 
+/** Repository identity resolved from `gh repo view`. */
 export interface RepoInfo {
+  /** Repository owner/name, e.g. `Balexda/March`. */
   readonly owner: string;
+  /** Default branch name, e.g. `main`. */
   readonly defaultBranch: string;
 }
 
@@ -66,6 +70,7 @@ export interface PullRequestSummary {
   readonly needsResponseCount: number;
 }
 
+/** Stable error codes returned in Statio's uniform error envelope. */
 export type ForgeErrorCode =
   | "invalid_request"
   | "unauthorized"
@@ -73,6 +78,7 @@ export type ForgeErrorCode =
   | "forge_error"
   | "internal";
 
+/** Uniform error envelope returned on every non-2xx Statio response. */
 export interface ForgeErrorBody {
   readonly error: {
     readonly code: ForgeErrorCode;
@@ -80,6 +86,7 @@ export interface ForgeErrorBody {
   };
 }
 
+/** Consumer seam for Statio forge reads. */
 export interface ForgeClient {
   repoInfo(): Promise<RepoInfo>;
   listPrs(req: ListPrsRequest): Promise<PullRequestListItem[]>;
@@ -92,5 +99,15 @@ export class StatioValidationError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "StatioValidationError";
+  }
+}
+
+/** A forge dependency failure. Maps to HTTP 502 `forge_error`. */
+export class StatioForgeError extends Error {
+  readonly code = "forge_error" satisfies ForgeErrorCode;
+
+  constructor(message: string) {
+    super(message);
+    this.name = "StatioForgeError";
   }
 }
