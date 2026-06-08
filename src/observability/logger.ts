@@ -54,6 +54,13 @@ export function resolveCastraLogFilePath(
   return resolveServiceLogFilePath("castra.jsonl", "MARCH_CASTRA_LOG_DIR", env);
 }
 
+/** Statio service log file: `$MARCH_STATIO_LOG_DIR/statio.jsonl`. */
+export function resolveStatioLogFilePath(
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  return resolveServiceLogFilePath("statio.jsonl", "MARCH_STATIO_LOG_DIR", env);
+}
+
 /**
  * Map a pino numeric level to its OpenTelemetry severity. pino levels:
  * trace=10 debug=20 info=30 warn=40 error=50 fatal=60. Exported for testing.
@@ -282,6 +289,29 @@ export function createCastraLogger(
   return createServiceLogger({
     serviceName: options.name ?? "march-castra",
     logFilePath: options.logFilePath ?? resolveCastraLogFilePath(env),
+    level: options.level,
+    env,
+    sync: options.sync,
+  });
+}
+
+export interface StatioLoggerOptions {
+  readonly logFilePath?: string;
+  readonly name?: string;
+  readonly level?: LevelWithSilent;
+  readonly env?: NodeJS.ProcessEnv;
+  /** Synchronous file writes. Default false (buffered); set true in tests/CI. */
+  readonly sync?: boolean;
+}
+
+/** Statio service logger (`march-statio` → `statio.jsonl`). */
+export function createStatioLogger(
+  options: StatioLoggerOptions = {},
+): PinoLogger {
+  const env = options.env ?? process.env;
+  return createServiceLogger({
+    serviceName: options.name ?? "march-statio",
+    logFilePath: options.logFilePath ?? resolveStatioLogFilePath(env),
     level: options.level,
     env,
     sync: options.sync,

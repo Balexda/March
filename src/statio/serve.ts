@@ -1,5 +1,11 @@
+import { createStatioLogger } from "../observability/logger.js";
 import { initOtel } from "../observability/otel.js";
-import { STATIO_SERVICE_NAME, STATIO_TOKEN_ENV, resolveStatioPort } from "./config.js";
+import {
+  STATIO_SERVICE_NAME,
+  STATIO_TOKEN_ENV,
+  resolveStatioPort,
+  resolveStatioToken,
+} from "./config.js";
 import { buildStatioServer } from "./server.js";
 
 export interface RunStatioServerOptions {
@@ -16,10 +22,15 @@ export async function runStatioServer(options: RunStatioServerOptions = {}): Pro
 
   const port = resolveStatioPort(options.port);
   const host = options.host ?? "127.0.0.1";
-  const token = options.token ?? process.env[STATIO_TOKEN_ENV];
+  // Normalize once: trim the override and treat a blank value as unset so the
+  // warning below fires whenever /v1/* is actually unauthenticated (mirrors how
+  // buildStatioServer resolves the token).
+  const token = options.token?.trim() || resolveStatioToken();
+  // Wire the OTLP pino logger so request logs ship to the durable JSONL file and
+  // Loki under service_name=march-statio (mirrors Castra/Brood/Hatchery/Herald).
   const app = buildStatioServer({
     token,
-    logger: true,
+    logger: createStatioLogger(),
     startedAt: Date.now(),
   });
 

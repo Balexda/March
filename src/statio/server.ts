@@ -43,7 +43,7 @@ export function buildStatioServer(options: BuildStatioServerOptions = {}): Fasti
   app.addHook("onRequest", async (request, reply) => {
     if (!token) return;
     const pathname = request.url.split("?")[0] ?? "";
-    if (!pathname.startsWith("/v1")) return;
+    if (pathname !== "/v1" && !pathname.startsWith("/v1/")) return;
     if (!bearerMatches(request.headers.authorization, token)) {
       return reply
         .code(401)

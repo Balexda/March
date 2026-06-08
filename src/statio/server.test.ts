@@ -87,6 +87,17 @@ describe("statio server", () => {
     expect(res.json().error.code).toBe("not_found");
   });
 
+  it("does not gate sibling paths that merely share the /v1 prefix", async () => {
+    app = buildStatioServer({ repoReader: fakeReader(), token: "secret" });
+
+    // `/v12` is not under `/v1/`, so the auth gate must not claim it: an
+    // unknown route should fall through to not_found, never unauthorized.
+    const res = await app.inject({ method: "GET", url: "/v12" });
+
+    expect(res.statusCode).toBe(404);
+    expect(res.json().error.code).toBe("not_found");
+  });
+
   it("maps forge failures to forge_error envelopes", async () => {
     app = buildStatioServer({
       repoReader: fakeReader({
