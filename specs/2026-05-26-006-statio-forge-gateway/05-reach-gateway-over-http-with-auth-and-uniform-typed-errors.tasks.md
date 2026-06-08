@@ -17,7 +17,7 @@
 
 ### Tasks
 
-- [ ] **Define Statio client types and config**
+- [x] **Define Statio client types and config**
 
   Add the US5-facing Statio wire types, `ForgeClient` interface, client error type, and configuration helpers under `src/statio/`, following the Castra client/config boundary pattern. Keep this focused on transport concerns from the contracts and avoid changing existing forge consumers or `gh` call sites.
 
@@ -28,7 +28,7 @@
   - `StatioClientError` preserves envelope code and HTTP status
   - No existing consumer behavior or direct `gh` call site changes
 
-- [ ] **Implement the async Statio client**
+- [x] **Implement the async Statio client**
 
   Add the fetch-based `StatioClient` under `src/statio/` implementing the `ForgeClient` contract. It should call the documented `/v1/*` routes, forward a provided slice trace key, map non-2xx envelopes for AS 5.3 and AS 5.5, and make `reachable()` exercise an authenticated read surface for AS 5.6.
 
