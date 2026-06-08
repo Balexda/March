@@ -54,7 +54,7 @@
 
 ### Tasks
 
-- [ ] **Build the Statio Fastify service**
+- [x] **Build the Statio Fastify service**
 
   Add the Statio service builder and serve entrypoint under `src/statio/`, with thin CLI dispatch in `src/cli/` only if needed to start the service. The HTTP layer should expose open health/status routes, authenticate `/v1/*`, route `/v1/repo` through the existing repo metadata seam, and leave later PR/list/thread routes to their own stories.
 
@@ -67,7 +67,7 @@
   - Service startup validates the Statio port configuration
   - Tests cover open routes, auth rejection, authorized success, unknown routes, and error mapping
 
-- [ ] **Wire client and service compatibility**
+- [x] **Wire client and service compatibility**
 
   Ensure the async client from Slice 1 interoperates with the service routes from this slice using the shared wire contracts. The compatibility work belongs in `src/statio/` tests and should verify the client-facing behavior from AS 5.3, AS 5.5, and AS 5.6 through the real Fastify app boundary.
 

@@ -354,6 +354,31 @@ describe("march CLI", () => {
     });
   });
 
+  describe("march statio", () => {
+    it("bare `march statio` exits 2 and prints the statio group help", () => {
+      const result = run(["statio"]);
+      expect(result.exitCode).toBe(2);
+      const combined = result.stdout + result.stderr;
+      expect(combined).toContain("Usage: march statio");
+      expect(combined).toMatch(/^\s+serve\b/m);
+    });
+
+    it("`march statio serve --help` exits 0 and prints the serve flag surface", () => {
+      const result = run(["statio", "serve", "--help"]);
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain("Usage: march statio serve");
+      expect(result.stdout).toContain("--port");
+      expect(result.stdout).toContain("--host");
+      expect(result.stdout).toContain("--token");
+    });
+
+    it("`march statio serve` validates the configured port before startup", () => {
+      const result = run(["statio", "serve", "--port", "9689x"]);
+      expect(result.exitCode).toBe(2);
+      expect(result.stderr).toContain("Invalid Statio port");
+    });
+  });
+
   it("march version exits 0 and stdout contains the package version", () => {
     const result = run(["version"]);
     expect(result.exitCode).toBe(0);
