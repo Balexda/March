@@ -34,7 +34,7 @@ import { createSenseIo } from "../../observe/sense-io.js";
 import { execText } from "./clients/exec.js";
 import { runTick as coordinatorRunTick } from "./coordinator.js";
 import { runHeartbeat } from "./heartbeat.js";
-import { broodRegister as broodRegisterCli, broodTeardown as broodTeardownCli } from "./clients/brood.js";
+import { broodRegister as broodRegisterCli, broodRetire as broodRetireCli, broodTeardown as broodTeardownCli } from "./clients/brood.js";
 import { LegateHerald } from "./clients/herald.js";
 // Dispatch ops (ask Hatchery to spawn / poll a job to completion). The legate's
 // effecting dispatch logic, behind the DispatchIoDeps seam built below. #144.
@@ -293,6 +293,7 @@ async function tickProfile(rt: ProfileRuntime): Promise<void> {
     castra: castra(),
     broodTeardown: (sessionId: string, opts?: any) => broodTeardownCli(sessionId, opts),
     broodRegister: (input: any) => broodRegisterCli(input),
+    broodRetire: (sessionId: string) => broodRetireCli(sessionId),
     requestJudgement: (input: any) => requestLegateJudgement(meta, input),
     emit: (event: any) => append(meta, meta.processor_events_path, event),
     emitTransition: (event: any) => emitTransition(meta.profile, event),

@@ -162,7 +162,15 @@ async function reconcileBrood(
   ctx: HandlerContext,
   state: LoopState,
   d: RelaunchDecision,
-  ids: { newSessionId: string; liveWorktree: string; priorSessionId: string; priorWorktree: string },
+  ids: {
+    newSessionId: string;
+    liveWorktree: string;
+    priorSessionId: string;
+    priorWorktree: string;
+    /** Hatchery spawn id this steward belongs to (#308) — preserved as the new
+     *  row's parentId so terminal teardown resolves & archives the spawn group. */
+    parentSpawnId: string;
+  },
 ): Promise<string> {
   const notes: string[] = [];
 
@@ -174,6 +182,12 @@ async function reconcileBrood(
         id: ids.newSessionId,
         kind: "steward",
         status: "running",
+        // Preserve the spawn parent (#308): Brood teardown uses a steward's
+        // parentId to resolve/mark the spawn+steward group; without it the
+        // relaunched steward looks unparented and terminal cleanup leaves the
+        // original spawn row active/unarchived. Omit when there is no spawn id
+        // (a steward not backed by a Hatchery spawn).
+        ...(ids.parentSpawnId ? { parentId: ids.parentSpawnId } : {}),
         agentDeckSessionId: ids.newSessionId,
         profile: ctx.meta.profile,
         repoPath: state.repoPath as string,
@@ -211,10 +225,29 @@ async function reconcileBrood(
       ctx.log(`relaunch ${d.sliceId}: Brood teardown of prior ${ids.priorSessionId} errored: ${errMsg(err)}`);
     }
   } else if (distinctSession && !distinctWorktree) {
-    // Same worktree path: the prior row is stale but a teardown would resolve the
-    // live session by worktree and remove it. Leave it for the #304 sweep; the
-    // register above already re-keyed Brood's tracking to the live session id.
-    notes.push("prior steward shares live worktree — left for sweep (no worktree-prune reap)");
+    // Same worktree path: a teardown would resolve the live session by worktree
+    // and remove it (#304), so we must NOT tear down. But the register above only
+    // upserts the NEW id — it does not retire the PRIOR row, so Brood would track
+    // BOTH stewards on this worktree and the stale row (its worktree still
+    // present) is not even a #304 sweep candidate, lingering forever. Retire the
+    // prior row (status → torndown, no worktree prune) so exactly ONE active row
+    // remains for the worktree (#308).
+    if (ctx.broodRetire) {
+      try {
+        const retired = await ctx.broodRetire(ids.priorSessionId);
+        if (retired.ok) notes.push("retired prior steward " + ids.priorSessionId + " (shared worktree)");
+        else if (retired.notTracked) notes.push("prior steward " + ids.priorSessionId + " not tracked by Brood");
+        else {
+          notes.push("prior retire failed: " + retired.detail);
+          ctx.log(`relaunch ${d.sliceId}: Brood retire of prior ${ids.priorSessionId} failed: ${retired.detail}`);
+        }
+      } catch (err) {
+        notes.push("prior retire errored: " + errMsg(err));
+        ctx.log(`relaunch ${d.sliceId}: Brood retire of prior ${ids.priorSessionId} errored: ${errMsg(err)}`);
+      }
+    } else {
+      notes.push("prior steward shares live worktree — broodRetire unavailable");
+    }
   }
 
   return notes.join("; ");
@@ -250,6 +283,10 @@ export async function apply(
     const slice = state.slices[d.sliceId];
     const priorSessionId = typeof slice.worker_session_id === "string" ? slice.worker_session_id : "";
     const priorWorktree = typeof slice.worktree_path === "string" ? slice.worktree_path : "";
+    // The Hatchery spawn this steward belongs to — re-registered as the new
+    // row's parentId so Brood keeps the spawn↔steward group intact (#308).
+    const parentSpawnId =
+      slice.hatchery && typeof slice.hatchery.spawn_id === "string" ? slice.hatchery.spawn_id : "";
 
     let newSessionId: string | null = null;
     let liveWorktree = d.worktreePath;
@@ -294,6 +331,7 @@ export async function apply(
       liveWorktree,
       priorSessionId,
       priorWorktree,
+      parentSpawnId,
     });
 
     slice.worker_session_id = newSessionId;

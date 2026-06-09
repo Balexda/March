@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { broodListSessions, broodRegister, broodTeardown, type BroodSeam } from "./brood.js";
+import { broodListSessions, broodRegister, broodRetire, broodTeardown, type BroodSeam } from "./brood.js";
 import { BroodNotFoundError } from "../../../brood/service/client.js";
 import { buildTraceparent, spanIdForDispatch, traceIdForDispatch } from "../../../observability/trace-ids.js";
 
@@ -8,6 +8,7 @@ function seam(over: Partial<BroodSeam> = {}): BroodSeam {
     teardown: vi.fn(async (id: string) => ({ id, status: "removed", warnings: [] })),
     list: vi.fn(async () => []),
     register: vi.fn(async (input) => ({ ...input, status: input.status ?? "running", createdAt: "T", updatedAt: "T" }) as any),
+    update: vi.fn(async (id, changes) => ({ id, kind: "steward", createdAt: "T", updatedAt: "T", ...changes }) as any),
     ...over,
   };
 }
@@ -107,5 +108,34 @@ describe("loop brood client (async BroodClient seam)", () => {
     const res = await broodRegister({ id: "sess-1", kind: "steward" }, client);
     expect(res).toMatchObject({ ok: false });
     expect(res.detail).toContain("brood down");
+  });
+
+  it("retire PATCHes the prior row to torndown without a worktree-pruning teardown (#308)", async () => {
+    const update = vi.fn(async (id: string, changes: any) => ({ id, kind: "steward", createdAt: "T", updatedAt: "T", ...changes }) as any);
+    const client = seam({ update });
+    const res = await broodRetire("old-sess", client);
+    expect(res).toMatchObject({ ok: true, notTracked: false });
+    expect(update).toHaveBeenCalledWith("old-sess", expect.objectContaining({ status: "torndown" }));
+    expect(update.mock.calls[0][1]).toHaveProperty("torndownAt");
+  });
+
+  it("retire flags a 404 as notTracked (nothing to retire — no phantom row)", async () => {
+    const client = seam({
+      update: vi.fn(async () => {
+        throw new BroodNotFoundError('brood has no session "old-sess"');
+      }),
+    });
+    const res = await broodRetire("old-sess", client);
+    expect(res).toMatchObject({ ok: false, notTracked: true });
+  });
+
+  it("retire reports a generic failure as not-ok, not notTracked", async () => {
+    const client = seam({
+      update: vi.fn(async () => {
+        throw new Error("brood down");
+      }),
+    });
+    const res = await broodRetire("old-sess", client);
+    expect(res).toMatchObject({ ok: false, notTracked: false });
   });
 });

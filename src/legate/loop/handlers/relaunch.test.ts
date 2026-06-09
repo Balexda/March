@@ -26,6 +26,7 @@ function ctx(
   over: {
     register?: (input: any) => any;
     teardown?: (id: string, opts?: any) => any;
+    retire?: (id: string) => any;
     withRegister?: boolean;
   } = {},
 ): HandlerContext & { castra: any } {
@@ -40,6 +41,9 @@ function ctx(
     broodRegister: withRegister
       ? vi.fn(async (input: any) => (over.register ? over.register(input) : { ok: true, detail: "registered " + input.id }))
       : undefined,
+    broodRetire: vi.fn(async (id: string) =>
+      over.retire ? over.retire(id) : { ok: true, notTracked: false, detail: "retired " + id },
+    ),
     emit: vi.fn(),
     emitTransition: vi.fn(),
     log: vi.fn(),
@@ -142,7 +146,28 @@ describe("relaunch handler", () => {
     expect(slice.worker_session_id).toBe("new");
   });
 
-  it("#308: does NOT reap the prior steward when it shares the live worktree", async () => {
+  it("#308: registers parentId from the slice's Hatchery spawn id (preserves the spawn group)", async () => {
+    const slice = eligibleSlice({ hatchery: { spawn_id: "spawn-42", backend: "codex" } });
+    const state = loopState({ slices: { gone: slice }, raw: { slices: { gone: slice } } });
+    const c = ctx(() => ({ sessionId: "fresh", worktreePath: "/wt/feature-feat-a" }));
+    const deps: RelaunchDeps = { worktreeExists: () => true, ensureWorktree: vi.fn() };
+    await apply(assess(state), c, state, deps);
+
+    expect(c.broodRegister).toHaveBeenCalledWith(expect.objectContaining({ id: "fresh", parentId: "spawn-42" }));
+  });
+
+  it("#308: omits parentId when the slice has no Hatchery spawn id", async () => {
+    const slice = eligibleSlice();
+    const state = loopState({ slices: { gone: slice }, raw: { slices: { gone: slice } } });
+    const c = ctx(() => ({ sessionId: "fresh", worktreePath: "/wt/feature-feat-a" }));
+    const deps: RelaunchDeps = { worktreeExists: () => true, ensureWorktree: vi.fn() };
+    await apply(assess(state), c, state, deps);
+
+    const reg = (c.broodRegister as any).mock.calls[0][0];
+    expect(reg).not.toHaveProperty("parentId");
+  });
+
+  it("#308: same-worktree relaunch retires the prior row instead of tearing it down", async () => {
     const sharedWorktree = "/wt/feature-feat-a";
     const slice = eligibleSlice({ worker_session_id: "old", worktree_path: sharedWorktree });
     const state = loopState({ slices: { gone: slice }, raw: { slices: { gone: slice } } });
@@ -150,9 +175,12 @@ describe("relaunch handler", () => {
     const deps: RelaunchDeps = { worktreeExists: () => true, ensureWorktree: vi.fn() };
     const res = await apply(assess(state), c, state, deps);
 
+    // Never a worktree-pruning teardown on a shared worktree (#304 would reap the live one).
     expect(c.broodTeardown).not.toHaveBeenCalled();
+    // New row registered + prior row retired → exactly one active row for the worktree.
     expect(c.broodRegister).toHaveBeenCalledWith(expect.objectContaining({ id: "new", worktreePath: sharedWorktree }));
-    expect(res.actions[0].detail).toContain("left for sweep");
+    expect(c.broodRetire).toHaveBeenCalledWith("old");
+    expect(res.actions[0].detail).toContain("retired prior steward old");
   });
 
   it("#308: relaunch still succeeds and rebinds when Brood register fails (best-effort)", async () => {
