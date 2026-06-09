@@ -168,6 +168,33 @@ const ROW_PREFIX_BY_COMMAND: Record<string, string> = {
   "smithy.render": "M",
 };
 
+/**
+ * The graph node a forge record's task slice maps to: `<tasks-file>#<rowId>` (e.g.
+ * `…/01-foo.tasks.md#S1`), derived from the forge action's `[tasksPath, row]`
+ * arguments and the record's `dependency_order.id_prefix` (default `S`) — the same
+ * node {@link forgeNodeId} and the dependency graph already key forge work at.
+ *
+ * Smithy ≤0.4.10 gated forge readiness on the PARENT story node ({@link
+ * recordGraphNodeId}) and buried this slice node deep under it. Since smithy 0.5.13
+ * a CUT (decomposed) story LEAVES the layer graph (`decomposed: true`) and its
+ * slice rows are promoted onto the layer-0 frontier, so the slice node is now the
+ * readiness signal. Callers accept BOTH the parent-story node and this slice node
+ * (see {@link readySmithyItems}/{@link recordsByTargetNode}) so either graph shape
+ * dispatches. Returns null when the row number can't be derived (non-forge record
+ * or missing argument).
+ */
+export function forgeSliceNodeId(record: any): string | null {
+  const action = record?.next_action || {};
+  if (String(action.command || "") !== "smithy.forge") return null;
+  const args = actionArguments(action);
+  const num = rowNumber(args[1]);
+  if (!num) return null;
+  const prefix =
+    (typeof record.dependency_order?.id_prefix === "string" && record.dependency_order.id_prefix) || "S";
+  const filePath = args[0] || record.path;
+  return filePath ? String(filePath) + "#" + prefix + num : null;
+}
+
 export function recordGraphNodeId(record: any): string | null {
   if (!record || typeof record !== "object") return null;
   const action = record.next_action || {};
@@ -207,10 +234,21 @@ function dispatchRecords(status: any): any[] {
     .sort((a: any, b: any) => dispatchPriority(a) - dispatchPriority(b) || a.__index - b.__index);
 }
 
+/**
+ * The graph nodes whose layer-0 membership marks a record ready. Usually the single
+ * {@link recordGraphNodeId}; a forge record ALSO accepts its {@link forgeSliceNodeId}
+ * so smithy 0.5.13's promoted slice node matches directly while a pre-0.5.13 graph —
+ * where the slice sits deep under a still-layer-0 parent story — keeps dispatching
+ * through the parent node. (forgeSliceNodeId is null for non-forge records.)
+ */
+export function readyNodeCandidates(record: any): string[] {
+  return [recordGraphNodeId(record), forgeSliceNodeId(record)].filter(Boolean) as string[];
+}
+
 export function readySmithyItems(status: any): any[] {
   const readyNodes = readyLayerNodeIds(status);
   return dispatchRecords(status).filter(
-    (record: any) => readyNodes.size === 0 || readyNodes.has(recordGraphNodeId(record)!),
+    (record: any) => readyNodes.size === 0 || readyNodeCandidates(record).some((id) => readyNodes.has(id)),
   );
 }
 
@@ -274,8 +312,12 @@ function recordsByPath(status: any): Map<string, any> {
 function recordsByTargetNode(status: any): Map<string, any> {
   const m = new Map<string, any>();
   for (const r of dispatchRecords(status)) {
-    const id = recordGraphNodeId(r);
-    if (id && !m.has(id)) m.set(id, r);
+    // A forge record targets its slice node (0.5.13's layer-0 frontier) AND its
+    // parent-story node (the pre-0.5.13 frontier) — index both so the actionable
+    // layer-0 scan resolves whichever the graph surfaces back to this record.
+    for (const id of readyNodeCandidates(r)) {
+      if (id && !m.has(id)) m.set(id, r);
+    }
   }
   return m;
 }
@@ -284,8 +326,10 @@ function recordsByTargetNode(status: any): Map<string, any> {
  * The dispatch item for an actionable layer-0 node: the record whose `next_action`
  * targets it when one exists (so the derived slice id / branch match a real
  * dispatch EXACTLY — letting the in-flight dedup recognize it), else a synthesized
- * `smithy.cut` for that spec user story — a sibling row beyond the spec record's
- * single surfaced cut. Returns null when no runnable item can be built.
+ * action for a sibling row the record's single surfaced next_action didn't emit — a
+ * `smithy.cut` for a spec user story, or (since 0.5.13 promotes a cut story's slice
+ * rows to the frontier) a `smithy.forge` for a task slice. Returns null when no
+ * runnable item can be built.
  */
 function dispatchItemForNode(
   byPath: Map<string, any>,
@@ -294,8 +338,9 @@ function dispatchItemForNode(
 ): any | null {
   const direct = byTarget.get(n.id);
   if (direct) return direct;
-  if (nodeRowKind(n.node) === "US") {
-    const recordPath = String(n.node?.record_path || "");
+  const recordPath = String(n.node?.record_path || "");
+  const kind = nodeRowKind(n.node);
+  if (kind === "US") {
     if (!recordPath) return null;
     const rec = byPath.get(recordPath) || {};
     const num = rowNumber(n.node?.row?.id);
@@ -307,6 +352,19 @@ function dispatchItemForNode(
       parent_row_id: rec.parent_row_id ?? null,
       title: n.node?.row?.title,
       next_action: { command: "smithy.cut", arguments: [specDir, num] },
+    };
+  }
+  if (kind === "S") {
+    if (!recordPath) return null;
+    const rec = byPath.get(recordPath) || {};
+    const num = rowNumber(n.node?.row?.id);
+    if (!num) return null;
+    return {
+      path: recordPath,
+      parent_path: rec.parent_path ?? null,
+      parent_row_id: rec.parent_row_id ?? null,
+      title: n.node?.row?.title,
+      next_action: { command: "smithy.forge", arguments: [recordPath, num] },
     };
   }
   return null;

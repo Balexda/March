@@ -51,7 +51,7 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 # Smithy CLI — the legate runs `smithy status` each tick to find ready work.
-RUN npm install -g @balexda/smithy@latest && npm cache clean --force
+RUN npm install -g @balexda/smithy@0.5.13 && npm cache clean --force
 COPY --from=build /app/dist ./dist
 # `march` on PATH; a world-writable log dir so the service can write its log
 # file under any runtime uid/gid the compose `user:` selects.
