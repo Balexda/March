@@ -13,6 +13,47 @@ become specification debt in the PRD; they do not interrupt the pipeline.
 
 ---
 
+## Authored Smithy Artifacts Location
+
+This Smithy install was set up with an explicit policy for **where authored
+Smithy artifacts live**. Every path you see in the rest of this prompt that
+refers to an authored Smithy artifact — `.rfc.md`, `.features.md`, `.spec.md`,
+`.tasks.md`, `.strike.md`, `.prd.md`, `.persona.md`, `.data-model.md`,
+`.contracts.md` — is already prefixed with `` so it points
+at the right root for this repo. Do not strip, override, or rewrite that
+prefix.
+
+- When `` is empty, artifacts live **in the repo**:
+  `docs/rfcs/...`, `docs/prds/...`, `docs/personas/...`, `specs/...`,
+  `specs/strikes/...`.
+- When `` is `~/.smithy/repos/<repoKey>/`, artifacts live **outside
+  the repo, in the user's home directory**: `~/.smithy/repos/<repoKey>/docs/rfcs/...`,
+  `~/.smithy/repos/<repoKey>/docs/personas/...`, `~/.smithy/repos/<repoKey>/specs/...`, etc.
+  Treat the resolved path as authoritative — agents (Claude Code, Gemini CLI,
+  Codex) expand `~` at tool-call time, so the path is portable across team
+  members even when this prompt is committed to source control.
+
+### Scope of the policy
+
+This policy applies **only to authored Smithy artifacts** such as planning
+artifacts and durable persona files. It does **not** apply to:
+
+- **Source code, tests, configuration, or any other repo file you edit as
+  part of an implementation slice.** Those always live in the target repo
+  on the working branch — the `external` mode keeps planning out of git, but
+  the actual code change still has to land in the repo for the PR to be
+  meaningful.
+- **GitHub issue body templates** under `<manifestDir>/templates/orders/`.
+  Those are managed separately by `smithy init` and `smithy.orders`.
+- **The smithy manifest itself** (`.smithy/smithy-manifest.json` or
+  `~/.smithy/smithy-manifest.json`), which is set by `smithy init`.
+
+### When discovering existing artifacts
+
+When you scan for existing artifacts (e.g. "list folders in
+`docs/rfcs/`"), use the prefixed path. The `smithy status`
+CLI already reads the manifest and looks in the right place, so its output
+will be consistent with the paths in this prompt.
 ## Input
 
 The user's idea or document path: $ARGUMENTS
@@ -166,6 +207,14 @@ formulate any search), record the error as a debt item
 canonical title formats and check for repo-level overrides in the project's
 CLAUDE.md. Apply those conventions to all headings in this artifact. The PRD
 H1 follows the pattern `# PRD: <Title>`.
+
+Before drafting orchestrator-inline PRD prose in this phase, load
+`Skill("smithy.helper-voice")` in draft mode. Use it as the shared voice
+source for directly authored PRD sections such as Proposed Solution, Target
+Users, Success Signals, Assumptions, Specification Debt framing, and Open
+Questions. Keep the Problem Statement path delegated to `smithy-prose`; do not
+route every PRD section through that sub-agent, and do not inline the helper's
+taxonomy here.
 
 ### PRD File Creation
 
@@ -391,25 +440,30 @@ path to trigger another Phase 0 review loop.
 **Created**: YYYY-MM-DD  |  **Status**: Draft
 
 ## Problem Statement
+<!-- audience: stakeholder; mode: explanation; length: 2-3 paragraphs; diagram: optional; examples: discouraged -->
 
 <2–3 paragraphs from smithy-prose. Concrete user pain leading to the outcome
 we want.>
 
 ## Proposed Solution
+<!-- audience: stakeholder; mode: explanation; length: 1-2 paragraphs; diagram: optional; examples: discouraged -->
 
 <1–2 paragraphs, WHAT-not-HOW. The capability the user will observe.>
 
 ## Target Users
+<!-- audience: stakeholder; mode: reference; length: tables only; diagram: optional; examples: discouraged -->
 
 - <Named user or role 1 — how they encounter the problem today>
 - <Named user or role 2>
 
 ## Success Signals
+<!-- audience: reviewer; mode: reference; length: tables only; diagram: optional; examples: optional -->
 
 - <Observable outcome 1>
 - <Observable outcome 2>
 
 ## Alternatives / Build-vs-Buy
+<!-- audience: reviewer; mode: explanation; length: 3-6 paragraphs; diagram: optional; examples: recommended -->
 
 ### Alternatives Considered
 
@@ -422,11 +476,13 @@ we want.>
 <1–2 paragraph narrative citing concrete gaps of the closest candidate.>
 
 ## Assumptions
+<!-- audience: reviewer; mode: reference; length: tables only; diagram: optional; examples: discouraged -->
 
 - [Critical Assumption] <promoted Critical+High item, if any>
 - <ordinary assumption>
 
 ## Specification Debt
+<!-- audience: reviewer; mode: reference; length: tables only; diagram: optional; examples: discouraged -->
 
 | ID | Description | Source Category | Impact | Confidence | Status | Resolution |
 |----|-------------|-----------------|--------|------------|--------|------------|
@@ -435,6 +491,7 @@ we want.>
 _If no debt items, write: "None — all ambiguities resolved."_
 
 ## Open Questions
+<!-- audience: reviewer; mode: reference; length: tables only; diagram: optional; examples: discouraged -->
 
 - <Genuinely unresolved item that needs stakeholder input or experimentation>
 ```
@@ -446,8 +503,7 @@ table.
 
 **Dependency-order hierarchy note**: The PRD template deliberately contains
 **no** `## Dependency Order` section. The canonical 4-column Dependency
-Order table format — documented as the single source of truth in
-`src/templates/agent-skills/README.md` — applies only to artifacts that
+Order table format applies only to artifacts that
 decompose in the strict parent/child lineage
 `RFC → Feature Map → Spec → Tasks` (milestones → features → stories →
 slices). PRDs sit **upstream** of that lineage as an optional entry point

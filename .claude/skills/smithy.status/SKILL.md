@@ -139,19 +139,36 @@ The CLI's text renderer is authoritative.
      without paying for the duplication in the payload.
    - `graph` — cross-artifact dependency graph. The wire format mirrors
      the CLI `--all` flag via a top-level `mode` discriminator:
-     - `mode: "pending-only"` (default, no `--all`): `nodes` is keyed
-       only by FQ IDs of `done`-free rows; every `layers[i].node_ids`
-       lists only the pending FQ IDs in that layer, and
-       `layers[i].complete_count` reports how many `done` nodes the
-       layer had. Layers that were entirely `done` are omitted from
-       `layers[]` (their work is fully accounted for via
-       `summary.counts`).
+     - `mode: "pending-only"` (default, no `--all`): the graph is the
+       **dispatch view** — it lists only rows that still await dispatch.
+       Every `layers[i].node_ids` lists the dispatchable FQ IDs in that
+       layer, *excluding* two kinds of row: `done` rows (counted in
+       `layers[i].complete_count`) and **decomposed** rows — rows already
+       broken down into a real downstream artifact, whose work lives in
+       their children (counted in `layers[i].suppressed_count`). A
+       decomposed user story therefore does **not** appear as its own
+       dispatch item; its pending child slices do, and they float up to
+       the layer they are actually unblocked at (the structural
+       parent→child edge is contracted, so a slice whose only blocker is
+       its decomposed parent surfaces at Layer 0). `nodes` is keyed by
+       every `done`-free FQ ID — including decomposed nodes, which are not
+       `done` and stay resolvable. Layers with no dispatchable members are
+       omitted from `layers[]`.
      - `mode: "all"` (`--all`): `nodes` is the full graph; each
-       `layers[i].node_ids` is complete, with `pending_node_indexes`
-       and `complete_node_indexes` partitioning it by status.
+       `layers[i].node_ids` is complete (decomposed parents included
+       inline), with `pending_node_indexes` and `complete_node_indexes`
+       partitioning it by status.
      `cycles` and `dangling_refs` are mode-independent.
    - `--graph` is a **no-op** in JSON mode (the payload is always
      graph-shaped). To change what is on the wire, use `--all`.
+   - **Layer filters** `--layer <n>` / `--ready` (= `--layer 0`) /
+     `--max-layer <n>` trim `graph.layers[]` to a single layer, just
+     Layer 0, or layers `0..n` respectively (keyed on each layer's
+     `layer` index). They apply to the JSON `graph` always and to text
+     `--graph`; they are mutually exclusive, and `--pending` may not be
+     combined with `--all`. `nodes` / `cycles` / `dangling_refs` are
+     never trimmed by a layer filter, so every referenced ID stays
+     resolvable.
 
 3. Answer the user's question in **one to three sentences**, or a short
    bulleted list when enumerating multiple items. Quote concrete IDs, paths,
@@ -164,13 +181,16 @@ The CLI's text renderer is authoritative.
      is not `true`. Quote its `next_action.command` plus
      `next_action.arguments`, along with the artifact's title and path.
      `graph.layers[]` is a useful *candidate* list when the user is
-     thinking in dependency-graph terms, but it is **not** the canonical
-     answer on its own: fully-done leading layers are omitted in
-     `pending-only` mode (so `layers[0]` need not correspond to true
-     layer 0 — read `layers[0].layer` to know which layer it actually
-     is), and graph layering does not encode
-     `next_action.suppressed_by_ancestor`, so a graph-first pick may
-     still need filtering against the matching `records` entry.
+     thinking in dependency-graph terms (in `pending-only` mode it is the
+     dispatch view — decomposed parents are suppressed and their pending
+     child slices surface at the layer they are unblocked at, so
+     `layers[0].node_ids` is a tight "ready to work now" set), but it is
+     **not** the canonical answer on its own: fully-hidden leading layers
+     are omitted (so `layers[0]` need not correspond to true layer 0 —
+     read `layers[0].layer` to know which layer it actually is), and
+     graph layering does not encode `next_action.suppressed_by_ancestor`,
+     so a graph-first pick may still need filtering against the matching
+     `records` entry.
    - **"how many slices for this tasks file?"** → find the matching `tasks`
      record from `records` and quote its `total` (and, when relevant, its
      `completed`) field. The CLI emits one `ArtifactRecord` per file — there

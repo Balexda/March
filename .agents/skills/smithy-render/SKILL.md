@@ -9,6 +9,47 @@ Your job is to take an **RFC milestone** and interactively break it into a
 **feature map** — a structured list of discrete, user-facing features that
 together deliver the milestone's goals.
 
+## Authored Smithy Artifacts Location
+
+This Smithy install was set up with an explicit policy for **where authored
+Smithy artifacts live**. Every path you see in the rest of this prompt that
+refers to an authored Smithy artifact — `.rfc.md`, `.features.md`, `.spec.md`,
+`.tasks.md`, `.strike.md`, `.prd.md`, `.persona.md`, `.data-model.md`,
+`.contracts.md` — is already prefixed with `` so it points
+at the right root for this repo. Do not strip, override, or rewrite that
+prefix.
+
+- When `` is empty, artifacts live **in the repo**:
+  `docs/rfcs/...`, `docs/prds/...`, `docs/personas/...`, `specs/...`,
+  `specs/strikes/...`.
+- When `` is `~/.smithy/repos/<repoKey>/`, artifacts live **outside
+  the repo, in the user's home directory**: `~/.smithy/repos/<repoKey>/docs/rfcs/...`,
+  `~/.smithy/repos/<repoKey>/docs/personas/...`, `~/.smithy/repos/<repoKey>/specs/...`, etc.
+  Treat the resolved path as authoritative — agents (Claude Code, Gemini CLI,
+  Codex) expand `~` at tool-call time, so the path is portable across team
+  members even when this prompt is committed to source control.
+
+### Scope of the policy
+
+This policy applies **only to authored Smithy artifacts** such as planning
+artifacts and durable persona files. It does **not** apply to:
+
+- **Source code, tests, configuration, or any other repo file you edit as
+  part of an implementation slice.** Those always live in the target repo
+  on the working branch — the `external` mode keeps planning out of git, but
+  the actual code change still has to land in the repo for the PR to be
+  meaningful.
+- **GitHub issue body templates** under `<manifestDir>/templates/orders/`.
+  Those are managed separately by `smithy init` and `smithy.orders`.
+- **The smithy manifest itself** (`.smithy/smithy-manifest.json` or
+  `~/.smithy/smithy-manifest.json`), which is set by `smithy init`.
+
+### When discovering existing artifacts
+
+When you scan for existing artifacts (e.g. "list folders in
+`docs/rfcs/`"), use the prefixed path. The `smithy status`
+CLI already reads the manifest and looks in the right place, so its output
+will be consistent with the paths in this prompt.
 ## Input
 
 The user's RFC path and optional milestone number: $ARGUMENTS
@@ -204,6 +245,95 @@ Handle the scout report as follows:
 
 ## Phase 1.8: Approach Planning
 
+### Competing Plans
+
+Use competing **smithy-plan** sub-agents to generate the approach from multiple
+perspectives.
+
+### Competing Plan Lenses
+
+Dispatch 4 competing **smithy-plan** sub-agents in parallel. Each receives the
+same planning context, feature description, codebase file paths, and scout
+report — the only difference is the **additional planning directives** field.
+
+Use the following lens directives (one per sub-agent):
+
+#### Scope Minimalism
+
+> **Directive:** Challenge scope creep. Propose tighter boundaries, question
+> optional requirements, and look for elements that can be deferred without
+> blocking the core artifact. Favor fewer entities, narrower stories, and
+> smaller milestones. In the Tradeoffs section, surface at least one narrower
+> alternative even if you ultimately recommend against it. This directive biases
+> your attention, not your coverage — still flag completeness gaps or coherence
+> issues if you find them.
+
+#### Completeness
+
+> **Directive:** Look for gaps in coverage: missing user stories, unstated
+> assumptions, edge cases in contracts, entities without clear ownership, and
+> milestones that skip necessary groundwork. Verify that every requirement
+> traces to a concrete artifact element. In the Tradeoffs section, surface at
+> least one more thorough alternative even if you ultimately recommend against
+> it. This directive biases your attention, not your coverage — still flag
+> scope bloat or coherence issues if you find them.
+
+#### Coherence
+
+> **Directive:** Look for inconsistencies between elements: stories that don't
+> trace to contracts, data model entities that overlap or have ambiguous
+> ownership, feature boundaries that create awkward cross-cutting dependencies,
+> and milestones whose ordering doesn't match their actual dependencies.
+> Propose cleaner groupings and sharper boundaries. In the Tradeoffs section,
+> surface at least one better-structured alternative even if you ultimately
+> recommend against it. This directive biases your attention, not your
+> coverage — still flag scope bloat or completeness gaps if you find them.
+
+#### Parallelism
+
+> **Directive:** Look for splits that let independent workstreams begin
+> concurrently. Prefer **vertical slices** that span data, logic, and interface
+> over **horizontal phases** that batch all of one layer before any of the
+> next. For each milestone, feature, or user story, ask whether its children
+> could realistically start in parallel without a missing prerequisite — and
+> whether a sequential ordering is truly required by data flow, or merely
+> conventional. In the Tradeoffs section, surface at least one alternative
+> with greater concurrent-execution potential even if you ultimately recommend
+> against it. This directive biases your attention, not your coverage — still
+> flag scope bloat, completeness gaps, or coherence issues if you find them.
+
+---
+
+Pass the quoted directive text above as the **Additional planning directives**
+field for the corresponding smithy-plan run.
+
+After all 4 return, dispatch the **smithy-reconcile** sub-agent. Pass it:
+
+- All 4 plan outputs, each labeled with its lens name (e.g.,
+  "**[Scope Minimalism]** …", "**[Completeness]** …",
+  "**[Coherence]** …", "**[Parallelism]** …")
+- The same context file paths
+- The planning context and feature description
+
+Use the reconciled plan as the basis for presenting the approach to the user.
+Pass each smithy-plan sub-agent:
+
+- **Planning context**: feature map artifact
+- **Feature/problem description**: the RFC path and the target milestone number, title, description, and success criteria
+- **Codebase file paths**: the RFC file path plus any codebase files read during Phase 1
+- **Scout report**: the scout report from Phase 1.5 (if it contained conflicts or warnings)
+- **Additional planning directives**: the lens directive from the competing-lenses section above (each run gets a different directive)
+
+Present the reconciled plan to the user as:
+
+1. **Summary** — What you understand the milestone to deliver and the proposed feature decomposition.
+2. **Approach** — The reconciled approach for feature boundaries and grouping. Note any
+   items annotated with `[via <lens>]`.
+3. **Risks** — The reconciled risk assessment.
+4. **Conflicts** — If the reconciled plan contains unresolved conflicts between
+   approaches, present them with both options and the reconciler's
+   recommendation. Let the user decide.
+
 
 ---
 
@@ -236,10 +366,68 @@ Use the **smithy-clarify** sub-agent. Pass it:
 canonical title formats and check for repo-level overrides in the project's
 CLAUDE.md. Apply those conventions to all headings in this artifact.
 
-Using the workshopped answers from Phase 2, draft a structured `.features.md` with
-this format:
+Using the workshopped answers from Phase 2, draft a structured `.features.md`. Every
+feature is typed per the shared schema below:
 
-```markdown
+## Feature Kinds
+
+Every feature in a `.features.md` map is **typed**. Each `### Feature N:` carries a
+fenced `yaml` metadata block — placed right after the heading, before the prose —
+declaring its kind and, for UI work, its design and phase fields. The kind selects
+the `smithy.mark` authoring path: `backend` keeps the existing spec-triad flow,
+while `ui` enters the UI authoring path for the typed ledger and durable design
+truth.
+
+- **`backend`** — server/library functionality; the prose body is a behavioral delta.
+- **`ui`** — screen/flow work; `mark` authors the UI spec ledger and durable
+  screen/flow design artifacts, then downstream build steps render a
+  framework-appropriate screen component from a committed design skill and, in
+  the `wire` phase, emit/update the executable flow body for any flow the screen
+  joins.
+
+| Key | Kind | Required | Notes |
+|-----|------|----------|-------|
+| `kind` | both | Yes (new) | `backend` or `ui`. Missing on legacy maps → `backend`. |
+| `phase` | ui | Yes | `build` or `wire` (feature-level). |
+| `design_system` | ui | Yes | Committed design-skill ref (for example `story-spider-design`); source of truth even when a bundle is present. |
+| `bundle` | ui | No | Path to a Claude Design export — a visual/structural reference, not a drop-in. Bundle wins on layout/visual intent; the skill wins on implementation dialect. |
+| `flag` | ui | Yes (flag-gated) | Feature-flag name; the shared contract joining a `build` feature to its `wire` feature. |
+| `screens` | ui | Yes | List of `ScreenId`, e.g. `[AddTitle]`. |
+| `flows` | ui | No (build) / Yes (wire) | List of `FlowId` the screen participates in. |
+
+```yaml
+# backend feature
+kind: backend
+```
+
+```yaml
+# ui feature (build phase)
+kind: ui
+phase: build
+design_system: story-spider-design
+bundle: design/bundles/add-title.zip   # optional
+flag: add_title_v1
+screens: [AddTitle]
+flows: [AddTitle]
+```
+
+**Phase semantics.** `build` implements the screen component against a mock behind
+`flag` (rendering every brief state with design-system tokens only); `wire`
+connects real data, flips the flag, and emits/updates the executable test body for
+every flow in `flows` using the project's UI driver; the `.flow.md` design truth is
+authored by `mark`. Compose, Maestro, and `story-spider-design` are examples, not
+required stacks.
+
+**The build/wire seam.** Flag-gated UI is two features sharing one `flag`: a `build`
+feature and a `wire` feature that lists the build feature in its `Depends On` cell.
+Build-ahead-of-backend is legal — only the `wire` feature depends on the backend
+feature. The shared `flag`, not a naming convention, is the contract of record. See
+the "Feature Kinds and the Build/Wire Seam" section of the agent-skills README for a
+worked example.
+Assemble the feature map in this format (a backend feature and a build/wire UI pair
+are shown to illustrate the seam):
+
+````markdown
 # Feature Map: <Milestone Title>
 
 **Source RFC**: `<docs/rfcs/YYYY-NNN-slug/slug.rfc.md>`
@@ -247,8 +435,13 @@ this format:
 **Created**: YYYY-MM-DD
 
 ## Features
+<!-- audience: reviewer; mode: reference; length: tables only; diagram: optional; examples: discouraged -->
 
 ### Feature 1: <Title>
+
+```yaml
+kind: backend
+```
 
 **Description**: <What this feature delivers — one to two sentences.>
 
@@ -260,7 +453,17 @@ this format:
 
 ### Feature 2: <Title>
 
-**Description**: <What this feature delivers.>
+```yaml
+kind: ui
+phase: build
+design_system: <committed design skill, e.g. story-spider-design>
+bundle: <optional Claude Design export path, or omit the key>
+flag: <feature-flag name gating this screen>
+screens: [<ScreenId>]
+flows: [<FlowId>]
+```
+
+**Description**: <What this screen delivers, built against a mock behind the flag.>
 
 **User-Facing Value**: <Why a user cares about this feature.>
 
@@ -268,10 +471,31 @@ this format:
 - Includes: <what is in scope>
 - Excludes: <what is explicitly out of scope>
 
-<!-- Repeat for each feature -->
+### Feature 3: <Title> (wire)
+
+```yaml
+kind: ui
+phase: wire
+design_system: <same skill as the build feature>
+flag: <same flag as the build feature — the shared contract>
+screens: [<ScreenId>]
+flows: [<FlowId>]
+```
+
+**Description**: <Connect the screen to real data and flip the flag; done includes
+emitting/updating the Maestro flow + flow.md for each flow above.>
+
+**User-Facing Value**: <Why a user cares about this feature.>
+
+**Scope Boundaries**:
+- Includes: <what is in scope>
+- Excludes: <what is explicitly out of scope>
+
+<!-- Repeat for each feature. backend features carry only `kind: backend`. -->
 
 <!-- Specification Debt appears here for templates without ## Assumptions sections -->
 ## Specification Debt
+<!-- audience: reviewer; mode: reference; length: tables only; diagram: optional; examples: discouraged -->
 
 | ID | Description | Source Category | Impact | Confidence | Status | Resolution |
 |----|-------------|-----------------|--------|------------|--------|------------|
@@ -280,6 +504,7 @@ this format:
 _If no debt items, write: "None — all ambiguities resolved."_
 
 ## Dependency Order
+<!-- audience: builder+ai-input; mode: reference; length: tables only; diagram: optional; examples: discouraged -->
 
 Recommended specification sequence:
 
@@ -287,8 +512,10 @@ Recommended specification sequence:
 |----|-------|-----------|----------|
 | F1 | <Title> | — | — |
 | F2 | <Title> | — | — |
+| F3 | <Title> | F1, F2 | — |
 
 ## Cross-Milestone Dependencies
+<!-- audience: reviewer; mode: reference; length: tables only; diagram: recommended; examples: discouraged -->
 
 Direction must be either `depends on` or `depended upon by`.
 
@@ -297,7 +524,7 @@ Direction must be either `depends on` or `depended upon by`.
 | Milestone <X>: <title> | depends on | <what this milestone needs from or provides to the other> |
 
 _If no cross-milestone dependencies exist, state "None — this milestone is self-contained."_
-```
+````
 
 ## Phase 4: Write & Create PR
 
@@ -522,6 +749,9 @@ attempting to render the full format above:
   comma-separated list of same-table IDs. The `Artifact` column starts as `—`
   and is populated by `smithy.mark` when it creates the spec folder. Do NOT
   use checkboxes in the `## Dependency Order` section.
+- **DO** type every feature with a `yaml` metadata block per the `feature-kinds`
+  schema in Phase 3 (every feature has a `kind`; flag-gated UI splits into a
+  `build` + `wire` pair sharing one `flag`).
 
 ---
 

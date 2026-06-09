@@ -12,6 +12,47 @@ implementation.
 
 ---
 
+## Authored Smithy Artifacts Location
+
+This Smithy install was set up with an explicit policy for **where authored
+Smithy artifacts live**. Every path you see in the rest of this prompt that
+refers to an authored Smithy artifact — `.rfc.md`, `.features.md`, `.spec.md`,
+`.tasks.md`, `.strike.md`, `.prd.md`, `.persona.md`, `.data-model.md`,
+`.contracts.md` — is already prefixed with `` so it points
+at the right root for this repo. Do not strip, override, or rewrite that
+prefix.
+
+- When `` is empty, artifacts live **in the repo**:
+  `docs/rfcs/...`, `docs/prds/...`, `docs/personas/...`, `specs/...`,
+  `specs/strikes/...`.
+- When `` is `~/.smithy/repos/<repoKey>/`, artifacts live **outside
+  the repo, in the user's home directory**: `~/.smithy/repos/<repoKey>/docs/rfcs/...`,
+  `~/.smithy/repos/<repoKey>/docs/personas/...`, `~/.smithy/repos/<repoKey>/specs/...`, etc.
+  Treat the resolved path as authoritative — agents (Claude Code, Gemini CLI,
+  Codex) expand `~` at tool-call time, so the path is portable across team
+  members even when this prompt is committed to source control.
+
+### Scope of the policy
+
+This policy applies **only to authored Smithy artifacts** such as planning
+artifacts and durable persona files. It does **not** apply to:
+
+- **Source code, tests, configuration, or any other repo file you edit as
+  part of an implementation slice.** Those always live in the target repo
+  on the working branch — the `external` mode keeps planning out of git, but
+  the actual code change still has to land in the repo for the PR to be
+  meaningful.
+- **GitHub issue body templates** under `<manifestDir>/templates/orders/`.
+  Those are managed separately by `smithy init` and `smithy.orders`.
+- **The smithy manifest itself** (`.smithy/smithy-manifest.json` or
+  `~/.smithy/smithy-manifest.json`), which is set by `smithy init`.
+
+### When discovering existing artifacts
+
+When you scan for existing artifacts (e.g. "list folders in
+`docs/rfcs/`"), use the prefixed path. The `smithy status`
+CLI already reads the manifest and looks in the right place, so its output
+will be consistent with the paths in this prompt.
 ## Input
 
 The user's input: $ARGUMENTS
@@ -368,6 +409,88 @@ Handle the scout report as follows:
 
 ## Phase 2.8: Approach Planning
 
+### Competing Slice Decompositions
+
+Use competing **smithy-slice** sub-agents to generate the task decomposition
+from multiple perspectives.
+
+### Competing Slice Lenses
+
+Dispatch 3 competing **smithy-slice** sub-agents in parallel. Each receives the
+same user story, spec artifacts, codebase file paths, and scout report — the
+only difference is the **additional planning directives** field.
+
+Use the following lens directives (one per sub-agent):
+
+#### Minimal Path
+
+> **Directive:** Achieve the user story's goals with minimum code churn. Prefer
+> adding behavior where it naturally fits in the existing code structure —
+> extend current functions, add cases to existing switches, augment existing
+> tests. Avoid refactoring, extracting, or reorganizing unless strictly
+> required by acceptance criteria. Produce fewer, more targeted tasks. In the
+> Tradeoffs section, surface at least one lower-churn alternative even if you
+> ultimately recommend against it. This directive biases your attention, not
+> your coverage — still flag structural problems or missing tasks if you find
+> them.
+
+#### Structural Integrity
+
+> **Directive:** Achieve the user story's goals with code in the architecturally
+> correct location. If the right place for new behavior requires extracting a
+> module, moving logic between layers, or reorganizing existing code, include
+> those steps as tasks. Prioritize code health and maintainability over minimal
+> diff. In the Tradeoffs section, surface at least one better-structured
+> alternative even if you ultimately recommend against it. This directive biases
+> your attention, not your coverage — still flag unnecessary refactoring or
+> scope creep if you find them.
+
+#### Independent Slices
+
+> **Directive:** Bias toward slices whose `Depends On` cell is `—`. When two
+> slices touch the same files but address functionally independent acceptance
+> scenarios, treat them as parallel-eligible rather than fabricating a
+> sequential chain. Avoid front-loading "scaffolding" or "groundwork" slices
+> that exist only to enable later work — if scaffolding is real, fold it into
+> the first slice that needs it. In the Tradeoffs section, surface at least
+> one alternative slicing with greater parallel-execution potential even if
+> you ultimately recommend against it. This directive biases your attention,
+> not your coverage — still flag structural problems, missing tasks, or scope
+> creep if you find them.
+
+---
+
+Pass the quoted directive text above as the **Additional planning directives**
+field for the corresponding smithy-slice run.
+
+After all 3 return, dispatch the **smithy-reconcile-slices** sub-agent. Pass it:
+
+- All 3 slice decomposition outputs, each labeled with its lens name (e.g.,
+  "**[Minimal Path]** …", "**[Structural Integrity]** …",
+  "**[Independent Slices]** …")
+- The same context file paths
+- The user story and spec artifact paths
+
+Use the reconciled decomposition as the basis for presenting the approach to
+the user.
+Pass each smithy-slice sub-agent:
+
+- **User story**: the story title, acceptance scenarios, priority, and traced FRs from Phase 1
+- **Spec artifacts**: paths to the `.spec.md`, `.data-model.md`, and `.contracts.md`
+- **Codebase file paths**: the code areas mapped to acceptance scenarios during Phase 2
+- **Scout report**: the scout report from Phase 2.5 (if it contained conflicts or warnings)
+- **Additional planning directives**: the lens directive from the competing-lenses section above (each run gets a different directive)
+
+Present the reconciled decomposition to the user as:
+
+1. **Summary** — What you understand the user story to deliver and the proposed slicing strategy.
+2. **Approach** — The reconciled approach for PR-sized slices and task ordering. Note any
+   items annotated with `[via <lens>]`.
+3. **Risks** — The reconciled risk assessment.
+4. **Conflicts** — If the reconciled decomposition contains unresolved conflicts
+   between approaches, present them with both options and the reconciler's
+   recommendation. Let the user decide.
+
 
 ---
 
@@ -421,6 +544,7 @@ Draft the tasks file with this structure:
 ---
 
 ## Slice 1: <Title>
+<!-- audience: builder; mode: how-to; length: 5-15 steps; diagram: optional; examples: forbidden -->
 
 **Goal**: <What this slice delivers as a standalone working increment.>
 
@@ -444,12 +568,14 @@ Draft the tasks file with this structure:
 ---
 
 ## Slice 2: <Title>
+<!-- audience: builder; mode: how-to; length: 5-15 steps; diagram: optional; examples: forbidden -->
 
 ...
 
 ---
 
 ## Specification Debt
+<!-- audience: reviewer; mode: reference; length: tables only; diagram: optional; examples: discouraged -->
 
 | ID | Description | Source Category | Impact | Confidence | Status | Resolution |
 |----|-------------|-----------------|--------|------------|--------|------------|
@@ -460,6 +586,7 @@ _If no debt items, write: "None — all ambiguities resolved."_
 ---
 
 ## Dependency Order
+<!-- audience: builder+ai-input; mode: reference; length: tables only; diagram: recommended; examples: discouraged -->
 
 Recommended implementation sequence:
 

@@ -11,6 +11,47 @@ data models, and interface contracts — all scoped to "what and why", not "how"
 
 ---
 
+## Authored Smithy Artifacts Location
+
+This Smithy install was set up with an explicit policy for **where authored
+Smithy artifacts live**. Every path you see in the rest of this prompt that
+refers to an authored Smithy artifact — `.rfc.md`, `.features.md`, `.spec.md`,
+`.tasks.md`, `.strike.md`, `.prd.md`, `.persona.md`, `.data-model.md`,
+`.contracts.md` — is already prefixed with `` so it points
+at the right root for this repo. Do not strip, override, or rewrite that
+prefix.
+
+- When `` is empty, artifacts live **in the repo**:
+  `docs/rfcs/...`, `docs/prds/...`, `docs/personas/...`, `specs/...`,
+  `specs/strikes/...`.
+- When `` is `~/.smithy/repos/<repoKey>/`, artifacts live **outside
+  the repo, in the user's home directory**: `~/.smithy/repos/<repoKey>/docs/rfcs/...`,
+  `~/.smithy/repos/<repoKey>/docs/personas/...`, `~/.smithy/repos/<repoKey>/specs/...`, etc.
+  Treat the resolved path as authoritative — agents (Claude Code, Gemini CLI,
+  Codex) expand `~` at tool-call time, so the path is portable across team
+  members even when this prompt is committed to source control.
+
+### Scope of the policy
+
+This policy applies **only to authored Smithy artifacts** such as planning
+artifacts and durable persona files. It does **not** apply to:
+
+- **Source code, tests, configuration, or any other repo file you edit as
+  part of an implementation slice.** Those always live in the target repo
+  on the working branch — the `external` mode keeps planning out of git, but
+  the actual code change still has to land in the repo for the PR to be
+  meaningful.
+- **GitHub issue body templates** under `<manifestDir>/templates/orders/`.
+  Those are managed separately by `smithy init` and `smithy.orders`.
+- **The smithy manifest itself** (`.smithy/smithy-manifest.json` or
+  `~/.smithy/smithy-manifest.json`), which is set by `smithy init`.
+
+### When discovering existing artifacts
+
+When you scan for existing artifacts (e.g. "list folders in
+`docs/rfcs/`"), use the prefixed path. The `smithy status`
+CLI already reads the manifest and looks in the right place, so its output
+will be consistent with the paths in this prompt.
 ## Input
 
 The user's input: $ARGUMENTS
@@ -64,9 +105,33 @@ Before starting, determine the mode:
 When entering Phase 1 from a `.features.md`, carry forward:
 - The selected feature's **Title**, **Description**, **User-Facing Value**, and
   **Scope Boundaries** as the starting context.
+- The selected feature's fenced `yaml` metadata block, including `kind` and any
+  UI fields such as `phase`, `design_system`, `bundle`, `flag`, `screens`, and
+  `flows`. Keep this metadata attached to the planning context so later mark
+  phases can author the correct child artifacts without reparsing the feature map.
+  This block is optional: legacy feature maps authored before typed kinds will
+  not have it. When it is absent, carry no UI metadata forward and treat the
+  feature as `kind: backend` per the **Feature Kind Path** table below — never
+  abort or prompt for the missing block.
 - The **Source RFC** path from the `.features.md` header (if present; if missing,
   look for a co-located `.rfc.md` in the same directory).
 - The **feature map path** and **feature number** for traceability.
+
+### Feature Kind Path
+
+When Phase 1 starts from a `.features.md` feature, classify the selected
+feature before drafting artifacts:
+
+| Selected feature metadata | Mark authoring path |
+|---------------------------|---------------------|
+| `kind: backend` | **Backend spec-triad path** — preserve the existing `.spec.md` + `.data-model.md` + `.contracts.md` behavior. |
+| No `kind` field | **Backend spec-triad path** — legacy feature maps continue through the existing flow unchanged. |
+| `kind: ui` | **UI authoring path** — carry the UI metadata forward for the UI spec ledger and mark-owned durable design artifacts. |
+
+Do not change feature-number validation, already-specced detection, or
+auto-selection semantics when applying this branch. Those decisions still happen
+solely from the parsed `### Feature N` headings and the `.features.md`
+`## Dependency Order` table above.
 
 ---
 
@@ -88,8 +153,9 @@ When entering Phase 1 from a `.features.md`, carry forward:
    - **Feature description**: Treat as the starting context.
    - **Feature map** (from Routing): Use the selected feature's Title,
      Description, User-Facing Value, and Scope Boundaries as the starting
-     context. Also read the Source RFC (resolved during Routing) for additional
-     goals and constraints.
+     context, plus the selected metadata and mark authoring path from Routing.
+     Also read the Source RFC (resolved during Routing) for additional goals
+     and constraints.
 2. Explore the codebase to understand current architecture, relevant modules,
    and existing patterns that inform the specification.
 3. Determine the spec folder name:
@@ -232,6 +298,95 @@ Handle the scout report as follows:
 
 ## Phase 1.8: Approach Planning
 
+### Competing Plans
+
+Use competing **smithy-plan** sub-agents to generate the approach from multiple
+perspectives.
+
+### Competing Plan Lenses
+
+Dispatch 4 competing **smithy-plan** sub-agents in parallel. Each receives the
+same planning context, feature description, codebase file paths, and scout
+report — the only difference is the **additional planning directives** field.
+
+Use the following lens directives (one per sub-agent):
+
+#### Scope Minimalism
+
+> **Directive:** Challenge scope creep. Propose tighter boundaries, question
+> optional requirements, and look for elements that can be deferred without
+> blocking the core artifact. Favor fewer entities, narrower stories, and
+> smaller milestones. In the Tradeoffs section, surface at least one narrower
+> alternative even if you ultimately recommend against it. This directive biases
+> your attention, not your coverage — still flag completeness gaps or coherence
+> issues if you find them.
+
+#### Completeness
+
+> **Directive:** Look for gaps in coverage: missing user stories, unstated
+> assumptions, edge cases in contracts, entities without clear ownership, and
+> milestones that skip necessary groundwork. Verify that every requirement
+> traces to a concrete artifact element. In the Tradeoffs section, surface at
+> least one more thorough alternative even if you ultimately recommend against
+> it. This directive biases your attention, not your coverage — still flag
+> scope bloat or coherence issues if you find them.
+
+#### Coherence
+
+> **Directive:** Look for inconsistencies between elements: stories that don't
+> trace to contracts, data model entities that overlap or have ambiguous
+> ownership, feature boundaries that create awkward cross-cutting dependencies,
+> and milestones whose ordering doesn't match their actual dependencies.
+> Propose cleaner groupings and sharper boundaries. In the Tradeoffs section,
+> surface at least one better-structured alternative even if you ultimately
+> recommend against it. This directive biases your attention, not your
+> coverage — still flag scope bloat or completeness gaps if you find them.
+
+#### Parallelism
+
+> **Directive:** Look for splits that let independent workstreams begin
+> concurrently. Prefer **vertical slices** that span data, logic, and interface
+> over **horizontal phases** that batch all of one layer before any of the
+> next. For each milestone, feature, or user story, ask whether its children
+> could realistically start in parallel without a missing prerequisite — and
+> whether a sequential ordering is truly required by data flow, or merely
+> conventional. In the Tradeoffs section, surface at least one alternative
+> with greater concurrent-execution potential even if you ultimately recommend
+> against it. This directive biases your attention, not your coverage — still
+> flag scope bloat, completeness gaps, or coherence issues if you find them.
+
+---
+
+Pass the quoted directive text above as the **Additional planning directives**
+field for the corresponding smithy-plan run.
+
+After all 4 return, dispatch the **smithy-reconcile** sub-agent. Pass it:
+
+- All 4 plan outputs, each labeled with its lens name (e.g.,
+  "**[Scope Minimalism]** …", "**[Completeness]** …",
+  "**[Coherence]** …", "**[Parallelism]** …")
+- The same context file paths
+- The planning context and feature description
+
+Use the reconciled plan as the basis for presenting the approach to the user.
+Pass each smithy-plan sub-agent:
+
+- **Planning context**: spec artifact
+- **Feature/problem description**: the feature description or RFC path with extracted goals and constraints from intake
+- **Codebase file paths**: the relevant codebase files explored during Phase 1
+- **Scout report**: the scout report from Phase 1.5 (if it contained conflicts or warnings)
+- **Additional planning directives**: the lens directive from the competing-lenses section above (each run gets a different directive)
+
+Present the reconciled plan to the user as:
+
+1. **Summary** — What you understand the feature to be and the proposed specification structure.
+2. **Approach** — The reconciled approach for user stories, data model scope, and contract boundaries. Note any
+   items annotated with `[via <lens>]`.
+3. **Risks** — The reconciled risk assessment.
+4. **Conflicts** — If the reconciled plan contains unresolved conflicts between
+   approaches, present them with both options and the reconciler's
+   recommendation. Let the user decide.
+
 
 ---
 
@@ -289,6 +444,7 @@ invoked inside a linked worktree)*
 **Source Feature Map**: `<path-to-.features.md>` — Feature <N>: <Title> *(include only when input is a `.features.md`)*
 
 ## Clarifications
+<!-- audience: reviewer; mode: reference; length: tables only; diagram: optional; examples: discouraged -->
 
 ### Session YYYY-MM-DD
 
@@ -296,10 +452,12 @@ invoked inside a linked worktree)*
 - _Assumption text_
 
 ## Artifact Hierarchy
+<!-- audience: reviewer; mode: reference; length: tables only; diagram: optional; examples: discouraged -->
 
 RFC → Milestone → Feature → User Story → Slice → Tasks
 
 ## User Scenarios & Testing *(mandatory)*
+<!-- audience: builder+ai-input; mode: reference; length: tables only; diagram: optional; examples: optional -->
 
 ### User Story 1: <Title> (Priority: P<N>)
 
@@ -324,6 +482,7 @@ As a <persona>, I want <goal> so that <benefit>.
 - ...
 
 ## Dependency Order
+<!-- audience: builder+ai-input; mode: reference; length: tables only; diagram: optional; examples: discouraged -->
 
 Recommended implementation sequence:
 
@@ -334,6 +493,7 @@ Recommended implementation sequence:
 | USN | <Title> | — | — |
 
 ## Requirements *(mandatory)*
+<!-- audience: builder+ai-input; mode: reference; length: tables only; diagram: optional; examples: recommended -->
 
 ### Functional Requirements
 
@@ -346,10 +506,12 @@ Recommended implementation sequence:
 - ...
 
 ## Assumptions
+<!-- audience: reviewer; mode: reference; length: tables only; diagram: optional; examples: discouraged -->
 
 - ...
 
 ## Specification Debt
+<!-- audience: reviewer; mode: reference; length: tables only; diagram: optional; examples: discouraged -->
 
 | ID | Description | Source Category | Impact | Confidence | Status | Resolution |
 |----|-------------|-----------------|--------|------------|--------|------------|
@@ -358,10 +520,12 @@ Recommended implementation sequence:
 _If no debt items, write: "None — all ambiguities resolved."_
 
 ## Out of Scope
+<!-- audience: reviewer; mode: reference; length: tables only; diagram: optional; examples: discouraged -->
 
 - ...
 
 ## Success Criteria *(mandatory)*
+<!-- audience: reviewer; mode: reference; length: tables only; diagram: optional; examples: discouraged -->
 
 ### Measurable Outcomes
 
@@ -391,26 +555,89 @@ Guidelines for the spec:
   column starts as `—` and is populated by `smithy.cut` when it creates the
   tasks file. Do NOT use checkboxes in the `## Dependency Order` section.
 
+### UI Authoring Path Spec Ledger
+
+When the selected feature's authoring path is `kind: ui`, keep the same
+`.spec.md` structure above but replace the backend-only `## Dependency Order`
+table with a typed UI Spec Ledger. This is the ordering graph for the UI
+feature; it is not a layout or flow-body document.
+
+Use this exact column set for the UI ledger:
+
+```markdown
+| ID | Kind | Title | Depends On | Design | Artifact |
+|----|------|-------|------------|--------|----------|
+| SC1 | screen | <Screen title> → `design/screens/<ScreenId>.design.md` | — | <none/import/brief> | — |
+| FL1 | flow | <Flow title> → `design/flows/<FlowId>.flow.md` | SC1 | — | — |
+| US1 | story | <Backend story title> | — | — | — |
+```
+
+UI ledger rules:
+- `ID` values are typed and unique in the table: `SC<N>` for screen-build rows,
+  `FL<N>` for flow-wire rows, and `US<N>` for backend story rows. Use no leading
+  zeros.
+- `Kind` is exactly `screen`, `flow`, or `story`, matching the row's ID prefix.
+- `Depends On` is exactly `—` or a comma-separated list of same-table IDs. This
+  is the only place intra-feature ordering and parallelism are expressed.
+- `Design` is required for `screen` rows and is one of `none`, `import`, or
+  `brief`; use `—` for `flow` and `story` rows.
+- `Artifact` is `—` for every row in mark's output. It holds the
+  `cut`-produced `.tasks.md` path only after `smithy.cut` runs; mark never
+  pre-fills a tasks path in this column.
+- Screen and flow row titles must name their durable files with pointer text
+  — `→ design/screens/<ScreenId>.design.md` for screen rows and
+  `→ design/flows/<FlowId>.flow.md` for flow rows — so the title is the stable
+  reference edge downstream tooling and later artifact creation resolve to the
+  durable file. Titles and cells must not carry layout,
+  state, interaction-step, visual-positioning, or implementation prose.
+- Flow rows are first-class `FL<N>` rows, not entries in a `flows: [...]` list
+  and not nested under a screen row.
+- Direct all screen and flow intent into the durable artifacts described by the
+  UI Spec Ledger and Screen/Flow node entities in the data model. Do not
+  duplicate the screen or flow artifact body schemas in the spec ledger.
+- If the feature has no internal ordering, emit the smallest honest typed graph.
+  A single pass-through screen with no flows or backend work may be one `SC<N>`
+  row, but it must still use the full UI ledger column set.
+- Do not add UI-only columns (`Kind` or `Design`) to backend spec-triad output
+  for `kind: backend` or absent-kind feature inputs.
+
 ---
 
 ## Phase 4: Model
 
 Draft the `<slug>.data-model.md` file.
 
+**Reference voice only.** `.data-model.md` is a Builder × Reference artifact: its
+body is tables, schema definitions, validation rules, and state-transition
+matrices — never narrative prose explaining what the entities mean. If a
+section would otherwise be a paragraph of Explanation, either compress it
+into the structured artifact (the table, the schema literal) or drop it.
+
+**Non-overlap with `.contracts.md`.** `.data-model.md` covers **entities,
+schema, validation, lifecycle, and state transitions**. Interfaces,
+signatures, integration boundaries, and event/hook surfaces belong in
+`.contracts.md` instead — do not restate them here. If the same concept
+shows up in both files, the data-model row defines the persisted shape and
+the contracts row defines the call/event surface; they are complementary,
+not duplicative.
+
+**Applicability — code-shaped features only.** `.data-model.md` is
+mandatory only when the feature introduces or modifies persisted entities,
+types, or state. For non-code-shaped features (docs-only changes,
+template/prompt refactors, configuration toggles, process updates), the
+file MUST still exist but its body is a single `N/A` line with a
+one-sentence reason. Do not invent prose entities to fill the section.
+
 If the feature implies data storage, new types, or state management:
 
 ```markdown
 # Data Model: <Title>
-
-## Overview
-
-<One paragraph describing what this model supports.>
+<!-- applicability: code-shaped features only -->
 
 ## Entities
+<!-- audience: builder; mode: reference; length: tables only; diagram: required; examples: recommended; applicability: code-shaped features only -->
 
 ### 1) <Entity Name> (`<storage_name>`)
-
-Purpose: <what this entity represents and why it exists>
 
 | Field | Type | Required | Notes |
 |-------|------|----------|-------|
@@ -424,11 +651,13 @@ Validation rules:
 ### 2) ...
 
 ## Relationships
+<!-- audience: builder; mode: reference; length: tables only; diagram: required; examples: recommended; applicability: code-shaped features only -->
 
 - <Entity A> 1:N <Entity B> via `foreign_key`.
 - ...
 
 ## State Transitions
+<!-- audience: builder; mode: reference; length: tables only; diagram: required; examples: recommended; applicability: code-shaped features only -->
 
 ### <Entity/Process> lifecycle
 
@@ -439,17 +668,20 @@ Validation rules:
 2. ...
 
 ## Identity & Uniqueness
+<!-- audience: builder; mode: reference; length: tables only; diagram: optional; examples: recommended; applicability: code-shaped features only -->
 
 - <How entities are uniquely identified and deduplicated.>
 ```
 
-If the feature does NOT involve data changes, write a minimal file:
+If the feature does NOT involve data changes, write a one-line fallback —
+do not invent prose entities, do not pad the file with explanatory
+paragraphs:
 
 ```markdown
 # Data Model: <Title>
+<!-- applicability: code-shaped features only -->
 
-No new data entities, storage changes, or type definitions are required for this feature.
-Existing data structures are sufficient as-is.
+N/A — <one-sentence reason this feature has no code-shaped data changes (e.g., "docs-only change to README", "template refactor with no persisted state", "configuration toggle with no schema impact").>
 ```
 
 ---
@@ -458,16 +690,35 @@ Existing data structures are sufficient as-is.
 
 Draft the `<slug>.contracts.md` file.
 
+**Reference voice only.** `.contracts.md` is a Builder × Reference artifact:
+its body is signatures, input/output tables, and error-condition tables —
+the signatures *are* the deliverable. Never wrap the interfaces in
+narrative paragraphs explaining what they do; the signature itself, plus
+the input/output tables next to it, is the contract.
+
+**Non-overlap with `.data-model.md`.** `.contracts.md` covers **interfaces,
+signatures, integration boundaries, and event/hook surfaces**. Entity
+shapes, validation rules, lifecycles, and state transitions belong in
+`.data-model.md` instead — do not restate them here. The contracts file
+describes the call/event surface; the data-model file describes the
+persisted shape.
+
+**Applicability — code-shaped features only.** `.contracts.md` is
+mandatory only when the feature introduces or modifies an interface, API
+boundary, or integration surface. For non-code-shaped features (docs-only
+changes, template/prompt refactors, configuration toggles, process
+updates), the file MUST still exist but its body is a single `N/A` line
+with a one-sentence reason. Do not invent prose interfaces to fill the
+section.
+
 If the feature involves interfaces, API boundaries, or integration points:
 
 ```markdown
 # Contracts: <Title>
-
-## Overview
-
-<One paragraph describing the integration boundaries this feature touches.>
+<!-- applicability: code-shaped features only -->
 
 ## Interfaces
+<!-- audience: builder; mode: reference; length: tables only; diagram: optional; examples: required; applicability: code-shaped features only -->
 
 ### <Interface/Contract Name>
 
@@ -501,22 +752,28 @@ Use language-appropriate pseudo-signatures — not full implementation code.>
 ### ...
 
 ## Events / Hooks
+<!-- audience: builder; mode: reference; length: tables only; diagram: optional; examples: required; applicability: code-shaped features only -->
 
-<If the feature publishes or subscribes to events, document them here.>
+<If the feature publishes or subscribes to events, document them here as a
+table of event name → trigger → payload shape. No narrative wrappers.>
 
 ## Integration Boundaries
+<!-- audience: builder; mode: reference; length: tables only; diagram: optional; examples: required; applicability: code-shaped features only -->
 
-<Describe where this feature touches external systems, third-party APIs,
-or other internal modules — and what the contract is at each boundary.>
+<List external systems, third-party APIs, or other internal modules this
+feature touches, with the contract at each boundary. Table format
+preferred — boundary | direction | contract | failure mode.>
 ```
 
-If the feature does NOT involve contracts or interfaces, write a minimal file:
+If the feature does NOT involve contracts or interfaces, write a one-line
+fallback — do not invent prose interfaces, do not pad the file with
+explanatory paragraphs:
 
 ```markdown
 # Contracts: <Title>
+<!-- applicability: code-shaped features only -->
 
-No new interfaces, API contracts, or integration boundaries are introduced by this feature.
-Existing contracts remain unchanged.
+N/A — <one-sentence reason this feature has no code-shaped interface changes (e.g., "docs-only change to README", "template refactor with no new API surface", "configuration toggle that reuses existing CLI flag handling").>
 ```
 
 ---
@@ -794,7 +1051,7 @@ Use the **smithy-refine** sub-agent. Pass it:
   | **Ambiguity & Risk** | Are there vague terms, unstated assumptions, or scope boundaries that could be interpreted multiple ways? |
   | **Specification Debt** | Are there open debt items that can now be resolved based on new information or user answers? Are all debt items structured with required metadata columns? Are inherited items attributed to their source artifact? |
   | **Staleness** | Does the spec still reflect the current codebase reality? Have upstream changes invalidated any assumptions? |
-  | **Dependency Order** | Does the spec contain a `## Dependency Order` 4-column table (`ID \| Title \| Depends On \| Artifact`)? Does it list every user story with a `US<N>` ID (no leading zeros)? Does each `Depends On` cell contain `—` or comma-separated same-table IDs (no prose)? Does each `Artifact` cell contain `—` or a repo-relative path to the corresponding `.tasks.md` file? Are any `- [ ]`/`- [x]` checkboxes present in the section (an error if so)? |
+  | **Dependency Order** | For `kind: backend` (or absent-kind) specs: does the spec contain a `## Dependency Order` 4-column table (`ID \| Title \| Depends On \| Artifact`) listing every user story with a `US<N>` ID (no leading zeros)? For `kind: ui` specs: does it instead contain the typed UI Spec Ledger — a 6-column table (`ID \| Kind \| Title \| Depends On \| Design \| Artifact`) with `SC<N>`/`FL<N>`/`US<N>` rows whose `Kind` matches the ID prefix (`screen`/`flow`/`story`), `Design` (`none`/`import`/`brief`) set on screen rows and `—` elsewhere, and screen/flow titles naming their durable `.design.md`/`.flow.md` files? Do not flag a valid UI ledger as missing the backend shape, and do not rewrite it back to the 4-column US-only table. In both shapes: does each `Depends On` cell contain `—` or comma-separated same-table IDs (no prose)? Does each `Artifact` cell contain `—` or a repo-relative path to the corresponding `.tasks.md` file (always `—` in mark's own output)? Are any `- [ ]`/`- [x]` checkboxes present in the section (an error if so)? |
 
 - **Target files**: the spec (`.spec.md`), data model (`.data-model.md`), and
   contracts (`.contracts.md`) in the spec folder.
