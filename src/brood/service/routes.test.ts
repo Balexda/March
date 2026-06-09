@@ -300,7 +300,7 @@ describe.skipIf(!sqliteAvailable)("brood routes", () => {
     // Orphan gate: the leaked session's worktree is gone on disk → work done.
     const orphanGate: OrphanGate = {
       worktreeExists: (p) => p !== "/wt/gone",
-      branchPrState: () => "unknown",
+      branchPrState: async () => "unknown",
     };
     const { app, store } = await buildApp(undefined, gateway, {
       orphanGate,

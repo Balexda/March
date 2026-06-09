@@ -177,20 +177,112 @@ export type BranchPrState = "open" | "merged" | "closed" | "none" | "unknown";
 
 /**
  * The two forge/disk reads the orphan gate needs, behind a seam so the sweep is
- * unit-testable without a real `gh` / filesystem. {@link defaultOrphanGate}
- * shells out to `gh` and `fs.existsSync`.
+ * unit-testable without a real network / filesystem. {@link defaultOrphanGate}
+ * uses `fs.existsSync` and the GitHub REST API (token, NOT `gh`).
  */
 export interface OrphanGate {
   /** True when the steward's worktree still exists on disk (best-effort). */
   worktreeExists(worktreePath: string): boolean;
-  /** PR state for `branch`, resolved by running `gh` from a checkout at `repoRoot`. */
-  branchPrState(branch: string, repoRoot: string): BranchPrState;
+  /** PR state for `branch`, resolved from the origin remote at `repoRoot`. */
+  branchPrState(branch: string, repoRoot: string): Promise<BranchPrState>;
 }
 
-const GH_MAX_BUFFER = 16 * 1024 * 1024;
+const GIT_MAX_BUFFER = 16 * 1024 * 1024;
+/** Keep the forge lookup snappy — a hung api.github.com must not stall the sweep. */
+const GITHUB_API_TIMEOUT_MS = 10_000;
 
-/** The default forge/disk-backed gate: `fs.existsSync` + `gh pr list`. */
-export function defaultOrphanGate(): OrphanGate {
+type FetchImpl = typeof fetch;
+
+/**
+ * Parse `owner/repo` from a GitHub origin remote URL — the scp-short
+ * (`git@github.com:owner/repo.git`), `https://github.com/owner/repo(.git)`, and
+ * `ssh://git@github.com/owner/repo` forms. Returns undefined for a non-GitHub
+ * remote (no forge lookup possible → the gate reports `unknown`, never reaps).
+ */
+export function parseGitHubSlug(
+  remoteUrl: string,
+): { owner: string; repo: string } | undefined {
+  const m = remoteUrl.trim().match(/github\.com[:/]+([^/]+)\/(.+?)(?:\.git)?\/?$/i);
+  if (!m) return undefined;
+  return { owner: m[1], repo: m[2] };
+}
+
+/**
+ * Query GitHub's REST API for the PR state of a head branch WITHOUT `gh` (the
+ * brood image ships no `gh`, mirroring the #301 Herald fix that dropped a tool
+ * dependency for a token). Lists pulls by `head=owner:branch` across all states
+ * and folds them: any open → `open`; else any merged (`merged_at` set) →
+ * `merged`; else any closed → `closed`; none → `none`. Any transport / non-2xx /
+ * parse error → `unknown` so an open PR we could not see is never reaped.
+ */
+export async function fetchBranchPrState(opts: {
+  owner: string;
+  repo: string;
+  branch: string;
+  token: string;
+  fetchImpl?: FetchImpl;
+}): Promise<BranchPrState> {
+  const fetchImpl = opts.fetchImpl ?? fetch;
+  const head = `${opts.owner}:${opts.branch}`;
+  const url =
+    `https://api.github.com/repos/${encodeURIComponent(opts.owner)}/` +
+    `${encodeURIComponent(opts.repo)}/pulls` +
+    `?head=${encodeURIComponent(head)}&state=all&per_page=100`;
+
+  let res: Response;
+  try {
+    res = await fetchImpl(url, {
+      headers: {
+        authorization: `Bearer ${opts.token}`,
+        accept: "application/vnd.github+json",
+        "x-github-api-version": "2022-11-28",
+        "user-agent": "march-brood",
+      },
+      signal: AbortSignal.timeout(GITHUB_API_TIMEOUT_MS),
+    });
+  } catch {
+    return "unknown";
+  }
+  if (!res.ok) return "unknown";
+
+  let prs: Array<{ state?: string; merged_at?: string | null }>;
+  try {
+    prs = (await res.json()) as Array<{ state?: string; merged_at?: string | null }>;
+  } catch {
+    return "unknown";
+  }
+  if (!Array.isArray(prs)) return "unknown";
+  if (prs.some((p) => p.state === "open")) return "open";
+  if (prs.some((p) => Boolean(p.merged_at))) return "merged";
+  if (prs.some((p) => p.state === "closed")) return "closed";
+  return "none";
+}
+
+/** The origin remote URL of the repo at `repoRoot`, or undefined on any error. */
+function gitOriginRemote(repoRoot: string): string | undefined {
+  try {
+    return execFileSync("git", ["-C", repoRoot, "remote", "get-url", "origin"], {
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "ignore"],
+      maxBuffer: GIT_MAX_BUFFER,
+    }).trim();
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The default disk/forge-backed gate. Worktree existence is `fs.existsSync`; PR
+ * state is the GitHub REST API authenticated with `GH_TOKEN`/`GITHUB_TOKEN` (the
+ * same token the rest of the stack uses) — NO `gh` binary, so it works in the
+ * tool-less brood container. With no token (or a non-GitHub remote) the PR lookup
+ * reports `unknown` and the gate never reaps on the PR signal.
+ */
+export function defaultOrphanGate(
+  env: NodeJS.ProcessEnv = process.env,
+  fetchImpl: FetchImpl = fetch,
+): OrphanGate {
+  const token = (env.GH_TOKEN || env.GITHUB_TOKEN || "").trim();
   return {
     worktreeExists(worktreePath) {
       try {
@@ -201,35 +293,13 @@ export function defaultOrphanGate(): OrphanGate {
         return true;
       }
     },
-    branchPrState(branch, repoRoot) {
-      let raw: string;
-      try {
-        raw = execFileSync(
-          "gh",
-          ["pr", "list", "--head", branch, "--state", "all", "--json", "number,state"],
-          {
-            cwd: repoRoot,
-            encoding: "utf-8",
-            stdio: ["ignore", "pipe", "ignore"],
-            maxBuffer: GH_MAX_BUFFER,
-          },
-        );
-      } catch {
-        // `gh` missing / unauthenticated / network error: cannot conclude. Never
-        // report a false "done" — an open PR we couldn't see must not be reaped.
-        return "unknown";
-      }
-      let prs: Array<{ state?: string }>;
-      try {
-        const trimmed = raw.trim();
-        prs = trimmed ? (JSON.parse(trimmed) as Array<{ state?: string }>) : [];
-      } catch {
-        return "unknown";
-      }
-      if (prs.some((p) => p.state === "OPEN")) return "open";
-      if (prs.some((p) => p.state === "MERGED")) return "merged";
-      if (prs.some((p) => p.state === "CLOSED")) return "closed";
-      return "none";
+    async branchPrState(branch, repoRoot) {
+      if (!token) return "unknown";
+      const remote = gitOriginRemote(repoRoot);
+      if (!remote) return "unknown";
+      const slug = parseGitHubSlug(remote);
+      if (!slug) return "unknown";
+      return fetchBranchPrState({ ...slug, branch, token, fetchImpl });
     },
   };
 }
@@ -250,18 +320,18 @@ export interface OrphanVerdict {
  * everything we cannot verify (no branch, no repo root, no PR, `gh` failed) is
  * `unknown` (left alone).
  */
-export function classifyOrphanWork(
+export async function classifyOrphanWork(
   session: CastraSession,
   repoRoot: string | undefined,
   gate: OrphanGate,
-): OrphanVerdict {
+): Promise<OrphanVerdict> {
   if (session.worktreePath && !gate.worktreeExists(session.worktreePath)) {
     return { state: "done", reason: "worktree-gone" };
   }
   if (!session.branch) return { state: "unknown", reason: "no-branch" };
   if (!repoRoot) return { state: "unknown", reason: "no-repo-root" };
 
-  switch (gate.branchPrState(session.branch, repoRoot)) {
+  switch (await gate.branchPrState(session.branch, repoRoot)) {
     case "open":
       return { state: "in-progress", reason: "open-pr" };
     case "merged":
@@ -404,7 +474,7 @@ export async function sweepLeakedStewards(
         continue;
       }
 
-      const verdict = classifyOrphanWork(session, index.repoRoot, gate);
+      const verdict = await classifyOrphanWork(session, index.repoRoot, gate);
       if (verdict.state !== "done") {
         skipped.push({ sessionId: session.sessionId, profile, reason: verdict.reason });
         continue;

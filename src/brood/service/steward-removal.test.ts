@@ -3,6 +3,8 @@ import type { CastraSession } from "../../castra/types.js";
 import { sqliteAvailable } from "./sqlite.js";
 import { SessionStore } from "./store.js";
 import {
+  fetchBranchPrState,
+  parseGitHubSlug,
   removeStewardViaCastra,
   sweepLeakedStewards,
   type BranchPrState,
@@ -132,7 +134,7 @@ function fakeGate(
   const missing = new Set(opts.missingWorktrees ?? []);
   return {
     worktreeExists: (p) => !missing.has(p),
-    branchPrState: (branch) => opts.pr?.[branch] ?? "unknown",
+    branchPrState: async (branch) => opts.pr?.[branch] ?? "unknown",
   };
 }
 
@@ -301,5 +303,94 @@ describe.skipIf(!sqliteAvailable)("sweepLeakedStewards", () => {
     expect(result.failures).toHaveLength(1);
     expect(result.failures[0].profile).toBe("smithy");
     store.close();
+  });
+});
+
+describe("parseGitHubSlug", () => {
+  it("parses the scp-short, https, and ssh remote forms", () => {
+    expect(parseGitHubSlug("git@github.com:Balexda/March.git")).toEqual({
+      owner: "Balexda",
+      repo: "March",
+    });
+    expect(parseGitHubSlug("https://github.com/Balexda/March")).toEqual({
+      owner: "Balexda",
+      repo: "March",
+    });
+    expect(parseGitHubSlug("ssh://git@github.com/Balexda/March.git")).toEqual({
+      owner: "Balexda",
+      repo: "March",
+    });
+  });
+
+  it("returns undefined for a non-GitHub remote", () => {
+    expect(parseGitHubSlug("git@gitlab.com:acme/widget.git")).toBeUndefined();
+  });
+});
+
+describe("fetchBranchPrState (token REST path, no gh)", () => {
+  // A fake `fetch` over a fixed PR list — proves the gate resolves PR state via
+  // the GitHub REST API with a token and never shells out to `gh`.
+  function fetchReturning(
+    prs: Array<{ state: string; merged_at: string | null }>,
+    status = 200,
+  ): { impl: typeof fetch; calls: Array<{ url: string; init?: RequestInit }> } {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    const impl = (async (url: string | URL, init?: RequestInit) => {
+      calls.push({ url: String(url), init });
+      return new Response(JSON.stringify(prs), { status });
+    }) as unknown as typeof fetch;
+    return { impl, calls };
+  }
+
+  it("reports merged when a PR for the head branch is merged", async () => {
+    const { impl, calls } = fetchReturning([
+      { state: "closed", merged_at: "2026-06-01T00:00:00Z" },
+    ]);
+    const state = await fetchBranchPrState({
+      owner: "Balexda",
+      repo: "March",
+      branch: "feature/screens",
+      token: "t0ken",
+      fetchImpl: impl,
+    });
+    expect(state).toBe("merged");
+    // head=owner:branch and the bearer token are on the request.
+    expect(calls[0].url).toContain("head=Balexda%3Afeature%2Fscreens");
+    expect(
+      (calls[0].init?.headers as Record<string, string>).authorization,
+    ).toBe("Bearer t0ken");
+  });
+
+  it("reports open / closed / none from the PR list", async () => {
+    const open = fetchReturning([{ state: "open", merged_at: null }]);
+    expect(
+      await fetchBranchPrState({ owner: "o", repo: "r", branch: "b", token: "t", fetchImpl: open.impl }),
+    ).toBe("open");
+
+    const closed = fetchReturning([{ state: "closed", merged_at: null }]);
+    expect(
+      await fetchBranchPrState({ owner: "o", repo: "r", branch: "b", token: "t", fetchImpl: closed.impl }),
+    ).toBe("closed");
+
+    const none = fetchReturning([]);
+    expect(
+      await fetchBranchPrState({ owner: "o", repo: "r", branch: "b", token: "t", fetchImpl: none.impl }),
+    ).toBe("none");
+  });
+
+  it("reports unknown on a non-2xx response (never a false done)", async () => {
+    const { impl } = fetchReturning([], 403);
+    expect(
+      await fetchBranchPrState({ owner: "o", repo: "r", branch: "b", token: "t", fetchImpl: impl }),
+    ).toBe("unknown");
+  });
+
+  it("reports unknown when the transport throws", async () => {
+    const impl = (async () => {
+      throw new Error("network down");
+    }) as unknown as typeof fetch;
+    expect(
+      await fetchBranchPrState({ owner: "o", repo: "r", branch: "b", token: "t", fetchImpl: impl }),
+    ).toBe("unknown");
   });
 });
