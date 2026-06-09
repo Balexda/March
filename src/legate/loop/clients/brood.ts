@@ -1,5 +1,5 @@
 import { BroodClient, BroodNotFoundError } from "../../../brood/service/client.js";
-import type { RegisterSessionInput, SessionRecord } from "../../../brood/service/types.js";
+import type { RegisterSessionInput, SessionRecord, UpdateSessionInput } from "../../../brood/service/types.js";
 import {
   buildTraceparent,
   spanIdForDispatch,
@@ -21,6 +21,7 @@ export interface BroodSeam {
   ): Promise<{ id: string; status: string; warnings?: string[] }>;
   list(filter?: { kind?: SessionRecord["kind"]; status?: SessionRecord["status"] }): Promise<SessionRecord[]>;
   register(input: RegisterSessionInput): Promise<SessionRecord>;
+  update(id: string, changes: UpdateSessionInput): Promise<SessionRecord>;
 }
 
 let _client: BroodClient | undefined;
@@ -137,6 +138,41 @@ export async function broodRegister(
     return { ok: true, detail: `registered ${rec.id} (${rec.kind})` };
   } catch (err) {
     return { ok: false, detail: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+export interface BroodRetireResult {
+  /** The prior row is now retired (status torndown) — no longer an active row. */
+  readonly ok: boolean;
+  /** Brood has no record of the session (HTTP 404) — nothing to retire. */
+  readonly notTracked: boolean;
+  readonly detail: string;
+}
+
+/**
+ * Retire a prior steward's Brood row WITHOUT a worktree-pruning teardown (#308).
+ * Used on a same-worktree relaunch: the prior session vanished but its tracked
+ * worktree is now the LIVE session's, so a teardown — which resolves the steward
+ * by exact worktree (#304) — would reap the live one. A status-only PATCH to
+ * `torndown` retires the stale duplicate so exactly one ACTIVE row remains for
+ * that worktree, never touching the checkout. Idempotent; a 404 means the row is
+ * already gone (nothing to retire). Best-effort: any failure yields `ok:false`.
+ */
+export async function broodRetire(
+  sessionId: string,
+  client: BroodSeam = defaultClient(),
+): Promise<BroodRetireResult> {
+  try {
+    const rec = await client.update(sessionId, {
+      status: "torndown",
+      torndownAt: new Date().toISOString(),
+    });
+    return { ok: true, notTracked: false, detail: `retired ${rec.id} (status ${rec.status})` };
+  } catch (err) {
+    if (err instanceof BroodNotFoundError) {
+      return { ok: false, notTracked: true, detail: err.message };
+    }
+    return { ok: false, notTracked: false, detail: err instanceof Error ? err.message : String(err) };
   }
 }
 

@@ -1,7 +1,7 @@
 import type { LoopMeta } from "../meta.js";
 import type { WorkerSummary } from "../pure/session.js";
 import type { CastraClient } from "../../../castra/client.js";
-import type { BroodRegisterResult, BroodTeardownOptions, BroodTeardownResult } from "../clients/brood.js";
+import type { BroodRegisterResult, BroodRetireResult, BroodTeardownOptions, BroodTeardownResult } from "../clients/brood.js";
 import type { RegisterSessionInput } from "../../../brood/service/types.js";
 import type { JudgementInput } from "../judgement.js";
 import type { TransitionEvent } from "../clients/herald.js";
@@ -85,6 +85,13 @@ export interface HandlerContext {
    * never reconcile can omit it.
    */
   broodRegister?: (input: RegisterSessionInput) => Promise<BroodRegisterResult>;
+  /**
+   * Retire a prior steward's Brood row (status → torndown) WITHOUT a worktree-
+   * pruning teardown — used on a same-worktree relaunch where a teardown would
+   * reap the live session by exact-worktree match (#308/#304). Optional so
+   * tests/handlers that never relaunch can omit it.
+   */
+  broodRetire?: (sessionId: string) => Promise<BroodRetireResult>;
   /**
    * Escalate to the legate operator when a handler can't proceed deterministically
    * (rings the doorbell + records a `processor_request`, deduped by `requestKey`).
