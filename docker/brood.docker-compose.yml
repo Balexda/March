@@ -22,6 +22,19 @@
 #                     network). brood asks castra to remove the steward session,
 #                     then re-checks + removes the worktree by exact path.
 #   CASTRA_API_TOKEN  bearer token — must match the castra service's token.
+#   GH_TOKEN / GITHUB_TOKEN
+#                     GitHub token (the same one the rest of the stack uses). The
+#                     `march brood sweep` orphan gate (#304) reads PR state via
+#                     the GitHub REST API with this token — NO `gh` binary in the
+#                     image (mirrors the #301 Herald token-over-tool fix). Without
+#                     it the PR signal reports `unknown` and only worktree-gone
+#                     orphans reap.
+#   MARCH_BROOD_ADMIN_TOKEN
+#                     break-glass operator token for POST /admin/sweep (#304).
+#                     LEAVE UNSET in prod — while unset the admin route 404s and is
+#                     invisible. Set it ONLY for the window an operator needs to
+#                     reap leaked stewards (`march brood sweep`), then UNSET it
+#                     again. The CLI sends the SAME token as its bearer.
 #
 # SECURITY: this mounts the docker socket (host-root-equivalent) and your HOME.
 # The port is bound to localhost only; never expose it publicly, never publish
@@ -59,6 +72,14 @@ services:
       # same names the shared CastraClient reads.)
       - CASTRA_URL=${CASTRA_URL:-http://castra:${CASTRA_PORT:-9264}}
       - CASTRA_API_TOKEN=${CASTRA_API_TOKEN:?CASTRA_API_TOKEN must match the castra service token}
+      # GitHub token: the `march brood sweep` orphan gate (#304) reads PR state
+      # via the GitHub REST API with this token — no `gh` binary needed in-image.
+      - GH_TOKEN=${GH_TOKEN:-}
+      - GITHUB_TOKEN=${GITHUB_TOKEN:-}
+      # Break-glass admin endpoint (#304): UNSET by default so POST /admin/sweep
+      # 404s and is invisible. Set it ONLY while an operator is reaping leaked
+      # stewards (`march brood sweep`), then unset it and recreate the container.
+      - MARCH_BROOD_ADMIN_TOKEN=${MARCH_BROOD_ADMIN_TOKEN:-}
     volumes:
       # Host docker daemon (remove spawn containers + read their logs).
       - /var/run/docker.sock:/var/run/docker.sock

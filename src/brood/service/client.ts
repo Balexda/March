@@ -1,4 +1,5 @@
 import { broodPort } from "../config.js";
+import type { SweepResult } from "./steward-removal.js";
 import type {
   ListSessionsFilter,
   RegisterSessionInput,
@@ -80,6 +81,9 @@ export interface BroodClientOptions {
   readonly traceparent?: string;
   /** Per-request timeout in ms (default 30s). */
   readonly timeoutMs?: number;
+  /** Bearer token for the break-glass `POST /admin/sweep` endpoint (#304).
+   *  Defaults to `MARCH_BROOD_ADMIN_TOKEN`; only the admin sweep path reads it. */
+  readonly adminToken?: string;
 }
 
 /**
@@ -94,31 +98,39 @@ export class BroodClient {
   private readonly fetchImpl: FetchImpl;
   private readonly traceparent?: string;
   private readonly timeoutMs: number;
+  private readonly adminToken?: string;
 
   constructor(options: BroodClientOptions = {}) {
     this.baseUrl = options.baseUrl ?? resolveBroodUrl(options.env);
     this.fetchImpl = options.fetchImpl ?? fetch;
     this.traceparent = options.traceparent;
     this.timeoutMs = options.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+    this.adminToken =
+      options.adminToken ??
+      ((options.env ?? process.env).MARCH_BROOD_ADMIN_TOKEN?.trim() || undefined);
   }
 
-  private headers(json: boolean): Record<string, string> {
+  private headers(
+    json: boolean,
+    extra?: Record<string, string>,
+  ): Record<string, string> {
     const headers: Record<string, string> = {};
     if (json) headers["content-type"] = "application/json";
     if (this.traceparent) headers["traceparent"] = this.traceparent;
-    return headers;
+    return { ...headers, ...extra };
   }
 
   private async request(
     method: string,
     path: string,
     body?: unknown,
+    extraHeaders?: Record<string, string>,
   ): Promise<{ status: number; body: unknown }> {
     let res: Response;
     try {
       res = await this.fetchImpl(`${this.baseUrl}${path}`, {
         method,
-        headers: this.headers(body !== undefined),
+        headers: this.headers(body !== undefined, extraHeaders),
         ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
         signal: AbortSignal.timeout(this.timeoutMs),
       });
@@ -211,5 +223,36 @@ export class BroodClient {
       );
     }
     return body as TeardownResult;
+  }
+
+  /**
+   * Reap leaked Castra stewards (#304) — true orphans (no active Brood record)
+   * whose work is genuinely done (PR merged/closed or worktree gone). Calls the
+   * gated break-glass `POST /admin/sweep` endpoint with the admin bearer token.
+   * Idempotent; returns what was reaped (and what was deliberately skipped).
+   */
+  async sweep(): Promise<SweepResult> {
+    if (!this.adminToken) {
+      throw new BroodClientError(
+        "MARCH_BROOD_ADMIN_TOKEN is not set — the brood admin sweep endpoint is disabled.",
+      );
+    }
+    const { status, body } = await this.request("POST", "/admin/sweep", undefined, {
+      authorization: `Bearer ${this.adminToken}`,
+    });
+    if (status === 401) {
+      throw new BroodClientError(
+        bodyError(body, "brood admin sweep rejected the bearer token (401)"),
+      );
+    }
+    if (status === 404) {
+      throw new BroodClientError(
+        "brood admin sweep is disabled (MARCH_BROOD_ADMIN_TOKEN unset on the service).",
+      );
+    }
+    if (status !== 200) {
+      throw new BroodClientError(bodyError(body, `brood sweep failed (${status})`));
+    }
+    return body as SweepResult;
   }
 }

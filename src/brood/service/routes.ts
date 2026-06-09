@@ -9,6 +9,13 @@ import { startBroodSpan } from "../../observability/brood-trace.js";
 import { createCastraClientFromEnv } from "../../castra/client.js";
 import type { SessionRepository } from "./repository.js";
 import {
+  defaultOrphanGate,
+  defaultStewardGateway,
+  sweepLeakedStewards,
+  type CastraStewardGateway,
+  type OrphanGate,
+} from "./steward-removal.js";
+import {
   BroodConflictError,
   BroodNotFoundError,
   teardownSession,
@@ -31,6 +38,23 @@ export interface RoutesOptions {
     request: TeardownRequest,
     traceparent?: string,
   ) => Promise<TeardownResult>;
+  /** Override the Castra gateway the sweep uses (tests). Defaults to env client. */
+  readonly stewardGateway?: CastraStewardGateway;
+  /** Override the orphan gate the sweep uses (tests). Defaults to `gh` + `fs`. */
+  readonly orphanGate?: OrphanGate;
+  /** Environment the admin gate reads its bearer token from (defaults to process.env). */
+  readonly env?: NodeJS.ProcessEnv;
+}
+
+/** Env var gating the break-glass `POST /admin/sweep` endpoint (#304). */
+export const BROOD_ADMIN_TOKEN_ENV = "MARCH_BROOD_ADMIN_TOKEN";
+
+/** Extract a `Bearer <token>` value from an Authorization header, or null. */
+function bearerToken(header: string | string[] | undefined): string | null {
+  const raw = Array.isArray(header) ? header[0] : header;
+  if (typeof raw !== "string") return null;
+  const match = /^Bearer\s+(.+)$/i.exec(raw.trim());
+  return match ? match[1].trim() : null;
 }
 
 const SESSION_KINDS: readonly SessionKind[] = ["spawn", "steward", "legate"];
@@ -145,6 +169,7 @@ export async function registerRoutes(
   opts: RoutesOptions,
 ): Promise<void> {
   const { store } = opts;
+  const env = opts.env ?? process.env;
   const teardown =
     opts.teardown ??
     ((id, request, traceparent) =>
@@ -272,6 +297,30 @@ export async function registerRoutes(
       return { error: `No session with id "${id}".` };
     }
     return record;
+  });
+
+  // Break-glass remedial cleanup (#304): reap leaked Castra stewards — true
+  // orphans (no active Brood record) whose work is genuinely done (PR
+  // merged/closed or worktree gone). Gated like Herald's admin endpoint so an
+  // unguarded "remove sessions" surface is never exposed by default.
+  //
+  // The token (MARCH_BROOD_ADMIN_TOKEN) is read PER REQUEST so the gate tracks
+  // the live env: UNSET → 404 (invisible by default — prod leaves it unset);
+  // SET but the Bearer is missing/wrong → 401. Read at request time so a single
+  // long-lived server can be armed and disarmed without a restart.
+  app.post("/admin/sweep", async (request, reply) => {
+    const expected = env[BROOD_ADMIN_TOKEN_ENV]?.trim();
+    if (!expected) {
+      reply.code(404);
+      return { error: "not found" };
+    }
+    if (bearerToken(request.headers["authorization"]) !== expected) {
+      reply.code(401);
+      return { error: "invalid or missing admin bearer token." };
+    }
+    const gateway = opts.stewardGateway ?? defaultStewardGateway();
+    const gate = opts.orphanGate ?? defaultOrphanGate();
+    return sweepLeakedStewards(store, gateway, gate);
   });
 
   app.post("/sessions/:id/teardown", async (request, reply) => {
