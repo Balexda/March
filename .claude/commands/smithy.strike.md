@@ -6,6 +6,47 @@ codebase, propose an approach, produce a `.strike.md` ready for
 implementation, and create a PR for it — all without stopping for user
 approval. The shared one-shot output format is the terminal contract.
 
+## Authored Smithy Artifacts Location
+
+This Smithy install was set up with an explicit policy for **where authored
+Smithy artifacts live**. Every path you see in the rest of this prompt that
+refers to an authored Smithy artifact — `.rfc.md`, `.features.md`, `.spec.md`,
+`.tasks.md`, `.strike.md`, `.prd.md`, `.persona.md`, `.data-model.md`,
+`.contracts.md` — is already prefixed with `` so it points
+at the right root for this repo. Do not strip, override, or rewrite that
+prefix.
+
+- When `` is empty, artifacts live **in the repo**:
+  `docs/rfcs/...`, `docs/prds/...`, `docs/personas/...`, `specs/...`,
+  `specs/strikes/...`.
+- When `` is `~/.smithy/repos/<repoKey>/`, artifacts live **outside
+  the repo, in the user's home directory**: `~/.smithy/repos/<repoKey>/docs/rfcs/...`,
+  `~/.smithy/repos/<repoKey>/docs/personas/...`, `~/.smithy/repos/<repoKey>/specs/...`, etc.
+  Treat the resolved path as authoritative — agents (Claude Code, Gemini CLI,
+  Codex) expand `~` at tool-call time, so the path is portable across team
+  members even when this prompt is committed to source control.
+
+### Scope of the policy
+
+This policy applies **only to authored Smithy artifacts** such as planning
+artifacts and durable persona files. It does **not** apply to:
+
+- **Source code, tests, configuration, or any other repo file you edit as
+  part of an implementation slice.** Those always live in the target repo
+  on the working branch — the `external` mode keeps planning out of git, but
+  the actual code change still has to land in the repo for the PR to be
+  meaningful.
+- **GitHub issue body templates** under `<manifestDir>/templates/orders/`.
+  Those are managed separately by `smithy init` and `smithy.orders`.
+- **The smithy manifest itself** (`.smithy/smithy-manifest.json` or
+  `~/.smithy/smithy-manifest.json`), which is set by `smithy init`.
+
+### When discovering existing artifacts
+
+When you scan for existing artifacts (e.g. "list folders in
+`docs/rfcs/`"), use the prefixed path. The `smithy status`
+CLI already reads the manifest and looks in the right place, so its output
+will be consistent with the paths in this prompt.
 ## Input
 
 The user's feature description: $ARGUMENTS
@@ -239,6 +280,12 @@ strike document is written and no PR is created.
 canonical title formats and check for repo-level overrides in the project's
 CLAUDE.md. Apply those conventions to all headings in this artifact.
 
+Before writing prose-bearing strike sections, load
+`Skill("smithy.helper-voice")` in draft mode. Use it for Explanation sections
+and concise task guidance while preserving Reference and How-to sections as
+structured artifact content. Do not inline the helper's taxonomy in this
+prompt.
+
 Write a single strike document to `specs/strikes/YYYY-MM-DD-<slug>.strike.md`
 with this format:
 
@@ -248,45 +295,55 @@ with this format:
 **Date:** YYYY-MM-DD  |  **Branch:** <resolved-branch>  |  **Status:** Ready
 
 ## Summary
+<!-- audience: stakeholder; mode: explanation; length: 2-3 sentences; diagram: optional; examples: discouraged -->
 
 <What is being built and why, in plain English.>
 
 ## Goal
+<!-- audience: stakeholder; mode: explanation; length: 1 sentence; diagram: optional; examples: discouraged -->
 
 <Single meaningful outcome this strike delivers.>
 
 ## Out of Scope
+<!-- audience: reviewer; mode: reference; length: bullets or table; diagram: optional; examples: discouraged -->
 
 - <Explicitly excluded item 1>
 - <Explicitly excluded item 2>
 
 ## Requirements
+<!-- audience: builder+ai-input; mode: reference; length: bullets or table; diagram: optional; examples: recommended -->
 
 - **FR-001**: <Numbered functional requirement>
 - **FR-002**: <Numbered functional requirement>
 
 ## Success Criteria
+<!-- audience: reviewer; mode: reference; length: bullets or table; diagram: optional; examples: optional -->
 
 - **SC-001**: <Numbered testable outcome>
 - **SC-002**: <Numbered testable outcome>
 
 ## User Flow
+<!-- audience: stakeholder; mode: explanation; length: 1-3 paragraphs; diagram: recommended; examples: discouraged -->
 
 <Behavior from the user's point of view — what the user does and what happens.>
 
 ## Data Model
+<!-- audience: builder; mode: reference; length: tables only; diagram: recommended; examples: recommended; applicability: code-shaped features only -->
 
-<Inline, minimal description of any data changes. Write "N/A" if not needed.>
+<Inline, minimal description of any data changes. Write `N/A — <one-sentence reason>` if the strike has no code-shaped data changes.>
 
 ## Contracts
+<!-- audience: builder; mode: reference; length: tables only; diagram: optional; examples: required; applicability: code-shaped features only -->
 
-<Inline, minimal description of any interface changes. Write "N/A" if not needed.>
+<Inline, minimal description of any interface changes. Write `N/A — <one-sentence reason>` if the strike has no code-shaped interface changes.>
 
 ## Decisions
+<!-- audience: reviewer; mode: explanation; length: 1-3 paragraphs; diagram: optional; examples: discouraged -->
 
 <Important decisions and tradeoffs made during the planning phase.>
 
 ## Specification Debt
+<!-- audience: reviewer; mode: reference; length: tables only; diagram: optional; examples: discouraged -->
 
 | ID | Description | Source Category | Impact | Confidence | Status | Resolution |
 |----|-------------|-----------------|--------|------------|--------|------------|
@@ -295,6 +352,7 @@ with this format:
 _If no debt items, write: "None — all ambiguities resolved."_
 
 ## Single Slice
+<!-- audience: builder; mode: how-to; length: 5-15 steps; diagram: optional; examples: forbidden -->
 
 **Goal**: <What this slice delivers as a standalone increment.>
 
@@ -324,9 +382,11 @@ suggestion in the terminal output, not an interactive branching gate.
 After writing the strike document to disk and before committing, dispatch the
 **smithy-plan-review** sub-agent to perform a self-consistency review. Pass it:
 
-- **artifact_paths** — the repo-relative path to the strike document just
-  written (for strike: the single `.strike.md` file at
-  `specs/strikes/YYYY-MM-DD-<slug>.strike.md`).
+- **artifact_paths** — the path to the strike document just written, exactly
+  as it was used to write the file (for strike: the single `.strike.md` file
+  at `specs/strikes/YYYY-MM-DD-<slug>.strike.md`). In
+  external-artifacts mode this is a `~/.smithy/repos/<repo>/...` path, not a
+  repo-relative one — pass it through verbatim; do not strip the prefix.
 - **artifact_type** — `strike`.
 
 The agent is read-only and returns a `ReviewResult` containing `findings` and a

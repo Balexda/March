@@ -6,6 +6,47 @@ structured **RFC (Request for Comments)** with clearly defined milestones. You a
 the collaborative partner that asks the right questions to turn a spark of an idea
 into a solid, reviewable plan.
 
+## Authored Smithy Artifacts Location
+
+This Smithy install was set up with an explicit policy for **where authored
+Smithy artifacts live**. Every path you see in the rest of this prompt that
+refers to an authored Smithy artifact — `.rfc.md`, `.features.md`, `.spec.md`,
+`.tasks.md`, `.strike.md`, `.prd.md`, `.persona.md`, `.data-model.md`,
+`.contracts.md` — is already prefixed with `` so it points
+at the right root for this repo. Do not strip, override, or rewrite that
+prefix.
+
+- When `` is empty, artifacts live **in the repo**:
+  `docs/rfcs/...`, `docs/prds/...`, `docs/personas/...`, `specs/...`,
+  `specs/strikes/...`.
+- When `` is `~/.smithy/repos/<repoKey>/`, artifacts live **outside
+  the repo, in the user's home directory**: `~/.smithy/repos/<repoKey>/docs/rfcs/...`,
+  `~/.smithy/repos/<repoKey>/docs/personas/...`, `~/.smithy/repos/<repoKey>/specs/...`, etc.
+  Treat the resolved path as authoritative — agents (Claude Code, Gemini CLI,
+  Codex) expand `~` at tool-call time, so the path is portable across team
+  members even when this prompt is committed to source control.
+
+### Scope of the policy
+
+This policy applies **only to authored Smithy artifacts** such as planning
+artifacts and durable persona files. It does **not** apply to:
+
+- **Source code, tests, configuration, or any other repo file you edit as
+  part of an implementation slice.** Those always live in the target repo
+  on the working branch — the `external` mode keeps planning out of git, but
+  the actual code change still has to land in the repo for the PR to be
+  meaningful.
+- **GitHub issue body templates** under `<manifestDir>/templates/orders/`.
+  Those are managed separately by `smithy init` and `smithy.orders`.
+- **The smithy manifest itself** (`.smithy/smithy-manifest.json` or
+  `~/.smithy/smithy-manifest.json`), which is set by `smithy init`.
+
+### When discovering existing artifacts
+
+When you scan for existing artifacts (e.g. "list folders in
+`docs/rfcs/`"), use the prefixed path. The `smithy status`
+CLI already reads the manifest and looks in the right place, so its output
+will be consistent with the paths in this prompt.
 ## Input
 
 The user's idea or document path: $ARGUMENTS
@@ -434,6 +475,13 @@ sessions on this RFC can deduplicate against them:
 canonical title formats and check for repo-level overrides in the project's
 CLAUDE.md. Apply those conventions to all headings in this artifact.
 
+Before drafting orchestrator-inline RFC prose in this phase, load
+`Skill("smithy.helper-voice")` in draft mode. Use it as the shared voice
+source for directly authored RFC sections such as Decisions and coherence
+repairs. Keep Summary, Motivation / Problem Statement, and Personas delegated
+to `smithy-prose` where those sub-phases already own the narrative drafting,
+and do not inline the helper's taxonomy here.
+
 ### RFC File Creation
 
 Before any sub-phase begins, create the RFC folder and file:
@@ -671,46 +719,57 @@ duplicates the debt table in a less structured format.
 **Created**: YYYY-MM-DD  |  **Status**: Draft
 
 ## Summary
+<!-- audience: stakeholder; mode: explanation; length: 2-3 sentences; diagram: optional; examples: discouraged -->
 
 <High-level pitch — what this is and why it matters, in 2-3 sentences.>
 
 ## Motivation / Problem Statement
+<!-- audience: stakeholder; mode: explanation; length: 2-3 paragraphs; diagram: optional; examples: discouraged -->
 
 <What problem does this solve? Why does it need solving now? What is the impact
 of not solving it?>
 
 ## Goals
+<!-- audience: reviewer; mode: reference; length: tables only; diagram: optional; examples: discouraged -->
 
 - <Outcome 1 — what this RFC commits to delivering, stated as a result a stakeholder can evaluate. Do NOT reference milestone IDs (M1, M-A, etc.) or the word "milestone"; milestones realize goals, not the reverse.>
 - <Outcome 2>
 - <Outcome 3>
 
 ## Out of Scope
+<!-- audience: reviewer; mode: reference; length: tables only; diagram: optional; examples: discouraged -->
 
 - <Capability 1 this RFC will NOT deliver — must be a true exclusion, not deferred work. Bad: "Eval rubrics — deferred to M-F or later". Good: "Production observability — lives in operations-doc territory, not in this RFC.">
 - <Capability 2>
 
 ## Personas
+<!-- audience: stakeholder; mode: reference; length: tables only; diagram: optional; examples: discouraged -->
 
 - <Persona 1 — role and how they benefit from this RFC>
 - <Persona 2 — role and how they benefit>
 
 ## Proposal
+<!-- audience: reviewer; mode: explanation; length: 3-6 paragraphs; diagram: recommended; examples: recommended -->
 
 <The "WHAT" — describe what will be built at a high level. Focus on outcomes
-and capabilities, not implementation details.>
+and capabilities, not implementation details. A block or sequence diagram of
+the proposed architecture beats wall-of-text whenever three or more named
+components or steps are involved.>
 
 ## Design Considerations
+<!-- audience: reviewer; mode: explanation; length: 3-6 paragraphs; diagram: optional; examples: discouraged -->
 
 <High-level architectural thoughts, tradeoffs, and constraints that will
 influence downstream design decisions. Keep this at "WHAT not HOW" level.>
 
 ## Decisions
+<!-- audience: reviewer; mode: explanation; length: 1-3 paragraphs; diagram: optional; examples: discouraged -->
 
 - <Decision 1 — what was decided and the rationale>
 - <Decision 2>
 
 ## Specification Debt
+<!-- audience: reviewer; mode: reference; length: tables only; diagram: optional; examples: discouraged -->
 
 | ID | Description | Source Category | Impact | Confidence | Status | Resolution |
 |----|-------------|-----------------|--------|------------|--------|------------|
@@ -719,6 +778,7 @@ influence downstream design decisions. Keep this at "WHAT not HOW" level.>
 _If no debt items, write: "None — all ambiguities resolved."_
 
 ## Milestones
+<!-- audience: reviewer; mode: reference; length: tables only; diagram: optional; examples: discouraged -->
 
 ### Milestone 1: <Title>
 
@@ -737,6 +797,7 @@ _If no debt items, write: "None — all ambiguities resolved."_
 - <Measurable outcome 2>
 
 ## Dependency Order
+<!-- audience: builder+ai-input; mode: reference; length: tables only; diagram: optional; examples: discouraged -->
 
 Recommended implementation sequence:
 

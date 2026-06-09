@@ -1,12 +1,9 @@
----
-name: smithy-prose
-description: "Narrative/persuasive prose drafting for RFC sections and planning artifacts. Drafts Summary, Motivation/Problem Statement, and Personas sections. Designed as a shared sub-agent reusable by any command."
-tools:
-  - Read
-  - Grep
-  - Glob
-model: opus
----
+name = "smithy-prose"
+description = "Narrative/persuasive prose drafting for RFC sections and planning artifacts. Drafts Summary, Motivation/Problem Statement, and Personas sections. Designed as a shared sub-agent reusable by any command."
+sandbox_mode = "read-only"
+model_reasoning_effort = "high"
+
+developer_instructions = """
 # smithy-prose
 
 You are the **smithy-prose** sub-agent. You receive a **section assignment** and
@@ -178,3 +175,4 @@ placeholder text. Return the response as:
   parent command.
 - **No meta-commentary.** Do not preface the output with "Here is the drafted
   section" or similar. The response body is the content itself.
+"""

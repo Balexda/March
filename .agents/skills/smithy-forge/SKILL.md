@@ -7,6 +7,9 @@ description: "Implement a slice from a .tasks.md or .strike.md file as a pull re
 You are the **smithy-forge agent** for this repository.
 Your role is to take a single slice from a `.tasks.md` or `.strike.md` file and implement it end-to-end as a pull request.
 
+You orchestrate implementation by dispatching sub-agents for each task and for
+the final code review. This keeps each sub-agent's context fresh and focused.
+
 Before running any shell commands, read and follow the `smithy.guidance` prompt for shell best practices.
 
 ### Operational Skills
@@ -236,59 +239,24 @@ Store this value for later.
 
 Execute each task from the slice's checklist **in order**:
 
-Use test-driven development for each task:
+Dispatch a sub-agent for each task.
 
-## TDD Protocol
+For each task, use the **smithy-implement** sub-agent. Pass it:
 
-For each task, follow the **red-green-refactor** cycle:
+- **Task**: The full task description text
+- **Task number**: Its position in the checklist (e.g., "3 of 7")
+- **Slice goal**: The slice's stated goal
+- **File paths**: The spec, contracts, data-model, and tasks/strike file paths
+- **Branch**: The current branch name
 
-### 1. Red — Write a failing test
+After the sub-agent returns:
 
-Write a test that captures the behavior this task adds or changes. Run the test
-suite and verify the new test **fails**. If it passes already, your test is not
-testing the right thing — rewrite it.
+- **Success** → proceed to the next task.
+- **Blocked** → stop and report the blocker to the user. Do not proceed to the
+  next task until the blocker is resolved.
+- **Failure** → attempt to diagnose the issue. Retry the sub-agent once with
+  additional context. If still failing, stop and report to the user.
 
-> **Structural tasks** (adding config files, scaffolding directories, updating
-> docs, wiring imports): skip the Red phase and proceed directly to
-> implementation + validation. Not every task produces testable behavior.
-
-### 2. Green — Write the minimal implementation
-
-Write the **minimum code** needed to make the failing test pass. Do not
-over-engineer or add behavior beyond what the test requires. Run the test suite
-and verify the new test **passes** and no existing tests have broken.
-
-### 3. Refactor — Clean up
-
-If the implementation introduced duplication, unclear naming, or structural
-issues, clean it up now. Run the full test suite again to confirm nothing broke.
-
-### 4. Commit
-
-Stage the test and implementation together and commit with a concise, descriptive
-message that summarizes *what* was accomplished (not "add test" — describe the
-behavior).
-
-### 5. Mark the task complete
-
-Update the task checkbox from `- [ ]` to `- [x]` in the tasks or strike file.
-**Include this edit in the implementation commit — not a follow-up commit.**
-
-The checkbox flip is **mandatory**, not bookkeeping. The slice's parent
-orchestrator (`smithy.forge`) gates PR creation on every task in the slice
-reading `- [x]` at HEAD; a merged PR that leaves rows unchecked wedges the
-downstream dispatch loop (`smithy status` keeps the slice in progress while
-the merge-archive blocks re-dispatch). If you cannot legitimately mark the
-task complete (work is blocked, requirements unclear), do not fake the flip
-— stop and report the blocker per the constraints below.
-
----
-
-**Important constraints:**
-- Do **not** mark a task complete until tests pass.
-- If tests fail, fix the issue before proceeding to the next task.
-- If a task cannot be completed (missing information, conflicting requirements),
-  stop and document the blocker. Do not guess.
 Stay within the slice's scope. If you discover work that belongs to a different slice or story, note it but do not implement it.
 
 If you encounter missing functionality that the Cross-Story Dependencies section
@@ -303,94 +271,88 @@ guidance.
 
 After all tasks are complete:
 
-Review your implementation by examining the diff between BASE_SHA and HEAD:
+Compute the diff and changed file list:
 
 ```bash
+git rev-parse HEAD
+git diff --name-only <BASE_SHA> HEAD
 git diff <BASE_SHA> HEAD
 ```
 
-## Review Protocol
+Use the **smithy-implementation-review** sub-agent. Pass it:
 
-Shared read-only review protocol used by the review sub-agents
-(`smithy-plan-review` and `smithy-implementation-review`). Both agents
-return structured findings using the same shape; neither agent modifies
-artifacts or code. The parent command (planning command or forge)
-applies fixes based on the returned findings.
+- **BASE_SHA**: The commit SHA from before implementation started
+- **Slice goal**: The slice's stated goal
+- **Tasks**: The full task list with descriptions
+- **File paths**: Spec, contracts, data-model files
+- **Changed files**: The list of files changed between BASE_SHA and HEAD
+- **Raw diff**: The full diff output
 
-### 1. Gather context
+`smithy-implementation-review` is **read-only**. It returns a `ReviewResult`
+containing a list of `Finding` entries (`category`, `severity`, `confidence`,
+`description`, `artifact_path`, `proposed_fix`) and a summary. It does not
+modify files, run commands, or create commits — forge owns every on-disk
+change and commit resulting from a finding.
 
-Read the target artifacts and any referenced source material. Cross-reference
-each observation against:
+Process each returned finding using the severity × confidence triage table
+from the shared review protocol:
 
-- The stated goal or task descriptions driving the work
-- The spec requirements (`.spec.md`)
-- The data model (`.data-model.md`) and contracts (`.contracts.md`)
+| Severity | Confidence | Forge action |
+|----------|------------|--------------|
+| Critical | High | Apply the `proposed_fix` on disk, run the test suite, commit as `review: <description>`. |
+| Critical | Low | Do not apply. Append the finding to the slice planning artifact's `## Specification Debt` section. |
+| Important | High | Apply the `proposed_fix` on disk, run the test suite, commit as `review: <description>`. |
+| Important | Low | Do not apply. Append the finding to the slice planning artifact's `## Specification Debt` section. |
+| Minor | Any | Do not apply and do not record as debt. Note in forge's terminal-output **Review Summary** deliverable so the user sees it; do not add to the PR body. |
 
-Only read files — do not edit, write, or run commands that mutate state.
+"Slice planning artifact" above means the `.tasks.md`, `.strike.md`,
+`.spec.md`, or equivalent planning file associated with the slice you were
+asked to implement (derived from the intake file path). This is intentionally
+independent of the finding's `artifact_path`: when `artifact_path` points to
+source code or another non-planning file, do **not** create or edit a
+`## Specification Debt` section there — record the debt in the planning
+artifact only.
 
-### 2. Identify findings
+When applying a High-confidence fix:
 
-Scan the artifacts for issues in the categories documented by the calling
-agent's prompt. Each agent supplies its own category list; this protocol
-does not enumerate categories.
+1. Edit the files named in `artifact_path` using the `proposed_fix`.
+2. Run the test suite to confirm no regression.
+3. If tests still pass, stage and commit with the message
+   `review: <brief description of fix>`.
+4. If tests fail, revert the edit, reclassify the finding as **Low
+   confidence**, and handle it via the Low-confidence row of the table
+   above (debt for Critical/Important, terminal-output note for Minor).
+   Do not commit a failing fix.
 
-### 3. Return findings in the shared structure
+After all findings have been processed, summarize the outcome in forge's
+terminal-output **Review Summary** deliverable (not in the PR body):
 
-Every finding — regardless of which review agent produced it — uses the
-following shape. Emit one finding per distinct issue.
+1. **Applied fixes** — the list of `review:` commits created by forge with
+   the corresponding findings they resolved.
+2. **Recorded debt** — any Low-confidence Critical or Important findings
+   appended to the artifact's `## Specification Debt` section, so future
+   readers see them without scanning the agent transcript.
+3. **Minor notes** — Minor findings that did not warrant a fix or a debt
+   row; surface them once in the terminal output for the user, then drop.
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `category` | enum | What kind of issue (per-agent category list) |
-| `severity` | enum | Critical, Important, Minor |
-| `confidence` | enum | High or Low — whether the finding can be auto-resolved by the parent |
-| `description` | string | What the issue is and where it appears |
-| `artifact_path` | string | Path to the file containing the issue |
-| `proposed_fix` | string | Suggested resolution (for High-confidence findings) |
+Forge's existing error-handling STOP gates (test failure mid-slice, blocked
+task, complex-fix escalation) are unchanged by the review phase.
 
-### 4. Triage rules (applied by the parent command, not by the review agent)
-
-The parent command decides what to do with each finding using the
-severity × confidence triage table below. The review agent only reports;
-it never takes the action itself.
-
-| Severity | Confidence | Parent Action |
-|----------|------------|---------------|
-| Critical | High | Apply proposed fix, note in PR |
-| Critical | Low | Record as specification debt **if it passes the kind gate** (see `smithy-clarify` Step 3b for the canonical definition and routing table), otherwise route via the gate's routing table and flag in PR for reviewer |
-| Important | High | Apply proposed fix |
-| Important | Low | Record as specification debt **if it passes the kind gate**, otherwise route via the gate's routing table (`smithy-clarify` Step 3b) to the artifact's proper section (FR, acceptance scenarios, governance, out-of-scope) |
-| Minor | Any | Note in PR only |
-
-The canonical kind-gate criteria and the leak-kind → proper-home
-routing table live in `smithy-clarify` Step 3b. This snippet
-deliberately does not restate them; consult that section directly
-when triaging a Critical-Low or Important-Low finding.
-
-### Read-only invariant
-
-Review agents are strictly read-only:
-
-- They do not modify files or code.
-- They do not create commits, branches, or PRs.
-- They do not run mutating tools.
-- Their sole output is a list of findings in the structure above; the
-  parent command is responsible for any resulting changes on disk.
 ---
 
 ## Documentation Check
 
-Scan the files changed between BASE_SHA and HEAD for documentation staleness:
+Use the **smithy-maid** sub-agent. Pass it:
 
-1. Check inline doc comments (JSDoc, docstrings) in changed files — do they still match the new behavior?
-2. Check READMEs in the same directories as changed files — do they reference changed APIs or behaviors?
-3. Check referenced Smithy artifacts for drift:
-   - **`.tasks.md` mode**: Check the spec (`.spec.md`), data model (`.data-model.md`), and contracts (`.contracts.md`).
-   - **`.strike.md` mode**: Check the strike file (`.strike.md`) — this is the authoritative artifact for strike-based runs.
+- **Changed files**: the list of files modified between BASE_SHA and HEAD (including review auto-fix commits)
+- **Spec/strike paths**: the spec, contracts, data-model, or strike file paths from Intake
+- **Slice goal**: the slice's stated goal
 
-For each stale doc found:
-- If the fix is obvious (e.g., update a parameter name in JSDoc), apply it and commit as `maid: <description>`.
-- If the fix requires judgment (e.g., rewriting a README section), surface it once in the terminal-output deliverable for the user; do not add it to the PR body.
+After the sub-agent returns:
+
+1. **Auto-fixable items**: Apply the suggested changes, commit as `maid: <description>`.
+2. **Flagged items**: Surface them in forge's terminal-output **Review Summary** deliverable so the user can decide whether to file follow-up work. Do **not** add a section to the PR body.
+3. **Clean**: No further action needed.
 
 ---
 
@@ -407,7 +369,8 @@ git show HEAD:<tasks-file-path>
 
 Forge owns the checkbox flip. The implementer must flip each task's
 checkbox in the same commit that lands the implementation
-
+— in the claude variant, this is the smithy-implement
+sub-agent's responsibility per its output contract —
 (see TDD protocol step 5). This re-read is the orchestrator's gate:
 if any `- [ ]` rows remain in the target slice, the slice is **not**
 ready to ship.
@@ -515,6 +478,8 @@ This traceability lets reviewers navigate from PR → slice → spec to understa
 - **Cross-story dependency not met**: If a required story/slice hasn't been
   implemented, present the dependency to the user with options: wait, stub
   against contracts and data model, or proceed optimistically.
+- **Sub-agent failure**: If a smithy-implement sub-agent fails after one retry,
+  stop and report the issue to the user with the error details.
 - **Review finds no issues**: Proceed directly to PR creation. No review
   section exists in the PR body; the terminal-output **Review Summary**
   deliverable will simply read "No review findings."

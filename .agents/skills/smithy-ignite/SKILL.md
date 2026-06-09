@@ -10,6 +10,47 @@ structured **RFC (Request for Comments)** with clearly defined milestones. You a
 the collaborative partner that asks the right questions to turn a spark of an idea
 into a solid, reviewable plan.
 
+## Authored Smithy Artifacts Location
+
+This Smithy install was set up with an explicit policy for **where authored
+Smithy artifacts live**. Every path you see in the rest of this prompt that
+refers to an authored Smithy artifact — `.rfc.md`, `.features.md`, `.spec.md`,
+`.tasks.md`, `.strike.md`, `.prd.md`, `.persona.md`, `.data-model.md`,
+`.contracts.md` — is already prefixed with `` so it points
+at the right root for this repo. Do not strip, override, or rewrite that
+prefix.
+
+- When `` is empty, artifacts live **in the repo**:
+  `docs/rfcs/...`, `docs/prds/...`, `docs/personas/...`, `specs/...`,
+  `specs/strikes/...`.
+- When `` is `~/.smithy/repos/<repoKey>/`, artifacts live **outside
+  the repo, in the user's home directory**: `~/.smithy/repos/<repoKey>/docs/rfcs/...`,
+  `~/.smithy/repos/<repoKey>/docs/personas/...`, `~/.smithy/repos/<repoKey>/specs/...`, etc.
+  Treat the resolved path as authoritative — agents (Claude Code, Gemini CLI,
+  Codex) expand `~` at tool-call time, so the path is portable across team
+  members even when this prompt is committed to source control.
+
+### Scope of the policy
+
+This policy applies **only to authored Smithy artifacts** such as planning
+artifacts and durable persona files. It does **not** apply to:
+
+- **Source code, tests, configuration, or any other repo file you edit as
+  part of an implementation slice.** Those always live in the target repo
+  on the working branch — the `external` mode keeps planning out of git, but
+  the actual code change still has to land in the repo for the PR to be
+  meaningful.
+- **GitHub issue body templates** under `<manifestDir>/templates/orders/`.
+  Those are managed separately by `smithy init` and `smithy.orders`.
+- **The smithy manifest itself** (`.smithy/smithy-manifest.json` or
+  `~/.smithy/smithy-manifest.json`), which is set by `smithy init`.
+
+### When discovering existing artifacts
+
+When you scan for existing artifacts (e.g. "list folders in
+`docs/rfcs/`"), use the prefixed path. The `smithy status`
+CLI already reads the manifest and looks in the right place, so its output
+will be consistent with the paths in this prompt.
 ## Input
 
 The user's idea or document path: $ARGUMENTS
@@ -27,30 +68,109 @@ If no input is clear from the above, ask the user what idea they want to worksho
 
 Before starting, determine the mode:
 
-1. If the input points to an existing `.rfc.md` file, go to **Phase 0: Review Loop**.
-2. If the input is a file path (not `.rfc.md`), read the file and go to **Phase 1: Intake**.
-3. If the input is a description string, go to **Phase 1: Intake**.
+1. If the input points to an existing `.rfc.md` file, go to **Phase 0** —
+   Phase 0's state-detection step now classifies the file itself and decides
+   whether to review a complete RFC, resume a partial one from its first
+   missing sub-phase, or treat a header-only file as fresh.
+2. If the input is a file path (not `.rfc.md`), read the file and go to
+   **Phase 1: Intake**.
+3. If the input is a description string and no matching `docs/rfcs/` folder
+   is found during intake, go to **Phase 1: Intake** as normal — this is the
+   default new-idea path and Phase 1 proceeds unchanged for genuinely new
+   ideas.
 
 **Mid-intake redirect**: During Phase 1, step 2 scans `docs/rfcs/` for existing
-folders. If a folder's slug is a close match to the derived slug for the new idea
-(e.g., `docs/rfcs/2026-001-plugin-system/` already exists when the user asks to
-"build a plugin system"), **stop intake** and ask the user:
-
-> "An existing RFC was found at `docs/rfcs/<YYYY-NNN-slug>/<slug>.rfc.md`.
-> Would you like to **review and refine** the existing RFC, or **create a new one**?"
-
-- If the user chooses to review, go to **Phase 0: Review Loop** with that `.rfc.md`.
-- If the user chooses to create new, continue Phase 1 with the next available `NNN`.
+folders. If a folder's slug is a close match to the derived slug for the new
+idea (e.g., `docs/rfcs/2026-001-plugin-system/` already exists when the user
+asks to "build a plugin system"), **stop intake** and hand control to
+**Phase 0** with the matched `.rfc.md`. Do **not** ask the user "review or
+create new" inline here — that decision is delegated to Phase 0's
+state-detection step, which is now the single place that handles review,
+resume, and new-RFC branching. The option to **create a new RFC instead** of
+touching the existing file remains available to the user from inside Phase 0's
+`partial` and `complete` branches, so nothing is lost by deferring the
+decision.
 
 ---
 
-## Phase 0: Review Loop
+## Phase 0: State Detection and Review Loop
 
 Triggered when:
 - The input explicitly points to an existing `.rfc.md` file, **or**
 - Phase 1 detected a close-matching RFC folder during the `docs/rfcs/` scan
   and handed control to Phase 0 with the matched `.rfc.md` (see Routing
   above).
+
+### Phase 0.0: State Detection
+
+Before running the review loop, classify the existing RFC file to decide
+whether this is a full review, a resume from partial state, or a fresh-start
+header-only file.
+
+1. Read the RFC file from disk and enumerate its `##` headings.
+2. Classify the file as exactly one of three states using the
+   section-to-sub-phase map below:
+   - **`fresh`** — only the RFC header is present; none of the mandatory
+     template `##` sections have been written yet.
+   - **`partial`** — at least one but not all of the mandatory template
+     sections are present.
+   - **`complete`** — every mandatory template section is present.
+3. Report to the user which sections are present, which are missing, and
+   which state was detected.
+
+The section-to-sub-phase map below pairs the RFC template's mandatory `##`
+section headings with the sub-phase that produces each section. Use the exact
+same section titles as the RFC template code fence later in this prompt.
+
+| RFC section(s)                                    | Sub-phase |
+|---------------------------------------------------|-----------|
+| `## Summary`, `## Motivation / Problem Statement` | 3a        |
+| `## Personas`                                     | 3b        |
+| `## Goals`, `## Out of Scope`                     | 3c        |
+| `## Proposal`, `## Design Considerations`         | 3d        |
+| `## Decisions`, `## Specification Debt`           | 3e        |
+| `## Milestones`                                   | 3f        |
+
+### Phase 0.1: Branch on Detected State
+
+Route the pipeline based on the classification from Phase 0.0. Each state
+routes to a distinct next step:
+
+- **`complete`** → continue into `Phase 0a–0b: Audit & Refinement Questions`
+  below, exactly as before. The existing review-loop behavior for genuinely
+  complete RFCs is unchanged by this branching step.
+- **`partial`** → compute the **first missing sub-phase** as the lowest
+  sub-phase ID (3a → 3b → 3c → 3d → 3e → 3f) whose section(s) from the map
+  above are not yet present in the file. Tell the user which sections are
+  present, which sections are missing, and which sub-phase the pipeline will
+  resume from, then **ask the user to confirm** the resume. If the user
+  confirms, hand off to **Phase 3** beginning at that first missing
+  sub-phase (see the Phase 3 resume note for how the hand-off is honored).
+  Do **not** re-run any earlier sub-phase — the sections already on disk are
+  authoritative and must be preserved in place.
+- **`fresh`** → skip the review loop entirely. Leave the existing header-only
+  file on disk **untouched** (do not recreate it) and hand off to **Phase 3**
+  starting at sub-phase **3a**.
+
+From the `partial` or `complete` branch, the user may always choose to
+**create a new RFC instead** rather than touching the existing file; in that
+case, continue Phase 1 with the next available `NNN` so the existing file is
+preserved and a fresh RFC is drafted alongside it.
+
+**Partial RFC from a different idea.** Before resuming a `partial` file,
+verify that the existing `## Summary` and `## Motivation / Problem Statement`
+are contextually related to the current idea. If they are not a plausible
+match for the idea the user is now igniting, warn the user explicitly and
+offer exactly three options: **overwrite** the existing file (discard it and
+start a fresh draft in place), **create a new RFC** in a different folder
+with the next available `NNN`, or **proceed anyway** (treating the mismatch
+as intentional and resuming into the existing file as-is).
+
+**Session crash during harmonization (3g).** If the detection step classifies
+a file as `complete` but its enumerated headings are inconsistent, duplicated,
+or out of canonical template order — the symptom of a harmonization pass
+that crashed mid-rewrite — enter the `Phase 0a–0b` review loop below so that
+`smithy-refine` can identify and repair the inconsistencies.
 
 
 ### Phase 0a–0b: Audit & Refinement Questions
@@ -170,6 +290,94 @@ Parse the input to set up the RFC:
 
 ## Phase 1.5: Approach Planning
 
+### Competing Plans
+
+Use competing **smithy-plan** sub-agents to generate the approach from multiple
+perspectives.
+
+### Competing Plan Lenses
+
+Dispatch 4 competing **smithy-plan** sub-agents in parallel. Each receives the
+same planning context, feature description, codebase file paths, and scout
+report — the only difference is the **additional planning directives** field.
+
+Use the following lens directives (one per sub-agent):
+
+#### Scope Minimalism
+
+> **Directive:** Challenge scope creep. Propose tighter boundaries, question
+> optional requirements, and look for elements that can be deferred without
+> blocking the core artifact. Favor fewer entities, narrower stories, and
+> smaller milestones. In the Tradeoffs section, surface at least one narrower
+> alternative even if you ultimately recommend against it. This directive biases
+> your attention, not your coverage — still flag completeness gaps or coherence
+> issues if you find them.
+
+#### Completeness
+
+> **Directive:** Look for gaps in coverage: missing user stories, unstated
+> assumptions, edge cases in contracts, entities without clear ownership, and
+> milestones that skip necessary groundwork. Verify that every requirement
+> traces to a concrete artifact element. In the Tradeoffs section, surface at
+> least one more thorough alternative even if you ultimately recommend against
+> it. This directive biases your attention, not your coverage — still flag
+> scope bloat or coherence issues if you find them.
+
+#### Coherence
+
+> **Directive:** Look for inconsistencies between elements: stories that don't
+> trace to contracts, data model entities that overlap or have ambiguous
+> ownership, feature boundaries that create awkward cross-cutting dependencies,
+> and milestones whose ordering doesn't match their actual dependencies.
+> Propose cleaner groupings and sharper boundaries. In the Tradeoffs section,
+> surface at least one better-structured alternative even if you ultimately
+> recommend against it. This directive biases your attention, not your
+> coverage — still flag scope bloat or completeness gaps if you find them.
+
+#### Parallelism
+
+> **Directive:** Look for splits that let independent workstreams begin
+> concurrently. Prefer **vertical slices** that span data, logic, and interface
+> over **horizontal phases** that batch all of one layer before any of the
+> next. For each milestone, feature, or user story, ask whether its children
+> could realistically start in parallel without a missing prerequisite — and
+> whether a sequential ordering is truly required by data flow, or merely
+> conventional. In the Tradeoffs section, surface at least one alternative
+> with greater concurrent-execution potential even if you ultimately recommend
+> against it. This directive biases your attention, not your coverage — still
+> flag scope bloat, completeness gaps, or coherence issues if you find them.
+
+---
+
+Pass the quoted directive text above as the **Additional planning directives**
+field for the corresponding smithy-plan run.
+
+After all 4 return, dispatch the **smithy-reconcile** sub-agent. Pass it:
+
+- All 4 plan outputs, each labeled with its lens name (e.g.,
+  "**[Scope Minimalism]** …", "**[Completeness]** …",
+  "**[Coherence]** …", "**[Parallelism]** …")
+- The same context file paths
+- The planning context and feature description
+
+Use the reconciled plan as the basis for presenting the approach to the user.
+Pass each smithy-plan sub-agent:
+
+- **Planning context**: RFC artifact
+- **Feature/problem description**: the user's idea description or the PRD content read during intake
+- **Codebase file paths**: any existing RFC files found during the `docs/rfcs/` scan (for context on existing patterns)
+- **Additional planning directives**: the lens directive from the competing-lenses section above (each run gets a different directive)
+
+Present the reconciled plan to the user as:
+
+1. **Summary** — What you understand the idea to be and the proposed RFC structure.
+2. **Approach** — The reconciled approach for milestone decomposition and scope. Note any
+   items annotated with `[via <lens>]`.
+3. **Risks** — The reconciled risk assessment.
+4. **Conflicts** — If the reconciled plan contains unresolved conflicts between
+   approaches, present them with both options and the reconciler's
+   recommendation. Let the user decide.
+
 
 ---
 
@@ -271,7 +479,234 @@ sessions on this RFC can deduplicate against them:
 canonical title formats and check for repo-level overrides in the project's
 CLAUDE.md. Apply those conventions to all headings in this artifact.
 
-Using the workshopped answers from Phase 2, draft a structured RFC with this format.
+Before drafting orchestrator-inline RFC prose in this phase, load
+`Skill("smithy.helper-voice")` in draft mode. Use it as the shared voice
+source for directly authored RFC sections such as Decisions and coherence
+repairs. Keep Summary, Motivation / Problem Statement, and Personas delegated
+to `smithy-prose` where those sub-phases already own the narrative drafting,
+and do not inline the helper's taxonomy here.
+
+### RFC File Creation
+
+Before any sub-phase begins, create the RFC folder and file:
+
+1. Create the folder `docs/rfcs/<YYYY>-<NNN>-<slug>/` if it doesn't exist.
+2. Create `docs/rfcs/<YYYY>-<NNN>-<slug>/<slug>.rfc.md` with only the RFC header — nothing else:
+
+```markdown
+# RFC: <Title>
+
+**Created**: YYYY-MM-DD  |  **Status**: Draft
+```
+
+Do not add a template skeleton or empty section placeholders. Each sub-phase
+will append its own section headings and content. The RFC template code fence
+below is a reference for section ordering and format — do not copy it into the
+file.
+
+### Append-and-Continue Protocol
+
+After each sub-phase's sub-agent returns, the orchestrator appends the returned
+content to `<slug>.rfc.md` before dispatching the next sub-phase. This is the
+append-and-continue protocol for sub-phases 3a–3f. For inline sub-phase 3e, the
+orchestrator appends directly. Sub-phase 3g is an exception: it rewrites the
+entire file in place (harmonize pass) rather than appending.
+
+### Resume Hand-off from Phase 0
+
+If Phase 0's state-detection step (Phase 0.1) handed off to Phase 3 with a
+specific starting sub-phase (either a `partial` RFC resumed at its first
+missing sub-phase, or a `fresh` header-only RFC resumed at 3a), honor the
+hand-off with the following rules:
+
+1. **Skip** every sub-phase earlier than the designated starting sub-phase.
+   Those sections are already present on disk and MUST NOT be re-run — their
+   prior-session output is authoritative.
+2. **Leave the accumulating `<slug>.rfc.md` on disk untouched on entry.** The
+   `RFC File Creation` step above only runs in the fresh-pipeline case where
+   no file exists yet; on resume, the file Phase 0 classified is already on
+   disk (either a header-only `fresh` file or a `partial` file with some
+   sections already written) and is preserved as-is.
+3. **Reconstruct the missing intake and clarify context** before dispatching
+   the resumed sub-phase. The sub-agents below all expect
+   `idea_description` (normally produced by Phase 1 intake) and
+   `clarify_output` (normally produced by Phase 2 clarification), and the
+   inline sub-phase 3e synthesizes Decisions directly from the
+   clarification record. When Phase 0 hands off into a resume, those
+   in-session artifacts may not exist, so the orchestrator MUST rebuild
+   them before continuing:
+   - **`idea_description`**: re-derive from the existing `## Summary` and
+     `## Motivation / Problem Statement` sections of the on-disk RFC. If
+     those sections do not yet exist (e.g., 3a is the first missing
+     sub-phase), fall back to the user's current invocation arguments or
+     ask the user to restate the idea in one or two sentences.
+   - **`clarify_output`**: prefer loading the per-RFC clarify log at
+     `.smithy/clarify-logs/<YYYY>-<NNN>-<slug>.clarify-log.md` if it
+     exists. (This path replaces the legacy in-RFC-folder
+     `.clarify-log.md`; the slug here is the same one ignite uses for the
+     RFC folder.) If no log is present, run **Phase 2 (Clarify)** before
+     dispatching the first resumed sub-phase so the downstream sub-agents
+     receive grounded clarification context rather than fabricated answers.
+     Do not silently dispatch with empty clarification.
+4. **Begin dispatch** from the designated starting sub-phase and continue
+   through sub-phase 3g normally, using the append-and-continue protocol
+   above for each remaining sub-phase.
+
+For the disk-read context bridging itself, sub-phases **3b–3g** already pass
+`rfc_file_path` — the path to the accumulating `<slug>.rfc.md` — to their
+dispatched sub-agent, so every section written by an earlier sub-phase
+(whether in this session or in an interrupted prior session) flows into the
+current sub-agent via the existing disk-read contract. **Exception:**
+sub-phase 3a normally does **not** pass `rfc_file_path` because in the
+fresh pipeline the file contains only the header at that point. If Phase 0
+hands off into 3a (either a `fresh` header-only file or a `partial` file
+where 3a is somehow the first missing sub-phase), the orchestrator MUST
+pass `rfc_file_path` to smithy-prose for the resumed 3a dispatch so the
+sub-agent can see whatever is already on disk before writing the Summary
+and Motivation sections.
+
+### Sub-phase 3a: Summary + Motivation
+
+Dispatch **smithy-prose** with:
+
+- **section_assignment**: "Summary and Motivation / Problem Statement"
+- **idea_description**: the user's idea description or PRD content from intake
+- **clarify_output**: the Q&A and assumptions from Phase 2 clarification
+- **rfc_file_path**: do not pass (this is the first sub-phase; the RFC file contains only the header)
+
+After smithy-prose returns, append the returned content to `<slug>.rfc.md`.
+
+### Sub-phase 3b: Personas
+
+Dispatch **smithy-prose** with:
+
+- **section_assignment**: "Personas"
+- **idea_description**: the user's idea description or PRD content from intake
+- **clarify_output**: the Q&A and assumptions from Phase 2 clarification
+- **rfc_file_path**: the path to the accumulating `<slug>.rfc.md` (which at this point contains the header plus Summary and Motivation)
+- **tone_directives**: "Personas named or described during Phase 2 clarification are mandatory — every persona surfaced there MUST appear in the drafted `## Personas` section with a role and a description of how this RFC benefits them. Do not return placeholder or empty content."
+
+After smithy-prose returns, verify that the returned content contains a
+non-empty `## Personas` section with at least one named persona. If the
+sub-agent returns empty output, placeholder content (e.g., the template's
+`<Persona 1 ...>` literal), or a response missing the `## Personas` heading,
+**halt the pipeline** with a diagnostic that points at the Phase 2
+clarification record so the user can confirm which personas were identified
+before retrying. Otherwise, append the returned content to the RFC file.
+
+### Sub-phase 3c: Goals + Out of Scope
+
+Dispatch **smithy-plan** with:
+
+- **Planning context**: "Draft the Goals and Out of Scope sections for this RFC"
+- **Feature/problem description**: the user's idea description plus the full clarification output from Phase 2
+- **Codebase file paths**: the path to the accumulating `<slug>.rfc.md` (which by this point contains Summary, Motivation, and Personas from earlier sub-phases)
+- **Additional planning directives**: constrain smithy-plan to produce only the Goals and Out of Scope sections in the RFC template format — not a full planning document. Apply the following section-role rules.
+
+  **Goals.** Each bullet describes an outcome this RFC commits to delivering, phrased in terms a stakeholder can evaluate without reading the Milestones section. Goals MUST NOT name milestones (e.g., `M-A`, `M1`, "delivered by M-C"), reference milestone IDs by any notation, describe milestone sequencing, or use the word "milestone". The milestone decomposition is downstream of the goals — **milestones reference goals; goals do not reference milestones.** If a candidate goal can only be stated by pointing at the milestone that delivers it, rewrite it as the outcome the milestone produces, or drop it.
+
+  **Out of Scope.** Each bullet is a capability this RFC explicitly will NOT deliver — items that no milestone in this RFC covers and that a future RFC (or a separate effort) would be needed to address. An item that is "deferred to M-N", "covered by a later milestone", or "in scope but not yet specified at this layer" is **in scope for this RFC** and MUST NOT appear here — surface those inside the relevant milestone's description in sub-phase 3f instead. Source out-of-scope entries only from clarification answers that named a capability as excluded from the work entirely (clarify Scope category, "explicitly out of scope" answers). The returned content **must** include a `## Out of Scope` section; it is a required section, never omitted. If no exclusions were identified during clarification, smithy-plan must still emit the `## Out of Scope` section with the single placeholder entry `None identified at this time` so the section is never left empty.
+
+Append the returned content to the RFC file.
+
+### Sub-phase 3d: Proposal + Design Considerations
+
+Dispatch **smithy-plan** with:
+
+- **Planning context**: "Draft the Proposal and Design Considerations sections for this RFC"
+- **Feature/problem description**: the user's idea description plus the clarification output and the reconciled approach from Phase 1.5
+- **Codebase file paths**: the path to the accumulating `<slug>.rfc.md` (which by this point contains Summary through Out of Scope)
+- **Additional planning directives**: constrain smithy-plan to produce only the Proposal and Design Considerations sections — not a full planning document
+
+Append the returned content to the RFC file.
+
+### Sub-phase 3e: Decisions
+
+This sub-phase is orchestrator-inline — no sub-agent dispatch.
+
+Synthesize the **Decisions** section directly from the clarification record
+(Phase 2 output) and the reconciled approach (Phase 1.5):
+
+- **Decisions**: Items that were discussed and resolved during clarification
+  or reconciliation. Each entry states what was decided and why.
+
+The RFC has **no `## Open Questions` section**. Genuinely unresolved
+uncertainty is already captured as `SD-NNN` rows in `## Specification Debt`
+by smithy-clarify (and later refine / plan-review passes); duplicating it as
+prose under a separate heading would split the same uncertainty across two
+formats. Refer to the "Decisions vs Specification Debt" guidance below the
+template code fence.
+
+Append the formatted `## Decisions` section to the RFC file.
+
+### Sub-phase 3f: Milestones
+
+Dispatch **smithy-plan** with:
+
+- **Planning context**: "Draft the Milestones section and Dependency Order table for this RFC"
+- **Feature/problem description**: the user's idea description plus the clarification output
+- **Codebase file paths**: the path to the accumulating `<slug>.rfc.md` (containing all prior sections)
+- **Additional planning directives**: produce the milestone decomposition followed immediately by a `## Dependency Order` 4-column table with `M<N>` IDs. Each milestone must be formatted as `### Milestone N: <Title>` followed by `**Description**` and `**Success Criteria**` bullets. The Dependency Order table uses columns `ID | Title | Depends On | Artifact`. In `Depends On`, each cell must be exactly `—` or a comma-separated list of `M<N>` IDs from the same table (e.g., `M1` or `M1, M2`); do not use prose or any other format. In `Artifact`, each cell starts as `—`; do not use checkboxes.
+
+Append the returned content to the RFC file.
+
+### Sub-phase 3g: Harmonize
+
+This sub-phase is primarily orchestrator-inline. The only exception is the
+Personas repair branch in step 3 below, which may conditionally re-dispatch
+**smithy-prose** when the coherence pass detects that the `## Personas`
+section is missing, empty, or placeholder-only. No other sub-agents are
+dispatched in 3g.
+
+1. Read the complete `<slug>.rfc.md` from disk.
+2. Perform a coherence pass:
+   - Smooth tone across sections written by different sub-agents.
+   - Fix cross-references between sections (e.g., a Milestone referencing a Goal
+     by name, a Proposal referencing a Persona).
+   - **Reorder sections to match the RFC template structure** (Summary →
+     Motivation / Problem Statement → Goals → Out of Scope → Personas →
+     Proposal → Design Considerations → Decisions → Specification Debt →
+     Milestones → Dependency Order). This reordering is required because
+     sub-phase 3b appends Personas before sub-phase 3c appends Out of Scope,
+     so a correctly drafted Personas section will be misplaced in the
+     accumulating file and MUST be moved into canonical position here.
+   - Verify that every expected RFC template section is present and non-empty.
+   - **Out of Scope safety net**: explicitly verify that the `## Out of Scope` section exists and contains substantive content. If the section is missing entirely, insert it in the correct template position (immediately after `## Goals`) with the single placeholder entry `None identified at this time`. If the section is present but empty or contains no substantive content, fill it in place with the same placeholder phrasing `None identified at this time`. This safety net mirrors the sub-phase 3c directive so both enforcement layers use identical placeholder text.
+   - **Goals scope-scrub**: scan every bullet in `## Goals` for milestone references — any token matching `M[0-9]+`, `M-[A-Z]`, or the literal word "milestone" (case-insensitive). If a goal can only be expressed by naming the milestone that delivers it, rewrite it as the outcome the milestone produces (drop the milestone reference). If the milestone reference cannot be separated from the bullet without losing the goal, drop the bullet — milestones realize goals, not the other way around. This safety net mirrors the sub-phase 3c directive.
+   - **No `## Open Questions` section.** If a `## Open Questions` heading was generated by an earlier sub-phase or carried over from a prior draft of this RFC, **remove it**. Genuinely unresolved uncertainty belongs in `## Specification Debt` as an `SD-NNN` row with `clarify:Risks` or the appropriate clarify category — not as a separate narrative section. If removing the section would lose information that is not already represented in Specification Debt, translate each remaining open question into a new `SD-NNN` row (continue numbering from existing rows) before deleting the heading.
+   - **`## Specification Debt` safety net**: explicitly verify that the `## Specification Debt` section exists at the canonical position (after `## Decisions` and before `## Milestones`). If the section is missing entirely, insert it at that position with the placeholder body `_None — no specification debt was recorded._`. Do **not** back-fill the table from coordination notes, future-work bullets, or milestone deferrals — an empty placeholder is the correct outcome when no debt was recorded by clarify, refine, or plan-review. This safety net mirrors the Phase 0 state-detection contract so a legacy RFC missing the debt table is healed in place on resume.
+   - **`## Personas` is a mandatory verified section.** Explicitly check that
+     the harmonized RFC contains a non-empty `## Personas` section positioned
+     after `## Out of Scope` and before `## Proposal`, and that it lists at
+     least one named persona with a description (not placeholder text such as
+     the template's `<Persona 1 ...>` literal). Treat any of the following as
+     a failure that triggers the Personas repair branch in step 3: missing
+     section, empty section, placeholder-only content, or a non-empty
+     Personas section that remains outside the canonical position after the
+     reorder step above.
+3. **Personas repair.** If the Personas verification above fails for any
+   reason (missing, empty, placeholder-only, or still misplaced after
+   reorder), re-dispatch **smithy-prose** with:
+   - `section_assignment` = "Personas"
+   - `idea_description` = the user's original idea description or PRD content
+     from intake (same value passed to sub-phase 3b; required by the
+     smithy-prose contract)
+   - `clarify_output` = the Phase 2 clarification Q&A and assumptions
+   - `rfc_file_path` = the path to the accumulating `<slug>.rfc.md`
+   - `tone_directives` = "Personas named or described during Phase 2
+     clarification are mandatory. Do not return placeholder or empty content."
+
+   When smithy-prose returns, **replace** any existing `## Personas` section
+   in the RFC file with the returned content in place — do not append a
+   second Personas section. If no `## Personas` heading exists, splice the
+   returned section in at the canonical position (after `## Out of Scope`
+   and before `## Proposal`). Re-run the mandatory-section verification from
+   step 2 after repair; if Personas is still missing, empty, or misplaced,
+   halt the pipeline with a diagnostic pointing at the Phase 2 clarification
+   record.
+4. Rewrite the file in place with the harmonized content.
+
+Confirm the harmonize step completed before proceeding to Phase 4.
 
 
 **Important — Decisions vs Specification Debt**: Items discussed during
@@ -288,46 +723,57 @@ duplicates the debt table in a less structured format.
 **Created**: YYYY-MM-DD  |  **Status**: Draft
 
 ## Summary
+<!-- audience: stakeholder; mode: explanation; length: 2-3 sentences; diagram: optional; examples: discouraged -->
 
 <High-level pitch — what this is and why it matters, in 2-3 sentences.>
 
 ## Motivation / Problem Statement
+<!-- audience: stakeholder; mode: explanation; length: 2-3 paragraphs; diagram: optional; examples: discouraged -->
 
 <What problem does this solve? Why does it need solving now? What is the impact
 of not solving it?>
 
 ## Goals
+<!-- audience: reviewer; mode: reference; length: tables only; diagram: optional; examples: discouraged -->
 
 - <Outcome 1 — what this RFC commits to delivering, stated as a result a stakeholder can evaluate. Do NOT reference milestone IDs (M1, M-A, etc.) or the word "milestone"; milestones realize goals, not the reverse.>
 - <Outcome 2>
 - <Outcome 3>
 
 ## Out of Scope
+<!-- audience: reviewer; mode: reference; length: tables only; diagram: optional; examples: discouraged -->
 
 - <Capability 1 this RFC will NOT deliver — must be a true exclusion, not deferred work. Bad: "Eval rubrics — deferred to M-F or later". Good: "Production observability — lives in operations-doc territory, not in this RFC.">
 - <Capability 2>
 
 ## Personas
+<!-- audience: stakeholder; mode: reference; length: tables only; diagram: optional; examples: discouraged -->
 
 - <Persona 1 — role and how they benefit from this RFC>
 - <Persona 2 — role and how they benefit>
 
 ## Proposal
+<!-- audience: reviewer; mode: explanation; length: 3-6 paragraphs; diagram: recommended; examples: recommended -->
 
 <The "WHAT" — describe what will be built at a high level. Focus on outcomes
-and capabilities, not implementation details.>
+and capabilities, not implementation details. A block or sequence diagram of
+the proposed architecture beats wall-of-text whenever three or more named
+components or steps are involved.>
 
 ## Design Considerations
+<!-- audience: reviewer; mode: explanation; length: 3-6 paragraphs; diagram: optional; examples: discouraged -->
 
 <High-level architectural thoughts, tradeoffs, and constraints that will
 influence downstream design decisions. Keep this at "WHAT not HOW" level.>
 
 ## Decisions
+<!-- audience: reviewer; mode: explanation; length: 1-3 paragraphs; diagram: optional; examples: discouraged -->
 
 - <Decision 1 — what was decided and the rationale>
 - <Decision 2>
 
 ## Specification Debt
+<!-- audience: reviewer; mode: reference; length: tables only; diagram: optional; examples: discouraged -->
 
 | ID | Description | Source Category | Impact | Confidence | Status | Resolution |
 |----|-------------|-----------------|--------|------------|--------|------------|
@@ -336,6 +782,7 @@ influence downstream design decisions. Keep this at "WHAT not HOW" level.>
 _If no debt items, write: "None — all ambiguities resolved."_
 
 ## Milestones
+<!-- audience: reviewer; mode: reference; length: tables only; diagram: optional; examples: discouraged -->
 
 ### Milestone 1: <Title>
 
@@ -354,6 +801,7 @@ _If no debt items, write: "None — all ambiguities resolved."_
 - <Measurable outcome 2>
 
 ## Dependency Order
+<!-- audience: builder+ai-input; mode: reference; length: tables only; diagram: optional; examples: discouraged -->
 
 Recommended implementation sequence:
 
@@ -412,22 +860,23 @@ underlying assumption rather than silently accepting the applied fix.
 The review agent never modifies files itself — all on-disk changes are made
 here, by ignite.
 
-1. Create the folder `docs/rfcs/<YYYY>-<NNN>-<slug>/` if it doesn't exist.
-2. Write the RFC to `docs/rfcs/<YYYY>-<NNN>-<slug>/<slug>.rfc.md`.
-3. Run the Plan-Review Pass described above on the RFC file that was just
-   written.
-4. Commit the RFC file on the current feature branch (capturing both the
-   original RFC content and any plan-review fixes in the same diff). Push
+Phase 3 already created the RFC folder, wrote the file piecewise through
+sub-phases 3a–3f, and harmonized it in sub-phase 3g. Skip folder creation
+and file write — proceed directly through plan-review, commit, and PR:
+
+1. Run the Plan-Review Pass described above on the harmonized RFC file.
+2. Commit the RFC file on the current feature branch (capturing both the
+   harmonized content and any plan-review fixes in the same diff). Push
    the current branch as-is — do not rename it or prepend a prefix such
    as `feature/`. The PR must be opened against the same branch the
    operator (or upstream orchestrator) had checked out when ignite was
    invoked. See the branch policy below.
-5. Create a PR for the RFC artifact using the forge PR-creation pattern
+3. Create a PR for the RFC artifact using the forge PR-creation pattern
    (Prefer `mcp__github__create_pull_request` (the GitHub MCP tool); fall back to `gh pr create` only when the MCP server is unavailable.):
    - **Title**: the RFC title, under 70 characters, descriptive text only.
    - **Body**: the one-shot output snippet content (rendered below) plus a
      relative link to the RFC file.
-6. Render the one-shot output snippet as the terminal contract. For an
+4. Render the one-shot output snippet as the terminal contract. For an
    RFC-only run, use the RFC folder as the spec folder and substitute
    milestone counts where the snippet asks for user stories / functional
    requirements. Copy the clarify return's `assumptions` into the
