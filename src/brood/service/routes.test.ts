@@ -5,7 +5,7 @@ import { getActiveOtel, initOtel } from "../../observability/otel.js";
 import { registerRoutes } from "./routes.js";
 import { sqliteAvailable } from "./sqlite.js";
 import { SessionStore } from "./store.js";
-import type { CastraStewardGateway } from "./steward-removal.js";
+import type { CastraStewardGateway, OrphanGate } from "./steward-removal.js";
 import { BroodConflictError, BroodNotFoundError } from "./teardown.js";
 import type { TeardownRequest, TeardownResult } from "./types.js";
 
@@ -15,13 +15,20 @@ const stores: SessionStore[] = [];
 async function buildApp(
   teardown?: (id: string, request: TeardownRequest) => Promise<TeardownResult>,
   stewardGateway?: CastraStewardGateway,
+  extra: { orphanGate?: OrphanGate; env?: NodeJS.ProcessEnv } = {},
 ): Promise<{
   app: FastifyInstance;
   store: SessionStore;
 }> {
   const store = new SessionStore({ dbPath: ":memory:" });
   const app = Fastify();
-  await registerRoutes(app, { store, teardown, stewardGateway });
+  await registerRoutes(app, {
+    store,
+    teardown,
+    stewardGateway,
+    orphanGate: extra.orphanGate,
+    env: extra.env,
+  });
   apps.push(app);
   stores.push(store);
   return { app, store };
@@ -245,7 +252,31 @@ describe.skipIf(!sqliteAvailable)("brood routes", () => {
     expect((await app.inject({ method: "POST", url: "/sessions/live/teardown", payload: {} })).statusCode).toBe(409);
   });
 
-  it("POST /sweep reaps leaked Castra stewards via the gateway (#304)", async () => {
+  it("POST /admin/sweep 404s when MARCH_BROOD_ADMIN_TOKEN is unset (#304)", async () => {
+    const { app } = await buildApp(undefined, undefined, { env: {} });
+    const res = await app.inject({ method: "POST", url: "/admin/sweep" });
+    expect(res.statusCode).toBe(404);
+  });
+
+  it("POST /admin/sweep 401s on a missing/wrong bearer token (#304)", async () => {
+    const { app } = await buildApp(undefined, undefined, {
+      env: { MARCH_BROOD_ADMIN_TOKEN: "s3cret" },
+    });
+    expect(
+      (await app.inject({ method: "POST", url: "/admin/sweep" })).statusCode,
+    ).toBe(401);
+    expect(
+      (
+        await app.inject({
+          method: "POST",
+          url: "/admin/sweep",
+          headers: { authorization: "Bearer wrong" },
+        })
+      ).statusCode,
+    ).toBe(401);
+  });
+
+  it("POST /admin/sweep reaps orphan stewards when authorized (#304)", async () => {
     const removed: string[] = [];
     const gateway: CastraStewardGateway = {
       async listSessions() {
@@ -255,7 +286,7 @@ describe.skipIf(!sqliteAvailable)("brood routes", () => {
             title: "",
             group: "",
             branch: "feature/x",
-            worktreePath: "/wt/aaa",
+            worktreePath: "/wt/gone",
             createdAt: "",
             status: "waiting",
           },
@@ -266,17 +297,31 @@ describe.skipIf(!sqliteAvailable)("brood routes", () => {
         return { removed: true };
       },
     };
-    const { app, store } = await buildApp(undefined, gateway);
+    // Orphan gate: the leaked session's worktree is gone on disk → work done.
+    const orphanGate: OrphanGate = {
+      worktreeExists: (p) => p !== "/wt/gone",
+      branchPrState: () => "unknown",
+    };
+    const { app, store } = await buildApp(undefined, gateway, {
+      orphanGate,
+      env: { MARCH_BROOD_ADMIN_TOKEN: "s3cret" },
+    });
+    // A torndown row makes the `smithy` profile known so the sweep scans it.
     store.register({
       id: "steward-old",
       kind: "steward",
       agentDeckSessionId: "steward-old",
       profile: "smithy",
-      worktreePath: "/wt/aaa",
+      repoPath: "/repo",
+      worktreePath: "/wt/d4143794",
       status: "torndown",
     });
 
-    const res = await app.inject({ method: "POST", url: "/sweep" });
+    const res = await app.inject({
+      method: "POST",
+      url: "/admin/sweep",
+      headers: { authorization: "Bearer s3cret" },
+    });
     expect(res.statusCode).toBe(200);
     expect(res.json().reaped.map((r: { sessionId: string }) => r.sessionId)).toEqual([
       "leaked",

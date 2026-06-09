@@ -1070,7 +1070,7 @@ brood
 brood
   .command("sweep")
   .description(
-    "Reap leaked Castra stewards (Brood=torndown but still live in Castra)",
+    "Reap leaked Castra stewards — orphans whose work is done (gated by MARCH_BROOD_ADMIN_TOKEN)",
   )
   .option("--json", "Print the sweep result as JSON")
   .action(async (opts: { json?: boolean }) => {
@@ -1085,7 +1085,7 @@ brood
       } else {
         for (const reaped of result.reaped) {
           console.log(
-            `reaped ${reaped.sessionId} (${reaped.profile}) ${reaped.worktreePath}`,
+            `reaped ${reaped.sessionId} (${reaped.profile}) ${reaped.branch || "?"} [${reaped.reason}] ${reaped.worktreePath}`,
           );
         }
         for (const failure of result.failures) {
@@ -1094,7 +1094,7 @@ brood
           );
         }
         console.log(
-          `swept ${result.scannedProfiles.length} profile(s): ${result.reaped.length} reaped, ${result.failures.length} failed`,
+          `swept ${result.scannedProfiles.length} profile(s): ${result.reaped.length} reaped, ${result.skipped.length} left in place, ${result.failures.length} failed`,
         );
       }
       process.exitCode = SUCCESS;

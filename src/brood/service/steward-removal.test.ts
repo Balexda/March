@@ -5,7 +5,9 @@ import { SessionStore } from "./store.js";
 import {
   removeStewardViaCastra,
   sweepLeakedStewards,
+  type BranchPrState,
   type CastraStewardGateway,
+  type OrphanGate,
 } from "./steward-removal.js";
 
 function session(over: Partial<CastraSession> & { sessionId: string }): CastraSession {
@@ -123,39 +125,160 @@ describe("removeStewardViaCastra", () => {
   });
 });
 
+/** Fake orphan gate: declared PR states per branch + a set of missing worktrees. */
+function fakeGate(
+  opts: { pr?: Record<string, BranchPrState>; missingWorktrees?: string[] } = {},
+): OrphanGate {
+  const missing = new Set(opts.missingWorktrees ?? []);
+  return {
+    worktreeExists: (p) => !missing.has(p),
+    branchPrState: (branch) => opts.pr?.[branch] ?? "unknown",
+  };
+}
+
 describe.skipIf(!sqliteAvailable)("sweepLeakedStewards", () => {
-  it("reaps a Castra session whose worktree belongs to a torndown Brood row", async () => {
+  it("reaps a true orphan whose branch maps to a MERGED pr (#304)", async () => {
+    // The exact live-stack shape: Brood only has the FIRST attempt (torndown,
+    // worktree hash d4143794). The relaunch made a NEW orphan with a NEW id AND
+    // a NEW worktree hash (898689c7) that Brood never tracked — so keying off the
+    // torndown row's worktree can't find it. The merged PR is what proves it done.
     const store = new SessionStore({ dbPath: ":memory:" });
     store.register({
-      id: "spawn-1",
-      kind: "spawn",
-      status: "torndown",
-      repoPath: "/repo",
-      branch: "feature/x",
-      worktreePath: "/wt/aaa",
-    });
-    store.register({
-      id: "steward-old",
+      id: "e4473b5d",
       kind: "steward",
-      parentId: "spawn-1",
-      agentDeckSessionId: "steward-old",
+      agentDeckSessionId: "e4473b5d",
       profile: "smithy",
-      worktreePath: "/wt/aaa",
-      branch: "feature/x",
+      repoPath: "/repo",
+      worktreePath: "/wt/screens-d4143794",
+      branch: "feature/screens",
       status: "torndown",
     });
-
-    // Castra still holds a leaked session for that worktree (under a fresh id).
     const gw = fakeGateway([
-      session({ sessionId: "leaked-new", worktreePath: "/wt/aaa", branch: "feature/x" }),
-      session({ sessionId: "unrelated", worktreePath: "/wt/live" }),
+      session({
+        sessionId: "ab825c26",
+        worktreePath: "/wt/screens-898689c7",
+        branch: "feature/screens",
+      }),
     ]);
 
-    const result = await sweepLeakedStewards(store, gw);
+    const result = await sweepLeakedStewards(
+      store,
+      gw,
+      fakeGate({ pr: { "feature/screens": "merged" } }),
+    );
 
-    expect(result.reaped.map((r) => r.sessionId)).toEqual(["leaked-new"]);
-    expect(gw.removed).toEqual(["leaked-new"]);
-    expect(gw.sessions.map((s) => s.sessionId)).toEqual(["unrelated"]);
+    expect(result.reaped.map((r) => r.sessionId)).toEqual(["ab825c26"]);
+    expect(result.reaped[0].reason).toBe("pr-merged");
+    expect(gw.removed).toEqual(["ab825c26"]);
+    store.close();
+  });
+
+  it("never reaps a live steward whose branch has an OPEN pr", async () => {
+    const store = new SessionStore({ dbPath: ":memory:" });
+    store.register({
+      id: "old",
+      kind: "steward",
+      profile: "smithy",
+      repoPath: "/repo",
+      worktreePath: "/wt/old",
+      branch: "feature/x",
+      status: "torndown",
+    });
+    const gw = fakeGateway([
+      session({ sessionId: "live", worktreePath: "/wt/new", branch: "feature/x" }),
+    ]);
+
+    const result = await sweepLeakedStewards(
+      store,
+      gw,
+      fakeGate({ pr: { "feature/x": "open" } }),
+    );
+
+    expect(result.reaped).toEqual([]);
+    expect(gw.removed).toEqual([]);
+    expect(result.skipped.map((s) => s.reason)).toContain("open-pr");
+    store.close();
+  });
+
+  it("reaps an orphan whose worktree no longer exists on disk", async () => {
+    const store = new SessionStore({ dbPath: ":memory:" });
+    store.register({
+      id: "old",
+      kind: "steward",
+      profile: "smithy",
+      repoPath: "/repo",
+      worktreePath: "/wt/old",
+      branch: "feature/y",
+      status: "torndown",
+    });
+    const gw = fakeGateway([
+      session({ sessionId: "leaked", worktreePath: "/wt/gone", branch: "feature/y" }),
+    ]);
+
+    const result = await sweepLeakedStewards(
+      store,
+      gw,
+      fakeGate({ missingWorktrees: ["/wt/gone"] }),
+    );
+
+    expect(result.reaped.map((r) => r.sessionId)).toEqual(["leaked"]);
+    expect(result.reaped[0].reason).toBe("worktree-gone");
+    store.close();
+  });
+
+  it("never reaps a session an active Brood record still tracks", async () => {
+    const store = new SessionStore({ dbPath: ":memory:" });
+    store.register({
+      id: "live-steward",
+      kind: "steward",
+      agentDeckSessionId: "live-steward",
+      profile: "smithy",
+      repoPath: "/repo",
+      worktreePath: "/wt/live",
+      branch: "feature/z",
+      status: "running",
+    });
+    // Even if the gate would call it done, a tracked-live session is teardown's job.
+    const gw = fakeGateway([
+      session({ sessionId: "live-steward", worktreePath: "/wt/live", branch: "feature/z" }),
+    ]);
+
+    const result = await sweepLeakedStewards(
+      store,
+      gw,
+      fakeGate({ pr: { "feature/z": "merged" } }),
+    );
+
+    expect(result.reaped).toEqual([]);
+    expect(gw.removed).toEqual([]);
+    expect(result.skipped.map((s) => s.reason)).toContain("tracked");
+    store.close();
+  });
+
+  it("leaves an orphan in place when its PR state cannot be determined", async () => {
+    const store = new SessionStore({ dbPath: ":memory:" });
+    store.register({
+      id: "old",
+      kind: "steward",
+      profile: "smithy",
+      repoPath: "/repo",
+      worktreePath: "/wt/old",
+      branch: "feature/q",
+      status: "torndown",
+    });
+    const gw = fakeGateway([
+      session({ sessionId: "maybe", worktreePath: "/wt/maybe", branch: "feature/q" }),
+    ]);
+
+    const result = await sweepLeakedStewards(
+      store,
+      gw,
+      fakeGate({ pr: { "feature/q": "unknown" } }),
+    );
+
+    expect(result.reaped).toEqual([]);
+    expect(gw.removed).toEqual([]);
+    expect(result.skipped.map((s) => s.reason)).toContain("pr-lookup-unknown");
     store.close();
   });
 
@@ -166,33 +289,17 @@ describe.skipIf(!sqliteAvailable)("sweepLeakedStewards", () => {
       kind: "steward",
       agentDeckSessionId: "steward-x",
       profile: "smithy",
+      repoPath: "/repo",
       worktreePath: "/wt/aaa",
       status: "torndown",
     });
     const gw = fakeGateway([], { listThrows: true });
 
-    const result = await sweepLeakedStewards(store, gw);
+    const result = await sweepLeakedStewards(store, gw, fakeGate());
 
     expect(result.reaped).toEqual([]);
     expect(result.failures).toHaveLength(1);
     expect(result.failures[0].profile).toBe("smithy");
-    store.close();
-  });
-
-  it("reaps by tracked id when the leaked session reports no worktree", async () => {
-    const store = new SessionStore({ dbPath: ":memory:" });
-    store.register({
-      id: "ad-keep-id",
-      kind: "steward",
-      agentDeckSessionId: "ad-keep-id",
-      profile: "smithy",
-      status: "torndown",
-    });
-    const gw = fakeGateway([session({ sessionId: "ad-keep-id" })]);
-
-    const result = await sweepLeakedStewards(store, gw);
-
-    expect(result.reaped.map((r) => r.sessionId)).toEqual(["ad-keep-id"]);
     store.close();
   });
 });

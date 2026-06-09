@@ -1,3 +1,5 @@
+import { execFileSync } from "node:child_process";
+import { existsSync } from "node:fs";
 import { createCastraClientFromEnv } from "../../castra/client.js";
 import type { CastraSession } from "../../castra/types.js";
 import type { SessionRepository } from "./repository.js";
@@ -149,11 +151,146 @@ export async function removeStewardViaCastra(
   };
 }
 
+// ---------------------------------------------------------------------------
+// Orphan sweep — reaping leaked stewards Brood never tracked (#304, ask 3)
+// ---------------------------------------------------------------------------
+
+/**
+ * The deciding insight that the worktree-keyed teardown removal alone CANNOT
+ * close the leak: a relaunch makes a brand-new steward with a NEW worktree hash
+ * AND a new session id, and never tells Brood. So the live orphan's worktree
+ * (e.g. `…-screens-and-flows-as-ui-898689c7`) matches NO Brood row — the
+ * torndown record for that slice points at the FIRST attempt's worktree
+ * (`…-d4143794`). Keying the sweep off Brood's torndown rows therefore reaps
+ * zero and the leak persists.
+ *
+ * The sweep here instead reaps **true orphans**: any live Castra steward session
+ * for which Brood has NO *active* (non-torndown) record — gated so a session is
+ * only reaped when its work is GENUINELY DONE. "Done" = its branch maps to a
+ * GitHub PR that is MERGED or CLOSED, or its worktree no longer exists on disk.
+ * A live steward on an OPEN PR is never reaped; an indeterminate state (no PR,
+ * `gh` unavailable, no repo root) is left alone rather than guessed.
+ */
+
+/** PR state for a branch as reported by the forge, plus the no-PR / unknown cases. */
+export type BranchPrState = "open" | "merged" | "closed" | "none" | "unknown";
+
+/**
+ * The two forge/disk reads the orphan gate needs, behind a seam so the sweep is
+ * unit-testable without a real `gh` / filesystem. {@link defaultOrphanGate}
+ * shells out to `gh` and `fs.existsSync`.
+ */
+export interface OrphanGate {
+  /** True when the steward's worktree still exists on disk (best-effort). */
+  worktreeExists(worktreePath: string): boolean;
+  /** PR state for `branch`, resolved by running `gh` from a checkout at `repoRoot`. */
+  branchPrState(branch: string, repoRoot: string): BranchPrState;
+}
+
+const GH_MAX_BUFFER = 16 * 1024 * 1024;
+
+/** The default forge/disk-backed gate: `fs.existsSync` + `gh pr list`. */
+export function defaultOrphanGate(): OrphanGate {
+  return {
+    worktreeExists(worktreePath) {
+      try {
+        return existsSync(worktreePath);
+      } catch {
+        // An fs error is not proof of absence — err toward "exists" so a flaky
+        // stat never causes a false reap of live work.
+        return true;
+      }
+    },
+    branchPrState(branch, repoRoot) {
+      let raw: string;
+      try {
+        raw = execFileSync(
+          "gh",
+          ["pr", "list", "--head", branch, "--state", "all", "--json", "number,state"],
+          {
+            cwd: repoRoot,
+            encoding: "utf-8",
+            stdio: ["ignore", "pipe", "ignore"],
+            maxBuffer: GH_MAX_BUFFER,
+          },
+        );
+      } catch {
+        // `gh` missing / unauthenticated / network error: cannot conclude. Never
+        // report a false "done" — an open PR we couldn't see must not be reaped.
+        return "unknown";
+      }
+      let prs: Array<{ state?: string }>;
+      try {
+        const trimmed = raw.trim();
+        prs = trimmed ? (JSON.parse(trimmed) as Array<{ state?: string }>) : [];
+      } catch {
+        return "unknown";
+      }
+      if (prs.some((p) => p.state === "OPEN")) return "open";
+      if (prs.some((p) => p.state === "MERGED")) return "merged";
+      if (prs.some((p) => p.state === "CLOSED")) return "closed";
+      return "none";
+    },
+  };
+}
+
+/** Whether an orphan steward's slice is finished, in flight, or indeterminate. */
+export type OrphanWorkState = "done" | "in-progress" | "unknown";
+
+export interface OrphanVerdict {
+  readonly state: OrphanWorkState;
+  /** Low-cardinality reason for logging/telemetry (e.g. `pr-merged`, `open-pr`). */
+  readonly reason: string;
+}
+
+/**
+ * Decide whether a leaked Castra steward session's work is genuinely done, and
+ * is therefore safe to reap. Conservative by construction: only `worktree-gone`
+ * and a MERGED/CLOSED PR are "done"; an OPEN PR is `in-progress` (never reap);
+ * everything we cannot verify (no branch, no repo root, no PR, `gh` failed) is
+ * `unknown` (left alone).
+ */
+export function classifyOrphanWork(
+  session: CastraSession,
+  repoRoot: string | undefined,
+  gate: OrphanGate,
+): OrphanVerdict {
+  if (session.worktreePath && !gate.worktreeExists(session.worktreePath)) {
+    return { state: "done", reason: "worktree-gone" };
+  }
+  if (!session.branch) return { state: "unknown", reason: "no-branch" };
+  if (!repoRoot) return { state: "unknown", reason: "no-repo-root" };
+
+  switch (gate.branchPrState(session.branch, repoRoot)) {
+    case "open":
+      return { state: "in-progress", reason: "open-pr" };
+    case "merged":
+      return { state: "done", reason: "pr-merged" };
+    case "closed":
+      return { state: "done", reason: "pr-closed" };
+    case "none":
+      return { state: "unknown", reason: "no-pr" };
+    default:
+      return { state: "unknown", reason: "pr-lookup-unknown" };
+  }
+}
+
 /** A leaked Castra session reaped by {@link sweepLeakedStewards}. */
 export interface SweptSession {
   readonly sessionId: string;
   readonly profile: string;
   readonly worktreePath: string;
+  readonly branch: string;
+  /** Why its work was judged done (`worktree-gone` | `pr-merged` | `pr-closed`). */
+  readonly reason: string;
+}
+
+/** A live session the sweep deliberately left in place, and why. */
+export interface SkippedSession {
+  readonly sessionId: string;
+  readonly profile: string;
+  /** `tracked` | `open-pr` | `no-pr` | `pr-lookup-unknown` | `no-branch` | `no-repo-root`. */
+  readonly reason: string;
 }
 
 /** A profile whose sweep could not be completed (e.g. Castra unreachable). */
@@ -166,61 +303,86 @@ export interface SweepFailure {
 export interface SweepResult {
   readonly scannedProfiles: readonly string[];
   readonly reaped: readonly SweptSession[];
+  readonly skipped: readonly SkippedSession[];
   readonly failures: readonly SweepFailure[];
 }
 
-/** Resolve a steward row's worktree/branch, falling back to its parent spawn. */
+/** Resolve a record's worktree/branch, falling back to its parent spawn. */
 function resolveStewardWorkspace(
   store: SessionRepository,
-  steward: SessionRecord,
+  record: SessionRecord,
 ): { worktreePath?: string; branch?: string } {
-  if (steward.worktreePath) {
-    return { worktreePath: steward.worktreePath, branch: steward.branch };
+  if (record.worktreePath) {
+    return { worktreePath: record.worktreePath, branch: record.branch };
   }
-  const parent = steward.parentId ? store.get(steward.parentId) : undefined;
+  const parent = record.parentId ? store.get(record.parentId) : undefined;
   return {
     worktreePath: parent?.worktreePath,
-    branch: steward.branch ?? parent?.branch,
+    branch: record.branch ?? parent?.branch,
   };
 }
 
-interface ProfileLeakIndex {
-  readonly ids: Set<string>;
-  readonly worktrees: Set<string>;
-  readonly branches: Set<string>;
+/**
+ * Per-profile view of what Brood still considers LIVE — used to recognize which
+ * Castra sessions are legitimately tracked (and so must never be reaped) — plus
+ * a repo root to run forge lookups from.
+ */
+interface ProfileSweepIndex {
+  readonly activeIds: Set<string>;
+  readonly activeWorktrees: Set<string>;
+  readonly activeBranches: Set<string>;
+  repoRoot?: string;
 }
 
 /**
- * Reap already-leaked Castra stewards (issue #304, ask 3): sessions Brood has
- * marked `torndown` but that are still live in Castra (`waiting`/`error`) because
- * an earlier teardown removed the wrong id. Builds a per-profile index of every
- * torndown steward's id / worktree / branch from the registry, lists Castra's
- * live sessions for each profile, and removes any session that matches a torndown
- * row. Idempotent and best-effort: a profile whose Castra list fails is recorded
- * as a failure and the others still run.
+ * Reap leaked Castra stewards (issue #304, ask 3). For every profile Brood knows
+ * about, list Castra's live sessions and reap each TRUE ORPHAN — a session with
+ * no *active* (non-torndown) Brood record — whose work is genuinely done per
+ * {@link classifyOrphanWork} (PR merged/closed or worktree gone). Sessions an
+ * active Brood record still owns are skipped (teardown handles those); a live
+ * steward on an open PR or any state we cannot verify is left untouched.
+ *
+ * Idempotent and best-effort: a profile whose Castra list fails is recorded as a
+ * failure and the others still run.
  */
 export async function sweepLeakedStewards(
   store: SessionRepository,
   gateway: CastraStewardGateway,
+  gate: OrphanGate = defaultOrphanGate(),
 ): Promise<SweepResult> {
-  const torndown = store.list({ kind: "steward", status: "torndown" });
+  // Enumerate every profile Brood has seen (active OR torndown rows): the
+  // torndown rows carry the repoPath we run forge lookups from, and the profile
+  // set is what we sweep Castra for.
+  const records = store.list({});
 
-  const byProfile = new Map<string, ProfileLeakIndex>();
-  for (const steward of torndown) {
-    const profile = steward.profile ?? "";
+  const byProfile = new Map<string, ProfileSweepIndex>();
+  const indexFor = (profile: string): ProfileSweepIndex => {
     let index = byProfile.get(profile);
     if (!index) {
-      index = { ids: new Set(), worktrees: new Set(), branches: new Set() };
+      index = {
+        activeIds: new Set(),
+        activeWorktrees: new Set(),
+        activeBranches: new Set(),
+      };
       byProfile.set(profile, index);
     }
-    if (steward.id) index.ids.add(steward.id);
-    if (steward.agentDeckSessionId) index.ids.add(steward.agentDeckSessionId);
-    const { worktreePath, branch } = resolveStewardWorkspace(store, steward);
-    if (worktreePath) index.worktrees.add(worktreePath);
-    if (branch) index.branches.add(branch);
+    return index;
+  };
+
+  for (const record of records) {
+    const index = indexFor(record.profile ?? "");
+    if (record.repoPath && !index.repoRoot) index.repoRoot = record.repoPath;
+    // Only NON-torndown records mark a Castra session as legitimately tracked.
+    if (record.status === "torndown") continue;
+    if (record.id) index.activeIds.add(record.id);
+    if (record.agentDeckSessionId) index.activeIds.add(record.agentDeckSessionId);
+    const { worktreePath, branch } = resolveStewardWorkspace(store, record);
+    if (worktreePath) index.activeWorktrees.add(worktreePath);
+    if (branch) index.activeBranches.add(branch);
   }
 
   const reaped: SweptSession[] = [];
+  const skipped: SkippedSession[] = [];
   const failures: SweepFailure[] = [];
 
   for (const [profile, index] of byProfile) {
@@ -232,11 +394,22 @@ export async function sweepLeakedStewards(
       continue;
     }
     for (const session of sessions) {
-      const leaked =
-        index.ids.has(session.sessionId) ||
-        (!!session.worktreePath && index.worktrees.has(session.worktreePath)) ||
-        (!!session.branch && index.branches.has(session.branch));
-      if (!leaked) continue;
+      // Owned by a live Brood record → teardown's job, never the sweep's.
+      const trackedLive =
+        index.activeIds.has(session.sessionId) ||
+        (!!session.worktreePath && index.activeWorktrees.has(session.worktreePath)) ||
+        (!!session.branch && index.activeBranches.has(session.branch));
+      if (trackedLive) {
+        skipped.push({ sessionId: session.sessionId, profile, reason: "tracked" });
+        continue;
+      }
+
+      const verdict = classifyOrphanWork(session, index.repoRoot, gate);
+      if (verdict.state !== "done") {
+        skipped.push({ sessionId: session.sessionId, profile, reason: verdict.reason });
+        continue;
+      }
+
       try {
         await gateway.removeSession({
           profile,
@@ -247,6 +420,8 @@ export async function sweepLeakedStewards(
           sessionId: session.sessionId,
           profile,
           worktreePath: session.worktreePath,
+          branch: session.branch,
+          reason: verdict.reason,
         });
       } catch (err) {
         failures.push({ profile, sessionId: session.sessionId, detail: message(err) });
@@ -254,7 +429,7 @@ export async function sweepLeakedStewards(
     }
   }
 
-  return { scannedProfiles: [...byProfile.keys()], reaped, failures };
+  return { scannedProfiles: [...byProfile.keys()], reaped, skipped, failures };
 }
 
 function message(err: unknown): string {
