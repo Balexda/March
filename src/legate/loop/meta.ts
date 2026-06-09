@@ -73,3 +73,21 @@ export function resolveIntervalSeconds(env: NodeJS.ProcessEnv = process.env): nu
   );
   return Number.isFinite(raw) && raw > 0 ? raw : 60;
 }
+
+/** The default global concurrent-spawn cap when `MARCH_MAX_CONCURRENT_SPAWNS` is
+ *  unset, non-numeric, or not a positive integer. */
+export const DEFAULT_MAX_CONCURRENT_SPAWNS = 10;
+
+/**
+ * Resolve the GLOBAL cap on concurrent live spawns from env (#313). One budget of
+ * `MARCH_MAX_CONCURRENT_SPAWNS` is shared across ALL profiles on the single
+ * march-legate container. The fallback rule is strict: unset, non-numeric, or any
+ * value ≤ 0 is treated as MISCONFIGURATION and falls back to {@link
+ * DEFAULT_MAX_CONCURRENT_SPAWNS} (a 0/negative cap is NOT honored as "halt all
+ * dispatch" — that would silently wedge the loop). A positive value is floored to
+ * an integer.
+ */
+export function resolveMaxConcurrentSpawns(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = Number(env.MARCH_MAX_CONCURRENT_SPAWNS);
+  return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : DEFAULT_MAX_CONCURRENT_SPAWNS;
+}

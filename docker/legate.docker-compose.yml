@@ -52,6 +52,9 @@ services:
       - MARCH_OTEL_ENDPOINT=http://otel-lgtm:4318
       - MARCH_OTEL_SERVICE_NAME=march-legate
       - MARCH_LEGATE_PORT=8787
+      # GLOBAL cap on concurrent live spawns (#313), shared across ALL profiles on
+      # this single legate container. Unset / non-numeric / <= 0 falls back to 10.
+      - MARCH_MAX_CONCURRENT_SPAWNS=${MARCH_MAX_CONCURRENT_SPAWNS:-10}
       # Bind 0.0.0.0 inside the container so the loopback port-publish can reach it.
       - MARCH_LEGATE_CONTAINER=1
       # os.homedir() resolves from HOME -> ~/.march/legate (per-profile logs + the

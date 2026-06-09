@@ -6,6 +6,7 @@ import type { RegisterSessionInput } from "../../../brood/service/types.js";
 import type { JudgementInput } from "../judgement.js";
 import type { TransitionEvent } from "../clients/herald.js";
 import type { MergePolicy } from "../../../herald/profiles/merge-policy.js";
+import type { SpawnBudget } from "../pure/slice.js";
 
 /**
  * Two-stage loop contracts.
@@ -98,6 +99,14 @@ export interface HandlerContext {
    * Optional so tests/handlers that never escalate can omit it.
    */
   requestJudgement?: (input: JudgementInput) => Promise<any | null>;
+  /**
+   * The GLOBAL concurrent-spawn budget (#313), shared across every profile in this
+   * tick so the combined number of fresh dispatches can't exceed the cap. Dispatch
+   * decrements `remaining` per fresh launch and skips the rest once it hits 0.
+   * Optional: when absent (e.g. unit tests, or a caller that doesn't cap), dispatch
+   * is unbounded — preserving the pre-#313 behavior.
+   */
+  spawnBudget?: SpawnBudget;
   /** Append an action/event record to the action log (+ otel span/log). */
   emit: (event: any) => void;
   /**
@@ -149,4 +158,12 @@ export interface TickResult {
   processorRequestCount: number;
   dispatchActionCount: number;
   dispatchFailureCount: number;
+  /** GLOBAL concurrent-spawn cap (#313), or undefined when uncapped. Same value
+   *  for every profile this tick. */
+  spawnCap?: number;
+  /** Live spawns across ALL profiles at tick start (the cap's draw). */
+  spawnsLive?: number;
+  /** Fresh dispatchable items deferred this tick because the cap was reached
+   *  (global running tally; they stay dispatchable for a later tick). */
+  spawnsDeferred?: number;
 }

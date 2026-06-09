@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { apply, assess, type DispatchDeps } from "./dispatch.js";
 import type { HandlerContext, LoopState } from "../state/types.js";
 import { dispatchSliceId } from "../pure/dispatch-id.js";
-import { DISPATCH_RECOVERY_LIMIT, recoveryAttemptKey } from "../pure/slice.js";
+import { createSpawnBudget, DISPATCH_RECOVERY_LIMIT, liveSpawnCount, recoveryAttemptKey, type SpawnBudget } from "../pure/slice.js";
 
 function loopState(over: Partial<LoopState> = {}): LoopState {
   const raw = { slices: {}, archived_slices: {}, repo: { path: "/repo" }, ...((over as any).raw || {}) };
@@ -167,5 +167,118 @@ describe("dispatch apply (orchestration)", () => {
     const d = deps();
     await apply(assess(state), ctx(), state, d);
     expect(d.launchDispatch).not.toHaveBeenCalled();
+  });
+});
+
+describe("dispatch apply (#313 global concurrent-spawn cap)", () => {
+  // A handler context carrying the shared global spawn budget.
+  const ctxWithBudget = (budget: SpawnBudget): HandlerContext => ({ ...ctx(), spawnBudget: budget });
+
+  // A launchDispatch that, like the real one, seeds a live (non-terminal) slice
+  // keyed by sliceId — so a launched item drops out of the next assess() while a
+  // SKIPPED item, never seeded, stays dispatchable.
+  const seedingDeps = (over: Partial<DispatchDeps> = {}): DispatchDeps =>
+    deps({
+      launchDispatch: vi.fn(async (raw: any, _ts: string, _item: any, sliceId: string) => {
+        raw.slices[sliceId] = { stage: "hatchery-pending" };
+        return { actions: [{ action: "dispatch", sliceId }], failures: [], mutated: true };
+      }),
+      ...over,
+    });
+
+  const readyItems = (n: number) => Array.from({ length: n }, (_, i) => readyItem(`s${i}.tasks.md`));
+
+  it("CAP=10, 0 live, 30 dispatchable → exactly 10 launched, 20 deferred (still dispatchable)", async () => {
+    const ready = readyItems(30);
+    const state = loopState({ smithy: { ok: true, ready, queue: { dispatchable: 30, blocked: 0, total: 30 } } });
+    const budget = createSpawnBudget(10, 0);
+    const d = seedingDeps();
+    await apply(assess(state), ctxWithBudget(budget), state, d);
+    expect(d.launchDispatch).toHaveBeenCalledTimes(10);
+    expect(budget.remaining).toBe(0);
+    expect(budget.deferred).toBe(20);
+    // The 20 unlaunched items created no slice → they remain dispatchable next tick.
+    expect(assess(state)).toHaveLength(20);
+    expect(liveSpawnCount(state.raw)).toBe(10);
+  });
+
+  it("CAP=10 with 7 already live → at most 3 new launched", async () => {
+    // Seed 7 live slices from a prior tick.
+    const rawSlices: Record<string, any> = {};
+    for (let i = 0; i < 7; i++) rawSlices[`live${i}`] = { stage: "implementing" };
+    const ready = readyItems(10);
+    const state = loopState({
+      raw: { slices: rawSlices, archived_slices: {}, repo: { path: "/repo" } },
+      smithy: { ok: true, ready, queue: { dispatchable: 10, blocked: 0, total: 10 } },
+    });
+    const budget = createSpawnBudget(10, liveSpawnCount(state.raw)); // 10 − 7 = 3
+    const d = seedingDeps();
+    await apply(assess(state), ctxWithBudget(budget), state, d);
+    expect(d.launchDispatch).toHaveBeenCalledTimes(3);
+    expect(budget.remaining).toBe(0);
+    expect(budget.deferred).toBe(7);
+  });
+
+  it("GLOBAL pool: spawns on one profile reduce the budget left for others in the SAME tick", async () => {
+    // ONE budget threaded across two profiles' dispatch (sequential, like the tick).
+    const budget = createSpawnBudget(10, 0);
+
+    // Profile A (e.g. march): 6 dispatchable → consumes 6 of 10.
+    const stateA = loopState({ smithy: { ok: true, ready: readyItems(6), queue: { dispatchable: 6, blocked: 0, total: 6 } } });
+    const dA = seedingDeps();
+    await apply(assess(stateA), ctxWithBudget(budget), stateA, dA);
+    expect(dA.launchDispatch).toHaveBeenCalledTimes(6);
+    expect(budget.remaining).toBe(4);
+
+    // Profile B (e.g. smithy): 10 dispatchable but only 4 slots remain globally.
+    const stateB = loopState({ smithy: { ok: true, ready: readyItems(10), queue: { dispatchable: 10, blocked: 0, total: 10 } } });
+    const dB = seedingDeps();
+    await apply(assess(stateB), ctxWithBudget(budget), stateB, dB);
+    expect(dB.launchDispatch).toHaveBeenCalledTimes(4);
+    expect(budget.remaining).toBe(0);
+    expect(budget.deferred).toBe(6); // B's 6 unlaunched
+    expect(assess(stateB)).toHaveLength(6); // B's deferred stay dispatchable
+  });
+
+  it("budget exhausted (remaining 0) → no launch, items NOT dropped (stay dispatchable)", async () => {
+    const ready = readyItems(5);
+    const state = loopState({ smithy: { ok: true, ready, queue: { dispatchable: 5, blocked: 0, total: 5 } } });
+    const budget = createSpawnBudget(10, 10); // fully drawn — remaining 0
+    const d = seedingDeps();
+    await apply(assess(state), ctxWithBudget(budget), state, d);
+    expect(d.launchDispatch).not.toHaveBeenCalled();
+    expect(budget.deferred).toBe(5);
+    // Nothing dispatched, nothing archived → all 5 still dispatchable next tick.
+    expect(assess(state)).toHaveLength(5);
+  });
+
+  it("uncapped when no budget on the context (pre-#313 behavior preserved)", async () => {
+    const ready = readyItems(30);
+    const state = loopState({ smithy: { ok: true, ready, queue: { dispatchable: 30, blocked: 0, total: 30 } } });
+    const d = seedingDeps();
+    await apply(assess(state), ctx(), state, d); // ctx() has no spawnBudget
+    expect(d.launchDispatch).toHaveBeenCalledTimes(30);
+  });
+
+  it("the cap throttles only FRESH dispatches — recovery (#211) is never starved", async () => {
+    // A recoverably-escalated slice is ready; budget is fully exhausted. The fresh
+    // dispatch is deferred, but the recover decision still fires.
+    const fresh = readyItem("fresh.tasks.md");
+    const wedged = readyItem("wedged.tasks.md");
+    const state = loopState({ smithy: { ok: true, ready: [fresh, wedged], queue: { dispatchable: 1, blocked: 0, total: 2 } } });
+    const wedgedId = dispatchSliceId(wedged);
+    (state.raw.slices as any)[wedgedId] = {
+      stage: "escalated",
+      escalated_reason: "hatchery_dispatch_failed",
+      command: "smithy.forge",
+      arguments: [wedged.path, "1"],
+      artifact_path: wedged.path,
+    };
+    const budget = createSpawnBudget(10, 10); // remaining 0
+    const d = seedingDeps();
+    await apply(assess(state), ctxWithBudget(budget), state, d);
+    expect(d.launchDispatch).not.toHaveBeenCalled(); // fresh deferred by the cap
+    expect(d.recoverDispatch).toHaveBeenCalledTimes(1); // recovery uncapped
+    expect(budget.deferred).toBe(1);
   });
 });

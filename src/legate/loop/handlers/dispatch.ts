@@ -96,7 +96,25 @@ export async function apply(_decisions: DispatchDecision[], ctx: HandlerContext,
   // 2. Re-derive selection AFTER completion so a slice freed this tick isn't
   //    blocked by its own stale in-flight entry. Fresh dispatches launch a new
   //    slice; recovery re-dispatches a recoverably-escalated one (#211).
+  //
+  //    The GLOBAL concurrent-spawn cap (#313) throttles only FRESH dispatches: the
+  //    shared budget is threaded across every profile in this tick, so the combined
+  //    number of new spawns can't exceed the cap. Once the budget is exhausted the
+  //    remaining dispatchable items are SKIPPED — no slice is created, so they stay
+  //    dispatchable and launch a later tick as slots free (PRs merge/close).
+  //    Recovery (#211) is a bounded, exceptional re-dispatch of an already-escalated
+  //    slice and is deliberately NOT capped here, so a wedged slice's recovery is
+  //    never starved by fresh-frontier pressure. The cap never alters the #289/#290
+  //    dispatchable METRIC — `assess` still reports the true frontier.
+  const budget = ctx.spawnBudget;
   for (const decision of assess(state)) {
+    if (decision.kind === "dispatch" && budget) {
+      if (budget.remaining <= 0) {
+        budget.deferred += 1;
+        continue; // cap reached — defer (still dispatchable next tick)
+      }
+      budget.remaining -= 1; // reserve a slot for this fresh launch
+    }
     const out =
       decision.kind === "recover"
         ? await deps.recoverDispatch(state.raw, ts, decision.item, decision.sliceId, decision.attempt)

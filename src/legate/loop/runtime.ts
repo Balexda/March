@@ -33,6 +33,8 @@ import { senseFromHerald, type HeraldInbox } from "./state/sense.js";
 import { createSenseIo } from "../../observe/sense-io.js";
 import { execText } from "./clients/exec.js";
 import { runTick as coordinatorRunTick } from "./coordinator.js";
+import { resolveMaxConcurrentSpawns } from "./meta.js";
+import { createSpawnBudget, liveSpawnCount, type SpawnBudget } from "./pure/slice.js";
 import { runHeartbeat } from "./heartbeat.js";
 import { broodRegister as broodRegisterCli, broodRetire as broodRetireCli, broodTeardown as broodTeardownCli } from "./clients/brood.js";
 import { LegateHerald } from "./clients/herald.js";
@@ -107,6 +109,10 @@ let profileClient: ProfileClient;
 let intervalSeconds = 60;
 let homeDir: string = os.homedir();
 let env: NodeJS.ProcessEnv = process.env;
+// The GLOBAL concurrent-spawn cap (#313): one budget shared across ALL profiles on
+// this single legate container. Resolved from MARCH_MAX_CONCURRENT_SPAWNS at
+// startup (configureLoopRuntime), default 10.
+let maxConcurrentSpawns = resolveMaxConcurrentSpawns(env);
 
 // The cadence driver, built lazily on first start/tick (after configureLoopRuntime
 // has set the interval). Owns the re-entrancy guard, the interval, and tick timing.
@@ -131,6 +137,7 @@ export function configureLoopRuntime(opts: {
   intervalSeconds = opts.intervalSeconds;
   if (opts.homeDir) homeDir = opts.homeDir;
   if (opts.env) env = opts.env;
+  maxConcurrentSpawns = resolveMaxConcurrentSpawns(env);
 }
 
 export interface LoopSnapshot {
@@ -269,7 +276,7 @@ function dispatchIoDeps(meta: any): DispatchIoDeps {
  * shared Herald stream has already been drained this tick; this reads the
  * profile's folded bucket via `herald.snapshotFor(profile)`.
  */
-async function tickProfile(rt: ProfileRuntime): Promise<void> {
+async function tickProfile(rt: ProfileRuntime, spawnBudget?: SpawnBudget): Promise<void> {
   const meta = rt.meta;
   const startedMs = Date.now();
   const herald = legateHerald();
@@ -332,6 +339,7 @@ async function tickProfile(rt: ProfileRuntime): Promise<void> {
     makeContext,
     babysit: babysitDeps,
     dispatch: dispatchDeps,
+    spawnBudget,
   });
 
   rt.workingState = out.state.raw;
@@ -399,13 +407,36 @@ async function tick() {
     return;
   }
 
+  // Seed the GLOBAL concurrent-spawn budget (#313) ONCE per tick from the live
+  // spawns carried in by every profile's working state, then thread the SAME
+  // mutable budget through each profile's dispatch so the combined fresh launches
+  // this tick stay under the cap. `runtimeFor` below refreshes each rt's meta but
+  // leaves `workingState` (the prior tick's slices) intact, so this count is the
+  // live set as of tick start. New profiles not yet ticked have no workingState → 0.
+  let liveAcrossProfiles = 0;
+  for (const rec of profiles) liveAcrossProfiles += liveSpawnCount(runtimeFor(rec).workingState);
+  const spawnBudget = createSpawnBudget(maxConcurrentSpawns, liveAcrossProfiles);
+
   for (const rec of profiles) {
     const rt = runtimeFor(rec);
     try {
-      await tickProfile(rt);
+      await tickProfile(rt, spawnBudget);
     } catch (err: any) {
       logTickError(err, rec.profile);
     }
+  }
+
+  // One global line when the cap throttled this tick — the dispatchable frontier
+  // is unchanged (the #289/#290 metric still reports it); these items simply wait
+  // for slots to free as PRs merge/close.
+  if (spawnBudget.deferred > 0) {
+    emitLoopLog({
+      severity: "INFO",
+      body:
+        `spawn cap ${spawnBudget.cap} reached (${spawnBudget.live} live) — deferred ` +
+        `${spawnBudget.deferred} dispatchable across profiles`,
+      eventKind: "spawn_cap_throttled",
+    });
   }
 }
 
