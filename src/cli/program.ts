@@ -34,6 +34,9 @@ import {
 import { runCastraServer } from "../castra/serve.js";
 import { CASTRA_TOKEN_ENV } from "../castra/config.js";
 import { CastraValidationError } from "../castra/types.js";
+import { runStatioServer } from "../statio/serve.js";
+import { STATIO_TOKEN_ENV } from "../statio/config.js";
+import { StatioValidationError } from "../statio/types.js";
 import { initMarch, InitError } from "../bootstrap/init.js";
 import { createBuildContext, SnapshotError } from "../spawn/snapshot.js";
 import {
@@ -981,6 +984,35 @@ castra
       process.exitCode = SUCCESS;
     } catch (err) {
       if (err instanceof CastraValidationError) {
+        process.stderr.write(err.message + "\n");
+        process.exitCode = USAGE_ERROR;
+        return;
+      }
+      throw err;
+    }
+  });
+
+const statio = program
+  .command("statio")
+  .description("Manage Statio - the forge gateway over HTTP");
+
+statio
+  .command("serve")
+  .description("Run the Statio HTTP service (binds loopback by default)")
+  .option("--port <port>", "Port to listen on (default: deterministic 8800-9799)")
+  .option("--host <host>", "Bind address (default: 127.0.0.1; the container binds 0.0.0.0)")
+  .option("--token <token>", `Bearer token gating /v1/* (default: ${STATIO_TOKEN_ENV} env var)`)
+  .action(async (opts: { port?: string; host?: string; token?: string }) => {
+    commandHandled = true;
+    try {
+      await runStatioServer({
+        port: opts.port,
+        host: opts.host,
+        token: opts.token,
+      });
+      process.exitCode = SUCCESS;
+    } catch (err) {
+      if (err instanceof StatioValidationError) {
         process.stderr.write(err.message + "\n");
         process.exitCode = USAGE_ERROR;
         return;
