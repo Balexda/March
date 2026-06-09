@@ -170,9 +170,15 @@ const ROW_PREFIX_BY_COMMAND: Record<string, string> = {
 
 /**
  * The graph node a forge record's task slice maps to: `<tasks-file>#<rowId>` (e.g.
- * `…/01-foo.tasks.md#S1`), derived from the forge action's `[tasksPath, row]`
- * arguments and the record's `dependency_order.id_prefix` (default `S`) — the same
- * node {@link forgeNodeId} and the dependency graph already key forge work at.
+ * `…/01-foo.tasks.md#S1`). The row id is derived with {@link forgeRowId} — the
+ * EXACT scheme {@link forgeNodeId}, {@link recordRowForForgeItem}, {@link
+ * dependencyIds}, and the in-flight dedup keys already use (a numeric arg becomes
+ * `S<n>`; an already-prefixed arg is preserved) — so the readiness candidate, the
+ * dependency ids, and the dedup key are guaranteed to byte-match the same graph
+ * node. (Verified against smithy 0.5.13: every forge slice node in `graph.nodes`
+ * is keyed `<tasks-file>#S<n>`.) A parallel `id_prefix`-based derivation would risk
+ * a non-`S` id that fails `readyNodes.has(id)` even when the slice is layer-0 — the
+ * exact silent dispatch stall this helper exists to prevent.
  *
  * Smithy ≤0.4.10 gated forge readiness on the PARENT story node ({@link
  * recordGraphNodeId}) and buried this slice node deep under it. Since smithy 0.5.13
@@ -180,19 +186,17 @@ const ROW_PREFIX_BY_COMMAND: Record<string, string> = {
  * slice rows are promoted onto the layer-0 frontier, so the slice node is now the
  * readiness signal. Callers accept BOTH the parent-story node and this slice node
  * (see {@link readySmithyItems}/{@link recordsByTargetNode}) so either graph shape
- * dispatches. Returns null when the row number can't be derived (non-forge record
- * or missing argument).
+ * dispatches. Returns null when the row id can't be derived (non-forge record or
+ * missing argument).
  */
 export function forgeSliceNodeId(record: any): string | null {
   const action = record?.next_action || {};
   if (String(action.command || "") !== "smithy.forge") return null;
   const args = actionArguments(action);
-  const num = rowNumber(args[1]);
-  if (!num) return null;
-  const prefix =
-    (typeof record.dependency_order?.id_prefix === "string" && record.dependency_order.id_prefix) || "S";
+  const rowId = forgeRowId(args[1]);
+  if (!rowId) return null;
   const filePath = args[0] || record.path;
-  return filePath ? String(filePath) + "#" + prefix + num : null;
+  return filePath ? String(filePath) + "#" + rowId : null;
 }
 
 export function recordGraphNodeId(record: any): string | null {

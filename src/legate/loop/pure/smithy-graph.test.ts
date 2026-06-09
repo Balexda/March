@@ -5,6 +5,7 @@ import {
   dependencyIds,
   dependencyMerged,
   dispatchPriority,
+  forgeNodeId,
   forgeSliceNodeId,
   pendingGraphNodes,
   queueDepth,
@@ -277,17 +278,26 @@ describe("smithy-graph pure helpers", () => {
   // otherwise no forge work is ever ready and dispatch stalls (the 0.4.10 → 0.5.13
   // bump regression). The parent-story path stays as a fallback for older graphs.
   describe("0.5.13 forge frontier", () => {
-    it("forgeSliceNodeId derives <tasks-file>#<rowId>, honors id_prefix, null for non-forge", () => {
+    it("forgeSliceNodeId derives <tasks-file>#<rowId> the SAME way forgeNodeId does (forgeRowId), null for non-forge", () => {
+      const rec = { path: "t.md", next_action: { command: "smithy.forge", arguments: ["t.md", "3"] } };
+      // Numeric row arg → canonical "S<n>" — the prefix smithy 0.5.13 actually keys
+      // these promoted slice nodes with, and byte-identical to forgeNodeId so the
+      // readiness candidate / dependency ids / dedup key all agree.
+      expect(forgeSliceNodeId(rec)).toBe("t.md#S3");
+      expect(forgeSliceNodeId(rec)).toBe(forgeNodeId(rec));
+      // An already-prefixed row arg is preserved (forgeRowId leaves alpha-leading ids as-is).
       expect(
-        forgeSliceNodeId({ path: "t.md", next_action: { command: "smithy.forge", arguments: ["t.md", "3"] } }),
-      ).toBe("t.md#S3");
+        forgeSliceNodeId({ path: "t.md", next_action: { command: "smithy.forge", arguments: ["t.md", "S5"] } }),
+      ).toBe("t.md#S5");
+      // dependency_order.id_prefix does NOT fork the derivation — forgeRowId is the
+      // single source of truth, so no divergent (e.g. "TS") node id can be produced.
       expect(
         forgeSliceNodeId({
           path: "t.md",
           dependency_order: { id_prefix: "TS" },
           next_action: { command: "smithy.forge", arguments: ["t.md", "3"] },
         }),
-      ).toBe("t.md#TS3");
+      ).toBe("t.md#S3");
       expect(forgeSliceNodeId({ next_action: { command: "smithy.cut", arguments: ["x", "1"] } })).toBeNull();
       expect(forgeSliceNodeId({ next_action: { command: "smithy.forge", arguments: ["t.md"] } })).toBeNull();
     });
