@@ -13,6 +13,21 @@ import { execText } from "../clients/exec.js";
  * the worktree if needed, launches via Castra, sends a resume-context prompt,
  * and rewrites the slice's worker pointer. Throttled to {@link RELAUNCH_LIMIT}
  * attempts per slice via the working state's transient_retry_counts.
+ *
+ * Brood reconciliation AT THE SOURCE (#308): a relaunch mints a NEW session id
+ * (the prior one vanished) and may land on a NEW worktree, but it only used to
+ * rewrite the legate's in-memory pointer — Brood was never told. So the prior
+ * attempt's row stayed registered (torndown later, possibly resolving the wrong
+ * session by worktree match, #304) and the new attempt was never registered →
+ * an untracked orphan the moment its slice completes. apply() now closes that at
+ * the source: after a successful launch it REGISTERS the new session+worktree
+ * with Brood and REAPS the prior steward's Brood record, so at most one live
+ * steward + worktree per slice exists and Brood always tracks the live one. The
+ * prior reap is GUARDED on a distinct worktree path: Brood's steward removal
+ * resolves the live session by exact worktree (#304), so tearing down the prior
+ * when both share a worktree path would pull the checkout out from under the
+ * freshly relaunched session. Both Brood calls are best-effort — a failure logs
+ * and records a note but never fails the relaunch (the #304 sweep is the net).
  */
 
 const ELIGIBLE_STAGES = new Set([
@@ -133,6 +148,78 @@ export function assess(state: LoopState): RelaunchDecision[] {
   return out;
 }
 
+/**
+ * Reconcile Brood after a successful relaunch (#308). Registers the LIVE steward
+ * (new session id + its real worktree) so Brood owns its #155-safe teardown, then
+ * reaps the prior steward's Brood record. The reap is GUARDED on a distinct
+ * worktree path: Brood resolves the steward's real session by exact worktree
+ * (#304), so tearing down the prior when it shares the live worktree would remove
+ * the freshly relaunched session/checkout. Returns a short note for the action
+ * log (or "" when nothing notable happened). Never throws — Brood unavailability
+ * must not fail a relaunch; the #304 sweep remains the safety net.
+ */
+async function reconcileBrood(
+  ctx: HandlerContext,
+  state: LoopState,
+  d: RelaunchDecision,
+  ids: { newSessionId: string; liveWorktree: string; priorSessionId: string; priorWorktree: string },
+): Promise<string> {
+  const notes: string[] = [];
+
+  // Register the live steward FIRST so a crash between the two calls leaves the
+  // live one tracked rather than orphaned.
+  if (ctx.broodRegister) {
+    try {
+      const reg = await ctx.broodRegister({
+        id: ids.newSessionId,
+        kind: "steward",
+        status: "running",
+        agentDeckSessionId: ids.newSessionId,
+        profile: ctx.meta.profile,
+        repoPath: state.repoPath as string,
+        branch: d.featureBranch,
+        worktreePath: ids.liveWorktree,
+        ...(ctx.meta.worker_group ? { group: ctx.meta.worker_group } : {}),
+      });
+      notes.push(reg.ok ? "registered live steward with Brood" : "Brood register failed: " + reg.detail);
+      if (!reg.ok) ctx.log(`relaunch ${d.sliceId}: Brood register of ${ids.newSessionId} failed: ${reg.detail}`);
+    } catch (err) {
+      notes.push("Brood register errored: " + errMsg(err));
+      ctx.log(`relaunch ${d.sliceId}: Brood register of ${ids.newSessionId} errored: ${errMsg(err)}`);
+    }
+  }
+
+  // Reap the prior steward — only when it is a DISTINCT session on a DISTINCT
+  // worktree (else the worktree-match teardown would reap the live one, #304).
+  const distinctSession = ids.priorSessionId.length > 0 && ids.priorSessionId !== ids.newSessionId;
+  const distinctWorktree = ids.priorWorktree.length > 0 && ids.priorWorktree !== ids.liveWorktree;
+  if (distinctSession && distinctWorktree) {
+    try {
+      const teardown = await ctx.broodTeardown(ids.priorSessionId, {
+        force: true,
+        reason: "steward-relaunch",
+        traceKey: d.sliceId,
+      });
+      if (teardown.ok) notes.push("reaped prior steward " + ids.priorSessionId);
+      else if (teardown.notTracked) notes.push("prior steward " + ids.priorSessionId + " not tracked by Brood");
+      else {
+        notes.push("prior reap failed: " + teardown.detail);
+        ctx.log(`relaunch ${d.sliceId}: Brood teardown of prior ${ids.priorSessionId} failed: ${teardown.detail}`);
+      }
+    } catch (err) {
+      notes.push("prior reap errored: " + errMsg(err));
+      ctx.log(`relaunch ${d.sliceId}: Brood teardown of prior ${ids.priorSessionId} errored: ${errMsg(err)}`);
+    }
+  } else if (distinctSession && !distinctWorktree) {
+    // Same worktree path: the prior row is stale but a teardown would resolve the
+    // live session by worktree and remove it. Leave it for the #304 sweep; the
+    // register above already re-keyed Brood's tracking to the live session id.
+    notes.push("prior steward shares live worktree — left for sweep (no worktree-prune reap)");
+  }
+
+  return notes.join("; ");
+}
+
 export async function apply(
   decisions: RelaunchDecision[],
   ctx: HandlerContext,
@@ -158,7 +245,14 @@ export async function apply(
       }
     }
 
+    // Capture the PRIOR steward's identity BEFORE the rebind so we can reap its
+    // Brood record after the new one is registered (#308).
+    const slice = state.slices[d.sliceId];
+    const priorSessionId = typeof slice.worker_session_id === "string" ? slice.worker_session_id : "";
+    const priorWorktree = typeof slice.worktree_path === "string" ? slice.worktree_path : "";
+
     let newSessionId: string | null = null;
+    let liveWorktree = d.worktreePath;
     try {
       const relaunched = await ctx.castra.launchSession({
         profile: ctx.meta.profile,
@@ -171,6 +265,12 @@ export async function apply(
         traceKey: d.sliceId,
       } as any);
       newSessionId = relaunched.sessionId;
+      // The launch response carries the session's REAL worktree (agent-deck may
+      // pick a fresh hashed path when feature-<branch> already exists); register
+      // and track THAT, not the assess-time guess, so Brood owns the live path.
+      if (typeof relaunched.worktreePath === "string" && relaunched.worktreePath.length > 0) {
+        liveWorktree = relaunched.worktreePath;
+      }
     } catch (err) {
       res.actions.push({ action: "relaunch-failed", sliceId: d.sliceId, sessionId: null, detail: "castra launch failed: " + errMsg(err) });
       continue;
@@ -186,10 +286,19 @@ export async function apply(
       // Best-effort: session is alive; future babysit messages will still reach it.
     }
 
-    const slice = state.slices[d.sliceId];
+    // #308: register the LIVE steward with Brood and reap the prior one's record
+    // so Brood tracks exactly one live steward + worktree per slice. Best-effort
+    // — neither call may fail the relaunch (the live session must serve the PR).
+    const reconcileNote = await reconcileBrood(ctx, state, d, {
+      newSessionId,
+      liveWorktree,
+      priorSessionId,
+      priorWorktree,
+    });
+
     slice.worker_session_id = newSessionId;
     slice.worker_title = d.launchTitle;
-    slice.worktree_path = d.worktreePath;
+    slice.worktree_path = liveWorktree;
     slice.last_action = ctx.ts;
     slice.last_action_note = "Re-launched steward for PR #" + d.prNumber + " (attempt " + d.attempt + "/" + d.limit + "); new session " + newSessionId;
     counts["relaunch-steward:" + d.sliceId] = d.attempt;
@@ -200,7 +309,9 @@ export async function apply(
       action: "relaunch-steward",
       sliceId: d.sliceId,
       sessionId: newSessionId,
-      detail: "re-attached opus steward to PR #" + d.prNumber + " on " + d.featureBranch + " (attempt " + d.attempt + "/" + d.limit + ")",
+      detail:
+        "re-attached opus steward to PR #" + d.prNumber + " on " + d.featureBranch +
+        " (attempt " + d.attempt + "/" + d.limit + ")" + (reconcileNote ? "; " + reconcileNote : ""),
     });
   }
 
