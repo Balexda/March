@@ -5,6 +5,8 @@ import {
   dependencyIds,
   dependencyMerged,
   dispatchPriority,
+  forgeNodeId,
+  forgeSliceNodeId,
   pendingGraphNodes,
   queueDepth,
   readyLayerNodeIds,
@@ -267,5 +269,110 @@ describe("smithy-graph pure helpers", () => {
     };
     const item = { next_action: { command: "smithy.forge", arguments: ["t.md", "1"] } };
     expect(dependenciesClear({}, status, item)).toBe(true);
+  });
+
+  // Smithy 0.5.13 changed which nodes sit on the layer-0 frontier: once a story is
+  // CUT, smithy marks its US node `decomposed` and REMOVES it from the layer graph,
+  // promoting the story's task-slice rows to layer 0. The forge readiness gate must
+  // therefore accept the SLICE node, not only the (now de-layered) parent story —
+  // otherwise no forge work is ever ready and dispatch stalls (the 0.4.10 → 0.5.13
+  // bump regression). The parent-story path stays as a fallback for older graphs.
+  describe("0.5.13 forge frontier", () => {
+    it("forgeSliceNodeId derives <tasks-file>#<rowId> the SAME way forgeNodeId does (forgeRowId), null for non-forge", () => {
+      const rec = { path: "t.md", next_action: { command: "smithy.forge", arguments: ["t.md", "3"] } };
+      // Numeric row arg → canonical "S<n>" — the prefix smithy 0.5.13 actually keys
+      // these promoted slice nodes with, and byte-identical to forgeNodeId so the
+      // readiness candidate / dependency ids / dedup key all agree.
+      expect(forgeSliceNodeId(rec)).toBe("t.md#S3");
+      expect(forgeSliceNodeId(rec)).toBe(forgeNodeId(rec));
+      // An already-prefixed row arg is preserved (forgeRowId leaves alpha-leading ids as-is).
+      expect(
+        forgeSliceNodeId({ path: "t.md", next_action: { command: "smithy.forge", arguments: ["t.md", "S5"] } }),
+      ).toBe("t.md#S5");
+      // dependency_order.id_prefix does NOT fork the derivation — forgeRowId is the
+      // single source of truth, so no divergent (e.g. "TS") node id can be produced.
+      expect(
+        forgeSliceNodeId({
+          path: "t.md",
+          dependency_order: { id_prefix: "TS" },
+          next_action: { command: "smithy.forge", arguments: ["t.md", "3"] },
+        }),
+      ).toBe("t.md#S3");
+      expect(forgeSliceNodeId({ next_action: { command: "smithy.cut", arguments: ["x", "1"] } })).toBeNull();
+      expect(forgeSliceNodeId({ next_action: { command: "smithy.forge", arguments: ["t.md"] } })).toBeNull();
+    });
+
+    it("readySmithyItems dispatches a forge via its slice node when the cut parent left the layer graph", () => {
+      // 0.5.13 shape: parent US4 is `decomposed` and present in `nodes` but ABSENT
+      // from every layer; the slice node S1 is the layer-0 frontier.
+      const status = {
+        graph: {
+          nodes: {
+            "specs/x/x.spec.md#US4": { record_path: "specs/x/x.spec.md", row: { id: "US4" }, status: "in-progress", decomposed: true },
+            "specs/x/01-foo.tasks.md#S1": { record_path: "specs/x/01-foo.tasks.md", row: { id: "S1", depends_on: [] }, status: "not-started" },
+          },
+          layers: [{ layer: 0, node_ids: ["specs/x/01-foo.tasks.md#S1"] }],
+        },
+        records: [
+          {
+            path: "specs/x/01-foo.tasks.md",
+            parent_path: "specs/x/x.spec.md",
+            parent_row_id: "US4",
+            next_action: { command: "smithy.forge", arguments: ["specs/x/01-foo.tasks.md", "1"] },
+          },
+        ],
+      };
+      expect(readySmithyItems(status).map((r) => r.path)).toEqual(["specs/x/01-foo.tasks.md"]);
+    });
+
+    it("readySmithyItems still dispatches a forge via the layer-0 parent story (pre-0.5.13 graph)", () => {
+      // ≤0.4.10 shape: parent US4 is the layer-0 gate; the slice node sits at layer 1.
+      const status = {
+        graph: {
+          layers: [
+            { layer: 0, node_ids: ["specs/x/x.spec.md#US4"] },
+            { layer: 1, node_ids: ["specs/x/01-foo.tasks.md#S1"] },
+          ],
+        },
+        records: [
+          {
+            path: "specs/x/01-foo.tasks.md",
+            parent_path: "specs/x/x.spec.md",
+            parent_row_id: "US4",
+            next_action: { command: "smithy.forge", arguments: ["specs/x/01-foo.tasks.md", "1"] },
+          },
+        ],
+      };
+      expect(readySmithyItems(status).map((r) => r.path)).toEqual(["specs/x/01-foo.tasks.md"]);
+    });
+
+    it("actionableLayer0Items resolves a layer-0 slice to its record and synthesizes a forge for an unsurfaced sibling slice", () => {
+      // S1 is the record's surfaced forge target; S2 is a sibling slice the record's
+      // single next_action never emitted — both are dispatchable layer-0 units.
+      const status = {
+        graph: {
+          nodes: {
+            "specs/x/x.spec.md#US4": { record_path: "specs/x/x.spec.md", row: { id: "US4" }, status: "in-progress", decomposed: true },
+            "specs/x/01-foo.tasks.md#S1": { record_path: "specs/x/01-foo.tasks.md", row: { id: "S1", title: "Slice one", depends_on: [] }, status: "not-started" },
+            "specs/x/01-foo.tasks.md#S2": { record_path: "specs/x/01-foo.tasks.md", row: { id: "S2", title: "Slice two", depends_on: [] }, status: "not-started" },
+          },
+          layers: [{ layer: 0, node_ids: ["specs/x/01-foo.tasks.md#S1", "specs/x/01-foo.tasks.md#S2"] }],
+        },
+        records: [
+          {
+            path: "specs/x/01-foo.tasks.md",
+            parent_path: "specs/x/x.spec.md",
+            parent_row_id: "US4",
+            next_action: { command: "smithy.forge", arguments: ["specs/x/01-foo.tasks.md", "1"] },
+          },
+        ],
+      };
+      const items = actionableLayer0Items(status);
+      expect(items.every((i) => i.next_action.command === "smithy.forge")).toBe(true);
+      expect(items.map((i) => i.next_action.arguments.join(" ")).sort()).toEqual([
+        "specs/x/01-foo.tasks.md 1",
+        "specs/x/01-foo.tasks.md 2",
+      ]);
+    });
   });
 });
