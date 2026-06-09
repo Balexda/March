@@ -3,6 +3,7 @@ import type { CastraSession } from "../../castra/types.js";
 import { sqliteAvailable } from "./sqlite.js";
 import { SessionStore } from "./store.js";
 import {
+  candidateHeadBranches,
   fetchBranchPrState,
   parseGitHubSlug,
   removeStewardViaCastra,
@@ -392,5 +393,69 @@ describe("fetchBranchPrState (token REST path, no gh)", () => {
     expect(
       await fetchBranchPrState({ owner: "o", repo: "r", branch: "b", token: "t", fetchImpl: impl }),
     ).toBe("unknown");
+  });
+
+  // The deciding live-stack mismatch: the steward carries the LOCAL branch
+  // `smithy/cut/X`, but the worker pushed it as PR head `feature/smithy/cut/X`.
+  // A query by the raw local name finds nothing — the `feature/` variant wins.
+  it("resolves a merged PR pushed under a feature/ prefix (#304 prefix mismatch)", async () => {
+    const impl = (async (url: string | URL) => {
+      const u = String(url);
+      // Only the feature/-prefixed head has the merged PR; the raw name has none.
+      if (u.includes(encodeURIComponent("o:feature/smithy/cut/X"))) {
+        return new Response(
+          JSON.stringify([{ state: "closed", merged_at: "2026-06-06T00:00:00Z" }]),
+          { status: 200 },
+        );
+      }
+      return new Response(JSON.stringify([]), { status: 200 });
+    }) as unknown as typeof fetch;
+
+    const state = await fetchBranchPrState({
+      owner: "o",
+      repo: "r",
+      branch: "smithy/cut/X",
+      token: "t",
+      fetchImpl: impl,
+    });
+    expect(state).toBe("merged");
+  });
+
+  it("keeps an OPEN feature/-prefixed PR as open (never reaped)", async () => {
+    const impl = (async (url: string | URL) => {
+      const u = String(url);
+      if (u.includes(encodeURIComponent("o:feature/smithy/cut/Y"))) {
+        return new Response(
+          JSON.stringify([{ state: "open", merged_at: null }]),
+          { status: 200 },
+        );
+      }
+      return new Response(JSON.stringify([]), { status: 200 });
+    }) as unknown as typeof fetch;
+
+    const state = await fetchBranchPrState({
+      owner: "o",
+      repo: "r",
+      branch: "smithy/cut/Y",
+      token: "t",
+      fetchImpl: impl,
+    });
+    expect(state).toBe("open");
+  });
+});
+
+describe("candidateHeadBranches", () => {
+  it("adds the feature/-prefixed variant for a bare worker branch", () => {
+    expect(candidateHeadBranches("smithy/cut/X")).toEqual([
+      "smithy/cut/X",
+      "feature/smithy/cut/X",
+    ]);
+  });
+
+  it("adds the feature/-stripped variant for an already-prefixed branch", () => {
+    expect(candidateHeadBranches("feature/smithy/cut/X")).toEqual([
+      "feature/smithy/cut/X",
+      "smithy/cut/X",
+    ]);
   });
 });

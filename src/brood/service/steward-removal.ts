@@ -207,23 +207,36 @@ export function parseGitHubSlug(
   return { owner: m[1], repo: m[2] };
 }
 
+const FEATURE_PREFIX = "feature/";
+
 /**
- * Query GitHub's REST API for the PR state of a head branch WITHOUT `gh` (the
- * brood image ships no `gh`, mirroring the #301 Herald fix that dropped a tool
- * dependency for a token). Lists pulls by `head=owner:branch` across all states
- * and folds them: any open → `open`; else any merged (`merged_at` set) →
- * `merged`; else any closed → `closed`; none → `none`. Any transport / non-2xx /
- * parse error → `unknown` so an open PR we could not see is never reaped.
+ * The head-branch variants to query GitHub for, because the LOCAL branch a
+ * steward/Castra session carries is NOT always the pushed PR head. The workers
+ * push `smithy/<verb>/…` branches under a `feature/` prefix
+ * (`feature/smithy/<verb>/…`), so a head query by the raw local name finds no PR
+ * and a merged orphan would never be reaped. Try the name as-is, plus the
+ * `feature/`-prefixed form, plus the `feature/`-stripped form — deduped, order
+ * preserved (as-is first).
  */
-export async function fetchBranchPrState(opts: {
+export function candidateHeadBranches(branch: string): string[] {
+  const variants = [branch];
+  if (branch.startsWith(FEATURE_PREFIX)) {
+    variants.push(branch.slice(FEATURE_PREFIX.length));
+  } else {
+    variants.push(`${FEATURE_PREFIX}${branch}`);
+  }
+  return [...new Set(variants.filter((b) => b.length > 0))];
+}
+
+/** PRs for a single exact `owner:head` query, plus whether the request errored. */
+async function fetchPullsForHead(opts: {
   owner: string;
   repo: string;
-  branch: string;
+  head: string;
   token: string;
-  fetchImpl?: FetchImpl;
-}): Promise<BranchPrState> {
-  const fetchImpl = opts.fetchImpl ?? fetch;
-  const head = `${opts.owner}:${opts.branch}`;
+  fetchImpl: FetchImpl;
+}): Promise<{ prs: Array<{ state?: string; merged_at?: string | null }>; errored: boolean }> {
+  const head = `${opts.owner}:${opts.head}`;
   const url =
     `https://api.github.com/repos/${encodeURIComponent(opts.owner)}/` +
     `${encodeURIComponent(opts.repo)}/pulls` +
@@ -231,7 +244,7 @@ export async function fetchBranchPrState(opts: {
 
   let res: Response;
   try {
-    res = await fetchImpl(url, {
+    res = await opts.fetchImpl(url, {
       headers: {
         authorization: `Bearer ${opts.token}`,
         accept: "application/vnd.github+json",
@@ -241,21 +254,53 @@ export async function fetchBranchPrState(opts: {
       signal: AbortSignal.timeout(GITHUB_API_TIMEOUT_MS),
     });
   } catch {
-    return "unknown";
+    return { prs: [], errored: true };
   }
-  if (!res.ok) return "unknown";
-
-  let prs: Array<{ state?: string; merged_at?: string | null }>;
+  if (!res.ok) return { prs: [], errored: true };
   try {
-    prs = (await res.json()) as Array<{ state?: string; merged_at?: string | null }>;
+    const body = await res.json();
+    if (!Array.isArray(body)) return { prs: [], errored: true };
+    return { prs: body as Array<{ state?: string; merged_at?: string | null }>, errored: false };
   } catch {
-    return "unknown";
+    return { prs: [], errored: true };
   }
-  if (!Array.isArray(prs)) return "unknown";
+}
+
+/**
+ * Query GitHub's REST API for the PR state of a head branch WITHOUT `gh` (the
+ * brood image ships no `gh`, mirroring the #301 Herald fix that dropped a tool
+ * dependency for a token). Lists pulls across every {@link candidateHeadBranches}
+ * variant (the worker `feature/` prefix mismatch) and folds the union: any open →
+ * `open`; else any merged (`merged_at` set) → `merged`; else any closed →
+ * `closed`. With no PRs found and no request error → `none`; with no PRs but a
+ * request error → `unknown`, so an open PR we could not see is never reaped.
+ */
+export async function fetchBranchPrState(opts: {
+  owner: string;
+  repo: string;
+  branch: string;
+  token: string;
+  fetchImpl?: FetchImpl;
+}): Promise<BranchPrState> {
+  const fetchImpl = opts.fetchImpl ?? fetch;
+  const prs: Array<{ state?: string; merged_at?: string | null }> = [];
+  let errored = false;
+  for (const head of candidateHeadBranches(opts.branch)) {
+    const res = await fetchPullsForHead({
+      owner: opts.owner,
+      repo: opts.repo,
+      head,
+      token: opts.token,
+      fetchImpl,
+    });
+    if (res.errored) errored = true;
+    else prs.push(...res.prs);
+  }
+
   if (prs.some((p) => p.state === "open")) return "open";
   if (prs.some((p) => Boolean(p.merged_at))) return "merged";
   if (prs.some((p) => p.state === "closed")) return "closed";
-  return "none";
+  return errored ? "unknown" : "none";
 }
 
 /** The origin remote URL of the repo at `repoRoot`, or undefined on any error. */
