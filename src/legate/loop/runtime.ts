@@ -30,7 +30,7 @@ import { legateStateDir, metaForProfileRecord } from "../profile-paths.js";
 // Decomposed two-stage loop: Stage 1 sense → coordinator (ordered handlers) →
 // heartbeat. runtime now only wires these to the proven I/O seams below.
 import { rebuildWorkingState, senseFromHerald, type HeraldInbox } from "./state/sense.js";
-import { createSenseIo } from "../../observe/sense-io.js";
+import { createFoldDeps } from "./state/fold-deps.js";
 import { execText } from "./clients/exec.js";
 import { runTick as coordinatorRunTick } from "./coordinator.js";
 import { resolveMaxConcurrentSpawns } from "./meta.js";
@@ -280,12 +280,10 @@ async function tickProfile(rt: ProfileRuntime, spawnBudget?: SpawnBudget): Promi
   const meta = rt.meta;
   const startedMs = Date.now();
   const herald = legateHerald();
-  const senseDeps = createSenseIo({
-    meta,
-    castra: castra(),
-    now,
-    warn: (message: string) => appendText(meta.processor_log_path, "[" + now() + "] " + message),
-  }).toSenseDeps();
+  // Stage 1 reads the world from the folded Herald inbox, so the legate's sense
+  // deps are gh-free (only the local smithy-graph read). All gh sensing lives in
+  // Herald via sense-io.ts; the legate no longer imports it.
+  const senseDeps = createFoldDeps({ meta, now });
 
   // Per-profile inbox adapter over the already-drained shared fold (no re-drain).
   const inbox: HeraldInbox = {

@@ -523,3 +523,82 @@ describe("gitHubAuthConfigArgs (#301)", () => {
     expect(gitHubAuthConfigArgs({} as NodeJS.ProcessEnv)).toEqual([]);
   });
 });
+
+describe("listOpenPrs (open-PR change-cursor probe)", () => {
+  it("builds the number→{updatedAt,headRefName} index from one graphql call", async () => {
+    let graphqlArgs: string[] | undefined;
+    routeExec((cmd, args) => {
+      if (cmd === "gh" && args.includes("graphql")) {
+        graphqlArgs = args;
+        return JSON.stringify({
+          data: {
+            repository: {
+              pullRequests: {
+                nodes: [
+                  { number: 7, updatedAt: "T2", headRefName: "feature/a" },
+                  { number: 9, updatedAt: "T1", headRefName: "feature/b" },
+                ],
+              },
+            },
+          },
+        });
+      }
+      return "";
+    });
+    const io = createSenseIo({ meta: meta(), castra: fakeCastra() });
+    const result = await io.listOpenPrs({ repo: { owner_with_name: "octo/march" } });
+    expect(result instanceof Map).toBe(true);
+    const map = result as Map<number, { updatedAt: string; headRefName: string }>;
+    expect(map.get(7)).toEqual({ updatedAt: "T2", headRefName: "feature/a" });
+    expect(map.get(9)).toEqual({ updatedAt: "T1", headRefName: "feature/b" });
+    // The owner/name are passed as graphql variables, split from owner_with_name.
+    expect(graphqlArgs).toEqual(expect.arrayContaining(["owner=octo", "name=march"]));
+  });
+
+  it("returns {error} (never throws) when the repo owner can't be resolved", async () => {
+    routeExec((cmd, args) => (cmd === "gh" && args.includes("repo") ? "" : "")); // empty nameWithOwner
+    const io = createSenseIo({ meta: meta(), castra: fakeCastra() });
+    expect(await io.listOpenPrs({ repo: { path: "/repo" } })).toEqual({ error: "repo owner unavailable" });
+  });
+
+  it("returns {error} when the probe query fails (so the caller degrades, not strands)", async () => {
+    routeExec((cmd, args) => {
+      if (cmd === "gh" && args.includes("graphql")) throw new Error("HTTP 403: rate limit exceeded");
+      return "";
+    });
+    const io = createSenseIo({ meta: meta(), castra: fakeCastra() });
+    const result = await io.listOpenPrs({ repo: { owner_with_name: "octo/march" } });
+    expect(result).toMatchObject({ error: expect.stringContaining("rate limit") });
+  });
+});
+
+describe("repoOwner caching (#gh-over-usage)", () => {
+  it("resolves the owner via gh ONCE and reuses it across PR queries (no per-slice gh repo view)", async () => {
+    let repoViews = 0;
+    routeExec((cmd, args) => {
+      if (cmd === "gh" && args.includes("repo") && args.includes("view")) {
+        repoViews++;
+        return "octo/march";
+      }
+      if (cmd === "gh" && args.includes("pr") && args.includes("view")) {
+        return JSON.stringify({
+          number: Number(args[2]),
+          state: "OPEN",
+          headRefName: "b",
+          author: { login: "me" },
+          statusCheckRollup: [],
+        });
+      }
+      if (args.includes("graphql")) {
+        return JSON.stringify({ data: { repository: { pullRequest: { reviewThreads: { nodes: [] } } } } });
+      }
+      return "";
+    });
+    const io = createSenseIo({ meta: meta(), castra: fakeCastra() });
+    // No owner_with_name in state → the owner must be resolved via `gh repo view`.
+    const state = { repo: { path: "/repo" } };
+    await io.queryPrForBabysit({ pr: { number: 7 } }, state);
+    await io.queryPrForBabysit({ pr: { number: 8 } }, state);
+    expect(repoViews).toBe(1);
+  });
+});
