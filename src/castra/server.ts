@@ -543,7 +543,9 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
         ...(group ? { group } : {}),
         ...(sessionIds && sessionIds.length ? { sessionIds } : {}),
       });
-      const resolved = report.recovered.filter((r) => r.outcome !== "restart_failed").length;
+      const resolved = report.recovered.filter(
+        (r) => r.outcome === "recovered" || r.outcome === "picker_resolved",
+      ).length;
       const pickers = report.recovered.filter((r) => r.pickerResolved).length;
       withCastraSpan(
         {

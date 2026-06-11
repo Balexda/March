@@ -1025,7 +1025,9 @@ castra
           const detail = r.error ? `: ${r.error}` : ` → ${r.finalStatus}`;
           console.log(`${r.outcome} ${r.sessionId} (${r.group}) "${r.title}"${picker}${detail}`);
         }
-        const resolved = report.recovered.filter((r) => r.outcome !== "restart_failed").length;
+        const resolved = report.recovered.filter(
+          (r) => r.outcome === "recovered" || r.outcome === "picker_resolved",
+        ).length;
         console.log(
           `recovered ${resolved}/${report.recovered.length} errored session(s) for profile ${opts.profile}` +
             (opts.group ? ` in group ${opts.group}` : ""),

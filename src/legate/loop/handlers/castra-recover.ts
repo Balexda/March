@@ -73,7 +73,15 @@ export async function apply(
 
   let report: Awaited<ReturnType<typeof ctx.castra.recoverSessions>>;
   try {
-    report = await ctx.castra.recoverSessions(ctx.meta.profile, decision.group);
+    // Scope the sweep to the attemptable ids (not the whole group) so a session
+    // at the attempt cap is NOT restarted again just because a sibling is still
+    // under budget — that would defeat the throttle and restart-storm a stuck
+    // worker every tick.
+    report = await ctx.castra.recoverSessions(
+      ctx.meta.profile,
+      decision.group,
+      decision.sessionIds,
+    );
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
     res.failures.push({ action: "castra-recover-failed", detail });
@@ -92,22 +100,34 @@ export async function apply(
         sessionId: r.sessionId,
         detail: r.error ?? "restart failed",
       });
-    } else {
-      // Reflect the recovered status into this tick's snapshot so relaunch /
-      // babysit (which run after) see a live session, not the stale "error".
-      const snap = state.sessionsById?.get(r.sessionId);
-      if (snap && r.finalStatus) snap.status = r.finalStatus;
     }
+
+    const left = r.outcome === "recovered" || r.outcome === "picker_resolved";
+    const snap = state.sessionsById?.get(r.sessionId);
+    // Reflect the recovered status into this tick's snapshot so relaunch / babysit
+    // (which run after) see a live session. still_error stays "error" (no-op);
+    // restart_failed leaves the existing status untouched.
+    if (left && snap && r.finalStatus) snap.status = r.finalStatus;
 
     if (raw?.castra_recover_attempts) {
       const counts = raw.castra_recover_attempts;
-      if (r.outcome === "recovered" || r.outcome === "picker_resolved") {
+      if (left) {
         // Healthy again — clear the budget so a future re-error retries fresh.
         delete counts[r.sessionId];
       } else {
         // Restarted but still wedged (or restart threw): count the attempt so a
         // persistently-stuck session eventually defers to babysit escalation.
         counts[r.sessionId] = (counts[r.sessionId] ?? 0) + 1;
+      }
+      // While recovery still has budget for a stuck session, mark it so babysit
+      // (the next handler) defers its worker-error escalation until the cap is
+      // exhausted — a slow restart / missed picker shouldn't cry wolf on attempt 1.
+      if (snap) {
+        if (!left && (counts[r.sessionId] ?? 0) < MAX_RECOVER_ATTEMPTS) {
+          snap.recovery_pending = true;
+        } else {
+          delete snap.recovery_pending;
+        }
       }
     }
 

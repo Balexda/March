@@ -188,6 +188,32 @@ describe("recoverErrorSessions", () => {
     expect(sendEnter).not.toHaveBeenCalled();
   });
 
+  it("does not abort the sweep when post-restart observation (readSession) throws", async () => {
+    const { deps } = harness({
+      sessions: [
+        view({ sessionId: "w1", status: "error" }),
+        view({ sessionId: "w2", status: "error" }),
+      ],
+      readSession: (_p, id) => {
+        if (id === "w1") throw new Error("agent-deck session show failed: boom");
+        return view({ sessionId: "w2", status: "idle" });
+      },
+      capturePane: () => "",
+    });
+
+    const report = await recoverErrorSessions(deps, { profile: "march" });
+
+    expect(report.recovered).toHaveLength(2);
+    // w1's observation threw AFTER a successful restart → reported, not thrown.
+    expect(report.recovered[0]).toMatchObject({
+      sessionId: "w1",
+      outcome: "still_error",
+      error: "agent-deck session show failed: boom",
+    });
+    // The sweep continued to w2.
+    expect(report.recovered[1]).toMatchObject({ sessionId: "w2", outcome: "recovered" });
+  });
+
   it("reports still_error when the session never leaves error after restart", async () => {
     const { deps } = harness({
       sessions: [view({ sessionId: "w1", status: "error" })],

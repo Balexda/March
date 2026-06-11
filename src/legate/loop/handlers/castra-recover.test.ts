@@ -94,7 +94,8 @@ describe("castra-recover apply", () => {
 
     const res = await apply(assess(state), c, state);
 
-    expect(c.castra.recoverSessions).toHaveBeenCalledWith("march", "legate-workers");
+    // Scoped to the attemptable ids (the cap-honoring sweep), not the whole group.
+    expect(c.castra.recoverSessions).toHaveBeenCalledWith("march", "legate-workers", ["w1"]);
     // Snapshot mutated so relaunch/babysit (later) see a live session this tick.
     expect(state.sessions[0].status).toBe("waiting");
     expect(state.sessionsById.get("w1").status).toBe("waiting");
@@ -115,7 +116,7 @@ describe("castra-recover apply", () => {
     expect(state.sessions[0].status).toBe("running");
   });
 
-  it("counts a still_error attempt and leaves the snapshot errored", async () => {
+  it("counts a still_error attempt, leaves the snapshot errored, and marks it recovery_pending while under cap", async () => {
     const state = loopState([sess("w1", "error")]);
     const c = ctx(async () => ({
       recovered: [result({ sessionId: "w1", outcome: "still_error", finalStatus: "error" })],
@@ -123,6 +124,22 @@ describe("castra-recover apply", () => {
     await apply(assess(state), c, state);
     expect(state.raw.castra_recover_attempts.w1).toBe(1);
     expect(state.sessions[0].status).toBe("error");
+    // 1 < MAX → recovery still has budget → babysit should defer escalation.
+    expect(state.sessions[0].recovery_pending).toBe(true);
+  });
+
+  it("clears recovery_pending once the attempt cap is reached (defers to escalation)", async () => {
+    const state = loopState([sess("w1", "error")], {
+      raw: { castra_recover_attempts: { w1: MAX_RECOVER_ATTEMPTS - 1 }, recovery_pending: true },
+    });
+    // Pre-mark to prove the at-cap path clears it.
+    state.sessions[0].recovery_pending = true;
+    const c = ctx(async () => ({
+      recovered: [result({ sessionId: "w1", outcome: "still_error", finalStatus: "error" })],
+    }));
+    await apply(assess(state), c, state);
+    expect(state.raw.castra_recover_attempts.w1).toBe(MAX_RECOVER_ATTEMPTS);
+    expect(state.sessions[0].recovery_pending).toBeUndefined();
   });
 
   it("reports a restart_failed session as a failure", async () => {

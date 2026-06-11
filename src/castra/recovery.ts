@@ -166,8 +166,23 @@ async function recoverOne(
   }
 
   // Restart regenerates the tmux session name, so re-read to target the pane.
-  const pickerResolved = await resolvePickerIfShown(deps, profile, target.sessionId, now, cfg);
-  const finalStatus = await waitForLeaveError(deps, profile, target.sessionId, now, cfg);
+  // The restart already succeeded; if OBSERVING the result throws (e.g.
+  // readSession's `agent-deck session show` errors), don't let that one session
+  // abort the whole sweep — report it as unconfirmed/still_error and move on.
+  let pickerResolved = false;
+  let finalStatus: string;
+  try {
+    pickerResolved = await resolvePickerIfShown(deps, profile, target.sessionId, now, cfg);
+    finalStatus = await waitForLeaveError(deps, profile, target.sessionId, now, cfg);
+  } catch (err) {
+    return {
+      ...base,
+      outcome: "still_error",
+      pickerResolved,
+      finalStatus: target.status,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
 
   if (finalStatus === ERROR_STATUS) {
     return { ...base, outcome: "still_error", pickerResolved, finalStatus };
