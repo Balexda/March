@@ -402,6 +402,34 @@ describe("castra server", () => {
       expect(runtime.restart).toHaveBeenCalledWith("march", "w1");
     });
 
+    it("restricts the sweep to explicit sessionIds", async () => {
+      const runtime = recoveryRuntime({
+        listSessions: vi.fn().mockReturnValue([
+          { sessionId: "w1", title: "a", group: "legate-workers", status: "error", tmuxSession: "t1" },
+          { sessionId: "w2", title: "b", group: "legate-workers", status: "error", tmuxSession: "t2" },
+        ]),
+        readSession: vi.fn().mockReturnValue({
+          sessionId: "w2", title: "b", group: "legate-workers", status: "idle", tmuxSession: "t2",
+        }),
+      });
+      app = buildServer({
+        adapter: fakeAdapter(),
+        token: "secret",
+        recovery: fastRecovery(runtime),
+      });
+      const res = await app.inject({
+        method: "POST",
+        url: "/v1/sessions/recover",
+        headers: { authorization: "Bearer secret" },
+        payload: { profile: "march", sessionIds: ["w2"] },
+      });
+      expect(res.statusCode).toBe(200);
+      const ids = res.json().recovered.map((r: { sessionId: string }) => r.sessionId);
+      expect(ids).toEqual(["w2"]);
+      expect(runtime.restart).toHaveBeenCalledTimes(1);
+      expect(runtime.restart).toHaveBeenCalledWith("march", "w2");
+    });
+
     it("forwards an explicit group filter to the sweep", async () => {
       const runtime = recoveryRuntime({
         listSessions: vi

@@ -91,6 +91,31 @@ describe("selectRecoverable", () => {
     const picked = selectRecoverable(sessions, { profile: "march", group: "conductor" });
     expect(picked.map((s) => s.sessionId)).toEqual(["c"]);
   });
+
+  it("targets exact sessionIds (overriding the conductor exclusion), only errored", () => {
+    const sessions = [
+      view({ sessionId: "a", status: "error", group: "legate-workers" }),
+      view({ sessionId: "b", status: "error", group: "legate-workers" }),
+      view({ sessionId: "c", status: "error", group: "conductor" }),
+      view({ sessionId: "d", status: "idle", group: "legate-workers" }),
+    ];
+    const picked = selectRecoverable(sessions, { profile: "march", sessionIds: ["b", "c", "d"] });
+    // d is excluded (not errored); c is included despite being the conductor.
+    expect(picked.map((s) => s.sessionId)).toEqual(["b", "c"]);
+  });
+
+  it("intersects sessionIds with group when both are given", () => {
+    const sessions = [
+      view({ sessionId: "a", status: "error", group: "legate-workers" }),
+      view({ sessionId: "c", status: "error", group: "conductor" }),
+    ];
+    const picked = selectRecoverable(sessions, {
+      profile: "march",
+      group: "legate-workers",
+      sessionIds: ["a", "c"],
+    });
+    expect(picked.map((s) => s.sessionId)).toEqual(["a"]);
+  });
 });
 
 describe("recoverErrorSessions", () => {

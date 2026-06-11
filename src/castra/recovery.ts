@@ -56,7 +56,15 @@ export interface RecoverOptions {
    */
   readonly group?: string;
   /**
-   * Groups skipped when no explicit `group` is given. Defaults to
+   * When set, recovery is restricted to these exact session ids (still only the
+   * errored ones). This is explicit operator targeting — it overrides the
+   * default conductor exclusion, so an operator can name a specific session in
+   * any group. Combined with `group`, both must match. Use for a controlled
+   * "recover just these" sweep rather than a whole group.
+   */
+  readonly sessionIds?: readonly string[];
+  /**
+   * Groups skipped when no explicit `group`/`sessionIds` is given. Defaults to
    * {@link RECOVERY_DEFAULT_EXCLUDED_GROUPS} (the conductor).
    */
   readonly excludeGroups?: readonly string[];
@@ -90,9 +98,14 @@ export function selectRecoverable(
   sessions: readonly RecoverySessionView[],
   options: RecoverOptions,
 ): RecoverySessionView[] {
+  const ids =
+    options.sessionIds && options.sessionIds.length ? new Set(options.sessionIds) : null;
   const excluded = new Set(options.excludeGroups ?? RECOVERY_DEFAULT_EXCLUDED_GROUPS);
   return sessions.filter((s) => {
     if (s.status !== ERROR_STATUS) return false;
+    // Explicit id targeting wins (overrides the conductor exclusion); when a
+    // group is also given, both must match.
+    if (ids) return ids.has(s.sessionId) && (!options.group || s.group === options.group);
     if (options.group) return s.group === options.group;
     return !excluded.has(s.group);
   });

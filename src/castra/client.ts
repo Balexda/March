@@ -215,12 +215,21 @@ export class CastraClient {
 
   /**
    * POST /v1/sessions/recover — restart errored sessions in scope and resolve
-   * any "Resume from summary" picker. With no `group`, recovers every errored
-   * session except the conductor; pass `group` to scope to one group.
+   * any "Resume from summary" picker. With no `group`/`sessionIds`, recovers
+   * every errored session except the conductor; pass `group` to scope to one
+   * group, or `sessionIds` to target exact sessions (a controlled sweep).
    */
-  async recoverSessions(profile: string, group?: string): Promise<RecoverReport> {
+  async recoverSessions(
+    profile: string,
+    group?: string,
+    sessionIds?: readonly string[],
+  ): Promise<RecoverReport> {
     const body = await this.request("POST", "/v1/sessions/recover", {
-      json: { profile, ...(group ? { group } : {}) },
+      json: {
+        profile,
+        ...(group ? { group } : {}),
+        ...(sessionIds && sessionIds.length ? { sessionIds } : {}),
+      },
       expectStatus: 200,
       timeoutMs: RECOVER_TIMEOUT_MS,
     });

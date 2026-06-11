@@ -239,6 +239,17 @@ describe("castra client — requests", () => {
     expect(JSON.parse(init.body as string)).toEqual({ profile: "march" });
   });
 
+  it("forwards explicit sessionIds in the recovery body", async () => {
+    const fetchImpl = vi.fn(async () => jsonResponse(200, { recovered: [] }));
+    const client = new CastraClient({
+      baseUrl: "http://castra:9264",
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+    await client.recoverSessions("march", undefined, ["s1", "s2"]);
+    const [, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
+    expect(JSON.parse(init.body as string)).toEqual({ profile: "march", sessionIds: ["s1", "s2"] });
+  });
+
   it("probes the authenticated /v1 surface for readiness", async () => {
     const fetchImpl = vi.fn(async () => jsonResponse(200, { sessions: [] }));
     const ok = new CastraClient({

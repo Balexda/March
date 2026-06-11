@@ -514,12 +514,26 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
         body: {
           type: "object",
           required: ["profile"],
-          properties: { profile: profileSchema, group: groupSchema },
+          properties: {
+            profile: profileSchema,
+            group: groupSchema,
+            // Explicit session-id targeting for a controlled "recover just these"
+            // sweep (bounded so the body stays a targeting list, not a blob).
+            sessionIds: {
+              type: "array",
+              maxItems: 64,
+              items: { type: "string", pattern: "^[a-zA-Z0-9][a-zA-Z0-9._:-]*$", maxLength: 128 },
+            },
+          },
         },
       },
     },
     async (request) => {
-      const { profile, group } = request.body as { profile: string; group?: string };
+      const { profile, group, sessionIds } = request.body as {
+        profile: string;
+        group?: string;
+        sessionIds?: string[];
+      };
       const sliceId = sliceIdFrom(request);
       // Run the sweep first (it awaits restarts + picker/status polls), then
       // record a correlated summary span/log. HTTP latency is captured by the
@@ -527,6 +541,7 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
       const report = await recoverErrorSessions(recoverDeps, {
         profile,
         ...(group ? { group } : {}),
+        ...(sessionIds && sessionIds.length ? { sessionIds } : {}),
       });
       const resolved = report.recovered.filter((r) => r.outcome !== "restart_failed").length;
       const pickers = report.recovered.filter((r) => r.pickerResolved).length;

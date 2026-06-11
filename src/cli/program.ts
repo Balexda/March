@@ -1001,12 +1001,22 @@ castra
   )
   .requiredOption("--profile <profile>", "Profile whose errored sessions to recover")
   .option("--group <group>", "Only recover sessions in this group")
+  .option(
+    "--session <id>",
+    "Recover only this session id (repeatable) — a controlled, targeted sweep",
+    (id: string, prev: string[]) => [...prev, id],
+    [] as string[],
+  )
   .option("--json", "Print the recovery report as JSON")
-  .action(async (opts: { profile: string; group?: string; json?: boolean }) => {
+  .action(async (opts: { profile: string; group?: string; session: string[]; json?: boolean }) => {
     commandHandled = true;
     const { CastraClient, CastraClientError } = await import("../castra/client.js");
     try {
-      const report = await new CastraClient().recoverSessions(opts.profile, opts.group);
+      const report = await new CastraClient().recoverSessions(
+        opts.profile,
+        opts.group,
+        opts.session,
+      );
       if (opts.json) {
         console.log(JSON.stringify(report, null, 2));
       } else {
