@@ -2,12 +2,14 @@ import { describe, expect, it } from "vitest";
 import {
   alreadyArchivedSlice,
   blockingMergedArchive,
+  createSpawnBudget,
   DISPATCH_RECOVERY_LIMIT,
   dispatchableReady,
   escalatedRecoverable,
   inFlightSliceMatches,
   isStubArchivedSlice,
   isTerminalSlice,
+  liveSpawnCount,
   recoverableEscalations,
   recoveryAttemptKey,
   recoveryBudgetExhausted,
@@ -22,6 +24,38 @@ const item = {
 };
 // branch/key the matchers compute for `item`:
 const ITEM_BRANCH = "smithy/forge/docs-x-tasks-md-forge"; // legacy-hash path may vary; not asserted directly
+
+describe("spawn cap helpers (#313)", () => {
+  it("liveSpawnCount counts only non-terminal slices (pipeline-occupying spawns)", () => {
+    const slices = {
+      a: { stage: "hatchery-pending" },
+      b: { stage: "implementing" },
+      c: { stage: "pr-open" },
+      d: { stage: "pr-in-fix" },
+      e: { stage: "pr-resolving-conflicts" },
+      // terminal — must NOT count:
+      f: { stage: "merged" },
+      g: { stage: "escalated" },
+      h: { pr: { state: "CLOSED" } },
+      i: { pr: { state: "MERGED" } },
+    };
+    expect(liveSpawnCount({ slices })).toBe(5);
+  });
+
+  it("liveSpawnCount is 0 for empty/missing state", () => {
+    expect(liveSpawnCount({ slices: {} })).toBe(0);
+    expect(liveSpawnCount({})).toBe(0);
+    expect(liveSpawnCount(null)).toBe(0);
+  });
+
+  it("createSpawnBudget seeds remaining = max(0, cap − live) and retains cap/live", () => {
+    expect(createSpawnBudget(10, 0)).toEqual({ cap: 10, live: 0, remaining: 10, deferred: 0 });
+    expect(createSpawnBudget(10, 7)).toEqual({ cap: 10, live: 7, remaining: 3, deferred: 0 });
+    // live ≥ cap → fully throttled, never negative.
+    expect(createSpawnBudget(10, 10)).toEqual({ cap: 10, live: 10, remaining: 0, deferred: 0 });
+    expect(createSpawnBudget(10, 14)).toEqual({ cap: 10, live: 14, remaining: 0, deferred: 0 });
+  });
+});
 
 describe("slice pure helpers", () => {
   it("isTerminalSlice covers merged/escalated stages + terminal PR states", () => {

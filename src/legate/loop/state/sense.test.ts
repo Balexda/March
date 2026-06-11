@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { rebuildWorkingState, senseFromHerald, senseObserved, type SenseDeps } from "./sense.js";
 import type { LoopMeta } from "../meta.js";
 import { emptySystemState, type SliceState, type SystemState } from "../../../herald/events.js";
+import { liveSpawnCount } from "../pure/slice.js";
 
 const meta = { worker_group: "legate-workers", repo: { name: "march", path: "/repo" } } as unknown as LoopMeta;
 
@@ -309,6 +310,27 @@ describe("rebuildWorkingState", () => {
     // The tombstone is reconstructed into neither the live nor the archived set.
     expect(Object.keys(raw.slices)).toEqual(["live"]);
     expect(raw.archived_slices.tomb).toBeUndefined();
+  });
+
+  it("a cold-start rebuild counts live spawns from the fold, not 0 (#313/#314 review P1)", () => {
+    // The global spawn-cap budget is seeded from each profile's live-slice count at
+    // tick start. On a restart `workingState` is null, so the count MUST come from
+    // the fold rebuild — otherwise live reads as 0 and the loop launches a full extra
+    // cap on top of the workers already running, exceeding the global limit. Three
+    // non-terminal slices + one merged/archived + one escalated (terminal) → 3 live.
+    const sys = foldedState({
+      slices: {
+        pending: { sliceId: "pending", stage: "hatchery-pending", branch: "b-p", jobId: "j" },
+        implementing: { sliceId: "implementing", stage: "implementing", branch: "b-i", sessionId: "s-i" },
+        prOpen: { sliceId: "prOpen", stage: "pr-open", branch: "b-o", pr: { number: 1, state: "OPEN" } },
+        merged: { sliceId: "merged", stage: "merged", archived: true, branch: "b-m", pr: { number: 2, state: "MERGED" } },
+        escalated: { sliceId: "escalated", stage: "escalated", branch: "b-e", escalatedReason: "needs_human_judgement" },
+      },
+    });
+    const raw = rebuildWorkingState(sys, meta);
+    // Same primitive the tick uses to seed the budget — the archived + escalated
+    // (terminal) slices don't hold a live spawn slot; the three in-flight ones do.
+    expect(liveSpawnCount(raw)).toBe(3);
   });
 });
 

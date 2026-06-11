@@ -117,6 +117,52 @@ export function blockingMergedArchive(state: any, item: any, sliceId: string): a
 }
 
 /**
+ * The number of LIVE spawns in a profile's working state — the slices still
+ * occupying the dispatch pipeline (hatchery-pending / implementing / pr-open /
+ * pr-in-fix / pr-resolving-conflicts): every slice that is NOT {@link
+ * isTerminalSlice terminal} (merged / closed / escalated). This is exactly the
+ * "still occupies a codex spawn + steward" set the loop already classifies with
+ * `isTerminalSlice`; the global spawn cap (#313) budgets against the SUM of this
+ * across all profiles. Escalated slices are terminal here (operator-only, worker
+ * torn down) so they correctly do NOT consume a slot.
+ */
+export function liveSpawnCount(state: any): number {
+  const slices = state?.slices && typeof state.slices === "object" ? state.slices : {};
+  let live = 0;
+  for (const slice of Object.values(slices)) if (!isTerminalSlice(slice)) live++;
+  return live;
+}
+
+/**
+ * The shared, mutable per-tick budget for the GLOBAL concurrent-spawn cap (#313).
+ * One instance is threaded across every profile's dispatch in a single tick so the
+ * combined number of NEW spawns can't exceed the cap. `remaining` is decremented
+ * per fresh launch and `deferred` accrues the dispatchable items skipped once the
+ * budget is exhausted (they stay dispatchable and launch a later tick as slots
+ * free). `cap`/`live` are the tick-start constants, retained for logging + /status.
+ */
+export interface SpawnBudget {
+  /** The configured global cap (MARCH_MAX_CONCURRENT_SPAWNS). */
+  readonly cap: number;
+  /** Live spawns across ALL profiles at tick start (the cap's current draw). */
+  readonly live: number;
+  /** New fresh dispatches still permitted this tick; decremented per launch. */
+  remaining: number;
+  /** Fresh dispatchable items skipped this tick because the budget hit 0. */
+  deferred: number;
+}
+
+/**
+ * Seed the shared budget for a tick: `remaining = max(0, cap − liveAcrossProfiles)`.
+ * A live count ≥ cap yields 0 remaining (dispatch is fully throttled this tick, not
+ * negative). The caller threads the returned object through every profile's
+ * dispatch so the global sum of fresh launches stays ≤ cap.
+ */
+export function createSpawnBudget(cap: number, liveAcrossProfiles: number): SpawnBudget {
+  return { cap, live: liveAcrossProfiles, remaining: Math.max(0, cap - liveAcrossProfiles), deferred: 0 };
+}
+
+/**
  * The subset of smithy layer-0 ready items that would dispatch FRESH this tick:
  * ready minus anything already in-flight or archived — the exact dedup
  * {@link assess} (`handlers/dispatch.ts`) applies before launching a spawn. Shared

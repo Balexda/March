@@ -6,7 +6,7 @@ import * as babysit from "./handlers/babysit.js";
 import * as recovery from "./handlers/recovery.js";
 import * as adoptFromFold from "./handlers/adopt-from-fold.js";
 import * as dispatch from "./handlers/dispatch.js";
-import { summarizeSlicesByStage } from "./pure/slice.js";
+import { summarizeSlicesByStage, type SpawnBudget } from "./pure/slice.js";
 
 /**
  * Stage 2 orchestration. runTick senses once, then runs the handlers in the fixed
@@ -27,6 +27,10 @@ export interface CoordinatorDeps {
   babysit: babysit.BabysitDeps;
   dispatch: dispatch.DispatchDeps;
   relaunch?: relaunch.RelaunchDeps;
+  /** The GLOBAL concurrent-spawn budget (#313), shared across every profile this
+   *  tick. Attached to the handler context so dispatch caps fresh launches against
+   *  it. Omitted → dispatch is uncapped (pre-#313 behavior). */
+  spawnBudget?: SpawnBudget;
 }
 
 export interface CoordinatorOutput {
@@ -45,7 +49,7 @@ export interface CoordinatorOutput {
 
 const countAction = (res: HandlerResult, action: string): number => res.actions.filter((a) => a?.action === action).length;
 
-function buildTickResult(state: LoopState, r: CoordinatorOutput["results"]): TickResult {
+function buildTickResult(state: LoopState, r: CoordinatorOutput["results"], spawnBudget?: SpawnBudget): TickResult {
   // The steward-nudge family rides in on the babysit handler's actions but is
   // metricized on its own (#212), so split it out of the babysit umbrella count.
   const stewardNudgeCount = countAction(r.babysit, "steward-nudge");
@@ -72,12 +76,18 @@ function buildTickResult(state: LoopState, r: CoordinatorOutput["results"]): Tic
     processorRequestCount: r.cleanup.requests.length + r.babysit.requests.length + r.dispatch.requests.length,
     dispatchActionCount: r.dispatch.actions.length,
     dispatchFailureCount: r.dispatch.failures.length,
+    ...(spawnBudget
+      ? { spawnCap: spawnBudget.cap, spawnsLive: spawnBudget.live, spawnsDeferred: spawnBudget.deferred }
+      : {}),
   };
 }
 
 export async function runTick(deps: CoordinatorDeps): Promise<CoordinatorOutput> {
   const state = await deps.sense();
   const ctx = deps.makeContext(state);
+  // Share the global spawn budget with the dispatch handler via the context so a
+  // single tick's combined fresh launches across all profiles stay under the cap.
+  ctx.spawnBudget = deps.spawnBudget;
 
   // Awaited in order — each apply mutates the shared snapshot, so a later
   // handler's assess sees the current world. Do NOT parallelize: the ordering
@@ -97,5 +107,5 @@ export async function runTick(deps: CoordinatorDeps): Promise<CoordinatorOutput>
     dispatch: await dispatch.apply(dispatch.assess(state), ctx, state, deps.dispatch),
   };
 
-  return { state, tick: buildTickResult(state, results), results };
+  return { state, tick: buildTickResult(state, results, deps.spawnBudget), results };
 }
