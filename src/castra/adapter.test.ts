@@ -13,6 +13,7 @@ import {
   buildListArgs,
   buildSessionOutputArgs,
   buildSessionRemoveArgs,
+  buildSessionRestartArgs,
   buildSessionSendArgs,
   buildSessionSetArgs,
   buildSessionShowArgs,
@@ -120,6 +121,15 @@ describe("castra adapter — argv builders", () => {
     ]);
     expect(buildSessionRemoveArgs("p", "s", false)).toEqual([
       "-p", "p", "session", "remove", "s", "--force",
+    ]);
+  });
+
+  it("builds restart args, defaulting to --force", () => {
+    expect(buildSessionRestartArgs("p", "s")).toEqual([
+      "-p", "p", "session", "restart", "s", "--force",
+    ]);
+    expect(buildSessionRestartArgs("p", "s", false)).toEqual([
+      "-p", "p", "session", "restart", "s",
     ]);
   });
 });

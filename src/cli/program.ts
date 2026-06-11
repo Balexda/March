@@ -992,6 +992,44 @@ castra
     }
   });
 
+castra
+  .command("recover")
+  .description(
+    "Restart errored sessions (e.g. after a host reboot) and answer Claude's " +
+      "'Resume from summary' picker. Targets every errored session except the " +
+      "conductor unless --group scopes it. Resolves Castra via CASTRA_URL.",
+  )
+  .requiredOption("--profile <profile>", "Profile whose errored sessions to recover")
+  .option("--group <group>", "Only recover sessions in this group")
+  .option("--json", "Print the recovery report as JSON")
+  .action(async (opts: { profile: string; group?: string; json?: boolean }) => {
+    commandHandled = true;
+    const { CastraClient, CastraClientError } = await import("../castra/client.js");
+    try {
+      const report = await new CastraClient().recoverSessions(opts.profile, opts.group);
+      if (opts.json) {
+        console.log(JSON.stringify(report, null, 2));
+      } else {
+        for (const r of report.recovered) {
+          const picker = r.pickerResolved ? " [resume-from-summary]" : "";
+          const detail = r.error ? `: ${r.error}` : ` → ${r.finalStatus}`;
+          console.log(`${r.outcome} ${r.sessionId} (${r.group}) "${r.title}"${picker}${detail}`);
+        }
+        const resolved = report.recovered.filter((r) => r.outcome !== "restart_failed").length;
+        console.log(
+          `recovered ${resolved}/${report.recovered.length} errored session(s) for profile ${opts.profile}` +
+            (opts.group ? ` in group ${opts.group}` : ""),
+        );
+      }
+      process.exitCode = SUCCESS;
+    } catch (err) {
+      const message =
+        err instanceof CastraClientError ? err.message : (err as Error).message;
+      process.stderr.write(message + "\n");
+      process.exitCode = ERROR;
+    }
+  });
+
 const statio = program
   .command("statio")
   .description("Manage Statio - the forge gateway over HTTP");

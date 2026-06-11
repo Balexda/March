@@ -1,5 +1,10 @@
 import { execFileSync } from "node:child_process";
-import { type CastraErrorBody, type CastraSession } from "./types.js";
+import {
+  type CastraErrorBody,
+  type CastraSession,
+  type RecoverReport,
+  type SessionRecoveryResult,
+} from "./types.js";
 import { CASTRA_TOKEN_ENV, CASTRA_URL_ENV, resolveCastraPort } from "./config.js";
 
 /**
@@ -18,6 +23,14 @@ const SLICE_ID_HEADER = "x-march-slice-id";
 const DEFAULT_REQUEST_TIMEOUT_MS = 60_000;
 /** Reachability probe timeout — kept short so `/readyz` stays snappy. */
 const REACHABLE_TIMEOUT_MS = 3_000;
+/**
+ * Recovery sweep timeout. A sweep restarts every errored session and polls each
+ * for the resume picker + status, so it runs far longer than a single op — give
+ * it a generous ceiling rather than the per-request default.
+ */
+const RECOVER_TIMEOUT_MS = 300_000;
+/** Sync-client recovery sweep timeout (seconds), mirroring {@link RECOVER_TIMEOUT_MS}. */
+const RECOVER_TIMEOUT_SECONDS = 300;
 /**
  * Profile used by the readiness probe. `reachable()` lists this profile's
  * sessions to confirm Castra can actually serve authenticated `/v1/*` calls;
@@ -103,6 +116,12 @@ interface RequestOptions {
   readonly json?: unknown;
   readonly expectStatus: number;
   readonly timeoutMs?: number;
+}
+
+/** Normalize a `/v1/sessions/recover` response body into a {@link RecoverReport}. */
+function coerceRecoverReport(body: unknown): RecoverReport {
+  const recovered = (body as { recovered?: unknown }).recovered;
+  return { recovered: Array.isArray(recovered) ? (recovered as SessionRecoveryResult[]) : [] };
 }
 
 async function parseJsonBody(res: Response): Promise<unknown> {
@@ -192,6 +211,20 @@ export class CastraClient {
       { traceKey: req.traceKey, expectStatus: 200 },
     );
     return { removed: Boolean((body as { removed?: boolean }).removed) };
+  }
+
+  /**
+   * POST /v1/sessions/recover — restart errored sessions in scope and resolve
+   * any "Resume from summary" picker. With no `group`, recovers every errored
+   * session except the conductor; pass `group` to scope to one group.
+   */
+  async recoverSessions(profile: string, group?: string): Promise<RecoverReport> {
+    const body = await this.request("POST", "/v1/sessions/recover", {
+      json: { profile, ...(group ? { group } : {}) },
+      expectStatus: 200,
+      timeoutMs: RECOVER_TIMEOUT_MS,
+    });
+    return coerceRecoverReport(body);
   }
 
   /**
@@ -358,13 +391,28 @@ export class SyncCastraClient {
     return { removed: Boolean((body as { removed?: boolean }).removed) };
   }
 
+  /**
+   * POST /v1/sessions/recover — restart errored sessions and resolve resume
+   * pickers. The legate loop calls this (sync tick) when it observes errored
+   * worker sessions, e.g. after a host reboot.
+   */
+  recoverSessions(profile: string, group?: string): RecoverReport {
+    const body = this.request("POST", "/v1/sessions/recover", {
+      json: { profile, ...(group ? { group } : {}) },
+      expectStatus: 200,
+      timeoutSeconds: RECOVER_TIMEOUT_SECONDS,
+    });
+    return coerceRecoverReport(body);
+  }
+
   private request(
     method: string,
     pathWithQuery: string,
-    opts: { traceKey?: string; json?: unknown; expectStatus: number },
+    opts: { traceKey?: string; json?: unknown; expectStatus: number; timeoutSeconds?: number },
   ): unknown {
     // `-w \n%{http_code}` appends the status after the body so we can split it.
-    const args = ["-sS", "--max-time", String(SYNC_TIMEOUT_SECONDS), "-X", method, "-w", "\n%{http_code}"];
+    const maxTime = String(opts.timeoutSeconds ?? SYNC_TIMEOUT_SECONDS);
+    const args = ["-sS", "--max-time", maxTime, "-X", method, "-w", "\n%{http_code}"];
     if (this.token) args.push("-H", `authorization: Bearer ${this.token}`);
     if (opts.traceKey) args.push("-H", `${SLICE_ID_HEADER}: ${opts.traceKey}`);
     if (opts.json !== undefined) {

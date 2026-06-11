@@ -1,6 +1,7 @@
 import type { HandlerContext, HandlerResult, LoopState, TickResult } from "./state/types.js";
 import * as cleanup from "./handlers/cleanup.js";
 import * as ghostCleanup from "./handlers/ghost-cleanup.js";
+import * as castraRecover from "./handlers/castra-recover.js";
 import * as relaunch from "./handlers/relaunch.js";
 import * as babysit from "./handlers/babysit.js";
 import * as recovery from "./handlers/recovery.js";
@@ -10,8 +11,8 @@ import { summarizeSlicesByStage, type SpawnBudget } from "./pure/slice.js";
 
 /**
  * Stage 2 orchestration. runTick senses once, then runs the handlers in the fixed
- * order cleanup → ghost-cleanup → relaunch → babysit → recovery → adopt-from-fold →
- * dispatch,
+ * order cleanup → ghost-cleanup → castra-recover → relaunch → babysit → recovery →
+ * adopt-from-fold → dispatch,
  * each as pure assess() + effecting apply(), threading the SAME mutating {@link LoopState}
  * through all of them. Because apply() mutates the snapshot in place (drops a
  * cleaned session, archives a slice), a later handler's assess() sees the current
@@ -39,6 +40,7 @@ export interface CoordinatorOutput {
   results: {
     cleanup: HandlerResult;
     ghost: HandlerResult;
+    castraRecover: HandlerResult;
     relaunch: HandlerResult;
     babysit: HandlerResult;
     recovery: HandlerResult;
@@ -95,6 +97,11 @@ export async function runTick(deps: CoordinatorDeps): Promise<CoordinatorOutput>
   const results = {
     cleanup: await cleanup.apply(cleanup.assess(state), ctx, state),
     ghost: await ghostCleanup.apply(ghostCleanup.assess(state), ctx, state),
+    // Restart errored worker sessions (e.g. post-reboot) in place BEFORE relaunch
+    // (which only fires on a vanished session) and babysit (which would escalate
+    // a present-but-errored worker) — apply mutates the snapshot so they see the
+    // recovered sessions as live this same tick.
+    castraRecover: await castraRecover.apply(castraRecover.assess(state), ctx, state),
     relaunch: await relaunch.apply(relaunch.assess(state), ctx, state, deps.relaunch),
     babysit: await babysit.apply(babysit.assess(state), ctx, state, deps.babysit),
     // Operator recovery (#238) runs BEFORE dispatch so the dropped slice frees the
