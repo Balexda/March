@@ -29,7 +29,7 @@ import type { MergePolicy } from "../../herald/profiles/merge-policy.js";
 import { legateStateDir, metaForProfileRecord } from "../profile-paths.js";
 // Decomposed two-stage loop: Stage 1 sense → coordinator (ordered handlers) →
 // heartbeat. runtime now only wires these to the proven I/O seams below.
-import { senseFromHerald, type HeraldInbox } from "./state/sense.js";
+import { rebuildWorkingState, senseFromHerald, type HeraldInbox } from "./state/sense.js";
 import { createSenseIo } from "../../observe/sense-io.js";
 import { execText } from "./clients/exec.js";
 import { runTick as coordinatorRunTick } from "./coordinator.js";
@@ -410,11 +410,25 @@ async function tick() {
   // Seed the GLOBAL concurrent-spawn budget (#313) ONCE per tick from the live
   // spawns carried in by every profile's working state, then thread the SAME
   // mutable budget through each profile's dispatch so the combined fresh launches
-  // this tick stay under the cap. `runtimeFor` below refreshes each rt's meta but
-  // leaves `workingState` (the prior tick's slices) intact, so this count is the
-  // live set as of tick start. New profiles not yet ticked have no workingState → 0.
+  // this tick stay under the cap.
+  //
+  // On a warm tick `workingState` already holds the prior tick's slices, so the
+  // count is the live set as of tick start. On a COLD start (restart, or a
+  // first-seen profile) `workingState` is still null here — but the shared Herald
+  // stream was already drained above, so rebuild the slice set from each profile's
+  // fold first. Without this, a restart with existing non-terminal slices would
+  // seed live=0 and launch a full extra cap on top of the already-running workers,
+  // exceeding the global limit the feature enforces. Pre-seeding `workingState`
+  // with the same rebuild `senseFromHerald` would do is idempotent: `tickProfile`
+  // then reuses it (prevRaw non-null) instead of rebuilding from the same fold.
   let liveAcrossProfiles = 0;
-  for (const rec of profiles) liveAcrossProfiles += liveSpawnCount(runtimeFor(rec).workingState);
+  for (const rec of profiles) {
+    const rt = runtimeFor(rec);
+    if (rt.workingState == null) {
+      rt.workingState = rebuildWorkingState(legateHerald().snapshotFor(rec.profile), rt.meta);
+    }
+    liveAcrossProfiles += liveSpawnCount(rt.workingState);
+  }
   const spawnBudget = createSpawnBudget(maxConcurrentSpawns, liveAcrossProfiles);
 
   for (const rec of profiles) {

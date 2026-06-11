@@ -17,6 +17,13 @@ describe("resolveMaxConcurrentSpawns (#313 global spawn cap config)", () => {
     expect(resolveMaxConcurrentSpawns({ MARCH_MAX_CONCURRENT_SPAWNS: "-5" })).toBe(10);
   });
 
+  it("treats a fractional sub-1 cap (floors to 0) as misconfiguration → default 10", () => {
+    // `0.5` is positive but floors to a zero cap that would defer every dispatch —
+    // flooring BEFORE the positivity check routes it to the default, not a wedge.
+    expect(resolveMaxConcurrentSpawns({ MARCH_MAX_CONCURRENT_SPAWNS: "0.5" })).toBe(10);
+    expect(resolveMaxConcurrentSpawns({ MARCH_MAX_CONCURRENT_SPAWNS: "0.99" })).toBe(10);
+  });
+
   it("honors a valid positive value (floored to an integer)", () => {
     expect(resolveMaxConcurrentSpawns({ MARCH_MAX_CONCURRENT_SPAWNS: "3" })).toBe(3);
     expect(resolveMaxConcurrentSpawns({ MARCH_MAX_CONCURRENT_SPAWNS: "25" })).toBe(25);

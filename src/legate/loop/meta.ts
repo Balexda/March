@@ -85,9 +85,11 @@ export const DEFAULT_MAX_CONCURRENT_SPAWNS = 10;
  * value ≤ 0 is treated as MISCONFIGURATION and falls back to {@link
  * DEFAULT_MAX_CONCURRENT_SPAWNS} (a 0/negative cap is NOT honored as "halt all
  * dispatch" — that would silently wedge the loop). A positive value is floored to
- * an integer.
+ * an integer; floor BEFORE the positivity check so a fractional sub-1 value like
+ * `0.5` (which floors to 0, a zero cap that would defer every dispatch) is also
+ * treated as misconfiguration and falls back to the default rather than wedging.
  */
 export function resolveMaxConcurrentSpawns(env: NodeJS.ProcessEnv = process.env): number {
-  const raw = Number(env.MARCH_MAX_CONCURRENT_SPAWNS);
-  return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : DEFAULT_MAX_CONCURRENT_SPAWNS;
+  const floored = Math.floor(Number(env.MARCH_MAX_CONCURRENT_SPAWNS));
+  return Number.isFinite(floored) && floored > 0 ? floored : DEFAULT_MAX_CONCURRENT_SPAWNS;
 }

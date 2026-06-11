@@ -260,6 +260,37 @@ describe("dispatch apply (#313 global concurrent-spawn cap)", () => {
     expect(d.launchDispatch).toHaveBeenCalledTimes(30);
   });
 
+  it("refunds the reservation when a launch escalates or adopts an existing PR (no fresh spawn = no slot consumed)", async () => {
+    // CAP=2, 0 live. The first two launches fail to queue a fresh spawn — one
+    // escalates (dispatch threw → slice left escalated, no action) and one adopts an
+    // existing open PR on a branch collision (`adopt-pr`, not a new spawn). Neither
+    // creates a live spawn, so reserve-then-refund must NOT spend global budget on
+    // them; both genuine spawns that follow still launch under the cap of 2. Without
+    // the refund the two non-spawns would have eaten the budget and starved them.
+    // `assess` preserves `ready` order (filter→map), so s0/s1 are processed first.
+    const ready = readyItems(4); // s0..s3
+    const state = loopState({ smithy: { ok: true, ready, queue: { dispatchable: 4, blocked: 0, total: 4 } } });
+    const budget = createSpawnBudget(2, 0);
+    const nonSpawn: Record<string, any> = {
+      [dispatchSliceId(ready[0]!)]: { actions: [], failures: [{ error: "boom" }], mutated: true }, // escalated
+      [dispatchSliceId(ready[1]!)]: { actions: [{ action: "adopt-pr" }], failures: [], mutated: true }, // adopted
+    };
+    const launched: string[] = [];
+    const d = deps({
+      launchDispatch: vi.fn(async (raw: any, _ts: string, _item: any, sliceId: string) => {
+        if (nonSpawn[sliceId]) return nonSpawn[sliceId];
+        raw.slices[sliceId] = { stage: "hatchery-pending" };
+        launched.push(sliceId);
+        return { actions: [{ action: "dispatch", sliceId }], failures: [], mutated: true };
+      }),
+    });
+    await apply(assess(state), ctxWithBudget(budget), state, d);
+    expect(d.launchDispatch).toHaveBeenCalledTimes(4); // all four attempted
+    expect(launched).toHaveLength(2); // only the two real spawns
+    expect(budget.remaining).toBe(0); // exactly the cap of 2 consumed
+    expect(budget.deferred).toBe(0); // a refund is not a throttle — nothing deferred
+  });
+
   it("the cap throttles only FRESH dispatches — recovery (#211) is never starved", async () => {
     // A recoverably-escalated slice is ready; budget is fully exhausted. The fresh
     // dispatch is deferred, but the recover decision still fires.

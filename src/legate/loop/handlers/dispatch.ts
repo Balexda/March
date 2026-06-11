@@ -108,17 +108,27 @@ export async function apply(_decisions: DispatchDecision[], ctx: HandlerContext,
   //    dispatchable METRIC — `assess` still reports the true frontier.
   const budget = ctx.spawnBudget;
   for (const decision of assess(state)) {
+    let reserved = false;
     if (decision.kind === "dispatch" && budget) {
       if (budget.remaining <= 0) {
         budget.deferred += 1;
         continue; // cap reached — defer (still dispatchable next tick)
       }
-      budget.remaining -= 1; // reserve a slot for this fresh launch
+      budget.remaining -= 1; // optimistically reserve a slot for this fresh launch
+      reserved = true;
     }
     const out =
       decision.kind === "recover"
         ? await deps.recoverDispatch(state.raw, ts, decision.item, decision.sliceId, decision.attempt)
         : await deps.launchDispatch(state.raw, ts, decision.item, decision.sliceId);
+    // Refund the reservation if the launch did NOT actually queue a fresh spawn —
+    // `launchDispatch` may instead escalate (dispatch threw) or adopt an existing
+    // open PR on a branch collision (`adopt-pr`), neither of which creates a new
+    // live spawn. Only the `dispatch` action consumes a global slot, so a failed/
+    // adopted launch must not starve later profiles below the configured cap.
+    if (reserved && budget && !out.actions.some((a: any) => a?.action === "dispatch")) {
+      budget.remaining += 1;
+    }
     res.actions.push(...out.actions);
     res.failures.push(...out.failures);
     if (out.mutated) res.mutated = true;
