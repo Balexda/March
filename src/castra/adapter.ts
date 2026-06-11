@@ -109,6 +109,22 @@ export function buildSessionOutputArgs(profile: string, sessionId: string): stri
   return ["-p", profile, "session", "output", sessionId];
 }
 
+/**
+ * Restart a session's tmux process (#castra-recover). `--force` bypasses
+ * agent-deck's issue-#30 freshness guard so a session that errored on a host
+ * reboot is restarted even if its `LastStartedAt` looks recent. For a Claude
+ * session with a stored `claude_session_id` this re-spawns as `claude --resume
+ * <uuid>`, which is what surfaces the "Resume from summary" startup picker the
+ * recovery sweep resolves.
+ */
+export function buildSessionRestartArgs(
+  profile: string,
+  sessionId: string,
+  force = true,
+): string[] {
+  return ["-p", profile, "session", "restart", sessionId, ...(force ? ["--force"] : [])];
+}
+
 // ---------------------------------------------------------------------------
 // parsers (pure) — copied from spawn-handoff.ts
 // ---------------------------------------------------------------------------
@@ -633,4 +649,132 @@ function readSession(profile: string, sessionId: string): CastraSession | undefi
 
 function readWorktreePath(profile: string, sessionId: string): string | undefined {
   return readSession(profile, sessionId)?.worktreePath || undefined;
+}
+
+// ---------------------------------------------------------------------------
+// recovery runtime (#castra-recover)
+// ---------------------------------------------------------------------------
+
+/**
+ * The narrowed session view the recovery sweep needs. Unlike {@link
+ * CastraSession} this carries the live `tmuxSession` name — the recovery path
+ * targets `tmux capture-pane`/`send-keys` at it to detect and resolve Claude's
+ * "Resume from summary" startup picker, and the name is regenerated on every
+ * restart so it must be re-read after restarting.
+ */
+export interface RecoverySessionView {
+  readonly sessionId: string;
+  readonly title: string;
+  readonly group: string;
+  readonly status: string;
+  readonly tmuxSession: string;
+}
+
+function parseRecoveryView(record: Record<string, unknown>): RecoverySessionView | null {
+  const sessionId = firstString(record, ["id", "session_id", "sessionId"]);
+  if (!sessionId) return null;
+  return {
+    sessionId,
+    title: firstString(record, ["title", "name"]) ?? "",
+    group: firstString(record, ["group"]) ?? "",
+    status: firstString(record, ["status"]) ?? "",
+    tmuxSession: firstString(record, ["tmux_session", "tmuxSession"]) ?? "",
+  };
+}
+
+/**
+ * The agent-deck + tmux operations the recovery sweep ({@link
+ * recoverErrorSessions}) drives, decoupled from the transport so tests inject a
+ * fake. Production uses {@link createAgentDeckRecoveryRuntime}; the pane
+ * capture/send-keys go through tmux directly (not agent-deck) because the CLI's
+ * `session restart` skips agent-deck's own resume-picker auto-confirm on the
+ * resume branch — Castra answers the picker itself.
+ */
+export interface RecoveryRuntime {
+  listSessions(profile: string): RecoverySessionView[];
+  restart(profile: string, sessionId: string): void;
+  readSession(profile: string, sessionId: string): RecoverySessionView | undefined;
+  /** Visible pane text, or `""` when the pane can't be read (gone/not ready). */
+  capturePane(tmuxSession: string): string;
+  /** Best-effort single Enter keypress — confirms the preselected picker option. */
+  sendEnter(tmuxSession: string): void;
+}
+
+/** Run `tmux <args>` against the same server socket agent-deck addresses. */
+function runTmux(args: readonly string[]): string {
+  const out = execFileSync("tmux", args as string[], {
+    encoding: "utf-8",
+    stdio: ["ignore", "pipe", "pipe"],
+    maxBuffer: EXEC_MAX_BUFFER,
+    env: resolveAgentDeckEnv(process.env, process.getuid?.()),
+  });
+  return typeof out === "string" ? out : "";
+}
+
+export function createAgentDeckRecoveryRuntime(): RecoveryRuntime {
+  return {
+    listSessions(profile) {
+      const stdout = runAgentDeck(buildListArgs(profile), true);
+      const parsed = parseJsonMaybe(stdout.trim());
+      if (!Array.isArray(parsed)) {
+        throw new CastraAgentDeckError("agent-deck list --json returned unexpected output.");
+      }
+      return parsed
+        .filter(
+          (value): value is Record<string, unknown> =>
+            !!value && typeof value === "object" && !Array.isArray(value),
+        )
+        .map((record) => parseRecoveryView(record))
+        .filter((view): view is RecoverySessionView => view !== null);
+    },
+
+    restart(profile, sessionId) {
+      try {
+        runAgentDeck(buildSessionRestartArgs(profile, sessionId, true), false);
+      } catch (err) {
+        const stderr = (err as AgentDeckExecError).stderr ?? "";
+        if (looksLikeNotFound(stderr)) {
+          throw new CastraNotFoundError(`session "${sessionId}" not found.`);
+        }
+        throw new CastraAgentDeckError(
+          `agent-deck session restart failed: ${(err as Error).message}`,
+        );
+      }
+    },
+
+    readSession(profile, sessionId) {
+      let stdout: string;
+      try {
+        stdout = runAgentDeck(buildSessionShowArgs(profile, sessionId), true);
+      } catch (err) {
+        const stderr = (err as AgentDeckExecError).stderr ?? "";
+        if (looksLikeNotFound(stderr)) return undefined;
+        throw new CastraAgentDeckError(
+          `agent-deck session show failed: ${(err as Error).message}`,
+        );
+      }
+      const parsed = parseJsonMaybe(stdout.trim());
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
+      return parseRecoveryView(parsed as Record<string, unknown>) ?? undefined;
+    },
+
+    capturePane(tmuxSession) {
+      if (!tmuxSession) return "";
+      try {
+        return runTmux(["capture-pane", "-p", "-t", tmuxSession]);
+      } catch {
+        // Pane gone or not yet ready — an empty read is a valid "no picker".
+        return "";
+      }
+    },
+
+    sendEnter(tmuxSession) {
+      if (!tmuxSession) return;
+      try {
+        runTmux(["send-keys", "-t", tmuxSession, "Enter"]);
+      } catch {
+        // Best-effort: a missing pane simply means there is nothing to confirm.
+      }
+    },
+  };
 }

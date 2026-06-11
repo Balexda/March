@@ -66,6 +66,17 @@ describe("babysit assess", () => {
     expect(kindsOf(assess(state))).toEqual(["worker-error"]);
   });
 
+  it("defers worker-error escalation while the worker is being auto-recovered (#316 review)", async () => {
+    const state = loopState({
+      slices: { s: { worker_session_id: "w", stage: "pr-open", pr: { number: 1 } } },
+      // castra-recover (runs before babysit) marked this still-errored worker as
+      // recovery_pending because its restart budget isn't exhausted yet.
+      sessions: [{ id: "w", group: "legate-workers", status: "error", recovery_pending: true }],
+      perSlice: { s: { recentOutput: { output: "boom" } } },
+    });
+    expect(kindsOf(assess(state))).toEqual([]);
+  });
+
   it("skips running workers and clears stale worker-error markers", async () => {
     const state = loopState({
       slices: { s: { worker_session_id: "w", stage: "pr-open", pr: { number: 1 }, worker_error_last_seen_at: "x" } },

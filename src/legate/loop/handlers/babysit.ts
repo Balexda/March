@@ -289,6 +289,12 @@ export function assess(state: LoopState): BabysitDecision[] {
 
     // 3. Worker error.
     if (workerStatus === "error") {
+      // A worker Castra is still auto-recovering (within its restart budget) is
+      // marked `recovery_pending` by the castra-recover handler, which runs just
+      // before babysit. Defer the worker-error escalation until that budget is
+      // exhausted (the marker clears) so a slow restart / missed picker doesn't
+      // cry wolf on the first recovery attempt.
+      if (worker.recovery_pending) continue;
       out.push({
         kind: "worker-error",
         sliceId,

@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { buildServer } from "./server.js";
-import type { AgentDeckAdapter } from "./adapter.js";
+import type { AgentDeckAdapter, RecoveryRuntime } from "./adapter.js";
 import {
   CastraAgentDeckError,
   CastraConflictError,
@@ -314,6 +314,151 @@ describe("castra server", () => {
       expect(sendLine!["castra.session_id"]).toBe("sess-1");
       expect(sendLine!["march.slice_id"]).toBe("slice-abc");
       expect(sendLine!["castra.message_bytes"]).toBe(11);
+    });
+  });
+
+  describe("POST /v1/sessions/recover", () => {
+    function recoveryRuntime(overrides: Partial<RecoveryRuntime> = {}): RecoveryRuntime {
+      return {
+        listSessions: vi
+          .fn()
+          .mockReturnValue([
+            { sessionId: "w1", title: "forge", group: "legate-workers", status: "error", tmuxSession: "t1" },
+          ]),
+        restart: vi.fn(),
+        readSession: vi.fn().mockReturnValue({
+          sessionId: "w1",
+          title: "forge",
+          group: "legate-workers",
+          status: "waiting",
+          tmuxSession: "t1",
+        }),
+        capturePane: vi.fn().mockReturnValue("❯ "),
+        sendEnter: vi.fn(),
+        ...overrides,
+      };
+    }
+
+    // Fast, finite poll loops: advance a fake clock on each sleep.
+    function fastRecovery(runtime: RecoveryRuntime) {
+      let clock = 0;
+      return {
+        runtime,
+        sleep: async (ms: number) => {
+          clock += ms;
+        },
+        now: () => clock,
+      };
+    }
+
+    it("requires a bearer token", async () => {
+      app = buildServer({ adapter: fakeAdapter(), token: "secret" });
+      const res = await app.inject({
+        method: "POST",
+        url: "/v1/sessions/recover",
+        payload: { profile: "march" },
+      });
+      expect(res.statusCode).toBe(401);
+    });
+
+    it("rejects a body without a profile", async () => {
+      app = buildServer({ adapter: fakeAdapter(), token: "secret" });
+      const res = await app.inject({
+        method: "POST",
+        url: "/v1/sessions/recover",
+        headers: { authorization: "Bearer secret" },
+        payload: {},
+      });
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error.code).toBe("invalid_request");
+    });
+
+    it("runs the sweep and returns the per-session report", async () => {
+      const runtime = recoveryRuntime();
+      app = buildServer({
+        adapter: fakeAdapter(),
+        token: "secret",
+        recovery: fastRecovery(runtime),
+      });
+      const res = await app.inject({
+        method: "POST",
+        url: "/v1/sessions/recover",
+        headers: { authorization: "Bearer secret" },
+        payload: { profile: "march" },
+      });
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual({
+        recovered: [
+          {
+            sessionId: "w1",
+            title: "forge",
+            group: "legate-workers",
+            outcome: "recovered",
+            pickerResolved: false,
+            finalStatus: "waiting",
+          },
+        ],
+      });
+      expect(runtime.restart).toHaveBeenCalledWith("march", "w1");
+    });
+
+    it("restricts the sweep to explicit sessionIds", async () => {
+      const runtime = recoveryRuntime({
+        listSessions: vi.fn().mockReturnValue([
+          { sessionId: "w1", title: "a", group: "legate-workers", status: "error", tmuxSession: "t1" },
+          { sessionId: "w2", title: "b", group: "legate-workers", status: "error", tmuxSession: "t2" },
+        ]),
+        readSession: vi.fn().mockReturnValue({
+          sessionId: "w2", title: "b", group: "legate-workers", status: "idle", tmuxSession: "t2",
+        }),
+      });
+      app = buildServer({
+        adapter: fakeAdapter(),
+        token: "secret",
+        recovery: fastRecovery(runtime),
+      });
+      const res = await app.inject({
+        method: "POST",
+        url: "/v1/sessions/recover",
+        headers: { authorization: "Bearer secret" },
+        payload: { profile: "march", sessionIds: ["w2"] },
+      });
+      expect(res.statusCode).toBe(200);
+      const ids = res.json().recovered.map((r: { sessionId: string }) => r.sessionId);
+      expect(ids).toEqual(["w2"]);
+      expect(runtime.restart).toHaveBeenCalledTimes(1);
+      expect(runtime.restart).toHaveBeenCalledWith("march", "w2");
+    });
+
+    it("forwards an explicit group filter to the sweep", async () => {
+      const runtime = recoveryRuntime({
+        listSessions: vi
+          .fn()
+          .mockReturnValue([
+            { sessionId: "c1", title: "conductor", group: "conductor", status: "error", tmuxSession: "tc" },
+          ]),
+        readSession: vi.fn().mockReturnValue({
+          sessionId: "c1",
+          title: "conductor",
+          group: "conductor",
+          status: "idle",
+          tmuxSession: "tc",
+        }),
+      });
+      app = buildServer({
+        adapter: fakeAdapter(),
+        token: "secret",
+        recovery: fastRecovery(runtime),
+      });
+      const res = await app.inject({
+        method: "POST",
+        url: "/v1/sessions/recover",
+        headers: { authorization: "Bearer secret" },
+        payload: { profile: "march", group: "conductor" },
+      });
+      expect(res.statusCode).toBe(200);
+      expect(res.json().recovered[0].sessionId).toBe("c1");
+      expect(runtime.restart).toHaveBeenCalledWith("march", "c1");
     });
   });
 });

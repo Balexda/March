@@ -199,6 +199,57 @@ describe("castra client — requests", () => {
     expect(url).toContain("pruneWorktree=true");
   });
 
+  it("posts a recovery sweep and returns the report", async () => {
+    const fetchImpl = vi.fn(async () =>
+      jsonResponse(200, {
+        recovered: [
+          {
+            sessionId: "w1",
+            title: "forge",
+            group: "legate-workers",
+            outcome: "picker_resolved",
+            pickerResolved: true,
+            finalStatus: "waiting",
+          },
+        ],
+      }),
+    );
+    const client = new CastraClient({
+      baseUrl: "http://castra:9264",
+      token: "secret",
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+    const report = await client.recoverSessions("march", "legate-workers");
+    expect(report.recovered[0]).toMatchObject({ sessionId: "w1", outcome: "picker_resolved" });
+    const [url, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe("http://castra:9264/v1/sessions/recover");
+    expect(init.method).toBe("POST");
+    expect(JSON.parse(init.body as string)).toEqual({ profile: "march", group: "legate-workers" });
+  });
+
+  it("omits the group from the recovery body when not given", async () => {
+    const fetchImpl = vi.fn(async () => jsonResponse(200, { recovered: [] }));
+    const client = new CastraClient({
+      baseUrl: "http://castra:9264",
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+    const report = await client.recoverSessions("march");
+    expect(report).toEqual({ recovered: [] });
+    const [, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
+    expect(JSON.parse(init.body as string)).toEqual({ profile: "march" });
+  });
+
+  it("forwards explicit sessionIds in the recovery body", async () => {
+    const fetchImpl = vi.fn(async () => jsonResponse(200, { recovered: [] }));
+    const client = new CastraClient({
+      baseUrl: "http://castra:9264",
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+    await client.recoverSessions("march", undefined, ["s1", "s2"]);
+    const [, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
+    expect(JSON.parse(init.body as string)).toEqual({ profile: "march", sessionIds: ["s1", "s2"] });
+  });
+
   it("probes the authenticated /v1 surface for readiness", async () => {
     const fetchImpl = vi.fn(async () => jsonResponse(200, { sessions: [] }));
     const ok = new CastraClient({
@@ -286,5 +337,23 @@ describe("SyncCastraClient (curl transport)", () => {
     expect(client().removeSession({ profile: "smithy", sessionId: "s1", pruneWorktree: true })).toEqual({
       removed: true,
     });
+  });
+
+  it("runs a recovery sweep with a longer curl timeout", () => {
+    cp.execFileSync.mockReturnValue(
+      reply({
+        recovered: [
+          { sessionId: "w1", title: "f", group: "legate-workers", outcome: "recovered", pickerResolved: false, finalStatus: "idle" },
+        ],
+      }),
+    );
+    const report = client().recoverSessions("smithy", "legate-workers");
+    expect(report.recovered[0]).toMatchObject({ sessionId: "w1", outcome: "recovered" });
+    const args = cp.execFileSync.mock.calls[0][1] as string[];
+    expect(args.some((a) => a.includes("/v1/sessions/recover"))).toBe(true);
+    // The sweep gets the long --max-time ceiling, not the 60s default.
+    expect(args[args.indexOf("--max-time") + 1]).toBe("300");
+    const body = JSON.parse(args[args.indexOf("--data-binary") + 1]!);
+    expect(body).toEqual({ profile: "smithy", group: "legate-workers" });
   });
 });

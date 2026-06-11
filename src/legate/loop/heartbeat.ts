@@ -82,6 +82,16 @@ export function runHeartbeat(out: CoordinatorOutput, deps: HeartbeatDeps): any {
     event(meta.processor_events_path, { ...base, kind: "ghost_cleanup", action: a.action, session_id: a.sessionId, title: a.title, detail: a.detail });
     log("[" + ts + "] " + a.action + " " + a.sessionId + " " + (a.title || "") + ": " + a.detail);
   }
+  // castra-recover runs after ghost-cleanup and before relaunch; keep its
+  // action-log ordering consistent with the handler order within the tick.
+  for (const a of out.results.castraRecover.actions) {
+    event(meta.processor_events_path, { ...base, kind: "castra_recover", action: a.action, session_id: a.sessionId, detail: a.detail });
+    log("[" + ts + "] " + a.action + " " + (a.sessionId || "") + ": " + a.detail);
+  }
+  for (const failure of out.results.castraRecover.failures) {
+    event(meta.processor_events_path, { ...base, kind: "castra_recover_failure", action: failure.action, session_id: failure.sessionId, detail: failure.detail });
+    log("[" + ts + "] castra-recover failed " + (failure.sessionId || "") + ": " + failure.detail);
+  }
   for (const a of out.results.relaunch.actions) {
     event(meta.processor_events_path, { ...base, kind: "steward_relaunch", action: a.action, slice_id: a.sliceId, session_id: a.sessionId, detail: a.detail });
     log("[" + ts + "] " + a.action + " " + a.sliceId + ": " + a.detail);

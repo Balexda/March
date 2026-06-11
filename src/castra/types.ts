@@ -44,6 +44,41 @@ export interface CastraSession {
   readonly metadata?: Record<string, string>;
 }
 
+/**
+ * Per-session outcome of a recovery sweep (#castra-recover):
+ *   - `recovered`        — restarted and the session left `error` status.
+ *   - `picker_resolved`  — the "Resume from summary" picker was answered AND the
+ *                          session left `error`; a stronger `recovered` that
+ *                          records the resume path was exercised.
+ *   - `restart_failed`   — `agent-deck session restart` threw; nothing changed.
+ *   - `still_error`      — restarted but the session was still `error` at the
+ *                          status deadline (manual attention may be needed).
+ */
+export type SessionRecoveryOutcome =
+  | "recovered"
+  | "picker_resolved"
+  | "restart_failed"
+  | "still_error";
+
+/** What happened to one session during {@link recoverErrorSessions}. */
+export interface SessionRecoveryResult {
+  readonly sessionId: string;
+  readonly title: string;
+  readonly group: string;
+  readonly outcome: SessionRecoveryOutcome;
+  /** True when the Claude resume picker was detected and confirmed. */
+  readonly pickerResolved: boolean;
+  /** The session's agent-deck status at the end of the attempt. */
+  readonly finalStatus: string;
+  /** Present only on `restart_failed` — the underlying error message. */
+  readonly error?: string;
+}
+
+/** The result of a recovery sweep over a profile's errored sessions. */
+export interface RecoverReport {
+  readonly recovered: readonly SessionRecoveryResult[];
+}
+
 /** Stable error codes returned in the API error envelope. */
 export type CastraErrorCode =
   | "invalid_request"

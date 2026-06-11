@@ -13,8 +13,11 @@ import {
 } from "./config.js";
 import {
   createAgentDeckAdapter,
+  createAgentDeckRecoveryRuntime,
   type AgentDeckAdapter,
+  type RecoveryRuntime,
 } from "./adapter.js";
+import { recoverErrorSessions, type RecoverDeps } from "./recovery.js";
 import {
   type CastraSpanContext,
   recordCastraRequest,
@@ -50,6 +53,18 @@ export interface BuildServerOptions {
   readonly logger?: FastifyBaseLogger | boolean;
   /** Process start time for `/status` uptime; defaults to now. */
   readonly startedAt?: number;
+  /**
+   * Recovery sweep dependencies (#castra-recover). `runtime` defaults to the
+   * real agent-deck/tmux-backed {@link createAgentDeckRecoveryRuntime}; the
+   * remaining fields (sleep/now/timeouts) let tests run the sweep without real
+   * timers or a live agent-deck. `sleep` defaults to a real `setTimeout`.
+   */
+  readonly recovery?: Partial<RecoverDeps> & { readonly runtime?: RecoveryRuntime };
+}
+
+/** Real-timer sleep used by the recovery sweep unless a test injects its own. */
+function defaultSleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 // Reusable JSON-schema fragments (kept in sync with config.ts validators).
@@ -129,6 +144,27 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
   const adapter = options.adapter ?? createAgentDeckAdapter();
   const token = options.token?.trim() || undefined;
   const startedAt = options.startedAt ?? Date.now();
+
+  // Recovery sweep deps: real agent-deck/tmux runtime + real-timer sleep unless
+  // a test overrides them. Built once and reused per `POST /v1/sessions/recover`.
+  const recoveryRuntime = options.recovery?.runtime ?? createAgentDeckRecoveryRuntime();
+  const recoverDeps: RecoverDeps = {
+    runtime: recoveryRuntime,
+    sleep: options.recovery?.sleep ?? defaultSleep,
+    ...(options.recovery?.now ? { now: options.recovery.now } : {}),
+    ...(options.recovery?.pickerTimeoutMs !== undefined
+      ? { pickerTimeoutMs: options.recovery.pickerTimeoutMs }
+      : {}),
+    ...(options.recovery?.pickerPollMs !== undefined
+      ? { pickerPollMs: options.recovery.pickerPollMs }
+      : {}),
+    ...(options.recovery?.statusTimeoutMs !== undefined
+      ? { statusTimeoutMs: options.recovery.statusTimeoutMs }
+      : {}),
+    ...(options.recovery?.statusPollMs !== undefined
+      ? { statusPollMs: options.recovery.statusPollMs }
+      : {}),
+  };
 
   // A logger instance wires through Fastify's `loggerInstance`; a boolean (or
   // the off default) goes through `logger` so request logs stay disabled.
@@ -468,6 +504,79 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
         },
       );
       return { ok: true, removed: result.removed };
+    },
+  );
+
+  app.post(
+    "/v1/sessions/recover",
+    {
+      schema: {
+        body: {
+          type: "object",
+          required: ["profile"],
+          properties: {
+            profile: profileSchema,
+            group: groupSchema,
+            // Explicit session-id targeting for a controlled "recover just these"
+            // sweep (bounded so the body stays a targeting list, not a blob).
+            sessionIds: {
+              type: "array",
+              maxItems: 64,
+              items: { type: "string", pattern: "^[a-zA-Z0-9][a-zA-Z0-9._:-]*$", maxLength: 128 },
+            },
+          },
+        },
+      },
+    },
+    async (request) => {
+      const { profile, group, sessionIds } = request.body as {
+        profile: string;
+        group?: string;
+        sessionIds?: string[];
+      };
+      const sliceId = sliceIdFrom(request);
+      // Run the sweep first (it awaits restarts + picker/status polls), then
+      // record a correlated summary span/log. HTTP latency is captured by the
+      // onResponse metrics hook, so the marker span stays zero-duration.
+      const report = await recoverErrorSessions(recoverDeps, {
+        profile,
+        ...(group ? { group } : {}),
+        ...(sessionIds && sessionIds.length ? { sessionIds } : {}),
+      });
+      const resolved = report.recovered.filter(
+        (r) => r.outcome === "recovered" || r.outcome === "picker_resolved",
+      ).length;
+      const pickers = report.recovered.filter((r) => r.pickerResolved).length;
+      withCastraSpan(
+        {
+          op: "recover",
+          traceKey: traceKeyFor(request),
+          attributes: {
+            "march.profile": profile,
+            ...(group ? { "castra.group": group } : {}),
+            "castra.recover_total": report.recovered.length,
+            "castra.recover_resolved": resolved,
+            "castra.recover_pickers": pickers,
+            ...sliceAttr(sliceId),
+          },
+        },
+        (span) => {
+          request.log.info(
+            {
+              "castra.op": "recover",
+              "march.profile": profile,
+              ...(group ? { "castra.group": group } : {}),
+              "castra.recover_total": report.recovered.length,
+              "castra.recover_resolved": resolved,
+              "castra.recover_pickers": pickers,
+              ...sliceAttr(sliceId),
+              ...traceLogFields(span),
+            },
+            "castra recovery sweep",
+          );
+        },
+      );
+      return report;
     },
   );
 
