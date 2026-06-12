@@ -3,7 +3,7 @@ import type { LoopState, SliceExternalState, SmithyView } from "./types.js";
 import { looseSessionMatch, summarizeWorkers } from "../pure/session.js";
 import { dispatchableReady, isTerminalSlice } from "../pure/slice.js";
 import { actionableLayer0Items, queueDepth, readySmithyItems } from "../pure/smithy-graph.js";
-import { prSnapshotNumber, type ObservedSession, type SystemState } from "../../../herald/events.js";
+import { prSnapshotErrored, prSnapshotNumber, type ObservedSession, type SystemState } from "../../../herald/events.js";
 
 /**
  * Stage 1: gather every external read into one {@link LoopState} snapshot. Since
@@ -354,11 +354,17 @@ export function resolveSliceSession(
   return sessions.find((sx) => looseSessionMatch(sx, loose)) ?? null;
 }
 
-/** Checks are still running — `gh pr view`'s rollup says PENDING. CI completing
- *  green/red does NOT reliably bump `pullRequest.updatedAt`, so a merge-candidate
- *  parked on CI must be re-fetched every tick (it can't ride the cursor). */
-function prChecksPending(pr: any): boolean {
-  return pr?.checks === "PENDING";
+/** Checks haven't reached a terminal verdict — `gh pr view`'s rollup is `NONE`
+ *  before any check has registered and `PENDING` while they run. In BOTH states a
+ *  later status-check create/complete can change `statusCheckRollup` WITHOUT
+ *  advancing `pullRequest.updatedAt`, so a PR in either must be re-fetched every
+ *  tick (it can't ride the cursor) — otherwise a PR first observed at `NONE` would
+ *  be skipped forever and never surface its CI verdict to the babysit merge gate.
+ *  (A repo with NO CI sits at `NONE` permanently and so isn't cursor-gated, but
+ *  its review activity still bumps `updatedAt`, so nothing is missed — only a PR
+ *  detail fetch per tick is spent, which is acceptable.) */
+function prChecksUnsettled(pr: any): boolean {
+  return pr?.checks === "NONE" || pr?.checks === "PENDING";
 }
 
 /** The PR has at least one unresolved review thread. Resolving a thread without
@@ -383,10 +389,15 @@ export function shouldRefetchKnownPr(priorPr: any, live: OpenPrEntry | undefined
   // No cursor stored yet (first observe, or a snapshot from before this feature):
   // fetch so we capture `updated_at` to gate on next tick.
   if (priorPr?.updated_at === undefined) return true;
+  // A latched transient error must clear: #288 keeps the number/state and ATTACHES
+  // `error` to the stored snapshot, so without this a `gh pr view` blip would leave
+  // the slice stuck on the errored snapshot until unrelated activity bumps
+  // updatedAt. Re-fetch until a successful detail read drops the error.
+  if (prSnapshotErrored(priorPr)) return true;
   // Activity since we last looked (comment / review / commit all bump updatedAt).
   if (live.updatedAt !== priorPr.updated_at) return true;
   // Lifecycle states whose changes updatedAt can miss (see the helpers above).
-  if (prChecksPending(priorPr)) return true;
+  if (prChecksUnsettled(priorPr)) return true;
   if (prHasUnresolvedThreads(priorPr)) return true;
   return false;
 }

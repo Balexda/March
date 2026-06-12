@@ -642,6 +642,33 @@ describe("senseObserved PR change-cursor (listOpenPrs gate)", () => {
     expect(queryPr).toHaveBeenCalledTimes(1);
   });
 
+  it("RE-FETCHES an idle-cursor PR whose checks are still NONE (observed pre-CI; create may not bump updatedAt)", async () => {
+    const queryPr = vi.fn(async () => ({ number: 7, state: "OPEN" }));
+    await senseObserved(
+      deps({
+        listSessions: async () => live,
+        queryPr,
+        listOpenPrs: async () => index([[7, { updatedAt: "T1" }]]),
+      }),
+      prevWithPr({ number: 7, updated_at: "T1", checks: "NONE", thread_count: 0 }),
+    );
+    expect(queryPr).toHaveBeenCalledTimes(1);
+  });
+
+  it("RE-FETCHES an idle-cursor PR carrying a latched error so a transient gh failure clears", async () => {
+    const queryPr = vi.fn(async () => ({ number: 7, state: "OPEN" }));
+    await senseObserved(
+      deps({
+        listSessions: async () => live,
+        queryPr,
+        listOpenPrs: async () => index([[7, { updatedAt: "T1" }]]),
+      }),
+      // #288 keeps number/state and attaches `error` to the stored snapshot.
+      prevWithPr({ number: 7, updated_at: "T1", checks: "PASS", thread_count: 0, error: "rate limited" }),
+    );
+    expect(queryPr).toHaveBeenCalledTimes(1);
+  });
+
   it("RE-FETCHES an idle-cursor PR with unresolved threads (catch resolve-without-push)", async () => {
     const queryPr = vi.fn(async () => ({ number: 7, state: "OPEN" }));
     await senseObserved(
