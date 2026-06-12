@@ -8,7 +8,7 @@ import { execFile } from "node:child_process";
  * all done records up-front; layer 0 of the returned graph still means "ready to
  * dispatch right now".
  *
- * Split out of {@link ../observe/sense-io.ts sense-io.ts} so it can be shared
+ * Split out of {@link ./sense-io.js} so it can be shared
  * WITHOUT dragging in the gh-based world observation: Herald's observer pulls it
  * via sense-io (the full {@link SenseDeps}), and the legate's Herald-fold sense
  * pulls it via `fold-deps.ts` — letting the legate read its own smithy queue
