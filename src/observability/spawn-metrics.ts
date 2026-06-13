@@ -18,6 +18,7 @@ export type SpawnFailureStage =
   | "image_build"
   | "container_run"
   | "patch_extract"
+  | "handoff_eligibility"
   | "patch_apply"
   | "steward_send"
   | "rollback";

@@ -6,11 +6,14 @@ import {
   buildManagerPrompt,
   buildSpawnCommitPrompt,
   createHatcherySpawnArtifacts,
+  evaluateStewardHandoffEligibility,
   extractPatchFromSpawnOutput,
   hatcherySpawnLogDir,
   managerBranchName,
   validateHatcherySpawnBackend,
 } from "./spawn-handoff.js";
+import type { DispatchTrace } from "../observability/spawn-trace.js";
+import type { ExtractionResult } from "../brood/spawn-record.js";
 import { claudeCodeBackend, codexBackend, PATCH_SENTINEL } from "../spawn/backends.js";
 
 /** Encode a patch the way the in-container wrapper does: one sentinel line. */
@@ -221,5 +224,197 @@ describe("spawn-handoff", () => {
     );
     const metadata = JSON.parse(fs.readFileSync(artifacts.metadataPath, "utf-8"));
     expect(metadata.artifacts.patchPath).toBe(artifacts.patchPath);
+  });
+
+  describe("Steward handoff eligibility", () => {
+    function successfulExtraction(
+      patchText =
+        "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-a\n+b\n",
+      touchedPaths: readonly string[] = ["a.txt"],
+    ): ExtractionResult {
+      return {
+        spawnId: "spawn-1",
+        backend: "codex",
+        status: "succeeded",
+        patch: {
+          spawnId: "spawn-1",
+          backend: "codex",
+          patchText,
+          touchedPaths,
+          sha256: "abc123",
+        },
+        extractedAt: "2026-06-13T00:00:00.000Z",
+      };
+    }
+
+    function failedExtraction(): ExtractionResult {
+      return {
+        spawnId: "spawn-1",
+        backend: "codex",
+        status: "failed",
+        failureReason: "malformed_output",
+        diagnostic: "no committed patch",
+        extractedAt: "2026-06-13T00:00:00.000Z",
+      };
+    }
+
+    function fakeDispatch() {
+      const spans: Array<{
+        name: string;
+        errored: boolean;
+        attributes: Record<string, unknown>;
+      }> = [];
+      const dispatch: DispatchTrace = {
+        enabled: true,
+        spanContext: () => undefined,
+        span: (name, fn) => {
+          const recorded: {
+            name: string;
+            errored: boolean;
+            attributes: Record<string, unknown>;
+          } = { name, errored: false, attributes: {} };
+          spans.push(recorded);
+          const handle = {
+            setAttributes: (attributes: Record<string, unknown>) => {
+              recorded.attributes = { ...recorded.attributes, ...attributes };
+            },
+            spanContext: () => undefined,
+          };
+          try {
+            return fn(handle);
+          } catch (err) {
+            recorded.errored = true;
+            throw err;
+          }
+        },
+        spanAsync: async (_name, fn) =>
+          fn({ setAttributes: () => {}, spanContext: () => undefined }),
+        setAttributes: () => {},
+        recordException: () => {},
+        traceparent: () => undefined,
+        end: () => {},
+      };
+      return { dispatch, spans };
+    }
+
+    it("exposes only validated patch fields for a successful extraction", () => {
+      const { dispatch, spans } = fakeDispatch();
+      const result = evaluateStewardHandoffEligibility({
+        spawnId: "spawn-1",
+        dispatch,
+        readExtractionResult: () => successfulExtraction(),
+      });
+
+      expect(result).toEqual({
+        eligible: true,
+        handoff: {
+          spawnId: "spawn-1",
+          backend: "codex",
+          patchText:
+            "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-a\n+b\n",
+          patchSha256: "abc123",
+          touchedPaths: ["a.txt"],
+          extractedAt: "2026-06-13T00:00:00.000Z",
+        },
+      });
+      expect(spans).toHaveLength(1);
+      expect(spans[0]).toMatchObject({
+        name: "steward.handoff_eligibility",
+        errored: false,
+      });
+      expect(spans[0].attributes).toMatchObject({
+        "march.handoff.eligible": true,
+        "march.handoff.reason": "ready",
+        "march.extraction.status": "succeeded",
+      });
+    });
+
+    it("refuses failed extraction with bounded metadata and an errored span", () => {
+      const { dispatch, spans } = fakeDispatch();
+      const result = evaluateStewardHandoffEligibility({
+        spawnId: "spawn-1",
+        dispatch,
+        readExtractionResult: () => failedExtraction(),
+      });
+
+      expect(result).toMatchObject({
+        eligible: false,
+        reason: "failed",
+        failureReason: "malformed_output",
+        backend: "codex",
+        extractedAt: "2026-06-13T00:00:00.000Z",
+      });
+      if (result.eligible) throw new Error("expected handoff refusal");
+      expect(result.diagnostic).toContain("no committed patch");
+      expect(spans[0]).toMatchObject({
+        name: "steward.handoff_eligibility",
+        errored: true,
+      });
+      expect(spans[0].attributes).toMatchObject({
+        "march.handoff.eligible": false,
+        "march.handoff.reason": "failed",
+        "march.extraction.status": "failed",
+      });
+    });
+
+    it("refuses missing extraction state with an errored span", () => {
+      const { dispatch, spans } = fakeDispatch();
+      const result = evaluateStewardHandoffEligibility({
+        spawnId: "spawn-1",
+        dispatch,
+        readExtractionResult: () => undefined,
+      });
+
+      expect(result).toMatchObject({
+        eligible: false,
+        reason: "missing",
+      });
+      if (result.eligible) throw new Error("expected handoff refusal");
+      expect(result.diagnostic).toContain("extraction result is missing");
+      expect(spans[0]).toMatchObject({
+        name: "steward.handoff_eligibility",
+        errored: true,
+      });
+      expect(spans[0].attributes).toMatchObject({
+        "march.handoff.eligible": false,
+        "march.handoff.reason": "missing",
+        "march.extraction.status": "missing",
+      });
+    });
+
+    it("refuses empty or normalized no-op successful extraction with errored spans", () => {
+      for (const extractionResult of [
+        successfulExtraction("   \n", ["a.txt"]),
+        successfulExtraction("diff --git a/a.txt b/a.txt\n", []),
+        // Header-only patch with a non-empty computed touchedPaths list (the
+        // shape extractionSuccessResult() really produces) — no hunk, so it
+        // must still be rejected as no-op (#350 review).
+        successfulExtraction("diff --git a/a.txt b/a.txt\n", ["a.txt"]),
+        successfulExtraction("not a git diff\n", ["a.txt"]),
+      ]) {
+        const { dispatch, spans } = fakeDispatch();
+        const result = evaluateStewardHandoffEligibility({
+          spawnId: "spawn-1",
+          dispatch,
+          readExtractionResult: () => extractionResult,
+        });
+
+        expect(result).toMatchObject({
+          eligible: false,
+          reason: "noop",
+        });
+        if (result.eligible) throw new Error("expected handoff refusal");
+        expect(result.diagnostic).toContain("empty or no-op");
+        expect(spans[0]).toMatchObject({
+          name: "steward.handoff_eligibility",
+          errored: true,
+        });
+        expect(spans[0].attributes).toMatchObject({
+          "march.handoff.eligible": false,
+          "march.handoff.reason": "noop",
+          "march.extraction.status": "succeeded",
+        });
+      }
+    });
   });
 });

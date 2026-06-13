@@ -19,6 +19,31 @@ export const DEFAULT_BACKEND = "claude-code";
  */
 export type SpawnStatus = "created" | "running" | "stopped" | "failed";
 
+export interface SpawnPatchResult {
+  readonly spawnId: string;
+  readonly backend: string;
+  readonly patchText: string;
+  readonly touchedPaths: readonly string[];
+  readonly sha256: string;
+}
+
+export type ExtractionResult =
+  | {
+      readonly spawnId: string;
+      readonly backend: string;
+      readonly status: "succeeded";
+      readonly patch: SpawnPatchResult;
+      readonly extractedAt: string;
+    }
+  | {
+      readonly spawnId: string;
+      readonly backend: string;
+      readonly status: "failed";
+      readonly failureReason: string;
+      readonly diagnostic?: string;
+      readonly extractedAt: string;
+    };
+
 /**
  * Structure of a SpawnRecord JSON file at `~/.march/spawns/<spawn-id>.json`.
  *
@@ -70,6 +95,12 @@ export interface SpawnRecord {
    * from its `error` argument. Forward-compatible (no `version` bump).
    */
   failureReason?: string;
+  /**
+   * Current backend-neutral extraction result for this spawn. Downstream
+   * Hatchery handoff reads this field instead of scraping raw backend output.
+   * Forward-compatible (no `version` bump).
+   */
+  extractionResult?: ExtractionResult;
 }
 
 /** Inputs required to write the initial `"created"` spawn record. */
@@ -327,6 +358,27 @@ export function updateSpawnRecordStewardSession(
   };
   atomicWriteSpawnRecord(spawnRecordPath(id, homeDir), updated);
   return updated;
+}
+
+export function updateSpawnRecordExtractionResult(
+  id: string,
+  extractionResult: ExtractionResult,
+  homeDir?: string,
+): SpawnRecord {
+  const existing = readSpawnRecord(id, homeDir);
+  const updated: SpawnRecord = {
+    ...existing,
+    extractionResult,
+  };
+  atomicWriteSpawnRecord(spawnRecordPath(id, homeDir), updated);
+  return updated;
+}
+
+export function readSpawnRecordExtractionResult(
+  id: string,
+  homeDir?: string,
+): ExtractionResult | undefined {
+  return readSpawnRecord(id, homeDir).extractionResult;
 }
 
 /**
