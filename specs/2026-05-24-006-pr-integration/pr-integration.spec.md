@@ -130,7 +130,7 @@ Recommended implementation sequence:
 
 | ID | Title | Depends On | Artifact |
 |----|-------|------------|----------|
-| US1 | Gate PR Integration on Validated Extraction | — | — |
+| US1 | Gate PR Integration on Validated Extraction | — | specs/2026-05-24-006-pr-integration/01-gate-pr-integration-on-validated-extraction.tasks.md |
 | US2 | Apply the Validated Patch to an Integration Branch | US1 | — |
 | US3 | Create a Reviewable Commit and Push Branch | US2 | — |
 | US4 | Open or Reuse a Pull Request | US3 | — |
