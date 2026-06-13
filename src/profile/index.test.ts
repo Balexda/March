@@ -45,4 +45,214 @@ describe("validateProfile", () => {
   it("lets TypeScript consumers narrow on result.ok", () => {
     assertValidationResultNarrowing(validateProfile(null));
   });
+
+  it.each([
+    { name: "spawn", baseImage: "march-base:latest" },
+    { version: "1", name: "spawn", baseImage: "march-base:latest" },
+    { version: 2, name: "spawn", baseImage: "march-base:latest" },
+  ])("returns one UnsupportedSchemaVersion error for %#", (input) => {
+    expect(validateProfile(input)).toEqual({
+      ok: false,
+      errors: [
+        {
+          code: "UnsupportedSchemaVersion",
+          path: "/version",
+          message: "Profile version must be the supported schema version 1.",
+        },
+      ],
+    });
+  });
+
+  it("short-circuits version failures before identity field validation", () => {
+    const result = validateProfile({
+      version: "1",
+      name: "Spawn",
+      baseImage: "",
+    });
+
+    expect(result).toEqual({
+      ok: false,
+      errors: [
+        {
+          code: "UnsupportedSchemaVersion",
+          path: "/version",
+          message: "Profile version must be the supported schema version 1.",
+        },
+      ],
+    });
+  });
+
+  it("accepts a profile with valid identity fields", () => {
+    expect(
+      validateProfile({
+        version: 1,
+        name: "spawn",
+        baseImage: "march-base:latest",
+      }),
+    ).toEqual({
+      ok: true,
+      value: {
+        version: 1,
+        name: "spawn",
+        baseImage: "march-base:latest",
+      },
+    });
+  });
+
+  it.each(["Spawn", "1spawn", ""])(
+    "returns InvalidName at /name for invalid profile name %s",
+    (name) => {
+      expect(
+        validateProfile({
+          version: 1,
+          name,
+          baseImage: "march-base:latest",
+        }),
+      ).toEqual({
+        ok: false,
+        errors: [
+          {
+            code: "InvalidName",
+            path: "/name",
+            message:
+              "Profile name must start with a lowercase letter and contain only lowercase letters, digits, and hyphens.",
+          },
+        ],
+      });
+    },
+  );
+
+  it.each([
+    ["", "InvalidImageReference"],
+    ["march base:latest", "InvalidImageReference"],
+    [42, "WrongType"],
+  ] as const)(
+    "returns %s at /baseImage for invalid image reference %#",
+    (baseImage, code) => {
+      expect(
+        validateProfile({
+          version: 1,
+          name: "spawn",
+          baseImage,
+        }),
+      ).toEqual({
+        ok: false,
+        errors: [
+          {
+            code,
+            path: "/baseImage",
+            message:
+              code === "WrongType"
+                ? "Profile baseImage must be a string."
+                : "Profile baseImage must be a valid Docker image reference.",
+          },
+        ],
+      });
+    },
+  );
+
+  it("returns MissingField for an omitted name", () => {
+    expect(
+      validateProfile({ version: 1, baseImage: "march-base:latest" }),
+    ).toEqual({
+      ok: false,
+      errors: [
+        {
+          code: "MissingField",
+          path: "/name",
+          message: "Profile name is required.",
+        },
+      ],
+    });
+  });
+
+  it.each([null, 42])(
+    "returns WrongType at /name for non-string name %#",
+    (name) => {
+      expect(
+        validateProfile({ version: 1, name, baseImage: "march-base:latest" }),
+      ).toEqual({
+        ok: false,
+        errors: [
+          {
+            code: "WrongType",
+            path: "/name",
+            message: "Profile name must be a string.",
+          },
+        ],
+      });
+    },
+  );
+
+  it("returns MissingField for an omitted baseImage", () => {
+    expect(validateProfile({ version: 1, name: "spawn" })).toEqual({
+      ok: false,
+      errors: [
+        {
+          code: "MissingField",
+          path: "/baseImage",
+          message: "Profile baseImage is required.",
+        },
+      ],
+    });
+  });
+
+  it("returns WrongType at /baseImage for a present non-string baseImage", () => {
+    expect(
+      validateProfile({ version: 1, name: "spawn", baseImage: null }),
+    ).toEqual({
+      ok: false,
+      errors: [
+        {
+          code: "WrongType",
+          path: "/baseImage",
+          message: "Profile baseImage must be a string.",
+        },
+      ],
+    });
+  });
+
+  it("accepts digest-pinned image references", () => {
+    expect(
+      validateProfile({
+        version: 1,
+        name: "spawn",
+        baseImage:
+          "march-base:latest@sha256:0123abcd0123abcd0123abcd0123abcd0123abcd0123abcd0123abcd0123abcd",
+      }),
+    ).toEqual({
+      ok: true,
+      value: {
+        version: 1,
+        name: "spawn",
+        baseImage:
+          "march-base:latest@sha256:0123abcd0123abcd0123abcd0123abcd0123abcd0123abcd0123abcd0123abcd",
+      },
+    });
+  });
+
+  it("orders identity field errors deterministically by path and code", () => {
+    const result = validateProfile({
+      version: 1,
+      name: "Spawn",
+      baseImage: "",
+    });
+
+    expect(result).toEqual({
+      ok: false,
+      errors: [
+        {
+          code: "InvalidImageReference",
+          path: "/baseImage",
+          message: "Profile baseImage must be a valid Docker image reference.",
+        },
+        {
+          code: "InvalidName",
+          path: "/name",
+          message:
+            "Profile name must start with a lowercase letter and contain only lowercase letters, digits, and hyphens.",
+        },
+      ],
+    });
+  });
 });

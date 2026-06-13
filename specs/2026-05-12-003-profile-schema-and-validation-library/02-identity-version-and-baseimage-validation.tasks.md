@@ -18,7 +18,7 @@
 
 ### Tasks
 
-- [ ] **Validate schema version before other fields**
+- [x] **Validate schema version before other fields**
 
   Update `src/profile/` so `validateProfile` enforces the required top-level `version` field for object inputs before any other profile-field checks. Preserve the Story 1 non-object behavior while satisfying AS 2.2 and the version short-circuit contract.
 
@@ -29,7 +29,7 @@
   - Version failures return exactly one validation error
   - The validator remains pure and synchronous
 
-- [ ] **Validate name and base image fields**
+- [x] **Validate name and base image fields**
 
   Extend `src/profile/` validation and colocated tests for the required `name` and `baseImage` fields. Keep this task scoped to US2 identity fields, leaving downstream section validation to later stories while satisfying AS 2.1 and AS 2.3-AS 2.5.
 
