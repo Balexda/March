@@ -18,7 +18,7 @@
 
 ### Tasks
 
-- [ ] **Add the public export summary extractor**
+- [x] **Add the public export summary extractor**
 
   Add the extraction implementation in the documentation-contract tooling source area as a local filesystem module. The extractor should parse TypeScript with a syntax-aware parser, accept repo-relative TypeScript source paths, and return the `PublicExportSummary` shape from the data model without adding the npm command, ownership mapping, contract marker replacement, or CI enforcement.
 
@@ -30,7 +30,7 @@
   - Parse failures return bounded diagnostics with the source path instead of partial successful output.
   - The module runs from repository filesystem inputs only and does not require Docker, network access, live March services, or agent sessions.
 
-- [ ] **Make extraction output byte-stable**
+- [x] **Make extraction output byte-stable**
 
   Normalize declaration signatures and ordering so repeated extraction over unchanged source files produces identical summaries. Keep this behavior inside the extractor and its formatting helpers so later generated Markdown and check/write command modes can depend on the same deterministic surface.
 
@@ -42,7 +42,7 @@
   - Unsupported export syntax is reported as a bounded extraction diagnostic with category, severity, source path, and message.
   - Running the same fixture extraction twice yields byte-identical serialized output.
 
-- [ ] **Cover extraction with focused fixtures**
+- [x] **Cover extraction with focused fixtures**
 
   Add fixture-driven tests for the extractor that exercise the public and private declaration cases in AS 1.1-1.3. The tests should validate the public export summary behavior directly and should not depend on contract ownership mapping, AUTOGEN markers, write mode, check mode, or live subsystem services.
 
