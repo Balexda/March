@@ -101,7 +101,7 @@ Recommended implementation sequence:
 
 | ID | Title | Depends On | Artifact |
 |----|-------|-----------|----------|
-| US1 | Document Steward Launch and Input Contract | — | — |
+| US1 | Document Steward Launch and Input Contract | — | specs/2026-06-03-008-steward-role-contract/01-document-steward-launch-and-input-contract.tasks.md |
 | US2 | Document Patch Application and PR-Ready Outcome Contract | US1 | — |
 | US3 | Document Steward Lifecycle, Tracking, and Cleanup Boundaries | US1 | — |
 | US4 | Record Cross-Contract Ownership for Steward Consumers | US1, US2, US3 | — |
