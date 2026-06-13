@@ -101,7 +101,7 @@ Recommended implementation sequence:
 
 | ID | Title | Depends On | Artifact |
 |----|-------|-----------|----------|
-| US1 | Extract Exported TypeScript Surface | — | — |
+| US1 | Extract Exported TypeScript Surface | — | specs/2026-06-07-010-typescript-public-interface-autogen-extraction/01-extract-exported-typescript-surface.tasks.md |
 | US3 | Map Extraction Inputs to Contract Owners | US1 | — |
 | US2 | Replace Contract AUTOGEN Regions Safely | US1, US3 | — |
 | US4 | Provide Deterministic Local Command Output | US1, US2, US3 | — |
