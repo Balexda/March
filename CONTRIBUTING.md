@@ -40,8 +40,17 @@ The milestone-level execution plan (M1 through M8, success criteria, dependency 
 
 Day-to-day commands:
 
-- **`npm test`** — runs the deterministic CI suite. Today that's the full vitest set: L0, L1, and the L2 cases that exercise real Docker (`spawn/container-launch`, `spawn/snapshot-build`, `hatchery/legate-container`). Cassette-replayed L2/L3 will land here as the [RFC milestones](docs/rfcs/2026-002-layered-testing-framework/layered-testing-framework.rfc.md#milestones) progress. Cost: $0, < 2 minutes. Runs on every push and PR.
+- **`npm test`** — runs the deterministic CI suite. Today that's the full vitest set: L0, L1, and the surviving L2-shaped vitest cases listed in the Test Layer Migration policy below. Cassette-replayed L2/L3 will land here as the [RFC milestones](docs/rfcs/2026-002-layered-testing-framework/layered-testing-framework.rfc.md#milestones) progress. Cost: $0, < 2 minutes. Runs on every push and PR.
 - **`npm run typecheck`** — `tsc --noEmit`.
+
+### Test Layer Migration
+
+The governed legacy L2 tests are exactly:
+
+- `src/spawn/container-launch.test.ts`
+- `src/spawn/snapshot-build.test.ts`
+
+Only those governed files are subject to the Test Layer Migration trigger; a file outside this set does not trigger migration under this policy. Their starting state is vitest in place with `@l2 @deterministic @ci` tags, a mocked `node:child_process` boundary, and no real Docker execution. They remain in vitest until a material change to a governed file triggers the migration policy.
 
 Agent-driven and human tests:
 
