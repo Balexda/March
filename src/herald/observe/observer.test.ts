@@ -1,3 +1,6 @@
+/**
+ * @l1 @deterministic @ci
+ */
 import { describe, expect, it, vi } from "vitest";
 import { describeChangeSpan, runObservation, type ObserveStore } from "./observer.js";
 import { emptySystemState, foldEvents, reduce, type AppendEventInput, type EventBody, type HeraldEvent, type SystemState } from "../events.js";

@@ -1,3 +1,6 @@
+/**
+ * @l0 @deterministic @ci
+ */
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { broodListSessions, broodRegister, broodRetire, broodTeardown, type BroodSeam } from "./brood.js";
 import { BroodNotFoundError } from "../../../brood/service/client.js";

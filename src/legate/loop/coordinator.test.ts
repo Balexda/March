@@ -1,3 +1,6 @@
+/**
+ * @l1 @deterministic @ci
+ */
 import { describe, expect, it, vi } from "vitest";
 import { runTick, type CoordinatorDeps } from "./coordinator.js";
 import type { HandlerContext, LoopState } from "./state/types.js";

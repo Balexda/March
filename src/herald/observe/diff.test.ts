@@ -1,3 +1,6 @@
+/**
+ * @l0 @deterministic @ci
+ */
 import { describe, expect, it } from "vitest";
 import { diffObserved } from "./diff.js";
 import { emptySystemState, foldEvents, type HeraldEvent, type SystemState } from "../events.js";

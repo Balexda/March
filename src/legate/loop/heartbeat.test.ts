@@ -1,3 +1,6 @@
+/**
+ * @l0 @deterministic @ci
+ */
 import { describe, expect, it, vi } from "vitest";
 import { buildHeartbeatRecord, runHeartbeat, type HeartbeatDeps } from "./heartbeat.js";
 import type { CoordinatorOutput } from "./coordinator.js";

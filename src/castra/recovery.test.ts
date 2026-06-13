@@ -1,3 +1,6 @@
+/**
+ * @l0 @deterministic @ci
+ */
 import { describe, it, expect, vi } from "vitest";
 import type { RecoveryRuntime, RecoverySessionView } from "./adapter.js";
 import {

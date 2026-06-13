@@ -1,3 +1,6 @@
+/**
+ * @l1 @deterministic @ci
+ */
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildServer } from "./server.js";
 import { JobStore } from "./jobs.js";

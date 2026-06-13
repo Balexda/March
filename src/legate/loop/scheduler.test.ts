@@ -1,3 +1,6 @@
+/**
+ * @l1 @deterministic @ci
+ */
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createScheduler } from "./scheduler.js";
 

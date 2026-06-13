@@ -1,3 +1,6 @@
+/**
+ * @l0 @deterministic @ci
+ */
 import { describe, it, expect } from "vitest";
 import { BASE_IMAGE, SPAWN_CONFIG, type SpawnConfig } from "./spawn-config.js";
 

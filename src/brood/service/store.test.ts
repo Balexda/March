@@ -1,3 +1,6 @@
+/**
+ * @l1 @deterministic @ci
+ */
 import { describe, expect, it } from "vitest";
 import { sqliteAvailable } from "./sqlite.js";
 import { SessionStore } from "./store.js";

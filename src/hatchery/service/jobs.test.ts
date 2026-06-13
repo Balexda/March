@@ -1,3 +1,6 @@
+/**
+ * @l0 @deterministic @ci
+ */
 import { describe, expect, it, vi } from "vitest";
 import { errorMessage, JobStore, type JobLogger } from "./jobs.js";
 import type { HatcherySpawnResult } from "../spawn-handoff.js";

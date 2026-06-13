@@ -1,3 +1,6 @@
+/**
+ * @l1 @deterministic @ci
+ */
 import { describe, expect, it, vi } from "vitest";
 import { HeraldClient } from "../../herald/service/client.js";
 import { publishStewardAttachedToHerald } from "./herald-registration.js";

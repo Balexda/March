@@ -1,3 +1,6 @@
+/**
+ * @l0 @deterministic @ci
+ */
 import { describe, expect, it } from "vitest";
 import { heraldPort, HERALD_SERVICE_NAME, resolveHeraldPort } from "./config.js";
 import { broodPort } from "../brood/config.js";

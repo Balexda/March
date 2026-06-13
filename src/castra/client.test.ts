@@ -1,3 +1,6 @@
+/**
+ * @l0 @deterministic @ci
+ */
 import { describe, it, expect, vi, afterEach } from "vitest";
 
 const cp = vi.hoisted(() => ({ execFileSync: vi.fn() }));
