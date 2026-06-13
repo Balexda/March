@@ -100,7 +100,7 @@ Recommended implementation sequence:
 
 | ID | Title | Depends On | Artifact |
 |----|-------|-----------|----------|
-| US1 | Park a Failing Test Without Deleting It | — | — |
+| US1 | Park a Failing Test Without Deleting It | — | specs/2026-06-03-007-quarantine-routing-scaffold/01-park-failing-test-without-deleting-it.tasks.md |
 | US2 | Exclude Quarantined Tests From the Staged Gate | US1 | — |
 | US3 | List Quarantined Tests in a Generated Roster | US1 | — |
 | US4 | Document the Quarantine Primitive for Contributors | US1 | — |
