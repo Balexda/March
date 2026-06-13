@@ -17,7 +17,7 @@
 
 ### Tasks
 
-- [ ] **Create the shared contract scaffold artifact**
+- [x] **Create the shared contract scaffold artifact**
 
   Add a reusable scaffold document under `docs/subsystems/` for future subsystem authors. The document should identify `docs/subsystems/<name>/contract.md` as the canonical contract location pattern and show the minimum Markdown structure for a new subsystem contract.
 
@@ -28,7 +28,7 @@
   - The scaffold makes clear that additional sections are allowed, but these three H2 sections are required for every subsystem contract.
   - The scaffold does not author contract bodies for Hatchery, Brood, Herald, Castra, Spawn, Legate, or Steward.
 
-- [ ] **Keep the scaffold presence-check ready without adding tooling**
+- [x] **Keep the scaffold presence-check ready without adding tooling**
 
   Ensure the scaffold is structured so a later presence checker can key on the same three required headings for every subsystem contract. Keep the change limited to documentation artifacts and any repository navigation needed to make the scaffold discoverable.
 
