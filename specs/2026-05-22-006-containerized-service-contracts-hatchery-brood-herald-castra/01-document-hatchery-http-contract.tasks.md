@@ -23,12 +23,12 @@
   Create `docs/subsystems/hatchery/contract.md` using the service-contract structure from the data model and the Hatchery route surface from the contracts artifact. Keep the AUTOGEN region empty, document only Hatchery's existing HTTP boundary, and satisfy AS 1.1-1.3 without adding runtime service behavior.
 
   _Acceptance criteria:_
-  - Contract contains exactly `## Public Interface`, `## Invariants`, and `## Error Modes`
+  - Contract includes `## Public Interface`, `## Invariants`, and `## Error Modes` as H2 sections (a title and route sub-headings are permitted)
   - `## Public Interface` contains an empty AUTOGEN marker pair
   - Health, readiness, spawn submission, and spawn lookup routes are documented
   - Each route includes method, path, request envelope, response envelope, and visible status or error behavior
-  - Spawn submission documents required and optional request fields from the Hatchery service contract
-  - Validation errors cover missing prompt, missing backend, unknown backend, and missing repo path
+  - Spawn submission documents required and optional request fields from the Hatchery service contract, including the optional `toolchain` selection field
+  - Validation errors cover missing prompt, missing backend, unknown backend, missing repo path, and invalid toolchain
   - Readiness documents dependency fields and 200/503 behavior
 
 **PR Outcome**: Hatchery's HTTP contract exists as a stable documentation target for spawn submission, spawn polling, readiness gating, validation errors, and future AUTOGEN extraction.
