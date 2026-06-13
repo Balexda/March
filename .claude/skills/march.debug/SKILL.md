@@ -205,12 +205,12 @@ It enumerates `stage==escalated` slices from Herald's fold and appends a
 `slice.recovery.requested` for each — the same mechanism as the single-slice
 operation, just batched.
 
-- **Cap gate (load-bearing):** with `--yes` the script first verifies the
-  running legate has `MARCH_MAX_CONCURRENT_SPAWNS` set (#313, default 10) and
-  **refuses to act if it is unset** — recovering dozens of slices without the cap
-  re-creates the storm you are recovering from. With the cap, fresh re-dispatch
-  is throttled and paced; `spawn_cap_throttled` events appear if the frontier
-  exceeds it.
+- **Cap (always enforced):** re-dispatch is paced by the legate's global
+  concurrency cap (#313) whether or not `MARCH_MAX_CONCURRENT_SPAWNS` is set — an
+  unset/invalid value resolves to the built-in default of **10** — so bulk
+  recovery can't re-storm the host. With `--yes` the script just reports the
+  effective cap (and notes when the default applies); it never blocks on it.
+  `spawn_cap_throttled` events appear if the dispatchable frontier exceeds the cap.
 - **No manual git is needed.** A re-dispatch whose orphan branch/worktree still
   exists collides at `manager.launch` ("branch already exists"); the Hatchery
   **self-heal (#243, `src/hatchery/orphan-branch.ts`)** classifies the orphan and,

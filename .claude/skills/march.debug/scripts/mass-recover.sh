@@ -8,12 +8,13 @@
 # `slice.recovery.requested` mechanism, same "diagnose first" contract — it just
 # enumerates `stage==escalated` slices from Herald's fold and recovers each.
 #
-# SAFETY: dry-run unless `--yes`. Before acting it verifies the running legate
-# has the global concurrency cap set (MARCH_MAX_CONCURRENT_SPAWNS) — without it,
-# recovering dozens of slices at once re-creates the very storm you are
-# recovering from. No manual git is needed afterward: the hatchery self-heal
-# (#243) removes a colliding orphan worktree+branch (when ahead==0 / merged) and
-# #211 auto-recovery retries into the clean state.
+# SAFETY: dry-run unless `--yes`. Re-dispatch is always paced by the legate's
+# GLOBAL concurrency cap (#313) — MARCH_MAX_CONCURRENT_SPAWNS, or its built-in
+# default of 10 when unset/invalid — so bulk recovery can't re-storm the host.
+# Before acting it just reports the effective cap. No manual git is needed
+# afterward: the hatchery self-heal (#243) removes a colliding orphan
+# worktree+branch (when ahead==0 / merged) and #211 auto-recovery retries into
+# the clean state.
 #
 # Usage:
 #   mass-recover.sh [--profile <p>] [--reason <substr>] [--yes]
@@ -58,13 +59,17 @@ print(" ".join(p["profile"] for p in json.load(sys.stdin).get("profiles", [])))'
 fi
 [ -n "${PROFILES// }" ] || die "no profiles found (set --profile or check MARCH_HERALD_URL)."
 
-# --- Cap safety gate (only matters when we are about to act) ---------------
+# --- Cap report (re-dispatch is always paced; this is informational) -------
+# The legate enforces the global spawn cap (#313) regardless of this env var —
+# an unset/invalid value resolves to the built-in default (10) — so bulk recovery
+# can never re-storm. Just surface the effective cap; never block on it.
 if [ "$APPLY" -eq 1 ]; then
   cap="$(docker exec march-legate printenv MARCH_MAX_CONCURRENT_SPAWNS 2>/dev/null || true)"
   if [ -z "$cap" ]; then
-    die "march-legate has NO MARCH_MAX_CONCURRENT_SPAWNS set — bulk recovery could re-storm the host. Set the cap (compose env, default 10) and restart the legate before mass-recovering, or recover a few slices at a time with 'march legate recover'."
+    echo "march.debug: MARCH_MAX_CONCURRENT_SPAWNS not set on march-legate — the legate paces re-dispatch with its built-in default cap (10). Proceeding."
+  else
+    echo "march.debug: global spawn cap = $cap concurrent (re-dispatch is paced; no re-storm)."
   fi
-  echo "march.debug: global spawn cap = $cap concurrent (re-dispatch is paced; no re-storm)."
 fi
 
 total=0
