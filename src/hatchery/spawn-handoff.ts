@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -29,16 +30,23 @@ import {
 } from "../spawn/snapshot-build.js";
 import { generateSpawnId, removeSpawnWorktree } from "../brood/worktree.js";
 import {
+  readSpawnRecordExtractionResult,
   markSpawnRecordFailed,
   markSpawnRecordRunning,
   markSpawnRecordStopped,
   SpawnRecordError,
+  type ExtractionResult,
   updateSpawnRecordImageId,
+  updateSpawnRecordExtractionResult,
   updateSpawnRecordPrompt,
   updateSpawnRecordStewardSession,
   writeInitialSpawnRecord,
 } from "../brood/spawn-record.js";
-import { startDispatchSpan, type DispatchTrace } from "../observability/spawn-trace.js";
+import {
+  type DispatchSpanHandle,
+  startDispatchSpan,
+  type DispatchTrace,
+} from "../observability/spawn-trace.js";
 import { emitSpawnLog } from "../observability/logs.js";
 import {
   recordSpawnRun,
@@ -124,6 +132,31 @@ export interface HatcherySpawnArtifacts {
   readonly managerPromptPath: string;
   readonly metadataPath: string;
 }
+
+export interface StewardHandoffInput {
+  readonly spawnId: string;
+  readonly backend: string;
+  readonly patchText: string;
+  readonly patchSha256: string;
+  readonly touchedPaths: readonly string[];
+  readonly extractedAt: string;
+}
+
+export type StewardHandoffEligibility =
+  | {
+      readonly eligible: true;
+      readonly handoff: StewardHandoffInput;
+    }
+  | {
+      readonly eligible: false;
+      readonly reason: HandoffRefusalReason;
+      readonly diagnostic: string;
+      readonly failureReason?: string;
+      readonly backend?: string;
+      readonly extractedAt?: string;
+    };
+
+export type HandoffRefusalReason = "missing" | "failed" | "noop";
 
 export interface HatcherySpawnResult {
   readonly spawnId: string;
@@ -309,6 +342,17 @@ export function extractPatchFromSpawnOutput(output: string): string {
   return normalizeTrailingNewline(patch);
 }
 
+function patchTouchedPaths(patch: string): string[] {
+  const paths = new Set<string>();
+  const headerRe = /^diff --git a\/(.+?) b\/(.+)$/gm;
+  let match: RegExpExecArray | null;
+  while ((match = headerRe.exec(patch)) !== null) {
+    paths.add(match[1]);
+    paths.add(match[2]);
+  }
+  return [...paths].sort();
+}
+
 const PATCH_SENTINEL_RE = new RegExp(`^${PATCH_SENTINEL}:(.*)$`);
 
 /** The base64 payload of the LAST patch-sentinel line, or null if none. */
@@ -342,6 +386,196 @@ function assertPatchPathsSafe(patch: string): void {
     }
   }
 }
+
+function extractionFailureResult(input: {
+  readonly spawnId: string;
+  readonly backend: string;
+  readonly failureReason: string;
+  readonly diagnostic: string;
+}): ExtractionResult {
+  return {
+    spawnId: input.spawnId,
+    backend: input.backend,
+    status: "failed",
+    failureReason: input.failureReason,
+    diagnostic: input.diagnostic.slice(0, 2048),
+    extractedAt: new Date().toISOString(),
+  };
+}
+
+function extractionSuccessResult(input: {
+  readonly spawnId: string;
+  readonly backend: string;
+  readonly patchText: string;
+}): ExtractionResult {
+  return {
+    spawnId: input.spawnId,
+    backend: input.backend,
+    status: "succeeded",
+    patch: {
+      spawnId: input.spawnId,
+      backend: input.backend,
+      patchText: input.patchText,
+      touchedPaths: patchTouchedPaths(input.patchText),
+      sha256: cryptoHash(input.patchText),
+    },
+    extractedAt: new Date().toISOString(),
+  };
+}
+
+function cryptoHash(text: string): string {
+  return crypto.createHash("sha256").update(text, "utf-8").digest("hex");
+}
+
+function refusal(
+  reason: HandoffRefusalReason,
+  diagnostic: string,
+  extras?: Omit<Extract<StewardHandoffEligibility, { eligible: false }>, "eligible" | "reason" | "diagnostic">,
+): StewardHandoffEligibility {
+  return { eligible: false, reason, diagnostic, ...extras };
+}
+
+function setEligibilitySpanAttributes(
+  span: DispatchSpanHandle,
+  input: {
+    readonly spawnId: string;
+    readonly result?: ExtractionResult;
+    readonly eligible: boolean;
+    readonly reason: "ready" | "missing" | "failed" | "noop";
+  },
+): void {
+  span.setAttributes({
+    "march.spawn_id": input.spawnId,
+    "march.handoff.eligible": input.eligible,
+    "march.handoff.reason": input.reason,
+    "march.extraction.status": input.result?.status ?? "missing",
+    "march.backend": input.result?.backend ?? "",
+  });
+}
+
+export function evaluateStewardHandoffEligibility(input: {
+  readonly spawnId: string;
+  readonly homeDir?: string;
+  readonly dispatch?: DispatchTrace;
+  readonly readExtractionResult?: (
+    spawnId: string,
+    homeDir?: string,
+  ) => ExtractionResult | undefined;
+}): StewardHandoffEligibility {
+  const readResult =
+    input.readExtractionResult ?? readSpawnRecordExtractionResult;
+  const safeReadResult = () => {
+    try {
+      return readResult(input.spawnId, input.homeDir);
+    } catch {
+      return undefined;
+    }
+  };
+  try {
+    return (input.dispatch ?? NOOP_DISPATCH_TRACE).span(
+      "steward.handoff_eligibility",
+      (span) => {
+        const result = safeReadResult();
+        if (!result) {
+          setEligibilitySpanAttributes(span, {
+            spawnId: input.spawnId,
+            result,
+            eligible: false,
+            reason: "missing",
+          });
+          throw new HatcherySpawnError(
+            `Spawn ${input.spawnId} is not eligible for Steward handoff: extraction result is missing.`,
+          );
+        }
+        if (result.status === "failed") {
+          setEligibilitySpanAttributes(span, {
+            spawnId: input.spawnId,
+            result,
+            eligible: false,
+            reason: "failed",
+          });
+          throw new HatcherySpawnError(
+            `Spawn ${input.spawnId} is not eligible for Steward handoff: extraction failed (${result.failureReason}).`,
+          );
+        }
+        if (
+          result.patch.patchText.trim().length === 0 ||
+          result.patch.touchedPaths.length === 0 ||
+          !result.patch.patchText.includes("diff --git ")
+        ) {
+          setEligibilitySpanAttributes(span, {
+            spawnId: input.spawnId,
+            result,
+            eligible: false,
+            reason: "noop",
+          });
+          throw new HatcherySpawnError(
+            `Spawn ${input.spawnId} is not eligible for Steward handoff: validated patch is empty or no-op.`,
+          );
+        }
+
+        setEligibilitySpanAttributes(span, {
+          spawnId: input.spawnId,
+          result,
+          eligible: true,
+          reason: "ready",
+        });
+        return {
+          eligible: true,
+          handoff: {
+            spawnId: result.spawnId,
+            backend: result.backend,
+            patchText: result.patch.patchText,
+            patchSha256: result.patch.sha256,
+            touchedPaths: result.patch.touchedPaths,
+            extractedAt: result.extractedAt,
+          },
+        };
+      },
+    );
+  } catch {
+    const result = safeReadResult();
+    if (!result) {
+      return refusal(
+        "missing",
+        `Spawn ${input.spawnId} is not eligible for Steward handoff: extraction result is missing.`,
+      );
+    }
+    if (result.status === "failed") {
+      const diagnostic = result.diagnostic
+        ? `Spawn ${input.spawnId} is not eligible for Steward handoff: extraction failed (${result.failureReason}). ${result.diagnostic}`
+        : `Spawn ${input.spawnId} is not eligible for Steward handoff: extraction failed (${result.failureReason}).`;
+      return refusal(
+        "failed",
+        diagnostic,
+        {
+          failureReason: result.failureReason,
+          backend: result.backend,
+          extractedAt: result.extractedAt,
+        },
+      );
+    }
+    return refusal(
+      "noop",
+      `Spawn ${input.spawnId} is not eligible for Steward handoff: validated patch is empty or no-op.`,
+      {
+        backend: result.backend,
+        extractedAt: result.extractedAt,
+      },
+    );
+  }
+}
+
+const NOOP_DISPATCH_TRACE: DispatchTrace = {
+  enabled: false,
+  spanContext: () => undefined,
+  span: (_name, fn) => fn({ setAttributes: () => {}, spanContext: () => undefined }),
+  spanAsync: (_name, fn) => fn({ setAttributes: () => {}, spanContext: () => undefined }),
+  setAttributes: () => {},
+  recordException: () => {},
+  traceparent: () => undefined,
+  end: () => {},
+};
 
 // Strip only trailing newlines, then add exactly one. Unlike trimEnd(), this
 // preserves trailing whitespace-only context lines (e.g., " \n") that are part
@@ -915,14 +1149,22 @@ export async function runHatcherySpawn(
       );
     }
 
-    // Patch extraction is pure in-process parsing — not a cross-system seam, so
-    // it gets no span; the stage tracker still classifies a no-patch failure.
+    // Patch extraction persists the backend-neutral result. Handoff eligibility
+    // below consumes that persisted contract instead of scraping logs again.
     stage = "patch_extract";
-    let patch: string;
     try {
-      patch = extractPatchFromSpawnOutput(logs);
+      const patch = extractPatchFromSpawnOutput(logs);
+      updateSpawnRecordExtractionResult(
+        spawnId,
+        extractionSuccessResult({
+          spawnId,
+          backend: input.backend.name,
+          patchText: patch,
+        }),
+        input.homeDir,
+      );
     } catch (err) {
-      const artifacts = createHatcherySpawnArtifacts({
+      createHatcherySpawnArtifacts({
         spawnId,
         homeDir: input.homeDir,
         spawnOutput: logs,
@@ -930,16 +1172,33 @@ export async function runHatcherySpawn(
         managerPrompt,
         metadata: metadataFor(input, manager, spawnId, branch, waitResult.exitCode, startedAt),
       });
-      throw new HatcherySpawnError(
-        `${(err as Error).message} Logs: ${artifacts.spawnOutputPath}`,
+      updateSpawnRecordExtractionResult(
+        spawnId,
+        extractionFailureResult({
+          spawnId,
+          backend: input.backend.name,
+          failureReason: "patch_extraction_failed",
+          diagnostic: (err as Error).message,
+        }),
+        input.homeDir,
       );
+    }
+
+    stage = "handoff_eligibility";
+    const eligibility = evaluateStewardHandoffEligibility({
+      spawnId,
+      homeDir: input.homeDir,
+      dispatch,
+    });
+    if (!eligibility.eligible) {
+      throw new HatcherySpawnError(eligibility.diagnostic);
     }
 
     const artifacts = createHatcherySpawnArtifacts({
       spawnId,
       homeDir: input.homeDir,
       spawnOutput: logs,
-      patch,
+      patch: eligibility.handoff.patchText,
       managerPrompt,
       metadata: metadataFor(input, manager, spawnId, branch, waitResult.exitCode, startedAt),
     });

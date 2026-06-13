@@ -17,7 +17,7 @@
 
 ### Tasks
 
-- [ ] **Read extraction readiness before Steward handoff**
+- [x] **Read extraction readiness before Steward handoff**
 
   Update the Hatchery spawn handoff path to consume the lifecycle read contract introduced by US3 before preparing any Steward patch input. The handoff should use only the successful `ExtractionResult.patch` fields and extraction metadata, while failed or missing extraction state produces a terminal Hatchery diagnostic without launching Steward patch-application behavior.
 
@@ -28,7 +28,7 @@
   - Missing extraction state is treated as not eligible and exits cleanly with a bounded diagnostic, not a hang or prompt for operator input (FR-014).
   - The handoff eligibility decision participates in the slice trace (keyed by `traceIdForDispatch`, nesting as a child on the `hatchery.spawn` → `steward.send` leg, never claiming root): an eligible decision emits a child span, and the failed and missing refusal paths emit *errored* spans so a refused Steward handoff is visible in the trace rather than silently absent (AGENTS.md observability lock-step; new lifecycle action / new failure mode).
 
-- [ ] **Reject empty validated patches at the handoff boundary**
+- [x] **Reject empty validated patches at the handoff boundary**
 
   Add a final Hatchery-side guard that rejects a successful extraction result whose normalized validated patch is empty or no-op before any Steward handoff is prepared. Keep this as a defense-in-depth check over US2 validation so downstream code cannot launch a Steward with no meaningful patch input.
 
