@@ -1,3 +1,6 @@
+/**
+ * @l1 @deterministic @ci
+ */
 import { describe, expect, it } from "vitest";
 import { removeSpawnContainer } from "../../spawn/container-launch.js";
 import { removeSpawnWorktreeExact } from "../worktree.js";

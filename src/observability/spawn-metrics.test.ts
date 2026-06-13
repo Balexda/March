@@ -1,3 +1,6 @@
+/**
+ * @l0 @deterministic @ci
+ */
 import { describe, expect, it } from "vitest";
 import { outcomeFromExitCode, recordSpawnRun } from "./spawn-metrics.js";
 

@@ -1,3 +1,6 @@
+/**
+ * @l1 @deterministic @ci
+ */
 import type { AddressInfo } from "node:net";
 import type { FastifyInstance } from "fastify";
 import { afterEach, describe, expect, it, vi } from "vitest";

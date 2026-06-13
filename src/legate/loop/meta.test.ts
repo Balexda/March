@@ -1,3 +1,6 @@
+/**
+ * @l0 @deterministic @ci
+ */
 import { describe, expect, it } from "vitest";
 import { DEFAULT_MAX_CONCURRENT_SPAWNS, resolveMaxConcurrentSpawns } from "./meta.js";
 

@@ -1,3 +1,6 @@
+/**
+ * @l0 @deterministic @ci
+ */
 import { describe, it, expect } from "vitest";
 import { getM1Skills, type MarchSkill } from "./skills.js";
 

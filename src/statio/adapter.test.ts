@@ -1,3 +1,6 @@
+/**
+ * @l1 @deterministic @ci
+ */
 import { describe, expect, it, vi } from "vitest";
 import {
   buildRepoInfoArgs,

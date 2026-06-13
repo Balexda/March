@@ -1,3 +1,6 @@
+/**
+ * @l1 @deterministic @ci
+ */
 import { describe, expect, it } from "vitest";
 import { buildLoopServer, buildStatus, type LoopHttpContext } from "./http.js";
 import type { LoopSnapshot } from "./runtime.js";

@@ -1,3 +1,6 @@
+/**
+ * @l1 @deterministic @ci
+ */
 import { describe, expect, it } from "vitest";
 import type { CastraSession } from "../../castra/types.js";
 import { sqliteAvailable } from "./sqlite.js";

@@ -1,3 +1,6 @@
+/**
+ * @l0 @deterministic @ci
+ */
 import { trace } from "@opentelemetry/api";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { getActiveOtel, initOtel } from "./otel.js";

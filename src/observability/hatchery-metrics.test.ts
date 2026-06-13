@@ -1,3 +1,6 @@
+/**
+ * @l0 @deterministic @ci
+ */
 import { afterEach, describe, expect, it } from "vitest";
 import { initOtel } from "./otel.js";
 import {

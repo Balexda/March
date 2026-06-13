@@ -1,3 +1,6 @@
+/**
+ * @l1 @deterministic @ci
+ */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { execFileSync, spawn } from "node:child_process";
 import { resolve } from "node:path";

@@ -1,3 +1,6 @@
+/**
+ * @l1 @deterministic @ci
+ */
 import { describe, it, expect, beforeEach, vi } from "vitest";
 
 const childProcessMock = vi.hoisted(() => ({

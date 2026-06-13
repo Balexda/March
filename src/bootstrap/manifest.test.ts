@@ -1,3 +1,6 @@
+/**
+ * @l0 @deterministic @ci
+ */
 import { describe, it, expect } from "vitest";
 import { createManifest, isValidManifest, type MarchManifest } from "./manifest.js";
 

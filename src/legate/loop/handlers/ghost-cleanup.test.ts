@@ -1,3 +1,6 @@
+/**
+ * @l0 @deterministic @ci
+ */
 import { describe, expect, it, vi } from "vitest";
 import { apply, assess } from "./ghost-cleanup.js";
 import type { HandlerContext, LoopState } from "../state/types.js";

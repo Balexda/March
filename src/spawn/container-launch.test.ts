@@ -1,3 +1,6 @@
+/**
+ * @l2 @deterministic @ci
+ */
 import { describe, it, expect, beforeEach, vi } from "vitest";
 
 /**

@@ -1,3 +1,6 @@
+/**
+ * @l0 @deterministic @ci
+ */
 import { describe, expect, it, vi } from "vitest";
 import { rebuildWorkingState, senseFromHerald, senseObserved, type SenseDeps } from "./sense.js";
 import type { LoopMeta } from "../meta.js";

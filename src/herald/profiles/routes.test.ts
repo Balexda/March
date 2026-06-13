@@ -1,3 +1,6 @@
+/**
+ * @l1 @deterministic @ci
+ */
 import { afterEach, describe, expect, it } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 import { sqliteAvailable } from "../service/sqlite.js";

@@ -1,3 +1,6 @@
+/**
+ * @l0 @deterministic @ci
+ */
 import { describe, expect, it, vi } from "vitest";
 import type { DispatchIoDeps } from "./dispatch-io.js";
 import { completePendingHatcheryDispatches, launchDispatch } from "./dispatch-ops.js";

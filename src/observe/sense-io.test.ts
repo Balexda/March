@@ -1,3 +1,6 @@
+/**
+ * @l1 @deterministic @ci
+ */
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { LoopMeta } from "../legate/loop/meta.js";
 

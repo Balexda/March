@@ -18,7 +18,7 @@
 
 ### Tasks
 
-- [ ] **Add taxonomy blocks to Vitest files**
+- [x] **Add taxonomy blocks to Vitest files**
 
   Add the leading tag block required by the Test File Tag Block contract to every current `*.test.ts` file outside generated dependency directories. Classify each file with exactly one scope tag, one determinism tag, and one execution-channel tag, using the spec's baseline assumptions and preserving all existing imports, mocks, test bodies, and assertions.
 

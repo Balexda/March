@@ -1,3 +1,6 @@
+/**
+ * @l1 @deterministic @ci
+ */
 import Fastify, { type FastifyInstance } from "fastify";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Span } from "@opentelemetry/sdk-trace-base";

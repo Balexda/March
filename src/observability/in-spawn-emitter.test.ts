@@ -1,3 +1,6 @@
+/**
+ * @l0 @deterministic @ci
+ */
 import { afterEach, describe, expect, it } from "vitest";
 import { spawn } from "node:child_process";
 import http from "node:http";

@@ -1,3 +1,6 @@
+/**
+ * @l2 @deterministic @ci
+ */
 import { describe, it, expect, afterEach, beforeEach, vi } from "vitest";
 import fs from "node:fs";
 import os from "node:os";

@@ -1,3 +1,6 @@
+/**
+ * @l1 @deterministic @ci
+ */
 import { afterEach, describe, expect, it } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 import { registerRoutes, validateEvent, type ObserveStatus } from "./routes.js";

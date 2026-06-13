@@ -1,3 +1,6 @@
+/**
+ * @l0 @deterministic @ci
+ */
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Span } from "@opentelemetry/sdk-trace-base";
 import { getActiveOtel, initOtel } from "./otel.js";

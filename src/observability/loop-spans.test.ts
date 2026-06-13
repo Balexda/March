@@ -1,3 +1,6 @@
+/**
+ * @l0 @deterministic @ci
+ */
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { SpanStatusCode } from "@opentelemetry/api";
 import type { Span } from "@opentelemetry/sdk-trace-base";
