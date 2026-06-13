@@ -1,7 +1,7 @@
 ---
 name: march.debug
 description: "Diagnose a running March stack: inspect Herald's fold and event log, compare against the legate's view to surface divergence, read spawn/codex failure logs to find root cause, and execute the break-glass (Herald admin events) or recovery (`march legate recover`) procedures when the fold is wedged. Use when slices are escalated unexpectedly, dispatch appears stuck, the operator suspects a service-side bug, or before/after running any operator-only recovery action."
-allowed-tools: Bash(*/march.debug/scripts/fold-state.sh:*) Bash(*/march.debug/scripts/events-tail.sh:*) Bash(*/march.debug/scripts/legate-status.sh:*) Bash(*/march.debug/scripts/dispatch-diag.sh:*) Bash(*/march.debug/scripts/spawn-failure.sh:*) Bash(*/march.debug/scripts/admin-event.sh:*) Bash(docker logs march-*) Bash(docker ps*) Bash(curl -s http://localhost:8818/*) Bash(curl -s http://localhost:8787/*) Bash(node /home/jmbattista/Development/March/dist/cli.js legate recover *) Bash(node /home/jmbattista/Development/March/dist/cli.js herald admin event*)
+allowed-tools: Bash(*/march.debug/scripts/fold-state.sh:*) Bash(*/march.debug/scripts/events-tail.sh:*) Bash(*/march.debug/scripts/legate-status.sh:*) Bash(*/march.debug/scripts/dispatch-diag.sh:*) Bash(*/march.debug/scripts/spawn-failure.sh:*) Bash(*/march.debug/scripts/admin-event.sh:*) Bash(*/march.debug/scripts/mass-recover.sh:*) Bash(docker logs march-*) Bash(docker ps*) Bash(docker exec march-legate printenv*) Bash(curl -s http://localhost:8818/*) Bash(curl -s http://localhost:8787/*) Bash(node /home/jmbattista/Development/March/dist/cli.js legate recover *) Bash(node /home/jmbattista/Development/March/dist/cli.js brood sweep*) Bash(node /home/jmbattista/Development/March/dist/cli.js herald admin event*)
 ---
 # march.debug
 
@@ -29,6 +29,9 @@ re-cite it.
 - Herald's dashboard / `/state` and your intuition disagree about how much work
   is dispatchable.
 - A spawn **failed** and `docker logs` isn't telling you why.
+- **Many** slices escalated at once from one transient cause — a host reboot, an
+  OOM, a Castra-unreachable window, a codex auth lapse — that is now resolved
+  (see *Operation: Mass recovery*).
 - You suspect a **service-side bug** left the fold in an unreachable state.
 - **Before or after** running any operator-only recovery (`march legate recover`)
   or break-glass (`march herald admin event`) action — diagnose first, verify
@@ -168,6 +171,85 @@ After recovering, watch it re-dispatch:
 ${CLAUDE_SKILL_DIR}/scripts/events-tail.sh --slice <sliceId> --src legate
 ```
 
+## Operation: Mass recovery after a spawn-storm / host reboot
+
+When **many** slices escalated from a **single transient cause that is now
+resolved** — a host reboot or OOM that killed every Castra session, a burst that
+overran the host, a window where `castra:9264` was unreachable, a codex auth
+lapse — they all carry the same `escalatedReason` (usually
+`hatchery_dispatch_failed`) and all sit at retry count 2 = `DISPATCH_RECOVERY_LIMIT`.
+This is the bulk sibling of the single-slice recovery above.
+
+**Signature** (confirm before mass-recovering):
+
+- `dispatch-diag.sh` shows dispatchable work but `dispatch_action_count` stays 0
+  across ticks, and `slices_by_stage.escalated` is large.
+- `spawn-failure.sh --profile <p> --all` shows **one shared marker** across the
+  failures (e.g. `Could not reach Castra` for a whole minute) — one root cause,
+  not N problems.
+- Often paired with **dead sessions**: Castra `/v1/sessions` returns far fewer
+  (or zero) live sessions than the fold's `workers.waiting` count, and
+  `legate.ndjson` is churning `ghost-cleanup-failed` (the fold still references
+  sessions the reboot destroyed).
+
+**Recover all of them with one command** — dry-run first, then `--yes`:
+
+```bash
+export MARCH_HERALD_URL=http://localhost:8818
+${CLAUDE_SKILL_DIR}/scripts/mass-recover.sh                       # dry run: prints the plan
+${CLAUDE_SKILL_DIR}/scripts/mass-recover.sh --yes                 # recover every escalated slice
+${CLAUDE_SKILL_DIR}/scripts/mass-recover.sh --profile smithy --reason hatchery_dispatch_failed --yes
+```
+
+It enumerates `stage==escalated` slices from Herald's fold and appends a
+`slice.recovery.requested` for each — the same mechanism as the single-slice
+operation, just batched.
+
+- **Cap gate (load-bearing):** with `--yes` the script first verifies the
+  running legate has `MARCH_MAX_CONCURRENT_SPAWNS` set (#313, default 10) and
+  **refuses to act if it is unset** — recovering dozens of slices without the cap
+  re-creates the storm you are recovering from. With the cap, fresh re-dispatch
+  is throttled and paced; `spawn_cap_throttled` events appear if the frontier
+  exceeds it.
+- **No manual git is needed.** A re-dispatch whose orphan branch/worktree still
+  exists collides at `manager.launch` ("branch already exists"); the Hatchery
+  **self-heal (#243, `src/hatchery/orphan-branch.ts`)** classifies the orphan and,
+  when it is safe (HEAD is an ancestor of the default branch — no unique commits —
+  or its PR already merged), removes the **worktree then the branch by exact path**
+  (#155, never `git worktree prune`). The first attempt collides + self-heals +
+  escalates; **#211 auto-recovery retries into the now-clean state and succeeds**.
+  An **unsafe** orphan (diverged unmerged work, or an open PR — #173's adopt path)
+  is left in place and that slice stays operator-only: handle it with the
+  `legate.unwedge` skill, not here.
+- **Companion — sweep leaked stewards.** The reboot also leaks steward rows whose
+  PR already merged but whose worktree/branch were never torn down. Reap them:
+
+  ```bash
+  node /home/jmbattista/Development/March/dist/cli.js brood sweep   # needs MARCH_BROOD_ADMIN_TOKEN
+  ```
+
+  Caveats: `POST /admin/sweep` **does not honor a `dryRun` body — it always
+  acts**. It only reaps stewards it can prove are done — `pr-merged` /
+  `pr-closed` / `worktree-gone`; it deliberately **skips `no-pr`** (the
+  failed-spawn ghosts — those are cleared by the self-heal above when their slice
+  re-dispatches) and **`open-pr`** (still live).
+
+**Verify** the backlog drains (escalated → 0, slices flow to
+`hatchery-pending`/`implementing`/`pr-open`, orphan worktrees fall as each
+re-dispatches):
+
+```bash
+${CLAUDE_SKILL_DIR}/scripts/events-tail.sh --src legate            # slice.dispatched / slice.recovery.dispatched
+curl -s "$MARCH_HERALD_URL/state?profile=<p>" | python3 -c 'import sys,json; print(json.load(sys.stdin)["smithy"])'
+```
+
+> The residual ghost-cleanup churn and merged-but-unarchived `pr-open` tombstones
+> come from the steward-leak re-keying bug (#304/#310): on a stack built before
+> #310 they are harmless dashboard noise the running services cannot self-clear.
+> Redeploying the stack from `main` (#310 `reconcileBrood`, #155 exact-path
+> teardown, #316 castra-recover) clears them — that is a deploy action, not a
+> `march.debug` operation.
+
 ## Operation: Break-glass admin event
 
 For inserting a corrective event the running services **cannot author
@@ -232,10 +314,13 @@ admin-event regularly, the bug isn't fixed; fix the bug instead.
 
 - **Does not modify code.** Diagnostic + recovery only; the product is the thing
   being observed.
-- **Does not run destructive git.** No `git reset --hard`, no `git branch -D`, no
-  worktree surgery. Orphan-branch / worktree cleanup is out of scope — it routes
-  through Brood's teardown path (exact-path, never-prune) and is referred to
-  #155.
+- **Does not run destructive git by hand.** No `git reset --hard`, no
+  `git branch -D`, no worktree surgery from this skill. Orphan-branch / worktree
+  cleanup is **not manual** — `march legate recover` / `mass-recover.sh` lets the
+  Hatchery self-heal (#243) remove safe orphans by exact path on re-dispatch, and
+  teardown routes through Brood (exact-path, never-prune, #155). If an orphan is
+  *unsafe* (diverged / open-PR), that is the `legate.unwedge` skill or #173's
+  adopt path — not a manual `branch -D` here.
 - **Does not implement the operator notifier.** That's Courier (#254 / #270);
   this skill is the manual stand-in until it ships.
 - **Does not invent diagnostics.** Every pattern here was proven during real
