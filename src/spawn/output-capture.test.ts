@@ -8,11 +8,15 @@ import {
 const capturedAt = new Date("2026-05-21T12:34:56.000Z");
 
 function source(
-  readOutput: SpawnOutputSourceAdapter["readOutput"],
+  read: () => string | undefined,
+  truncated = false,
 ): SpawnOutputSourceAdapter {
   return {
     label: "container",
-    readOutput,
+    readOutput: () => {
+      const rawJson = read();
+      return rawJson === undefined ? undefined : { rawJson, truncated };
+    },
   };
 }
 
@@ -64,8 +68,10 @@ describe("captureSpawnOutput", () => {
   });
 
   it("rejects failed spawn state with a failed capture result", () => {
+    // A non-zero exit transitions the SpawnRecord to status "failed"
+    // (markSpawnRecordStopped), which is terminal but must not be captured.
     const result = captureSpawnOutput(
-      input({ terminalStatus: "stopped", exitCode: 2 }),
+      input({ terminalStatus: "failed", exitCode: 2 }),
     );
 
     expect(result).toMatchObject({
@@ -127,6 +133,21 @@ describe("captureSpawnOutput", () => {
     expect(result.envelope.rawJson).toHaveLength(10);
     expect(result.envelope.truncated).toBe(true);
     expect(result.diagnostic).toContain("retained trailing 10 characters");
+  });
+
+  it("propagates source-side truncation even when within the capture limit", () => {
+    const result = captureSpawnOutput(
+      input({
+        captureLimitChars: 1_000,
+        outputSource: source(() => '{"patch":"diff"}', true),
+      }),
+    );
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error(result.diagnostic);
+    expect(result.envelope.rawJson).toBe('{"patch":"diff"}');
+    expect(result.envelope.truncated).toBe(true);
+    expect(result.diagnostic).toContain("reported truncated output");
   });
 
   it("bounds unreadable-source diagnostics", () => {

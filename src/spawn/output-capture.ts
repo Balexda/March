@@ -12,9 +12,20 @@ export interface SpawnOutputEnvelope {
   readonly capturedAt: string;
 }
 
+/**
+ * Bounded output returned by a source adapter. Per the extraction contract,
+ * a real container / Castra / Hatchery source enforces `captureLimitChars`
+ * itself to avoid materializing huge logs, so it reports whether it had to
+ * truncate via `truncated` rather than handing back unbounded output.
+ */
+export interface SpawnOutputReadResult {
+  readonly rawJson: string;
+  readonly truncated: boolean;
+}
+
 export interface SpawnOutputSourceAdapter {
   readonly label: SpawnOutputSourceLabel;
-  readOutput(spawnId: string): string | undefined;
+  readOutput(spawnId: string): SpawnOutputReadResult | undefined;
 }
 
 export interface CaptureSpawnOutputInput {
@@ -57,6 +68,9 @@ export type SpawnOutputCaptureResult =
 
 const DIAGNOSTIC_TAIL_CHARS = 1_024;
 
+/** Spawn statuses the wait stage resolves to (data-model: `SpawnStatus`). */
+const TERMINAL_STATUSES = new Set(["stopped", "failed"]);
+
 export function captureSpawnOutput(
   input: CaptureSpawnOutputInput,
 ): SpawnOutputCaptureResult {
@@ -66,7 +80,11 @@ export function captureSpawnOutput(
     return failed(input, capturedAt, "capture-limit-invalid", "Capture limit must be a positive integer.");
   }
 
-  if (input.terminalStatus !== "stopped") {
+  // A spawn is terminal once the wait stage has resolved it. Per the data
+  // model (`markSpawnRecordStopped`), a non-zero exit transitions the record
+  // to "failed", so both "stopped" and "failed" are terminal; success is then
+  // gated strictly on the exit code below.
+  if (!TERMINAL_STATUSES.has(input.terminalStatus)) {
     return failed(
       input,
       capturedAt,
@@ -84,9 +102,9 @@ export function captureSpawnOutput(
     );
   }
 
-  let rawOutput: string | undefined;
+  let read: SpawnOutputReadResult | undefined;
   try {
-    rawOutput = input.outputSource.readOutput(input.spawnId);
+    read = input.outputSource.readOutput(input.spawnId);
   } catch (err) {
     return failed(
       input,
@@ -96,7 +114,7 @@ export function captureSpawnOutput(
     );
   }
 
-  if (rawOutput === undefined) {
+  if (read === undefined) {
     return failed(
       input,
       capturedAt,
@@ -105,6 +123,7 @@ export function captureSpawnOutput(
     );
   }
 
+  const rawOutput = read.rawJson;
   if (rawOutput.trim().length === 0) {
     return failed(
       input,
@@ -115,7 +134,10 @@ export function captureSpawnOutput(
   }
 
   const boundedRawJson = rawOutput.slice(-input.captureLimitChars);
-  const truncated = rawOutput.length > input.captureLimitChars;
+  const localTruncated = rawOutput.length > input.captureLimitChars;
+  // Truncation is reported when the source already bounded the output OR when
+  // we bound it locally here, so source-side truncation is never mislabeled.
+  const truncated = read.truncated || localTruncated;
   return {
     ok: true,
     envelope: {
@@ -126,9 +148,11 @@ export function captureSpawnOutput(
       truncated,
       capturedAt,
     },
-    diagnostic: truncated
+    diagnostic: localTruncated
       ? `Output exceeded capture limit of ${input.captureLimitChars} characters; retained trailing ${boundedRawJson.length} characters.`
-      : undefined,
+      : read.truncated
+        ? `Output source "${input.outputSource.label}" reported truncated output before the capture limit was reached.`
+        : undefined,
   };
 }
 
@@ -144,18 +168,23 @@ function failed(
     backend: input.backend,
     source: input.outputSource.label,
     failureReason,
-    diagnostic: diagnosticTail(diagnostic),
+    // Callers pass an already-bounded diagnostic (static strings here are
+    // short; untrusted content is bounded via `boundedDiagnostic`), so we do
+    // not re-truncate and risk chopping off the context prefix.
+    diagnostic,
     capturedAt,
   };
 }
 
 function boundedDiagnostic(prefix: string, err: unknown): string {
   const message = err instanceof Error ? err.message : String(err);
+  // Bound only the untrusted message tail so the context prefix is preserved.
   return `${prefix}: ${diagnosticTail(message)}`;
 }
 
 function diagnosticTail(text: string): string {
-  const trimmed = text.trim();
+  // Mirrors `stderrTail` in container-launch.ts / snapshot-build.ts.
+  const trimmed = text.trimEnd();
   if (trimmed.length <= DIAGNOSTIC_TAIL_CHARS) return trimmed;
-  return `...${trimmed.slice(-DIAGNOSTIC_TAIL_CHARS)}`;
+  return "…" + trimmed.slice(-DIAGNOSTIC_TAIL_CHARS);
 }
