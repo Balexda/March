@@ -1,4 +1,4 @@
-# Tasks: Author The Test Layer Migration Policy
+# Tasks: Author the Test Layer Migration Policy
 
 **Source**: `specs/2026-06-06-009-test-layer-migration-policy/test-layer-migration-policy.spec.md` — User Story 1
 **Data Model**: `specs/2026-06-06-009-test-layer-migration-policy/test-layer-migration-policy.data-model.md`
@@ -59,5 +59,4 @@ Direction must be either `depends on` or `depended upon by`.
 
 | Dependency | Direction | Notes |
 |------------|-----------|-------|
-| User Story 2: Record the Starting State of the Governed Tests | depended upon by | US2 can add the exact governed file list and corrected starting-state record after this trigger rule exists. |
 | User Story 3: Apply the Policy on a Touching PR Without Relitigation | depended upon by | US3 depends on the written trigger rule from this story and the governed-set record from US2 before validating concrete diff classification. |
