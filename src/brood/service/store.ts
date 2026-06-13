@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { getDatabaseSync, type BroodDatabase } from "./sqlite.js";
+import { parseExtractionResult } from "./extraction.js";
 import type { SessionRepository } from "./repository.js";
 import type {
   ListSessionsFilter,
@@ -120,6 +121,14 @@ function mergeDefined<T extends object>(base: T, changes: Partial<T>): T {
   return out;
 }
 
+function safeReadExtraction(json: string) {
+  try {
+    return parseExtractionResult(JSON.parse(json));
+  } catch {
+    return undefined;
+  }
+}
+
 function rowToRecord(row: SqliteRow): SessionRecord {
   const record: SessionRecord = {
     id: row.id as string,
@@ -152,7 +161,10 @@ function rowToRecord(row: SqliteRow): SessionRecord {
   }
   if (row.exit_code != null) record.exitCode = row.exit_code as number;
   if (typeof row.extraction_result_json === "string") {
-    record.extractionResult = JSON.parse(row.extraction_result_json);
+    // Malformed JSON (partial write, manual edit, older version) or a bad shape
+    // is treated as "no extraction result" so it can never crash a row read.
+    const extraction = safeReadExtraction(row.extraction_result_json);
+    if (extraction) record.extractionResult = extraction;
   }
   return record;
 }

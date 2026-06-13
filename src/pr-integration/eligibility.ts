@@ -6,6 +6,7 @@ import type {
   SessionRecord,
 } from "../brood/service/types.js";
 import type { SessionRepository } from "../brood/service/repository.js";
+import { isSpawnPatch } from "../brood/service/extraction.js";
 import { startDispatchSpan } from "../observability/spawn-trace.js";
 
 export type PrIntegrationFailureReason =
@@ -116,8 +117,17 @@ export function integratePullRequest(
     });
 
     failed = result.status === "failed";
-    if (failed) trace.recordException(new Error(result.failureReason));
+    if (failed) {
+      trace.recordException(
+        new Error(result.failureReason ?? "pr-integration-failed"),
+      );
+    }
     return result;
+  } catch (err) {
+    // A thrown eligibility body must still mark the root span errored — the
+    // `failed` flag only tracks terminal results returned normally.
+    failed = true;
+    throw err;
   } finally {
     trace.end({ error: failed });
   }
@@ -149,6 +159,14 @@ export function evaluateExtractionEligibility(
       ok: false,
       reason: "extraction-failed",
       diagnostic: boundedDiagnostic(extraction.diagnostic ?? extraction.failureReason),
+    };
+  }
+
+  if (!isSpawnPatch(extraction.patch)) {
+    return {
+      ok: false,
+      reason: "malformed-extraction",
+      diagnostic: "Successful extraction is missing a valid patch object.",
     };
   }
 
@@ -255,7 +273,9 @@ function normalizedPatchIsNoop(patchText: string): boolean {
     return (
       line.startsWith("+") ||
       line.startsWith("-") ||
-      /^new file mode |^deleted file mode |^rename (from|to) /.test(line)
+      /^old mode |^new mode |^new file mode |^deleted file mode |^rename (from|to) /.test(
+        line,
+      )
     );
   });
 }

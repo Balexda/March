@@ -2,8 +2,12 @@ import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { SessionStore } from "../brood/service/store.js";
 import { sqliteAvailable } from "../brood/service/sqlite.js";
-import type { ExtractionResult } from "../brood/service/types.js";
+import type {
+  ExtractionResult,
+  SessionRecord,
+} from "../brood/service/types.js";
 import {
+  evaluateExtractionEligibility,
   integratePullRequest,
   prIntegrationRepositoryFromBrood,
   type EligiblePrExtraction,
@@ -234,5 +238,77 @@ describe.skipIf(!sqliteAvailable)("PR integration eligibility", () => {
       expect(nextStage).not.toHaveBeenCalled();
       store.close();
     }
+  });
+
+  it("admits a mode-only diff as a real, reviewable change", () => {
+    const modePatch = [
+      "diff --git a/script.sh b/script.sh",
+      "old mode 100644",
+      "new mode 100755",
+      "",
+    ].join("\n");
+    const store = makeStore(
+      succeededExtraction({
+        patch: {
+          spawnId: "spawn-1",
+          backend: "codex",
+          patchText: modePatch,
+          touchedPaths: ["script.sh"],
+          sha256: patchSha256(modePatch),
+        },
+      }),
+    );
+    const nextStage = vi.fn((eligible: EligiblePrExtraction) => ({
+      spawnId: eligible.spawnId,
+      status: "succeeded" as const,
+      completedAt: NOW.toISOString(),
+    }));
+
+    const result = integratePullRequest(
+      { spawnId: "spawn-1", backend: "codex" },
+      {
+        repository: prIntegrationRepositoryFromBrood(store),
+        now: () => NOW,
+        nextStage,
+      },
+    );
+
+    expect(result.status).toBe("succeeded");
+    expect(nextStage).toHaveBeenCalledTimes(1);
+    store.close();
+  });
+});
+
+describe("evaluateExtractionEligibility patch-shape guard", () => {
+  const lifecycle: SessionRecord = {
+    id: "spawn-1",
+    kind: "spawn",
+    status: "stopped",
+    backend: "codex",
+    createdAt: NOW.toISOString(),
+    updatedAt: NOW.toISOString(),
+  };
+
+  it("returns terminal malformed-extraction instead of throwing on a bad patch", () => {
+    // A persisted "succeeded" result whose patch is not a valid object — the
+    // dereference must not throw before the refusal path runs.
+    const malformed = {
+      spawnId: "spawn-1",
+      backend: "codex",
+      status: "succeeded",
+      patch: null,
+      extractedAt: NOW.toISOString(),
+    } as unknown as ExtractionResult;
+
+    const decision = evaluateExtractionEligibility(
+      { spawnId: "spawn-1", backend: "codex" },
+      lifecycle,
+      malformed,
+    );
+
+    expect(decision.ok).toBe(false);
+    expect(decision.ok ? undefined : decision.reason).toBe(
+      "malformed-extraction",
+    );
   });
 });
