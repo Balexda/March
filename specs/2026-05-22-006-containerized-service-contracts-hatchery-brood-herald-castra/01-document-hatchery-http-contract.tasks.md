@@ -18,7 +18,7 @@
 
 ### Tasks
 
-- [ ] **Author the Hatchery HTTP contract**
+- [x] **Author the Hatchery HTTP contract**
 
   Create `docs/subsystems/hatchery/contract.md` using the service-contract structure from the data model and the Hatchery route surface from the contracts artifact. Keep the AUTOGEN region empty, document only Hatchery's existing HTTP boundary, and satisfy AS 1.1-1.3 without adding runtime service behavior.
 
