@@ -386,6 +386,10 @@ describe("spawn-handoff", () => {
       for (const extractionResult of [
         successfulExtraction("   \n", ["a.txt"]),
         successfulExtraction("diff --git a/a.txt b/a.txt\n", []),
+        // Header-only patch with a non-empty computed touchedPaths list (the
+        // shape extractionSuccessResult() really produces) — no hunk, so it
+        // must still be rejected as no-op (#350 review).
+        successfulExtraction("diff --git a/a.txt b/a.txt\n", ["a.txt"]),
         successfulExtraction("not a git diff\n", ["a.txt"]),
       ]) {
         const { dispatch, spans } = fakeDispatch();

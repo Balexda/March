@@ -353,6 +353,22 @@ function patchTouchedPaths(patch: string): string[] {
   return [...paths].sort();
 }
 
+/**
+ * A `git diff` that carries only a `diff --git` header — no hunk and no
+ * file-operation metadata — touches a path in name only: there is no content,
+ * mode, rename, or create/delete change to apply. `patchTouchedPaths` still
+ * reports such a header, so the no-op guard cannot rely on `touchedPaths`
+ * alone (#350 review). Require at least one real change marker.
+ */
+function patchHasRealChange(patch: string): boolean {
+  return (
+    /^@@ /m.test(patch) ||
+    /^(new file mode|deleted file mode|rename (from|to)|copy (from|to)|old mode|new mode) /m.test(
+      patch,
+    )
+  );
+}
+
 const PATCH_SENTINEL_RE = new RegExp(`^${PATCH_SENTINEL}:(.*)$`);
 
 /** The base64 payload of the LAST patch-sentinel line, or null if none. */
@@ -501,7 +517,8 @@ export function evaluateStewardHandoffEligibility(input: {
         if (
           result.patch.patchText.trim().length === 0 ||
           result.patch.touchedPaths.length === 0 ||
-          !result.patch.patchText.includes("diff --git ")
+          !result.patch.patchText.includes("diff --git ") ||
+          !patchHasRealChange(result.patch.patchText)
         ) {
           setEligibilitySpanAttributes(span, {
             spawnId: input.spawnId,
@@ -1164,7 +1181,7 @@ export async function runHatcherySpawn(
         input.homeDir,
       );
     } catch (err) {
-      createHatcherySpawnArtifacts({
+      const artifacts = createHatcherySpawnArtifacts({
         spawnId,
         homeDir: input.homeDir,
         spawnOutput: logs,
@@ -1181,6 +1198,18 @@ export async function runHatcherySpawn(
           diagnostic: (err as Error).message,
         }),
         input.homeDir,
+      );
+      // Emit the errored eligibility span so the refused handoff stays visible
+      // in the trace, then fail at the patch_extract stage (don't let the
+      // failure stage drift to handoff_eligibility) with the artifacts pointer
+      // restored to the terminal diagnostic (#350 review).
+      evaluateStewardHandoffEligibility({
+        spawnId,
+        homeDir: input.homeDir,
+        dispatch,
+      });
+      throw new HatcherySpawnError(
+        `${(err as Error).message} Logs: ${artifacts.spawnOutputPath}`,
       );
     }
 
