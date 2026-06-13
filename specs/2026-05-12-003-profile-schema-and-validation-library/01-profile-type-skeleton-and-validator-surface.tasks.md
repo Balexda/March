@@ -18,7 +18,7 @@
 
 ### Tasks
 
-- [ ] **Add the profile public type surface**
+- [x] **Add the profile public type surface**
 
   Create the new `src/profile/` module with `index.ts` as the public barrel for the canonical profile types, validation result types, error shape, and error-code union. Add colocated type-oriented coverage that imports the public names and proves `ValidationResult.ok` narrows as required by AS 1.1 and AS 1.3.
 
@@ -29,7 +29,7 @@
   - Branching on `result.ok` narrows the success arm to a `Profile` value
   - Branching on `result.ok` narrows the failure arm to validation errors
 
-- [ ] **Implement non-object validation behavior**
+- [x] **Implement non-object validation behavior**
 
   Add the initial pure `validateProfile` implementation in `src/profile/`. Cover the root non-object cases from AS 1.2 while keeping the implementation scoped to the story-1 surface rather than later field-level validation.
 
