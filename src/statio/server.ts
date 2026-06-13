@@ -2,7 +2,6 @@ import { timingSafeEqual } from "node:crypto";
 import Fastify, {
   type FastifyBaseLogger,
   type FastifyInstance,
-  type FastifyRequest,
 } from "fastify";
 import { emitStatioRequestSpan } from "../observability/statio-trace.js";
 import { CLI_VERSION } from "../shared/version.js";
@@ -37,26 +36,24 @@ export function buildStatioServer(options: BuildStatioServerOptions = {}): Fasti
   const token = options.token?.trim() || undefined;
   const startedAt = options.startedAt ?? Date.now();
   const loggerOption = options.logger ?? false;
-  const requestStarts = new WeakMap<FastifyRequest, number>();
   const app =
     typeof loggerOption === "boolean"
       ? Fastify({ logger: loggerOption })
       : Fastify({ loggerInstance: loggerOption });
 
-  app.addHook("onRequest", async (request) => {
-    requestStarts.set(request, Date.now());
-  });
-
   app.addHook("onResponse", async (request, reply) => {
     const slice = request.headers["x-march-slice-id"];
     const sliceId = Array.isArray(slice) ? slice[0] : slice;
+    // Fastify tracks request duration on a monotonic clock; backdate the span
+    // start from it rather than recording our own wall-clock timestamp.
+    const endTimeMs = Date.now();
     emitStatioRequestSpan({
       method: request.method,
       route: request.routeOptions.url ?? "unmatched",
       statusCode: reply.statusCode,
       sliceId,
-      startTimeMs: requestStarts.get(request),
-      endTimeMs: Date.now(),
+      startTimeMs: endTimeMs - reply.elapsedTime,
+      endTimeMs,
     });
   });
 

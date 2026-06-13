@@ -1,5 +1,6 @@
 import type { AddressInfo } from "node:net";
 import type { FastifyInstance } from "fastify";
+import { SpanStatusCode } from "@opentelemetry/api";
 import type { Span } from "@opentelemetry/sdk-trace-base";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { getActiveOtel, initOtel } from "../observability/otel.js";
@@ -285,6 +286,51 @@ describe("statio request tracing", () => {
 
     expect(res.statusCode).toBe(200);
     expect(start).not.toHaveBeenCalled();
+  });
+
+  it("emits a success-outcome span for a 4xx auth failure", async () => {
+    initOtel({ MARCH_OTEL: "1", MARCH_OTEL_ENDPOINT: "http://localhost:4318" });
+    const spans = captureSpans();
+    app = buildStatioServer({ repoReader: fakeReader(), token: "secret" });
+
+    const res = await app.inject({
+      method: "GET",
+      url: "/v1/repo",
+      headers: { authorization: "Bearer wrong" },
+    });
+
+    expect(res.statusCode).toBe(401);
+    const span = spans.find((s) => s.name === "statio.request")!;
+    expect(span).toBeDefined();
+    expect(span.attributes).toMatchObject({
+      "statio.status_class": "4xx",
+      "statio.outcome": "success",
+    });
+    expect(span.status.code).not.toBe(SpanStatusCode.ERROR);
+  });
+
+  it("emits a failure-outcome error span for a 5xx forge failure", async () => {
+    initOtel({ MARCH_OTEL: "1", MARCH_OTEL_ENDPOINT: "http://localhost:4318" });
+    const spans = captureSpans();
+    const reader = fakeReader({
+      repoInfo: vi.fn().mockRejectedValue(new StatioForgeError("forge down")),
+    });
+    app = buildStatioServer({ repoReader: reader, token: "secret" });
+
+    const res = await app.inject({
+      method: "GET",
+      url: "/v1/repo",
+      headers: { authorization: "Bearer secret" },
+    });
+
+    expect(res.statusCode).toBe(502);
+    const span = spans.find((s) => s.name === "statio.request")!;
+    expect(span).toBeDefined();
+    expect(span.attributes).toMatchObject({
+      "statio.status_class": "5xx",
+      "statio.outcome": "failure",
+    });
+    expect(span.status.code).toBe(SpanStatusCode.ERROR);
   });
 });
 
