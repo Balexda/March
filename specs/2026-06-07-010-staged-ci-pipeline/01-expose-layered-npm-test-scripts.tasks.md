@@ -1,6 +1,6 @@
 # Tasks: Expose Layered Npm Test Scripts
 
-**Source**: `specs/2026-06-07-010-staged-ci-pipeline/staged-ci-pipeline.spec.md` - User Story 1
+**Source**: `specs/2026-06-07-010-staged-ci-pipeline/staged-ci-pipeline.spec.md` — User Story 1
 **Data Model**: `specs/2026-06-07-010-staged-ci-pipeline/staged-ci-pipeline.data-model.md`
 **Contracts**: `specs/2026-06-07-010-staged-ci-pipeline/staged-ci-pipeline.contracts.md`
 **Story Number**: 01
@@ -14,7 +14,7 @@
 
 **Justification**: This slice delivers the command surface contributors and later CI jobs can call directly, without requiring the aggregate `npm test` alias to be rebuilt first.
 
-**Addresses**: FR-001, FR-002, FR-006, FR-010; Acceptance Scenario 1.1, Acceptance Scenario 1.2, Acceptance Scenario 1.3, Acceptance Scenario 1.4
+**Addresses**: FR-001, FR-002, FR-006, FR-009, FR-010; Acceptance Scenario 1.1, Acceptance Scenario 1.2, Acceptance Scenario 1.3, Acceptance Scenario 1.4
 
 ### Tasks
 
@@ -26,6 +26,7 @@
   - `package.json` exposes all four staged script names.
   - Each staged script selects exactly one intended layer.
   - Each staged script requires the deterministic CI tag axes for its layer.
+  - Each staged script excludes the `tests/quarantine/` path before tag-based selection, so a quarantined but validly tagged test is never selected (the AS 1.1-AS 1.4 / FR-009 exclusion contract, distinct from Feature 3's routing).
   - A layer with zero selected tests exits cleanly with explicit empty-layer diagnostics.
   - Each staged script remains reachable through `npm run`.
   - Staged scripts do not require live services, network calls, paid calls, or cassette refresh.
@@ -37,6 +38,7 @@
   _Acceptance criteria:_
   - Tests prove each staged script targets one scope only.
   - Tests prove the deterministic and CI axes are included.
+  - Tests prove a `tests/quarantine/` file carrying a matching layer tag is excluded from every staged script (AS 1.1-AS 1.4 / FR-009 exclusion contract).
   - Tests prove the M1 commands stay local and deterministic.
   - Tests do not require live Docker services, Hatchery, Brood, Herald, Castra, Legate, or cassette refresh.
   - No CI fan-out, operator docs, quarantine routing, or whole-repo coverage lint behavior is introduced.
