@@ -17,7 +17,7 @@
 
 ### Tasks
 
-- [ ] **Evaluate extraction eligibility before mutation**
+- [x] **Evaluate extraction eligibility before mutation**
 
   Add the PR-integration runner's first decision point so it reads the Brood lifecycle state and persisted Feature 5 extraction result, then admits only `status: "succeeded"` results whose spawn id, backend, patch digest, touched paths, and validated patch text are internally consistent with the recorded spawn state. Rejected inputs must return a terminal `PrIntegrationResult` without invoking patch application, branch publishing, or pull-request creation.
 
@@ -28,7 +28,7 @@
   - Spawn id or backend mismatch between extraction metadata and lifecycle state fails before patch application (AS 1.4, FR-001).
   - The eligibility path does not parse raw backend logs or raw spawn output as fallback patch input (FR-002).
 
-- [ ] **Reject no-op patches and expose observable failures**
+- [x] **Reject no-op patches and expose observable failures**
 
   Add the final eligibility guard for successful extraction results whose normalized validated patch is empty or no-op, and wire every refusal path through bounded diagnostics and errored telemetry. The result should preserve enough durable context for orchestration to stop or retry safely while keeping secrets, raw backend logs, and unbounded spawn output out of diagnostics.
 

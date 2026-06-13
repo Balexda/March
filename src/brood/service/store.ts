@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { getDatabaseSync, type BroodDatabase } from "./sqlite.js";
+import { parseExtractionResult } from "./extraction.js";
 import type { SessionRepository } from "./repository.js";
 import type {
   ListSessionsFilter,
@@ -50,6 +51,7 @@ const COLUMNS = [
   "profile",
   "ad_group",
   "backend",
+  "extraction_result_json",
   "image_id",
   "exit_code",
   "failure_reason",
@@ -74,6 +76,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   profile              TEXT,
   ad_group             TEXT,
   backend              TEXT,
+  extraction_result_json TEXT,
   image_id             TEXT,
   exit_code            INTEGER,
   failure_reason       TEXT,
@@ -118,6 +121,14 @@ function mergeDefined<T extends object>(base: T, changes: Partial<T>): T {
   return out;
 }
 
+function safeReadExtraction(json: string) {
+  try {
+    return parseExtractionResult(JSON.parse(json));
+  } catch {
+    return undefined;
+  }
+}
+
 function rowToRecord(row: SqliteRow): SessionRecord {
   const record: SessionRecord = {
     id: row.id as string,
@@ -149,6 +160,12 @@ function rowToRecord(row: SqliteRow): SessionRecord {
     }
   }
   if (row.exit_code != null) record.exitCode = row.exit_code as number;
+  if (typeof row.extraction_result_json === "string") {
+    // Malformed JSON (partial write, manual edit, older version) or a bad shape
+    // is treated as "no extraction result" so it can never crash a row read.
+    const extraction = safeReadExtraction(row.extraction_result_json);
+    if (extraction) record.extractionResult = extraction;
+  }
   return record;
 }
 
@@ -166,6 +183,7 @@ function recordToValues(record: SessionRecord): Array<string | number | null> {
     record.profile ?? null,
     record.group ?? null,
     record.backend ?? null,
+    record.extractionResult ? JSON.stringify(record.extractionResult) : null,
     record.imageId ?? null,
     record.exitCode ?? null,
     record.failureReason ?? null,
@@ -208,6 +226,12 @@ export class SessionStore implements SessionRepository {
 
   private migrate(): void {
     this.db.exec(CREATE_TABLE_SQL);
+    const columns = this.db
+      .prepare("PRAGMA table_info(sessions)")
+      .all() as Array<{ name: string }>;
+    if (!columns.some((column) => column.name === "extraction_result_json")) {
+      this.db.exec("ALTER TABLE sessions ADD COLUMN extraction_result_json TEXT;");
+    }
     const row = this.db
       .prepare("SELECT version FROM schema_meta LIMIT 1")
       .get() as { version?: number } | undefined;

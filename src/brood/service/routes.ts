@@ -8,6 +8,7 @@ import {
 import { startBroodSpan } from "../../observability/brood-trace.js";
 import { createCastraClientFromEnv } from "../../castra/client.js";
 import type { SessionRepository } from "./repository.js";
+import { parseExtractionResult } from "./extraction.js";
 import {
   defaultOrphanGate,
   defaultStewardGateway,
@@ -129,6 +130,11 @@ export function validateRegister(
   if (body.profile !== undefined) input.profile = body.profile;
   if (body.group !== undefined) input.group = body.group;
   if (body.backend !== undefined) input.backend = body.backend;
+  if (body.extractionResult !== undefined) {
+    const parsed = parseExtractionResult(body.extractionResult);
+    if (!parsed) return { ok: false, error: "invalid extractionResult." };
+    input.extractionResult = parsed;
+  }
   if (body.imageId !== undefined) input.imageId = body.imageId;
   if (body.exitCode !== undefined) input.exitCode = body.exitCode;
   if (body.failureReason !== undefined) input.failureReason = body.failureReason;
@@ -147,6 +153,7 @@ const UPDATE_FIELDS: readonly (keyof UpdateSessionInput)[] = [
   "branch",
   "profile",
   "group",
+  "extractionResult",
   "startedAt",
   "stoppedAt",
   "torndownAt",
@@ -284,6 +291,14 @@ export async function registerRoutes(
       reply.code(400);
       return { error: `invalid branch "${String(body.branch)}".` };
     }
+    let parsedExtraction: UpdateSessionInput["extractionResult"];
+    if (body.extractionResult !== undefined) {
+      parsedExtraction = parseExtractionResult(body.extractionResult);
+      if (!parsedExtraction) {
+        reply.code(400);
+        return { error: "invalid extractionResult." };
+      }
+    }
     // Whitelist: only known mutable fields reach the store.
     const changes: UpdateSessionInput = {};
     for (const field of UPDATE_FIELDS) {
@@ -291,6 +306,8 @@ export async function registerRoutes(
         (changes as Record<string, unknown>)[field] = body[field];
       }
     }
+    // Persist the validated/normalized extraction, not the raw request shape.
+    if (parsedExtraction) changes.extractionResult = parsedExtraction;
     const record = store.update(id, changes);
     if (!record) {
       reply.code(404);
