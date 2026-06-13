@@ -92,7 +92,7 @@
 
 ### Tasks
 
-- [ ] **Add Statio request span correlation**
+- [x] **Add Statio request span correlation**
 
   Add Statio span helpers under `src/observability/` and service integration under `src/statio/` so request handling can read `x-march-slice-id` and nest spans on the deterministic slice trace. Keep telemetry env-gated and no-op when disabled, following the existing Castra and Herald trace patterns.
 

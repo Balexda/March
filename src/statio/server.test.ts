@@ -1,6 +1,9 @@
 import type { AddressInfo } from "node:net";
 import type { FastifyInstance } from "fastify";
+import type { Span } from "@opentelemetry/sdk-trace-base";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { getActiveOtel, initOtel } from "../observability/otel.js";
+import { spanIdForDispatch, traceIdForDispatch } from "../observability/trace-ids.js";
 import { StatioClient } from "./client.js";
 import type { RepoMetadataReader } from "./forge.js";
 import { buildStatioServer } from "./server.js";
@@ -16,12 +19,26 @@ function fakeReader(overrides: Partial<RepoMetadataReader> = {}): RepoMetadataRe
   };
 }
 
+function captureSpans(): Span[] {
+  const tracer = getActiveOtel().getTracer();
+  const created: Span[] = [];
+  const real = tracer.startSpan.bind(tracer);
+  vi.spyOn(tracer, "startSpan").mockImplementation((...args: Parameters<typeof real>) => {
+    const span = real(...args) as Span;
+    created.push(span);
+    return span;
+  });
+  return created;
+}
+
 describe("statio server", () => {
   let app: FastifyInstance | undefined;
 
   afterEach(async () => {
     if (app) await app.close();
     app = undefined;
+    vi.restoreAllMocks();
+    initOtel({});
   });
 
   it("exposes open health and status routes", async () => {
@@ -163,12 +180,122 @@ describe("statio server", () => {
   });
 });
 
+describe("statio request tracing", () => {
+  let app: FastifyInstance | undefined;
+
+  afterEach(async () => {
+    if (app) await app.close();
+    app = undefined;
+    vi.restoreAllMocks();
+    initOtel({});
+  });
+
+  it("nests request spans under a valid x-march-slice-id when telemetry is enabled", async () => {
+    initOtel({ MARCH_OTEL: "1", MARCH_OTEL_ENDPOINT: "http://localhost:4318" });
+    const spans = captureSpans();
+    app = buildStatioServer({ repoReader: fakeReader(), token: "secret" });
+
+    const res = await app.inject({
+      method: "GET",
+      url: "/v1/repo?ignored=1",
+      headers: {
+        authorization: "Bearer secret",
+        "x-march-slice-id": "slice-abc",
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const span = spans.find((s) => s.name === "statio.request")!;
+    expect(span).toBeDefined();
+    expect(span.spanContext().traceId).toBe(traceIdForDispatch("slice-abc"));
+    expect(span.parentSpanContext?.spanId).toBe(spanIdForDispatch("slice-abc"));
+    expect(span.attributes).toMatchObject({
+      "statio.method": "GET",
+      "statio.route": "/v1/repo",
+      "statio.status_class": "2xx",
+      "statio.outcome": "success",
+    });
+  });
+
+  it("emits a service-local request span when no slice id is provided", async () => {
+    initOtel({ MARCH_OTEL: "1", MARCH_OTEL_ENDPOINT: "http://localhost:4318" });
+    const spans = captureSpans();
+    app = buildStatioServer({ repoReader: fakeReader(), token: "secret" });
+
+    const res = await app.inject({
+      method: "GET",
+      url: "/v1/repo",
+      headers: { authorization: "Bearer secret" },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const span = spans.find((s) => s.name === "statio.request")!;
+    expect(span).toBeDefined();
+    expect(span.parentSpanContext).toBeUndefined();
+  });
+
+  it("ignores malformed and oversized slice ids for correlation without affecting responses", async () => {
+    initOtel({ MARCH_OTEL: "1", MARCH_OTEL_ENDPOINT: "http://localhost:4318" });
+    const spans = captureSpans();
+    app = buildStatioServer({ repoReader: fakeReader(), token: "secret" });
+
+    const res = await app.inject({
+      method: "GET",
+      url: "/v1/repo",
+      headers: {
+        authorization: "Bearer secret",
+        "x-march-slice-id": "bad slice id",
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const span = spans.find((s) => s.name === "statio.request")!;
+    expect(span).toBeDefined();
+    expect(span.parentSpanContext).toBeUndefined();
+    expect(span.spanContext().traceId).not.toBe(traceIdForDispatch("bad slice id"));
+
+    const oversized = await app.inject({
+      method: "GET",
+      url: "/v1/repo",
+      headers: {
+        authorization: "Bearer secret",
+        "x-march-slice-id": "x".repeat(201),
+      },
+    });
+
+    expect(oversized.statusCode).toBe(200);
+    const oversizedSpan = spans.filter((s) => s.name === "statio.request").at(-1)!;
+    expect(oversizedSpan).toBeDefined();
+    expect(oversizedSpan.parentSpanContext).toBeUndefined();
+  });
+
+  it("does not emit request spans when telemetry is disabled", async () => {
+    initOtel({});
+    const start = vi.spyOn(getActiveOtel().getTracer(), "startSpan");
+    app = buildStatioServer({ repoReader: fakeReader(), token: "secret" });
+
+    const res = await app.inject({
+      method: "GET",
+      url: "/v1/repo",
+      headers: {
+        authorization: "Bearer secret",
+        "x-march-slice-id": "slice-abc",
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(start).not.toHaveBeenCalled();
+  });
+});
+
 describe("statio client/server compatibility", () => {
   let app: FastifyInstance | undefined;
 
   afterEach(async () => {
     if (app) await app.close();
     app = undefined;
+    vi.restoreAllMocks();
+    initOtel({});
   });
 
   async function listen(reader: RepoMetadataReader, token = "secret"): Promise<string> {
