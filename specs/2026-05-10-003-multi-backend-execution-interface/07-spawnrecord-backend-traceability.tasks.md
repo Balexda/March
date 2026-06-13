@@ -17,7 +17,7 @@
 
 ### Tasks
 
-- [ ] **Record selected backend names in new SpawnRecords**
+- [x] **Record selected backend names in new SpawnRecords**
 
   Update the CLI dispatch and Hatchery handoff record-creation paths so `writeInitialSpawnRecord` receives the resolved backend's `name` instead of relying on a hardcoded default. Keep the `SpawnRecord` type, persisted schema version, and existing record-reader behavior unchanged; this slice only changes how new records are populated. Cover both Codex and Claude/default dispatch paths while leaving existing on-disk records untouched.
 

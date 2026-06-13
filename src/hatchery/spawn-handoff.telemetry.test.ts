@@ -153,6 +153,33 @@ describe("runHatcherySpawn outcome + failure_stage telemetry", () => {
     );
   });
 
+  it("persists the supplied backend name in the initial SpawnRecord", async () => {
+    buildShouldThrow.value = true;
+    const home = makeHome();
+
+    await expect(
+      runHatcherySpawn({
+        repoPath: "/repo",
+        prompt: "do the thing",
+        backend: { ...backend, name: "fixture-backend" },
+        agentDeckProfile: "march",
+        branch: "smithy/cut/01-spawn-f3-s3",
+        homeDir: home,
+      }),
+    ).rejects.toThrow(/image build failed/);
+
+    const spawnsDir = path.join(home, ".march", "spawns");
+    const recordFiles = fs
+      .readdirSync(spawnsDir)
+      .filter((file) => file.endsWith(".json"));
+    expect(recordFiles).toHaveLength(1);
+    const record = JSON.parse(
+      fs.readFileSync(path.join(spawnsDir, recordFiles[0]), "utf-8"),
+    );
+    expect(record.backend).toBe("fixture-backend");
+    expect(record.version).toBe(1);
+  });
+
   it("records failure at stage patch_apply when the container exits 0 but git apply fails (#211)", async () => {
     // Point the manager worktree at a path that does not exist so the real
     // applyPatchToManagerWorktree throws — the post-container failure that used
