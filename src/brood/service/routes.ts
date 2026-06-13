@@ -193,7 +193,8 @@ function validExtractionResult(value: unknown): boolean {
       Array.isArray(result.patch.touchedPaths) &&
       result.patch.touchedPaths.every((path) => typeof path === "string") &&
       typeof result.patch.sha256 === "string" &&
-      result.failureReason === undefined
+      result.failureReason === undefined &&
+      result.diagnostic === undefined
     );
   }
   if (result.status === "failed") {
@@ -335,12 +336,25 @@ export async function registerRoutes(
       reply.code(400);
       return { error: `invalid branch "${String(body.branch)}".` };
     }
-    if (
-      body.extractionResult !== undefined &&
-      !validExtractionResult(body.extractionResult)
-    ) {
-      reply.code(400);
-      return { error: "invalid extractionResult." };
+    if (body.extractionResult !== undefined) {
+      if (!validExtractionResult(body.extractionResult)) {
+        reply.code(400);
+        return { error: "invalid extractionResult." };
+      }
+      const extractionResult = body.extractionResult as { spawnId: string };
+      if (extractionResult.spawnId !== id) {
+        reply.code(400);
+        return { error: "extractionResult.spawnId must match the session id." };
+      }
+      const target = store.get(id);
+      if (!target) {
+        reply.code(404);
+        return { error: `No session with id "${id}".` };
+      }
+      if (target.kind !== "spawn") {
+        reply.code(400);
+        return { error: "extractionResult is only valid on a spawn session." };
+      }
     }
     // Whitelist: only known mutable fields reach the store.
     const changes: UpdateSessionInput = {};

@@ -226,6 +226,84 @@ describe.skipIf(!sqliteAvailable)("brood routes", () => {
     expect(bad.statusCode).toBe(400);
   });
 
+  it("PATCH /sessions/:id rejects a succeeded extractionResult that carries a diagnostic", async () => {
+    const { app } = await buildApp();
+    await app.inject({
+      method: "POST",
+      url: "/sessions",
+      payload: { id: "s1", kind: "spawn" },
+    });
+    const bad = await app.inject({
+      method: "PATCH",
+      url: "/sessions/s1",
+      payload: {
+        extractionResult: {
+          status: "succeeded",
+          spawnId: "s1",
+          backend: "codex",
+          diagnostic: "x".repeat(2001),
+          extractedAt: "2026-06-13T00:00:00.000Z",
+          patch: {
+            spawnId: "s1",
+            backend: "codex",
+            patchText: "diff --git a/a b/a\n",
+            touchedPaths: ["a"],
+            sha256: "d",
+          },
+        },
+      },
+    });
+    expect(bad.statusCode).toBe(400);
+  });
+
+  it("PATCH /sessions/:id rejects an extractionResult whose spawnId differs from the route id", async () => {
+    const { app } = await buildApp();
+    await app.inject({
+      method: "POST",
+      url: "/sessions",
+      payload: { id: "s1", kind: "spawn" },
+    });
+    const bad = await app.inject({
+      method: "PATCH",
+      url: "/sessions/s1",
+      payload: {
+        extractionResult: {
+          status: "failed",
+          spawnId: "s2",
+          backend: "codex",
+          failureReason: "malformed-output",
+          diagnostic: "bad json",
+          extractedAt: "2026-06-13T00:00:00.000Z",
+        },
+      },
+    });
+    expect(bad.statusCode).toBe(400);
+  });
+
+  it("PATCH /sessions/:id rejects an extractionResult on a non-spawn session", async () => {
+    const { app } = await buildApp();
+    await app.inject({
+      method: "POST",
+      url: "/sessions",
+      payload: { id: "steward-1", kind: "steward" },
+    });
+    const bad = await app.inject({
+      method: "PATCH",
+      url: "/sessions/steward-1",
+      payload: {
+        extractionResult: {
+          status: "failed",
+          spawnId: "steward-1",
+          backend: "codex",
+          failureReason: "malformed-output",
+          diagnostic: "bad json",
+          extractedAt: "2026-06-13T00:00:00.000Z",
+        },
+      },
+    });
+    expect(bad.statusCode).toBe(400);
+  });
+
   it("GET /sessions filters by kind/status/parentId", async () => {
     const { app } = await buildApp();
     await app.inject({ method: "POST", url: "/sessions", payload: { id: "spawn-1", kind: "spawn", status: "running" } });

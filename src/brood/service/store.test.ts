@@ -223,6 +223,49 @@ describe.skipIf(!sqliteAvailable)("SessionStore", () => {
     store.close();
   });
 
+  it("returns a terminal persistence diagnostic when the recorded backend differs", () => {
+    const store = makeStore();
+    store.register({ id: "spawn-4", kind: "spawn", backend: "claude-code" });
+
+    const persisted = persistExtractionResult(store, {
+      spawnId: "spawn-4",
+      backend: "codex",
+      extractedAt: "2026-06-13T00:06:00.000Z",
+      outcome: {
+        status: "accepted",
+        patchText: "diff --git a/README.md b/README.md\n",
+        touchedPaths: ["README.md"],
+        sha256: "digest-1",
+      },
+    });
+
+    expect(persisted.ok).toBe(false);
+    expect(persisted.result).toMatchObject({
+      status: "failed",
+      spawnId: "spawn-4",
+      backend: "codex",
+      failureReason: "backend-mismatch",
+    });
+    expect(store.get("spawn-4")?.extractionResult).toBeUndefined();
+    store.close();
+  });
+
+  it("treats a malformed extraction_result_json column as absent instead of throwing", () => {
+    const store = makeStore();
+    store.register({ id: "spawn-5", kind: "spawn", backend: "codex" });
+    // Simulate a partial write / manual edit / corruption directly in the DB.
+    store["db"]
+      .prepare(
+        "UPDATE sessions SET extraction_result_json = ? WHERE id = ?",
+      )
+      .run("{not valid json", "spawn-5");
+
+    const record = store.get("spawn-5");
+    expect(record).toBeDefined();
+    expect(record?.extractionResult).toBeUndefined();
+    store.close();
+  });
+
   it("returns a terminal persistence diagnostic when the spawn row is absent", () => {
     const store = makeStore();
     const persisted = persistExtractionResult(store, {

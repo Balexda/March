@@ -116,6 +116,20 @@ export function persistExtractionResult(
     };
   }
 
+  if (existing.backend !== undefined && existing.backend !== input.backend) {
+    return {
+      ok: false,
+      result: {
+        status: "failed",
+        spawnId: input.spawnId,
+        backend: input.backend,
+        failureReason: "backend-mismatch",
+        diagnostic: `Brood spawn session "${input.spawnId}" is recorded with backend "${existing.backend}", not "${input.backend}".`,
+        extractedAt: result.extractedAt,
+      },
+    };
+  }
+
   const updated = repository.recordExtractionResult(input.spawnId, result);
   if (!updated) {
     return {

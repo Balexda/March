@@ -153,9 +153,14 @@ function rowToRecord(row: SqliteRow): SessionRecord {
   }
   if (row.exit_code != null) record.exitCode = row.exit_code as number;
   if (row.extraction_result_json != null) {
-    record.extractionResult = JSON.parse(
-      row.extraction_result_json as string,
-    ) as ExtractionResult;
+    try {
+      record.extractionResult = JSON.parse(
+        row.extraction_result_json as string,
+      ) as ExtractionResult;
+    } catch {
+      // Malformed JSON (partial write, manual edit, corruption): treat the
+      // extraction result as absent rather than 500-ing the whole read.
+    }
   }
   return record;
 }
