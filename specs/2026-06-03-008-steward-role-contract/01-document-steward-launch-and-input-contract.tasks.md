@@ -17,7 +17,7 @@
 
 ### Tasks
 
-- [ ] **Create the Steward contract artifact and required section shape**
+- [x] **Create the Steward contract artifact and required section shape**
 
   Add `docs/subsystems/steward/contract.md` as the role-level contract for the Castra-hosted Steward manager session. The artifact should establish Steward as a documented role boundary rather than a new runtime service, include the required H2 sections, and reserve the generated public-interface region for later extraction without populating it in this slice.
 
@@ -28,7 +28,7 @@
   - The contract states that Steward is not a standalone TypeScript subsystem, HTTP service, CLI command, or agent-deck adapter.
   - No contract checker, freshness checker, AUTOGEN generation, CI enforcement, runtime behavior, PR creation, push, or merge behavior is introduced.
 
-- [ ] **Document launch envelope inputs and Castra consumer methods**
+- [x] **Document launch envelope inputs and Castra consumer methods**
 
   In `## Public Interface`, document the facts that must be present before Steward can launch: the validated patch, target worktree, target branch, spawn id, slice id, profile or session metadata, and role prompt context. Pin the Hatchery-to-Castra consumer boundary by naming the `launch`, `send`, `output`, and `remove` methods in `src/castra/client.ts` as consumed by `src/hatchery/spawn-handoff.ts`, while deferring server route shapes to Castra's own contract.
 
@@ -39,7 +39,7 @@
   - Castra is described as the interactive session host, with server-side `/v1/sessions*` wire shapes owned by Castra's contract rather than duplicated here.
   - Hatchery is described as the launch/handoff consumer boundary, not as the owner of Steward's role semantics.
 
-- [ ] **Record launch eligibility and fail-closed refusals**
+- [x] **Record launch eligibility and fail-closed refusals**
 
   Document the invariant that Steward launches only for successful, non-empty, validated spawn output and that ineligible output stops before session launch with bounded diagnostics or evented state. Keep the refusal language focused on launch eligibility; do not implement or specify later patch-apply, PR-ready, lifecycle cleanup, or freshness-check behavior beyond naming them as later contract concerns.
 
