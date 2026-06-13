@@ -17,7 +17,7 @@
 
 ### Tasks
 
-- [ ] **Derive Stage 1 and Snapshot images from the selected backend**
+- [x] **Derive Stage 1 and Snapshot images from the selected backend**
 
   Update the dispatch action and snapshot build boundary so the dependency check and generated Dockerfile consume the resolved backend's `baseImage`. Consume the backend already produced by the repo's existing selection surface (the current `--backend`/`MARCH_BACKEND`/default resolution) as-is — this slice does not touch that resolution behavior. No changes to `--backend` parsing, env-var fallback behavior, or auth pre-flight exits belong in this slice.
 

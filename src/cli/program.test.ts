@@ -554,6 +554,53 @@ describe("march CLI", () => {
     expect(result.stderr).toContain("march-spawn-claude:latest");
   });
 
+  it("spawn dispatch: dependency validation checks the selected backend image", () => {
+    const nodeBinDir = path.dirname(process.execPath);
+
+    const claudeRepoRoot = makeRealRepo();
+    const claudeHome = makeTmpDir();
+    const claudeDockerLog = path.join(claudeHome, "docker-invocations.log");
+    const claudeDockerStubDir = makeDockerStubBinDir(claudeDockerLog);
+    const claudeResult = runWithEnv(
+      ["spawn", "dispatch", "--backend", "claude-code"],
+      {
+        PATH: [nodeBinDir, claudeDockerStubDir, process.env.PATH ?? ""].join(
+          path.delimiter,
+        ),
+        HOME: claudeHome,
+      },
+      { cwd: claudeRepoRoot },
+    );
+    expect(claudeResult.exitCode).toBe(2);
+    const claudeInvocations = fs.readFileSync(claudeDockerLog, "utf-8");
+    expect(claudeInvocations).toContain(
+      "image inspect march-spawn-claude:latest",
+    );
+    expect(claudeInvocations).not.toContain("march-spawn-codex:latest");
+
+    const codexRepoRoot = makeRealRepo();
+    const codexHome = makeTmpDir();
+    const codexDockerLog = path.join(codexHome, "docker-invocations.log");
+    const codexDockerStubDir = makeDockerStubBinDir(codexDockerLog);
+    const codexResult = runWithEnv(
+      ["spawn", "dispatch", "--backend", "codex"],
+      {
+        PATH: [nodeBinDir, codexDockerStubDir, process.env.PATH ?? ""].join(
+          path.delimiter,
+        ),
+        HOME: codexHome,
+        CODEX_HOME: path.join(codexHome, "missing-codex-home"),
+      },
+      { cwd: codexRepoRoot },
+    );
+    expect(codexResult.exitCode).toBe(2);
+    const codexInvocations = fs.readFileSync(codexDockerLog, "utf-8");
+    expect(codexInvocations).toContain(
+      "image inspect march-spawn-codex:latest",
+    );
+    expect(codexInvocations).not.toContain("march-spawn-claude:latest");
+  });
+
   // --- spawn dispatch worktree + initial SpawnRecord (Story 3) ---
 
   /**
