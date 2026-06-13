@@ -120,6 +120,29 @@ describe.skipIf(!sqliteAvailable)("ProfileStore", () => {
     store.close();
   });
 
+  it("round-trips a priority through register/get (including 0)", () => {
+    const store = makeStore();
+    expect(store.register(input({ priority: 0 })).priority).toBe(0);
+    expect(store.get("march")?.priority).toBe(0);
+    store.close();
+  });
+
+  it("a profile without a priority reads back as undefined (default)", () => {
+    const store = makeStore();
+    store.register(input());
+    expect(store.get("march")?.priority).toBeUndefined();
+    store.close();
+  });
+
+  it("a plain re-register preserves an existing priority", () => {
+    const store = makeStore();
+    store.register(input({ priority: 2 }));
+    const back = store.register(input({ workerGroup: "renamed" }));
+    expect(back.workerGroup).toBe("renamed");
+    expect(back.priority).toBe(2);
+    store.close();
+  });
+
   it("a plain re-register preserves an existing toolchain", () => {
     const store = makeStore();
     store.register(input({ toolchain: "jvm" }));

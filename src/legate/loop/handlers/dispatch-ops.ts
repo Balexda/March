@@ -165,6 +165,45 @@ export async function launchHatcheryDispatch(item: any, sliceId: string, deps: D
   return { jobId: created.id };
 }
 
+// Best-effort cull of the steward an escalating failed spawn orphaned (see
+// DispatchIoDeps.cullStewardForSlice). Pure plumbing: never throws into the
+// dispatch flow (a cull failure is logged, not propagated — the slice is already
+// escalated), and returns the action to push when something was actually culled,
+// or null. Shared by both escalate paths (launch-throw + completion-failure).
+//
+// NEVER culls on a "branch already exists" collision: that branch belongs to a
+// PRIOR spawn that may have an OPEN PR whose live steward the fold simply hasn't
+// observed yet (`slice.pr.changed` not emitted), so `adoptOpenPrOnCollision`
+// returns null this tick and re-tries the adopt on a later one. Culling by branch
+// here would delete the steward/worktree backing that PR before adoption runs.
+// The collision case is owned by #173 (adopt) + the Hatchery self-heal (#243),
+// not the orphan cull — which exists for the genuine never-reached-steward
+// failures (Castra launch timeout / crash), where the error is not a collision.
+async function cullOrphanedSteward(
+  sliceId: string,
+  branch: string | undefined,
+  errorText: string,
+  ts: string,
+  deps: DispatchIoDeps,
+): Promise<any | null> {
+  if (!deps.cullStewardForSlice) return null;
+  if (/already exists/i.test(errorText)) return null;
+  try {
+    const res = await deps.cullStewardForSlice(sliceId, branch);
+    if (res?.culled) {
+      return {
+        action: "steward-cull",
+        sliceId,
+        sessionId: res.sessionId,
+        detail: "culled orphaned steward (spawn failed before reaching steward) for " + sliceId,
+      };
+    }
+  } catch (err: any) {
+    deps.log("[" + ts + "] steward cull failed for " + sliceId + ": " + (err?.message || String(err)));
+  }
+  return null;
+}
+
 // Fresh-dispatch launch for one ready item: create the hatchery-pending slice,
 // fire the codex spawn, and return the action (or escalate + a notification on a
 // launch throw). The dispatch handler's apply() calls this via DispatchDeps.
@@ -226,6 +265,8 @@ export async function launchDispatch(state: any, ts: string, item: any, sliceId:
       existing.last_action = ts;
       existing.last_action_note = "NEED: Hatchery dispatch launch failed: " + error;
       deps.emitTransition({ type: "slice.escalated", sliceId, reason: "hatchery_dispatch_failed" });
+      const culled = await cullOrphanedSteward(sliceId, existing.branch, error, ts, deps);
+      if (culled) actions.push(culled);
       // Only bother the operator once auto-recovery is out of budget — within
       // budget the loop re-dispatches this slice itself (#211), so a judgement
       // request here would escalate prematurely and defeat bounded recovery. The
@@ -326,7 +367,7 @@ export async function completePendingHatcheryDispatches(state: any, ts: string, 
   let mutated = false;
   const slices: Record<string, any> = state?.slices && typeof state.slices === "object" ? state.slices : {};
 
-  const escalate = (slice: any, sliceId: string, errorText: string) => {
+  const escalate = async (slice: any, sliceId: string, errorText: string) => {
     slice.stage = "escalated";
     // Tag the recoverable class so the loop's bounded auto-recovery (#211) can
     // re-dispatch this slice; survives a restart via rebuildWorkingState.
@@ -334,6 +375,11 @@ export async function completePendingHatcheryDispatches(state: any, ts: string, 
     slice.last_action = ts;
     slice.last_action_note = "NEED: Hatchery dispatch failed: " + errorText;
     deps.emitTransition({ type: "slice.escalated", sliceId, reason: "hatchery_dispatch_failed" });
+    // The spawn failed before reaching a useful steward; cull the session it may
+    // have orphaned in Castra (timeout-ambiguity / crash case the Hatchery's own
+    // rollback can't reach) so it does not leak or hold a budget slot.
+    const culled = await cullOrphanedSteward(sliceId, slice.branch, errorText, ts, deps);
+    if (culled) actions.push(culled);
     const commandLine = actionCommandLine({ command: slice.command, arguments: slice.arguments || [] });
     failures.push({ slice_id: sliceId, command: commandLine, error: errorText });
     // Only escalate to the operator once auto-recovery is out of budget. Within
@@ -375,7 +421,7 @@ export async function completePendingHatcheryDispatches(state: any, ts: string, 
       // forever, so escalate it for judgement.
       const message = String(err?.message || "");
       if (message.startsWith("Could not reach")) continue;
-      escalate(slice, sliceId, "Hatchery job lookup failed: " + (message || "unknown error"));
+      await escalate(slice, sliceId, "Hatchery job lookup failed: " + (message || "unknown error"));
       continue;
     }
     if (job.status !== "succeeded" && job.status !== "failed") {
@@ -394,7 +440,7 @@ export async function completePendingHatcheryDispatches(state: any, ts: string, 
         mutated = true;
         continue;
       }
-      escalate(slice, sliceId, errorText);
+      await escalate(slice, sliceId, errorText);
       continue;
     }
     // Success: hand off to the manager session Hatchery launched.

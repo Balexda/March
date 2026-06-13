@@ -31,7 +31,7 @@ expect() { # <desc> <expected-rc> <substr-or-empty> -- <cmd...>
 REPLAY="$FIX/replay"
 
 # --- --help on every script exits 0 ---
-for s in fold-state events-tail legate-status dispatch-diag spawn-failure admin-event; do
+for s in fold-state events-tail legate-status dispatch-diag spawn-failure admin-event mass-recover; do
   expect "$s --help" 0 "Usage" -- bash "$DIR/$s.sh" --help
 done
 
@@ -106,6 +106,17 @@ out=$(env MARCH_HERALD_URL=http://localhost:8818 MARCH_HERALD_ADMIN_TOKEN=tok \
 grep -q "BREAK-GLASS" <<<"$out" || fail "admin-event dry-run missing banner"
 grep -q "DRY RUN" <<<"$out" || fail "admin-event dry-run missing DRY RUN notice"
 ok "admin-event dry-run is safe and shows the break-glass banner"
+
+# --- mass-recover: dry-run enumerates escalated slices, acts only with --yes ---
+# Dry run (no --yes): lists the fixture's escalated slice, calls neither docker
+# nor the CLI, exits 0.
+expect "mass-recover dry-run lists the escalated slice" 0 "01-spawn-f5-s3-cut" -- \
+  env MARCH_DEBUG_REPLAY_DIR="$REPLAY" bash "$DIR/mass-recover.sh" --profile march
+expect "mass-recover dry-run says DRY RUN" 0 "DRY RUN" -- \
+  env MARCH_DEBUG_REPLAY_DIR="$REPLAY" bash "$DIR/mass-recover.sh" --profile march
+# --reason filter excludes non-matching escalations (nothing to recover).
+expect "mass-recover --reason filters out non-matches" 0 "no escalated slices match" -- \
+  env MARCH_DEBUG_REPLAY_DIR="$REPLAY" bash "$DIR/mass-recover.sh" --profile march --reason no-such-reason
 
 # --- service unreachable (no replay dir; closed port) ---
 expect "fold-state unreachable -> 4" 4 "" -- \

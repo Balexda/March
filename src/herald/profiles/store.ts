@@ -13,8 +13,9 @@ import type {
 
 /** Profile-registry schema version. Bumped only on a breaking migration.
  *  v2 added the nullable `merge_policy` TEXT column (per-task-type merge gates).
- *  v3 added the nullable `toolchain` TEXT column (issue #287 worker toolchain). */
-export const PROFILE_SCHEMA_VERSION = 3;
+ *  v3 added the nullable `toolchain` TEXT column (issue #287 worker toolchain).
+ *  v4 added the nullable `priority` INTEGER column (dispatch priority; lower wins). */
+export const PROFILE_SCHEMA_VERSION = 4;
 
 /**
  * Absolute path to the profile-registry sqlite file. Deliberately a SEPARATE
@@ -38,6 +39,7 @@ const COLUMNS = [
   "mode",
   "merge_policy",
   "toolchain",
+  "priority",
   "status",
   "created_at",
   "updated_at",
@@ -55,6 +57,7 @@ CREATE TABLE IF NOT EXISTS profiles (
   mode           TEXT,
   merge_policy   TEXT,
   toolchain      TEXT,
+  priority       INTEGER,
   status         TEXT NOT NULL DEFAULT 'active',
   created_at     TEXT NOT NULL,
   updated_at     TEXT NOT NULL
@@ -103,10 +106,11 @@ function rowToRecord(row: SqliteRow): ProfileRecord {
   }
   const mergePolicy = parseMergePolicy(row.merge_policy as string | null);
   if (mergePolicy) (record as unknown as Record<string, unknown>).mergePolicy = mergePolicy;
+  if (row.priority != null) (record as unknown as Record<string, unknown>).priority = Number(row.priority);
   return record;
 }
 
-function recordToValues(record: ProfileRecord): Array<string | null> {
+function recordToValues(record: ProfileRecord): Array<string | number | null> {
   return [
     record.profile,
     record.repoName,
@@ -118,6 +122,7 @@ function recordToValues(record: ProfileRecord): Array<string | null> {
     record.mode ?? null,
     record.mergePolicy != null ? JSON.stringify(record.mergePolicy) : null,
     record.toolchain ?? null,
+    record.priority ?? null,
     record.status,
     record.createdAt,
     record.updatedAt,
@@ -180,6 +185,14 @@ export class ProfileStore {
       }
       this.db.prepare("UPDATE profile_schema_meta SET version = ?").run(3);
     }
+    // v3 → v4: add the nullable `priority` column (dispatch priority; lower wins).
+    // Same guarded ALTER pattern — a no-op on a fresh DB that already has it.
+    if (row.version < 4) {
+      if (!this.hasColumn("profiles", "priority")) {
+        this.db.exec("ALTER TABLE profiles ADD COLUMN priority INTEGER;");
+      }
+      this.db.prepare("UPDATE profile_schema_meta SET version = ?").run(4);
+    }
     // Future breaking changes branch on `row.version` here.
   }
 
@@ -207,6 +220,9 @@ export class ProfileStore {
       // Preserve an existing toolchain when a plain re-register omits it; an
       // explicit value on the input replaces it (mirrors mergePolicy above).
       toolchain: input.toolchain ?? existing?.toolchain,
+      // Dispatch priority (lower wins). Preserve-on-omit like the fields above, so
+      // `march legate init` / merge-policy edits never reset a configured priority.
+      priority: input.priority ?? existing?.priority,
       // A re-register defaults to reactivating (status omitted → active), so
       // `march legate init` on a previously-removed profile brings it back.
       status: input.status ?? "active",

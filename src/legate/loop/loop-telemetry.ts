@@ -151,6 +151,12 @@ export function buildLoopTickActivity(record: any, ctx: HeartbeatMetricsContext)
       if (typeof count === "number") slicesByStage[stage] = count;
     }
   }
+  const escalatedByReason: Record<string, number> = {};
+  if (record.escalated_by_reason && typeof record.escalated_by_reason === "object") {
+    for (const [reason, count] of Object.entries(record.escalated_by_reason)) {
+      if (typeof count === "number") escalatedByReason[reason] = count;
+    }
+  }
   const snapshot: LoopMetricsSnapshot = {
     profile: ctx.profile || "unknown",
     conductor: ctx.conductor || "unknown",
@@ -162,6 +168,7 @@ export function buildLoopTickActivity(record: any, ctx: HeartbeatMetricsContext)
     workersByState,
     slicesByStage,
     readyToMerge: record.ready_to_merge_count ?? 0,
+    escalatedByReason,
   };
   return {
     snapshot,

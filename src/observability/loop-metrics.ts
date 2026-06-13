@@ -47,6 +47,9 @@ export interface LoopMetricsSnapshot {
   readonly slicesByStage: Readonly<Record<string, number>>;
   /** Derived: pr-open slices clean+mergeable with no threads owed (#220). */
   readonly readyToMerge: number;
+  /** Escalated-stage slices keyed by bounded escalation reason; sums to
+   *  slicesByStage.escalated. Splits spawn-failed from steward-stuck on the board. */
+  readonly escalatedByReason: Readonly<Record<string, number>>;
 }
 
 /** Per-tick deltas folded into the cumulative counters + the duration histogram. */
@@ -178,6 +181,23 @@ function ensureInstruments(meter: Meter): void {
     "Slices ready to merge (pr-open, clean checks, mergeable, no threads owed)",
     (s) => s.readyToMerge,
   );
+
+  // Escalated slices split by reason (sums to slices{stage="escalated"}). `reason`
+  // is a bounded label (the ESCALATION_REASONS vocabulary). Lets the work-status
+  // board separate "spawn failed — never reached steward" (hatchery_dispatch_failed)
+  // from "steward stuck — needs the agent/operator" (everything else). Exported as
+  // `march_legate_escalated{reason}`.
+  const escalated: ObservableGauge = meter.createObservableGauge(
+    "march.legate.escalated",
+    { description: "Escalated slices by escalation reason" },
+  );
+  escalated.addCallback((result: ObservableResult) => {
+    const s = latest;
+    if (!s) return;
+    for (const [reason, count] of Object.entries(s.escalatedByReason)) {
+      result.observe(count, { ...base(s), reason });
+    }
+  });
 }
 
 function registerGauge(

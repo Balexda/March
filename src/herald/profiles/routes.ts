@@ -58,6 +58,17 @@ export function validateRegisterProfile(
     toolchain = body.toolchain;
   }
 
+  let priority: number | undefined;
+  if (body.priority !== undefined && body.priority !== null) {
+    if (typeof body.priority !== "number" || !Number.isInteger(body.priority) || body.priority < 0) {
+      return {
+        ok: false,
+        error: `invalid priority "${String(body.priority)}": expected a non-negative integer (lower = higher priority).`,
+      };
+    }
+    priority = body.priority;
+  }
+
   const input: RegisterProfileInput = {
     profile,
     repoName,
@@ -71,6 +82,7 @@ export function validateRegisterProfile(
     mode: requireString(body, "mode") ?? undefined,
     mergePolicy,
     toolchain,
+    priority,
   };
   return { ok: true, input };
 }

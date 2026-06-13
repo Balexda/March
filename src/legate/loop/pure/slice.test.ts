@@ -7,6 +7,7 @@ import {
   dispatchableReady,
   escalatedRecoverable,
   inFlightSliceMatches,
+  isReadyToMerge,
   isStubArchivedSlice,
   isTerminalSlice,
   liveSpawnCount,
@@ -46,6 +47,33 @@ describe("spawn cap helpers (#313)", () => {
     expect(liveSpawnCount({ slices: {} })).toBe(0);
     expect(liveSpawnCount({})).toBe(0);
     expect(liveSpawnCount(null)).toBe(0);
+  });
+
+  it("liveSpawnCount excludes waiting-to-merge but counts active stewards", () => {
+    const slices = {
+      // active spawn + active steward → count
+      spawn: { stage: "implementing" },
+      stewardOwed: { stage: "pr-open", pr: { checks: "PASS", mergeable: "MERGEABLE" }, needs_response_count: 2 },
+      stewardConflict: { stage: "pr-open", pr: { checks: "PASS", mergeable: "CONFLICTING" }, needs_response_count: 0 },
+      stewardChecks: { stage: "pr-open", pr: { checks: "FAIL", mergeable: "MERGEABLE" }, needs_response_count: 0 },
+      // waiting for merge (all-clear) → does NOT count
+      waiting: { stage: "pr-open", pr: { checks: "PASS", mergeable: "MERGEABLE" }, needs_response_count: 0 },
+      // unknown thread debt (e.g. post-cold-start) is treated as active → counts
+      unknownDebt: { stage: "pr-open", pr: { checks: "PASS", mergeable: "MERGEABLE" } },
+    };
+    // spawn + 3 stewards + unknownDebt = 5; only `waiting` is released.
+    expect(liveSpawnCount({ slices })).toBe(5);
+  });
+
+  it("isReadyToMerge matches the dashboard's waiting-for-merge gate", () => {
+    const clear = { stage: "pr-open", pr: { checks: "PASS", mergeable: "MERGEABLE" }, needs_response_count: 0 };
+    expect(isReadyToMerge(clear)).toBe(true);
+    expect(isReadyToMerge({ ...clear, stage: "implementing" })).toBe(false); // not pr-open
+    expect(isReadyToMerge({ ...clear, pr: { checks: "FAIL", mergeable: "MERGEABLE" } })).toBe(false); // checks
+    expect(isReadyToMerge({ ...clear, pr: { checks: "PASS", mergeable: "CONFLICTING" } })).toBe(false); // conflict
+    expect(isReadyToMerge({ ...clear, needs_response_count: 1 })).toBe(false); // threads owed
+    expect(isReadyToMerge({ stage: "pr-open", pr: { checks: "PASS" } })).toBe(false); // unknown debt → not ready
+    expect(isReadyToMerge(null)).toBe(false);
   });
 
   it("createSpawnBudget seeds remaining = max(0, cap − live) and retains cap/live", () => {
@@ -181,6 +209,27 @@ describe("slice pure helpers", () => {
     expect(readyToMerge).toBe(1); // only `nested` (explicit 0); `cold` is unknown
   });
 
+  it("summarizeSlicesByStage splits escalated by reason (spawn-failed vs stuck)", () => {
+    const slices = {
+      a: { stage: "escalated", escalated_reason: "hatchery_dispatch_failed" }, // spawn failed
+      b: { stage: "escalated", escalated_reason: "hatchery_dispatch_failed" },
+      c: { stage: "escalated", escalated_reason: "needs_human_judgement" }, // steward stuck
+      d: { stage: "escalated", escalated_reason: "some_future_reason" }, // unknown → other
+      e: { stage: "escalated" }, // no reason → other
+      f: { stage: "implementing" }, // not escalated → not counted
+    };
+    const { byStage, escalatedByReason } = summarizeSlicesByStage(slices);
+    expect(escalatedByReason.hatchery_dispatch_failed).toBe(2);
+    expect(escalatedByReason.needs_human_judgement).toBe(1);
+    expect(escalatedByReason.other).toBe(2); // unknown reason + missing reason
+    // Pre-seeded reasons report 0 (stable series), not absent.
+    expect(escalatedByReason.real_spawn_error).toBe(0);
+    // The reason split sums to the escalated stage tally.
+    const reasonSum = Object.values(escalatedByReason).reduce((a, b) => a + b, 0);
+    expect(reasonSum).toBe(byStage.escalated);
+    expect(reasonSum).toBe(5);
+  });
+
   it("summarizeSlicesByStage pre-seeds all stages to 0 for an empty slice set", () => {
     expect(summarizeSlicesByStage(undefined)).toEqual({
       byStage: {
@@ -192,6 +241,13 @@ describe("slice pure helpers", () => {
         escalated: 0,
       },
       readyToMerge: 0,
+      escalatedByReason: {
+        hatchery_dispatch_failed: 0,
+        needs_human: 0,
+        needs_human_judgement: 0,
+        real_spawn_error: 0,
+        other: 0,
+      },
     });
   });
 

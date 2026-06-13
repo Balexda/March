@@ -25,6 +25,7 @@ import {
 import { CastraClient } from "../../castra/client.js";
 import { ProfileClient } from "../../herald/profiles/client.js";
 import type { ProfileRecord } from "../../herald/profiles/types.js";
+import { byDispatchPriority } from "../../herald/profiles/types.js";
 import type { MergePolicy } from "../../herald/profiles/merge-policy.js";
 import { legateStateDir, metaForProfileRecord } from "../profile-paths.js";
 // Decomposed two-stage loop: Stage 1 sense → coordinator (ordered handlers) →
@@ -258,6 +259,36 @@ function emitTransition(profile: string, event: any) {
     .catch(() => {});
 }
 
+// Cull the steward a failed spawn orphaned in Castra (see
+// DispatchIoDeps.cullStewardForSlice). Matches by the sliceId stamped into session
+// metadata at launch (#214) — robust to the feature/-prefix the actual git branch
+// carries — and falls back to a prefix-normalized branch compare for legacy
+// sessions without metadata. Removes the session (pruning its worktree), so the
+// orphan a launch-timeout/crash left behind doesn't leak or hold a budget slot.
+async function cullStewardForSlice(
+  profile: string,
+  sliceId: string,
+  branch: string | undefined,
+): Promise<{ culled: boolean; sessionId?: string }> {
+  const sessions = await castra().listSessions(profile);
+  const want = (branch ?? "").replace(/^feature\//, "");
+  // Remove EVERY session matching this slice, not just the first: repeated
+  // spawn failures / launch timeouts can orphan more than one Castra session for
+  // the same sliceId/branch, and leaving the extras behind keeps leaking
+  // worktrees + holding budget slots. Remove all so the cull is complete.
+  const matches = sessions.filter(
+    (s) =>
+      (s.metadata?.sliceId !== undefined && s.metadata.sliceId === sliceId) ||
+      (want.length > 0 && (s.branch ?? "").replace(/^feature\//, "") === want),
+  );
+  if (matches.length === 0) return { culled: false };
+  for (const m of matches) {
+    await castra().removeSession({ profile, sessionId: m.sessionId, pruneWorktree: true });
+  }
+  // Report the first id culled (the action is one-per-slice); all matches removed.
+  return { culled: true, sessionId: matches[0].sessionId };
+}
+
 // Build the dispatch I/O seam (handlers/dispatch-io.ts) for one profile.
 function dispatchIoDeps(meta: any): DispatchIoDeps {
   const hatcheryUrl = resolveHatcheryUrl(env);
@@ -268,6 +299,8 @@ function dispatchIoDeps(meta: any): DispatchIoDeps {
     log: (line: string) => appendText(meta.processor_log_path, line),
     postSpawn: (request: any) => postSpawn(hatcheryUrl, request),
     getJob: (jobId: string) => getJob(hatcheryUrl, jobId),
+    cullStewardForSlice: (sliceId: string, branch: string | undefined) =>
+      cullStewardForSlice(meta.profile, sliceId, branch),
   };
 }
 
@@ -388,6 +421,12 @@ async function tick() {
     });
     return;
   }
+
+  // Dispatch in priority order (lower `priority` wins, ties by name): the shared
+  // spawn budget below is consumed as each profile dispatches in turn, so a P0
+  // profile gets first claim on the cap each tick and a P2 profile only spawns
+  // from what's left. Unset priority sorts last (DEFAULT_PROFILE_PRIORITY).
+  profiles.sort(byDispatchPriority);
 
   // GC runtimes for profiles that are no longer registered (removed/disabled).
   const active = new Set(profiles.map((p) => p.profile));

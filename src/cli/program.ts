@@ -549,7 +549,8 @@ profile
         console.log("No profiles registered.");
       } else {
         for (const p of profiles) {
-          console.log(`${p.profile}\t${p.status}\t${p.repoPath}\t(${p.workerGroup})`);
+          const prio = typeof p.priority === "number" ? `P${p.priority}` : "P-";
+          console.log(`${p.profile}\t${p.status}\t${prio}\t${p.repoPath}\t(${p.workerGroup})`);
         }
       }
       process.exitCode = SUCCESS;
@@ -573,6 +574,10 @@ profile
     "--toolchain <toolchain>",
     "Worker toolchain for this profile's spawns: auto (default) | node | jvm",
   )
+  .option(
+    "--priority <n>",
+    "Dispatch priority (lower wins; 0 = highest / P0). Omit to leave unset.",
+  )
   .action(async (opts: {
     profile: string;
     repoPath: string;
@@ -580,6 +585,7 @@ profile
     workerGroup: string;
     conductor?: string;
     toolchain?: string;
+    priority?: string;
   }) => {
     commandHandled = true;
     const { registerProfile } = await import("../legate/profile-register.js");
@@ -597,6 +603,16 @@ profile
       process.exitCode = ERROR;
       return;
     }
+    let priority: number | undefined;
+    if (opts.priority !== undefined) {
+      const n = Number(opts.priority.trim());
+      if (!Number.isInteger(n) || n < 0) {
+        process.stderr.write(`Invalid --priority "${opts.priority}": expected a non-negative integer (0 = highest).\n`);
+        process.exitCode = ERROR;
+        return;
+      }
+      priority = n;
+    }
     const result = await registerProfile({
       profile: opts.profile.trim(),
       repoPath: opts.repoPath,
@@ -604,6 +620,7 @@ profile
       workerGroup: opts.workerGroup,
       conductorName: opts.conductor,
       toolchain,
+      priority,
     });
     if (result.record) {
       console.log(result.note);
@@ -774,6 +791,88 @@ mergePolicyCmd
       });
       console.log(`Updated merge policy for "${record.profile}":`);
       console.log(JSON.stringify(record.mergePolicy ?? {}, null, 2));
+      process.exitCode = SUCCESS;
+    } catch (err) {
+      process.stderr.write(
+        (err instanceof HeraldClientError ? err.message : (err as Error).message) + "\n",
+      );
+      process.exitCode = ERROR;
+    }
+  });
+
+// Per-profile dispatch priority. The legate service reads this live each tick and
+// allocates the shared spawn budget in priority order (lower wins), so changes
+// take effect on the next tick — no re-init needed.
+const priorityCmd = profile
+  .command("priority")
+  .description("Inspect/set a profile's dispatch priority (lower wins; 0 = highest / P0)");
+
+priorityCmd
+  .command("get <profile>")
+  .description("Show a profile's dispatch priority. Resolves Herald via MARCH_HERALD_URL.")
+  .action(async (profileName: string) => {
+    commandHandled = true;
+    const { ProfileClient } = await import("../herald/profiles/client.js");
+    const { HeraldClientError } = await import("../herald/service/client.js");
+    const { DEFAULT_PROFILE_PRIORITY } = await import("../herald/profiles/types.js");
+    try {
+      const existing = await new ProfileClient().get(profileName.trim());
+      if (!existing) {
+        process.stderr.write(`Unknown profile "${profileName}".\n`);
+        process.exitCode = ERROR;
+        return;
+      }
+      const label = typeof existing.priority === "number"
+        ? String(existing.priority)
+        : `${DEFAULT_PROFILE_PRIORITY} (default, unset)`;
+      console.log(`${existing.profile}: priority ${label}`);
+      process.exitCode = SUCCESS;
+    } catch (err) {
+      process.stderr.write(
+        (err instanceof HeraldClientError ? err.message : (err as Error).message) + "\n",
+      );
+      process.exitCode = ERROR;
+    }
+  });
+
+priorityCmd
+  .command("set <profile> <priority>")
+  .description("Set a profile's dispatch priority (0 = highest / P0; accepts 0/1/2 or P0/P1/P2). Resolves Herald via MARCH_HERALD_URL.")
+  .action(async (profileName: string, priorityArg: string) => {
+    commandHandled = true;
+    const { ProfileClient } = await import("../herald/profiles/client.js");
+    const { HeraldClientError } = await import("../herald/service/client.js");
+    // Accept "P0"/"p2" as well as plain "0"/"2".
+    const n = Number(String(priorityArg).trim().replace(/^[Pp]/, ""));
+    if (!Number.isInteger(n) || n < 0) {
+      process.stderr.write(
+        `Invalid priority "${priorityArg}": expected a non-negative integer (0 = highest), e.g. 0, 1, 2 or P0, P1, P2.\n`,
+      );
+      process.exitCode = ERROR;
+      return;
+    }
+    try {
+      const client = new ProfileClient();
+      const existing = await client.get(profileName.trim());
+      if (!existing) {
+        process.stderr.write(`Unknown profile "${profileName}".\n`);
+        process.exitCode = ERROR;
+        return;
+      }
+      const record = await client.register({
+        profile: existing.profile,
+        repoName: existing.repoName,
+        repoPath: existing.repoPath,
+        workerGroup: existing.workerGroup,
+        conductorName: existing.conductorName,
+        broodEndpoint: existing.broodEndpoint,
+        marchCliPath: existing.marchCliPath,
+        mode: existing.mode,
+        mergePolicy: existing.mergePolicy,
+        toolchain: existing.toolchain,
+        priority: n,
+      });
+      console.log(`Set priority for "${record.profile}" to ${record.priority}.`);
       process.exitCode = SUCCESS;
     } catch (err) {
       process.stderr.write(

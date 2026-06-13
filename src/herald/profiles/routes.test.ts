@@ -56,6 +56,20 @@ describe("validateRegisterProfile", () => {
     expect(result.ok).toBe(true);
     if (result.ok) expect(result.input.toolchain).toBeUndefined();
   });
+  it("accepts a valid priority (including 0) and carries it onto the input", () => {
+    expect(validateRegisterProfile(body({ priority: 0 }))).toMatchObject({ ok: true, input: { priority: 0 } });
+    expect(validateRegisterProfile(body({ priority: 2 }))).toMatchObject({ ok: true, input: { priority: 2 } });
+  });
+  it("rejects a non-integer / negative priority", () => {
+    expect(validateRegisterProfile(body({ priority: -1 }))).toMatchObject({ ok: false });
+    expect(validateRegisterProfile(body({ priority: 1.5 }))).toMatchObject({ ok: false });
+    expect(validateRegisterProfile(body({ priority: "0" }))).toMatchObject({ ok: false });
+  });
+  it("omits priority when not provided", () => {
+    const result = validateRegisterProfile(body());
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.input.priority).toBeUndefined();
+  });
 });
 
 describe.skipIf(!sqliteAvailable)("profile routes", () => {

@@ -38,9 +38,36 @@ export interface ProfileRecord {
    * (e.g. Kotlin/Gradle) can build in-container. Undefined = `auto`.
    */
   readonly toolchain?: string;
+  /**
+   * Dispatch priority: the order the shared Legate service allocates the global
+   * spawn budget across profiles each tick. **Lower wins** — priority 0 dispatches
+   * first and consumes budget before higher numbers (so P0 = 0, P1 = 1, P2 = 2).
+   * Undefined falls back to {@link DEFAULT_PROFILE_PRIORITY} (sorts last). Ties
+   * break by profile name for a deterministic order.
+   */
+  readonly priority?: number;
   readonly status: ProfileStatus;
   readonly createdAt: string;
   readonly updatedAt: string;
+}
+
+/** Priority assigned to a profile that has none set — sorts after every explicit
+ *  priority, so configuring even one profile's priority doesn't starve the rest. */
+export const DEFAULT_PROFILE_PRIORITY = 100;
+
+/** A profile's effective dispatch priority (lower = higher priority). */
+export function profilePriority(p: { readonly priority?: number }): number {
+  return typeof p.priority === "number" && Number.isFinite(p.priority)
+    ? p.priority
+    : DEFAULT_PROFILE_PRIORITY;
+}
+
+/** Compare profiles for dispatch order: priority ascending, then name ascending. */
+export function byDispatchPriority(
+  a: { readonly priority?: number; readonly profile: string },
+  b: { readonly priority?: number; readonly profile: string },
+): number {
+  return profilePriority(a) - profilePriority(b) || a.profile.localeCompare(b.profile);
 }
 
 /** What a caller hands to {@link ProfileStore.register} (upsert). */
@@ -56,6 +83,8 @@ export interface RegisterProfileInput {
   readonly mergePolicy?: MergePolicy;
   /** Worker toolchain selection (issue #287): `auto` (default) | `node` | `jvm`. */
   readonly toolchain?: string;
+  /** Dispatch priority (lower wins); preserve-on-omit on re-register. */
+  readonly priority?: number;
   readonly status?: ProfileStatus;
 }
 

@@ -50,7 +50,7 @@
         "type": "prometheus",
         "uid": "prometheus"
       },
-      "description": "Brood session-state + teardown service. UP when it has emitted heartbeats in the last 5m. Global (one shared host) — not filtered by profile.",
+      "description": "Brood session-state + teardown service. UP when it has emitted heartbeats in the last 5m. Global (one shared host) \u2014 not filtered by profile.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -151,7 +151,7 @@
         "type": "prometheus",
         "uid": "prometheus"
       },
-      "description": "Hatchery spawn service. UP when it has emitted heartbeats in the last 5m. Global (one shared host) — not filtered by profile.",
+      "description": "Hatchery spawn service. UP when it has emitted heartbeats in the last 5m. Global (one shared host) \u2014 not filtered by profile.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -252,7 +252,7 @@
         "type": "prometheus",
         "uid": "prometheus"
       },
-      "description": "Herald observation service. UP when it has emitted heartbeats in the last 5m. Global (one shared host) — not filtered by profile.",
+      "description": "Herald observation service. UP when it has emitted heartbeats in the last 5m. Global (one shared host) \u2014 not filtered by profile.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -445,7 +445,7 @@
         "type": "prometheus",
         "uid": "prometheus"
       },
-      "description": "Castra interactive-session host. UP when it has emitted heartbeats in the last 5m. Global (one shared host) — not filtered by profile.",
+      "description": "Castra interactive-session host. UP when it has emitted heartbeats in the last 5m. Global (one shared host) \u2014 not filtered by profile.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -549,9 +549,9 @@
         "x": 0,
         "y": 7
       },
-      "id": 101,
+      "id": 200,
       "panels": [],
-      "title": "Work status (where is the work?)",
+      "title": "Pending \u2014 queued work",
       "type": "row"
     },
     {
@@ -559,7 +559,7 @@
         "type": "prometheus",
         "uid": "prometheus"
       },
-      "description": "The smithy dependency frontier: actionable layer-0 graph nodes minus work already in-flight/archived (march_legate_queue_dispatchable). Measured at the node level (#289) so a spec's independent layer-0 user stories each count — not one-per-record. Stewarded/escalated slices are excluded (in-flight until merge).",
+      "description": "Smithy dependency frontier ready to dispatch now \u2014 actionable layer-0 nodes minus in-flight/archived (march_legate_queue_dispatchable, #289). This is what the parallelism cap gates.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -581,11 +581,11 @@
       },
       "gridPos": {
         "h": 6,
-        "w": 6,
+        "w": 8,
         "x": 0,
         "y": 8
       },
-      "id": 6,
+      "id": 201,
       "options": {
         "colorMode": "value",
         "graphMode": "area",
@@ -622,263 +622,7 @@
         "type": "prometheus",
         "uid": "prometheus"
       },
-      "description": "Dispatched, spawn running, no steward yet: march_legate_slices{stage=\"hatchery-pending\"}.",
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "thresholds"
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "blue",
-                "value": null
-              }
-            ]
-          },
-          "unit": "short"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 6,
-        "w": 6,
-        "x": 6,
-        "y": 8
-      },
-      "id": 7,
-      "options": {
-        "colorMode": "value",
-        "graphMode": "area",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "textMode": "auto"
-      },
-      "pluginVersion": "12.2.1",
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "editorMode": "code",
-          "expr": "sum(march_legate_slices{stage=\"hatchery-pending\", profile=~\"$profile\"})",
-          "legendFormat": "in spawn",
-          "range": true,
-          "refId": "A"
-        }
-      ],
-      "title": "In spawn",
-      "type": "stat"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "description": "Steward working, not yet mergeable: march_legate_slices{stage=~\"implementing|pr-in-fix|pr-resolving-conflicts\"}.",
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "thresholds"
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "blue",
-                "value": null
-              }
-            ]
-          },
-          "unit": "short"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 6,
-        "w": 6,
-        "x": 12,
-        "y": 8
-      },
-      "id": 8,
-      "options": {
-        "colorMode": "value",
-        "graphMode": "area",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "textMode": "auto"
-      },
-      "pluginVersion": "12.2.1",
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "editorMode": "code",
-          "expr": "sum(march_legate_slices{stage=~\"implementing|pr-in-fix|pr-resolving-conflicts\", profile=~\"$profile\"})",
-          "legendFormat": "in steward",
-          "range": true,
-          "refId": "A"
-        }
-      ],
-      "title": "In steward",
-      "type": "stat"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "description": "PR open, checks passing, mergeable, no threads owed (the loop-side derived march_legate_slices_ready_to_merge). These are sitting waiting for a merge decision.",
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "thresholds"
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              }
-            ]
-          },
-          "unit": "short"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 6,
-        "w": 6,
-        "x": 18,
-        "y": 8
-      },
-      "id": 9,
-      "options": {
-        "colorMode": "value",
-        "graphMode": "area",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "textMode": "auto"
-      },
-      "pluginVersion": "12.2.1",
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "editorMode": "code",
-          "expr": "sum(march_legate_slices_ready_to_merge{profile=~\"$profile\"})",
-          "legendFormat": "waiting for merge",
-          "range": true,
-          "refId": "A"
-        }
-      ],
-      "title": "Waiting for merge",
-      "type": "stat"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "description": "Failed / awaiting operator (legate.unwedge): march_legate_slices{stage=\"escalated\"}. Any nonzero value needs manual recovery.",
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "thresholds"
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "red",
-                "value": 1
-              }
-            ]
-          },
-          "unit": "short"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 6,
-        "w": 8,
-        "x": 0,
-        "y": 14
-      },
-      "id": 10,
-      "options": {
-        "colorMode": "background",
-        "graphMode": "area",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "textMode": "auto"
-      },
-      "pluginVersion": "12.2.1",
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "editorMode": "code",
-          "expr": "sum(march_legate_slices{stage=\"escalated\", profile=~\"$profile\"})",
-          "legendFormat": "escalated",
-          "range": true,
-          "refId": "A"
-        }
-      ],
-      "title": "Escalated / failed",
-      "type": "stat"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "description": "The next wave: pending graph nodes one dependency layer away (layer 1) — work that unblocks as the current frontier merges (march_legate_queue_blocked, #289). NOT the old total − ready residual.",
+      "description": "Layer-1 pending items that cannot launch even with infinite parallelism because their dependencies are unmet (march_legate_queue_blocked).",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -906,9 +650,9 @@
         "h": 6,
         "w": 8,
         "x": 8,
-        "y": 14
+        "y": 8
       },
-      "id": 11,
+      "id": 202,
       "options": {
         "colorMode": "value",
         "graphMode": "area",
@@ -945,7 +689,7 @@
         "type": "prometheus",
         "uid": "prometheus"
       },
-      "description": "Deep backlog: pending graph nodes two or more dependency layers down (layer ≥ 2), waiting behind the frontier and the next wave (march_legate_queue_total, #289).",
+      "description": "All outstanding tracked work we know of \u2014 dispatchable + blocked + deeper layers (march_legate_queue_total).",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -969,9 +713,9 @@
         "h": 6,
         "w": 8,
         "x": 16,
-        "y": 14
+        "y": 8
       },
-      "id": 12,
+      "id": 203,
       "options": {
         "colorMode": "value",
         "graphMode": "area",
@@ -995,12 +739,12 @@
           },
           "editorMode": "code",
           "expr": "sum(march_legate_queue_total{profile=~\"$profile\"})",
-          "legendFormat": "total remaining",
+          "legendFormat": "total",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "Backlog (L2+)",
+      "title": "Total remaining",
       "type": "stat"
     },
     {
@@ -1009,7 +753,356 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 20
+        "y": 14
+      },
+      "id": 210,
+      "panels": [],
+      "title": "Working \u2014 active resource",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "Slices with a codex worker running \u2014 queued or implementing (march_legate_slices stage hatchery-pending|implementing). Resource-heavy; counts toward the concurrency cap.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 0,
+        "y": 15
+      },
+      "id": 211,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "pluginVersion": "12.2.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "sum(march_legate_slices{stage=~\"hatchery-pending|implementing\", profile=~\"$profile\"})",
+          "legendFormat": "in spawn",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "In spawn",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "Slices a steward session is actively driving \u2014 review fixes, conflicts, or failing checks (pr-open|pr-in-fix|pr-resolving-conflicts minus waiting-for-merge). Resource-heavy; counts toward the cap.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 8,
+        "y": 15
+      },
+      "id": 212,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "pluginVersion": "12.2.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "clamp_min(sum(march_legate_slices{stage=~\"pr-open|pr-in-fix|pr-resolving-conflicts\", profile=~\"$profile\"}) - sum(march_legate_slices_ready_to_merge{profile=~\"$profile\"}), 0)",
+          "legendFormat": "in steward",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "In steward",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "Clean PRs parked awaiting a merge \u2014 checks pass, mergeable, no threads owed (march_legate_slices_ready_to_merge). Consumes no spawn/steward, so it does NOT count toward the cap.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 16,
+        "y": 15
+      },
+      "id": 213,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "pluginVersion": "12.2.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "sum(march_legate_slices_ready_to_merge{profile=~\"$profile\"})",
+          "legendFormat": "waiting",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Waiting for merge",
+      "type": "stat"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 21
+      },
+      "id": 220,
+      "panels": [],
+      "title": "Escalation \u2014 needs attention",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "Slices escalated because the spawn failed before handing off to a steward \u2014 reason hatchery_dispatch_failed (march_legate_escalated). Auto-recovers within budget; then operator-only. The orphaned steward (if any) is culled automatically.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 0,
+        "y": 22
+      },
+      "id": 221,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "pluginVersion": "12.2.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "sum(march_legate_escalated{reason=\"hatchery_dispatch_failed\", profile=~\"$profile\"})",
+          "legendFormat": "spawn failed",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Spawn failed (never reached steward)",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "Slices escalated for steward-stuck / judgement reasons \u2014 needs the legate agent or an operator (march_legate_escalated reason != hatchery_dispatch_failed).",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 12,
+        "y": 22
+      },
+      "id": 222,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "pluginVersion": "12.2.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "sum(march_legate_escalated{reason!=\"hatchery_dispatch_failed\", profile=~\"$profile\"})",
+          "legendFormat": "escalated",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Escalated (steward stuck)",
+      "type": "stat"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 28
       },
       "id": 102,
       "panels": [],
@@ -1083,7 +1176,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 21
+        "y": 29
       },
       "id": 13,
       "options": {
@@ -1157,7 +1250,7 @@
   },
   "timepicker": {},
   "timezone": "",
-  "title": "March — Work Status",
+  "title": "March \u2014 Work Status",
   "uid": "march-work-status",
   "version": 1,
   "weekStart": ""
