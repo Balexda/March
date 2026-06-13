@@ -48,6 +48,8 @@ export interface SpawnConfig {
   readonly user: string;
   /** Docker network mode. `"bridge"` for Feature 2; Feature 4 hardens. */
   readonly networkMode: string;
+  /** Environment variable names allowed through to the container. */
+  readonly envWhitelist: readonly string[];
   /** Container memory limit, in Docker's `<size><b|k|m|g>` format. */
   readonly memoryLimit: string;
   /** Container CPU limit, as a positive number formatted as a string. */
@@ -71,6 +73,9 @@ export interface SpawnConfig {
  * - `networkMode: "bridge"` — Stage 4 passes `--network`; default Docker
  *   bridge, Feature 4 owns network-policy hardening, the bridge gap is
  *   intentional (AS 5.5).
+ * - `envWhitelist: ["ANTHROPIC_API_KEY"]` — the retained M1 env allowlist
+ *   value for profile parity; backend-specific env resolution remains owned
+ *   by the spawn backend layer until F5 migrates it.
  * - `memoryLimit: "4g"`, `cpuLimit: "2"` — Stage 4 passes `--memory` and
  *   `--cpus`; hardcoded resource ceilings sized for typical Claude Code
  *   sessions (AS 5.3).
@@ -81,6 +86,7 @@ export const SPAWN_CONFIG: SpawnConfig = {
   capDrop: ["ALL"],
   user: "march",
   networkMode: "bridge",
+  envWhitelist: ["ANTHROPIC_API_KEY"],
   memoryLimit: "4g",
   cpuLimit: "2",
   timeoutSeconds: 3600,

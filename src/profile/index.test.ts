@@ -2,13 +2,27 @@
  * @l0 @deterministic @ci
  */
 import { describe, expect, it } from "vitest";
+import { SPAWN_CONFIG, type SpawnConfig } from "../hatchery/spawn-config.js";
 import {
   validateProfile,
+  type ContainerSecurity,
   type Profile,
+  type ResourceLimits,
   type ValidationError,
   type ValidationErrorCode,
   type ValidationResult,
 } from "./index.js";
+
+type AssertTrue<T extends true> = T;
+type IsAssignable<From, To> = [From] extends [To] ? true : false;
+type RetainedSpawnConfig = Omit<SpawnConfig, "networkMode">;
+type ProfileSpawnConfigParity = ContainerSecurity & ResourceLimits;
+type _RetainedSpawnConfigFieldsAssignToProfileSubtypes = AssertTrue<
+  IsAssignable<RetainedSpawnConfig, ProfileSpawnConfigParity>
+>;
+type _RetainedSpawnConfigOmitsNetworkMode = AssertTrue<
+  Extract<keyof RetainedSpawnConfig, "networkMode"> extends never ? true : false
+>;
 
 function assertProfileType(_profile: Profile): void {
   return;
@@ -24,6 +38,29 @@ function assertValidationResultNarrowing(result: ValidationResult): void {
   const errors: readonly ValidationError[] = result.errors;
   const code: ValidationErrorCode = errors[0]?.code ?? "WrongType";
   expect(code).toBeTruthy();
+}
+
+function makeM1ParityProfile(
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    version: 1,
+    name: "spawn",
+    baseImage: "march-spawn-claude:latest",
+    container: {
+      capDrop: SPAWN_CONFIG.capDrop,
+      user: SPAWN_CONFIG.user,
+      envWhitelist: SPAWN_CONFIG.envWhitelist,
+    },
+    resources: {
+      memoryLimit: SPAWN_CONFIG.memoryLimit,
+      cpuLimit: SPAWN_CONFIG.cpuLimit,
+      timeoutSeconds: SPAWN_CONFIG.timeoutSeconds,
+    },
+    fileMounts: [],
+    network: { mode: "bridge" },
+    ...overrides,
+  };
 }
 
 describe("validateProfile", () => {
@@ -254,6 +291,137 @@ describe("validateProfile", () => {
           path: "/name",
           message:
             "Profile name must start with a lowercase letter and contain only lowercase letters, digits, and hyphens.",
+        },
+      ],
+    });
+  });
+
+  it("accepts M1-equivalent container and resource fields copied from SPAWN_CONFIG", () => {
+    const profile = makeM1ParityProfile();
+
+    expect(validateProfile(profile)).toEqual({ ok: true, value: profile });
+  });
+
+  it.each([
+    [{ user: "march", envWhitelist: SPAWN_CONFIG.envWhitelist }],
+    [{ capDrop: "ALL", user: "march", envWhitelist: SPAWN_CONFIG.envWhitelist }],
+    [{ capDrop: [], user: "march", envWhitelist: SPAWN_CONFIG.envWhitelist }],
+    [{ capDrop: ["NET_ADMIN"], user: "march", envWhitelist: SPAWN_CONFIG.envWhitelist }],
+  ])("reports malformed capDrop with InvalidCapDrop %#", (container) => {
+    expect(
+      validateProfile(makeM1ParityProfile({ container })),
+    ).toMatchObject({
+      ok: false,
+      errors: [
+        {
+          code: "InvalidCapDrop",
+          path: "/container/capDrop",
+        },
+      ],
+    });
+  });
+
+  it.each(["march", "user_name", "1000", "1000:1000"])(
+    "accepts documented container.user form %s",
+    (user) => {
+      expect(
+        validateProfile(
+          makeM1ParityProfile({
+            container: {
+              capDrop: SPAWN_CONFIG.capDrop,
+              user,
+              envWhitelist: SPAWN_CONFIG.envWhitelist,
+            },
+          }),
+        ),
+      ).toMatchObject({ ok: true });
+    },
+  );
+
+  it.each(["", "March", "root:root", "1000:march", "bad user"])(
+    "reports invalid container.user value %s",
+    (user) => {
+      expect(
+        validateProfile(
+          makeM1ParityProfile({
+            container: {
+              capDrop: SPAWN_CONFIG.capDrop,
+              user,
+              envWhitelist: SPAWN_CONFIG.envWhitelist,
+            },
+          }),
+        ),
+      ).toMatchObject({
+        ok: false,
+        errors: [
+          {
+            code: "InvalidUser",
+            path: "/container/user",
+          },
+        ],
+      });
+    },
+  );
+
+  it.each([
+    [{ memoryLimit: "4GB", cpuLimit: "2", timeoutSeconds: 3600 }, "InvalidMemoryLimit", "/resources/memoryLimit"],
+    [{ memoryLimit: "4g", cpuLimit: "0", timeoutSeconds: 3600 }, "InvalidCpuLimit", "/resources/cpuLimit"],
+    [{ memoryLimit: "4g", cpuLimit: "2", timeoutSeconds: 0 }, "InvalidTimeout", "/resources/timeoutSeconds"],
+    [{ memoryLimit: "4g", cpuLimit: "2", timeoutSeconds: 1.5 }, "InvalidTimeout", "/resources/timeoutSeconds"],
+  ] as const)(
+    "reports invalid resource field with %s",
+    (resources, code, path) => {
+      expect(
+        validateProfile(makeM1ParityProfile({ resources })),
+      ).toMatchObject({
+        ok: false,
+        errors: [
+          {
+            code,
+            path,
+          },
+        ],
+      });
+    },
+  );
+
+  it("aggregates and deterministically orders container and resource errors", () => {
+    const result = validateProfile(
+      makeM1ParityProfile({
+        container: {
+          capDrop: ["NET_ADMIN"],
+          user: "root:root",
+          envWhitelist: SPAWN_CONFIG.envWhitelist,
+        },
+        resources: {
+          memoryLimit: "4 GB",
+          cpuLimit: "0",
+          timeoutSeconds: -1,
+        },
+      }),
+    );
+
+    expect(result).toMatchObject({
+      ok: false,
+      errors: [
+        { code: "InvalidCapDrop", path: "/container/capDrop" },
+        { code: "InvalidUser", path: "/container/user" },
+        { code: "InvalidCpuLimit", path: "/resources/cpuLimit" },
+        { code: "InvalidMemoryLimit", path: "/resources/memoryLimit" },
+        { code: "InvalidTimeout", path: "/resources/timeoutSeconds" },
+      ],
+    });
+  });
+
+  it("rejects legacy root networkMode without masking valid parity sections", () => {
+    expect(
+      validateProfile(makeM1ParityProfile({ networkMode: SPAWN_CONFIG.networkMode })),
+    ).toMatchObject({
+      ok: false,
+      errors: [
+        {
+          code: "UnknownField",
+          path: "/networkMode",
         },
       ],
     });

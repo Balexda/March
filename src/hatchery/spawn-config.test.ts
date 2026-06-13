@@ -50,6 +50,10 @@ describe("spawn-config", () => {
       expect(SPAWN_CONFIG.networkMode).toBe("bridge");
     });
 
+    it("retains the M1 environment allowlist", () => {
+      expect(SPAWN_CONFIG.envWhitelist).toEqual(["ANTHROPIC_API_KEY"]);
+    });
+
     it("applies hardcoded memory and CPU limits matching Docker's formats (AS 5.3)", () => {
       expect(SPAWN_CONFIG.memoryLimit).toBe("4g");
       // Docker memory format: `<positive integer><b|k|m|g>?` (case-
@@ -71,6 +75,5 @@ describe("spawn-config", () => {
       expect(Number.isInteger(SPAWN_CONFIG.timeoutSeconds)).toBe(true);
       expect(SPAWN_CONFIG.timeoutSeconds).toBeGreaterThan(0);
     });
-
   });
 });
