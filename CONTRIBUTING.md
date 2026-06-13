@@ -50,7 +50,7 @@ The governed legacy L2 tests are exactly:
 - `src/spawn/container-launch.test.ts`
 - `src/spawn/snapshot-build.test.ts`
 
-Only those governed files are subject to the Test Layer Migration trigger; a file outside this set does not trigger migration under this policy. Their starting state is vitest in place with `@l2 @deterministic @ci` tags, a mocked `node:child_process` boundary, and no real Docker execution. They remain in vitest until a material change to a governed file triggers the migration policy.
+Only those governed files are subject to the Test Layer Migration trigger; a file outside this set does not trigger migration under this policy. Their starting state is vitest in place: a mocked `node:child_process` boundary and no real Docker execution. They are classified `@l2 @deterministic @ci`; the matching leading tag blocks are applied in place by the tag-taxonomy feature (`specs/2026-05-23-006-tag-taxonomy-and-coverage-lint`) and are not yet present in the files. They remain in vitest until a material change to a governed file triggers the migration policy.
 
 Agent-driven and human tests:
 
