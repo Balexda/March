@@ -235,4 +235,17 @@ describe("spawn output validation composition", () => {
     expect(failure.diagnostic.length).toBeLessThanOrEqual(240);
     expect("patch" in failure).toBe(false);
   });
+
+  it("truncates an overlong diagnostic to the bound, ellipsis included", () => {
+    const longPath = `/${"a".repeat(400)}`;
+    const result = validateSpawnPatch({
+      patchText: modifyPatch.replace("b/src/app.ts", `b/${longPath}`),
+      worktreePath,
+    });
+    const failure = expectFailure(result);
+
+    expect(failure.category).toBe("unsafe-patch-path");
+    expect(failure.diagnostic.length).toBeLessThanOrEqual(240);
+    expect(failure.diagnostic.endsWith("...")).toBe(true);
+  });
 });

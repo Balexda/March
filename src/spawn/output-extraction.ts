@@ -280,7 +280,7 @@ function failure(
 
 function boundDiagnostic(diagnostic: string): string {
   if (diagnostic.length <= MAX_DIAGNOSTIC_LENGTH) return diagnostic;
-  return `${diagnostic.slice(0, MAX_DIAGNOSTIC_LENGTH - 1)}...`;
+  return `${diagnostic.slice(0, MAX_DIAGNOSTIC_LENGTH - 3)}...`;
 }
 
 function normalizeTrailingNewline(text: string): string {
