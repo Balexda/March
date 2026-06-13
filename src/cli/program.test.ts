@@ -465,7 +465,7 @@ describe("march CLI", () => {
     expect(result.stdout).toContain("--name");
     expect(result.stdout).toContain("--branch");
     expect(result.stdout).toContain("--json");
-    expect(result.stdout).toContain("default: claude-code");
+    expect(result.stdout).toContain("default: codex");
   });
 
   // NOTE: `march hatchery spawn` is now a thin HTTP client for the hatchery

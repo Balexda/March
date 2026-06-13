@@ -40,7 +40,6 @@ import { StatioValidationError } from "../statio/types.js";
 import { initMarch, InitError } from "../bootstrap/init.js";
 import { createBuildContext, SnapshotError } from "../spawn/snapshot.js";
 import {
-  defaultBackendName,
   listBackends,
   getBackend,
   missingCredentialMounts,
@@ -140,9 +139,9 @@ function resolveHatcheryBackendSelection(input: {
   }
 
   return {
-    requestedName: defaultBackendName,
+    requestedName: "codex",
     source: "default",
-    backend: getBackend(defaultBackendName),
+    backend: getBackend("codex"),
   };
 }
 
@@ -793,7 +792,7 @@ hatchery
   .description("Run a one-shot spawn and hand its patch to an agent-deck manager")
   .option(
     "--backend <name>",
-    `Backend for spawn execution (${listBackends().join(", ")}; default: ${defaultBackendName})`,
+    `Backend for spawn execution (${listBackends().join(", ")}; default: codex)`,
   )
   .option("--prompt <prompt>", "Task prompt for the spawn; Hatchery injects patch-output instructions")
   .option(
