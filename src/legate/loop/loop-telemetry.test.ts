@@ -98,6 +98,7 @@ describe("buildLoopTickActivity", () => {
     const record = {
       workers: { running: 1, idle: 2, error: 0, bogus: "x" },
       dispatchable_count: 3,
+      dispatchable_ready_count: 2,
       blocked_count: 1,
       pending_total: 5,
       slices_by_stage: { implementing: 2, "pr-open": 1, bogus: "x" },
@@ -122,6 +123,7 @@ describe("buildLoopTickActivity", () => {
       up: 1,
       lastTickAtMs: 1000,
       queueDispatchable: 3,
+      queueDispatchableReady: 2,
       queueBlocked: 1,
       queueTotal: 5,
       workersByState: { running: 1, idle: 2, error: 0 }, // non-number 'bogus' dropped

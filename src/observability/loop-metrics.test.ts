@@ -13,6 +13,7 @@ function activity(overrides: Partial<LoopTickActivity> = {}): LoopTickActivity {
       up: 1,
       lastTickAtMs: Date.now(),
       queueDispatchable: 2,
+      queueDispatchableReady: 2,
       queueBlocked: 1,
       queueTotal: 5,
       workersByState: { running: 1, idle: 2 },

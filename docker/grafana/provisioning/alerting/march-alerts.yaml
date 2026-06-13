@@ -113,7 +113,7 @@ groups:
               instant: true
               editorMode: code
               expr: >-
-                sum(march_legate_queue_dispatchable) > 0
+                sum(march_legate_queue_dispatchable_ready) > 0
                 and (sum(increase(march_legate_dispatch_actions_total[10m])) or vector(0)) == 0
           - refId: C
             datasourceUid: __expr__
@@ -296,7 +296,7 @@ groups:
               instant: true
               editorMode: code
               expr: >-
-                (sum(march_legate_queue_dispatchable) or vector(0)) > 0
+                (sum(march_legate_queue_dispatchable_ready) or vector(0)) > 0
                 and (sum(increase(march_legate_dispatch_actions_total[30m])) or vector(0)) == 0
           - refId: C
             datasourceUid: __expr__
@@ -336,7 +336,7 @@ groups:
               instant: true
               editorMode: code
               expr: >-
-                ((sum(march_legate_queue_dispatchable) or vector(0)) + (sum(march_legate_slices_ready_to_merge) or vector(0)) + (sum(march_legate_escalated) or vector(0))) > 0
+                ((sum(march_legate_queue_dispatchable_ready) or vector(0)) + (sum(march_legate_slices_ready_to_merge) or vector(0)) + (sum(march_legate_escalated) or vector(0))) > 0
                 and ((sum(increase(march_legate_loop_actions_total[30m])) or vector(0)) + (sum(increase(march_legate_dispatch_actions_total[30m])) or vector(0))) == 0
           - refId: C
             datasourceUid: __expr__

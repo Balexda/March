@@ -145,6 +145,11 @@ export interface TickResult {
   slicesByStage: Record<string, number>;
   /** Derived: pr-open slices with clean checks, no conflicts, no threads owed. */
   readyToMergeCount: number;
+  /** The record-paced set the dispatcher would launch FRESH (dispatchableReady):
+   *  ready smithy items minus in-flight/archived. Distinct from queue.dispatchable
+   *  (the node-level frontier that over-counts); the precise dispatch-ready signal
+   *  the dispatch alarms key on. */
+  dispatchableReadyCount: number;
   /** Escalated-stage slices keyed by escalation reason; sums to slicesByStage.escalated. */
   escalatedByReason: Record<string, number>;
   cleanupCount: number;

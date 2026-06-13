@@ -163,6 +163,7 @@ export function buildLoopTickActivity(record: any, ctx: HeartbeatMetricsContext)
     up: 1,
     lastTickAtMs: ctx.tickAtMs,
     queueDispatchable: record.dispatchable_count ?? 0,
+    queueDispatchableReady: record.dispatchable_ready_count ?? 0,
     queueBlocked: record.blocked_count ?? 0,
     queueTotal: record.pending_total ?? 0,
     workersByState,

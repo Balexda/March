@@ -37,8 +37,12 @@ export interface LoopMetricsSnapshot {
   readonly up: number;
   /** Epoch ms of the last completed tick; drives `tick.age`. */
   readonly lastTickAtMs: number;
-  /** Smithy items ready to dispatch right now. */
+  /** Smithy items ready to dispatch right now (node-level frontier, #289 — can
+   *  over-count escalated/blocked-shadow nodes). */
   readonly queueDispatchable: number;
+  /** The TRUE dispatch-ready count: the record-paced set the dispatcher actually
+   *  launches (dispatchableReady), phantom-free. The dispatch alarms key on this. */
+  readonly queueDispatchableReady: number;
   /** Pending items not yet dispatchable (blocked on dependencies). */
   readonly queueBlocked: number;
   /** Total tracked slices. */
@@ -159,8 +163,14 @@ function ensureInstruments(meter: Meter): void {
   registerGauge(
     meter,
     "march.legate.queue.dispatchable",
-    "Smithy items ready to dispatch now",
+    "Smithy items ready to dispatch now (node-level frontier, may over-count)",
     (s) => s.queueDispatchable,
+  );
+  registerGauge(
+    meter,
+    "march.legate.queue.dispatchable_ready",
+    "True dispatch-ready count the dispatcher would launch (phantom-free)",
+    (s) => s.queueDispatchableReady,
   );
   registerGauge(
     meter,
