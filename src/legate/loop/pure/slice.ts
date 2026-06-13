@@ -331,12 +331,36 @@ export const OTHER_STAGE = "other";
 
 const STAGE_ALLOWLIST = new Set<string>(SLICE_STAGES);
 
+/**
+ * The fixed escalation-reason vocabulary — the low-cardinality `reason` label set
+ * for the `march.legate.escalated` gauge. Splits the single `escalated` stage into
+ * the operator-meaningful buckets the work-status dashboard shows:
+ * `hatchery_dispatch_failed` is "spawn failed — never reached a steward"; the rest
+ * are "steward stuck — needs the legate agent or an operator". Any reason outside
+ * this set buckets under {@link OTHER_ESCALATION_REASON} so a stray value can never
+ * blow up the series cardinality.
+ */
+export const ESCALATION_REASONS = [
+  "hatchery_dispatch_failed",
+  "needs_human",
+  "needs_human_judgement",
+  "real_spawn_error",
+] as const;
+
+/** Catch-all bucket for any escalation reason outside {@link ESCALATION_REASONS}. */
+export const OTHER_ESCALATION_REASON = "other";
+
+const ESCALATION_REASON_ALLOWLIST = new Set<string>(ESCALATION_REASONS);
+
 /** Per-stage slice tally plus the derived ready-to-merge count (#220). */
 export interface SliceStageSummary {
   /** Count of non-archived slices keyed by lifecycle `stage` (a metric label). */
   readonly byStage: Record<string, number>;
   /** Slices `pr-open` with passing checks, no conflicts, and no threads owed. */
   readonly readyToMerge: number;
+  /** Escalated-stage slices keyed by escalation `reason` (a metric label). Sums to
+   *  `byStage.escalated`; lets the dashboard split spawn-failed from steward-stuck. */
+  readonly escalatedByReason: Record<string, number>;
 }
 
 /**
@@ -385,6 +409,8 @@ export function isReadyToMerge(slice: any): boolean {
 export function summarizeSlicesByStage(slices: Record<string, any> | undefined): SliceStageSummary {
   const byStage: Record<string, number> = {};
   for (const stage of SLICE_STAGES) byStage[stage] = 0; // pre-seed so dashboards show 0, not "no data"
+  const escalatedByReason: Record<string, number> = { [OTHER_ESCALATION_REASON]: 0 };
+  for (const reason of ESCALATION_REASONS) escalatedByReason[reason] = 0; // pre-seed for stable series
   let readyToMerge = 0;
   for (const slice of Object.values(slices ?? {})) {
     if (!slice || typeof slice !== "object") continue;
@@ -392,6 +418,12 @@ export function summarizeSlicesByStage(slices: Record<string, any> | undefined):
     const stage = STAGE_ALLOWLIST.has(raw) ? raw : OTHER_STAGE;
     byStage[stage] = (byStage[stage] ?? 0) + 1;
     if (isReadyToMerge(slice)) readyToMerge++;
+    if (stage === "escalated") {
+      const r = typeof slice.escalated_reason === "string" && ESCALATION_REASON_ALLOWLIST.has(slice.escalated_reason)
+        ? slice.escalated_reason
+        : OTHER_ESCALATION_REASON;
+      escalatedByReason[r] = (escalatedByReason[r] ?? 0) + 1;
+    }
   }
-  return { byStage, readyToMerge };
+  return { byStage, readyToMerge, escalatedByReason };
 }

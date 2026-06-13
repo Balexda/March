@@ -15,6 +15,7 @@ function activity(overrides: Partial<LoopTickActivity> = {}): LoopTickActivity {
       workersByState: { running: 1, idle: 2 },
       slicesByStage: { implementing: 1, "pr-open": 2 },
       readyToMerge: 1,
+      escalatedByReason: { hatchery_dispatch_failed: 0, other: 0 },
     },
     tickDurationSeconds: 0.4,
     dispatchActions: 1,

@@ -209,6 +209,27 @@ describe("slice pure helpers", () => {
     expect(readyToMerge).toBe(1); // only `nested` (explicit 0); `cold` is unknown
   });
 
+  it("summarizeSlicesByStage splits escalated by reason (spawn-failed vs stuck)", () => {
+    const slices = {
+      a: { stage: "escalated", escalated_reason: "hatchery_dispatch_failed" }, // spawn failed
+      b: { stage: "escalated", escalated_reason: "hatchery_dispatch_failed" },
+      c: { stage: "escalated", escalated_reason: "needs_human_judgement" }, // steward stuck
+      d: { stage: "escalated", escalated_reason: "some_future_reason" }, // unknown → other
+      e: { stage: "escalated" }, // no reason → other
+      f: { stage: "implementing" }, // not escalated → not counted
+    };
+    const { byStage, escalatedByReason } = summarizeSlicesByStage(slices);
+    expect(escalatedByReason.hatchery_dispatch_failed).toBe(2);
+    expect(escalatedByReason.needs_human_judgement).toBe(1);
+    expect(escalatedByReason.other).toBe(2); // unknown reason + missing reason
+    // Pre-seeded reasons report 0 (stable series), not absent.
+    expect(escalatedByReason.real_spawn_error).toBe(0);
+    // The reason split sums to the escalated stage tally.
+    const reasonSum = Object.values(escalatedByReason).reduce((a, b) => a + b, 0);
+    expect(reasonSum).toBe(byStage.escalated);
+    expect(reasonSum).toBe(5);
+  });
+
   it("summarizeSlicesByStage pre-seeds all stages to 0 for an empty slice set", () => {
     expect(summarizeSlicesByStage(undefined)).toEqual({
       byStage: {
@@ -220,6 +241,13 @@ describe("slice pure helpers", () => {
         escalated: 0,
       },
       readyToMerge: 0,
+      escalatedByReason: {
+        hatchery_dispatch_failed: 0,
+        needs_human: 0,
+        needs_human_judgement: 0,
+        real_spawn_error: 0,
+        other: 0,
+      },
     });
   });
 

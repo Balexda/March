@@ -57,7 +57,7 @@ function buildTickResult(state: LoopState, r: CoordinatorOutput["results"], spaw
   const stewardNudgeCount = countAction(r.babysit, "steward-nudge");
   const stewardStrandedCount = countAction(r.babysit, "steward-stranded");
   // Tally after all handlers ran so stages/PR snapshots reflect this tick (#220).
-  const { byStage, readyToMerge } = summarizeSlicesByStage(state.slices);
+  const { byStage, readyToMerge, escalatedByReason } = summarizeSlicesByStage(state.slices);
   return {
     ts: state.ts,
     statePresent: state.statePresent,
@@ -68,6 +68,7 @@ function buildTickResult(state: LoopState, r: CoordinatorOutput["results"], spaw
     queue: state.smithy.queue,
     slicesByStage: byStage,
     readyToMergeCount: readyToMerge,
+    escalatedByReason,
     cleanupCount: r.cleanup.actions.length,
     cleanupFailureCount: r.cleanup.failures.length,
     ghostCleanupCount: countAction(r.ghost, "ghost-cleanup"),

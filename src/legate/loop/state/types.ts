@@ -145,6 +145,8 @@ export interface TickResult {
   slicesByStage: Record<string, number>;
   /** Derived: pr-open slices with clean checks, no conflicts, no threads owed. */
   readyToMergeCount: number;
+  /** Escalated-stage slices keyed by escalation reason; sums to slicesByStage.escalated. */
+  escalatedByReason: Record<string, number>;
   cleanupCount: number;
   cleanupFailureCount: number;
   ghostCleanupCount: number;
