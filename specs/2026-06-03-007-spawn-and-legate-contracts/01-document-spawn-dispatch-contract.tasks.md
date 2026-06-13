@@ -73,7 +73,7 @@ Recommended implementation sequence:
 
 | ID | Title | Depends On | Artifact |
 |----|-------|------------|----------|
-| S1 | Author Spawn Dispatch Contract | - | `docs/subsystems/spawn/contract.md` |
+| S1 | Author Spawn Dispatch Contract | — | — |
 
 ### Cross-Story Dependencies
 
