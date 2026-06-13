@@ -1,6 +1,6 @@
 ---
 name: steward-pr
-description: "Open the pull request for a completed Steward spawn. Use after the worker's patch is applied/committed and pushed, when you (the Hatchery manager/steward session) need to create the PR. Defines the required title and body format: a parentage-grounded Summary, surfaced spec debt + uncertainty, and a one-line validation summary — no per-file Changes dump."
+description: "Open the pull request for a completed Steward spawn. Use after the worker's patch is applied/committed and pushed, when you (the Hatchery manager/steward session) need to create the PR. Defines the required title and body format: a parentage-grounded Summary, any manager corrections to the spawned draft, surfaced spec debt + uncertainty, and a one-line validation summary — no per-file Changes dump."
 allowed-tools: Bash(git status*) Bash(git log*) Bash(git diff*) Bash(git branch --show-current) Bash(gh pr create*) Bash(gh pr view*)
 ---
 # steward-pr
@@ -42,14 +42,22 @@ Bad:  `smithy forge: US1 S1 bounded spawn output capture envelope`
 
 ## Body
 
-Exactly these three sections, in this order. **Do not add a `## Changes`
-section** — the diff, commit log, and linked artifact already carry per-file
-detail; restating it just buries the signal.
+These sections, in this order. The `## Manager corrections` section is
+**conditional** — include it only when it applies (see below); the other three
+are always present. **Do not add a `## Changes` section** — the diff, commit
+log, and linked artifact already carry per-file detail; restating it just
+buries the signal.
 
 ```
 ## Summary
 <RFC id> → M<n> <milestone> → F<n> <feature> → <spec name> → Slice <n>: <goal>
 <1–2 sentences: what this slice adds and why it is the right increment.>
+
+## ⚠️ Manager corrections to the spawned draft
+<Only when you materially changed what the worker produced — see below.>
+- <what the worker got wrong, and the evidence it was wrong>
+- <what this PR actually ships instead>
+- Reviewer note: <disposable leftover artifacts / anything a reviewer should know>
 
 ## Spec debt & uncertainty
 - <SD-NNN (open|inherited): one-line description>
@@ -74,6 +82,25 @@ Walk the artifact headers (read the files; relative paths are repo-rooted):
 
 If a link is genuinely absent (e.g. a `.strike.md` with no spec), include the
 breadcrumb you can build and skip the rest — do not fabricate ancestry.
+
+### Manager corrections (high-value — include whenever it applies)
+
+The spawned worker ran headless in a fresh checkout and can produce a draft
+that is **mis-scoped or built on a false premise** — e.g. asserting a feature
+map or RFC was "absent from this checkout" when it is present, scoping the work
+to the wrong feature, or inventing requirements. You review and fix that draft
+before opening the PR (per your manager workflow). **When you materially changed
+what the worker produced, say so** — this is the single most steer-worthy thing
+in the PR, far more useful than a file-by-file changelog.
+
+Include this section when you re-scoped, dropped a false assumption, corrected
+requirements, or otherwise diverged from the worker's output. For each
+correction, state plainly: **what the worker got wrong** (with the evidence it
+was wrong), and **what this PR ships instead**. If you had to leave incorrect or
+orphaned artifacts behind in the worktree (e.g. a clean delete was blocked), add
+a **Reviewer note** that they are disposable. If you recorded the issue as spec
+debt, cross-reference the `SD-NNN` id. Omit the whole section when the worker's
+draft was correct and you only validated it.
 
 ### Surfacing spec debt & uncertainty
 
