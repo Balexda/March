@@ -170,13 +170,24 @@ export async function launchHatcheryDispatch(item: any, sliceId: string, deps: D
 // dispatch flow (a cull failure is logged, not propagated — the slice is already
 // escalated), and returns the action to push when something was actually culled,
 // or null. Shared by both escalate paths (launch-throw + completion-failure).
+//
+// NEVER culls on a "branch already exists" collision: that branch belongs to a
+// PRIOR spawn that may have an OPEN PR whose live steward the fold simply hasn't
+// observed yet (`slice.pr.changed` not emitted), so `adoptOpenPrOnCollision`
+// returns null this tick and re-tries the adopt on a later one. Culling by branch
+// here would delete the steward/worktree backing that PR before adoption runs.
+// The collision case is owned by #173 (adopt) + the Hatchery self-heal (#243),
+// not the orphan cull — which exists for the genuine never-reached-steward
+// failures (Castra launch timeout / crash), where the error is not a collision.
 async function cullOrphanedSteward(
   sliceId: string,
   branch: string | undefined,
+  errorText: string,
   ts: string,
   deps: DispatchIoDeps,
 ): Promise<any | null> {
   if (!deps.cullStewardForSlice) return null;
+  if (/already exists/i.test(errorText)) return null;
   try {
     const res = await deps.cullStewardForSlice(sliceId, branch);
     if (res?.culled) {
@@ -254,7 +265,7 @@ export async function launchDispatch(state: any, ts: string, item: any, sliceId:
       existing.last_action = ts;
       existing.last_action_note = "NEED: Hatchery dispatch launch failed: " + error;
       deps.emitTransition({ type: "slice.escalated", sliceId, reason: "hatchery_dispatch_failed" });
-      const culled = await cullOrphanedSteward(sliceId, existing.branch, ts, deps);
+      const culled = await cullOrphanedSteward(sliceId, existing.branch, error, ts, deps);
       if (culled) actions.push(culled);
       // Only bother the operator once auto-recovery is out of budget — within
       // budget the loop re-dispatches this slice itself (#211), so a judgement
@@ -367,7 +378,7 @@ export async function completePendingHatcheryDispatches(state: any, ts: string, 
     // The spawn failed before reaching a useful steward; cull the session it may
     // have orphaned in Castra (timeout-ambiguity / crash case the Hatchery's own
     // rollback can't reach) so it does not leak or hold a budget slot.
-    const culled = await cullOrphanedSteward(sliceId, slice.branch, ts, deps);
+    const culled = await cullOrphanedSteward(sliceId, slice.branch, errorText, ts, deps);
     if (culled) actions.push(culled);
     const commandLine = actionCommandLine({ command: slice.command, arguments: slice.arguments || [] });
     failures.push({ slice_id: sliceId, command: commandLine, error: errorText });

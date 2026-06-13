@@ -272,14 +272,21 @@ async function cullStewardForSlice(
 ): Promise<{ culled: boolean; sessionId?: string }> {
   const sessions = await castra().listSessions(profile);
   const want = (branch ?? "").replace(/^feature\//, "");
-  const match = sessions.find(
+  // Remove EVERY session matching this slice, not just the first: repeated
+  // spawn failures / launch timeouts can orphan more than one Castra session for
+  // the same sliceId/branch, and leaving the extras behind keeps leaking
+  // worktrees + holding budget slots. Remove all so the cull is complete.
+  const matches = sessions.filter(
     (s) =>
       (s.metadata?.sliceId !== undefined && s.metadata.sliceId === sliceId) ||
       (want.length > 0 && (s.branch ?? "").replace(/^feature\//, "") === want),
   );
-  if (!match) return { culled: false };
-  await castra().removeSession({ profile, sessionId: match.sessionId, pruneWorktree: true });
-  return { culled: true, sessionId: match.sessionId };
+  if (matches.length === 0) return { culled: false };
+  for (const m of matches) {
+    await castra().removeSession({ profile, sessionId: m.sessionId, pruneWorktree: true });
+  }
+  // Report the first id culled (the action is one-per-slice); all matches removed.
+  return { culled: true, sessionId: matches[0].sessionId };
 }
 
 // Build the dispatch I/O seam (handlers/dispatch-io.ts) for one profile.
