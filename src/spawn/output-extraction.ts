@@ -221,8 +221,19 @@ function parsePatchSection(
   const newPath = headerMatch[2];
   const touchedPaths = new Set([oldPath, newPath]);
   let changedPathCount = 0;
+  let sawHunk = false;
 
   for (const line of lines) {
+    if (line.startsWith("@@ ")) {
+      // Once hunk bodies begin, `---`/`+++` prefixes are removed/added content
+      // lines, not file headers — stop treating them as declared paths.
+      sawHunk = true;
+      changedPathCount++;
+      continue;
+    }
+
+    if (sawHunk) continue;
+
     if (line.startsWith("rename from ")) {
       touchedPaths.add(line.slice("rename from ".length));
       changedPathCount++;
@@ -231,18 +242,31 @@ function parsePatchSection(
       changedPathCount++;
     } else if (line.startsWith("copy from ") || line.startsWith("copy to ")) {
       return failure("unsupported-patch-form", "Copy patch payloads are not supported.");
+    } else if (line.startsWith("--- ") || line.startsWith("+++ ")) {
+      // Validate the actual file-header targets too: the `diff --git` line can
+      // be benign while `--- `/`+++ ` points outside the worktree.
+      const target = fileHeaderTarget(line);
+      if (target !== undefined) touchedPaths.add(target);
     } else if (
       line.startsWith("new file mode ") ||
       line.startsWith("deleted file mode ") ||
       line.startsWith("old mode ") ||
-      line.startsWith("new mode ") ||
-      line.startsWith("@@ ")
+      line.startsWith("new mode ")
     ) {
       changedPathCount++;
     }
   }
 
   return { status: "parsed", touchedPaths: [...touchedPaths], changedPathCount };
+}
+
+function fileHeaderTarget(line: string): string | undefined {
+  let raw = line.slice("--- ".length).trimStart();
+  const tabIndex = raw.indexOf("\t");
+  if (tabIndex !== -1) raw = raw.slice(0, tabIndex);
+  if (raw.length === 0 || raw === "/dev/null") return undefined;
+  if (raw.startsWith("a/") || raw.startsWith("b/")) raw = raw.slice(2);
+  return raw;
 }
 
 function normalizePatchPath(

@@ -165,6 +165,42 @@ describe("spawn patch validation", () => {
     expect(result).toMatchObject({ status: "failed", category: "unsafe-patch-path" });
   });
 
+  it("rejects an unsafe +++ file-header target behind a benign diff --git header", () => {
+    const result = validateSpawnPatch({
+      patchText: modifyPatch.replace("+++ b/src/app.ts", "+++ b/../outside.ts"),
+      worktreePath,
+    });
+
+    expect(result).toMatchObject({ status: "failed", category: "unsafe-patch-path" });
+  });
+
+  it("rejects an absolute --- file-header target behind a benign diff --git header", () => {
+    const result = validateSpawnPatch({
+      patchText: modifyPatch.replace("--- a/src/app.ts", "--- /etc/passwd"),
+      worktreePath,
+    });
+
+    expect(result).toMatchObject({ status: "failed", category: "unsafe-patch-path" });
+  });
+
+  it("does not misparse hunk-body lines that begin with --- or +++", () => {
+    const patchRemovingDashLine = [
+      "diff --git a/src/app.ts b/src/app.ts",
+      "index 1111111..2222222 100644",
+      "--- a/src/app.ts",
+      "+++ b/src/app.ts",
+      "@@ -1,2 +1,2 @@",
+      "--- /etc/passwd",
+      "+++ b/../outside.ts",
+      "",
+    ].join("\n");
+
+    expect(validateSpawnPatch({ patchText: patchRemovingDashLine, worktreePath })).toMatchObject({
+      status: "accepted",
+      patch: { touchedPaths: ["src/app.ts"] },
+    });
+  });
+
   it("allows safe relative names that merely start with dots", () => {
     const result = validateSpawnPatch({
       patchText: modifyPatch.replaceAll("src/app.ts", "..well-known/config.json"),
