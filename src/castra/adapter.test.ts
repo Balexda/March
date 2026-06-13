@@ -54,39 +54,50 @@ describe("castra adapter — argv builders", () => {
   });
 
   it("builds launch args mirroring the Hatchery handoff shape", () => {
-    expect(
-      buildLaunchArgs({
-        profile: "march",
-        repoPath: "/repo",
-        title: "Steward",
-        group: "g",
-        branch: "march/spawn/x",
-        model: "opus",
-      }),
-    ).toEqual([
-      "-p",
-      "march",
-      "launch",
-      "/repo",
-      "-t",
-      "Steward",
-      "-c",
-      "claude",
-      "-g",
-      "g",
-      "--worktree",
-      "march/spawn/x",
-      "-b",
-      "--title-lock",
-      "--extra-arg",
-      "--permission-mode",
-      "--extra-arg",
-      "auto",
-      "--extra-arg",
-      "--model",
-      "--extra-arg",
-      "opus",
-    ]);
+    const prev = process.env.MARCH_STEWARD_SKILLS_DIR;
+    process.env.MARCH_STEWARD_SKILLS_DIR = "/steward-skills";
+    try {
+      expect(
+        buildLaunchArgs({
+          profile: "march",
+          repoPath: "/repo",
+          title: "Steward",
+          group: "g",
+          branch: "march/spawn/x",
+          model: "opus",
+        }),
+      ).toEqual([
+        "-p",
+        "march",
+        "launch",
+        "/repo",
+        "-t",
+        "Steward",
+        "-c",
+        "claude",
+        "-g",
+        "g",
+        "--worktree",
+        "march/spawn/x",
+        "-b",
+        "--title-lock",
+        "--extra-arg",
+        "--permission-mode",
+        "--extra-arg",
+        "auto",
+        "--extra-arg",
+        "--model",
+        "--extra-arg",
+        "opus",
+        "--extra-arg",
+        "--add-dir",
+        "--extra-arg",
+        "/steward-skills",
+      ]);
+    } finally {
+      if (prev === undefined) delete process.env.MARCH_STEWARD_SKILLS_DIR;
+      else process.env.MARCH_STEWARD_SKILLS_DIR = prev;
+    }
   });
 
   it("defaults the launch model when none is given", () => {
@@ -97,7 +108,30 @@ describe("castra adapter — argv builders", () => {
       group: "g",
       branch: "b",
     });
-    expect(args.at(-1)).toBe("opus");
+    // model is the --extra-arg value immediately after the "--model" token.
+    expect(args[args.indexOf("--model") + 2]).toBe("opus");
+  });
+
+  it("loads the steward skills dir via --add-dir (keeps host ~/.claude auth)", () => {
+    const prev = process.env.MARCH_STEWARD_SKILLS_DIR;
+    process.env.MARCH_STEWARD_SKILLS_DIR = "/steward-skills";
+    try {
+      const args = buildLaunchArgs({
+        profile: "march",
+        repoPath: "/repo",
+        title: "t",
+        group: "g",
+        branch: "b",
+      });
+      const idx = args.indexOf("--add-dir");
+      expect(idx).toBeGreaterThan(-1);
+      expect(args[idx - 1]).toBe("--extra-arg");
+      expect(args[idx + 1]).toBe("--extra-arg");
+      expect(args[idx + 2]).toBe("/steward-skills");
+    } finally {
+      if (prev === undefined) delete process.env.MARCH_STEWARD_SKILLS_DIR;
+      else process.env.MARCH_STEWARD_SKILLS_DIR = prev;
+    }
   });
 
   it("includes -b by default and omits it when createBranch is false (attach)", () => {

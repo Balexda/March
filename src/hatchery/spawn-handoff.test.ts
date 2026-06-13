@@ -140,7 +140,7 @@ describe("spawn-handoff", () => {
     // consider "step N complete" after just the commit.
     expect(prompt).toMatch(/6\. Commit/);
     expect(prompt).toMatch(/7\. Push/);
-    expect(prompt).toMatch(/8\. Open the PR with `gh pr create`/);
+    expect(prompt).toMatch(/8\. Open the PR using the `steward-pr` skill/);
     expect(prompt).toMatch(/9\. Report the PR URL/);
     // The mid-task-exit prohibition must be present in plain language so
     // claude reads it during planning, not just as boilerplate.

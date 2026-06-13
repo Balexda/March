@@ -2,6 +2,7 @@ import { createCastraLogger } from "../observability/logger.js";
 import { initOtel } from "../observability/otel.js";
 import { startCastraHeartbeat } from "./metrics.js";
 import { buildServer } from "./server.js";
+import { ensureStewardSkills } from "./steward-skills.js";
 import {
   CASTRA_SERVICE_NAME,
   CASTRA_TOKEN_ENV,
@@ -45,6 +46,21 @@ export async function runCastraServer(options: RunCastraServerOptions = {}): Pro
     app.log.warn(
       `${CASTRA_TOKEN_ENV} is not set — /v1/* is UNAUTHENTICATED. Set ${CASTRA_TOKEN_ENV} ` +
         "and do not publish the port on a public interface.",
+    );
+  }
+
+  // Provision the steward skills the manager sessions load via `--add-dir`
+  // (see steward-skills.ts / buildLaunchArgs). The directory must exist before
+  // any session launches. Non-fatal: a provisioning failure must not stop the
+  // session host — stewards just fall back to the manager prompt's guidance.
+  try {
+    const root = await ensureStewardSkills();
+    app.log.info(`steward skills provisioned at ${root}`);
+  } catch (err) {
+    app.log.warn(
+      `steward skill provisioning failed (stewards will lack the steward-pr skill): ${
+        err instanceof Error ? err.message : String(err)
+      }`,
     );
   }
 
