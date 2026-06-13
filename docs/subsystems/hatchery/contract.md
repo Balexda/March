@@ -46,8 +46,8 @@ Spawn request body:
 | Field | Type | Required | Meaning |
 |-------|------|----------|---------|
 | `prompt` | string | Yes | Prompt handed to the spawn backend. Must contain non-whitespace text. |
-| `backend` | string | Yes | Registered backend name resolved server-side. |
-| `repoPath` | absolute path string | Yes | Repository path valid inside the Hatchery container bind mount. |
+| `backend` | string | Yes | Registered backend name resolved server-side. Trimmed; must contain non-whitespace text. |
+| `repoPath` | absolute path string | Yes | Repository path valid inside the Hatchery container bind mount. Trimmed; must contain non-whitespace text. |
 | `agentDeckProfile` | string | No | Agent-deck profile for manager session launch. |
 | `managerGroup` | string | No | Manager group metadata. |
 | `title` | string | No | Human-readable job title. |
@@ -99,9 +99,9 @@ Job record response:
 | Condition | Route | Response | Observable behavior |
 |-----------|-------|----------|---------------------|
 | Missing prompt | `POST /spawns` | `400` with `{ "error": string }` | The body has no string `prompt` with non-whitespace content. |
-| Missing backend | `POST /spawns` | `400` with `{ "error": string }` | The body has no non-empty string `backend`. |
+| Missing backend | `POST /spawns` | `400` with `{ "error": string }` | The trimmed `backend` is empty (absent, non-string, or whitespace-only). |
 | Unknown backend | `POST /spawns` | `400` with `{ "error": string }` | The backend name is not registered; the message includes supported backend names. |
-| Missing repo path | `POST /spawns` | `400` with `{ "error": string }` | The body has no non-empty string `repoPath`. |
+| Missing repo path | `POST /spawns` | `400` with `{ "error": string }` | The trimmed `repoPath` is empty (absent, non-string, or whitespace-only). |
 | Invalid toolchain | `POST /spawns` | `400` with `{ "error": string }` | A provided `toolchain` is not one of Hatchery's allowed selections. |
 | Unknown job id | `GET /spawns/:id` | `404` with `{ "error": string }` | No retained job record exists for the requested id. |
 | Readiness dependency unavailable | `GET /readyz` | `503` with `{ "ready": false, "docker": boolean, "castra": boolean }` | At least one readiness dependency is false. |
