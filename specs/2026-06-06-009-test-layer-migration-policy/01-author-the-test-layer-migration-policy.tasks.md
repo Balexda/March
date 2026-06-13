@@ -18,7 +18,7 @@
 
 ### Tasks
 
-- [ ] **Document the migration trigger policy**
+- [x] **Document the migration trigger policy**
 
   Add a "Test Layer Migration" heading under `CONTRIBUTING.md`'s `## Testing` section and write the policy text for material, non-material, and no-trigger outcomes. The text should satisfy AS 1.1-1.4 and the Test Layer Migration Policy contract without introducing runtime code, staged-script changes, quarantine routing, or the governed-set starting-state record owned by User Story 2.
 

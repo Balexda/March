@@ -38,6 +38,28 @@ The strategy — scope tiers (L0 unit / L1 subsystem / L2 cross-subsystem / L3 s
 
 The milestone-level execution plan (M1 through M8, success criteria, dependency order, the gap-analysis baseline of today's tests) lives in **[docs/rfcs/2026-002-layered-testing-framework/layered-testing-framework.rfc.md](docs/rfcs/2026-002-layered-testing-framework/layered-testing-framework.rfc.md)**.
 
+### Test Layer Migration
+
+Governed legacy L2 tests stay in vitest until a material edit touches the
+governed test file itself. A material edit is any semantic change to that file's:
+
+- assertions;
+- mocked process behavior;
+- fixtures;
+- subsystem boundary it drives.
+
+A material edit requires a Cucumber.js port of the affected scenario in the same
+change PR. The trigger does not fire for production-code or shared-helper changes
+that do not edit the governed test file itself.
+
+These edits are non-material and do not require a port when they preserve the
+test contract: formatting-only changes, comment-only changes, import sorting,
+tag-block edits, and mechanical renames. When no material trigger is met, the
+governed tests stay in vitest with no preemptive port.
+
+This policy defines only the migration trigger. It does not redefine the tag
+taxonomy, staged scripts, quarantine routing, or Cucumber.js port mechanics.
+
 Day-to-day commands:
 
 - **`npm test`** — runs the deterministic CI suite. Today that's the full vitest set: L0, L1, and the L2 cases that exercise real Docker (`spawn/container-launch`, `spawn/snapshot-build`, `hatchery/legate-container`). Cassette-replayed L2/L3 will land here as the [RFC milestones](docs/rfcs/2026-002-layered-testing-framework/layered-testing-framework.rfc.md#milestones) progress. Cost: $0, < 2 minutes. Runs on every push and PR.
