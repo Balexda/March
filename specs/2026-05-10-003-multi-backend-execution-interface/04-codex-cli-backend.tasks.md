@@ -17,7 +17,7 @@
 
 ### Tasks
 
-- [ ] **Define the Codex backend**
+- [x] **Define the Codex backend**
 
   Update the spawn backend module with a `codexBackend` that satisfies the live `SpawnBackend` contract. Use Codex's base image, registry name, credential mount, entrypoint, and egress-host metadata as backend-owned data. Do not add Gemini, do not reintroduce env-var auth for the second backend, and do not route any dispatch pipeline stage through the selected backend in this slice.
 
@@ -29,7 +29,7 @@
   - `codexBackend.buildEntrypoint("/march/prompt.txt")` returns an argv that copies mounted credentials into the in-container Codex home and runs `codex exec` headlessly against the prompt file. The entrypoint does not use Gemini flags and does not add Docker-in-Docker sandboxing.
   - `codexBackend.allowedEgressHosts` declares the ChatGPT/Codex service host(s). `allowedEgressHosts` is a required field on the live `SpawnBackend` surface (`src/spawn/backends.ts`), so Codex MUST populate it — egress metadata is not optional — without broadening Claude's egress metadata.
 
-- [ ] **Register Codex in the backend registry**
+- [x] **Register Codex in the backend registry**
 
   Add `codexBackend` to the static backend registry alongside `claudeCodeBackend`. Keep the registry deterministic and internal; this slice does not introduce plugin loading, runtime backend mutation, profile selection, or any CLI default change.
 
@@ -40,7 +40,7 @@
   - `defaultBackendName` remains `"claude-code"`; changing dispatch defaults is outside US4.
   - No dispatch pipeline stage is migrated to consume Codex in this slice; US5 owns image/env/entrypoint derivation at call sites and US1 owns operator-facing selection.
 
-- [ ] **Cover Codex backend behavior with focused tests**
+- [x] **Cover Codex backend behavior with focused tests**
 
   Extend backend unit tests to prove the second registered backend satisfies the live substituted US4 contract. Tests should assert backend-owned values and registry behavior, not dispatch pipeline behavior that later stories own.
 

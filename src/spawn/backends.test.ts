@@ -45,6 +45,11 @@ describe("spawn backends", () => {
     expect(listBackends()).toEqual(["claude-code", "codex"]);
   });
 
+  it("resolves registered backend names to the exported implementations", () => {
+    expect(getBackend("claude-code")).toBe(claudeCodeBackend);
+    expect(getBackend("codex")).toBe(codexBackend);
+  });
+
   it("defaults to Claude Code for backward-compatible dispatch", () => {
     expect(defaultBackendName).toBe("claude-code");
     expect(resolveBackendSelection({}).backend).toBe(claudeCodeBackend);
@@ -87,6 +92,7 @@ describe("spawn backends", () => {
   });
 
   it("defines the Codex exec backend for ChatGPT session auth", () => {
+    expect(codexBackend.name).toBe("codex");
     expect(codexBackend.baseImage).toBe("march-spawn-codex:latest");
     expect(codexBackend.requiredEnvVars).toEqual([]);
     expect(codexBackend.allowedEgressHosts).toEqual(["chatgpt.com"]);
@@ -97,6 +103,8 @@ describe("spawn backends", () => {
     expect(entrypoint[2]).toContain(
       `cp -R /march/codex-auth/. /march/codex-home/ && chmod -R u+rwX /march/codex-home && codex exec --json --ephemeral --ignore-rules --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --cd ${CONTAINER_WORKDIR} - < /march/prompt.txt`,
     );
+    expect(entrypoint[2]).not.toContain("gemini");
+    expect(entrypoint[2]).not.toContain("--sandbox=docker");
   });
 
   it("wraps each backend's agent command in the git commit/diff scaffold", () => {
