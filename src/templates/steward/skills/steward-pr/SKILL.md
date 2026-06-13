@@ -1,7 +1,7 @@
 ---
 name: steward-pr
 description: "Open the pull request for a completed Steward spawn. Use after the worker's patch is applied/committed and pushed, when you (the Hatchery manager/steward session) need to create the PR. Defines the required title and body format: a parentage-grounded Summary, any manager corrections to the spawned draft, surfaced spec debt + uncertainty, and a one-line validation summary — no per-file Changes dump."
-allowed-tools: Bash(git status*) Bash(git log*) Bash(git diff*) Bash(git branch --show-current) Bash(gh pr create*) Bash(gh pr view*)
+allowed-tools: Bash(git status *) Bash(git log *) Bash(git diff *) Bash(git branch *) Bash(gh pr create *) Bash(gh pr view *)
 ---
 # steward-pr
 
