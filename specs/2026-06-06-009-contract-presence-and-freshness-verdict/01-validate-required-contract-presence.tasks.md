@@ -18,7 +18,7 @@
 
 ### Tasks
 
-- [ ] **Add the contract presence verdict command**
+- [x] **Add the contract presence verdict command**
 
   Add the repository-local verdict entrypoint in the docs-contract tooling source area and expose it through `npm run docs:contracts:check`. The command should evaluate the Required Contract set from the data model and satisfy AS 1.1-1.2 without adding freshness config validation, git diff checking, CI wiring, Smithy-agent enforcement, AUTOGEN extraction, or runtime subsystem behavior.
 
@@ -30,7 +30,7 @@
   - Diagnostics remain bounded and include the presence category.
   - The command runs from filesystem inputs without Docker, network, or live March services.
 
-- [ ] **Validate required Markdown H2 sections**
+- [x] **Validate required Markdown H2 sections**
 
   Extend the verdict command's contract parser to validate the required section schema for every present contract. The parser should satisfy AS 1.3 and the Required Contract model by recognizing Markdown headings structurally, treating missing or duplicate required H2 headings as failures, and keeping this slice limited to section-schema verdict behavior.
 
