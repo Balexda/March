@@ -99,7 +99,7 @@ Recommended implementation sequence:
 
 | ID | Title | Depends On | Artifact |
 |----|-------|-----------|----------|
-| US1 | Validate Required Contract Presence | — | — |
+| US1 | Validate Required Contract Presence | — | specs/2026-06-06-009-contract-presence-and-freshness-verdict/01-validate-required-contract-presence.tasks.md |
 | US2 | Populate and Validate Contract Freshness Mapping | US1 | — |
 | US3 | Report Source and Contract Freshness Drift | US1, US2 | — |
 | US4 | Provide Deterministic Local Verdict Output | US1, US2, US3 | — |
