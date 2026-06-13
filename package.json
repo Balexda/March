@@ -9,6 +9,11 @@
   "scripts": {
     "pretest": "tsup src/cli.ts --format esm --clean",
     "test": "vitest run",
+    "test:vitest": "vitest run",
+    "test:l0": "node scripts/run-layered-tests.mjs l0",
+    "test:l1": "node scripts/run-layered-tests.mjs l1",
+    "test:l2-cassette": "node scripts/run-layered-tests.mjs l2-cassette",
+    "test:l3-cassette": "node scripts/run-layered-tests.mjs l3-cassette",
     "build": "tsup src/cli.ts --format esm --clean",
     "build:spawn-claude-image": "docker build -t march-spawn-claude:latest -f docker/spawn-claude.Dockerfile docker",
     "build:spawn-codex-image": "docker build -t march-spawn-codex:latest -f docker/spawn-codex.Dockerfile docker",
