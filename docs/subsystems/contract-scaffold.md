@@ -23,9 +23,18 @@ for all contracts.
 
 ## Public Interface
 
+<!-- Externally consumed routes, commands, types, roles, or protocol surfaces,
+     depending on the subsystem shape. List what other subsystems depend on. -->
+
 ## Invariants
 
+<!-- Behavioral promises this subsystem maintains — what callers can always
+     rely on holding true. -->
+
 ## Error Modes
+
+<!-- Externally visible failure conditions and their outcomes — what callers
+     observe when something goes wrong. -->
 ```
 
 Copy the template into `docs/subsystems/<name>/contract.md` and fill it with
