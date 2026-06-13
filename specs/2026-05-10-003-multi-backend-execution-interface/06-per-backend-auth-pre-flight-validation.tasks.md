@@ -17,7 +17,7 @@
 
 ### Tasks
 
-- [ ] **Validate selected backend auth before worktree creation**
+- [x] **Validate selected backend auth before worktree creation**
 
   Add the dispatch auth pre-flight immediately after Stage 1 dependency validation and before Stage 2 worktree creation. The check must read only the selected backend's declared auth surface: `requiredEnvVars` for env-var backends and `credentialMounts` for credential-mount backends. For env vars, unset and empty-string values are both missing. For credential mounts, the backend-resolved host source must exist and be readable. Failures exit with `USAGE_ERROR` before worktree, branch, snapshot image, or container creation; a base image pulled by Stage 1 remains outside this slice's cleanup scope.
 

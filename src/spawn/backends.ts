@@ -73,6 +73,7 @@ function composeGitScaffoldedEntrypoint(
 }
 
 export interface BackendCredentialMount {
+  readonly name: string;
   readonly hostPath: string;
   readonly containerPath: string;
   readonly readOnly: boolean;
@@ -200,6 +201,7 @@ export function resolveCredentialMounts(
   env: NodeJS.ProcessEnv = process.env,
 ): readonly BackendCredentialMount[] {
   return backend.credentialMounts.map((mount) => ({
+    name: mount.name,
     hostPath: mount.resolveHostPath(env),
     containerPath: mount.containerPath,
     readOnly: mount.readOnly,
@@ -221,6 +223,29 @@ export function missingCredentialMounts(
   return resolveCredentialMounts(backend, env).filter(
     (mount) => !isReadableDirectory(mount.hostPath),
   );
+}
+
+export function formatMissingBackendAuthError(
+  backend: SpawnBackend,
+  missingEnvVars: readonly string[],
+  missingMounts: readonly BackendCredentialMount[],
+): string {
+  const requirements = [
+    ...backend.requiredEnvVars,
+    ...backend.credentialMounts.map((mount) => mount.name),
+  ];
+  const missing = [
+    ...missingEnvVars,
+    ...missingMounts.map((mount) => mount.name),
+  ];
+  const remedy =
+    missingEnvVars.length > 0 && missingMounts.length > 0
+      ? "Set the variable(s), make the credential mount(s) readable, and re-run."
+      : missingMounts.length > 0
+        ? "Make the credential mount(s) readable and re-run."
+        : "Set the variable(s) and re-run.";
+
+  return `Backend "${backend.name}" requires ${requirements.join(", ")}: missing ${missing.join(", ")}. ${remedy}`;
 }
 
 function isReadableDirectory(hostPath: string): boolean {

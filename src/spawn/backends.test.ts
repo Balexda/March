@@ -7,6 +7,7 @@ import {
   codexBackend,
   CONTAINER_WORKDIR,
   defaultBackendName,
+  formatMissingBackendAuthError,
   getBackend,
   listBackends,
   missingCredentialMounts,
@@ -139,6 +140,7 @@ describe("spawn backends", () => {
       }),
     ).toEqual([
       {
+        name: "Codex credential directory",
         hostPath: "/tmp/codex-home",
         containerPath: "/march/codex-auth",
         readOnly: true,
@@ -171,6 +173,7 @@ describe("spawn backends", () => {
       CODEX_HOME: "/path/that/does/not/exist",
     });
     expect(missing).toHaveLength(1);
+    expect(missing[0].name).toBe("Codex credential directory");
     expect(missing[0].hostPath).toBe("/path/that/does/not/exist");
   });
 
@@ -200,5 +203,30 @@ describe("spawn backends", () => {
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
+  });
+
+  it("formats missing auth errors without credential values or host paths", () => {
+    const missingEnv = missingRequiredEnvVars(claudeCodeBackend, {
+      ANTHROPIC_API_KEY: "",
+    });
+    expect(
+      formatMissingBackendAuthError(claudeCodeBackend, missingEnv, []),
+    ).toBe(
+      'Backend "claude-code" requires ANTHROPIC_API_KEY: missing ANTHROPIC_API_KEY. Set the variable(s) and re-run.',
+    );
+
+    const missingMounts = missingCredentialMounts(codexBackend, {
+      CODEX_HOME: "/secret/codex-home",
+    });
+    const message = formatMissingBackendAuthError(
+      codexBackend,
+      [],
+      missingMounts,
+    );
+    expect(message).toBe(
+      'Backend "codex" requires Codex credential directory: missing Codex credential directory. Make the credential mount(s) readable and re-run.',
+    );
+    expect(message).not.toContain("/secret");
+    expect(message).not.toContain("CODEX_HOME");
   });
 });

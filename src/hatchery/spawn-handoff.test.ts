@@ -9,8 +9,9 @@ import {
   extractPatchFromSpawnOutput,
   hatcherySpawnLogDir,
   managerBranchName,
+  validateHatcherySpawnBackend,
 } from "./spawn-handoff.js";
-import { PATCH_SENTINEL } from "../spawn/backends.js";
+import { claudeCodeBackend, codexBackend, PATCH_SENTINEL } from "../spawn/backends.js";
 
 /** Encode a patch the way the in-container wrapper does: one sentinel line. */
 function sentinelLine(patch: string): string {
@@ -161,6 +162,35 @@ describe("spawn-handoff", () => {
     expect(prompt).toMatch(/5\. Verify the work is marked complete/);
     expect(prompt).toMatch(/`\[ \]` to `\[x\]`/);
     expect(prompt).toContain("dedup-blocks-re-dispatch");
+  });
+
+  it("validates selected backend auth without exposing secret values or paths", () => {
+    const oldAnthropic = process.env.ANTHROPIC_API_KEY;
+    const oldCodexHome = process.env.CODEX_HOME;
+    try {
+      process.env.ANTHROPIC_API_KEY = "";
+      expect(() => validateHatcherySpawnBackend(claudeCodeBackend)).toThrow(
+        /Backend "claude-code" requires ANTHROPIC_API_KEY: missing ANTHROPIC_API_KEY/,
+      );
+
+      const missingCodexHome = path.join(makeTmpDir(), "missing-codex-home");
+      process.env.CODEX_HOME = missingCodexHome;
+      expect(() => validateHatcherySpawnBackend(codexBackend)).toThrow(
+        /Backend "codex" requires Codex credential directory: missing Codex credential directory/,
+      );
+      try {
+        validateHatcherySpawnBackend(codexBackend);
+      } catch (err) {
+        const message = (err as Error).message;
+        expect(message).not.toContain(missingCodexHome);
+        expect(message).not.toContain("CODEX_HOME");
+      }
+    } finally {
+      if (oldAnthropic === undefined) delete process.env.ANTHROPIC_API_KEY;
+      else process.env.ANTHROPIC_API_KEY = oldAnthropic;
+      if (oldCodexHome === undefined) delete process.env.CODEX_HOME;
+      else process.env.CODEX_HOME = oldCodexHome;
+    }
   });
 
   it("writes handoff artifacts and tells the manager the patch is already applied", () => {

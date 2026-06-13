@@ -41,6 +41,7 @@ import { initMarch, InitError } from "../bootstrap/init.js";
 import { createBuildContext, SnapshotError } from "../spawn/snapshot.js";
 import {
   listBackends,
+  formatMissingBackendAuthError,
   getBackend,
   missingCredentialMounts,
   missingRequiredEnvVars,
@@ -1516,18 +1517,14 @@ program
       }
 
       const missingEnvVars = missingRequiredEnvVars(selectedBackend);
-      if (missingEnvVars.length > 0) {
-        process.stderr.write(
-          `Backend "${selectedBackend.name}" requires ${selectedBackend.requiredEnvVars.join(", ")}: missing ${missingEnvVars.join(", ")}. Set the variable(s) and re-run.\n`,
-        );
-        process.exitCode = USAGE_ERROR;
-        return;
-      }
-
       const missingMounts = missingCredentialMounts(selectedBackend);
-      if (missingMounts.length > 0) {
+      if (missingEnvVars.length > 0 || missingMounts.length > 0) {
         process.stderr.write(
-          `Backend "${selectedBackend.name}" requires readable credential directories: ${missingMounts.map((mount) => mount.hostPath).join(", ")}. Configure the credential path(s) and re-run.\n`,
+          formatMissingBackendAuthError(
+            selectedBackend,
+            missingEnvVars,
+            missingMounts,
+          ) + "\n",
         );
         process.exitCode = USAGE_ERROR;
         return;
