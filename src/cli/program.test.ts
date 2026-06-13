@@ -408,7 +408,7 @@ describe("march CLI", () => {
   });
 
   it("march quarantine park moves a test and records its origin without prompting", () => {
-    const repoRoot = makeTmpDir();
+    const repoRoot = makeRealRepo();
     const origin = "src/example/quarantine-me.test.ts";
     const body = [
       "/* @scope unit @determinism deterministic @channel ci */",
@@ -423,10 +423,12 @@ describe("march CLI", () => {
     fs.mkdirSync(path.join(repoRoot, "src/example"), { recursive: true });
     fs.writeFileSync(path.join(repoRoot, origin), body);
 
+    // Run from a nested subdirectory to prove repo-relative paths resolve
+    // from the git repository root, not the caller's working directory.
     const result = runWithEnv(
       ["quarantine", "park", origin],
-      { ...process.env },
-      { cwd: repoRoot },
+      {},
+      { cwd: path.join(repoRoot, "src/example") },
     );
 
     const quarantinedPath = path.join(

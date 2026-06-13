@@ -103,7 +103,20 @@ export function parkQuarantinedTest(inputPath: string, options?: {
   fs.renameSync(sourcePath, targetPath);
 
   manifest[quarantinedPath] = originPath;
-  writeManifest(repoRoot, manifest);
+  try {
+    writeManifest(repoRoot, manifest);
+  } catch (err) {
+    // Roll back the move so a manifest-write failure does not leave the repo
+    // in a partially-parked state (file relocated, origin unrecorded).
+    try {
+      fs.renameSync(targetPath, sourcePath);
+    } catch {
+      // best-effort rollback
+    }
+    throw new QuarantineError(
+      `Could not record the parked origin in ${QUARANTINE_ORIGINS_FILE}: ${(err as Error).message}`,
+    );
+  }
 
   return { originPath, quarantinedPath };
 }

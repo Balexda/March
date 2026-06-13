@@ -251,8 +251,37 @@ quarantine
   .description("Move a repo-relative *.test.ts file under tests/quarantine/")
   .action((testPath: string) => {
     commandHandled = true;
+    if (!isOnPath("git")) {
+      process.stderr.write(
+        "git not found on PATH — required to detect the repository root.\n",
+      );
+      process.exitCode = ERROR;
+      return;
+    }
+    let repoRoot: string;
     try {
-      const result = parkQuarantinedTest(testPath);
+      repoRoot = execFileSync("git", ["rev-parse", "--show-toplevel"], {
+        encoding: "utf-8",
+        stdio: ["ignore", "pipe", "pipe"],
+      }).trim();
+    } catch (err) {
+      const stderr = ((err as { stderr?: Buffer | string }).stderr ?? "")
+        .toString()
+        .trim();
+      if (stderr.includes("not a git repository")) {
+        process.stderr.write(
+          "Run `march quarantine park` from inside a git repository.\n",
+        );
+      } else {
+        process.stderr.write(
+          `Failed to detect the repository root: ${stderr || (err as Error).message}\n`,
+        );
+      }
+      process.exitCode = ERROR;
+      return;
+    }
+    try {
+      const result = parkQuarantinedTest(testPath, { repoRoot });
       console.log(
         `Parked ${result.originPath} at ${result.quarantinedPath}.`,
       );

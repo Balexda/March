@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -9,11 +9,26 @@ import {
   QuarantineError,
 } from "./quarantine.js";
 
-function makeRepo(): string {
-  return fs.mkdtempSync(path.join(os.tmpdir(), "march-quarantine-test-"));
-}
-
 describe("quarantine routing", () => {
+  const tmpDirs: string[] = [];
+
+  function makeRepo(): string {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "march-quarantine-test-"));
+    tmpDirs.push(dir);
+    return dir;
+  }
+
+  afterEach(() => {
+    for (const dir of tmpDirs) {
+      try {
+        fs.rmSync(dir, { recursive: true, force: true });
+      } catch {
+        // best-effort cleanup
+      }
+    }
+    tmpDirs.length = 0;
+  });
+
   it("parks a test under tests/quarantine while preserving the file body", () => {
     const repoRoot = makeRepo();
     const origin = "src/example/foo.test.ts";
@@ -67,5 +82,22 @@ describe("quarantine routing", () => {
       .toThrow(QuarantineError);
     expect(() => parkQuarantinedTest(quarantined, { repoRoot }))
       .toThrow(QuarantineError);
+  });
+
+  it("rolls the move back when the origin manifest cannot be written", () => {
+    const repoRoot = makeRepo();
+    const origin = "src/example/qux.test.ts";
+    const body = "import \"vitest\";\n";
+    fs.mkdirSync(path.join(repoRoot, "src/example"), { recursive: true });
+    fs.writeFileSync(path.join(repoRoot, origin), body);
+    // Force the manifest write to fail: occupy its path with a directory so
+    // writeFileSync throws EISDIR after the file has already been moved.
+    fs.mkdirSync(path.join(repoRoot, QUARANTINE_ORIGINS_FILE), { recursive: true });
+
+    expect(() => parkQuarantinedTest(origin, { repoRoot })).toThrow(QuarantineError);
+    // The move is rolled back: the test is back at its origin, not stranded
+    // under quarantine with no recorded origin.
+    expect(fs.readFileSync(path.join(repoRoot, origin), "utf-8")).toBe(body);
+    expect(fs.existsSync(path.join(repoRoot, QUARANTINE_DIR, origin))).toBe(false);
   });
 });
