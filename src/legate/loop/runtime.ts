@@ -258,6 +258,29 @@ function emitTransition(profile: string, event: any) {
     .catch(() => {});
 }
 
+// Cull the steward a failed spawn orphaned in Castra (see
+// DispatchIoDeps.cullStewardForSlice). Matches by the sliceId stamped into session
+// metadata at launch (#214) — robust to the feature/-prefix the actual git branch
+// carries — and falls back to a prefix-normalized branch compare for legacy
+// sessions without metadata. Removes the session (pruning its worktree), so the
+// orphan a launch-timeout/crash left behind doesn't leak or hold a budget slot.
+async function cullStewardForSlice(
+  profile: string,
+  sliceId: string,
+  branch: string | undefined,
+): Promise<{ culled: boolean; sessionId?: string }> {
+  const sessions = await castra().listSessions(profile);
+  const want = (branch ?? "").replace(/^feature\//, "");
+  const match = sessions.find(
+    (s) =>
+      (s.metadata?.sliceId !== undefined && s.metadata.sliceId === sliceId) ||
+      (want.length > 0 && (s.branch ?? "").replace(/^feature\//, "") === want),
+  );
+  if (!match) return { culled: false };
+  await castra().removeSession({ profile, sessionId: match.sessionId, pruneWorktree: true });
+  return { culled: true, sessionId: match.sessionId };
+}
+
 // Build the dispatch I/O seam (handlers/dispatch-io.ts) for one profile.
 function dispatchIoDeps(meta: any): DispatchIoDeps {
   const hatcheryUrl = resolveHatcheryUrl(env);
@@ -268,6 +291,8 @@ function dispatchIoDeps(meta: any): DispatchIoDeps {
     log: (line: string) => appendText(meta.processor_log_path, line),
     postSpawn: (request: any) => postSpawn(hatcheryUrl, request),
     getJob: (jobId: string) => getJob(hatcheryUrl, jobId),
+    cullStewardForSlice: (sliceId: string, branch: string | undefined) =>
+      cullStewardForSlice(meta.profile, sliceId, branch),
   };
 }
 

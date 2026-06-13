@@ -80,6 +80,32 @@ describe("launchDispatch", () => {
     expect(out.notifications[0]).toMatchObject({ sliceId: "s", reason: "hatchery_dispatch_failed" });
     expect(out.notifications[0].detail).toContain("operator-only");
   });
+
+  it("culls the orphaned steward on a launch-throw escalation", async () => {
+    const state: any = { slices: {} };
+    const cullStewardForSlice = vi.fn(async () => ({ culled: true, sessionId: "sess-9" }));
+    const out = await launchDispatch(state, "T", item(), "s", deps({
+      cullStewardForSlice,
+      postSpawn: vi.fn(async () => { throw new Error("hatchery 500"); }),
+    }));
+    expect(cullStewardForSlice).toHaveBeenCalledWith("s", expect.any(String));
+    expect(out.actions).toContainEqual(
+      expect.objectContaining({ action: "steward-cull", sliceId: "s", sessionId: "sess-9" }),
+    );
+  });
+
+  it("swallows a cull failure — the escalation still records", async () => {
+    const state: any = { slices: {} };
+    const log = vi.fn();
+    const out = await launchDispatch(state, "T", item(), "s", deps({
+      log,
+      cullStewardForSlice: vi.fn(async () => { throw new Error("castra unreachable"); }),
+      postSpawn: vi.fn(async () => { throw new Error("hatchery 500"); }),
+    }));
+    expect(state.slices.s.stage).toBe("escalated");
+    expect(out.actions.some((a: any) => a.action === "steward-cull")).toBe(false);
+    expect(log).toHaveBeenCalledWith(expect.stringContaining("steward cull failed for s"));
+  });
 });
 
 describe("completePendingHatcheryDispatches", () => {
@@ -176,6 +202,20 @@ describe("completePendingHatcheryDispatches", () => {
     expect(state.slices.s.stage).toBe("escalated");
     expect(out.notifications[0]).toMatchObject({ sliceId: "s", reason: "hatchery_dispatch_failed" });
     expect(out.notifications[0].detail).toContain("operator-only");
+  });
+
+  it("culls the orphaned steward when a failed job escalates the slice", async () => {
+    const state: any = { slices: { s: { ...pending(), branch: "smithy/forge/a" } } };
+    const cullStewardForSlice = vi.fn(async () => ({ culled: true, sessionId: "sess-orphan" }));
+    const out = await completePendingHatcheryDispatches(state, "T", deps({
+      getJob: vi.fn(async () => ({ status: "failed", error: { message: "Castra session launch failed: timeout" } })),
+      cullStewardForSlice,
+    }));
+    expect(state.slices.s.stage).toBe("escalated");
+    expect(cullStewardForSlice).toHaveBeenCalledWith("s", "smithy/forge/a");
+    expect(out.actions).toContainEqual(
+      expect.objectContaining({ action: "steward-cull", sliceId: "s", sessionId: "sess-orphan" }),
+    );
   });
 
   it("escalates on a non-transient getJob lookup failure (e.g. 404), holding the ping within budget", async () => {
