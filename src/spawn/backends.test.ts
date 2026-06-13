@@ -47,6 +47,7 @@ describe("spawn backends", () => {
 
   it("defaults to Claude Code for backward-compatible dispatch", () => {
     expect(defaultBackendName).toBe("claude-code");
+    expect(getBackend("claude-code")).toBe(claudeCodeBackend);
     expect(resolveBackendSelection({}).backend).toBe(claudeCodeBackend);
   });
 
@@ -75,6 +76,7 @@ describe("spawn backends", () => {
   });
 
   it("defines the Claude Code backend", () => {
+    expect(claudeCodeBackend.name).toBe("claude-code");
     expect(claudeCodeBackend.baseImage).toBe("march-spawn-claude:latest");
     expect(claudeCodeBackend.requiredEnvVars).toEqual(["ANTHROPIC_API_KEY"]);
     expect(claudeCodeBackend.credentialMounts).toEqual([]);

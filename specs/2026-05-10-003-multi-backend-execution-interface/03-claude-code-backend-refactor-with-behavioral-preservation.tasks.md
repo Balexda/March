@@ -17,7 +17,7 @@
 
 ### Tasks
 
-- [ ] **Define the Claude Code backend**
+- [x] **Define the Claude Code backend**
 
   Update the spawn backend module (`src/spawn/backends.ts`, or the US2-created backend module if it still has the older path) with a `claudeCodeBackend` that satisfies the live `SpawnBackend` contract. Preserve the existing Claude image tag, auth env var, registry name, and entrypoint argv from the F2 dispatch path, and keep credential-mount auth empty if the live five-member interface from the divergence note is present.
 
@@ -28,7 +28,7 @@
   - `claudeCodeBackend.buildEntrypoint("/march/prompt.txt")` returns the same argv the existing Claude launch path used for AS 3.1.
   - If `SpawnBackend` includes `credentialMounts`, the Claude backend declares an empty readonly list so env-var auth remains the only Claude auth path.
 
-- [ ] **Register Claude as the default backend**
+- [x] **Register Claude as the default backend**
 
   Wire `claudeCodeBackend` into the backend registry surface from US2 so registry lookup returns it by name and default selection resolves to Claude Code. Keep this registration static; do not introduce plugin loading, dependency injection, or runtime backend mutation.
 
@@ -39,7 +39,7 @@
   - Unknown backend lookup behavior remains unchanged from US2.
   - No dispatch pipeline stage is migrated to consume the selected backend in this slice; US5 owns image/env/entrypoint derivation at call sites.
 
-- [ ] **Preserve F2 behavior with regression tests**
+- [x] **Preserve F2 behavior with regression tests**
 
   Extend backend and launch-adjacent unit tests to prove the extracted Claude backend is behaviorally identical to the F2 hardcoded path. Tests should compare observable values and argv composition, not private helper names, so they remain valid whether the old helper is removed or kept during the refactor.
 
