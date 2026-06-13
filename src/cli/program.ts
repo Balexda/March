@@ -66,6 +66,7 @@ import {
 } from "../brood/spawn-record.js";
 import { updateMarch, UpdateError } from "../bootstrap/update.js";
 import { CLI_VERSION } from "../shared/version.js";
+import { parkQuarantinedTest, QuarantineError } from "../testing/quarantine.js";
 import { startDispatchSpan } from "../observability/spawn-trace.js";
 import { recordSpawnRun } from "../observability/spawn-metrics.js";
 import { buildSpawnOtelContext } from "../observability/in-spawn-emitter.js";
@@ -239,6 +240,31 @@ program
     commandHandled = true;
     console.log(CLI_VERSION);
     process.exitCode = SUCCESS;
+  });
+
+const quarantine = program
+  .command("quarantine")
+  .description("Route failing tests into the repository quarantine area");
+
+quarantine
+  .command("park <testPath>")
+  .description("Move a repo-relative *.test.ts file under tests/quarantine/")
+  .action((testPath: string) => {
+    commandHandled = true;
+    try {
+      const result = parkQuarantinedTest(testPath);
+      console.log(
+        `Parked ${result.originPath} at ${result.quarantinedPath}.`,
+      );
+      process.exitCode = SUCCESS;
+    } catch (err) {
+      if (err instanceof QuarantineError) {
+        process.stderr.write(err.message + "\n");
+        process.exitCode = ERROR;
+        return;
+      }
+      throw err;
+    }
   });
 
 program
