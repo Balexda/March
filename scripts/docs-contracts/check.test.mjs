@@ -54,13 +54,13 @@ describe("docs contract checker", () => {
         {
           category: "presence",
           status: "pass",
-          checkedCount: 7,
+          checkedCount: REQUIRED_CONTRACTS.length,
           diagnostics: [],
         },
         {
           category: "section-schema",
           status: "pass",
-          checkedCount: 7,
+          checkedCount: REQUIRED_CONTRACTS.length,
           diagnostics: [],
         },
       ]);

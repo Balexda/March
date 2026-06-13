@@ -97,18 +97,24 @@ export function findH2Headings(markdown) {
   const headings = [];
   let inFence = false;
   let fenceMarker = "";
+  let fenceLength = 0;
 
   const lines = markdown.split(/\r?\n/);
   for (const line of lines) {
     const fenceMatch = /^( {0,3})(`{3,}|~{3,})/.exec(line);
     if (fenceMatch) {
-      const marker = fenceMatch[2][0];
+      const fence = fenceMatch[2];
+      const marker = fence[0];
       if (!inFence) {
         inFence = true;
         fenceMarker = marker;
-      } else if (marker === fenceMarker) {
+        fenceLength = fence.length;
+      } else if (marker === fenceMarker && fence.length >= fenceLength) {
+        // CommonMark: a closing fence must use the same character and be at
+        // least as long as the opening fence.
         inFence = false;
         fenceMarker = "";
+        fenceLength = 0;
       }
       continue;
     }
