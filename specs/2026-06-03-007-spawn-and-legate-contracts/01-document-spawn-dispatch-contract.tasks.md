@@ -18,7 +18,7 @@
 
 ### Tasks
 
-- [ ] **Author the Spawn public interface contract**
+- [x] **Author the Spawn public interface contract**
 
   Create `docs/subsystems/spawn/contract.md` with the required contract section shape and a Spawn-owned `## Public Interface` section. Document the operator and Hatchery dispatch inputs, metadata, exported dispatch/execution entrypoint surface, and output handoff boundary as human-authored prose while leaving generated extraction content empty.
 
@@ -31,7 +31,7 @@
   - Hatchery, Brood, Castra, and Steward are referenced only as integration boundaries; their route, lifecycle authority, session-hosting, and role-interface contracts are not re-authored.
   - No Legate contract, Steward role contract, contract checker, freshness mapping, AUTOGEN generator, CI enforcement, or runtime behavior change is introduced.
 
-- [ ] **Document Spawn lifecycle and handoff invariants**
+- [x] **Document Spawn lifecycle and handoff invariants**
 
   Fill `## Invariants` with assertable lifecycle, output, validation, handoff, trace, and cleanup promises owned by Spawn. The contract should support L2 tests that assert the boundary without reverse-engineering CLI control flow, Hatchery handoff, or legacy flat-file artifacts.
 
@@ -44,7 +44,7 @@
   - Validated handoff eligibility is documented without describing Feature 4's Steward-specific role interface.
   - Trace and correlation prose aligns with slice identity without introducing new metrics, spans, or runtime instrumentation.
 
-- [ ] **Document Spawn observable error modes**
+- [x] **Document Spawn observable error modes**
 
   Fill `## Error Modes` with externally visible failure behavior for dependency, launch, runtime, timeout, output, validation, handoff, and cleanup failures. Keep the error contract focused on diagnostics and clean terminal outcomes rather than interactive recovery.
 
