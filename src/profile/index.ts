@@ -152,7 +152,25 @@ export function validateProfile(input: unknown): ValidationResult {
 }
 
 function validateName(value: unknown, errors: ValidationError[]): void {
-  if (typeof value !== "string" || !PROFILE_NAME_PATTERN.test(value)) {
+  if (value === undefined) {
+    errors.push({
+      code: "MissingField",
+      path: "/name",
+      message: "Profile name is required.",
+    });
+    return;
+  }
+
+  if (typeof value !== "string") {
+    errors.push({
+      code: "WrongType",
+      path: "/name",
+      message: "Profile name must be a string.",
+    });
+    return;
+  }
+
+  if (!PROFILE_NAME_PATTERN.test(value)) {
     errors.push({
       code: "InvalidName",
       path: "/name",
@@ -163,6 +181,15 @@ function validateName(value: unknown, errors: ValidationError[]): void {
 }
 
 function validateBaseImage(value: unknown, errors: ValidationError[]): void {
+  if (value === undefined) {
+    errors.push({
+      code: "MissingField",
+      path: "/baseImage",
+      message: "Profile baseImage is required.",
+    });
+    return;
+  }
+
   if (typeof value !== "string") {
     errors.push({
       code: "WrongType",

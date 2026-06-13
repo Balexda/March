@@ -151,6 +151,67 @@ describe("validateProfile", () => {
     },
   );
 
+  it("returns MissingField for an omitted name", () => {
+    expect(
+      validateProfile({ version: 1, baseImage: "march-base:latest" }),
+    ).toEqual({
+      ok: false,
+      errors: [
+        {
+          code: "MissingField",
+          path: "/name",
+          message: "Profile name is required.",
+        },
+      ],
+    });
+  });
+
+  it.each([null, 42])(
+    "returns WrongType at /name for non-string name %#",
+    (name) => {
+      expect(
+        validateProfile({ version: 1, name, baseImage: "march-base:latest" }),
+      ).toEqual({
+        ok: false,
+        errors: [
+          {
+            code: "WrongType",
+            path: "/name",
+            message: "Profile name must be a string.",
+          },
+        ],
+      });
+    },
+  );
+
+  it("returns MissingField for an omitted baseImage", () => {
+    expect(validateProfile({ version: 1, name: "spawn" })).toEqual({
+      ok: false,
+      errors: [
+        {
+          code: "MissingField",
+          path: "/baseImage",
+          message: "Profile baseImage is required.",
+        },
+      ],
+    });
+  });
+
+  it("returns WrongType at /baseImage for a present non-string baseImage", () => {
+    expect(
+      validateProfile({ version: 1, name: "spawn", baseImage: null }),
+    ).toEqual({
+      ok: false,
+      errors: [
+        {
+          code: "WrongType",
+          path: "/baseImage",
+          message: "Profile baseImage must be a string.",
+        },
+      ],
+    });
+  });
+
   it("accepts digest-pinned image references", () => {
     expect(
       validateProfile({
