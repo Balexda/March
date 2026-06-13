@@ -117,19 +117,33 @@ export function blockingMergedArchive(state: any, item: any, sliceId: string): a
 }
 
 /**
- * The number of LIVE spawns in a profile's working state — the slices still
- * occupying the dispatch pipeline (hatchery-pending / implementing / pr-open /
- * pr-in-fix / pr-resolving-conflicts): every slice that is NOT {@link
- * isTerminalSlice terminal} (merged / closed / escalated). This is exactly the
- * "still occupies a codex spawn + steward" set the loop already classifies with
- * `isTerminalSlice`; the global spawn cap (#313) budgets against the SUM of this
- * across all profiles. Escalated slices are terminal here (operator-only, worker
- * torn down) so they correctly do NOT consume a slot.
+ * The number of slices in a profile's working state that are actively consuming
+ * a worker resource — a running codex **spawn** (hatchery-pending / implementing)
+ * or an active **steward** session (pr-open with owed thread responses / failing
+ * checks / conflicts, pr-in-fix, pr-resolving-conflicts). The global spawn cap
+ * (#313) budgets against the SUM of this across all profiles, so it bounds how
+ * much heavy parallel work runs at once — NOT how many PRs are open.
+ *
+ * Excluded:
+ *  - {@link isTerminalSlice terminal} slices (merged / closed / escalated) — done
+ *    or operator-only, worker torn down.
+ *  - {@link isReadyToMerge waiting-to-merge} slices (pr-open, checks passing, no
+ *    conflicts, no threads owed) — the PR is parked awaiting a merge and runs no
+ *    spawn or active steward, so it must NOT hold a slot. This is what lets the
+ *    loop keep dispatching fresh work while merge-ready PRs pile up for review
+ *    (the overnight-throughput goal). A waiting-to-merge slice that reverts to
+ *    steward (new comment / conflict) counts again; because the cap only gates
+ *    FRESH dispatch and never preempts, the live set can briefly exceed the cap —
+ *    that just delays the next dispatch, it never kills running work.
  */
 export function liveSpawnCount(state: any): number {
   const slices = state?.slices && typeof state.slices === "object" ? state.slices : {};
   let live = 0;
-  for (const slice of Object.values(slices)) if (!isTerminalSlice(slice)) live++;
+  for (const slice of Object.values(slices)) {
+    if (isTerminalSlice(slice)) continue;
+    if (isReadyToMerge(slice)) continue;
+    live++;
+  }
   return live;
 }
 
@@ -326,6 +340,30 @@ export interface SliceStageSummary {
 }
 
 /**
+ * A `pr-open` slice whose PR has passing checks, is not CONFLICTING, and owes no
+ * thread responses — the dashboard's "waiting for merge" bucket. It runs no codex
+ * spawn and no active steward, so the spawn cap ({@link liveSpawnCount}) does NOT
+ * count it. This is the SAME gate babysit uses for its "all clear" merge decision
+ * and {@link summarizeSlicesByStage}'s `readyToMerge` tally, so the budget and the
+ * dashboard agree 1:1 — "waiting for merge" on the board is exactly the set that
+ * does not hold a budget slot.
+ *
+ * Thread debt must be an **explicit** `0` (from the flattened `needs_response_count`
+ * babysit writes, or the PR snapshot it was derived from): after a cold start
+ * `rebuildWorkingState` restores `slice.pr` but not the flattened counter, so a
+ * missing value is "unknown debt" → treated as still-active (it counts), never
+ * silently released.
+ */
+export function isReadyToMerge(slice: any): boolean {
+  if (!slice || typeof slice !== "object") return false;
+  if (slice.stage !== "pr-open") return false;
+  if (slice.pr?.checks !== "PASS") return false;
+  if (slice.pr?.mergeable === "CONFLICTING") return false;
+  const owed = slice.needs_response_count ?? slice.pr?.needs_response_count;
+  return owed === 0;
+}
+
+/**
  * Tally the loop's working slices by lifecycle `stage` and derive how many are
  * ready to merge (#220). Pure: reads only the in-memory working `slices` record
  * (after the tick's handlers have run, so stages/PR snapshots are current).
@@ -353,12 +391,7 @@ export function summarizeSlicesByStage(slices: Record<string, any> | undefined):
     const raw = typeof slice.stage === "string" ? slice.stage : "";
     const stage = STAGE_ALLOWLIST.has(raw) ? raw : OTHER_STAGE;
     byStage[stage] = (byStage[stage] ?? 0) + 1;
-    if (stage === "pr-open" && slice.pr?.checks === "PASS" && slice.pr?.mergeable !== "CONFLICTING") {
-      // Require an explicit 0 — undefined (e.g. post-cold-start, before babysit
-      // re-derives it) is "unknown thread debt", not "no threads owed".
-      const owed = slice.needs_response_count ?? slice.pr?.needs_response_count;
-      if (owed === 0) readyToMerge++;
-    }
+    if (isReadyToMerge(slice)) readyToMerge++;
   }
   return { byStage, readyToMerge };
 }
