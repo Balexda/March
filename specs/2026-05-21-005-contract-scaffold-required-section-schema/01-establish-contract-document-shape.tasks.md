@@ -44,7 +44,7 @@
 
 ## Specification Debt
 
-None - all ambiguities resolved.
+None — all ambiguities resolved.
 
 ---
 
@@ -54,7 +54,7 @@ Recommended implementation sequence:
 
 | ID | Title | Depends On | Artifact |
 |----|-------|------------|----------|
-| S1 | Canonical Contract Scaffold Shape | - | `docs/subsystems/contract-scaffold.md` |
+| S1 | Canonical Contract Scaffold Shape | — | — |
 
 ### Cross-Story Dependencies
 
