@@ -61,7 +61,7 @@
 ## Specification Debt
 <!-- audience: reviewer; mode: reference; length: tables only; diagram: optional; examples: discouraged -->
 
-None - all inherited spec debt is resolved upstream.
+None — all ambiguities resolved.
 
 ---
 
@@ -72,7 +72,7 @@ Recommended implementation sequence:
 
 | ID | Title | Depends On | Artifact |
 |----|-------|------------|----------|
-| S1 | Extract Public TypeScript Declarations | - | - |
+| S1 | Extract Public TypeScript Declarations | — | — |
 
 ### Cross-Story Dependencies
 
