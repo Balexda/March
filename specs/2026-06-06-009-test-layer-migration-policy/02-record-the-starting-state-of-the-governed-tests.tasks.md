@@ -18,7 +18,7 @@
 
 ### Tasks
 
-- [ ] **Record the governed test starting state**
+- [x] **Record the governed test starting state**
 
   Update `CONTRIBUTING.md`'s Test Layer Migration policy content so it records the governed set and corrected starting state for AS 2.1-2.3. Keep the change documentation-only and avoid altering runtime code, staged scripts, tag taxonomy, quarantine routing, or port mechanics.
 
