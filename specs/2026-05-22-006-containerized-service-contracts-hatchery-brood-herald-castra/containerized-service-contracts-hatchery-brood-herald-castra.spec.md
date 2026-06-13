@@ -100,7 +100,7 @@ Recommended implementation sequence:
 
 | ID | Title | Depends On | Artifact |
 |----|-------|-----------|----------|
-| US1 | Document Hatchery HTTP Contract | — | — |
+| US1 | Document Hatchery HTTP Contract | — | specs/2026-05-22-006-containerized-service-contracts-hatchery-brood-herald-castra/01-document-hatchery-http-contract.tasks.md |
 | US3 | Document Herald HTTP Contract and Event Log Semantics | — | — |
 | US4 | Document Castra HTTP Contract | — | — |
 | US2 | Document Brood HTTP Contract and Teardown Invariants | US4 | — |
