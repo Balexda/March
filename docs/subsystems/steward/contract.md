@@ -33,16 +33,16 @@ The target worktree, target branch, spawn id, and slice id remain correlated for
 
 ### Castra Client Surface
 
-`src/hatchery/spawn-handoff.ts` consumes the Castra client in `src/castra/client.ts` for Steward handoff through these methods:
+`src/hatchery/spawn-handoff.ts` drives the Steward handoff through the Castra client in `src/castra/client.ts`, consuming the `launch`, `send`, and `remove` methods. The `output` method is the bounded read used by the observation path (`src/observe/sense-io.ts`) rather than by the handoff itself; it is named here because reading a launched Steward session's output is part of the same Castra client surface:
 
-| Consumer verb | Client method | Steward use |
-|---------------|---------------|-------------|
-| `launch` | `launchSession` | Starts the Castra-hosted manager session for the target worktree, branch, profile/session metadata, and slice/spawn correlation. |
-| `send` | `sendPrompt` | Sends the Steward role prompt context to the launched session. |
-| `output` | `sessionOutput` | Reads bounded session output for diagnostics or handoff observation. |
-| `remove` | `removeSession` | Removes the hosted interactive session when the handoff boundary needs teardown. |
+| Consumer verb | Client method | Consumer | Steward use |
+|---------------|---------------|----------|-------------|
+| `launch` | `launchSession` | `spawn-handoff.ts` | Starts the Castra-hosted manager session for the target worktree, branch, profile/session metadata, and slice/spawn correlation. |
+| `send` | `sendPrompt` | `spawn-handoff.ts` | Sends the Steward role prompt context to the launched session. |
+| `output` | `sessionOutput` | `observe/sense-io.ts` | Reads bounded session output for diagnostics or handoff observation. |
+| `remove` | `removeSession` | `spawn-handoff.ts` | Removes the hosted interactive session when the handoff boundary needs teardown. |
 
-This contract does not duplicate Castra's server routes or response bodies. Castra owns those `/v1/sessions*` wire shapes; Steward only depends on the client methods above being the consumer surface used by Hatchery's handoff path.
+This contract does not duplicate Castra's server routes or response bodies. Castra owns those `/v1/sessions*` wire shapes; Steward only depends on the client methods above being the consumer surface for the launch handoff and bounded output observation.
 
 ## Invariants
 
