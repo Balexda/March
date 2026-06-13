@@ -3,6 +3,7 @@ import Fastify, {
   type FastifyBaseLogger,
   type FastifyInstance,
 } from "fastify";
+import { emitStatioRequestSpan } from "../observability/statio-trace.js";
 import { CLI_VERSION } from "../shared/version.js";
 import { STATIO_SERVICE_NAME } from "./config.js";
 import { createGhRepoMetadataReader, type RepoMetadataReader } from "./forge.js";
@@ -39,6 +40,22 @@ export function buildStatioServer(options: BuildStatioServerOptions = {}): Fasti
     typeof loggerOption === "boolean"
       ? Fastify({ logger: loggerOption })
       : Fastify({ loggerInstance: loggerOption });
+
+  app.addHook("onResponse", async (request, reply) => {
+    const slice = request.headers["x-march-slice-id"];
+    const sliceId = Array.isArray(slice) ? slice[0] : slice;
+    // Fastify tracks request duration on a monotonic clock; backdate the span
+    // start from it rather than recording our own wall-clock timestamp.
+    const endTimeMs = Date.now();
+    emitStatioRequestSpan({
+      method: request.method,
+      route: request.routeOptions.url ?? "unmatched",
+      statusCode: reply.statusCode,
+      sliceId,
+      startTimeMs: endTimeMs - reply.elapsedTime,
+      endTimeMs,
+    });
+  });
 
   app.addHook("onRequest", async (request, reply) => {
     if (!token) return;
