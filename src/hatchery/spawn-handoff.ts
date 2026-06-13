@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
+  formatMissingBackendAuthError,
   missingCredentialMounts,
   missingRequiredEnvVars,
   PATCH_SENTINEL,
@@ -702,16 +703,10 @@ function runGitApply(args: readonly string[], cwd: string): void {
 
 export function validateHatcherySpawnBackend(backend: SpawnBackend): void {
   const missingEnvVars = missingRequiredEnvVars(backend);
-  if (missingEnvVars.length > 0) {
-    throw new HatcherySpawnError(
-      `Backend "${backend.name}" requires ${backend.requiredEnvVars.join(", ")}: missing ${missingEnvVars.join(", ")}. Set the variable(s) and re-run.`,
-    );
-  }
-
   const missingMounts = missingCredentialMounts(backend);
-  if (missingMounts.length > 0) {
+  if (missingEnvVars.length > 0 || missingMounts.length > 0) {
     throw new HatcherySpawnError(
-      `Backend "${backend.name}" requires readable credential directories: ${missingMounts.map((mount) => mount.hostPath).join(", ")}. Configure the credential path(s) and re-run.`,
+      formatMissingBackendAuthError(backend, missingEnvVars, missingMounts),
     );
   }
 }

@@ -610,6 +610,71 @@ describe("march CLI", () => {
     expect(codexInvocations).not.toContain("march-spawn-claude:latest");
   });
 
+  it("spawn dispatch: missing selected-backend env vars exit 2 after dependency validation and before artifacts", () => {
+    const repoRoot = makeRealRepo();
+    const home = makeTmpDir();
+    const dockerLog = path.join(home, "docker-invocations.log");
+    const dockerStubDir = makeDockerStubBinDir(dockerLog);
+    const nodeBinDir = path.dirname(process.execPath);
+    const secretPrefix = "sk-ant-secret-prefix";
+    const result = runWithEnv(
+      ["spawn", "dispatch", "--backend", "claude-code"],
+      {
+        PATH: [nodeBinDir, dockerStubDir, process.env.PATH ?? ""].join(
+          path.delimiter,
+        ),
+        HOME: home,
+        ANTHROPIC_API_KEY: "",
+        UNUSED_SECRET: secretPrefix,
+      },
+      { cwd: repoRoot },
+    );
+
+    expect(result.exitCode).toBe(2);
+    expect(result.stderr).toContain(
+      'Backend "claude-code" requires ANTHROPIC_API_KEY: missing ANTHROPIC_API_KEY',
+    );
+    expect(result.stderr).not.toContain(secretPrefix);
+    const dockerInvocations = fs.readFileSync(dockerLog, "utf-8");
+    expect(dockerInvocations).toContain("image inspect march-spawn-claude:latest");
+    expect(dockerInvocations).not.toContain("create ");
+    const branches = execFileSync(
+      "git",
+      ["for-each-ref", "--format=%(refname:short)", "refs/heads/march/spawn/"],
+      { cwd: repoRoot, encoding: "utf-8" },
+    );
+    expect(branches.trim()).toBe("");
+    expect(fs.existsSync(path.join(home, ".march", "spawns"))).toBe(false);
+  });
+
+  it("spawn dispatch: present selected-backend env vars pass auth pre-flight silently", () => {
+    const repoRoot = makeRealRepo();
+    const home = makeTmpDir();
+    const dockerLog = path.join(home, "docker-invocations.log");
+    const dockerStubDir = makeDockerStubBinDir(dockerLog);
+    const nodeBinDir = path.dirname(process.execPath);
+    const result = runWithEnv(
+      ["spawn", "dispatch", "--backend", "claude-code"],
+      {
+        PATH: [nodeBinDir, dockerStubDir, process.env.PATH ?? ""].join(
+          path.delimiter,
+        ),
+        HOME: home,
+        ANTHROPIC_API_KEY: "test-key",
+      },
+      { cwd: repoRoot },
+    );
+
+    expect(result.exitCode).toBe(2);
+    expect(result.stderr).toContain(
+      "march spawn dispatch requires --prompt <prompt>",
+    );
+    expect(result.stderr).not.toContain("requires ANTHROPIC_API_KEY");
+    const dockerInvocations = fs.readFileSync(dockerLog, "utf-8");
+    expect(dockerInvocations).toContain("image inspect march-spawn-claude:latest");
+    expect(dockerInvocations).not.toContain("create ");
+  });
+
   // --- spawn dispatch worktree + initial SpawnRecord (Story 3) ---
 
   /**
@@ -865,9 +930,10 @@ describe("march CLI", () => {
 
     expect(result.exitCode).toBe(2);
     expect(result.stderr).toContain(
-      'Backend "codex" requires readable credential directories',
+      'Backend "codex" requires Codex credential directory: missing Codex credential directory',
     );
-    expect(result.stderr).toContain(missingCodexHome);
+    expect(result.stderr).not.toContain(missingCodexHome);
+    expect(result.stderr).not.toContain("CODEX_HOME");
     const branches = execFileSync(
       "git",
       ["for-each-ref", "--format=%(refname:short)", "refs/heads/march/spawn/"],
