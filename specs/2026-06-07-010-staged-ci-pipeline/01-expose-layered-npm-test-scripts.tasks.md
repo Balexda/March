@@ -18,7 +18,7 @@
 
 ### Tasks
 
-- [ ] **Add the staged npm scripts**
+- [x] **Add the staged npm scripts**
 
   Add `test:l0`, `test:l1`, `test:l2-cassette`, and `test:l3-cassette` to `package.json`, with implementation owned by the existing test-command surface rather than ad hoc direct tool usage. Each script must map to exactly one Layered Test Script scope from the data model and satisfy AS 1.1-AS 1.4.
 
@@ -31,7 +31,7 @@
   - Each staged script remains reachable through `npm run`.
   - Staged scripts do not require live services, network calls, paid calls, or cassette refresh.
 
-- [ ] **Cover the staged command contract**
+- [x] **Cover the staged command contract**
 
   Add focused tests around the staged command surface in the package-script or selector module that owns the behavior. The tests should verify the Layered Test Script contract for AS 1.1-AS 1.4 without prescribing CI workflow behavior from User Story 3.
 
