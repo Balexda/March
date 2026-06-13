@@ -32,11 +32,13 @@ export interface StartDispatchSpanInput {
  */
 export interface DispatchSpanHandle {
   setAttributes(attributes: Attributes): void;
+  setError(message?: string): void;
   spanContext(): { traceId: string; spanId: string } | undefined;
 }
 
 const NOOP_SPAN_HANDLE: DispatchSpanHandle = {
   setAttributes: () => {},
+  setError: () => {},
   spanContext: () => undefined,
 };
 
@@ -44,6 +46,8 @@ const NOOP_SPAN_HANDLE: DispatchSpanHandle = {
 function childHandle(child: Span): DispatchSpanHandle {
   return {
     setAttributes: (attributes) => child.setAttributes(attributes),
+    setError: (message) =>
+      child.setStatus({ code: SpanStatusCode.ERROR, message }),
     spanContext: () => {
       const sc = child.spanContext();
       return { traceId: sc.traceId, spanId: sc.spanId };

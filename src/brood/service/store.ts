@@ -50,6 +50,7 @@ const COLUMNS = [
   "profile",
   "ad_group",
   "backend",
+  "extraction_result_json",
   "image_id",
   "exit_code",
   "failure_reason",
@@ -74,6 +75,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   profile              TEXT,
   ad_group             TEXT,
   backend              TEXT,
+  extraction_result_json TEXT,
   image_id             TEXT,
   exit_code            INTEGER,
   failure_reason       TEXT,
@@ -149,6 +151,9 @@ function rowToRecord(row: SqliteRow): SessionRecord {
     }
   }
   if (row.exit_code != null) record.exitCode = row.exit_code as number;
+  if (typeof row.extraction_result_json === "string") {
+    record.extractionResult = JSON.parse(row.extraction_result_json);
+  }
   return record;
 }
 
@@ -166,6 +171,7 @@ function recordToValues(record: SessionRecord): Array<string | number | null> {
     record.profile ?? null,
     record.group ?? null,
     record.backend ?? null,
+    record.extractionResult ? JSON.stringify(record.extractionResult) : null,
     record.imageId ?? null,
     record.exitCode ?? null,
     record.failureReason ?? null,
@@ -208,6 +214,12 @@ export class SessionStore implements SessionRepository {
 
   private migrate(): void {
     this.db.exec(CREATE_TABLE_SQL);
+    const columns = this.db
+      .prepare("PRAGMA table_info(sessions)")
+      .all() as Array<{ name: string }>;
+    if (!columns.some((column) => column.name === "extraction_result_json")) {
+      this.db.exec("ALTER TABLE sessions ADD COLUMN extraction_result_json TEXT;");
+    }
     const row = this.db
       .prepare("SELECT version FROM schema_meta LIMIT 1")
       .get() as { version?: number } | undefined;

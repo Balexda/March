@@ -129,6 +129,9 @@ export function validateRegister(
   if (body.profile !== undefined) input.profile = body.profile;
   if (body.group !== undefined) input.group = body.group;
   if (body.backend !== undefined) input.backend = body.backend;
+  if (body.extractionResult !== undefined) {
+    input.extractionResult = body.extractionResult;
+  }
   if (body.imageId !== undefined) input.imageId = body.imageId;
   if (body.exitCode !== undefined) input.exitCode = body.exitCode;
   if (body.failureReason !== undefined) input.failureReason = body.failureReason;
@@ -147,6 +150,7 @@ const UPDATE_FIELDS: readonly (keyof UpdateSessionInput)[] = [
   "branch",
   "profile",
   "group",
+  "extractionResult",
   "startedAt",
   "stoppedAt",
   "torndownAt",

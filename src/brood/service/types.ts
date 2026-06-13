@@ -31,6 +31,34 @@ export type SessionStatus =
   | "tearing-down"
   | "torndown";
 
+export type ExtractionBackend = "claude-code" | "codex";
+
+export interface SpawnPatch {
+  spawnId: string;
+  backend: ExtractionBackend;
+  patchText: string;
+  touchedPaths: string[];
+  sha256: string;
+}
+
+export type ExtractionResult =
+  | {
+      spawnId: string;
+      backend: ExtractionBackend;
+      status: "succeeded";
+      patch: SpawnPatch;
+      diagnostic?: string;
+      extractedAt: string;
+    }
+  | {
+      spawnId: string;
+      backend: ExtractionBackend;
+      status: "failed";
+      failureReason: string;
+      diagnostic?: string;
+      extractedAt: string;
+    };
+
 /** A managed session as stored in the registry and surfaced over the API. */
 export interface SessionRecord {
   /** Spawn id, steward agent-deck session id, or legate conductor name. */
@@ -54,6 +82,8 @@ export interface SessionRecord {
   /** agent-deck group. */
   group?: string;
   backend?: string;
+  /** Current persisted Feature 5 extraction result, when extraction has completed. */
+  extractionResult?: ExtractionResult;
   imageId?: string;
   exitCode?: number;
   /** Human-readable failure context (closes the dropped-error gap in spawn-record). */
@@ -79,6 +109,7 @@ export interface RegisterSessionInput {
   profile?: string;
   group?: string;
   backend?: string;
+  extractionResult?: ExtractionResult;
   imageId?: string;
   exitCode?: number;
   failureReason?: string;
@@ -96,6 +127,7 @@ export interface UpdateSessionInput {
   branch?: string;
   profile?: string;
   group?: string;
+  extractionResult?: ExtractionResult;
   startedAt?: string;
   stoppedAt?: string;
   torndownAt?: string;
