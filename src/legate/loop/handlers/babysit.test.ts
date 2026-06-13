@@ -129,6 +129,53 @@ describe("babysit assess", () => {
     expect(kindsOf(assess(state))).toEqual(["pr-snapshot", "review-fix"]);
   });
 
+  it("sends comment-fix for an unacknowledged conversation (non-thread) comment", async () => {
+    const state = loopState({
+      slices: { s: { worker_session_id: "w", stage: "pr-open", pr: { number: 5 }, pr_open_at: T_30M_AGO } },
+      sessions: [session("w", "idle")],
+      perSlice: {
+        s: {
+          recentOutput: { output: "" },
+          pr: {
+            number: 5,
+            state: "OPEN",
+            mergeable: "MERGEABLE",
+            checks: "PASS",
+            unresolved_threads: [],
+            needs_response_count: 0,
+            conversation_comments: [{ id: 11, author: "rev", body_preview: "please reconsider the spec", reacted_eyes: false }],
+          },
+        },
+      },
+    });
+    expect(kindsOf(assess(state))).toEqual(["pr-snapshot", "comment-fix"]);
+  });
+
+  it("does NOT re-dispatch a conversation comment already acknowledged (:eyes:) or already dispatched (seen-set)", async () => {
+    const mkState = (over: any) =>
+      loopState({
+        slices: { s: { worker_session_id: "w", stage: "pr-open", pr: { number: 5 }, pr_open_at: T_30M_AGO, ...over } },
+        sessions: [session("w", "idle")],
+        perSlice: {
+          s: {
+            recentOutput: { output: "" },
+            pr: {
+              number: 5,
+              state: "OPEN",
+              mergeable: "MERGEABLE",
+              checks: "PASS",
+              needs_response_count: 0,
+              conversation_comments: [{ id: 11, author: "rev", body_preview: "x", reacted_eyes: over.reacted_eyes ?? false }],
+            },
+          },
+        },
+      });
+    // :eyes: already on the comment → filtered out by commentsNeedingResponse.
+    expect(kindsOf(assess(mkState({ reacted_eyes: true })))).toEqual(["pr-snapshot"]);
+    // Not :eyes:'d but already in the dispatched seen-set → no fresh dispatch.
+    expect(kindsOf(assess(mkState({ comment_fix_seen_comment_ids: ["11"] })))).toEqual(["pr-snapshot"]);
+  });
+
   it("dispatches a steward ci-fix on the first failing CI, before any legate judgement (#303)", async () => {
     const state = loopState({
       slices: { s: { worker_session_id: "w", stage: "pr-open", pr: { number: 5 } } },
@@ -373,6 +420,64 @@ describe("babysit apply", () => {
     const res = await apply([{ kind: "ci-failure", sliceId: "s", sessionId: "w", pr: { number: 5 }, requestKey: "rk", detail: "d" }], ctx(), state, deps());
     expect(slice.ci_fix_escalated_at).toBe(NOW);
     expect(res.requests).toHaveLength(1);
+  });
+
+  it("comment-fix sends the prompt, marks the comment seen, posts the :eyes: ack, and advances stage", async () => {
+    const slice: any = { worker_session_id: "w", stage: "pr-open", pr: { number: 5 } };
+    const state = loopState({ slices: { s: slice } });
+    const c = ctx();
+    const reactToComment = vi.fn(async () => {});
+    const d = deps({ reactToComment });
+    const res = await apply(
+      [{ kind: "comment-fix", sliceId: "s", sessionId: "w", pr: { number: 5 }, key: "k", message: "MSG", detail: "x", commentIds: ["11"] }],
+      c,
+      state,
+      d,
+    );
+    expect(d.sendMessage).toHaveBeenCalledWith("w", "MSG", "s");
+    expect(slice.stage).toBe("pr-in-fix");
+    expect(slice.comment_fix_seen_comment_ids).toEqual(["11"]);
+    expect(reactToComment).toHaveBeenCalledWith({ commentId: "11", content: "eyes", repoPath: "/repo" });
+    expect(res.actions[0]).toMatchObject({ action: "comment-fix" });
+    expect(c.emitTransition).toHaveBeenCalledWith({ type: "slice.stage.changed", sliceId: "s", stage: "pr-in-fix" });
+  });
+
+  it("comment-fix that fails to send escalates and does NOT mark the comment seen (retries next tick)", async () => {
+    const slice: any = { worker_session_id: "w", stage: "pr-open", pr: { number: 5 } };
+    const state = loopState({ slices: { s: slice } });
+    const reactToComment = vi.fn(async () => {});
+    const d = deps({
+      sendMessage: vi.fn(async () => {
+        throw new Error("down");
+      }),
+      reactToComment,
+    });
+    const res = await apply(
+      [{ kind: "comment-fix", sliceId: "s", sessionId: "w", pr: { number: 5 }, key: "k", message: "M", detail: "x", commentIds: ["11"] }],
+      ctx(),
+      state,
+      d,
+    );
+    expect(slice.stage).toBe("pr-open"); // not advanced
+    expect(slice.comment_fix_seen_comment_ids).toBeUndefined(); // not recorded → retried
+    expect(reactToComment).not.toHaveBeenCalled(); // no ack on a failed send
+    expect(res.requests).toHaveLength(1);
+    expect(res.actions).toHaveLength(0);
+  });
+
+  it("comment-fix tolerates a missing reactToComment seam (best-effort ack)", async () => {
+    const slice: any = { worker_session_id: "w", stage: "pr-open", pr: { number: 5 } };
+    const state = loopState({ slices: { s: slice } });
+    const d = deps({ reactToComment: undefined });
+    const res = await apply(
+      [{ kind: "comment-fix", sliceId: "s", sessionId: "w", pr: { number: 5 }, key: "k", message: "MSG", detail: "x", commentIds: ["11"] }],
+      ctx(),
+      state,
+      d,
+    );
+    expect(slice.stage).toBe("pr-in-fix");
+    expect(slice.comment_fix_seen_comment_ids).toEqual(["11"]);
+    expect(res.actions[0]).toMatchObject({ action: "comment-fix" });
   });
 
   it("review-fix that fails to send escalates instead of advancing stage", async () => {

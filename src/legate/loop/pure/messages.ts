@@ -115,6 +115,40 @@ Threads:
 ${reviewThreadsSummary(threads)}`;
 }
 
+/**
+ * Pure decision helper: which conversation (non-thread) comments still need a
+ * response. A comment is handled once the legate has reacted :eyes: to it
+ * (`reacted_eyes`) — the babysit caller additionally drops any whose id is already
+ * in the persisted dispatched set, so this returns the not-yet-acknowledged set.
+ * Author is deliberately NOT a filter: the legate token shares the PR-author
+ * identity (steward pushes as the same account that reviews), so an author check
+ * is unreliable — dedup is carried by the :eyes: reaction + the comment-id set.
+ */
+export function commentsNeedingResponse(slice: any, pr: any): any[] {
+  return (pr.conversation_comments || []).filter((comment: any) => comment && comment.reacted_eyes !== true);
+}
+
+/** Quote each conversation comment as a Markdown blockquote with attribution. */
+export function conversationCommentsSummary(comments: any[]): string {
+  return comments
+    .map((comment: any) => {
+      const quoted = String(comment.body_preview || "").trim().replace(/\n/g, "\n> ");
+      const who = comment.author || "unknown";
+      const when = comment.created_at ? ` (${comment.created_at})` : "";
+      return `> ${quoted}\n— ${who}${when}`;
+    })
+    .join("\n\n");
+}
+
+export function commentFixMessage(pr: any, comments: any[]): string {
+  return `/smithy.fix
+
+PR #${pr.number} has reviewer comment(s) on the conversation (not attached to a code line, so there is no review thread to resolve) that need a response. Address the feedback in this PR branch, push the fix, and reply on the PR conversation so the reviewer sees the resolution.
+
+Comments:
+${conversationCommentsSummary(comments)}`;
+}
+
 export function loginRequiredDetail(input: {
   sliceId: string;
   slice: any;

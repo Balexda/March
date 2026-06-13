@@ -269,6 +269,50 @@ describe("queryPrForBabysit", () => {
     });
   });
 
+  it("captures conversation (non-thread) comments with the :eyes: ack flag", async () => {
+    routeExec((_cmd, args) => {
+      if (args.includes("graphql")) {
+        return JSON.stringify({
+          data: {
+            repository: {
+              pullRequest: {
+                headRefOid: "abc",
+                mergeStateStatus: "CLEAN",
+                reviews: { nodes: [] },
+                comments: {
+                  nodes: [
+                    {
+                      databaseId: 101,
+                      body: "We should modify the spec and pull back from this behavior.",
+                      createdAt: "2026-06-09T07:00:30Z",
+                      author: { login: "reviewer", __typename: "User" },
+                      reactionGroups: [{ content: "THUMBS_UP", viewerHasReacted: false }],
+                    },
+                    {
+                      databaseId: 102,
+                      body: "already handled",
+                      createdAt: "2026-06-09T08:00:00Z",
+                      author: { login: "reviewer", __typename: "User" },
+                      reactionGroups: [{ content: "EYES", viewerHasReacted: true }],
+                    },
+                  ],
+                },
+                reviewThreads: { nodes: [] },
+              },
+            },
+          },
+        });
+      }
+      return JSON.stringify({ number: 5, url: "u", state: "OPEN", mergeable: "MERGEABLE", headRefName: "b", title: "t", author: { login: "me" }, statusCheckRollup: [] });
+    });
+    const io = createSenseIo({ meta: meta(), castra: fakeCastra() });
+    const pr = await io.queryPrForBabysit({ pr: { number: 5 } }, { repo: { path: "/repo", owner_with_name: "octo/march" } });
+    expect(pr.conversation_comments).toEqual([
+      { id: 101, author: "reviewer", author_type: "User", body_preview: "We should modify the spec and pull back from this behavior.", created_at: "2026-06-09T07:00:30Z", reacted_eyes: false },
+      { id: 102, author: "reviewer", author_type: "User", body_preview: "already handled", created_at: "2026-06-09T08:00:00Z", reacted_eyes: true },
+    ]);
+  });
+
   it("skips when the slice has no PR number", async () => {
     const io = createSenseIo({ meta: meta(), castra: fakeCastra() });
     const pr = await io.queryPrForBabysit({}, { repo: { owner_with_name: "octo/march" } });

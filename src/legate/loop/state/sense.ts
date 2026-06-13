@@ -52,6 +52,42 @@ export interface OpenPrEntry {
 /** Open PRs keyed by number — the result of one `listOpenPrs` probe per tick. */
 export type OpenPrIndex = Map<number, OpenPrEntry>;
 
+/**
+ * The cursor gate skips a known, idle PR's detail fetch while its `updatedAt`
+ * holds steady — but a PR can go `CONFLICTING` purely because the DEFAULT BRANCH
+ * moved (another PR merged), and GitHub does NOT bump the PR's `updatedAt` for
+ * that. So a clean PR that silently conflicts would never be re-observed and the
+ * legate's conflict-fix would never fire. This tracker drives a bounded staleness
+ * sweep: each tick {@link senseObserved} force-refetches the SINGLE most-stale
+ * gate-skipped PR (one extra `gh pr view` per profile per tick), on a rotating
+ * basis. With one idle PR it is re-checked every {@link STALE_RECHECK_MS}; with N
+ * idle PRs the 1/tick cap stretches each PR's interval to ~N ticks — eventual,
+ * not immediate, but it keeps the GraphQL spend flat. The state is per-profile and
+ * lives only in the observer's memory (a restart just resets the clock); it never
+ * touches the fold, and a force-refetch that finds nothing changed emits no event
+ * (the diff suppresses an identical snapshot), so the sweep adds zero log churn.
+ */
+export interface StaleRecheckTracker {
+  /** Epoch ms of the last forced recheck for this PR, or undefined if never. */
+  lastForcedMs(prNumber: number): number | undefined;
+  /** Record that this PR was the forced recheck this tick (starts its cooldown). */
+  markForced(prNumber: number, nowMs: number): void;
+}
+
+/** Minimum age before a gate-skipped PR is eligible for a forced staleness recheck. */
+export const STALE_RECHECK_MS = 10 * 60 * 1000;
+
+/** In-memory {@link StaleRecheckTracker} (the production default, one per profile). */
+export function createStaleRecheckTracker(): StaleRecheckTracker {
+  const lastForced = new Map<number, number>();
+  return {
+    lastForcedMs: (prNumber) => lastForced.get(prNumber),
+    markForced: (prNumber, nowMs) => {
+      lastForced.set(prNumber, nowMs);
+    },
+  };
+}
+
 export interface SenseDeps extends FoldDeps {
   /** Castra session list, mapped to agent-deck-shaped objects (or `{error}`). */
   readonly listSessions: () => Promise<any[] | { error: string }>;
@@ -71,6 +107,14 @@ export interface SenseDeps extends FoldDeps {
    * same way, so a probe outage never strands a slice.
    */
   readonly listOpenPrs?: (state: any) => Promise<OpenPrIndex | { error: string }>;
+  /**
+   * Per-profile staleness tracker for the rotating forced-recheck sweep (the
+   * default-branch-movement conflict blind spot). Optional: when absent the sweep
+   * is disabled and observation behaves exactly as the pure cursor gate — so the
+   * legate's fold-sense and test stubs that omit it lose nothing. See {@link
+   * StaleRecheckTracker}.
+   */
+  readonly staleRecheck?: StaleRecheckTracker;
 }
 
 /**
@@ -403,6 +447,49 @@ export function shouldRefetchKnownPr(priorPr: any, live: OpenPrEntry | undefined
 }
 
 /**
+ * Pick the single PR to FORCE-refetch this tick despite the cursor gate, to catch
+ * a default-branch-movement conflict that never bumped `updatedAt` (see {@link
+ * StaleRecheckTracker}). Among the gate-SKIPPED known-PR slices (the idle, clean,
+ * fully-observed ones — the only PRs that can silently go CONFLICTING), choose the
+ * one whose last forced recheck is oldest (never-forced wins; ties break to the
+ * lowest PR number) AND is past its {@link STALE_RECHECK_MS} cooldown. Returns the
+ * PR number to force, or null when nothing is eligible. Pure given `nowMs`.
+ *
+ * Selection deliberately mirrors the gate decision only (not the full
+ * session/terminal observe filter the main loop applies): the caller marks the
+ * chosen PR forced unconditionally, so even a victim the loop ends up NOT
+ * observing simply spends its rotation slot rather than starving the others.
+ */
+export function selectStaleRecheck(
+  prev: SystemState,
+  openPrs: OpenPrIndex | null,
+  tracker: StaleRecheckTracker | undefined,
+  nowMs: number,
+): number | null {
+  if (!tracker || !openPrs) return null;
+  let best: { prNumber: number; lastMs: number } | null = null;
+  for (const s of Object.values(prev.slices)) {
+    if (s.archived) continue;
+    const prNumber = prSnapshotNumber(s.pr);
+    if (prNumber === null) continue;
+    // Only PRs the cursor gate would SKIP are at risk of a silent conflict — a PR
+    // the gate already re-fetches is fresh, so forcing it buys nothing.
+    if (shouldRefetchKnownPr(s.pr, openPrs.get(prNumber))) continue;
+    const lastMs = tracker.lastForcedMs(prNumber);
+    if (lastMs !== undefined && nowMs - lastMs < STALE_RECHECK_MS) continue; // still cooling down
+    const effectiveLast = lastMs ?? -Infinity; // never-forced sorts oldest
+    if (
+      best === null ||
+      effectiveLast < best.lastMs ||
+      (effectiveLast === best.lastMs && prNumber < best.prNumber)
+    ) {
+      best = { prNumber, lastMs: effectiveLast };
+    }
+  }
+  return best?.prNumber ?? null;
+}
+
+/**
  * Stage 1 for the Herald observation service (#176): assemble the observed
  * {@link LoopState} the diff folds into events, sourcing the slices-to-observe
  * from Herald's OWN projection (`prev`, fed by the legate's `slice.dispatched`
@@ -446,6 +533,14 @@ export async function senseObserved(deps: SenseDeps, prev: SystemState): Promise
   const openProbe = anyKnownPr && deps.listOpenPrs ? await deps.listOpenPrs(state) : null;
   const openPrs: OpenPrIndex | null =
     openProbe && !(openProbe as { error?: unknown }).error ? (openProbe as OpenPrIndex) : null;
+
+  // Rotating staleness sweep: force ONE gate-skipped PR's detail fetch this tick so
+  // a default-branch-movement conflict (which never bumps `updatedAt`) is caught
+  // eventually rather than never. Marked forced unconditionally below so a perpetual
+  // never-observed victim can't starve the rotation. See {@link selectStaleRecheck}.
+  const nowMs = Date.parse(ts);
+  const forcedRecheckPr = Number.isFinite(nowMs) ? selectStaleRecheck(prev, openPrs, deps.staleRecheck, nowMs) : null;
+  if (forcedRecheckPr !== null) deps.staleRecheck?.markForced(forcedRecheckPr, nowMs);
 
   // Per-slice external state for slices the projection knows are live and
   // non-terminal — the union of what cleanup (PR terminal?) and babysit (PR/CI/
@@ -493,7 +588,7 @@ export async function senseObserved(deps: SenseDeps, prev: SystemState): Promise
         // (gh pr view + review-thread GraphQL) only when something may have moved;
         // otherwise leave `entry.pr` unset so the diff keeps the stored snapshot
         // and emits no event. This is the per-tick GraphQL fan-out the gate cuts.
-        if (shouldRefetchKnownPr(s.pr, openPrs.get(knownNumber))) {
+        if (shouldRefetchKnownPr(s.pr, openPrs.get(knownNumber)) || knownNumber === forcedRecheckPr) {
           entry.pr = await deps.queryPr(sliceLike, state, repoPath);
         }
       } else {
