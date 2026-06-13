@@ -17,7 +17,7 @@
 
 ### Tasks
 
-- [ ] **Add backend selection to dispatch CLI**
+- [x] **Add backend selection to dispatch CLI**
 
   Update the `march spawn dispatch` command in `src/cli/program.ts` to expose `--backend <name>` and resolve it through the backend registry before the existing dependency and spawn pipeline stages. Use the live registry values from `src/spawn/backends.ts`; per the spec divergence note, the second supported backend is `codex` rather than the historical `gemini`.
 
@@ -28,7 +28,7 @@
   - A valid `MARCH_BACKEND` value is used when the flag is absent (AS 1.4).
   - A backend flag takes precedence over a conflicting env-var value (AS 1.5).
 
-- [ ] **Reject unknown backend selections early**
+- [x] **Reject unknown backend selections early**
 
   Extend the dispatch command's selection path so unknown backend names from either source exit through the existing usage-error path before dependency checks, worktree creation, image work, or container launch. Keep the user-facing error scoped to the rejected value, its source, and the supported backend names from the registry.
 

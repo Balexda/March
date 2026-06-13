@@ -455,6 +455,14 @@ describe("march CLI", () => {
     expect(result.stdout).toContain("spawn");
   });
 
+  it("march spawn dispatch --help lists backend selection and registered names", () => {
+    const result = run(["spawn", "dispatch", "--help"]);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("--backend <name>");
+    expect(result.stdout).toContain("claude-code");
+    expect(result.stdout).toContain("codex");
+  });
+
   it("march hatchery spawn --help exits 0 and prints handoff flags", () => {
     const result = run(["hatchery", "spawn", "--help"]);
     expect(result.exitCode).toBe(0);
@@ -549,6 +557,7 @@ describe("march CLI", () => {
     const nodeBinDir = path.dirname(process.execPath);
     const result = runWithEnv(["spawn", "dispatch"], {
       PATH: [nodeBinDir, binDir].join(path.delimiter),
+      MARCH_BACKEND: "",
     });
     expect(result.exitCode).toBe(1);
     expect(result.stderr).toContain("march-spawn-claude:latest");
@@ -773,6 +782,22 @@ describe("march CLI", () => {
     expect(result.stderr).not.toContain("git not found");
   });
 
+  it("spawn dispatch: unknown MARCH_BACKEND exits 2 before dependency checks", () => {
+    const fakeBin = makeFakeBin(); // no git or docker needed
+    const nodeBinDir = path.dirname(process.execPath);
+    const result = runWithEnv(["spawn", "dispatch"], {
+      PATH: [nodeBinDir, fakeBin].join(path.delimiter),
+      MARCH_BACKEND: "missing",
+    });
+
+    expect(result.exitCode).toBe(2);
+    expect(result.stderr).toContain('Unknown backend "missing"');
+    expect(result.stderr).toContain("MARCH_BACKEND env var");
+    expect(result.stderr).toContain("claude-code");
+    expect(result.stderr).toContain("codex");
+    expect(result.stderr).not.toContain("git not found");
+  });
+
   it("spawn dispatch: Codex missing credential directory exits 2 and leaves no SpawnRecord", () => {
     const repoRoot = makeRealRepo();
     const home = makeTmpDir();
@@ -860,6 +885,45 @@ describe("march CLI", () => {
     expect(startIndex).toBeGreaterThan(cpIndex);
     expect(waitIndex).toBeGreaterThan(startIndex);
     expect(logsIndex).toBeGreaterThan(waitIndex);
+  });
+
+  it("spawn dispatch: MARCH_BACKEND selects codex when --backend is absent", () => {
+    const repoRoot = makeRealRepo();
+    const home = makeTmpDir();
+    const codexHome = path.join(home, "codex-home");
+    fs.mkdirSync(codexHome);
+    const dockerStubDir = makeDockerStubBinDir();
+    const nodeBinDir = path.dirname(process.execPath);
+    const result = runWithEnv(
+      [
+        "spawn",
+        "dispatch",
+        "--prompt",
+        "what is the capital of Washington state",
+      ],
+      {
+        PATH: [nodeBinDir, dockerStubDir, process.env.PATH ?? ""].join(
+          path.delimiter,
+        ),
+        HOME: home,
+        CODEX_HOME: codexHome,
+        MARCH_BACKEND: "codex",
+      },
+      { cwd: repoRoot },
+    );
+
+    expect(result.exitCode).toBe(0);
+    const spawnsDir = path.join(home, ".march", "spawns");
+    const recordFiles = fs
+      .readdirSync(spawnsDir)
+      .filter((f) => f.endsWith(".json"));
+    expect(recordFiles).toHaveLength(1);
+    const record = JSON.parse(
+      fs.readFileSync(path.join(spawnsDir, recordFiles[0]), "utf-8"),
+    );
+    expect(record.backend).toBe("codex");
+    expect(record.status).toBe("stopped");
+    expect(result.stdout).toContain("Olympia");
   });
 
   it("spawn dispatch: docker build failure transitions SpawnRecord to failed and cleans up worktree+branch+image", () => {
