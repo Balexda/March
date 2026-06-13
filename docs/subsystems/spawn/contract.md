@@ -19,20 +19,27 @@ Repository context includes the repository path and the worktree, base branch,
 or dispatch branch needed to snapshot and execute the task in an isolated
 workspace.
 
-Accepted dispatch metadata includes:
+Caller-supplied dispatch metadata includes:
 
 - `backend`: the selected `SpawnBackend` name and its launch contract.
-- `profile`: the deployment or execution profile used for telemetry tagging and
-  service context.
+- `profile`: the deployment profile used solely for telemetry tagging — the
+  Legate deployment's profile, not the agent-deck session profile. The distinct
+  `agentDeckProfile` field carries the Castra/agent-deck session context and is
+  not the same value.
 - `branch`: the dispatch or manager branch that correlates worktree, session,
   and downstream handoff state.
 - `taskType`, `taskName`, and `title`: task identity fields suitable for
   operator diagnostics and trace attributes.
-- `spawnId`: Spawn's execution identity for container, image, worktree, branch,
-  output artifact, lifecycle, and trace correlation.
 - `sliceId`: the Smithy slice correlation key; when present, Spawn uses it as
   the deterministic trace key so service-side observations for that slice can
   nest under the same trace.
+
+Spawn allocates its own execution identity rather than accepting it from the
+caller:
+
+- `spawnId`: generated internally by `runHatcherySpawn` and used as Spawn's
+  execution identity for container, image, worktree, branch, output artifact,
+  lifecycle, and trace correlation. It is not a caller-supplied input.
 
 The exported TypeScript surface is split between Spawn's execution primitives
 and the Hatchery dispatch entrypoint that composes them:
@@ -49,10 +56,10 @@ and the Hatchery dispatch entrypoint that composes them:
   launch diagnostics.
 - `runHatcherySpawn(input: HatcherySpawnOptions)` is the exported dispatch
   composition used by Hatchery. It accepts the required prompt, repository path,
-  and backend plus optional profile, branch, task identity, spawn metadata, and
-  slice correlation fields, then returns a `HatcherySpawnResult` only after a
-  terminal successful spawn output has been extracted, validated as a patch, and
-  handed to the manager session.
+  and backend plus optional deployment profile, agent-deck session profile,
+  branch, task identity, and slice correlation fields, then returns a
+  `HatcherySpawnResult` only after a terminal successful spawn output has been
+  extracted, validated as a patch, and handed to the manager session.
 
 Spawn's output handoff boundary is the validated patch artifact produced from
 terminal successful backend output. Raw backend logs are not a public handoff
