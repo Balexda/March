@@ -14,7 +14,7 @@ import { BASE_IMAGE, SPAWN_CONFIG, type SpawnConfig } from "./spawn-config.js";
 
 describe("spawn-config", () => {
   describe("BASE_IMAGE", () => {
-    it("points direct Dockerfile helper calls at the default Claude backend image", () => {
+    it("retains the default Claude backend image literal", () => {
       expect(BASE_IMAGE).toBe("march-spawn-claude:latest");
     });
   });

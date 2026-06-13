@@ -26,7 +26,7 @@
  * Appendix A threat model.
  */
 
-/** Default base image retained for direct Dockerfile helper calls. */
+/** Default Claude base image retained for compatibility assertions. */
 export const BASE_IMAGE = "march-spawn-claude:latest";
 
 /**

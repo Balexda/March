@@ -1,7 +1,6 @@
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
-import { BASE_IMAGE } from "../hatchery/spawn-config.js";
 
 /**
  * Error thrown by docker build / image-management operations in the
@@ -63,14 +62,14 @@ export function spawnImageTag(spawnId: string): string {
  *
  * @param contextPath - Absolute path to the temp build-context directory
  *   produced by {@link createBuildContext}.
- * @param baseImage - Base image tag for the `FROM` line. Defaults to the
- *   shared {@link BASE_IMAGE} constant from `spawn-config.ts`.
+ * @param baseImage - Base image tag for the `FROM` line. Dispatch callers
+ *   pass the selected backend's `baseImage`.
  * @returns Absolute path to the written Dockerfile (always
  *   `<contextPath>/Dockerfile`).
  */
 export function writeSpawnDockerfile(
   contextPath: string,
-  baseImage: string = BASE_IMAGE,
+  baseImage: string,
 ): string {
   const dockerfilePath = path.join(contextPath, SPAWN_DOCKERFILE_NAME);
   // Trailing newline so POSIX tools don't whine about a missing final LF

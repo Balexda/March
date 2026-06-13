@@ -30,7 +30,7 @@ import {
   writeSpawnDockerfile,
   SPAWN_DOCKERFILE_NAME,
 } from "./snapshot-build.js";
-import { BASE_IMAGE } from "../hatchery/spawn-config.js";
+import { claudeCodeBackend, codexBackend } from "./backends.js";
 
 describe("snapshot-build", () => {
   const tmpDirs: string[] = [];
@@ -59,12 +59,15 @@ describe("snapshot-build", () => {
   describe("writeSpawnDockerfile", () => {
     it("writes a Dockerfile whose contents exactly match the contracts' template", () => {
       const ctx = makeTmpDir();
-      const dockerfilePath = writeSpawnDockerfile(ctx);
+      const dockerfilePath = writeSpawnDockerfile(
+        ctx,
+        claudeCodeBackend.baseImage,
+      );
       const got = fs.readFileSync(dockerfilePath, "utf-8");
       // Verbatim from the contracts' Image Build template — base image,
       // COPY --chown=march:march . /march/workspace, WORKDIR /march/workspace.
       expect(got).toBe(
-        `FROM ${BASE_IMAGE}\n` +
+        `FROM ${claudeCodeBackend.baseImage}\n` +
           `COPY --chown=march:march . /march/workspace\n` +
           `WORKDIR /march/workspace\n`,
       );
@@ -72,20 +75,32 @@ describe("snapshot-build", () => {
 
     it("writes the Dockerfile inside the build context directory", () => {
       const ctx = makeTmpDir();
-      const dockerfilePath = writeSpawnDockerfile(ctx);
+      const dockerfilePath = writeSpawnDockerfile(
+        ctx,
+        claudeCodeBackend.baseImage,
+      );
       expect(path.dirname(dockerfilePath)).toBe(ctx);
       expect(path.basename(dockerfilePath)).toBe(SPAWN_DOCKERFILE_NAME);
       expect(fs.existsSync(dockerfilePath)).toBe(true);
     });
 
-    it("substitutes a custom base image when one is provided", () => {
+    it("writes the selected backend image into the FROM line", () => {
       const ctx = makeTmpDir();
-      const dockerfilePath = writeSpawnDockerfile(ctx, "my-base:dev");
-      const got = fs.readFileSync(dockerfilePath, "utf-8");
-      expect(got).toBe(
-        `FROM my-base:dev\n` +
-          `COPY --chown=march:march . /march/workspace\n` +
-          `WORKDIR /march/workspace\n`,
+      const claudeDockerfile = writeSpawnDockerfile(
+        ctx,
+        claudeCodeBackend.baseImage,
+      );
+      expect(fs.readFileSync(claudeDockerfile, "utf-8")).toContain(
+        `FROM ${claudeCodeBackend.baseImage}\n`,
+      );
+
+      const codexCtx = makeTmpDir();
+      const codexDockerfile = writeSpawnDockerfile(
+        codexCtx,
+        codexBackend.baseImage,
+      );
+      expect(fs.readFileSync(codexDockerfile, "utf-8")).toContain(
+        `FROM ${codexBackend.baseImage}\n`,
       );
     });
   });
@@ -94,7 +109,7 @@ describe("snapshot-build", () => {
     it("invokes `docker build` with the contract's argument shape and returns the tag", () => {
       childProcessMock.execFileSync.mockReturnValueOnce(Buffer.from(""));
       const ctx = makeTmpDir();
-      const dockerfile = writeSpawnDockerfile(ctx);
+      const dockerfile = writeSpawnDockerfile(ctx, claudeCodeBackend.baseImage);
 
       const tag = buildSpawnImage({
         spawnId: "20260504-abc123",
@@ -120,7 +135,7 @@ describe("snapshot-build", () => {
     it("does not pass any bind-mount / volume flags (COPY-only context)", () => {
       childProcessMock.execFileSync.mockReturnValueOnce(Buffer.from(""));
       const ctx = makeTmpDir();
-      const dockerfile = writeSpawnDockerfile(ctx);
+      const dockerfile = writeSpawnDockerfile(ctx, claudeCodeBackend.baseImage);
 
       buildSpawnImage({
         spawnId: "20260504-abc123",
@@ -154,7 +169,7 @@ describe("snapshot-build", () => {
         .mockReturnValueOnce(Buffer.from(""));
 
       const ctx = makeTmpDir();
-      const dockerfile = writeSpawnDockerfile(ctx);
+      const dockerfile = writeSpawnDockerfile(ctx, claudeCodeBackend.baseImage);
 
       let caught: unknown;
       try {
@@ -185,7 +200,7 @@ describe("snapshot-build", () => {
         .mockReturnValueOnce(Buffer.from(""));
 
       const ctx = makeTmpDir();
-      const dockerfile = writeSpawnDockerfile(ctx);
+      const dockerfile = writeSpawnDockerfile(ctx, claudeCodeBackend.baseImage);
 
       try {
         buildSpawnImage({
@@ -225,7 +240,7 @@ describe("snapshot-build", () => {
         });
 
       const ctx = makeTmpDir();
-      const dockerfile = writeSpawnDockerfile(ctx);
+      const dockerfile = writeSpawnDockerfile(ctx, claudeCodeBackend.baseImage);
 
       let caught: unknown;
       try {
