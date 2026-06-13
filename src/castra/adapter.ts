@@ -7,6 +7,7 @@ import {
   type CastraSession,
 } from "./types.js";
 import { CASTRA_DEFAULT_MODEL } from "./config.js";
+import { stewardSkillsRoot } from "./steward-skills.js";
 
 /**
  * The agent-deck adapter: the single place that turns Castra operations into
@@ -65,6 +66,14 @@ export function buildLaunchArgs(input: {
     "--model",
     "--extra-arg",
     input.model?.trim() || CASTRA_DEFAULT_MODEL,
+    // Load the shared steward skills (e.g. steward-pr) without relocating the
+    // host ~/.claude config: --add-dir reads <root>/.claude/skills/** and keeps
+    // the operator's credentials. The dir is provisioned at Castra serve start
+    // (see steward-skills.ts).
+    "--extra-arg",
+    "--add-dir",
+    "--extra-arg",
+    stewardSkillsRoot(),
   ];
 }
 

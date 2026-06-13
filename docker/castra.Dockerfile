@@ -62,6 +62,11 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 COPY --from=build /app/dist ./dist
+# Steward skills (steward-pr, …) are markdown templates, not bundled into dist.
+# Castra serve provisions them into ~/.march/steward at startup (see
+# src/castra/steward-skills.ts), resolving src/templates relative to dist — so
+# ship the template tree alongside dist in the runtime image.
+COPY --from=build /app/src/templates ./src/templates
 # `march` on PATH.
 RUN ln -sf /app/dist/cli.js /usr/local/bin/march
 
