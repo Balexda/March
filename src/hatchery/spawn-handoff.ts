@@ -586,8 +586,8 @@ export function evaluateStewardHandoffEligibility(input: {
 const NOOP_DISPATCH_TRACE: DispatchTrace = {
   enabled: false,
   spanContext: () => undefined,
-  span: (_name, fn) => fn({ setAttributes: () => {}, spanContext: () => undefined }),
-  spanAsync: (_name, fn) => fn({ setAttributes: () => {}, spanContext: () => undefined }),
+  span: (_name, fn) => fn({ setAttributes: () => {}, setError: () => {}, spanContext: () => undefined }),
+  spanAsync: (_name, fn) => fn({ setAttributes: () => {}, setError: () => {}, spanContext: () => undefined }),
   setAttributes: () => {},
   recordException: () => {},
   traceparent: () => undefined,

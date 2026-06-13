@@ -110,6 +110,25 @@ const IMAGE_TAG_PATTERN = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$/;
 const IMAGE_DIGEST_PATTERN =
   /^[A-Za-z][A-Za-z0-9]*(?:[+._-][A-Za-z][A-Za-z0-9]*)*:[A-Fa-f0-9]{8,}$/;
 
+const ROOT_FIELDS = new Set([
+  "version",
+  "name",
+  "baseImage",
+  "container",
+  "resources",
+  "fileMounts",
+  "snapshot",
+  "network",
+  "tools",
+]);
+
+const CONTAINER_FIELDS = new Set(["capDrop", "user", "envWhitelist"]);
+const RESOURCE_FIELDS = new Set(["memoryLimit", "cpuLimit", "timeoutSeconds"]);
+
+const USER_PATTERN = /^(?:[a-z_][a-z0-9_-]{0,31}|[0-9]+(?::[0-9]+)?)$/;
+const MEMORY_LIMIT_PATTERN = /^[0-9]+[bkmgBKMG]$/;
+const CPU_LIMIT_PATTERN = /^[0-9]+(?:\.[0-9]+)?$/;
+
 export function validateProfile(input: unknown): ValidationResult {
   if (input === null || typeof input !== "object" || Array.isArray(input)) {
     return {
@@ -141,8 +160,11 @@ export function validateProfile(input: unknown): ValidationResult {
 
   const errors: ValidationError[] = [];
 
+  collectUnknownFields(profile, ROOT_FIELDS, "", errors);
   validateName(profile.name, errors);
   validateBaseImage(profile.baseImage, errors);
+  validateContainer(profile.container, errors);
+  validateResources(profile.resources, errors);
 
   if (errors.length > 0) {
     return { ok: false, errors: sortErrors(errors) };
@@ -240,6 +262,134 @@ function isValidImageReference(value: string): boolean {
     IMAGE_NAME_PATTERN.test(name) &&
     (tag === undefined || IMAGE_TAG_PATTERN.test(tag))
   );
+}
+
+function validateContainer(
+  container: unknown,
+  errors: ValidationError[],
+): void {
+  if (container === undefined) {
+    return;
+  }
+
+  if (!isPlainObject(container)) {
+    errors.push({
+      code: "WrongType",
+      path: "/container",
+      message: "Profile container must be an object.",
+    });
+    return;
+  }
+
+  collectUnknownFields(container, CONTAINER_FIELDS, "/container", errors);
+
+  const capDrop = container.capDrop;
+  if (
+    !Array.isArray(capDrop) ||
+    !capDrop.every((value) => typeof value === "string") ||
+    !capDrop.includes("ALL")
+  ) {
+    errors.push({
+      code: "InvalidCapDrop",
+      path: "/container/capDrop",
+      message: 'container.capDrop must be a string array containing "ALL".',
+    });
+  }
+
+  const user = container.user;
+  if (typeof user !== "string" || !USER_PATTERN.test(user)) {
+    errors.push({
+      code: "InvalidUser",
+      path: "/container/user",
+      message:
+        "container.user must be a POSIX username or numeric uid[:gid] value.",
+    });
+  }
+}
+
+function validateResources(
+  resources: unknown,
+  errors: ValidationError[],
+): void {
+  if (resources === undefined) {
+    return;
+  }
+
+  if (!isPlainObject(resources)) {
+    errors.push({
+      code: "WrongType",
+      path: "/resources",
+      message: "Profile resources must be an object.",
+    });
+    return;
+  }
+
+  collectUnknownFields(resources, RESOURCE_FIELDS, "/resources", errors);
+
+  const memoryLimit = resources.memoryLimit;
+  if (
+    typeof memoryLimit !== "string" ||
+    !MEMORY_LIMIT_PATTERN.test(memoryLimit)
+  ) {
+    errors.push({
+      code: "InvalidMemoryLimit",
+      path: "/resources/memoryLimit",
+      message:
+        "resources.memoryLimit must match the Docker memory grammar used by SpawnConfig.",
+    });
+  }
+
+  const cpuLimit = resources.cpuLimit;
+  if (
+    typeof cpuLimit !== "string" ||
+    !CPU_LIMIT_PATTERN.test(cpuLimit) ||
+    Number(cpuLimit) <= 0
+  ) {
+    errors.push({
+      code: "InvalidCpuLimit",
+      path: "/resources/cpuLimit",
+      message:
+        "resources.cpuLimit must be a positive number formatted as a string.",
+    });
+  }
+
+  const timeoutSeconds = resources.timeoutSeconds;
+  if (
+    typeof timeoutSeconds !== "number" ||
+    !Number.isInteger(timeoutSeconds) ||
+    timeoutSeconds <= 0
+  ) {
+    errors.push({
+      code: "InvalidTimeout",
+      path: "/resources/timeoutSeconds",
+      message: "resources.timeoutSeconds must be a positive integer.",
+    });
+  }
+}
+
+function collectUnknownFields(
+  value: Record<string, unknown>,
+  knownFields: ReadonlySet<string>,
+  parentPath: string,
+  errors: ValidationError[],
+): void {
+  for (const key of Object.keys(value)) {
+    if (!knownFields.has(key)) {
+      errors.push({
+        code: "UnknownField",
+        path: joinPointer(parentPath, key),
+        message: `Unknown profile field "${key}".`,
+      });
+    }
+  }
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function joinPointer(parentPath: string, key: string): string {
+  return `${parentPath}/${key.replace(/~/g, "~0").replace(/\//g, "~1")}`;
 }
 
 function sortErrors(errors: ValidationError[]): readonly ValidationError[] {

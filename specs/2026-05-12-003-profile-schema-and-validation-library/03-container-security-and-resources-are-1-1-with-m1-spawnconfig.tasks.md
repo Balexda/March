@@ -18,7 +18,7 @@
 
 ### Tasks
 
-- [ ] **Prove retained SpawnConfig structural parity**
+- [x] **Prove retained SpawnConfig structural parity**
 
   Add type-oriented coverage around `src/profile/` and `src/hatchery/spawn-config.ts` showing that the retained M1 security and resource fields are structurally assignable to the profile container and resources subtypes. Keep the check scoped to AS 3.1 and the `networkMode` omission described by US3.
 
@@ -28,7 +28,7 @@
   - `networkMode` is not part of the retained structural parity check
   - The check is compile-time only and adds no runtime dependency from `src/profile/` to Hatchery
 
-- [ ] **Validate container security fields**
+- [x] **Validate container security fields**
 
   Extend the profile validator for `Profile.container` in `src/profile/` so the security fields satisfy AS 3.1-AS 3.3. Preserve the total, aggregated-error behavior established by earlier stories while reporting container-field problems at their JSON-pointer paths.
 
@@ -39,7 +39,7 @@
   - Invalid `user` values are reported with `InvalidUser`
   - Container errors use deterministic JSON-pointer paths
 
-- [ ] **Validate resource limit fields**
+- [x] **Validate resource limit fields**
 
   Extend the profile validator for `Profile.resources` so the resource ceiling fields satisfy AS 3.1 and AS 3.4. Keep the resource grammar aligned with the data model's M1 mapping rather than broadening to Docker's full accepted surface.
 
@@ -50,7 +50,7 @@
   - Invalid timeout values are reported with `InvalidTimeout`
   - Resource errors are aggregated and deterministically ordered with other validation errors
 
-- [ ] **Reject legacy root networkMode**
+- [x] **Reject legacy root networkMode**
 
   Extend root-level object validation enough to satisfy AS 3.5 without implementing the later `Profile.network` policy story. Treat legacy M1 `networkMode` as an unknown top-level field because the value has migrated to `Profile.network.mode`.
 
