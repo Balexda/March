@@ -42,7 +42,7 @@
   - Trace prose states that `legate.dispatch` is the slice trace origin and service-side actions nest under the deterministic slice trace rather than starting unrelated roots.
   - Babysit behavior covers timeout, missing worker, missing steward, relaunch, cleanup, and terminal-failure decisions as clean events or outcomes instead of interactive prompts.
   - Terminal outcome promises identify the labels or diagnostic classes that stop further autonomous action and the events or service state that justify them.
-  - The invariants cite the low-touch execution model from `docs/vision.md` and the autonomous-component rules from `docs/operating-philosophy.md` when describing noninteractive recovery and clean terminal outcomes, while acknowledging those docs may be absent from the current Hatchery snapshot.
+  - The invariants cite the low-touch execution model from `docs/vision.md` and the autonomous-component rules from `docs/operating-philosophy.md` when describing noninteractive recovery and clean terminal outcomes.
 
 - [ ] **Document Legate observable error modes**
 
@@ -74,11 +74,10 @@ Recommended implementation sequence:
 
 | ID | Title | Depends On | Artifact |
 |----|-------|------------|----------|
-| S1 | Author Legate Loop Contract | - | `docs/subsystems/legate/contract.md` |
+| S1 | Author Legate Loop Contract | — | — |
 
 ### Cross-Story Dependencies
 
 | Dependency | Direction | Notes |
 |------------|-----------|-------|
-| User Story 1: Document Spawn Dispatch Contract | independent of | US2 can author the Legate loop contract independently; US1 covers Spawn's dispatch/output boundary. |
 | User Story 3: Record Cross-Contract Ownership Boundaries | depended upon by | US3 consolidates Spawn and Legate boundary references after both subsystem contracts exist. |
