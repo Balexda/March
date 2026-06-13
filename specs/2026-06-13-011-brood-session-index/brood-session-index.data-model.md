@@ -2,13 +2,13 @@
 
 ## Overview
 
-This feature models a **read-and-derive** layer over the per-spawn record JSON M1 already persists to `~/.march/spawns/`. The persisted `SpawnRecord` remains the source of truth; this feature adds one optional persisted field (`failureReason`) and defines a non-persisted derived view (`SpawnView`). No new persisted status values are introduced and the schema `version` is unchanged.
+This feature models a **read-and-derive** layer over the per-spawn record JSON M1 already persists to `~/.march/spawns/`. The persisted `SpawnRecord` remains the source of truth. The optional persisted `failureReason` field is **already present** on `SpawnRecord` in `src/brood/spawn-record.ts`; this feature defines the non-persisted derived view (`SpawnView`) over the record. No new persisted status values are introduced and the schema `version` is unchanged.
 
 ## Entities
 
-### 1) SpawnRecord (extended)
+### 1) SpawnRecord
 
-Purpose: The durable per-spawn record M1 writes to `~/.march/spawns/<id>.json`. This feature extends it with one optional field and otherwise leaves it untouched.
+Purpose: The durable per-spawn record M1 writes to `~/.march/spawns/<id>.json` (defined in `src/brood/spawn-record.ts`). The reader/derive layer reads it untouched; the `failureReason` field below is already present.
 
 | Field | Type | Required | Notes |
 |-------|------|----------|-------|
@@ -16,7 +16,7 @@ Purpose: The durable per-spawn record M1 writes to `~/.march/spawns/<id>.json`. 
 | `id` | string | Yes | Spawn identity; the `<id>.json` filename key. |
 | `status` | `SpawnStatus` | Yes | One of `"created" | "running" | "stopped" | "failed"`. Enum is unchanged by this feature. |
 | `profile` | string | No | M2-era field owned by M2 F5. The reader MUST tolerate its presence or absence; this feature does not add it. |
-| `failureReason` | string | No | **New.** Optional. Carries the `error` string `markSpawnRecordFailed` previously dropped. Absent on success-path and pre-existing records. |
+| `failureReason` | string | No | Optional; already present in `src/brood/spawn-record.ts`. Carries the `error` string `markSpawnRecordFailed` records. Absent on success-path records. |
 
 Validation rules:
 - `version` stays `1`; `failureReason` is additive and optional.
@@ -58,7 +58,7 @@ Validation rules:
 
 - A `SpawnView` is derived from exactly one `SpawnRecord`.
 - `listSpawnRecords()` yields the set of `SpawnRecord`s under `~/.march/spawns/`; `loadSpawnRecord(id)` yields one.
-- `derivedStatus(record, dockerSnapshot?)` maps a `SpawnRecord` (optionally informed by a Docker Snapshot) onto the derived condition used to populate a `SpawnView`.
+- `derivedStatus(record, dockerSnapshot?)` returns the `SpawnView` for a `SpawnRecord` (optionally informed by a Docker Snapshot), computing its derived flags.
 - A Docker Snapshot, when supplied, informs only the `containerLive` flag of the resulting view.
 
 ## State Transitions

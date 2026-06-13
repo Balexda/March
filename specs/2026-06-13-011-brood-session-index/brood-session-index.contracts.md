@@ -2,7 +2,7 @@
 
 ## Overview
 
-This feature introduces a repository-internal **TypeScript module contract**, not an HTTP, event, or CLI surface. `src/brood-index.ts` exposes the tolerant read-and-derive API every downstream Brood verb consumes, and `src/spawn-record.ts` gains one optional persisted field plus the wiring that fills it. No runtime events, metrics, logs, or spans are introduced.
+This feature introduces a repository-internal **TypeScript module contract**, not an HTTP, event, or CLI surface. The new `src/brood-index.ts` exposes the tolerant read-and-derive API every downstream Brood verb consumes. `src/brood/spawn-record.ts` already carries the optional `failureReason` field and the `markSpawnRecordFailed` wiring that fills it; the contract below records that established surface. No runtime events, metrics, or spans are introduced; the reader emits only the skip-and-warn diagnostic noted below.
 
 ## Interfaces
 
@@ -15,7 +15,7 @@ This feature introduces a repository-internal **TypeScript module contract**, no
 #### Signature
 
 ```ts
-// Listed shapes are the contract surface; exact field names follow src/spawn-record.ts.
+// Listed shapes are the contract surface; exact field names follow src/brood/spawn-record.ts.
 function listSpawnRecords(): SpawnRecord[];          // tolerant: skips unreadable records
 function loadSpawnRecord(id: string): SpawnRecord | undefined;
 function derivedStatus(record: SpawnRecord, dockerSnapshot?: DockerSnapshot): SpawnView;
@@ -53,11 +53,11 @@ interface SpawnView {
 | Record lacks the M2-era `profile` field | Load successfully | The reader tolerates records with and without `profile`. |
 | No Docker snapshot supplied to `derivedStatus` | Derive from the record alone | The module makes no Docker call and no mutation. |
 
-### SpawnRecord failureReason wiring (`src/spawn-record.ts`)
+### SpawnRecord failureReason wiring (`src/brood/spawn-record.ts`)
 
-**Purpose**: Persist *why* a spawn failed, captured from the `error` previously dropped by `markSpawnRecordFailed`.
+**Purpose**: Persist *why* a spawn failed, captured from the `error` passed to `markSpawnRecordFailed`. Already implemented; recorded here as F1's established data-model surface.
 **Consumers**: F2 `inspect` (surfaces `failureReason`), the reader above.
-**Providers**: `src/spawn-record.ts` — the `SpawnRecord` shape and `markSpawnRecordFailed`.
+**Providers**: `src/brood/spawn-record.ts` — the `SpawnRecord` shape and `markSpawnRecordFailed`.
 
 #### Signature
 
@@ -90,17 +90,17 @@ function markSpawnRecordFailed(id: string, options: MarkSpawnRecordFailedOptions
 
 | Condition | Response | Description |
 |-----------|----------|-------------|
-| `error` supplied | Persist `failureReason` | The previously-dropped argument now reaches disk. |
+| `error` supplied | Persist `failureReason` | The `error` argument is recorded to disk as `failureReason`. |
 | `error` omitted | Leave `failureReason` absent | Field stays optional; older records load without it. |
 | Schema read of a record without `failureReason` | Load successfully at `version` 1 | Additive field requires no migration or version bump. |
 
 ## Events / Hooks
 
-No runtime events, metrics, logs, or spans are introduced. This feature is a repository-internal read-and-derive module plus one additive persisted field.
+No runtime events, metrics, or spans are introduced. The only emitted output is the **safe-read skip-and-warn diagnostic**: when a record file is unreadable after one retry, the reader warns and skips it (so `list` does not fail). This is a local read-path warning, not structured telemetry. This feature otherwise reads the per-spawn records and reuses the already-present `failureReason` field.
 
 ## Integration Boundaries
 
-- **M1 spawn records (`src/spawn-record.ts`, `~/.march/spawns/`)**: The source of truth this feature reads and minimally extends; the `SpawnStatus` enum and `version` are unchanged.
+- **M1 spawn records (`src/brood/spawn-record.ts`, `~/.march/spawns/`)**: The source of truth this feature reads; the `SpawnStatus` enum and `version` are unchanged, and `failureReason` is already present.
 - **Brood CLI read surface (F2)**: Consumes `listSpawnRecords` / `loadSpawnRecord` / `SpawnView` and surfaces `failureReason`; not implemented here.
 - **Lifecycle teardown (F3)**: Leaves the record JSON in place after removing the container/worktree — the condition this feature's `disposed` derivation keys on; teardown itself is out of scope here.
 - **Docker**: Liveness reconciliation is caller-driven via an optional snapshot; this module never shells out to Docker or mutates Docker state.

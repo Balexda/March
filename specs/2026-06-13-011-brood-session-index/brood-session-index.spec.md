@@ -13,7 +13,7 @@
 
 - This feature is the **read-and-derive substrate** Feature 1 of the Brood (Basic) milestone: a new `src/brood-index.ts` module that exposes `listSpawnRecords()`, `loadSpawnRecord(id)`, and `derivedStatus(record, dockerSnapshot?)` over the per-spawn JSON files M1 already writes to `~/.march/spawns/`. It is a pure read layer — it never mutates disk and never mutates Docker state.
 - The persisted `SpawnStatus` enum stays exactly `"created" | "running" | "stopped" | "failed"`. The `needsAttention` and `disposed` conditions are **derived** in the `SpawnView` and are **never** written to disk as new status values.
-- A new optional `failureReason?: string` is added to `SpawnRecord` as a **forward-compatible** field — the schema `version` stays `1` (no bump). `markSpawnRecordFailed`'s currently-dropped `error` argument is wired through to this field; the existing JSDoc on `MarkSpawnRecordFailedOptions` in `src/spawn-record.ts` already declared this slot.
+- F1's data-model contribution — the optional `failureReason?: string` field on `SpawnRecord` and the wiring of `markSpawnRecordFailed`'s `error` argument into it — has **already landed** in `src/brood/spawn-record.ts` (forward-compatible; the schema `version` stays `1`, no bump). This spec records it as part of F1's contract surface so downstream slicing treats it as **satisfied**, not net-new work; the genuinely-unbuilt part of F1 is the reader/derive layer (`brood-index.ts`, `listSpawnRecords` / `loadSpawnRecord` / `derivedStatus`, `SpawnView`).
 - Docker liveness reconciliation is a **caller-controlled** sub-capability: the caller may pass a `docker inspect` snapshot into `derivedStatus` / view derivation, and the module reconciles `containerLive` from it. When no snapshot is supplied, derivation uses the persisted record alone. The module itself never shells out to Docker as a required step.
 - The reader is tolerant by construction: a **safe-read protocol** (one retry on JSON parse failure, then skip-and-warn) guarantees a concurrent dispatch write cannot fail a `list`, and the reader accepts records both with and without an M2-era `profile` field.
 - **Architecture-note supersession (2026-05).** The feature map records that Brood has since shipped as a containerized Fastify service whose session state lives in a SQLite registry at `~/.march/brood` behind a swappable `SessionRepository`, rather than a read-and-derive layer over per-spawn JSON. The feature map states the *decomposition still holds* and the F1–F6 descriptions are read with that mechanism correction. This spec marks Feature 1 **as decomposed** — the `SpawnView` / `derivedStatus` / `failureReason` API surface and tolerance guarantees are the load-bearing deliverable; whether the backing store is the JSON directory or the registry is a mechanism the implementation may reconcile (see SD-001). [Critical Assumption]
@@ -47,7 +47,7 @@ As an operator-facing verb, I want a derived view that tells me whether a spawn 
 
 **Why this priority**: Derived conditions (`needsAttention`, `disposed`, `containerLive`) are what make `list`/`inspect` legible, but persisting them would corrupt the durable `SpawnStatus` contract M1 owns. The derivation must be computed, never stored.
 
-**Independent Test**: Construct records in each persisted status, call `derivedStatus(record)` and build the `SpawnView`, and verify `needsAttention` / `disposed` / `containerLive` are computed correctly; then re-read the on-disk record and confirm no derived value was written back and the persisted `SpawnStatus` is still one of the four canonical values.
+**Independent Test**: Construct records in each persisted status, call `derivedStatus(record)` to obtain the `SpawnView`, and verify `needsAttention` / `disposed` / `containerLive` are computed correctly; then re-read the on-disk record and confirm no derived value was written back and the persisted `SpawnStatus` is still one of the four canonical values.
 
 **Acceptance Scenarios**:
 
@@ -119,8 +119,8 @@ Recommended implementation sequence:
 - **FR-006**: `derivedStatus` MUST accept an optional `docker inspect` snapshot and, when supplied, reconcile `containerLive` from it; when omitted, derivation MUST use the persisted record alone and make no Docker call.
 - **FR-007**: The persisted `SpawnStatus` enum MUST remain exactly `"created" | "running" | "stopped" | "failed"`; `"needs-attention"` and `"disposed"` MUST be derived only and MUST NEVER be written to disk.
 - **FR-008**: The `disposed` condition MUST be derived from the record state (JSON present, container/worktree absent) rather than read from a persisted status value.
-- **FR-009**: A `failureReason?: string` field MUST be added to `SpawnRecord` as an optional, forward-compatible field with NO schema `version` bump (`version` stays `1`).
-- **FR-010**: `markSpawnRecordFailed` MUST persist its currently-dropped `error` argument into the new `failureReason` field.
+- **FR-009**: `SpawnRecord` MUST carry an optional, forward-compatible `failureReason?: string` field with NO schema `version` bump (`version` stays `1`). *(Already satisfied in `src/brood/spawn-record.ts`; recorded here as part of F1's contract surface.)*
+- **FR-010**: `markSpawnRecordFailed` MUST persist its `error` argument into the `failureReason` field. *(Already satisfied in `src/brood/spawn-record.ts`.)*
 - **FR-011**: Docker-inspect-driven liveness reconciliation MUST be a caller-controlled sub-capability — the caller passes the snapshot in — and MUST NOT be a required Docker call inside the module.
 - **FR-012**: This feature MUST NOT change the persisted `SpawnStatus` enum values, bump the schema `version`, add a `profile` field (M2 F5), or implement the CLI surface (F2), teardown logic (F3), concurrent-dispatch audit (F4), tmux integration (F5), or skill content (F6).
 
@@ -133,7 +133,7 @@ Recommended implementation sequence:
 
 ## Assumptions
 
-- M1's per-spawn record JSON under `~/.march/spawns/` and `src/spawn-record.ts` (including the `MarkSpawnRecordFailedOptions` JSDoc slot for `error`) are present and remain the data source this feature reads and extends.
+- M1's per-spawn record JSON under `~/.march/spawns/` and `src/brood/spawn-record.ts` (including `MarkSpawnRecordFailedOptions` and its `error` slot, already wired to `failureReason`) are present and remain the data source the new reader/derive layer builds over.
 - The M2-era `profile` field is owned by M2 F5; this feature only tolerates its presence or absence and does not add it.
 - The downstream CLI read surface (F2), teardown (F3), concurrent-dispatch audit (F4), tmux attach (F5), and skills (F6) consume this API but are out of scope here.
 - Per the feature map's architecture note, Brood may realize this API over the SQLite registry rather than the JSON directory; the `SpawnView` / `derivedStatus` / `failureReason` contract is what this feature pins, and the backing-store mechanism is reconciled at task slicing (SD-001).
@@ -163,5 +163,5 @@ Recommended implementation sequence:
 - **SC-001**: Every downstream Brood verb can read spawn state through one API — `listSpawnRecords()` / `loadSpawnRecord(id)` / `derivedStatus(record, dockerSnapshot?)` — without re-parsing record JSON itself.
 - **SC-002**: A concurrent dispatch write to a record file never fails a `list`; the unreadable record is skipped-and-warned after one retry.
 - **SC-003**: The persisted `SpawnStatus` enum and schema `version` are unchanged, and no derived `needs-attention` / `disposed` value is ever written to disk.
-- **SC-004**: An operator can recover *why* a spawn failed from the persisted `failureReason`, captured from the `error` previously dropped by `markSpawnRecordFailed`.
+- **SC-004**: An operator can recover *why* a spawn failed from the persisted `failureReason`, captured from the `error` passed to `markSpawnRecordFailed`.
 - **SC-005**: `derivedStatus` reconciles `containerLive` from a caller-supplied Docker snapshot when given one, and stays pure (no Docker call, no mutation) when not.
