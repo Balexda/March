@@ -3,7 +3,7 @@ import type { LoopState, SliceExternalState, SmithyView } from "./types.js";
 import { looseSessionMatch, summarizeWorkers } from "../pure/session.js";
 import { dispatchableReady, isTerminalSlice } from "../pure/slice.js";
 import { actionableLayer0Items, queueDepth, readySmithyItems } from "../pure/smithy-graph.js";
-import type { ObservedSession, SystemState } from "../../../herald/events.js";
+import { prSnapshotErrored, prSnapshotNumber, type ObservedSession, type SystemState } from "../../../herald/events.js";
 
 /**
  * Stage 1: gather every external read into one {@link LoopState} snapshot. Since
@@ -22,20 +22,55 @@ import type { ObservedSession, SystemState } from "../../../herald/events.js";
  * fully unit-testable.
  */
 
-export interface SenseDeps {
+/**
+ * The minimal I/O the legate's Stage 1 ({@link senseFromHerald}) needs: it reads
+ * the world from the folded Herald inbox, so the only impure read left is the
+ * local smithy graph. Deliberately gh-free and Castra-free — the legate builds
+ * this via `fold-deps.ts` (not `sense-io.ts`), keeping all gh sensing on the
+ * Herald side. {@link SenseDeps} extends it with the gh/Castra reads that only
+ * Herald's {@link senseObserved} performs.
+ */
+export interface FoldDeps {
   readonly meta: LoopMeta;
   readonly now: () => string;
+  readonly readSmithyStatus: (repoPath: string) => Promise<any>;
+  /** Sink for non-fatal sense warnings (so they surface in the action log). */
+  readonly warn?: (message: string) => void;
+}
+
+/** One open PR as returned by the cheap per-profile cursor probe ({@link
+ *  SenseDeps.listOpenPrs}) — just enough to decide whether the expensive
+ *  per-PR detail fetch is worth running this tick. */
+export interface OpenPrEntry {
+  /** `pullRequest.updatedAt` — the change cursor. Bumps on any comment, review,
+   *  or commit, so a value equal to the last-fetched `pr.updated_at` means
+   *  nothing review-relevant moved since we last looked. */
+  updatedAt: string;
+  headRefName: string;
+}
+
+/** Open PRs keyed by number — the result of one `listOpenPrs` probe per tick. */
+export type OpenPrIndex = Map<number, OpenPrEntry>;
+
+export interface SenseDeps extends FoldDeps {
   /** Castra session list, mapped to agent-deck-shaped objects (or `{error}`). */
   readonly listSessions: () => Promise<any[] | { error: string }>;
-  readonly readSmithyStatus: (repoPath: string) => Promise<any>;
   /** Per-slice PR state (queryPrForBabysit) for an active slice. */
   readonly queryPr: (slice: any, state: any, repoPath: string | undefined) => Promise<any>;
   /** Branch/output-based PR discovery for an implementing slice with no PR yet. */
   readonly discoverPr?: (slice: any, state: any, repoPath: string | undefined, sessionId: string) => Promise<any>;
   /** Recent session output for login/error detection. */
   readonly sessionOutput: (sessionId: string) => Promise<{ output: string; error?: string }>;
-  /** Sink for non-fatal sense warnings (so they surface in the action log). */
-  readonly warn?: (message: string) => void;
+  /**
+   * One cheap GraphQL probe of the repo's open PRs (number + `updatedAt`), used
+   * by {@link senseObserved} as a change cursor: a known-PR slice whose live
+   * `updatedAt` still equals the last-fetched value skips the expensive detail
+   * fetch this tick (the GraphQL-budget fix). Optional — when absent (e.g. the
+   * legate's fold-sense, or a test stub) observation degrades to fetching every
+   * tracked PR every tick. A profile-wide `{error}` (probe failed) degrades the
+   * same way, so a probe outage never strands a slice.
+   */
+  readonly listOpenPrs?: (state: any) => Promise<OpenPrIndex | { error: string }>;
 }
 
 /**
@@ -45,7 +80,7 @@ export interface SenseDeps {
  * fetches, so it can't fight Herald.
  */
 async function senseSmithy(
-  deps: SenseDeps,
+  deps: FoldDeps,
   state: any,
   repoPath: string | undefined,
 ): Promise<SmithyView> {
@@ -229,7 +264,7 @@ export function rebuildWorkingState(sys: SystemState, meta: LoopMeta): any {
  * transition is the event log (the handlers' `emitTransition`), so the in-memory
  * `raw` can always be rebuilt after a restart.
  */
-export async function senseFromHerald(deps: SenseDeps, herald: HeraldInbox, prevRaw: any): Promise<LoopState> {
+export async function senseFromHerald(deps: FoldDeps, herald: HeraldInbox, prevRaw: any): Promise<LoopState> {
   const ts = deps.now();
 
   // Drain + fold the Herald inbox: the observed world (sessions, workers,
@@ -319,6 +354,54 @@ export function resolveSliceSession(
   return sessions.find((sx) => looseSessionMatch(sx, loose)) ?? null;
 }
 
+/** Checks haven't reached a terminal verdict — `gh pr view`'s rollup is `NONE`
+ *  before any check has registered and `PENDING` while they run. In BOTH states a
+ *  later status-check create/complete can change `statusCheckRollup` WITHOUT
+ *  advancing `pullRequest.updatedAt`, so a PR in either must be re-fetched every
+ *  tick (it can't ride the cursor) — otherwise a PR first observed at `NONE` would
+ *  be skipped forever and never surface its CI verdict to the babysit merge gate.
+ *  (A repo with NO CI sits at `NONE` permanently and so isn't cursor-gated, but
+ *  its review activity still bumps `updatedAt`, so nothing is missed — only a PR
+ *  detail fetch per tick is spent, which is acceptable.) */
+function prChecksUnsettled(pr: any): boolean {
+  return pr?.checks === "NONE" || pr?.checks === "PENDING";
+}
+
+/** The PR has at least one unresolved review thread. Resolving a thread without
+ *  a push may not bump `updatedAt`, so keep re-fetching while threads are open so
+ *  the resolution (steward pushed + resolved) is never missed. */
+function prHasUnresolvedThreads(pr: any): boolean {
+  if (typeof pr?.thread_count === "number") return pr.thread_count > 0;
+  return Array.isArray(pr?.unresolved_threads) && pr.unresolved_threads.length > 0;
+}
+
+/**
+ * The cursor gate (the GraphQL-budget fix): given the last-stored PR snapshot and
+ * this tick's cheap open-PR probe entry, decide whether the expensive
+ * `queryPrForBabysit` detail fetch is worth running. Returns true (fetch) when
+ * something may have moved; false (skip — keep the stored snapshot, emit nothing)
+ * for an idle, fully-observed PR. See {@link SenseDeps.listOpenPrs}.
+ */
+export function shouldRefetchKnownPr(priorPr: any, live: OpenPrEntry | undefined): boolean {
+  // Gone from the OPEN set → it merged/closed; fetch by number to record the
+  // terminal transition (the by-number query still resolves after branch delete).
+  if (!live) return true;
+  // No cursor stored yet (first observe, or a snapshot from before this feature):
+  // fetch so we capture `updated_at` to gate on next tick.
+  if (priorPr?.updated_at === undefined) return true;
+  // A latched transient error must clear: #288 keeps the number/state and ATTACHES
+  // `error` to the stored snapshot, so without this a `gh pr view` blip would leave
+  // the slice stuck on the errored snapshot until unrelated activity bumps
+  // updatedAt. Re-fetch until a successful detail read drops the error.
+  if (prSnapshotErrored(priorPr)) return true;
+  // Activity since we last looked (comment / review / commit all bump updatedAt).
+  if (live.updatedAt !== priorPr.updated_at) return true;
+  // Lifecycle states whose changes updatedAt can miss (see the helpers above).
+  if (prChecksUnsettled(priorPr)) return true;
+  if (prHasUnresolvedThreads(priorPr)) return true;
+  return false;
+}
+
 /**
  * Stage 1 for the Herald observation service (#176): assemble the observed
  * {@link LoopState} the diff folds into events, sourcing the slices-to-observe
@@ -330,6 +413,11 @@ export function resolveSliceSession(
  * the default-branch git sync that keeps the local checkout fresh is owned by
  * Herald's observe path (`runObservation`, gated by `MARCH_HERALD_SYNC`) and
  * runs BEFORE this read, not inside it (#300).
+ *
+ * PR detail reads are gated by a single cheap open-PR probe (`deps.listOpenPrs`,
+ * the change cursor) so a known, idle PR is NOT re-fetched every tick — that
+ * per-tick `gh pr view` + review-thread GraphQL fan-out is what exhausts the
+ * GraphQL budget. See {@link shouldRefetchKnownPr}.
  */
 export async function senseObserved(deps: SenseDeps, prev: SystemState): Promise<LoopState> {
   const ts = deps.now();
@@ -347,6 +435,17 @@ export async function senseObserved(deps: SenseDeps, prev: SystemState): Promise
     if (s?.name) sessionsById.set(String(s.name), s);
   }
   const workers = summarizeWorkers(sessionList, deps.meta.worker_group);
+
+  // One cheap GraphQL probe of the repo's open PRs (number + updatedAt) drives the
+  // per-PR refetch gate below. Skipped entirely unless some slice actually has a
+  // tracked PR number to gate — an all-implementing or idle profile spends nothing.
+  // `null` when the probe is unwired (no listOpenPrs) or failed (`{error}`) — both
+  // degrade to fetching every tracked PR this tick, so a probe outage never strands
+  // a slice; it just forgoes the savings.
+  const anyKnownPr = Object.values(prev.slices).some((s) => !s.archived && prSnapshotNumber(s.pr) !== null);
+  const openProbe = anyKnownPr && deps.listOpenPrs ? await deps.listOpenPrs(state) : null;
+  const openPrs: OpenPrIndex | null =
+    openProbe && !(openProbe as { error?: unknown }).error ? (openProbe as OpenPrIndex) : null;
 
   // Per-slice external state for slices the projection knows are live and
   // non-terminal — the union of what cleanup (PR terminal?) and babysit (PR/CI/
@@ -387,25 +486,37 @@ export async function senseObserved(deps: SenseDeps, prev: SystemState): Promise
     const observeEscalated = sliceLike.stage === "escalated" && !!sliceLike.branch && !s.recovered;
     if (isTerminalSlice(sliceLike) && !observeEscalated) continue;
     const entry: SliceExternalState = {};
+    const knownNumber = prSnapshotNumber(s.pr);
     try {
-      let pr = await deps.queryPr(sliceLike, state, repoPath);
-      // No PR snapshot yet: queryPr skips (no number to query), so fall back to
-      // branch/output-based discovery so the legate sees the PR appear in its
-      // inbox uniformly. Observe for an implementing slice (the original case) AND
-      // for an escalated slice with a known branch (#173): an escalated/diverged
-      // slice may have an open PR from an EARLIER dispatch that the legate must
-      // adopt on the next branch-collision — and it only learns of it from this
-      // observation. Recovered (tombstoned, #238/#239) slices are excluded; they
-      // are re-observed once the recovery's fresh dispatch lands them back in
-      // hatchery-pending → implementing.
-      const needsPrObservation =
-        (!pr || pr.skipped) &&
-        !(s.pr as any)?.number &&
-        (s.stage === "implementing" || (s.stage === "escalated" && !!s.branch && !s.recovered));
-      if (needsPrObservation && deps.discoverPr) {
-        pr = (await deps.discoverPr(sliceLike, state, repoPath, sessionId)) ?? pr;
+      if (knownNumber !== null && openPrs) {
+        // Known PR + a live open-PR probe: ride the cursor. Re-fetch the detail
+        // (gh pr view + review-thread GraphQL) only when something may have moved;
+        // otherwise leave `entry.pr` unset so the diff keeps the stored snapshot
+        // and emits no event. This is the per-tick GraphQL fan-out the gate cuts.
+        if (shouldRefetchKnownPr(s.pr, openPrs.get(knownNumber))) {
+          entry.pr = await deps.queryPr(sliceLike, state, repoPath);
+        }
+      } else {
+        // No tracked PR number yet (discovery), or no probe to gate on (degrade to
+        // the original always-observe path). queryPr skips when there's no number;
+        // discovery then finds a freshly-opened PR by branch/output so the legate
+        // sees it appear in its inbox uniformly. Observe for an implementing slice
+        // (the original case) AND for an escalated slice with a known branch (#173):
+        // an escalated/diverged slice may have an open PR from an EARLIER dispatch
+        // that the legate must adopt on the next branch-collision — and it only
+        // learns of it from this observation. Recovered (tombstoned, #238/#239)
+        // slices are excluded; they are re-observed once the recovery's fresh
+        // dispatch lands them back in hatchery-pending → implementing.
+        let pr = await deps.queryPr(sliceLike, state, repoPath);
+        const needsPrObservation =
+          (!pr || pr.skipped) &&
+          !(s.pr as any)?.number &&
+          (s.stage === "implementing" || (s.stage === "escalated" && !!s.branch && !s.recovered));
+        if (needsPrObservation && deps.discoverPr) {
+          pr = (await deps.discoverPr(sliceLike, state, repoPath, sessionId)) ?? pr;
+        }
+        entry.pr = pr;
       }
-      entry.pr = pr;
     } catch (err: any) {
       entry.pr = { error: err?.message || String(err) };
     }

@@ -589,3 +589,136 @@ describe("senseObserved (Herald observation Stage 1)", () => {
     expect(state.smithy.error).toBe("smithy down");
   });
 });
+
+describe("senseObserved PR change-cursor (listOpenPrs gate)", () => {
+  const live = [{ id: "s1", group: "legate-workers", status: "idle" }];
+  // A tracked, open PR with a stored cursor and clean (idle) lifecycle state.
+  const prevWithPr = (pr: Record<string, unknown>) =>
+    foldedState({
+      slices: { p: slice({ sliceId: "p", stage: "pr-open", sessionId: "s1", branch: "b", pr }) },
+    });
+  const index = (entries: Array<[number, { updatedAt: string; headRefName?: string }]>) =>
+    new Map(entries.map(([n, e]) => [n, { updatedAt: e.updatedAt, headRefName: e.headRefName ?? "b" }]));
+
+  it("SKIPS the detail fetch when updatedAt is unchanged and the PR is idle", async () => {
+    const queryPr = vi.fn(async () => ({ number: 7, state: "OPEN" }));
+    const state = await senseObserved(
+      deps({
+        listSessions: async () => live,
+        queryPr,
+        listOpenPrs: async () => index([[7, { updatedAt: "T1" }]]),
+      }),
+      prevWithPr({ number: 7, updated_at: "T1", checks: "PASS", thread_count: 0 }),
+    );
+    expect(queryPr).not.toHaveBeenCalled();
+    // No detail observed → the diff keeps the stored snapshot (pr left unset).
+    expect(state.perSlice.p?.pr).toBeUndefined();
+  });
+
+  it("RE-FETCHES when updatedAt advanced past the stored cursor", async () => {
+    const queryPr = vi.fn(async () => ({ number: 7, state: "OPEN", updated_at: "T2" }));
+    const state = await senseObserved(
+      deps({
+        listSessions: async () => live,
+        queryPr,
+        listOpenPrs: async () => index([[7, { updatedAt: "T2" }]]),
+      }),
+      prevWithPr({ number: 7, updated_at: "T1", checks: "PASS", thread_count: 0 }),
+    );
+    expect(queryPr).toHaveBeenCalledTimes(1);
+    expect(state.perSlice.p?.pr).toMatchObject({ number: 7 });
+  });
+
+  it("RE-FETCHES an idle-cursor PR whose checks are still PENDING (CI may not bump updatedAt)", async () => {
+    const queryPr = vi.fn(async () => ({ number: 7, state: "OPEN" }));
+    await senseObserved(
+      deps({
+        listSessions: async () => live,
+        queryPr,
+        listOpenPrs: async () => index([[7, { updatedAt: "T1" }]]),
+      }),
+      prevWithPr({ number: 7, updated_at: "T1", checks: "PENDING", thread_count: 0 }),
+    );
+    expect(queryPr).toHaveBeenCalledTimes(1);
+  });
+
+  it("RE-FETCHES an idle-cursor PR whose checks are still NONE (observed pre-CI; create may not bump updatedAt)", async () => {
+    const queryPr = vi.fn(async () => ({ number: 7, state: "OPEN" }));
+    await senseObserved(
+      deps({
+        listSessions: async () => live,
+        queryPr,
+        listOpenPrs: async () => index([[7, { updatedAt: "T1" }]]),
+      }),
+      prevWithPr({ number: 7, updated_at: "T1", checks: "NONE", thread_count: 0 }),
+    );
+    expect(queryPr).toHaveBeenCalledTimes(1);
+  });
+
+  it("RE-FETCHES an idle-cursor PR carrying a latched error so a transient gh failure clears", async () => {
+    const queryPr = vi.fn(async () => ({ number: 7, state: "OPEN" }));
+    await senseObserved(
+      deps({
+        listSessions: async () => live,
+        queryPr,
+        listOpenPrs: async () => index([[7, { updatedAt: "T1" }]]),
+      }),
+      // #288 keeps number/state and attaches `error` to the stored snapshot.
+      prevWithPr({ number: 7, updated_at: "T1", checks: "PASS", thread_count: 0, error: "rate limited" }),
+    );
+    expect(queryPr).toHaveBeenCalledTimes(1);
+  });
+
+  it("RE-FETCHES an idle-cursor PR with unresolved threads (catch resolve-without-push)", async () => {
+    const queryPr = vi.fn(async () => ({ number: 7, state: "OPEN" }));
+    await senseObserved(
+      deps({
+        listSessions: async () => live,
+        queryPr,
+        listOpenPrs: async () => index([[7, { updatedAt: "T1" }]]),
+      }),
+      prevWithPr({ number: 7, updated_at: "T1", checks: "PASS", thread_count: 2 }),
+    );
+    expect(queryPr).toHaveBeenCalledTimes(1);
+  });
+
+  it("RE-FETCHES (by number) when the tracked PR dropped out of the open set — merged/closed", async () => {
+    const queryPr = vi.fn(async () => ({ number: 7, state: "MERGED" }));
+    const state = await senseObserved(
+      deps({
+        listSessions: async () => live,
+        queryPr,
+        listOpenPrs: async () => index([]), // PR 7 is no longer open
+      }),
+      prevWithPr({ number: 7, updated_at: "T1", checks: "PASS", thread_count: 0 }),
+    );
+    expect(queryPr).toHaveBeenCalledTimes(1);
+    expect(state.perSlice.p?.pr).toMatchObject({ state: "MERGED" });
+  });
+
+  it("RE-FETCHES when no cursor was stored yet (first observe / pre-feature snapshot)", async () => {
+    const queryPr = vi.fn(async () => ({ number: 7, state: "OPEN", updated_at: "T1" }));
+    await senseObserved(
+      deps({
+        listSessions: async () => live,
+        queryPr,
+        listOpenPrs: async () => index([[7, { updatedAt: "T1" }]]),
+      }),
+      prevWithPr({ number: 7, checks: "PASS", thread_count: 0 }), // no updated_at
+    );
+    expect(queryPr).toHaveBeenCalledTimes(1);
+  });
+
+  it("DEGRADES to always-fetch when the probe fails (never strands a slice)", async () => {
+    const queryPr = vi.fn(async () => ({ number: 7, state: "OPEN" }));
+    await senseObserved(
+      deps({
+        listSessions: async () => live,
+        queryPr,
+        listOpenPrs: async () => ({ error: "rate limited" }),
+      }),
+      prevWithPr({ number: 7, updated_at: "T1", checks: "PASS", thread_count: 0 }),
+    );
+    expect(queryPr).toHaveBeenCalledTimes(1);
+  });
+});

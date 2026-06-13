@@ -1,7 +1,8 @@
 import { execFile } from "node:child_process";
 import { CastraClient } from "../castra/client.js";
 import type { LoopMeta } from "../legate/loop/meta.js";
-import type { SenseDeps } from "../legate/loop/state/sense.js";
+import type { OpenPrIndex, SenseDeps } from "../legate/loop/state/sense.js";
+import { readSmithyStatus } from "./smithy-status.js";
 
 /**
  * Shared system-observation I/O — the impure reads that turn the live world
@@ -79,6 +80,8 @@ export interface SenseIo {
   discoverPrForSlice(slice: any, state: any, sessionId: string): Promise<any>;
   prMatchesSliceBranch(slice: any, pr: any): Promise<boolean>;
   captureRecentSessionOutput(sessionId: string): Promise<{ output: string; error?: string }>;
+  /** The cheap open-PR change-cursor probe (one GraphQL call). */
+  listOpenPrs(state: any): Promise<OpenPrIndex | { error: string }>;
   /** Adapt to the injected {@link SenseDeps} contract the sense entry points consume. */
   toSenseDeps(): SenseDeps;
 }
@@ -224,6 +227,12 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
   const warn = ctx.warn;
   let castraClient = ctx.castra;
   const castra = (): CastraClient => (castraClient ??= new CastraClient({ env }));
+  // The repo's `owner/name` never changes for a checkout, and this bundle is built
+  // fresh per profile per tick — so resolving it once and reusing it collapses the
+  // former one-`gh repo view`-per-slice fan-out into a single call per tick.
+  // `undefined` = not yet resolved; `null` = resolution failed (cached for the tick
+  // so a gh outage isn't retried per slice).
+  let ownerCache: string | null | undefined;
 
   async function listSessions(): Promise<any[] | { error: string }> {
     // Sessions come from Castra (the agent-deck interdiction service), mapped
@@ -240,16 +249,19 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
   async function repoOwner(state: any): Promise<string | null> {
     const owner = state?.repo?.owner_with_name;
     if (typeof owner === "string" && owner.length > 0) return owner;
+    if (ownerCache !== undefined) return ownerCache;
     const repoPath = state?.repo?.path || meta.repo?.path;
+    // Don't cache a "no path" miss — it's a caller/config gap, not a resolved fact.
     if (typeof repoPath !== "string" || repoPath.length === 0) return null;
     try {
       const out = await execText("gh", ["repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"], {
         cwd: repoPath,
       });
-      return out.trim() || null;
+      ownerCache = out.trim() || null;
     } catch {
-      return null;
+      ownerCache = null;
     }
+    return ownerCache;
   }
 
   async function ghPrArgs(slice: any, state: any, fields: string): Promise<any> {
@@ -361,7 +373,7 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
     const request = await ghPrArgs(
       slice,
       state,
-      "number,url,state,mergeable,reviewDecision,statusCheckRollup,headRefName,title,author",
+      "number,url,state,mergeable,reviewDecision,statusCheckRollup,headRefName,title,author,updatedAt",
     );
     if (request.skipped) return request;
     const summary = JSON.parse(await execText("gh", request.args, request.options));
@@ -377,6 +389,9 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
       url: summary.url,
       state: summary.state,
       mergeable: summary.mergeable,
+      // The change cursor: senseObserved stores this and compares it against the
+      // next tick's cheap open-PR probe to skip an unchanged PR's detail fetch.
+      updated_at: summary.updatedAt,
       head_branch: summary.headRefName,
       head_sha: graphql.headRefOid,
       merge_state_status: graphql.mergeStateStatus ? String(graphql.mergeStateStatus).toLowerCase() : null,
@@ -470,12 +485,56 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
     }
   }
 
-  async function readSmithyStatus(repoPath: string): Promise<any> {
-    // --pending = shorthand for --status in-progress,not-started. Filters out
-    // all done records up-front. Layer 0 of the returned graph still means
-    // "ready to dispatch right now".
-    const out = await execText("smithy", ["status", "--format", "json", "--pending"], { cwd: repoPath });
-    return JSON.parse(out);
+  /**
+   * The change-cursor probe: ONE GraphQL call listing the repo's open PRs with
+   * just `number` + `updatedAt` (+ `headRefName`). `senseObserved` reads it once
+   * per tick and skips the expensive per-PR detail fetch for any tracked PR whose
+   * `updatedAt` hasn't advanced — collapsing the per-open-PR-per-tick `gh pr view`
+   * + review-thread GraphQL fan-out that exhausts the GraphQL budget.
+   *
+   * Cost is ~1 point: a single connection (`pullRequests(first: 100)`). Capped at
+   * 100 (ordered most-recently-updated first); a repo with >100 open PRs just
+   * leaves the overflow ungated — they fall through to a by-number detail fetch,
+   * the same as today, so correctness holds, only the savings taper.
+   *
+   * Returns `{error}` (never throws) when the owner can't be resolved or the query
+   * fails, so the caller degrades to the always-fetch path instead of stranding.
+   */
+  async function listOpenPrs(state: any): Promise<OpenPrIndex | { error: string }> {
+    const owner = await repoOwner(state);
+    if (!owner) return { error: "repo owner unavailable" };
+    const [repoOwnerName, repoName] = owner.split("/");
+    if (!repoOwnerName || !repoName) return { error: `unparseable repo owner: ${owner}` };
+    try {
+      const out = await execText("gh", [
+        "api",
+        "graphql",
+        "-F",
+        `owner=${repoOwnerName}`,
+        "-F",
+        `name=${repoName}`,
+        "-f",
+        `query=query($owner: String!, $name: String!) {
+  repository(owner: $owner, name: $name) {
+    pullRequests(states: OPEN, first: 100, orderBy: {field: UPDATED_AT, direction: DESC}) {
+      nodes { number updatedAt headRefName }
+    }
+  }
+}`,
+      ]);
+      const nodes = JSON.parse(out)?.data?.repository?.pullRequests?.nodes;
+      const index: OpenPrIndex = new Map();
+      if (Array.isArray(nodes)) {
+        for (const node of nodes) {
+          if (typeof node?.number === "number") {
+            index.set(node.number, { updatedAt: node.updatedAt, headRefName: node.headRefName });
+          }
+        }
+      }
+      return index;
+    } catch (err: any) {
+      return { error: err?.message || String(err) };
+    }
   }
 
   async function syncDefaultBranch(state: any): Promise<SyncResult> {
@@ -521,6 +580,7 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
       discoverPr: (slice: any, state: any, _repoPath: string | undefined, sessionId: string) =>
         discoverPrForSlice(slice, state, sessionId),
       sessionOutput: (sessionId: string) => captureRecentSessionOutput(sessionId),
+      listOpenPrs: (state: any) => listOpenPrs(state),
       ...(warn ? { warn } : {}),
     };
   }
@@ -533,6 +593,7 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
     discoverPrForSlice,
     prMatchesSliceBranch,
     captureRecentSessionOutput,
+    listOpenPrs,
     toSenseDeps,
   };
 }
