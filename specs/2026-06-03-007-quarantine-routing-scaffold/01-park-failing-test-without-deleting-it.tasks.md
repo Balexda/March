@@ -18,7 +18,7 @@
 
 ### Tasks
 
-- [ ] **Add the quarantine parking primitive**
+- [x] **Add the quarantine parking primitive**
 
   Add the repo-local routing primitive in the source location chosen during implementation under SD-001, and expose it through a single non-interactive repository command. The primitive should park a repo-relative `*.test.ts` file under `tests/quarantine/`, record the origin path at park time, and satisfy AS 1.1-1.3 without implementing staged-script exclusion, index generation, documentation, or M6 SLA behavior.
 

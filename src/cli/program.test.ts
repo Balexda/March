@@ -410,6 +410,49 @@ describe("march CLI", () => {
     expect(helpSubcommand.stdout).toBe(helpFlag.stdout);
   });
 
+  it("march quarantine park moves a test and records its origin without prompting", () => {
+    const repoRoot = makeRealRepo();
+    const origin = "src/example/quarantine-me.test.ts";
+    const body = [
+      "/* @scope unit @determinism deterministic @channel ci */",
+      "import { describe, expect, it } from \"vitest\";",
+      "describe(\"quarantine\", () => {",
+      "  it(\"keeps the assertion\", () => {",
+      "    expect(true).toBe(true);",
+      "  });",
+      "});",
+      "",
+    ].join("\n");
+    fs.mkdirSync(path.join(repoRoot, "src/example"), { recursive: true });
+    fs.writeFileSync(path.join(repoRoot, origin), body);
+
+    // Run from a nested subdirectory to prove repo-relative paths resolve
+    // from the git repository root, not the caller's working directory.
+    const result = runWithEnv(
+      ["quarantine", "park", origin],
+      {},
+      { cwd: path.join(repoRoot, "src/example") },
+    );
+
+    const quarantinedPath = path.join(
+      repoRoot,
+      "tests/quarantine/src/example/quarantine-me.test.ts",
+    );
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain(
+      "Parked src/example/quarantine-me.test.ts at tests/quarantine/src/example/quarantine-me.test.ts.",
+    );
+    expect(fs.existsSync(path.join(repoRoot, origin))).toBe(false);
+    expect(fs.readFileSync(quarantinedPath, "utf-8")).toBe(body);
+    expect(
+      JSON.parse(
+        fs.readFileSync(path.join(repoRoot, "tests/quarantine/.origins.json"), "utf-8"),
+      ),
+    ).toEqual({
+      "tests/quarantine/src/example/quarantine-me.test.ts": origin,
+    });
+  });
+
   it("march help init exits 0 and stdout contains init-specific help text", () => {
     const result = run(["help", "init"]);
     expect(result.exitCode).toBe(0);

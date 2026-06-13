@@ -67,6 +67,7 @@ import {
 } from "../brood/spawn-record.js";
 import { updateMarch, UpdateError } from "../bootstrap/update.js";
 import { CLI_VERSION } from "../shared/version.js";
+import { parkQuarantinedTest, QuarantineError } from "../testing/quarantine.js";
 import { startDispatchSpan } from "../observability/spawn-trace.js";
 import { recordSpawnRun } from "../observability/spawn-metrics.js";
 import { buildSpawnOtelContext } from "../observability/in-spawn-emitter.js";
@@ -240,6 +241,60 @@ program
     commandHandled = true;
     console.log(CLI_VERSION);
     process.exitCode = SUCCESS;
+  });
+
+const quarantine = program
+  .command("quarantine")
+  .description("Route failing tests into the repository quarantine area");
+
+quarantine
+  .command("park <testPath>")
+  .description("Move a repo-relative *.test.ts file under tests/quarantine/")
+  .action((testPath: string) => {
+    commandHandled = true;
+    if (!isOnPath("git")) {
+      process.stderr.write(
+        "git not found on PATH — required to detect the repository root.\n",
+      );
+      process.exitCode = ERROR;
+      return;
+    }
+    let repoRoot: string;
+    try {
+      repoRoot = execFileSync("git", ["rev-parse", "--show-toplevel"], {
+        encoding: "utf-8",
+        stdio: ["ignore", "pipe", "pipe"],
+      }).trim();
+    } catch (err) {
+      const stderr = ((err as { stderr?: Buffer | string }).stderr ?? "")
+        .toString()
+        .trim();
+      if (stderr.includes("not a git repository")) {
+        process.stderr.write(
+          "Run `march quarantine park` from inside a git repository.\n",
+        );
+      } else {
+        process.stderr.write(
+          `Failed to detect the repository root: ${stderr || (err as Error).message}\n`,
+        );
+      }
+      process.exitCode = ERROR;
+      return;
+    }
+    try {
+      const result = parkQuarantinedTest(testPath, { repoRoot });
+      console.log(
+        `Parked ${result.originPath} at ${result.quarantinedPath}.`,
+      );
+      process.exitCode = SUCCESS;
+    } catch (err) {
+      if (err instanceof QuarantineError) {
+        process.stderr.write(err.message + "\n");
+        process.exitCode = ERROR;
+        return;
+      }
+      throw err;
+    }
   });
 
 program
