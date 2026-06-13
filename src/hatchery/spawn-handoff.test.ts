@@ -281,6 +281,7 @@ describe("spawn-handoff", () => {
             setAttributes: (attributes: Record<string, unknown>) => {
               recorded.attributes = { ...recorded.attributes, ...attributes };
             },
+            setError: () => {},
             spanContext: () => undefined,
           };
           try {
@@ -291,7 +292,7 @@ describe("spawn-handoff", () => {
           }
         },
         spanAsync: async (_name, fn) =>
-          fn({ setAttributes: () => {}, spanContext: () => undefined }),
+          fn({ setAttributes: () => {}, setError: () => {}, spanContext: () => undefined }),
         setAttributes: () => {},
         recordException: () => {},
         traceparent: () => undefined,
