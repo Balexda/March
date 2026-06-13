@@ -18,7 +18,7 @@
 
 ### Tasks
 
-- [ ] **Author the Legate public interface contract**
+- [x] **Author the Legate public interface contract**
 
   Create `docs/subsystems/legate/contract.md` with the required contract section shape and a Legate-owned `## Public Interface` section. Document the operator-visible loop command or process surface, configuration inputs, observed service dependencies, exported loop and serve entrypoint surface, slice decision outputs, and terminal diagnostic outputs as human-authored prose while leaving generated extraction content empty.
 
@@ -31,7 +31,7 @@
   - Herald, Hatchery, Brood, Castra, and Steward are referenced only as integration boundaries; their route, lifecycle authority, session-hosting, and role-interface contracts are not re-authored.
   - No Spawn contract change, Steward role contract, contract checker, freshness mapping, AUTOGEN generator, CI enforcement, or runtime behavior change is introduced.
 
-- [ ] **Document Legate loop invariants**
+- [x] **Document Legate loop invariants**
 
   Fill `## Invariants` with assertable cursor, projection, dispatch, babysit, trace, and terminal-state promises owned by Legate. The contract should support L2 tests that diagnose stalled slices, missing events, duplicate events, relaunch decisions, and terminal outcomes without reading terminal logs or re-authoring service contracts.
 
@@ -44,7 +44,7 @@
   - Terminal outcome promises identify the labels or diagnostic classes that stop further autonomous action and the events or service state that justify them.
   - The invariants cite the low-touch execution model from `docs/vision.md` and the autonomous-component rules from `docs/operating-philosophy.md` when describing noninteractive recovery and clean terminal outcomes.
 
-- [ ] **Document Legate observable error modes**
+- [x] **Document Legate observable error modes**
 
   Fill `## Error Modes` with externally visible failure behavior for service readiness, repository or configuration input, event streams, slice projection, Hatchery dispatch, worker or steward loss, timeout, relaunch, terminal cleanup, trace correlation, and bounded diagnostics. Keep the error contract focused on deterministic outcomes and escalations rather than interactive recovery.
 
