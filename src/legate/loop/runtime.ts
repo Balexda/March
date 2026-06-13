@@ -25,6 +25,7 @@ import {
 import { CastraClient } from "../../castra/client.js";
 import { ProfileClient } from "../../herald/profiles/client.js";
 import type { ProfileRecord } from "../../herald/profiles/types.js";
+import { byDispatchPriority } from "../../herald/profiles/types.js";
 import type { MergePolicy } from "../../herald/profiles/merge-policy.js";
 import { legateStateDir, metaForProfileRecord } from "../profile-paths.js";
 // Decomposed two-stage loop: Stage 1 sense → coordinator (ordered handlers) →
@@ -413,6 +414,12 @@ async function tick() {
     });
     return;
   }
+
+  // Dispatch in priority order (lower `priority` wins, ties by name): the shared
+  // spawn budget below is consumed as each profile dispatches in turn, so a P0
+  // profile gets first claim on the cap each tick and a P2 profile only spawns
+  // from what's left. Unset priority sorts last (DEFAULT_PROFILE_PRIORITY).
+  profiles.sort(byDispatchPriority);
 
   // GC runtimes for profiles that are no longer registered (removed/disabled).
   const active = new Set(profiles.map((p) => p.profile));
