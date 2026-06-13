@@ -1,3 +1,5 @@
+import type { ExtractionResult } from "./extraction-result.js";
+
 /**
  * Brood session-registry wire + storage types.
  *
@@ -58,6 +60,8 @@ export interface SessionRecord {
   exitCode?: number;
   /** Human-readable failure context (closes the dropped-error gap in spawn-record). */
   failureReason?: string;
+  /** Current backend-neutral extraction result for this spawn, if extraction ran. */
+  extractionResult?: ExtractionResult;
   createdAt: string;
   updatedAt: string;
   startedAt?: string;
@@ -82,6 +86,7 @@ export interface RegisterSessionInput {
   imageId?: string;
   exitCode?: number;
   failureReason?: string;
+  extractionResult?: ExtractionResult;
 }
 
 /** Mutable fields accepted on a lifecycle update. Only defined keys are applied. */
@@ -91,6 +96,7 @@ export interface UpdateSessionInput {
   imageId?: string;
   exitCode?: number;
   failureReason?: string;
+  extractionResult?: ExtractionResult;
   agentDeckSessionId?: string;
   worktreePath?: string;
   branch?: string;

@@ -1,4 +1,5 @@
 import { SessionStore, type SessionStoreOptions } from "./store.js";
+import type { ExtractionResult } from "./extraction-result.js";
 import type {
   ListSessionsFilter,
   RegisterSessionInput,
@@ -25,6 +26,11 @@ export interface SessionRepository {
   register(input: RegisterSessionInput): SessionRecord;
   /** Apply a lifecycle update. Returns `undefined` if the session is unknown. */
   update(id: string, changes: UpdateSessionInput): SessionRecord | undefined;
+  /** Store one current extraction result for a spawn. */
+  recordExtractionResult(
+    id: string,
+    result: ExtractionResult,
+  ): SessionRecord | undefined;
   /** Fetch a single session by id. */
   get(id: string): SessionRecord | undefined;
   /** List sessions, optionally filtered by kind/status/parentId. */

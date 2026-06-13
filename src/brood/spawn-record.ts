@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import type { ExtractionResult } from "./service/extraction-result.js";
 
 /**
  * Current SpawnRecord schema version. Fixed at 1 for Feature 2.
@@ -70,6 +71,11 @@ export interface SpawnRecord {
    * from its `error` argument. Forward-compatible (no `version` bump).
    */
   failureReason?: string;
+  /**
+   * Forward-compatible read-through for legacy JSON records that already carry
+   * extraction state. Brood's registry is the owner for new writes.
+   */
+  extractionResult?: ExtractionResult;
 }
 
 /** Inputs required to write the initial `"created"` spawn record. */

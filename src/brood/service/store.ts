@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { getDatabaseSync, type BroodDatabase } from "./sqlite.js";
 import type { SessionRepository } from "./repository.js";
+import type { ExtractionResult } from "./extraction-result.js";
 import type {
   ListSessionsFilter,
   RegisterSessionInput,
@@ -53,6 +54,7 @@ const COLUMNS = [
   "image_id",
   "exit_code",
   "failure_reason",
+  "extraction_result_json",
   "created_at",
   "updated_at",
   "started_at",
@@ -77,6 +79,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   image_id             TEXT,
   exit_code            INTEGER,
   failure_reason       TEXT,
+  extraction_result_json TEXT,
   created_at           TEXT NOT NULL,
   updated_at           TEXT NOT NULL,
   started_at           TEXT,
@@ -149,6 +152,11 @@ function rowToRecord(row: SqliteRow): SessionRecord {
     }
   }
   if (row.exit_code != null) record.exitCode = row.exit_code as number;
+  if (row.extraction_result_json != null) {
+    record.extractionResult = JSON.parse(
+      row.extraction_result_json as string,
+    ) as ExtractionResult;
+  }
   return record;
 }
 
@@ -169,6 +177,9 @@ function recordToValues(record: SessionRecord): Array<string | number | null> {
     record.imageId ?? null,
     record.exitCode ?? null,
     record.failureReason ?? null,
+    record.extractionResult
+      ? JSON.stringify(record.extractionResult)
+      : null,
     record.createdAt,
     record.updatedAt,
     record.startedAt ?? null,
@@ -208,6 +219,12 @@ export class SessionStore implements SessionRepository {
 
   private migrate(): void {
     this.db.exec(CREATE_TABLE_SQL);
+    const columns = this.db
+      .prepare("PRAGMA table_info(sessions)")
+      .all() as Array<{ name: string }>;
+    if (!columns.some((column) => column.name === "extraction_result_json")) {
+      this.db.exec("ALTER TABLE sessions ADD COLUMN extraction_result_json TEXT;");
+    }
     const row = this.db
       .prepare("SELECT version FROM schema_meta LIMIT 1")
       .get() as { version?: number } | undefined;
@@ -256,6 +273,14 @@ export class SessionStore implements SessionRepository {
     });
     this.persist(merged);
     return merged;
+  }
+
+  /** Store one current extraction result for a spawn. */
+  recordExtractionResult(
+    id: string,
+    result: ExtractionResult,
+  ): SessionRecord | undefined {
+    return this.update(id, { extractionResult: result });
   }
 
   /** Fetch a single session by id. */

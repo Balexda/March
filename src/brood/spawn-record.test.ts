@@ -6,6 +6,7 @@ import {
   DEFAULT_BACKEND,
   markSpawnRecordFailed,
   markSpawnRecordRunning,
+  loadSpawnRecord,
   removeSpawnRecord,
   SPAWN_RECORD_VERSION,
   spawnRecordDir,
@@ -50,6 +51,52 @@ describe("spawn-record", () => {
       expect(spawnRecordPath("20260411-a1b2c3", "/fake/home")).toBe(
         "/fake/home/.march/spawns/20260411-a1b2c3.json",
       );
+    });
+  });
+
+  describe("legacy extraction result compatibility", () => {
+    it("loads a legacy JSON SpawnRecord that carries extractionResult", () => {
+      const home = makeHome();
+      const id = "20260411-extract";
+      fs.mkdirSync(spawnRecordDir(home), { recursive: true });
+      fs.writeFileSync(
+        spawnRecordPath(id, home),
+        JSON.stringify(
+          {
+            version: 1,
+            id,
+            repoPath: "/abs/repo",
+            branch: "march/spawn/20260411-extract",
+            worktreePath: "/abs/worktrees/march/20260411-extract",
+            backend: "codex",
+            status: "stopped",
+            createdAt: "2026-06-13T00:00:00.000Z",
+            extractionResult: {
+              status: "succeeded",
+              spawnId: id,
+              backend: "codex",
+              extractedAt: "2026-06-13T00:01:00.000Z",
+              patch: {
+                spawnId: id,
+                backend: "codex",
+                patchText: "diff --git a/README.md b/README.md\n",
+                touchedPaths: ["README.md"],
+                sha256: "digest-1",
+              },
+            },
+          },
+          null,
+          2,
+        ) + "\n",
+      );
+
+      const record = loadSpawnRecord(id, home);
+
+      expect(record?.extractionResult).toMatchObject({
+        status: "succeeded",
+        spawnId: id,
+        backend: "codex",
+      });
     });
   });
 

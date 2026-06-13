@@ -7,6 +7,7 @@ import {
 } from "../../observability/brood-metrics.js";
 import { startBroodSpan } from "../../observability/brood-trace.js";
 import { createCastraClientFromEnv } from "../../castra/client.js";
+import { MAX_EXTRACTION_DIAGNOSTIC_CHARS } from "./extraction-result.js";
 import type { SessionRepository } from "./repository.js";
 import {
   defaultOrphanGate,
@@ -142,6 +143,7 @@ const UPDATE_FIELDS: readonly (keyof UpdateSessionInput)[] = [
   "imageId",
   "exitCode",
   "failureReason",
+  "extractionResult",
   "agentDeckSessionId",
   "worktreePath",
   "branch",
@@ -154,6 +156,55 @@ const UPDATE_FIELDS: readonly (keyof UpdateSessionInput)[] = [
 
 function asString(value: unknown): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function validExtractionResult(value: unknown): boolean {
+  const result = value as {
+    status?: unknown;
+    spawnId?: unknown;
+    backend?: unknown;
+    patch?: {
+      spawnId?: unknown;
+      backend?: unknown;
+      patchText?: unknown;
+      touchedPaths?: unknown;
+      sha256?: unknown;
+    };
+    failureReason?: unknown;
+    diagnostic?: unknown;
+    extractedAt?: unknown;
+  };
+  if (
+    typeof result !== "object" ||
+    result === null ||
+    typeof result.spawnId !== "string" ||
+    typeof result.backend !== "string" ||
+    typeof result.extractedAt !== "string"
+  ) {
+    return false;
+  }
+  if (result.status === "succeeded") {
+    return (
+      typeof result.patch === "object" &&
+      result.patch !== null &&
+      result.patch.spawnId === result.spawnId &&
+      result.patch.backend === result.backend &&
+      typeof result.patch.patchText === "string" &&
+      Array.isArray(result.patch.touchedPaths) &&
+      result.patch.touchedPaths.every((path) => typeof path === "string") &&
+      typeof result.patch.sha256 === "string" &&
+      result.failureReason === undefined
+    );
+  }
+  if (result.status === "failed") {
+    return (
+      typeof result.failureReason === "string" &&
+      typeof result.diagnostic === "string" &&
+      result.diagnostic.length <= MAX_EXTRACTION_DIAGNOSTIC_CHARS &&
+      result.patch === undefined
+    );
+  }
+  return false;
 }
 
 /** First inbound W3C `traceparent` header value, if any (dedup array form). */
@@ -283,6 +334,13 @@ export async function registerRoutes(
     ) {
       reply.code(400);
       return { error: `invalid branch "${String(body.branch)}".` };
+    }
+    if (
+      body.extractionResult !== undefined &&
+      !validExtractionResult(body.extractionResult)
+    ) {
+      reply.code(400);
+      return { error: "invalid extractionResult." };
     }
     // Whitelist: only known mutable fields reach the store.
     const changes: UpdateSessionInput = {};

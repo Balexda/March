@@ -182,6 +182,50 @@ describe.skipIf(!sqliteAvailable)("brood routes", () => {
     ).toBe(404);
   });
 
+  it("PATCH /sessions/:id accepts bounded extractionResult and rejects malformed values", async () => {
+    const { app } = await buildApp();
+    await app.inject({
+      method: "POST",
+      url: "/sessions",
+      payload: { id: "s1", kind: "spawn" },
+    });
+    const ok = await app.inject({
+      method: "PATCH",
+      url: "/sessions/s1",
+      payload: {
+        extractionResult: {
+          status: "failed",
+          spawnId: "s1",
+          backend: "codex",
+          failureReason: "malformed-output",
+          diagnostic: "bad json",
+          extractedAt: "2026-06-13T00:00:00.000Z",
+        },
+      },
+    });
+    expect(ok.statusCode).toBe(200);
+    expect(ok.json().extractionResult).toMatchObject({
+      status: "failed",
+      failureReason: "malformed-output",
+    });
+
+    const bad = await app.inject({
+      method: "PATCH",
+      url: "/sessions/s1",
+      payload: {
+        extractionResult: {
+          status: "failed",
+          spawnId: "s1",
+          backend: "codex",
+          failureReason: "malformed-output",
+          diagnostic: "x".repeat(2001),
+          extractedAt: "2026-06-13T00:00:00.000Z",
+        },
+      },
+    });
+    expect(bad.statusCode).toBe(400);
+  });
+
   it("GET /sessions filters by kind/status/parentId", async () => {
     const { app } = await buildApp();
     await app.inject({ method: "POST", url: "/sessions", payload: { id: "spawn-1", kind: "spawn", status: "running" } });
