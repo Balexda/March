@@ -1,4 +1,4 @@
-# Tasks: Declare The Frozen Test Tag Vocabulary
+# Tasks: Declare the Frozen Test Tag Vocabulary
 
 **Source**: `specs/2026-05-23-006-tag-taxonomy-and-coverage-lint/tag-taxonomy-and-coverage-lint.spec.md` - User Story 1
 **Data Model**: `specs/2026-05-23-006-tag-taxonomy-and-coverage-lint/tag-taxonomy-and-coverage-lint.data-model.md`
