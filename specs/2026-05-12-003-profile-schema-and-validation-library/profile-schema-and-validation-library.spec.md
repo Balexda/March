@@ -216,7 +216,7 @@ Recommended implementation sequence:
 |-----|-------------------------------------------------------------------|-----------------|----------|
 | US1 | Profile Type Skeleton and Validator Surface                       | —               | specs/2026-05-12-003-profile-schema-and-validation-library/01-profile-type-skeleton-and-validator-surface.tasks.md |
 | US2 | Identity, Version, and `baseImage` Validation                     | US1             | specs/2026-05-12-003-profile-schema-and-validation-library/02-identity-version-and-baseimage-validation.tasks.md |
-| US3 | Container Security and Resources are 1:1 with M1 SpawnConfig      | US1             | —        |
+| US3 | Container Security and Resources are 1:1 with M1 SpawnConfig      | US1             | specs/2026-05-12-003-profile-schema-and-validation-library/03-container-security-and-resources-are-1-1-with-m1-spawnconfig.tasks.md |
 | US4 | A3 Structural Enforcement — `envWhitelist` is the Only Env Mechanism | US1, US3     | —        |
 | US5 | A7 Network Policy is a Closed Allowlist with Structured Endpoints | US1             | —        |
 | US6 | A2/A5 — File Mounts and Snapshot Policy Enforce Threat Model      | US1             | —        |
