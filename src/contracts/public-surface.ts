@@ -229,6 +229,17 @@ function summariesForVariableStatement(
 ): PublicExportSummary[] {
   const summaries: PublicExportSummary[] = [];
 
+  const keyword = declarationListKeyword(statement.declarationList);
+  if (keyword !== "const") {
+    diagnostics.push({
+      category: "extraction",
+      severity: "error",
+      sourcePath,
+      message: `Unsupported exported variable declaration: only 'const' exports are supported, found '${keyword}'.`,
+    });
+    return summaries;
+  }
+
   for (const declaration of statement.declarationList.declarations) {
     if (!ts.isIdentifier(declaration.name)) {
       diagnostics.push({
@@ -266,7 +277,7 @@ function summariesForExportDeclaration(
         sourcePath,
         kind: "namespace",
         name: "*",
-        signature: normalizeSignature(`export *${moduleText ? ` from ${moduleText}` : ""};`),
+        signature: normalizeSignature(`export ${typeOnly ? "type " : ""}*${moduleText ? ` from ${moduleText}` : ""};`),
         typeOnly,
       },
     ];
@@ -279,7 +290,7 @@ function summariesForExportDeclaration(
         sourcePath,
         kind: "namespace",
         name,
-        signature: normalizeSignature(`export * as ${name}${moduleText ? ` from ${moduleText}` : ""};`),
+        signature: normalizeSignature(`export ${typeOnly ? "type " : ""}* as ${name}${moduleText ? ` from ${moduleText}` : ""};`),
         typeOnly,
       },
     ];
@@ -475,12 +486,29 @@ function resolveRepoPath(repoRoot: string, repoRelativePath: string): string | u
   if (path.isAbsolute(repoRelativePath)) return undefined;
 
   const resolved = path.resolve(repoRoot, repoRelativePath);
-  const relative = path.relative(repoRoot, resolved);
-  if (relative === "" || relative.startsWith("..") || path.isAbsolute(relative)) {
-    return undefined;
+  if (!isInsideRoot(repoRoot, resolved)) return undefined;
+
+  // String-level containment is not enough: a path inside the repo can resolve
+  // through a symlink to a target outside it. When the target exists, validate
+  // its real path against the repo's real path so symlinks cannot escape.
+  if (fs.existsSync(resolved)) {
+    let realRoot: string;
+    let realResolved: string;
+    try {
+      realRoot = fs.realpathSync(repoRoot);
+      realResolved = fs.realpathSync(resolved);
+    } catch {
+      return undefined;
+    }
+    if (!isInsideRoot(realRoot, realResolved)) return undefined;
   }
 
   return resolved;
+}
+
+function isInsideRoot(root: string, target: string): boolean {
+  const relative = path.relative(root, target);
+  return !(relative.startsWith("..") || path.isAbsolute(relative));
 }
 
 function formatTsDiagnostic(diagnostic: ts.Diagnostic, sourceFile: ts.SourceFile): string {
@@ -502,7 +530,7 @@ function boundedMessage(error: unknown): string {
 
 function truncate(message: string): string {
   return message.length > MAX_MESSAGE_LENGTH
-    ? `${message.slice(0, MAX_MESSAGE_LENGTH - 1)}...`
+    ? `${message.slice(0, MAX_MESSAGE_LENGTH - 3)}...`
     : message;
 }
 
@@ -516,5 +544,7 @@ function compareSummaries(a: PublicExportSummary, b: PublicExportSummary): numbe
 }
 
 function compareStrings(a: string, b: string): number {
-  return a.localeCompare(b, "en");
+  // Code-point comparison is deterministic across ICU/Node versions, unlike
+  // localeCompare collation. Required for byte-stable output ordering.
+  return a < b ? -1 : a > b ? 1 : 0;
 }

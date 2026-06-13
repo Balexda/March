@@ -1,11 +1,14 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { extractPublicTypeScriptSurface } from "./public-surface.js";
+
+const createdRepos: string[] = [];
 
 function fixtureRepo(files: Record<string, string>): string {
   const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), "march-public-surface-"));
+  createdRepos.push(repoRoot);
   for (const [relativePath, contents] of Object.entries(files)) {
     const filePath = path.join(repoRoot, relativePath);
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
@@ -13,6 +16,13 @@ function fixtureRepo(files: Record<string, string>): string {
   }
   return repoRoot;
 }
+
+afterEach(() => {
+  while (createdRepos.length > 0) {
+    const repoRoot = createdRepos.pop();
+    if (repoRoot) fs.rmSync(repoRoot, { recursive: true, force: true });
+  }
+});
 
 describe("extractPublicTypeScriptSurface", () => {
   it("extracts public declarations and omits private local declarations and bodies", () => {
@@ -106,8 +116,8 @@ describe("extractPublicTypeScriptSurface", () => {
       ["default", "default", false],
       ["namespace", "*", false],
       ["namespace", "utilities", false],
-      ["re-export", "localValue", false],
       ["re-export", "PublicType", true],
+      ["re-export", "localValue", false],
       ["re-export", "renamed", false],
     ]);
     expect(result.summaries.find((summary) => summary.name === "renamed")?.signature).toBe(
@@ -196,6 +206,53 @@ describe("extractPublicTypeScriptSurface", () => {
         severity: "error",
         sourcePath: "src/legacy.ts",
         message: "Unsupported export syntax: export assignment with equals.",
+      },
+    ]);
+  });
+
+  it("includes the type keyword in type-only namespace and star re-export signatures", () => {
+    const repoRoot = fixtureRepo({
+      "src/types-barrel.ts": `
+        export type * from "./types.js";
+        export type * as typeNs from "./more-types.js";
+      `,
+    });
+
+    const result = extractPublicTypeScriptSurface({
+      repoRoot,
+      sourcePaths: ["src/types-barrel.ts"],
+    });
+
+    expect(result.diagnostics).toEqual([]);
+    expect(result.summaries.find((summary) => summary.name === "*")).toMatchObject({
+      typeOnly: true,
+      signature: 'export type * from "./types.js";',
+    });
+    expect(result.summaries.find((summary) => summary.name === "typeNs")).toMatchObject({
+      typeOnly: true,
+      signature: 'export type * as typeNs from "./more-types.js";',
+    });
+  });
+
+  it("rejects non-const exported variables with an extraction diagnostic", () => {
+    const repoRoot = fixtureRepo({
+      "src/mutable.ts": `
+        export let counter = 0;
+      `,
+    });
+
+    const result = extractPublicTypeScriptSurface({
+      repoRoot,
+      sourcePaths: ["src/mutable.ts"],
+    });
+
+    expect(result.summaries).toEqual([]);
+    expect(result.diagnostics).toEqual([
+      {
+        category: "extraction",
+        severity: "error",
+        sourcePath: "src/mutable.ts",
+        message: "Unsupported exported variable declaration: only 'const' exports are supported, found 'let'.",
       },
     ]);
   });
