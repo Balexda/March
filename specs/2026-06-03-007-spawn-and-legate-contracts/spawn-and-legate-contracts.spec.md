@@ -88,7 +88,7 @@ Recommended implementation sequence:
 | ID | Title | Depends On | Artifact |
 |----|-------|-----------|----------|
 | US1 | Document Spawn Dispatch Contract | — | specs/2026-06-03-007-spawn-and-legate-contracts/01-document-spawn-dispatch-contract.tasks.md |
-| US2 | Document Legate Loop Contract | — | — |
+| US2 | Document Legate Loop Contract | — | specs/2026-06-03-007-spawn-and-legate-contracts/02-document-legate-loop-contract.tasks.md |
 | US3 | Record Cross-Contract Ownership Boundaries | US1, US2 | — |
 
 ## Requirements *(mandatory)*
