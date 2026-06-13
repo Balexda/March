@@ -30,6 +30,11 @@ Caller-supplied dispatch metadata includes:
   and downstream handoff state.
 - `taskType`, `taskName`, and `title`: task identity fields suitable for
   operator diagnostics and trace attributes.
+- `toolchain`: the optional per-profile worker toolchain override. `auto` or
+  undefined infers the toolchain from the repository, while an explicit value
+  (e.g. `node`, `jvm`) forces the toolchain layer image. Spawn resolves the
+  spawn's base image as a function of the backend agent and this value, so
+  non-node repositories can build in-container.
 - `sliceId`: the Smithy slice correlation key; when present, Spawn uses it as
   the deterministic trace key so service-side observations for that slice can
   nest under the same trace.
@@ -49,17 +54,18 @@ and the Hatchery dispatch entrypoint that composes them:
   environment, credential mounts, network egress allowlist, and backend
   entrypoint command.
 - Snapshot and image helpers create a Docker build context from the managed
-  worktree, write the spawn Dockerfile, build the tagged spawn image, and remove
-  the image during cleanup.
+  worktree, resolve the toolchain layer image for the selected backend and
+  `toolchain` override, write the spawn Dockerfile, build the tagged spawn image,
+  and remove the image during cleanup.
 - Container launch helpers create, start, wait for, log, and remove the spawn
   container. They expose typed launch input and wait-result shapes plus bounded
   launch diagnostics.
 - `runHatcherySpawn(input: HatcherySpawnOptions)` is the exported dispatch
   composition used by Hatchery. It accepts the required prompt, repository path,
   and backend plus optional deployment profile, agent-deck session profile,
-  branch, task identity, and slice correlation fields, then returns a
-  `HatcherySpawnResult` only after a terminal successful spawn output has been
-  extracted, validated as a patch, and handed to the manager session.
+  branch, task identity, toolchain override, and slice correlation fields, then
+  returns a `HatcherySpawnResult` only after a terminal successful spawn output
+  has been extracted, validated as a patch, and handed to the manager session.
 
 Spawn's output handoff boundary is the validated patch artifact produced from
 terminal successful backend output. Raw backend logs are not a public handoff
