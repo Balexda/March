@@ -17,7 +17,7 @@
 
 ### Tasks
 
-- [ ] **Define `SpawnBackend` interface in `src/spawn-backend.ts`**
+- [x] **Define `SpawnBackend` interface in `src/spawn-backend.ts`**
 
   Create `src/spawn-backend.ts` exporting a `SpawnBackend` interface with the four members specified in the contracts (`name`, `baseImage`, `requiredEnvVars`, `buildEntrypoint`) and no others. The `buildEntrypoint` return type is the structural-compatibility commitment AS 2.5 names — it must be assignable to the return type of the existing F2 `buildClaudeCodeEntrypoint` helper in `src/container-launch.ts` (the argv form `launchSpawnContainer` passes to `docker run`), without modifying `src/container-launch.ts`.
 
@@ -28,7 +28,7 @@
   - A plain object literal satisfying all four members compiles without a cast.
   - File is new; no existing `src/*.ts` file is touched.
 
-- [ ] **Implement `createBackendRegistry` factory with duplicate-name guard**
+- [x] **Implement `createBackendRegistry` factory with duplicate-name guard**
 
   Extend `src/spawn-backend.ts` with a `createBackendRegistry` factory function that accepts a list of `SpawnBackend` values and returns an object exposing `getBackend`, `listBackends`, and `defaultBackendName`. Also export `defaultBackendName` as a module-level constant equal to the value specified in the Backend Registry contract section. Tests must drive AS 2.2–2.4 with fixture backends only — no concrete `claudeCodeBackend` or `geminiBackend` imports, and no production module is modified.
 
