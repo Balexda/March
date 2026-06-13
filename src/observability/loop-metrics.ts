@@ -20,7 +20,9 @@ import { getActiveOtel } from "./otel.js";
  *
  * Cumulative activity (heartbeats, dispatch actions/failures, and the loop
  * lifecycle actions by kind: cleanup/ghost_cleanup/relaunch/babysit/steward_nudge/
- * steward_stranded) are counters incremented by each tick's delta; current-state
+ * steward_stranded plus their cleanup_failed/ghost_cleanup_failed/relaunch_failed
+ * failure twins — a loop failing every tick is invisible on the success-only
+ * counters) are counters incremented by each tick's delta; current-state
  * values (up, queue depth, worker counts, tick age) are observable gauges whose
  * callbacks read the latest {@link LoopMetricsSnapshot}. Gauges carry no `unit`:
  * the OTel→Prometheus bridge appends `_ratio` to a `unit: "1"` gauge, which both
@@ -59,13 +61,35 @@ export interface LoopTickActivity {
   readonly dispatchActions: number;
   readonly dispatchFailures: number;
   readonly cleanups: number;
+  /** Cleanup teardowns that did not confirm this tick (`cleanup_failure`). */
+  readonly cleanupFailures: number;
   readonly ghostCleanups: number;
+  /** Ghost-cleanup attempts Brood would not confirm (`ghost-cleanup-failed`). */
+  readonly ghostCleanupFailures: number;
   readonly relaunches: number;
+  /** Steward relaunch attempts that failed (`relaunch-failed`). */
+  readonly relaunchFailures: number;
   readonly babysitActions: number;
   /** Stranded-steward nudges sent this tick (the watchdog re-prodding a steward). */
   readonly stewardNudges: number;
   /** Stranded-steward escalations raised this tick (operator alert). */
   readonly stewardStranded: number;
+}
+
+/**
+ * The GLOBAL concurrent-spawn cap and its current draw (#313), shared across all
+ * profiles in a single multi-profile tick. Emitted as profile-less gauges so the
+ * "live ≫ cap while dispatch is starved" wedge — the ghost stewards pinning the
+ * cap — is one panel/alert, not a per-profile sum that would multiply the shared
+ * values by the profile count.
+ */
+export interface SpawnBudgetMetrics {
+  /** Configured global cap (MARCH_MAX_CONCURRENT_SPAWNS). */
+  readonly cap: number;
+  /** Live spawns across ALL profiles at tick start — the cap's current draw. */
+  readonly live: number;
+  /** Dispatchable items deferred this tick because the cap was reached. */
+  readonly deferred: number;
 }
 
 // OTel instruments must be created once per Meter and reused. Cache them keyed by
@@ -80,6 +104,11 @@ let tickDuration: Histogram | undefined;
 
 // The observable gauges read this holder; updated on every recordLoopHeartbeat.
 let latest: LoopMetricsSnapshot | undefined;
+
+// The GLOBAL concurrent-spawn budget (#313) is one shared instance across every
+// profile this tick, so it is NOT per-profile: recorded once per multi-profile
+// tick with no `profile` label. Its gauges read this holder.
+let latestSpawnBudget: SpawnBudgetMetrics | undefined;
 
 function base(snapshot: LoopMetricsSnapshot): Attributes {
   return { profile: snapshot.profile, conductor: snapshot.conductor };
@@ -103,8 +132,9 @@ function ensureInstruments(meter: Meter): void {
   });
   // One counter for every non-dispatch loop action, split by the bounded
   // `action` label (cleanup, ghost_cleanup, relaunch, babysit, steward_nudge,
-  // steward_stranded). Keep `action` low-cardinality — it backs the "Loop
-  // actions by kind" panel and is a metric label.
+  // steward_stranded, and the cleanup_failed/ghost_cleanup_failed/relaunch_failed
+  // failure twins). Keep `action` low-cardinality — it backs the "Loop actions by
+  // kind" / "Loop failures" panels and is a metric label.
   loopActions = meter.createCounter("march.legate.loop.actions", {
     description: "Count of loop lifecycle actions by kind",
     unit: "1",
@@ -198,6 +228,34 @@ function ensureInstruments(meter: Meter): void {
       result.observe(count, { ...base(s), reason });
     }
   });
+
+  // GLOBAL spawn-budget gauges (#313) — profile-less (one shared cap across all
+  // profiles per tick), read from `latestSpawnBudget`. `spawn.live ≫ spawn.cap`
+  // with dispatch starved is the ghost-stewards-pin-the-cap wedge. No unit ⇒
+  // exported as march_legate_spawn_{live,cap,deferred} with no suffix.
+  registerSpawnGauge(meter, "march.legate.spawn.live", "Live spawns billed against the global cap", (b) => b.live);
+  registerSpawnGauge(meter, "march.legate.spawn.cap", "Global concurrent-spawn cap", (b) => b.cap);
+  registerSpawnGauge(
+    meter,
+    "march.legate.spawn.deferred",
+    "Dispatchable items deferred this tick because the cap was reached",
+    (b) => b.deferred,
+  );
+}
+
+/** Register a profile-less observable gauge reading the latest spawn budget. */
+function registerSpawnGauge(
+  meter: Meter,
+  name: string,
+  description: string,
+  read: (b: SpawnBudgetMetrics) => number,
+): void {
+  const gauge = meter.createObservableGauge(name, { description });
+  gauge.addCallback((result: ObservableResult) => {
+    const b = latestSpawnBudget;
+    if (!b) return;
+    result.observe(read(b));
+  });
 }
 
 function registerGauge(
@@ -233,14 +291,32 @@ export function recordLoopHeartbeat(activity: LoopTickActivity): void {
   if (activity.dispatchActions) dispatchActions!.add(activity.dispatchActions, attrs);
   if (activity.dispatchFailures) dispatchFailures!.add(activity.dispatchFailures, attrs);
   if (activity.cleanups) loopActions!.add(activity.cleanups, { ...attrs, action: "cleanup" });
+  if (activity.cleanupFailures)
+    loopActions!.add(activity.cleanupFailures, { ...attrs, action: "cleanup_failed" });
   if (activity.ghostCleanups)
     loopActions!.add(activity.ghostCleanups, { ...attrs, action: "ghost_cleanup" });
+  if (activity.ghostCleanupFailures)
+    loopActions!.add(activity.ghostCleanupFailures, { ...attrs, action: "ghost_cleanup_failed" });
   if (activity.relaunches)
     loopActions!.add(activity.relaunches, { ...attrs, action: "relaunch" });
+  if (activity.relaunchFailures)
+    loopActions!.add(activity.relaunchFailures, { ...attrs, action: "relaunch_failed" });
   if (activity.babysitActions)
     loopActions!.add(activity.babysitActions, { ...attrs, action: "babysit" });
   if (activity.stewardNudges)
     loopActions!.add(activity.stewardNudges, { ...attrs, action: "steward_nudge" });
   if (activity.stewardStranded)
     loopActions!.add(activity.stewardStranded, { ...attrs, action: "steward_stranded" });
+}
+
+/**
+ * Refresh the GLOBAL spawn-budget gauges (#313) from the per-tick shared budget.
+ * Called once per multi-profile tick (not per profile) since the cap and its draw
+ * are global. No-op when telemetry is disabled.
+ */
+export function recordSpawnBudget(budget: SpawnBudgetMetrics): void {
+  const otel = getActiveOtel();
+  if (!otel.enabled) return;
+  ensureInstruments(otel.getMeter());
+  latestSpawnBudget = budget;
 }

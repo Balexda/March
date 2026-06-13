@@ -8,6 +8,7 @@ import { SessionStore } from "./store.js";
 import {
   candidateHeadBranches,
   fetchBranchPrState,
+  observeReconciliation,
   parseGitHubSlug,
   removeStewardViaCastra,
   sweepLeakedStewards,
@@ -306,6 +307,73 @@ describe.skipIf(!sqliteAvailable)("sweepLeakedStewards", () => {
     expect(result.reaped).toEqual([]);
     expect(result.failures).toHaveLength(1);
     expect(result.failures[0].profile).toBe("smithy");
+    store.close();
+  });
+});
+
+describe.skipIf(!sqliteAvailable)("observeReconciliation", () => {
+  it("counts a live session an active Brood record owns as tracked, not orphan", async () => {
+    const store = new SessionStore({ dbPath: ":memory:" });
+    store.register({
+      id: "live-1",
+      kind: "steward",
+      agentDeckSessionId: "live-1",
+      profile: "smithy",
+      repoPath: "/repo",
+      worktreePath: "/wt/a",
+      branch: "feature/a",
+      status: "running",
+    });
+    const gw = fakeGateway([session({ sessionId: "live-1", worktreePath: "/wt/a", branch: "feature/a" })]);
+
+    const obs = await observeReconciliation(store, gw);
+
+    expect(obs).toEqual([{ profile: "smithy", castraLive: 1, trackedActive: 1, orphans: 0 }]);
+    store.close();
+  });
+
+  it("counts live Castra sessions with only torndown Brood rows as orphans (the wedge)", async () => {
+    // The live-stack shape: every Brood steward row is torndown, yet Castra still
+    // lists the sessions → all orphans (the "54 live, 0 tracked" divergence).
+    const store = new SessionStore({ dbPath: ":memory:" });
+    store.register({
+      id: "old-1",
+      kind: "steward",
+      agentDeckSessionId: "old-1",
+      profile: "march",
+      repoPath: "/repo",
+      worktreePath: "/wt/old",
+      branch: "feature/old",
+      status: "torndown",
+    });
+    const gw = fakeGateway([
+      session({ sessionId: "ghost-1", worktreePath: "/wt/g1" }),
+      session({ sessionId: "ghost-2", worktreePath: "/wt/g2" }),
+    ]);
+
+    const obs = await observeReconciliation(store, gw);
+
+    expect(obs).toEqual([{ profile: "march", castraLive: 2, trackedActive: 0, orphans: 2 }]);
+    // Read-only: no removals.
+    expect(gw.removed).toEqual([]);
+    store.close();
+  });
+
+  it("skips a profile whose Castra list fails rather than emitting a misleading zero", async () => {
+    const store = new SessionStore({ dbPath: ":memory:" });
+    store.register({
+      id: "s",
+      kind: "steward",
+      profile: "smithy",
+      repoPath: "/repo",
+      worktreePath: "/wt/a",
+      status: "running",
+    });
+    const gw = fakeGateway([], { listThrows: true });
+
+    const obs = await observeReconciliation(store, gw);
+
+    expect(obs).toEqual([]);
     store.close();
   });
 });

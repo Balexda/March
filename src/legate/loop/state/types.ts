@@ -150,7 +150,13 @@ export interface TickResult {
   cleanupCount: number;
   cleanupFailureCount: number;
   ghostCleanupCount: number;
+  /** Ghost-cleanup attempts this tick that Brood would not confirm
+   *  (`ghost-cleanup-failed`). A loop failing here every tick is invisible on the
+   *  success-only counters, so it is metricized on its own (loop-failing monitor). */
+  ghostCleanupFailureCount: number;
   relaunchCount: number;
+  /** Steward relaunch attempts this tick that failed (`relaunch-failed`). */
+  relaunchFailureCount: number;
   /** Babysit actions excluding the steward-nudge family (counted separately below). */
   babysitActionCount: number;
   /** Stranded-steward nudges sent this tick. */

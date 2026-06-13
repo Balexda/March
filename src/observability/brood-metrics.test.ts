@@ -2,8 +2,10 @@
  * @l0 @deterministic @ci
  */
 import { describe, expect, it } from "vitest";
+import { initOtel } from "./otel.js";
 import {
   outcomeFromStatus,
+  recordBroodReconciliation,
   recordBroodRequest,
   recordBroodTeardown,
   startBroodHeartbeat,
@@ -38,5 +40,17 @@ describe("brood-metrics", () => {
     const stop = startBroodHeartbeat(10);
     expect(typeof stop).toBe("function");
     expect(() => stop()).not.toThrow();
+  });
+
+  it("recordBroodReconciliation is a no-op when disabled and folds when enabled", () => {
+    const samples = [{ profile: "march", castraLive: 54, trackedActive: 0, orphans: 54 }];
+    initOtel({});
+    expect(() => recordBroodReconciliation(samples)).not.toThrow();
+    try {
+      initOtel({ MARCH_OTEL: "1", MARCH_OTEL_ENDPOINT: "http://localhost:4318" });
+      expect(() => recordBroodReconciliation(samples)).not.toThrow();
+    } finally {
+      initOtel({});
+    }
   });
 });

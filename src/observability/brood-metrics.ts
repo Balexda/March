@@ -22,6 +22,25 @@ export interface RecordBroodTeardownInput {
 
 const HEARTBEAT_INTERVAL_MS = 15000;
 
+/**
+ * One profile's live-Castra-vs-Brood-tracked reconciliation counts, fed to the
+ * gauges below. Mirrors `ReconciliationObservation` in
+ * `brood/service/steward-removal.ts` as plain data so observability does not
+ * depend on the service layer (the service maps its observation to this shape).
+ */
+export interface BroodReconciliationSample {
+  readonly profile: string;
+  readonly castraLive: number;
+  readonly trackedActive: number;
+  /** Live Castra sessions with NO active Brood record — the leak. `orphans > 0`
+   *  is the divergence that renders a stalled loop green. */
+  readonly orphans: number;
+}
+
+// The reconciliation observable gauges read this holder; updated each periodic
+// reconciliation tick. `undefined` until the first observation completes.
+let latestReconciliation: readonly BroodReconciliationSample[] | undefined;
+
 // One instrument per Meter, rebuilt transparently when initOtel swaps the
 // provider (e.g. between tests) — mirrors hatchery-metrics / spawn-metrics.
 let cachedMeter: Meter | undefined;
@@ -68,6 +87,30 @@ function broodInstruments(meter: Meter): BroodInstruments {
         unit: "s",
       })
       .addCallback((result) => result.observe(process.uptime()));
+
+    // Reconciliation gauges (per profile) — live Castra sessions vs the live
+    // sessions Brood actually tracks, and the orphan delta. `orphans > 0` is the
+    // wedge a stalled loop hides behind. Low-cardinality: only the `profile`
+    // label. No unit ⇒ exported as march_brood_sessions_{castra_live,
+    // tracked_active,orphans}{profile}.
+    registerReconciliationGauge(
+      meter,
+      "march.brood.sessions.castra_live",
+      "Live Castra sessions per profile",
+      (s) => s.castraLive,
+    );
+    registerReconciliationGauge(
+      meter,
+      "march.brood.sessions.tracked_active",
+      "Live Castra sessions an active Brood record owns",
+      (s) => s.trackedActive,
+    );
+    registerReconciliationGauge(
+      meter,
+      "march.brood.sessions.orphans",
+      "Live Castra sessions with no active Brood record (the leak)",
+      (s) => s.orphans,
+    );
   }
   return {
     requests: requestsCounter!,
@@ -76,6 +119,39 @@ function broodInstruments(meter: Meter): BroodInstruments {
     teardownDuration: teardownDuration!,
     heartbeat: heartbeatCounter!,
   };
+}
+
+/** Register a per-profile reconciliation observable gauge reading `latestReconciliation`. */
+function registerReconciliationGauge(
+  meter: Meter,
+  name: string,
+  description: string,
+  read: (sample: BroodReconciliationSample) => number,
+): void {
+  meter
+    .createObservableGauge(name, { description })
+    .addCallback((result) => {
+      const samples = latestReconciliation;
+      if (!samples) return;
+      for (const sample of samples) {
+        result.observe(read(sample), { profile: sample.profile });
+      }
+    });
+}
+
+/**
+ * Refresh the reconciliation gauges from the latest observation. Called each
+ * periodic reconciliation tick by the brood service. No-op when telemetry is
+ * disabled. Ensures the instruments exist so a first call after init registers
+ * the gauges before the next scrape.
+ */
+export function recordBroodReconciliation(
+  samples: readonly BroodReconciliationSample[],
+): void {
+  const otel = getActiveOtel();
+  if (!otel.enabled) return;
+  broodInstruments(otel.getMeter());
+  latestReconciliation = samples;
 }
 
 /** Record one HTTP request: count + duration by route/method/outcome. No-op when disabled. */

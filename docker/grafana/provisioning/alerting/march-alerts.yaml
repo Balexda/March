@@ -1,0 +1,261 @@
+# March stack — SILENT monitors (issue: stack observability).
+#
+# Grafana-managed alert rules that evaluate continuously and record breach state
+# (Normal → Pending → Firing) with state history, but send ZERO notifications:
+# the `team: march` route below carries an always-on mute timing, so you can SEE
+# what is in breach (Alerting → Alert rules, and the state-history view) without
+# anything paging. This is the Datadog "monitor without a notification channel"
+# model. To start notifying later, add a real contact point and drop the mute
+# from that route.
+#
+# Provisioned the same way as the dashboards (mounted into Grafana's provisioning
+# dir by docker/otel-lgtm.docker-compose.yml). Rule definitions + state history
+# persist on the `march-otel-grafana` volume. Datasource UID `prometheus` is the
+# stable uid the otel-lgtm image provisions (confirmed via /api/datasources).
+#
+# These six conditions are the ones that would have screamed during the
+# reboot-leak incident where ~54 ghost stewards pinned the spawn cap and the loop
+# rendered green while dispatch was starved.
+apiVersion: 1
+
+# An always-active mute interval: all day, every day. A route that references it
+# never notifies, while the rule's state is still evaluated and recorded. The
+# interval is constrained ONLY by time-of-day (00:00–24:00); with no weekday /
+# day-of-month / month constraint it matches every day. (A `weekdays` range like
+# monday:sunday is REJECTED — Grafana orders days Sunday=0…Saturday=6, so that is
+# a backwards range and the parse failure aborts Grafana's provisioning service.)
+muteTimes:
+  - orgId: 1
+    name: march-silence
+    time_intervals:
+      - times:
+          - start_time: "00:00"
+            end_time: "24:00"
+
+# Route march alerts to the built-in default contact point but ALWAYS mute them.
+# Provisioning replaces the notification policy tree; the root keeps the default
+# receiver so any non-march alert still behaves normally.
+policies:
+  - orgId: 1
+    receiver: grafana-default-email
+    group_by:
+      - grafana_folder
+      - alertname
+    routes:
+      - receiver: grafana-default-email
+        object_matchers:
+          - ["team", "=", "march"]
+        mute_time_intervals:
+          - march-silence
+        continue: false
+
+groups:
+  - orgId: 1
+    name: march-loop-health
+    folder: March Alerts
+    interval: 1m
+    rules:
+      # 1. Fold↔live divergence — live Castra sessions Brood does not track. This
+      #    is the "Castra has N stewards, Brood tracks 0" wedge that renders a
+      #    stalled loop green. Any sustained orphan is a breach.
+      - uid: march-session-divergence
+        title: Session reconciliation divergence (live Castra vs Brood-tracked)
+        condition: C
+        for: 15m
+        noDataState: OK
+        execErrState: OK
+        labels:
+          severity: warning
+          team: march
+        annotations:
+          summary: >-
+            Live Castra sessions with no active Brood record (orphans > 0). The
+            loop fold still counts these as active stewards — the green-but-wedged
+            divergence. Reap with `march brood sweep`.
+        data:
+          - refId: A
+            relativeTimeRange: { from: 900, to: 0 }
+            datasourceUid: prometheus
+            model:
+              refId: A
+              instant: true
+              editorMode: code
+              expr: sum(march_brood_sessions_orphans)
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [0] }
+
+      # 2. Dispatch starvation — work is ready but nothing is being dispatched.
+      - uid: march-dispatch-starvation
+        title: Legate dispatch starvation (dispatchable > 0, no dispatches in 10m)
+        condition: C
+        for: 10m
+        noDataState: OK
+        execErrState: OK
+        labels:
+          severity: critical
+          team: march
+        annotations:
+          summary: >-
+            Dispatchable work exists but the loop has dispatched nothing in 10m —
+            dispatch is starved (often the spawn cap pinned by ghost stewards).
+        data:
+          - refId: A
+            relativeTimeRange: { from: 900, to: 0 }
+            datasourceUid: prometheus
+            model:
+              refId: A
+              instant: true
+              editorMode: code
+              expr: >-
+                sum(march_legate_queue_dispatchable) > 0
+                and sum(increase(march_legate_dispatch_actions_total[10m])) == 0
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [0] }
+
+      # 3. Spawn cap pinned by ghosts — live draw exceeds the cap while dispatch
+      #    is starved (the direct mechanism of the incident).
+      - uid: march-spawn-cap-pinned
+        title: Spawn cap pinned (live > cap while dispatch starved)
+        condition: C
+        for: 10m
+        noDataState: OK
+        execErrState: OK
+        labels:
+          severity: critical
+          team: march
+        annotations:
+          summary: >-
+            Live spawns billed against the global cap exceed the cap while no
+            dispatches occur — the cap is pinned (likely by untracked ghost
+            stewards) and fresh work cannot launch.
+        data:
+          - refId: A
+            relativeTimeRange: { from: 900, to: 0 }
+            datasourceUid: prometheus
+            model:
+              refId: A
+              instant: true
+              editorMode: code
+              expr: >-
+                sum(march_legate_spawn_live) > sum(march_legate_spawn_cap)
+                and sum(increase(march_legate_dispatch_actions_total[10m])) == 0
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [0] }
+
+      # 4. Loop failing every tick — the *_failed actions that increment no
+      #    success counter (ghost_cleanup_failed / relaunch_failed / cleanup_failed).
+      - uid: march-loop-failing
+        title: Legate loop failing (ghost-cleanup / relaunch / cleanup failures)
+        condition: C
+        for: 10m
+        noDataState: OK
+        execErrState: OK
+        labels:
+          severity: warning
+          team: march
+        annotations:
+          summary: >-
+            The loop is taking failure actions every tick (a *_failed loop action)
+            — e.g. ghost-cleanup-failed against a session Brood never tracked.
+        data:
+          - refId: A
+            relativeTimeRange: { from: 900, to: 0 }
+            datasourceUid: prometheus
+            model:
+              refId: A
+              instant: true
+              editorMode: code
+              expr: sum(increase(march_legate_loop_actions_total{action=~".+_failed"}[10m])) > 0
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [0] }
+
+      # 5. Orphan backlog — a louder threshold of #1 for a large, sustained leak.
+      - uid: march-orphan-backlog
+        title: Steward orphan backlog (untracked live sessions > 5)
+        condition: C
+        for: 15m
+        noDataState: OK
+        execErrState: OK
+        labels:
+          severity: critical
+          team: march
+        annotations:
+          summary: >-
+            A large backlog of live Castra sessions Brood does not track. Reap
+            with `march brood sweep` and investigate the leak source.
+        data:
+          - refId: A
+            relativeTimeRange: { from: 900, to: 0 }
+            datasourceUid: prometheus
+            model:
+              refId: A
+              instant: true
+              editorMode: code
+              expr: sum(march_brood_sessions_orphans)
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [5] }
+
+      # 6. Service liveness — the legate loop is not ticking (hung or dead). The
+      #    loop emits a minute heartbeat; tick age over 3 minutes (or the series
+      #    absent entirely) is a breach. noDataState=Alerting so a dead loop that
+      #    stops emitting the gauge still fires.
+      - uid: march-loop-liveness
+        title: Legate loop not ticking (tick age > 3m)
+        condition: C
+        for: 5m
+        noDataState: Alerting
+        execErrState: Alerting
+        labels:
+          severity: critical
+          team: march
+        annotations:
+          summary: >-
+            The legate loop has not completed a tick in over 3 minutes (it ticks
+            roughly once a minute). The loop is hung, crashed, or not running.
+        data:
+          - refId: A
+            relativeTimeRange: { from: 900, to: 0 }
+            datasourceUid: prometheus
+            model:
+              refId: A
+              instant: true
+              editorMode: code
+              expr: max(march_legate_tick_age_seconds)
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [180] }

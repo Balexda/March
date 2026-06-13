@@ -106,8 +106,11 @@ describe("buildLoopTickActivity", () => {
       dispatch_action_count: 2,
       dispatch_failure_count: 1,
       cleanup_count: 4,
+      cleanup_failure_count: 2,
       ghost_cleanup_count: 0,
+      ghost_cleanup_failure_count: 5,
       relaunch_count: 0,
+      relaunch_failure_count: 3,
       babysit_action_count: 6,
       steward_nudge_count: 7,
       steward_stranded_count: 1,
@@ -131,6 +134,9 @@ describe("buildLoopTickActivity", () => {
       dispatchActions: 2,
       dispatchFailures: 1,
       cleanups: 4,
+      cleanupFailures: 2,
+      ghostCleanupFailures: 5,
+      relaunchFailures: 3,
       babysitActions: 6,
       stewardNudges: 7,
       stewardStranded: 1,
@@ -143,5 +149,8 @@ describe("buildLoopTickActivity", () => {
     expect(activity.dispatchActions).toBe(0);
     expect(activity.stewardNudges).toBe(0);
     expect(activity.stewardStranded).toBe(0);
+    expect(activity.cleanupFailures).toBe(0);
+    expect(activity.ghostCleanupFailures).toBe(0);
+    expect(activity.relaunchFailures).toBe(0);
   });
 });

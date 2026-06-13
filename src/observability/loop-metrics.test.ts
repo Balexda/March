@@ -3,7 +3,7 @@
  */
 import { afterEach, describe, expect, it } from "vitest";
 import { initOtel } from "./otel.js";
-import { recordLoopHeartbeat, type LoopTickActivity } from "./loop-metrics.js";
+import { recordLoopHeartbeat, recordSpawnBudget, type LoopTickActivity } from "./loop-metrics.js";
 
 function activity(overrides: Partial<LoopTickActivity> = {}): LoopTickActivity {
   return {
@@ -24,8 +24,11 @@ function activity(overrides: Partial<LoopTickActivity> = {}): LoopTickActivity {
     dispatchActions: 1,
     dispatchFailures: 0,
     cleanups: 0,
+    cleanupFailures: 0,
     ghostCleanups: 0,
+    ghostCleanupFailures: 0,
     relaunches: 0,
+    relaunchFailures: 0,
     babysitActions: 0,
     stewardNudges: 0,
     stewardStranded: 0,
@@ -51,12 +54,22 @@ describe("loop-metrics", () => {
         activity({
           dispatchFailures: 2,
           cleanups: 1,
+          cleanupFailures: 1,
           ghostCleanups: 1,
+          ghostCleanupFailures: 2,
+          relaunchFailures: 1,
           babysitActions: 3,
           stewardNudges: 4,
           stewardStranded: 1,
         }),
       ),
     ).not.toThrow();
+  });
+
+  it("recordSpawnBudget is a no-op when disabled and folds when enabled", () => {
+    initOtel({});
+    expect(() => recordSpawnBudget({ cap: 10, live: 41, deferred: 13 })).not.toThrow();
+    initOtel({ MARCH_OTEL: "1", MARCH_OTEL_ENDPOINT: "http://localhost:4318" });
+    expect(() => recordSpawnBudget({ cap: 10, live: 41, deferred: 13 })).not.toThrow();
   });
 });

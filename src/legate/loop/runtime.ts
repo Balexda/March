@@ -15,7 +15,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { recordLoopHeartbeat } from "../../observability/loop-metrics.js";
+import { recordLoopHeartbeat, recordSpawnBudget } from "../../observability/loop-metrics.js";
 import { emitLoopLog } from "../../observability/logs.js";
 import {
   getJob,
@@ -475,6 +475,20 @@ async function tick() {
     } catch (err: any) {
       logTickError(err, rec.profile);
     }
+  }
+
+  // Refresh the GLOBAL spawn-budget gauges (#313) once per tick — emitted after
+  // the per-profile loop so `deferred` is final. Profile-less: cap + draw are
+  // shared, so `spawn.live ≫ spawn.cap` with dispatch starved screams the
+  // ghost-stewards-pin-the-cap wedge as one signal.
+  try {
+    recordSpawnBudget({
+      cap: spawnBudget.cap,
+      live: spawnBudget.live,
+      deferred: spawnBudget.deferred,
+    });
+  } catch {
+    // Telemetry must never break the loop.
   }
 
   // One global line when the cap throttled this tick — the dispatchable frontier

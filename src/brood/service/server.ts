@@ -7,6 +7,7 @@ import { getActiveOtel } from "../../observability/otel.js";
 import { startBroodHeartbeat } from "../../observability/brood-metrics.js";
 import { resolveBroodPort, resolveBroodStoreBackend } from "../config.js";
 import { registerRoutes } from "./routes.js";
+import { startBroodReconciler } from "./reconciler.js";
 import {
   createSessionRepository,
   type SessionRepository,
@@ -57,6 +58,8 @@ export async function startServer(
     storeOptions: { backend: resolveBroodStoreBackend() },
   });
   const stopHeartbeat = startBroodHeartbeat();
+  // Periodic read-only reconciliation gauges (Castra-live vs Brood-tracked).
+  const stopReconciler = startBroodReconciler(store);
 
   let shuttingDown = false;
   const shutdown = async (signal: string): Promise<void> => {
@@ -64,6 +67,7 @@ export async function startServer(
     shuttingDown = true;
     app.log.info({ signal }, "brood service shutting down");
     stopHeartbeat();
+    stopReconciler();
     try {
       await app.close();
     } catch {
