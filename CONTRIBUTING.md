@@ -53,9 +53,16 @@ change PR. The trigger does not fire for production-code or shared-helper change
 that do not edit the governed test file itself.
 
 These edits are non-material and do not require a port when they preserve the
-test contract: formatting-only changes, comment-only changes, import sorting,
-tag-block edits, and mechanical renames. When no material trigger is met, the
-governed tests stay in vitest with no preemptive port.
+test contract:
+
+- formatting-only changes;
+- comment-only changes;
+- import sorting;
+- tag-block edits;
+- mechanical renames.
+
+When no material trigger is met, the governed tests stay in vitest with no
+preemptive port.
 
 This policy defines only the migration trigger. It does not redefine the tag
 taxonomy, staged scripts, quarantine routing, or Cucumber.js port mechanics.
