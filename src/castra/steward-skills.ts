@@ -75,6 +75,10 @@ export async function ensureStewardSkills(): Promise<string> {
   const templateDir = await findStewardTemplateDir();
   const skillsSrc = path.join(templateDir, "skills");
   const skillsDest = path.join(root, ".claude", "skills");
+  // Wipe-then-copy so a skill deleted/renamed in the shipped template does not
+  // linger as a stale steward skill — `fs.cp` overwrites but never prunes. The
+  // destination is March-owned (~/.march/steward), so the wipe is safe.
+  await fs.rm(skillsDest, { recursive: true, force: true });
   await fs.mkdir(skillsDest, { recursive: true });
   await fs.cp(skillsSrc, skillsDest, { recursive: true, force: true });
   return root;
