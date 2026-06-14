@@ -98,16 +98,22 @@ describe("buildLoopTickActivity", () => {
     const record = {
       workers: { running: 1, idle: 2, error: 0, bogus: "x" },
       dispatchable_count: 3,
+      dispatchable_ready_count: 2,
       blocked_count: 1,
       pending_total: 5,
       slices_by_stage: { implementing: 2, "pr-open": 1, bogus: "x" },
       ready_to_merge_count: 1,
+      waiting_on_approval_count: 3,
+      blocked_on_merge_state_count: 2,
       escalated_by_reason: { hatchery_dispatch_failed: 2, other: 1, bogus: "x" },
       dispatch_action_count: 2,
       dispatch_failure_count: 1,
       cleanup_count: 4,
+      cleanup_failure_count: 2,
       ghost_cleanup_count: 0,
+      ghost_cleanup_failure_count: 5,
       relaunch_count: 0,
+      relaunch_failure_count: 3,
       babysit_action_count: 6,
       steward_nudge_count: 7,
       steward_stranded_count: 1,
@@ -119,11 +125,14 @@ describe("buildLoopTickActivity", () => {
       up: 1,
       lastTickAtMs: 1000,
       queueDispatchable: 3,
+      queueDispatchableReady: 2,
       queueBlocked: 1,
       queueTotal: 5,
       workersByState: { running: 1, idle: 2, error: 0 }, // non-number 'bogus' dropped
       slicesByStage: { implementing: 2, "pr-open": 1 }, // non-number 'bogus' dropped
       readyToMerge: 1,
+      waitingOnApproval: 3,
+      blockedOnMergeState: 2,
       escalatedByReason: { hatchery_dispatch_failed: 2, other: 1 }, // non-number 'bogus' dropped
     });
     expect(activity.tickDurationSeconds).toBe(2.5);
@@ -131,6 +140,9 @@ describe("buildLoopTickActivity", () => {
       dispatchActions: 2,
       dispatchFailures: 1,
       cleanups: 4,
+      cleanupFailures: 2,
+      ghostCleanupFailures: 5,
+      relaunchFailures: 3,
       babysitActions: 6,
       stewardNudges: 7,
       stewardStranded: 1,
@@ -143,5 +155,8 @@ describe("buildLoopTickActivity", () => {
     expect(activity.dispatchActions).toBe(0);
     expect(activity.stewardNudges).toBe(0);
     expect(activity.stewardStranded).toBe(0);
+    expect(activity.cleanupFailures).toBe(0);
+    expect(activity.ghostCleanupFailures).toBe(0);
+    expect(activity.relaunchFailures).toBe(0);
   });
 });

@@ -2,7 +2,8 @@ import type { HandlerContext, HandlerResult, LoopState } from "../state/types.js
 import { emptyHandlerResult } from "../state/types.js";
 import { prNumber, workerBySessionId } from "../pure/session.js";
 import { hashText } from "../pure/hash.js";
-import { resolveMergeRequirements } from "../../../herald/profiles/merge-policy.js";
+import { resolveMergeRequirements, type MergePolicy } from "../../../herald/profiles/merge-policy.js";
+import { mergeReadiness, taskTypeForSlice } from "../pure/slice.js";
 import {
   ciFixMessage,
   conflictMessage,
@@ -141,26 +142,6 @@ export type BabysitDecision =
 
 function actionKey(action: string, pr: any, extra = ""): string {
   return [action, pr?.number || "", pr?.state || "", pr?.mergeable || "", pr?.checks || "", pr?.head_branch || "", extra].join(":");
-}
-
-/**
- * The smithy verb that keys a slice's per-task-type merge policy (e.g. "cut").
- * Tries, in order, the signals available on a slice — `command` is set at
- * dispatch on a warm loop, but the Herald fold is deliberately thin and does NOT
- * carry it, so after a cold-start rebuild we must fall back to the fold-durable
- * branch (`smithy/<verb>/…`) and the sliceId suffix (`…-<verb>`), both of which
- * the dispatch-id scheme guarantees. Undefined for non-smithy / unrecognized
- * shapes → resolveMergeRequirements falls back to all-required.
- */
-function taskTypeForSlice(sliceId: string, slice: any): string | undefined {
-  const fromCommand = String(slice?.command || "").match(/^smithy\.([a-z0-9_-]+)/i);
-  if (fromCommand) return fromCommand[1].toLowerCase();
-  const branch = String(slice?.actual_branch || slice?.branch || "");
-  const fromBranch = branch.match(/(?:^|\/)smithy\/([a-z0-9_-]+)\//i);
-  if (fromBranch) return fromBranch[1].toLowerCase();
-  const fromId = String(sliceId || "").match(/-(cut|forge|mark|render|fix|strike)$/i);
-  if (fromId) return fromId[1].toLowerCase();
-  return undefined;
 }
 
 function workerErrorRequestKey(sessionId: string, slice: any, recent: any): string {
@@ -628,12 +609,17 @@ function mark(slice: any, action: string, key: string, note: string, ts: string)
   slice.last_action_note = note;
 }
 
-function snapshot(slice: any, pr: any): void {
+function snapshot(slice: any, pr: any, sliceId: string, mergePolicy: MergePolicy | undefined): void {
   slice.pr = { number: pr.number, url: pr.url, state: pr.state, checks: pr.checks, mergeable: pr.mergeable };
   if (pr.head_branch) slice.actual_branch = pr.head_branch;
   slice.thread_count = pr.thread_count;
   slice.needs_response_count = pr.needs_response_count;
   slice.unresolved_threads = pr.unresolved_threads;
+  // Stamp the merge-readiness 3-way from the LIVE PR (ready / waiting-approval /
+  // blocked-merge-state / not-ready), the same gate babysit's auto-merge decision
+  // uses. The summary tallies this stamp instead of recomputing from the
+  // possibly-stale persisted slice.pr (#stack-observability).
+  slice.merge_gate = mergeReadiness(sliceId, slice, pr, mergePolicy);
 }
 
 /** Fold handled comment ids into the review-fix dedup set, union-merged so a
@@ -734,13 +720,14 @@ export async function apply(decisions: BabysitDecision[], ctx: HandlerContext, s
         await fireRequest({ ts, slice, requestKey: d.requestKey, sliceId: d.sliceId, sessionId: d.sessionId, prNumber: d.prNumber, reason: "processor could not query PR state", detail: d.detail });
         break;
       case "pr-snapshot":
-        snapshot(slice, d.pr);
+        snapshot(slice, d.pr, d.sliceId, state.mergePolicy);
         res.mutated = true;
         break;
       case "discover-pr":
-        snapshot(slice, d.pr);
+        // Set the stage BEFORE snapshot so the merge-gate stamp sees pr-open.
         slice.stage = "pr-open";
         slice.pr_open_at = ts;
+        snapshot(slice, d.pr, d.sliceId, state.mergePolicy);
         mark(slice, "discover-pr", actionKey("discover-pr", d.pr), "processor discovered PR", ts);
         ctx.emitTransition?.({ type: "slice.stage.changed", sliceId: d.sliceId, stage: "pr-open" });
         res.actions.push({ action: "discover-pr", sliceId: d.sliceId, sessionId: d.sessionId, pr: d.pr, detail: "discovered worker PR" });

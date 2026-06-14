@@ -7,7 +7,7 @@ import * as babysit from "./handlers/babysit.js";
 import * as recovery from "./handlers/recovery.js";
 import * as adoptFromFold from "./handlers/adopt-from-fold.js";
 import * as dispatch from "./handlers/dispatch.js";
-import { summarizeSlicesByStage, type SpawnBudget } from "./pure/slice.js";
+import { dispatchableReady, summarizeSlicesByStage, type SpawnBudget } from "./pure/slice.js";
 
 /**
  * Stage 2 orchestration. runTick senses once, then runs the handlers in the fixed
@@ -57,7 +57,18 @@ function buildTickResult(state: LoopState, r: CoordinatorOutput["results"], spaw
   const stewardNudgeCount = countAction(r.babysit, "steward-nudge");
   const stewardStrandedCount = countAction(r.babysit, "steward-stranded");
   // Tally after all handlers ran so stages/PR snapshots reflect this tick (#220).
-  const { byStage, readyToMerge, escalatedByReason } = summarizeSlicesByStage(state.slices);
+  // The merge-readiness 3-way (ready / waiting-approval / blocked-merge-state) is
+  // read from each slice's `merge_gate` stamp (babysit's live-PR verdict).
+  const { byStage, readyToMerge, waitingOnApproval, blockedOnMergeState, escalatedByReason } =
+    summarizeSlicesByStage(state.slices);
+  // The TRUE dispatch-ready count: the record-paced set the dispatcher actually
+  // launches (`dispatchableReady`), distinct from the node-level `queue.dispatchable`
+  // frontier metric which over-counts (escalated/blocked-shadow nodes). Computed
+  // post-handlers, so it reflects work STILL ready after this tick's dispatch —
+  // the precise "ready but not flowing" signal the dispatch alarms key on.
+  const dispatchableReadyCount = state.smithy.ok
+    ? dispatchableReady(state.raw, state.smithy.ready).length
+    : 0;
   return {
     ts: state.ts,
     statePresent: state.statePresent,
@@ -68,11 +79,16 @@ function buildTickResult(state: LoopState, r: CoordinatorOutput["results"], spaw
     queue: state.smithy.queue,
     slicesByStage: byStage,
     readyToMergeCount: readyToMerge,
+    waitingOnApprovalCount: waitingOnApproval,
+    blockedOnMergeStateCount: blockedOnMergeState,
+    dispatchableReadyCount,
     escalatedByReason,
     cleanupCount: r.cleanup.actions.length,
     cleanupFailureCount: r.cleanup.failures.length,
     ghostCleanupCount: countAction(r.ghost, "ghost-cleanup"),
+    ghostCleanupFailureCount: countAction(r.ghost, "ghost-cleanup-failed"),
     relaunchCount: countAction(r.relaunch, "relaunch-steward"),
+    relaunchFailureCount: countAction(r.relaunch, "relaunch-failed"),
     babysitActionCount: r.babysit.actions.length - stewardNudgeCount - stewardStrandedCount,
     stewardNudgeCount,
     stewardStrandedCount,

@@ -15,7 +15,8 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { recordLoopHeartbeat } from "../../observability/loop-metrics.js";
+import { recordDwell, recordLoopHeartbeat, recordSpawnBudget } from "../../observability/loop-metrics.js";
+import { stampDwell } from "./pure/dwell.js";
 import { emitLoopLog } from "../../observability/logs.js";
 import {
   getJob,
@@ -375,6 +376,16 @@ async function tickProfile(rt: ProfileRuntime, spawnBudget?: SpawnBudget): Promi
 
   rt.workingState = out.state.raw;
 
+  // Dwell (time-in-state): stamp stage_entered_at / merge_gate_since on the working
+  // slices (same ref as rt.workingState, so it persists across ticks) and fold the
+  // max-age view + completed dwells into the dwell metrics. Best-effort.
+  try {
+    const dwell = stampDwell(out.state.slices, Date.now());
+    recordDwell(meta.profile, dwell);
+  } catch {
+    // Telemetry must never break the loop.
+  }
+
   runHeartbeat(out, {
     meta: {
       processor_name: meta.processor_name,
@@ -475,6 +486,20 @@ async function tick() {
     } catch (err: any) {
       logTickError(err, rec.profile);
     }
+  }
+
+  // Refresh the GLOBAL spawn-budget gauges (#313) once per tick — emitted after
+  // the per-profile loop so `deferred` is final. Profile-less: cap + draw are
+  // shared, so `spawn.live ≫ spawn.cap` with dispatch starved screams the
+  // ghost-stewards-pin-the-cap wedge as one signal.
+  try {
+    recordSpawnBudget({
+      cap: spawnBudget.cap,
+      live: spawnBudget.live,
+      deferred: spawnBudget.deferred,
+    });
+  } catch {
+    // Telemetry must never break the loop.
   }
 
   // One global line when the cap throttled this tick — the dispatchable frontier

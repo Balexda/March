@@ -43,7 +43,9 @@ export function buildHeartbeatRecord(out: CoordinatorOutput, meta: { processor_n
     cleanup_count: t.cleanupCount,
     cleanup_failure_count: t.cleanupFailureCount,
     ghost_cleanup_count: t.ghostCleanupCount,
+    ghost_cleanup_failure_count: t.ghostCleanupFailureCount,
     relaunch_count: t.relaunchCount,
+    relaunch_failure_count: t.relaunchFailureCount,
     babysit_action_count: t.babysitActionCount,
     steward_nudge_count: t.stewardNudgeCount,
     steward_stranded_count: t.stewardStrandedCount,
@@ -51,10 +53,13 @@ export function buildHeartbeatRecord(out: CoordinatorOutput, meta: { processor_n
     dispatch_action_count: t.dispatchActionCount,
     dispatch_failure_count: t.dispatchFailureCount,
     dispatchable_count: t.queue.dispatchable,
+    dispatchable_ready_count: t.dispatchableReadyCount,
     blocked_count: t.queue.blocked,
     pending_total: t.queue.total,
     slices_by_stage: t.slicesByStage,
     ready_to_merge_count: t.readyToMergeCount,
+    waiting_on_approval_count: t.waitingOnApprovalCount,
+    blocked_on_merge_state_count: t.blockedOnMergeStateCount,
     escalated_by_reason: t.escalatedByReason,
   };
 }

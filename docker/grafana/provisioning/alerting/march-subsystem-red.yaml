@@ -1,0 +1,217 @@
+# March stack — per-subsystem RED alerts (SILENT, tier: subsystem).
+#
+# A lower tier than the system-health alarms in march-alerts.yaml: these point at
+# a SINGLE subsystem "acting out of turn" — an elevated error rate or latency on
+# its requests. They carry `team: march`, so the always-on mute defined in
+# march-alerts.yaml routes them to zero notifications while still recording breach
+# state (no policies/muteTimes are redefined here — those are global).
+#
+# Built entirely from the request metrics each service already emits
+# (march_<svc>_requests_total{outcome} + march_<svc>_request_duration_seconds).
+# outcome label: "error" for brood/herald/hatchery, "failure" for castra.
+# Thresholds are deliberately generous (silent → tune as real baselines emerge).
+apiVersion: 1
+
+groups:
+  - orgId: 1
+    name: march-subsystem-red
+    folder: March Alerts
+    interval: 1m
+    rules:
+      # ---- Error rate (>10% of requests failing over 5m, sustained 10m) ----
+      - uid: march-red-brood-errors
+        title: "RED: brood error rate > 10%"
+        condition: C
+        for: 10m
+        noDataState: OK
+        execErrState: OK
+        labels: { severity: warning, team: march, tier: subsystem }
+        annotations: { summary: "Brood is returning errors on >10% of requests." }
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: prometheus
+            model:
+              refId: A
+              instant: true
+              editorMode: code
+              expr: sum(rate(march_brood_requests_total{outcome="error"}[5m])) / sum(rate(march_brood_requests_total[5m]))
+          - refId: C
+            datasourceUid: __expr__
+            model: { refId: C, type: threshold, expression: A, conditions: [{ evaluator: { type: gt, params: [0.1] } }] }
+
+      - uid: march-red-herald-errors
+        title: "RED: herald error rate > 10%"
+        condition: C
+        for: 10m
+        noDataState: OK
+        execErrState: OK
+        labels: { severity: warning, team: march, tier: subsystem }
+        annotations: { summary: "Herald is returning errors on >10% of requests." }
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: prometheus
+            model:
+              refId: A
+              instant: true
+              editorMode: code
+              expr: sum(rate(march_herald_requests_total{outcome="error"}[5m])) / sum(rate(march_herald_requests_total[5m]))
+          - refId: C
+            datasourceUid: __expr__
+            model: { refId: C, type: threshold, expression: A, conditions: [{ evaluator: { type: gt, params: [0.1] } }] }
+
+      - uid: march-red-castra-errors
+        title: "RED: castra error rate > 10%"
+        condition: C
+        for: 10m
+        noDataState: OK
+        execErrState: OK
+        labels: { severity: warning, team: march, tier: subsystem }
+        annotations: { summary: "Castra is returning errors (5xx) on >10% of requests." }
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: prometheus
+            model:
+              refId: A
+              instant: true
+              editorMode: code
+              expr: sum(rate(march_castra_requests_total{outcome="failure"}[5m])) / sum(rate(march_castra_requests_total[5m]))
+          - refId: C
+            datasourceUid: __expr__
+            model: { refId: C, type: threshold, expression: A, conditions: [{ evaluator: { type: gt, params: [0.1] } }] }
+
+      - uid: march-red-hatchery-errors
+        title: "RED: hatchery error rate > 10%"
+        condition: C
+        for: 10m
+        noDataState: OK
+        execErrState: OK
+        labels: { severity: warning, team: march, tier: subsystem }
+        annotations: { summary: "Hatchery is returning errors on >10% of requests." }
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: prometheus
+            model:
+              refId: A
+              instant: true
+              editorMode: code
+              expr: sum(rate(march_hatchery_requests_total{outcome="error"}[5m])) / sum(rate(march_hatchery_requests_total[5m]))
+          - refId: C
+            datasourceUid: __expr__
+            model: { refId: C, type: threshold, expression: A, conditions: [{ evaluator: { type: gt, params: [0.1] } }] }
+
+      # ---- Latency (p95 request duration, 5m window) ----
+      # Skipped for hatchery: its /spawn request runs for minutes by design, so a
+      # service-wide p95 would be permanently "high" — not a useful RED signal.
+      - uid: march-red-brood-latency
+        title: "RED: brood p95 latency > 2s"
+        condition: C
+        for: 10m
+        noDataState: OK
+        execErrState: OK
+        labels: { severity: warning, team: march, tier: subsystem }
+        annotations: { summary: "Brood p95 request latency over 2s — the registry is slow." }
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: prometheus
+            model:
+              refId: A
+              instant: true
+              editorMode: code
+              expr: histogram_quantile(0.95, sum by (le) (rate(march_brood_request_duration_seconds_bucket[5m])))
+          - refId: C
+            datasourceUid: __expr__
+            model: { refId: C, type: threshold, expression: A, conditions: [{ evaluator: { type: gt, params: [2] } }] }
+
+      - uid: march-red-herald-latency
+        title: "RED: herald p95 latency > 8s"
+        condition: C
+        for: 10m
+        noDataState: OK
+        execErrState: OK
+        labels: { severity: warning, team: march, tier: subsystem }
+        annotations: { summary: "Herald p95 request latency over 8s (observe/sync is heavy — tune if noisy)." }
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: prometheus
+            model:
+              refId: A
+              instant: true
+              editorMode: code
+              expr: histogram_quantile(0.95, sum by (le) (rate(march_herald_request_duration_seconds_bucket[5m])))
+          - refId: C
+            datasourceUid: __expr__
+            model: { refId: C, type: threshold, expression: A, conditions: [{ evaluator: { type: gt, params: [8] } }] }
+
+      - uid: march-red-castra-latency
+        title: "RED: castra p95 latency > 15s"
+        condition: C
+        for: 10m
+        noDataState: OK
+        execErrState: OK
+        labels: { severity: warning, team: march, tier: subsystem }
+        annotations: { summary: "Castra p95 request latency over 15s (session launch is slow — tune if noisy)." }
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: prometheus
+            model:
+              refId: A
+              instant: true
+              editorMode: code
+              expr: histogram_quantile(0.95, sum by (le) (rate(march_castra_request_duration_seconds_bucket[5m])))
+          - refId: C
+            datasourceUid: __expr__
+            model: { refId: C, type: threshold, expression: A, conditions: [{ evaluator: { type: gt, params: [15] } }] }
+
+      # ---- Legate (actions, not HTTP) ----
+      # Failure-action ratio: a different lens than march-loop-failing (any failure)
+      # — failures DOMINATE the loop's activity.
+      - uid: march-red-legate-failure-ratio
+        title: "RED: legate failure-action ratio > 50%"
+        condition: C
+        for: 10m
+        noDataState: OK
+        execErrState: OK
+        labels: { severity: warning, team: march, tier: subsystem }
+        annotations: { summary: "Over half of the legate loop's actions are failures (*_failed)." }
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: prometheus
+            model:
+              refId: A
+              instant: true
+              editorMode: code
+              expr: sum(rate(march_legate_loop_actions_total{action=~".+_failed"}[10m])) / sum(rate(march_legate_loop_actions_total[10m]))
+          - refId: C
+            datasourceUid: __expr__
+            model: { refId: C, type: threshold, expression: A, conditions: [{ evaluator: { type: gt, params: [0.5] } }] }
+
+      # Tick duration p95: ticks are normally sub-second; >10s means the loop is
+      # struggling (slow I/O / overload).
+      - uid: march-red-legate-tick-duration
+        title: "RED: legate tick p95 > 10s"
+        condition: C
+        for: 10m
+        noDataState: OK
+        execErrState: OK
+        labels: { severity: warning, team: march, tier: subsystem }
+        annotations: { summary: "Legate loop tick p95 duration over 10s — the loop is struggling." }
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: prometheus
+            model:
+              refId: A
+              instant: true
+              editorMode: code
+              expr: histogram_quantile(0.95, sum by (le) (rate(march_legate_tick_duration_seconds_bucket[5m])))
+          - refId: C
+            datasourceUid: __expr__
+            model: { refId: C, type: threshold, expression: A, conditions: [{ evaluator: { type: gt, params: [10] } }] }

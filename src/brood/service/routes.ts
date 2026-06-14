@@ -50,6 +50,42 @@ export interface RoutesOptions {
 /** Env var gating the break-glass `POST /admin/sweep` endpoint (#304). */
 export const BROOD_ADMIN_TOKEN_ENV = "MARCH_BROOD_ADMIN_TOKEN";
 
+/** An error-outcome request to log (so the `outcome=error` metric is drillable). */
+export interface RequestErrorLog {
+  readonly level: "warn" | "error";
+  readonly fields: Record<string, unknown>;
+  readonly msg: string;
+}
+
+/**
+ * Decide how to log a completed request. Returns null for a 2xx/3xx (no log —
+ * the request log was previously all 200/201, so the `outcome=error` counter had
+ * nothing to drill into). A 5xx is a SERVER error → `error`; a 4xx is
+ * client/expected (e.g. a not-found probe) → `warn`, so the two can be filtered
+ * apart in Loki. Pure so it is unit-tested without standing up Fastify/pino.
+ */
+export function classifyRequestLog(
+  statusCode: number,
+  route: string,
+  method: string,
+  elapsedMs: number,
+  detail?: string,
+): RequestErrorLog | null {
+  if (statusCode < 400) return null;
+  const fields: Record<string, unknown> = {
+    route,
+    method,
+    status_code: statusCode,
+    duration_ms: Math.round(elapsedMs),
+  };
+  if (detail) fields.detail = detail.slice(0, 500);
+  return {
+    level: statusCode >= 500 ? "error" : "warn",
+    fields,
+    msg: `brood request ${statusCode} ${method} ${route}`,
+  };
+}
+
 /** Extract a `Bearer <token>` value from an Authorization header, or null. */
 function bearerToken(header: string | string[] | undefined): string | null {
   const raw = Array.isArray(header) ? header[0] : header;
@@ -182,15 +218,35 @@ export async function registerRoutes(
     ((id, request, traceparent) =>
       teardownSession(store, id, request, { traceparent }));
 
+  // Capture an error response body (the handlers' `{ error }`) so the log below
+  // can include WHY, not just the status. Bounded + best-effort.
+  app.addHook("onSend", async (request, _reply, payload) => {
+    if (_reply.statusCode >= 400 && typeof payload === "string") {
+      (request as { _broodErrorDetail?: string })._broodErrorDetail = payload;
+    }
+    return payload;
+  });
+
   // Record every request keyed by route TEMPLATE (not the concrete path) to
-  // keep metric cardinality bounded — the same rule spawn/hatchery metrics use.
+  // keep metric cardinality bounded — the same rule spawn/hatchery metrics use —
+  // AND log error-outcome requests so the `march_brood_requests_total{outcome=
+  // "error"}` counter is drillable (5xx→error, 4xx→warn) instead of opaque.
   app.addHook("onResponse", async (request, reply) => {
+    const route = request.routeOptions.url ?? "unknown";
     recordBroodRequest({
-      route: request.routeOptions.url ?? "unknown",
+      route,
       method: request.method,
       outcome: outcomeFromStatus(reply.statusCode),
       durationSeconds: reply.elapsedTime / 1000,
     });
+    const entry = classifyRequestLog(
+      reply.statusCode,
+      route,
+      request.method,
+      reply.elapsedTime,
+      (request as { _broodErrorDetail?: string })._broodErrorDetail,
+    );
+    if (entry) request.log[entry.level](entry.fields, entry.msg);
   });
 
   app.get("/healthz", async () => ({ status: "ok" }));

@@ -450,24 +450,16 @@ interface ProfileSweepIndex {
 }
 
 /**
- * Reap leaked Castra stewards (issue #304, ask 3). For every profile Brood knows
- * about, list Castra's live sessions and reap each TRUE ORPHAN — a session with
- * no *active* (non-torndown) Brood record — whose work is genuinely done per
- * {@link classifyOrphanWork} (PR merged/closed or worktree gone). Sessions an
- * active Brood record still owns are skipped (teardown handles those); a live
- * steward on an open PR or any state we cannot verify is left untouched.
- *
- * Idempotent and best-effort: a profile whose Castra list fails is recorded as a
- * failure and the others still run.
+ * Build the per-profile index of what Brood still considers LIVE. Enumerates
+ * every profile Brood has seen (active OR torndown rows): the torndown rows carry
+ * the `repoPath` forge lookups run from, and the profile set is what callers scan
+ * Castra for. Only NON-torndown records mark a Castra session as legitimately
+ * tracked. Shared by the manual sweep and the periodic reconciliation observer so
+ * both classify "is this live Castra session tracked?" identically.
  */
-export async function sweepLeakedStewards(
+export function indexActiveByProfile(
   store: SessionRepository,
-  gateway: CastraStewardGateway,
-  gate: OrphanGate = defaultOrphanGate(),
-): Promise<SweepResult> {
-  // Enumerate every profile Brood has seen (active OR torndown rows): the
-  // torndown rows carry the repoPath we run forge lookups from, and the profile
-  // set is what we sweep Castra for.
+): Map<string, ProfileSweepIndex> {
   const records = store.list({});
 
   const byProfile = new Map<string, ProfileSweepIndex>();
@@ -496,6 +488,92 @@ export async function sweepLeakedStewards(
     if (branch) index.activeBranches.add(branch);
   }
 
+  return byProfile;
+}
+
+/**
+ * Is this live Castra session owned by an *active* (non-torndown) Brood record?
+ * Matched the same three ways the sweep matches — exact session id, exact
+ * worktree path (#155), or branch — so the reconciliation gauge and the reaper
+ * agree on what "tracked" means.
+ */
+function sessionIsTrackedLive(
+  session: CastraSession,
+  index: ProfileSweepIndex,
+): boolean {
+  return (
+    index.activeIds.has(session.sessionId) ||
+    (!!session.worktreePath && index.activeWorktrees.has(session.worktreePath)) ||
+    (!!session.branch && index.activeBranches.has(session.branch))
+  );
+}
+
+/** One profile's live-Castra-vs-Brood-tracked reconciliation counts. */
+export interface ReconciliationObservation {
+  readonly profile: string;
+  /** Live Castra sessions Castra reported for this profile. */
+  readonly castraLive: number;
+  /** Of those, how many an active Brood record owns. */
+  readonly trackedActive: number;
+  /** Of those, how many have NO active Brood record (the leak: live but untracked). */
+  readonly orphans: number;
+}
+
+/**
+ * Read-only reconciliation: for every profile Brood knows, compare Castra's live
+ * session list against Brood's active records and count how many live sessions
+ * are tracked vs orphaned. This is the divergence the dashboards/alerts read —
+ * `orphans > 0` is the "Castra has N stewards, Brood tracks 0" wedge that renders
+ * a stalled loop as green. NEVER mutates Castra or Brood (the reaping is
+ * {@link sweepLeakedStewards}); a profile whose Castra list fails is skipped so
+ * one unreachable profile cannot poison the others' gauges.
+ */
+export async function observeReconciliation(
+  store: SessionRepository,
+  gateway: CastraStewardGateway,
+): Promise<ReconciliationObservation[]> {
+  const byProfile = indexActiveByProfile(store);
+  const out: ReconciliationObservation[] = [];
+  for (const [profile, index] of byProfile) {
+    let sessions: CastraSession[];
+    try {
+      sessions = await gateway.listSessions(profile);
+    } catch {
+      // Skip — an unreachable profile must not emit a misleading zero/spike.
+      continue;
+    }
+    let trackedActive = 0;
+    for (const session of sessions) {
+      if (sessionIsTrackedLive(session, index)) trackedActive++;
+    }
+    out.push({
+      profile,
+      castraLive: sessions.length,
+      trackedActive,
+      orphans: sessions.length - trackedActive,
+    });
+  }
+  return out;
+}
+
+/**
+ * Reap leaked Castra stewards (issue #304, ask 3). For every profile Brood knows
+ * about, list Castra's live sessions and reap each TRUE ORPHAN — a session with
+ * no *active* (non-torndown) Brood record — whose work is genuinely done per
+ * {@link classifyOrphanWork} (PR merged/closed or worktree gone). Sessions an
+ * active Brood record still owns are skipped (teardown handles those); a live
+ * steward on an open PR or any state we cannot verify is left untouched.
+ *
+ * Idempotent and best-effort: a profile whose Castra list fails is recorded as a
+ * failure and the others still run.
+ */
+export async function sweepLeakedStewards(
+  store: SessionRepository,
+  gateway: CastraStewardGateway,
+  gate: OrphanGate = defaultOrphanGate(),
+): Promise<SweepResult> {
+  const byProfile = indexActiveByProfile(store);
+
   const reaped: SweptSession[] = [];
   const skipped: SkippedSession[] = [];
   const failures: SweepFailure[] = [];
@@ -510,11 +588,7 @@ export async function sweepLeakedStewards(
     }
     for (const session of sessions) {
       // Owned by a live Brood record → teardown's job, never the sweep's.
-      const trackedLive =
-        index.activeIds.has(session.sessionId) ||
-        (!!session.worktreePath && index.activeWorktrees.has(session.worktreePath)) ||
-        (!!session.branch && index.activeBranches.has(session.branch));
-      if (trackedLive) {
+      if (sessionIsTrackedLive(session, index)) {
         skipped.push({ sessionId: session.sessionId, profile, reason: "tracked" });
         continue;
       }
