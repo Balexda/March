@@ -332,11 +332,12 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
           author { login __typename }
         }
       }
-      comments(first: 50) {
+      comments(last: 50) {
         nodes {
           databaseId
           body
           createdAt
+          url
           author { login __typename }
           reactionGroups { content viewerHasReacted }
         }
@@ -390,25 +391,35 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
       });
     // Conversation comments: PR-level (issue) comments NOT tied to a code line and
     // NOT part of a review thread — the "non-thread" feedback the thread/review
-    // signals miss entirely. `reacted_eyes` reads `viewerHasReacted` for the EYES
-    // reaction from the legate token's perspective: the legate posts :eyes: when it
-    // dispatches a comment-fix, so this is the human-visible, fold-independent half
-    // of the dedup (the persisted comment-id set is the authoritative half — the
-    // legate token shares the PR-author identity, so neither author nor reaction
-    // alone is decisive).
+    // signals miss entirely. We sample the NEWEST 50 (`last: 50`): on a long-running
+    // PR the most recent reviewer feedback is what matters, and `first: 50` would
+    // pin us to the oldest comments and never surface a fresh request. `reacted_eyes`
+    // reads `viewerHasReacted` for the EYES reaction from the legate token's
+    // perspective: the legate posts :eyes: when it dispatches a comment-fix, so this
+    // is the human-visible, fold-independent half of the dedup (the persisted
+    // comment-id set is the authoritative half — the legate token shares the
+    // PR-author identity, so neither author nor reaction alone is decisive).
     const commentNodes = Array.isArray(pr?.comments?.nodes) ? pr.comments.nodes : [];
     const comments = commentNodes
       .filter((c: any) => c && c.databaseId != null)
-      .map((c: any) => ({
-        id: c.databaseId,
-        author: c.author?.login,
-        author_type: c.author?.__typename,
-        body_preview: String(c.body || "").slice(0, 280),
-        created_at: c.createdAt,
-        reacted_eyes: (Array.isArray(c.reactionGroups) ? c.reactionGroups : []).some(
-          (g: any) => g?.content === "EYES" && g?.viewerHasReacted === true,
-        ),
-      }));
+      .map((c: any) => {
+        const body = String(c.body || "");
+        return {
+          id: c.databaseId,
+          author: c.author?.login,
+          author_type: c.author?.__typename,
+          // Bounded to keep the /smithy.fix prompt + fold entry small; `url` (and
+          // `truncated`) let the worker read the rest, so a long request stays
+          // actionable instead of being silently clipped.
+          body_preview: body.slice(0, 280),
+          truncated: body.length > 280,
+          url: c.url,
+          created_at: c.createdAt,
+          reacted_eyes: (Array.isArray(c.reactionGroups) ? c.reactionGroups : []).some(
+            (g: any) => g?.content === "EYES" && g?.viewerHasReacted === true,
+          ),
+        };
+      });
     return {
       threads,
       reviews: pr?.reviews?.nodes || [],

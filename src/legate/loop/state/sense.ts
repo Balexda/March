@@ -472,6 +472,11 @@ export function selectStaleRecheck(
     if (s.archived) continue;
     const prNumber = prSnapshotNumber(s.pr);
     if (prNumber === null) continue;
+    // The sweep exists to catch a CLEAN→CONFLICTING transition that didn't bump
+    // `updatedAt`. A PR already stored as CONFLICTING is known and being handled by
+    // babysit, so forcing it wastes the one slot and delays detecting a silent
+    // conflict on some other clean PR — skip it.
+    if ((s.pr as { mergeable?: unknown } | undefined)?.mergeable === "CONFLICTING") continue;
     // Only PRs the cursor gate would SKIP are at risk of a silent conflict — a PR
     // the gate already re-fetches is fresh, so forcing it buys nothing.
     if (shouldRefetchKnownPr(s.pr, openPrs.get(prNumber))) continue;

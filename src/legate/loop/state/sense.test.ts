@@ -752,6 +752,13 @@ describe("selectStaleRecheck (rotating forced-recheck victim)", () => {
     expect(selectStaleRecheck(skippablePrev(), null, createStaleRecheckTracker(), t0)).toBeNull();
   });
 
+  it("does NOT pick a PR already known CONFLICTING (handled by babysit; wastes a sweep slot)", () => {
+    const prev = foldedState({
+      slices: { p: slice({ sliceId: "p", stage: "pr-open", branch: "b", pr: { number: 7, updated_at: "T1", checks: "PASS", thread_count: 0, mergeable: "CONFLICTING" } }) },
+    });
+    expect(selectStaleRecheck(prev, idleOpen, createStaleRecheckTracker(), t0)).toBeNull();
+  });
+
   it("does NOT pick a PR the cursor gate already re-fetches (updatedAt advanced)", () => {
     // Stored cursor T1 but live probe shows T2 → gate refetches it, so forcing buys nothing.
     const advanced = new Map([[7, { updatedAt: "T2", headRefName: "b" }]]);

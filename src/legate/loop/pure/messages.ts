@@ -128,14 +128,19 @@ export function commentsNeedingResponse(slice: any, pr: any): any[] {
   return (pr.conversation_comments || []).filter((comment: any) => comment && comment.reacted_eyes !== true);
 }
 
-/** Quote each conversation comment as a Markdown blockquote with attribution. */
+/** Quote each conversation comment as a Markdown blockquote with attribution. The
+ *  body is a bounded preview; when it was truncated (or whenever a permalink is
+ *  available) the comment URL is appended so the worker can read the full request
+ *  rather than acting on a clipped quote. */
 export function conversationCommentsSummary(comments: any[]): string {
   return comments
     .map((comment: any) => {
-      const quoted = String(comment.body_preview || "").trim().replace(/\n/g, "\n> ");
+      const preview = String(comment.body_preview || "").trim();
+      const quoted = (comment.truncated ? `${preview}…` : preview).replace(/\n/g, "\n> ");
       const who = comment.author || "unknown";
       const when = comment.created_at ? ` (${comment.created_at})` : "";
-      return `> ${quoted}\n— ${who}${when}`;
+      const link = comment.url ? `\n  (full comment: ${comment.url})` : "";
+      return `> ${quoted}\n— ${who}${when}${link}`;
     })
     .join("\n\n");
 }

@@ -285,6 +285,7 @@ describe("queryPrForBabysit", () => {
                       databaseId: 101,
                       body: "We should modify the spec and pull back from this behavior.",
                       createdAt: "2026-06-09T07:00:30Z",
+                      url: "https://github.com/octo/march/pull/5#issuecomment-101",
                       author: { login: "reviewer", __typename: "User" },
                       reactionGroups: [{ content: "THUMBS_UP", viewerHasReacted: false }],
                     },
@@ -292,6 +293,7 @@ describe("queryPrForBabysit", () => {
                       databaseId: 102,
                       body: "already handled",
                       createdAt: "2026-06-09T08:00:00Z",
+                      url: "https://github.com/octo/march/pull/5#issuecomment-102",
                       author: { login: "reviewer", __typename: "User" },
                       reactionGroups: [{ content: "EYES", viewerHasReacted: true }],
                     },
@@ -308,9 +310,39 @@ describe("queryPrForBabysit", () => {
     const io = createSenseIo({ meta: meta(), castra: fakeCastra() });
     const pr = await io.queryPrForBabysit({ pr: { number: 5 } }, { repo: { path: "/repo", owner_with_name: "octo/march" } });
     expect(pr.conversation_comments).toEqual([
-      { id: 101, author: "reviewer", author_type: "User", body_preview: "We should modify the spec and pull back from this behavior.", created_at: "2026-06-09T07:00:30Z", reacted_eyes: false },
-      { id: 102, author: "reviewer", author_type: "User", body_preview: "already handled", created_at: "2026-06-09T08:00:00Z", reacted_eyes: true },
+      { id: 101, author: "reviewer", author_type: "User", body_preview: "We should modify the spec and pull back from this behavior.", truncated: false, url: "https://github.com/octo/march/pull/5#issuecomment-101", created_at: "2026-06-09T07:00:30Z", reacted_eyes: false },
+      { id: 102, author: "reviewer", author_type: "User", body_preview: "already handled", truncated: false, url: "https://github.com/octo/march/pull/5#issuecomment-102", created_at: "2026-06-09T08:00:00Z", reacted_eyes: true },
     ]);
+  });
+
+  it("samples the NEWEST conversation comments (last:50) and flags an over-length body as truncated", async () => {
+    const longBody = "x".repeat(400);
+    let graphqlArgs: string[] = [];
+    routeExec((_cmd, args) => {
+      if (args.includes("graphql")) {
+        graphqlArgs = args;
+        return JSON.stringify({
+          data: {
+            repository: {
+              pullRequest: {
+                headRefOid: "abc",
+                mergeStateStatus: "CLEAN",
+                reviews: { nodes: [] },
+                comments: { nodes: [{ databaseId: 7, body: longBody, createdAt: "2026-06-09T09:00:00Z", url: "u7", author: { login: "rev", __typename: "User" }, reactionGroups: [] }] },
+                reviewThreads: { nodes: [] },
+              },
+            },
+          },
+        });
+      }
+      return JSON.stringify({ number: 5, url: "u", state: "OPEN", mergeable: "MERGEABLE", headRefName: "b", title: "t", author: { login: "me" }, statusCheckRollup: [] });
+    });
+    const io = createSenseIo({ meta: meta(), castra: fakeCastra() });
+    const pr = await io.queryPrForBabysit({ pr: { number: 5 } }, { repo: { path: "/repo", owner_with_name: "octo/march" } });
+    // The graphql query asks for the newest page, not the oldest.
+    expect(graphqlArgs.some((a) => a.includes("comments(last: 50)"))).toBe(true);
+    expect(pr.conversation_comments[0]).toMatchObject({ id: 7, truncated: true, url: "u7" });
+    expect(pr.conversation_comments[0].body_preview).toHaveLength(280);
   });
 
   it("skips when the slice has no PR number", async () => {

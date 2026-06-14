@@ -852,15 +852,16 @@ export async function apply(decisions: BabysitDecision[], ctx: HandlerContext, s
         markCommentFixSeen(slice, d.commentIds || []);
         // Best-effort :eyes: ack on each dispatched comment — human-visible, and the
         // fold-independent dedup half (it survives a cold start that wipes the
-        // seen-set). A failed reaction never blocks the fix; the seen-set covers it.
-        if (deps.reactToComment) {
-          for (const id of d.commentIds || []) {
-            try {
-              await deps.reactToComment({ commentId: id, content: "eyes", repoPath: state.repoPath });
-            } catch {
-              // best-effort; seen-set is authoritative.
-            }
-          }
+        // seen-set). Fire them concurrently so a comment-heavy PR doesn't serialize
+        // the tick; a failed reaction never blocks the fix (the seen-set is
+        // authoritative).
+        const reactToComment = deps.reactToComment;
+        if (reactToComment) {
+          await Promise.all(
+            (d.commentIds || []).map((id) =>
+              reactToComment({ commentId: id, content: "eyes", repoPath: state.repoPath }).catch(() => {}),
+            ),
+          );
         }
         mark(slice, "comment-fix", d.key, "processor sent conversation-comment /smithy.fix", ts);
         ctx.emitTransition?.({ type: "slice.stage.changed", sliceId: d.sliceId, stage: "pr-in-fix" });

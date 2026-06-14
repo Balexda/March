@@ -86,6 +86,14 @@ describe("messages pure builders", () => {
     expect(m).toContain("— rev (2026-06-09T07:00:30Z)");
   });
 
+  it("conversationCommentsSummary appends the permalink and marks a truncated body", () => {
+    const m = commentFixMessage({ number: 12 }, [
+      { author: "rev", body_preview: "do the thing", truncated: true, url: "https://gh/c/1", created_at: "2026-06-09T07:00:30Z" },
+    ]);
+    expect(m).toContain("> do the thing…");
+    expect(m).toContain("(full comment: https://gh/c/1)");
+  });
+
   it("prDiscoverySince falls back through timestamp fields", () => {
     expect(prDiscoverySince({ created_at: "c" })).toBe("c");
     expect(prDiscoverySince({ last_action: "l", created_at: "c" })).toBe("l");
