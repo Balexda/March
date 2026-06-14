@@ -35,6 +35,17 @@
 #                     invisible. Set it ONLY for the window an operator needs to
 #                     reap leaked stewards (`march brood sweep`), then UNSET it
 #                     again. The CLI sends the SAME token as its bearer.
+#   MARCH_BROOD_AUTO_REAP / MARCH_BROOD_AUTO_ADOPT
+#                     durable self-heal (#304/#308 follow-up), two independent
+#                     flags. AUTO_REAP=1 makes the brood service periodically reap
+#                     dead orphans (confirmed-done + age-gated no-open-PR); AUTO_
+#                     ADOPT=1 adopts untracked open-PR stewards INTO Brood so the
+#                     legate manages/merges them (closes the manual-merge backlog).
+#                     Defaulted ON for this stack; set to 0 to disable. The reaper
+#                     respects the OPEN-PR protection and reuses the same PR gate as
+#                     the manual sweep (needs GH_TOKEN/GITHUB_TOKEN). Tunables:
+#                     MARCH_BROOD_AUTO_REAP_INTERVAL_MS (default 300000),
+#                     MARCH_BROOD_DEAD_ORPHAN_AGE_HOURS (default 24).
 #
 # SECURITY: this mounts the docker socket (host-root-equivalent) and your HOME.
 # The port is bound to localhost only; never expose it publicly, never publish
@@ -80,6 +91,13 @@ services:
       # 404s and is invisible. Set it ONLY while an operator is reaping leaked
       # stewards (`march brood sweep`), then unset it and recreate the container.
       - MARCH_BROOD_ADMIN_TOKEN=${MARCH_BROOD_ADMIN_TOKEN:-}
+      # Durable self-heal (#304/#308): two independent flags, ON for this stack
+      # (set to 0 to disable). AUTO_REAP periodically reaps dead orphans; AUTO_
+      # ADOPT adopts untracked open-PR stewards into Brood. Tunable cadence + age.
+      - MARCH_BROOD_AUTO_REAP=${MARCH_BROOD_AUTO_REAP:-1}
+      - MARCH_BROOD_AUTO_ADOPT=${MARCH_BROOD_AUTO_ADOPT:-1}
+      - MARCH_BROOD_AUTO_REAP_INTERVAL_MS=${MARCH_BROOD_AUTO_REAP_INTERVAL_MS:-300000}
+      - MARCH_BROOD_DEAD_ORPHAN_AGE_HOURS=${MARCH_BROOD_DEAD_ORPHAN_AGE_HOURS:-24}
     volumes:
       # Host docker daemon (remove spawn containers + read their logs).
       - /var/run/docker.sock:/var/run/docker.sock

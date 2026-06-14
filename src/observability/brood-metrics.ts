@@ -41,6 +41,18 @@ export interface BroodReconciliationSample {
 // reconciliation tick. `undefined` until the first observation completes.
 let latestReconciliation: readonly BroodReconciliationSample[] | undefined;
 
+/**
+ * One outcome of the auto-reconciler reap loop, fed to the `march.brood.reaps`
+ * counter. Low-cardinality by construction: `outcome` is a 4-value enum and
+ * `reason` is drawn from the bounded verdict/skip reasons (`pr-merged`,
+ * `dead-orphan`, `open-pr`, `tracked`, …). Plain data so observability does not
+ * depend on the service layer.
+ */
+export interface BroodReapOutcome {
+  readonly outcome: "reaped" | "adopted" | "skipped" | "failed";
+  readonly reason: string;
+}
+
 // One instrument per Meter, rebuilt transparently when initOtel swaps the
 // provider (e.g. between tests) — mirrors hatchery-metrics / spawn-metrics.
 let cachedMeter: Meter | undefined;
@@ -49,6 +61,7 @@ let requestDuration: Histogram | undefined;
 let teardownsCounter: Counter | undefined;
 let teardownDuration: Histogram | undefined;
 let heartbeatCounter: Counter | undefined;
+let reapsCounter: Counter | undefined;
 
 interface BroodInstruments {
   requests: Counter;
@@ -56,6 +69,7 @@ interface BroodInstruments {
   teardowns: Counter;
   teardownDuration: Histogram;
   heartbeat: Counter;
+  reaps: Counter;
 }
 
 function broodInstruments(meter: Meter): BroodInstruments {
@@ -79,6 +93,11 @@ function broodInstruments(meter: Meter): BroodInstruments {
     });
     heartbeatCounter = meter.createCounter("march.brood.heartbeat", {
       description: "Liveness heartbeat ticks emitted by the brood service",
+      unit: "1",
+    });
+    reapsCounter = meter.createCounter("march.brood.reaps", {
+      description:
+        "Auto-reconciler outcomes by outcome (reaped/adopted/skipped/failed) and reason",
       unit: "1",
     });
     meter
@@ -118,6 +137,7 @@ function broodInstruments(meter: Meter): BroodInstruments {
     teardowns: teardownsCounter!,
     teardownDuration: teardownDuration!,
     heartbeat: heartbeatCounter!,
+    reaps: reapsCounter!,
   };
 }
 
@@ -152,6 +172,24 @@ export function recordBroodReconciliation(
   if (!otel.enabled) return;
   broodInstruments(otel.getMeter());
   latestReconciliation = samples;
+}
+
+/**
+ * Record the outcomes of one auto-reconciler reap loop tick: increments
+ * `march.brood.reaps{outcome,reason}` once per outcome. No-op when telemetry is
+ * disabled. The reconciler flattens its `SweepResult` (reaped/adopted/skipped/
+ * failures) into these outcomes so a single, drillable counter shows the
+ * reconciled delta — `outcome="reaped",reason="dead-orphan"` vs
+ * `outcome="adopted",reason="open-pr"`.
+ */
+export function recordBroodReaps(outcomes: readonly BroodReapOutcome[]): void {
+  if (outcomes.length === 0) return;
+  const otel = getActiveOtel();
+  if (!otel.enabled) return;
+  const { reaps } = broodInstruments(otel.getMeter());
+  for (const o of outcomes) {
+    reaps.add(1, { outcome: o.outcome, reason: o.reason });
+  }
 }
 
 /** Record one HTTP request: count + duration by route/method/outcome. No-op when disabled. */
