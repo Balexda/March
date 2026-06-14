@@ -17,7 +17,7 @@
 
 ### Tasks
 
-- [ ] **Add Brood persistence fields for extraction results**
+- [x] **Add Brood persistence fields for extraction results**
 
   Extend the Brood session registry contract so a spawn session can store one current `ExtractionResult` with the fields required by the data model. The persisted shape should represent success with a validated patch and failure with stable failure metadata, while keeping diagnostics bounded and avoiding any branch push, PR creation, or Steward launch behavior.
 
@@ -28,7 +28,7 @@
   - The persistence shape remains backend-neutral and does not store unbounded raw backend output (FR-009, FR-013).
   - The change preserves legacy spawn-record readability for callers that still load `~/.march/spawns/<id>.json`.
 
-- [ ] **Implement idempotent extraction result writes**
+- [x] **Implement idempotent extraction result writes**
 
   Add the write path that accepts the terminal validation outcome from US2 and records it against the spawn's lifecycle row. Re-running extraction for unchanged source output should replace or preserve the same current result deterministically rather than appending duplicate patch files or creating multiple result rows.
 
@@ -39,7 +39,7 @@
   - Missing or stale Brood spawn rows fail cleanly with a terminal persistence diagnostic instead of hanging autonomous callers (FR-014).
   - The write path has no Feature 6 dependency and does not apply patches, push branches, or create pull requests.
 
-- [ ] **Cover persistence behavior with focused tests**
+- [x] **Cover persistence behavior with focused tests**
 
   Add tests for Brood-backed extraction result storage using isolated registry state and US2-style validation fixtures. The tests should prove success, failure, retry determinism, diagnostic bounding, and legacy record compatibility without requiring Docker, Castra, Hatchery, or a live Steward session.
 
