@@ -359,21 +359,95 @@ export interface OrphanVerdict {
 }
 
 /**
+ * Knobs the durable auto-reconciler (issue #304/#308 follow-up) passes through
+ * the sweep. All optional — the empty default reproduces the conservative
+ * break-glass behavior exactly, so the manual `march brood sweep` is unchanged.
+ *
+ * The auto-reconciler turns these on from env (two independent flags): the
+ * dead-orphan criterion (`deadOrphanAgeMs`) and open-PR adoption (`adopt`) are
+ * gated separately, and `reap: false` lets an adopt-only run leave confirmed-done
+ * orphans untouched.
+ */
+export interface ReapOptions {
+  /**
+   * Remove confirmed-done orphans (pr-merged / pr-closed / worktree-gone /
+   * dead-orphan). `undefined` is treated as `true` (the historical default); the
+   * auto-reconciler sets `false` for an adopt-only pass.
+   */
+  readonly reap?: boolean;
+  /**
+   * Enable the age-gated dead-orphan criterion when set (milliseconds). A
+   * non-running orphan past this age whose KNOWN branch the forge confirms has no
+   * PR (`no-pr`) is judged `done`. Branchless sessions stay `unknown` (an empty
+   * branch is ambiguous, not proof of no PR). `undefined` disables the criterion
+   * entirely — the conservative default.
+   */
+  readonly deadOrphanAgeMs?: number;
+  /**
+   * Adopt untracked LIVE open-PR stewards INTO Brood (register them) instead of
+   * skipping them, so the legate manages/merges them — the #304/#308 source fix
+   * for the manual-merge backlog. Off by default.
+   */
+  readonly adopt?: boolean;
+  /** Clock injection for the age comparison (tests). Defaults to `Date.now()`. */
+  readonly now?: number;
+}
+
+/**
+ * agent-deck statuses that mark a session as NOT actively working — the only
+ * states a dead orphan may be in. `running` (busy) and `idle` are excluded, and
+ * an empty status (agent-deck reported none) is treated as unknown → never dead.
+ * Deliberately narrow: the dead-orphan reap must not race a session that is
+ * merely between turns.
+ */
+const NON_RUNNING_STATUSES = new Set(["waiting", "error", "stopped"]);
+
+/**
+ * Is this untracked session a *dead orphan* — old enough, in a non-running
+ * agent-deck status, and (the caller has already established) carrying no open
+ * PR? Disabled (always false) unless `options.deadOrphanAgeMs` is set, so the
+ * criterion is opt-in.
+ */
+function isDeadOrphan(session: CastraSession, options: ReapOptions): boolean {
+  if (options.deadOrphanAgeMs === undefined) return false;
+  if (!NON_RUNNING_STATUSES.has(session.status.trim().toLowerCase())) return false;
+  const created = Date.parse(session.createdAt);
+  if (Number.isNaN(created)) return false; // no trustworthy age → never reap
+  const now = options.now ?? Date.now();
+  return now - created > options.deadOrphanAgeMs;
+}
+
+/**
  * Decide whether a leaked Castra steward session's work is genuinely done, and
  * is therefore safe to reap. Conservative by construction: only `worktree-gone`
- * and a MERGED/CLOSED PR are "done"; an OPEN PR is `in-progress` (never reap);
- * everything we cannot verify (no branch, no repo root, no PR, `gh` failed) is
- * `unknown` (left alone).
+ * and a MERGED/CLOSED PR are unconditionally "done"; an OPEN PR is `in-progress`
+ * (never reap); everything we cannot verify is `unknown` (left alone).
+ *
+ * The age-gated dead-orphan criterion (opt-in via `options.deadOrphanAgeMs`)
+ * upgrades only `no-pr` (a KNOWN branch the forge confirms has no PR) to `done`
+ * when the session is old + non-running ({@link isDeadOrphan}). `no-branch`,
+ * `pr-lookup-unknown`, and `no-repo-root` stay `unknown`: a branch we could not
+ * read or a PR we could not see must never be reaped on age.
  */
 export async function classifyOrphanWork(
   session: CastraSession,
   repoRoot: string | undefined,
   gate: OrphanGate,
+  options: ReapOptions = {},
 ): Promise<OrphanVerdict> {
   if (session.worktreePath && !gate.worktreeExists(session.worktreePath)) {
     return { state: "done", reason: "worktree-gone" };
   }
-  if (!session.branch) return { state: "unknown", reason: "no-branch" };
+  if (!session.branch) {
+    // `branch === ""` is AMBIGUOUS per the CastraSession contract — it means the
+    // branch is UNKNOWN (detached HEAD, a non-git dir, a transient `git`
+    // derivation failure, or an infra session like a conductor), NOT provably
+    // "no branch / no PR". It therefore never proves a slice is done, so it is
+    // never age-reaped: an open PR whose branch we could not read must survive.
+    // Only worktree-gone (above) or a forge-confirmed no-PR on a KNOWN branch
+    // (below) can mark an orphan done.
+    return { state: "unknown", reason: "no-branch" };
+  }
   if (!repoRoot) return { state: "unknown", reason: "no-repo-root" };
 
   switch (await gate.branchPrState(session.branch, repoRoot)) {
@@ -384,7 +458,9 @@ export async function classifyOrphanWork(
     case "closed":
       return { state: "done", reason: "pr-closed" };
     case "none":
-      return { state: "unknown", reason: "no-pr" };
+      return isDeadOrphan(session, options)
+        ? { state: "done", reason: "dead-orphan" }
+        : { state: "unknown", reason: "no-pr" };
     default:
       return { state: "unknown", reason: "pr-lookup-unknown" };
   }
@@ -408,6 +484,18 @@ export interface SkippedSession {
   readonly reason: string;
 }
 
+/**
+ * An untracked LIVE open-PR steward the sweep ADOPTED into Brood (registered)
+ * rather than skipping, so the legate manages/merges it — the #304/#308 source
+ * fix for the manual-merge backlog. Only produced when `ReapOptions.adopt` is on.
+ */
+export interface AdoptedSession {
+  readonly sessionId: string;
+  readonly profile: string;
+  readonly worktreePath: string;
+  readonly branch: string;
+}
+
 /** A profile whose sweep could not be completed (e.g. Castra unreachable). */
 export interface SweepFailure {
   readonly profile: string;
@@ -418,6 +506,8 @@ export interface SweepFailure {
 export interface SweepResult {
   readonly scannedProfiles: readonly string[];
   readonly reaped: readonly SweptSession[];
+  /** Untracked open-PR stewards registered INTO Brood (only when `adopt` on). */
+  readonly adopted: readonly AdoptedSession[];
   readonly skipped: readonly SkippedSession[];
   readonly failures: readonly SweepFailure[];
 }
@@ -560,9 +650,18 @@ export async function observeReconciliation(
  * Reap leaked Castra stewards (issue #304, ask 3). For every profile Brood knows
  * about, list Castra's live sessions and reap each TRUE ORPHAN — a session with
  * no *active* (non-torndown) Brood record — whose work is genuinely done per
- * {@link classifyOrphanWork} (PR merged/closed or worktree gone). Sessions an
- * active Brood record still owns are skipped (teardown handles those); a live
- * steward on an open PR or any state we cannot verify is left untouched.
+ * {@link classifyOrphanWork} (PR merged/closed, worktree gone, or — when the
+ * dead-orphan criterion is enabled — an old non-running orphan with no open PR).
+ * Sessions an active Brood record still owns are skipped (teardown handles
+ * those); a live steward on an open PR or any state we cannot verify is left
+ * untouched.
+ *
+ * With `options.adopt` on, an untracked LIVE open-PR steward is ADOPTED into
+ * Brood (registered) instead of being skipped, so the legate manages/merges it —
+ * the #304/#308 source fix for the manual-merge backlog. With `options.reap`
+ * `false` (an adopt-only pass) a confirmed-done orphan is left in place rather
+ * than removed. The default `{}` reproduces the conservative break-glass behavior
+ * exactly (reap confirmed-done, skip open-PR, no dead-orphan reap).
  *
  * Idempotent and best-effort: a profile whose Castra list fails is recorded as a
  * failure and the others still run.
@@ -571,10 +670,13 @@ export async function sweepLeakedStewards(
   store: SessionRepository,
   gateway: CastraStewardGateway,
   gate: OrphanGate = defaultOrphanGate(),
+  options: ReapOptions = {},
 ): Promise<SweepResult> {
   const byProfile = indexActiveByProfile(store);
+  const reapEnabled = options.reap !== false; // undefined → historical default (reap)
 
   const reaped: SweptSession[] = [];
+  const adopted: AdoptedSession[] = [];
   const skipped: SkippedSession[] = [];
   const failures: SweepFailure[] = [];
 
@@ -593,8 +695,36 @@ export async function sweepLeakedStewards(
         continue;
       }
 
-      const verdict = await classifyOrphanWork(session, index.repoRoot, gate);
+      const verdict = await classifyOrphanWork(session, index.repoRoot, gate, options);
+
+      // Untracked open-PR steward: adopt it into Brood so the legate can
+      // manage/merge it (the manual-merge-backlog source fix), else leave it.
+      if (verdict.state === "in-progress") {
+        if (options.adopt) {
+          try {
+            adoptOpenPrSteward(store, session, profile, index.repoRoot);
+            adopted.push({
+              sessionId: session.sessionId,
+              profile,
+              worktreePath: session.worktreePath,
+              branch: session.branch,
+            });
+          } catch (err) {
+            failures.push({ profile, sessionId: session.sessionId, detail: `adopt failed: ${message(err)}` });
+          }
+        } else {
+          skipped.push({ sessionId: session.sessionId, profile, reason: verdict.reason });
+        }
+        continue;
+      }
+
       if (verdict.state !== "done") {
+        skipped.push({ sessionId: session.sessionId, profile, reason: verdict.reason });
+        continue;
+      }
+
+      // Confirmed done — but an adopt-only pass (reap disabled) leaves it.
+      if (!reapEnabled) {
         skipped.push({ sessionId: session.sessionId, profile, reason: verdict.reason });
         continue;
       }
@@ -618,7 +748,36 @@ export async function sweepLeakedStewards(
     }
   }
 
-  return { scannedProfiles: [...byProfile.keys()], reaped, skipped, failures };
+  return { scannedProfiles: [...byProfile.keys()], reaped, adopted, skipped, failures };
+}
+
+/**
+ * Register an untracked live open-PR steward into Brood so the legate manages and
+ * merges it. Mirrors the legate relaunch handler's `reconcileBrood` register
+ * (`src/legate/loop/handlers/relaunch.ts`): the steward row is keyed by the
+ * agent-deck session id, carries its worktree/branch, and threads the spawn id
+ * from Castra's session metadata as `parentId` (#308) when present so terminal
+ * teardown still resolves/archives the spawn+steward group.
+ */
+function adoptOpenPrSteward(
+  store: SessionRepository,
+  session: CastraSession,
+  profile: string,
+  repoRoot: string | undefined,
+): void {
+  const spawnId = session.metadata?.spawnId;
+  store.register({
+    id: session.sessionId,
+    kind: "steward",
+    status: "running",
+    agentDeckSessionId: session.sessionId,
+    profile,
+    ...(spawnId ? { parentId: spawnId } : {}),
+    ...(repoRoot ? { repoPath: repoRoot } : {}),
+    ...(session.branch ? { branch: session.branch } : {}),
+    ...(session.worktreePath ? { worktreePath: session.worktreePath } : {}),
+    ...(session.group ? { group: session.group } : {}),
+  });
 }
 
 function message(err: unknown): string {

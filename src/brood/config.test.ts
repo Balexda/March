@@ -7,6 +7,7 @@ import {
   BROOD_SERVICE_NAME,
   resolveBroodPort,
   resolveBroodStoreBackend,
+  resolveReapConfig,
 } from "./config.js";
 
 describe("brood config", () => {
@@ -47,5 +48,56 @@ describe("brood config", () => {
     expect(() =>
       resolveBroodStoreBackend({ MARCH_BROOD_STORE: "mysql" }),
     ).toThrowError(/Invalid MARCH_BROOD_STORE/);
+  });
+});
+
+describe("resolveReapConfig", () => {
+  it("defaults both flags OFF (inactive), 5-min cadence, 24-h dead-orphan age", () => {
+    const c = resolveReapConfig({});
+    expect(c.reapEnabled).toBe(false);
+    expect(c.adoptEnabled).toBe(false);
+    expect(c.active).toBe(false);
+    expect(c.intervalMs).toBe(300_000);
+    expect(c.deadOrphanAgeMs).toBe(24 * 3_600_000);
+  });
+
+  it("treats the two flags independently and derives `active` from either", () => {
+    expect(resolveReapConfig({ MARCH_BROOD_AUTO_REAP: "1" })).toMatchObject({
+      reapEnabled: true,
+      adoptEnabled: false,
+      active: true,
+    });
+    expect(resolveReapConfig({ MARCH_BROOD_AUTO_ADOPT: "1" })).toMatchObject({
+      reapEnabled: false,
+      adoptEnabled: true,
+      active: true,
+    });
+    expect(
+      resolveReapConfig({ MARCH_BROOD_AUTO_REAP: "1", MARCH_BROOD_AUTO_ADOPT: "1" }),
+    ).toMatchObject({ reapEnabled: true, adoptEnabled: true, active: true });
+  });
+
+  it("only the exact value \"1\" arms a flag", () => {
+    expect(resolveReapConfig({ MARCH_BROOD_AUTO_REAP: "true" }).reapEnabled).toBe(false);
+    expect(resolveReapConfig({ MARCH_BROOD_AUTO_REAP: "0" }).reapEnabled).toBe(false);
+    expect(resolveReapConfig({ MARCH_BROOD_AUTO_REAP: " 1 " }).reapEnabled).toBe(true);
+  });
+
+  it("honors interval + dead-orphan-age overrides", () => {
+    const c = resolveReapConfig({
+      MARCH_BROOD_AUTO_REAP_INTERVAL_MS: "60000",
+      MARCH_BROOD_DEAD_ORPHAN_AGE_HOURS: "48",
+    });
+    expect(c.intervalMs).toBe(60_000);
+    expect(c.deadOrphanAgeMs).toBe(48 * 3_600_000);
+  });
+
+  it("throws on a non-positive / non-numeric override (fail fast)", () => {
+    expect(() =>
+      resolveReapConfig({ MARCH_BROOD_AUTO_REAP_INTERVAL_MS: "0" }),
+    ).toThrowError(/MARCH_BROOD_AUTO_REAP_INTERVAL_MS/);
+    expect(() =>
+      resolveReapConfig({ MARCH_BROOD_DEAD_ORPHAN_AGE_HOURS: "abc" }),
+    ).toThrowError(/MARCH_BROOD_DEAD_ORPHAN_AGE_HOURS/);
   });
 });

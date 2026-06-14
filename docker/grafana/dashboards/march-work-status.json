@@ -828,7 +828,7 @@
         "type": "prometheus",
         "uid": "prometheus"
       },
-      "description": "Slices a steward session is actively driving \u2014 review fixes, conflicts, or failing checks (pr-open|pr-in-fix|pr-resolving-conflicts minus waiting-for-merge). Resource-heavy; counts toward the cap.",
+      "description": "Slices the SYSTEM is still working \u2014 review fixes, conflicts, failing checks, or an auto-mergeable PR about to merge (pr-open|pr-in-fix|pr-resolving-conflicts minus waiting-on-approval). No human action needed. Resource-heavy; counts toward the cap.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -877,7 +877,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "clamp_min(sum(march_legate_slices{stage=~\"pr-open|pr-in-fix|pr-resolving-conflicts\", profile=~\"$profile\"}) - sum(march_legate_slices_ready_to_merge{profile=~\"$profile\"}), 0)",
+          "expr": "clamp_min(sum(march_legate_slices{stage=~\"pr-open|pr-in-fix|pr-resolving-conflicts\", profile=~\"$profile\"}) - sum(march_legate_slices_waiting_on_approval{profile=~\"$profile\"}), 0)",
           "legendFormat": "in steward",
           "range": true,
           "refId": "A"
@@ -891,7 +891,7 @@
         "type": "prometheus",
         "uid": "prometheus"
       },
-      "description": "Clean PRs parked awaiting a merge \u2014 checks pass, mergeable, no threads owed (march_legate_slices_ready_to_merge). Consumes no spawn/steward, so it does NOT count toward the cap.",
+      "description": "PRs waiting on a HUMAN to approve \u2014 checks pass, the system is done, only an approval click stands between them and merge (march_legate_slices_waiting_on_approval). Consumes no spawn/steward, so it does NOT count toward the cap.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -940,7 +940,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "sum(march_legate_slices_ready_to_merge{profile=~\"$profile\"})",
+          "expr": "sum(march_legate_slices_waiting_on_approval{profile=~\"$profile\"})",
           "legendFormat": "waiting",
           "range": true,
           "refId": "A"

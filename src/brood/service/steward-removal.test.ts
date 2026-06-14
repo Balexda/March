@@ -7,6 +7,7 @@ import { sqliteAvailable } from "./sqlite.js";
 import { SessionStore } from "./store.js";
 import {
   candidateHeadBranches,
+  classifyOrphanWork,
   fetchBranchPrState,
   observeReconciliation,
   parseGitHubSlug,
@@ -26,6 +27,7 @@ function session(over: Partial<CastraSession> & { sessionId: string }): CastraSe
     worktreePath: over.worktreePath ?? "",
     createdAt: over.createdAt ?? "",
     status: over.status ?? "waiting",
+    ...(over.metadata ? { metadata: over.metadata } : {}),
   };
 }
 
@@ -142,6 +144,110 @@ function fakeGate(
     branchPrState: async (branch) => opts.pr?.[branch] ?? "unknown",
   };
 }
+
+describe("classifyOrphanWork (age-gated dead-orphan criterion)", () => {
+  const NOW = Date.parse("2026-06-13T00:00:00Z");
+  const OLD = "2026-06-01T00:00:00Z"; // ~12 days before NOW
+  const FRESH = "2026-06-12T23:00:00Z"; // 1 hour before NOW
+  const ON = { deadOrphanAgeMs: 24 * 3_600_000, now: NOW };
+
+  it("leaves no-branch / no-pr orphans `unknown` when the criterion is OFF (default)", async () => {
+    expect(
+      await classifyOrphanWork(
+        session({ sessionId: "a", status: "waiting", createdAt: OLD }),
+        "/repo",
+        fakeGate(),
+      ),
+    ).toEqual({ state: "unknown", reason: "no-branch" });
+    expect(
+      await classifyOrphanWork(
+        session({ sessionId: "b", status: "waiting", createdAt: OLD, branch: "feature/x" }),
+        "/repo",
+        fakeGate({ pr: { "feature/x": "none" } }),
+      ),
+    ).toEqual({ state: "unknown", reason: "no-pr" });
+  });
+
+  it("keeps a branchless orphan `unknown` even when armed (empty branch is not proof of no PR)", async () => {
+    // branch === "" is ambiguous (detached / derivation failed / conductor), so
+    // it is never age-reaped — a live open-PR steward whose branch we could not
+    // read must survive (PR #368 review, codex P2).
+    expect(
+      await classifyOrphanWork(
+        session({ sessionId: "a", status: "waiting", createdAt: OLD }),
+        "/repo",
+        fakeGate(),
+        ON,
+      ),
+    ).toEqual({ state: "unknown", reason: "no-branch" });
+  });
+
+  it("reaps an old, non-running no-pr orphan as dead-orphan when armed", async () => {
+    expect(
+      await classifyOrphanWork(
+        session({ sessionId: "b", status: "stopped", createdAt: OLD, branch: "feature/x" }),
+        "/repo",
+        fakeGate({ pr: { "feature/x": "none" } }),
+        ON,
+      ),
+    ).toEqual({ state: "done", reason: "dead-orphan" });
+  });
+
+  it("never reaps a RUNNING orphan even when old (no-pr path)", async () => {
+    expect(
+      await classifyOrphanWork(
+        session({ sessionId: "c", status: "running", createdAt: OLD, branch: "feature/x" }),
+        "/repo",
+        fakeGate({ pr: { "feature/x": "none" } }),
+        ON,
+      ),
+    ).toEqual({ state: "unknown", reason: "no-pr" });
+  });
+
+  it("never reaps a too-young orphan (no-pr path)", async () => {
+    expect(
+      await classifyOrphanWork(
+        session({ sessionId: "d", status: "waiting", createdAt: FRESH, branch: "feature/x" }),
+        "/repo",
+        fakeGate({ pr: { "feature/x": "none" } }),
+        ON,
+      ),
+    ).toEqual({ state: "unknown", reason: "no-pr" });
+  });
+
+  it("keeps the OPEN-PR protection for an old, non-running orphan", async () => {
+    expect(
+      await classifyOrphanWork(
+        session({ sessionId: "e", status: "waiting", createdAt: OLD, branch: "feature/o" }),
+        "/repo",
+        fakeGate({ pr: { "feature/o": "open" } }),
+        ON,
+      ),
+    ).toEqual({ state: "in-progress", reason: "open-pr" });
+  });
+
+  it("never reaps on an indeterminate PR lookup (could hide an open PR)", async () => {
+    expect(
+      await classifyOrphanWork(
+        session({ sessionId: "f", status: "waiting", createdAt: OLD, branch: "feature/q" }),
+        "/repo",
+        fakeGate({ pr: { "feature/q": "unknown" } }),
+        ON,
+      ),
+    ).toEqual({ state: "unknown", reason: "pr-lookup-unknown" });
+  });
+
+  it("a merged PR is done regardless of age/status", async () => {
+    expect(
+      await classifyOrphanWork(
+        session({ sessionId: "g", status: "running", createdAt: FRESH, branch: "feature/m" }),
+        "/repo",
+        fakeGate({ pr: { "feature/m": "merged" } }),
+        ON,
+      ),
+    ).toEqual({ state: "done", reason: "pr-merged" });
+  });
+});
 
 describe.skipIf(!sqliteAvailable)("sweepLeakedStewards", () => {
   it("reaps a true orphan whose branch maps to a MERGED pr (#304)", async () => {
@@ -307,6 +413,141 @@ describe.skipIf(!sqliteAvailable)("sweepLeakedStewards", () => {
     expect(result.reaped).toEqual([]);
     expect(result.failures).toHaveLength(1);
     expect(result.failures[0].profile).toBe("smithy");
+    store.close();
+  });
+
+  it("adopts an untracked open-PR steward into Brood when adopt is on (#304/#308 source fix)", async () => {
+    const store = new SessionStore({ dbPath: ":memory:" });
+    // Only a torndown row exists → the live open-PR session is an untracked orphan.
+    store.register({
+      id: "old",
+      kind: "steward",
+      profile: "smithy",
+      repoPath: "/repo",
+      worktreePath: "/wt/old",
+      branch: "feature/x",
+      status: "torndown",
+    });
+    const gw = fakeGateway([
+      session({
+        sessionId: "live",
+        worktreePath: "/wt/new",
+        branch: "feature/open",
+        group: "march",
+        metadata: { spawnId: "spawn-9" },
+      }),
+    ]);
+
+    const result = await sweepLeakedStewards(
+      store,
+      gw,
+      fakeGate({ pr: { "feature/open": "open" } }),
+      { adopt: true },
+    );
+
+    expect(result.adopted.map((a) => a.sessionId)).toEqual(["live"]);
+    expect(result.reaped).toEqual([]);
+    expect(gw.removed).toEqual([]); // a live open-PR steward is never removed
+    // It is now a tracked-live steward row (legate will manage/merge it), with
+    // the spawn id threaded through as parentId (#308) and its workspace.
+    expect(store.get("live")).toMatchObject({
+      kind: "steward",
+      status: "running",
+      parentId: "spawn-9",
+      branch: "feature/open",
+      worktreePath: "/wt/new",
+      agentDeckSessionId: "live",
+      repoPath: "/repo",
+      group: "march",
+    });
+    store.close();
+  });
+
+  it("skips (does not adopt) an open-PR steward when adopt is off — the conservative default", async () => {
+    const store = new SessionStore({ dbPath: ":memory:" });
+    store.register({
+      id: "old",
+      kind: "steward",
+      profile: "smithy",
+      repoPath: "/repo",
+      worktreePath: "/wt/old",
+      branch: "feature/x",
+      status: "torndown",
+    });
+    const gw = fakeGateway([
+      session({ sessionId: "live", worktreePath: "/wt/new", branch: "feature/open" }),
+    ]);
+
+    const result = await sweepLeakedStewards(
+      store,
+      gw,
+      fakeGate({ pr: { "feature/open": "open" } }),
+    );
+
+    expect(result.adopted).toEqual([]);
+    expect(result.skipped.map((s) => s.reason)).toContain("open-pr");
+    expect(store.get("live")).toBeUndefined();
+    store.close();
+  });
+
+  it("reaps an old, non-running no-pr dead orphan when the criterion is armed", async () => {
+    const store = new SessionStore({ dbPath: ":memory:" });
+    store.register({
+      id: "old",
+      kind: "steward",
+      profile: "smithy",
+      repoPath: "/repo",
+      worktreePath: "/wt/old",
+      branch: "feature/d",
+      status: "torndown",
+    });
+    const gw = fakeGateway([
+      session({
+        sessionId: "dead",
+        worktreePath: "/wt/dead",
+        branch: "feature/d",
+        status: "waiting",
+        createdAt: "2026-06-01T00:00:00Z",
+      }),
+    ]);
+
+    const result = await sweepLeakedStewards(
+      store,
+      gw,
+      fakeGate({ pr: { "feature/d": "none" } }),
+      { deadOrphanAgeMs: 24 * 3_600_000, now: Date.parse("2026-06-13T00:00:00Z") },
+    );
+
+    expect(result.reaped.map((r) => r.reason)).toEqual(["dead-orphan"]);
+    expect(gw.removed).toEqual(["dead"]);
+    store.close();
+  });
+
+  it("with reaping disabled (adopt-only pass), leaves a confirmed-done orphan in place", async () => {
+    const store = new SessionStore({ dbPath: ":memory:" });
+    store.register({
+      id: "old",
+      kind: "steward",
+      profile: "smithy",
+      repoPath: "/repo",
+      worktreePath: "/wt/old",
+      branch: "feature/y",
+      status: "torndown",
+    });
+    const gw = fakeGateway([
+      session({ sessionId: "leaked", worktreePath: "/wt/gone", branch: "feature/y" }),
+    ]);
+
+    const result = await sweepLeakedStewards(
+      store,
+      gw,
+      fakeGate({ missingWorktrees: ["/wt/gone"] }),
+      { reap: false, adopt: true },
+    );
+
+    expect(result.reaped).toEqual([]);
+    expect(gw.removed).toEqual([]);
+    expect(result.skipped.map((s) => s.reason)).toContain("worktree-gone");
     store.close();
   });
 });

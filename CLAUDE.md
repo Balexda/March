@@ -52,7 +52,14 @@ Quick pointers:
   callers (routes/teardown/server) depend on the interface, the sqlite
   `SessionStore` is the default, and `createSessionRepository` selects the
   backend from `MARCH_BROOD_STORE` (`sqlite` default; `postgres` is a typed,
-  not-yet-implemented extension point for SaaS — issue #167/#166). Image/compose:
+  not-yet-implemented extension point for SaaS — issue #167/#166). Brood also runs
+  a periodic **reconciler** (`src/brood/service/reconciler.ts`): an always-on
+  read-only loop publishing the Castra-live-vs-Brood-tracked divergence to the
+  `march_brood_sessions_*` gauges, plus an env-gated **self-heal** loop (two
+  independent flags, OFF by default — `MARCH_BROOD_AUTO_REAP` reaps dead orphans
+  via `sweepLeakedStewards`, `MARCH_BROOD_AUTO_ADOPT` adopts untracked open-PR
+  stewards into Brood so the legate merges them; reuses the same OPEN-PR-protected
+  PR gate as `march brood sweep`, emits `march_brood_reaps`). Image/compose:
   `docker/brood.Dockerfile`, `docker/brood.docker-compose.yml`. Set
   `MARCH_BROOD_URL` so producers/consumers reach it.
 - **Herald is a containerized service:** `march herald serve` (Fastify) under

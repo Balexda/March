@@ -5,7 +5,11 @@ import Fastify, {
 import { createBroodLogger } from "../../observability/logger.js";
 import { getActiveOtel } from "../../observability/otel.js";
 import { startBroodHeartbeat } from "../../observability/brood-metrics.js";
-import { resolveBroodPort, resolveBroodStoreBackend } from "../config.js";
+import {
+  resolveBroodPort,
+  resolveBroodStoreBackend,
+  resolveReapConfig,
+} from "../config.js";
 import { registerRoutes } from "./routes.js";
 import { startBroodReconciler } from "./reconciler.js";
 import {
@@ -58,8 +62,13 @@ export async function startServer(
     storeOptions: { backend: resolveBroodStoreBackend() },
   });
   const stopHeartbeat = startBroodHeartbeat();
-  // Periodic read-only reconciliation gauges (Castra-live vs Brood-tracked).
-  const stopReconciler = startBroodReconciler(store);
+  // Periodic reconciliation: always-on read-only divergence gauges (Castra-live
+  // vs Brood-tracked), plus the env-gated self-heal reap/adopt loop (OFF by
+  // default — armed by MARCH_BROOD_AUTO_REAP / MARCH_BROOD_AUTO_ADOPT).
+  const stopReconciler = startBroodReconciler(store, {
+    reap: resolveReapConfig(),
+    logger: app.log,
+  });
 
   let shuttingDown = false;
   const shutdown = async (signal: string): Promise<void> => {

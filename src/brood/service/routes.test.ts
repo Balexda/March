@@ -331,6 +331,62 @@ describe.skipIf(!sqliteAvailable)("brood routes", () => {
     ]);
     expect(removed).toEqual(["leaked"]);
   });
+
+  it("POST /admin/sweep stays conservative — skips open-PR orphans, never adopts (#304)", async () => {
+    const removed: string[] = [];
+    const gateway: CastraStewardGateway = {
+      async listSessions() {
+        return [
+          {
+            sessionId: "live",
+            title: "",
+            group: "",
+            branch: "feature/open",
+            worktreePath: "/wt/new",
+            createdAt: "",
+            status: "waiting",
+          },
+        ];
+      },
+      async removeSession({ sessionId }) {
+        removed.push(sessionId);
+        return { removed: true };
+      },
+    };
+    // The branch has an OPEN PR — the manual sweep must leave it (no adoption).
+    const orphanGate: OrphanGate = {
+      worktreeExists: () => true,
+      branchPrState: async () => "open",
+    };
+    const { app, store } = await buildApp(undefined, gateway, {
+      orphanGate,
+      env: { MARCH_BROOD_ADMIN_TOKEN: "s3cret" },
+    });
+    store.register({
+      id: "steward-old",
+      kind: "steward",
+      agentDeckSessionId: "steward-old",
+      profile: "smithy",
+      repoPath: "/repo",
+      worktreePath: "/wt/old",
+      status: "torndown",
+    });
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/admin/sweep",
+      headers: { authorization: "Bearer s3cret" },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.reaped).toEqual([]);
+    expect(body.adopted).toEqual([]); // manual sweep never adopts
+    expect(body.skipped.map((s: { reason: string }) => s.reason)).toContain("open-pr");
+    expect(removed).toEqual([]);
+    // The live session must NOT have been registered into Brood by the sweep.
+    expect(store.get("live")).toBeUndefined();
+  });
 });
 
 describe("classifyRequestLog", () => {
