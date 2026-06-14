@@ -58,6 +58,7 @@ export function buildHeartbeatRecord(out: CoordinatorOutput, meta: { processor_n
     pending_total: t.queue.total,
     slices_by_stage: t.slicesByStage,
     ready_to_merge_count: t.readyToMergeCount,
+    waiting_on_approval_count: t.waitingOnApprovalCount,
     escalated_by_reason: t.escalatedByReason,
   };
 }

@@ -3,6 +3,7 @@ import { emptyHandlerResult } from "../state/types.js";
 import { prNumber, workerBySessionId } from "../pure/session.js";
 import { hashText } from "../pure/hash.js";
 import { resolveMergeRequirements } from "../../../herald/profiles/merge-policy.js";
+import { taskTypeForSlice } from "../pure/slice.js";
 import {
   ciFixMessage,
   conflictMessage,
@@ -141,26 +142,6 @@ export type BabysitDecision =
 
 function actionKey(action: string, pr: any, extra = ""): string {
   return [action, pr?.number || "", pr?.state || "", pr?.mergeable || "", pr?.checks || "", pr?.head_branch || "", extra].join(":");
-}
-
-/**
- * The smithy verb that keys a slice's per-task-type merge policy (e.g. "cut").
- * Tries, in order, the signals available on a slice — `command` is set at
- * dispatch on a warm loop, but the Herald fold is deliberately thin and does NOT
- * carry it, so after a cold-start rebuild we must fall back to the fold-durable
- * branch (`smithy/<verb>/…`) and the sliceId suffix (`…-<verb>`), both of which
- * the dispatch-id scheme guarantees. Undefined for non-smithy / unrecognized
- * shapes → resolveMergeRequirements falls back to all-required.
- */
-function taskTypeForSlice(sliceId: string, slice: any): string | undefined {
-  const fromCommand = String(slice?.command || "").match(/^smithy\.([a-z0-9_-]+)/i);
-  if (fromCommand) return fromCommand[1].toLowerCase();
-  const branch = String(slice?.actual_branch || slice?.branch || "");
-  const fromBranch = branch.match(/(?:^|\/)smithy\/([a-z0-9_-]+)\//i);
-  if (fromBranch) return fromBranch[1].toLowerCase();
-  const fromId = String(sliceId || "").match(/-(cut|forge|mark|render|fix|strike)$/i);
-  if (fromId) return fromId[1].toLowerCase();
-  return undefined;
 }
 
 function workerErrorRequestKey(sessionId: string, slice: any, recent: any): string {
@@ -629,7 +610,20 @@ function mark(slice: any, action: string, key: string, note: string, ts: string)
 }
 
 function snapshot(slice: any, pr: any): void {
-  slice.pr = { number: pr.number, url: pr.url, state: pr.state, checks: pr.checks, mergeable: pr.mergeable };
+  slice.pr = {
+    number: pr.number,
+    url: pr.url,
+    state: pr.state,
+    checks: pr.checks,
+    mergeable: pr.mergeable,
+    // Persist the auto-merge gate inputs so the pure ready-to-merge vs
+    // waiting-on-approval split (`mergeReadiness`, pure/slice.ts) can be computed
+    // from the working state at summary time — the gate itself runs here in
+    // assess against the transient observed PR, which the summary never sees.
+    human_approval_count: pr.human_approval_count,
+    changes_requested_count: pr.changes_requested_count,
+    merge_state_status: pr.merge_state_status,
+  };
   if (pr.head_branch) slice.actual_branch = pr.head_branch;
   slice.thread_count = pr.thread_count;
   slice.needs_response_count = pr.needs_response_count;

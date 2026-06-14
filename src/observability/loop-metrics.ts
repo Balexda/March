@@ -51,8 +51,12 @@ export interface LoopMetricsSnapshot {
   readonly workersByState: Readonly<Record<string, number>>;
   /** Non-archived slice counts keyed by bounded lifecycle stage (#220). */
   readonly slicesByStage: Readonly<Record<string, number>>;
-  /** Derived: pr-open slices clean+mergeable with no threads owed (#220). */
+  /** All-clear slices the loop WILL auto-merge (clears the approval/CR/merge-state
+   *  gate) — the narrow "ready to merge". */
   readonly readyToMerge: number;
+  /** All-clear slices blocked on a human gate (approval / changes-requested /
+   *  non-clean merge state). Human-dependent — exported as a metric, never alarmed. */
+  readonly waitingOnApproval: number;
   /** Escalated-stage slices keyed by bounded escalation reason; sums to
    *  slicesByStage.escalated. Splits spawn-failed from steward-stuck on the board. */
   readonly escalatedByReason: Readonly<Record<string, number>>;
@@ -218,8 +222,19 @@ function ensureInstruments(meter: Meter): void {
   registerGauge(
     meter,
     "march.legate.slices.ready_to_merge",
-    "Slices ready to merge (pr-open, clean checks, mergeable, no threads owed)",
+    "Slices the loop will auto-merge (all-clear AND past the approval/CR/merge-state gate)",
     (s) => s.readyToMerge,
+  );
+  // All-clear but blocked on a human gate (approval / changes-requested / non-clean
+  // merge state). Split out from ready_to_merge so the dashboard reads "waiting on
+  // approval" accurately and the merge-drain alarm only fires on auto-merge stalls,
+  // not on PRs legitimately awaiting a human. Exported as
+  // march_legate_slices_waiting_on_approval (no suffix).
+  registerGauge(
+    meter,
+    "march.legate.slices.waiting_on_approval",
+    "Mergeable slices blocked on a human gate (approval / changes-requested / merge state)",
+    (s) => s.waitingOnApproval,
   );
 
   // Escalated slices split by reason (sums to slices{stage="escalated"}). `reason`

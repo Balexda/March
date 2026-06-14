@@ -103,6 +103,7 @@ describe("buildLoopTickActivity", () => {
       pending_total: 5,
       slices_by_stage: { implementing: 2, "pr-open": 1, bogus: "x" },
       ready_to_merge_count: 1,
+      waiting_on_approval_count: 3,
       escalated_by_reason: { hatchery_dispatch_failed: 2, other: 1, bogus: "x" },
       dispatch_action_count: 2,
       dispatch_failure_count: 1,
@@ -129,6 +130,7 @@ describe("buildLoopTickActivity", () => {
       workersByState: { running: 1, idle: 2, error: 0 }, // non-number 'bogus' dropped
       slicesByStage: { implementing: 2, "pr-open": 1 }, // non-number 'bogus' dropped
       readyToMerge: 1,
+      waitingOnApproval: 3,
       escalatedByReason: { hatchery_dispatch_failed: 2, other: 1 }, // non-number 'bogus' dropped
     });
     expect(activity.tickDurationSeconds).toBe(2.5);

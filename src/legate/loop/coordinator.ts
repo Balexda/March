@@ -57,7 +57,12 @@ function buildTickResult(state: LoopState, r: CoordinatorOutput["results"], spaw
   const stewardNudgeCount = countAction(r.babysit, "steward-nudge");
   const stewardStrandedCount = countAction(r.babysit, "steward-stranded");
   // Tally after all handlers ran so stages/PR snapshots reflect this tick (#220).
-  const { byStage, readyToMerge, escalatedByReason } = summarizeSlicesByStage(state.slices);
+  // Pass the live merge policy so the all-clear set splits into auto-mergeable
+  // (readyToMerge) vs blocked-on-a-human-gate (waitingOnApproval).
+  const { byStage, readyToMerge, waitingOnApproval, escalatedByReason } = summarizeSlicesByStage(
+    state.slices,
+    state.mergePolicy,
+  );
   // The TRUE dispatch-ready count: the record-paced set the dispatcher actually
   // launches (`dispatchableReady`), distinct from the node-level `queue.dispatchable`
   // frontier metric which over-counts (escalated/blocked-shadow nodes). Computed
@@ -76,6 +81,7 @@ function buildTickResult(state: LoopState, r: CoordinatorOutput["results"], spaw
     queue: state.smithy.queue,
     slicesByStage: byStage,
     readyToMergeCount: readyToMerge,
+    waitingOnApprovalCount: waitingOnApproval,
     dispatchableReadyCount,
     escalatedByReason,
     cleanupCount: r.cleanup.actions.length,
