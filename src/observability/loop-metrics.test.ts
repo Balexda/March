@@ -3,7 +3,7 @@
  */
 import { afterEach, describe, expect, it } from "vitest";
 import { initOtel } from "./otel.js";
-import { recordLoopHeartbeat, recordSpawnBudget, type LoopTickActivity } from "./loop-metrics.js";
+import { recordDwell, recordLoopHeartbeat, recordSpawnBudget, type LoopTickActivity } from "./loop-metrics.js";
 
 function activity(overrides: Partial<LoopTickActivity> = {}): LoopTickActivity {
   return {
@@ -74,5 +74,17 @@ describe("loop-metrics", () => {
     expect(() => recordSpawnBudget({ cap: 10, live: 41, deferred: 13 })).not.toThrow();
     initOtel({ MARCH_OTEL: "1", MARCH_OTEL_ENDPOINT: "http://localhost:4318" });
     expect(() => recordSpawnBudget({ cap: 10, live: 41, deferred: 13 })).not.toThrow();
+  });
+
+  it("recordDwell is a no-op when disabled and folds (gauges + histogram) when enabled", () => {
+    const sample = {
+      stageAgeMaxSeconds: { "hatchery-pending": 1800, implementing: 0 },
+      mergeGateAgeMaxSeconds: { ready: 0, "waiting-approval": 600, "blocked-merge-state": 0 },
+      completedStageDwells: [{ stage: "implementing", seconds: 1234 }],
+    };
+    initOtel({});
+    expect(() => recordDwell("march", sample)).not.toThrow();
+    initOtel({ MARCH_OTEL: "1", MARCH_OTEL_ENDPOINT: "http://localhost:4318" });
+    expect(() => recordDwell("march", sample)).not.toThrow();
   });
 });

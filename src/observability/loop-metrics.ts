@@ -102,6 +102,20 @@ export interface SpawnBudgetMetrics {
   readonly deferred: number;
 }
 
+/**
+ * Per-tick dwell sample (time-in-state). Plain data so observability stays a leaf
+ * layer — `stampDwell` (legate/loop/pure/dwell.ts) returns a structurally
+ * compatible object the runtime passes straight through.
+ */
+export interface DwellSample {
+  /** Max age (s) of any slice currently in each lifecycle stage. */
+  readonly stageAgeMaxSeconds: Record<string, number>;
+  /** Max age (s) of any pr-open slice currently in each merge-gate. */
+  readonly mergeGateAgeMaxSeconds: Record<string, number>;
+  /** Completed stage dwells (s) this tick → the dwell histogram (not alarmed). */
+  readonly completedStageDwells: ReadonlyArray<{ stage: string; seconds: number }>;
+}
+
 // OTel instruments must be created once per Meter and reused. Cache them keyed by
 // the Meter instance so a fresh initOtel (e.g. between tests) transparently
 // rebuilds them — mirrors src/observability/spawn-metrics.ts.
@@ -119,6 +133,12 @@ let latest: LoopMetricsSnapshot | undefined;
 // profile this tick, so it is NOT per-profile: recorded once per multi-profile
 // tick with no `profile` label. Its gauges read this holder.
 let latestSpawnBudget: SpawnBudgetMetrics | undefined;
+
+// The dwell max-age gauges read this map (one sample PER PROFILE) so a stuck
+// slice in any profile surfaces, not just the last profile to tick. Module-level;
+// the observable callbacks iterate it.
+const latestDwellByProfile = new Map<string, DwellSample>();
+let stageDwellHistogram: Histogram | undefined;
 
 function base(snapshot: LoopMetricsSnapshot): Attributes {
   return { profile: snapshot.profile, conductor: snapshot.conductor };
@@ -275,6 +295,40 @@ function ensureInstruments(meter: Meter): void {
     "Dispatchable items deferred this tick because the cap was reached",
     (b) => b.deferred,
   );
+
+  // Dwell (time-in-state) — max age of the oldest slice in each stage / merge-gate,
+  // per profile. Drives the dwell alarms (spawn/steward too long; ready/blocked
+  // not draining). Labels: profile + the bounded stage/gate vocab. No unit ⇒
+  // exported as march_legate_slice_stage_age_max_seconds? No — seconds unit set so
+  // the bridge appends _seconds. (Gauge value IS seconds, so the unit is correct.)
+  const stageAge: ObservableGauge = meter.createObservableGauge("march.legate.slice.stage_age_max", {
+    description: "Max age of the oldest slice currently in each lifecycle stage",
+    unit: "s",
+  });
+  stageAge.addCallback((result: ObservableResult) => {
+    for (const [profile, sample] of latestDwellByProfile) {
+      for (const [stage, seconds] of Object.entries(sample.stageAgeMaxSeconds)) {
+        result.observe(seconds, { profile, stage });
+      }
+    }
+  });
+  const gateAge: ObservableGauge = meter.createObservableGauge("march.legate.merge_gate_age_max", {
+    description: "Max age of the oldest pr-open slice currently in each merge-gate",
+    unit: "s",
+  });
+  gateAge.addCallback((result: ObservableResult) => {
+    for (const [profile, sample] of latestDwellByProfile) {
+      for (const [gate, seconds] of Object.entries(sample.mergeGateAgeMaxSeconds)) {
+        result.observe(seconds, { profile, gate });
+      }
+    }
+  });
+
+  // Completed stage dwells (s) — for p50/p95 analysis, NOT alarmed.
+  stageDwellHistogram = meter.createHistogram("march.legate.stage.dwell", {
+    description: "Completed time-in-stage durations",
+    unit: "s",
+  });
 }
 
 /** Register a profile-less observable gauge reading the latest spawn budget. */
@@ -353,4 +407,19 @@ export function recordSpawnBudget(budget: SpawnBudgetMetrics): void {
   if (!otel.enabled) return;
   ensureInstruments(otel.getMeter());
   latestSpawnBudget = budget;
+}
+
+/**
+ * Refresh a profile's dwell (time-in-state) gauges and record its completed
+ * stage dwells into the histogram. Per profile (the gauges aggregate across the
+ * shared multi-profile legate). No-op when telemetry is disabled.
+ */
+export function recordDwell(profile: string, sample: DwellSample): void {
+  const otel = getActiveOtel();
+  if (!otel.enabled) return;
+  ensureInstruments(otel.getMeter());
+  latestDwellByProfile.set(profile || "unknown", sample);
+  for (const d of sample.completedStageDwells) {
+    stageDwellHistogram!.record(d.seconds, { stage: d.stage });
+  }
 }

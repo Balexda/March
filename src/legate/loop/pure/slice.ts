@@ -330,7 +330,7 @@ export const SLICE_STAGES = [
 /** Catch-all bucket for any stage outside {@link SLICE_STAGES}. */
 export const OTHER_STAGE = "other";
 
-const STAGE_ALLOWLIST = new Set<string>(SLICE_STAGES);
+export const STAGE_ALLOWLIST = new Set<string>(SLICE_STAGES);
 
 /**
  * The fixed escalation-reason vocabulary — the low-cardinality `reason` label set

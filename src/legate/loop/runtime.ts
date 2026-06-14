@@ -15,7 +15,8 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { recordLoopHeartbeat, recordSpawnBudget } from "../../observability/loop-metrics.js";
+import { recordDwell, recordLoopHeartbeat, recordSpawnBudget } from "../../observability/loop-metrics.js";
+import { stampDwell } from "./pure/dwell.js";
 import { emitLoopLog } from "../../observability/logs.js";
 import {
   getJob,
@@ -374,6 +375,16 @@ async function tickProfile(rt: ProfileRuntime, spawnBudget?: SpawnBudget): Promi
   });
 
   rt.workingState = out.state.raw;
+
+  // Dwell (time-in-state): stamp stage_entered_at / merge_gate_since on the working
+  // slices (same ref as rt.workingState, so it persists across ticks) and fold the
+  // max-age view + completed dwells into the dwell metrics. Best-effort.
+  try {
+    const dwell = stampDwell(out.state.slices, Date.now());
+    recordDwell(meta.profile, dwell);
+  } catch {
+    // Telemetry must never break the loop.
+  }
 
   runHeartbeat(out, {
     meta: {

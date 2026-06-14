@@ -18,6 +18,14 @@
 # rendered green while dispatch was starved.
 apiVersion: 1
 
+# Explicitly delete rules removed from this file — Grafana's alerting provisioning
+# does NOT auto-prune file-removed rules (unlike dashboards), and a file-provenance
+# rule can't be deleted via the user API. march-merge-drain-stall was retired in
+# favor of the dwell alarms (#9-12); list it here so provisioning removes it.
+deleteRules:
+  - orgId: 1
+    uid: march-merge-drain-stall
+
 # An always-active mute interval: all day, every day. A route that references it
 # never notifies, while the rule's state is still evaluated and recorded. The
 # interval is constrained ONLY by time-of-day (00:00–24:00); with no weekday /
@@ -347,40 +355,112 @@ groups:
               conditions:
                 - evaluator: { type: gt, params: [0] }
 
-      # 9. Merge-drain stall (30m) — slices are ready to merge but none are
-      #    draining (no cleanup/teardown completes a merge cycle) in 30m. Catches
-      #    a stuck merge gate. NOTE: PRs that are mergeable but await human
-      #    approval (per merge policy) can sit legitimately — tune/scope if noisy.
-      - uid: march-merge-drain-stall
-        title: Merge-drain stall (ready-to-merge > 0, no cleanups in 30m)
+      # ---------------------------------------------------------------------
+      # TIME-IN-STATE (dwell) alarms — a slice has sat in one state too long.
+      # The gauge IS the current age of the oldest slice in that state (max
+      # across profiles), so the threshold encodes the duration and `for:` is a
+      # short debounce. Most dwell data is metric-only (the stage_dwell histogram
+      # for analysis); only these few wall-clock ceilings alarm, per design.
+      # Replaces the old count-based merge-drain-stall, which is inert now that
+      # `ready_to_merge` is transient (ready slices merge + archive).
+      # ---------------------------------------------------------------------
+
+      # 9. Spawn too long — a slice stuck in the hatchery-pending (spawn) stage.
+      #    Spawn should take minutes; >30m means a spawn that isn't completing or
+      #    escalating.
+      - uid: march-dwell-spawn
+        title: Spawn dwell (slice in hatchery-pending > 30m)
         condition: C
-        for: 5m
+        for: 2m
         noDataState: OK
         execErrState: OK
-        labels:
-          severity: warning
-          team: march
-          tier: behavioral
+        labels: { severity: warning, team: march, tier: behavioral }
         annotations:
-          summary: >-
-            Slices are ready to merge but none have drained (no cleanup completed
-            a merge cycle) in 30 minutes — the merge/teardown path may be stuck.
+          summary: A slice has been in the spawn (hatchery-pending) stage for over 30 minutes.
         data:
           - refId: A
-            relativeTimeRange: { from: 2400, to: 0 }
+            relativeTimeRange: { from: 600, to: 0 }
             datasourceUid: prometheus
             model:
               refId: A
               instant: true
               editorMode: code
-              expr: >-
-                (sum(march_legate_slices_ready_to_merge) or vector(0)) > 0
-                and (sum(increase(march_legate_loop_actions_total{action="cleanup"}[30m])) or vector(0)) == 0
+              expr: max(march_legate_slice_stage_age_max_seconds{stage="hatchery-pending"})
           - refId: C
             datasourceUid: __expr__
+            model: { refId: C, type: threshold, expression: A, conditions: [{ evaluator: { type: gt, params: [1800] } }] }
+
+      # 10. Steward too long — a slice implementing (steward working) for > 4h.
+      - uid: march-dwell-steward
+        title: Steward dwell (slice implementing > 4h)
+        condition: C
+        for: 2m
+        noDataState: OK
+        execErrState: OK
+        labels: { severity: warning, team: march, tier: behavioral }
+        annotations:
+          summary: A slice has been in the implementing (steward) stage for over 4 hours — likely a stuck steward.
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: prometheus
             model:
-              refId: C
-              type: threshold
-              expression: A
-              conditions:
-                - evaluator: { type: gt, params: [0] }
+              refId: A
+              instant: true
+              editorMode: code
+              expr: max(march_legate_slice_stage_age_max_seconds{stage="implementing"})
+          - refId: C
+            datasourceUid: __expr__
+            model: { refId: C, type: threshold, expression: A, conditions: [{ evaluator: { type: gt, params: [14400] } }] }
+
+      # 11. Ready-to-merge not draining — a slice the loop SHOULD merge now has
+      #     sat ready (all gates clear) for > 30m. ready is normally transient
+      #     (merge + archive), so a lingering one is a merge/teardown stall.
+      - uid: march-dwell-ready-to-merge
+        title: Ready-to-merge dwell (auto-mergeable but unmerged > 30m)
+        condition: C
+        for: 2m
+        noDataState: OK
+        execErrState: OK
+        labels: { severity: warning, team: march, tier: behavioral }
+        annotations:
+          summary: A slice has been ready-to-merge (all gates clear) for over 30 minutes without merging — the merge/teardown path may be stuck.
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: prometheus
+            model:
+              refId: A
+              instant: true
+              editorMode: code
+              expr: max(march_legate_merge_gate_age_max_seconds{gate="ready"})
+          - refId: C
+            datasourceUid: __expr__
+            model: { refId: C, type: threshold, expression: A, conditions: [{ evaluator: { type: gt, params: [1800] } }] }
+
+      # 12. Approved-but-GitHub-won't-merge — human gates cleared but the PR has
+      #     sat in a non-mergeable GitHub state (UNKNOWN/BEHIND/BLOCKED/DIRTY) for
+      #     > 30m. This is "fully approved, waiting to merge" — a real stall (needs
+      #     a rebase or a branch-protection review). NOT the human-paced
+      #     waiting-on-approval state, which is deliberately never alarmed.
+      - uid: march-dwell-blocked-merge-state
+        title: Blocked-merge-state dwell (approved but unmergeable > 30m)
+        condition: C
+        for: 2m
+        noDataState: OK
+        execErrState: OK
+        labels: { severity: warning, team: march, tier: behavioral }
+        annotations:
+          summary: A PR has cleared its human gates but GitHub has refused to merge it (UNKNOWN/BEHIND/BLOCKED/DIRTY) for over 30 minutes — needs a rebase or a branch-protection review.
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: prometheus
+            model:
+              refId: A
+              instant: true
+              editorMode: code
+              expr: max(march_legate_merge_gate_age_max_seconds{gate="blocked-merge-state"})
+          - refId: C
+            datasourceUid: __expr__
+            model: { refId: C, type: threshold, expression: A, conditions: [{ evaluator: { type: gt, params: [1800] } }] }
