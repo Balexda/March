@@ -42,9 +42,9 @@ services:
       # RED/JVM dashboards. Dashboard JSON lives under /etc/march/dashboards.
       - ./grafana/provisioning/dashboards/march.yaml:/otel-lgtm/grafana/conf/provisioning/dashboards/march.yaml:ro
       - ./grafana/dashboards:/etc/march/dashboards:ro
-      # March's SILENT alert rules (six monitors that record breach state but
-      # send no notifications — see the file header). Dropped into Grafana's
-      # alerting provisioning dir alongside the image's own provider files.
+      # March's SILENT alert rules (record breach state but send no notifications
+      # — see the file header). Dropped into Grafana's alerting provisioning dir
+      # alongside the image's own provider files.
       - ./grafana/provisioning/alerting/march-alerts.yaml:/otel-lgtm/grafana/conf/provisioning/alerting/march-alerts.yaml:ro
       # Per-subsystem RED alerts (error rate + latency), a lower "subsystem" tier;
       # routes through the same team:march mute (silent).
