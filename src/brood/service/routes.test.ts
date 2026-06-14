@@ -5,7 +5,7 @@ import Fastify, { type FastifyInstance } from "fastify";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Span } from "@opentelemetry/sdk-trace-base";
 import { getActiveOtel, initOtel } from "../../observability/otel.js";
-import { registerRoutes } from "./routes.js";
+import { classifyRequestLog, registerRoutes } from "./routes.js";
 import { sqliteAvailable } from "./sqlite.js";
 import { SessionStore } from "./store.js";
 import type { CastraStewardGateway, OrphanGate } from "./steward-removal.js";
@@ -330,5 +330,31 @@ describe.skipIf(!sqliteAvailable)("brood routes", () => {
       "leaked",
     ]);
     expect(removed).toEqual(["leaked"]);
+  });
+});
+
+describe("classifyRequestLog", () => {
+  it("returns null for a 2xx/3xx (no error log)", () => {
+    expect(classifyRequestLog(200, "/sessions", "POST", 12)).toBeNull();
+    expect(classifyRequestLog(201, "/sessions", "POST", 12)).toBeNull();
+    expect(classifyRequestLog(304, "/x", "GET", 1)).toBeNull();
+  });
+
+  it("logs 5xx at error and 4xx at warn, with route/method/status/duration", () => {
+    const e = classifyRequestLog(500, "/sessions/:id/teardown", "POST", 42.7, '{"error":"boom"}');
+    expect(e).toMatchObject({
+      level: "error",
+      fields: { route: "/sessions/:id/teardown", method: "POST", status_code: 500, duration_ms: 43, detail: '{"error":"boom"}' },
+    });
+    expect(e!.msg).toContain("500");
+    const w = classifyRequestLog(404, "/sessions/:id", "GET", 3);
+    expect(w!.level).toBe("warn");
+    expect(w!.fields).not.toHaveProperty("detail"); // no body captured → no detail
+  });
+
+  it("truncates a long detail payload to 500 chars", () => {
+    const big = "x".repeat(900);
+    const e = classifyRequestLog(500, "/x", "POST", 1, big);
+    expect((e!.fields.detail as string).length).toBe(500);
   });
 });
