@@ -54,6 +54,19 @@ describe("stampDwell", () => {
     expect(obs.mergeGateAgeMaxSeconds["waiting-approval"]).toBe(0);
   });
 
+  it("records age for an unexpected stage (normalized to 'other'), not undefined", () => {
+    const slices = { a: { stage: "weird-unmapped", _dwell_stage: "other", stage_entered_at: T0 - 120_000 } };
+    const obs = stampDwell(slices, T0);
+    expect(obs.stageAgeMaxSeconds["other"]).toBe(120); // not undefined / never-recorded
+  });
+
+  it("seeds merge-gate age from pr_open_at on the FIRST observation (survives restart)", () => {
+    // Cold start: no _dwell_gate yet, but the PR has been open (and ready) a while.
+    const slices = { a: { stage: "pr-open", merge_gate: "ready", pr_open_at: new Date(T0 - 2_400_000).toISOString() } }; // 40m ago
+    const obs = stampDwell(slices, T0);
+    expect(obs.mergeGateAgeMaxSeconds["ready"]).toBe(2400); // 40m, not 0 → the >30m alarm can fire
+  });
+
   it("reports the MAX age across multiple slices in the same stage", () => {
     const slices = {
       a: { stage: "hatchery-pending", _dwell_stage: "hatchery-pending", stage_entered_at: T0 - 60_000 },

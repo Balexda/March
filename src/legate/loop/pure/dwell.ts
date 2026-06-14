@@ -48,6 +48,13 @@ function stageEntryHint(slice: any, stage: string, nowMs: number): number {
   return Number.isFinite(ms) ? ms : nowMs;
 }
 
+/** Durable lower-bound for a merge-gate's entry time (pr_open_at), so gate age
+ *  survives a restart instead of resetting to 0. */
+function gateEntryHint(slice: any, nowMs: number): number {
+  const ms = typeof slice.pr_open_at === "string" ? Date.parse(slice.pr_open_at) : NaN;
+  return Number.isFinite(ms) ? ms : nowMs;
+}
+
 const secondsSince = (nowMs: number, thenMs: number): number => Math.max(0, (nowMs - thenMs) / 1000);
 
 /**
@@ -76,14 +83,22 @@ export function stampDwell(slices: Record<string, any> | undefined, nowMs: numbe
       slice.stage_entered_at = stageEntryHint(slice, stage, nowMs);
     }
     const stageAge = secondsSince(nowMs, slice.stage_entered_at ?? nowMs);
-    if (stageAge > stageAgeMaxSeconds[stage]) stageAgeMaxSeconds[stage] = stageAge;
+    // `?? 0` because an unexpected stage normalizes to OTHER_STAGE, which is not
+    // pre-seeded — without the fallback the comparison is against `undefined` and
+    // the `other` age is never recorded (and the record value is undefined).
+    if (stageAge > (stageAgeMaxSeconds[stage] ?? 0)) stageAgeMaxSeconds[stage] = stageAge;
 
     // Merge-gate dwell only applies while pr-open; clear the book-keeping otherwise.
     if (stage === "pr-open" && (TRACKED_MERGE_GATES as readonly string[]).includes(slice.merge_gate)) {
       const gate = slice.merge_gate as string;
       if (slice._dwell_gate !== gate) {
+        // First observation after a (re)start: the gate may have already held for
+        // a long time, so seed from a durable lower bound (pr_open_at) rather than
+        // resetting age to 0 each restart (which would keep the >30m dwell alarms
+        // green for a full window). A real gate TRANSITION starts fresh at nowMs.
+        const firstObservation = slice._dwell_gate === undefined;
         slice._dwell_gate = gate;
-        slice.merge_gate_since = nowMs;
+        slice.merge_gate_since = firstObservation ? gateEntryHint(slice, nowMs) : nowMs;
       }
       const gateAge = secondsSince(nowMs, slice.merge_gate_since ?? nowMs);
       if (gateAge > mergeGateAgeMaxSeconds[gate]) mergeGateAgeMaxSeconds[gate] = gateAge;
