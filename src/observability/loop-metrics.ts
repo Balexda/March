@@ -51,12 +51,14 @@ export interface LoopMetricsSnapshot {
   readonly workersByState: Readonly<Record<string, number>>;
   /** Non-archived slice counts keyed by bounded lifecycle stage (#220). */
   readonly slicesByStage: Readonly<Record<string, number>>;
-  /** All-clear slices the loop WILL auto-merge (clears the approval/CR/merge-state
-   *  gate) — the narrow "ready to merge". */
+  /** All-clear slices the loop WILL squash-merge now (merge_gate=ready). Transient. */
   readonly readyToMerge: number;
-  /** All-clear slices blocked on a human gate (approval / changes-requested /
-   *  non-clean merge state). Human-dependent — exported as a metric, never alarmed. */
+  /** All-clear slices blocked on a human review gate (merge_gate=waiting-approval).
+   *  Human-paced — a metric, never alarmed. */
   readonly waitingOnApproval: number;
+  /** All-clear, human-gates-cleared slices GitHub won't merge yet
+   *  (merge_gate=blocked-merge-state). A real stall. */
+  readonly blockedOnMergeState: number;
   /** Escalated-stage slices keyed by bounded escalation reason; sums to
    *  slicesByStage.escalated. Splits spawn-failed from steward-stuck on the board. */
   readonly escalatedByReason: Readonly<Record<string, number>>;
@@ -219,22 +221,29 @@ function ensureInstruments(meter: Meter): void {
   });
   // Derived "waiting for merge": pr-open slices that are clean + mergeable with no
   // threads owed. Exported as `march_legate_slices_ready_to_merge` (no suffix).
+  // Merge-readiness 3-way (human-consumable), from babysit's live-PR verdict:
+  //   ready_to_merge       — loop will squash-merge now (transient).
+  //   waiting_on_approval  — blocked on a human review gate (NOT alarmed).
+  //   blocked_on_merge_state — human gates clear, GitHub won't merge yet (a stall).
+  // Exported as march_legate_slices_{ready_to_merge,waiting_on_approval,
+  // blocked_on_merge_state} (no suffix).
   registerGauge(
     meter,
     "march.legate.slices.ready_to_merge",
-    "Slices the loop will auto-merge (all-clear AND past the approval/CR/merge-state gate)",
+    "Slices the loop will squash-merge now (all gates clear)",
     (s) => s.readyToMerge,
   );
-  // All-clear but blocked on a human gate (approval / changes-requested / non-clean
-  // merge state). Split out from ready_to_merge so the dashboard reads "waiting on
-  // approval" accurately and the merge-drain alarm only fires on auto-merge stalls,
-  // not on PRs legitimately awaiting a human. Exported as
-  // march_legate_slices_waiting_on_approval (no suffix).
   registerGauge(
     meter,
     "march.legate.slices.waiting_on_approval",
-    "Mergeable slices blocked on a human gate (approval / changes-requested / merge state)",
+    "Mergeable slices blocked on a human review gate (approval / changes-requested)",
     (s) => s.waitingOnApproval,
+  );
+  registerGauge(
+    meter,
+    "march.legate.slices.blocked_on_merge_state",
+    "Human-gates-cleared slices GitHub won't merge yet (UNKNOWN/BEHIND/BLOCKED/DIRTY)",
+    (s) => s.blockedOnMergeState,
   );
 
   // Escalated slices split by reason (sums to slices{stage="escalated"}). `reason`

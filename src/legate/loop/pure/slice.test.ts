@@ -169,68 +169,68 @@ describe("slice pure helpers", () => {
     expect(dispatchableReady({}, undefined)).toEqual([]);
   });
 
-  it("summarizeSlicesByStage tallies by stage and splits ready-to-merge vs waiting-on-approval (#220)", () => {
-    // The merge-gate inputs (human_approval_count / merge_state_status) live on
-    // slice.pr (babysit persists them); the default (undefined) policy requires an
-    // approval, so an all-clear PR is "auto" only when it also carries an approval
-    // + clean merge state, else "waiting-approval".
-    const auto = { checks: "PASS", mergeable: "MERGEABLE", human_approval_count: 1, merge_state_status: "clean" };
+  it("summarizeSlicesByStage tallies by stage and tallies the merge_gate 3-way (#220)", () => {
+    // The summary reads the merge_gate stamp babysit writes from the live PR — it
+    // does NOT recompute, so each pr-open slice carries its verdict directly.
     const slices = {
       a: { stage: "hatchery-pending" },
       b: { stage: "implementing" },
-      c: { stage: "pr-open", pr: { ...auto }, needs_response_count: 0 }, // auto-mergeable
-      d: { stage: "pr-open", pr: { checks: "FAIL", mergeable: "MERGEABLE" }, needs_response_count: 0 }, // failing checks
-      e: { stage: "pr-open", pr: { checks: "PASS", mergeable: "CONFLICTING" }, needs_response_count: 0 }, // conflicting
-      f: { stage: "pr-open", pr: { checks: "PASS", mergeable: "MERGEABLE" }, needs_response_count: 2 }, // threads owed
-      h: { stage: "pr-open", pr: { checks: "PASS", mergeable: "MERGEABLE", merge_state_status: "clean" }, needs_response_count: 0 }, // all-clear but no approval → waiting
+      c: { stage: "pr-open", merge_gate: "ready" }, // loop will merge now
+      d: { stage: "pr-open", merge_gate: "waiting-approval" }, // human gate
+      e: { stage: "pr-open", merge_gate: "blocked-merge-state" }, // GitHub won't merge yet
+      f: { stage: "pr-open", merge_gate: "not-ready" }, // checks pending / threads owed
       g: { stage: "escalated" },
     };
-    const { byStage, readyToMerge, waitingOnApproval } = summarizeSlicesByStage(slices);
+    const { byStage, readyToMerge, waitingOnApproval, blockedOnMergeState } = summarizeSlicesByStage(slices);
     expect(byStage).toEqual({
       "hatchery-pending": 1,
       implementing: 1,
-      "pr-open": 5,
+      "pr-open": 4,
       "pr-in-fix": 0,
       "pr-resolving-conflicts": 0,
       escalated: 1,
     });
     expect(Object.values(byStage).reduce((a, b) => a + b, 0)).toBe(Object.keys(slices).length);
-    expect(readyToMerge).toBe(1); // only c clears the auto-merge gate
-    expect(waitingOnApproval).toBe(1); // h is all-clear but lacks the required approval
+    expect(readyToMerge).toBe(1); // c
+    expect(waitingOnApproval).toBe(1); // d
+    expect(blockedOnMergeState).toBe(1); // e
   });
 
-  it("summarizeSlicesByStage buckets unknown stages and gates unknown thread debt (#220)", () => {
+  it("summarizeSlicesByStage buckets unknown stages; an unstamped pr-open counts in no merge bucket", () => {
     const slices = {
       typo: { stage: "implmenting" }, // typo / unexpected stage → 'other', not a new series
       merged: { stage: "merged" }, // transient terminal stage → 'other'
-      // Cold-start pr-open: pr restored from the fold but the flattened
-      // needs_response_count is absent → unknown debt, must NOT count as ready.
-      cold: { stage: "pr-open", pr: { checks: "PASS", mergeable: "MERGEABLE" } },
-      // Same, but the PR snapshot still carries the count → all-clear. With no
-      // merge-gate fields + default policy it is waiting-on-approval, not auto.
-      nested: { stage: "pr-open", pr: { checks: "PASS", mergeable: "MERGEABLE", needs_response_count: 0 } },
+      // pr-open with no merge_gate yet (cold start, not re-snapshotted) → counted
+      // in pr-open but in none of the merge buckets until babysit stamps it.
+      cold: { stage: "pr-open" },
+      ready: { stage: "pr-open", merge_gate: "ready" },
     };
-    const { byStage, readyToMerge, waitingOnApproval } = summarizeSlicesByStage(slices);
+    const { byStage, readyToMerge, waitingOnApproval, blockedOnMergeState } = summarizeSlicesByStage(slices);
     expect(byStage.other).toBe(2); // typo + merged bucketed together
     expect(byStage).not.toHaveProperty("implmenting");
     expect(byStage).not.toHaveProperty("merged");
     expect(byStage["pr-open"]).toBe(2);
-    expect(readyToMerge).toBe(0); // nested is all-clear but unapproved → not auto
-    expect(waitingOnApproval).toBe(1); // only `nested` (explicit 0); `cold` is unknown
+    expect(readyToMerge).toBe(1);
+    expect(waitingOnApproval).toBe(0);
+    expect(blockedOnMergeState).toBe(0); // `cold` is unstamped → no bucket
   });
 
-  it("mergeReadiness honors the per-task-type merge policy (cut drops the approval gate)", () => {
-    const allClear = { stage: "pr-open", needs_response_count: 0, branch: "feature/smithy/cut/x", pr: { checks: "PASS", mergeable: "MERGEABLE", merge_state_status: "clean" } };
-    // Default policy requires approval → unapproved cut PR is waiting.
-    expect(mergeReadiness("x-cut", allClear, undefined)).toBe("waiting-approval");
-    // A policy that drops approval for `cut` → the same PR is auto-mergeable.
+  it("mergeReadiness is a 3-way over the LIVE pr, honoring the per-task-type merge policy", () => {
+    const slice = { stage: "pr-open", branch: "feature/smithy/cut/x" };
+    const clearPr = { checks: "PASS", mergeable: "MERGEABLE", needs_response_count: 0, merge_state_status: "clean" };
+    // Default policy requires approval → unapproved cut PR waits on approval.
+    expect(mergeReadiness("x-cut", slice, clearPr, undefined)).toBe("waiting-approval");
+    // Policy drops approval for `cut` + clean merge state → ready (loop merges).
     const policy = { byTaskType: { cut: { approval: false } } } as any;
-    expect(mergeReadiness("x-cut", allClear, policy)).toBe("auto");
-    // A changes-requested review still blocks it even when approval is relaxed.
-    const cr = { ...allClear, pr: { ...allClear.pr, changes_requested_count: 1 } };
-    expect(mergeReadiness("x-cut", cr, policy)).toBe("waiting-approval");
-    // Not all-clear at all → not-ready regardless of policy.
-    expect(mergeReadiness("x-cut", { stage: "implementing" }, policy)).toBe("not-ready");
+    expect(mergeReadiness("x-cut", slice, clearPr, policy)).toBe("ready");
+    // Approval relaxed but GitHub merge-state not clean → blocked-merge-state.
+    expect(mergeReadiness("x-cut", slice, { ...clearPr, merge_state_status: "BEHIND" }, policy)).toBe("blocked-merge-state");
+    // A changes-requested review blocks on the human gate even when approval is relaxed.
+    expect(mergeReadiness("x-cut", slice, { ...clearPr, changes_requested_count: 1 }, policy)).toBe("waiting-approval");
+    // Not all-clear (failing checks / threads owed / wrong stage) → not-ready.
+    expect(mergeReadiness("x-cut", slice, { ...clearPr, checks: "FAIL" }, policy)).toBe("not-ready");
+    expect(mergeReadiness("x-cut", slice, { ...clearPr, needs_response_count: 2 }, policy)).toBe("not-ready");
+    expect(mergeReadiness("x-cut", { stage: "implementing" }, clearPr, policy)).toBe("not-ready");
   });
 
   it("summarizeSlicesByStage splits escalated by reason (spawn-failed vs stuck)", () => {
@@ -266,6 +266,7 @@ describe("slice pure helpers", () => {
       },
       readyToMerge: 0,
       waitingOnApproval: 0,
+      blockedOnMergeState: 0,
       escalatedByReason: {
         hatchery_dispatch_failed: 0,
         needs_human: 0,

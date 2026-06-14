@@ -2,8 +2,8 @@ import type { HandlerContext, HandlerResult, LoopState } from "../state/types.js
 import { emptyHandlerResult } from "../state/types.js";
 import { prNumber, workerBySessionId } from "../pure/session.js";
 import { hashText } from "../pure/hash.js";
-import { resolveMergeRequirements } from "../../../herald/profiles/merge-policy.js";
-import { taskTypeForSlice } from "../pure/slice.js";
+import { resolveMergeRequirements, type MergePolicy } from "../../../herald/profiles/merge-policy.js";
+import { mergeReadiness, taskTypeForSlice } from "../pure/slice.js";
 import {
   ciFixMessage,
   conflictMessage,
@@ -609,25 +609,17 @@ function mark(slice: any, action: string, key: string, note: string, ts: string)
   slice.last_action_note = note;
 }
 
-function snapshot(slice: any, pr: any): void {
-  slice.pr = {
-    number: pr.number,
-    url: pr.url,
-    state: pr.state,
-    checks: pr.checks,
-    mergeable: pr.mergeable,
-    // Persist the auto-merge gate inputs so the pure ready-to-merge vs
-    // waiting-on-approval split (`mergeReadiness`, pure/slice.ts) can be computed
-    // from the working state at summary time — the gate itself runs here in
-    // assess against the transient observed PR, which the summary never sees.
-    human_approval_count: pr.human_approval_count,
-    changes_requested_count: pr.changes_requested_count,
-    merge_state_status: pr.merge_state_status,
-  };
+function snapshot(slice: any, pr: any, sliceId: string, mergePolicy: MergePolicy | undefined): void {
+  slice.pr = { number: pr.number, url: pr.url, state: pr.state, checks: pr.checks, mergeable: pr.mergeable };
   if (pr.head_branch) slice.actual_branch = pr.head_branch;
   slice.thread_count = pr.thread_count;
   slice.needs_response_count = pr.needs_response_count;
   slice.unresolved_threads = pr.unresolved_threads;
+  // Stamp the merge-readiness 3-way from the LIVE PR (ready / waiting-approval /
+  // blocked-merge-state / not-ready), the same gate babysit's auto-merge decision
+  // uses. The summary tallies this stamp instead of recomputing from the
+  // possibly-stale persisted slice.pr (#stack-observability).
+  slice.merge_gate = mergeReadiness(sliceId, slice, pr, mergePolicy);
 }
 
 /** Fold handled comment ids into the review-fix dedup set, union-merged so a
@@ -728,13 +720,14 @@ export async function apply(decisions: BabysitDecision[], ctx: HandlerContext, s
         await fireRequest({ ts, slice, requestKey: d.requestKey, sliceId: d.sliceId, sessionId: d.sessionId, prNumber: d.prNumber, reason: "processor could not query PR state", detail: d.detail });
         break;
       case "pr-snapshot":
-        snapshot(slice, d.pr);
+        snapshot(slice, d.pr, d.sliceId, state.mergePolicy);
         res.mutated = true;
         break;
       case "discover-pr":
-        snapshot(slice, d.pr);
+        // Set the stage BEFORE snapshot so the merge-gate stamp sees pr-open.
         slice.stage = "pr-open";
         slice.pr_open_at = ts;
+        snapshot(slice, d.pr, d.sliceId, state.mergePolicy);
         mark(slice, "discover-pr", actionKey("discover-pr", d.pr), "processor discovered PR", ts);
         ctx.emitTransition?.({ type: "slice.stage.changed", sliceId: d.sliceId, stage: "pr-open" });
         res.actions.push({ action: "discover-pr", sliceId: d.sliceId, sessionId: d.sessionId, pr: d.pr, detail: "discovered worker PR" });

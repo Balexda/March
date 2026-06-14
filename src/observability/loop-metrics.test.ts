@@ -20,6 +20,7 @@ function activity(overrides: Partial<LoopTickActivity> = {}): LoopTickActivity {
       slicesByStage: { implementing: 1, "pr-open": 2 },
       readyToMerge: 1,
       waitingOnApproval: 1,
+      blockedOnMergeState: 1,
       escalatedByReason: { hatchery_dispatch_failed: 0, other: 0 },
     },
     tickDurationSeconds: 0.4,

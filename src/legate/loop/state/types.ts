@@ -143,12 +143,14 @@ export interface TickResult {
   queue: { dispatchable: number; blocked: number; total: number };
   /** Non-archived slice counts keyed by lifecycle stage (#220 gauge source). */
   slicesByStage: Record<string, number>;
-  /** All-clear slices the loop WILL auto-merge (clears the approval/CR/merge-state
-   *  gate). The narrow "ready to merge". */
+  /** All-clear slices the loop WILL squash-merge now (merge_gate=ready). Transient. */
   readyToMergeCount: number;
-  /** All-clear slices blocked on a human gate (approval / changes-requested /
-   *  non-clean merge state). Human-dependent — metric only, not alarmed. */
+  /** All-clear slices blocked on a human review gate (merge_gate=waiting-approval).
+   *  Human-paced — metric only, not alarmed. */
   waitingOnApprovalCount: number;
+  /** All-clear, human-gates-cleared slices GitHub won't merge yet
+   *  (merge_gate=blocked-merge-state: UNKNOWN/BEHIND/BLOCKED/DIRTY). */
+  blockedOnMergeStateCount: number;
   /** The record-paced set the dispatcher would launch FRESH (dispatchableReady):
    *  ready smithy items minus in-flight/archived. Distinct from queue.dispatchable
    *  (the node-level frontier that over-counts); the precise dispatch-ready signal

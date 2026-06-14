@@ -357,14 +357,16 @@ const ESCALATION_REASON_ALLOWLIST = new Set<string>(ESCALATION_REASONS);
 export interface SliceStageSummary {
   /** Count of non-archived slices keyed by lifecycle `stage` (a metric label). */
   readonly byStage: Record<string, number>;
-  /** All-clear slices the loop WILL auto-merge (clears the approval/CR/merge-state
-   *  gate). This is "ready to merge"; the merge-drain alarm keys on it. */
+  /** All-clear slices the loop WILL squash-merge now (`merge_gate == ready`).
+   *  Transient (they merge + archive); a lingering >0 is a merge stall. */
   readonly readyToMerge: number;
-  /** All-clear slices blocked on a human gate (missing approval, open
-   *  changes-requested, or non-clean merge state). Human-dependent — a metric,
-   *  never an alarm. Disjoint from {@link readyToMerge}; the two sum to the old
-   *  broad all-clear count. */
+  /** All-clear slices blocked on a HUMAN review gate (`merge_gate ==
+   *  waiting-approval`). Human-paced — a metric, never an alarm. */
   readonly waitingOnApproval: number;
+  /** All-clear, human-gates-cleared slices GitHub won't merge yet
+   *  (`merge_gate == blocked-merge-state`: UNKNOWN/BEHIND/BLOCKED/DIRTY). A real
+   *  stall the loop can't clear itself. */
+  readonly blockedOnMergeState: number;
   /** Escalated-stage slices keyed by escalation `reason` (a metric label). Sums to
    *  `byStage.escalated`; lets the dashboard split spawn-failed from steward-stuck. */
   readonly escalatedByReason: Record<string, number>;
@@ -413,39 +415,53 @@ export function taskTypeForSlice(sliceId: string, slice: any): string | undefine
   return undefined;
 }
 
-/** Merge readiness of a slice, splitting the all-clear set the loop won't spawn on:
- *   - `not-ready`     — fails the {@link isReadyToMerge} all-clear precondition.
- *   - `auto`          — all-clear AND clears the auto-merge gate (approval /
- *                       changes-requested per the profile's merge policy, plus
- *                       GitHub's own `merge_state_status == clean`): the loop will
- *                       squash-merge it. THIS is "ready to merge".
- *   - `waiting-approval` — all-clear but blocked on a human gate (missing required
- *                       approval, an open changes-requested review, or a non-clean
- *                       merge state / manual-merge requirement). Human-dependent;
- *                       a metric, never an alarm. */
-export type MergeReadiness = "not-ready" | "auto" | "waiting-approval";
+/**
+ * The human-consumable merge state of a `pr-open` slice — a THREE-way split of the
+ * all-clear set (passing checks, not conflicting, no threads owed):
+ *   - `ready`               — human gates cleared (approval / changes-requested per
+ *                             the profile's merge policy) AND GitHub's own
+ *                             `merge_state_status == clean`: the loop squash-merges
+ *                             it now. Transient — a `ready` slice merges and
+ *                             archives, so it does not linger.
+ *   - `waiting-approval`    — blocked on a HUMAN review gate (missing required
+ *                             approval or an open changes-requested review).
+ *                             Human-paced — a metric, NEVER an alarm.
+ *   - `blocked-merge-state` — human gates cleared but GitHub won't merge yet
+ *                             (`UNKNOWN`/`BEHIND`/`BLOCKED`/`DIRTY` — needs a rebase
+ *                             or branch protection still enforces a review the
+ *                             policy relaxed). A real stall the loop can't clear
+ *                             on its own.
+ *   - `not-ready`           — fails the all-clear precondition.
+ */
+export type MergeReadiness = "not-ready" | "ready" | "waiting-approval" | "blocked-merge-state";
 
 /**
- * Classify a slice's merge readiness. Mirrors babysit's auto-merge gate
- * (`handlers/babysit.ts`) EXACTLY — same `resolveMergeRequirements` +
- * `merge_state_status == clean` checks — so the split metric matches what the
- * loop actually does. Reads the merge-gate inputs babysit's `snapshot()` persists
- * onto `slice.pr` (`human_approval_count` / `changes_requested_count` /
- * `merge_state_status`); a missing field fails its gate (fail-safe toward
- * `waiting-approval`, never falsely claiming `auto`).
+ * Classify a slice's merge readiness from the LIVE PR snapshot, mirroring
+ * babysit's auto-merge gate EXACTLY (same `resolveMergeRequirements` approval/CR
+ * checks + `merge_state_status == clean`). `pr` is the source of the merge fields
+ * — pass the freshly observed PR so the verdict reflects what the loop actually
+ * sees this tick (babysit stamps it onto `slice.merge_gate` in `snapshot()`); the
+ * summary then tallies the stamp rather than recomputing from the possibly-stale
+ * persisted `slice.pr`. A missing approval/merge-state field fails its gate
+ * (fail-safe — never falsely claims `ready`).
  */
 export function mergeReadiness(
   sliceId: string,
   slice: any,
+  pr: any,
   mergePolicy: MergePolicy | undefined,
 ): MergeReadiness {
-  if (!isReadyToMerge(slice)) return "not-ready";
-  const pr = slice.pr ?? {};
+  if (!slice || typeof slice !== "object" || slice.stage !== "pr-open") return "not-ready";
+  const src = pr ?? {};
+  if (src.checks !== "PASS") return "not-ready";
+  if (src.mergeable === "CONFLICTING") return "not-ready";
+  const owed = src.needs_response_count ?? slice.needs_response_count ?? slice.pr?.needs_response_count;
+  if (owed !== 0) return "not-ready";
   const req = resolveMergeRequirements(mergePolicy, taskTypeForSlice(sliceId, slice));
-  const approvalOk = !req.approval || Number(pr.human_approval_count ?? 0) >= 1;
-  const crOk = !req.changesRequested || Number(pr.changes_requested_count ?? 0) === 0;
-  const mergeStateOk = String(pr.merge_state_status || "").toLowerCase() === "clean";
-  return approvalOk && crOk && mergeStateOk ? "auto" : "waiting-approval";
+  const approvalOk = !req.approval || Number(src.human_approval_count ?? 0) >= 1;
+  const crOk = !req.changesRequested || Number(src.changes_requested_count ?? 0) === 0;
+  if (!approvalOk || !crOk) return "waiting-approval";
+  return String(src.merge_state_status || "").toLowerCase() === "clean" ? "ready" : "blocked-merge-state";
 }
 
 /**
@@ -467,30 +483,31 @@ export function mergeReadiness(
  * flattened counter, so a missing value is treated as "unknown", not "zero", to
  * avoid overstating the metric.
  */
-export function summarizeSlicesByStage(
-  slices: Record<string, any> | undefined,
-  mergePolicy?: MergePolicy,
-): SliceStageSummary {
+export function summarizeSlicesByStage(slices: Record<string, any> | undefined): SliceStageSummary {
   const byStage: Record<string, number> = {};
   for (const stage of SLICE_STAGES) byStage[stage] = 0; // pre-seed so dashboards show 0, not "no data"
   const escalatedByReason: Record<string, number> = { [OTHER_ESCALATION_REASON]: 0 };
   for (const reason of ESCALATION_REASONS) escalatedByReason[reason] = 0; // pre-seed for stable series
   let readyToMerge = 0;
   let waitingOnApproval = 0;
-  for (const [sliceId, slice] of Object.entries(slices ?? {})) {
+  let blockedOnMergeState = 0;
+  for (const slice of Object.values(slices ?? {})) {
     if (!slice || typeof slice !== "object") continue;
     const raw = typeof slice.stage === "string" ? slice.stage : "";
     const stage = STAGE_ALLOWLIST.has(raw) ? raw : OTHER_STAGE;
     byStage[stage] = (byStage[stage] ?? 0) + 1;
-    // Split the all-clear set: "ready to merge" (loop will auto-merge) vs
-    // "waiting on approval" (mergeable but blocked on a human gate). The merge
-    // policy decides which gates apply per task type.
-    switch (mergeReadiness(sliceId, slice, mergePolicy)) {
-      case "auto":
+    // Tally the merge-readiness 3-way from babysit's live-PR verdict
+    // (`slice.merge_gate`, stamped in snapshot()) — NOT recomputed here, so the
+    // count reflects what the loop actually saw, not a stale persisted slice.pr.
+    switch (slice.merge_gate) {
+      case "ready":
         readyToMerge++;
         break;
       case "waiting-approval":
         waitingOnApproval++;
+        break;
+      case "blocked-merge-state":
+        blockedOnMergeState++;
         break;
     }
     if (stage === "escalated") {
@@ -500,5 +517,5 @@ export function summarizeSlicesByStage(
       escalatedByReason[r] = (escalatedByReason[r] ?? 0) + 1;
     }
   }
-  return { byStage, readyToMerge, waitingOnApproval, escalatedByReason };
+  return { byStage, readyToMerge, waitingOnApproval, blockedOnMergeState, escalatedByReason };
 }

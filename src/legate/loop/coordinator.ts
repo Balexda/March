@@ -57,12 +57,10 @@ function buildTickResult(state: LoopState, r: CoordinatorOutput["results"], spaw
   const stewardNudgeCount = countAction(r.babysit, "steward-nudge");
   const stewardStrandedCount = countAction(r.babysit, "steward-stranded");
   // Tally after all handlers ran so stages/PR snapshots reflect this tick (#220).
-  // Pass the live merge policy so the all-clear set splits into auto-mergeable
-  // (readyToMerge) vs blocked-on-a-human-gate (waitingOnApproval).
-  const { byStage, readyToMerge, waitingOnApproval, escalatedByReason } = summarizeSlicesByStage(
-    state.slices,
-    state.mergePolicy,
-  );
+  // The merge-readiness 3-way (ready / waiting-approval / blocked-merge-state) is
+  // read from each slice's `merge_gate` stamp (babysit's live-PR verdict).
+  const { byStage, readyToMerge, waitingOnApproval, blockedOnMergeState, escalatedByReason } =
+    summarizeSlicesByStage(state.slices);
   // The TRUE dispatch-ready count: the record-paced set the dispatcher actually
   // launches (`dispatchableReady`), distinct from the node-level `queue.dispatchable`
   // frontier metric which over-counts (escalated/blocked-shadow nodes). Computed
@@ -82,6 +80,7 @@ function buildTickResult(state: LoopState, r: CoordinatorOutput["results"], spaw
     slicesByStage: byStage,
     readyToMergeCount: readyToMerge,
     waitingOnApprovalCount: waitingOnApproval,
+    blockedOnMergeStateCount: blockedOnMergeState,
     dispatchableReadyCount,
     escalatedByReason,
     cleanupCount: r.cleanup.actions.length,

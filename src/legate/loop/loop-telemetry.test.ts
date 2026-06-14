@@ -104,6 +104,7 @@ describe("buildLoopTickActivity", () => {
       slices_by_stage: { implementing: 2, "pr-open": 1, bogus: "x" },
       ready_to_merge_count: 1,
       waiting_on_approval_count: 3,
+      blocked_on_merge_state_count: 2,
       escalated_by_reason: { hatchery_dispatch_failed: 2, other: 1, bogus: "x" },
       dispatch_action_count: 2,
       dispatch_failure_count: 1,
@@ -131,6 +132,7 @@ describe("buildLoopTickActivity", () => {
       slicesByStage: { implementing: 2, "pr-open": 1 }, // non-number 'bogus' dropped
       readyToMerge: 1,
       waitingOnApproval: 3,
+      blockedOnMergeState: 2,
       escalatedByReason: { hatchery_dispatch_failed: 2, other: 1 }, // non-number 'bogus' dropped
     });
     expect(activity.tickDurationSeconds).toBe(2.5);

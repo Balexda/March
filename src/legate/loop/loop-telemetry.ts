@@ -170,6 +170,7 @@ export function buildLoopTickActivity(record: any, ctx: HeartbeatMetricsContext)
     slicesByStage,
     readyToMerge: record.ready_to_merge_count ?? 0,
     waitingOnApproval: record.waiting_on_approval_count ?? 0,
+    blockedOnMergeState: record.blocked_on_merge_state_count ?? 0,
     escalatedByReason,
   };
   return {
