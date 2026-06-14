@@ -377,8 +377,9 @@ export interface ReapOptions {
   readonly reap?: boolean;
   /**
    * Enable the age-gated dead-orphan criterion when set (milliseconds). A
-   * non-running orphan past this age, whose branch has NO open PR (no branch / no
-   * PR / merged / closed), is judged `done`. `undefined` disables the criterion
+   * non-running orphan past this age whose KNOWN branch the forge confirms has no
+   * PR (`no-pr`) is judged `done`. Branchless sessions stay `unknown` (an empty
+   * branch is ambiguous, not proof of no PR). `undefined` disables the criterion
    * entirely — the conservative default.
    */
   readonly deadOrphanAgeMs?: number;
@@ -423,11 +424,10 @@ function isDeadOrphan(session: CastraSession, options: ReapOptions): boolean {
  * (never reap); everything we cannot verify is `unknown` (left alone).
  *
  * The age-gated dead-orphan criterion (opt-in via `options.deadOrphanAgeMs`)
- * upgrades the two cases that PROVE there is no open PR — `no-branch`
- * (definitionally none) and `no-pr` (forge confirmed none) — to `done` when the
- * session is old + non-running ({@link isDeadOrphan}). `pr-lookup-unknown` and
- * `no-repo-root` stay `unknown`: an open PR we could not see must never be reaped
- * on age.
+ * upgrades only `no-pr` (a KNOWN branch the forge confirms has no PR) to `done`
+ * when the session is old + non-running ({@link isDeadOrphan}). `no-branch`,
+ * `pr-lookup-unknown`, and `no-repo-root` stay `unknown`: a branch we could not
+ * read or a PR we could not see must never be reaped on age.
  */
 export async function classifyOrphanWork(
   session: CastraSession,
@@ -439,9 +439,14 @@ export async function classifyOrphanWork(
     return { state: "done", reason: "worktree-gone" };
   }
   if (!session.branch) {
-    return isDeadOrphan(session, options)
-      ? { state: "done", reason: "dead-orphan" }
-      : { state: "unknown", reason: "no-branch" };
+    // `branch === ""` is AMBIGUOUS per the CastraSession contract — it means the
+    // branch is UNKNOWN (detached HEAD, a non-git dir, a transient `git`
+    // derivation failure, or an infra session like a conductor), NOT provably
+    // "no branch / no PR". It therefore never proves a slice is done, so it is
+    // never age-reaped: an open PR whose branch we could not read must survive.
+    // Only worktree-gone (above) or a forge-confirmed no-PR on a KNOWN branch
+    // (below) can mark an orphan done.
+    return { state: "unknown", reason: "no-branch" };
   }
   if (!repoRoot) return { state: "unknown", reason: "no-repo-root" };
 

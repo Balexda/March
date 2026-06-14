@@ -168,7 +168,10 @@ describe("classifyOrphanWork (age-gated dead-orphan criterion)", () => {
     ).toEqual({ state: "unknown", reason: "no-pr" });
   });
 
-  it("reaps an old, non-running no-branch orphan as dead-orphan when armed", async () => {
+  it("keeps a branchless orphan `unknown` even when armed (empty branch is not proof of no PR)", async () => {
+    // branch === "" is ambiguous (detached / derivation failed / conductor), so
+    // it is never age-reaped — a live open-PR steward whose branch we could not
+    // read must survive (PR #368 review, codex P2).
     expect(
       await classifyOrphanWork(
         session({ sessionId: "a", status: "waiting", createdAt: OLD }),
@@ -176,7 +179,7 @@ describe("classifyOrphanWork (age-gated dead-orphan criterion)", () => {
         fakeGate(),
         ON,
       ),
-    ).toEqual({ state: "done", reason: "dead-orphan" });
+    ).toEqual({ state: "unknown", reason: "no-branch" });
   });
 
   it("reaps an old, non-running no-pr orphan as dead-orphan when armed", async () => {
@@ -190,26 +193,26 @@ describe("classifyOrphanWork (age-gated dead-orphan criterion)", () => {
     ).toEqual({ state: "done", reason: "dead-orphan" });
   });
 
-  it("never reaps a RUNNING orphan even when old", async () => {
+  it("never reaps a RUNNING orphan even when old (no-pr path)", async () => {
     expect(
       await classifyOrphanWork(
-        session({ sessionId: "c", status: "running", createdAt: OLD }),
+        session({ sessionId: "c", status: "running", createdAt: OLD, branch: "feature/x" }),
         "/repo",
-        fakeGate(),
+        fakeGate({ pr: { "feature/x": "none" } }),
         ON,
       ),
-    ).toEqual({ state: "unknown", reason: "no-branch" });
+    ).toEqual({ state: "unknown", reason: "no-pr" });
   });
 
-  it("never reaps a too-young orphan", async () => {
+  it("never reaps a too-young orphan (no-pr path)", async () => {
     expect(
       await classifyOrphanWork(
-        session({ sessionId: "d", status: "waiting", createdAt: FRESH }),
+        session({ sessionId: "d", status: "waiting", createdAt: FRESH, branch: "feature/x" }),
         "/repo",
-        fakeGate(),
+        fakeGate({ pr: { "feature/x": "none" } }),
         ON,
       ),
-    ).toEqual({ state: "unknown", reason: "no-branch" });
+    ).toEqual({ state: "unknown", reason: "no-pr" });
   });
 
   it("keeps the OPEN-PR protection for an old, non-running orphan", async () => {
