@@ -2,7 +2,15 @@
  * @l0 @deterministic @ci
  */
 import { describe, expect, it, vi } from "vitest";
-import { rebuildWorkingState, senseFromHerald, senseObserved, type SenseDeps } from "./sense.js";
+import {
+  createStaleRecheckTracker,
+  rebuildWorkingState,
+  selectStaleRecheck,
+  senseFromHerald,
+  senseObserved,
+  STALE_RECHECK_MS,
+  type SenseDeps,
+} from "./sense.js";
 import type { LoopMeta } from "../meta.js";
 import { emptySystemState, type SliceState, type SystemState } from "../../../herald/events.js";
 import { liveSpawnCount } from "../pure/slice.js";
@@ -723,5 +731,98 @@ describe("senseObserved PR change-cursor (listOpenPrs gate)", () => {
       prevWithPr({ number: 7, updated_at: "T1", checks: "PASS", thread_count: 0 }),
     );
     expect(queryPr).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("selectStaleRecheck (rotating forced-recheck victim)", () => {
+  const idleOpen = new Map([[7, { updatedAt: "T1", headRefName: "b" }]]);
+  const skippablePrev = () =>
+    foldedState({
+      slices: { p: slice({ sliceId: "p", stage: "pr-open", branch: "b", pr: { number: 7, updated_at: "T1", checks: "PASS", thread_count: 0 } }) },
+    });
+  const t0 = Date.parse("2026-05-20T00:00:00Z");
+
+  it("picks a gate-skipped idle PR that has never been force-rechecked", () => {
+    const tracker = createStaleRecheckTracker();
+    expect(selectStaleRecheck(skippablePrev(), idleOpen, tracker, t0)).toBe(7);
+  });
+
+  it("returns null with no tracker or no open-PR probe (sweep disabled)", () => {
+    expect(selectStaleRecheck(skippablePrev(), idleOpen, undefined, t0)).toBeNull();
+    expect(selectStaleRecheck(skippablePrev(), null, createStaleRecheckTracker(), t0)).toBeNull();
+  });
+
+  it("does NOT pick a PR already known CONFLICTING (handled by babysit; wastes a sweep slot)", () => {
+    const prev = foldedState({
+      slices: { p: slice({ sliceId: "p", stage: "pr-open", branch: "b", pr: { number: 7, updated_at: "T1", checks: "PASS", thread_count: 0, mergeable: "CONFLICTING" } }) },
+    });
+    expect(selectStaleRecheck(prev, idleOpen, createStaleRecheckTracker(), t0)).toBeNull();
+  });
+
+  it("does NOT pick a PR the cursor gate already re-fetches (updatedAt advanced)", () => {
+    // Stored cursor T1 but live probe shows T2 → gate refetches it, so forcing buys nothing.
+    const advanced = new Map([[7, { updatedAt: "T2", headRefName: "b" }]]);
+    expect(selectStaleRecheck(skippablePrev(), advanced, createStaleRecheckTracker(), t0)).toBeNull();
+  });
+
+  it("respects the cooldown — a just-forced PR is not eligible again until STALE_RECHECK_MS", () => {
+    const tracker = createStaleRecheckTracker();
+    tracker.markForced(7, t0);
+    expect(selectStaleRecheck(skippablePrev(), idleOpen, tracker, t0 + STALE_RECHECK_MS - 1)).toBeNull();
+    expect(selectStaleRecheck(skippablePrev(), idleOpen, tracker, t0 + STALE_RECHECK_MS)).toBe(7);
+  });
+
+  it("rotates oldest-first across multiple idle PRs (never-forced wins; ties break to lowest number)", () => {
+    const prev = foldedState({
+      slices: {
+        a: slice({ sliceId: "a", stage: "pr-open", branch: "b", pr: { number: 7, updated_at: "T1", checks: "PASS", thread_count: 0 } }),
+        b: slice({ sliceId: "b", stage: "pr-open", branch: "b", pr: { number: 9, updated_at: "T1", checks: "PASS", thread_count: 0 } }),
+      },
+    });
+    const open = new Map([
+      [7, { updatedAt: "T1", headRefName: "b" }],
+      [9, { updatedAt: "T1", headRefName: "b" }],
+    ]);
+    const tracker = createStaleRecheckTracker();
+    // Both never-forced → tie broken to the lowest number.
+    expect(selectStaleRecheck(prev, open, tracker, t0)).toBe(7);
+    // After 7 is forced, 9 (still never-forced) is the oldest.
+    tracker.markForced(7, t0);
+    expect(selectStaleRecheck(prev, open, tracker, t0)).toBe(9);
+  });
+});
+
+describe("senseObserved forced staleness recheck", () => {
+  const live = [{ id: "s1", group: "legate-workers", status: "idle" }];
+  const prevIdle = () =>
+    foldedState({
+      slices: { p: slice({ sliceId: "p", stage: "pr-open", sessionId: "s1", branch: "b", pr: { number: 7, updated_at: "T1", checks: "PASS", thread_count: 0 } }) },
+    });
+  const idleOpen = async () => new Map([[7, { updatedAt: "T1", headRefName: "b" }]]);
+
+  it("force-refetches the gate-skipped PR when the tracker says it is due, and marks it forced", async () => {
+    const tracker = createStaleRecheckTracker();
+    const markForced = vi.spyOn(tracker, "markForced");
+    const queryPr = vi.fn(async () => ({ number: 7, state: "OPEN", mergeable: "CONFLICTING" }));
+    const state = await senseObserved(
+      deps({ listSessions: async () => live, queryPr, listOpenPrs: idleOpen, staleRecheck: tracker }),
+      prevIdle(),
+    );
+    // Cursor gate alone would SKIP (idle, unchanged) — the sweep forces the fetch.
+    expect(queryPr).toHaveBeenCalledTimes(1);
+    expect(state.perSlice.p?.pr).toMatchObject({ mergeable: "CONFLICTING" });
+    expect(markForced).toHaveBeenCalledWith(7, Date.parse("2026-05-20T00:00:00Z"));
+  });
+
+  it("does NOT force-refetch while the PR is on cooldown (no churn on a quiet PR)", async () => {
+    const tracker = createStaleRecheckTracker();
+    tracker.markForced(7, Date.parse("2026-05-20T00:00:00Z")); // forced this very tick already
+    const queryPr = vi.fn(async () => ({ number: 7, state: "OPEN" }));
+    const state = await senseObserved(
+      deps({ listSessions: async () => live, queryPr, listOpenPrs: idleOpen, staleRecheck: tracker }),
+      prevIdle(),
+    );
+    expect(queryPr).not.toHaveBeenCalled();
+    expect(state.perSlice.p?.pr).toBeUndefined();
   });
 });

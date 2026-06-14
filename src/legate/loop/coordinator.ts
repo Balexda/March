@@ -59,8 +59,16 @@ function buildTickResult(state: LoopState, r: CoordinatorOutput["results"], spaw
   // Tally after all handlers ran so stages/PR snapshots reflect this tick (#220).
   // The merge-readiness 3-way (ready / waiting-approval / blocked-merge-state) is
   // read from each slice's `merge_gate` stamp (babysit's live-PR verdict).
-  const { byStage, readyToMerge, waitingOnApproval, blockedOnMergeState, escalatedByReason } =
+  const { byStage, readyToMerge, waitingOnApproval, blockedOnMergeState, escalatedByReason, prBlocker } =
     summarizeSlicesByStage(state.slices);
+  // Per-kind babysit fix-dispatch breakdown — the aggregate `babysitActionCount`
+  // hides WHICH fix the loop is doing. Bounded label set, keyed in metric form.
+  const babysitActionsByKind: Record<string, number> = {
+    conflict_fix: countAction(r.babysit, "conflict-fix"),
+    review_fix: countAction(r.babysit, "review-fix"),
+    ci_fix: countAction(r.babysit, "ci-fix"),
+    comment_fix: countAction(r.babysit, "comment-fix"),
+  };
   // The TRUE dispatch-ready count: the record-paced set the dispatcher actually
   // launches (`dispatchableReady`), distinct from the node-level `queue.dispatchable`
   // frontier metric which over-counts (escalated/blocked-shadow nodes). Computed
@@ -83,6 +91,8 @@ function buildTickResult(state: LoopState, r: CoordinatorOutput["results"], spaw
     blockedOnMergeStateCount: blockedOnMergeState,
     dispatchableReadyCount,
     escalatedByReason,
+    prBlockerCounts: prBlocker,
+    babysitActionsByKind,
     cleanupCount: r.cleanup.actions.length,
     cleanupFailureCount: r.cleanup.failures.length,
     ghostCleanupCount: countAction(r.ghost, "ghost-cleanup"),

@@ -115,6 +115,45 @@ Threads:
 ${reviewThreadsSummary(threads)}`;
 }
 
+/**
+ * Pure decision helper: which conversation (non-thread) comments still need a
+ * response. A comment is handled once the legate has reacted :eyes: to it
+ * (`reacted_eyes`) — the babysit caller additionally drops any whose id is already
+ * in the persisted dispatched set, so this returns the not-yet-acknowledged set.
+ * Author is deliberately NOT a filter: the legate token shares the PR-author
+ * identity (steward pushes as the same account that reviews), so an author check
+ * is unreliable — dedup is carried by the :eyes: reaction + the comment-id set.
+ */
+export function commentsNeedingResponse(slice: any, pr: any): any[] {
+  return (pr.conversation_comments || []).filter((comment: any) => comment && comment.reacted_eyes !== true);
+}
+
+/** Quote each conversation comment as a Markdown blockquote with attribution. The
+ *  body is a bounded preview; when it was truncated (or whenever a permalink is
+ *  available) the comment URL is appended so the worker can read the full request
+ *  rather than acting on a clipped quote. */
+export function conversationCommentsSummary(comments: any[]): string {
+  return comments
+    .map((comment: any) => {
+      const preview = String(comment.body_preview || "").trim();
+      const quoted = (comment.truncated ? `${preview}…` : preview).replace(/\n/g, "\n> ");
+      const who = comment.author || "unknown";
+      const when = comment.created_at ? ` (${comment.created_at})` : "";
+      const link = comment.url ? `\n  (full comment: ${comment.url})` : "";
+      return `> ${quoted}\n— ${who}${when}${link}`;
+    })
+    .join("\n\n");
+}
+
+export function commentFixMessage(pr: any, comments: any[]): string {
+  return `/smithy.fix
+
+PR #${pr.number} has reviewer comment(s) on the conversation (not attached to a code line, so there is no review thread to resolve) that need a response. Address the feedback in this PR branch, push the fix, and reply on the PR conversation so the reviewer sees the resolution.
+
+Comments:
+${conversationCommentsSummary(comments)}`;
+}
+
 export function loginRequiredDetail(input: {
   sliceId: string;
   slice: any;

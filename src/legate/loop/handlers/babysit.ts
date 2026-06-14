@@ -3,9 +3,11 @@ import { emptyHandlerResult } from "../state/types.js";
 import { prNumber, workerBySessionId } from "../pure/session.js";
 import { hashText } from "../pure/hash.js";
 import { resolveMergeRequirements, type MergePolicy } from "../../../herald/profiles/merge-policy.js";
-import { mergeReadiness, taskTypeForSlice } from "../pure/slice.js";
+import { mergeBlocker, mergeReadiness, taskTypeForSlice } from "../pure/slice.js";
 import {
   ciFixMessage,
+  commentFixMessage,
+  commentsNeedingResponse,
   conflictMessage,
   failedChecksSummary,
   loginRequiredDetail,
@@ -114,6 +116,13 @@ export interface BabysitDeps {
     mergeSha?: string;
     error?: string;
   }>;
+  /**
+   * React to a PR conversation comment (the :eyes: acknowledgement the legate
+   * posts when it dispatches a comment-fix). Optional + best-effort: the persisted
+   * comment-id set is the authoritative dedup, so a missing seam or a failed
+   * reaction never blocks the fix. See the `comment-fix` apply case.
+   */
+  reactToComment?: (input: { commentId: string | number; content: string; repoPath?: string }) => Promise<void>;
 }
 
 export type BabysitDecision =
@@ -133,6 +142,7 @@ export type BabysitDecision =
   | { kind: "nudge-exhausted"; sliceId: string; sessionId: string; pr: any; requestKey: string; reason: string; detail: string }
   | { kind: "review-fix"; sliceId: string; sessionId: string; pr: any; key: string; message: string; detail: string; threadIds: string[]; commentIds: string[] }
   | { kind: "review-fix-exhausted"; sliceId: string; sessionId: string; pr: any; requestKey: string; reason: string; detail: string; commentIds: string[] }
+  | { kind: "comment-fix"; sliceId: string; sessionId: string; pr: any; key: string; message: string; detail: string; commentIds: string[] }
   | { kind: "ci-fix"; sliceId: string; sessionId: string; pr: any; key: string; message: string; detail: string }
   | { kind: "ci-failure"; sliceId: string; sessionId: string; pr: any; requestKey: string; detail: string }
   | { kind: "pr-open-clear"; sliceId: string; sessionId: string; pr: any }
@@ -563,6 +573,38 @@ function evaluatePr(
     return;
   }
 
+  // Conversation (non-thread) comments: reviewer feedback posted on the PR
+  // conversation, not attached to a code line — so there's no review thread to
+  // resolve and the thread/review signals miss it entirely. Without this a
+  // commented-but-otherwise-clean PR sits "waiting for merge" forever. Each
+  // distinct comment id is dispatched once, then acked (:eyes:) + recorded in the
+  // persisted seen-set; a later reviewer reply carries a NEW id and re-arms. Dedup
+  // is author-independent on purpose: the legate token shares the PR-author
+  // identity, so :eyes: + the comment-id set — not "author != prAuthor" — are the
+  // reliable signals (#non-thread-comments).
+  const unhandledComments = commentsNeedingResponse(evalSlice, pr);
+  if (unhandledComments.length > 0) {
+    const seen = new Set<string>((slice.comment_fix_seen_comment_ids || []).map((id: any) => String(id)));
+    const fresh = unhandledComments.filter((c: any) => c.id != null && !seen.has(String(c.id)));
+    if (fresh.length > 0) {
+      const commentIds = fresh.map((c: any) => String(c.id));
+      out.push({
+        kind: "comment-fix",
+        sliceId,
+        sessionId,
+        pr,
+        key: actionKey("comment-fix", pr, commentIds.join(",")),
+        message: commentFixMessage(pr, fresh),
+        detail: `sent /smithy.fix for ${fresh.length} conversation comment(s) on PR #${pr.number}`,
+        commentIds,
+      });
+      return;
+    }
+    // Every unacked comment is already in the seen-set (we dispatched for it; the
+    // :eyes: write may have lagged). Nothing new to send — fall through to the merge
+    // gate so a comment we already handled can't wedge the PR open indefinitely.
+  }
+
   if (pr.checks === "PASS" && pr.needs_response_count === 0 && pr.mergeable !== "CONFLICTING") {
     // Record the one-time transition into the all-clear `pr-open` stage (the loop
     // confirmed CI/threads/conflicts). This happens regardless of the merge gate.
@@ -620,6 +662,11 @@ function snapshot(slice: any, pr: any, sliceId: string, mergePolicy: MergePolicy
   // uses. The summary tallies this stamp instead of recomputing from the
   // possibly-stale persisted slice.pr (#stack-observability).
   slice.merge_gate = mergeReadiness(sliceId, slice, pr, mergePolicy);
+  // Stamp the complementary merge-BLOCKER (conflicting / owes_review_threads /
+  // owes_comments / ci_failing / none) — the not-ready reasons the 3-way gauge
+  // collapses away. summarizeSlicesByStage tallies this stamp into the pr_blocker
+  // gauge (#non-thread-comments observability).
+  slice.pr_blocker = mergeBlocker(slice, pr);
 }
 
 /** Fold handled comment ids into the review-fix dedup set, union-merged so a
@@ -627,6 +674,12 @@ function snapshot(slice: any, pr: any, sliceId: string, mergePolicy: MergePolicy
  *  for (or escalated) — never speculatively before a send that may fail (#224). */
 function markCommentsSeen(slice: any, commentIds: string[]): void {
   slice.review_fix_seen_comment_ids = [...new Set([...(slice.review_fix_seen_comment_ids || []).map((id: any) => String(id)), ...commentIds])];
+}
+
+/** Same union-merge for the conversation-comment dispatch set (the authoritative
+ *  half of the non-thread-comment dedup; recorded only after a successful send). */
+function markCommentFixSeen(slice: any, commentIds: string[]): void {
+  slice.comment_fix_seen_comment_ids = [...new Set([...(slice.comment_fix_seen_comment_ids || []).map((id: any) => String(id)), ...commentIds])];
 }
 
 function clearLoginBlocked(slice: any): void {
@@ -788,6 +841,36 @@ export async function apply(decisions: BabysitDecision[], ctx: HandlerContext, s
         mark(slice, "review-fix", d.key, "processor sent review-thread /smithy.fix", ts);
         ctx.emitTransition?.({ type: "slice.stage.changed", sliceId: d.sliceId, stage: "pr-in-fix" });
         res.actions.push({ action: "review-fix", sliceId: d.sliceId, sessionId: d.sessionId, pr: d.pr, detail: d.detail });
+        res.mutated = true;
+        break;
+      }
+      case "comment-fix": {
+        try {
+          await deps.sendMessage(d.sessionId, d.message, d.sliceId);
+        } catch (err: any) {
+          await fireRequest({ ts, slice, requestKey: actionKey("comment-send-failed", d.pr, d.key), sliceId: d.sliceId, sessionId: d.sessionId, pr: d.pr, reason: "processor failed to send conversation-comment /smithy.fix", detail: err?.message || String(err) });
+          break;
+        }
+        slice.stage = "pr-in-fix";
+        // Record seen ONLY after a successful send so a transport failure retries
+        // next tick instead of silently dropping the comment (mirrors review-fix).
+        markCommentFixSeen(slice, d.commentIds || []);
+        // Best-effort :eyes: ack on each dispatched comment — human-visible, and the
+        // fold-independent dedup half (it survives a cold start that wipes the
+        // seen-set). Fire them concurrently so a comment-heavy PR doesn't serialize
+        // the tick; a failed reaction never blocks the fix (the seen-set is
+        // authoritative).
+        const reactToComment = deps.reactToComment;
+        if (reactToComment) {
+          await Promise.all(
+            (d.commentIds || []).map((id) =>
+              reactToComment({ commentId: id, content: "eyes", repoPath: state.repoPath }).catch(() => {}),
+            ),
+          );
+        }
+        mark(slice, "comment-fix", d.key, "processor sent conversation-comment /smithy.fix", ts);
+        ctx.emitTransition?.({ type: "slice.stage.changed", sliceId: d.sliceId, stage: "pr-in-fix" });
+        res.actions.push({ action: "comment-fix", sliceId: d.sliceId, sessionId: d.sessionId, pr: d.pr, detail: d.detail });
         res.mutated = true;
         break;
       }

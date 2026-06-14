@@ -158,6 +158,13 @@ export interface TickResult {
   dispatchableReadyCount: number;
   /** Escalated-stage slices keyed by escalation reason; sums to slicesByStage.escalated. */
   escalatedByReason: Record<string, number>;
+  /** PR-bearing slices keyed by dominant merge BLOCKER (conflicting /
+   *  owes_review_threads / owes_comments / ci_failing) — the not-ready reasons the
+   *  3-way merge-readiness gauge collapses away (#non-thread-comments). */
+  prBlockerCounts: Record<string, number>;
+  /** Babysit fix dispatches this tick keyed by kind (conflict_fix / review_fix /
+   *  ci_fix / comment_fix) — the per-kind split of the babysit umbrella. */
+  babysitActionsByKind: Record<string, number>;
   cleanupCount: number;
   cleanupFailureCount: number;
   ghostCleanupCount: number;

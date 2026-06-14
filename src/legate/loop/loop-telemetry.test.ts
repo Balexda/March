@@ -115,8 +115,10 @@ describe("buildLoopTickActivity", () => {
       relaunch_count: 0,
       relaunch_failure_count: 3,
       babysit_action_count: 6,
+      babysit_actions_by_kind: { conflict_fix: 1, comment_fix: 2, bogus: "x" },
       steward_nudge_count: 7,
       steward_stranded_count: 1,
+      pr_blocker_counts: { conflicting: 1, owes_comments: 2, bogus: "x" },
     };
     const activity = buildLoopTickActivity(record, ctx)!;
     expect(activity.snapshot).toEqual({
@@ -134,6 +136,7 @@ describe("buildLoopTickActivity", () => {
       waitingOnApproval: 3,
       blockedOnMergeState: 2,
       escalatedByReason: { hatchery_dispatch_failed: 2, other: 1 }, // non-number 'bogus' dropped
+      prBlocker: { conflicting: 1, owes_comments: 2 }, // non-number 'bogus' dropped
     });
     expect(activity.tickDurationSeconds).toBe(2.5);
     expect(activity).toMatchObject({
@@ -144,6 +147,7 @@ describe("buildLoopTickActivity", () => {
       ghostCleanupFailures: 5,
       relaunchFailures: 3,
       babysitActions: 6,
+      babysitActionsByKind: { conflict_fix: 1, comment_fix: 2 }, // non-number 'bogus' dropped
       stewardNudges: 7,
       stewardStranded: 1,
     });

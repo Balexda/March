@@ -1,4 +1,4 @@
-import { OTHER_STAGE, SLICE_STAGES, STAGE_ALLOWLIST } from "./slice.js";
+import { OTHER_STAGE, PR_BLOCKER_REASONS, SLICE_STAGES, STAGE_ALLOWLIST } from "./slice.js";
 
 /**
  * Time-in-state (dwell) tracking for the loop's slices. Pure + mutating: each
@@ -24,11 +24,16 @@ import { OTHER_STAGE, SLICE_STAGES, STAGE_ALLOWLIST } from "./slice.js";
 /** Merge-gate values whose pr-open dwell we track (matches pure/slice MergeReadiness). */
 export const TRACKED_MERGE_GATES = ["ready", "waiting-approval", "blocked-merge-state"] as const;
 
+/** Merge-blocker values whose dwell we track (matches pure/slice PR_BLOCKER_REASONS). */
+export const TRACKED_PR_BLOCKERS = PR_BLOCKER_REASONS;
+
 export interface DwellObservation {
   /** Max age (seconds) of any slice currently in each lifecycle stage. */
   readonly stageAgeMaxSeconds: Record<string, number>;
   /** Max age (seconds) of any pr-open slice currently in each merge-gate. */
   readonly mergeGateAgeMaxSeconds: Record<string, number>;
+  /** Max age (seconds) of any PR-bearing slice currently under each merge blocker. */
+  readonly mergeBlockerAgeMaxSeconds: Record<string, number>;
   /** Completed stage dwells (seconds) observed this tick (a slice changed stage). */
   readonly completedStageDwells: ReadonlyArray<{ stage: string; seconds: number }>;
 }
@@ -68,6 +73,8 @@ export function stampDwell(slices: Record<string, any> | undefined, nowMs: numbe
   for (const stage of SLICE_STAGES) stageAgeMaxSeconds[stage] = 0; // pre-seed → stable series at 0
   const mergeGateAgeMaxSeconds: Record<string, number> = {};
   for (const gate of TRACKED_MERGE_GATES) mergeGateAgeMaxSeconds[gate] = 0;
+  const mergeBlockerAgeMaxSeconds: Record<string, number> = {};
+  for (const blocker of TRACKED_PR_BLOCKERS) mergeBlockerAgeMaxSeconds[blocker] = 0;
   const completedStageDwells: Array<{ stage: string; seconds: number }> = [];
 
   for (const slice of Object.values(slices ?? {})) {
@@ -106,7 +113,25 @@ export function stampDwell(slices: Record<string, any> | undefined, nowMs: numbe
       slice._dwell_gate = undefined;
       slice.merge_gate_since = undefined;
     }
+
+    // Merge-blocker dwell — tracked regardless of stage (a conflicting slice may
+    // already be in pr-resolving-conflicts), so "how long has this PR been
+    // CONFLICTING / owed a comment response" is measurable. Seeds from pr_open_at
+    // on the first observation so the age survives a restart (same as merge-gate).
+    const blocker = typeof slice.pr_blocker === "string" ? slice.pr_blocker : "none";
+    if ((TRACKED_PR_BLOCKERS as readonly string[]).includes(blocker)) {
+      if (slice._dwell_blocker !== blocker) {
+        const firstObservation = slice._dwell_blocker === undefined;
+        slice._dwell_blocker = blocker;
+        slice.pr_blocker_since = firstObservation ? gateEntryHint(slice, nowMs) : nowMs;
+      }
+      const blockerAge = secondsSince(nowMs, slice.pr_blocker_since ?? nowMs);
+      if (blockerAge > mergeBlockerAgeMaxSeconds[blocker]) mergeBlockerAgeMaxSeconds[blocker] = blockerAge;
+    } else if (slice._dwell_blocker != null) {
+      slice._dwell_blocker = undefined;
+      slice.pr_blocker_since = undefined;
+    }
   }
 
-  return { stageAgeMaxSeconds, mergeGateAgeMaxSeconds, completedStageDwells };
+  return { stageAgeMaxSeconds, mergeGateAgeMaxSeconds, mergeBlockerAgeMaxSeconds, completedStageDwells };
 }

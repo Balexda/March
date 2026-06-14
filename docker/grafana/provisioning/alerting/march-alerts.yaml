@@ -464,3 +464,54 @@ groups:
           - refId: C
             datasourceUid: __expr__
             model: { refId: C, type: threshold, expression: A, conditions: [{ evaluator: { type: gt, params: [1800] } }] }
+
+      # MERGE-BLOCKER dwell — the not-ready reasons the 3-way merge-readiness alarms
+      # (above) collapse away. `conflicting` is the base-movement / silent-conflict
+      # wedge (a PR that went CONFLICTING from default-branch churn without bumping
+      # updatedAt; StorySpider #597) that conflict-fix should be clearing within a
+      # tick — a sustained >30m means it is NOT. `owes_comments` is a non-thread
+      # reviewer comment (March #294 class) the loop dispatched a comment-fix for but
+      # that has gone unaddressed; human-review-paced, so a longer 2h debounce.
+      - uid: march-blocker-conflicting
+        title: Merge-conflict dwell (PR CONFLICTING > 30m, conflict-fix not clearing)
+        condition: C
+        for: 2m
+        noDataState: OK
+        execErrState: OK
+        labels: { severity: warning, team: march, tier: behavioral }
+        annotations:
+          summary: A PR has been mergeable=CONFLICTING for over 30 minutes — the deterministic conflict-fix (rebase + /smithy.fix) is not clearing it. Likely a genuine design conflict needing operator/steward judgement, or a stuck worker.
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: prometheus
+            model:
+              refId: A
+              instant: true
+              editorMode: code
+              expr: max(march_legate_merge_blocker_age_max_seconds{blocker="conflicting"})
+          - refId: C
+            datasourceUid: __expr__
+            model: { refId: C, type: threshold, expression: A, conditions: [{ evaluator: { type: gt, params: [1800] } }] }
+
+      - uid: march-blocker-owes-comments
+        title: Conversation-comment dwell (non-thread reviewer comment unaddressed > 2h)
+        condition: C
+        for: 5m
+        noDataState: OK
+        execErrState: OK
+        labels: { severity: warning, team: march, tier: behavioral }
+        annotations:
+          summary: A PR has carried an unacknowledged conversation (non-thread) reviewer comment for over 2 hours. The loop dispatches a /smithy.fix once per comment; a persistent dwell means the steward hasn't resolved it (or the reviewer wants more) — operator should check the thread.
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: prometheus
+            model:
+              refId: A
+              instant: true
+              editorMode: code
+              expr: max(march_legate_merge_blocker_age_max_seconds{blocker="owes_comments"})
+          - refId: C
+            datasourceUid: __expr__
+            model: { refId: C, type: threshold, expression: A, conditions: [{ evaluator: { type: gt, params: [7200] } }] }
