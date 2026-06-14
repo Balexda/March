@@ -191,7 +191,7 @@ specced and cut in parallel; F6 integrates last because it invokes F5's verdict.
 | F4 | Steward Contract (Castra-Consumer Surface) | F1 | specs/2026-06-03-008-steward-role-contract/ |
 | F5 | Contract Presence & Freshness Check | F1 | specs/2026-06-06-009-contract-presence-and-freshness-verdict/ |
 | F7 | TypeScript Public-Interface Autogen Tool | F1 | specs/2026-06-07-010-typescript-public-interface-autogen-extraction/ |
-| F6 | Contract-Freshness Enforcement Directive | F1, F5 | — |
+| F6 | Contract-Freshness Enforcement Directive | F1, F5 | specs/2026-06-07-011-contract-freshness-enforcement-directive/ |
 
 ## Cross-Milestone Dependencies
 
