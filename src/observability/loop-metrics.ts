@@ -126,8 +126,13 @@ let dispatchFailures: Counter | undefined;
 let loopActions: Counter | undefined;
 let tickDuration: Histogram | undefined;
 
-// The observable gauges read this holder; updated on every recordLoopHeartbeat.
-let latest: LoopMetricsSnapshot | undefined;
+// The observable gauges read this map — one snapshot PER PROFILE, updated on
+// every recordLoopHeartbeat. The single shared legate ticks each profile in turn
+// and recordLoopHeartbeat fires once per profile; keying by profile (not a single
+// `latest`) is what keeps a gauge for an earlier profile from being clobbered by
+// a later profile's tick — load-bearing for the cross-profile alert signals
+// (e.g. queue.dispatchable_ready summed across profiles).
+const latestByProfile = new Map<string, LoopMetricsSnapshot>();
 
 // The GLOBAL concurrent-spawn budget (#313) is one shared instance across every
 // profile this tick, so it is NOT per-profile: recorded once per multi-profile
@@ -216,10 +221,10 @@ function ensureInstruments(meter: Meter): void {
     { description: "Worker sessions by state" },
   );
   workers.addCallback((result: ObservableResult) => {
-    const s = latest;
-    if (!s) return;
-    for (const [state, count] of Object.entries(s.workersByState)) {
-      result.observe(count, { ...base(s), state });
+    for (const s of latestByProfile.values()) {
+      for (const [state, count] of Object.entries(s.workersByState)) {
+        result.observe(count, { ...base(s), state });
+      }
     }
   });
 
@@ -233,10 +238,10 @@ function ensureInstruments(meter: Meter): void {
     { description: "Non-archived slices by lifecycle stage" },
   );
   slices.addCallback((result: ObservableResult) => {
-    const s = latest;
-    if (!s) return;
-    for (const [stage, count] of Object.entries(s.slicesByStage)) {
-      result.observe(count, { ...base(s), stage });
+    for (const s of latestByProfile.values()) {
+      for (const [stage, count] of Object.entries(s.slicesByStage)) {
+        result.observe(count, { ...base(s), stage });
+      }
     }
   });
   // Derived "waiting for merge": pr-open slices that are clean + mergeable with no
@@ -276,10 +281,10 @@ function ensureInstruments(meter: Meter): void {
     { description: "Escalated slices by escalation reason" },
   );
   escalated.addCallback((result: ObservableResult) => {
-    const s = latest;
-    if (!s) return;
-    for (const [reason, count] of Object.entries(s.escalatedByReason)) {
-      result.observe(count, { ...base(s), reason });
+    for (const s of latestByProfile.values()) {
+      for (const [reason, count] of Object.entries(s.escalatedByReason)) {
+        result.observe(count, { ...base(s), reason });
+      }
     }
   });
 
@@ -355,9 +360,9 @@ function registerGauge(
 ): void {
   const gauge = meter.createObservableGauge(name, unit ? { description, unit } : { description });
   gauge.addCallback((result: ObservableResult) => {
-    const s = latest;
-    if (!s) return;
-    result.observe(read(s), base(s));
+    for (const s of latestByProfile.values()) {
+      result.observe(read(s), base(s));
+    }
   });
 }
 
@@ -371,7 +376,7 @@ export function recordLoopHeartbeat(activity: LoopTickActivity): void {
   if (!otel.enabled) return;
 
   ensureInstruments(otel.getMeter());
-  latest = activity.snapshot;
+  latestByProfile.set(activity.snapshot.profile || "unknown", activity.snapshot);
 
   const attrs = base(activity.snapshot);
   heartbeats!.add(1, attrs);
