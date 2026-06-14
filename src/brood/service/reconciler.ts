@@ -34,8 +34,12 @@ import {
  *
  * Both loops are best-effort (a transient failure is swallowed and the next tick
  * retries), guard against overlapping a slow Castra onto the next tick, and run
- * on `unref`'d intervals so neither holds the process open. Mirrors
- * {@link startBroodHeartbeat}: no-op (no timers) when telemetry is disabled.
+ * on `unref`'d intervals so neither holds the process open. The observe loop is
+ * gated on telemetry (it only feeds gauges, a no-op without it); the env-gated
+ * reap loop runs regardless of `MARCH_OTEL` — its flags
+ * (`MARCH_BROOD_AUTO_REAP`/`AUTO_ADOPT`) are independent of telemetry, and its
+ * `march.brood.reaps` recording no-ops when telemetry is off. Nothing starts only
+ * when telemetry is off AND no reap flag is armed.
  */
 const OBSERVE_INTERVAL_MS = 30000;
 
@@ -63,16 +67,23 @@ export function startBroodReconciler(
   options: ReconcilerOptions = {},
 ): () => void {
   const otel = getActiveOtel();
-  if (!otel.enabled) return () => {};
+  const reap = options.reap;
+  const reapActive = reap?.active ?? false;
+  // Observe feeds gauges only (no-op without telemetry); the self-heal loop is
+  // gated by its own env flags, NOT by MARCH_OTEL. Start nothing only when both
+  // are off.
+  if (!otel.enabled && !reapActive) return () => {};
 
   const gateway = options.gateway ?? defaultStewardGateway();
   const stops: Array<() => void> = [];
 
-  stops.push(startObserveLoop(store, gateway, options.intervalMs ?? OBSERVE_INTERVAL_MS));
+  if (otel.enabled) {
+    stops.push(startObserveLoop(store, gateway, options.intervalMs ?? OBSERVE_INTERVAL_MS));
+  }
 
-  if (options.reap?.active) {
+  if (reapActive) {
     stops.push(
-      startReapLoop(store, gateway, options.reap, options.gate ?? defaultOrphanGate(), options.logger),
+      startReapLoop(store, gateway, reap!, options.gate ?? defaultOrphanGate(), options.logger),
     );
   }
 

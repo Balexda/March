@@ -75,6 +75,36 @@ describe.skipIf(!sqliteAvailable)("startBroodReconciler", () => {
     store.close();
   });
 
+  it("runs the env-gated reap loop even when telemetry is disabled (flags are independent of MARCH_OTEL)", async () => {
+    initOtel({}); // telemetry OFF
+    const store = new SessionStore({ dbPath: ":memory:" });
+    store.register({
+      id: "old",
+      kind: "steward",
+      profile: "smithy",
+      repoPath: "/repo",
+      worktreePath: "/wt/old",
+      branch: "feature/y",
+      status: "torndown",
+    });
+    const gw = recordingGateway([
+      castraSession({ sessionId: "leaked", worktreePath: "/wt/gone", branch: "feature/y" }),
+    ]);
+    const gate: OrphanGate = {
+      worktreeExists: (p) => p !== "/wt/gone",
+      branchPrState: async () => "unknown",
+    };
+    const stop = startBroodReconciler(store, {
+      gateway: gw,
+      reap: reapConfig({ reapEnabled: true }),
+      gate,
+    });
+    await waitFor(() => gw.removed.length > 0);
+    expect(gw.removed).toEqual(["leaked"]); // reaped despite telemetry off
+    stop();
+    store.close();
+  });
+
   it("observes immediately when telemetry is enabled", async () => {
     initOtel({ MARCH_OTEL: "1", MARCH_OTEL_ENDPOINT: "http://localhost:4318" });
     const gw = recordingGateway();
