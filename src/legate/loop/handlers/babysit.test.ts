@@ -151,6 +151,44 @@ describe("babysit assess", () => {
     expect(kindsOf(assess(state))).toEqual(["pr-snapshot", "comment-fix"]);
   });
 
+  it("escalates a parked steward that ignored a comment-fix as steward-stuck", () => {
+    const state = loopState({
+      slices: {
+        s: {
+          worker_session_id: "w",
+          stage: "pr-in-fix",
+          pr: { number: 5 },
+          pr_open_at: T_30M_AGO,
+          last_processor_action: "comment-fix",
+          last_processor_action_at: T_30M_AGO, // 30min ago > grace
+          comment_fix_head_sha: "abc",
+        },
+      },
+      sessions: [session("w", "waiting")], // parked
+      perSlice: {
+        s: {
+          recentOutput: { output: "" },
+          // :eyes:'d comment + head unchanged since dispatch → steward did nothing.
+          pr: { number: 5, state: "OPEN", mergeable: "MERGEABLE", checks: "PASS", needs_response_count: 0, head_sha: "abc", conversation_comments: [{ id: 11, reacted_eyes: true }] },
+        },
+      },
+    });
+    expect(kindsOf(assess(state))).toEqual(["pr-snapshot", "steward-stuck"]);
+  });
+
+  it("holds a steward-stuck slice (no further action) until a push, then unsticks", () => {
+    const base = (head: string) =>
+      loopState({
+        slices: { s: { worker_session_id: "w", stage: "escalated", steward_stuck_at: T_30M_AGO, steward_stuck_head_sha: "abc", pr: { number: 5 } } },
+        sessions: [session("w", "waiting")],
+        perSlice: { s: { recentOutput: { output: "" }, pr: { number: 5, state: "OPEN", checks: "PASS", needs_response_count: 0, head_sha: head } } },
+      });
+    // Head unchanged → latched, no decisions (besides the snapshot).
+    expect(kindsOf(assess(base("abc")))).toEqual(["pr-snapshot"]);
+    // Head advanced (steward pushed) → unstick.
+    expect(kindsOf(assess(base("def")))).toContain("steward-unstuck");
+  });
+
   it("does NOT re-dispatch a conversation comment already acknowledged (:eyes:) or already dispatched (seen-set)", async () => {
     const mkState = (over: any) =>
       loopState({
@@ -478,6 +516,35 @@ describe("babysit apply", () => {
     expect(slice.stage).toBe("pr-in-fix");
     expect(slice.comment_fix_seen_comment_ids).toEqual(["11"]);
     expect(res.actions[0]).toMatchObject({ action: "comment-fix" });
+  });
+
+  it("steward-stuck apply escalates the slice (visible) AND fires a judgement request", async () => {
+    const slice: any = { worker_session_id: "w", stage: "pr-in-fix", pr: { number: 5 } };
+    const state = loopState({ slices: { s: slice } });
+    const c = ctx();
+    const res = await apply(
+      [{ kind: "steward-stuck", sliceId: "s", sessionId: "w", pr: { number: 5, head_sha: "abc" }, requestKey: "rk", reason: "steward_unresponsive_after_comment_fix", detail: "parked, no push" }],
+      c,
+      state,
+      deps(),
+    );
+    expect(slice.stage).toBe("escalated");
+    expect(slice.escalated_reason).toBe("steward_stuck");
+    expect(slice.steward_stuck_at).toBe(NOW);
+    expect(slice.steward_stuck_head_sha).toBe("abc");
+    expect(res.requests).toHaveLength(1); // judgement request still fired (for the future legate-agent)
+    expect(res.actions[0]).toMatchObject({ action: "steward-stuck" });
+    expect(c.emitTransition).toHaveBeenCalledWith({ type: "slice.escalated", sliceId: "s", reason: "steward_stuck" });
+  });
+
+  it("steward-unstuck apply clears the escalation back to pr-open", async () => {
+    const slice: any = { worker_session_id: "w", stage: "escalated", escalated_reason: "steward_stuck", steward_stuck_at: NOW, steward_stuck_head_sha: "abc", pr: { number: 5 } };
+    const state = loopState({ slices: { s: slice } });
+    const res = await apply([{ kind: "steward-unstuck", sliceId: "s", sessionId: "w", pr: { number: 5 } }], ctx(), state, deps());
+    expect(slice.stage).toBe("pr-open");
+    expect(slice.steward_stuck_at).toBeUndefined();
+    expect(slice.escalated_reason).toBeUndefined();
+    expect(res.actions[0]).toMatchObject({ action: "steward-unstuck" });
   });
 
   it("review-fix that fails to send escalates instead of advancing stage", async () => {

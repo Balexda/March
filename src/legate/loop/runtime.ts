@@ -143,8 +143,10 @@ export function configureLoopRuntime(opts: {
 }
 
 export interface LoopSnapshot {
-  /** Per-profile latest heartbeat record. */
-  readonly byProfile: Record<string, { lastHeartbeat: any }>;
+  /** Per-profile latest heartbeat record + live working state (the in-memory
+   *  `raw` for that profile, whose `slices` carry per-slice stage/PR/escalation —
+   *  the source for the /escalations interrogation endpoint). */
+  readonly byProfile: Record<string, { lastHeartbeat: any; workingState: any }>;
   readonly profiles: string[];
   readonly lastTickAtMs: number;
   readonly lastTickDurationMs: number;
@@ -152,10 +154,10 @@ export interface LoopSnapshot {
   readonly lastHeartbeat: any;
 }
 
-/** Latest tick snapshot, consumed by the HTTP /status endpoint. */
+/** Latest tick snapshot, consumed by the HTTP /status + /escalations endpoints. */
 export function getLoopSnapshot(): LoopSnapshot {
-  const byProfile: Record<string, { lastHeartbeat: any }> = {};
-  for (const [profile, rt] of runtimes) byProfile[profile] = { lastHeartbeat: rt.lastHeartbeat };
+  const byProfile: Record<string, { lastHeartbeat: any; workingState: any }> = {};
+  for (const [profile, rt] of runtimes) byProfile[profile] = { lastHeartbeat: rt.lastHeartbeat, workingState: rt.workingState };
   const profiles = Object.keys(byProfile);
   return {
     byProfile,

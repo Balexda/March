@@ -43,6 +43,13 @@ const STRANDED = { initialNudgeMs: 10 * 60 * 1000, repeatNudgeMs: 5 * 60 * 1000,
 // 5min, every 5min, escalating after 3 unanswered re-nudges (~15min).
 const POST_DISPATCH = { initialNudgeMs: 5 * 60 * 1000, repeatNudgeMs: 5 * 60 * 1000, escalateAfterNudges: 3 };
 
+// Steward-stuck grace (#non-thread-comments): how long after a comment-fix dispatch
+// a steward may sit parked (waiting/idle) without pushing before the slice is
+// escalated as "steward stuck" — visible in the work-status dashboard + the
+// /escalations endpoint. The legate-agent/human path that would otherwise drive a
+// parked steward isn't built yet, so surfacing it is the resolution lever.
+const STEWARD_STUCK_GRACE_MIN = 5;
+
 // Review-fix safety cap (#224): the most DISTINCT /smithy.fix rounds the loop
 // will dispatch for a single review thread. A round = one dispatch that included
 // a genuinely new (unseen) comment on that thread. A thread that won't clear
@@ -143,6 +150,8 @@ export type BabysitDecision =
   | { kind: "review-fix"; sliceId: string; sessionId: string; pr: any; key: string; message: string; detail: string; threadIds: string[]; commentIds: string[] }
   | { kind: "review-fix-exhausted"; sliceId: string; sessionId: string; pr: any; requestKey: string; reason: string; detail: string; commentIds: string[] }
   | { kind: "comment-fix"; sliceId: string; sessionId: string; pr: any; key: string; message: string; detail: string; commentIds: string[] }
+  | { kind: "steward-stuck"; sliceId: string; sessionId: string; pr: any; requestKey: string; reason: string; detail: string }
+  | { kind: "steward-unstuck"; sliceId: string; sessionId: string; pr: any }
   | { kind: "ci-fix"; sliceId: string; sessionId: string; pr: any; key: string; message: string; detail: string }
   | { kind: "ci-failure"; sliceId: string; sessionId: string; pr: any; requestKey: string; detail: string }
   | { kind: "pr-open-clear"; sliceId: string; sessionId: string; pr: any }
@@ -378,6 +387,23 @@ function evaluatePr(
     return;
   }
 
+  // Steward-stuck latch (#non-thread-comments): once a slice is escalated as
+  // "steward stuck", hold the escalation — take no further babysit action — until
+  // the steward demonstrably acts: a PUSH (head SHA advanced past the escalation
+  // point) is the concrete evidence it responded. This keeps the slice visible and
+  // stable on the dashboard instead of being re-poked, without prematurely clearing
+  // on an ambiguous status flip; the push clears it (steward-unstuck) and normal
+  // handling resumes. (A merge/close still archives it via cleanup regardless.)
+  if (slice.steward_stuck_at) {
+    const advanced = !!pr.head_sha && !!slice.steward_stuck_head_sha && pr.head_sha !== slice.steward_stuck_head_sha;
+    if (advanced) {
+      out.push({ kind: "steward-unstuck", sliceId, sessionId, pr });
+      // fall through — the steward pushed, so resume normal babysit handling.
+    } else {
+      return;
+    }
+  }
+
   // Evaluate threads/stage as the worker would see them post-discovery.
   const evalSlice = discovered ? { ...slice, stage: "pr-open", pr_open_at: ts } : slice;
 
@@ -601,8 +627,34 @@ function evaluatePr(
       return;
     }
     // Every unacked comment is already in the seen-set (we dispatched for it; the
-    // :eyes: write may have lagged). Nothing new to send — fall through to the merge
-    // gate so a comment we already handled can't wedge the PR open indefinitely.
+    // :eyes: write may have lagged). Nothing new to send — fall through to the
+    // steward-stuck check / merge gate below.
+  }
+
+  // Steward-stuck detection (#non-thread-comments): we dispatched a comment-fix but
+  // the steward parked (waiting/idle) and has NOT pushed since (head SHA unchanged)
+  // for longer than the grace window. Since the legate-agent/human path that would
+  // drive it isn't built yet, escalate the slice as "steward stuck" so the operator
+  // sees it on the work-status dashboard + the /escalations endpoint, instead of
+  // silently treating the comment as handled.
+  if (
+    !slice.steward_stuck_at &&
+    slice.last_processor_action === "comment-fix" &&
+    (workerStatus === "waiting" || workerStatus === "idle") &&
+    !!pr.head_sha &&
+    pr.head_sha === slice.comment_fix_head_sha &&
+    minutesSince(ts, slice.last_processor_action_at) >= STEWARD_STUCK_GRACE_MIN
+  ) {
+    out.push({
+      kind: "steward-stuck",
+      sliceId,
+      sessionId,
+      pr,
+      requestKey: actionKey("steward-stuck", pr),
+      reason: "steward_unresponsive_after_comment_fix",
+      detail: `PR #${pr.number}: the steward was sent /smithy.fix for a reviewer conversation comment ${minutesSince(ts, slice.last_processor_action_at)}min ago but is parked (${workerStatus}) with no push since. The legate-agent/human path to drive it isn't built yet, so it is escalated for manual resolution.`,
+    });
+    return;
   }
 
   if (pr.checks === "PASS" && pr.needs_response_count === 0 && pr.mergeable !== "CONFLICTING") {
@@ -820,7 +872,20 @@ export async function apply(decisions: BabysitDecision[], ctx: HandlerContext, s
         break;
       }
       case "nudge-exhausted":
+        // A steward stayed parked after we re-nudged a conflict/review/CI fix — the
+        // same "steward stuck" condition as the comment-fix path. Surface it as
+        // escalated (steward stuck) on the dashboard + /escalations (latched), not
+        // just an invisible judgement request to the not-yet-built legate-agent.
+        slice.stage = "escalated";
+        slice.escalated_reason = "steward_stuck";
+        slice.steward_stuck_at = ts;
+        slice.steward_stuck_head_sha = d.pr?.head_sha ?? null;
+        slice.last_action = ts;
+        slice.last_action_note = d.detail;
+        ctx.emitTransition?.({ type: "slice.escalated", sliceId: d.sliceId, reason: "steward_stuck" });
         await fireRequest({ ts, slice, requestKey: d.requestKey, sliceId: d.sliceId, sessionId: d.sessionId, pr: d.pr, reason: d.reason, detail: d.detail });
+        res.actions.push({ action: "steward-stuck", sliceId: d.sliceId, sessionId: d.sessionId, pr: d.pr, detail: d.detail });
+        res.mutated = true;
         break;
       case "review-fix": {
         try {
@@ -868,9 +933,45 @@ export async function apply(decisions: BabysitDecision[], ctx: HandlerContext, s
             ),
           );
         }
+        // Record the head SHA at dispatch so the steward-stuck check can tell a
+        // parked-and-did-nothing steward (head unchanged) from one that pushed a fix.
+        slice.comment_fix_head_sha = d.pr?.head_sha ?? null;
         mark(slice, "comment-fix", d.key, "processor sent conversation-comment /smithy.fix", ts);
         ctx.emitTransition?.({ type: "slice.stage.changed", sliceId: d.sliceId, stage: "pr-in-fix" });
         res.actions.push({ action: "comment-fix", sliceId: d.sliceId, sessionId: d.sessionId, pr: d.pr, detail: d.detail });
+        res.mutated = true;
+        break;
+      }
+      case "steward-stuck": {
+        // Surface a parked, unresponsive steward as escalated (steward stuck) so it
+        // shows on the work-status dashboard (slices{stage=escalated} +
+        // escalated_by_reason{steward_stuck}) and the /escalations endpoint. Latched
+        // via steward_stuck_at; ALSO fire the judgement request for when the
+        // legate-agent path exists. Record the head SHA so a later push un-sticks it.
+        slice.stage = "escalated";
+        slice.escalated_reason = "steward_stuck";
+        slice.steward_stuck_at = ts;
+        slice.steward_stuck_head_sha = d.pr?.head_sha ?? null;
+        slice.last_action = ts;
+        slice.last_action_note = d.detail;
+        ctx.emitTransition?.({ type: "slice.escalated", sliceId: d.sliceId, reason: "steward_stuck" });
+        await fireRequest({ ts, slice, requestKey: d.requestKey, sliceId: d.sliceId, sessionId: d.sessionId, pr: d.pr, reason: d.reason, detail: d.detail });
+        res.actions.push({ action: "steward-stuck", sliceId: d.sliceId, sessionId: d.sessionId, pr: d.pr, detail: d.detail });
+        res.mutated = true;
+        break;
+      }
+      case "steward-unstuck": {
+        // The steward resumed (running) or pushed — clear the steward-stuck
+        // escalation and return the slice to pr-open so normal babysit handling
+        // (re-observe, merge gate) resumes.
+        delete slice.steward_stuck_at;
+        delete slice.steward_stuck_head_sha;
+        slice.escalated_reason = undefined;
+        slice.stage = "pr-open";
+        slice.last_action = ts;
+        slice.last_action_note = "steward resumed — cleared steward-stuck escalation";
+        ctx.emitTransition?.({ type: "slice.stage.changed", sliceId: d.sliceId, stage: "pr-open" });
+        res.actions.push({ action: "steward-unstuck", sliceId: d.sliceId, sessionId: d.sessionId, pr: d.pr, detail: "steward resumed" });
         res.mutated = true;
         break;
       }

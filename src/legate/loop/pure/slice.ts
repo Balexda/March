@@ -346,6 +346,11 @@ export const ESCALATION_REASONS = [
   "needs_human",
   "needs_human_judgement",
   "real_spawn_error",
+  // A steward was dispatched a fix (comment / review / conflict / CI) but parked
+  // (waiting/idle) without acting — and the legate-agent/human path that would
+  // drive it isn't built yet, so we surface it as escalated rather than silently
+  // dropping it. Operator-resolvable; not auto-recoverable (#non-thread-comments).
+  "steward_stuck",
 ] as const;
 
 /** Catch-all bucket for any escalation reason outside {@link ESCALATION_REASONS}. */

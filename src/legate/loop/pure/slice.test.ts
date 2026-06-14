@@ -304,6 +304,7 @@ describe("slice pure helpers", () => {
         needs_human: 0,
         needs_human_judgement: 0,
         real_spawn_error: 0,
+        steward_stuck: 0,
         other: 0,
       },
       prBlocker: {

@@ -68,6 +68,60 @@ export function buildStatus(ctx: LoopHttpContext, profile?: string): Record<stri
   return { ok: true, profiles: snap.profiles, by_profile: byProfile };
 }
 
+/** One escalated task in the /escalations interrogation payload. */
+export interface EscalationEntry {
+  /** The task — the slice id (encodes the smithy artifact/feature/slice). */
+  task: string;
+  /** The slice's PR branch, when known. */
+  branch: string | null;
+  /** The PR associated with the task (number + url), or null if none observed yet. */
+  pr: { number: number | null; url: string | null } | null;
+  /** Why it's escalated (the bounded `escalated_reason`, e.g. `steward_stuck`). */
+  reason: string | null;
+  /** Human-readable escalation detail (the last action note). */
+  detail: string | null;
+  /** When it entered the escalation (best-effort: steward-stuck stamp or last action). */
+  escalated_at: string | null;
+}
+
+/** Extract the escalated slices from a profile's working state (pure; testable). */
+export function escalationsForWorkingState(workingState: any): EscalationEntry[] {
+  const slices = workingState?.slices;
+  if (!slices || typeof slices !== "object") return [];
+  const out: EscalationEntry[] = [];
+  for (const [sliceId, s] of Object.entries(slices as Record<string, any>)) {
+    if (!s || typeof s !== "object" || s.stage !== "escalated") continue;
+    const pr = s.pr;
+    out.push({
+      task: sliceId,
+      branch: s.actual_branch ?? s.branch ?? null,
+      pr: pr && (pr.number != null || pr.url != null) ? { number: pr.number ?? null, url: pr.url ?? null } : null,
+      reason: typeof s.escalated_reason === "string" ? s.escalated_reason : null,
+      detail: typeof s.last_action_note === "string" ? s.last_action_note : null,
+      escalated_at: s.steward_stuck_at ?? s.last_action ?? null,
+    });
+  }
+  return out;
+}
+
+/** Build the /escalations payload. With `profile`, that profile's escalated tasks;
+ *  else every profile's, keyed by profile. */
+export function buildEscalations(ctx: LoopHttpContext, profile?: string): Record<string, unknown> {
+  const snap = ctx.getSnapshot();
+  if (profile) {
+    const entry = snap.byProfile[profile];
+    if (!entry) return { ok: false, error: `unknown profile "${profile}".`, profiles: snap.profiles };
+    const escalations = escalationsForWorkingState(entry.workingState);
+    return { ok: true, profile, count: escalations.length, escalations };
+  }
+  const byProfile: Record<string, unknown> = {};
+  for (const p of snap.profiles) {
+    const escalations = escalationsForWorkingState(snap.byProfile[p].workingState);
+    byProfile[p] = { count: escalations.length, escalations };
+  }
+  return { ok: true, profiles: snap.profiles, by_profile: byProfile };
+}
+
 /** Build the Fastify app with the loop routes registered. Exported for tests (inject). */
 export function buildLoopServer(ctx: LoopHttpContext): FastifyInstance {
   const app = Fastify({ logger: false });
@@ -84,6 +138,17 @@ export function buildLoopServer(ctx: LoopHttpContext): FastifyInstance {
     const profile =
       typeof query.profile === "string" && query.profile.length > 0 ? query.profile : undefined;
     return buildStatus(ctx, profile);
+  });
+
+  // Interrogation endpoint: list escalated tasks (what the task is, the PR, the
+  // escalation details) for a profile — the operator's view of work that needs
+  // manual resolution (e.g. steward_stuck) now that the legate-agent path isn't
+  // built. `?profile=<p>` for one profile; bare for all.
+  app.get("/escalations", async (request) => {
+    const query = (request.query ?? {}) as Record<string, string | undefined>;
+    const profile =
+      typeof query.profile === "string" && query.profile.length > 0 ? query.profile : undefined;
+    return buildEscalations(ctx, profile);
   });
 
   return app;

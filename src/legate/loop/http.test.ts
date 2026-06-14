@@ -2,7 +2,7 @@
  * @l1 @deterministic @ci
  */
 import { describe, expect, it } from "vitest";
-import { buildLoopServer, buildStatus, type LoopHttpContext } from "./http.js";
+import { buildEscalations, buildLoopServer, buildStatus, escalationsForWorkingState, type LoopHttpContext } from "./http.js";
 import type { LoopSnapshot } from "./runtime.js";
 
 const heartbeat = {
@@ -26,7 +26,7 @@ const heartbeat = {
 };
 
 function snapshot(over: Partial<LoopSnapshot> = {}): LoopSnapshot {
-  const byProfile = over.byProfile ?? { smithy: { lastHeartbeat: heartbeat } };
+  const byProfile = over.byProfile ?? { smithy: { lastHeartbeat: heartbeat, workingState: { slices: {} } } };
   return {
     byProfile,
     profiles: over.profiles ?? Object.keys(byProfile),
@@ -67,7 +67,7 @@ describe("loop http (fastify)", () => {
 
   it("returns safe defaults before the first tick", () => {
     const status = buildStatus(
-      ctxWith(snapshot({ byProfile: { smithy: { lastHeartbeat: null } }, lastTickAtMs: 0, lastTickDurationMs: 0 })),
+      ctxWith(snapshot({ byProfile: { smithy: { lastHeartbeat: null, workingState: null } }, lastTickAtMs: 0, lastTickDurationMs: 0 })),
       "smithy",
     );
     expect(status).toMatchObject({
@@ -94,6 +94,68 @@ describe("loop http (fastify)", () => {
 
       const wrongMethod = await app.inject({ method: "POST", url: "/status" });
       expect(wrongMethod.statusCode).toBe(404);
+    } finally {
+      await app.close();
+    }
+  });
+});
+
+const escalatedWorkingState = {
+  slices: {
+    "spec-re-read-us1-s2-forge": {
+      stage: "escalated",
+      escalated_reason: "steward_stuck",
+      branch: "feature/smithy/forge/x",
+      actual_branch: "feature/smithy/forge/x",
+      pr: { number: 457, url: "https://github.com/Balexda/SmithyCLI/pull/457" },
+      last_action_note: "PR #457: steward parked after /smithy.fix; no push — escalated.",
+      steward_stuck_at: "2026-06-14T08:00:00.000Z",
+    },
+    "healthy-us1-s1-forge": { stage: "pr-open", pr: { number: 99 } }, // not escalated → excluded
+  },
+};
+
+describe("escalationsForWorkingState (pure)", () => {
+  it("returns only escalated slices with task / PR / details", () => {
+    expect(escalationsForWorkingState(escalatedWorkingState)).toEqual([
+      {
+        task: "spec-re-read-us1-s2-forge",
+        branch: "feature/smithy/forge/x",
+        pr: { number: 457, url: "https://github.com/Balexda/SmithyCLI/pull/457" },
+        reason: "steward_stuck",
+        detail: "PR #457: steward parked after /smithy.fix; no push — escalated.",
+        escalated_at: "2026-06-14T08:00:00.000Z",
+      },
+    ]);
+  });
+
+  it("is safe on a null/empty working state (cold start)", () => {
+    expect(escalationsForWorkingState(null)).toEqual([]);
+    expect(escalationsForWorkingState({ slices: {} })).toEqual([]);
+  });
+});
+
+describe("buildEscalations + /escalations route", () => {
+  const snap = snapshot({ byProfile: { smithy: { lastHeartbeat: heartbeat, workingState: escalatedWorkingState } } });
+
+  it("lists a profile's escalated tasks", () => {
+    const out = buildEscalations(ctxWith(snap), "smithy") as any;
+    expect(out.ok).toBe(true);
+    expect(out.count).toBe(1);
+    expect(out.escalations[0]).toMatchObject({ task: "spec-re-read-us1-s2-forge", reason: "steward_stuck", pr: { number: 457 } });
+  });
+
+  it("unknown profile reports not-ok with the known list", () => {
+    expect(buildEscalations(ctxWith(snap), "ghost")).toMatchObject({ ok: false, profiles: ["smithy"] });
+  });
+
+  it("serves GET /escalations?profile=", async () => {
+    const app = buildLoopServer(ctxWith(snap));
+    try {
+      const res = await app.inject({ method: "GET", url: "/escalations?profile=smithy" });
+      expect(res.statusCode).toBe(200);
+      expect(res.json().count).toBe(1);
+      expect(res.json().escalations[0].pr.number).toBe(457);
     } finally {
       await app.close();
     }
