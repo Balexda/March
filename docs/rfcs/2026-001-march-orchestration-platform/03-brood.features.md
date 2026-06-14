@@ -123,7 +123,7 @@ Recommended specification sequence:
 
 | ID | Title | Depends On | Artifact |
 |----|-------|-----------|----------|
-| F1 | Brood Session Index | — | — |
+| F1 | Brood Session Index | — | `specs/2026-06-13-011-brood-session-index` |
 | F2 | Brood CLI Read Surface | F1 | — |
 | F3 | Lifecycle Teardown | F1 | — |
 | F4 | Concurrent Dispatch Audit | F1 | — |
