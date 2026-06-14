@@ -1,3 +1,25 @@
+// Spawn Output Extraction — Feature 5, User Story 1 / Slice 1 (the capture
+// boundary). Spec: specs/2026-05-21-005-spawn-output-extraction/.
+//
+// SCOPE / WIRING: this module is intentionally a pure, service-free boundary
+// and is NOT yet wired into the live dispatch path. Production patch capture
+// today is the deterministic git-commit harness, NOT this module: the spawn
+// container scaffolds its own git and emits a `__MARCH_PATCH_B64__` sentinel
+// (`composeGitScaffoldedEntrypoint`, src/spawn/backends.ts), which Hatchery
+// reads + applies via `extractPatchFromSpawnOutput` /
+// `applyPatchToManagerWorktree` (src/hatchery/spawn-handoff.ts). That sentinel
+// path exists *because* scraping the agent's JSON stdout for patch bytes
+// truncated large patches ("corrupt patch" bug); patch bytes must keep coming
+// from the git diff, not from re-parsed JSON.
+//
+// INTENDED INTEGRATION (pending maintainer reconciliation — see PR #344): the
+// later slices add an `OutputSource` adapter for `"container"` that wraps the
+// existing container-log read, capturing the backend JSON *envelope* for
+// validation (US2), a persisted backend-neutral result (US3), and the Steward
+// handoff (US4) — summary/metadata/diagnostics, while the deterministic
+// sentinel diff remains the source of truth for the patch itself. The exact
+// division of labor between this envelope and the sentinel harness is the open
+// question raised on PR #344 and is not settled by this slice.
 export type SpawnOutputSourceLabel =
   | "container"
   | "castra-session"
