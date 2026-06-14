@@ -3,7 +3,7 @@ import { emptyHandlerResult } from "../state/types.js";
 import { prNumber, workerBySessionId } from "../pure/session.js";
 import { hashText } from "../pure/hash.js";
 import { resolveMergeRequirements, type MergePolicy } from "../../../herald/profiles/merge-policy.js";
-import { mergeReadiness, taskTypeForSlice } from "../pure/slice.js";
+import { mergeBlocker, mergeReadiness, taskTypeForSlice } from "../pure/slice.js";
 import {
   ciFixMessage,
   commentFixMessage,
@@ -662,6 +662,11 @@ function snapshot(slice: any, pr: any, sliceId: string, mergePolicy: MergePolicy
   // uses. The summary tallies this stamp instead of recomputing from the
   // possibly-stale persisted slice.pr (#stack-observability).
   slice.merge_gate = mergeReadiness(sliceId, slice, pr, mergePolicy);
+  // Stamp the complementary merge-BLOCKER (conflicting / owes_review_threads /
+  // owes_comments / ci_failing / none) — the not-ready reasons the 3-way gauge
+  // collapses away. summarizeSlicesByStage tallies this stamp into the pr_blocker
+  // gauge (#non-thread-comments observability).
+  slice.pr_blocker = mergeBlocker(slice, pr);
 }
 
 /** Fold handled comment ids into the review-fix dedup set, union-merged so a

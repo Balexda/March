@@ -157,6 +157,18 @@ export function buildLoopTickActivity(record: any, ctx: HeartbeatMetricsContext)
       if (typeof count === "number") escalatedByReason[reason] = count;
     }
   }
+  const prBlocker: Record<string, number> = {};
+  if (record.pr_blocker_counts && typeof record.pr_blocker_counts === "object") {
+    for (const [reason, count] of Object.entries(record.pr_blocker_counts)) {
+      if (typeof count === "number") prBlocker[reason] = count;
+    }
+  }
+  const babysitActionsByKind: Record<string, number> = {};
+  if (record.babysit_actions_by_kind && typeof record.babysit_actions_by_kind === "object") {
+    for (const [kind, count] of Object.entries(record.babysit_actions_by_kind)) {
+      if (typeof count === "number") babysitActionsByKind[kind] = count;
+    }
+  }
   const snapshot: LoopMetricsSnapshot = {
     profile: ctx.profile || "unknown",
     conductor: ctx.conductor || "unknown",
@@ -172,10 +184,12 @@ export function buildLoopTickActivity(record: any, ctx: HeartbeatMetricsContext)
     waitingOnApproval: record.waiting_on_approval_count ?? 0,
     blockedOnMergeState: record.blocked_on_merge_state_count ?? 0,
     escalatedByReason,
+    prBlocker,
   };
   return {
     snapshot,
     tickDurationSeconds: ctx.durationMs / 1000,
+    babysitActionsByKind,
     dispatchActions: record.dispatch_action_count ?? 0,
     dispatchFailures: record.dispatch_failure_count ?? 0,
     cleanups: record.cleanup_count ?? 0,
