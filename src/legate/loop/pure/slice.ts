@@ -461,7 +461,13 @@ export function mergeReadiness(
   const approvalOk = !req.approval || Number(src.human_approval_count ?? 0) >= 1;
   const crOk = !req.changesRequested || Number(src.changes_requested_count ?? 0) === 0;
   if (!approvalOk || !crOk) return "waiting-approval";
-  return String(src.merge_state_status || "").toLowerCase() === "clean" ? "ready" : "blocked-merge-state";
+  // A missing/empty merge_state_status (sense-io maps absent → null; also the
+  // case for a cold-start thin slice.pr) is UNKNOWN, not a stall — classify it
+  // not-ready so a partial/restarted observation can't raise a false
+  // blocked-merge-state alarm. Only a present, non-"clean" value is a real stall.
+  const mergeState = src.merge_state_status;
+  if (mergeState == null || mergeState === "") return "not-ready";
+  return String(mergeState).toLowerCase() === "clean" ? "ready" : "blocked-merge-state";
 }
 
 /**

@@ -223,8 +223,13 @@ describe("slice pure helpers", () => {
     // Policy drops approval for `cut` + clean merge state → ready (loop merges).
     const policy = { byTaskType: { cut: { approval: false } } } as any;
     expect(mergeReadiness("x-cut", slice, clearPr, policy)).toBe("ready");
-    // Approval relaxed but GitHub merge-state not clean → blocked-merge-state.
+    // Approval relaxed but GitHub merge-state present and not clean → blocked-merge-state.
     expect(mergeReadiness("x-cut", slice, { ...clearPr, merge_state_status: "BEHIND" }, policy)).toBe("blocked-merge-state");
+    // A MISSING/null/empty merge-state (sense-io null, or a cold-start thin pr) is
+    // UNKNOWN, not a stall → not-ready (no false blocked-merge-state alarm).
+    expect(mergeReadiness("x-cut", slice, { ...clearPr, merge_state_status: null }, policy)).toBe("not-ready");
+    expect(mergeReadiness("x-cut", slice, { ...clearPr, merge_state_status: "" }, policy)).toBe("not-ready");
+    expect(mergeReadiness("x-cut", slice, { checks: "PASS", mergeable: "MERGEABLE", needs_response_count: 0 }, policy)).toBe("not-ready");
     // A changes-requested review blocks on the human gate even when approval is relaxed.
     expect(mergeReadiness("x-cut", slice, { ...clearPr, changes_requested_count: 1 }, policy)).toBe("waiting-approval");
     // Not all-clear (failing checks / threads owed / wrong stage) → not-ready.
