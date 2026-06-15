@@ -143,8 +143,10 @@ export function configureLoopRuntime(opts: {
 }
 
 export interface LoopSnapshot {
-  /** Per-profile latest heartbeat record. */
-  readonly byProfile: Record<string, { lastHeartbeat: any }>;
+  /** Per-profile latest heartbeat record + live working state (the in-memory
+   *  `raw` for that profile, whose `slices` carry per-slice stage/PR/escalation —
+   *  the source for the /escalations interrogation endpoint). */
+  readonly byProfile: Record<string, { lastHeartbeat: any; workingState: any }>;
   readonly profiles: string[];
   readonly lastTickAtMs: number;
   readonly lastTickDurationMs: number;
@@ -152,10 +154,10 @@ export interface LoopSnapshot {
   readonly lastHeartbeat: any;
 }
 
-/** Latest tick snapshot, consumed by the HTTP /status endpoint. */
+/** Latest tick snapshot, consumed by the HTTP /status + /escalations endpoints. */
 export function getLoopSnapshot(): LoopSnapshot {
-  const byProfile: Record<string, { lastHeartbeat: any }> = {};
-  for (const [profile, rt] of runtimes) byProfile[profile] = { lastHeartbeat: rt.lastHeartbeat };
+  const byProfile: Record<string, { lastHeartbeat: any; workingState: any }> = {};
+  for (const [profile, rt] of runtimes) byProfile[profile] = { lastHeartbeat: rt.lastHeartbeat, workingState: rt.workingState };
   const profiles = Object.keys(byProfile);
   return {
     byProfile,
@@ -225,6 +227,27 @@ async function squashMergePr(input: { prNumber: number | string; headSha: string
   } catch (err: any) {
     return { merged: false, error: err?.message || String(err) };
   }
+}
+
+/**
+ * Post a reaction to a PR conversation (issue) comment — the babysit `:eyes:`
+ * acknowledgement on a dispatched comment-fix. `gh api` substitutes `{owner}`/
+ * `{repo}` from the repo checkout's remote, so running in the profile's repoPath
+ * needs no owner resolution. Best-effort: babysit treats the persisted comment-id
+ * set as authoritative, so a failure here is swallowed by the caller.
+ */
+async function reactToCommentGh(input: { commentId: string | number; content: string; repoPath?: string }): Promise<void> {
+  const args = [
+    "api",
+    "--method",
+    "POST",
+    `repos/{owner}/{repo}/issues/comments/${input.commentId}/reactions`,
+    "-f",
+    `content=${input.content}`,
+  ];
+  const options: { cwd?: string } = {};
+  if (input.repoPath) options.cwd = input.repoPath;
+  await execText("gh", args, options);
 }
 
 async function sendDoorbellToLegate(meta: any) {
@@ -345,6 +368,8 @@ async function tickProfile(rt: ProfileRuntime, spawnBudget?: SpawnBudget): Promi
     requestJudgement: (input: any) => requestLegateJudgement(meta, input),
     mergePr: (input: { prNumber: number | string; headSha: string; repoPath?: string }) =>
       squashMergePr(input),
+    reactToComment: (input: { commentId: string | number; content: string; repoPath?: string }) =>
+      reactToCommentGh(input),
   };
 
   const ioDeps = dispatchIoDeps(meta);

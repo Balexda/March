@@ -129,6 +129,119 @@ describe("babysit assess", () => {
     expect(kindsOf(assess(state))).toEqual(["pr-snapshot", "review-fix"]);
   });
 
+  it("sends comment-fix for an unacknowledged conversation (non-thread) comment", async () => {
+    const state = loopState({
+      slices: { s: { worker_session_id: "w", stage: "pr-open", pr: { number: 5 }, pr_open_at: T_30M_AGO } },
+      sessions: [session("w", "idle")],
+      perSlice: {
+        s: {
+          recentOutput: { output: "" },
+          pr: {
+            number: 5,
+            state: "OPEN",
+            mergeable: "MERGEABLE",
+            checks: "PASS",
+            unresolved_threads: [],
+            needs_response_count: 0,
+            conversation_comments: [{ id: 11, author: "rev", body_preview: "please reconsider the spec", reacted_eyes: false }],
+          },
+        },
+      },
+    });
+    expect(kindsOf(assess(state))).toEqual(["pr-snapshot", "comment-fix"]);
+  });
+
+  it("escalates a steward whose SELF-REPORT says awaiting_input (from the fold, not a scrape)", () => {
+    const state = loopState({
+      slices: { s: { worker_session_id: "w", stage: "pr-open", pr: { number: 346 } } },
+      sessions: [session("w", "waiting")],
+      perSlice: { s: { stewardReport: { status: "awaiting_input", summary: "How should I resolve the reviewer's concern?", classified: true }, pr: { number: 346, state: "OPEN", checks: "PASS" } } },
+    });
+    // Detection short-circuits before PR logic → no pr-snapshot, just the escalation.
+    expect(kindsOf(assess(state))).toEqual(["steward-awaiting-input"]);
+  });
+
+  it("does NOT escalate a steward whose self-report is a non-awaiting state (working)", () => {
+    const state = loopState({
+      slices: { s: { worker_session_id: "w", stage: "pr-open", pr: { number: 346 }, pr_open_at: T_30M_AGO } },
+      sessions: [session("w", "waiting")],
+      perSlice: { s: { stewardReport: { status: "working", classified: true }, pr: { number: 346, state: "OPEN", checks: "PASS", needs_response_count: 0 } } },
+    });
+    expect(kindsOf(assess(state))).not.toContain("steward-awaiting-input");
+  });
+
+  it("clears the awaiting-input escalation when the steward reports a non-awaiting state", () => {
+    const state = loopState({
+      slices: { s: { worker_session_id: "w", stage: "escalated", escalated_reason: "steward_awaiting_input", steward_awaiting_input_at: T_30M_AGO, pre_awaiting_stage: "pr-open", pr: { number: 346 } } },
+      sessions: [session("w", "waiting")],
+      perSlice: { s: { stewardReport: { status: "working", classified: true }, pr: { number: 346, state: "OPEN", checks: "PASS" } } },
+    });
+    expect(kindsOf(assess(state))).toContain("steward-awaiting-clear");
+  });
+
+  it("escalates a parked steward that ignored a comment-fix as steward-stuck", () => {
+    const state = loopState({
+      slices: {
+        s: {
+          worker_session_id: "w",
+          stage: "pr-in-fix",
+          pr: { number: 5 },
+          pr_open_at: T_30M_AGO,
+          last_processor_action: "comment-fix",
+          last_processor_action_at: T_30M_AGO, // 30min ago > grace
+          comment_fix_head_sha: "abc",
+        },
+      },
+      sessions: [session("w", "waiting")], // parked
+      perSlice: {
+        s: {
+          recentOutput: { output: "" },
+          // :eyes:'d comment + head unchanged since dispatch → steward did nothing.
+          pr: { number: 5, state: "OPEN", mergeable: "MERGEABLE", checks: "PASS", needs_response_count: 0, head_sha: "abc", conversation_comments: [{ id: 11, reacted_eyes: true }] },
+        },
+      },
+    });
+    expect(kindsOf(assess(state))).toEqual(["pr-snapshot", "steward-stuck"]);
+  });
+
+  it("holds a steward-stuck slice (no further action) until a push, then unsticks", () => {
+    const base = (head: string) =>
+      loopState({
+        slices: { s: { worker_session_id: "w", stage: "escalated", steward_stuck_at: T_30M_AGO, steward_stuck_head_sha: "abc", pr: { number: 5 } } },
+        sessions: [session("w", "waiting")],
+        perSlice: { s: { recentOutput: { output: "" }, pr: { number: 5, state: "OPEN", checks: "PASS", needs_response_count: 0, head_sha: head } } },
+      });
+    // Head unchanged → latched, no decisions (besides the snapshot).
+    expect(kindsOf(assess(base("abc")))).toEqual(["pr-snapshot"]);
+    // Head advanced (steward pushed) → unstick.
+    expect(kindsOf(assess(base("def")))).toContain("steward-unstuck");
+  });
+
+  it("does NOT re-dispatch a conversation comment already acknowledged (:eyes:) or already dispatched (seen-set)", async () => {
+    const mkState = (over: any) =>
+      loopState({
+        slices: { s: { worker_session_id: "w", stage: "pr-open", pr: { number: 5 }, pr_open_at: T_30M_AGO, ...over } },
+        sessions: [session("w", "idle")],
+        perSlice: {
+          s: {
+            recentOutput: { output: "" },
+            pr: {
+              number: 5,
+              state: "OPEN",
+              mergeable: "MERGEABLE",
+              checks: "PASS",
+              needs_response_count: 0,
+              conversation_comments: [{ id: 11, author: "rev", body_preview: "x", reacted_eyes: over.reacted_eyes ?? false }],
+            },
+          },
+        },
+      });
+    // :eyes: already on the comment → filtered out by commentsNeedingResponse.
+    expect(kindsOf(assess(mkState({ reacted_eyes: true })))).toEqual(["pr-snapshot"]);
+    // Not :eyes:'d but already in the dispatched seen-set → no fresh dispatch.
+    expect(kindsOf(assess(mkState({ comment_fix_seen_comment_ids: ["11"] })))).toEqual(["pr-snapshot"]);
+  });
+
   it("dispatches a steward ci-fix on the first failing CI, before any legate judgement (#303)", async () => {
     const state = loopState({
       slices: { s: { worker_session_id: "w", stage: "pr-open", pr: { number: 5 } } },
@@ -373,6 +486,115 @@ describe("babysit apply", () => {
     const res = await apply([{ kind: "ci-failure", sliceId: "s", sessionId: "w", pr: { number: 5 }, requestKey: "rk", detail: "d" }], ctx(), state, deps());
     expect(slice.ci_fix_escalated_at).toBe(NOW);
     expect(res.requests).toHaveLength(1);
+  });
+
+  it("comment-fix sends the prompt, marks the comment seen, posts the :eyes: ack, and advances stage", async () => {
+    const slice: any = { worker_session_id: "w", stage: "pr-open", pr: { number: 5 } };
+    const state = loopState({ slices: { s: slice } });
+    const c = ctx();
+    const reactToComment = vi.fn(async () => {});
+    const d = deps({ reactToComment });
+    const res = await apply(
+      [{ kind: "comment-fix", sliceId: "s", sessionId: "w", pr: { number: 5 }, key: "k", message: "MSG", detail: "x", commentIds: ["11"] }],
+      c,
+      state,
+      d,
+    );
+    expect(d.sendMessage).toHaveBeenCalledWith("w", "MSG", "s");
+    expect(slice.stage).toBe("pr-in-fix");
+    expect(slice.comment_fix_seen_comment_ids).toEqual(["11"]);
+    expect(reactToComment).toHaveBeenCalledWith({ commentId: "11", content: "eyes", repoPath: "/repo" });
+    expect(res.actions[0]).toMatchObject({ action: "comment-fix" });
+    expect(c.emitTransition).toHaveBeenCalledWith({ type: "slice.stage.changed", sliceId: "s", stage: "pr-in-fix" });
+  });
+
+  it("comment-fix that fails to send escalates and does NOT mark the comment seen (retries next tick)", async () => {
+    const slice: any = { worker_session_id: "w", stage: "pr-open", pr: { number: 5 } };
+    const state = loopState({ slices: { s: slice } });
+    const reactToComment = vi.fn(async () => {});
+    const d = deps({
+      sendMessage: vi.fn(async () => {
+        throw new Error("down");
+      }),
+      reactToComment,
+    });
+    const res = await apply(
+      [{ kind: "comment-fix", sliceId: "s", sessionId: "w", pr: { number: 5 }, key: "k", message: "M", detail: "x", commentIds: ["11"] }],
+      ctx(),
+      state,
+      d,
+    );
+    expect(slice.stage).toBe("pr-open"); // not advanced
+    expect(slice.comment_fix_seen_comment_ids).toBeUndefined(); // not recorded → retried
+    expect(reactToComment).not.toHaveBeenCalled(); // no ack on a failed send
+    expect(res.requests).toHaveLength(1);
+    expect(res.actions).toHaveLength(0);
+  });
+
+  it("comment-fix tolerates a missing reactToComment seam (best-effort ack)", async () => {
+    const slice: any = { worker_session_id: "w", stage: "pr-open", pr: { number: 5 } };
+    const state = loopState({ slices: { s: slice } });
+    const d = deps({ reactToComment: undefined });
+    const res = await apply(
+      [{ kind: "comment-fix", sliceId: "s", sessionId: "w", pr: { number: 5 }, key: "k", message: "MSG", detail: "x", commentIds: ["11"] }],
+      ctx(),
+      state,
+      d,
+    );
+    expect(slice.stage).toBe("pr-in-fix");
+    expect(slice.comment_fix_seen_comment_ids).toEqual(["11"]);
+    expect(res.actions[0]).toMatchObject({ action: "comment-fix" });
+  });
+
+  it("steward-stuck apply escalates the slice (visible) AND fires a judgement request", async () => {
+    const slice: any = { worker_session_id: "w", stage: "pr-in-fix", pr: { number: 5 } };
+    const state = loopState({ slices: { s: slice } });
+    const c = ctx();
+    const res = await apply(
+      [{ kind: "steward-stuck", sliceId: "s", sessionId: "w", pr: { number: 5, head_sha: "abc" }, requestKey: "rk", reason: "steward_unresponsive_after_comment_fix", detail: "parked, no push" }],
+      c,
+      state,
+      deps(),
+    );
+    expect(slice.stage).toBe("escalated");
+    expect(slice.escalated_reason).toBe("steward_stuck");
+    expect(slice.steward_stuck_at).toBe(NOW);
+    expect(slice.steward_stuck_head_sha).toBe("abc");
+    expect(res.requests).toHaveLength(1); // judgement request still fired (for the future legate-agent)
+    expect(res.actions[0]).toMatchObject({ action: "steward-stuck" });
+    expect(c.emitTransition).toHaveBeenCalledWith({ type: "slice.escalated", sliceId: "s", reason: "steward_stuck" });
+  });
+
+  it("steward-unstuck apply clears the escalation back to pr-open", async () => {
+    const slice: any = { worker_session_id: "w", stage: "escalated", escalated_reason: "steward_stuck", steward_stuck_at: NOW, steward_stuck_head_sha: "abc", pr: { number: 5 } };
+    const state = loopState({ slices: { s: slice } });
+    const res = await apply([{ kind: "steward-unstuck", sliceId: "s", sessionId: "w", pr: { number: 5 } }], ctx(), state, deps());
+    expect(slice.stage).toBe("pr-open");
+    expect(slice.steward_stuck_at).toBeUndefined();
+    expect(slice.escalated_reason).toBeUndefined();
+    expect(res.actions[0]).toMatchObject({ action: "steward-unstuck" });
+  });
+
+  it("steward-awaiting-input apply escalates the slice (visible) + saves prior stage", async () => {
+    const slice: any = { worker_session_id: "w", stage: "pr-open", pr: { number: 346 } };
+    const state = loopState({ slices: { s: slice } });
+    const c = ctx();
+    const res = await apply([{ kind: "steward-awaiting-input", sliceId: "s", sessionId: "w", detail: 'awaiting: "How should I resolve…?"' }], c, state, deps());
+    expect(slice.stage).toBe("escalated");
+    expect(slice.escalated_reason).toBe("steward_awaiting_input");
+    expect(slice.steward_awaiting_input_at).toBe(NOW);
+    expect(slice.pre_awaiting_stage).toBe("pr-open");
+    expect(res.actions[0]).toMatchObject({ action: "steward-awaiting-input" });
+    expect(c.emitTransition).toHaveBeenCalledWith({ type: "slice.escalated", sliceId: "s", reason: "steward_awaiting_input" });
+  });
+
+  it("steward-awaiting-clear apply restores the prior stage", async () => {
+    const slice: any = { worker_session_id: "w", stage: "escalated", escalated_reason: "steward_awaiting_input", steward_awaiting_input_at: NOW, pre_awaiting_stage: "pr-open" };
+    const state = loopState({ slices: { s: slice } });
+    await apply([{ kind: "steward-awaiting-clear", sliceId: "s", sessionId: "w" }], ctx(), state, deps());
+    expect(slice.stage).toBe("pr-open");
+    expect(slice.steward_awaiting_input_at).toBeUndefined();
+    expect(slice.escalated_reason).toBeUndefined();
   });
 
   it("review-fix that fails to send escalates instead of advancing stage", async () => {

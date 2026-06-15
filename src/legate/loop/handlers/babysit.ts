@@ -3,9 +3,11 @@ import { emptyHandlerResult } from "../state/types.js";
 import { prNumber, workerBySessionId } from "../pure/session.js";
 import { hashText } from "../pure/hash.js";
 import { resolveMergeRequirements, type MergePolicy } from "../../../herald/profiles/merge-policy.js";
-import { mergeReadiness, taskTypeForSlice } from "../pure/slice.js";
+import { mergeBlocker, mergeReadiness, taskTypeForSlice } from "../pure/slice.js";
 import {
   ciFixMessage,
+  commentFixMessage,
+  commentsNeedingResponse,
   conflictMessage,
   failedChecksSummary,
   loginRequiredDetail,
@@ -40,6 +42,13 @@ const STRANDED = { initialNudgeMs: 10 * 60 * 1000, repeatNudgeMs: 5 * 60 * 1000,
 // prompt, a worker that parks in waiting/idle gets the message re-delivered at
 // 5min, every 5min, escalating after 3 unanswered re-nudges (~15min).
 const POST_DISPATCH = { initialNudgeMs: 5 * 60 * 1000, repeatNudgeMs: 5 * 60 * 1000, escalateAfterNudges: 3 };
+
+// Steward-stuck grace (#non-thread-comments): how long after a comment-fix dispatch
+// a steward may sit parked (waiting/idle) without pushing before the slice is
+// escalated as "steward stuck" — visible in the work-status dashboard + the
+// /escalations endpoint. The legate-agent/human path that would otherwise drive a
+// parked steward isn't built yet, so surfacing it is the resolution lever.
+const STEWARD_STUCK_GRACE_MIN = 5;
 
 // Review-fix safety cap (#224): the most DISTINCT /smithy.fix rounds the loop
 // will dispatch for a single review thread. A round = one dispatch that included
@@ -114,6 +123,13 @@ export interface BabysitDeps {
     mergeSha?: string;
     error?: string;
   }>;
+  /**
+   * React to a PR conversation comment (the :eyes: acknowledgement the legate
+   * posts when it dispatches a comment-fix). Optional + best-effort: the persisted
+   * comment-id set is the authoritative dedup, so a missing seam or a failed
+   * reaction never blocks the fix. See the `comment-fix` apply case.
+   */
+  reactToComment?: (input: { commentId: string | number; content: string; repoPath?: string }) => Promise<void>;
 }
 
 export type BabysitDecision =
@@ -133,6 +149,11 @@ export type BabysitDecision =
   | { kind: "nudge-exhausted"; sliceId: string; sessionId: string; pr: any; requestKey: string; reason: string; detail: string }
   | { kind: "review-fix"; sliceId: string; sessionId: string; pr: any; key: string; message: string; detail: string; threadIds: string[]; commentIds: string[] }
   | { kind: "review-fix-exhausted"; sliceId: string; sessionId: string; pr: any; requestKey: string; reason: string; detail: string; commentIds: string[] }
+  | { kind: "comment-fix"; sliceId: string; sessionId: string; pr: any; key: string; message: string; detail: string; commentIds: string[] }
+  | { kind: "steward-stuck"; sliceId: string; sessionId: string; pr: any; requestKey: string; reason: string; detail: string }
+  | { kind: "steward-unstuck"; sliceId: string; sessionId: string; pr: any }
+  | { kind: "steward-awaiting-input"; sliceId: string; sessionId: string; detail: string }
+  | { kind: "steward-awaiting-clear"; sliceId: string; sessionId: string }
   | { kind: "ci-fix"; sliceId: string; sessionId: string; pr: any; key: string; message: string; detail: string }
   | { kind: "ci-failure"; sliceId: string; sessionId: string; pr: any; requestKey: string; detail: string }
   | { kind: "pr-open-clear"; sliceId: string; sessionId: string; pr: any }
@@ -153,6 +174,14 @@ function workerErrorRequestKey(sessionId: string, slice: any, recent: any): stri
 function hasClaudeLoginBlock(output: any): boolean {
   const text = String(output || "");
   return text.includes("Please run /login") || text.includes("API Error: 401 Invalid authentication credentials");
+}
+
+/** A concise detail for a steward-awaiting-input escalation, from the steward's
+ *  self-reported summary (so the operator sees what it's asking). */
+function awaitingInputDetail(summary: any): string {
+  const s = String(summary || "").trim();
+  const base = "Steward is parked awaiting your response";
+  return s ? `${base}: ${s}` : `${base}. Attach to the session to see the prompt.`;
 }
 
 function alreadyDispatched(slice: any, key: string): boolean {
@@ -289,6 +318,27 @@ export function assess(state: LoopState): BabysitDecision[] {
     // 4. Clear a stale worker-error marker (bookkeeping; not terminal).
     if (slice.worker_error_last_seen_at) out.push({ kind: "clear-worker-error", sliceId });
 
+    // 4.5 Steward awaiting-user-response escalation (#steward-self-report). The
+    // signal is the steward's own SELF-REPORT folded from Herald (its hook pushes
+    // `status: awaiting_input` when it parks on a prompt) — NOT a scrape of the
+    // (stale, transcript-only) session output. Escalate so it shows on the
+    // work-status dashboard (escalated_by_reason{steward_awaiting_input}) +
+    // /escalations; latched, and cleared once the steward reports a non-awaiting
+    // state (its hook fires again) or resumes running.
+    const report = ext.stewardReport;
+    const awaitingNow = report?.status === "awaiting_input";
+    if (slice.steward_awaiting_input_at) {
+      if (workerStatus === "running" || !awaitingNow) {
+        out.push({ kind: "steward-awaiting-clear", sliceId, sessionId });
+        // fall through — steward resumed; resume normal handling below.
+      } else {
+        continue; // still awaiting — hold the escalation, take no other action.
+      }
+    } else if (awaitingNow) {
+      out.push({ kind: "steward-awaiting-input", sliceId, sessionId, detail: awaitingInputDetail(report?.summary) });
+      continue;
+    }
+
     // 5. Running workers are healthy — nothing to do.
     if (workerStatus === "running") continue;
 
@@ -366,6 +416,23 @@ function evaluatePr(
   if (pr.state !== "OPEN") {
     out.push({ kind: "unknown-pr-state", sliceId, sessionId, pr, requestKey: actionKey("unknown-pr-state", pr), detail: `state=${pr.state}` });
     return;
+  }
+
+  // Steward-stuck latch (#non-thread-comments): once a slice is escalated as
+  // "steward stuck", hold the escalation — take no further babysit action — until
+  // the steward demonstrably acts: a PUSH (head SHA advanced past the escalation
+  // point) is the concrete evidence it responded. This keeps the slice visible and
+  // stable on the dashboard instead of being re-poked, without prematurely clearing
+  // on an ambiguous status flip; the push clears it (steward-unstuck) and normal
+  // handling resumes. (A merge/close still archives it via cleanup regardless.)
+  if (slice.steward_stuck_at) {
+    const advanced = !!pr.head_sha && !!slice.steward_stuck_head_sha && pr.head_sha !== slice.steward_stuck_head_sha;
+    if (advanced) {
+      out.push({ kind: "steward-unstuck", sliceId, sessionId, pr });
+      // fall through — the steward pushed, so resume normal babysit handling.
+    } else {
+      return;
+    }
   }
 
   // Evaluate threads/stage as the worker would see them post-discovery.
@@ -563,6 +630,64 @@ function evaluatePr(
     return;
   }
 
+  // Conversation (non-thread) comments: reviewer feedback posted on the PR
+  // conversation, not attached to a code line — so there's no review thread to
+  // resolve and the thread/review signals miss it entirely. Without this a
+  // commented-but-otherwise-clean PR sits "waiting for merge" forever. Each
+  // distinct comment id is dispatched once, then acked (:eyes:) + recorded in the
+  // persisted seen-set; a later reviewer reply carries a NEW id and re-arms. Dedup
+  // is author-independent on purpose: the legate token shares the PR-author
+  // identity, so :eyes: + the comment-id set — not "author != prAuthor" — are the
+  // reliable signals (#non-thread-comments).
+  const unhandledComments = commentsNeedingResponse(evalSlice, pr);
+  if (unhandledComments.length > 0) {
+    const seen = new Set<string>((slice.comment_fix_seen_comment_ids || []).map((id: any) => String(id)));
+    const fresh = unhandledComments.filter((c: any) => c.id != null && !seen.has(String(c.id)));
+    if (fresh.length > 0) {
+      const commentIds = fresh.map((c: any) => String(c.id));
+      out.push({
+        kind: "comment-fix",
+        sliceId,
+        sessionId,
+        pr,
+        key: actionKey("comment-fix", pr, commentIds.join(",")),
+        message: commentFixMessage(pr, fresh),
+        detail: `sent /smithy.fix for ${fresh.length} conversation comment(s) on PR #${pr.number}`,
+        commentIds,
+      });
+      return;
+    }
+    // Every unacked comment is already in the seen-set (we dispatched for it; the
+    // :eyes: write may have lagged). Nothing new to send — fall through to the
+    // steward-stuck check / merge gate below.
+  }
+
+  // Steward-stuck detection (#non-thread-comments): we dispatched a comment-fix but
+  // the steward parked (waiting/idle) and has NOT pushed since (head SHA unchanged)
+  // for longer than the grace window. Since the legate-agent/human path that would
+  // drive it isn't built yet, escalate the slice as "steward stuck" so the operator
+  // sees it on the work-status dashboard + the /escalations endpoint, instead of
+  // silently treating the comment as handled.
+  if (
+    !slice.steward_stuck_at &&
+    slice.last_processor_action === "comment-fix" &&
+    (workerStatus === "waiting" || workerStatus === "idle") &&
+    !!pr.head_sha &&
+    pr.head_sha === slice.comment_fix_head_sha &&
+    minutesSince(ts, slice.last_processor_action_at) >= STEWARD_STUCK_GRACE_MIN
+  ) {
+    out.push({
+      kind: "steward-stuck",
+      sliceId,
+      sessionId,
+      pr,
+      requestKey: actionKey("steward-stuck", pr),
+      reason: "steward_unresponsive_after_comment_fix",
+      detail: `PR #${pr.number}: the steward was sent /smithy.fix for a reviewer conversation comment ${minutesSince(ts, slice.last_processor_action_at)}min ago but is parked (${workerStatus}) with no push since. The legate-agent/human path to drive it isn't built yet, so it is escalated for manual resolution.`,
+    });
+    return;
+  }
+
   if (pr.checks === "PASS" && pr.needs_response_count === 0 && pr.mergeable !== "CONFLICTING") {
     // Record the one-time transition into the all-clear `pr-open` stage (the loop
     // confirmed CI/threads/conflicts). This happens regardless of the merge gate.
@@ -620,6 +745,11 @@ function snapshot(slice: any, pr: any, sliceId: string, mergePolicy: MergePolicy
   // uses. The summary tallies this stamp instead of recomputing from the
   // possibly-stale persisted slice.pr (#stack-observability).
   slice.merge_gate = mergeReadiness(sliceId, slice, pr, mergePolicy);
+  // Stamp the complementary merge-BLOCKER (conflicting / owes_review_threads /
+  // owes_comments / ci_failing / none) — the not-ready reasons the 3-way gauge
+  // collapses away. summarizeSlicesByStage tallies this stamp into the pr_blocker
+  // gauge (#non-thread-comments observability).
+  slice.pr_blocker = mergeBlocker(slice, pr);
 }
 
 /** Fold handled comment ids into the review-fix dedup set, union-merged so a
@@ -627,6 +757,12 @@ function snapshot(slice: any, pr: any, sliceId: string, mergePolicy: MergePolicy
  *  for (or escalated) — never speculatively before a send that may fail (#224). */
 function markCommentsSeen(slice: any, commentIds: string[]): void {
   slice.review_fix_seen_comment_ids = [...new Set([...(slice.review_fix_seen_comment_ids || []).map((id: any) => String(id)), ...commentIds])];
+}
+
+/** Same union-merge for the conversation-comment dispatch set (the authoritative
+ *  half of the non-thread-comment dedup; recorded only after a successful send). */
+function markCommentFixSeen(slice: any, commentIds: string[]): void {
+  slice.comment_fix_seen_comment_ids = [...new Set([...(slice.comment_fix_seen_comment_ids || []).map((id: any) => String(id)), ...commentIds])];
 }
 
 function clearLoginBlocked(slice: any): void {
@@ -767,7 +903,20 @@ export async function apply(decisions: BabysitDecision[], ctx: HandlerContext, s
         break;
       }
       case "nudge-exhausted":
+        // A steward stayed parked after we re-nudged a conflict/review/CI fix — the
+        // same "steward stuck" condition as the comment-fix path. Surface it as
+        // escalated (steward stuck) on the dashboard + /escalations (latched), not
+        // just an invisible judgement request to the not-yet-built legate-agent.
+        slice.stage = "escalated";
+        slice.escalated_reason = "steward_stuck";
+        slice.steward_stuck_at = ts;
+        slice.steward_stuck_head_sha = d.pr?.head_sha ?? null;
+        slice.last_action = ts;
+        slice.last_action_note = d.detail;
+        ctx.emitTransition?.({ type: "slice.escalated", sliceId: d.sliceId, reason: "steward_stuck" });
         await fireRequest({ ts, slice, requestKey: d.requestKey, sliceId: d.sliceId, sessionId: d.sessionId, pr: d.pr, reason: d.reason, detail: d.detail });
+        res.actions.push({ action: "steward-stuck", sliceId: d.sliceId, sessionId: d.sessionId, pr: d.pr, detail: d.detail });
+        res.mutated = true;
         break;
       case "review-fix": {
         try {
@@ -788,6 +937,101 @@ export async function apply(decisions: BabysitDecision[], ctx: HandlerContext, s
         mark(slice, "review-fix", d.key, "processor sent review-thread /smithy.fix", ts);
         ctx.emitTransition?.({ type: "slice.stage.changed", sliceId: d.sliceId, stage: "pr-in-fix" });
         res.actions.push({ action: "review-fix", sliceId: d.sliceId, sessionId: d.sessionId, pr: d.pr, detail: d.detail });
+        res.mutated = true;
+        break;
+      }
+      case "comment-fix": {
+        try {
+          await deps.sendMessage(d.sessionId, d.message, d.sliceId);
+        } catch (err: any) {
+          await fireRequest({ ts, slice, requestKey: actionKey("comment-send-failed", d.pr, d.key), sliceId: d.sliceId, sessionId: d.sessionId, pr: d.pr, reason: "processor failed to send conversation-comment /smithy.fix", detail: err?.message || String(err) });
+          break;
+        }
+        slice.stage = "pr-in-fix";
+        // Record seen ONLY after a successful send so a transport failure retries
+        // next tick instead of silently dropping the comment (mirrors review-fix).
+        markCommentFixSeen(slice, d.commentIds || []);
+        // Best-effort :eyes: ack on each dispatched comment — human-visible, and the
+        // fold-independent dedup half (it survives a cold start that wipes the
+        // seen-set). Fire them concurrently so a comment-heavy PR doesn't serialize
+        // the tick; a failed reaction never blocks the fix (the seen-set is
+        // authoritative).
+        const reactToComment = deps.reactToComment;
+        if (reactToComment) {
+          await Promise.all(
+            (d.commentIds || []).map((id) =>
+              reactToComment({ commentId: id, content: "eyes", repoPath: state.repoPath }).catch(() => {}),
+            ),
+          );
+        }
+        // Record the head SHA at dispatch so the steward-stuck check can tell a
+        // parked-and-did-nothing steward (head unchanged) from one that pushed a fix.
+        slice.comment_fix_head_sha = d.pr?.head_sha ?? null;
+        mark(slice, "comment-fix", d.key, "processor sent conversation-comment /smithy.fix", ts);
+        ctx.emitTransition?.({ type: "slice.stage.changed", sliceId: d.sliceId, stage: "pr-in-fix" });
+        res.actions.push({ action: "comment-fix", sliceId: d.sliceId, sessionId: d.sessionId, pr: d.pr, detail: d.detail });
+        res.mutated = true;
+        break;
+      }
+      case "steward-stuck": {
+        // Surface a parked, unresponsive steward as escalated (steward stuck) so it
+        // shows on the work-status dashboard (slices{stage=escalated} +
+        // escalated_by_reason{steward_stuck}) and the /escalations endpoint. Latched
+        // via steward_stuck_at; ALSO fire the judgement request for when the
+        // legate-agent path exists. Record the head SHA so a later push un-sticks it.
+        slice.stage = "escalated";
+        slice.escalated_reason = "steward_stuck";
+        slice.steward_stuck_at = ts;
+        slice.steward_stuck_head_sha = d.pr?.head_sha ?? null;
+        slice.last_action = ts;
+        slice.last_action_note = d.detail;
+        ctx.emitTransition?.({ type: "slice.escalated", sliceId: d.sliceId, reason: "steward_stuck" });
+        await fireRequest({ ts, slice, requestKey: d.requestKey, sliceId: d.sliceId, sessionId: d.sessionId, pr: d.pr, reason: d.reason, detail: d.detail });
+        res.actions.push({ action: "steward-stuck", sliceId: d.sliceId, sessionId: d.sessionId, pr: d.pr, detail: d.detail });
+        res.mutated = true;
+        break;
+      }
+      case "steward-unstuck": {
+        // The steward resumed (running) or pushed — clear the steward-stuck
+        // escalation and return the slice to pr-open so normal babysit handling
+        // (re-observe, merge gate) resumes.
+        delete slice.steward_stuck_at;
+        delete slice.steward_stuck_head_sha;
+        slice.escalated_reason = undefined;
+        slice.stage = "pr-open";
+        slice.last_action = ts;
+        slice.last_action_note = "steward resumed — cleared steward-stuck escalation";
+        ctx.emitTransition?.({ type: "slice.stage.changed", sliceId: d.sliceId, stage: "pr-open" });
+        res.actions.push({ action: "steward-unstuck", sliceId: d.sliceId, sessionId: d.sessionId, pr: d.pr, detail: "steward resumed" });
+        res.mutated = true;
+        break;
+      }
+      case "steward-awaiting-input": {
+        // The steward is parked on Claude's interactive prompt awaiting the user.
+        // Escalate so it shows on the dashboard (escalated_by_reason) + /escalations;
+        // save the prior stage so steward-awaiting-clear can restore it on resume.
+        if (slice.stage !== "escalated") slice.pre_awaiting_stage = slice.stage;
+        slice.stage = "escalated";
+        slice.escalated_reason = "steward_awaiting_input";
+        slice.steward_awaiting_input_at = ts;
+        slice.last_action = ts;
+        slice.last_action_note = d.detail;
+        ctx.emitTransition?.({ type: "slice.escalated", sliceId: d.sliceId, reason: "steward_awaiting_input" });
+        res.actions.push({ action: "steward-awaiting-input", sliceId: d.sliceId, sessionId: d.sessionId, detail: d.detail });
+        res.mutated = true;
+        break;
+      }
+      case "steward-awaiting-clear": {
+        // The steward resumed (running) or the prompt cleared — un-escalate and
+        // restore the prior stage so normal babysit handling resumes.
+        delete slice.steward_awaiting_input_at;
+        slice.escalated_reason = undefined;
+        slice.stage = slice.pre_awaiting_stage || "pr-open";
+        delete slice.pre_awaiting_stage;
+        slice.last_action = ts;
+        slice.last_action_note = "steward resumed — cleared awaiting-input escalation";
+        ctx.emitTransition?.({ type: "slice.stage.changed", sliceId: d.sliceId, stage: slice.stage });
+        res.actions.push({ action: "steward-awaiting-clear", sliceId: d.sliceId, sessionId: d.sessionId, detail: "steward resumed" });
         res.mutated = true;
         break;
       }

@@ -346,6 +346,15 @@ export const ESCALATION_REASONS = [
   "needs_human",
   "needs_human_judgement",
   "real_spawn_error",
+  // A steward was dispatched a fix (comment / review / conflict / CI) but parked
+  // (waiting/idle) without acting — and the legate-agent/human path that would
+  // drive it isn't built yet, so we surface it as escalated rather than silently
+  // dropping it. Operator-resolvable; not auto-recoverable (#non-thread-comments).
+  "steward_stuck",
+  // The steward explicitly handed a decision back / asked the user and is parked
+  // AWAITING the user's response (detected from session output). The thing it's
+  // pending — operator input — isn't deliverable by the loop, so it is escalated.
+  "steward_awaiting_input",
 ] as const;
 
 /** Catch-all bucket for any escalation reason outside {@link ESCALATION_REASONS}. */
@@ -370,6 +379,10 @@ export interface SliceStageSummary {
   /** Escalated-stage slices keyed by escalation `reason` (a metric label). Sums to
    *  `byStage.escalated`; lets the dashboard split spawn-failed from steward-stuck. */
   readonly escalatedByReason: Record<string, number>;
+  /** PR-bearing slices keyed by dominant merge BLOCKER ({@link PrBlocker}), the
+   *  not-ready reasons the 3-way merge-readiness gauge collapses away — `conflicting`
+   *  / `owes_review_threads` / `owes_comments` / `ci_failing`. Pre-seeded to 0. */
+  readonly prBlocker: Record<string, number>;
 }
 
 /**
@@ -471,6 +484,54 @@ export function mergeReadiness(
 }
 
 /**
+ * The merge-BLOCKER taxonomy for a PR-bearing slice: the dominant reason it is not
+ * merging, in babysit's own dispatch precedence (conflict → review threads → CI →
+ * conversation comments) — so the gauge reflects what the loop will actually act on
+ * (a red-CI PR with an unacked comment classifies `ci_failing`, since babysit fixes
+ * CI before comments). This COMPLEMENTS {@link mergeReadiness} rather than
+ * duplicating it — the all-clear gate states (ready / waiting-approval /
+ * blocked-merge-state) are reported by the 3-way gauge; this surfaces only the
+ * not-ready blockers that the 3-way collapses into "not-ready" and so makes
+ * invisible. `conflicting` (the base-movement / StorySpider #597 class) and
+ * `owes_comments` (the non-thread-comment / March #294 class) are otherwise
+ * unobservable today. `none` = no active blocker here (all-clear, no observed PR,
+ * or CI still PENDING — a healthy transient). Bounded label set.
+ */
+export type PrBlocker = "none" | "conflicting" | "owes_review_threads" | "owes_comments" | "ci_failing";
+
+/** The non-`none` {@link PrBlocker} values — the metric's pre-seeded label set. */
+export const PR_BLOCKER_REASONS = ["conflicting", "owes_review_threads", "owes_comments", "ci_failing"] as const;
+
+/** A conversation (non-thread) comment is outstanding when it carries no legate
+ *  :eyes: ack yet (mirrors `commentsNeedingResponse`, inlined to keep this pure
+ *  module free of a messages.ts dependency). */
+function owesCommentResponse(pr: any): boolean {
+  const comments = pr?.conversation_comments;
+  return Array.isArray(comments) && comments.some((c: any) => c && c.reacted_eyes !== true);
+}
+
+/**
+ * Classify a slice's dominant merge blocker from the LIVE PR snapshot. Unlike
+ * {@link mergeReadiness} this does NOT gate on `stage === "pr-open"` — a slice the
+ * loop has already moved to `pr-resolving-conflicts` / `pr-in-fix` still reports
+ * the blocker its live PR exhibits, so the gauge reflects the true backlog, not
+ * just the not-yet-dispatched set. Returns `none` when there is no observed PR or
+ * the PR is all-clear / CI-pending (covered by mergeReadiness or healthy).
+ */
+export function mergeBlocker(slice: any, pr: any): PrBlocker {
+  const src = pr ?? slice?.pr ?? {};
+  if (!src || typeof src !== "object" || src.number == null) return "none";
+  if (src.mergeable === "CONFLICTING") return "conflicting";
+  const owed = src.needs_response_count ?? slice?.needs_response_count;
+  if (typeof owed === "number" && owed > 0) return "owes_review_threads";
+  // CI before comments — matches babysit's block order (it dispatches a ci-fix
+  // before a comment-fix), so a red-CI PR with an unacked comment is `ci_failing`.
+  if (src.checks === "FAIL") return "ci_failing";
+  if (owesCommentResponse(src)) return "owes_comments";
+  return "none";
+}
+
+/**
  * Tally the loop's working slices by lifecycle `stage` and derive how many are
  * ready to merge (#220). Pure: reads only the in-memory working `slices` record
  * (after the tick's handlers have run, so stages/PR snapshots are current).
@@ -494,6 +555,8 @@ export function summarizeSlicesByStage(slices: Record<string, any> | undefined):
   for (const stage of SLICE_STAGES) byStage[stage] = 0; // pre-seed so dashboards show 0, not "no data"
   const escalatedByReason: Record<string, number> = { [OTHER_ESCALATION_REASON]: 0 };
   for (const reason of ESCALATION_REASONS) escalatedByReason[reason] = 0; // pre-seed for stable series
+  const prBlocker: Record<string, number> = {};
+  for (const reason of PR_BLOCKER_REASONS) prBlocker[reason] = 0; // pre-seed so dashboards show 0, not "no data"
   let readyToMerge = 0;
   let waitingOnApproval = 0;
   let blockedOnMergeState = 0;
@@ -522,6 +585,11 @@ export function summarizeSlicesByStage(slices: Record<string, any> | undefined):
         : OTHER_ESCALATION_REASON;
       escalatedByReason[r] = (escalatedByReason[r] ?? 0) + 1;
     }
+    // Tally the merge-blocker stamp (`slice.pr_blocker`, set in babysit's snapshot()
+    // from the live PR) — only the non-`none` reasons are tracked series.
+    if (typeof slice.pr_blocker === "string" && slice.pr_blocker in prBlocker) {
+      prBlocker[slice.pr_blocker] += 1;
+    }
   }
-  return { byStage, readyToMerge, waitingOnApproval, blockedOnMergeState, escalatedByReason };
+  return { byStage, readyToMerge, waitingOnApproval, blockedOnMergeState, escalatedByReason, prBlocker };
 }

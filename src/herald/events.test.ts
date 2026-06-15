@@ -70,6 +70,17 @@ describe("reduce / fold", () => {
     expect(archived.slices.s1.archived).toBe(true);
   });
 
+  it("folds a steward self-report onto the slice (the legate acts on it off the fold)", () => {
+    seq = 0;
+    const state = foldEvents([
+      ev({ type: "slice.steward.report", sliceId: "s1", status: "awaiting_input", summary: "How should I resolve …?", classified: true }),
+    ]);
+    expect(state.slices.s1.stewardReport).toEqual({ status: "awaiting_input", summary: "How should I resolve …?", classified: true });
+    // A later report supersedes (e.g. it resumed).
+    const next = foldEvents([ev({ type: "slice.steward.report", sliceId: "s1", status: "working", classified: true })], state);
+    expect(next.slices.s1.stewardReport).toEqual({ status: "working", summary: undefined, classified: true });
+  });
+
   it("slice.dispatched sets stage to hatchery-pending and clears any escalation (#255)", () => {
     seq = 0;
     // The job-bearing dispatch event itself means the slice is hatchery-pending, so a

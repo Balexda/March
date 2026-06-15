@@ -2,7 +2,7 @@
  * @l1 @deterministic @ci
  */
 import { describe, expect, it } from "vitest";
-import { buildLoopServer, buildStatus, type LoopHttpContext } from "./http.js";
+import { buildEscalations, buildLoopServer, buildStatus, escalationsForWorkingState, type LoopHttpContext } from "./http.js";
 import type { LoopSnapshot } from "./runtime.js";
 
 const heartbeat = {
@@ -26,7 +26,7 @@ const heartbeat = {
 };
 
 function snapshot(over: Partial<LoopSnapshot> = {}): LoopSnapshot {
-  const byProfile = over.byProfile ?? { smithy: { lastHeartbeat: heartbeat } };
+  const byProfile = over.byProfile ?? { smithy: { lastHeartbeat: heartbeat, workingState: { slices: {} } } };
   return {
     byProfile,
     profiles: over.profiles ?? Object.keys(byProfile),
@@ -67,7 +67,7 @@ describe("loop http (fastify)", () => {
 
   it("returns safe defaults before the first tick", () => {
     const status = buildStatus(
-      ctxWith(snapshot({ byProfile: { smithy: { lastHeartbeat: null } }, lastTickAtMs: 0, lastTickDurationMs: 0 })),
+      ctxWith(snapshot({ byProfile: { smithy: { lastHeartbeat: null, workingState: null } }, lastTickAtMs: 0, lastTickDurationMs: 0 })),
       "smithy",
     );
     expect(status).toMatchObject({
@@ -94,6 +94,73 @@ describe("loop http (fastify)", () => {
 
       const wrongMethod = await app.inject({ method: "POST", url: "/status" });
       expect(wrongMethod.statusCode).toBe(404);
+    } finally {
+      await app.close();
+    }
+  });
+});
+
+const escalatedWorkingState = {
+  slices: {
+    // Steward parked on Claude's interactive prompt awaiting the user → escalated.
+    "spec-re-read-us1-s2-forge": {
+      stage: "escalated",
+      escalated_reason: "steward_awaiting_input",
+      branch: "feature/smithy/forge/x",
+      actual_branch: "feature/smithy/forge/x",
+      worker_session_id: "sess-1",
+      worktree_path: "/wt/x",
+      pr: { number: 346, url: "https://github.com/Balexda/SmithyCLI/pull/346" },
+      last_action_note: 'Steward is parked on an interactive prompt awaiting your selection: "How should I resolve …?".',
+      steward_awaiting_input_at: "2026-06-14T08:00:00.000Z",
+    },
+    "healthy-us1-s2-forge": { stage: "pr-open", pr: { number: 12 } }, // not escalated → excluded
+  },
+};
+
+describe("escalationsForWorkingState (pure)", () => {
+  it("returns escalated slices with session+worktree+reason so the operator can find them", () => {
+    expect(escalationsForWorkingState(escalatedWorkingState)).toEqual([
+      {
+        task: "spec-re-read-us1-s2-forge",
+        branch: "feature/smithy/forge/x",
+        pr: { number: 346, url: "https://github.com/Balexda/SmithyCLI/pull/346" },
+        reason: "steward_awaiting_input",
+        session_id: "sess-1",
+        worktree_path: "/wt/x",
+        detail: 'Steward is parked on an interactive prompt awaiting your selection: "How should I resolve …?".',
+        escalated_at: "2026-06-14T08:00:00.000Z",
+      },
+    ]);
+  });
+
+  it("is safe on a null/empty working state (cold start)", () => {
+    expect(escalationsForWorkingState(null)).toEqual([]);
+    expect(escalationsForWorkingState({ slices: {} })).toEqual([]);
+  });
+});
+
+describe("buildEscalations + /escalations route", () => {
+  const snap = snapshot({ byProfile: { smithy: { lastHeartbeat: heartbeat, workingState: escalatedWorkingState } } });
+
+  it("lists a profile's escalated tasks with the reason + session to find them", () => {
+    const out = buildEscalations(ctxWith(snap), "smithy") as any;
+    expect(out.ok).toBe(true);
+    expect(out.count).toBe(1);
+    expect(out.escalations[0]).toMatchObject({ reason: "steward_awaiting_input", session_id: "sess-1", pr: { number: 346 } });
+  });
+
+  it("unknown profile reports not-ok with the known list", () => {
+    expect(buildEscalations(ctxWith(snap), "ghost")).toMatchObject({ ok: false, profiles: ["smithy"] });
+  });
+
+  it("serves GET /escalations?profile=", async () => {
+    const app = buildLoopServer(ctxWith(snap));
+    try {
+      const res = await app.inject({ method: "GET", url: "/escalations?profile=smithy" });
+      expect(res.statusCode).toBe(200);
+      expect(res.json().count).toBe(1);
+      expect(res.json().escalations[0].session_id).toBe("sess-1"); // operator can find the session
     } finally {
       await app.close();
     }

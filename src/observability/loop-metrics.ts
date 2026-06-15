@@ -62,6 +62,10 @@ export interface LoopMetricsSnapshot {
   /** Escalated-stage slices keyed by bounded escalation reason; sums to
    *  slicesByStage.escalated. Splits spawn-failed from steward-stuck on the board. */
   readonly escalatedByReason: Readonly<Record<string, number>>;
+  /** PR-bearing slices keyed by dominant merge BLOCKER (conflicting /
+   *  owes_review_threads / owes_comments / ci_failing) — the not-ready reasons the
+   *  3-way merge-readiness gauge above collapses away (#non-thread-comments). */
+  readonly prBlocker: Readonly<Record<string, number>>;
 }
 
 /** Per-tick deltas folded into the cumulative counters + the duration histogram. */
@@ -80,6 +84,10 @@ export interface LoopTickActivity {
   /** Steward relaunch attempts that failed (`relaunch-failed`). */
   readonly relaunchFailures: number;
   readonly babysitActions: number;
+  /** Babysit fix dispatches this tick keyed by kind (conflict_fix / review_fix /
+   *  ci_fix / comment_fix) — emitted onto loop.actions{action} for per-kind rates.
+   *  Optional so older callers/tests can omit it. */
+  readonly babysitActionsByKind?: Readonly<Record<string, number>>;
   /** Stranded-steward nudges sent this tick (the watchdog re-prodding a steward). */
   readonly stewardNudges: number;
   /** Stranded-steward escalations raised this tick (operator alert). */
@@ -112,6 +120,9 @@ export interface DwellSample {
   readonly stageAgeMaxSeconds: Record<string, number>;
   /** Max age (s) of any pr-open slice currently in each merge-gate. */
   readonly mergeGateAgeMaxSeconds: Record<string, number>;
+  /** Max age (s) of any PR-bearing slice currently under each merge BLOCKER
+   *  (conflicting / owes_review_threads / owes_comments / ci_failing). */
+  readonly mergeBlockerAgeMaxSeconds: Record<string, number>;
   /** Completed stage dwells (s) this tick → the dwell histogram (not alarmed). */
   readonly completedStageDwells: ReadonlyArray<{ stage: string; seconds: number }>;
 }
@@ -288,6 +299,23 @@ function ensureInstruments(meter: Meter): void {
     }
   });
 
+  // PR-bearing slices by dominant merge BLOCKER — the not-ready reasons the 3-way
+  // merge-readiness gauges collapse away. `conflicting` (base-movement / #597) and
+  // `owes_comments` (non-thread feedback / #294) are otherwise invisible. `reason`
+  // is the bounded PR_BLOCKER_REASONS vocabulary. Exported as
+  // `march_legate_slices_pr_blocker{reason}`.
+  const prBlocker: ObservableGauge = meter.createObservableGauge(
+    "march.legate.slices.pr_blocker",
+    { description: "PR-bearing slices by dominant merge blocker (conflicting/owes_review_threads/owes_comments/ci_failing)" },
+  );
+  prBlocker.addCallback((result: ObservableResult) => {
+    for (const s of latestByProfile.values()) {
+      for (const [reason, count] of Object.entries(s.prBlocker)) {
+        result.observe(count, { ...base(s), reason });
+      }
+    }
+  });
+
   // GLOBAL spawn-budget gauges (#313) — profile-less (one shared cap across all
   // profiles per tick), read from `latestSpawnBudget`. `spawn.live ≫ spawn.cap`
   // with dispatch starved is the ghost-stewards-pin-the-cap wedge. No unit ⇒
@@ -325,6 +353,20 @@ function ensureInstruments(meter: Meter): void {
     for (const [profile, sample] of latestDwellByProfile) {
       for (const [gate, seconds] of Object.entries(sample.mergeGateAgeMaxSeconds)) {
         result.observe(seconds, { profile, gate });
+      }
+    }
+  });
+  // Dwell under each merge BLOCKER — "this PR has been CONFLICTING / owed a comment
+  // response for N seconds". Drives the blocker dwell alarms (conflict not clearing,
+  // comment unanswered too long). Label: profile + the bounded blocker vocab.
+  const blockerAge: ObservableGauge = meter.createObservableGauge("march.legate.merge_blocker_age_max", {
+    description: "Max age of the oldest PR-bearing slice currently under each merge blocker",
+    unit: "s",
+  });
+  blockerAge.addCallback((result: ObservableResult) => {
+    for (const [profile, sample] of latestDwellByProfile) {
+      for (const [blocker, seconds] of Object.entries(sample.mergeBlockerAgeMaxSeconds ?? {})) {
+        result.observe(seconds, { profile, blocker });
       }
     }
   });
@@ -396,6 +438,14 @@ export function recordLoopHeartbeat(activity: LoopTickActivity): void {
     loopActions!.add(activity.relaunchFailures, { ...attrs, action: "relaunch_failed" });
   if (activity.babysitActions)
     loopActions!.add(activity.babysitActions, { ...attrs, action: "babysit" });
+  // Per-kind babysit fix dispatches (conflict_fix / review_fix / ci_fix /
+  // comment_fix) — distinct `action` labels alongside the "babysit" umbrella so a
+  // dashboard can rate() each fix type. The kind is already metric-form (underscore).
+  if (activity.babysitActionsByKind) {
+    for (const [kind, count] of Object.entries(activity.babysitActionsByKind)) {
+      if (count) loopActions!.add(count, { ...attrs, action: kind });
+    }
+  }
   if (activity.stewardNudges)
     loopActions!.add(activity.stewardNudges, { ...attrs, action: "steward_nudge" });
   if (activity.stewardStranded)

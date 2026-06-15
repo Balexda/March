@@ -5,6 +5,8 @@ import { describe, expect, it } from "vitest";
 import {
   buildSmithySpawnPrompt,
   ciFixMessage,
+  commentFixMessage,
+  commentsNeedingResponse,
   conflictMessage,
   failedChecksSummary,
   prDiscoverySince,
@@ -60,6 +62,36 @@ describe("messages pure builders", () => {
     expect(reviewFixMessage({ number: 3 }, [{ path: "a.ts", line: 4, author: "x", body_preview: "fix" }])).toContain(
       "- a.ts:4 by x: fix",
     );
+  });
+
+  it("commentsNeedingResponse returns only un-acknowledged conversation comments (author-independent)", () => {
+    const pr = {
+      conversation_comments: [
+        { id: 1, author: "rev", reacted_eyes: false },
+        { id: 2, author: "rev", reacted_eyes: true }, // already :eyes:'d → handled
+        { id: 3, author: "steward", reacted_eyes: false }, // author NOT a filter
+      ],
+    };
+    expect(commentsNeedingResponse({}, pr).map((c: any) => c.id)).toEqual([1, 3]);
+    expect(commentsNeedingResponse({}, {})).toEqual([]);
+  });
+
+  it("commentFixMessage drives /smithy.fix and blockquotes each comment body", () => {
+    const m = commentFixMessage({ number: 12 }, [
+      { author: "rev", body_preview: "line one\nline two", created_at: "2026-06-09T07:00:30Z" },
+    ]);
+    expect(m).toContain("/smithy.fix");
+    expect(m).toContain("PR #12");
+    expect(m).toContain("> line one\n> line two");
+    expect(m).toContain("— rev (2026-06-09T07:00:30Z)");
+  });
+
+  it("conversationCommentsSummary appends the permalink and marks a truncated body", () => {
+    const m = commentFixMessage({ number: 12 }, [
+      { author: "rev", body_preview: "do the thing", truncated: true, url: "https://gh/c/1", created_at: "2026-06-09T07:00:30Z" },
+    ]);
+    expect(m).toContain("> do the thing…");
+    expect(m).toContain("(full comment: https://gh/c/1)");
   });
 
   it("prDiscoverySince falls back through timestamp fields", () => {

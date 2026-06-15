@@ -103,6 +103,15 @@ export type EventBody =
   | { type: "steward.relaunched"; sliceId: string; sessionId?: string }
   /** The slice was escalated for legate judgement. */
   | { type: "slice.escalated"; sliceId: string; reason?: string }
+  /**
+   * A steward SELF-REPORT of its own state (push, not scrape): the steward's hook
+   * fires when it parks, reads its last message chunk, and POSTs here. `classified`
+   * is whether the steward could heuristically classify it; an unclassified report
+   * carries only the raw `summary` for the legate-agent to classify later. The
+   * legate acts on the folded `status` (e.g. `awaiting_input` → escalate). Herald
+   * only RECORDS this — it makes no decision. (#steward-self-report)
+   */
+  | { type: "slice.steward.report"; sliceId: string; status?: "awaiting_input" | "reported" | "working"; summary?: string; classified: boolean }
   /** A transient auto-recovery retry counter was bumped. */
   | { type: "retry.counted"; key: string; count: number }
   // ── Audit events (Herald break-glass admin endpoint, #265) ──────────────
@@ -182,6 +191,7 @@ export function entityRefOf(body: EventBody): EntityRef {
     case "slice.recovery.requested":
     case "steward.relaunched":
     case "slice.escalated":
+    case "slice.steward.report":
       return { kind: "slice", id: body.sliceId };
     case "session.changed":
       return { kind: "session", id: body.session.id };
@@ -219,6 +229,10 @@ export interface SliceState {
   recentOutput?: { output: string; error?: string };
   archived?: boolean;
   escalatedReason?: string;
+  /** The steward's latest SELF-REPORT (#steward-self-report): its own classified
+   *  state + a one-line summary, pushed via its hook (not scraped). The legate acts
+   *  on `status` off the fold (e.g. `awaiting_input` → escalate). */
+  stewardReport?: { status?: "awaiting_input" | "reported" | "working"; summary?: string; classified: boolean };
   /**
    * Tombstone set by `slice.recovery.requested` (#238): the operator recovered this
    * slice, so it carries no live/archived facts and must not block re-dispatch.
@@ -461,6 +475,15 @@ export function reduce(state: SystemState, event: HeraldEvent): SystemState {
       const slice = sliceOf(state, event.sliceId);
       slice.stage = "escalated";
       if (event.reason !== undefined) slice.escalatedReason = event.reason;
+      break;
+    }
+    case "slice.steward.report": {
+      // Record the steward's self-report; the legate acts on it off the fold.
+      sliceOf(state, event.sliceId).stewardReport = {
+        status: event.status,
+        summary: event.summary,
+        classified: event.classified,
+      };
       break;
     }
     case "retry.counted":

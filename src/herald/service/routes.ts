@@ -229,6 +229,41 @@ export async function registerRoutes(
     return event;
   });
 
+  // Steward self-report write path (#steward-self-report): the steward's hook (or
+  // the legate-agent, pushing a classified result) POSTs its own state here. Herald
+  // only RECORDS it as a `slice.steward.report` event — the legate acts on the fold.
+  // Distinct from POST /events (which forces legate transition events) so an
+  // external reporter has a small, purpose-shaped body.
+  app.post("/steward-report", async (request, reply) => {
+    const body = (request.body ?? {}) as Record<string, unknown>;
+    const profile = typeof body.profile === "string" ? body.profile : "";
+    const sliceId = typeof body.sliceId === "string" ? body.sliceId : "";
+    if (profile.length === 0 || sliceId.length === 0) {
+      reply.code(400);
+      return { error: "steward-report requires non-empty profile and sliceId." };
+    }
+    if (typeof body.classified !== "boolean") {
+      reply.code(400);
+      return { error: "steward-report requires a boolean `classified`." };
+    }
+    const status = body.status;
+    if (status !== undefined && status !== "awaiting_input" && status !== "reported" && status !== "working") {
+      reply.code(400);
+      return { error: `steward-report status must be awaiting_input|reported|working (got "${String(status)}").` };
+    }
+    const event = store.append({
+      type: "slice.steward.report",
+      source: "legate",
+      profile,
+      sliceId,
+      classified: body.classified,
+      ...(status !== undefined ? { status: status as "awaiting_input" | "reported" | "working" } : {}),
+      ...(typeof body.summary === "string" ? { summary: body.summary } : {}),
+    } as AppendEventInput);
+    reply.code(201);
+    return event;
+  });
+
   // Break-glass operator endpoint (#265): author a corrective event into the
   // fold through the normal pipeline (validated, sequenced, audited) instead of
   // hand-editing the sqlite log or growing dead auto-heal code in the legate.

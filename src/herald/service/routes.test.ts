@@ -102,6 +102,31 @@ describe.skipIf(!sqliteAvailable)("herald routes", () => {
     expect(bad.statusCode).toBe(400);
   });
 
+  it("POST /steward-report records a steward self-report event", async () => {
+    const { app, store } = await buildApp();
+    close = async () => { await app.close(); store.close(); };
+    const res = await app.inject({
+      method: "POST",
+      url: "/steward-report",
+      payload: { profile: "march", sliceId: "s1", classified: true, status: "awaiting_input", summary: "How should I resolve …?" },
+    });
+    expect(res.statusCode).toBe(201);
+    expect(res.json()).toMatchObject({ type: "slice.steward.report", sliceId: "s1", status: "awaiting_input", classified: true });
+    // It lands in the event stream the legate drains.
+    expect(store.readAfter(0, 10).some((e) => e.type === "slice.steward.report")).toBe(true);
+  });
+
+  it("POST /steward-report rejects missing fields and a bad status", async () => {
+    const { app, store } = await buildApp();
+    close = async () => { await app.close(); store.close(); };
+    const noSlice = await app.inject({ method: "POST", url: "/steward-report", payload: { profile: "march", classified: true } });
+    expect(noSlice.statusCode).toBe(400);
+    const noClass = await app.inject({ method: "POST", url: "/steward-report", payload: { profile: "march", sliceId: "s1" } });
+    expect(noClass.statusCode).toBe(400);
+    const badStatus = await app.inject({ method: "POST", url: "/steward-report", payload: { profile: "march", sliceId: "s1", classified: true, status: "bogus" } });
+    expect(badStatus.statusCode).toBe(400);
+  });
+
   it("GET /state returns the projection and honors ?at=", async () => {
     const { app, store } = await buildApp();
     close = async () => { await app.close(); store.close(); };

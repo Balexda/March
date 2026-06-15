@@ -22,6 +22,7 @@ function activity(overrides: Partial<LoopTickActivity> = {}): LoopTickActivity {
       waitingOnApproval: 1,
       blockedOnMergeState: 1,
       escalatedByReason: { hatchery_dispatch_failed: 0, other: 0 },
+      prBlocker: { conflicting: 0, owes_review_threads: 0, owes_comments: 0, ci_failing: 0 },
     },
     tickDurationSeconds: 0.4,
     dispatchActions: 1,
@@ -80,6 +81,7 @@ describe("loop-metrics", () => {
     const sample = {
       stageAgeMaxSeconds: { "hatchery-pending": 1800, implementing: 0 },
       mergeGateAgeMaxSeconds: { ready: 0, "waiting-approval": 600, "blocked-merge-state": 0 },
+      mergeBlockerAgeMaxSeconds: { conflicting: 0, owes_review_threads: 0, owes_comments: 0, ci_failing: 0 },
       completedStageDwells: [{ stage: "implementing", seconds: 1234 }],
     };
     initOtel({});

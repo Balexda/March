@@ -44,6 +44,11 @@ export function assess(state: LoopState): AdoptFromFoldDecision[] {
     if (!slice || typeof slice !== "object") continue;
     if (slice.archived || slice.recovered) continue;
     if (slice.stage !== "escalated") continue;
+    // Operator-ATTENTION escalations (steward parked awaiting input / stuck) are
+    // deliberate, must-stick states the operator resolves — NOT the branch-collision
+    // / diverged-dispatch case this adopt path is for. Leave them escalated so they
+    // hold on the dashboard + /escalations (#steward-self-report).
+    if (slice.escalated_reason === "steward_awaiting_input" || slice.escalated_reason === "steward_stuck") continue;
     const pr = state.perSlice?.[sliceId]?.pr ?? slice.pr;
     if (!pr || typeof pr !== "object") continue;
     if (String(pr.state).toUpperCase() !== "OPEN") continue;

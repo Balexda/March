@@ -28,6 +28,10 @@ export interface SliceExternalState {
   pr?: any;
   /** Recent session output (for login/error detection). */
   recentOutput?: { output: string; error?: string };
+  /** The steward's self-report (#steward-self-report): its own classified state +
+   *  a one-line summary, pushed via its hook. babysit acts on `status`
+   *  (`awaiting_input` → escalate) instead of scraping `recentOutput`. */
+  stewardReport?: { status?: "awaiting_input" | "reported" | "working"; summary?: string; classified: boolean };
 }
 
 /** Smithy readiness view derived once per tick. */
@@ -158,6 +162,13 @@ export interface TickResult {
   dispatchableReadyCount: number;
   /** Escalated-stage slices keyed by escalation reason; sums to slicesByStage.escalated. */
   escalatedByReason: Record<string, number>;
+  /** PR-bearing slices keyed by dominant merge BLOCKER (conflicting /
+   *  owes_review_threads / owes_comments / ci_failing) — the not-ready reasons the
+   *  3-way merge-readiness gauge collapses away (#non-thread-comments). */
+  prBlockerCounts: Record<string, number>;
+  /** Babysit fix dispatches this tick keyed by kind (conflict_fix / review_fix /
+   *  ci_fix / comment_fix) — the per-kind split of the babysit umbrella. */
+  babysitActionsByKind: Record<string, number>;
   cleanupCount: number;
   cleanupFailureCount: number;
   ghostCleanupCount: number;

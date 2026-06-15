@@ -20,6 +20,7 @@ import {
   sliceReleasesArtifact,
   summarizeSlicesByStage,
   mergeReadiness,
+  mergeBlocker,
 } from "./slice.js";
 import { dispatchSliceId } from "./dispatch-id.js";
 
@@ -215,6 +216,36 @@ describe("slice pure helpers", () => {
     expect(blockedOnMergeState).toBe(0); // `cold` is unstamped → no bucket
   });
 
+  it("summarizeSlicesByStage tallies the merge-blocker stamp (conflicting / owes_comments / …)", () => {
+    const slices = {
+      a: { stage: "pr-resolving-conflicts", pr_blocker: "conflicting" },
+      b: { stage: "pr-open", pr_blocker: "owes_review_threads" },
+      c: { stage: "pr-in-fix", pr_blocker: "owes_comments" },
+      d: { stage: "pr-open", pr_blocker: "ci_failing" },
+      e: { stage: "pr-open", pr_blocker: "none" }, // all-clear → not a tracked blocker
+      f: { stage: "pr-open" }, // unstamped → counts in no blocker series
+    };
+    const { prBlocker } = summarizeSlicesByStage(slices);
+    expect(prBlocker).toEqual({ conflicting: 1, owes_review_threads: 1, owes_comments: 1, ci_failing: 1 });
+  });
+
+  it("mergeBlocker classifies the dominant blocker in babysit's dispatch precedence", () => {
+    const pr = (over: any) => ({ number: 5, checks: "PASS", mergeable: "MERGEABLE", needs_response_count: 0, ...over });
+    // Precedence matches babysit's block order: conflict > review threads > CI >
+    // conversation comments.
+    expect(mergeBlocker({}, pr({ mergeable: "CONFLICTING", checks: "FAIL", needs_response_count: 2 }))).toBe("conflicting");
+    expect(mergeBlocker({}, pr({ needs_response_count: 1, checks: "FAIL" }))).toBe("owes_review_threads");
+    // CI wins over an unacked comment (babysit fixes CI before comment-fix).
+    expect(mergeBlocker({}, pr({ conversation_comments: [{ id: 1, reacted_eyes: false }], checks: "FAIL" }))).toBe("ci_failing");
+    expect(mergeBlocker({}, pr({ checks: "FAIL" }))).toBe("ci_failing");
+    // owes_comments only once checks PASS (no CI to fix first).
+    expect(mergeBlocker({}, pr({ conversation_comments: [{ id: 1, reacted_eyes: false }] }))).toBe("owes_comments");
+    // All-clear, an acknowledged comment, or no PR → none.
+    expect(mergeBlocker({}, pr({ conversation_comments: [{ id: 1, reacted_eyes: true }] }))).toBe("none");
+    expect(mergeBlocker({}, pr({}))).toBe("none");
+    expect(mergeBlocker({}, {})).toBe("none"); // no observed PR
+  });
+
   it("mergeReadiness is a 3-way over the LIVE pr, honoring the per-task-type merge policy", () => {
     const slice = { stage: "pr-open", branch: "feature/smithy/cut/x" };
     const clearPr = { checks: "PASS", mergeable: "MERGEABLE", needs_response_count: 0, merge_state_status: "clean" };
@@ -277,7 +308,15 @@ describe("slice pure helpers", () => {
         needs_human: 0,
         needs_human_judgement: 0,
         real_spawn_error: 0,
+        steward_stuck: 0,
+        steward_awaiting_input: 0,
         other: 0,
+      },
+      prBlocker: {
+        conflicting: 0,
+        owes_review_threads: 0,
+        owes_comments: 0,
+        ci_failing: 0,
       },
     });
   });

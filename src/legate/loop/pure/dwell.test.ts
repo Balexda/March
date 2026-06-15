@@ -25,6 +25,19 @@ describe("stampDwell", () => {
     expect(obs.completedStageDwells).toEqual([]); // no transition
   });
 
+  it("tracks merge-blocker dwell regardless of stage, and clears it when the blocker lifts", () => {
+    const slices = { a: { stage: "pr-resolving-conflicts", pr_blocker: "conflicting", pr_open_at: new Date(T0).toISOString() } };
+    stampDwell(slices, T0);
+    const obs = stampDwell(slices, T0 + 1_800_000); // +30 min, still conflicting
+    expect(obs.mergeBlockerAgeMaxSeconds["conflicting"]).toBe(1800);
+    expect(obs.mergeBlockerAgeMaxSeconds["owes_comments"]).toBe(0); // pre-seeded
+    // Conflict resolves → blocker clears, dwell bookkeeping resets.
+    (slices.a as any).pr_blocker = "none";
+    const after = stampDwell(slices, T0 + 1_900_000);
+    expect(after.mergeBlockerAgeMaxSeconds["conflicting"]).toBe(0);
+    expect((slices.a as any).pr_blocker_since).toBeUndefined();
+  });
+
   it("records the completed dwell of the stage just left on a transition", () => {
     const slices = { a: { stage: "hatchery-pending" } };
     stampDwell(slices, T0);

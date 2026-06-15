@@ -58,6 +58,9 @@ describe("adopt-from-fold assess", () => {
     expect(assess(loopState({ s: { stage: "escalated", branch: "b", pr: PR, recovered: true } }))).toEqual([]);
     expect(assess(loopState({ s: { stage: "escalated", branch: "b", pr: PR, archived: true } }))).toEqual([]);
     expect(assess(loopState({ s: { stage: "pr-open", branch: "b", pr: PR } }))).toEqual([]);
+    // Operator-attention escalations must STICK — not be adopted away (#steward-self-report).
+    expect(assess(loopState({ s: { stage: "escalated", branch: "b", pr: PR, escalated_reason: "steward_awaiting_input" } }))).toEqual([]);
+    expect(assess(loopState({ s: { stage: "escalated", branch: "b", pr: PR, escalated_reason: "steward_stuck" } }))).toEqual([]);
   });
 
   it("does not select an escalated OPEN PR with no usable number", () => {
