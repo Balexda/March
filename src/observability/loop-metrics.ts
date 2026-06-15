@@ -66,6 +66,9 @@ export interface LoopMetricsSnapshot {
    *  owes_review_threads / owes_comments / ci_failing) — the not-ready reasons the
    *  3-way merge-readiness gauge above collapses away (#non-thread-comments). */
   readonly prBlocker: Readonly<Record<string, number>>;
+  /** Slices whose live steward session is parked in `waiting` status — blocked
+   *  needing operator input (a session-state signal, independent of GitHub). */
+  readonly stewardsAwaitingInput: number;
 }
 
 /** Per-tick deltas folded into the cumulative counters + the duration histogram. */
@@ -280,6 +283,16 @@ function ensureInstruments(meter: Meter): void {
     "march.legate.slices.blocked_on_merge_state",
     "Human-gates-cleared slices GitHub won't merge yet (UNKNOWN/BEHIND/BLOCKED/DIRTY)",
     (s) => s.blockedOnMergeState,
+  );
+  // Stewards parked in `waiting` status — blocked needing operator input. A pure
+  // session-state signal (no GitHub): a sustained >0 is parked sessions an operator
+  // must find (via /escalations: session id + worktree) and unblock. Exported as
+  // `march_legate_stewards_awaiting_input`.
+  registerGauge(
+    meter,
+    "march.legate.stewards.awaiting_input",
+    "Steward sessions parked in 'waiting' status — blocked needing operator input",
+    (s) => s.stewardsAwaitingInput,
   );
 
   // Escalated slices split by reason (sums to slices{stage="escalated"}). `reason`

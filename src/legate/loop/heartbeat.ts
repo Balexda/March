@@ -61,6 +61,7 @@ export function buildHeartbeatRecord(out: CoordinatorOutput, meta: { processor_n
     waiting_on_approval_count: t.waitingOnApprovalCount,
     blocked_on_merge_state_count: t.blockedOnMergeStateCount,
     escalated_by_reason: t.escalatedByReason,
+    stewards_awaiting_input: t.stewardsAwaitingInput,
     pr_blocker_counts: t.prBlockerCounts,
     babysit_actions_by_kind: t.babysitActionsByKind,
   };

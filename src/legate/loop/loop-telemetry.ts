@@ -185,6 +185,7 @@ export function buildLoopTickActivity(record: any, ctx: HeartbeatMetricsContext)
     blockedOnMergeState: record.blocked_on_merge_state_count ?? 0,
     escalatedByReason,
     prBlocker,
+    stewardsAwaitingInput: record.stewards_awaiting_input ?? 0,
   };
   return {
     snapshot,
