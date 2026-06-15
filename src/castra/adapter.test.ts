@@ -1,7 +1,10 @@
 /**
  * @l1 @deterministic @ci
  */
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, afterAll, vi } from "vitest";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
 const childProcessMock = vi.hoisted(() => ({
   execFileSync: vi.fn(),
@@ -96,6 +99,10 @@ describe("castra adapter — argv builders", () => {
         "--add-dir",
         "--extra-arg",
         "/steward-skills",
+        "--extra-arg",
+        "--settings",
+        "--extra-arg",
+        path.join("/steward-skills", "settings.json"),
       ]);
     } finally {
       if (prev === undefined) delete process.env.MARCH_STEWARD_SKILLS_DIR;
@@ -131,6 +138,28 @@ describe("castra adapter — argv builders", () => {
       expect(args[idx - 1]).toBe("--extra-arg");
       expect(args[idx + 1]).toBe("--extra-arg");
       expect(args[idx + 2]).toBe("/steward-skills");
+    } finally {
+      if (prev === undefined) delete process.env.MARCH_STEWARD_SKILLS_DIR;
+      else process.env.MARCH_STEWARD_SKILLS_DIR = prev;
+    }
+  });
+
+  it("loads the steward self-report settings via --settings (#371)", () => {
+    const prev = process.env.MARCH_STEWARD_SKILLS_DIR;
+    process.env.MARCH_STEWARD_SKILLS_DIR = "/steward-skills";
+    try {
+      const args = buildLaunchArgs({
+        profile: "march",
+        repoPath: "/repo",
+        title: "t",
+        group: "g",
+        branch: "b",
+      });
+      const idx = args.indexOf("--settings");
+      expect(idx).toBeGreaterThan(-1);
+      expect(args[idx - 1]).toBe("--extra-arg");
+      expect(args[idx + 1]).toBe("--extra-arg");
+      expect(args[idx + 2]).toBe(path.join("/steward-skills", "settings.json"));
     } finally {
       if (prev === undefined) delete process.env.MARCH_STEWARD_SKILLS_DIR;
       else process.env.MARCH_STEWARD_SKILLS_DIR = prev;
@@ -241,8 +270,27 @@ describe("castra adapter — agent-deck tmux env (issue #174)", () => {
 });
 
 describe("castra adapter — operations", () => {
+  // launch() writes a per-session steward-report sidecar under the steward
+  // skills root (#371). Point it at a throwaway temp dir so these tests never
+  // touch ~/.march/steward, and clean it up afterward.
+  const sidecarRoot = fs.mkdtempSync(path.join(os.tmpdir(), "castra-adapter-"));
+  const prevSkillsDir = process.env.MARCH_STEWARD_SKILLS_DIR;
+
   beforeEach(() => {
     childProcessMock.execFileSync.mockReset();
+    process.env.MARCH_STEWARD_SKILLS_DIR = sidecarRoot;
+    // Start each test with a clean sessions dir so a prior launch's sidecar
+    // can't make a later "should not write" assertion pass spuriously.
+    fs.rmSync(path.join(sidecarRoot, "sessions"), { recursive: true, force: true });
+  });
+
+  afterEach(() => {
+    if (prevSkillsDir === undefined) delete process.env.MARCH_STEWARD_SKILLS_DIR;
+    else process.env.MARCH_STEWARD_SKILLS_DIR = prevSkillsDir;
+  });
+
+  afterAll(() => {
+    fs.rmSync(sidecarRoot, { recursive: true, force: true });
   });
 
   it("lists sessions, filtering by group when given", () => {
@@ -321,6 +369,63 @@ describe("castra adapter — operations", () => {
       sliceId: "slice-7",
       spawnId: "sp-1",
     });
+  });
+
+  it("writes the steward-report sidecar keyed by the worktree dir on launch (#371)", () => {
+    let listCalls = 0;
+    childProcessMock.execFileSync.mockImplementation((_cmd: string, args: string[]) => {
+      if (args.includes("list")) {
+        listCalls++;
+        return listCalls === 1
+          ? "[]"
+          : JSON.stringify([session({ sessionId: "sess-new", group: "g" })]);
+      }
+      return "";
+    });
+    process.env.MARCH_HERALD_URL = "http://herald.example:1234";
+    try {
+      createAgentDeckAdapter().launch({
+        profile: "march",
+        repoPath: "/repo",
+        branch: "march/spawn/x",
+        title: "Steward",
+        group: "g",
+        metadata: { sliceId: "slice-7", spawnId: "sp-1" },
+      });
+      // Sidecar is keyed by the worktree dir name (feature-<branch>), the same
+      // key the hook derives from its cwd.
+      const sidecar = path.join(sidecarRoot, "sessions", "feature-march-spawn-x.json");
+      const payload = JSON.parse(fs.readFileSync(sidecar, "utf-8"));
+      expect(payload).toEqual({
+        profile: "march",
+        sliceId: "slice-7",
+        heraldUrl: "http://herald.example:1234",
+      });
+    } finally {
+      delete process.env.MARCH_HERALD_URL;
+    }
+  });
+
+  it("skips the steward-report sidecar when no sliceId is supplied (#371)", () => {
+    let listCalls = 0;
+    childProcessMock.execFileSync.mockImplementation((_cmd: string, args: string[]) => {
+      if (args.includes("list")) {
+        listCalls++;
+        return listCalls === 1
+          ? "[]"
+          : JSON.stringify([session({ sessionId: "sess-new", group: "g" })]);
+      }
+      return "";
+    });
+    createAgentDeckAdapter().launch({
+      profile: "march",
+      repoPath: "/repo",
+      branch: "march/spawn/x",
+      title: "Steward",
+      group: "g",
+    });
+    const sidecar = path.join(sidecarRoot, "sessions", "feature-march-spawn-x.json");
+    expect(fs.existsSync(sidecar)).toBe(false);
   });
 
   it("backfills an empty branch from the launch branch on list (stale-branch fix #214)", () => {

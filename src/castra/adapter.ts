@@ -7,7 +7,11 @@ import {
   type CastraSession,
 } from "./types.js";
 import { CASTRA_DEFAULT_MODEL } from "./config.js";
-import { stewardSkillsRoot } from "./steward-skills.js";
+import {
+  recordStewardSession,
+  stewardSettingsPath,
+  stewardSkillsRoot,
+} from "./steward-skills.js";
 
 /**
  * The agent-deck adapter: the single place that turns Castra operations into
@@ -74,6 +78,12 @@ export function buildLaunchArgs(input: {
     "--add-dir",
     "--extra-arg",
     stewardSkillsRoot(),
+    // Load the steward self-report settings (#371): the Notification/Stop hook
+    // that POSTs the steward's state to Herald. Provisioned alongside the skills.
+    "--extra-arg",
+    "--settings",
+    "--extra-arg",
+    stewardSettingsPath(),
   ];
 }
 
@@ -519,6 +529,16 @@ export function createAgentDeckAdapter(): AgentDeckAdapter {
             "re-dispatch once the colliding launch settles.",
         );
       }
+
+      // Record the launch-time context the steward self-report hook echoes back
+      // (#371): keyed by this worktree, it carries the slice id / profile /
+      // Herald URL the hook needs to POST a report. Best-effort (no-op without a
+      // sliceId) and must not fail the launch — see recordStewardSession.
+      recordStewardSession({
+        worktreePath,
+        profile: input.profile,
+        sliceId: input.metadata?.sliceId,
+      });
 
       // Stewards need session-level auto-mode or the agent-deck classifier
       // pauses tool calls mid-workflow. Best-effort — a functional session
