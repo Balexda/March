@@ -18,6 +18,23 @@ export interface RecordHeraldObserveInput {
   readonly eventsByType: Record<string, number>;
 }
 
+/**
+ * The classification label for a steward self-report (#371) — the cheap-vs-
+ * expensive split the heuristic-health monitor watches. `classified:true`
+ * reports carry their detected status (`awaiting_input`/`reported`/`working`);
+ * `classified:false` reports are the ones the hook's heuristic could NOT pin
+ * down and that fall through to the (relatively expensive) legate-agent (P2).
+ * A rising `unclassified` share is the signal that the heuristics need updating.
+ * Bounded to ≤5 values, so it stays a safe metric label.
+ */
+export function stewardReportClassification(
+  classified: boolean,
+  status?: string,
+): string {
+  if (!classified) return "unclassified";
+  return status && status.length > 0 ? status : "classified";
+}
+
 const HEARTBEAT_INTERVAL_MS = 15000;
 
 // One instrument per Meter, rebuilt transparently when initOtel swaps the
@@ -27,6 +44,7 @@ let requestsCounter: Counter | undefined;
 let requestDuration: Histogram | undefined;
 let observeDuration: Histogram | undefined;
 let eventsCounter: Counter | undefined;
+let stewardReportsCounter: Counter | undefined;
 let adminEventsCounter: Counter | undefined;
 let observeErrors: Counter | undefined;
 let syncCounter: Counter | undefined;
@@ -37,6 +55,7 @@ interface HeraldInstruments {
   requestDuration: Histogram;
   observeDuration: Histogram;
   events: Counter;
+  stewardReports: Counter;
   adminEvents: Counter;
   observeErrors: Counter;
   sync: Counter;
@@ -60,6 +79,11 @@ function heraldInstruments(meter: Meter): HeraldInstruments {
     });
     eventsCounter = meter.createCounter("march.herald.events", {
       description: "Count of change events Herald appended, by type",
+      unit: "1",
+    });
+    stewardReportsCounter = meter.createCounter("march.herald.steward_reports", {
+      description:
+        "Count of steward self-reports recorded, by classification and profile (#371)",
       unit: "1",
     });
     adminEventsCounter = meter.createCounter("march.herald.admin.events", {
@@ -90,6 +114,7 @@ function heraldInstruments(meter: Meter): HeraldInstruments {
     requestDuration: requestDuration!,
     observeDuration: observeDuration!,
     events: eventsCounter!,
+    stewardReports: stewardReportsCounter!,
     adminEvents: adminEventsCounter!,
     observeErrors: observeErrors!,
     sync: syncCounter!,
@@ -120,6 +145,26 @@ export function recordHeraldObserve(input: RecordHeraldObserveInput): void {
   for (const [type, count] of Object.entries(input.eventsByType)) {
     if (count > 0) instruments.events.add(count, { type });
   }
+}
+
+/**
+ * Record one steward self-report (#371): increments
+ * `march.herald.steward_reports` labelled by `classification` (the cheap-vs-
+ * legate-agent split — see {@link stewardReportClassification}) and `profile`
+ * (both low-cardinality). This is the queryable signal for steward-report
+ * volume and, via the unclassified share, heuristic health. No-op when
+ * telemetry is disabled.
+ */
+export function recordStewardReport(input: {
+  readonly profile: string;
+  readonly classification: string;
+}): void {
+  const otel = getActiveOtel();
+  if (!otel.enabled) return;
+  heraldInstruments(otel.getMeter()).stewardReports.add(1, {
+    profile: input.profile,
+    classification: input.classification,
+  });
 }
 
 /**

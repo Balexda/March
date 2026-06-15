@@ -5,7 +5,11 @@ import {
   recordHeraldRequest,
 } from "../../observability/herald-metrics.js";
 import { startHeraldSpan } from "../../observability/herald-trace.js";
-import { recordHeraldAdminEvent } from "../../observability/herald-metrics.js";
+import {
+  recordHeraldAdminEvent,
+  recordStewardReport,
+  stewardReportClassification,
+} from "../../observability/herald-metrics.js";
 import { createCastraClientFromEnv } from "../../castra/client.js";
 import type { EventStore } from "./store.js";
 import type { AppendEventInput, EventType } from "../events.js";
@@ -260,6 +264,16 @@ export async function registerRoutes(
       ...(status !== undefined ? { status: status as "awaiting_input" | "reported" | "working" } : {}),
       ...(typeof body.summary === "string" ? { summary: body.summary } : {}),
     } as AppendEventInput);
+    // Track report volume + the heuristic-vs-legate-agent split (#371): a rising
+    // `unclassified` share means the cheap hook heuristics are missing cases and
+    // pushing the expensive legate-agent harder — the heuristic-health monitor.
+    recordStewardReport({
+      profile,
+      classification: stewardReportClassification(
+        body.classified,
+        typeof status === "string" ? status : undefined,
+      ),
+    });
     reply.code(201);
     return event;
   });
