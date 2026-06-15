@@ -21,7 +21,6 @@ import {
   summarizeSlicesByStage,
   mergeReadiness,
   mergeBlocker,
-  stampStewardAwaitingInput,
 } from "./slice.js";
 import { dispatchSliceId } from "./dispatch-id.js";
 
@@ -230,26 +229,6 @@ describe("slice pure helpers", () => {
     expect(prBlocker).toEqual({ conflicting: 1, owes_review_threads: 1, owes_comments: 1, ci_failing: 1 });
   });
 
-  it("stampStewardAwaitingInput flags slices whose live steward session is parked 'waiting' (session-state, no GitHub)", () => {
-    const slices = {
-      a: { worker_session_id: "w1" }, // waiting → flagged
-      b: { worker_session_id: "w2" }, // running → not
-      c: { worker_session_id: "gone" }, // no live session → not
-      d: {}, // no session → not
-    };
-    const sessions = [
-      { id: "w1", group: "legate-workers", status: "waiting" },
-      { id: "w2", group: "legate-workers", status: "running" },
-    ];
-    stampStewardAwaitingInput(slices, sessions, "legate-workers");
-    expect((slices.a as any).steward_awaiting_input).toBe(true);
-    expect((slices.b as any).steward_awaiting_input).toBe(false);
-    expect((slices.c as any).steward_awaiting_input).toBe(false);
-    expect((slices.d as any).steward_awaiting_input).toBe(false);
-    // The summary then tallies the stamp.
-    expect(summarizeSlicesByStage(slices).stewardsAwaitingInput).toBe(1);
-  });
-
   it("mergeBlocker classifies the dominant blocker in babysit's dispatch precedence", () => {
     const pr = (over: any) => ({ number: 5, checks: "PASS", mergeable: "MERGEABLE", needs_response_count: 0, ...over });
     // Precedence: conflict > review threads > conversation comments > CI.
@@ -326,6 +305,7 @@ describe("slice pure helpers", () => {
         needs_human_judgement: 0,
         real_spawn_error: 0,
         steward_stuck: 0,
+        steward_awaiting_input: 0,
         other: 0,
       },
       prBlocker: {
@@ -334,7 +314,6 @@ describe("slice pure helpers", () => {
         owes_comments: 0,
         ci_failing: 0,
       },
-      stewardsAwaitingInput: 0,
     });
   });
 

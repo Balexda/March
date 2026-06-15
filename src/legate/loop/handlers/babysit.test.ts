@@ -151,6 +151,35 @@ describe("babysit assess", () => {
     expect(kindsOf(assess(state))).toEqual(["pr-snapshot", "comment-fix"]);
   });
 
+  it("escalates a steward parked on Claude's interactive prompt as steward-awaiting-input (from output, not status)", () => {
+    const promptOutput = ["How should I resolve this?", "❯ 1. Option A", "  2. Type something.", "  3. Chat about this", "Enter to select · Esc to cancel"].join("\n");
+    const state = loopState({
+      slices: { s: { worker_session_id: "w", stage: "pr-open", pr: { number: 346 } } },
+      sessions: [session("w", "waiting")],
+      perSlice: { s: { recentOutput: { output: promptOutput }, pr: { number: 346, state: "OPEN", checks: "PASS" } } },
+    });
+    // Detection short-circuits before PR logic → no pr-snapshot, just the escalation.
+    expect(kindsOf(assess(state))).toEqual(["steward-awaiting-input"]);
+  });
+
+  it("does NOT escalate a parked steward whose output is mid-task (no prompt)", () => {
+    const state = loopState({
+      slices: { s: { worker_session_id: "w", stage: "pr-open", pr: { number: 346 }, pr_open_at: T_30M_AGO } },
+      sessions: [session("w", "waiting")],
+      perSlice: { s: { recentOutput: { output: "This is the key finding. Let me read the inline guard." }, pr: { number: 346, state: "OPEN", checks: "PASS", needs_response_count: 0 } } },
+    });
+    expect(kindsOf(assess(state))).not.toContain("steward-awaiting-input");
+  });
+
+  it("clears the awaiting-input escalation when the steward's prompt is gone", () => {
+    const state = loopState({
+      slices: { s: { worker_session_id: "w", stage: "escalated", escalated_reason: "steward_awaiting_input", steward_awaiting_input_at: T_30M_AGO, pre_awaiting_stage: "pr-open", pr: { number: 346 } } },
+      sessions: [session("w", "waiting")],
+      perSlice: { s: { recentOutput: { output: "Resolved — applying option 1 now." }, pr: { number: 346, state: "OPEN", checks: "PASS" } } },
+    });
+    expect(kindsOf(assess(state))).toContain("steward-awaiting-clear");
+  });
+
   it("escalates a parked steward that ignored a comment-fix as steward-stuck", () => {
     const state = loopState({
       slices: {
@@ -545,6 +574,28 @@ describe("babysit apply", () => {
     expect(slice.steward_stuck_at).toBeUndefined();
     expect(slice.escalated_reason).toBeUndefined();
     expect(res.actions[0]).toMatchObject({ action: "steward-unstuck" });
+  });
+
+  it("steward-awaiting-input apply escalates the slice (visible) + saves prior stage", async () => {
+    const slice: any = { worker_session_id: "w", stage: "pr-open", pr: { number: 346 } };
+    const state = loopState({ slices: { s: slice } });
+    const c = ctx();
+    const res = await apply([{ kind: "steward-awaiting-input", sliceId: "s", sessionId: "w", detail: 'awaiting: "How should I resolve…?"' }], c, state, deps());
+    expect(slice.stage).toBe("escalated");
+    expect(slice.escalated_reason).toBe("steward_awaiting_input");
+    expect(slice.steward_awaiting_input_at).toBe(NOW);
+    expect(slice.pre_awaiting_stage).toBe("pr-open");
+    expect(res.actions[0]).toMatchObject({ action: "steward-awaiting-input" });
+    expect(c.emitTransition).toHaveBeenCalledWith({ type: "slice.escalated", sliceId: "s", reason: "steward_awaiting_input" });
+  });
+
+  it("steward-awaiting-clear apply restores the prior stage", async () => {
+    const slice: any = { worker_session_id: "w", stage: "escalated", escalated_reason: "steward_awaiting_input", steward_awaiting_input_at: NOW, pre_awaiting_stage: "pr-open" };
+    const state = loopState({ slices: { s: slice } });
+    await apply([{ kind: "steward-awaiting-clear", sliceId: "s", sessionId: "w" }], ctx(), state, deps());
+    expect(slice.stage).toBe("pr-open");
+    expect(slice.steward_awaiting_input_at).toBeUndefined();
+    expect(slice.escalated_reason).toBeUndefined();
   });
 
   it("review-fix that fails to send escalates instead of advancing stage", async () => {

@@ -1,6 +1,5 @@
 import { dispatchBranch, dispatchItemKey, dispatchSliceId, sliceActionKey } from "./dispatch-id.js";
 import { resolveMergeRequirements, type MergePolicy } from "../../../herald/profiles/merge-policy.js";
-import { workerBySessionId } from "./session.js";
 
 /**
  * Pure slice/archive reasoning: terminal detection and the dedup/recovery
@@ -352,6 +351,10 @@ export const ESCALATION_REASONS = [
   // drive it isn't built yet, so we surface it as escalated rather than silently
   // dropping it. Operator-resolvable; not auto-recoverable (#non-thread-comments).
   "steward_stuck",
+  // The steward explicitly handed a decision back / asked the user and is parked
+  // AWAITING the user's response (detected from session output). The thing it's
+  // pending — operator input — isn't deliverable by the loop, so it is escalated.
+  "steward_awaiting_input",
 ] as const;
 
 /** Catch-all bucket for any escalation reason outside {@link ESCALATION_REASONS}. */
@@ -380,10 +383,6 @@ export interface SliceStageSummary {
    *  not-ready reasons the 3-way merge-readiness gauge collapses away — `conflicting`
    *  / `owes_review_threads` / `owes_comments` / `ci_failing`. Pre-seeded to 0. */
   readonly prBlocker: Record<string, number>;
-  /** Slices whose live steward session is parked in `waiting` status — blocked
-   *  needing input, an operator-attention signal independent of any GitHub state
-   *  (stamped by {@link stampStewardAwaitingInput}). */
-  readonly stewardsAwaitingInput: number;
 }
 
 /**
@@ -529,30 +528,6 @@ export function mergeBlocker(slice: any, pr: any): PrBlocker {
 }
 
 /**
- * Stamp `slice.steward_awaiting_input` on every slice from its live worker session
- * status — a pure SESSION-state signal, decoupled from GitHub/PR state. A steward
- * whose session is parked in `waiting` status is blocked needing input (a Claude
- * permission prompt, or a question it asked) and cannot self-progress; the
- * legate-agent/human path that would answer it isn't built yet, so we surface it
- * for an operator to find (the session id + worktree ride in /escalations) and
- * unblock. Call once per tick on the working slices before
- * {@link summarizeSlicesByStage} so the gauge + endpoint read the current value.
- */
-export function stampStewardAwaitingInput(
-  slices: Record<string, any> | undefined,
-  sessions: any,
-  workerGroup: string,
-): void {
-  const workers = workerBySessionId(sessions, workerGroup);
-  for (const slice of Object.values(slices ?? {})) {
-    if (!slice || typeof slice !== "object") continue;
-    const sid = String(slice.worker_session_id || "");
-    const worker = sid ? workers.get(sid) : undefined;
-    slice.steward_awaiting_input = !!worker && worker.status === "waiting";
-  }
-}
-
-/**
  * Tally the loop's working slices by lifecycle `stage` and derive how many are
  * ready to merge (#220). Pure: reads only the in-memory working `slices` record
  * (after the tick's handlers have run, so stages/PR snapshots are current).
@@ -581,10 +556,8 @@ export function summarizeSlicesByStage(slices: Record<string, any> | undefined):
   let readyToMerge = 0;
   let waitingOnApproval = 0;
   let blockedOnMergeState = 0;
-  let stewardsAwaitingInput = 0;
   for (const slice of Object.values(slices ?? {})) {
     if (!slice || typeof slice !== "object") continue;
-    if (slice.steward_awaiting_input === true) stewardsAwaitingInput++;
     const raw = typeof slice.stage === "string" ? slice.stage : "";
     const stage = STAGE_ALLOWLIST.has(raw) ? raw : OTHER_STAGE;
     byStage[stage] = (byStage[stage] ?? 0) + 1;
@@ -614,5 +587,5 @@ export function summarizeSlicesByStage(slices: Record<string, any> | undefined):
       prBlocker[slice.pr_blocker] += 1;
     }
   }
-  return { byStage, readyToMerge, waitingOnApproval, blockedOnMergeState, escalatedByReason, prBlocker, stewardsAwaitingInput };
+  return { byStage, readyToMerge, waitingOnApproval, blockedOnMergeState, escalatedByReason, prBlocker };
 }

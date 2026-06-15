@@ -7,7 +7,7 @@ import * as babysit from "./handlers/babysit.js";
 import * as recovery from "./handlers/recovery.js";
 import * as adoptFromFold from "./handlers/adopt-from-fold.js";
 import * as dispatch from "./handlers/dispatch.js";
-import { dispatchableReady, stampStewardAwaitingInput, summarizeSlicesByStage, type SpawnBudget } from "./pure/slice.js";
+import { dispatchableReady, summarizeSlicesByStage, type SpawnBudget } from "./pure/slice.js";
 
 /**
  * Stage 2 orchestration. runTick senses once, then runs the handlers in the fixed
@@ -59,11 +59,7 @@ function buildTickResult(state: LoopState, r: CoordinatorOutput["results"], spaw
   // Tally after all handlers ran so stages/PR snapshots reflect this tick (#220).
   // The merge-readiness 3-way (ready / waiting-approval / blocked-merge-state) is
   // read from each slice's `merge_gate` stamp (babysit's live-PR verdict).
-  // Stamp the session-state "steward awaiting input" signal (parked `waiting`
-  // workers) before the tally — decoupled from GitHub, for the operator-attention
-  // metric + /escalations.
-  stampStewardAwaitingInput(state.slices, state.sessions, state.workerGroup);
-  const { byStage, readyToMerge, waitingOnApproval, blockedOnMergeState, escalatedByReason, prBlocker, stewardsAwaitingInput } =
+  const { byStage, readyToMerge, waitingOnApproval, blockedOnMergeState, escalatedByReason, prBlocker } =
     summarizeSlicesByStage(state.slices);
   // Per-kind babysit fix-dispatch breakdown — the aggregate `babysitActionCount`
   // hides WHICH fix the loop is doing. Bounded label set, keyed in metric form.
@@ -95,7 +91,6 @@ function buildTickResult(state: LoopState, r: CoordinatorOutput["results"], spaw
     blockedOnMergeStateCount: blockedOnMergeState,
     dispatchableReadyCount,
     escalatedByReason,
-    stewardsAwaitingInput,
     prBlockerCounts: prBlocker,
     babysitActionsByKind,
     cleanupCount: r.cleanup.actions.length,

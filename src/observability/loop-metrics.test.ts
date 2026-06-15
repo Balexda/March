@@ -23,7 +23,6 @@ function activity(overrides: Partial<LoopTickActivity> = {}): LoopTickActivity {
       blockedOnMergeState: 1,
       escalatedByReason: { hatchery_dispatch_failed: 0, other: 0 },
       prBlocker: { conflicting: 0, owes_review_threads: 0, owes_comments: 0, ci_failing: 0 },
-      stewardsAwaitingInput: 2,
     },
     tickDurationSeconds: 0.4,
     dispatchActions: 1,

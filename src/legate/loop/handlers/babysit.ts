@@ -13,6 +13,7 @@ import {
   loginRequiredDetail,
   loginResumeMessage,
   reviewFixMessage,
+  stewardAwaitingUserResponse,
   threadsNeedingResponse,
   workerErrorDetail,
 } from "../pure/messages.js";
@@ -152,6 +153,8 @@ export type BabysitDecision =
   | { kind: "comment-fix"; sliceId: string; sessionId: string; pr: any; key: string; message: string; detail: string; commentIds: string[] }
   | { kind: "steward-stuck"; sliceId: string; sessionId: string; pr: any; requestKey: string; reason: string; detail: string }
   | { kind: "steward-unstuck"; sliceId: string; sessionId: string; pr: any }
+  | { kind: "steward-awaiting-input"; sliceId: string; sessionId: string; detail: string }
+  | { kind: "steward-awaiting-clear"; sliceId: string; sessionId: string }
   | { kind: "ci-fix"; sliceId: string; sessionId: string; pr: any; key: string; message: string; detail: string }
   | { kind: "ci-failure"; sliceId: string; sessionId: string; pr: any; requestKey: string; detail: string }
   | { kind: "pr-open-clear"; sliceId: string; sessionId: string; pr: any }
@@ -172,6 +175,16 @@ function workerErrorRequestKey(sessionId: string, slice: any, recent: any): stri
 function hasClaudeLoginBlock(output: any): boolean {
   const text = String(output || "");
   return text.includes("Please run /login") || text.includes("API Error: 401 Invalid authentication credentials");
+}
+
+/** A concise detail for a steward-awaiting-input escalation: the prompt's question
+ *  line (so the operator sees what is being asked) from the recent output tail. */
+function awaitingInputDetail(output: any): string {
+  const tail = String(output || "").slice(-1500);
+  const lines = tail.split("\n").map((l) => l.trim()).filter(Boolean);
+  const question = [...lines].reverse().find((l) => l.endsWith("?") && l.length <= 200);
+  const base = "Steward is parked on an interactive prompt awaiting your selection";
+  return question ? `${base}: "${question}". Attach to the session to answer.` : `${base}. Attach to the session to see the options.`;
 }
 
 function alreadyDispatched(slice: any, key: string): boolean {
@@ -307,6 +320,26 @@ export function assess(state: LoopState): BabysitDecision[] {
 
     // 4. Clear a stale worker-error marker (bookkeeping; not terminal).
     if (slice.worker_error_last_seen_at) out.push({ kind: "clear-worker-error", sliceId });
+
+    // 4.5 Steward awaiting-user-response escalation (#non-thread-comments). The
+    // steward is "pending a response from the user" when Claude Code is showing its
+    // interactive selection prompt — detected from the session OUTPUT, not the
+    // coarse `waiting` status (every parked session is `waiting`). Escalate so it
+    // shows on the work-status dashboard (escalated_by_reason{steward_awaiting_input})
+    // + /escalations; latched, and cleared once the steward resumes (running) or the
+    // prompt is gone from its output.
+    const awaitingNow = stewardAwaitingUserResponse(recent.output);
+    if (slice.steward_awaiting_input_at) {
+      if (workerStatus === "running" || !awaitingNow) {
+        out.push({ kind: "steward-awaiting-clear", sliceId, sessionId });
+        // fall through — steward resumed; resume normal handling below.
+      } else {
+        continue; // still on the prompt — hold the escalation, take no other action.
+      }
+    } else if (awaitingNow && (workerStatus === "waiting" || workerStatus === "idle")) {
+      out.push({ kind: "steward-awaiting-input", sliceId, sessionId, detail: awaitingInputDetail(recent.output) });
+      continue;
+    }
 
     // 5. Running workers are healthy — nothing to do.
     if (workerStatus === "running") continue;
@@ -972,6 +1005,35 @@ export async function apply(decisions: BabysitDecision[], ctx: HandlerContext, s
         slice.last_action_note = "steward resumed — cleared steward-stuck escalation";
         ctx.emitTransition?.({ type: "slice.stage.changed", sliceId: d.sliceId, stage: "pr-open" });
         res.actions.push({ action: "steward-unstuck", sliceId: d.sliceId, sessionId: d.sessionId, pr: d.pr, detail: "steward resumed" });
+        res.mutated = true;
+        break;
+      }
+      case "steward-awaiting-input": {
+        // The steward is parked on Claude's interactive prompt awaiting the user.
+        // Escalate so it shows on the dashboard (escalated_by_reason) + /escalations;
+        // save the prior stage so steward-awaiting-clear can restore it on resume.
+        if (slice.stage !== "escalated") slice.pre_awaiting_stage = slice.stage;
+        slice.stage = "escalated";
+        slice.escalated_reason = "steward_awaiting_input";
+        slice.steward_awaiting_input_at = ts;
+        slice.last_action = ts;
+        slice.last_action_note = d.detail;
+        ctx.emitTransition?.({ type: "slice.escalated", sliceId: d.sliceId, reason: "steward_awaiting_input" });
+        res.actions.push({ action: "steward-awaiting-input", sliceId: d.sliceId, sessionId: d.sessionId, detail: d.detail });
+        res.mutated = true;
+        break;
+      }
+      case "steward-awaiting-clear": {
+        // The steward resumed (running) or the prompt cleared — un-escalate and
+        // restore the prior stage so normal babysit handling resumes.
+        delete slice.steward_awaiting_input_at;
+        slice.escalated_reason = undefined;
+        slice.stage = slice.pre_awaiting_stage || "pr-open";
+        delete slice.pre_awaiting_stage;
+        slice.last_action = ts;
+        slice.last_action_note = "steward resumed — cleared awaiting-input escalation";
+        ctx.emitTransition?.({ type: "slice.stage.changed", sliceId: d.sliceId, stage: slice.stage });
+        res.actions.push({ action: "steward-awaiting-clear", sliceId: d.sliceId, sessionId: d.sessionId, detail: "steward resumed" });
         res.mutated = true;
         break;
       }

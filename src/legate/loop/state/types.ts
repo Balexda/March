@@ -158,9 +158,6 @@ export interface TickResult {
   dispatchableReadyCount: number;
   /** Escalated-stage slices keyed by escalation reason; sums to slicesByStage.escalated. */
   escalatedByReason: Record<string, number>;
-  /** Slices whose live steward session is parked in `waiting` status — blocked
-   *  needing input (an operator-attention signal, independent of GitHub state). */
-  stewardsAwaitingInput: number;
   /** PR-bearing slices keyed by dominant merge BLOCKER (conflicting /
    *  owes_review_threads / owes_comments / ci_failing) — the not-ready reasons the
    *  3-way merge-readiness gauge collapses away (#non-thread-comments). */

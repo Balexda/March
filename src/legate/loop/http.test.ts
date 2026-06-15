@@ -102,53 +102,36 @@ describe("loop http (fastify)", () => {
 
 const escalatedWorkingState = {
   slices: {
+    // Steward parked on Claude's interactive prompt awaiting the user → escalated.
     "spec-re-read-us1-s2-forge": {
       stage: "escalated",
-      escalated_reason: "steward_stuck",
+      escalated_reason: "steward_awaiting_input",
       branch: "feature/smithy/forge/x",
       actual_branch: "feature/smithy/forge/x",
       worker_session_id: "sess-1",
       worktree_path: "/wt/x",
-      pr: { number: 457, url: "https://github.com/Balexda/SmithyCLI/pull/457" },
-      last_action_note: "PR #457: steward parked after /smithy.fix; no push — escalated.",
-      steward_stuck_at: "2026-06-14T08:00:00.000Z",
+      pr: { number: 346, url: "https://github.com/Balexda/SmithyCLI/pull/346" },
+      last_action_note: 'Steward is parked on an interactive prompt awaiting your selection: "How should I resolve …?".',
+      steward_awaiting_input_at: "2026-06-14T08:00:00.000Z",
     },
-    // Steward parked waiting on input (NOT escalated-stage) → surfaced as awaiting_input.
-    "waiting-us1-s1-forge": {
-      stage: "pr-open",
-      branch: "feature/smithy/forge/y",
-      worker_session_id: "sess-2",
-      worktree_path: "/wt/y",
-      pr: { number: 99, url: "u99" },
-      steward_awaiting_input: true,
-      last_action: "2026-06-14T09:00:00.000Z",
-    },
-    "healthy-us1-s2-forge": { stage: "pr-open", pr: { number: 12 } }, // neither → excluded
+    "healthy-us1-s2-forge": { stage: "pr-open", pr: { number: 12 } }, // not escalated → excluded
   },
 };
 
 describe("escalationsForWorkingState (pure)", () => {
-  it("returns escalated slices AND stewards awaiting input, with session+worktree to find them", () => {
-    const out = escalationsForWorkingState(escalatedWorkingState);
-    expect(out).toHaveLength(2);
-    expect(out.find((e) => e.task === "spec-re-read-us1-s2-forge")).toEqual({
-      task: "spec-re-read-us1-s2-forge",
-      branch: "feature/smithy/forge/x",
-      pr: { number: 457, url: "https://github.com/Balexda/SmithyCLI/pull/457" },
-      reason: "steward_stuck",
-      awaiting_input: false,
-      session_id: "sess-1",
-      worktree_path: "/wt/x",
-      detail: "PR #457: steward parked after /smithy.fix; no push — escalated.",
-      escalated_at: "2026-06-14T08:00:00.000Z",
-    });
-    expect(out.find((e) => e.task === "waiting-us1-s1-forge")).toMatchObject({
-      reason: "steward_awaiting_input",
-      awaiting_input: true,
-      session_id: "sess-2",
-      worktree_path: "/wt/y",
-      pr: { number: 99 },
-    });
+  it("returns escalated slices with session+worktree+reason so the operator can find them", () => {
+    expect(escalationsForWorkingState(escalatedWorkingState)).toEqual([
+      {
+        task: "spec-re-read-us1-s2-forge",
+        branch: "feature/smithy/forge/x",
+        pr: { number: 346, url: "https://github.com/Balexda/SmithyCLI/pull/346" },
+        reason: "steward_awaiting_input",
+        session_id: "sess-1",
+        worktree_path: "/wt/x",
+        detail: 'Steward is parked on an interactive prompt awaiting your selection: "How should I resolve …?".',
+        escalated_at: "2026-06-14T08:00:00.000Z",
+      },
+    ]);
   });
 
   it("is safe on a null/empty working state (cold start)", () => {
@@ -160,11 +143,11 @@ describe("escalationsForWorkingState (pure)", () => {
 describe("buildEscalations + /escalations route", () => {
   const snap = snapshot({ byProfile: { smithy: { lastHeartbeat: heartbeat, workingState: escalatedWorkingState } } });
 
-  it("lists a profile's escalated tasks + awaiting-input stewards", () => {
+  it("lists a profile's escalated tasks with the reason + session to find them", () => {
     const out = buildEscalations(ctxWith(snap), "smithy") as any;
     expect(out.ok).toBe(true);
-    expect(out.count).toBe(2);
-    expect(out.escalations.map((e: any) => e.reason).sort()).toEqual(["steward_awaiting_input", "steward_stuck"]);
+    expect(out.count).toBe(1);
+    expect(out.escalations[0]).toMatchObject({ reason: "steward_awaiting_input", session_id: "sess-1", pr: { number: 346 } });
   });
 
   it("unknown profile reports not-ok with the known list", () => {
@@ -176,9 +159,8 @@ describe("buildEscalations + /escalations route", () => {
     try {
       const res = await app.inject({ method: "GET", url: "/escalations?profile=smithy" });
       expect(res.statusCode).toBe(200);
-      expect(res.json().count).toBe(2);
-      const awaiting = res.json().escalations.find((e: any) => e.awaiting_input);
-      expect(awaiting.session_id).toBe("sess-2"); // operator can find the session
+      expect(res.json().count).toBe(1);
+      expect(res.json().escalations[0].session_id).toBe("sess-1"); // operator can find the session
     } finally {
       await app.close();
     }

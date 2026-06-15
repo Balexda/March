@@ -2956,7 +2956,7 @@
         "type": "prometheus",
         "uid": "prometheus"
       },
-      "description": "Steward sessions parked in 'waiting' status \u2014 blocked needing operator input (session-state, no GitHub). Sustained >0 = parked sessions to find via GET /escalations and unblock.",
+      "description": "Tasks where the steward is parked on Claude's interactive prompt awaiting a user response (escalated as steward_awaiting_input). GET /escalations for the session id + worktree + question.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -3028,7 +3028,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "sum by (profile) (march_legate_stewards_awaiting_input{profile=~\"$profile\"})",
+          "expr": "sum by (profile) (march_legate_escalated{reason=\"steward_awaiting_input\", profile=~\"$profile\"})",
           "legendFormat": "{{profile}}",
           "range": true,
           "refId": "A"

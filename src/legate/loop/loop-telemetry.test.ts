@@ -137,7 +137,6 @@ describe("buildLoopTickActivity", () => {
       blockedOnMergeState: 2,
       escalatedByReason: { hatchery_dispatch_failed: 2, other: 1 }, // non-number 'bogus' dropped
       prBlocker: { conflicting: 1, owes_comments: 2 }, // non-number 'bogus' dropped
-      stewardsAwaitingInput: 0,
     });
     expect(activity.tickDurationSeconds).toBe(2.5);
     expect(activity).toMatchObject({

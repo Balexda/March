@@ -516,30 +516,30 @@ groups:
             datasourceUid: __expr__
             model: { refId: C, type: threshold, expression: A, conditions: [{ evaluator: { type: gt, params: [7200] } }] }
 
-      # STEWARD AWAITING INPUT — a pure session-state signal (no GitHub): one or more
-      # steward sessions are parked in `waiting` status, blocked needing operator
-      # input (a Claude permission prompt or a question), and the legate-agent/human
-      # path that would answer isn't built yet. Sustained >0 means parked sessions an
-      # operator must find (GET /escalations gives the session id + worktree to
-      # attach) and unblock. 15m debounce so normal between-turns waiting doesn't fire.
+      # STEWARD AWAITING INPUT — the steward is parked on Claude's interactive prompt
+      # ("pending a response from the user"), detected from session output and
+      # escalated as `steward_awaiting_input`. The legate-agent/human path that would
+      # answer it isn't built yet, so sustained >0 means tasks an operator must find
+      # (GET /escalations on the legate :8787 gives the session id + worktree + the
+      # question) and answer via agent-deck. 5m debounce.
       - uid: march-stewards-awaiting-input
-        title: Stewards awaiting input (parked sessions need an operator)
+        title: Stewards awaiting input (parked on a prompt, need an operator)
         condition: C
-        for: 15m
+        for: 5m
         noDataState: OK
         execErrState: OK
         labels: { severity: warning, team: march, tier: behavioral }
         annotations:
-          summary: One or more steward sessions have been parked in 'waiting' status for over 15 minutes — blocked needing operator input. Hit GET /escalations (legate :8787) for the session id + worktree of each, then attach via agent-deck to unblock them.
+          summary: One or more steward sessions are parked on Claude's interactive prompt awaiting a user response. Hit GET /escalations (legate :8787) for each task's session id + worktree + the question, then attach via agent-deck to answer.
         data:
           - refId: A
-            relativeTimeRange: { from: 900, to: 0 }
+            relativeTimeRange: { from: 600, to: 0 }
             datasourceUid: prometheus
             model:
               refId: A
               instant: true
               editorMode: code
-              expr: sum(march_legate_stewards_awaiting_input) or vector(0)
+              expr: sum(march_legate_escalated{reason="steward_awaiting_input"}) or vector(0)
           - refId: C
             datasourceUid: __expr__
             model: { refId: C, type: threshold, expression: A, conditions: [{ evaluator: { type: gt, params: [0] } }] }

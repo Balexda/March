@@ -68,8 +68,8 @@ export function buildStatus(ctx: LoopHttpContext, profile?: string): Record<stri
   return { ok: true, profiles: snap.profiles, by_profile: byProfile };
 }
 
-/** One entry in the /escalations interrogation payload — a task needing operator
- *  attention: either an escalated-stage slice OR a steward parked awaiting input. */
+/** One escalated task in the /escalations interrogation payload — work needing
+ *  operator attention (escalated-stage slices, incl. `steward_awaiting_input`). */
 export interface EscalationEntry {
   /** The task — the slice id (encodes the smithy artifact/feature/slice). */
   task: string;
@@ -77,46 +77,38 @@ export interface EscalationEntry {
   branch: string | null;
   /** The PR associated with the task (number + url), or null if none observed yet. */
   pr: { number: number | null; url: string | null } | null;
-  /** Why it needs attention: the `escalated_reason` (e.g. `steward_stuck`), or
-   *  `steward_awaiting_input` when the steward session is parked in `waiting`. */
+  /** Why it's escalated (the bounded `escalated_reason`, e.g. `steward_awaiting_input`). */
   reason: string | null;
-  /** True when the steward session is parked in `waiting` status (needs input) —
-   *  a session-state signal independent of any GitHub state. */
-  awaiting_input: boolean;
   /** The Castra/agent-deck session id — so the operator can attach and unblock it. */
   session_id: string | null;
   /** The steward's worktree path — where to attach / inspect. */
   worktree_path: string | null;
-  /** Human-readable detail (the last action note, when escalated). */
+  /** Human-readable detail (the last action note — for awaiting-input, a snippet
+   *  of what the steward is asking). */
   detail: string | null;
-  /** When it entered the state (best-effort: escalation stamp or last action). */
+  /** When it entered the escalation (best-effort: escalation stamp or last action). */
   escalated_at: string | null;
 }
 
-/** Extract the tasks needing operator attention from a profile's working state
- *  (pure; testable): escalated-stage slices AND stewards parked awaiting input. */
+/** Extract the escalated slices from a profile's working state (pure; testable) —
+ *  the operator's list of tasks needing manual resolution, each with the session
+ *  id + worktree to go find and unblock it. */
 export function escalationsForWorkingState(workingState: any): EscalationEntry[] {
   const slices = workingState?.slices;
   if (!slices || typeof slices !== "object") return [];
   const out: EscalationEntry[] = [];
   for (const [sliceId, s] of Object.entries(slices as Record<string, any>)) {
-    if (!s || typeof s !== "object") continue;
-    const isEscalated = s.stage === "escalated";
-    const awaitingInput = s.steward_awaiting_input === true;
-    if (!isEscalated && !awaitingInput) continue;
+    if (!s || typeof s !== "object" || s.stage !== "escalated") continue;
     const pr = s.pr;
     out.push({
       task: sliceId,
       branch: s.actual_branch ?? s.branch ?? null,
       pr: pr && (pr.number != null || pr.url != null) ? { number: pr.number ?? null, url: pr.url ?? null } : null,
-      // An escalated slice keeps its escalated_reason; an otherwise-fine slice whose
-      // steward is just parked surfaces as steward_awaiting_input.
-      reason: isEscalated && typeof s.escalated_reason === "string" ? s.escalated_reason : awaitingInput ? "steward_awaiting_input" : null,
-      awaiting_input: awaitingInput,
+      reason: typeof s.escalated_reason === "string" ? s.escalated_reason : null,
       session_id: s.worker_session_id ?? null,
       worktree_path: s.worktree_path ?? null,
-      detail: typeof s.last_action_note === "string" ? s.last_action_note : awaitingInput ? "steward session parked in 'waiting' status — needs operator input" : null,
-      escalated_at: s.steward_stuck_at ?? s.last_action ?? null,
+      detail: typeof s.last_action_note === "string" ? s.last_action_note : null,
+      escalated_at: s.steward_awaiting_input_at ?? s.steward_stuck_at ?? s.last_action ?? null,
     });
   }
   return out;
