@@ -231,11 +231,15 @@ describe("slice pure helpers", () => {
 
   it("mergeBlocker classifies the dominant blocker in babysit's dispatch precedence", () => {
     const pr = (over: any) => ({ number: 5, checks: "PASS", mergeable: "MERGEABLE", needs_response_count: 0, ...over });
-    // Precedence: conflict > review threads > conversation comments > CI.
+    // Precedence matches babysit's block order: conflict > review threads > CI >
+    // conversation comments.
     expect(mergeBlocker({}, pr({ mergeable: "CONFLICTING", checks: "FAIL", needs_response_count: 2 }))).toBe("conflicting");
     expect(mergeBlocker({}, pr({ needs_response_count: 1, checks: "FAIL" }))).toBe("owes_review_threads");
-    expect(mergeBlocker({}, pr({ conversation_comments: [{ id: 1, reacted_eyes: false }], checks: "FAIL" }))).toBe("owes_comments");
+    // CI wins over an unacked comment (babysit fixes CI before comment-fix).
+    expect(mergeBlocker({}, pr({ conversation_comments: [{ id: 1, reacted_eyes: false }], checks: "FAIL" }))).toBe("ci_failing");
     expect(mergeBlocker({}, pr({ checks: "FAIL" }))).toBe("ci_failing");
+    // owes_comments only once checks PASS (no CI to fix first).
+    expect(mergeBlocker({}, pr({ conversation_comments: [{ id: 1, reacted_eyes: false }] }))).toBe("owes_comments");
     // All-clear, an acknowledged comment, or no PR → none.
     expect(mergeBlocker({}, pr({ conversation_comments: [{ id: 1, reacted_eyes: true }] }))).toBe("none");
     expect(mergeBlocker({}, pr({}))).toBe("none");

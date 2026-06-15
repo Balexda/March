@@ -485,8 +485,10 @@ export function mergeReadiness(
 
 /**
  * The merge-BLOCKER taxonomy for a PR-bearing slice: the dominant reason it is not
- * merging, in babysit's own dispatch precedence (conflict → review threads →
- * conversation comments → CI). This COMPLEMENTS {@link mergeReadiness} rather than
+ * merging, in babysit's own dispatch precedence (conflict → review threads → CI →
+ * conversation comments) — so the gauge reflects what the loop will actually act on
+ * (a red-CI PR with an unacked comment classifies `ci_failing`, since babysit fixes
+ * CI before comments). This COMPLEMENTS {@link mergeReadiness} rather than
  * duplicating it — the all-clear gate states (ready / waiting-approval /
  * blocked-merge-state) are reported by the 3-way gauge; this surfaces only the
  * not-ready blockers that the 3-way collapses into "not-ready" and so makes
@@ -522,8 +524,10 @@ export function mergeBlocker(slice: any, pr: any): PrBlocker {
   if (src.mergeable === "CONFLICTING") return "conflicting";
   const owed = src.needs_response_count ?? slice?.needs_response_count;
   if (typeof owed === "number" && owed > 0) return "owes_review_threads";
-  if (owesCommentResponse(src)) return "owes_comments";
+  // CI before comments — matches babysit's block order (it dispatches a ci-fix
+  // before a comment-fix), so a red-CI PR with an unacked comment is `ci_failing`.
   if (src.checks === "FAIL") return "ci_failing";
+  if (owesCommentResponse(src)) return "owes_comments";
   return "none";
 }
 
