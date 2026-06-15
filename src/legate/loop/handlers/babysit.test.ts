@@ -151,31 +151,30 @@ describe("babysit assess", () => {
     expect(kindsOf(assess(state))).toEqual(["pr-snapshot", "comment-fix"]);
   });
 
-  it("escalates a steward parked on Claude's interactive prompt as steward-awaiting-input (from output, not status)", () => {
-    const promptOutput = ["How should I resolve this?", "❯ 1. Option A", "  2. Type something.", "  3. Chat about this", "Enter to select · Esc to cancel"].join("\n");
+  it("escalates a steward whose SELF-REPORT says awaiting_input (from the fold, not a scrape)", () => {
     const state = loopState({
       slices: { s: { worker_session_id: "w", stage: "pr-open", pr: { number: 346 } } },
       sessions: [session("w", "waiting")],
-      perSlice: { s: { recentOutput: { output: promptOutput }, pr: { number: 346, state: "OPEN", checks: "PASS" } } },
+      perSlice: { s: { stewardReport: { status: "awaiting_input", summary: "How should I resolve the reviewer's concern?", classified: true }, pr: { number: 346, state: "OPEN", checks: "PASS" } } },
     });
     // Detection short-circuits before PR logic → no pr-snapshot, just the escalation.
     expect(kindsOf(assess(state))).toEqual(["steward-awaiting-input"]);
   });
 
-  it("does NOT escalate a parked steward whose output is mid-task (no prompt)", () => {
+  it("does NOT escalate a steward whose self-report is a non-awaiting state (working)", () => {
     const state = loopState({
       slices: { s: { worker_session_id: "w", stage: "pr-open", pr: { number: 346 }, pr_open_at: T_30M_AGO } },
       sessions: [session("w", "waiting")],
-      perSlice: { s: { recentOutput: { output: "This is the key finding. Let me read the inline guard." }, pr: { number: 346, state: "OPEN", checks: "PASS", needs_response_count: 0 } } },
+      perSlice: { s: { stewardReport: { status: "working", classified: true }, pr: { number: 346, state: "OPEN", checks: "PASS", needs_response_count: 0 } } },
     });
     expect(kindsOf(assess(state))).not.toContain("steward-awaiting-input");
   });
 
-  it("clears the awaiting-input escalation when the steward's prompt is gone", () => {
+  it("clears the awaiting-input escalation when the steward reports a non-awaiting state", () => {
     const state = loopState({
       slices: { s: { worker_session_id: "w", stage: "escalated", escalated_reason: "steward_awaiting_input", steward_awaiting_input_at: T_30M_AGO, pre_awaiting_stage: "pr-open", pr: { number: 346 } } },
       sessions: [session("w", "waiting")],
-      perSlice: { s: { recentOutput: { output: "Resolved — applying option 1 now." }, pr: { number: 346, state: "OPEN", checks: "PASS" } } },
+      perSlice: { s: { stewardReport: { status: "working", classified: true }, pr: { number: 346, state: "OPEN", checks: "PASS" } } },
     });
     expect(kindsOf(assess(state))).toContain("steward-awaiting-clear");
   });

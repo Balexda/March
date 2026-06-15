@@ -11,7 +11,6 @@ import {
   failedChecksSummary,
   prDiscoverySince,
   reviewFixMessage,
-  stewardAwaitingUserResponse,
   threadsNeedingResponse,
 } from "./messages.js";
 
@@ -93,28 +92,6 @@ describe("messages pure builders", () => {
     ]);
     expect(m).toContain("> do the thing…");
     expect(m).toContain("(full comment: https://gh/c/1)");
-  });
-
-  it("stewardAwaitingUserResponse detects Claude's interactive prompt (bars / Chat about this / footer), not mid-task output", () => {
-    // The real interactive-prompt shape (bars + options + footer).
-    const prompt = [
-      "─".repeat(40),
-      " How should I resolve the reviewer's concern on PR #346?",
-      "❯ 1. Reply-only, converge at US4",
-      "  2. Make it vertical now",
-      "  4. Type something.",
-      "─".repeat(40),
-      "  5. Chat about this",
-      "Enter to select · ↑/↓ to navigate · Esc to cancel",
-    ].join("\n");
-    expect(stewardAwaitingUserResponse(prompt)).toBe(true);
-    // Individual strong markers also trip it.
-    expect(stewardAwaitingUserResponse("...\n  5. Chat about this")).toBe(true);
-    expect(stewardAwaitingUserResponse("foo\nEsc to cancel")).toBe(true);
-    // Mid-task / healthy output does NOT.
-    expect(stewardAwaitingUserResponse("This is the key finding. Let me read the inline guard.")).toBe(false);
-    expect(stewardAwaitingUserResponse("")).toBe(false);
-    expect(stewardAwaitingUserResponse(undefined)).toBe(false);
   });
 
   it("prDiscoverySince falls back through timestamp fields", () => {

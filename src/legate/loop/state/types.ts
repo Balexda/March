@@ -28,6 +28,10 @@ export interface SliceExternalState {
   pr?: any;
   /** Recent session output (for login/error detection). */
   recentOutput?: { output: string; error?: string };
+  /** The steward's self-report (#steward-self-report): its own classified state +
+   *  a one-line summary, pushed via its hook. babysit acts on `status`
+   *  (`awaiting_input` → escalate) instead of scraping `recentOutput`. */
+  stewardReport?: { status?: "awaiting_input" | "reported" | "working"; summary?: string; classified: boolean };
 }
 
 /** Smithy readiness view derived once per tick. */

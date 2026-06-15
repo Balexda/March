@@ -344,7 +344,8 @@ export async function senseFromHerald(deps: FoldDeps, herald: HeraldInbox, prevR
     const entry: SliceExternalState = {};
     if (s.pr !== undefined) entry.pr = s.pr;
     if (s.recentOutput !== undefined) entry.recentOutput = s.recentOutput;
-    if (entry.pr !== undefined || entry.recentOutput !== undefined) perSlice[sliceId] = entry;
+    if (s.stewardReport !== undefined) entry.stewardReport = s.stewardReport;
+    if (entry.pr !== undefined || entry.recentOutput !== undefined || entry.stewardReport !== undefined) perSlice[sliceId] = entry;
   }
 
   return {

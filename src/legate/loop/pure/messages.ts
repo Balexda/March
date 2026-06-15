@@ -145,35 +145,6 @@ export function conversationCommentsSummary(comments: any[]): string {
     .join("\n\n");
 }
 
-/**
- * Detect from a steward's recent session output that Claude Code is showing its
- * INTERACTIVE selection prompt (an AskUserQuestion / option menu) and is parked
- * AWAITING the user's choice — the reliable signal that the steward is "pending a
- * response from the user", distinct from a healthy turn-end or a mid-task stall.
- * The agent-deck `waiting` status is too coarse (every parked session is
- * `waiting`), so we key on the prompt's consistent on-screen structure.
- *
- * HEURISTIC STUB: the better path is to route the output block to the legate-agent
- * for classification, but that isn't built yet — so we match the prompt's
- * consistent markers: the box-drawing bar frame, the auto-added "Type something" /
- * "Chat about this" options, and the "Enter to select … Esc to cancel" footer.
- * Only the transcript TAIL is examined so older text can't trip it. (#non-thread-comments)
- */
-const INTERACTIVE_PROMPT_MARKERS: RegExp[] = [
-  /\bchat about this\b/i, // the AskUserQuestion auto-appended option
-  /\btype something\b/i, // the free-text "Other" option
-  /\benter to select\b/i, // the prompt footer
-  /\besc to cancel\b/i,
-  /to navigate/i,
-  /─{20,}/, // the box-drawing bar separator framing the prompt
-];
-
-export function stewardAwaitingUserResponse(output: string | undefined): boolean {
-  if (!output) return false;
-  const tail = String(output).slice(-1500);
-  return INTERACTIVE_PROMPT_MARKERS.some((re) => re.test(tail));
-}
-
 export function commentFixMessage(pr: any, comments: any[]): string {
   return `/smithy.fix
 

@@ -13,7 +13,6 @@ import {
   loginRequiredDetail,
   loginResumeMessage,
   reviewFixMessage,
-  stewardAwaitingUserResponse,
   threadsNeedingResponse,
   workerErrorDetail,
 } from "../pure/messages.js";
@@ -177,14 +176,12 @@ function hasClaudeLoginBlock(output: any): boolean {
   return text.includes("Please run /login") || text.includes("API Error: 401 Invalid authentication credentials");
 }
 
-/** A concise detail for a steward-awaiting-input escalation: the prompt's question
- *  line (so the operator sees what is being asked) from the recent output tail. */
-function awaitingInputDetail(output: any): string {
-  const tail = String(output || "").slice(-1500);
-  const lines = tail.split("\n").map((l) => l.trim()).filter(Boolean);
-  const question = [...lines].reverse().find((l) => l.endsWith("?") && l.length <= 200);
-  const base = "Steward is parked on an interactive prompt awaiting your selection";
-  return question ? `${base}: "${question}". Attach to the session to answer.` : `${base}. Attach to the session to see the options.`;
+/** A concise detail for a steward-awaiting-input escalation, from the steward's
+ *  self-reported summary (so the operator sees what it's asking). */
+function awaitingInputDetail(summary: any): string {
+  const s = String(summary || "").trim();
+  const base = "Steward is parked awaiting your response";
+  return s ? `${base}: ${s}` : `${base}. Attach to the session to see the prompt.`;
 }
 
 function alreadyDispatched(slice: any, key: string): boolean {
@@ -321,23 +318,24 @@ export function assess(state: LoopState): BabysitDecision[] {
     // 4. Clear a stale worker-error marker (bookkeeping; not terminal).
     if (slice.worker_error_last_seen_at) out.push({ kind: "clear-worker-error", sliceId });
 
-    // 4.5 Steward awaiting-user-response escalation (#non-thread-comments). The
-    // steward is "pending a response from the user" when Claude Code is showing its
-    // interactive selection prompt — detected from the session OUTPUT, not the
-    // coarse `waiting` status (every parked session is `waiting`). Escalate so it
-    // shows on the work-status dashboard (escalated_by_reason{steward_awaiting_input})
-    // + /escalations; latched, and cleared once the steward resumes (running) or the
-    // prompt is gone from its output.
-    const awaitingNow = stewardAwaitingUserResponse(recent.output);
+    // 4.5 Steward awaiting-user-response escalation (#steward-self-report). The
+    // signal is the steward's own SELF-REPORT folded from Herald (its hook pushes
+    // `status: awaiting_input` when it parks on a prompt) — NOT a scrape of the
+    // (stale, transcript-only) session output. Escalate so it shows on the
+    // work-status dashboard (escalated_by_reason{steward_awaiting_input}) +
+    // /escalations; latched, and cleared once the steward reports a non-awaiting
+    // state (its hook fires again) or resumes running.
+    const report = ext.stewardReport;
+    const awaitingNow = report?.status === "awaiting_input";
     if (slice.steward_awaiting_input_at) {
       if (workerStatus === "running" || !awaitingNow) {
         out.push({ kind: "steward-awaiting-clear", sliceId, sessionId });
         // fall through — steward resumed; resume normal handling below.
       } else {
-        continue; // still on the prompt — hold the escalation, take no other action.
+        continue; // still awaiting — hold the escalation, take no other action.
       }
-    } else if (awaitingNow && (workerStatus === "waiting" || workerStatus === "idle")) {
-      out.push({ kind: "steward-awaiting-input", sliceId, sessionId, detail: awaitingInputDetail(recent.output) });
+    } else if (awaitingNow) {
+      out.push({ kind: "steward-awaiting-input", sliceId, sessionId, detail: awaitingInputDetail(report?.summary) });
       continue;
     }
 
