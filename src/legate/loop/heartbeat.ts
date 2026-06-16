@@ -44,6 +44,7 @@ export function buildHeartbeatRecord(out: CoordinatorOutput, meta: { processor_n
     cleanup_failure_count: t.cleanupFailureCount,
     ghost_cleanup_count: t.ghostCleanupCount,
     ghost_cleanup_failure_count: t.ghostCleanupFailureCount,
+    ghost_cleanup_deferred_count: t.ghostCleanupDeferredCount,
     relaunch_count: t.relaunchCount,
     relaunch_failure_count: t.relaunchFailureCount,
     babysit_action_count: t.babysitActionCount,
@@ -60,6 +61,7 @@ export function buildHeartbeatRecord(out: CoordinatorOutput, meta: { processor_n
     ready_to_merge_count: t.readyToMergeCount,
     waiting_on_approval_count: t.waitingOnApprovalCount,
     blocked_on_merge_state_count: t.blockedOnMergeStateCount,
+    stranded_count: t.strandedCount,
     escalated_by_reason: t.escalatedByReason,
     pr_blocker_counts: t.prBlockerCounts,
     babysit_actions_by_kind: t.babysitActionsByKind,
@@ -134,7 +136,7 @@ export function runHeartbeat(out: CoordinatorOutput, deps: HeartbeatDeps): any {
 
   deps.appendTextSilent(
     deps.heartbeatLogPath,
-    `[${ts}] heartbeat slice_count=${record.slice_count} archived=${record.archived_slice_count} cleanups=${record.cleanup_count} ghost_cleanups=${record.ghost_cleanup_count} relaunches=${record.relaunch_count} babysit_actions=${record.babysit_action_count} steward_nudges=${record.steward_nudge_count} steward_stranded=${record.steward_stranded_count} dispatches=${record.dispatch_action_count} processor_requests=${record.processor_request_count} workers=${JSON.stringify(record.workers)}${record.state_error ? " state_error=" + record.state_error : ""}`,
+    `[${ts}] heartbeat slice_count=${record.slice_count} archived=${record.archived_slice_count} cleanups=${record.cleanup_count} ghost_cleanups=${record.ghost_cleanup_count} relaunches=${record.relaunch_count} babysit_actions=${record.babysit_action_count} steward_nudges=${record.steward_nudge_count} steward_stranded=${record.steward_stranded_count} stranded=${record.stranded_count} dispatches=${record.dispatch_action_count} processor_requests=${record.processor_request_count} workers=${JSON.stringify(record.workers)}${record.state_error ? " state_error=" + record.state_error : ""}`,
   );
 
   deps.recordMetrics?.(record);

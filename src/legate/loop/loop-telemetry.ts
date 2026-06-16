@@ -183,6 +183,7 @@ export function buildLoopTickActivity(record: any, ctx: HeartbeatMetricsContext)
     readyToMerge: record.ready_to_merge_count ?? 0,
     waitingOnApproval: record.waiting_on_approval_count ?? 0,
     blockedOnMergeState: record.blocked_on_merge_state_count ?? 0,
+    stranded: record.stranded_count ?? 0,
     escalatedByReason,
     prBlocker,
   };
@@ -196,6 +197,7 @@ export function buildLoopTickActivity(record: any, ctx: HeartbeatMetricsContext)
     cleanupFailures: record.cleanup_failure_count ?? 0,
     ghostCleanups: record.ghost_cleanup_count ?? 0,
     ghostCleanupFailures: record.ghost_cleanup_failure_count ?? 0,
+    ghostCleanupDeferred: record.ghost_cleanup_deferred_count ?? 0,
     relaunches: record.relaunch_count ?? 0,
     relaunchFailures: record.relaunch_failure_count ?? 0,
     babysitActions: record.babysit_action_count ?? 0,

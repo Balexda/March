@@ -36,6 +36,7 @@ function ctx(teardown: () => BroodTeardownResult): HandlerContext {
     castra: {} as any,
     broodTeardown: vi.fn(async () => teardown()),
     emit: vi.fn(),
+    emitTransition: vi.fn(),
     log: vi.fn(),
   };
 }
@@ -67,14 +68,34 @@ describe("ghost-cleanup handler", () => {
     expect(state.sessionsById.has("ghost")).toBe(false);
   });
 
-  it("apply records a failure (no drop) when teardown can't confirm", async () => {
+  it("defers (no drop) and tombstones when Brood does not track the session (404)", async () => {
     const state = loopState({
       sessions: [{ id: "ghost", group: "legate-workers", worktree_path: "/wt/feature-orphan", created_at: OLD }],
       sessionsById: new Map([["ghost", {}]]),
     });
     const c = ctx(() => ({ ok: false, notTracked: true, detail: "not tracked by Brood" }));
     const res = await apply(assess(state), c, state);
+    // notTracked is a Brood reconciliation gap, not a failure: deferred, not failed.
+    expect(res.actions[0]).toMatchObject({ action: "ghost-cleanup-deferred", sessionId: "ghost" });
+    expect(state.sessionsById.has("ghost")).toBe(true); // live session NOT dropped
+    // Tombstone persisted (durable via retry.counted) so the next tick skips it.
+    expect(state.raw.transient_retry_counts).toMatchObject({ "ghost-cleanup:ghost": 1 });
+    expect(c.emitTransition).toHaveBeenCalledWith({ type: "retry.counted", key: "ghost-cleanup:ghost", count: 1 });
+    // assess no longer re-selects the tombstoned session → no 404 storm.
+    expect(assess(state)).toEqual([]);
+  });
+
+  it("records a failure and retries (no tombstone) on a transient Brood error", async () => {
+    const state = loopState({
+      sessions: [{ id: "ghost", group: "legate-workers", worktree_path: "/wt/feature-orphan", created_at: OLD }],
+      sessionsById: new Map([["ghost", {}]]),
+    });
+    const c = ctx(() => ({ ok: false, notTracked: false, detail: "Brood unreachable" }));
+    const res = await apply(assess(state), c, state);
     expect(res.actions[0]).toMatchObject({ action: "ghost-cleanup-failed" });
     expect(state.sessionsById.has("ghost")).toBe(true);
+    // No tombstone — a transient failure must be retried next tick.
+    expect(state.raw.transient_retry_counts?.["ghost-cleanup:ghost"]).toBeUndefined();
+    expect(assess(state).map((d) => d.sessionId)).toEqual(["ghost"]);
   });
 });

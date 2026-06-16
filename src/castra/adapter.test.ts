@@ -306,6 +306,22 @@ describe("castra adapter — operations", () => {
     expect(adapter.list({ profile: "march", group: "g1" }).map((s) => s.sessionId)).toEqual(["a"]);
   });
 
+  it("treats an empty profile as [] (agent-deck prints 'No sessions found', not [])", () => {
+    const adapter = createAgentDeckAdapter();
+    // The exact human line agent-deck prints to stdout for an empty profile.
+    childProcessMock.execFileSync.mockReturnValue("No sessions found in profile 'gatecli'.\n");
+    expect(adapter.list({ profile: "gatecli" })).toEqual([]);
+    // Empty stdout is also a normal empty listing, not malformed output.
+    childProcessMock.execFileSync.mockReturnValue("");
+    expect(adapter.list({ profile: "gatecli" })).toEqual([]);
+  });
+
+  it("still throws on genuinely malformed (non-empty, non-JSON) list output", () => {
+    const adapter = createAgentDeckAdapter();
+    childProcessMock.execFileSync.mockReturnValue("garbled <not json> output");
+    expect(() => adapter.list({ profile: "march" })).toThrow(/unexpected output/);
+  });
+
   it("launches and returns the identified session", () => {
     let listCalls = 0;
     childProcessMock.execFileSync.mockImplementation((_cmd: string, args: string[]) => {

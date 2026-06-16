@@ -333,6 +333,21 @@ export const OTHER_STAGE = "other";
 export const STAGE_ALLOWLIST = new Set<string>(SLICE_STAGES);
 
 /**
+ * Lifecycle stages where a live steward session is EXPECTED to be attached — the
+ * slice was handed to a steward (`implementing`) or has an open PR a steward
+ * babysits/fixes/rebases. Mirrors relaunch's eligible stages, so what relaunch
+ * tries to re-attach is exactly what counts as stranded until it succeeds.
+ */
+export const STEWARD_STAGES = new Set<string>([
+  "implementing",
+  "pr-open",
+  "pr-in-fix",
+  "pr-resolving-conflicts",
+  "pr-rebasing",
+  "pr-in-rerun",
+]);
+
+/**
  * The fixed escalation-reason vocabulary — the low-cardinality `reason` label set
  * for the `march.legate.escalated` gauge. Splits the single `escalated` stage into
  * the operator-meaningful buckets the work-status dashboard shows:
@@ -592,4 +607,31 @@ export function summarizeSlicesByStage(slices: Record<string, any> | undefined):
     }
   }
   return { byStage, readyToMerge, waitingOnApproval, blockedOnMergeState, escalatedByReason, prBlocker };
+}
+
+/**
+ * Count non-terminal slices in a {@link STEWARD_STAGES steward stage} that have NO
+ * live worker session — an empty `worker_session_id`, or a pointer to a session
+ * Castra no longer lists. These slices read as active work on the board (they sit
+ * in `pr-open`/`implementing`/…) but have no resource behind them: the steward
+ * crashed, or the slice was adopted from an observed open PR whose dispatch failed
+ * before a steward ever launched (gatecli's spawn-failed forge slices, promoted to
+ * `pr-open` by adopt-from-fold). Pure: `liveWorkerSessionIds` is the set of live
+ * worker-session ids observed this tick. Exported as `march_legate_slices_stranded`
+ * so this work stops masquerading as healthy "In steward" — and stays visible even
+ * after relaunch exhausts its retry budget and goes quiet.
+ */
+export function countStrandedSlices(
+  slices: Record<string, any> | undefined,
+  liveWorkerSessionIds: ReadonlySet<string>,
+): number {
+  let stranded = 0;
+  for (const slice of Object.values(slices ?? {})) {
+    if (!slice || typeof slice !== "object") continue;
+    if (!STEWARD_STAGES.has(slice.stage)) continue;
+    const sid = slice.worker_session_id;
+    const hasLiveSteward = typeof sid === "string" && sid.length > 0 && liveWorkerSessionIds.has(sid);
+    if (!hasLiveSteward) stranded++;
+  }
+  return stranded;
 }

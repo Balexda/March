@@ -1,4 +1,3 @@
-import { execFileSync } from "node:child_process";
 import {
   type CastraErrorBody,
   type CastraSession,
@@ -29,8 +28,6 @@ const REACHABLE_TIMEOUT_MS = 3_000;
  * it a generous ceiling rather than the per-request default.
  */
 const RECOVER_TIMEOUT_MS = 300_000;
-/** Sync-client recovery sweep timeout (seconds), mirroring {@link RECOVER_TIMEOUT_MS}. */
-const RECOVER_TIMEOUT_SECONDS = 300;
 /**
  * Profile used by the readiness probe. `reachable()` lists this profile's
  * sessions to confirm Castra can actually serve authenticated `/v1/*` calls;
@@ -86,6 +83,12 @@ export interface LaunchSessionRequest {
   readonly title: string;
   readonly group?: string;
   readonly model?: string;
+  /**
+   * False ATTACHES to an existing worktree/branch instead of creating a new
+   * branch — the steward-relaunch case, where the branch/PR already exist and a
+   * fresh `-b` would collide ("branch already exists"). Defaults to true (create).
+   */
+  readonly createBranch?: boolean;
   /** Dispatch trace key forwarded as x-march-slice-id so spans share one trace. */
   readonly traceKey?: string;
   /**
@@ -179,6 +182,10 @@ export class CastraClient {
         title: req.title,
         ...(req.group ? { group: req.group } : {}),
         ...(req.model ? { model: req.model } : {}),
+        // Only send createBranch when explicitly false (attach) — the server
+        // defaults to true. Dropping it here is what silently turned a relaunch
+        // ATTACH back into a `-b` create → "branch already exists".
+        ...(req.createBranch === false ? { createBranch: false } : {}),
         ...(req.metadata ? { metadata: req.metadata } : {}),
       },
       expectStatus: 201,
@@ -302,159 +309,4 @@ export function createCastraClientFromEnv(
   env: NodeJS.ProcessEnv = process.env,
 ): CastraClient {
   return new CastraClient({ env });
-}
-
-// ---------------------------------------------------------------------------
-// Synchronous client (curl transport)
-// ---------------------------------------------------------------------------
-
-/** Per-request timeout (seconds) for the sync transport. */
-const SYNC_TIMEOUT_SECONDS = 60;
-const SYNC_MAX_BUFFER = 16 * 1024 * 1024;
-
-export interface SyncLaunchSessionRequest extends LaunchSessionRequest {
-  /** False attaches to an existing worktree/branch (steward relaunch). Default true. */
-  readonly createBranch?: boolean;
-}
-
-/**
- * Synchronous twin of {@link CastraClient}, for the **legate loop**: its tick is
- * fully synchronous (execFileSync throughout), so it cannot await the async
- * client. This speaks the identical API via `curl` — one more child process
- * alongside the git/gh/smithy ones the loop already runs — and reuses the same
- * base-url/token resolution, slice-id header, error envelope ({@link
- * CastraClientError}), and wire types. Prefer the async {@link CastraClient}
- * everywhere that runs on the event loop.
- */
-export class SyncCastraClient {
-  private readonly baseUrl: string;
-  private readonly token: string | undefined;
-
-  constructor(options: { baseUrl?: string; token?: string; env?: NodeJS.ProcessEnv } = {}) {
-    const env = options.env ?? process.env;
-    this.baseUrl = (options.baseUrl ?? resolveCastraBaseUrl(env)).replace(/\/+$/, "");
-    this.token = options.token ?? resolveCastraToken(env);
-  }
-
-  /** GET /v1/sessions — list sessions (optionally filtered by group). */
-  listSessions(profile: string, group?: string): CastraSession[] {
-    const qs = new URLSearchParams({ profile });
-    if (group) qs.set("group", group);
-    const body = this.request("GET", `/v1/sessions?${qs.toString()}`, { expectStatus: 200 });
-    const sessions = (body as { sessions?: CastraSession[] }).sessions;
-    return Array.isArray(sessions) ? sessions : [];
-  }
-
-  /** POST /v1/sessions — launch a steward session. */
-  launchSession(req: SyncLaunchSessionRequest): CastraSession {
-    const body = this.request("POST", "/v1/sessions", {
-      traceKey: req.traceKey,
-      json: {
-        profile: req.profile,
-        repoPath: req.repoPath,
-        branch: req.branch,
-        title: req.title,
-        ...(req.group ? { group: req.group } : {}),
-        ...(req.model ? { model: req.model } : {}),
-        ...(req.createBranch === false ? { createBranch: false } : {}),
-        ...(req.metadata ? { metadata: req.metadata } : {}),
-      },
-      expectStatus: 201,
-    });
-    return (body as { session: CastraSession }).session;
-  }
-
-  /** GET /v1/sessions/:id/output — recent session output. */
-  sessionOutput(profile: string, sessionId: string, lines?: number): string {
-    const qs = new URLSearchParams({ profile });
-    if (lines !== undefined) qs.set("lines", String(lines));
-    const body = this.request(
-      "GET",
-      `/v1/sessions/${encodeURIComponent(sessionId)}/output?${qs.toString()}`,
-      { expectStatus: 200 },
-    );
-    const output = (body as { output?: unknown }).output;
-    return typeof output === "string" ? output : "";
-  }
-
-  /** POST /v1/sessions/:id/send — message a session (202). */
-  sendPrompt(req: SendPromptRequest): void {
-    this.request("POST", `/v1/sessions/${encodeURIComponent(req.sessionId)}/send`, {
-      traceKey: req.traceKey,
-      json: { profile: req.profile, prompt: req.prompt },
-      expectStatus: 202,
-    });
-  }
-
-  /** DELETE /v1/sessions/:id — remove a session (idempotent). */
-  removeSession(req: RemoveSessionRequest): { removed: boolean } {
-    const qs = new URLSearchParams({
-      profile: req.profile,
-      pruneWorktree: String(req.pruneWorktree),
-    });
-    const body = this.request(
-      "DELETE",
-      `/v1/sessions/${encodeURIComponent(req.sessionId)}?${qs.toString()}`,
-      { traceKey: req.traceKey, expectStatus: 200 },
-    );
-    return { removed: Boolean((body as { removed?: boolean }).removed) };
-  }
-
-  /**
-   * POST /v1/sessions/recover — restart errored sessions and resolve resume
-   * pickers. The legate loop calls this (sync tick) when it observes errored
-   * worker sessions, e.g. after a host reboot.
-   */
-  recoverSessions(profile: string, group?: string): RecoverReport {
-    const body = this.request("POST", "/v1/sessions/recover", {
-      json: { profile, ...(group ? { group } : {}) },
-      expectStatus: 200,
-      timeoutSeconds: RECOVER_TIMEOUT_SECONDS,
-    });
-    return coerceRecoverReport(body);
-  }
-
-  private request(
-    method: string,
-    pathWithQuery: string,
-    opts: { traceKey?: string; json?: unknown; expectStatus: number; timeoutSeconds?: number },
-  ): unknown {
-    // `-w \n%{http_code}` appends the status after the body so we can split it.
-    const maxTime = String(opts.timeoutSeconds ?? SYNC_TIMEOUT_SECONDS);
-    const args = ["-sS", "--max-time", maxTime, "-X", method, "-w", "\n%{http_code}"];
-    if (this.token) args.push("-H", `authorization: Bearer ${this.token}`);
-    if (opts.traceKey) args.push("-H", `${SLICE_ID_HEADER}: ${opts.traceKey}`);
-    if (opts.json !== undefined) {
-      args.push("-H", "content-type: application/json", "--data-binary", JSON.stringify(opts.json));
-    }
-    args.push(`${this.baseUrl}${pathWithQuery}`);
-
-    let raw: string;
-    try {
-      raw = execFileSync("curl", args, { encoding: "utf-8", maxBuffer: SYNC_MAX_BUFFER });
-    } catch (err) {
-      throw new CastraClientError(
-        `Could not reach Castra at ${this.baseUrl}: ${err instanceof Error ? err.message : String(err)}`,
-      );
-    }
-    const nl = raw.lastIndexOf("\n");
-    const status = Number((nl >= 0 ? raw.slice(nl + 1) : raw).trim());
-    const text = nl >= 0 ? raw.slice(0, nl) : "";
-    let parsed: unknown = {};
-    if (text) {
-      try {
-        parsed = JSON.parse(text);
-      } catch {
-        parsed = {};
-      }
-    }
-    if (status !== opts.expectStatus) {
-      const envelope = parsed as Partial<CastraErrorBody>;
-      throw new CastraClientError(
-        envelope?.error?.message ?? `Castra ${method} ${pathWithQuery} failed with status ${status || "?"}`,
-        { code: envelope?.error?.code, status: status || undefined },
-      );
-    }
-    return parsed;
-  }
 }

@@ -88,6 +88,21 @@ describe("coordinator runTick", () => {
     });
   });
 
+  it("counts a steward-stage slice with no live session as stranded in the TickResult", async () => {
+    const state = makeState();
+    // A pr-open slice whose steward session is NOT in the live session list, and
+    // no PR/branch so relaunch/babysit leave it untouched — it should surface as
+    // stranded (looks active, no resource behind it).
+    state.raw.slices = { ghost: { stage: "pr-open", worker_session_id: "vanished" } } as any;
+    state.slices = state.raw.slices;
+    state.sessions = [{ id: "m", group: "legate-workers", status: "idle" }] as any; // "vanished" absent
+    state.perSlice = {};
+
+    const out = await runTick(deps(state));
+
+    expect(out.tick.strandedCount).toBe(1);
+  });
+
   it("drives the dispatch completion + selection seams", async () => {
     const state = makeState();
     const d = deps(state);

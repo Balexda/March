@@ -160,6 +160,11 @@ export interface TickResult {
    *  (the node-level frontier that over-counts); the precise dispatch-ready signal
    *  the dispatch alarms key on. */
   dispatchableReadyCount: number;
+  /** Slices in a steward stage (implementing/pr-open/…) with NO live worker session
+   *  behind them — adopted-but-steward-less open PRs + crashed-steward slices. They
+   *  look like active "In steward" work but have no resource; surfaced as
+   *  `march_legate_slices_stranded`. */
+  strandedCount: number;
   /** Escalated-stage slices keyed by escalation reason; sums to slicesByStage.escalated. */
   escalatedByReason: Record<string, number>;
   /** PR-bearing slices keyed by dominant merge BLOCKER (conflicting /
@@ -176,6 +181,10 @@ export interface TickResult {
    *  (`ghost-cleanup-failed`). A loop failing here every tick is invisible on the
    *  success-only counters, so it is metricized on its own (loop-failing monitor). */
   ghostCleanupFailureCount: number;
+  /** Ghost-cleanup attempts this tick deferred to Brood because it does not track
+   *  the session (`ghost-cleanup-deferred`, a 404). Benign — tombstoned, not retried;
+   *  NOT a failure. Metricized so the deferral stays visible instead of going silent. */
+  ghostCleanupDeferredCount: number;
   relaunchCount: number;
   /** Steward relaunch attempts this tick that failed (`relaunch-failed`). */
   relaunchFailureCount: number;

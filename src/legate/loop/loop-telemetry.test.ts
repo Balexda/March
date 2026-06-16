@@ -105,6 +105,7 @@ describe("buildLoopTickActivity", () => {
       ready_to_merge_count: 1,
       waiting_on_approval_count: 3,
       blocked_on_merge_state_count: 2,
+      stranded_count: 4,
       escalated_by_reason: { hatchery_dispatch_failed: 2, other: 1, bogus: "x" },
       dispatch_action_count: 2,
       dispatch_failure_count: 1,
@@ -135,6 +136,7 @@ describe("buildLoopTickActivity", () => {
       readyToMerge: 1,
       waitingOnApproval: 3,
       blockedOnMergeState: 2,
+      stranded: 4,
       escalatedByReason: { hatchery_dispatch_failed: 2, other: 1 }, // non-number 'bogus' dropped
       prBlocker: { conflicting: 1, owes_comments: 2 }, // non-number 'bogus' dropped
     });
