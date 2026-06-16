@@ -16,10 +16,14 @@ export const MARCH_BOT_MARKER = "[march-bot]";
 
 /**
  * True when a captured conversation comment is one of March's own replies — i.e.
- * its body carries {@link MARCH_BOT_MARKER}. The capture retains only a bounded
- * `body_preview`, but the marker is a leading prefix, so a substring check over
- * the preview is sufficient and robust to truncation.
+ * its body *opens* with {@link MARCH_BOT_MARKER}. The marker is always a leading
+ * prefix (`add-comment.sh` prepends it; `commentFixMessage` instructs the steward
+ * to lead with it), so a prefix check — not a substring `includes` — is the right
+ * test: a reviewer who merely *quotes or mentions* `[march-bot]` mid-comment is
+ * not one of our replies and must still be captured. `trimStart` tolerates
+ * incidental leading whitespace; the bounded `body_preview` always retains the
+ * prefix, so truncation never hides it.
  */
 export function isMarchBotComment(comment: any): boolean {
-  return typeof comment?.body_preview === "string" && comment.body_preview.includes(MARCH_BOT_MARKER);
+  return typeof comment?.body_preview === "string" && comment.body_preview.trimStart().startsWith(MARCH_BOT_MARKER);
 }
