@@ -151,6 +151,32 @@ describe("babysit assess", () => {
     expect(kindsOf(assess(state))).toEqual(["pr-snapshot", "comment-fix"]);
   });
 
+  it("does NOT send comment-fix for March's own [march-bot] conversation reply (#374)", async () => {
+    const state = loopState({
+      slices: { s: { worker_session_id: "w", stage: "pr-open", pr: { number: 5 }, pr_open_at: T_30M_AGO } },
+      sessions: [session("w", "idle")],
+      perSlice: {
+        s: {
+          recentOutput: { output: "" },
+          pr: {
+            number: 5,
+            state: "OPEN",
+            mergeable: "MERGEABLE",
+            checks: "PASS",
+            unresolved_threads: [],
+            needs_response_count: 0,
+            // The steward posts under the same token as the reviewer, so only the
+            // [march-bot] marker tells its own reply apart — no re-dispatch.
+            conversation_comments: [
+              { id: 12, author: "rev", body_preview: "[march-bot] Fixed in abc123: addressed the spec concern", reacted_eyes: false },
+            ],
+          },
+        },
+      },
+    });
+    expect(kindsOf(assess(state))).toEqual(["pr-snapshot"]);
+  });
+
   it("escalates a steward whose SELF-REPORT says awaiting_input (from the fold, not a scrape)", () => {
     const state = loopState({
       slices: { s: { worker_session_id: "w", stage: "pr-open", pr: { number: 346 } } },
