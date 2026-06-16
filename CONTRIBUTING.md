@@ -32,6 +32,12 @@ March's source is organized by product subsystem rather than by generic layers:
 
 Tests live next to the modules they cover. When adding a module, place it under the subsystem that should own the behavior long-term, not necessarily the milestone that first needs it.
 
+### Subsystem contract docs
+
+Each subsystem carries a `contract.md` describing its public surface. These docs are kept current **at edit time, not by an enforcement gate**: when a change alters a subsystem's public surface, update that subsystem's `contract.md` in the same change. The Smithy tools used for most edits already maintain affected docs as part of their change, and the mechanically-derivable regions are refreshed by a **deterministic** extractor (the planned `npm run docs:contracts:extract`, from Fastify controller endpoints and exported TypeScript signatures) — there is no AI/LLM step on check-in.
+
+There is **no per-PR CI or AI freshness gate**. The planned `npm run docs:contracts:check` is an opt-in, advisory local check you *may* run to sanity-check a contract; it never blocks a PR, slice, or merge. This convention is Feature 6 of the contract-documentation track — see **[docs/rfcs/2026-002-layered-testing-framework/02-subsystem-contract-documentation-track.features.md](docs/rfcs/2026-002-layered-testing-framework/02-subsystem-contract-documentation-track.features.md)**.
+
 ## Testing
 
 The strategy — scope tiers (L0 unit / L1 subsystem / L2 cross-subsystem / L3 system), the deterministic-vs-stochastic axis, the cassette pivot, the cost policy, and the framework choice per scope — lives in **[docs/testing-strategy.md](docs/testing-strategy.md)**. Read it once before adding tests in a new layer.
