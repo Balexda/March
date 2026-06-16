@@ -76,6 +76,23 @@ describe("messages pure builders", () => {
     expect(commentsNeedingResponse({}, {})).toEqual([]);
   });
 
+  it("commentsNeedingResponse skips March's own [march-bot] replies (#374, author-independent)", () => {
+    const pr = {
+      conversation_comments: [
+        { id: 1, author: "rev", body_preview: "please reconsider the spec", reacted_eyes: false },
+        { id: 2, author: "rev", body_preview: "[march-bot] Fixed in abc123: tightened the gate", reacted_eyes: false },
+      ],
+    };
+    // The steward's own reply (same token as the reviewer) is dropped by the marker,
+    // so it can never re-arm a comment-fix dispatch.
+    expect(commentsNeedingResponse({}, pr).map((c: any) => c.id)).toEqual([1]);
+  });
+
+  it("commentFixMessage tells the steward to prefix its conversation reply with [march-bot]", () => {
+    const m = commentFixMessage({ number: 12 }, [{ author: "rev", body_preview: "x", created_at: "2026-06-09T07:00:30Z" }]);
+    expect(m).toContain("[march-bot]");
+  });
+
   it("commentFixMessage drives /smithy.fix and blockquotes each comment body", () => {
     const m = commentFixMessage({ number: 12 }, [
       { author: "rev", body_preview: "line one\nline two", created_at: "2026-06-09T07:00:30Z" },

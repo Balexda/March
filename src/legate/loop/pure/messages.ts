@@ -1,4 +1,5 @@
 import { actionCommandLine } from "./dispatch-id.js";
+import { MARCH_BOT_MARKER, isMarchBotComment } from "./march-bot.js";
 
 /**
  * Pure builders for the prompts and escalation/detail strings the loop sends to
@@ -123,9 +124,14 @@ ${reviewThreadsSummary(threads)}`;
  * Author is deliberately NOT a filter: the legate token shares the PR-author
  * identity (steward pushes as the same account that reviews), so an author check
  * is unreliable — dedup is carried by the :eyes: reaction + the comment-id set.
+ * March's own replies are dropped by the `[march-bot]` content marker
+ * ({@link isMarchBotComment}, issue #374) — the author-independence-proof half of
+ * the dedup so the steward never re-processes its own conversation replies.
  */
 export function commentsNeedingResponse(slice: any, pr: any): any[] {
-  return (pr.conversation_comments || []).filter((comment: any) => comment && comment.reacted_eyes !== true);
+  return (pr.conversation_comments || []).filter(
+    (comment: any) => comment && comment.reacted_eyes !== true && !isMarchBotComment(comment),
+  );
 }
 
 /** Quote each conversation comment as a Markdown blockquote with attribution. The
@@ -149,6 +155,8 @@ export function commentFixMessage(pr: any, comments: any[]): string {
   return `/smithy.fix
 
 PR #${pr.number} has reviewer comment(s) on the conversation (not attached to a code line, so there is no review thread to resolve) that need a response. Address the feedback in this PR branch, push the fix, and reply on the PR conversation so the reviewer sees the resolution.
+
+Prefix your conversation reply with the marker \`${MARCH_BOT_MARKER}\` so the capture recognizes it as your own reply and does not re-process it (the smithy.pr-review skill's add-comment path adds this automatically).
 
 Comments:
 ${conversationCommentsSummary(comments)}`;

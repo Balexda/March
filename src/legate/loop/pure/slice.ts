@@ -1,4 +1,5 @@
 import { dispatchBranch, dispatchItemKey, dispatchSliceId, sliceActionKey } from "./dispatch-id.js";
+import { isMarchBotComment } from "./march-bot.js";
 import { resolveMergeRequirements, type MergePolicy } from "../../../herald/profiles/merge-policy.js";
 
 /**
@@ -503,11 +504,14 @@ export type PrBlocker = "none" | "conflicting" | "owes_review_threads" | "owes_c
 export const PR_BLOCKER_REASONS = ["conflicting", "owes_review_threads", "owes_comments", "ci_failing"] as const;
 
 /** A conversation (non-thread) comment is outstanding when it carries no legate
- *  :eyes: ack yet (mirrors `commentsNeedingResponse`, inlined to keep this pure
- *  module free of a messages.ts dependency). */
+ *  :eyes: ack yet and is not one of March's own `[march-bot]` replies (#374)
+ *  (mirrors `commentsNeedingResponse`; the marker predicate lives in the
+ *  dependency-free `march-bot` module so this pure module stays clean). */
 function owesCommentResponse(pr: any): boolean {
   const comments = pr?.conversation_comments;
-  return Array.isArray(comments) && comments.some((c: any) => c && c.reacted_eyes !== true);
+  return (
+    Array.isArray(comments) && comments.some((c: any) => c && c.reacted_eyes !== true && !isMarchBotComment(c))
+  );
 }
 
 /**

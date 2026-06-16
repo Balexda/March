@@ -242,6 +242,10 @@ describe("slice pure helpers", () => {
     expect(mergeBlocker({}, pr({ conversation_comments: [{ id: 1, reacted_eyes: false }] }))).toBe("owes_comments");
     // All-clear, an acknowledged comment, or no PR → none.
     expect(mergeBlocker({}, pr({ conversation_comments: [{ id: 1, reacted_eyes: true }] }))).toBe("none");
+    // March's own [march-bot] reply is not an outstanding comment (#374) → none.
+    expect(
+      mergeBlocker({}, pr({ conversation_comments: [{ id: 1, body_preview: "[march-bot] Fixed in abc", reacted_eyes: false }] })),
+    ).toBe("none");
     expect(mergeBlocker({}, pr({}))).toBe("none");
     expect(mergeBlocker({}, {})).toBe("none"); // no observed PR
   });

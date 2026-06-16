@@ -199,8 +199,8 @@ replies to issue-style PR conversation comments.
 
 Call the host's issue-comment write tool with:
 - `owner`, `repo`, `issue_number` / `pr_number`
-- `body` / `comment`: the reply text plus an HTML marker:
-  `<!-- smithy-pr-review-response-to:<databaseId> -->`
+- `body` / `comment`: the `[march-bot]` prefix, then the reply text, plus an HTML
+  marker: `[march-bot] <reply text>` … `<!-- smithy-pr-review-response-to:<databaseId> -->`
 
 ### Script fallback
 
@@ -218,7 +218,12 @@ ${CLAUDE_SKILL_DIR}/scripts/add-comment.sh <ownerRepo> <pr-number> /tmp/smithy_p
 
 - For a **fix** reply: `"Fixed in <commit-sha>: <one-line explanation of what changed and why>"`
 - For a **decline** reply: `"Not addressed: <explanation — why the comment doesn't apply, or what was misunderstood>"`
-- For a **conversation comment** reply, append
+- For a **conversation comment** reply, prefix the body with the `[march-bot]`
+  marker so the legate's author-independent non-thread comment capture (#366,
+  #374) recognizes March's own reply and never re-processes it. The
+  `add-comment.sh` script adds this prefix automatically (idempotently); on the
+  MCP path, lead the body with `[march-bot]` yourself.
+- For a **conversation comment** reply, also append
   `<!-- smithy-pr-review-response-to:<databaseId> -->` so future list
   operations can suppress the handled comment.
 
