@@ -102,7 +102,7 @@ Recommended implementation sequence:
 
 | ID | Title | Depends On | Artifact |
 |----|-------|------------|----------|
-| US1 | Read Spawn Records Tolerantly | — | — |
+| US1 | Read Spawn Records Tolerantly | — | specs/2026-06-13-011-brood-session-index/01-read-spawn-records-tolerantly.tasks.md |
 | US2 | Derive the SpawnView Without Persisting New Status | US1 | — |
 | US3 | Reconcile Container Liveness From a Caller Snapshot | US1, US2 | — |
 | US4 | Surface Why a Spawn Failed | US1 | — |
