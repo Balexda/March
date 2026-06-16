@@ -2,8 +2,9 @@
  * @l0 @deterministic @ci
  */
 import { describe, expect, it, vi } from "vitest";
+import { CASTRA_TOKEN_ENV } from "../castra/config.js";
 import { MARCH_SERVICES } from "./services.js";
-import { stackDown, type DrainResult } from "./down.js";
+import { resolveComposeEnv, stackDown, type DrainResult } from "./down.js";
 
 /** A locator that pretends every compose file is present at docker/<basename>. */
 const locateAll = (b: string) => `/repo/docker/${b}`;
@@ -86,6 +87,34 @@ describe("stackDown — best-effort behavior", () => {
     expect(result.services.filter((s) => s.outcome === "stopped")).toHaveLength(
       MARCH_SERVICES.length - 1,
     );
+  });
+});
+
+describe("resolveComposeEnv — required-token resilience", () => {
+  it("injects a placeholder CASTRA_API_TOKEN when the env lacks one", () => {
+    const env = resolveComposeEnv({ PATH: "/usr/bin" });
+    expect(env[CASTRA_TOKEN_ENV]).toBeTruthy();
+    expect(env.PATH).toBe("/usr/bin");
+  });
+
+  it("leaves a real CASTRA_API_TOKEN untouched", () => {
+    const base = { [CASTRA_TOKEN_ENV]: "real-secret" };
+    expect(resolveComposeEnv(base)).toBe(base);
+    expect(resolveComposeEnv(base)[CASTRA_TOKEN_ENV]).toBe("real-secret");
+  });
+});
+
+describe("stackDown — compose env", () => {
+  it("runs compose with a non-empty CASTRA_API_TOKEN even when unset, so `down` works without the secret", async () => {
+    const seen: (NodeJS.ProcessEnv | undefined)[] = [];
+    const run = (_file: string, _args: string[], env?: NodeJS.ProcessEnv) => {
+      seen.push(env);
+    };
+
+    await stackDown({ run, locate: locateAll, env: { PATH: "/usr/bin" } });
+
+    expect(seen).toHaveLength(MARCH_SERVICES.length);
+    expect(seen.every((e) => Boolean(e?.[CASTRA_TOKEN_ENV]))).toBe(true);
   });
 });
 

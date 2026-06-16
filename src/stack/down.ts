@@ -1,5 +1,31 @@
 import { execFileSync } from "node:child_process";
+import { CASTRA_TOKEN_ENV } from "../castra/config.js";
 import { MARCH_SERVICES, locateCompose, type MarchService } from "./services.js";
+
+/**
+ * Placeholder injected for `CASTRA_API_TOKEN` when the operator hasn't set it.
+ * The service compose files declare it as a *required* interpolation variable
+ * (`${CASTRA_API_TOKEN:?...}`), so `docker compose down` refuses to even parse
+ * them without a value — yet teardown never uses the token (containers match by
+ * compose project, not by secret). A non-empty placeholder satisfies the parse
+ * without the operator having to recall the real token just to turn the system
+ * off. When `march up` (#388) exports the real token, it flows through
+ * unchanged.
+ */
+const TEARDOWN_TOKEN_PLACEHOLDER = "march-down-teardown-placeholder";
+
+/**
+ * Build the child env for `compose down`: the operator's env, with the
+ * required-but-teardown-irrelevant `CASTRA_API_TOKEN` filled in when absent so
+ * compose-file interpolation succeeds. A real token already in the env is left
+ * untouched.
+ */
+export function resolveComposeEnv(
+  base: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+  if (base[CASTRA_TOKEN_ENV]) return base;
+  return { ...base, [CASTRA_TOKEN_ENV]: TEARDOWN_TOKEN_PLACEHOLDER };
+}
 
 /**
  * `march down` — stop the full March service stack, the inverse of `march up`.
@@ -34,7 +60,11 @@ export interface StackDownResult {
 }
 
 /** Runs a command, throwing on non-zero exit (the `execFileSync` contract). */
-export type CommandRunner = (file: string, args: string[]) => void;
+export type CommandRunner = (
+  file: string,
+  args: string[],
+  env?: NodeJS.ProcessEnv,
+) => void;
 
 export interface StackDownOptions {
   /** Also remove named volumes (`docker compose down --volumes`). */
@@ -47,10 +77,12 @@ export interface StackDownOptions {
   readonly locate?: (basename: string) => string | null;
   /** Injected drain implementation (defaults to {@link drainBroodSessions}). */
   readonly drainSessions?: () => Promise<DrainResult>;
+  /** Base env for compose interpolation (defaults to `process.env`). */
+  readonly env?: NodeJS.ProcessEnv;
 }
 
-const defaultRun: CommandRunner = (file, args) => {
-  execFileSync(file, args, { stdio: ["ignore", "ignore", "pipe"] });
+const defaultRun: CommandRunner = (file, args, env) => {
+  execFileSync(file, args, { stdio: ["ignore", "ignore", "pipe"], env });
 };
 
 function downService(
@@ -59,6 +91,7 @@ function downService(
     run: CommandRunner;
     locate: (basename: string) => string | null;
     volumes: boolean;
+    env: NodeJS.ProcessEnv;
   },
 ): ServiceDownResult {
   const composePath = opts.locate(svc.compose);
@@ -72,7 +105,7 @@ function downService(
   try {
     const args = ["compose", "-f", composePath, "down"];
     if (opts.volumes) args.push("--volumes");
-    opts.run("docker", args);
+    opts.run("docker", args, opts.env);
     return {
       service: svc.name,
       outcome: "stopped",
@@ -140,6 +173,7 @@ export async function stackDown(
 ): Promise<StackDownResult> {
   const run = opts.run ?? defaultRun;
   const locate = opts.locate ?? ((b: string) => locateCompose(b));
+  const env = resolveComposeEnv(opts.env ?? process.env);
 
   let drain: DrainResult | undefined;
   if (opts.drain) {
@@ -150,7 +184,9 @@ export async function stackDown(
   const services: ServiceDownResult[] = [];
   // Reverse dependency order: legate first, otel-lgtm (network owner) last.
   for (const svc of [...MARCH_SERVICES].reverse()) {
-    services.push(downService(svc, { run, locate, volumes: opts.volumes ?? false }));
+    services.push(
+      downService(svc, { run, locate, volumes: opts.volumes ?? false, env }),
+    );
   }
 
   return { services, drain };
