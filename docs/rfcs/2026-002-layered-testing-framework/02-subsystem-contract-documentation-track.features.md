@@ -122,32 +122,39 @@ design removes the presence-vs-freshness naming ambiguity.
 - Includes: the `docs:contracts:check` script; presence verification against the
   F1 schema; freshness verification against the diff; the **populated**
   `contract-freshness.config.json` glob entries (using F1's schema and F4's Steward
-  partition); the shared verdict logic that F6 invokes unchanged.
-- Excludes: the CI/agent enforcement surface that *runs* the check on PRs (F6); the
-  AUTOGEN extraction tool (F7); the contract content itself (F2/F3/F4); resolving
+  partition); the shared verdict logic that F6 leaves available as an opt-in check.
+- Excludes: the edit-time maintenance convention that keeps contracts current (F6);
+  the AUTOGEN extraction tool (F7); the contract content itself (F2/F3/F4); resolving
   the precise public-source-path definition (carried as debt SD-010).
 
-### Feature 6: Contract-Freshness Enforcement Directive
+### Feature 6: Contract-Freshness Maintenance Convention
 
-**Description**: Delivers the CI-side enforcement vehicle for the freshness verdict
-as a **Smithy-agent directive** (the operator's SD-002 resolution): a directive
-that instructs the Smithy agent to fail any PR touching a subsystem's public source
-without updating the corresponding `contract.md`, invoking F5's shared verdict
-authority so local and enforced verdicts cannot diverge. Integrates last.
+**Description**: Establishes the **convention** by which subsystem contract docs stay
+current — *not* an enforcement vehicle that fails PRs. Per the operator's SD-002
+resolution (PR #294), this milestone enforces nothing automatically: contract docs are
+maintained at edit time (the Smithy agents used for most edits already update affected
+docs as part of their change), and the mechanically-derivable regions are refreshed by
+F7's **deterministic** `docs:contracts:extract` extractor (e.g. from Fastify controller
+endpoints and exported TS signatures). No AI/LLM step runs on every check-in. F5's
+verdict stays available as an opt-in, advisory local check. Integrates last.
 
-**User-Facing Value**: Closes the loop that keeps the contracts honest over time
-without standing up CI infrastructure — drift is caught at the moment a PR
-introduces it, in keeping with March's "Smithy decomposes; March executes"
-posture, while staying cheaply reversible to a CI workflow if drift slips through.
+**User-Facing Value**: Keeps the contracts honest over time without spending tokens on
+an AI bot per check-in or standing up CI — drift is avoided by maintaining the doc in
+the same change that alters the surface, in keeping with March's "Smithy decomposes;
+March executes" posture, while staying cheaply reversible to a directive or CI workflow
+if drift later slips through.
 
 **Scope Boundaries**:
-- Includes: the Smithy-agent directive that wires F5's verdict into PR handling;
-  the operator-decision record that SD-002 resolved toward the directive (not a CI
-  workflow) for this milestone.
-- Excludes: a `.github/workflows/contract-freshness.yml` GitHub Actions workflow
-  (the alternative SD-002 vehicle, not chosen here); the verdict logic itself (F5);
-  the structural AST-diff escalation path (RFC SD-002 defers it until drift is
-  observed); settling review-advisory vs. merge-blocking enforcement (debt SD-011).
+- Includes: the edit-time maintenance convention; references to F7's deterministic
+  auto-gen and F5's opt-in advisory check; the convention's documentation in
+  `CONTRIBUTING.md`, `CLAUDE.md`, and `AGENTS.md`; the operator-decision record that
+  SD-002 resolved toward **no enforcement gate** for this milestone.
+- Excludes: a Smithy-agent enforcement directive that fails PRs, and a
+  `.github/workflows/contract-freshness.yml` GitHub Actions workflow (both rejected-but-
+  cheaply-reversible SD-002 alternatives); the verdict logic itself (F5); the
+  deterministic extractor itself (F7); the structural AST-diff escalation path (RFC
+  SD-002 defers it until drift is observed). SD-011 (enforcement strength) is closed as
+  moot — with no gate, the question does not arise.
 
 ### Feature 7: TypeScript Public-Interface Autogen Tool
 
@@ -175,13 +182,14 @@ stays accurate without hand-maintenance.
 | ID | Description | Source Category | Impact | Confidence | Status | Resolution |
 |----|-------------|-----------------|--------|------------|--------|------------|
 | SD-010 | What counts as a subsystem's "public source paths" for the freshness globs in `contract-freshness.config.json`? Unresolved choice between (a) whole-directory globs (`src/legate/**`), (b) curated public-surface file lists (e.g. only `src/castra/client.ts`+`server.ts`, excluding `config.ts`/`types.ts`/`metrics.ts`), or (c) export-set membership rather than path membership. The choice changes which PRs the freshness check fires on and how much false-positive noise authors absorb — `src/legate/` alone spans 40+ files across `loop/`, `pure/`, `handlers/`, `clients/`, `state/`, and `init.ts`, and most are not public surface. | clarify:Constraints (RFC carry-forward) | High | Low | open | — |
-| SD-011 | Where does the Smithy-agent directive (F6, per SD-002) enforce its verdict — at PR-review time (the directive reads the diff and flags drift in review) or as a blocking pre-merge gate? The two paths produce different feature surfaces: a review-time directive is advisory and lives in agent instructions, whereas a blocking gate needs a non-zero exit wired into the merge path. SD-002 is resolved toward "directive not CI workflow" but does not settle review-advisory vs merge-blocking. | feedback:Risks (SD-002 sub-question) | Medium | Medium | open | — |
+| SD-011 | Where does the Smithy-agent directive (F6, per SD-002) enforce its verdict — at PR-review time (the directive reads the diff and flags drift in review) or as a blocking pre-merge gate? The two paths produce different feature surfaces: a review-time directive is advisory and lives in agent instructions, whereas a blocking gate needs a non-zero exit wired into the merge path. SD-002 is resolved toward "directive not CI workflow" but does not settle review-advisory vs merge-blocking. | feedback:Risks (SD-002 sub-question) | Medium | High | resolved | Closed as moot. Operator resolved SD-002 toward **no enforcement gate** (PR #294); F6 is a maintenance convention, so enforcement strength no longer arises. |
 
 ## Dependency Order
 
 Recommended specification sequence. After F1 lands, the authoring features
 (F2, F3, F4) and the tooling features (F5, F7) are mutually independent and can be
-specced and cut in parallel; F6 integrates last because it invokes F5's verdict.
+specced and cut in parallel; F6 integrates last because it references F5's verdict
+and F7's extractor.
 
 | ID | Title | Depends On | Artifact |
 |----|-------|-----------|----------|
@@ -191,7 +199,7 @@ specced and cut in parallel; F6 integrates last because it invokes F5's verdict.
 | F4 | Steward Contract (Castra-Consumer Surface) | F1 | specs/2026-06-03-008-steward-role-contract/ |
 | F5 | Contract Presence & Freshness Check | F1 | specs/2026-06-06-009-contract-presence-and-freshness-verdict/ |
 | F7 | TypeScript Public-Interface Autogen Tool | F1 | specs/2026-06-07-010-typescript-public-interface-autogen-extraction/ |
-| F6 | Contract-Freshness Enforcement Directive | F1, F5 | specs/2026-06-07-011-contract-freshness-enforcement-directive/ |
+| F6 | Contract-Freshness Maintenance Convention | F1, F5, F7 | specs/2026-06-07-011-contract-freshness-enforcement-directive/ |
 
 ## Cross-Milestone Dependencies
 
@@ -203,5 +211,5 @@ Direction must be either `depends on` or `depended upon by`.
 | Milestone M4: L1 Gap-Fill (Hatchery) | depended upon by | M4 drafts the Hatchery contract concurrently and its tests retro-link to it; per RFC Decisions this is a concurrent soft dependency, not a hard blocker (M4's hard dependency is M1 only). |
 
 _M1 (Test Legibility & Staged CI) runs concurrently with M2 and is neither a
-prerequisite nor a dependent — M2 adds its own contract-freshness directive rather
-than the staged `ci.yml` jobs M1 builds._
+prerequisite nor a dependent — M2 keeps contracts current with its own edit-time
+maintenance convention rather than the staged `ci.yml` jobs M1 builds._

@@ -11,6 +11,15 @@ Quick pointers:
   proposing new components or non-trivial behavior changes.
 - **Contributor setup, testing strategy, release checklist:**
   [`CONTRIBUTING.md`](CONTRIBUTING.md).
+- **Subsystem contract docs are kept current at edit time, not by a gate.** When a
+  change alters a subsystem's public surface, update that subsystem's `contract.md`
+  in the same change. The Smithy tools used for most edits already maintain affected
+  docs; the mechanically-derivable regions are refreshed by a **deterministic**
+  extractor (planned `npm run docs:contracts:extract`, from Fastify endpoints /
+  exported TS signatures). There is **no per-PR CI or AI freshness gate** — the
+  planned `npm run docs:contracts:check` is an opt-in, advisory local check. This is
+  Feature 6's maintenance convention in the contract-documentation track
+  ([`docs/rfcs/2026-002-layered-testing-framework/02-subsystem-contract-documentation-track.features.md`](docs/rfcs/2026-002-layered-testing-framework/02-subsystem-contract-documentation-track.features.md)).
 - **Observability (OpenTelemetry → `otel-lgtm`):**
   [`docs/Observability.md`](docs/Observability.md). Telemetry (traces, metrics,
   logs) is opt-in (`MARCH_OTEL=1`) and a no-op when off. **Keep it in lock-step

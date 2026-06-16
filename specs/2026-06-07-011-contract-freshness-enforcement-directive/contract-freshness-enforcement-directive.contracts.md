@@ -1,118 +1,109 @@
-# Contracts: Contract-Freshness Enforcement Directive
+# Contracts: Contract-Freshness Maintenance Convention
 
 ## Overview
 
-This feature defines the Smithy-agent enforcement boundary for subsystem contract
-freshness. The directive consumes Feature 5's local `npm run docs:contracts:check`
-verdict and turns a non-zero result into a blocking, bounded agent failure on the
-PR. It introduces no live service API, runtime route, CI workflow, AUTOGEN
-extraction behavior, or replacement logic — it is an instruction-level boundary
-between Feature 5's verdict and the agent's PR-handling decision.
+This feature defines the **convention** by which subsystem contract docs stay current,
+not an enforcement boundary that fails PRs. The convention keeps a subsystem's
+`contract.md` current at edit time — the Smithy agents used for most edits already
+maintain affected docs, and the mechanically-derivable regions are refreshed by
+Feature 7's deterministic extractor. It introduces no live service API, runtime route,
+CI workflow, blocking verdict, or AI-on-check-in step. Feature 5's verdict remains
+available as an opt-in, advisory local check.
 
 ## Interfaces
 
-### Contract-Freshness Enforcement Directive
+### Contract Maintenance Convention
 
-**Purpose**: Defines how a Smithy agent must invoke the contract verdict before
-completing a PR that can stale a subsystem contract.
-**Consumers**: Smithy mark/cut/forge/fix-style agents, Hatchery-managed worker
-sessions, Steward/reviewer handoff context.
-**Providers**: Repository-local Smithy agent instruction artifacts.
+**Purpose**: Defines how a subsystem's `contract.md` is kept current as part of the
+change that alters its public surface.
+**Consumers**: Contributors, Smithy mark/cut/forge/fix-style agents, reviewers.
+**Providers**: Repository convention plus its references in `CONTRIBUTING.md`,
+`CLAUDE.md`, and `AGENTS.md`.
 
 #### Signature
 
 ```text
-When a PR diff changes a watched public subsystem source, run:
-npm run docs:contracts:check
-A non-zero verdict blocks the PR until the owning contract.md is updated.
+When a change alters a subsystem's mapped public surface, update that subsystem's
+contract.md in the same change. Mechanical regions are refreshed by Feature 7's
+deterministic extractor. No PR, slice, or merge is gated on a freshness verdict.
 ```
 
-The enforcement command is Feature 5's npm-run verdict, invoked unchanged. The
-directive must not replace it with a direct parser, a live service call, a CI
-workflow, or a prompt-driven review step.
+The convention does not introduce a blocking gate, a CI workflow, or an AI step that
+runs on every check-in.
 
 #### Inputs
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `repoRoot` | filesystem path | Yes | Repository checkout where the agent is producing the PR. |
-| `changedFiles` | repo-relative path list or git-derived diff | Conditional | Freshness input, supplied directly or derived by Feature 5's verdict command. |
-| `verdictCommand` | literal command | Yes | `npm run docs:contracts:check`. |
-| `agentContext` | task context | Yes | Current Smithy task and changed working tree / PR diff. |
+| `changedSources` | repo-relative path list | Yes | Mapped public-source paths the change touches. |
+| `subsystem` | identifier | Conditional | The subsystem whose surface changed, when one is touched. |
+| `agentContext` | task context | Conditional | The Smithy task making the edit, when an agent authors the change. |
 
 #### Outputs
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `status` | enum | `pass` when the verdict exits zero; `fail` otherwise. |
-| `blocksCompletion` | boolean | True for any failed status. |
-| `diagnostics` | diagnostic list | Bounded verdict or invocation findings. |
-| `summary` | bounded text | Deterministic agent-facing enforcement result. |
+| `contractUpdateExpected` | boolean | True when a mapped public surface changed and its `contract.md` should be updated in the same change. |
+| `gated` | boolean | Always false; the convention never blocks completion. |
 
 #### Error Conditions
 
 | Condition | Response | Description |
 |-----------|----------|-------------|
-| Verdict exits non-zero | Blocking failure | Preserve verdict diagnostics and stop completion. |
-| Verdict command missing | Blocking failure | Report the unavailable command without trying an ad hoc checker. |
-| Verdict times out | Blocking failure | Report the timeout as a clean failed result. |
-| Verdict output malformed | Blocking failure | Report an invocation diagnostic with bounded context. |
-| Live service unavailable | No special handling | Enforcement does not depend on live services. |
+| Mapped surface changed, contract not updated | Convention reminder | Surface as author/review guidance; do not fail the PR. |
+| Feature 5 / Feature 7 tooling absent | Degrade to manual upkeep | The convention still applies via manual edit-time maintenance. |
+| Live service unavailable | No special handling | The convention depends on no live services. |
 
-### Enforcement Diagnostic Envelope
+### Deterministic Autogen Handoff (Feature 7)
 
-**Purpose**: Defines the diagnostic facts the directive preserves when enforcement
-blocks completion.
-**Consumers**: Repair agents, reviewers, CI failure triagers, Hatchery manager
-sessions.
-**Providers**: Smithy-agent enforcement wrapper around Feature 5 verdict output.
+**Purpose**: Points the convention at Feature 7's deterministic extractor for the
+mechanically-derivable regions of a contract.
+**Consumers**: Contributors and Smithy agents refreshing a contract's generated
+regions.
+**Providers**: Feature 7's `docs:contracts:extract` tool (referenced, not implemented
+here).
 
 #### Signature
 
 ```text
-category: <presence|section-schema|config|freshness|invocation>
-name: <optional owner>
-sourcePath: <optional repo-relative source path>
-contractPath: <optional repo-relative contract path>
-message: <bounded diagnostic>
+Refresh mechanical contract regions (Fastify endpoints, exported TS signatures) with:
+npm run docs:contracts:extract
+Deterministic and ordered; no AI/LLM step participates.
 ```
 
 #### Inputs
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `verdictDiagnostics` | diagnostic list | Conditional | Diagnostics emitted by the Feature 5 verdict. |
-| `invocationFailure` | failure fact | Conditional | Command missing, timeout, or malformed-output condition. |
+| `sourceKind` | enum | Yes | `fastify-endpoints` or `exported-ts-signatures`. |
+| `targetContract` | repo-relative path | Yes | The `contract.md` whose generated regions are refreshed. |
 
 #### Outputs
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `category` | string | Stable failure category. |
-| `name` | string | Contract owner when known. Mirrors F5's verdict diagnostic `name` field unchanged. |
-| `sourcePath` | repo-relative path | Source path when relevant. |
-| `contractPath` | repo-relative path | Contract path when relevant. |
-| `message` | bounded text | Concise failure explanation. |
+| `deterministic` | boolean | Always true; output is ordered and does not churn on cosmetic moves. |
+| `aiInLoop` | boolean | Always false; no LLM step participates. |
 
 #### Error Conditions
 
 | Condition | Response | Description |
 |-----------|----------|-------------|
-| Missing path in verdict | Preserve available fields | Do not invent ownership facts absent from the verdict. |
-| Multiple diagnostics | Deterministic list | Keep bounded ordering from the verdict or sort by category and path. |
-| Sensitive or unbounded output | Truncated diagnostic | Do not dump full logs, files, or contract bodies. |
+| Extractor not yet present | Degrade to manual upkeep | The convention does not depend on the extractor existing. |
+| Non-deterministic output requested | Reject | The mechanism must remain deterministic; ownership stays with Feature 7. |
 
-### Repair Guidance Handoff
+### Opt-In Freshness Check (Feature 5)
 
-**Purpose**: Gives a later repair step enough path context to update the stale
-contract after enforcement fails.
-**Consumers**: Smithy fix/forge agents, reviewers, Hatchery manager sessions.
-**Providers**: Enforcement result renderer.
+**Purpose**: Leaves Feature 5's verdict available as an advisory local check a
+contributor may run.
+**Consumers**: Contributors who want a local sanity check.
+**Providers**: Feature 5's `docs:contracts:check` command (referenced, not changed
+here).
 
 #### Signature
 
 ```text
-Contract enforcement failed. Update the named contract artifact(s), then rerun:
+Optional local sanity check (advisory, non-blocking):
 npm run docs:contracts:check
 ```
 
@@ -120,38 +111,35 @@ npm run docs:contracts:check
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `diagnostics` | diagnostic list | Yes | Blocking diagnostics from enforcement. |
-| `contractPaths` | repo-relative path list | No | Unique contract paths named by diagnostics. |
-| `sourcePaths` | repo-relative path list | No | Unique source paths named by diagnostics. |
+| `repoRoot` | filesystem path | Yes | Repository checkout being changed. |
 
 #### Outputs
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `nextCommand` | literal command | `npm run docs:contracts:check` after repair. |
-| `affectedContracts` | path list | Deduplicated contract paths. |
-| `affectedSources` | path list | Deduplicated source paths. |
+| `advisory` | boolean | Always true. |
+| `blocksCompletion` | boolean | Always false; the verdict never gates a PR/slice/merge. |
 
 #### Error Conditions
 
 | Condition | Response | Description |
 |-----------|----------|-------------|
-| No contract path available | Report generic repair guidance | The failed verdict still blocks completion. |
-| Diagnostics disagree | Preserve all diagnostics | Do not collapse conflicting findings into one invented owner. |
+| Verdict reports drift | Inform only | Report as advice; do not block the change. |
+| No autonomous agent runs it | Expected | No agent or CI job is required to run the check. |
 
 ## Events / Hooks
 
-No runtime events or hooks are introduced by this feature. Enforcement happens
-inside Smithy-agent instruction flow and local command execution. It does not add
-Herald events, Hatchery routes, Brood records, Castra sessions, Legate loop actions,
-CI workflows, or service callbacks.
+No runtime events or hooks are introduced by this feature. Maintenance happens inside
+ordinary editing and local command execution. It adds no Herald events, Hatchery
+routes, Brood records, Castra sessions, Legate loop actions, CI workflows, or service
+callbacks.
 
 ## Integration Boundaries
 
-- **Feature 5 contract verdict**: Owns presence, section-schema, freshness-config, and source/contract drift computation. Feature 6 invokes and interprets only pass/fail plus diagnostics — unchanged, so local and enforced verdicts cannot diverge.
-- **Smithy agent instructions**: Own when an autonomous agent must run the verdict on a PR and how a failure blocks completion.
-- **Hatchery and Steward**: May carry the enforcement result through manager/PR handoff, but receive no new service APIs from this feature.
-- **Feature 7 AUTOGEN extraction**: Remains separate; Feature 6 does not run `docs:contracts:extract` or update generated regions.
-- **SD-002 vehicle decision**: This milestone enforces via a Smithy-agent directive, not a `.github/workflows/contract-freshness.yml` GitHub Actions workflow; reverting to the workflow is a cheap, deliberate alternative, and the structural AST-diff escalation is deferred (RFC SD-002) until drift is observed.
-- **Git and filesystem**: Enforcement relies on local repository state and the verdict command's deterministic changed-file inputs.
-- **March operating philosophy**: Enforcement follows the non-interactive, minimum-access, clean-exit rules in `docs/vision.md` and `docs/operating-philosophy.md`.
+- **Feature 5 contract verdict**: Remains the local verdict authority; this feature leaves it available as an opt-in, advisory check and never wires it as a gate.
+- **Feature 7 deterministic extractor**: Owns mechanical region population (`docs:contracts:extract`); this feature only references it for the auto-gen mechanism.
+- **Smithy agent instructions**: Own the edit-time documentation maintenance the convention rides on; updating a subsystem's `contract.md` is part of the same change that alters its surface.
+- **Contributor guides**: `CONTRIBUTING.md`, `CLAUDE.md`, and `AGENTS.md` reference the convention and state there is no per-PR freshness gate.
+- **SD-002 vehicle decision**: This milestone enforces nothing automatically. Both the Smithy-agent enforcement directive and the `.github/workflows/contract-freshness.yml` workflow are rejected-but-cheaply-reversible alternatives, and the structural AST-diff escalation is deferred (RFC SD-002) until drift is observed. SD-011 (enforcement strength) is closed as moot.
+- **Git and filesystem**: The convention relies only on local repository state; it needs no live services.
+- **March operating philosophy**: The convention follows the non-interactive, minimum-access, clean-exit rules in `docs/vision.md` and `docs/operating-philosophy.md`.
