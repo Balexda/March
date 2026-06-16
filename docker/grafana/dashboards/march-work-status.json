@@ -828,7 +828,7 @@
         "type": "prometheus",
         "uid": "prometheus"
       },
-      "description": "Slices the SYSTEM is still working with a live steward attached \u2014 review fixes, conflicts, failing checks, or an auto-mergeable PR about to merge (pr-open|pr-in-fix|pr-resolving-conflicts minus waiting-on-approval minus stranded). No human action needed. Resource-heavy; counts toward the cap.",
+      "description": "Slices the SYSTEM is still working \u2014 review fixes, conflicts, failing checks, or an auto-mergeable PR about to merge (pr-open|pr-in-fix|pr-resolving-conflicts minus waiting-on-approval). No human action needed. Resource-heavy; counts toward the cap. Steward-less ('stranded') slices are surfaced separately in the Escalation row, not netted out here (the stranded gauge spans more stages than this sum, so subtracting it would under-count).",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -877,7 +877,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "clamp_min(sum(march_legate_slices{stage=~\"pr-open|pr-in-fix|pr-resolving-conflicts\", profile=~\"$profile\"}) - sum(march_legate_slices_waiting_on_approval{profile=~\"$profile\"}) - sum(march_legate_slices_stranded{profile=~\"$profile\"}), 0)",
+          "expr": "clamp_min(sum(march_legate_slices{stage=~\"pr-open|pr-in-fix|pr-resolving-conflicts\", profile=~\"$profile\"}) - sum(march_legate_slices_waiting_on_approval{profile=~\"$profile\"}), 0)",
           "legendFormat": "in steward",
           "range": true,
           "refId": "A"
