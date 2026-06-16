@@ -54,7 +54,7 @@
 
 ### Tasks
 
-- [ ] **Build Steward artifacts from validated handoff input**
+- [x] **Build Steward artifacts from validated handoff input**
 
   Update Hatchery's manager prompt and handoff artifact creation so the Steward receives the validated patch and extraction metadata rather than raw spawn output. Preserve bounded diagnostics and metadata useful for review, but keep raw backend logs out of patch input.
 
@@ -64,7 +64,7 @@
   - Raw backend output is not passed as patch input and is not required for Steward to apply or review the validated artifact (FR-012).
   - Existing manager prompt requirements for acceptance-criteria verification and task checkbox updates remain intact.
 
-- [ ] **Constrain patch application to the Steward worktree branch**
+- [x] **Constrain patch application to the Steward worktree branch**
 
   Keep patch application scoped to the manager or spawn worktree path recorded for the handoff and reject attempts to apply the validated patch outside that branch-owned worktree. This task should preserve Hatchery's current separation from Feature 6: it may apply the patch for Steward review, but it must not push branches, open pull requests, or mutate the operator's main checkout.
 
