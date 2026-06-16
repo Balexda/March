@@ -543,3 +543,47 @@ groups:
           - refId: C
             datasourceUid: __expr__
             model: { refId: C, type: threshold, expression: A, conditions: [{ evaluator: { type: gt, params: [0] } }] }
+
+      # STEWARD SELF-REPORT HEURISTIC DEGRADED (#371) — LOW PRIORITY. The steward
+      # hook classifies its own state with cheap heuristics; only what it CAN'T
+      # classify (`classification="unclassified"`) spills to the relatively
+      # expensive legate-agent (P2). A sustained drop in the classified share is
+      # the early signal the heuristics have drifted (new prompt phrasings, a CLI
+      # change) and need updating before the legate-agent cost climbs. Fires when
+      # <50% of reports were classifiable over 1h AND volume is meaningful (≥10,
+      # via the clamp_min'd denominator + the >=10 gate, so a single unclassified
+      # report on a quiet day never trips it). 1h debounce — this is a trend, not
+      # an incident. Heuristics are cheap; the legate-agent is not.
+      - uid: march-steward-heuristic-degraded
+        title: Steward self-report heuristic degraded (>50% spilling to the legate-agent)
+        condition: C
+        for: 1h
+        noDataState: OK
+        execErrState: OK
+        labels: { severity: info, team: march, tier: behavioral }
+        annotations:
+          summary: >-
+            Over the last 1h, fewer than half of steward self-reports could be
+            classified by the cheap hook heuristics — the rest fall through to the
+            (expensive) legate-agent. The heuristics in
+            src/templates/steward/hooks/steward-report.mjs likely need updating
+            (new prompt phrasings / a CLI change). See the Herald dashboard's
+            "Heuristic classification rate (1h)" panel.
+        data:
+          - refId: A
+            relativeTimeRange: { from: 3600, to: 0 }
+            datasourceUid: prometheus
+            model:
+              refId: A
+              instant: true
+              editorMode: code
+              expr: >-
+                (
+                  sum(increase(march_herald_steward_reports_total{classification!="unclassified"}[1h]))
+                  / clamp_min(sum(increase(march_herald_steward_reports_total[1h])), 1)
+                  < bool 0.5
+                )
+                * (sum(increase(march_herald_steward_reports_total[1h])) >= bool 10)
+          - refId: C
+            datasourceUid: __expr__
+            model: { refId: C, type: threshold, expression: A, conditions: [{ evaluator: { type: gt, params: [0] } }] }

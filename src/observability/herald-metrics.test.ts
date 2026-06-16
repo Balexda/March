@@ -8,7 +8,9 @@ import {
   recordHeraldObserveError,
   recordHeraldRequest,
   recordHeraldSync,
+  recordStewardReport,
   startHeraldHeartbeat,
+  stewardReportClassification,
 } from "./herald-metrics.js";
 
 describe("herald-metrics", () => {
@@ -27,6 +29,20 @@ describe("herald-metrics", () => {
     expect(() => recordHeraldObserveError()).not.toThrow();
     expect(() => recordHeraldSync("ok")).not.toThrow();
     expect(() => recordHeraldSync("error")).not.toThrow();
+    expect(() =>
+      recordStewardReport({ profile: "march", classification: "awaiting_input" }),
+    ).not.toThrow();
+  });
+
+  it("classifies a steward report into its metric label (#371)", () => {
+    expect(stewardReportClassification(true, "awaiting_input")).toBe("awaiting_input");
+    expect(stewardReportClassification(true, "reported")).toBe("reported");
+    expect(stewardReportClassification(true, "working")).toBe("working");
+    // The cheap-vs-expensive split: no classification → the legate-agent's job.
+    expect(stewardReportClassification(false)).toBe("unclassified");
+    expect(stewardReportClassification(false, "working")).toBe("unclassified");
+    // classified but status-less (defensive) collapses to a bounded label.
+    expect(stewardReportClassification(true)).toBe("classified");
   });
 
   it("startHeraldHeartbeat returns a no-op stopper when disabled", () => {
