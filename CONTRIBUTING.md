@@ -115,6 +115,17 @@ path** so worktree paths resolve, the tmux socket, and the agent-deck binary) �
 review/override the host-specific vars at the top of
 `docker/hatchery.docker-compose.yml`.
 
+To turn the whole stack off and recover the resources it holds, run **`march
+down`**: it stops the service containers in reverse dependency order (legate →
+herald → brood → hatchery → castra → otel-lgtm). State is preserved by default
+(named volumes, worktrees, branches, in-flight sessions), so a later bring-up
+resumes where it left off. Pass `--volumes` to also remove the named volumes
+(registries, Herald's event log, telemetry), or `--drain` to tear down in-flight
+Brood sessions (spawn containers, worktrees, branches, stewards) before stopping
+the services. The matching single-command bring-up (`march up`) and the rest of
+the stack-lifecycle surface (`march upgrade` / `march status` / `march init`) are
+tracked as follow-ups.
+
 **Keep telemetry in lock-step with the dispatch machinery.** When you add a loop
 lifecycle action or a new dispatch path, emit a span for it; when you add a
 failure mode, emit an *errored* span so it surfaces in traces; when a new process

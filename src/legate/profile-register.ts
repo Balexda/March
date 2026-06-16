@@ -1,7 +1,5 @@
 import { execFileSync } from "node:child_process";
-import fs from "node:fs";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { locateCompose } from "../stack/services.js";
 import { ProfileClient } from "../herald/profiles/client.js";
 import type { ProfileRecord, RegisterProfileInput } from "../herald/profiles/types.js";
 
@@ -40,20 +38,13 @@ export async function registerProfile(
 }
 
 /**
- * Locate the `docker/legate.docker-compose.yml` shipped alongside the CLI, by
- * walking up from this module to the package root (the dir holding package.json).
- * Returns null when not found (e.g. an npm install that didn't publish `docker/`).
+ * Locate the `docker/legate.docker-compose.yml` shipped alongside the CLI.
+ * Thin wrapper over the shared {@link locateCompose} walk-up used by the
+ * stack-lifecycle commands. Returns null when not found (e.g. an npm install
+ * that didn't publish `docker/`).
  */
 export function locateLegateCompose(): string | null {
-  let dir = path.dirname(fileURLToPath(import.meta.url));
-  for (let i = 0; i < 6; i++) {
-    const candidate = path.join(dir, "docker", "legate.docker-compose.yml");
-    if (fs.existsSync(candidate)) return candidate;
-    const parent = path.dirname(dir);
-    if (parent === dir) break;
-    dir = parent;
-  }
-  return null;
+  return locateCompose("legate.docker-compose.yml");
 }
 
 export interface EnsureServiceResult {

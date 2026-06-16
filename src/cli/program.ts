@@ -38,6 +38,7 @@ import { runStatioServer } from "../statio/serve.js";
 import { STATIO_TOKEN_ENV } from "../statio/config.js";
 import { StatioValidationError } from "../statio/types.js";
 import { initMarch, InitError } from "../bootstrap/init.js";
+import { stackDown } from "../stack/down.js";
 import { createBuildContext, SnapshotError } from "../spawn/snapshot.js";
 import {
   listBackends,
@@ -231,6 +232,44 @@ program
         return;
       }
       throw err;
+    }
+  });
+
+program
+  .command("down")
+  .description("Stop the March service stack (inverse of bring-up)")
+  .option("--volumes", "Also remove named volumes (registries, event log, telemetry)")
+  .option("--drain", "Tear down in-flight Brood sessions before stopping services")
+  .action(async (opts: { volumes?: boolean; drain?: boolean }) => {
+    commandHandled = true;
+    try {
+      const result = await stackDown({ volumes: opts.volumes, drain: opts.drain });
+
+      if (result.drain) {
+        const { tornDown, failures, note } = result.drain;
+        if (note) {
+          process.stderr.write(`drain: ${note}\n`);
+        } else {
+          console.log(`drain: tore down ${tornDown.length} session(s)`);
+        }
+        for (const f of failures) {
+          process.stderr.write(`drain: failed ${f.id} (${f.detail})\n`);
+        }
+      }
+
+      let failed = false;
+      for (const svc of result.services) {
+        console.log(
+          `${svc.service}: ${svc.outcome}${svc.detail ? ` (${svc.detail})` : ""}`,
+        );
+        if (svc.outcome === "failed") failed = true;
+      }
+      // A skipped service (compose file not found) is not a hard failure; a
+      // failed `docker compose down` is.
+      process.exitCode = failed ? ERROR : SUCCESS;
+    } catch (err) {
+      process.stderr.write((err instanceof Error ? err.message : String(err)) + "\n");
+      process.exitCode = ERROR;
     }
   });
 
