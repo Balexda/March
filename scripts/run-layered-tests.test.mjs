@@ -1,3 +1,6 @@
+/**
+ * @l0 @deterministic @ci
+ */
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -97,6 +100,33 @@ describe("layered test command contract", () => {
     }
   });
 
+  it("runs npm test as the sequential fail-fast aggregate over staged scripts", () => {
+    const packageJson = JSON.parse(
+      fs.readFileSync(path.join(repoRoot, "package.json"), "utf8"),
+    );
+
+    expect(packageJson.scripts.test).toBe(
+      "npm run test:l0 && npm run test:l1 && npm run test:l2-cassette && npm run test:l3-cassette",
+    );
+    expect(packageJson.scripts.test).not.toMatch(/\b(vitest|node|npx)\b/);
+  });
+
+  it("keeps the aggregate build to npm pretest without per-layer build hooks", () => {
+    const packageJson = JSON.parse(
+      fs.readFileSync(path.join(repoRoot, "package.json"), "utf8"),
+    );
+
+    expect(packageJson.scripts.pretest).toBe(packageJson.scripts.build);
+    expect(packageJson.scripts.build).toBe(
+      "tsup src/cli.ts --format esm --clean",
+    );
+    expect(packageJson.scripts.typecheck).toBe("tsc --noEmit");
+    expect(packageJson.scripts["pretest:l0"]).toBeUndefined();
+    expect(packageJson.scripts["pretest:l1"]).toBeUndefined();
+    expect(packageJson.scripts["pretest:l2-cassette"]).toBeUndefined();
+    expect(packageJson.scripts["pretest:l3-cassette"]).toBeUndefined();
+  });
+
   it("selects exactly the intended deterministic CI scope for every layer", () => {
     const root = makeRepo({
       "src/l0.test.ts": taggedTest("@l0 @deterministic @ci"),
@@ -114,6 +144,16 @@ describe("layered test command contract", () => {
     ]);
     expect(selectLayerTestFiles(root, "l3-cassette")).toEqual([
       "src/l3.test.ts",
+    ]);
+  });
+
+  it("includes tagged script tests in the deterministic aggregate surface", () => {
+    const root = makeRepo({
+      "scripts/contract.test.mjs": taggedTest("@l0 @deterministic @ci"),
+    });
+
+    expect(selectLayerTestFiles(root, "l0")).toEqual([
+      "scripts/contract.test.mjs",
     ]);
   });
 
