@@ -1,5 +1,6 @@
 import type { Attributes, Counter, Histogram, Meter } from "@opentelemetry/api";
 import { getActiveOtel } from "../observability/otel.js";
+import { REQUEST_LATENCY_BUCKETS_SECONDS } from "../observability/histogram-buckets.js";
 import { startDispatchSpan } from "../observability/spawn-trace.js";
 
 /**
@@ -48,6 +49,7 @@ function castraInstruments(meter: Meter): CastraInstruments {
     durationHistogram = meter.createHistogram("march.castra.request.duration", {
       description: "Castra API request wall-clock duration",
       unit: "s",
+      advice: { explicitBucketBoundaries: REQUEST_LATENCY_BUCKETS_SECONDS },
     });
     heartbeatCounter = meter.createCounter("march.castra.heartbeat", {
       description: "Liveness heartbeat ticks emitted by the castra service",

@@ -1,6 +1,7 @@
 import type { Attributes, Counter, Histogram, Meter } from "@opentelemetry/api";
 import { getActiveOtel } from "./otel.js";
 import { type RequestOutcome, outcomeFromStatus } from "./hatchery-metrics.js";
+import { REQUEST_LATENCY_BUCKETS_SECONDS } from "./histogram-buckets.js";
 
 export { type RequestOutcome, outcomeFromStatus };
 
@@ -82,6 +83,7 @@ function broodInstruments(meter: Meter): BroodInstruments {
     requestDuration = meter.createHistogram("march.brood.request.duration", {
       description: "Brood HTTP request wall-clock duration",
       unit: "s",
+      advice: { explicitBucketBoundaries: REQUEST_LATENCY_BUCKETS_SECONDS },
     });
     teardownsCounter = meter.createCounter("march.brood.teardowns", {
       description: "Count of brood teardowns by kind, outcome and profile",
@@ -90,6 +92,7 @@ function broodInstruments(meter: Meter): BroodInstruments {
     teardownDuration = meter.createHistogram("march.brood.teardown.duration", {
       description: "Brood teardown wall-clock duration",
       unit: "s",
+      advice: { explicitBucketBoundaries: REQUEST_LATENCY_BUCKETS_SECONDS },
     });
     heartbeatCounter = meter.createCounter("march.brood.heartbeat", {
       description: "Liveness heartbeat ticks emitted by the brood service",

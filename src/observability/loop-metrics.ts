@@ -59,6 +59,11 @@ export interface LoopMetricsSnapshot {
   /** All-clear, human-gates-cleared slices GitHub won't merge yet
    *  (merge_gate=blocked-merge-state). A real stall. */
   readonly blockedOnMergeState: number;
+  /** Slices in a steward stage with NO live worker session — adopted-but-steward-less
+   *  open PRs + crashed-steward slices. They look like active "In steward" work but
+   *  have no resource; the durable "stuck, no steward" signal independent of the
+   *  relaunch retry churn. */
+  readonly stranded: number;
   /** Escalated-stage slices keyed by bounded escalation reason; sums to
    *  slicesByStage.escalated. Splits spawn-failed from steward-stuck on the board. */
   readonly escalatedByReason: Readonly<Record<string, number>>;
@@ -80,6 +85,9 @@ export interface LoopTickActivity {
   readonly ghostCleanups: number;
   /** Ghost-cleanup attempts Brood would not confirm (`ghost-cleanup-failed`). */
   readonly ghostCleanupFailures: number;
+  /** Ghost-cleanup attempts deferred to Brood (`ghost-cleanup-deferred`, a 404):
+   *  tombstoned, not retried, NOT a failure. */
+  readonly ghostCleanupDeferred: number;
   readonly relaunches: number;
   /** Steward relaunch attempts that failed (`relaunch-failed`). */
   readonly relaunchFailures: number;
@@ -281,6 +289,16 @@ function ensureInstruments(meter: Meter): void {
     "Human-gates-cleared slices GitHub won't merge yet (UNKNOWN/BEHIND/BLOCKED/DIRTY)",
     (s) => s.blockedOnMergeState,
   );
+  // Stranded: steward-stage slices with no live steward (adopted-but-steward-less
+  // open PRs + crashed stewards). Surfaces spawn-failed/steward-less work that the
+  // stage gauge alone shows as healthy "In steward". Exported as
+  // `march_legate_slices_stranded` (no suffix).
+  registerGauge(
+    meter,
+    "march.legate.slices.stranded",
+    "Steward-stage slices with no live worker session (stuck, no resource attached)",
+    (s) => s.stranded,
+  );
 
   // Escalated slices split by reason (sums to slices{stage="escalated"}). `reason`
   // is a bounded label (the ESCALATION_REASONS vocabulary). Lets the work-status
@@ -432,6 +450,8 @@ export function recordLoopHeartbeat(activity: LoopTickActivity): void {
     loopActions!.add(activity.ghostCleanups, { ...attrs, action: "ghost_cleanup" });
   if (activity.ghostCleanupFailures)
     loopActions!.add(activity.ghostCleanupFailures, { ...attrs, action: "ghost_cleanup_failed" });
+  if (activity.ghostCleanupDeferred)
+    loopActions!.add(activity.ghostCleanupDeferred, { ...attrs, action: "ghost_cleanup_deferred" });
   if (activity.relaunches)
     loopActions!.add(activity.relaunches, { ...attrs, action: "relaunch" });
   if (activity.relaunchFailures)

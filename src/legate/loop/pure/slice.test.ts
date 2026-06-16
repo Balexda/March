@@ -19,6 +19,7 @@ import {
   recoveryBudgetExhausted,
   sliceReleasesArtifact,
   summarizeSlicesByStage,
+  countStrandedSlices,
   mergeReadiness,
   mergeBlocker,
 } from "./slice.js";
@@ -322,6 +323,32 @@ describe("slice pure helpers", () => {
   });
 
   void ITEM_BRANCH;
+});
+
+describe("countStrandedSlices (steward-stage slices with no live steward)", () => {
+  it("counts steward-stage slices whose worker session is empty or not live", () => {
+    const slices = {
+      adopted: { stage: "pr-open", worker_session_id: "" }, // adopt-from-fold, never got a steward
+      crashed: { stage: "pr-open", worker_session_id: "dead-1" }, // steward vanished from Castra
+      healthy: { stage: "pr-open", worker_session_id: "live-1" }, // live steward → not stranded
+      fixing: { stage: "pr-in-fix", worker_session_id: "gone-2" }, // stranded
+      rebasing: { stage: "pr-rebasing", worker_session_id: undefined }, // stranded (non-allowlist steward stage)
+    };
+    const live = new Set(["live-1"]);
+    expect(countStrandedSlices(slices, live)).toBe(4);
+  });
+
+  it("ignores non-steward stages and an empty/absent slice set", () => {
+    const slices = {
+      queued: { stage: "hatchery-pending", worker_session_id: "" }, // no steward expected yet
+      escalated: { stage: "escalated" }, // already surfaced on its own metric
+      other: { stage: "archived", worker_session_id: "" }, // terminal/unknown stage
+      working: { stage: "implementing", worker_session_id: "live-1" }, // live → not stranded
+    };
+    expect(countStrandedSlices(slices, new Set(["live-1"]))).toBe(0);
+    expect(countStrandedSlices(undefined, new Set())).toBe(0);
+    expect(countStrandedSlices({}, new Set())).toBe(0);
+  });
 });
 
 describe("recoverableEscalations (#211 bounded auto-recovery)", () => {

@@ -216,5 +216,28 @@ describe("relaunch handler", () => {
     expect(c.castra.launchSession).not.toHaveBeenCalled();
     expect(res.actions[0]).toMatchObject({ action: "relaunch-failed" });
     expect(slice.worker_session_id).toBe("dead");
+    // FIX 2: the FAILED attempt is counted against the budget (else it would
+    // retry every tick forever) and durably recorded via retry.counted.
+    expect(state.raw.transient_retry_counts["relaunch-steward:gone"]).toBe(1);
+    expect(c.emitTransition).toHaveBeenCalledWith({ type: "retry.counted", key: "relaunch-steward:gone", count: 1 });
+  });
+
+  it("a persistently-failing relaunch stops being re-selected once the budget is exhausted", async () => {
+    const slice = eligibleSlice();
+    const state = loopState({ slices: { gone: slice }, raw: { slices: { gone: slice } } });
+    const c = ctx(() => {
+      throw new Error("castra down");
+    });
+    const deps: RelaunchDeps = { worktreeExists: () => true, ensureWorktree: vi.fn() };
+
+    // Three failing attempts advance the counter 1→2→3; the 4th assess is empty.
+    for (let i = 1; i <= 3; i++) {
+      const decisions = assess(state);
+      expect(decisions).toHaveLength(1);
+      const res = await apply(decisions, c, state, deps);
+      expect(res.actions[0]).toMatchObject({ action: "relaunch-failed" });
+      expect(state.raw.transient_retry_counts["relaunch-steward:gone"]).toBe(i);
+    }
+    expect(assess(state)).toEqual([]); // budget exhausted → no more churn
   });
 });

@@ -41,6 +41,19 @@ export function dropSlice(state: LoopState, sliceId: string): void {
   delete state.slices[sliceId];
 }
 
+/**
+ * Ensure `raw.transient_retry_counts` exists and return it — the #211 bounded-retry
+ * budget. Shared by handlers that persist a per-key attempt/tombstone count
+ * (`relaunch-steward:<sliceId>`, `ghost-cleanup:<sessionId>`) so a failing action
+ * stops re-firing every tick instead of churning forever.
+ */
+export function ensureRetryCounts(raw: any): Record<string, number> {
+  if (!raw.transient_retry_counts || typeof raw.transient_retry_counts !== "object") {
+    raw.transient_retry_counts = {};
+  }
+  return raw.transient_retry_counts;
+}
+
 /** Drop a session from the in-memory snapshot after teardown so later handlers
  *  don't act on it. */
 export function dropSession(state: LoopState, sessionId: string): void {

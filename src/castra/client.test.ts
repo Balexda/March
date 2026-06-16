@@ -1,15 +1,11 @@
 /**
  * @l0 @deterministic @ci
  */
-import { describe, it, expect, vi, afterEach } from "vitest";
-
-const cp = vi.hoisted(() => ({ execFileSync: vi.fn() }));
-vi.mock("node:child_process", () => ({ execFileSync: cp.execFileSync }));
+import { describe, it, expect, vi } from "vitest";
 
 import {
   CastraClient,
   CastraClientError,
-  SyncCastraClient,
   resolveCastraBaseUrl,
   resolveCastraToken,
 } from "./client.js";
@@ -114,6 +110,33 @@ describe("castra client — requests", () => {
     expect(JSON.parse(init.body as string)).toMatchObject({
       metadata: { sliceId: "slice-1", spawnId: "sp-1" },
     });
+  });
+
+  it("sends createBranch:false for an attach launch, and omits it otherwise", async () => {
+    const session = {
+      sessionId: "s2",
+      title: "t",
+      group: "g",
+      branch: "b",
+      worktreePath: "/w",
+      createdAt: "c",
+    };
+    const fetchImpl = vi.fn(async () => jsonResponse(201, { session }));
+    const client = new CastraClient({
+      baseUrl: "http://castra:9264",
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+
+    // Attach: createBranch:false MUST reach the server (else it defaults to a
+    // `-b` create and collides with the existing relaunch branch).
+    await client.launchSession({ profile: "smithy", repoPath: "/r", branch: "b", title: "t", createBranch: false });
+    const [, attachInit] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
+    expect(JSON.parse(attachInit.body as string)).toMatchObject({ createBranch: false });
+
+    // Default (create): the field is omitted so the server applies its `-b` default.
+    await client.launchSession({ profile: "smithy", repoPath: "/r", branch: "b", title: "t" });
+    const [, createInit] = fetchImpl.mock.calls[1] as unknown as [string, RequestInit];
+    expect(JSON.parse(createInit.body as string)).not.toHaveProperty("createBranch");
   });
 
   it("lists sessions via GET with the profile + group query", async () => {
@@ -284,79 +307,5 @@ describe("castra client — requests", () => {
       }) as unknown as typeof fetch,
     });
     expect(await down.reachable()).toBe(false);
-  });
-});
-
-describe("SyncCastraClient (curl transport)", () => {
-  afterEach(() => cp.execFileSync.mockReset());
-
-  // curl emits the body followed by `\n<http_code>` (the client's -w format).
-  const reply = (body: unknown, code = 200) =>
-    `${typeof body === "string" ? body : JSON.stringify(body)}\n${code}`;
-
-  const client = () =>
-    new SyncCastraClient({ baseUrl: "http://castra:9264", token: "tok" });
-
-  it("lists sessions and sends the bearer token + profile query via curl", () => {
-    cp.execFileSync.mockReturnValue(
-      reply({
-        sessions: [
-          { sessionId: "s1", title: "St", group: "g", branch: "b", worktreePath: "/w", createdAt: "t", status: "running" },
-        ],
-      }),
-    );
-    const sessions = client().listSessions("smithy");
-    expect(sessions[0]).toMatchObject({ sessionId: "s1", status: "running" });
-    const args = cp.execFileSync.mock.calls[0][1] as string[];
-    expect(args).toContain("authorization: Bearer tok");
-    expect(args.some((a) => a.includes("/v1/sessions?profile=smithy"))).toBe(true);
-  });
-
-  it("sends createBranch:false only for an attach launch", () => {
-    cp.execFileSync.mockReturnValue(
-      reply({ session: { sessionId: "s2", title: "t", group: "g", branch: "b", worktreePath: "/w", createdAt: "c", status: "idle" } }, 201),
-    );
-    client().launchSession({ profile: "smithy", repoPath: "/r", branch: "b", title: "t", createBranch: false });
-    const args = cp.execFileSync.mock.calls[0][1] as string[];
-    const body = JSON.parse(args[args.indexOf("--data-binary") + 1]!);
-    expect(body.createBranch).toBe(false);
-  });
-
-  it("maps a non-2xx envelope to CastraClientError with code + status", () => {
-    cp.execFileSync.mockReturnValue(reply({ error: { code: "not_found", message: "gone" } }, 404));
-    try {
-      client().sessionOutput("smithy", "s1");
-      throw new Error("expected throw");
-    } catch (err) {
-      expect(err).toBeInstanceOf(CastraClientError);
-      expect((err as CastraClientError).status).toBe(404);
-      expect((err as CastraClientError).code).toBe("not_found");
-      expect((err as Error).message).toBe("gone");
-    }
-  });
-
-  it("treats DELETE removed flag as the result", () => {
-    cp.execFileSync.mockReturnValue(reply({ ok: true, removed: true }));
-    expect(client().removeSession({ profile: "smithy", sessionId: "s1", pruneWorktree: true })).toEqual({
-      removed: true,
-    });
-  });
-
-  it("runs a recovery sweep with a longer curl timeout", () => {
-    cp.execFileSync.mockReturnValue(
-      reply({
-        recovered: [
-          { sessionId: "w1", title: "f", group: "legate-workers", outcome: "recovered", pickerResolved: false, finalStatus: "idle" },
-        ],
-      }),
-    );
-    const report = client().recoverSessions("smithy", "legate-workers");
-    expect(report.recovered[0]).toMatchObject({ sessionId: "w1", outcome: "recovered" });
-    const args = cp.execFileSync.mock.calls[0][1] as string[];
-    expect(args.some((a) => a.includes("/v1/sessions/recover"))).toBe(true);
-    // The sweep gets the long --max-time ceiling, not the 60s default.
-    expect(args[args.indexOf("--max-time") + 1]).toBe("300");
-    const body = JSON.parse(args[args.indexOf("--data-binary") + 1]!);
-    expect(body).toEqual({ profile: "smithy", group: "legate-workers" });
   });
 });

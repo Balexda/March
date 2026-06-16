@@ -3,6 +3,7 @@ import path from "node:path";
 import type { HandlerContext, HandlerResult, LoopState } from "../state/types.js";
 import { emptyHandlerResult } from "../state/types.js";
 import { isWorkerSession } from "../pure/session.js";
+import { ensureRetryCounts } from "../state/mutations.js";
 import { execText } from "../clients/exec.js";
 
 /**
@@ -76,14 +77,6 @@ function errMsg(err: any): string {
 function readRetryCounts(raw: any): Record<string, number> {
   const c = raw?.transient_retry_counts;
   return c && typeof c === "object" ? c : {};
-}
-
-/** apply-side: ensure the counter object exists so we can write into it. */
-function ensureRetryCounts(raw: any): Record<string, number> {
-  if (!raw.transient_retry_counts || typeof raw.transient_retry_counts !== "object") {
-    raw.transient_retry_counts = {};
-  }
-  return raw.transient_retry_counts;
 }
 
 function stewardResumeMessage(d: RelaunchDecision): string {
@@ -263,16 +256,27 @@ export async function apply(
   if (decisions.length === 0) return res;
   const counts = ensureRetryCounts(state.raw);
 
+  // Persist THIS attempt against the budget. Called on success AND on every
+  // failure path: a relaunch that can never succeed (unrecreatable worktree, a
+  // launch error) must still advance the counter, else assess re-selects it every
+  // tick forever and RELAUNCH_LIMIT is never reached (the relaunch_failed churn).
+  const recordAttempt = (d: RelaunchDecision): void => {
+    counts["relaunch-steward:" + d.sliceId] = d.attempt;
+    ctx.emitTransition?.({ type: "retry.counted", key: "relaunch-steward:" + d.sliceId, count: d.attempt });
+  };
+
   for (const d of decisions) {
     if (!deps.worktreeExists(d.worktreePath)) {
       try {
         await deps.ensureWorktree(d.worktreePath, d.featureBranch, state.repoPath as string);
       } catch (err) {
+        recordAttempt(d);
+        res.mutated = true;
         res.actions.push({
           action: "relaunch-failed",
           sliceId: d.sliceId,
           sessionId: null,
-          detail: "could not recreate worktree at " + d.worktreePath + " from branch " + d.featureBranch + ": " + errMsg(err),
+          detail: "could not recreate worktree at " + d.worktreePath + " from branch " + d.featureBranch + " (attempt " + d.attempt + "/" + d.limit + "): " + errMsg(err),
         });
         continue;
       }
@@ -298,9 +302,12 @@ export async function apply(
         title: d.launchTitle,
         group: ctx.meta.worker_group,
         model: "opus",
+        // Attach to the EXISTING branch/PR — never `-b` (it already exists). This
+        // flag was previously dropped by the async client, collapsing the attach
+        // into a create that always failed "branch already exists".
         createBranch: false,
         traceKey: d.sliceId,
-      } as any);
+      });
       newSessionId = relaunched.sessionId;
       // The launch response carries the session's REAL worktree (agent-deck may
       // pick a fresh hashed path when feature-<branch> already exists); register
@@ -309,11 +316,15 @@ export async function apply(
         liveWorktree = relaunched.worktreePath;
       }
     } catch (err) {
-      res.actions.push({ action: "relaunch-failed", sliceId: d.sliceId, sessionId: null, detail: "castra launch failed: " + errMsg(err) });
+      recordAttempt(d);
+      res.mutated = true;
+      res.actions.push({ action: "relaunch-failed", sliceId: d.sliceId, sessionId: null, detail: "castra launch failed (attempt " + d.attempt + "/" + d.limit + "): " + errMsg(err) });
       continue;
     }
     if (!newSessionId) {
-      res.actions.push({ action: "relaunch-failed", sliceId: d.sliceId, sessionId: null, detail: "castra launch returned no identifiable new session" });
+      recordAttempt(d);
+      res.mutated = true;
+      res.actions.push({ action: "relaunch-failed", sliceId: d.sliceId, sessionId: null, detail: "castra launch returned no identifiable new session (attempt " + d.attempt + "/" + d.limit + ")" });
       continue;
     }
 
@@ -339,9 +350,8 @@ export async function apply(
     slice.worktree_path = liveWorktree;
     slice.last_action = ctx.ts;
     slice.last_action_note = "Re-launched steward for PR #" + d.prNumber + " (attempt " + d.attempt + "/" + d.limit + "); new session " + newSessionId;
-    counts["relaunch-steward:" + d.sliceId] = d.attempt;
     ctx.emitTransition?.({ type: "steward.relaunched", sliceId: d.sliceId, sessionId: newSessionId });
-    ctx.emitTransition?.({ type: "retry.counted", key: "relaunch-steward:" + d.sliceId, count: d.attempt });
+    recordAttempt(d);
     res.mutated = true;
     res.actions.push({
       action: "relaunch-steward",

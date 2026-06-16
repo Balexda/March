@@ -157,6 +157,19 @@ function parseJsonMaybe(text: string): unknown {
   }
 }
 
+/**
+ * Does this `list --json` stdout signal an EMPTY profile rather than malformed
+ * output? agent-deck does not print `[]` for a profile with no sessions — it
+ * prints a human `No sessions found in profile 'X'.` line (and could print
+ * nothing). An empty profile is a normal state (a reaped/idle repo), so the list
+ * adapters treat this as `[]` instead of throwing — a hard error here 502s the
+ * GET /v1/sessions the legate calls every tick per profile, which drove the
+ * castra error-rate alarm the moment any profile went empty.
+ */
+function isEmptyProfileListing(trimmedStdout: string): boolean {
+  return trimmedStdout === "" || /^no sessions found\b/i.test(trimmedStdout);
+}
+
 function firstString(
   record: Record<string, unknown>,
   keys: readonly string[],
@@ -358,9 +371,10 @@ function looksLikeNotFound(stderr: string): boolean {
 }
 
 function listSnapshot(profile: string): CastraSession[] {
-  const stdout = runAgentDeck(buildListArgs(profile), true);
-  const parsed = parseJsonMaybe(stdout.trim());
+  const stdout = runAgentDeck(buildListArgs(profile), true).trim();
+  const parsed = parseJsonMaybe(stdout);
   if (!Array.isArray(parsed)) {
+    if (isEmptyProfileListing(stdout)) return [];
     throw new CastraAgentDeckError("agent-deck list --json returned unexpected output.");
   }
   return parsed
@@ -743,9 +757,10 @@ function runTmux(args: readonly string[]): string {
 export function createAgentDeckRecoveryRuntime(): RecoveryRuntime {
   return {
     listSessions(profile) {
-      const stdout = runAgentDeck(buildListArgs(profile), true);
-      const parsed = parseJsonMaybe(stdout.trim());
+      const stdout = runAgentDeck(buildListArgs(profile), true).trim();
+      const parsed = parseJsonMaybe(stdout);
       if (!Array.isArray(parsed)) {
+        if (isEmptyProfileListing(stdout)) return [];
         throw new CastraAgentDeckError("agent-deck list --json returned unexpected output.");
       }
       return parsed

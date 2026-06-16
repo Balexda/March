@@ -7,7 +7,8 @@ import * as babysit from "./handlers/babysit.js";
 import * as recovery from "./handlers/recovery.js";
 import * as adoptFromFold from "./handlers/adopt-from-fold.js";
 import * as dispatch from "./handlers/dispatch.js";
-import { dispatchableReady, summarizeSlicesByStage, type SpawnBudget } from "./pure/slice.js";
+import { countStrandedSlices, dispatchableReady, summarizeSlicesByStage, type SpawnBudget } from "./pure/slice.js";
+import { isWorkerSession } from "./pure/session.js";
 
 /**
  * Stage 2 orchestration. runTick senses once, then runs the handlers in the fixed
@@ -77,6 +78,17 @@ function buildTickResult(state: LoopState, r: CoordinatorOutput["results"], spaw
   const dispatchableReadyCount = state.smithy.ok
     ? dispatchableReady(state.raw, state.smithy.ready).length
     : 0;
+  // Slices in a steward stage with no live steward behind them (#stranded): the
+  // adopted-but-steward-less open PRs + crashed-steward slices. Without this they
+  // count as healthy "In steward" on the board while relaunch fails (or has given
+  // up) every tick. Built from this tick's live worker-session list.
+  const liveWorkerSessionIds = new Set<string>();
+  for (const s of Array.isArray(state.sessions) ? state.sessions : []) {
+    if (isWorkerSession(s, state.workerGroup) && typeof s?.id === "string" && s.id.length > 0) {
+      liveWorkerSessionIds.add(s.id);
+    }
+  }
+  const strandedCount = countStrandedSlices(state.slices, liveWorkerSessionIds);
   return {
     ts: state.ts,
     statePresent: state.statePresent,
@@ -90,6 +102,7 @@ function buildTickResult(state: LoopState, r: CoordinatorOutput["results"], spaw
     waitingOnApprovalCount: waitingOnApproval,
     blockedOnMergeStateCount: blockedOnMergeState,
     dispatchableReadyCount,
+    strandedCount,
     escalatedByReason,
     prBlockerCounts: prBlocker,
     babysitActionsByKind,
@@ -97,6 +110,7 @@ function buildTickResult(state: LoopState, r: CoordinatorOutput["results"], spaw
     cleanupFailureCount: r.cleanup.failures.length,
     ghostCleanupCount: countAction(r.ghost, "ghost-cleanup"),
     ghostCleanupFailureCount: countAction(r.ghost, "ghost-cleanup-failed"),
+    ghostCleanupDeferredCount: countAction(r.ghost, "ghost-cleanup-deferred"),
     relaunchCount: countAction(r.relaunch, "relaunch-steward"),
     relaunchFailureCount: countAction(r.relaunch, "relaunch-failed"),
     babysitActionCount: r.babysit.actions.length - stewardNudgeCount - stewardStrandedCount,
