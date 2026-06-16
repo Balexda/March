@@ -29,6 +29,7 @@ import {
   pickLaunchedSession,
   resolveAgentDeckEnv,
 } from "./adapter.js";
+import { stewardSessionFilePath } from "./steward-skills.js";
 import {
   CastraAgentDeckError,
   CastraConflictError,
@@ -392,9 +393,9 @@ describe("castra adapter — operations", () => {
         group: "g",
         metadata: { sliceId: "slice-7", spawnId: "sp-1" },
       });
-      // Sidecar is keyed by the worktree dir name (feature-<branch>), the same
-      // key the hook derives from its cwd.
-      const sidecar = path.join(sidecarRoot, "sessions", "feature-march-spawn-x.json");
+      // Sidecar is keyed by the full worktree path (the same key the hook
+      // derives from its cwd) — assert via the shared keying function.
+      const sidecar = stewardSessionFilePath("/repo/feature-march-spawn-x");
       const payload = JSON.parse(fs.readFileSync(sidecar, "utf-8"));
       expect(payload).toEqual({
         profile: "march",
@@ -424,7 +425,7 @@ describe("castra adapter — operations", () => {
       title: "Steward",
       group: "g",
     });
-    const sidecar = path.join(sidecarRoot, "sessions", "feature-march-spawn-x.json");
+    const sidecar = stewardSessionFilePath("/repo/feature-march-spawn-x");
     expect(fs.existsSync(sidecar)).toBe(false);
   });
 

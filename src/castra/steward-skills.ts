@@ -1,5 +1,6 @@
 import fs from "node:fs/promises";
 import fsSync from "node:fs";
+import { createHash } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -58,13 +59,52 @@ export function stewardSessionsDir(): string {
 }
 
 /**
- * Per-session sidecar path, keyed by the steward's worktree directory name —
- * the same key the hook derives from its `cwd`. The hook runs inside the
- * worktree, so `basename(worktreePath)` is the one identifier both sides share
- * without any env-var propagation through agent-deck/tmux.
+ * Per-session sidecar path. Keyed by a hash of the FULL (resolved) worktree
+ * path — the one identifier both sides share without any env-var propagation
+ * through agent-deck/tmux: Castra writes it from the launch `worktreePath`, the
+ * hook re-derives it from its `cwd` (which is that worktree). A bare
+ * `basename` would collide across repos/profiles launching the same branch name
+ * (`feature-<branch>`) and make the hook post the WRONG `{profile, sliceId}`
+ * for an active session; hashing the full path makes the mapping injective. The
+ * basename is kept as a readable prefix. If the two paths ever disagree (e.g. a
+ * symlink), the hook simply misses and skips — a benign no-report, never a
+ * mis-tagged one. Must stay byte-identical to the hook's `sessionFileFor`
+ * (`src/templates/steward/hooks/steward-report.mjs`).
  */
 export function stewardSessionFilePath(worktreePath: string): string {
-  return path.join(stewardSessionsDir(), `${path.basename(worktreePath)}.json`);
+  const resolved = path.resolve(worktreePath);
+  const hash = createHash("sha256").update(resolved).digest("hex").slice(0, 12);
+  return path.join(stewardSessionsDir(), `${path.basename(resolved)}-${hash}.json`);
+}
+
+/** Sidecars older than this are GC'd on the next write (well beyond any
+ *  plausible live steward session, so an active session is never pruned). */
+const STEWARD_SESSION_TTL_MS = 14 * 24 * 60 * 60 * 1000;
+
+/**
+ * Best-effort age-based GC of the sessions dir so it can't grow without bound
+ * (one sidecar accumulates per distinct worktree ever launched). Unlinks files
+ * whose mtime is older than {@link STEWARD_SESSION_TTL_MS}. Fully swallowed —
+ * pruning must never break a launch.
+ */
+function pruneStaleStewardSessions(dir: string, now: number): void {
+  let names: string[];
+  try {
+    names = fsSync.readdirSync(dir);
+  } catch {
+    return; // dir missing — nothing to prune
+  }
+  for (const name of names) {
+    if (!name.endsWith(".json")) continue;
+    const file = path.join(dir, name);
+    try {
+      if (now - fsSync.statSync(file).mtimeMs > STEWARD_SESSION_TTL_MS) {
+        fsSync.unlinkSync(file);
+      }
+    } catch {
+      // racing removal / transient stat error — skip this entry
+    }
+  }
 }
 
 /**
@@ -97,7 +137,9 @@ export function recordStewardSession(input: {
 }): void {
   if (!input.worktreePath || !input.sliceId) return;
   try {
-    fsSync.mkdirSync(stewardSessionsDir(), { recursive: true });
+    const dir = stewardSessionsDir();
+    fsSync.mkdirSync(dir, { recursive: true });
+    pruneStaleStewardSessions(dir, Date.now());
     const payload = {
       profile: input.profile,
       sliceId: input.sliceId,

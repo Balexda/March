@@ -24,6 +24,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 
 // ---------------------------------------------------------------------------
@@ -142,9 +143,18 @@ export function stewardRootFromHook(scriptPath) {
   return path.dirname(path.dirname(scriptPath));
 }
 
-/** Per-session sidecar path Castra writes at launch, keyed by the worktree dir. */
+/**
+ * Per-session sidecar path Castra writes at launch. Keyed by a hash of the FULL
+ * (resolved) worktree path so it can't collide across repos/profiles that
+ * launch the same branch name. MUST stay byte-identical to Castra's
+ * `stewardSessionFilePath` (`src/castra/steward-skills.ts`) — both derive the
+ * key from the worktree path they share (Castra's launch `worktreePath`, the
+ * hook's `cwd`).
+ */
 export function sessionFileFor(root, cwd) {
-  return path.join(root, "sessions", path.basename(cwd || "") + ".json");
+  const resolved = path.resolve(cwd || "");
+  const hash = createHash("sha256").update(resolved).digest("hex").slice(0, 12);
+  return path.join(root, "sessions", `${path.basename(resolved)}-${hash}.json`);
 }
 
 // ---------------------------------------------------------------------------

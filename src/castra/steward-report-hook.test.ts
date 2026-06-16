@@ -14,6 +14,7 @@ import {
   sessionFileFor,
   stewardRootFromHook,
 } from "../templates/steward/hooks/steward-report.mjs";
+import { stewardSessionFilePath } from "./steward-skills.js";
 
 function transcript(records: unknown[]): string {
   return records.map((r) => JSON.stringify(r)).join("\n");
@@ -138,9 +139,29 @@ describe("path helpers", () => {
     );
   });
 
-  it("keys the session sidecar by the worktree dir name", () => {
-    expect(sessionFileFor("/srv/steward", "/repos/feature-march-spawn-x")).toBe(
-      path.join("/srv/steward", "sessions", "feature-march-spawn-x.json"),
+  it("keys the session sidecar by a full-path hash with a readable basename prefix", () => {
+    const file = sessionFileFor("/srv/steward", "/repos/feature-march-spawn-x");
+    expect(path.dirname(file)).toBe(path.join("/srv/steward", "sessions"));
+    expect(path.basename(file)).toMatch(/^feature-march-spawn-x-[0-9a-f]{12}\.json$/);
+  });
+
+  it("does not collide on same-basename worktrees in different repos", () => {
+    expect(sessionFileFor("/srv/steward", "/repos/march/feature-x")).not.toBe(
+      sessionFileFor("/srv/steward", "/repos/smithy/feature-x"),
     );
+  });
+
+  it("agrees byte-for-byte with Castra's stewardSessionFilePath (writer/reader parity)", () => {
+    // The hook (reader) and Castra (writer) must derive the SAME sidecar path
+    // from the worktree they share, or every report would miss.
+    const prev = process.env.MARCH_STEWARD_SKILLS_DIR;
+    process.env.MARCH_STEWARD_SKILLS_DIR = "/srv/steward";
+    try {
+      const cwd = "/repos/march/feature-smithy-forge-01";
+      expect(sessionFileFor("/srv/steward", cwd)).toBe(stewardSessionFilePath(cwd));
+    } finally {
+      if (prev === undefined) delete process.env.MARCH_STEWARD_SKILLS_DIR;
+      else process.env.MARCH_STEWARD_SKILLS_DIR = prev;
+    }
   });
 });
