@@ -6,6 +6,7 @@ import type {
   UpDownCounter,
 } from "@opentelemetry/api";
 import { getActiveOtel } from "./otel.js";
+import { REQUEST_LATENCY_BUCKETS_SECONDS } from "./histogram-buckets.js";
 
 /** Outcome label for an HTTP request: 2xx/3xx is success, else error. */
 export type RequestOutcome = "success" | "error";
@@ -70,6 +71,7 @@ function hatcheryInstruments(meter: Meter): HatcheryInstruments {
     requestDuration = meter.createHistogram("march.hatchery.request.duration", {
       description: "Hatchery HTTP request wall-clock duration",
       unit: "s",
+      advice: { explicitBucketBoundaries: REQUEST_LATENCY_BUCKETS_SECONDS },
     });
     activeSpawns = meter.createUpDownCounter("march.hatchery.active_spawns", {
       description: "Spawn jobs currently executing in the hatchery service",

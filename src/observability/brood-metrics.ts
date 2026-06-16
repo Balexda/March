@@ -1,21 +1,9 @@
 import type { Attributes, Counter, Histogram, Meter } from "@opentelemetry/api";
 import { getActiveOtel } from "./otel.js";
 import { type RequestOutcome, outcomeFromStatus } from "./hatchery-metrics.js";
+import { REQUEST_LATENCY_BUCKETS_SECONDS } from "./histogram-buckets.js";
 
 export { type RequestOutcome, outcomeFromStatus };
-
-/**
- * Explicit histogram buckets (SECONDS) for HTTP request latency. Brood requests
- * are sub-millisecond-to-seconds, but the OTel SDK default boundaries
- * ([0, 5, 10, 25, … 10000]) are calibrated for MILLISECONDS — so every ~2ms
- * request piled into the first bucket (le=5s) and `histogram_quantile(0.95)`
- * interpolated to a fixed 0.95×5 = 4.75s artifact, firing the brood-p95 RED alarm
- * regardless of real latency. These sub-second boundaries make p95 measure the
- * actual distribution so the `> 2s` rule means what it says.
- */
-const REQUEST_LATENCY_BUCKETS_SECONDS = [
-  0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10,
-];
 
 export interface RecordBroodRequestInput {
   /** Route TEMPLATE (e.g. "/sessions/:id"), never the concrete path. */
@@ -104,6 +92,7 @@ function broodInstruments(meter: Meter): BroodInstruments {
     teardownDuration = meter.createHistogram("march.brood.teardown.duration", {
       description: "Brood teardown wall-clock duration",
       unit: "s",
+      advice: { explicitBucketBoundaries: REQUEST_LATENCY_BUCKETS_SECONDS },
     });
     heartbeatCounter = meter.createCounter("march.brood.heartbeat", {
       description: "Liveness heartbeat ticks emitted by the brood service",

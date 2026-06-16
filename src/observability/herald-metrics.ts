@@ -1,6 +1,7 @@
 import type { Attributes, Counter, Histogram, Meter } from "@opentelemetry/api";
 import { getActiveOtel } from "./otel.js";
 import { type RequestOutcome, outcomeFromStatus } from "./hatchery-metrics.js";
+import { REQUEST_LATENCY_BUCKETS_SECONDS } from "./histogram-buckets.js";
 
 export { type RequestOutcome, outcomeFromStatus };
 
@@ -72,10 +73,12 @@ function heraldInstruments(meter: Meter): HeraldInstruments {
     requestDuration = meter.createHistogram("march.herald.request.duration", {
       description: "Herald HTTP request wall-clock duration",
       unit: "s",
+      advice: { explicitBucketBoundaries: REQUEST_LATENCY_BUCKETS_SECONDS },
     });
     observeDuration = meter.createHistogram("march.herald.observe.duration", {
       description: "Herald observe-tick wall-clock duration",
       unit: "s",
+      advice: { explicitBucketBoundaries: REQUEST_LATENCY_BUCKETS_SECONDS },
     });
     eventsCounter = meter.createCounter("march.herald.events", {
       description: "Count of change events Herald appended, by type",
