@@ -1380,4 +1380,20 @@ describe("march CLI", () => {
       fs.existsSync(worktreeParent) && fs.readdirSync(worktreeParent);
     expect(!leftover || leftover.length === 0).toBe(true);
   });
+
+  describe("march doctor", () => {
+    it("is registered and its help documents the read-only diagnostic flags", () => {
+      const result = run(["doctor", "--help"]);
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain("--profile");
+      expect(result.stdout).toContain("--json");
+      // The command must advertise itself as read-only / non-mutating.
+      expect(result.stdout.toLowerCase()).toContain("read-only");
+    });
+
+    it("appears in the top-level command list", () => {
+      const result = run(["help"]);
+      expect(result.stdout).toContain("doctor");
+    });
+  });
 });

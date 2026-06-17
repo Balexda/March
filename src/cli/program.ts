@@ -348,6 +348,35 @@ program
   });
 
 program
+  .command("doctor")
+  .description(
+    "Read-only deep stack-consistency diagnostics: token wiring, session divergence, dispatch health, worktree hygiene, and branch-sync lag. Names the remedy per finding; never mutates. Exits non-zero on any failure.",
+  )
+  .option("--profile <profile>", "Scope the battery to a single registered profile")
+  .option("--json", "Print the diagnostic report as JSON")
+  .action(async (opts: { profile?: string; json?: boolean }) => {
+    commandHandled = true;
+    const { wireDoctorContext, runDoctor, formatReport } = await import("../doctor/index.js");
+    try {
+      const { context, setupFindings } = await wireDoctorContext({ profile: opts.profile });
+      const report = await runDoctor(context, {
+        profile: opts.profile,
+        setupFindings,
+      });
+      if (opts.json) {
+        console.log(JSON.stringify(report, null, 2));
+      } else {
+        console.log(formatReport(report));
+      }
+      // Non-zero exit on any failure so `march doctor` can gate automation.
+      process.exitCode = report.ok ? SUCCESS : ERROR;
+    } catch (err) {
+      process.stderr.write((err instanceof Error ? err.message : String(err)) + "\n");
+      process.exitCode = ERROR;
+    }
+  });
+
+program
   .command("version")
   .description("Display the installed CLI version")
   .action(() => {
