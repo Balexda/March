@@ -36,6 +36,7 @@ import { createFoldDeps } from "./state/fold-deps.js";
 import { execText } from "./clients/exec.js";
 import { runTick as coordinatorRunTick } from "./coordinator.js";
 import { resolveMaxConcurrentSpawns } from "./meta.js";
+import { SpawnBreaker } from "./spawn-breaker.js";
 import { createSpawnBudget, liveSpawnCount, type SpawnBudget } from "./pure/slice.js";
 import { runHeartbeat } from "./heartbeat.js";
 import { broodRegister as broodRegisterCli, broodRetire as broodRetireCli, broodTeardown as broodTeardownCli } from "./clients/brood.js";
@@ -115,6 +116,14 @@ let env: NodeJS.ProcessEnv = process.env;
 // this single legate container. Resolved from MARCH_MAX_CONCURRENT_SPAWNS at
 // startup (configureLoopRuntime), default 10.
 let maxConcurrentSpawns = resolveMaxConcurrentSpawns(env);
+
+// The agent-health circuit-breaker (#codex-down backpressure): collapses the
+// effective spawn cap to 0 when the agent is hard-down (e.g. codex auth expired)
+// so the loop stops flooding doomed spawns, periodically probing for recovery.
+// Module-level: the cap is global across all profiles, so the breaker is too.
+const spawnBreaker = new SpawnBreaker();
+// Reported breaker state, so a trip/recover is logged once on the edge.
+let lastBreakerOpen = false;
 
 // The cadence driver, built lazily on first start/tick (after configureLoopRuntime
 // has set the interval). Owns the re-entrancy guard, the interval, and tick timing.
@@ -333,7 +342,15 @@ function dispatchIoDeps(meta: any): DispatchIoDeps {
  * shared Herald stream has already been drained this tick; this reads the
  * profile's folded bucket via `herald.snapshotFor(profile)`.
  */
-async function tickProfile(rt: ProfileRuntime, spawnBudget?: SpawnBudget): Promise<void> {
+/** Per-tick agent-health tally a profile contributes to the global circuit-breaker. */
+interface AgentHealthTally {
+  /** Hard-down spawn failures (codex auth, ...) drained this tick. */
+  agentDown: number;
+  /** Spawns that completed successfully this tick (the agent is working). */
+  healthy: number;
+}
+
+async function tickProfile(rt: ProfileRuntime, spawnBudget?: SpawnBudget): Promise<AgentHealthTally> {
   const meta = rt.meta;
   const startedMs = Date.now();
   const herald = legateHerald();
@@ -401,6 +418,17 @@ async function tickProfile(rt: ProfileRuntime, spawnBudget?: SpawnBudget): Promi
 
   rt.workingState = out.state.raw;
 
+  // Agent-health tally for the circuit-breaker: hard-down spawn failures the
+  // dispatch handler flagged this tick, and successful spawn completions
+  // (`dispatch-complete`) that prove the agent is working.
+  const dispatchRes = out.results?.dispatch;
+  const tally: AgentHealthTally = {
+    agentDown: dispatchRes?.hardDownFailures ?? 0,
+    healthy: Array.isArray(dispatchRes?.actions)
+      ? dispatchRes.actions.filter((a: any) => a?.action === "dispatch-complete").length
+      : 0,
+  };
+
   // Dwell (time-in-state): stamp stage_entered_at / merge_gate_since on the working
   // slices (same ref as rt.workingState, so it persists across ticks) and fold the
   // max-age view + completed dwells into the dwell metrics. Best-effort.
@@ -440,6 +468,8 @@ async function tickProfile(rt: ProfileRuntime, spawnBudget?: SpawnBudget): Promi
   } catch {
     // Telemetry must never break the loop.
   }
+
+  return tally;
 }
 
 // Multi-profile tick: list the registered profiles, drain the shared Herald
@@ -502,16 +532,50 @@ async function tick() {
     }
     liveAcrossProfiles += liveSpawnCount(rt.workingState);
   }
-  const spawnBudget = createSpawnBudget(maxConcurrentSpawns, liveAcrossProfiles);
+  // Effective cap after the agent-health circuit-breaker: full cap when the
+  // agent is healthy, collapsed to 0 (or 1 for a probe) when it is hard-down so
+  // the loop stops flooding spawns into a failing agent (#codex-down). The
+  // breaker returns the FRESH-dispatch allowance; while OPEN that allowance is
+  // ADDED to the current live draw so a probe can actually launch even when
+  // stewards/spawns are already live (otherwise `remaining = cap - live` would
+  // swallow the probe and the breaker could never recover). While CLOSED the
+  // allowance IS the total cap, preserving the normal global-cap semantics.
+  const freshAllowance = spawnBreaker.beginTick(maxConcurrentSpawns);
+  const budgetCap = spawnBreaker.isOpen() ? liveAcrossProfiles + freshAllowance : freshAllowance;
+  const spawnBudget = createSpawnBudget(budgetCap, liveAcrossProfiles);
 
+  const agentHealth = { agentDown: 0, healthy: 0 };
   for (const rec of profiles) {
     const rt = runtimeFor(rec);
     try {
-      await tickProfile(rt, spawnBudget);
+      const tally = await tickProfile(rt, spawnBudget);
+      agentHealth.agentDown += tally.agentDown;
+      agentHealth.healthy += tally.healthy;
     } catch (err: any) {
       logTickError(err, rec.profile);
     }
   }
+
+  // Fold this tick's agent-health into the breaker (transitions apply NEXT tick).
+  spawnBreaker.endTick(agentHealth);
+  const breakerSnap = spawnBreaker.snapshot();
+  if (breakerSnap.breakerOpen === 1 && !lastBreakerOpen) {
+    emitLoopLog({
+      severity: "ERROR",
+      body:
+        `agent-health circuit-breaker OPEN — ${agentHealth.agentDown} hard-down spawn ` +
+        `failure(s) (e.g. codex auth). Pausing fresh dispatch (effective cap 0, probing ` +
+        `every few ticks). Re-authenticate the agent, then recover the backlog.`,
+      eventKind: "spawn_breaker_open",
+    });
+  } else if (breakerSnap.breakerOpen === 0 && lastBreakerOpen) {
+    emitLoopLog({
+      severity: "INFO",
+      body: "agent-health circuit-breaker CLOSED — agent recovered; resuming normal dispatch.",
+      eventKind: "spawn_breaker_closed",
+    });
+  }
+  lastBreakerOpen = breakerSnap.breakerOpen === 1;
 
   // Refresh the GLOBAL spawn-budget gauges (#313) once per tick — emitted after
   // the per-profile loop so `deferred` is final. Profile-less: cap + draw are
@@ -519,9 +583,13 @@ async function tick() {
   // ghost-stewards-pin-the-cap wedge as one signal.
   try {
     recordSpawnBudget({
-      cap: spawnBudget.cap,
+      // Report the CONFIGURED cap as `cap` (so spawn.cap stays the operator's
+      // setting) and the breaker's collapse separately as `effective_cap`.
+      cap: maxConcurrentSpawns,
       live: spawnBudget.live,
       deferred: spawnBudget.deferred,
+      effectiveCap: breakerSnap.effectiveCap,
+      breakerOpen: breakerSnap.breakerOpen,
     });
   } catch {
     // Telemetry must never break the loop.

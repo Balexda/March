@@ -2,6 +2,7 @@ import type { HandlerContext, HandlerResult, LoopState } from "../state/types.js
 import { emptyHandlerResult } from "../state/types.js";
 import { dispatchSliceId } from "../pure/dispatch-id.js";
 import { dispatchableReady, recoverableEscalations } from "../pure/slice.js";
+import { isHardDownReason, parseAgentFailureReason } from "../spawn-breaker.js";
 
 /**
  * Dispatch: turn smithy's layer-0 ready items into Hatchery codex spawns.
@@ -135,6 +136,12 @@ export async function apply(_decisions: DispatchDecision[], ctx: HandlerContext,
     await fireNotifications(deps, ts, out.notifications, res);
   }
 
+  // Feed the agent-health circuit-breaker from the un-gated failure list (see
+  // tallyHardDownFailures): a hard-down `[agent_failure_reason]` marker means
+  // the agent — not one slice — is the problem.
+  const hardDown = tallyHardDownFailures(res.failures);
+  if (hardDown > 0) res.hardDownFailures = hardDown;
+
   return res;
 }
 
@@ -151,4 +158,22 @@ async function fireNotifications(
       res.mutated = true;
     }
   }
+}
+
+/**
+ * Tally this tick's hard-down spawn failures for the circuit-breaker, reading the
+ * `[agent_failure_reason]` marker off each recorded failure's `error`. Counts
+ * from `res.failures` — the UN-gated source pushed on every dispatch failure —
+ * rather than from notifications, which dispatch-ops suppresses while the #211
+ * auto-recovery budget is still available. Counting off notifications would make
+ * the agent invisible to the breaker for the first ~3 attempts of every slice at
+ * outage onset (exactly when backpressure matters most).
+ */
+function tallyHardDownFailures(failures: any[]): number {
+  let n = 0;
+  for (const f of failures) {
+    const reason = parseAgentFailureReason(String(f?.error ?? ""));
+    if (reason && isHardDownReason(reason)) n += 1;
+  }
+  return n;
 }
