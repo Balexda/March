@@ -1156,6 +1156,34 @@ export async function runHatcherySpawn(
     const managerPrompt = buildManagerPrompt({
       operatorPrompt: input.prompt,
     });
+
+    // Agent-level failure detection runs BEFORE the exit-code gate: the codex
+    // CLI exits 0 even on `turn.failed` (an expired OAuth token makes the
+    // *process* succeed while the turn failed with "refresh token already
+    // used"). Keying off the exit code alone would miss that and let the spawn
+    // fall through to a confusing patch-extraction failure. Scanning the logs
+    // regardless of exit code makes the auth / rate-limit / timeout case a
+    // first-class alarm (march_spawn_agent_failures_total{reason}) and stamps
+    // the reason into the dispatch detail so the legate's circuit-breaker can
+    // read it. A clean run classifies as "none" and falls through.
+    const agentFailureReason = classifyAgentFailure(logs);
+    if (agentFailureReason !== "none") {
+      const artifacts = createHatcherySpawnArtifacts({
+        spawnId,
+        homeDir: input.homeDir,
+        spawnOutput: logs,
+        patch: "",
+        managerPrompt,
+        metadata: metadataFor(input, manager, spawnId, branch, waitResult.exitCode, startedAt),
+      });
+      recordAgentFailure({ backend: input.backend.name, profile, reason: agentFailureReason });
+      dispatch.setAttributes({ "march.agent_failure_reason": agentFailureReason });
+      throw new HatcherySpawnError(
+        `Spawn ${spawnId} agent failure (exit ${waitResult.exitCode}); manager prompt was not sent. ` +
+          `[agent_failure_reason=${agentFailureReason}] Logs: ${artifacts.spawnOutputPath}`,
+      );
+    }
+
     if (waitResult.exitCode !== 0) {
       const artifacts = createHatcherySpawnArtifacts({
         spawnId,
@@ -1165,17 +1193,8 @@ export async function runHatcherySpawn(
         managerPrompt,
         metadata: metadataFor(input, manager, spawnId, branch, waitResult.exitCode, startedAt),
       });
-      // Classify the agent-level failure (codex auth lapse, rate limit, ...) so
-      // it becomes a first-class alarm and so the legate can read the reason
-      // from the dispatch detail to drive backpressure (the circuit-breaker).
-      const agentFailureReason = classifyAgentFailure(logs);
-      recordAgentFailure({ backend: input.backend.name, profile, reason: agentFailureReason });
-      if (agentFailureReason !== "none") {
-        dispatch.setAttributes({ "march.agent_failure_reason": agentFailureReason });
-      }
       throw new HatcherySpawnError(
-        `Spawn ${spawnId} exited ${waitResult.exitCode}; manager prompt was not sent. ` +
-          `[agent_failure_reason=${agentFailureReason}] Logs: ${artifacts.spawnOutputPath}`,
+        `Spawn ${spawnId} exited ${waitResult.exitCode}; manager prompt was not sent. Logs: ${artifacts.spawnOutputPath}`,
       );
     }
 
