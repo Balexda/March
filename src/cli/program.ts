@@ -38,6 +38,8 @@ import { runStatioServer } from "../statio/serve.js";
 import { STATIO_TOKEN_ENV } from "../statio/config.js";
 import { StatioValidationError } from "../statio/types.js";
 import { initMarch, InitError } from "../bootstrap/init.js";
+import { stackDown } from "../stack/down.js";
+import { stackUp } from "../stack/up.js";
 import { createBuildContext, SnapshotError } from "../spawn/snapshot.js";
 import {
   listBackends,
@@ -231,6 +233,94 @@ program
         return;
       }
       throw err;
+    }
+  });
+
+program
+  .command("up")
+  .description("Bring up the March service stack (in dependency order)")
+  .action(async () => {
+    commandHandled = true;
+    try {
+      const result = await stackUp();
+
+      if (result.token.source === "generated") {
+        console.log(
+          `token: generated and persisted to ${result.token.persistedPath}`,
+        );
+      } else if (result.token.source === "file") {
+        console.log(`token: reused from ${result.token.persistedPath}`);
+      } else {
+        console.log(`token: using ${CASTRA_TOKEN_ENV} from the environment`);
+      }
+
+      if (result.missingImages.length > 0) {
+        process.stderr.write(
+          "Cannot bring up the stack — these images are not built:\n",
+        );
+        for (const m of result.missingImages) {
+          process.stderr.write(`  ${m.service}: ${m.image}\n`);
+        }
+        process.stderr.write(
+          "Build them with `march upgrade` (or `npm run build:<service>-image`), then re-run `march up`.\n",
+        );
+        process.exitCode = ERROR;
+        return;
+      }
+
+      let failed = false;
+      for (const svc of result.services) {
+        console.log(
+          `${svc.service}: ${svc.outcome}${svc.detail ? ` (${svc.detail})` : ""}`,
+        );
+        if (svc.outcome === "failed") failed = true;
+      }
+      process.exitCode = failed ? ERROR : SUCCESS;
+    } catch (err) {
+      process.stderr.write((err instanceof Error ? err.message : String(err)) + "\n");
+      process.exitCode = ERROR;
+    }
+  });
+
+program
+  .command("down")
+  .description("Stop the March service stack (inverse of bring-up)")
+  .option("--volumes", "Also remove named volumes (registries, event log, telemetry)")
+  .option("--drain", "Tear down in-flight Brood sessions before stopping services")
+  .action(async (opts: { volumes?: boolean; drain?: boolean }) => {
+    commandHandled = true;
+    try {
+      const result = await stackDown({ volumes: opts.volumes, drain: opts.drain });
+
+      let failed = false;
+      if (result.drain) {
+        const { tornDown, failures, note } = result.drain;
+        if (note) {
+          // Brood unreachable — best-effort, non-fatal skip.
+          process.stderr.write(`drain: ${note}\n`);
+        } else {
+          console.log(`drain: tore down ${tornDown.length} session(s)`);
+        }
+        for (const f of failures) {
+          process.stderr.write(`drain: failed ${f.id} (${f.detail})\n`);
+        }
+        // A requested drain that left live resources behind is a failure, so
+        // automation that asked for --drain doesn't read it as a clean off.
+        if (failures.length > 0) failed = true;
+      }
+
+      for (const svc of result.services) {
+        console.log(
+          `${svc.service}: ${svc.outcome}${svc.detail ? ` (${svc.detail})` : ""}`,
+        );
+        if (svc.outcome === "failed") failed = true;
+      }
+      // A skipped service (compose file not found) is not a hard failure; a
+      // failed `docker compose down` or an incomplete requested drain is.
+      process.exitCode = failed ? ERROR : SUCCESS;
+    } catch (err) {
+      process.stderr.write((err instanceof Error ? err.message : String(err)) + "\n");
+      process.exitCode = ERROR;
     }
   });
 
