@@ -7,6 +7,7 @@ import { MARCH_SERVICES, containerName } from "./services.js";
 import {
   formatStatusTable,
   readSharedToken,
+  resolveServicePort,
   stackStatus,
   type ContainerState,
   type HttpProbeResult,
@@ -237,6 +238,59 @@ describe("readSharedToken", () => {
 
   it("trims whitespace from the env token", () => {
     expect(readSharedToken({ [CASTRA_TOKEN_ENV]: "  spaced  " })).toBe("spaced");
+  });
+});
+
+describe("resolveServicePort", () => {
+  // MarchService keys on `.name` (ServiceStatus keys on `.service`).
+  const castraSvc = MARCH_SERVICES.find((s) => s.name === "castra")!;
+  const heraldSvc = MARCH_SERVICES.find((s) => s.name === "herald")!;
+
+  it("returns the default port when no portEnv override is set", () => {
+    expect(resolveServicePort(castraSvc, {})).toBe(9264);
+  });
+
+  it("honors CASTRA_PORT when set to a valid port", () => {
+    expect(resolveServicePort(castraSvc, { CASTRA_PORT: "9999" })).toBe(9999);
+  });
+
+  it("falls back to the default for a non-numeric or non-positive override", () => {
+    expect(resolveServicePort(castraSvc, { CASTRA_PORT: "abc" })).toBe(9264);
+    expect(resolveServicePort(castraSvc, { CASTRA_PORT: "0" })).toBe(9264);
+    expect(resolveServicePort(castraSvc, { CASTRA_PORT: "  " })).toBe(9264);
+  });
+
+  it("ignores env for a service without a portEnv (hard-coded host port)", () => {
+    expect(resolveServicePort(heraldSvc, { CASTRA_PORT: "9999" })).toBe(8818);
+  });
+});
+
+describe("stackStatus — CASTRA_PORT override", () => {
+  it("probes the operator-set CASTRA_PORT instead of the 9264 default", async () => {
+    const probed: string[] = [];
+    const status = await stackStatus(
+      healthyOptions({
+        env: { CASTRA_PORT: "9300" } as NodeJS.ProcessEnv,
+        // Override readToken because healthyOptions does; env-derived token read
+        // would otherwise touch the real file. Keep the happy-path token.
+        readToken: () => "tok-123",
+        probeHttp: async (url, token) => {
+          probed.push(url);
+          if (url.includes("/v1/")) {
+            return token === "tok-123"
+              ? { reachable: true, status: 200 }
+              : { reachable: true, status: 401 };
+          }
+          return { reachable: true, status: 200 };
+        },
+      }),
+    );
+    const castra = status.services.find((s) => s.service === "castra");
+    expect(castra?.port).toBe(9300);
+    expect(castra?.healthy).toBe(true);
+    expect(probed.some((u) => u.includes(":9300/healthz"))).toBe(true);
+    expect(probed.some((u) => u.includes(":9300/v1/sessions"))).toBe(true);
+    expect(probed.some((u) => u.includes(":9264"))).toBe(false);
   });
 });
 

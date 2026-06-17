@@ -20,6 +20,14 @@ export interface MarchService {
   readonly image?: string;
   /** Loopback port the service publishes (`127.0.0.1:<port>`). */
   readonly port: number;
+  /**
+   * Env var that overrides the published host port, for the services whose
+   * compose file parametrizes it (only castra: `127.0.0.1:${CASTRA_PORT:-9264}`).
+   * When set in the environment, `march status` probes that port instead of
+   * {@link port}; the other services hard-code their host port in compose, so
+   * they have no `portEnv`.
+   */
+  readonly portEnv?: string;
   /** HTTP path that reports liveness (200 = reachable + healthy). */
   readonly healthPath: string;
   /**
@@ -65,6 +73,9 @@ export const MARCH_SERVICES: readonly MarchService[] = [
     compose: "castra.docker-compose.yml",
     image: "march-castra:latest",
     port: 9264,
+    // The castra compose publishes 127.0.0.1:${CASTRA_PORT:-9264}, so honor an
+    // operator-set CASTRA_PORT when probing rather than the 9264 default.
+    portEnv: "CASTRA_PORT",
     healthPath: "/healthz",
     // `/v1/*` is the shared-token gate; GET /v1/sessions exercises it.
     tokenGatedPath: "/v1/sessions",

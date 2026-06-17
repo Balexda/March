@@ -46,8 +46,12 @@ export interface ServiceStatus {
   readonly imagePresent?: boolean;
   /** True when this service is up, reachable, and correctly token-wired. */
   readonly healthy: boolean;
-  /** Human-readable misconfig descriptions (empty when healthy). */
-  readonly issues: string[];
+  /**
+   * Human-readable misconfig descriptions (empty when healthy). Not `readonly`:
+   * the dependency pass in {@link stackStatus} appends to it after the per-service
+   * status is built.
+   */
+  issues: string[];
 }
 
 export interface StackStatus {
@@ -102,6 +106,23 @@ export function readSharedToken(
   return null;
 }
 
+/**
+ * Resolve the host port to probe for a service. Honors the service's
+ * {@link MarchService.portEnv} override (e.g. `CASTRA_PORT`, which the castra
+ * compose publishes) when it holds a valid positive integer; otherwise falls
+ * back to the descriptor's default {@link MarchService.port}.
+ */
+export function resolveServicePort(
+  svc: MarchService,
+  env: NodeJS.ProcessEnv = process.env,
+): number {
+  if (!svc.portEnv) return svc.port;
+  const raw = env[svc.portEnv]?.trim();
+  if (!raw) return svc.port;
+  const n = Number(raw);
+  return Number.isInteger(n) && n > 0 ? n : svc.port;
+}
+
 /** Default container-state probe via `docker inspect`. */
 export function dockerContainerState(name: string): ContainerState {
   let out: string;
@@ -111,9 +132,16 @@ export function dockerContainerState(name: string): ContainerState {
       ["inspect", "-f", "{{.State.Status}}", name],
       { encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"] },
     ).trim();
-  } catch {
-    // `No such object` (container absent) or docker unavailable.
-    return "absent";
+  } catch (err) {
+    const stderr = ((err as { stderr?: Buffer | string }).stderr ?? "")
+      .toString()
+      .toLowerCase();
+    // A genuinely-absent container exits non-zero with "No such object". Any
+    // other failure (docker binary missing, daemon down, permission denied)
+    // means we could not determine the state — report "unknown" rather than
+    // misreporting every service as absent.
+    if (stderr.includes("no such object")) return "absent";
+    return "unknown";
   }
   if (out === "running") return "running";
   if (out === "") return "unknown";
@@ -158,6 +186,8 @@ async function statusForService(
   // keeping the concurrent probe phase free of event-loop-blocking sync calls.
   container: ContainerState,
   imagePresent: boolean | undefined,
+  // Effective host port (honors any portEnv override), resolved by the caller.
+  port: number,
 ): Promise<ServiceStatus> {
   const issues: string[] = [];
 
@@ -174,12 +204,12 @@ async function statusForService(
   }
 
   const health = await deps.probeHttp(
-    `http://127.0.0.1:${svc.port}${svc.healthPath}`,
+    `http://127.0.0.1:${port}${svc.healthPath}`,
   );
   let reachable: Reachability;
   if (!health.reachable) {
     reachable = "unreachable";
-    issues.push(`not reachable on port ${svc.port}`);
+    issues.push(`not reachable on port ${port}`);
   } else if (health.status !== undefined && health.status >= 200 && health.status < 300) {
     reachable = "ok";
   } else {
@@ -190,7 +220,7 @@ async function statusForService(
     // the March service is not actually reachable where clients connect.
     reachable = "error";
     issues.push(
-      `port ${svc.port} answered HTTP ${health.status ?? "?"} on ${svc.healthPath} (not a healthy 2xx — wrong service or unhealthy)`,
+      `port ${port} answered HTTP ${health.status ?? "?"} on ${svc.healthPath} (not a healthy 2xx — wrong service or unhealthy)`,
     );
   }
 
@@ -208,7 +238,7 @@ async function statusForService(
     token = "unknown";
   } else {
     const gated = await deps.probeHttp(
-      `http://127.0.0.1:${svc.port}${svc.tokenGatedPath}`,
+      `http://127.0.0.1:${port}${svc.tokenGatedPath}`,
       deps.token,
     );
     if (!gated.reachable) {
@@ -235,7 +265,7 @@ async function statusForService(
 
   return {
     service: svc.name,
-    port: svc.port,
+    port,
     container,
     reachable,
     ...(health.status !== undefined ? { httpStatus: health.status } : {}),
@@ -269,6 +299,7 @@ export async function stackStatus(
     svc,
     container: containerState(containerName(svc.name)),
     imagePresent: svc.image ? imagePresent(svc.image) : undefined,
+    port: resolveServicePort(svc, env),
   }));
 
   // Phase 2: probe every service over HTTP concurrently — independent loopback
@@ -276,7 +307,13 @@ export async function stackStatus(
   // in one tight burst.
   const services = await Promise.all(
     inspected.map((i) =>
-      statusForService(i.svc, { probeHttp, token }, i.container, i.imagePresent),
+      statusForService(
+        i.svc,
+        { probeHttp, token },
+        i.container,
+        i.imagePresent,
+        i.port,
+      ),
     ),
   );
 
