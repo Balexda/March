@@ -534,9 +534,15 @@ async function tick() {
   }
   // Effective cap after the agent-health circuit-breaker: full cap when the
   // agent is healthy, collapsed to 0 (or 1 for a probe) when it is hard-down so
-  // the loop stops flooding spawns into a failing agent (#codex-down).
-  const effectiveCap = spawnBreaker.beginTick(maxConcurrentSpawns);
-  const spawnBudget = createSpawnBudget(effectiveCap, liveAcrossProfiles);
+  // the loop stops flooding spawns into a failing agent (#codex-down). The
+  // breaker returns the FRESH-dispatch allowance; while OPEN that allowance is
+  // ADDED to the current live draw so a probe can actually launch even when
+  // stewards/spawns are already live (otherwise `remaining = cap - live` would
+  // swallow the probe and the breaker could never recover). While CLOSED the
+  // allowance IS the total cap, preserving the normal global-cap semantics.
+  const freshAllowance = spawnBreaker.beginTick(maxConcurrentSpawns);
+  const budgetCap = spawnBreaker.isOpen() ? liveAcrossProfiles + freshAllowance : freshAllowance;
+  const spawnBudget = createSpawnBudget(budgetCap, liveAcrossProfiles);
 
   const agentHealth = { agentDown: 0, healthy: 0 };
   for (const rec of profiles) {

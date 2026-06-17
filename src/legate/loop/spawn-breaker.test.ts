@@ -85,6 +85,18 @@ describe("SpawnBreaker", () => {
     expect(b.isOpen()).toBe(true);
   });
 
+  it("never lets a probe exceed the configured cap (cap 0 disables probes)", () => {
+    const b = new SpawnBreaker();
+    tick(b, 0, { agentDown: 4, healthy: 0 });
+    tick(b, 0, { agentDown: 4, healthy: 0 }); // OPEN with cap 0
+    // Even on a probe tick the allowance is clamped to the configured cap of 0.
+    b.beginTick(0);
+    b.endTick({ agentDown: 1, healthy: 0 });
+    b.beginTick(0);
+    b.endTick({ agentDown: 1, healthy: 0 });
+    expect(b.beginTick(0)).toBe(0); // would be the probe tick, but cap 0 ⇒ 0
+  });
+
   it("closes when a healthy completion arrives while open (e.g. a recovery success)", () => {
     const b = new SpawnBreaker();
     tick(b, CAP, { agentDown: 4, healthy: 0 });

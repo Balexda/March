@@ -102,12 +102,14 @@ export class SpawnBreaker {
       this.effectiveCap = configuredCap;
       return this.effectiveCap;
     }
-    // OPEN: pause dispatch, periodically arming a single probe.
+    // OPEN: pause dispatch, periodically arming a single probe. The probe never
+    // exceeds the operator's configured cap, so a cap of 0 (dispatch disabled)
+    // disables probes too rather than sneaking one fresh spawn through.
     this.ticksSinceProbe += 1;
     if (this.ticksSinceProbe >= this.config.probeIntervalTicks) {
       this.ticksSinceProbe = 0;
       this.probeArmed = true;
-      this.effectiveCap = 1;
+      this.effectiveCap = Math.min(1, configuredCap);
     } else {
       this.probeArmed = false;
       this.effectiveCap = 0;

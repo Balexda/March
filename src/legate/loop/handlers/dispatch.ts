@@ -136,6 +136,12 @@ export async function apply(_decisions: DispatchDecision[], ctx: HandlerContext,
     await fireNotifications(deps, ts, out.notifications, res);
   }
 
+  // Feed the agent-health circuit-breaker from the un-gated failure list (see
+  // tallyHardDownFailures): a hard-down `[agent_failure_reason]` marker means
+  // the agent — not one slice — is the problem.
+  const hardDown = tallyHardDownFailures(res.failures);
+  if (hardDown > 0) res.hardDownFailures = hardDown;
+
   return res;
 }
 
@@ -146,17 +152,28 @@ async function fireNotifications(
   res: HandlerResult,
 ): Promise<void> {
   for (const n of notifications || []) {
-    // Feed the agent-health circuit-breaker: a dispatch failure whose detail
-    // carries a hard-down `[agent_failure_reason]` marker (codex auth, ...)
-    // means the agent — not this one slice — is the problem.
-    const reason = parseAgentFailureReason(n.detail);
-    if (reason && isHardDownReason(reason)) {
-      res.hardDownFailures = (res.hardDownFailures ?? 0) + 1;
-    }
     const event = await deps.requestJudgement({ ts, slice: n.slice, sliceId: n.sliceId, requestKey: n.requestKey, reason: n.reason, detail: n.detail });
     if (event) {
       res.requests.push(event);
       res.mutated = true;
     }
   }
+}
+
+/**
+ * Tally this tick's hard-down spawn failures for the circuit-breaker, reading the
+ * `[agent_failure_reason]` marker off each recorded failure's `error`. Counts
+ * from `res.failures` — the UN-gated source pushed on every dispatch failure —
+ * rather than from notifications, which dispatch-ops suppresses while the #211
+ * auto-recovery budget is still available. Counting off notifications would make
+ * the agent invisible to the breaker for the first ~3 attempts of every slice at
+ * outage onset (exactly when backpressure matters most).
+ */
+function tallyHardDownFailures(failures: any[]): number {
+  let n = 0;
+  for (const f of failures) {
+    const reason = parseAgentFailureReason(String(f?.error ?? ""));
+    if (reason && isHardDownReason(reason)) n += 1;
+  }
+  return n;
 }
