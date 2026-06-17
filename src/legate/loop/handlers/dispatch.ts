@@ -2,6 +2,7 @@ import type { HandlerContext, HandlerResult, LoopState } from "../state/types.js
 import { emptyHandlerResult } from "../state/types.js";
 import { dispatchSliceId } from "../pure/dispatch-id.js";
 import { dispatchableReady, recoverableEscalations } from "../pure/slice.js";
+import { isHardDownReason, parseAgentFailureReason } from "../spawn-breaker.js";
 
 /**
  * Dispatch: turn smithy's layer-0 ready items into Hatchery codex spawns.
@@ -145,6 +146,13 @@ async function fireNotifications(
   res: HandlerResult,
 ): Promise<void> {
   for (const n of notifications || []) {
+    // Feed the agent-health circuit-breaker: a dispatch failure whose detail
+    // carries a hard-down `[agent_failure_reason]` marker (codex auth, ...)
+    // means the agent — not this one slice — is the problem.
+    const reason = parseAgentFailureReason(n.detail);
+    if (reason && isHardDownReason(reason)) {
+      res.hardDownFailures = (res.hardDownFailures ?? 0) + 1;
+    }
     const event = await deps.requestJudgement({ ts, slice: n.slice, sliceId: n.sliceId, requestKey: n.requestKey, reason: n.reason, detail: n.detail });
     if (event) {
       res.requests.push(event);

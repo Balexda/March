@@ -49,9 +49,12 @@ import {
 } from "../observability/spawn-trace.js";
 import { emitSpawnLog } from "../observability/logs.js";
 import {
+  recordAgentFailure,
   recordSpawnRun,
+  recordSpawnTokens,
   type SpawnFailureStage,
 } from "../observability/spawn-metrics.js";
+import { classifyAgentFailure, parseTokenUsage } from "../observability/agent-output.js";
 import {
   classifyBranchSafety,
   describeVerdict,
@@ -1162,9 +1165,25 @@ export async function runHatcherySpawn(
         managerPrompt,
         metadata: metadataFor(input, manager, spawnId, branch, waitResult.exitCode, startedAt),
       });
+      // Classify the agent-level failure (codex auth lapse, rate limit, ...) so
+      // it becomes a first-class alarm and so the legate can read the reason
+      // from the dispatch detail to drive backpressure (the circuit-breaker).
+      const agentFailureReason = classifyAgentFailure(logs);
+      recordAgentFailure({ backend: input.backend.name, profile, reason: agentFailureReason });
+      if (agentFailureReason !== "none") {
+        dispatch.setAttributes({ "march.agent_failure_reason": agentFailureReason });
+      }
       throw new HatcherySpawnError(
-        `Spawn ${spawnId} exited ${waitResult.exitCode}; manager prompt was not sent. Logs: ${artifacts.spawnOutputPath}`,
+        `Spawn ${spawnId} exited ${waitResult.exitCode}; manager prompt was not sent. ` +
+          `[agent_failure_reason=${agentFailureReason}] Logs: ${artifacts.spawnOutputPath}`,
       );
+    }
+
+    // Record token usage of the completed turn (codex emits it on the final
+    // `turn.completed` line) before moving on to patch extraction.
+    const tokenUsage = parseTokenUsage(logs);
+    if (tokenUsage) {
+      recordSpawnTokens({ backend: input.backend.name, profile, taskType, usage: tokenUsage });
     }
 
     // Patch extraction persists the backend-neutral result. Handoff eligibility

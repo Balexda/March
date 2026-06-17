@@ -212,8 +212,18 @@ keeping ids out of labels bounds cardinality.
 |---|---|---|
 | `march.spawn.runs` (counter) | `march_spawn_runs_total` | spawn dispatches by outcome |
 | `march.spawn.duration` (histogram, `s`) | `march_spawn_duration_seconds_{bucket,count,sum}` | spawn wall-clock duration |
+| `march.spawn.agent_failures` (counter) | `march_spawn_agent_failures_total` | agent-level spawn failures by `{backend, profile, reason}` |
+| `march.spawn.tokens.{input,cached_input,output,reasoning}` (counters) | `march_spawn_tokens_*_total` | agent token usage by `{backend, profile, task_type}` |
 
-`outcome` is `success` (container exit 0) or `failure`.
+`outcome` is `success` (container exit 0) or `failure`. `reason` is the bounded
+agent-failure class — `auth` / `rate_limit` / `timeout` / `other` — classified
+from the codex output by [`agent-output.ts`](../src/observability/agent-output.ts).
+`reason="auth"` (codex "refresh token already used") is the **agent-is-down**
+signal: it drives the codex-auth-down alert and the legate's dispatch
+circuit-breaker (`march_legate_spawn_effective_cap` / `march_legate_spawn_breaker_open`,
+see the legate metrics), which collapses the effective spawn cap to 0 so the loop
+stops flooding doomed spawns until the agent is re-authenticated. Token counters
+are recorded from the codex `turn.completed` usage line on successful spawns.
 
 #### Hatchery service metrics
 
@@ -461,6 +471,21 @@ right now" at a glance — no logs, no per-service RED. A service up/down row
 (`slices{stage="escalated"}`), **Blocked** (`march_legate_queue_blocked`), and
 **Total remaining** (`march_legate_queue_total`) — followed by a stacked
 work-by-stage timeseries. Filtered by `profile` only.
+
+The **Agent status** dashboard,
+[`docker/grafana/dashboards/march-agent-status.json`](../docker/grafana/dashboards/march-agent-status.json)
+("**March — Agent status**", uid `march-agent-status`), focuses on the LLM agents
+the spawns drive: an **Agent — UP/DOWN** tile that flips to DOWN on codex auth
+failure (`march_spawn_agent_failures_total{reason="auth"}`), the dispatch
+**circuit-breaker** state and configured-vs-effective cap
+(`march_legate_spawn_{cap,effective_cap,breaker_open}`), agent-failure rate by
+reason, **token usage** (input / cached / output / reasoning from
+`march_spawn_tokens_*_total`), latency percentiles, and the use-case mix by task
+type. Its alerts live in
+[`docker/grafana/provisioning/alerting/march-agent-status-alerts.yaml`](../docker/grafana/provisioning/alerting/march-agent-status-alerts.yaml)
+— `march-agent-codex-auth-down` (the actionable "re-authenticate codex" alarm)
+and `march-agent-all-failing` — silent like the rest (record state, no
+notification), under the global `team: march` mute.
 
 All dashboards land in the same **March** folder
 (the provider loads every JSON under `/etc/march/dashboards`, so dropping the file
