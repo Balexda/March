@@ -325,6 +325,29 @@ program
   });
 
 program
+  .command("status")
+  .description("Report stack health: per-service container state, HTTP reachability, and token wiring")
+  .option("--json", "Print the status report as JSON")
+  .action(async (opts: { json?: boolean }) => {
+    commandHandled = true;
+    try {
+      const { stackStatus, formatStatusTable } = await import("../stack/status.js");
+      const status = await stackStatus();
+      if (opts.json) {
+        console.log(JSON.stringify(status, null, 2));
+      } else {
+        console.log(formatStatusTable(status));
+      }
+      // Non-zero exit when the stack is not fully healthy — usable as a
+      // pre-flight gate in scripts/CI.
+      process.exitCode = status.healthy ? SUCCESS : ERROR;
+    } catch (err) {
+      process.stderr.write((err instanceof Error ? err.message : String(err)) + "\n");
+      process.exitCode = ERROR;
+    }
+  });
+
+program
   .command("version")
   .description("Display the installed CLI version")
   .action(() => {

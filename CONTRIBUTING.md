@@ -131,9 +131,23 @@ unset. State is preserved by default (named volumes, worktrees, branches,
 in-flight sessions), so a later bring-up resumes where it left off. Pass
 `--volumes` to also remove the named volumes (registries, Herald's event log,
 telemetry), or `--drain` to tear down in-flight Brood sessions (spawn containers,
-worktrees, branches, stewards) before stopping the services. The rest of the
-stack-lifecycle surface (`march upgrade` / `march status` / `march init`) is
-tracked as follow-ups.
+worktrees, branches, stewards) before stopping the services.
+
+To check whether the stack is healthy — the pre-flight gate before `march up`'s
+consumers expect a working stack — run **`march status`**. For each service
+(otel-lgtm → castra → hatchery → brood → herald → legate) it reports three
+independent facts: container state (running/stopped/absent, via `docker
+inspect`), HTTP reachability on the service's loopback port (castra 9264,
+hatchery 8080, brood 9748, herald 8818, legate 8787, otel-lgtm/Grafana 3000), and
+— for the castra `/v1/*` gate — whether the shared `CASTRA_API_TOKEN`
+authenticates rather than 401-ing silently. It surfaces the common misconfig
+classes (token drift, a depended-on service that is down, a locally-built image
+that is absent), prints a per-service table, and **exits non-zero when the stack
+is not fully healthy** so it can gate scripts/CI. The command is read-only — it
+never starts, stops, or generates anything (unlike `march up`, it reads the
+persisted token but never mints one). Pass `--json` for machine-readable output.
+The remaining stack-lifecycle surface (`march upgrade` / `march init`) is tracked
+as follow-ups.
 
 **Keep telemetry in lock-step with the dispatch machinery.** When you add a loop
 lifecycle action or a new dispatch path, emit a span for it; when you add a
