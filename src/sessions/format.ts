@@ -71,6 +71,21 @@ const HEADERS = [
   "FLAG",
 ] as const;
 
+/**
+ * Per-column display caps (aligned to {@link HEADERS}; `0` = uncapped). The
+ * free-text columns (SLICE, BRANCH, WORKTREE-derived branch) are capped so one
+ * pathological value — e.g. an aggregate fold key that concatenates many slice
+ * ids — can't blow the whole table's column width out to hundreds of chars. The
+ * `--json` path is uncapped, so the full value is always machine-recoverable.
+ */
+const COLUMN_CAPS = [48, 0, 0, 0, 44, 0, 0, 0, 0, 0] as const;
+
+/** Truncate `value` to `max` chars with a trailing ellipsis (`max` 0 = no cap). */
+function cap(value: string, max: number): string {
+  if (max <= 0 || value.length <= max) return value;
+  return value.slice(0, max - 1) + "…";
+}
+
 /** Build the display cells for one row (the same order as {@link HEADERS}). */
 function rowCells(row: UnifiedSession): string[] {
   return [
@@ -101,7 +116,7 @@ export function formatTable(
   if (rows.length === 0) {
     lines.push("No in-flight sessions.");
   } else {
-    const cellRows = rows.map(rowCells);
+    const cellRows = rows.map((row) => rowCells(row).map((cell, i) => cap(cell, COLUMN_CAPS[i])));
     const widths = HEADERS.map((h, i) =>
       Math.max(h.length, ...cellRows.map((cells) => cells[i].length)),
     );

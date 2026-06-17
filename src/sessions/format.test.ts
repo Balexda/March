@@ -90,6 +90,15 @@ describe("formatTable", () => {
     const out = formatTable([row({ divergence: "castra-only" })]);
     expect(out).toContain("leak");
   });
+
+  it("caps a pathologically long slice id so the table layout survives", () => {
+    const giant = "x".repeat(500);
+    const out = formatTable([row({ sliceId: giant })]);
+    expect(out).not.toContain(giant); // truncated
+    expect(out).toContain("…");
+    // No line is anywhere near the un-capped width.
+    for (const line of out.split("\n")) expect(line.length).toBeLessThan(120);
+  });
 });
 
 describe("formatJson", () => {
