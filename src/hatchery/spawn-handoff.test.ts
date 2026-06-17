@@ -199,14 +199,15 @@ describe("spawn-handoff", () => {
     }
   });
 
-  it("writes handoff artifacts and tells the manager the patch is already applied", () => {
+  it("writes handoff artifacts from validated patch input and bounded metadata", () => {
     const home = makeTmpDir();
+    const artifactDir = hatcherySpawnLogDir("20260514-abcdef", home);
     const patch = "diff --git a/a b/a\n--- a/a\n+++ b/a\n";
     const prompt = buildManagerPrompt({
       operatorPrompt: "Do the work.",
-      patchPath: path.join(home, "patch.diff"),
-      spawnOutputPath: path.join(home, "spawn-output.log"),
-      metadataPath: path.join(home, "metadata.json"),
+      patchPath: path.join(artifactDir, "patch.diff"),
+      spawnOutputPath: path.join(artifactDir, "spawn-output.log"),
+      metadataPath: path.join(artifactDir, "metadata.json"),
     });
     const artifacts = createHatcherySpawnArtifacts({
       spawnId: "20260514-abcdef",
@@ -214,19 +215,41 @@ describe("spawn-handoff", () => {
       spawnOutput: "spawn log",
       patch,
       managerPrompt: prompt,
-      metadata: { spawnId: "20260514-abcdef" },
+      metadata: {
+        spawnId: "20260514-abcdef",
+        handoff: {
+          source: "extraction-result",
+          patchInput: "validated-patch",
+          spawnId: "20260514-abcdef",
+          backend: "codex",
+          touchedPaths: ["a"],
+          patchSha256: "abc123",
+          extractedAt: "2026-06-13T00:00:00.000Z",
+          diagnostic:
+            "Patch artifact is validated ExtractionResult.patch.patchText; raw backend output is diagnostic-only.",
+        },
+      },
     });
 
     expect(fs.readFileSync(artifacts.patchPath, "utf-8")).toBe(patch);
     expect(fs.readFileSync(artifacts.spawnOutputPath, "utf-8")).toBe("spawn log");
-    expect(fs.readFileSync(artifacts.managerPromptPath, "utf-8")).toContain(
-      "Review the already-applied staged change",
+    const writtenPrompt = fs.readFileSync(artifacts.managerPromptPath, "utf-8");
+    expect(writtenPrompt).toContain("Review the already-applied staged change");
+    expect(writtenPrompt).toContain(
+      `Patch input: ${artifacts.patchPath} (validated ExtractionResult.patch.patchText; already applied).`,
     );
-    expect(fs.readFileSync(artifacts.managerPromptPath, "utf-8")).not.toContain(
-      artifacts.patchPath,
-    );
+    expect(writtenPrompt).toContain("do not use it as patch input");
     const metadata = JSON.parse(fs.readFileSync(artifacts.metadataPath, "utf-8"));
     expect(metadata.artifacts.patchPath).toBe(artifacts.patchPath);
+    expect(metadata.handoff).toMatchObject({
+      source: "extraction-result",
+      patchInput: "validated-patch",
+      spawnId: "20260514-abcdef",
+      backend: "codex",
+      touchedPaths: ["a"],
+      patchSha256: "abc123",
+      extractedAt: "2026-06-13T00:00:00.000Z",
+    });
   });
 
   describe("Steward handoff eligibility", () => {
