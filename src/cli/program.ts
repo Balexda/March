@@ -40,6 +40,8 @@ import { StatioValidationError } from "../statio/types.js";
 import { initMarch, InitError } from "../bootstrap/init.js";
 import { stackDown } from "../stack/down.js";
 import { stackUp } from "../stack/up.js";
+import { stackUpgrade } from "../stack/upgrade.js";
+import { MARCH_SERVICES } from "../stack/services.js";
 import { createBuildContext, SnapshotError } from "../spawn/snapshot.js";
 import {
   listBackends,
@@ -173,67 +175,96 @@ program
     }
   });
 
-program
-  .command("update")
-  .description("Update the March installation")
-  .action(async () => {
-    commandHandled = true;
-    const yes = program.opts().yes as boolean | undefined;
-    try {
-      // When --yes is set, pass force=true on the first call so a downgrade
-      // proceeds immediately without a detection roundtrip that would print
-      // the "Pass --yes" warning before the update runs.
-      const result = await updateMarch(undefined, yes ? true : undefined);
+/**
+ * Run the CLI-version updater (the body shared by `march self update` and the
+ * deprecated `march update` shim). Sets `process.exitCode`; never calls
+ * `process.exit()` so buffered output flushes.
+ */
+async function runSelfUpdate(): Promise<void> {
+  const yes = program.opts().yes as boolean | undefined;
+  try {
+    // When --yes is set, pass force=true on the first call so a downgrade
+    // proceeds immediately without a detection roundtrip that would print
+    // the "Pass --yes" warning before the update runs.
+    const result = await updateMarch(undefined, yes ? true : undefined);
 
-      if (result.downgrade) {
-        // Downgrade detected and --yes was not set (force bypasses this branch).
-        console.log(result.summary);
-        for (const warning of result.warnings) {
-          process.stderr.write(warning + "\n");
-        }
-
-        if (!process.stdin.isTTY) {
-          // Non-interactive environment: instruct the user and exit 0 without
-          // performing the downgrade.
-          process.stderr.write(
-            "Pass --yes to force the downgrade in non-interactive mode.\n",
-          );
-          process.exitCode = SUCCESS;
-          return;
-        }
-
-        // Interactive TTY: ask for confirmation.
-        const confirmed = await confirm(
-          `Downgrade from v${result.summary.match(/v(\S+)/)?.[1] ?? "?"} to v${CLI_VERSION}?`,
-        );
-        if (!confirmed) {
-          process.stderr.write("Downgrade cancelled.\n");
-          process.exitCode = SUCCESS;
-          return;
-        }
-
-        const forced = await updateMarch(undefined, true);
-        console.log(forced.summary);
-        for (const warning of forced.warnings) {
-          process.stderr.write(warning + "\n");
-        }
-        process.exitCode = SUCCESS;
-        return;
-      }
-
+    if (result.downgrade) {
+      // Downgrade detected and --yes was not set (force bypasses this branch).
       console.log(result.summary);
       for (const warning of result.warnings) {
         process.stderr.write(warning + "\n");
       }
-      process.exitCode = SUCCESS;
-    } catch (err) {
-      if (err instanceof UpdateError) {
-        console.error(err.message);
-        process.exitCode = ERROR;
+
+      if (!process.stdin.isTTY) {
+        // Non-interactive environment: instruct the user and exit 0 without
+        // performing the downgrade.
+        process.stderr.write(
+          "Pass --yes to force the downgrade in non-interactive mode.\n",
+        );
+        process.exitCode = SUCCESS;
         return;
       }
-      throw err;
+
+      // Interactive TTY: ask for confirmation.
+      const confirmed = await confirm(
+        `Downgrade from v${result.summary.match(/v(\S+)/)?.[1] ?? "?"} to v${CLI_VERSION}?`,
+      );
+      if (!confirmed) {
+        process.stderr.write("Downgrade cancelled.\n");
+        process.exitCode = SUCCESS;
+        return;
+      }
+
+      const forced = await updateMarch(undefined, true);
+      console.log(forced.summary);
+      for (const warning of forced.warnings) {
+        process.stderr.write(warning + "\n");
+      }
+      process.exitCode = SUCCESS;
+      return;
     }
+
+    console.log(result.summary);
+    for (const warning of result.warnings) {
+      process.stderr.write(warning + "\n");
+    }
+    process.exitCode = SUCCESS;
+  } catch (err) {
+    if (err instanceof UpdateError) {
+      console.error(err.message);
+      process.exitCode = ERROR;
+      return;
+    }
+    throw err;
+  }
+}
+
+// `march self` — operate on the March CLI installation itself (the `self update`
+// home for the CLI-version updater that used to be the top-level `march update`).
+const self = program
+  .command("self")
+  .description("Manage the March CLI installation itself");
+
+self
+  .command("update")
+  .description("Update the March installation to match the current CLI version")
+  .action(async () => {
+    commandHandled = true;
+    await runSelfUpdate();
+  });
+
+// Deprecation shim: `march update` moved to `march self update` to free the
+// `update`/`upgrade` collision (upgrade rebuilds the service containers). Warns
+// and forwards for one release; remove the shim after that.
+program
+  .command("update")
+  .description("Deprecated: use `march self update` (forwards for one release)")
+  .action(async () => {
+    commandHandled = true;
+    process.stderr.write(
+      "`march update` is deprecated and will be removed in a future release; use `march self update` instead.\n",
+    );
+    await runSelfUpdate();
   });
 
 program
@@ -317,6 +348,50 @@ program
       }
       // A skipped service (compose file not found) is not a hard failure; a
       // failed `docker compose down` or an incomplete requested drain is.
+      process.exitCode = failed ? ERROR : SUCCESS;
+    } catch (err) {
+      process.stderr.write((err instanceof Error ? err.message : String(err)) + "\n");
+      process.exitCode = ERROR;
+    }
+  });
+
+program
+  .command("upgrade")
+  .description(
+    "Rebuild the march-* service images from source and recreate the containers (state preserved)",
+  )
+  .option(
+    "--service <name>",
+    "Upgrade a single service (otel-lgtm, castra, hatchery, brood, herald, legate)",
+  )
+  .action(async (opts: { service?: string }) => {
+    commandHandled = true;
+    try {
+      const result = await stackUpgrade({ service: opts.service?.trim() || undefined });
+
+      if (result.unknownService) {
+        process.stderr.write(
+          `Unknown service "${result.unknownService}". ` +
+            `Known services: ${MARCH_SERVICES.map((s) => s.name).join(", ")}.\n`,
+        );
+        process.exitCode = USAGE_ERROR;
+        return;
+      }
+
+      let failed = false;
+      for (const svc of result.services) {
+        if (svc.outcome === "upgraded") {
+          const what = svc.built
+            ? "rebuilt image + recreated container"
+            : "recreated container";
+          console.log(`${svc.service}: upgraded (${what})`);
+        } else {
+          console.log(
+            `${svc.service}: ${svc.outcome}${svc.detail ? ` — ${svc.detail}` : ""}`,
+          );
+        }
+        if (svc.outcome === "failed") failed = true;
+      }
       process.exitCode = failed ? ERROR : SUCCESS;
     } catch (err) {
       process.stderr.write((err instanceof Error ? err.message : String(err)) + "\n");

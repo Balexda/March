@@ -19,7 +19,8 @@ March's source is organized by product subsystem rather than by generic layers:
 |-----------|-----------|
 | `src/cli.ts` | Executable bin entrypoint only; delegates to `src/cli/program.ts`. |
 | `src/cli/` | Commander program setup and command dispatch. |
-| `src/bootstrap/` | `march init` / `march update`, manifest handling, and deployed base skills. |
+| `src/bootstrap/` | `march init` / `march self update`, manifest handling, and deployed base skills. |
+| `src/stack/` | Stack-lifecycle commands (`march up` / `down` / `upgrade`): the shared service list, compose/Dockerfile locator, command runner, and token resolution. |
 | `src/spawn/` | Spawn execution pipeline: snapshots, image builds, backend entrypoints, and container launch. |
 | `src/hatchery/` | Container/profile policy and the spawn orchestrator (`runHatcherySpawn`). `src/hatchery/service/` is the containerized Fastify service (`march hatchery serve`) plus the thin client `march hatchery spawn` uses. |
 | `src/brood/` | Spawn lifecycle state: worktrees, branches, records, and cleanup ownership. |
@@ -131,9 +132,25 @@ unset. State is preserved by default (named volumes, worktrees, branches,
 in-flight sessions), so a later bring-up resumes where it left off. Pass
 `--volumes` to also remove the named volumes (registries, Herald's event log,
 telemetry), or `--drain` to tear down in-flight Brood sessions (spawn containers,
-worktrees, branches, stewards) before stopping the services. The rest of the
-stack-lifecycle surface (`march upgrade` / `march status` / `march init`) is
-tracked as follow-ups.
+worktrees, branches, stewards) before stopping the services.
+
+To pick up source changes, **`march upgrade`** is the build-and-roll counterpart
+to `march up`: it rebuilds each locally-built `march-*:latest` image from its
+`docker/<name>.Dockerfile` (the same images the `build:<name>-image` scripts
+produce) and then recreates the containers in dependency order with
+`docker compose up -d --force-recreate`, so the new images take effect. State is
+preserved — `--force-recreate` replaces the container but not its named volumes
+(registries, Herald's event log, telemetry). Pass `--service <name>` (one of
+`otel-lgtm`, `castra`, `hatchery`, `brood`, `herald`, `legate`) to rebuild and
+recreate a single service; `otel-lgtm` is pulled rather than built, so it is only
+recreated. A build failure marks that service failed and skips its recreate (so a
+stale image is never silently rolled) while the rest still upgrade. The remaining
+stack-lifecycle surface (`march status`) is tracked as a follow-up.
+
+> **Note:** `march upgrade` rebuilds the **service container** images. The
+> CLI-version updater that deploys the bundled skills lives at **`march self
+> update`** (formerly `march update`, which now warns and forwards for one
+> release).
 
 **Keep telemetry in lock-step with the dispatch machinery.** When you add a loop
 lifecycle action or a new dispatch path, emit a span for it; when you add a

@@ -18,6 +18,13 @@ export interface MarchService {
    * compose (e.g. otel-lgtm) rather than built locally.
    */
   readonly image?: string;
+  /**
+   * Basename of the Dockerfile under `docker/` that `march upgrade` rebuilds
+   * the local image from (mirrors the `build:<name>-image` script in
+   * `package.json`). Paired with {@link image}; both are undefined for pulled
+   * services (e.g. otel-lgtm), which `upgrade` recreates without a build.
+   */
+  readonly dockerfile?: string;
 }
 
 /**
@@ -32,11 +39,11 @@ export interface MarchService {
  */
 export const MARCH_SERVICES: readonly MarchService[] = [
   { name: "otel-lgtm", compose: "otel-lgtm.docker-compose.yml" },
-  { name: "castra", compose: "castra.docker-compose.yml", image: "march-castra:latest" },
-  { name: "hatchery", compose: "hatchery.docker-compose.yml", image: "march-hatchery:latest" },
-  { name: "brood", compose: "brood.docker-compose.yml", image: "march-brood:latest" },
-  { name: "herald", compose: "herald.docker-compose.yml", image: "march-herald:latest" },
-  { name: "legate", compose: "legate.docker-compose.yml", image: "march-legate:latest" },
+  { name: "castra", compose: "castra.docker-compose.yml", image: "march-castra:latest", dockerfile: "castra.Dockerfile" },
+  { name: "hatchery", compose: "hatchery.docker-compose.yml", image: "march-hatchery:latest", dockerfile: "hatchery.Dockerfile" },
+  { name: "brood", compose: "brood.docker-compose.yml", image: "march-brood:latest", dockerfile: "brood.Dockerfile" },
+  { name: "herald", compose: "herald.docker-compose.yml", image: "march-herald:latest", dockerfile: "herald.Dockerfile" },
+  { name: "legate", compose: "legate.docker-compose.yml", image: "march-legate:latest", dockerfile: "legate.Dockerfile" },
 ];
 
 /**
