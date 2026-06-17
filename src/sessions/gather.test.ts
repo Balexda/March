@@ -47,7 +47,6 @@ function clients(opts: {
 describe("gatherSessions", () => {
   it("scans the union of profiles from the registry, the fold, and Brood records", async () => {
     const fold = emptyMultiProfileState();
-    fold.byProfile["from-fold"] = { ...emptyMultiProfileState().byProfile, ...{} } as never;
     fold.byProfile["from-fold"] = {
       seq: 0, ts: "", statePresent: true, stateError: null, slices: {}, sessions: {}, workers: null,
       smithy: { dispatchable: 0, blocked: 0, total: 0 }, retries: {},
@@ -69,6 +68,13 @@ describe("gatherSessions", () => {
     const sources = await gatherSessions(impl);
     expect(sources.brood).toEqual([]);
     expect(sources.errors).toContainEqual({ source: "brood", message: "brood down" });
+  });
+
+  it("includes caller-supplied extraProfiles in the Castra scan set", async () => {
+    const { impl, listed } = clients({ profiles: [], castra: { forced: [] } });
+    const sources = await gatherSessions(impl, { extraProfiles: ["forced"] });
+    expect(sources.profiles).toContain("forced");
+    expect(listed).toContain("forced");
   });
 
   it("scopes a per-profile Castra failure", async () => {

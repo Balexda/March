@@ -39,7 +39,14 @@ interface RowAccumulator {
   brood: SessionRecord[];
 }
 
-/** Does this live Castra session realize the given fold slice? */
+/**
+ * Does this live Castra session realize the given fold slice? Matched in the
+ * documented order — slice id (metadata) → session id → worktree → branch. The
+ * branch fallback is NOT gated on a missing worktree: a relaunch re-keys the
+ * steward onto a fresh worktree while keeping the (deterministic, unique) branch,
+ * so without it a relaunched session would split into its own row instead of
+ * rejoining the fold slice (#155 relaunch case).
+ */
 function sessionMatchesSlice(
   session: CastraSession,
   slice: SliceState,
@@ -48,9 +55,7 @@ function sessionMatchesSlice(
   if (session.metadata?.sliceId && session.metadata.sliceId === sliceId) return true;
   if (slice.sessionId && session.sessionId === slice.sessionId) return true;
   if (slice.worktreePath && session.worktreePath === slice.worktreePath) return true;
-  if (!slice.worktreePath && slice.branch && session.branch && session.branch === slice.branch) {
-    return true;
-  }
+  if (slice.branch && session.branch && session.branch === slice.branch) return true;
   return false;
 }
 
@@ -59,22 +64,44 @@ function broodIds(rec: SessionRecord): string[] {
   return [rec.id, rec.agentDeckSessionId].filter((v): v is string => !!v);
 }
 
-/** Does this active Brood record back the accumulated unit of work? */
+/**
+ * Does this active Brood record back the accumulated unit of work? Identity is
+ * matched on session id / worktree / branch. Profile is a COMPATIBILITY guard,
+ * not an equality requirement: in the normal Hatchery path a spawn row is written
+ * with no `profile` while its paired steward carries the agent-deck profile, so
+ * requiring `rec.profile === row.profile` would split a healthy spawn+steward pair
+ * into a phantom `profile=""` orphan and strip the real row's containerId. A
+ * profile-LESS record therefore matches any row by identity; a profile-BEARING
+ * record only matches a same-profile row (preserving cross-profile isolation).
+ */
 function broodMatchesRow(rec: SessionRecord, row: RowAccumulator): boolean {
+  if (rec.profile && rec.profile !== row.profile) return false;
   const ids = broodIds(rec);
-  const sessionIds = [row.castra?.sessionId, row.slice?.sessionId, row.slice?.spawnId].filter(
-    (v): v is string => !!v,
-  );
+  // Candidate identity from EVERY source already on the row — the fold slice, the
+  // live Castra session, AND any Brood record already attached. The last matters
+  // for a pure Brood-only spawn+steward pair (no slice/castra): the steward row's
+  // worktree lives only on its attached record, so without it the paired spawn
+  // would never join and would split into a second row.
+  const sessionIds = [
+    row.castra?.sessionId,
+    row.slice?.sessionId,
+    row.slice?.spawnId,
+    ...row.brood.flatMap(broodIds),
+  ].filter((v): v is string => !!v);
   if (sessionIds.some((id) => ids.includes(id))) return true;
 
-  const worktrees = [row.slice?.worktreePath, row.castra?.worktreePath].filter(
-    (v): v is string => !!v,
-  );
+  const worktrees = [
+    row.slice?.worktreePath,
+    row.castra?.worktreePath,
+    ...row.brood.map((r) => r.worktreePath),
+  ].filter((v): v is string => !!v);
   if (rec.worktreePath && worktrees.includes(rec.worktreePath)) return true;
 
-  const branches = [row.slice?.branch, row.castra?.branch].filter(
-    (v): v is string => !!v && v.length > 0,
-  );
+  const branches = [
+    row.slice?.branch,
+    row.castra?.branch,
+    ...row.brood.map((r) => r.branch),
+  ].filter((v): v is string => !!v && v.length > 0);
   if (rec.branch && rec.branch.length > 0 && branches.includes(rec.branch)) return true;
 
   return false;
@@ -91,20 +118,30 @@ function deriveState(row: RowAccumulator): SessionState {
   const slice = row.slice;
   if (slice) {
     if (slice.archived) return "archived";
-    if (slice.stewardReport?.status === "awaiting_input") return "waiting-on-approval";
     const stage = slice.stage;
+    // `escalated` (the loop gave up — needs the legate-agent/operator) is a
+    // stronger, more accurate signal than the steward's own awaiting-input
+    // self-report, so it takes precedence when both are present.
     if (stage === "escalated") return "errored";
+    if (slice.stewardReport?.status === "awaiting_input") return "waiting-on-approval";
     if (stage === "hatchery-pending") return "dispatched";
     if (stage === "pr-open") return "waiting-for-merge";
     if (stage && STEWARD_STAGES.has(stage)) return "in-steward";
-    if (stage === "merged") return "waiting-for-merge";
+    // `merged` is terminal (pending archive), not an active state — never
+    // mislabel an already-merged slice as still waiting to merge. Its stage
+    // stays visible in the table's STAGE column.
+    if (stage === "merged") return "unknown";
     // A slice with a steward session but no stage yet is implementing.
     if (slice.sessionId) return "in-steward";
     return "unknown";
   }
 
-  // No fold slice — classify from the live session status instead.
-  const status = (row.castra?.status ?? row.brood[0]?.status ?? "").trim().toLowerCase();
+  // No fold slice — classify from the live session status instead. Prefer the
+  // steward record's status (the live unit) over an arbitrary first record,
+  // which could be the paired spawn.
+  const status = (row.castra?.status ?? pickBroodRecord(row.brood)?.status ?? "")
+    .trim()
+    .toLowerCase();
   if (status === "error" || status === "failed") return "errored";
   if (status === "running" || status === "waiting" || status === "idle" || status === "created") {
     return "in-steward";
@@ -113,29 +150,39 @@ function deriveState(row: RowAccumulator): SessionState {
 }
 
 /**
- * States where a live Castra session is EXPECTED to back the slice — so a
- * fold-only slice in one of these is a genuine stale projection (a ghost), while
- * a `waiting-for-merge` / `waiting-on-approval` slice legitimately has no live
- * session (its steward is done) and must NOT be flagged. Mirrors the loop's
- * `STEWARD_STAGES`/dispatched notion of "a session should be attached here".
+ * Does a live Castra session belong with this fold slice? True for a slice the
+ * loop dispatched or handed to a steward (`hatchery-pending` / a STEWARD stage),
+ * AND for one whose steward self-reported `awaiting_input` — the operator must be
+ * able to attach to that session to answer the prompt, so its disappearance is a
+ * genuine stale projection. A plain `pr-open` (waiting-for-merge) or terminal
+ * slice legitimately has no live steward and must NOT be flagged. Computed from
+ * the slice signals directly, not the derived state, because `waiting-on-approval`
+ * conflates the (session-expected) awaiting-input case with the (not-expected)
+ * human-merge-gate case.
  */
-const SESSION_EXPECTED_STATES = new Set<SessionState>(["dispatched", "in-steward"]);
+function sliceExpectsLiveSession(slice: SliceState): boolean {
+  if (slice.archived) return false;
+  if (slice.stewardReport?.status === "awaiting_input") return true;
+  const stage = slice.stage;
+  if (stage === "hatchery-pending") return true;
+  return stage !== undefined && STEWARD_STAGES.has(stage);
+}
 
 /**
  * Classify the cross-service divergence. A live Castra session with no Brood
  * record is always a leak; an active Brood record with no live session is always
- * a dead orphan. A fold-only slice is only `stale` when its state expects a live
- * session — otherwise (waiting-for-merge / waiting-on-approval / errored) the
- * absence of a session is normal, not a ghost.
+ * a dead orphan. A fold-only slice is only `stale` when it expects a live session
+ * ({@link sliceExpectsLiveSession}) — otherwise (waiting-for-merge / a human merge
+ * gate / terminal) the absence of a session is normal, not a ghost.
  */
 function classifyDivergence(
   presence: { herald: boolean; castra: boolean; brood: boolean },
-  state: SessionState,
+  slice: SliceState | undefined,
 ): Divergence {
   if (presence.castra && !presence.brood) return "castra-only";
   if (presence.brood && !presence.castra) return "brood-only";
-  if (presence.herald && !presence.castra && !presence.brood) {
-    return SESSION_EXPECTED_STATES.has(state) ? "fold-only" : "ok";
+  if (presence.herald && !presence.castra && !presence.brood && slice) {
+    return sliceExpectsLiveSession(slice) ? "fold-only" : "ok";
   }
   return "ok";
 }
@@ -173,7 +220,7 @@ function finalizeRow(row: RowAccumulator, now: number): UnifiedSession {
     brood: row.brood.length > 0,
   };
   const state = deriveState(row);
-  const divergence = classifyDivergence(presence, state);
+  const divergence = classifyDivergence(presence, slice);
 
   const branch = slice?.branch ?? (row.castra?.branch || broodRec?.branch || undefined);
   const worktreePath =
@@ -216,10 +263,14 @@ export function joinSessions(
 ): UnifiedSession[] {
   const rows: RowAccumulator[] = [];
 
-  // 1. Seed from the fold — one row per live slice.
+  // 1. Seed from the fold — one row per live slice. Archived (terminal) and
+  //    recovered (operator-tombstoned via slice.recovery.requested) slices are
+  //    skipped, mirroring the loop's own in-flight projection (rebuildWorkingState
+  //    in src/legate/loop/state/sense.ts) — a tombstone is intentionally cleared
+  //    from in-flight state and must not surface as a misleading `unknown` row.
   for (const [profile, state] of Object.entries(sources.fold.byProfile)) {
     for (const [sliceId, slice] of Object.entries(state.slices)) {
-      if (slice.archived) continue; // not in-flight
+      if (slice.archived || slice.recovered) continue; // not in-flight
       rows.push({ profile, sliceId, slice, brood: [] });
     }
   }
@@ -249,15 +300,19 @@ export function joinSessions(
   }
 
   // 3. Attach active spawn/steward Brood records, or open an orphan row.
-  for (const rec of sources.brood) {
-    if (!WORK_KINDS.has(rec.kind)) continue; // legates are infra, not work
-    if (rec.status === "torndown") continue; // not in-flight
-    const profile = rec.profile ?? "";
-    const match = rows.find((r) => r.profile === profile && broodMatchesRow(rec, r));
+  //    Stewards are processed before spawns so a pure Brood-only pair anchors its
+  //    row on the steward's (real) profile first — the profile-less spawn then
+  //    matches that row by worktree, instead of seeding a separate `profile=""`
+  //    row the profile-bearing steward could no longer join.
+  const workRecords = sources.brood
+    .filter((rec) => WORK_KINDS.has(rec.kind) && rec.status !== "torndown")
+    .sort((a, b) => (a.kind === "steward" ? 0 : 1) - (b.kind === "steward" ? 0 : 1));
+  for (const rec of workRecords) {
+    const match = rows.find((r) => broodMatchesRow(rec, r));
     if (match) {
       match.brood.push(rec);
     } else {
-      rows.push({ profile, brood: [rec] });
+      rows.push({ profile: rec.profile ?? "", brood: [rec] });
     }
   }
 

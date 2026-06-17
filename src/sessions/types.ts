@@ -64,7 +64,9 @@ export interface UnifiedSession {
   readonly worktreePath?: string;
   /** Docker container id (from the Brood spawn record), when known. */
   readonly containerId?: string;
-  /** Live Castra/agent-deck session id, when a session exists. */
+  /** Castra/agent-deck session id. The live Castra session's id when one is
+   *  attached; otherwise falls back to the tracked steward record's agent-deck
+   *  session id (a Brood-only orphan still surfaces an addressable id). */
   readonly castraSessionId?: string;
   /** Brood lifecycle status (steward record preferred, else spawn), when tracked. */
   readonly broodStatus?: string;

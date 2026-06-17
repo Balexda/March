@@ -105,6 +105,37 @@ describe("runSessions", () => {
     expect(result.exitCode).toBe(1);
   });
 
+  it("exits 0 on a healthy but idle stack (no rows, no errors)", async () => {
+    const result = await runSessions({}, fakeClients({ profiles: ["march"] }), NOW);
+    expect(result.exitCode).toBe(0);
+    expect(result.output).toBe("No in-flight sessions.");
+  });
+
+  it("forces a --profile into the Castra scan to expose an unregistered leak", async () => {
+    // `ghost` is live in Castra but absent from the registry/fold/Brood, so a
+    // plain run never scans it. --profile ghost must surface the leak.
+    const ghostSession: CastraSession = {
+      sessionId: "g1",
+      title: "steward",
+      group: "legate-workers",
+      branch: "feature/ghost",
+      worktreePath: "/wt/ghost",
+      createdAt: "2026-06-16T11:00:00.000Z",
+      status: "running",
+      metadata: { sliceId: "ghost-cut" },
+    };
+    const clients = fakeClients({ profiles: [], castra: { ghost: [ghostSession] } });
+
+    const without = await runSessions({ json: true }, clients, NOW);
+    expect(JSON.parse(without.output).sessions).toHaveLength(0);
+
+    const withProfile = await runSessions({ profile: "ghost", json: true }, clients, NOW);
+    const parsed = JSON.parse(withProfile.output);
+    expect(parsed.sessions).toHaveLength(1);
+    expect(parsed.sessions[0].divergence).toBe("castra-only");
+    expect(parsed.sessions[0].sliceId).toBe("ghost-cut");
+  });
+
   it("applies --orphans to the rendered rows", async () => {
     const result = await runSessions(
       { orphans: true, json: true },

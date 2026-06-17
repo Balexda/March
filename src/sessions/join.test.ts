@@ -199,6 +199,120 @@ describe("joinSessions", () => {
     expect(byId["disp-cut"].state).toBe("dispatched");
   });
 
+  it("attaches a profile-less spawn record to its steward's row (Hatchery path)", () => {
+    // Normal Hatchery registration: spawn row has NO profile, steward row carries
+    // it. Both share the worktree. They must collapse into one row that keeps the
+    // containerId — not split into a phantom profile="" orphan.
+    const slice: SliceState = {
+      sliceId: "p-cut",
+      stage: "pr-open",
+      branch: "feature/p",
+      worktreePath: "/wt/p",
+      sessionId: "stew-p",
+    };
+    const rows = joinSessions(
+      sources({
+        fold: foldWith("march", { "p-cut": slice }),
+        castraByProfile: new Map([["march", [castra({ sessionId: "stew-p", worktreePath: "/wt/p", branch: "feature/p" })]]]),
+        brood: [
+          broodRecord({ id: "spawn-p", kind: "spawn", profile: undefined, containerId: "cidp123456789", worktreePath: "/wt/p" }),
+          broodRecord({ id: "stew-p", kind: "steward", agentDeckSessionId: "stew-p", profile: "march", parentId: "spawn-p", worktreePath: "/wt/p" }),
+        ],
+      }),
+      NOW,
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0].divergence).toBe("ok");
+    expect(rows[0].containerId).toBe("cidp123456789");
+    expect(rows[0].profile).toBe("march");
+  });
+
+  it("collapses a pure Brood-only spawn+steward pair into one row (steward processed first)", () => {
+    const rows = joinSessions(
+      sources({
+        brood: [
+          broodRecord({ id: "spawn-q", kind: "spawn", profile: undefined, containerId: "cidq123456789", worktreePath: "/wt/q" }),
+          broodRecord({ id: "stew-q", kind: "steward", agentDeckSessionId: "stew-q", profile: "march", worktreePath: "/wt/q", status: "running" }),
+        ],
+      }),
+      NOW,
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0].profile).toBe("march");
+    expect(rows[0].containerId).toBe("cidq123456789");
+    expect(rows[0].divergence).toBe("brood-only");
+  });
+
+  it("flags a fold-only awaiting_input slice as stale (the operator can't attach to answer)", () => {
+    const rows = joinSessions(
+      sources({
+        fold: foldWith("march", {
+          "ask-cut": { sliceId: "ask-cut", stage: "pr-open", stewardReport: { status: "awaiting_input", classified: true } },
+        }),
+      }),
+      NOW,
+    );
+    expect(rows[0].state).toBe("waiting-on-approval");
+    expect(rows[0].divergence).toBe("fold-only");
+  });
+
+  it("lets escalated take precedence over an awaiting_input self-report in the state label", () => {
+    const rows = joinSessions(
+      sources({
+        fold: foldWith("march", {
+          "esc-cut": {
+            sliceId: "esc-cut",
+            stage: "escalated",
+            escalatedReason: "steward_awaiting_input",
+            stewardReport: { status: "awaiting_input", classified: true },
+          },
+        }),
+      }),
+      NOW,
+    );
+    expect(rows[0].state).toBe("errored"); // escalated wins
+    expect(rows[0].stage).toBe("escalated");
+    expect(rows[0].divergence).toBe("fold-only"); // awaiting_input still expects a session
+  });
+
+  it("does not mislabel a terminal `merged` slice as waiting-for-merge", () => {
+    const rows = joinSessions(
+      sources({ fold: foldWith("march", { "m-cut": { sliceId: "m-cut", stage: "merged" } }) }),
+      NOW,
+    );
+    expect(rows[0].state).toBe("unknown");
+    expect(rows[0].stage).toBe("merged"); // real stage still visible
+    expect(rows[0].divergence).toBe("ok"); // not session-expected → not stale
+  });
+
+  it("skips operator-recovered (tombstoned) slices", () => {
+    const rows = joinSessions(
+      sources({ fold: foldWith("march", { "rec-cut": { sliceId: "rec-cut", recovered: true } }) }),
+      NOW,
+    );
+    expect(rows).toHaveLength(0);
+  });
+
+  it("rejoins a relaunched session to its slice by branch even when the worktree changed", () => {
+    const slice: SliceState = {
+      sliceId: "relaunch-cut",
+      stage: "implementing",
+      branch: "feature/relaunch",
+      worktreePath: "/wt/old",
+    };
+    const rows = joinSessions(
+      sources({
+        fold: foldWith("march", { "relaunch-cut": slice }),
+        castraByProfile: new Map([
+          ["march", [castra({ sessionId: "fresh", worktreePath: "/wt/new", branch: "feature/relaunch" })]],
+        ]),
+      }),
+      NOW,
+    );
+    expect(rows).toHaveLength(1); // joined, not split
+    expect(rows[0].castraSessionId).toBe("fresh");
+  });
+
   it("computes age from the earliest known createdAt", () => {
     const rows = joinSessions(
       sources({

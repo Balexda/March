@@ -14,7 +14,10 @@ import type { SourceError } from "./types.js";
  * the sources that ARE up (the common case is exactly that one service is down).
  */
 export interface SessionSources {
-  /** Active (non-torndown) Brood spawn/steward records. */
+  /** ALL Brood records, every kind and status as returned by `GET /sessions`.
+   *  The join layer is what filters to active spawn/steward records — keeping the
+   *  raw list here lets a future consumer (e.g. `march doctor`) classify torndown
+   *  and legate records differently without a second fetch. */
   readonly brood: readonly SessionRecord[];
   /** Live Castra sessions, keyed by the profile they were listed for. */
   readonly castraByProfile: ReadonlyMap<string, readonly CastraSession[]>;
@@ -63,6 +66,7 @@ function message(err: unknown): string {
  */
 export async function gatherSessions(
   clients: SessionClients = defaultSessionClients(),
+  options: { readonly extraProfiles?: readonly string[] } = {},
 ): Promise<SessionSources> {
   const errors: SourceError[] = [];
 
@@ -91,10 +95,14 @@ export async function gatherSessions(
   }
 
   // Union every profile any source mentions so an unregistered-but-live profile
-  // (the divergence we are hunting) is still scanned.
+  // (the divergence we are hunting) is still scanned. `extraProfiles` lets the
+  // caller force a profile in — e.g. `--profile <p>` for a known Castra profile
+  // absent from the registry and with no Brood/fold rows yet, which is exactly
+  // the Castra-only leak the command exists to expose.
   const profileSet = new Set<string>(registered);
   for (const key of Object.keys(fold.byProfile)) profileSet.add(key);
   for (const rec of brood) if (rec.profile) profileSet.add(rec.profile);
+  for (const p of options.extraProfiles ?? []) if (p) profileSet.add(p);
   const profiles = [...profileSet].filter((p) => p.length > 0).sort();
 
   // Castra: list per profile (the API requires one). A per-profile failure is

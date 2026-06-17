@@ -1,3 +1,4 @@
+import { ERROR, SUCCESS, USAGE_ERROR } from "../shared/exit-codes.js";
 import { defaultSessionClients, gatherSessions, type SessionClients } from "./gather.js";
 import { joinSessions } from "./join.js";
 import {
@@ -7,6 +8,7 @@ import {
   SESSION_STATES,
   type SessionFilter,
 } from "./format.js";
+import type { SourceError } from "./types.js";
 
 /** Options for one `march sessions` run (the parsed CLI flags). */
 export interface RunSessionsOptions extends SessionFilter {
@@ -19,21 +21,18 @@ export interface RunSessionsResult {
   readonly exitCode: number;
 }
 
-/** Exit codes mirror the rest of the CLI (`src/shared/exit-codes.ts`). */
-const SUCCESS = 0;
-const ERROR = 1;
-const USAGE_ERROR = 2;
-
 /**
  * Gather → join → filter → render the unified session view. Pure orchestration
  * over the injectable {@link SessionClients} so it is fully testable without a
  * running stack; `program.ts` wires the env-configured HTTP clients and prints
  * the result.
  *
- * Exit code: `2` for a bad `--state`; `1` when EVERY source failed (nothing to
- * show); otherwise `0` — a partial view (one source down) is a success with the
- * failures footnoted, since the whole point is to surface divergence even when a
- * service is wedged.
+ * Exit code: `2` for a bad `--state`; `1` only when we are genuinely BLIND — every
+ * service (Brood, Herald, Castra) failed to answer; otherwise `0`. A partial view
+ * (one source down) is a success with the failures footnoted, and an idle-but-up
+ * system (zero rows, no errors) is also `0` — the whole point is to surface
+ * divergence even when a service is wedged, without crying failure on an empty
+ * but healthy stack.
  */
 export async function runSessions(
   options: RunSessionsOptions = {},
@@ -47,25 +46,29 @@ export async function runSessions(
     };
   }
 
-  const sources = await gatherSessions(clients);
+  // Force the requested --profile into the Castra scan: a known live Castra
+  // profile absent from the registry/fold/Brood would otherwise never be listed,
+  // hiding the exact Castra-only leak the filter is asking about.
+  const sources = await gatherSessions(
+    clients,
+    options.profile ? { extraProfiles: [options.profile] } : {},
+  );
   const rows = filterSessions(joinSessions(sources, now), options);
 
-  // Every source failing means we are blind, not "all clear" — exit non-zero.
-  const allFailed =
-    sources.errors.length > 0 &&
-    sources.brood.length === 0 &&
-    sources.castraByProfile.size === 0 &&
-    Object.keys(sources.fold.byProfile).length === 0;
+  // Blind = none of the three services answered. Tied to per-source errors (NOT
+  // "zero rows"), so a healthy idle stack still exits 0. Castra is "down" only
+  // when it was scanned and every scan errored; an empty scan set means we never
+  // had a profile to ask it about (Brood + Herald were the blind ones).
+  const failed = (source: SourceError["source"]) =>
+    sources.errors.some((e) => e.source === source);
+  const broodBlind = failed("brood");
+  const heraldBlind = failed("herald") || failed("profiles");
+  const castraScans = sources.castraByProfile.size;
+  const castraBlind = castraScans === 0 || sources.profiles.every((p) => !sources.castraByProfile.has(p));
+  const blind = broodBlind && heraldBlind && castraBlind;
 
-  if (options.json) {
-    return {
-      output: formatJson({ sessions: rows, errors: sources.errors }),
-      exitCode: allFailed ? ERROR : SUCCESS,
-    };
-  }
-
-  return {
-    output: formatTable(rows, sources.errors),
-    exitCode: allFailed ? ERROR : SUCCESS,
-  };
+  const output = options.json
+    ? formatJson({ sessions: rows, errors: sources.errors })
+    : formatTable(rows, sources.errors);
+  return { output, exitCode: blind ? ERROR : SUCCESS };
 }
