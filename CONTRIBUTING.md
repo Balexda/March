@@ -23,6 +23,7 @@ March's source is organized by product subsystem rather than by generic layers:
 | `src/spawn/` | Spawn execution pipeline: snapshots, image builds, backend entrypoints, and container launch. |
 | `src/hatchery/` | Container/profile policy and the spawn orchestrator (`runHatcherySpawn`). `src/hatchery/service/` is the containerized Fastify service (`march hatchery serve`) plus the thin client `march hatchery spawn` uses. |
 | `src/brood/` | Spawn lifecycle state: worktrees, branches, records, and cleanup ownership. |
+| `src/sessions/` | The `march sessions` (alias `march ps`) unified in-flight view. Pure gather → join → format layers that join Brood + Castra + Herald purely over their HTTP APIs (no source/compose/filesystem reads at runtime), so it works from a plain `npm i -g march`. The divergence/join helpers are factored to be shared with `march doctor`. |
 | `src/herald/` | Deterministic event bus code. Add mini-herald event/log/daemon modules here when that feature lands. |
 | `src/legate/` | Legate conductor setup, template rendering, bridge checks, and related orchestration bootstrap. |
 | `src/observability/` | OpenTelemetry bootstrap (traces, metrics, logs), deterministic trace/span id helpers, spawn metrics (`spawn-metrics.ts`), Hatchery service metrics (`hatchery-metrics.ts`), the pino+OTLP logger (`logger.ts`), the dispatch-trace helper, and the in-sandbox emitter. Env-gated (`MARCH_OTEL=1`), no-op when off. |
@@ -134,6 +135,22 @@ telemetry), or `--drain` to tear down in-flight Brood sessions (spawn containers
 worktrees, branches, stewards) before stopping the services. The rest of the
 stack-lifecycle surface (`march upgrade` / `march status` / `march init`) is
 tracked as follow-ups.
+
+**`march sessions`** (alias **`march ps`**) is the single-command answer to "what
+is March running right now?". It joins Brood's session registry, Castra's live
+sessions, and Herald's folded system state into one table — one row per in-flight
+unit of work (spawn / steward / slice) with slice id, profile, state, PR, branch,
+container id, Castra session id, Brood status, and age. It talks **only** to the
+service HTTP APIs (`MARCH_BROOD_URL` / `CASTRA_URL` / `MARCH_HERALD_URL`, falling
+back to the deterministic localhost ports), so it needs no source checkout.
+Cross-service divergence is flagged inline: a live Castra session untracked in
+Brood is a `leak`, a Brood-tracked record with no live session is an `orphan`, and
+a fold slice that expects a live session but has neither is `stale` — the
+ghost-session-pins-the-cap incident class made visible at a glance. Filter with
+`--profile <p>`, `--state <state>`, or `--orphans` (divergent rows only), and add
+`--json` for machine consumption. Each source is best-effort: a service that is
+down is footnoted (`! castra (smithy) unavailable: …`) and the rest of the view
+still renders, so a partial view is never silently mistaken for "all clear".
 
 **Keep telemetry in lock-step with the dispatch machinery.** When you add a loop
 lifecycle action or a new dispatch path, emit a span for it; when you add a

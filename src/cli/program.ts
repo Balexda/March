@@ -333,6 +333,36 @@ program
     process.exitCode = SUCCESS;
   });
 
+program
+  .command("sessions")
+  .alias("ps")
+  .description(
+    "Unified in-flight view across Brood + Castra + Herald: every spawn/steward/slice in one table, with cross-service divergence (leak/orphan/stale) flagged inline. Resolves services via MARCH_BROOD_URL / CASTRA_URL / MARCH_HERALD_URL.",
+  )
+  .option("--profile <profile>", "Show only this profile's units of work")
+  .option(
+    "--state <state>",
+    "Show only this state: dispatched | in-steward | waiting-on-approval | waiting-for-merge | errored | archived | unknown",
+  )
+  .option("--orphans", "Show only divergent rows (Castra-only / Brood-only / fold-only)")
+  .option("--json", "Print the joined view as JSON")
+  .action(async (opts: { profile?: string; state?: string; orphans?: boolean; json?: boolean }) => {
+    commandHandled = true;
+    const { runSessions } = await import("../sessions/command.js");
+    const result = await runSessions({
+      profile: opts.profile?.trim() || undefined,
+      state: opts.state?.trim() || undefined,
+      orphans: opts.orphans,
+      json: opts.json,
+    });
+    if (result.exitCode === SUCCESS) {
+      console.log(result.output);
+    } else {
+      process.stderr.write(result.output + "\n");
+    }
+    process.exitCode = result.exitCode;
+  });
+
 const quarantine = program
   .command("quarantine")
   .description("Route failing tests into the repository quarantine area");
