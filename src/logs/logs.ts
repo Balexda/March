@@ -82,6 +82,12 @@ export interface LogsOptions {
 export interface LogsResult {
   /** Per-service exit codes (null = killed by signal, e.g. Ctrl-C). */
   readonly services: { readonly name: string; readonly exitCode: number | null }[];
+  /**
+   * True when the operator interrupted a `--follow` stream (Ctrl-C). The child
+   * `docker logs -f` processes then exit non-zero, but that's the *expected*
+   * way to stop a tail — callers should treat it as a clean exit, not failure.
+   */
+  readonly interrupted: boolean;
 }
 
 /** ANSI colors cycled across service tags so the interleaved view is legible. */
@@ -183,7 +189,9 @@ export async function runLogs(opts: LogsOptions = {}): Promise<LogsResult> {
       }),
   );
 
+  let interrupted = false;
   const onSigint = (): void => {
+    interrupted = true;
     for (const child of children) child.kill("SIGINT");
   };
   if (opts.follow) process.once("SIGINT", onSigint);
@@ -200,5 +208,5 @@ export async function runLogs(opts: LogsOptions = {}): Promise<LogsResult> {
       services.findIndex((s) => s.name === a.name) -
       services.findIndex((s) => s.name === b.name),
   );
-  return { services: results };
+  return { services: results, interrupted };
 }

@@ -407,13 +407,16 @@ program
           tail: opts.tail,
           errors: opts.errors,
         });
-        // Exit non-zero only when every requested service failed to produce a
-        // stream (e.g. docker missing, or all containers absent) — a partial
-        // stack with some services down is normal for `march logs`.
+        // Ctrl-C of a `--follow` stream is the normal way to stop a tail, even
+        // though the killed `docker logs -f` children exit non-zero — treat it
+        // as a clean exit. Otherwise, exit non-zero only when *every* requested
+        // service failed to produce a stream (e.g. docker missing, or all
+        // containers absent); a partial stack with some services down is normal
+        // for `march logs`.
         const allFailed = result.services.every(
           (s) => s.exitCode !== null && s.exitCode !== 0,
         );
-        process.exitCode = allFailed ? ERROR : SUCCESS;
+        process.exitCode = result.interrupted || !allFailed ? SUCCESS : ERROR;
       } catch (err) {
         process.stderr.write(
           (err instanceof Error ? err.message : String(err)) + "\n",

@@ -228,5 +228,56 @@ describe("runLogs — follow + SIGINT", () => {
 
     expect(child.killed).toBe("SIGINT");
     expect(result.services).toEqual([{ name: "legate", exitCode: null }]);
+    // The operator initiated the teardown, so the run is flagged interrupted —
+    // callers treat that as a clean exit even though real `docker logs -f`
+    // children exit non-zero when killed.
+    expect(result.interrupted).toBe(true);
+  });
+
+  it("flags interrupted true even when killed children report non-zero exit", async () => {
+    const children = new Map<string, FakeChild>();
+    // A child that, on kill, reports a non-zero code (like real docker logs -f).
+    class NonZeroOnKill extends FakeChild {
+      kill(signal?: NodeJS.Signals): void {
+        this.killed = signal;
+        this.emit("exit", 1);
+      }
+    }
+    const child = new NonZeroOnKill();
+    children.set("march-legate", child);
+    const { spawn } = fakeSpawner(children);
+
+    const promise = runLogs({
+      service: "legate",
+      follow: true,
+      spawn,
+      write: () => {},
+      color: false,
+    });
+    process.emit("SIGINT");
+    const result = await promise;
+
+    expect(result.interrupted).toBe(true);
+    expect(result.services).toEqual([{ name: "legate", exitCode: 1 }]);
+  });
+});
+
+describe("runLogs — non-follow result", () => {
+  it("reports interrupted false for a normal one-shot run", async () => {
+    const children = new Map<string, FakeChild>();
+    const child = new FakeChild();
+    children.set("march-herald", child);
+    const { spawn } = fakeSpawner(children);
+
+    const promise = runLogs({
+      service: "herald",
+      spawn,
+      write: () => {},
+      color: false,
+    });
+    child.feed(["line"], 0);
+    const result = await promise;
+
+    expect(result.interrupted).toBe(false);
   });
 });
