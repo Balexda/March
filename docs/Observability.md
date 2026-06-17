@@ -485,7 +485,11 @@ type. Its alerts live in
 [`docker/grafana/provisioning/alerting/march-agent-status-alerts.yaml`](../docker/grafana/provisioning/alerting/march-agent-status-alerts.yaml)
 — `march-agent-codex-auth-down` (the actionable "re-authenticate codex" alarm)
 and `march-agent-all-failing` — silent like the rest (record state, no
-notification), under the global `team: march` mute.
+notification), under the global `team: march` mute. The auth-down alarm fires on
+the auth-failure **rate** OR `march_legate_spawn_breaker_open`: once the breaker
+trips it pauses dispatch, so the failure rate falls to ~0 while the agent is
+still down — the breaker gauge is the durable steady-state signal that keeps both
+the alarm and the dashboard's UP/DOWN tile lit for the whole outage.
 
 All dashboards land in the same **March** folder
 (the provider loads every JSON under `/etc/march/dashboards`, so dropping the file

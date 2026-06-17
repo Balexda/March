@@ -32,7 +32,7 @@
     },
     {
       "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "description": "UP unless the agent is failing authentication (codex 'refresh token already used') in the last 10m. DOWN ⇒ re-authenticate the agent (codex login), then recover the backlog.",
+      "description": "UP unless the agent is failing authentication (codex 'refresh token already used') in the last 10m, OR the legate circuit-breaker has paused dispatch for a hard-down agent. DOWN ⇒ re-authenticate the agent (codex login), then recover the backlog.",
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "thresholds" },
@@ -59,7 +59,7 @@
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
           "editorMode": "code",
-          "expr": "(sum(rate(march_spawn_agent_failures_total{reason=\"auth\", backend=~\"$backend\", profile=~\"$profile\"}[10m])) > bool 0)",
+          "expr": "clamp_max(max(march_legate_spawn_breaker_open) + (sum(rate(march_spawn_agent_failures_total{reason=\"auth\", backend=~\"$backend\", profile=~\"$profile\"}[10m])) or vector(0)), 1)",
           "legendFormat": "agent",
           "range": true,
           "refId": "A"

@@ -18,9 +18,15 @@ groups:
     interval: 1m
     rules:
       # ---- Codex / agent authentication down ----
-      # Any sustained auth-failure rate means the agent OAuth token is dead
-      # ("refresh token already used"); spawns fail the instant they start. The
-      # fix is an operator action, named in the annotation.
+      # The agent OAuth token is dead ("refresh token already used") and spawns
+      # fail the instant they start. Two signals are OR'd because they are
+      # complementary in time: the auth-failure RATE catches the initial burst,
+      # but once the legate circuit-breaker trips it PAUSES dispatch — so the
+      # failure rate falls to ~0 while the agent is still down. The breaker's
+      # `march_legate_spawn_breaker_open` gauge is the durable steady-state
+      # "agent is down" signal. Firing on either keeps the alarm up for the whole
+      # outage. `or vector(0)` defaults the (absent-when-quiet) rate series to 0
+      # so the breaker term alone can still fire.
       - uid: march-agent-codex-auth-down
         title: "AGENT: codex authentication down (re-auth required)"
         condition: C
@@ -32,9 +38,9 @@ groups:
           summary: >-
             Codex/agent authentication is FAILING ("refresh token already
             used") — spawns die the instant they start and the profile stalls
-            with everything escalating. The legate circuit-breaker pauses fresh
-            dispatch automatically. ACTION: re-authenticate the agent on the
-            host (`codex login`), then clear the backlog
+            with everything escalating. The legate circuit-breaker has paused
+            fresh dispatch (breaker_open=1). ACTION: re-authenticate the agent on
+            the host (`codex login`), then clear the backlog
             (march.debug `mass-recover.sh --yes`).
         data:
           - refId: A
@@ -44,7 +50,7 @@ groups:
               refId: A
               instant: true
               editorMode: code
-              expr: sum(rate(march_spawn_agent_failures_total{reason="auth"}[5m]))
+              expr: max(march_legate_spawn_breaker_open) + (sum(rate(march_spawn_agent_failures_total{reason="auth"}[5m])) or vector(0))
           - refId: C
             datasourceUid: __expr__
             model: { refId: C, type: threshold, expression: A, conditions: [{ evaluator: { type: gt, params: [0] } }] }
