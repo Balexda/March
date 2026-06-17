@@ -119,10 +119,13 @@ describe("stackDown — compose env", () => {
 });
 
 describe("stackDown — drain", () => {
-  it("does not drain by default", async () => {
+  it("does not drain by default, and omits the drain key entirely", async () => {
     const drainSessions = vi.fn();
     const result = await stackDown({ run: () => {}, locate: locateAll, drainSessions });
     expect(drainSessions).not.toHaveBeenCalled();
+    // The key is absent (not just undefined) so `'drain' in result` is false,
+    // matching the documented contract.
+    expect("drain" in result).toBe(false);
     expect(result.drain).toBeUndefined();
   });
 

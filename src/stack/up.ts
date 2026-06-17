@@ -3,7 +3,12 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { CASTRA_TOKEN_ENV } from "../castra/config.js";
-import { runCommand, imageExists, type CommandRunner } from "./exec.js";
+import {
+  runCommand,
+  imageExists,
+  describeExecError,
+  type CommandRunner,
+} from "./exec.js";
 import { MARCH_SERVICES, locateCompose, type MarchService } from "./services.js";
 
 /**
@@ -152,7 +157,7 @@ function upService(
     return {
       service: svc.name,
       outcome: "failed",
-      detail: err instanceof Error ? err.message : String(err),
+      detail: describeExecError(err),
     };
   }
 }

@@ -292,9 +292,11 @@ program
     try {
       const result = await stackDown({ volumes: opts.volumes, drain: opts.drain });
 
+      let failed = false;
       if (result.drain) {
         const { tornDown, failures, note } = result.drain;
         if (note) {
+          // Brood unreachable — best-effort, non-fatal skip.
           process.stderr.write(`drain: ${note}\n`);
         } else {
           console.log(`drain: tore down ${tornDown.length} session(s)`);
@@ -302,9 +304,11 @@ program
         for (const f of failures) {
           process.stderr.write(`drain: failed ${f.id} (${f.detail})\n`);
         }
+        // A requested drain that left live resources behind is a failure, so
+        // automation that asked for --drain doesn't read it as a clean off.
+        if (failures.length > 0) failed = true;
       }
 
-      let failed = false;
       for (const svc of result.services) {
         console.log(
           `${svc.service}: ${svc.outcome}${svc.detail ? ` (${svc.detail})` : ""}`,
@@ -312,7 +316,7 @@ program
         if (svc.outcome === "failed") failed = true;
       }
       // A skipped service (compose file not found) is not a hard failure; a
-      // failed `docker compose down` is.
+      // failed `docker compose down` or an incomplete requested drain is.
       process.exitCode = failed ? ERROR : SUCCESS;
     } catch (err) {
       process.stderr.write((err instanceof Error ? err.message : String(err)) + "\n");

@@ -18,6 +18,21 @@ export const runCommand: CommandRunner = (file, args, env) => {
   execFileSync(file, args, { stdio: ["ignore", "ignore", "pipe"], env });
 };
 
+/**
+ * Extract the most actionable text from a failed `execFileSync` error. The
+ * underlying Docker/Compose diagnostic lands on the child's stderr (captured
+ * because stderr is piped), so prefer it over the generic `Command failed: …`
+ * message. Falls back to the message when stderr is empty.
+ */
+export function describeExecError(err: unknown): string {
+  if (err && typeof err === "object" && "stderr" in err) {
+    const stderr = (err as { stderr?: Buffer | string | null }).stderr;
+    const text = stderr ? stderr.toString().trim() : "";
+    if (text) return text;
+  }
+  return err instanceof Error ? err.message : String(err);
+}
+
 /** True when a local Docker image exists (`docker image inspect` exits 0). */
 export function imageExists(image: string): boolean {
   try {

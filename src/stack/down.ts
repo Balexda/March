@@ -1,5 +1,5 @@
 import { CASTRA_TOKEN_ENV } from "../castra/config.js";
-import { runCommand, type CommandRunner } from "./exec.js";
+import { runCommand, describeExecError, type CommandRunner } from "./exec.js";
 import { MARCH_SERVICES, locateCompose, type MarchService } from "./services.js";
 
 /**
@@ -104,7 +104,7 @@ function downService(
     return {
       service: svc.name,
       outcome: "failed",
-      detail: err instanceof Error ? err.message : String(err),
+      detail: describeExecError(err),
     };
   }
 }
@@ -178,5 +178,8 @@ export async function stackDown(
     );
   }
 
-  return { services, drain };
+  // Only attach `drain` when it was requested, so the result shape matches the
+  // documented "present only when --drain was requested" contract (callers may
+  // test `'drain' in result`).
+  return opts.drain ? { services, drain } : { services };
 }
