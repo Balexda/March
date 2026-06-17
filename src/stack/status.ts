@@ -76,7 +76,7 @@ export interface StatusOptions {
   readonly imagePresent?: (image: string) => boolean;
   /** Injected shared-token reader (defaults to {@link readSharedToken}). */
   readonly readToken?: () => string | null;
-  /** Per-probe HTTP timeout in ms (default 2000). */
+  /** Per-probe HTTP timeout in ms (default 3000). */
   readonly timeoutMs?: number;
   /** Base env (defaults to `process.env`). */
   readonly env?: NodeJS.ProcessEnv;
@@ -150,15 +150,17 @@ export async function fetchProbe(
 async function statusForService(
   svc: MarchService,
   deps: {
-    containerState: (name: string) => ContainerState;
     probeHttp: (url: string, token?: string) => Promise<HttpProbeResult>;
-    imagePresent: (image: string) => boolean;
     token: string | null;
   },
+  // Container state + image presence are inspected synchronously up front (see
+  // stackStatus) and passed in, so this function does ONLY async HTTP work —
+  // keeping the concurrent probe phase free of event-loop-blocking sync calls.
+  container: ContainerState,
+  imagePresent: boolean | undefined,
 ): Promise<ServiceStatus> {
   const issues: string[] = [];
 
-  const container = deps.containerState(containerName(svc.name));
   if (container !== "running") {
     issues.push(
       container === "absent"
@@ -167,10 +169,8 @@ async function statusForService(
     );
   }
 
-  let imagePresent: boolean | undefined;
-  if (svc.image) {
-    imagePresent = deps.imagePresent(svc.image);
-    if (!imagePresent) issues.push(`image ${svc.image} is not built`);
+  if (imagePresent === false) {
+    issues.push(`image ${svc.image} is not built`);
   }
 
   const health = await deps.probeHttp(
@@ -180,11 +180,18 @@ async function statusForService(
   if (!health.reachable) {
     reachable = "unreachable";
     issues.push(`not reachable on port ${svc.port}`);
-  } else if (health.status !== undefined && health.status >= 500) {
-    reachable = "error";
-    issues.push(`health check returned HTTP ${health.status}`);
-  } else {
+  } else if (health.status !== undefined && health.status >= 200 && health.status < 300) {
     reachable = "ok";
+  } else {
+    // The port answered, but not with a healthy 2xx from the service's health
+    // endpoint. This catches a service that is up-but-erroring (5xx) AND the
+    // case where an unrelated process has taken the port (e.g. a 404 from a
+    // foreign server, or the container failing to publish its port) — both mean
+    // the March service is not actually reachable where clients connect.
+    reachable = "error";
+    issues.push(
+      `port ${svc.port} answered HTTP ${health.status ?? "?"} on ${svc.healthPath} (not a healthy 2xx — wrong service or unhealthy)`,
+    );
   }
 
   // Token wiring: only meaningful for a token-gated service that is reachable.
@@ -246,20 +253,30 @@ export async function stackStatus(
   const env = opts.env ?? process.env;
   const containerState = opts.containerState ?? dockerContainerState;
   const imagePresent = opts.imagePresent ?? imageExists;
-  const timeoutMs = opts.timeoutMs ?? 2000;
+  const timeoutMs = opts.timeoutMs ?? 3000;
   const probeHttp =
     opts.probeHttp ?? ((url, token) => fetchProbe(url, token, timeoutMs));
   const token = (opts.readToken ?? (() => readSharedToken(env)))();
 
-  // Probe every service concurrently — they are independent loopback checks.
+  // Phase 1: inspect container + image state synchronously, up front. The
+  // default probes shell out via `execFileSync` ("docker inspect"), which blocks
+  // the event loop for a few hundred ms each. Doing them here — BEFORE arming any
+  // HTTP probe — keeps that blocking out of the concurrent probe phase; otherwise
+  // the sync calls interleaved between probes would delay the per-probe abort
+  // timers past their deadline and spuriously fail the first services (the
+  // event-loop-starvation bug found testing against the live stack).
+  const inspected = MARCH_SERVICES.map((svc) => ({
+    svc,
+    container: containerState(containerName(svc.name)),
+    imagePresent: svc.image ? imagePresent(svc.image) : undefined,
+  }));
+
+  // Phase 2: probe every service over HTTP concurrently — independent loopback
+  // checks with no synchronous work interleaved, so all abort timers are armed
+  // in one tight burst.
   const services = await Promise.all(
-    MARCH_SERVICES.map((svc) =>
-      statusForService(svc, {
-        containerState,
-        probeHttp,
-        imagePresent,
-        token,
-      }),
+    inspected.map((i) =>
+      statusForService(i.svc, { probeHttp, token }, i.container, i.imagePresent),
     ),
   );
 

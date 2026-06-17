@@ -52,6 +52,35 @@ describe("stackStatus — healthy stack", () => {
     const hatchery = status.services.find((s) => s.service === "hatchery");
     expect(hatchery?.token).toBe("n/a");
   });
+
+  // Regression: the default container probe shells out synchronously
+  // (`execFileSync "docker inspect"`). When that ran interleaved with the
+  // concurrent HTTP probes it blocked the event loop and starved the per-probe
+  // abort timers, spuriously failing the first services against a live stack.
+  // All synchronous inspection must therefore complete BEFORE any HTTP probe is
+  // started.
+  it("inspects every container before starting any HTTP probe", async () => {
+    const order: string[] = [];
+    await stackStatus(
+      healthyOptions({
+        containerState: (name) => {
+          order.push(`inspect:${name}`);
+          return "running";
+        },
+        probeHttp: async (url) => {
+          order.push(`probe:${url}`);
+          return { reachable: true, status: 200 };
+        },
+      }),
+    );
+    const firstProbe = order.findIndex((e) => e.startsWith("probe:"));
+    const inspections = order.filter((e) => e.startsWith("inspect:"));
+    expect(inspections).toHaveLength(MARCH_SERVICES.length);
+    // Every inspection appears before the first probe.
+    expect(order.slice(0, firstProbe).every((e) => e.startsWith("inspect:"))).toBe(
+      true,
+    );
+  });
 });
 
 describe("stackStatus — container state", () => {
@@ -110,6 +139,25 @@ describe("stackStatus — reachability", () => {
     const hatchery = status.services.find((s) => s.service === "hatchery");
     expect(hatchery?.reachable).toBe("error");
     expect(hatchery?.healthy).toBe(false);
+  });
+
+  // Regression: a non-hatchery process squatting on the loopback port answers
+  // 404 (or the container failed to publish its port). Found against the live
+  // stack — a foreign HTTP/1.0 server on :8080 must NOT be reported "ok".
+  it("treats a non-2xx (e.g. 404 from a foreign server) as an error, not ok", async () => {
+    const status = await stackStatus(
+      healthyOptions({
+        probeHttp: async (url): Promise<HttpProbeResult> => {
+          if (url.includes(":8080")) return { reachable: true, status: 404 };
+          return { reachable: true, status: 200 };
+        },
+      }),
+    );
+    const hatchery = status.services.find((s) => s.service === "hatchery");
+    expect(hatchery?.reachable).toBe("error");
+    expect(hatchery?.healthy).toBe(false);
+    expect(hatchery?.issues.some((i) => i.includes("404"))).toBe(true);
+    expect(status.healthy).toBe(false);
   });
 });
 
