@@ -12,6 +12,12 @@ export interface MarchService {
   readonly name: string;
   /** Basename of the compose file under `docker/`. */
   readonly compose: string;
+  /**
+   * The local image `march up` must find before it will start the service.
+   * Undefined for services whose image is pulled from a remote registry by
+   * compose (e.g. otel-lgtm) rather than built locally.
+   */
+  readonly image?: string;
 }
 
 /**
@@ -26,11 +32,11 @@ export interface MarchService {
  */
 export const MARCH_SERVICES: readonly MarchService[] = [
   { name: "otel-lgtm", compose: "otel-lgtm.docker-compose.yml" },
-  { name: "castra", compose: "castra.docker-compose.yml" },
-  { name: "hatchery", compose: "hatchery.docker-compose.yml" },
-  { name: "brood", compose: "brood.docker-compose.yml" },
-  { name: "herald", compose: "herald.docker-compose.yml" },
-  { name: "legate", compose: "legate.docker-compose.yml" },
+  { name: "castra", compose: "castra.docker-compose.yml", image: "march-castra:latest" },
+  { name: "hatchery", compose: "hatchery.docker-compose.yml", image: "march-hatchery:latest" },
+  { name: "brood", compose: "brood.docker-compose.yml", image: "march-brood:latest" },
+  { name: "herald", compose: "herald.docker-compose.yml", image: "march-herald:latest" },
+  { name: "legate", compose: "legate.docker-compose.yml", image: "march-legate:latest" },
 ];
 
 /**

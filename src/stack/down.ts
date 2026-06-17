@@ -1,5 +1,5 @@
-import { execFileSync } from "node:child_process";
 import { CASTRA_TOKEN_ENV } from "../castra/config.js";
+import { runCommand, type CommandRunner } from "./exec.js";
 import { MARCH_SERVICES, locateCompose, type MarchService } from "./services.js";
 
 /**
@@ -59,13 +59,6 @@ export interface StackDownResult {
   readonly drain?: DrainResult;
 }
 
-/** Runs a command, throwing on non-zero exit (the `execFileSync` contract). */
-export type CommandRunner = (
-  file: string,
-  args: string[],
-  env?: NodeJS.ProcessEnv,
-) => void;
-
 export interface StackDownOptions {
   /** Also remove named volumes (`docker compose down --volumes`). */
   readonly volumes?: boolean;
@@ -80,10 +73,6 @@ export interface StackDownOptions {
   /** Base env for compose interpolation (defaults to `process.env`). */
   readonly env?: NodeJS.ProcessEnv;
 }
-
-const defaultRun: CommandRunner = (file, args, env) => {
-  execFileSync(file, args, { stdio: ["ignore", "ignore", "pipe"], env });
-};
 
 function downService(
   svc: MarchService,
@@ -171,7 +160,7 @@ export async function drainBroodSessions(): Promise<DrainResult> {
 export async function stackDown(
   opts: StackDownOptions = {},
 ): Promise<StackDownResult> {
-  const run = opts.run ?? defaultRun;
+  const run = opts.run ?? runCommand;
   const locate = opts.locate ?? ((b: string) => locateCompose(b));
   const env = resolveComposeEnv(opts.env ?? process.env);
 

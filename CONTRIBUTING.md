@@ -115,15 +115,24 @@ path** so worktree paths resolve, the tmux socket, and the agent-deck binary) �
 review/override the host-specific vars at the top of
 `docker/hatchery.docker-compose.yml`.
 
-To turn the whole stack off and recover the resources it holds, run **`march
-down`**: it stops the service containers in reverse dependency order (legate →
-herald → brood → hatchery → castra → otel-lgtm). State is preserved by default
-(named volumes, worktrees, branches, in-flight sessions), so a later bring-up
-resumes where it left off. Pass `--volumes` to also remove the named volumes
-(registries, Herald's event log, telemetry), or `--drain` to tear down in-flight
-Brood sessions (spawn containers, worktrees, branches, stewards) before stopping
-the services. The matching single-command bring-up (`march up`) and the rest of
-the stack-lifecycle surface (`march upgrade` / `march status` / `march init`) are
+Once the images are built (see below), **`march up`** brings the whole stack up
+with one command: it resolves a shared `CASTRA_API_TOKEN` (generated and
+persisted to `~/.march/castra-token` on first run, reused thereafter), then
+starts the services in dependency order (otel-lgtm → castra → hatchery → brood →
+herald → legate). It never builds images — if a locally-built `march-*` image is
+missing it aborts before starting anything and points you at `march upgrade`
+(until that lands, use the `npm run build:<service>-image` scripts). Re-running
+is idempotent.
+
+To turn the stack off and recover the resources it holds, run **`march down`**:
+it stops the service containers in reverse dependency order (legate → herald →
+brood → hatchery → castra → otel-lgtm) and works even with `CASTRA_API_TOKEN`
+unset. State is preserved by default (named volumes, worktrees, branches,
+in-flight sessions), so a later bring-up resumes where it left off. Pass
+`--volumes` to also remove the named volumes (registries, Herald's event log,
+telemetry), or `--drain` to tear down in-flight Brood sessions (spawn containers,
+worktrees, branches, stewards) before stopping the services. The rest of the
+stack-lifecycle surface (`march upgrade` / `march status` / `march init`) is
 tracked as follow-ups.
 
 **Keep telemetry in lock-step with the dispatch machinery.** When you add a loop
