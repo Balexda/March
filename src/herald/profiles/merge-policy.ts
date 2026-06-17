@@ -13,6 +13,12 @@
  * task types. The CI/conflict/thread requirements are *not* expressed here — they
  * stay mandatory and are enforced by the legate's all-clear precondition.
  *
+ * On top of a profile's own policy, a built-in {@link BUILTIN_BASE_POLICY}
+ * relaxes the `cut` approval gate for *every* profile (issue #298): cut's relax
+ * used to be a per-profile opt-in, and every new profile silently re-introduced a
+ * backlog of stranded cut PRs until an operator remembered to set it. Making it
+ * the default removes that footgun; a profile can still re-tighten cut explicitly.
+ *
  * This module is pure (no I/O) so both Herald (validation on write) and the
  * legate service (resolution at merge time) can import it.
  */
@@ -28,8 +34,8 @@ export interface MergeRequirements {
   readonly changesRequested: boolean;
 }
 
-/** All human-review gates required — the back-compat default for a profile with
- *  no policy, and the base every override layers on top of. */
+/** All human-review gates required — the base every layer (the built-in base
+ *  policy and a profile's own policy) layers on top of. */
 export const DEFAULT_MERGE_REQUIREMENTS: MergeRequirements = {
   approval: true,
   changesRequested: true,
@@ -53,20 +59,51 @@ export interface MergePolicy {
 }
 
 /**
- * Resolve the effective requirements for a task type:
- * `DEFAULT_MERGE_REQUIREMENTS` < `policy.defaults` < `policy.byTaskType[taskType]`,
- * last layer wins per field. An undefined policy or unknown task type yields the
- * all-required default — both fail safe toward *more* gating.
+ * The built-in base policy applied beneath every profile's own policy (issue
+ * #298). This is how the `cut` approval-relax becomes the default for ALL
+ * profiles — present and future — instead of a per-profile opt-in that every new
+ * profile forgets. Only the *approval* gate is dropped for `cut`;
+ * `changesRequested` (and the CI/conflict/thread preconditions the legate's
+ * all-clear gate enforces) stay mandatory. Because a profile's own policy layers
+ * ON TOP of this, a profile can still re-require approval for cut explicitly
+ * (`byTaskType.cut.approval = true`).
+ *
+ * To make another AI-only planning verb (`mark`, `render`) auto-merge by default,
+ * add it here — scope intentionally limited to the confirmed `cut` case for now.
+ */
+export const BUILTIN_BASE_POLICY: MergePolicy = {
+  byTaskType: { cut: { approval: false } },
+};
+
+/**
+ * Resolve the effective requirements for a task type, layering last-wins per
+ * field across two tiers (general → specific):
+ *
+ *   1. defaults tier:    `DEFAULT_MERGE_REQUIREMENTS` < built-in `defaults`
+ *                        < `policy.defaults`
+ *   2. task-type tier:   built-in `byTaskType[taskType]` < `policy.byTaskType[taskType]`
+ *
+ * The task-type tier is more specific, so it wins over the defaults tier — and
+ * within each tier the profile's own policy wins over the built-in base. So an
+ * undefined/empty policy still gets the built-in `cut` relax, while an explicit
+ * per-profile policy can override it (re-require cut approval). An unknown task
+ * type touches no `byTaskType` layer and falls through to the defaults tier.
  */
 export function resolveMergeRequirements(
   policy: MergePolicy | undefined,
   taskType: string | undefined,
 ): MergeRequirements {
   const effective: MergeRequirements = { ...DEFAULT_MERGE_REQUIREMENTS };
-  if (!policy) return effective;
-  Object.assign(effective, policy.defaults ?? {});
-  const override = taskType ? policy.byTaskType?.[taskType] : undefined;
-  if (override) Object.assign(effective, override);
+  // Defaults tier: built-in base, then the profile's own profile-wide defaults.
+  Object.assign(effective, BUILTIN_BASE_POLICY.defaults ?? {});
+  Object.assign(effective, policy?.defaults ?? {});
+  // Task-type tier (more specific, applied last): built-in base for this verb,
+  // then the profile's own per-verb override — so an explicit profile policy
+  // always wins, even over the built-in cut relax.
+  if (taskType) {
+    Object.assign(effective, BUILTIN_BASE_POLICY.byTaskType?.[taskType] ?? {});
+    Object.assign(effective, policy?.byTaskType?.[taskType] ?? {});
+  }
   return effective;
 }
 
