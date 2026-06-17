@@ -128,6 +128,21 @@ describe("march CLI", () => {
     expect(result.stderr + result.stdout).toMatch(/missing required argument|usage/i);
   });
 
+  it("march init <profile> --no-setup skips the stack bring-up (render-only path)", () => {
+    // --no-setup is render-only: it must NOT preflight images or require Docker,
+    // so the unconditional stack bring-up is skipped and the command proceeds
+    // straight to repo detection (which fails here — tmp dir is not a git repo).
+    const tmpDir = makeTmpDir();
+    const result = runWithEnv(
+      ["init", "demo", "--no-setup"],
+      { ...process.env },
+      { cwd: tmpDir },
+    );
+    expect(result.stderr).not.toContain("images are not built");
+    expect(result.stderr).not.toContain("Docker not found");
+    expect(result.stderr).toContain("from inside a git repository");
+  });
+
   it("march with no args exits 2 with usage", () => {
     const result = run([]);
     expect(result.exitCode).toBe(2);

@@ -23,6 +23,7 @@ import {
   checkBridgeRequirements,
   initLegate,
   LegateError,
+  type LegateInitResult,
 } from "../legate/init.js";
 import type { MergePolicy } from "../herald/profiles/merge-policy.js";
 import { DEFAULT_MANAGER_GROUP } from "../hatchery/spawn-handoff.js";
@@ -153,9 +154,19 @@ function resolveHatcheryBackendSelection(input: {
  * Shared profile-onboarding flow behind both `march init <profile>` and the
  * deprecated `march legate init`. Resolves the repo root (an explicit `repoArg`
  * when given, else the cwd's git toplevel), runs the agent-deck / docker / bridge
- * pre-flight, then renders + sets up the legate conductor, registers the profile
- * with Herald, and ensures the shared legate service. Writes user-facing output
- * and sets `process.exitCode`; never throws for the expected failure modes.
+ * pre-flight, then renders the legate conductor template.
+ *
+ * What happens next depends on the skip flags, mirroring `initLegate`'s gating:
+ * with the defaults it also runs `agent-deck conductor setup`, registers the
+ * profile with Herald, and ensures the shared legate service; `--no-setup`
+ * renders the template only (no conductor, no registration); `--no-loop` sets up
+ * the conductor but skips the loop deployment **and** the Herald registration /
+ * service-ensure step. Writes user-facing output and sets `process.exitCode`;
+ * never throws for the expected failure modes.
+ *
+ * Returns the {@link LegateInitResult} on success (so the caller can inspect
+ * whether registration actually happened), or `null` when an expected pre-flight
+ * or setup failure short-circuited the flow (with `process.exitCode` already set).
  *
  * `invokedAs` is the command the operator typed, so pre-flight errors point them
  * back at the right command.
@@ -176,7 +187,7 @@ async function runLegateOnboarding(input: {
   loop?: boolean;
   bridgeCheck?: boolean;
   invokedAs: string;
-}): Promise<void> {
+}): Promise<LegateInitResult | null> {
   const loopDisabled = input.loop === false || input.processor === false;
 
   // 1. Resolve the repo root. Legate is per-repo, so this is mandatory. Three
@@ -189,14 +200,14 @@ async function runLegateOnboarding(input: {
       "Cannot verify git is installed: path-search utility unavailable.\n",
     );
     process.exitCode = ERROR;
-    return;
+    return null;
   }
   if (!isOnPath("git")) {
     process.stderr.write(
       "git not found on PATH — required to detect the repository root.\n",
     );
     process.exitCode = ERROR;
-    return;
+    return null;
   }
   const repoCwd = input.repoArg ? input.repoArg : process.cwd();
   let repoRoot: string;
@@ -222,7 +233,7 @@ async function runLegateOnboarding(input: {
       );
     }
     process.exitCode = ERROR;
-    return;
+    return null;
   }
 
   // 2. Verify agent-deck is on PATH when we'll actually invoke it.
@@ -236,14 +247,14 @@ async function runLegateOnboarding(input: {
         "Cannot verify Docker is installed: path-search utility unavailable.\n",
       );
       process.exitCode = ERROR;
-      return;
+      return null;
     }
     if (!isOnPath("docker")) {
       process.stderr.write(
         "Docker not found on PATH — required to launch the Legate loop service container (pass --no-loop or --no-setup to skip).\n",
       );
       process.exitCode = ERROR;
-      return;
+      return null;
     }
   }
   if (willRunSetup) {
@@ -252,14 +263,14 @@ async function runLegateOnboarding(input: {
         "Cannot verify agent-deck is installed: path-search utility unavailable.\n",
       );
       process.exitCode = ERROR;
-      return;
+      return null;
     }
     if (!isOnPath("agent-deck")) {
       process.stderr.write(
         "agent-deck not found on PATH — install it from https://github.com/asheshgoplani/agent-deck or pass --no-setup to render the template only.\n",
       );
       process.exitCode = ERROR;
-      return;
+      return null;
     }
 
     // 3. Bridge pre-flight: confirm python3 is recent enough to actually run
@@ -269,7 +280,7 @@ async function runLegateOnboarding(input: {
       if (!check.ok) {
         process.stderr.write(check.message + "\n");
         process.exitCode = ERROR;
-        return;
+        return null;
       }
     }
   }
@@ -293,11 +304,12 @@ async function runLegateOnboarding(input: {
     });
     console.log(result.summary);
     process.exitCode = SUCCESS;
+    return result;
   } catch (err) {
     if (err instanceof LegateError) {
       console.error(err.message);
       process.exitCode = ERROR;
-      return;
+      return null;
     }
     throw err;
   }
@@ -336,6 +348,35 @@ async function parseToolchainAndPriority(opts: {
     priority = n;
   }
   return { toolchain, priority };
+}
+
+/**
+ * Poll Herald's profile registry until it answers, or the deadline passes.
+ * `march up`/`stackUp` only runs `docker compose up -d` (no `--wait`), so the
+ * containers may be created but not yet serving when onboarding's best-effort
+ * `POST /profiles` fires — which would otherwise let `march init` print success
+ * without having registered the profile. A bounded readiness gate closes that
+ * cold-start race; registration itself stays the authority on the final outcome.
+ *
+ * Returns true once `GET /profiles` succeeds, false on timeout.
+ */
+async function waitForHeraldReady(
+  opts: { timeoutMs?: number; intervalMs?: number } = {},
+): Promise<boolean> {
+  const timeoutMs = opts.timeoutMs ?? 30_000;
+  const intervalMs = opts.intervalMs ?? 1_000;
+  const { ProfileClient } = await import("../herald/profiles/client.js");
+  const client = new ProfileClient();
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    try {
+      await client.list();
+      return true;
+    } catch {
+      if (Date.now() >= deadline) return false;
+      await new Promise((resolve) => setTimeout(resolve, intervalMs));
+    }
+  }
 }
 
 // `march init <profile> --repo <path>` — the single profile-onboarding entry
@@ -399,47 +440,70 @@ program
     });
     if (parsed === null) return;
 
-    // 1. Ensure the full stack is up (idempotent — reconciles a healthy stack,
-    //    aborts cleanly when images are missing). Reuses the `march up` path.
-    try {
-      const up = await stackUp();
-      if (up.missingImages.length > 0) {
-        process.stderr.write(
-          "Cannot bring up the stack — these images are not built:\n",
-        );
-        for (const m of up.missingImages) {
-          process.stderr.write(`  ${m.service}: ${m.image}\n`);
+    // Onboarding only registers the profile / ensures services when BOTH setup
+    // and the loop are enabled (mirrors `initLegate`'s gating). `--no-setup`
+    // (render-only) and `--no-loop` (conductor-only) deliberately skip that work,
+    // so bringing the whole stack up first would be pointless — and worse, would
+    // force Docker + built images on those paths and abort before the skip flag
+    // is honored. Only stand the stack up when it will actually be used.
+    const willEnsureServices = opts.setup !== false && opts.loop !== false;
+
+    if (willEnsureServices) {
+      // 1. Ensure the full stack is up (idempotent — reconciles a healthy stack,
+      //    aborts cleanly when images are missing). Reuses the `march up` path.
+      try {
+        const up = await stackUp();
+        if (up.missingImages.length > 0) {
+          process.stderr.write(
+            "Cannot bring up the stack — these images are not built:\n",
+          );
+          for (const m of up.missingImages) {
+            process.stderr.write(`  ${m.service}: ${m.image}\n`);
+          }
+          process.stderr.write(
+            "Build them with `march upgrade` (or `npm run build:<service>-image`), then re-run `march init`.\n",
+          );
+          process.exitCode = ERROR;
+          return;
         }
+        let failed = false;
+        for (const svc of up.services) {
+          console.log(
+            `${svc.service}: ${svc.outcome}${svc.detail ? ` (${svc.detail})` : ""}`,
+          );
+          if (svc.outcome === "failed") failed = true;
+        }
+        if (failed) {
+          process.stderr.write(
+            "One or more services failed to start; fix the above, then re-run `march init`.\n",
+          );
+          process.exitCode = ERROR;
+          return;
+        }
+      } catch (err) {
         process.stderr.write(
-          "Build them with `march upgrade` (or `npm run build:<service>-image`), then re-run `march init`.\n",
+          (err instanceof Error ? err.message : String(err)) + "\n",
         );
         process.exitCode = ERROR;
         return;
       }
-      let failed = false;
-      for (const svc of up.services) {
-        console.log(
-          `${svc.service}: ${svc.outcome}${svc.detail ? ` (${svc.detail})` : ""}`,
-        );
-        if (svc.outcome === "failed") failed = true;
-      }
-      if (failed) {
+
+      // `compose up -d` returns before Herald is necessarily serving, so wait
+      // for the profile registry to answer before onboarding registers against
+      // it — otherwise registration silently best-efforts and we'd report
+      // success without a registered profile. Non-fatal on timeout: onboarding
+      // still runs and the registration-outcome check below is the authority.
+      const ready = await waitForHeraldReady();
+      if (!ready) {
         process.stderr.write(
-          "One or more services failed to start; fix the above, then re-run `march init`.\n",
+          "Herald did not become ready within 30s of stack bring-up; the profile registration may fail. " +
+            "Re-run `march init` once the stack is healthy.\n",
         );
-        process.exitCode = ERROR;
-        return;
       }
-    } catch (err) {
-      process.stderr.write(
-        (err instanceof Error ? err.message : String(err)) + "\n",
-      );
-      process.exitCode = ERROR;
-      return;
     }
 
     // 2. Onboard the profile.
-    await runLegateOnboarding({
+    const result = await runLegateOnboarding({
       repoArg: opts.repo,
       profile,
       conductorName: opts.conductor,
@@ -455,6 +519,21 @@ program
       bridgeCheck: opts.bridgeCheck,
       invokedAs: "march init",
     });
+
+    // When onboarding was supposed to register the profile, a best-effort
+    // registration that didn't land must NOT report success — otherwise
+    // `march init` exits 0 having brought the stack up but registered nothing.
+    if (
+      result !== null &&
+      willEnsureServices &&
+      !result.legateService?.registered
+    ) {
+      process.stderr.write(
+        `Profile "${result.profile}" was not registered with Herald (see warnings above). ` +
+          "The legate cannot drive it until registration succeeds — re-run `march init` once Herald is reachable.\n",
+      );
+      process.exitCode = ERROR;
+    }
   });
 
 // `march self` — installation-scoped (CLI-host) maintenance, distinct from the
