@@ -195,6 +195,17 @@ socket, never a source checkout. Scope it with `--profile <p>`, get machine
 output with `--json`, and rely on the non-zero exit on any `fail` to gate
 automation.
 
+To read what the stack is doing, **`march logs [service]`** tails the service
+container logs without you having to remember per-service container or compose
+names. With no argument it interleaves all six services' recent logs, each line
+tagged with its service; pass a name (`otel-lgtm`, `castra`, `hatchery`,
+`brood`, `herald`, `legate`) to scope to one. `-f`/`--follow` streams new lines,
+`--since <dur>` (e.g. `10m`, `1h`) and `-n`/`--tail <N>` bound the backfill, and
+`--errors` keeps only error-level lines. It resolves each service to its running
+container by name over the Docker socket (the service→container mapping is baked
+into the CLI), so it works from a plain `npm i -g march` install with no source
+checkout — it never reads the `docker/*.docker-compose.yml` files.
+
 **Keep telemetry in lock-step with the dispatch machinery.** When you add a loop
 lifecycle action or a new dispatch path, emit a span for it; when you add a
 failure mode, emit an *errored* span so it surfaces in traces; when a new process

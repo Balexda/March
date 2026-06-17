@@ -40,6 +40,7 @@ import { StatioValidationError } from "../statio/types.js";
 import { initMarch, InitError } from "../bootstrap/init.js";
 import { stackDown } from "../stack/down.js";
 import { stackUp } from "../stack/up.js";
+import { runLogs, LOG_SERVICES } from "../logs/logs.js";
 import { createBuildContext, SnapshotError } from "../spawn/snapshot.js";
 import {
   listBackends,
@@ -375,6 +376,52 @@ program
       process.exitCode = ERROR;
     }
   });
+
+program
+  .command("logs [service]")
+  .description(
+    "Tail March service container logs (all services, or one of: " +
+      LOG_SERVICES.map((s) => s.name).join(", ") +
+      ")",
+  )
+  .option("-f, --follow", "Stream new log lines as they arrive")
+  .option("--since <dur>", "Only show logs since a duration/timestamp (e.g. 10m, 1h)")
+  .option("-n, --tail <N>", "Show at most the last N lines per service", "100")
+  .option("--errors", "Show only error-level lines")
+  .action(
+    async (
+      service: string | undefined,
+      opts: {
+        follow?: boolean;
+        since?: string;
+        tail?: string;
+        errors?: boolean;
+      },
+    ) => {
+      commandHandled = true;
+      try {
+        const result = await runLogs({
+          service,
+          follow: opts.follow,
+          since: opts.since,
+          tail: opts.tail,
+          errors: opts.errors,
+        });
+        // Exit non-zero only when every requested service failed to produce a
+        // stream (e.g. docker missing, or all containers absent) — a partial
+        // stack with some services down is normal for `march logs`.
+        const allFailed = result.services.every(
+          (s) => s.exitCode !== null && s.exitCode !== 0,
+        );
+        process.exitCode = allFailed ? ERROR : SUCCESS;
+      } catch (err) {
+        process.stderr.write(
+          (err instanceof Error ? err.message : String(err)) + "\n",
+        );
+        process.exitCode = USAGE_ERROR;
+      }
+    },
+  );
 
 program
   .command("version")
