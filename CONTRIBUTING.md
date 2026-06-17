@@ -175,7 +175,7 @@ battery and prints each finding as pass / warn / fail with the existing remedy
 command named beneath it (it diagnoses, it never mutates):
 
 - **Token wiring** — `CASTRA_API_TOKEN` is consistent across the five service
-  containers and Castra actually accepts it (no silent 401/404). Remedy: re-run
+  containers and Castra actually accepts it (no silent 401/403). Remedy: re-run
   `march up`.
 - **Session consistency** — Castra-live vs Brood-tracked vs Herald-fold
   divergence (leaked stewards, dead orphans, stale projections). Remedy:
@@ -190,10 +190,10 @@ command named beneath it (it diagnoses, it never mutates):
   `git pull` (or `MARCH_HERALD_SYNC=1`).
 
 It works from a plain `npm i -g march` install — it talks only to the service
-HTTP APIs (`CASTRA_URL` / `MARCH_BROOD_URL` / `MARCH_HERALD_URL` /
-`MARCH_HATCHERY_URL`) and the docker socket, never a source checkout. Scope it
-with `--profile <p>`, get machine output with `--json`, and rely on the non-zero
-exit on any `fail` to gate automation.
+HTTP APIs (`CASTRA_URL` / `MARCH_BROOD_URL` / `MARCH_HERALD_URL`) and the docker
+socket, never a source checkout. Scope it with `--profile <p>`, get machine
+output with `--json`, and rely on the non-zero exit on any `fail` to gate
+automation.
 
 **Keep telemetry in lock-step with the dispatch machinery.** When you add a loop
 lifecycle action or a new dispatch path, emit a span for it; when you add a
