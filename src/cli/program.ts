@@ -362,7 +362,7 @@ program
   )
   .option(
     "--service <name>",
-    "Upgrade a single service (otel-lgtm, castra, hatchery, brood, herald, legate)",
+    `Upgrade a single service (${MARCH_SERVICES.map((s) => s.name).join(", ")})`,
   )
   .action(async (opts: { service?: string }) => {
     commandHandled = true;
@@ -375,6 +375,12 @@ program
             `Known services: ${MARCH_SERVICES.map((s) => s.name).join(", ")}.\n`,
         );
         process.exitCode = USAGE_ERROR;
+        return;
+      }
+
+      if (result.partialUpgradeTokenError) {
+        process.stderr.write(result.partialUpgradeTokenError + "\n");
+        process.exitCode = ERROR;
         return;
       }
 

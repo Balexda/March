@@ -1,6 +1,6 @@
 import path from "node:path";
 import { CASTRA_TOKEN_ENV } from "../castra/config.js";
-import { runCommand, describeExecError, type CommandRunner } from "./exec.js";
+import { runBuild, runCommand, describeExecError, type CommandRunner } from "./exec.js";
 import { MARCH_SERVICES, locateCompose, type MarchService } from "./services.js";
 import { resolveCastraToken, type ResolvedToken } from "./up.js";
 
@@ -24,7 +24,7 @@ import { resolveCastraToken, type ResolvedToken } from "./up.js";
  * remaining services still upgrade.
  */
 
-export type UpgradeOutcome = "upgraded" | "skipped" | "failed";
+export type UpgradeOutcome = "upgraded" | "failed";
 
 export interface ServiceUpgradeResult {
   readonly service: string;
@@ -35,12 +35,20 @@ export interface ServiceUpgradeResult {
 }
 
 export interface StackUpgradeResult {
-  readonly token: ResolvedToken;
+  /** The shared token used for the recreate. Undefined when the upgrade was rejected before resolving one. */
+  readonly token?: ResolvedToken;
   /**
    * Set when `--service` named a service that is not part of the stack: no
-   * service was touched and `services` is empty.
+   * service was touched, no token was resolved, and `services` is empty.
    */
   readonly unknownService?: string;
+  /**
+   * Set when a single-service (`--service`) upgrade was refused because no
+   * shared `CASTRA_API_TOKEN` already exists (env or persisted file): recreating
+   * one container with a freshly minted token would desync it from its
+   * still-running siblings. `services` is empty.
+   */
+  readonly partialUpgradeTokenError?: string;
   readonly services: ServiceUpgradeResult[];
 }
 
@@ -65,7 +73,7 @@ export interface StackUpgradeOptions {
 function buildImage(
   svc: MarchService,
   opts: {
-    run: CommandRunner;
+    buildRun: CommandRunner;
     locate: (basename: string) => string | null;
     env: NodeJS.ProcessEnv;
   },
@@ -77,7 +85,8 @@ function buildImage(
   // <root>/docker/<name>.Dockerfile → <root> (the build context).
   const context = path.dirname(path.dirname(dockerfilePath));
   try {
-    opts.run(
+    // buildRun streams output (no maxBuffer ceiling) — see runBuild in exec.ts.
+    opts.buildRun(
       "docker",
       ["build", "-t", svc.image!, "-f", dockerfilePath, context],
       opts.env,
@@ -106,9 +115,12 @@ function recreateService(
     return { ok: false, detail: `could not locate docker/${svc.compose}` };
   }
   try {
+    // `--no-build` keeps the recreate honest: it must pick up the image
+    // buildImage() just produced and fail loudly otherwise, never silently
+    // trigger compose's own `build:` section (mirrors stackUp's guard).
     opts.run(
       "docker",
-      ["compose", "-f", composePath, "up", "-d", "--force-recreate"],
+      ["compose", "-f", composePath, "up", "-d", "--force-recreate", "--no-build"],
       opts.env,
     );
     return { ok: true };
@@ -121,6 +133,7 @@ function upgradeService(
   svc: MarchService,
   opts: {
     run: CommandRunner;
+    buildRun: CommandRunner;
     locate: (basename: string) => string | null;
     env: NodeJS.ProcessEnv;
   },
@@ -151,16 +164,41 @@ export async function stackUpgrade(
   opts: StackUpgradeOptions = {},
 ): Promise<StackUpgradeResult> {
   const run = opts.run ?? runCommand;
+  // Builds stream their output (runBuild); recreates pipe + capture stderr for
+  // the result detail (runCommand). An injected `run` overrides both so tests
+  // record every docker invocation through one recorder.
+  const buildRun = opts.run ?? runBuild;
   const locate = opts.locate ?? ((b: string) => locateCompose(b));
-  const token = (opts.resolveToken ?? (() => resolveCastraToken(opts.env)))();
 
+  // Validate `--service` before resolving the token so an unknown service never
+  // generates/persists a fresh ~/.march/castra-token as a side effect.
   let targets: readonly MarchService[] = MARCH_SERVICES;
   if (opts.service) {
     const match = MARCH_SERVICES.find((s) => s.name === opts.service);
     if (!match) {
-      return { token, unknownService: opts.service, services: [] };
+      return { unknownService: opts.service, services: [] };
     }
     targets = [match];
+  }
+
+  const token = (opts.resolveToken ?? (() => resolveCastraToken(opts.env)))();
+
+  // A single-service recreate must reuse the token the rest of the stack is
+  // already running with. A freshly *generated* token (no env value, no
+  // persisted file) means there is no shared secret to reuse — recreating just
+  // one container with a new token would desync it from its still-running
+  // siblings (cross-service auth failures). Refuse rather than break the stack;
+  // a full `march upgrade` rolls every container onto the new shared token at once.
+  if (opts.service && token.source === "generated") {
+    return {
+      token,
+      partialUpgradeTokenError:
+        `Cannot upgrade only "${opts.service}" without an existing shared ${CASTRA_TOKEN_ENV}: ` +
+        "recreating one container with a freshly generated token would desync it from the " +
+        `rest of the stack. Set ${CASTRA_TOKEN_ENV} (or run \`march up\` once to persist a ` +
+        "shared token), or run `march upgrade` without --service to roll the whole stack together.",
+      services: [],
+    };
   }
 
   // Inject the shared token so compose-file interpolation succeeds on recreate
@@ -173,7 +211,7 @@ export async function stackUpgrade(
   const services: ServiceUpgradeResult[] = [];
   // Forward dependency order: otel-lgtm (network owner) first, legate last.
   for (const svc of targets) {
-    services.push(upgradeService(svc, { run, locate, env }));
+    services.push(upgradeService(svc, { run, buildRun, locate, env }));
   }
 
   return { token, services };

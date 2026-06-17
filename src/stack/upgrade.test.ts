@@ -53,9 +53,11 @@ describe("stackUpgrade — build + recreate", () => {
     expect(castraBuildIdx).toBeGreaterThanOrEqual(0);
     expect(castraRecreateIdx).toBeGreaterThan(castraBuildIdx);
 
-    // Every recreate forces recreation and carries the shared token.
+    // Every recreate forces recreation, never builds (we built explicitly), and
+    // carries the shared token.
     const recreates = calls.filter((c) => c.args.includes("--force-recreate"));
     expect(recreates).toHaveLength(MARCH_SERVICES.length);
+    expect(recreates.every((c) => c.args.includes("--no-build"))).toBe(true);
     expect(recreates.every((c) => c.token === "tok-123")).toBe(true);
   });
 
@@ -81,17 +83,50 @@ describe("stackUpgrade — --service", () => {
     expect(calls.every((c) => c.args.join(" ").includes("herald"))).toBe(true);
   });
 
-  it("reports an unknown service without touching anything", async () => {
+  it("reports an unknown service without touching anything or resolving a token", async () => {
     const run = vi.fn();
+    const resolveToken = vi.fn(() => stubToken);
     const result = await stackUpgrade({
       service: "nope",
       run,
       locate: locateAll,
-      resolveToken: () => stubToken,
+      resolveToken,
     });
     expect(result.unknownService).toBe("nope");
     expect(result.services).toEqual([]);
+    expect(result.token).toBeUndefined();
     expect(run).not.toHaveBeenCalled();
+    // Unknown service is rejected before the token is resolved/persisted.
+    expect(resolveToken).not.toHaveBeenCalled();
+  });
+
+  it("refuses a single-service upgrade when only a freshly generated token exists", async () => {
+    const run = vi.fn();
+    const result = await stackUpgrade({
+      service: "castra",
+      run,
+      locate: locateAll,
+      // No shared token to reuse — resolver had to mint one.
+      resolveToken: () => ({ token: "fresh", source: "generated" }),
+    });
+    expect(result.partialUpgradeTokenError).toContain("castra");
+    expect(result.partialUpgradeTokenError).toContain(CASTRA_TOKEN_ENV);
+    expect(result.services).toEqual([]);
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it("allows a single-service upgrade when a shared token already exists", async () => {
+    const { calls, run } = recorder();
+    const result = await stackUpgrade({
+      service: "castra",
+      run,
+      locate: locateAll,
+      // source "file"/"env" means a shared token is already in play.
+      resolveToken: () => stubToken,
+    });
+    expect(result.partialUpgradeTokenError).toBeUndefined();
+    expect(result.services.map((s) => s.service)).toEqual(["castra"]);
+    expect(calls.every((c) => c.token === "tok-123")).toBe(true);
   });
 });
 
