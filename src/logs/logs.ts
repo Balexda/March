@@ -39,11 +39,12 @@ export const LOG_SERVICES: readonly LogsService[] = [
 
 /**
  * Lines whose content reads as error-level, for the `--errors` convenience
- * filter. Matches the common shapes: bare `error`/`fatal`/`panic`/`critical`
- * (covers `ERROR`, `[error]`, and pino's `"level":"error"`). Warnings are not
- * errors and are intentionally excluded.
+ * filter. Matches the level token as a whole word so it catches the common
+ * shapes (`ERROR`, `[error]`, pino's `"level":"error"`, `level=fatal`) without
+ * the substring false matches an unbounded pattern produces (`terror`,
+ * `errors`). Warnings are not errors and are intentionally excluded.
  */
-const ERROR_LINE_RE = /error|fatal|panic|critical/i;
+const ERROR_LINE_RE = /\b(error|fatal|panic|critical)\b/i;
 
 /** Minimal child-process surface the runner needs — `spawn`'s return value. */
 export interface LogsChild {
@@ -144,7 +145,7 @@ export async function runLogs(opts: LogsOptions = {}): Promise<LogsResult> {
     const padded = name.padEnd(tagWidth);
     if (!useColor) return `${padded} | `;
     const color = TAG_COLORS[colorIdx % TAG_COLORS.length];
-    return `[${color}m${padded}[0m | `;
+    return `\u001b[${color}m${padded}\u001b[0m | `;
   };
 
   const emit = (tag: string, line: string): void => {

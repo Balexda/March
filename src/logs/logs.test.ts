@@ -195,6 +195,7 @@ describe("runLogs — --errors filter", () => {
         "info: all good",
         "ERROR: boom",
         'something with "level":"error" embedded',
+        "level=fatal cannot continue",
         "a warning only",
       ],
       0,
@@ -203,8 +204,34 @@ describe("runLogs — --errors filter", () => {
 
     expect(out.join("")).toBe(
       "brood | ERROR: boom\n" +
-        'brood | something with "level":"error" embedded\n',
+        'brood | something with "level":"error" embedded\n' +
+        "brood | level=fatal cannot continue\n",
     );
+  });
+
+  it("matches level tokens as whole words, not substrings", async () => {
+    const children = new Map<string, FakeChild>();
+    const child = new FakeChild();
+    children.set("march-brood", child);
+    const { spawn } = fakeSpawner(children);
+    const out: string[] = [];
+
+    const promise = runLogs({
+      service: "brood",
+      errors: true,
+      spawn,
+      write: (c) => out.push(c),
+      color: false,
+    });
+    // "terror" / "errors" embed the token mid-word — they must NOT match, but a
+    // standalone bracketed token must.
+    child.feed(
+      ["a terror in the night", "5 errors total", "[error] real one"],
+      0,
+    );
+    await promise;
+
+    expect(out.join("")).toBe("brood | [error] real one\n");
   });
 });
 
