@@ -20,9 +20,15 @@ import type {
 /** Castra session listing (the live interactive-session view). */
 export interface CastraView {
   listSessions(profile: string, group?: string): Promise<CastraSession[]>;
-  /** True when Castra is up AND accepts the shared token (no silent 401). */
-  reachable(): Promise<boolean>;
 }
+
+/**
+ * Result of probing Castra's token gate: `accepted` = the bearer passed the
+ * gate (any non-auth response), `rejected` = an explicit 401/403, `unverified`
+ * = no token to probe with, or an unreachable/erroring backend (NOT an auth
+ * fault). Status-aware so a 5xx/outage is never misread as a token rejection.
+ */
+export type CastraAuthVerdict = "accepted" | "rejected" | "unverified";
 
 /** Brood session-registry view (the tracked-session authority). */
 export interface BroodView {
@@ -41,6 +47,12 @@ export interface DoctorContext {
   readonly castra: CastraView;
   readonly brood: BroodView;
   readonly herald: HeraldView;
+  /**
+   * Probe Castra's token gate with a specific token (the one read from the
+   * service containers), independent of the client's own bearer. Status-aware
+   * so token-wiring can distinguish a 401/403 rejection from a backend outage.
+   */
+  readonly castraAuthProbe: (token: string | undefined) => Promise<CastraAuthVerdict>;
   readonly containerEnv: ContainerEnvReader;
   readonly containerState: ContainerStateReader;
   readonly git: GitRunner;

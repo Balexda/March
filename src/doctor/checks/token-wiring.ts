@@ -8,10 +8,11 @@ import type { CheckResult, Finding } from "../types.js";
  * and Castra must actually accept it.
  *
  * The classic silent incident: a stale/regenerated token leaves one container
- * disagreeing with the rest, so every cross-service call 401/404s while every
+ * disagreeing with the rest, so every cross-service call 401/403s while every
  * container stays green. We read the token from each container over the docker
- * socket, compare, and then confirm Castra authenticates the shared value
- * (`CastraView.reachable()` lists through the token-gated `/v1/*` surface).
+ * socket, compare, and then confirm Castra authenticates the *container* token
+ * (not the host's, which may be stale) via a status-aware probe of the
+ * token-gated `/v1/*` surface.
  */
 
 /** The token-bearing services (otel-lgtm does not use the shared token). */
@@ -81,11 +82,14 @@ export async function checkTokenWiring(ctx: DoctorContext): Promise<CheckResult>
     });
   }
 
-  // Even a perfectly consistent token is worthless if Castra rejects it. Verify
-  // the live auth surface — but only an explicit 401/403 is a token fault. A
-  // 5xx / unreachable backend is Castra's problem (its own status check), and
-  // reaching it tokenless would false-fail, so those resolve to "unverified".
-  const auth = await probeCastraAuth(ctx);
+  // Even a perfectly consistent token is worthless if Castra rejects it. Probe
+  // the live auth surface with the CONTAINER token (the value Castra actually
+  // runs with) rather than the host's, which may be stale — otherwise a healthy
+  // stack would false-fail on the operator's local env. Only an explicit
+  // 401/403 is a token fault; a 5xx / unreachable backend resolves to
+  // "unverified" (Castra's own liveness problem, not a wiring fault).
+  const containerToken = present.get("castra") ?? [...distinct][0];
+  const auth = await ctx.castraAuthProbe(containerToken);
   if (auth === "rejected") {
     findings.push({
       check: "token-wiring",
@@ -109,33 +113,6 @@ export async function checkTokenWiring(ctx: DoctorContext): Promise<CheckResult>
   }
 
   return { check: "token-wiring", findings };
-}
-
-type AuthVerdict = "accepted" | "rejected" | "unverified";
-
-/**
- * Confirm Castra authenticates the shared token by making a real authenticated
- * call. Prefer an in-scope profile (which exists, so a non-error means the
- * bearer was accepted); fall back to the readiness probe when no profile is in
- * scope. Only an explicit 401/403 is "rejected" — everything else is
- * "unverified" so a down/erroring backend never reads as a token fault.
- */
-async function probeCastraAuth(ctx: DoctorContext): Promise<AuthVerdict> {
-  const probeProfile = ctx.profiles[0]?.profile;
-  if (probeProfile) {
-    try {
-      await ctx.castra.listSessions(probeProfile);
-      return "accepted";
-    } catch (err) {
-      const status = (err as { status?: number }).status;
-      return status === 401 || status === 403 ? "rejected" : "unverified";
-    }
-  }
-  try {
-    return (await ctx.castra.reachable()) ? "accepted" : "unverified";
-  } catch {
-    return "unverified";
-  }
 }
 
 /** A short, non-secret fingerprint so drift is visible without leaking tokens. */

@@ -6,7 +6,7 @@ import type { ProfileRecord } from "../herald/profiles/types.js";
 import type { SessionRecord } from "../brood/service/types.js";
 import type { CastraSession } from "../castra/types.js";
 import type { SystemState, SliceState, ObservedSession } from "../herald/events.js";
-import type { DoctorContext } from "./context.js";
+import type { CastraAuthVerdict, DoctorContext } from "./context.js";
 import { runDoctor } from "./run.js";
 import { formatReport } from "./format.js";
 import { checkTokenWiring } from "./checks/token-wiring.js";
@@ -79,10 +79,9 @@ interface FakeOpts {
   profiles?: ProfileRecord[];
   containerEnv?: Record<string, Record<string, string | undefined>>;
   castraSessions?: Record<string, CastraSession[]>;
-  castraReachable?: boolean;
   castraThrows?: boolean;
-  /** Make listSessions throw a 401-status error (token rejected). */
-  castraAuthRejected?: boolean;
+  /** Verdict the status-aware Castra auth probe returns (default "accepted"). */
+  castraAuth?: CastraAuthVerdict;
   broodRecords?: SessionRecord[];
   broodThrows?: boolean;
   states?: Record<string, SystemState>;
@@ -96,16 +95,11 @@ function ctx(opts: FakeOpts = {}): DoctorContext {
     profiles: opts.profiles ?? [profile()],
     castra: {
       async listSessions(p: string) {
-        if (opts.castraAuthRejected) {
-          throw Object.assign(new Error("Missing or invalid bearer token."), { status: 401 });
-        }
         if (opts.castraThrows) throw new Error("castra down");
         return opts.castraSessions?.[p] ?? [];
       },
-      async reachable() {
-        return opts.castraReachable ?? true;
-      },
     },
+    castraAuthProbe: async () => opts.castraAuth ?? "accepted",
     brood: {
       async list() {
         if (opts.broodThrows) throw new Error("brood down");
@@ -141,13 +135,13 @@ describe("token-wiring", () => {
   };
 
   it("passes when the token is consistent and Castra accepts it", async () => {
-    const r = await checkTokenWiring(ctx({ containerEnv: allSame, castraReachable: true }));
+    const r = await checkTokenWiring(ctx({ containerEnv: allSame, castraAuth: "accepted" }));
     expect(sev(r.findings)).toEqual(["pass"]);
   });
 
   it("fails on drift across containers and names a remedy", async () => {
     const drift = { ...allSame, "march-legate": { CASTRA_API_TOKEN: "other" } };
-    const r = await checkTokenWiring(ctx({ containerEnv: drift, castraReachable: true }));
+    const r = await checkTokenWiring(ctx({ containerEnv: drift, castraAuth: "accepted" }));
     const fail = r.findings.find((f) => f.severity === "fail");
     expect(fail).toBeDefined();
     expect(fail!.detail).toContain("drift");
@@ -156,29 +150,47 @@ describe("token-wiring", () => {
 
   it("fails when the token is missing on some containers", async () => {
     const partial = { ...allSame, "march-brood": {} };
-    const r = await checkTokenWiring(ctx({ containerEnv: partial, castraReachable: true }));
+    const r = await checkTokenWiring(ctx({ containerEnv: partial, castraAuth: "accepted" }));
     const fail = r.findings.find((f) => f.severity === "fail");
     expect(fail!.detail).toContain("unset on");
     expect(fail!.detail).toContain("brood");
   });
 
-  it("fails when Castra rejects a consistent token (explicit 401)", async () => {
-    const r = await checkTokenWiring(ctx({ containerEnv: allSame, castraAuthRejected: true }));
+  it("fails when Castra rejects a consistent token (explicit 401/403)", async () => {
+    const r = await checkTokenWiring(ctx({ containerEnv: allSame, castraAuth: "rejected" }));
     const fail = r.findings.find((f) => f.severity === "fail");
     expect(fail!.detail).toContain("rejected the shared token");
   });
 
-  it("passes (auth unverifiable) when consistent but Castra is down, not a 401", async () => {
-    // A 5xx / unreachable backend must not read as a token fault.
+  it("passes (auth unverifiable) when consistent but Castra is unreachable, not a 401/403", async () => {
+    // A 5xx / unreachable backend (no profiles either) must not read as a token
+    // fault — the status-aware probe returns "unverified", not "rejected".
     const r = await checkTokenWiring(
-      ctx({ containerEnv: allSame, profiles: [], castraReachable: false }),
+      ctx({ containerEnv: allSame, profiles: [], castraAuth: "unverified" }),
     );
     expect(sev(r.findings)).toEqual(["pass"]);
     expect(r.findings[0].detail).toContain("not verifiable");
   });
 
+  it("probes auth with the CONTAINER token, not the host token", async () => {
+    // Even when the host has no token, a consistent container token that Castra
+    // accepts must pass (regression for the stale-host-token false-fail).
+    let probedWith: string | undefined = "UNSET";
+    const c = ctx({ containerEnv: allSame, castraAuth: "accepted" });
+    const spied: DoctorContext = {
+      ...c,
+      castraAuthProbe: async (token) => {
+        probedWith = token;
+        return "accepted";
+      },
+    };
+    const r = await checkTokenWiring(spied);
+    expect(probedWith).toBe("tok"); // the value read from the containers
+    expect(sev(r.findings)).toEqual(["pass"]);
+  });
+
   it("warns (not fails) when no container exposes the token", async () => {
-    const r = await checkTokenWiring(ctx({ containerEnv: {}, castraReachable: false }));
+    const r = await checkTokenWiring(ctx({ containerEnv: {}, castraAuth: "unverified" }));
     expect(sev(r.findings)).toEqual(["warn"]);
     expect(r.findings[0].detail).toContain("could not read");
   });
@@ -272,6 +284,39 @@ describe("dispatch-health", () => {
     expect(r.findings.some((f) => f.severity === "pass")).toBe(true);
   });
 
+  it("counts a pr-open slice that still owes a review response as LIVE", async () => {
+    // Mirrors canonical liveSpawnCount: PASS + non-conflicting is NOT
+    // ready-to-merge while the steward owes replies, so it stays live and can
+    // saturate the cap (regression for the undercount that read saturated as ok).
+    const owingPr = { state: "OPEN", checks: "PASS", mergeable: "MERGEABLE", needs_response_count: 1 };
+    const slices: Record<string, SliceState> = {
+      a: slice({ sliceId: "a", stage: "pr-open", pr: owingPr }),
+      b: slice({ sliceId: "b", stage: "pr-open", pr: owingPr }),
+    };
+    const c = ctx({
+      env: { MARCH_MAX_CONCURRENT_SPAWNS: "2" },
+      states: { march: state({ slices, smithy: { dispatchable: 3, blocked: 0, total: 5 } }) },
+    });
+    const r = await checkDispatchHealth(c);
+    expect(r.findings.some((f) => f.severity === "fail" && f.detail.includes("cap saturated"))).toBe(true);
+  });
+
+  it("treats a settled pr-open slice (owes nothing) as ready-to-merge, not live", async () => {
+    const settledPr = { state: "OPEN", checks: "PASS", mergeable: "MERGEABLE", needs_response_count: 0 };
+    const c = ctx({
+      env: { MARCH_MAX_CONCURRENT_SPAWNS: "2" },
+      states: {
+        march: state({
+          slices: { a: slice({ sliceId: "a", stage: "pr-open", pr: settledPr }) },
+          smithy: { dispatchable: 0, blocked: 0, total: 1 },
+        }),
+      },
+    });
+    const r = await checkDispatchHealth(c);
+    // live should be 0 (ready-to-merge excluded), so a "0/2 live" pass.
+    expect(r.findings.some((f) => f.detail.includes("0/2"))).toBe(true);
+  });
+
   it("flags stranded escalated stewards", async () => {
     const c = ctx({
       states: {
@@ -360,13 +405,14 @@ describe("sync-health", () => {
     expect(sev(r.findings)).toEqual(["pass"]);
   });
 
-  it("warns with a git pull remedy when the local branch is behind origin", async () => {
+  it("warns with a git pull remedy when the local branch is a fetched ancestor of origin", async () => {
     const c = ctx({
       paths: new Set(["/repos/march"]),
       git: gitFor({
         "symbolic-ref --short refs/remotes/origin/HEAD": "origin/main",
         "rev-parse main": "local99",
         "ls-remote origin main": "remote88\trefs/heads/main",
+        "cat-file -e remote88^{commit}": "", // remote object present locally
         "merge-base --is-ancestor local99 remote88": "", // ancestor → behind
       }),
     });
@@ -374,6 +420,42 @@ describe("sync-health", () => {
     const warn = r.findings.find((f) => f.severity === "warn");
     expect(warn?.detail).toContain("behind origin");
     expect(warn?.remedy).toContain("pull");
+  });
+
+  it("reports 'behind' + git pull when origin advanced but the remote SHA is unfetched", async () => {
+    // ls-remote returns a SHA not in the local object DB → cat-file -e fails
+    // (no entry in the map → null). Must still read as behind, not diverged.
+    const c = ctx({
+      paths: new Set(["/repos/march"]),
+      git: gitFor({
+        "symbolic-ref --short refs/remotes/origin/HEAD": "origin/main",
+        "rev-parse main": "local11",
+        "ls-remote origin main": "unfetched99\trefs/heads/main",
+        // no "cat-file -e unfetched99^{commit}" entry → unknown locally
+        // no "merge-base ..." entry → would error, but must not be relied on
+      }),
+    });
+    const r = await checkSyncHealth(c);
+    const warn = r.findings.find((f) => f.severity === "warn");
+    expect(warn?.detail).toContain("behind origin");
+    expect(warn?.remedy).toContain("pull");
+  });
+
+  it("reports 'diverged' + inspect when the remote SHA is known and not an ancestor", async () => {
+    const c = ctx({
+      paths: new Set(["/repos/march"]),
+      git: gitFor({
+        "symbolic-ref --short refs/remotes/origin/HEAD": "origin/main",
+        "rev-parse main": "local11",
+        "ls-remote origin main": "remote22\trefs/heads/main",
+        "cat-file -e remote22^{commit}": "", // remote object IS present locally
+        // merge-base --is-ancestor absent from map → null → not an ancestor
+      }),
+    });
+    const r = await checkSyncHealth(c);
+    const warn = r.findings.find((f) => f.severity === "warn");
+    expect(warn?.detail).toContain("diverged");
+    expect(warn?.remedy).toContain("inspect");
   });
 
   it("warns 'unverified' when the repo is not on this host", async () => {
@@ -405,7 +487,7 @@ describe("runDoctor aggregation", () => {
           "march-herald": { CASTRA_API_TOKEN: "t" },
           "march-legate": { CASTRA_API_TOKEN: "t" },
         },
-        castraReachable: true,
+        castraAuth: "accepted",
         profiles: [],
       }),
     );

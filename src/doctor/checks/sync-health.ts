@@ -69,10 +69,18 @@ export async function checkSyncHealth(ctx: DoctorContext): Promise<CheckResult> 
       continue;
     }
 
-    // Local differs from remote. If local is an ancestor of remote, it is behind
-    // (the #299/#300 class). Otherwise it has unpushed local commits — not a
-    // sync wedge, so report it as informational.
+    // Local differs from remote. Decide behind-vs-diverged. The remote SHA comes
+    // from `ls-remote` (no fetch), so it may not be in the local object DB; in
+    // that case `merge-base --is-ancestor` exits 128 (errors), which would
+    // otherwise be misread as "diverged". When the remote commit is unknown
+    // locally, origin has simply advanced past us — the #299/#300 "behind" class
+    // this check exists to catch — so report behind + `git pull`. Only call it
+    // diverged when the ancestry test actually runs and says local is NOT an
+    // ancestor (genuine local-only commits).
+    const remoteKnownLocally =
+      ctx.git(repoPath, ["cat-file", "-e", `${remoteSha}^{commit}`]) !== null;
     const behind =
+      !remoteKnownLocally ||
       ctx.git(repoPath, ["merge-base", "--is-ancestor", localSha, remoteSha]) !== null;
     if (behind) {
       findings.push({

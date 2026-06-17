@@ -25,12 +25,25 @@ import type { CheckResult, Finding } from "../types.js";
  * terminal (merged/escalated, or PR merged/closed) or ready-to-merge.
  */
 function isLiveSlice(slice: SliceState): boolean {
-  const pr = slice.pr as { state?: string; checks?: string; mergeable?: string } | undefined;
+  const pr = slice.pr as
+    | { state?: string; checks?: string; mergeable?: string; needs_response_count?: number }
+    | undefined;
   // Terminal.
   if (slice.stage === "merged" || slice.stage === "escalated") return false;
   if (pr?.state === "MERGED" || pr?.state === "CLOSED") return false;
-  // Ready-to-merge (an open PR that has passed and owes no response).
-  if (slice.stage === "pr-open" && pr?.checks === "PASS" && pr?.mergeable !== "CONFLICTING") {
+  // Ready-to-merge (an open PR that has passed AND owes no review response).
+  // Mirror the canonical `isReadyToMerge` gate exactly: a steward that still
+  // owes replies (or whose debt is unknown after a cold start) is NOT
+  // ready-to-merge, so it stays counted as live — undercounting it here would
+  // make a saturated cap read as healthy/under-capacity.
+  const owed = (slice as { needs_response_count?: number }).needs_response_count ??
+    pr?.needs_response_count;
+  if (
+    slice.stage === "pr-open" &&
+    pr?.checks === "PASS" &&
+    pr?.mergeable !== "CONFLICTING" &&
+    owed === 0
+  ) {
     return false;
   }
   return true;
