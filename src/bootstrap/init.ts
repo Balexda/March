@@ -55,7 +55,7 @@ export async function initMarch(homeDir?: string): Promise<InitResult> {
       throw new InitError(
         `Corrupted manifest found at ${manifestPath}. ` +
           "The file exists but contains invalid JSON. " +
-          "Please remove it manually and re-run `march init`.",
+          "Please remove it manually and re-run `march self init`.",
       );
     }
 
@@ -68,7 +68,7 @@ export async function initMarch(homeDir?: string): Promise<InitResult> {
     throw new InitError(
       `Corrupted manifest found at ${manifestPath}. ` +
         "The file contains JSON but is not a valid March manifest. " +
-        "Please remove it manually and re-run `march init`.",
+        "Please remove it manually and re-run `march self init`.",
     );
   } catch (err: unknown) {
     if (err instanceof InitError) throw err;

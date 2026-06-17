@@ -18,7 +18,7 @@ When you write a spec or a piece of code that makes the operator/automation trad
 
 - `src/cli.ts`: bin wrapper only. It should import `runCli` and do no command work itself.
 - `src/cli/`: Commander setup and command dispatch. Keep command handlers thin; move subsystem behavior into the owning domain directory.
-- `src/bootstrap/`: install/update/manifest/skill deployment for `march init` and `march update`.
+- `src/bootstrap/`: install/update/manifest/skill deployment for `march self init` (CLI-installation bootstrap) and `march update`. (The top-level `march init <profile>` is profile onboarding, wired in `src/cli/program.ts` over `src/legate/`.)
 - `src/spawn/`: one-shot spawn execution: snapshot, Dockerfile/image build, backend entrypoint, container launch, prompt handoff, output extraction.
 - `src/hatchery/`: container/profile policy and the spawn orchestrator (`runHatcherySpawn`). It drives the steward (manager) session through the Castra HTTP API (`src/castra/client.ts`) rather than shelling out to `agent-deck`, so the container needs neither the binary nor the tmux socket — only `CASTRA_URL`/`CASTRA_API_TOKEN` and the shared host `HOME` (so the worktree Castra creates resolves for `git apply` + the build context). `src/hatchery/service/` is the containerized Fastify service (`march hatchery serve`): routes, in-memory job store, the worker that runs `runHatcherySpawn`, and the thin HTTP client `march hatchery spawn` uses. Image/compose live in `docker/hatchery.Dockerfile` and `docker/hatchery.docker-compose.yml`.
 - `src/brood/`: lifecycle state and cleanup: spawn records, worktrees, branches, running/stopped session tracking.

@@ -19,7 +19,7 @@ March's source is organized by product subsystem rather than by generic layers:
 |-----------|-----------|
 | `src/cli.ts` | Executable bin entrypoint only; delegates to `src/cli/program.ts`. |
 | `src/cli/` | Commander program setup and command dispatch. |
-| `src/bootstrap/` | `march init` / `march update`, manifest handling, and deployed base skills. |
+| `src/bootstrap/` | `march self init` / `march update` (CLI-installation bootstrap), manifest handling, and deployed base skills. |
 | `src/spawn/` | Spawn execution pipeline: snapshots, image builds, backend entrypoints, and container launch. |
 | `src/hatchery/` | Container/profile policy and the spawn orchestrator (`runHatcherySpawn`). `src/hatchery/service/` is the containerized Fastify service (`march hatchery serve`) plus the thin client `march hatchery spawn` uses. |
 | `src/brood/` | Spawn lifecycle state: worktrees, branches, records, and cleanup ownership. |
@@ -132,8 +132,32 @@ in-flight sessions), so a later bring-up resumes where it left off. Pass
 `--volumes` to also remove the named volumes (registries, Herald's event log,
 telemetry), or `--drain` to tear down in-flight Brood sessions (spawn containers,
 worktrees, branches, stewards) before stopping the services. The rest of the
-stack-lifecycle surface (`march upgrade` / `march status` / `march init`) is
-tracked as follow-ups.
+stack-lifecycle surface (`march upgrade` / `march status`) is tracked as
+follow-ups.
+
+### Onboarding a profile
+
+**`march init <profile> --repo <path>`** is the single profile-onboarding entry
+point. It first ensures the full stack is up (the idempotent `march up` path — a
+no-op when the stack is already healthy, aborting with a build hint if a
+locally-built image is missing), then onboards the profile: it renders and sets
+up the profile's Legate conductor, registers the repo with Herald's profile
+registry (the source of truth the shared `march-legate` service reads each tick),
+and ensures the legate service. Re-running is idempotent. `--repo` defaults to the
+current git repo. Onboarding options carry over from the commands it replaces:
+`--worker-group`, `--model`, `--effort`, `--toolchain`, `--priority`,
+`--conductor`, `--description`, `--heartbeat-interval`, plus `--no-setup` /
+`--no-loop` / `--no-bridge-check`.
+
+`march init <profile>` **supersedes** the previously split `march legate init`
+(conductor + registration) and `march profile register` (registration only). Both
+still work but print a deprecation warning pointing at `march init`, and will be
+removed in a future release. The `march profile` group (`list`, `remove`,
+`merge-policy`, `priority`) remains the way to manage already-registered profiles.
+
+> The top-level `init` name used to bootstrap the **CLI installation** itself
+> (writes `~/.march/march-manifest.json`, deploys base skills). That now lives at
+> **`march self init`**.
 
 **Keep telemetry in lock-step with the dispatch machinery.** When you add a loop
 lifecycle action or a new dispatch path, emit a span for it; when you add a

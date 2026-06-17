@@ -482,6 +482,17 @@ export interface LegateInitOptions {
   loop?: boolean;
   /** Deprecated alias for {@link loop}. */
   processor?: boolean;
+  /**
+   * Worker toolchain selection for this profile's spawns (issue #287): `auto`
+   * (default) | `node` | `jvm`. Forwarded to the Herald profile registration so
+   * `march init` can carry it over from the old `march profile register` flag.
+   */
+  toolchain?: string;
+  /**
+   * Dispatch priority (lower wins; 0 = highest / P0). Forwarded to the Herald
+   * profile registration. Undefined leaves it unset (preserve-on-omit).
+   */
+  priority?: number;
 }
 
 export interface LegateSkillDeployment {
@@ -1989,6 +2000,10 @@ export async function initLegate(
           conductorName,
           marchCliPath: process.argv[1] ? path.resolve(process.argv[1]) : null,
           mode: "terminal-pr-maintenance",
+          // Carried over from the old `march profile register` flags so the
+          // unified `march init` can set them at onboarding time.
+          ...(opts.toolchain !== undefined ? { toolchain: opts.toolchain } : {}),
+          ...(opts.priority !== undefined ? { priority: opts.priority } : {}),
         },
         { env: process.env },
       );

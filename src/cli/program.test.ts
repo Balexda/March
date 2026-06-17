@@ -111,13 +111,21 @@ describe("march CLI", () => {
     return fakeBin;
   }
 
-  it("march init runs successfully on clean home", () => {
+  it("march self init runs successfully on clean home", () => {
     const tmpDir = makeTmpDir();
-    const result = run(["init"], {
+    const result = run(["self", "init"], {
       env: { ...process.env, HOME: tmpDir },
     });
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toContain("initialized successfully");
+  });
+
+  it("march init <profile> requires a profile argument (the bootstrap moved to `march self init`)", () => {
+    // Bare `march init` now needs the <profile> positional; commander reports
+    // the missing argument rather than running the old CLI bootstrap.
+    const result = run(["init"]);
+    expect(result.exitCode).toBe(2);
+    expect(result.stderr + result.stdout).toMatch(/missing required argument|usage/i);
   });
 
   it("march with no args exits 2 with usage", () => {
@@ -249,8 +257,21 @@ describe("march CLI", () => {
       );
       expect(result.exitCode).toBe(1);
       expect(result.stderr).toContain(
-        "Run `march legate init` from inside a git repository.",
+        "Run `march legate init` from inside a git repository",
       );
+    });
+
+    it("`march legate init` prints a deprecation warning pointing at `march init`", () => {
+      // Even the early-exit (not-a-git-repo) path emits the deprecation shim
+      // warning first — the command still works but nudges toward `march init`.
+      const tmpDir = makeTmpDir();
+      const result = runWithEnv(
+        ["legate", "init", "--no-setup"],
+        { ...process.env },
+        { cwd: tmpDir },
+      );
+      expect(result.stderr).toContain("`march legate init` is deprecated");
+      expect(result.stderr).toContain("march init");
     });
 
     it("`march legate init` without git on PATH exits 1 with a git-specific message", () => {
@@ -268,6 +289,20 @@ describe("march CLI", () => {
       expect(result.exitCode).toBe(1);
       expect(result.stderr).toContain("git not found on PATH");
       expect(result.stderr).not.toContain("from inside a git repository");
+    });
+  });
+
+  describe("march profile", () => {
+    it("`march profile register` still works but warns it is deprecated", () => {
+      // Point at a closed port so the Herald round-trip fails fast; registration
+      // is best-effort (never throws), so the action runs to completion and the
+      // deprecation warning is emitted before the unreachable-Herald note.
+      const result = runWithEnv(
+        ["profile", "register", "-p", "demo", "--repo-path", "/tmp/demo"],
+        { ...process.env, MARCH_HERALD_URL: "http://127.0.0.1:1" },
+      );
+      expect(result.stderr).toContain("`march profile register` is deprecated");
+      expect(result.stderr).toContain("march init");
     });
   });
 
@@ -470,11 +505,20 @@ describe("march CLI", () => {
     expect(result.exitCode).toBe(2);
   });
 
-  it("march init --help exits 0 and stdout contains init and its description", () => {
+  it("march init --help exits 0 and shows the profile-onboarding usage", () => {
     const result = run(["init", "--help"]);
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toContain("init");
-    expect(result.stdout).toContain("Initialize");
+    // Profile-onboarding command: takes a <profile> positional and a --repo flag.
+    expect(result.stdout).toContain("<profile>");
+    expect(result.stdout).toContain("--repo");
+  });
+
+  it("march self init --help exits 0 and describes the CLI-installation bootstrap", () => {
+    const result = run(["self", "init", "--help"]);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("Usage: march self init");
+    expect(result.stdout).toContain("manifest");
   });
 
   it("march update --help exits 0 and stdout contains update", () => {

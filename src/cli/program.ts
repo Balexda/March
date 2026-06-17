@@ -149,9 +149,324 @@ function resolveHatcheryBackendSelection(input: {
   };
 }
 
+/**
+ * Shared profile-onboarding flow behind both `march init <profile>` and the
+ * deprecated `march legate init`. Resolves the repo root (an explicit `repoArg`
+ * when given, else the cwd's git toplevel), runs the agent-deck / docker / bridge
+ * pre-flight, then renders + sets up the legate conductor, registers the profile
+ * with Herald, and ensures the shared legate service. Writes user-facing output
+ * and sets `process.exitCode`; never throws for the expected failure modes.
+ *
+ * `invokedAs` is the command the operator typed, so pre-flight errors point them
+ * back at the right command.
+ */
+async function runLegateOnboarding(input: {
+  repoArg?: string;
+  profile?: string;
+  conductorName?: string;
+  description?: string;
+  workerGroup?: string;
+  model?: string;
+  effort?: string;
+  toolchain?: string;
+  priority?: number;
+  heartbeatInterval?: string;
+  setup?: boolean;
+  processor?: boolean;
+  loop?: boolean;
+  bridgeCheck?: boolean;
+  invokedAs: string;
+}): Promise<void> {
+  const loopDisabled = input.loop === false || input.processor === false;
+
+  // 1. Resolve the repo root. Legate is per-repo, so this is mandatory. Three
+  //    distinct failures need distinct messages — pointing the user at "run
+  //    from inside a git repo" when `git` itself isn't installed sends them in
+  //    the wrong direction. An explicit --repo is canonicalised through the
+  //    same `git rev-parse` so it is validated as a real checkout too.
+  if (!isFinderAvailable()) {
+    process.stderr.write(
+      "Cannot verify git is installed: path-search utility unavailable.\n",
+    );
+    process.exitCode = ERROR;
+    return;
+  }
+  if (!isOnPath("git")) {
+    process.stderr.write(
+      "git not found on PATH — required to detect the repository root.\n",
+    );
+    process.exitCode = ERROR;
+    return;
+  }
+  const repoCwd = input.repoArg ? input.repoArg : process.cwd();
+  let repoRoot: string;
+  try {
+    repoRoot = execFileSync("git", ["rev-parse", "--show-toplevel"], {
+      cwd: repoCwd,
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "pipe"],
+    }).trim();
+  } catch (err) {
+    const stderr = ((err as { stderr?: Buffer | string }).stderr ?? "")
+      .toString()
+      .trim();
+    if (stderr.includes("not a git repository")) {
+      process.stderr.write(
+        input.repoArg
+          ? `--repo "${input.repoArg}" is not inside a git repository.\n`
+          : `Run \`${input.invokedAs}\` from inside a git repository (or pass --repo <path>).\n`,
+      );
+    } else {
+      process.stderr.write(
+        `Failed to detect the repository root: ${stderr || (err as Error).message}\n`,
+      );
+    }
+    process.exitCode = ERROR;
+    return;
+  }
+
+  // 2. Verify agent-deck is on PATH when we'll actually invoke it.
+  const willRunSetup = input.setup !== false;
+  // The deterministic loop runs as a Hatchery-managed container — the only loop
+  // runtime — so Docker is required whenever setup will launch it.
+  const willLaunchLoopContainer = willRunSetup && !loopDisabled;
+  if (willLaunchLoopContainer) {
+    if (!isFinderAvailable()) {
+      process.stderr.write(
+        "Cannot verify Docker is installed: path-search utility unavailable.\n",
+      );
+      process.exitCode = ERROR;
+      return;
+    }
+    if (!isOnPath("docker")) {
+      process.stderr.write(
+        "Docker not found on PATH — required to launch the Legate loop service container (pass --no-loop or --no-setup to skip).\n",
+      );
+      process.exitCode = ERROR;
+      return;
+    }
+  }
+  if (willRunSetup) {
+    if (!isFinderAvailable()) {
+      process.stderr.write(
+        "Cannot verify agent-deck is installed: path-search utility unavailable.\n",
+      );
+      process.exitCode = ERROR;
+      return;
+    }
+    if (!isOnPath("agent-deck")) {
+      process.stderr.write(
+        "agent-deck not found on PATH — install it from https://github.com/asheshgoplani/agent-deck or pass --no-setup to render the template only.\n",
+      );
+      process.exitCode = ERROR;
+      return;
+    }
+
+    // 3. Bridge pre-flight: confirm python3 is recent enough to actually run
+    //    agent-deck's conductor bridge daemon. Skipped under --no-bridge-check.
+    if (input.bridgeCheck !== false) {
+      const check = checkBridgeRequirements();
+      if (!check.ok) {
+        process.stderr.write(check.message + "\n");
+        process.exitCode = ERROR;
+        return;
+      }
+    }
+  }
+
+  // 4. Render template + (optionally) run agent-deck conductor setup + register.
+  try {
+    const result = await initLegate({
+      repoPath: repoRoot,
+      profile: input.profile,
+      conductorName: input.conductorName,
+      description: input.description,
+      workerGroup: input.workerGroup,
+      model: input.model,
+      effort: input.effort,
+      toolchain: input.toolchain,
+      priority: input.priority,
+      heartbeatInterval: input.heartbeatInterval,
+      runSetup: willRunSetup,
+      loop: !loopDisabled,
+      processor: !loopDisabled,
+    });
+    console.log(result.summary);
+    process.exitCode = SUCCESS;
+  } catch (err) {
+    if (err instanceof LegateError) {
+      console.error(err.message);
+      process.exitCode = ERROR;
+      return;
+    }
+    throw err;
+  }
+}
+
+/**
+ * Parse the shared `--toolchain` / `--priority` onboarding flags, validating
+ * each. Returns the parsed values, or `null` after writing an error + setting
+ * `process.exitCode` when a value is invalid.
+ */
+async function parseToolchainAndPriority(opts: {
+  toolchain?: string;
+  priority?: string;
+}): Promise<{ toolchain?: string; priority?: number } | null> {
+  const { isToolchainSelection, TOOLCHAIN_SELECTIONS } = await import(
+    "../spawn/toolchain.js"
+  );
+  const toolchain = opts.toolchain?.trim();
+  if (toolchain !== undefined && !isToolchainSelection(toolchain)) {
+    process.stderr.write(
+      `Invalid --toolchain "${opts.toolchain}": expected one of ${TOOLCHAIN_SELECTIONS.join(", ")}.\n`,
+    );
+    process.exitCode = USAGE_ERROR;
+    return null;
+  }
+  let priority: number | undefined;
+  if (opts.priority !== undefined) {
+    const n = Number(opts.priority.trim());
+    if (!Number.isInteger(n) || n < 0) {
+      process.stderr.write(
+        `Invalid --priority "${opts.priority}": expected a non-negative integer (0 = highest).\n`,
+      );
+      process.exitCode = USAGE_ERROR;
+      return null;
+    }
+    priority = n;
+  }
+  return { toolchain, priority };
+}
+
+// `march init <profile> --repo <path>` — the single profile-onboarding entry
+// point. Ensures the full service stack is up (idempotent, the `march up` path),
+// then onboards the profile: renders/sets up its legate conductor, registers it
+// with Herald, and ensures the shared legate service. Supersedes the split
+// `march legate init` + `march profile register`. The CLI-installation bootstrap
+// that used to own the top-level `init` name now lives at `march self init`.
 program
+  .command("init <profile>")
+  .description("Onboard a profile: bring the stack up (idempotent), then register the repo with Herald")
+  .option("--repo <path>", "Path to the repo checkout to onboard (default: current git repo)")
+  .option("-g, --worker-group <group>", "Group for worker sessions (default: legate-workers)")
+  .option(
+    "-m, --model <model>",
+    "Claude model alias or full ID for the Legate agent session (default: opus).",
+  )
+  .option(
+    "--effort <level>",
+    "Claude Code --effort level for the conductor session: low | medium | high | xhigh | max (default: medium).",
+  )
+  .option(
+    "--toolchain <toolchain>",
+    "Worker toolchain for this profile's spawns: auto (default) | node | jvm",
+  )
+  .option(
+    "--priority <n>",
+    "Dispatch priority (lower wins; 0 = highest / P0). Omit to leave unset.",
+  )
+  .option("-n, --conductor <name>", "Legate agent conductor name (default: <repo-slug>-legate-agent)")
+  .option("-d, --description <description>", "Legate agent conductor description")
+  .option(
+    "-i, --heartbeat-interval <interval>",
+    "Cadence at which the conductor's systemd heartbeat timer fires (e.g. 5min, 300s, 1h). Default: 5min.",
+  )
+  .option("--no-setup", "Render the template only; skip `agent-deck conductor setup`")
+  .option("--no-loop", "Skip deploying the paired deterministic Legate loop service container")
+  .option(
+    "--no-bridge-check",
+    "Skip the Python 3.9+ pre-flight check for the agent-deck conductor bridge daemon.",
+  )
+  .action(async (profile: string, opts: {
+    repo?: string;
+    workerGroup?: string;
+    model?: string;
+    effort?: string;
+    toolchain?: string;
+    priority?: string;
+    conductor?: string;
+    description?: string;
+    heartbeatInterval?: string;
+    setup?: boolean;
+    loop?: boolean;
+    bridgeCheck?: boolean;
+  }) => {
+    commandHandled = true;
+
+    const parsed = await parseToolchainAndPriority({
+      toolchain: opts.toolchain,
+      priority: opts.priority,
+    });
+    if (parsed === null) return;
+
+    // 1. Ensure the full stack is up (idempotent — reconciles a healthy stack,
+    //    aborts cleanly when images are missing). Reuses the `march up` path.
+    try {
+      const up = await stackUp();
+      if (up.missingImages.length > 0) {
+        process.stderr.write(
+          "Cannot bring up the stack — these images are not built:\n",
+        );
+        for (const m of up.missingImages) {
+          process.stderr.write(`  ${m.service}: ${m.image}\n`);
+        }
+        process.stderr.write(
+          "Build them with `march upgrade` (or `npm run build:<service>-image`), then re-run `march init`.\n",
+        );
+        process.exitCode = ERROR;
+        return;
+      }
+      let failed = false;
+      for (const svc of up.services) {
+        console.log(
+          `${svc.service}: ${svc.outcome}${svc.detail ? ` (${svc.detail})` : ""}`,
+        );
+        if (svc.outcome === "failed") failed = true;
+      }
+      if (failed) {
+        process.stderr.write(
+          "One or more services failed to start; fix the above, then re-run `march init`.\n",
+        );
+        process.exitCode = ERROR;
+        return;
+      }
+    } catch (err) {
+      process.stderr.write(
+        (err instanceof Error ? err.message : String(err)) + "\n",
+      );
+      process.exitCode = ERROR;
+      return;
+    }
+
+    // 2. Onboard the profile.
+    await runLegateOnboarding({
+      repoArg: opts.repo,
+      profile,
+      conductorName: opts.conductor,
+      description: opts.description,
+      workerGroup: opts.workerGroup,
+      model: opts.model,
+      effort: opts.effort,
+      toolchain: parsed.toolchain,
+      priority: parsed.priority,
+      heartbeatInterval: opts.heartbeatInterval,
+      setup: opts.setup,
+      loop: opts.loop,
+      bridgeCheck: opts.bridgeCheck,
+      invokedAs: "march init",
+    });
+  });
+
+// `march self` — installation-scoped (CLI-host) maintenance, distinct from the
+// per-profile/service surface. This group is shared with other stack-lifecycle
+// work; keep additions composable with any sibling `self` subcommands.
+const self = program
+  .command("self")
+  .description("Manage the March CLI installation on this host (manifest + deployed skills)");
+
+self
   .command("init")
-  .description("Initialize the March environment")
+  .description("Initialize the March CLI installation (writes the manifest + deploys base skills)")
   .action(async () => {
     commandHandled = true;
     try {
@@ -465,126 +780,28 @@ legate
   }) => {
     commandHandled = true;
 
-    const loopDisabled = opts.loop === false || opts.processor === false;
+    // Deprecated since the unified `march init <profile> --repo <path>` landed:
+    // that command brings the stack up first, then runs this same onboarding.
+    // Kept working (forwarding to the shared flow) for one release.
+    process.stderr.write(
+      "warning: `march legate init` is deprecated — use `march init <profile> --repo <path>` " +
+        "(it brings the stack up first, then onboards the profile). This shim will be removed in a future release.\n",
+    );
 
-    // 1. Detect repo root. Legate is per-repo, so this is mandatory. Three
-    //    distinct failures need distinct messages — pointing the user at
-    //    "run from inside a git repo" when `git` itself isn't installed
-    //    sends them in the wrong direction.
-    if (!isFinderAvailable()) {
-      process.stderr.write(
-        "Cannot verify git is installed: path-search utility unavailable.\n",
-      );
-      process.exitCode = ERROR;
-      return;
-    }
-    if (!isOnPath("git")) {
-      process.stderr.write(
-        "git not found on PATH — required to detect the repository root.\n",
-      );
-      process.exitCode = ERROR;
-      return;
-    }
-    let repoRoot: string;
-    try {
-      repoRoot = execFileSync("git", ["rev-parse", "--show-toplevel"], {
-        encoding: "utf-8",
-        stdio: ["ignore", "pipe", "pipe"],
-      }).trim();
-    } catch (err) {
-      const stderr = ((err as { stderr?: Buffer | string }).stderr ?? "")
-        .toString()
-        .trim();
-      if (stderr.includes("not a git repository")) {
-        process.stderr.write(
-          "Run `march legate init` from inside a git repository.\n",
-        );
-      } else {
-        process.stderr.write(
-          `Failed to detect the repository root: ${stderr || (err as Error).message}\n`,
-        );
-      }
-      process.exitCode = ERROR;
-      return;
-    }
-
-    // 2. Verify agent-deck is on PATH when we'll actually invoke it.
-    const willRunSetup = opts.setup !== false;
-    // The deterministic loop runs as a Hatchery-managed container — the only
-    // loop runtime — so Docker is required whenever setup will launch it.
-    const willLaunchLoopContainer = willRunSetup && !loopDisabled;
-    if (willLaunchLoopContainer) {
-      if (!isFinderAvailable()) {
-        process.stderr.write(
-          "Cannot verify Docker is installed: path-search utility unavailable.\n",
-        );
-        process.exitCode = ERROR;
-        return;
-      }
-      if (!isOnPath("docker")) {
-        process.stderr.write(
-          "Docker not found on PATH — required to launch the Legate loop service container (pass --no-loop or --no-setup to skip).\n",
-        );
-        process.exitCode = ERROR;
-        return;
-      }
-    }
-    if (willRunSetup) {
-      if (!isFinderAvailable()) {
-        process.stderr.write(
-          "Cannot verify agent-deck is installed: path-search utility unavailable.\n",
-        );
-        process.exitCode = ERROR;
-        return;
-      }
-      if (!isOnPath("agent-deck")) {
-        process.stderr.write(
-          "agent-deck not found on PATH — install it from https://github.com/asheshgoplani/agent-deck or pass --no-setup to render the template only.\n",
-        );
-        process.exitCode = ERROR;
-        return;
-      }
-
-      // 3. Bridge pre-flight: confirm python3 is recent enough to actually
-      //    run agent-deck's conductor bridge daemon. The bridge is what
-      //    delivers heartbeats; without it, the conductor is functional
-      //    but inert. Failing here is preferable to deploying a conductor
-      //    that silently never wakes up. Skipped under --no-bridge-check.
-      if (opts.bridgeCheck !== false) {
-        const check = checkBridgeRequirements();
-        if (!check.ok) {
-          process.stderr.write(check.message + "\n");
-          process.exitCode = ERROR;
-          return;
-        }
-      }
-    }
-
-    // 4. Render template + (optionally) run agent-deck conductor setup.
-    try {
-      const result = await initLegate({
-        repoPath: repoRoot,
-        profile: opts.profile,
-        conductorName: opts.name,
-        description: opts.description,
-        workerGroup: opts.workerGroup,
-        model: opts.model,
-        effort: opts.effort,
-        heartbeatInterval: opts.heartbeatInterval,
-        runSetup: willRunSetup,
-        loop: !loopDisabled,
-        processor: !loopDisabled,
-      });
-      console.log(result.summary);
-      process.exitCode = SUCCESS;
-    } catch (err) {
-      if (err instanceof LegateError) {
-        console.error(err.message);
-        process.exitCode = ERROR;
-        return;
-      }
-      throw err;
-    }
+    await runLegateOnboarding({
+      profile: opts.profile,
+      conductorName: opts.name,
+      description: opts.description,
+      workerGroup: opts.workerGroup,
+      model: opts.model,
+      effort: opts.effort,
+      heartbeatInterval: opts.heartbeatInterval,
+      setup: opts.setup,
+      processor: opts.processor,
+      loop: opts.loop,
+      bridgeCheck: opts.bridgeCheck,
+      invokedAs: "march legate init",
+    });
   });
 
 legate
@@ -734,6 +951,14 @@ profile
     priority?: string;
   }) => {
     commandHandled = true;
+    // Deprecated since the unified `march init <profile> --repo <path>` landed:
+    // onboarding (stack-up + registration + conductor) now lives there. This
+    // registration-only shim keeps working for one release.
+    process.stderr.write(
+      "warning: `march profile register` is deprecated — use `march init <profile> --repo <path>` " +
+        "to onboard a profile (it also brings the stack up and sets up the conductor). " +
+        "This shim will be removed in a future release.\n",
+    );
     const { registerProfile } = await import("../legate/profile-register.js");
     const { isToolchainSelection, TOOLCHAIN_SELECTIONS } = await import(
       "../spawn/toolchain.js"
