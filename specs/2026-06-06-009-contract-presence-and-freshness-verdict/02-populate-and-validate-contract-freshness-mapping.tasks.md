@@ -20,11 +20,11 @@
 
 - [ ] **Author the populated freshness configuration**
 
-  Add `docs/subsystems/contract-freshness.config.json` with one entry for each required M2 contract from the Required Contract set. Keep the mapping limited to public source selectors and include Steward's role-consumer ownership context so AS 2.1 and AS 2.3 can be validated by the existing docs-contract checker.
+  Add `docs/subsystems/contract-freshness.config.json` with one entry for each required M2 contract from the Required Contract set. Keep the mapping limited to public source selectors and include Steward's role-consumer ownership context so AS 2.1 and AS 2.3 can be validated by the existing `npm run docs:contracts:check` verdict command.
 
   _Acceptance criteria:_
   - The config file uses the Contract Freshness Configuration shape from the contracts artifact.
-  - Hatchery, Brood, Herald, Castra, Spawn, Legate, and Steward each have exactly one entry.
+  - Every subsystem in `docs/subsystems/subsystems.json` — currently Hatchery, Brood, Herald, Castra, Spawn, Legate, Steward, and Statio — has exactly one entry, since `readSubsystems()` derives the required set from that manifest.
   - Every entry has a stable name, a unique contract path, and at least one public source selector.
   - Selectors are repo-relative and avoid generated or dependency directories.
   - Steward maps to role-consumer surfaces instead of a standalone `src/steward/` module.
