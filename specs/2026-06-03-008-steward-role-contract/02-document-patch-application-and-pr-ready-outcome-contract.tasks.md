@@ -8,6 +8,7 @@
 ---
 
 ## Slice 1: Steward Patch Application and PR-Ready Outcome Contract
+<!-- audience: builder; mode: how-to; length: 5-15 steps; diagram: optional; examples: forbidden -->
 
 **Goal**: Extend `docs/subsystems/steward/contract.md` with Steward-owned patch-application, worktree/index, failure, diagnostic, and PR-ready outcome promises after the launch/input contract is in place.
 
@@ -25,7 +26,7 @@
   - The contract documents `git apply --index` behavior for validated patch output (AS 2.1).
   - Success requires the expected worktree and index to reflect the accepted patch (AS 2.1).
   - Fallback, rejected hunks, conflicts, and unsupported apply forms are described as bounded Steward outcomes, not interactive prompts (AS 2.2).
-  - The prose consumes Spawn's validated patch result without restating Spawn raw-output parsing or validation internals.
+  - The prose consumes Spawn's validated patch result without restating Spawn's raw-output parsing or validation internals.
 
 - [ ] **Record worktree cleanliness and failure constraints**
 
@@ -52,20 +53,24 @@
 ---
 
 ## Specification Debt
+<!-- audience: reviewer; mode: reference; length: tables only; diagram: optional; examples: discouraged -->
 
-None - all ambiguities resolved.
+None — all ambiguities resolved.
 
 ---
 
 ## Dependency Order
+<!-- audience: builder+ai-input; mode: reference; length: tables only; diagram: recommended; examples: discouraged -->
 
 Recommended implementation sequence:
 
 | ID | Title | Depends On | Artifact |
 |----|-------|------------|----------|
-| S1 | Steward Patch Application and PR-Ready Outcome Contract | US1 | `docs/subsystems/steward/contract.md` |
+| S1 | Steward Patch Application and PR-Ready Outcome Contract | — | — |
 
 ### Cross-Story Dependencies
+
+Direction must be either `depends on` or `depended upon by`.
 
 | Dependency | Direction | Notes |
 |------------|-----------|-------|
