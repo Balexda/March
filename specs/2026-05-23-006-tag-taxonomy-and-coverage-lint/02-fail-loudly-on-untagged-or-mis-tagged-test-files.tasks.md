@@ -1,4 +1,4 @@
-# Tasks: Fail Loudly On Untagged Or Mis-Tagged Test Files
+# Tasks: Fail Loudly on Untagged or Mis-tagged Test Files
 
 **Source**: `specs/2026-05-23-006-tag-taxonomy-and-coverage-lint/tag-taxonomy-and-coverage-lint.spec.md` - User Story 2
 **Data Model**: `specs/2026-05-23-006-tag-taxonomy-and-coverage-lint/tag-taxonomy-and-coverage-lint.data-model.md`
@@ -37,7 +37,9 @@
 ## Specification Debt
 <!-- audience: reviewer; mode: reference; length: tables only; diagram: optional; examples: discouraged -->
 
-None - all ambiguities resolved.
+| Item | Resolution |
+|------|------------|
+| The lint will fail against the current untagged baseline (e.g. `src/castra/steward-skills.test.ts`, `src/contracts/public-surface.test.ts`, `src/herald/profiles/types.test.ts`, `src/pr-integration/eligibility.test.ts`, `src/testing/quarantine.test.ts`). | Expected. Failing on untagged files is this slice's intended outcome, not a defect. Bringing the tree green is **US3's** job (Preserve Existing Test Scope While Tagging the Baseline), which depends on US1+US2 per the spec dependency order. This slice deliberately does **not** tag existing files (acceptance criterion: "pass without rewriting files"). `npm run test:taxonomy` is the **local** entrypoint here; CI wiring is deferred (criterion 5: "future CI entrypoint"), so this slice does not turn `main` red in CI before US3 lands. |
 
 ---
 
