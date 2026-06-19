@@ -29,7 +29,7 @@
 
 - [ ] **Implement `getPr(number)` through bounded `gh pr view`**
 
-  Add the Statio forge adapter logic that resolves repository identity, scopes `gh pr view` with `-R <owner>` when available, falls back to the repo-path cwd when owner is unavailable, and shapes the response into the documented PR summary. The adapter should remain stateless, preserve the current `sense-io.ts` projection, and turn absent PRs, failed commands, timeouts, and unparseable output into typed outcomes.
+  Add the Statio forge adapter logic that resolves repository identity, scopes `gh pr view` with `-R <owner>/<name>` when available, falls back to the repo-path cwd when owner is unavailable, and shapes the response into the documented PR summary. The adapter should remain stateless, preserve the current `sense-io.ts` projection, and turn absent PRs, failed commands, timeouts, and unparseable output into typed outcomes.
 
   _Acceptance criteria:_
   - An open PR returns state, mergeable, review decision, CI rollup, head branch, title, author, and unresolved-thread summary for AS 1.1
@@ -95,8 +95,8 @@ Recommended implementation sequence:
 
 | ID | Title | Depends On | Artifact |
 |----|-------|-----------|----------|
-| S1 | Add the Single-PR Forge Read | User Story 3 | — |
-| S2 | Expose `getPr` Through the Gateway Surface | S1, User Story 5 | — |
+| S1 | Add the Single-PR Forge Read | — | — |
+| S2 | Expose `getPr` Through the Gateway Surface | S1 | — |
 
 ### Cross-Story Dependencies
 
@@ -104,7 +104,7 @@ Direction must be either `depends on` or `depended upon by`.
 
 | Dependency | Direction | Notes |
 |------------|-----------|-------|
-| User Story 3: Resolve Repository Identity and Default Branch | depends on | Single-PR reads use repo identity to scope `gh pr view` with `-R <owner>` and fall back when owner is unavailable. |
+| User Story 3: Resolve Repository Identity and Default Branch | depends on | Single-PR reads use repo identity to scope `gh pr view` with `-R <owner>/<name>` and fall back when owner is unavailable. |
 | User Story 5: Reach the Gateway Over HTTP With Auth and Uniform Typed Errors | depends on | The HTTP route and async client use the existing bearer-token, envelope, trace-header, and client transport foundation. |
 | User Story 4: Read Unresolved Review Threads | depended upon by | The richer standalone review-thread read can reuse the unresolved-thread shaping proven by `getPr(number)`. |
 | User Story 6: Operate Statio as an Observable Container | depended upon by | Containerization and dashboards observe this route as part of the complete v1 read surface. |
