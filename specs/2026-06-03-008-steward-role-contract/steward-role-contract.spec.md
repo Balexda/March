@@ -103,7 +103,7 @@ Recommended implementation sequence:
 |----|-------|-----------|----------|
 | US1 | Document Steward Launch and Input Contract | — | specs/2026-06-03-008-steward-role-contract/01-document-steward-launch-and-input-contract.tasks.md |
 | US2 | Document Patch Application and PR-Ready Outcome Contract | US1 | specs/2026-06-03-008-steward-role-contract/02-document-patch-application-and-pr-ready-outcome-contract.tasks.md |
-| US3 | Document Steward Lifecycle, Tracking, and Cleanup Boundaries | US1 | — |
+| US3 | Document Steward Lifecycle, Tracking, and Cleanup Boundaries | US1 | specs/2026-06-03-008-steward-role-contract/03-document-steward-lifecycle-tracking-and-cleanup-boundaries.tasks.md |
 | US4 | Record Cross-Contract Ownership for Steward Consumers | US1, US2, US3 | — |
 
 ## Requirements *(mandatory)*
@@ -160,7 +160,7 @@ None - all ambiguities resolved.
 
 - **SC-001**: One new contract artifact exists at the Steward subsystem contract path.
 - **SC-002**: The new contract contains the three required H2 sections from Feature 1.
-- **SC-003**: The new contract includes an empty AUTOGEN marker pair inside `## Public Interface` for later extraction.
+- **SC-003**: The new contract includes an empty AUTOGEN marker pair inside `## Public Interface`.
 - **SC-004**: Steward's contract records launch eligibility, validated patch input, target worktree/branch context, and role prompt/session metadata.
 - **SC-005**: Steward's contract records patch-application, index/worktree, PR-ready, and failed-outcome promises.
 - **SC-006**: Steward's contract records Brood, Herald, Castra, Spawn, Hatchery, and Legate lifecycle/correlation boundaries.
