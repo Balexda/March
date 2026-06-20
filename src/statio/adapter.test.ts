@@ -11,7 +11,7 @@ import {
   parseRepoInfoGhJson,
   type StatioCommandRunner,
 } from "./adapter.js";
-import { StatioForgeError, StatioNotFoundError } from "./types.js";
+import { StatioForgeError, StatioNotFoundError, StatioValidationError } from "./types.js";
 
 function runnerReturning(stdout: string): StatioCommandRunner {
   return vi.fn(async () => stdout);
@@ -271,6 +271,34 @@ describe("statio gh forge adapter — getPr", () => {
       code: "not_found",
     });
     await expect(adapter.getPr(404)).rejects.toBeInstanceOf(StatioNotFoundError);
+  });
+
+  it("detects a not_found reported only on gh stderr", async () => {
+    const runCommand: StatioCommandRunner = vi.fn(async (_command, args) => {
+      if (args[0] === "repo") {
+        return JSON.stringify({
+          nameWithOwner: "Balexda/March",
+          defaultBranchRef: { name: "master" },
+        });
+      }
+      const err = new Error("Command failed: gh pr view 99");
+      (err as Error & { stderr?: string }).stderr = "no pull request found for branch";
+      throw err;
+    });
+    const adapter = createGhForgeAdapter({ runCommand });
+
+    await expect(adapter.getPr(99)).rejects.toBeInstanceOf(StatioNotFoundError);
+  });
+
+  it("rejects a non-positive or non-integer PR number as a validation error", async () => {
+    const runCommand: StatioCommandRunner = vi.fn(async () => "");
+    const adapter = createGhForgeAdapter({ runCommand });
+
+    for (const bad of [0, -1, 1.5]) {
+      await expect(adapter.getPr(bad)).rejects.toBeInstanceOf(StatioValidationError);
+    }
+    // The forge is never reached for a malformed argument.
+    expect(runCommand).not.toHaveBeenCalled();
   });
 
   it("wraps malformed gh pr view output as forge_error", async () => {

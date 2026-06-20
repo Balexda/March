@@ -7,7 +7,7 @@ import type {
   PullRequestSummary,
   ReviewThread,
 } from "./types.js";
-import { StatioForgeError, StatioNotFoundError } from "./types.js";
+import { StatioForgeError, StatioNotFoundError, StatioValidationError } from "./types.js";
 
 const EXEC_MAX_BUFFER = 1024 * 1024;
 const DEFAULT_GH_TIMEOUT_MS = 10_000;
@@ -287,8 +287,16 @@ export function parsePullRequestSummaryGhJson(
 }
 
 function isNotFoundError(err: unknown): boolean {
-  const message = err instanceof Error ? err.message : String(err);
-  return /not found|no pull request|could not resolve|404/i.test(message);
+  const haystack: string[] = [];
+  if (err instanceof Error) {
+    haystack.push(err.message);
+    const streams = err as { stderr?: unknown; stdout?: unknown };
+    if (typeof streams.stderr === "string") haystack.push(streams.stderr);
+    if (typeof streams.stdout === "string") haystack.push(streams.stdout);
+  } else {
+    haystack.push(String(err));
+  }
+  return /not found|no pull request|could not resolve|404/i.test(haystack.join("\n"));
 }
 
 function splitOwner(owner: string): [string, string] | null {
@@ -322,7 +330,9 @@ export function createGhForgeAdapter(
 
     async getPr(number: number): Promise<PullRequestSummary> {
       if (!Number.isInteger(number) || number <= 0) {
-        throw new StatioNotFoundError(`Pull request #${number} was not found.`);
+        throw new StatioValidationError(
+          `Pull request number must be a positive integer; received ${number}.`,
+        );
       }
 
       let repo: RepoInfo = { owner: "", defaultBranch: "" };
@@ -381,8 +391,13 @@ function execText(
         maxBuffer: EXEC_MAX_BUFFER,
         signal: AbortSignal.timeout(options.timeoutMs),
       },
-      (err, stdout) => {
+      (err, stdout, stderr) => {
         if (err) {
+          // execFile passes stderr as a separate callback argument; surface it
+          // on the error so not-found detection can inspect gh's stderr text.
+          if (typeof stderr === "string" && stderr) {
+            (err as Error & { stderr?: string }).stderr = stderr;
+          }
           reject(err);
           return;
         }
