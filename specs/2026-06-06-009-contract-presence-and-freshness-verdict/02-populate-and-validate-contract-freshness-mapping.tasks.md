@@ -18,7 +18,7 @@
 
 ### Tasks
 
-- [ ] **Author the populated freshness configuration**
+- [x] **Author the populated freshness configuration**
 
   Add `docs/subsystems/contract-freshness.config.json` with one entry for each required M2 contract from the Required Contract set. Keep the mapping limited to public source selectors and include Steward's role-consumer ownership context so AS 2.1 and AS 2.3 can be validated by the existing `npm run docs:contracts:check` verdict command.
 
@@ -30,7 +30,7 @@
   - Steward maps to role-consumer surfaces instead of a standalone `src/steward/` module.
   - No runtime subsystem behavior, CI workflow, Smithy-agent enforcement, or AUTOGEN extraction is added.
 
-- [ ] **Validate freshness config ownership**
+- [x] **Validate freshness config ownership**
 
   Extend `scripts/docs-contracts/check.mjs` and its tests so the verdict command reads and validates the freshness config as a config category. The validator should satisfy AS 2.1-2.3 by rejecting missing required entries, duplicate contract paths, overlapping public source ownership, malformed selectors, and Steward mappings that rely on a standalone source directory.
 

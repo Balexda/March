@@ -1,0 +1,73 @@
+{
+  "version": 1,
+  "contracts": [
+    {
+      "name": "hatchery",
+      "contractPath": "docs/subsystems/hatchery/contract.md",
+      "publicSourcePaths": [
+        "src/hatchery/defaults.ts",
+        "src/hatchery/orphan-branch.ts",
+        "src/hatchery/service/**",
+        "src/hatchery/spawn-config.ts"
+      ]
+    },
+    {
+      "name": "brood",
+      "contractPath": "docs/subsystems/brood/contract.md",
+      "publicSourcePaths": [
+        "src/brood/**"
+      ]
+    },
+    {
+      "name": "herald",
+      "contractPath": "docs/subsystems/herald/contract.md",
+      "publicSourcePaths": [
+        "src/herald/**"
+      ]
+    },
+    {
+      "name": "castra",
+      "contractPath": "docs/subsystems/castra/contract.md",
+      "publicSourcePaths": [
+        "src/castra/adapter.ts",
+        "src/castra/config.ts",
+        "src/castra/metrics.ts",
+        "src/castra/recovery.ts",
+        "src/castra/serve.ts",
+        "src/castra/server.ts",
+        "src/castra/types.ts"
+      ]
+    },
+    {
+      "name": "spawn",
+      "contractPath": "docs/subsystems/spawn/contract.md",
+      "publicSourcePaths": [
+        "src/spawn/**"
+      ]
+    },
+    {
+      "name": "legate",
+      "contractPath": "docs/subsystems/legate/contract.md",
+      "publicSourcePaths": [
+        "src/legate/**"
+      ]
+    },
+    {
+      "name": "steward",
+      "contractPath": "docs/subsystems/steward/contract.md",
+      "publicSourcePaths": [
+        "src/castra/client.ts",
+        "src/castra/steward-skills.ts",
+        "src/hatchery/spawn-handoff.ts"
+      ],
+      "notes": "Steward is a role-level consumer implemented through Castra session/client surfaces and Hatchery prompt handoff, not a standalone src/steward module."
+    },
+    {
+      "name": "statio",
+      "contractPath": "docs/subsystems/statio/contract.md",
+      "publicSourcePaths": [
+        "src/statio/**"
+      ]
+    }
+  ]
+}
