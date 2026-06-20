@@ -105,8 +105,15 @@ describe("relaunch handler", () => {
     expect(slice.worker_session_id).toBe("fresh");
     expect(state.raw.transient_retry_counts["relaunch-steward:gone"]).toBe(1);
     expect(res.actions[0]).toMatchObject({ action: "relaunch-steward", sessionId: "fresh" });
-    // #175: Herald steward.relaunched + retry.counted transition events.
-    expect(c.emitTransition).toHaveBeenCalledWith({ type: "steward.relaunched", sliceId: "gone", sessionId: "fresh" });
+    // #175: Herald steward.relaunched + retry.counted transition events. The
+    // relaunch now records the LIVE worktree (#410/#412) — here the launch reported
+    // none, so it falls back to the decision's worktree path.
+    expect(c.emitTransition).toHaveBeenCalledWith({
+      type: "steward.relaunched",
+      sliceId: "gone",
+      sessionId: "fresh",
+      worktreePath: "/home/u/Development/WorkTrees/March/feature-feat-a",
+    });
     expect(c.emitTransition).toHaveBeenCalledWith({ type: "retry.counted", key: "relaunch-steward:gone", count: 1 });
   });
 
@@ -131,6 +138,14 @@ describe("relaunch handler", () => {
     );
     // The slice tracks the LIVE worktree from the launch response, not the guess.
     expect((slice as any).worktree_path).toBe("/wt/feature-feat-a-newhash");
+    // …and the steward.relaunched event records that SAME live worktree so a
+    // cold-start rebuild keeps it (#410/#412), not the assess-time guess.
+    expect(c.emitTransition).toHaveBeenCalledWith({
+      type: "steward.relaunched",
+      sliceId: "gone",
+      sessionId: "fresh",
+      worktreePath: "/wt/feature-feat-a-newhash",
+    });
   });
 
   it("#308: reaps the prior steward when it sits on a DISTINCT worktree", async () => {

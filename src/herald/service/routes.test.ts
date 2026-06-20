@@ -57,6 +57,25 @@ describe("validateEvent", () => {
     expect(validateEvent({ type: "slice.recovery.requested", sliceId: "" })).toMatchObject({ ok: false });
     expect(validateEvent({ type: "slice.recovery.requested", sliceId: "s1" })).toMatchObject({ ok: true });
   });
+  it("guards the optional recovery `rung` to an integer in {0,1,2,3} (#412)", () => {
+    for (const rung of [0, 1, 2, 3]) {
+      expect(validateEvent({ type: "slice.recovery.requested", sliceId: "s1", rung })).toMatchObject({ ok: true });
+    }
+    expect(validateEvent({ type: "slice.recovery.requested", sliceId: "s1", rung: 4 })).toMatchObject({ ok: false });
+    expect(validateEvent({ type: "slice.recovery.requested", sliceId: "s1", rung: -1 })).toMatchObject({ ok: false });
+    expect(validateEvent({ type: "slice.recovery.requested", sliceId: "s1", rung: 1.5 })).toMatchObject({ ok: false });
+    expect(validateEvent({ type: "slice.recovery.requested", sliceId: "s1", rung: "3" as unknown as number })).toMatchObject({ ok: false });
+  });
+  it("guards an optional worktreePath to a non-empty string when present (#412)", () => {
+    expect(validateEvent({ type: "steward.relaunched", sliceId: "s1", sessionId: "x", worktreePath: "/wt/a" })).toMatchObject({ ok: true });
+    // Omitted is fine.
+    expect(validateEvent({ type: "steward.relaunched", sliceId: "s1", sessionId: "x" })).toMatchObject({ ok: true });
+    // Present-but-bad is rejected, across every type that carries it.
+    expect(validateEvent({ type: "steward.relaunched", sliceId: "s1", sessionId: "x", worktreePath: "" })).toMatchObject({ ok: false });
+    expect(validateEvent({ type: "steward.relaunched", sliceId: "s1", sessionId: "x", worktreePath: "   " })).toMatchObject({ ok: false });
+    expect(validateEvent({ type: "slice.dispatched", sliceId: "s1", worktreePath: 7 as unknown as string })).toMatchObject({ ok: false });
+    expect(validateEvent({ type: "slice.steward.attached", sliceId: "s1", sessionId: "x", worktreePath: "" })).toMatchObject({ ok: false });
+  });
   it("forces source to legate (cannot spoof a herald observation event)", () => {
     const v = validateEvent({ type: "heartbeat" });
     expect(v.ok && v.input.source).toBe("legate");

@@ -323,6 +323,22 @@ describe("rebuildWorkingState", () => {
     expect(raw.archived_slices.tomb).toBeUndefined();
   });
 
+  it("carries the graduated-recovery rung onto the rebuilt slice (#412)", () => {
+    // A begin-graduated recovery preserves the live slice and marks recoveryRung; a
+    // cold-start rebuild must restore it as recovery_rung so the rung driver (PR2)
+    // resumes the walk at the right rung instead of restarting from zero.
+    const sys = foldedState({
+      slices: {
+        r: { sliceId: "r", stage: "escalated", branch: "b-r", worktreePath: "/wt/r", pr: { number: 9, state: "OPEN" }, recoveryRung: 1 },
+        none: { sliceId: "none", stage: "pr-open", branch: "b-n", pr: { number: 8, state: "OPEN" } },
+      },
+    });
+    const raw = rebuildWorkingState(sys, meta);
+    expect(raw.slices.r).toMatchObject({ stage: "escalated", branch: "b-r", worktree_path: "/wt/r", recovery_rung: 1 });
+    // A slice with no rung carries no recovery_rung key.
+    expect(raw.slices.none.recovery_rung).toBeUndefined();
+  });
+
   it("a cold-start rebuild counts live spawns from the fold, not 0 (#313/#314 review P1)", () => {
     // The global spawn-cap budget is seeded from each profile's live-slice count at
     // tick start. On a restart `workingState` is null, so the count MUST come from

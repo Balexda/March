@@ -97,10 +97,23 @@ export type EventBody =
    * longer reconstructs a blocking entry; the warm loop reconciles its in-memory
    * working state from the drained request (the cold-start fold alone can't reach
    * it — warm-loop invisibility, #238). The still-ready smithy work then dispatches
-   * fresh on the next tick. */
-  | { type: "slice.recovery.requested"; sliceId: string }
-  /** A stalled steward was relaunched. */
-  | { type: "steward.relaunched"; sliceId: string; sessionId?: string }
+   * fresh on the next tick.
+   *
+   * The optional `rung` selects the reducer behavior (the graduated-recovery
+   * ladder, #412): omitted / `0`-`2` → BEGIN-GRADUATED — the slice's still-true
+   * durable facts (`branch`/`worktreePath`/`pr`) are PRESERVED and only its
+   * execution state is reset (`recoveryRung=0`, `escalatedReason`/retry budgets
+   * cleared) so the gentle rungs can re-attach in place; `3` → the last-resort
+   * NUKE that keeps today's #238 tombstone (`recovered:true`) and re-dispatches
+   * fresh. The operator CLI append omits `rung` (begin graduated); only the rung
+   * ladder driver emits `rung:3`. */
+  | { type: "slice.recovery.requested"; sliceId: string; rung?: number }
+  /** A stalled steward was relaunched. Carries the LIVE worktree the relaunch
+   *  attached to (agent-deck may mint a fresh hashed path when the expected one is
+   *  taken) so the fold records it durably — a cold-start rebuild then keeps the
+   *  real worktree instead of the relaunch handler re-guessing a colliding path
+   *  (#410/#412). */
+  | { type: "steward.relaunched"; sliceId: string; sessionId?: string; worktreePath?: string }
   /** The slice was escalated for legate judgement. */
   | { type: "slice.escalated"; sliceId: string; reason?: string }
   /**
@@ -242,6 +255,16 @@ export interface SliceState {
    * cold-start rebuild. A fresh `slice.dispatched` clears it.
    */
   recovered?: boolean;
+  /**
+   * The current rung of the graduated-recovery ladder (#412), set by a
+   * begin-graduated `slice.recovery.requested` (rung 0) and advanced by the rung
+   * driver (PR2). Durable so the ladder's progress survives a cold-start rebuild
+   * (it maps to the working state's `recovery_rung`). Cleared on a clean
+   * `slice.dispatched`/`slice.steward.attached` — the slice is then re-established
+   * normally and no longer mid-recovery. Distinct from `recovered` (the rung-3
+   * tombstone): rungs 0–2 keep the live slice and its observations.
+   */
+  recoveryRung?: number;
 }
 
 /** The folded system state — the projection both services read. */
@@ -429,6 +452,7 @@ export function reduce(state: SystemState, event: HeraldEvent): SystemState {
       if ("jobId" in event && event.jobId !== undefined) slice.jobId = event.jobId;
       slice.archived = false;
       delete slice.recovered; // a fresh dispatch re-establishes the slice (#238)
+      delete slice.recoveryRung; // …and ends any graduated-recovery walk (#412)
       break;
     }
     case "slice.steward.attached": {
@@ -439,6 +463,7 @@ export function reduce(state: SystemState, event: HeraldEvent): SystemState {
       if (event.worktreePath !== undefined) slice.worktreePath = event.worktreePath;
       slice.archived = false;
       delete slice.recovered; // a steward attach re-establishes the slice (#238)
+      delete slice.recoveryRung; // …and ends any graduated-recovery walk (#412)
       break;
     }
     case "slice.stage.changed": {
@@ -454,23 +479,49 @@ export function reduce(state: SystemState, event: HeraldEvent): SystemState {
       sliceOf(state, event.sliceId).archived = true;
       break;
     case "slice.recovery.requested": {
-      // Operator recovery (#238): replace the escalated incarnation with a
-      // tombstone so a cold-start rebuild produces no blocking slices/archived/
-      // budget entry for it, AND so a stale observation delta (snapshotted before
-      // the recovery, sequenced after it) can't resurrect a ghost in-flight slice
-      // — the pr.changed/output.changed folds skip a tombstoned slice. The
-      // deterministic slice id is re-derived from the artifact, so the subsequent
-      // fresh `slice.dispatched` clears the tombstone and re-creates it clean.
-      // Clearing the retry counters resets the bounded-recovery budget (#211).
-      state.slices[event.sliceId] = { sliceId: event.sliceId, recovered: true };
+      // Graduated recovery (#412). The optional `rung` selects the behavior:
+      //
+      //  - rung===3 — the LAST-RESORT NUKE (today's #238 behavior, regression
+      //    locked): replace the escalated incarnation with a bare tombstone so a
+      //    cold-start rebuild produces no blocking slices/archived/budget entry,
+      //    AND so a stale observation delta (snapshotted before the recovery,
+      //    sequenced after it) can't resurrect a ghost in-flight slice — the
+      //    pr.changed/output.changed folds skip a tombstoned slice. The
+      //    deterministic slice id is re-derived from the artifact, so the
+      //    subsequent fresh `slice.dispatched` clears the tombstone and re-creates
+      //    it clean. The `recovered` stale-observation guard is set ONLY here.
+      //
+      //  - otherwise (operator CLI append, or the driver's rung 0-2) —
+      //    BEGIN-GRADUATED: keep the live slice and its still-true durable facts
+      //    (`branch`/`worktreePath`/`pr`) so the gentle rungs can re-attach in
+      //    place, and reset only its execution state (mark the start of the ladder
+      //    with `recoveryRung=0`, clear the escalation reason). The slice is NOT
+      //    tombstoned, so its observations keep folding through normally.
+      //
+      // Both branches clear the retry counters so the bounded-recovery budget
+      // (#211) starts fresh — the ladder must be able to walk its rungs from zero,
+      // and the nuke re-dispatches clean.
+      if (event.rung === 3) {
+        state.slices[event.sliceId] = { sliceId: event.sliceId, recovered: true };
+      } else {
+        const slice = sliceOf(state, event.sliceId);
+        slice.recoveryRung = 0;
+        delete slice.escalatedReason;
+      }
       for (const key of Object.keys(state.retries)) {
         if (key === event.sliceId || key.endsWith(":" + event.sliceId)) delete state.retries[key];
       }
       break;
     }
-    case "steward.relaunched":
-      if (event.sessionId !== undefined) sliceOf(state, event.sliceId).sessionId = event.sessionId;
+    case "steward.relaunched": {
+      const slice = sliceOf(state, event.sliceId);
+      if (event.sessionId !== undefined) slice.sessionId = event.sessionId;
+      // Record the LIVE worktree the relaunch attached to (#410/#412) so a
+      // cold-start rebuild keeps it instead of the relaunch handler re-guessing a
+      // colliding path. Merged additively — never clobber a known path with absent.
+      if (event.worktreePath !== undefined) slice.worktreePath = event.worktreePath;
       break;
+    }
     case "slice.escalated": {
       const slice = sliceOf(state, event.sliceId);
       slice.stage = "escalated";
