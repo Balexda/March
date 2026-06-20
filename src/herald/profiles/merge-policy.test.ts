@@ -11,12 +11,32 @@ import {
 } from "./merge-policy.js";
 
 describe("resolveMergeRequirements", () => {
-  it("undefined policy yields the all-required default", () => {
-    expect(resolveMergeRequirements(undefined, "cut")).toEqual(DEFAULT_MERGE_REQUIREMENTS);
+  // Built-in base policy (#298): cut drops the approval gate for EVERY profile,
+  // present and future, without per-profile config.
+  it("undefined policy: cut auto-merges by default; other verbs stay all-required", () => {
+    expect(resolveMergeRequirements(undefined, "cut")).toEqual({ approval: false, changesRequested: true });
+    expect(resolveMergeRequirements(undefined, "forge")).toEqual(DEFAULT_MERGE_REQUIREMENTS);
+    expect(resolveMergeRequirements(undefined, undefined)).toEqual(DEFAULT_MERGE_REQUIREMENTS);
   });
 
-  it("empty policy yields the all-required default", () => {
-    expect(resolveMergeRequirements({}, "cut")).toEqual({ approval: true, changesRequested: true });
+  it("empty policy behaves like undefined: built-in cut default still applies", () => {
+    expect(resolveMergeRequirements({}, "cut")).toEqual({ approval: false, changesRequested: true });
+    expect(resolveMergeRequirements({}, "forge")).toEqual({ approval: true, changesRequested: true });
+  });
+
+  it("built-in cut default relaxes approval only, never changesRequested", () => {
+    expect(resolveMergeRequirements(undefined, "cut")).toEqual({ approval: false, changesRequested: true });
+  });
+
+  it("a profile can re-tighten cut explicitly — its policy wins over the built-in base", () => {
+    const policy: MergePolicy = { byTaskType: { cut: { approval: true } } };
+    expect(resolveMergeRequirements(policy, "cut")).toEqual({ approval: true, changesRequested: true });
+  });
+
+  it("a profile-wide defaults.approval=true does NOT re-require cut approval (verb tier is more specific)", () => {
+    const policy: MergePolicy = { defaults: { approval: true } };
+    expect(resolveMergeRequirements(policy, "cut")).toEqual({ approval: false, changesRequested: true });
+    expect(resolveMergeRequirements(policy, "forge")).toEqual({ approval: true, changesRequested: true });
   });
 
   it("defaults override the base for every task type", () => {

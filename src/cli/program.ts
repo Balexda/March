@@ -828,7 +828,12 @@ mergePolicyCmd
         ((mp.defaults && Object.keys(mp.defaults).length > 0) ||
           (mp.byTaskType && Object.keys(mp.byTaskType).length > 0));
       if (!hasPolicy) {
-        console.log(`${record.profile}: all requirements enforced (no policy set).`);
+        // No per-profile policy — but the built-in base (#298) still relaxes the
+        // cut approval gate, so don't claim "all requirements enforced".
+        console.log(
+          `${record.profile}: no per-profile merge policy set. Built-in defaults apply: ` +
+            `cut auto-merges without human approval; all other verbs require approval.`,
+        );
       } else {
         console.log(`${record.profile}:`);
         console.log(JSON.stringify(mp, null, 2));

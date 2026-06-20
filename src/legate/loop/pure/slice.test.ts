@@ -254,9 +254,16 @@ describe("slice pure helpers", () => {
   it("mergeReadiness is a 3-way over the LIVE pr, honoring the per-task-type merge policy", () => {
     const slice = { stage: "pr-open", branch: "feature/smithy/cut/x" };
     const clearPr = { checks: "PASS", mergeable: "MERGEABLE", needs_response_count: 0, merge_state_status: "clean" };
-    // Default policy requires approval → unapproved cut PR waits on approval.
-    expect(mergeReadiness("x-cut", slice, clearPr, undefined)).toBe("waiting-approval");
-    // Policy drops approval for `cut` + clean merge state → ready (loop merges).
+    // #298: cut drops the approval gate by default for EVERY profile, so even an
+    // unapproved cut PR with no per-profile policy + clean merge state is ready.
+    expect(mergeReadiness("x-cut", slice, clearPr, undefined)).toBe("ready");
+    // A non-cut verb still requires approval under the all-required default.
+    const forgeSlice = { stage: "pr-open", branch: "feature/smithy/forge/x" };
+    expect(mergeReadiness("x-forge", forgeSlice, clearPr, undefined)).toBe("waiting-approval");
+    // A profile can re-tighten cut explicitly → back to waiting-approval.
+    const tighten = { byTaskType: { cut: { approval: true } } } as any;
+    expect(mergeReadiness("x-cut", slice, clearPr, tighten)).toBe("waiting-approval");
+    // An explicit per-profile relax is still honored (same as the built-in) → ready.
     const policy = { byTaskType: { cut: { approval: false } } } as any;
     expect(mergeReadiness("x-cut", slice, clearPr, policy)).toBe("ready");
     // Approval relaxed but GitHub merge-state present and not clean → blocked-merge-state.
