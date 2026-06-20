@@ -17,7 +17,7 @@
 
 ### Tasks
 
-- [ ] **Define the PR summary wire shape**
+- [x] **Define the PR summary wire shape**
 
   Add the US1-facing Statio types under `src/statio/`, extending the existing forge read seam only for `getPr(number)`. Keep the shape aligned with `PullRequestSummary`, `CheckRollup`, `CheckSummary`, and the unresolved-thread summary fields in the data model, and preserve the read-only, named-method boundary from the contracts.
 
@@ -27,7 +27,7 @@
   - `not_found` and `forge_error` outcomes can be represented through the existing uniform error model
   - No existing consumer behavior or direct `gh` call site changes
 
-- [ ] **Implement `getPr(number)` through bounded `gh pr view`**
+- [x] **Implement `getPr(number)` through bounded `gh pr view`**
 
   Add the Statio forge adapter logic that resolves repository identity, scopes `gh pr view` with `-R <owner>/<name>` when available, falls back to the repo-path cwd when owner is unavailable, and shapes the response into the documented PR summary. The adapter should remain stateless, preserve the current `sense-io.ts` projection, and turn absent PRs, failed commands, timeouts, and unparseable output into typed outcomes.
 

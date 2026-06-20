@@ -10,6 +10,7 @@ import { createGhRepoMetadataReader, type RepoMetadataReader } from "./forge.js"
 import {
   type ForgeErrorCode,
   StatioForgeError,
+  StatioNotFoundError,
   StatioValidationError,
 } from "./types.js";
 
@@ -75,6 +76,10 @@ export function buildStatioServer(options: BuildStatioServerOptions = {}): Fasti
     }
     if (err instanceof StatioForgeError) {
       void reply.code(502).send(errorBody("forge_error", err.message));
+      return;
+    }
+    if (err instanceof StatioNotFoundError) {
+      void reply.code(404).send(errorBody("not_found", err.message));
       return;
     }
     request.log.error({ err }, "unhandled statio error");
