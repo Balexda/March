@@ -20,6 +20,7 @@ March's source is organized by product subsystem rather than by generic layers:
 | `src/cli.ts` | Executable bin entrypoint only; delegates to `src/cli/program.ts`. |
 | `src/cli/` | Commander program setup and command dispatch. |
 | `src/bootstrap/` | `march init` / `march update`, manifest handling, and deployed base skills. |
+| `src/doctor/` | `march doctor` — the read-only stack-consistency battery (token wiring, session divergence, dispatch health, worktree hygiene, branch-sync lag). Talks only to the service HTTP clients + the docker socket; one module per check under `checks/`. |
 | `src/spawn/` | Spawn execution pipeline: snapshots, image builds, backend entrypoints, and container launch. |
 | `src/hatchery/` | Container/profile policy and the spawn orchestrator (`runHatcherySpawn`). `src/hatchery/service/` is the containerized Fastify service (`march hatchery serve`) plus the thin client `march hatchery spawn` uses. |
 | `src/brood/` | Spawn lifecycle state: worktrees, branches, records, and cleanup ownership. |
@@ -165,6 +166,34 @@ ghost-session-pins-the-cap incident class made visible at a glance. Filter with
 `--json` for machine consumption. Each source is best-effort: a service that is
 down is footnoted (`! castra (smithy) unavailable: …`) and the rest of the view
 still renders, so a partial view is never silently mistaken for "all clear".
+
+Where `march status` answers "are the services up and reachable?",
+**`march doctor`** answers "is the system internally *consistent* and unwedged?"
+— the read-only deep-diagnostics counterpart that encapsulates the checks an
+operator otherwise steps through by hand (the `march.debug` skill). It runs a
+battery and prints each finding as pass / warn / fail with the existing remedy
+command named beneath it (it diagnoses, it never mutates):
+
+- **Token wiring** — `CASTRA_API_TOKEN` is consistent across the five service
+  containers and Castra actually accepts it (no silent 401/403). Remedy: re-run
+  `march up`.
+- **Session consistency** — Castra-live vs Brood-tracked vs Herald-fold
+  divergence (leaked stewards, dead orphans, stale projections). Remedy:
+  `march brood sweep` / `march legate recover`.
+- **Dispatch health** — spawn-cap saturation, a dispatchable-but-starved
+  backlog, and stranded/escalated stewards. Remedy: `march brood sweep` then
+  `march legate recover <sliceId>`.
+- **Worktree/branch hygiene** — worktrees left on disk with no live session.
+  Remedy: `march brood sweep` / `march brood teardown`.
+- **Sync health** — a profile's default branch behind origin (the
+  `syncDefaultBranch` class, #299/#300), so merged work never surfaces. Remedy:
+  `git pull` (or `MARCH_HERALD_SYNC=1`).
+
+It works from a plain `npm i -g march` install — it talks only to the service
+HTTP APIs (`CASTRA_URL` / `MARCH_BROOD_URL` / `MARCH_HERALD_URL`) and the docker
+socket, never a source checkout. Scope it with `--profile <p>`, get machine
+output with `--json`, and rely on the non-zero exit on any `fail` to gate
+automation.
 
 **Keep telemetry in lock-step with the dispatch machinery.** When you add a loop
 lifecycle action or a new dispatch path, emit a span for it; when you add a
