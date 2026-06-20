@@ -18,7 +18,7 @@
 
 ### Tasks
 
-- [ ] **Add the taxonomy coverage lint**
+- [x] **Add the taxonomy coverage lint**
 
   Add the lint implementation in the repository's script or testing infrastructure and expose it through the Coverage Lint Command contract. The lint should discover `*.test.ts` files according to FR-005, validate only the leading Test File Tag Block, and report failures using the Coverage Lint Verdict model for AS 2.1-2.3.
 
