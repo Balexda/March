@@ -11,7 +11,7 @@ const LAYERS = {
 };
 
 const REQUIRED_TAGS = ["@deterministic", "@ci"];
-const TEST_FILE_RE = /\.test\.ts$/;
+const TEST_FILE_RE = /\.test\.(?:mjs|ts)$/;
 const IGNORED_DIRS = new Set([".git", "dist", "node_modules"]);
 const QUARANTINE_PREFIX = "tests/quarantine/";
 

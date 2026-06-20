@@ -58,7 +58,7 @@
 
 ### Tasks
 
-- [ ] **Rebuild the aggregate npm test command**
+- [x] **Rebuild the aggregate npm test command**
 
   Update `package.json` so `npm test` runs the four staged scripts in the ordered Aggregate Deterministic Gate from the data model. The command must satisfy AS 1.5 while preserving the repository rule that test execution flows through npm scripts.
 
@@ -69,7 +69,7 @@
   - `npm test` is not narrowed to a single layer.
   - The aggregate command does not invoke direct test-runner commands outside npm scripts.
 
-- [ ] **Resolve redundant pretest builds**
+- [x] **Resolve redundant pretest builds**
 
   Adjust the build/test script arrangement so invoking `npm test` builds at most once and staged scripts do not each trigger their own redundant build. Keep the behavior scoped to the local command surface in AS 1.6, leaving CI fan-out to User Story 3.
 
