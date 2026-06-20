@@ -235,14 +235,25 @@ function readFreshnessConfig(repoRoot) {
 }
 
 function isRepoRelativeSelector(selector) {
-  return (
-    selector !== "" &&
-    !path.isAbsolute(selector) &&
-    selector !== "." &&
-    selector !== ".." &&
-    !selector.startsWith("../") &&
-    !selector.includes("/../")
-  );
+  if (selector === "" || path.isAbsolute(selector)) {
+    return false;
+  }
+
+  // Reject Windows-style separators so a selector cannot sidestep the
+  // "/"-based generated/dependency-root and overlap checks.
+  if (selector.includes("\\")) {
+    return false;
+  }
+
+  // Reject any "." or ".." path segment (including trailing ones such as
+  // `src/hatchery/..`) so selectors cannot escape the repo root or introduce
+  // ambiguous dot-segments.
+  const segments = selector.split("/");
+  if (segments.some((segment) => segment === "." || segment === "..")) {
+    return false;
+  }
+
+  return true;
 }
 
 function generatedOrDependencyRoot(selector) {
@@ -290,7 +301,24 @@ function selectorsOverlap(left, right) {
 
 function validateFreshnessConfig(repoRoot, requiredContracts) {
   const { config, diagnostics } = readFreshnessConfig(repoRoot);
-  if (!config) {
+  if (config === undefined) {
+    // The file was missing or unparseable; readFreshnessConfig already
+    // recorded the diagnostic. JSON.parse never yields `undefined`, so this
+    // uniquely identifies a read/parse failure rather than a parsed value.
+    return { checkedCount: 0, diagnostics };
+  }
+
+  if (config === null || typeof config !== "object" || Array.isArray(config)) {
+    // A valid-but-non-object root (`null`, `false`, `0`, `""`, or an array)
+    // parses cleanly but is not a freshness config; reject it explicitly so it
+    // cannot pass with checked=0 and no diagnostics.
+    diagnostics.push(
+      toDiagnostic({
+        category: "config",
+        contractPath: FRESHNESS_CONFIG_PATH,
+        message: "freshness config must be a JSON object",
+      }),
+    );
     return { checkedCount: 0, diagnostics };
   }
 
