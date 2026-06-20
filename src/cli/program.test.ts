@@ -154,6 +154,32 @@ describe("march CLI", () => {
     expect(result.stdout).toContain(PKG_VERSION);
   });
 
+  describe("march sessions", () => {
+    it("`march sessions --help` exits 0 and prints the filter flag surface", () => {
+      const result = run(["sessions", "--help"]);
+      expect(result.exitCode).toBe(0);
+      const combined = result.stdout + result.stderr;
+      expect(combined).toContain("--profile");
+      expect(combined).toContain("--state");
+      expect(combined).toContain("--orphans");
+      expect(combined).toContain("--json");
+    });
+
+    it("is reachable via the `ps` alias", () => {
+      const result = run(["ps", "--help"]);
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout + result.stderr).toContain("--orphans");
+    });
+
+    it("rejects an invalid --state with a usage error (exit 2) before any network call", () => {
+      // No MARCH_*_URL set: the --state validation short-circuits ahead of any
+      // service call, so this is deterministic without a running stack.
+      const result = run(["sessions", "--state", "bogus"], { env: { PATH: process.env.PATH ?? "" } });
+      expect(result.exitCode).toBe(2);
+      expect(result.stderr).toContain('Invalid --state "bogus"');
+    });
+  });
+
   describe("march legate", () => {
     it("bare `march legate` exits 2 and prints the legate group help", () => {
       const result = run(["legate"]);
