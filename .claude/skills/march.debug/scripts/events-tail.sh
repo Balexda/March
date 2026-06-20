@@ -73,4 +73,4 @@ echo "$FILTERED" | jq -r --argjson show "$SHOW" '
       (.sliceId // "-"),
       ( (if .admin then "ADMIN " else "" end)
         + (.reason // .stage // .note // .operator // "") ) ]
-  | @tsv' | column -t -s$'\t'
+  | @tsv' | { command -v column >/dev/null 2>&1 && column -t -s$'\t' || cat; }

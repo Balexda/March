@@ -46,16 +46,14 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-need python3
+need jq
 MARCH_CLI="${MARCH_CLI:-node /home/jmbattista/Development/March/dist/cli.js}"
 
 # Resolve the profile list (one explicit, or all registered).
 if [ -n "$PROFILE" ]; then
   PROFILES="$PROFILE"
 else
-  PROFILES="$(herald_get "/profiles" | python3 -c '
-import sys, json
-print(" ".join(p["profile"] for p in json.load(sys.stdin).get("profiles", [])))')"
+  PROFILES="$(herald_get "/profiles" | jq -r '[.profiles[].profile] | join(" ")')"
 fi
 [ -n "${PROFILES// }" ] || die "no profiles found (set --profile or check MARCH_HERALD_URL)."
 
@@ -75,17 +73,12 @@ fi
 total=0
 for p in $PROFILES; do
   # Pull stage==escalated sliceIds (+reason) from the fold for this profile.
-  mapfile -t rows < <(herald_get "/state?profile=$p" | REASON="$REASON" python3 -c '
-import sys, os, json
-reason = os.environ.get("REASON", "")
-state = json.load(sys.stdin)
-for sid, s in (state.get("slices") or {}).items():
-    if s.get("stage") != "escalated":
-        continue
-    er = s.get("escalatedReason") or ""
-    if reason and reason not in er:
-        continue
-    print(f"{sid}\t{er}")')
+  mapfile -t rows < <(herald_get "/state?profile=$p" | jq -r --arg reason "$REASON" '
+    (.slices // {}) | to_entries[]
+    | select(.value.stage == "escalated")
+    | (.value.escalatedReason // "") as $er
+    | select($reason == "" or ($er | contains($reason)))
+    | "\(.key)\t\($er)"')
 
   [ "${#rows[@]}" -eq 0 ] && { echo "[$p] no escalated slices match."; continue; }
   echo "[$p] ${#rows[@]} escalated slice(s):"
