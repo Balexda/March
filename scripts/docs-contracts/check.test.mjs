@@ -350,6 +350,44 @@ describe("docs contract checker", () => {
       );
     }));
 
+  it("fails config validation for a falsy non-object config root", () =>
+    withTempRepo((repoRoot) => {
+      writeManifest(repoRoot, SUBSYSTEMS);
+      for (const name of SUBSYSTEMS) {
+        writeFile(repoRoot, contractPathForSubsystem(name), validContract);
+      }
+      writeFile(repoRoot, FRESHNESS_CONFIG_PATH, "null\n");
+
+      const verdict = checkRequiredContracts({ repoRoot });
+      const output = formatVerdict(verdict);
+
+      expect(verdict.status).toBe("fail");
+      expect(output).toContain("category=config");
+      expect(output).toContain("freshness config must be a JSON object");
+    }));
+
+  it("fails escaping and Windows-style selectors", () =>
+    withTempRepo((repoRoot) => {
+      writeManifest(repoRoot, SUBSYSTEMS);
+      for (const name of SUBSYSTEMS) {
+        writeFile(repoRoot, contractPathForSubsystem(name), validContract);
+      }
+      const config = validFreshnessConfig();
+      config.contracts.find((entry) => entry.name === "hatchery").publicSourcePaths = [
+        "src/hatchery/..",
+        "node_modules\\vitest\\index.js",
+      ];
+      writeFreshnessConfig(repoRoot, config);
+
+      const verdict = checkRequiredContracts({ repoRoot });
+      const output = formatVerdict(verdict);
+
+      expect(verdict.status).toBe("fail");
+      expect(output).toContain("sourcePath=src/hatchery/..");
+      expect(output).toContain("sourcePath=node_modules\\vitest\\index.js");
+      expect(output).toContain("freshness config selector must be repo-relative");
+    }));
+
   it("fails config validation when the freshness config is missing", () =>
     withTempRepo((repoRoot) => {
       writeManifest(repoRoot, SUBSYSTEMS);
