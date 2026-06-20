@@ -331,6 +331,27 @@ describe("reduce / fold", () => {
     expect(recovered.retries["relaunch-steward:s1"]).toBeUndefined();
   });
 
+  it("an inner-rung slice.recovery.requested persists the rung durably (#412 review)", () => {
+    seq = 0;
+    // The driver advances the ladder by appending an inner-rung event; the reducer
+    // must record THAT rung (not reset to 0) so a cold-start rebuild resumes the
+    // walk at the right rung rather than restarting from the bottom.
+    const atRung2 = foldEvents([
+      ev({ type: "slice.dispatched", sliceId: "s1", branch: "feature/a", worktreePath: "/wt/a", jobId: "job-1" }),
+      ev({ type: "slice.escalated", sliceId: "s1", reason: "steward_stuck" }),
+      ev({ type: "slice.recovery.requested", sliceId: "s1", rung: 2 }),
+    ]);
+    expect(atRung2.slices.s1).toMatchObject({ branch: "feature/a", worktreePath: "/wt/a", recoveryRung: 2 });
+    expect(atRung2.slices.s1.recovered).toBeUndefined();
+    expect(atRung2.slices.s1.escalatedReason).toBeUndefined();
+    // rung:1 likewise.
+    const atRung1 = foldEvents([ev({ type: "slice.recovery.requested", sliceId: "s2", rung: 1 })]);
+    expect(atRung1.slices.s2.recoveryRung).toBe(1);
+    // An omitted rung (the operator CLI append) still begins at rung 0.
+    const atRung0 = foldEvents([ev({ type: "slice.recovery.requested", sliceId: "s3" })]);
+    expect(atRung0.slices.s3.recoveryRung).toBe(0);
+  });
+
   it("begin-graduated recovery keeps the slice live, so observations keep folding (#412)", () => {
     seq = 0;
     // Unlike the rung-3 tombstone, a begin-graduated recovery leaves the live slice

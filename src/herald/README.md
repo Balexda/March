@@ -71,9 +71,11 @@ metrics label).
   - **omitted / `0`–`2` (begin-graduated)** — the reducer **preserves** the live
     slice and its still-true durable facts (`branch`/`worktreePath`/`pr`) so the
     gentle recovery rungs can re-attach in place, resetting only execution state
-    (sets `recoveryRung=0`, clears the escalation reason and the retry budget). The
-    operator CLI append omits `rung`; only the rung ladder driver emits the inner
-    rungs. The slice is NOT tombstoned, so its observations keep folding normally.
+    (sets `recoveryRung` to the event's `rung`, defaulting to 0 when the operator
+    CLI omits it; clears the escalation reason and the retry budget). The operator
+    CLI append omits `rung`; the rung ladder driver appends the inner rungs to
+    durably advance the ladder so its progress survives a cold-start rebuild. The
+    slice is NOT tombstoned, so its observations keep folding normally.
   - **`3` (last-resort nuke)** — keeps today's #238 behavior exactly: the reducer
     **drops** the slice to a bare `recovered:true` tombstone and clears its retry
     counters, so a cold-start rebuild reconstructs no blocking entry and a stale

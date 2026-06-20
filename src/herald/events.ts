@@ -102,11 +102,12 @@ export type EventBody =
    * The optional `rung` selects the reducer behavior (the graduated-recovery
    * ladder, #412): omitted / `0`-`2` → BEGIN-GRADUATED — the slice's still-true
    * durable facts (`branch`/`worktreePath`/`pr`) are PRESERVED and only its
-   * execution state is reset (`recoveryRung=0`, `escalatedReason`/retry budgets
-   * cleared) so the gentle rungs can re-attach in place; `3` → the last-resort
-   * NUKE that keeps today's #238 tombstone (`recovered:true`) and re-dispatches
-   * fresh. The operator CLI append omits `rung` (begin graduated); only the rung
-   * ladder driver emits `rung:3`. */
+   * execution state is reset (`recoveryRung` ← the event's `rung`, defaulting to
+   * 0; `escalatedReason`/retry budgets cleared) so the gentle rungs can re-attach
+   * in place; `3` → the last-resort NUKE that keeps today's #238 tombstone
+   * (`recovered:true`) and re-dispatches fresh. The operator CLI append omits
+   * `rung` (begin graduated at rung 0); the rung ladder driver (PR2) appends the
+   * inner rungs (`1`/`2`) to durably advance the ladder and `3` for the nuke. */
   | { type: "slice.recovery.requested"; sliceId: string; rung?: number }
   /** A stalled steward was relaunched. Carries the LIVE worktree the relaunch
    *  attached to (agent-deck may mint a fresh hashed path when the expected one is
@@ -256,10 +257,11 @@ export interface SliceState {
    */
   recovered?: boolean;
   /**
-   * The current rung of the graduated-recovery ladder (#412), set by a
-   * begin-graduated `slice.recovery.requested` (rung 0) and advanced by the rung
-   * driver (PR2). Durable so the ladder's progress survives a cold-start rebuild
-   * (it maps to the working state's `recovery_rung`). Cleared on a clean
+   * The current rung of the graduated-recovery ladder (#412), set from a
+   * begin-graduated `slice.recovery.requested`'s `rung` (0 when the operator CLI
+   * omits it) and advanced by the rung driver (PR2) appending an inner-rung event.
+   * Durable so the ladder's progress survives a cold-start rebuild (it maps to the
+   * working state's `recovery_rung`). Cleared on a clean
    * `slice.dispatched`/`slice.steward.attached` — the slice is then re-established
    * normally and no longer mid-recovery. Distinct from `recovered` (the rung-3
    * tombstone): rungs 0–2 keep the live slice and its observations.
@@ -494,8 +496,11 @@ export function reduce(state: SystemState, event: HeraldEvent): SystemState {
       //  - otherwise (operator CLI append, or the driver's rung 0-2) —
       //    BEGIN-GRADUATED: keep the live slice and its still-true durable facts
       //    (`branch`/`worktreePath`/`pr`) so the gentle rungs can re-attach in
-      //    place, and reset only its execution state (mark the start of the ladder
-      //    with `recoveryRung=0`, clear the escalation reason). The slice is NOT
+      //    place, and reset only its execution state. `recoveryRung` is set to the
+      //    event's `rung` (defaulting to 0 when the operator CLI omits it), so an
+      //    inner-rung event the driver appends DURABLY records the ladder's
+      //    progress — a cold-start rebuild then resumes at that rung instead of
+      //    restarting from zero. The escalation reason is cleared. The slice is NOT
       //    tombstoned, so its observations keep folding through normally.
       //
       // Both branches clear the retry counters so the bounded-recovery budget
@@ -505,7 +510,7 @@ export function reduce(state: SystemState, event: HeraldEvent): SystemState {
         state.slices[event.sliceId] = { sliceId: event.sliceId, recovered: true };
       } else {
         const slice = sliceOf(state, event.sliceId);
-        slice.recoveryRung = 0;
+        slice.recoveryRung = event.rung ?? 0;
         delete slice.escalatedReason;
       }
       for (const key of Object.keys(state.retries)) {
