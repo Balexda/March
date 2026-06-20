@@ -12,14 +12,21 @@
 // truncated large patches ("corrupt patch" bug); patch bytes must keep coming
 // from the git diff, not from re-parsed JSON.
 //
-// INTENDED INTEGRATION (pending maintainer reconciliation — see PR #344): the
-// later slices add an `OutputSource` adapter for `"container"` that wraps the
-// existing container-log read, capturing the backend JSON *envelope* for
+// ROLE (settled on PR #344): the sentinel harness recovers *only* the patch
+// bytes — every other piece of backend output (summary, metadata, diagnostics,
+// failure context) is dropped on the floor today. And it works only because the
+// spawn is not yet truly locked down: the container is trusted to scaffold its
+// own git and emit the sentinel. Both of those are the gap this feature fills.
+//
+// So the division of labor is: this envelope is the durable capture of the
+// backend's JSON output — the context the sentinel path loses — and it becomes
+// the patch-carrying path too once spawns are sandboxed and can no longer
+// self-scaffold git. The later slices add an `OutputSource` adapter for
+// `"container"` that wraps the existing container-log read, then layer
 // validation (US2), a persisted backend-neutral result (US3), and the Steward
-// handoff (US4) — summary/metadata/diagnostics, while the deterministic
-// sentinel diff remains the source of truth for the patch itself. The exact
-// division of labor between this envelope and the sentinel harness is the open
-// question raised on PR #344 and is not settled by this slice.
+// handoff (US4) on top. Until the sandbox lockdown lands, the sentinel diff
+// remains the source of truth for the patch and this envelope carries the
+// surrounding context alongside it.
 export type SpawnOutputSourceLabel =
   | "container"
   | "castra-session"
