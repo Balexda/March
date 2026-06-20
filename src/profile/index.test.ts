@@ -15,13 +15,46 @@ import {
 
 type AssertTrue<T extends true> = T;
 type IsAssignable<From, To> = [From] extends [To] ? true : false;
+type IsEqual<Left, Right> =
+  (<T>() => T extends Left ? 1 : 2) extends
+  (<T>() => T extends Right ? 1 : 2)
+    ? true
+    : false;
 type RetainedSpawnConfig = Omit<SpawnConfig, "networkMode">;
 type ProfileSpawnConfigParity = ContainerSecurity & ResourceLimits;
+type DocumentedContainerFields = "capDrop" | "user" | "envWhitelist";
+type InlineEnvContainerFields =
+  | "env"
+  | "envFile"
+  | "environment"
+  | "passthrough";
 type _RetainedSpawnConfigFieldsAssignToProfileSubtypes = AssertTrue<
   IsAssignable<RetainedSpawnConfig, ProfileSpawnConfigParity>
 >;
 type _RetainedSpawnConfigOmitsNetworkMode = AssertTrue<
   Extract<keyof RetainedSpawnConfig, "networkMode"> extends never ? true : false
+>;
+type _ProfileContainerOnlyExposesDocumentedFields = AssertTrue<
+  IsEqual<keyof Profile["container"], DocumentedContainerFields>
+>;
+type _ProfileContainerHasNoInlineEnvFields = AssertTrue<
+  Extract<keyof Profile["container"], InlineEnvContainerFields> extends never
+    ? true
+    : false
+>;
+type _ContainerSecurityOnlyExposesDocumentedFields = AssertTrue<
+  IsEqual<keyof ContainerSecurity, DocumentedContainerFields>
+>;
+type _ContainerSecurityHasNoInlineEnvFields = AssertTrue<
+  Extract<keyof ContainerSecurity, InlineEnvContainerFields> extends never
+    ? true
+    : false
+>;
+type _ProfileContainerEnvWhitelistIsOnlyEnvRelatedField = AssertTrue<
+  IsEqual<Extract<keyof Profile["container"], `env${string}`>, "envWhitelist">
+>;
+type _ContainerSecurityEnvWhitelistIsOnlyEnvRelatedField = AssertTrue<
+  IsEqual<Extract<keyof ContainerSecurity, `env${string}`>, "envWhitelist">
 >;
 
 function assertProfileType(_profile: Profile): void {
