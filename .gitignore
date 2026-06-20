@@ -1,5 +1,7 @@
 # Logs
 logs
+# ...but not the `march logs` CLI source module (a real directory under src/).
+!/src/logs/
 *.log
 npm-debug.log*
 yarn-debug.log*

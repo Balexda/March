@@ -436,6 +436,37 @@ describe("march CLI", () => {
     expect(helpSubcommand.stdout).toBe(helpFlag.stdout);
   });
 
+  describe("march logs", () => {
+    it("`march logs --help` exits 0 and lists the services and flags", () => {
+      const result = run(["logs", "--help"]);
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain("Usage: march logs");
+      // Lists the six services in the description.
+      for (const svc of [
+        "otel-lgtm",
+        "castra",
+        "hatchery",
+        "brood",
+        "herald",
+        "legate",
+      ]) {
+        expect(result.stdout).toContain(svc);
+      }
+      // The bounding flags are all present.
+      expect(result.stdout).toContain("--follow");
+      expect(result.stdout).toContain("--since");
+      expect(result.stdout).toContain("--tail");
+      expect(result.stdout).toContain("--errors");
+    });
+
+    it("`march logs <bad>` exits 2 with a usage error listing valid services", () => {
+      const result = run(["logs", "not-a-service"]);
+      expect(result.exitCode).toBe(2);
+      expect(result.stderr).toContain('Unknown service "not-a-service"');
+      expect(result.stderr).toContain("herald");
+    });
+  });
+
   it("march quarantine park moves a test and records its origin without prompting", () => {
     const repoRoot = makeRealRepo();
     const origin = "src/example/quarantine-me.test.ts";
