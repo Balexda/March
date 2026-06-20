@@ -34,7 +34,7 @@ export function discoverTestFiles(rootDir, dir = rootDir, out = []) {
 
 export function leadingTagBlock(source) {
   const trimmed = source.replace(/^﻿/, "").trimStart();
-  if (!trimmed.startsWith("/*")) {
+  if (!trimmed.startsWith("/**")) {
     return "";
   }
 

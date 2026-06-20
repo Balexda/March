@@ -160,6 +160,29 @@ describe("fixture", () => {
     ]);
   });
 
+  it("ignores tags in a non-JSDoc block comment to match the layered selector", () => {
+    expect(
+      validateTestFile(
+        "src/plain-block.test.ts",
+        `/* @l0 @deterministic @ci */
+import { describe, it } from "vitest";
+
+describe("fixture", () => {
+  it("passes", () => {});
+});
+`,
+      ),
+    ).toEqual([
+      { path: "src/plain-block.test.ts", axis: "scope", reason: "missing" },
+      { path: "src/plain-block.test.ts", axis: "determinism", reason: "missing" },
+      {
+        path: "src/plain-block.test.ts",
+        axis: "executionChannel",
+        reason: "missing",
+      },
+    ]);
+  });
+
   it("exits non-zero with actionable diagnostics for invalid files", () => {
     const root = makeRepo({
       "src/invalid.test.ts": taggedTest("@l0 @l1 @ci"),
