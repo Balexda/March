@@ -489,6 +489,13 @@ describe("march CLI", () => {
     expect(result.stdout).toContain("version");
   });
 
+  it("march status --help exits 0 and documents --json", () => {
+    const result = run(["status", "--help"]);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("status");
+    expect(result.stdout).toContain("--json");
+  });
+
   it("march help --help exits 0 and stdout contains help", () => {
     const result = run(["help", "--help"]);
     expect(result.exitCode).toBe(0);
