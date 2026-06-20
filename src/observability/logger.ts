@@ -168,20 +168,35 @@ export interface ServiceLoggerOptions {
   readonly env?: NodeJS.ProcessEnv;
   /** Synchronous file writes. Default false (buffered); set true in tests/CI. */
   readonly sync?: boolean;
+  /**
+   * Where records stream for `docker logs` capture. Defaults to the process's
+   * real stdout; injectable so tests can assert on the captured output without
+   * polluting the test runner's console.
+   */
+  readonly stdout?: NodeJS.WritableStream;
 }
 
 /**
- * Build a March service logger: a pino instance that always writes JSONL to a
- * file (durable artifact, mandated independently of telemetry) and, when
- * `MARCH_OTEL=1`, mirrors each record to the OTel logs pipeline so it ships to
- * the lgtm collector. Wire the same instance into Fastify so request logs flow
- * through one pipeline.
+ * Build a March service logger: a pino instance that writes JSONL to **both**
+ * the container's stdout (so `docker logs <container>` — and therefore
+ * `march logs` — show the service's records) and a durable file (mandated
+ * independently of telemetry) and, when `MARCH_OTEL=1`, mirrors each record to
+ * the OTel logs pipeline so it ships to the lgtm collector. Wire the same
+ * instance into Fastify so request logs flow through one pipeline.
+ *
+ * The stdout stream is what closes the gap the file-only sink left: services
+ * built on this logger used to log to `*.jsonl` only, so their `docker logs`
+ * were empty even while the file filled. Streaming to stdout is the standard
+ * 12-factor container practice and makes `docker logs` the authoritative view.
  */
 export function createServiceLogger(options: ServiceLoggerOptions): PinoLogger {
   const env = options.env ?? process.env;
   fs.mkdirSync(path.dirname(options.logFilePath), { recursive: true });
 
   const streams: pino.StreamEntry[] = [
+    // stdout first so the container runtime captures every record; this is the
+    // stream `docker logs` / `march logs` read.
+    { stream: options.stdout ?? process.stdout },
     {
       stream: pino.destination({
         dest: options.logFilePath,
@@ -210,6 +225,8 @@ export interface HatcheryLoggerOptions {
   readonly env?: NodeJS.ProcessEnv;
   /** Synchronous file writes. Default false (buffered); set true in tests/CI. */
   readonly sync?: boolean;
+  /** Override the stdout sink (tests); defaults to the process stdout. */
+  readonly stdout?: NodeJS.WritableStream;
 }
 
 /** Hatchery service logger (`march-hatchery` → `hatchery.jsonl`). */
@@ -223,6 +240,7 @@ export function createHatcheryLogger(
     level: options.level,
     env,
     sync: options.sync,
+    stdout: options.stdout,
   });
 }
 
@@ -233,6 +251,8 @@ export interface BroodLoggerOptions {
   readonly env?: NodeJS.ProcessEnv;
   /** Synchronous file writes. Default false (buffered); set true in tests/CI. */
   readonly sync?: boolean;
+  /** Override the stdout sink (tests); defaults to the process stdout. */
+  readonly stdout?: NodeJS.WritableStream;
 }
 
 /** Brood service logger (`march-brood` → `brood.jsonl`). */
@@ -246,6 +266,7 @@ export function createBroodLogger(
     level: options.level,
     env,
     sync: options.sync,
+    stdout: options.stdout,
   });
 }
 
@@ -256,6 +277,8 @@ export interface HeraldLoggerOptions {
   readonly env?: NodeJS.ProcessEnv;
   /** Synchronous file writes. Default false (buffered); set true in tests/CI. */
   readonly sync?: boolean;
+  /** Override the stdout sink (tests); defaults to the process stdout. */
+  readonly stdout?: NodeJS.WritableStream;
 }
 
 /** Herald service logger (`march-herald` → `herald.jsonl`). */
@@ -269,6 +292,7 @@ export function createHeraldLogger(
     level: options.level,
     env,
     sync: options.sync,
+    stdout: options.stdout,
   });
 }
 
@@ -279,6 +303,8 @@ export interface CastraLoggerOptions {
   readonly env?: NodeJS.ProcessEnv;
   /** Synchronous file writes. Default false (buffered); set true in tests/CI. */
   readonly sync?: boolean;
+  /** Override the stdout sink (tests); defaults to the process stdout. */
+  readonly stdout?: NodeJS.WritableStream;
 }
 
 /** Castra service logger (`march-castra` → `castra.jsonl`). */
@@ -292,6 +318,7 @@ export function createCastraLogger(
     level: options.level,
     env,
     sync: options.sync,
+    stdout: options.stdout,
   });
 }
 
@@ -302,6 +329,8 @@ export interface StatioLoggerOptions {
   readonly env?: NodeJS.ProcessEnv;
   /** Synchronous file writes. Default false (buffered); set true in tests/CI. */
   readonly sync?: boolean;
+  /** Override the stdout sink (tests); defaults to the process stdout. */
+  readonly stdout?: NodeJS.WritableStream;
 }
 
 /** Statio service logger (`march-statio` → `statio.jsonl`). */
@@ -315,5 +344,6 @@ export function createStatioLogger(
     level: options.level,
     env,
     sync: options.sync,
+    stdout: options.stdout,
   });
 }
