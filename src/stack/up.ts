@@ -7,6 +7,7 @@ import {
   runCommand,
   imageExists,
   describeExecError,
+  readTmuxServerHost,
   type CommandRunner,
 } from "./exec.js";
 import { MARCH_SERVICES, locateCompose, type MarchService } from "./services.js";
@@ -127,6 +128,25 @@ export interface StackUpResult {
 export const HOST_TMUX_ANCHOR_SESSION = "march-host-anchor";
 
 /**
+ * `os.hostname()` and tmux `#{host}` can differ in case across platforms;
+ * normalize before comparing for ownership so a casing mismatch isn't read as a
+ * foreign server. Original hostnames are still surfaced in result details.
+ */
+function normalizeHost(host: string): string {
+  return host.trim().toLowerCase();
+}
+
+export interface EnsureHostTmuxOptions {
+  /**
+   * Reads the default tmux server's host (defaults to a real `#{host}` probe).
+   * Used to detect a foreign-owned socket before creating the anchor.
+   */
+  readonly readServerHost?: () => string | null;
+  /** This host's name (defaults to `os.hostname()`). */
+  readonly localHost?: string;
+}
+
+/**
  * Ensure the host owns the default tmux server before castra starts.
  *
  * castra is a containerized agent-deck that drives sessions over the host tmux
@@ -147,14 +167,36 @@ export const HOST_TMUX_ANCHOR_SESSION = "march-host-anchor";
 export function ensureHostTmuxServer(
   run: CommandRunner,
   env: NodeJS.ProcessEnv,
+  opts: EnsureHostTmuxOptions = {},
 ): TmuxAnchorResult {
+  const localHost = opts.localHost ?? os.hostname();
   try {
-    // Server up and anchor present — idempotent no-op across re-runs.
+    // Server up and anchor present — idempotent no-op across re-runs. The
+    // anchor session is only ever created host-side, so its presence already
+    // proves host ownership.
     run("tmux", ["has-session", "-t", HOST_TMUX_ANCHOR_SESSION], env);
     return { outcome: "present" };
   } catch {
-    // No server (or anchor missing): (re)create it. `new-session` starts a
-    // server on the default uid socket when none is running.
+    // Anchor absent. Before creating it, check whether a *foreign* server
+    // already holds the default socket: `new-session` would otherwise merely
+    // attach to it (the autostarted castra container is the usual culprit) and
+    // we'd falsely report host ownership while panes keep spawning inside the
+    // container. `march up` cannot evict an already-bound server, so surface a
+    // failure with the reclaim remedy instead of treating session creation as
+    // proof of host ownership.
+    const serverHost = opts.readServerHost?.() ?? null;
+    if (serverHost && normalizeHost(serverHost) !== normalizeHost(localHost)) {
+      return {
+        outcome: "failed",
+        detail:
+          `default tmux server is owned by "${serverHost}", not this host ` +
+          `("${localHost}") — likely the march-castra container; run ` +
+          "`march down && march up` to reclaim the host tmux server before castra starts",
+      };
+    }
+    // No server, or a host-owned one merely missing our anchor: (re)create it.
+    // `new-session` starts a server on the default uid socket when none is
+    // running.
     try {
       run("tmux", ["new-session", "-d", "-s", HOST_TMUX_ANCHOR_SESSION], env);
       return { outcome: "created" };
@@ -175,6 +217,12 @@ export interface StackUpOptions {
   readonly resolveToken?: () => ResolvedToken;
   /** Base env for compose interpolation (defaults to `process.env`). */
   readonly env?: NodeJS.ProcessEnv;
+  /**
+   * Injected reader for the default tmux server's host (defaults to a real
+   * `#{host}` probe via {@link readTmuxServerHost}). Lets the anchor detect a
+   * foreign-owned socket before claiming host ownership.
+   */
+  readonly readServerHost?: () => string | null;
 }
 
 function upService(
@@ -243,9 +291,17 @@ export async function stackUp(
     [CASTRA_TOKEN_ENV]: token.token,
   };
 
+  // The tmux anchor must NOT carry CASTRA_API_TOKEN: tmux exports the server's
+  // environment into every pane it spawns, which would leak the bearer into
+  // interactive operator shells. Only the docker compose calls below need it.
+  const tmuxEnv: NodeJS.ProcessEnv = { ...env };
+  delete tmuxEnv[CASTRA_TOKEN_ENV];
+
   // Claim the host tmux server before castra starts, so its sessions (and the
   // operator's own shells) land on the host rather than inside the container.
-  const tmuxAnchor = ensureHostTmuxServer(run, env);
+  const tmuxAnchor = ensureHostTmuxServer(run, tmuxEnv, {
+    readServerHost: opts.readServerHost ?? readTmuxServerHost,
+  });
 
   const services: ServiceUpResult[] = [];
   // Forward dependency order: otel-lgtm (network owner) first, legate last.

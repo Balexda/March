@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import { CASTRA_TOKEN_ENV } from "../castra/config.js";
 import { MARCH_SERVICES } from "./services.js";
 import {
+  ensureHostTmuxServer,
   resolveCastraToken,
   stackUp,
   type ResolvedToken,
@@ -67,11 +68,17 @@ describe("stackUp — ordering + token injection", () => {
     expect(result.services[0].service).toBe("otel-lgtm");
     expect(result.services.at(-1)?.service).toBe("legate");
     expect(result.services.every((s) => s.outcome === "started")).toBe(true);
-    // The shared token is injected into the anchor and every compose call.
-    expect(calls.every((c) => c.token === "tok-123")).toBe(true);
+    const dockerCalls = calls.filter((c) => c.file === "docker");
+    const tmuxCalls = calls.filter((c) => c.file === "tmux");
+    // The shared token is injected into every compose call so the services
+    // agree on the secret...
+    expect(dockerCalls.every((c) => c.token === "tok-123")).toBe(true);
+    // ...but never into the tmux anchor: tmux exports its environment into the
+    // panes it spawns, so the bearer must not ride along into operator shells.
+    expect(tmuxCalls.length).toBeGreaterThan(0);
+    expect(tmuxCalls.every((c) => c.token === undefined)).toBe(true);
     // Every *compose* up carries the never-build guard (the tmux anchor is not a
     // compose call, so scope these assertions to docker invocations).
-    const dockerCalls = calls.filter((c) => c.file === "docker");
     expect(dockerCalls.every((c) => c.args.includes("--no-build"))).toBe(true);
     expect(
       dockerCalls.every((c) => c.args.includes("up") && c.args.includes("-d")),
@@ -126,10 +133,40 @@ describe("stackUp — host tmux anchor", () => {
       locate: locateAll,
       imagePresent: allImagesPresent,
       resolveToken: () => stubToken,
+      readServerHost: () => null, // no server holds the socket yet
     });
 
     expect(result.tmuxAnchor).toEqual({ outcome: "created" });
     expect(newSession).toHaveBeenCalledOnce();
+  });
+
+  // Exercised against ensureHostTmuxServer directly so localHost is injected
+  // (not os.hostname()) and the foreign-server check is deterministic.
+  it("reports a failed anchor when a foreign server already owns the socket", () => {
+    const newSession = vi.fn();
+    const run = (file: string, args: string[]) => {
+      if (file === "tmux" && args[0] === "has-session") {
+        throw new Error("no anchor session");
+      }
+      if (file === "tmux" && args[0] === "new-session") newSession(args);
+    };
+
+    const result = ensureHostTmuxServer(
+      run,
+      {},
+      {
+        localHost: "host-machine",
+        // A container id the host never matches: the castra container owns the
+        // default tmux socket, so creating a session would just attach to it.
+        readServerHost: () => "cd42c4740280",
+      },
+    );
+
+    expect(result.outcome).toBe("failed");
+    expect(result.detail).toContain("cd42c4740280");
+    expect(result.detail).toContain("march down && march up");
+    // We must NOT attach to the foreign server by creating a session on it.
+    expect(newSession).not.toHaveBeenCalled();
   });
 
   it("records a failed anchor without aborting the stack (best-effort)", async () => {
@@ -142,6 +179,7 @@ describe("stackUp — host tmux anchor", () => {
       locate: locateAll,
       imagePresent: allImagesPresent,
       resolveToken: () => stubToken,
+      readServerHost: () => null, // no foreign server — exercise the exec failure
     });
 
     expect(result.tmuxAnchor?.outcome).toBe("failed");

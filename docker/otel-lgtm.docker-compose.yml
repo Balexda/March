@@ -21,6 +21,12 @@ services:
   otel-lgtm:
     image: grafana/otel-lgtm:0.11.16
     container_name: march-otel-lgtm
+    # `on-failure` (not `unless-stopped`) is intentional and stack-wide: the
+    # whole March stack must NOT autostart on host/daemon reboot, so that
+    # `march up` always runs first and claims the host tmux server before
+    # castra (see ensureHostTmuxServer in src/stack/up.ts). Crash-restart is
+    # preserved; only boot-time autostart is dropped. Trade-off: observability
+    # does not auto-resurface after a reboot until the operator runs `march up`.
     restart: on-failure
     ports:
       - "3000:3000" # Grafana UI
