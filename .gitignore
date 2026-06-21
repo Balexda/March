@@ -3,6 +3,10 @@ logs
 # ...but not the `march logs` CLI source module (a real directory under src/).
 !/src/logs/
 *.log
+# ...but keep the march.* skill self-test fixtures (sample spawn-output.log
+# files). The skill generator wipes+recreates each variant from these sources,
+# so they must be tracked or a fresh-clone build would delete them.
+!src/templates/skills/**/fixtures/**/*.log
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*

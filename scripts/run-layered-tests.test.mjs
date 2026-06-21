@@ -118,7 +118,7 @@ describe("layered test command contract", () => {
 
     expect(packageJson.scripts.pretest).toBe(packageJson.scripts.build);
     expect(packageJson.scripts.build).toBe(
-      "tsup src/cli.ts --format esm --clean",
+      "tsup src/cli.ts --format esm --clean && npm run skills:generate",
     );
     expect(packageJson.scripts.typecheck).toBe("tsc --noEmit");
     expect(packageJson.scripts["pretest:l0"]).toBeUndefined();

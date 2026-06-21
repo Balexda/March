@@ -17,6 +17,9 @@ COPY package.json package-lock.json ./
 RUN npm ci
 COPY tsconfig.json ./
 COPY src ./src
+# `npm run build` also runs `scripts/generate-skills.mjs` (per-context march.*
+# skill variants), so the generator + its inputs must be present.
+COPY scripts ./scripts
 RUN npm run build
 
 # --- runtime ---

@@ -1,0 +1,5 @@
+{
+  "ok": false,
+  "error": "unknown profile \"nope\".",
+  "profiles": ["march"]
+}

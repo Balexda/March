@@ -4,5 +4,9 @@
 node_modules
 dist
 *.log
+# ...but keep the march.* skill self-test fixtures (sample spawn-output.log
+# files). `npm run build` regenerates the castra skill variant from these
+# sources during the image build, so they must be in the build context.
+!src/templates/skills/**/fixtures/**/*.log
 .smithy
 docs

@@ -8,7 +8,7 @@
   },
   "scripts": {
     "docs:contracts:check": "node scripts/docs-contracts/check.mjs",
-    "pretest": "tsup src/cli.ts --format esm --clean",
+    "pretest": "tsup src/cli.ts --format esm --clean && npm run skills:generate",
     "test": "npm run test:l0 && npm run test:l1 && npm run test:l2-cassette && npm run test:l3-cassette",
     "test:vitest": "vitest run",
     "test:l0": "node scripts/run-layered-tests.mjs l0",
@@ -16,7 +16,8 @@
     "test:l2-cassette": "node scripts/run-layered-tests.mjs l2-cassette",
     "test:l3-cassette": "node scripts/run-layered-tests.mjs l3-cassette",
     "test:taxonomy": "node scripts/test-taxonomy.mjs",
-    "build": "tsup src/cli.ts --format esm --clean",
+    "skills:generate": "node scripts/generate-skills.mjs",
+    "build": "tsup src/cli.ts --format esm --clean && npm run skills:generate",
     "build:spawn-claude-image": "docker build -t march-spawn-claude:latest -f docker/spawn-claude.Dockerfile docker",
     "build:spawn-codex-image": "docker build -t march-spawn-codex:latest -f docker/spawn-codex.Dockerfile docker",
     "build:spawn-claude-jvm-image": "docker build -t march-spawn-claude-jvm:latest -f docker/spawn-claude-jvm.Dockerfile docker",
