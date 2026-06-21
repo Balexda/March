@@ -540,6 +540,37 @@ describe("march CLI", () => {
     expect(result.stdout).toContain("update");
   });
 
+  it("march self update --help exits 0 and stdout contains update", () => {
+    const result = run(["self", "update", "--help"]);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("update");
+  });
+
+  it("march update warns it is deprecated and forwards to self update", () => {
+    // Isolated HOME with no manifest: the forwarded updater fails fast, but the
+    // deprecation warning must have already been emitted to stderr.
+    const tmpDir = makeTmpDir();
+    const result = runWithEnv(["update"], { HOME: tmpDir });
+    expect(result.stderr).toContain("`march update` is deprecated");
+    expect(result.stderr).toContain("march self update");
+  });
+
+  it("march upgrade --help exits 0 and documents --service", () => {
+    const result = run(["upgrade", "--help"]);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("upgrade");
+    expect(result.stdout).toContain("--service");
+  });
+
+  it("march upgrade --service <unknown> exits 2 with the known-service list", () => {
+    // Isolated HOME so the token resolver doesn't touch the real ~/.march.
+    const tmpDir = makeTmpDir();
+    const result = runWithEnv(["upgrade", "--service", "bogus"], { HOME: tmpDir });
+    expect(result.exitCode).toBe(2);
+    expect(result.stderr).toContain("bogus");
+    expect(result.stderr).toContain("legate");
+  });
+
   it("march version --help exits 0 and stdout contains version", () => {
     const result = run(["version", "--help"]);
     expect(result.exitCode).toBe(0);

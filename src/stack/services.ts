@@ -13,9 +13,9 @@ export interface MarchService {
   /** Basename of the compose file under `docker/`. */
   readonly compose: string;
   /**
-   * The local image `march up` must find before it will start the service.
-   * Undefined for services whose image is pulled from a remote registry by
-   * compose (e.g. otel-lgtm) rather than built locally.
+   * The local image `march up` / `march upgrade` must find before it will
+   * (re)start the service. Undefined for services whose image is pulled from a
+   * remote registry by compose (e.g. otel-lgtm) rather than built locally.
    */
   readonly image?: string;
   /** Loopback port the service publishes (`127.0.0.1:<port>`). */

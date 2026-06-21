@@ -19,7 +19,8 @@ March's source is organized by product subsystem rather than by generic layers:
 |-----------|-----------|
 | `src/cli.ts` | Executable bin entrypoint only; delegates to `src/cli/program.ts`. |
 | `src/cli/` | Commander program setup and command dispatch. |
-| `src/bootstrap/` | `march init` / `march update`, manifest handling, and deployed base skills. |
+| `src/bootstrap/` | `march init` / `march self update`, manifest handling, and deployed base skills. |
+| `src/stack/` | Stack-lifecycle commands (`march up` / `down` / `upgrade`): the shared service list, compose-file locator, command runner, and token resolution. |
 | `src/doctor/` | `march doctor` — the read-only stack-consistency battery (token wiring, session divergence, dispatch health, worktree hygiene, branch-sync lag, tmux server ownership). Talks only to the service HTTP clients + the docker socket; one module per check under `checks/`. |
 | `src/spawn/` | Spawn execution pipeline: snapshots, image builds, backend entrypoints, and container launch. |
 | `src/hatchery/` | Container/profile policy and the spawn orchestrator (`runHatcherySpawn`). `src/hatchery/service/` is the containerized Fastify service (`march hatchery serve`) plus the thin client `march hatchery spawn` uses. |
@@ -122,9 +123,9 @@ with one command: it resolves a shared `CASTRA_API_TOKEN` (generated and
 persisted to `~/.march/castra-token` on first run, reused thereafter), then
 starts the services in dependency order (otel-lgtm → castra → hatchery → brood →
 herald → legate). It never builds images — if a locally-built `march-*` image is
-missing it aborts before starting anything and points you at `march upgrade`
-(until that lands, use the `npm run build:<service>-image` scripts). Re-running
-is idempotent.
+missing it aborts before starting anything and points you at `npm run
+build:images` (or the per-service `npm run build:<service>-image` scripts).
+Re-running is idempotent.
 
 To turn the stack off and recover the resources it holds, run **`march down`**:
 it stops the service containers in reverse dependency order (legate → herald →
@@ -134,6 +135,33 @@ in-flight sessions), so a later bring-up resumes where it left off. Pass
 `--volumes` to also remove the named volumes (registries, Herald's event log,
 telemetry), or `--drain` to tear down in-flight Brood sessions (spawn containers,
 worktrees, branches, stewards) before stopping the services.
+
+To roll the stack onto newer images, **`march upgrade`** recreates the service
+containers in dependency order with `docker compose up -d --force-recreate
+--no-build`, so the latest available `march-*` images take effect. State is
+preserved — `--force-recreate` replaces the container but not its named volumes
+(registries, Herald's event log, telemetry). Pass `--service <name>` (one of
+`otel-lgtm`, `castra`, `hatchery`, `brood`, `herald`, `legate`) to recreate a
+single service. A recreate failure marks that service failed while the rest still
+upgrade.
+
+`march upgrade` **never builds** and reads no source — it works from a plain
+`npm i -g @balexda/march` and operates on whatever `march-*` images are already
+present locally (the local image store, "the local registry"). **Producing**
+those images is a separate concern:
+
+- With the source tree, rebuild them with **`npm run build:images`** (the
+  aggregate of the `build:<service>-image` scripts), then `march upgrade` to roll
+  the containers onto them. **`npm run deploy:local`** chains both — build the CLI
+  + the five service images, then recreate.
+- Pulling prebuilt images from a *hosted* registry — so an npm/brew install with
+  no source can fetch fresh images rather than only recreate local ones — is
+  tracked in **[issue #438](https://github.com/Balexda/March/issues/438)**.
+
+> **Note:** `march upgrade` recreates the **service container** images. The
+> CLI-version updater that deploys the bundled skills lives at **`march self
+> update`** (formerly `march update`, which now warns and forwards for one
+> release).
 
 To check whether the stack is healthy — the pre-flight gate before `march up`'s
 consumers expect a working stack — run **`march status`**. For each service
@@ -148,8 +176,7 @@ that is absent), prints a per-service table, and **exits non-zero when the stack
 is not fully healthy** so it can gate scripts/CI. The command is read-only — it
 never starts, stops, or generates anything (unlike `march up`, it reads the
 persisted token but never mints one). Pass `--json` for machine-readable output.
-The remaining stack-lifecycle surface (`march upgrade` / `march init`) is tracked
-as follow-ups.
+The remaining stack-lifecycle surface (`march init`) is tracked as a follow-up.
 
 **`march sessions`** (alias **`march ps`**) is the single-command answer to "what
 is March running right now?". It joins Brood's session registry, Castra's live

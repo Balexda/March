@@ -26,6 +26,8 @@
     "build:brood-image": "docker build -t march-brood:latest -f docker/brood.Dockerfile .",
     "build:herald-image": "docker build -t march-herald:latest -f docker/herald.Dockerfile .",
     "build:legate-image": "docker build -t march-legate:latest -f docker/legate.Dockerfile .",
+    "build:images": "npm run build:castra-image && npm run build:hatchery-image && npm run build:brood-image && npm run build:herald-image && npm run build:legate-image",
+    "deploy:local": "npm run build && npm run build:images && node dist/cli.js upgrade",
     "start": "node dist/cli.js",
     "typecheck": "tsc --noEmit"
   },
