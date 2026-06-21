@@ -6,6 +6,7 @@ import { SPAWN_CONFIG, type SpawnConfig } from "../hatchery/spawn-config.js";
 import {
   validateProfile,
   type ContainerSecurity,
+  type NetworkPolicy,
   type Profile,
   type ResourceLimits,
   type ValidationError,
@@ -23,11 +24,15 @@ type IsEqual<Left, Right> =
 type RetainedSpawnConfig = Omit<SpawnConfig, "networkMode">;
 type ProfileSpawnConfigParity = ContainerSecurity & ResourceLimits;
 type DocumentedContainerFields = "capDrop" | "user" | "envWhitelist";
+type DocumentedNetworkModes = "bridge" | "none" | "allowlist";
 type InlineEnvContainerFields =
   | "env"
   | "envFile"
   | "environment"
   | "passthrough";
+type AllowlistField<T> = T extends { readonly allowlist: infer Allowlist }
+  ? Allowlist
+  : never;
 type _RetainedSpawnConfigFieldsAssignToProfileSubtypes = AssertTrue<
   IsAssignable<RetainedSpawnConfig, ProfileSpawnConfigParity>
 >;
@@ -55,6 +60,28 @@ type _ProfileContainerEnvWhitelistIsOnlyEnvRelatedField = AssertTrue<
 >;
 type _ContainerSecurityEnvWhitelistIsOnlyEnvRelatedField = AssertTrue<
   IsEqual<Extract<keyof ContainerSecurity, `env${string}`>, "envWhitelist">
+>;
+type _ProfileNetworkAssignsToExportedNetworkPolicy = AssertTrue<
+  IsAssignable<Profile["network"], NetworkPolicy>
+>;
+type _NetworkPolicyModeValuesAreClosed = AssertTrue<
+  IsEqual<NetworkPolicy["mode"], DocumentedNetworkModes>
+>;
+type _BridgeNetworkHasNoAllowlistField = AssertTrue<
+  AllowlistField<Extract<NetworkPolicy, { readonly mode: "bridge" }>> extends never
+    ? true
+    : false
+>;
+type _NoneNetworkHasNoAllowlistField = AssertTrue<
+  AllowlistField<Extract<NetworkPolicy, { readonly mode: "none" }>> extends never
+    ? true
+    : false
+>;
+type _AllowlistFieldOnlyExistsOnAllowlistNetwork = AssertTrue<
+  IsEqual<
+    Extract<NetworkPolicy, { readonly allowlist: readonly unknown[] }>,
+    Extract<NetworkPolicy, { readonly mode: "allowlist" }>
+  >
 >;
 
 function assertProfileType(_profile: Profile): void {
