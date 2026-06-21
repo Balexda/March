@@ -153,6 +153,14 @@ describe("quarantine routing", () => {
       ].join("\n"));
   });
 
+  it("raises a QuarantineError when the index file cannot be written", () => {
+    const repoRoot = makeRepo();
+    // Occupy the INDEX.md path with a directory so writeFileSync fails (EISDIR).
+    fs.mkdirSync(path.join(repoRoot, QUARANTINE_INDEX_FILE), { recursive: true });
+
+    expect(() => generateQuarantineIndex({ repoRoot })).toThrow(QuarantineError);
+  });
+
   it("fails deterministically for invalid and already-quarantined inputs", () => {
     const repoRoot = makeRepo();
     const quarantined = `${QUARANTINE_DIR}/src/example/baz.test.ts`;

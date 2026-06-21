@@ -153,8 +153,14 @@ export function generateQuarantineIndex(options?: {
     return { quarantinedPath, originPath };
   });
 
-  fs.mkdirSync(path.join(repoRoot, QUARANTINE_DIR), { recursive: true });
-  fs.writeFileSync(path.join(repoRoot, QUARANTINE_INDEX_FILE), renderIndex(entries));
+  try {
+    fs.mkdirSync(path.join(repoRoot, QUARANTINE_DIR), { recursive: true });
+    fs.writeFileSync(path.join(repoRoot, QUARANTINE_INDEX_FILE), renderIndex(entries));
+  } catch (err) {
+    throw new QuarantineError(
+      `Failed to write ${QUARANTINE_INDEX_FILE}: ${(err as Error).message}`,
+    );
+  }
 
   return { indexPath: QUARANTINE_INDEX_FILE, entries };
 }
