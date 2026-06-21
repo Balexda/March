@@ -27,6 +27,9 @@ export type GitRunner = (repoPath: string, args: readonly string[]) => string | 
 /** Tests whether a filesystem path exists. */
 export type PathExists = (path: string) => boolean;
 
+/** Reads the hostname of the machine running the default tmux server, or null. */
+export type TmuxServerHostReader = () => string | null;
+
 /**
  * Read one env var from a container via `docker inspect`. Returns null when the
  * container is absent, docker is unavailable, or the var is unset — the caller
@@ -89,4 +92,27 @@ export const pathExists: PathExists = (p) => {
   } catch {
     return false;
   }
+};
+
+/**
+ * Read the hostname of the host running the default tmux server via
+ * `tmux list-sessions -F '#{host}'`. tmux evaluates `#{host}` server-side, so
+ * the value is the machine the server — and therefore every pane it spawns —
+ * lives on. `list-sessions` (unlike `display-message`) needs no attached client,
+ * so it works when `march doctor` runs from a plain shell. Returns null when no
+ * server is running, tmux is unavailable, or there are no sessions.
+ */
+export const tmuxServerHost: TmuxServerHostReader = () => {
+  let out: string;
+  try {
+    out = execFileSync("tmux", ["list-sessions", "-F", "#{host}"], {
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+  } catch {
+    // No server running, no sessions, or tmux not installed.
+    return null;
+  }
+  const first = out.split("\n").map((l) => l.trim()).find((l) => l.length > 0);
+  return first ?? null;
 };

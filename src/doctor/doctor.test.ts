@@ -14,6 +14,7 @@ import { checkSessionConsistency } from "./checks/session-consistency.js";
 import { checkDispatchHealth } from "./checks/dispatch-health.js";
 import { checkWorktreeHygiene } from "./checks/worktree-hygiene.js";
 import { checkSyncHealth } from "./checks/sync-health.js";
+import { checkTmuxOwnership } from "./checks/tmux-ownership.js";
 import type { Finding, Severity } from "./types.js";
 
 // ---- builders -------------------------------------------------------------
@@ -87,6 +88,10 @@ interface FakeOpts {
   states?: Record<string, SystemState>;
   paths?: Set<string>;
   git?: (repoPath: string, args: readonly string[]) => string | null;
+  /** Hostname the tmux server reports (default null = no server reachable). */
+  tmuxServerHost?: string | null;
+  /** This host's name (default "host-machine"). */
+  localHostname?: string;
   env?: NodeJS.ProcessEnv;
 }
 
@@ -115,6 +120,8 @@ function ctx(opts: FakeOpts = {}): DoctorContext {
     containerState: () => "running",
     git: opts.git ?? (() => null),
     pathExists: (p) => opts.paths?.has(p) ?? false,
+    tmuxServerHost: () => (opts.tmuxServerHost === undefined ? null : opts.tmuxServerHost),
+    localHostname: opts.localHostname ?? "host-machine",
     env: opts.env ?? {},
   };
 }
@@ -462,6 +469,33 @@ describe("sync-health", () => {
     const c = ctx({ paths: new Set() });
     const r = await checkSyncHealth(c);
     expect(r.findings[0].detail).toContain("not on this host");
+  });
+});
+
+// ---- tmux ownership -------------------------------------------------------
+
+describe("tmux-ownership", () => {
+  it("passes when the tmux server runs on this host", async () => {
+    const c = ctx({ tmuxServerHost: "host-machine", localHostname: "host-machine" });
+    const r = await checkTmuxOwnership(c);
+    expect(sev(r.findings)).toEqual(["pass"]);
+    expect(r.findings[0].detail).toContain("host-owned");
+  });
+
+  it("warns with a down/up remedy when the server runs inside the container", async () => {
+    const c = ctx({ tmuxServerHost: "cd42c4740280", localHostname: "host-machine" });
+    const r = await checkTmuxOwnership(c);
+    const warn = r.findings.find((f) => f.severity === "warn");
+    expect(warn?.detail).toContain("cd42c4740280");
+    expect(warn?.detail).toContain("inside the container");
+    expect(warn?.remedy).toContain("march down && march up");
+  });
+
+  it("passes (nothing to verify) when no tmux server is reachable", async () => {
+    const c = ctx({ tmuxServerHost: null });
+    const r = await checkTmuxOwnership(c);
+    expect(sev(r.findings)).toEqual(["pass"]);
+    expect(r.findings[0].detail).toContain("nothing to verify");
   });
 });
 

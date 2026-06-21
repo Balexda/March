@@ -20,7 +20,7 @@ March's source is organized by product subsystem rather than by generic layers:
 | `src/cli.ts` | Executable bin entrypoint only; delegates to `src/cli/program.ts`. |
 | `src/cli/` | Commander program setup and command dispatch. |
 | `src/bootstrap/` | `march init` / `march update`, manifest handling, and deployed base skills. |
-| `src/doctor/` | `march doctor` — the read-only stack-consistency battery (token wiring, session divergence, dispatch health, worktree hygiene, branch-sync lag). Talks only to the service HTTP clients + the docker socket; one module per check under `checks/`. |
+| `src/doctor/` | `march doctor` — the read-only stack-consistency battery (token wiring, session divergence, dispatch health, worktree hygiene, branch-sync lag, tmux server ownership). Talks only to the service HTTP clients + the docker socket; one module per check under `checks/`. |
 | `src/spawn/` | Spawn execution pipeline: snapshots, image builds, backend entrypoints, and container launch. |
 | `src/hatchery/` | Container/profile policy and the spawn orchestrator (`runHatcherySpawn`). `src/hatchery/service/` is the containerized Fastify service (`march hatchery serve`) plus the thin client `march hatchery spawn` uses. |
 | `src/brood/` | Spawn lifecycle state: worktrees, branches, records, and cleanup ownership. |
@@ -188,6 +188,12 @@ command named beneath it (it diagnoses, it never mutates):
 - **Sync health** — a profile's default branch behind origin (the
   `syncDefaultBranch` class, #299/#300), so merged work never surfaces. Remedy:
   `git pull` (or `MARCH_HERALD_SYNC=1`).
+- **tmux server ownership** — the default tmux server (which Castra drives over
+  the bind-mounted socket) runs on the host, not inside the `march-castra`
+  container. If the container won the socket race (e.g. it autostarted ahead of
+  `march up`), it owns the server and every session — stewards and operator
+  shells — opens *inside* the container. Remedy: `march down && march up`
+  (`march up` claims the host tmux server before Castra starts).
 
 It works from a plain `npm i -g march` install — it talks only to the service
 HTTP APIs (`CASTRA_URL` / `MARCH_BROOD_URL` / `MARCH_HERALD_URL`) and the docker

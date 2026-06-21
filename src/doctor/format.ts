@@ -18,6 +18,7 @@ const CHECK_TITLE: Record<CheckId, string> = {
   "dispatch-health": "Dispatch health",
   "worktree-hygiene": "Worktree/branch hygiene",
   "sync-health": "Sync health",
+  "tmux-ownership": "tmux server ownership",
 };
 
 export function formatReport(report: DoctorReport): string {

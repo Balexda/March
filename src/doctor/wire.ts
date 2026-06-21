@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import os from "node:os";
 import { CastraClient, resolveCastraBaseUrl } from "../castra/client.js";
 import { CASTRA_TOKEN_ENV } from "../castra/config.js";
 import { containerName } from "../stack/services.js";
@@ -14,6 +15,7 @@ import {
   dockerContainerState,
   pathExists,
   runGit,
+  tmuxServerHost,
 } from "./probes.js";
 
 export interface WireOptions {
@@ -83,6 +85,8 @@ export async function wireDoctorContext(
     castraAuthProbe: (token) => probeCastraAuthHttp(baseUrl, token),
     git: runGit,
     pathExists,
+    tmuxServerHost,
+    localHostname: os.hostname(),
     env,
   };
 
