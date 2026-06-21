@@ -520,12 +520,15 @@ quarantine
       );
       process.exitCode = SUCCESS;
     } catch (err) {
-      if (err instanceof QuarantineError) {
-        process.stderr.write(err.message + "\n");
-        process.exitCode = ERROR;
-        return;
-      }
-      throw err;
+      // Fail loudly: an unexpected (non-QuarantineError) throw here would
+      // otherwise fall through dispatchCli's CommanderError-only catch with
+      // commandHandled already set, producing a silent exit 0.
+      const message =
+        err instanceof QuarantineError
+          ? err.message
+          : `Failed to park test: ${(err as Error).message}`;
+      process.stderr.write(message + "\n");
+      process.exitCode = ERROR;
     }
   });
 
@@ -545,12 +548,15 @@ quarantine
       );
       process.exitCode = SUCCESS;
     } catch (err) {
-      if (err instanceof QuarantineError) {
-        process.stderr.write(err.message + "\n");
-        process.exitCode = ERROR;
-        return;
-      }
-      throw err;
+      // Fail loudly: an unexpected (non-QuarantineError) throw here would
+      // otherwise fall through dispatchCli's CommanderError-only catch with
+      // commandHandled already set, producing a silent exit 0.
+      const message =
+        err instanceof QuarantineError
+          ? err.message
+          : `Failed to generate quarantine index: ${(err as Error).message}`;
+      process.stderr.write(message + "\n");
+      process.exitCode = ERROR;
     }
   });
 

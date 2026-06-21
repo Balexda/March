@@ -533,6 +533,20 @@ describe("march CLI", () => {
     ).toContain("No quarantined tests.");
   });
 
+  it("march quarantine index fails loudly (non-zero exit) when INDEX.md cannot be written", () => {
+    const repoRoot = makeRealRepo();
+    // Occupy the INDEX.md path with a directory so the write fails (EISDIR);
+    // the command must surface the failure rather than exit 0 silently.
+    fs.mkdirSync(path.join(repoRoot, "tests/quarantine/INDEX.md"), {
+      recursive: true,
+    });
+
+    const result = runWithEnv(["quarantine", "index"], {}, { cwd: repoRoot });
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr).toContain("tests/quarantine/INDEX.md");
+  });
+
   it("march help init exits 0 and stdout contains init-specific help text", () => {
     const result = run(["help", "init"]);
     expect(result.exitCode).toBe(0);
