@@ -52,7 +52,7 @@
 
 ### Tasks
 
-- [ ] **Add the `/v1/prs/:number` route**
+- [x] **Add the `/v1/prs/:number` route**
 
   Extend the Statio Fastify service under `src/statio/` so the authenticated single-PR route delegates to the `getPr(number)` forge seam and returns the documented success wrapper or uniform error envelope. Keep health/status behavior unchanged and preserve the existing slice trace correlation behavior for the new route.
 
@@ -63,7 +63,7 @@
   - The route requires bearer-token auth and keeps `x-march-slice-id` correlation available
   - Tests cover authorized success, auth rejection, invalid number, missing PR, forge failure, and trace header forwarding
 
-- [ ] **Wire the async client to `getPr(number)`**
+- [x] **Wire the async client to `getPr(number)`**
 
   Extend the fetch-based Statio client so `getPr(number)` calls the new route, returns the documented wire type, forwards any configured slice id, and maps non-2xx envelopes through `StatioClientError`. Keep `reachable()` semantics unchanged unless they already depend on the method list generically.
 
