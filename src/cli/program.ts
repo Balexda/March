@@ -269,6 +269,17 @@ program
         return;
       }
 
+      if (result.tmuxAnchor) {
+        const a = result.tmuxAnchor;
+        if (a.outcome === "failed") {
+          console.log(
+            `tmux anchor: failed${a.detail ? ` (${a.detail})` : ""} — sessions may spawn inside the castra container`,
+          );
+        } else {
+          console.log(`host tmux server: ${a.outcome}`);
+        }
+      }
+
       let failed = false;
       for (const svc of result.services) {
         console.log(
