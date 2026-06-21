@@ -5,6 +5,7 @@ import { checkSessionConsistency } from "./checks/session-consistency.js";
 import { checkDispatchHealth } from "./checks/dispatch-health.js";
 import { checkWorktreeHygiene } from "./checks/worktree-hygiene.js";
 import { checkSyncHealth } from "./checks/sync-health.js";
+import { checkTmuxOwnership } from "./checks/tmux-ownership.js";
 
 /**
  * The consistency battery, in report order. Each check is independent and
@@ -20,6 +21,7 @@ const CHECKS: ReadonlyArray<{
   { id: "dispatch-health", run: checkDispatchHealth },
   { id: "worktree-hygiene", run: checkWorktreeHygiene },
   { id: "sync-health", run: checkSyncHealth },
+  { id: "tmux-ownership", run: checkTmuxOwnership },
 ];
 
 export interface RunDoctorOptions {

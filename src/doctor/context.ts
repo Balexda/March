@@ -7,6 +7,7 @@ import type {
   ContainerStateReader,
   GitRunner,
   PathExists,
+  TmuxServerHostReader,
 } from "./probes.js";
 
 /**
@@ -57,6 +58,10 @@ export interface DoctorContext {
   readonly containerState: ContainerStateReader;
   readonly git: GitRunner;
   readonly pathExists: PathExists;
+  /** Hostname of the machine running the default tmux server, or null. */
+  readonly tmuxServerHost: TmuxServerHostReader;
+  /** This host's name, compared against the tmux server's host for ownership. */
+  readonly localHostname: string;
   /** Base env (the legate cap fallback reads `MARCH_MAX_CONCURRENT_SPAWNS`). */
   readonly env: NodeJS.ProcessEnv;
 }

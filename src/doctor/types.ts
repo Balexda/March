@@ -17,7 +17,8 @@ export type CheckId =
   | "session-consistency"
   | "dispatch-health"
   | "worktree-hygiene"
-  | "sync-health";
+  | "sync-health"
+  | "tmux-ownership";
 
 /** A single diagnosed fact. */
 export interface Finding {
