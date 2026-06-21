@@ -38,7 +38,7 @@ import { CastraValidationError } from "../castra/types.js";
 import { runStatioServer } from "../statio/serve.js";
 import { STATIO_TOKEN_ENV } from "../statio/config.js";
 import { StatioValidationError } from "../statio/types.js";
-import { initMarch, InitError } from "../bootstrap/init.js";
+import { initMarch, isMarchInstalled, InitError } from "../bootstrap/init.js";
 import { stackDown } from "../stack/down.js";
 import { stackUp } from "../stack/up.js";
 import { createBuildContext, SnapshotError } from "../spawn/snapshot.js";
@@ -379,15 +379,48 @@ async function waitForHeraldReady(
   }
 }
 
-// `march init <profile> --repo <path>` — the single profile-onboarding entry
-// point. Ensures the full service stack is up (idempotent, the `march up` path),
-// then onboards the profile: renders/sets up its legate conductor, registers it
-// with Herald, and ensures the shared legate service. Supersedes the split
-// `march legate init` + `march profile register`. The CLI-installation bootstrap
-// that used to own the top-level `init` name now lives at `march self init`.
+type BootstrapOutcome = "already" | "bootstrapped" | "failed";
+
+/**
+ * First-run global bootstrap for `march init`. When the CLI installation is not
+ * yet bootstrapped on this host (no valid manifest), runs the one-time install
+ * (writes `~/.march/march-manifest.json`, deploys base skills) before any
+ * profile onboarding — so a fresh `npm i -g` only ever needs `march init`.
+ * Idempotent: a no-op once installed. `initMarch` refuses to run over an
+ * existing install, which is why this is gated on {@link isMarchInstalled}.
+ *
+ * On a bootstrap failure it writes the error and sets `process.exitCode`;
+ * the caller short-circuits on `"failed"`.
+ */
+async function ensureCliBootstrapped(): Promise<BootstrapOutcome> {
+  if (await isMarchInstalled()) return "already";
+  try {
+    const { summary, warnings } = await initMarch();
+    console.log(summary);
+    for (const warning of warnings) {
+      process.stderr.write(warning + "\n");
+    }
+    return "bootstrapped";
+  } catch (err) {
+    if (err instanceof InitError) {
+      console.error(err.message);
+      process.exitCode = ERROR;
+      return "failed";
+    }
+    throw err;
+  }
+}
+
+// `march init [profile] --repo <path>` — the single entry point for standing up
+// March. On first run it bootstraps the CLI installation itself (manifest + base
+// skills); with a `<profile>` it then onboards that profile: ensures the full
+// service stack is up (idempotent, the `march up` path), renders/sets up the
+// profile's legate conductor, registers it with Herald, and ensures the shared
+// legate service. Run with no profile to do just the first-run bootstrap.
+// Supersedes the split `march legate init` + `march profile register`.
 program
-  .command("init <profile>")
-  .description("Onboard a profile: bring the stack up (idempotent), then register the repo with Herald")
+  .command("init [profile]")
+  .description("Initialize March (first run) and, given a profile, onboard the repo with Herald")
   .option("--repo <path>", "Path to the repo checkout to onboard (default: current git repo)")
   .option("-g, --worker-group <group>", "Group for worker sessions (default: legate-workers)")
   .option(
@@ -418,7 +451,7 @@ program
     "--no-bridge-check",
     "Skip the Python 3.9+ pre-flight check for the agent-deck conductor bridge daemon.",
   )
-  .action(async (profile: string, opts: {
+  .action(async (profile: string | undefined, opts: {
     repo?: string;
     workerGroup?: string;
     model?: string;
@@ -433,6 +466,23 @@ program
     bridgeCheck?: boolean;
   }) => {
     commandHandled = true;
+
+    // First-run global bootstrap (manifest + base skills), folded in so a fresh
+    // `npm i -g` only needs `march init`. No-op once installed.
+    const bootstrap = await ensureCliBootstrapped();
+    if (bootstrap === "failed") return;
+
+    // No profile → first-run bootstrap only; nothing to onboard.
+    if (!profile) {
+      if (bootstrap === "already") {
+        console.log("March is already initialized on this host.");
+      }
+      console.log(
+        "To onboard a profile, run `march init <profile> --repo <path>`.",
+      );
+      process.exitCode = SUCCESS;
+      return;
+    }
 
     const parsed = await parseToolchainAndPriority({
       toolchain: opts.toolchain,
@@ -533,37 +583,6 @@ program
           "The legate cannot drive it until registration succeeds — re-run `march init` once Herald is reachable.\n",
       );
       process.exitCode = ERROR;
-    }
-  });
-
-// `march self` — installation-scoped (CLI-host) maintenance, distinct from the
-// per-profile/service surface. This group is shared with other stack-lifecycle
-// work; keep additions composable with any sibling `self` subcommands.
-const self = program
-  .command("self")
-  .description("Manage the March CLI installation on this host (manifest + deployed skills)");
-
-self
-  .command("init")
-  .description("Initialize the March CLI installation (writes the manifest + deploys base skills)")
-  .action(async () => {
-    commandHandled = true;
-    try {
-      const { summary, warnings } = await initMarch();
-      console.log(summary);
-      for (const warning of warnings) {
-        process.stderr.write(warning + "\n");
-      }
-      // Set exitCode rather than calling process.exit() so buffered stdout/
-      // stderr is fully flushed before the process terminates naturally.
-      process.exitCode = SUCCESS;
-    } catch (err) {
-      if (err instanceof InitError) {
-        console.error(err.message);
-        process.exitCode = ERROR;
-        return;
-      }
-      throw err;
     }
   });
 

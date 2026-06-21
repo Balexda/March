@@ -104,16 +104,20 @@ Quick pointers:
   multiplexed Herald event stream once** (one cursor, `event.profile` on the
   envelope routes each event to that profile's fold via `reduceMulti`), then runs
   the coordinator per profile against isolated working state — each profile in its
-  own try/catch so one bad repo can't stall the others. `march init <profile>
-  --repo <path>` is the profile-onboarding entry point: it ensures the full stack
-  is up (the idempotent `march up` path), then **registers** the profile with
-  Herald (`POST /profiles`) and ensures the shared service is up. It supersedes
-  the now-deprecated `march legate init` (conductor + registration) and `march
-  profile register` (registration only) — both still work for one release but warn
-  and forward. `march profile list|remove|merge-policy|priority` manage
-  already-registered profiles directly. (The top-level `init` name's old
-  CLI-installation bootstrap — manifest + base skills — now lives at `march self
-  init`.) Herald's observer iterates the same registry. The old per-profile
+  own try/catch so one bad repo can't stall the others. `march init [profile]
+  --repo <path>` is the single entry point for standing up March: on first run it
+  bootstraps the CLI installation itself (manifest + base skills — folded in, no
+  separate command), and with a `<profile>` it then onboards that profile —
+  ensures the full stack is up (the idempotent `march up` path), **registers** the
+  profile with Herald (`POST /profiles`), and ensures the shared service is up
+  (run with no profile to do just the first-run bootstrap). It supersedes the
+  now-deprecated `march legate init` (conductor + registration) and `march profile
+  register` (registration only) — both still work for one release but warn and
+  forward. `march profile list|remove|merge-policy|priority` manage
+  already-registered profiles directly. (Onboarding still needs the `march-*`
+  images built locally; making the stack pullable from a registry so a bare `npm
+  i -g` → `march init` works with no source/builds is tracked in issue #438.)
+  Herald's observer iterates the same registry. The old per-profile
   hatchery-launched container + `legate-loop-meta.json` are retired (the meta
   survives only as a legacy registry seed via `MARCH_HERALD_META`). Set
   `MARCH_HERALD_URL`/`MARCH_BROOD_URL`/`MARCH_HATCHERY_URL`/`CASTRA_URL` so the

@@ -19,6 +19,31 @@ export interface InitResult {
 }
 
 /**
+ * Whether the March CLI installation is already bootstrapped on this host — i.e.
+ * a *valid* manifest exists at `~/.march/march-manifest.json`. Used by `march
+ * init` to decide whether to run the one-time global bootstrap before onboarding
+ * a profile (the bootstrap is first-run-gated because {@link initMarch} refuses
+ * to run over an existing install).
+ *
+ * Returns `false` for a missing manifest **and** for a present-but-corrupt one,
+ * so the caller proceeds to {@link initMarch}, which surfaces the precise
+ * corrupt-manifest error. Any other read failure (e.g. EACCES) is likewise
+ * treated as "not installed" so {@link initMarch} reports it consistently.
+ *
+ * @param homeDir - Override the home directory (defaults to `os.homedir()`).
+ */
+export async function isMarchInstalled(homeDir?: string): Promise<boolean> {
+  const home = homeDir ?? os.homedir();
+  const manifestPath = path.join(home, ".march", "march-manifest.json");
+  try {
+    const parsed = JSON.parse(await fs.readFile(manifestPath, "utf-8"));
+    return isValidManifest(parsed);
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Initialize the March environment.
  *
  * Creates `~/.march/march-manifest.json` and deploys the M1 placeholder
@@ -55,7 +80,7 @@ export async function initMarch(homeDir?: string): Promise<InitResult> {
       throw new InitError(
         `Corrupted manifest found at ${manifestPath}. ` +
           "The file exists but contains invalid JSON. " +
-          "Please remove it manually and re-run `march self init`.",
+          "Please remove it manually and re-run `march init`.",
       );
     }
 
@@ -68,7 +93,7 @@ export async function initMarch(homeDir?: string): Promise<InitResult> {
     throw new InitError(
       `Corrupted manifest found at ${manifestPath}. ` +
         "The file contains JSON but is not a valid March manifest. " +
-        "Please remove it manually and re-run `march self init`.",
+        "Please remove it manually and re-run `march init`.",
     );
   } catch (err: unknown) {
     if (err instanceof InitError) throw err;

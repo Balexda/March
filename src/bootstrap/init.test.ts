@@ -66,7 +66,7 @@ function runWithEnv(
   };
 }
 
-describe("march self init", () => {
+describe("march init (CLI-installation bootstrap)", () => {
   const tmpDirs: string[] = [];
 
   function makeTmpDir(): string {
@@ -133,7 +133,7 @@ describe("march self init", () => {
 
   it("clean install creates manifest with correct schema and field values", () => {
     const tmpDir = makeTmpDir();
-    const result = runWithHome(["self", "init"], tmpDir);
+    const result = runWithHome(["init"], tmpDir);
 
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toContain("initialized successfully");
@@ -154,7 +154,10 @@ describe("march self init", () => {
     ]);
   });
 
-  it("already-installed guard triggers on existing valid manifest", () => {
+  it("bare `march init` is a graceful no-op on an existing valid manifest", () => {
+    // The folded `march init` is first-run-gated: with an install already
+    // present it must NOT re-run the bootstrap (and so does not raise initMarch's
+    // "already installed" error). It reports the no-op and points at onboarding.
     const tmpDir = makeTmpDir();
     const marchDir = path.join(tmpDir, ".march");
     fs.mkdirSync(marchDir, { recursive: true });
@@ -169,12 +172,13 @@ describe("march self init", () => {
       }),
     );
 
-    const result = runWithHome(["self", "init"], tmpDir);
+    const result = runWithHome(["init"], tmpDir);
 
-    expect(result.exitCode).toBe(1);
+    expect(result.exitCode).toBe(0);
     const output = result.stdout + result.stderr;
-    expect(output).toContain("already installed");
-    expect(output).toContain("march update");
+    expect(output).not.toContain("initialized successfully");
+    expect(output).toContain("already initialized");
+    expect(output).toContain("march init <profile>");
   });
 
   it("corrupted manifest detected exits 1 with warning", () => {
@@ -186,7 +190,7 @@ describe("march self init", () => {
       "not json {{{}}",
     );
 
-    const result = runWithHome(["self", "init"], tmpDir);
+    const result = runWithHome(["init"], tmpDir);
 
     expect(result.exitCode).toBe(1);
     const output = result.stdout + result.stderr;
@@ -203,7 +207,7 @@ describe("march self init", () => {
       JSON.stringify({ hello: "world" }),
     );
 
-    const result = runWithHome(["self", "init"], tmpDir);
+    const result = runWithHome(["init"], tmpDir);
 
     expect(result.exitCode).toBe(1);
     const output = result.stdout + result.stderr;
@@ -218,7 +222,7 @@ describe("march self init", () => {
     // where chmod-based permission tests are bypassed.
     fs.writeFileSync(path.join(tmpDir, ".march"), "blocker");
 
-    const result = runWithHome(["self", "init"], tmpDir);
+    const result = runWithHome(["init"], tmpDir);
 
     expect(result.exitCode).toBe(1);
     const output = result.stdout + result.stderr;
@@ -227,7 +231,7 @@ describe("march self init", () => {
 
   it("all 3 skill files exist at expected paths after init", () => {
     const tmpDir = makeTmpDir();
-    const result = runWithHome(["self", "init"], tmpDir);
+    const result = runWithHome(["init"], tmpDir);
 
     expect(result.exitCode).toBe(0);
 
@@ -243,7 +247,7 @@ describe("march self init", () => {
 
   it("all deployed skill files are valid markdown", () => {
     const tmpDir = makeTmpDir();
-    runWithHome(["self", "init"], tmpDir);
+    runWithHome(["init"], tmpDir);
 
     const skillFiles = [
       path.join(tmpDir, ".claude", "commands", "march.spawn-dispatch.md"),
@@ -259,7 +263,7 @@ describe("march self init", () => {
 
   it("~/.claude/commands and ~/.claude/prompts are created if absent", () => {
     const tmpDir = makeTmpDir();
-    runWithHome(["self", "init"], tmpDir);
+    runWithHome(["init"], tmpDir);
 
     expect(fs.existsSync(path.join(tmpDir, ".claude", "commands"))).toBe(true);
     expect(fs.existsSync(path.join(tmpDir, ".claude", "prompts"))).toBe(true);
@@ -267,7 +271,7 @@ describe("march self init", () => {
 
   it("all deployed filenames start with march.", () => {
     const tmpDir = makeTmpDir();
-    runWithHome(["self", "init"], tmpDir);
+    runWithHome(["init"], tmpDir);
 
     const manifestPath = path.join(tmpDir, ".march", "march-manifest.json");
     const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf-8"));
@@ -279,7 +283,7 @@ describe("march self init", () => {
 
   it("manifest files.claude paths use no leading ~/ prefix", () => {
     const tmpDir = makeTmpDir();
-    runWithHome(["self", "init"], tmpDir);
+    runWithHome(["init"], tmpDir);
 
     const manifestPath = path.join(tmpDir, ".march", "march-manifest.json");
     const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf-8"));
@@ -291,7 +295,7 @@ describe("march self init", () => {
 
   it("success message lists deployed skill files", () => {
     const tmpDir = makeTmpDir();
-    const result = runWithHome(["self", "init"], tmpDir);
+    const result = runWithHome(["init"], tmpDir);
 
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toContain("march.spawn-dispatch.md");
@@ -304,7 +308,7 @@ describe("march self init", () => {
     // Fake bin has 'which' but no git or docker — isolates the git warning.
     const fakeBin = makeFakeBin();
     const nodeBinDir = path.dirname(process.execPath);
-    const result = runWithEnv(["self", "init"], {
+    const result = runWithEnv(["init"], {
       HOME: tmpDir,
       USERPROFILE: tmpDir,
       PATH: [nodeBinDir, fakeBin].join(path.delimiter),
@@ -318,7 +322,7 @@ describe("march self init", () => {
     const tmpDir = makeTmpDir();
     const fakeBin = makeFakeBin();
     const nodeBinDir = path.dirname(process.execPath);
-    const result = runWithEnv(["self", "init"], {
+    const result = runWithEnv(["init"], {
       HOME: tmpDir,
       USERPROFILE: tmpDir,
       PATH: [nodeBinDir, fakeBin].join(path.delimiter),
@@ -332,7 +336,7 @@ describe("march self init", () => {
     const tmpDir = makeTmpDir();
     const fakeBin = makeFakeBin();
     const nodeBinDir = path.dirname(process.execPath);
-    const result = runWithEnv(["self", "init"], {
+    const result = runWithEnv(["init"], {
       HOME: tmpDir,
       USERPROFILE: tmpDir,
       PATH: [nodeBinDir, fakeBin].join(path.delimiter),
@@ -345,7 +349,7 @@ describe("march self init", () => {
   it("emits cannot-detect warning when which is not on PATH", () => {
     const tmpDir = makeTmpDir();
     // PATH has only node — which itself is absent, triggering the cannot-detect path.
-    const result = runWithEnv(["self", "init"], {
+    const result = runWithEnv(["init"], {
       HOME: tmpDir,
       USERPROFILE: tmpDir,
       PATH: path.dirname(process.execPath),
@@ -365,7 +369,7 @@ describe("march self init", () => {
     // makeFakeBin); add stubs for them here too if that assumption ever breaks.
     const fakeBin = makeFakeBin(["git", "docker"]);
     const nodeBinDir = path.dirname(process.execPath);
-    const result = runWithEnv(["self", "init"], {
+    const result = runWithEnv(["init"], {
       HOME: tmpDir,
       USERPROFILE: tmpDir,
       PATH: [nodeBinDir, fakeBin].join(path.delimiter),

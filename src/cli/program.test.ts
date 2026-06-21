@@ -111,31 +111,46 @@ describe("march CLI", () => {
     return fakeBin;
   }
 
-  it("march self init runs successfully on clean home", () => {
+  it("march init with no profile runs the first-run CLI bootstrap on a clean home", () => {
+    // The CLI-installation bootstrap (manifest + base skills) is folded into
+    // `march init`: with no profile on a fresh host it just bootstraps and then
+    // points the operator at profile onboarding.
     const tmpDir = makeTmpDir();
-    const result = run(["self", "init"], {
+    const result = run(["init"], {
       env: { ...process.env, HOME: tmpDir },
     });
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toContain("initialized successfully");
+    expect(result.stdout).toContain("march init <profile>");
   });
 
-  it("march init <profile> requires a profile argument (the bootstrap moved to `march self init`)", () => {
-    // Bare `march init` now needs the <profile> positional; commander reports
-    // the missing argument rather than running the old CLI bootstrap.
-    const result = run(["init"]);
-    expect(result.exitCode).toBe(2);
-    expect(result.stderr + result.stdout).toMatch(/missing required argument|usage/i);
+  it("march init with no profile is a no-op on an already-initialized home", () => {
+    // First-run-gated: the second invocation must not re-bootstrap (initMarch
+    // refuses to run over an existing install); it reports the no-op and the
+    // onboarding hint instead.
+    const tmpDir = makeTmpDir();
+    const env = { ...process.env, HOME: tmpDir };
+    const first = run(["init"], { env });
+    expect(first.exitCode).toBe(0);
+    expect(first.stdout).toContain("initialized successfully");
+
+    const second = run(["init"], { env });
+    expect(second.exitCode).toBe(0);
+    expect(second.stdout).not.toContain("initialized successfully");
+    expect(second.stdout).toContain("already initialized");
+    expect(second.stdout).toContain("march init <profile>");
   });
 
   it("march init <profile> --no-setup skips the stack bring-up (render-only path)", () => {
     // --no-setup is render-only: it must NOT preflight images or require Docker,
     // so the unconditional stack bring-up is skipped and the command proceeds
-    // straight to repo detection (which fails here — tmp dir is not a git repo).
+    // (after the first-run bootstrap) straight to repo detection — which fails
+    // here because the tmp cwd is not a git repo. Use an isolated HOME so the
+    // folded bootstrap writes to a throwaway dir, not the real ~/.march.
     const tmpDir = makeTmpDir();
     const result = runWithEnv(
       ["init", "demo", "--no-setup"],
-      { ...process.env },
+      { ...process.env, HOME: makeTmpDir() },
       { cwd: tmpDir },
     );
     expect(result.stderr).not.toContain("images are not built");
@@ -520,20 +535,13 @@ describe("march CLI", () => {
     expect(result.exitCode).toBe(2);
   });
 
-  it("march init --help exits 0 and shows the profile-onboarding usage", () => {
+  it("march init --help exits 0 and shows the optional-profile onboarding usage", () => {
     const result = run(["init", "--help"]);
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toContain("init");
-    // Profile-onboarding command: takes a <profile> positional and a --repo flag.
-    expect(result.stdout).toContain("<profile>");
+    // Onboarding command: takes an optional [profile] positional and a --repo flag.
+    expect(result.stdout).toContain("[profile]");
     expect(result.stdout).toContain("--repo");
-  });
-
-  it("march self init --help exits 0 and describes the CLI-installation bootstrap", () => {
-    const result = run(["self", "init", "--help"]);
-    expect(result.exitCode).toBe(0);
-    expect(result.stdout).toContain("Usage: march self init");
-    expect(result.stdout).toContain("manifest");
   });
 
   it("march update --help exits 0 and stdout contains update", () => {
