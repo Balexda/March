@@ -518,6 +518,12 @@ quarantine
       console.log(
         `Parked ${result.originPath} at ${result.quarantinedPath}.`,
       );
+      if (result.indexWarning) {
+        process.stderr.write(
+          `Warning: ${result.indexWarning}\n` +
+            "Run `march quarantine index` to regenerate the roster.\n",
+        );
+      }
       process.exitCode = SUCCESS;
     } catch (err) {
       // Fail loudly: an unexpected (non-QuarantineError) throw here would

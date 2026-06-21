@@ -10,6 +10,12 @@ export class QuarantineError extends Error {}
 export interface ParkQuarantineResult {
   readonly originPath: string;
   readonly quarantinedPath: string;
+  /**
+   * Set when the park succeeded (file moved + origin recorded) but the derived
+   * `INDEX.md` roster could not be refreshed. The quarantine itself is durable;
+   * the caller should surface this and suggest `march quarantine index`.
+   */
+  readonly indexWarning?: string;
 }
 
 export interface QuarantineIndexEntry {
@@ -209,7 +215,21 @@ export function parkQuarantinedTest(inputPath: string, options?: {
     );
   }
 
-  generateQuarantineIndex({ repoRoot });
+  // The move + manifest write above are the durable quarantine and are not
+  // rolled back here. Regenerating the roster is a derived, best-effort step:
+  // a failure (unwritable INDEX.md, or a pre-existing quarantined file with a
+  // missing origin) must not fail an otherwise-successful park, nor leave a
+  // partially-parked state with an error. Report it so the caller can suggest
+  // `march quarantine index`.
+  try {
+    generateQuarantineIndex({ repoRoot });
+  } catch (err) {
+    return {
+      originPath,
+      quarantinedPath,
+      indexWarning: `parked, but could not refresh ${QUARANTINE_INDEX_FILE}: ${(err as Error).message}`,
+    };
+  }
 
   return { originPath, quarantinedPath };
 }

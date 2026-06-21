@@ -189,4 +189,29 @@ describe("quarantine routing", () => {
     expect(fs.readFileSync(path.join(repoRoot, origin), "utf-8")).toBe(body);
     expect(fs.existsSync(path.join(repoRoot, QUARANTINE_DIR, origin))).toBe(false);
   });
+
+  it("still parks (without throwing) when the roster cannot be refreshed", () => {
+    const repoRoot = makeRepo();
+    const origin = "src/example/quux.test.ts";
+    const body = "import \"vitest\";\n";
+    fs.mkdirSync(path.join(repoRoot, "src/example"), { recursive: true });
+    fs.writeFileSync(path.join(repoRoot, origin), body);
+    // Force only the derived INDEX.md write to fail (directory at its path).
+    // The durable quarantine (move + origin record) must still succeed.
+    fs.mkdirSync(path.join(repoRoot, QUARANTINE_INDEX_FILE), { recursive: true });
+
+    const result = parkQuarantinedTest(origin, { repoRoot });
+
+    const quarantinedPath = `${QUARANTINE_DIR}/${origin}`;
+    expect(result.quarantinedPath).toBe(quarantinedPath);
+    expect(result.indexWarning).toContain(QUARANTINE_INDEX_FILE);
+    // Durable quarantine intact: file moved and origin recorded.
+    expect(fs.existsSync(path.join(repoRoot, origin))).toBe(false);
+    expect(fs.readFileSync(path.join(repoRoot, quarantinedPath), "utf-8")).toBe(body);
+    expect(
+      JSON.parse(
+        fs.readFileSync(path.join(repoRoot, QUARANTINE_ORIGINS_FILE), "utf-8"),
+      ) as Record<string, string>,
+    ).toEqual({ [quarantinedPath]: origin });
+  });
 });
