@@ -1,4 +1,5 @@
 import type { Attributes, Counter, Histogram, Meter } from "@opentelemetry/api";
+import type { AgentFailureReason, AgentTokenUsage } from "./agent-output.js";
 import { getActiveOtel } from "./otel.js";
 
 export type SpawnOutcome = "success" | "failure";
@@ -69,11 +70,23 @@ export interface RecordSpawnRunInput {
 let cachedMeter: Meter | undefined;
 let runsCounter: Counter | undefined;
 let durationHistogram: Histogram | undefined;
+let agentFailuresCounter: Counter | undefined;
+let tokensInputCounter: Counter | undefined;
+let tokensCachedInputCounter: Counter | undefined;
+let tokensOutputCounter: Counter | undefined;
+let tokensReasoningCounter: Counter | undefined;
 
-function spawnInstruments(meter: Meter): {
+interface SpawnInstruments {
   counter: Counter;
   histogram: Histogram;
-} {
+  agentFailures: Counter;
+  tokensInput: Counter;
+  tokensCachedInput: Counter;
+  tokensOutput: Counter;
+  tokensReasoning: Counter;
+}
+
+function spawnInstruments(meter: Meter): SpawnInstruments {
   if (meter !== cachedMeter) {
     cachedMeter = meter;
     runsCounter = meter.createCounter("march.spawn.runs", {
@@ -84,8 +97,40 @@ function spawnInstruments(meter: Meter): {
       description: "Spawn dispatch wall-clock duration",
       unit: "s",
     });
+    // The agent (codex CLI) failure signal, keyed by a bounded reason. The
+    // `auth` reason is the "agent is down — go re-authenticate" alarm that the
+    // smithy-profile-idle incident showed was previously invisible (it lumped
+    // into `march_spawn_runs{failure_stage="container_run"}`).
+    agentFailuresCounter = meter.createCounter("march.spawn.agent_failures", {
+      description: "Count of spawn agent-level failures by reason (auth/rate_limit/timeout/other)",
+      unit: "1",
+    });
+    tokensInputCounter = meter.createCounter("march.spawn.tokens.input", {
+      description: "Agent input tokens consumed by completed spawns",
+      unit: "1",
+    });
+    tokensCachedInputCounter = meter.createCounter("march.spawn.tokens.cached_input", {
+      description: "Agent cached input tokens served to completed spawns",
+      unit: "1",
+    });
+    tokensOutputCounter = meter.createCounter("march.spawn.tokens.output", {
+      description: "Agent output tokens produced by completed spawns",
+      unit: "1",
+    });
+    tokensReasoningCounter = meter.createCounter("march.spawn.tokens.reasoning", {
+      description: "Agent reasoning output tokens produced by completed spawns",
+      unit: "1",
+    });
   }
-  return { counter: runsCounter!, histogram: durationHistogram! };
+  return {
+    counter: runsCounter!,
+    histogram: durationHistogram!,
+    agentFailures: agentFailuresCounter!,
+    tokensInput: tokensInputCounter!,
+    tokensCachedInput: tokensCachedInputCounter!,
+    tokensOutput: tokensOutputCounter!,
+    tokensReasoning: tokensReasoningCounter!,
+  };
 }
 
 export function recordSpawnRun(input: RecordSpawnRunInput): void {
@@ -102,4 +147,47 @@ export function recordSpawnRun(input: RecordSpawnRunInput): void {
   };
   counter.add(1, attributes);
   histogram.record(input.durationSeconds, attributes);
+}
+
+/**
+ * Record one agent-level spawn failure, tagged by backend, profile, and a
+ * bounded {@link AgentFailureReason}. `reason: "none"` is skipped (there was no
+ * agent-level failure to record). `march_spawn_agent_failures_total{reason="auth"}`
+ * is the codex-down alarm. No-op when telemetry is disabled.
+ */
+export function recordAgentFailure(input: {
+  readonly backend: string;
+  readonly profile: string;
+  readonly reason: AgentFailureReason;
+}): void {
+  if (input.reason === "none") return;
+  const otel = getActiveOtel();
+  if (!otel.enabled) return;
+  const { agentFailures } = spawnInstruments(otel.getMeter());
+  agentFailures.add(1, { backend: input.backend, profile: input.profile, reason: input.reason });
+}
+
+/**
+ * Record the token usage of a completed spawn, tagged by backend, profile, and
+ * task type. Feeds the Agent status dashboard's token panels. No-op when
+ * telemetry is disabled.
+ */
+export function recordSpawnTokens(input: {
+  readonly backend: string;
+  readonly profile: string;
+  readonly taskType: string;
+  readonly usage: AgentTokenUsage;
+}): void {
+  const otel = getActiveOtel();
+  if (!otel.enabled) return;
+  const inst = spawnInstruments(otel.getMeter());
+  const attrs: Attributes = {
+    backend: input.backend,
+    profile: input.profile,
+    task_type: input.taskType,
+  };
+  inst.tokensInput.add(input.usage.inputTokens, attrs);
+  inst.tokensCachedInput.add(input.usage.cachedInputTokens, attrs);
+  inst.tokensOutput.add(input.usage.outputTokens, attrs);
+  inst.tokensReasoning.add(input.usage.reasoningOutputTokens, attrs);
 }

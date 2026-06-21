@@ -154,6 +154,32 @@ describe("march CLI", () => {
     expect(result.stdout).toContain(PKG_VERSION);
   });
 
+  describe("march sessions", () => {
+    it("`march sessions --help` exits 0 and prints the filter flag surface", () => {
+      const result = run(["sessions", "--help"]);
+      expect(result.exitCode).toBe(0);
+      const combined = result.stdout + result.stderr;
+      expect(combined).toContain("--profile");
+      expect(combined).toContain("--state");
+      expect(combined).toContain("--orphans");
+      expect(combined).toContain("--json");
+    });
+
+    it("is reachable via the `ps` alias", () => {
+      const result = run(["ps", "--help"]);
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout + result.stderr).toContain("--orphans");
+    });
+
+    it("rejects an invalid --state with a usage error (exit 2) before any network call", () => {
+      // No MARCH_*_URL set: the --state validation short-circuits ahead of any
+      // service call, so this is deterministic without a running stack.
+      const result = run(["sessions", "--state", "bogus"], { env: { PATH: process.env.PATH ?? "" } });
+      expect(result.exitCode).toBe(2);
+      expect(result.stderr).toContain('Invalid --state "bogus"');
+    });
+  });
+
   describe("march legate", () => {
     it("bare `march legate` exits 2 and prints the legate group help", () => {
       const result = run(["legate"]);
@@ -410,6 +436,37 @@ describe("march CLI", () => {
     expect(helpSubcommand.stdout).toBe(helpFlag.stdout);
   });
 
+  describe("march logs", () => {
+    it("`march logs --help` exits 0 and lists the services and flags", () => {
+      const result = run(["logs", "--help"]);
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain("Usage: march logs");
+      // Lists the six services in the description.
+      for (const svc of [
+        "otel-lgtm",
+        "castra",
+        "hatchery",
+        "brood",
+        "herald",
+        "legate",
+      ]) {
+        expect(result.stdout).toContain(svc);
+      }
+      // The bounding flags are all present.
+      expect(result.stdout).toContain("--follow");
+      expect(result.stdout).toContain("--since");
+      expect(result.stdout).toContain("--tail");
+      expect(result.stdout).toContain("--errors");
+    });
+
+    it("`march logs <bad>` exits 2 with a usage error listing valid services", () => {
+      const result = run(["logs", "not-a-service"]);
+      expect(result.exitCode).toBe(2);
+      expect(result.stderr).toContain('Unknown service "not-a-service"');
+      expect(result.stderr).toContain("herald");
+    });
+  });
+
   it("march quarantine park moves a test and records its origin without prompting", () => {
     const repoRoot = makeRealRepo();
     const origin = "src/example/quarantine-me.test.ts";
@@ -518,6 +575,13 @@ describe("march CLI", () => {
     const result = run(["version", "--help"]);
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toContain("version");
+  });
+
+  it("march status --help exits 0 and documents --json", () => {
+    const result = run(["status", "--help"]);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("status");
+    expect(result.stdout).toContain("--json");
   });
 
   it("march help --help exits 0 and stdout contains help", () => {
@@ -1377,5 +1441,21 @@ describe("march CLI", () => {
     const leftover =
       fs.existsSync(worktreeParent) && fs.readdirSync(worktreeParent);
     expect(!leftover || leftover.length === 0).toBe(true);
+  });
+
+  describe("march doctor", () => {
+    it("is registered and its help documents the read-only diagnostic flags", () => {
+      const result = run(["doctor", "--help"]);
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain("--profile");
+      expect(result.stdout).toContain("--json");
+      // The command must advertise itself as read-only / non-mutating.
+      expect(result.stdout.toLowerCase()).toContain("read-only");
+    });
+
+    it("appears in the top-level command list", () => {
+      const result = run(["help"]);
+      expect(result.stdout).toContain("doctor");
+    });
   });
 });

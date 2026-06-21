@@ -139,6 +139,23 @@ export function validateEvent(body: Record<string, unknown>): EventValidation {
       return { ok: false, error: `event "session.changed" requires session.id.` };
     }
   }
+  // Durable worktree path (#412) carried by slice.dispatched / slice.steward.attached
+  // / steward.relaunched. Optional, but when present it must be a non-empty
+  // (non-whitespace) string — an empty/garbage value would fold into
+  // slice.worktreePath and send the relaunch handler to a bogus path.
+  if (body.worktreePath !== undefined) {
+    if (typeof body.worktreePath !== "string" || body.worktreePath.trim().length === 0) {
+      return { ok: false, error: `event "${type}" worktreePath must be a non-empty string.` };
+    }
+  }
+  // Graduated-recovery rung (#412) on slice.recovery.requested: optional, but when
+  // present it selects the reducer branch, so it must be an integer in {0,1,2,3}
+  // (3 = the last-resort tombstone-and-redispatch; 0-2 = the gentle rungs).
+  if (type === "slice.recovery.requested" && body.rung !== undefined) {
+    if (typeof body.rung !== "number" || !Number.isInteger(body.rung) || body.rung < 0 || body.rung > 3) {
+      return { ok: false, error: `event "slice.recovery.requested" rung must be an integer in {0,1,2,3}.` };
+    }
+  }
   return { ok: true, input: { ...(body as object), source: "legate" } as AppendEventInput };
 }
 

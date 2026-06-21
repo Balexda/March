@@ -256,9 +256,9 @@ Recommended implementation sequence:
 |----|-------|------------|----------|
 | US3 | Resolve Repository Identity and Default Branch | — | specs/2026-05-26-006-statio-forge-gateway/03-resolve-repository-identity-and-default-branch.tasks.md |
 | US5 | Reach the Gateway Over HTTP With Auth and Uniform Typed Errors | — | specs/2026-05-26-006-statio-forge-gateway/05-reach-gateway-over-http-with-auth-and-uniform-typed-errors.tasks.md |
-| US1 | Read a Pull Request's State Through the Gateway | US3, US5 | — |
-| US2 | Discover and List Pull Requests | US3, US5 | — |
-| US4 | Read Unresolved Review Threads | US3, US5 | — |
+| US1 | Read a Pull Request's State Through the Gateway | US3, US5 | specs/2026-05-26-006-statio-forge-gateway/01-read-a-pull-requests-state-through-the-gateway.tasks.md |
+| US2 | Discover and List Pull Requests | US3, US5 | specs/2026-05-26-006-statio-forge-gateway/02-discover-and-list-pull-requests.tasks.md |
+| US4 | Read Unresolved Review Threads | US3, US5 | specs/2026-05-26-006-statio-forge-gateway/04-read-unresolved-review-threads.tasks.md |
 | US6 | Operate Statio as an Observable Container | US1–US5 | — |
 
 US3 (repoInfo) and US5 (transport/auth/errors/clients) are the foundation; the

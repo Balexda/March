@@ -41,7 +41,7 @@ services:
       dockerfile: docker/legate.Dockerfile
     image: march-legate:latest
     container_name: march-legate
-    restart: unless-stopped
+    restart: on-failure
     command: ["legate", "serve"]
     # Run as the host user so mounted files / creds are accessible.
     user: "${MARCH_HOST_UID:-1000}:${MARCH_HOST_GID:-${MARCH_HOST_UID:-1000}}"

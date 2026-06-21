@@ -21,7 +21,7 @@ services:
   otel-lgtm:
     image: grafana/otel-lgtm:0.11.16
     container_name: march-otel-lgtm
-    restart: unless-stopped
+    restart: on-failure
     ports:
       - "3000:3000" # Grafana UI
       - "4317:4317" # OTLP gRPC
@@ -49,6 +49,9 @@ services:
       # Per-subsystem RED alerts (error rate + latency), a lower "subsystem" tier;
       # routes through the same team:march mute (silent).
       - ./grafana/provisioning/alerting/march-subsystem-red.yaml:/otel-lgtm/grafana/conf/provisioning/alerting/march-subsystem-red.yaml:ro
+      # Agent (codex spawn) health alerts — codex-auth-down is the headline;
+      # same team:march mute (silent), shows red on /d/march-agent-status.
+      - ./grafana/provisioning/alerting/march-agent-status-alerts.yaml:/otel-lgtm/grafana/conf/provisioning/alerting/march-agent-status-alerts.yaml:ro
     healthcheck:
       # The image ships curl but not wget, so probe with curl — otherwise the
       # container reports "unhealthy" forever despite Grafana being up, and any

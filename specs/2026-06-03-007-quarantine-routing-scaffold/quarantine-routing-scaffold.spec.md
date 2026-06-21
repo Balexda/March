@@ -101,9 +101,9 @@ Recommended implementation sequence:
 | ID | Title | Depends On | Artifact |
 |----|-------|-----------|----------|
 | US1 | Park a Failing Test Without Deleting It | — | specs/2026-06-03-007-quarantine-routing-scaffold/01-park-failing-test-without-deleting-it.tasks.md |
-| US2 | Exclude Quarantined Tests From the Staged Gate | US1 | — |
-| US3 | List Quarantined Tests in a Generated Roster | US1 | — |
-| US4 | Document the Quarantine Primitive for Contributors | US1 | — |
+| US2 | Exclude Quarantined Tests From the Staged Gate | US1 | specs/2026-06-03-007-quarantine-routing-scaffold/02-exclude-quarantined-tests-from-the-staged-gate.tasks.md |
+| US3 | List Quarantined Tests in a Generated Roster | US1 | specs/2026-06-03-007-quarantine-routing-scaffold/03-list-quarantined-tests-in-a-generated-roster.tasks.md |
+| US4 | Document the Quarantine Primitive for Contributors | US1 | specs/2026-06-03-007-quarantine-routing-scaffold/04-document-the-quarantine-primitive-for-contributors.tasks.md |
 
 ## Requirements *(mandatory)*
 

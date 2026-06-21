@@ -1,6 +1,6 @@
 {
   "name": "@balexda/march",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "CLI for the March agentic-development workflow: snapshot a worktree, dispatch a sandboxed spawn, and deploy the March skills for Claude Code.",
   "type": "module",
   "bin": {
@@ -9,12 +9,13 @@
   "scripts": {
     "docs:contracts:check": "node scripts/docs-contracts/check.mjs",
     "pretest": "tsup src/cli.ts --format esm --clean",
-    "test": "vitest run",
+    "test": "npm run test:l0 && npm run test:l1 && npm run test:l2-cassette && npm run test:l3-cassette",
     "test:vitest": "vitest run",
     "test:l0": "node scripts/run-layered-tests.mjs l0",
     "test:l1": "node scripts/run-layered-tests.mjs l1",
     "test:l2-cassette": "node scripts/run-layered-tests.mjs l2-cassette",
     "test:l3-cassette": "node scripts/run-layered-tests.mjs l3-cassette",
+    "test:taxonomy": "node scripts/test-taxonomy.mjs",
     "build": "tsup src/cli.ts --format esm --clean",
     "build:spawn-claude-image": "docker build -t march-spawn-claude:latest -f docker/spawn-claude.Dockerfile docker",
     "build:spawn-codex-image": "docker build -t march-spawn-codex:latest -f docker/spawn-codex.Dockerfile docker",
@@ -50,11 +51,11 @@
   "dependencies": {
     "@opentelemetry/api": "^1.9.1",
     "@opentelemetry/api-logs": "^0.218.0",
-    "@opentelemetry/exporter-logs-otlp-http": "^0.218.0",
-    "@opentelemetry/exporter-metrics-otlp-http": "^0.218.0",
-    "@opentelemetry/exporter-trace-otlp-http": "^0.218.0",
+    "@opentelemetry/exporter-logs-otlp-http": "^0.219.0",
+    "@opentelemetry/exporter-metrics-otlp-http": "^0.219.0",
+    "@opentelemetry/exporter-trace-otlp-http": "^0.219.0",
     "@opentelemetry/resources": "^2.7.1",
-    "@opentelemetry/sdk-logs": "^0.218.0",
+    "@opentelemetry/sdk-logs": "^0.219.0",
     "@opentelemetry/sdk-metrics": "^2.7.1",
     "@opentelemetry/sdk-trace-base": "^2.7.1",
     "@opentelemetry/semantic-conventions": "^1.41.1",

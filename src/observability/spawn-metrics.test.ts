@@ -2,7 +2,7 @@
  * @l0 @deterministic @ci
  */
 import { describe, expect, it } from "vitest";
-import { outcomeFromExitCode, recordSpawnRun } from "./spawn-metrics.js";
+import { outcomeFromExitCode, recordAgentFailure, recordSpawnRun, recordSpawnTokens } from "./spawn-metrics.js";
 
 describe("spawn-metrics", () => {
   it("maps exit code 0 to success and anything else to failure", () => {
@@ -32,6 +32,25 @@ describe("spawn-metrics", () => {
         outcome: "failure",
         failureStage: "patch_apply",
         durationSeconds: 0.3,
+      }),
+    ).not.toThrow();
+  });
+
+  it("recordAgentFailure is a no-op (does not throw) when telemetry is disabled", () => {
+    expect(() => recordAgentFailure({ backend: "codex", profile: "smithy", reason: "auth" })).not.toThrow();
+  });
+
+  it("recordAgentFailure skips the `none` reason without throwing", () => {
+    expect(() => recordAgentFailure({ backend: "codex", profile: "smithy", reason: "none" })).not.toThrow();
+  });
+
+  it("recordSpawnTokens is a no-op (does not throw) when telemetry is disabled", () => {
+    expect(() =>
+      recordSpawnTokens({
+        backend: "codex",
+        profile: "smithy",
+        taskType: "forge",
+        usage: { inputTokens: 100, cachedInputTokens: 50, outputTokens: 20, reasoningOutputTokens: 5 },
       }),
     ).not.toThrow();
   });

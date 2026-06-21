@@ -49,9 +49,9 @@ describe("resolveCastraToken", () => {
 
 describe("stackUp — ordering + token injection", () => {
   it("starts services in forward dependency order (otel-lgtm first, legate last)", async () => {
-    const calls: { args: string[]; token?: string }[] = [];
-    const run = (_file: string, args: string[], env?: NodeJS.ProcessEnv) => {
-      calls.push({ args, token: env?.[CASTRA_TOKEN_ENV] });
+    const calls: { file: string; args: string[]; token?: string }[] = [];
+    const run = (file: string, args: string[], env?: NodeJS.ProcessEnv) => {
+      calls.push({ file, args, token: env?.[CASTRA_TOKEN_ENV] });
     };
 
     const result = await stackUp({
@@ -67,10 +67,99 @@ describe("stackUp — ordering + token injection", () => {
     expect(result.services[0].service).toBe("otel-lgtm");
     expect(result.services.at(-1)?.service).toBe("legate");
     expect(result.services.every((s) => s.outcome === "started")).toBe(true);
-    // Every compose up carries the shared token + the never-build guard.
+    // The shared token is injected into the anchor and every compose call.
     expect(calls.every((c) => c.token === "tok-123")).toBe(true);
-    expect(calls.every((c) => c.args.includes("--no-build"))).toBe(true);
-    expect(calls.every((c) => c.args.includes("up") && c.args.includes("-d"))).toBe(true);
+    // Every *compose* up carries the never-build guard (the tmux anchor is not a
+    // compose call, so scope these assertions to docker invocations).
+    const dockerCalls = calls.filter((c) => c.file === "docker");
+    expect(dockerCalls.every((c) => c.args.includes("--no-build"))).toBe(true);
+    expect(
+      dockerCalls.every((c) => c.args.includes("up") && c.args.includes("-d")),
+    ).toBe(true);
+  });
+
+  it("claims the host tmux server before starting any service", async () => {
+    const order: string[] = [];
+    const run = (file: string, args: string[]) => {
+      if (file === "tmux") order.push(`tmux:${args[0]}`);
+      else order.push(`${file}:${args.find((a) => a.endsWith(".yml")) ?? ""}`);
+    };
+
+    await stackUp({
+      run,
+      locate: locateAll,
+      imagePresent: allImagesPresent,
+      resolveToken: () => stubToken,
+    });
+
+    // The tmux anchor must precede the first compose up (castra in particular).
+    const firstTmux = order.findIndex((o) => o.startsWith("tmux:"));
+    const firstDocker = order.findIndex((o) => o.startsWith("docker:"));
+    expect(firstTmux).toBeGreaterThanOrEqual(0);
+    expect(firstTmux).toBeLessThan(firstDocker);
+  });
+});
+
+describe("stackUp — host tmux anchor", () => {
+  it("reports the anchor present when a server + anchor already exist", async () => {
+    // A no-op runner: `tmux has-session` 'succeeds', so nothing is created.
+    const result = await stackUp({
+      run: () => {},
+      locate: locateAll,
+      imagePresent: allImagesPresent,
+      resolveToken: () => stubToken,
+    });
+    expect(result.tmuxAnchor).toEqual({ outcome: "present" });
+  });
+
+  it("creates the anchor when no server is running", async () => {
+    const newSession = vi.fn();
+    const run = (file: string, args: string[]) => {
+      if (file === "tmux" && args[0] === "has-session") {
+        throw new Error("no server running");
+      }
+      if (file === "tmux" && args[0] === "new-session") newSession(args);
+    };
+
+    const result = await stackUp({
+      run,
+      locate: locateAll,
+      imagePresent: allImagesPresent,
+      resolveToken: () => stubToken,
+    });
+
+    expect(result.tmuxAnchor).toEqual({ outcome: "created" });
+    expect(newSession).toHaveBeenCalledOnce();
+  });
+
+  it("records a failed anchor without aborting the stack (best-effort)", async () => {
+    const run = (file: string) => {
+      if (file === "tmux") throw new Error("tmux: command not found");
+    };
+
+    const result = await stackUp({
+      run,
+      locate: locateAll,
+      imagePresent: allImagesPresent,
+      resolveToken: () => stubToken,
+    });
+
+    expect(result.tmuxAnchor?.outcome).toBe("failed");
+    expect(result.tmuxAnchor?.detail).toContain("not found");
+    // The stack still came up — a missing tmux must not block bring-up.
+    expect(result.services.every((s) => s.outcome === "started")).toBe(true);
+  });
+
+  it("does not anchor when the image pre-flight aborts the run", async () => {
+    const run = vi.fn();
+    const result = await stackUp({
+      run,
+      locate: locateAll,
+      imagePresent: (image: string) => image !== "march-castra:latest",
+      resolveToken: () => stubToken,
+    });
+    expect(result.tmuxAnchor).toBeUndefined();
+    expect(run).not.toHaveBeenCalled();
   });
 });
 

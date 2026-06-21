@@ -1,0 +1,85 @@
+# March stack — Agent status alerts (SILENT, tier: agent).
+#
+# Health of the LLM agents (codex spawns) March drives. The headline rule is
+# codex-auth-down: when spawns die on "refresh token already used", EVERY
+# dispatch fails instantly and the profile silently stalls (the
+# smithy-profile-idle incident). These carry `team: march`, so the always-on
+# mute defined in march-alerts.yaml routes them to zero notifications while still
+# recording breach state and showing red on the Agent status dashboard
+# (/d/march-agent-status). No policies/muteTimes are redefined here.
+#
+# Built from march_spawn_agent_failures_total{reason} + march_spawn_runs_total{outcome}.
+apiVersion: 1
+
+groups:
+  - orgId: 1
+    name: march-agent-status
+    folder: March Alerts
+    interval: 1m
+    rules:
+      # ---- Codex / agent authentication down ----
+      # The agent OAuth token is dead ("refresh token already used") and spawns
+      # fail the instant they start. Two signals are OR'd because they are
+      # complementary in time: the auth-failure RATE catches the initial burst,
+      # but once the legate circuit-breaker trips it PAUSES dispatch — so the
+      # failure rate falls to ~0 while the agent is still down. The breaker's
+      # `march_legate_spawn_breaker_open` gauge is the durable steady-state
+      # "agent is down" signal. Firing on either keeps the alarm up for the whole
+      # outage. `or vector(0)` defaults the (absent-when-quiet) rate series to 0
+      # so the breaker term alone can still fire.
+      - uid: march-agent-codex-auth-down
+        title: "AGENT: codex authentication down (re-auth required)"
+        condition: C
+        for: 2m
+        noDataState: OK
+        execErrState: OK
+        labels: { severity: critical, team: march, tier: agent }
+        annotations:
+          summary: >-
+            Codex/agent authentication is FAILING ("refresh token already
+            used") — spawns die the instant they start and the profile stalls
+            with everything escalating. The legate circuit-breaker has paused
+            fresh dispatch (breaker_open=1). ACTION: re-authenticate the agent on
+            the host (`codex login`), then clear the backlog
+            (march.debug `mass-recover.sh --yes`).
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: prometheus
+            model:
+              refId: A
+              instant: true
+              editorMode: code
+              expr: max(march_legate_spawn_breaker_open) + (sum(rate(march_spawn_agent_failures_total{reason="auth"}[5m])) or vector(0))
+          - refId: C
+            datasourceUid: __expr__
+            model: { refId: C, type: threshold, expression: A, conditions: [{ evaluator: { type: gt, params: [0] } }] }
+
+      # ---- Agent hard-down (any reason): failing with zero successes ----
+      # Catches a non-auth hard-down (broken image, codex CLI startup error):
+      # spawns are failing and NONE are completing over 10m. The multiplier zeroes
+      # the value whenever any spawn succeeds, so an idle stack never fires.
+      - uid: march-agent-all-failing
+        title: "AGENT: spawns failing with zero successes"
+        condition: C
+        for: 10m
+        noDataState: OK
+        execErrState: OK
+        labels: { severity: warning, team: march, tier: agent }
+        annotations:
+          summary: >-
+            Spawns are failing and none are completing over 10m — the agent is
+            effectively down (broken image / CLI startup / auth). Check the
+            Agent status dashboard and the most recent spawn-output.log.
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: prometheus
+            model:
+              refId: A
+              instant: true
+              editorMode: code
+              expr: sum(rate(march_spawn_runs_total{outcome="failure"}[10m])) * (sum(rate(march_spawn_runs_total{outcome="success"}[10m])) == bool 0)
+          - refId: C
+            datasourceUid: __expr__
+            model: { refId: C, type: threshold, expression: A, conditions: [{ evaluator: { type: gt, params: [0] } }] }

@@ -11,7 +11,12 @@ import { spanIdForDispatch, traceIdForDispatch } from "../observability/trace-id
 import { StatioClient } from "./client.js";
 import type { RepoMetadataReader } from "./forge.js";
 import { buildStatioServer } from "./server.js";
-import { StatioForgeError, StatioValidationError, type RepoInfo } from "./types.js";
+import {
+  StatioForgeError,
+  StatioNotFoundError,
+  StatioValidationError,
+  type RepoInfo,
+} from "./types.js";
 
 const REPO: RepoInfo = { owner: "Balexda/March", defaultBranch: "master" };
 
@@ -137,6 +142,28 @@ describe("statio server", () => {
 
     expect(res.statusCode).toBe(502);
     expect(res.json()).toEqual({ error: { code: "forge_error", message: "gh failed" } });
+  });
+
+  it("maps not-found failures to not_found envelopes", async () => {
+    app = buildStatioServer({
+      repoReader: fakeReader({
+        repoInfo: vi.fn(async () => {
+          throw new StatioNotFoundError("pull request not found");
+        }),
+      }),
+      token: "secret",
+    });
+
+    const res = await app.inject({
+      method: "GET",
+      url: "/v1/repo",
+      headers: { authorization: "Bearer secret" },
+    });
+
+    expect(res.statusCode).toBe(404);
+    expect(res.json()).toEqual({
+      error: { code: "not_found", message: "pull request not found" },
+    });
   });
 
   it("maps validation failures to invalid_request envelopes", async () => {

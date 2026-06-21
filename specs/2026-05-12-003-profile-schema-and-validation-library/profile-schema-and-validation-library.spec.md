@@ -218,8 +218,8 @@ Recommended implementation sequence:
 | US2 | Identity, Version, and `baseImage` Validation                     | US1             | specs/2026-05-12-003-profile-schema-and-validation-library/02-identity-version-and-baseimage-validation.tasks.md |
 | US3 | Container Security and Resources are 1:1 with M1 SpawnConfig      | US1             | specs/2026-05-12-003-profile-schema-and-validation-library/03-container-security-and-resources-are-1-1-with-m1-spawnconfig.tasks.md |
 | US4 | A3 Structural Enforcement — `envWhitelist` is the Only Env Mechanism | US1, US3     | specs/2026-05-12-003-profile-schema-and-validation-library/04-a3-structural-enforcement-envwhitelist-is-the-only-env-mechanism.tasks.md |
-| US5 | A7 Network Policy is a Closed Allowlist with Structured Endpoints | US1             | —        |
-| US6 | A2/A5 — File Mounts and Snapshot Policy Enforce Threat Model      | US1             | —        |
+| US5 | A7 Network Policy is a Closed Allowlist with Structured Endpoints | US1             | specs/2026-05-12-003-profile-schema-and-validation-library/05-a7-network-policy-is-a-closed-allowlist-with-structured-endpoints.tasks.md |
+| US6 | A2/A5 — File Mounts and Snapshot Policy Enforce Threat Model      | US1             | specs/2026-05-12-003-profile-schema-and-validation-library/06-a2-a5-file-mounts-and-snapshot-policy-enforce-threat-model-structurally.tasks.md |
 | US7 | Optional `tools` Policy, Shipped But Unconsumed                   | US1             | —        |
 | US8 | Profile Fixture Corpus as Schema Documentation                    | US2, US3, US4, US5, US6, US7 | — |
 
