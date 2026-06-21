@@ -1,6 +1,6 @@
 {
   "name": "@balexda/march",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "CLI for the March agentic-development workflow: snapshot a worktree, dispatch a sandboxed spawn, and deploy the March skills for Claude Code.",
   "type": "module",
   "bin": {
