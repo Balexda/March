@@ -3,10 +3,12 @@
  */
 import { describe, expect, it, vi } from "vitest";
 import {
+  buildPrListArgs,
   buildPrViewArgs,
   buildRepoInfoArgs,
   buildReviewThreadsArgs,
   createGhForgeAdapter,
+  parsePullRequestListGhJson,
   parsePullRequestSummaryGhJson,
   parseRepoInfoGhJson,
   type StatioCommandRunner,
@@ -107,6 +109,216 @@ describe("statio gh forge adapter — repoInfo", () => {
     await expect(adapter.repoInfo()).resolves.toEqual({
       owner: "",
       defaultBranch: "main",
+    });
+  });
+});
+
+describe("statio gh forge adapter — listPrs", () => {
+  it("builds bounded gh pr list args with author, state, and repository owner scoping", () => {
+    expect(buildPrListArgs({ author: "@me", state: "open" }, "Balexda/March")).toEqual([
+      "pr",
+      "list",
+      "--json",
+      "number,url,state,mergeable,headRefName,title,statusCheckRollup,createdAt",
+      "--author",
+      "@me",
+      "--state",
+      "open",
+      "-R",
+      "Balexda/March",
+    ]);
+  });
+
+  it("returns bounded list items for author plus state filters", async () => {
+    const runCommand: StatioCommandRunner = vi.fn(async (_command, args) => {
+      if (args[0] === "repo") {
+        return JSON.stringify({
+          nameWithOwner: "Balexda/March",
+          defaultBranchRef: { name: "master" },
+        });
+      }
+      return JSON.stringify([
+        {
+          number: 42,
+          url: "https://github.com/Balexda/March/pull/42",
+          state: "OPEN",
+          mergeable: "MERGEABLE",
+          headRefName: "feature/statio",
+          title: "Add Statio",
+          statusCheckRollup: [
+            { name: "build", status: "COMPLETED", conclusion: "SUCCESS" },
+          ],
+          createdAt: "2026-05-26T00:00:00Z",
+        },
+      ]);
+    });
+    const adapter = createGhForgeAdapter({ cwd: "/repo", timeoutMs: 1234, runCommand });
+
+    await expect(adapter.listPrs({ author: "@me", state: "open" })).resolves.toEqual([
+      {
+        number: 42,
+        url: "https://github.com/Balexda/March/pull/42",
+        state: "OPEN",
+        mergeable: "MERGEABLE",
+        headBranch: "feature/statio",
+        title: "Add Statio",
+        checks: "PASS",
+        createdAt: "2026-05-26T00:00:00Z",
+      },
+    ]);
+    expect(runCommand).toHaveBeenNthCalledWith(
+      2,
+      "gh",
+      buildPrListArgs({ author: "@me", state: "open" }, "Balexda/March"),
+      {
+        cwd: undefined,
+        timeoutMs: 1234,
+      },
+    );
+  });
+
+  it("returns bounded list items for head branch filters", async () => {
+    const runCommand: StatioCommandRunner = vi.fn(async (_command, args) => {
+      if (args[0] === "repo") {
+        return JSON.stringify({
+          nameWithOwner: "Balexda/March",
+          defaultBranchRef: { name: "master" },
+        });
+      }
+      return JSON.stringify([
+        {
+          number: 7,
+          url: "https://github.com/Balexda/March/pull/7",
+          state: "OPEN",
+          headRefName: "feature/head-filter",
+          title: "Head match",
+          statusCheckRollup: [
+            { name: "test", status: "COMPLETED", conclusion: "FAILURE" },
+          ],
+          createdAt: "2026-05-27T00:00:00Z",
+        },
+      ]);
+    });
+    const adapter = createGhForgeAdapter({ runCommand });
+
+    await expect(adapter.listPrs({ head: "feature/head-filter" })).resolves.toEqual([
+      {
+        number: 7,
+        url: "https://github.com/Balexda/March/pull/7",
+        state: "OPEN",
+        headBranch: "feature/head-filter",
+        title: "Head match",
+        checks: "FAIL",
+        createdAt: "2026-05-27T00:00:00Z",
+      },
+    ]);
+    expect(runCommand).toHaveBeenNthCalledWith(
+      2,
+      "gh",
+      buildPrListArgs({ head: "feature/head-filter" }, "Balexda/March"),
+      {
+        cwd: undefined,
+        timeoutMs: 10_000,
+      },
+    );
+  });
+
+  it("returns an empty list for empty gh pr list output", async () => {
+    const runCommand: StatioCommandRunner = vi.fn(async (_command, args) => {
+      if (args[0] === "repo") {
+        return JSON.stringify({
+          nameWithOwner: "Balexda/March",
+          defaultBranchRef: { name: "master" },
+        });
+      }
+      return "[]";
+    });
+    const adapter = createGhForgeAdapter({ runCommand });
+
+    await expect(adapter.listPrs({ author: "@me", state: "open" })).resolves.toEqual([]);
+  });
+
+  it("rejects invalid filters and malformed requests as validation errors", async () => {
+    const runCommand: StatioCommandRunner = vi.fn(async () => "[]");
+    const adapter = createGhForgeAdapter({ runCommand });
+
+    await expect(adapter.listPrs({ state: "draft" as "open" })).rejects.toBeInstanceOf(
+      StatioValidationError,
+    );
+    await expect(adapter.listPrs({ head: "" })).rejects.toBeInstanceOf(StatioValidationError);
+    await expect(adapter.listPrs(null as unknown as {})).rejects.toBeInstanceOf(
+      StatioValidationError,
+    );
+    expect(runCommand).not.toHaveBeenCalled();
+  });
+
+  it("wraps malformed gh pr list output as forge_error", async () => {
+    expect(() => parsePullRequestListGhJson("not-json")).toThrow(StatioForgeError);
+    expect(() => parsePullRequestListGhJson("{}")).toThrow(StatioForgeError);
+    expect(() =>
+      parsePullRequestListGhJson(JSON.stringify([{ number: 42, state: "OPEN" }])),
+    ).toThrow(StatioForgeError);
+  });
+
+  it("falls back to the repo cwd when owner is unavailable", async () => {
+    const runCommand: StatioCommandRunner = vi.fn(async (_command, args) => {
+      if (args[0] === "repo") {
+        return JSON.stringify({ nameWithOwner: "", defaultBranchRef: { name: "master" } });
+      }
+      return JSON.stringify([
+        {
+          number: 9,
+          url: "https://github.com/Balexda/March/pull/9",
+          state: "OPEN",
+          mergeable: "UNKNOWN",
+          headRefName: "branch",
+          title: "Fallback",
+          statusCheckRollup: [],
+          createdAt: "2026-05-28T00:00:00Z",
+        },
+      ]);
+    });
+    const adapter = createGhForgeAdapter({ cwd: "/repo", timeoutMs: 100, runCommand });
+
+    await expect(adapter.listPrs({ head: "branch" })).resolves.toHaveLength(1);
+    expect(runCommand).toHaveBeenNthCalledWith(2, "gh", buildPrListArgs({ head: "branch" }), {
+      cwd: "/repo",
+      timeoutMs: 100,
+    });
+  });
+
+  it("falls back to the repo cwd when owner resolution fails", async () => {
+    const runCommand: StatioCommandRunner = vi.fn(async (_command, args) => {
+      if (args[0] === "repo") {
+        throw new Error("gh repo view failed");
+      }
+      return "[]";
+    });
+    const adapter = createGhForgeAdapter({ cwd: "/repo", timeoutMs: 100, runCommand });
+
+    await expect(adapter.listPrs({ author: "@me" })).resolves.toEqual([]);
+    expect(runCommand).toHaveBeenNthCalledWith(2, "gh", buildPrListArgs({ author: "@me" }), {
+      cwd: "/repo",
+      timeoutMs: 100,
+    });
+  });
+
+  it("wraps gh pr list failures as forge_error", async () => {
+    const runCommand: StatioCommandRunner = vi.fn(async (_command, args) => {
+      if (args[0] === "repo") {
+        return JSON.stringify({
+          nameWithOwner: "Balexda/March",
+          defaultBranchRef: { name: "master" },
+        });
+      }
+      throw new Error("gh auth token secret failed");
+    });
+    const adapter = createGhForgeAdapter({ runCommand });
+
+    await expect(adapter.listPrs({ state: "all" })).rejects.toMatchObject({
+      name: "StatioForgeError",
+      code: "forge_error",
+      message: "gh pr list failed while listing pull requests.",
     });
   });
 });

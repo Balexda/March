@@ -4,6 +4,8 @@ import type {
   CheckSummary,
   RepoInfo,
   ForgeClient,
+  ListPrsRequest,
+  PullRequestListItem,
   PullRequestSummary,
   ReviewThread,
 } from "./types.js";
@@ -41,6 +43,24 @@ export function buildPrViewArgs(number: number, owner?: string): string[] {
     "--json",
     "number,url,state,mergeable,reviewDecision,statusCheckRollup,headRefName,title,author",
   ];
+  if (owner) {
+    args.push("-R", owner);
+  }
+  return args;
+}
+
+const PR_LIST_JSON_FIELDS =
+  "number,url,state,mergeable,headRefName,title,statusCheckRollup,createdAt";
+
+export function buildPrListArgs(req: ListPrsRequest, owner?: string): string[] {
+  const args = ["pr", "list", "--json", PR_LIST_JSON_FIELDS];
+  if (req.head) {
+    args.push("--head", req.head);
+  }
+  if (req.author) {
+    args.push("--author", req.author);
+  }
+  args.push("--state", req.state ?? "open");
   if (owner) {
     args.push("-R", owner);
   }
@@ -286,6 +306,88 @@ export function parsePullRequestSummaryGhJson(
   };
 }
 
+function assertPlainObject(value: unknown, message: string): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new StatioForgeError(message);
+  }
+  return value as Record<string, unknown>;
+}
+
+export function parsePullRequestListGhJson(text: string): PullRequestListItem[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text) as unknown;
+  } catch {
+    throw new StatioForgeError("gh pr list returned unparseable pull request data.");
+  }
+  if (!Array.isArray(parsed)) {
+    throw new StatioForgeError("gh pr list returned malformed pull request data.");
+  }
+  return parsed.map((item) => {
+    const record = assertPlainObject(item, "gh pr list returned malformed pull request data.");
+    const number = record.number;
+    const url = stringField(record, "url");
+    const state = stringField(record, "state");
+    const mergeable = stringField(record, "mergeable");
+    const headBranch = stringField(record, "headRefName");
+    const title = stringField(record, "title");
+    const createdAt = stringField(record, "createdAt");
+    if (
+      typeof number !== "number" ||
+      !Number.isInteger(number) ||
+      !url ||
+      !state ||
+      !headBranch ||
+      !title ||
+      !createdAt
+    ) {
+      throw new StatioForgeError("gh pr list returned malformed pull request data.");
+    }
+    return {
+      number,
+      url,
+      state,
+      ...(mergeable ? { mergeable } : {}),
+      headBranch,
+      title,
+      checks: checksSummary(record.statusCheckRollup),
+      createdAt,
+    };
+  });
+}
+
+function validateOptionalFilter(value: unknown, field: string): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || value.trim() !== value || value.length === 0) {
+    throw new StatioValidationError(`${field} must be a non-empty string when provided.`);
+  }
+  return value;
+}
+
+function validateListPrsRequest(req: ListPrsRequest): ListPrsRequest {
+  if (!req || typeof req !== "object" || Array.isArray(req)) {
+    throw new StatioValidationError("listPrs request must be an object.");
+  }
+  const record = req as Record<string, unknown>;
+  const state = record.state;
+  if (
+    state !== undefined &&
+    state !== "open" &&
+    state !== "closed" &&
+    state !== "merged" &&
+    state !== "all"
+  ) {
+    throw new StatioValidationError(
+      "state must be one of open, closed, merged, or all when provided.",
+    );
+  }
+  return {
+    head: validateOptionalFilter(record.head, "head"),
+    author: validateOptionalFilter(record.author, "author"),
+    state: state as ListPrsRequest["state"],
+  };
+}
+
 function isNotFoundError(err: unknown): boolean {
   const haystack: string[] = [];
   if (err instanceof Error) {
@@ -307,7 +409,7 @@ function splitOwner(owner: string): [string, string] | null {
 
 export function createGhForgeAdapter(
   options: GhForgeAdapterOptions = {},
-): Pick<ForgeClient, "repoInfo" | "getPr"> {
+): Pick<ForgeClient, "repoInfo" | "listPrs" | "getPr"> {
   const runCommand = options.runCommand ?? execText;
   const timeoutMs = options.timeoutMs ?? DEFAULT_GH_TIMEOUT_MS;
 
@@ -326,6 +428,32 @@ export function createGhForgeAdapter(
   return {
     async repoInfo(): Promise<RepoInfo> {
       return resolveRepoInfo();
+    },
+
+    async listPrs(req: ListPrsRequest = {}): Promise<PullRequestListItem[]> {
+      const filters = validateListPrsRequest(req);
+      let repo: RepoInfo = { owner: "", defaultBranch: "" };
+      try {
+        repo = await resolveRepoInfo();
+      } catch {
+        repo = { owner: "", defaultBranch: "" };
+      }
+
+      const owner = splitOwner(repo.owner) ? repo.owner : "";
+      const commandOptions = {
+        cwd: owner ? undefined : options.cwd,
+        timeoutMs,
+      };
+
+      try {
+        const stdout = await runCommand("gh", buildPrListArgs(filters, owner), commandOptions);
+        return parsePullRequestListGhJson(stdout);
+      } catch (err) {
+        if (err instanceof StatioValidationError || err instanceof StatioForgeError) {
+          throw err;
+        }
+        throw new StatioForgeError("gh pr list failed while listing pull requests.");
+      }
     },
 
     async getPr(number: number): Promise<PullRequestSummary> {
