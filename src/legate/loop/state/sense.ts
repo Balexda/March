@@ -281,6 +281,10 @@ export function rebuildWorkingState(sys: SystemState, meta: LoopMeta): any {
       // recoverable escalation from a terminal one after a cold start.
       slice.escalated_reason = s.escalatedReason;
     }
+    // Carry the graduated-recovery ladder rung (#412) so the rung driver (PR2)
+    // resumes the walk at the right rung after a cold-start rebuild rather than
+    // restarting it from zero.
+    if (s.recoveryRung !== undefined) slice.recovery_rung = s.recoveryRung;
     // Restore the Hatchery job id so a slice still in `hatchery-pending` after a
     // restart can be polled to completion (otherwise the completion poll skips it).
     if (s.jobId) slice.hatchery = { job_id: s.jobId, backend: "codex" };

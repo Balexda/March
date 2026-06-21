@@ -277,7 +277,7 @@ describe("reduce / fold", () => {
     ).toEqual({ kind: "slice", id: "s1" });
   });
 
-  it("slice.recovery.requested tombstones the escalated slice + clears its budget (#238)", () => {
+  it("slice.recovery.requested {rung:3} tombstones the escalated slice + clears its budget (#238 regression-lock)", () => {
     seq = 0;
     // An escalated slice with an exhausted recovery budget — no internal re-dispatch path.
     const escalated = foldEvents([
@@ -288,29 +288,94 @@ describe("reduce / fold", () => {
     expect(escalated.slices.s1).toMatchObject({ stage: "escalated", escalatedReason: "hatchery_dispatch_failed" });
     expect(escalated.retries["dispatch-recovery:s1"]).toBe(2);
 
-    const recovered = foldEvents([ev({ type: "slice.recovery.requested", sliceId: "s1" })], escalated);
-    // The slice is replaced by a bare tombstone carrying no blocking facts, and its
+    // The last-resort nuke (rung 3) keeps today's #238 behavior exactly: the slice
+    // is replaced by a bare tombstone carrying no blocking facts, and its
     // bounded-recovery budget is cleared. rebuildWorkingState skips tombstones, so a
     // cold-start rebuild reconstructs nothing blocking.
+    const recovered = foldEvents([ev({ type: "slice.recovery.requested", sliceId: "s1", rung: 3 })], escalated);
     expect(recovered.slices.s1).toEqual({ sliceId: "s1", recovered: true });
     expect(recovered.retries["dispatch-recovery:s1"]).toBeUndefined();
   });
 
-  it("slice.recovery.requested tombstones even an unknown slice (guards in-flight stale deltas)", () => {
+  it("slice.recovery.requested {rung:3} tombstones even an unknown slice (guards in-flight stale deltas)", () => {
     seq = 0;
-    const state = foldEvents([ev({ type: "slice.recovery.requested", sliceId: "ghost" })]);
+    const state = foldEvents([ev({ type: "slice.recovery.requested", sliceId: "ghost", rung: 3 })]);
     expect(state.slices.ghost).toEqual({ sliceId: "ghost", recovered: true });
     expect(state.seq).toBe(1);
   });
 
-  it("ignores a stale observation delta for a recovered slice — no resurrection (#238)", () => {
+  it("begin-graduated slice.recovery.requested PRESERVES durable facts, resets only execution state (#412)", () => {
     seq = 0;
-    // A stale pr/output delta sequenced AFTER the recovery (observe tick snapshotted
-    // the slice before it was recovered) must not rebuild a ghost in-flight slice.
+    // An escalated slice that still carries its branch/worktree/PR — the gentle
+    // rungs need those to re-attach in place.
+    const escalated = foldEvents([
+      ev({ type: "slice.dispatched", sliceId: "s1", branch: "feature/a", worktreePath: "/wt/a", jobId: "job-1" }),
+      ev({ type: "slice.pr.changed", sliceId: "s1", pr: { number: 7, state: "OPEN" } }),
+      ev({ type: "slice.escalated", sliceId: "s1", reason: "steward_stuck" }),
+      ev({ type: "retry.counted", key: "relaunch-steward:s1", count: 2 }),
+    ]);
+    expect(escalated.slices.s1).toMatchObject({ branch: "feature/a", worktreePath: "/wt/a", escalatedReason: "steward_stuck" });
+
+    // No `rung` (the operator CLI append) → begin-graduated: keep branch/worktreePath/pr,
+    // mark the start of the ladder, clear the escalation reason and the retry budget.
+    const recovered = foldEvents([ev({ type: "slice.recovery.requested", sliceId: "s1" })], escalated);
+    expect(recovered.slices.s1).toMatchObject({
+      sliceId: "s1",
+      branch: "feature/a",
+      worktreePath: "/wt/a",
+      pr: { number: 7, state: "OPEN" },
+      recoveryRung: 0,
+    });
+    expect(recovered.slices.s1.recovered).toBeUndefined();
+    expect(recovered.slices.s1.escalatedReason).toBeUndefined();
+    expect(recovered.retries["relaunch-steward:s1"]).toBeUndefined();
+  });
+
+  it("an inner-rung slice.recovery.requested persists the rung durably (#412 review)", () => {
+    seq = 0;
+    // The driver advances the ladder by appending an inner-rung event; the reducer
+    // must record THAT rung (not reset to 0) so a cold-start rebuild resumes the
+    // walk at the right rung rather than restarting from the bottom.
+    const atRung2 = foldEvents([
+      ev({ type: "slice.dispatched", sliceId: "s1", branch: "feature/a", worktreePath: "/wt/a", jobId: "job-1" }),
+      ev({ type: "slice.escalated", sliceId: "s1", reason: "steward_stuck" }),
+      ev({ type: "slice.recovery.requested", sliceId: "s1", rung: 2 }),
+    ]);
+    expect(atRung2.slices.s1).toMatchObject({ branch: "feature/a", worktreePath: "/wt/a", recoveryRung: 2 });
+    expect(atRung2.slices.s1.recovered).toBeUndefined();
+    expect(atRung2.slices.s1.escalatedReason).toBeUndefined();
+    // rung:1 likewise.
+    const atRung1 = foldEvents([ev({ type: "slice.recovery.requested", sliceId: "s2", rung: 1 })]);
+    expect(atRung1.slices.s2.recoveryRung).toBe(1);
+    // An omitted rung (the operator CLI append) still begins at rung 0.
+    const atRung0 = foldEvents([ev({ type: "slice.recovery.requested", sliceId: "s3" })]);
+    expect(atRung0.slices.s3.recoveryRung).toBe(0);
+  });
+
+  it("begin-graduated recovery keeps the slice live, so observations keep folding (#412)", () => {
+    seq = 0;
+    // Unlike the rung-3 tombstone, a begin-graduated recovery leaves the live slice
+    // in place — a subsequent observation delta updates it normally (no resurrection
+    // guard, because there is no ghost to resurrect).
+    const recovered = foldEvents([
+      ev({ type: "slice.dispatched", sliceId: "s1", branch: "feature/a", jobId: "job-1" }),
+      ev({ type: "slice.escalated", sliceId: "s1", reason: "steward_stuck" }),
+      ev({ type: "slice.recovery.requested", sliceId: "s1" }),
+      ev({ type: "slice.pr.changed", sliceId: "s1", pr: { number: 7, state: "OPEN" } }),
+    ]);
+    expect(recovered.slices.s1).toMatchObject({ branch: "feature/a", recoveryRung: 0, pr: { number: 7, state: "OPEN" } });
+    expect(recovered.slices.s1.recovered).toBeUndefined();
+  });
+
+  it("ignores a stale observation delta for a {rung:3} recovered slice — no resurrection (#238)", () => {
+    seq = 0;
+    // A stale pr/output delta sequenced AFTER a rung-3 recovery (observe tick
+    // snapshotted the slice before it was recovered) must not rebuild a ghost
+    // in-flight slice. The recovered guard is set ONLY on the rung-3 branch.
     const recovered = foldEvents([
       ev({ type: "slice.dispatched", sliceId: "s1", branch: "feature/a", jobId: "job-1" }),
       ev({ type: "slice.escalated", sliceId: "s1", reason: "hatchery_dispatch_failed" }),
-      ev({ type: "slice.recovery.requested", sliceId: "s1" }),
+      ev({ type: "slice.recovery.requested", sliceId: "s1", rung: 3 }),
       ev({ type: "slice.pr.changed", sliceId: "s1", pr: { number: 7, state: "OPEN" } }),
       ev({ type: "slice.output.changed", sliceId: "s1", recentOutput: { output: "stale" } }),
     ]);
@@ -318,11 +383,11 @@ describe("reduce / fold", () => {
     expect(recovered.slices.s1).toEqual({ sliceId: "s1", recovered: true });
   });
 
-  it("a fresh dispatch after recovery clears the tombstone and re-creates the slice clean", () => {
+  it("a fresh dispatch after a {rung:3} recovery clears the tombstone and re-creates the slice clean", () => {
     seq = 0;
     const recovered = foldEvents([
       ev({ type: "slice.escalated", sliceId: "s1", reason: "hatchery_dispatch_failed" }),
-      ev({ type: "slice.recovery.requested", sliceId: "s1" }),
+      ev({ type: "slice.recovery.requested", sliceId: "s1", rung: 3 }),
       ev({ type: "slice.dispatched", sliceId: "s1", branch: "feature/a", jobId: "job-2" }),
     ]);
     expect(recovered.slices.s1).toMatchObject({ branch: "feature/a", jobId: "job-2", archived: false });
@@ -337,6 +402,71 @@ describe("reduce / fold", () => {
 
   it("entityRefOf maps slice.recovery.requested to its slice", () => {
     expect(entityRefOf({ type: "slice.recovery.requested", sliceId: "s1" })).toEqual({ kind: "slice", id: "s1" });
+  });
+
+  it("steward.relaunched folds the LIVE worktreePath onto the slice (#410/#412)", () => {
+    seq = 0;
+    // A relaunch mints a new session and may land on a fresh agent-deck-hashed
+    // worktree; the event now carries it so the fold records the real path.
+    const relaunched = foldEvents([
+      ev({ type: "slice.dispatched", sliceId: "s1", branch: "feature/a", worktreePath: "/wt/guess", jobId: "job-1" }),
+      ev({ type: "steward.relaunched", sliceId: "s1", sessionId: "fresh", worktreePath: "/wt/feature-a-newhash" }),
+    ]);
+    expect(relaunched.slices.s1).toMatchObject({ sessionId: "fresh", worktreePath: "/wt/feature-a-newhash" });
+  });
+
+  it("steward.relaunched without worktreePath never clobbers a known path with absent", () => {
+    seq = 0;
+    const relaunched = foldEvents([
+      ev({ type: "slice.dispatched", sliceId: "s1", branch: "feature/a", worktreePath: "/wt/known", jobId: "job-1" }),
+      ev({ type: "steward.relaunched", sliceId: "s1", sessionId: "fresh" }),
+    ]);
+    expect(relaunched.slices.s1).toMatchObject({ sessionId: "fresh", worktreePath: "/wt/known" });
+  });
+
+  it("recoveryRung is cleared on a clean slice.dispatched (#412)", () => {
+    seq = 0;
+    const cleared = foldEvents([
+      ev({ type: "slice.escalated", sliceId: "s1", reason: "steward_stuck" }),
+      ev({ type: "slice.recovery.requested", sliceId: "s1" }),
+      ev({ type: "slice.dispatched", sliceId: "s1", branch: "feature/a", jobId: "job-2" }),
+    ]);
+    expect(cleared.slices.s1.recoveryRung).toBeUndefined();
+    expect(cleared.slices.s1.stage).toBe("hatchery-pending");
+  });
+
+  it("recoveryRung is cleared on slice.steward.attached (#412)", () => {
+    seq = 0;
+    const cleared = foldEvents([
+      ev({ type: "slice.escalated", sliceId: "s1", reason: "steward_stuck" }),
+      ev({ type: "slice.recovery.requested", sliceId: "s1" }),
+      ev({ type: "slice.steward.attached", sliceId: "s1", sessionId: "fresh", worktreePath: "/wt/a" }),
+    ]);
+    expect(cleared.slices.s1.recoveryRung).toBeUndefined();
+    expect(cleared.slices.s1.sessionId).toBe("fresh");
+  });
+
+  it("folding the same recovery log twice is deterministic (double-fold) (#412)", () => {
+    seq = 0;
+    const log: HeraldEvent[] = [
+      ev({ type: "slice.dispatched", sliceId: "s1", branch: "feature/a", worktreePath: "/wt/a", jobId: "job-1" }),
+      ev({ type: "slice.pr.changed", sliceId: "s1", pr: { number: 7, state: "OPEN" } }),
+      ev({ type: "slice.escalated", sliceId: "s1", reason: "steward_stuck" }),
+      ev({ type: "slice.recovery.requested", sliceId: "s1" }),
+      ev({ type: "steward.relaunched", sliceId: "s1", sessionId: "fresh", worktreePath: "/wt/a-newhash" }),
+    ];
+    const first = foldEvents(log);
+    const second = foldEvents(log);
+    expect(second.slices).toEqual(first.slices);
+    expect(second.retries).toEqual(first.retries);
+    // And the preserved/recorded facts are exactly what the ladder needs.
+    expect(first.slices.s1).toMatchObject({
+      branch: "feature/a",
+      worktreePath: "/wt/a-newhash",
+      pr: { number: 7, state: "OPEN" },
+      sessionId: "fresh",
+      recoveryRung: 0,
+    });
   });
 
   it("state.error sets the error and clears statePresent", () => {

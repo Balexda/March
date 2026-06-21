@@ -116,6 +116,16 @@ export interface SpawnBudgetMetrics {
   readonly live: number;
   /** Dispatchable items deferred this tick because the cap was reached. */
   readonly deferred: number;
+  /**
+   * The EFFECTIVE cap the dispatcher used this tick after the agent-health
+   * circuit-breaker. Equals `cap` when the breaker is closed; collapses to 0
+   * (or 1 for a probe) when the agent is hard-down (e.g. codex auth expired) so
+   * the loop stops flooding spawns into a failing agent. Optional — omitted
+   * pre-breaker.
+   */
+  readonly effectiveCap?: number;
+  /** 1 while the agent-health circuit-breaker is OPEN (dispatch paused), else 0. */
+  readonly breakerOpen?: number;
 }
 
 /**
@@ -345,6 +355,22 @@ function ensureInstruments(meter: Meter): void {
     "march.legate.spawn.deferred",
     "Dispatchable items deferred this tick because the cap was reached",
     (b) => b.deferred,
+  );
+  // Agent-health circuit-breaker (the codex-down backpressure). `effective_cap`
+  // is the cap the dispatcher actually used after the breaker; `breaker_open`
+  // is 1 while dispatch is paused for a hard-down agent. `effective_cap ≪ cap`
+  // with `breaker_open=1` is the "agent is down, we stopped flooding" signal.
+  registerSpawnGauge(
+    meter,
+    "march.legate.spawn.effective_cap",
+    "Effective concurrent-spawn cap after the agent-health circuit-breaker",
+    (b) => b.effectiveCap ?? b.cap,
+  );
+  registerSpawnGauge(
+    meter,
+    "march.legate.spawn.breaker_open",
+    "1 while the agent-health circuit-breaker is OPEN (dispatch paused for a hard-down agent)",
+    (b) => b.breakerOpen ?? 0,
   );
 
   // Dwell (time-in-state) — max age of the oldest slice in each stage / merge-gate,

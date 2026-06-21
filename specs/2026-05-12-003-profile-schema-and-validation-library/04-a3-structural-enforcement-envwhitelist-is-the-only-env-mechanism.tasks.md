@@ -18,7 +18,7 @@
 
 ### Tasks
 
-- [ ] **Prove the container type has no inline env surface**
+- [x] **Prove the container type has no inline env surface**
 
   Add type-oriented coverage around the public `src/profile/` exports proving that `ContainerSecurity` and `Profile["container"]` expose only the documented container fields and no inline environment mechanism. Keep the check focused on the A3 field names called out by US4.
 

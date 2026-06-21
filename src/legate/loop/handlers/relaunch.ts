@@ -350,7 +350,11 @@ export async function apply(
     slice.worktree_path = liveWorktree;
     slice.last_action = ctx.ts;
     slice.last_action_note = "Re-launched steward for PR #" + d.prNumber + " (attempt " + d.attempt + "/" + d.limit + "); new session " + newSessionId;
-    ctx.emitTransition?.({ type: "steward.relaunched", sliceId: d.sliceId, sessionId: newSessionId });
+    // Record the LIVE worktree (the launch-reported path, which may be a fresh
+    // agent-deck hash) so the fold keeps it durably — a cold-start rebuild then
+    // re-attaches to the real worktree instead of re-guessing a colliding one
+    // (#410/#412).
+    ctx.emitTransition?.({ type: "steward.relaunched", sliceId: d.sliceId, sessionId: newSessionId, worktreePath: liveWorktree });
     recordAttempt(d);
     res.mutated = true;
     res.actions.push({

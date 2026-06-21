@@ -130,6 +130,13 @@ export interface HandlerResult {
   failures: any[];
   requests: any[];
   mutated: boolean;
+  /**
+   * Count of this tick's drained spawn failures whose `[agent_failure_reason]`
+   * marker is a hard-down class (the agent is unusable, e.g. codex auth
+   * expired). Set only by the dispatch handler; feeds the agent-health
+   * circuit-breaker (spawn-breaker.ts). Absent ⇒ 0.
+   */
+  hardDownFailures?: number;
 }
 
 export function emptyHandlerResult(): HandlerResult {

@@ -60,16 +60,30 @@ metrics label).
   folds them for replay of older logs.)
 - **Transition events** (legate-written, emitted at the cutover): `slice.dispatched`,
   `slice.stage.changed`, `slice.archived`, `slice.recovery.dispatched`,
-  `steward.relaunched`, `slice.escalated`, `retry.counted`.
-- **Operator-command event** (operator-written via `POST /events`, #238):
+  `steward.relaunched`, `slice.escalated`, `retry.counted`. `steward.relaunched`
+  carries the LIVE `worktreePath` the relaunch attached to (#410/#412) — the
+  reducer folds it onto the slice so a cold-start rebuild keeps the real worktree
+  instead of the relaunch handler re-guessing a colliding path.
+- **Operator-command event** (operator-written via `POST /events`, #238/#412):
   `slice.recovery.requested` — appended by `march legate recover <sliceId>` (or the
-  `legate.unwedge` skill) to un-wedge an escalated slice whose bounded-recovery
-  budget (#211) is spent. The reducer **drops** the slice from the fold and clears
-  its retry counters so a cold-start rebuild reconstructs no blocking entry; the
-  warm loop reconciles its in-memory working state off the *drained* request (the
-  fold can't reach the running loop on its own — warm-loop invisibility) and
-  re-dispatches the still-ready smithy work fresh. (Like the other `POST /events`
-  writers the stored `source` is `legate`.)
+  `legate.unwedge` skill) to un-wedge an escalated slice. Its optional `rung` field
+  selects the graduated-recovery behavior (#412):
+  - **omitted / `0`–`2` (begin-graduated)** — the reducer **preserves** the live
+    slice and its still-true durable facts (`branch`/`worktreePath`/`pr`) so the
+    gentle recovery rungs can re-attach in place, resetting only execution state
+    (sets `recoveryRung` to the event's `rung`, defaulting to 0 when the operator
+    CLI omits it; clears the escalation reason and the retry budget). The operator
+    CLI append omits `rung`; the rung ladder driver appends the inner rungs to
+    durably advance the ladder so its progress survives a cold-start rebuild. The
+    slice is NOT tombstoned, so its observations keep folding normally.
+  - **`3` (last-resort nuke)** — keeps today's #238 behavior exactly: the reducer
+    **drops** the slice to a bare `recovered:true` tombstone and clears its retry
+    counters, so a cold-start rebuild reconstructs no blocking entry and a stale
+    observation delta can't resurrect a ghost in-flight slice. The still-ready
+    smithy work then re-dispatches fresh. The `recovered` stale-observation guard
+    is set ONLY on this branch.
+
+  (Like the other `POST /events` writers the stored `source` is `legate`.)
 - **Correlation event** (Hatchery-written, #213): `slice.steward.attached` —
   published at steward launch, carrying `{ sliceId, sessionId, spawnId, branch,
   worktreePath }`. Hatchery is the single integration point that holds all three

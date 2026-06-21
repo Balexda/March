@@ -1,13 +1,22 @@
 #!/usr/bin/env bash
 # lib.sh — shared helpers for the march.debug diagnostic scripts.
 #
+# GENERATED — do not edit. Author the source at
+#   src/templates/skills/march.debug/scripts/lib.sh.prompt
+# and run `npm run skills:generate` (also runs on `npm run build`).
+#
+# Execution context: repo — host shell — services are reached on `localhost` via the compose-published ports.
+#
 # Sourced by every script in this directory. Provides URL resolution, a single
 # HTTP-fetch chokepoint (with a fixture-replay hook for tests), and friendly
 # error/exit helpers. Side-effect-free; no global state beyond the resolved URLs.
 #
-# Env overrides honored by all scripts:
+# Service base URLs are BAKED for this execution context at generation time —
+# there is NO runtime context detection. An explicit MARCH_*_URL env var still
+# wins, so the same variant also works against a non-default endpoint:
 #   MARCH_HERALD_URL   default http://localhost:8818
 #   MARCH_LEGATE_URL   default http://localhost:8787
+#   MARCH_CLI          default march
 #
 # Test-only hook (do NOT set in production):
 #   MARCH_DEBUG_REPLAY_DIR  when set, http_get reads <dir>/<segment>.json
@@ -17,9 +26,14 @@
 
 set -euo pipefail
 
-HERALD_URL="${MARCH_HERALD_URL:-http://localhost:8818}"
+# Context-baked defaults (overridable via the matching env var).
+HERALD_DEFAULT_URL="http://localhost:8818"
+LEGATE_DEFAULT_URL="http://localhost:8787"
+MARCH_CLI_DEFAULT="march"
+
+HERALD_URL="${MARCH_HERALD_URL:-$HERALD_DEFAULT_URL}"
 HERALD_URL="${HERALD_URL%/}"
-LEGATE_URL="${MARCH_LEGATE_URL:-http://localhost:8787}"
+LEGATE_URL="${MARCH_LEGATE_URL:-$LEGATE_DEFAULT_URL}"
 LEGATE_URL="${LEGATE_URL%/}"
 
 # Exit codes (stable so callers/tests can distinguish error classes):
@@ -32,6 +46,17 @@ die() { echo "march.debug: $*" >&2; exit 1; }
 
 need() {
   command -v "$1" >/dev/null 2>&1 || die "'$1' is required but not installed."
+}
+
+# columnize — align TSV on stdin into padded columns when util-linux `column` is
+# available; otherwise pass the TSV through unchanged. The in-container image
+# omits `column`, so callers must degrade gracefully rather than error.
+columnize() {
+  if command -v column >/dev/null 2>&1; then
+    column -t -s$'\t'
+  else
+    cat
+  fi
 }
 
 # http_get <base-url> <path-with-optional-query>

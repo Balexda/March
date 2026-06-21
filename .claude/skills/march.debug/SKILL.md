@@ -1,8 +1,11 @@
 ---
 name: march.debug
 description: "Diagnose a running March stack: inspect Herald's fold and event log, compare against the legate's view to surface divergence, read spawn/codex failure logs to find root cause, and execute the break-glass (Herald admin events) or recovery (`march legate recover`) procedures when the fold is wedged. Use when slices are escalated unexpectedly, dispatch appears stuck, the operator suspects a service-side bug, or before/after running any operator-only recovery action."
-allowed-tools: Bash(*/march.debug/scripts/fold-state.sh:*) Bash(*/march.debug/scripts/events-tail.sh:*) Bash(*/march.debug/scripts/legate-status.sh:*) Bash(*/march.debug/scripts/dispatch-diag.sh:*) Bash(*/march.debug/scripts/spawn-failure.sh:*) Bash(*/march.debug/scripts/admin-event.sh:*) Bash(*/march.debug/scripts/mass-recover.sh:*) Bash(docker logs march-*) Bash(docker ps*) Bash(docker exec march-legate printenv*) Bash(curl -s http://localhost:8818/*) Bash(curl -s http://localhost:8787/*) Bash(node /home/jmbattista/Development/March/dist/cli.js legate recover *) Bash(node /home/jmbattista/Development/March/dist/cli.js brood sweep*) Bash(node /home/jmbattista/Development/March/dist/cli.js herald admin event*)
+allowed-tools: Bash(*/march.debug/scripts/fold-state.sh:*) Bash(*/march.debug/scripts/events-tail.sh:*) Bash(*/march.debug/scripts/legate-status.sh:*) Bash(*/march.debug/scripts/dispatch-diag.sh:*) Bash(*/march.debug/scripts/spawn-failure.sh:*) Bash(*/march.debug/scripts/admin-event.sh:*) Bash(*/march.debug/scripts/mass-recover.sh:*) Bash(docker logs march-*) Bash(docker ps*) Bash(docker exec march-legate printenv*) Bash(curl -s http://localhost:8818/*) Bash(curl -s http://localhost:8787/*) Bash(march legate recover *) Bash(march brood sweep*) Bash(march herald admin event*)
 ---
+<!-- GENERATED for the repo execution context — do not edit.
+     Author the source at src/templates/skills/march.debug/SKILL.prompt and run
+     `npm run skills:generate` (also runs on `npm run build`). -->
 # march.debug
 
 Operator-side diagnostics for a **running** March container stack. Everything
@@ -41,17 +44,23 @@ re-cite it.
 
 ## Where everything lives
 
-### Services + ports (all bound to localhost)
+### Services + ports
 
-| Service | Port | Notes |
+This variant is generated for the **repo** execution context:
+host shell — services are reached on `localhost` via the compose-published ports. Every programmatic base URL below is baked for that context and
+can be overridden with the matching `MARCH_*_URL` env var (an explicit value
+always wins). Grafana is a browser endpoint you open from the host, so it stays
+on `localhost` regardless of context.
+
+| Service | URL | Notes |
 |---|---|---|
-| otel-lgtm (Grafana) | 3000 | dashboards: `march-legate`, `march-herald`, `march-hatchery` |
-| OTel collector (OTLP HTTP) | 4318 | |
-| Castra | 9264 | interactive-session host; `/v1/sessions` carries `branch` (#264) |
-| Hatchery | 8080 | spawn flow |
-| Brood | 9748 | session-state + teardown authority |
-| Herald | 8818 | event log + fold projection |
-| Legate loop | 8787 | the deterministic two-stage tick, one shared container, N profiles |
+| otel-lgtm (Grafana) | http://localhost:3000 | dashboards: `march-legate`, `march-herald`, `march-hatchery` (browser, from the host) |
+| OTel collector (OTLP HTTP) | http://localhost:4318 | where services ship traces/metrics/logs; read them via Grafana above |
+| Castra | http://localhost:9264 | interactive-session host; `/v1/sessions` carries `branch` (#264) |
+| Hatchery | http://localhost:8080 | spawn flow |
+| Brood | http://localhost:9748 | session-state + teardown authority |
+| Herald | http://localhost:8818 | event log + fold projection |
+| Legate loop | http://localhost:8787 | the deterministic two-stage tick, one shared container, N profiles |
 
 ### Log files (on the host, NOT inside the container)
 
@@ -152,7 +161,7 @@ When a slice escalated because the **auto-recovery budget (#211) was exhausted**
 and you have **fixed the root cause** (e.g. re-authed codex), request recovery:
 
 ```bash
-node /home/jmbattista/Development/March/dist/cli.js legate recover <sliceId> [--profile <p>]
+march legate recover <sliceId> [--profile <p>]
 ```
 
 This appends a `slice.recovery.requested` event to Herald. On the next tick the
@@ -175,7 +184,7 @@ ${CLAUDE_SKILL_DIR}/scripts/events-tail.sh --slice <sliceId> --src legate
 
 When **many** slices escalated from a **single transient cause that is now
 resolved** — a host reboot or OOM that killed every Castra session, a burst that
-overran the host, a window where `castra:9264` was unreachable, a codex auth
+overran the host, a window where castra was unreachable, a codex auth
 lapse — they all carry the same `escalatedReason` (usually
 `hatchery_dispatch_failed`) and all sit at retry count 2 = `DISPATCH_RECOVERY_LIMIT`.
 This is the bulk sibling of the single-slice recovery above.
@@ -225,7 +234,7 @@ operation, just batched.
   PR already merged but whose worktree/branch were never torn down. Reap them:
 
   ```bash
-  node /home/jmbattista/Development/March/dist/cli.js brood sweep   # needs MARCH_BROOD_ADMIN_TOKEN
+  march brood sweep   # needs MARCH_BROOD_ADMIN_TOKEN
   ```
 
   Caveats: `POST /admin/sweep` **does not honor a `dryRun` body — it always
@@ -240,7 +249,7 @@ re-dispatches):
 
 ```bash
 ${CLAUDE_SKILL_DIR}/scripts/events-tail.sh --src legate            # slice.dispatched / slice.recovery.dispatched
-curl -s "$MARCH_HERALD_URL/state?profile=<p>" | python3 -c 'import sys,json; print(json.load(sys.stdin)["smithy"])'
+curl -s "$MARCH_HERALD_URL/state?profile=<p>" | jq .smithy
 ```
 
 > The residual ghost-cleanup churn and merged-but-unarchived `pr-open` tombstones

@@ -108,7 +108,7 @@ Recommended implementation sequence:
 | ID | Title | Depends On | Artifact |
 |----|-------|------------|----------|
 | US1 | Expose Layered Npm Test Scripts | — | `specs/2026-06-07-010-staged-ci-pipeline/01-expose-layered-npm-test-scripts.tasks.md` |
-| US2 | Keep Selection Driven by the Tag Contract | US1 | — |
+| US2 | Keep Selection Driven by the Tag Contract | US1 | `specs/2026-06-07-010-staged-ci-pipeline/02-keep-selection-driven-by-the-tag-contract.tasks.md` |
 | US3 | Fan Out CI Into Legible Staged Jobs | US1, US2 | — |
 | US4 | Keep Operator Docs Current For Staged Test Use | US1, US3 | — |
 

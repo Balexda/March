@@ -13,11 +13,41 @@ export interface MarchService {
   /** Basename of the compose file under `docker/`. */
   readonly compose: string;
   /**
-   * The local image `march up` must find before it will start the service.
-   * Undefined for services whose image is pulled from a remote registry by
-   * compose (e.g. otel-lgtm) rather than built locally.
+   * The local image `march up` / `march upgrade` must find before it will
+   * (re)start the service. Undefined for services whose image is pulled from a
+   * remote registry by compose (e.g. otel-lgtm) rather than built locally.
    */
   readonly image?: string;
+  /** Loopback port the service publishes (`127.0.0.1:<port>`). */
+  readonly port: number;
+  /**
+   * Env var that overrides the published host port, for the services whose
+   * compose file parametrizes it (only castra: `127.0.0.1:${CASTRA_PORT:-9264}`).
+   * When set in the environment, `march status` probes that port instead of
+   * {@link port}; the other services hard-code their host port in compose, so
+   * they have no `portEnv`.
+   */
+  readonly portEnv?: string;
+  /** HTTP path that reports liveness (200 = reachable + healthy). */
+  readonly healthPath: string;
+  /**
+   * HTTP path gated by the shared `CASTRA_API_TOKEN`, used to verify the token
+   * actually authenticates rather than 401/404-ing silently. Only set for
+   * services that gate a route on the shared token (castra).
+   */
+  readonly tokenGatedPath?: string;
+  /**
+   * Other services this one calls over HTTP. Used by `march status` to explain
+   * a degraded service ("legate depends on herald, which is down"). The shared
+   * `otel-lgtm` network owner is intentionally omitted — telemetry is opt-in,
+   * so it is not a functional dependency.
+   */
+  readonly dependsOn?: readonly string[];
+}
+
+/** Docker container name for a service (matches `container_name` in compose). */
+export function containerName(service: string): string {
+  return `march-${service}`;
 }
 
 /**
@@ -31,12 +61,57 @@ export interface MarchService {
  * removed last, after every consumer is gone.
  */
 export const MARCH_SERVICES: readonly MarchService[] = [
-  { name: "otel-lgtm", compose: "otel-lgtm.docker-compose.yml" },
-  { name: "castra", compose: "castra.docker-compose.yml", image: "march-castra:latest" },
-  { name: "hatchery", compose: "hatchery.docker-compose.yml", image: "march-hatchery:latest" },
-  { name: "brood", compose: "brood.docker-compose.yml", image: "march-brood:latest" },
-  { name: "herald", compose: "herald.docker-compose.yml", image: "march-herald:latest" },
-  { name: "legate", compose: "legate.docker-compose.yml", image: "march-legate:latest" },
+  {
+    name: "otel-lgtm",
+    compose: "otel-lgtm.docker-compose.yml",
+    port: 3000,
+    // Grafana's health endpoint; the otel-lgtm bundle has no /healthz.
+    healthPath: "/api/health",
+  },
+  {
+    name: "castra",
+    compose: "castra.docker-compose.yml",
+    image: "march-castra:latest",
+    port: 9264,
+    // The castra compose publishes 127.0.0.1:${CASTRA_PORT:-9264}, so honor an
+    // operator-set CASTRA_PORT when probing rather than the 9264 default.
+    portEnv: "CASTRA_PORT",
+    healthPath: "/healthz",
+    // `/v1/*` is the shared-token gate; GET /v1/sessions exercises it.
+    tokenGatedPath: "/v1/sessions",
+  },
+  {
+    name: "hatchery",
+    compose: "hatchery.docker-compose.yml",
+    image: "march-hatchery:latest",
+    port: 8080,
+    healthPath: "/healthz",
+    dependsOn: ["castra"],
+  },
+  {
+    name: "brood",
+    compose: "brood.docker-compose.yml",
+    image: "march-brood:latest",
+    port: 9748,
+    healthPath: "/healthz",
+    dependsOn: ["castra"],
+  },
+  {
+    name: "herald",
+    compose: "herald.docker-compose.yml",
+    image: "march-herald:latest",
+    port: 8818,
+    healthPath: "/healthz",
+    dependsOn: ["castra"],
+  },
+  {
+    name: "legate",
+    compose: "legate.docker-compose.yml",
+    image: "march-legate:latest",
+    port: 8787,
+    healthPath: "/healthz",
+    dependsOn: ["castra", "herald", "brood", "hatchery"],
+  },
 ];
 
 /**

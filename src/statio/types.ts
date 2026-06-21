@@ -27,6 +27,7 @@ export type CheckRollup = "NONE" | "FAIL" | "PENDING" | "PASS";
 
 export interface CheckSummary {
   readonly name: string;
+  readonly conclusion: string;
   readonly url: string | null;
 }
 
@@ -109,5 +110,15 @@ export class StatioForgeError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "StatioForgeError";
+  }
+}
+
+/** A requested forge resource was absent. Maps to HTTP 404 `not_found`. */
+export class StatioNotFoundError extends Error {
+  readonly code = "not_found" satisfies ForgeErrorCode;
+
+  constructor(message: string) {
+    super(message);
+    this.name = "StatioNotFoundError";
   }
 }

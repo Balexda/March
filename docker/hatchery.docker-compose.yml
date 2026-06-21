@@ -44,7 +44,7 @@ services:
       dockerfile: docker/hatchery.Dockerfile
     image: march-hatchery:latest
     container_name: march-hatchery
-    restart: unless-stopped
+    restart: on-failure
     command: ["hatchery", "serve"]
     # Run as the host user so mounted files / sockets are accessible, plus the
     # docker group so the daemon socket is usable.

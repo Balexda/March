@@ -4,10 +4,12 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { PassThrough } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   createCastraLogger,
   createHatcheryLogger,
+  createServiceLogger,
   emitOtelLogLine,
   pinoLevelToSeverity,
   resolveCastraLogFilePath,
@@ -96,8 +98,9 @@ describe("createHatcheryLogger", () => {
     const logFilePath = path.join(dir, "nested", "hatchery.jsonl");
     const logger = createHatcheryLogger({
       logFilePath,
-      env: {}, // MARCH_OTEL unset -> file sink only
+      env: {}, // MARCH_OTEL unset -> file + stdout sinks
       sync: true,
+      stdout: new PassThrough(), // swallow stdout; this test asserts the file sink
     });
     logger.info({ job_id: "abc" }, "spawn started");
 
@@ -111,6 +114,46 @@ describe("createHatcheryLogger", () => {
     expect(lines[0].msg).toBe("spawn started");
     expect(lines[0].job_id).toBe("abc");
     expect(lines[0].level).toBe(30);
+  });
+});
+
+describe("createServiceLogger — stdout capture", () => {
+  let dir: string;
+
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), "march-svc-log-"));
+  });
+  afterEach(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("streams every record to stdout so `docker logs` (and `march logs`) sees it", () => {
+    const logFilePath = path.join(dir, "svc.jsonl");
+    const stdout = new PassThrough();
+    const captured: string[] = [];
+    stdout.on("data", (c: Buffer) => captured.push(c.toString("utf-8")));
+
+    const logger = createServiceLogger({
+      serviceName: "march-test",
+      logFilePath,
+      env: {}, // MARCH_OTEL unset
+      sync: true,
+      stdout,
+    });
+    logger.info({ slice: "x" }, "observed");
+
+    const lines = captured
+      .join("")
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .map((l) => JSON.parse(l) as Record<string, unknown>);
+    expect(lines).toHaveLength(1);
+    expect(lines[0].name).toBe("march-test");
+    expect(lines[0].msg).toBe("observed");
+    expect(lines[0].slice).toBe("x");
+    // The durable file sink still receives the same record.
+    expect(fs.readFileSync(logFilePath, "utf-8")).toContain("observed");
   });
 });
 
@@ -128,8 +171,9 @@ describe("createCastraLogger", () => {
     const logFilePath = path.join(dir, "nested", "castra.jsonl");
     const logger = createCastraLogger({
       logFilePath,
-      env: {}, // MARCH_OTEL unset -> file sink only
+      env: {}, // MARCH_OTEL unset -> file + stdout sinks
       sync: true,
+      stdout: new PassThrough(), // swallow stdout; this test asserts the file sink
     });
     logger.info({ profile: "march" }, "session launched");
 

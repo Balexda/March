@@ -41,6 +41,9 @@ import { StatioValidationError } from "../statio/types.js";
 import { initMarch, isMarchInstalled, InitError } from "../bootstrap/init.js";
 import { stackDown } from "../stack/down.js";
 import { stackUp } from "../stack/up.js";
+import { stackUpgrade } from "../stack/upgrade.js";
+import { MARCH_SERVICES } from "../stack/services.js";
+import { runLogs, LOG_SERVICES } from "../logs/logs.js";
 import { createBuildContext, SnapshotError } from "../spawn/snapshot.js";
 import {
   listBackends,
@@ -586,67 +589,96 @@ program
     }
   });
 
-program
-  .command("update")
-  .description("Update the March installation")
-  .action(async () => {
-    commandHandled = true;
-    const yes = program.opts().yes as boolean | undefined;
-    try {
-      // When --yes is set, pass force=true on the first call so a downgrade
-      // proceeds immediately without a detection roundtrip that would print
-      // the "Pass --yes" warning before the update runs.
-      const result = await updateMarch(undefined, yes ? true : undefined);
+/**
+ * Run the CLI-version updater (the body shared by `march self update` and the
+ * deprecated `march update` shim). Sets `process.exitCode`; never calls
+ * `process.exit()` so buffered output flushes.
+ */
+async function runSelfUpdate(): Promise<void> {
+  const yes = program.opts().yes as boolean | undefined;
+  try {
+    // When --yes is set, pass force=true on the first call so a downgrade
+    // proceeds immediately without a detection roundtrip that would print
+    // the "Pass --yes" warning before the update runs.
+    const result = await updateMarch(undefined, yes ? true : undefined);
 
-      if (result.downgrade) {
-        // Downgrade detected and --yes was not set (force bypasses this branch).
-        console.log(result.summary);
-        for (const warning of result.warnings) {
-          process.stderr.write(warning + "\n");
-        }
-
-        if (!process.stdin.isTTY) {
-          // Non-interactive environment: instruct the user and exit 0 without
-          // performing the downgrade.
-          process.stderr.write(
-            "Pass --yes to force the downgrade in non-interactive mode.\n",
-          );
-          process.exitCode = SUCCESS;
-          return;
-        }
-
-        // Interactive TTY: ask for confirmation.
-        const confirmed = await confirm(
-          `Downgrade from v${result.summary.match(/v(\S+)/)?.[1] ?? "?"} to v${CLI_VERSION}?`,
-        );
-        if (!confirmed) {
-          process.stderr.write("Downgrade cancelled.\n");
-          process.exitCode = SUCCESS;
-          return;
-        }
-
-        const forced = await updateMarch(undefined, true);
-        console.log(forced.summary);
-        for (const warning of forced.warnings) {
-          process.stderr.write(warning + "\n");
-        }
-        process.exitCode = SUCCESS;
-        return;
-      }
-
+    if (result.downgrade) {
+      // Downgrade detected and --yes was not set (force bypasses this branch).
       console.log(result.summary);
       for (const warning of result.warnings) {
         process.stderr.write(warning + "\n");
       }
-      process.exitCode = SUCCESS;
-    } catch (err) {
-      if (err instanceof UpdateError) {
-        console.error(err.message);
-        process.exitCode = ERROR;
+
+      if (!process.stdin.isTTY) {
+        // Non-interactive environment: instruct the user and exit 0 without
+        // performing the downgrade.
+        process.stderr.write(
+          "Pass --yes to force the downgrade in non-interactive mode.\n",
+        );
+        process.exitCode = SUCCESS;
         return;
       }
-      throw err;
+
+      // Interactive TTY: ask for confirmation.
+      const confirmed = await confirm(
+        `Downgrade from v${result.summary.match(/v(\S+)/)?.[1] ?? "?"} to v${CLI_VERSION}?`,
+      );
+      if (!confirmed) {
+        process.stderr.write("Downgrade cancelled.\n");
+        process.exitCode = SUCCESS;
+        return;
+      }
+
+      const forced = await updateMarch(undefined, true);
+      console.log(forced.summary);
+      for (const warning of forced.warnings) {
+        process.stderr.write(warning + "\n");
+      }
+      process.exitCode = SUCCESS;
+      return;
     }
+
+    console.log(result.summary);
+    for (const warning of result.warnings) {
+      process.stderr.write(warning + "\n");
+    }
+    process.exitCode = SUCCESS;
+  } catch (err) {
+    if (err instanceof UpdateError) {
+      console.error(err.message);
+      process.exitCode = ERROR;
+      return;
+    }
+    throw err;
+  }
+}
+
+// `march self` — operate on the March CLI installation itself (the `self update`
+// home for the CLI-version updater that used to be the top-level `march update`).
+const self = program
+  .command("self")
+  .description("Manage the March CLI installation itself");
+
+self
+  .command("update")
+  .description("Update the March installation to match the current CLI version")
+  .action(async () => {
+    commandHandled = true;
+    await runSelfUpdate();
+  });
+
+// Deprecation shim: `march update` moved to `march self update` to free the
+// `update`/`upgrade` collision (upgrade rebuilds the service containers). Warns
+// and forwards for one release; remove the shim after that.
+program
+  .command("update")
+  .description("Deprecated: use `march self update` (forwards for one release)")
+  .action(async () => {
+    commandHandled = true;
+    process.stderr.write(
+      "`march update` is deprecated and will be removed in a future release; use `march self update` instead.\n",
+    );
+    await runSelfUpdate();
   });
 
 program
@@ -675,10 +707,21 @@ program
           process.stderr.write(`  ${m.service}: ${m.image}\n`);
         }
         process.stderr.write(
-          "Build them with `march upgrade` (or `npm run build:<service>-image`), then re-run `march up`.\n",
+          "Build them with `npm run build:images` (or `npm run build:<service>-image`), then re-run `march up`.\n",
         );
         process.exitCode = ERROR;
         return;
+      }
+
+      if (result.tmuxAnchor) {
+        const a = result.tmuxAnchor;
+        if (a.outcome === "failed") {
+          console.log(
+            `tmux anchor: failed${a.detail ? ` (${a.detail})` : ""} — sessions may spawn inside the castra container`,
+          );
+        } else {
+          console.log(`host tmux server: ${a.outcome}`);
+        }
       }
 
       let failed = false;
@@ -738,12 +781,190 @@ program
   });
 
 program
+  .command("upgrade")
+  .description(
+    "Recreate the service containers to adopt the latest local march-* images (state preserved; does not build)",
+  )
+  .option(
+    "--service <name>",
+    `Upgrade a single service (${MARCH_SERVICES.map((s) => s.name).join(", ")})`,
+  )
+  .action(async (opts: { service?: string }) => {
+    commandHandled = true;
+    try {
+      const result = await stackUpgrade({ service: opts.service?.trim() || undefined });
+
+      if (result.unknownService) {
+        process.stderr.write(
+          `Unknown service "${result.unknownService}". ` +
+            `Known services: ${MARCH_SERVICES.map((s) => s.name).join(", ")}.\n`,
+        );
+        process.exitCode = USAGE_ERROR;
+        return;
+      }
+
+      if (result.partialUpgradeTokenError) {
+        process.stderr.write(result.partialUpgradeTokenError + "\n");
+        process.exitCode = ERROR;
+        return;
+      }
+
+      let failed = false;
+      for (const svc of result.services) {
+        if (svc.outcome === "upgraded") {
+          console.log(`${svc.service}: upgraded (recreated container)`);
+        } else {
+          console.log(
+            `${svc.service}: ${svc.outcome}${svc.detail ? ` — ${svc.detail}` : ""}`,
+          );
+        }
+        if (svc.outcome === "failed") failed = true;
+      }
+      process.exitCode = failed ? ERROR : SUCCESS;
+    } catch (err) {
+      process.stderr.write((err instanceof Error ? err.message : String(err)) + "\n");
+      process.exitCode = ERROR;
+    }
+  });
+
+program
+  .command("status")
+  .description("Report stack health: per-service container state, HTTP reachability, and token wiring")
+  .option("--json", "Print the status report as JSON")
+  .action(async (opts: { json?: boolean }) => {
+    commandHandled = true;
+    try {
+      const { stackStatus, formatStatusTable } = await import("../stack/status.js");
+      const status = await stackStatus();
+      if (opts.json) {
+        console.log(JSON.stringify(status, null, 2));
+      } else {
+        console.log(formatStatusTable(status));
+      }
+      // Non-zero exit when the stack is not fully healthy — usable as a
+      // pre-flight gate in scripts/CI.
+      process.exitCode = status.healthy ? SUCCESS : ERROR;
+    } catch (err) {
+      process.stderr.write((err instanceof Error ? err.message : String(err)) + "\n");
+      process.exitCode = ERROR;
+    }
+  });
+
+program
+  .command("doctor")
+  .description(
+    "Read-only deep stack-consistency diagnostics: token wiring, session divergence, dispatch health, worktree hygiene, and branch-sync lag. Names the remedy per finding; never mutates. Exits non-zero on any failure.",
+  )
+  .option("--profile <profile>", "Scope the battery to a single registered profile")
+  .option("--json", "Print the diagnostic report as JSON")
+  .action(async (opts: { profile?: string; json?: boolean }) => {
+    commandHandled = true;
+    const { wireDoctorContext, runDoctor, formatReport } = await import("../doctor/index.js");
+    try {
+      const { context, setupFindings } = await wireDoctorContext({ profile: opts.profile });
+      const report = await runDoctor(context, {
+        profile: opts.profile,
+        setupFindings,
+      });
+      if (opts.json) {
+        console.log(JSON.stringify(report, null, 2));
+      } else {
+        console.log(formatReport(report));
+      }
+      // Non-zero exit on any failure so `march doctor` can gate automation.
+      process.exitCode = report.ok ? SUCCESS : ERROR;
+    } catch (err) {
+      process.stderr.write((err instanceof Error ? err.message : String(err)) + "\n");
+      process.exitCode = ERROR;
+    }
+  });
+
+program
+  .command("logs [service]")
+  .description(
+    "Tail March service container logs (all services, or one of: " +
+      LOG_SERVICES.map((s) => s.name).join(", ") +
+      ")",
+  )
+  .option("-f, --follow", "Stream new log lines as they arrive")
+  .option("--since <dur>", "Only show logs since a duration/timestamp (e.g. 10m, 1h)")
+  .option("-n, --tail <N>", "Show at most the last N lines per service", "100")
+  .option("--errors", "Show only error-level lines")
+  .action(
+    async (
+      service: string | undefined,
+      opts: {
+        follow?: boolean;
+        since?: string;
+        tail?: string;
+        errors?: boolean;
+      },
+    ) => {
+      commandHandled = true;
+      try {
+        const result = await runLogs({
+          service,
+          follow: opts.follow,
+          since: opts.since,
+          tail: opts.tail,
+          errors: opts.errors,
+        });
+        // Ctrl-C of a `--follow` stream is the normal way to stop a tail, even
+        // though the killed `docker logs -f` children exit non-zero — treat it
+        // as a clean exit. Otherwise, exit non-zero only when *every* requested
+        // service failed to produce a stream (e.g. docker missing, or all
+        // containers absent); a partial stack with some services down is normal
+        // for `march logs`.
+        const allFailed = result.services.every(
+          (s) => s.exitCode !== null && s.exitCode !== 0,
+        );
+        process.exitCode = result.interrupted || !allFailed ? SUCCESS : ERROR;
+      } catch (err) {
+        process.stderr.write(
+          (err instanceof Error ? err.message : String(err)) + "\n",
+        );
+        process.exitCode = USAGE_ERROR;
+      }
+    },
+  );
+
+program
   .command("version")
   .description("Display the installed CLI version")
   .action(() => {
     commandHandled = true;
     console.log(CLI_VERSION);
     process.exitCode = SUCCESS;
+  });
+
+program
+  .command("sessions")
+  .alias("ps")
+  .description(
+    "Unified in-flight view across Brood + Castra + Herald: every spawn/steward/slice in one table, with cross-service divergence (leak/orphan/stale) flagged inline. Resolves services via MARCH_BROOD_URL / CASTRA_URL / MARCH_HERALD_URL.",
+  )
+  .option("--profile <profile>", "Show only this profile's units of work")
+  .option(
+    "--state <state>",
+    "Show only this state: dispatched | in-steward | waiting-on-approval | waiting-for-merge | errored | archived | unknown",
+  )
+  .option("--orphans", "Show only divergent rows (Castra-only / Brood-only / fold-only)")
+  .option("--json", "Print the joined view as JSON")
+  .action(async (opts: { profile?: string; state?: string; orphans?: boolean; json?: boolean }) => {
+    commandHandled = true;
+    const { runSessions } = await import("../sessions/command.js");
+    const result = await runSessions({
+      profile: opts.profile?.trim() || undefined,
+      state: opts.state?.trim() || undefined,
+      orphans: opts.orphans,
+      json: opts.json,
+    });
+    if (result.exitCode === SUCCESS) {
+      console.log(result.output);
+    } else {
+      process.stderr.write(result.output + "\n");
+    }
+    process.exitCode = result.exitCode;
   });
 
 const quarantine = program
@@ -1151,7 +1372,12 @@ mergePolicyCmd
         ((mp.defaults && Object.keys(mp.defaults).length > 0) ||
           (mp.byTaskType && Object.keys(mp.byTaskType).length > 0));
       if (!hasPolicy) {
-        console.log(`${record.profile}: all requirements enforced (no policy set).`);
+        // No per-profile policy — but the built-in base (#298) still relaxes the
+        // cut approval gate, so don't claim "all requirements enforced".
+        console.log(
+          `${record.profile}: no per-profile merge policy set. Built-in defaults apply: ` +
+            `cut auto-merges without human approval; all other verbs require approval.`,
+        );
       } else {
         console.log(`${record.profile}:`);
         console.log(JSON.stringify(mp, null, 2));
