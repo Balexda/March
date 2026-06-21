@@ -37,7 +37,16 @@ services:
       dockerfile: docker/castra.Dockerfile
     image: march-castra:latest
     container_name: march-castra
-    restart: unless-stopped
+    # on-failure (not unless-stopped): the stack must NOT autostart on Docker
+    # Desktop launch. castra drives the host tmux server over the mounted socket
+    # (below), and whichever process first touches that socket becomes the
+    # server. If castra autostarted ahead of the operator it would win that race
+    # and spawn every session — stewards and operator shells — *inside* this
+    # container. `march up` runs on the host, claims the tmux server first
+    # (see ensureHostTmuxServer in src/stack/up.ts), then starts this service as
+    # a client. Restart-on-crash is kept; boot-time autostart is intentionally
+    # dropped so `march up` always goes first.
+    restart: on-failure
     command: ["castra", "serve", "--host", "0.0.0.0"]
     # Run as the host user so mounted files / sockets are accessible, plus the
     # docker group so the daemon socket is usable.

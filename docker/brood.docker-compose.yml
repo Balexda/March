@@ -59,7 +59,7 @@ services:
       dockerfile: docker/brood.Dockerfile
     image: march-brood:latest
     container_name: march-brood
-    restart: unless-stopped
+    restart: on-failure
     command: ["brood", "serve"]
     # Run as the host user so mounted files / sockets are accessible, plus the
     # docker group so the daemon socket is usable.

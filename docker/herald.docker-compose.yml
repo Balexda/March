@@ -58,7 +58,7 @@ services:
       dockerfile: docker/herald.Dockerfile
     image: march-herald:latest
     container_name: march-herald
-    restart: unless-stopped
+    restart: on-failure
     command: ["herald", "serve"]
     # Run as the host user so mounted files are accessible.
     user: "${MARCH_HOST_UID:-1000}:${MARCH_HOST_GID:-${MARCH_HOST_UID:-1000}}"

@@ -100,6 +100,13 @@ export interface MissingImage {
   readonly image: string;
 }
 
+export type TmuxAnchorOutcome = "present" | "created" | "failed";
+
+export interface TmuxAnchorResult {
+  readonly outcome: TmuxAnchorOutcome;
+  readonly detail?: string;
+}
+
 export interface StackUpResult {
   readonly token: ResolvedToken;
   /**
@@ -108,7 +115,53 @@ export interface StackUpResult {
    * `services` is empty.
    */
   readonly missingImages: MissingImage[];
+  /**
+   * Outcome of the host tmux-server anchor (see {@link ensureHostTmuxServer}).
+   * Undefined when the run aborted before anchoring (e.g. missing images).
+   */
+  readonly tmuxAnchor?: TmuxAnchorResult;
   readonly services: ServiceUpResult[];
+}
+
+/** The detached tmux session that keeps the host-owned server alive. */
+export const HOST_TMUX_ANCHOR_SESSION = "march-host-anchor";
+
+/**
+ * Ensure the host owns the default tmux server before castra starts.
+ *
+ * castra is a containerized agent-deck that drives sessions over the host tmux
+ * socket bind-mounted at `/tmp/tmux-<uid>/default`. Whichever process first
+ * touches that socket *becomes* the server, and every pane it spawns — stewards
+ * and operator shells alike — runs in that process's namespace. Under Docker
+ * Desktop the castra container autostarts from the Windows side, so without this
+ * anchor it wins the race and all panes land *inside the container* (a bare
+ * `node@<container>` bash shell) instead of on the host.
+ *
+ * `march up` runs on the host as the operator's uid, so creating a detached
+ * anchor session here makes the host own that server first; castra then attaches
+ * as a client and panes land on the host. This only holds when castra cannot
+ * autostart ahead of `march up` — the compose `restart: on-failure` policy is
+ * what removes that boot-time race. Best-effort: a missing tmux binary or any
+ * tmux error is recorded, never fatal.
+ */
+export function ensureHostTmuxServer(
+  run: CommandRunner,
+  env: NodeJS.ProcessEnv,
+): TmuxAnchorResult {
+  try {
+    // Server up and anchor present — idempotent no-op across re-runs.
+    run("tmux", ["has-session", "-t", HOST_TMUX_ANCHOR_SESSION], env);
+    return { outcome: "present" };
+  } catch {
+    // No server (or anchor missing): (re)create it. `new-session` starts a
+    // server on the default uid socket when none is running.
+    try {
+      run("tmux", ["new-session", "-d", "-s", HOST_TMUX_ANCHOR_SESSION], env);
+      return { outcome: "created" };
+    } catch (err) {
+      return { outcome: "failed", detail: describeExecError(err) };
+    }
+  }
 }
 
 export interface StackUpOptions {
@@ -190,11 +243,15 @@ export async function stackUp(
     [CASTRA_TOKEN_ENV]: token.token,
   };
 
+  // Claim the host tmux server before castra starts, so its sessions (and the
+  // operator's own shells) land on the host rather than inside the container.
+  const tmuxAnchor = ensureHostTmuxServer(run, env);
+
   const services: ServiceUpResult[] = [];
   // Forward dependency order: otel-lgtm (network owner) first, legate last.
   for (const svc of MARCH_SERVICES) {
     services.push(upService(svc, { run, locate, env }));
   }
 
-  return { token, missingImages, services };
+  return { token, missingImages, tmuxAnchor, services };
 }
