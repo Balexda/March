@@ -34,7 +34,7 @@ while [ $# -gt 0 ]; do
 done
 [ -n "$PROFILE" ] || { echo "march.debug: --profile is required." >&2; exit "$EX_USAGE"; }
 
-STATE=$(herald_get "/state") || exit $?
+STATE=$(herald_get "/state?profile=${PROFILE}") || exit $?
 STATUS=$(legate_get "/status?profile=${PROFILE}") || exit $?
 
 if [ "$(echo "$STATUS" | jq -r '.ok // false')" != "true" ]; then
