@@ -70,7 +70,11 @@ import {
 } from "../brood/spawn-record.js";
 import { updateMarch, UpdateError } from "../bootstrap/update.js";
 import { CLI_VERSION } from "../shared/version.js";
-import { parkQuarantinedTest, QuarantineError } from "../testing/quarantine.js";
+import {
+  generateQuarantineIndex,
+  parkQuarantinedTest,
+  QuarantineError,
+} from "../testing/quarantine.js";
 import { startDispatchSpan } from "../observability/spawn-trace.js";
 import { recordSpawnRun } from "../observability/spawn-metrics.js";
 import { buildSpawnOtelContext } from "../observability/in-spawn-emitter.js";
@@ -469,44 +473,75 @@ const quarantine = program
   .command("quarantine")
   .description("Route failing tests into the repository quarantine area");
 
+function detectRepoRootForQuarantine(subcommand: string): string | undefined {
+  if (!isOnPath("git")) {
+    process.stderr.write(
+      "git not found on PATH — required to detect the repository root.\n",
+    );
+    process.exitCode = ERROR;
+    return undefined;
+  }
+  try {
+    return execFileSync("git", ["rev-parse", "--show-toplevel"], {
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "pipe"],
+    }).trim();
+  } catch (err) {
+    const stderr = ((err as { stderr?: Buffer | string }).stderr ?? "")
+      .toString()
+      .trim();
+    if (stderr.includes("not a git repository")) {
+      process.stderr.write(
+        `Run \`march quarantine ${subcommand}\` from inside a git repository.\n`,
+      );
+    } else {
+      process.stderr.write(
+        `Failed to detect the repository root: ${stderr || (err as Error).message}\n`,
+      );
+    }
+    process.exitCode = ERROR;
+    return undefined;
+  }
+}
+
 quarantine
   .command("park <testPath>")
   .description("Move a repo-relative *.test.ts file under tests/quarantine/")
   .action((testPath: string) => {
     commandHandled = true;
-    if (!isOnPath("git")) {
-      process.stderr.write(
-        "git not found on PATH — required to detect the repository root.\n",
-      );
-      process.exitCode = ERROR;
-      return;
-    }
-    let repoRoot: string;
-    try {
-      repoRoot = execFileSync("git", ["rev-parse", "--show-toplevel"], {
-        encoding: "utf-8",
-        stdio: ["ignore", "pipe", "pipe"],
-      }).trim();
-    } catch (err) {
-      const stderr = ((err as { stderr?: Buffer | string }).stderr ?? "")
-        .toString()
-        .trim();
-      if (stderr.includes("not a git repository")) {
-        process.stderr.write(
-          "Run `march quarantine park` from inside a git repository.\n",
-        );
-      } else {
-        process.stderr.write(
-          `Failed to detect the repository root: ${stderr || (err as Error).message}\n`,
-        );
-      }
-      process.exitCode = ERROR;
+    const repoRoot = detectRepoRootForQuarantine("park");
+    if (!repoRoot) {
       return;
     }
     try {
       const result = parkQuarantinedTest(testPath, { repoRoot });
       console.log(
         `Parked ${result.originPath} at ${result.quarantinedPath}.`,
+      );
+      process.exitCode = SUCCESS;
+    } catch (err) {
+      if (err instanceof QuarantineError) {
+        process.stderr.write(err.message + "\n");
+        process.exitCode = ERROR;
+        return;
+      }
+      throw err;
+    }
+  });
+
+quarantine
+  .command("index")
+  .description("Regenerate tests/quarantine/INDEX.md from parked tests")
+  .action(() => {
+    commandHandled = true;
+    const repoRoot = detectRepoRootForQuarantine("index");
+    if (!repoRoot) {
+      return;
+    }
+    try {
+      const result = generateQuarantineIndex({ repoRoot });
+      console.log(
+        `Generated ${result.indexPath} with ${result.entries.length} quarantined test(s).`,
       );
       process.exitCode = SUCCESS;
     } catch (err) {

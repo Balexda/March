@@ -508,6 +508,29 @@ describe("march CLI", () => {
     ).toEqual({
       "tests/quarantine/src/example/quarantine-me.test.ts": origin,
     });
+    expect(
+      fs.readFileSync(path.join(repoRoot, "tests/quarantine/INDEX.md"), "utf-8"),
+    ).toContain(
+      "| `tests/quarantine/src/example/quarantine-me.test.ts` | `src/example/quarantine-me.test.ts` |",
+    );
+  });
+
+  it("march quarantine index writes an empty generated roster without prompting", () => {
+    const repoRoot = makeRealRepo();
+
+    const result = runWithEnv(
+      ["quarantine", "index"],
+      {},
+      { cwd: repoRoot },
+    );
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain(
+      "Generated tests/quarantine/INDEX.md with 0 quarantined test(s).",
+    );
+    expect(
+      fs.readFileSync(path.join(repoRoot, "tests/quarantine/INDEX.md"), "utf-8"),
+    ).toContain("No quarantined tests.");
   });
 
   it("march help init exits 0 and stdout contains init-specific help text", () => {
