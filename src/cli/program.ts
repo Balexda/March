@@ -293,7 +293,7 @@ program
           process.stderr.write(`  ${m.service}: ${m.image}\n`);
         }
         process.stderr.write(
-          "Build them with `march upgrade` (or `npm run build:<service>-image`), then re-run `march up`.\n",
+          "Build them with `npm run build:images` (or `npm run build:<service>-image`), then re-run `march up`.\n",
         );
         process.exitCode = ERROR;
         return;
@@ -358,7 +358,7 @@ program
 program
   .command("upgrade")
   .description(
-    "Rebuild the march-* service images from source and recreate the containers (state preserved)",
+    "Recreate the service containers to adopt the latest local march-* images (state preserved; does not build)",
   )
   .option(
     "--service <name>",
@@ -387,10 +387,7 @@ program
       let failed = false;
       for (const svc of result.services) {
         if (svc.outcome === "upgraded") {
-          const what = svc.built
-            ? "rebuilt image + recreated container"
-            : "recreated container";
-          console.log(`${svc.service}: upgraded (${what})`);
+          console.log(`${svc.service}: upgraded (recreated container)`);
         } else {
           console.log(
             `${svc.service}: ${svc.outcome}${svc.detail ? ` — ${svc.detail}` : ""}`,

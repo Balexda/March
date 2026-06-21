@@ -19,21 +19,6 @@ export const runCommand: CommandRunner = (file, args, env) => {
 };
 
 /**
- * Build-oriented runner: stream the child's stdout/stderr straight to this
- * process's terminal (`stdio: "inherit"`) instead of buffering them. A real
- * `docker build` emits verbose progress (`npm ci`, apt, downloads) that can
- * exceed `execFileSync`'s default `maxBuffer` and abort with `ENOBUFS` — a
- * spurious "build failed" even though the same build succeeds from the package
- * scripts. Inheriting stdio sidesteps the buffer entirely and shows live build
- * output, the expected UX for `march upgrade`. Throws on non-zero exit, same as
- * {@link runCommand}; the diagnostic is already on the terminal, so callers fall
- * back to the error message for their result detail.
- */
-export const runBuild: CommandRunner = (file, args, env) => {
-  execFileSync(file, args, { stdio: "inherit", env });
-};
-
-/**
  * Extract the most actionable text from a failed `execFileSync` error. The
  * underlying Docker/Compose diagnostic lands on the child's stderr (captured
  * because stderr is piped), so prefer it over the generic `Command failed: …`

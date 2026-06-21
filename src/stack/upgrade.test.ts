@@ -19,8 +19,8 @@ function recorder() {
   return { calls, run };
 }
 
-describe("stackUpgrade — build + recreate", () => {
-  it("rebuilds every built image then force-recreates in dependency order", async () => {
+describe("stackUpgrade — recreate", () => {
+  it("force-recreates every service in dependency order, never building", async () => {
     const { calls, run } = recorder();
 
     const result = await stackUpgrade({
@@ -34,39 +34,20 @@ describe("stackUpgrade — build + recreate", () => {
     );
     expect(result.services.every((s) => s.outcome === "upgraded")).toBe(true);
 
-    // otel-lgtm is pulled (recreate only); the other five are rebuilt.
-    const built = result.services.filter((s) => s.built).map((s) => s.service);
-    expect(built).toEqual(
-      MARCH_SERVICES.filter((s) => s.dockerfile).map((s) => s.name),
-    );
-    expect(result.services.find((s) => s.service === "otel-lgtm")?.built).toBe(false);
+    // Every call is a force-recreate that never builds; nothing is a `docker build`.
+    expect(calls.every((c) => c.args[0] === "compose")).toBe(true);
+    expect(calls.some((c) => c.args.includes("build"))).toBe(false);
+    expect(calls.every((c) => c.args.includes("--force-recreate"))).toBe(true);
+    expect(calls.every((c) => c.args.includes("--no-build"))).toBe(true);
 
-    // Each built service does a `docker build` immediately before its recreate.
-    const castraBuildIdx = calls.findIndex(
-      (c) => c.args[0] === "build" && c.args.includes("march-castra:latest"),
+    // One recreate per service, walked in declared (dependency) order, each
+    // carrying the shared token.
+    expect(calls).toHaveLength(MARCH_SERVICES.length);
+    const order = calls.map(
+      (c) => c.args[c.args.indexOf("-f") + 1].match(/docker\/(.+)\.docker-compose/)![1],
     );
-    const castraRecreateIdx = calls.findIndex(
-      (c) =>
-        c.args.includes("/repo/docker/castra.docker-compose.yml") &&
-        c.args.includes("--force-recreate"),
-    );
-    expect(castraBuildIdx).toBeGreaterThanOrEqual(0);
-    expect(castraRecreateIdx).toBeGreaterThan(castraBuildIdx);
-
-    // Every recreate forces recreation, never builds (we built explicitly), and
-    // carries the shared token.
-    const recreates = calls.filter((c) => c.args.includes("--force-recreate"));
-    expect(recreates).toHaveLength(MARCH_SERVICES.length);
-    expect(recreates.every((c) => c.args.includes("--no-build"))).toBe(true);
-    expect(recreates.every((c) => c.token === "tok-123")).toBe(true);
-  });
-
-  it("does not build otel-lgtm (it is pulled, not built)", async () => {
-    const { calls, run } = recorder();
-    await stackUpgrade({ run, locate: locateAll, resolveToken: () => stubToken });
-    const builds = calls.filter((c) => c.args[0] === "build");
-    expect(builds).toHaveLength(MARCH_SERVICES.filter((s) => s.dockerfile).length);
-    expect(builds.some((c) => c.args.join(" ").includes("otel-lgtm"))).toBe(false);
+    expect(order).toEqual(MARCH_SERVICES.map((s) => s.name));
+    expect(calls.every((c) => c.token === "tok-123")).toBe(true);
   });
 });
 
@@ -80,7 +61,8 @@ describe("stackUpgrade — --service", () => {
       resolveToken: () => stubToken,
     });
     expect(result.services.map((s) => s.service)).toEqual(["herald"]);
-    expect(calls.every((c) => c.args.join(" ").includes("herald"))).toBe(true);
+    expect(calls).toHaveLength(1);
+    expect(calls[0].args.join(" ")).toContain("herald");
   });
 
   it("reports an unknown service without touching anything or resolving a token", async () => {
@@ -131,31 +113,7 @@ describe("stackUpgrade — --service", () => {
 });
 
 describe("stackUpgrade — failure handling", () => {
-  it("skips the recreate when the build fails and keeps going", async () => {
-    const run = (_file: string, args: string[]) => {
-      // Fail the herald image build only.
-      if (args[0] === "build" && args.includes("march-herald:latest")) {
-        throw new Error("build blew up");
-      }
-    };
-
-    const result = await stackUpgrade({
-      run,
-      locate: locateAll,
-      resolveToken: () => stubToken,
-    });
-
-    const herald = result.services.find((s) => s.service === "herald");
-    expect(herald?.outcome).toBe("failed");
-    expect(herald?.built).toBe(false);
-    expect(herald?.detail).toContain("build blew up");
-    // The other services still upgraded.
-    expect(
-      result.services.filter((s) => s.outcome === "upgraded"),
-    ).toHaveLength(MARCH_SERVICES.length - 1);
-  });
-
-  it("reports a recreate failure after a successful build", async () => {
+  it("reports a recreate failure and keeps going", async () => {
     const run = (_file: string, args: string[]) => {
       if (
         args.includes("/repo/docker/brood.docker-compose.yml") &&
@@ -173,11 +131,14 @@ describe("stackUpgrade — failure handling", () => {
 
     const brood = result.services.find((s) => s.service === "brood");
     expect(brood?.outcome).toBe("failed");
-    expect(brood?.built).toBe(true);
     expect(brood?.detail).toContain("port in use");
+    // The other services still upgraded.
+    expect(
+      result.services.filter((s) => s.outcome === "upgraded"),
+    ).toHaveLength(MARCH_SERVICES.length - 1);
   });
 
-  it("fails a service whose compose/Dockerfile cannot be located", async () => {
+  it("fails a service whose compose file cannot be located", async () => {
     const { run } = recorder();
     const result = await stackUpgrade({
       run,

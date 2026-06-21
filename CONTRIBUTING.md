@@ -20,7 +20,7 @@ March's source is organized by product subsystem rather than by generic layers:
 | `src/cli.ts` | Executable bin entrypoint only; delegates to `src/cli/program.ts`. |
 | `src/cli/` | Commander program setup and command dispatch. |
 | `src/bootstrap/` | `march init` / `march self update`, manifest handling, and deployed base skills. |
-| `src/stack/` | Stack-lifecycle commands (`march up` / `down` / `upgrade`): the shared service list, compose/Dockerfile locator, command runner, and token resolution. |
+| `src/stack/` | Stack-lifecycle commands (`march up` / `down` / `upgrade`): the shared service list, compose-file locator, command runner, and token resolution. |
 | `src/spawn/` | Spawn execution pipeline: snapshots, image builds, backend entrypoints, and container launch. |
 | `src/hatchery/` | Container/profile policy and the spawn orchestrator (`runHatcherySpawn`). `src/hatchery/service/` is the containerized Fastify service (`march hatchery serve`) plus the thin client `march hatchery spawn` uses. |
 | `src/brood/` | Spawn lifecycle state: worktrees, branches, records, and cleanup ownership. |
@@ -121,9 +121,9 @@ with one command: it resolves a shared `CASTRA_API_TOKEN` (generated and
 persisted to `~/.march/castra-token` on first run, reused thereafter), then
 starts the services in dependency order (otel-lgtm → castra → hatchery → brood →
 herald → legate). It never builds images — if a locally-built `march-*` image is
-missing it aborts before starting anything and points you at `march upgrade`
-(until that lands, use the `npm run build:<service>-image` scripts). Re-running
-is idempotent.
+missing it aborts before starting anything and points you at `npm run
+build:images` (or the per-service `npm run build:<service>-image` scripts).
+Re-running is idempotent.
 
 To turn the stack off and recover the resources it holds, run **`march down`**:
 it stops the service containers in reverse dependency order (legate → herald →
@@ -134,20 +134,31 @@ in-flight sessions), so a later bring-up resumes where it left off. Pass
 telemetry), or `--drain` to tear down in-flight Brood sessions (spawn containers,
 worktrees, branches, stewards) before stopping the services.
 
-To pick up source changes, **`march upgrade`** is the build-and-roll counterpart
-to `march up`: it rebuilds each locally-built `march-*:latest` image from its
-`docker/<name>.Dockerfile` (the same images the `build:<name>-image` scripts
-produce) and then recreates the containers in dependency order with
-`docker compose up -d --force-recreate`, so the new images take effect. State is
+To roll the stack onto newer images, **`march upgrade`** recreates the service
+containers in dependency order with `docker compose up -d --force-recreate
+--no-build`, so the latest available `march-*` images take effect. State is
 preserved — `--force-recreate` replaces the container but not its named volumes
 (registries, Herald's event log, telemetry). Pass `--service <name>` (one of
-`otel-lgtm`, `castra`, `hatchery`, `brood`, `herald`, `legate`) to rebuild and
-recreate a single service; `otel-lgtm` is pulled rather than built, so it is only
-recreated. A build failure marks that service failed and skips its recreate (so a
-stale image is never silently rolled) while the rest still upgrade. The remaining
-stack-lifecycle surface (`march status`) is tracked as a follow-up.
+`otel-lgtm`, `castra`, `hatchery`, `brood`, `herald`, `legate`) to recreate a
+single service. A recreate failure marks that service failed while the rest still
+upgrade.
 
-> **Note:** `march upgrade` rebuilds the **service container** images. The
+`march upgrade` **never builds** and reads no source — it works from a plain
+`npm i -g @balexda/march` and operates on whatever `march-*` images are already
+present locally (the local image store, "the local registry"). **Producing**
+those images is a separate concern:
+
+- With the source tree, rebuild them with **`npm run build:images`** (the
+  aggregate of the `build:<service>-image` scripts), then `march upgrade` to roll
+  the containers onto them. **`npm run deploy:local`** chains both — build the CLI
+  + the five service images, then recreate.
+- Pulling prebuilt images from a *hosted* registry — so an npm/brew install with
+  no source can fetch fresh images rather than only recreate local ones — is
+  tracked in **[issue #438](https://github.com/Balexda/March/issues/438)**.
+
+The remaining stack-lifecycle surface (`march status`) is tracked as a follow-up.
+
+> **Note:** `march upgrade` recreates the **service container** images. The
 > CLI-version updater that deploys the bundled skills lives at **`march self
 > update`** (formerly `march update`, which now warns and forwards for one
 > release).
