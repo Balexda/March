@@ -1,9 +1,9 @@
 ---
 name: march.debug
 description: "Diagnose a running March stack: inspect Herald's fold and event log, compare against the legate's view to surface divergence, read spawn/codex failure logs to find root cause, and execute the break-glass (Herald admin events) or recovery (`march legate recover`) procedures when the fold is wedged. Use when slices are escalated unexpectedly, dispatch appears stuck, the operator suspects a service-side bug, or before/after running any operator-only recovery action."
-allowed-tools: Bash(*/march.debug/scripts/fold-state.sh:*) Bash(*/march.debug/scripts/events-tail.sh:*) Bash(*/march.debug/scripts/legate-status.sh:*) Bash(*/march.debug/scripts/dispatch-diag.sh:*) Bash(*/march.debug/scripts/spawn-failure.sh:*) Bash(*/march.debug/scripts/admin-event.sh:*) Bash(*/march.debug/scripts/mass-recover.sh:*) Bash(docker logs march-*) Bash(docker ps*) Bash(docker exec march-legate printenv*) Bash(curl -s http://localhost:8818/*) Bash(curl -s http://localhost:8787/*) Bash(march legate recover *) Bash(march brood sweep*) Bash(march herald admin event*)
+allowed-tools: Bash(*/march.debug/scripts/fold-state.sh:*) Bash(*/march.debug/scripts/events-tail.sh:*) Bash(*/march.debug/scripts/legate-status.sh:*) Bash(*/march.debug/scripts/dispatch-diag.sh:*) Bash(*/march.debug/scripts/spawn-failure.sh:*) Bash(*/march.debug/scripts/admin-event.sh:*) Bash(*/march.debug/scripts/mass-recover.sh:*) Bash(docker logs march-*) Bash(docker ps*) Bash(docker exec march-legate printenv*) Bash(curl -s {{{HERALD_BASE}}}/*) Bash(curl -s {{{LEGATE_BASE}}}/*) Bash({{{MARCH_CLI}}} legate recover *) Bash({{{MARCH_CLI}}} brood sweep*) Bash({{{MARCH_CLI}}} herald admin event*)
 ---
-<!-- GENERATED for the repo execution context — do not edit.
+<!-- GENERATED for the {{CONTEXT}} execution context — do not edit.
      Author the source at src/templates/skills/march.debug/SKILL.prompt and run
      `npm run skills:generate` (also runs on `npm run build`). -->
 # march.debug
@@ -44,23 +44,7 @@ re-cite it.
 
 ## Where everything lives
 
-### Services + ports
-
-This variant is generated for the **repo** execution context:
-host shell — services are reached on `localhost` via the compose-published ports. Every programmatic base URL below is baked for that context and
-can be overridden with the matching `MARCH_*_URL` env var (an explicit value
-always wins). Grafana is a browser endpoint you open from the host, so it stays
-on `localhost` regardless of context.
-
-| Service | URL | Notes |
-|---|---|---|
-| otel-lgtm (Grafana) | http://localhost:3000 | dashboards: `march-legate`, `march-herald`, `march-hatchery` (browser, from the host) |
-| OTel collector (OTLP HTTP) | http://localhost:4318 | where services ship traces/metrics/logs; read them via Grafana above |
-| Castra | http://localhost:9264 | interactive-session host; `/v1/sessions` carries `branch` (#264) |
-| Hatchery | http://localhost:8080 | spawn flow |
-| Brood | http://localhost:9748 | session-state + teardown authority |
-| Herald | http://localhost:8818 | event log + fold projection |
-| Legate loop | http://localhost:8787 | the deterministic two-stage tick, one shared container, N profiles |
+{{>service-addressing}}
 
 ### Log files (on the host, NOT inside the container)
 
@@ -76,10 +60,10 @@ on `localhost` regardless of context.
 
 | Endpoint | What |
 |---|---|
-| `GET http://localhost:8818/state` | Herald's current fold projection (bare `SystemState`: `seq`, `smithy{dispatchable,blocked,total}`, `workers`, `slices{}` keyed by sliceId). |
-| `GET http://localhost:8818/events?after=<seq>&limit=<n>` | drain past events; `{events:[...], lastSeq}`. Each envelope has `source` = `herald` (observation) or `legate` (transition). |
-| `GET http://localhost:8787/status?profile=<p>` | the legate's view of the **same** fold — different in-memory shape, **can diverge** from Herald's projection (see #268). |
-| `GET http://localhost:9264/v1/sessions?profile=<p>` | Castra's live session list (carries `branch` per #264). |
+| `GET {{{HERALD_BASE}}}/state` | Herald's current fold projection (bare `SystemState`: `seq`, `smithy{dispatchable,blocked,total}`, `workers`, `slices{}` keyed by sliceId). |
+| `GET {{{HERALD_BASE}}}/events?after=<seq>&limit=<n>` | drain past events; `{events:[...], lastSeq}`. Each envelope has `source` = `herald` (observation) or `legate` (transition). |
+| `GET {{{LEGATE_BASE}}}/status?profile=<p>` | the legate's view of the **same** fold — different in-memory shape, **can diverge** from Herald's projection (see #268). |
+| `GET {{{CASTRA_BASE}}}/v1/sessions?profile=<p>` | Castra's live session list (carries `branch` per #264). |
 
 ### OTel correlation gotcha
 
@@ -161,7 +145,7 @@ When a slice escalated because the **auto-recovery budget (#211) was exhausted**
 and you have **fixed the root cause** (e.g. re-authed codex), request recovery:
 
 ```bash
-march legate recover <sliceId> [--profile <p>]
+{{{MARCH_CLI}}} legate recover <sliceId> [--profile <p>]
 ```
 
 This appends a `slice.recovery.requested` event to Herald. On the next tick the
@@ -204,7 +188,7 @@ This is the bulk sibling of the single-slice recovery above.
 **Recover all of them with one command** — dry-run first, then `--yes`:
 
 ```bash
-export MARCH_HERALD_URL=http://localhost:8818
+export MARCH_HERALD_URL={{{HERALD_BASE}}}
 ${CLAUDE_SKILL_DIR}/scripts/mass-recover.sh                       # dry run: prints the plan
 ${CLAUDE_SKILL_DIR}/scripts/mass-recover.sh --yes                 # recover every escalated slice
 ${CLAUDE_SKILL_DIR}/scripts/mass-recover.sh --profile smithy --reason hatchery_dispatch_failed --yes
@@ -234,7 +218,7 @@ operation, just batched.
   PR already merged but whose worktree/branch were never torn down. Reap them:
 
   ```bash
-  march brood sweep   # needs MARCH_BROOD_ADMIN_TOKEN
+  {{{MARCH_CLI}}} brood sweep   # needs MARCH_BROOD_ADMIN_TOKEN
   ```
 
   Caveats: `POST /admin/sweep` **does not honor a `dryRun` body — it always
@@ -291,7 +275,7 @@ slices that predate the #213 Hatchery push, so no `slice.steward.attached` was
 ever emitted and `babysit.assess` skips them):
 
 ```bash
-export MARCH_HERALD_URL=http://localhost:8818
+export MARCH_HERALD_URL={{{HERALD_BASE}}}
 export MARCH_HERALD_ADMIN_TOKEN=<token>      # set only for the intervention
 
 ${CLAUDE_SKILL_DIR}/scripts/admin-event.sh \

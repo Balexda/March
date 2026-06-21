@@ -5,7 +5,7 @@
 #   src/templates/skills/march.debug/scripts/lib.sh.prompt
 # and run `npm run skills:generate` (also runs on `npm run build`).
 #
-# Execution context: repo — host shell — services are reached on `localhost` via the compose-published ports.
+# Execution context: {{CONTEXT}} — {{ADDRESSING}}.
 #
 # Sourced by every script in this directory. Provides URL resolution, a single
 # HTTP-fetch chokepoint (with a fixture-replay hook for tests), and friendly
@@ -14,9 +14,9 @@
 # Service base URLs are BAKED for this execution context at generation time —
 # there is NO runtime context detection. An explicit MARCH_*_URL env var still
 # wins, so the same variant also works against a non-default endpoint:
-#   MARCH_HERALD_URL   default http://localhost:8818
-#   MARCH_LEGATE_URL   default http://localhost:8787
-#   MARCH_CLI          default march
+#   MARCH_HERALD_URL   default {{{HERALD_BASE}}}
+#   MARCH_LEGATE_URL   default {{{LEGATE_BASE}}}
+#   MARCH_CLI          default {{{MARCH_CLI}}}
 #
 # Test-only hook (do NOT set in production):
 #   MARCH_DEBUG_REPLAY_DIR  when set, http_get reads <dir>/<segment>.json
@@ -27,9 +27,9 @@
 set -euo pipefail
 
 # Context-baked defaults (overridable via the matching env var).
-HERALD_DEFAULT_URL="http://localhost:8818"
-LEGATE_DEFAULT_URL="http://localhost:8787"
-MARCH_CLI_DEFAULT="march"
+HERALD_DEFAULT_URL="{{{HERALD_BASE}}}"
+LEGATE_DEFAULT_URL="{{{LEGATE_BASE}}}"
+MARCH_CLI_DEFAULT="{{{MARCH_CLI}}}"
 
 HERALD_URL="${MARCH_HERALD_URL:-$HERALD_DEFAULT_URL}"
 HERALD_URL="${HERALD_URL%/}"
