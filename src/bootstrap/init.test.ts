@@ -66,7 +66,7 @@ function runWithEnv(
   };
 }
 
-describe("march init", () => {
+describe("march init (CLI-installation bootstrap)", () => {
   const tmpDirs: string[] = [];
 
   function makeTmpDir(): string {
@@ -154,7 +154,10 @@ describe("march init", () => {
     ]);
   });
 
-  it("already-installed guard triggers on existing valid manifest", () => {
+  it("bare `march init` is a graceful no-op on an existing valid manifest", () => {
+    // The folded `march init` is first-run-gated: with an install already
+    // present it must NOT re-run the bootstrap (and so does not raise initMarch's
+    // "already installed" error). It reports the no-op and points at onboarding.
     const tmpDir = makeTmpDir();
     const marchDir = path.join(tmpDir, ".march");
     fs.mkdirSync(marchDir, { recursive: true });
@@ -171,10 +174,11 @@ describe("march init", () => {
 
     const result = runWithHome(["init"], tmpDir);
 
-    expect(result.exitCode).toBe(1);
+    expect(result.exitCode).toBe(0);
     const output = result.stdout + result.stderr;
-    expect(output).toContain("already installed");
-    expect(output).toContain("march update");
+    expect(output).not.toContain("initialized successfully");
+    expect(output).toContain("already initialized");
+    expect(output).toContain("march init <profile>");
   });
 
   it("corrupted manifest detected exits 1 with warning", () => {

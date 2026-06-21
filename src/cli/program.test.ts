@@ -111,13 +111,51 @@ describe("march CLI", () => {
     return fakeBin;
   }
 
-  it("march init runs successfully on clean home", () => {
+  it("march init with no profile runs the first-run CLI bootstrap on a clean home", () => {
+    // The CLI-installation bootstrap (manifest + base skills) is folded into
+    // `march init`: with no profile on a fresh host it just bootstraps and then
+    // points the operator at profile onboarding.
     const tmpDir = makeTmpDir();
     const result = run(["init"], {
       env: { ...process.env, HOME: tmpDir },
     });
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toContain("initialized successfully");
+    expect(result.stdout).toContain("march init <profile>");
+  });
+
+  it("march init with no profile is a no-op on an already-initialized home", () => {
+    // First-run-gated: the second invocation must not re-bootstrap (initMarch
+    // refuses to run over an existing install); it reports the no-op and the
+    // onboarding hint instead.
+    const tmpDir = makeTmpDir();
+    const env = { ...process.env, HOME: tmpDir };
+    const first = run(["init"], { env });
+    expect(first.exitCode).toBe(0);
+    expect(first.stdout).toContain("initialized successfully");
+
+    const second = run(["init"], { env });
+    expect(second.exitCode).toBe(0);
+    expect(second.stdout).not.toContain("initialized successfully");
+    expect(second.stdout).toContain("already initialized");
+    expect(second.stdout).toContain("march init <profile>");
+  });
+
+  it("march init <profile> --no-setup skips the stack bring-up (render-only path)", () => {
+    // --no-setup is render-only: it must NOT preflight images or require Docker,
+    // so the unconditional stack bring-up is skipped and the command proceeds
+    // (after the first-run bootstrap) straight to repo detection — which fails
+    // here because the tmp cwd is not a git repo. Use an isolated HOME so the
+    // folded bootstrap writes to a throwaway dir, not the real ~/.march.
+    const tmpDir = makeTmpDir();
+    const result = runWithEnv(
+      ["init", "demo", "--no-setup"],
+      { ...process.env, HOME: makeTmpDir() },
+      { cwd: tmpDir },
+    );
+    expect(result.stderr).not.toContain("images are not built");
+    expect(result.stderr).not.toContain("Docker not found");
+    expect(result.stderr).toContain("from inside a git repository");
   });
 
   it("march with no args exits 2 with usage", () => {
@@ -275,8 +313,21 @@ describe("march CLI", () => {
       );
       expect(result.exitCode).toBe(1);
       expect(result.stderr).toContain(
-        "Run `march legate init` from inside a git repository.",
+        "Run `march legate init` from inside a git repository",
       );
+    });
+
+    it("`march legate init` prints a deprecation warning pointing at `march init`", () => {
+      // Even the early-exit (not-a-git-repo) path emits the deprecation shim
+      // warning first — the command still works but nudges toward `march init`.
+      const tmpDir = makeTmpDir();
+      const result = runWithEnv(
+        ["legate", "init", "--no-setup"],
+        { ...process.env },
+        { cwd: tmpDir },
+      );
+      expect(result.stderr).toContain("`march legate init` is deprecated");
+      expect(result.stderr).toContain("march init");
     });
 
     it("`march legate init` without git on PATH exits 1 with a git-specific message", () => {
@@ -294,6 +345,20 @@ describe("march CLI", () => {
       expect(result.exitCode).toBe(1);
       expect(result.stderr).toContain("git not found on PATH");
       expect(result.stderr).not.toContain("from inside a git repository");
+    });
+  });
+
+  describe("march profile", () => {
+    it("`march profile register` still works but warns it is deprecated", () => {
+      // Point at a closed port so the Herald round-trip fails fast; registration
+      // is best-effort (never throws), so the action runs to completion and the
+      // deprecation warning is emitted before the unreachable-Herald note.
+      const result = runWithEnv(
+        ["profile", "register", "-p", "demo", "--repo-path", "/tmp/demo"],
+        { ...process.env, MARCH_HERALD_URL: "http://127.0.0.1:1" },
+      );
+      expect(result.stderr).toContain("`march profile register` is deprecated");
+      expect(result.stderr).toContain("march init");
     });
   });
 
@@ -527,11 +592,13 @@ describe("march CLI", () => {
     expect(result.exitCode).toBe(2);
   });
 
-  it("march init --help exits 0 and stdout contains init and its description", () => {
+  it("march init --help exits 0 and shows the optional-profile onboarding usage", () => {
     const result = run(["init", "--help"]);
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toContain("init");
-    expect(result.stdout).toContain("Initialize");
+    // Onboarding command: takes an optional [profile] positional and a --repo flag.
+    expect(result.stdout).toContain("[profile]");
+    expect(result.stdout).toContain("--repo");
   });
 
   it("march update --help exits 0 and stdout contains update", () => {

@@ -19,7 +19,7 @@ March's source is organized by product subsystem rather than by generic layers:
 |-----------|-----------|
 | `src/cli.ts` | Executable bin entrypoint only; delegates to `src/cli/program.ts`. |
 | `src/cli/` | Commander program setup and command dispatch. |
-| `src/bootstrap/` | `march init` / `march self update`, manifest handling, and deployed base skills. |
+| `src/bootstrap/` | CLI-installation bootstrap (manifest + deployed base skills) — run as the first-run step of `march init` — plus the `march self update` CLI-version updater. |
 | `src/stack/` | Stack-lifecycle commands (`march up` / `down` / `upgrade`): the shared service list, compose-file locator, command runner, and token resolution. |
 | `src/doctor/` | `march doctor` — the read-only stack-consistency battery (token wiring, session divergence, dispatch health, worktree hygiene, branch-sync lag, tmux server ownership). Talks only to the service HTTP clients + the docker socket; one module per check under `checks/`. |
 | `src/spawn/` | Spawn execution pipeline: snapshots, image builds, backend entrypoints, and container launch. |
@@ -176,7 +176,8 @@ that is absent), prints a per-service table, and **exits non-zero when the stack
 is not fully healthy** so it can gate scripts/CI. The command is read-only — it
 never starts, stops, or generates anything (unlike `march up`, it reads the
 persisted token but never mints one). Pass `--json` for machine-readable output.
-The remaining stack-lifecycle surface (`march init`) is tracked as a follow-up.
+The profile-onboarding surface (`march init`) is documented under **Initializing
+March and onboarding a profile** below.
 
 **`march sessions`** (alias **`march ps`**) is the single-command answer to "what
 is March running right now?". It joins Brood's session registry, Castra's live
@@ -238,6 +239,44 @@ tagged with its service; pass a name (`otel-lgtm`, `castra`, `hatchery`,
 container by name over the Docker socket (the service→container mapping is baked
 into the CLI), so it works from a plain `npm i -g march` install with no source
 checkout — it never reads the `docker/*.docker-compose.yml` files.
+
+### Initializing March and onboarding a profile
+
+**`march init [profile] --repo <path>`** is the single entry point for standing up
+March. It does two things, in order:
+
+1. **First-run CLI bootstrap.** When the CLI installation isn't yet set up on this
+   host (no valid `~/.march/march-manifest.json`), `init` writes the manifest and
+   deploys the base skills before doing anything else. It's first-run-gated, so a
+   no-op on every subsequent run. This is the bootstrap that used to be a separate
+   top-level `init` command — it is now folded in, so a fresh `npm i -g` only ever
+   needs `march init`.
+2. **Profile onboarding** (when a `<profile>` is given). It ensures the full stack
+   is up (the idempotent `march up` path — a no-op when the stack is already
+   healthy, aborting with a build hint if a locally-built image is missing), then
+   renders and sets up the profile's Legate conductor, registers the repo with
+   Herald's profile registry (the source of truth the shared `march-legate`
+   service reads each tick), and ensures the legate service.
+
+Run `march init` with **no profile** to do just the first-run bootstrap.
+Re-running with a profile is idempotent. `--repo` defaults to the current git
+repo. Onboarding options carry over from the commands it replaces:
+`--worker-group`, `--model`, `--effort`, `--toolchain`, `--priority`,
+`--conductor`, `--description`, `--heartbeat-interval`, plus `--no-setup` /
+`--no-loop` / `--no-bridge-check`.
+
+`march init <profile>` **supersedes** the previously split `march legate init`
+(conductor + registration) and `march profile register` (registration only). Both
+still work but print a deprecation warning pointing at `march init`, and will be
+removed in a future release. The `march profile` group (`list`, `remove`,
+`merge-policy`, `priority`) remains the way to manage already-registered profiles.
+
+> **No-build installs are not there yet.** The profile-onboarding step still
+> requires the `march-*` service images to exist locally (built from the source
+> tree via `npm run build:images`); a bare `npm i -g` has no way to obtain them and
+> `init` aborts with a build hint. Making the stack pullable from a hosted registry
+> — so `npm i -g` → `march init` works with no source and no local builds — is
+> tracked in **[#438](https://github.com/Balexda/March/issues/438)**.
 
 **Keep telemetry in lock-step with the dispatch machinery.** When you add a loop
 lifecycle action or a new dispatch path, emit a span for it; when you add a
