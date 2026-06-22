@@ -220,7 +220,7 @@ Recommended implementation sequence:
 | US4 | A3 Structural Enforcement — `envWhitelist` is the Only Env Mechanism | US1, US3     | specs/2026-05-12-003-profile-schema-and-validation-library/04-a3-structural-enforcement-envwhitelist-is-the-only-env-mechanism.tasks.md |
 | US5 | A7 Network Policy is a Closed Allowlist with Structured Endpoints | US1             | specs/2026-05-12-003-profile-schema-and-validation-library/05-a7-network-policy-is-a-closed-allowlist-with-structured-endpoints.tasks.md |
 | US6 | A2/A5 — File Mounts and Snapshot Policy Enforce Threat Model      | US1             | specs/2026-05-12-003-profile-schema-and-validation-library/06-a2-a5-file-mounts-and-snapshot-policy-enforce-threat-model-structurally.tasks.md |
-| US7 | Optional `tools` Policy, Shipped But Unconsumed                   | US1             | —        |
+| US7 | Optional `tools` Policy, Shipped But Unconsumed                   | US1             | specs/2026-05-12-003-profile-schema-and-validation-library/07-optional-tools-policy-shipped-but-unconsumed.tasks.md |
 | US8 | Profile Fixture Corpus as Schema Documentation                    | US2, US3, US4, US5, US6, US7 | — |
 
 US2–US7 are pairwise independent once US1 lands, so the bulk of the implementation work can begin in parallel. US8 is sequenced last because the corpus codifies the rule IDs that US2–US7 settle.
