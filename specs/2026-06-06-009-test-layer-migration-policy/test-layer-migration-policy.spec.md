@@ -86,7 +86,7 @@ Recommended implementation sequence:
 |----|-------|------------|----------|
 | US1 | Author the Test Layer Migration Policy | — | specs/2026-06-06-009-test-layer-migration-policy/01-author-the-test-layer-migration-policy.tasks.md |
 | US2 | Record the Starting State of the Governed Tests | — | specs/2026-06-06-009-test-layer-migration-policy/02-record-the-starting-state-of-the-governed-tests.tasks.md |
-| US3 | Apply the Policy on a Touching PR Without Relitigation | US1, US2 | — |
+| US3 | Apply the Policy on a Touching PR Without Relitigation | US1, US2 | specs/2026-06-06-009-test-layer-migration-policy/03-apply-the-policy-on-a-touching-pr-without-relitigation.tasks.md |
 
 ## Requirements *(mandatory)*
 
