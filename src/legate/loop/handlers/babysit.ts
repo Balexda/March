@@ -688,7 +688,19 @@ function evaluatePr(
     return;
   }
 
-  if (pr.checks === "PASS" && pr.needs_response_count === 0 && pr.mergeable !== "CONFLICTING") {
+  // "All-clear" CI precondition: the checks are green (`PASS`) OR there are none
+  // to wait on (`NONE`). A docs-only PR that triggers no workflow (e.g. a cut PR
+  // whose diff only touches `specs/`) sits at `checks: "NONE"` permanently, so the
+  // old `=== "PASS"` gate could NEVER auto-merge it — it stuck at pr-open/pr-in-fix
+  // forever despite being MERGEABLE/CLEAN with no open threads. `NONE` can also
+  // briefly mean "checks not registered yet" for a PR that WILL run CI (see
+  // state/sense.ts `prChecksUnsettled`), but accepting it here cannot merge
+  // anything GitHub considers unmergeable: the merge is still gated below on
+  // GitHub's own `mergeStateStatus === "clean"` (which stays non-clean while
+  // required checks are pending/blocked) and, for non-cut task types, on the
+  // human-approval requirement.
+  const checksClear = pr.checks === "PASS" || pr.checks === "NONE";
+  if (checksClear && pr.needs_response_count === 0 && pr.mergeable !== "CONFLICTING") {
     // Record the one-time transition into the all-clear `pr-open` stage (the loop
     // confirmed CI/threads/conflicts). This happens regardless of the merge gate.
     if (TERMINAL_RESET_STAGES.includes(slice.stage)) {
