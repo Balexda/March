@@ -54,14 +54,39 @@ expect "fold-state --slice unknown -> 5" 5 "" -- \
   env MARCH_DEBUG_REPLAY_DIR="$REPLAY" bash "$DIR/fold-state.sh" --slice nope
 
 # --- events-tail (use --after to skip the /state.seq probe) ---
+# --profile is required; replay/ has no per-profile fixture so ?profile=march
+# falls back to the single-profile events.json (all march).
 expect "events-tail filters by type" 0 "slice.escalated" -- \
-  env MARCH_DEBUG_REPLAY_DIR="$REPLAY" bash "$DIR/events-tail.sh" --after 0 --type slice.escalated
+  env MARCH_DEBUG_REPLAY_DIR="$REPLAY" bash "$DIR/events-tail.sh" --profile march --after 0 --type slice.escalated
 expect "events-tail --src legate excludes herald heartbeat" 0 "slice.escalated" -- \
-  env MARCH_DEBUG_REPLAY_DIR="$REPLAY" bash "$DIR/events-tail.sh" --after 0 --src legate
+  env MARCH_DEBUG_REPLAY_DIR="$REPLAY" bash "$DIR/events-tail.sh" --profile march --after 0 --src legate
 # heartbeat is herald-source: must NOT appear under --src legate
-out=$(env MARCH_DEBUG_REPLAY_DIR="$REPLAY" bash "$DIR/events-tail.sh" --after 0 --src legate 2>/dev/null)
+out=$(env MARCH_DEBUG_REPLAY_DIR="$REPLAY" bash "$DIR/events-tail.sh" --profile march --after 0 --src legate 2>/dev/null)
 grep -q "heartbeat" <<<"$out" && fail "events-tail --src legate leaked a herald event"
 ok "events-tail --src legate excludes herald observations"
+# --profile is required (exit EX_USAGE=2 when omitted).
+expect "events-tail missing --profile -> 2" 2 "" -- \
+  env MARCH_DEBUG_REPLAY_DIR="$REPLAY" bash "$DIR/events-tail.sh" --after 0
+
+# --- events-tail multi-profile: ?profile= scopes to one profile server-side.
+# The replay hook serves events.<profile>.json, mirroring Herald's filtering.
+MULTI="$FIX/multi-profile"
+# march scope shows march's slices (incl. the colliding sliceId) ...
+expect "events-tail --profile march shows march's escalation" 0 "march-only-m1-f1-mark" -- \
+  env MARCH_DEBUG_REPLAY_DIR="$MULTI" bash "$DIR/events-tail.sh" --profile march --after 0
+# ... and NOT the other profile's.
+out=$(env MARCH_DEBUG_REPLAY_DIR="$MULTI" bash "$DIR/events-tail.sh" --profile march --after 0 2>/dev/null)
+grep -q "smithy-only-s1-f2-cut" <<<"$out" && fail "events-tail --profile march leaked a smithy event"
+ok "events-tail --profile march excludes other profiles"
+# smithy scope is the mirror image.
+expect "events-tail --profile smithy shows smithy's escalation" 0 "smithy-only-s1-f2-cut" -- \
+  env MARCH_DEBUG_REPLAY_DIR="$MULTI" bash "$DIR/events-tail.sh" --profile smithy --after 0
+out=$(env MARCH_DEBUG_REPLAY_DIR="$MULTI" bash "$DIR/events-tail.sh" --profile smithy --after 0 2>/dev/null)
+grep -q "march-only-m1-f1-mark" <<<"$out" && fail "events-tail --profile smithy leaked a march event"
+ok "events-tail --profile smithy excludes other profiles"
+# the seq probe is also profile-scoped: omitting --after reads state.<profile>.json.
+expect "events-tail --profile smithy probes that profile's seq" 0 "smithy-only-s1-f2-cut" -- \
+  env MARCH_DEBUG_REPLAY_DIR="$MULTI" bash "$DIR/events-tail.sh" --profile smithy
 
 # --- legate-status ---
 expect "legate-status ok" 0 "\"profile\": \"march\"" -- \

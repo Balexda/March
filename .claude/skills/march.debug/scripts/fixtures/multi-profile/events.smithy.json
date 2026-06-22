@@ -1,0 +1,8 @@
+{
+  "lastSeq": 518,
+  "events": [
+    { "seq": 507, "id": "s1", "ts": "2026-06-10T09:00:30.000Z", "source": "herald", "profile": "smithy", "type": "smithy.queue.changed", "dispatchable": 1, "blocked": 2, "total": 6 },
+    { "seq": 514, "id": "s2", "ts": "2026-06-10T09:01:30.000Z", "source": "legate", "profile": "smithy", "type": "slice.dispatched", "sliceId": "shared-collide-cut", "sessionId": "smithy-bbbb" },
+    { "seq": 518, "id": "s3", "ts": "2026-06-10T09:02:30.000Z", "source": "legate", "profile": "smithy", "type": "slice.escalated", "sliceId": "smithy-only-s1-f2-cut", "reason": "review_changes_requested" }
+  ]
+}

@@ -22,7 +22,11 @@
 #   MARCH_DEBUG_REPLAY_DIR  when set, http_get reads <dir>/<segment>.json
 #                           instead of curling — segment is the first path
 #                           component (e.g. /state -> state.json, /status?... ->
-#                           status.json). Lets the test suite run offline.
+#                           status.json). Lets the test suite run offline. When the
+#                           request carries `?profile=<p>`, a per-profile fixture
+#                           <segment>.<p>.json is preferred when present (else the
+#                           bare <segment>.json) — this lets a fixture model
+#                           Herald's server-side per-profile scoping.
 
 set -euo pipefail
 
@@ -67,7 +71,15 @@ http_get() {
 
   if [ -n "${MARCH_DEBUG_REPLAY_DIR:-}" ]; then
     local seg="${path#/}"; seg="${seg%%\?*}"; seg="${seg%%/*}"
+    # Prefer a per-profile fixture (<segment>.<profile>.json) when the request is
+    # profile-scoped, mirroring Herald's server-side ?profile= filtering; fall
+    # back to the bare <segment>.json (single-profile / unscoped fixtures).
+    local prof=""
+    case "$path" in *profile=*) prof="${path##*profile=}"; prof="${prof%%&*}";; esac
     local f="$MARCH_DEBUG_REPLAY_DIR/${seg}.json"
+    if [ -n "$prof" ] && [ -f "$MARCH_DEBUG_REPLAY_DIR/${seg}.${prof}.json" ]; then
+      f="$MARCH_DEBUG_REPLAY_DIR/${seg}.${prof}.json"
+    fi
     if [ -f "$f" ]; then cat "$f"; return 0; fi
     echo "march.debug: replay fixture not found: $f (for $path)" >&2
     return "$EX_UNREACHABLE"
