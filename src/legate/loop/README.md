@@ -48,7 +48,8 @@ drop-in (see [`state/types.ts`](./state/types.ts)).
 
 ### The handler pipeline (order is load-bearing)
 
-`cleanup → ghost-cleanup → relaunch → babysit → recovery → dispatch`, awaited in
+`cleanup → ghost-cleanup → castra-recover → relaunch → babysit → recovery →
+adopt-from-fold → dispatch`, awaited in
 order. Do **not** parallelize — earlier handlers drop sessions/slices that later
 ones must not act on. `recovery` runs **after** `castra-recover`/`relaunch` (it
 *prepares* a stuck slice — un-escalates it — for the gentle owner to heal next
