@@ -41,6 +41,11 @@ export type TransitionEvent = Extract<
       | "slice.stage.changed"
       | "slice.archived"
       | "slice.recovery.dispatched"
+      // The graduated-recovery driver (#413) appends inner-rung
+      // `slice.recovery.requested {rung}` events to durably advance the ladder
+      // (rung 1/2) and tombstone on the last-resort nuke (rung 3). The operator
+      // CLI also appends this (no `rung`); both share Herald's validator.
+      | "slice.recovery.requested"
       | "steward.relaunched"
       | "slice.escalated"
       | "retry.counted";

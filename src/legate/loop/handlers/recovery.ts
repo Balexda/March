@@ -1,68 +1,385 @@
 import type { HandlerContext, HandlerResult, LoopState } from "../state/types.js";
 import { emptyHandlerResult } from "../state/types.js";
 import { dropRecoveredSlice } from "../state/mutations.js";
+import { MAX_RECOVER_ATTEMPTS } from "./castra-recover.js";
+import { RELAUNCH_LIMIT, relaunchRetryKey } from "./relaunch.js";
 
 /**
- * Operator recovery (#238): honor `slice.recovery.requested` events drained from
- * the Herald inbox this tick. Once a slice escalates with its bounded-recovery
- * budget (#211) exhausted, the loop has NO internal re-dispatch path — the
- * escalated slice stays load-bearing and dedups the still-ready smithy work
- * forever. An operator un-wedges it with `march legate recover <sliceId>` (or the
- * `legate.unwedge` skill), which appends a `slice.recovery.requested` event.
+ * Graduated recovery ladder driver (#413, fixes #409). `march legate recover`
+ * used to jump straight to the most-destructive option — tombstone + fresh
+ * re-dispatch — because the escalated stage walls off the gentle recovery
+ * handlers (`relaunch` excludes `escalated`; `adopt-from-fold` skips the
+ * steward-attention reasons). This handler turns the operator lever into a rung
+ * state machine that always starts at the least-destructive rung and walks down,
+ * with a bounded budget per rung:
  *
- * This handler reconciles the loop's IN-MEMORY working state for each request:
- * it drops the slice from both the live and archived sets and clears its retry
- * budget. Acting here — during the tick the request is drained — is what defeats
- * warm-loop invisibility: the request's reducer tombstones the slice in the
- * durable fold, but the warm loop's `raw` is threaded in memory and only rebuilt
- * from the fold on a cold start, so a fold edit alone never reaches the running
- * loop (gap #3 in #238). With the slice dropped, the dispatcher's
- * `dispatchableReady` re-selects the still-ready item and re-launches it FRESH on
- * this same tick (the dispatch handler runs after this one).
+ *   0b human-input — steward parked `awaiting_input` → REFUSE, touch nothing
+ *                    (the full refuse-and-redirect UX lands in PR3).
+ *   0a static      — errored worker session → un-escalate in place and let
+ *                    `castra-recover` restart it. Descend when its budget
+ *                    (`castra_recover_attempts >= MAX_RECOVER_ATTEMPTS`) is spent
+ *                    and the session is still errored: drop the wedged session
+ *                    (worktree/branch/PR preserved) so relaunch can take over.
+ *   1   relaunch   — un-escalate to the slice's working stage (`pr-open` if it
+ *                    has a PR, else `implementing`) so `relaunch` re-attaches a
+ *                    fresh steward to the PRESERVED worktree next tick. Descend
+ *                    when relaunch's budget (`relaunchRetryKey >= RELAUNCH_LIMIT`)
+ *                    is spent and the session is still gone.
+ *   2   confirm    — relaunch's budget is spent; wait ONE tick so a relaunch that
+ *                    only just succeeded surfaces in the next sense (its new
+ *                    session id is not in this tick's snapshot yet) before we give
+ *                    up. Still gone next tick → descend to rung 3.
+ *   3   nuke       — last resort: tombstone the slice (`dropRecoveredSlice`) and
+ *                    append `slice.recovery.requested {rung:3}`, exactly today's
+ *                    #238 behavior. Dispatch re-selects the still-ready item FRESH.
  *
- * Pure `assess` + effecting `apply`, deps-free like cleanup/ghost-cleanup — the
- * only effect is the in-memory drop. The action records it returns are appended to
- * the action log by {@link runHeartbeat} in pipeline order alongside every other
- * handler's actions (this handler does NOT write the log directly, so per-tick
- * action ordering stays consistent). No transition event is emitted: the
- * `slice.recovery.requested` is already in the durable log (operator-appended) and
- * the ensuing fresh `slice.dispatched` is the durable record of the re-dispatch.
+ * Pipeline ordering is load-bearing (`coordinator.ts`): this handler runs AFTER
+ * `castra-recover`/`relaunch`, so it PREPARES the slice (un-escalates) this tick
+ * for the owning handler to act NEXT tick, and DESCENDS once that handler's
+ * budget is exhausted. One-tick latency per rung; do NOT reorder.
+ *
+ * Durability (#412): the begin-graduated `slice.recovery.requested` the operator
+ * appends sets the fold's `recoveryRung` to 0; each inner-rung descent appends
+ * `slice.recovery.requested {rung:N}` ONCE (re-emitting every tick would re-clear
+ * the relaunch budget the reducer resets, so the ladder would never descend), so
+ * a cold-start rebuild resumes the walk at the right rung. The walk COMPLETES —
+ * `recovery_rung` cleared — the moment the slice is un-escalated AND has a live
+ * worker session again; that is re-derived from world state every tick, so it is
+ * idempotent and cold-start-safe even if a stale `recoveryRung` lingers in the
+ * fold.
+ *
+ * Pure `assess` + effecting `apply`. The only I/O is the rung-0→1 session drop
+ * (best-effort `ctx.castra.removeSession`, worktree NOT pruned); everything else
+ * is an in-memory mutation + a durable transition event. The action records are
+ * appended to the log by {@link runHeartbeat} in pipeline order — this handler
+ * does NOT write the log directly.
  */
+
+/** The graduated-recovery action this slice takes THIS tick. */
+export type RecoveryActionKind =
+  | "refuse-awaiting-input" // 0b — steward awaiting input; touch nothing
+  | "hold-castra" // 0a — un-escalate, ensure rung 0, await Castra restart
+  | "free-and-relaunch" // 0a→1 — drop the wedged errored session, un-escalate for relaunch
+  | "prepare-relaunch" // 1 — un-escalate so relaunch re-attaches a steward
+  | "confirm-relaunch" // 1→2 — relaunch budget spent; hold one tick before the nuke
+  | "nuke" // 2→3 (or descended into) — tombstone + fresh re-dispatch
+  | "complete"; // un-escalated + live session (or nothing to do) — end the walk
 
 export interface RecoveryDecision {
   readonly sliceId: string;
+  readonly action: RecoveryActionKind;
+  /** Working stage to un-escalate to (hold-castra / free-and-relaunch / prepare-relaunch). */
+  readonly stage?: string;
+  /** The wedged errored session to drop (free-and-relaunch). */
+  readonly removeSessionId?: string;
+  /** Session whose Castra-recover budget to reset for a genuine fresh rung-0 attempt. */
+  readonly resetCastraSessionId?: string;
+  /** Durable rung to record this tick via `slice.recovery.requested` (descent only). */
+  readonly emitRung?: number;
+}
+
+/** Pure: the working stage an un-escalated slice returns to — `pr-open` when it
+ *  carries a live PR (so babysit drives it to merge), else `implementing`. */
+export function deriveUnescalateStage(slice: any): string {
+  const n = slice?.pr?.number;
+  return typeof n === "number" && n > 0 ? "pr-open" : "implementing";
+}
+
+function castraAttempts(state: LoopState): Record<string, number> {
+  const raw = state.raw as { castra_recover_attempts?: Record<string, number> } | undefined;
+  return raw?.castra_recover_attempts ?? {};
+}
+
+function retryCounts(state: LoopState): Record<string, number> {
+  const raw = state.raw as { transient_retry_counts?: Record<string, number> } | undefined;
+  const c = raw?.transient_retry_counts;
+  return c && typeof c === "object" ? c : {};
+}
+
+/** The relaunch rung (1) / confirm rung (2) decision: descend when relaunch has
+ *  stopped firing and the session is still gone, else keep un-escalating so
+ *  relaunch re-attaches. */
+function relaunchRung(state: LoopState, sliceId: string, slice: any, sessionGone: boolean): RecoveryDecision {
+  const used = Number.isFinite(retryCounts(state)[relaunchRetryKey(sliceId)])
+    ? retryCounts(state)[relaunchRetryKey(sliceId)]
+    : 0;
+  const rung = slice.recovery_rung === undefined ? 0 : Number(slice.recovery_rung);
+  if (used >= RELAUNCH_LIMIT && sessionGone) {
+    // Relaunch's budget is spent. Hold one tick at rung 2 so a relaunch that
+    // only just succeeded (its new session id is not in THIS tick's snapshot)
+    // surfaces in the next sense before we nuke; if we are already at rung 2 and
+    // still gone, the relaunch genuinely failed — descend to the nuke.
+    if (rung >= 2) return { sliceId, action: "nuke" };
+    return { sliceId, action: "confirm-relaunch", emitRung: 2 };
+  }
+  return {
+    sliceId,
+    action: "prepare-relaunch",
+    stage: deriveUnescalateStage(slice),
+    // Record rung 1 durably only on the transition INTO it (not every maintain
+    // tick) so the reducer's retry-budget reset fires once, not repeatedly.
+    ...(rung === 1 ? {} : { emitRung: 1 }),
+  };
+}
+
+/** Pure: classify ONE candidate slice into its rung action for this tick. */
+function classify(state: LoopState, sliceId: string): RecoveryDecision {
+  const slice = state.slices?.[sliceId];
+  if (!slice || typeof slice !== "object" || slice.recovered || slice.archived) {
+    // Operator requested recovery on an unknown / already-recovered slice.
+    return { sliceId, action: "complete" };
+  }
+
+  // 0b — the steward is deliberately parked awaiting the user. Refuse and touch
+  // nothing; this wins even over an errored session (e.g. both at once).
+  if (state.perSlice?.[sliceId]?.stewardReport?.status === "awaiting_input") {
+    return { sliceId, action: "refuse-awaiting-input" };
+  }
+
+  const sessId = typeof slice.worker_session_id === "string" ? slice.worker_session_id : "";
+  const snap = sessId ? state.sessionsById?.get(sessId) : undefined;
+  const sessionPresent = !!snap;
+  const sessionErrored = sessionPresent && snap.status === "error";
+  const sessionHealthy = sessionPresent && snap.status !== "error";
+  const sessionGone = !sessionPresent;
+
+  // Walk complete: the slice is no longer escalated and has a live steward —
+  // babysit drives it from here. Idempotent / cold-start-safe (re-derived every
+  // tick), so a lingering fold `recoveryRung` resolves on the next pass.
+  if (slice.stage !== "escalated" && sessionHealthy) return { sliceId, action: "complete" };
+
+  const rung = slice.recovery_rung === undefined ? 0 : Number(slice.recovery_rung);
+
+  if (rung <= 0) {
+    if (sessionErrored) {
+      const attempts = Number.isFinite(castraAttempts(state)[sessId]) ? castraAttempts(state)[sessId] : 0;
+      const fresh = slice.recovery_rung === undefined;
+      // A fresh operator request gets a genuine gentlest attempt: reset the
+      // Castra-recover budget (the begin-graduated reducer clears the relaunch
+      // counters but NOT this separate per-session map) so rung 0 actually retries
+      // even if the slice escalated because that budget was already spent.
+      if (fresh || attempts < MAX_RECOVER_ATTEMPTS) {
+        return {
+          sliceId,
+          action: "hold-castra",
+          stage: deriveUnescalateStage(slice),
+          ...(fresh ? { resetCastraSessionId: sessId } : {}),
+        };
+      }
+      // Restart budget spent and still errored: nothing gentle can heal it in
+      // place. Drop the wedged session (worktree/branch/PR preserved) so relaunch
+      // re-attaches a fresh steward next tick, and descend to rung 1.
+      return {
+        sliceId,
+        action: "free-and-relaunch",
+        stage: deriveUnescalateStage(slice),
+        removeSessionId: sessId,
+        emitRung: 1,
+      };
+    }
+    // No errored session to recover in place (vanished, or alive-but-escalated):
+    // rung 0 has nothing to do — go straight to the relaunch rung.
+    return relaunchRung(state, sliceId, slice, sessionGone);
+  }
+
+  return relaunchRung(state, sliceId, slice, sessionGone);
 }
 
 /**
- * Pure: one decision per DISTINCT recovery request drained this tick. De-duped so
- * an operator appending several `slice.recovery.requested` for the same slice
- * before the next tick produces a single recovery action (the drop is idempotent,
- * but a duplicate action would misreport the work done).
+ * Pure: one decision per DISTINCT candidate slice this tick — the union of slices
+ * whose operator `slice.recovery.requested` was drained (`state.recoveryRequests`,
+ * begin-graduated → rung-0 init) and slices already mid-walk (carrying
+ * `recovery_rung`, continuing to descend). De-duped by slice id so a re-drained
+ * inner-rung event (the descents this handler appends re-enter `recoveryRequests`)
+ * is processed once; the rung-0 init is guarded on `recovery_rung === undefined`
+ * inside {@link classify} so a duplicate request can never reset progress.
  */
 export function assess(state: LoopState): RecoveryDecision[] {
+  const ids: string[] = [];
   const seen = new Set<string>();
-  const out: RecoveryDecision[] = [];
-  for (const sliceId of state.recoveryRequests ?? []) {
-    if (seen.has(sliceId)) continue;
-    seen.add(sliceId);
-    out.push({ sliceId });
+  const add = (id: string): void => {
+    if (typeof id !== "string" || id.length === 0 || seen.has(id)) return;
+    seen.add(id);
+    ids.push(id);
+  };
+  for (const id of state.recoveryRequests ?? []) add(id);
+  const slices = state.slices && typeof state.slices === "object" ? state.slices : {};
+  for (const [id, slice] of Object.entries(slices) as [string, any][]) {
+    if (slice && typeof slice === "object" && slice.recovery_rung !== undefined) add(id);
   }
-  return out;
+  return ids.map((id) => classify(state, id));
 }
 
-export async function apply(decisions: RecoveryDecision[], _ctx: HandlerContext, state: LoopState): Promise<HandlerResult> {
+/** Un-escalate a slice in place: move it to the working stage and clear the
+ *  escalation reason + babysit's escalation latches so babysit resumes cleanly. */
+function unescalate(slice: any, stage: string, ts: string, note: string): void {
+  slice.stage = stage;
+  slice.escalated_reason = undefined;
+  delete slice.steward_awaiting_input_at;
+  delete slice.steward_stuck_at;
+  delete slice.steward_stuck_head_sha;
+  slice.last_action = ts;
+  slice.last_action_note = note;
+}
+
+export async function apply(decisions: RecoveryDecision[], ctx: HandlerContext, state: LoopState): Promise<HandlerResult> {
   const res = emptyHandlerResult();
   if (!state.raw) return res;
-  for (const { sliceId } of decisions) {
-    // "cleared" reflects whether a slice was actually tracked, computed from the
-    // drop itself (not a pre-apply snapshot) so the report can't claim a slice was
-    // cleared when nothing was there.
-    const cleared = dropRecoveredSlice(state.raw, sliceId);
-    res.mutated = true;
-    const detail = cleared
-      ? "operator recovery: cleared escalated slice for fresh re-dispatch"
-      : "operator recovery: no tracked slice to clear (already recovered or unknown) — re-dispatch will proceed if still ready";
-    res.actions.push({ action: "slice-recovery", sliceId, detail });
+  const ts = ctx.ts;
+
+  for (const d of decisions) {
+    const slice = state.slices?.[d.sliceId];
+    const sessionId = (slice && typeof slice.worker_session_id === "string" && slice.worker_session_id) || null;
+
+    switch (d.action) {
+      case "refuse-awaiting-input": {
+        // Touch nothing — the steward is parked on a user prompt the operator must
+        // resolve. PR3 adds the refuse-and-redirect UX.
+        res.actions.push({
+          action: "recovery-awaiting-input",
+          sliceId: d.sliceId,
+          sessionId,
+          detail: "rung 0b: steward awaiting user input — recovery refused (resolve the prompt; PR3 will redirect)",
+        });
+        break;
+      }
+
+      case "complete": {
+        const had = !!slice && slice.recovery_rung !== undefined;
+        if (had) delete slice.recovery_rung;
+        res.mutated = true;
+        res.actions.push({
+          action: "recovery-complete",
+          sliceId: d.sliceId,
+          sessionId,
+          detail: !slice
+            ? "no tracked slice to recover (already recovered or unknown)"
+            : "slice un-escalated with a live steward — graduated recovery complete",
+        });
+        break;
+      }
+
+      case "hold-castra": {
+        if (!slice) break;
+        unescalate(slice, d.stage as string, ts, "Graduated recovery rung 0: un-escalated; awaiting in-place Castra restart (#413)");
+        slice.recovery_rung = 0;
+        if (d.resetCastraSessionId) {
+          const raw = state.raw as { castra_recover_attempts?: Record<string, number> };
+          if (raw.castra_recover_attempts) delete raw.castra_recover_attempts[d.resetCastraSessionId];
+        }
+        ctx.emitTransition?.({
+          type: "slice.stage.changed",
+          sliceId: d.sliceId,
+          stage: d.stage as string,
+          ...(sessionId ? { sessionId } : {}),
+        });
+        res.mutated = true;
+        res.actions.push({
+          action: "recovery-hold",
+          sliceId: d.sliceId,
+          sessionId,
+          detail: `rung 0: un-escalated to ${d.stage}; Castra-recover restarts the errored session in place`,
+        });
+        break;
+      }
+
+      case "free-and-relaunch": {
+        if (!slice) break;
+        let dropNote = "";
+        if (d.removeSessionId) {
+          try {
+            await ctx.castra.removeSession({
+              profile: ctx.meta.profile,
+              sessionId: d.removeSessionId,
+              // Preserve the worktree/branch/PR — only the wedged session goes, so
+              // relaunch re-attaches a fresh steward to the existing checkout.
+              pruneWorktree: false,
+              traceKey: d.sliceId,
+            });
+            dropNote = `; dropped wedged session ${d.removeSessionId}`;
+          } catch (err) {
+            const msg = (err as any)?.message || String(err);
+            dropNote = `; could not drop wedged session ${d.removeSessionId} (${msg.slice(0, 120)})`;
+            ctx.log(`recovery ${d.sliceId}: removeSession ${d.removeSessionId} failed: ${msg}`);
+          }
+        }
+        unescalate(slice, d.stage as string, ts, "Graduated recovery rung 0→1: Castra restart exhausted; un-escalated for relaunch (#413)");
+        slice.recovery_rung = 1;
+        ctx.emitTransition?.({
+          type: "slice.stage.changed",
+          sliceId: d.sliceId,
+          stage: d.stage as string,
+          ...(sessionId ? { sessionId } : {}),
+        });
+        ctx.emitTransition?.({ type: "slice.recovery.requested", sliceId: d.sliceId, rung: 1 });
+        res.mutated = true;
+        res.actions.push({
+          action: "recovery-descend",
+          sliceId: d.sliceId,
+          sessionId,
+          detail: `rung 0→1: Castra restart budget spent${dropNote}; un-escalated to ${d.stage} for relaunch`,
+        });
+        break;
+      }
+
+      case "prepare-relaunch": {
+        if (!slice) break;
+        unescalate(slice, d.stage as string, ts, "Graduated recovery rung 1: un-escalated; relaunch re-attaches a steward (#413)");
+        slice.recovery_rung = 1;
+        ctx.emitTransition?.({
+          type: "slice.stage.changed",
+          sliceId: d.sliceId,
+          stage: d.stage as string,
+          ...(sessionId ? { sessionId } : {}),
+        });
+        if (d.emitRung !== undefined) {
+          ctx.emitTransition?.({ type: "slice.recovery.requested", sliceId: d.sliceId, rung: d.emitRung });
+        }
+        res.mutated = true;
+        res.actions.push({
+          action: "recovery-relaunch",
+          sliceId: d.sliceId,
+          sessionId,
+          detail: `rung 1: un-escalated to ${d.stage}; relaunch re-attaches a steward to the preserved worktree`,
+        });
+        break;
+      }
+
+      case "confirm-relaunch": {
+        if (!slice) break;
+        slice.recovery_rung = 2;
+        if (d.emitRung !== undefined) {
+          ctx.emitTransition?.({ type: "slice.recovery.requested", sliceId: d.sliceId, rung: d.emitRung });
+        }
+        res.mutated = true;
+        res.actions.push({
+          action: "recovery-descend",
+          sliceId: d.sliceId,
+          sessionId,
+          detail: "rung 1→2: relaunch budget spent; holding one tick to confirm before the last-resort nuke",
+        });
+        break;
+      }
+
+      case "nuke": {
+        const cleared = dropRecoveredSlice(state.raw, d.sliceId);
+        // Tombstone the fold (recovered:true) so a cold-start rebuild reconstructs
+        // nothing blocking and a stale observation can't resurrect a ghost; the
+        // ensuing fresh slice.dispatched clears the tombstone. Mirrors #238.
+        ctx.emitTransition?.({ type: "slice.recovery.requested", sliceId: d.sliceId, rung: 3 });
+        res.mutated = true;
+        res.actions.push({
+          action: "recovery-nuke",
+          sliceId: d.sliceId,
+          sessionId,
+          detail: cleared
+            ? "rung 3: gentle rungs exhausted — tombstoned for fresh re-dispatch"
+            : "rung 3: no tracked slice to clear (already recovered) — re-dispatch will proceed if still ready",
+        });
+        break;
+      }
+    }
   }
+
   return res;
 }
