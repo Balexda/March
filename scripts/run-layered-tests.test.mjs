@@ -4,10 +4,11 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  findUntaggedCandidateTestFiles,
   layerCommandContract,
   selectLayerTestFiles,
 } from "./run-layered-tests.mjs";
@@ -41,6 +42,13 @@ describe("fixture", () => {
 });
 `;
 }
+
+const untaggedTest = `import { describe, it } from "vitest";
+
+describe("fixture", () => {
+  it("passes", () => {});
+});
+`;
 
 describe("layered test command contract", () => {
   afterEach(() => {
@@ -147,6 +155,42 @@ describe("layered test command contract", () => {
     ]);
   });
 
+  it("selects L0 files from @l0 @deterministic @ci leading tags", () => {
+    const root = makeRepo({
+      "src/l0.test.ts": taggedTest("@l0 @deterministic @ci"),
+      "src/l1.test.ts": taggedTest("@l1 @deterministic @ci"),
+    });
+
+    expect(selectLayerTestFiles(root, "l0")).toEqual(["src/l0.test.ts"]);
+  });
+
+  it("moves selection between L0 and L1 when the leading layer tag changes", () => {
+    const root = makeRepo({
+      "src/retagged.test.ts": taggedTest("@l0 @deterministic @ci"),
+    });
+    const fixturePath = path.join(root, "src/retagged.test.ts");
+
+    expect(selectLayerTestFiles(root, "l0")).toEqual(["src/retagged.test.ts"]);
+    expect(selectLayerTestFiles(root, "l1")).toEqual([]);
+
+    fs.writeFileSync(fixturePath, taggedTest("@l1 @deterministic @ci"));
+
+    expect(selectLayerTestFiles(root, "l0")).toEqual([]);
+    expect(selectLayerTestFiles(root, "l1")).toEqual(["src/retagged.test.ts"]);
+  });
+
+  it("excludes stochastic and scheduled files from deterministic PR gate layers", () => {
+    const root = makeRepo({
+      "src/stochastic.test.ts": taggedTest("@l0 @stochastic @ci"),
+      "src/scheduled.test.ts": taggedTest("@l1 @deterministic @scheduled"),
+    });
+
+    expect(selectLayerTestFiles(root, "l0")).toEqual([]);
+    expect(selectLayerTestFiles(root, "l1")).toEqual([]);
+    expect(selectLayerTestFiles(root, "l2-cassette")).toEqual([]);
+    expect(selectLayerTestFiles(root, "l3-cassette")).toEqual([]);
+  });
+
   it("includes tagged script tests in the deterministic aggregate surface", () => {
     const root = makeRepo({
       "scripts/contract.test.mjs": taggedTest("@l0 @deterministic @ci"),
@@ -163,12 +207,47 @@ describe("layered test command contract", () => {
       "tests/quarantine/l1.test.ts": taggedTest("@l1 @deterministic @ci"),
       "tests/quarantine/l2.test.ts": taggedTest("@l2 @deterministic @ci"),
       "tests/quarantine/l3.test.ts": taggedTest("@l3 @deterministic @ci"),
+      "tests/quarantine/untagged.test.ts": untaggedTest,
     });
 
+    expect(findUntaggedCandidateTestFiles(root)).toEqual([]);
     expect(selectLayerTestFiles(root, "l0")).toEqual([]);
     expect(selectLayerTestFiles(root, "l1")).toEqual([]);
     expect(selectLayerTestFiles(root, "l2-cassette")).toEqual([]);
     expect(selectLayerTestFiles(root, "l3-cassette")).toEqual([]);
+  });
+
+  it("detects untagged non-quarantined candidate test files before selection", () => {
+    const root = makeRepo({
+      "src/untagged.test.ts": untaggedTest,
+      "src/missing-axis.test.ts": taggedTest("@l0 @ci"),
+      "tests/quarantine/untagged.test.ts": untaggedTest,
+    });
+
+    expect(findUntaggedCandidateTestFiles(root)).toEqual([
+      "src/untagged.test.ts",
+    ]);
+    expect(selectLayerTestFiles(root, "l0")).toEqual([]);
+  });
+
+  it("exits non-zero with bounded diagnostics for an untagged matched file", () => {
+    const root = makeRepo({
+      "src/untagged.test.ts": untaggedTest,
+      "src/tagged.test.ts": taggedTest("@l0 @deterministic @ci"),
+    });
+    const result = spawnSync("node", [runnerPath, "l0"], {
+      cwd: root,
+      encoding: "utf8",
+    });
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(
+      "test:l0: refused to run 1 untagged test file(s)",
+    );
+    expect(result.stderr).toContain(
+      "test:l0: src/untagged.test.ts has no leading tag block.",
+    );
+    expect(result.stderr).not.toContain("src/tagged.test.ts");
   });
 
   it("exits cleanly with explicit diagnostics when a layer is empty", () => {
