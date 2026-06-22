@@ -95,8 +95,8 @@ Cross-checks Herald's `smithy.dispatchable` against the legate's
   legate says `0`, nothing is genuinely ready — stop, you're not wedged.
 - **Both 0**, nothing in the smithy queue → nothing to do.
 - **Both > 0** and the legate is silent across several ticks (no recent
-  legate-source events — check `events-tail.sh --src legate`) → the dispatch
-  handler is genuinely not firing. Go to step 2.
+  legate-source events — check `events-tail.sh --profile <p> --src legate`) → the
+  dispatch handler is genuinely not firing. Go to step 2.
 
 ### 2. What is the latest dispatch attempt actually doing?
 
@@ -161,7 +161,7 @@ registered.
 After recovering, watch it re-dispatch:
 
 ```bash
-${CLAUDE_SKILL_DIR}/scripts/events-tail.sh --slice <sliceId> --src legate
+${CLAUDE_SKILL_DIR}/scripts/events-tail.sh --profile <p> --slice <sliceId> --src legate
 ```
 
 ## Operation: Mass recovery after a spawn-storm / host reboot
@@ -232,7 +232,7 @@ operation, just batched.
 re-dispatches):
 
 ```bash
-${CLAUDE_SKILL_DIR}/scripts/events-tail.sh --src legate            # slice.dispatched / slice.recovery.dispatched
+${CLAUDE_SKILL_DIR}/scripts/events-tail.sh --profile <p> --src legate   # slice.dispatched / slice.recovery.dispatched
 curl -s "$MARCH_HERALD_URL/state?profile=<p>" | jq .smithy
 ```
 

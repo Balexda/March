@@ -1,0 +1,8 @@
+{
+  "lastSeq": 520,
+  "events": [
+    { "seq": 505, "id": "m1", "ts": "2026-06-10T09:00:00.000Z", "source": "herald", "profile": "march", "type": "smithy.queue.changed", "dispatchable": 2, "blocked": 4, "total": 9 },
+    { "seq": 512, "id": "m2", "ts": "2026-06-10T09:01:00.000Z", "source": "legate", "profile": "march", "type": "slice.dispatched", "sliceId": "shared-collide-cut", "sessionId": "march-aaaa" },
+    { "seq": 520, "id": "m3", "ts": "2026-06-10T09:02:00.000Z", "source": "legate", "profile": "march", "type": "slice.escalated", "sliceId": "march-only-m1-f1-mark", "reason": "hatchery_dispatch_failed" }
+  ]
+}
