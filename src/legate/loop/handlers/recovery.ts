@@ -96,10 +96,23 @@ function retryCounts(state: LoopState): Record<string, number> {
   return c && typeof c === "object" ? c : {};
 }
 
+/** True when a slice carries an open PR for relaunch to re-attach a steward to. */
+function hasOpenPr(slice: any): boolean {
+  const n = slice?.pr?.number;
+  return typeof n === "number" && n > 0;
+}
+
 /** The relaunch rung (1) / confirm rung (2) decision: descend when relaunch has
  *  stopped firing and the session is still gone, else keep un-escalating so
  *  relaunch re-attaches. */
 function relaunchRung(state: LoopState, sliceId: string, slice: any, sessionGone: boolean): RecoveryDecision {
+  // Relaunch only operates on a slice with an open PR — it re-attaches a steward
+  // to the EXISTING PR branch/worktree. With no PR (e.g. a spawn that died before
+  // opening one) there is no gentler option than a fresh re-dispatch, so the
+  // ladder degrades straight to the nuke rather than un-escalating to a stage
+  // relaunch can't act on (which would strand the slice: no relaunch, and
+  // dispatch skips it as in-flight).
+  if (!hasOpenPr(slice)) return { sliceId, action: "nuke" };
   const used = Number.isFinite(retryCounts(state)[relaunchRetryKey(sliceId)])
     ? retryCounts(state)[relaunchRetryKey(sliceId)]
     : 0;
@@ -167,8 +180,10 @@ function classify(state: LoopState, sliceId: string): RecoveryDecision {
         };
       }
       // Restart budget spent and still errored: nothing gentle can heal it in
-      // place. Drop the wedged session (worktree/branch/PR preserved) so relaunch
-      // re-attaches a fresh steward next tick, and descend to rung 1.
+      // place. With an open PR, drop the wedged session (worktree/branch/PR
+      // preserved) so relaunch re-attaches a fresh steward next tick (descend to
+      // rung 1); with no PR there is nothing to relaunch onto, so go to the nuke.
+      if (!hasOpenPr(slice)) return { sliceId, action: "nuke" };
       return {
         sliceId,
         action: "free-and-relaunch",

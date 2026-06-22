@@ -210,13 +210,20 @@ describe("rung 1 — relaunch prep (vanished session)", () => {
     expect(emitted(c)).toContainEqual(expect.objectContaining({ type: "slice.recovery.requested", rung: 1 }));
   });
 
-  it("un-escalates a PR-less slice to implementing", async () => {
+  it("nukes a PR-less vanished slice (no PR to relaunch onto → fresh re-dispatch)", async () => {
+    // A spawn that died before opening a PR: relaunch is structurally inapplicable
+    // (it requires pr.number), so the ladder degrades straight to the nuke instead
+    // of un-escalating to a stage that would strand it (no relaunch, dispatch skips
+    // it as in-flight).
     const state = loopState({
       recoveryRequests: ["s1"],
-      raw: { slices: { s1: { stage: "escalated", worker_session_id: "gone", branch: "feature/a" } } },
+      raw: { slices: { s1: { stage: "escalated", escalated_reason: "hatchery_dispatch_failed", worker_session_id: "gone", branch: "feature/a" } } },
     });
-    await apply(assess(state), ctx(), state);
-    expect(state.slices.s1.stage).toBe("implementing");
+    const c = ctx();
+    const res = await apply(assess(state), c, state);
+    expect(res.actions[0]).toMatchObject({ action: "recovery-nuke" });
+    expect(state.slices.s1).toBeUndefined();
+    expect(emitted(c)).toContainEqual(expect.objectContaining({ type: "slice.recovery.requested", rung: 3 }));
   });
 
   it("does NOT re-emit the rung event on a maintain tick (already rung 1)", async () => {
