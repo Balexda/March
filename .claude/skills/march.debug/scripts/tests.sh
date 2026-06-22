@@ -87,6 +87,11 @@ ok "events-tail --profile smithy excludes other profiles"
 # the seq probe is also profile-scoped: omitting --after reads state.<profile>.json.
 expect "events-tail --profile smithy probes that profile's seq" 0 "smithy-only-s1-f2-cut" -- \
   env MARCH_DEBUG_REPLAY_DIR="$MULTI" bash "$DIR/events-tail.sh" --profile smithy
+# A traversal-style profile is rejected by the replay hook's token check: it
+# falls back to the (absent) bare events.json rather than selecting a file
+# outside the fixture dir -> EX_UNREACHABLE, never a traversed read.
+expect "events-tail rejects path-traversal in --profile" 4 "" -- \
+  env MARCH_DEBUG_REPLAY_DIR="$MULTI" bash "$DIR/events-tail.sh" --profile "../../etc/passwd" --after 0
 
 # --- legate-status ---
 expect "legate-status ok" 0 "\"profile\": \"march\"" -- \

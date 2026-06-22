@@ -74,8 +74,15 @@ http_get() {
     # Prefer a per-profile fixture (<segment>.<profile>.json) when the request is
     # profile-scoped, mirroring Herald's server-side ?profile= filtering; fall
     # back to the bare <segment>.json (single-profile / unscoped fixtures).
+    # Match only a real `profile=` query param (anchored on its `?`/`&`
+    # delimiter, so `user_profile=` does not), then reject anything that is not a
+    # bare profile token — this keeps a crafted `?profile=../..` from traversing
+    # out of the fixture dir when building the filename.
     local prof=""
-    case "$path" in *profile=*) prof="${path##*profile=}"; prof="${prof%%&*}";; esac
+    case "$path" in
+      *"?profile="*|*"&profile="*) prof="${path##*profile=}"; prof="${prof%%&*}";;
+    esac
+    case "$prof" in *[!A-Za-z0-9._-]*) prof="";; esac
     local f="$MARCH_DEBUG_REPLAY_DIR/${seg}.json"
     if [ -n "$prof" ] && [ -f "$MARCH_DEBUG_REPLAY_DIR/${seg}.${prof}.json" ]; then
       f="$MARCH_DEBUG_REPLAY_DIR/${seg}.${prof}.json"
