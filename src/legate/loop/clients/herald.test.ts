@@ -183,6 +183,26 @@ describe("LegateHerald.takeRecoveryRequests (#238)", () => {
     expect(herald.takeRecoveryRequests("p")).toEqual([]);
   });
 
+  it("captures only OPERATOR (no-rung) requests — the driver's inner-rung descent events are NOT requests (#413)", async () => {
+    // Inner-rung `slice.recovery.requested {rung}` events are durability records the
+    // ladder driver appends; capturing them as requests would reset the per-rung
+    // budget every descent so the ladder could never progress (and a re-drained
+    // rung-3 would re-fire after the tombstone). Only the no-rung operator request
+    // counts.
+    const events = vi.fn(async () => ({
+      events: [
+        ev(1, { profile: "p", type: "slice.recovery.requested", sliceId: "op" } as any),
+        ev(2, { profile: "p", type: "slice.recovery.requested", sliceId: "inner1", rung: 1 } as any),
+        ev(3, { profile: "p", type: "slice.recovery.requested", sliceId: "inner3", rung: 3 } as any),
+      ],
+      lastSeq: 3,
+    }));
+    const herald = new LegateHerald({ stateDir: dir, client: stubClient({ events }) });
+
+    await herald.consume();
+    expect(herald.takeRecoveryRequests("p")).toEqual(["op"]);
+  });
+
   it("scopes recovery requests to the most recent consume (resets each drain)", async () => {
     const events = vi
       .fn()

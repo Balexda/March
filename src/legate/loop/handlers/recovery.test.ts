@@ -84,17 +84,29 @@ describe("recovery assess (candidate union)", () => {
     expect(ids).toEqual(["a", "b", "c"]);
   });
 
-  it("a duplicate request never resets a slice already mid-walk (guarded on recovery_rung)", () => {
-    // A re-drained inner-rung event puts a rung-1 slice back in recoveryRequests;
-    // it must continue descending, not re-init at rung 0.
-    const state = withSession(
-      loopState({
-        recoveryRequests: ["s1"],
-        raw: { slices: { s1: { stage: "pr-open", recovery_rung: 1, branch: "feature/a", pr: { number: 7 } } } },
-      }),
-      "ignored",
-      "error",
-    );
+  it("a mid-walk slice (carrying recovery_rung, NOT re-requested) continues descending", () => {
+    // The slice is mid-walk via its recovery_rung — it must keep descending on its
+    // accruing budget, not be in recoveryRequests (inner-rung events no longer
+    // re-enter the request list).
+    const state = loopState({
+      raw: { slices: { s1: { stage: "pr-open", recovery_rung: 1, branch: "feature/a", worker_session_id: "gone", pr: { number: 7 } } } },
+    });
+    const [d] = assess(state);
+    expect(d.action).toBe("prepare-relaunch");
+  });
+
+  it("an OPERATOR re-request restarts the ladder fresh even mid-walk (resets the budget)", () => {
+    // The #387 case: an operator re-issues `march legate recover` after fixing the
+    // blocker. The slice is mid-walk (rung 2) with its relaunch budget spent — a
+    // re-request must restart from the gentle rung with a clean budget (relaunch),
+    // NOT read the spent budget and descend to the nuke.
+    const state = loopState({
+      recoveryRequests: ["s1"],
+      raw: {
+        slices: { s1: { stage: "pr-open", recovery_rung: 2, branch: "feature/a", worker_session_id: "gone", pr: { number: 7 } } },
+        transient_retry_counts: { [relaunchRetryKey("s1")]: 3 },
+      },
+    });
     const [d] = assess(state);
     expect(d.action).toBe("prepare-relaunch");
   });

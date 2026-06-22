@@ -176,7 +176,14 @@ export class LegateHerald {
     for (;;) {
       const page = await this.client.events({ after: this.cursor, limit: this.pageLimit });
       for (const event of page.events) {
-        if (event.type === "slice.recovery.requested") {
+        // Only OPERATOR begin-graduated requests (no `rung`) are fresh-recovery
+        // signals that restart the graduated ladder (#413). The driver's OWN
+        // inner-rung descent events (`rung` 1/2/3) are durability records, not new
+        // requests — capturing them here would re-enter the request list every
+        // descent, resetting the per-rung budget so the ladder could never progress
+        // (and a re-drained rung-3 would re-trigger after the tombstone). Mid-walk
+        // continuation is driven by the slice's `recovery_rung`, not this list.
+        if (event.type === "slice.recovery.requested" && (event as { rung?: number }).rung === undefined) {
           const list = this.recoveryRequests.get(event.profile) ?? [];
           list.push(event.sliceId);
           this.recoveryRequests.set(event.profile, list);

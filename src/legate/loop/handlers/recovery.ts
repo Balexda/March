@@ -146,8 +146,13 @@ function relaunchRung(state: LoopState, sliceId: string, slice: any, sessionGone
   };
 }
 
-/** Pure: classify ONE candidate slice into its rung action for this tick. */
-function classify(state: LoopState, sliceId: string): RecoveryDecision {
+/** Pure: classify ONE candidate slice into its rung action for this tick.
+ *  `requested` = an OPERATOR `slice.recovery.requested` (no rung) was drained for
+ *  this slice THIS tick — an explicit (re-)request that restarts the ladder from
+ *  the gentlest rung with clean budgets, even mid-walk (the operator fixed the
+ *  blocker and wants a fresh attempt). Mid-walk continuation (no fresh request)
+ *  is driven by `recovery_rung` and keeps its accruing budget so it can descend. */
+function classify(state: LoopState, sliceId: string, requested: boolean): RecoveryDecision {
   const slice = state.slices?.[sliceId];
   if (!slice || typeof slice !== "object" || slice.recovered || slice.archived) {
     // Operator requested recovery on an unknown / already-recovered slice.
@@ -172,11 +177,13 @@ function classify(state: LoopState, sliceId: string): RecoveryDecision {
   // tick), so a lingering fold `recoveryRung` resolves on the next pass.
   if (slice.stage !== "escalated" && sessionHealthy) return { sliceId, action: "complete" };
 
-  // A FRESH operator request (no rung yet) begins the ladder at rung 0 with clean
-  // per-rung budgets — the begin-graduated reducer (#412) clears the fold's
-  // retries; apply mirrors that into the warm working state (warm-loop
-  // invisibility: the fold edit never reaches the running loop's in-memory raw).
-  const fresh = slice.recovery_rung === undefined;
+  // A FRESH start of the ladder — at rung 0 with clean per-rung budgets — is
+  // either a slice with no rung yet OR an explicit operator (re-)request (the
+  // operator fixed the blocker and wants to retry from the gentlest rung). The
+  // begin-graduated reducer (#412) clears the fold's retries; apply mirrors that
+  // into the warm working state (warm-loop invisibility: the fold edit never
+  // reaches the running loop's in-memory raw).
+  const fresh = requested || slice.recovery_rung === undefined;
   const rung = fresh ? 0 : Number(slice.recovery_rung);
 
   if (rung <= 0) {
@@ -233,12 +240,16 @@ export function assess(state: LoopState): RecoveryDecision[] {
     seen.add(id);
     ids.push(id);
   };
-  for (const id of state.recoveryRequests ?? []) add(id);
+  const requested = new Set<string>();
+  for (const id of state.recoveryRequests ?? []) {
+    requested.add(id);
+    add(id);
+  }
   const slices = state.slices && typeof state.slices === "object" ? state.slices : {};
   for (const [id, slice] of Object.entries(slices) as [string, any][]) {
     if (slice && typeof slice === "object" && slice.recovery_rung !== undefined) add(id);
   }
-  return ids.map((id) => classify(state, id));
+  return ids.map((id) => classify(state, id, requested.has(id)));
 }
 
 /**
@@ -259,8 +270,12 @@ function clearWarmRetryBudgets(raw: any, sliceId: string): void {
 }
 
 /** Un-escalate a slice in place: move it to the working stage and clear the
- *  escalation reason + babysit's escalation latches so babysit resumes cleanly. */
-function unescalate(slice: any, stage: string, ts: string, note: string): void {
+ *  escalation reason + babysit's escalation latches so babysit resumes cleanly.
+ *  Returns whether the STAGE actually changed, so the caller emits a durable
+ *  `slice.stage.changed` only on a real transition (not every maintain tick — that
+ *  would spam the event log re-announcing an already-`pr-open` slice). */
+function unescalate(slice: any, stage: string, ts: string, note: string): boolean {
+  const changed = slice.stage !== stage;
   slice.stage = stage;
   slice.escalated_reason = undefined;
   delete slice.steward_awaiting_input_at;
@@ -268,6 +283,7 @@ function unescalate(slice: any, stage: string, ts: string, note: string): void {
   delete slice.steward_stuck_head_sha;
   slice.last_action = ts;
   slice.last_action_note = note;
+  return changed;
 }
 
 export async function apply(decisions: RecoveryDecision[], ctx: HandlerContext, state: LoopState): Promise<HandlerResult> {
@@ -315,18 +331,20 @@ export async function apply(decisions: RecoveryDecision[], ctx: HandlerContext, 
 
       case "hold-castra": {
         if (!slice) break;
-        unescalate(slice, d.stage as string, ts, "Graduated recovery rung 0: un-escalated; awaiting in-place Castra restart (#413)");
+        const stageChanged = unescalate(slice, d.stage as string, ts, "Graduated recovery rung 0: un-escalated; awaiting in-place Castra restart (#413)");
         slice.recovery_rung = 0;
         if (d.resetCastraSessionId) {
           const raw = state.raw as { castra_recover_attempts?: Record<string, number> };
           if (raw.castra_recover_attempts) delete raw.castra_recover_attempts[d.resetCastraSessionId];
         }
-        ctx.emitTransition?.({
-          type: "slice.stage.changed",
-          sliceId: d.sliceId,
-          stage: d.stage as string,
-          ...(sessionId ? { sessionId } : {}),
-        });
+        if (stageChanged) {
+          ctx.emitTransition?.({
+            type: "slice.stage.changed",
+            sliceId: d.sliceId,
+            stage: d.stage as string,
+            ...(sessionId ? { sessionId } : {}),
+          });
+        }
         res.mutated = true;
         res.actions.push({
           action: "recovery-hold",
@@ -357,14 +375,16 @@ export async function apply(decisions: RecoveryDecision[], ctx: HandlerContext, 
             ctx.log(`recovery ${d.sliceId}: removeSession ${d.removeSessionId} failed: ${msg}`);
           }
         }
-        unescalate(slice, d.stage as string, ts, "Graduated recovery rung 0→1: Castra restart exhausted; un-escalated for relaunch (#413)");
+        const descStageChanged = unescalate(slice, d.stage as string, ts, "Graduated recovery rung 0→1: Castra restart exhausted; un-escalated for relaunch (#413)");
         slice.recovery_rung = 1;
-        ctx.emitTransition?.({
-          type: "slice.stage.changed",
-          sliceId: d.sliceId,
-          stage: d.stage as string,
-          ...(sessionId ? { sessionId } : {}),
-        });
+        if (descStageChanged) {
+          ctx.emitTransition?.({
+            type: "slice.stage.changed",
+            sliceId: d.sliceId,
+            stage: d.stage as string,
+            ...(sessionId ? { sessionId } : {}),
+          });
+        }
         ctx.emitTransition?.({ type: "slice.recovery.requested", sliceId: d.sliceId, rung: 1 });
         res.mutated = true;
         res.actions.push({
@@ -378,14 +398,16 @@ export async function apply(decisions: RecoveryDecision[], ctx: HandlerContext, 
 
       case "prepare-relaunch": {
         if (!slice) break;
-        unescalate(slice, d.stage as string, ts, "Graduated recovery rung 1: un-escalated; relaunch re-attaches a steward (#413)");
+        const prepStageChanged = unescalate(slice, d.stage as string, ts, "Graduated recovery rung 1: un-escalated; relaunch re-attaches a steward (#413)");
         slice.recovery_rung = 1;
-        ctx.emitTransition?.({
-          type: "slice.stage.changed",
-          sliceId: d.sliceId,
-          stage: d.stage as string,
-          ...(sessionId ? { sessionId } : {}),
-        });
+        if (prepStageChanged) {
+          ctx.emitTransition?.({
+            type: "slice.stage.changed",
+            sliceId: d.sliceId,
+            stage: d.stage as string,
+            ...(sessionId ? { sessionId } : {}),
+          });
+        }
         if (d.emitRung !== undefined) {
           ctx.emitTransition?.({ type: "slice.recovery.requested", sliceId: d.sliceId, rung: d.emitRung });
         }
