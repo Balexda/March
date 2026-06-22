@@ -18,7 +18,7 @@
 
 ### Tasks
 
-- [ ] **Document the quarantine workflow**
+- [x] **Document the quarantine workflow**
 
   Update `CONTRIBUTING.md` with a contributor-facing quarantine section that references the Quarantine Documentation contract and satisfies AS 4.1-AS 4.3. The section should describe the routing primitive, `tests/quarantine/`, how to park a known-bad test, the generated roster surface, and the M6 boundary without adding routing, staged-script, index, or SLA behavior.
 
