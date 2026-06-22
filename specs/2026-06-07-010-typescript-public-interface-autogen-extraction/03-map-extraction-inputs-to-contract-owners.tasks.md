@@ -14,7 +14,7 @@
 
 **Justification**: User Story 3 is one coherent PR because ownership loading, selector resolution, overlap rejection, and Steward role handling form a single validation boundary. The slice consumes the User Story 1 extractor output shape but stops before AUTOGEN marker replacement, check/write command behavior, CI wiring, or generated contract writes.
 
-**Addresses**: FR-002, FR-013, FR-014, FR-015, FR-016, FR-017; Acceptance Scenarios 3.1, 3.2, 3.3
+**Addresses**: FR-002, FR-013, FR-014, FR-015, FR-016, FR-017; Acceptance Scenarios 3.2, 3.3, and the owner-to-source input precondition of 3.1. The generated-block-to-contract association that completes AS 3.1 is deferred to US2 (see Cross-Story Dependencies), which consumes this slice's validated owner-to-source mapping.
 
 ### Tasks
 
@@ -25,7 +25,7 @@
   _Acceptance criteria:_
   - The loader accepts repository filesystem inputs only and does not require Docker, network access, live March services, or agent sessions.
   - Owner records include stable owner name, repo-relative contract path, and repo-relative public source selectors.
-  - Duplicate contract paths produce bounded ownership diagnostics instead of partial successful ownership output.
+  - Duplicate contract paths produce bounded ownership diagnostics instead of partially successful ownership output.
   - Unsupported config shape or version produces bounded config diagnostics with the config path.
   - Existing User Story 1 public export extraction behavior remains unchanged.
 
@@ -58,7 +58,7 @@
 ## Specification Debt
 <!-- audience: reviewer; mode: reference; length: tables only; diagram: optional; examples: discouraged -->
 
-None - all ambiguities resolved.
+None — all ambiguities resolved.
 
 ---
 
