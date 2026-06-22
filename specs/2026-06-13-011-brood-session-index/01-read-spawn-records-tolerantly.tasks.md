@@ -20,7 +20,7 @@
 
 - [ ] **Add the spawn index reader module**
 
-  Add `src/brood-index.ts` as the repository-internal reader module over the existing `src/brood/spawn-record.ts` record shape and path helpers. Expose story-owned list and load behavior while leaving `derivedStatus` for the later derived-view slices; AS 1.1 and AS 1.4 define the observable read outcomes.
+  Add `src/brood/spawn-index.ts` as the repository-internal reader module over the existing `src/brood/spawn-record.ts` record shape and path helpers. Expose story-owned list and load behavior while leaving `derivedStatus` for the later derived-view slices; AS 1.1 and AS 1.4 define the observable read outcomes.
 
   _Acceptance criteria:_
   - `listSpawnRecords()` returns valid records from the configured spawn-record directory
@@ -31,7 +31,7 @@
 
 - [ ] **Implement the safe-read skip warning**
 
-  Extend the reader path in `src/brood-index.ts` with the US1 safe-read protocol for list operations. Keep unreadable-file handling local to the index reader so downstream verbs can consume `listSpawnRecords()` without duplicating parse recovery logic.
+  Extend the reader path in `src/brood/spawn-index.ts` with the US1 safe-read protocol for list operations. Keep unreadable-file handling local to the index reader so downstream verbs can consume `listSpawnRecords()` without duplicating parse recovery logic.
 
   _Acceptance criteria:_
   - A parse failure during listing is retried once before the file is skipped
@@ -51,7 +51,7 @@
   - Not-found load behavior is deterministic and non-throwing
   - Existing `src/brood/spawn-record.ts` behavior remains compatible
 
-**PR Outcome**: `src/brood-index.ts` provides the US1 tolerant read API for per-spawn JSON records, with tests proving valid records load, corrupt in-flight reads are skipped after one retry and warning, profile-less records are accepted, missing ids do not throw, and the reader performs no disk or Docker mutation. The derived `SpawnView` and Docker-snapshot behavior remain for US2/US3.
+**PR Outcome**: `src/brood/spawn-index.ts` provides the US1 tolerant read API for per-spawn JSON records, with tests proving valid records load, corrupt in-flight reads are skipped after one retry and warning, profile-less records are accepted, missing ids do not throw, and the reader performs no disk or Docker mutation. The derived `SpawnView` and Docker-snapshot behavior remain for US2/US3.
 
 ---
 
@@ -60,7 +60,7 @@
 
 | ID | Description | Source Category | Impact | Confidence | Status | Resolution |
 |----|-------------|-----------------|--------|------------|--------|------------|
-| SD-001 | inherited from spec: Backing-store mechanism: Feature 1 as written reads per-spawn JSON under `~/.march/spawns/`, but the feature map's 2026-05 architecture note records Brood shipped as a SQLite registry at `~/.march/brood`. The decomposition (the `SpawnView` / `derivedStatus` / `failureReason` API and tolerance guarantees) holds either way; whether the reader binds to the JSON directory, the registry, or both is left to task slicing. | clarify:Mechanism vs. decomposition | Medium | Medium | inherited | — |
+| SD-001 | inherited from spec: Backing-store mechanism: Feature 1 as written reads per-spawn JSON under `~/.march/spawns/`, but the feature map's 2026-05 architecture note records Brood shipped as a SQLite registry at `~/.march/brood` behind `SessionRepository` (`src/brood/service/repository.ts` `list`/`get`, store at `src/brood/service/store.ts`). The spawn-handoff JSON record is now an intermediate artifact: Hatchery writes it (`src/hatchery/spawn-handoff.ts`) and immediately registers the session into the SQLite registry (`src/hatchery/service/brood-registration.ts`). A reader bound only to the JSON directory therefore sees handoff records, not the full set of sessions (stewards/legates, post-handoff lifecycle) tracked in the registry, so downstream Brood verbs could observe stale or partial state (raised as a P1 review concern on PR #387). The decomposition (the `SpawnView` / `derivedStatus` / `failureReason` API and tolerance guarantees) holds either way; whether the reader binds to the JSON directory, the registry, or both must be **resolved before forge** — note that US1's tolerance scenarios (corrupt-mid-write skip, profile-less acceptance) are JSON-file semantics that a registry binding would re-shape. | clarify:Mechanism vs. decomposition | High | Medium | inherited | — |
 | SD-002 | inherited from spec: Exact `needsAttention` derivation predicate is unpinned. The feature names the flag but not the precise set of conditions (e.g. `failed`, container-dead-while-running, stale) that set it. The view shape is fixed; the predicate is settled at task slicing. | Scope Within the Feature | Low | Medium | inherited | — |
 
 ---

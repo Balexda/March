@@ -11,9 +11,9 @@
 
 ### Session 2026-06-13
 
-- This feature is the **read-and-derive substrate** Feature 1 of the Brood (Basic) milestone: a new `src/brood-index.ts` module that exposes `listSpawnRecords()`, `loadSpawnRecord(id)`, and `derivedStatus(record, dockerSnapshot?)` over the per-spawn JSON files M1 already writes to `~/.march/spawns/`. It is a pure read layer — it never mutates disk and never mutates Docker state.
+- This feature is the **read-and-derive substrate** Feature 1 of the Brood (Basic) milestone: a new `src/brood/spawn-index.ts` module that exposes `listSpawnRecords()`, `loadSpawnRecord(id)`, and `derivedStatus(record, dockerSnapshot?)` over the per-spawn JSON files M1 already writes to `~/.march/spawns/`. It is a pure read layer — it never mutates disk and never mutates Docker state.
 - The persisted `SpawnStatus` enum stays exactly `"created" | "running" | "stopped" | "failed"`. The `needsAttention` and `disposed` conditions are **derived** in the `SpawnView` and are **never** written to disk as new status values.
-- F1's data-model contribution — the optional `failureReason?: string` field on `SpawnRecord` and the wiring of `markSpawnRecordFailed`'s `error` argument into it — has **already landed** in `src/brood/spawn-record.ts` (forward-compatible; the schema `version` stays `1`, no bump). This spec records it as part of F1's contract surface so downstream slicing treats it as **satisfied**, not net-new work; the genuinely-unbuilt part of F1 is the reader/derive layer (`brood-index.ts`, `listSpawnRecords` / `loadSpawnRecord` / `derivedStatus`, `SpawnView`).
+- F1's data-model contribution — the optional `failureReason?: string` field on `SpawnRecord` and the wiring of `markSpawnRecordFailed`'s `error` argument into it — has **already landed** in `src/brood/spawn-record.ts` (forward-compatible; the schema `version` stays `1`, no bump). This spec records it as part of F1's contract surface so downstream slicing treats it as **satisfied**, not net-new work; the genuinely-unbuilt part of F1 is the reader/derive layer (`spawn-index.ts`, `listSpawnRecords` / `loadSpawnRecord` / `derivedStatus`, `SpawnView`).
 - Docker liveness reconciliation is a **caller-controlled** sub-capability: the caller may pass a `docker inspect` snapshot into `derivedStatus` / view derivation, and the module reconciles `containerLive` from it. When no snapshot is supplied, derivation uses the persisted record alone. The module itself never shells out to Docker as a required step.
 - The reader is tolerant by construction: a **safe-read protocol** (one retry on JSON parse failure, then skip-and-warn) guarantees a concurrent dispatch write cannot fail a `list`, and the reader accepts records both with and without an M2-era `profile` field.
 - **Architecture-note supersession (2026-05).** The feature map records that Brood has since shipped as a containerized Fastify service whose session state lives in a SQLite registry at `~/.march/brood` behind a swappable `SessionRepository`, rather than a read-and-derive layer over per-spawn JSON. The feature map states the *decomposition still holds* and the F1–F6 descriptions are read with that mechanism correction. This spec marks Feature 1 **as decomposed** — the `SpawnView` / `derivedStatus` / `failureReason` API surface and tolerance guarantees are the load-bearing deliverable; whether the backing store is the JSON directory or the registry is a mechanism the implementation may reconcile (see SD-001). [Critical Assumption]
@@ -111,7 +111,7 @@ Recommended implementation sequence:
 
 ### Functional Requirements
 
-- **FR-001**: A new `src/brood-index.ts` module MUST expose `listSpawnRecords()`, `loadSpawnRecord(id)`, and `derivedStatus(record, dockerSnapshot?)`.
+- **FR-001**: A new `src/brood/spawn-index.ts` module MUST expose `listSpawnRecords()`, `loadSpawnRecord(id)`, and `derivedStatus(record, dockerSnapshot?)`.
 - **FR-002**: The reader MUST read the per-spawn record JSON M1 writes to `~/.march/spawns/`, and MUST NOT mutate disk state or Docker state (pure read-and-derive).
 - **FR-003**: The reader MUST apply a safe-read protocol — one retry on JSON parse failure, then skip-and-warn — so a concurrent dispatch write cannot fail a `list`.
 - **FR-004**: The reader MUST tolerate records both with and without an M2-era `profile` field.
@@ -129,7 +129,7 @@ Recommended implementation sequence:
 - **SpawnRecord (extended)**: The persisted per-spawn JSON M1 writes to `~/.march/spawns/<id>.json`, gaining one optional `failureReason?: string` field; `version` and the `SpawnStatus` enum are unchanged.
 - **SpawnView**: A derived, non-persisted view over a SpawnRecord exposing `needsAttention`, `disposed`, and `containerLive` — realized by `derivedStatus` plus the view's flag fields, not stored on disk.
 - **Docker Snapshot**: An optional, caller-supplied `docker inspect` result passed into derivation to reconcile `containerLive`; absent it, derivation uses the record alone.
-- **Spawn Index Reader**: The `src/brood-index.ts` module surface (`listSpawnRecords` / `loadSpawnRecord` / `derivedStatus`) with the safe-read protocol and profile-tolerance.
+- **Spawn Index Reader**: The `src/brood/spawn-index.ts` module surface (`listSpawnRecords` / `loadSpawnRecord` / `derivedStatus`) with the safe-read protocol and profile-tolerance.
 
 ## Assumptions
 
