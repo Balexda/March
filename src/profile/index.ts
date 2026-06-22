@@ -124,6 +124,9 @@ const ROOT_FIELDS = new Set([
 
 const CONTAINER_FIELDS = new Set(["capDrop", "user", "envWhitelist"]);
 const RESOURCE_FIELDS = new Set(["memoryLimit", "cpuLimit", "timeoutSeconds"]);
+const FILE_MOUNT_FIELDS = new Set(["kind", "name", "target", "readOnly"]);
+const SNAPSHOT_MOUNT_FIELDS = new Set(["kind", "target", "readOnly"]);
+const SNAPSHOT_FIELDS = new Set(["include", "exclude"]);
 
 const USER_PATTERN = /^(?:[a-z_][a-z0-9_-]{0,31}|[0-9]+(?::[0-9]+)?)$/;
 const MEMORY_LIMIT_PATTERN = /^[0-9]+[bkmgBKMG]$/;
@@ -165,6 +168,8 @@ export function validateProfile(input: unknown): ValidationResult {
   validateBaseImage(profile.baseImage, errors);
   validateContainer(profile.container, errors);
   validateResources(profile.resources, errors);
+  validateFileMounts(profile.fileMounts, errors);
+  validateSnapshot(profile.snapshot, errors);
 
   if (errors.length > 0) {
     return { ok: false, errors: sortErrors(errors) };
@@ -365,6 +370,273 @@ function validateResources(
       message: "resources.timeoutSeconds must be a positive integer.",
     });
   }
+}
+
+function validateFileMounts(
+  fileMounts: unknown,
+  errors: ValidationError[],
+): void {
+  if (fileMounts === undefined) {
+    return;
+  }
+
+  if (!Array.isArray(fileMounts)) {
+    errors.push({
+      code: "WrongType",
+      path: "/fileMounts",
+      message: "Profile fileMounts must be an array.",
+    });
+    return;
+  }
+
+  fileMounts.forEach((mount, index) => {
+    validateFileMount(mount, `/fileMounts/${index}`, errors);
+  });
+}
+
+function validateFileMount(
+  mount: unknown,
+  path: string,
+  errors: ValidationError[],
+): void {
+  if (!isPlainObject(mount)) {
+    errors.push({
+      code: "WrongType",
+      path,
+      message: "File mount entries must be objects.",
+    });
+    return;
+  }
+
+  if (mount.kind === undefined) {
+    errors.push({
+      code: "MissingField",
+      path: joinPointer(path, "kind"),
+      message: "File mount kind is required.",
+    });
+    return;
+  }
+
+  if (mount.kind === "named-volume") {
+    validateNamedVolumeMount(mount, path, errors);
+    return;
+  }
+
+  if (mount.kind === "snapshot") {
+    validateSnapshotMount(mount, path, errors);
+    return;
+  }
+
+  errors.push({
+    code: "UnknownDiscriminator",
+    path: joinPointer(path, "kind"),
+    message: "File mount kind must be named-volume or snapshot.",
+  });
+}
+
+function validateNamedVolumeMount(
+  mount: Record<string, unknown>,
+  path: string,
+  errors: ValidationError[],
+): void {
+  collectUnknownFields(mount, FILE_MOUNT_FIELDS, path, errors);
+  validateNonEmptyStringField(mount.name, joinPointer(path, "name"), errors);
+  validateMountTarget(mount.target, joinPointer(path, "target"), errors);
+
+  if (mount.readOnly === undefined) {
+    errors.push({
+      code: "MissingField",
+      path: joinPointer(path, "readOnly"),
+      message: "Named-volume mount readOnly is required.",
+    });
+    return;
+  }
+
+  if (typeof mount.readOnly !== "boolean") {
+    errors.push({
+      code: "WrongType",
+      path: joinPointer(path, "readOnly"),
+      message: "Named-volume mount readOnly must be a boolean.",
+    });
+  }
+}
+
+function validateSnapshotMount(
+  mount: Record<string, unknown>,
+  path: string,
+  errors: ValidationError[],
+): void {
+  collectUnknownFields(mount, SNAPSHOT_MOUNT_FIELDS, path, errors);
+  validateMountTarget(mount.target, joinPointer(path, "target"), errors);
+
+  if (mount.readOnly === undefined) {
+    errors.push({
+      code: "MissingField",
+      path: joinPointer(path, "readOnly"),
+      message: "Snapshot mount readOnly is required.",
+    });
+    return;
+  }
+
+  if (mount.readOnly !== true) {
+    errors.push({
+      code: "SnapshotMustBeReadOnly",
+      path: joinPointer(path, "readOnly"),
+      message: "Snapshot mounts must be read-only.",
+    });
+  }
+}
+
+function validateNonEmptyStringField(
+  value: unknown,
+  path: string,
+  errors: ValidationError[],
+): void {
+  if (value === undefined) {
+    errors.push({
+      code: "MissingField",
+      path,
+      message: "Field is required.",
+    });
+    return;
+  }
+
+  if (typeof value !== "string") {
+    errors.push({
+      code: "WrongType",
+      path,
+      message: "Field must be a string.",
+    });
+    return;
+  }
+
+  if (value.length === 0) {
+    errors.push({
+      code: "InvalidMountTarget",
+      path,
+      message: "Field must not be empty.",
+    });
+  }
+}
+
+function validateMountTarget(
+  value: unknown,
+  path: string,
+  errors: ValidationError[],
+): void {
+  if (value === undefined) {
+    errors.push({
+      code: "MissingField",
+      path,
+      message: "Mount target is required.",
+    });
+    return;
+  }
+
+  if (typeof value !== "string") {
+    errors.push({
+      code: "WrongType",
+      path,
+      message: "Mount target must be a string.",
+    });
+    return;
+  }
+
+  if (!isValidContainerMountTarget(value)) {
+    errors.push({
+      code: "InvalidMountTarget",
+      path,
+      message:
+        "Mount target must be an absolute non-root POSIX path without traversal segments.",
+    });
+  }
+}
+
+function isValidContainerMountTarget(value: string): boolean {
+  return (
+    value.length > 0 &&
+    value.startsWith("/") &&
+    value !== "/" &&
+    !value.split("/").includes("..")
+  );
+}
+
+function validateSnapshot(
+  snapshot: unknown,
+  errors: ValidationError[],
+): void {
+  if (snapshot === undefined) {
+    return;
+  }
+
+  if (!isPlainObject(snapshot)) {
+    errors.push({
+      code: "WrongType",
+      path: "/snapshot",
+      message: "Profile snapshot must be an object.",
+    });
+    return;
+  }
+
+  collectUnknownFields(snapshot, SNAPSHOT_FIELDS, "/snapshot", errors);
+
+  if (snapshot.exclude === undefined) {
+    errors.push({
+      code: "MissingField",
+      path: "/snapshot/exclude",
+      message: "snapshot.exclude is required when snapshot is present.",
+    });
+  } else {
+    validateSnapshotPatternList(snapshot.exclude, "/snapshot/exclude", errors);
+  }
+
+  if (snapshot.include !== undefined) {
+    validateSnapshotPatternList(snapshot.include, "/snapshot/include", errors);
+  }
+}
+
+function validateSnapshotPatternList(
+  value: unknown,
+  path: string,
+  errors: ValidationError[],
+): void {
+  if (!Array.isArray(value)) {
+    errors.push({
+      code: "WrongType",
+      path,
+      message: "Snapshot pattern list must be an array.",
+    });
+    return;
+  }
+
+  value.forEach((entry, index) => {
+    const entryPath = `${path}/${index}`;
+    if (typeof entry !== "string") {
+      errors.push({
+        code: "WrongType",
+        path: entryPath,
+        message: "Snapshot pattern entries must be strings.",
+      });
+      return;
+    }
+
+    if (!isValidSnapshotPattern(entry)) {
+      errors.push({
+        code: "InvalidMountTarget",
+        path: entryPath,
+        message:
+          "Snapshot patterns must be relative and must not contain traversal segments.",
+      });
+    }
+  });
+}
+
+function isValidSnapshotPattern(value: string): boolean {
+  return (
+    value.length > 0 &&
+    !value.startsWith("/") &&
+    !value.split("/").includes("..")
+  );
 }
 
 function collectUnknownFields(
