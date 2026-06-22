@@ -58,7 +58,7 @@ Recommended implementation sequence:
 
 | ID | Title | Depends On | Artifact |
 |----|-------|------------|----------|
-| S1 | Assertable Scaffold Authoring Rules | User Story 1 | `docs/subsystems/contract-scaffold.md` |
+| S1 | Assertable Scaffold Authoring Rules | - | `docs/subsystems/contract-scaffold.md` |
 
 ### Cross-Story Dependencies
 
