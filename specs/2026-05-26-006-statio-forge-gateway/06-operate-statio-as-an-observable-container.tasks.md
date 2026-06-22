@@ -8,6 +8,7 @@
 ---
 
 ## Slice 1: Package Statio for the March Network
+<!-- audience: builder; mode: how-to; length: 5-15 steps; diagram: optional; examples: forbidden -->
 
 **Goal**: Deliver the Statio container image and compose recipe that run the existing service with the required token, deterministic port, localhost host binding, and external `march` network membership.
 
@@ -45,8 +46,9 @@
 ---
 
 ## Slice 2: Emit Statio RED Metrics, Heartbeat, Spans, and Logs
+<!-- audience: builder; mode: how-to; length: 5-15 steps; diagram: optional; examples: forbidden -->
 
-**Goal**: Make the running Statio service observable under `service.name=march-statio` with request RED metrics, heartbeat/uptime, per-operation spans, and request logs, all no-op unless `MARCH_OTEL=1`.
+**Goal**: Make the running Statio service observable under `service.name=march-statio` with request RED metrics, heartbeat/uptime, per-operation spans, and request logs. Metrics, spans, and the OTLP log-export bridge are no-op unless `MARCH_OTEL=1`; pino stdout/JSONL request logging stays active regardless (matching `src/observability/logger.ts`, which only gates the OTLP stream on `otelEnabled`).
 
 **Justification**: This slice is a standalone working increment because it makes Statio's service behavior debuggable through the existing OTel pipeline before adding the Grafana dashboard presentation layer.
 
@@ -75,7 +77,7 @@
   - Forge failures and unexpected service failures mark the corresponding span errored
   - Valid slice ids continue to nest Statio spans under the deterministic slice trace; malformed or oversized ids are ignored without response impact
   - Request logs carry Statio service identity and enough status/outcome context for Grafana log panels
-  - With `MARCH_OTEL` unset, span and log telemetry paths do not change service behavior for AS 6.4
+  - With `MARCH_OTEL` unset, spans and the OTLP log-export bridge are no-ops and service behavior is unchanged for AS 6.4; pino stdout/JSONL request logging remains active so operators keep local/container logs in telemetry-off runs
   - Tests cover successful spans, errored spans, slice-id nesting, ignored invalid slice ids, and log field hygiene
 
 **PR Outcome**: Statio emits the operational signals needed to debug request rate, errors, latency, liveness, forge failures, and slice-correlated request paths through the existing observability stack.
@@ -83,6 +85,7 @@
 ---
 
 ## Slice 3: Surface Statio in Grafana and Operator Validation
+<!-- audience: builder; mode: how-to; length: 5-15 steps; diagram: optional; examples: forbidden -->
 
 **Goal**: Add the Statio Grafana dashboard and operational validation so operators can confirm the container is reachable and its telemetry is visible in the March observability stack.
 
@@ -119,6 +122,7 @@
 ---
 
 ## Specification Debt
+<!-- audience: reviewer; mode: reference; length: tables only; diagram: optional; examples: discouraged -->
 
 | ID | Description | Source Category | Impact | Confidence | Status | Resolution |
 |----|-------------|-----------------|--------|------------|--------|------------|
@@ -130,6 +134,7 @@
 ---
 
 ## Dependency Order
+<!-- audience: builder+ai-input; mode: reference; length: tables only; diagram: recommended; examples: discouraged -->
 
 Recommended implementation sequence:
 
