@@ -26,7 +26,7 @@
   - Hatchery is named only as the submitter or manager boundary for spawn work; Hatchery HTTP route details are not restated.
   - Brood is named only as the lifecycle and cleanup-state authority observed by Spawn; Brood service routes are not restated.
   - Castra is named only as an integration boundary for hosted sessions or downstream session context; Castra routes and adapter details are not restated.
-  - Steward is named only as the future validated-output handoff consumer; Steward role commands, prompts, and public interface remain Feature 4 scope.
+  - Steward is named only as the validated-output handoff consumer, pointing to the existing Steward contract (`docs/subsystems/steward/contract.md`); Steward's role commands, prompts, and public interface are not restated — they remain owned by the Steward contract.
   - Spawn-owned lifecycle, terminal output, validation-gated handoff, and cleanup promises remain the only detailed behavior documented in the Spawn contract.
 
 - [ ] **Add Legate boundary ownership references**
@@ -38,7 +38,7 @@
   - Hatchery is named only as the dispatch boundary for runnable slices; Hatchery HTTP route details are not restated.
   - Brood is named only as lifecycle state observed for worker and cleanup decisions; Brood service routes are not restated.
   - Castra is named only as the session-hosting and steward-attachment boundary observed by Legate; Castra routes and adapter details are not restated.
-  - Steward is named only as a future role boundary whose attachment, loss, or terminal outcome can affect Legate decisions; Steward role commands, prompts, and public interface remain Feature 4 scope.
+  - Steward is named only as a role boundary whose attachment, loss, or terminal outcome can affect Legate decisions, pointing to the existing Steward contract (`docs/subsystems/steward/contract.md`); Steward's role commands, prompts, and public interface are not restated — they remain owned by the Steward contract.
   - Legate-owned loop decisions, cursor handling, trace origin, babysit behavior, and terminal outcomes remain the only detailed behavior documented in the Legate contract.
 
 - [ ] **Verify non-duplication and future freshness usefulness**
@@ -48,7 +48,7 @@
   _Acceptance criteria:_
   - Both contracts reference Hatchery, Brood, Herald, Castra, and Steward only where relevant to their own boundary.
   - No provider HTTP route table, endpoint list, request schema, or response schema is duplicated into the Spawn or Legate contracts.
-  - No Steward-specific role interface, command surface, prompt contract, or review behavior is documented ahead of Feature 4.
+  - No Steward-specific role interface, command surface, prompt contract, or review behavior is duplicated from the existing Steward contract.
   - The boundary references can be mapped to the `Cross-Contract Boundary` entity fields: consumer contract, provider contract or future path, relationship, and ownership rule.
   - The change does not introduce contract checkers, freshness globs, AUTOGEN generation, CI enforcement, runtime route changes, loop behavior changes, or Steward-specific contract content.
 
@@ -70,7 +70,7 @@ Recommended implementation sequence:
 
 | ID | Title | Depends On | Artifact |
 |----|-------|------------|----------|
-| S1 | Consolidate Cross-Contract Boundary References | User Story 1, User Story 2 | `docs/subsystems/spawn/contract.md`, `docs/subsystems/legate/contract.md` |
+| S1 | Consolidate Cross-Contract Boundary References | — | — |
 
 ### Cross-Story Dependencies
 
