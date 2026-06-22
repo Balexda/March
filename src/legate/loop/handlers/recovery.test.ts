@@ -226,6 +226,28 @@ describe("rung 1 — relaunch prep (vanished session)", () => {
     expect(emitted(c)).toContainEqual(expect.objectContaining({ type: "slice.recovery.requested", rung: 3 }));
   });
 
+  it("a FRESH request on a stranded slice (relaunch budget already spent) relaunches, not nukes — clears the warm budget", async () => {
+    // The live #387 case: pr-open, vanished session, relaunch-steward budget = 3
+    // (the loop gave up). A fresh operator recover must mirror the begin-graduated
+    // fold reset into the warm raw so the ladder gets a clean relaunch attempt
+    // instead of reading the spent budget and descending straight to the nuke.
+    const state = loopState({
+      recoveryRequests: ["s1"],
+      raw: {
+        slices: { s1: { stage: "pr-open", escalated_reason: "hatchery_dispatch_failed", worker_session_id: "gone", branch: "feature/a", worktree_path: "/wt/a", pr: { number: 387 } } },
+        transient_retry_counts: { [relaunchRetryKey("s1")]: 3, ["dispatch-recovery:s1"]: 2 },
+      },
+    });
+    const c = ctx();
+    const res = await apply(assess(state), c, state);
+    expect(res.actions[0]).toMatchObject({ action: "recovery-relaunch" });
+    expect(state.slices.s1).toMatchObject({ stage: "pr-open", recovery_rung: 1 });
+    // The spent budgets were cleared so relaunch fires fresh next tick.
+    expect(state.raw.transient_retry_counts[relaunchRetryKey("s1")]).toBeUndefined();
+    expect(state.raw.transient_retry_counts["dispatch-recovery:s1"]).toBeUndefined();
+    expect(emitted(c)).toContainEqual(expect.objectContaining({ type: "slice.recovery.requested", rung: 1 }));
+  });
+
   it("does NOT re-emit the rung event on a maintain tick (already rung 1)", async () => {
     const state = loopState({
       raw: { slices: { s1: { stage: "pr-open", recovery_rung: 1, worker_session_id: "gone", branch: "feature/a", pr: { number: 9 } } } },

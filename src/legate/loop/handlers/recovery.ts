@@ -76,6 +76,9 @@ export interface RecoveryDecision {
   readonly resetCastraSessionId?: string;
   /** Durable rung to record this tick via `slice.recovery.requested` (descent only). */
   readonly emitRung?: number;
+  /** This is a fresh operator request (no rung yet) — apply clears the slice's
+   *  spent warm retry budgets, mirroring the fold's begin-graduated reset (#412). */
+  readonly freshInit?: boolean;
 }
 
 /** Pure: the working stage an un-escalated slice returns to — `pr-open` when it
@@ -105,30 +108,38 @@ function hasOpenPr(slice: any): boolean {
 /** The relaunch rung (1) / confirm rung (2) decision: descend when relaunch has
  *  stopped firing and the session is still gone, else keep un-escalating so
  *  relaunch re-attaches. */
-function relaunchRung(state: LoopState, sliceId: string, slice: any, sessionGone: boolean): RecoveryDecision {
+function relaunchRung(state: LoopState, sliceId: string, slice: any, sessionGone: boolean, fresh: boolean): RecoveryDecision {
   // Relaunch only operates on a slice with an open PR — it re-attaches a steward
   // to the EXISTING PR branch/worktree. With no PR (e.g. a spawn that died before
   // opening one) there is no gentler option than a fresh re-dispatch, so the
   // ladder degrades straight to the nuke rather than un-escalating to a stage
   // relaunch can't act on (which would strand the slice: no relaunch, and
   // dispatch skips it as in-flight).
-  if (!hasOpenPr(slice)) return { sliceId, action: "nuke" };
-  const used = Number.isFinite(retryCounts(state)[relaunchRetryKey(sliceId)])
-    ? retryCounts(state)[relaunchRetryKey(sliceId)]
-    : 0;
+  if (!hasOpenPr(slice)) return { sliceId, action: "nuke", freshInit: fresh };
+  // A fresh operator request begins the ladder at rung 0 with a clean per-rung
+  // budget (the begin-graduated reducer clears the fold's retries; apply mirrors
+  // that into the warm working state). So a slice whose relaunch budget was
+  // ALREADY spent — the stranded case the operator is un-wedging — relaunches
+  // again instead of immediately reading as exhausted and descending to the nuke.
+  const used = fresh
+    ? 0
+    : Number.isFinite(retryCounts(state)[relaunchRetryKey(sliceId)])
+      ? retryCounts(state)[relaunchRetryKey(sliceId)]
+      : 0;
   const rung = slice.recovery_rung === undefined ? 0 : Number(slice.recovery_rung);
   if (used >= RELAUNCH_LIMIT && sessionGone) {
     // Relaunch's budget is spent. Hold one tick at rung 2 so a relaunch that
     // only just succeeded (its new session id is not in THIS tick's snapshot)
     // surfaces in the next sense before we nuke; if we are already at rung 2 and
     // still gone, the relaunch genuinely failed — descend to the nuke.
-    if (rung >= 2) return { sliceId, action: "nuke" };
-    return { sliceId, action: "confirm-relaunch", emitRung: 2 };
+    if (rung >= 2) return { sliceId, action: "nuke", freshInit: fresh };
+    return { sliceId, action: "confirm-relaunch", emitRung: 2, freshInit: fresh };
   }
   return {
     sliceId,
     action: "prepare-relaunch",
     stage: deriveUnescalateStage(slice),
+    freshInit: fresh,
     // Record rung 1 durably only on the transition INTO it (not every maintain
     // tick) so the reducer's retry-budget reset fires once, not repeatedly.
     ...(rung === 1 ? {} : { emitRung: 1 }),
@@ -161,21 +172,25 @@ function classify(state: LoopState, sliceId: string): RecoveryDecision {
   // tick), so a lingering fold `recoveryRung` resolves on the next pass.
   if (slice.stage !== "escalated" && sessionHealthy) return { sliceId, action: "complete" };
 
-  const rung = slice.recovery_rung === undefined ? 0 : Number(slice.recovery_rung);
+  // A FRESH operator request (no rung yet) begins the ladder at rung 0 with clean
+  // per-rung budgets — the begin-graduated reducer (#412) clears the fold's
+  // retries; apply mirrors that into the warm working state (warm-loop
+  // invisibility: the fold edit never reaches the running loop's in-memory raw).
+  const fresh = slice.recovery_rung === undefined;
+  const rung = fresh ? 0 : Number(slice.recovery_rung);
 
   if (rung <= 0) {
     if (sessionErrored) {
       const attempts = Number.isFinite(castraAttempts(state)[sessId]) ? castraAttempts(state)[sessId] : 0;
-      const fresh = slice.recovery_rung === undefined;
-      // A fresh operator request gets a genuine gentlest attempt: reset the
-      // Castra-recover budget (the begin-graduated reducer clears the relaunch
-      // counters but NOT this separate per-session map) so rung 0 actually retries
-      // even if the slice escalated because that budget was already spent.
+      // A fresh request gets a genuine gentlest attempt: reset the Castra-recover
+      // budget so rung 0 actually retries even if the slice escalated because that
+      // budget was already spent.
       if (fresh || attempts < MAX_RECOVER_ATTEMPTS) {
         return {
           sliceId,
           action: "hold-castra",
           stage: deriveUnescalateStage(slice),
+          freshInit: fresh,
           ...(fresh ? { resetCastraSessionId: sessId } : {}),
         };
       }
@@ -183,21 +198,22 @@ function classify(state: LoopState, sliceId: string): RecoveryDecision {
       // place. With an open PR, drop the wedged session (worktree/branch/PR
       // preserved) so relaunch re-attaches a fresh steward next tick (descend to
       // rung 1); with no PR there is nothing to relaunch onto, so go to the nuke.
-      if (!hasOpenPr(slice)) return { sliceId, action: "nuke" };
+      if (!hasOpenPr(slice)) return { sliceId, action: "nuke", freshInit: fresh };
       return {
         sliceId,
         action: "free-and-relaunch",
         stage: deriveUnescalateStage(slice),
         removeSessionId: sessId,
         emitRung: 1,
+        freshInit: fresh,
       };
     }
     // No errored session to recover in place (vanished, or alive-but-escalated):
     // rung 0 has nothing to do — go straight to the relaunch rung.
-    return relaunchRung(state, sliceId, slice, sessionGone);
+    return relaunchRung(state, sliceId, slice, sessionGone, fresh);
   }
 
-  return relaunchRung(state, sliceId, slice, sessionGone);
+  return relaunchRung(state, sliceId, slice, sessionGone, fresh);
 }
 
 /**
@@ -225,6 +241,23 @@ export function assess(state: LoopState): RecoveryDecision[] {
   return ids.map((id) => classify(state, id));
 }
 
+/**
+ * Mirror the begin-graduated reducer's retry reset (#412) into the WARM working
+ * state: clear every `transient_retry_counts` entry keyed to this slice so a
+ * fresh operator request restarts the per-rung budgets — without this the warm
+ * loop (whose `raw` is never re-folded from the budget-cleared fold) still reads
+ * the spent counters and a stranded slice descends straight to the nuke (gap #3
+ * in #238 / warm-loop invisibility). Keyed identically to the reducer:
+ * `<sliceId>` or any `…:<sliceId>` (relaunch-steward / dispatch-recovery / …).
+ */
+function clearWarmRetryBudgets(raw: any, sliceId: string): void {
+  const counts = raw?.transient_retry_counts;
+  if (!counts || typeof counts !== "object") return;
+  for (const key of Object.keys(counts)) {
+    if (key === sliceId || key.endsWith(":" + sliceId)) delete counts[key];
+  }
+}
+
 /** Un-escalate a slice in place: move it to the working stage and clear the
  *  escalation reason + babysit's escalation latches so babysit resumes cleanly. */
 function unescalate(slice: any, stage: string, ts: string, note: string): void {
@@ -245,6 +278,12 @@ export async function apply(decisions: RecoveryDecision[], ctx: HandlerContext, 
   for (const d of decisions) {
     const slice = state.slices?.[d.sliceId];
     const sessionId = (slice && typeof slice.worker_session_id === "string" && slice.worker_session_id) || null;
+
+    // Fresh request → reset the warm per-rung budgets (mirror of #412's
+    // begin-graduated fold reset) BEFORE acting, so a stranded slice whose
+    // relaunch/recover budgets were already spent gets a clean walk. The nuke's
+    // own dropRecoveredSlice still clears them on rung 3.
+    if (d.freshInit) clearWarmRetryBudgets(state.raw, d.sliceId);
 
     switch (d.action) {
       case "refuse-awaiting-input": {
