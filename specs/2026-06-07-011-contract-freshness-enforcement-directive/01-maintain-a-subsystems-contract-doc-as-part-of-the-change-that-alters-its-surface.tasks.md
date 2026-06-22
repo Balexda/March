@@ -58,7 +58,7 @@ Recommended implementation sequence:
 
 | ID | Title | Depends On | Artifact |
 |----|-------|------------|----------|
-| S1 | Codify Edit-Time Contract Maintenance | - | Repository contract-maintenance instructions |
+| S1 | Codify Edit-Time Contract Maintenance | — | — |
 
 ### Cross-Story Dependencies
 
