@@ -1,3 +1,6 @@
+/**
+ * @l0 @deterministic @ci
+ */
 import { describe, it, expect, afterEach } from "vitest";
 import fs from "node:fs";
 import fsp from "node:fs/promises";

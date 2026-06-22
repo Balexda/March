@@ -1,3 +1,6 @@
+/**
+ * @l0 @deterministic @ci
+ */
 import { describe, expect, it } from "vitest";
 import { MARCH_BOT_MARKER, isMarchBotComment } from "./march-bot.js";
 
