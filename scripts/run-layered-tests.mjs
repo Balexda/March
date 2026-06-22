@@ -51,8 +51,23 @@ function tagsInLeadingBlock(source) {
   return new Set(block.match(/@[a-z0-9-]+/g) ?? []);
 }
 
+function hasParseableLeadingTagBlock(source) {
+  return tagsInLeadingBlock(source).size > 0;
+}
+
 function isQuarantined(relativePath) {
   return toPosixPath(relativePath).startsWith(QUARANTINE_PREFIX);
+}
+
+export function findUntaggedCandidateTestFiles(rootDir) {
+  return walkTestFiles(rootDir).filter((relativePath) => {
+    if (isQuarantined(relativePath)) {
+      return false;
+    }
+
+    const source = fs.readFileSync(path.join(rootDir, relativePath), "utf8");
+    return !hasParseableLeadingTagBlock(source);
+  });
 }
 
 export function selectLayerTestFiles(rootDir, layerName) {
@@ -95,6 +110,17 @@ function runLayer(layerName, rootDir = process.cwd()) {
       `Unknown test layer "${layerName}". Expected one of: ${Object.keys(LAYERS).join(", ")}`,
     );
     return 2;
+  }
+
+  const untaggedCandidates = findUntaggedCandidateTestFiles(rootDir);
+  if (untaggedCandidates.length > 0) {
+    console.error(
+      `${layer.script}: refused to run ${untaggedCandidates.length} untagged test file(s) outside ${QUARANTINE_PREFIX}.`,
+    );
+    for (const relativePath of untaggedCandidates) {
+      console.error(`${layer.script}: ${relativePath} has no leading tag block.`);
+    }
+    return 1;
   }
 
   const selected = selectLayerTestFiles(rootDir, layerName);
