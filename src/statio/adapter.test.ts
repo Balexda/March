@@ -566,3 +566,201 @@ describe("statio gh forge adapter — getPr", () => {
     });
   });
 });
+
+describe("statio gh forge adapter — reviewThreads", () => {
+  it("returns only unresolved threads in first-comment shape with ordered comment ids", async () => {
+    const runCommand: StatioCommandRunner = vi.fn(async (_command, args) => {
+      if (args[0] === "repo") {
+        return JSON.stringify({
+          nameWithOwner: "Balexda/March",
+          defaultBranchRef: { name: "master" },
+        });
+      }
+      return JSON.stringify({
+        data: {
+          repository: {
+            pullRequest: {
+              reviewThreads: {
+                nodes: [
+                  {
+                    isResolved: true,
+                    comments: {
+                      nodes: [
+                        {
+                          databaseId: 999,
+                          body: "resolved",
+                          createdAt: "2026-05-26T00:00:00Z",
+                        },
+                      ],
+                    },
+                  },
+                  {
+                    isResolved: false,
+                    comments: {
+                      nodes: [
+                        {
+                          databaseId: 22,
+                          body: "follow-up",
+                          path: "src/later.ts",
+                          line: 12,
+                          author: { login: "second-reviewer" },
+                          createdAt: "2026-05-26T00:02:00Z",
+                        },
+                        {
+                          databaseId: 11,
+                          body: "please fix this ordering-sensitive comment",
+                          path: "src/first.ts",
+                          line: 7,
+                          author: { login: "first-reviewer" },
+                          createdAt: "2026-05-26T00:01:00Z",
+                        },
+                      ],
+                    },
+                  },
+                ],
+              },
+            },
+          },
+        },
+      });
+    });
+    const adapter = createGhForgeAdapter({ timeoutMs: 1234, runCommand });
+
+    await expect(adapter.reviewThreads(42)).resolves.toEqual([
+      {
+        id: 11,
+        path: "src/first.ts",
+        line: 7,
+        author: "first-reviewer",
+        bodyPreview: "please fix this ordering-sensitive comment",
+        lastAuthor: "second-reviewer",
+        lastCommentAt: "2026-05-26T00:02:00Z",
+        commentCount: 2,
+        commentIds: [11, 22],
+      },
+    ]);
+    expect(runCommand).toHaveBeenNthCalledWith(
+      2,
+      "gh",
+      buildReviewThreadsArgs("Balexda/March", 42),
+      { timeoutMs: 1234 },
+    );
+  });
+
+  it("bounds the body preview to the sense-io review-thread limit", async () => {
+    const longBody = "x".repeat(200);
+    const runCommand: StatioCommandRunner = vi.fn(async (_command, args) => {
+      if (args[0] === "repo") {
+        return JSON.stringify({
+          nameWithOwner: "Balexda/March",
+          defaultBranchRef: { name: "master" },
+        });
+      }
+      return JSON.stringify({
+        data: {
+          repository: {
+            pullRequest: {
+              reviewThreads: {
+                nodes: [
+                  {
+                    isResolved: false,
+                    comments: {
+                      nodes: [
+                        {
+                          databaseId: 1,
+                          body: longBody,
+                          author: { login: "reviewer" },
+                          createdAt: "2026-05-26T00:00:00Z",
+                        },
+                      ],
+                    },
+                  },
+                ],
+              },
+            },
+          },
+        },
+      });
+    });
+    const adapter = createGhForgeAdapter({ runCommand });
+
+    const threads = await adapter.reviewThreads(42);
+
+    expect(threads[0]?.bodyPreview).toBe("x".repeat(140));
+  });
+
+  it("returns an empty list when repository owner is unavailable", async () => {
+    const runCommand: StatioCommandRunner = vi.fn(async () =>
+      JSON.stringify({ nameWithOwner: "", defaultBranchRef: { name: "master" } }),
+    );
+    const adapter = createGhForgeAdapter({ runCommand });
+
+    await expect(adapter.reviewThreads(42)).resolves.toEqual([]);
+    expect(runCommand).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects a non-positive or non-integer PR number as a validation error", async () => {
+    const runCommand: StatioCommandRunner = vi.fn(async () => "");
+    const adapter = createGhForgeAdapter({ runCommand });
+
+    for (const bad of [0, -1, 1.5]) {
+      await expect(adapter.reviewThreads(bad)).rejects.toBeInstanceOf(StatioValidationError);
+    }
+    expect(runCommand).not.toHaveBeenCalled();
+  });
+
+  it("wraps malformed GraphQL output as forge_error", async () => {
+    const malformedShape: StatioCommandRunner = vi.fn(async (_command, args) => {
+      if (args[0] === "repo") {
+        return JSON.stringify({
+          nameWithOwner: "Balexda/March",
+          defaultBranchRef: { name: "master" },
+        });
+      }
+      return JSON.stringify({ data: { repository: { pullRequest: {} } } });
+    });
+    const unparseableJson: StatioCommandRunner = vi.fn(async (_command, args) => {
+      if (args[0] === "repo") {
+        return JSON.stringify({
+          nameWithOwner: "Balexda/March",
+          defaultBranchRef: { name: "master" },
+        });
+      }
+      return "not-json";
+    });
+
+    await expect(
+      createGhForgeAdapter({ runCommand: malformedShape }).reviewThreads(42),
+    ).rejects.toMatchObject({
+      name: "StatioForgeError",
+      code: "forge_error",
+      message: "gh api graphql failed while reading review threads.",
+    });
+    await expect(
+      createGhForgeAdapter({ runCommand: unparseableJson }).reviewThreads(42),
+    ).rejects.toMatchObject({
+      name: "StatioForgeError",
+      code: "forge_error",
+      message: "gh api graphql failed while reading review threads.",
+    });
+  });
+
+  it("wraps failed GraphQL reads as forge_error", async () => {
+    const runCommand: StatioCommandRunner = vi.fn(async (_command, args) => {
+      if (args[0] === "repo") {
+        return JSON.stringify({
+          nameWithOwner: "Balexda/March",
+          defaultBranchRef: { name: "master" },
+        });
+      }
+      throw new Error("rate limit");
+    });
+    const adapter = createGhForgeAdapter({ runCommand });
+
+    await expect(adapter.reviewThreads(42)).rejects.toMatchObject({
+      name: "StatioForgeError",
+      code: "forge_error",
+      message: "gh api graphql failed while reading review threads.",
+    });
+  });
+});

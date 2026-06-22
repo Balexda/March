@@ -221,11 +221,17 @@ function stringField(record: Record<string, unknown>, field: string): string {
 
 function parseReviewThreadsGhJson(text: string): ReviewThread[] {
   const parsed = parseJsonObject(text, "gh api graphql returned unparseable review threads.");
-  const pullRequest = (((parsed.data as Record<string, unknown> | undefined)?.repository as
+  const pullRequest = ((parsed.data as Record<string, unknown> | undefined)?.repository as
     | Record<string, unknown>
-    | undefined)?.pullRequest ?? {}) as Record<string, unknown>;
+    | undefined)?.pullRequest as Record<string, unknown> | undefined;
+  if (!pullRequest || typeof pullRequest !== "object" || Array.isArray(pullRequest)) {
+    throw new StatioForgeError("gh api graphql returned malformed review threads.");
+  }
   const reviewThreads = pullRequest.reviewThreads as Record<string, unknown> | undefined;
-  const nodes = Array.isArray(reviewThreads?.nodes) ? reviewThreads.nodes : [];
+  if (!reviewThreads || !Array.isArray(reviewThreads.nodes)) {
+    throw new StatioForgeError("gh api graphql returned malformed review threads.");
+  }
+  const nodes = reviewThreads.nodes;
   return nodes
     .filter(
       (thread) =>
@@ -409,7 +415,7 @@ function splitOwner(owner: string): [string, string] | null {
 
 export function createGhForgeAdapter(
   options: GhForgeAdapterOptions = {},
-): Pick<ForgeClient, "repoInfo" | "listPrs" | "getPr"> {
+): Pick<ForgeClient, "repoInfo" | "listPrs" | "getPr" | "reviewThreads"> {
   const runCommand = options.runCommand ?? execText;
   const timeoutMs = options.timeoutMs ?? DEFAULT_GH_TIMEOUT_MS;
 
@@ -500,6 +506,36 @@ export function createGhForgeAdapter(
       }
 
       return parsePullRequestSummaryGhJson(prStdout, threads);
+    },
+
+    async reviewThreads(prNumber: number): Promise<ReviewThread[]> {
+      if (!Number.isInteger(prNumber) || prNumber <= 0) {
+        throw new StatioValidationError(
+          `Pull request number must be a positive integer; received ${prNumber}.`,
+        );
+      }
+
+      let repo: RepoInfo = { owner: "", defaultBranch: "" };
+      try {
+        repo = await resolveRepoInfo();
+      } catch {
+        return [];
+      }
+
+      const owner = splitOwner(repo.owner) ? repo.owner : "";
+      if (!owner) {
+        return [];
+      }
+
+      try {
+        return parseReviewThreadsGhJson(
+          await runCommand("gh", buildReviewThreadsArgs(owner, prNumber), {
+            timeoutMs,
+          }),
+        );
+      } catch {
+        throw new StatioForgeError("gh api graphql failed while reading review threads.");
+      }
     },
   };
 }

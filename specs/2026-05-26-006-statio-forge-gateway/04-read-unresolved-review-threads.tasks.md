@@ -17,7 +17,7 @@
 
 ### Tasks
 
-- [ ] **Implement the `reviewThreads(prNumber)` forge seam**
+- [x] **Implement the `reviewThreads(prNumber)` forge seam**
 
   Extend the Statio forge adapter under `src/statio/` so `reviewThreads(prNumber)` validates the PR number, resolves repository identity, returns an empty list when owner/name cannot be split, runs the bounded GraphQL read when it can, and shapes only unresolved threads into the documented `ReviewThread` values. Keep the adapter stateless, read-only, and behavior-preserving relative to the current `sense-io.ts` review-thread projection.
 
