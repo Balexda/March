@@ -18,7 +18,7 @@
 
 ### Tasks
 
-- [ ] **Prove the network policy type is a closed discriminator**
+- [x] **Prove the network policy type is a closed discriminator**
 
   Add type-oriented coverage around the public `src/profile/` exports proving that `NetworkPolicy` and `Profile["network"]` expose only the documented `mode` variants and that the `allowlist` field is only present on the allowlist variant. Keep the check scoped to the A7 network surface.
 
