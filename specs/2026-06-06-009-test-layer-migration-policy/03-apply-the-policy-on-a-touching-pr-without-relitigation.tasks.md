@@ -18,7 +18,7 @@
 
 ### Tasks
 
-- [ ] **Add touching-PR classification guidance**
+- [x] **Add touching-PR classification guidance**
 
   Update `CONTRIBUTING.md`'s Test Layer Migration policy so a PR author and reviewer can apply the written conditions to concrete governed-file diffs for AS 3.1-3.3. Keep the change documentation-only and preserve the existing governed set, starting-state record, non-preemptive-port rule, and adjacent-feature boundaries.
 
