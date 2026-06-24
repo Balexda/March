@@ -1,3 +1,6 @@
+/**
+ * @l1 @deterministic @ci
+ */
 import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { SessionStore } from "../brood/service/store.js";

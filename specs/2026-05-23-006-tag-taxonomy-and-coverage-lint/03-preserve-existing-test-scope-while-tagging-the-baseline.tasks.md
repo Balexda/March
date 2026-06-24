@@ -18,7 +18,7 @@
 
 ### Tasks
 
-- [ ] **Tag the baseline tests in place**
+- [x] **Tag the baseline tests in place**
 
   Review the current repo `*.test.ts` inventory and adjust only leading Test File Tag Blocks so each file's scope tag matches the boundary it already exercises. Preserve all imports, mocks, helpers, test bodies, assertions, and framework choices while satisfying AS 3.1-3.3.
 

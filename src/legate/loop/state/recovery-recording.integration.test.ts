@@ -13,7 +13,7 @@
  * Scope note (per docs/rfcs/2026-002-layered-testing-framework): the ladder's
  * TRUE cross-service coverage — legate↔Herald↔Castra over HTTP, and the multi-tick
  * descent through the rungs — is an L2/L3 cassette concern whose substrate (M3+)
- * is not yet built. These are the in-process (`@l1`) round-trips that are
+ * is not yet built. These are the in-process L1 round-trips that are
  * affordable on the $0 PR gate today; they exercise the same recording seams the
  * future L2 cassette scenario will, minus the wire.
  */
