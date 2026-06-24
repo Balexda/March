@@ -74,6 +74,7 @@ describe("spawn cap helpers (#313)", () => {
   it("isReadyToMerge matches the dashboard's waiting-for-merge gate", () => {
     const clear = { stage: "pr-open", pr: { checks: "PASS", mergeable: "MERGEABLE" }, needs_response_count: 0 };
     expect(isReadyToMerge(clear)).toBe(true);
+    expect(isReadyToMerge({ ...clear, pr: { checks: "NONE", mergeable: "MERGEABLE" } })).toBe(true);
     expect(isReadyToMerge({ ...clear, stage: "implementing" })).toBe(false); // not pr-open
     expect(isReadyToMerge({ ...clear, pr: { checks: "FAIL", mergeable: "MERGEABLE" } })).toBe(false); // checks
     expect(isReadyToMerge({ ...clear, pr: { checks: "PASS", mergeable: "CONFLICTING" } })).toBe(false); // conflict
@@ -266,6 +267,7 @@ describe("slice pure helpers", () => {
     // An explicit per-profile relax is still honored (same as the built-in) → ready.
     const policy = { byTaskType: { cut: { approval: false } } } as any;
     expect(mergeReadiness("x-cut", slice, clearPr, policy)).toBe("ready");
+    expect(mergeReadiness("x-cut", slice, { ...clearPr, checks: "NONE" }, policy)).toBe("ready");
     // Approval relaxed but GitHub merge-state present and not clean → blocked-merge-state.
     expect(mergeReadiness("x-cut", slice, { ...clearPr, merge_state_status: "BEHIND" }, policy)).toBe("blocked-merge-state");
     // A MISSING/null/empty merge-state (sense-io null, or a cold-start thin pr) is

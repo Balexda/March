@@ -429,6 +429,36 @@ describe("babysit auto-merge gate", () => {
     }
   });
 
+  it("auto-merges a PR with NO checks (checks=NONE) when otherwise all-clear", () => {
+    // A docs-only PR that triggers no CI sits at checks=NONE permanently; the old
+    // `=== "PASS"` gate stranded it forever despite being MERGEABLE/CLEAN with no
+    // open threads. NONE is now accepted as the all-clear CI precondition.
+    const state = allClearState({ checks: "NONE", human_approval_count: 1 });
+    expect(kindsOf(assess(state))).toEqual(["pr-snapshot", "pr-auto-merge"]);
+  });
+
+  it("auto-merges a no-checks cut PR with zero approvals under the cut policy (the live #387 case)", () => {
+    const state = allClearState(
+      { checks: "NONE", human_approval_count: 0 },
+      { command: "smithy.cut" },
+    );
+    state.mergePolicy = { byTaskType: { cut: { approval: false } } };
+    expect(kindsOf(assess(state))).toEqual(["pr-snapshot", "pr-auto-merge"]);
+  });
+
+  it("does NOT auto-merge a no-checks PR when GitHub's merge state is not clean (guards transient NONE)", () => {
+    // NONE also briefly means "checks not registered yet" for a PR that will run
+    // CI; GitHub keeps merge_state_status non-clean while required checks are
+    // pending/blocked, so the merge stays gated.
+    const state = allClearState({ checks: "NONE", human_approval_count: 1, merge_state_status: "blocked" });
+    expect(kindsOf(assess(state))).toEqual(["pr-snapshot"]);
+  });
+
+  it("still does NOT auto-merge while checks are PENDING (not yet a verdict)", () => {
+    const state = allClearState({ checks: "PENDING", human_approval_count: 1 });
+    expect(kindsOf(assess(state))).toEqual(["pr-snapshot"]);
+  });
+
   it("apply pr-auto-merge calls mergePr with the pinned head SHA and marks the slice merged", async () => {
     const slice = { worker_session_id: "w", stage: "pr-open", pr: { number: 5 }, command: "smithy.cut" };
     const state = loopState({ slices: { s: slice } });

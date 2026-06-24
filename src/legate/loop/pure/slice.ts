@@ -419,7 +419,7 @@ export interface SliceStageSummary {
 export function isReadyToMerge(slice: any): boolean {
   if (!slice || typeof slice !== "object") return false;
   if (slice.stage !== "pr-open") return false;
-  if (slice.pr?.checks !== "PASS") return false;
+  if (slice.pr?.checks !== "PASS" && slice.pr?.checks !== "NONE") return false;
   if (slice.pr?.mergeable === "CONFLICTING") return false;
   const owed = slice.needs_response_count ?? slice.pr?.needs_response_count;
   return owed === 0;
@@ -482,7 +482,7 @@ export function mergeReadiness(
 ): MergeReadiness {
   if (!slice || typeof slice !== "object" || slice.stage !== "pr-open") return "not-ready";
   const src = pr ?? {};
-  if (src.checks !== "PASS") return "not-ready";
+  if (src.checks !== "PASS" && src.checks !== "NONE") return "not-ready";
   if (src.mergeable === "CONFLICTING") return "not-ready";
   const owed = src.needs_response_count ?? slice.needs_response_count ?? slice.pr?.needs_response_count;
   if (owed !== 0) return "not-ready";
