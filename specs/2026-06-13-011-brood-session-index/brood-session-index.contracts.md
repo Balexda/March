@@ -2,15 +2,15 @@
 
 ## Overview
 
-This feature introduces a repository-internal **TypeScript module contract**, not an HTTP, event, or CLI surface. The new `src/brood-index.ts` exposes the tolerant read-and-derive API every downstream Brood verb consumes. `src/brood/spawn-record.ts` already carries the optional `failureReason` field and the `markSpawnRecordFailed` wiring that fills it; the contract below records that established surface. No runtime events, metrics, or spans are introduced; the reader emits only the skip-and-warn diagnostic noted below.
+This feature introduces a repository-internal **TypeScript module contract**, not an HTTP, event, or CLI surface. The new `src/brood/spawn-index.ts` exposes the tolerant read-and-derive API every downstream Brood verb consumes. `src/brood/spawn-record.ts` already carries the optional `failureReason` field and the `markSpawnRecordFailed` wiring that fills it; the contract below records that established surface. No runtime events, metrics, or spans are introduced; the reader emits only the skip-and-warn diagnostic noted below.
 
 ## Interfaces
 
-### Spawn Index Reader (`src/brood-index.ts`)
+### Spawn Index Reader (`src/brood/spawn-index.ts`)
 
 **Purpose**: One tolerant API to list, load, and derive status over the per-spawn records.
 **Consumers**: Brood verbs `list` / `inspect` / `logs` / `teardown` / `attach` (F2–F5), and Smithy task verification.
-**Providers**: `src/brood-index.ts`, reading the JSON M1 writes under `~/.march/spawns/`.
+**Providers**: `src/brood/spawn-index.ts`, reading the JSON M1 writes under `~/.march/spawns/`.
 
 #### Signature
 
