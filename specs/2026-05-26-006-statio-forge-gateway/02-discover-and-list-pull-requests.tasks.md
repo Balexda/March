@@ -17,7 +17,7 @@
 
 ### Tasks
 
-- [ ] **Implement the `listPrs(req)` forge seam**
+- [x] **Implement the `listPrs(req)` forge seam**
 
   Extend the Statio forge adapter under `src/statio/` so `listPrs(req)` validates the documented filters, resolves repository identity for owner-scoped `gh pr list` calls when available, falls back to the repo-path cwd when owner is unavailable, and shapes the returned array into `PullRequestListItem` values. Keep the adapter stateless and read-only, with no consumer cutover.
 

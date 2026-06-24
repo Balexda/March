@@ -92,6 +92,8 @@ interface FakeOpts {
   tmuxServerHost?: string | null;
   /** This host's name (default "host-machine"). */
   localHostname?: string;
+  /** Per-container lifecycle state (default: every container "running"). */
+  containerStates?: Record<string, "running" | "stopped" | "absent">;
   env?: NodeJS.ProcessEnv;
 }
 
@@ -117,7 +119,7 @@ function ctx(opts: FakeOpts = {}): DoctorContext {
       },
     },
     containerEnv: (container, name) => opts.containerEnv?.[container]?.[name] ?? null,
-    containerState: () => "running",
+    containerState: (c: string) => opts.containerStates?.[c] ?? "running",
     git: opts.git ?? (() => null),
     pathExists: (p) => opts.paths?.has(p) ?? false,
     tmuxServerHost: () => (opts.tmuxServerHost === undefined ? null : opts.tmuxServerHost),
@@ -491,11 +493,19 @@ describe("tmux-ownership", () => {
     expect(warn?.remedy).toContain("march down && march up");
   });
 
-  it("passes (nothing to verify) when no tmux server is reachable", async () => {
-    const c = ctx({ tmuxServerHost: null });
+  it("passes (nothing to verify) when no tmux server is reachable and the stack is down", async () => {
+    const c = ctx({ tmuxServerHost: null, containerStates: { "march-castra": "absent" } });
     const r = await checkTmuxOwnership(c);
     expect(sev(r.findings)).toEqual(["pass"]);
     expect(r.findings[0].detail).toContain("nothing to verify");
+  });
+
+  it("warns when host tmux is unverifiable while march-castra is running", async () => {
+    const c = ctx({ tmuxServerHost: null, containerStates: { "march-castra": "running" } });
+    const r = await checkTmuxOwnership(c);
+    const warn = r.findings.find((f) => f.severity === "warn");
+    expect(warn?.detail).toContain("cannot be verified");
+    expect(warn?.remedy).toContain("march down && march up");
   });
 });
 
