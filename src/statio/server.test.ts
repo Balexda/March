@@ -13,6 +13,7 @@ import type { RepoMetadataReader } from "./forge.js";
 import { buildStatioServer } from "./server.js";
 import {
   type ForgeClient,
+  type PullRequestListItem,
   type PullRequestSummary,
   StatioForgeError,
   StatioNotFoundError,
@@ -21,6 +22,18 @@ import {
 } from "./types.js";
 
 const REPO: RepoInfo = { owner: "Balexda/March", defaultBranch: "master" };
+const PR_LIST: PullRequestListItem[] = [
+  {
+    number: 42,
+    url: "https://github.com/Balexda/March/pull/42",
+    state: "OPEN",
+    mergeable: "MERGEABLE",
+    headBranch: "feature/statio",
+    title: "Add Statio",
+    checks: "PASS",
+    createdAt: "2026-05-26T00:00:00Z",
+  },
+];
 const PR: PullRequestSummary = {
   number: 42,
   url: "https://github.com/Balexda/March/pull/42",
@@ -50,7 +63,7 @@ const PR: PullRequestSummary = {
   needsResponseCount: 1,
 };
 
-type StatioRouteForgeClient = Pick<ForgeClient, "repoInfo" | "getPr" | "reachable">;
+type StatioRouteForgeClient = Pick<ForgeClient, "repoInfo" | "listPrs" | "getPr" | "reachable">;
 
 function fakeReader(overrides: Partial<RepoMetadataReader> = {}): RepoMetadataReader {
   return {
@@ -63,6 +76,7 @@ function fakeReader(overrides: Partial<RepoMetadataReader> = {}): RepoMetadataRe
 function fakeForge(overrides: Partial<StatioRouteForgeClient> = {}): StatioRouteForgeClient {
   return {
     repoInfo: vi.fn().mockResolvedValue(REPO),
+    listPrs: vi.fn().mockResolvedValue(PR_LIST),
     getPr: vi.fn().mockResolvedValue(PR),
     reachable: vi.fn().mockResolvedValue(true),
     ...overrides,
@@ -146,12 +160,112 @@ describe("statio server", () => {
 
     const res = await app.inject({
       method: "GET",
-      url: "/v1/prs",
+      url: "/v1/unknown",
       headers: { authorization: "Bearer secret" },
     });
 
     expect(res.statusCode).toBe(404);
     expect(res.json().error.code).toBe("not_found");
+  });
+
+  it("returns pull request lists through the authorized /v1/prs wrapper", async () => {
+    const forgeClient = fakeForge();
+    app = buildStatioServer({ forgeClient, token: "secret" });
+
+    const res = await app.inject({
+      method: "GET",
+      url: "/v1/prs?author=%40me&state=open",
+      headers: { authorization: "Bearer secret" },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ prs: PR_LIST });
+    expect(forgeClient.listPrs).toHaveBeenCalledWith({
+      author: "@me",
+      head: undefined,
+      state: "open",
+    });
+  });
+
+  it("passes head filters to the pull request list forge seam", async () => {
+    const forgeClient = fakeForge();
+    app = buildStatioServer({ forgeClient, token: "secret" });
+
+    const res = await app.inject({
+      method: "GET",
+      url: "/v1/prs?head=feature%2Fstatio",
+      headers: { authorization: "Bearer secret" },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ prs: PR_LIST });
+    expect(forgeClient.listPrs).toHaveBeenCalledWith({
+      author: undefined,
+      head: "feature/statio",
+      state: undefined,
+    });
+  });
+
+  it("returns an empty pull request list as a successful response", async () => {
+    const forgeClient = fakeForge({ listPrs: vi.fn().mockResolvedValue([]) });
+    app = buildStatioServer({ forgeClient, token: "secret" });
+
+    const res = await app.inject({
+      method: "GET",
+      url: "/v1/prs?head=no-match",
+      headers: { authorization: "Bearer secret" },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ prs: [] });
+  });
+
+  it("returns invalid_request envelopes for malformed pull request list filters", async () => {
+    const forgeClient = fakeForge();
+    app = buildStatioServer({ forgeClient, token: "secret" });
+
+    for (const url of ["/v1/prs?state=draft", "/v1/prs?head=", "/v1/prs?author=%20me"]) {
+      const res = await app.inject({
+        method: "GET",
+        url,
+        headers: { authorization: "Bearer secret" },
+      });
+
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error.code).toBe("invalid_request");
+    }
+    expect(forgeClient.listPrs).not.toHaveBeenCalled();
+  });
+
+  it("rejects unauthenticated pull request list reads before calling the forge seam", async () => {
+    const forgeClient = fakeForge();
+    app = buildStatioServer({ forgeClient, token: "secret" });
+
+    const res = await app.inject({ method: "GET", url: "/v1/prs?author=%40me" });
+
+    expect(res.statusCode).toBe(401);
+    expect(res.json().error.code).toBe("unauthorized");
+    expect(forgeClient.listPrs).not.toHaveBeenCalled();
+  });
+
+  it("maps pull request list forge failures to forge_error envelopes", async () => {
+    app = buildStatioServer({
+      forgeClient: fakeForge({
+        listPrs: vi.fn(async () => {
+          throw new StatioForgeError("gh list failed");
+        }),
+      }),
+      token: "secret",
+    });
+
+    const res = await app.inject({
+      method: "GET",
+      url: "/v1/prs?author=%40me",
+      headers: { authorization: "Bearer secret" },
+    });
+
+    expect(res.statusCode).toBe(502);
+    expect(res.json()).toEqual({ error: { code: "forge_error", message: "gh list failed" } });
   });
 
   it("returns pull request summaries through the authorized /v1/prs/:number wrapper", async () => {
@@ -400,6 +514,32 @@ describe("statio request tracing", () => {
     });
   });
 
+  it("keeps slice correlation on pull request list reads", async () => {
+    initOtel({ MARCH_OTEL: "1", MARCH_OTEL_ENDPOINT: "http://localhost:4318" });
+    const spans = captureSpans();
+    app = buildStatioServer({ forgeClient: fakeForge(), token: "secret" });
+
+    const res = await app.inject({
+      method: "GET",
+      url: "/v1/prs?head=feature%2Fstatio",
+      headers: {
+        authorization: "Bearer secret",
+        "x-march-slice-id": "slice-abc",
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const span = spans.find((s) => s.name === "statio.request")!;
+    expect(span).toBeDefined();
+    expect(span.spanContext().traceId).toBe(traceIdForDispatch("slice-abc"));
+    expect(span.parentSpanContext?.spanId).toBe(spanIdForDispatch("slice-abc"));
+    expect(span.attributes).toMatchObject({
+      "statio.method": "GET",
+      "statio.route": "/v1/prs",
+      "statio.status_class": "2xx",
+    });
+  });
+
   it("emits a service-local request span when no slice id is provided", async () => {
     initOtel({ MARCH_OTEL: "1", MARCH_OTEL_ENDPOINT: "http://localhost:4318" });
     const spans = captureSpans();
@@ -553,6 +693,55 @@ describe("statio client/server compatibility", () => {
     expect(forgeClient.getPr).toHaveBeenCalledWith(42);
   });
 
+  it("lets the async client call the authorized /v1/prs route with author and state filters", async () => {
+    const forgeClient = fakeForge();
+    const baseUrl = await listen(forgeClient);
+    const client = new StatioClient({ baseUrl, token: "secret", traceKey: "slice-abc" });
+
+    await expect(client.listPrs({ author: "@me", state: "open" })).resolves.toEqual(PR_LIST);
+    expect(forgeClient.listPrs).toHaveBeenCalledWith({
+      author: "@me",
+      head: undefined,
+      state: "open",
+    });
+  });
+
+  it("forwards client trace headers to the pull request list service route", async () => {
+    initOtel({ MARCH_OTEL: "1", MARCH_OTEL_ENDPOINT: "http://localhost:4318" });
+    const spans = captureSpans();
+    const baseUrl = await listen(fakeForge());
+    const client = new StatioClient({ baseUrl, token: "secret", traceKey: "slice-client" });
+
+    await expect(client.listPrs({ author: "@me", state: "open" })).resolves.toEqual(PR_LIST);
+
+    const span = spans.find((s) => s.name === "statio.request")!;
+    expect(span).toBeDefined();
+    expect(span.spanContext().traceId).toBe(traceIdForDispatch("slice-client"));
+    expect(span.parentSpanContext?.spanId).toBe(spanIdForDispatch("slice-client"));
+    expect(span.attributes["statio.route"]).toBe("/v1/prs");
+  });
+
+  it("lets the async client call the authorized /v1/prs route with head filters", async () => {
+    const forgeClient = fakeForge();
+    const baseUrl = await listen(forgeClient);
+    const client = new StatioClient({ baseUrl, token: "secret" });
+
+    await expect(client.listPrs({ head: "feature/statio" })).resolves.toEqual(PR_LIST);
+    expect(forgeClient.listPrs).toHaveBeenCalledWith({
+      author: undefined,
+      head: "feature/statio",
+      state: undefined,
+    });
+  });
+
+  it("preserves empty pull request list responses through the client boundary", async () => {
+    const forgeClient = fakeForge({ listPrs: vi.fn().mockResolvedValue([]) });
+    const baseUrl = await listen(forgeClient);
+    const client = new StatioClient({ baseUrl, token: "secret" });
+
+    await expect(client.listPrs({ head: "missing" })).resolves.toEqual([]);
+  });
+
   it("maps service-generated non-2xx envelopes to client errors", async () => {
     const baseUrl = await listen(fakeReader());
     const client = new StatioClient({ baseUrl, token: "wrong" });
@@ -577,6 +766,23 @@ describe("statio client/server compatibility", () => {
       code: "forge_error",
       status: 502,
       message: "gh down",
+    });
+  });
+
+  it("maps pull request list route envelopes to client errors", async () => {
+    const baseUrl = await listen(
+      fakeForge({
+        listPrs: vi.fn(async () => {
+          throw new StatioForgeError("gh list down");
+        }),
+      }),
+    );
+    const client = new StatioClient({ baseUrl, token: "secret" });
+
+    await expect(client.listPrs({ author: "@me" })).rejects.toMatchObject({
+      code: "forge_error",
+      status: 502,
+      message: "gh list down",
     });
   });
 
