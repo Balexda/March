@@ -100,7 +100,7 @@ Recommended implementation sequence:
 | US1 | Declare the Frozen Test Tag Vocabulary | — | specs/2026-05-23-006-tag-taxonomy-and-coverage-lint/01-declare-frozen-test-tag-vocabulary.tasks.md |
 | US2 | Fail Loudly on Untagged or Mis-tagged Test Files | US1 | specs/2026-05-23-006-tag-taxonomy-and-coverage-lint/02-fail-loudly-on-untagged-or-mis-tagged-test-files.tasks.md |
 | US3 | Preserve Existing Test Scope While Tagging the Baseline | US1, US2 | specs/2026-05-23-006-tag-taxonomy-and-coverage-lint/03-preserve-existing-test-scope-while-tagging-the-baseline.tasks.md |
-| US4 | Keep Operator Documentation Aligned With the New Taxonomy | US1, US3 | — |
+| US4 | Keep Operator Documentation Aligned With the New Taxonomy | US1, US3 | specs/2026-05-23-006-tag-taxonomy-and-coverage-lint/04-keep-operator-documentation-aligned-with-the-new-taxonomy.tasks.md |
 
 ## Requirements *(mandatory)*
 
