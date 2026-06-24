@@ -18,7 +18,7 @@
 
 ### Tasks
 
-- [ ] **Generate the quarantine roster**
+- [x] **Generate the quarantine roster**
 
   Extend the existing quarantine routing surface so index generation rewrites `tests/quarantine/INDEX.md` from the current set of quarantined `*.test.ts` files and their recorded origins. The generation path should be non-interactive, should keep the roster derived from filesystem state rather than hand-authored content, and should avoid adding staged-script, contributor-doc, restore, or M6 SLA behavior.
 

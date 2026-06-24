@@ -573,6 +573,43 @@ describe("march CLI", () => {
     ).toEqual({
       "tests/quarantine/src/example/quarantine-me.test.ts": origin,
     });
+    expect(
+      fs.readFileSync(path.join(repoRoot, "tests/quarantine/INDEX.md"), "utf-8"),
+    ).toContain(
+      "| `tests/quarantine/src/example/quarantine-me.test.ts` | `src/example/quarantine-me.test.ts` |",
+    );
+  });
+
+  it("march quarantine index writes an empty generated roster without prompting", () => {
+    const repoRoot = makeRealRepo();
+
+    const result = runWithEnv(
+      ["quarantine", "index"],
+      {},
+      { cwd: repoRoot },
+    );
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain(
+      "Generated tests/quarantine/INDEX.md with 0 quarantined test(s).",
+    );
+    expect(
+      fs.readFileSync(path.join(repoRoot, "tests/quarantine/INDEX.md"), "utf-8"),
+    ).toContain("No quarantined tests.");
+  });
+
+  it("march quarantine index fails loudly (non-zero exit) when INDEX.md cannot be written", () => {
+    const repoRoot = makeRealRepo();
+    // Occupy the INDEX.md path with a directory so the write fails (EISDIR);
+    // the command must surface the failure rather than exit 0 silently.
+    fs.mkdirSync(path.join(repoRoot, "tests/quarantine/INDEX.md"), {
+      recursive: true,
+    });
+
+    const result = runWithEnv(["quarantine", "index"], {}, { cwd: repoRoot });
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr).toContain("tests/quarantine/INDEX.md");
   });
 
   it("march help init exits 0 and stdout contains init-specific help text", () => {
