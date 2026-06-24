@@ -33,6 +33,29 @@ export function describeExecError(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+/**
+ * Read the hostname of the machine running the default tmux server via
+ * `tmux list-sessions -F '#{host}'`. tmux evaluates `#{host}` server-side, so
+ * this reports the *server's* host, not ours. Returns null when no server is
+ * reachable or tmux is absent. Used to detect a foreign-owned socket (e.g. the
+ * autostarted castra container) before `march up` claims the host anchor.
+ */
+export function readTmuxServerHost(): string | null {
+  try {
+    const out = execFileSync("tmux", ["list-sessions", "-F", "#{host}"], {
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    const host = out
+      .toString()
+      .split("\n")
+      .map((line) => line.trim())
+      .find(Boolean);
+    return host ?? null;
+  } catch {
+    return null;
+  }
+}
+
 /** True when a local Docker image exists (`docker image inspect` exits 0). */
 export function imageExists(image: string): boolean {
   try {

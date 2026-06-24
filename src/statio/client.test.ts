@@ -134,9 +134,30 @@ describe("StatioClient", () => {
   });
 
   it("forwards bearer token and slice trace headers", async () => {
-    const fetchImpl = vi.fn(async () =>
-      jsonResponse(200, { repo: { owner: "Balexda/March", defaultBranch: "master" } }),
-    );
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce(
+        jsonResponse(200, { repo: { owner: "Balexda/March", defaultBranch: "master" } }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          pr: {
+            number: 12,
+            url: "https://example.test/pr/12",
+            state: "OPEN",
+            mergeable: "MERGEABLE",
+            reviewDecision: "APPROVED",
+            headBranch: "feature",
+            title: "Change",
+            author: "dev",
+            checks: "PASS",
+            failedChecks: [],
+            unresolvedThreads: [],
+            threadCount: 0,
+            needsResponseCount: 0,
+          },
+        }),
+      );
     const client = new StatioClient({
       baseUrl: "http://statio:9689/",
       token: "tok",
@@ -145,12 +166,19 @@ describe("StatioClient", () => {
     });
 
     await client.repoInfo();
+    await client.getPr(12);
 
     const [url, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
     expect(url).toBe("http://statio:9689/v1/repo");
     const headers = init.headers as Record<string, string>;
     expect(headers.authorization).toBe("Bearer tok");
     expect(headers["x-march-slice-id"]).toBe("slice-5");
+
+    const [prUrl, prInit] = fetchImpl.mock.calls[1] as unknown as [string, RequestInit];
+    expect(prUrl).toBe("http://statio:9689/v1/prs/12");
+    const prHeaders = prInit.headers as Record<string, string>;
+    expect(prHeaders.authorization).toBe("Bearer tok");
+    expect(prHeaders["x-march-slice-id"]).toBe("slice-5");
   });
 
   it("maps non-2xx envelopes to typed errors preserving code and status", async () => {

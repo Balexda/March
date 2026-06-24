@@ -5,17 +5,22 @@ import Fastify, {
 } from "fastify";
 import { emitStatioRequestSpan } from "../observability/statio-trace.js";
 import { CLI_VERSION } from "../shared/version.js";
+import { createGhForgeAdapter } from "./adapter.js";
 import { STATIO_SERVICE_NAME } from "./config.js";
-import { createGhRepoMetadataReader, type RepoMetadataReader } from "./forge.js";
+import type { RepoMetadataReader } from "./forge.js";
 import {
+  type ForgeClient,
   type ForgeErrorCode,
   StatioForgeError,
   StatioNotFoundError,
   StatioValidationError,
 } from "./types.js";
 
+type StatioRouteForgeClient = Pick<ForgeClient, "repoInfo" | "getPr" | "reachable">;
+
 export interface BuildStatioServerOptions {
   readonly repoReader?: RepoMetadataReader;
+  readonly forgeClient?: StatioRouteForgeClient;
   readonly token?: string;
   readonly logger?: FastifyBaseLogger | boolean;
   readonly startedAt?: number;
@@ -32,8 +37,40 @@ function bearerMatches(authorization: string | undefined, token: string): boolea
   return provided.length === expected.length && timingSafeEqual(provided, expected);
 }
 
+function createDefaultForgeClient(): StatioRouteForgeClient {
+  const adapter = createGhForgeAdapter();
+  return {
+    repoInfo: adapter.repoInfo,
+    getPr: adapter.getPr,
+    async reachable(): Promise<boolean> {
+      try {
+        await adapter.repoInfo();
+        return true;
+      } catch {
+        return false;
+      }
+    },
+  };
+}
+
+function parsePullRequestNumber(raw: string): number {
+  if (!/^[1-9]\d*$/.test(raw)) {
+    throw new StatioValidationError(
+      `Pull request number must be a positive integer; received ${raw}.`,
+    );
+  }
+  const number = Number(raw);
+  if (!Number.isSafeInteger(number)) {
+    throw new StatioValidationError(
+      `Pull request number must be a safe integer; received ${raw}.`,
+    );
+  }
+  return number;
+}
+
 export function buildStatioServer(options: BuildStatioServerOptions = {}): FastifyInstance {
-  const repoReader = options.repoReader ?? createGhRepoMetadataReader();
+  const forgeClient = options.forgeClient ?? createDefaultForgeClient();
+  const repoReader = options.repoReader ?? forgeClient;
   const token = options.token?.trim() || undefined;
   const startedAt = options.startedAt ?? Date.now();
   const loggerOption = options.logger ?? false;
@@ -102,6 +139,11 @@ export function buildStatioServer(options: BuildStatioServerOptions = {}): Fasti
   }));
 
   app.get("/v1/repo", async () => ({ repo: await repoReader.repoInfo() }));
+
+  app.get<{ Params: { number: string } }>("/v1/prs/:number", async (request) => {
+    const number = parsePullRequestNumber(request.params.number);
+    return { pr: await forgeClient.getPr(number) };
+  });
 
   return app;
 }

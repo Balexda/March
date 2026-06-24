@@ -3,6 +3,15 @@ import type { DoctorContext } from "../context.js";
 import type { CheckResult, Finding } from "../types.js";
 
 /**
+ * `os.hostname()` and tmux `#{host}` can differ in case across platforms;
+ * normalize before comparing so a casing-only mismatch isn't a false `warn`.
+ * The original hostnames are still surfaced in finding details.
+ */
+function normalizeHost(host: string): string {
+  return host.trim().toLowerCase();
+}
+
+/**
  * tmux server ownership — the default tmux server must run on the host, not
  * inside the castra container.
  *
@@ -56,7 +65,7 @@ export async function checkTmuxOwnership(ctx: DoctorContext): Promise<CheckResul
     return { check: "tmux-ownership", findings };
   }
 
-  if (serverHost === ctx.localHostname) {
+  if (normalizeHost(serverHost) === normalizeHost(ctx.localHostname)) {
     findings.push({
       check: "tmux-ownership",
       title: "tmux",

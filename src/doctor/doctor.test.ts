@@ -484,6 +484,14 @@ describe("tmux-ownership", () => {
     expect(r.findings[0].detail).toContain("host-owned");
   });
 
+  it("passes when host and server names differ only in case", async () => {
+    const c = ctx({ tmuxServerHost: "Host-Machine", localHostname: "host-machine" });
+    const r = await checkTmuxOwnership(c);
+    expect(sev(r.findings)).toEqual(["pass"]);
+    // The original (un-normalized) hostname is still surfaced in the detail.
+    expect(r.findings[0].detail).toContain("Host-Machine");
+  });
+
   it("warns with a down/up remedy when the server runs inside the container", async () => {
     const c = ctx({ tmuxServerHost: "cd42c4740280", localHostname: "host-machine" });
     const r = await checkTmuxOwnership(c);

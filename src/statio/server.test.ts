@@ -12,6 +12,8 @@ import { StatioClient } from "./client.js";
 import type { RepoMetadataReader } from "./forge.js";
 import { buildStatioServer } from "./server.js";
 import {
+  type ForgeClient,
+  type PullRequestSummary,
   StatioForgeError,
   StatioNotFoundError,
   StatioValidationError,
@@ -19,10 +21,49 @@ import {
 } from "./types.js";
 
 const REPO: RepoInfo = { owner: "Balexda/March", defaultBranch: "master" };
+const PR: PullRequestSummary = {
+  number: 42,
+  url: "https://github.com/Balexda/March/pull/42",
+  state: "OPEN",
+  mergeable: "MERGEABLE",
+  reviewDecision: "APPROVED",
+  headBranch: "feature/statio",
+  title: "Add Statio",
+  author: "dev",
+  checks: "PASS",
+  failedChecks: [],
+  unresolvedThreads: [
+    {
+      id: 10,
+      path: "src/statio/server.ts",
+      line: 112,
+      author: "reviewer",
+      bodyPreview: "Please adjust this.",
+      lastAuthor: "reviewer",
+      lastCommentAt: "2026-05-26T00:00:00Z",
+      commentCount: 1,
+      commentIds: [10],
+      needsResponse: true,
+    },
+  ],
+  threadCount: 1,
+  needsResponseCount: 1,
+};
+
+type StatioRouteForgeClient = Pick<ForgeClient, "repoInfo" | "getPr" | "reachable">;
 
 function fakeReader(overrides: Partial<RepoMetadataReader> = {}): RepoMetadataReader {
   return {
     repoInfo: vi.fn().mockResolvedValue(REPO),
+    reachable: vi.fn().mockResolvedValue(true),
+    ...overrides,
+  };
+}
+
+function fakeForge(overrides: Partial<StatioRouteForgeClient> = {}): StatioRouteForgeClient {
+  return {
+    repoInfo: vi.fn().mockResolvedValue(REPO),
+    getPr: vi.fn().mockResolvedValue(PR),
     reachable: vi.fn().mockResolvedValue(true),
     ...overrides,
   };
@@ -111,6 +152,91 @@ describe("statio server", () => {
 
     expect(res.statusCode).toBe(404);
     expect(res.json().error.code).toBe("not_found");
+  });
+
+  it("returns pull request summaries through the authorized /v1/prs/:number wrapper", async () => {
+    const forgeClient = fakeForge();
+    app = buildStatioServer({ forgeClient, token: "secret" });
+
+    const res = await app.inject({
+      method: "GET",
+      url: "/v1/prs/42",
+      headers: { authorization: "Bearer secret" },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ pr: PR });
+    expect(forgeClient.getPr).toHaveBeenCalledWith(42);
+  });
+
+  it("rejects unauthenticated pull request reads before calling the forge seam", async () => {
+    const forgeClient = fakeForge();
+    app = buildStatioServer({ forgeClient, token: "secret" });
+
+    const res = await app.inject({ method: "GET", url: "/v1/prs/42" });
+
+    expect(res.statusCode).toBe(401);
+    expect(res.json().error.code).toBe("unauthorized");
+    expect(forgeClient.getPr).not.toHaveBeenCalled();
+  });
+
+  it("returns invalid_request envelopes for malformed pull request numbers", async () => {
+    const forgeClient = fakeForge();
+    app = buildStatioServer({ forgeClient, token: "secret" });
+
+    for (const number of ["abc", "0", "-1", "1.5"]) {
+      const res = await app.inject({
+        method: "GET",
+        url: `/v1/prs/${number}`,
+        headers: { authorization: "Bearer secret" },
+      });
+
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error.code).toBe("invalid_request");
+    }
+    expect(forgeClient.getPr).not.toHaveBeenCalled();
+  });
+
+  it("maps absent pull requests to not_found envelopes", async () => {
+    app = buildStatioServer({
+      forgeClient: fakeForge({
+        getPr: vi.fn(async () => {
+          throw new StatioNotFoundError("pull request not found");
+        }),
+      }),
+      token: "secret",
+    });
+
+    const res = await app.inject({
+      method: "GET",
+      url: "/v1/prs/404",
+      headers: { authorization: "Bearer secret" },
+    });
+
+    expect(res.statusCode).toBe(404);
+    expect(res.json()).toEqual({
+      error: { code: "not_found", message: "pull request not found" },
+    });
+  });
+
+  it("maps pull request forge failures to forge_error envelopes", async () => {
+    app = buildStatioServer({
+      forgeClient: fakeForge({
+        getPr: vi.fn(async () => {
+          throw new StatioForgeError("gh failed");
+        }),
+      }),
+      token: "secret",
+    });
+
+    const res = await app.inject({
+      method: "GET",
+      url: "/v1/prs/42",
+      headers: { authorization: "Bearer secret" },
+    });
+
+    expect(res.statusCode).toBe(502);
+    expect(res.json()).toEqual({ error: { code: "forge_error", message: "gh failed" } });
   });
 
   it("does not gate sibling paths that merely share the /v1 prefix", async () => {
@@ -248,6 +374,32 @@ describe("statio request tracing", () => {
     });
   });
 
+  it("keeps slice correlation on pull request reads", async () => {
+    initOtel({ MARCH_OTEL: "1", MARCH_OTEL_ENDPOINT: "http://localhost:4318" });
+    const spans = captureSpans();
+    app = buildStatioServer({ forgeClient: fakeForge(), token: "secret" });
+
+    const res = await app.inject({
+      method: "GET",
+      url: "/v1/prs/42",
+      headers: {
+        authorization: "Bearer secret",
+        "x-march-slice-id": "slice-abc",
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const span = spans.find((s) => s.name === "statio.request")!;
+    expect(span).toBeDefined();
+    expect(span.spanContext().traceId).toBe(traceIdForDispatch("slice-abc"));
+    expect(span.parentSpanContext?.spanId).toBe(spanIdForDispatch("slice-abc"));
+    expect(span.attributes).toMatchObject({
+      "statio.method": "GET",
+      "statio.route": "/v1/prs/:number",
+      "statio.status_class": "2xx",
+    });
+  });
+
   it("emits a service-local request span when no slice id is provided", async () => {
     initOtel({ MARCH_OTEL: "1", MARCH_OTEL_ENDPOINT: "http://localhost:4318" });
     const spans = captureSpans();
@@ -375,7 +527,10 @@ describe("statio client/server compatibility", () => {
   });
 
   async function listen(reader: RepoMetadataReader, token = "secret"): Promise<string> {
-    app = buildStatioServer({ repoReader: reader, token });
+    app =
+      "getPr" in reader
+        ? buildStatioServer({ forgeClient: reader as StatioRouteForgeClient, token })
+        : buildStatioServer({ repoReader: reader, token });
     await app.listen({ host: "127.0.0.1", port: 0 });
     const address = app.server.address() as AddressInfo;
     return `http://127.0.0.1:${address.port}`;
@@ -389,6 +544,15 @@ describe("statio client/server compatibility", () => {
     await expect(client.reachable()).resolves.toBe(true);
   });
 
+  it("lets the async client call the authorized /v1/prs/:number route", async () => {
+    const forgeClient = fakeForge();
+    const baseUrl = await listen(forgeClient);
+    const client = new StatioClient({ baseUrl, token: "secret", traceKey: "slice-abc" });
+
+    await expect(client.getPr(42)).resolves.toEqual(PR);
+    expect(forgeClient.getPr).toHaveBeenCalledWith(42);
+  });
+
   it("maps service-generated non-2xx envelopes to client errors", async () => {
     const baseUrl = await listen(fakeReader());
     const client = new StatioClient({ baseUrl, token: "wrong" });
@@ -396,6 +560,23 @@ describe("statio client/server compatibility", () => {
     await expect(client.repoInfo()).rejects.toMatchObject({
       code: "unauthorized",
       status: 401,
+    });
+  });
+
+  it("maps pull request route envelopes to client errors", async () => {
+    const baseUrl = await listen(
+      fakeForge({
+        getPr: vi.fn(async () => {
+          throw new StatioForgeError("gh down");
+        }),
+      }),
+    );
+    const client = new StatioClient({ baseUrl, token: "secret" });
+
+    await expect(client.getPr(42)).rejects.toMatchObject({
+      code: "forge_error",
+      status: 502,
+      message: "gh down",
     });
   });
 
