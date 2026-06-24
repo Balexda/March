@@ -1247,7 +1247,8 @@ legate
       });
       console.log(
         `Requested recovery of ${id} (profile=${profile}) (seq=${event.seq}). ` +
-          `The legate will drop the escalated slice and re-dispatch it on its next tick.`,
+          `The legate will walk the graduated recovery ladder on its next tick — ` +
+          `least-destructive first (restart/relaunch in place), dropping + re-dispatching only as a last resort.`,
       );
       process.exitCode = SUCCESS;
     } catch (err) {

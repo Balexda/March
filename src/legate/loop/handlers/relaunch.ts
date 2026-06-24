@@ -39,7 +39,14 @@ const ELIGIBLE_STAGES = new Set([
   "pr-rebasing",
   "pr-in-rerun",
 ]);
-const RELAUNCH_LIMIT = 3;
+/** Max steward relaunch attempts per slice before the budget is spent. Exported
+ *  so the graduated-recovery driver (#413) reads the SAME budget — its rung-1→2
+ *  descent fires exactly when relaunch has stopped firing. */
+export const RELAUNCH_LIMIT = 3;
+
+/** The transient-retry-counts key for a slice's steward-relaunch budget. Shared
+ *  with the recovery driver (#413) so both sides key the counter identically. */
+export const relaunchRetryKey = (sliceId: string): string => "relaunch-steward:" + sliceId;
 
 export interface RelaunchDecision {
   readonly sliceId: string;
@@ -121,7 +128,7 @@ export function assess(state: LoopState): RelaunchDecision[] {
     const bareBranch = rawBranch.replace(/^feature\//, "");
     const featureBranch = "feature/" + bareBranch;
     const expectedDirName = "feature-" + bareBranch.replace(/\//g, "-");
-    const key = "relaunch-steward:" + sliceId;
+    const key = relaunchRetryKey(sliceId);
     const prev = Number.isFinite(counts[key]) ? counts[key] : 0;
     const attempt = prev + 1;
     if (attempt > RELAUNCH_LIMIT) continue;
@@ -261,8 +268,8 @@ export async function apply(
   // launch error) must still advance the counter, else assess re-selects it every
   // tick forever and RELAUNCH_LIMIT is never reached (the relaunch_failed churn).
   const recordAttempt = (d: RelaunchDecision): void => {
-    counts["relaunch-steward:" + d.sliceId] = d.attempt;
-    ctx.emitTransition?.({ type: "retry.counted", key: "relaunch-steward:" + d.sliceId, count: d.attempt });
+    counts[relaunchRetryKey(d.sliceId)] = d.attempt;
+    ctx.emitTransition?.({ type: "retry.counted", key: relaunchRetryKey(d.sliceId), count: d.attempt });
   };
 
   for (const d of decisions) {

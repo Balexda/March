@@ -2,12 +2,19 @@
  * @l0 @deterministic @ci
  */
 import { describe, expect, it, vi } from "vitest";
-import { apply, assess } from "./recovery.js";
+import { apply, assess, deriveUnescalateStage } from "./recovery.js";
 import type { HandlerContext, LoopState } from "../state/types.js";
-import { recoveryAttemptKey } from "../pure/slice.js";
+import { relaunchRetryKey } from "./relaunch.js";
 
-function loopState(over: Partial<LoopState> = {}): LoopState {
-  const raw = { slices: {}, archived_slices: {}, transient_retry_counts: {}, repo: { path: "/repo" }, ...((over as any).raw || {}) };
+function loopState(over: Partial<LoopState> & { raw?: any } = {}): LoopState {
+  const raw = {
+    slices: {},
+    archived_slices: {},
+    transient_retry_counts: {},
+    castra_recover_attempts: {},
+    repo: { path: "/repo" },
+    ...((over as any).raw || {}),
+  };
   return {
     ts: "T",
     statePresent: true,
@@ -26,109 +33,324 @@ function loopState(over: Partial<LoopState> = {}): LoopState {
   };
 }
 
-function ctx(): HandlerContext {
+function ctx(over: Partial<HandlerContext> = {}): HandlerContext {
   return {
-    meta: { processor_name: "loop", paired_legate: "legate" } as any,
+    meta: { profile: "march", processor_name: "loop", paired_legate: "legate" } as any,
     ts: "T",
-    castra: {} as any,
+    castra: { removeSession: vi.fn().mockResolvedValue({ removed: true }) } as any,
     broodTeardown: vi.fn(),
+    emitTransition: vi.fn(),
     emit: vi.fn(),
     log: vi.fn(),
-  };
+    ...over,
+  } as any;
 }
 
-describe("recovery assess", () => {
-  it("emits no decisions when no recovery requests were drained", () => {
+/** Register a session into the snapshot the handler reads (`sessionsById`). */
+function withSession(state: LoopState, id: string, status: string): LoopState {
+  state.sessionsById.set(id, { id, status });
+  state.sessions.push({ id, status, group: state.workerGroup });
+  return state;
+}
+
+const emitted = (c: HandlerContext): any[] => (c.emitTransition as any).mock.calls.map((a: any[]) => a[0]);
+
+describe("deriveUnescalateStage", () => {
+  it("returns pr-open when the slice carries a live PR, else implementing", () => {
+    expect(deriveUnescalateStage({ pr: { number: 9 } })).toBe("pr-open");
+    expect(deriveUnescalateStage({ pr: { number: 0 } })).toBe("implementing");
+    expect(deriveUnescalateStage({})).toBe("implementing");
+    expect(deriveUnescalateStage(undefined)).toBe("implementing");
+  });
+});
+
+describe("recovery assess (candidate union)", () => {
+  it("emits no decisions with no requests and no mid-walk slices", () => {
     expect(assess(loopState())).toEqual([]);
     expect(assess(loopState({ recoveryRequests: [] }))).toEqual([]);
   });
 
-  it("emits one decision per request, in order", () => {
-    const state = loopState({ recoveryRequests: ["a", "b"] });
-    expect(assess(state)).toEqual([{ sliceId: "a" }, { sliceId: "b" }]);
+  it("unions drained requests with mid-walk slices, de-duped by id", () => {
+    const state = loopState({
+      recoveryRequests: ["a", "a", "b"],
+      raw: {
+        slices: {
+          a: { stage: "escalated" }, // also requested → still one decision
+          c: { stage: "pr-open", recovery_rung: 1 }, // mid-walk, not requested
+        },
+      },
+    });
+    const ids = assess(state).map((d) => d.sliceId).sort();
+    expect(ids).toEqual(["a", "b", "c"]);
   });
 
-  it("de-dups repeated requests for the same slice in one tick", () => {
-    const state = loopState({ recoveryRequests: ["a", "a", "b", "a"] });
-    expect(assess(state)).toEqual([{ sliceId: "a" }, { sliceId: "b" }]);
+  it("a mid-walk slice (carrying recovery_rung, NOT re-requested) continues descending", () => {
+    // The slice is mid-walk via its recovery_rung — it must keep descending on its
+    // accruing budget, not be in recoveryRequests (inner-rung events no longer
+    // re-enter the request list).
+    const state = loopState({
+      raw: { slices: { s1: { stage: "pr-open", recovery_rung: 1, branch: "feature/a", worker_session_id: "gone", pr: { number: 7 } } } },
+    });
+    const [d] = assess(state);
+    expect(d.action).toBe("prepare-relaunch");
+  });
+
+  it("an OPERATOR re-request restarts the ladder fresh even mid-walk (resets the budget)", () => {
+    // The #387 case: an operator re-issues `march legate recover` after fixing the
+    // blocker. The slice is mid-walk (rung 2) with its relaunch budget spent — a
+    // re-request must restart from the gentle rung with a clean budget (relaunch),
+    // NOT read the spent budget and descend to the nuke.
+    const state = loopState({
+      recoveryRequests: ["s1"],
+      raw: {
+        slices: { s1: { stage: "pr-open", recovery_rung: 2, branch: "feature/a", worker_session_id: "gone", pr: { number: 7 } } },
+        transient_retry_counts: { [relaunchRetryKey("s1")]: 3 },
+      },
+    });
+    const [d] = assess(state);
+    expect(d.action).toBe("prepare-relaunch");
   });
 });
 
-describe("recovery apply", () => {
-  it("drops an escalated slice + clears its budget so it is no longer in-flight", async () => {
-    const sliceId = "s1";
+describe("rung 0b — steward awaiting input (refuse)", () => {
+  it("refuses and touches nothing", async () => {
+    const state = withSession(
+      loopState({
+        recoveryRequests: ["s1"],
+        raw: { slices: { s1: { stage: "escalated", escalated_reason: "steward_awaiting_input", worker_session_id: "sess1", branch: "feature/a" } } },
+        perSlice: { s1: { stewardReport: { status: "awaiting_input", classified: true } } },
+      }),
+      "sess1",
+      "running",
+    );
+    const c = ctx();
+    const res = await apply(assess(state), c, state);
+    expect(res.actions[0]).toMatchObject({ action: "recovery-awaiting-input" });
+    // untouched
+    expect(state.slices.s1.stage).toBe("escalated");
+    expect(state.slices.s1.recovery_rung).toBeUndefined();
+    expect(emitted(c)).toEqual([]);
+  });
+
+  it("awaiting_input wins even when the session is also errored", async () => {
+    const state = withSession(
+      loopState({
+        recoveryRequests: ["s1"],
+        raw: { slices: { s1: { stage: "escalated", worker_session_id: "sess1", branch: "feature/a" } }, castra_recover_attempts: {} },
+        perSlice: { s1: { stewardReport: { status: "awaiting_input", classified: true } } },
+      }),
+      "sess1",
+      "error",
+    );
+    const [d] = assess(state);
+    expect(d.action).toBe("refuse-awaiting-input");
+  });
+});
+
+describe("rung 0a — errored session (Castra-recover hold)", () => {
+  it("un-escalates, sets rung 0, resets the Castra budget on a fresh request, emits stage.changed", async () => {
+    const state = withSession(
+      loopState({
+        recoveryRequests: ["s1"],
+        raw: {
+          slices: { s1: { stage: "escalated", escalated_reason: "worker_error", worker_session_id: "sess1", branch: "feature/a", pr: { number: 9 } } },
+          castra_recover_attempts: { sess1: 3 }, // already spent — fresh request must reset it
+        },
+      }),
+      "sess1",
+      "error",
+    );
+    const c = ctx();
+    const res = await apply(assess(state), c, state);
+    expect(res.actions[0]).toMatchObject({ action: "recovery-hold" });
+    expect(state.slices.s1).toMatchObject({ stage: "pr-open", recovery_rung: 0, escalated_reason: undefined });
+    expect(state.raw.castra_recover_attempts.sess1).toBeUndefined();
+    expect(emitted(c)).toContainEqual(expect.objectContaining({ type: "slice.stage.changed", stage: "pr-open" }));
+  });
+
+  it("holds (does not descend) while the Castra budget remains on a mid-walk slice", async () => {
+    const state = withSession(
+      loopState({
+        raw: {
+          slices: { s1: { stage: "pr-open", recovery_rung: 0, worker_session_id: "sess1", branch: "feature/a", pr: { number: 9 } } },
+          castra_recover_attempts: { sess1: 1 },
+        },
+      }),
+      "sess1",
+      "error",
+    );
+    const [d] = assess(state);
+    expect(d.action).toBe("hold-castra");
+  });
+});
+
+describe("rung 0a→1 — Castra budget spent, drop the wedged session", () => {
+  it("removes the errored session (worktree preserved), un-escalates to rung 1, records the rung durably", async () => {
+    const state = withSession(
+      loopState({
+        raw: {
+          slices: { s1: { stage: "pr-open", recovery_rung: 0, worker_session_id: "sess1", branch: "feature/a", pr: { number: 9 } } },
+          castra_recover_attempts: { sess1: 3 },
+        },
+      }),
+      "sess1",
+      "error",
+    );
+    const c = ctx();
+    const res = await apply(assess(state), c, state);
+    expect(c.castra.removeSession).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionId: "sess1", pruneWorktree: false }),
+    );
+    expect(res.actions[0]).toMatchObject({ action: "recovery-descend" });
+    expect(state.slices.s1).toMatchObject({ stage: "pr-open", recovery_rung: 1 });
+    expect(emitted(c)).toContainEqual(expect.objectContaining({ type: "slice.recovery.requested", rung: 1 }));
+  });
+});
+
+describe("rung 1 — relaunch prep (vanished session)", () => {
+  it("un-escalates a vanished-session slice with an open PR to pr-open and records rung 1 once", async () => {
     const state = loopState({
-      recoveryRequests: [sliceId],
+      recoveryRequests: ["s1"],
+      raw: { slices: { s1: { stage: "escalated", escalated_reason: "worker_error", worker_session_id: "gone", branch: "feature/a", worktree_path: "/wt/a", pr: { number: 9 } } } },
+    });
+    const c = ctx();
+    const res = await apply(assess(state), c, state);
+    expect(res.actions[0]).toMatchObject({ action: "recovery-relaunch" });
+    expect(state.slices.s1).toMatchObject({ stage: "pr-open", recovery_rung: 1, escalated_reason: undefined });
+    // worktree preserved for relaunch
+    expect(state.slices.s1.worktree_path).toBe("/wt/a");
+    expect(emitted(c)).toContainEqual(expect.objectContaining({ type: "slice.recovery.requested", rung: 1 }));
+  });
+
+  it("nukes a PR-less vanished slice (no PR to relaunch onto → fresh re-dispatch)", async () => {
+    // A spawn that died before opening a PR: relaunch is structurally inapplicable
+    // (it requires pr.number), so the ladder degrades straight to the nuke instead
+    // of un-escalating to a stage that would strand it (no relaunch, dispatch skips
+    // it as in-flight).
+    const state = loopState({
+      recoveryRequests: ["s1"],
+      raw: { slices: { s1: { stage: "escalated", escalated_reason: "hatchery_dispatch_failed", worker_session_id: "gone", branch: "feature/a" } } },
+    });
+    const c = ctx();
+    const res = await apply(assess(state), c, state);
+    expect(res.actions[0]).toMatchObject({ action: "recovery-nuke" });
+    expect(state.slices.s1).toBeUndefined();
+    expect(emitted(c)).toContainEqual(expect.objectContaining({ type: "slice.recovery.requested", rung: 3 }));
+  });
+
+  it("a FRESH request on a stranded slice (relaunch budget already spent) relaunches, not nukes — clears the warm budget", async () => {
+    // The live #387 case: pr-open, vanished session, relaunch-steward budget = 3
+    // (the loop gave up). A fresh operator recover must mirror the begin-graduated
+    // fold reset into the warm raw so the ladder gets a clean relaunch attempt
+    // instead of reading the spent budget and descending straight to the nuke.
+    const state = loopState({
+      recoveryRequests: ["s1"],
       raw: {
-        slices: { [sliceId]: { stage: "escalated", escalated_reason: "hatchery_dispatch_failed", branch: "feature/a" } },
-        archived_slices: {},
-        transient_retry_counts: { [recoveryAttemptKey(sliceId)]: 2 },
-        repo: { path: "/repo" },
+        slices: { s1: { stage: "pr-open", escalated_reason: "hatchery_dispatch_failed", worker_session_id: "gone", branch: "feature/a", worktree_path: "/wt/a", pr: { number: 387 } } },
+        transient_retry_counts: { [relaunchRetryKey("s1")]: 3, ["dispatch-recovery:s1"]: 2 },
       },
     });
-    const res = await apply(assess(state), ctx(), state);
+    const c = ctx();
+    const res = await apply(assess(state), c, state);
+    expect(res.actions[0]).toMatchObject({ action: "recovery-relaunch" });
+    expect(state.slices.s1).toMatchObject({ stage: "pr-open", recovery_rung: 1 });
+    // The spent budgets were cleared so relaunch fires fresh next tick.
+    expect(state.raw.transient_retry_counts[relaunchRetryKey("s1")]).toBeUndefined();
+    expect(state.raw.transient_retry_counts["dispatch-recovery:s1"]).toBeUndefined();
+    expect(emitted(c)).toContainEqual(expect.objectContaining({ type: "slice.recovery.requested", rung: 1 }));
+  });
 
-    expect(state.raw.slices[sliceId]).toBeUndefined();
-    // state.slices mirrors raw.slices (same reference), so it is gone there too.
-    expect(state.slices[sliceId]).toBeUndefined();
-    expect(state.raw.transient_retry_counts[recoveryAttemptKey(sliceId)]).toBeUndefined();
-    expect(res.mutated).toBe(true);
-    // The action is RETURNED (not written directly) so runHeartbeat appends it in
-    // pipeline order; "cleared" is derived from the drop, not a pre-apply snapshot.
-    expect(res.actions).toEqual([
-      { action: "slice-recovery", sliceId, detail: expect.stringContaining("cleared escalated slice") },
-    ]);
+  it("does NOT re-emit the rung event on a maintain tick (already rung 1)", async () => {
+    const state = loopState({
+      raw: { slices: { s1: { stage: "pr-open", recovery_rung: 1, worker_session_id: "gone", branch: "feature/a", pr: { number: 9 } } } },
+    });
+    const c = ctx();
+    await apply(assess(state), c, state);
+    expect(emitted(c).filter((e) => e.type === "slice.recovery.requested")).toEqual([]);
+  });
+});
+
+describe("rung 1→2→3 — descent on relaunch-budget exhaustion", () => {
+  it("rung 1 with the relaunch budget spent + session gone holds one tick at rung 2", async () => {
+    const state = loopState({
+      raw: {
+        slices: { s1: { stage: "pr-open", recovery_rung: 1, worker_session_id: "gone", branch: "feature/a", pr: { number: 9 } } },
+        transient_retry_counts: { [relaunchRetryKey("s1")]: 3 },
+      },
+    });
+    const c = ctx();
+    const res = await apply(assess(state), c, state);
+    expect(res.actions[0]).toMatchObject({ action: "recovery-descend" });
+    expect(state.slices.s1.recovery_rung).toBe(2);
+    expect(emitted(c)).toContainEqual(expect.objectContaining({ type: "slice.recovery.requested", rung: 2 }));
+  });
+
+  it("rung 2 with the session still gone nukes (tombstone + fresh re-dispatch)", async () => {
+    const state = loopState({
+      raw: {
+        slices: { s1: { stage: "pr-open", recovery_rung: 2, worker_session_id: "gone", branch: "feature/a", pr: { number: 9 } } },
+        transient_retry_counts: { [relaunchRetryKey("s1")]: 3 },
+      },
+    });
+    const c = ctx();
+    const res = await apply(assess(state), c, state);
+    expect(res.actions[0]).toMatchObject({ action: "recovery-nuke" });
+    expect(state.slices.s1).toBeUndefined();
+    expect(emitted(c)).toContainEqual(expect.objectContaining({ type: "slice.recovery.requested", rung: 3 }));
+  });
+
+  it("rung 2 completes (not nukes) when the relaunch turned out to have succeeded", async () => {
+    // The relaunched session surfaced healthy in the next sense → walk complete.
+    const state = withSession(
+      loopState({
+        raw: {
+          slices: { s1: { stage: "pr-open", recovery_rung: 2, worker_session_id: "new-sess", branch: "feature/a", pr: { number: 9 } } },
+          transient_retry_counts: { [relaunchRetryKey("s1")]: 3 },
+        },
+      }),
+      "new-sess",
+      "running",
+    );
+    const res = await apply(assess(state), ctx(), state);
+    expect(res.actions[0]).toMatchObject({ action: "recovery-complete" });
+    expect(state.slices.s1.recovery_rung).toBeUndefined();
+  });
+});
+
+describe("completion + edge cases", () => {
+  it("a non-escalated slice with a live session completes the walk and clears the rung", async () => {
+    const state = withSession(
+      loopState({ raw: { slices: { s1: { stage: "pr-open", recovery_rung: 1, worker_session_id: "sess1" } } } }),
+      "sess1",
+      "running",
+    );
+    const res = await apply(assess(state), ctx(), state);
+    expect(res.actions[0]).toMatchObject({ action: "recovery-complete" });
+    expect(state.slices.s1.recovery_rung).toBeUndefined();
+  });
+
+  it("an operator request on an unknown slice is a tolerant complete (no throw)", async () => {
+    const state = loopState({ recoveryRequests: ["ghost"] });
+    const res = await apply(assess(state), ctx(), state);
+    expect(res.actions[0]).toMatchObject({ action: "recovery-complete", sliceId: "ghost" });
+    expect(res.actions[0].detail).toContain("no tracked slice");
+  });
+
+  it("de-dups repeated requests for the same slice into one decision", () => {
+    const state = loopState({
+      recoveryRequests: ["s1", "s1", "s1"],
+      raw: { slices: { s1: { stage: "escalated", worker_session_id: "gone", branch: "feature/a" } } },
+    });
+    expect(assess(state).filter((d) => d.sliceId === "s1")).toHaveLength(1);
   });
 
   it("does not write the action log directly (heartbeat owns ordering)", async () => {
     const state = loopState({
       recoveryRequests: ["s1"],
-      raw: { slices: { s1: { stage: "escalated" } }, archived_slices: {}, transient_retry_counts: {}, repo: { path: "/repo" } },
+      raw: { slices: { s1: { stage: "escalated", worker_session_id: "gone", branch: "feature/a" } } },
     });
     const c = ctx();
     await apply(assess(state), c, state);
-    expect(c.emit).not.toHaveBeenCalled();
     expect(c.log).not.toHaveBeenCalled();
-  });
-
-  it("drops a slice that was archived (un-archives it for re-dispatch)", async () => {
-    const sliceId = "s1";
-    const state = loopState({
-      recoveryRequests: [sliceId],
-      raw: {
-        slices: {},
-        archived_slices: { [sliceId]: { terminal_state: "CLOSED", branch: "feature/a" } },
-        transient_retry_counts: {},
-        repo: { path: "/repo" },
-      },
-    });
-    await apply(assess(state), ctx(), state);
-    expect(state.raw.archived_slices[sliceId]).toBeUndefined();
-  });
-
-  it("is a tolerant no-op (still mutated) reporting no tracked slice for an unknown slice", async () => {
-    const state = loopState({ recoveryRequests: ["ghost"] });
-    const res = await apply(assess(state), ctx(), state);
-    expect(res.actions[0]).toMatchObject({ action: "slice-recovery", sliceId: "ghost" });
-    expect(res.actions[0].detail).toContain("no tracked slice");
-    expect(res.mutated).toBe(true);
-  });
-
-  it("only clears retry counters keyed to the recovered slice", async () => {
-    const state = loopState({
-      recoveryRequests: ["s1"],
-      raw: {
-        slices: { s1: { stage: "escalated" } },
-        archived_slices: {},
-        transient_retry_counts: {
-          [recoveryAttemptKey("s1")]: 2,
-          s1: 1,
-          [recoveryAttemptKey("s2")]: 1,
-        },
-        repo: { path: "/repo" },
-      },
-    });
-    await apply(assess(state), ctx(), state);
-    expect(state.raw.transient_retry_counts).toEqual({ [recoveryAttemptKey("s2")]: 1 });
   });
 });

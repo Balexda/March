@@ -110,9 +110,12 @@ describe("coordinator runTick", () => {
     expect(d.dispatch.completePending).toHaveBeenCalledWith(state.raw, NOW);
   });
 
-  it("recovers an escalated slice to a FRESH re-dispatch in the same tick (#238)", async () => {
-    // A still-ready smithy item whose deterministic slice is escalated with its
-    // recovery budget exhausted — the wedge #238 describes.
+  it("starts an operator recovery at the GENTLE rung — un-escalate for relaunch, not a fresh re-dispatch (#413)", async () => {
+    // A still-ready smithy item whose deterministic slice is escalated with a
+    // vanished steward (no live session). PR1's begin-graduated request lands it
+    // here; the ladder must un-escalate it (rung 1) so relaunch re-attaches a
+    // steward to the preserved worktree — NOT tombstone + fresh dispatch (that is
+    // now rung 3 only). This is the inversion #413/#409 are about.
     const item = { path: "a.spec.md", next_action: { command: "smithy.forge", arguments: ["a.spec.md", "1"] }, parent_path: "a.spec.md" };
     const sliceId = dispatchSliceId(item);
     const raw = {
@@ -123,10 +126,14 @@ describe("coordinator runTick", () => {
           command: "smithy.forge",
           arguments: ["a.spec.md", "1"],
           artifact_path: "a.spec.md",
+          branch: "feature/a",
+          worktree_path: "/wt/a",
+          pr: { number: 9, url: "u", state: "OPEN" },
         },
       },
       archived_slices: {},
-      transient_retry_counts: { ["dispatch-recovery:" + sliceId]: 2 },
+      transient_retry_counts: {},
+      castra_recover_attempts: {},
       repo: { path: "/repo" },
     };
     const state: LoopState = {
@@ -146,17 +153,22 @@ describe("coordinator runTick", () => {
       recoveryRequests: [sliceId],
     };
 
-    const d = deps(state);
+    const emitTransition = vi.fn();
+    const d = deps(state, { emitTransition });
     const out = await runTick(d);
 
-    // recovery dropped the escalated slice + cleared its budget...
-    expect(out.results.recovery.actions).toEqual([
-      { action: "slice-recovery", sliceId, detail: expect.stringContaining("cleared escalated slice") },
-    ]);
-    expect(state.raw.transient_retry_counts["dispatch-recovery:" + sliceId]).toBeUndefined();
-    // ...so dispatch re-selected it as a FRESH launch (not the #211 recover path).
-    expect(d.dispatch.launchDispatch).toHaveBeenCalledWith(state.raw, NOW, item, sliceId);
+    // Recovery un-escalated to pr-open (the slice has a PR) and marked rung 1 —
+    // the worktree is preserved for relaunch.
+    expect(out.results.recovery.actions[0]).toMatchObject({ action: "recovery-relaunch", sliceId });
+    expect(state.raw.slices[sliceId]).toMatchObject({ stage: "pr-open", recovery_rung: 1, escalated_reason: undefined });
+    expect(state.raw.slices[sliceId].worktree_path).toBe("/wt/a");
+    // It did NOT drop the slice, so dispatch never re-launched it fresh (relaunch
+    // owns it now); the durable rung-1 transition was recorded.
+    expect(d.dispatch.launchDispatch).not.toHaveBeenCalled();
     expect(d.dispatch.recoverDispatch).not.toHaveBeenCalled();
+    expect(emitTransition.mock.calls.map((a) => a[0])).toContainEqual(
+      expect.objectContaining({ type: "slice.recovery.requested", rung: 1 }),
+    );
   });
 
   it("counts steward-nudge actions separately from the babysit umbrella (#212)", async () => {

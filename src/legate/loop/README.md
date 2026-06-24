@@ -48,10 +48,14 @@ drop-in (see [`state/types.ts`](./state/types.ts)).
 
 ### The handler pipeline (order is load-bearing)
 
-`cleanup → ghost-cleanup → relaunch → babysit → recovery → dispatch`, awaited in
+`cleanup → ghost-cleanup → castra-recover → relaunch → babysit → recovery →
+adopt-from-fold → dispatch`, awaited in
 order. Do **not** parallelize — earlier handlers drop sessions/slices that later
-ones must not act on (and `recovery` must run before `dispatch` so the slice it
-drops frees the still-ready item for a fresh re-dispatch this same tick).
+ones must not act on. `recovery` runs **after** `castra-recover`/`relaunch` (it
+*prepares* a stuck slice — un-escalates it — for the gentle owner to heal next
+tick, and descends a rung once that owner's budget is spent) and **before**
+`dispatch` (so its last-resort rung-3 nuke frees the still-ready item for a fresh
+re-dispatch this same tick).
 
 | Handler | What it does |
 |---------|--------------|
@@ -59,7 +63,7 @@ drops frees the still-ready item for a fresh re-dispatch this same tick).
 | [`ghost-cleanup`](./handlers/ghost-cleanup.ts) | A worker session whose worktree isn't tracked by any non-terminal slice (and old enough to not be a launch race) is an orphan → request Brood teardown. |
 | [`relaunch`](./handlers/relaunch.ts) | A non-terminal slice with an open PR but a vanished worker → re-attach a fresh opus steward to the existing worktree/branch. Throttled per slice. |
 | [`babysit`](./handlers/babysit.ts) | The steward watchdog: login-block recovery, worker-error escalation, stranded-steward nudges, PR discovery, conflict / review-thread / CI handling, post-dispatch re-nudges. |
-| [`recovery`](./handlers/recovery.ts) | Operator recovery ([#238](https://github.com/Balexda/March/issues/238)): drains `slice.recovery.requested` from the Herald inbox and drops the named slice from the in-memory working state (both `slices` and `archived_slices`) + clears its retry budget, so the still-ready smithy work re-dispatches fresh. Acting on the *drained* request is what reaches the warm loop — the request's fold edit alone never does (warm-loop invisibility). |
+| [`recovery`](./handlers/recovery.ts) | Graduated recovery ladder ([#413](https://github.com/Balexda/March/issues/413), fixes [#409](https://github.com/Balexda/March/issues/409); supersedes the [#238](https://github.com/Balexda/March/issues/238) drop-only path). An operator `slice.recovery.requested` (or a slice already carrying `recovery_rung`) walks least-destructive-first: **0b** steward `awaiting_input` → refuse; **0a** errored session → un-escalate and let `castra-recover` restart it in place (descend by dropping the wedged session when its budget is spent); **1** vanished session → un-escalate to the working stage so `relaunch` re-attaches a steward to the **preserved** worktree; **2** relaunch budget spent → hold one tick to confirm; **3** last resort → tombstone + fresh re-dispatch (the old #238 behavior). Each descent is recorded durably (`slice.recovery.requested {rung}`) so a cold-start resumes mid-ladder; the walk completes the moment the slice is un-escalated with a live steward. Acting on the *drained* request is what reaches the warm loop — the fold edit alone never does (warm-loop invisibility). |
 | [`dispatch`](./handlers/dispatch.ts) | Smithy's layer-0 ready items → Hatchery codex spawns; drains completed spawns; bounded auto-recovery of recoverable escalations (#211). |
 
 The heartbeat ([`heartbeat.ts`](./heartbeat.ts)) folds the tick's results into a
