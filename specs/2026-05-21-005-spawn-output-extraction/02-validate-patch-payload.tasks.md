@@ -17,7 +17,7 @@
 
 ### Tasks
 
-- [ ] **Introduce spawn output validation types and failure categories**
+- [x] **Introduce spawn output validation types and failure categories**
 
   Add the validation-facing types in the spawn output extraction ownership area, keeping them backend-neutral where the contracts require it and backend-specific only at the parser boundary. Model successful validation with accepted patch text, normalized touched paths, and a stable digest, and model failed validation with stable failure categories plus bounded diagnostics suitable for operator display. Keep the module independent of Brood persistence and Hatchery Steward launch code so this slice cannot trigger downstream PR integration.
 
@@ -27,7 +27,7 @@
   - Diagnostics are bounded and do not include unbounded raw backend output (FR-013).
   - The validation module has no Hatchery Steward launch side effect and no Brood persistence dependency (AS 2.6).
 
-- [ ] **Parse Claude Code and Codex envelopes into exactly one candidate patch**
+- [x] **Parse Claude Code and Codex envelopes into exactly one candidate patch**
 
   Implement backend-specific adapter behavior for the live supported backend names, treating raw backend output as untrusted JSON and returning a single candidate patch only when the selected envelope shape contains exactly one usable patch payload. Reject malformed JSON, unsupported backend names, missing patch content, and ambiguous multiple-patch output as structured validation failures.
 
@@ -38,7 +38,7 @@
   - Output with multiple incompatible candidate patches returns an ambiguity failure rather than choosing nondeterministically (FR-005).
   - Tests cover both supported backend names and do not introduce Gemini behavior.
 
-- [ ] **Validate git patch targets against the spawn worktree**
+- [x] **Validate git patch targets against the spawn worktree**
 
   Add patch validation that extracts every changed path from an accepted candidate patch, normalizes those targets against the supplied spawn worktree root, and rejects any patch that is absolute, contains parent-directory traversal, resolves outside the worktree, or uses a patch form the downstream apply path cannot safely process. Preserve the accepted patch text only after every touched path has passed validation.
 
@@ -49,7 +49,7 @@
   - Empty and no-op patches are rejected before any downstream handoff can consume them (FR-008).
   - Tests include create, modify, delete, rename, and mode-only examples when those forms are accepted; unsupported forms are rejected with stable failure categories.
 
-- [ ] **Wire validation result behavior without downstream PR integration**
+- [x] **Wire validation result behavior without downstream PR integration**
 
   Expose a validation entrypoint that composes backend envelope parsing with patch target validation and returns a terminal validation result to future extraction persistence. Ensure rejected payloads stop at diagnostics and never call Hatchery Steward launch or PR integration surfaces. Keep retry behavior deterministic for unchanged raw output by deriving accepted patch identity from the patch content rather than the validation timestamp.
 
