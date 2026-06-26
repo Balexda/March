@@ -17,7 +17,7 @@
 
 ### Tasks
 
-- [ ] **Add a spawn-owned output capture module**
+- [x] **Add a spawn-owned output capture module**
 
   Add the initial extraction module under the spawn subsystem. It should accept terminal spawn context and an output-source adapter, refuse nonterminal or nonzero-exit spawns, read output through the adapter, apply a configured capture limit, and return a backend-neutral envelope or a clean failed capture result.
 
@@ -28,7 +28,7 @@
   - Output larger than the configured limit is bounded deterministically, reports `truncated: true`, and retains a diagnostic tail instead of unbounded raw output, satisfying US1 AS 1.5.
   - Successful capture returns a `SpawnOutputEnvelope`-shaped value containing spawn id, backend, source, bounded raw JSON text, truncation status, and capture timestamp.
 
-- [ ] **Cover envelope capture with source-adapter tests**
+- [x] **Cover envelope capture with source-adapter tests**
 
   Add focused tests for the capture module using injected output-source fixtures. The tests should prove lifecycle gating, empty-output failure, capture limiting, and deterministic truncation behavior without requiring Docker, Castra, or Hatchery services.
 
