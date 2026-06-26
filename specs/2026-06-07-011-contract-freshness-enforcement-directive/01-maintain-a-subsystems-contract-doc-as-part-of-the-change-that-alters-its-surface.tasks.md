@@ -18,7 +18,7 @@
 
 ### Tasks
 
-- [ ] **State the same-change contract update convention**
+- [x] **State the same-change contract update convention**
 
   Add the edit-time maintenance convention to the repository instructions that govern subsystem contract upkeep. The prose should require same-change updates when mapped public surfaces change, make clear that changes outside mapped public surfaces do not require contract edits, and cite the March vision and operating-philosophy docs for the autonomous-component posture.
 
@@ -29,7 +29,7 @@
   - The convention cites `docs/vision.md` and `docs/operating-philosophy.md` rather than restating their philosophy.
   - No runtime subsystem behavior, service route, Herald event, Hatchery job, Brood record, Castra session, Legate loop action, CI workflow, or AI-on-check-in step is introduced.
 
-- [ ] **Preserve the non-gating boundary**
+- [x] **Preserve the non-gating boundary**
 
   Keep the authored convention advisory in effect and non-blocking in mechanism. Any local freshness verdict remains optional guidance, and the slice must not make contract freshness a merge, PR, slice, or autonomous-agent gate.
 
