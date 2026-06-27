@@ -2,7 +2,15 @@
  * @l1 @deterministic @ci
  */
 import { describe, expect, it } from "vitest";
-import { buildEscalations, buildLoopServer, buildStatus, escalationsForWorkingState, type LoopHttpContext } from "./http.js";
+import {
+  buildEscalations,
+  buildLoopServer,
+  buildStatus,
+  escalationsForWorkingState,
+  resolveRespondTarget,
+  type LoopHttpContext,
+  type RespondInput,
+} from "./http.js";
 import type { LoopSnapshot } from "./runtime.js";
 
 const heartbeat = {
@@ -161,6 +169,142 @@ describe("buildEscalations + /escalations route", () => {
       expect(res.statusCode).toBe(200);
       expect(res.json().count).toBe(1);
       expect(res.json().escalations[0].session_id).toBe("sess-1"); // operator can find the session
+    } finally {
+      await app.close();
+    }
+  });
+});
+
+describe("resolveRespondTarget (pure)", () => {
+  it("resolves a steward_awaiting_input slice to its session id", () => {
+    expect(resolveRespondTarget(escalatedWorkingState, "spec-re-read-us1-s2-forge")).toEqual({
+      ok: true,
+      sessionId: "sess-1",
+      reason: "steward_awaiting_input",
+    });
+  });
+
+  it("yields a null sessionId when the slice has no worker session", () => {
+    const ws = { slices: { x: { stage: "escalated", escalated_reason: "steward_awaiting_input" } } };
+    expect(resolveRespondTarget(ws, "x")).toEqual({ ok: true, sessionId: null, reason: "steward_awaiting_input" });
+  });
+
+  it("rejects an unknown slice", () => {
+    expect(resolveRespondTarget(escalatedWorkingState, "nope")).toMatchObject({ ok: false });
+    expect((resolveRespondTarget(escalatedWorkingState, "nope") as any).error).toMatch(/unknown slice/);
+  });
+
+  it("rejects a non-escalated slice", () => {
+    expect(resolveRespondTarget(escalatedWorkingState, "healthy-us1-s2-forge")).toMatchObject({ ok: false });
+    expect((resolveRespondTarget(escalatedWorkingState, "healthy-us1-s2-forge") as any).error).toMatch(/not escalated/);
+  });
+
+  it("rejects an escalation that is not steward_awaiting_input (points at recover)", () => {
+    const ws = { slices: { d: { stage: "escalated", escalated_reason: "hatchery_dispatch_failed" } } };
+    const r = resolveRespondTarget(ws, "d") as any;
+    expect(r.ok).toBe(false);
+    expect(r.error).toMatch(/not steward_awaiting_input/);
+    expect(r.error).toMatch(/march legate recover/);
+  });
+});
+
+describe("POST /escalations/:sliceId/respond", () => {
+  function ctxWithRespond(spy: (input: RespondInput) => void, result: any): LoopHttpContext {
+    return {
+      startedAtMs: Date.now() - 5000,
+      getSnapshot: () => snapshot(),
+      respondToEscalation: async (input) => {
+        spy(input);
+        return result;
+      },
+    };
+  }
+
+  it("answer mode: parses message + profile and returns the result (200)", async () => {
+    let seen: RespondInput | null = null;
+    const app = buildLoopServer(
+      ctxWithRespond((i) => (seen = i), { ok: true, profile: "march", sliceId: "s1", mode: "answer", delivered: true, cleared: true }),
+    );
+    try {
+      const res = await app.inject({
+        method: "POST",
+        url: "/escalations/s1/respond",
+        payload: { profile: "march", message: "use option B" },
+      });
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toMatchObject({ ok: true, mode: "answer", delivered: true, cleared: true });
+      expect(seen).toEqual({ profile: "march", sliceId: "s1", message: "use option B", ack: false });
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("ack mode: no message, ack:true → marks read", async () => {
+    let seen: RespondInput | null = null;
+    const app = buildLoopServer(
+      ctxWithRespond((i) => (seen = i), { ok: true, profile: "march", sliceId: "s1", mode: "ack", cleared: true }),
+    );
+    try {
+      const res = await app.inject({
+        method: "POST",
+        url: "/escalations/s1/respond?profile=march",
+        payload: { ack: true },
+      });
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toMatchObject({ ok: true, mode: "ack", cleared: true });
+      expect(seen).toEqual({ profile: "march", sliceId: "s1", ack: true }); // profile read from query
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("400 when neither message nor ack is provided", async () => {
+    const app = buildLoopServer(ctxWithRespond(() => {}, { ok: true }));
+    try {
+      const res = await app.inject({ method: "POST", url: "/escalations/s1/respond", payload: { profile: "march" } });
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error).toMatch(/message.*or.*ack/i);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("400 when profile is missing", async () => {
+    const app = buildLoopServer(ctxWithRespond(() => {}, { ok: true }));
+    try {
+      const res = await app.inject({ method: "POST", url: "/escalations/s1/respond", payload: { ack: true } });
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error).toMatch(/profile is required/);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("501 when respond is not wired into the context", async () => {
+    const app = buildLoopServer({ startedAtMs: Date.now(), getSnapshot: () => snapshot() });
+    try {
+      const res = await app.inject({ method: "POST", url: "/escalations/s1/respond", payload: { profile: "march", ack: true } });
+      expect(res.statusCode).toBe(501);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("maps an unknown-profile result to 404", async () => {
+    const app = buildLoopServer(ctxWithRespond(() => {}, { ok: false, error: 'unknown profile "ghost".', profiles: ["smithy"] }));
+    try {
+      const res = await app.inject({ method: "POST", url: "/escalations/s1/respond", payload: { profile: "ghost", ack: true } });
+      expect(res.statusCode).toBe(404);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("maps a generic not-ok result to 400", async () => {
+    const app = buildLoopServer(ctxWithRespond(() => {}, { ok: false, error: "slice has no steward session." }));
+    try {
+      const res = await app.inject({ method: "POST", url: "/escalations/s1/respond", payload: { profile: "march", message: "hi" } });
+      expect(res.statusCode).toBe(400);
     } finally {
       await app.close();
     }

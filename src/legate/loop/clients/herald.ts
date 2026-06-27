@@ -245,4 +245,22 @@ export class LegateHerald {
   async append(profile: string, event: TransitionEvent): Promise<HeraldEvent> {
     return this.client.append({ ...event, profile });
   }
+
+  /**
+   * Record a steward self-report for `profile` via Herald's `POST /steward-report`
+   * (the steward.report event is NOT in the legate's transition-event set, so it
+   * can't go through {@link append}). The respond endpoint posts a non-awaiting
+   * status here to clear a latched `steward_awaiting_input` escalation.
+   */
+  async stewardReport(
+    profile: string,
+    input: {
+      sliceId: string;
+      classified: boolean;
+      status?: "awaiting_input" | "reported" | "working";
+      summary?: string;
+    },
+  ): Promise<HeraldEvent> {
+    return this.client.stewardReport({ profile, ...input });
+  }
 }
