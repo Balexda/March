@@ -1333,6 +1333,7 @@ legate
         mode?: string;
         delivered?: boolean;
         cleared?: boolean;
+        recoveryRequested?: boolean;
         error?: string;
       };
       if (!res.ok || !result.ok) {
@@ -1342,8 +1343,9 @@ legate
       }
       const what = result.mode === "answer" ? `answer delivered=${result.delivered}` : "marked read";
       console.log(
-        `Responded to ${id} (profile=${profileName}): ${what}, escalation cleared=${result.cleared}. ` +
-          "The legate unlatches it and resumes babysit handling on its next tick.",
+        `Responded to ${id} (profile=${profileName}): ${what}, report cleared=${result.cleared}, ` +
+          `recovery requested=${result.recoveryRequested}. The legate walks the graduated recovery ladder ` +
+          "on its next tick — un-escalating the slice back to babysit's PR (fix + merge) handling.",
       );
       process.exitCode = SUCCESS;
     } catch (err) {
