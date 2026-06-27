@@ -20,6 +20,7 @@ import {
   startSpawnContainer,
   waitForSpawnContainer,
 } from "../spawn/container-launch.js";
+import { gitHubAuthConfigArgs } from "../spawn/git-auth.js";
 import { createBuildContext, SnapshotError } from "../spawn/snapshot.js";
 import { resolveToolchain, resolveToolchainImage } from "../spawn/toolchain.js";
 import {
@@ -956,6 +957,100 @@ function runGitApply(args: readonly string[], cwd: string): void {
   });
 }
 
+/** Run a git command for its side effect, discarding stdout. */
+function runGitQuiet(args: readonly string[], cwd: string): void {
+  execFileSync("git", args as string[], {
+    cwd,
+    stdio: ["ignore", "ignore", "pipe"],
+    maxBuffer: EXEC_MAX_BUFFER,
+  });
+}
+
+/** Run a git command and return its trimmed stdout. */
+function runGitCapture(args: readonly string[], cwd: string): string {
+  return execFileSync("git", args as string[], {
+    cwd,
+    encoding: "utf-8",
+    stdio: ["ignore", "pipe", "pipe"],
+    maxBuffer: EXEC_MAX_BUFFER,
+  }).trim();
+}
+
+/**
+ * Resolve a repo's default branch (e.g. `main` / `master`) from
+ * `refs/remotes/origin/HEAD`, falling back to `main` when `origin/HEAD` is not
+ * set locally. Exposed for tests.
+ */
+export function resolveDefaultBranch(worktreePath: string): string {
+  try {
+    const ref = runGitCapture(
+      ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+      worktreePath,
+    );
+    const name = ref.replace(/^origin\//, "").trim();
+    if (name) return name;
+  } catch {
+    // origin/HEAD unset (e.g. a worktree whose remote HEAD was never fetched) —
+    // fall through to the conventional default.
+  }
+  return "main";
+}
+
+/**
+ * Pin a freshly-created manager worktree to the up-to-date default branch so the
+ * worker's snapshot base — and the apply target, which is this same worktree —
+ * contain already-merged files (#460).
+ *
+ * Without this, agent-deck cuts the worktree from whatever stale local base it
+ * chose and never fetches; when that base predates a merge that *created* a
+ * file, the worker can't see it, authors it from scratch, and the resulting
+ * `new file` patch is rejected at apply time ("already exists in index") — a
+ * conflict `--3way` cannot resolve — stranding the slice after the recovery
+ * budget is spent.
+ *
+ * Safe to hard-reset because the manager branch has no commits yet (the worker
+ * runs against a container snapshot, not this worktree). The fetch uses the
+ * SSH→HTTPS token rewrite (#300/#301) so it works inside the legate/hatchery
+ * container, and is best-effort: a network failure degrades to the last-known
+ * `origin/<default>` rather than stranding the spawn. Returns the resolved
+ * default branch for telemetry. Exposed for tests.
+ */
+export interface PinBaseResult {
+  /** The resolved default branch (`main` / `master`). */
+  readonly defaultBranch: string;
+  /** Whether `git fetch origin <default>` succeeded this run. */
+  readonly fetched: boolean;
+  /** Whether the worktree was hard-reset onto `origin/<default>`. */
+  readonly pinned: boolean;
+}
+
+export function pinManagerWorktreeToDefaultBranch(
+  worktreePath: string,
+  env: NodeJS.ProcessEnv = process.env,
+): PinBaseResult {
+  const defaultBranch = resolveDefaultBranch(worktreePath);
+  const auth = gitHubAuthConfigArgs(env);
+  let fetched = false;
+  try {
+    runGitQuiet([...auth, "fetch", "origin", defaultBranch], worktreePath);
+    fetched = true;
+  } catch {
+    // Best-effort: offline / auth-less degrades to the last-known
+    // origin/<default>; the reset below still pins to whatever tracking ref
+    // is present, which is strictly fresher than an arbitrary agent-deck base.
+  }
+  let pinned = false;
+  try {
+    runGitQuiet(["reset", "--hard", `origin/${defaultBranch}`], worktreePath);
+    pinned = true;
+  } catch {
+    // No origin/<default> tracking ref to pin onto (e.g. a never-fetched repo).
+    // Leave the worktree on agent-deck's base rather than stranding the spawn —
+    // this only ever happens when there was nothing fresher to pin to anyway.
+  }
+  return { defaultBranch, fetched, pinned };
+}
+
 export function validateHatcherySpawnBackend(backend: SpawnBackend): void {
   const missingEnvVars = missingRequiredEnvVars(backend);
   const missingMounts = missingCredentialMounts(backend);
@@ -1056,6 +1151,22 @@ export async function runHatcherySpawn(
     // fails the dispatch. The onSucceeded hook later enriches this row.
     const stewardSessionId = manager.sessionId;
     const managerWorktree = manager.worktreePath;
+
+    // Pin the worker's base to the up-to-date default branch (#460). agent-deck
+    // cut this worktree from a stale local base and never fetched; pinning it to
+    // origin/<default> NOW — before the snapshot the worker diffs against AND
+    // before the apply that targets this same worktree — makes the worker edit
+    // already-merged files instead of re-creating them and colliding at apply.
+    dispatch.span("manager.pin_base", (pinSpan) => {
+      const pin = pinManagerWorktreeToDefaultBranch(managerWorktree, process.env);
+      pinSpan.setAttributes({
+        "march.worktree": managerWorktree,
+        "march.default_branch": pin.defaultBranch,
+        "march.pin_base.fetched": pin.fetched,
+        "march.pin_base.pinned": pin.pinned,
+      });
+    });
+
     await dispatch.spanAsync("brood.register", () =>
       registerStewardLaunchWithBrood({
         spawnId,
