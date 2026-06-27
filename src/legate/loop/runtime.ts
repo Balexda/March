@@ -247,6 +247,10 @@ export async function respondToEscalation(input: RespondInput): Promise<RespondR
     mode === "answer"
       ? clampReportSummary(`operator answer via respond API: ${message}`)
       : "operator marked read via respond API (returned to babysit handling).";
+  // 1. Flip the steward report to a NON-awaiting status. This clears the
+  //    dashboard's `steward_awaiting_input` and, crucially, lifts the recovery
+  //    ladder's rung-0b refusal (recovery.ts refuses to touch a slice whose
+  //    report is `awaiting_input`).
   try {
     await legateHerald().stewardReport(profile, {
       sliceId: input.sliceId,
@@ -262,10 +266,33 @@ export async function respondToEscalation(input: RespondInput): Promise<RespondR
       mode,
       delivered,
       cleared: false,
-      error: `${mode === "answer" ? "answer delivered, but " : ""}failed to clear the escalation: ${err?.message ?? String(err)}`,
+      error: `${mode === "answer" ? "answer delivered, but " : ""}failed to clear the steward report: ${err?.message ?? String(err)}`,
     };
   }
-  return { ok: true, profile, sliceId: input.sliceId, mode, delivered, cleared: true };
+  // 2. Drive the graduated recovery ladder so the slice actually LEAVES the
+  //    `escalated` stage. The report flip alone is insufficient: babysit skips a
+  //    slice whose session is dead (`if (!worker) continue`), which is exactly
+  //    the state these false positives sit in after a restart. The recovery
+  //    ladder (now un-refused by step 1) un-escalates least-destructively —
+  //    relaunch re-attaches a fresh steward to the preserved worktree for an
+  //    open PR — handing the slice back to babysit's PR (fix + merge) path.
+  let recoveryRequested = false;
+  try {
+    await legateHerald().append(profile, { type: "slice.recovery.requested", sliceId: input.sliceId });
+    recoveryRequested = true;
+  } catch (err: any) {
+    return {
+      ok: false,
+      profile,
+      sliceId: input.sliceId,
+      mode,
+      delivered,
+      cleared: true,
+      recoveryRequested: false,
+      error: `report cleared, but failed to request recovery (the slice may stay escalated): ${err?.message ?? String(err)}`,
+    };
+  }
+  return { ok: true, profile, sliceId: input.sliceId, mode, delivered, cleared: true, recoveryRequested };
 }
 
 function now() {

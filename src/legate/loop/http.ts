@@ -32,8 +32,11 @@ export interface RespondResult {
   mode?: "answer" | "ack";
   /** Answer mode: whether the message reached the steward session. */
   delivered?: boolean;
-  /** Whether the awaiting-input latch was cleared (a non-awaiting report posted). */
+  /** Whether the steward report was flipped to a non-awaiting status. */
   cleared?: boolean;
+  /** Whether a recovery request was appended to drive the slice out of `escalated`
+   *  (the graduated ladder un-escalates + relaunches even for a dead session). */
+  recoveryRequested?: boolean;
   error?: string;
   /** On an unknown-profile error, the known profiles (parity with /status). */
   profiles?: string[];
@@ -223,11 +226,14 @@ export function buildLoopServer(ctx: LoopHttpContext): FastifyInstance {
 
   // Respond to a steward escalated as `steward_awaiting_input`. Two modes:
   //   - `{ "message": "<answer>" }` delivers the operator's answer into the live
-  //     steward session (Castra send) and then clears the escalation latch.
+  //     steward session (Castra send), then un-escalates the slice.
   //   - `{ "ack": true }` marks it read WITHOUT an answer — for the false-positive
   //     "stuck" stewards that actually just finished / await merge / have open
-  //     review threads: clears the latch so the slice falls back into babysit
-  //     handling (the /smithy.fix + merge path) on the next tick.
+  //     review threads.
+  // Both flip the steward report to non-awaiting AND drive the graduated recovery
+  // ladder, so the slice leaves `escalated` and returns to babysit's PR (fix +
+  // merge) path — even when its session is dead (babysit skips dead-session
+  // slices, so the report flip alone can't un-escalate them).
   // Profile from the body or `?profile=`. Read-but-acting, so it's the one POST.
   app.post("/escalations/:sliceId/respond", async (request, reply) => {
     const params = (request.params ?? {}) as Record<string, string | undefined>;
