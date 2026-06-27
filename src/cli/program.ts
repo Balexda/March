@@ -1258,6 +1258,101 @@ legate
     }
   });
 
+legate
+  .command("respond <sliceId>")
+  .description(
+    "Respond to a steward escalated as `steward_awaiting_input`: deliver an answer into its live session (--message), or just mark it read (--ack) to clear the false-positive escalation and hand the slice back to babysit handling (the /smithy.fix + merge path). Calls the running legate's HTTP API (MARCH_LEGATE_URL).",
+  )
+  .option(
+    "--profile <profile>",
+    "Profile the slice belongs to (sliceIds are only unique within a profile). When omitted, the sole registered profile is used; required if more than one is registered.",
+  )
+  .option("--message <text>", "Answer to deliver into the live steward session (answer mode).")
+  .option("--ack", "Mark read without an answer: clear the escalation back to babysit handling.")
+  .action(async (sliceId: string, opts: { profile?: string; message?: string; ack?: boolean }) => {
+    commandHandled = true;
+    const id = (sliceId ?? "").trim();
+    const message = opts.message?.trim();
+    if (id.length === 0) {
+      process.stderr.write("Provide a non-empty <sliceId> to respond to.\n");
+      process.exitCode = ERROR;
+      return;
+    }
+    if (!message && !opts.ack) {
+      process.stderr.write("Provide --message <text> to answer the steward, or --ack to mark it read.\n");
+      process.exitCode = ERROR;
+      return;
+    }
+    const { ProfileClient } = await import("../herald/profiles/client.js");
+    const { HeraldClientError } = await import("../herald/service/client.js");
+    try {
+      // Resolve the owning profile (sliceIds are unique only within a profile),
+      // mirroring `legate recover`.
+      let profileName = opts.profile?.trim();
+      if (!profileName) {
+        const active = await new ProfileClient().list();
+        if (active.length === 1) {
+          profileName = active[0].profile;
+        } else if (active.length === 0) {
+          process.stderr.write("No profiles are registered with Herald — nothing to respond to.\n");
+          process.exitCode = ERROR;
+          return;
+        } else {
+          process.stderr.write(
+            `Multiple profiles are registered (${active.map((p) => p.profile).join(", ")}); ` +
+              "pass --profile <profile> to disambiguate which one owns the slice.\n",
+          );
+          process.exitCode = ERROR;
+          return;
+        }
+      }
+      // The respond endpoint lives on the running legate service, not Herald.
+      const base = (
+        process.env.MARCH_LEGATE_URL?.trim() ||
+        `http://127.0.0.1:${process.env.MARCH_LEGATE_PORT?.trim() || process.env.MARCH_LEGATE_LOOP_PORT?.trim() || DEFAULT_LOOP_PORT}`
+      ).replace(/\/+$/, "");
+      const url = `${base}/escalations/${encodeURIComponent(id)}/respond`;
+      const body = message ? { profile: profileName, message } : { profile: profileName, ack: true };
+      let res: Response;
+      try {
+        res = await fetch(url, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
+        });
+      } catch (err) {
+        process.stderr.write(
+          `Could not reach the legate service at ${base}: ${(err as Error).message}. ` +
+            "Is `march legate serve` up? Set MARCH_LEGATE_URL to override.\n",
+        );
+        process.exitCode = ERROR;
+        return;
+      }
+      const result = (await res.json().catch(() => ({}))) as {
+        ok?: boolean;
+        mode?: string;
+        delivered?: boolean;
+        cleared?: boolean;
+        error?: string;
+      };
+      if (!res.ok || !result.ok) {
+        process.stderr.write((result.error ?? `legate respond failed (HTTP ${res.status}).`) + "\n");
+        process.exitCode = ERROR;
+        return;
+      }
+      const what = result.mode === "answer" ? `answer delivered=${result.delivered}` : "marked read";
+      console.log(
+        `Responded to ${id} (profile=${profileName}): ${what}, escalation cleared=${result.cleared}. ` +
+          "The legate unlatches it and resumes babysit handling on its next tick.",
+      );
+      process.exitCode = SUCCESS;
+    } catch (err) {
+      const m = err instanceof HeraldClientError ? err.message : (err as Error).message;
+      process.stderr.write(m + "\n");
+      process.exitCode = ERROR;
+    }
+  });
+
 // Profile registry — Herald is the source of truth for which profiles the single
 // march-legate service drives. `march legate init` registers automatically; these
 // verbs manage profiles directly (and are the clean seam for a future profile service).

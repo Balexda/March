@@ -6,6 +6,7 @@ import { ProfileClient } from "../../herald/profiles/client.js";
 import {
   configureLoopRuntime,
   getLoopSnapshot,
+  respondToEscalation,
   startLoopRuntime,
 } from "./runtime.js";
 import { startLoopHttpServer } from "./http.js";
@@ -68,7 +69,11 @@ export async function runLoop(opts: RunLoopOptions = {}): Promise<void> {
     env.MARCH_LEGATE_HOST?.trim() ||
     env.MARCH_LEGATE_LOOP_HOST?.trim() ||
     (env.MARCH_LEGATE_CONTAINER === "1" ? "0.0.0.0" : "127.0.0.1");
-  const server = await startLoopHttpServer({ startedAtMs, getSnapshot: getLoopSnapshot }, port, host);
+  const server = await startLoopHttpServer(
+    { startedAtMs, getSnapshot: getLoopSnapshot, respondToEscalation },
+    port,
+    host,
+  );
 
   const loop = startLoopRuntime();
   console.log(`March Legate service listening on http://${host}:${port} (profile-agnostic)`);

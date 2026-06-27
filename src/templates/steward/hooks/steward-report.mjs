@@ -97,39 +97,56 @@ function endsWithQuestion(text) {
 /**
  * Best-effort classification of a steward's last message into a steward-report.
  *
+ * Classification is driven by the steward's *actions in the transcript*, NOT by
+ * which hook event fired. Claude Code's `Notification` fires both on a genuine
+ * prompt AND on a ~60s idle timeout — including on a steward that has *finished*
+ * and gone idle — so the event alone is not evidence of awaiting input. Treating
+ * every `Notification` as `awaiting_input` was the dominant false-positive source
+ * (a finished "PR opened, standing by" steward idles → `Notification` → escalated
+ * as steward-stuck; see the escalation audit / #459). We instead read the last
+ * assistant message and key off what the steward actually did:
+ *
+ * - `awaiting_input` — the steward invoked `AskUserQuestion` (the unambiguous
+ *   "asking the user" action), or emitted a `NEED:` escalation / decision-request
+ *   phrase / trailing question.
  * - `reported`   — the message carries a PR URL (`PR: <url>` or a github pull
  *   link); the steward finished and opened the PR.
- * - `awaiting_input` — a `Notification` event, an `AskUserQuestion`, a `NEED:`
- *   escalation, a trailing question, or a decision-request phrase: the steward
- *   wants a human.
- * - `working`    — a `Stop` with substantive progress text that is none of the
- *   above; reported so a prior `awaiting_input` escalation clears.
+ * - `working`    — substantive progress text that is none of the above; reported
+ *   so a prior `awaiting_input` escalation clears.
  *
  * Anything we cannot read (no message) → `{ classified: false }` with no status,
- * leaving it for the legate-agent classifier (P2). Returns the POST body fields.
+ * leaving it for the local classifier (#459). A `Notification` with no readable
+ * transcript message is likewise left unclassified rather than asserting
+ * awaiting_input — we have no evidence the steward is parked vs merely idle.
+ * `eventName` is intentionally not consulted for the status decision.
+ * Returns the POST body fields.
  */
 export function classify(message, eventName) {
-  // A Notification means Claude Code is asking for the operator's attention —
-  // in a steward that is, by construction, "awaiting input".
-  if (eventName === "Notification") {
-    return {
-      status: "awaiting_input",
-      summary: clampSummary(message?.text ?? "Steward requested attention (notification)."),
-      classified: true,
-    };
-  }
+  void eventName; // deliberately not used: the event does not determine status.
 
   if (!message || !message.text) {
+    // No readable transcript message. We cannot tell a parked steward from a
+    // finished-then-idle one (both fire `Notification`), so do not assert
+    // awaiting_input — leave it for the local classifier (#459).
     return { classified: false };
   }
   const text = message.text;
 
+  // Strongest deterministic signal: the steward actually invoked AskUserQuestion.
+  // An unambiguous "asking the user" action, independent of prose or hook event.
+  if (message.usedAskUserQuestion) {
+    return { status: "awaiting_input", summary: clampSummary(text), classified: true };
+  }
+
+  // A PR URL means the steward finished and opened the PR.
   const prMatch = text.match(PR_URL_RE) ?? text.match(GH_PR_URL_RE);
   if (prMatch) {
     return { status: "reported", summary: clampSummary(prMatch[1] ?? prMatch[0]), classified: true };
   }
 
-  if (message.usedAskUserQuestion || AWAITING_RE.test(text) || endsWithQuestion(text)) {
+  // A structured escalation (`NEED:` per the steward-pr skill), a decision-request
+  // phrase, or a trailing question — the steward wants a human.
+  if (AWAITING_RE.test(text) || endsWithQuestion(text)) {
     return { status: "awaiting_input", summary: clampSummary(text), classified: true };
   }
 

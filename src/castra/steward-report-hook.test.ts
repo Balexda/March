@@ -65,11 +65,30 @@ describe("extractLastAssistantMessage", () => {
 });
 
 describe("classify", () => {
-  it("Notification → awaiting_input regardless of message", () => {
-    expect(classify(null, "Notification")).toMatchObject({
-      status: "awaiting_input",
-      classified: true,
-    });
+  it("a bare Notification with no readable message → classified:false (not awaiting_input)", () => {
+    // The ~60s idle-timeout Notification fires on a *finished* steward too, so
+    // the event alone is not evidence of awaiting input (#459 false positives).
+    expect(classify(null, "Notification")).toEqual({ classified: false });
+  });
+
+  it("Notification is classified off the transcript, not the event: a completion message → reported", () => {
+    const r = classify(
+      { text: "PR opened successfully. Standing by.\nPR: https://github.com/o/r/pull/7", usedAskUserQuestion: false },
+      "Notification",
+    );
+    expect(r).toMatchObject({ status: "reported", classified: true });
+  });
+
+  it("a finished-then-idle Notification with a 'Done' message → working, not awaiting_input", () => {
+    expect(
+      classify({ text: "Done — zero unresolved threads remain on PR #433.", usedAskUserQuestion: false }, "Notification"),
+    ).toMatchObject({ status: "working", classified: true });
+  });
+
+  it("an AskUserQuestion on a Notification → awaiting_input", () => {
+    expect(
+      classify({ text: "Which approach?", usedAskUserQuestion: true }, "Notification"),
+    ).toMatchObject({ status: "awaiting_input", classified: true });
   });
 
   it("a PR url → reported", () => {
