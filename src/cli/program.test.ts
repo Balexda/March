@@ -248,6 +248,32 @@ describe("march CLI", () => {
       expect(result.stderr).toContain("Could not reach the herald service");
     });
 
+    it("`march legate respond --help` exits 0 and prints the respond usage", () => {
+      const result = run(["legate", "respond", "--help"]);
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain("Usage: march legate respond");
+      expect(result.stdout).toContain("--ack");
+      expect(result.stdout).toContain("--message");
+    });
+
+    it("`march legate respond <sliceId>` with neither --message nor --ack exits 1", () => {
+      const result = run(["legate", "respond", "some-slice", "--profile", "march"]);
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toContain("--message");
+      expect(result.stderr).toContain("--ack");
+    });
+
+    it("`march legate respond --ack` exits 1 with a reach error when the legate is down", () => {
+      // --profile skips Herald profile resolution so the failure is the legate
+      // round-trip; a closed port fails fast.
+      const result = runWithEnv(
+        ["legate", "respond", "some-slice", "--profile", "march", "--ack"],
+        { ...process.env, MARCH_LEGATE_URL: "http://127.0.0.1:1" },
+      );
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toContain("Could not reach the legate service");
+    });
+
     it("`march legate serve --help` exits 0 and prints the service flag surface", () => {
       const result = run(["legate", "serve", "--help"]);
       expect(result.exitCode).toBe(0);
