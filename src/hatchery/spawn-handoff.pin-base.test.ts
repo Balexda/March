@@ -53,6 +53,7 @@ describe("pinManagerWorktreeToDefaultBranch (#460)", () => {
    */
   function makeStaleWorktree(defaultBranch: string): {
     stale: string;
+    origin: string;
     originTip: string;
   } {
     const root = makeTmpDir();
@@ -82,7 +83,7 @@ describe("pinManagerWorktreeToDefaultBranch (#460)", () => {
     git(["push", "-q", "origin", defaultBranch], seed);
     const originTip = git(["rev-parse", `origin/${defaultBranch}`], seed);
 
-    return { stale, originTip };
+    return { stale, origin, originTip };
   }
 
   afterEach(() => {
@@ -134,6 +135,26 @@ describe("pinManagerWorktreeToDefaultBranch (#460)", () => {
     // which here lacks contract.md — but is never staler than agent-deck's base).
     expect(result.fetched).toBe(false);
     expect(result.pinned).toBe(true);
+  });
+
+  it("does NOT regress a base that is ahead of / divergent from origin (fast-forward only)", () => {
+    const { origin } = makeStaleWorktree("main");
+    // A worktree cut from a base that is AHEAD of origin/main (a local-only
+    // commit on top of the tip), as could happen with a divergent checkout.
+    const root = makeTmpDir();
+    const ahead = path.join(root, "ahead");
+    git(["clone", "-q", origin, ahead], root);
+    fs.writeFileSync(path.join(ahead, "local-only.txt"), "unpushed\n");
+    git(["add", "-A"], ahead);
+    git(["commit", "-q", "-m", "local-only commit"], ahead);
+    const headBefore = git(["rev-parse", "HEAD"], ahead);
+
+    const result = pinManagerWorktreeToDefaultBranch(ahead, GIT_ENV);
+
+    // origin/main is BEHIND HEAD → pin is skipped, the local commit is preserved.
+    expect(result.pinned).toBe(false);
+    expect(git(["rev-parse", "HEAD"], ahead)).toBe(headBefore);
+    expect(fs.existsSync(path.join(ahead, "local-only.txt"))).toBe(true);
   });
 
   it("never throws and reports unpinned when there is no origin tracking ref", () => {
