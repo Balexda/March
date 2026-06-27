@@ -977,6 +977,25 @@ function runGitCapture(args: readonly string[], cwd: string): string {
 }
 
 /**
+ * True iff `ancestor` is an ancestor of (or identical to) `descendant`.
+ * `git merge-base --is-ancestor` exits 0 when true, 1 when false, and non-0/1
+ * on error (e.g. either ref is missing) — all non-zero exits surface as a throw,
+ * which we treat as "not a safe fast-forward".
+ */
+function isAncestor(ancestor: string, descendant: string, cwd: string): boolean {
+  try {
+    execFileSync("git", ["merge-base", "--is-ancestor", ancestor, descendant], {
+      cwd,
+      stdio: ["ignore", "ignore", "ignore"],
+      maxBuffer: EXEC_MAX_BUFFER,
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Resolve a repo's default branch (e.g. `main` / `master`) from
  * `refs/remotes/origin/HEAD`, falling back to `main` when `origin/HEAD` is not
  * set locally. Exposed for tests.
@@ -1011,9 +1030,15 @@ export function resolveDefaultBranch(worktreePath: string): string {
  * Safe to hard-reset because the manager branch has no commits yet (the worker
  * runs against a container snapshot, not this worktree). The fetch uses the
  * SSH→HTTPS token rewrite (#300/#301) so it works inside the legate/hatchery
- * container, and is best-effort: a network failure degrades to the last-known
- * `origin/<default>` rather than stranding the spawn. Returns the resolved
- * default branch for telemetry. Exposed for tests.
+ * container, and is best-effort.
+ *
+ * The reset is **fast-forward-only**: it pins to `origin/<default>` ONLY when
+ * that ref is at least as new as the worktree's current HEAD (HEAD is an
+ * ancestor of it). A divergent or locally-ahead base — or a failed fetch that
+ * left a stale tracking ref behind HEAD — is left untouched and reported
+ * `pinned: false`, so the pin never *regresses* the base below agent-deck's
+ * original (review on #460). Returns the resolved default branch for telemetry.
+ * Exposed for tests.
  */
 export interface PinBaseResult {
   /** The resolved default branch (`main` / `master`). */
@@ -1035,18 +1060,22 @@ export function pinManagerWorktreeToDefaultBranch(
     runGitQuiet([...auth, "fetch", "origin", defaultBranch], worktreePath);
     fetched = true;
   } catch {
-    // Best-effort: offline / auth-less degrades to the last-known
-    // origin/<default>; the reset below still pins to whatever tracking ref
-    // is present, which is strictly fresher than an arbitrary agent-deck base.
+    // Best-effort: offline / auth-less degrades to whatever origin/<default>
+    // tracking ref is already present; the fast-forward guard below decides
+    // whether that ref is safe to pin onto.
   }
   let pinned = false;
-  try {
-    runGitQuiet(["reset", "--hard", `origin/${defaultBranch}`], worktreePath);
-    pinned = true;
-  } catch {
-    // No origin/<default> tracking ref to pin onto (e.g. a never-fetched repo).
-    // Leave the worktree on agent-deck's base rather than stranding the spawn —
-    // this only ever happens when there was nothing fresher to pin to anyway.
+  // Fast-forward-only: pin ONLY when origin/<default> is at least as new as the
+  // worktree's HEAD. This skips (rather than regresses) a divergent / ahead base
+  // or a stale post-fetch-failure tracking ref. `isAncestor` is also false when
+  // origin/<default> doesn't exist (never-fetched repo), so the reset is skipped.
+  if (isAncestor("HEAD", `origin/${defaultBranch}`, worktreePath)) {
+    try {
+      runGitQuiet(["reset", "--hard", `origin/${defaultBranch}`], worktreePath);
+      pinned = true;
+    } catch {
+      // Leave the worktree on agent-deck's base rather than stranding the spawn.
+    }
   }
   return { defaultBranch, fetched, pinned };
 }
