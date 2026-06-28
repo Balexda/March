@@ -113,6 +113,10 @@ function buildTickResult(state: LoopState, r: CoordinatorOutput["results"], spaw
     ghostCleanupDeferredCount: countAction(r.ghost, "ghost-cleanup-deferred"),
     relaunchCount: countAction(r.relaunch, "relaunch-steward"),
     relaunchFailureCount: countAction(r.relaunch, "relaunch-failed"),
+    // AIMD self-healing rate, read from the working state the relaunch handler
+    // maintains (default 1 when unset). Surfaced as a gauge so the operator can
+    // see recovery throttle down after an outage and ramp back up.
+    recoveryRate: Number.isFinite(state.raw?.recovery_rate) ? state.raw.recovery_rate : 1,
     babysitActionCount: r.babysit.actions.length - stewardNudgeCount - stewardStrandedCount,
     stewardNudgeCount,
     stewardStrandedCount,

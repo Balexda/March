@@ -115,6 +115,7 @@ describe("buildLoopTickActivity", () => {
       ghost_cleanup_failure_count: 5,
       relaunch_count: 0,
       relaunch_failure_count: 3,
+      recovery_rate: 2,
       babysit_action_count: 6,
       babysit_actions_by_kind: { conflict_fix: 1, comment_fix: 2, bogus: "x" },
       steward_nudge_count: 7,
@@ -137,6 +138,7 @@ describe("buildLoopTickActivity", () => {
       waitingOnApproval: 3,
       blockedOnMergeState: 2,
       stranded: 4,
+      recoveryRate: 2,
       escalatedByReason: { hatchery_dispatch_failed: 2, other: 1 }, // non-number 'bogus' dropped
       prBlocker: { conflicting: 1, owes_comments: 2 }, // non-number 'bogus' dropped
     });

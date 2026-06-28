@@ -3,6 +3,9 @@ import { emptyHandlerResult } from "../state/types.js";
 import { dropRecoveredSlice } from "../state/mutations.js";
 import { MAX_RECOVER_ATTEMPTS } from "./castra-recover.js";
 import { RELAUNCH_LIMIT, relaunchRetryKey } from "./relaunch.js";
+import { deriveUnescalateStage, unescalate } from "../steps/unescalate.js";
+
+export { deriveUnescalateStage } from "../steps/unescalate.js";
 
 /**
  * Graduated recovery ladder driver (#413, fixes #409). `march legate recover`
@@ -79,13 +82,6 @@ export interface RecoveryDecision {
   /** This is a fresh operator request (no rung yet) — apply clears the slice's
    *  spent warm retry budgets, mirroring the fold's begin-graduated reset (#412). */
   readonly freshInit?: boolean;
-}
-
-/** Pure: the working stage an un-escalated slice returns to — `pr-open` when it
- *  carries a live PR (so babysit drives it to merge), else `implementing`. */
-export function deriveUnescalateStage(slice: any): string {
-  const n = slice?.pr?.number;
-  return typeof n === "number" && n > 0 ? "pr-open" : "implementing";
 }
 
 function castraAttempts(state: LoopState): Record<string, number> {
@@ -263,27 +259,15 @@ export function assess(state: LoopState): RecoveryDecision[] {
  */
 function clearWarmRetryBudgets(raw: any, sliceId: string): void {
   const counts = raw?.transient_retry_counts;
-  if (!counts || typeof counts !== "object") return;
-  for (const key of Object.keys(counts)) {
-    if (key === sliceId || key.endsWith(":" + sliceId)) delete counts[key];
+  if (counts && typeof counts === "object") {
+    for (const key of Object.keys(counts)) {
+      if (key === sliceId || key.endsWith(":" + sliceId)) delete counts[key];
+    }
   }
-}
-
-/** Un-escalate a slice in place: move it to the working stage and clear the
- *  escalation reason + babysit's escalation latches so babysit resumes cleanly.
- *  Returns whether the STAGE actually changed, so the caller emits a durable
- *  `slice.stage.changed` only on a real transition (not every maintain tick — that
- *  would spam the event log re-announcing an already-`pr-open` slice). */
-function unescalate(slice: any, stage: string, ts: string, note: string): boolean {
-  const changed = slice.stage !== stage;
-  slice.stage = stage;
-  slice.escalated_reason = undefined;
-  delete slice.steward_awaiting_input_at;
-  delete slice.steward_stuck_at;
-  delete slice.steward_stuck_head_sha;
-  slice.last_action = ts;
-  slice.last_action_note = note;
-  return changed;
+  // Also drop the self-healing backoff timer (relaunch.ts) so a fresh operator
+  // request relaunches promptly instead of waiting out an accrued cooldown.
+  const backoff = raw?.relaunch_backoff_until;
+  if (backoff && typeof backoff === "object") delete backoff[sliceId];
 }
 
 export async function apply(decisions: RecoveryDecision[], ctx: HandlerContext, state: LoopState): Promise<HandlerResult> {

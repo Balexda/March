@@ -64,6 +64,11 @@ export interface LoopMetricsSnapshot {
    *  have no resource; the durable "stuck, no steward" signal independent of the
    *  relaunch retry churn. */
   readonly stranded: number;
+  /** AIMD self-healing recovery rate — the max backoff-eligible stranded slices
+   *  the automatic relaunch path attempts per tick. Halves after a failure (down
+   *  to 1), ramps up on clean rate-limited sweeps. Pairs with `stranded` to show
+   *  the recovery loop throttling down during an outage and recovering after. */
+  readonly recoveryRate: number;
   /** Escalated-stage slices keyed by bounded escalation reason; sums to
    *  slicesByStage.escalated. Splits spawn-failed from steward-stuck on the board. */
   readonly escalatedByReason: Readonly<Record<string, number>>;
@@ -308,6 +313,16 @@ function ensureInstruments(meter: Meter): void {
     "march.legate.slices.stranded",
     "Steward-stage slices with no live worker session (stuck, no resource attached)",
     (s) => s.stranded,
+  );
+  // AIMD self-healing recovery rate (#stranded): max backoff-eligible stranded
+  // slices the automatic relaunch path attempts per tick. Collapses to 1 after a
+  // failure, ramps up on clean sweeps — watch it dip then recover around an
+  // outage. Exported as `march_legate_recovery_rate`.
+  registerGauge(
+    meter,
+    "march.legate.recovery_rate",
+    "AIMD self-healing rate: max stranded-slice relaunch attempts per tick",
+    (s) => s.recoveryRate,
   );
 
   // Escalated slices split by reason (sums to slices{stage="escalated"}). `reason`
