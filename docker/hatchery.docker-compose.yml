@@ -59,6 +59,12 @@ services:
       - MARCH_OTEL_SERVICE_NAME=march-hatchery
       - MARCH_HATCHERY_PORT=8080
       - MARCH_HATCHERY_LOG_DIR=/march/logs
+      # #460: PARK failed spawns (keep the worker container/image, rename the
+      # manager worktree+branch aside, drop a parked/<spawnId>.json manifest)
+      # instead of destroying them, so #460-class failures can be root-caused
+      # while the self-healing re-dispatch still starts clean. Default-on here;
+      # unset (or empty) to restore destructive rollback.
+      - MARCH_HATCHERY_PARK_FAILED=${MARCH_HATCHERY_PARK_FAILED:-1}
       # os.homedir() resolves from HOME -> spawn records/artifacts land on the
       # mounted host HOME at the identical path.
       - HOME=${MARCH_HOST_HOME:-/home/jmbattista}
