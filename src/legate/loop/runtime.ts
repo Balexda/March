@@ -199,8 +199,15 @@ function clampReportSummary(text: string, max = 500): string {
  *
  *   - **answer** (`message`): deliver the answer into the live steward session
  *     via Castra, then clear the latch.
- *   - **ack** (no message): clear the latch only — for the false-positive "stuck"
- *     stewards that actually finished / await merge / have open review threads.
+ *   - **ack** (no message): clear the latch only — explicitly release a steward
+ *     the operator judges is not really blocked (finished / awaiting merge / open
+ *     review threads) without sending an answer.
+ *
+ * This is the operator lever for a steward held on a LIVE session — the relaunch
+ * self-heal already drains a `steward_awaiting_input` slice automatically once its
+ * session has VANISHED (HUMAN_HOLD_REASONS, relaunch.ts), so respond is for the
+ * case the auto path deliberately leaves alone (a live prompt the operator must
+ * resolve) plus immediate manual override.
  *
  * Clearing posts a NON-awaiting `slice.steward.report` to Herald; on the next tick
  * babysit sees `!awaitingNow`, drops the `steward_awaiting_input` latch, and
