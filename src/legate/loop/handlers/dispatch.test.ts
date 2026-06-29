@@ -96,12 +96,26 @@ describe("dispatch assess (#211 bounded auto-recovery)", () => {
     expect(assess(state)).toEqual([{ kind: "recover", sliceId, item, attempt: 1 }]);
   });
 
-  it("does NOT recover once the retry budget is exhausted (stays operator-only)", async () => {
+  it("#460: KEEPS recovering past the old retry budget (no hard give-up)", async () => {
     const item = readyItem("a.spec.md");
     const state = loopState({ smithy: { ok: true, ready: [item], queue: { dispatchable: 0, blocked: 0, total: 1 } } });
     const sliceId = seedEscalated(state, item);
-    (state.raw as any).transient_retry_counts = { [recoveryAttemptKey(sliceId)]: DISPATCH_RECOVERY_LIMIT };
+    (state.raw as any).transient_retry_counts = { [recoveryAttemptKey(sliceId)]: DISPATCH_RECOVERY_LIMIT + 3 };
+    // Past the old limit it still produces a recover decision (attempt = used+1).
+    expect(assess(state)).toEqual([{ kind: "recover", sliceId, item, attempt: DISPATCH_RECOVERY_LIMIT + 4 }]);
+  });
+
+  it("#460: a slice still inside its backoff window is held back this tick", async () => {
+    const item = readyItem("a.spec.md");
+    const state = loopState({ ts: "2026-06-28T00:00:00.000Z", smithy: { ok: true, ready: [item], queue: { dispatchable: 0, blocked: 0, total: 1 } } });
+    const sliceId = seedEscalated(state, item);
+    (state.raw as any).transient_retry_counts = { [recoveryAttemptKey(sliceId)]: 3 };
+    // Window ends 1h in the future → cooling down, not selected.
+    (state.raw as any).dispatch_recovery_backoff_until = { [sliceId]: Date.parse("2026-06-28T01:00:00.000Z") };
     expect(assess(state)).toEqual([]);
+    // Once the window has elapsed it is eligible again.
+    (state.raw as any).dispatch_recovery_backoff_until = { [sliceId]: Date.parse("2026-06-27T23:00:00.000Z") };
+    expect(assess(state)).toHaveLength(1);
   });
 
   it("does NOT recover a non-recoverable escalation reason (fail-safe allowlist)", async () => {

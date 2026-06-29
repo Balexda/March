@@ -81,7 +81,9 @@ describe("launchDispatch", () => {
     const state: any = { slices: {}, transient_retry_counts: { [recoveryAttemptKey("s")]: DISPATCH_RECOVERY_LIMIT } };
     const out = await launchDispatch(state, "T", item(), "s", deps({ postSpawn: vi.fn(async () => { throw new Error("hatchery 500"); }) }));
     expect(out.notifications[0]).toMatchObject({ sliceId: "s", reason: "hatchery_dispatch_failed" });
-    expect(out.notifications[0].detail).toContain("operator-only");
+    // #460: the operator is still pinged once the threshold is crossed, but the
+    // wording reflects that the loop keeps re-dispatching with backoff (no give-up).
+    expect(out.notifications[0].detail).toContain("KEEPS re-dispatching");
   });
 
   it("culls the orphaned steward on a launch-throw escalation", async () => {
@@ -204,7 +206,7 @@ describe("completePendingHatcheryDispatches", () => {
     const out = await completePendingHatcheryDispatches(state, "T", deps({ getJob: vi.fn(async () => ({ status: "failed", error: { message: "git apply --index failed" } })) }));
     expect(state.slices.s.stage).toBe("escalated");
     expect(out.notifications[0]).toMatchObject({ sliceId: "s", reason: "hatchery_dispatch_failed" });
-    expect(out.notifications[0].detail).toContain("operator-only");
+    expect(out.notifications[0].detail).toContain("KEEPS re-dispatching");
   });
 
   it("culls the orphaned steward when a failed job escalates the slice", async () => {

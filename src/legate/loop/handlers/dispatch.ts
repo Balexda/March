@@ -2,6 +2,7 @@ import type { HandlerContext, HandlerResult, LoopState } from "../state/types.js
 import { emptyHandlerResult } from "../state/types.js";
 import { dispatchSliceId } from "../pure/dispatch-id.js";
 import { dispatchableReady, recoverableEscalations } from "../pure/slice.js";
+import { parseMs } from "../pure/self-heal.js";
 import { isHardDownReason, parseAgentFailureReason } from "../spawn-breaker.js";
 
 /**
@@ -71,8 +72,10 @@ export function assess(state: LoopState): DispatchDecision[] {
     sliceId: dispatchSliceId(item),
     item,
   }));
-  // #211: items wedged behind a recoverable escalation, within the retry budget.
-  for (const r of recoverableEscalations(state.raw, state.smithy.ready)) {
+  // #211/#460: items wedged behind a recoverable escalation. No hard cap — paced
+  // by exponential backoff + the AIMD rate inside recoverableEscalations, gated on
+  // this tick's clock so a cooling-down slice is held back.
+  for (const r of recoverableEscalations(state.raw, state.smithy.ready, parseMs(state.ts))) {
     decisions.push({ kind: "recover", sliceId: r.sliceId, item: r.item, attempt: r.attempt });
   }
   return decisions;
