@@ -1567,16 +1567,14 @@ export async function runHatcherySpawn(
           removeSpawnImage(spawnId);
         }
         if (mgr && !handedOff) {
-          await removeAgentDeckManager(
-            { sessionId: mgr.sessionId, profile: agentDeckProfile, traceKey },
-            castra,
-          );
           if (park) {
             // Preserve the manager worktree + branch by renaming them ASIDE (never
             // deleted/pruned, #155); free the canonical names for re-dispatch and
-            // drop a forensic manifest. removeAgentDeckManager above already killed
-            // the idle session (so it can't leak / pin the spawn cap); the parked
-            // worktree on disk survives that session removal.
+            // drop a forensic manifest. This MUST run BEFORE removeAgentDeckManager
+            // below: Castra's removeSession prunes the worktree, which would destroy
+            // the forensic apply-target before we could move it. Moving first means
+            // that later prune no-ops on the freed canonical path, and the parked
+            // worktree survives the session removal.
             await dispatch.spanAsync("manager.park", async (parkSpan) => {
               const parked = parkSpawnWorktree(input.repoPath, {
                 spawnId,
@@ -1606,7 +1604,12 @@ export async function runHatcherySpawn(
                 "march.park.manifest": manifestPath ?? "",
               });
             });
-          } else {
+          }
+          await removeAgentDeckManager(
+            { sessionId: mgr.sessionId, profile: agentDeckProfile, traceKey },
+            castra,
+          );
+          if (!park) {
             // Castra's removeSession prunes the worktree but LEAVES the local
             // branch behind. A later re-dispatch of the same slice would then
             // collide on "branch already exists" and strand the slice

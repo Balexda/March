@@ -75,6 +75,33 @@ describe("parkSpawnWorktree (#460)", () => {
     expect(fs.existsSync(worktree)).toBe(true);
   });
 
+  it("parks a DIRTY worktree with unmerged paths (the live failed-apply condition)", () => {
+    const { repo, worktree, branch } = makeRepoWithWorktree("dirty/us2");
+    // Reproduce a failed `git apply --index --3way`: leave an unmerged path + a
+    // dirty working tree, exactly what parking must preserve, not reset.
+    const conflicted = path.join(worktree, "contract.md");
+    fs.writeFileSync(conflicted, "<<<<<<< ours\nA\n=======\nB\n>>>>>>> theirs\n");
+    git(["add", conflicted], worktree);
+    // Force an unmerged index entry (stage the same path at two stages).
+    execFileSync("git", ["update-index", "--index-info"], {
+      cwd: worktree,
+      input: `100644 ${git(["hash-object", "-w", conflicted], worktree)} 1\tcontract.md\n` +
+             `100644 ${git(["hash-object", "-w", conflicted], worktree)} 2\tcontract.md\n`,
+      env: GIT_ENV,
+    });
+    expect(git(["status", "--porcelain"], worktree)).toMatch(/contract\.md/);
+
+    const res = parkSpawnWorktree(repo, { spawnId: "20260628-dirty1", branch, worktreePath: worktree });
+
+    // The whole point: a dirty/conflicted worktree is STILL parked + branch freed.
+    expect(res.worktreeMoved).toBe(true);
+    expect(res.branchRenamed).toBe(true);
+    expect(fs.existsSync(worktree)).toBe(false);
+    expect(fs.existsSync(path.join(res.parkedWorktreePath, "contract.md"))).toBe(true);
+    // Canonical branch freed → re-dispatch can recreate it.
+    expect(() => git(["worktree", "add", "-b", branch, worktree], repo)).not.toThrow();
+  });
+
   it("is non-destructive and idempotent-ish when the worktree path is already gone", () => {
     const { repo, branch } = makeRepoWithWorktree("gone-us2");
     const missing = path.join(repo, "..", "WorkTrees", "does-not-exist");

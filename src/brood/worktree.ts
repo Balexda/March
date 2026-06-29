@@ -384,7 +384,10 @@ export function parkSpawnWorktree(
   let worktreeMoved = false;
   if (fs.existsSync(spawn.worktreePath) && !fs.existsSync(parkedWorktreePath)) {
     try {
-      execFileSync("git", ["worktree", "move", spawn.worktreePath, parkedWorktreePath], {
+      // `--force` because a failed-apply worktree is DIRTY (a `--3way` apply leaves
+      // unmerged paths) and may still be the cwd of the about-to-be-removed
+      // agent-deck session — plain `move` refuses both. We want it moved regardless.
+      execFileSync("git", ["worktree", "move", "--force", spawn.worktreePath, parkedWorktreePath], {
         cwd: repoRoot,
         stdio: "ignore",
       });
@@ -396,7 +399,10 @@ export function parkSpawnWorktree(
 
   let branchRenamed = false;
   // Only free the branch name once the worktree no longer holds it at the
-  // canonical path (post-move). Detach the parked checkout so `-m` is permitted.
+  // canonical path (post-move). Detach the parked checkout so `-m` is permitted —
+  // `checkout --detach` with no pathspec just repoints HEAD at the SAME commit, so
+  // it leaves the dirty/unmerged working tree + index untouched (the forensics we
+  // are preserving) and succeeds even on a conflicted worktree.
   if (worktreeMoved) {
     try {
       execFileSync("git", ["-C", parkedWorktreePath, "checkout", "--detach"], { stdio: "ignore" });
