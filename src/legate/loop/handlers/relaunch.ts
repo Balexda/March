@@ -6,6 +6,15 @@ import { isWorkerSession } from "../pure/session.js";
 import { ensureRetryCounts } from "../state/mutations.js";
 import { execText } from "../clients/exec.js";
 import { unescalate } from "../steps/unescalate.js";
+import {
+  backoffMs,
+  parseMs,
+  readRecoveryRate,
+  stepRecoveryRate,
+  BACKOFF_BASE_MS,
+  BACKOFF_JITTER,
+  BACKOFF_MAX_MS,
+} from "../pure/self-heal.js";
 
 /**
  * Steward relaunch: a non-terminal slice that still has an open PR but whose
@@ -99,20 +108,14 @@ export const HUMAN_HOLD_REASONS = new Set([
  *  failures and the session is still gone. */
 export const RELAUNCH_LIMIT = 3;
 
-/** AIMD global recovery rate bounds. R is the max backoff-eligible slices the
- *  automatic path attempts per tick; it starts at the min, adds 1 per clean
- *  rate-limited sweep, and halves on any failure. */
-export const RECOVERY_RATE_MIN = 1;
-export const RECOVERY_RATE_MAX = 8;
-
-/** Exponential-backoff schedule for the automatic path. delay =
- *  min(BASE · 2^failures, MAX) · (1 + jitter), jitter ∈ [0, JITTER) derived
- *  deterministically from the slice id. */
-export const RELAUNCH_BACKOFF_BASE_MS = 2 * 60 * 1000; // 2 min after the first failure
-export const RELAUNCH_BACKOFF_MAX_MS = 6 * 60 * 60 * 1000; // plateau at 6 h
-export const RELAUNCH_BACKOFF_JITTER = 0.2; // up to +20% spread, per slice
-/** Cap the doubling exponent so 2^n can't overflow (min() clamps to MAX anyway). */
-const RELAUNCH_BACKOFF_MAX_EXP = 16;
+/** AIMD bounds + exponential-backoff schedule for the automatic path. The math
+ *  lives in the shared {@link ../pure/self-heal.js self-heal} module (identical to
+ *  the spawn re-dispatch path, #460); these aliases keep relaunch's historical
+ *  export names stable for its callers/tests. */
+export { RECOVERY_RATE_MIN, RECOVERY_RATE_MAX } from "../pure/self-heal.js";
+export const RELAUNCH_BACKOFF_BASE_MS = BACKOFF_BASE_MS;
+export const RELAUNCH_BACKOFF_MAX_MS = BACKOFF_MAX_MS;
+export const RELAUNCH_BACKOFF_JITTER = BACKOFF_JITTER;
 
 /** The transient-retry-counts key for a slice's steward-relaunch budget. Shared
  *  with the recovery driver (#413) so both sides key the counter identically. */
@@ -179,37 +182,15 @@ function ensureBackoff(raw: any): Record<string, number> {
   return raw.relaunch_backoff_until;
 }
 
-/** Pure read of the AIMD recovery rate, clamped to [MIN, MAX]. Default MIN. */
+/** Pure read of the relaunch AIMD recovery rate (its own `recovery_rate` scalar),
+ *  clamped to [MIN, MAX]. Default MIN. */
 function readRate(raw: any): number {
-  const r = raw?.recovery_rate;
-  if (!Number.isFinite(r)) return RECOVERY_RATE_MIN;
-  return Math.min(RECOVERY_RATE_MAX, Math.max(RECOVERY_RATE_MIN, Math.floor(r)));
+  return readRecoveryRate(raw, "recovery_rate");
 }
 
-/** NaN-safe epoch-ms parse of a tick timestamp. Returns NaN for non-dates (unit
- *  tests use `ts:"T"`); callers treat NaN as "backoff cannot gate" (eligible). */
-function parseMs(ts: unknown): number {
-  return typeof ts === "string" ? Date.parse(ts) : NaN;
-}
-
-/** Deterministic per-slice jitter fraction in [0, 1) (FNV-1a over the id). Stable
- *  across ticks so a slice's backoff spread is reproducible (and test-friendly),
- *  yet differs between slices so a failed burst doesn't re-probe in lock-step. */
-function jitterFraction(sliceId: string): number {
-  let h = 0x811c9dc5;
-  for (let i = 0; i < sliceId.length; i++) {
-    h ^= sliceId.charCodeAt(i);
-    h = Math.imul(h, 0x01000193);
-  }
-  return ((h >>> 0) % 100000) / 100000;
-}
-
-/** Exponential backoff with per-slice jitter for the Nth failure (1-based). */
-export function relaunchBackoffMs(attempt: number, sliceId: string): number {
-  const exp = Math.min(Math.max(attempt - 1, 0), RELAUNCH_BACKOFF_MAX_EXP);
-  const base = Math.min(RELAUNCH_BACKOFF_BASE_MS * 2 ** exp, RELAUNCH_BACKOFF_MAX_MS);
-  return Math.round(base * (1 + RELAUNCH_BACKOFF_JITTER * jitterFraction(sliceId)));
-}
+/** Exponential backoff with per-slice jitter for the Nth failure (1-based).
+ *  Historical name; delegates to the shared {@link backoffMs}. */
+export const relaunchBackoffMs = backoffMs;
 
 function stewardResumeMessage(d: RelaunchDecision): string {
   return [
@@ -609,9 +590,7 @@ export async function apply(
   // AIMD: a fully-successful rate-limited sweep earns +1; ANY failure halves R.
   if (autoAttempts > 0) {
     const current = readRate(state.raw);
-    let next = current;
-    if (autoFailures > 0) next = Math.max(RECOVERY_RATE_MIN, Math.floor(current / 2));
-    else if (autoRateLimited) next = Math.min(RECOVERY_RATE_MAX, current + 1);
+    const next = stepRecoveryRate(current, { failures: autoFailures, rateLimited: autoRateLimited });
     if (next !== current) state.raw.recovery_rate = next;
   }
 

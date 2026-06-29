@@ -20,6 +20,7 @@ import {
   startSpawnContainer,
   waitForSpawnContainer,
 } from "../spawn/container-launch.js";
+import { gitHubAuthConfigArgs } from "../spawn/git-auth.js";
 import { createBuildContext, SnapshotError } from "../spawn/snapshot.js";
 import { resolveToolchain, resolveToolchainImage } from "../spawn/toolchain.js";
 import {
@@ -28,7 +29,7 @@ import {
   removeSpawnImage,
   writeSpawnDockerfile,
 } from "../spawn/snapshot-build.js";
-import { generateSpawnId, removeSpawnWorktree } from "../brood/worktree.js";
+import { generateSpawnId, parkSpawnWorktree, removeSpawnWorktree } from "../brood/worktree.js";
 import {
   readSpawnRecordExtractionResult,
   markSpawnRecordFailed,
@@ -194,6 +195,43 @@ export function managerBranchName(spawnId: string): string {
  */
 export function orphanManagerBranch(branch: string): string {
   return "feature/" + branch.replace(/^feature\//, "");
+}
+
+/**
+ * Whether a FAILED spawn should be PARKED (state preserved for forensics) rather
+ * than destructively rolled back. Off by default; flipped on per deployment via
+ * `MARCH_HATCHERY_PARK_FAILED` (any non-empty value). When on, the failed spawn's
+ * worker container + image are kept and its manager worktree/branch are renamed
+ * aside (see {@link parkSpawnWorktree}) so #460-class failures can be inspected,
+ * while the canonical path/branch are freed so the loop's self-healing
+ * re-dispatch starts clean. Each failure leaves one `parked/<spawnId>.json`.
+ */
+export function parkFailedSpawnsEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return (env.MARCH_HATCHERY_PARK_FAILED || "").trim().length > 0;
+}
+
+/** Directory holding the forensic manifests for parked failed spawns (#460). */
+export function parkedManifestDir(homeDir: string = os.homedir()): string {
+  return path.join(homeDir, ".march", "hatchery", "parked");
+}
+
+/**
+ * Write the forensic manifest for a parked failed spawn — the pointer record an
+ * operator (or the follow-up investigation) reads to find everything the park
+ * preserved: the kept worker container/image (by spawn id), the parked-aside
+ * worktree + branch, the persisted patch/log artifacts, and the failure stage.
+ * Best-effort; never throws (parking must not fail the rollback).
+ */
+export function writeParkedSpawnManifest(homeDir: string = os.homedir(), manifest: Record<string, unknown> = {}): string | null {
+  try {
+    const dir = parkedManifestDir(homeDir);
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, `${manifest.spawnId}.json`);
+    fs.writeFileSync(file, JSON.stringify(manifest, null, 2) + "\n");
+    return file;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -956,6 +994,129 @@ function runGitApply(args: readonly string[], cwd: string): void {
   });
 }
 
+/** Run a git command for its side effect, discarding stdout. */
+function runGitQuiet(args: readonly string[], cwd: string): void {
+  execFileSync("git", args as string[], {
+    cwd,
+    stdio: ["ignore", "ignore", "pipe"],
+    maxBuffer: EXEC_MAX_BUFFER,
+  });
+}
+
+/** Run a git command and return its trimmed stdout. */
+function runGitCapture(args: readonly string[], cwd: string): string {
+  return execFileSync("git", args as string[], {
+    cwd,
+    encoding: "utf-8",
+    stdio: ["ignore", "pipe", "pipe"],
+    maxBuffer: EXEC_MAX_BUFFER,
+  }).trim();
+}
+
+/**
+ * True iff `ancestor` is an ancestor of (or identical to) `descendant`.
+ * `git merge-base --is-ancestor` exits 0 when true, 1 when false, and non-0/1
+ * on error (e.g. either ref is missing) — all non-zero exits surface as a throw,
+ * which we treat as "not a safe fast-forward".
+ */
+function isAncestor(ancestor: string, descendant: string, cwd: string): boolean {
+  try {
+    execFileSync("git", ["merge-base", "--is-ancestor", ancestor, descendant], {
+      cwd,
+      stdio: ["ignore", "ignore", "ignore"],
+      maxBuffer: EXEC_MAX_BUFFER,
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Resolve a repo's default branch (e.g. `main` / `master`) from
+ * `refs/remotes/origin/HEAD`, falling back to `main` when `origin/HEAD` is not
+ * set locally. Exposed for tests.
+ */
+export function resolveDefaultBranch(worktreePath: string): string {
+  try {
+    const ref = runGitCapture(
+      ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+      worktreePath,
+    );
+    const name = ref.replace(/^origin\//, "").trim();
+    if (name) return name;
+  } catch {
+    // origin/HEAD unset (e.g. a worktree whose remote HEAD was never fetched) —
+    // fall through to the conventional default.
+  }
+  return "main";
+}
+
+/**
+ * Pin a freshly-created manager worktree to the up-to-date default branch so the
+ * worker's snapshot base — and the apply target, which is this same worktree —
+ * contain already-merged files (#460).
+ *
+ * Without this, agent-deck cuts the worktree from whatever stale local base it
+ * chose and never fetches; when that base predates a merge that *created* a
+ * file, the worker can't see it, authors it from scratch, and the resulting
+ * `new file` patch is rejected at apply time ("already exists in index") — a
+ * conflict `--3way` cannot resolve — stranding the slice after the recovery
+ * budget is spent.
+ *
+ * Safe to hard-reset because the manager branch has no commits yet (the worker
+ * runs against a container snapshot, not this worktree). The fetch uses the
+ * SSH→HTTPS token rewrite (#300/#301) so it works inside the legate/hatchery
+ * container, and is best-effort.
+ *
+ * The reset is **fast-forward-only**: it pins to `origin/<default>` ONLY when
+ * that ref is at least as new as the worktree's current HEAD (HEAD is an
+ * ancestor of it). A divergent or locally-ahead base — or a failed fetch that
+ * left a stale tracking ref behind HEAD — is left untouched and reported
+ * `pinned: false`, so the pin never *regresses* the base below agent-deck's
+ * original (review on #460). Returns the resolved default branch for telemetry.
+ * Exposed for tests.
+ */
+export interface PinBaseResult {
+  /** The resolved default branch (`main` / `master`). */
+  readonly defaultBranch: string;
+  /** Whether `git fetch origin <default>` succeeded this run. */
+  readonly fetched: boolean;
+  /** Whether the worktree was hard-reset onto `origin/<default>`. */
+  readonly pinned: boolean;
+}
+
+export function pinManagerWorktreeToDefaultBranch(
+  worktreePath: string,
+  env: NodeJS.ProcessEnv = process.env,
+): PinBaseResult {
+  const defaultBranch = resolveDefaultBranch(worktreePath);
+  const auth = gitHubAuthConfigArgs(env);
+  let fetched = false;
+  try {
+    runGitQuiet([...auth, "fetch", "origin", defaultBranch], worktreePath);
+    fetched = true;
+  } catch {
+    // Best-effort: offline / auth-less degrades to whatever origin/<default>
+    // tracking ref is already present; the fast-forward guard below decides
+    // whether that ref is safe to pin onto.
+  }
+  let pinned = false;
+  // Fast-forward-only: pin ONLY when origin/<default> is at least as new as the
+  // worktree's HEAD. This skips (rather than regresses) a divergent / ahead base
+  // or a stale post-fetch-failure tracking ref. `isAncestor` is also false when
+  // origin/<default> doesn't exist (never-fetched repo), so the reset is skipped.
+  if (isAncestor("HEAD", `origin/${defaultBranch}`, worktreePath)) {
+    try {
+      runGitQuiet(["reset", "--hard", `origin/${defaultBranch}`], worktreePath);
+      pinned = true;
+    } catch {
+      // Leave the worktree on agent-deck's base rather than stranding the spawn.
+    }
+  }
+  return { defaultBranch, fetched, pinned };
+}
+
 export function validateHatcherySpawnBackend(backend: SpawnBackend): void {
   const missingEnvVars = missingRequiredEnvVars(backend);
   const missingMounts = missingCredentialMounts(backend);
@@ -1056,6 +1217,22 @@ export async function runHatcherySpawn(
     // fails the dispatch. The onSucceeded hook later enriches this row.
     const stewardSessionId = manager.sessionId;
     const managerWorktree = manager.worktreePath;
+
+    // Pin the worker's base to the up-to-date default branch (#460). agent-deck
+    // cut this worktree from a stale local base and never fetched; pinning it to
+    // origin/<default> NOW — before the snapshot the worker diffs against AND
+    // before the apply that targets this same worktree — makes the worker edit
+    // already-merged files instead of re-creating them and colliding at apply.
+    dispatch.span("manager.pin_base", (pinSpan) => {
+      const pin = pinManagerWorktreeToDefaultBranch(managerWorktree, process.env);
+      pinSpan.setAttributes({
+        "march.worktree": managerWorktree,
+        "march.default_branch": pin.defaultBranch,
+        "march.pin_base.fetched": pin.fetched,
+        "march.pin_base.pinned": pin.pinned,
+      });
+    });
+
     await dispatch.spanAsync("brood.register", () =>
       registerStewardLaunchWithBrood({
         spawnId,
@@ -1375,31 +1552,80 @@ export async function runHatcherySpawn(
     // self-heal runs after the standard rollback.
     const launchCollision =
       !mgr && stage === "manager_launch" && isBranchAlreadyExistsError(err);
+    // #460: PARK this failure instead of destroying it, when enabled and there is
+    // a manager worktree to preserve. Parking keeps the worker container/image and
+    // renames the worktree/branch aside (the canonical names are freed for the
+    // self-healing re-dispatch); the destructive rollback runs otherwise.
+    const park = parkFailedSpawnsEnabled() && !!mgr && !handedOff;
     await dispatch.spanAsync(
       "spawn.rollback",
       async () => {
-        if (containerId) removeSpawnContainer(spawnId);
-        removeSpawnImage(spawnId);
+        // When parking we deliberately KEEP the worker container + image so the
+        // failed snapshot/base can be inspected (`docker exec`/`cp` by spawn id).
+        if (!park) {
+          if (containerId) removeSpawnContainer(spawnId);
+          removeSpawnImage(spawnId);
+        }
         if (mgr && !handedOff) {
+          if (park) {
+            // Preserve the manager worktree + branch by renaming them ASIDE (never
+            // deleted/pruned, #155); free the canonical names for re-dispatch and
+            // drop a forensic manifest. This MUST run BEFORE removeAgentDeckManager
+            // below: Castra's removeSession prunes the worktree, which would destroy
+            // the forensic apply-target before we could move it. Moving first means
+            // that later prune no-ops on the freed canonical path, and the parked
+            // worktree survives the session removal.
+            await dispatch.spanAsync("manager.park", async (parkSpan) => {
+              const parked = parkSpawnWorktree(input.repoPath, {
+                spawnId,
+                branch: orphanManagerBranch(branch),
+                worktreePath: mgr.worktreePath,
+              });
+              const manifestPath = writeParkedSpawnManifest(input.homeDir, {
+                spawnId,
+                sliceId,
+                profile,
+                stage,
+                error: (err as Error).message,
+                containerId: containerId ?? null,
+                originalBranch: orphanManagerBranch(branch),
+                originalWorktreePath: mgr.worktreePath,
+                parkedBranch: parked.parkedBranch,
+                parkedWorktreePath: parked.parkedWorktreePath,
+                worktreeMoved: parked.worktreeMoved,
+                branchRenamed: parked.branchRenamed,
+                artifactsDir: hatcherySpawnLogDir(spawnId, input.homeDir),
+              });
+              parkSpan.setAttributes({
+                "march.spawn_id": spawnId,
+                "march.park.worktree_moved": parked.worktreeMoved,
+                "march.park.branch_renamed": parked.branchRenamed,
+                "march.park.parked_worktree": parked.parkedWorktreePath,
+                "march.park.manifest": manifestPath ?? "",
+              });
+            });
+          }
           await removeAgentDeckManager(
             { sessionId: mgr.sessionId, profile: agentDeckProfile, traceKey },
             castra,
           );
-          // Castra's removeSession prunes the worktree but LEAVES the local
-          // branch behind. A later re-dispatch of the same slice would then
-          // collide on "branch already exists" and strand the slice
-          // operator-only (issue #211). Remove the orphan branch (and the
-          // worktree, idempotently) by EXACT path via the rollback helper — it
-          // never runs a blanket `git worktree prune` (#155).
-          try {
-            removeSpawnWorktree(input.repoPath, {
-              spawnId,
-              branch: orphanManagerBranch(branch),
-              worktreePath: mgr.worktreePath,
-            });
-          } catch {
-            // Swallowed — removeSpawnWorktree surfaces its own incomplete-
-            // rollback warning; preserve the original failure below.
+          if (!park) {
+            // Castra's removeSession prunes the worktree but LEAVES the local
+            // branch behind. A later re-dispatch of the same slice would then
+            // collide on "branch already exists" and strand the slice
+            // operator-only (issue #211). Remove the orphan branch (and the
+            // worktree, idempotently) by EXACT path via the rollback helper — it
+            // never runs a blanket `git worktree prune` (#155).
+            try {
+              removeSpawnWorktree(input.repoPath, {
+                spawnId,
+                branch: orphanManagerBranch(branch),
+                worktreePath: mgr.worktreePath,
+              });
+            } catch {
+              // Swallowed — removeSpawnWorktree surfaces its own incomplete-
+              // rollback warning; preserve the original failure below.
+            }
           }
         }
       },

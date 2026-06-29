@@ -17,6 +17,12 @@ import {
   recoverableEscalations,
   recoveryAttemptKey,
   recoveryBudgetExhausted,
+  scheduleDispatchRecoveryBackoff,
+  clearDispatchRecoveryBackoff,
+  decreaseDispatchRecoveryRate,
+  increaseDispatchRecoveryRate,
+  DISPATCH_RECOVERY_RATE_FIELD,
+  DISPATCH_RECOVERY_BACKOFF_FIELD,
   sliceReleasesArtifact,
   summarizeSlicesByStage,
   countStrandedSlices,
@@ -364,7 +370,7 @@ describe("countStrandedSlices (steward-stage slices with no live steward)", () =
   });
 });
 
-describe("recoverableEscalations (#211 bounded auto-recovery)", () => {
+describe("recoverableEscalations (#211/#460 self-healing auto-recovery)", () => {
   const SID = dispatchSliceId(item);
   const recoverableSlice = () => ({
     stage: "escalated",
@@ -393,9 +399,43 @@ describe("recoverableEscalations (#211 bounded auto-recovery)", () => {
     expect(recoverableEscalations(state, [item])[0]).toMatchObject({ attempt: 2 });
   });
 
-  it("stops at the budget — no decision once the limit is reached", () => {
-    const state = { slices: { [SID]: recoverableSlice() }, archived_slices: {}, transient_retry_counts: { [recoveryAttemptKey(SID)]: DISPATCH_RECOVERY_LIMIT } };
-    expect(recoverableEscalations(state, [item])).toEqual([]);
+  it("#460: does NOT stop at the old limit — keeps re-dispatching past it", () => {
+    const state = { slices: { [SID]: recoverableSlice() }, archived_slices: {}, transient_retry_counts: { [recoveryAttemptKey(SID)]: DISPATCH_RECOVERY_LIMIT + 5 } };
+    expect(recoverableEscalations(state, [item])).toEqual([
+      { item, sliceId: SID, attempt: DISPATCH_RECOVERY_LIMIT + 6, limit: DISPATCH_RECOVERY_LIMIT },
+    ]);
+  });
+
+  it("#460: skips a slice still inside its backoff window, admits it once elapsed", () => {
+    const base = {
+      slices: { [SID]: recoverableSlice() },
+      archived_slices: {},
+      transient_retry_counts: { [recoveryAttemptKey(SID)]: 3 },
+      dispatch_recovery_backoff_until: { [SID]: 5000 },
+    };
+    // nowMs before the window → cooling down, not selected.
+    expect(recoverableEscalations(base, [item], 4999)).toEqual([]);
+    // nowMs at/after the window → eligible again.
+    expect(recoverableEscalations(base, [item], 5000)).toHaveLength(1);
+    // NaN clock (non-date tick) disables the gate entirely.
+    expect(recoverableEscalations(base, [item], NaN)).toHaveLength(1);
+  });
+
+  it("#460: AIMD rate caps candidates per tick, longest-waiting (smallest until) first", () => {
+    const itemA = { command: "smithy.forge", arguments: ["docs/a.tasks.md", "1"], path: "docs/a.tasks.md" };
+    const itemB = { command: "smithy.forge", arguments: ["docs/b.tasks.md", "1"], path: "docs/b.tasks.md" };
+    const itemC = { command: "smithy.forge", arguments: ["docs/c.tasks.md", "1"], path: "docs/c.tasks.md" };
+    const idA = dispatchSliceId(itemA), idB = dispatchSliceId(itemB), idC = dispatchSliceId(itemC);
+    const state = {
+      slices: { [idA]: recoverableSlice(), [idB]: recoverableSlice(), [idC]: recoverableSlice() },
+      archived_slices: {},
+      transient_retry_counts: {},
+      // A eligible longest ago, then C, then B.
+      dispatch_recovery_backoff_until: { [idA]: 100, [idB]: 300, [idC]: 200 },
+      dispatch_recovery_rate: 2, // R = 2 → only the two longest-waiting this tick
+    };
+    const out = recoverableEscalations(state, [itemA, itemB, itemC], 1000);
+    expect(out.map((d) => d.sliceId)).toEqual([idA, idC]);
   });
 
   it("ignores a non-recoverable escalation reason", () => {
@@ -423,5 +463,42 @@ describe("recoverableEscalations (#211 bounded auto-recovery)", () => {
     expect(recoveryBudgetExhausted({ transient_retry_counts: { [recoveryAttemptKey("x")]: 0 } }, "x")).toBe(false);
     expect(recoveryBudgetExhausted({ transient_retry_counts: { [recoveryAttemptKey("x")]: DISPATCH_RECOVERY_LIMIT - 1 } }, "x")).toBe(false);
     expect(recoveryBudgetExhausted({ transient_retry_counts: { [recoveryAttemptKey("x")]: DISPATCH_RECOVERY_LIMIT } }, "x")).toBe(true);
+  });
+});
+
+describe("dispatch-recovery self-heal state (#460)", () => {
+  it("scheduleDispatchRecoveryBackoff records now + an attempt-growing delay", () => {
+    const state: any = {};
+    scheduleDispatchRecoveryBackoff(state, "s", 1, 1000);
+    const after1 = state[DISPATCH_RECOVERY_BACKOFF_FIELD].s;
+    expect(after1).toBeGreaterThan(1000);
+    scheduleDispatchRecoveryBackoff(state, "s", 4, 1000);
+    // Later attempt → strictly longer window (exponential).
+    expect(state[DISPATCH_RECOVERY_BACKOFF_FIELD].s).toBeGreaterThan(after1);
+  });
+
+  it("scheduleDispatchRecoveryBackoff is a no-op for a non-finite clock", () => {
+    const state: any = {};
+    scheduleDispatchRecoveryBackoff(state, "s", 1, NaN);
+    expect(state[DISPATCH_RECOVERY_BACKOFF_FIELD]).toBeUndefined();
+  });
+
+  it("clearDispatchRecoveryBackoff removes a slice's window and tolerates absence", () => {
+    const state: any = { [DISPATCH_RECOVERY_BACKOFF_FIELD]: { s: 1, t: 2 } };
+    clearDispatchRecoveryBackoff(state, "s");
+    expect(state[DISPATCH_RECOVERY_BACKOFF_FIELD]).toEqual({ t: 2 });
+    expect(() => clearDispatchRecoveryBackoff({}, "missing")).not.toThrow();
+  });
+
+  it("AIMD decrease halves R (floored at 1); increase adds 1 (capped at 8)", () => {
+    const state: any = { [DISPATCH_RECOVERY_RATE_FIELD]: 8 };
+    decreaseDispatchRecoveryRate(state);
+    expect(state[DISPATCH_RECOVERY_RATE_FIELD]).toBe(4);
+    increaseDispatchRecoveryRate(state);
+    expect(state[DISPATCH_RECOVERY_RATE_FIELD]).toBe(5);
+    // Floor: an unset rate reads as 1, halving stays 1.
+    const cold: any = {};
+    decreaseDispatchRecoveryRate(cold);
+    expect(cold[DISPATCH_RECOVERY_RATE_FIELD] ?? 1).toBe(1);
   });
 });

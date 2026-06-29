@@ -30,7 +30,30 @@ import {
 } from "../pure/dispatch-id.js";
 import { buildSmithySpawnPrompt } from "../pure/messages.js";
 import { hashText } from "../pure/hash.js";
-import { DISPATCH_RECOVERY_LIMIT, recoveryAttemptKey, recoveryBudgetExhausted } from "../pure/slice.js";
+import {
+  DISPATCH_RECOVERY_LIMIT,
+  recoveryAttemptKey,
+  recoveryBudgetExhausted,
+  scheduleDispatchRecoveryBackoff,
+  clearDispatchRecoveryBackoff,
+  decreaseDispatchRecoveryRate,
+  increaseDispatchRecoveryRate,
+} from "../pure/slice.js";
+import { parseMs } from "../pure/self-heal.js";
+
+/**
+ * Self-heal bookkeeping for a FAILED (re-)dispatch (#460): schedule the slice's
+ * next exponential-backoff window and apply the AIMD rate DECREASE. Shared by both
+ * escalation sites — the synchronous launch throw and the async spawn-result
+ * drain. `attempt` is the failure count so far (recovery counter + 1) so the
+ * backoff doubles per failure.
+ */
+function recordDispatchRecoveryFailure(state: any, sliceId: string, ts: string): void {
+  const counts = state?.transient_retry_counts && typeof state.transient_retry_counts === "object" ? state.transient_retry_counts : {};
+  const used = Number.isFinite(counts[recoveryAttemptKey(sliceId)]) ? counts[recoveryAttemptKey(sliceId)] : 0;
+  scheduleDispatchRecoveryBackoff(state, sliceId, used + 1, parseMs(ts));
+  decreaseDispatchRecoveryRate(state);
+}
 
 /** A judgement-request notification (the dispatch handler fires these). */
 export interface DispatchNotification {
@@ -265,6 +288,8 @@ export async function launchDispatch(state: any, ts: string, item: any, sliceId:
       existing.last_action = ts;
       existing.last_action_note = "NEED: Hatchery dispatch launch failed: " + error;
       deps.emitTransition({ type: "slice.escalated", sliceId, reason: "hatchery_dispatch_failed" });
+      // #460: same self-heal bookkeeping as the async drain — back off + decrease R.
+      recordDispatchRecoveryFailure(state, sliceId, ts);
       const culled = await cullOrphanedSteward(sliceId, existing.branch, error, ts, deps);
       if (culled) actions.push(culled);
       // Only bother the operator once auto-recovery is out of budget — within
@@ -277,8 +302,10 @@ export async function launchDispatch(state: any, ts: string, item: any, sliceId:
           requestKey: "hatchery-failure:" + sliceId + ":launch-throw:" + hashText(error).slice(0, 12),
           reason: "hatchery_dispatch_failed",
           detail: "Hatchery dispatch launch threw for " + actionCommandLine(action) + ".\n\nError:\n" + error
-            + "\n\nThe loop auto-recovered this class " + DISPATCH_RECOVERY_LIMIT + " times and it still failed, so the"
-            + " slice is now operator-only. For 'branch already exists' surface this via legate.unwedge; otherwise legate.error.",
+            + "\n\nThe loop auto-recovered this class " + DISPATCH_RECOVERY_LIMIT + " times and it still failed, so you are"
+            + " being notified — but the loop KEEPS re-dispatching it with exponential backoff (#460), so a transient cause"
+            + " self-heals on its own. For a persistent 'branch already exists' / diverged-branch collision, legate.unwedge"
+            + " + a Brood teardown of the orphan branch/worktree (#155) clears it; otherwise legate.error for worker-side recovery.",
         });
       }
     }
@@ -375,6 +402,10 @@ export async function completePendingHatcheryDispatches(state: any, ts: string, 
     slice.last_action = ts;
     slice.last_action_note = "NEED: Hatchery dispatch failed: " + errorText;
     deps.emitTransition({ type: "slice.escalated", sliceId, reason: "hatchery_dispatch_failed" });
+    // #460: schedule this slice's next exponential-backoff window + AIMD-decrease
+    // the recovery rate, so the loop keeps re-dispatching indefinitely but ever
+    // further apart and without stampeding after a burst.
+    recordDispatchRecoveryFailure(state, sliceId, ts);
     // The spawn failed before reaching a useful steward; cull the session it may
     // have orphaned in Castra (timeout-ambiguity / crash case the Hatchery's own
     // rollback can't reach) so it does not leak or hold a budget slot.
@@ -393,10 +424,10 @@ export async function completePendingHatcheryDispatches(state: any, ts: string, 
         requestKey: "hatchery-failure:" + sliceId + ":" + hashText(errorText).slice(0, 12),
         reason: "hatchery_dispatch_failed",
         detail: "Hatchery dispatch for " + commandLine + " failed and was escalated.\n\nError:\n" + errorText.trim()
-          + "\n\nThe loop auto-recovered this " + DISPATCH_RECOVERY_LIMIT + " times and it still failed, so the slice is"
-          + " now operator-only. A 'branch already exists' / diverged-branch collision needs legate.unwedge + a Brood"
-          + " teardown of the orphan branch/worktree (#155) before re-dispatch; otherwise run legate.error for"
-          + " worker-side recovery.",
+          + "\n\nThe loop auto-recovered this " + DISPATCH_RECOVERY_LIMIT + " times and it still failed, so you are being"
+          + " notified — but the loop KEEPS re-dispatching it with exponential backoff (#460), so a transient cause"
+          + " self-heals on its own. A persistent 'branch already exists' / diverged-branch collision needs legate.unwedge"
+          + " + a Brood teardown of the orphan branch/worktree (#155); otherwise run legate.error for worker-side recovery.",
       });
     }
     mutated = true;
@@ -477,6 +508,11 @@ export async function completePendingHatcheryDispatches(state: any, ts: string, 
     // it the counter would reappear from sys.retries on a cold start and could
     // wrongly deny recovery to a later re-incarnation of the same slice id (#211).
     if (state.transient_retry_counts && typeof state.transient_retry_counts === "object") {
+      // #460: a recovery that cleanly reached `implementing` is a SUCCESS — AIMD
+      // increase the recovery rate so a recovered world ramps back up. Detected
+      // BEFORE the clear, off this slice's recovery counter.
+      const recoveryUsed = state.transient_retry_counts[recoveryAttemptKey(sliceId)];
+      if (Number.isFinite(recoveryUsed) && recoveryUsed > 0) increaseDispatchRecoveryRate(state);
       const cleared: string[] = [];
       if (Object.prototype.hasOwnProperty.call(state.transient_retry_counts, sliceId)) cleared.push(sliceId);
       for (const k of Object.keys(state.transient_retry_counts)) {
@@ -487,6 +523,9 @@ export async function completePendingHatcheryDispatches(state: any, ts: string, 
         deps.emitTransition({ type: "retry.counted", key: k, count: 0 });
       }
     }
+    // Clear any dispatch-recovery backoff window — a future re-strand re-probes
+    // promptly with a short first backoff (#460).
+    clearDispatchRecoveryBackoff(state, sliceId);
     actions.push({
       action: "dispatch-complete",
       sliceId,

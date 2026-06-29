@@ -1,6 +1,7 @@
 import { dispatchBranch, dispatchItemKey, dispatchSliceId, sliceActionKey } from "./dispatch-id.js";
 import { isMarchBotComment } from "./march-bot.js";
 import { resolveMergeRequirements, type MergePolicy } from "../../../herald/profiles/merge-policy.js";
+import { backoffMs, readRecoveryRate, stepRecoveryRate } from "./self-heal.js";
 
 /**
  * Pure slice/archive reasoning: terminal detection and the dedup/recovery
@@ -218,12 +219,67 @@ export function dispatchableReady<T>(state: any, ready: readonly T[] | undefined
 export const RECOVERABLE_ESCALATION_REASONS = new Set<string>(["hatchery_dispatch_failed"]);
 
 /**
- * How many times the loop auto-re-dispatches a recoverable escalation before
- * leaving it operator-only. Two: a deterministic failure that survives two fresh
- * workers is almost certainly not transient, so a human should look. Total spawn
- * attempts for a slice are 1 (original) + {@link DISPATCH_RECOVERY_LIMIT}.
+ * After how many failed re-dispatches the loop PINGS THE OPERATOR (once). This is
+ * NO LONGER a give-up limit (#460): the loop now re-dispatches a recoverable
+ * escalation INDEFINITELY with exponential backoff (see {@link
+ * recoverableEscalations}), the same self-healing pace the steward relaunch path
+ * uses — a transient cause (stale base, a Castra-unreachable window, codex auth
+ * lapse) self-heals the instant the world recovers, costing almost nothing while
+ * it waits. The operator is still notified once this threshold is crossed so a
+ * genuinely-stuck slice is visible, but the loop keeps probing (and, with parking
+ * enabled, each failed probe leaves a forensic artifact to root-cause).
  */
 export const DISPATCH_RECOVERY_LIMIT = 2;
+
+/** Warm working-state field (in `state.raw`, NOT folded — resets to empty on a
+ *  cold start, like the relaunch backoff map): epoch-ms of each slice's next
+ *  dispatch-recovery eligibility. */
+export const DISPATCH_RECOVERY_BACKOFF_FIELD = "dispatch_recovery_backoff_until";
+/** Warm working-state field: the dispatch-recovery AIMD rate R (max re-dispatches
+ *  attempted per tick). Its own scalar, independent of relaunch's `recovery_rate`,
+ *  so a spawn-failure burst and a steward-relaunch burst don't throttle each other. */
+export const DISPATCH_RECOVERY_RATE_FIELD = "dispatch_recovery_rate";
+
+/** Pure read of the dispatch-recovery backoff map. */
+function readDispatchBackoff(state: any): Record<string, number> {
+  const b = state?.[DISPATCH_RECOVERY_BACKOFF_FIELD];
+  return b && typeof b === "object" ? b : {};
+}
+
+/**
+ * Schedule the next dispatch-recovery backoff window for a slice after a failed
+ * (re-)dispatch: `now + backoffMs(attempt)`. `attempt` is the failure count so
+ * far (1-based) so the delay doubles per failure. No-op when `nowMs` is not a
+ * finite time (a non-date tick ts → backoff can't gate, so don't record one).
+ */
+export function scheduleDispatchRecoveryBackoff(state: any, sliceId: string, attempt: number, nowMs: number): void {
+  if (!Number.isFinite(nowMs)) return;
+  if (!state[DISPATCH_RECOVERY_BACKOFF_FIELD] || typeof state[DISPATCH_RECOVERY_BACKOFF_FIELD] !== "object") {
+    state[DISPATCH_RECOVERY_BACKOFF_FIELD] = {};
+  }
+  state[DISPATCH_RECOVERY_BACKOFF_FIELD][sliceId] = nowMs + backoffMs(Math.max(attempt, 1), sliceId);
+}
+
+/** Clear a slice's dispatch-recovery backoff (it transitioned cleanly, so a future
+ *  re-strand should re-probe promptly with a short first backoff). */
+export function clearDispatchRecoveryBackoff(state: any, sliceId: string): void {
+  const b = state?.[DISPATCH_RECOVERY_BACKOFF_FIELD];
+  if (b && typeof b === "object") delete b[sliceId];
+}
+
+/** AIMD decrease: halve R (floored at MIN) after a failed re-dispatch. */
+export function decreaseDispatchRecoveryRate(state: any): void {
+  const current = readRecoveryRate(state, DISPATCH_RECOVERY_RATE_FIELD);
+  const next = stepRecoveryRate(current, { failures: 1, rateLimited: false });
+  if (next !== current) state[DISPATCH_RECOVERY_RATE_FIELD] = next;
+}
+
+/** AIMD increase: +1 R (capped at MAX) after a re-dispatch that cleanly succeeded. */
+export function increaseDispatchRecoveryRate(state: any): void {
+  const current = readRecoveryRate(state, DISPATCH_RECOVERY_RATE_FIELD);
+  const next = stepRecoveryRate(current, { failures: 0, rateLimited: true });
+  if (next !== current) state[DISPATCH_RECOVERY_RATE_FIELD] = next;
+}
 
 /** Durable retry-counter key for a slice's auto-recovery budget. Suffixed with
  *  the slice id so completePending's success-path cleanup (`endsWith(":"+id)`)
@@ -277,7 +333,7 @@ function otherLiveBlocker(state: any, item: any, sliceId: string): boolean {
 }
 
 /** A still-ready smithy item whose deterministic slice is recoverably escalated
- *  and within the retry budget — i.e. a candidate for auto re-dispatch. */
+ *  and eligible for an auto re-dispatch this tick. */
 export interface RecoverableEscalation {
   readonly item: any;
   readonly sliceId: string;
@@ -287,29 +343,53 @@ export interface RecoverableEscalation {
 }
 
 /**
- * The subset of smithy layer-0 ready items the loop should AUTO-RECOVER this tick:
- * each item whose deterministic slice is escalated for a {@link
- * RECOVERABLE_ESCALATION_REASONS recoverable reason}, is within the {@link
- * DISPATCH_RECOVERY_LIMIT retry budget}, is not blocked by a terminal archive
- * decision (a MERGED/ESCALATED/CLOSED archive keeps blocking — we never fight an
- * operator's archive), and has no OTHER live blocker. Disjoint from {@link
- * dispatchableReady}: an escalated slice reads as in-flight there, so the same
- * item is never both a fresh dispatch and a recovery in one tick.
+ * The subset of smithy layer-0 ready items the loop should AUTO-RECOVER this tick.
+ * Each candidate's deterministic slice is escalated for a {@link
+ * RECOVERABLE_ESCALATION_REASONS recoverable reason}, is not blocked by a terminal
+ * archive decision (a MERGED/ESCALATED/CLOSED archive keeps blocking — we never
+ * fight an operator's archive), and has no OTHER live blocker. Disjoint from
+ * {@link dispatchableReady}: an escalated slice reads as in-flight there, so the
+ * same item is never both a fresh dispatch and a recovery in one tick.
+ *
+ * SELF-HEALING PACE (#460), mirroring the steward relaunch path: there is NO hard
+ * give-up limit. A recoverable escalation is re-dispatched INDEFINITELY but
+ *  - gated by EXPONENTIAL BACKOFF + per-slice jitter ({@link
+ *    DISPATCH_RECOVERY_BACKOFF_FIELD}, warm-only): a candidate still cooling down
+ *    is skipped, so a genuinely-broken slice is probed ever-further apart yet
+ *    self-heals the instant the cause clears; and
+ *  - rate-limited by the per-profile AIMD rate R ({@link
+ *    DISPATCH_RECOVERY_RATE_FIELD}): at most R candidates per tick, longest-waiting
+ *    first, so a burst that all failed at once can't stampede re-dispatches (the
+ *    throttle that replaces the removed hard cap).
+ *
+ * `nowMs` is the tick epoch-ms; pass NaN (or omit) to disable the backoff gate
+ * (unit tests / a non-date tick → every recoverable slice is eligible).
  */
-export function recoverableEscalations(state: any, ready: readonly any[] | undefined): RecoverableEscalation[] {
+export function recoverableEscalations(state: any, ready: readonly any[] | undefined, nowMs = NaN): RecoverableEscalation[] {
   const slices = state?.slices && typeof state.slices === "object" ? state.slices : {};
   const counts = state?.transient_retry_counts && typeof state.transient_retry_counts === "object" ? state.transient_retry_counts : {};
-  const out: RecoverableEscalation[] = [];
+  const backoff = readDispatchBackoff(state);
+  const candidates: { item: any; sliceId: string; attempt: number; until: number }[] = [];
   for (const item of ready ?? []) {
     const sliceId = dispatchSliceId(item);
     if (!escalatedRecoverable(slices[sliceId])) continue;
-    const used = Number.isFinite(counts[recoveryAttemptKey(sliceId)]) ? counts[recoveryAttemptKey(sliceId)] : 0;
-    if (used >= DISPATCH_RECOVERY_LIMIT) continue;
     if (alreadyArchivedSlice(state, item, sliceId)) continue;
     if (otherLiveBlocker(state, item, sliceId)) continue;
-    out.push({ item, sliceId, attempt: used + 1, limit: DISPATCH_RECOVERY_LIMIT });
+    const used = Number.isFinite(counts[recoveryAttemptKey(sliceId)]) ? counts[recoveryAttemptKey(sliceId)] : 0;
+    // Backoff gate: skip while still cooling down (only when we can compare times).
+    const until = Number.isFinite(backoff[sliceId]) ? backoff[sliceId] : 0;
+    if (Number.isFinite(nowMs) && nowMs < until) continue;
+    candidates.push({ item, sliceId, attempt: used + 1, until });
   }
-  return out;
+  // Longest-waiting first: smallest next-eligible timestamp (never-tried = 0) wins.
+  candidates.sort((a, b) => a.until - b.until);
+  const rate = readRecoveryRate(state, DISPATCH_RECOVERY_RATE_FIELD);
+  return candidates.slice(0, rate).map((c) => ({
+    item: c.item,
+    sliceId: c.sliceId,
+    attempt: c.attempt,
+    limit: DISPATCH_RECOVERY_LIMIT,
+  }));
 }
 
 /**

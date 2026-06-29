@@ -341,3 +341,85 @@ export function removeSpawnWorktree(
     );
   }
 }
+
+/** Outcome of {@link parkSpawnWorktree}: the parked-aside identifiers and which
+ *  of the three preserving git ops actually completed. */
+export interface ParkWorktreeResult {
+  /** Where the worktree now lives (the canonical path is freed for re-dispatch). */
+  readonly parkedWorktreePath: string;
+  /** What the branch was renamed to (the canonical name is freed). */
+  readonly parkedBranch: string;
+  readonly worktreeMoved: boolean;
+  readonly branchRenamed: boolean;
+}
+
+/**
+ * PARK a failed spawn's manager worktree + branch instead of deleting them
+ * (#460 forensics): rename both ASIDE so the failed state survives on disk for
+ * later root-causing, while FREEING the canonical worktree path and branch name
+ * so the loop's self-healing re-dispatch starts clean (no collision).
+ *
+ * Three best-effort, preserving git ops (the inverse of {@link
+ * removeSpawnWorktree} — nothing is destroyed, nothing is pruned, #155):
+ *   1. `git worktree move <wt> <parked>` — frees the canonical directory.
+ *   2. `git -C <parked> checkout --detach` — releases the branch so it can be
+ *      renamed (a checked-out branch can't be `-m`'d); the parked worktree stays
+ *      at the failed commit (detached), so its files + index are intact.
+ *   3. `git branch -m <branch> <parked>` — frees the canonical branch name while
+ *      keeping the failed commit reachable under the parked name.
+ *
+ * Never throws; the caller inspects the returned flags. If the move fails the
+ * branch rename is skipped (leaving everything in place is still non-destructive —
+ * only a later re-dispatch could then collide, which the existing self-heal
+ * handles). The worker container/image are left to the caller (kept, not removed).
+ */
+export function parkSpawnWorktree(
+  repoRoot: string,
+  spawn: SpawnWorktree,
+): ParkWorktreeResult {
+  const parkedWorktreePath = `${spawn.worktreePath}-parked-${spawn.spawnId}`;
+  // A fresh namespace that can't D/F-conflict with the freed canonical ref.
+  const parkedBranch = `parked/${spawn.spawnId}/${spawn.branch.replace(/^feature\//, "")}`;
+
+  let worktreeMoved = false;
+  if (fs.existsSync(spawn.worktreePath) && !fs.existsSync(parkedWorktreePath)) {
+    try {
+      // `--force` because a failed-apply worktree is DIRTY (a `--3way` apply leaves
+      // unmerged paths) and may still be the cwd of the about-to-be-removed
+      // agent-deck session — plain `move` refuses both. We want it moved regardless.
+      execFileSync("git", ["worktree", "move", "--force", spawn.worktreePath, parkedWorktreePath], {
+        cwd: repoRoot,
+        stdio: "ignore",
+      });
+      worktreeMoved = true;
+    } catch {
+      // Leave the worktree in place — preservation still holds; report via flag.
+    }
+  }
+
+  let branchRenamed = false;
+  // Only free the branch name once the worktree no longer holds it at the
+  // canonical path (post-move). Detach the parked checkout so `-m` is permitted —
+  // `checkout --detach` with no pathspec just repoints HEAD at the SAME commit, so
+  // it leaves the dirty/unmerged working tree + index untouched (the forensics we
+  // are preserving) and succeeds even on a conflicted worktree.
+  if (worktreeMoved) {
+    try {
+      execFileSync("git", ["-C", parkedWorktreePath, "checkout", "--detach"], { stdio: "ignore" });
+    } catch {
+      // best-effort — if detach fails the rename below will simply no-op.
+    }
+    try {
+      execFileSync("git", ["branch", "-m", spawn.branch, parkedBranch], {
+        cwd: repoRoot,
+        stdio: "ignore",
+      });
+      branchRenamed = true;
+    } catch {
+      // Branch left under its original name; a later re-dispatch collision is
+      // handled by the existing #243 self-heal. Reported via the flag.
+    }
+  }
+
+  return { parkedWorktreePath, parkedBranch, worktreeMoved, branchRenamed };
+}
