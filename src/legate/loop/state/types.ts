@@ -195,6 +195,11 @@ export interface TickResult {
   relaunchCount: number;
   /** Steward relaunch attempts this tick that failed (`relaunch-failed`). */
   relaunchFailureCount: number;
+  /** The profile's current AIMD self-healing recovery rate — the max
+   *  backoff-eligible stranded slices the automatic relaunch path attempts per
+   *  tick. Collapses to 1 after a failure, ramps up on clean sweeps. Surfaced as
+   *  `march_legate_recovery_rate`. */
+  recoveryRate: number;
   /** Babysit actions excluding the steward-nudge family (counted separately below). */
   babysitActionCount: number;
   /** Stranded-steward nudges sent this tick. */

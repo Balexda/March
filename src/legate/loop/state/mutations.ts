@@ -94,5 +94,9 @@ export function dropRecoveredSlice(raw: any, sliceId: string): boolean {
       if (key === sliceId || key.endsWith(":" + sliceId)) delete counts[key];
     }
   }
+  // Drop the self-healing backoff timer (relaunch.ts) too — a nuked/recovered
+  // slice that re-dispatches fresh must not carry a stale cooldown window.
+  const backoff = raw?.relaunch_backoff_until;
+  if (backoff && typeof backoff === "object") delete backoff[sliceId];
   return dropped;
 }

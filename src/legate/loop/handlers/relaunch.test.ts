@@ -2,7 +2,7 @@
  * @l0 @deterministic @ci
  */
 import { describe, expect, it, vi } from "vitest";
-import { apply, assess, type RelaunchDeps } from "./relaunch.js";
+import { apply, assess, relaunchBackoffMs, RELAUNCH_BACKOFF_MAX_MS, type RelaunchDeps } from "./relaunch.js";
 import type { HandlerContext, LoopState } from "../state/types.js";
 
 function loopState(over: Partial<LoopState> = {}): LoopState {
@@ -80,12 +80,17 @@ describe("relaunch handler", () => {
     expect(d.worktreePath).toBe("/home/u/Development/WorkTrees/March/feature-feat-a");
   });
 
-  it("assess stops after the retry limit", async () => {
+  it("no longer hard-stops at a retry count — it keeps retrying (backs off instead)", async () => {
+    // With the old hard cap a slice at count 3 was parked forever. Now it stays
+    // selectable (the backoff timer, not a fixed limit, paces it). ts is not a
+    // real date here so the backoff gate can't fire → eligible, attempt 4.
     const state = loopState({
       slices: { gone: eligibleSlice() },
       raw: { slices: {}, transient_retry_counts: { "relaunch-steward:gone": 3 } },
     });
-    expect(assess(state)).toEqual([]);
+    const decisions = assess(state);
+    expect(decisions).toHaveLength(1);
+    expect(decisions[0]).toMatchObject({ sliceId: "gone", mode: "auto", attempt: 4 });
   });
 
   it("apply recreates a missing worktree, launches, sends resume, and rebinds the slice", async () => {
@@ -237,22 +242,100 @@ describe("relaunch handler", () => {
     expect(c.emitTransition).toHaveBeenCalledWith({ type: "retry.counted", key: "relaunch-steward:gone", count: 1 });
   });
 
-  it("a persistently-failing relaunch stops being re-selected once the budget is exhausted", async () => {
+  it("a failing auto relaunch backs off, then becomes eligible again after the cooldown", async () => {
+    const t0 = "2026-06-26T00:00:00.000Z";
     const slice = eligibleSlice();
-    const state = loopState({ slices: { gone: slice }, raw: { slices: { gone: slice } } });
-    const c = ctx(() => {
-      throw new Error("castra down");
-    });
+    const state = loopState({ ts: t0, slices: { gone: slice }, raw: { slices: { gone: slice } } });
+    const c = { ...ctx(() => { throw new Error("castra down"); }), ts: t0 };
     const deps: RelaunchDeps = { worktreeExists: () => true, ensureWorktree: vi.fn() };
 
-    // Three failing attempts advance the counter 1→2→3; the 4th assess is empty.
-    for (let i = 1; i <= 3; i++) {
-      const decisions = assess(state);
-      expect(decisions).toHaveLength(1);
-      const res = await apply(decisions, c, state, deps);
-      expect(res.actions[0]).toMatchObject({ action: "relaunch-failed" });
-      expect(state.raw.transient_retry_counts["relaunch-steward:gone"]).toBe(i);
-    }
-    expect(assess(state)).toEqual([]); // budget exhausted → no more churn
+    const res = await apply(assess(state), c, state, deps);
+    expect(res.actions[0]).toMatchObject({ action: "relaunch-failed" });
+    // A backoff window was scheduled in the future…
+    const until = state.raw.relaunch_backoff_until.gone;
+    expect(until).toBeGreaterThan(Date.parse(t0));
+    // …so an immediate re-assess (same tick time) skips it — no churn.
+    expect(assess(state)).toEqual([]);
+    // Once the cooldown elapses it is selectable again (retries indefinitely).
+    state.ts = "2026-06-26T01:00:00.000Z";
+    const later = assess(state);
+    expect(later).toHaveLength(1);
+    expect(later[0]).toMatchObject({ sliceId: "gone", attempt: 2 });
+  });
+
+  it("auto path: AIMD caps attempts at the rate and increases it after a clean sweep", async () => {
+    // Three stranded slices but rate 1 → only the longest-waiting is attempted,
+    // flagged rate-limited; a clean success bumps the rate to 2.
+    const mk = () => eligibleSlice();
+    const slices = { a: mk(), b: mk(), c: mk() };
+    const state = loopState({ slices, raw: { slices, recovery_rate: 1 } });
+    const decisions = assess(state);
+    expect(decisions).toHaveLength(1);
+    expect(decisions[0]).toMatchObject({ mode: "auto", autoRateLimited: true });
+
+    const c = ctx(() => ({ sessionId: "fresh" }));
+    const deps: RelaunchDeps = { worktreeExists: () => true, ensureWorktree: vi.fn() };
+    await apply(decisions, c, state, deps);
+    expect(state.raw.recovery_rate).toBe(2); // additive increase
+  });
+
+  it("auto path: any failure halves the AIMD rate (multiplicative decrease)", async () => {
+    const slice = eligibleSlice();
+    const state = loopState({ slices: { gone: slice }, raw: { slices: { gone: slice }, recovery_rate: 4 } });
+    const c = ctx(() => { throw new Error("castra down"); });
+    const deps: RelaunchDeps = { worktreeExists: () => true, ensureWorktree: vi.fn() };
+    await apply(assess(state), c, state, deps);
+    expect(state.raw.recovery_rate).toBe(2); // 4 → 2
+  });
+
+  it("auto path: covers an escalated-infra slice with a dead steward by un-escalating it", async () => {
+    const slice = eligibleSlice({ stage: "escalated", escalated_reason: "hatchery_dispatch_failed" });
+    const state = loopState({ slices: { gone: slice }, raw: { slices: { gone: slice } } });
+    const decisions = assess(state);
+    expect(decisions).toHaveLength(1);
+    expect(decisions[0]).toMatchObject({ mode: "auto", unescalateStage: "pr-open" });
+
+    const c = ctx(() => ({ sessionId: "fresh" }));
+    const deps: RelaunchDeps = { worktreeExists: () => true, ensureWorktree: vi.fn() };
+    await apply(decisions, c, state, deps);
+    expect(slice.stage).toBe("pr-open");
+    expect((slice as any).escalated_reason).toBeUndefined();
+    expect(c.emitTransition).toHaveBeenCalledWith({ type: "slice.stage.changed", sliceId: "gone", stage: "pr-open" });
+    expect(slice.worker_session_id).toBe("fresh");
+  });
+
+  it("auto path: never touches an escalated slice that is genuinely awaiting the user", async () => {
+    const slice = eligibleSlice({ stage: "escalated", escalated_reason: "steward_awaiting_input" });
+    const state = loopState({ slices: { hold: slice }, raw: { slices: { hold: slice } } });
+    expect(assess(state)).toEqual([]);
+  });
+
+  it("ladder path: a recovery_rung slice keeps the bounded, backoff-free behavior", async () => {
+    // Even with a future backoff timer, an operator-driven (ladder) slice is
+    // selected every tick until RELAUNCH_LIMIT — the operator path stays prompt.
+    const slice = eligibleSlice({ recovery_rung: 1 });
+    const state = loopState({
+      ts: "2026-06-26T00:00:00.000Z",
+      slices: { gone: slice },
+      raw: {
+        slices: { gone: slice },
+        relaunch_backoff_until: { gone: Date.parse("2030-01-01T00:00:00.000Z") },
+      },
+    });
+    const decisions = assess(state);
+    expect(decisions).toHaveLength(1);
+    expect(decisions[0]).toMatchObject({ mode: "ladder", attempt: 1, limit: 3 });
+  });
+
+  it("relaunchBackoffMs grows exponentially and is deterministic per slice", async () => {
+    const a1 = relaunchBackoffMs(1, "slice-x");
+    const a2 = relaunchBackoffMs(2, "slice-x");
+    const a3 = relaunchBackoffMs(3, "slice-x");
+    expect(a2).toBeGreaterThan(a1);
+    expect(a3).toBeGreaterThan(a2);
+    // Deterministic: same inputs → same output (cold-start / test stable).
+    expect(relaunchBackoffMs(1, "slice-x")).toBe(a1);
+    // Plateaus at the cap (with up to +20% jitter).
+    expect(relaunchBackoffMs(99, "slice-x")).toBeLessThanOrEqual(Math.round(RELAUNCH_BACKOFF_MAX_MS * 1.2));
   });
 });

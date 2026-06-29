@@ -47,6 +47,7 @@ export function buildHeartbeatRecord(out: CoordinatorOutput, meta: { processor_n
     ghost_cleanup_deferred_count: t.ghostCleanupDeferredCount,
     relaunch_count: t.relaunchCount,
     relaunch_failure_count: t.relaunchFailureCount,
+    recovery_rate: t.recoveryRate,
     babysit_action_count: t.babysitActionCount,
     steward_nudge_count: t.stewardNudgeCount,
     steward_stranded_count: t.stewardStrandedCount,
