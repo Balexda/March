@@ -18,7 +18,7 @@
 
 ### Tasks
 
-- [ ] **Add the spawn index reader module**
+- [x] **Add the spawn index reader module**
 
   Add `src/brood/spawn-index.ts` as the repository-internal reader module over the existing `src/brood/spawn-record.ts` record shape and path helpers. Expose story-owned list and load behavior while leaving `derivedStatus` for the later derived-view slices; AS 1.1 and AS 1.4 define the observable read outcomes.
 
@@ -29,7 +29,7 @@
   - The reader accepts records without an M2-era `profile` field
   - The module does not mutate disk or Docker state
 
-- [ ] **Implement the safe-read skip warning**
+- [x] **Implement the safe-read skip warning**
 
   Extend the reader path in `src/brood/spawn-index.ts` with the US1 safe-read protocol for list operations. Keep unreadable-file handling local to the index reader so downstream verbs can consume `listSpawnRecords()` without duplicating parse recovery logic.
 
@@ -40,7 +40,7 @@
   - Other valid records in the same directory are still returned
   - The implementation remains a pure read path with no cleanup or rewrite side effects
 
-- [ ] **Cover tolerant reader behavior with tests**
+- [x] **Cover tolerant reader behavior with tests**
 
   Add focused tests beside the Brood record/index modules using isolated home-directory fixtures. Cover AS 1.1-1.4 through the exported API, including valid records, an unreadable mid-write record, a profile-less record, a known id, and an unknown id.
 
