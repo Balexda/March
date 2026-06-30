@@ -18,7 +18,7 @@
 
 ### Tasks
 
-- [ ] **Document publishable Steward correlation facts**
+- [x] **Document publishable Steward correlation facts**
 
   Update the Steward contract's public interface and invariants to name the lifecycle facts that become observable when a Steward session launches. The prose should cover the Steward session id, parent spawn id, slice id, profile, branch, and worktree facts from AS 3.1 without moving ownership of Brood rows, Herald events, or Castra sessions into Steward.
 
@@ -29,7 +29,7 @@
   - Castra session identity remains the hosted interactive-session identity rather than Steward-owned route state.
   - No Hatchery, Brood, Herald, Castra, Spawn, Legate, PR, or runtime behavior is implemented.
 
-- [ ] **Define cleanup ownership boundaries**
+- [x] **Define cleanup ownership boundaries**
 
   Extend the Steward contract with cleanup rules for requested Steward removal. The contract should state that Castra owns interactive-session removal while Brood owns exact tracked worktree and branch cleanup ordering, satisfying AS 3.2 without restating provider route tables or cleanup implementation details.
 
@@ -40,7 +40,7 @@
   - Provider contracts remain referenced as boundaries rather than duplicated route or loop specifications.
   - Steward cleanup semantics do not require PR creation, push, merge, contract checking, freshness checking, or CI changes.
 
-- [ ] **Record loss, timeout, and unreachable-session failures**
+- [x] **Record loss, timeout, and unreachable-session failures**
 
   Add error-mode and invariant prose for Steward sessions that disappear, stall, time out, or become unreachable. The contract should align with March's clean-exit model from `docs/vision.md` and `docs/operating-philosophy.md`, making these states observable to Legate or Brood under AS 3.3 rather than waiting forever on input the role cannot receive.
 
