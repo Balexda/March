@@ -18,7 +18,7 @@
 
 ### Tasks
 
-- [ ] **Document index-aware patch application promises**
+- [x] **Document index-aware patch application promises**
 
   Update the Steward contract's public interface and invariants to describe how Steward applies validated patch output to the expected worktree and index. The contract should name `git apply --index` as the index-aware application mode, define what fallback or conflict handling is allowed to report, and keep the behavior framed as Steward-owned role semantics rather than Spawn validation or Castra route behavior.
 
@@ -28,7 +28,7 @@
   - Fallback, rejected hunks, conflicts, and unsupported apply forms are described as bounded Steward outcomes, not interactive prompts (AS 2.2).
   - The prose consumes Spawn's validated patch result without restating Spawn's raw-output parsing or validation internals.
 
-- [ ] **Record worktree cleanliness and failure constraints**
+- [x] **Record worktree cleanliness and failure constraints**
 
   Add assertable rules for target-worktree identity, branch identity, dirty-worktree handling, out-of-worktree patch attempts, and incoherent index states. The contract should make failed handoffs externally diagnosable while preserving March's autonomous-component rules from `docs/vision.md` and `docs/operating-philosophy.md`.
 
@@ -38,7 +38,7 @@
   - Patches that apply outside the allowed worktree are failed outcomes, not partially accepted states (AS 2.2).
   - Failure language cites the noninteractive, clean-exit model from `docs/vision.md` and `docs/operating-philosophy.md`.
 
-- [ ] **Define PR-ready and failed outcome reporting**
+- [x] **Define PR-ready and failed outcome reporting**
 
   Document Steward's terminal success and failure reports without requiring this story to create, push, merge, or open a pull request. The contract should distinguish PR-ready branch state from downstream PR creation tooling and name the bounded diagnostic surfaces that callers or tests can assert.
 
