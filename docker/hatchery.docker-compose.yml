@@ -71,6 +71,11 @@ services:
       - PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
       - CODEX_HOME=${MARCH_HOST_HOME:-/home/jmbattista}/.codex
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      # GitHub token for the pre-snapshot base pin's in-container `git fetch`
+      # (#300/#301 ssh->https rewrite). Optional: without it the pin degrades to
+      # the last-known origin/<default> tracking ref instead of a live fetch.
+      - GH_TOKEN=${GH_TOKEN:-}
+      - GITHUB_TOKEN=${GITHUB_TOKEN:-}
       # Castra — the interactive-sessions host the Hatchery drives over HTTP.
       - CASTRA_URL=${CASTRA_URL:-http://castra:${CASTRA_PORT:-9264}}
       # Required — must match the token Castra was started with.
