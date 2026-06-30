@@ -18,7 +18,7 @@
 
 ### Tasks
 
-- [ ] **Add Spawn boundary ownership references**
+- [x] **Add Spawn boundary ownership references**
 
   Review `docs/subsystems/spawn/contract.md` and make the Spawn-owned relationships to Hatchery, Brood, Castra, and Steward explicit. Keep the prose focused on Spawn's lifecycle, output, validation, cleanup, and handoff promises while pointing provider interface details back to their owning contracts or future contract.
 
@@ -29,7 +29,7 @@
   - Steward is named only as the validated-output handoff consumer, pointing to the existing Steward contract (`docs/subsystems/steward/contract.md`); Steward's role commands, prompts, and public interface are not restated — they remain owned by the Steward contract.
   - Spawn-owned lifecycle, terminal output, validation-gated handoff, and cleanup promises remain the only detailed behavior documented in the Spawn contract.
 
-- [ ] **Add Legate boundary ownership references**
+- [x] **Add Legate boundary ownership references**
 
   Review `docs/subsystems/legate/contract.md` and make the Legate-owned relationships to Herald, Hatchery, Brood, Castra, and Steward explicit. Keep the prose focused on Legate's loop decisions, event consumption, dispatch, babysit, relaunch, terminal outcomes, and trace ownership while pointing provider interface details back to their owning contracts or future contract.
 
@@ -41,7 +41,7 @@
   - Steward is named only as a role boundary whose attachment, loss, or terminal outcome can affect Legate decisions, pointing to the existing Steward contract (`docs/subsystems/steward/contract.md`); Steward's role commands, prompts, and public interface are not restated — they remain owned by the Steward contract.
   - Legate-owned loop decisions, cursor handling, trace origin, babysit behavior, and terminal outcomes remain the only detailed behavior documented in the Legate contract.
 
-- [ ] **Verify non-duplication and future freshness usefulness**
+- [x] **Verify non-duplication and future freshness usefulness**
 
   Check both updated contracts against the User Story 3 acceptance scenarios and the cross-contract boundary model. The final wording should be specific enough for later freshness mappings to identify source owners, but not so detailed that Spawn or Legate becomes the owner of another subsystem's public surface.
 

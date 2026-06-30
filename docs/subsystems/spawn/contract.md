@@ -69,10 +69,20 @@ and the Hatchery dispatch entrypoint that composes them:
 
 Spawn's output handoff boundary is the validated patch artifact produced from
 terminal successful backend output. Raw backend logs are not a public handoff
-payload. Hatchery may submit or manage spawn work; Brood records lifecycle and
-cleanup state; Castra hosts the manager session reached through Hatchery; and
-Steward consumes only the validated handoff eligibility. This contract does not
-define those provider surfaces.
+payload.
+
+### Cross-Contract Ownership Boundaries
+
+| Provider boundary | Provider contract | Spawn relationship | Ownership rule |
+|-------------------|-------------------|--------------------|----------------|
+| Hatchery | `docs/subsystems/hatchery/contract.md` | Hatchery submits or manages spawn work by invoking the Spawn dispatch composition. | Spawn owns execution lifecycle, terminal output, validation, and handoff promises; Hatchery owns its dispatch service surface. |
+| Brood | `docs/subsystems/brood/contract.md` (future) | Spawn records or is observed through lifecycle and cleanup-state evidence. | Spawn owns the lifecycle promises it must satisfy; Brood owns lifecycle authority and cleanup-state persistence. |
+| Castra | `docs/subsystems/castra/contract.md` (future) | Spawn reaches hosted downstream session context through the Hatchery-managed handoff path. | Spawn owns validated output eligibility; Castra owns hosted-session behavior. |
+| Steward | `docs/subsystems/steward/contract.md` | Steward is the downstream consumer for validated handoff eligibility after Spawn output passes validation. | Spawn owns raw-output extraction and validation; the Steward contract owns Steward-specific role behavior after handoff. |
+
+These references are owner pointers for future freshness mapping. They do not
+define Hatchery, Brood, or Castra service routes, Castra adapter behavior, or
+Steward-specific public interface details.
 
 ## Invariants
 
