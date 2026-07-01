@@ -138,15 +138,18 @@ test body unchanged, and records the original path in
 guess. Do not create another quarantine path, add `it.skip`, comment out the
 failing assertions, or delete the file.
 
-Quarantined tests remain visible in the repository and on the generated roster
-surface, `tests/quarantine/INDEX.md`; quarantine is a temporary visible state,
-not a way to silence coverage. The staged scripts exclude `tests/quarantine/`
-by directory path, while non-quarantined tests with matching tags continue to
-run normally.
+Quarantined tests remain visible in the repository: the parked file stays in
+`tests/quarantine/` and its origin is recorded in `.origins.json`. Quarantine is
+a temporary visible state, not a way to silence coverage. The staged scripts
+exclude `tests/quarantine/` by directory path, while non-quarantined tests with
+matching tags continue to run normally. A generated roster surface,
+`tests/quarantine/INDEX.md`, is planned to summarize the parked set once the
+roster-generation work lands; until then the directory and `.origins.json` are
+the visibility surface.
 
 The one-week quarantine SLA, overdue alerts, and weekly-report wiring are M6
-work. Until that automation lands, contributors should treat the parked file,
-the origin record, and the generated roster as the review surface for follow-up.
+work. Until that automation lands, contributors should treat the parked file in
+`tests/quarantine/` and its origin record as the review surface for follow-up.
 
 Agent-driven and human tests:
 
