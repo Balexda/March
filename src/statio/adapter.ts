@@ -515,12 +515,13 @@ export function createGhForgeAdapter(
         );
       }
 
-      let repo: RepoInfo = { owner: "", defaultBranch: "" };
-      try {
-        repo = await resolveRepoInfo();
-      } catch {
-        return [];
-      }
+      // A forge dependency failure (gh missing/unauth/timeout/rate-limit or
+      // unparseable repo metadata) must surface as forge_error, not be
+      // conflated with "no unresolved threads" — resolveRepoInfo already wraps
+      // those as StatioForgeError, so let it propagate. Only a successfully
+      // resolved but unsplittable/empty owner takes the documented empty-list
+      // path (AS 4.3).
+      const repo = await resolveRepoInfo();
 
       const owner = splitOwner(repo.owner) ? repo.owner : "";
       if (!owner) {

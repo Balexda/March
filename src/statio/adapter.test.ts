@@ -699,6 +699,23 @@ describe("statio gh forge adapter — reviewThreads", () => {
     expect(runCommand).toHaveBeenCalledTimes(1);
   });
 
+  it("propagates a repo-resolution failure as forge_error, not an empty list", async () => {
+    const ghFailed: StatioCommandRunner = vi.fn(async () => {
+      throw new Error("gh: not authenticated");
+    });
+    const unparseableMetadata: StatioCommandRunner = vi.fn(async () => "not-json");
+
+    await expect(
+      createGhForgeAdapter({ runCommand: ghFailed }).reviewThreads(42),
+    ).rejects.toMatchObject({ name: "StatioForgeError", code: "forge_error" });
+    await expect(
+      createGhForgeAdapter({ runCommand: unparseableMetadata }).reviewThreads(42),
+    ).rejects.toMatchObject({ name: "StatioForgeError", code: "forge_error" });
+    // The GraphQL read is never reached — only repo resolution ran.
+    expect(ghFailed).toHaveBeenCalledTimes(1);
+    expect(unparseableMetadata).toHaveBeenCalledTimes(1);
+  });
+
   it("rejects a non-positive or non-integer PR number as a validation error", async () => {
     const runCommand: StatioCommandRunner = vi.fn(async () => "");
     const adapter = createGhForgeAdapter({ runCommand });
