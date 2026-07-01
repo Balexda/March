@@ -199,6 +199,52 @@ describe("loadExtractionOwnershipConfig", () => {
       message: "steward extraction selectors must use Castra/Hatchery role-consumer surfaces.",
     });
   });
+
+  it("reports a repeated owner as a duplicated owner, not a duplicate contractPath", () => {
+    const repoRoot = fixtureRepo({});
+    const config = validConfig();
+    config.contracts.push(owner("hatchery", ["src/hatchery/a.ts", "src/hatchery/nested/**"]));
+    writeConfig(repoRoot, config);
+
+    const result = loadExtractionOwnershipConfig({
+      repoRoot,
+      configPath: "config/extraction.json",
+    });
+
+    expect(result.config).toBeUndefined();
+    expect(result.diagnostics).toContainEqual({
+      category: "config",
+      severity: "error",
+      contractPath: "config/extraction.json",
+      ownerName: "hatchery",
+      message: "required extraction owner is duplicated: hatchery.",
+    });
+    expect(
+      result.diagnostics.some((diagnostic) =>
+        diagnostic.message.startsWith("duplicate extraction contractPath"),
+      ),
+    ).toBe(false);
+  });
+
+  it("does not treat a shallow selector as overlapping a deeper subtree owned by another owner", () => {
+    const repoRoot = fixtureRepo({});
+    writeConfig(repoRoot, {
+      version: 1,
+      contracts: [
+        owner("hatchery", ["src/hatchery/*"]),
+        owner("brood", ["src/hatchery/nested/**"]),
+      ],
+    });
+
+    const result = loadExtractionOwnershipConfig({
+      repoRoot,
+      configPath: "config/extraction.json",
+      requiredOwnerNames: ["hatchery", "brood"],
+    });
+
+    expect(result.diagnostics).toEqual([]);
+    expect(result.config?.owners.map((entry) => entry.name)).toEqual(["brood", "hatchery"]);
+  });
 });
 
 describe("resolveExtractionSourceSurfaces", () => {
@@ -333,5 +379,40 @@ describe("resolveExtractionSourceSurfaces", () => {
         message: "overlapping extraction source owned by brood,hatchery.",
       },
     ]);
+  });
+
+  it("rejects a selector root that resolves outside the repository via symlink", () => {
+    const repoRoot = fixtureRepo({});
+    const externalRoot = fs.mkdtempSync(path.join(os.tmpdir(), "march-extraction-external-"));
+    createdRepos.push(externalRoot);
+    fs.writeFileSync(path.join(externalRoot, "leaked.ts"), "export const leaked = 1;");
+    fs.mkdirSync(path.join(repoRoot, "src"), { recursive: true });
+    fs.symlinkSync(externalRoot, path.join(repoRoot, "src/hatchery"), "dir");
+
+    const result = resolveExtractionSourceSurfaces({
+      repoRoot,
+      config: {
+        version: 1,
+        source: "config/extraction.json",
+        owners: [
+          {
+            name: "hatchery",
+            contractPath: "docs/subsystems/hatchery/contract.md",
+            publicSourcePaths: ["src/hatchery/**"],
+            allowEmptySurface: false,
+          },
+        ],
+      },
+    });
+
+    expect(result.surfaces).toEqual([]);
+    expect(result.diagnostics).toContainEqual({
+      category: "ownership",
+      severity: "error",
+      ownerName: "hatchery",
+      contractPath: "docs/subsystems/hatchery/contract.md",
+      sourcePath: "src/hatchery/**",
+      message: "source selector must stay inside the repository.",
+    });
   });
 });

@@ -175,7 +175,9 @@ export function loadExtractionOwnershipConfig(
 
   for (const [contractPath, ownerNames] of entriesByContractPath.entries()) {
     const uniqueOwnerNames = [...new Set(ownerNames)].sort(compareStrings);
-    if (ownerNames.length > 1) {
+    // Same-owner duplication is already reported as a duplicated-owner
+    // diagnostic; only flag a shared contractPath across *distinct* owners.
+    if (uniqueOwnerNames.length > 1) {
       diagnostics.push({
         category: "ownership",
         severity: "error",
@@ -428,6 +430,9 @@ interface OwnedSelector {
   readonly selector: string;
   readonly kind: "file" | "directory";
   readonly base: string;
+  // For directory selectors: true when the selector matches the full subtree
+  // (`/**` or trailing `/`), false for shallow direct-children selectors (`/*`).
+  readonly recursive: boolean;
 }
 
 function selectorOverlapDiagnostics(
@@ -511,6 +516,13 @@ function resolveSelector(repoRoot: string, selector: string): {
   const stat = statIfExists(absoluteBase);
   if (!stat) return { valid: true, sourcePaths: [] };
 
+  // Reject a selector root that resolves outside the repository (e.g. a
+  // symlinked directory) before walking it, rather than walking an external
+  // tree and filtering per-file afterwards.
+  if (!realPathStaysInsideRoot(repoRoot, absoluteBase)) {
+    return { valid: false, sourcePaths: [] };
+  }
+
   const paths =
     ownershipBase.kind === "directory"
       ? collectFiles(absoluteBase, selector.endsWith("/*") ? "shallow" : "recursive")
@@ -544,6 +556,7 @@ function collectFiles(directory: string, mode: "recursive" | "shallow"): string[
   for (const entry of entries) {
     const absolutePath = path.join(directory, entry.name);
     if (entry.isDirectory()) {
+      if (GENERATED_OR_DEPENDENCY_SEGMENTS.has(entry.name)) continue;
       if (mode === "recursive") files.push(...collectFiles(absolutePath, mode));
       continue;
     }
@@ -556,39 +569,53 @@ function collectFiles(directory: string, mode: "recursive" | "shallow"): string[
 function selectorOwnershipBase(selector: string): {
   readonly kind: "file" | "directory";
   readonly base: string;
+  readonly recursive: boolean;
 } {
   if (selector.endsWith("/**")) {
-    return { kind: "directory", base: selector.slice(0, -3) };
+    return { kind: "directory", base: selector.slice(0, -3), recursive: true };
   }
 
   if (selector.endsWith("/*")) {
-    return { kind: "directory", base: selector.slice(0, -2) };
+    return { kind: "directory", base: selector.slice(0, -2), recursive: false };
   }
 
   if (selector.endsWith("/")) {
-    return { kind: "directory", base: selector.slice(0, -1) };
+    return { kind: "directory", base: selector.slice(0, -1), recursive: true };
   }
 
-  return { kind: "file", base: selector };
+  return { kind: "file", base: selector, recursive: false };
 }
 
 function selectorsOverlap(left: OwnedSelector, right: OwnedSelector): boolean {
   if (left.selector === right.selector) return true;
 
-  if (
-    left.kind === "directory" &&
-    (right.base === left.base || right.base.startsWith(`${left.base}/`))
-  ) {
-    return true;
+  if (left.kind === "file" && right.kind === "file") {
+    return left.base === right.base;
   }
 
-  if (
-    right.kind === "directory" &&
-    (left.base === right.base || left.base.startsWith(`${right.base}/`))
-  ) {
-    return true;
-  }
+  if (left.kind === "file") return directoryCoversFile(right, left.base);
+  if (right.kind === "file") return directoryCoversFile(left, right.base);
 
+  return directoriesOverlap(left, right);
+}
+
+// Does a directory selector match the given repo-relative file path? Shallow
+// (`/*`) selectors only match direct children; recursive (`/**`) selectors
+// match the full subtree.
+function directoryCoversFile(directory: OwnedSelector, filePath: string): boolean {
+  const prefix = `${directory.base}/`;
+  if (!filePath.startsWith(prefix)) return false;
+  if (directory.recursive) return true;
+  return !filePath.slice(prefix.length).includes("/");
+}
+
+function directoriesOverlap(a: OwnedSelector, b: OwnedSelector): boolean {
+  if (a.base === b.base) return true;
+  // When one directory is nested under the other, the ancestor only reaches
+  // into the descendant's subtree if it is recursive; a shallow ancestor
+  // covers only its own direct children.
+  if (b.base.startsWith(`${a.base}/`)) return a.recursive;
+  if (a.base.startsWith(`${b.base}/`)) return b.recursive;
   return false;
 }
 
