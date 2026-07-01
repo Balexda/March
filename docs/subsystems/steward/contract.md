@@ -72,7 +72,7 @@ When a Steward session launches, its lifecycle tracking includes the Steward ses
 
 Brood is the lifecycle registry boundary for parent spawn records and Steward session records. Brood owns the durable parent/child tracking needed to connect the spawned work, the Steward session, the branch, and the worktree for later teardown or recovery.
 
-Herald `slice.steward.attached` is the correlation event boundary. The event carries the slice/spawn/session correlation needed by observers, while Herald owns event append, projection, and cursor behavior in its own contract.
+Herald `slice.steward.attached` is the correlation event boundary. The event carries the slice, session, spawn, branch, and worktree correlation needed by observers; the profile fact is not on this event and stays scoped to the Brood row and Castra session, so consumers must not assert profile against the Herald envelope. Herald owns event append, projection, and cursor behavior in its own contract.
 
 The Castra session id remains the hosted interactive-session identity. Steward consumes that identity as the manager role's session handle; it does not own Castra route state, agent-deck hosting behavior, or provider-specific session storage.
 
@@ -97,7 +97,7 @@ Steward cleanup semantics do not require PR creation, push, merge, contract chec
 - Steward must fail closed before success is reported when the target worktree is missing, the active branch does not match the handoff correlation, unrelated dirty state is present, the patch reaches outside the expected worktree, or the index and worktree cannot remain coherent.
 - Fallback application paths are allowed only when they preserve the same target-branch, worktree, and index success state; otherwise conflicts, rejected hunks, unsupported patch forms, or partial applies are failed outcomes.
 - PR-ready means downstream integration may proceed from the target branch state; Steward's contract does not require this feature to create, push, merge, or open a pull request.
-- Steward lifecycle correlation is observable through the Steward session id, parent spawn id, slice id, profile, branch, and worktree facts published to the Brood and Herald boundaries.
+- Steward lifecycle correlation is observable through the Steward session id, parent spawn id, slice id, profile, branch, and worktree facts. These facts are split across boundaries: Herald's `slice.steward.attached` event carries the slice, session, spawn, branch, and worktree correlation, while the Castra/agent-deck profile is a Brood- and Castra-scoped fact and is not part of the Herald event envelope.
 - Brood registration is the lifecycle registry boundary for parent spawn and Steward session records; Steward does not take ownership of Brood's row model or teardown registry.
 - Herald `slice.steward.attached` is the correlation event boundary; Steward does not take ownership of Herald's event append or projection semantics.
 - Castra session identity remains the hosted interactive-session identity and not Steward-owned route state.
