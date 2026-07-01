@@ -304,9 +304,35 @@ describe("relaunch handler", () => {
     expect(slice.worker_session_id).toBe("fresh");
   });
 
-  it("auto path: never touches an escalated slice that is genuinely awaiting the user", async () => {
+  it("auto path: recovers a human-hold (awaiting_input) slice once its steward session is GONE", async () => {
+    // A dead session has no live prompt for the operator to answer, so the
+    // human-hold reason no longer holds — the slice is un-escalated + relaunched
+    // (non-destructive). Drains the false-positive backlog with no operator input.
     const slice = eligibleSlice({ stage: "escalated", escalated_reason: "steward_awaiting_input" });
-    const state = loopState({ slices: { hold: slice }, raw: { slices: { hold: slice } } });
+    const state = loopState({ slices: { gone: slice }, raw: { slices: { gone: slice } } });
+    const decisions = assess(state);
+    expect(decisions).toHaveLength(1);
+    expect(decisions[0]).toMatchObject({ mode: "auto", unescalateStage: "pr-open" });
+
+    const c = ctx(() => ({ sessionId: "fresh" }));
+    const deps: RelaunchDeps = { worktreeExists: () => true, ensureWorktree: vi.fn() };
+    await apply(decisions, c, state, deps);
+    expect(slice.stage).toBe("pr-open");
+    expect((slice as any).escalated_reason).toBeUndefined();
+    expect(slice.worker_session_id).toBe("fresh");
+  });
+
+  it("auto path: still HOLDS an awaiting_input slice whose steward session is LIVE (operator can answer)", async () => {
+    const slice = eligibleSlice({
+      stage: "escalated",
+      escalated_reason: "steward_awaiting_input",
+      worker_session_id: "live",
+    });
+    const state = loopState({
+      slices: { hold: slice },
+      raw: { slices: { hold: slice } },
+      sessions: [{ id: "live", group: "legate-workers" }],
+    });
     expect(assess(state)).toEqual([]);
   });
 

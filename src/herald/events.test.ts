@@ -424,6 +424,26 @@ describe("reduce / fold", () => {
     expect(relaunched.slices.s1).toMatchObject({ sessionId: "fresh", worktreePath: "/wt/known" });
   });
 
+  it("steward.relaunched voids the prior steward's stale self-report (stops re-escalation bounce)", () => {
+    seq = 0;
+    // The prior steward parked `awaiting_input`; its session then died and the
+    // slice was auto-relaunched. The fresh steward has not reported yet, so the
+    // stale report must be cleared — otherwise babysit re-escalates off it once
+    // the new session goes live and walls the self-healed slice back off.
+    const relaunched = foldEvents([
+      ev({ type: "slice.dispatched", sliceId: "s1", branch: "feature/a", jobId: "job-1" }),
+      ev({ type: "slice.steward.report", sliceId: "s1", status: "awaiting_input", summary: "PR opened. Done.", classified: true }),
+      ev({ type: "steward.relaunched", sliceId: "s1", sessionId: "fresh", worktreePath: "/wt/a" }),
+    ]);
+    expect(relaunched.slices.s1.stewardReport).toBeUndefined();
+    // A fresh self-report after the relaunch is recorded normally.
+    const reported = foldEvents(
+      [ev({ type: "slice.steward.report", sliceId: "s1", status: "working", classified: true })],
+      relaunched,
+    );
+    expect(reported.slices.s1.stewardReport).toEqual({ status: "working", summary: undefined, classified: true });
+  });
+
   it("recoveryRung is cleared on a clean slice.dispatched (#412)", () => {
     seq = 0;
     const cleared = foldEvents([

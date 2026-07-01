@@ -155,6 +155,27 @@ export class HeraldClient {
   }
 
   /**
+   * Record a steward self-report via the purpose-shaped `POST /steward-report`
+   * path (distinct from `POST /events`, which only accepts transition events).
+   * Herald records it as a `slice.steward.report` event the legate folds. The
+   * respond endpoint uses this to post a NON-awaiting status, which clears a
+   * latched `steward_awaiting_input` escalation on the next tick.
+   */
+  async stewardReport(input: {
+    profile: string;
+    sliceId: string;
+    classified: boolean;
+    status?: "awaiting_input" | "reported" | "working";
+    summary?: string;
+  }): Promise<HeraldEvent> {
+    const { status, body } = await this.request("POST", "/steward-report", input);
+    if (status !== 201) {
+      throw new HeraldClientError(bodyError(body, `herald POST /steward-report failed (${status})`));
+    }
+    return body as HeraldEvent;
+  }
+
+  /**
    * Author a corrective event via the break-glass `POST /admin/events` endpoint
    * (#265). Sends the admin bearer token; Herald validates the inner event,
    * sequences it, stamps the audit attributes, and appends a paired audit row.

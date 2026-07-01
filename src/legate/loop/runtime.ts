@@ -18,6 +18,7 @@ import path from "node:path";
 import { recordDwell, recordLoopHeartbeat, recordSpawnBudget } from "../../observability/loop-metrics.js";
 import { stampDwell } from "./pure/dwell.js";
 import { emitLoopLog } from "../../observability/logs.js";
+import { emitLoopSpan } from "../../observability/loop-spans.js";
 import {
   getJob,
   postSpawn,
@@ -58,6 +59,10 @@ import { buildLoopTickActivity, emitActionEventLog, emitActionEventSpan } from "
 // Cadence layer (#144): the re-entrancy guard + interval + tick timing. runtime
 // supplies the tick body, error handler, and metrics flush.
 import { createScheduler, type LoopScheduler } from "./scheduler.js";
+// Operator respond endpoint (#459 follow-up): the pure target resolver + I/O
+// shapes; runtime supplies the Castra/Herald effects below. http.ts imports only
+// the LoopSnapshot TYPE from here, so this value import is a one-way edge.
+import { resolveRespondTarget, type RespondInput, type RespondResult } from "./http.js";
 
 // ── Container-wide singletons (shared across all profiles) ──────────────────
 
@@ -180,6 +185,156 @@ export function getLoopSnapshot(): LoopSnapshot {
 /** Run a single tick immediately (used by start + future /tick endpoint). */
 export async function runTickOnce(): Promise<void> {
   await scheduler().runOnce();
+}
+
+/** Bound an operator note posted into the fold as a steward-report summary. */
+function clampReportSummary(text: string, max = 500): string {
+  const t = text.trim();
+  return t.length <= max ? t : t.slice(0, max - 1) + "…";
+}
+
+/**
+ * Effect an operator's response to a slice escalated as `steward_awaiting_input`
+ * — the side-effecting half of POST /escalations/:sliceId/respond (the routing +
+ * validation live in http.ts; this needs the Castra/Herald singletons). Modes:
+ *
+ *   - **answer** (`message`): deliver the answer into the live steward session
+ *     via Castra, then clear the latch.
+ *   - **ack** (no message): clear the latch only — explicitly release a steward
+ *     the operator judges is not really blocked (finished / awaiting merge / open
+ *     review threads) without sending an answer.
+ *
+ * This is the operator lever for a steward held on a LIVE session — the relaunch
+ * self-heal already drains a `steward_awaiting_input` slice automatically once its
+ * session has VANISHED (HUMAN_HOLD_REASONS, relaunch.ts), so respond is for the
+ * case the auto path deliberately leaves alone (a live prompt the operator must
+ * resolve) plus immediate manual override.
+ *
+ * Clearing posts a NON-awaiting `slice.steward.report` to Herald; on the next tick
+ * babysit sees `!awaitingNow`, drops the `steward_awaiting_input` latch, and
+ * resumes normal PR handling (the /smithy.fix + merge path) for that slice.
+ */
+export async function respondToEscalation(input: RespondInput): Promise<RespondResult> {
+  const profile = input.profile;
+  // Emit a `legate.respond` child span + a slice-correlated log for every outcome
+  // so this operator lifecycle action (and its send/clear failure modes) is
+  // visible in the slice trace (AGENTS.md observability requirement). The span
+  // nests on the slice's deterministic id like the other lifecycle actions.
+  const finish = (result: RespondResult): RespondResult => {
+    emitLoopSpan({
+      name: "legate.respond",
+      traceKey: input.sliceId,
+      root: false,
+      error: !result.ok,
+      attributes: {
+        "march.slice_id": input.sliceId,
+        "march.profile": profile,
+        "march.respond.mode": result.mode ?? "unknown",
+        "march.respond.delivered": result.delivered ?? false,
+        "march.respond.cleared": result.cleared ?? false,
+        "march.respond.recovery_requested": result.recoveryRequested ?? false,
+      },
+    });
+    emitLoopLog({
+      severity: result.ok ? "INFO" : "ERROR",
+      body: result.ok
+        ? `respond ${result.mode} for ${input.sliceId}: delivered=${result.delivered ?? false} cleared=${result.cleared ?? false} recovery_requested=${result.recoveryRequested ?? false}`
+        : `respond failed for ${input.sliceId}: ${result.error ?? "unknown error"}`,
+      eventKind: "respond",
+      sliceId: input.sliceId,
+      attributes: {
+        "march.profile": profile,
+        "march.respond.mode": result.mode ?? "unknown",
+      },
+    });
+    return result;
+  };
+
+  const rt = runtimes.get(profile);
+  if (!rt) return finish({ ok: false, error: `unknown profile "${profile}".`, profiles: [...runtimes.keys()] });
+
+  const target = resolveRespondTarget(rt.workingState, input.sliceId);
+  if (!target.ok) return finish({ ok: false, profile, sliceId: input.sliceId, error: target.error });
+
+  const message = input.message?.trim();
+  const mode: "answer" | "ack" = message ? "answer" : "ack";
+  let delivered = false;
+
+  if (mode === "answer") {
+    if (!target.sessionId) {
+      return finish({
+        ok: false,
+        profile,
+        sliceId: input.sliceId,
+        mode,
+        error: `slice "${input.sliceId}" has no steward session to deliver the answer to — use { "ack": true } to clear it back to babysit handling instead.`,
+      });
+    }
+    try {
+      await sendAgentDeckMessage(rt.meta, target.sessionId, message!, input.sliceId);
+      delivered = true;
+    } catch (err: any) {
+      return finish({
+        ok: false,
+        profile,
+        sliceId: input.sliceId,
+        mode,
+        delivered: false,
+        error: `failed to deliver the answer to session ${target.sessionId}: ${err?.message ?? String(err)} — the steward session may be gone; try { "ack": true }.`,
+      });
+    }
+  }
+
+  const summary =
+    mode === "answer"
+      ? clampReportSummary(`operator answer via respond API: ${message}`)
+      : "operator marked read via respond API (returned to babysit handling).";
+  // 1. Flip the steward report to a NON-awaiting status. This clears the
+  //    dashboard's `steward_awaiting_input` and, crucially, lifts the recovery
+  //    ladder's rung-0b refusal (recovery.ts refuses to touch a slice whose
+  //    report is `awaiting_input`).
+  try {
+    await legateHerald().stewardReport(profile, {
+      sliceId: input.sliceId,
+      status: "working",
+      classified: true,
+      summary,
+    });
+  } catch (err: any) {
+    return finish({
+      ok: false,
+      profile,
+      sliceId: input.sliceId,
+      mode,
+      delivered,
+      cleared: false,
+      error: `${mode === "answer" ? "answer delivered, but " : ""}failed to clear the steward report: ${err?.message ?? String(err)}`,
+    });
+  }
+  // 2. Drive the graduated recovery ladder so the slice actually LEAVES the
+  //    `escalated` stage. The report flip alone is insufficient: babysit skips a
+  //    slice whose session is dead (`if (!worker) continue`), which is exactly
+  //    the state these false positives sit in after a restart. The recovery
+  //    ladder (now un-refused by step 1) un-escalates least-destructively —
+  //    relaunch re-attaches a fresh steward to the preserved worktree for an
+  //    open PR — handing the slice back to babysit's PR (fix + merge) path.
+  let recoveryRequested = false;
+  try {
+    await legateHerald().append(profile, { type: "slice.recovery.requested", sliceId: input.sliceId });
+    recoveryRequested = true;
+  } catch (err: any) {
+    return finish({
+      ok: false,
+      profile,
+      sliceId: input.sliceId,
+      mode,
+      delivered,
+      cleared: true,
+      recoveryRequested: false,
+      error: `report cleared, but failed to request recovery (the slice may stay escalated): ${err?.message ?? String(err)}`,
+    });
+  }
+  return finish({ ok: true, profile, sliceId: input.sliceId, mode, delivered, cleared: true, recoveryRequested });
 }
 
 function now() {

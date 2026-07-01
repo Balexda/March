@@ -525,6 +525,14 @@ export function reduce(state: SystemState, event: HeraldEvent): SystemState {
       // cold-start rebuild keeps it instead of the relaunch handler re-guessing a
       // colliding path. Merged additively — never clobber a known path with absent.
       if (event.worktreePath !== undefined) slice.worktreePath = event.worktreePath;
+      // A relaunch attaches a FRESH steward, which voids the PRIOR steward's stale
+      // self-report — the new one has not reported yet. Clear it so the loop does
+      // not act on a dead session's report: without this, an un-escalated slice
+      // whose old report was `awaiting_input` is immediately RE-escalated by
+      // babysit (its live-session re-check fires `awaitingNow` off the stale
+      // report) — the exact bounce that walls a self-healed human-hold slice back
+      // off the auto path. The fresh steward emits its own report when it acts.
+      delete slice.stewardReport;
       break;
     }
     case "slice.escalated": {

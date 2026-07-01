@@ -45,12 +45,18 @@ import {
  *    {@link RECOVERY_RATE_MIN}). After an outage R collapses to 1, so recovery
  *    probes ONE slice, and only ramps back up as probes succeed — no
  *    thundering-herd re-attempt when a budget threshold elapses.
- *  - covers ESCALATED-with-dead-steward slices whose reason is an
- *    infrastructure failure ({@link AUTO_RECOVERABLE_REASONS}) by un-escalating
- *    them in place first; it deliberately SKIPS the human-hold reasons
- *    ({@link HUMAN_HOLD_REASONS}) — a steward genuinely awaiting the user is not
- *    something to silently relaunch. It never nukes: the destructive
- *    tombstone+re-dispatch stays in the operator's graduated-recovery ladder.
+ *  - covers ESCALATED-with-dead-steward slices by un-escalating them in place
+ *    first, then relaunching. Infra-failure reasons ({@link AUTO_RECOVERABLE_REASONS})
+ *    always qualify. Human-hold reasons ({@link HUMAN_HOLD_REASONS}) qualify ONLY
+ *    once the steward's session has VANISHED: a steward genuinely awaiting the user
+ *    is held for the operator while a LIVE session can still receive the answer
+ *    (such a slice is skipped by the liveness gate and never reaches the auto path),
+ *    but once its session is gone there is no live prompt to resolve — holding it
+ *    for an operator is pointless, so the auto path re-attaches a steward to the
+ *    preserved PR/worktree (if the question still stands the fresh steward re-asks
+ *    with a live session, re-escalating it back into the operator's hands). It
+ *    never nukes: the destructive tombstone+re-dispatch stays in the operator's
+ *    graduated-recovery ladder.
  *
  * The OPERATOR ladder path (#413) is unchanged: a slice the ladder is driving
  * (carrying `recovery_rung`) keeps the old bounded, every-tick, not-rate-limited
@@ -92,9 +98,12 @@ export const AUTO_RECOVERABLE_REASONS = new Set([
   "steward_stuck",
 ]);
 
-/** Escalation reasons the automatic path NEVER touches — a human must act, so
- *  silently relaunching a steward would paper over the hold. Left for the
- *  operator's graduated-recovery ladder. */
+/** Escalation reasons that hold a slice for a human WHILE the steward session is
+ *  LIVE — silently relaunching a live steward would paper over a real prompt the
+ *  operator must answer. The automatic path skips these for a live session (left
+ *  for `respond` / the operator's graduated-recovery ladder), but recovers them
+ *  once the session has VANISHED: a dead session has no prompt left to answer, so
+ *  re-attaching a steward is the non-destructive way back (see assess()). */
 export const HUMAN_HOLD_REASONS = new Set([
   "steward_awaiting_input",
   "needs_human",
@@ -291,11 +300,23 @@ export function assess(state: LoopState): RelaunchDecision[] {
     let unescalateStage: string | undefined;
     if (ELIGIBLE_STAGES.has(slice.stage)) {
       // working steward stage — relaunch directly
-    } else if (slice.stage === "escalated" && AUTO_RECOVERABLE_REASONS.has(slice.escalated_reason)) {
-      // infrastructure-failure escalation with a dead steward → un-escalate first.
+    } else if (
+      slice.stage === "escalated" &&
+      (AUTO_RECOVERABLE_REASONS.has(slice.escalated_reason) || HUMAN_HOLD_REASONS.has(slice.escalated_reason))
+    ) {
+      // An escalated slice whose steward is DEAD → un-escalate first, then relaunch.
+      // Infra-failure reasons (AUTO_RECOVERABLE_REASONS) always qualify. Human-hold
+      // reasons (awaiting_input / needs_human) qualify HERE too, but ONLY because
+      // control already passed the liveness gate above — a slice with a live worker
+      // session was skipped. A steward genuinely awaiting the user is held for the
+      // operator only while it can still BE answered; once its session has vanished
+      // there is no live prompt to resolve, so silently relaunching it (re-attaching
+      // a steward to the preserved PR/worktree) is the non-destructive way back —
+      // if the question still stands the fresh steward re-asks with a LIVE session,
+      // which re-escalates and is once again held for the operator. Never nukes.
       unescalateStage = "pr-open"; // it has a PR (checked above)
     } else {
-      continue; // human-hold escalations / non-steward stages are not auto-recovered
+      continue; // non-steward stages are not auto-recovered
     }
 
     // Backoff gate: skip while still cooling down (only when we can compare times).

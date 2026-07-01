@@ -11,9 +11,44 @@ import type { LoopSnapshot } from "./runtime.js";
  * publishes only on loopback, so the API is never exposed beyond the host.
  */
 
+/** Operator input to the respond endpoint: an answer to deliver, or an ack. */
+export interface RespondInput {
+  /** Owning profile (which registered repo the slice belongs to). */
+  profile: string;
+  /** The escalated slice id. */
+  sliceId: string;
+  /** Free-text answer to deliver into the live steward session (answer mode). */
+  message?: string;
+  /** Mark-read: clear the escalation back to babysit handling without an answer. */
+  ack?: boolean;
+}
+
+/** Result of a respond attempt (also the HTTP response body). */
+export interface RespondResult {
+  ok: boolean;
+  profile?: string;
+  sliceId?: string;
+  /** `answer` when a message was delivered; `ack` when only marked read. */
+  mode?: "answer" | "ack";
+  /** Answer mode: whether the message reached the steward session. */
+  delivered?: boolean;
+  /** Whether the steward report was flipped to a non-awaiting status. */
+  cleared?: boolean;
+  /** Whether a recovery request was appended to drive the slice out of `escalated`
+   *  (the graduated ladder un-escalates + relaunches even for a dead session). */
+  recoveryRequested?: boolean;
+  error?: string;
+  /** On an unknown-profile error, the known profiles (parity with /status). */
+  profiles?: string[];
+}
+
 export interface LoopHttpContext {
   readonly startedAtMs: number;
   readonly getSnapshot: () => LoopSnapshot;
+  /** Effect an operator's answer/ack to an escalated `steward_awaiting_input`
+   *  slice. Supplied by the runtime (it needs Castra + Herald); absent in the
+   *  pure HTTP unit tests, where the route reports 501. */
+  readonly respondToEscalation?: (input: RespondInput) => Promise<RespondResult>;
 }
 
 /** Per-profile status from a heartbeat record + tick timing (pure; testable). */
@@ -114,6 +149,34 @@ export function escalationsForWorkingState(workingState: any): EscalationEntry[]
   return out;
 }
 
+/** The outcome of resolving a respond target from a profile's working state (pure). */
+export type RespondTarget =
+  | { ok: true; sessionId: string | null; reason: string }
+  | { ok: false; error: string };
+
+/**
+ * Resolve (and validate) the slice a respond call targets, from a profile's
+ * in-memory working state. Pure + testable. Respond only handles a latched
+ * `steward_awaiting_input` escalation — the only reason whose latch a non-awaiting
+ * steward-report clears (other reasons, e.g. `hatchery_dispatch_failed`, are
+ * cleared by `march legate recover`, not here).
+ */
+export function resolveRespondTarget(workingState: any, sliceId: string): RespondTarget {
+  const slice = workingState?.slices?.[sliceId];
+  if (!slice || typeof slice !== "object") return { ok: false, error: `unknown slice "${sliceId}".` };
+  if (slice.stage !== "escalated") {
+    return { ok: false, error: `slice "${sliceId}" is not escalated (stage="${slice.stage ?? "?"}").` };
+  }
+  const reason = typeof slice.escalated_reason === "string" ? slice.escalated_reason : "";
+  if (reason !== "steward_awaiting_input") {
+    return {
+      ok: false,
+      error: `slice "${sliceId}" is escalated for "${reason || "?"}", not steward_awaiting_input — respond handles only steward-awaiting escalations (use \`march legate recover\` for others).`,
+    };
+  }
+  return { ok: true, sessionId: slice.worker_session_id ?? null, reason };
+}
+
 /** Build the /escalations payload. With `profile`, that profile's escalated tasks;
  *  else every profile's, keyed by profile. */
 export function buildEscalations(ctx: LoopHttpContext, profile?: string): Record<string, unknown> {
@@ -159,6 +222,73 @@ export function buildLoopServer(ctx: LoopHttpContext): FastifyInstance {
     const profile =
       typeof query.profile === "string" && query.profile.length > 0 ? query.profile : undefined;
     return buildEscalations(ctx, profile);
+  });
+
+  // Respond to a steward escalated as `steward_awaiting_input`. Two modes:
+  //   - `{ "message": "<answer>" }` delivers the operator's answer into the live
+  //     steward session (Castra send), then un-escalates the slice.
+  //   - `{ "ack": true }` marks it read WITHOUT an answer — for the false-positive
+  //     "stuck" stewards that actually just finished / await merge / have open
+  //     review threads.
+  // Both flip the steward report to non-awaiting AND drive the graduated recovery
+  // ladder, so the slice leaves `escalated` and returns to babysit's PR (fix +
+  // merge) path — even when its session is dead (babysit skips dead-session
+  // slices, so the report flip alone can't un-escalate them).
+  // Profile from the body or `?profile=`. Read-but-acting, so it's the one POST.
+  app.post("/escalations/:sliceId/respond", async (request, reply) => {
+    const params = (request.params ?? {}) as Record<string, string | undefined>;
+    const query = (request.query ?? {}) as Record<string, string | undefined>;
+    const body = (request.body ?? {}) as Record<string, unknown>;
+    const sliceId = typeof params.sliceId === "string" ? params.sliceId : "";
+    const profile =
+      (typeof body.profile === "string" && body.profile.length > 0 && body.profile) ||
+      (typeof query.profile === "string" && query.profile.length > 0 && query.profile) ||
+      "";
+    const message = typeof body.message === "string" ? body.message.trim() : "";
+    const ack = body.ack === true;
+
+    if (!profile) {
+      reply.code(400);
+      return { ok: false, error: "profile is required (body.profile or ?profile=)." };
+    }
+    if (!sliceId) {
+      reply.code(400);
+      return { ok: false, error: "sliceId path param is required." };
+    }
+    if (!message && !ack) {
+      reply.code(400);
+      return {
+        ok: false,
+        error: "provide a non-empty `message` to answer the steward, or `ack:true` to mark it read and return it to babysit handling.",
+      };
+    }
+    if (message && ack) {
+      // Exactly one mode: a `message` (answer, delivered to the steward) OR
+      // `ack:true` (mark-read, no delivery). Accepting both is ambiguous and would
+      // silently deliver the message — reject so the caller picks one.
+      reply.code(400);
+      return {
+        ok: false,
+        error: "provide exactly one of `message` (answer) or `ack:true` (mark read), not both.",
+      };
+    }
+    if (!ctx.respondToEscalation) {
+      reply.code(501);
+      return { ok: false, error: "respond is not available in this context." };
+    }
+
+    const result = await ctx.respondToEscalation({
+      profile,
+      sliceId,
+      ...(message ? { message } : {}),
+      ack,
+    });
+    if (result.ok) {
+      reply.code(200);
+    } else {
+      reply.code(/^unknown (profile|slice)/.test(result.error ?? "") ? 404 : 400);
+    }
+    return result;
   });
 
   return app;

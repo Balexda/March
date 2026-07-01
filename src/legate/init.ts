@@ -429,6 +429,7 @@ const MARCH_CLI_ALLOWS = [
   "Bash(march herald state *)",
   "Bash(march herald events *)",
   "Bash(march legate recover *)",
+  "Bash(march legate respond *)",
 ] as const;
 
 export interface LegateInitOptions {
