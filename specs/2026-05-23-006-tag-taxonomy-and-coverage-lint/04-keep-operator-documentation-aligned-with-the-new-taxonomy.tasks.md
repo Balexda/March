@@ -20,11 +20,11 @@
 
 - [ ] **Update operator testing documentation**
 
-  Update `CONTRIBUTING.md` and `docs/testing-strategy.md` so day-to-day contributor guidance names the required leading tag tuple for new Vitest files, the baseline documentation records the existing L2-shaped vitest tests as `node:child_process`-mocked tests rather than real Docker exercises, and the strategy document remains principles-level while delegating tactical sequencing to the RFC and feature specs.
+  Update `CONTRIBUTING.md` and `docs/testing-strategy.md` so day-to-day contributor guidance names the required leading tag tuple for new Vitest files, the baseline documentation records the existing L2-shaped Vitest tests as `node:child_process`-mocked tests rather than real Docker exercises, and the strategy document remains principles-level while delegating tactical sequencing to the RFC and feature specs.
 
   _Acceptance criteria:_
   - `CONTRIBUTING.md` tells contributors that new `*.test.ts` files need exactly one scope tag, one determinism tag, and one execution-channel tag in the leading Test File Tag Block.
-  - The day-one baseline documentation names the existing L2-shaped vitest tests as mocked child-process tests and does not describe them as exercising real Docker.
+  - The day-one baseline documentation names the existing L2-shaped Vitest tests as mocked child-process tests and does not describe them as exercising real Docker.
   - `docs/testing-strategy.md` stays strategic and points milestone-level tactics to the layered testing RFC and feature specs.
   - The documentation does not present staged layer scripts, CI fan-out, quarantine routing, runtime tag guards, Cucumber.js ports, stochastic tests, or scheduled tests as delivered by this feature.
 
@@ -35,7 +35,9 @@
 ## Specification Debt
 <!-- audience: reviewer; mode: reference; length: tables only; diagram: optional; examples: discouraged -->
 
-None - all ambiguities resolved.
+| ID | Description | Source Category | Impact | Confidence | Status | Resolution |
+|----|-------------|-----------------|--------|------------|--------|------------|
+| SD-001 | Inherited from User Story 3: the spec names `src/hatchery/legate-container.test.ts` in AS 3.3 and FR-011 as one of the three L2-shaped tests, but the current repository inventory contains only `src/spawn/container-launch.test.ts` and `src/spawn/snapshot-build.test.ts`. The forge step must not document a nonexistent governed test — it should describe the L2-shaped tests that actually exist until the US3 debt resolves whether the third path is a rename or a spec correction. | Scope Edges | Medium | High | inherited | — |
 
 ---
 
