@@ -984,11 +984,20 @@ export function applyPatchToManagerWorktree(input: {
     );
   }
   const repoPath = input.repoPath?.trim();
-  if (repoPath && path.resolve(worktreePath) === path.resolve(repoPath)) {
-    throw new HatcherySpawnError(
-      `git apply --index aborted: refusing to apply Steward handoff patch in the operator checkout at ${worktreePath}. ` +
-        `Expected a manager or spawn worktree branch.`,
-    );
+  if (repoPath) {
+    // Refuse to apply into the operator checkout. An exact `path.resolve`
+    // comparison is too weak (#389 review): a symlinked operator checkout
+    // (common with mounted volumes) or a path *inside* the checkout (a
+    // subdirectory) both compare unequal and slip past. Collapse the worktree
+    // to its git top-level so a subdirectory maps back to the checkout root,
+    // and realpath both sides so symlinks can't disguise the same directory.
+    const worktreeTop = worktreeGitToplevel(worktreePath) ?? worktreePath;
+    if (realPath(worktreeTop) === realPath(repoPath)) {
+      throw new HatcherySpawnError(
+        `git apply --index aborted: refusing to apply Steward handoff patch in the operator checkout at ${worktreePath}. ` +
+          `Expected a manager or spawn worktree branch.`,
+      );
+    }
   }
   assertBranchOwnedWorktree(worktreePath);
   try {
@@ -1015,6 +1024,32 @@ export function applyPatchToManagerWorktree(input: {
         .join("\n\n");
       throw new PatchApplyError(combined, (err3way as Error).message);
     }
+  }
+}
+
+/**
+ * Canonicalize a path, resolving symlinks. Falls back to `path.resolve` when the
+ * target can't be stat'd (e.g. it was removed between checks) so the caller still
+ * gets a comparable absolute path rather than a throw.
+ */
+function realPath(p: string): string {
+  try {
+    return fs.realpathSync(p);
+  } catch {
+    return path.resolve(p);
+  }
+}
+
+/**
+ * The git checkout root (`git rev-parse --show-toplevel`) for `cwd`, or undefined
+ * when `cwd` isn't inside a git worktree. A subdirectory of a checkout collapses
+ * to the checkout root, so it can be compared against the operator repo path.
+ */
+function worktreeGitToplevel(cwd: string): string | undefined {
+  try {
+    return runGitCapture(["rev-parse", "--show-toplevel"], cwd) || undefined;
+  } catch {
+    return undefined;
   }
 }
 

@@ -99,6 +99,42 @@ describe("applyPatchToManagerWorktree", () => {
     ).toThrow(/operator checkout/);
   });
 
+  it("refuses when the worktree path is a subdirectory of the operator checkout (#389)", () => {
+    const repo = makeRepo();
+    const subdir = path.join(repo, "sub");
+    fs.mkdirSync(subdir);
+    const patch = writePatch(repo, "diff --git a/f b/f\n");
+
+    // A path *inside* the operator checkout is not an exact match, but its git
+    // top-level collapses back to the checkout root — so it must still refuse.
+    expect(() =>
+      applyPatchToManagerWorktree({
+        patchPath: patch,
+        worktreePath: subdir,
+        repoPath: repo,
+      }),
+    ).toThrow(/operator checkout/);
+  });
+
+  it("refuses when the operator checkout is reached through a symlink (#389)", () => {
+    const repo = makeRepo();
+    const linkDir = fs.mkdtempSync(path.join(os.tmpdir(), "patch-apply-link-"));
+    tmpDirs.push(linkDir);
+    const linkedRepo = path.join(linkDir, "repo-link");
+    fs.symlinkSync(repo, linkedRepo);
+    const patch = writePatch(repo, "diff --git a/f b/f\n");
+
+    // worktreePath and repoPath name the same directory via different symlink
+    // paths; realpath must normalize both before comparing.
+    expect(() =>
+      applyPatchToManagerWorktree({
+        patchPath: patch,
+        worktreePath: linkedRepo,
+        repoPath: repo,
+      }),
+    ).toThrow(/operator checkout/);
+  });
+
   it("falls back to --3way for a new-file patch the base already contains (#244 root cause)", () => {
     const repo = makeRepo();
     // The worker emitted a "new file" patch for `f`, but `f` already exists in the
