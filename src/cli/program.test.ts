@@ -263,6 +263,12 @@ describe("march CLI", () => {
       expect(result.stderr).toContain("--ack");
     });
 
+    it("`march legate respond <sliceId>` with BOTH --message and --ack exits 1 (ambiguous mode)", () => {
+      const result = run(["legate", "respond", "some-slice", "--profile", "march", "--message", "hi", "--ack"]);
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toMatch(/exactly one of --message or --ack/i);
+    });
+
     it("`march legate respond --ack` exits 1 with a reach error when the legate is down", () => {
       // --profile skips Herald profile resolution so the failure is the legate
       // round-trip; a closed port fails fast.

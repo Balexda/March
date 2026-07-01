@@ -18,6 +18,7 @@ import path from "node:path";
 import { recordDwell, recordLoopHeartbeat, recordSpawnBudget } from "../../observability/loop-metrics.js";
 import { stampDwell } from "./pure/dwell.js";
 import { emitLoopLog } from "../../observability/logs.js";
+import { emitLoopSpan } from "../../observability/loop-spans.js";
 import {
   getJob,
   postSpawn,
@@ -215,11 +216,45 @@ function clampReportSummary(text: string, max = 500): string {
  */
 export async function respondToEscalation(input: RespondInput): Promise<RespondResult> {
   const profile = input.profile;
+  // Emit a `legate.respond` child span + a slice-correlated log for every outcome
+  // so this operator lifecycle action (and its send/clear failure modes) is
+  // visible in the slice trace (AGENTS.md observability requirement). The span
+  // nests on the slice's deterministic id like the other lifecycle actions.
+  const finish = (result: RespondResult): RespondResult => {
+    emitLoopSpan({
+      name: "legate.respond",
+      traceKey: input.sliceId,
+      root: false,
+      error: !result.ok,
+      attributes: {
+        "march.slice_id": input.sliceId,
+        "march.profile": profile,
+        "march.respond.mode": result.mode ?? "unknown",
+        "march.respond.delivered": result.delivered ?? false,
+        "march.respond.cleared": result.cleared ?? false,
+        "march.respond.recovery_requested": result.recoveryRequested ?? false,
+      },
+    });
+    emitLoopLog({
+      severity: result.ok ? "INFO" : "ERROR",
+      body: result.ok
+        ? `respond ${result.mode} for ${input.sliceId}: delivered=${result.delivered ?? false} cleared=${result.cleared ?? false} recovery_requested=${result.recoveryRequested ?? false}`
+        : `respond failed for ${input.sliceId}: ${result.error ?? "unknown error"}`,
+      eventKind: "respond",
+      sliceId: input.sliceId,
+      attributes: {
+        "march.profile": profile,
+        "march.respond.mode": result.mode ?? "unknown",
+      },
+    });
+    return result;
+  };
+
   const rt = runtimes.get(profile);
-  if (!rt) return { ok: false, error: `unknown profile "${profile}".`, profiles: [...runtimes.keys()] };
+  if (!rt) return finish({ ok: false, error: `unknown profile "${profile}".`, profiles: [...runtimes.keys()] });
 
   const target = resolveRespondTarget(rt.workingState, input.sliceId);
-  if (!target.ok) return { ok: false, profile, sliceId: input.sliceId, error: target.error };
+  if (!target.ok) return finish({ ok: false, profile, sliceId: input.sliceId, error: target.error });
 
   const message = input.message?.trim();
   const mode: "answer" | "ack" = message ? "answer" : "ack";
@@ -227,26 +262,26 @@ export async function respondToEscalation(input: RespondInput): Promise<RespondR
 
   if (mode === "answer") {
     if (!target.sessionId) {
-      return {
+      return finish({
         ok: false,
         profile,
         sliceId: input.sliceId,
         mode,
         error: `slice "${input.sliceId}" has no steward session to deliver the answer to — use { "ack": true } to clear it back to babysit handling instead.`,
-      };
+      });
     }
     try {
       await sendAgentDeckMessage(rt.meta, target.sessionId, message!, input.sliceId);
       delivered = true;
     } catch (err: any) {
-      return {
+      return finish({
         ok: false,
         profile,
         sliceId: input.sliceId,
         mode,
         delivered: false,
         error: `failed to deliver the answer to session ${target.sessionId}: ${err?.message ?? String(err)} — the steward session may be gone; try { "ack": true }.`,
-      };
+      });
     }
   }
 
@@ -266,7 +301,7 @@ export async function respondToEscalation(input: RespondInput): Promise<RespondR
       summary,
     });
   } catch (err: any) {
-    return {
+    return finish({
       ok: false,
       profile,
       sliceId: input.sliceId,
@@ -274,7 +309,7 @@ export async function respondToEscalation(input: RespondInput): Promise<RespondR
       delivered,
       cleared: false,
       error: `${mode === "answer" ? "answer delivered, but " : ""}failed to clear the steward report: ${err?.message ?? String(err)}`,
-    };
+    });
   }
   // 2. Drive the graduated recovery ladder so the slice actually LEAVES the
   //    `escalated` stage. The report flip alone is insufficient: babysit skips a
@@ -288,7 +323,7 @@ export async function respondToEscalation(input: RespondInput): Promise<RespondR
     await legateHerald().append(profile, { type: "slice.recovery.requested", sliceId: input.sliceId });
     recoveryRequested = true;
   } catch (err: any) {
-    return {
+    return finish({
       ok: false,
       profile,
       sliceId: input.sliceId,
@@ -297,9 +332,9 @@ export async function respondToEscalation(input: RespondInput): Promise<RespondR
       cleared: true,
       recoveryRequested: false,
       error: `report cleared, but failed to request recovery (the slice may stay escalated): ${err?.message ?? String(err)}`,
-    };
+    });
   }
-  return { ok: true, profile, sliceId: input.sliceId, mode, delivered, cleared: true, recoveryRequested };
+  return finish({ ok: true, profile, sliceId: input.sliceId, mode, delivered, cleared: true, recoveryRequested });
 }
 
 function now() {

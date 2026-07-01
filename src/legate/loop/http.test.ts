@@ -269,6 +269,23 @@ describe("POST /escalations/:sliceId/respond", () => {
     }
   });
 
+  it("400 when BOTH message and ack are provided (ambiguous mode)", async () => {
+    let called = false;
+    const app = buildLoopServer(ctxWithRespond(() => (called = true), { ok: true }));
+    try {
+      const res = await app.inject({
+        method: "POST",
+        url: "/escalations/s1/respond",
+        payload: { profile: "march", message: "do the thing", ack: true },
+      });
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error).toMatch(/exactly one/i);
+      expect(called).toBe(false); // rejected before effecting anything
+    } finally {
+      await app.close();
+    }
+  });
+
   it("400 when profile is missing", async () => {
     const app = buildLoopServer(ctxWithRespond(() => {}, { ok: true }));
     try {

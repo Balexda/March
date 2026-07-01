@@ -262,6 +262,16 @@ export function buildLoopServer(ctx: LoopHttpContext): FastifyInstance {
         error: "provide a non-empty `message` to answer the steward, or `ack:true` to mark it read and return it to babysit handling.",
       };
     }
+    if (message && ack) {
+      // Exactly one mode: a `message` (answer, delivered to the steward) OR
+      // `ack:true` (mark-read, no delivery). Accepting both is ambiguous and would
+      // silently deliver the message — reject so the caller picks one.
+      reply.code(400);
+      return {
+        ok: false,
+        error: "provide exactly one of `message` (answer) or `ack:true` (mark read), not both.",
+      };
+    }
     if (!ctx.respondToEscalation) {
       reply.code(501);
       return { ok: false, error: "respond is not available in this context." };

@@ -1278,6 +1278,11 @@ legate
       process.exitCode = ERROR;
       return;
     }
+    if (message && opts.ack) {
+      process.stderr.write("Provide exactly one of --message or --ack, not both.\n");
+      process.exitCode = ERROR;
+      return;
+    }
     if (!message && !opts.ack) {
       process.stderr.write("Provide --message <text> to answer the steward, or --ack to mark it read.\n");
       process.exitCode = ERROR;
@@ -1319,6 +1324,10 @@ legate
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify(body),
+          // Bound the request so a wedged listener that accepts TCP but never
+          // responds fails as a clean exit instead of hanging forever (the abort
+          // surfaces below as the reachability error).
+          signal: AbortSignal.timeout(15_000),
         });
       } catch (err) {
         process.stderr.write(
