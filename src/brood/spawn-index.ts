@@ -17,8 +17,8 @@ export interface ListSpawnRecordsOptions {
 }
 
 function defaultWarn(warning: SpawnIndexWarning): void {
-  console.warn(
-    `Skipping unreadable spawn record "${warning.filePath}": ${warning.error.message}`,
+  process.stderr.write(
+    `warning: skipping unreadable spawn record "${warning.filePath}": ${warning.error.message}\n`,
   );
 }
 
@@ -73,8 +73,14 @@ export function loadSpawnRecord(
   id: string,
   homeDir?: string,
 ): SpawnRecord | undefined {
+  const filePath = spawnRecordPath(id, homeDir);
+  // Guard against a traversal id (e.g. "../secret"): the record must be a
+  // direct child of the spawn-record directory. Anything else is not-found.
+  if (path.dirname(path.resolve(filePath)) !== path.resolve(spawnRecordDir(homeDir))) {
+    return undefined;
+  }
   try {
-    return parseSpawnRecord(spawnRecordPath(id, homeDir));
+    return parseSpawnRecord(filePath);
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") {
       return undefined;

@@ -79,9 +79,13 @@ describe("spawn-index", () => {
     const filePath = spawnRecordPath(value.id, home);
     const realRead = fs.readFileSync.bind(fs);
     const read = vi.spyOn(fs, "readFileSync");
+    let targetReads = 0;
     read.mockImplementation((target, options) => {
-      if (target === filePath && read.mock.calls.length === 1) {
-        return "{";
+      if (target === filePath) {
+        targetReads += 1;
+        if (targetReads === 1) {
+          return "{";
+        }
       }
       return realRead(target, options);
     });
@@ -129,6 +133,13 @@ describe("spawn-index", () => {
 
     expect(loadSpawnRecord(value.id, home)).toEqual(value);
     expect(loadSpawnRecord("20260613-absent", home)).toBeUndefined();
+  });
+
+  it("treats a traversal id as not-found without escaping the spawn dir", () => {
+    const home = makeHome();
+
+    expect(loadSpawnRecord("../escape", home)).toBeUndefined();
+    expect(loadSpawnRecord("sub/nested", home)).toBeUndefined();
   });
 
   it("returns an empty list when the spawn-record directory is absent", () => {
