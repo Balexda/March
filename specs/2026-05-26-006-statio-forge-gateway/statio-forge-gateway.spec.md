@@ -259,7 +259,7 @@ Recommended implementation sequence:
 | US1 | Read a Pull Request's State Through the Gateway | US3, US5 | specs/2026-05-26-006-statio-forge-gateway/01-read-a-pull-requests-state-through-the-gateway.tasks.md |
 | US2 | Discover and List Pull Requests | US3, US5 | specs/2026-05-26-006-statio-forge-gateway/02-discover-and-list-pull-requests.tasks.md |
 | US4 | Read Unresolved Review Threads | US3, US5 | specs/2026-05-26-006-statio-forge-gateway/04-read-unresolved-review-threads.tasks.md |
-| US6 | Operate Statio as an Observable Container | US1–US5 | — |
+| US6 | Operate Statio as an Observable Container | US1–US5 | specs/2026-05-26-006-statio-forge-gateway/06-operate-statio-as-an-observable-container.tasks.md |
 
 US3 (repoInfo) and US5 (transport/auth/errors/clients) are the foundation; the
 remaining reads build on them; US6 packages and instruments the result.
