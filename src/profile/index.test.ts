@@ -417,6 +417,21 @@ describe("validateProfile", () => {
     });
   });
 
+  it("reports a structural tools error for exotic (non-plain) objects", () => {
+    expect(
+      validateProfile(makeM1ParityProfile({ tools: new Date() })),
+    ).toEqual({
+      ok: false,
+      errors: [
+        {
+          code: "WrongType",
+          path: "/tools",
+          message: "Profile tools must be an object.",
+        },
+      ],
+    });
+  });
+
   it("reports structural errors for malformed tools policy lists", () => {
     expect(
       validateProfile(
@@ -434,7 +449,7 @@ describe("validateProfile", () => {
         {
           code: "WrongType",
           path: "/tools/allowed",
-          message: "Tools policy entries must be string arrays.",
+          message: "Tools policy lists must be arrays of strings.",
         },
         {
           code: "WrongType",

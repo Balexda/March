@@ -374,7 +374,7 @@ function validateTools(tools: unknown, errors: ValidationError[]): void {
     return;
   }
 
-  if (!isPlainObject(tools)) {
+  if (!isPlainRecord(tools)) {
     errors.push({
       code: "WrongType",
       path: "/tools",
@@ -420,7 +420,7 @@ function validateToolList(
     errors.push({
       code: "WrongType",
       path,
-      message: "Tools policy entries must be string arrays.",
+      message: "Tools policy lists must be arrays of strings.",
     });
     return undefined;
   }
@@ -460,6 +460,18 @@ function collectUnknownFields(
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+// Stricter than isPlainObject: also rejects exotic objects (Date, Map, class
+// instances) that a YAML parser can produce (e.g. !!timestamp tags). The
+// profile contract requires such non-JSON-compatible values to surface as
+// WrongType at the offending path rather than being cast to a policy object.
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  if (!isPlainObject(value)) {
+    return false;
+  }
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
 }
 
 function joinPointer(parentPath: string, key: string): string {
