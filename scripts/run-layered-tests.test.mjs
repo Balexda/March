@@ -50,6 +50,19 @@ describe("fixture", () => {
 });
 `;
 
+// A leading block whose only annotation is a non-taxonomy JSDoc tag. The
+// literal `@vitest-environment` token is avoided here because vitest's own
+// environment scanner would try to honor it against this test file.
+const nonTaxonomyTaggedTest = `/**
+ * @fileoverview shared fixture
+ */
+import { describe, it } from "vitest";
+
+describe("fixture", () => {
+  it("passes", () => {});
+});
+`;
+
 describe("layered test command contract", () => {
   afterEach(() => {
     for (const dir of tmpDirs) {
@@ -230,6 +243,22 @@ describe("layered test command contract", () => {
     expect(selectLayerTestFiles(root, "l0")).toEqual([]);
   });
 
+  it("flags a leading block with no recognized taxonomy tag as untagged", () => {
+    const root = makeRepo({
+      "src/env-only.test.mjs": nonTaxonomyTaggedTest,
+      "src/missing-axis.test.ts": taggedTest("@l0 @ci"),
+      "src/l0.test.ts": taggedTest("@l0 @deterministic @ci"),
+    });
+
+    // A block carrying only a non-taxonomy JSDoc tag has no taxonomy tag, so
+    // it would be silently omitted from every layer — the guard must catch it.
+    // A partial-but-recognized tuple (`@l0 @ci`) still routes through the
+    // tag-selection contract and is left to the whole-repo taxonomy lint.
+    expect(findUntaggedCandidateTestFiles(root)).toEqual([
+      "src/env-only.test.mjs",
+    ]);
+  });
+
   it("exits non-zero with bounded diagnostics for an untagged matched file", () => {
     const root = makeRepo({
       "src/untagged.test.ts": untaggedTest,
@@ -245,9 +274,34 @@ describe("layered test command contract", () => {
       "test:l0: refused to run 1 untagged test file(s)",
     );
     expect(result.stderr).toContain(
-      "test:l0: src/untagged.test.ts has no leading tag block.",
+      "test:l0: src/untagged.test.ts has no recognized taxonomy tag block.",
     );
     expect(result.stderr).not.toContain("src/tagged.test.ts");
+  });
+
+  it("caps per-file diagnostics and summarizes the remainder", () => {
+    const files = {};
+    const untaggedCount = 55;
+    for (let i = 0; i < untaggedCount; i += 1) {
+      files[`src/untagged-${String(i).padStart(2, "0")}.test.ts`] = untaggedTest;
+    }
+    const root = makeRepo(files);
+    const result = spawnSync("node", [runnerPath, "l0"], {
+      cwd: root,
+      encoding: "utf8",
+    });
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(
+      `test:l0: refused to run ${untaggedCount} untagged test file(s)`,
+    );
+    const listedLines = result.stderr
+      .split("\n")
+      .filter((line) => line.includes("has no recognized taxonomy tag block."));
+    expect(listedLines).toHaveLength(50);
+    expect(result.stderr).toContain(
+      "test:l0: … and 5 more untagged file(s) not listed.",
+    );
   });
 
   it("exits cleanly with explicit diagnostics when a layer is empty", () => {

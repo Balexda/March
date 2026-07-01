@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { TAXONOMY_AXES } from "./test-taxonomy.mjs";
 
 const LAYERS = {
   l0: { scope: "@l0", script: "test:l0" },
@@ -14,6 +15,12 @@ const REQUIRED_TAGS = ["@deterministic", "@ci"];
 const TEST_FILE_RE = /\.test\.(?:mjs|ts)$/;
 const IGNORED_DIRS = new Set([".git", "dist", "node_modules"]);
 const QUARANTINE_PREFIX = "tests/quarantine/";
+// Shares Feature 1's tag vocabulary so the guard classifies against the same
+// taxonomy the whole-repo lint enforces, rather than any bare `@`-token.
+const TAXONOMY_TAGS = new Set(Object.values(TAXONOMY_AXES).flat());
+// Bound the per-file diagnostic output so a large drift cannot flood CI logs,
+// matching scripts/docs-contracts/check.mjs.
+const MAX_DIAGNOSTICS = 50;
 
 function toPosixPath(value) {
   return value.split(path.sep).join("/");
@@ -51,8 +58,18 @@ function tagsInLeadingBlock(source) {
   return new Set(block.match(/@[a-z0-9-]+/g) ?? []);
 }
 
-function hasParseableLeadingTagBlock(source) {
-  return tagsInLeadingBlock(source).size > 0;
+// A candidate is classifiable only when its leading block carries at least one
+// recognized taxonomy tag. A block with only non-taxonomy annotations (e.g.
+// `@vitest-environment jsdom`) is unclassified: it would be excluded from every
+// layer, so the guard must treat it as untagged and fail loudly rather than let
+// the file be silently omitted.
+function hasRecognizedTaxonomyTag(source) {
+  for (const tag of tagsInLeadingBlock(source)) {
+    if (TAXONOMY_TAGS.has(tag)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function isQuarantined(relativePath) {
@@ -66,7 +83,7 @@ export function findUntaggedCandidateTestFiles(rootDir) {
     }
 
     const source = fs.readFileSync(path.join(rootDir, relativePath), "utf8");
-    return !hasParseableLeadingTagBlock(source);
+    return !hasRecognizedTaxonomyTag(source);
   });
 }
 
@@ -117,8 +134,16 @@ function runLayer(layerName, rootDir = process.cwd()) {
     console.error(
       `${layer.script}: refused to run ${untaggedCandidates.length} untagged test file(s) outside ${QUARANTINE_PREFIX}.`,
     );
-    for (const relativePath of untaggedCandidates) {
-      console.error(`${layer.script}: ${relativePath} has no leading tag block.`);
+    for (const relativePath of untaggedCandidates.slice(0, MAX_DIAGNOSTICS)) {
+      console.error(
+        `${layer.script}: ${relativePath} has no recognized taxonomy tag block.`,
+      );
+    }
+    const undiagnosed = untaggedCandidates.length - MAX_DIAGNOSTICS;
+    if (undiagnosed > 0) {
+      console.error(
+        `${layer.script}: … and ${undiagnosed} more untagged file(s) not listed.`,
+      );
     }
     return 1;
   }
