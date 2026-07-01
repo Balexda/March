@@ -135,6 +135,9 @@ describe("snapshot", () => {
             "src/index.ts",
             "src/lib/util.ts",
             "package.json",
+            // #460: createBuildContext always emits a neutralized .dockerignore
+            // so `docker build` can't strip docs/ etc. from the worker workspace.
+            ".dockerignore",
           ].map((p) => p.split("/").join(path.sep)).sort(),
         );
 
@@ -145,6 +148,32 @@ describe("snapshot", () => {
           expect(lst.isSymbolicLink()).toBe(false);
           expect(lst.isFile()).toBe(true);
         }
+      } finally {
+        handle.cleanup();
+      }
+    });
+
+    it("#460: keeps docs/ + .smithy/ in the context and neutralizes the repo .dockerignore", () => {
+      // The exact live condition: the worktree tracks a repo .dockerignore that
+      // excludes `docs` + `.smithy` (to keep the SERVICE images lean), plus the
+      // already-merged contract doc the forge worker must EDIT, not re-create.
+      const repoRoot = makeRepoWithFiles({
+        ".dockerignore": "docs\n.smithy\ndist\n*.log\n",
+        "docs/subsystems/contract.md": "# Contract\nexisting content\n",
+        ".smithy/smithy-manifest.json": "{}\n",
+        "README.md": "hi\n",
+      });
+      const handle = createBuildContext(repoRoot);
+      try {
+        const got = listRelativeFiles(handle.contextPath);
+        // The files the repo .dockerignore would have stripped from `docker build`
+        // MUST be present so the worker edits them instead of authoring new files.
+        expect(got).toContain(["docs", "subsystems", "contract.md"].join(path.sep));
+        expect(got).toContain([".smithy", "smithy-manifest.json"].join(path.sep));
+        // And the context's own .dockerignore must NOT re-exclude them.
+        const ctxIgnore = fs.readFileSync(path.join(handle.contextPath, ".dockerignore"), "utf-8");
+        expect(ctxIgnore).not.toMatch(/^\s*docs\s*$/m);
+        expect(ctxIgnore).not.toMatch(/^\s*\.smithy\s*$/m);
       } finally {
         handle.cleanup();
       }

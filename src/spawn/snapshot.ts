@@ -259,6 +259,25 @@ export function createBuildContext(worktreePath: string): BuildContextHandle {
     for (const rel of filtered) {
       copyTrackedFile(worktreePath, contextPath, rel);
     }
+    // #460: NEUTRALIZE any `.dockerignore` carried in from the worktree. The
+    // repo's `.dockerignore` is for the SERVICE image builds (it drops `docs`,
+    // `.smithy`, `dist`, `*.log` to keep those images lean). It is a tracked
+    // file, so the copy above lands it in this context — and `docker build`
+    // (which builds the per-spawn worker image via `COPY . /march/workspace`)
+    // HONORS it, silently stripping `docs/` and `.smithy/` from the worker's
+    // workspace. The worker then authors an already-merged `docs/subsystems/
+    // *.md` from scratch → a `new file` patch → `git apply --index` rejects it
+    // ("already exists in index"). The snapshot is ALREADY curated (only tracked
+    // files, minus SNAPSHOT_EXCLUSION_PATTERNS secrets), so the worker image must
+    // copy it whole. Overwrite with an empty ignore file so `docker build`
+    // includes everything in the context regardless of the repo's image-build
+    // rules. Builder-agnostic (classic + BuildKit both read `<context>/.dockerignore`).
+    fs.writeFileSync(
+      path.join(contextPath, ".dockerignore"),
+      "# Intentionally empty (#460): the spawn build context is already the\n" +
+        "# curated tracked-file set; the repo's image-build .dockerignore must not\n" +
+        "# strip docs/ or .smithy/ from the worker workspace.\n",
+    );
   } catch (err) {
     // Best-effort cleanup so we don't leak the partially populated dir
     // when bubbling the error up to the caller.
