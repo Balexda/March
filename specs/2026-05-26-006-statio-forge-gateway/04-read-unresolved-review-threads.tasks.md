@@ -42,7 +42,7 @@
 
 ### Tasks
 
-- [ ] **Add the authenticated review-threads route**
+- [x] **Add the authenticated review-threads route**
 
   Extend the Statio Fastify service so `GET /v1/prs/:number/review-threads` delegates to the `reviewThreads(prNumber)` forge seam and returns the documented `{ threads }` success wrapper or uniform error envelope. Preserve bearer-token auth, health/status behavior, and slice trace correlation for the new route.
 
@@ -54,7 +54,7 @@
   - The route requires bearer-token auth and keeps `x-march-slice-id` correlation available
   - Tests cover authorized success, auth rejection, invalid number, owner-unavailable empty result, forge failure, and trace header forwarding
 
-- [ ] **Verify async client compatibility for `reviewThreads(prNumber)`**
+- [x] **Verify async client compatibility for `reviewThreads(prNumber)`**
 
   Ensure the fetch-based Statio client interoperates with the service route for `reviewThreads(prNumber)`, including response unwrapping, trace header forwarding, and `StatioClientError` mapping for non-2xx envelopes. Keep `reachable()` anchored to the existing authenticated readiness probe rather than this route.
 
