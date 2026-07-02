@@ -32,34 +32,37 @@ is a valid placeholder when no generated content exists yet.
 
 ## Contract Freshness Configuration Shape
 
-Future contract freshness checks read their source-to-contract mapping from
+Contract freshness checks read their source-to-contract mapping from
 `docs/subsystems/contract-freshness.config.json`. The artifact is versioned so
 checker behavior can evolve explicitly, and each entry maps one contract
 artifact to the public source selectors that make that contract stale when
-changed.
+changed. This mapping is live: the config is populated for the current
+subsystems and validated by `npm run docs:contracts:check`
+(`scripts/docs-contracts/check.mjs`). Maintainers update the existing config
+alongside contract or public-source changes rather than treating it as future
+work.
 
 | Field | Required | Purpose |
 |-------|----------|---------|
-| `version` | Yes | Stable integer schema version consumed by later checker behavior. |
+| `version` | Yes | Schema version consumed by the checker; currently fixed at `1`. |
 | `contracts` | Yes | Array of contract freshness ownership entries. |
 | `contracts[].name` | Yes | Stable subsystem or role slug for the owner. |
 | `contracts[].contractPath` | Yes | Repo-relative path to the owning `docs/subsystems/<name>/contract.md` artifact. |
-| `contracts[].publicSourcePaths` | Yes | Repo-relative public-source path selectors associated with that contract. |
+| `contracts[].publicSourcePaths` | Yes | Non-empty array of repo-relative public-source path selectors associated with that contract. |
 | `contracts[].notes` | No | Optional ownership context for boundaries that need clarification. |
 
-Freshness ownership entries should describe non-overlapping public source
-surfaces: a later local verdict command must be able to determine which single
-contract belongs to a changed public source path. If later work needs overlapping
-selectors, that work must define the conflict rule before relying on the
-overlap. This scaffold records only the schema and ownership rules; populated
-selectors for Hatchery, Brood, Herald, Castra, Spawn, Legate, Steward, or any
-other subsystem belong to later freshness-checker work.
+Freshness ownership entries describe non-overlapping public source surfaces so
+the verdict command can determine which single contract belongs to a changed
+public source path; `publicSourcePaths` must be a non-empty selector set for
+that ownership rule to hold, which is why the checker rejects an empty array. If
+later work needs overlapping selectors, that work must define the conflict rule
+before relying on the overlap.
 
-Steward is represented as a role-level contract bound to a Castra-consumer
-surface rather than as a standalone source module. Its freshness entry may use
-`notes` to record that ownership decision while `contractPath` still points at
-the Steward role contract and `publicSourcePaths` remains the selector field a
-later checker consumes.
+Steward is represented as a role-level contract bound to Castra-consumer and
+Hatchery-handoff surfaces rather than as a standalone source module. Its
+freshness entry uses `notes` to record that ownership decision while
+`contractPath` still points at the Steward role contract and
+`publicSourcePaths` carries the selectors the checker consumes.
 
 ## Minimum Template
 
