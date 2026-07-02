@@ -6,6 +6,19 @@ import {
   type SpawnRecord,
 } from "./spawn-record.js";
 
+export interface DockerSnapshot {
+  readonly containerId: string;
+  readonly present: boolean;
+  readonly running?: boolean;
+}
+
+export interface SpawnView {
+  readonly record: SpawnRecord;
+  readonly needsAttention: boolean;
+  readonly disposed: boolean;
+  readonly containerLive: boolean;
+}
+
 export interface SpawnIndexWarning {
   readonly filePath: string;
   readonly error: Error;
@@ -87,4 +100,17 @@ export function loadSpawnRecord(
     }
     throw err;
   }
+}
+
+export function derivedStatus(
+  record: SpawnRecord,
+  dockerSnapshot?: DockerSnapshot,
+): SpawnView {
+  void dockerSnapshot;
+  return {
+    record,
+    needsAttention: record.status === "failed",
+    disposed: !fs.existsSync(record.worktreePath),
+    containerLive: record.status === "running",
+  };
 }
