@@ -56,4 +56,18 @@ describe("statio container artifacts", () => {
     expect(compose).not.toContain("/tmp/tmux-");
     expect(compose).not.toContain(".local/bin");
   });
+
+  it("redirects gh cache/state/data to a writable path so the read-only HOME does not break forge reads", () => {
+    const compose = read("docker/statio.docker-compose.yml");
+
+    expect(compose).toContain("XDG_CACHE_HOME=/tmp/gh/cache");
+    expect(compose).toContain("XDG_STATE_HOME=/tmp/gh/state");
+    expect(compose).toContain("XDG_DATA_HOME=/tmp/gh/data");
+    expect(compose).toContain("GH_NO_UPDATE_NOTIFIER=1");
+    // Config still resolves from the read-only HOME mount, so the config-dir
+    // override must NOT be set (that would hide the mounted gh credentials).
+    expect(compose).not.toContain("XDG_CONFIG_HOME=");
+    // HOME remains mounted read-only.
+    expect(compose).toContain(":ro");
+  });
 });

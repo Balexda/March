@@ -58,6 +58,14 @@ services:
       - HOME=${MARCH_HOST_HOME:-/home/jmbattista}
       - GH_TOKEN=${GH_TOKEN:-}
       - GITHUB_TOKEN=${GITHUB_TOKEN:-}
+      # HOME is mounted read-only for credentials, but gh writes cache/state/data
+      # under XDG dirs in HOME. Redirect those to a writable in-container path so
+      # forge reads don't fail on the read-only mount; config (~/.config/gh) is
+      # still read from HOME, so XDG_CONFIG_HOME is intentionally NOT overridden.
+      - GH_NO_UPDATE_NOTIFIER=1
+      - XDG_CACHE_HOME=/tmp/gh/cache
+      - XDG_STATE_HOME=/tmp/gh/state
+      - XDG_DATA_HOME=/tmp/gh/data
     volumes:
       # Whole HOME at the identical path: repos, worktrees, ~/.config/gh, and
       # .gitconfig for gh/git. No host control sockets are mounted.
