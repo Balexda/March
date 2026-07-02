@@ -18,7 +18,7 @@
 
 ### Tasks
 
-- [ ] **Add the derived SpawnView API**
+- [x] **Add the derived SpawnView API**
 
   Extend `src/brood/spawn-index.ts` with the `SpawnView` type and derived-view export described by the contracts, with focused coverage beside `src/brood/spawn-index.test.ts`. Compute US2-owned flags from the supplied `SpawnRecord`: `failed` records set `needsAttention`; `disposed` is derived `true` when the record JSON is present but the worktree path it records is absent on disk — a pure filesystem stat, no Docker (the F3 teardown-leaves-JSON condition — FR-008 / AS 2.2) — and is represented only in the view; and `containerLive` is inferred from persisted record state until US3 reconciles it from a caller snapshot. Container-liveness-driven disposal refinement (a dead container whose worktree still lingers) is layered in US3 alongside the snapshot; US2's disposal evidence is the worktree-artifact absence that forge can determine from the record alone.
 
