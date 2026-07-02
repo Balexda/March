@@ -18,7 +18,7 @@
 
 ### Tasks
 
-- [ ] **Render generated public-interface blocks**
+- [x] **Render generated public-interface blocks**
 
   Add the deterministic Markdown renderer for one owner's `PublicExportSummary` records in the documentation-contract tooling area. The renderer should produce the `Generated Contract Block` content from the data model for a specific owner and contract path, without reading or writing contract files and without adding command-mode behavior.
 
@@ -28,7 +28,7 @@
   - Empty export sets render deterministically when the owner surface is explicitly allowed to be empty.
   - The renderer does not rewrite human-authored contract prose, inspect AUTOGEN markers, invoke live services, or require Docker, network access, agent sessions, or runtime March processes.
 
-- [ ] **Validate contract AUTOGEN marker regions**
+- [x] **Validate contract AUTOGEN marker regions**
 
   Add marker-region discovery for Markdown contract artifacts. The validator should require exactly one standalone `<!-- BEGIN AUTOGEN -->` and one standalone `<!-- END AUTOGEN -->` marker pair inside the contract's `## Public Interface` section, returning bounded marker diagnostics for invalid contracts rather than replacement ranges.
 
@@ -39,7 +39,7 @@
   - Diagnostics include category, severity, contract path when available, and bounded message text.
   - Validation does not edit contract files or implement check/write command modes.
 
-- [ ] **Replace only validated marker contents**
+- [x] **Replace only validated marker contents**
 
   Add the safe replacement operation that combines a validated marker region with rendered generated content and returns updated contract bytes only when every write-safety check passes. The operation should preserve marker lines and all bytes outside the marker pair so AS 2.1 and AS 2.2 can be tested without invoking the final npm command.
 
@@ -50,7 +50,7 @@
   - Batch updates are all-or-nothing for the contracts included in one replacement request; no partial contract write is possible after any contract in the batch fails validation.
   - The replacement layer does not add the public `npm run docs:contracts:extract` command, check mode, write mode, CI enforcement, runtime subsystem behavior, or Smithy-agent directives.
 
-- [ ] **Cover marker replacement with focused fixtures**
+- [x] **Cover marker replacement with focused fixtures**
 
   Add fixture-driven tests for valid, missing, duplicate, misplaced, unbalanced, and prose-preserving contract cases. The tests should exercise the renderer, marker validator, and safe replacement layer directly while remaining independent of command-line mode parsing and live subsystem services.
 
