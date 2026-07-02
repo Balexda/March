@@ -138,7 +138,7 @@ Recommended implementation sequence:
 |----|-------|------------|----------|
 | US1 | Maintain a subsystem's contract doc as part of the change that alters its surface | — | specs/2026-06-07-011-contract-freshness-enforcement-directive/01-maintain-a-subsystems-contract-doc-as-part-of-the-change-that-alters-its-surface.tasks.md |
 | US2 | Refresh the mechanical parts of a contract deterministically | US1 | specs/2026-06-07-011-contract-freshness-enforcement-directive/02-refresh-the-mechanical-parts-of-a-contract-deterministically.tasks.md |
-| US3 | Document the convention in the contributor guides | US1 | — |
+| US3 | Document the convention in the contributor guides | US1 | specs/2026-06-07-011-contract-freshness-enforcement-directive/03-document-the-convention-in-the-contributor-guides.tasks.md |
 | US4 | Record the SD-002 "no enforcement gate" decision | US1 | — |
 
 ## Requirements *(mandatory)*
