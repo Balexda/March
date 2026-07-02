@@ -53,7 +53,7 @@
 
 ### Tasks
 
-- [ ] **Introduce backend parser adapters selected by recorded backend**
+- [x] **Introduce backend parser adapters selected by recorded backend**
 
   Extend the extraction module with parser adapters for the live supported backends. The parser layer should select behavior from the spawn record's backend name, parse only bounded captured JSON, and normalize successful backend output into an unvalidated candidate patch payload plus optional bounded summary metadata.
 
@@ -64,7 +64,7 @@
   - Parser output remains explicitly unvalidated; it does not validate patch paths, write `ExtractionResult`, apply patches, or launch Steward integration.
   - Parser diagnostics never include unbounded raw backend output.
 
-- [ ] **Add parser fixtures for Claude Code, Codex, and malformed output**
+- [x] **Add parser fixtures for Claude Code, Codex, and malformed output**
 
   Add tests that exercise representative Claude Code and Codex JSON envelopes and parser failure cases. Use fixtures small enough to make expected behavior obvious and keep validation concerns out of this slice.
 
