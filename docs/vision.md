@@ -2,9 +2,9 @@
 
 **Status**: Long-lived vision document. Intended to outlive any individual RFC, milestone, or refactor. Revise sparingly — when the broad direction of the project actually shifts, not when implementation details change.
 
-**Companion**: [`docs/operating-philosophy.md`](operating-philosophy.md) translates this vision into the rules and per-component framing that should guide day-to-day spec and code decisions. If the vision answers *what* and *why*, the operating philosophy answers *how we're getting there*.
+**Companions**: [`docs/operating-philosophy.md`](operating-philosophy.md) translates this vision into the rules and per-component framing that should guide day-to-day spec and code decisions — if the vision answers *what* and *why*, the operating philosophy answers *how we're getting there*. [`docs/open-core-boundary.md`](open-core-boundary.md) holds the *open vs. closed* line that cuts across the whole system (the open engine and the private value layer that hangs off it). [`docs/testing-strategy.md`](testing-strategy.md) holds *what we test at which scope* and why.
 
-**Last revised**: 2026-05-16.
+**Last revised**: 2026-07-01.
 
 ---
 
@@ -88,5 +88,10 @@ This is a vision document, but not a static one. The thesis is stable; the frami
 - When the daily-life narrative in [§ Ideas in, quality out](#ideas-in-quality-out) no longer matches the operator's actual day, that is feedback that the system isn't living up to the vision — the next round of work should close the gap.
 - When a new pattern emerges (a new role like the Steward in 2026-05, a new touch point we hadn't recognized), reflect it here and in the [operating philosophy](operating-philosophy.md).
 - When we've genuinely learned that a piece of the vision was wrong — not just hard to implement, actually wrong — change it. Document why, so future readers understand the shift.
+
+Two shifts since this doc's first framing are worth naming, because both change the *shape* of the system without touching the thesis:
+
+- **From a CLI to a distributed system.** March began as a CLI a person runs. It is now a set of long-running containerized services — Hatchery, Brood, Herald, Castra, and a profile-agnostic Legate — that a person *deploys*. "Ideas in, quality out" is unchanged; the operator still brings ideas and judgment and walks away. But the thing they walk away from is a deployed system, not a foreground process. The CLI is now the operator's control surface over that system, not the system itself.
+- **From a single tool to an open engine with a value layer around it.** The deterministic execution engine (the loop, spawn/teardown, the event log, the CLI) is the open, auditable, self-hostable core; the agentic judgment, the management/action surface, the enterprise connectors, and the eventual cloud control plane are the private value layer that hangs off it. This opens a commercial path, but it does not change who March is *for* or what it promises — it is the same vision, drawn with an open/closed line through it. [`docs/open-core-boundary.md`](open-core-boundary.md) is the authority on where that line falls and why.
 
 Revise sparingly. If you find yourself revising the vision because of a single feature, you are probably actually revising the operating philosophy or an individual spec. The vision is the slowest-moving artifact in the repo.
