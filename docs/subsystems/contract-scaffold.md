@@ -16,6 +16,20 @@ integration notes. The three required H2 sections above must appear in every
 subsystem contract so later presence checks can key on the same heading names
 for all contracts.
 
+When a contract reserves generated exported-signature content, place one
+AUTOGEN marker pair inside `## Public Interface`:
+
+```markdown
+<!-- BEGIN AUTOGEN -->
+<!-- END AUTOGEN -->
+```
+
+Generated public-interface content belongs between those markers. The bounded
+AUTOGEN block is the only region intended for automated replacement by later
+tooling; human-authored public-interface prose may appear before or after the
+marker pair and remains outside the replacement boundary. An empty marker pair
+is a valid placeholder when no generated content exists yet.
+
 ## Minimum Template
 
 ```markdown
@@ -25,6 +39,9 @@ for all contracts.
 
 <!-- Externally consumed routes, commands, types, roles, or protocol surfaces,
      depending on the subsystem shape. List what other subsystems depend on. -->
+
+<!-- BEGIN AUTOGEN -->
+<!-- END AUTOGEN -->
 
 ## Invariants
 
