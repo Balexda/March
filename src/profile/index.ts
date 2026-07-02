@@ -124,6 +124,7 @@ const ROOT_FIELDS = new Set([
 
 const CONTAINER_FIELDS = new Set(["capDrop", "user", "envWhitelist"]);
 const RESOURCE_FIELDS = new Set(["memoryLimit", "cpuLimit", "timeoutSeconds"]);
+const TOOLS_FIELDS = new Set(["allowed", "disallowed"]);
 
 const USER_PATTERN = /^(?:[a-z_][a-z0-9_-]{0,31}|[0-9]+(?::[0-9]+)?)$/;
 const MEMORY_LIMIT_PATTERN = /^[0-9]+[bkmgBKMG]$/;
@@ -165,6 +166,7 @@ export function validateProfile(input: unknown): ValidationResult {
   validateBaseImage(profile.baseImage, errors);
   validateContainer(profile.container, errors);
   validateResources(profile.resources, errors);
+  validateTools(profile.tools, errors);
 
   if (errors.length > 0) {
     return { ok: false, errors: sortErrors(errors) };
@@ -367,6 +369,78 @@ function validateResources(
   }
 }
 
+function validateTools(tools: unknown, errors: ValidationError[]): void {
+  if (tools === undefined) {
+    return;
+  }
+
+  if (!isPlainRecord(tools)) {
+    errors.push({
+      code: "WrongType",
+      path: "/tools",
+      message: "Profile tools must be an object.",
+    });
+    return;
+  }
+
+  collectUnknownFields(tools, TOOLS_FIELDS, "/tools", errors);
+
+  const allowed = validateToolList(tools.allowed, "/tools/allowed", errors);
+  const disallowed = validateToolList(
+    tools.disallowed,
+    "/tools/disallowed",
+    errors,
+  );
+
+  if (allowed === undefined || disallowed === undefined) {
+    return;
+  }
+
+  const disallowedTools = new Set(disallowed);
+  const overlappingTool = allowed.find((tool) => disallowedTools.has(tool));
+  if (overlappingTool !== undefined) {
+    errors.push({
+      code: "ToolOverlap",
+      path: "/tools",
+      message: `Tool "${overlappingTool}" cannot be both allowed and disallowed.`,
+    });
+  }
+}
+
+function validateToolList(
+  value: unknown,
+  path: string,
+  errors: ValidationError[],
+): readonly string[] | undefined {
+  if (value === undefined) {
+    return [];
+  }
+
+  if (!Array.isArray(value)) {
+    errors.push({
+      code: "WrongType",
+      path,
+      message: "Tools policy lists must be arrays of strings.",
+    });
+    return undefined;
+  }
+
+  const strings: string[] = [];
+  for (const [index, entry] of value.entries()) {
+    if (typeof entry !== "string") {
+      errors.push({
+        code: "WrongType",
+        path: joinPointer(path, String(index)),
+        message: "Tool policy entries must be strings.",
+      });
+    } else {
+      strings.push(entry);
+    }
+  }
+
+  return strings;
+}
+
 function collectUnknownFields(
   value: Record<string, unknown>,
   knownFields: ReadonlySet<string>,
@@ -386,6 +460,18 @@ function collectUnknownFields(
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+// Stricter than isPlainObject: also rejects exotic objects (Date, Map, class
+// instances) that a YAML parser can produce (e.g. !!timestamp tags). The
+// profile contract requires such non-JSON-compatible values to surface as
+// WrongType at the offending path rather than being cast to a policy object.
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  if (!isPlainObject(value)) {
+    return false;
+  }
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
 }
 
 function joinPointer(parentPath: string, key: string): string {

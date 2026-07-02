@@ -9,6 +9,7 @@ import {
   type NetworkPolicy,
   type Profile,
   type ResourceLimits,
+  type ToolsPolicy,
   type ValidationError,
   type ValidationErrorCode,
   type ValidationResult,
@@ -25,6 +26,7 @@ type RetainedSpawnConfig = Omit<SpawnConfig, "networkMode">;
 type ProfileSpawnConfigParity = ContainerSecurity & ResourceLimits;
 type DocumentedContainerFields = "capDrop" | "user" | "envWhitelist";
 type DocumentedNetworkModes = "bridge" | "none" | "allowlist";
+type DocumentedToolsFields = "allowed" | "disallowed";
 type InlineEnvContainerFields =
   | "env"
   | "envFile"
@@ -81,6 +83,18 @@ type _AllowlistFieldOnlyExistsOnAllowlistNetwork = AssertTrue<
   IsEqual<
     Extract<NetworkPolicy, { readonly allowlist: readonly unknown[] }>,
     Extract<NetworkPolicy, { readonly mode: "allowlist" }>
+  >
+>;
+type _ProfileToolsAssignsToExportedToolsPolicy = AssertTrue<
+  IsEqual<Profile["tools"], ToolsPolicy | undefined>
+>;
+type _ToolsPolicyOnlyExposesDocumentedFields = AssertTrue<
+  IsEqual<keyof ToolsPolicy, DocumentedToolsFields>
+>;
+type _ToolsPolicyListsAreStringArrays = AssertTrue<
+  IsAssignable<
+    NonNullable<ToolsPolicy["allowed"] | ToolsPolicy["disallowed"]>,
+    readonly string[]
   >
 >;
 
@@ -360,6 +374,153 @@ describe("validateProfile", () => {
     const profile = makeM1ParityProfile();
 
     expect(validateProfile(profile)).toEqual({ ok: true, value: profile });
+  });
+
+  it("accepts profiles with absent, empty, and non-overlapping tools policies", () => {
+    const withoutTools = makeM1ParityProfile();
+    const emptyTools = makeM1ParityProfile({ tools: {} });
+    const emptyLists = makeM1ParityProfile({
+      tools: { allowed: [], disallowed: [] },
+    });
+    const nonOverlappingTools = makeM1ParityProfile({
+      tools: { allowed: ["Bash", "Read"], disallowed: ["WebFetch"] },
+    });
+
+    expect(validateProfile(withoutTools)).toEqual({
+      ok: true,
+      value: withoutTools,
+    });
+    expect(validateProfile(emptyTools)).toEqual({
+      ok: true,
+      value: emptyTools,
+    });
+    expect(validateProfile(emptyLists)).toEqual({
+      ok: true,
+      value: emptyLists,
+    });
+    expect(validateProfile(nonOverlappingTools)).toEqual({
+      ok: true,
+      value: nonOverlappingTools,
+    });
+  });
+
+  it("reports a structural tools error for non-object tools policies", () => {
+    expect(validateProfile(makeM1ParityProfile({ tools: "Bash" }))).toEqual({
+      ok: false,
+      errors: [
+        {
+          code: "WrongType",
+          path: "/tools",
+          message: "Profile tools must be an object.",
+        },
+      ],
+    });
+  });
+
+  it("reports a structural tools error for exotic (non-plain) objects", () => {
+    expect(
+      validateProfile(makeM1ParityProfile({ tools: new Date() })),
+    ).toEqual({
+      ok: false,
+      errors: [
+        {
+          code: "WrongType",
+          path: "/tools",
+          message: "Profile tools must be an object.",
+        },
+      ],
+    });
+  });
+
+  it("reports structural errors for malformed tools policy lists", () => {
+    expect(
+      validateProfile(
+        makeM1ParityProfile({
+          tools: {
+            allowed: "Bash",
+            disallowed: [42],
+            extra: true,
+          },
+        }),
+      ),
+    ).toEqual({
+      ok: false,
+      errors: [
+        {
+          code: "WrongType",
+          path: "/tools/allowed",
+          message: "Tools policy lists must be arrays of strings.",
+        },
+        {
+          code: "WrongType",
+          path: "/tools/disallowed/0",
+          message: "Tool policy entries must be strings.",
+        },
+        {
+          code: "UnknownField",
+          path: "/tools/extra",
+          message: 'Unknown profile field "extra".',
+        },
+      ],
+    });
+  });
+
+  it("rejects overlapping allowed and disallowed tools", () => {
+    expect(
+      validateProfile(
+        makeM1ParityProfile({
+          tools: { allowed: ["Bash"], disallowed: ["Read", "Bash"] },
+        }),
+      ),
+    ).toEqual({
+      ok: false,
+      errors: [
+        {
+          code: "ToolOverlap",
+          path: "/tools",
+          message: 'Tool "Bash" cannot be both allowed and disallowed.',
+        },
+      ],
+    });
+  });
+
+  it("aggregates tools errors with other profile validation errors deterministically", () => {
+    expect(
+      validateProfile(
+        makeM1ParityProfile({
+          baseImage: "",
+          tools: {
+            allowed: ["Bash", 42],
+            disallowed: ["Bash"],
+            extra: true,
+          },
+        }),
+      ),
+    ).toEqual({
+      ok: false,
+      errors: [
+        {
+          code: "InvalidImageReference",
+          path: "/baseImage",
+          message: "Profile baseImage must be a valid Docker image reference.",
+        },
+        {
+          code: "ToolOverlap",
+          path: "/tools",
+          message: 'Tool "Bash" cannot be both allowed and disallowed.',
+        },
+        {
+          code: "WrongType",
+          path: "/tools/allowed/1",
+          message: "Tool policy entries must be strings.",
+        },
+        {
+          code: "UnknownField",
+          path: "/tools/extra",
+          message: 'Unknown profile field "extra".',
+        },
+      ],
+    });
   });
 
   it.each([

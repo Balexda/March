@@ -18,7 +18,7 @@
 
 ### Tasks
 
-- [ ] **Expose optional tools policy types**
+- [x] **Expose optional tools policy types**
 
   Add the `ToolsPolicy` public type through `src/profile/` and wire it into `Profile` as an optional top-level field. Keep the change limited to the profile schema surface; M2 dispatch and tool execution paths must not read or enforce the field.
 
@@ -30,7 +30,7 @@
   - No non-profile runtime subsystem depends on `Profile.tools`
   - The coverage remains compile-time only and adds no runtime behavior
 
-- [ ] **Validate tools policy structure**
+- [x] **Validate tools policy structure**
 
   Extend `validateProfile` in `src/profile/` to validate optional `tools` objects, including absent policy, empty policy, empty inner arrays, and string-list entries. Preserve closed-world validation under `/tools` and satisfy AS 7.1, AS 7.2, AS 7.4, and AS 7.5.
 
@@ -43,7 +43,7 @@
   - Unknown fields under `tools` produce `UnknownField`
   - Tools-policy errors are aggregated with all other profile validation errors
 
-- [ ] **Reject overlapping tool policy entries**
+- [x] **Reject overlapping tool policy entries**
 
   Add overlap validation for `tools.allowed` and `tools.disallowed` while preserving deterministic validation behavior. Keep the check semantic only to the two policy arrays; M2 must not interpret tool names or attempt backend-specific enforcement.
 
