@@ -11,12 +11,13 @@ import type { RepoMetadataReader } from "./forge.js";
 import {
   type ForgeClient,
   type ForgeErrorCode,
+  type ListPrsRequest,
   StatioForgeError,
   StatioNotFoundError,
   StatioValidationError,
 } from "./types.js";
 
-type StatioRouteForgeClient = Pick<ForgeClient, "repoInfo" | "getPr" | "reachable">;
+type StatioRouteForgeClient = Pick<ForgeClient, "repoInfo" | "listPrs" | "getPr" | "reachable">;
 
 export interface BuildStatioServerOptions {
   readonly repoReader?: RepoMetadataReader;
@@ -41,6 +42,7 @@ function createDefaultForgeClient(): StatioRouteForgeClient {
   const adapter = createGhForgeAdapter();
   return {
     repoInfo: adapter.repoInfo,
+    listPrs: adapter.listPrs,
     getPr: adapter.getPr,
     async reachable(): Promise<boolean> {
       try {
@@ -66,6 +68,42 @@ function parsePullRequestNumber(raw: string): number {
     );
   }
   return number;
+}
+
+function parseOptionalQueryString(
+  value: unknown,
+  field: "author" | "head",
+): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || value.trim() !== value || value.length === 0) {
+    throw new StatioValidationError(`${field} must be a non-empty string when provided.`);
+  }
+  return value;
+}
+
+function parseListPrsQuery(query: unknown): ListPrsRequest {
+  if (!query || typeof query !== "object" || Array.isArray(query)) {
+    throw new StatioValidationError("PR list query must be an object.");
+  }
+  const record = query as Record<string, unknown>;
+  const state = record.state;
+  if (
+    state !== undefined &&
+    state !== "open" &&
+    state !== "closed" &&
+    state !== "merged" &&
+    state !== "all"
+  ) {
+    throw new StatioValidationError(
+      "state must be one of open, closed, merged, or all when provided.",
+    );
+  }
+
+  return {
+    author: parseOptionalQueryString(record.author, "author"),
+    head: parseOptionalQueryString(record.head, "head"),
+    state: state as ListPrsRequest["state"],
+  };
 }
 
 export function buildStatioServer(options: BuildStatioServerOptions = {}): FastifyInstance {
@@ -139,6 +177,11 @@ export function buildStatioServer(options: BuildStatioServerOptions = {}): Fasti
   }));
 
   app.get("/v1/repo", async () => ({ repo: await repoReader.repoInfo() }));
+
+  app.get("/v1/prs", async (request) => {
+    const filters = parseListPrsQuery(request.query);
+    return { prs: await forgeClient.listPrs(filters) };
+  });
 
   app.get<{ Params: { number: string } }>("/v1/prs/:number", async (request) => {
     const number = parsePullRequestNumber(request.params.number);

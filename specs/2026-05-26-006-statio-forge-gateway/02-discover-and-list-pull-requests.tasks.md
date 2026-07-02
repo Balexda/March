@@ -43,7 +43,7 @@
 
 ### Tasks
 
-- [ ] **Add the authenticated `/v1/prs` route**
+- [x] **Add the authenticated `/v1/prs` route**
 
   Extend the Statio Fastify service so `GET /v1/prs` accepts the documented query filters, delegates to `listPrs(req)`, and returns the success wrapper or uniform error envelope. Preserve health/status behavior, bearer-token auth, and slice trace correlation for the new route.
 
@@ -55,7 +55,7 @@
   - The route requires bearer-token auth and keeps `x-march-slice-id` correlation available
   - Tests cover authorized success, auth rejection, empty results, invalid query values, forge failure, and trace header forwarding
 
-- [ ] **Verify async client compatibility for `listPrs(req)`**
+- [x] **Verify async client compatibility for `listPrs(req)`**
 
   Ensure the fetch-based Statio client interoperates with the service route for `listPrs(req)`, including query serialization, response unwrapping, trace header forwarding, and `StatioClientError` mapping for non-2xx envelopes. Keep `reachable()` behavior anchored to the existing authenticated readiness probe.
 
