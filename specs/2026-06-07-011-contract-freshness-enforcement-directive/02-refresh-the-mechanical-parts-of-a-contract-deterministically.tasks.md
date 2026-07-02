@@ -18,7 +18,7 @@
 
 ### Tasks
 
-- [ ] **Document the deterministic extractor handoff**
+- [x] **Document the deterministic extractor handoff**
 
   Update the contract-authoring convention in `docs/subsystems/contract-scaffold.md` so mechanically-derivable public-interface regions point to Feature 7's `docs:contracts:extract` tool. The guidance should satisfy AS 2.1 and AS 2.3 without implementing extraction logic, adding a gate, or moving contributor-guide coverage from US3 into this story.
 
@@ -29,7 +29,7 @@
   - No `.github/workflows/contract-freshness.yml` workflow, CI job, or AI-on-check-in step is introduced.
   - `CONTRIBUTING.md`, `CLAUDE.md`, and `AGENTS.md` are not broadened beyond the already-planned US3 contributor-guide coverage.
 
-- [ ] **State generated-region stability expectations**
+- [x] **State generated-region stability expectations**
 
   Extend the same contract-authoring convention to record the stability boundary for generated regions. The guidance should satisfy AS 2.2 by requiring deterministic, ordered output that avoids churn from cosmetic source moves, while leaving parser, replacement, check-mode, and write-mode behavior to Feature 7.
 
