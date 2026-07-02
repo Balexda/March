@@ -104,7 +104,7 @@ Recommended implementation sequence:
 | US1 | Document Steward Launch and Input Contract | — | specs/2026-06-03-008-steward-role-contract/01-document-steward-launch-and-input-contract.tasks.md |
 | US2 | Document Patch Application and PR-Ready Outcome Contract | US1 | specs/2026-06-03-008-steward-role-contract/02-document-patch-application-and-pr-ready-outcome-contract.tasks.md |
 | US3 | Document Steward Lifecycle, Tracking, and Cleanup Boundaries | US1 | specs/2026-06-03-008-steward-role-contract/03-document-steward-lifecycle-tracking-and-cleanup-boundaries.tasks.md |
-| US4 | Record Cross-Contract Ownership for Steward Consumers | US1, US2, US3 | — |
+| US4 | Record Cross-Contract Ownership for Steward Consumers | US1, US2, US3 | specs/2026-06-03-008-steward-role-contract/04-record-cross-contract-ownership-for-steward-consumers.tasks.md |
 
 ## Requirements *(mandatory)*
 
