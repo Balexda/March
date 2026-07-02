@@ -10,7 +10,7 @@
 ## Slice 1: Add Non-Persisted SpawnView Derivation
 <!-- audience: builder; mode: how-to; length: 5-15 steps; diagram: optional; examples: forbidden -->
 
-**Goal**: Deliver the US2-owned `SpawnView` shape and `derivedStatus(record)` behavior in `src/brood/spawn-index.ts` so callers can distinguish attention, disposal, and inferred container liveness without adding persisted status values.
+**Goal**: Deliver the US2-owned `SpawnView` shape and the record-only path of `derivedStatus(record, dockerSnapshot?): SpawnView` in `src/brood/spawn-index.ts` so callers can distinguish attention, disposal, and inferred container liveness without adding persisted status values.
 
 **Justification**: This is a complete derived-view increment over the US1 reader: downstream callers can derive operator-facing flags from an already-loaded record, tests can prove no disk mutation occurs, and the persisted `SpawnStatus` contract remains unchanged. It deliberately leaves caller-supplied Docker snapshot reconciliation to US3 and does not add CLI, teardown, or write-path behavior.
 
@@ -20,18 +20,18 @@
 
 - [ ] **Add the derived SpawnView API**
 
-  Extend `src/brood/spawn-index.ts` with the `SpawnView` type and derived-view export described by the contracts, with focused coverage beside `src/brood/spawn-index.test.ts`. Compute US2-owned flags from the supplied `SpawnRecord`: `failed` records need attention, disposed records are represented only in the view, and container liveness is inferred from persisted record state until US3 supplies snapshots.
+  Extend `src/brood/spawn-index.ts` with the `SpawnView` type and derived-view export described by the contracts, with focused coverage beside `src/brood/spawn-index.test.ts`. Compute US2-owned flags from the supplied `SpawnRecord`: `failed` records set `needsAttention`; `disposed` is derived `true` when the record JSON is present but the worktree path it records is absent on disk — a pure filesystem stat, no Docker (the F3 teardown-leaves-JSON condition — FR-008 / AS 2.2) — and is represented only in the view; and `containerLive` is inferred from persisted record state until US3 reconciles it from a caller snapshot. Container-liveness-driven disposal refinement (a dead container whose worktree still lingers) is layered in US3 alongside the snapshot; US2's disposal evidence is the worktree-artifact absence that forge can determine from the record alone.
 
   _Acceptance criteria:_
-  - `derivedStatus(record)` returns the original record plus all US2 view flags
+  - `derivedStatus(record, dockerSnapshot?)` returns a `SpawnView` (the original record plus the US2 view flags); the record-only call `derivedStatus(record)` derives from the persisted record alone
   - `needsAttention` is true for `failed` records and false for non-attention statuses
   - `created`, `running`, `stopped`, and `failed` persisted statuses are covered
-  - A runtime-artifact absence condition is exposed only on `SpawnView`
+  - `disposed` is derived `true` when the record JSON is present but its recorded worktree path is absent on disk (a pure filesystem check, no Docker call), and is exposed only on `SpawnView` (never persisted)
   - `containerLive` is inferred without shelling out to Docker
   - On-disk records remain byte-for-byte free of derived status values after derivation
   - No `"needs-attention"` or `"disposed"` value is added to `SpawnStatus`
 
-**PR Outcome**: `src/brood/spawn-index.ts` exposes the US2 `SpawnView` derivation API, with tests proving attention, disposal, and inferred liveness flags are computed without Docker calls, without disk mutation, and without expanding the persisted `SpawnStatus` enum. Docker-snapshot reconciliation remains for US3.
+**PR Outcome**: `src/brood/spawn-index.ts` exposes the US2 `SpawnView` derivation API (`derivedStatus(record, dockerSnapshot?): SpawnView`, record-only path), with tests proving attention, disposal, and inferred liveness flags are computed without Docker calls, without disk mutation, and without expanding the persisted `SpawnStatus` enum. Docker-snapshot reconciliation remains for US3.
 
 ---
 
