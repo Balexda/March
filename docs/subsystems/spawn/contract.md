@@ -60,6 +60,11 @@ and the Hatchery dispatch entrypoint that composes them:
 - Container launch helpers create, start, wait for, log, and remove the spawn
   container. They expose typed launch input and wait-result shapes plus bounded
   launch diagnostics.
+- Output extraction helpers capture bounded terminal backend output and parse
+  bounded JSON through the recorded backend name. The parser surface supports
+  Claude Code and Codex adapters and returns an unvalidated candidate patch or a
+  bounded parser diagnostic; it does not validate paths, persist extraction
+  state, apply patches, or launch Steward integration.
 - `runHatcherySpawn(input: HatcherySpawnOptions)` is the exported dispatch
   composition used by Hatchery. It accepts the required prompt, repository path,
   and backend plus optional deployment profile, agent-deck session profile,
@@ -108,6 +113,9 @@ Steward-specific public interface details.
 - Raw backend output is untrusted until validated. The accepted handoff payload
   is the decoded patch emitted by the deterministic sentinel path and checked
   for non-empty git-diff shape and safe repository-relative paths.
+- Backend JSON envelope parsing is selected from the recorded backend name,
+  never by probing output contents. Parser output is a candidate only until the
+  later validation boundary accepts or rejects it.
 - Missing, malformed, ambiguous, unsafe, failed, or no-op output prevents
   Steward handoff.
 - Validated handoff eligibility only states that Spawn produced an eligible
@@ -133,6 +141,7 @@ Steward-specific public interface details.
 | Backend runtime failure | A nonzero backend exit is recorded as terminal failure; captured logs are diagnostic material only and manager or Steward handoff is not attempted. |
 | Timeout | The wait is bounded, the container is force-removed best-effort, the spawn is marked failed or surfaced as a launch/runtime diagnostic, and execution does not hang. |
 | Output capture failure | Failure to read terminal logs is reported as an output diagnostic; extraction and handoff do not proceed. |
+| Output parser failure | Unsupported backend names, malformed backend JSON, absent patch fields, or ambiguous candidate patch fields are reported with bounded diagnostics and do not produce a validated patch or handoff. |
 | Validation failure | Missing sentinel output, malformed base64, decoded content without a git-diff header, unsafe paths, failed extraction, unsafe output, or no-op output all produce diagnostics and a no-handoff outcome. |
 | Handoff failure | A validated patch that cannot be applied or sent to the manager boundary records the failure stage, preserves artifacts for diagnosis, attempts rollback cleanup, and does not claim successful handoff. |
 | Cleanup failure | Cleanup diagnostics remain observable through lifecycle evidence, logs, records, or rollback warnings and do not mask the original terminal success or failure. |
