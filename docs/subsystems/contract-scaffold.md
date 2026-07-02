@@ -30,6 +30,37 @@ tooling; human-authored public-interface prose may appear before or after the
 marker pair and remains outside the replacement boundary. An empty marker pair
 is a valid placeholder when no generated content exists yet.
 
+## Contract Freshness Configuration Shape
+
+Future contract freshness checks read their source-to-contract mapping from
+`docs/subsystems/contract-freshness.config.json`. The artifact is versioned so
+checker behavior can evolve explicitly, and each entry maps one contract
+artifact to the public source selectors that make that contract stale when
+changed.
+
+| Field | Required | Purpose |
+|-------|----------|---------|
+| `version` | Yes | Stable integer schema version consumed by later checker behavior. |
+| `contracts` | Yes | Array of contract freshness ownership entries. |
+| `contracts[].name` | Yes | Stable subsystem or role slug for the owner. |
+| `contracts[].contractPath` | Yes | Repo-relative path to the owning `docs/subsystems/<name>/contract.md` artifact. |
+| `contracts[].publicSourcePaths` | Yes | Repo-relative public-source path selectors associated with that contract. |
+| `contracts[].notes` | No | Optional ownership context for boundaries that need clarification. |
+
+Freshness ownership entries should describe non-overlapping public source
+surfaces: a later local verdict command must be able to determine which single
+contract belongs to a changed public source path. If later work needs overlapping
+selectors, that work must define the conflict rule before relying on the
+overlap. This scaffold records only the schema and ownership rules; populated
+selectors for Hatchery, Brood, Herald, Castra, Spawn, Legate, Steward, or any
+other subsystem belong to later freshness-checker work.
+
+Steward is represented as a role-level contract bound to a Castra-consumer
+surface rather than as a standalone source module. Its freshness entry may use
+`notes` to record that ownership decision while `contractPath` still points at
+the Steward role contract and `publicSourcePaths` remains the selector field a
+later checker consumes.
+
 ## Minimum Template
 
 ```markdown
