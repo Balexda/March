@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  derivedStatus,
   listSpawnRecords,
   loadSpawnRecord,
   type SpawnIndexWarning,
@@ -48,6 +49,12 @@ describe("spawn-index", () => {
       JSON.stringify(value, null, 2) + "\n",
       "utf-8",
     );
+  }
+
+  function makeWorktree(home: string, id: string): string {
+    const worktreePath = path.join(home, "worktrees", id);
+    fs.mkdirSync(worktreePath, { recursive: true });
+    return worktreePath;
   }
 
   afterEach(() => {
@@ -147,5 +154,66 @@ describe("spawn-index", () => {
 
     expect(listSpawnRecords({ homeDir: home })).toEqual([]);
     expect(fs.existsSync(spawnRecordDir(home))).toBe(false);
+  });
+
+  it("derives attention and container liveness from persisted statuses", () => {
+    const home = makeHome();
+    const statuses: Array<[SpawnRecord["status"], boolean, boolean]> = [
+      ["created", false, false],
+      ["running", false, true],
+      ["stopped", false, false],
+      ["failed", true, false],
+    ];
+
+    for (const [status, needsAttention, containerLive] of statuses) {
+      const value = record(`20260613-${status}`, {
+        status,
+        worktreePath: makeWorktree(home, status),
+      });
+
+      expect(derivedStatus(value)).toEqual({
+        record: value,
+        needsAttention,
+        disposed: false,
+        containerLive,
+      });
+    }
+  });
+
+  it("derives disposed when the record's worktree path is absent", () => {
+    const value = record("20260613-gone01", {
+      status: "stopped",
+      worktreePath: path.join(makeHome(), "missing-worktree"),
+    });
+
+    expect(derivedStatus(value)).toMatchObject({
+      record: value,
+      needsAttention: false,
+      disposed: true,
+      containerLive: false,
+    });
+  });
+
+  it("does not persist derived view fields or status values during derivation", () => {
+    const home = makeHome();
+    const value = record("20260613-pure01", {
+      status: "failed",
+      worktreePath: path.join(home, "missing-worktree"),
+    });
+    writeRecord(home, value);
+    const before = fs.readFileSync(spawnRecordPath(value.id, home), "utf-8");
+
+    expect(derivedStatus(value)).toMatchObject({
+      needsAttention: true,
+      disposed: true,
+      containerLive: false,
+    });
+
+    const after = fs.readFileSync(spawnRecordPath(value.id, home), "utf-8");
+    expect(after).toBe(before);
+    expect(JSON.parse(after)).toEqual(value);
+    expect(after).not.toContain("needsAttention");
+    expect(after).not.toContain("needs-attention");
+    expect(after).not.toContain("disposed");
   });
 });
