@@ -18,7 +18,7 @@
 
 ### Tasks
 
-- [ ] **Update operator testing documentation**
+- [x] **Update operator testing documentation**
 
   Update `CONTRIBUTING.md` and `docs/testing-strategy.md` so day-to-day contributor guidance names the required leading tag tuple for new Vitest files, the baseline documentation records the existing L2-shaped Vitest tests as `node:child_process`-mocked tests rather than real Docker exercises, and the strategy document remains principles-level while delegating tactical sequencing to the RFC and feature specs.
 
