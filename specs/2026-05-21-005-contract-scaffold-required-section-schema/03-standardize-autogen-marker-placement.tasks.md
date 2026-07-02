@@ -18,7 +18,7 @@
 
 ### Tasks
 
-- [ ] **Add the AUTOGEN marker pair to the scaffold guidance**
+- [x] **Add the AUTOGEN marker pair to the scaffold guidance**
 
   Update the shared contract scaffold documentation so `## Public Interface` defines `<!-- BEGIN AUTOGEN -->` and `<!-- END AUTOGEN -->` as the paired delimiter block for generated exported-signature content. Keep the guidance reusable across subsystem and role contracts, and preserve the human-authored prose around the generated region.
 
@@ -29,7 +29,7 @@
   - The scaffold states human-authored public-interface prose may surround the marker pair.
   - The scaffold still preserves `## Public Interface`, `## Invariants`, and `## Error Modes` as required H2 sections.
 
-- [ ] **Constrain automated replacement to the marker-bounded region**
+- [x] **Constrain automated replacement to the marker-bounded region**
 
   Clarify that later AUTOGEN refresh behavior may replace only the content between the paired markers. Keep this as a documentation convention for future tooling rather than implementing extraction, validation, CI enforcement, or generated contract writes in this slice.
 
