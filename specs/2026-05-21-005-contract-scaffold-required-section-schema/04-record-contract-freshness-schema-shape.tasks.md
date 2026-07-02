@@ -18,7 +18,7 @@
 
 ### Tasks
 
-- [ ] **Document the freshness config entry shape**
+- [x] **Document the freshness config entry shape**
 
   Add schema-shape documentation for `docs/subsystems/contract-freshness.config.json` that identifies the top-level version field and the contract entry fields a later checker will consume. Keep the guidance focused on artifact shape and concepts rather than concrete subsystem watch lists.
 
@@ -29,7 +29,7 @@
   - The schema shape does not finalize populated public-source globs for Hatchery, Brood, Herald, Castra, Spawn, Legate, Steward, or any other subsystem.
   - No contract freshness checker, presence checker, AUTOGEN extraction tool, generated signature output, CI enforcement, runtime behavior, or subsystem-specific contract body is introduced.
 
-- [ ] **Record ownership and non-overlap rules**
+- [x] **Record ownership and non-overlap rules**
 
   Clarify how freshness entries express ownership so a public source surface maps to the contract artifact that owns it. Include the Steward role binding as a Castra-consumer surface, and keep the ownership rule assertable enough for later tooling without implementing that tooling here.
 
