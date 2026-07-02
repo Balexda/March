@@ -49,9 +49,10 @@ The milestone-level execution plan (M1 through M8, success criteria, dependency 
 
 ### Test File Tag Blocks
 
-Every new `*.test.ts` file needs a leading Test File Tag Block before imports
-or executable code. The block must contain exactly one scope tag, exactly one
-determinism tag, and exactly one execution-channel tag:
+Every new Vitest test file — `*.test.ts` or `*.test.mjs`, the extensions the
+layered test runner discovers — needs a leading Test File Tag Block before
+imports or executable code. The block must contain exactly one scope tag,
+exactly one determinism tag, and exactly one execution-channel tag:
 
 ```ts
 /**
