@@ -15,6 +15,7 @@ import {
   type ForgeClient,
   type PullRequestListItem,
   type PullRequestSummary,
+  type ReviewThread,
   StatioForgeError,
   StatioNotFoundError,
   StatioValidationError,
@@ -62,8 +63,24 @@ const PR: PullRequestSummary = {
   threadCount: 1,
   needsResponseCount: 1,
 };
+const REVIEW_THREADS: ReviewThread[] = [
+  {
+    id: 10,
+    path: "src/statio/server.ts",
+    line: 112,
+    author: "reviewer",
+    bodyPreview: "Please adjust this.",
+    lastAuthor: "reviewer",
+    lastCommentAt: "2026-05-26T00:00:00Z",
+    commentCount: 1,
+    commentIds: [10],
+  },
+];
 
-type StatioRouteForgeClient = Pick<ForgeClient, "repoInfo" | "listPrs" | "getPr" | "reachable">;
+type StatioRouteForgeClient = Pick<
+  ForgeClient,
+  "repoInfo" | "listPrs" | "getPr" | "reviewThreads" | "reachable"
+>;
 
 function fakeReader(overrides: Partial<RepoMetadataReader> = {}): RepoMetadataReader {
   return {
@@ -78,6 +95,7 @@ function fakeForge(overrides: Partial<StatioRouteForgeClient> = {}): StatioRoute
     repoInfo: vi.fn().mockResolvedValue(REPO),
     listPrs: vi.fn().mockResolvedValue(PR_LIST),
     getPr: vi.fn().mockResolvedValue(PR),
+    reviewThreads: vi.fn().mockResolvedValue(REVIEW_THREADS),
     reachable: vi.fn().mockResolvedValue(true),
     ...overrides,
   };
@@ -353,6 +371,107 @@ describe("statio server", () => {
     expect(res.json()).toEqual({ error: { code: "forge_error", message: "gh failed" } });
   });
 
+  it("returns review threads through the authorized /v1/prs/:number/review-threads wrapper", async () => {
+    const forgeClient = fakeForge();
+    app = buildStatioServer({ forgeClient, token: "secret" });
+
+    const res = await app.inject({
+      method: "GET",
+      url: "/v1/prs/42/review-threads",
+      headers: { authorization: "Bearer secret" },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ threads: REVIEW_THREADS });
+    expect(forgeClient.reviewThreads).toHaveBeenCalledWith(42);
+  });
+
+  it("rejects unauthenticated review thread reads before calling the forge seam", async () => {
+    const forgeClient = fakeForge();
+    app = buildStatioServer({ forgeClient, token: "secret" });
+
+    const res = await app.inject({ method: "GET", url: "/v1/prs/42/review-threads" });
+
+    expect(res.statusCode).toBe(401);
+    expect(res.json().error.code).toBe("unauthorized");
+    expect(forgeClient.reviewThreads).not.toHaveBeenCalled();
+  });
+
+  it("returns invalid_request envelopes for malformed review thread PR numbers", async () => {
+    const forgeClient = fakeForge();
+    app = buildStatioServer({ forgeClient, token: "secret" });
+
+    for (const number of ["abc", "0", "-1", "1.5"]) {
+      const res = await app.inject({
+        method: "GET",
+        url: `/v1/prs/${number}/review-threads`,
+        headers: { authorization: "Bearer secret" },
+      });
+
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error.code).toBe("invalid_request");
+    }
+    expect(forgeClient.reviewThreads).not.toHaveBeenCalled();
+  });
+
+  it("returns owner-unavailable empty review thread results as a success", async () => {
+    const forgeClient = fakeForge({ reviewThreads: vi.fn().mockResolvedValue([]) });
+    app = buildStatioServer({ forgeClient, token: "secret" });
+
+    const res = await app.inject({
+      method: "GET",
+      url: "/v1/prs/42/review-threads",
+      headers: { authorization: "Bearer secret" },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ threads: [] });
+  });
+
+  it("maps review thread forge failures to forge_error envelopes", async () => {
+    app = buildStatioServer({
+      forgeClient: fakeForge({
+        reviewThreads: vi.fn(async () => {
+          throw new StatioForgeError("gh api graphql failed");
+        }),
+      }),
+      token: "secret",
+    });
+
+    const res = await app.inject({
+      method: "GET",
+      url: "/v1/prs/42/review-threads",
+      headers: { authorization: "Bearer secret" },
+    });
+
+    expect(res.statusCode).toBe(502);
+    expect(res.json()).toEqual({
+      error: { code: "forge_error", message: "gh api graphql failed" },
+    });
+  });
+
+  it("maps an absent review-thread PR to a not_found envelope", async () => {
+    app = buildStatioServer({
+      forgeClient: fakeForge({
+        reviewThreads: vi.fn(async () => {
+          throw new StatioNotFoundError("Pull request #999999 was not found.");
+        }),
+      }),
+      token: "secret",
+    });
+
+    const res = await app.inject({
+      method: "GET",
+      url: "/v1/prs/999999/review-threads",
+      headers: { authorization: "Bearer secret" },
+    });
+
+    expect(res.statusCode).toBe(404);
+    expect(res.json()).toEqual({
+      error: { code: "not_found", message: "Pull request #999999 was not found." },
+    });
+  });
+
   it("does not gate sibling paths that merely share the /v1 prefix", async () => {
     app = buildStatioServer({ repoReader: fakeReader(), token: "secret" });
 
@@ -540,6 +659,32 @@ describe("statio request tracing", () => {
     });
   });
 
+  it("keeps slice correlation on review thread reads", async () => {
+    initOtel({ MARCH_OTEL: "1", MARCH_OTEL_ENDPOINT: "http://localhost:4318" });
+    const spans = captureSpans();
+    app = buildStatioServer({ forgeClient: fakeForge(), token: "secret" });
+
+    const res = await app.inject({
+      method: "GET",
+      url: "/v1/prs/42/review-threads",
+      headers: {
+        authorization: "Bearer secret",
+        "x-march-slice-id": "slice-abc",
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const span = spans.find((s) => s.name === "statio.request")!;
+    expect(span).toBeDefined();
+    expect(span.spanContext().traceId).toBe(traceIdForDispatch("slice-abc"));
+    expect(span.parentSpanContext?.spanId).toBe(spanIdForDispatch("slice-abc"));
+    expect(span.attributes).toMatchObject({
+      "statio.method": "GET",
+      "statio.route": "/v1/prs/:number/review-threads",
+      "statio.status_class": "2xx",
+    });
+  });
+
   it("emits a service-local request span when no slice id is provided", async () => {
     initOtel({ MARCH_OTEL: "1", MARCH_OTEL_ENDPOINT: "http://localhost:4318" });
     const spans = captureSpans();
@@ -706,6 +851,15 @@ describe("statio client/server compatibility", () => {
     });
   });
 
+  it("lets the async client call the authorized /v1/prs/:number/review-threads route", async () => {
+    const forgeClient = fakeForge();
+    const baseUrl = await listen(forgeClient);
+    const client = new StatioClient({ baseUrl, token: "secret", traceKey: "slice-abc" });
+
+    await expect(client.reviewThreads(42)).resolves.toEqual(REVIEW_THREADS);
+    expect(forgeClient.reviewThreads).toHaveBeenCalledWith(42);
+  });
+
   it("forwards client trace headers to the pull request list service route", async () => {
     initOtel({ MARCH_OTEL: "1", MARCH_OTEL_ENDPOINT: "http://localhost:4318" });
     const spans = captureSpans();
@@ -719,6 +873,21 @@ describe("statio client/server compatibility", () => {
     expect(span.spanContext().traceId).toBe(traceIdForDispatch("slice-client"));
     expect(span.parentSpanContext?.spanId).toBe(spanIdForDispatch("slice-client"));
     expect(span.attributes["statio.route"]).toBe("/v1/prs");
+  });
+
+  it("forwards client trace headers to the review thread service route", async () => {
+    initOtel({ MARCH_OTEL: "1", MARCH_OTEL_ENDPOINT: "http://localhost:4318" });
+    const spans = captureSpans();
+    const baseUrl = await listen(fakeForge());
+    const client = new StatioClient({ baseUrl, token: "secret", traceKey: "slice-client" });
+
+    await expect(client.reviewThreads(42)).resolves.toEqual(REVIEW_THREADS);
+
+    const span = spans.find((s) => s.name === "statio.request")!;
+    expect(span).toBeDefined();
+    expect(span.spanContext().traceId).toBe(traceIdForDispatch("slice-client"));
+    expect(span.parentSpanContext?.spanId).toBe(spanIdForDispatch("slice-client"));
+    expect(span.attributes["statio.route"]).toBe("/v1/prs/:number/review-threads");
   });
 
   it("lets the async client call the authorized /v1/prs route with head filters", async () => {
@@ -783,6 +952,23 @@ describe("statio client/server compatibility", () => {
       code: "forge_error",
       status: 502,
       message: "gh list down",
+    });
+  });
+
+  it("maps review thread route envelopes to client errors", async () => {
+    const baseUrl = await listen(
+      fakeForge({
+        reviewThreads: vi.fn(async () => {
+          throw new StatioForgeError("gh api graphql down");
+        }),
+      }),
+    );
+    const client = new StatioClient({ baseUrl, token: "secret" });
+
+    await expect(client.reviewThreads(42)).rejects.toMatchObject({
+      code: "forge_error",
+      status: 502,
+      message: "gh api graphql down",
     });
   });
 
