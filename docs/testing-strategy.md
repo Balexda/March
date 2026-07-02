@@ -99,7 +99,7 @@ Different scopes have different natural assertion shapes, and one framework does
 The day-one baseline still contains legacy L2-shaped Vitest tests:
 `src/spawn/container-launch.test.ts` and `src/spawn/snapshot-build.test.ts`.
 They are classified `@l2 @deterministic @ci`, but they mock
-`node:child_process` and do not exercise real Docker. They remain Vitest tests
+`node:child_process` and do not exercise real docker. They remain Vitest tests
 until the migration policy in [`CONTRIBUTING.md`](../CONTRIBUTING.md#test-layer-migration)
 requires a Cucumber.js port for a material governed-file edit.
 
