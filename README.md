@@ -1,7 +1,7 @@
 # March CLI
 
 **March** is an agentic-development system: it takes a fully decomposed plan
-(from [Smithy](docs/vision.md)) and runs it to a queue of reviewable PRs with
+(from [Smithy](docs/vision.md)) and turns it into a queue of reviewable PRs with
 minimum operator intervention. Under the hood it runs as a small stack of
 coordinated, containerized services, but you deploy and operate it with a few
 high-level commands — `march init`, `march up`, `march down`. The `march` CLI is
@@ -36,11 +36,20 @@ march init
 ```
 
 Requires Node 20 or 22. `march spawn dispatch` additionally requires `git` and
-`docker` on `PATH`. Standing up the full stack — `march init <profile>` and
-`march up` — additionally requires Docker, [`agent-deck`](https://github.com/asheshgoplani/agent-deck),
-and Python 3.9+ for agent-deck's conductor bridge. `march init` with no profile
-does just the first-run CLI bootstrap (manifest + base skills); pass a
-`<profile>` to also bring the stack up and onboard a repo.
+`docker` on `PATH`. `march up` / `march down` bring the service stack up and down
+and need only Docker. Onboarding a repo — `march init <profile>` — additionally
+requires [`agent-deck`](https://github.com/asheshgoplani/agent-deck) and Python
+3.9+ for agent-deck's conductor bridge. `march init` with no profile does just
+the first-run CLI bootstrap (manifest + base skills); pass a `<profile>` to also
+bring the stack up and onboard a repo.
+
+The service images (`march-castra`, `march-hatchery`, `march-brood`,
+`march-herald`, `march-legate`) are **not yet published to a registry**, so
+`march up` / `march init <profile>` currently require them to be built locally
+from a source checkout first (`npm run build:images`). `march up` preflights the
+images and reports the missing ones rather than starting a partial stack. Making
+the stack pullable from a plain `npm i -g` is tracked in
+[issue #438](https://github.com/Balexda/March/issues/438).
 
 ## Supported AI Assistants
 
@@ -66,13 +75,13 @@ the rest are container entrypoints and internals covered in
 
 | Command | Purpose |
 | :--- | :--- |
-| `march legate recover <sliceId>` | Recover a stuck/escalated slice: the running Legate drops it and re-dispatches the still-ready work fresh — no restart, no manual state surgery. |
+| `march legate recover <sliceId>` | Hand a stuck/escalated slice back to the loop's graduated recovery ladder: it un-escalates and tries to relaunch in place first (preserving the slice's branch/worktree/PR), and only tombstones for a fresh re-dispatch as a last resort — no manual state surgery. |
 | `march legate respond <sliceId>` | Answer a steward escalated as `steward_awaiting_input` — deliver a reply into its live session (`--message`), or `--ack` to clear a false-positive escalation back to the normal fix→merge path. |
 
 `march version` / `march help [command]` round out the set. `march legate init`
-is deprecated — it warns and forwards to `march init [profile]`, which supersedes
-the old per-profile conductor flow (a single shared `march-legate` service now
-drives every profile).
+is deprecated — it prints a deprecation warning and then runs the same profile
+onboarding flow as `march init [profile]`, which supersedes the old per-profile
+conductor flow (a single shared `march-legate` service now drives every profile).
 
 ## Observability
 
