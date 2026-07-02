@@ -18,7 +18,7 @@
 
 ### Tasks
 
-- [ ] **Add assertable invariant guidance to the scaffold**
+- [x] **Add assertable invariant guidance to the scaffold**
 
   Update the shared contract scaffold documentation so `## Invariants` tells authors to record observable behavioral promises that tests can check. Keep the guidance reusable across subsystems and roles, and keep the change limited to scaffold documentation rather than subsystem-specific contract prose.
 
@@ -29,7 +29,7 @@
   - The scaffold still preserves the required H2 section vocabulary from User Story 1.
   - No contract body is authored for Hatchery, Brood, Herald, Castra, Spawn, Legate, or Steward.
 
-- [ ] **Add observable error-mode guidance to the scaffold**
+- [x] **Add observable error-mode guidance to the scaffold**
 
   Update the shared contract scaffold documentation so `## Error Modes` tells authors to identify both the failure condition and the externally visible outcome. Keep the error guidance focused on outcomes that callers, operators, or tests can observe without relying on private implementation details.
 
