@@ -175,19 +175,32 @@ function firstSummary(value: unknown): string | undefined {
   return summary;
 }
 
+// Iterative pre-order walk. An explicit heap stack keeps deeply nested but
+// size-bounded backend JSON from overflowing the call stack, so untrusted
+// output can only ever produce a bounded failed result, never a thrown
+// RangeError that escapes the parser boundary.
 function visit(
-  value: unknown,
+  root: unknown,
   visitor: (key: string | undefined, value: unknown) => void,
-  key?: string,
 ): void {
-  visitor(key, value);
-  if (Array.isArray(value)) {
-    for (const item of value) visit(item, visitor);
-    return;
-  }
-  if (typeof value !== "object" || value === null) return;
-  for (const [entryKey, entryValue] of Object.entries(value)) {
-    visit(entryValue, visitor, entryKey);
+  const stack: Array<{ key: string | undefined; value: unknown }> = [
+    { key: undefined, value: root },
+  ];
+  while (stack.length > 0) {
+    const { key, value } = stack.pop()!;
+    visitor(key, value);
+    if (Array.isArray(value)) {
+      // Push in reverse so siblings are visited in source order on pop.
+      for (let i = value.length - 1; i >= 0; i--) {
+        stack.push({ key: undefined, value: value[i] });
+      }
+      continue;
+    }
+    if (typeof value !== "object" || value === null) continue;
+    const entries = Object.entries(value);
+    for (let i = entries.length - 1; i >= 0; i--) {
+      stack.push({ key: entries[i][0], value: entries[i][1] });
+    }
   }
 }
 

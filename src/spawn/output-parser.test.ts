@@ -141,6 +141,25 @@ describe("parseBackendEnvelope", () => {
     expect(result).not.toHaveProperty("candidate");
   });
 
+  it("fails cleanly on deeply nested backend JSON without overflowing the stack", () => {
+    // Valid JSON, within a plausible size cap, but nested far past the native
+    // recursion limit — a recursive walk would throw RangeError outside the
+    // parse boundary and crash the caller.
+    const depth = 50_000;
+    const deeplyNested = "[".repeat(depth) + "]".repeat(depth);
+
+    const result = parseBackendEnvelope(
+      envelope({ backend: "codex", rawJson: deeplyNested }),
+    );
+
+    expect(result).toMatchObject({
+      ok: false,
+      backend: "codex",
+      failureReason: "patch-absent",
+    });
+    expect(result).not.toHaveProperty("candidate");
+  });
+
   it("does not validate patch paths or persist extraction results", () => {
     const absolutePathPatch = [
       "diff --git a//tmp/evil.txt b//tmp/evil.txt",
