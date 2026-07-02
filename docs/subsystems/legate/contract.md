@@ -33,7 +33,20 @@ Legate's public outputs are:
 - Deterministic trace relationship: `legate.dispatch` is the slice trace origin, and downstream service actions join the same deterministic slice trace.
 - Bounded diagnostic output: status payloads, heartbeat counters, action events, processor requests, errored spans, and concise diagnostics suitable for tests and operator display.
 
-Herald, Hatchery, Brood, Castra, and Steward are integration boundaries for this contract. Herald owns event storage, profile registry routes, cursor APIs, and projection service details. Hatchery owns spawn job routes and worker launch implementation. Brood owns lifecycle state and teardown authority. Castra owns session hosting and prompt delivery. Steward role behavior and patch application remain owned by the Steward contract. Legate documents only the loop decisions it makes from those boundaries and the metadata it supplies to them.
+### Cross-Contract Ownership Boundaries
+
+| Provider boundary | Provider contract | Legate relationship | Ownership rule |
+|-------------------|-------------------|---------------------|----------------|
+| Herald | `docs/subsystems/herald/contract.md` (future) | Legate consumes event-log cursors, folded projections, profile observations, and recovery events. | Legate owns cursor use, replay decisions, and loop state changes; Herald owns event-log and projection behavior. |
+| Hatchery | `docs/subsystems/hatchery/contract.md` | Legate dispatches runnable slices and observes job outcomes through the Hatchery boundary. | Legate owns slice selection, dispatch metadata, and trace origin; Hatchery owns dispatch service behavior. |
+| Brood | `docs/subsystems/brood/contract.md` (future) | Legate observes lifecycle state and asks for teardown or cleanup decisions to be reflected. | Legate owns loop decisions made from lifecycle evidence; Brood owns lifecycle state and cleanup authority. |
+| Castra | `docs/subsystems/castra/contract.md` (future) | Legate observes hosted worker or steward sessions and attachment state. | Legate owns babysit, relaunch, and terminal decisions; Castra owns session hosting and attachment behavior. |
+| Steward | `docs/subsystems/steward/contract.md` | Steward attachment, loss, or terminal outcome can affect Legate decisions. | Legate owns decisions made from steward state; the Steward contract owns Steward-specific role behavior. |
+
+These references are owner pointers for future freshness mapping. They do not
+define provider route tables, request or response schemas, Castra adapter
+details, or Steward-specific role behavior. Legate documents only the loop
+decisions it makes from those boundaries and the metadata it supplies to them.
 
 ## Invariants
 
