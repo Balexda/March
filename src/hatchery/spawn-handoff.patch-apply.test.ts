@@ -34,6 +34,17 @@ function makeRepo(): string {
   return dir;
 }
 
+function makeLinkedWorktree(repo: string, branch = "steward-branch"): string {
+  const worktree = fs.mkdtempSync(path.join(os.tmpdir(), "patch-apply-wt-"));
+  tmpDirs.push(worktree);
+  execFileSync("git", ["branch", branch], { cwd: repo, stdio: "ignore" });
+  execFileSync("git", ["worktree", "add", "-q", worktree, branch], {
+    cwd: repo,
+    stdio: "ignore",
+  });
+  return worktree;
+}
+
 function writePatch(dir: string, content: string): string {
   const p = path.join(dir, "worker.patch");
   fs.writeFileSync(p, content);
@@ -54,6 +65,74 @@ describe("applyPatchToManagerWorktree", () => {
     const strategy = applyPatchToManagerWorktree({ patchPath: patch, worktreePath: repo });
     expect(strategy).toBe("index");
     expect(fs.readFileSync(path.join(repo, "f"), "utf-8")).toBe("world\n");
+  });
+
+  it("applies the validated patch in the handoff worktree, not the operator checkout", () => {
+    const repo = makeRepo();
+    const handoffWorktree = makeLinkedWorktree(repo);
+    const patch = writePatch(
+      repo,
+      "diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1 +1 @@\n-hello\n+world\n",
+    );
+
+    const strategy = applyPatchToManagerWorktree({
+      patchPath: patch,
+      worktreePath: handoffWorktree,
+      repoPath: repo,
+    });
+
+    expect(strategy).toBe("index");
+    expect(fs.readFileSync(path.join(handoffWorktree, "f"), "utf-8")).toBe("world\n");
+    expect(fs.readFileSync(path.join(repo, "f"), "utf-8")).toBe("hello\n");
+  });
+
+  it("refuses to apply the handoff patch in the operator checkout", () => {
+    const repo = makeRepo();
+    const patch = writePatch(repo, "diff --git a/f b/f\n");
+
+    expect(() =>
+      applyPatchToManagerWorktree({
+        patchPath: patch,
+        worktreePath: repo,
+        repoPath: repo,
+      }),
+    ).toThrow(/operator checkout/);
+  });
+
+  it("refuses when the worktree path is a subdirectory of the operator checkout (#389)", () => {
+    const repo = makeRepo();
+    const subdir = path.join(repo, "sub");
+    fs.mkdirSync(subdir);
+    const patch = writePatch(repo, "diff --git a/f b/f\n");
+
+    // A path *inside* the operator checkout is not an exact match, but its git
+    // top-level collapses back to the checkout root — so it must still refuse.
+    expect(() =>
+      applyPatchToManagerWorktree({
+        patchPath: patch,
+        worktreePath: subdir,
+        repoPath: repo,
+      }),
+    ).toThrow(/operator checkout/);
+  });
+
+  it("refuses when the operator checkout is reached through a symlink (#389)", () => {
+    const repo = makeRepo();
+    const linkDir = fs.mkdtempSync(path.join(os.tmpdir(), "patch-apply-link-"));
+    tmpDirs.push(linkDir);
+    const linkedRepo = path.join(linkDir, "repo-link");
+    fs.symlinkSync(repo, linkedRepo);
+    const patch = writePatch(repo, "diff --git a/f b/f\n");
+
+    // worktreePath and repoPath name the same directory via different symlink
+    // paths; realpath must normalize both before comparing.
+    expect(() =>
+      applyPatchToManagerWorktree({
+        patchPath: patch,
+        worktreePath: linkedRepo,
+        repoPath: repo,
+      }),
+    ).toThrow(/operator checkout/);
   });
 
   it("falls back to --3way for a new-file patch the base already contains (#244 root cause)", () => {
@@ -102,6 +181,16 @@ describe("applyPatchToManagerWorktree", () => {
         worktreePath: path.join(os.tmpdir(), "missing-" + Date.now()),
       }),
     ).toThrow(/manager worktree not found/);
+  });
+
+  it("throws a plain HatcherySpawnError when the worktree path is empty", () => {
+    const patch = writePatch(makeRepo(), "diff --git a/f b/f\n");
+    expect(() =>
+      applyPatchToManagerWorktree({
+        patchPath: patch,
+        worktreePath: " ",
+      }),
+    ).toThrow(/worktree path is empty/);
   });
 });
 

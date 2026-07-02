@@ -651,6 +651,22 @@ export function buildManagerPrompt(input: {
   readonly spawnOutputPath?: string;
   readonly metadataPath?: string;
 }): string {
+  const artifactGuidance =
+    input.patchPath || input.metadataPath || input.spawnOutputPath
+      ? [
+          "Validated handoff artifacts:",
+          input.patchPath
+            ? `- Patch input: ${input.patchPath} (validated ExtractionResult.patch.patchText; already applied).`
+            : "- Patch input: already applied from validated ExtractionResult.patch.patchText.",
+          input.metadataPath
+            ? `- Handoff metadata: ${input.metadataPath} (spawn id, backend, touched paths, digest, extraction timestamp).`
+            : "- Handoff metadata: recorded with spawn artifacts.",
+          input.spawnOutputPath
+            ? `- Diagnostic log: ${input.spawnOutputPath} (bounded review context only; do not use it as patch input).`
+            : "- Diagnostic log: bounded review context only; do not use raw backend output as patch input.",
+          "",
+        ]
+      : [];
   return [
     "You are the March Hatchery management session for a completed spawn.",
     "",
@@ -658,6 +674,7 @@ export function buildManagerPrompt(input: {
     "",
     `Original request:\n${input.operatorPrompt.trimEnd()}`,
     "",
+    ...artifactGuidance,
     "Required workflow — execute every step in this turn; do NOT end your turn",
     "between steps. The deterministic loop has no way to nudge you mid-task,",
     "so a session that stops after the commit or push but before the PR is a",
@@ -944,6 +961,7 @@ export class PatchApplyError extends HatcherySpawnError {
 export function applyPatchToManagerWorktree(input: {
   readonly patchPath: string;
   readonly worktreePath: string;
+  readonly repoPath?: string;
 }): PatchApplyStrategy {
   // Pre-check cwd existence so we don't surface Node's misleading
   // "spawnSync git ENOENT" — which happens when execFileSync can't chdir
@@ -952,15 +970,38 @@ export function applyPatchToManagerWorktree(input: {
   // error every time a concurrent dispatch attached to the wrong session;
   // even after the race fix, surfacing a clear message keeps future
   // failures debuggable.
-  if (!fs.existsSync(input.worktreePath)) {
+  const worktreePath = input.worktreePath.trim();
+  if (worktreePath.length === 0) {
     throw new HatcherySpawnError(
-      `git apply --index aborted: manager worktree not found at ${input.worktreePath}. ` +
+      "git apply --index aborted: manager worktree path is empty.",
+    );
+  }
+  if (!fs.existsSync(worktreePath)) {
+    throw new HatcherySpawnError(
+      `git apply --index aborted: manager worktree not found at ${worktreePath}. ` +
         `This usually means launchAgentDeckManager attached to the wrong session (race) ` +
         `or the worktree was removed between launch and patch-apply.`,
     );
   }
+  const repoPath = input.repoPath?.trim();
+  if (repoPath) {
+    // Refuse to apply into the operator checkout. An exact `path.resolve`
+    // comparison is too weak (#389 review): a symlinked operator checkout
+    // (common with mounted volumes) or a path *inside* the checkout (a
+    // subdirectory) both compare unequal and slip past. Collapse the worktree
+    // to its git top-level so a subdirectory maps back to the checkout root,
+    // and realpath both sides so symlinks can't disguise the same directory.
+    const worktreeTop = worktreeGitToplevel(worktreePath) ?? worktreePath;
+    if (realPath(worktreeTop) === realPath(repoPath)) {
+      throw new HatcherySpawnError(
+        `git apply --index aborted: refusing to apply Steward handoff patch in the operator checkout at ${worktreePath}. ` +
+          `Expected a manager or spawn worktree branch.`,
+      );
+    }
+  }
+  assertBranchOwnedWorktree(worktreePath);
   try {
-    runGitApply(["apply", "--index", input.patchPath], input.worktreePath);
+    runGitApply(["apply", "--index", input.patchPath], worktreePath);
     return "index";
   } catch (errIndex) {
     const stderrIndex = stderrText((errIndex as { stderr?: unknown }).stderr);
@@ -968,7 +1009,7 @@ export function applyPatchToManagerWorktree(input: {
     // context drifted (e.g. a "new file" the worktree base already has). It
     // never silently masks a real conflict — that still throws below.
     try {
-      runGitApply(["apply", "--index", "--3way", input.patchPath], input.worktreePath);
+      runGitApply(["apply", "--index", "--3way", input.patchPath], worktreePath);
       return "index-3way";
     } catch (err3way) {
       const stderr3way = stderrText((err3way as { stderr?: unknown }).stderr);
@@ -983,6 +1024,55 @@ export function applyPatchToManagerWorktree(input: {
         .join("\n\n");
       throw new PatchApplyError(combined, (err3way as Error).message);
     }
+  }
+}
+
+/**
+ * Canonicalize a path, resolving symlinks. Falls back to `path.resolve` when the
+ * target can't be stat'd (e.g. it was removed between checks) so the caller still
+ * gets a comparable absolute path rather than a throw.
+ */
+function realPath(p: string): string {
+  try {
+    return fs.realpathSync(p);
+  } catch {
+    return path.resolve(p);
+  }
+}
+
+/**
+ * The git checkout root (`git rev-parse --show-toplevel`) for `cwd`, or undefined
+ * when `cwd` isn't inside a git worktree. A subdirectory of a checkout collapses
+ * to the checkout root, so it can be compared against the operator repo path.
+ */
+function worktreeGitToplevel(cwd: string): string | undefined {
+  try {
+    return runGitCapture(["rev-parse", "--show-toplevel"], cwd) || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function assertBranchOwnedWorktree(worktreePath: string): void {
+  let branch = "";
+  try {
+    branch = execFileSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], {
+      cwd: worktreePath,
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "pipe"],
+      maxBuffer: EXEC_MAX_BUFFER,
+    }).trim();
+  } catch (err) {
+    throw new HatcherySpawnError(
+      `git apply --index aborted: manager worktree at ${worktreePath} is not a readable git worktree. ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
+  if (!branch || branch === "HEAD") {
+    throw new HatcherySpawnError(
+      `git apply --index aborted: manager worktree at ${worktreePath} is not on a branch-owned checkout.`,
+    );
   }
 }
 
@@ -1330,10 +1420,6 @@ export async function runHatcherySpawn(
       return r;
     });
     exitCode = waitResult.exitCode;
-    const managerPrompt = buildManagerPrompt({
-      operatorPrompt: input.prompt,
-    });
-
     // Agent-level failure detection runs BEFORE the exit-code gate: the codex
     // CLI exits 0 even on `turn.failed` (an expired OAuth token makes the
     // *process* succeed while the turn failed with "refresh token already
@@ -1345,6 +1431,9 @@ export async function runHatcherySpawn(
     // read it. A clean run classifies as "none" and falls through.
     const agentFailureReason = classifyAgentFailure(logs);
     if (agentFailureReason !== "none") {
+      const managerPrompt = buildManagerPrompt({
+        operatorPrompt: input.prompt,
+      });
       const artifacts = createHatcherySpawnArtifacts({
         spawnId,
         homeDir: input.homeDir,
@@ -1362,6 +1451,9 @@ export async function runHatcherySpawn(
     }
 
     if (waitResult.exitCode !== 0) {
+      const managerPrompt = buildManagerPrompt({
+        operatorPrompt: input.prompt,
+      });
       const artifacts = createHatcherySpawnArtifacts({
         spawnId,
         homeDir: input.homeDir,
@@ -1397,6 +1489,9 @@ export async function runHatcherySpawn(
         input.homeDir,
       );
     } catch (err) {
+      const managerPrompt = buildManagerPrompt({
+        operatorPrompt: input.prompt,
+      });
       const artifacts = createHatcherySpawnArtifacts({
         spawnId,
         homeDir: input.homeDir,
@@ -1439,13 +1534,28 @@ export async function runHatcherySpawn(
       throw new HatcherySpawnError(eligibility.diagnostic);
     }
 
+    const artifactDir = hatcherySpawnLogDir(spawnId, input.homeDir);
+    const managerPrompt = buildManagerPrompt({
+      operatorPrompt: input.prompt,
+      patchPath: path.join(artifactDir, "patch.diff"),
+      spawnOutputPath: path.join(artifactDir, "spawn-output.log"),
+      metadataPath: path.join(artifactDir, "metadata.json"),
+    });
     const artifacts = createHatcherySpawnArtifacts({
       spawnId,
       homeDir: input.homeDir,
       spawnOutput: logs,
       patch: eligibility.handoff.patchText,
       managerPrompt,
-      metadata: metadataFor(input, manager, spawnId, branch, waitResult.exitCode, startedAt),
+      metadata: metadataFor(
+        input,
+        manager,
+        spawnId,
+        branch,
+        waitResult.exitCode,
+        startedAt,
+        eligibility.handoff,
+      ),
     });
     stage = "patch_apply";
     const managerWorktreePath = manager.worktreePath;
@@ -1466,6 +1576,7 @@ export async function runHatcherySpawn(
         const strategy = applyPatchToManagerWorktree({
           patchPath: artifacts.patchPath,
           worktreePath: managerWorktreePath,
+          repoPath: input.repoPath,
         });
         span.setAttributes({ "march.patch.strategy": strategy });
       } catch (err) {
@@ -1694,6 +1805,7 @@ function metadataFor(
   branch: string,
   exitCode: number,
   startedAt: string,
+  handoff?: StewardHandoffInput,
 ): Record<string, unknown> {
   return {
     version: 1,
@@ -1705,6 +1817,20 @@ function metadataFor(
     exitCode,
     startedAt,
     completedAt: new Date().toISOString(),
+    ...(handoff
+      ? {
+          handoff: {
+            source: "extraction-result",
+            patchInput: "validated-patch",
+            spawnId: handoff.spawnId,
+            backend: handoff.backend,
+            touchedPaths: handoff.touchedPaths,
+            patchSha256: handoff.patchSha256,
+            extractedAt: handoff.extractedAt,
+            diagnostic: "Patch artifact is validated ExtractionResult.patch.patchText; raw backend output is diagnostic-only.",
+          },
+        }
+      : {}),
   };
 }
 
