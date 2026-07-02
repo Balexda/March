@@ -18,7 +18,7 @@
 
 ### Tasks
 
-- [ ] **Prove mount and snapshot types are threat-model closed**
+- [x] **Prove mount and snapshot types are threat-model closed**
 
   Add type-oriented coverage around the public `src/profile/` exports proving that `FileMount` exposes only the documented mount variants and that `SnapshotPolicy["exclude"]` remains a string array shape. Keep the coverage scoped to A2/A5 structural guarantees and the contracts' type-only test expectations.
 
@@ -30,7 +30,7 @@
   - `NonNullable<Profile["snapshot"]>["exclude"]` remains compatible with readonly string arrays
   - The coverage remains compile-time only and adds no runtime behavior
 
-- [ ] **Validate named-volume and snapshot mount variants**
+- [x] **Validate named-volume and snapshot mount variants**
 
   Extend `validateProfile` in `src/profile/` to validate `fileMounts` as an array of the two documented discriminator variants. Preserve closed-world object validation for each variant and satisfy AS 6.1-AS 6.5.
 
@@ -43,7 +43,7 @@
   - Unknown fields inside known mount variants produce indexed `UnknownField` errors
   - File-mount errors are deterministically ordered with all other profile validation errors
 
-- [ ] **Validate mount targets without admitting host paths**
+- [x] **Validate mount targets without admitting host paths**
 
   Add mount-target validation for known `FileMount` variants using the data-model resolution captured in SD-006. Keep the rule limited to container target paths; do not introduce a host-path source field or backend credential-mount behavior in this story.
 
@@ -55,7 +55,7 @@
   - Named-volume `readOnly` remains boolean and does not inherit the snapshot literal-true rule
   - No accepted mount variant contains a host filesystem source path field
 
-- [ ] **Validate snapshot policy exclusion patterns**
+- [x] **Validate snapshot policy exclusion patterns**
 
   Extend root `snapshot` validation so `exclude` is required when `snapshot` is present, `include` remains optional, and both pattern lists retain the string-array shape documented for F5's snapshot pipeline. Keep the profile library decoupled from `src/spawn/snapshot.ts` while preserving AS 6.6 and AS 6.7.
 

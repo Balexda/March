@@ -6,9 +6,13 @@ import { SPAWN_CONFIG, type SpawnConfig } from "../hatchery/spawn-config.js";
 import {
   validateProfile,
   type ContainerSecurity,
+  type FileMount,
+  type NamedVolumeMount,
   type NetworkPolicy,
   type Profile,
   type ResourceLimits,
+  type SnapshotMount,
+  type SnapshotPolicy,
   type ToolsPolicy,
   type ValidationError,
   type ValidationErrorCode,
@@ -27,6 +31,7 @@ type ProfileSpawnConfigParity = ContainerSecurity & ResourceLimits;
 type DocumentedContainerFields = "capDrop" | "user" | "envWhitelist";
 type DocumentedNetworkModes = "bridge" | "none" | "allowlist";
 type DocumentedToolsFields = "allowed" | "disallowed";
+type DocumentedFileMountKinds = "named-volume" | "snapshot";
 type InlineEnvContainerFields =
   | "env"
   | "envFile"
@@ -96,6 +101,32 @@ type _ToolsPolicyListsAreStringArrays = AssertTrue<
     NonNullable<ToolsPolicy["allowed"] | ToolsPolicy["disallowed"]>,
     readonly string[]
   >
+>;
+type _NamedVolumeMountExportedAsFileMount = AssertTrue<
+  IsAssignable<NamedVolumeMount, FileMount>
+>;
+type _SnapshotMountExportedAsFileMount = AssertTrue<
+  IsAssignable<SnapshotMount, FileMount>
+>;
+type _SnapshotPolicyExcludeIsReadonlyStringArray = AssertTrue<
+  IsAssignable<SnapshotPolicy["exclude"], readonly string[]>
+>;
+type _ProfileFileMountsIsReadonlyFileMountArray = AssertTrue<
+  IsAssignable<Profile["fileMounts"], readonly FileMount[]>
+>;
+type _ProfileSnapshotExcludeIsReadonlyStringArray = AssertTrue<
+  IsAssignable<NonNullable<Profile["snapshot"]>["exclude"], readonly string[]>
+>;
+type _FileMountOnlyExposesDocumentedKinds = AssertTrue<
+  IsEqual<FileMount["kind"], DocumentedFileMountKinds>
+>;
+type _FileMountHasNoHostPathVariant = AssertTrue<
+  Extract<FileMount, { kind: "host-path" | "host-bind" | "bind" }> extends never
+    ? true
+    : false
+>;
+type _SnapshotMountReadOnlyIsLiteralTrue = AssertTrue<
+  IsEqual<Extract<FileMount, { kind: "snapshot" }>["readOnly"], true>
 >;
 
 function assertProfileType(_profile: Profile): void {
@@ -643,6 +674,204 @@ describe("validateProfile", () => {
         {
           code: "UnknownField",
           path: "/networkMode",
+        },
+      ],
+    });
+  });
+
+  it.each([
+    [
+      "named-volume",
+      [{ kind: "named-volume", name: "march-cache", target: "/cache", readOnly: false }],
+    ],
+    [
+      "snapshot",
+      [{ kind: "snapshot", target: "/workspace", readOnly: true }],
+    ],
+    ["empty", []],
+  ])("accepts valid %s fileMounts", (_label, fileMounts) => {
+    expect(validateProfile(makeM1ParityProfile({ fileMounts }))).toMatchObject({
+      ok: true,
+    });
+  });
+
+  it("rejects mutable snapshot mounts with SnapshotMustBeReadOnly", () => {
+    expect(
+      validateProfile(
+        makeM1ParityProfile({
+          fileMounts: [{ kind: "snapshot", target: "/workspace", readOnly: false }],
+        }),
+      ),
+    ).toMatchObject({
+      ok: false,
+      errors: [
+        {
+          code: "SnapshotMustBeReadOnly",
+          path: "/fileMounts/0/readOnly",
+        },
+      ],
+    });
+  });
+
+  it.each(["host-path", "host-bind", "bind"])(
+    "rejects unknown file mount discriminator %s",
+    (kind) => {
+      expect(
+        validateProfile(
+          makeM1ParityProfile({
+            fileMounts: [{ kind, source: "/etc", target: "/host-etc" }],
+          }),
+        ),
+      ).toMatchObject({
+        ok: false,
+        errors: [
+          {
+            code: "UnknownDiscriminator",
+            path: "/fileMounts/0/kind",
+          },
+        ],
+      });
+    },
+  );
+
+  it("rejects unknown fields inside known file mount variants", () => {
+    expect(
+      validateProfile(
+        makeM1ParityProfile({
+          fileMounts: [
+            {
+              kind: "named-volume",
+              name: "march-cache",
+              source: "/host",
+              target: "/cache",
+              readOnly: true,
+            },
+          ],
+        }),
+      ),
+    ).toMatchObject({
+      ok: false,
+      errors: [
+        {
+          code: "UnknownField",
+          path: "/fileMounts/0/source",
+        },
+      ],
+    });
+  });
+
+  it.each([
+    [{ kind: "named-volume", name: "march-cache", readOnly: true }, "MissingField", "/fileMounts/0/target"],
+    [{ kind: "snapshot", target: 42, readOnly: true }, "WrongType", "/fileMounts/0/target"],
+    [{ kind: "named-volume", name: "", target: "/cache", readOnly: true }, "InvalidMountTarget", "/fileMounts/0/name"],
+    [{ kind: "named-volume", target: "/cache", readOnly: true }, "MissingField", "/fileMounts/0/name"],
+    [{ kind: "named-volume", name: 42, target: "/cache", readOnly: true }, "WrongType", "/fileMounts/0/name"],
+    [{ kind: "named-volume", name: "march-cache", target: "/cache", readOnly: "true" }, "WrongType", "/fileMounts/0/readOnly"],
+    [{ kind: "snapshot", target: "/workspace", readOnly: "true" }, "WrongType", "/fileMounts/0/readOnly"],
+  ] as const)("reports structural mount errors %#", (mount, code, path) => {
+    expect(
+      validateProfile(makeM1ParityProfile({ fileMounts: [mount] })),
+    ).toMatchObject({
+      ok: false,
+      errors: [
+        {
+          code,
+          path,
+        },
+      ],
+    });
+  });
+
+  it.each([
+    ["", "/fileMounts/0/target"],
+    ["/", "/fileMounts/0/target"],
+    ["workspace", "/fileMounts/0/target"],
+    ["/workspace/../secrets", "/fileMounts/0/target"],
+  ])("rejects invalid mount target %s", (target, path) => {
+    expect(
+      validateProfile(
+        makeM1ParityProfile({
+          fileMounts: [{ kind: "snapshot", target, readOnly: true }],
+        }),
+      ),
+    ).toMatchObject({
+      ok: false,
+      errors: [
+        {
+          code: "InvalidMountTarget",
+          path,
+        },
+      ],
+    });
+  });
+
+  it("orders file-mount errors deterministically with other profile errors", () => {
+    expect(
+      validateProfile(
+        makeM1ParityProfile({
+          name: "Spawn",
+          fileMounts: [{ kind: "host-bind", source: "/etc", target: "/host-etc" }],
+          snapshot: { extra: true },
+        }),
+      ),
+    ).toMatchObject({
+      ok: false,
+      errors: [
+        { code: "UnknownDiscriminator", path: "/fileMounts/0/kind" },
+        { code: "InvalidName", path: "/name" },
+        { code: "MissingField", path: "/snapshot/exclude" },
+        { code: "UnknownField", path: "/snapshot/extra" },
+      ],
+    });
+  });
+
+  it("accepts and preserves M1 snapshot exclusion patterns verbatim", () => {
+    const exclude = [".env", ".env.*", "*.pem", "*.key", ".secrets/", "credentials.json"];
+    const profile = makeM1ParityProfile({
+      snapshot: {
+        exclude,
+      },
+    });
+
+    expect(validateProfile(profile)).toEqual({ ok: true, value: profile });
+  });
+
+  it("accepts optional snapshot.include string arrays", () => {
+    expect(
+      validateProfile(
+        makeM1ParityProfile({
+          snapshot: {
+            include: ["src/**"],
+            exclude: [".env"],
+          },
+        }),
+      ),
+    ).toMatchObject({ ok: true });
+  });
+
+  it("allows snapshot to be omitted at the root", () => {
+    expect(validateProfile(makeM1ParityProfile())).toMatchObject({ ok: true });
+  });
+
+  it.each([
+    [{}, "MissingField", "/snapshot/exclude"],
+    [{ exclude: ".env" }, "WrongType", "/snapshot/exclude"],
+    [{ exclude: [".env", 42] }, "WrongType", "/snapshot/exclude/1"],
+    [{ exclude: ["/absolute/path"] }, "InvalidMountTarget", "/snapshot/exclude/0"],
+    [{ exclude: ["../escape"] }, "InvalidMountTarget", "/snapshot/exclude/0"],
+    [{ include: ".env", exclude: [".env"] }, "WrongType", "/snapshot/include"],
+    [{ include: [42], exclude: [".env"] }, "WrongType", "/snapshot/include/0"],
+    [{ include: ["/absolute/path"], exclude: [".env"] }, "InvalidMountTarget", "/snapshot/include/0"],
+    [{ exclude: [".env"], extra: true }, "UnknownField", "/snapshot/extra"],
+  ] as const)("reports snapshot policy errors %#", (snapshot, code, path) => {
+    expect(
+      validateProfile(makeM1ParityProfile({ snapshot })),
+    ).toMatchObject({
+      ok: false,
+      errors: [
+        {
+          code,
+          path,
         },
       ],
     });
