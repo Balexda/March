@@ -64,7 +64,7 @@
 
 ### Tasks
 
-- [ ] **Expose extraction completion on lifecycle reads**
+- [x] **Expose extraction completion on lifecycle reads**
 
   Update the Brood lifecycle read path or adjacent spawn-owned query helper so consumers can read the current extraction result for a spawn and derive readiness from its terminal status. Successful extraction should expose the validated patch metadata required by later handoff, while failed extraction should expose only failure metadata and diagnostics.
 
@@ -75,7 +75,7 @@
   - Failed extraction state remains terminal for this feature and cannot be mistaken for PR-ready handoff input (FR-011).
   - Missing extraction state is represented distinctly from succeeded and failed results so autonomous callers do not wait indefinitely on ambiguous state (FR-014).
 
-- [ ] **Add lifecycle-read tests for readiness decisions**
+- [x] **Add lifecycle-read tests for readiness decisions**
 
   Add tests that read spawn lifecycle state after successful, failed, missing, and retried extraction results. Keep assertions focused on the stable contract and readiness decision, leaving Hatchery Steward launch behavior to US4.
 

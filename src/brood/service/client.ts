@@ -2,6 +2,7 @@ import { broodPort } from "../config.js";
 import type { SweepResult } from "./steward-removal.js";
 import type {
   ListSessionsFilter,
+  ExtractionReadiness,
   RegisterSessionInput,
   SessionRecord,
   TeardownRequest,
@@ -183,6 +184,25 @@ export class BroodClient {
       );
     }
     return body as SessionRecord;
+  }
+
+  async getExtractionReadiness(
+    id: string,
+  ): Promise<ExtractionReadiness | undefined> {
+    const { status, body } = await this.request(
+      "GET",
+      `/sessions/${encodeURIComponent(id)}/extraction-readiness`,
+    );
+    if (status === 404) return undefined;
+    if (status !== 200) {
+      throw new BroodClientError(
+        bodyError(
+          body,
+          `brood GET /sessions/${id}/extraction-readiness failed (${status})`,
+        ),
+      );
+    }
+    return body as ExtractionReadiness;
   }
 
   async list(filter: ListSessionsFilter = {}): Promise<SessionRecord[]> {

@@ -59,6 +59,39 @@ export type ExtractionResult =
       extractedAt: string;
     };
 
+export type SucceededExtractionResult = Extract<
+  ExtractionResult,
+  { status: "succeeded" }
+>;
+export type FailedExtractionResult = Extract<
+  ExtractionResult,
+  { status: "failed" }
+>;
+
+/**
+ * Lifecycle read view for downstream PR-integration gating. Missing extraction
+ * state is explicit so autonomous callers can distinguish "not extracted yet"
+ * from terminal success or failure without scraping backend logs.
+ */
+export type ExtractionReadiness =
+  | {
+      spawnId: string;
+      status: "missing";
+      prReady: false;
+    }
+  | {
+      spawnId: string;
+      status: "failed";
+      prReady: false;
+      result: FailedExtractionResult;
+    }
+  | {
+      spawnId: string;
+      status: "succeeded";
+      prReady: true;
+      result: SucceededExtractionResult;
+    };
+
 /** A managed session as stored in the registry and surfaced over the API. */
 export interface SessionRecord {
   /** Spawn id, steward agent-deck session id, or legate conductor name. */
