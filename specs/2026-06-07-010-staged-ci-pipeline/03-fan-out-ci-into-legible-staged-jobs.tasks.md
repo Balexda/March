@@ -18,7 +18,7 @@
 
 ### Tasks
 
-- [ ] **Restructure the CI workflow into staged jobs**
+- [x] **Restructure the CI workflow into staged jobs**
 
   Update `.github/workflows/ci.yml` so the existing monolithic build-test job becomes the Staged CI Job graph from the data model. Keep the Node 20/22 matrix and repository setup behavior intact while satisfying AS 3.1-AS 3.5 through npm-run layer entrypoints only.
 
