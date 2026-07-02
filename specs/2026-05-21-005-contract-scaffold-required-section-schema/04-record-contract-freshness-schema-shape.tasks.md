@@ -58,7 +58,7 @@ Recommended implementation sequence:
 
 | ID | Title | Depends On | Artifact |
 |----|-------|------------|----------|
-| S1 | Freshness Configuration Schema Shape | - | `docs/subsystems/contract-freshness.config.json` |
+| S1 | Freshness Configuration Schema Shape | - | `docs/subsystems/contract-scaffold.md` |
 
 ### Cross-Story Dependencies
 
