@@ -124,11 +124,29 @@ export function validateAutogenMarkerRegion(
 
   const beginLines: number[] = [];
   const endLines: number[] = [];
-  let inFence = false;
+  let openFence: FenceDelimiter | undefined;
 
   for (const line of lines) {
-    if (isFenceLine(line.text)) inFence = !inFence;
-    if (inFence) continue;
+    const delimiter = fenceDelimiter(line.text);
+    if (delimiter) {
+      if (!openFence) {
+        // A backtick opening fence may not carry backticks in its info string.
+        if (!(delimiter.char === "`" && delimiter.info.includes("`"))) {
+          openFence = delimiter;
+          continue;
+        }
+      } else if (
+        delimiter.char === openFence.char &&
+        delimiter.length >= openFence.length &&
+        delimiter.info.trim() === ""
+      ) {
+        // A closing fence uses the same character, is at least as long, and
+        // carries no info string; a shorter or mismatched run is fence content.
+        openFence = undefined;
+        continue;
+      }
+    }
+    if (openFence) continue;
     if (line.text.trim() === BEGIN_AUTOGEN_MARKER) beginLines.push(line.lineNumber);
     if (line.text.trim() === END_AUTOGEN_MARKER) endLines.push(line.lineNumber);
   }
@@ -208,7 +226,7 @@ export function replaceContractAutogenRegions(
     return { replacements: [], diagnostics };
   }
 
-  return { replacements: pending, diagnostics: [] };
+  return { replacements: pending, diagnostics };
 }
 
 function replaceOneContract(
@@ -289,8 +307,17 @@ function splitLines(content: string): LineRecord[] {
   return lines;
 }
 
-function isFenceLine(line: string): boolean {
-  return /^(```|~~~)/.test(line.trim());
+interface FenceDelimiter {
+  readonly char: "`" | "~";
+  readonly length: number;
+  readonly info: string;
+}
+
+function fenceDelimiter(line: string): FenceDelimiter | undefined {
+  const match = line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
+  if (!match) return undefined;
+  const run = match[1];
+  return { char: run[0] as "`" | "~", length: run.length, info: match[2] };
 }
 
 function normalizeGeneratedContent(content: string): string {

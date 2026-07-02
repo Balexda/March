@@ -214,6 +214,35 @@ describe("validateAutogenMarkerRegion", () => {
       },
     ]);
   });
+
+  it("keeps a nested inner fence from closing a longer outer fence around markers", () => {
+    const result = validateAutogenMarkerRegion({
+      contractPath: "docs/subsystems/hatchery/contract.md",
+      content: [
+        "# Contract",
+        "",
+        "## Public Interface",
+        "",
+        "````markdown",
+        "```md",
+        BEGIN_AUTOGEN_MARKER,
+        END_AUTOGEN_MARKER,
+        "```",
+        "````",
+        "",
+        BEGIN_AUTOGEN_MARKER,
+        "real generated content",
+        END_AUTOGEN_MARKER,
+        "",
+      ].join("\n"),
+    });
+
+    expect(result.diagnostics).toEqual([]);
+    expect(result.region).toEqual({
+      beginMarkerLine: 12,
+      endMarkerLine: 14,
+    });
+  });
 });
 
 describe("replaceContractAutogenRegions", () => {
