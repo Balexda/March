@@ -4,6 +4,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { execFileSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
 import {
   FRESHNESS_CONFIG_PATH,
@@ -109,6 +110,22 @@ function writeFreshnessConfig(repoRoot, config = validFreshnessConfig()) {
   );
 }
 
+function writeCompleteRepo(repoRoot, config = validFreshnessConfig()) {
+  writeManifest(repoRoot, SUBSYSTEMS);
+  writeFreshnessConfig(repoRoot, config);
+  for (const name of SUBSYSTEMS) {
+    writeFile(repoRoot, contractPathForSubsystem(name), validContract);
+  }
+}
+
+function git(repoRoot, args) {
+  return execFileSync("git", args, {
+    cwd: repoRoot,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+}
+
 const validContract = `# Contract
 
 ## Public Interface
@@ -127,11 +144,7 @@ The externally visible errors are documented here.
 describe("docs contract checker", () => {
   it("passes presence and section schema for the complete required contract set", () =>
     withTempRepo((repoRoot) => {
-      writeManifest(repoRoot, SUBSYSTEMS);
-      writeFreshnessConfig(repoRoot);
-      for (const name of SUBSYSTEMS) {
-        writeFile(repoRoot, contractPathForSubsystem(name), validContract);
-      }
+      writeCompleteRepo(repoRoot);
 
       const verdict = checkRequiredContracts({ repoRoot });
       const output = formatVerdict(verdict);
@@ -156,9 +169,163 @@ describe("docs contract checker", () => {
           checkedCount: SUBSYSTEMS.length,
           diagnostics: [],
         },
+        {
+          category: "freshness",
+          status: "pass",
+          checkedCount: 0,
+          diagnostics: [],
+        },
       ]);
       expect(output).toContain(`config: pass checked=${SUBSYSTEMS.length}`);
+      expect(output).toContain("freshness: pass checked=0 changedFiles=0");
       expect(output).toContain(`contracts=${SUBSYSTEMS.join(",")}`);
+    }));
+
+  it("passes freshness when an explicit mapped source change includes its contract", () =>
+    withTempRepo((repoRoot) => {
+      writeCompleteRepo(repoRoot);
+
+      const verdict = checkRequiredContracts({
+        repoRoot,
+        changedFiles: [
+          "src/hatchery/service/worker.ts",
+          "docs/subsystems/hatchery/contract.md",
+        ],
+      });
+      const output = formatVerdict(verdict);
+
+      expect(verdict.status).toBe("pass");
+      expect(output).toContain("freshness: pass checked=2 changedFiles=2");
+    }));
+
+  it("fails freshness when an explicit mapped source changes without its contract", () =>
+    withTempRepo((repoRoot) => {
+      writeCompleteRepo(repoRoot);
+
+      const verdict = checkRequiredContracts({
+        repoRoot,
+        changedFiles: ["src/hatchery/service/worker.ts"],
+      });
+      const output = formatVerdict(verdict);
+
+      expect(verdict.status).toBe("fail");
+      expect(output).toContain("category=freshness");
+      expect(output).toContain("name=hatchery");
+      expect(output).toContain("sourcePath=src/hatchery/service/worker.ts");
+      expect(output).toContain("contractPath=docs/subsystems/hatchery/contract.md");
+      expect(output).toContain("mapped public source changed without owning contract");
+    }));
+
+  it("ignores contract-only and unmapped explicit changed paths for freshness", () =>
+    withTempRepo((repoRoot) => {
+      writeCompleteRepo(repoRoot);
+
+      const verdict = checkRequiredContracts({
+        repoRoot,
+        changedFiles: [
+          "README.md",
+          "docs/subsystems/hatchery/contract.md",
+          "src/unknown/private.ts",
+        ],
+      });
+      const output = formatVerdict(verdict);
+
+      expect(verdict.status).toBe("pass");
+      expect(output).toContain("freshness: pass checked=3 changedFiles=3");
+    }));
+
+  it("rejects absolute and escaping explicit changed paths with bounded diagnostics", () =>
+    withTempRepo((repoRoot) => {
+      writeCompleteRepo(repoRoot);
+
+      expect(() =>
+        checkRequiredContracts({
+          repoRoot,
+          changedFiles: [path.join(repoRoot, "src/hatchery/service/worker.ts")],
+        }),
+      ).toThrow("changed-file path must be repo-relative");
+      expect(() =>
+        checkRequiredContracts({
+          repoRoot,
+          changedFiles: ["../outside.ts"],
+        }),
+      ).toThrow("changed-file path escapes repository root");
+    }));
+
+  it("derives deterministic git changed paths including deletes and renames", () =>
+    withTempRepo((repoRoot) => {
+      writeCompleteRepo(repoRoot);
+      writeFile(repoRoot, "src/hatchery/service/old.ts", "old\n");
+      writeFile(repoRoot, "src/brood/removed.ts", "removed\n");
+      git(repoRoot, ["init"]);
+      git(repoRoot, ["config", "user.email", "march@example.test"]);
+      git(repoRoot, ["config", "user.name", "March Test"]);
+      git(repoRoot, ["add", "."]);
+      git(repoRoot, ["commit", "-m", "base"]);
+      const base = git(repoRoot, ["rev-parse", "HEAD"]).trim();
+
+      git(repoRoot, [
+        "mv",
+        "src/hatchery/service/old.ts",
+        "src/hatchery/service/new.ts",
+      ]);
+      fs.rmSync(path.join(repoRoot, "src/brood/removed.ts"));
+
+      const verdict = checkRequiredContracts({ repoRoot, diffBase: base });
+      const output = formatVerdict(verdict);
+
+      expect(verdict.status).toBe("fail");
+      expect(output).toContain("freshness: fail checked=3 changedFiles=3");
+      expect(output).toContain("sourcePath=src/hatchery/service/old.ts");
+      expect(output).toContain("sourcePath=src/hatchery/service/new.ts");
+      expect(output).toContain("sourcePath=src/brood/removed.ts");
+    }));
+
+  it("fails cleanly when a git diff base is unavailable", () =>
+    withTempRepo((repoRoot) => {
+      writeCompleteRepo(repoRoot);
+      git(repoRoot, ["init"]);
+
+      const stderr = [];
+      const code = run(["--repo-root", repoRoot, "--diff-base", "missing-ref"], {
+        stdout: { write: () => {} },
+        stderr: { write: (line) => stderr.push(line) },
+      });
+
+      expect(code).toBe(2);
+      expect(stderr.join("")).toContain(
+        "unable to evaluate git diff base: missing-ref",
+      );
+    }));
+
+  it("skips freshness drift when the config is invalid even with mapped changed input", () =>
+    withTempRepo((repoRoot) => {
+      writeManifest(repoRoot, SUBSYSTEMS);
+      for (const name of SUBSYSTEMS) {
+        writeFile(repoRoot, contractPathForSubsystem(name), validContract);
+      }
+      const config = validFreshnessConfig();
+      config.contracts = [
+        ...config.contracts.filter((entry) => entry.name !== "herald"),
+        freshnessEntry("brood", {
+          publicSourcePaths: ["src/brood/worktree.ts"],
+        }),
+      ];
+      writeFreshnessConfig(repoRoot, config);
+
+      const verdict = checkRequiredContracts({
+        repoRoot,
+        changedFiles: ["src/hatchery/service/worker.ts"],
+      });
+      const output = formatVerdict(verdict);
+
+      expect(verdict.status).toBe("fail");
+      expect(output).toContain("category=config");
+      // Freshness is skipped because the config never validated: the mapped
+      // source path must not surface a drift diagnostic, and checked=0 reflects
+      // that nothing was evaluated while changedFiles still counts the input.
+      expect(output).toContain("freshness: pass checked=0 changedFiles=1");
+      expect(output).not.toContain("category=freshness");
     }));
 
   it("requires every subsystem named in the manifest", () =>

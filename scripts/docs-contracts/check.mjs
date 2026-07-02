@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import { execFileSync } from "node:child_process";
 
 export const REQUIRED_SECTIONS = [
   "Public Interface",
@@ -78,6 +79,8 @@ export function readSubsystems(repoRoot) {
 
 function parseArgs(argv) {
   let repoRoot = process.cwd();
+  const changedFiles = [];
+  let diffBase;
 
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
@@ -91,10 +94,34 @@ function parseArgs(argv) {
       continue;
     }
 
+    if (arg === "--changed-file") {
+      const next = argv[index + 1];
+      if (!next) {
+        throw new Error("--changed-file requires a path");
+      }
+      changedFiles.push(next);
+      index += 1;
+      continue;
+    }
+
+    if (arg === "--diff-base") {
+      const next = argv[index + 1];
+      if (!next) {
+        throw new Error("--diff-base requires a git ref");
+      }
+      diffBase = next;
+      index += 1;
+      continue;
+    }
+
     throw new Error(`unknown argument: ${arg}`);
   }
 
-  return { repoRoot };
+  if (changedFiles.length > 0 && diffBase !== undefined) {
+    throw new Error("--changed-file and --diff-base cannot be combined");
+  }
+
+  return { repoRoot, changedFiles, diffBase };
 }
 
 function toDiagnostic(fields) {
@@ -277,6 +304,18 @@ function selectorOwnershipBase(selector) {
   return { kind: "file", base: selector };
 }
 
+function selectorMatchesPath(selector, repoRelativePath) {
+  const ownership = selectorOwnershipBase(selector);
+  if (ownership.kind === "directory") {
+    return (
+      repoRelativePath === ownership.base ||
+      repoRelativePath.startsWith(`${ownership.base}/`)
+    );
+  }
+
+  return repoRelativePath === ownership.base;
+}
+
 function selectorsOverlap(left, right) {
   if (left.selector === right.selector) {
     return true;
@@ -349,6 +388,7 @@ function validateFreshnessConfig(repoRoot, requiredContracts) {
   const entriesByName = new Map();
   const entriesByContractPath = new Map();
   const ownedSelectors = [];
+  const validatedEntries = [];
 
   for (const [index, entry] of config.contracts.entries()) {
     const entryLabel =
@@ -509,6 +549,23 @@ function validateFreshnessConfig(repoRoot, requiredContracts) {
         ...ownershipBase,
       });
     }
+
+    if (
+      typeof entry.name === "string" &&
+      entry.name.trim() !== "" &&
+      typeof entry.contractPath === "string" &&
+      entry.contractPath.trim() !== "" &&
+      Array.isArray(entry.publicSourcePaths)
+    ) {
+      validatedEntries.push({
+        name: entry.name.trim(),
+        contractPath: entry.contractPath.trim(),
+        publicSourcePaths: entry.publicSourcePaths
+          .filter((selector) => typeof selector === "string")
+          .map((selector) => selector.trim())
+          .filter((selector) => selector !== ""),
+      });
+    }
   }
 
   for (const required of requiredContracts) {
@@ -573,7 +630,129 @@ function validateFreshnessConfig(repoRoot, requiredContracts) {
     }
   }
 
-  return { checkedCount: config.contracts.length, diagnostics };
+  return { checkedCount: config.contracts.length, diagnostics, validatedEntries };
+}
+
+function normalizeChangedPath(repoRoot, inputPath) {
+  if (typeof inputPath !== "string" || inputPath.trim() === "") {
+    throw new Error("changed-file path must be non-empty");
+  }
+
+  if (inputPath.includes("\\")) {
+    throw new Error(`changed-file path must use "/" separators: ${inputPath}`);
+  }
+
+  if (path.isAbsolute(inputPath)) {
+    throw new Error(`changed-file path must be repo-relative: ${inputPath}`);
+  }
+
+  const normalized = path.posix.normalize(inputPath);
+  if (
+    normalized === "." ||
+    normalized === ".." ||
+    normalized.startsWith("../") ||
+    normalized.includes("/../")
+  ) {
+    throw new Error(`changed-file path escapes repository root: ${inputPath}`);
+  }
+
+  const resolved = path.resolve(repoRoot, normalized);
+  const relativeFromRoot = path.relative(repoRoot, resolved);
+  if (
+    relativeFromRoot === "" ||
+    relativeFromRoot.startsWith("..") ||
+    path.isAbsolute(relativeFromRoot)
+  ) {
+    throw new Error(`changed-file path escapes repository root: ${inputPath}`);
+  }
+
+  return normalized;
+}
+
+function normalizeChangedPaths(repoRoot, changedFiles) {
+  return [...new Set(changedFiles.map((file) => normalizeChangedPath(repoRoot, file)))].sort();
+}
+
+function readGitChangedFiles(repoRoot, diffBase) {
+  let raw;
+  try {
+    raw = execFileSync(
+      "git",
+      ["diff", "--name-status", "-z", "-M", diffBase, "--"],
+      {
+        cwd: repoRoot,
+        encoding: "utf8",
+        timeout: 10000,
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
+  } catch {
+    throw new Error(`unable to evaluate git diff base: ${diffBase}`);
+  }
+
+  const tokens = raw.split("\0").filter((token) => token !== "");
+  const changedFiles = [];
+  for (let index = 0; index < tokens.length; ) {
+    const status = tokens[index];
+    index += 1;
+    if (status.startsWith("R") || status.startsWith("C")) {
+      changedFiles.push(tokens[index], tokens[index + 1]);
+      index += 2;
+      continue;
+    }
+    changedFiles.push(tokens[index]);
+    index += 1;
+  }
+
+  return normalizeChangedPaths(repoRoot, changedFiles);
+}
+
+function resolveChangedFiles(repoRoot, input) {
+  if (input.diffBase !== undefined) {
+    return readGitChangedFiles(repoRoot, input.diffBase);
+  }
+
+  if (Array.isArray(input.changedFiles) && input.changedFiles.length > 0) {
+    return normalizeChangedPaths(repoRoot, input.changedFiles);
+  }
+
+  return [];
+}
+
+function validateFreshnessDrift(changedFiles, freshnessEntries, configDiagnostics) {
+  const diagnostics = [];
+  // checkedCount reports how many changed paths were actually evaluated for
+  // drift. When evaluation is skipped — no changed input, or an invalid config
+  // that makes the freshness comparison meaningless — nothing is evaluated.
+  if (changedFiles.length === 0 || configDiagnostics.length > 0) {
+    return { checkedCount: 0, diagnostics };
+  }
+
+  const changedSet = new Set(changedFiles);
+  for (const sourcePath of changedFiles) {
+    for (const entry of freshnessEntries) {
+      if (
+        entry.publicSourcePaths.some((selector) =>
+          selectorMatchesPath(selector, sourcePath),
+        )
+      ) {
+        if (!changedSet.has(entry.contractPath)) {
+          diagnostics.push(
+            toDiagnostic({
+              category: "freshness",
+              name: entry.name,
+              sourcePath,
+              contractPath: entry.contractPath,
+              message: "mapped public source changed without owning contract",
+            }),
+          );
+        }
+        break;
+      }
+    }
+  }
+
+  return { checkedCount: changedFiles.length, diagnostics };
 }
 
 function summarizeCheck(category, checkedCount, diagnostics) {
@@ -587,18 +766,29 @@ function summarizeCheck(category, checkedCount, diagnostics) {
 
 export function checkRequiredContracts(input = {}) {
   const repoRoot = path.resolve(input.repoRoot ?? process.cwd());
+  const changedFiles = resolveChangedFiles(repoRoot, input);
   const requiredContracts = readSubsystems(repoRoot);
   const { presenceDiagnostics, presentContracts } = readContractFiles(
     repoRoot,
     requiredContracts,
   );
   const sectionDiagnostics = validateSections(presentContracts);
-  const { checkedCount: configCheckedCount, diagnostics: configDiagnostics } =
-    validateFreshnessConfig(repoRoot, requiredContracts);
+  const {
+    checkedCount: configCheckedCount,
+    diagnostics: configDiagnostics,
+    validatedEntries,
+  } = validateFreshnessConfig(repoRoot, requiredContracts);
+  const { checkedCount: freshnessCheckedCount, diagnostics: freshnessDiagnostics } =
+    validateFreshnessDrift(
+      changedFiles,
+      configDiagnostics.length === 0 ? validatedEntries : [],
+      configDiagnostics,
+    );
   const checks = [
     summarizeCheck("presence", requiredContracts.length, presenceDiagnostics),
     summarizeCheck("section-schema", presentContracts.length, sectionDiagnostics),
     summarizeCheck("config", configCheckedCount, configDiagnostics),
+    summarizeCheck("freshness", freshnessCheckedCount, freshnessDiagnostics),
   ];
   const diagnostics = checks
     .flatMap((check) => check.diagnostics)
@@ -612,6 +802,7 @@ export function checkRequiredContracts(input = {}) {
     summary: {
       contracts: requiredContracts.map((contract) => contract.name),
       configEntries: configCheckedCount,
+      changedFiles: changedFiles.length,
       diagnostics: diagnostics.length,
     },
   };
@@ -638,11 +829,13 @@ export function formatVerdict(verdict) {
     (check) => check.category === "section-schema",
   );
   const config = verdict.checks.find((check) => check.category === "config");
+  const freshness = verdict.checks.find((check) => check.category === "freshness");
   const lines = [
     `contract verdict: ${verdict.status}`,
     `presence: ${presence.status} checked=${presence.checkedCount} contracts=${verdict.summary.contracts.join(",")}`,
     `section-schema: ${sectionSchema.status} checked=${sectionSchema.checkedCount} contracts=${verdict.summary.contracts.join(",")}`,
     `config: ${config.status} checked=${config.checkedCount} entries=${verdict.summary.configEntries}`,
+    `freshness: ${freshness.status} checked=${freshness.checkedCount} changedFiles=${verdict.summary.changedFiles}`,
     `diagnostics: ${verdict.summary.diagnostics}`,
   ];
 
@@ -655,8 +848,8 @@ export function formatVerdict(verdict) {
 
 export function run(argv = process.argv.slice(2), io = process) {
   try {
-    const { repoRoot } = parseArgs(argv);
-    const verdict = checkRequiredContracts({ repoRoot });
+    const { repoRoot, changedFiles, diffBase } = parseArgs(argv);
+    const verdict = checkRequiredContracts({ repoRoot, changedFiles, diffBase });
     io.stdout.write(formatVerdict(verdict));
     return verdict.status === "pass" ? 0 : 1;
   } catch (error) {
