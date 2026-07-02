@@ -30,6 +30,19 @@ tooling; human-authored public-interface prose may appear before or after the
 marker pair and remains outside the replacement boundary. An empty marker pair
 is a valid placeholder when no generated content exists yet.
 
+Mechanically-derivable public-interface regions are refreshed by Feature 7's
+deterministic `npm run docs:contracts:extract` tool when that extractor is
+available. This scaffold records the convention-level handoff only: Feature 7
+owns extraction, replacement, check-mode, and write-mode behavior. Until that
+tool is present, authors and Smithy agents keep generated-region content current
+manually as normal edit-time upkeep. Neither path creates a CI job, a
+per-check-in AI/LLM validation step, or a PR/slice/merge gate; Feature 5's
+`npm run docs:contracts:check`, when used, remains opt-in and advisory.
+
+Generated-region output is expected to be deterministic and ordered. Cosmetic
+source moves alone should not churn the generated block when the public surface
+is unchanged.
+
 ## Minimum Template
 
 ```markdown
