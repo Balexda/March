@@ -47,6 +47,28 @@ The strategy — scope tiers (L0 unit / L1 subsystem / L2 cross-subsystem / L3 s
 
 The milestone-level execution plan (M1 through M8, success criteria, dependency order, the gap-analysis baseline of today's tests) lives in **[docs/rfcs/2026-002-layered-testing-framework/layered-testing-framework.rfc.md](docs/rfcs/2026-002-layered-testing-framework/layered-testing-framework.rfc.md)**.
 
+### Test File Tag Blocks
+
+Every new Vitest test file — `*.test.ts` or `*.test.mjs`, the extensions the
+layered test runner discovers — needs a leading Test File Tag Block before
+imports or executable code. The block must contain exactly one scope tag,
+exactly one determinism tag, and exactly one execution-channel tag:
+
+```ts
+/**
+ * @l1 @deterministic @ci
+ */
+```
+
+- Scope: exactly one of `@l0`, `@l1`, `@l2`, or `@l3`.
+- Determinism: exactly one of `@deterministic` or `@stochastic`.
+- Execution channel: exactly one of `@ci` or `@scheduled`.
+
+Choose the narrowest scope that matches the boundary the test actually
+exercises. Most new tests should be `@deterministic @ci`; use `@stochastic` or
+`@scheduled` only when a spec explicitly asks for live-output or scheduled-run
+coverage.
+
 ### Test Layer Migration
 
 The governed legacy L2 tests are exactly:

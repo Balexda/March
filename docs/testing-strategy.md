@@ -18,7 +18,7 @@ Three structural pressures make this hard, and they will keep applying as March 
 2. **Determinism and stochasticity are mixed.** The harness itself is deterministic; the LLM-backed sessions it launches are not. Tests that conflate the two either lie (passing because they only check shape) or break (failing because the prose drifted overnight).
 3. **Stochastic tests cost money and time.** Running real backends on every PR is not affordable. Never running them is dishonest.
 
-The strategy this document describes — a two-axis taxonomy, a cassette pivot, an explicit cost framing, and locked framework choices per scope — is the answer to those three pressures. The companion RFC owns the milestones that execute it.
+The strategy this document describes — a scope/determinism taxonomy, explicit execution channels, a cassette pivot, an explicit cost framing, and locked framework choices per scope — is the answer to those three pressures. The companion RFC owns the milestones that execute it.
 
 ## 2. Principles
 
@@ -30,9 +30,11 @@ These trace directly to [`docs/operating-philosophy.md`](operating-philosophy.md
 - **Fail loud, fail fast.** A flaky test masks the very fragility this strategy is fighting. Stochastic tests must have explicit pass/fail criteria (e.g. `pass^k` with `k ≥ 3`) and tight timeouts — never "looks roughly right." A stochastic test that hangs is itself a violation of [rule 3 — failures are clean exits, not hangs](operating-philosophy.md#3-failures-are-clean-exits-not-hangs).
 - **Cost is a first-class budget.** Money and wall-clock are scarce; PR-gate tests must spend neither. The cassette pivot (§4) makes this practical.
 
-## 3. Two-axis taxonomy
+## 3. Test taxonomy
 
-Earlier framings collapsed three different things — *who* runs the test, *what scope* it exercises, and *whether it asserts over deterministic or stochastic output* — into a single tier label. This document separates them onto orthogonal axes.
+Earlier framings collapsed three different things — *who* runs the test, *what scope* it exercises, and *whether it asserts over deterministic or stochastic output* — into a single tier label. This document separates them into a stable file-level tag tuple plus operational contexts.
+
+Every Vitest `*.test.ts` file declares the frozen tag tuple in a leading comment block before imports: exactly one scope tag (`@l0`, `@l1`, `@l2`, `@l3`), exactly one determinism tag (`@deterministic`, `@stochastic`), and exactly one execution-channel tag (`@ci`, `@scheduled`). The day-to-day authoring rule lives in [`CONTRIBUTING.md`](../CONTRIBUTING.md#test-file-tag-blocks); this strategy explains what those axes mean.
 
 ### Axis A — Scope (what the test exercises)
 
@@ -56,11 +58,14 @@ Earlier framings collapsed three different things — *who* runs the test, *what
 
 A test that depends on a live backend and asserts an exact string is mis-categorized. Either replay the cassette (deterministic) or assert a property (stochastic). Pick one.
 
-### Orthogonal — Execution context (who runs it, where)
+### Axis C — Execution channel (where the file is allowed to run unattended)
 
 - **CI.** Runs unattended on every push/PR. L0 always; L1 mostly; L2/L3 with cassettes only. No live backend spawns.
-- **Local.** Opt-in for L2/L3 with real docker on a dev machine. The right place to re-record a cassette or debug container plumbing.
 - **Scheduled.** Periodic runs against live backends, behind a budget gate. Catches drift between cassette and live behavior.
+
+The file-level execution-channel tags are `@ci` and `@scheduled`. Local, agent-driven, and human exercises remain operational modes rather than tag-block values:
+
+- **Local.** Opt-in for L2/L3 with real docker on a dev machine. The right place to re-record a cassette or debug container plumbing.
 - **Agent-driven.** A Claude Code session inside a Legate runs scenarios that themselves test Legate. Dogfooding.
 - **Human.** TTY-only or judgment-required tests.
 
@@ -91,6 +96,13 @@ Different scopes have different natural assertion shapes, and one framework does
 - **L3 — System.** Gherkin via **Cucumber.js**, same toolchain as L2. At L3 the assertion shape is "*given* this seed repo and Smithy plan, *when* Legate runs the loop end-to-end against replayed cassettes, *then* a PR exists in state X with these properties." Trying to write that in vitest collapses readability; Gherkin is the native shape. The L3 step-definition library is largely a superset of L2's, with extra orchestration helpers.
 - **Stochastic suite — PromptFoo.** The L0–L3 framework choices above cover the deterministic, cassette-replayed PR-gate tier. The orthogonal stochastic suite — live-backend runs scheduled outside the PR critical path, asserting `pass^k` shape properties and detecting cassette drift — uses **PromptFoo** (`promptfoo`). Test cases live as YAML/JSON config in the repo, alongside the cassettes they back-check, and the runner ships as an npm package that composes with the same `package.json` script convention as the deterministic tiers. PromptFoo's role is orthogonal to Cucumber.js — Cucumber drives *how* the harness behaves against a cassette; PromptFoo asserts *what* the backend produces when called live — and the two coexist without overlap.
 
+The day-one baseline still contains legacy L2-shaped Vitest tests:
+`src/spawn/container-launch.test.ts` and `src/spawn/snapshot-build.test.ts`.
+They are classified `@l2 @deterministic @ci`, but they mock
+`node:child_process` and do not exercise real docker. They remain Vitest tests
+until the migration policy in [`CONTRIBUTING.md`](../CONTRIBUTING.md#test-layer-migration)
+requires a Cucumber.js port for a material governed-file edit.
+
 Cucumber.js was picked over the alternatives because it is the canonical Gherkin runner for Node, has first-class TypeScript support and parallel execution, and a healthy 2026 release cadence — it is the safe place to land an integration tier the rest of the strategy depends on. Considered and rejected: `@amiceli/vitest-cucumber` (would give a unified vitest story, but the ecosystem — single maintainer, ~90 GitHub stars — is too thin a foundation for the integration tier); `jest-cucumber` (we don't use Jest, and it couples Gherkin to Jest's structure less cleanly than Cucumber.js stands alone). `playwright-bdd` and Maestro are named in §7 as the future browser and mobile paths that keep `.feature` files reusable.
 
 PromptFoo was picked over the alternatives because it is TypeScript-native (matches the rest of the stack — npm install, ships with first-class TS types), CI-first by design (config-in-repo, built-in `pass^k`-style retry semantics, structured cost tracking per run, matrix testing across models), and lightweight to operate (no database, no separate runtime). Considered and rejected: **Phoenix (Arize)** — Apache-2.0, unified eval + tracing, strong eval primitive library — but Python-first, heavier infrastructure (Postgres-backed for full functionality), and its CI eval story is less polished than its notebook/online-tracing story. Phoenix would have been the right call if we were unifying eval + production AI-flow tracing under one OSS platform, but that decision is deferred to a future RFC; if Phoenix is later adopted as the trace platform, the eval-framework choice may be revisited at that time. **Braintrust** considered and rejected on hosted-CI grounds — the strategy doc leans OSS self-hostable across the board, and a hosted dependency in the critical CI path is inconsistent with that posture.
@@ -113,7 +125,7 @@ The scheduled cadence and the specific budget cap are tactical knobs owned by th
 This document is principles-first, but the principles are easier to apply when you can see them in someone else's code. The exemplars below are the inspiration set, not a mandate — when a milestone spec lands, the spec picks which (if any) to adopt directly.
 
 - **Anthropic's evals framework** — the three grader types (code-based, model-based, human) map cleanly onto our Determinism axis: code-based ≈ deterministic-CI, model-based ≈ stochastic-scheduled, human ≈ H-tests.
-- **Testcontainers philosophy** — "real services in containers, not mocks" for the integration tier. We already follow this implicitly for snapshot/build tests; the L2 playbook generalizes it.
+- **Testcontainers philosophy** — "real services in containers, not mocks" for the future integration tier. The current legacy L2-shaped Vitest baseline does not satisfy this yet; it mocks `node:child_process` and records where the later Cucumber.js migration needs to move.
 - **VCR / `pytest-recording` / `vcr-langchain` / `proxymock`** — the cassette-replay pattern as the canonical record-replay primitive.
 - **LangSmith trace-as-fixture** — production traces become regression fixtures by converting them into cassettes. Aspirational; depends on Herald landing.
 - **`pass@k` / `pass^k` metrics** from the agent-eval literature — the right way to score a stochastic test that runs a small number of trials.
