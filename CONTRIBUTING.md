@@ -107,6 +107,50 @@ Day-to-day commands:
 - **`npm test`** — runs the deterministic CI suite. Today that's the full vitest set: L0, L1, and the surviving L2-shaped vitest cases listed in the Test Layer Migration policy above. Cassette-replayed L2/L3 will land here as the [RFC milestones](docs/rfcs/2026-002-layered-testing-framework/layered-testing-framework.rfc.md#milestones) progress. Cost: $0, < 2 minutes. Runs on every push and PR.
 - **`npm run typecheck`** — `tsc --noEmit`.
 
+### Quarantine Routing
+
+Use the quarantine routing primitive when a known-bad `*.test.ts` file should
+stop blocking the staged gate but must remain visible for follow-up. Quarantine
+membership is path-based: the canonical location is `tests/quarantine/`, and a
+test is quarantined because it lives there, not because of a tag or a skipped
+assertion. This is the workflow described by the Quarantine Documentation
+contract in
+`specs/2026-06-03-007-quarantine-routing-scaffold/quarantine-routing-scaffold.contracts.md`.
+
+To park a test, run the non-interactive command from anywhere inside the
+repository:
+
+```bash
+march quarantine park <repo-relative-path-to-test.test.ts>
+```
+
+When working from an uninstalled source checkout, build first and invoke the
+same command through the local bundle:
+
+```bash
+npm run build
+node dist/cli.js quarantine park <repo-relative-path-to-test.test.ts>
+```
+
+The command moves the file to `tests/quarantine/<original-path>`, preserves the
+test body unchanged, and records the original path in
+`tests/quarantine/.origins.json` so later restore/index work does not have to
+guess. Do not create another quarantine path, add `it.skip`, comment out the
+failing assertions, or delete the file.
+
+Quarantined tests remain visible in the repository: the parked file stays in
+`tests/quarantine/` and its origin is recorded in `.origins.json`. Quarantine is
+a temporary visible state, not a way to silence coverage. The staged scripts
+exclude `tests/quarantine/` by directory path, while non-quarantined tests with
+matching tags continue to run normally. A generated roster surface,
+`tests/quarantine/INDEX.md`, is planned to summarize the parked set once the
+roster-generation work lands; until then the directory and `.origins.json` are
+the visibility surface.
+
+The one-week quarantine SLA, overdue alerts, and weekly-report wiring are M6
+work. Until that automation lands, contributors should treat the parked file in
+`tests/quarantine/` and its origin record as the review surface for follow-up.
+
 Agent-driven and human tests:
 
 - **Agent tests** (Claude Code session) — end-to-end dispatch lifecycle on a throwaway repo and `failed`-state rollback. Today documented as prose; aspirational target is `L3 / Deterministic / CI` (cassette-replayed) plus `L3 / Stochastic / Scheduled` (weekly live-backend). See **[tests/Agent.tests.md](tests/Agent.tests.md)** (A1–A5).
