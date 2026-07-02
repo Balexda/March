@@ -219,11 +219,27 @@ function stringField(record: Record<string, unknown>, field: string): string {
   return typeof value === "string" ? value : "";
 }
 
-function parseReviewThreadsGhJson(text: string): ReviewThread[] {
+function parseReviewThreadsGhJson(text: string, prNumber?: number): ReviewThread[] {
   const parsed = parseJsonObject(text, "gh api graphql returned unparseable review threads.");
-  const pullRequest = ((parsed.data as Record<string, unknown> | undefined)?.repository as
+  const repository = (parsed.data as Record<string, unknown> | undefined)?.repository as
     | Record<string, unknown>
-    | undefined)?.pullRequest as Record<string, unknown> | undefined;
+    | undefined;
+  // GraphQL returns a well-formed `repository.pullRequest: null` (zero exit)
+  // when the PR does not exist — that is an absent PR (404 not_found), not a
+  // forge outage. Distinguish it from a genuinely malformed response.
+  if (
+    repository &&
+    typeof repository === "object" &&
+    !Array.isArray(repository) &&
+    repository.pullRequest === null
+  ) {
+    throw new StatioNotFoundError(
+      prNumber === undefined
+        ? "Pull request was not found."
+        : `Pull request #${prNumber} was not found.`,
+    );
+  }
+  const pullRequest = repository?.pullRequest as Record<string, unknown> | undefined;
   if (!pullRequest || typeof pullRequest !== "object" || Array.isArray(pullRequest)) {
     throw new StatioForgeError("gh api graphql returned malformed review threads.");
   }
@@ -533,8 +549,12 @@ export function createGhForgeAdapter(
           await runCommand("gh", buildReviewThreadsArgs(owner, prNumber), {
             timeoutMs,
           }),
+          prNumber,
         );
-      } catch {
+      } catch (err) {
+        if (err instanceof StatioNotFoundError) {
+          throw err;
+        }
         throw new StatioForgeError("gh api graphql failed while reading review threads.");
       }
     },

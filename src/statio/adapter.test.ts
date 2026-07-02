@@ -780,4 +780,24 @@ describe("statio gh forge adapter — reviewThreads", () => {
       message: "gh api graphql failed while reading review threads.",
     });
   });
+
+  it("maps an absent PR (null pullRequest) to not_found, not forge_error", async () => {
+    const runCommand: StatioCommandRunner = vi.fn(async (_command, args) => {
+      if (args[0] === "repo") {
+        return JSON.stringify({
+          nameWithOwner: "Balexda/March",
+          defaultBranchRef: { name: "master" },
+        });
+      }
+      return JSON.stringify({ data: { repository: { pullRequest: null } } });
+    });
+    const adapter = createGhForgeAdapter({ runCommand });
+
+    await expect(adapter.reviewThreads(999999)).rejects.toMatchObject({
+      name: "StatioNotFoundError",
+      code: "not_found",
+      message: "Pull request #999999 was not found.",
+    });
+    await expect(adapter.reviewThreads(999999)).rejects.toBeInstanceOf(StatioNotFoundError);
+  });
 });

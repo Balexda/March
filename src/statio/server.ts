@@ -12,12 +12,16 @@ import {
   type ForgeClient,
   type ForgeErrorCode,
   type ListPrsRequest,
+  type ReviewThread,
   StatioForgeError,
   StatioNotFoundError,
   StatioValidationError,
 } from "./types.js";
 
-type StatioRouteForgeClient = Pick<ForgeClient, "repoInfo" | "listPrs" | "getPr" | "reachable">;
+type StatioRouteForgeClient = Pick<
+  ForgeClient,
+  "repoInfo" | "listPrs" | "getPr" | "reviewThreads" | "reachable"
+>;
 
 export interface BuildStatioServerOptions {
   readonly repoReader?: RepoMetadataReader;
@@ -44,6 +48,7 @@ function createDefaultForgeClient(): StatioRouteForgeClient {
     repoInfo: adapter.repoInfo,
     listPrs: adapter.listPrs,
     getPr: adapter.getPr,
+    reviewThreads: adapter.reviewThreads,
     async reachable(): Promise<boolean> {
       try {
         await adapter.repoInfo();
@@ -187,6 +192,14 @@ export function buildStatioServer(options: BuildStatioServerOptions = {}): Fasti
     const number = parsePullRequestNumber(request.params.number);
     return { pr: await forgeClient.getPr(number) };
   });
+
+  app.get<{ Params: { number: string } }>(
+    "/v1/prs/:number/review-threads",
+    async (request): Promise<{ threads: ReviewThread[] }> => {
+      const number = parsePullRequestNumber(request.params.number);
+      return { threads: await forgeClient.reviewThreads(number) };
+    },
+  );
 
   return app;
 }
