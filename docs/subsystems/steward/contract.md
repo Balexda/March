@@ -44,6 +44,28 @@ The target worktree, target branch, spawn id, and slice id remain correlated for
 
 This contract does not duplicate Castra's server routes or response bodies. Castra owns those `/v1/sessions*` wire shapes; Steward only depends on the client methods above being the consumer surface for the launch handoff and bounded output observation.
 
+### Patch Application
+
+After launch, Steward consumes Spawn's validated patch result as an already accepted handoff artifact. Spawn continues to own raw backend-output parsing, validation, unsafe-output rejection, and no-op detection; Steward owns only the role semantics for applying that validated patch to the correlated repository state.
+
+Steward's index-aware application mode is `git apply --index` from the target worktree. Success requires the target worktree and index, on the correlated target branch, to reflect the accepted patch. Steward must not report success from a worktree-only apply, an index-only apply, a different checkout, a different branch, or a partially accepted state.
+
+Steward may report fallback, rejected-hunk, conflict, or unsupported-apply diagnostics only as bounded outcomes. A fallback is acceptable only when it preserves the same success contract: the expected worktree and index on the target branch contain the accepted patch. Rejected hunks, merge conflicts, unsupported patch forms, and apply attempts that cannot preserve index/worktree coherence are failed Steward outcomes, not prompts for interactive repair inside the autonomous role.
+
+### Repository State Constraints
+
+The launch envelope's target worktree and target branch remain the only repository state where Steward may apply the validated patch. Before reporting success, Steward must be able to correlate the active checkout to that worktree and branch. Missing worktrees, mismatched branches, dirty state unrelated to the accepted patch, incoherent index state, or evidence that the patch applies outside the allowed worktree are failed handoffs or terminal diagnostics.
+
+These failures follow the low-touch execution model in `docs/vision.md` and the autonomous-component rules in `docs/operating-philosophy.md`: failures are clean exits, bounded diagnostics, or events, not hidden waits or approval prompts that the role cannot receive.
+
+### Outcome Reporting
+
+A PR-ready Steward outcome means the target branch, target worktree, and index contain the accepted patch and downstream integration may proceed. It is a branch-state report, not proof that a pull request has been created or merged.
+
+PR creation, pushing, merging, and PR-tool invocation are owned by the manager session's delivery instructions or by a later integration boundary. This documentation slice introduces no PR command, runtime behavior, freshness checker, AUTOGEN extraction, CI enforcement, push, merge, or pull-request creation requirement.
+
+Failed outcomes include patch-apply failure, dirty or missing worktree state, target branch mismatch, out-of-worktree application attempts, and incoherent index/worktree state. Each failure is terminal or evented with a bounded diagnostic that callers and tests can assert without reading an unbounded session transcript.
+
 ## Invariants
 
 - Steward launches only for successful, non-empty, validated Spawn output. Spawn owns raw backend output parsing and validation internals; Steward consumes the validated-output result.
@@ -52,7 +74,12 @@ This contract does not duplicate Castra's server routes or response bodies. Cast
 - Refusals and missing launch facts surface as clean failed outcomes, bounded diagnostics, or events rather than interactive prompts inside the autonomous role.
 - The launch envelope keeps worktree, branch, spawn id, and slice id correlated across the Hatchery-to-Castra handoff.
 - Hatchery owns invoking the handoff path and passing session/profile metadata plus role prompt context; Steward owns the manager role semantics once launch eligibility has been satisfied.
-- Later patch application, PR-ready branch state, lifecycle tracking, cleanup ordering, and contract freshness mapping are downstream contract concerns and are not specified by this launch slice.
+- Steward applies validated patch output with index-aware repository semantics, with `git apply --index` as the named application mode.
+- Steward success requires the expected target branch, worktree, and index to reflect the accepted patch.
+- Steward must fail closed before success is reported when the target worktree is missing, the active branch does not match the handoff correlation, unrelated dirty state is present, the patch reaches outside the expected worktree, or the index and worktree cannot remain coherent.
+- Fallback application paths are allowed only when they preserve the same target-branch, worktree, and index success state; otherwise conflicts, rejected hunks, unsupported patch forms, or partial applies are failed outcomes.
+- PR-ready means downstream integration may proceed from the target branch state; Steward's contract does not require this feature to create, push, merge, or open a pull request.
+- Lifecycle tracking, cleanup ordering, and contract freshness mapping are downstream contract concerns and are not specified by this patch-application slice.
 
 ## Error Modes
 
@@ -63,5 +90,11 @@ This contract does not duplicate Castra's server routes or response bodies. Cast
 | Missing launch context | Missing worktree, branch, spawn id, slice id, session/profile metadata, or role prompt context produces a failed handoff diagnostic or event. |
 | Mismatched launch context | A worktree, branch, spawn id, or slice id that does not match the validated handoff correlation produces a failed handoff diagnostic or event before launch. |
 | Castra launch boundary failure | The failure is reported through the Hatchery/Castra handoff boundary as bounded diagnostics or evented state; this contract does not redefine Castra's route errors. |
+| Dirty or missing target worktree | Steward reports a failed handoff or terminal diagnostic before success because the accepted patch cannot be proven against the expected checkout. |
+| Target branch mismatch | Steward reports a failed handoff or terminal diagnostic because PR-ready state is defined only for the correlated target branch. |
+| Patch apply conflict or rejected hunk | Steward reports a bounded failed-application diagnostic; it does not block on interactive conflict repair. |
+| Unsupported apply form | Steward reports a bounded failed-application diagnostic unless a fallback can preserve the same target worktree and index success contract. |
+| Out-of-worktree patch attempt | Steward reports a failed outcome and does not partially accept files outside the allowed target worktree. |
+| Incoherent index/worktree state | Steward reports a failed handoff or terminal diagnostic because success requires both the worktree and index to reflect the accepted patch. |
 
-Patch application failures, PR-ready success/failure reporting, lifecycle registration, cleanup ordering, and freshness drift are intentionally left to later Steward contract slices and their owning subsystem contracts.
+Lifecycle registration, cleanup ordering, and freshness drift are intentionally left to later Steward contract slices and their owning subsystem contracts.
