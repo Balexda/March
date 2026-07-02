@@ -30,6 +30,23 @@ tooling; human-authored public-interface prose may appear before or after the
 marker pair and remains outside the replacement boundary. An empty marker pair
 is a valid placeholder when no generated content exists yet.
 
+Mechanically-derivable public-interface regions are refreshed by the
+deterministic `npm run docs:contracts:extract` tool — the TypeScript
+public-interface autogen tool (Feature 7 of the layered-testing-framework RFC's
+subsystem-contract-documentation track,
+`docs/rfcs/2026-002-layered-testing-framework/02-subsystem-contract-documentation-track.features.md`)
+— when that extractor is available. This scaffold records the convention-level
+handoff only: that autogen tool owns extraction, replacement, check-mode, and
+write-mode behavior. Until it is present, authors and Smithy agents keep
+generated-region content current manually as normal edit-time upkeep. Neither
+path creates a CI job, a per-check-in AI/LLM validation step, or a PR/slice/merge
+gate; the contract presence & freshness check (`npm run docs:contracts:check`,
+Feature 5 in the same feature map), when used, remains opt-in and advisory.
+
+Generated-region output is expected to be deterministic and ordered. Cosmetic
+source moves alone should not churn the generated block when the public surface
+is unchanged.
+
 ## Minimum Template
 
 ```markdown
