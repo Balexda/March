@@ -450,6 +450,28 @@ describe("statio server", () => {
     });
   });
 
+  it("maps an absent review-thread PR to a not_found envelope", async () => {
+    app = buildStatioServer({
+      forgeClient: fakeForge({
+        reviewThreads: vi.fn(async () => {
+          throw new StatioNotFoundError("Pull request #999999 was not found.");
+        }),
+      }),
+      token: "secret",
+    });
+
+    const res = await app.inject({
+      method: "GET",
+      url: "/v1/prs/999999/review-threads",
+      headers: { authorization: "Bearer secret" },
+    });
+
+    expect(res.statusCode).toBe(404);
+    expect(res.json()).toEqual({
+      error: { code: "not_found", message: "Pull request #999999 was not found." },
+    });
+  });
+
   it("does not gate sibling paths that merely share the /v1 prefix", async () => {
     app = buildStatioServer({ repoReader: fakeReader(), token: "secret" });
 
