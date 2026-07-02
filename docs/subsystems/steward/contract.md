@@ -44,6 +44,25 @@ The target worktree, target branch, spawn id, and slice id remain correlated for
 
 This contract does not duplicate Castra's server routes or response bodies. Castra owns those `/v1/sessions*` wire shapes; Steward only depends on the client methods above being the consumer surface for the launch handoff and bounded output observation.
 
+### Cross-Contract Ownership Boundaries
+
+| Provider boundary | Provider contract | Steward relationship | Ownership rule |
+|-------------------|-------------------|----------------------|----------------|
+| Spawn | `docs/subsystems/spawn/contract.md` | Steward consumes successful, non-empty, validated Spawn output as the patch handoff artifact. | Spawn owns backend-output parsing, validation, unsafe-output rejection, and no-op detection; Steward owns applying validated output to the correlated worktree and reporting a bounded role outcome. |
+| Hatchery | `docs/subsystems/hatchery/contract.md` | Hatchery invokes the handoff path and supplies session/profile metadata, role prompt context, branch, worktree, spawn id, and slice id. | Hatchery owns dispatch service and handoff invocation behavior; Steward owns hosted manager role semantics after launch eligibility has been satisfied. |
+| Brood | `docs/subsystems/brood/contract.md` (future) | Brood records parent spawn and Steward session lifecycle evidence used for cleanup and recovery. | Brood owns lifecycle registry rows, parent/child tracking, and teardown authority; Steward owns the role outcome facts tied to that correlation. |
+| Herald | `docs/subsystems/herald/contract.md` (future) | Herald carries Steward attachment and correlation facts for observers. | Herald owns event append, projection, and cursor behavior; Steward owns only the semantics of the Steward role state being reported. |
+| Castra | `docs/subsystems/castra/contract.md` (future) | Castra hosts, prompts, observes, and removes the interactive session through its client/server boundary. | Castra owns HTTP/session routes, authentication, response envelopes, agent-deck hosting, and removal; Steward owns the hosted role semantics and permitted outcomes. |
+| Legate | `docs/subsystems/legate/contract.md` | Legate observes Steward attachment, loss, timeout, or terminal outcome as part of the autonomous loop. | Legate owns loop observation, babysit, relaunch, terminal, and merge/archive decisions; Steward owns the session outcome facts that Legate consumes. |
+
+These boundaries are owner pointers for L2 tests and future freshness mapping. They do not define provider route tables, request or response schemas, event append rules, projection or cursor behavior, Legate loop rules, Hatchery dispatch service behavior, Brood teardown ordering, Castra server internals, or Spawn validation internals. Readers should follow the provider contracts for those public interfaces; this contract documents only Steward-owned launch eligibility, role semantics, patch application, PR-ready outcome semantics, and bounded failure reporting.
+
+### Freshness Binding
+
+Future Steward freshness belongs to the role-consumer partition made from `src/castra/client.ts` plus `src/hatchery/spawn-handoff.ts`. No standalone `src/steward/` source module owns Steward freshness because Steward is a Castra-hosted role boundary, not a separate runtime subsystem.
+
+The Castra server route surface, including `src/castra/server.ts`, remains outside the Steward freshness partition and stays owned by Castra's contract. Brood, Herald, and Legate service, registry, event, projection, cursor, and loop surfaces remain owned by their respective contracts and by the Feature 2 and Feature 3 contract tracks that define those providers. This section records the future binding hint only; it does not implement a freshness checker, update freshness config, populate AUTOGEN content, add CI enforcement, or change runtime behavior.
+
 ### Patch Application
 
 After launch, Steward consumes Spawn's validated patch result as an already accepted handoff artifact. Spawn continues to own raw backend-output parsing, validation, unsafe-output rejection, and no-op detection; Steward owns only the role semantics for applying that validated patch to the correlated repository state.
@@ -103,7 +122,8 @@ Steward cleanup semantics do not require PR creation, push, merge, contract chec
 - Castra session identity remains the hosted interactive-session identity and not Steward-owned route state.
 - Steward disappearance, stall, timeout, and unreachable-session cases are observable failure states for Legate or Brood consumers without transferring ownership of their loop, registry, or teardown behavior.
 - Following the intervention-avoidance framing in `docs/vision.md` and the clean-exit rules in `docs/operating-philosophy.md`, the autonomous Steward role must not wait indefinitely on unavailable input. Failure outcomes are terminal diagnostics or evented states with bounded detail.
-- Contract freshness mapping remains a downstream contract concern and is not specified by these slices.
+- L2 tests may assert Steward-owned launch eligibility, role semantics, patch-application promises, PR-ready branch-state semantics, and bounded failure outcomes from this contract. They must follow the Spawn, Hatchery, Brood, Herald, Castra, and Legate contracts for provider-specific public interfaces rather than scraping provider route tables, event append rules, loop rules, or validation internals from Steward prose.
+- Steward freshness is pinned for future tooling to `src/castra/client.ts` and `src/hatchery/spawn-handoff.ts`; no standalone `src/steward/` module owns Steward freshness, and provider service or loop surfaces stay outside this contract's freshness partition.
 
 ## Error Modes
 
@@ -126,5 +146,7 @@ Steward cleanup semantics do not require PR creation, push, merge, contract chec
 | Steward stall or timeout | A stalled or timed-out Steward session becomes a terminal diagnostic or evented state with bounded detail, aligned with `docs/vision.md` and `docs/operating-philosophy.md`. |
 | Unreachable Steward session | A Castra session that cannot be reached remains Castra-owned session state, while Legate or Brood may consume the failure as observation or teardown evidence. |
 | Cleanup failure | Castra removal or Brood cleanup failure preserves parent spawn, Steward session, slice, branch, worktree, and profile/session evidence for later observation or diagnostics. |
+| Cross-contract ownership drift | Steward prose that starts duplicating provider routes, event append behavior, loop rules, service internals, or Spawn validation internals is a contract-maintenance error; tests should assert the boundary and follow the provider contract for those details. |
+| Freshness ownership drift | Freshness mapping to a nonexistent `src/steward/` module, Castra server routes, or Brood/Herald/Legate service and loop surfaces is a contract-maintenance error; the Steward binding is `src/castra/client.ts` plus `src/hatchery/spawn-handoff.ts`. |
 
-Contract freshness drift is intentionally left to a later Steward contract slice and its owning subsystem contracts. Patch application, PR-ready success/failure reporting, lifecycle registration, correlation, cleanup ownership, and loss/timeout boundaries are documented here without implementing Hatchery, Brood, Herald, Castra, Spawn, Legate, PR, or runtime behavior.
+Patch application, PR-ready success/failure reporting, lifecycle registration, correlation, cleanup ownership, cross-contract boundaries, freshness binding, and loss/timeout boundaries are documented here without implementing Hatchery, Brood, Herald, Castra, Spawn, Legate, PR, freshness, CI, or runtime behavior.
