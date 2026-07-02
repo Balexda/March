@@ -49,17 +49,40 @@ The milestone-level execution plan (M1 through M8, success criteria, dependency 
 
 ### Test Layer Migration
 
-Governed legacy L2 tests stay in vitest until a material edit touches the
-governed test file itself. A material edit is any semantic change to that file's:
+The governed legacy L2 tests are exactly:
+
+- `src/spawn/container-launch.test.ts`
+- `src/spawn/snapshot-build.test.ts`
+
+Only those governed files are subject to the Test Layer Migration trigger; a
+file outside this set does not trigger migration under this policy. Their
+starting state is vitest in place: a mocked `node:child_process` boundary and no
+real Docker execution. They are classified `@l2 @deterministic @ci`; the
+matching leading tag blocks are applied in place by the tag-taxonomy feature
+(`specs/2026-05-23-006-tag-taxonomy-and-coverage-lint`). They remain in vitest
+until a material change to a governed file triggers the migration policy.
+
+For each PR that edits one of those governed test files, classify the governed
+file diff from the changed test-file hunks only:
+
+1. If any governed-file hunk semantically changes one of the surfaces below,
+   classify that governed-file edit as **material**.
+2. If every governed-file hunk is limited to one of the non-material classes
+   below and preserves the test contract, classify that governed-file edit as
+   **non-material**.
+3. If the PR changes production code, shared helpers, or other files without
+   editing a governed test file itself, the migration trigger is absent.
+
+A material edit is any semantic change to the governed test file's:
 
 - assertions;
 - mocked process behavior;
 - fixtures;
 - subsystem boundary it drives.
 
-A material edit requires a Cucumber.js port of the affected scenario in the same
-change PR. The trigger does not fire for production-code or shared-helper changes
-that do not edit the governed test file itself.
+A material governed-file edit requires a Cucumber.js port of the affected
+scenario in the same change PR. The trigger does not fire for production-code or
+shared-helper changes that do not edit the governed test file itself.
 
 These edits are non-material and do not require a port when they preserve the
 test contract:
@@ -70,25 +93,19 @@ test contract:
 - tag-block edits;
 - mechanical renames.
 
-When no material trigger is met, the governed tests stay in vitest with no
-preemptive port.
+When an author and reviewer classify the same governed-file diff, they should
+use this decision path and these listed surfaces as the written basis for the
+classification. A material classification requires the same-PR Cucumber.js port;
+a non-material classification, or an absent trigger, leaves the governed tests in
+vitest with no preemptive port.
 
 This policy defines only the migration trigger. It does not redefine the tag
 taxonomy, staged scripts, quarantine routing, or Cucumber.js port mechanics.
 
 Day-to-day commands:
 
-- **`npm test`** — runs the deterministic CI suite. Today that's the full vitest set: L0, L1, and the surviving L2-shaped vitest cases listed in the Test Layer Migration policy below. Cassette-replayed L2/L3 will land here as the [RFC milestones](docs/rfcs/2026-002-layered-testing-framework/layered-testing-framework.rfc.md#milestones) progress. Cost: $0, < 2 minutes. Runs on every push and PR.
+- **`npm test`** — runs the deterministic CI suite. Today that's the full vitest set: L0, L1, and the surviving L2-shaped vitest cases listed in the Test Layer Migration policy above. Cassette-replayed L2/L3 will land here as the [RFC milestones](docs/rfcs/2026-002-layered-testing-framework/layered-testing-framework.rfc.md#milestones) progress. Cost: $0, < 2 minutes. Runs on every push and PR.
 - **`npm run typecheck`** — `tsc --noEmit`.
-
-### Test Layer Migration
-
-The governed legacy L2 tests are exactly:
-
-- `src/spawn/container-launch.test.ts`
-- `src/spawn/snapshot-build.test.ts`
-
-Only those governed files are subject to the Test Layer Migration trigger; a file outside this set does not trigger migration under this policy. Their starting state is vitest in place: a mocked `node:child_process` boundary and no real Docker execution. They are classified `@l2 @deterministic @ci`; the matching leading tag blocks are applied in place by the tag-taxonomy feature (`specs/2026-05-23-006-tag-taxonomy-and-coverage-lint`) and are not yet present in the files. They remain in vitest until a material change to a governed file triggers the migration policy.
 
 Agent-driven and human tests:
 
