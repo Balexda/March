@@ -99,7 +99,7 @@ Recommended implementation sequence:
 | US1 | Establish Contract Document Shape | — | specs/2026-05-21-005-contract-scaffold-required-section-schema/01-establish-contract-document-shape.tasks.md |
 | US2 | Define Assertable Authoring Rules | US1 | specs/2026-05-21-005-contract-scaffold-required-section-schema/02-define-assertable-authoring-rules.tasks.md |
 | US3 | Standardize Autogen Marker Placement | US1 | specs/2026-05-21-005-contract-scaffold-required-section-schema/03-standardize-autogen-marker-placement.tasks.md |
-| US4 | Record Contract Freshness Schema Shape | US1, US2 | — |
+| US4 | Record Contract Freshness Schema Shape | US1, US2 | specs/2026-05-21-005-contract-scaffold-required-section-schema/04-record-contract-freshness-schema-shape.tasks.md |
 
 ## Requirements *(mandatory)*
 
