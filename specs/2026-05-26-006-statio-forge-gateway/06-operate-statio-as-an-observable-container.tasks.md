@@ -18,7 +18,7 @@
 
 ### Tasks
 
-- [ ] **Add the Statio service image and compose recipe**
+- [x] **Add the Statio service image and compose recipe**
 
   Add `docker/statio.Dockerfile` and `docker/statio.docker-compose.yml` following the Castra/Hatchery container conventions while keeping Statio forge-only. The compose file should require `MARCH_STATIO_TOKEN`, publish the deterministic service port to localhost only, join the external `march` network, provide the peer-network URL, and install/provision only the runtime dependencies Statio needs to execute `gh` reads.
 
@@ -30,7 +30,7 @@
   - The compose recipe does not mount unrelated host control surfaces or grant broader access than Statio needs
   - Tests or script-level validation cover required-token interpolation, port override wiring, network declaration, and service command shape
 
-- [ ] **Add build and entrypoint integration for Statio**
+- [x] **Add build and entrypoint integration for Statio**
 
   Wire the Statio image into the repo's build scripts and CLI/service startup path as needed so operators can build the image through `npm run` and the container can start `march statio serve` consistently with the local service command. Preserve the existing public CLI contract except for adding the Statio serve entrypoint required by this story.
 

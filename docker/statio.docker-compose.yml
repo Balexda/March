@@ -1,0 +1,90 @@
+# Statio service — the forge-read gateway over HTTP.
+#
+#   # 1. observability stack first (creates the `march` network):
+#   docker compose -f docker/otel-lgtm.docker-compose.yml up -d
+#   # 2. build + run statio (from the repo root):
+#   npm run build:statio-image
+#   export MARCH_STATIO_TOKEN=$(openssl rand -hex 32)   # required (see below)
+#   docker compose -f docker/statio.docker-compose.yml up -d
+#
+# Consumers reach Statio at http://localhost:${MARCH_STATIO_PORT:-9689} on the
+# host, or http://statio:${MARCH_STATIO_PORT:-9689} from peers on the `march`
+# network. Peer containers can read MARCH_STATIO_URL when it is passed to them.
+#
+# HOST-SPECIFIC CONFIG (override via env or a .env file next to this compose):
+#   MARCH_HOST_HOME       host HOME, bind-mounted at the IDENTICAL path so gh
+#                         credentials and repo paths resolve inside the container.
+#   MARCH_HOST_UID        host uid that owns those files (run-as).
+#   MARCH_HOST_GID        host primary gid for those files (defaults to the uid).
+#   MARCH_STATIO_REPO_DIR repo/worktree path used as the service working dir
+#                         for gh repo context. Defaults to MARCH_HOST_HOME.
+#   MARCH_STATIO_PORT     API port (default: deterministic 9689).
+#   MARCH_STATIO_URL      peer URL advertised in-container (default:
+#                         http://statio:${MARCH_STATIO_PORT:-9689}).
+#   MARCH_STATIO_TOKEN    bearer token gating /v1/* — REQUIRED. Compose refuses
+#                         to start without it because the container binds
+#                         0.0.0.0 on the shared march network.
+#
+# SECURITY: this mounts HOME for gh credentials and repo access only. It does
+# NOT mount the docker socket, tmux socket, or agent-deck. The port is bound to
+# localhost only; never expose it publicly, never publish this image.
+name: march-statio
+
+services:
+  statio:
+    build:
+      context: ..
+      dockerfile: docker/statio.Dockerfile
+    image: march-statio:latest
+    container_name: march-statio
+    restart: on-failure
+    command: ["statio", "serve", "--host", "0.0.0.0", "--port", "${MARCH_STATIO_PORT:-9689}"]
+    # Run as the host user so mounted gh credentials and repos are accessible.
+    user: "${MARCH_HOST_UID:-1000}:${MARCH_HOST_GID:-${MARCH_HOST_UID:-1000}}"
+    working_dir: "${MARCH_STATIO_REPO_DIR:-${MARCH_HOST_HOME:-/home/jmbattista}}"
+    ports:
+      - "127.0.0.1:${MARCH_STATIO_PORT:-9689}:${MARCH_STATIO_PORT:-9689}" # localhost only — never public
+    environment:
+      - MARCH_OTEL=1
+      - MARCH_OTEL_ENDPOINT=http://otel-lgtm:4318
+      - MARCH_OTEL_SERVICE_NAME=march-statio
+      - MARCH_STATIO_PORT=${MARCH_STATIO_PORT:-9689}
+      - MARCH_STATIO_URL=${MARCH_STATIO_URL:-http://statio:${MARCH_STATIO_PORT:-9689}}
+      - MARCH_STATIO_LOG_DIR=/march/logs
+      # Required — compose aborts if unset (the API binds 0.0.0.0 on a shared net).
+      - MARCH_STATIO_TOKEN=${MARCH_STATIO_TOKEN:?MARCH_STATIO_TOKEN must be set; the API binds 0.0.0.0 on the march network}
+      # os.homedir() resolves from HOME -> gh credentials and repo paths land on
+      # the mounted host HOME at the identical path.
+      - HOME=${MARCH_HOST_HOME:-/home/jmbattista}
+      - GH_TOKEN=${GH_TOKEN:-}
+      - GITHUB_TOKEN=${GITHUB_TOKEN:-}
+      # HOME is mounted read-only for credentials, but gh writes cache/state/data
+      # under XDG dirs in HOME. Redirect those to a writable in-container path so
+      # forge reads don't fail on the read-only mount; config (~/.config/gh) is
+      # still read from HOME, so XDG_CONFIG_HOME is intentionally NOT overridden.
+      - GH_NO_UPDATE_NOTIFIER=1
+      - XDG_CACHE_HOME=/tmp/gh/cache
+      - XDG_STATE_HOME=/tmp/gh/state
+      - XDG_DATA_HOME=/tmp/gh/data
+    volumes:
+      # Whole HOME at the identical path: repos, worktrees, ~/.config/gh, and
+      # .gitconfig for gh/git. No host control sockets are mounted.
+      - ${MARCH_HOST_HOME:-/home/jmbattista}:${MARCH_HOST_HOME:-/home/jmbattista}:ro
+      # Durable service log file (also shipped to otel-lgtm via OTLP logs).
+      - march-statio-logs:/march/logs
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:${MARCH_STATIO_PORT:-9689}/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
+    networks:
+      - march
+
+networks:
+  march:
+    external: true
+    name: march
+
+volumes:
+  march-statio-logs:
