@@ -9,6 +9,7 @@ import { startBroodSpan } from "../../observability/brood-trace.js";
 import { createCastraClientFromEnv } from "../../castra/client.js";
 import type { SessionRepository } from "./repository.js";
 import { parseExtractionResult } from "./extraction.js";
+import { extractionReadiness } from "./extraction-readiness.js";
 import {
   defaultOrphanGate,
   defaultStewardGateway,
@@ -323,6 +324,16 @@ export async function registerRoutes(
       return { error: `No session with id "${id}".` };
     }
     return record;
+  });
+
+  app.get("/sessions/:id/extraction-readiness", async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const record = store.get(id);
+    if (!record) {
+      reply.code(404);
+      return { error: `No session with id "${id}".` };
+    }
+    return extractionReadiness(record);
   });
 
   app.patch("/sessions/:id", async (request, reply) => {

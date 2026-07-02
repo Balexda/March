@@ -166,6 +166,101 @@ describe.skipIf(!sqliteAvailable)("brood routes", () => {
     expect((await app.inject({ method: "GET", url: "/sessions/nope" })).statusCode).toBe(404);
   });
 
+  it("GET /sessions/:id/extraction-readiness exposes PR-ready successful extraction metadata", async () => {
+    const { app } = await buildApp();
+    const extractionResult = {
+      spawnId: "s-ready",
+      backend: "codex",
+      status: "succeeded",
+      patch: {
+        spawnId: "s-ready",
+        backend: "codex",
+        patchText: "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n",
+        touchedPaths: ["a.txt"],
+        sha256: "abc123",
+      },
+      extractedAt: "2026-06-13T00:00:00.000Z",
+    };
+    await app.inject({
+      method: "POST",
+      url: "/sessions",
+      payload: { id: "s-ready", kind: "spawn", extractionResult },
+    });
+
+    const res = await app.inject({
+      method: "GET",
+      url: "/sessions/s-ready/extraction-readiness",
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({
+      spawnId: "s-ready",
+      status: "succeeded",
+      prReady: true,
+      result: extractionResult,
+    });
+  });
+
+  it("GET /sessions/:id/extraction-readiness exposes failed and missing states as not PR-ready", async () => {
+    const { app } = await buildApp();
+    await app.inject({
+      method: "POST",
+      url: "/sessions",
+      payload: {
+        id: "s-failed",
+        kind: "spawn",
+        extractionResult: {
+          spawnId: "s-failed",
+          backend: "claude-code",
+          status: "failed",
+          failureReason: "no-patch-produced",
+          diagnostic: "No patch sentinel was present.",
+          extractedAt: "2026-06-13T00:00:00.000Z",
+        },
+      },
+    });
+    await app.inject({
+      method: "POST",
+      url: "/sessions",
+      payload: { id: "s-missing", kind: "spawn" },
+    });
+
+    const failed = await app.inject({
+      method: "GET",
+      url: "/sessions/s-failed/extraction-readiness",
+    });
+    expect(failed.statusCode).toBe(200);
+    expect(failed.json()).toMatchObject({
+      spawnId: "s-failed",
+      status: "failed",
+      prReady: false,
+      result: {
+        failureReason: "no-patch-produced",
+        diagnostic: "No patch sentinel was present.",
+      },
+    });
+    expect(failed.json().result).not.toHaveProperty("patch");
+
+    const missing = await app.inject({
+      method: "GET",
+      url: "/sessions/s-missing/extraction-readiness",
+    });
+    expect(missing.statusCode).toBe(200);
+    expect(missing.json()).toEqual({
+      spawnId: "s-missing",
+      status: "missing",
+      prReady: false,
+    });
+    expect(
+      (
+        await app.inject({
+          method: "GET",
+          url: "/sessions/nope/extraction-readiness",
+        })
+      ).statusCode,
+    ).toBe(404);
+  });
+
   it("PATCH /sessions/:id updates lifecycle, 404 for unknown", async () => {
     const { app } = await buildApp();
     await app.inject({

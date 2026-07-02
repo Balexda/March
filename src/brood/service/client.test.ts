@@ -67,6 +67,37 @@ describe("BroodClient", () => {
     expect(await client.get("missing")).toBeUndefined();
   });
 
+  it("getExtractionReadiness reads the stable PR-readiness view", async () => {
+    const fetchImpl = vi.fn(async (..._args: unknown[]) =>
+      jsonResponse(200, {
+        spawnId: "s1",
+        status: "missing",
+        prReady: false,
+      }),
+    );
+    const client = new BroodClient({
+      baseUrl: "http://brood",
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+
+    expect(await client.getExtractionReadiness("s1")).toEqual({
+      spawnId: "s1",
+      status: "missing",
+      prReady: false,
+    });
+    expect(fetchImpl.mock.calls[0][0]).toBe(
+      "http://brood/sessions/s1/extraction-readiness",
+    );
+  });
+
+  it("getExtractionReadiness returns undefined on 404", async () => {
+    const client = new BroodClient({
+      baseUrl: "http://brood",
+      fetchImpl: (async () => jsonResponse(404, { error: "no" })) as unknown as typeof fetch,
+    });
+    expect(await client.getExtractionReadiness("missing")).toBeUndefined();
+  });
+
   it("list returns the sessions array", async () => {
     const client = new BroodClient({
       baseUrl: "http://brood",
