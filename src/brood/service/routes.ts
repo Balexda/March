@@ -329,9 +329,9 @@ export async function registerRoutes(
   app.get("/sessions/:id/extraction-readiness", async (request, reply) => {
     const { id } = request.params as { id: string };
     const record = store.get(id);
-    if (!record) {
+    if (!record || record.kind !== "spawn") {
       reply.code(404);
-      return { error: `No session with id "${id}".` };
+      return { error: `No spawn session with id "${id}".` };
     }
     return extractionReadiness(record);
   });

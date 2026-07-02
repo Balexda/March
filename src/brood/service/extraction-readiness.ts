@@ -17,14 +17,14 @@ export function extractionReadiness(
   }
   if (result.status === "failed") {
     return {
-      spawnId: result.spawnId,
+      spawnId: session.id,
       status: "failed",
       prReady: false,
       result,
     };
   }
   return {
-    spawnId: result.spawnId,
+    spawnId: session.id,
     status: "succeeded",
     prReady: true,
     result,

@@ -261,6 +261,21 @@ describe.skipIf(!sqliteAvailable)("brood routes", () => {
     ).toBe(404);
   });
 
+  it("GET /sessions/:id/extraction-readiness 404s for non-spawn sessions", async () => {
+    const { app } = await buildApp();
+    await app.inject({
+      method: "POST",
+      url: "/sessions",
+      payload: { id: "steward-1", kind: "steward" },
+    });
+
+    const res = await app.inject({
+      method: "GET",
+      url: "/sessions/steward-1/extraction-readiness",
+    });
+    expect(res.statusCode).toBe(404);
+  });
+
   it("PATCH /sessions/:id updates lifecycle, 404 for unknown", async () => {
     const { app } = await buildApp();
     await app.inject({
