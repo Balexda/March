@@ -21,12 +21,21 @@ export interface PublicExportSummary {
   readonly typeOnly: boolean;
 }
 
-export type AutogenDiagnosticCategory = "parse" | "extraction" | "config";
+export type AutogenDiagnosticCategory =
+  | "parse"
+  | "extraction"
+  | "config"
+  | "ownership"
+  | "marker"
+  | "stale-output"
+  | "write-safety";
 export type AutogenDiagnosticSeverity = "error" | "warning";
 
 export interface AutogenDiagnostic {
   readonly category: AutogenDiagnosticCategory;
   readonly severity: AutogenDiagnosticSeverity;
+  readonly ownerName?: string;
+  readonly contractPath?: string;
   readonly sourcePath?: string;
   readonly message: string;
 }

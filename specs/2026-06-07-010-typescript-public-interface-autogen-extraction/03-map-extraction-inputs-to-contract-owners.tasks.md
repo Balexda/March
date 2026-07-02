@@ -18,7 +18,7 @@
 
 ### Tasks
 
-- [ ] **Load extraction ownership configuration**
+- [x] **Load extraction ownership configuration**
 
   Add the repository-local ownership config reader in the contracts tooling area and expose the `Extraction Config View` and `Extraction Owner` behavior from the data model. The loader should consume repo-relative configuration for the required M2 contract set and prepare owner records for AS 3.1 without invoking live services or AUTOGEN marker replacement.
 
@@ -29,7 +29,7 @@
   - Unsupported config shape or version produces bounded config diagnostics with the config path.
   - Existing User Story 1 public export extraction behavior remains unchanged.
 
-- [ ] **Resolve owner selectors to source surfaces**
+- [x] **Resolve owner selectors to source surfaces**
 
   Add deterministic selector resolution that maps each ownership entry to the `Source Surface` model before extraction. It should produce source paths for Hatchery, Brood, Herald, Castra, Spawn, Legate, and Steward according to AS 3.1 and AS 3.3, while treating allowed empty or future role-level surfaces as explicit owner state rather than a failure.
 
@@ -40,7 +40,7 @@
   - Steward can resolve from configured role-consumer surfaces without requiring a standalone `src/steward/` module.
   - Empty surfaces are represented only when the owner configuration explicitly allows that case.
 
-- [ ] **Reject overlapping source ownership**
+- [x] **Reject overlapping source ownership**
 
   Add ownership validation that detects when two owners claim the same resolved extraction source or an overlapping selector set. The validation should fail cleanly for AS 3.2 and report enough bounded context for a triager to identify both owners and the conflicting source or selector.
 
