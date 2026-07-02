@@ -18,7 +18,7 @@
 
 ### Tasks
 
-- [ ] **Accept deterministic changed-file input**
+- [x] **Accept deterministic changed-file input**
 
   Extend the docs-contract verdict command to build a Changed File Set from local inputs without relying on live March services. The command should accept explicit changed-file input for fixture and local use, support git-derived input when a base ref is provided, normalize paths to repo-relative form, and fail cleanly when the requested changed-file source cannot be evaluated.
 
@@ -30,7 +30,7 @@
   - An unavailable git base exits non-zero with a bounded diagnostic rather than hanging or prompting.
   - The command still runs from filesystem and git inputs without Docker, network, or live March services.
 
-- [ ] **Report source-to-contract freshness drift**
+- [x] **Report source-to-contract freshness drift**
 
   Extend the verdict evaluator so changed public source paths are matched against validated freshness entries and require the owning contract path to appear in the same changed-file set. The freshness check should satisfy AS 3.1-3.3 while preserving the existing presence, section-schema, and config behavior.
 
