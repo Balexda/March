@@ -6,8 +6,8 @@ on:
   pull_request:
 
 jobs:
-  build-test:
-    name: Build & Test (Node ${{ matrix.node-version }})
+  l0:
+    name: l0 (Node ${{ matrix.node-version }})
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -26,4 +26,73 @@ jobs:
 
       - run: npm run build
 
-      - run: npm test
+      - run: npm run test:l0
+
+  l1:
+    name: l1 (Node ${{ matrix.node-version }})
+    runs-on: ubuntu-latest
+    needs: l0
+    strategy:
+      matrix:
+        node-version: [20, 22]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+
+      - run: npm ci
+
+      - run: npm run typecheck
+
+      - run: npm run build
+
+      - run: npm run test:l1
+
+  l2-cassette:
+    name: l2-cassette (Node ${{ matrix.node-version }})
+    runs-on: ubuntu-latest
+    needs: l0
+    strategy:
+      matrix:
+        node-version: [20, 22]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+
+      - run: npm ci
+
+      - run: npm run typecheck
+
+      - run: npm run build
+
+      - run: npm run test:l2-cassette
+
+  l3-cassette:
+    name: l3-cassette (Node ${{ matrix.node-version }})
+    runs-on: ubuntu-latest
+    needs: l0
+    strategy:
+      matrix:
+        node-version: [20, 22]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+
+      - run: npm ci
+
+      - run: npm run typecheck
+
+      - run: npm run build
+
+      - run: npm run test:l3-cassette
