@@ -721,8 +721,11 @@ function resolveChangedFiles(repoRoot, input) {
 
 function validateFreshnessDrift(changedFiles, freshnessEntries, configDiagnostics) {
   const diagnostics = [];
+  // checkedCount reports how many changed paths were actually evaluated for
+  // drift. When evaluation is skipped — no changed input, or an invalid config
+  // that makes the freshness comparison meaningless — nothing is evaluated.
   if (changedFiles.length === 0 || configDiagnostics.length > 0) {
-    return { checkedCount: changedFiles.length, diagnostics };
+    return { checkedCount: 0, diagnostics };
   }
 
   const changedSet = new Set(changedFiles);
@@ -799,7 +802,7 @@ export function checkRequiredContracts(input = {}) {
     summary: {
       contracts: requiredContracts.map((contract) => contract.name),
       configEntries: configCheckedCount,
-      changedFiles: freshnessCheckedCount,
+      changedFiles: changedFiles.length,
       diagnostics: diagnostics.length,
     },
   };

@@ -298,6 +298,36 @@ describe("docs contract checker", () => {
       );
     }));
 
+  it("skips freshness drift when the config is invalid even with mapped changed input", () =>
+    withTempRepo((repoRoot) => {
+      writeManifest(repoRoot, SUBSYSTEMS);
+      for (const name of SUBSYSTEMS) {
+        writeFile(repoRoot, contractPathForSubsystem(name), validContract);
+      }
+      const config = validFreshnessConfig();
+      config.contracts = [
+        ...config.contracts.filter((entry) => entry.name !== "herald"),
+        freshnessEntry("brood", {
+          publicSourcePaths: ["src/brood/worktree.ts"],
+        }),
+      ];
+      writeFreshnessConfig(repoRoot, config);
+
+      const verdict = checkRequiredContracts({
+        repoRoot,
+        changedFiles: ["src/hatchery/service/worker.ts"],
+      });
+      const output = formatVerdict(verdict);
+
+      expect(verdict.status).toBe("fail");
+      expect(output).toContain("category=config");
+      // Freshness is skipped because the config never validated: the mapped
+      // source path must not surface a drift diagnostic, and checked=0 reflects
+      // that nothing was evaluated while changedFiles still counts the input.
+      expect(output).toContain("freshness: pass checked=0 changedFiles=1");
+      expect(output).not.toContain("category=freshness");
+    }));
+
   it("requires every subsystem named in the manifest", () =>
     withTempRepo((repoRoot) => {
       writeManifest(repoRoot, [...SUBSYSTEMS, "observatory"]);
