@@ -18,7 +18,7 @@
 
 ### Tasks
 
-- [ ] **Add provider ownership references**
+- [x] **Add provider ownership references**
 
   Update `docs/subsystems/steward/contract.md` to name Spawn, Hatchery, Brood, Herald, Castra, and Legate as provider or consumer boundaries for Steward. The prose should make Steward-owned role semantics, patch application, and PR-ready outcome promises distinct from each provider's contract, satisfying AS 4.1 and AS 4.2.
 
@@ -29,7 +29,7 @@
   - Hatchery, Brood, Herald, and Legate are described as integration boundaries without transferring their public surfaces to Steward.
   - Provider route tables, event append rules, loop rules, and Spawn validation internals are not duplicated.
 
-- [ ] **Pin Steward freshness binding**
+- [x] **Pin Steward freshness binding**
 
   Add contract prose that records Steward's future freshness source partition as `src/castra/client.ts` plus `src/hatchery/spawn-handoff.ts`, not a nonexistent `src/steward/` module. The same text should explicitly leave Castra server routes and Brood, Herald, and Legate service or loop surfaces to their owning Feature 2 and Feature 3 contracts under AS 4.3.
 
@@ -40,7 +40,7 @@
   - Brood, Herald, and Legate service and loop surfaces remain owned by their respective contracts (AS 4.3).
   - No freshness checker, config enforcement, AUTOGEN generation, CI change, or runtime behavior is implemented.
 
-- [ ] **Constrain cross-contract test expectations**
+- [x] **Constrain cross-contract test expectations**
 
   Refine the Steward contract's invariants or error-mode notes so L2 tests can assert ownership boundaries without scraping provider-specific details. The update should preserve the story 1-3 launch, patch-application, lifecycle, cleanup, and clean-failure promises while adding only the ownership and non-duplication guarantees required by AS 4.1-AS 4.3.
 
