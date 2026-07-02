@@ -66,6 +66,24 @@ PR creation, pushing, merging, and PR-tool invocation are owned by the manager s
 
 Failed outcomes include patch-apply failure, dirty or missing worktree state, target branch mismatch, out-of-worktree application attempts, and incoherent index/worktree state. Each failure is terminal or evented with a bounded diagnostic that callers and tests can assert without reading an unbounded session transcript.
 
+### Lifecycle Correlation
+
+When a Steward session launches, its lifecycle tracking includes the Steward session id, parent spawn id, slice id, profile, branch, and worktree facts. Those facts are publishable for later observation and diagnostics; they do not make Steward the owner of Brood rows, Herald events, Castra session state, Spawn records, Hatchery jobs, or Legate loop decisions.
+
+Brood is the lifecycle registry boundary for parent spawn records and Steward session records. Brood owns the durable parent/child tracking needed to connect the spawned work, the Steward session, the branch, and the worktree for later teardown or recovery.
+
+Herald `slice.steward.attached` is the correlation event boundary. The event carries the slice, session, spawn, branch, and worktree correlation needed by observers; the profile fact is not on this event and stays scoped to the Brood row and Castra session, so consumers must not assert profile against the Herald envelope. Herald owns event append, projection, and cursor behavior in its own contract.
+
+The Castra session id remains the hosted interactive-session identity. Steward consumes that identity as the manager role's session handle; it does not own Castra route state, agent-deck hosting behavior, or provider-specific session storage.
+
+### Cleanup Boundary
+
+Requested Steward removal crosses two owner boundaries. Castra owns removing the interactive Steward session. Brood owns exact cleanup ordering for the tracked worktree and branch tied to the spawn/steward correlation.
+
+Cleanup must preserve enough correlation evidence to explain what was removed, deferred, failed, or already missing: parent spawn id, Steward session id, slice id, branch, worktree, and the relevant profile/session facts. Provider contracts remain the authority for route, registry, event, and loop details; this contract only states the Steward role boundary that callers and tests may assert.
+
+Steward cleanup semantics do not require PR creation, push, merge, contract checking, freshness checking, CI changes, or new runtime behavior.
+
 ## Invariants
 
 - Steward launches only for successful, non-empty, validated Spawn output. Spawn owns raw backend output parsing and validation internals; Steward consumes the validated-output result.
@@ -79,7 +97,13 @@ Failed outcomes include patch-apply failure, dirty or missing worktree state, ta
 - Steward must fail closed before success is reported when the target worktree is missing, the active branch does not match the handoff correlation, unrelated dirty state is present, the patch reaches outside the expected worktree, or the index and worktree cannot remain coherent.
 - Fallback application paths are allowed only when they preserve the same target-branch, worktree, and index success state; otherwise conflicts, rejected hunks, unsupported patch forms, or partial applies are failed outcomes.
 - PR-ready means downstream integration may proceed from the target branch state; Steward's contract does not require this feature to create, push, merge, or open a pull request.
-- Lifecycle tracking, cleanup ordering, and contract freshness mapping are downstream contract concerns and are not specified by this patch-application slice.
+- Steward lifecycle correlation is observable through the Steward session id, parent spawn id, slice id, profile, branch, and worktree facts. These facts are split across boundaries: Herald's `slice.steward.attached` event carries the slice, session, spawn, branch, and worktree correlation, while the Castra/agent-deck profile is a Brood- and Castra-scoped fact and is not part of the Herald event envelope.
+- Brood registration is the lifecycle registry boundary for parent spawn and Steward session records; Steward does not take ownership of Brood's row model or teardown registry.
+- Herald `slice.steward.attached` is the correlation event boundary; Steward does not take ownership of Herald's event append or projection semantics.
+- Castra session identity remains the hosted interactive-session identity and not Steward-owned route state.
+- Steward disappearance, stall, timeout, and unreachable-session cases are observable failure states for Legate or Brood consumers without transferring ownership of their loop, registry, or teardown behavior.
+- Following the intervention-avoidance framing in `docs/vision.md` and the clean-exit rules in `docs/operating-philosophy.md`, the autonomous Steward role must not wait indefinitely on unavailable input. Failure outcomes are terminal diagnostics or evented states with bounded detail.
+- Contract freshness mapping remains a downstream contract concern and is not specified by these slices.
 
 ## Error Modes
 
@@ -96,5 +120,11 @@ Failed outcomes include patch-apply failure, dirty or missing worktree state, ta
 | Unsupported apply form | Steward reports a bounded failed-application diagnostic unless a fallback can preserve the same target worktree and index success contract. |
 | Out-of-worktree patch attempt | Steward reports a failed outcome and does not partially accept files outside the allowed target worktree. |
 | Incoherent index/worktree state | Steward reports a failed handoff or terminal diagnostic because success requires both the worktree and index to reflect the accepted patch. |
+| Brood registration failure | Parent spawn or Steward session registration failure is observable at the lifecycle registry boundary and does not silently erase the spawn/steward correlation evidence. |
+| Herald correlation publish failure | Failure to publish `slice.steward.attached` is an event-boundary diagnostic; this contract does not redefine Herald append, cursor, or projection behavior. |
+| Steward disappearance | A launched Steward session that disappears becomes an observable loss state for Legate or Brood rather than an indefinite wait. |
+| Steward stall or timeout | A stalled or timed-out Steward session becomes a terminal diagnostic or evented state with bounded detail, aligned with `docs/vision.md` and `docs/operating-philosophy.md`. |
+| Unreachable Steward session | A Castra session that cannot be reached remains Castra-owned session state, while Legate or Brood may consume the failure as observation or teardown evidence. |
+| Cleanup failure | Castra removal or Brood cleanup failure preserves parent spawn, Steward session, slice, branch, worktree, and profile/session evidence for later observation or diagnostics. |
 
-Lifecycle registration, cleanup ordering, and freshness drift are intentionally left to later Steward contract slices and their owning subsystem contracts.
+Contract freshness drift is intentionally left to a later Steward contract slice and its owning subsystem contracts. Patch application, PR-ready success/failure reporting, lifecycle registration, correlation, cleanup ownership, and loss/timeout boundaries are documented here without implementing Hatchery, Brood, Herald, Castra, Spawn, Legate, PR, or runtime behavior.
