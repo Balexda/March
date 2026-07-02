@@ -18,7 +18,7 @@
 
 ### Tasks
 
-- [ ] **Add the untagged matched-file guard**
+- [x] **Add the untagged matched-file guard**
 
   Extend the staged test selector so each layer script checks candidate test files outside `tests/quarantine/` for a parseable leading tag block before execution. A candidate with no leading tag block must make the layer command exit non-zero with bounded diagnostics, while preserving the separate whole-repo taxonomy lint owned by Feature 1.
 
@@ -29,7 +29,7 @@
   - Quarantined files remain excluded before the guard and do not fail staged scripts solely because they are under `tests/quarantine/`.
   - The guard remains local and deterministic, with no live services, network calls, paid calls, or cassette refresh.
 
-- [ ] **Cover tag-driven selection behavior**
+- [x] **Cover tag-driven selection behavior**
 
   Add focused tests for the selector behavior that User Story 2 relies on: valid leading tag blocks include the matching layer, retagging moves a file between layers, stochastic or scheduled files stay out of deterministic CI scripts, and quarantine takes precedence over tags.
 
