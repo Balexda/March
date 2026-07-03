@@ -4,15 +4,15 @@
 
 **Audience**: Anyone designing a new March component, writing or reviewing a March spec, or trying to understand why a particular feature is shaped the way it is.
 
-**Companion**: [`docs/vision.md`](vision.md) holds the long-lived "what and why" of March. This document holds the implementation-level "how" — how each component contributes to the vision, and the rules of thumb that fall out of trying to live up to it. Read the vision first; this document presumes it.
+**Companion**: [`docs/vision.md`](vision.md) holds the long-lived "what and why" of March. This document holds the implementation-level "how" — how each component contributes to the vision, and the rules of thumb that fall out of trying to live up to it. Read the vision first; this document presumes it. For the *open vs. closed* line that cuts across these components — which live in the open engine and which in the private value layer — see [`docs/open-core-boundary.md`](open-core-boundary.md).
 
-**Last revised**: 2026-05-16.
+**Last revised**: 2026-07-01.
 
 ---
 
 ## Per-component intervention-avoidance
 
-The vision says March eliminates operator intervention at points where intervention does not add value. This table is the concrete decomposition: which component eliminates which intervention.
+The vision says March eliminates operator intervention at points where intervention does not add value. This table is the concrete decomposition: which component eliminates which intervention. Most of these components are now long-running **containerized services** (Hatchery, Brood, Herald, Castra, and a single profile-agnostic Legate) rather than in-process CLI steps — but the intervention each one eliminates is unchanged, and that is what this table tracks.
 
 | Component | The intervention it eliminates | What that feels like |
 |-----------|-------------------------------|----------------------|
