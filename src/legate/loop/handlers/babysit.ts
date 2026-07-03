@@ -4,6 +4,8 @@ import { prNumber, workerBySessionId } from "../pure/session.js";
 import { hashText } from "../pure/hash.js";
 import { resolveMergeRequirements, type MergePolicy } from "../../../herald/profiles/merge-policy.js";
 import { mergeBlocker, mergeReadiness, taskTypeForSlice } from "../pure/slice.js";
+import { backoffMs, parseMs } from "../pure/self-heal.js";
+import { ensureRetryCounts } from "../state/mutations.js";
 import {
   ciFixMessage,
   commentFixMessage,
@@ -57,14 +59,49 @@ const STEWARD_STUCK_GRACE_MIN = 5;
 // to the operator rather than keep poking the steward.
 const REVIEW_FIX_MAX_ROUNDS = 3;
 
-// CI-fix bound (#303): failing CI gets a deterministic steward fix first
-// (rebase onto the synced default + /smithy.fix with the failed-check summary),
-// mirroring the conflict path, rather than escalating straight to the
-// legate-agent. A "round" is one /smithy.fix dispatch against a distinct failing
-// head SHA — so it counts genuine worker attempts, not CI re-runs of the same
-// commit. After this many rounds still fail to clear CI, escalate to the
-// legate-agent ONCE (the real-PR-diff-failure case that needs human judgement).
-const CI_FIX_MAX_ROUNDS = 2;
+// CI-failure self-heal (#506). Like a merge conflict (#504), a CI failure is
+// never "done": a green PR goes red the instant `main` moves under it (a
+// stale-base breakage), and a red one goes green when the base is fixed. So the
+// loop re-dispatches the deterministic steward fix (rebase onto the synced
+// default + /smithy.fix with the failed-check summary) INDEFINITELY rather than
+// escalating once (after CI_FIX_MAX_ROUNDS) to the not-yet-built legate-agent and
+// parking the slice. Pacing reuses the shared exponential-backoff + per-slice
+// jitter (`pure/self-heal.ts`) — the same self-healing shape as conflict recovery,
+// steward relaunch, and spawn re-dispatch (#460): the first fix goes out
+// immediately; each still-failing re-try waits ever-longer (2min → … → 6h
+// plateau), so a stuck failure is probed cheaply forever and self-heals the
+// instant CI clears.
+//
+// A genuinely broken PR diff (not a stale base) may never self-heal on its own —
+// unlike a conflict, no base movement fixes a real test failure. We still keep
+// retrying forever (cheap, backed off) but notify the operator ONCE at
+// CI_NOTIFY_ATTEMPT so it stays visible; the operator can take the branch over.
+//
+// The attempt counter is keyed per distinct failing head SHA: CI RE-RUNS of the
+// same commit (a manual re-run, a flake retry, the staged l0/l1/l2/l3 jobs
+// reporting FAIL at different ticks) must NOT burn attempts, so a re-dispatch for
+// the already-attempted SHA re-pokes the (likely parked) steward without advancing
+// the count. A genuinely new failing commit the steward pushed IS a fresh attempt.
+// The durable per-slice counter lives in `transient_retry_counts` (folded via
+// `retry.counted`, surviving a restart); the next-eligible timestamps live in the
+// warm `ci_recovery_backoff_until` map (reset on a cold start, like relaunch's);
+// the SHA the counter reflects rides on the slice as `ci_recovery_head_sha`.
+const CI_RECOVERY_KEY = (sliceId: string): string => "ci-recovery:" + sliceId;
+const CI_BACKOFF_FIELD = "ci_recovery_backoff_until";
+const CI_NOTIFY_ATTEMPT = 3;
+
+/** Pure read of a slice's CI-recovery attempt counter (0 when never tried). */
+function ciRecoveryAttempts(raw: any, sliceId: string): number {
+  const c = raw?.transient_retry_counts;
+  const v = c && typeof c === "object" ? c[CI_RECOVERY_KEY(sliceId)] : undefined;
+  return Number.isFinite(v) ? v : 0;
+}
+
+/** Pure read of a slice's next CI-recovery eligibility (epoch ms; 0 = eligible now). */
+function ciBackoffUntil(raw: any, sliceId: string): number {
+  const b = raw?.[CI_BACKOFF_FIELD];
+  return b && typeof b === "object" && Number.isFinite(b[sliceId]) ? b[sliceId] : 0;
+}
 
 const STRANDED_MESSAGE = [
   "[STRANDED-STEWARD-NUDGE] The deterministic loop sees no PR for this slice yet.",
@@ -154,8 +191,7 @@ export type BabysitDecision =
   | { kind: "steward-unstuck"; sliceId: string; sessionId: string; pr: any }
   | { kind: "steward-awaiting-input"; sliceId: string; sessionId: string; detail: string }
   | { kind: "steward-awaiting-clear"; sliceId: string; sessionId: string }
-  | { kind: "ci-fix"; sliceId: string; sessionId: string; pr: any; key: string; message: string; detail: string }
-  | { kind: "ci-failure"; sliceId: string; sessionId: string; pr: any; requestKey: string; detail: string }
+  | { kind: "ci-fix"; sliceId: string; sessionId: string; pr: any; key: string; message: string; detail: string; attempt: number; notify: boolean }
   | { kind: "pr-open-clear"; sliceId: string; sessionId: string; pr: any }
   | { kind: "pr-auto-merge"; sliceId: string; sessionId: string; pr: any; key: string };
 
@@ -566,66 +602,38 @@ function evaluatePr(
   }
 
   if (pr.checks === "FAIL") {
-    // Fix-first, escalate-on-persist — the conflict path's shape applied to CI
-    // (#303). "Ask the steward to rebase + /smithy.fix" is safe to attempt
-    // deterministically and clears the common stale-main / fixable-failure
-    // cases; the legate-agent is only needed once bounded attempts don't take.
-    const key = actionKey("ci-fix", pr, String(pr.head_sha || ""));
-    if (alreadyDispatched(slice, key)) {
-      // A ci-fix for THIS head SHA already went out; the same SHA is still
-      // failing. Only re-nudge a worker that parked without pushing a fix
-      // (bounded + escalating) — don't count it as a fresh attempt.
-      const nd = postDispatchNudge(slice, workerStatus, ts, key);
-      if (nd.nudge) {
-        out.push({
-          kind: "post-dispatch-nudge",
-          sliceId,
-          sessionId,
-          pr,
-          key,
-          count: nd.count,
-          message: ciFixMessage(slice, pr, state.raw),
-          detail: `re-sent ci-fix prompt (nudge ${nd.count}/${POST_DISPATCH.escalateAfterNudges}) — worker ${workerStatus}`,
-        });
-      } else if (nd.escalate) {
-        out.push({
-          kind: "nudge-exhausted",
-          sliceId,
-          sessionId,
-          pr,
-          requestKey: actionKey("ci-nudges-exhausted", pr, key),
-          reason: "worker_unresponsive_after_ci_fix",
-          detail: `Sent ${nd.count} ci-fix nudges to PR #${pr.number} worker (session ${sessionId}); still ${workerStatus} with failing CI. Operator should attach and inspect.`,
-        });
-      }
-      return;
+    // Self-heal (#506): the FIRST fix goes out immediately; every later
+    // still-failing tick re-dispatches, gated by exponential backoff + jitter so a
+    // parked/slow steward — or a failure that keeps regenerating as the base moves
+    // — is re-poked ever-further apart, never every tick, and forever (no give-up).
+    const prev = ciRecoveryAttempts(state.raw, sliceId);
+    const nowMs = parseMs(ts);
+    if (prev > 0 && Number.isFinite(nowMs) && nowMs < ciBackoffUntil(state.raw, sliceId)) {
+      return; // still cooling down — hold, act next window (absorbs CI re-runs)
     }
-    const rounds = Number(slice.ci_fix_rounds || 0);
-    if (rounds >= CI_FIX_MAX_ROUNDS) {
-      // Bounded steward attempts exhausted (a fresh failing head SHA after
-      // CI_FIX_MAX_ROUNDS /smithy.fix rounds). This is the real-PR-diff-failure
-      // case — escalate to the legate-agent for human judgement, exactly once.
-      if (!slice.ci_fix_escalated_at) {
-        out.push({
-          kind: "ci-failure",
-          sliceId,
-          sessionId,
-          pr,
-          requestKey: actionKey("ci-failure", pr, (pr.failed_checks || []).map((c: any) => `${c.name}:${c.url || ""}`).join(",")),
-          detail: `PR #${pr.number} still has failing CI after ${rounds} deterministic steward fix round(s) (rebase + /smithy.fix). This looks like a real PR-diff failure, not stale-main or a flake the loop can clear on its own. Failed checks:\n${failedChecksSummary(pr)}`,
-        });
-      }
-      return;
-    }
-    // Dispatch the steward to fix it first.
+    // Keyed per distinct failing head SHA (#506): a re-dispatch for the SAME commit
+    // still re-pokes the steward but does NOT burn an attempt, so CI re-runs of one
+    // commit can't march the count toward the notify threshold. A genuinely new
+    // failing commit the steward pushed IS a fresh attempt (ever-longer backoff).
+    const headSha = String(pr.head_sha || "");
+    const sameSha = headSha !== "" && headSha === String(slice.ci_recovery_head_sha || "");
+    const attempt = sameSha ? Math.max(prev, 1) : prev + 1;
     out.push({
       kind: "ci-fix",
       sliceId,
       sessionId,
       pr,
-      key,
+      // Key varies by attempt so `mark`/dedup never suppress a legitimate re-try.
+      key: actionKey("ci-fix", pr, `attempt-${attempt}`),
       message: ciFixMessage(slice, pr, state.raw),
-      detail: `sent ci-fix /smithy.fix (round ${rounds + 1}/${CI_FIX_MAX_ROUNDS}) for failing CI on PR #${pr.number}`,
+      detail:
+        attempt > 1
+          ? `re-sent ci-fix /smithy.fix (auto attempt ${attempt}, backing off) for failing CI on PR #${pr.number}`
+          : `sent ci-fix /smithy.fix for failing CI on PR #${pr.number}`,
+      attempt,
+      // Notify once at the threshold — but only on a genuinely new attempt (a
+      // distinct failing commit), never on a same-SHA re-poke.
+      notify: !sameSha && attempt === CI_NOTIFY_ATTEMPT,
     });
     return;
   }
@@ -1065,20 +1073,44 @@ export async function apply(decisions: BabysitDecision[], ctx: HandlerContext, s
           break;
         }
         slice.stage = "pr-in-rerun";
-        // Count this round only after a successful send so a transient outage is
-        // retried next tick rather than burning an attempt against the budget.
-        slice.ci_fix_rounds = Number(slice.ci_fix_rounds || 0) + 1;
-        mark(slice, "ci-fix", d.key, "processor sent CI-failure fix", ts);
+        // Self-heal bookkeeping (#506): record this attempt durably and schedule the
+        // next exponential-backoff window (warm) — the shared self-heal pace. Only
+        // now (after a successful send) so a transient outage is retried next tick
+        // rather than burning an attempt. Stamp the SHA the count reflects so a
+        // same-commit re-run next tick re-pokes without burning a fresh attempt.
+        const attempt = Number.isFinite(d.attempt) && d.attempt > 0 ? d.attempt : 1;
+        const counts = ensureRetryCounts(state.raw);
+        counts[CI_RECOVERY_KEY(d.sliceId)] = attempt;
+        ctx.emitTransition?.({ type: "retry.counted", key: CI_RECOVERY_KEY(d.sliceId), count: attempt });
+        slice.ci_recovery_head_sha = d.pr?.head_sha ?? null;
+        const nowMs = parseMs(ts);
+        if (Number.isFinite(nowMs)) {
+          if (!state.raw[CI_BACKOFF_FIELD] || typeof state.raw[CI_BACKOFF_FIELD] !== "object") {
+            state.raw[CI_BACKOFF_FIELD] = {};
+          }
+          state.raw[CI_BACKOFF_FIELD][d.sliceId] = nowMs + backoffMs(attempt, d.sliceId);
+        }
+        mark(slice, "ci-fix", d.key, `processor sent CI-failure fix (attempt ${attempt})`, ts);
         ctx.emitTransition?.({ type: "slice.stage.changed", sliceId: d.sliceId, stage: "pr-in-rerun" });
         res.actions.push({ action: "ci-fix", sliceId: d.sliceId, sessionId: d.sessionId, pr: d.pr, detail: d.detail });
         res.mutated = true;
+        // Notify the operator ONCE at the threshold — visible, but the loop keeps
+        // retrying (this is not a give-up; #506). A genuinely broken PR diff may
+        // never self-heal, so surface it for a human while still probing forever.
+        if (d.notify) {
+          await fireRequest({
+            ts,
+            slice,
+            requestKey: actionKey("ci-unresolved", d.pr),
+            sliceId: d.sliceId,
+            sessionId: d.sessionId,
+            pr: d.pr,
+            reason: "CI still failing after repeated auto-fix attempts",
+            detail: `PR #${d.pr.number} still has failing CI after ${attempt} deterministic steward fix attempt(s) (rebase + /smithy.fix); the loop keeps retrying with exponential backoff + jitter. This may be a real PR-diff failure a human should take over. Failed checks:\n${failedChecksSummary(d.pr)}`,
+          });
+        }
         break;
       }
-      case "ci-failure":
-        slice.ci_fix_escalated_at = ts;
-        await fireRequest({ ts, slice, requestKey: d.requestKey, sliceId: d.sliceId, sessionId: d.sessionId, pr: d.pr, reason: "CI failure requires Legate judgement", detail: d.detail });
-        res.mutated = true;
-        break;
       case "pr-open-clear":
         slice.stage = "pr-open";
         slice.pr_open_at = ts;
@@ -1086,9 +1118,18 @@ export async function apply(decisions: BabysitDecision[], ctx: HandlerContext, s
         // exhaustion latch so a future review thread starts a fresh budget (#224).
         delete slice.review_fix_rounds;
         delete slice.review_fix_escalated_at;
-        // Same for the CI-fix budget (#303): a later CI failure starts fresh.
-        delete slice.ci_fix_rounds;
-        delete slice.ci_fix_escalated_at;
+        // CI self-heal budget (#506): CI cleared, so reset the durable attempt
+        // counter + drop the warm backoff window and the tracked SHA — a future
+        // re-failure (a base movement broke it again) re-probes promptly with a
+        // short first wait, exactly like the conflict reset.
+        if (ciRecoveryAttempts(state.raw, d.sliceId) > 0) {
+          ensureRetryCounts(state.raw)[CI_RECOVERY_KEY(d.sliceId)] = 0;
+          ctx.emitTransition?.({ type: "retry.counted", key: CI_RECOVERY_KEY(d.sliceId), count: 0 });
+        }
+        if (state.raw[CI_BACKOFF_FIELD] && typeof state.raw[CI_BACKOFF_FIELD] === "object") {
+          delete state.raw[CI_BACKOFF_FIELD][d.sliceId];
+        }
+        delete slice.ci_recovery_head_sha;
         mark(slice, "pr-open", actionKey("pr-open", d.pr), "processor observed PR all clear", ts);
         ctx.emitTransition?.({ type: "slice.stage.changed", sliceId: d.sliceId, stage: "pr-open" });
         res.actions.push({ action: "pr-open", sliceId: d.sliceId, sessionId: d.sessionId, pr: d.pr, detail: "observed PR all clear" });
