@@ -4,7 +4,8 @@ import { prNumber, workerBySessionId } from "../pure/session.js";
 import { hashText } from "../pure/hash.js";
 import { resolveMergeRequirements, type MergePolicy } from "../../../herald/profiles/merge-policy.js";
 import { mergeBlocker, mergeReadiness, taskTypeForSlice } from "../pure/slice.js";
-import { parseMs } from "../pure/self-heal.js";
+import { backoffMs, parseMs } from "../pure/self-heal.js";
+import { ensureRetryCounts } from "../state/mutations.js";
 import {
   CI_RECOVERY_DOMAIN,
   decideCiFix,
@@ -70,6 +71,35 @@ const REVIEW_FIX_MAX_ROUNDS = 3;
 // the shared `pure/self-heal-pacer.ts` the relaunch and dispatch-recovery domains
 // reuse. See that module for the full rationale; this handler just calls
 // decideCiFix / recordCiFixAttempt / resetCiFixRecovery.
+
+// Merge-conflict self-heal (#504). A conflict is never "done" — a resolved one can
+// be RE-CREATED the moment another PR merges into the base — so the loop
+// re-dispatches the conflict-fix INDEFINITELY rather than escalating once and
+// parking the slice. Pacing reuses the shared exponential-backoff + per-slice jitter
+// (`pure/self-heal.ts`), the same self-healing shape as steward relaunch and spawn
+// re-dispatch (#460): the first fix goes out immediately; each still-conflicting
+// re-try waits ever-longer (2min → … → 6h plateau), so a stuck conflict is probed
+// cheaply forever and self-heals the instant it clears. The operator is notified
+// ONCE at CONFLICT_NOTIFY_ATTEMPT (visible, not a give-up). The durable per-slice
+// attempt counter lives in `transient_retry_counts` (folded via `retry.counted`, so
+// it survives a restart); the next-eligible timestamps live in the warm
+// `conflict_recovery_backoff_until` map (reset on a cold start, like relaunch's).
+const CONFLICT_RECOVERY_KEY = (sliceId: string): string => "conflict-recovery:" + sliceId;
+const CONFLICT_BACKOFF_FIELD = "conflict_recovery_backoff_until";
+const CONFLICT_NOTIFY_ATTEMPT = 3;
+
+/** Pure read of a slice's conflict-recovery attempt counter (0 when never tried). */
+function conflictRecoveryAttempts(raw: any, sliceId: string): number {
+  const c = raw?.transient_retry_counts;
+  const v = c && typeof c === "object" ? c[CONFLICT_RECOVERY_KEY(sliceId)] : undefined;
+  return Number.isFinite(v) ? v : 0;
+}
+
+/** Pure read of a slice's next conflict-recovery eligibility (epoch ms; 0 = eligible now). */
+function conflictBackoffUntil(raw: any, sliceId: string): number {
+  const b = raw?.[CONFLICT_BACKOFF_FIELD];
+  return b && typeof b === "object" && Number.isFinite(b[sliceId]) ? b[sliceId] : 0;
+}
 
 const STRANDED_MESSAGE = [
   "[STRANDED-STEWARD-NUDGE] The deterministic loop sees no PR for this slice yet.",
@@ -148,8 +178,7 @@ export type BabysitDecision =
   | { kind: "pr-snapshot"; sliceId: string; pr: any }
   | { kind: "discover-pr"; sliceId: string; sessionId: string; pr: any }
   | { kind: "unknown-pr-state"; sliceId: string; sessionId: string; pr: any; requestKey: string; detail: string }
-  | { kind: "conflict-persisted"; sliceId: string; sessionId: string; pr: any; requestKey: string; detail: string }
-  | { kind: "conflict-fix"; sliceId: string; sessionId: string; pr: any; key: string; message: string }
+  | { kind: "conflict-fix"; sliceId: string; sessionId: string; pr: any; key: string; message: string; attempt: number; notify: boolean }
   | { kind: "post-dispatch-nudge"; sliceId: string; sessionId: string; pr: any; key: string; count: number; message: string; detail: string }
   | { kind: "nudge-exhausted"; sliceId: string; sessionId: string; pr: any; requestKey: string; reason: string; detail: string }
   | { kind: "review-fix"; sliceId: string; sessionId: string; pr: any; key: string; message: string; detail: string; threadIds: string[]; commentIds: string[] }
@@ -443,45 +472,27 @@ function evaluatePr(
   const evalSlice = discovered ? { ...slice, stage: "pr-open", pr_open_at: ts } : slice;
 
   if (pr.mergeable === "CONFLICTING") {
-    if (slice.stage === "pr-resolving-conflicts") {
-      out.push({
-        kind: "conflict-persisted",
-        sliceId,
-        sessionId,
-        pr,
-        requestKey: actionKey("conflict-persisted", pr),
-        detail: `PR #${pr.number} is still CONFLICTING after the processor previously sent a conflict-resolution prompt. Legate judgement is required before repeating recovery.`,
-      });
-      return;
+    // Self-heal (#504): the FIRST fix goes out immediately; every later
+    // still-conflicting tick re-dispatches, gated by exponential backoff + jitter so
+    // a parked/slow steward — or a conflict that keeps regenerating as the base moves
+    // — is re-poked ever-further apart, never every tick, and forever (no give-up).
+    const prev = conflictRecoveryAttempts(state.raw, sliceId);
+    const nowMs = parseMs(ts);
+    if (prev > 0 && Number.isFinite(nowMs) && nowMs < conflictBackoffUntil(state.raw, sliceId)) {
+      return; // still cooling down — hold in pr-resolving-conflicts, act next window
     }
-    const key = actionKey("conflict-fix", pr);
-    if (alreadyDispatched(slice, key)) {
-      const nd = postDispatchNudge(slice, workerStatus, ts, key);
-      if (nd.nudge) {
-        out.push({
-          kind: "post-dispatch-nudge",
-          sliceId,
-          sessionId,
-          pr,
-          key,
-          count: nd.count,
-          message: conflictMessage(slice, pr, state.raw),
-          detail: `re-sent conflict-fix prompt (nudge ${nd.count}/${POST_DISPATCH.escalateAfterNudges}) — worker ${workerStatus}`,
-        });
-      } else if (nd.escalate) {
-        out.push({
-          kind: "nudge-exhausted",
-          sliceId,
-          sessionId,
-          pr,
-          requestKey: actionKey("conflict-nudges-exhausted", pr, key),
-          reason: "worker_unresponsive_after_conflict_fix",
-          detail: `Sent ${nd.count} conflict-fix nudges to PR #${pr.number} worker (session ${sessionId}); still ${workerStatus}. Operator should attach and inspect.`,
-        });
-      }
-      return;
-    }
-    out.push({ kind: "conflict-fix", sliceId, sessionId, pr, key, message: conflictMessage(slice, pr, state.raw) });
+    const attempt = prev + 1;
+    out.push({
+      kind: "conflict-fix",
+      sliceId,
+      sessionId,
+      pr,
+      // Key varies by attempt so `mark`/dedup never suppress a legitimate re-try.
+      key: actionKey("conflict-fix", pr, `attempt-${attempt}`),
+      message: conflictMessage(slice, pr, state.raw),
+      attempt,
+      notify: attempt === CONFLICT_NOTIFY_ATTEMPT,
+    });
     return;
   }
 
@@ -847,9 +858,6 @@ export async function apply(decisions: BabysitDecision[], ctx: HandlerContext, s
       case "unknown-pr-state":
         await fireRequest({ ts, slice, requestKey: d.requestKey, sliceId: d.sliceId, sessionId: d.sessionId, pr: d.pr, reason: "unknown PR state", detail: d.detail });
         break;
-      case "conflict-persisted":
-        await fireRequest({ ts, slice, requestKey: d.requestKey, sliceId: d.sliceId, sessionId: d.sessionId, pr: d.pr, reason: "merge conflict persisted after processor prompt", detail: d.detail });
-        break;
       case "conflict-fix": {
         try {
           await deps.sendMessage(d.sessionId, d.message, d.sliceId);
@@ -858,10 +866,43 @@ export async function apply(decisions: BabysitDecision[], ctx: HandlerContext, s
           break;
         }
         slice.stage = "pr-resolving-conflicts";
-        mark(slice, "conflict-fix", d.key, "processor sent conflict-resolution fix", ts);
+        // Self-heal bookkeeping (#504): record this attempt durably and schedule the
+        // next exponential-backoff window (warm) — the shared self-heal pace.
+        const attempt = Number.isFinite(d.attempt) && d.attempt > 0 ? d.attempt : 1;
+        const counts = ensureRetryCounts(state.raw);
+        counts[CONFLICT_RECOVERY_KEY(d.sliceId)] = attempt;
+        ctx.emitTransition?.({ type: "retry.counted", key: CONFLICT_RECOVERY_KEY(d.sliceId), count: attempt });
+        const nowMs = parseMs(ts);
+        if (Number.isFinite(nowMs)) {
+          if (!state.raw[CONFLICT_BACKOFF_FIELD] || typeof state.raw[CONFLICT_BACKOFF_FIELD] !== "object") {
+            state.raw[CONFLICT_BACKOFF_FIELD] = {};
+          }
+          state.raw[CONFLICT_BACKOFF_FIELD][d.sliceId] = nowMs + backoffMs(attempt, d.sliceId);
+        }
+        mark(slice, "conflict-fix", d.key, `processor sent conflict-resolution fix (attempt ${attempt})`, ts);
         ctx.emitTransition?.({ type: "slice.stage.changed", sliceId: d.sliceId, stage: "pr-resolving-conflicts" });
-        res.actions.push({ action: "conflict-fix", sliceId: d.sliceId, sessionId: d.sessionId, pr: d.pr, detail: "sent conflict-resolution prompt" });
+        res.actions.push({
+          action: "conflict-fix",
+          sliceId: d.sliceId,
+          sessionId: d.sessionId,
+          pr: d.pr,
+          detail: attempt > 1 ? `re-sent conflict-resolution prompt (auto attempt ${attempt}, backing off)` : "sent conflict-resolution prompt",
+        });
         res.mutated = true;
+        // Notify the operator ONCE at the threshold — visible, but the loop keeps
+        // retrying (this is not a give-up; #504).
+        if (d.notify) {
+          await fireRequest({
+            ts,
+            slice,
+            requestKey: actionKey("conflict-unresolved", d.pr),
+            sliceId: d.sliceId,
+            sessionId: d.sessionId,
+            pr: d.pr,
+            reason: "merge conflict persists after repeated auto-resolution attempts",
+            detail: `PR #${d.pr.number} is still CONFLICTING after ${attempt} conflict-fix attempts; the loop keeps retrying with exponential backoff + jitter. Operator can inspect the branch if it never clears.`,
+          });
+        }
         break;
       }
       case "post-dispatch-nudge": {
@@ -1074,6 +1115,16 @@ export async function apply(decisions: BabysitDecision[], ctx: HandlerContext, s
         // a future re-failure (a base movement broke it again) re-probes promptly.
         if (resetCiFixRecovery(state.raw, d.sliceId, slice)) {
           ctx.emitTransition?.({ type: "retry.counted", key: CI_RECOVERY_DOMAIN.retryKey(d.sliceId), count: 0 });
+        }
+        // Conflict self-heal budget (#504): the conflict cleared, so reset the durable
+        // attempt counter + drop the warm backoff window — a future re-conflict
+        // (another PR merged into the base) re-probes promptly with a short first wait.
+        if (conflictRecoveryAttempts(state.raw, d.sliceId) > 0) {
+          ensureRetryCounts(state.raw)[CONFLICT_RECOVERY_KEY(d.sliceId)] = 0;
+          ctx.emitTransition?.({ type: "retry.counted", key: CONFLICT_RECOVERY_KEY(d.sliceId), count: 0 });
+        }
+        if (state.raw[CONFLICT_BACKOFF_FIELD] && typeof state.raw[CONFLICT_BACKOFF_FIELD] === "object") {
+          delete state.raw[CONFLICT_BACKOFF_FIELD][d.sliceId];
         }
         mark(slice, "pr-open", actionKey("pr-open", d.pr), "processor observed PR all clear", ts);
         ctx.emitTransition?.({ type: "slice.stage.changed", sliceId: d.sliceId, stage: "pr-open" });

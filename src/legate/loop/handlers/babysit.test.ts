@@ -327,23 +327,35 @@ describe("babysit assess", () => {
     expect(assess(state).find((d) => d.kind === "ci-fix")).toMatchObject({ attempt: 2, notify: false });
   });
 
-  it("post-dispatch nudges a parked worker on a re-dispatch of the same key", async () => {
-    const key = ["conflict-fix", 5, "OPEN", "CONFLICTING", "PASS", "", ""].join(":");
+  it("holds (no re-dispatch) while inside the conflict-recovery backoff window (#504)", () => {
     const state = loopState({
-      slices: {
-        s: {
-          worker_session_id: "w",
-          stage: "pr-open",
-          pr: { number: 5 },
-          last_processor_action_key: key,
-          last_processor_action_at: T_30M_AGO,
-        },
+      raw: {
+        slices: {},
+        repo: { default_branch: "main" },
+        transient_retry_counts: { "conflict-recovery:s": 1 },
+        conflict_recovery_backoff_until: { s: Date.parse(NOW) + 60_000 }, // 1min out
       },
+      slices: { s: { worker_session_id: "w", stage: "pr-resolving-conflicts", pr: { number: 5 } } },
       sessions: [session("w", "idle")],
       perSlice: { s: { recentOutput: { output: "" }, pr: { number: 5, state: "OPEN", mergeable: "CONFLICTING", checks: "PASS" } } },
     });
-    const ds = assess(state);
-    expect(ds.find((d) => d.kind === "post-dispatch-nudge")).toMatchObject({ count: 1 });
+    // A pr-snapshot still records state, but the conflict-fix is held while cooling down.
+    expect(assess(state).filter((d) => d.kind === "conflict-fix")).toEqual([]);
+  });
+
+  it("re-dispatches conflict-fix once the backoff window elapses, bumping the attempt (#504)", () => {
+    const state = loopState({
+      raw: {
+        slices: {},
+        repo: { default_branch: "main" },
+        transient_retry_counts: { "conflict-recovery:s": 1 },
+        conflict_recovery_backoff_until: { s: Date.parse(NOW) - 1000 }, // eligible
+      },
+      slices: { s: { worker_session_id: "w", stage: "pr-resolving-conflicts", pr: { number: 5 } } },
+      sessions: [session("w", "idle")],
+      perSlice: { s: { recentOutput: { output: "" }, pr: { number: 5, state: "OPEN", mergeable: "CONFLICTING", checks: "PASS" } } },
+    });
+    expect(assess(state).find((d) => d.kind === "conflict-fix")).toMatchObject({ attempt: 2, notify: false });
   });
 });
 
@@ -501,13 +513,17 @@ describe("babysit apply", () => {
     const state = loopState({ slices: { s: slice } });
     const c = ctx();
     const d = deps();
-    const res = await apply([{ kind: "conflict-fix", sliceId: "s", sessionId: "w", pr: { number: 5 }, key: "k", message: "MSG" }], c, state, d);
+    const res = await apply([{ kind: "conflict-fix", sliceId: "s", sessionId: "w", pr: { number: 5 }, key: "k", message: "MSG", attempt: 1, notify: false }], c, state, d);
     expect(d.sendMessage).toHaveBeenCalledWith("w", "MSG", "s");
     expect(slice.stage).toBe("pr-resolving-conflicts");
     expect((slice as any).last_processor_action_key).toBe("k");
     expect(res.actions[0]).toMatchObject({ action: "conflict-fix" });
     // #175: a Herald slice.stage.changed transition event accompanies the move.
     expect(c.emitTransition).toHaveBeenCalledWith({ type: "slice.stage.changed", sliceId: "s", stage: "pr-resolving-conflicts" });
+    // #504 self-heal: the attempt is recorded durably and a backoff window scheduled.
+    expect(state.raw.transient_retry_counts["conflict-recovery:s"]).toBe(1);
+    expect(c.emitTransition).toHaveBeenCalledWith({ type: "retry.counted", key: "conflict-recovery:s", count: 1 });
+    expect(state.raw.conflict_recovery_backoff_until.s).toBeGreaterThan(Date.parse(NOW));
   });
 
   it("ci-fix sends the prompt, advances stage, and records the self-heal attempt (#506)", async () => {
@@ -915,6 +931,15 @@ describe("babysit review-fix comment-id dedup (#224)", () => {
     expect(slice.review_fix_escalated_at).toBeUndefined();
   });
 
+  it("conflict-fix at the notify threshold fires a one-time operator judgement request but keeps retrying (#504)", async () => {
+    const state = loopState({ slices: { s: { worker_session_id: "w", stage: "pr-resolving-conflicts", pr: { number: 5 } } } });
+    const d = deps();
+    const res = await apply([{ kind: "conflict-fix", sliceId: "s", sessionId: "w", pr: { number: 5 }, key: "k3", message: "MSG", attempt: 3, notify: true }], ctx(), state, d);
+    expect(d.sendMessage).toHaveBeenCalled(); // still re-dispatched (not a give-up)
+    expect(res.requests.some((r: any) => r.reason === "merge conflict persists after repeated auto-resolution attempts")).toBe(true);
+    expect(state.raw.transient_retry_counts["conflict-recovery:s"]).toBe(3);
+  });
+
   it("pr-open-clear resets the CI self-heal budget so a re-created failure re-probes promptly (#506)", async () => {
     const slice: any = { worker_session_id: "w", stage: "pr-in-rerun", pr: { number: 5 }, ci_recovery_head_sha: "sha1" };
     const state = loopState({
@@ -932,5 +957,22 @@ describe("babysit review-fix comment-id dedup (#224)", () => {
     expect(state.raw.ci_recovery_backoff_until.s).toBeUndefined();
     expect(slice.ci_recovery_head_sha).toBeUndefined();
     expect(c.emitTransition).toHaveBeenCalledWith({ type: "retry.counted", key: "ci-recovery:s", count: 0 });
+  });
+
+  it("pr-open-clear resets the conflict self-heal budget so a re-created conflict re-probes promptly (#504)", async () => {
+    const state = loopState({
+      raw: {
+        slices: {},
+        repo: { default_branch: "main" },
+        transient_retry_counts: { "conflict-recovery:s": 4 },
+        conflict_recovery_backoff_until: { s: Date.parse(NOW) + 3_600_000 },
+      },
+      slices: { s: { worker_session_id: "w", stage: "pr-resolving-conflicts", pr: { number: 5 } } },
+    });
+    const c = ctx();
+    await apply([{ kind: "pr-open-clear", sliceId: "s", sessionId: "w", pr: { number: 5 } }], c, state, deps());
+    expect(state.raw.transient_retry_counts["conflict-recovery:s"]).toBe(0);
+    expect(state.raw.conflict_recovery_backoff_until.s).toBeUndefined();
+    expect(c.emitTransition).toHaveBeenCalledWith({ type: "retry.counted", key: "conflict-recovery:s", count: 0 });
   });
 });

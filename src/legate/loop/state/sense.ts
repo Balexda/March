@@ -2,7 +2,7 @@ import type { LoopMeta } from "../meta.js";
 import type { LoopState, SliceExternalState, SmithyView } from "./types.js";
 import { looseSessionMatch, summarizeWorkers } from "../pure/session.js";
 import { dispatchableReady, isTerminalSlice } from "../pure/slice.js";
-import { actionableLayer0Items, queueDepth, readySmithyItems } from "../pure/smithy-graph.js";
+import { actionableLayer0Items, queueDepth } from "../pure/smithy-graph.js";
 import { prSnapshotErrored, prSnapshotNumber, type ObservedSession, type SystemState } from "../../../herald/events.js";
 
 /**
@@ -137,17 +137,19 @@ async function senseSmithy(
   } catch (err: any) {
     return { ok: false, error: err?.message || String(err), ready: [], queue: { dispatchable: 0, blocked: 0, total: 0 } };
   }
-  // `ready` drives the actual dispatch this tick — smithy serializes work per
-  // record (one `next_action` each), so the loop paces itself through the layer-0
-  // frontier rather than spawning a steward for every ready node at once.
-  const ready = readySmithyItems(status);
-  // The queue METRIC, by contrast, is measured at the smithy graph's NODE level so
-  // the dashboard reflects the true dependency frontier, not the one-next-action-
-  // per-record collapse (#289). `dispatchable` = the actionable layer-0 nodes a
-  // steward could be launched on now, MINUS work already in-flight/archived (the
-  // same dedup `assess()` applies). `blocked` = the next wave (layer 1, one dep
-  // away). `total` = the deep backlog (layer ≥ 2).
-  const dispatchable = dispatchableReady(state, actionableLayer0Items(status)).length;
+  // Dispatch AND the queue metric are both measured at the smithy graph's NODE
+  // level (#289 metric; #504 dispatch). `ready` is the actionable layer-0 frontier —
+  // every independent layer-0 node is its own dispatch unit, so sibling
+  // user-stories / task-slices in one spec launch in PARALLEL (bounded only by the
+  // global spawn cap, #313) rather than serializing behind the record's single
+  // `next_action` (which is a dependency-blind, one-per-record human hint —
+  // Balexda/SmithyCLI#499/#501). Dependency + parent→child edges are already encoded
+  // as layers ≥ 1, so parallelizing siblings never crosses a real dependency.
+  const ready = actionableLayer0Items(status);
+  // `dispatchable` = that frontier MINUS work already in-flight/archived (the same
+  // dedup `assess()` applies). `blocked` = the next wave (layer 1, one dep away).
+  // `total` = the deep backlog (layer ≥ 2).
+  const dispatchable = dispatchableReady(state, ready).length;
   const { blocked, total } = queueDepth(status);
   return {
     ok: true,
