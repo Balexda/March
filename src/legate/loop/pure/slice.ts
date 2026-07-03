@@ -1,7 +1,14 @@
 import { dispatchBranch, dispatchItemKey, dispatchSliceId, sliceActionKey } from "./dispatch-id.js";
 import { isMarchBotComment } from "./march-bot.js";
 import { resolveMergeRequirements, type MergePolicy } from "../../../herald/profiles/merge-policy.js";
-import { backoffMs, readRecoveryRate, stepRecoveryRate } from "./self-heal.js";
+import { readRecoveryRate, stepRecoveryRate } from "./self-heal.js";
+import {
+  backoffUntil,
+  clearBackoff,
+  retryAttempts,
+  scheduleBackoff,
+  type RetryDomain,
+} from "./self-heal-pacer.js";
 
 /**
  * Pure slice/archive reasoning: terminal detection and the dedup/recovery
@@ -240,11 +247,13 @@ export const DISPATCH_RECOVERY_BACKOFF_FIELD = "dispatch_recovery_backoff_until"
  *  so a spawn-failure burst and a steward-relaunch burst don't throttle each other. */
 export const DISPATCH_RECOVERY_RATE_FIELD = "dispatch_recovery_rate";
 
-/** Pure read of the dispatch-recovery backoff map. */
-function readDispatchBackoff(state: any): Record<string, number> {
-  const b = state?.[DISPATCH_RECOVERY_BACKOFF_FIELD];
-  return b && typeof b === "object" ? b : {};
-}
+/** This domain's ({@link recoveryAttemptKey}, {@link DISPATCH_RECOVERY_BACKOFF_FIELD})
+ *  pair for the shared self-heal {@link RetryDomain pacer} — the same retry-counter +
+ *  warm-backoff-window bookkeeping the relaunch and CI-fix domains use. */
+export const DISPATCH_RECOVERY_DOMAIN: RetryDomain = {
+  retryKey: (sliceId) => recoveryAttemptKey(sliceId),
+  backoffField: DISPATCH_RECOVERY_BACKOFF_FIELD,
+};
 
 /**
  * Schedule the next dispatch-recovery backoff window for a slice after a failed
@@ -253,18 +262,13 @@ function readDispatchBackoff(state: any): Record<string, number> {
  * finite time (a non-date tick ts → backoff can't gate, so don't record one).
  */
 export function scheduleDispatchRecoveryBackoff(state: any, sliceId: string, attempt: number, nowMs: number): void {
-  if (!Number.isFinite(nowMs)) return;
-  if (!state[DISPATCH_RECOVERY_BACKOFF_FIELD] || typeof state[DISPATCH_RECOVERY_BACKOFF_FIELD] !== "object") {
-    state[DISPATCH_RECOVERY_BACKOFF_FIELD] = {};
-  }
-  state[DISPATCH_RECOVERY_BACKOFF_FIELD][sliceId] = nowMs + backoffMs(Math.max(attempt, 1), sliceId);
+  scheduleBackoff(state, DISPATCH_RECOVERY_DOMAIN, sliceId, attempt, nowMs);
 }
 
 /** Clear a slice's dispatch-recovery backoff (it transitioned cleanly, so a future
  *  re-strand should re-probe promptly with a short first backoff). */
 export function clearDispatchRecoveryBackoff(state: any, sliceId: string): void {
-  const b = state?.[DISPATCH_RECOVERY_BACKOFF_FIELD];
-  if (b && typeof b === "object") delete b[sliceId];
+  clearBackoff(state, DISPATCH_RECOVERY_DOMAIN, sliceId);
 }
 
 /** AIMD decrease: halve R (floored at MIN) after a failed re-dispatch. */
@@ -299,9 +303,7 @@ export function recoveryAttemptKey(sliceId: string): string {
  * an operator is pinged once at the end rather than on every recoverable failure.
  */
 export function recoveryBudgetExhausted(state: any, sliceId: string): boolean {
-  const counts = state?.transient_retry_counts && typeof state.transient_retry_counts === "object" ? state.transient_retry_counts : {};
-  const used = Number.isFinite(counts[recoveryAttemptKey(sliceId)]) ? counts[recoveryAttemptKey(sliceId)] : 0;
-  return used >= DISPATCH_RECOVERY_LIMIT;
+  return retryAttempts(state, DISPATCH_RECOVERY_DOMAIN, sliceId) >= DISPATCH_RECOVERY_LIMIT;
 }
 
 /** True when a slice is escalated for a reason the loop is allowed to auto-recover. */
@@ -367,17 +369,15 @@ export interface RecoverableEscalation {
  */
 export function recoverableEscalations(state: any, ready: readonly any[] | undefined, nowMs = NaN): RecoverableEscalation[] {
   const slices = state?.slices && typeof state.slices === "object" ? state.slices : {};
-  const counts = state?.transient_retry_counts && typeof state.transient_retry_counts === "object" ? state.transient_retry_counts : {};
-  const backoff = readDispatchBackoff(state);
   const candidates: { item: any; sliceId: string; attempt: number; until: number }[] = [];
   for (const item of ready ?? []) {
     const sliceId = dispatchSliceId(item);
     if (!escalatedRecoverable(slices[sliceId])) continue;
     if (alreadyArchivedSlice(state, item, sliceId)) continue;
     if (otherLiveBlocker(state, item, sliceId)) continue;
-    const used = Number.isFinite(counts[recoveryAttemptKey(sliceId)]) ? counts[recoveryAttemptKey(sliceId)] : 0;
+    const used = retryAttempts(state, DISPATCH_RECOVERY_DOMAIN, sliceId);
     // Backoff gate: skip while still cooling down (only when we can compare times).
-    const until = Number.isFinite(backoff[sliceId]) ? backoff[sliceId] : 0;
+    const until = backoffUntil(state, DISPATCH_RECOVERY_DOMAIN, sliceId);
     if (Number.isFinite(nowMs) && nowMs < until) continue;
     candidates.push({ item, sliceId, attempt: used + 1, until });
   }
