@@ -1101,7 +1101,14 @@ export async function apply(decisions: BabysitDecision[], ctx: HandlerContext, s
           await fireRequest({
             ts,
             slice,
-            requestKey: actionKey("ci-unresolved", d.pr),
+            // Key by the failing head SHA so the one-time notify fires again for a
+            // NEW failing commit after an all-clear reset. `requestJudgement`
+            // dedups on `slice.last_processor_request_key`, which `pr-open-clear`
+            // does NOT clear — a SHA-less key would suppress the notify for a
+            // re-created CI failure whose PR fields (number/state/checks) match the
+            // prior episode's. Attempt alone can't discriminate (it resets across
+            // episodes); the head SHA is distinct per failing commit.
+            requestKey: actionKey("ci-unresolved", d.pr, String(d.pr?.head_sha || "")),
             sliceId: d.sliceId,
             sessionId: d.sessionId,
             pr: d.pr,

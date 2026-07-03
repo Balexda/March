@@ -549,7 +549,11 @@ describe("babysit apply", () => {
     const d = deps();
     const res = await apply([{ kind: "ci-fix", sliceId: "s", sessionId: "w", pr: { number: 5, head_sha: "sha3" }, key: "k3", message: "MSG", detail: "x", attempt: 3, notify: true }], ctx(), state, d);
     expect(d.sendMessage).toHaveBeenCalled(); // still re-dispatched (not a give-up)
-    expect(res.requests.some((r: any) => r.reason === "CI still failing after repeated auto-fix attempts")).toBe(true);
+    const notify = res.requests.find((r: any) => r.reason === "CI still failing after repeated auto-fix attempts");
+    expect(notify).toBeTruthy();
+    // Keyed by the failing head SHA so a re-created failure after an all-clear
+    // reset (which doesn't clear last_processor_request_key) notifies again.
+    expect(notify.requestKey).toContain("sha3");
     expect(state.raw.transient_retry_counts["ci-recovery:s"]).toBe(3);
   });
 
