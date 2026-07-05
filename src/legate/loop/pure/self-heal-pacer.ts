@@ -14,9 +14,11 @@
  * Each re-implemented the same read guards, the same
  * `now + backoffMs(attempt, slice)` schedule, and the same
  * ensure-the-map-exists dance. Reading all three together is what drew the
- * abstraction boundary here: the STATE representation + scheduling is common; the
+ * abstraction boundary here: the STATE representation + scheduling is common —
+ * including the "it's time" gate every domain runs ({@link whenDue}: hold while
+ * cooling down, call back with the next attempt once the window elapses); the
  * POLICY (AIMD, an operator ladder, a per-head-SHA guard, a notify threshold) is
- * NOT — it stays in each caller. The pacer deliberately holds none of it.
+ * NOT — it lives in each caller's callback. The pacer deliberately holds none of it.
  *
  * A {@link RetryDomain} names one domain's two `raw` locations. The durable count
  * lives in `transient_retry_counts` (folded via `retry.counted`, so it survives a
@@ -82,12 +84,33 @@ export function clearBackoff(raw: any, domain: RetryDomain, sliceId: string): vo
   if (b && typeof b === "object") delete b[sliceId];
 }
 
-// ---- convenience predicate ------------------------------------------------
+// ---- the "it's time" gate ---------------------------------------------------
 
 /** True when a prior attempt exists AND `nowMs` is before the window ⇒ HOLD this
- *  tick (still cooling down). The common eligibility gate for a backoff-paced
- *  re-dispatch; a domain with extra policy (a ladder, AIMD) composes the reads
- *  above instead. */
+ *  tick (still cooling down). The predicate under {@link whenDue}; exported for
+ *  callers that only need the boolean. */
 export function coolingDown(raw: any, domain: RetryDomain, sliceId: string, nowMs: number): boolean {
   return retryAttempts(raw, domain, sliceId) > 0 && Number.isFinite(nowMs) && nowMs < backoffUntil(raw, domain, sliceId);
+}
+
+/**
+ * The shared "it's time" gate, callback-style — every pacer consumer holds a slice
+ * while it is cooling down and acts once its window elapses, so the pacer owns that
+ * shape. Invokes `onDue` only when the slice is eligible — never tried, past its
+ * window, or `nowMs` not finite (a non-date tick can't gate) — and returns its
+ * result; returns `undefined` (without calling back) while still cooling down.
+ * `onDue` receives the next 1-based attempt (prior count + 1; a domain with its own
+ * counting rule, like CI's per-head-SHA guard, derives from it) and the window that
+ * just elapsed (0 = never scheduled; domains selecting longest-waiting-first use it
+ * as the wait key). What happens when it IS time stays the caller's policy.
+ */
+export function whenDue<T>(
+  raw: any,
+  domain: RetryDomain,
+  sliceId: string,
+  nowMs: number,
+  onDue: (attempt: number, until: number) => T,
+): T | undefined {
+  if (coolingDown(raw, domain, sliceId, nowMs)) return undefined;
+  return onDue(retryAttempts(raw, domain, sliceId) + 1, backoffUntil(raw, domain, sliceId));
 }

@@ -3,10 +3,10 @@ import { isMarchBotComment } from "./march-bot.js";
 import { resolveMergeRequirements, type MergePolicy } from "../../../herald/profiles/merge-policy.js";
 import { readRecoveryRate, stepRecoveryRate } from "./self-heal.js";
 import {
-  backoffUntil,
   clearBackoff,
   retryAttempts,
   scheduleBackoff,
+  whenDue,
   type RetryDomain,
 } from "./self-heal-pacer.js";
 
@@ -375,11 +375,11 @@ export function recoverableEscalations(state: any, ready: readonly any[] | undef
     if (!escalatedRecoverable(slices[sliceId])) continue;
     if (alreadyArchivedSlice(state, item, sliceId)) continue;
     if (otherLiveBlocker(state, item, sliceId)) continue;
-    const used = retryAttempts(state, DISPATCH_RECOVERY_DOMAIN, sliceId);
-    // Backoff gate: skip while still cooling down (only when we can compare times).
-    const until = backoffUntil(state, DISPATCH_RECOVERY_DOMAIN, sliceId);
-    if (Number.isFinite(nowMs) && nowMs < until) continue;
-    candidates.push({ item, sliceId, attempt: used + 1, until });
+    // The pacer's "it's time" gate: the callback fires only once the slice is past
+    // its backoff window (a candidate still cooling down is skipped).
+    whenDue(state, DISPATCH_RECOVERY_DOMAIN, sliceId, nowMs, (attempt, until) => {
+      candidates.push({ item, sliceId, attempt, until });
+    });
   }
   // Longest-waiting first: smallest next-eligible timestamp (never-tried = 0) wins.
   candidates.sort((a, b) => a.until - b.until);

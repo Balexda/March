@@ -28,11 +28,11 @@
  */
 import type { StepContract } from "./contract.js";
 import {
-  backoffUntil,
   clearBackoff,
   retryAttempts,
   scheduleBackoff,
   setRetryAttempts,
+  whenDue,
   type RetryDomain,
 } from "../pure/self-heal-pacer.js";
 
@@ -74,16 +74,17 @@ export interface CiFixPlan {
  * tick → always eligible, for unit tests).
  */
 export function decideCiFix(raw: any, sliceId: string, slice: any, pr: any, nowMs: number): CiFixPlan | null {
-  const prev = retryAttempts(raw, CI_RECOVERY_DOMAIN, sliceId);
-  if (prev > 0 && Number.isFinite(nowMs) && nowMs < backoffUntil(raw, CI_RECOVERY_DOMAIN, sliceId)) {
-    return null; // still cooling down — hold, act next window (absorbs CI re-runs)
-  }
-  const headSha = String(pr?.head_sha || "");
-  const sameSha = headSha !== "" && headSha === String(slice?.ci_recovery_head_sha || "");
-  const attempt = sameSha ? Math.max(prev, 1) : prev + 1;
-  // Notify once at the threshold — but only on a genuinely new attempt (a distinct
-  // failing commit), never on a same-SHA re-poke.
-  return { attempt, notify: !sameSha && attempt === CI_NOTIFY_ATTEMPT };
+  // The pacer owns the "it's time" gate (hold inside the window — which also
+  // absorbs CI re-runs); this callback is only the CI-specific counting policy.
+  const plan = whenDue(raw, CI_RECOVERY_DOMAIN, sliceId, nowMs, (next): CiFixPlan => {
+    const headSha = String(pr?.head_sha || "");
+    const sameSha = headSha !== "" && headSha === String(slice?.ci_recovery_head_sha || "");
+    const attempt = sameSha ? Math.max(next - 1, 1) : next;
+    // Notify once at the threshold — but only on a genuinely new attempt (a distinct
+    // failing commit), never on a same-SHA re-poke.
+    return { attempt, notify: !sameSha && attempt === CI_NOTIFY_ATTEMPT };
+  });
+  return plan ?? null;
 }
 
 /**

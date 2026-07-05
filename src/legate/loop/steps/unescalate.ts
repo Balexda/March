@@ -3,11 +3,10 @@
  *
  * `unescalate` was copy-pasted between `recovery.ts` and `relaunch.ts` (inlined to
  * dodge a relaunch↔recovery import cycle) — exactly the duplication the step
- * library exists to remove. The shared {@link StepContract} it advertises now
- * lives in `./contract.ts`, alongside the CI-fix step and any future leaves.
+ * library exists to remove. The shared {@link StepContract} it advertises lives in
+ * `./contract.ts`, alongside the CI-fix step and any future leaves.
  */
 import type { StepContract } from "./contract.js";
-export type { StepContract } from "./contract.js";
 
 /** The `unescalate` step's contract: a pure in-memory slice mutation, no I/O. */
 export const unescalateStep: StepContract = { name: "unescalate", destructive: false };

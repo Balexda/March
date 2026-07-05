@@ -1,7 +1,7 @@
 /**
  * @l0 @deterministic @ci
  */
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   backoffUntil,
   clearBackoff,
@@ -9,6 +9,7 @@ import {
   retryAttempts,
   scheduleBackoff,
   setRetryAttempts,
+  whenDue,
   type RetryDomain,
 } from "./self-heal-pacer.js";
 import { backoffMs } from "./self-heal.js";
@@ -71,5 +72,37 @@ describe("self-heal pacer", () => {
     const raw: any = { test_backoff_until: { s: NOW + 999999 } };
     expect(retryAttempts(raw, DOMAIN, "s")).toBe(0);
     expect(coolingDown(raw, DOMAIN, "s", NOW)).toBe(false);
+  });
+
+  it("whenDue holds (no callback, undefined) while cooling down", () => {
+    const raw: any = {};
+    setRetryAttempts(raw, DOMAIN, "s", 1);
+    scheduleBackoff(raw, DOMAIN, "s", 1, NOW);
+    const until = backoffUntil(raw, DOMAIN, "s");
+    const onDue = vi.fn(() => "acted");
+    expect(whenDue(raw, DOMAIN, "s", until - 1, onDue)).toBeUndefined();
+    expect(onDue).not.toHaveBeenCalled();
+  });
+
+  it("whenDue calls back with the next attempt + elapsed window and returns the result", () => {
+    const raw: any = {};
+    setRetryAttempts(raw, DOMAIN, "s", 2);
+    scheduleBackoff(raw, DOMAIN, "s", 2, NOW);
+    const until = backoffUntil(raw, DOMAIN, "s");
+    const onDue = vi.fn((attempt: number, window: number) => ({ attempt, window }));
+    expect(whenDue(raw, DOMAIN, "s", until + 1, onDue)).toEqual({ attempt: 3, window: until });
+  });
+
+  it("whenDue fires immediately on a never-tried slice (attempt 1, window 0)", () => {
+    const onDue = vi.fn((attempt: number, window: number) => [attempt, window]);
+    expect(whenDue({}, DOMAIN, "s", NOW, onDue)).toEqual([1, 0]);
+  });
+
+  it("whenDue fires on a non-finite now (a non-date tick can't gate)", () => {
+    const raw: any = {};
+    setRetryAttempts(raw, DOMAIN, "s", 1);
+    scheduleBackoff(raw, DOMAIN, "s", 1, NOW);
+    const onDue = vi.fn((attempt: number) => attempt);
+    expect(whenDue(raw, DOMAIN, "s", NaN, onDue)).toBe(2);
   });
 });

@@ -15,11 +15,11 @@ import {
   BACKOFF_MAX_MS,
 } from "../pure/self-heal.js";
 import {
-  backoffUntil,
   clearBackoff,
   retryAttempts,
   scheduleBackoff,
   setRetryAttempts,
+  whenDue,
   type RetryDomain,
 } from "../pure/self-heal-pacer.js";
 
@@ -278,12 +278,11 @@ export function assess(state: LoopState): RelaunchDecision[] {
     const sessId = slice.worker_session_id;
     if (typeof sessId === "string" && sessId.length > 0 && liveSessionIds.has(sessId)) continue;
 
-    const prev = retryAttempts(state.raw, RELAUNCH_DOMAIN, sliceId);
-    const attempt = prev + 1;
-
     // The operator's graduated ladder owns slices it is walking (`recovery_rung`):
-    // keep the bounded, every-tick behavior so `march legate recover` stays prompt.
+    // keep the bounded, every-tick behavior so `march legate recover` stays prompt
+    // — no backoff gate, so it reads the attempt directly rather than via whenDue.
     if (slice.recovery_rung !== undefined) {
+      const attempt = retryAttempts(state.raw, RELAUNCH_DOMAIN, sliceId) + 1;
       if (!ELIGIBLE_STAGES.has(slice.stage)) continue;
       if (attempt > RELAUNCH_LIMIT) continue;
       ladder.push({ ...baseDecision(sliceId, slice, attempt, worktreesParent), mode: "ladder" });
@@ -313,11 +312,11 @@ export function assess(state: LoopState): RelaunchDecision[] {
       continue; // non-steward stages are not auto-recovered
     }
 
-    // Backoff gate: skip while still cooling down (only when we can compare times).
-    const until = backoffUntil(state.raw, RELAUNCH_DOMAIN, sliceId);
-    if (Number.isFinite(nowMs) && nowMs < until) continue;
-
-    autoCandidates.push({ sliceId, slice, attempt, until, unescalateStage });
+    // The pacer's "it's time" gate: the callback fires only once the slice is past
+    // its backoff window (a candidate still cooling down is skipped).
+    whenDue(state.raw, RELAUNCH_DOMAIN, sliceId, nowMs, (attempt, until) => {
+      autoCandidates.push({ sliceId, slice, attempt, until, unescalateStage });
+    });
   }
 
   // Longest-waiting first: smallest next-eligible timestamp (never-tried = 0) wins.
