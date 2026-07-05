@@ -275,53 +275,56 @@ describe("babysit assess", () => {
       perSlice: { s: { recentOutput: { output: "" }, pr: { number: 5, state: "OPEN", mergeable: "MERGEABLE", checks: "FAIL", needs_response_count: 0, head_sha: "sha1" } } },
     });
     expect(kindsOf(assess(state))).toEqual(["pr-snapshot", "ci-fix"]);
+    expect(assess(state).find((d) => d.kind === "ci-fix")).toMatchObject({ attempt: 1, notify: false });
   });
 
-  it("escalates failing CI to legate judgement only after the bounded steward rounds are spent (#303)", async () => {
-    // Two rounds already spent, and this is a fresh failing head SHA (not the
-    // one last dispatched against) → no more steward attempts, escalate once.
+  it("holds (no re-dispatch) while inside the ci-recovery backoff window (#506)", () => {
     const state = loopState({
-      slices: {
-        s: {
-          worker_session_id: "w",
-          stage: "pr-in-rerun",
-          pr: { number: 5 },
-          ci_fix_rounds: 2,
-          last_processor_action: "ci-fix",
-          last_processor_action_key: ["ci-fix", 5, "OPEN", "MERGEABLE", "FAIL", "", "shaPREV"].join(":"),
-        },
+      raw: {
+        slices: {},
+        repo: { default_branch: "main" },
+        transient_retry_counts: { "ci-recovery:s": 1 },
+        ci_recovery_backoff_until: { s: Date.parse(NOW) + 60_000 }, // 1min out
       },
-      sessions: [session("w", "idle")],
-      perSlice: { s: { recentOutput: { output: "" }, pr: { number: 5, state: "OPEN", mergeable: "MERGEABLE", checks: "FAIL", needs_response_count: 0, head_sha: "shaNEW" } } },
-    });
-    expect(kindsOf(assess(state))).toEqual(["pr-snapshot", "ci-failure"]);
-
-    // Once the escalation latch is set, it does not fire again (escalate once).
-    (state.slices.s as any).ci_fix_escalated_at = NOW;
-    expect(kindsOf(assess(state))).toEqual(["pr-snapshot"]);
-  });
-
-  it("re-nudges a parked worker on the same failing head SHA instead of burning a fresh ci-fix round (#303)", async () => {
-    const key = ["ci-fix", 5, "OPEN", "MERGEABLE", "FAIL", "", "sha1"].join(":");
-    const state = loopState({
-      slices: {
-        s: {
-          worker_session_id: "w",
-          stage: "pr-in-rerun",
-          pr: { number: 5 },
-          ci_fix_rounds: 1,
-          last_processor_action: "ci-fix",
-          last_processor_action_key: key,
-          last_processor_action_at: T_30M_AGO,
-        },
-      },
+      slices: { s: { worker_session_id: "w", stage: "pr-in-rerun", pr: { number: 5 }, ci_recovery_head_sha: "sha1" } },
       sessions: [session("w", "idle")],
       perSlice: { s: { recentOutput: { output: "" }, pr: { number: 5, state: "OPEN", mergeable: "MERGEABLE", checks: "FAIL", needs_response_count: 0, head_sha: "sha1" } } },
     });
-    const ds = assess(state);
-    expect(ds.find((d) => d.kind === "post-dispatch-nudge")).toMatchObject({ count: 1 });
-    expect(ds.find((d) => d.kind === "ci-fix")).toBeUndefined();
-    expect(ds.find((d) => d.kind === "ci-failure")).toBeUndefined();
+    // A pr-snapshot still records state, but the ci-fix is held while cooling down.
+    expect(assess(state).filter((d) => d.kind === "ci-fix")).toEqual([]);
+  });
+
+  it("re-dispatches ci-fix on a NEW failing head SHA once the window elapses, bumping the attempt (#506)", () => {
+    const state = loopState({
+      raw: {
+        slices: {},
+        repo: { default_branch: "main" },
+        transient_retry_counts: { "ci-recovery:s": 1 },
+        ci_recovery_backoff_until: { s: Date.parse(NOW) - 1000 }, // eligible
+      },
+      slices: { s: { worker_session_id: "w", stage: "pr-in-rerun", pr: { number: 5 }, ci_recovery_head_sha: "shaPREV" } },
+      sessions: [session("w", "idle")],
+      perSlice: { s: { recentOutput: { output: "" }, pr: { number: 5, state: "OPEN", mergeable: "MERGEABLE", checks: "FAIL", needs_response_count: 0, head_sha: "shaNEW" } } },
+    });
+    expect(assess(state).find((d) => d.kind === "ci-fix")).toMatchObject({ attempt: 2, notify: false });
+  });
+
+  it("re-pokes the SAME failing head SHA past the window WITHOUT burning a fresh attempt (#506)", () => {
+    // CI re-ran the same commit and it's still red. Past the window we re-poke the
+    // (likely parked) steward, but the attempt count stays put — a re-run must not
+    // march the count toward the notify threshold.
+    const state = loopState({
+      raw: {
+        slices: {},
+        repo: { default_branch: "main" },
+        transient_retry_counts: { "ci-recovery:s": 2 },
+        ci_recovery_backoff_until: { s: Date.parse(NOW) - 1000 }, // eligible
+      },
+      slices: { s: { worker_session_id: "w", stage: "pr-in-rerun", pr: { number: 5 }, ci_recovery_head_sha: "sha1" } },
+      sessions: [session("w", "idle")],
+      perSlice: { s: { recentOutput: { output: "" }, pr: { number: 5, state: "OPEN", mergeable: "MERGEABLE", checks: "FAIL", needs_response_count: 0, head_sha: "sha1" } } },
+    });
+    expect(assess(state).find((d) => d.kind === "ci-fix")).toMatchObject({ attempt: 2, notify: false });
   });
 
   it("post-dispatch nudges a parked worker on a re-dispatch of the same key", async () => {
@@ -507,21 +510,26 @@ describe("babysit apply", () => {
     expect(c.emitTransition).toHaveBeenCalledWith({ type: "slice.stage.changed", sliceId: "s", stage: "pr-resolving-conflicts" });
   });
 
-  it("ci-fix sends the prompt, advances stage, counts the round (#303)", async () => {
+  it("ci-fix sends the prompt, advances stage, and records the self-heal attempt (#506)", async () => {
     const slice: any = { worker_session_id: "w", stage: "pr-open", pr: { number: 5 } };
     const state = loopState({ slices: { s: slice } });
     const c = ctx();
     const d = deps();
-    const res = await apply([{ kind: "ci-fix", sliceId: "s", sessionId: "w", pr: { number: 5 }, key: "k", message: "MSG", detail: "x" }], c, state, d);
+    const res = await apply([{ kind: "ci-fix", sliceId: "s", sessionId: "w", pr: { number: 5, head_sha: "sha1" }, key: "k", message: "MSG", detail: "x", attempt: 1, notify: false }], c, state, d);
     expect(d.sendMessage).toHaveBeenCalledWith("w", "MSG", "s");
     expect(slice.stage).toBe("pr-in-rerun");
-    expect(slice.ci_fix_rounds).toBe(1);
     expect(slice.last_processor_action_key).toBe("k");
     expect(res.actions[0]).toMatchObject({ action: "ci-fix" });
     expect(c.emitTransition).toHaveBeenCalledWith({ type: "slice.stage.changed", sliceId: "s", stage: "pr-in-rerun" });
+    // #506 self-heal: the attempt is recorded durably, the SHA it reflects is
+    // stamped, and a backoff window is scheduled.
+    expect(state.raw.transient_retry_counts["ci-recovery:s"]).toBe(1);
+    expect(c.emitTransition).toHaveBeenCalledWith({ type: "retry.counted", key: "ci-recovery:s", count: 1 });
+    expect(slice.ci_recovery_head_sha).toBe("sha1");
+    expect(state.raw.ci_recovery_backoff_until.s).toBeGreaterThan(Date.parse(NOW));
   });
 
-  it("ci-fix that fails to send escalates instead of advancing stage or counting a round (#303)", async () => {
+  it("ci-fix that fails to send escalates instead of advancing stage or recording an attempt (#506)", async () => {
     const slice: any = { worker_session_id: "w", stage: "pr-open", pr: { number: 5 } };
     const state = loopState({ slices: { s: slice } });
     const d = deps({
@@ -529,19 +537,24 @@ describe("babysit apply", () => {
         throw new Error("down");
       }),
     });
-    const res = await apply([{ kind: "ci-fix", sliceId: "s", sessionId: "w", pr: { number: 5 }, key: "k", message: "M", detail: "x" }], ctx(), state, d);
+    const res = await apply([{ kind: "ci-fix", sliceId: "s", sessionId: "w", pr: { number: 5 }, key: "k", message: "M", detail: "x", attempt: 1, notify: false }], ctx(), state, d);
     expect(slice.stage).toBe("pr-open"); // not advanced
-    expect(slice.ci_fix_rounds).toBeUndefined(); // round not counted
+    expect(state.raw.transient_retry_counts?.["ci-recovery:s"]).toBeUndefined(); // attempt not counted
     expect(res.requests).toHaveLength(1);
     expect(res.actions).toHaveLength(0);
   });
 
-  it("ci-failure escalation latches ci_fix_escalated_at so it fires once (#303)", async () => {
-    const slice: any = { worker_session_id: "w", stage: "pr-in-rerun", pr: { number: 5 }, ci_fix_rounds: 2 };
-    const state = loopState({ slices: { s: slice } });
-    const res = await apply([{ kind: "ci-failure", sliceId: "s", sessionId: "w", pr: { number: 5 }, requestKey: "rk", detail: "d" }], ctx(), state, deps());
-    expect(slice.ci_fix_escalated_at).toBe(NOW);
-    expect(res.requests).toHaveLength(1);
+  it("ci-fix at the notify threshold fires a one-time operator request but keeps retrying (#506)", async () => {
+    const state = loopState({ slices: { s: { worker_session_id: "w", stage: "pr-in-rerun", pr: { number: 5 } } } });
+    const d = deps();
+    const res = await apply([{ kind: "ci-fix", sliceId: "s", sessionId: "w", pr: { number: 5, head_sha: "sha3" }, key: "k3", message: "MSG", detail: "x", attempt: 3, notify: true }], ctx(), state, d);
+    expect(d.sendMessage).toHaveBeenCalled(); // still re-dispatched (not a give-up)
+    const notify = res.requests.find((r: any) => r.reason === "CI still failing after repeated auto-fix attempts");
+    expect(notify).toBeTruthy();
+    // Keyed by the failing head SHA so a re-created failure after an all-clear
+    // reset (which doesn't clear last_processor_request_key) notifies again.
+    expect(notify.requestKey).toContain("sha3");
+    expect(state.raw.transient_retry_counts["ci-recovery:s"]).toBe(3);
   });
 
   it("comment-fix sends the prompt, marks the comment seen, posts the :eyes: ack, and advances stage", async () => {
@@ -900,5 +913,24 @@ describe("babysit review-fix comment-id dedup (#224)", () => {
     await apply([{ kind: "pr-open-clear", sliceId: "s", sessionId: "w", pr: { number: 5 } }], ctx(), state, deps());
     expect(slice.review_fix_rounds).toBeUndefined();
     expect(slice.review_fix_escalated_at).toBeUndefined();
+  });
+
+  it("pr-open-clear resets the CI self-heal budget so a re-created failure re-probes promptly (#506)", async () => {
+    const slice: any = { worker_session_id: "w", stage: "pr-in-rerun", pr: { number: 5 }, ci_recovery_head_sha: "sha1" };
+    const state = loopState({
+      raw: {
+        slices: {},
+        repo: { default_branch: "main" },
+        transient_retry_counts: { "ci-recovery:s": 4 },
+        ci_recovery_backoff_until: { s: Date.parse(NOW) + 3_600_000 },
+      },
+      slices: { s: slice },
+    });
+    const c = ctx();
+    await apply([{ kind: "pr-open-clear", sliceId: "s", sessionId: "w", pr: { number: 5 } }], c, state, deps());
+    expect(state.raw.transient_retry_counts["ci-recovery:s"]).toBe(0);
+    expect(state.raw.ci_recovery_backoff_until.s).toBeUndefined();
+    expect(slice.ci_recovery_head_sha).toBeUndefined();
+    expect(c.emitTransition).toHaveBeenCalledWith({ type: "retry.counted", key: "ci-recovery:s", count: 0 });
   });
 });

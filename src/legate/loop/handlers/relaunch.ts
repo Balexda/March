@@ -3,7 +3,6 @@ import path from "node:path";
 import type { HandlerContext, HandlerResult, LoopState } from "../state/types.js";
 import { emptyHandlerResult } from "../state/types.js";
 import { isWorkerSession } from "../pure/session.js";
-import { ensureRetryCounts } from "../state/mutations.js";
 import { execText } from "../clients/exec.js";
 import { unescalate } from "../steps/unescalate.js";
 import {
@@ -15,6 +14,14 @@ import {
   BACKOFF_JITTER,
   BACKOFF_MAX_MS,
 } from "../pure/self-heal.js";
+import {
+  clearBackoff,
+  retryAttempts,
+  scheduleBackoff,
+  setRetryAttempts,
+  whenDue,
+  type RetryDomain,
+} from "../pure/self-heal-pacer.js";
 
 /**
  * Steward relaunch: a non-terminal slice that still has an open PR but whose
@@ -130,6 +137,15 @@ export const RELAUNCH_BACKOFF_JITTER = BACKOFF_JITTER;
  *  with the recovery driver (#413) so both sides key the counter identically. */
 export const relaunchRetryKey = (sliceId: string): string => "relaunch-steward:" + sliceId;
 
+/** This domain's ({@link relaunchRetryKey}, `relaunch_backoff_until`) pair for the
+ *  shared self-heal {@link RetryDomain pacer} — the same durable-counter +
+ *  warm-backoff-window bookkeeping the dispatch-recovery and CI-fix domains use.
+ *  The AIMD rate + operator ladder remain relaunch's own policy, layered on top. */
+export const RELAUNCH_DOMAIN: RetryDomain = {
+  retryKey: relaunchRetryKey,
+  backoffField: "relaunch_backoff_until",
+};
+
 export interface RelaunchDecision {
   readonly sliceId: string;
   readonly bareBranch: string;
@@ -169,26 +185,6 @@ const defaultRelaunchDeps: RelaunchDeps = {
 
 function errMsg(err: any): string {
   return (err?.message || String(err)).slice(0, 200);
-}
-
-/** Pure read of the throttle counters (assess never mutates them). */
-function readRetryCounts(raw: any): Record<string, number> {
-  const c = raw?.transient_retry_counts;
-  return c && typeof c === "object" ? c : {};
-}
-
-/** Pure read of the per-slice backoff timers (epoch ms of next eligibility). */
-function readBackoff(raw: any): Record<string, number> {
-  const b = raw?.relaunch_backoff_until;
-  return b && typeof b === "object" ? b : {};
-}
-
-/** Ensure the warm backoff map exists and return it (apply-side mutation). */
-function ensureBackoff(raw: any): Record<string, number> {
-  if (!raw.relaunch_backoff_until || typeof raw.relaunch_backoff_until !== "object") {
-    raw.relaunch_backoff_until = {};
-  }
-  return raw.relaunch_backoff_until;
 }
 
 /** Pure read of the relaunch AIMD recovery rate (its own `recovery_rate` scalar),
@@ -257,8 +253,6 @@ export function assess(state: LoopState): RelaunchDecision[] {
   for (const s of state.sessions) {
     if (isWorkerSession(s, state.workerGroup) && typeof s?.id === "string") liveSessionIds.add(s.id);
   }
-  const counts = readRetryCounts(state.raw);
-  const backoff = readBackoff(state.raw);
   const nowMs = parseMs(state.ts);
   const worktreesParent = path.join(path.dirname(repoPath), "WorkTrees", path.basename(repoPath));
   // Slices with a pending operator recovery request this tick belong to the
@@ -284,12 +278,11 @@ export function assess(state: LoopState): RelaunchDecision[] {
     const sessId = slice.worker_session_id;
     if (typeof sessId === "string" && sessId.length > 0 && liveSessionIds.has(sessId)) continue;
 
-    const prev = Number.isFinite(counts[relaunchRetryKey(sliceId)]) ? counts[relaunchRetryKey(sliceId)] : 0;
-    const attempt = prev + 1;
-
     // The operator's graduated ladder owns slices it is walking (`recovery_rung`):
-    // keep the bounded, every-tick behavior so `march legate recover` stays prompt.
+    // keep the bounded, every-tick behavior so `march legate recover` stays prompt
+    // — no backoff gate, so it reads the attempt directly rather than via whenDue.
     if (slice.recovery_rung !== undefined) {
+      const attempt = retryAttempts(state.raw, RELAUNCH_DOMAIN, sliceId) + 1;
       if (!ELIGIBLE_STAGES.has(slice.stage)) continue;
       if (attempt > RELAUNCH_LIMIT) continue;
       ladder.push({ ...baseDecision(sliceId, slice, attempt, worktreesParent), mode: "ladder" });
@@ -319,11 +312,11 @@ export function assess(state: LoopState): RelaunchDecision[] {
       continue; // non-steward stages are not auto-recovered
     }
 
-    // Backoff gate: skip while still cooling down (only when we can compare times).
-    const until = Number.isFinite(backoff[sliceId]) ? backoff[sliceId] : 0;
-    if (Number.isFinite(nowMs) && nowMs < until) continue;
-
-    autoCandidates.push({ sliceId, slice, attempt, until, unescalateStage });
+    // The pacer's "it's time" gate: the callback fires only once the slice is past
+    // its backoff window (a candidate still cooling down is skipped).
+    whenDue(state.raw, RELAUNCH_DOMAIN, sliceId, nowMs, (attempt, until) => {
+      autoCandidates.push({ sliceId, slice, attempt, until, unescalateStage });
+    });
   }
 
   // Longest-waiting first: smallest next-eligible timestamp (never-tried = 0) wins.
@@ -454,8 +447,6 @@ export async function apply(
 ): Promise<HandlerResult> {
   const res = emptyHandlerResult();
   if (decisions.length === 0) return res;
-  const counts = ensureRetryCounts(state.raw);
-  const backoff = ensureBackoff(state.raw);
   const nowMs = parseMs(ctx.ts);
 
   // AIMD accumulators over THIS tick's automatic attempts.
@@ -463,11 +454,11 @@ export async function apply(
   let autoFailures = 0;
   let autoRateLimited = false;
 
-  // Persist THIS attempt against the budget. Called on success AND on every
-  // failure path: the counter advances the operator ladder's descent and the
-  // automatic backoff exponent alike.
+  // Persist THIS attempt against the budget (via the shared self-heal pacer).
+  // Called on success AND on every failure path: the counter advances the operator
+  // ladder's descent and the automatic backoff exponent alike.
   const recordAttempt = (d: RelaunchDecision): void => {
-    counts[relaunchRetryKey(d.sliceId)] = d.attempt;
+    setRetryAttempts(state.raw, RELAUNCH_DOMAIN, d.sliceId, d.attempt);
     ctx.emitTransition?.({ type: "retry.counted", key: relaunchRetryKey(d.sliceId), count: d.attempt });
   };
 
@@ -478,7 +469,7 @@ export async function apply(
     recordAttempt(d);
     if (d.mode !== "auto") return;
     autoFailures++;
-    if (Number.isFinite(nowMs)) backoff[d.sliceId] = nowMs + relaunchBackoffMs(d.attempt, d.sliceId);
+    scheduleBackoff(state.raw, RELAUNCH_DOMAIN, d.sliceId, d.attempt, nowMs);
   };
 
   for (const d of decisions) {
@@ -596,7 +587,7 @@ export async function apply(
     recordAttempt(d);
     // Healed: clear any pending backoff window so a future re-strand re-probes
     // promptly (its first backoff is short again).
-    if (d.mode === "auto") delete backoff[d.sliceId];
+    if (d.mode === "auto") clearBackoff(state.raw, RELAUNCH_DOMAIN, d.sliceId);
     res.mutated = true;
     res.actions.push({
       action: "relaunch-steward",
