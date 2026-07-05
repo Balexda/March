@@ -17,7 +17,7 @@ Quick pointers:
   docs; Feature 7's mechanically-derivable regions are refreshed by a
   **deterministic** extractor (planned `npm run docs:contracts:extract`, from
   Fastify endpoints / exported TS signatures). There is **no per-PR CI or AI
-  freshness gate** — Feature 5's planned `npm run docs:contracts:check` is an
+  freshness gate** — Feature 5's `npm run docs:contracts:check` is an
   opt-in, advisory local check that never blocks a PR, slice, or merge. This is
   Feature 6's maintenance convention in the contract-documentation track
   ([`docs/rfcs/2026-002-layered-testing-framework/02-subsystem-contract-documentation-track.features.md`](docs/rfcs/2026-002-layered-testing-framework/02-subsystem-contract-documentation-track.features.md)).
