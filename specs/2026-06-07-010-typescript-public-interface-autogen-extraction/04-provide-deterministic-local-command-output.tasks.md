@@ -64,7 +64,7 @@
 
 - [ ] **Cover the command with integration fixtures**
 
-  Add focused command-level tests that exercise current, stale, write, and service-unavailable scenarios through the public npm-run command or its command entrypoint. The tests should prove US4 behavior without adding CI enforcement or depending on live March processes.
+  Add focused command-level tests that exercise current, stale, write, and infrastructure-unavailable (Docker + March subsystems/sessions absent) scenarios through the public npm-run command or its command entrypoint. The tests should prove US4 behavior without adding CI enforcement or depending on live March processes.
 
   _Acceptance criteria:_
   - Tests cover AS 4.1 with current AUTOGEN content in check mode.
