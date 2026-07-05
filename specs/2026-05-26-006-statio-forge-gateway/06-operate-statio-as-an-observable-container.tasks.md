@@ -56,7 +56,7 @@
 
 ### Tasks
 
-- [ ] **Add Statio metrics and heartbeat instrumentation**
+- [x] **Add Statio metrics and heartbeat instrumentation**
 
   Add Statio-owned metric helpers under `src/observability/` or `src/statio/` following the existing service telemetry patterns. Record request count and latency with low-cardinality labels, expose heartbeat/uptime instruments, and integrate them with Statio request handling so telemetry remains disabled when `MARCH_OTEL` is unset.
 
@@ -68,7 +68,7 @@
   - With `MARCH_OTEL` unset, metric and heartbeat helpers are no-ops for AS 6.4
   - Tests cover enabled metrics, no-op telemetry, heartbeat stopping, and low-cardinality labels
 
-- [ ] **Instrument Statio operations and request logs**
+- [x] **Instrument Statio operations and request logs**
 
   Extend Statio request/forge handling so authenticated reads emit per-operation spans, mark failures as errored spans, preserve child nesting from `x-march-slice-id`, and write request logs through the shared pino/OTLP logger under `march-statio`. Keep logs bounded and free of token, PR body, or raw forge payload data.
 

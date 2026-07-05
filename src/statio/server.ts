@@ -2,8 +2,18 @@ import { timingSafeEqual } from "node:crypto";
 import Fastify, {
   type FastifyBaseLogger,
   type FastifyInstance,
+  type FastifyRequest,
 } from "fastify";
-import { emitStatioRequestSpan } from "../observability/statio-trace.js";
+import {
+  recordStatioRequest,
+  statusClass,
+} from "../observability/statio-metrics.js";
+import {
+  emitStatioRequestSpan,
+  type StatioSpanContext,
+  validStatioSliceId,
+  withStatioOperationSpan,
+} from "../observability/statio-trace.js";
 import { CLI_VERSION } from "../shared/version.js";
 import { createGhForgeAdapter } from "./adapter.js";
 import { STATIO_SERVICE_NAME } from "./config.js";
@@ -33,6 +43,60 @@ export interface BuildStatioServerOptions {
 
 function errorBody(code: ForgeErrorCode, message: string) {
   return { error: { code, message } };
+}
+
+function sliceIdFrom(request: FastifyRequest): string | undefined {
+  const slice = request.headers["x-march-slice-id"];
+  return Array.isArray(slice) ? slice[0] : slice;
+}
+
+function operationForRoute(route: string | undefined): string {
+  switch (route) {
+    case "/healthz":
+      return "healthz";
+    case "/status":
+      return "status";
+    case "/v1/repo":
+      return "repo_info";
+    case "/v1/prs":
+      return "list_prs";
+    case "/v1/prs/:number":
+      return "get_pr";
+    case "/v1/prs/:number/review-threads":
+      return "review_threads";
+    default:
+      return "unmatched";
+  }
+}
+
+function traceLogFields(
+  span: StatioSpanContext | undefined,
+): { trace_id?: string; span_id?: string } {
+  return span ? { trace_id: span.traceId, span_id: span.spanId } : {};
+}
+
+function sliceAttr(sliceId: string | undefined): { "march.slice_id"?: string } {
+  const valid = validStatioSliceId(sliceId);
+  return valid ? { "march.slice_id": valid } : {};
+}
+
+function statioLogFields(
+  request: FastifyRequest,
+  route: string,
+  statusCode: number,
+  durationMs: number,
+  span: StatioSpanContext | undefined,
+) {
+  const operation = operationForRoute(route);
+  return {
+    "statio.method": request.method,
+    "statio.route": route,
+    "statio.status_class": statusClass(statusCode),
+    "statio.operation": operation,
+    "statio.outcome": statusCode >= 500 ? "failure" : "success",
+    "statio.duration_ms": Math.round(durationMs),
+    ...traceLogFields(span),
+  };
 }
 
 function bearerMatches(authorization: string | undefined, token: string): boolean {
@@ -120,22 +184,35 @@ export function buildStatioServer(options: BuildStatioServerOptions = {}): Fasti
   const app =
     typeof loggerOption === "boolean"
       ? Fastify({ logger: loggerOption })
-      : Fastify({ loggerInstance: loggerOption });
+      : Fastify({ loggerInstance: loggerOption, disableRequestLogging: true });
 
   app.addHook("onResponse", async (request, reply) => {
-    const slice = request.headers["x-march-slice-id"];
-    const sliceId = Array.isArray(slice) ? slice[0] : slice;
+    const sliceId = sliceIdFrom(request);
+    const route = request.routeOptions.url ?? "unmatched";
+    const status = reply.statusCode;
     // Fastify tracks request duration on a monotonic clock; backdate the span
     // start from it rather than recording our own wall-clock timestamp.
     const endTimeMs = Date.now();
-    emitStatioRequestSpan({
+    const span = emitStatioRequestSpan({
       method: request.method,
-      route: request.routeOptions.url ?? "unmatched",
-      statusCode: reply.statusCode,
+      route,
+      statusCode: status,
       sliceId,
       startTimeMs: endTimeMs - reply.elapsedTime,
       endTimeMs,
     });
+    recordStatioRequest({
+      route,
+      method: request.method,
+      statusClass: statusClass(status),
+      operation: operationForRoute(route),
+      outcome: status >= 500 ? "failure" : "success",
+      durationSeconds: reply.elapsedTime / 1000,
+    });
+    request.log.info(
+      statioLogFields(request, route, status, reply.elapsedTime, span),
+      "statio request handled",
+    );
   });
 
   app.addHook("onRequest", async (request, reply) => {
@@ -181,23 +258,117 @@ export function buildStatioServer(options: BuildStatioServerOptions = {}): Fasti
     gh: { reachable: await repoReader.reachable() },
   }));
 
-  app.get("/v1/repo", async () => ({ repo: await repoReader.repoInfo() }));
+  app.get("/v1/repo", async (request) => {
+    const sliceId = sliceIdFrom(request);
+    return withStatioOperationSpan(
+      {
+        operation: "repo_info",
+        route: "/v1/repo",
+        method: request.method,
+        sliceId,
+        attributes: sliceAttr(sliceId),
+      },
+      async (span) => {
+        const repo = await repoReader.repoInfo();
+        request.log.info(
+          {
+            "statio.operation": "repo_info",
+            "statio.route": "/v1/repo",
+            ...traceLogFields(span),
+          },
+          "statio operation handled",
+        );
+        return { repo };
+      },
+    );
+  });
 
   app.get("/v1/prs", async (request) => {
     const filters = parseListPrsQuery(request.query);
-    return { prs: await forgeClient.listPrs(filters) };
+    const sliceId = sliceIdFrom(request);
+    return withStatioOperationSpan(
+      {
+        operation: "list_prs",
+        route: "/v1/prs",
+        method: request.method,
+        sliceId,
+        attributes: {
+          ...sliceAttr(sliceId),
+          "statio.has_head_filter": filters.head !== undefined,
+          "statio.has_author_filter": filters.author !== undefined,
+          "statio.state_filter": filters.state ?? "default",
+        },
+      },
+      async (span) => {
+        const prs = await forgeClient.listPrs(filters);
+        request.log.info(
+          {
+            "statio.operation": "list_prs",
+            "statio.route": "/v1/prs",
+            "statio.has_head_filter": filters.head !== undefined,
+            "statio.has_author_filter": filters.author !== undefined,
+            "statio.state_filter": filters.state ?? "default",
+            ...traceLogFields(span),
+          },
+          "statio operation handled",
+        );
+        return { prs };
+      },
+    );
   });
 
   app.get<{ Params: { number: string } }>("/v1/prs/:number", async (request) => {
     const number = parsePullRequestNumber(request.params.number);
-    return { pr: await forgeClient.getPr(number) };
+    const sliceId = sliceIdFrom(request);
+    return withStatioOperationSpan(
+      {
+        operation: "get_pr",
+        route: "/v1/prs/:number",
+        method: request.method,
+        sliceId,
+        attributes: sliceAttr(sliceId),
+      },
+      async (span) => {
+        const pr = await forgeClient.getPr(number);
+        request.log.info(
+          {
+            "statio.operation": "get_pr",
+            "statio.route": "/v1/prs/:number",
+            ...traceLogFields(span),
+          },
+          "statio operation handled",
+        );
+        return { pr };
+      },
+    );
   });
 
   app.get<{ Params: { number: string } }>(
     "/v1/prs/:number/review-threads",
     async (request): Promise<{ threads: ReviewThread[] }> => {
       const number = parsePullRequestNumber(request.params.number);
-      return { threads: await forgeClient.reviewThreads(number) };
+      const sliceId = sliceIdFrom(request);
+      return withStatioOperationSpan(
+        {
+          operation: "review_threads",
+          route: "/v1/prs/:number/review-threads",
+          method: request.method,
+          sliceId,
+          attributes: sliceAttr(sliceId),
+        },
+        async (span) => {
+          const threads = await forgeClient.reviewThreads(number);
+          request.log.info(
+            {
+              "statio.operation": "review_threads",
+              "statio.route": "/v1/prs/:number/review-threads",
+              ...traceLogFields(span),
+            },
+            "statio operation handled",
+          );
+          return { threads };
+        },
+      );
     },
   );
 

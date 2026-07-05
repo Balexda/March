@@ -2,11 +2,16 @@
  * @l1 @deterministic @ci
  */
 import type { AddressInfo } from "node:net";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { PassThrough } from "node:stream";
 import type { FastifyInstance } from "fastify";
 import { SpanStatusCode } from "@opentelemetry/api";
 import type { Span } from "@opentelemetry/sdk-trace-base";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { getActiveOtel, initOtel } from "../observability/otel.js";
+import { createStatioLogger } from "../observability/logger.js";
 import { spanIdForDispatch, traceIdForDispatch } from "../observability/trace-ids.js";
 import { StatioClient } from "./client.js";
 import type { RepoMetadataReader } from "./forge.js";
@@ -631,6 +636,17 @@ describe("statio request tracing", () => {
       "statio.route": "/v1/prs/:number",
       "statio.status_class": "2xx",
     });
+
+    const operationSpan = spans.find((s) => s.name === "statio.get_pr")!;
+    expect(operationSpan).toBeDefined();
+    expect(operationSpan.spanContext().traceId).toBe(traceIdForDispatch("slice-abc"));
+    expect(operationSpan.parentSpanContext?.spanId).toBe(spanIdForDispatch("slice-abc"));
+    expect(operationSpan.attributes).toMatchObject({
+      "statio.operation": "get_pr",
+      "statio.method": "GET",
+      "statio.route": "/v1/prs/:number",
+      "march.slice_id": "slice-abc",
+    });
   });
 
   it("keeps slice correlation on pull request list reads", async () => {
@@ -735,6 +751,15 @@ describe("statio request tracing", () => {
     const oversizedSpan = spans.filter((s) => s.name === "statio.request").at(-1)!;
     expect(oversizedSpan).toBeDefined();
     expect(oversizedSpan.parentSpanContext).toBeUndefined();
+
+    const operationSpans = spans.filter((s) => s.name === "statio.repo_info");
+    expect(operationSpans).toHaveLength(2);
+    for (const operationSpan of operationSpans) {
+      expect(operationSpan.parentSpanContext?.spanId).not.toBe(
+        spanIdForDispatch("bad slice id"),
+      );
+      expect(operationSpan.attributes).not.toHaveProperty("march.slice_id");
+    }
   });
 
   it("does not emit request spans when telemetry is disabled", async () => {
@@ -745,6 +770,24 @@ describe("statio request tracing", () => {
     const res = await app.inject({
       method: "GET",
       url: "/v1/repo",
+      headers: {
+        authorization: "Bearer secret",
+        "x-march-slice-id": "slice-abc",
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(start).not.toHaveBeenCalled();
+  });
+
+  it("does not emit operation spans when telemetry is disabled", async () => {
+    initOtel({});
+    const start = vi.spyOn(getActiveOtel().getTracer(), "startSpan");
+    app = buildStatioServer({ forgeClient: fakeForge(), token: "secret" });
+
+    const res = await app.inject({
+      method: "GET",
+      url: "/v1/prs/42",
       headers: {
         authorization: "Bearer secret",
         "x-march-slice-id": "slice-abc",
@@ -798,6 +841,55 @@ describe("statio request tracing", () => {
       "statio.outcome": "failure",
     });
     expect(span.status.code).toBe(SpanStatusCode.ERROR);
+    const operationSpan = spans.find((s) => s.name === "statio.repo_info")!;
+    expect(operationSpan).toBeDefined();
+    expect(operationSpan.status.code).toBe(SpanStatusCode.ERROR);
+  });
+
+  it("writes bounded request logs through the Statio service logger", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "march-statio-log-"));
+    try {
+      const logFilePath = path.join(dir, "statio.jsonl");
+      app = buildStatioServer({
+        forgeClient: fakeForge(),
+        token: "secret",
+        logger: createStatioLogger({
+          logFilePath,
+          env: {},
+          sync: true,
+          stdout: new PassThrough(),
+        }),
+      });
+
+      const res = await app.inject({
+        method: "GET",
+        url: "/v1/prs/42?token=do-not-log",
+        headers: {
+          authorization: "Bearer secret",
+          "x-march-slice-id": "slice-abc",
+        },
+      });
+
+      expect(res.statusCode).toBe(200);
+      const records = fs
+        .readFileSync(logFilePath, "utf-8")
+        .trim()
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => JSON.parse(line) as Record<string, unknown>);
+      const requestLog = records.find((record) => record.msg === "statio request handled")!;
+      expect(requestLog).toBeDefined();
+      expect(requestLog.name).toBe("march-statio");
+      expect(requestLog["statio.operation"]).toBe("get_pr");
+      expect(requestLog["statio.route"]).toBe("/v1/prs/:number");
+      expect(requestLog["statio.status_class"]).toBe("2xx");
+      const serialized = JSON.stringify(records);
+      expect(serialized).not.toContain("do-not-log");
+      expect(serialized).not.toContain("secret");
+      expect(serialized).not.toContain("Please adjust this.");
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 
