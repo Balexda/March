@@ -42,7 +42,7 @@ Castra exposes open process-health/status routes and a bearer-token-protected `/
 | Field | Contract |
 |-------|----------|
 | Method and path | `POST /v1/sessions` |
-| Request envelope | Header `Authorization: Bearer <token>`. JSON body requires `profile`, `repoPath`, `branch`, and `title`; optional fields are `group`, `model`, `createBranch`, and `metadata`. |
+| Request envelope | Header `Authorization: Bearer <token>`. JSON body requires `profile`, `repoPath`, `branch`, and `title`; optional fields are `group`, `model`, `createBranch`, and `metadata`. Body fields outside this set are ignored, not rejected. |
 | Response envelope | `201` with `{ "session": CastraSession }`. |
 | Authentication behavior | Bearer-token protected. Missing or invalid bearer tokens return `401` with `unauthorized`. |
 | Visible status or error behavior | Invalid bodies return `400`; concurrent launch/worktree races return `409`; agent-deck launch or session-identification failures return `502`; unexpected failures return `500`. |
@@ -127,7 +127,7 @@ Launch request body:
 
 - `/healthz` and `/status` are open routes; `/v1/*` session routes are the protected service boundary.
 - Every protected session route is scoped by `profile`; list and launch may additionally be scoped by `group`.
-- Launch accepts only the documented required fields and optional `group`, `model`, `createBranch`, and bounded string metadata fields as the public contract.
+- The documented required fields and optional `group`, `model`, `createBranch`, and bounded string metadata fields are launch's public contract; any additional body fields are ignored rather than rejected.
 - Castra returns `CastraSession` records with stable field names for list, launch, and show; unknown string values are represented as empty strings rather than omitted fields.
 - Session output line limiting is bounded to integer values from 1 through 100000.
 - Session mutation is limited to the allowed set keys `auto-mode`, `title`, and `model`.
