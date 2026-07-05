@@ -152,7 +152,7 @@ Recommended implementation sequence:
 - **FR-005**: Feature 5's `npm run docs:contracts:check` MUST remain an opt-in, advisory local check a contributor MAY run; no autonomous agent or CI job is required to run it as a gate.
 - **FR-006**: The convention MUST be referenced in `CONTRIBUTING.md`, `CLAUDE.md`, and `AGENTS.md`, stating that contract docs are maintained at edit time and not enforced by a freshness gate.
 - **FR-007**: The feature MUST NOT add a `.github/workflows/contract-freshness.yml` workflow or any CI job that validates contract freshness.
-- **FR-008**: The feature MUST record that SD-002 is resolved toward no per-check-in enforcement gate, and that both the Smithy-agent directive and the CI workflow remain cheaply available if drift later proves to need them.
+- **FR-008**: The feature MUST record that SD-002 is resolved toward no per-check-in enforcement gate, and that both the Smithy-agent enforcement directive and `.github/workflows/contract-freshness.yml` workflow remain rejected-but-cheaply-reversible alternatives if drift later proves to need them.
 - **FR-009**: The feature MUST NOT implement the structural AST-diff escalation path, which RFC SD-002 defers until drift is observed.
 - **FR-010**: The convention MUST follow March's autonomous-component posture (non-interactive, minimum access, clean exits) per `docs/vision.md` and `docs/operating-philosophy.md`.
 - **FR-011**: The deterministic auto-gen mechanism MUST be owned by Feature 7; this feature defines the convention and its contributor-doc references, not the extractor itself.
@@ -163,7 +163,7 @@ Recommended implementation sequence:
 - **Edit-Time Contract Update**: The same-change update of a subsystem's `contract.md` performed by the author or Smithy agent that altered its surface.
 - **Deterministic Contract Autogen (Feature 7)**: The deterministic extractor that refreshes mechanically-derivable contract regions; owned by Feature 7.
 - **Opt-In Freshness Check (Feature 5)**: `npm run docs:contracts:check`, an advisory local check that never gates work.
-- **SD-002 Decision Record**: The recorded resolution toward no enforcement gate, with the directive and workflow as reversible alternatives.
+- **SD-002 Decision Record**: The recorded resolution toward no enforcement gate, with edit-time maintenance plus deterministic auto-gen as the chosen path, the Smithy-agent enforcement directive and `.github/workflows/contract-freshness.yml` workflow as rejected-but-cheaply-reversible alternatives, structural AST-diff escalation deferred, and SD-011 closed as moot.
 
 ## Assumptions
 
@@ -183,6 +183,7 @@ Recommended implementation sequence:
 - Implementing the Feature 7 deterministic extractor (this feature only references it).
 - Authoring subsystem contract prose or the contract content itself (Features 2/3/4).
 - Any per-PR enforcement gate, blocking merge step, or AI freshness bot that validates documentation on check-in.
+- Adding or requiring a Smithy-agent enforcement directive (a reversible alternative, not chosen for this milestone).
 - Adding a `.github/workflows/contract-freshness.yml` GitHub Actions workflow (a reversible alternative, not chosen for this milestone).
 - Implementing the structural AST-diff escalation path (RFC SD-002 defers it until drift is observed).
 
@@ -194,4 +195,4 @@ Recommended implementation sequence:
 - **SC-002**: No PR, slice, or merge is blocked by a contract-freshness verdict; `npm run docs:contracts:check` is opt-in and advisory.
 - **SC-003**: `CONTRIBUTING.md`, `CLAUDE.md`, and `AGENTS.md` each reference the edit-time maintenance plus deterministic auto-gen convention and the absence of a freshness gate.
 - **SC-004**: Mechanically-derivable contract regions can be populated by Feature 7's deterministic extractor with no AI/LLM-on-check-in step.
-- **SC-005**: The SD-002 "no enforcement gate" resolution and the SD-011 closure are recorded so the decision stays legible and cheaply reversible.
+- **SC-005**: The SD-002 "no enforcement gate" resolution, rejected-but-cheaply-reversible Smithy-agent directive and `.github/workflows/contract-freshness.yml` alternatives, deferred structural AST-diff escalation, and SD-011 moot closure are recorded so the decision stays legible and deliberately reversible.

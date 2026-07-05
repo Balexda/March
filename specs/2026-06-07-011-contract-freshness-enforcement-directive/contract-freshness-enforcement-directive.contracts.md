@@ -141,5 +141,6 @@ callbacks.
 - **Smithy agent instructions**: Own the edit-time documentation maintenance the convention rides on; updating a subsystem's `contract.md` is part of the same change that alters its surface.
 - **Contributor guides**: `CONTRIBUTING.md`, `CLAUDE.md`, and `AGENTS.md` reference the convention and state there is no per-PR freshness gate.
 - **SD-002 vehicle decision**: This milestone enforces nothing automatically. Both the Smithy-agent enforcement directive and the `.github/workflows/contract-freshness.yml` workflow are rejected-but-cheaply-reversible alternatives, and the structural AST-diff escalation is deferred (RFC SD-002) until drift is observed. SD-011 (enforcement strength) is closed as moot.
+- **No enforcement provider**: The SD-002 decision record is documentation-only; it defines no live service API, runtime hook, autonomous prompt, CI job, route, event, or verdict path.
 - **Git and filesystem**: The convention relies only on local repository state; it needs no live services.
 - **March operating philosophy**: The convention follows the non-interactive, minimum-access, clean-exit rules in `docs/vision.md` and `docs/operating-philosophy.md`.

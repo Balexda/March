@@ -18,7 +18,7 @@
 
 ### Tasks
 
-- [ ] **Record the no-gate decision in the spec**
+- [x] **Record the no-gate decision in the spec**
 
   Update the feature spec so the SD-002 decision is visible in the story, requirements, debt, out-of-scope, and success-criteria surfaces that future maintainers read. The prose should satisfy AS 4.1-4.3 while preserving this feature as a maintenance convention rather than an enforcement vehicle.
 
@@ -29,7 +29,7 @@
   - The spec keeps structural AST-diff escalation deferred until drift is observed.
   - SD-011 is closed as moot because there is no enforcement-strength choice without a gate.
 
-- [ ] **Align the model and contract decision surfaces**
+- [x] **Align the model and contract decision surfaces**
 
   Update the data model and contracts artifacts so their SD-002 decision surfaces agree with the spec. Keep the entities and integration boundaries documentation-only, satisfying AS 4.1-4.3 without introducing a new provider, command, route, or event.
 
@@ -40,7 +40,7 @@
   - The contracts artifact records the deferred AST-diff escalation and SD-011 moot closure.
   - The contracts artifact does not define a live service API, runtime hook, or autonomous prompt.
 
-- [ ] **Preserve the no-enforcement implementation boundary**
+- [x] **Preserve the no-enforcement implementation boundary**
 
   Keep the implementation limited to the spec package and any directly necessary decision-record documentation. This task guards AS 4.1-4.3 by ensuring the record does not accidentally create the enforcement machinery it rejects.
 

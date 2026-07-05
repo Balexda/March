@@ -94,12 +94,14 @@ deterministic auto-gen.
 | `chosenVehicle` | enum | Yes | `maintenance-convention` (no enforcement gate). |
 | `rejectedAlternatives` | enum list | Yes | `smithy-agent-enforcement-directive`, `github-actions-workflow` (`.github/workflows/contract-freshness.yml`). |
 | `reversibility` | bounded text | Yes | Re-adding either rejected alternative is cheap and deliberate if drift slips through. |
+| `enforcesAutomatically` | boolean | Yes | Always false; this milestone records the decision and gates no PR, slice, or merge. |
 | `deferredEscalation` | bounded text | Yes | Structural AST-diff escalation deferred (RFC SD-002) until drift is observed. |
 | `closedSubQuestion` | reference | Yes | SD-011 closed as moot: with no gate, enforcement strength is not a question. |
 
 Validation rules:
 
 - The record must name both rejected alternatives and state their reversibility.
+- The record must keep the chosen vehicle as edit-time maintenance plus deterministic auto-gen, not a live enforcement provider.
 - The record must not implement the deferred escalation; it only documents the deferral.
 
 ## Relationships
