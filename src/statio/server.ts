@@ -183,7 +183,7 @@ export function buildStatioServer(options: BuildStatioServerOptions = {}): Fasti
   const loggerOption = options.logger ?? false;
   const app =
     typeof loggerOption === "boolean"
-      ? Fastify({ logger: loggerOption })
+      ? Fastify({ logger: loggerOption, disableRequestLogging: true })
       : Fastify({ loggerInstance: loggerOption, disableRequestLogging: true });
 
   app.addHook("onResponse", async (request, reply) => {
