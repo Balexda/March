@@ -27,7 +27,7 @@
   - The day-to-day testing guidance maps each staged command to L0, L1, L2 cassette-ready, or L3 cassette-ready coverage.
   - The `npm test` guidance identifies it as the sequential fail-fast aggregate deterministic PR gate over the staged scripts.
   - The Pre-Release Checklist's `npm test` step reflects the rebuilt aggregate gate from AS 4.2.
-  - The documentation makes clear that scheduled/stochastic runs, live cassette-backed L2/L3 execution, and cassette refresh remain outside M1's delivered PR gate.
+  - The documentation makes clear that future Cucumber.js runs, scheduled/stochastic runs, live cassette-backed L2/L3 execution, and cassette refresh remain outside M1's delivered PR gate (AS 4.3).
   - Documented usage routes through `npm run` or `npm test`, with no direct test-runner command introduced.
 
 **PR Outcome**: Contributors can choose the smallest relevant deterministic staged gate from operator docs, and release guidance stays aligned with the full `npm test` aggregate.
