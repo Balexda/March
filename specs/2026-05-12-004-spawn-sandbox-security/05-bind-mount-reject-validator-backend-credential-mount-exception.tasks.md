@@ -17,7 +17,7 @@
 
 ### Tasks
 
-- [ ] **Run credential-mount readability checks before artifact creation**
+- [x] **Run credential-mount readability checks before artifact creation**
 
   Wire the selected backend's `credentialMounts` into the existing dispatch validation path so each mount source is resolved from the process environment and checked before worktree, branch, snapshot image, container, proxy, or network artifacts can be created.
 
