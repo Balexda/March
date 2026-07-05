@@ -13,10 +13,12 @@ import {
 } from "./spawn-index.js";
 import {
   DEFAULT_BACKEND,
+  markSpawnRecordFailed,
   SPAWN_RECORD_VERSION,
   spawnRecordDir,
   spawnRecordPath,
   type SpawnRecord,
+  writeInitialSpawnRecord,
 } from "./spawn-record.js";
 
 describe("spawn-index", () => {
@@ -140,6 +142,56 @@ describe("spawn-index", () => {
 
     expect(loadSpawnRecord(value.id, home)).toEqual(value);
     expect(loadSpawnRecord("20260613-absent", home)).toBeUndefined();
+  });
+
+  it("loads failed records with optional failure reasons written by spawn-record", () => {
+    const home = makeHome();
+    const id = "20260613-fail01";
+    writeInitialSpawnRecord(
+      {
+        id,
+        repoPath: "/abs/repo",
+        branch: `march/spawn/${id}`,
+        worktreePath: `/abs/worktrees/march/${id}`,
+      },
+      home,
+    );
+
+    const failed = markSpawnRecordFailed(
+      id,
+      { error: "docker build exited non-zero" },
+      home,
+    );
+
+    expect(loadSpawnRecord(id, home)).toEqual(failed);
+    expect(loadSpawnRecord(id, home)?.failureReason).toBe(
+      "docker build exited non-zero",
+    );
+    const onDisk = JSON.parse(
+      fs.readFileSync(spawnRecordPath(id, home), "utf-8"),
+    );
+    expect(onDisk.version).toBe(SPAWN_RECORD_VERSION);
+    expect(onDisk.failureReason).toBe("docker build exited non-zero");
+    expect(Object.keys(onDisk)).not.toContain("error");
+  });
+
+  it("loads records that do not carry failureReason with the field absent", () => {
+    const home = makeHome();
+    const initial = writeInitialSpawnRecord(
+      {
+        id: "20260613-nofail",
+        repoPath: "/abs/repo",
+        branch: "march/spawn/20260613-nofail",
+        worktreePath: "/abs/worktrees/march/20260613-nofail",
+      },
+      home,
+    );
+
+    const loaded = loadSpawnRecord(initial.id, home);
+
+    expect(loaded).toEqual(initial);
+    expect(loaded?.failureReason).toBeUndefined();
+    expect(Object.keys(loaded!)).not.toContain("failureReason");
   });
 
   it("treats a traversal id as not-found without escaping the spawn dir", () => {
