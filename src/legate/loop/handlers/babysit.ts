@@ -476,7 +476,15 @@ function evaluatePr(
     // still-conflicting tick re-dispatches, gated by exponential backoff + jitter so
     // a parked/slow steward — or a conflict that keeps regenerating as the base moves
     // — is re-poked ever-further apart, never every tick, and forever (no give-up).
-    const prev = conflictRecoveryAttempts(state.raw, sliceId);
+    // A conflict is a FRESH episode when the last observed snapshot was definitively
+    // non-conflicting (MERGEABLE) — the prior conflict fully cleared, even if the PR
+    // then sat on another blocker (CI/review) and so never reached the all-clear
+    // reset. Treat it as attempt 0 so the first fix fires immediately and any stale
+    // backoff window left over from the previous episode is ignored (the dispatch
+    // below overwrites the durable counter + warm window). "UNKNOWN" (GitHub still
+    // recomputing mid-episode) is NOT a clear, so it does not reset. Codex #504.
+    const clearedSinceLastConflict = slice.pr?.mergeable === "MERGEABLE";
+    const prev = clearedSinceLastConflict ? 0 : conflictRecoveryAttempts(state.raw, sliceId);
     const nowMs = parseMs(ts);
     if (prev > 0 && Number.isFinite(nowMs) && nowMs < conflictBackoffUntil(state.raw, sliceId)) {
       return; // still cooling down — hold in pr-resolving-conflicts, act next window

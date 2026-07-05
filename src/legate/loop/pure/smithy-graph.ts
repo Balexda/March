@@ -406,7 +406,9 @@ export function actionableLayer0Items(status: any): any[] {
     // leaf task-slice can still surface `in-progress` in layer-0; dispatching it
     // would double-launch work already underway. Only `not-started` layer-0 nodes
     // are a fresh dispatch (done nodes are already dropped by pendingGraphNodes).
-    if (String(n.node?.status) === "in-progress") continue;
+    // Case-normalized to match `dependencySatisfied` (a status-case flip upstream
+    // must not silently defeat the guard and double-launch started work).
+    if (String(n.node?.status ?? "").toLowerCase() === "in-progress") continue;
     const kind = nodeRowKind(n.node);
     if (!(kind === "US" || kind === "S" || byTarget.has(n.id))) continue;
     const item = dispatchItemForNode(byPath, byTarget, n);

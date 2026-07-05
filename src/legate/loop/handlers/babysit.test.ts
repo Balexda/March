@@ -357,6 +357,25 @@ describe("babysit assess", () => {
     });
     expect(assess(state).find((d) => d.kind === "conflict-fix")).toMatchObject({ attempt: 2, notify: false });
   });
+
+  it("ignores a stale backoff window on a RE-CREATED conflict when the last snapshot had cleared (#504, Codex)", () => {
+    // Prior episode resolved into a NON-conflict (MERGEABLE) but the PR then sat on
+    // another blocker, so the all-clear reset never ran and a 6h-plateau backoff
+    // window + high attempt count linger. A new conflict (base moved) must re-probe
+    // immediately as attempt 1, not honor the stale window.
+    const state = loopState({
+      raw: {
+        slices: {},
+        repo: { default_branch: "main" },
+        transient_retry_counts: { "conflict-recovery:s": 8 },
+        conflict_recovery_backoff_until: { s: Date.parse(NOW) + 6 * 3_600_000 }, // 6h out
+      },
+      slices: { s: { worker_session_id: "w", stage: "pr-resolving-conflicts", pr: { number: 5, mergeable: "MERGEABLE" } } },
+      sessions: [session("w", "idle")],
+      perSlice: { s: { recentOutput: { output: "" }, pr: { number: 5, state: "OPEN", mergeable: "CONFLICTING", checks: "PASS" } } },
+    });
+    expect(assess(state).find((d) => d.kind === "conflict-fix")).toMatchObject({ attempt: 1, notify: false });
+  });
 });
 
 describe("babysit auto-merge gate", () => {
