@@ -152,7 +152,7 @@ Recommended implementation sequence:
 - **FR-005**: Feature 5's `npm run docs:contracts:check` MUST remain an opt-in, advisory local check a contributor MAY run; no autonomous agent or CI job is required to run it as a gate.
 - **FR-006**: The convention MUST be referenced in `CONTRIBUTING.md`, `CLAUDE.md`, and `AGENTS.md`, stating that contract docs are maintained at edit time and not enforced by a freshness gate.
 - **FR-007**: The feature MUST NOT add a `.github/workflows/contract-freshness.yml` workflow or any CI job that validates contract freshness.
-- **FR-008**: The feature MUST record that SD-002 is resolved toward no per-check-in enforcement gate, and that both the Smithy-agent enforcement directive and `.github/workflows/contract-freshness.yml` workflow remain rejected-but-cheaply-reversible alternatives if drift later proves to need them.
+- **FR-008**: The feature MUST record that SD-002 is resolved toward no per-check-in enforcement gate, and that both the Smithy-agent enforcement directive and the `.github/workflows/contract-freshness.yml` workflow remain rejected-but-cheaply-reversible alternatives if drift later proves to need them.
 - **FR-009**: The feature MUST NOT implement the structural AST-diff escalation path, which RFC SD-002 defers until drift is observed.
 - **FR-010**: The convention MUST follow March's autonomous-component posture (non-interactive, minimum access, clean exits) per `docs/vision.md` and `docs/operating-philosophy.md`.
 - **FR-011**: The deterministic auto-gen mechanism MUST be owned by Feature 7; this feature defines the convention and its contributor-doc references, not the extractor itself.
@@ -195,4 +195,4 @@ Recommended implementation sequence:
 - **SC-002**: No PR, slice, or merge is blocked by a contract-freshness verdict; `npm run docs:contracts:check` is opt-in and advisory.
 - **SC-003**: `CONTRIBUTING.md`, `CLAUDE.md`, and `AGENTS.md` each reference the edit-time maintenance plus deterministic auto-gen convention and the absence of a freshness gate.
 - **SC-004**: Mechanically-derivable contract regions can be populated by Feature 7's deterministic extractor with no AI/LLM-on-check-in step.
-- **SC-005**: The SD-002 "no enforcement gate" resolution, rejected-but-cheaply-reversible Smithy-agent directive and `.github/workflows/contract-freshness.yml` alternatives, deferred structural AST-diff escalation, and SD-011 moot closure are recorded so the decision stays legible and deliberately reversible.
+- **SC-005**: The SD-002 "no enforcement gate" resolution, the rejected-but-cheaply-reversible Smithy-agent enforcement directive and `.github/workflows/contract-freshness.yml` workflow alternatives, the deferred structural AST-diff escalation, and the SD-011 moot closure are recorded so the decision stays legible and deliberately reversible.
