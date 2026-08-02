@@ -256,6 +256,74 @@ describe("runAutogenCommand", () => {
     expect(readFile(repoRoot, invalidContractPath)).toBe(invalidBefore);
   });
 
+  it("treats a CRLF contract with current generated content as unchanged", () => {
+    const repoRoot = fixtureRepo();
+    const crlfContractPath = contractPathFor("hatchery");
+    const before = contractBody(
+      "hatchery",
+      generatedBlock(repoRoot, "hatchery"),
+    ).replace(/\n/g, "\r\n");
+    writeFile(repoRoot, crlfContractPath, before);
+
+    const checkResult = runAutogenCommand({ repoRoot, mode: "check" });
+    const writeResult = runAutogenCommand({ repoRoot, mode: "write" });
+
+    expect(checkResult.status).toBe("pass");
+    expect(checkResult.staleContracts).toEqual([]);
+    expect(writeResult.updatedContracts).toEqual([]);
+    expect(readFile(repoRoot, crlfContractPath)).toBe(before);
+  });
+
+  it("refreshes a CRLF contract without introducing mixed line endings", () => {
+    const repoRoot = fixtureRepo();
+    const crlfContractPath = contractPathFor("hatchery");
+    const before = contractBody("hatchery", "stale generated content\n").replace(
+      /\n/g,
+      "\r\n",
+    );
+    writeFile(repoRoot, crlfContractPath, before);
+
+    const result = runAutogenCommand({ repoRoot, mode: "write" });
+    const after = readFile(repoRoot, crlfContractPath);
+
+    expect(result.status).toBe("pass");
+    expect(result.updatedContracts).toEqual([crlfContractPath]);
+    expect(after.replace(/\r\n/g, "")).not.toContain("\n");
+    expect(runAutogenCommand({ repoRoot, mode: "check" }).staleContracts).toEqual([]);
+  });
+
+  it("restores earlier contracts when a later filesystem write fails", () => {
+    if (process.getuid?.() === 0) return;
+
+    const repoRoot = fixtureRepo();
+    const writableContractPath = contractPathFor("hatchery");
+    const unwritableContractPath = contractPathFor("steward");
+    const writableBefore = contractBody("hatchery", "stale generated content\n");
+    const unwritableBefore = contractBody("steward", "stale generated content\n");
+    writeFile(repoRoot, writableContractPath, writableBefore);
+    writeFile(repoRoot, unwritableContractPath, unwritableBefore);
+    fs.chmodSync(path.join(repoRoot, unwritableContractPath), 0o444);
+
+    const result = runAutogenCommand({ repoRoot, mode: "write" });
+    fs.chmodSync(path.join(repoRoot, unwritableContractPath), 0o644);
+
+    expect(result.status).toBe("fail");
+    // Owners write in name order, so hatchery is written before steward fails —
+    // the restored hatchery file below is a rollback, not a skipped write.
+    expect(result.staleContracts).toEqual([writableContractPath, unwritableContractPath]);
+    expect(result.updatedContracts).toEqual([]);
+    expect(
+      result.diagnostics.some(
+        (diagnostic) =>
+          diagnostic.category === "write-safety" &&
+          diagnostic.contractPath === unwritableContractPath &&
+          diagnostic.message.startsWith("contract file cannot be written."),
+      ),
+    ).toBe(true);
+    expect(readFile(repoRoot, writableContractPath)).toBe(writableBefore);
+    expect(readFile(repoRoot, unwritableContractPath)).toBe(unwritableBefore);
+  });
+
   it("runs through the public npm script without Docker or live March services", () => {
     const repoRoot = fixtureRepo();
 

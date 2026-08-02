@@ -42,7 +42,20 @@ interface PreparedContract {
   readonly surface: SourceSurface;
   readonly block: GeneratedContractBlock;
   readonly currentContent: string;
+  /**
+   * The rendered block re-encoded with the contract's own line endings, so a
+   * CRLF checkout neither reports a current contract as stale nor gets
+   * rewritten into a mixed-line-ending file.
+   */
+  readonly generatedContent: string;
   readonly stale: boolean;
+}
+
+interface PlannedWrite {
+  readonly contractPath: string;
+  readonly absolutePath: string;
+  readonly content: string;
+  readonly priorContent: string;
 }
 
 interface ParsedArgs {
@@ -134,7 +147,11 @@ export function runAutogenCommand(input: RunAutogenCommandInput): AutogenCommand
       markerValidation.region.beginMarkerLine,
       markerValidation.region.endMarkerLine,
     );
-    const stale = existingGenerated !== normalizeGeneratedContent(block.content);
+    const generatedContent = applyEol(
+      normalizeGeneratedContent(block.content),
+      detectEol(currentContent),
+    );
+    const stale = existingGenerated !== generatedContent;
     if (input.mode === "check" && stale) {
       diagnostics.push({
         category: "stale-output",
@@ -150,6 +167,7 @@ export function runAutogenCommand(input: RunAutogenCommandInput): AutogenCommand
       surface,
       block,
       currentContent,
+      generatedContent,
       stale,
     });
   }
@@ -185,7 +203,7 @@ export function runAutogenCommand(input: RunAutogenCommandInput): AutogenCommand
     contracts: prepared.map((contract) => ({
       contractPath: contract.owner.contractPath,
       content: contract.currentContent,
-      generatedContent: contract.block.content,
+      generatedContent: contract.generatedContent,
     })),
   });
   diagnostics.push(
@@ -207,11 +225,7 @@ export function runAutogenCommand(input: RunAutogenCommandInput): AutogenCommand
     );
   }
 
-  const writes: Array<{
-    readonly contractPath: string;
-    readonly absolutePath: string;
-    readonly content: string;
-  }> = [];
+  const writes: PlannedWrite[] = [];
   for (const replacementResult of replacement.replacements.filter(
     (candidate) => !candidate.unchanged,
   )) {
@@ -225,10 +239,23 @@ export function runAutogenCommand(input: RunAutogenCommandInput): AutogenCommand
       });
       continue;
     }
+    const priorContract = prepared.find(
+      (contract) => contract.owner.contractPath === replacementResult.contractPath,
+    );
+    if (!priorContract) {
+      diagnostics.push({
+        category: "write-safety",
+        severity: "error",
+        contractPath: replacementResult.contractPath,
+        message: bounded("replacement has no prepared contract to restore from on failure."),
+      });
+      continue;
+    }
     writes.push({
       contractPath: replacementResult.contractPath,
       absolutePath,
       content: replacementResult.content,
+      priorContent: priorContract.currentContent,
     });
   }
 
@@ -243,9 +270,33 @@ export function runAutogenCommand(input: RunAutogenCommandInput): AutogenCommand
     );
   }
 
+  // The prevalidation above cannot rule out a failure at the filesystem
+  // boundary (unwritable target, vanished directory, full disk). Roll the
+  // already-written contracts back so a partial batch never survives, and
+  // report the failure as a bounded diagnostic instead of an escaping throw.
   const updatedContracts: string[] = [];
+  const written: PlannedWrite[] = [];
   for (const write of writes) {
-    fs.writeFileSync(write.absolutePath, write.content);
+    try {
+      fs.writeFileSync(write.absolutePath, write.content);
+    } catch (error) {
+      diagnostics.push({
+        category: "write-safety",
+        severity: "error",
+        contractPath: write.contractPath,
+        message: bounded(readFailureMessage(error, "contract file cannot be written.")),
+      });
+      diagnostics.push(...rollbackWrites(written));
+      return commandResult(
+        input.mode,
+        surfaces.surfaces.length,
+        extractedExports,
+        staleContracts,
+        [],
+        diagnostics,
+      );
+    }
+    written.push(write);
     updatedContracts.push(write.contractPath);
   }
 
@@ -443,6 +494,38 @@ function splitLines(content: string): Array<{
 function normalizeGeneratedContent(content: string): string {
   if (content === "") return "";
   return content.endsWith("\n") || content.endsWith("\r") ? content : `${content}\n`;
+}
+
+function detectEol(content: string): string {
+  const crlf = content.match(/\r\n/g)?.length ?? 0;
+  const lf = (content.match(/\n/g)?.length ?? 0) - crlf;
+  return crlf > lf ? "\r\n" : "\n";
+}
+
+function applyEol(content: string, eol: string): string {
+  return eol === "\n" ? content : content.replace(/\r\n|\n|\r/g, eol);
+}
+
+function rollbackWrites(written: readonly PlannedWrite[]): AutogenDiagnostic[] {
+  const diagnostics: AutogenDiagnostic[] = [];
+  for (const write of [...written].reverse()) {
+    try {
+      fs.writeFileSync(write.absolutePath, write.priorContent);
+    } catch (error) {
+      diagnostics.push({
+        category: "write-safety",
+        severity: "error",
+        contractPath: write.contractPath,
+        message: bounded(
+          readFailureMessage(
+            error,
+            "contract file was updated but could not be restored after a failed batch write.",
+          ),
+        ),
+      });
+    }
+  }
+  return diagnostics;
 }
 
 function withOwnerFields(
