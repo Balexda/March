@@ -137,6 +137,26 @@ function toDiagnostic(fields) {
   return fields;
 }
 
+// A thrown value is not guaranteed to be an Error, and `undefined.message`
+// would leak `message=undefined` into the verdict. Every diagnostic carries a
+// non-empty message, so coerce whatever was caught into a stable string.
+export function toErrorMessage(error) {
+  if (error instanceof Error && typeof error.message === "string") {
+    return error.message;
+  }
+
+  if (typeof error === "string" && error !== "") {
+    return error;
+  }
+
+  try {
+    const rendered = String(error);
+    return rendered === "" ? "unknown error" : rendered;
+  } catch {
+    return "unknown error";
+  }
+}
+
 function readContractFiles(repoRoot, requiredContracts) {
   const presenceDiagnostics = [];
   const presentContracts = [];
@@ -740,7 +760,7 @@ function resolveChangedFiles(repoRoot, input) {
           toDiagnostic({
             category: "input-source",
             sourcePath: input.diffBase,
-            message: error.message,
+            message: toErrorMessage(error),
           }),
         ],
       };
@@ -761,7 +781,7 @@ function resolveChangedFiles(repoRoot, input) {
           toDiagnostic({
             category: "input-source",
             sourcePath: changedFile,
-            message: error.message,
+            message: toErrorMessage(error),
           }),
         );
       }
@@ -824,6 +844,27 @@ function validateFreshnessDrift(changedFiles, freshnessEntries, configDiagnostic
   return { checkedCount: changedFiles.length, diagnostics };
 }
 
+// A category missing from CHECK_ORDER would `indexOf` to -1 and sort ahead of
+// every known category — the opposite of what an ordering safety net should do.
+// Unknown categories go last, alphabetically, so adding one can never reshuffle
+// the established prefix of the output contract.
+export function compareCheckCategories(left, right) {
+  const leftRank = CHECK_ORDER.indexOf(left.category);
+  const rightRank = CHECK_ORDER.indexOf(right.category);
+  const leftKey = leftRank === -1 ? CHECK_ORDER.length : leftRank;
+  const rightKey = rightRank === -1 ? CHECK_ORDER.length : rightRank;
+
+  if (leftKey !== rightKey) {
+    return leftKey - rightKey;
+  }
+
+  return left.category < right.category
+    ? -1
+    : left.category > right.category
+      ? 1
+      : 0;
+}
+
 function summarizeCheck(category, checkedCount, diagnostics) {
   return {
     category,
@@ -870,10 +911,7 @@ export function checkRequiredContracts(input = {}) {
     summarizeCheck("section-schema", presentContracts.length, sectionDiagnostics),
     summarizeCheck("config", configCheckedCount, configDiagnostics),
     summarizeCheck("freshness", freshnessCheckedCount, freshnessDiagnostics),
-  ].sort(
-    (left, right) =>
-      CHECK_ORDER.indexOf(left.category) - CHECK_ORDER.indexOf(right.category),
-  );
+  ].sort(compareCheckCategories);
   const diagnostics = checks
     .flatMap((check) => check.diagnostics)
     .slice(0, MAX_DIAGNOSTICS);

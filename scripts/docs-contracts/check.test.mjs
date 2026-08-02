@@ -11,11 +11,13 @@ import {
   MAX_DIAGNOSTICS,
   SUBSYSTEM_MANIFEST_PATH,
   checkRequiredContracts,
+  compareCheckCategories,
   contractPathForSubsystem,
   escapeDiagnosticValue,
   findH2Headings,
   formatVerdict,
   run,
+  toErrorMessage,
 } from "./check.mjs";
 
 // The required set is now discovered from the manifest, so the tests declare
@@ -772,6 +774,40 @@ describe("docs contract checker", () => {
       expect(code).toBe(2);
       expect(stderr.join("")).toContain(SUBSYSTEM_MANIFEST_PATH);
     }));
+
+  it("coerces non-Error throws into a stable diagnostic message", () => {
+    expect(toErrorMessage(new Error("boom"))).toBe("boom");
+    expect(toErrorMessage("plain string throw")).toBe("plain string throw");
+    expect(toErrorMessage(undefined)).toBe("undefined");
+    expect(toErrorMessage("")).toBe("unknown error");
+    expect(toErrorMessage({ nope: true })).toBe("[object Object]");
+    // A value whose String() throws must still yield a renderable message.
+    expect(
+      toErrorMessage({
+        toString() {
+          throw new Error("hostile");
+        },
+      }),
+    ).toBe("unknown error");
+  });
+
+  it("sorts unknown check categories last instead of first", () => {
+    const sorted = [
+      { category: "zebra" },
+      { category: "freshness" },
+      { category: "apple" },
+      { category: "input-source" },
+      { category: "presence" },
+    ].sort(compareCheckCategories);
+
+    expect(sorted.map((check) => check.category)).toEqual([
+      "input-source",
+      "presence",
+      "freshness",
+      "apple",
+      "zebra",
+    ]);
+  });
 
   it("detects only structural H2 headings outside fenced code blocks", () => {
     expect(
