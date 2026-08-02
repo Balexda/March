@@ -134,7 +134,9 @@ Day-to-day commands:
 - **`npm run typecheck`** — `tsc --noEmit`.
 
 Every layer is free to run and finishes in minutes; CI runs the same staged
-scripts as separate jobs on every push and PR.
+scripts as separate jobs on pull requests and on pushes to `main`. A push to a
+branch with no open PR is not validated remotely — run the staged commands
+locally.
 
 The M1 PR gate is deterministic and local. Future Cucumber.js execution,
 scheduled or stochastic runs, live cassette-backed L2/L3 execution, and cassette
