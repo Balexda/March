@@ -245,6 +245,73 @@ describe("spawn-index", () => {
     });
   });
 
+  it("treats a present container with unknown running state as not live", () => {
+    const home = makeHome();
+    const value = record("20260613-live02", {
+      status: "running",
+      worktreePath: makeWorktree(home, "live02"),
+      containerId: "container-live02",
+    });
+
+    expect(
+      derivedStatus(value, {
+        containerId: value.containerId!,
+        present: true,
+      }),
+    ).toMatchObject({
+      record: value,
+      needsAttention: false,
+      disposed: false,
+      containerLive: false,
+    });
+  });
+
+  it("ignores a snapshot taken for a different container", () => {
+    const home = makeHome();
+    const running = record("20260613-live03", {
+      status: "running",
+      worktreePath: makeWorktree(home, "live03"),
+      containerId: "container-live03",
+    });
+    const stopped = record("20260613-live04", {
+      status: "stopped",
+      worktreePath: makeWorktree(home, "live04"),
+      containerId: "container-live04",
+    });
+
+    // A foreign snapshot must not drag a running record down...
+    expect(
+      derivedStatus(running, {
+        containerId: "container-someone-else",
+        present: false,
+      }),
+    ).toMatchObject({ record: running, containerLive: true });
+    // ...nor bring a stopped record back to life.
+    expect(
+      derivedStatus(stopped, {
+        containerId: "container-someone-else",
+        present: true,
+        running: true,
+      }),
+    ).toMatchObject({ record: stopped, containerLive: false });
+  });
+
+  it("ignores any snapshot for a record that has no container id", () => {
+    const home = makeHome();
+    const value = record("20260613-live05", {
+      status: "running",
+      worktreePath: makeWorktree(home, "live05"),
+    });
+
+    expect(value.containerId).toBeUndefined();
+    expect(
+      derivedStatus(value, {
+        containerId: "container-live05",
+        present: false,
+      }),
+    ).toMatchObject({ record: value, containerLive: true });
+  });
+
   it("does not persist derived view fields or status values during derivation", () => {
     const home = makeHome();
     const value = record("20260613-pure01", {
