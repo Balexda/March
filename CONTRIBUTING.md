@@ -6,7 +6,7 @@
 npm install
 npm run build        # Build with tsup
 npm run typecheck    # Type-check without emitting
-npm test             # Run all tests
+npm test             # Run the aggregate deterministic PR gate
 ```
 
 Always use `npm run` scripts. Do not use `npx tsx`, `npx vitest`, or similar direct invocations.
@@ -126,8 +126,20 @@ taxonomy, staged scripts, quarantine routing, or Cucumber.js port mechanics.
 
 Day-to-day commands:
 
-- **`npm test`** — runs the deterministic CI suite. Today that's the full vitest set: L0, L1, and the surviving L2-shaped vitest cases listed in the Test Layer Migration policy above. Cassette-replayed L2/L3 will land here as the [RFC milestones](docs/rfcs/2026-002-layered-testing-framework/layered-testing-framework.rfc.md#milestones) progress. Cost: $0, < 2 minutes. Runs on every push and PR.
+- **`npm run test:l0`** — runs the L0 deterministic PR-gate layer: unit and broken-fundamentals coverage tagged `@l0 @deterministic @ci`, excluding quarantine.
+- **`npm run test:l1`** — runs the L1 deterministic PR-gate layer: subsystem coverage tagged `@l1 @deterministic @ci`, excluding quarantine.
+- **`npm run test:l2-cassette`** — runs the L2 cassette-ready deterministic PR-gate layer: cross-subsystem coverage tagged `@l2 @deterministic @ci`, excluding quarantine.
+- **`npm run test:l3-cassette`** — runs the L3 cassette-ready deterministic PR-gate layer: system coverage tagged `@l3 @deterministic @ci`, excluding quarantine.
+- **`npm test`** — runs the full deterministic PR gate by invoking `npm run test:l0`, `npm run test:l1`, `npm run test:l2-cassette`, and `npm run test:l3-cassette` sequentially, stopping at the first failing layer. It is the aggregate gate, not a synonym for one layer.
 - **`npm run typecheck`** — `tsc --noEmit`.
+
+Every layer is free to run and finishes in minutes; CI runs the same staged
+scripts as separate jobs on every push and PR.
+
+The M1 PR gate is deterministic and local. Future Cucumber.js execution,
+scheduled or stochastic runs, live cassette-backed L2/L3 execution, and cassette
+refresh remain later-milestone work; they are not delivered by these staged PR
+commands.
 
 ### Quarantine Routing
 
@@ -381,7 +393,7 @@ This repo runs Dependabot on a monthly schedule (plus immediate security advisor
 
 Before publishing a new version:
 
-1. All automated tests pass: `npm test`
+1. All automated tests pass: `npm test` completes the sequential fail-fast aggregate deterministic PR gate over `npm run test:l0`, `npm run test:l1`, `npm run test:l2-cassette`, and `npm run test:l3-cassette`
 2. Agent tests (A1–A5) verified in a Claude Code session
 3. Human tests (H1–H2) verified in an interactive terminal
 4. Trigger the **Publish to npm** workflow with both test gate checkboxes checked

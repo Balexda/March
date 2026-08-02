@@ -18,7 +18,7 @@
 
 ### Tasks
 
-- [ ] **Update staged testing guidance**
+- [x] **Update staged testing guidance**
 
   Update `CONTRIBUTING.md` so its `## Testing` day-to-day commands and Pre-Release Checklist describe the staged npm command surface from the Layered Npm Scripts contract. The documentation should satisfy AS 4.1-AS 4.3 without changing scripts, CI, quarantine routing, cassette runtime behavior, or scheduled workflow behavior.
 
