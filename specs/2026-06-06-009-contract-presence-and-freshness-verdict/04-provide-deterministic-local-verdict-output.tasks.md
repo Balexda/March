@@ -18,7 +18,7 @@
 
 ### Tasks
 
-- [ ] **Stabilize passing verdict summaries**
+- [x] **Stabilize passing verdict summaries**
 
   Extend the docs-contract checker and tests around `scripts/docs-contracts/check.mjs` so passing runs emit a stable summary for every evaluated verdict category. This task satisfies AS 4.1 by documenting and verifying the chosen local text output shape rather than adding a second transport or new enforcement surface.
 
@@ -29,7 +29,7 @@
   - The npm script remains the supported entrypoint from `package.json`.
   - No CI workflow, Smithy-agent enforcement, AUTOGEN extraction, or runtime subsystem behavior is added.
 
-- [ ] **Bound failing verdict diagnostics**
+- [x] **Bound failing verdict diagnostics**
 
   Harden failure formatting in `scripts/docs-contracts/check.mjs` so presence, section-schema, config, freshness, and input-source failures expose bounded diagnostics with stable field names. This task satisfies AS 4.2 and resolves the inherited output-shape debt by keeping stable text as the committed interface for this feature.
 
@@ -40,7 +40,7 @@
   - Input-source failures exit non-zero with bounded output rather than prompting.
   - Tests cover representative failures from presence, config, freshness, and changed-file input.
 
-- [ ] **Preserve service-independent command execution**
+- [x] **Preserve service-independent command execution**
 
   Harden the npm-run verdict path so command execution remains limited to filesystem and git inputs. This task satisfies AS 4.3 by protecting the local verdict boundary from accidental Docker, network, Castra, Hatchery, Brood, Herald, Legate, agent-deck, or runtime service dependencies.
 

@@ -16,7 +16,16 @@ export const SUBSYSTEM_MANIFEST_PATH = "docs/subsystems/subsystems.json";
 export const FRESHNESS_CONFIG_PATH =
   "docs/subsystems/contract-freshness.config.json";
 
-const MAX_DIAGNOSTICS = 50;
+// The diagnostic cap is part of the output contract: callers can rely on the
+// verdict never emitting more than this many diagnostic lines.
+export const MAX_DIAGNOSTICS = 50;
+const CHECK_ORDER = [
+  "input-source",
+  "presence",
+  "section-schema",
+  "config",
+  "freshness",
+];
 const GENERATED_OR_DEPENDENCY_ROOTS = new Set([
   ".git",
   "coverage",
@@ -708,15 +717,75 @@ function readGitChangedFiles(repoRoot, diffBase) {
 }
 
 function resolveChangedFiles(repoRoot, input) {
+  let source = "none";
+  let requestedCount = 0;
+
   if (input.diffBase !== undefined) {
-    return readGitChangedFiles(repoRoot, input.diffBase);
+    source = "git";
+    requestedCount = 1;
+    try {
+      const changedFiles = readGitChangedFiles(repoRoot, input.diffBase);
+      return {
+        changedFiles,
+        source,
+        checkedCount: changedFiles.length,
+        diagnostics: [],
+      };
+    } catch (error) {
+      return {
+        changedFiles: [],
+        source,
+        checkedCount: requestedCount,
+        diagnostics: [
+          toDiagnostic({
+            category: "input-source",
+            sourcePath: input.diffBase,
+            message: error.message,
+          }),
+        ],
+      };
+    }
   }
 
   if (Array.isArray(input.changedFiles) && input.changedFiles.length > 0) {
-    return normalizeChangedPaths(repoRoot, input.changedFiles);
+    source = "explicit";
+    requestedCount = input.changedFiles.length;
+
+    const diagnostics = [];
+    const normalizedFiles = [];
+    for (const changedFile of input.changedFiles) {
+      try {
+        normalizedFiles.push(normalizeChangedPath(repoRoot, changedFile));
+      } catch (error) {
+        diagnostics.push(
+          toDiagnostic({
+            category: "input-source",
+            sourcePath: changedFile,
+            message: error.message,
+          }),
+        );
+      }
+    }
+
+    if (diagnostics.length > 0) {
+      return {
+        changedFiles: [],
+        source,
+        checkedCount: requestedCount,
+        diagnostics: diagnostics.slice(0, MAX_DIAGNOSTICS),
+      };
+    }
+
+    const changedFiles = [...new Set(normalizedFiles)].sort();
+    return {
+      changedFiles,
+      source,
+      checkedCount: changedFiles.length,
+      diagnostics: [],
+    };
   }
 
-  return [];
+  return { changedFiles: [], source, checkedCount: 0, diagnostics: [] };
 }
 
 function validateFreshnessDrift(changedFiles, freshnessEntries, configDiagnostics) {
@@ -766,7 +835,12 @@ function summarizeCheck(category, checkedCount, diagnostics) {
 
 export function checkRequiredContracts(input = {}) {
   const repoRoot = path.resolve(input.repoRoot ?? process.cwd());
-  const changedFiles = resolveChangedFiles(repoRoot, input);
+  const {
+    changedFiles,
+    source: changedFileSource,
+    checkedCount: inputSourceCheckedCount,
+    diagnostics: inputSourceDiagnostics,
+  } = resolveChangedFiles(repoRoot, input);
   const requiredContracts = readSubsystems(repoRoot);
   const { presenceDiagnostics, presentContracts } = readContractFiles(
     repoRoot,
@@ -780,16 +854,26 @@ export function checkRequiredContracts(input = {}) {
   } = validateFreshnessConfig(repoRoot, requiredContracts);
   const { checkedCount: freshnessCheckedCount, diagnostics: freshnessDiagnostics } =
     validateFreshnessDrift(
-      changedFiles,
-      configDiagnostics.length === 0 ? validatedEntries : [],
-      configDiagnostics,
+      inputSourceDiagnostics.length === 0 ? changedFiles : [],
+      configDiagnostics.length === 0 && inputSourceDiagnostics.length === 0
+        ? validatedEntries
+        : [],
+      [...configDiagnostics, ...inputSourceDiagnostics],
     );
   const checks = [
+    summarizeCheck(
+      "input-source",
+      inputSourceCheckedCount,
+      inputSourceDiagnostics,
+    ),
     summarizeCheck("presence", requiredContracts.length, presenceDiagnostics),
     summarizeCheck("section-schema", presentContracts.length, sectionDiagnostics),
     summarizeCheck("config", configCheckedCount, configDiagnostics),
     summarizeCheck("freshness", freshnessCheckedCount, freshnessDiagnostics),
-  ];
+  ].sort(
+    (left, right) =>
+      CHECK_ORDER.indexOf(left.category) - CHECK_ORDER.indexOf(right.category),
+  );
   const diagnostics = checks
     .flatMap((check) => check.diagnostics)
     .slice(0, MAX_DIAGNOSTICS);
@@ -803,6 +887,7 @@ export function checkRequiredContracts(input = {}) {
       contracts: requiredContracts.map((contract) => contract.name),
       configEntries: configCheckedCount,
       changedFiles: changedFiles.length,
+      changedFileSource,
       diagnostics: diagnostics.length,
     },
   };
@@ -824,6 +909,9 @@ function formatDiagnostic(diagnostic) {
 }
 
 export function formatVerdict(verdict) {
+  const inputSource = verdict.checks.find(
+    (check) => check.category === "input-source",
+  );
   const presence = verdict.checks.find((check) => check.category === "presence");
   const sectionSchema = verdict.checks.find(
     (check) => check.category === "section-schema",
@@ -832,10 +920,11 @@ export function formatVerdict(verdict) {
   const freshness = verdict.checks.find((check) => check.category === "freshness");
   const lines = [
     `contract verdict: ${verdict.status}`,
-    `presence: ${presence.status} checked=${presence.checkedCount} contracts=${verdict.summary.contracts.join(",")}`,
-    `section-schema: ${sectionSchema.status} checked=${sectionSchema.checkedCount} contracts=${verdict.summary.contracts.join(",")}`,
-    `config: ${config.status} checked=${config.checkedCount} entries=${verdict.summary.configEntries}`,
-    `freshness: ${freshness.status} checked=${freshness.checkedCount} changedFiles=${verdict.summary.changedFiles}`,
+    `input-source: ${inputSource.status} checked=${inputSource.checkedCount} changedFiles=${verdict.summary.changedFiles} source=${verdict.summary.changedFileSource} diagnostics=${inputSource.diagnostics.length}`,
+    `presence: ${presence.status} checked=${presence.checkedCount} contracts=${verdict.summary.contracts.join(",")} diagnostics=${presence.diagnostics.length}`,
+    `section-schema: ${sectionSchema.status} checked=${sectionSchema.checkedCount} contracts=${verdict.summary.contracts.join(",")} diagnostics=${sectionSchema.diagnostics.length}`,
+    `config: ${config.status} checked=${config.checkedCount} entries=${verdict.summary.configEntries} diagnostics=${config.diagnostics.length}`,
+    `freshness: ${freshness.status} checked=${freshness.checkedCount} changedFiles=${verdict.summary.changedFiles} diagnostics=${freshness.diagnostics.length}`,
     `diagnostics: ${verdict.summary.diagnostics}`,
   ];
 
