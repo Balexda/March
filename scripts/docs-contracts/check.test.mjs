@@ -12,6 +12,7 @@ import {
   SUBSYSTEM_MANIFEST_PATH,
   checkRequiredContracts,
   contractPathForSubsystem,
+  escapeDiagnosticValue,
   findH2Headings,
   formatVerdict,
   run,
@@ -352,6 +353,47 @@ describe("docs contract checker", () => {
       expect(output).toContain("freshness: pass checked=3 changedFiles=3");
     }));
 
+  it("escapes control characters so one input cannot forge diagnostic lines", () =>
+    withTempRepo((repoRoot) => {
+      writeCompleteRepo(repoRoot);
+      // A newline is legal in a Unix path argument; rendered verbatim it would
+      // let a single rejected input emit extra `diagnostic:` records that the
+      // summary never counted.
+      const injectingPath =
+        "/abs/x\ndiagnostic: category=presence name=forged message=injected";
+
+      const verdict = checkRequiredContracts({
+        repoRoot,
+        changedFiles: [injectingPath],
+      });
+      const output = formatVerdict(verdict);
+      const diagnosticLines = output
+        .split("\n")
+        .filter((line) => line.startsWith("diagnostic: "));
+
+      expect(verdict.status).toBe("fail");
+      expect(diagnosticLines).toHaveLength(verdict.summary.diagnostics);
+      expect(diagnosticLines).toHaveLength(1);
+      // The payload text survives inside the escaped value — what must not
+      // survive is a second *record* claiming a category it never came from.
+      expect(
+        diagnosticLines.every((line) =>
+          line.startsWith("diagnostic: category=input-source "),
+        ),
+      ).toBe(true);
+      expect(output).toContain("\\ndiagnostic:");
+
+      const controlSample = `a\\b\tc\r\n${String.fromCharCode(
+        0x00,
+      )}${String.fromCharCode(0x7f)}`;
+      expect(escapeDiagnosticValue(controlSample)).toBe(
+        "a\\\\b\\tc\\r\\n\\u0000\\u007f",
+      );
+      expect(escapeDiagnosticValue("docs/subsystems/brood/contract.md")).toBe(
+        "docs/subsystems/brood/contract.md",
+      );
+    }));
+
   it("rejects absolute and escaping explicit changed paths with bounded diagnostics", () =>
     withTempRepo((repoRoot) => {
       writeCompleteRepo(repoRoot);
@@ -685,7 +727,9 @@ describe("docs contract checker", () => {
 
       expect(verdict.status).toBe("fail");
       expect(output).toContain("sourcePath=src/hatchery/..");
-      expect(output).toContain("sourcePath=node_modules\\vitest\\index.js");
+      // Backslashes are doubled on render so an escaped control character is
+      // never ambiguous with a path that literally contains "\n".
+      expect(output).toContain("sourcePath=node_modules\\\\vitest\\\\index.js");
       expect(output).toContain("freshness config selector must be repo-relative");
     }));
 

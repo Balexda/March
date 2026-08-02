@@ -893,18 +893,42 @@ export function checkRequiredContracts(input = {}) {
   };
 }
 
+// Diagnostic values echo operator-supplied paths, and a path may legally
+// contain control characters on Unix. Rendering one verbatim would let a single
+// input emit extra `diagnostic:` lines — forging records the summary never
+// counted — so every value is escaped to keep one diagnostic on one line.
+export function escapeDiagnosticValue(value) {
+  return String(value).replace(
+    /[\\\u0000-\u001f\u007f-\u009f]/gu,
+    (character) => {
+      switch (character) {
+        case "\\":
+          return "\\\\";
+        case "\n":
+          return "\\n";
+        case "\r":
+          return "\\r";
+        case "\t":
+          return "\\t";
+        default:
+          return `\\u${character.codePointAt(0).toString(16).padStart(4, "0")}`;
+      }
+    },
+  );
+}
+
 function formatDiagnostic(diagnostic) {
-  const parts = [`category=${diagnostic.category}`];
+  const parts = [`category=${escapeDiagnosticValue(diagnostic.category)}`];
   if (diagnostic.name !== undefined) {
-    parts.push(`name=${diagnostic.name}`);
+    parts.push(`name=${escapeDiagnosticValue(diagnostic.name)}`);
   }
   if (diagnostic.sourcePath !== undefined) {
-    parts.push(`sourcePath=${diagnostic.sourcePath}`);
+    parts.push(`sourcePath=${escapeDiagnosticValue(diagnostic.sourcePath)}`);
   }
   if (diagnostic.contractPath !== undefined) {
-    parts.push(`contractPath=${diagnostic.contractPath}`);
+    parts.push(`contractPath=${escapeDiagnosticValue(diagnostic.contractPath)}`);
   }
-  parts.push(`message=${diagnostic.message}`);
+  parts.push(`message=${escapeDiagnosticValue(diagnostic.message)}`);
   return `diagnostic: ${parts.join(" ")}`;
 }
 
