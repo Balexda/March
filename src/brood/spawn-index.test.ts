@@ -194,6 +194,57 @@ describe("spawn-index", () => {
     });
   });
 
+  it("reconciles container liveness from a caller-supplied Docker snapshot", () => {
+    const home = makeHome();
+    const value = record("20260613-live01", {
+      status: "running",
+      worktreePath: makeWorktree(home, "live01"),
+      containerId: "container-live01",
+    });
+
+    expect(
+      derivedStatus(value, {
+        containerId: value.containerId!,
+        present: false,
+      }),
+    ).toMatchObject({
+      record: value,
+      needsAttention: false,
+      disposed: false,
+      containerLive: false,
+    });
+    expect(
+      derivedStatus(value, {
+        containerId: value.containerId!,
+        present: true,
+        running: true,
+      }),
+    ).toMatchObject({
+      record: value,
+      needsAttention: false,
+      disposed: false,
+      containerLive: true,
+    });
+    expect(
+      derivedStatus(value, {
+        containerId: value.containerId!,
+        present: true,
+        running: false,
+      }),
+    ).toMatchObject({
+      record: value,
+      needsAttention: false,
+      disposed: false,
+      containerLive: false,
+    });
+    expect(derivedStatus(value)).toMatchObject({
+      record: value,
+      needsAttention: false,
+      disposed: false,
+      containerLive: true,
+    });
+  });
+
   it("does not persist derived view fields or status values during derivation", () => {
     const home = makeHome();
     const value = record("20260613-pure01", {
@@ -206,6 +257,35 @@ describe("spawn-index", () => {
     expect(derivedStatus(value)).toMatchObject({
       needsAttention: true,
       disposed: true,
+      containerLive: false,
+    });
+
+    const after = fs.readFileSync(spawnRecordPath(value.id, home), "utf-8");
+    expect(after).toBe(before);
+    expect(JSON.parse(after)).toEqual(value);
+    expect(after).not.toContain("needsAttention");
+    expect(after).not.toContain("needs-attention");
+    expect(after).not.toContain("disposed");
+  });
+
+  it("does not persist caller-supplied Docker snapshot liveness", () => {
+    const home = makeHome();
+    const value = record("20260613-pure02", {
+      status: "running",
+      worktreePath: makeWorktree(home, "pure02"),
+      containerId: "container-pure02",
+    });
+    writeRecord(home, value);
+    const before = fs.readFileSync(spawnRecordPath(value.id, home), "utf-8");
+
+    expect(
+      derivedStatus(value, {
+        containerId: value.containerId!,
+        present: false,
+      }),
+    ).toMatchObject({
+      needsAttention: false,
+      disposed: false,
       containerLive: false,
     });
 

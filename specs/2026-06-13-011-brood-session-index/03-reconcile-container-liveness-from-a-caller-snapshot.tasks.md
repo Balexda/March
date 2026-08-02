@@ -18,7 +18,7 @@
 
 ### Tasks
 
-- [ ] **Honor optional Docker snapshots in SpawnView derivation**
+- [x] **Honor optional Docker snapshots in SpawnView derivation**
 
   Extend `src/brood/spawn-index.ts` and its focused tests so `derivedStatus(record, dockerSnapshot?)` uses a supplied snapshot to derive `containerLive`, while the no-snapshot path keeps using only the persisted record as established by US2. Treat the snapshot as read-only caller evidence: it can report an absent container or a present container with known running state, but derivation must not persist a derived value, mutate Docker, or introduce a required Docker call.
 
