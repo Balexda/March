@@ -4,8 +4,15 @@ import { prNumber, workerBySessionId } from "../pure/session.js";
 import { hashText } from "../pure/hash.js";
 import { resolveMergeRequirements, type MergePolicy } from "../../../herald/profiles/merge-policy.js";
 import { mergeBlocker, mergeReadiness, taskTypeForSlice } from "../pure/slice.js";
-import { backoffMs, parseMs } from "../pure/self-heal.js";
-import { ensureRetryCounts } from "../state/mutations.js";
+import { parseMs } from "../pure/self-heal.js";
+import {
+  clearBackoff,
+  coolingDown,
+  retryAttempts,
+  scheduleBackoff,
+  setRetryAttempts,
+  type RetryDomain,
+} from "../pure/self-heal-pacer.js";
 import {
   CI_RECOVERY_DOMAIN,
   decideCiFix,
@@ -75,31 +82,18 @@ const REVIEW_FIX_MAX_ROUNDS = 3;
 // Merge-conflict self-heal (#504). A conflict is never "done" — a resolved one can
 // be RE-CREATED the moment another PR merges into the base — so the loop
 // re-dispatches the conflict-fix INDEFINITELY rather than escalating once and
-// parking the slice. Pacing reuses the shared exponential-backoff + per-slice jitter
-// (`pure/self-heal.ts`), the same self-healing shape as steward relaunch and spawn
-// re-dispatch (#460): the first fix goes out immediately; each still-conflicting
-// re-try waits ever-longer (2min → … → 6h plateau), so a stuck conflict is probed
-// cheaply forever and self-heals the instant it clears. The operator is notified
-// ONCE at CONFLICT_NOTIFY_ATTEMPT (visible, not a give-up). The durable per-slice
-// attempt counter lives in `transient_retry_counts` (folded via `retry.counted`, so
-// it survives a restart); the next-eligible timestamps live in the warm
-// `conflict_recovery_backoff_until` map (reset on a cold start, like relaunch's).
-const CONFLICT_RECOVERY_KEY = (sliceId: string): string => "conflict-recovery:" + sliceId;
-const CONFLICT_BACKOFF_FIELD = "conflict_recovery_backoff_until";
+// parking the slice. Pacing uses the shared self-heal-pacer (#506) — the same
+// building blocks the CI-fix, steward relaunch, and spawn re-dispatch domains use:
+// a durable per-slice attempt counter + a warm backoff-window map, with the
+// exponential-backoff + per-slice jitter math from `pure/self-heal.ts`. The first
+// fix goes out immediately; each still-conflicting re-try waits ever-longer
+// (2min → … → 6h plateau). The operator is notified ONCE at
+// CONFLICT_NOTIFY_ATTEMPT (visible, not a give-up).
+const CONFLICT_RECOVERY_DOMAIN: RetryDomain = {
+  retryKey: (sliceId) => "conflict-recovery:" + sliceId,
+  backoffField: "conflict_recovery_backoff_until",
+};
 const CONFLICT_NOTIFY_ATTEMPT = 3;
-
-/** Pure read of a slice's conflict-recovery attempt counter (0 when never tried). */
-function conflictRecoveryAttempts(raw: any, sliceId: string): number {
-  const c = raw?.transient_retry_counts;
-  const v = c && typeof c === "object" ? c[CONFLICT_RECOVERY_KEY(sliceId)] : undefined;
-  return Number.isFinite(v) ? v : 0;
-}
-
-/** Pure read of a slice's next conflict-recovery eligibility (epoch ms; 0 = eligible now). */
-function conflictBackoffUntil(raw: any, sliceId: string): number {
-  const b = raw?.[CONFLICT_BACKOFF_FIELD];
-  return b && typeof b === "object" && Number.isFinite(b[sliceId]) ? b[sliceId] : 0;
-}
 
 const STRANDED_MESSAGE = [
   "[STRANDED-STEWARD-NUDGE] The deterministic loop sees no PR for this slice yet.",
@@ -479,16 +473,15 @@ function evaluatePr(
     // A conflict is a FRESH episode when the last observed snapshot was definitively
     // non-conflicting (MERGEABLE) — the prior conflict fully cleared, even if the PR
     // then sat on another blocker (CI/review) and so never reached the all-clear
-    // reset. Treat it as attempt 0 so the first fix fires immediately and any stale
-    // backoff window left over from the previous episode is ignored (the dispatch
-    // below overwrites the durable counter + warm window). "UNKNOWN" (GitHub still
+    // reset. Skip the backoff gate so the first fix fires immediately; the dispatch
+    // overwrites the durable counter + warm window. "UNKNOWN" (GitHub still
     // recomputing mid-episode) is NOT a clear, so it does not reset. Codex #504.
     const clearedSinceLastConflict = slice.pr?.mergeable === "MERGEABLE";
-    const prev = clearedSinceLastConflict ? 0 : conflictRecoveryAttempts(state.raw, sliceId);
     const nowMs = parseMs(ts);
-    if (prev > 0 && Number.isFinite(nowMs) && nowMs < conflictBackoffUntil(state.raw, sliceId)) {
+    if (!clearedSinceLastConflict && coolingDown(state.raw, CONFLICT_RECOVERY_DOMAIN, sliceId, nowMs)) {
       return; // still cooling down — hold in pr-resolving-conflicts, act next window
     }
+    const prev = clearedSinceLastConflict ? 0 : retryAttempts(state.raw, CONFLICT_RECOVERY_DOMAIN, sliceId);
     const attempt = prev + 1;
     out.push({
       kind: "conflict-fix",
@@ -875,18 +868,11 @@ export async function apply(decisions: BabysitDecision[], ctx: HandlerContext, s
         }
         slice.stage = "pr-resolving-conflicts";
         // Self-heal bookkeeping (#504): record this attempt durably and schedule the
-        // next exponential-backoff window (warm) — the shared self-heal pace.
+        // next exponential-backoff window (warm) via the shared pacer (#506).
         const attempt = Number.isFinite(d.attempt) && d.attempt > 0 ? d.attempt : 1;
-        const counts = ensureRetryCounts(state.raw);
-        counts[CONFLICT_RECOVERY_KEY(d.sliceId)] = attempt;
-        ctx.emitTransition?.({ type: "retry.counted", key: CONFLICT_RECOVERY_KEY(d.sliceId), count: attempt });
-        const nowMs = parseMs(ts);
-        if (Number.isFinite(nowMs)) {
-          if (!state.raw[CONFLICT_BACKOFF_FIELD] || typeof state.raw[CONFLICT_BACKOFF_FIELD] !== "object") {
-            state.raw[CONFLICT_BACKOFF_FIELD] = {};
-          }
-          state.raw[CONFLICT_BACKOFF_FIELD][d.sliceId] = nowMs + backoffMs(attempt, d.sliceId);
-        }
+        setRetryAttempts(state.raw, CONFLICT_RECOVERY_DOMAIN, d.sliceId, attempt);
+        ctx.emitTransition?.({ type: "retry.counted", key: CONFLICT_RECOVERY_DOMAIN.retryKey(d.sliceId), count: attempt });
+        scheduleBackoff(state.raw, CONFLICT_RECOVERY_DOMAIN, d.sliceId, attempt, parseMs(ts));
         mark(slice, "conflict-fix", d.key, `processor sent conflict-resolution fix (attempt ${attempt})`, ts);
         ctx.emitTransition?.({ type: "slice.stage.changed", sliceId: d.sliceId, stage: "pr-resolving-conflicts" });
         res.actions.push({
@@ -1125,15 +1111,13 @@ export async function apply(decisions: BabysitDecision[], ctx: HandlerContext, s
           ctx.emitTransition?.({ type: "retry.counted", key: CI_RECOVERY_DOMAIN.retryKey(d.sliceId), count: 0 });
         }
         // Conflict self-heal budget (#504): the conflict cleared, so reset the durable
-        // attempt counter + drop the warm backoff window — a future re-conflict
-        // (another PR merged into the base) re-probes promptly with a short first wait.
-        if (conflictRecoveryAttempts(state.raw, d.sliceId) > 0) {
-          ensureRetryCounts(state.raw)[CONFLICT_RECOVERY_KEY(d.sliceId)] = 0;
-          ctx.emitTransition?.({ type: "retry.counted", key: CONFLICT_RECOVERY_KEY(d.sliceId), count: 0 });
+        // attempt counter + drop the warm backoff window via the shared pacer — a
+        // future re-conflict (another PR merged into the base) re-probes promptly.
+        if (retryAttempts(state.raw, CONFLICT_RECOVERY_DOMAIN, d.sliceId) > 0) {
+          setRetryAttempts(state.raw, CONFLICT_RECOVERY_DOMAIN, d.sliceId, 0);
+          ctx.emitTransition?.({ type: "retry.counted", key: CONFLICT_RECOVERY_DOMAIN.retryKey(d.sliceId), count: 0 });
         }
-        if (state.raw[CONFLICT_BACKOFF_FIELD] && typeof state.raw[CONFLICT_BACKOFF_FIELD] === "object") {
-          delete state.raw[CONFLICT_BACKOFF_FIELD][d.sliceId];
-        }
+        clearBackoff(state.raw, CONFLICT_RECOVERY_DOMAIN, d.sliceId);
         mark(slice, "pr-open", actionKey("pr-open", d.pr), "processor observed PR all clear", ts);
         ctx.emitTransition?.({ type: "slice.stage.changed", sliceId: d.sliceId, stage: "pr-open" });
         res.actions.push({ action: "pr-open", sliceId: d.sliceId, sessionId: d.sessionId, pr: d.pr, detail: "observed PR all clear" });
