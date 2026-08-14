@@ -382,6 +382,13 @@ function dispatchItemForNode(
  * milestone CONTAINER nodes — whose child artifact already exists, so their real
  * work lives at deeper layers — are excluded. Subtract in-flight/archived work with
  * {@link dispatchableReady} to get the "dispatchable now" count.
+ *
+ * This is BOTH the queue metric's frontier AND (since #504) the actual dispatch set:
+ * every independent layer-0 node is a separate dispatch unit, so sibling
+ * user-stories / task-slices in one spec launch in PARALLEL rather than serializing
+ * behind the record's single `next_action`. Ordered by {@link dispatchPriority}
+ * (cut → forge → render → mark), stable within a priority band, so dispatch and the
+ * cap allocate work in the same deterministic order the record-paced path used.
  */
 export function actionableLayer0Items(status: any): any[] {
   const pending = pendingGraphNodes(status);
@@ -394,12 +401,23 @@ export function actionableLayer0Items(status: any): any[] {
   const out: any[] = [];
   for (const n of pending) {
     if (n.layer !== 0) continue;
+    // Defensive: never dispatch a node smithy already marks in-progress. Smithy
+    // should exclude started work from the layers (Balexda/SmithyCLI#500), but a
+    // leaf task-slice can still surface `in-progress` in layer-0; dispatching it
+    // would double-launch work already underway. Only `not-started` layer-0 nodes
+    // are a fresh dispatch (done nodes are already dropped by pendingGraphNodes).
+    // Case-normalized to match `dependencySatisfied` (a status-case flip upstream
+    // must not silently defeat the guard and double-launch started work).
+    if (String(n.node?.status ?? "").toLowerCase() === "in-progress") continue;
     const kind = nodeRowKind(n.node);
     if (!(kind === "US" || kind === "S" || byTarget.has(n.id))) continue;
     const item = dispatchItemForNode(byPath, byTarget, n);
     if (item) out.push(item);
   }
-  return out;
+  return out
+    .map((item, index) => ({ item, index }))
+    .sort((a, b) => dispatchPriority(a.item) - dispatchPriority(b.item) || a.index - b.index)
+    .map((x) => x.item);
 }
 
 /** Pending-node queue depth by dependency layer: `blocked` is the next wave (layer

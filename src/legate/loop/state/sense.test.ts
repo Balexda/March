@@ -180,8 +180,11 @@ describe("senseFromHerald (Stage 1, Herald-backed)", () => {
       herald,
       { repo: { path: "/repo" }, slices: {}, archived_slices: {} },
     );
-    // The orphaned spec still dispatches (its record is in the dispatch `ready` set).
-    expect(state.smithy.ready.map((r: any) => r.path)).toEqual(["specs/statio/statio.spec.md"]);
+    // `ready` is now the NODE-level frontier (#504): all THREE independent layer-0
+    // user stories dispatch in parallel — one `smithy.cut` per story — not the
+    // record's single collapsed `cut US3`. Their target rows are US3/US5/US6.
+    expect(state.smithy.ready.map((r: any) => r.next_action.arguments[1])).toEqual(["3", "5", "6"]);
+    expect(state.smithy.ready.every((r: any) => r.path === "specs/statio/statio.spec.md")).toBe(true);
     // Frontier = 3 user stories, blocked = the 1 layer-1 story, backlog = the 1 layer-2 node.
     expect(state.smithy.queue).toEqual({ dispatchable: 3, blocked: 1, total: 1 });
   });

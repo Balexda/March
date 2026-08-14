@@ -200,6 +200,23 @@ describe("smithy-graph pure helpers", () => {
     expect(dispatchableReady(state, items)).toHaveLength(2);
   });
 
+  it("actionableLayer0Items skips a layer-0 node smithy marks in-progress (never re-dispatch started work, #500)", () => {
+    // Both US1 and US2 are layer-0, but US2 is already in-progress — dispatching it
+    // would double-launch work underway. Only the not-started US1 is a fresh item.
+    const status = {
+      graph: {
+        nodes: {
+          "s/x.spec.md#US1": { record_path: "s/x.spec.md", row: { id: "US1", depends_on: [] }, status: "not-started" },
+          "s/x.spec.md#US2": { record_path: "s/x.spec.md", row: { id: "US2", depends_on: [] }, status: "in-progress" },
+        },
+        layers: [{ layer: 0, node_ids: ["s/x.spec.md#US1", "s/x.spec.md#US2"] }],
+      },
+      records: [{ path: "s/x.spec.md", dependency_order: { id_prefix: "US" }, next_action: { command: "smithy.cut", arguments: ["s", "1"] } }],
+    };
+    const items = actionableLayer0Items(status);
+    expect(items.map((i) => i.next_action.arguments[1])).toEqual(["1"]);
+  });
+
   it("queueDepth counts the next wave (layer 1) as blocked and layer ≥ 2 as the deep backlog", () => {
     expect(queueDepth(statioStatus())).toEqual({ blocked: 1, total: 1 });
   });
