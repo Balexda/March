@@ -1,5 +1,6 @@
 import { createStatioLogger } from "../observability/logger.js";
 import { initOtel } from "../observability/otel.js";
+import { startStatioHeartbeat } from "../observability/statio-metrics.js";
 import {
   STATIO_SERVICE_NAME,
   STATIO_TOKEN_ENV,
@@ -43,6 +44,7 @@ export async function runStatioServer(options: RunStatioServerOptions = {}): Pro
 
   await app.listen({ port, host });
   app.log.info(`statio listening on http://${host}:${port}`);
+  const stopHeartbeat = startStatioHeartbeat();
 
   await new Promise<void>((resolve) => {
     let shuttingDown = false;
@@ -52,6 +54,7 @@ export async function runStatioServer(options: RunStatioServerOptions = {}): Pro
       app.log.info(`received ${signal}, shutting down`);
       void (async () => {
         try {
+          stopHeartbeat();
           await app.close();
         } finally {
           await otel.shutdown();
