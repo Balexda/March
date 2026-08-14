@@ -106,14 +106,20 @@ export function derivedStatus(
   record: SpawnRecord,
   dockerSnapshot?: DockerSnapshot,
 ): SpawnView {
-  // US2 derives the view from the persisted record alone. `dockerSnapshot` is
-  // accepted now to pin the signature but intentionally not yet consulted;
-  // reconciling `containerLive`/`disposed` against a caller snapshot is US3.
-  void dockerSnapshot;
+  // A snapshot is evidence about the container it names. One taken for a
+  // different container (a caller mis-zipping records to observations) says
+  // nothing about this record, so it is ignored rather than believed — the
+  // fallback is the record-only path, identical to supplying no snapshot.
+  const applies =
+    dockerSnapshot !== undefined &&
+    record.containerId !== undefined &&
+    dockerSnapshot.containerId === record.containerId;
   return {
     record,
     needsAttention: record.status === "failed",
     disposed: !fs.existsSync(record.worktreePath),
-    containerLive: record.status === "running",
+    containerLive: applies
+      ? dockerSnapshot.present && dockerSnapshot.running === true
+      : record.status === "running",
   };
 }
