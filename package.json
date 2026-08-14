@@ -8,6 +8,7 @@
   },
   "scripts": {
     "docs:contracts:check": "node scripts/docs-contracts/check.mjs",
+    "docs:contracts:extract": "tsup src/contracts/autogen-command-cli.ts --format esm --out-dir .cache/docs-contracts-extract --clean --external typescript --silent && node .cache/docs-contracts-extract/autogen-command-cli.js",
     "pretest": "tsup src/cli.ts --format esm --clean && npm run skills:generate",
     "test": "npm run test:l0 && npm run test:l1 && npm run test:l2-cassette && npm run test:l3-cassette",
     "test:vitest": "vitest run",

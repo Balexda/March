@@ -18,7 +18,7 @@
 
 ### Tasks
 
-- [ ] **Expose the npm-run command surface**
+- [x] **Expose the npm-run command surface**
 
   Add the repository-local command entrypoint and package script for `npm run docs:contracts:extract` with explicit check and write modes. The command should delegate subsystem behavior to the existing documentation-contract tooling modules and avoid adding live-service, Docker, network, CI, or Smithy-agent enforcement behavior.
 
@@ -29,7 +29,7 @@
   - The command resolves repository filesystem inputs deterministically from the current checkout.
   - No Docker, network access, live March services, agent sessions, CI workflow, or runtime subsystem behavior is required.
 
-- [ ] **Compose check mode without editing files**
+- [x] **Compose check mode without editing files**
 
   Implement the check-mode pipeline that loads extraction ownership, resolves source surfaces, extracts public export summaries, renders expected generated blocks, validates target AUTOGEN regions, and compares expected content with existing marker-bounded content.
 
@@ -40,7 +40,7 @@
   - Check mode does not modify contract files or any generated region.
   - Config, ownership, parse, marker, stale-output, and write-safety failures produce the `Autogen Command Result` shape from the data model.
 
-- [ ] **Compose write mode with marker-bounded updates**
+- [x] **Compose write mode with marker-bounded updates**
 
   Implement the write-mode pipeline using the same expected generated blocks and marker validation as check mode, then refresh only stale valid AUTOGEN regions. The write path should preserve the all-or-nothing safety boundary from the replacement slice and report updated owners deterministically.
 
@@ -51,7 +51,7 @@
   - Invalid config, ownership, parse, marker, or write-safety failures leave contracts unchanged.
   - Already-current contracts remain byte-for-byte unchanged and are reported consistently.
 
-- [ ] **Stabilize command output and exit behavior**
+- [x] **Stabilize command output and exit behavior**
 
   Normalize command summaries, diagnostics, and exit codes so humans, CI, and future Smithy-agent enforcement receive the same local result from unchanged repository inputs. Keep output bounded and deterministic without requiring service readiness or interactive prompts.
 
@@ -62,7 +62,7 @@
   - Output ordering is deterministic by owner and repo-relative path.
   - The command never prompts for input and failures are clean exits rather than hangs.
 
-- [ ] **Cover the command with integration fixtures**
+- [x] **Cover the command with integration fixtures**
 
   Add focused command-level tests that exercise current, stale, write, and infrastructure-unavailable (Docker + March subsystems/sessions absent) scenarios through the public npm-run command or its command entrypoint. The tests should prove US4 behavior without adding CI enforcement or depending on live March processes.
 
