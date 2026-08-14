@@ -454,6 +454,61 @@ describe("container-launch", () => {
       ).not.toThrow();
     });
 
+    it("rejects non-bind --mount types unconditionally", () => {
+      for (const value of [
+        "type=volume,source=march-cache,target=/march/cache",
+        "type=tmpfs,target=/march/scratch",
+        // `type=` omitted — Docker defaults --mount to a named volume.
+        "source=march-cache,target=/march/cache",
+      ]) {
+        expect(() =>
+          validateLaunchBindMounts(
+            codexBackend,
+            ["create", "--mount", value, IMAGE_TAG],
+            declaredMounts,
+          ),
+        ).toThrow(/rejected non-bind mount/);
+      }
+
+      expect(() =>
+        validateLaunchBindMounts(
+          codexBackend,
+          ["create", "--mount=type=volume,source=march-cache,target=/march/cache"],
+          declaredMounts,
+        ),
+      ).toThrow(/--mount type=volume is not/);
+    });
+
+    it("stops scanning at the image token so entrypoint args are not read as flags", () => {
+      expect(() =>
+        validateLaunchBindMounts(
+          claudeCodeBackend,
+          [
+            "create",
+            IMAGE_TAG,
+            "bash",
+            "-lc",
+            "some-backend-cli -v --mount type=volume,source=x,target=/x",
+            "-v",
+            "/host/oauth:/march/oauth",
+          ],
+          [],
+          IMAGE_TAG,
+        ),
+      ).not.toThrow();
+    });
+
+    it("still rejects a bind mount that precedes the image token", () => {
+      expect(() =>
+        validateLaunchBindMounts(
+          claudeCodeBackend,
+          ["create", "-v", "/host/oauth:/march/oauth", IMAGE_TAG, "bash"],
+          [],
+          IMAGE_TAG,
+        ),
+      ).toThrow(/rejected undeclared bind mount/);
+    });
+
     it("rejects declared sources with the wrong target or read-only posture", () => {
       expect(() =>
         validateLaunchBindMounts(
