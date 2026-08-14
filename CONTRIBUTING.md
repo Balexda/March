@@ -37,9 +37,9 @@ Tests live next to the modules they cover. When adding a module, place it under 
 
 ### Subsystem contract docs
 
-Each subsystem carries a `contract.md` describing its public surface. These docs are kept current **at edit time, not by an enforcement gate**: when a change alters a subsystem's public surface, update that subsystem's `contract.md` in the same change. The Smithy tools used for most edits already maintain affected docs as part of their change, and the mechanically-derivable regions are refreshed by a **deterministic** extractor (the planned `npm run docs:contracts:extract`, from Fastify controller endpoints and exported TypeScript signatures) — there is no AI/LLM step on check-in.
+Each subsystem carries a `contract.md` describing its public surface. These docs are kept current **at edit time, not by an enforcement gate**: when a change alters a subsystem's public surface, update that subsystem's `contract.md` in the same change. The Smithy tools used for most edits already maintain affected docs as part of their change, and Feature 7's mechanically-derivable regions are refreshed by a **deterministic** extractor (the planned `npm run docs:contracts:extract`, from Fastify controller endpoints and exported TypeScript signatures) — there is no AI/LLM step on check-in.
 
-There is **no per-PR CI or AI freshness gate**. The planned `npm run docs:contracts:check` is an opt-in, advisory local check you *may* run to sanity-check a contract; it never blocks a PR, slice, or merge. This convention is Feature 6 of the contract-documentation track — see **[docs/rfcs/2026-002-layered-testing-framework/02-subsystem-contract-documentation-track.features.md](docs/rfcs/2026-002-layered-testing-framework/02-subsystem-contract-documentation-track.features.md)**.
+There is **no per-PR CI or AI freshness gate**. Feature 5's `npm run docs:contracts:check` is an opt-in, advisory local check you *may* run to sanity-check a contract; it never blocks a PR, slice, or merge. This convention is Feature 6 of the contract-documentation track — see **[docs/rfcs/2026-002-layered-testing-framework/02-subsystem-contract-documentation-track.features.md](docs/rfcs/2026-002-layered-testing-framework/02-subsystem-contract-documentation-track.features.md)**.
 
 ## Testing
 

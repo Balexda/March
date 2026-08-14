@@ -18,7 +18,7 @@
 
 ### Tasks
 
-- [ ] **Document the convention in `CONTRIBUTING.md`**
+- [x] **Document the convention in `CONTRIBUTING.md`**
 
   Update the contributor-facing guide so its subsystem contract documentation guidance satisfies AS 3.1-3.3. Keep the change scoped to discoverability of the convention and avoid adding implementation details for Feature 5 or Feature 7.
 
@@ -29,7 +29,7 @@
   - Feature 7's extractor is described as deterministic and responsible for mechanical generated regions.
   - No `.github/workflows/contract-freshness.yml` workflow, CI job, runtime behavior, or AI-on-check-in step is introduced.
 
-- [ ] **Document the convention in `CLAUDE.md`**
+- [x] **Document the convention in `CLAUDE.md`**
 
   Update the Claude agent guide so an autonomous coding agent sees the same convention described in `CONTRIBUTING.md`. The wording should satisfy AS 3.1-3.3 while preserving `AGENTS.md` as the canonical detailed agent guide if the file already delegates there.
 
@@ -40,7 +40,7 @@
   - Feature 7's extractor is described as deterministic and responsible for mechanical generated regions.
   - The file does not introduce a separate enforcement pass, autonomous prompt, or required pre-merge freshness verdict.
 
-- [ ] **Document the convention in `AGENTS.md`**
+- [x] **Document the convention in `AGENTS.md`**
 
   Update the canonical agent guide so Smithy and other autonomous agents receive the contract-maintenance convention where repository working rules live. The guidance should satisfy AS 3.1-3.3 and cite `docs/vision.md` plus `docs/operating-philosophy.md` for the autonomous-component posture rather than restating that philosophy.
 
