@@ -65,9 +65,8 @@ march brood inspect <id> [--json] [--reconcile|--no-reconcile]
 
 | Field | Type | Description |
 |-------|------|-------------|
-| record | SessionRecord | Complete tracked session record. |
-| view | BroodReadView | Derived read fields for the same record. |
-| `failureReason` | string \| null | Failure context when present. |
+| human output | text | Rendered record fields plus derived read fields, including `failureReason` when present. |
+| JSON | BroodReadView | A single read view. The complete tracked `SessionRecord` is its `record` field — `failureReason` is read from there, not emitted as a peer key. |
 
 #### Error Conditions
 
