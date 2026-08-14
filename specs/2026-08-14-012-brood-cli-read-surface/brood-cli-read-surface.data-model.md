@@ -5,18 +5,33 @@
 
 ### 1) SessionRecord (`brood_session`)
 
+This feature does **not** define `SessionRecord` — the Brood service owns it at
+`src/brood/service/types.ts`. `inspect` presents the service response as an
+**opaque pass-through**, so fields added there later surface without a spec
+change (FR-021). The table below records the shape as of this spec and the read
+role of each field; it is a reference, not a permitted subset.
+
 | Field | Type | Required | Notes |
 |-------|------|----------|-------|
 | `id` | string | Yes | Stable session identifier used by `inspect` and `logs`. |
-| `kind` | `spawn \| steward \| legate` | Yes | Filterable by `list --kind`. |
+| `kind` | `spawn \| steward \| legate` | Yes | Filterable by `list --kind`; selects the `logs` source path. |
 | `status` | SessionStatus | Yes | Filterable by `list --status`; read commands do not change it. |
 | `parentId` | string | No | Relationship to a parent spawn for steward rows. |
+| `repoPath` | string | No | Source repository root; displayed by inspect. |
 | `branch` | string | No | Displayed by list and inspect. |
 | `worktreePath` | string | No | Displayed by inspect; may inform derived `disposed`. |
-| `containerId` | string | No | Displayed by list and inspect; used by `logs` live-source selection. |
+| `containerId` | string | No | Displayed by list and inspect; used by `logs` live-source selection for `spawn` / `legate` rows. |
+| `agentDeckSessionId` | string | No | Castra/agent-deck session id; used by `logs` source selection for `steward` rows. |
+| `profile` | string | No | agent-deck profile; displayed by inspect. |
+| `group` | string | No | agent-deck group; displayed by inspect. |
+| `backend` | string | No | Execution backend; displayed by inspect. |
+| `extractionResult` | ExtractionResult | No | Persisted extraction outcome; displayed by inspect, never recomputed. |
+| `imageId` | string | No | Displayed by inspect. |
+| `exitCode` | number | No | Displayed by inspect; may inform derived `needsAttention`. |
 | `failureReason` | string | No | Displayed by inspect when present. |
 | `createdAt` | ISO timestamp | Yes | Used to derive age. |
 | `updatedAt` | ISO timestamp | Yes | Displayed by inspect. |
+| `startedAt` | ISO timestamp | No | Displayed by inspect. |
 | `stoppedAt` | ISO timestamp | No | Displayed by inspect. |
 | `torndownAt` | ISO timestamp | No | Informs derived `disposed`. |
 
@@ -24,6 +39,7 @@ Validation rules:
 - Read commands MUST NOT create, update, delete, or repair SessionRecord rows.
 - Invalid `kind` and `status` filter values are rejected before querying as usage errors.
 - Missing optional fields are rendered as null/empty values without changing output shape.
+- `inspect` MUST NOT drop unrecognized fields returned by the service.
 
 ### 2) BroodReadView (`brood_read_view`)
 
@@ -57,15 +73,17 @@ Validation rules:
 
 | Field | Type | Required | Notes |
 |-------|------|----------|-------|
-| `kind` | `live-container \| archive` | Yes | Selected log source. |
+| `kind` | `live-container \| castra-session \| archive` | Yes | Selected log source. |
 | `containerId` | string | No | Required for `live-container`. |
+| `agentDeckSessionId` | string | No | Required for `castra-session`. |
 | `archivePath` | string | No | Required for `archive`. |
 | `available` | boolean | Yes | False produces a clear unavailable-log error. |
 
 Validation rules:
-- Live container logs are preferred when the tracked container exists.
-- Archive fallback is used only when live logs are unavailable and archived `container.log` exists.
-- Selecting or reading a LogReadSource MUST NOT mutate Docker or archive state.
+- For `spawn` and `legate` rows, live container logs are preferred when the tracked container exists.
+- For a live `steward` row, `castra-session` is the live source — stewards are hosted in Castra and have no container of their own, so container absence alone MUST NOT produce an unavailable-log error.
+- Archive fallback is used only when the live source is unavailable and archived `container.log` exists.
+- Selecting or reading a LogReadSource MUST NOT mutate Docker, Castra, or archive state.
 
 ## Relationships
 
@@ -81,8 +99,9 @@ Validation rules:
 |--------|------------|---------|---------|
 | SessionRecord | none | Any F2 read command | No persisted state changes. |
 | BroodReadView | not-created -> derived | list or inspect reads a SessionRecord | Derived fields are computed for output only. |
-| LogReadSource | unresolved -> live-container | logs finds a live tracked container | Live logs are read only. |
-| LogReadSource | unresolved -> archive | logs cannot use live container and finds archive | Archived log is read only. |
+| LogReadSource | unresolved -> live-container | logs finds a live tracked container on a `spawn` / `legate` row | Live logs are read only. |
+| LogReadSource | unresolved -> castra-session | logs resolves a live `steward` row's `agentDeckSessionId` | Castra session output is read only. |
+| LogReadSource | unresolved -> archive | logs cannot use the live source and finds archive | Archived log is read only. |
 | LogReadSource | unresolved -> unavailable | logs finds neither source | Command exits non-zero. |
 
 ## Identity & Uniqueness

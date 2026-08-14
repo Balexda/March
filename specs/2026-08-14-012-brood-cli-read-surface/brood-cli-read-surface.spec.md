@@ -15,7 +15,8 @@
 - The 2026-05 architecture note in the feature map supersedes the original local-JSON mechanism. These commands are thin clients of the Brood service and read from the service-owned session registry. They do not parse registry files directly.
 - The commands are read-only from the operator CLI surface. They do not register, update, tear down, prune, or delete sessions. `logs` may read Docker logs or an archived log, but it never mutates Docker state.
 - `list` defaults to a cheap registry read with reconciliation off. `inspect` defaults to reconciled liveness because it is focused on one session. Both expose `--reconcile` and `--no-reconcile` so callers can choose accuracy or speed explicitly. [Critical Assumption]
-- `logs` reads live container logs when the tracked container exists; after teardown, it falls back to the archived `container.log` captured by the teardown feature. Continuous log capture, compression, and retention policy are outside this feature.
+- `logs` reads live container logs when the tracked container exists; after teardown, it falls back to the archived `container.log` captured by the teardown feature. A live `steward` row has no container of its own — it is hosted in Castra — so its logs come from Castra's session output instead. Continuous log capture, compression, and retention policy are outside this feature.
+- Reconciliation and log reading live behind the Brood service, per the feature map's architecture note that "state and Docker reconciliation live behind the service, not in the CLI process". The CLI never opens a Docker socket or reads the archive directly.
 - The read surface applies to Brood `SessionRecord` rows, not only legacy spawn JSON. Spawn rows remain the primary operator target for F2, while steward and legate rows are listed and inspected through the same read contract when present.
 - This spec cites `docs/vision.md` and `docs/operating-philosophy.md`: Brood removes cleanup and lifecycle intervention, and these read commands are the deliberate CLI intervention surface that lets the operator inspect state without manually reconciling containers, worktrees, or raw registry rows.
 
@@ -75,7 +76,8 @@ As an operator, I want `march brood logs <id>` to read the relevant log stream f
 2. **Given** the tracked container has been removed and an archived `container.log` exists, **When** the operator runs `march brood logs <id>`, **Then** the command prints the archived log.
 3. **Given** neither live container logs nor an archived log are available, **When** the operator runs `march brood logs <id>`, **Then** the command exits non-zero with a clear message that logs are unavailable.
 4. **Given** the operator asks for logs of an untracked id, **When** the command runs, **Then** it exits non-zero with a deterministic not-found message.
-5. **Given** logs are read from Docker or the archive, **When** the command completes, **Then** no registry, archive, Docker, worktree, or branch state is mutated.
+5. **Given** logs are read from Docker, Castra, or the archive, **When** the command completes, **Then** no registry, archive, Docker, Castra, worktree, or branch state is mutated.
+6. **Given** a live `steward` row with an `agentDeckSessionId` and no `containerId`, **When** the operator runs `march brood logs <id>`, **Then** the command returns that session's output from Castra rather than an unavailable-log error.
 
 ### Edge Cases
 
@@ -83,7 +85,7 @@ As an operator, I want `march brood logs <id>` to read the relevant log stream f
 - A status or kind filter is invalid: the command rejects the filter as usage error rather than silently returning an unfiltered list.
 - `--reconcile` is requested for list: the command may perform liveness observation for rows, but it still must not update registry or Docker state.
 - `--no-reconcile` is requested for inspect: the command uses registry facts only and marks the view as unreconciled.
-- A session has no branch or no container id: table and JSON output keep stable fields and use empty/null values rather than shifting columns.
+- A session has no branch or no container id: table and JSON output keep stable fields and use empty/null values rather than shifting columns. For a `steward` row, a missing container id is normal and MUST NOT be presented as a fault.
 - A session is already torn down: `disposed` is derived true, the persisted status remains Brood's lifecycle status, and logs fall back to the archive when present.
 
 ## Dependency Order
@@ -93,8 +95,15 @@ Recommended implementation sequence:
 | ID | Title | Depends On | Artifact |
 |----|-------|------------|----------|
 | US1 | List Tracked Sessions | — | — |
-| US2 | Inspect One Session | US1 | — |
-| US3 | Read Live Or Archived Logs | US1, US2 | — |
+| US2 | Inspect One Session | — | — |
+| US3 | Read Live Or Archived Logs | — | — |
+
+All three stories are independently sliceable: `list` and `inspect` are separate
+read commands over the same pre-existing service substrate, and `logs` needs
+only record lookup plus its own source selection — not either command's
+presentation. `BroodReadView` is a shared data-model contract, not a sequencing
+edge. The one genuine ordering constraint is FR-019's `SessionRecord`
+derivation, which every story depends on equally.
 
 ## Requirements *(mandatory)*
 
@@ -115,20 +124,24 @@ Recommended implementation sequence:
 - **FR-013**: The system MUST provide `march brood logs <id>` as a read-only CLI command for a tracked session's logs.
 - **FR-014**: `march brood logs <id>` MUST read live container logs when the tracked container exists.
 - **FR-015**: `march brood logs <id>` MUST fall back to the archived teardown log when the live container is unavailable and the archive exists.
+- **FR-015a**: For a live `steward` row — which is hosted in Castra and carries `agentDeckSessionId` rather than a `containerId` — `march brood logs <id>` MUST read the session's output from Castra rather than reporting logs unavailable. Container-backed kinds (`spawn`, `legate`) keep the Docker-then-archive path.
 - **FR-016**: All three read commands MUST fail clearly on an unreachable Brood service and MUST NOT silently fall back to direct local registry parsing.
 - **FR-017**: All three read commands MUST NOT register, update, tear down, delete, prune, or otherwise mutate Brood registry, Docker, worktree, branch, or archive state.
 - **FR-018**: This feature MUST NOT implement teardown, archive capture, bulk cleanup, watch/follow mode, tmux attach, Hatchery profile editing, Herald event subscription, or spawn launch behavior.
+- **FR-019**: The derived read view MUST be computed over the service's `SessionRecord` shape for all tracked kinds. Because F1's shipped derivation is typed against the legacy `SpawnRecord`, lifting it to `SessionRecord` is prerequisite work inside this feature.
+- **FR-020**: Reconciliation and log reading MUST be owned by the Brood service, not the CLI process. The CLI MUST NOT open a Docker socket or read the teardown archive directly; it requests a reconciliation mode and log content over HTTP and renders the response.
+- **FR-021**: `inspect` MUST emit every field the registry persists for a session. The presented record is a pass-through of the service response, so fields added to `SessionRecord` later surface without a spec change.
 
 ### Key Entities
 
 - **SessionRecord**: The service-owned tracked lifecycle record for a spawn, steward, or legate session.
 - **BroodReadView**: A derived, non-persisted view over a SessionRecord used by list and inspect presentations.
-- **LogReadSource**: The selected read-only source for `logs`: live container logs or archived teardown log.
+- **LogReadSource**: The selected read-only source for `logs`: live container logs, Castra session output (steward rows), or the archived teardown log.
 - **Reconciliation Mode**: The per-command choice that controls whether liveness evidence is observed during read presentation.
 
 ## Assumptions
 
-- F1's reader/derived-view guarantees have landed and are available to Brood's service-backed read surface, even if the backing mechanism is the SQLite session registry rather than legacy spawn JSON.
+- **F1's derived view does not yet cover the service registry — this is a prerequisite, not an assumption.** F1 shipped as `src/brood/spawn-index.ts`: `listSpawnRecords()` / `loadSpawnRecord(id)` / `derivedStatus(record)` read legacy `~/.march/spawns/*.json` and are typed against `SpawnRecord` / `SpawnView`. The Brood service's `GET /sessions` returns the materially different `SessionRecord` shape and covers `spawn`, `steward`, and `legate` kinds. F2 therefore cannot consume F1's API as-is. Lifting the derivation to `SessionRecord` is **in-scope prerequisite work for this feature** (FR-019), not assumed-available. The alternative — restricting F2 to the legacy spawn surface — is rejected here because the 2026-05 architecture note makes the service registry the source of truth and the read surface must cover every kind it tracks. See SD-003.
 - `march brood list` and `march brood inspect` are operator-facing CLI clients over the Brood service, not autonomous components that prompt for input. This follows `docs/vision.md` and `docs/operating-philosophy.md`: the CLI is the deliberate intervention surface, while Brood owns lifecycle state and cleanup.
 - Reconciliation is observational only. It may read liveness evidence but does not repair, update, or tear down anything during F2 reads.
 - `logs` depends on F3 to create the archived teardown `container.log`. Before F3 lands, archive fallback may be specified and tested with fixtures, but production fallback only works once teardown writes the archive.
@@ -140,6 +153,9 @@ Recommended implementation sequence:
 |----|-------------|-----------------|--------|------------|--------|------------|
 | SD-001 | Archive availability sequencing: F2 specifies fallback to F3's archived `container.log`, but F3 is a separate feature. The F2 implementation must either land after the archive path exists or ship the fallback path with fixture coverage and a clear unavailable-log error until F3 writes real archives. | clarify:Integration | Medium | Medium | open | — |
 | SD-002 | Exact `needsAttention` predicate is inherited from F1's open debt. This feature requires the marker to exist in list/inspect output, but the final predicate set is owned by the derived-view contract F1 exposes. | clarify:Domain & Data Model | Medium | Medium | open | — |
+| SD-003 | F1's shipped derivation (`src/brood/spawn-index.ts`) is typed against the legacy `SpawnRecord` and reads `~/.march/spawns/*.json`, while this feature reads the service's `SessionRecord` over `GET /sessions`. FR-019 makes the lift prerequisite work, but the shape of that lift is undecided: generalize `derivedStatus` over both record types, adapt `SessionRecord` → `SpawnView` at the boundary, or retire the legacy reader once F2 lands. Settle at slice time. | plan-review:Assumption-output drift | High | High | open | — |
+| SD-004 | The Brood service exposes no reconciliation query parameter and no logs endpoint today. FR-020 places both server-side, so this feature adds routes to a shipped service. Whether reconciliation becomes a query parameter on the existing session routes (as contracted here) or a separate observation endpoint is a service-design decision for the slice. | clarify:Integration Points | High | Medium | open | — |
+| SD-005 | Steward log retrieval depends on a Castra session-output read path (FR-015a). Whether Castra already exposes a suitable read endpoint, and whether Brood proxies it or the CLI is told to ask Castra directly, is unverified at spec time and must be confirmed before slicing US3. | clarify:Integration Points | Medium | Low | open | — |
 
 ## Out of Scope
 
@@ -161,3 +177,5 @@ Recommended implementation sequence:
 - **SC-004**: `march brood logs <id>` reads live logs when available and the archived teardown log when the live container is gone.
 - **SC-005**: Reconciliation defaults are test-covered: list defaults off, inspect defaults on, and both commands honor explicit `--reconcile` / `--no-reconcile`.
 - **SC-006**: Tests prove all three commands are read-only: they do not mutate Brood registry, Docker, worktree, branch, or archive state.
+- **SC-007**: `list` and `inspect` return `spawn`, `steward`, and `legate` rows with derived fields computed over `SessionRecord`, and `inspect` output contains every field the registry persists for the session.
+- **SC-008**: `march brood logs <id>` against a live steward returns that session's output from Castra rather than an unavailable-log error.
