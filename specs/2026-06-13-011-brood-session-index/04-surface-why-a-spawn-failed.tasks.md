@@ -18,7 +18,7 @@
 
 ### Tasks
 
-- [ ] **Cover failed-record reasons through the spawn index reader**
+- [x] **Cover failed-record reasons through the spawn index reader**
 
   Add focused coverage beside the Brood record/index tests that creates a spawn record, marks it failed with an error, reloads it through the session-index `loadSpawnRecord(id)` API, and asserts the persisted `failureReason` survives as optional record data. Keep any code changes limited to preserving the established `SpawnRecord` / `markSpawnRecordFailed` surface if the test exposes drift; do not add CLI presentation or a new persistence mechanism.
 
