@@ -8,12 +8,16 @@ import { execFileSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
 import {
   FRESHNESS_CONFIG_PATH,
+  MAX_DIAGNOSTICS,
   SUBSYSTEM_MANIFEST_PATH,
   checkRequiredContracts,
+  compareCheckCategories,
   contractPathForSubsystem,
+  escapeDiagnosticValue,
   findH2Headings,
   formatVerdict,
   run,
+  toErrorMessage,
 } from "./check.mjs";
 
 // The required set is now discovered from the manifest, so the tests declare
@@ -152,6 +156,12 @@ describe("docs contract checker", () => {
       expect(verdict.status).toBe("pass");
       expect(verdict.checks).toEqual([
         {
+          category: "input-source",
+          status: "pass",
+          checkedCount: 0,
+          diagnostics: [],
+        },
+        {
           category: "presence",
           status: "pass",
           checkedCount: SUBSYSTEMS.length,
@@ -176,6 +186,10 @@ describe("docs contract checker", () => {
           diagnostics: [],
         },
       ]);
+      expect(output).toContain("contract verdict: pass");
+      expect(output).toContain(
+        "input-source: pass checked=0 changedFiles=0 source=none",
+      );
       expect(output).toContain(`config: pass checked=${SUBSYSTEMS.length}`);
       expect(output).toContain("freshness: pass checked=0 changedFiles=0");
       expect(output).toContain(`contracts=${SUBSYSTEMS.join(",")}`);
@@ -196,6 +210,113 @@ describe("docs contract checker", () => {
 
       expect(verdict.status).toBe("pass");
       expect(output).toContain("freshness: pass checked=2 changedFiles=2");
+    }));
+
+  it("exits zero with stable output for a complete local fixture", () =>
+    withTempRepo((repoRoot) => {
+      writeCompleteRepo(repoRoot);
+      const stdout = [];
+      const stderr = [];
+
+      const code = run(["--repo-root", repoRoot], {
+        stdout: { write: (line) => stdout.push(line) },
+        stderr: { write: (line) => stderr.push(line) },
+      });
+
+      expect(code).toBe(0);
+      expect(stderr.join("")).toBe("");
+      expect(stdout.join("")).toContain("contract verdict: pass");
+      expect(stdout.join("")).toContain(
+        "input-source: pass checked=0 changedFiles=0 source=none diagnostics=0",
+      );
+      expect(stdout.join("")).toContain(
+        `presence: pass checked=${SUBSYSTEMS.length}`,
+      );
+      expect(stdout.join("")).toContain(
+        `config: pass checked=${SUBSYSTEMS.length} entries=${SUBSYSTEMS.length}`,
+      );
+      expect(stdout.join("")).toContain(
+        "freshness: pass checked=0 changedFiles=0 diagnostics=0",
+      );
+      expect(stdout.join("")).toContain("diagnostics: 0");
+    }));
+
+  it("exits non-zero with bounded verdict output for a failing local fixture", () =>
+    withTempRepo((repoRoot) => {
+      writeManifest(repoRoot, SUBSYSTEMS);
+      writeFreshnessConfig(repoRoot);
+      for (const name of SUBSYSTEMS.slice(1)) {
+        writeFile(repoRoot, contractPathForSubsystem(name), validContract);
+      }
+      const stdout = [];
+      const stderr = [];
+
+      const code = run(["--repo-root", repoRoot], {
+        stdout: { write: (line) => stdout.push(line) },
+        stderr: { write: (line) => stderr.push(line) },
+      });
+
+      expect(code).toBe(1);
+      expect(stderr.join("")).toBe("");
+      expect(stdout.join("")).toContain("contract verdict: fail");
+      expect(stdout.join("")).toContain("presence: fail");
+      expect(stdout.join("")).toContain("category=presence");
+      expect(stdout.join("")).toContain(contractPathForSubsystem("hatchery"));
+    }));
+
+  it("bounds and stably orders diagnostics when failures exceed the cap", () =>
+    withTempRepo((repoRoot) => {
+      // 60 declared-but-absent subsystems produce more presence failures than
+      // the diagnostic cap allows, so the output stays bounded and repeatable.
+      const manyNames = Array.from(
+        { length: 60 },
+        (_, index) => `subsystem${String(index).padStart(2, "0")}`,
+      );
+      writeManifest(repoRoot, manyNames);
+      writeFreshnessConfig(repoRoot, {
+        version: 1,
+        contracts: manyNames.map((name) => freshnessEntry(name)),
+      });
+
+      const verdict = checkRequiredContracts({ repoRoot });
+      const output = formatVerdict(verdict);
+
+      expect(verdict.status).toBe("fail");
+      expect(verdict.diagnostics).toHaveLength(MAX_DIAGNOSTICS);
+      expect(verdict.summary.diagnostics).toBe(MAX_DIAGNOSTICS);
+      expect(
+        output.split("\n").filter((line) => line.startsWith("diagnostic: ")),
+      ).toHaveLength(MAX_DIAGNOSTICS);
+      expect(output).toContain(`diagnostics: ${MAX_DIAGNOSTICS}`);
+      expect(formatVerdict(checkRequiredContracts({ repoRoot }))).toBe(output);
+    }));
+
+  it("emits identical summary output across repeated runs", () =>
+    withTempRepo((repoRoot) => {
+      writeCompleteRepo(repoRoot);
+      const changedFiles = [
+        "src/legate/loop/runtime.ts",
+        contractPathForSubsystem("legate"),
+        "src/brood/service/routes.ts",
+      ];
+
+      const first = formatVerdict(
+        checkRequiredContracts({ repoRoot, changedFiles }),
+      );
+      const second = formatVerdict(
+        checkRequiredContracts({ repoRoot, changedFiles: [...changedFiles] }),
+      );
+
+      expect(first).toBe(second);
+      expect(first.split("\n").slice(0, 7)).toEqual([
+        "contract verdict: fail",
+        `input-source: pass checked=3 changedFiles=3 source=explicit diagnostics=0`,
+        `presence: pass checked=${SUBSYSTEMS.length} contracts=${SUBSYSTEMS.join(",")} diagnostics=0`,
+        `section-schema: pass checked=${SUBSYSTEMS.length} contracts=${SUBSYSTEMS.join(",")} diagnostics=0`,
+        `config: pass checked=${SUBSYSTEMS.length} entries=${SUBSYSTEMS.length} diagnostics=0`,
+        "freshness: fail checked=3 changedFiles=3 diagnostics=1",
+        "diagnostics: 1",
+      ]);
     }));
 
   it("fails freshness when an explicit mapped source changes without its contract", () =>
@@ -234,22 +355,74 @@ describe("docs contract checker", () => {
       expect(output).toContain("freshness: pass checked=3 changedFiles=3");
     }));
 
+  it("escapes control characters so one input cannot forge diagnostic lines", () =>
+    withTempRepo((repoRoot) => {
+      writeCompleteRepo(repoRoot);
+      // A newline is legal in a Unix path argument; rendered verbatim it would
+      // let a single rejected input emit extra `diagnostic:` records that the
+      // summary never counted.
+      const injectingPath =
+        "/abs/x\ndiagnostic: category=presence name=forged message=injected";
+
+      const verdict = checkRequiredContracts({
+        repoRoot,
+        changedFiles: [injectingPath],
+      });
+      const output = formatVerdict(verdict);
+      const diagnosticLines = output
+        .split("\n")
+        .filter((line) => line.startsWith("diagnostic: "));
+
+      expect(verdict.status).toBe("fail");
+      expect(diagnosticLines).toHaveLength(verdict.summary.diagnostics);
+      expect(diagnosticLines).toHaveLength(1);
+      // The payload text survives inside the escaped value — what must not
+      // survive is a second *record* claiming a category it never came from.
+      expect(
+        diagnosticLines.every((line) =>
+          line.startsWith("diagnostic: category=input-source "),
+        ),
+      ).toBe(true);
+      expect(output).toContain("\\ndiagnostic:");
+
+      const controlSample = `a\\b\tc\r\n${String.fromCharCode(
+        0x00,
+      )}${String.fromCharCode(0x7f)}`;
+      expect(escapeDiagnosticValue(controlSample)).toBe(
+        "a\\\\b\\tc\\r\\n\\u0000\\u007f",
+      );
+      expect(escapeDiagnosticValue("docs/subsystems/brood/contract.md")).toBe(
+        "docs/subsystems/brood/contract.md",
+      );
+    }));
+
   it("rejects absolute and escaping explicit changed paths with bounded diagnostics", () =>
     withTempRepo((repoRoot) => {
       writeCompleteRepo(repoRoot);
 
-      expect(() =>
-        checkRequiredContracts({
-          repoRoot,
-          changedFiles: [path.join(repoRoot, "src/hatchery/service/worker.ts")],
-        }),
-      ).toThrow("changed-file path must be repo-relative");
-      expect(() =>
-        checkRequiredContracts({
-          repoRoot,
-          changedFiles: ["../outside.ts"],
-        }),
-      ).toThrow("changed-file path escapes repository root");
+      const absolutePathVerdict = checkRequiredContracts({
+        repoRoot,
+        changedFiles: [path.join(repoRoot, "src/hatchery/service/worker.ts")],
+      });
+      const absolutePathOutput = formatVerdict(absolutePathVerdict);
+      expect(absolutePathVerdict.status).toBe("fail");
+      expect(absolutePathOutput).toContain("input-source: fail checked=1");
+      expect(absolutePathOutput).toContain("category=input-source");
+      expect(absolutePathOutput).toContain(
+        "changed-file path must be repo-relative",
+      );
+
+      const escapingPathVerdict = checkRequiredContracts({
+        repoRoot,
+        changedFiles: ["../outside.ts"],
+      });
+      const escapingPathOutput = formatVerdict(escapingPathVerdict);
+      expect(escapingPathVerdict.status).toBe("fail");
+      expect(escapingPathOutput).toContain("input-source: fail checked=1");
+      expect(escapingPathOutput).toContain("category=input-source");
+      expect(escapingPathOutput).toContain(
+        "changed-file path escapes repository root",
+      );
     }));
 
   it("derives deterministic git changed paths including deletes and renames", () =>
@@ -286,14 +459,16 @@ describe("docs contract checker", () => {
       writeCompleteRepo(repoRoot);
       git(repoRoot, ["init"]);
 
-      const stderr = [];
+      const stdout = [];
       const code = run(["--repo-root", repoRoot, "--diff-base", "missing-ref"], {
-        stdout: { write: () => {} },
-        stderr: { write: (line) => stderr.push(line) },
+        stdout: { write: (line) => stdout.push(line) },
+        stderr: { write: () => {} },
       });
 
-      expect(code).toBe(2);
-      expect(stderr.join("")).toContain(
+      expect(code).toBe(1);
+      expect(stdout.join("")).toContain("input-source: fail checked=1");
+      expect(stdout.join("")).toContain("category=input-source");
+      expect(stdout.join("")).toContain(
         "unable to evaluate git diff base: missing-ref",
       );
     }));
@@ -554,7 +729,9 @@ describe("docs contract checker", () => {
 
       expect(verdict.status).toBe("fail");
       expect(output).toContain("sourcePath=src/hatchery/..");
-      expect(output).toContain("sourcePath=node_modules\\vitest\\index.js");
+      // Backslashes are doubled on render so an escaped control character is
+      // never ambiguous with a path that literally contains "\n".
+      expect(output).toContain("sourcePath=node_modules\\\\vitest\\\\index.js");
       expect(output).toContain("freshness config selector must be repo-relative");
     }));
 
@@ -597,6 +774,40 @@ describe("docs contract checker", () => {
       expect(code).toBe(2);
       expect(stderr.join("")).toContain(SUBSYSTEM_MANIFEST_PATH);
     }));
+
+  it("coerces non-Error throws into a stable diagnostic message", () => {
+    expect(toErrorMessage(new Error("boom"))).toBe("boom");
+    expect(toErrorMessage("plain string throw")).toBe("plain string throw");
+    expect(toErrorMessage(undefined)).toBe("undefined");
+    expect(toErrorMessage("")).toBe("unknown error");
+    expect(toErrorMessage({ nope: true })).toBe("[object Object]");
+    // A value whose String() throws must still yield a renderable message.
+    expect(
+      toErrorMessage({
+        toString() {
+          throw new Error("hostile");
+        },
+      }),
+    ).toBe("unknown error");
+  });
+
+  it("sorts unknown check categories last instead of first", () => {
+    const sorted = [
+      { category: "zebra" },
+      { category: "freshness" },
+      { category: "apple" },
+      { category: "input-source" },
+      { category: "presence" },
+    ].sort(compareCheckCategories);
+
+    expect(sorted.map((check) => check.category)).toEqual([
+      "input-source",
+      "presence",
+      "freshness",
+      "apple",
+      "zebra",
+    ]);
+  });
 
   it("detects only structural H2 headings outside fenced code blocks", () => {
     expect(

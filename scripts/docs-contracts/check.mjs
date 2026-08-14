@@ -16,7 +16,16 @@ export const SUBSYSTEM_MANIFEST_PATH = "docs/subsystems/subsystems.json";
 export const FRESHNESS_CONFIG_PATH =
   "docs/subsystems/contract-freshness.config.json";
 
-const MAX_DIAGNOSTICS = 50;
+// The diagnostic cap is part of the output contract: callers can rely on the
+// verdict never emitting more than this many diagnostic lines.
+export const MAX_DIAGNOSTICS = 50;
+const CHECK_ORDER = [
+  "input-source",
+  "presence",
+  "section-schema",
+  "config",
+  "freshness",
+];
 const GENERATED_OR_DEPENDENCY_ROOTS = new Set([
   ".git",
   "coverage",
@@ -126,6 +135,26 @@ function parseArgs(argv) {
 
 function toDiagnostic(fields) {
   return fields;
+}
+
+// A thrown value is not guaranteed to be an Error, and `undefined.message`
+// would leak `message=undefined` into the verdict. Every diagnostic carries a
+// non-empty message, so coerce whatever was caught into a stable string.
+export function toErrorMessage(error) {
+  if (error instanceof Error && typeof error.message === "string") {
+    return error.message;
+  }
+
+  if (typeof error === "string" && error !== "") {
+    return error;
+  }
+
+  try {
+    const rendered = String(error);
+    return rendered === "" ? "unknown error" : rendered;
+  } catch {
+    return "unknown error";
+  }
 }
 
 function readContractFiles(repoRoot, requiredContracts) {
@@ -708,15 +737,75 @@ function readGitChangedFiles(repoRoot, diffBase) {
 }
 
 function resolveChangedFiles(repoRoot, input) {
+  let source = "none";
+  let requestedCount = 0;
+
   if (input.diffBase !== undefined) {
-    return readGitChangedFiles(repoRoot, input.diffBase);
+    source = "git";
+    requestedCount = 1;
+    try {
+      const changedFiles = readGitChangedFiles(repoRoot, input.diffBase);
+      return {
+        changedFiles,
+        source,
+        checkedCount: changedFiles.length,
+        diagnostics: [],
+      };
+    } catch (error) {
+      return {
+        changedFiles: [],
+        source,
+        checkedCount: requestedCount,
+        diagnostics: [
+          toDiagnostic({
+            category: "input-source",
+            sourcePath: input.diffBase,
+            message: toErrorMessage(error),
+          }),
+        ],
+      };
+    }
   }
 
   if (Array.isArray(input.changedFiles) && input.changedFiles.length > 0) {
-    return normalizeChangedPaths(repoRoot, input.changedFiles);
+    source = "explicit";
+    requestedCount = input.changedFiles.length;
+
+    const diagnostics = [];
+    const normalizedFiles = [];
+    for (const changedFile of input.changedFiles) {
+      try {
+        normalizedFiles.push(normalizeChangedPath(repoRoot, changedFile));
+      } catch (error) {
+        diagnostics.push(
+          toDiagnostic({
+            category: "input-source",
+            sourcePath: changedFile,
+            message: toErrorMessage(error),
+          }),
+        );
+      }
+    }
+
+    if (diagnostics.length > 0) {
+      return {
+        changedFiles: [],
+        source,
+        checkedCount: requestedCount,
+        diagnostics: diagnostics.slice(0, MAX_DIAGNOSTICS),
+      };
+    }
+
+    const changedFiles = [...new Set(normalizedFiles)].sort();
+    return {
+      changedFiles,
+      source,
+      checkedCount: changedFiles.length,
+      diagnostics: [],
+    };
   }
 
-  return [];
+  return { changedFiles: [], source, checkedCount: 0, diagnostics: [] };
 }
 
 function validateFreshnessDrift(changedFiles, freshnessEntries, configDiagnostics) {
@@ -755,6 +844,27 @@ function validateFreshnessDrift(changedFiles, freshnessEntries, configDiagnostic
   return { checkedCount: changedFiles.length, diagnostics };
 }
 
+// A category missing from CHECK_ORDER would `indexOf` to -1 and sort ahead of
+// every known category — the opposite of what an ordering safety net should do.
+// Unknown categories go last, alphabetically, so adding one can never reshuffle
+// the established prefix of the output contract.
+export function compareCheckCategories(left, right) {
+  const leftRank = CHECK_ORDER.indexOf(left.category);
+  const rightRank = CHECK_ORDER.indexOf(right.category);
+  const leftKey = leftRank === -1 ? CHECK_ORDER.length : leftRank;
+  const rightKey = rightRank === -1 ? CHECK_ORDER.length : rightRank;
+
+  if (leftKey !== rightKey) {
+    return leftKey - rightKey;
+  }
+
+  return left.category < right.category
+    ? -1
+    : left.category > right.category
+      ? 1
+      : 0;
+}
+
 function summarizeCheck(category, checkedCount, diagnostics) {
   return {
     category,
@@ -766,7 +876,12 @@ function summarizeCheck(category, checkedCount, diagnostics) {
 
 export function checkRequiredContracts(input = {}) {
   const repoRoot = path.resolve(input.repoRoot ?? process.cwd());
-  const changedFiles = resolveChangedFiles(repoRoot, input);
+  const {
+    changedFiles,
+    source: changedFileSource,
+    checkedCount: inputSourceCheckedCount,
+    diagnostics: inputSourceDiagnostics,
+  } = resolveChangedFiles(repoRoot, input);
   const requiredContracts = readSubsystems(repoRoot);
   const { presenceDiagnostics, presentContracts } = readContractFiles(
     repoRoot,
@@ -780,16 +895,23 @@ export function checkRequiredContracts(input = {}) {
   } = validateFreshnessConfig(repoRoot, requiredContracts);
   const { checkedCount: freshnessCheckedCount, diagnostics: freshnessDiagnostics } =
     validateFreshnessDrift(
-      changedFiles,
-      configDiagnostics.length === 0 ? validatedEntries : [],
-      configDiagnostics,
+      inputSourceDiagnostics.length === 0 ? changedFiles : [],
+      configDiagnostics.length === 0 && inputSourceDiagnostics.length === 0
+        ? validatedEntries
+        : [],
+      [...configDiagnostics, ...inputSourceDiagnostics],
     );
   const checks = [
+    summarizeCheck(
+      "input-source",
+      inputSourceCheckedCount,
+      inputSourceDiagnostics,
+    ),
     summarizeCheck("presence", requiredContracts.length, presenceDiagnostics),
     summarizeCheck("section-schema", presentContracts.length, sectionDiagnostics),
     summarizeCheck("config", configCheckedCount, configDiagnostics),
     summarizeCheck("freshness", freshnessCheckedCount, freshnessDiagnostics),
-  ];
+  ].sort(compareCheckCategories);
   const diagnostics = checks
     .flatMap((check) => check.diagnostics)
     .slice(0, MAX_DIAGNOSTICS);
@@ -803,27 +925,55 @@ export function checkRequiredContracts(input = {}) {
       contracts: requiredContracts.map((contract) => contract.name),
       configEntries: configCheckedCount,
       changedFiles: changedFiles.length,
+      changedFileSource,
       diagnostics: diagnostics.length,
     },
   };
 }
 
+// Diagnostic values echo operator-supplied paths, and a path may legally
+// contain control characters on Unix. Rendering one verbatim would let a single
+// input emit extra `diagnostic:` lines — forging records the summary never
+// counted — so every value is escaped to keep one diagnostic on one line.
+export function escapeDiagnosticValue(value) {
+  return String(value).replace(
+    /[\\\u0000-\u001f\u007f-\u009f]/gu,
+    (character) => {
+      switch (character) {
+        case "\\":
+          return "\\\\";
+        case "\n":
+          return "\\n";
+        case "\r":
+          return "\\r";
+        case "\t":
+          return "\\t";
+        default:
+          return `\\u${character.codePointAt(0).toString(16).padStart(4, "0")}`;
+      }
+    },
+  );
+}
+
 function formatDiagnostic(diagnostic) {
-  const parts = [`category=${diagnostic.category}`];
+  const parts = [`category=${escapeDiagnosticValue(diagnostic.category)}`];
   if (diagnostic.name !== undefined) {
-    parts.push(`name=${diagnostic.name}`);
+    parts.push(`name=${escapeDiagnosticValue(diagnostic.name)}`);
   }
   if (diagnostic.sourcePath !== undefined) {
-    parts.push(`sourcePath=${diagnostic.sourcePath}`);
+    parts.push(`sourcePath=${escapeDiagnosticValue(diagnostic.sourcePath)}`);
   }
   if (diagnostic.contractPath !== undefined) {
-    parts.push(`contractPath=${diagnostic.contractPath}`);
+    parts.push(`contractPath=${escapeDiagnosticValue(diagnostic.contractPath)}`);
   }
-  parts.push(`message=${diagnostic.message}`);
+  parts.push(`message=${escapeDiagnosticValue(diagnostic.message)}`);
   return `diagnostic: ${parts.join(" ")}`;
 }
 
 export function formatVerdict(verdict) {
+  const inputSource = verdict.checks.find(
+    (check) => check.category === "input-source",
+  );
   const presence = verdict.checks.find((check) => check.category === "presence");
   const sectionSchema = verdict.checks.find(
     (check) => check.category === "section-schema",
@@ -832,10 +982,11 @@ export function formatVerdict(verdict) {
   const freshness = verdict.checks.find((check) => check.category === "freshness");
   const lines = [
     `contract verdict: ${verdict.status}`,
-    `presence: ${presence.status} checked=${presence.checkedCount} contracts=${verdict.summary.contracts.join(",")}`,
-    `section-schema: ${sectionSchema.status} checked=${sectionSchema.checkedCount} contracts=${verdict.summary.contracts.join(",")}`,
-    `config: ${config.status} checked=${config.checkedCount} entries=${verdict.summary.configEntries}`,
-    `freshness: ${freshness.status} checked=${freshness.checkedCount} changedFiles=${verdict.summary.changedFiles}`,
+    `input-source: ${inputSource.status} checked=${inputSource.checkedCount} changedFiles=${verdict.summary.changedFiles} source=${verdict.summary.changedFileSource} diagnostics=${inputSource.diagnostics.length}`,
+    `presence: ${presence.status} checked=${presence.checkedCount} contracts=${verdict.summary.contracts.join(",")} diagnostics=${presence.diagnostics.length}`,
+    `section-schema: ${sectionSchema.status} checked=${sectionSchema.checkedCount} contracts=${verdict.summary.contracts.join(",")} diagnostics=${sectionSchema.diagnostics.length}`,
+    `config: ${config.status} checked=${config.checkedCount} entries=${verdict.summary.configEntries} diagnostics=${config.diagnostics.length}`,
+    `freshness: ${freshness.status} checked=${freshness.checkedCount} changedFiles=${verdict.summary.changedFiles} diagnostics=${freshness.diagnostics.length}`,
     `diagnostics: ${verdict.summary.diagnostics}`,
   ];
 
