@@ -18,7 +18,7 @@
 
 ### Tasks
 
-- [ ] **Author the Castra HTTP contract**
+- [x] **Author the Castra HTTP contract**
 
   Create `docs/subsystems/castra/contract.md` using the service-contract structure from the data model, the Castra route surface from the contracts artifact, and the current route behavior in `src/castra/`. Keep the AUTOGEN region empty, document only Castra's server-side HTTP boundary listed for US4, and satisfy AS 4.1-4.3 without adding runtime service behavior or documenting the Steward role contract.
 
