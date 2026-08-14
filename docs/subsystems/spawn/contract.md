@@ -59,7 +59,10 @@ and the Hatchery dispatch entrypoint that composes them:
   and remove the image during cleanup.
 - Container launch helpers create, start, wait for, log, and remove the spawn
   container. They expose typed launch input and wait-result shapes plus bounded
-  launch diagnostics.
+  launch diagnostics. Stage 4 launch validates the fully composed Docker argv
+  against the selected backend's declared credential mounts, rejecting
+  undeclared host bind mounts per the F4 US5 contract in
+  `specs/2026-05-12-004-spawn-sandbox-security/spawn-sandbox-security.contracts.md`.
 - Output extraction helpers capture bounded terminal backend output and parse
   bounded JSON through the recorded backend name. The parser surface supports
   Claude Code and Codex adapters and returns an unvalidated candidate patch or a
@@ -138,6 +141,7 @@ Steward-specific public interface details.
 | Dependency readiness failure | Missing git, Docker, backend credential, profile, Brood, Castra, or other required readiness is reported as a dependency diagnostic before unbounded work starts when that dependency is required for the path. Best-effort registrations remain nonblocking when their owning boundary defines them that way. |
 | Image or build failure | The spawn reaches a failed dispatch outcome, build diagnostics are surfaced, and cleanup of image, worktree, branch, or related artifacts is attempted. |
 | Container launch failure | Launch fails with a bounded diagnostic, any partially created container is removed best-effort, lifecycle evidence is retained, and no output extraction or handoff occurs. |
+| Undeclared bind mount in launch argv | Launch is rejected before Docker creates the spawn container. The diagnostic names the offending bind-mount flag, explains that only backend-declared credential mounts are permitted, and lists the selected backend's declared mounts or reports none. |
 | Backend runtime failure | A nonzero backend exit is recorded as terminal failure; captured logs are diagnostic material only and manager or Steward handoff is not attempted. |
 | Timeout | The wait is bounded, the container is force-removed best-effort, the spawn is marked failed or surfaced as a launch/runtime diagnostic, and execution does not hang. |
 | Output capture failure | Failure to read terminal logs is reported as an output diagnostic; extraction and handoff do not proceed. |

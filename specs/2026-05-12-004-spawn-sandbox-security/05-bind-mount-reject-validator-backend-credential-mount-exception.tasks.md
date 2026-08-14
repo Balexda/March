@@ -46,7 +46,7 @@
 
 ### Tasks
 
-- [ ] **Validate launch argv bind mounts against backend declarations**
+- [x] **Validate launch argv bind mounts against backend declarations**
 
   Add launch-time validation for `-v`, `--volume`, and `--mount` flags. Compare each parsed bind source, target, and read-only posture to the selected backend's resolved `credentialMounts`, and allow only exact declared credential mounts. Treat `--tmpfs` as a non-bind mount and allow it unconditionally.
 
@@ -59,7 +59,7 @@
   - Tests fail if a future contributor adds an undeclared Claude OAuth bind mount without declaring it on `claudeCodeBackend.credentialMounts`.
   - Tests prove long and short Docker bind-mount flag forms are covered.
 
-- [ ] **Emit actionable validator failures**
+- [x] **Emit actionable validator failures**
 
   Convert validator rejection into the existing launch failure path so dispatch exits with `ERROR`, reports the offending flag, and lists the selected backend's declared credential mounts or states that none are declared.
 

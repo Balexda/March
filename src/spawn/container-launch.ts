@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
+  type BackendCredentialMount,
   resolveCredentialMounts,
   type SpawnBackend,
 } from "./backends.js";
@@ -56,6 +57,14 @@ const STDERR_TAIL_CHARS = 4_000;
  */
 const DOCKER_OUTPUT_MAX_BUFFER = 16 * 1024 * 1024;
 
+interface ParsedBindMountFlag {
+  /** The offending flag exactly as it appears in the launch argv, value included. */
+  readonly flag: string;
+  readonly source: string;
+  readonly target: string;
+  readonly readOnly: boolean;
+}
+
 /**
  * Returns the canonical container name for a given spawn ID. The container
  * name (`--name march-spawn-<spawn-id>`) intentionally matches the image
@@ -82,6 +91,140 @@ function stderrTail(stderr: unknown): string {
   text = text.trimEnd();
   if (text.length <= STDERR_TAIL_CHARS) return text;
   return "…" + text.slice(-STDERR_TAIL_CHARS);
+}
+
+/**
+ * Stage 4 bind-mount validator. It inspects the concrete docker argv that will
+ * be launched and rejects every host bind mount except the selected backend's
+ * declared credential mounts.
+ */
+export function validateLaunchBindMounts(
+  backend: SpawnBackend,
+  args: readonly string[],
+  credentialMounts: readonly BackendCredentialMount[] = resolveCredentialMounts(backend),
+): void {
+  const allowed = new Set(
+    credentialMounts.map(
+      (mount) =>
+        `${mount.hostPath}\0${mount.containerPath}\0${mount.readOnly ? "ro" : "rw"}`,
+    ),
+  );
+
+  for (const bindMount of parseBindMountFlags(args)) {
+    const key = `${bindMount.source}\0${bindMount.target}\0${
+      bindMount.readOnly ? "ro" : "rw"
+    }`;
+    if (!allowed.has(key)) {
+      throw new LaunchError(
+        [
+          `docker create rejected undeclared bind mount ${JSON.stringify(bindMount.flag)} for backend "${backend.name}".`,
+          "Only backend-declared credential mounts are permitted.",
+          `Declared credential mounts: ${formatDeclaredCredentialMounts(credentialMounts)}.`,
+        ].join(" "),
+      );
+    }
+  }
+}
+
+function parseBindMountFlags(args: readonly string[]): readonly ParsedBindMountFlag[] {
+  const mounts: ParsedBindMountFlag[] = [];
+
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (arg === "--tmpfs" || arg.startsWith("--tmpfs=")) {
+      if (arg === "--tmpfs") i++;
+      continue;
+    }
+
+    if (arg === "-v" || arg === "--volume") {
+      const value = args[i + 1];
+      if (value !== undefined) mounts.push(parseVolumeFlag(`${arg} ${value}`, value));
+      i++;
+      continue;
+    }
+
+    if (arg.startsWith("-v=")) {
+      mounts.push(parseVolumeFlag(arg, arg.slice("-v=".length)));
+      continue;
+    }
+
+    if (arg.startsWith("--volume=")) {
+      mounts.push(parseVolumeFlag(arg, arg.slice("--volume=".length)));
+      continue;
+    }
+
+    if (arg === "--mount") {
+      const value = args[i + 1];
+      const bindMount =
+        value === undefined ? undefined : parseMountFlag(`${arg} ${value}`, value);
+      if (bindMount) mounts.push(bindMount);
+      i++;
+      continue;
+    }
+
+    if (arg.startsWith("--mount=")) {
+      const bindMount = parseMountFlag(arg, arg.slice("--mount=".length));
+      if (bindMount) mounts.push(bindMount);
+    }
+  }
+
+  return mounts;
+}
+
+function parseVolumeFlag(flag: string, value: string): ParsedBindMountFlag {
+  const [source = "", target = "", ...options] = value.split(":");
+  return {
+    flag,
+    source,
+    target,
+    readOnly: options.includes("ro") || options.includes("readonly"),
+  };
+}
+
+function parseMountFlag(
+  flag: string,
+  value: string,
+): ParsedBindMountFlag | undefined {
+  const fields = new Map<string, string>();
+  const bareOptions = new Set<string>();
+
+  for (const segment of value.split(",")) {
+    const equalsIdx = segment.indexOf("=");
+    if (equalsIdx === -1) {
+      bareOptions.add(segment);
+      continue;
+    }
+    fields.set(segment.slice(0, equalsIdx), segment.slice(equalsIdx + 1));
+  }
+
+  if (fields.get("type") !== "bind") return undefined;
+
+  return {
+    flag,
+    source: fields.get("source") ?? fields.get("src") ?? "",
+    target: fields.get("target") ?? fields.get("dst") ?? fields.get("destination") ?? "",
+    readOnly:
+      bareOptions.has("readonly") ||
+      bareOptions.has("ro") ||
+      fields.get("readonly") === "true" ||
+      fields.get("readonly") === "1" ||
+      fields.get("ro") === "true" ||
+      fields.get("ro") === "1",
+  };
+}
+
+function formatDeclaredCredentialMounts(
+  credentialMounts: readonly BackendCredentialMount[],
+): string {
+  if (credentialMounts.length === 0) return "none";
+  return credentialMounts
+    .map(
+      (mount) =>
+        `${mount.name} (${mount.hostPath} -> ${mount.containerPath}${
+          mount.readOnly ? ", read-only" : ", read-write"
+        })`,
+    )
+    .join(", ");
 }
 
 /** Inputs to {@link createSpawnContainer}. */
@@ -146,7 +289,12 @@ export interface WaitForSpawnContainerResult {
  * launch failure is more diagnostic and the cleanup is best-effort by
  * contract.
  *
- * @throws {LaunchError} If `docker create` exits non-zero.
+ * Before `docker create` is invoked at all, the fully composed argv is run
+ * through {@link validateLaunchBindMounts}, so an undeclared host bind mount
+ * is rejected without ever creating a container.
+ *
+ * @throws {LaunchError} If the composed argv carries a bind mount the selected
+ * backend does not declare, or if `docker create` exits non-zero.
  */
 export function createSpawnContainer(input: LaunchSpawnContainerInput): string {
   const { backend, spawnId } = input;
@@ -165,8 +313,9 @@ export function createSpawnContainer(input: LaunchSpawnContainerInput): string {
     envFlags.push("-e", envVar);
   }
 
+  const credentialMounts = resolveCredentialMounts(backend);
   const volumeFlags: string[] = [];
-  for (const mount of resolveCredentialMounts(backend)) {
+  for (const mount of credentialMounts) {
     const suffix = mount.readOnly ? ":ro" : "";
     volumeFlags.push("-v", `${mount.hostPath}:${mount.containerPath}${suffix}`);
     for (const [envVar, value] of Object.entries(mount.env)) {
@@ -211,6 +360,8 @@ export function createSpawnContainer(input: LaunchSpawnContainerInput): string {
     imageTag,
     ...entrypoint,
   ];
+
+  validateLaunchBindMounts(backend, args, credentialMounts);
 
   let stdout: Buffer | string;
   try {
