@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
+  type BackendCredentialMount,
   resolveCredentialMounts,
   type SpawnBackend,
 } from "./backends.js";
@@ -56,6 +57,20 @@ const STDERR_TAIL_CHARS = 4_000;
  */
 const DOCKER_OUTPUT_MAX_BUFFER = 16 * 1024 * 1024;
 
+interface ParsedMountFlag {
+  /** The offending flag exactly as it appears in the launch argv, value included. */
+  readonly flag: string;
+  /**
+   * Docker's `--mount type=` value; always `bind` for the `-v` / `--volume`
+   * short forms. Anything other than `bind` is rejected unconditionally — see
+   * the F4 US5 contract's permitted-flag table.
+   */
+  readonly mountType: string;
+  readonly source: string;
+  readonly target: string;
+  readonly readOnly: boolean;
+}
+
 /**
  * Returns the canonical container name for a given spawn ID. The container
  * name (`--name march-spawn-<spawn-id>`) intentionally matches the image
@@ -82,6 +97,154 @@ function stderrTail(stderr: unknown): string {
   text = text.trimEnd();
   if (text.length <= STDERR_TAIL_CHARS) return text;
   return "…" + text.slice(-STDERR_TAIL_CHARS);
+}
+
+/**
+ * Stage 4 mount validator. It inspects the concrete docker argv that will be
+ * launched and rejects every host bind mount except the selected backend's
+ * declared credential mounts, plus every non-bind `--mount` type (named
+ * volumes carry cross-spawn persistence, forbidden in M1).
+ *
+ * `imageTag` marks the end of the docker flag section: Docker stops parsing
+ * its own flags at the image token, so everything from there on is the
+ * container's command. Scanning it would let a backend entrypoint that
+ * happens to use `-v` (verbose) be misread as a bind mount. When omitted the
+ * whole argv is scanned, which is what the direct unit tests want.
+ */
+export function validateLaunchBindMounts(
+  backend: SpawnBackend,
+  args: readonly string[],
+  credentialMounts: readonly BackendCredentialMount[] = resolveCredentialMounts(backend),
+  imageTag?: string,
+): void {
+  const allowed = new Set(
+    credentialMounts.map(
+      (mount) =>
+        `${mount.hostPath}\0${mount.containerPath}\0${mount.readOnly ? "ro" : "rw"}`,
+    ),
+  );
+
+  const imageIdx = imageTag === undefined ? -1 : args.indexOf(imageTag);
+  const dockerFlags = imageIdx === -1 ? args : args.slice(0, imageIdx);
+
+  for (const mount of parseMountFlags(dockerFlags)) {
+    if (mount.mountType !== "bind") {
+      throw new LaunchError(
+        [
+          `docker create rejected non-bind mount ${JSON.stringify(mount.flag)} for backend "${backend.name}".`,
+          `Only backend-declared credential bind mounts are permitted; --mount type=${mount.mountType} is not.`,
+          `Declared credential mounts: ${formatDeclaredCredentialMounts(credentialMounts)}.`,
+        ].join(" "),
+      );
+    }
+
+    const key = `${mount.source}\0${mount.target}\0${mount.readOnly ? "ro" : "rw"}`;
+    if (!allowed.has(key)) {
+      throw new LaunchError(
+        [
+          `docker create rejected undeclared bind mount ${JSON.stringify(mount.flag)} for backend "${backend.name}".`,
+          "Only backend-declared credential mounts are permitted.",
+          `Declared credential mounts: ${formatDeclaredCredentialMounts(credentialMounts)}.`,
+        ].join(" "),
+      );
+    }
+  }
+}
+
+function parseMountFlags(args: readonly string[]): readonly ParsedMountFlag[] {
+  const mounts: ParsedMountFlag[] = [];
+
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (arg === "--tmpfs" || arg.startsWith("--tmpfs=")) {
+      if (arg === "--tmpfs") i++;
+      continue;
+    }
+
+    if (arg === "-v" || arg === "--volume") {
+      const value = args[i + 1];
+      if (value !== undefined) mounts.push(parseVolumeFlag(`${arg} ${value}`, value));
+      i++;
+      continue;
+    }
+
+    if (arg.startsWith("-v=")) {
+      mounts.push(parseVolumeFlag(arg, arg.slice("-v=".length)));
+      continue;
+    }
+
+    if (arg.startsWith("--volume=")) {
+      mounts.push(parseVolumeFlag(arg, arg.slice("--volume=".length)));
+      continue;
+    }
+
+    if (arg === "--mount") {
+      const value = args[i + 1];
+      if (value !== undefined) mounts.push(parseMountFlag(`${arg} ${value}`, value));
+      i++;
+      continue;
+    }
+
+    if (arg.startsWith("--mount=")) {
+      mounts.push(parseMountFlag(arg, arg.slice("--mount=".length)));
+    }
+  }
+
+  return mounts;
+}
+
+function parseVolumeFlag(flag: string, value: string): ParsedMountFlag {
+  const [source = "", target = "", ...options] = value.split(":");
+  return {
+    flag,
+    mountType: "bind",
+    source,
+    target,
+    readOnly: options.includes("ro") || options.includes("readonly"),
+  };
+}
+
+function parseMountFlag(flag: string, value: string): ParsedMountFlag {
+  const fields = new Map<string, string>();
+  const bareOptions = new Set<string>();
+
+  for (const segment of value.split(",")) {
+    const equalsIdx = segment.indexOf("=");
+    if (equalsIdx === -1) {
+      bareOptions.add(segment);
+      continue;
+    }
+    fields.set(segment.slice(0, equalsIdx), segment.slice(equalsIdx + 1));
+  }
+
+  return {
+    flag,
+    // Docker defaults `--mount` to type=volume when `type=` is omitted.
+    mountType: fields.get("type") ?? "volume",
+    source: fields.get("source") ?? fields.get("src") ?? "",
+    target: fields.get("target") ?? fields.get("dst") ?? fields.get("destination") ?? "",
+    readOnly:
+      bareOptions.has("readonly") ||
+      bareOptions.has("ro") ||
+      fields.get("readonly") === "true" ||
+      fields.get("readonly") === "1" ||
+      fields.get("ro") === "true" ||
+      fields.get("ro") === "1",
+  };
+}
+
+function formatDeclaredCredentialMounts(
+  credentialMounts: readonly BackendCredentialMount[],
+): string {
+  if (credentialMounts.length === 0) return "none";
+  return credentialMounts
+    .map(
+      (mount) =>
+        `${mount.name} (${mount.hostPath} -> ${mount.containerPath}${
+          mount.readOnly ? ", read-only" : ", read-write"
+        })`,
+    )
+    .join(", ");
 }
 
 /** Inputs to {@link createSpawnContainer}. */
@@ -146,7 +309,12 @@ export interface WaitForSpawnContainerResult {
  * launch failure is more diagnostic and the cleanup is best-effort by
  * contract.
  *
- * @throws {LaunchError} If `docker create` exits non-zero.
+ * Before `docker create` is invoked at all, the fully composed argv is run
+ * through {@link validateLaunchBindMounts}, so an undeclared host bind mount
+ * is rejected without ever creating a container.
+ *
+ * @throws {LaunchError} If the composed argv carries a bind mount the selected
+ * backend does not declare, or if `docker create` exits non-zero.
  */
 export function createSpawnContainer(input: LaunchSpawnContainerInput): string {
   const { backend, spawnId } = input;
@@ -165,8 +333,9 @@ export function createSpawnContainer(input: LaunchSpawnContainerInput): string {
     envFlags.push("-e", envVar);
   }
 
+  const credentialMounts = resolveCredentialMounts(backend);
   const volumeFlags: string[] = [];
-  for (const mount of resolveCredentialMounts(backend)) {
+  for (const mount of credentialMounts) {
     const suffix = mount.readOnly ? ":ro" : "";
     volumeFlags.push("-v", `${mount.hostPath}:${mount.containerPath}${suffix}`);
     for (const [envVar, value] of Object.entries(mount.env)) {
@@ -211,6 +380,8 @@ export function createSpawnContainer(input: LaunchSpawnContainerInput): string {
     imageTag,
     ...entrypoint,
   ];
+
+  validateLaunchBindMounts(backend, args, credentialMounts, imageTag);
 
   let stdout: Buffer | string;
   try {

@@ -32,9 +32,14 @@ import {
   readSpawnContainerLogs,
   removeSpawnContainer,
   startSpawnContainer,
+  validateLaunchBindMounts,
   waitForSpawnContainer,
 } from "./container-launch.js";
-import { claudeCodeBackend, codexBackend } from "./backends.js";
+import {
+  claudeCodeBackend,
+  codexBackend,
+  type BackendCredentialMount,
+} from "./backends.js";
 import { SPAWN_CONFIG } from "../hatchery/spawn-config.js";
 
 const SPAWN_ID = "20260504-abc123";
@@ -337,6 +342,21 @@ describe("container-launch", () => {
       );
     });
 
+    it("admits only Codex's declared credential mount source, target, and posture", () => {
+      const previousCodexHome = process.env.CODEX_HOME;
+      process.env.CODEX_HOME = CODEX_HOME;
+      childProcessMock.execFileSync.mockReturnValueOnce(Buffer.from("id\n"));
+
+      try {
+        expect(() =>
+          createSpawnContainer({ spawnId: SPAWN_ID, backend: codexBackend }),
+        ).not.toThrow();
+      } finally {
+        if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
+        else process.env.CODEX_HOME = previousCodexHome;
+      }
+    });
+
     it("keeps launchSpawnContainer as a compatibility alias for create", () => {
       childProcessMock.execFileSync.mockReturnValueOnce(Buffer.from("id\n"));
       expect(
@@ -344,6 +364,166 @@ describe("container-launch", () => {
       ).toBe("id");
       const [, args] = childProcessMock.execFileSync.mock.calls[0];
       expect((args as string[])[0]).toBe("create");
+    });
+  });
+
+  describe("validateLaunchBindMounts", () => {
+    const declaredMounts: readonly BackendCredentialMount[] = [
+      {
+        name: "fixture credentials",
+        hostPath: "/host/creds",
+        containerPath: "/march/creds",
+        readOnly: true,
+        env: {},
+      },
+    ];
+
+    it("rejects undeclared short bind-mount flags", () => {
+      expect(() =>
+        validateLaunchBindMounts(
+          claudeCodeBackend,
+          ["create", "-v", "/host/oauth:/march/oauth:ro", IMAGE_TAG],
+          [],
+        ),
+      ).toThrow(/"-v \/host\/oauth:\/march\/oauth:ro"/);
+    });
+
+    it("rejects undeclared long --volume bind-mount flags and reports no declared mounts", () => {
+      let caught: unknown;
+      try {
+        validateLaunchBindMounts(
+          claudeCodeBackend,
+          ["create", "--volume", "/host/oauth:/march/oauth:ro", IMAGE_TAG],
+          [],
+        );
+      } catch (e) {
+        caught = e;
+      }
+
+      expect(caught).toBeInstanceOf(LaunchError);
+      const message = (caught as LaunchError).message;
+      expect(message).toContain('"--volume /host/oauth:/march/oauth:ro"');
+      expect(message).toContain("Only backend-declared credential mounts are permitted");
+      expect(message).toContain("Declared credential mounts: none");
+    });
+
+    it("rejects undeclared --mount bind forms", () => {
+      expect(() =>
+        validateLaunchBindMounts(
+          claudeCodeBackend,
+          [
+            "create",
+            "--mount",
+            "type=bind,source=/host/oauth,target=/march/oauth,readonly",
+            IMAGE_TAG,
+          ],
+          [],
+        ),
+      ).toThrow(/"--mount type=bind,source=\/host\/oauth,/);
+    });
+
+    it("allows tmpfs flags without checking the bind-mount allow-set", () => {
+      expect(() =>
+        validateLaunchBindMounts(
+          claudeCodeBackend,
+          ["create", "--tmpfs", "/tmp", "--tmpfs=/run", IMAGE_TAG],
+          [],
+        ),
+      ).not.toThrow();
+    });
+
+    it("allows declared short and long bind-mount forms exactly", () => {
+      expect(() =>
+        validateLaunchBindMounts(
+          codexBackend,
+          ["create", "-v", "/host/creds:/march/creds:ro", IMAGE_TAG],
+          declaredMounts,
+        ),
+      ).not.toThrow();
+      expect(() =>
+        validateLaunchBindMounts(
+          codexBackend,
+          [
+            "create",
+            "--volume=/host/creds:/march/creds:ro",
+            "--mount=type=bind,src=/host/creds,dst=/march/creds,readonly",
+            IMAGE_TAG,
+          ],
+          declaredMounts,
+        ),
+      ).not.toThrow();
+    });
+
+    it("rejects non-bind --mount types unconditionally", () => {
+      for (const value of [
+        "type=volume,source=march-cache,target=/march/cache",
+        "type=tmpfs,target=/march/scratch",
+        // `type=` omitted — Docker defaults --mount to a named volume.
+        "source=march-cache,target=/march/cache",
+      ]) {
+        expect(() =>
+          validateLaunchBindMounts(
+            codexBackend,
+            ["create", "--mount", value, IMAGE_TAG],
+            declaredMounts,
+          ),
+        ).toThrow(/rejected non-bind mount/);
+      }
+
+      expect(() =>
+        validateLaunchBindMounts(
+          codexBackend,
+          ["create", "--mount=type=volume,source=march-cache,target=/march/cache"],
+          declaredMounts,
+        ),
+      ).toThrow(/--mount type=volume is not/);
+    });
+
+    it("stops scanning at the image token so entrypoint args are not read as flags", () => {
+      expect(() =>
+        validateLaunchBindMounts(
+          claudeCodeBackend,
+          [
+            "create",
+            IMAGE_TAG,
+            "bash",
+            "-lc",
+            "some-backend-cli -v --mount type=volume,source=x,target=/x",
+            "-v",
+            "/host/oauth:/march/oauth",
+          ],
+          [],
+          IMAGE_TAG,
+        ),
+      ).not.toThrow();
+    });
+
+    it("still rejects a bind mount that precedes the image token", () => {
+      expect(() =>
+        validateLaunchBindMounts(
+          claudeCodeBackend,
+          ["create", "-v", "/host/oauth:/march/oauth", IMAGE_TAG, "bash"],
+          [],
+          IMAGE_TAG,
+        ),
+      ).toThrow(/rejected undeclared bind mount/);
+    });
+
+    it("rejects declared sources with the wrong target or read-only posture", () => {
+      expect(() =>
+        validateLaunchBindMounts(
+          codexBackend,
+          ["create", "-v", "/host/creds:/march/other:ro", IMAGE_TAG],
+          declaredMounts,
+        ),
+      ).toThrow(/fixture credentials/);
+      expect(() =>
+        validateLaunchBindMounts(
+          codexBackend,
+          ["create", "--mount", "type=bind,source=/host/creds,target=/march/creds"],
+          declaredMounts,
+        ),
+      ).toThrow(/read-only/);
     });
   });
 
