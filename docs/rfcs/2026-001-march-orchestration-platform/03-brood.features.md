@@ -124,7 +124,7 @@ Recommended specification sequence:
 | ID | Title | Depends On | Artifact |
 |----|-------|-----------|----------|
 | F1 | Brood Session Index | — | `specs/2026-06-13-011-brood-session-index` |
-| F2 | Brood CLI Read Surface | F1 | — |
+| F2 | Brood CLI Read Surface | F1 | `specs/2026-08-14-012-brood-cli-read-surface` |
 | F3 | Lifecycle Teardown | F1 | — |
 | F4 | Concurrent Dispatch Audit | F1 | — |
 | F5 | Interactive Session Attach Helper | — | — |
