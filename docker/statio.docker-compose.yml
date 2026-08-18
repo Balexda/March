@@ -6,6 +6,7 @@
 #   npm run build:statio-image
 #   export MARCH_STATIO_TOKEN=$(openssl rand -hex 32)   # required (see below)
 #   docker compose -f docker/statio.docker-compose.yml up -d
+#   open http://localhost:3000/d/march-statio  # March — Statio forge gateway
 #
 # Consumers reach Statio at http://localhost:${MARCH_STATIO_PORT:-9689} on the
 # host, or http://statio:${MARCH_STATIO_PORT:-9689} from peers on the `march`
@@ -24,6 +25,11 @@
 #   MARCH_STATIO_TOKEN    bearer token gating /v1/* — REQUIRED. Compose refuses
 #                         to start without it because the container binds
 #                         0.0.0.0 on the shared march network.
+#   MARCH_OTEL            exports metrics/spans/OTLP logs to the observability
+#                         stack. Defaults to 1 here, like every other March
+#                         service compose; set MARCH_OTEL=0 to make telemetry a
+#                         no-op. Pino stdout/JSONL logs stay available either
+#                         way from the container/log volume.
 #
 # SECURITY: this mounts HOME for gh credentials and repo access only. It does
 # NOT mount the docker socket, tmux socket, or agent-deck. The port is bound to
@@ -45,7 +51,7 @@ services:
     ports:
       - "127.0.0.1:${MARCH_STATIO_PORT:-9689}:${MARCH_STATIO_PORT:-9689}" # localhost only — never public
     environment:
-      - MARCH_OTEL=1
+      - MARCH_OTEL=${MARCH_OTEL:-1}
       - MARCH_OTEL_ENDPOINT=http://otel-lgtm:4318
       - MARCH_OTEL_SERVICE_NAME=march-statio
       - MARCH_STATIO_PORT=${MARCH_STATIO_PORT:-9689}

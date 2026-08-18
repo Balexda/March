@@ -458,6 +458,14 @@ request rate, 5xx error ratio, rate by status class, duration percentiles
 (p50/p95/p99), a route × status-class table, and p95 by route — with `profile`
 and `route` template variables.
 
+The Statio dashboard,
+[`docker/grafana/dashboards/march-statio.json`](../docker/grafana/dashboards/march-statio.json)
+("**March — Statio forge gateway**", uid `march-statio`), covers the forge-read
+gateway at `service.name=march-statio`: heartbeat/uptime, request rate, 5xx
+error ratio, latency percentiles, route/operation/outcome tables, forge-error
+rate by operation, recent logs, and recent request traces. It uses only the
+route-pattern and operation labels emitted by Statio.
+
 The **Work Status** dashboard,
 [`docker/grafana/dashboards/march-work-status.json`](../docker/grafana/dashboards/march-work-status.json)
 ("**March — Work Status**", uid `march-work-status`), answers "where is the work
@@ -499,6 +507,31 @@ To browse raw traces: **Explore → Tempo**, query
 `{ resource.service.name =~ "march.*" }`. Metrics: **Explore → Prometheus**,
 e.g. `march_spawn_runs_total` or `march_castra_requests_total`. Logs: **Explore → Loki**,
 `{service_name="march-hatchery"}`.
+
+## Running Statio with observability
+
+Statio is a forge-credentialed container and should be started after the shared
+observability stack has created the external `march` network:
+
+```bash
+docker compose -f docker/otel-lgtm.docker-compose.yml up -d
+npm run build:statio-image
+export MARCH_STATIO_TOKEN=$(openssl rand -hex 32)
+export MARCH_STATIO_PORT=9689
+export MARCH_STATIO_URL=http://statio:${MARCH_STATIO_PORT}
+docker compose -f docker/statio.docker-compose.yml up -d
+open http://localhost:3000/d/march-statio
+```
+
+`MARCH_STATIO_TOKEN` is required and compose aborts without it. The service
+publishes `127.0.0.1:${MARCH_STATIO_PORT:-9689}` on the host and joins the
+external `march` network so peer containers can use `MARCH_STATIO_URL`
+(`http://statio:9689` by default). The compose recipe defaults `MARCH_OTEL` to
+`1` like the other March services, so RED metrics, heartbeat, spans, and OTLP
+logs appear on the **March — Statio forge gateway** dashboard out of the box.
+Set `MARCH_OTEL=0` (or leave `MARCH_OTEL` unset when running `march statio
+serve` outside compose) and telemetry export is a no-op with service behavior
+unchanged; local/container pino logs still remain available.
 
 ## Validating the stack end to end
 

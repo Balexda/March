@@ -95,7 +95,7 @@
 
 ### Tasks
 
-- [ ] **Add the Statio Grafana dashboard**
+- [x] **Add the Statio Grafana dashboard**
 
   Add a `March — Statio forge gateway` dashboard under `docker/grafana/dashboards/` and ensure provisioning discovers it alongside the existing March service dashboards. The dashboard should visualize Statio RED metrics, heartbeat/uptime, span/log correlation, and forge-error visibility using the labels emitted by Slice 2.
 
@@ -106,7 +106,7 @@
   - Dashboard content remains useful when there is no traffic or telemetry is disabled
   - Validation covers dashboard JSON parseability and provisioning visibility
 
-- [ ] **Document and validate the operator run path**
+- [x] **Document and validate the operator run path**
 
   Update the relevant operator-facing docs or compose comments so the Statio bring-up sequence is clear: observability stack first, token required, image build, compose up, deterministic localhost URL, and telemetry-on/off behavior. Add automated validation that checks the compose/dashboard artifacts without requiring a live Docker daemon unless the existing verification path already provides one.
 
