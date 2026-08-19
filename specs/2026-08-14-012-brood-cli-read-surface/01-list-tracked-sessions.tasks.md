@@ -18,7 +18,7 @@
 
 ### Tasks
 
-- [ ] **Derive list read views from sessions**
+- [x] **Derive list read views from sessions**
 
   Add the `BroodReadView` list derivation in the Brood-owned service modules around `src/brood/service/types.ts`, `src/brood/service/routes.ts`, and focused tests. The derivation must operate on `SessionRecord` for all tracked kinds and satisfy AS 1.4-1.5 without persisting derived fields.
 
@@ -29,7 +29,7 @@
   - Missing branch or container fields keep a stable nullable/empty shape
   - Service reads do not mutate registry, Docker, worktree, branch, or archive state
 
-- [ ] **Validate list filters and reconciliation mode**
+- [x] **Validate list filters and reconciliation mode**
 
   Tighten `GET /sessions` query handling so invalid `kind` and `status` values fail explicitly, and add the list reconciliation query contract. Keep reconciliation observational and service-owned so AS 1.2-1.5 and FR-020 hold for scripts as well as the CLI.
 
@@ -40,7 +40,7 @@
   - Default list reads are marked unreconciled when no query override is supplied
   - No CLI code opens Docker, Castra, archive, registry, worktree, or branch state directly
 
-- [ ] **Update service contracts for list reads**
+- [x] **Update service contracts for list reads**
 
   Update the Brood subsystem contract documentation that maps the service's public HTTP surface, if present, and keep the F2 contract artifact aligned with the implemented list response shape. Scope the documentation update to Story 1 behavior and cite the existing spec, data model, and contracts rather than adding inspect or logs commitments.
 

@@ -49,7 +49,7 @@ Validation rules:
 | `age` | string | Yes | Human/table age derived from timestamps. |
 | `needsAttention` | boolean | Yes | Derived marker for list and inspect. |
 | `disposed` | boolean | Yes | Derived teardown/disposal condition. |
-| `containerLive` | boolean | No | Present when known from registry facts or reconciliation. |
+| `containerLive` | boolean \| null | Yes | Registry or reconciliation liveness when a container is tracked; `null` when the row has no container fact. |
 | `reconciled` | boolean | Yes | Whether liveness reconciliation was requested and applied. |
 
 Validation rules:
