@@ -26,6 +26,11 @@
   - Derived view includes the fields required by the data model.
   - `failureReason` remains part of the nested record when present.
   - `disposed` and `needsAttention` are computed for all tracked session kinds.
+  - `needsAttention` is bound to F1's shipped predicate — true when and only when
+    `status === "failed"` (`src/brood/spawn-index.ts:119`) — so lifting the derivation
+    to `SessionRecord` preserves behavior rather than inventing a new predicate.
+    Widening it (exit codes, `tearing-down` dwell, other lifecycle states) is out of
+    scope for this slice and stays with SD-002.
   - Missing optional branch or container facts keep stable null or empty output fields.
   - Tests prove deriving a view does not update stored session records.
 
@@ -38,6 +43,12 @@
   - Missing ids return the existing deterministic not-found failure.
   - Inspect defaults to reconciled output unless explicitly disabled.
   - Missing tracked containers affect `containerLive` only when reconciliation is enabled.
+  - A failing liveness source degrades to a successful record with `reconciled: false`
+    **and** emits an *errored* span via `startBroodSpan`
+    (`src/observability/brood-trace.ts`), nesting on the slice id as a child rather than
+    starting its own root, per AGENTS.md's failure-modes-surface-as-errored-spans rule.
+    Tests assert the degraded response and the errored span together, so the new failure
+    mode cannot be silent in traces just because the HTTP status stays 200.
   - Service route tests cover read-only behavior and all tracked session kinds.
 
 - [ ] **Teach the Brood client to inspect views**
@@ -128,7 +139,7 @@
 | ID | Description | Source Category | Impact | Confidence | Status | Resolution |
 |----|-------------|-----------------|--------|------------|--------|------------|
 | SD-001 | inherited from spec: Archive availability sequencing: F2 specifies fallback to F3's archived `container.log`, but F3 is a separate feature. The F2 implementation must either land after the archive path exists or ship the fallback path with fixture coverage and a clear unavailable-log error until F3 writes real archives. | clarify:Integration | Medium | Medium | inherited | — |
-| SD-002 | inherited from spec: Exact `needsAttention` predicate is inherited from F1's open debt. This feature requires the marker to exist in list/inspect output, but the final predicate set is owned by the derived-view contract F1 exposes. | clarify:Domain & Data Model | Medium | Medium | inherited | — |
+| SD-002 | inherited from spec: Exact `needsAttention` predicate is inherited from F1's open debt. This feature requires the marker to exist in list/inspect output, but the final predicate set is owned by the derived-view contract F1 exposes. | clarify:Domain & Data Model | Medium | Medium | inherited | Bound for this slice to F1's shipped failed-only predicate (`src/brood/spawn-index.ts:119`) so the shared derivation is dispatchable; the feature-level question of whether the predicate should widen stays open. |
 | SD-003 | inherited from spec: F1's shipped derivation (`src/brood/spawn-index.ts`) is typed against the legacy `SpawnRecord` and reads `~/.march/spawns/*.json`, while this feature reads the service's `SessionRecord` over `GET /sessions`. FR-019 makes the lift prerequisite work, but the shape of that lift is undecided: generalize `derivedStatus` over both record types, adapt `SessionRecord` -> `SpawnView` at the boundary, or retire the legacy reader once F2 lands. Settle at slice time. | plan-review:Assumption-output drift | High | High | inherited | — |
 | SD-004 | inherited from spec: The Brood service exposes no reconciliation query parameter and no logs endpoint today. FR-020 places both server-side, so this feature adds routes to a shipped service. Whether reconciliation becomes a query parameter on the existing session routes (as contracted here) or a separate observation endpoint is a service-design decision for the slice. | clarify:Integration Points | High | Medium | inherited | — |
 | SD-005 | inherited from spec: Steward log retrieval depends on a Castra session-output read path (FR-015a). Whether Castra already exposes a suitable read endpoint, and whether Brood proxies it or the CLI is told to ask Castra directly, is unverified at spec time and must be confirmed before slicing US3. | clarify:Integration Points | Medium | Low | inherited | — |
