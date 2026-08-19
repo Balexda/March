@@ -67,6 +67,109 @@ describe("BroodClient", () => {
     expect(await client.get("missing")).toBeUndefined();
   });
 
+  it("get accepts the nested inspect route response for existing callers", async () => {
+    const fetchImpl = vi.fn(async (..._args: unknown[]) =>
+      jsonResponse(200, {
+        record: { id: "s1", kind: "spawn", status: "running" },
+        age: "1m",
+        needsAttention: false,
+        disposed: false,
+        containerLive: true,
+        reconciled: false,
+      }),
+    );
+    const client = new BroodClient({
+      baseUrl: "http://brood",
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+    expect(await client.get("s1")).toMatchObject({ id: "s1", kind: "spawn" });
+    expect(fetchImpl.mock.calls[0][0]).toBe(
+      "http://brood/sessions/s1?reconcile=false",
+    );
+  });
+
+  it("inspect reads the default single-session read view without a query override", async () => {
+    const fetchImpl = vi.fn(async (..._args: unknown[]) =>
+      jsonResponse(200, {
+        record: { id: "s1", kind: "spawn", status: "running" },
+        age: "1m",
+        needsAttention: false,
+        disposed: false,
+        containerLive: true,
+        reconciled: true,
+      }),
+    );
+    const client = new BroodClient({
+      baseUrl: "http://brood",
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+
+    await expect(client.inspect("s1")).resolves.toMatchObject({
+      record: { id: "s1" },
+      reconciled: true,
+    });
+    expect(fetchImpl.mock.calls[0][0]).toBe("http://brood/sessions/s1");
+  });
+
+  it("inspect sends explicit reconcile and no-reconcile query modes", async () => {
+    const fetchImpl = vi.fn(async (..._args: unknown[]) =>
+      jsonResponse(200, {
+        record: { id: "s1", kind: "spawn", status: "running" },
+        age: "1m",
+        needsAttention: false,
+        disposed: false,
+        containerLive: true,
+        reconciled: true,
+      }),
+    );
+    const client = new BroodClient({
+      baseUrl: "http://brood",
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+
+    await client.inspect("s1", { reconcile: true });
+    await client.inspect("s1", { reconcile: false });
+
+    expect(fetchImpl.mock.calls[0][0]).toBe(
+      "http://brood/sessions/s1?reconcile=true",
+    );
+    expect(fetchImpl.mock.calls[1][0]).toBe(
+      "http://brood/sessions/s1?reconcile=false",
+    );
+  });
+
+  it("inspect throws BroodNotFoundError on 404", async () => {
+    const client = new BroodClient({
+      baseUrl: "http://brood",
+      fetchImpl: (async () =>
+        jsonResponse(404, { error: "No session with id \"missing\"." })) as unknown as typeof fetch,
+    });
+    await expect(client.inspect("missing")).rejects.toBeInstanceOf(
+      BroodNotFoundError,
+    );
+  });
+
+  it("inspect raises BroodClientError on non-200 failures", async () => {
+    const client = new BroodClient({
+      baseUrl: "http://brood",
+      fetchImpl: (async () =>
+        jsonResponse(500, { error: "inspect failed" })) as unknown as typeof fetch,
+    });
+    await expect(client.inspect("s1")).rejects.toThrowError(/inspect failed/);
+  });
+
+  it("inspect raises BroodUnavailableError when the service is unavailable", async () => {
+    const client = new BroodClient({
+      baseUrl: "http://brood",
+      fetchImpl: (async () => {
+        throw new Error("ECONNREFUSED");
+      }) as unknown as typeof fetch,
+    });
+    await expect(client.inspect("s1")).rejects.toBeInstanceOf(
+      BroodUnavailableError,
+    );
+  });
+
   it("getExtractionReadiness reads the stable PR-readiness view", async () => {
     const fetchImpl = vi.fn(async (..._args: unknown[]) =>
       jsonResponse(200, {
