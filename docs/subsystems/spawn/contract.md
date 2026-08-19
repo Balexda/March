@@ -60,9 +60,21 @@ and the Hatchery dispatch entrypoint that composes them:
 - Container launch helpers create, start, wait for, log, and remove the spawn
   container. They expose typed launch input and wait-result shapes plus bounded
   launch diagnostics. Stage 4 launch validates the fully composed Docker argv
-  against the selected backend's declared credential mounts, rejecting
-  undeclared host bind mounts per the F4 US5 contract in
+  against the selected backend's declared credential mounts before container
+  creation, rejecting undeclared host bind mounts as `LaunchError`s per the F4
+  US5 contract in
   `specs/2026-05-12-004-spawn-sandbox-security/spawn-sandbox-security.contracts.md`.
+  Hatchery treats that validator error as a launch failure: the SpawnRecord is
+  marked failed when one exists, no spawn container is created, and existing
+  snapshot image, manager session, worktree, and branch artifacts enter the same
+  rollback path as other Stage 4 launch failures. That path has two modes, and
+  the validator inherits whichever one the deployment selected: destructive
+  reverse-order cleanup by default, or forensic parking when
+  `MARCH_HATCHERY_PARK_FAILED` is non-empty and a manager session exists.
+  Parking keeps the worker container and snapshot image and renames the manager
+  worktree and branch aside rather than deleting them, freeing the canonical
+  names for re-dispatch and writing a manifest under
+  `~/.march/hatchery/parked/<spawn-id>.json`.
 - Output extraction helpers capture bounded terminal backend output and parse
   bounded JSON through the recorded backend name. The parser surface supports
   Claude Code and Codex adapters and returns an unvalidated candidate patch or a
@@ -141,7 +153,7 @@ Steward-specific public interface details.
 | Dependency readiness failure | Missing git, Docker, backend credential, profile, Brood, Castra, or other required readiness is reported as a dependency diagnostic before unbounded work starts when that dependency is required for the path. Best-effort registrations remain nonblocking when their owning boundary defines them that way. |
 | Image or build failure | The spawn reaches a failed dispatch outcome, build diagnostics are surfaced, and cleanup of image, worktree, branch, or related artifacts is attempted. |
 | Container launch failure | Launch fails with a bounded diagnostic, any partially created container is removed best-effort, lifecycle evidence is retained, and no output extraction or handoff occurs. |
-| Undeclared bind mount in launch argv | Launch is rejected before Docker creates the spawn container. The diagnostic names the offending mount flag, explains that only backend-declared credential mounts are permitted, and lists the selected backend's declared mounts or reports none. Non-bind `--mount` types (named volumes and any other non-bind type) are rejected unconditionally. Only the Docker flag section is inspected — scanning stops at the image token. |
+| Undeclared bind mount in launch argv | Launch is rejected before Docker creates the spawn container and flows through the normal launch rollback path. The SpawnRecord is marked failed with the validator diagnostic when the dispatch path has already created one; snapshot image, manager session, worktree, and branch cleanup are attempted in reverse order, except under the `MARCH_HATCHERY_PARK_FAILED` parking mode, which keeps the snapshot image and renames the worktree and branch aside for forensics instead. The diagnostic names the offending mount flag, explains that only backend-declared credential mounts are permitted, and lists the selected backend's declared mounts or reports none. Non-bind `--mount` types (named volumes and any other non-bind type) are rejected unconditionally. Only the Docker flag section is inspected — scanning stops at the image token. |
 | Backend runtime failure | A nonzero backend exit is recorded as terminal failure; captured logs are diagnostic material only and manager or Steward handoff is not attempted. |
 | Timeout | The wait is bounded, the container is force-removed best-effort, the spawn is marked failed or surfaced as a launch/runtime diagnostic, and execution does not hang. |
 | Output capture failure | Failure to read terminal logs is reported as an output diagnostic; extraction and handoff do not proceed. |
