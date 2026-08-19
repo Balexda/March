@@ -18,7 +18,7 @@
 
 ### Tasks
 
-- [ ] **Derive read views from session records**
+- [x] **Derive read views from session records**
 
   Add the `BroodReadView` derivation owned by `src/brood/service/` and type it against `SessionRecord`, not the legacy spawn-record reader. Preserve the existing registry as the source of truth and keep derived fields non-persisted for AS 2.1, AS 2.3, and AS 2.4.
 
@@ -34,7 +34,7 @@
   - Missing optional branch or container facts keep stable null or empty output fields.
   - Tests prove deriving a view does not update stored session records.
 
-- [ ] **Add inspect reconciliation to the service route**
+- [x] **Add inspect reconciliation to the service route**
 
   Extend the single-session read route in `src/brood/service/routes.ts` so `GET /sessions/:id` returns the contracted inspect view and honors the reconciliation mode for AS 2.1, AS 2.2, AS 2.4, and AS 2.5. Keep reconciliation observational and server-owned, consistent with the feature contracts and Brood's lifecycle boundary.
 
@@ -51,7 +51,7 @@
     mode cannot be silent in traces just because the HTTP status stays 200.
   - Service route tests cover read-only behavior and all tracked session kinds.
 
-- [ ] **Teach the Brood client to inspect views**
+- [x] **Teach the Brood client to inspect views**
 
   Add client support in `src/brood/service/client.ts` for the inspect read-view response while preserving existing callers that still need the bare session lookup. The client should send the intended reconciliation mode over HTTP and surface service errors without local fallback for AS 2.2, AS 2.4, and AS 2.5.
 
@@ -62,7 +62,7 @@
   - Unknown ids surface through the not-found path.
   - Client tests cover unavailable-service and non-200 failures.
 
-- [ ] **Update Brood subsystem contract documentation**
+- [x] **Update Brood subsystem contract documentation**
 
   Add or update the Brood subsystem contract artifact under `docs/subsystems/` for the new single-session read-view surface. Document only the public HTTP and client-facing inspect contract changed by this slice, following the repository's contract-documentation guidance.
 

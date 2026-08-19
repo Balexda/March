@@ -22,6 +22,10 @@ import {
   BroodNotFoundError,
   teardownSession,
 } from "./teardown.js";
+import {
+  deriveBroodInspectView,
+  type ContainerLivenessObserver,
+} from "./read-view.js";
 import type {
   ListSessionsFilter,
   RegisterSessionInput,
@@ -44,6 +48,8 @@ export interface RoutesOptions {
   readonly stewardGateway?: CastraStewardGateway;
   /** Override the orphan gate the sweep uses (tests). Defaults to `gh` + `fs`. */
   readonly orphanGate?: OrphanGate;
+  /** Override inspect container liveness observation (tests). Defaults to Docker inspect. */
+  readonly observeContainer?: ContainerLivenessObserver;
   /** Environment the admin gate reads its bearer token from (defaults to process.env). */
   readonly env?: NodeJS.ProcessEnv;
 }
@@ -200,6 +206,16 @@ function asString(value: unknown): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
+function queryBoolean(
+  value: string | string[] | undefined,
+  defaultValue: boolean,
+): boolean {
+  const raw = Array.isArray(value) ? value[0] : value;
+  if (raw === "true") return true;
+  if (raw === "false") return false;
+  return defaultValue;
+}
+
 /** First inbound W3C `traceparent` header value, if any (dedup array form). */
 function inboundTraceparent(
   headers: Record<string, string | string[] | undefined>,
@@ -323,7 +339,29 @@ export async function registerRoutes(
       reply.code(404);
       return { error: `No session with id "${id}".` };
     }
-    return record;
+    const query = (request.query ?? {}) as Record<string, string | string[] | undefined>;
+    const reconcile = queryBoolean(query.reconcile, true);
+    try {
+      return await deriveBroodInspectView(record, {
+        reconcile,
+        observeContainer: opts.observeContainer,
+      });
+    } catch (err) {
+      const span = startBroodSpan({
+        name: "brood.inspect.reconcile",
+        key: id,
+        traceparent: inboundTraceparent(request.headers),
+        attributes: {
+          "march.session.id": id,
+          "march.session.kind": record.kind,
+          "march.brood.reconciled": false,
+          "march.brood.reconcile_error":
+            err instanceof Error ? err.message : String(err),
+        },
+      });
+      span.end({ error: true });
+      return deriveBroodInspectView(record, { reconcile: false });
+    }
   });
 
   app.get("/sessions/:id/extraction-readiness", async (request, reply) => {

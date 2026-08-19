@@ -1,6 +1,7 @@
 import { broodPort } from "../config.js";
 import type { SweepResult } from "./steward-removal.js";
 import type {
+  BroodReadView,
   ListSessionsFilter,
   ExtractionReadiness,
   RegisterSessionInput,
@@ -67,6 +68,11 @@ async function parseJsonBody(res: Response): Promise<unknown> {
 function bodyError(body: unknown, fallback: string): string {
   const message = (body as { error?: unknown }).error;
   return typeof message === "string" && message.length > 0 ? message : fallback;
+}
+
+function sessionRecordBody(body: unknown): SessionRecord {
+  const nested = (body as { record?: unknown }).record;
+  return (nested ?? body) as SessionRecord;
 }
 
 /** Default per-request timeout. The legate loop calls teardown synchronously
@@ -175,7 +181,7 @@ export class BroodClient {
   async get(id: string): Promise<SessionRecord | undefined> {
     const { status, body } = await this.request(
       "GET",
-      `/sessions/${encodeURIComponent(id)}`,
+      `/sessions/${encodeURIComponent(id)}?reconcile=false`,
     );
     if (status === 404) return undefined;
     if (status !== 200) {
@@ -183,7 +189,33 @@ export class BroodClient {
         bodyError(body, `brood GET /sessions/${id} failed (${status})`),
       );
     }
-    return body as SessionRecord;
+    return sessionRecordBody(body);
+  }
+
+  async inspect(
+    id: string,
+    options: { readonly reconcile?: boolean } = {},
+  ): Promise<BroodReadView> {
+    const params = new URLSearchParams();
+    if (options.reconcile !== undefined) {
+      params.set("reconcile", String(options.reconcile));
+    }
+    const query = params.toString();
+    const { status, body } = await this.request(
+      "GET",
+      `/sessions/${encodeURIComponent(id)}${query ? `?${query}` : ""}`,
+    );
+    if (status === 404) {
+      throw new BroodNotFoundError(
+        bodyError(body, `brood has no session "${id}"`),
+      );
+    }
+    if (status !== 200) {
+      throw new BroodClientError(
+        bodyError(body, `brood GET /sessions/${id} failed (${status})`),
+      );
+    }
+    return body as BroodReadView;
   }
 
   async getExtractionReadiness(
