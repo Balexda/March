@@ -84,7 +84,7 @@
 
 ### Tasks
 
-- [ ] **Route validator rejection through reverse-order cleanup**
+- [x] **Route validator rejection through reverse-order cleanup**
 
   Integrate the validator failure with the existing launch error handling so snapshot image, worktree, branch, and any prior launch artifacts are cleaned up consistently with the F2/F4 reverse-order contract.
 
@@ -95,7 +95,7 @@
   - The SpawnRecord reflects a failed dispatch with the validator diagnostic when the surrounding dispatch path records launch failures.
   - Repository verification appropriate for a spawn launch/security change passes, or environment-specific failures are documented with the exact blocker.
 
-- [ ] **Update mapped contracts for the Stage 4 validator**
+- [x] **Update mapped contracts for the Stage 4 validator**
 
   Refresh affected subsystem contract documentation only where the validator changes a mapped public or internal surface, keeping the docs aligned with the implementation and the F4 contracts artifact.
 
