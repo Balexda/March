@@ -3,6 +3,7 @@ import type { SweepResult } from "./steward-removal.js";
 import type {
   ListSessionsFilter,
   ExtractionReadiness,
+  SessionLogResponse,
   RegisterSessionInput,
   SessionRecord,
   TeardownRequest,
@@ -145,6 +146,40 @@ export class BroodClient {
     return { status: res.status, body: await parseJsonBody(res) };
   }
 
+  private async requestText(
+    method: string,
+    path: string,
+  ): Promise<{ status: number; body: unknown; text: string; headers: Headers }> {
+    let res: Response;
+    try {
+      res = await this.fetchImpl(`${this.baseUrl}${path}`, {
+        method,
+        headers: this.headers(false),
+        signal: AbortSignal.timeout(this.timeoutMs),
+      });
+    } catch (err) {
+      throw new BroodUnavailableError(
+        `Could not reach the brood service at ${this.baseUrl}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+    const text = await res.text();
+    if (res.status >= 400) {
+      try {
+        return {
+          status: res.status,
+          body: text ? (JSON.parse(text) as unknown) : {},
+          text,
+          headers: res.headers,
+        };
+      } catch {
+        return { status: res.status, body: {}, text, headers: res.headers };
+      }
+    }
+    return { status: res.status, body: {}, text, headers: res.headers };
+  }
+
   async register(input: RegisterSessionInput): Promise<SessionRecord> {
     const { status, body } = await this.request("POST", "/sessions", input);
     if (status !== 201) {
@@ -221,6 +256,34 @@ export class BroodClient {
       );
     }
     return (body as { sessions?: SessionRecord[] }).sessions ?? [];
+  }
+
+  async logs(id: string): Promise<SessionLogResponse> {
+    const { status, body, text, headers } = await this.requestText(
+      "GET",
+      `/sessions/${encodeURIComponent(id)}/logs`,
+    );
+    if (status === 404) {
+      throw new BroodNotFoundError(
+        bodyError(body, `brood has no session "${id}"`),
+      );
+    }
+    if (status !== 200) {
+      throw new BroodClientError(
+        bodyError(body, `brood GET /sessions/${id}/logs failed (${status})`),
+      );
+    }
+    const sourceKind = headers.get("x-march-log-source");
+    if (
+      sourceKind === "live-container" ||
+      sourceKind === "archive" ||
+      sourceKind === "castra-session"
+    ) {
+      return { content: text, source: { kind: sourceKind } };
+    }
+    throw new BroodClientError(
+      `brood GET /sessions/${id}/logs returned unknown log source "${sourceKind ?? ""}"`,
+    );
   }
 
   async teardown(

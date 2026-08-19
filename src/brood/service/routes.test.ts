@@ -11,6 +11,7 @@ import { SessionStore } from "./store.js";
 import type { CastraStewardGateway, OrphanGate } from "./steward-removal.js";
 import { BroodConflictError, BroodNotFoundError } from "./teardown.js";
 import type { TeardownRequest, TeardownResult } from "./types.js";
+import type { LogReaderDeps } from "./logs.js";
 
 const apps: FastifyInstance[] = [];
 const stores: SessionStore[] = [];
@@ -18,7 +19,11 @@ const stores: SessionStore[] = [];
 async function buildApp(
   teardown?: (id: string, request: TeardownRequest) => Promise<TeardownResult>,
   stewardGateway?: CastraStewardGateway,
-  extra: { orphanGate?: OrphanGate; env?: NodeJS.ProcessEnv } = {},
+  extra: {
+    orphanGate?: OrphanGate;
+    env?: NodeJS.ProcessEnv;
+    logReader?: LogReaderDeps;
+  } = {},
 ): Promise<{
   app: FastifyInstance;
   store: SessionStore;
@@ -30,6 +35,7 @@ async function buildApp(
     teardown,
     stewardGateway,
     orphanGate: extra.orphanGate,
+    logReader: extra.logReader,
     env: extra.env,
   });
   apps.push(app);
@@ -274,6 +280,128 @@ describe.skipIf(!sqliteAvailable)("brood routes", () => {
       url: "/sessions/steward-1/extraction-readiness",
     });
     expect(res.statusCode).toBe(404);
+  });
+
+  it("GET /sessions/:id/logs returns live container text with source header", async () => {
+    const { app, store } = await buildApp(undefined, undefined, {
+      logReader: {
+        readContainerLogs: (containerId) => `logs from ${containerId}\n`,
+      },
+    });
+    await app.inject({
+      method: "POST",
+      url: "/sessions",
+      payload: { id: "s1", kind: "spawn", containerId: "c1" },
+    });
+    const before = store.get("s1");
+
+    const res = await app.inject({ method: "GET", url: "/sessions/s1/logs" });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.headers["content-type"]).toContain("text/plain");
+    expect(res.headers["x-march-log-source"]).toBe("live-container");
+    expect(res.body).toBe("logs from c1\n");
+    expect(store.get("s1")).toEqual(before);
+  });
+
+  it("GET /sessions/:id/logs falls back to archive and distinguishes errors", async () => {
+    const { app } = await buildApp(undefined, undefined, {
+      logReader: {
+        readContainerLogs: () => {
+          throw new Error("no such container");
+        },
+        archiveExists: () => true,
+        readArchive: () => "archive logs\n",
+        homeDir: "/home/test",
+      },
+    });
+    await app.inject({
+      method: "POST",
+      url: "/sessions",
+      payload: { id: "s1", kind: "spawn", containerId: "gone" },
+    });
+
+    const archived = await app.inject({ method: "GET", url: "/sessions/s1/logs" });
+    expect(archived.statusCode).toBe(200);
+    expect(archived.headers["x-march-log-source"]).toBe("archive");
+    expect(archived.body).toBe("archive logs\n");
+    expect(
+      (await app.inject({ method: "GET", url: "/sessions/missing/logs" })).statusCode,
+    ).toBe(404);
+  });
+
+  it("GET /sessions/:id/logs returns a service error when logs are unavailable", async () => {
+    const { app } = await buildApp(undefined, undefined, {
+      logReader: {
+        readContainerLogs: () => {
+          throw new Error("docker down");
+        },
+        archiveExists: () => false,
+      },
+    });
+    await app.inject({
+      method: "POST",
+      url: "/sessions",
+      payload: { id: "s1", kind: "spawn", containerId: "c1" },
+    });
+    await app.inject({
+      method: "POST",
+      url: "/sessions",
+      payload: { id: "s2", kind: "legate" },
+    });
+
+    const upstream = await app.inject({ method: "GET", url: "/sessions/s1/logs" });
+    expect(upstream.statusCode).toBe(502);
+    expect(upstream.json().error).toContain("Live container logs");
+
+    const unavailable = await app.inject({ method: "GET", url: "/sessions/s2/logs" });
+    expect(unavailable.statusCode).toBe(409);
+    expect(unavailable.json().error).toContain("Logs for session");
+  });
+
+  it("GET /sessions/:id/logs still maps 502 when the archive is unreadable", async () => {
+    const { app } = await buildApp(undefined, undefined, {
+      logReader: {
+        readContainerLogs: () => {
+          throw new Error("docker down");
+        },
+        archiveExists: () => true,
+        readArchive: () => {
+          throw new Error("EACCES");
+        },
+        homeDir: "/home/test",
+      },
+    });
+    await app.inject({
+      method: "POST",
+      url: "/sessions",
+      payload: { id: "s1", kind: "spawn", containerId: "c1" },
+    });
+
+    const res = await app.inject({ method: "GET", url: "/sessions/s1/logs" });
+
+    expect(res.statusCode).toBe(502);
+    expect(res.json().error).toContain("docker down");
+  });
+
+  it("GET /sessions/:id/logs reports a non-Error throw without losing it", async () => {
+    const { app } = await buildApp(undefined, undefined, {
+      logReader: {
+        archiveExists: () => {
+          throw "boom";
+        },
+      },
+    });
+    await app.inject({
+      method: "POST",
+      url: "/sessions",
+      payload: { id: "s1", kind: "legate" },
+    });
+
+    const res = await app.inject({ method: "GET", url: "/sessions/s1/logs" });
+
+    expect(res.statusCode).toBe(500);
+    expect(res.json().error).toBe("boom");
   });
 
   it("PATCH /sessions/:id updates lifecycle, 404 for unknown", async () => {
