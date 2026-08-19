@@ -362,7 +362,7 @@ export async function registerRoutes(
         return { error: err.message };
       }
       reply.code(500);
-      return { error: (err as Error).message };
+      return { error: err instanceof Error ? err.message : String(err) };
     }
   });
 

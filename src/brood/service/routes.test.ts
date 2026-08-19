@@ -359,6 +359,51 @@ describe.skipIf(!sqliteAvailable)("brood routes", () => {
     expect(unavailable.json().error).toContain("Logs for session");
   });
 
+  it("GET /sessions/:id/logs still maps 502 when the archive is unreadable", async () => {
+    const { app } = await buildApp(undefined, undefined, {
+      logReader: {
+        readContainerLogs: () => {
+          throw new Error("docker down");
+        },
+        archiveExists: () => true,
+        readArchive: () => {
+          throw new Error("EACCES");
+        },
+        homeDir: "/home/test",
+      },
+    });
+    await app.inject({
+      method: "POST",
+      url: "/sessions",
+      payload: { id: "s1", kind: "spawn", containerId: "c1" },
+    });
+
+    const res = await app.inject({ method: "GET", url: "/sessions/s1/logs" });
+
+    expect(res.statusCode).toBe(502);
+    expect(res.json().error).toContain("docker down");
+  });
+
+  it("GET /sessions/:id/logs reports a non-Error throw without losing it", async () => {
+    const { app } = await buildApp(undefined, undefined, {
+      logReader: {
+        archiveExists: () => {
+          throw "boom";
+        },
+      },
+    });
+    await app.inject({
+      method: "POST",
+      url: "/sessions",
+      payload: { id: "s1", kind: "legate" },
+    });
+
+    const res = await app.inject({ method: "GET", url: "/sessions/s1/logs" });
+
+    expect(res.statusCode).toBe(500);
+    expect(res.json().error).toBe("boom");
+  });
+
   it("PATCH /sessions/:id updates lifecycle, 404 for unknown", async () => {
     const { app } = await buildApp();
     await app.inject({
