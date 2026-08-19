@@ -14,7 +14,7 @@
 - This feature hardens Brood's existing service-owned teardown surface: `march brood teardown <id>` remains a thin CLI client over Brood's teardown API, and ordered cleanup lives behind the Brood service.
 - The 2026-05 architecture note supersedes the original standalone `src/spawn-disposal.ts` mechanism. The durable contract is service-owned lifecycle teardown over `SessionRecord`, `TeardownSubstrate`, and Castra steward removal.
 - Teardown order is fixed: archive, container, steward, worktree, branch, terminal-state update. Worktree and branch cleanup use exact tracked identifiers and never invoke broad pruning.
-- `--force` is required for `running` or `created` spawn teardown. The default forced container path should stop gracefully before removal; `--kill` is the explicit immediate-kill path. [Critical Assumption]
+- `--force` is required for `running` or `created` spawn teardown. The default forced container path *should* stop gracefully before removal, with `--kill` as the explicit immediate-kill path. [Critical Assumption] This resolves the feature map's SD-001 **as a target contract only** — the shipped substrate takes no stop mode and always removes immediately, so the distinction is unimplementable until SD-004 is closed.
 - Brood archives only the registry snapshot, container log snapshot when available, and the known structured extraction artifact. It does not recursively copy the worktree.
 - A failed or unverified Castra steward removal defers worktree and branch removal and leaves the session retryable rather than marking it torn down over a possibly live steward.
 - This spec cites `docs/vision.md` and `docs/operating-philosophy.md`: Brood removes cleanup and lifecycle intervention while still providing a deliberate CLI override surface. Teardown must be non-interactive, bounded, idempotent, and observable.
@@ -117,16 +117,18 @@ As an operator debugging a stuck lifecycle, I want teardown spans, metrics, logs
 
 - Brood service is unreachable: the CLI exits non-zero and does not perform local cleanup directly.
 - Teardown is requested for a steward id: Brood resolves the owning spawn group and applies the same cleanup contract.
-- Teardown is requested for a legate row: Brood removes only artifacts that row owns and skips spawn/steward-only steps.
-- Archive capture fails before cleanup: Brood records the archive failure and still attempts cleanup unless a later safety guard prevents it.
-- Container log capture fails: teardown records a warning and continues; archive absence does not block artifact reclamation.
+- Teardown is requested for a legate row: Brood removes the compute artifact that row tracks and skips spawn/steward-only steps. A legate row MUST NOT reach `torndown` while its tracked compute is unreclaimed (see FR-012a).
+- The archive *sink* fails (directory cannot be created, `record.json` cannot be written — full or read-only filesystem): teardown ABORTS before any destructive step and leaves the session retryable. Destroying the container and worktree is what makes the evidence unrecoverable, so an unwritable sink is a stop condition, not a warning.
+- An *optional archive source* is unavailable (container logs unreadable, extraction artifact absent): teardown records a warning and continues. Only the sink failure above is blocking.
 - The known extraction artifact is malformed or absent: teardown archives what is available, records a warning, and does not invent an output artifact.
 - Worktree path or branch is missing from the registry: the corresponding cleanup step is skipped rather than guessed.
 - Branch deletion fails because the branch is checked out elsewhere: teardown reports a failed branch step and warning without pruning other worktrees.
 - Castra is reachable but reports no matching steward: absence is verified and teardown may continue.
 - Castra is unreachable: absence is not verified, so worktree and branch cleanup are deferred.
 - A teardown request races with another teardown request: outcomes remain idempotent and terminal state is not regressed.
-- A running spawn receives `--kill`: immediate kill semantics are explicit and test-covered separately from graceful `--force`.
+- A cleanup call-out hangs (Docker daemon wedged, `git` blocked on a lock, Castra not responding): the step hits its deadline and returns a failed/deferred outcome. Teardown MUST reach a terminal or retryable state rather than blocking the service.
+- A failed spawn is torn down with `--reason`: the teardown reason is recorded separately and MUST NOT overwrite the spawn's original `failureReason` diagnostic.
+- A running spawn receives `--kill`: immediate kill semantics are explicit and test-covered separately from graceful `--force`. Until the substrate carries the stop mode (SD-004), both paths collapse to immediate removal — the slice MUST NOT claim graceful-stop coverage it does not have.
 
 ## Dependency Order
 
@@ -147,23 +149,29 @@ Recommended implementation sequence:
 - **FR-001**: The system MUST provide `march brood teardown <id>` as an operator-facing CLI command over Brood's teardown API.
 - **FR-002**: The CLI MUST NOT perform Docker, Castra, git worktree, branch, archive, or registry cleanup directly.
 - **FR-003**: Brood MUST reject teardown of a `running` or `created` spawn unless the request includes `force`.
-- **FR-004**: Forced teardown SHOULD stop the running container gracefully before removal unless the request includes `kill`.
-- **FR-005**: `kill` MUST represent immediate kill semantics and MUST NOT be implied by ordinary `force`.
+- **FR-004**: Forced teardown SHOULD stop the running container gracefully before removal unless the request includes `kill`. This is a **target contract, not current behavior**: the host substrate removes via `docker rm -f` (immediate SIGKILL) and `TeardownSubstrate.removeSpawn` has no mode parameter, so no graceful path exists today (SD-004).
+- **FR-005**: `kill` MUST represent immediate kill semantics and MUST NOT be implied by ordinary `force`. Today `kill` is parsed at the route boundary and never read by the teardown routine — it is **accepted-but-ignored**. A slice MUST either implement the distinction end-to-end or reject `kill` as unsupported; it MUST NOT leave the flag silently inert.
+- **FR-005a**: The teardown response MUST NOT report a graceful-stop outcome for a request that was executed as an immediate removal.
 - **FR-006**: Teardown MUST execute cleanup in this logical order: archive, container, steward, worktree, branch, terminal-state update.
 - **FR-007**: The archive step MUST run before deleting runtime artifacts.
+- **FR-007a**: Failure of the archive *sink* (archive directory creation or `record.json` write) MUST abort teardown before any destructive step, return a failed `archive` outcome, and leave the session retryable in a non-terminal state. Unavailability of an *optional source* (container logs, extraction artifact) MUST NOT block cleanup.
 - **FR-008**: The archive MUST include a registry snapshot at `record.json`.
 - **FR-009**: The archive MUST include `container.log` when container logs are available.
 - **FR-010**: The archive MUST include only the known structured extraction artifact when that artifact exists.
 - **FR-011**: Teardown MUST NOT recursively copy the session worktree into the archive.
 - **FR-012**: Container cleanup MUST target the tracked compute artifact through `TeardownSubstrate`.
+- **FR-012a**: Compute cleanup MUST be defined for every session `kind` that tracks compute, not only `spawn`. A `legate` row carrying a tracked container MUST have that container reclaimed, or teardown MUST refuse the row outright — it MUST NOT record a skipped `container` step and still mark the row `torndown`, which leaks the container (SD-005).
 - **FR-013**: Steward cleanup MUST ask Castra to remove the steward session and MUST request that Castra not prune the shared worktree.
 - **FR-014**: If steward removal cannot be verified, Brood MUST defer worktree and branch removal and leave the session retryable.
+- **FR-014a**: A deferred or partial teardown MUST be distinguishable from a completed one by a **single deterministic rule** that every CLI and automation consumer applies: terminal cleanup is signalled **only** by a response `status` of `torndown`. Any other status — `tearing-down` included — MUST be treated as not-yet-torn-down, and consumers MUST NOT infer completion from the HTTP status code alone. A consumer that drops session state on a non-`torndown` response is non-conformant.
 - **FR-015**: Worktree cleanup MUST target the exact tracked worktree path and MUST NOT run broad worktree pruning.
 - **FR-016**: Branch cleanup MUST target the exact tracked branch and MUST NOT infer or delete adjacent branches.
 - **FR-017**: Teardown MUST be idempotent for already removed containers, already removed worktrees, already deleted branches, absent stewards, and already torn-down session records.
 - **FR-018**: A successful teardown MUST mark the applicable session group torn down without deleting the registry record.
 - **FR-019**: A partial or unverified teardown MUST surface warnings and step outcomes without pretending terminal cleanup succeeded.
 - **FR-020**: The teardown response MUST include the session id, final status, ordered step outcomes, and warnings.
+- **FR-020a**: Every teardown call-out — archive I/O, container removal, Castra steward removal, worktree removal, branch deletion — MUST be bounded by an enforced server-side deadline, and MUST convert a deadline breach into a failed or deferred step outcome. Teardown MUST NOT block the Brood service on an unbounded synchronous call-out; the request MUST reach a terminal or retryable state regardless of a wedged Docker daemon, git lock, or unresponsive Castra.
+- **FR-020b**: An operator-supplied teardown `reason` MUST be recorded without overwriting the session's pre-existing `failureReason` diagnostic. The reason for *cleanup* and the reason the session *failed* are distinct facts and MUST both survive teardown.
 - **FR-021**: Teardown MUST record lifecycle telemetry: a service-side teardown span, child spans or step events for cleanup steps, errored span state for failed/deferred outcomes, and low-cardinality teardown metrics.
 - **FR-022**: Teardown MUST preserve inbound trace context so service-side work nests under the caller's trace.
 - **FR-023**: Teardown MUST NOT introduce interactive prompts or confirmation surfaces inside Brood.
@@ -194,6 +202,11 @@ Recommended implementation sequence:
 | SD-001 | The current host substrate's container removal helper may not expose Docker removal failures as failed step outcomes. The slice must decide whether to change the helper contract, wrap it with verification, or document host-substrate "attempted" semantics while preserving the post-condition check required by the feature map. | clarify:Non-Functional Quality | High | Medium | open | — |
 | SD-002 | Exact archive layout for the known structured extraction artifact is not fully settled. The spec requires copying the single known structured artifact into an artifact area, but slice work must bind this to the persisted extraction-result path or encoded registry result without recursively copying the worktree. | clarify:Domain & Data Model | Medium | Medium | open | — |
 | SD-003 | The current teardown implementation writes `torndownAt` inside the archive snapshot and updates registry state later. The slice must confirm whether the archived snapshot should capture pre-teardown state only, the intended terminal timestamp, or both. | clarify:Data Model | Medium | Medium | open | — |
+| SD-004 | `TeardownSubstrate.removeSpawn(spawnId)` takes no stop mode, and the host provider calls `docker rm -f` unconditionally, so FR-004/FR-005's graceful-vs-immediate distinction is unimplementable at the current boundary — `kill` is parsed at the route and never read. The slice must either add the requested mode to the substrate contract or split graceful stop and forced removal into explicit operations. Until then FR-004 is a target contract and `kill` is accepted-but-ignored. This supersedes the feature map's SD-001, which this spec had recorded as resolved on the strength of FR-004/FR-005 alone. | review:Contract-implementation drift | High | High | open | — |
+| SD-005 | Compute cleanup is defined only for `spawn` rows: `removeSpawn(spawn.id)` is the sole compute contract, and teardown records a skipped `container` step whenever no spawn row resolves. A `legate` row with a tracked container can therefore reach `torndown` while leaking its container. The slice must either exclude legate rows from teardown explicitly or define generic tracked-compute removal across kinds (FR-012a). | review:Scope gap | High | High | open | — |
+| SD-006 | Consumers cannot currently distinguish deferred from completed teardown: the legate seam (`src/legate/loop/clients/brood.ts`) returns `ok: true` for any HTTP 200 and drops the session from loop state, so a `tearing-down` response is read as confirmed cleanup. FR-014a fixes the rule; the slice must also decide whether to enforce it by response-status inspection at every consumer, a distinct non-2xx status for deferred teardown, or both. Fixing the legate seam is in-scope for the slice that implements FR-014a. | review:Consumer contract | High | High | open | — |
+| SD-007 | No teardown call-out is deadline-bounded. Container removal, log capture, and git worktree/branch operations use synchronous `execFileSync` without a `timeout` (only `docker wait` sets one), so a wedged daemon or git lock blocks Brood's event loop past the HTTP client's timeout and prevents terminal state. FR-020a requires enforced deadlines; the slice must set the concrete per-step values and decide whether synchronous call-outs move off the event loop. | review:Non-Functional Quality | High | High | open | — |
+| SD-008 | Teardown writes the operator's `--reason` into `failureReason` on the registry row, overwriting the diagnostic explaining why the spawn failed (the archive snapshot is taken pre-update and retains the original, so the loss is confined to the live row the read surface shows). FR-020b requires both to survive; the slice must choose between a distinct `teardownReason` field and an append/compose convention. | review:Data Model | Medium | High | open | — |
 
 ## Out of Scope
 
@@ -211,10 +224,14 @@ Recommended implementation sequence:
 ### Measurable Outcomes
 
 - **SC-001**: Operators can run `march brood teardown <id>` for a stopped tracked spawn and receive ordered archive/container/steward/worktree/branch outcomes.
-- **SC-002**: Teardown refuses `running` and `created` spawn cleanup without `--force`, and tests distinguish graceful `--force` from immediate `--kill`.
+- **SC-002**: Teardown refuses `running` and `created` spawn cleanup without `--force`. Tests distinguish graceful `--force` from immediate `--kill` **once the substrate carries the stop mode**; until then the suite asserts the honest current behavior (both modes remove immediately) rather than a graceful path that does not exist.
 - **SC-003**: Archive tests prove `record.json`, `container.log` when available, and the known structured extraction artifact are preserved before cleanup, with no recursive worktree copy.
+- **SC-003a**: A simulated unwritable archive sink (read-only or full filesystem) leaves the container, worktree, and branch intact and the session retryable — no destructive step runs.
 - **SC-004**: Exact-identity cleanup tests prove unrelated containers, Castra sessions, worktrees, and branches are not targeted.
 - **SC-005**: Idempotency tests prove repeated teardown of already removed artifacts and already torn-down sessions is safe.
 - **SC-006**: Steward-removal failure tests prove worktree and branch cleanup are deferred until Castra removal or absence is verified.
+- **SC-006a**: A deferred teardown is proven non-terminal at the consumer boundary: the legate seam and the CLI both report it as not-torn-down and retain session state, rather than reading HTTP 200 as confirmed cleanup.
+- **SC-006b**: Each cleanup call-out is proven deadline-bounded — a stalled Docker, git, or Castra call yields a failed/deferred step within its deadline instead of hanging the service.
+- **SC-006c**: Tearing down a `failed` spawn with `--reason` leaves the original `failureReason` readable through the Brood read surface and the archive snapshot.
 - **SC-007**: Teardown telemetry tests prove success, partial, and failed/deferred outcomes emit bounded spans, step diagnostics, and low-cardinality metrics.
 - **SC-008**: The registry record remains present after teardown, allowing read surfaces to derive disposed state and inspect archived lifecycle evidence.
