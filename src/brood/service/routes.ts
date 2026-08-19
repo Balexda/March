@@ -17,6 +17,11 @@ import {
 import { parseExtractionResult } from "./extraction.js";
 import { extractionReadiness } from "./extraction-readiness.js";
 import {
+  BroodLogUnavailableError,
+  readSessionLogs,
+  type LogReaderDeps,
+} from "./logs.js";
+import {
   defaultOrphanGate,
   defaultStewardGateway,
   sweepLeakedStewards,
@@ -55,6 +60,8 @@ export interface RoutesOptions {
   readonly orphanGate?: OrphanGate;
   /** Override the liveness observer reconciled reads use (tests). Defaults to docker. */
   readonly containerObserver?: ContainerObserver;
+  /** Override log source read dependencies (tests). Defaults to Docker + archive files. */
+  readonly logReader?: LogReaderDeps;
   /** Environment the admin gate reads its bearer token from (defaults to process.env). */
   readonly env?: NodeJS.ProcessEnv;
 }
@@ -476,6 +483,29 @@ export async function registerRoutes(
       return { error: `No spawn session with id "${id}".` };
     }
     return extractionReadiness(record);
+  });
+
+  app.get("/sessions/:id/logs", async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const record = store.get(id);
+    if (!record) {
+      reply.code(404);
+      return { error: `No session with id "${id}".` };
+    }
+    try {
+      const result = readSessionLogs(record, opts.logReader);
+      reply
+        .type("text/plain; charset=utf-8")
+        .header("X-March-Log-Source", result.source.kind);
+      return result.content;
+    } catch (err) {
+      if (err instanceof BroodLogUnavailableError) {
+        reply.code(err.reason === "live-source-failed" ? 502 : 409);
+        return { error: err.message };
+      }
+      reply.code(500);
+      return { error: (err as Error).message };
+    }
   });
 
   app.patch("/sessions/:id", async (request, reply) => {
