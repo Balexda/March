@@ -120,9 +120,26 @@ and gain a query parameter; the logs route is new.
 
 | Route | Status | Query | Success response | Errors |
 |-------|--------|-------|------------------|--------|
-| `GET /sessions` | exists | `kind`, `status`, `parentId` (all existing); `reconcile=true\|false` (**new**, default `false`) | `200` `{ "sessions": SessionRecord[], "views": BroodReadView[] }` | `400` invalid filter value; `503` reconciliation source unreachable when `reconcile=true` |
+| `GET /sessions` | exists | `kind`, `status`, `parentId` (all existing); `reconcile=true\|false` (**new**, default `false`) | `200` `{ "sessions": SessionRecord[], "views": BroodReadView[] }` | `400` invalid `kind`, `status`, or `reconcile` value |
 | `GET /sessions/:id` | exists | `reconcile=true\|false` (**new**, default `true`) | `200` `BroodReadView` — the full `SessionRecord` nested at `record` | `404` `{ "error": "No session with id \"<id>\"." }` (existing shape) |
 | `GET /sessions/:id/logs` | **new** | — | `200` `text/plain` log content, plus `X-March-Log-Source: live-container\|castra-session\|archive` | `404` unknown id; `409` no log source available; `502` upstream Docker/Castra read failure with an archive miss |
+
+Story 1 `GET /sessions` read-view fields:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `views[].record` | SessionRecord | The matching service-owned registry row; raw `sessions[]` remains alongside it for existing consumers. |
+| `views[].age` | string | Human age derived from `createdAt`; never persisted. |
+| `views[].needsAttention` | boolean | True for failed rows in the Story 1 implementation. |
+| `views[].disposed` | boolean | True when the row is torndown or has `torndownAt`. |
+| `views[].containerLive` | boolean \| null | Registry-fact liveness for rows with `containerId`; `null` for rows without a tracked container such as normal steward rows. |
+| `views[].reconciled` | boolean | `false` by default and when `reconcile=false`; `true` when `reconcile=true` is explicitly requested. |
+
+`GET /sessions` is read-only and service-owned: it validates list filters before
+querying the registry, derives `views[]` from `SessionRecord` rows in memory, and
+does not mutate registry, Docker, Castra, archive, worktree, or branch state.
+This slice implements only the list route; inspect, logs, teardown, and archive
+behavior stay at their pre-slice scope.
 
 Contract notes:
 

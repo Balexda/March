@@ -23,8 +23,10 @@ import {
   teardownSession,
 } from "./teardown.js";
 import type {
+  BroodReadView,
   ListSessionsFilter,
   RegisterSessionInput,
+  SessionRecord,
   SessionKind,
   SessionStatus,
   TeardownRequest,
@@ -104,6 +106,43 @@ const SESSION_STATUSES: readonly SessionStatus[] = [
   "tearing-down",
   "torndown",
 ];
+
+function formatAge(createdAt: string, now = new Date()): string {
+  const createdMs = Date.parse(createdAt);
+  if (!Number.isFinite(createdMs)) return "";
+  const seconds = Math.max(0, Math.floor((now.getTime() - createdMs) / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h`;
+  const days = Math.floor(hours / 24);
+  return `${days}d`;
+}
+
+export function deriveBroodReadView(
+  record: Readonly<SessionRecord>,
+  options: { readonly reconciled: boolean; readonly now?: Date },
+): BroodReadView {
+  return {
+    record: record as SessionRecord,
+    age: formatAge(record.createdAt, options.now),
+    needsAttention: record.status === "failed",
+    disposed: record.status === "torndown" || record.torndownAt !== undefined,
+    containerLive: record.containerId ? record.status === "running" : null,
+    reconciled: options.reconciled,
+  };
+}
+
+function parseBooleanQuery(
+  value: string | undefined,
+  field: string,
+): { readonly ok: true; readonly value: boolean | undefined } | { readonly ok: false; readonly error: string } {
+  if (value === undefined) return { ok: true, value: undefined };
+  if (value === "true") return { ok: true, value: true };
+  if (value === "false") return { ok: true, value: false };
+  return { ok: false, error: `${field} must be true or false.` };
+}
 
 export type RegisterValidation =
   | { readonly ok: true; readonly input: RegisterSessionInput }
@@ -300,20 +339,38 @@ export async function registerRoutes(
     }
   });
 
-  app.get("/sessions", async (request) => {
+  app.get("/sessions", async (request, reply) => {
     const query = (request.query ?? {}) as Record<string, string | undefined>;
     const filter: ListSessionsFilter = {};
     const kind = asString(query.kind);
-    if (kind && SESSION_KINDS.includes(kind as SessionKind)) {
+    if (kind && !SESSION_KINDS.includes(kind as SessionKind)) {
+      reply.code(400);
+      return { error: `kind must be one of: ${SESSION_KINDS.join(", ")}.` };
+    }
+    if (kind) {
       filter.kind = kind as SessionKind;
     }
     const status = asString(query.status);
-    if (status && SESSION_STATUSES.includes(status as SessionStatus)) {
+    if (status && !SESSION_STATUSES.includes(status as SessionStatus)) {
+      reply.code(400);
+      return { error: `status must be one of: ${SESSION_STATUSES.join(", ")}.` };
+    }
+    if (status) {
       filter.status = status as SessionStatus;
     }
     const parentId = asString(query.parentId);
     if (parentId) filter.parentId = parentId;
-    return { sessions: store.list(filter) };
+    const reconcile = parseBooleanQuery(asString(query.reconcile), "reconcile");
+    if (!reconcile.ok) {
+      reply.code(400);
+      return { error: reconcile.error };
+    }
+    const reconciled = reconcile.value === true;
+    const sessions = store.list(filter);
+    return {
+      sessions,
+      views: sessions.map((record) => deriveBroodReadView(record, { reconciled })),
+    };
   });
 
   app.get("/sessions/:id", async (request, reply) => {

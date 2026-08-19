@@ -128,6 +128,20 @@ export interface SessionRecord {
   torndownAt?: string;
 }
 
+/**
+ * Non-persisted operator read view derived from a session record. Brood owns
+ * this shape so CLI and scripts never re-open registry, Docker, worktree,
+ * branch, or archive state to render list rows.
+ */
+export interface BroodReadView {
+  record: SessionRecord;
+  age: string;
+  needsAttention: boolean;
+  disposed: boolean;
+  containerLive: boolean | null;
+  reconciled: boolean;
+}
+
 /** Fields accepted when registering a session (idempotent upsert on `id`). */
 export interface RegisterSessionInput {
   id: string;
