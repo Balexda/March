@@ -6,6 +6,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Span } from "@opentelemetry/sdk-trace-base";
 import { getActiveOtel, initOtel } from "../../observability/otel.js";
 import { classifyRequestLog, deriveBroodReadView, registerRoutes } from "./routes.js";
+import {
+  ContainerObserverUnavailableError,
+  type ContainerObservation,
+  type ContainerObserver,
+} from "./container-observer.js";
 import { sqliteAvailable } from "./sqlite.js";
 import { SessionStore } from "./store.js";
 import type { CastraStewardGateway, OrphanGate } from "./steward-removal.js";
@@ -18,7 +23,11 @@ const stores: SessionStore[] = [];
 async function buildApp(
   teardown?: (id: string, request: TeardownRequest) => Promise<TeardownResult>,
   stewardGateway?: CastraStewardGateway,
-  extra: { orphanGate?: OrphanGate; env?: NodeJS.ProcessEnv } = {},
+  extra: {
+    orphanGate?: OrphanGate;
+    env?: NodeJS.ProcessEnv;
+    containerObserver?: ContainerObserver;
+  } = {},
 ): Promise<{
   app: FastifyInstance;
   store: SessionStore;
@@ -30,11 +39,31 @@ async function buildApp(
     teardown,
     stewardGateway,
     orphanGate: extra.orphanGate,
+    containerObserver: extra.containerObserver,
     env: extra.env,
   });
   apps.push(app);
   stores.push(store);
   return { app, store };
+}
+
+/** Records what was observed so tests can assert the read stayed observational. */
+function stubObserver(
+  live: Record<string, ContainerObservation>,
+): ContainerObserver & { calls: string[][] } {
+  const calls: string[][] = [];
+  return {
+    calls,
+    async observe(containerIds) {
+      calls.push([...containerIds]);
+      return new Map(
+        containerIds.map((id) => [
+          id,
+          live[id] ?? { present: false, running: false },
+        ]),
+      );
+    },
+  };
 }
 
 afterEach(async () => {
@@ -306,7 +335,13 @@ describe.skipIf(!sqliteAvailable)("brood routes", () => {
   });
 
   it("GET /sessions returns service-owned read views for all tracked kinds", async () => {
-    const { app } = await buildApp();
+    const observer = stubObserver({
+      "container-spawn-1": { present: true, running: true },
+      "container-legate-1": { present: false, running: false },
+    });
+    const { app } = await buildApp(undefined, undefined, {
+      containerObserver: observer,
+    });
     await app.inject({
       method: "POST",
       url: "/sessions",
@@ -388,6 +423,99 @@ describe.skipIf(!sqliteAvailable)("brood routes", () => {
       reconciled: true,
     });
     expect(body.views.every((view: { age: unknown }) => typeof view.age === "string")).toBe(true);
+    // Only rows that actually track a container are handed to the observer.
+    expect(observer.calls).toEqual([["container-spawn-1", "container-legate-1"]]);
+  });
+
+  it("GET /sessions reports observed liveness, not the persisted status", async () => {
+    const observer = stubObserver({
+      // The registry still says "running"; the container is gone.
+      "container-spawn-1": { present: false, running: false },
+    });
+    const { app } = await buildApp(undefined, undefined, {
+      containerObserver: observer,
+    });
+    await app.inject({
+      method: "POST",
+      url: "/sessions",
+      payload: {
+        id: "spawn-1",
+        kind: "spawn",
+        status: "running",
+        containerId: "container-spawn-1",
+      },
+    });
+
+    const unreconciled = await app.inject({ method: "GET", url: "/sessions" });
+    expect(unreconciled.json().views[0]).toMatchObject({
+      containerLive: true,
+      reconciled: false,
+    });
+    expect(observer.calls).toEqual([]);
+
+    const reconciled = await app.inject({
+      method: "GET",
+      url: "/sessions?reconcile=true",
+    });
+    expect(reconciled.json().views[0]).toMatchObject({
+      containerLive: false,
+      reconciled: true,
+    });
+    // Observation is read-only: the registry row is untouched.
+    expect(reconciled.json().sessions[0].status).toBe("running");
+  });
+
+  it("GET /sessions?reconcile=true returns 503 when the liveness source is unreachable", async () => {
+    const { app } = await buildApp(undefined, undefined, {
+      containerObserver: {
+        async observe() {
+          throw new ContainerObserverUnavailableError(
+            "docker liveness observation failed: Cannot connect to the Docker daemon",
+          );
+        },
+      },
+    });
+    await app.inject({
+      method: "POST",
+      url: "/sessions",
+      payload: {
+        id: "spawn-1",
+        kind: "spawn",
+        status: "running",
+        containerId: "container-spawn-1",
+      },
+    });
+
+    const res = await app.inject({ method: "GET", url: "/sessions?reconcile=true" });
+    expect(res.statusCode).toBe(503);
+    expect(res.json().error).toContain("docker liveness observation failed");
+
+    // The unreconciled read still succeeds — reconciliation is the only casualty.
+    const fallback = await app.inject({ method: "GET", url: "/sessions" });
+    expect(fallback.statusCode).toBe(200);
+    expect(fallback.json().views[0]).toMatchObject({ reconciled: false });
+  });
+
+  it("GET /sessions rejects repeated filter query values instead of ignoring them", async () => {
+    const { app, store } = await buildApp();
+    await app.inject({
+      method: "POST",
+      url: "/sessions",
+      payload: { id: "spawn-1", kind: "spawn", status: "running" },
+    });
+
+    const list = vi.spyOn(store, "list");
+    for (const [url, field] of [
+      ["/sessions?kind=spawn&kind=wrong", "kind"],
+      ["/sessions?status=running&status=bad", "status"],
+      ["/sessions?parentId=a&parentId=b", "parentId"],
+      ["/sessions?reconcile=true&reconcile=false", "reconcile"],
+    ] as const) {
+      const res = await app.inject({ method: "GET", url });
+      expect(res.statusCode, url).toBe(400);
+      expect(res.json().error).toBe(`${field} must be supplied at most once.`);
+    }
+    expect(list).not.toHaveBeenCalled();
   });
 
   it("GET /sessions validates filters before listing and defaults to unreconciled views", async () => {
@@ -439,7 +567,6 @@ describe.skipIf(!sqliteAvailable)("brood routes", () => {
 
     expect(
       deriveBroodReadView(record, {
-        reconciled: false,
         now: new Date("2026-08-19T00:02:00.000Z"),
       }),
     ).toEqual({

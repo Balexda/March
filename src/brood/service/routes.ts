@@ -8,6 +8,12 @@ import {
 import { startBroodSpan } from "../../observability/brood-trace.js";
 import { createCastraClientFromEnv } from "../../castra/client.js";
 import type { SessionRepository } from "./repository.js";
+import {
+  ContainerObserverUnavailableError,
+  dockerContainerObserver,
+  type ContainerObservation,
+  type ContainerObserver,
+} from "./container-observer.js";
 import { parseExtractionResult } from "./extraction.js";
 import { extractionReadiness } from "./extraction-readiness.js";
 import {
@@ -46,6 +52,8 @@ export interface RoutesOptions {
   readonly stewardGateway?: CastraStewardGateway;
   /** Override the orphan gate the sweep uses (tests). Defaults to `gh` + `fs`. */
   readonly orphanGate?: OrphanGate;
+  /** Override the liveness observer reconciled reads use (tests). Defaults to docker. */
+  readonly containerObserver?: ContainerObserver;
   /** Environment the admin gate reads its bearer token from (defaults to process.env). */
   readonly env?: NodeJS.ProcessEnv;
 }
@@ -120,27 +128,67 @@ function formatAge(createdAt: string, now = new Date()): string {
   return `${days}d`;
 }
 
+/**
+ * Derives the non-persisted operator read view for one session row.
+ *
+ * `observed` carries the result of an actual liveness observation pass. When it
+ * is supplied, `containerLive` reports what the substrate says and the row is
+ * marked `reconciled`; when it is absent, `containerLive` falls back to the
+ * registry fact and the row is explicitly NOT reconciled. The flag therefore
+ * means "liveness was observed and applied", never merely "it was requested".
+ */
 export function deriveBroodReadView(
   record: Readonly<SessionRecord>,
-  options: { readonly reconciled: boolean; readonly now?: Date },
+  options: {
+    readonly observed?: ReadonlyMap<string, ContainerObservation>;
+    readonly now?: Date;
+  },
 ): BroodReadView {
+  const { observed } = options;
+  let containerLive: boolean | null;
+  if (!record.containerId) {
+    // No container is tracked for this row (a steward is hosted in Castra), so
+    // there is no liveness fact to report either way.
+    containerLive = null;
+  } else if (observed) {
+    const observation = observed.get(record.containerId);
+    containerLive = observation ? observation.present && observation.running : false;
+  } else {
+    containerLive = record.status === "running";
+  }
   return {
     record: record as SessionRecord,
     age: formatAge(record.createdAt, options.now),
     needsAttention: record.status === "failed",
     disposed: record.status === "torndown" || record.torndownAt !== undefined,
-    containerLive: record.containerId ? record.status === "running" : null,
-    reconciled: options.reconciled,
+    containerLive,
+    reconciled: observed !== undefined,
   };
 }
 
-function parseBooleanQuery(
-  value: string | undefined,
-  field: string,
-): { readonly ok: true; readonly value: boolean | undefined } | { readonly ok: false; readonly error: string } {
-  if (value === undefined) return { ok: true, value: undefined };
-  if (value === "true") return { ok: true, value: true };
-  if (value === "false") return { ok: true, value: false };
+type QueryRead<T> =
+  | { readonly ok: true; readonly value: T | undefined }
+  | { readonly ok: false; readonly error: string };
+
+/**
+ * Reads one scalar query value. A repeated parameter (`?kind=a&kind=b`) is
+ * parsed by Fastify as an array; treating that as "absent" would silently skip
+ * validation and answer with an unfiltered list, so it is rejected outright.
+ */
+function readQueryValue(value: unknown, field: string): QueryRead<string> {
+  if (value === undefined || value === null) return { ok: true, value: undefined };
+  if (typeof value !== "string") {
+    return { ok: false, error: `${field} must be supplied at most once.` };
+  }
+  return { ok: true, value: value.length > 0 ? value : undefined };
+}
+
+function readBooleanQuery(value: unknown, field: string): QueryRead<boolean> {
+  const raw = readQueryValue(value, field);
+  if (!raw.ok) return raw;
+  if (raw.value === undefined) return { ok: true, value: undefined };
+  if (raw.value === "true") return { ok: true, value: true };
+  if (raw.value === "false") return { ok: true, value: false };
   return { ok: false, error: `${field} must be true or false.` };
 }
 
@@ -340,36 +388,72 @@ export async function registerRoutes(
   });
 
   app.get("/sessions", async (request, reply) => {
-    const query = (request.query ?? {}) as Record<string, string | undefined>;
+    const query = (request.query ?? {}) as Record<string, unknown>;
     const filter: ListSessionsFilter = {};
-    const kind = asString(query.kind);
-    if (kind && !SESSION_KINDS.includes(kind as SessionKind)) {
+    const kind = readQueryValue(query.kind, "kind");
+    if (!kind.ok) {
+      reply.code(400);
+      return { error: kind.error };
+    }
+    if (kind.value && !SESSION_KINDS.includes(kind.value as SessionKind)) {
       reply.code(400);
       return { error: `kind must be one of: ${SESSION_KINDS.join(", ")}.` };
     }
-    if (kind) {
-      filter.kind = kind as SessionKind;
+    if (kind.value) {
+      filter.kind = kind.value as SessionKind;
     }
-    const status = asString(query.status);
-    if (status && !SESSION_STATUSES.includes(status as SessionStatus)) {
+    const status = readQueryValue(query.status, "status");
+    if (!status.ok) {
+      reply.code(400);
+      return { error: status.error };
+    }
+    if (status.value && !SESSION_STATUSES.includes(status.value as SessionStatus)) {
       reply.code(400);
       return { error: `status must be one of: ${SESSION_STATUSES.join(", ")}.` };
     }
-    if (status) {
-      filter.status = status as SessionStatus;
+    if (status.value) {
+      filter.status = status.value as SessionStatus;
     }
-    const parentId = asString(query.parentId);
-    if (parentId) filter.parentId = parentId;
-    const reconcile = parseBooleanQuery(asString(query.reconcile), "reconcile");
+    const parentId = readQueryValue(query.parentId, "parentId");
+    if (!parentId.ok) {
+      reply.code(400);
+      return { error: parentId.error };
+    }
+    if (parentId.value) filter.parentId = parentId.value;
+    const reconcile = readBooleanQuery(query.reconcile, "reconcile");
     if (!reconcile.ok) {
       reply.code(400);
       return { error: reconcile.error };
     }
-    const reconciled = reconcile.value === true;
     const sessions = store.list(filter);
+    // Reconciliation is observational and service-owned: only an actual
+    // liveness read may mark a view reconciled, and an unreachable source is an
+    // explicit 503 rather than registry data mislabelled as observed.
+    let observed: ReadonlyMap<string, ContainerObservation> | undefined;
+    if (reconcile.value === true) {
+      const observer = opts.containerObserver ?? dockerContainerObserver();
+      const containerIds = [
+        ...new Set(
+          sessions
+            .map((record) => record.containerId)
+            .filter((id): id is string => id !== undefined),
+        ),
+      ];
+      try {
+        observed = await observer.observe(containerIds);
+      } catch (err) {
+        reply.code(503);
+        return {
+          error:
+            err instanceof ContainerObserverUnavailableError
+              ? err.message
+              : `reconciliation source unreachable: ${(err as Error).message}`,
+        };
+      }
+    }
     return {
       sessions,
-      views: sessions.map((record) => deriveBroodReadView(record, { reconciled })),
+      views: sessions.map((record) => deriveBroodReadView(record, { observed })),
     };
   });
 
