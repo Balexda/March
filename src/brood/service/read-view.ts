@@ -1,5 +1,6 @@
 import fs from "node:fs";
-import { execFileSync } from "node:child_process";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import type { BroodReadView, SessionRecord } from "./types.js";
 
 export interface ContainerLiveness {
@@ -94,16 +95,45 @@ export async function deriveBroodInspectView(
   });
 }
 
+const execFileAsync = promisify(execFile);
+
+/**
+ * Upper bound on one container liveness probe. Inspect reconciliation is
+ * enabled by default, so this probe sits on a hot read path of a
+ * single-threaded Fastify service: an unbounded probe against a wedged Docker
+ * CLI or daemon would stall every other Brood route, teardown included. On
+ * timeout the child is killed and the probe rejects, which the inspect route
+ * degrades to `reconciled: false` plus an errored span.
+ */
+export const CONTAINER_LIVENESS_TIMEOUT_MS = 2_000;
+
+/** Probe overrides. Tests use these to bound a deliberately hanging command. */
+export interface ContainerLivenessProbe {
+  readonly command?: string;
+  readonly buildArgs?: (containerId: string) => string[];
+  readonly timeoutMs?: number;
+}
+
 export async function defaultContainerLivenessObserver(
   containerId: string,
+  probe: ContainerLivenessProbe = {},
 ): Promise<ContainerLiveness> {
   try {
-    const status = execFileSync(
-      "docker",
-      ["inspect", "-f", "{{.State.Status}}", containerId],
-      { encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"] },
-    ).trim();
-    return { containerId, present: true, running: status === "running" };
+    const { stdout } = await execFileAsync(
+      probe.command ?? "docker",
+      probe.buildArgs?.(containerId) ?? [
+        "inspect",
+        "-f",
+        "{{.State.Status}}",
+        containerId,
+      ],
+      {
+        encoding: "utf-8",
+        timeout: probe.timeoutMs ?? CONTAINER_LIVENESS_TIMEOUT_MS,
+        killSignal: "SIGKILL",
+      },
+    );
+    return { containerId, present: true, running: stdout.trim() === "running" };
   } catch (err) {
     const stderr = (err as { stderr?: unknown }).stderr;
     const message =
@@ -112,6 +142,9 @@ export async function defaultContainerLivenessObserver(
         : err instanceof Error
           ? err.message
           : String(err);
+    // A definitively absent container is an observation, not a probe failure.
+    // Everything else — including a timeout kill — propagates so the route
+    // degrades rather than reporting a container as gone on bad evidence.
     if (message.includes("No such object")) {
       return { containerId, present: false };
     }

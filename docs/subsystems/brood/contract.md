@@ -50,6 +50,10 @@ state directly.
   container liveness observation and never asks the CLI to open Docker state.
 - Missing optional branch, worktree, and container facts keep a stable read-view
   shape rather than changing the HTTP envelope.
+- Liveness reconciliation is time-bounded. A container probe that does not
+  answer within the bound is killed and treated as a reconciliation failure, so
+  an unresponsive Docker CLI or daemon degrades one inspect response instead of
+  stalling other Brood routes.
 
 ## Error Modes
 
