@@ -32,7 +32,6 @@ import type { LogReaderDeps } from "./logs.js";
 
 const apps: FastifyInstance[] = [];
 const stores: SessionStore[] = [];
-
 async function buildApp(
   teardown?: (id: string, request: TeardownRequest, traceparent?: string) => Promise<TeardownResult>,
   stewardGateway?: CastraStewardGateway,
@@ -292,6 +291,27 @@ describe.skipIf(!sqliteAvailable)("brood routes", () => {
       reconciled: false,
     });
     expect(observer.calls).toEqual([["c1"]]);
+  });
+
+  it("GET /sessions/:id tolerates surrounding whitespace on the reconcile flag", async () => {
+    const observer = stubObserver({});
+    const { app } = await buildApp(undefined, undefined, { containerObserver: observer });
+    await app.inject({
+      method: "POST",
+      url: "/sessions",
+      payload: { id: "s1", kind: "spawn", status: "running", containerId: "c1" },
+    });
+
+    // A padded value must not silently fall through to the reconciled default
+    // and observe Docker when the caller explicitly asked it not to.
+    const res = await app.inject({
+      method: "GET",
+      url: "/sessions/s1?reconcile=false%20",
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ reconciled: false, containerLive: true });
+    expect(observer.calls).toEqual([]);
   });
 
   it("GET /sessions/:id treats missing container facts as a completed no-op reconciliation", async () => {
