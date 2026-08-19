@@ -5,7 +5,7 @@ import Fastify, { type FastifyInstance } from "fastify";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Span } from "@opentelemetry/sdk-trace-base";
 import { getActiveOtel, initOtel } from "../../observability/otel.js";
-import { classifyRequestLog, registerRoutes } from "./routes.js";
+import { classifyRequestLog, deriveBroodReadView, registerRoutes } from "./routes.js";
 import { sqliteAvailable } from "./sqlite.js";
 import { SessionStore } from "./store.js";
 import type { CastraStewardGateway, OrphanGate } from "./steward-removal.js";
@@ -303,6 +303,161 @@ describe.skipIf(!sqliteAvailable)("brood routes", () => {
     expect(spawns.json().sessions.map((s: { id: string }) => s.id)).toEqual(["spawn-1"]);
     const children = await app.inject({ method: "GET", url: "/sessions?parentId=spawn-1" });
     expect(children.json().sessions.map((s: { id: string }) => s.id)).toEqual(["steward-1"]);
+  });
+
+  it("GET /sessions returns service-owned read views for all tracked kinds", async () => {
+    const { app } = await buildApp();
+    await app.inject({
+      method: "POST",
+      url: "/sessions",
+      payload: {
+        id: "spawn-1",
+        kind: "spawn",
+        status: "running",
+        branch: "march/spawn/spawn-1",
+        containerId: "container-spawn-1",
+      },
+    });
+    await app.inject({
+      method: "POST",
+      url: "/sessions",
+      payload: {
+        id: "steward-1",
+        kind: "steward",
+        status: "failed",
+        parentId: "spawn-1",
+      },
+    });
+    await app.inject({
+      method: "POST",
+      url: "/sessions",
+      payload: {
+        id: "legate-1",
+        kind: "legate",
+        status: "torndown",
+        containerId: "container-legate-1",
+      },
+    });
+
+    const res = await app.inject({ method: "GET", url: "/sessions?reconcile=true" });
+
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.sessions.map((s: { id: string }) => s.id)).toEqual([
+      "spawn-1",
+      "steward-1",
+      "legate-1",
+    ]);
+    expect(body.views).toHaveLength(3);
+    expect(body.views[0]).toMatchObject({
+      record: {
+        id: "spawn-1",
+        kind: "spawn",
+        status: "running",
+        branch: "march/spawn/spawn-1",
+        containerId: "container-spawn-1",
+      },
+      needsAttention: false,
+      disposed: false,
+      containerLive: true,
+      reconciled: true,
+    });
+    expect(body.views[1]).toMatchObject({
+      record: {
+        id: "steward-1",
+        kind: "steward",
+        status: "failed",
+        parentId: "spawn-1",
+      },
+      needsAttention: true,
+      disposed: false,
+      containerLive: null,
+      reconciled: true,
+    });
+    expect(body.views[1].record).not.toHaveProperty("branch");
+    expect(body.views[2]).toMatchObject({
+      record: {
+        id: "legate-1",
+        kind: "legate",
+        status: "torndown",
+        containerId: "container-legate-1",
+      },
+      needsAttention: false,
+      disposed: true,
+      containerLive: false,
+      reconciled: true,
+    });
+    expect(body.views.every((view: { age: unknown }) => typeof view.age === "string")).toBe(true);
+  });
+
+  it("GET /sessions validates filters before listing and defaults to unreconciled views", async () => {
+    const { app, store } = await buildApp();
+    await app.inject({
+      method: "POST",
+      url: "/sessions",
+      payload: { id: "spawn-1", kind: "spawn", status: "running" },
+    });
+
+    const list = vi.spyOn(store, "list");
+    const badKind = await app.inject({ method: "GET", url: "/sessions?kind=wrong" });
+    expect(badKind.statusCode).toBe(400);
+    expect(badKind.json().error).toContain("kind must be one of");
+
+    const badStatus = await app.inject({ method: "GET", url: "/sessions?status=bad" });
+    expect(badStatus.statusCode).toBe(400);
+    expect(badStatus.json().error).toContain("status must be one of");
+
+    const badReconcile = await app.inject({
+      method: "GET",
+      url: "/sessions?reconcile=yes",
+    });
+    expect(badReconcile.statusCode).toBe(400);
+    expect(badReconcile.json().error).toBe("reconcile must be true or false.");
+    expect(list).not.toHaveBeenCalled();
+
+    const defaultRead = await app.inject({ method: "GET", url: "/sessions" });
+    expect(defaultRead.statusCode).toBe(200);
+    expect(defaultRead.json().views[0]).toMatchObject({ reconciled: false });
+
+    const explicitOff = await app.inject({
+      method: "GET",
+      url: "/sessions?reconcile=false",
+    });
+    expect(explicitOff.statusCode).toBe(200);
+    expect(explicitOff.json().views[0]).toMatchObject({ reconciled: false });
+  });
+
+  it("deriveBroodReadView is pure over the source record", () => {
+    const record = {
+      id: "spawn-1",
+      kind: "spawn" as const,
+      status: "failed" as const,
+      containerId: "container-spawn-1",
+      createdAt: "2026-08-19T00:00:00.000Z",
+      updatedAt: "2026-08-19T00:00:00.000Z",
+    };
+
+    expect(
+      deriveBroodReadView(record, {
+        reconciled: false,
+        now: new Date("2026-08-19T00:02:00.000Z"),
+      }),
+    ).toEqual({
+      record,
+      age: "2m",
+      needsAttention: true,
+      disposed: false,
+      containerLive: false,
+      reconciled: false,
+    });
+    expect(record).toEqual({
+      id: "spawn-1",
+      kind: "spawn",
+      status: "failed",
+      containerId: "container-spawn-1",
+      createdAt: "2026-08-19T00:00:00.000Z",
+      updatedAt: "2026-08-19T00:00:00.000Z",
+    });
   });
 
   it("POST /sessions emits a brood.register span nested under the inbound traceparent", async () => {
