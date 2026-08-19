@@ -70,6 +70,95 @@ describe("readSessionLogs", () => {
     expect(readContainerLogs).not.toHaveBeenCalled();
   });
 
+  it("reads a steward archive through its parent spawn id", () => {
+    // teardownSession archives a spawn<->steward group under the spawn id.
+    const probed: string[] = [];
+
+    const result = readSessionLogs(
+      session({ id: "steward-1", kind: "steward", parentId: "spawn-1" }),
+      {
+        archiveExists: (archivePath) => {
+          probed.push(archivePath);
+          return archivePath.includes("/archive/spawn-1/");
+        },
+        readArchive: () => "parent archive\n",
+        homeDir: "/home/test",
+      },
+    );
+
+    expect(result.source).toEqual({
+      kind: "archive",
+      archivePath: "/home/test/.march/brood/archive/spawn-1/container.log",
+      available: true,
+    });
+    expect(result.content).toBe("parent archive\n");
+    expect(probed).toEqual([
+      "/home/test/.march/brood/archive/steward-1/container.log",
+      "/home/test/.march/brood/archive/spawn-1/container.log",
+    ]);
+  });
+
+  it("never probes an archive path that escapes the archive root", () => {
+    const archiveExists = vi.fn(() => true);
+    const readArchive = vi.fn(() => "escaped\n");
+
+    expect(() =>
+      readSessionLogs(session({ id: "../../../../etc" }), {
+        archiveExists,
+        readArchive,
+        homeDir: "/home/test",
+      }),
+    ).toThrow(BroodLogUnavailableError);
+    expect(archiveExists).not.toHaveBeenCalled();
+    expect(readArchive).not.toHaveBeenCalled();
+  });
+
+  it("keeps the live failure when the archive exists but is unreadable", () => {
+    let thrown: unknown;
+    try {
+      readSessionLogs(session({ containerId: "c1" }), {
+        readContainerLogs: () => {
+          throw new Error("docker down");
+        },
+        archiveExists: () => true,
+        readArchive: () => {
+          throw new Error("EACCES");
+        },
+        homeDir: "/home/test",
+      });
+    } catch (err) {
+      thrown = err;
+    }
+
+    expect(thrown).toBeInstanceOf(BroodLogUnavailableError);
+    // The upstream live failure owns the outcome so the route still maps 502,
+    // and both failure details survive for diagnostics.
+    expect((thrown as BroodLogUnavailableError).reason).toBe(
+      "live-source-failed",
+    );
+    expect((thrown as Error).message).toContain("docker down");
+    expect((thrown as Error).message).toContain("EACCES");
+  });
+
+  it("reports an unreadable archive when no live source was tried", () => {
+    let thrown: unknown;
+    try {
+      readSessionLogs(session(), {
+        archiveExists: () => true,
+        readArchive: () => {
+          throw new Error("EACCES");
+        },
+        homeDir: "/home/test",
+      });
+    } catch (err) {
+      thrown = err;
+    }
+
+    expect((thrown as BroodLogUnavailableError).reason).toBe(
+      "archive-read-failed",
+    );
+  });
+
   it("reports unavailable logs without mutating dependencies", () => {
     const readContainerLogs = vi.fn(() => {
       throw new Error("docker down");

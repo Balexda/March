@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { readSpawnContainerLogs } from "../../spawn/container-launch.js";
-import { broodArchiveDir } from "./store.js";
+import { broodDir } from "./store.js";
 import type { SessionLogResult, SessionRecord } from "./types.js";
 
 export type LogUnavailableReason =
@@ -48,27 +48,65 @@ function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-function archivedContainerLogPath(record: SessionRecord, homeDir?: string): string {
-  return path.join(broodArchiveDir(record.id, homeDir), "container.log");
+/**
+ * Resolve `<home>/.march/brood/archive/<id>/container.log`, or `undefined`
+ * when `id` would escape the archive root. Registration only checks that an
+ * id is non-empty, so an id carrying `..` (or an absolute path) would
+ * otherwise turn this read-only endpoint into a probe for any readable
+ * `container.log` on the host. The containment check keeps the traversal from
+ * reaching the filesystem at all rather than trusting the id.
+ */
+function archivedContainerLogPath(
+  id: string,
+  homeDir?: string,
+): string | undefined {
+  const root = path.resolve(broodDir(homeDir), "archive");
+  const candidate = path.resolve(root, id, "container.log");
+  const rel = path.relative(root, candidate);
+  if (!rel || rel.startsWith("..") || path.isAbsolute(rel)) return undefined;
+  return candidate;
 }
+
+/**
+ * Archive ids to try, in order. `teardownSession` archives a spawn<->steward
+ * group under the *spawn* id (its `primary`), so a steward row's archived
+ * `container.log` lives under `parentId`, not under the steward's own id.
+ */
+function archiveCandidateIds(record: SessionRecord): string[] {
+  const ids = [record.id];
+  if (record.parentId && record.parentId !== record.id) {
+    ids.push(record.parentId);
+  }
+  return ids;
+}
+
+type ArchiveOutcome =
+  | { readonly kind: "read"; readonly result: SessionLogResult }
+  | { readonly kind: "failed"; readonly detail: string }
+  | { readonly kind: "absent" };
 
 function readArchiveIfAvailable(
   record: SessionRecord,
   deps: ResolvedLogReaderDeps,
-): SessionLogResult | undefined {
-  const archivePath = archivedContainerLogPath(record, deps.homeDir);
-  if (!deps.archiveExists(archivePath)) return undefined;
-  try {
-    return {
-      source: { kind: "archive", archivePath, available: true },
-      content: deps.readArchive(archivePath),
-    };
-  } catch (err) {
-    throw new BroodLogUnavailableError(
-      `Archived logs for session "${record.id}" are unreadable: ${errorMessage(err)}`,
-      "archive-read-failed",
-    );
+): ArchiveOutcome {
+  let failure: string | undefined;
+  for (const id of archiveCandidateIds(record)) {
+    const archivePath = archivedContainerLogPath(id, deps.homeDir);
+    if (!archivePath) continue;
+    if (!deps.archiveExists(archivePath)) continue;
+    try {
+      return {
+        kind: "read",
+        result: {
+          source: { kind: "archive", archivePath, available: true },
+          content: deps.readArchive(archivePath),
+        },
+      };
+    } catch (err) {
+      failure ??= `${archivePath}: ${errorMessage(err)}`;
+    }
   }
+  return failure ? { kind: "failed", detail: failure } : { kind: "absent" };
 }
 
 export function readSessionLogs(
@@ -94,12 +132,26 @@ export function readSessionLogs(
   }
 
   const archive = readArchiveIfAvailable(record, d);
-  if (archive) return archive;
+  if (archive.kind === "read") return archive.result;
 
+  // A live read that already failed owns the outcome: an unreadable archive is
+  // just another archive miss, so the upstream failure keeps both the
+  // contracted 502 status and its diagnostic context.
   if (liveFailure) {
+    const archiveDetail =
+      archive.kind === "failed"
+        ? ` (archived log unreadable: ${archive.detail})`
+        : "";
     throw new BroodLogUnavailableError(
-      `Live container logs for session "${record.id}" are unavailable and no archived log exists: ${liveFailure}`,
+      `Live container logs for session "${record.id}" are unavailable and no archived log exists${archiveDetail}: ${liveFailure}`,
       "live-source-failed",
+    );
+  }
+
+  if (archive.kind === "failed") {
+    throw new BroodLogUnavailableError(
+      `Archived logs for session "${record.id}" are unreadable: ${archive.detail}`,
+      "archive-read-failed",
     );
   }
 
