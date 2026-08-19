@@ -210,7 +210,7 @@ function queryBoolean(
   value: string | string[] | undefined,
   defaultValue: boolean,
 ): boolean {
-  const raw = Array.isArray(value) ? value[0] : value;
+  const raw = (Array.isArray(value) ? value[0] : value)?.trim();
   if (raw === "true") return true;
   if (raw === "false") return false;
   return defaultValue;

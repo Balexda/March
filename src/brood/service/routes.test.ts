@@ -24,6 +24,14 @@ import type {
 
 const apps: FastifyInstance[] = [];
 const stores: SessionStore[] = [];
+const tempDirs: string[] = [];
+
+/** A throwaway directory that stands in for a tracked worktree, removed in `afterEach`. */
+function tempWorktree(): string {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "march-brood-view-"));
+  tempDirs.push(dir);
+  return dir;
+}
 
 async function buildApp(
   teardown?: (id: string, request: TeardownRequest) => Promise<TeardownResult>,
@@ -52,6 +60,9 @@ async function buildApp(
 afterEach(async () => {
   while (apps.length) await apps.pop()!.close();
   while (stores.length) stores.pop()!.close();
+  while (tempDirs.length) {
+    fs.rmSync(tempDirs.pop()!, { recursive: true, force: true });
+  }
 });
 
 describe.skipIf(!sqliteAvailable)("brood routes", () => {
@@ -180,7 +191,7 @@ describe.skipIf(!sqliteAvailable)("brood routes", () => {
 
   it("GET /sessions/:id returns a nested inspect read view for every session kind", async () => {
     const { app } = await buildApp();
-    const worktree = fs.mkdtempSync(path.join(os.tmpdir(), "march-brood-view-"));
+    const worktree = tempWorktree();
     const kinds: SessionKind[] = ["spawn", "steward", "legate"];
     for (const kind of kinds) {
       await app.inject({
@@ -262,6 +273,27 @@ describe.skipIf(!sqliteAvailable)("brood routes", () => {
       reconciled: false,
     });
     expect(observed).toEqual(["c1"]);
+  });
+
+  it("GET /sessions/:id tolerates surrounding whitespace on the reconcile flag", async () => {
+    const observe = vi.fn<ContainerLivenessObserver>();
+    const { app } = await buildApp(undefined, undefined, {}, observe);
+    await app.inject({
+      method: "POST",
+      url: "/sessions",
+      payload: { id: "s1", kind: "spawn", status: "running", containerId: "c1" },
+    });
+
+    // A padded value must not silently fall through to the reconciled default
+    // and observe Docker when the caller explicitly asked it not to.
+    const res = await app.inject({
+      method: "GET",
+      url: "/sessions/s1?reconcile=false%20",
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ reconciled: false, containerLive: true });
+    expect(observe).not.toHaveBeenCalled();
   });
 
   it("GET /sessions/:id treats missing container facts as a completed no-op reconciliation", async () => {
