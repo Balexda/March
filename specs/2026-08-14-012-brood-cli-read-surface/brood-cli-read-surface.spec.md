@@ -95,7 +95,7 @@ Recommended implementation sequence:
 | ID | Title | Depends On | Artifact |
 |----|-------|------------|----------|
 | US1 | List Tracked Sessions | — | specs/2026-08-14-012-brood-cli-read-surface/01-list-tracked-sessions.tasks.md |
-| US2 | Inspect One Session | — | — |
+| US2 | Inspect One Session | — | specs/2026-08-14-012-brood-cli-read-surface/02-inspect-one-session.tasks.md |
 | US3 | Read Live Or Archived Logs | — | specs/2026-08-14-012-brood-cli-read-surface/03-read-live-or-archived-logs.tasks.md |
 
 All three stories are independently sliceable: `list` and `inspect` are separate
