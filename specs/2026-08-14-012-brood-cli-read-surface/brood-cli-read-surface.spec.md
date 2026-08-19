@@ -94,7 +94,7 @@ Recommended implementation sequence:
 
 | ID | Title | Depends On | Artifact |
 |----|-------|------------|----------|
-| US1 | List Tracked Sessions | — | — |
+| US1 | List Tracked Sessions | — | specs/2026-08-14-012-brood-cli-read-surface/01-list-tracked-sessions.tasks.md |
 | US2 | Inspect One Session | — | — |
 | US3 | Read Live Or Archived Logs | — | — |
 
