@@ -74,8 +74,15 @@ Each view contains its `record`, an `age` string, booleans `needsAttention`,
 rows without a tracked container. Without observation, liveness for a tracked
 container reflects whether its registry status is `running`.
 
-`GET /sessions/:id` takes the session ID as its only input. It returns 200
-with the `SessionRecord` or 404 with `{ error: string }` for an unknown ID.
+`GET /sessions/:id` returns one `BroodReadView` with the complete persisted
+`SessionRecord` nested at `record`, or `404` with
+`{ "error": "No session with id \"<id>\"." }`. It accepts `reconcile=true|false`;
+unlike the list route, reconciliation defaults to **on**. The view carries the
+same derived fields as list views (`age`, `needsAttention`, `disposed`,
+`containerLive`, `reconciled`) and is derived by the same function. A reconciled
+inspect observes only the row's tracked container (no observation is needed for
+a row without one, which still reports `reconciled: true` with
+`containerLive: null`).
 
 `PATCH /sessions/:id` takes the session ID and an optional JSON object.
 Only supplied allowlisted fields are applied. Those fields are `status`,
@@ -167,6 +174,11 @@ Both reads have deadlines. A failed read causes a nonzero exit and a diagnostic
 on stderr for each unavailable source. Available sections are labeled partial,
 and interactive names are advertised as attachable only when Brood has
 confirmed that they do not collide.
+
+`BroodClient.inspect(id, { reconcile? })` reads `GET /sessions/:id`; omitting
+`reconcile` uses the service default, and an explicit value is sent as the
+query parameter. `BroodClient.get(id)` keeps its bare-record contract by
+requesting `reconcile=false` and returning the nested `record`.
 
 ### Session teardown
 
@@ -417,8 +429,11 @@ Brood never runs blanket `git worktree prune`. Each Git step requires the
 tracked repository and its corresponding tracked path or branch. A failed
 steward removal defers both Git steps and leaves teardown retryable.
 
-List reads leave registry and container state unchanged. Brood owns filter
-validation, read-view derivation, and any requested liveness observation.
+List and inspect reads leave registry and container state unchanged: derived
+read-view fields are never persisted, and `record` is passed through from the
+stored `SessionRecord`, including optional and future fields. Brood owns filter
+validation, read-view derivation, and any requested liveness observation; the
+CLI never opens Docker or registry state itself.
 
 - Log reads are read-only. They do not register, update, delete, tear down,
   prune, remove, create, or repair registry rows, Docker resources, archives,
@@ -440,6 +455,13 @@ Registration, listing, and update return 400 with `{ error: string }` for
 validation failures. Lookup and update return 404 for unknown session IDs.
 Requested liveness observation can return 503. `listViews()` surfaces HTTP
 errors, transport failures, and responses missing the views array.
+
+Inspect degrades rather than fails when the liveness source is unavailable: it
+returns `200` with `reconciled: false` and registry-derived `containerLive`, and
+emits an errored `brood.inspect.reconcile` span under the inbound trace context.
+`BroodClient.inspect` raises `BroodNotFoundError` on `404`, `BroodClientError`
+(with the server error body when present) on other non-200 responses, and
+`BroodUnavailableError` when Brood is unreachable, with no local fallback.
 
 Teardown returns HTTP 404 for an unknown ID and HTTP 409 when force is required.
 Rejection precedes registry updates and cleanup. Rejections end an errored `brood.teardown`

@@ -122,15 +122,14 @@ and gain a query parameter; the logs route is new.
 This table is the **target contract for the whole feature**, not a description
 of what has shipped. `Status` describes whether the route exists in the service
 at all; `Delivered by` names the user story that implements the contracted
-behavior. Only the `GET /sessions` row is implemented as specified today — the
-`GET /sessions/:id` reconcile parameter and read-view shape are US2 work, and
-the logs route is US3 work, so both still behave as they did before this
-feature (`GET /sessions/:id` returns a bare `SessionRecord`).
+behavior. The `GET /sessions` (US1) and `GET /sessions/:id` (US2) rows are
+implemented as specified; `GET /sessions/:id` now returns a `BroodReadView`
+rather than a bare `SessionRecord`. The logs route is US3 work.
 
 | Route | Status | Delivered by | Query | Success response | Errors |
 |-------|--------|--------------|-------|------------------|--------|
 | `GET /sessions` | exists | **US1 — shipped** | `kind`, `status`, `parentId` (all existing); `reconcile=true\|false` (**new**, default `false`) | `200` `{ "sessions": SessionRecord[], "views": BroodReadView[] }` | `400` invalid or repeated `kind`, `status`, `parentId`, or `reconcile` value; `503` reconciliation source unreachable when `reconcile=true` |
-| `GET /sessions/:id` | exists | US2 — not yet implemented | `reconcile=true\|false` (**new**, default `true`) | `200` `BroodReadView` — the full `SessionRecord` nested at `record` | `404` `{ "error": "No session with id \"<id>\"." }` (existing shape) |
+| `GET /sessions/:id` | exists | **US2 — shipped** | `reconcile=true\|false` (**new**, default `true`) | `200` `BroodReadView` — the full `SessionRecord` nested at `record` | `404` `{ "error": "No session with id \"<id>\"." }` (existing shape) |
 | `GET /sessions/:id/logs` | **new** | US3 — not yet implemented | — | `200` `text/plain` log content, plus `X-March-Log-Source: live-container\|castra-session\|archive` | `404` unknown id; `409` no log source available; `502` upstream Docker/Castra read failure with an archive miss |
 
 Story 1 `GET /sessions` read-view fields:

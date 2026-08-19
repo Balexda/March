@@ -22,7 +22,12 @@ import { broodArchiveDir, SessionStore } from "./store.js";
 import type { StopComputeResult, TeardownSubstrate } from "./substrate.js";
 import type { CastraStewardGateway, OrphanGate } from "./steward-removal.js";
 import { BroodConflictError, BroodNotFoundError, teardownSession, type TeardownDeps } from "./teardown.js";
-import type { TeardownRequest, TeardownResult } from "./types.js";
+import type {
+  SessionKind,
+  SessionRecord,
+  TeardownRequest,
+  TeardownResult,
+} from "./types.js";
 import type { LogReaderDeps } from "./logs.js";
 
 const apps: FastifyInstance[] = [];
@@ -204,6 +209,202 @@ describe.skipIf(!sqliteAvailable)("brood routes", () => {
     });
     expect((await app.inject({ method: "GET", url: "/sessions/s1" })).statusCode).toBe(200);
     expect((await app.inject({ method: "GET", url: "/sessions/nope" })).statusCode).toBe(404);
+  });
+
+  it("GET /sessions/:id returns a nested inspect read view for every session kind", async () => {
+    const { app } = await buildApp();
+    const kinds: SessionKind[] = ["spawn", "steward", "legate"];
+    for (const kind of kinds) {
+      await app.inject({
+        method: "POST",
+        url: "/sessions",
+        payload: {
+          id: `${kind}-1`,
+          kind,
+          status:
+            kind === "steward"
+              ? "running"
+              : kind === "legate"
+                ? "torndown"
+                : "failed",
+          repoPath: "/repo",
+          branch: `${kind}/branch`,
+          worktreePath: `/worktrees/${kind}`,
+          containerId: kind === "steward" ? undefined : `${kind}-container`,
+          failureReason: kind === "spawn" ? "agent exited" : undefined,
+        },
+      });
+      const res = await app.inject({
+        method: "GET",
+        url: `/sessions/${kind}-1?reconcile=false`,
+      });
+      expect(res.statusCode).toBe(200);
+      const body = res.json() as {
+        record: SessionRecord;
+        age: string;
+        needsAttention: boolean;
+        disposed: boolean;
+        containerLive: boolean | null;
+        reconciled: boolean;
+      };
+      expect(body.record).toMatchObject({ id: `${kind}-1`, kind });
+      expect(body.age).toMatch(/^\d+[smhd]$/);
+      expect(body.disposed).toBe(body.record.status === "torndown");
+      expect(body.needsAttention).toBe(body.record.status === "failed");
+      expect(body.containerLive).toBe(
+        kind === "steward" ? null : body.record.status === "running",
+      );
+      expect(body.reconciled).toBe(false);
+      if (kind === "spawn") {
+        expect(body.record.failureReason).toBe("agent exited");
+      }
+    }
+  });
+
+  it("GET /sessions/:id defaults to reconciled liveness unless disabled", async () => {
+    const observer = stubObserver({});
+    const { app } = await buildApp(undefined, undefined, { containerObserver: observer });
+    await app.inject({
+      method: "POST",
+      url: "/sessions",
+      payload: {
+        id: "s1",
+        kind: "spawn",
+        status: "running",
+        containerId: "c1",
+      },
+    });
+
+    const reconciled = await app.inject({ method: "GET", url: "/sessions/s1" });
+    expect(reconciled.statusCode).toBe(200);
+    expect(reconciled.json()).toMatchObject({
+      containerLive: false,
+      reconciled: true,
+      record: { id: "s1", containerId: "c1" },
+    });
+    const unreconciled = await app.inject({
+      method: "GET",
+      url: "/sessions/s1?reconcile=false",
+    });
+    expect(unreconciled.statusCode).toBe(200);
+    expect(unreconciled.json()).toMatchObject({
+      containerLive: true,
+      reconciled: false,
+    });
+    expect(observer.calls).toEqual([["c1"]]);
+  });
+
+  it("GET /sessions/:id treats missing container facts as a completed no-op reconciliation", async () => {
+    const observer = stubObserver({});
+    const { app } = await buildApp(undefined, undefined, { containerObserver: observer });
+    await app.inject({
+      method: "POST",
+      url: "/sessions",
+      payload: {
+        id: "steward-1",
+        kind: "steward",
+        status: "running",
+        agentDeckSessionId: "steward-1",
+      },
+    });
+
+    const res = await app.inject({ method: "GET", url: "/sessions/steward-1" });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({
+      record: { id: "steward-1", kind: "steward" },
+      containerLive: null,
+      reconciled: true,
+    });
+    expect(observer.calls).toEqual([[]]);
+  });
+
+  it("GET /sessions/:id inspect is read-only and does not persist derived fields", async () => {
+    const { app, store } = await buildApp(undefined, undefined, {
+      containerObserver: stubObserver({}),
+    });
+    await app.inject({
+      method: "POST",
+      url: "/sessions",
+      payload: {
+        id: "s1",
+        kind: "spawn",
+        status: "running",
+        containerId: "c1",
+      },
+    });
+    const before = store.get("s1");
+    const res = await app.inject({ method: "GET", url: "/sessions/s1" });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ containerLive: false, reconciled: true });
+    const after = store.get("s1") as SessionRecord & Record<string, unknown>;
+    expect(after).toEqual(before);
+    expect(after.needsAttention).toBeUndefined();
+    expect(after.disposed).toBeUndefined();
+    expect(after.containerLive).toBeUndefined();
+    expect(after.reconciled).toBeUndefined();
+  });
+
+  it("GET /sessions/:id degrades liveness failures and emits an errored span", async () => {
+    initOtel({ MARCH_OTEL: "1", MARCH_OTEL_ENDPOINT: "http://localhost:4318" });
+    const created: Span[] = [];
+    const tracer = getActiveOtel().getTracer();
+    const real = tracer.startSpan.bind(tracer);
+    vi.spyOn(tracer, "startSpan").mockImplementation(
+      (...args: Parameters<typeof real>) => {
+        const span = real(...args) as Span;
+        created.push(span);
+        return span;
+      },
+    );
+    try {
+      const { app } = await buildApp(undefined, undefined, {
+        containerObserver: {
+          async observe() {
+            throw new ContainerObserverUnavailableError("docker unavailable");
+          },
+        },
+      });
+      const traceId = "0af7651916cd43dd8448eb211c80319c";
+      const spanId = "b7ad6b7169203331";
+      await app.inject({
+        method: "POST",
+        url: "/sessions",
+        payload: {
+          id: "s1",
+          kind: "spawn",
+          status: "running",
+          containerId: "c1",
+        },
+      });
+
+      const res = await app.inject({
+        method: "GET",
+        url: "/sessions/s1",
+        headers: { traceparent: `00-${traceId}-${spanId}-01` },
+      });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toMatchObject({
+        record: { id: "s1", containerId: "c1" },
+        containerLive: true,
+        reconciled: false,
+      });
+      const span = created.find((s) => s.name === "brood.inspect.reconcile");
+      expect(span).toBeDefined();
+      expect(span!.spanContext().traceId).toBe(traceId);
+      expect(span!.parentSpanContext?.spanId).toBe(spanId);
+      expect(span!.status.code).toBe(SpanStatusCode.ERROR);
+      expect(span!.attributes).toMatchObject({
+        "march.session.id": "s1",
+        "march.session.kind": "spawn",
+        "march.brood.reconciled": false,
+        "march.brood.reconcile_error": "docker unavailable",
+      });
+    } finally {
+      vi.restoreAllMocks();
+      initOtel({});
+    }
   });
 
   it("GET /sessions/:id/extraction-readiness exposes PR-ready successful extraction metadata", async () => {
