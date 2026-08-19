@@ -138,7 +138,7 @@ function formatAge(createdAt: string, now = new Date()): string {
  * means "liveness was observed and applied", never merely "it was requested".
  */
 export function deriveBroodReadView(
-  record: Readonly<SessionRecord>,
+  record: SessionRecord,
   options: {
     readonly observed?: ReadonlyMap<string, ContainerObservation>;
     readonly now?: Date;
@@ -157,7 +157,7 @@ export function deriveBroodReadView(
     containerLive = record.status === "running";
   }
   return {
-    record: record as SessionRecord,
+    record,
     age: formatAge(record.createdAt, options.now),
     needsAttention: record.status === "failed",
     disposed: record.status === "torndown" || record.torndownAt !== undefined,
