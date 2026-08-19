@@ -96,7 +96,7 @@ Recommended implementation sequence:
 |----|-------|------------|----------|
 | US1 | List Tracked Sessions | — | — |
 | US2 | Inspect One Session | — | — |
-| US3 | Read Live Or Archived Logs | — | — |
+| US3 | Read Live Or Archived Logs | — | specs/2026-08-14-012-brood-cli-read-surface/03-read-live-or-archived-logs.tasks.md |
 
 All three stories are independently sliceable: `list` and `inspect` are separate
 read commands over the same pre-existing service substrate, and `logs` needs
