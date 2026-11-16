@@ -42,7 +42,7 @@
   - Attributes are limited to the contract's list; none carries a repository, token or client key
   - Nothing is emitted, and nothing fails, when telemetry is off
 
-- [ ] **Count issuances and denials**
+- [x] **Count issuances and denials**
 
   Add the server-side issuance and denial counters (contracts "Events / Hooks") to `src/observability/tessera-metrics.ts` and record them from the same per-request record. Satisfies the counting half of AS 8.2.
 

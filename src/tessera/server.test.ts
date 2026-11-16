@@ -1631,3 +1631,236 @@ describe("tessera.issue spans", () => {
     expect(line!.span_id).toBeUndefined();
   });
 });
+
+/**
+ * One counter increment per token request (AS 8.2, FR-036): an issued request
+ * counts one issuance, a denied or failed one counts one denial with its error
+ * code as the reason, never both, and no other route counts anything.
+ */
+describe("tessera issuance and denial counters", () => {
+  let app: FastifyInstance | undefined;
+
+  afterEach(async () => {
+    if (app) await app.close();
+    app = undefined;
+    vi.restoreAllMocks();
+    initOtel({});
+  });
+
+  interface Counted {
+    readonly issuances: ReturnType<typeof vi.fn>;
+    readonly denials: ReturnType<typeof vi.fn>;
+  }
+
+  /** Enable telemetry and capture the server counters' `add` calls. */
+  function enable(): Counted {
+    const meter = initOtel({
+      MARCH_OTEL: "1",
+      MARCH_OTEL_ENDPOINT: "http://localhost:4318",
+    }).getMeter();
+    const counted: Counted = { issuances: vi.fn(), denials: vi.fn() };
+    vi.spyOn(meter, "createCounter").mockImplementation((name: string) => {
+      if (name === "march.tessera.issuances") return { add: counted.issuances } as never;
+      if (name === "march.tessera.denials") return { add: counted.denials } as never;
+      return { add: vi.fn() } as never;
+    });
+    return counted;
+  }
+
+  function build(providers: readonly CredentialProvider[] = [stubProvider()]): FastifyInstance {
+    app = buildTesseraServer({
+      clients: CLIENTS,
+      policy: POLICY,
+      registry: createProviderRegistry(providers),
+    });
+    return app;
+  }
+
+  function post(
+    body: unknown,
+    authorization: string | null = AUTH,
+    raw?: string,
+  ): Promise<LightMyRequestResponse> {
+    if (!app) throw new Error("app not built");
+    return app.inject({
+      method: "POST",
+      url: "/v1/github/token",
+      headers: {
+        "content-type": "application/json",
+        ...(authorization === null ? {} : { authorization }),
+      },
+      payload: raw ?? JSON.stringify(body),
+    });
+  }
+
+  const VALID = { identity: "app", repo: "acme/widgets", access: "read" };
+
+  function cachedProvider(cache: "hit" | "miss"): CredentialProvider {
+    return stubProvider({
+      issue: async () => ({
+        token: SECRET_TOKEN,
+        expiresAt: "2026-11-15T20:00:00Z",
+        identity: "march-bot[bot]",
+        commitIdentity: null,
+        cache,
+      }),
+    });
+  }
+
+  for (const cache of ["hit", "miss"] as const) {
+    it(`counts one issuance for an issued cache ${cache} and no denial`, async () => {
+      const counted = enable();
+      build([cachedProvider(cache)]);
+      expect((await post(VALID)).statusCode).toBe(200);
+      expect(counted.issuances).toHaveBeenCalledTimes(1);
+      expect(counted.issuances).toHaveBeenCalledWith(1, {
+        identity: "app",
+        provider: "github-app",
+        access: "read",
+        cache,
+      });
+      expect(counted.denials).not.toHaveBeenCalled();
+    });
+  }
+
+  it("counts a user issuance under the user provider", async () => {
+    const counted = enable();
+    build([stubProvider(), stubProvider({ id: "github-user", identity: "user" })]);
+    expect((await post({ identity: "user", access: "write" }, LEGATE_AUTH)).statusCode).toBe(200);
+    expect(counted.issuances).toHaveBeenCalledWith(1, {
+      identity: "user",
+      provider: "github-user",
+      access: "write",
+      cache: "miss",
+    });
+  });
+
+  function failing(error: Error): CredentialProvider {
+    return stubProvider({
+      issue: async () => {
+        throw error;
+      },
+    });
+  }
+
+  const denials: Array<{
+    label: string;
+    providers: () => CredentialProvider[];
+    send: () => Promise<LightMyRequestResponse>;
+    status: number;
+    labels: { identity: string; reason: string };
+  }> = [
+    {
+      label: "no key",
+      providers: () => [stubProvider()],
+      send: () => post(VALID, null),
+      status: 401,
+      labels: { identity: "none", reason: "unauthorized" },
+    },
+    {
+      label: "an unknown key",
+      providers: () => [stubProvider()],
+      send: () => post(VALID, "Bearer not-a-registered-key"),
+      status: 401,
+      labels: { identity: "none", reason: "unauthorized" },
+    },
+    {
+      label: "malformed JSON",
+      providers: () => [stubProvider()],
+      send: () => post(undefined, AUTH, "{not json"),
+      status: 400,
+      labels: { identity: "none", reason: "invalid_request" },
+    },
+    {
+      label: "an invalid field",
+      providers: () => [stubProvider()],
+      send: () => post({ ...VALID, access: "admin" }),
+      status: 400,
+      labels: { identity: "none", reason: "invalid_request" },
+    },
+    {
+      label: "a policy denial",
+      providers: () => [stubProvider()],
+      send: () => post({ ...VALID, access: "write" }),
+      status: 403,
+      labels: { identity: "app", reason: "policy_denied" },
+    },
+    {
+      label: "repo_not_installed",
+      providers: () => [failing(new RepoNotInstalledError("not installed"))],
+      send: () => post(VALID),
+      status: 422,
+      labels: { identity: "app", reason: "repo_not_installed" },
+    },
+    {
+      label: "no provider for the identity",
+      providers: () => [],
+      send: () => post(VALID),
+      status: 503,
+      labels: { identity: "app", reason: "provider_unconfigured" },
+    },
+    {
+      label: "credential_invalid",
+      providers: () => [failing(new CredentialInvalidError("rejected"))],
+      send: () => post(VALID),
+      status: 503,
+      labels: { identity: "app", reason: "credential_invalid" },
+    },
+    {
+      label: "provider_unavailable",
+      providers: () => [failing(new ProviderUnavailableError("down", 5))],
+      send: () => post(VALID),
+      status: 503,
+      labels: { identity: "app", reason: "provider_unavailable" },
+    },
+    {
+      label: "mint_failed",
+      providers: () => [failing(new MintFailedError("failed"))],
+      send: () => post(VALID),
+      status: 502,
+      labels: { identity: "app", reason: "mint_failed" },
+    },
+    {
+      label: "an unexpected error",
+      providers: () => [failing(new Error("boom"))],
+      send: () => post(VALID),
+      status: 500,
+      labels: { identity: "app", reason: "internal" },
+    },
+  ];
+  for (const { label, providers, send, status, labels } of denials) {
+    it(`counts one denial for ${label} (${status}) with reason ${labels.reason} and no issuance`, async () => {
+      const counted = enable();
+      build(providers());
+      expect((await send()).statusCode).toBe(status);
+      expect(counted.denials).toHaveBeenCalledTimes(1);
+      expect(counted.denials).toHaveBeenCalledWith(1, labels);
+      expect(counted.issuances).not.toHaveBeenCalled();
+    });
+  }
+
+  it("counts nothing for any other route", async () => {
+    const counted = enable();
+    const built = build();
+    await built.inject({ method: "GET", url: "/healthz" });
+    await built.inject({ method: "GET", url: "/status" });
+    await built.inject({ method: "POST", url: "/v1/nope", headers: { authorization: AUTH } });
+    await built.inject({ method: "POST", url: "/v1/nope" });
+    await built.inject({ method: "GET", url: "/v1/github/token", headers: { authorization: AUTH } });
+    await built.inject({ method: "GET", url: "/nope" });
+    expect(counted.issuances).not.toHaveBeenCalled();
+    expect(counted.denials).not.toHaveBeenCalled();
+  });
+
+  it("never carries a repository, client name, key or token in a label", async () => {
+    const counted = enable();
+    build();
+    await post(VALID);
+    await post({ ...VALID, access: "write" });
+    await post(VALID, "Bearer not-a-registered-key");
+    const labels = JSON.stringify([...counted.issuances.mock.calls, ...counted.denials.mock.calls]);
+    for (const leaked of ["acme", "herald", SECRET_TOKEN, CLIENT_KEY, CLIENT_KEY_SHA256, "not-a-registered-key"]) {
+      expect(labels).not.toContain(leaked);
+    }
+  });
+});

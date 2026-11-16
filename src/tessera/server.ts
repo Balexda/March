@@ -3,6 +3,7 @@ import Fastify, {
   type FastifyInstance,
   type FastifyRequest,
 } from "fastify";
+import { recordTesseraDenial, recordTesseraIssuance } from "../observability/tessera-metrics.js";
 import { emitTesseraIssueSpan } from "../observability/tessera-trace.js";
 import { type AuditContext, buildAuditRecord, createAuditContext } from "./audit.js";
 import type { ClientRegistry } from "./auth/client-keys.js";
@@ -312,6 +313,17 @@ export function buildTesseraServer(options: BuildTesseraServerOptions): FastifyI
         outcome: record.outcome,
         reason: record.reason,
       });
+      // Exactly one counter per request, driven by the same record.
+      if (record.outcome === "issued") {
+        recordTesseraIssuance({
+          identity: record.identity,
+          provider: record.provider,
+          access: record.access,
+          cache: record.cache,
+        });
+      } else {
+        recordTesseraDenial({ identity: record.identity, reason: record.reason });
+      }
       // Correlation ids sit beside the record, never inside it; absent when
       // telemetry is off (March has no ContextManager to supply them).
       request.log.info(
