@@ -153,7 +153,34 @@ describe("summarizeReviews", () => {
         { state: "APPROVED", submittedAt: "2026-05-20T02:00:00Z", author: { login: "copilot", __typename: "Bot" } },
         { state: "APPROVED", submittedAt: "2026-05-20T03:00:00Z", author: { login: "dependabot[bot]", __typename: "User" } },
       ]),
-    ).toEqual({ human_approval_count: 1, changes_requested_count: 0 });
+    ).toEqual({ human_approval_count: 1, changes_requested_count: 0, bot_approval_count: 2 });
+  });
+
+  it("counts bot approvals separately, never as human ones", () => {
+    expect(
+      summarizeReviews([
+        { state: "APPROVED", submittedAt: "2026-05-20T01:00:00Z", author: { login: "copilot-pull-request-reviewer", __typename: "Bot" } },
+      ]),
+    ).toEqual({ human_approval_count: 0, changes_requested_count: 0, bot_approval_count: 1 });
+  });
+
+  it("a dismissed or superseded bot approval does not count; a later bot comment does not hide one", () => {
+    const bot = { login: "copilot-pull-request-reviewer", __typename: "Bot" };
+    expect(
+      summarizeReviews([{ state: "DISMISSED", submittedAt: "2026-05-20T01:00:00Z", author: bot }]).bot_approval_count,
+    ).toBe(0);
+    expect(
+      summarizeReviews([
+        { state: "APPROVED", submittedAt: "2026-05-20T01:00:00Z", author: bot },
+        { state: "CHANGES_REQUESTED", submittedAt: "2026-05-20T02:00:00Z", author: bot },
+      ]),
+    ).toEqual({ human_approval_count: 0, changes_requested_count: 0, bot_approval_count: 0 });
+    expect(
+      summarizeReviews([
+        { state: "APPROVED", submittedAt: "2026-05-20T01:00:00Z", author: bot },
+        { state: "COMMENTED", submittedAt: "2026-05-20T02:00:00Z", author: bot },
+      ]).bot_approval_count,
+    ).toBe(1);
   });
 
   it("uses each human's latest non-COMMENTED review (approval supersedes earlier CR)", () => {
@@ -163,7 +190,7 @@ describe("summarizeReviews", () => {
         { state: "COMMENTED", submittedAt: "2026-05-20T02:00:00Z", author: { login: "bob", __typename: "User" } },
         { state: "APPROVED", submittedAt: "2026-05-20T03:00:00Z", author: { login: "bob", __typename: "User" } },
       ]),
-    ).toEqual({ human_approval_count: 1, changes_requested_count: 0 });
+    ).toEqual({ human_approval_count: 1, changes_requested_count: 0, bot_approval_count: 0 });
   });
 
   it("counts an outstanding changes-requested", () => {
@@ -172,12 +199,12 @@ describe("summarizeReviews", () => {
         { state: "APPROVED", submittedAt: "2026-05-20T01:00:00Z", author: { login: "alice", __typename: "User" } },
         { state: "CHANGES_REQUESTED", submittedAt: "2026-05-20T02:00:00Z", author: { login: "bob", __typename: "User" } },
       ]),
-    ).toEqual({ human_approval_count: 1, changes_requested_count: 1 });
+    ).toEqual({ human_approval_count: 1, changes_requested_count: 1, bot_approval_count: 0 });
   });
 
   it("handles empty / non-array input", () => {
-    expect(summarizeReviews([])).toEqual({ human_approval_count: 0, changes_requested_count: 0 });
-    expect(summarizeReviews(undefined)).toEqual({ human_approval_count: 0, changes_requested_count: 0 });
+    expect(summarizeReviews([])).toEqual({ human_approval_count: 0, changes_requested_count: 0, bot_approval_count: 0 });
+    expect(summarizeReviews(undefined)).toEqual({ human_approval_count: 0, changes_requested_count: 0, bot_approval_count: 0 });
   });
 });
 

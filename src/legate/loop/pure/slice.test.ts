@@ -267,6 +267,12 @@ describe("slice pure helpers", () => {
     // A non-cut verb still requires approval under the all-required default.
     const forgeSlice = { stage: "pr-open", branch: "feature/smithy/forge/x" };
     expect(mergeReadiness("x-forge", forgeSlice, clearPr, undefined)).toBe("waiting-approval");
+    // A bot approval only clears the gate when the policy accepts bot approvals.
+    const botApproved = { ...clearPr, bot_approval_count: 1 };
+    expect(mergeReadiness("x-forge", forgeSlice, botApproved, undefined)).toBe("waiting-approval");
+    const acceptBots = { byTaskType: { forge: { botApproval: true } } } as any;
+    expect(mergeReadiness("x-forge", forgeSlice, botApproved, acceptBots)).toBe("ready");
+    expect(mergeReadiness("x-forge", forgeSlice, clearPr, acceptBots)).toBe("waiting-approval");
     // A profile can re-tighten cut explicitly → back to waiting-approval.
     const tighten = { byTaskType: { cut: { approval: true } } } as any;
     expect(mergeReadiness("x-cut", slice, clearPr, tighten)).toBe("waiting-approval");

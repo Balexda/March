@@ -410,6 +410,29 @@ describe("babysit auto-merge gate", () => {
     expect(kindsOf(assess(state))).toEqual(["pr-snapshot"]);
   });
 
+  it("does NOT auto-merge on a bot approval alone under the default policy", () => {
+    const state = allClearState({ human_approval_count: 0, bot_approval_count: 1 });
+    expect(kindsOf(assess(state))).toEqual(["pr-snapshot"]);
+  });
+
+  it("auto-merges on a bot approval when the policy accepts bot approvals", () => {
+    const state = allClearState({ human_approval_count: 0, bot_approval_count: 1 });
+    state.mergePolicy = { defaults: { botApproval: true } };
+    expect(kindsOf(assess(state))).toEqual(["pr-snapshot", "pr-auto-merge"]);
+  });
+
+  it("accepting bot approvals still needs one: zero approvals does NOT auto-merge", () => {
+    const state = allClearState({ human_approval_count: 0, bot_approval_count: 0 });
+    state.mergePolicy = { defaults: { botApproval: true } };
+    expect(kindsOf(assess(state))).toEqual(["pr-snapshot"]);
+  });
+
+  it("a human changes-requested still blocks a bot-approved PR", () => {
+    const state = allClearState({ human_approval_count: 0, bot_approval_count: 1, changes_requested_count: 1 });
+    state.mergePolicy = { defaults: { botApproval: true } };
+    expect(kindsOf(assess(state))).toEqual(["pr-snapshot"]);
+  });
+
   it("does NOT auto-merge when an approval exists but a change is requested (default)", () => {
     const state = allClearState({ human_approval_count: 1, changes_requested_count: 1 });
     expect(kindsOf(assess(state))).toEqual(["pr-snapshot"]);

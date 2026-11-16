@@ -2,7 +2,7 @@ import type { HandlerContext, HandlerResult, LoopState } from "../state/types.js
 import { emptyHandlerResult } from "../state/types.js";
 import { prNumber, workerBySessionId } from "../pure/session.js";
 import { hashText } from "../pure/hash.js";
-import { resolveMergeRequirements, type MergePolicy } from "../../../herald/profiles/merge-policy.js";
+import { approvalSatisfied, resolveMergeRequirements, type MergePolicy } from "../../../herald/profiles/merge-policy.js";
 import { mergeBlocker, mergeReadiness, taskTypeForSlice } from "../pure/slice.js";
 import { parseMs } from "../pure/self-heal.js";
 import {
@@ -686,7 +686,7 @@ function evaluatePr(
     // type by the profile's merge policy (e.g. cut drops the approval gate). An
     // unknown verb / no policy resolves to all-required.
     const req = resolveMergeRequirements(state.mergePolicy, taskTypeForSlice(sliceId, slice));
-    const approvalOk = !req.approval || Number(pr.human_approval_count ?? 0) >= 1;
+    const approvalOk = approvalSatisfied(req, pr);
     const crOk = !req.changesRequested || Number(pr.changes_requested_count ?? 0) === 0;
     // Only attempt the merge when GitHub itself says the button is available
     // (mergeStateStatus == clean) — this enforces the repo's own branch-protection
@@ -700,7 +700,13 @@ function evaluatePr(
       const key = actionKey(
         "pr-auto-merge",
         pr,
-        [pr.head_sha, pr.merge_state_status, pr.human_approval_count ?? "", pr.changes_requested_count ?? ""].join("|"),
+        [
+          pr.head_sha,
+          pr.merge_state_status,
+          pr.human_approval_count ?? "",
+          pr.changes_requested_count ?? "",
+          pr.bot_approval_count ?? "",
+        ].join("|"),
       );
       if (!alreadyDispatched(slice, key)) {
         out.push({ kind: "pr-auto-merge", sliceId, sessionId, pr, key });

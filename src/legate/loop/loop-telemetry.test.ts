@@ -61,6 +61,18 @@ describe("emitActionEventSpan", () => {
     expect(emit).toHaveBeenCalledTimes(1);
     expect(emit).toHaveBeenCalledWith(expect.objectContaining({ name: "legate.ghost-cleanup", error: true }));
   });
+
+  it("emits a per-PR span for a Dependabot auto-merge and an errored one on failure", () => {
+    const emit = vi.fn();
+    emitActionEventSpan({ kind: "dependency_merge", processor: "smithy-loop", action: "dependency-auto-merge", pr_number: 606 }, emit);
+    expect(emit).toHaveBeenLastCalledWith(
+      expect.objectContaining({ name: "legate.dependency-merge", traceKey: "smithy-loop-dependency-pr-606", root: true, error: false }),
+    );
+    emitActionEventSpan({ kind: "dependency_merge_failure", processor: "smithy-loop", action: "dependency-auto-merge-failed", pr_number: 609 }, emit);
+    expect(emit).toHaveBeenLastCalledWith(expect.objectContaining({ traceKey: "smithy-loop-dependency-pr-609", error: true }));
+    emitActionEventSpan({ kind: "dependency_merge_failure", processor: "smithy-loop", action: "dependency-merge-list-failed" }, emit);
+    expect(emit).toHaveBeenLastCalledWith(expect.objectContaining({ traceKey: "smithy-loop-dependency-merge", error: true }));
+  });
 });
 
 describe("emitActionEventLog", () => {

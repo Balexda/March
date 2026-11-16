@@ -7,13 +7,14 @@ import * as babysit from "./handlers/babysit.js";
 import * as recovery from "./handlers/recovery.js";
 import * as adoptFromFold from "./handlers/adopt-from-fold.js";
 import * as dispatch from "./handlers/dispatch.js";
+import * as dependencyMerge from "./handlers/dependency-merge.js";
 import { countStrandedSlices, dispatchableReady, summarizeSlicesByStage, type SpawnBudget } from "./pure/slice.js";
 import { isWorkerSession } from "./pure/session.js";
 
 /**
  * Stage 2 orchestration. runTick senses once, then runs the handlers in the fixed
  * order cleanup → ghost-cleanup → castra-recover → relaunch → babysit → recovery →
- * adopt-from-fold → dispatch,
+ * adopt-from-fold → dispatch → dependency-merge,
  * each as pure assess() + effecting apply(), threading the SAME mutating {@link LoopState}
  * through all of them. Because apply() mutates the snapshot in place (drops a
  * cleaned session, archives a slice), a later handler's assess() sees the current
@@ -29,6 +30,8 @@ export interface CoordinatorDeps {
   babysit: babysit.BabysitDeps;
   dispatch: dispatch.DispatchDeps;
   relaunch?: relaunch.RelaunchDeps;
+  /** Seams for the opt-in Dependabot auto-merge. Omitted → the handler is inert. */
+  dependencyMerge?: dependencyMerge.DependencyMergeDeps;
   /** The GLOBAL concurrent-spawn budget (#313), shared across every profile this
    *  tick. Attached to the handler context so dispatch caps fresh launches against
    *  it. Omitted → dispatch is uncapped (pre-#313 behavior). */
@@ -47,6 +50,8 @@ export interface CoordinatorOutput {
     recovery: HandlerResult;
     adoptFromFold: HandlerResult;
     dispatch: HandlerResult;
+    /** Opt-in Dependabot auto-merge; absent in outputs built without it. */
+    dependencyMerge?: HandlerResult;
   };
 }
 
@@ -157,6 +162,9 @@ export async function runTick(deps: CoordinatorDeps): Promise<CoordinatorOutput>
     // recoverableEscalations no longer re-dispatches it (no collision needed).
     adoptFromFold: await adoptFromFold.apply(adoptFromFold.assess(state), ctx, state),
     dispatch: await dispatch.apply(dispatch.assess(state), ctx, state, deps.dispatch),
+    // Last: independent of every slice, so it never delays slice work, and a
+    // failure here cannot affect the handlers above.
+    dependencyMerge: await dependencyMerge.apply(ctx, state, deps.dependencyMerge),
   };
 
   return { state, tick: buildTickResult(state, results, deps.spawnBudget), results };
