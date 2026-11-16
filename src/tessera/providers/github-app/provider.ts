@@ -7,7 +7,16 @@
  *   a token without a commit identity is refused with `provider_unavailable`.
  * - Installation Binding: the configured installation id when set, else
  *   resolved per repository owner. Only successful lookups are remembered; a
- *   binding is dropped when a mint against it reports not-found.
+ *   binding is dropped when a mint against it reports not-found. Owners are
+ *   compared lower-cased (GitHub logins are case-insensitive).
+ * - Override owner check: with the configured installation id, the login of
+ *   the account that installation belongs to is read from GitHub once
+ *   (`GET /app/installations/{id}`; remembered only on success, concurrent
+ *   first lookups share one call). A request whose owner is not that account
+ *   is refused with `repo_not_installed` before any mint, so the override can
+ *   never mint a token for one owner's repository under another owner's name.
+ *   A failed lookup follows the usual rules (an outage is
+ *   `provider_unavailable` and the provider goes `degraded`).
  * - Downscoping: every mint names exactly the one requested repository and
  *   exactly the access profile's permissions ({@link ACCESS_PROFILES}); an
  *   unknown access level is refused before any GitHub call. There is no retry
@@ -17,8 +26,9 @@
  *   until restart in this slice: once invalid, no later failure or success,
  *   including one from a request already in flight, changes `state` or
  *   `last_error`). `last_error` carries the error code only.
- * - Token cache ({@link createTokenCache}): keyed by (installation id, sorted
- *   repositories, access level). A request with strictly more than ten minutes
+ * - Token cache ({@link createTokenCache}): keyed by (installation id, the
+ *   repository as lower-cased `owner/name`, access level); the mint request
+ *   still names just the repository. A request with strictly more than ten minutes
  *   of life left on its entry is served from the cache (`cache: "hit"`) with
  *   no GitHub call; otherwise a new token is minted, stored and returned
  *   (`cache: "miss"`). `refresh: true` evicts the entry first. Failed mints are
@@ -40,14 +50,17 @@
  *   (`cache: "hit"`) and the provider goes `degraded` with `last_error`
  *   `provider_unavailable`; every joiner of that shared mint gets it too. Only
  *   `provider_unavailable` is masked: `repo_not_installed`,
- *   `credential_invalid` and `mint_failed` always propagate. An expired token
+ *   `credential_invalid` and `mint_failed` always propagate. A re-mint that
+ *   fails with `repo_not_installed` also evicts that key's entry, so a later
+ *   outage cannot serve a token GitHub no longer backs. An expired token
  *   is never served, nothing is served once the provider is `invalid`, and a
  *   `refresh: true` request never receives a cached token (it evicted the
  *   entry, or it joined a mint and asked for a new token), so it gets
  *   `provider_unavailable`. The key must be known without GitHub: the bot
  *   identity is never forgotten once derived, and the installation id comes
- *   from the override or a remembered binding; when the binding has to be
- *   looked up and that lookup fails, the error propagates. A token is never
+ *   from the override (whose account must already be verified) or a remembered
+ *   binding; when the binding or the override account has to be looked up and
+ *   that lookup fails, the error propagates. A token is never
  *   served for a different key.
  *
  * Nothing in this module logs, and nothing is written to disk.
@@ -149,10 +162,14 @@ export function createGitHubAppProvider({
   let signer: AppAssertionSigner | null = null;
   let identity: BotIdentity | null = null;
   let identityLookup: Promise<BotIdentity> | null = null;
-  /** Installation Binding per owner; successful lookups only. */
+  /** Installation Binding per lower-cased owner; successful lookups only. */
   const bindings = new Map<string, number>();
-  /** In-flight owner installation lookups, one per owner. */
+  /** In-flight owner installation lookups, one per lower-cased owner. */
   const pendingLookups = new Map<string, Promise<number>>();
+  /** Lower-cased login of the override installation's account; successful lookups only. */
+  let overrideAccount: string | null = null;
+  /** In-flight override account lookup (at most one). */
+  const pendingAccountLookup = new Map<string, Promise<string>>();
   /** In-flight mints, one per cache key ({@link tokenCacheKeyId}). */
   const pendingMints = new Map<string, Promise<MintOutcome>>();
   const cache = createTokenCache(now === undefined ? {} : { now });
@@ -259,11 +276,30 @@ export function createGitHubAppProvider({
     return promise;
   }
 
+  /** The installation id for a lower-cased `owner`; see the module doc. */
   async function resolveInstallation(owner: string): Promise<number> {
-    if (config.installationId !== undefined) return config.installationId;
+    const overrideId = config.installationId;
+    if (overrideId !== undefined) {
+      const account = overrideAccount ?? (await shared(pendingAccountLookup, "override", () => lookupAccount(overrideId)));
+      if (account !== owner) {
+        throw new RepoNotInstalledError("The GitHub App is not installed on the requested repository.");
+      }
+      return overrideId;
+    }
     const known = bindings.get(owner);
     if (known !== undefined) return known;
     return shared(pendingLookups, owner, () => lookupInstallation(owner));
+  }
+
+  async function lookupAccount(installationId: number): Promise<string> {
+    try {
+      const installation = await client.getInstallation(assertion(), installationId);
+      overrideAccount = installation.account.toLowerCase();
+      markOk();
+      return overrideAccount;
+    } catch (error) {
+      return markFailure(error);
+    }
   }
 
   async function lookupInstallation(owner: string): Promise<number> {
@@ -290,7 +326,8 @@ export function createGitHubAppProvider({
     },
 
     async issue(req: ProviderIssueRequest): Promise<ProviderIssueResult> {
-      const { owner, name } = splitRepo(req.repo);
+      const { owner: rawOwner, name } = splitRepo(req.repo);
+      const owner = rawOwner.toLowerCase();
       const permissions = ACCESS_PROFILES[req.access] as GitHubPermissions | undefined;
       if (permissions === undefined) {
         throw new TesseraValidationError('access must be "read" or "write".');
@@ -307,7 +344,7 @@ export function createGitHubAppProvider({
 
       const installationId = await resolveInstallation(owner);
       if (invalidError !== null) throw invalidError;
-      const key: TokenCacheKey = { installationId, repos: [name], access: req.access };
+      const key: TokenCacheKey = { installationId, repos: [`${owner}/${name.toLowerCase()}`], access: req.access };
       const keyId = tokenCacheKeyId(key);
       const result = (token: CachedInstallationToken, cacheOutcome: "hit" | "miss"): ProviderIssueResult => ({
         token: token.token,
@@ -332,8 +369,10 @@ export function createGitHubAppProvider({
           if (invalidError === null) cache.set(key, token);
           return { kind: "minted", token };
         } catch (error) {
-          if (error instanceof RepoNotInstalledError && bindings.get(owner) === installationId) {
-            bindings.delete(owner);
+          if (error instanceof RepoNotInstalledError) {
+            // GitHub says this installation no longer covers the repository.
+            cache.evict(key);
+            if (bindings.get(owner) === installationId) bindings.delete(owner);
           }
           recordFailure(error);
           // Outage with a live entry for this key: serve it (see the module doc).

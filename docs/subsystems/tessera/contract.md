@@ -126,11 +126,18 @@ GitHub REST API.
   the mint, the provider does not retry with a broader scope, more
   repositories, or another identity.
 - **Installation.** When `TESSERA_GITHUB_INSTALLATION_ID` is set, every mint
-  uses that installation. Otherwise the provider looks up the App's
-  installation on the repository owner (`GET /orgs/{owner}/installation`, then
+  uses that installation, and only for repositories of the account it belongs
+  to. The provider reads that account's login once
+  (`GET /app/installations/{id}`) and refuses any request whose owner is a
+  different account with `repo_not_installed`, before any mint. Only a
+  successful lookup is remembered; concurrent first lookups share one call. A
+  failed lookup is returned as its error (an outage is `provider_unavailable`).
+  When the setting is unset, the provider looks up the App's installation on
+  the repository owner (`GET /orgs/{owner}/installation`, then
   `GET /users/{owner}/installation`) and remembers the id per owner. Only a
   successful lookup is remembered. A remembered id is forgotten when a mint
-  against it reports not-found.
+  against it reports not-found. Owners are compared without regard to case,
+  as GitHub logins are case-insensitive.
 - **Bot identity.** The bot login and commit identity come from GitHub
   (`GET /app` for the slug, `GET /users/<slug>[bot]` for the user id). No
   setting can change them. Until the identity is known, the provider issues no
@@ -145,8 +152,10 @@ GitHub REST API.
   outage at startup leaves the provider `degraded` and the service still
   serves. The startup log reports the provider state.
 - **Token cache.** Minted tokens are held in memory only (never on disk,
-  never logged), keyed by (installation id, sorted repository list, access
-  level), so different repositories or access levels never share an entry.
+  never logged), keyed by (installation id, repository as `owner/name`
+  lower-cased, access level), so different owners, repositories or access
+  levels never share an entry, and `Acme/Widgets` and `acme/widgets` do. The
+  mint request to GitHub still names just the repository.
   A request whose entry has strictly more than ten minutes of life left
   (`REMINT_THRESHOLD_MS`) is served from the cache with no GitHub call
   (`cache: "hit"`). Otherwise the provider mints a new token, stores it and
@@ -162,11 +171,14 @@ GitHub REST API.
   `last_error` `provider_unavailable`. Every request sharing that failed mint
   receives the cached token. No other failure is masked: `repo_not_installed`,
   `credential_invalid` and `mint_failed` are returned even when a cached token
-  exists. With no entry, or an expired one, `provider_unavailable` is
-  returned. A `refresh: true` request never receives a cached token. The
-  key must be known without GitHub: from `TESSERA_GITHUB_INSTALLATION_ID` or a
-  remembered installation id. If the installation has to be looked up and the
-  lookup fails, the error is returned. The bot identity, once known, is kept
+  exists. A re-mint that fails with `repo_not_installed` also evicts that
+  key's entry, so a later outage cannot serve it. With no entry, or an expired
+  one, `provider_unavailable` is returned. A `refresh: true` request never
+  receives a cached token. The key must be known without GitHub: from
+  `TESSERA_GITHUB_INSTALLATION_ID` once its account has been verified against
+  the owner, or from a remembered installation id. If the installation or the
+  override's account has to be looked up and the lookup fails, the error is
+  returned. The bot identity, once known, is kept
   until restart, so an identity lookup never blocks a cached token.
 - **Mint coalescing.** At most one mint is in flight per cache key:
   concurrent requests for the same key share it and receive the same token
@@ -224,7 +236,7 @@ prints the group help and exits with the usage status.
 | `MARCH_TESSERA_LOG_DIR` | server | Directory for the log file `tessera.jsonl`. Default `~/.march/logs`; the container uses `/march/logs` on the `march-tessera-logs` volume. |
 | `TESSERA_GITHUB_APP_ID` | server | GitHub App id. Optional; with the key file, it enables the `github-app` provider. |
 | `TESSERA_GITHUB_APP_KEY_FILE` | server | Path to the App private key file (PEM). Optional; counts as missing when the file does not exist. |
-| `TESSERA_GITHUB_INSTALLATION_ID` | server | Pinned installation id. Optional; must be a positive integer when set. When unset, the installation is looked up per repository owner. |
+| `TESSERA_GITHUB_INSTALLATION_ID` | server | Pinned installation id. Optional; must be a positive integer when set. When set, only repositories of the account that installation belongs to are served. When unset, the installation is looked up per repository owner. |
 | `MARCH_OTEL` | server | Enables telemetry export; a no-op when off. The compose file defaults it to `1`. |
 
 When the app id or key file is missing, the service still starts, logs a
@@ -284,9 +296,13 @@ or `GITHUB_TOKEN`.
 - `/healthz` reports process health only and returns `200` whether or not any
   provider is configured.
 - Cached `app` tokens live in memory only: never on disk, never logged, and
-  gone on restart. The cache key is (installation id, sorted repository list,
-  access level); a cached token is only ever served for its own key, so
-  different repositories, access levels or installations never share a token.
+  gone on restart. The cache key is (installation id, repository as
+  `owner/name` lower-cased, access level); a cached token is only ever served
+  for its own key, so different owners, repositories, access levels or
+  installations never share a token.
+- With `TESSERA_GITHUB_INSTALLATION_ID` set, a token is only minted for a
+  repository whose owner is the account that installation belongs to; any
+  other owner gets `repo_not_installed` with no mint.
 - A cached token is served without a GitHub call only while strictly more
   than ten minutes (`REMINT_THRESHOLD_MS`) of its life remain; otherwise it is
   re-minted. `refresh: true` evicts the entry before issuing, unless a mint
@@ -300,7 +316,8 @@ or `GITHUB_TOKEN`.
   cached token is served once the provider is `invalid`.
 - The cache is cleared as a whole when the provider goes `invalid` and by
   `clearCache()` (the key-reload trigger). Otherwise entries leave only by
-  expiry, `refresh` eviction, or replacement by a newer mint.
+  expiry, `refresh` eviction, eviction on a `repo_not_installed` re-mint, or
+  replacement by a newer mint.
 - Only Fastify framework rejections (an `FST_*` error code with a `4xx` status)
   become `400 invalid_request`. Any other unexpected error becomes
   `500 internal`, even if it carries a `4xx` status.
@@ -316,7 +333,7 @@ Every non-2xx response has the body
 | `invalid_request` | `400` | Fastify rejects the request before the route runs (an `FST_*` error with a `4xx` status: for example invalid JSON, an empty JSON body, an unsupported content type, or an oversized body). The message is always `Malformed request body.` and never echoes the body. |
 | `invalid_request` | `404` | No route matches the method and path. The message is fixed and does not echo the request URL. |
 | `provider_unconfigured` | `503` | No provider is registered for the requested identity: an `app` request when the GitHub App settings are not configured, and every `user` request. |
-| `repo_not_installed` | `422` | The App is not installed on the repository owner (both installation lookups return `404`; no mint is attempted), or GitHub refuses the mint with `404` or `422` because the installation does not cover the repository. |
+| `repo_not_installed` | `422` | The App is not installed on the repository owner (both installation lookups return `404`; no mint is attempted); with `TESSERA_GITHUB_INSTALLATION_ID` set, the owner is not the account that installation belongs to, or the installation returns `404` (no mint is attempted); or GitHub refuses the mint with `404` or `422` because the installation does not cover the repository (the cached entry for that key is evicted). |
 | `credential_invalid` | `503` | GitHub returns `401` to the app assertion, or the key file cannot be read or parsed. The provider becomes `invalid` until restart. No `Retry-After` header. |
 | `provider_unavailable` | `503` | A GitHub call times out (5 seconds), cannot connect, or returns `5xx`; or the bot identity is not yet known. The provider becomes `degraded`. The response carries a `Retry-After` header in seconds: GitHub's numeric `Retry-After` on a `5xx` when present, else `30`. When an unexpired cached token exists for the request's key (and the request is not a `refresh`), that token is served with `200` instead and no error is returned. |
 | `mint_failed` | `502` | Any other GitHub failure: another `4xx` (for example `403`, including rate limits), or a response that cannot be parsed. |

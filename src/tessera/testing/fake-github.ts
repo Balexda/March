@@ -6,6 +6,7 @@
  * Served endpoints (mirroring {@link GitHubClient}):
  * - `GET /app`
  * - `GET /orgs/{owner}/installation` (404 for `User` owners) and `GET /users/{owner}/installation`
+ * - `GET /app/installations/{id}` (404 unknown installation; reported under the `installation` endpoint)
  * - `POST /app/installations/{id}/access_tokens` (404 unknown installation, 422 repo not covered)
  * - `GET /users/{login}` (the bot user, unauthenticated)
  *
@@ -13,6 +14,9 @@
  * header was present — never the header value), counts mints, and supports
  * failure injection per endpoint: a status code, a hang, or refusing
  * connections entirely via {@link FakeGitHub.refuseConnections}.
+ *
+ * Owner logins and repository names match case-insensitively, as on GitHub;
+ * the account login is reported as the owner was first configured.
  */
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -51,7 +55,7 @@ export interface FakeGitHubOptions {
   readonly app?: { readonly id: number; readonly slug: string; readonly name?: string };
   /** Bot user id; login is `${slug}[bot]`. */
   readonly botUserId?: number;
-  /** Installations keyed by owner login. Owners absent here are uninstalled. */
+  /** Installations keyed by owner login (case-insensitive). Owners absent here are uninstalled. */
   readonly installations?: Readonly<Record<string, FakeInstallation>>;
   /** Lifetime of minted tokens in ms. Default one hour. */
   readonly tokenTtlMs?: number;
@@ -129,7 +133,10 @@ function readBody(req: IncomingMessage): Promise<string> {
 export async function startFakeGitHub(options: FakeGitHubOptions = {}): Promise<FakeGitHub> {
   const app = { id: 1, slug: "march-bot", name: "March Bot", ...options.app };
   const botUser = { id: options.botUserId ?? 123456, login: `${app.slug}[bot]` };
-  const installations = new Map<string, FakeInstallation>(Object.entries(options.installations ?? {}));
+  /** Keyed by lower-cased owner login; `owner` keeps the configured spelling. */
+  const installations = new Map<string, { readonly owner: string; readonly inst: FakeInstallation }>(
+    Object.entries(options.installations ?? {}).map(([owner, inst]) => [owner.toLowerCase(), { owner, inst }]),
+  );
   const now = options.now ?? Date.now;
   const failures = new Map<FakeGitHubEndpoint, FakeGitHubFailure>();
   const calls: FakeGitHubCall[] = [];
@@ -140,23 +147,33 @@ export async function startFakeGitHub(options: FakeGitHubOptions = {}): Promise<
   const json = (status: number, body: unknown) => ({ status, body });
   const notFound = () => json(404, { message: "Not Found" });
 
+  const installationBody = (owner: string, inst: FakeInstallation) =>
+    json(200, { id: inst.id, account: { login: owner, type: inst.type ?? "Organization" } });
+
   function installationFor(owner: string, viaOrg: boolean) {
-    const inst = installations.get(owner);
-    if (inst === undefined || (viaOrg && inst.type === "User")) return notFound();
-    return json(200, { id: inst.id, account: { login: owner, type: inst.type ?? "Organization" } });
+    const found = installations.get(owner.toLowerCase());
+    if (found === undefined || (viaOrg && found.inst.type === "User")) return notFound();
+    return installationBody(found.owner, found.inst);
+  }
+
+  const byId = (installationId: number) => [...installations.values()].find(({ inst }) => inst.id === installationId);
+
+  function installationById(installationId: number) {
+    const found = byId(installationId);
+    return found === undefined ? notFound() : installationBody(found.owner, found.inst);
   }
 
   function mint(installationId: number, body: unknown) {
-    const entry = [...installations.entries()].find(([, inst]) => inst.id === installationId);
+    const entry = byId(installationId);
     if (entry === undefined) return notFound();
-    const [owner, inst] = entry;
+    const { owner, inst } = entry;
     const req = (typeof body === "object" && body !== null ? body : {}) as {
       repositories?: unknown;
       permissions?: unknown;
     };
     const repos = Array.isArray(req.repositories) ? (req.repositories as unknown[]) : [];
-    const covered = inst.repos ?? "all";
-    if (covered !== "all" && repos.some((repo) => typeof repo !== "string" || !covered.includes(repo))) {
+    const covered = inst.repos === undefined || inst.repos === "all" ? "all" : inst.repos.map((r) => r.toLowerCase());
+    if (covered !== "all" && repos.some((repo) => typeof repo !== "string" || !covered.includes(repo.toLowerCase()))) {
       return json(422, { message: "There is at least one repository that is not accessible to the installation." });
     }
     issued += 1;
@@ -178,6 +195,12 @@ export async function startFakeGitHub(options: FakeGitHubOptions = {}): Promise<
     }
     if (method === "GET" && segments.length === 3 && (a === "orgs" || a === "users") && c === "installation") {
       return { endpoint: "installation", handle: () => installationFor(b ?? "", a === "orgs") };
+    }
+    if (method === "GET" && segments.length === 3 && a === "app" && b === "installations") {
+      return {
+        endpoint: "installation",
+        handle: () => (/^\d+$/.test(c ?? "") ? installationById(Number(c)) : notFound()),
+      };
     }
     if (method === "POST" && segments.length === 4 && a === "app" && b === "installations" && d === "access_tokens") {
       return {
@@ -269,10 +292,10 @@ export async function startFakeGitHub(options: FakeGitHubOptions = {}): Promise<
       tokenExpiry = expiry;
     },
     setInstallation: (owner, installation) => {
-      installations.set(owner, installation);
+      installations.set(owner.toLowerCase(), { owner, inst: installation });
     },
     uninstallOwner: (owner) => {
-      installations.delete(owner);
+      installations.delete(owner.toLowerCase());
     },
     fail: (endpoint, failure) => {
       if (failure === null) failures.delete(endpoint);

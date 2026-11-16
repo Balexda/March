@@ -246,12 +246,69 @@ describe("github-app provider minting", () => {
     ]);
   });
 
-  it("uses the configured installation override and skips the lookup", async () => {
+  it("uses the configured installation override: verifies its account once, skips the owner lookup", async () => {
     const { fake, provider } = await setup({ config: { installationId: 7 } });
     await provider.start();
     fake.reset();
     await provider.issue({ repo: "acme/widgets", access: "read" });
-    expect(fake.calls.map((c) => c.path)).toEqual(["/app/installations/7/access_tokens"]);
+    await provider.issue({ repo: "Acme/gadgets", access: "read" });
+    expect(fake.calls.map((c) => c.path)).toEqual([
+      "/app/installations/7",
+      "/app/installations/7/access_tokens",
+      "/app/installations/7/access_tokens",
+    ]);
+  });
+
+  it("refuses an owner that is not the override installation's account, before any mint", async () => {
+    const { fake, provider } = await setup({ config: { installationId: 7 } });
+    await provider.start();
+    await expect(provider.issue({ repo: "octocat/widgets", access: "read" })).rejects.toBeInstanceOf(
+      RepoNotInstalledError,
+    );
+    expect(fake.mintCount()).toBe(0);
+    await expect(provider.issue({ repo: "octocat/widgets", access: "read" })).rejects.toBeInstanceOf(
+      RepoNotInstalledError,
+    );
+    expect(fake.mintCount()).toBe(0);
+    expect(endpoints(fake).filter((e) => e === "installation")).toHaveLength(1);
+    expect(provider.status()).toMatchObject({ state: "ok", last_error: null });
+  });
+
+  it("refuses with repo_not_installed when the override installation does not exist", async () => {
+    const { fake, provider } = await setup({ config: { installationId: 99 } });
+    await provider.start();
+    await expect(provider.issue({ repo: "acme/widgets", access: "read" })).rejects.toBeInstanceOf(
+      RepoNotInstalledError,
+    );
+    expect(fake.mintCount()).toBe(0);
+  });
+
+  it("returns provider_unavailable when the override account lookup fails, and does not remember the failure", async () => {
+    const { fake, provider } = await setup({ config: { installationId: 7 } });
+    await provider.start();
+    fake.fail("installation", { status: 503 });
+    await expect(provider.issue({ repo: "acme/widgets", access: "read" })).rejects.toBeInstanceOf(
+      ProviderUnavailableError,
+    );
+    expect(fake.mintCount()).toBe(0);
+    expect(provider.status()).toMatchObject({ state: "degraded", last_error: "provider_unavailable" });
+
+    fake.fail("installation", null);
+    expect((await provider.issue({ repo: "acme/widgets", access: "read" })).cache).toBe("miss");
+    expect(provider.status()).toMatchObject({ state: "ok", last_error: null });
+  });
+
+  it("shares one override account lookup among concurrent requests", async () => {
+    const { fake, provider } = await setup({ config: { installationId: 7 } });
+    await provider.start();
+    fake.reset();
+    await Promise.all([
+      provider.issue({ repo: "acme/widgets", access: "read" }),
+      provider.issue({ repo: "acme/gadgets", access: "read" }),
+      provider.issue({ repo: "acme/widgets", access: "write" }),
+    ]);
+    expect(endpoints(fake).filter((e) => e === "installation")).toHaveLength(1);
+    expect(fake.mintCount()).toBe(3);
   });
 
   it("takes the bot identity only from GitHub, never from configuration", async () => {
@@ -565,7 +622,29 @@ describe("github-app provider outage fallback", () => {
     fake.setInstallation("acme", { id: 7, repos: ["widgets", "gadgets"] });
     fake.fail("installation", { status: 503 });
     await expect(provider.issue(READ)).rejects.toBeInstanceOf(ProviderUnavailableError);
-    expect(provider.cacheEntries()).toBe(1); // the entry exists, but its key cannot be determined
+  });
+
+  for (const config of [{}, { installationId: 7 }]) {
+    it(`evicts the entry when a re-mint reports repo_not_installed, so a later outage cannot serve it (${JSON.stringify(config)})`, async () => {
+      const { fake, provider, advance } = await outage(config);
+      await provider.issue(READ);
+      await provider.issue({ repo: "acme/gadgets", access: "read" }); // other key
+      advance(55 * MINUTE); // stale, still unexpired
+      fake.setInstallation("acme", { id: 7, repos: ["gadgets"] }); // 422 on re-mint
+      await expect(provider.issue(READ)).rejects.toBeInstanceOf(RepoNotInstalledError);
+      expect(provider.cacheEntries()).toBe(1); // only the other key remains
+      fake.setInstallation("acme", { id: 7, repos: ["widgets", "gadgets"] });
+      fake.fail("token", { status: 502 });
+      await expect(provider.issue(READ)).rejects.toBeInstanceOf(ProviderUnavailableError);
+    });
+  }
+
+  it("returns provider_unavailable when the override account lookup fails with nothing cached", async () => {
+    const { fake, provider } = await outage({ installationId: 7 });
+    fake.fail("installation", { status: 502 });
+    await expect(provider.issue(READ)).rejects.toBeInstanceOf(ProviderUnavailableError);
+    expect(fake.mintCount()).toBe(0);
+    expect(provider.status()).toMatchObject({ state: "degraded", last_error: "provider_unavailable" });
   });
 
   it("never serves another key's token", async () => {
@@ -743,5 +822,138 @@ describe("github-app provider status lifecycle", () => {
     const text = JSON.stringify(provider.status());
     expect(text).not.toContain(result.token);
     expect(text).not.toContain("PRIVATE KEY");
+  });
+});
+
+describe("github-app provider owner scoping", () => {
+  const T0 = Date.parse("2026-11-15T12:00:00Z");
+  const MINUTE = 60 * 1000;
+
+  async function scoped(config: Partial<GitHubAppProviderConfig> = {}, timeoutMs = 300) {
+    let t = T0;
+    const now = () => t;
+    fake = await startFakeGitHub({
+      app: { id: 42, slug: "march-bot" },
+      botUserId: 123456,
+      installations: {
+        acme: { id: 7, repos: ["widgets", "gadgets"] },
+        other: { id: 8, repos: ["widgets", "gizmos"] },
+      },
+      publicKey,
+      now,
+      tokenTtlMs: 60 * MINUTE,
+    });
+    const provider = createGitHubAppProvider({
+      config: { configured: true, appId: "42", keyFile: KEY_FILE, installationId: undefined, ...config },
+      client: new GitHubClient({ baseUrl: fake.baseUrl, timeoutMs }),
+      now,
+      readFile: readKey,
+    });
+    await provider.start();
+    return { fake, provider, advance: (ms: number) => { t += ms; } };
+  }
+
+  const ACME = { repo: "acme/widgets", access: "read" } as const;
+  const OTHER = { repo: "other/widgets", access: "read" } as const;
+
+  async function waitForMints(f: FakeGitHub, count: number): Promise<void> {
+    const deadline = Date.now() + 2_000;
+    while (f.mintCount() < count && Date.now() < deadline) await new Promise((r) => setTimeout(r, 5));
+    expect(f.mintCount()).toBe(count);
+  }
+
+  describe("without the installation override", () => {
+    it("does not serve acme/widgets' token to other/widgets from the cache", async () => {
+      const { fake, provider } = await scoped();
+      const acme = await provider.issue(ACME);
+      const other = await provider.issue(OTHER);
+      expect(other.cache).toBe("miss");
+      expect(other.token).not.toBe(acme.token);
+      expect(fake.calls.filter((c) => c.endpoint === "token").map((c) => c.path)).toEqual([
+        "/app/installations/7/access_tokens",
+        "/app/installations/8/access_tokens",
+      ]);
+      expect(provider.cacheEntries()).toBe(2);
+    });
+
+    it("does not let other/widgets join acme/widgets' in-flight mint", async () => {
+      const { fake, provider } = await scoped();
+      await provider.issue({ repo: "acme/gadgets", access: "read" }); // remember bindings
+      await provider.issue({ repo: "other/gizmos", access: "read" });
+      fake.reset();
+      fake.fail("token", { hang: true });
+      const acme = provider.issue(ACME).catch((e: unknown) => e);
+      await waitForMints(fake, 1);
+      fake.fail("token", null);
+      const other = await provider.issue(OTHER);
+      expect(other.cache).toBe("miss");
+      expect(fake.mintCount()).toBe(2);
+      expect(await acme).toBeInstanceOf(ProviderUnavailableError);
+    });
+
+    it("does not serve acme/widgets' token to other/widgets during an outage", async () => {
+      const { fake, provider, advance } = await scoped();
+      await provider.issue(ACME);
+      await provider.issue({ repo: "other/gizmos", access: "read" }); // remember other's binding
+      advance(55 * MINUTE);
+      fake.fail("token", { status: 502 });
+      await expect(provider.issue(OTHER)).rejects.toBeInstanceOf(ProviderUnavailableError);
+    });
+
+    it("shares one entry between Acme/Widgets and acme/widgets", async () => {
+      const { fake, provider } = await scoped();
+      const first = await provider.issue({ repo: "Acme/Widgets", access: "read" });
+      fake.reset();
+      const second = await provider.issue(ACME);
+      expect(second).toEqual({ ...first, cache: "hit" });
+      expect(fake.calls).toHaveLength(0);
+      expect(provider.cacheEntries()).toBe(1);
+    });
+
+    it("sends just the repository name to GitHub", async () => {
+      const { fake, provider } = await scoped();
+      await provider.issue(OTHER);
+      expect(fake.calls.find((c) => c.endpoint === "token")?.body).toMatchObject({ repositories: ["widgets"] });
+    });
+  });
+
+  describe("with the installation override", () => {
+    it("does not serve acme/widgets' token to other/widgets from the cache", async () => {
+      const { fake, provider } = await scoped({ installationId: 7 });
+      await provider.issue(ACME);
+      await expect(provider.issue(OTHER)).rejects.toBeInstanceOf(RepoNotInstalledError);
+      expect(fake.mintCount()).toBe(1);
+    });
+
+    it("does not let other/widgets join acme/widgets' in-flight mint", async () => {
+      const { fake, provider } = await scoped({ installationId: 7 });
+      await provider.issue({ repo: "acme/gadgets", access: "read" }); // verify the account
+      fake.reset();
+      fake.fail("token", { hang: true });
+      const acme = provider.issue(ACME).catch((e: unknown) => e);
+      await waitForMints(fake, 1);
+      await expect(provider.issue(OTHER)).rejects.toBeInstanceOf(RepoNotInstalledError);
+      expect(fake.mintCount()).toBe(1);
+      expect(await acme).toBeInstanceOf(ProviderUnavailableError);
+    });
+
+    it("does not serve acme/widgets' token to other/widgets during an outage", async () => {
+      const { fake, provider, advance } = await scoped({ installationId: 7 });
+      await provider.issue(ACME);
+      advance(55 * MINUTE);
+      fake.fail("token", { status: 502 });
+      await expect(provider.issue(OTHER)).rejects.toBeInstanceOf(RepoNotInstalledError);
+      expect(fake.mintCount()).toBe(1);
+    });
+
+    it("shares one entry between Acme/Widgets and acme/widgets", async () => {
+      const { fake, provider } = await scoped({ installationId: 7 });
+      const first = await provider.issue({ repo: "Acme/Widgets", access: "read" });
+      fake.reset();
+      const second = await provider.issue(ACME);
+      expect(second).toEqual({ ...first, cache: "hit" });
+      expect(fake.calls).toHaveLength(0);
+      expect(provider.cacheEntries()).toBe(1);
+    });
   });
 });

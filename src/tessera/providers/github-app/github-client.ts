@@ -1,9 +1,9 @@
 /**
  * Thin, bounded GitHub REST client for the github-app provider.
  *
- * Covers exactly the four calls the provider needs: the app lookup, the
- * installation lookup per repository owner, installation token creation and
- * the bot user lookup. Every call carries a timeout ({@link GITHUB_REQUEST_TIMEOUT_MS}
+ * Covers exactly the five calls the provider needs: the app lookup, the
+ * installation lookup per repository owner, the installation lookup by id,
+ * installation token creation and the bot user lookup. Every call carries a timeout ({@link GITHUB_REQUEST_TIMEOUT_MS}
  * by default, via `AbortSignal.timeout`), and every failure is turned into a
  * typed Tessera error by the one classifier, {@link classifyGitHubFailure}.
  *
@@ -56,6 +56,13 @@ export interface GitHubInstallation {
   readonly account: string | null;
 }
 
+/** An installation read by id (`GET /app/installations/{id}`). */
+export interface GitHubInstallationAccount {
+  readonly id: number;
+  /** Login of the account the installation belongs to. */
+  readonly account: string;
+}
+
 /** A minted installation token (`POST /app/installations/{id}/access_tokens`). */
 export interface InstallationToken {
   /** The credential. Never logged. */
@@ -99,7 +106,7 @@ const APP_AUTHENTICATED: ReadonlySet<GitHubOperation> = new Set(["app", "install
  * The single failure classifier for GitHub calls:
  * - network error, timeout, or 5xx → `provider_unavailable` (numeric `Retry-After` forwarded);
  * - 401 on an app-authenticated call → `credential_invalid`;
- * - 404 on installation lookup, 404/422 on token creation → `repo_not_installed`;
+ * - 404 on an installation lookup (by owner or by id), 404/422 on token creation → `repo_not_installed`;
  * - anything else → `mint_failed` (including secondary rate limits, open debt SD-011).
  */
 export function classifyGitHubFailure(operation: GitHubOperation, failure: GitHubFailure): TesseraError {
@@ -202,6 +209,24 @@ export class GitHubClient {
     }
     const account = isRecord(body.account) && typeof body.account.login === "string" ? body.account.login : null;
     return { id: body.id, account };
+  }
+
+  /** `GET /app/installations/{id}`: the installation and the login of the account it belongs to. */
+  async getInstallation(assertion: string, installationId: number): Promise<GitHubInstallationAccount> {
+    const body = await this.call("installation", {
+      method: "GET",
+      path: `/app/installations/${encodeURIComponent(String(installationId))}`,
+      assertion,
+    });
+    if (
+      !isRecord(body) ||
+      typeof body.id !== "number" ||
+      !isRecord(body.account) ||
+      typeof body.account.login !== "string"
+    ) {
+      throw classifyGitHubFailure("installation", { kind: "malformed" });
+    }
+    return { id: body.id, account: body.account.login };
   }
 
   /** `POST /app/installations/{id}/access_tokens`, restricted to `scope`. */

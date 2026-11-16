@@ -59,6 +59,21 @@ describe("GitHubClient success paths", () => {
     ]);
   });
 
+  it("reads an installation by id with its account login", async () => {
+    const { fake, client } = await setup();
+    await expect(client.getInstallation(assertion, 7)).resolves.toEqual({ id: 7, account: "acme" });
+    expect(fake.calls[0]).toMatchObject({ method: "GET", path: "/app/installations/7", bearer: true });
+  });
+
+  it("maps an installation lookup by id to repo_not_installed on 404, provider_unavailable on 5xx", async () => {
+    const { fake, client } = await setup();
+    await expect(client.getInstallation(assertion, 99)).rejects.toBeInstanceOf(RepoNotInstalledError);
+    fake.fail("installation", { status: 503 });
+    await expect(client.getInstallation(assertion, 7)).rejects.toBeInstanceOf(ProviderUnavailableError);
+    fake.fail("installation", { status: 200, body: { id: 7 } });
+    await expect(client.getInstallation(assertion, 7)).rejects.toBeInstanceOf(MintFailedError);
+  });
+
   it("mints a token for exactly the named repository and permissions", async () => {
     const { fake, client } = await setup({ now: () => Date.parse("2026-11-15T12:00:00Z"), tokenTtlMs: 60_000 });
     const result = await client.createInstallationToken(assertion, 7, {

@@ -16,7 +16,7 @@ function clock(start = T0) {
 }
 
 const iso = (ms: number) => new Date(ms).toISOString().replace(/\.\d{3}Z$/, "Z");
-const KEY: TokenCacheKey = { installationId: 7, repos: ["widgets"], access: "read" };
+const KEY: TokenCacheKey = { installationId: 7, repos: ["acme/widgets"], access: "read" };
 const ENTRY = { token: "ghs_one", expiresAt: iso(T0 + 60 * MINUTE) };
 
 describe("token cache", () => {
@@ -56,7 +56,7 @@ describe("token cache", () => {
     const c = clock();
     const cache = createTokenCache({ now: c.now });
     cache.set(KEY, ENTRY);
-    cache.set({ ...KEY, repos: ["gadgets"] }, { token: "ghs_two", expiresAt: iso(T0 + 90 * MINUTE) });
+    cache.set({ ...KEY, repos: ["acme/gadgets"] }, { token: "ghs_two", expiresAt: iso(T0 + 90 * MINUTE) });
     c.set(T0 + 70 * MINUTE);
     expect(cache.size()).toBe(1);
   });
@@ -65,9 +65,16 @@ describe("token cache", () => {
     const cache = createTokenCache({ now: () => T0 });
     cache.set(KEY, ENTRY);
     expect(cache.getFresh({ ...KEY, installationId: 8 })).toBeUndefined();
-    expect(cache.getFresh({ ...KEY, repos: ["gadgets"] })).toBeUndefined();
+    expect(cache.getFresh({ ...KEY, repos: ["acme/gadgets"] })).toBeUndefined();
     expect(cache.getFresh({ ...KEY, access: "write" })).toBeUndefined();
-    expect(cache.getFresh({ ...KEY, repos: ["widgets", "gadgets"] })).toBeUndefined();
+    expect(cache.getFresh({ ...KEY, repos: ["acme/widgets", "acme/gadgets"] })).toBeUndefined();
+  });
+
+  it("keys repositories by owner/name and ignores case", () => {
+    const cache = createTokenCache({ now: () => T0 });
+    cache.set(KEY, ENTRY);
+    expect(cache.getFresh({ ...KEY, repos: ["other/widgets"] })).toBeUndefined();
+    expect(cache.getFresh({ ...KEY, repos: ["Acme/Widgets"] })).toEqual(ENTRY);
   });
 
   it("treats the repository set as sorted", () => {
