@@ -117,7 +117,7 @@
   - The fake can report mint call counts, set token expiry, and simulate an uninstalled owner
   - Authorization headers are never logged; no test reaches the real network
 
-- [ ] **Implement the github-app provider**
+- [x] **Implement the github-app provider**
 
   Add the provider implementing the Slice 1 interface. It resolves the Installation Binding per owner, or uses the configured installation id when set, mints a token for the one requested repository with the access profile's permissions, and derives the bot login and commit identity from GitHub. It maintains Provider Status per the data model lifecycle. Satisfies AS 1.1, AS 1.5 and the bounded-failure clause of AS 1.6.
 
