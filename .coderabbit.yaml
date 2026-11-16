@@ -1,0 +1,49 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+#
+# CodeRabbit reads the same reviewer rules as Copilot and Codex. This file
+# holds no rule text: it only maps each rule file to the paths it governs.
+# Layout, review requests, and the auto-review options are described in
+# docs/reviewer-instructions.md; scripts/reviewer-instructions.test.mjs keeps
+# the map in step with the rule files.
+
+# Keys this file leaves out (auto-review, tone, summaries) come from the
+# repository and organization settings in the CodeRabbit app, not from schema
+# defaults.
+inheritance: true
+
+knowledge_base:
+  code_guidelines:
+    enabled: true
+    # AGENTS.md, CLAUDE.md, and .github/copilot-instructions.md are picked up
+    # by CodeRabbit's default patterns and need no entry. Each entry below
+    # repeats the `applyTo` of the instruction file it names, verbatim. A
+    # skill takes the `applyTo` of the instruction file that sends the
+    # reviewer to it, because CodeRabbit does not load skills on demand.
+    filePatterns:
+      # Smithy-general layer: the same entries in every repository that uses Smithy.
+      - files: ".github/instructions/smithy.review-stance.instructions.md"
+        applyTo: "**"
+      - files: ".github/instructions/smithy.planning-artifacts.instructions.md"
+        applyTo: "**/*.rfc.md,**/*.features.md,**/*.spec.md,**/*.data-model.md,**/*.contracts.md,**/*.tasks.md,**/*.strike.md,**/*.prd.md"
+      - files: ".github/skills/smithy-review-planning/SKILL.md"
+        applyTo: "**/*.rfc.md,**/*.features.md,**/*.spec.md,**/*.data-model.md,**/*.contracts.md,**/*.tasks.md,**/*.strike.md,**/*.prd.md"
+
+      # Repository layer.
+      - files: ".github/instructions/planning-artifacts.instructions.md"
+        applyTo: "specs/**,docs/rfcs/**"
+      - files: ".github/instructions/runtime-source.instructions.md"
+        applyTo: "src/**/*.ts,scripts/**/*.mjs"
+      - files: ".github/skills/march-review-runtime/SKILL.md"
+        applyTo: "src/**/*.ts,scripts/**/*.mjs"
+      - files: ".github/instructions/observability.instructions.md"
+        applyTo: "src/observability/**,docker/grafana/**,docker/otel-lgtm.docker-compose.yml"
+      - files: ".github/instructions/tests.instructions.md"
+        applyTo: "**/*.test.ts,**/*.test.mjs,tests/**,scripts/run-layered-tests.mjs,scripts/test-taxonomy.mjs"
+      - files: ".github/instructions/contracts.instructions.md"
+        applyTo: "docs/subsystems/**"
+      - files: ".github/instructions/containers.instructions.md"
+        applyTo: "docker/**,.github/workflows/**"
+      - files: ".github/instructions/templates.instructions.md"
+        applyTo: "src/templates/**,.claude/skills/march.*/**,scripts/generate-skills.mjs"
+      - files: ".github/instructions/deployed-snapshot.instructions.md"
+        applyTo: ".claude/commands/**,.claude/prompts/**,.claude/agents/**,.claude/hooks/**,.claude/skills/smithy*/**,.agents/skills/**,.codex/agents/**,tools/codex/**,.smithy/smithy-manifest.json"
