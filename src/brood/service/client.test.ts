@@ -17,6 +17,17 @@ function jsonResponse(status: number, body: unknown): Response {
   });
 }
 
+function textResponse(
+  status: number,
+  body: string,
+  headers: Record<string, string> = {},
+): Response {
+  return new Response(body, {
+    status,
+    headers: { "content-type": "text/plain", ...headers },
+  });
+}
+
 describe("resolveBroodUrl", () => {
   it("prefers MARCH_BROOD_URL, strips trailing slash", () => {
     expect(resolveBroodUrl({ MARCH_BROOD_URL: "http://brood:9000/" })).toBe(
@@ -106,6 +117,51 @@ describe("BroodClient", () => {
     });
     const sessions = await client.list({ kind: "spawn" });
     expect(sessions.map((s) => s.id)).toEqual(["a", "b"]);
+  });
+
+  it("logs returns text content and the selected source", async () => {
+    const fetchImpl = vi.fn(async (..._args: unknown[]) =>
+      textResponse(200, "hello\n", { "x-march-log-source": "archive" }),
+    );
+    const client = new BroodClient({
+      baseUrl: "http://brood",
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+
+    await expect(client.logs("s1")).resolves.toEqual({
+      content: "hello\n",
+      source: { kind: "archive" },
+    });
+    expect(fetchImpl.mock.calls[0][0]).toBe("http://brood/sessions/s1/logs");
+  });
+
+  it("logs maps not-found and unavailable service errors", async () => {
+    const missing = new BroodClient({
+      baseUrl: "http://brood",
+      fetchImpl: (async () =>
+        jsonResponse(404, { error: "No session" })) as unknown as typeof fetch,
+    });
+    await expect(missing.logs("ghost")).rejects.toBeInstanceOf(BroodNotFoundError);
+
+    const unavailable = new BroodClient({
+      baseUrl: "http://brood",
+      fetchImpl: (async () =>
+        jsonResponse(409, { error: "Logs unavailable" })) as unknown as typeof fetch,
+    });
+    await expect(unavailable.logs("s1")).rejects.toThrowError(/Logs unavailable/);
+  });
+
+  it("logs raises BroodUnavailableError when brood is unreachable", async () => {
+    const client = new BroodClient({
+      baseUrl: "http://brood",
+      fetchImpl: (async () => {
+        throw new Error("ECONNREFUSED");
+      }) as unknown as typeof fetch,
+    });
+
+    await expect(client.logs("s1")).rejects.toBeInstanceOf(
+      BroodUnavailableError,
+    );
   });
 
   it("teardown returns the result", async () => {

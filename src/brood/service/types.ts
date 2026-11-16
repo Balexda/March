@@ -197,3 +197,34 @@ export interface TeardownResult {
   steps: TeardownStep[];
   warnings: string[];
 }
+
+export type LogReadSourceKind = "live-container" | "castra-session" | "archive";
+
+export type LogReadSource =
+  | {
+      kind: "live-container";
+      containerId: string;
+      available: true;
+    }
+  | {
+      kind: "castra-session";
+      agentDeckSessionId: string;
+      available: true;
+    }
+  | {
+      kind: "archive";
+      archivePath: string;
+      available: true;
+    };
+
+export interface SessionLogResult {
+  source: LogReadSource;
+  content: string;
+}
+
+export interface SessionLogResponse {
+  source: {
+    kind: LogReadSourceKind;
+  };
+  content: string;
+}

@@ -18,7 +18,7 @@
 
 ### Tasks
 
-- [ ] **Add Brood log source selection**
+- [x] **Add Brood log source selection**
 
   Add a Brood service-owned log read module under `src/brood/service/` that resolves live-container, archive, and unavailable outcomes for `SessionRecord` rows. Keep the module injectable for tests and aligned with the `LogReadSource` data-model section while leaving steward Castra output for Slice 2.
 
@@ -29,7 +29,7 @@
   - Unknown ids are distinguishable from unavailable logs for AS 3.4
   - Source selection is read-only and performs no registry, Docker, worktree, branch, or archive mutation for AS 3.5
 
-- [ ] **Expose the Brood logs HTTP route**
+- [x] **Expose the Brood logs HTTP route**
 
   Add `GET /sessions/:id/logs` in `src/brood/service/routes.ts` and client support in `src/brood/service/client.ts`. Map source-selection outcomes to the contracts artifact's status codes, headers, and text response while preserving existing session route behavior.
 
@@ -40,7 +40,7 @@
   - Unavailable logs return the contracted non-zero service error for AS 3.3
   - Brood client failures surface clearly without local fallback for FR-016
 
-- [ ] **Keep Brood contract docs aligned**
+- [x] **Keep Brood contract docs aligned**
 
   Update Brood subsystem contract documentation when the logs HTTP route changes the mapped public service surface. Keep the documentation focused on the read-only endpoint, error envelope, and ownership boundary from the contracts artifact.
 
