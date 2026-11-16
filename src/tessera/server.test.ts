@@ -6,11 +6,15 @@
  * then with the real github-app provider against the fake GitHub API.
  */
 import { createHash, generateKeyPairSync } from "node:crypto";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { PassThrough } from "node:stream";
 import { SpanStatusCode } from "@opentelemetry/api";
 import type { Span } from "@opentelemetry/sdk-trace-base";
 import type { FastifyInstance, LightMyRequestResponse } from "fastify";
 import pino from "pino";
+import { createTesseraLogger } from "../observability/logger.js";
 import { getActiveOtel, initOtel } from "../observability/otel.js";
 import { spanIdForDispatch, traceIdForDispatch } from "../observability/trace-ids.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -1863,4 +1867,261 @@ describe("tessera issuance and denial counters", () => {
       expect(labels).not.toContain(leaked);
     }
   });
+});
+
+/**
+ * No credential reaches any output (AS 8.5, FR-038). The real server and the
+ * real github-app provider run against the fake GitHub, which mints tokens
+ * carrying a sentinel prefix, for a client whose key is a sentinel, at the
+ * most verbose log level with telemetry on. Every captured log line, span
+ * attribute, metric label, `/status` body and non-200 response is searched
+ * for the sentinels, the key's hash, a rejected key and any bearer header.
+ * Run once with a plain logger (the allow-list alone must hold) and once with
+ * the production Tessera logger (allow-list plus redaction).
+ */
+describe("no credential reaches any output", () => {
+  const { privateKey, publicKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+  const PEM = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+  const KEY_FILE = "/virtual/tessera-sentinel.pem";
+
+  const TOKEN_SENTINEL = "tessera-sentinel-token-";
+  const KEY_SENTINEL = "tessera-sentinel-client-key-0123456789";
+  const KEY_SENTINEL_SHA256 = sha256Hex(KEY_SENTINEL);
+  const BAD_KEY = "tessera-sentinel-bad-key-9876543210";
+  const SENTINEL_CLIENTS = parseClientRegistry(
+    JSON.stringify([{ client: "legate", key_sha256: KEY_SENTINEL_SHA256 }]),
+  );
+  const SENTINEL_POLICY = parsePolicy(
+    JSON.stringify([
+      { client: "legate", identities: ["app", "user"], repos: ["acme/*"], max_access: "write" },
+    ]),
+    SENTINEL_CLIENTS.clients(),
+  );
+  const FORBIDDEN = [TOKEN_SENTINEL, KEY_SENTINEL, KEY_SENTINEL_SHA256, BAD_KEY, "Bearer "];
+
+  let app: FastifyInstance | undefined;
+  let fake: FakeGitHub | undefined;
+  let logDir: string | undefined;
+
+  afterEach(async () => {
+    if (app) await app.close();
+    await fake?.close();
+    if (logDir) fs.rmSync(logDir, { recursive: true, force: true });
+    app = undefined;
+    fake = undefined;
+    logDir = undefined;
+    vi.restoreAllMocks();
+    initOtel({});
+  });
+
+  /** Every span the active tracer starts. */
+  function captureSpans(): Span[] {
+    const tracer = getActiveOtel().getTracer();
+    const created: Span[] = [];
+    const real = tracer.startSpan.bind(tracer);
+    vi.spyOn(tracer, "startSpan").mockImplementation((...args: Parameters<typeof real>) => {
+      const span = real(...args) as Span;
+      created.push(span);
+      return span;
+    });
+    return created;
+  }
+
+  /** Every attribute set recorded on any counter or histogram, by instrument name. */
+  function captureMetrics(): Array<{ name: string; attributes: unknown }> {
+    const meter = getActiveOtel().getMeter();
+    const recorded: Array<{ name: string; attributes: unknown }> = [];
+    vi.spyOn(meter, "createCounter").mockImplementation((name: string) => {
+      return { add: (_v: number, attributes?: unknown) => recorded.push({ name, attributes }) } as never;
+    });
+    vi.spyOn(meter, "createHistogram").mockImplementation((name: string) => {
+      return {
+        record: (_v: number, attributes?: unknown) => recorded.push({ name, attributes }),
+      } as never;
+    });
+    return recorded;
+  }
+
+  /**
+   * A trace-level logger, a reader for one copy of its records (`lines`) and
+   * a reader for everything it wrote to every sink (`text`).
+   */
+  function captureLogs(variant: "plain" | "tessera"): {
+    logger: pino.Logger;
+    lines: () => string;
+    text: () => string;
+  } {
+    const stream = new PassThrough();
+    const chunks: string[] = [];
+    stream.on("data", (chunk: Buffer) => chunks.push(chunk.toString("utf-8")));
+    if (variant === "plain") {
+      const lines = () => chunks.join("");
+      return { logger: pino({ level: "trace" }, stream), lines, text: lines };
+    }
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "march-tessera-sentinel-"));
+    logDir = dir;
+    const logger = createTesseraLogger({
+      env: { MARCH_TESSERA_LOG_DIR: dir },
+      level: "trace",
+      sync: true,
+      stdout: stream,
+    });
+    return {
+      logger,
+      lines: () => chunks.join(""),
+      text: () => chunks.join("") + fs.readFileSync(path.join(dir, "tessera.jsonl"), "utf-8"),
+    };
+  }
+
+  for (const variant of ["plain", "tessera"] as const) {
+    it(`leaks no token, key, hash or header with the ${variant} logger`, async () => {
+      initOtel({ MARCH_OTEL: "1", MARCH_OTEL_ENDPOINT: "http://localhost:4318" });
+      const spans = captureSpans();
+      const metrics = captureMetrics();
+      const logs = captureLogs(variant);
+
+      let t = Date.parse("2026-11-15T12:00:00Z");
+      fake = await startFakeGitHub({
+        app: { id: 42, slug: "march-bot" },
+        botUserId: 123456,
+        installations: { acme: { id: 7, repos: ["widgets", "gadgets"] } },
+        publicKey,
+        now: () => t,
+        tokenPrefix: TOKEN_SENTINEL,
+      });
+      const appProvider = createGitHubAppProvider({
+        config: { configured: true, appId: "42", keyFile: KEY_FILE, installationId: undefined },
+        client: new GitHubClient({ baseUrl: fake.baseUrl, timeoutMs: 200 }),
+        now: () => t,
+        readFile: (file) => {
+          if (file !== KEY_FILE) throw new Error("ENOENT");
+          return PEM;
+        },
+      });
+      await appProvider.start();
+      // Fails with a message carrying the token, the key and a bearer header.
+      const throwingUser = stubProvider({
+        id: "github-user",
+        identity: "user",
+        issue: async () => {
+          throw new Error(`boom ${TOKEN_SENTINEL}0001 ${KEY_SENTINEL} Bearer ${KEY_SENTINEL}`);
+        },
+      });
+      app = buildTesseraServer({
+        clients: SENTINEL_CLIENTS,
+        policy: SENTINEL_POLICY,
+        registry: createProviderRegistry([appProvider, throwingUser]),
+        logger: logs.logger,
+      });
+      const built = app;
+
+      const nonOk: LightMyRequestResponse[] = [];
+      const statuses: number[] = [];
+      async function send(
+        body: unknown,
+        options: { authorization?: string | null; raw?: string } = {},
+      ): Promise<LightMyRequestResponse> {
+        const authorization =
+          options.authorization === undefined ? `Bearer ${KEY_SENTINEL}` : options.authorization;
+        const res = await built.inject({
+          method: "POST",
+          url: "/v1/github/token",
+          headers: {
+            "content-type": "application/json",
+            ...(authorization === null ? {} : { authorization }),
+          },
+          payload: options.raw ?? JSON.stringify(body),
+        });
+        statuses.push(res.statusCode);
+        if (res.statusCode !== 200) nonOk.push(res);
+        return res;
+      }
+      const WIDGETS = { identity: "app", repo: "acme/widgets", access: "read" };
+
+      const minted = await send(WIDGETS); // issued, cache miss
+      expect(minted.json().token).toContain(TOKEN_SENTINEL);
+      await send(WIDGETS); // issued, cache hit
+      await send({ ...WIDGETS, refresh: true }); // refresh: a new mint
+      await send(WIDGETS, { authorization: `Bearer ${BAD_KEY}` }); // 401, wrong key
+      await send(WIDGETS, { authorization: null }); // 401, no key
+      await send(undefined, { raw: `{"token":"${TOKEN_SENTINEL}x", ${KEY_SENTINEL}` }); // 400, malformed
+      await send({ ...WIDGETS, token: `${TOKEN_SENTINEL}x`, clientKey: KEY_SENTINEL }); // 400, unknown fields
+      await send({ ...WIDGETS, repo: "other/widgets" }); // 403
+      await send({ ...WIDGETS, repo: "acme/uncovered" }); // 422
+      fake.fail("token", { status: 403, body: { message: `nope ${TOKEN_SENTINEL}gh Bearer x` } });
+      await send({ ...WIDGETS, repo: "acme/gadgets" }); // 502 mint_failed
+
+      t += 55 * 60 * 1000; // inside the re-mint window, still unexpired
+      fake.fail("token", { status: 503, retryAfter: "7", body: { message: `down ${TOKEN_SENTINEL}gh` } });
+      await send(WIDGETS); // 200, the cached token served through the outage
+      await send({ ...WIDGETS, refresh: true }); // 503, nothing to fall back to
+      t += 10 * 60 * 1000; // the cached token has now expired
+      await send(WIDGETS); // 503 provider_unavailable
+      fake.fail("token", null);
+
+      await send({ identity: "user", access: "write" }); // 500, message carries the sentinels
+
+      expect(statuses).toEqual([200, 200, 200, 401, 401, 400, 400, 403, 422, 502, 200, 503, 503, 500]);
+      const statusRes = await built.inject({ method: "GET", url: "/status" });
+      const healthRes = await built.inject({ method: "GET", url: "/healthz" });
+      expect(statusRes.statusCode).toBe(200);
+      expect(healthRes.statusCode).toBe(200);
+
+      const tokenSpans = spans.filter((span) => span.name === "tessera.issue");
+      expect(tokenSpans).toHaveLength(statuses.length);
+      expect(metrics.filter((m) => m.name.startsWith("march.tessera."))).toHaveLength(statuses.length);
+      const logText = logs.text();
+      expect(logs.lines().split("\n").filter((line) => line.includes('"msg":"tessera.audit"'))).toHaveLength(
+        statuses.length,
+      );
+
+      const outputs: Array<[string, string]> = [
+        ["logs", logText],
+        [
+          "spans",
+          JSON.stringify(
+            spans.map((span) => ({
+              name: span.name,
+              attributes: span.attributes,
+              status: span.status,
+              events: span.events,
+            })),
+          ),
+        ],
+        ["metrics", JSON.stringify(metrics)],
+        ["/status", statusRes.body],
+        ["/healthz", healthRes.body],
+        ["error bodies", JSON.stringify(nonOk.map((res) => ({ body: res.body, headers: res.headers })))],
+      ];
+      for (const [label, text] of outputs) {
+        for (const forbidden of FORBIDDEN) {
+          expect(text.includes(forbidden), `${label} contains ${forbidden}`).toBe(false);
+        }
+      }
+
+      const internal = logs
+        .lines()
+        .split("\n")
+        .filter((line) => line.trim() !== "")
+        .map((line) => JSON.parse(line) as Record<string, unknown>)
+        .filter((line) => line.msg === "tessera.audit")
+        .map((line) => line.audit as Record<string, unknown>)
+        .filter((audit) => audit.reason === "internal");
+      expect(internal).toEqual([
+        {
+          caller: "legate",
+          identity: "user",
+          provider: "github-user",
+          repo: null,
+          access: "write",
+          outcome: "failed",
+          reason: "internal",
+          cache: "n/a",
+          expires_at: null,
+          subject: null,
+        },
+      ]);
+      expect(logText).not.toContain("boom");
+    });
+  }
 });

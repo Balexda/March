@@ -191,6 +191,11 @@ export interface ServiceLoggerOptions {
    * polluting the test runner's console.
    */
   readonly stdout?: NodeJS.WritableStream;
+  /**
+   * pino `redact` paths whose values are replaced before any record is
+   * written. Unset by default: only the Tessera factories pass it.
+   */
+  readonly redact?: readonly string[];
 }
 
 /**
@@ -230,6 +235,9 @@ export function createServiceLogger(options: ServiceLoggerOptions): PinoLogger {
       name: options.serviceName,
       level: options.level ?? "info",
       mixin: traceMixin,
+      ...(options.redact === undefined
+        ? {}
+        : { redact: { paths: [...options.redact], censor: TESSERA_REDACT_CENSOR } }),
     },
     pino.multistream(streams),
   );
@@ -365,6 +373,29 @@ export function createStatioLogger(
   });
 }
 
+/**
+ * Credential-bearing field paths the Tessera loggers redact, at the top level
+ * and one level down. A second layer of defence: Tessera's log calls already
+ * name only allow-listed fields, so these should never match in practice.
+ */
+export const TESSERA_REDACT_PATHS: readonly string[] = Object.freeze([
+  "token",
+  "*.token",
+  "authorization",
+  "*.authorization",
+  "headers.authorization",
+  "req.headers.authorization",
+  "clientKey",
+  "*.clientKey",
+  "key_sha256",
+  "*.key_sha256",
+  "password",
+  "*.password",
+]);
+
+/** The fixed value a redacted field is replaced with. */
+export const TESSERA_REDACT_CENSOR = "[redacted]";
+
 export interface TesseraLoggerOptions {
   readonly logFilePath?: string;
   readonly name?: string;
@@ -404,12 +435,20 @@ export function createTesseraClientLogger(
     streams.push({ stream: createOtelBridgeStream() });
   }
   return pino(
-    { name: "march-tessera-client", level: options.level ?? "info", mixin: traceMixin },
+    {
+      name: "march-tessera-client",
+      level: options.level ?? "info",
+      mixin: traceMixin,
+      redact: { paths: [...TESSERA_REDACT_PATHS], censor: TESSERA_REDACT_CENSOR },
+    },
     pino.multistream(streams),
   );
 }
 
-/** Tessera service logger (`march-tessera` → `tessera.jsonl`). */
+/**
+ * Tessera service logger (`march-tessera` → `tessera.jsonl`), with
+ * {@link TESSERA_REDACT_PATHS} redacted from every record.
+ */
 export function createTesseraLogger(
   options: TesseraLoggerOptions = {},
 ): PinoLogger {
@@ -421,5 +460,6 @@ export function createTesseraLogger(
     env,
     sync: options.sync,
     stdout: options.stdout,
+    redact: TESSERA_REDACT_PATHS,
   });
 }

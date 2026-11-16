@@ -16,6 +16,9 @@ import {
   resolveHatcheryLogFilePath,
   createTesseraClientLogger,
   createTesseraLogger,
+  createStatioLogger,
+  TESSERA_REDACT_CENSOR,
+  TESSERA_REDACT_PATHS,
   resolveTesseraClientLogFilePath,
   resolveTesseraLogFilePath,
 } from "./logger.js";
@@ -273,5 +276,119 @@ describe("createCastraLogger", () => {
     expect(lines[0].name).toBe("march-castra");
     expect(lines[0].msg).toBe("session launched");
     expect(lines[0].profile).toBe("march");
+  });
+});
+
+/** Credential-bearing fields, at the top level and one level down. */
+const CREDENTIAL_RECORD = {
+  token: "tok-top",
+  authorization: "Bearer auth-top",
+  clientKey: "ck-top",
+  key_sha256: "sha-top",
+  password: "pw-top",
+  headers: { authorization: "Bearer auth-headers" },
+  req: { headers: { authorization: "Bearer auth-req" } },
+  entitlement: { token: "tok-nested", clientKey: "ck-nested", key_sha256: "sha-nested" },
+  login: { password: "pw-nested", authorization: "Bearer auth-nested" },
+  kept: "visible",
+};
+const CREDENTIAL_VALUES = [
+  "tok-top",
+  "auth-top",
+  "ck-top",
+  "sha-top",
+  "pw-top",
+  "auth-headers",
+  "auth-req",
+  "tok-nested",
+  "ck-nested",
+  "sha-nested",
+  "pw-nested",
+  "auth-nested",
+];
+
+describe("Tessera logger redaction", () => {
+  let dir: string;
+
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), "march-tessera-redact-"));
+  });
+  afterEach(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  function readLines(file: string): Array<Record<string, unknown>> {
+    return fs
+      .readFileSync(file, "utf-8")
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .map((l) => JSON.parse(l) as Record<string, unknown>);
+  }
+
+  it("covers the credential-bearing paths with a fixed censor", () => {
+    expect(TESSERA_REDACT_CENSOR).toBe("[redacted]");
+    for (const p of [
+      "token",
+      "*.token",
+      "authorization",
+      "*.authorization",
+      "headers.authorization",
+      "req.headers.authorization",
+      "clientKey",
+      "*.clientKey",
+      "key_sha256",
+      "*.key_sha256",
+      "password",
+      "*.password",
+    ]) {
+      expect(TESSERA_REDACT_PATHS).toContain(p);
+    }
+  });
+
+  it("redacts credential fields from the service logger, on stdout and in the file", () => {
+    const stdout = new PassThrough();
+    const captured: string[] = [];
+    stdout.on("data", (c: Buffer) => captured.push(c.toString("utf-8")));
+    const logger = createTesseraLogger({
+      env: { MARCH_TESSERA_LOG_DIR: dir },
+      level: "trace",
+      sync: true,
+      stdout,
+    });
+    logger.info(CREDENTIAL_RECORD, "credentials");
+
+    const file = fs.readFileSync(path.join(dir, "tessera.jsonl"), "utf-8");
+    for (const text of [file, captured.join("")]) {
+      for (const value of CREDENTIAL_VALUES) expect(text).not.toContain(value);
+      expect(text).toContain("visible");
+    }
+    const [line] = readLines(path.join(dir, "tessera.jsonl"));
+    expect(line!.token).toBe("[redacted]");
+    expect((line!.entitlement as Record<string, unknown>).token).toBe("[redacted]");
+    expect(((line!.req as Record<string, unknown>).headers as Record<string, unknown>).authorization).toBe(
+      "[redacted]",
+    );
+  });
+
+  it("redacts credential fields from the client logger", () => {
+    const logger = createTesseraClientLogger({ env: { MARCH_TESSERA_LOG_DIR: dir }, level: "trace" });
+    logger.warn(CREDENTIAL_RECORD, "credentials");
+    const text = fs.readFileSync(path.join(dir, "tessera-client.jsonl"), "utf-8");
+    for (const value of CREDENTIAL_VALUES) expect(text).not.toContain(value);
+    expect(text).toContain("visible");
+  });
+
+  it("leaves other services' loggers unaffected", () => {
+    const logFilePath = path.join(dir, "statio.jsonl");
+    const logger = createStatioLogger({
+      logFilePath,
+      env: {},
+      sync: true,
+      stdout: new PassThrough(),
+    });
+    logger.info({ token: "statio-visible-token" }, "unredacted");
+    const [line] = readLines(logFilePath);
+    expect(line!.token).toBe("statio-visible-token");
   });
 });

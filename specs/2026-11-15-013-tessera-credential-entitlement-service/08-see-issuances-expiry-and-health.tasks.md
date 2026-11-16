@@ -53,7 +53,7 @@
   - No label carries a repository, client name, client key or token
   - The existing consumer-side fallback counter is unchanged
 
-- [ ] **Prove no credential reaches any output**
+- [x] **Prove no credential reaches any output**
 
   Add redaction for credential-bearing fields to the Tessera logger in `src/observability/logger.ts`, as a second layer behind the audit allow-list, and a test in `src/tessera/server.test.ts` that drives issued, cached, denied and failed requests with a sentinel token and a sentinel client key at the most verbose log level. Satisfies AS 8.5 and FR-038.
 

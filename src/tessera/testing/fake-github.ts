@@ -63,6 +63,8 @@ export interface FakeGitHubOptions {
   readonly publicKey?: KeyObject;
   /** Wall clock in ms for token expiry and assertion checks. */
   readonly now?: () => number;
+  /** Prefix of every minted token, followed by a four-digit counter. Default `ghs_fake`. */
+  readonly tokenPrefix?: string;
 }
 
 /** Handle to a running fake GitHub. */
@@ -138,6 +140,7 @@ export async function startFakeGitHub(options: FakeGitHubOptions = {}): Promise<
     Object.entries(options.installations ?? {}).map(([owner, inst]) => [owner.toLowerCase(), { owner, inst }]),
   );
   const now = options.now ?? Date.now;
+  const tokenPrefix = options.tokenPrefix ?? "ghs_fake";
   const failures = new Map<FakeGitHubEndpoint, FakeGitHubFailure>();
   const calls: FakeGitHubCall[] = [];
   let tokenExpiry: string | number = options.tokenTtlMs ?? DEFAULT_TTL_MS;
@@ -180,7 +183,7 @@ export async function startFakeGitHub(options: FakeGitHubOptions = {}): Promise<
     const expiresAt =
       typeof tokenExpiry === "string" ? tokenExpiry : new Date(now() + tokenExpiry).toISOString().replace(/\.\d{3}Z$/, "Z");
     return json(201, {
-      token: `ghs_fake${String(issued).padStart(4, "0")}`,
+      token: `${tokenPrefix}${String(issued).padStart(4, "0")}`,
       expires_at: expiresAt,
       permissions: req.permissions ?? {},
       repository_selection: "selected",
