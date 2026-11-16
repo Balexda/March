@@ -1,4 +1,9 @@
-import Fastify, { type FastifyBaseLogger, type FastifyInstance } from "fastify";
+import Fastify, {
+  type FastifyBaseLogger,
+  type FastifyInstance,
+  type FastifyRequest,
+} from "fastify";
+import { type AuditContext, buildAuditRecord, createAuditContext } from "./audit.js";
 import type { ClientRegistry } from "./auth/client-keys.js";
 import { type Policy, authorize } from "./auth/policy.js";
 import { TESSERA_SERVICE_NAME } from "./config.js";
@@ -27,7 +32,21 @@ declare module "fastify" {
      * Never returned in a response body or header.
      */
     tesseraClient: string | undefined;
+    /**
+     * What a `POST /v1/github/token` request has resolved so far, filled in
+     * as it proceeds and read once by the response hook to emit its
+     * `tessera.audit` event; `undefined` on every other route.
+     */
+    tesseraAudit: AuditContext | undefined;
   }
+}
+
+/** The token route's pattern; the only route that is audited. */
+const TOKEN_ROUTE = "/v1/github/token";
+
+/** Matched on the route pattern and method, so no other or unmatched path is audited. */
+function isTokenRequest(request: FastifyRequest): boolean {
+  return request.method === "POST" && request.routeOptions.url === TOKEN_ROUTE;
 }
 
 /** The providers the token route dispatches to, keyed by the identity they serve. */
@@ -241,6 +260,12 @@ export function buildTesseraServer(options: BuildTesseraServerOptions): FastifyI
       : Fastify({ loggerInstance: loggerOption, disableRequestLogging: true });
 
   app.decorateRequest("tesseraClient", undefined);
+  app.decorateRequest("tesseraAudit", undefined);
+
+  // Registered before the auth hook, so a request it rejects is audited too.
+  app.addHook("onRequest", async (request) => {
+    if (isTokenRequest(request)) request.tesseraAudit = createAuditContext();
+  });
 
   // Authenticate before body parsing, so an unauthenticated request is 401
   // whatever its body, and an unmatched /v1 path is 401 rather than 404. The
@@ -254,6 +279,7 @@ export function buildTesseraServer(options: BuildTesseraServerOptions): FastifyI
     const client = key === undefined ? undefined : clients.authenticate(key);
     if (client === undefined) throw new UnauthorizedError();
     request.tesseraClient = client;
+    if (request.tesseraAudit) request.tesseraAudit.caller = client;
   });
 
   app.addHook("onResponse", async (request, reply) => {
@@ -267,10 +293,16 @@ export function buildTesseraServer(options: BuildTesseraServerOptions): FastifyI
       },
       "tessera request handled",
     );
+    const audit = request.tesseraAudit;
+    if (audit) {
+      request.log.info({ audit: buildAuditRecord(audit, reply.statusCode) }, "tessera.audit");
+    }
   });
 
   app.setErrorHandler((err: Error & { statusCode?: number; code?: unknown }, request, reply) => {
+    const audit = request.tesseraAudit;
     if (err instanceof TesseraError) {
+      if (audit) audit.errorCode = err.code;
       if (err instanceof ProviderUnavailableError) {
         void reply.header("retry-after", String(err.retryAfterSeconds));
       }
@@ -278,12 +310,14 @@ export function buildTesseraServer(options: BuildTesseraServerOptions): FastifyI
       return;
     }
     if (isFastifyClientError(err)) {
+      if (audit) audit.errorCode = "invalid_request";
       // Fastify body/content-type failures; the generic message never echoes the body.
       void reply.code(400).send(errorBody("invalid_request", "Malformed request body."));
       return;
     }
     // Log the error class only: an unexpected message could carry credential material.
     request.log.error({ "tessera.error_class": err.name }, "unhandled tessera error");
+    if (audit) audit.errorCode = "internal";
     void reply.code(500).send(errorBody("internal", "Internal server error."));
   });
 
@@ -316,8 +350,15 @@ export function buildTesseraServer(options: BuildTesseraServerOptions): FastifyI
     };
   });
 
-  app.post("/v1/github/token", async (request): Promise<Entitlement> => {
+  app.post(TOKEN_ROUTE, async (request): Promise<Entitlement> => {
     const req = parseEntitlementRequest(request.body);
+    const audit = request.tesseraAudit;
+    if (audit) {
+      audit.identity = req.identity;
+      audit.repo = req.repo ?? null;
+      audit.access = req.access;
+      audit.subject = req.subject ?? null;
+    }
     // The auth hook always sets the client on /v1 routes; fail closed if not.
     const client = request.tesseraClient;
     if (client === undefined) throw new UnauthorizedError();
@@ -336,11 +377,16 @@ export function buildTesseraServer(options: BuildTesseraServerOptions): FastifyI
         `No provider is configured for identity "${req.identity}".`,
       );
     }
+    if (audit) audit.provider = provider.id;
     const result = await provider.issue({
       ...(req.repo !== undefined ? { repo: req.repo } : {}),
       access: req.access,
       ...(req.refresh !== undefined ? { refresh: req.refresh } : {}),
     });
+    if (audit) {
+      audit.cache = result.cache;
+      audit.expiresAt = result.expiresAt;
+    }
     return {
       token: result.token,
       expires_at: result.expiresAt,

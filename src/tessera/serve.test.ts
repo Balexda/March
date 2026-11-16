@@ -198,7 +198,10 @@ describe("runTesseraServer", () => {
     // a client's rule or a repository.
     expect(output).toContain("policy loaded from TESSERA_POLICY_FILE: 1 rule");
     expect(output).not.toContain(policyFile());
-    expect(output).not.toContain("acme");
+    expect(output).not.toContain("acme/*");
+    // Only the audit event names a repository: the one submitted (FR-034).
+    const nonAudit = lines().filter((line) => !line.includes('"msg":"tessera.audit"'));
+    expect(nonAudit.join("\n")).not.toContain("acme");
     expect(output).toContain(`tessera listening on http://127.0.0.1:${port}`);
 
     // Tessera stops listening after shutdown.

@@ -502,8 +502,10 @@ describe("tessera server", () => {
     const logs = chunks.join("");
     expect(logs).toContain("tessera request handled");
     expect(logs).not.toContain(SECRET_TOKEN);
-    expect(logs).not.toContain("subject-do-not-log");
-    expect(logs).not.toContain("acme/widgets");
+    // Only the audit event echoes the subject and the submitted repository (FR-015, FR-034).
+    const nonAudit = logs.split("\n").filter((line) => !line.includes('"msg":"tessera.audit"'));
+    expect(nonAudit.join("\n")).not.toContain("subject-do-not-log");
+    expect(nonAudit.join("\n")).not.toContain("acme/widgets");
   });
 
   describe("client authentication (AS 2.1)", () => {
@@ -792,10 +794,19 @@ describe("tessera server", () => {
       const logs = chunks.join("");
       expect(logs).toContain("tessera request handled");
       expect(logs).toContain('"tessera.status_class":"4xx"');
-      for (const text of [logs, ...bodies]) {
+      // The audit event echoes the submitted repository and subject (FR-015,
+      // FR-034); every other line, and every body, carries neither.
+      const lines = logs.split("\n");
+      const auditLogs = lines.filter((line) => line.includes('"msg":"tessera.audit"')).join("\n");
+      const otherLogs = lines.filter((line) => !line.includes('"msg":"tessera.audit"')).join("\n");
+      for (const text of [otherLogs, ...bodies]) {
         for (const leaked of [...ALLOWLIST_ENTRIES, ...submittedRepos, "submitted-owner", "subject-do-not-log"]) {
           expect(text).not.toContain(leaked);
         }
+      }
+      // The audit never names an allowlist entry the request did not submit.
+      for (const entry of ALLOWLIST_ENTRIES.filter((e) => !submittedRepos.includes(e))) {
+        expect(auditLogs).not.toContain(entry);
       }
     });
   });
@@ -1126,5 +1137,301 @@ describe("tessera server with the github-app provider", () => {
     });
     expect(res.statusCode).toBe(503);
     expect(res.json().error.code).toBe("provider_unconfigured");
+  });
+});
+
+/**
+ * One `tessera.audit` event per token request (AS 8.1, FR-015, FR-034),
+ * whatever the outcome, and none for any other route.
+ */
+describe("tessera.audit events", () => {
+  let app: FastifyInstance | undefined;
+  let chunks: string[] = [];
+
+  afterEach(async () => {
+    if (app) await app.close();
+    app = undefined;
+    chunks = [];
+  });
+
+  function build(providers: readonly CredentialProvider[]): FastifyInstance {
+    const stream = new PassThrough();
+    stream.on("data", (chunk: Buffer) => chunks.push(chunk.toString("utf-8")));
+    app = buildTesseraServer({
+      clients: CLIENTS,
+      policy: POLICY,
+      registry: createProviderRegistry(providers),
+      logger: pino({ level: "trace" }, stream),
+    });
+    return app;
+  }
+
+  function lines(): Array<Record<string, unknown>> {
+    return chunks
+      .join("")
+      .split("\n")
+      .filter((line) => line.trim() !== "")
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+  }
+
+  function auditLines(): Array<Record<string, unknown>> {
+    return lines().filter((line) => line.msg === "tessera.audit");
+  }
+
+  /** The single audit record logged so far; fails unless there is exactly one. */
+  function onlyAudit(): Record<string, unknown> {
+    const audits = auditLines();
+    expect(audits).toHaveLength(1);
+    const line = audits[0]!;
+    expect(line.level).toBe(30);
+    return line.audit as Record<string, unknown>;
+  }
+
+  /** `authorization: null` sends no Authorization header. */
+  function post(
+    body: unknown,
+    authorization: string | null = AUTH,
+    raw?: string,
+  ): Promise<LightMyRequestResponse> {
+    if (!app) throw new Error("app not built");
+    return app.inject({
+      method: "POST",
+      url: "/v1/github/token",
+      headers: {
+        "content-type": "application/json",
+        ...(authorization === null ? {} : { authorization }),
+      },
+      payload: raw ?? JSON.stringify(body),
+    });
+  }
+
+  const UNRESOLVED = {
+    identity: null,
+    provider: null,
+    repo: null,
+    access: null,
+    cache: "n/a",
+    expires_at: null,
+    subject: null,
+  };
+
+  it("records an issued cache miss with the subject echoed", async () => {
+    build([stubProvider()]);
+    const res = await post({ identity: "app", repo: "acme/widgets", access: "read", subject: "spawn-a" });
+    expect(res.statusCode).toBe(200);
+    expect(onlyAudit()).toEqual({
+      caller: "herald",
+      identity: "app",
+      provider: "github-app",
+      repo: "acme/widgets",
+      access: "read",
+      outcome: "issued",
+      reason: null,
+      cache: "miss",
+      expires_at: "2026-11-15T19:04:11Z",
+      subject: "spawn-a",
+    });
+  });
+
+  it("records an issued cache hit with no subject as null", async () => {
+    build([
+      stubProvider({
+        issue: async () => ({
+          token: SECRET_TOKEN,
+          expiresAt: "2026-11-15T20:00:00Z",
+          identity: "march-bot[bot]",
+          commitIdentity: null,
+          cache: "hit",
+        }),
+      }),
+    ]);
+    await post({ identity: "app", repo: "acme/widgets", access: "read" });
+    expect(onlyAudit()).toMatchObject({
+      outcome: "issued",
+      cache: "hit",
+      expires_at: "2026-11-15T20:00:00Z",
+      subject: null,
+    });
+  });
+
+  it("records a user issuance under the user provider", async () => {
+    build([stubProvider(), stubProvider({ id: "github-user", identity: "user" })]);
+    await post({ identity: "user", access: "write" }, LEGATE_AUTH);
+    expect(onlyAudit()).toMatchObject({
+      caller: "legate",
+      identity: "user",
+      provider: "github-user",
+      repo: null,
+      access: "write",
+      outcome: "issued",
+    });
+  });
+
+  const unauthenticated: Array<[string, string | null]> = [
+    ["no key", null],
+    ["an unknown key", "Bearer not-a-registered-key"],
+  ];
+  for (const [label, authorization] of unauthenticated) {
+    it(`records ${label} as caller unknown, denied unauthorized, fields null`, async () => {
+      build([stubProvider()]);
+      const res = await post({ identity: "app", repo: "acme/widgets", access: "read" }, authorization);
+      expect(res.statusCode).toBe(401);
+      expect(onlyAudit()).toEqual({
+        caller: "unknown",
+        outcome: "denied",
+        reason: "unauthorized",
+        ...UNRESOLVED,
+      });
+    });
+  }
+
+  it("records malformed JSON as denied invalid_request with the caller known", async () => {
+    build([stubProvider()]);
+    const res = await post(undefined, AUTH, "{not json");
+    expect(res.statusCode).toBe(400);
+    expect(onlyAudit()).toEqual({
+      caller: "herald",
+      outcome: "denied",
+      reason: "invalid_request",
+      ...UNRESOLVED,
+    });
+  });
+
+  it("records an invalid field as denied invalid_request with nothing resolved", async () => {
+    build([stubProvider()]);
+    const res = await post({ identity: "app", repo: "acme/widgets", access: "admin", subject: "s" });
+    expect(res.statusCode).toBe(400);
+    expect(onlyAudit()).toEqual({
+      caller: "herald",
+      outcome: "denied",
+      reason: "invalid_request",
+      ...UNRESOLVED,
+    });
+  });
+
+  const policyDenials: Array<[PolicyDimension, Record<string, unknown>, string]> = [
+    ["access", { identity: "app", repo: "acme/widgets", access: "write" }, AUTH],
+    ["repository", { identity: "app", repo: "other/widgets", access: "read" }, AUTH],
+    ["identity", { identity: "user", access: "read" }, AUTH],
+  ];
+  for (const [dimension, body, authorization] of policyDenials) {
+    it(`records a ${dimension} policy denial with the request fields and no provider`, async () => {
+      build([stubProvider(), stubProvider({ id: "github-user", identity: "user" })]);
+      const res = await post({ ...body, subject: "spawn-b" }, authorization);
+      expect(res.statusCode).toBe(403);
+      expect(onlyAudit()).toEqual({
+        caller: "herald",
+        identity: body.identity,
+        provider: null,
+        repo: body.repo ?? null,
+        access: body.access,
+        outcome: "denied",
+        reason: "policy_denied",
+        cache: "n/a",
+        expires_at: null,
+        subject: "spawn-b",
+      });
+    });
+  }
+
+  it("records repo_not_installed (422) as denied with the provider reached", async () => {
+    build([
+      stubProvider({
+        issue: async () => {
+          throw new RepoNotInstalledError("not installed");
+        },
+      }),
+    ]);
+    const res = await post({ identity: "app", repo: "acme/widgets", access: "read" });
+    expect(res.statusCode).toBe(422);
+    expect(onlyAudit()).toMatchObject({
+      provider: "github-app",
+      outcome: "denied",
+      reason: "repo_not_installed",
+      cache: "n/a",
+      expires_at: null,
+    });
+  });
+
+  it("records provider_unconfigured with no provider for the identity as failed, provider null", async () => {
+    build([]);
+    const res = await post({ identity: "app", repo: "acme/widgets", access: "read" });
+    expect(res.statusCode).toBe(503);
+    expect(onlyAudit()).toMatchObject({
+      identity: "app",
+      provider: null,
+      outcome: "failed",
+      reason: "provider_unconfigured",
+    });
+  });
+
+  const providerFailures: Array<[TesseraError, number, string]> = [
+    [new ProviderUnconfiguredError("unconfigured"), 503, "provider_unconfigured"],
+    [new CredentialInvalidError("rejected"), 503, "credential_invalid"],
+    [new ProviderUnavailableError("down", 5), 503, "provider_unavailable"],
+    [new MintFailedError("failed"), 502, "mint_failed"],
+  ];
+  for (const [error, status, code] of providerFailures) {
+    it(`records a provider ${code} (${status}) as failed`, async () => {
+      build([
+        stubProvider({
+          issue: async () => {
+            throw error;
+          },
+        }),
+      ]);
+      const res = await post({ identity: "app", repo: "acme/widgets", access: "read" });
+      expect(res.statusCode).toBe(status);
+      expect(onlyAudit()).toMatchObject({
+        caller: "herald",
+        provider: "github-app",
+        outcome: "failed",
+        reason: code,
+        cache: "n/a",
+        expires_at: null,
+      });
+    });
+  }
+
+  it("records an unexpected provider error as failed internal", async () => {
+    build([
+      stubProvider({
+        issue: async () => {
+          throw new Error(`boom ${SECRET_TOKEN}`);
+        },
+      }),
+    ]);
+    const res = await post({ identity: "app", repo: "acme/widgets", access: "read" });
+    expect(res.statusCode).toBe(500);
+    expect(onlyAudit()).toMatchObject({ provider: "github-app", outcome: "failed", reason: "internal" });
+  });
+
+  it("emits no audit event for any other route", async () => {
+    const built = build([stubProvider()]);
+    await built.inject({ method: "GET", url: "/healthz" });
+    await built.inject({ method: "GET", url: "/status" });
+    await built.inject({ method: "POST", url: "/v1/nope", headers: { authorization: AUTH } });
+    await built.inject({ method: "POST", url: "/v1/nope" });
+    await built.inject({ method: "GET", url: "/v1/github/token", headers: { authorization: AUTH } });
+    await built.inject({ method: "GET", url: "/nope" });
+    expect(lines().some((line) => line.msg === "tessera request handled")).toBe(true);
+    expect(auditLines()).toEqual([]);
+  });
+
+  it("logs the audit event beside the request line, never a token, key, hash or header", async () => {
+    build([stubProvider()]);
+    await post({ identity: "app", repo: "acme/widgets", access: "read" });
+    await post({ identity: "app", repo: "acme/widgets", access: "read" }, "Bearer unknown-key-do-not-log");
+    await post(undefined, AUTH, "{not json");
+    expect(auditLines()).toHaveLength(3);
+    expect(lines().filter((line) => line.msg === "tessera request handled")).toHaveLength(3);
+    for (const line of auditLines()) {
+      const text = JSON.stringify(line);
+      for (const leaked of [SECRET_TOKEN, CLIENT_KEY, CLIENT_KEY_SHA256, "unknown-key-do-not-log"]) {
+        expect(text).not.toContain(leaked);
+      }
+      expect(text.toLowerCase()).not.toContain("authorization");
+      expect(text.toLowerCase()).not.toContain("bearer");
+    }
   });
 });

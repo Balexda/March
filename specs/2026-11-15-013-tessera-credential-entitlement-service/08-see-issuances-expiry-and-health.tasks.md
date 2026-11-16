@@ -18,7 +18,7 @@
 
 ### Tasks
 
-- [ ] **Emit one audit event for every token request**
+- [x] **Emit one audit event for every token request**
 
   In `src/tessera/server.ts`, record what each token request resolved on a per-request context, and emit one `tessera.audit` event from the response hook, which also sees requests rejected by the authentication hook or the error handler. Build the event in a new `src/tessera/audit.ts` as a pure function that copies an allow-list of fields — exactly the Issuance Audit Record (data model). Satisfies the audit half of AS 8.1 and FR-015.
 
