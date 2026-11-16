@@ -536,6 +536,18 @@ describe("march CLI", () => {
       expect(result.exitCode).toBe(2);
       expect(result.stderr).toContain("TESSERA_CLIENT_KEYS_FILE is not set");
     });
+
+    it("`march tessera serve` with client keys but no policy file exits 2 naming the setting", () => {
+      const keysFile = path.join(makeTmpDir(), "clients.json");
+      fs.writeFileSync(keysFile, JSON.stringify([{ client: "herald", key_sha256: "a".repeat(64) }]));
+      const result = runWithEnv(["tessera", "serve"], {
+        TESSERA_CLIENT_KEYS_FILE: keysFile,
+        TESSERA_POLICY_FILE: undefined,
+      });
+      expect(result.exitCode).toBe(2);
+      expect(result.stderr).toContain("TESSERA_POLICY_FILE is not set");
+      expect(result.stderr).not.toContain(keysFile);
+    });
   });
 
   it("march version exits 0 and stdout contains the package version", () => {

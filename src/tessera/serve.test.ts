@@ -6,8 +6,12 @@
  * configured it registers the github-app provider (driven here against the
  * fake GitHub API) and mints, even after a GitHub outage at startup. Logs name
  * settings only, never their values, and it shuts down cleanly on a signal.
- * A missing, empty or invalid client-keys file (TESSERA_CLIENT_KEYS_FILE)
- * refuses startup before any GitHub call, with nothing listening.
+ * A missing, empty or invalid client-keys file (TESSERA_CLIENT_KEYS_FILE) or
+ * policy file (TESSERA_POLICY_FILE) refuses startup before any GitHub call,
+ * with nothing listening; the port is checked first, then the keys, then the
+ * policy. Against the running entrypoint with no GitHub App, an allowed
+ * request reaches the (absent) provider and an out-of-policy one is 403
+ * `policy_denied` (AS 2.2-2.5).
  */
 import { createHash, generateKeyPairSync } from "node:crypto";
 import { EventEmitter } from "node:events";
@@ -20,7 +24,7 @@ import pino from "pino";
 import { afterEach, describe, expect, it } from "vitest";
 import { GitHubClient } from "./providers/github-app/github-client.js";
 import { startFakeGitHub, type FakeGitHub } from "./testing/fake-github.js";
-import { TesseraValidationError } from "./types.js";
+import { POLICY_DENIED_MESSAGES, TesseraValidationError } from "./types.js";
 import { runTesseraServer } from "./serve.js";
 
 const CLIENT_KEY = "tessera-serve-test-client-key";
@@ -150,6 +154,11 @@ describe("runTesseraServer", () => {
     expect(output).not.toContain(CLIENT_KEY_SHA256);
     expect(output).not.toContain(clientKeysFile());
     expect(output).not.toContain(path.dirname(clientKeysFile()));
+    // The policy log names the setting and the rule count, never the path,
+    // a client's rule or a repository.
+    expect(output).toContain("policy loaded from TESSERA_POLICY_FILE: 1 rule");
+    expect(output).not.toContain(policyFile());
+    expect(output).not.toContain("acme");
 
     // The port is released after shutdown.
     await expect(fetch(`http://127.0.0.1:${port}/healthz`)).rejects.toThrow();
@@ -164,6 +173,25 @@ describe("runTesseraServer", () => {
   it("reports an invalid port before a client-keys file problem", async () => {
     await expect(
       runTesseraServer({ port: "9689x", env: { TESSERA_CLIENT_KEYS_FILE: "/no/such/clients.json" } }),
+    ).rejects.toThrow(/Invalid Tessera port/);
+  });
+
+  it("reports a client-keys file problem before a policy file problem", async () => {
+    const err = await runTesseraServer({
+      port: await freePort(),
+      env: { TESSERA_POLICY_FILE: "/no/such/policy.json" },
+    }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(TesseraValidationError);
+    expect((err as Error).message).toContain("TESSERA_CLIENT_KEYS_FILE");
+    expect((err as Error).message).not.toContain("TESSERA_POLICY_FILE");
+  });
+
+  it("reports an invalid port before a policy file problem", async () => {
+    await expect(
+      runTesseraServer({
+        port: "9689x",
+        env: { TESSERA_CLIENT_KEYS_FILE: clientKeysFile(), TESSERA_POLICY_FILE: "/no/such/policy.json" },
+      }),
     ).rejects.toThrow(/Invalid Tessera port/);
   });
 
@@ -256,6 +284,239 @@ describe("runTesseraServer", () => {
           await fake.close();
           fs.rmSync(keyDir, { recursive: true, force: true });
         }
+      });
+    }
+  });
+
+  describe("refuses to start without a valid policy file", () => {
+    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    // Distinctive values that must never appear in a load error.
+    const SENTINEL_OWNER = "sentinelowner";
+    const SENTINEL_CLIENT = "sentinelclient";
+    let dir: string | undefined;
+
+    afterEach(() => {
+      if (dir) fs.rmSync(dir, { recursive: true, force: true });
+      dir = undefined;
+    });
+
+    function writeFile(contents: string): string {
+      dir ??= fs.mkdtempSync(path.join(os.tmpdir(), "tessera-bad-policy-"));
+      const file = path.join(dir, "policy.json");
+      fs.writeFileSync(file, contents);
+      return file;
+    }
+
+    const appRule = { client: "herald", identities: ["app"], repos: [`${SENTINEL_OWNER}/*`], max_access: "read" };
+    const cases: Array<{ name: string; file: () => string | undefined }> = [
+      { name: "the setting is unset", file: () => undefined },
+      { name: "the file is missing", file: () => path.join(os.tmpdir(), "tessera-no-such-dir", "policy.json") },
+      { name: "the file is empty", file: () => writeFile("") },
+      { name: "the file is not JSON", file: () => writeFile(`[{"client": "${SENTINEL_CLIENT}"`) },
+      { name: "the rule list is empty", file: () => writeFile("[]") },
+      {
+        name: "a rule names an unregistered client",
+        file: () => writeFile(JSON.stringify([{ ...appRule, client: SENTINEL_CLIENT }])),
+      },
+      {
+        name: "a non-legate client is granted user",
+        file: () => writeFile(JSON.stringify([{ client: "herald", identities: ["user"], max_access: "read" }])),
+      },
+      {
+        name: "a repository entry is a bare *",
+        file: () => writeFile(JSON.stringify([{ ...appRule, repos: ["*"] }])),
+      },
+      {
+        name: "an app rule has no repositories",
+        file: () => writeFile(JSON.stringify([{ client: "herald", identities: ["app"], max_access: "read" }])),
+      },
+      {
+        name: "a client has a second rule",
+        file: () => writeFile(JSON.stringify([appRule, { ...appRule, max_access: "write" }])),
+      },
+    ];
+
+    for (const { name, file } of cases) {
+      it(`when ${name}: rejects, names the setting, and nothing listens`, async () => {
+        const fake = await startFakeGitHub({
+          app: { id: 42, slug: "march-bot" },
+          botUserId: 123456,
+          installations: { acme: { id: 7 } },
+        });
+        const keyDir = fs.mkdtempSync(path.join(os.tmpdir(), "tessera-serve-"));
+        try {
+          // A configured GitHub App: a bad policy must fail before any GitHub call.
+          const keyFile = path.join(keyDir, "app.pem");
+          fs.writeFileSync(keyFile, privateKey.export({ type: "pkcs8", format: "pem" }).toString(), {
+            mode: 0o600,
+          });
+          const policy = file();
+          const env: NodeJS.ProcessEnv = {
+            TESSERA_GITHUB_APP_ID: "42",
+            TESSERA_GITHUB_APP_KEY_FILE: keyFile,
+            TESSERA_CLIENT_KEYS_FILE: clientKeysFile(),
+          };
+          if (policy !== undefined) env.TESSERA_POLICY_FILE = policy;
+          const port = await freePort();
+          const { logger, lines } = captureLogger();
+
+          const err = await runTesseraServer({
+            port,
+            host: "127.0.0.1",
+            env,
+            logger,
+            signals: new EventEmitter(),
+            githubClient: new GitHubClient({ baseUrl: fake.baseUrl }),
+          }).catch((e: unknown) => e);
+
+          expect(err).toBeInstanceOf(TesseraValidationError);
+          const message = (err as Error).message;
+          expect(message).toContain("TESSERA_POLICY_FILE");
+          if (policy !== undefined) {
+            expect(message).not.toContain(policy);
+            expect(message).not.toContain(path.dirname(policy));
+          }
+          expect(message).not.toContain(SENTINEL_OWNER);
+          expect(message).not.toContain(SENTINEL_CLIENT);
+          expect(message).not.toContain("herald");
+          expect(fake.calls).toHaveLength(0);
+          expect(lines()).toEqual([]);
+          await expect(fetch(`http://127.0.0.1:${port}/healthz`)).rejects.toThrow();
+        } finally {
+          await fake.close();
+          fs.rmSync(keyDir, { recursive: true, force: true });
+        }
+      });
+    }
+  });
+
+  describe("enforces the policy with no GitHub App configured", () => {
+    // herald: app read on acme/*; legate: app write on acme/widgets plus user;
+    // scribe: registered, but has no rule.
+    const KEYS = { herald: "serve-herald-key", legate: "serve-legate-key", scribe: "serve-scribe-key" };
+    let dir: string | undefined;
+    let running: Promise<void> | undefined;
+    let signals: EventEmitter | undefined;
+
+    afterEach(async () => {
+      signals?.emit("SIGTERM");
+      await running;
+      running = undefined;
+      signals = undefined;
+      if (dir) fs.rmSync(dir, { recursive: true, force: true });
+      dir = undefined;
+    });
+
+    async function start() {
+      dir = fs.mkdtempSync(path.join(os.tmpdir(), "tessera-policy-"));
+      const keysFile = path.join(dir, "clients.json");
+      fs.writeFileSync(
+        keysFile,
+        JSON.stringify(
+          Object.entries(KEYS).map(([client, key]) => ({
+            client,
+            key_sha256: createHash("sha256").update(key, "utf8").digest("hex"),
+          })),
+        ),
+      );
+      const policy = path.join(dir, "policy.json");
+      fs.writeFileSync(
+        policy,
+        JSON.stringify([
+          { client: "herald", identities: ["app"], repos: ["acme/*"], max_access: "read" },
+          { client: "legate", identities: ["app", "user"], repos: ["acme/widgets"], max_access: "write" },
+        ]),
+      );
+      const port = await freePort();
+      signals = new EventEmitter();
+      const { logger, lines } = captureLogger();
+      running = runTesseraServer({
+        port,
+        host: "127.0.0.1",
+        env: { TESSERA_CLIENT_KEYS_FILE: keysFile, TESSERA_POLICY_FILE: policy },
+        logger,
+        signals,
+      });
+      await waitForHealthz(`http://127.0.0.1:${port}/healthz`);
+      return { port, lines, policy };
+    }
+
+    async function request(port: number, client: keyof typeof KEYS, body: unknown) {
+      const res = await fetch(`http://127.0.0.1:${port}/v1/github/token`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${KEYS[client]}` },
+        body: JSON.stringify(body),
+      });
+      const json = (await res.json()) as { error: { code: string; message: string } };
+      return { status: res.status, code: json.error.code, message: json.error.message };
+    }
+
+    it("starts with a rule-less registered client and logs the rule count only", async () => {
+      const h = await start();
+      const output = h.lines().join("\n");
+      expect(output).toContain("client keys loaded from TESSERA_CLIENT_KEYS_FILE: 3 registered clients");
+      expect(output).toContain("policy loaded from TESSERA_POLICY_FILE: 2 rules");
+      expect(output).not.toContain(h.policy);
+      expect(output).not.toContain("acme");
+    });
+
+    it("lets an allowed request reach the provider lookup (provider_unconfigured)", async () => {
+      const h = await start();
+      expect(await request(h.port, "herald", { identity: "app", repo: "ACME/Gadgets", access: "read" })).toMatchObject({
+        status: 503,
+        code: "provider_unconfigured",
+      });
+      expect(await request(h.port, "legate", { identity: "user", access: "write" })).toMatchObject({
+        status: 503,
+        code: "provider_unconfigured",
+      });
+    });
+
+    const denials: Array<{
+      name: string;
+      client: keyof typeof KEYS;
+      body: Record<string, unknown>;
+      dimension: keyof typeof POLICY_DENIED_MESSAGES;
+    }> = [
+      {
+        name: "access above the ceiling",
+        client: "herald",
+        body: { identity: "app", repo: "acme/widgets", access: "write" },
+        dimension: "access",
+      },
+      {
+        name: "a repository outside the allowlist",
+        client: "herald",
+        body: { identity: "app", repo: "other/widgets", access: "read" },
+        dimension: "repository",
+      },
+      {
+        name: "another repository of an exact-entry owner",
+        client: "legate",
+        body: { identity: "app", repo: "acme/gadgets", access: "read" },
+        dimension: "repository",
+      },
+      {
+        name: "user from a non-legate client",
+        client: "herald",
+        body: { identity: "user", access: "read" },
+        dimension: "identity",
+      },
+      {
+        name: "a registered client with no rule",
+        client: "scribe",
+        body: { identity: "app", repo: "acme/widgets", access: "read" },
+        dimension: "identity",
+      },
+    ];
+
+    for (const { name, client, body, dimension } of denials) {
+      it(`denies ${name} with 403 policy_denied`, async () => {
+        const h = await start();
+        const res = await request(h.port, client, body);
+        expect(res).toEqual({ status: 403, code: "policy_denied", message: POLICY_DENIED_MESSAGES[dimension] });
+        expect(res.message).not.toContain("acme");
+        expect(res.message).not.toContain("other");
       });
     }
   });

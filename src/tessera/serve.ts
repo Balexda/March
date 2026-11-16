@@ -8,6 +8,7 @@ import {
   TESSERA_GITHUB_APP_ID_ENV,
   TESSERA_GITHUB_APP_KEY_FILE_ENV,
   TESSERA_GITHUB_INSTALLATION_ID_ENV,
+  TESSERA_POLICY_FILE_ENV,
   TESSERA_SERVICE_NAME,
   resolveGitHubAppConfig,
   resolveTesseraPort,
@@ -73,11 +74,16 @@ export async function runTesseraServer(options: RunTesseraServerOptions = {}): P
     startedAt: Date.now(),
   });
 
-  // Log setting names only - never the app id, key path, or key contents, and
-  // never the client-keys file path or any of its hashes.
+  // Log setting names and counts only - never the app id, key path, or key
+  // contents, never the client-keys file path or any of its hashes, and never
+  // the policy file path, a rule, a client's grants or a repository.
   app.log.info(
     `client keys loaded from ${TESSERA_CLIENT_KEYS_FILE_ENV}: ${clients.size} registered ` +
       `client${clients.size === 1 ? "" : "s"}`,
+  );
+  app.log.info(
+    `policy loaded from ${TESSERA_POLICY_FILE_ENV}: ${policy.size} ` +
+      `rule${policy.size === 1 ? "" : "s"}`,
   );
   if (appConfig.configured) {
     const settings = [TESSERA_GITHUB_APP_ID_ENV, TESSERA_GITHUB_APP_KEY_FILE_ENV];

@@ -106,7 +106,7 @@
   - The denial message names the dimension denied, never the allowlist or the submitted repository
   - Changing or omitting `subject` never changes an outcome
 
-- [ ] **Load the policy at startup**
+- [x] **Load the policy at startup**
 
   In `src/tessera/serve.ts`, load the policy after the client registry and pass both to the server, so an invalid policy fails startup with nothing listening. Extend `src/tessera/serve.test.ts`.
 
