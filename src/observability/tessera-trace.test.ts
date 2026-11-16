@@ -6,7 +6,7 @@ import { getActiveOtel, initOtel } from "./otel.js";
 import { emitTesseraSpan } from "./tessera-trace.js";
 import { traceIdForDispatch, spanIdForDispatch } from "./trace-ids.js";
 it("nests errored issuance under the deterministic slice and records discovery failure safely", async () => {
-  const otel = initOtel({MARCH_OTEL:"1"});
+  initOtel({MARCH_OTEL:"1"});
   const tracer = getActiveOtel().getTracer(); const real = tracer.startSpan.bind(tracer); const spans: Span[] = [];
   vi.spyOn(tracer,"startSpan").mockImplementation((...args: Parameters<typeof real>) => { const span = real(...args) as Span; spans.push(span); return span; });
   try {
@@ -16,5 +16,6 @@ it("nests errored issuance under the deterministic slice and records discovery f
     expect(spans[0].parentSpanContext?.spanId).toBe(spanIdForDispatch("slice-1"));
     expect(spans.map(span => span.status.code)).toEqual([SpanStatusCode.ERROR,SpanStatusCode.ERROR]);
     expect(spans[0].attributes).toEqual({outcome:"denied"});
-  } finally { vi.restoreAllMocks(); await otel.shutdown(); initOtel({}); }
+  // Repo convention: reset to the no-op handle without awaiting shutdown(); its OTLP flush blocks past the test timeout when no collector runs (CI).
+  } finally { vi.restoreAllMocks(); initOtel({}); }
 });
