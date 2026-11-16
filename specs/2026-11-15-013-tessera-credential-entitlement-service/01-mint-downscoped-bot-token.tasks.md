@@ -95,7 +95,7 @@
 
 ### Tasks
 
-- [ ] **Sign the GitHub App assertion with node:crypto**
+- [x] **Sign the GitHub App assertion with node:crypto**
 
   Add a signer module under `src/tessera/providers/github-app/` that produces the short-lived RS256 app assertion from the app id and the private key file. The repository has no JWT dependency and none is added. An unreadable or unparseable key is a `credential_invalid` condition.
 
