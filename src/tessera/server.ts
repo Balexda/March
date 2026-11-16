@@ -1,5 +1,6 @@
 import Fastify, { type FastifyBaseLogger, type FastifyInstance } from "fastify";
 import type { ClientRegistry } from "./auth/client-keys.js";
+import { type Policy, authorize } from "./auth/policy.js";
 import { TESSERA_SERVICE_NAME } from "./config.js";
 import { isValidRepo } from "./repo-name.js";
 import {
@@ -68,6 +69,12 @@ export interface BuildTesseraServerOptions {
    * Required: there is no unauthenticated mode.
    */
   readonly clients: ClientRegistry;
+  /**
+   * The per-client policy every token request is authorized against, after
+   * validation and before any provider is looked up. Required: there is no
+   * allow-all mode; a client with no rule is denied.
+   */
+  readonly policy: Policy;
   readonly logger?: FastifyBaseLogger | boolean;
   readonly startedAt?: number;
 }
@@ -219,12 +226,13 @@ function providerReport(provider: CredentialProvider): ProviderReport {
  * Build the Tessera HTTP server. Every `/v1/*` request must present a
  * registered client's bearer key, checked before the body is parsed; the
  * route holds no GitHub-specific logic, validates, dispatches on `identity`,
- * and maps typed errors to the contract envelope. Authorization (policy) is
- * not applied yet: any authenticated client may request anything. Request and
+ * and maps typed errors to the contract envelope. Order: authenticate,
+ * validate, authorize against the client's policy rule (default deny, 403
+ * `policy_denied`), then dispatch to a provider. Request and
  * response bodies, keys and the Authorization header are never logged.
  */
 export function buildTesseraServer(options: BuildTesseraServerOptions): FastifyInstance {
-  const { registry, clients } = options;
+  const { registry, clients, policy } = options;
   const startedAt = options.startedAt ?? Date.now();
   const loggerOption = options.logger ?? false;
   const app =
@@ -310,6 +318,17 @@ export function buildTesseraServer(options: BuildTesseraServerOptions): FastifyI
 
   app.post("/v1/github/token", async (request): Promise<Entitlement> => {
     const req = parseEntitlementRequest(request.body);
+    // The auth hook always sets the client on /v1 routes; fail closed if not.
+    const client = request.tesseraClient;
+    if (client === undefined) throw new UnauthorizedError();
+    // Authorize before any provider lookup, so a denial never reaches a
+    // provider or reports provider_unconfigured. `subject` is not passed: it
+    // never affects a decision.
+    authorize(policy, client, {
+      identity: req.identity,
+      access: req.access,
+      ...(req.repo !== undefined ? { repo: req.repo } : {}),
+    });
     const provider = registry.get(req.identity);
     // Strict identity match: no error path substitutes one identity for another.
     if (!provider || provider.identity !== req.identity) {

@@ -14,6 +14,7 @@ import { TESSERA_SERVICE_NAME } from "./config.js";
 import { GitHubClient } from "./providers/github-app/github-client.js";
 import { createGitHubAppProvider } from "./providers/github-app/provider.js";
 import { parseClientRegistry } from "./auth/client-keys.js";
+import { parsePolicy } from "./auth/policy.js";
 import { startFakeGitHub, type FakeGitHub, type FakeGitHubOptions } from "./testing/fake-github.js";
 import { buildTesseraServer, createProviderRegistry } from "./server.js";
 import {
@@ -22,6 +23,8 @@ import {
   type CredentialProvider,
   type Identity,
   MintFailedError,
+  POLICY_DENIED_MESSAGES,
+  type PolicyDimension,
   type ProviderId,
   type ProviderIssueRequest,
   type ProviderIssueResult,
@@ -38,15 +41,36 @@ const SECRET_TOKEN = "ghs_SECRETTOKENVALUE1234567890";
 /** The test caller's bearer key; only its SHA-256 is registered. */
 const CLIENT_KEY = "tessera-test-client-key-do-not-log";
 const OTHER_CLIENT_KEY = "tessera-other-client-key-do-not-log";
+const RULELESS_CLIENT_KEY = "tessera-ruleless-client-key-do-not-log";
 const sha256Hex = (value: string) => createHash("sha256").update(value, "utf8").digest("hex");
 const CLIENT_KEY_SHA256 = sha256Hex(CLIENT_KEY);
 const CLIENTS = parseClientRegistry(
   JSON.stringify([
     { client: "herald", key_sha256: CLIENT_KEY_SHA256 },
     { client: "legate", key_sha256: sha256Hex(OTHER_CLIENT_KEY) },
+    { client: "brood", key_sha256: sha256Hex(RULELESS_CLIENT_KEY) },
   ]),
 );
+/** herald's key: `app` read on any `acme` repository. */
 const AUTH = `Bearer ${CLIENT_KEY}`;
+/** legate's key: `app` + `user` write on its allowlist. */
+const LEGATE_AUTH = `Bearer ${OTHER_CLIENT_KEY}`;
+/** brood's key: registered, but brood has no policy rule. */
+const RULELESS_AUTH = `Bearer ${RULELESS_CLIENT_KEY}`;
+/** Allowlist entries no response body or log line may ever contain. */
+const ALLOWLIST_ENTRIES = ["acme/*", "acme/widgets", "acme/secret-repo", "octo/*"] as const;
+const POLICY = parsePolicy(
+  JSON.stringify([
+    { client: "herald", identities: ["app"], repos: ["acme/*"], max_access: "read" },
+    {
+      client: "legate",
+      identities: ["app", "user"],
+      repos: ["acme/widgets", "acme/secret-repo", "octo/*"],
+      max_access: "write",
+    },
+  ]),
+  CLIENTS.clients(),
+);
 
 interface StubOptions {
   readonly id?: ProviderId;
@@ -113,18 +137,18 @@ describe("tessera server", () => {
     app = undefined;
   });
 
-  async function postToken(body: unknown, raw?: string) {
+  async function postToken(body: unknown, raw?: string, authorization: string = AUTH) {
     if (!app) throw new Error("app not built");
     return app.inject({
       method: "POST",
       url: "/v1/github/token",
-      headers: { "content-type": "application/json", authorization: AUTH },
+      headers: { "content-type": "application/json", authorization },
       payload: raw ?? JSON.stringify(body),
     });
   }
 
   it("answers /healthz with ok", async () => {
-    app = buildTesseraServer({ clients: CLIENTS, registry: createProviderRegistry([]) });
+    app = buildTesseraServer({ clients: CLIENTS, policy: POLICY, registry: createProviderRegistry([]) });
     const res = await app.inject({ method: "GET", url: "/healthz" });
     expect(res.statusCode).toBe(200);
     expect(res.json()).toEqual({ status: "ok" });
@@ -133,7 +157,7 @@ describe("tessera server", () => {
   it("reports the minimal /status shape", async () => {
     const startedAt = Date.now() - 5_000;
     app = buildTesseraServer({
-      clients: CLIENTS,
+      clients: CLIENTS, policy: POLICY,
       registry: createProviderRegistry([unconfiguredAppProvider()]),
       startedAt,
     });
@@ -161,7 +185,7 @@ describe("tessera server", () => {
 
   it("reports the soonest expiry and summed cache entries from providers", async () => {
     app = buildTesseraServer({
-      clients: CLIENTS,
+      clients: CLIENTS, policy: POLICY,
       registry: createProviderRegistry([
         stubProvider({
           status: { credential_expires_at: "2027-01-01T00:00:00Z" },
@@ -192,7 +216,7 @@ describe("tessera server", () => {
       },
       cacheEntries: () => 5,
     };
-    app = buildTesseraServer({ clients: CLIENTS, registry: createProviderRegistry([broken, healthy]) });
+    app = buildTesseraServer({ clients: CLIENTS, policy: POLICY, registry: createProviderRegistry([broken, healthy]) });
     const res = await app.inject({ method: "GET", url: "/status" });
     expect(res.statusCode).toBe(200);
     const body = res.json();
@@ -216,7 +240,7 @@ describe("tessera server", () => {
         throw new TypeError("cache broke");
       },
     };
-    app = buildTesseraServer({ clients: CLIENTS, registry: createProviderRegistry([broken]) });
+    app = buildTesseraServer({ clients: CLIENTS, policy: POLICY, registry: createProviderRegistry([broken]) });
     const res = await app.inject({ method: "GET", url: "/status" });
     expect(res.statusCode).toBe(200);
     const body = res.json();
@@ -231,14 +255,14 @@ describe("tessera server", () => {
 
   it("issues an entitlement through the registered provider", async () => {
     const provider = stubProvider();
-    app = buildTesseraServer({ clients: CLIENTS, registry: createProviderRegistry([provider]) });
+    app = buildTesseraServer({ clients: CLIENTS, policy: POLICY, registry: createProviderRegistry([provider]) });
     const res = await postToken({
       identity: "app",
       repo: "acme/widgets",
       access: "write",
       refresh: true,
       subject: "spawn-1",
-    });
+    }, undefined, LEGATE_AUTH);
     expect(res.statusCode).toBe(200);
     expect(res.json()).toEqual({
       token: SECRET_TOKEN,
@@ -280,7 +304,7 @@ describe("tessera server", () => {
     for (const [label, body, raw] of cases) {
       it(`rejects ${label}`, async () => {
         const provider = stubProvider();
-        app = buildTesseraServer({ clients: CLIENTS, registry: createProviderRegistry([provider]) });
+        app = buildTesseraServer({ clients: CLIENTS, policy: POLICY, registry: createProviderRegistry([provider]) });
         const res = await postToken(body, raw);
         expect(res.statusCode).toBe(400);
         expect(res.json()).toEqual({
@@ -291,7 +315,7 @@ describe("tessera server", () => {
     }
 
     it("rejects an empty body", async () => {
-      app = buildTesseraServer({ clients: CLIENTS, registry: createProviderRegistry([]) });
+      app = buildTesseraServer({ clients: CLIENTS, policy: POLICY, registry: createProviderRegistry([]) });
       const res = await app.inject({
         method: "POST",
         url: "/v1/github/token",
@@ -303,7 +327,7 @@ describe("tessera server", () => {
   });
 
   it("returns provider_unconfigured for an unconfigured app provider and stays healthy", async () => {
-    app = buildTesseraServer({ clients: CLIENTS, registry: createProviderRegistry([unconfiguredAppProvider()]) });
+    app = buildTesseraServer({ clients: CLIENTS, policy: POLICY, registry: createProviderRegistry([unconfiguredAppProvider()]) });
     const res = await postToken({ identity: "app", repo: "acme/widgets", access: "read" });
     expect(res.statusCode).toBe(503);
     expect(res.json()).toEqual({
@@ -315,7 +339,7 @@ describe("tessera server", () => {
   });
 
   it("returns provider_unconfigured when no provider is registered for the identity", async () => {
-    app = buildTesseraServer({ clients: CLIENTS, registry: createProviderRegistry([]) });
+    app = buildTesseraServer({ clients: CLIENTS, policy: POLICY, registry: createProviderRegistry([]) });
     const res = await postToken({ identity: "app", repo: "acme/widgets", access: "read" });
     expect(res.statusCode).toBe(503);
     expect(res.json().error.code).toBe("provider_unconfigured");
@@ -323,8 +347,8 @@ describe("tessera server", () => {
 
   it("never serves a user request with the app provider (FR-009)", async () => {
     const appProvider = stubProvider();
-    app = buildTesseraServer({ clients: CLIENTS, registry: createProviderRegistry([appProvider]) });
-    const res = await postToken({ identity: "user", access: "read" });
+    app = buildTesseraServer({ clients: CLIENTS, policy: POLICY, registry: createProviderRegistry([appProvider]) });
+    const res = await postToken({ identity: "user", access: "read" }, undefined, LEGATE_AUTH);
     expect(res.statusCode).toBe(503);
     expect(res.json().error.code).toBe("provider_unconfigured");
     expect(appProvider.issue).not.toHaveBeenCalled();
@@ -343,8 +367,8 @@ describe("tessera server", () => {
       }),
     });
     const appProvider = stubProvider();
-    app = buildTesseraServer({ clients: CLIENTS, registry: createProviderRegistry([appProvider, userProvider]) });
-    const res = await postToken({ identity: "user", repo: "acme/widgets", access: "read" });
+    app = buildTesseraServer({ clients: CLIENTS, policy: POLICY, registry: createProviderRegistry([appProvider, userProvider]) });
+    const res = await postToken({ identity: "user", repo: "acme/widgets", access: "read" }, undefined, LEGATE_AUTH);
     expect(res.statusCode).toBe(200);
     expect(res.json()).toMatchObject({ identity: "octocat", repo: null, commit_identity: null });
     expect(appProvider.issue).not.toHaveBeenCalled();
@@ -368,7 +392,7 @@ describe("tessera server", () => {
     for (const [error, status, code] of cases) {
       it(`maps ${code} to ${status}`, async () => {
         app = buildTesseraServer({
-          clients: CLIENTS,
+          clients: CLIENTS, policy: POLICY,
           registry: createProviderRegistry([
             stubProvider({
               issue: async () => {
@@ -390,7 +414,7 @@ describe("tessera server", () => {
 
     it("maps a non-Tessera error carrying a 4xx statusCode to 500 internal", async () => {
       app = buildTesseraServer({
-        clients: CLIENTS,
+        clients: CLIENTS, policy: POLICY,
         registry: createProviderRegistry([
           stubProvider({
             issue: async () => {
@@ -408,7 +432,7 @@ describe("tessera server", () => {
 
     it("maps a non-Fastify error with an FST-like status but no FST code to 500", async () => {
       app = buildTesseraServer({
-        clients: CLIENTS,
+        clients: CLIENTS, policy: POLICY,
         registry: createProviderRegistry([
           stubProvider({
             issue: async () => {
@@ -424,7 +448,7 @@ describe("tessera server", () => {
 
     it("maps an unexpected provider failure to 500 internal without echoing it", async () => {
       app = buildTesseraServer({
-        clients: CLIENTS,
+        clients: CLIENTS, policy: POLICY,
         registry: createProviderRegistry([
           stubProvider({
             issue: async () => {
@@ -448,7 +472,7 @@ describe("tessera server", () => {
     stream.on("data", (chunk: Buffer) => chunks.push(chunk.toString("utf-8")));
     const logger = pino({ level: "trace" }, stream);
     app = buildTesseraServer({
-      clients: CLIENTS,
+      clients: CLIENTS, policy: POLICY,
       registry: createProviderRegistry([
         stubProvider(),
         stubProvider({
@@ -467,10 +491,10 @@ describe("tessera server", () => {
       repo: "acme/widgets",
       access: "write",
       subject: "subject-do-not-log",
-    });
+    }, undefined, LEGATE_AUTH);
     expect(ok.statusCode).toBe(200);
     expect(ok.json().token).toBe(SECRET_TOKEN);
-    const failed = await postToken({ identity: "user", access: "read" });
+    const failed = await postToken({ identity: "user", access: "read" }, undefined, LEGATE_AUTH);
     expect(failed.statusCode).toBe(500);
     const status = await app.inject({ method: "GET", url: "/status" });
 
@@ -527,7 +551,7 @@ describe("tessera server", () => {
     for (const [label, authorization] of rejected) {
       it(`rejects ${label} with the fixed unauthorized response and reaches no provider`, async () => {
         const provider = stubProvider();
-        app = buildTesseraServer({ clients: CLIENTS, registry: createProviderRegistry([provider]) });
+        app = buildTesseraServer({ clients: CLIENTS, policy: POLICY, registry: createProviderRegistry([provider]) });
         expectUnauthorized(await inject("/v1/github/token", authorization));
         expect(provider.issue).not.toHaveBeenCalled();
       });
@@ -535,7 +559,7 @@ describe("tessera server", () => {
 
     it("accepts the bearer scheme case-insensitively", async () => {
       const provider = stubProvider();
-      app = buildTesseraServer({ clients: CLIENTS, registry: createProviderRegistry([provider]) });
+      app = buildTesseraServer({ clients: CLIENTS, policy: POLICY, registry: createProviderRegistry([provider]) });
       const res = await inject("/v1/github/token", `bearer ${CLIENT_KEY}`);
       expect(res.statusCode).toBe(200);
       expect(provider.issue).toHaveBeenCalledTimes(1);
@@ -543,7 +567,7 @@ describe("tessera server", () => {
 
     it("authenticates before body validation", async () => {
       const provider = stubProvider();
-      app = buildTesseraServer({ clients: CLIENTS, registry: createProviderRegistry([provider]) });
+      app = buildTesseraServer({ clients: CLIENTS, policy: POLICY, registry: createProviderRegistry([provider]) });
       expectUnauthorized(await inject("/v1/github/token", "Bearer unknown", "{not json"));
       expectUnauthorized(await inject("/v1/github/token", undefined, JSON.stringify({ scope: "x" })));
       const valid = await inject("/v1/github/token", AUTH, "{not json");
@@ -553,7 +577,7 @@ describe("tessera server", () => {
     });
 
     it("rejects an unmatched /v1 path as unauthorized, and 404s it only with a valid key", async () => {
-      app = buildTesseraServer({ clients: CLIENTS, registry: createProviderRegistry([stubProvider()]) });
+      app = buildTesseraServer({ clients: CLIENTS, policy: POLICY, registry: createProviderRegistry([stubProvider()]) });
       expectUnauthorized(await inject("/v1/nope", undefined));
       expectUnauthorized(await inject("/v1", undefined, VALID_BODY, "GET"));
       expectUnauthorized(await inject("/v1/nope?x=1", "Bearer unknown"));
@@ -564,14 +588,14 @@ describe("tessera server", () => {
 
     it("cannot reach a /v1 route through a percent-encoded path without a key", async () => {
       const provider = stubProvider();
-      app = buildTesseraServer({ clients: CLIENTS, registry: createProviderRegistry([provider]) });
+      app = buildTesseraServer({ clients: CLIENTS, policy: POLICY, registry: createProviderRegistry([provider]) });
       const res = await inject("/%761/github/token", undefined);
       expect(res.statusCode).not.toBe(200);
       expect(provider.issue).not.toHaveBeenCalled();
     });
 
     it("leaves /healthz and /status open", async () => {
-      app = buildTesseraServer({ clients: CLIENTS, registry: createProviderRegistry([stubProvider()]) });
+      app = buildTesseraServer({ clients: CLIENTS, policy: POLICY, registry: createProviderRegistry([stubProvider()]) });
       const health = await inject("/healthz", undefined, VALID_BODY, "GET");
       expect(health.statusCode).toBe(200);
       const status = await inject("/status", "Bearer unknown", VALID_BODY, "GET");
@@ -580,7 +604,7 @@ describe("tessera server", () => {
 
     it("exposes the authenticated client name to the route, never in the response", async () => {
       const provider = stubProvider();
-      app = buildTesseraServer({ clients: CLIENTS, registry: createProviderRegistry([provider]) });
+      app = buildTesseraServer({ clients: CLIENTS, policy: POLICY, registry: createProviderRegistry([provider]) });
       const seen: Array<string | undefined> = [];
       app.get("/v1/test/caller", async (request) => {
         seen.push(request.tesseraClient);
@@ -606,7 +630,7 @@ describe("tessera server", () => {
       const chunks: string[] = [];
       stream.on("data", (chunk: Buffer) => chunks.push(chunk.toString("utf-8")));
       app = buildTesseraServer({
-        clients: CLIENTS,
+        clients: CLIENTS, policy: POLICY,
         registry: createProviderRegistry([stubProvider()]),
         logger: pino({ level: "trace" }, stream),
       });
@@ -625,6 +649,153 @@ describe("tessera server", () => {
         expect(text).not.toContain("unknown-key-do-not-log");
         expect(text.toLowerCase()).not.toContain("authorization");
         expect(text.toLowerCase()).not.toContain("bearer");
+      }
+    });
+  });
+
+  describe("policy authorization (AS 2.2-2.5, FR-015)", () => {
+    type Body = Record<string, unknown>;
+    const denied = (dimension: PolicyDimension) => ({
+      error: { code: "policy_denied", message: POLICY_DENIED_MESSAGES[dimension] },
+    });
+
+    /** Both providers registered, so only the policy can stop a request. */
+    function buildWithProviders() {
+      const appProvider = stubProvider();
+      const userProvider = stubProvider({ id: "github-user", identity: "user" });
+      app = buildTesseraServer({
+        clients: CLIENTS,
+        policy: POLICY,
+        registry: createProviderRegistry([appProvider, userProvider]),
+      });
+      return { appProvider, userProvider };
+    }
+
+    async function expectDenied(
+      body: Body,
+      authorization: string,
+      dimension: PolicyDimension,
+    ): Promise<LightMyRequestResponse> {
+      const res = await postToken(body, undefined, authorization);
+      expect(res.statusCode).toBe(403);
+      expect(res.json()).toEqual(denied(dimension));
+      return res;
+    }
+
+    /** Each outcome must be identical with subject absent, present, or changed. */
+    const subjects: ReadonlyArray<Body> = [{}, { subject: "spawn-a" }, { subject: "legate" }, { subject: "" }];
+
+    const deniedCases: Array<[string, Body, string, PolicyDimension]> = [
+      ["herald app/write above its read ceiling (AS 2.2)", { identity: "app", repo: "acme/widgets", access: "write" }, AUTH, "access"],
+      ["herald on a repository outside its allowlist (AS 2.3)", { identity: "app", repo: "other/widgets", access: "read" }, AUTH, "repository"],
+      ["herald on a look-alike owner acme-evil", { identity: "app", repo: "acme-evil/widgets", access: "read" }, AUTH, "repository"],
+      ["herald on a look-alike owner xacme", { identity: "app", repo: "xacme/widgets", access: "read" }, AUTH, "repository"],
+      ["legate on an exact-entry miss", { identity: "app", repo: "acme/gadgets", access: "read" }, LEGATE_AUTH, "repository"],
+      ["herald requesting user (AS 2.4)", { identity: "user", access: "read" }, AUTH, "identity"],
+      ["herald requesting user with a repo", { identity: "user", repo: "acme/widgets", access: "read" }, AUTH, "identity"],
+      ["brood (no rule) requesting app (AS 2.5)", { identity: "app", repo: "acme/widgets", access: "read" }, RULELESS_AUTH, "identity"],
+      ["brood (no rule) requesting app write", { identity: "app", repo: "octo/x", access: "write" }, RULELESS_AUTH, "identity"],
+      ["brood (no rule) requesting user", { identity: "user", access: "read" }, RULELESS_AUTH, "identity"],
+    ];
+
+    for (const [label, body, authorization, dimension] of deniedCases) {
+      it(`denies ${label} as ${dimension}, reaching no provider, whatever the subject`, async () => {
+        const { appProvider, userProvider } = buildWithProviders();
+        for (const subject of subjects) {
+          await expectDenied({ ...body, ...subject }, authorization, dimension);
+        }
+        expect(appProvider.issue).not.toHaveBeenCalled();
+        expect(userProvider.issue).not.toHaveBeenCalled();
+      });
+    }
+
+    const allowedCases: Array<[string, Body, string, "app" | "user"]> = [
+      ["herald app/read inside acme/*", { identity: "app", repo: "acme/widgets", access: "read" }, AUTH, "app"],
+      ["herald app/read on any acme repo, ignoring case", { identity: "app", repo: "ACME/Some-Other.repo", access: "read" }, AUTH, "app"],
+      ["legate app/write on an exact entry, ignoring case", { identity: "app", repo: "Acme/Widgets", access: "write" }, LEGATE_AUTH, "app"],
+      ["legate app/write inside octo/*", { identity: "app", repo: "octo/anything", access: "write" }, LEGATE_AUTH, "app"],
+      ["legate user/write", { identity: "user", access: "write" }, LEGATE_AUTH, "user"],
+      ["legate user with a repo outside its allowlist (SD-016)", { identity: "user", repo: "other/widgets", access: "write" }, LEGATE_AUTH, "user"],
+    ];
+
+    for (const [label, body, authorization, identity] of allowedCases) {
+      it(`allows ${label}, whatever the subject`, async () => {
+        const { appProvider, userProvider } = buildWithProviders();
+        for (const subject of subjects) {
+          const res = await postToken({ ...body, ...subject }, undefined, authorization);
+          expect(res.statusCode).toBe(200);
+        }
+        const served = identity === "app" ? appProvider : userProvider;
+        const other = identity === "app" ? userProvider : appProvider;
+        expect(served.issue).toHaveBeenCalledTimes(subjects.length);
+        expect(other.issue).not.toHaveBeenCalled();
+      });
+    }
+
+    it("returns 403, never provider_unconfigured, for a denial with no providers registered", async () => {
+      app = buildTesseraServer({ clients: CLIENTS, policy: POLICY, registry: createProviderRegistry([]) });
+      for (const [, body, authorization, dimension] of deniedCases) {
+        await expectDenied(body, authorization, dimension);
+      }
+    });
+
+    it("still returns provider_unconfigured for an allowed request with no providers registered", async () => {
+      app = buildTesseraServer({ clients: CLIENTS, policy: POLICY, registry: createProviderRegistry([]) });
+      const allowedApp = await postToken({ identity: "app", repo: "acme/widgets", access: "read" });
+      expect(allowedApp.statusCode).toBe(503);
+      expect(allowedApp.json().error.code).toBe("provider_unconfigured");
+      // legate's user grant passes the policy; no user provider exists yet.
+      const allowedUser = await postToken({ identity: "user", access: "write" }, undefined, LEGATE_AUTH);
+      expect(allowedUser.statusCode).toBe(503);
+      expect(allowedUser.json().error.code).toBe("provider_unconfigured");
+    });
+
+    it("checks the key, then the body, then the policy", async () => {
+      const { appProvider } = buildWithProviders();
+      const deniedBody = { identity: "app", repo: "other/widgets", access: "write" };
+      const unknownKey = await postToken(deniedBody, undefined, "Bearer not-a-registered-key");
+      expect(unknownKey.statusCode).toBe(401);
+      expect(unknownKey.json().error.code).toBe("unauthorized");
+      const noRuleBadBody = await postToken(undefined, "{not json", RULELESS_AUTH);
+      expect(noRuleBadBody.statusCode).toBe(400);
+      expect(noRuleBadBody.json().error.code).toBe("invalid_request");
+      const invalidForHerald = await postToken({ identity: "user", access: "admin" });
+      expect(invalidForHerald.statusCode).toBe(400);
+      expect(invalidForHerald.json().error.code).toBe("invalid_request");
+      await expectDenied(deniedBody, AUTH, "repository");
+      expect(appProvider.issue).not.toHaveBeenCalled();
+    });
+
+    it("keeps the allowlist, the submitted repo and the subject out of 403 bodies and logs", async () => {
+      const stream = new PassThrough();
+      const chunks: string[] = [];
+      stream.on("data", (chunk: Buffer) => chunks.push(chunk.toString("utf-8")));
+      app = buildTesseraServer({
+        clients: CLIENTS,
+        policy: POLICY,
+        registry: createProviderRegistry([stubProvider()]),
+        logger: pino({ level: "trace" }, stream),
+      });
+      const submittedRepos = ["submitted-owner/submitted-repo", "acme/widgets", "acme/gadgets"];
+      const bodies: string[] = [];
+      for (const [body, authorization] of [
+        [{ identity: "app", repo: submittedRepos[0], access: "read" }, AUTH],
+        [{ identity: "app", repo: submittedRepos[1], access: "write" }, AUTH],
+        [{ identity: "app", repo: submittedRepos[2], access: "read" }, LEGATE_AUTH],
+        [{ identity: "user", repo: submittedRepos[1], access: "read" }, AUTH],
+        [{ identity: "app", repo: submittedRepos[1], access: "read" }, RULELESS_AUTH],
+      ] as const) {
+        const res = await postToken({ ...body, subject: "subject-do-not-log" }, undefined, authorization);
+        expect(res.statusCode).toBe(403);
+        bodies.push(res.body);
+      }
+      const logs = chunks.join("");
+      expect(logs).toContain("tessera request handled");
+      expect(logs).toContain('"tessera.status_class":"4xx"');
+      for (const text of [logs, ...bodies]) {
+        for (const leaked of [...ALLOWLIST_ENTRIES, ...submittedRepos, "submitted-owner", "subject-do-not-log"]) {
+          expect(text).not.toContain(leaked);
+        }
       }
     });
   });
@@ -707,7 +878,7 @@ describe("tessera server with the github-app provider", () => {
     const chunks: string[] = [];
     stream.on("data", (chunk: Buffer) => chunks.push(chunk.toString("utf-8")));
     app = buildTesseraServer({
-      clients: CLIENTS,
+      clients: CLIENTS, policy: POLICY,
       registry: createProviderRegistry([provider]),
       logger: pino({ level: "trace" }, stream),
     });
@@ -718,11 +889,12 @@ describe("tessera server with the github-app provider", () => {
       provider,
       logs: () => chunks.join(""),
       assertions,
+      // legate: app write on acme/widgets, acme/secret-repo and octo/*.
       post: (body) =>
         built.inject({
           method: "POST",
           url: "/v1/github/token",
-          headers: { "content-type": "application/json", authorization: AUTH },
+          headers: { "content-type": "application/json", authorization: LEGATE_AUTH },
           payload: JSON.stringify(body),
         }),
     };
@@ -801,7 +973,8 @@ describe("tessera server with the github-app provider", () => {
 
   it("returns 422 repo_not_installed for an uninstalled owner without minting", async () => {
     const h = await harness();
-    const res = await h.post({ identity: "app", repo: "nobody/widgets", access: "read" });
+    // octo/* is allowed by policy, but the app has no installation on octo.
+    const res = await h.post({ identity: "app", repo: "octo/widgets", access: "read" });
     expect(res.statusCode).toBe(422);
     expect(res.json()).toEqual({ error: { code: "repo_not_installed", message: expect.any(String) } });
     expect(h.fake.mintCount()).toBe(0);
@@ -944,7 +1117,7 @@ describe("tessera server with the github-app provider", () => {
   });
 
   it("returns 503 provider_unconfigured for app requests when no app provider is registered", async () => {
-    app = buildTesseraServer({ clients: CLIENTS, registry: createProviderRegistry([]) });
+    app = buildTesseraServer({ clients: CLIENTS, policy: POLICY, registry: createProviderRegistry([]) });
     const res = await app.inject({
       method: "POST",
       url: "/v1/github/token",

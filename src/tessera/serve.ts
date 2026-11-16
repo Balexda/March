@@ -2,6 +2,7 @@ import type { FastifyBaseLogger } from "fastify";
 import { createTesseraLogger } from "../observability/logger.js";
 import { initOtel } from "../observability/otel.js";
 import { loadClientRegistry } from "./auth/client-keys.js";
+import { loadPolicy } from "./auth/policy.js";
 import {
   TESSERA_CLIENT_KEYS_FILE_ENV,
   TESSERA_GITHUB_APP_ID_ENV,
@@ -41,16 +42,19 @@ export interface RunTesseraServerOptions {
 
 /**
  * Run the Tessera HTTP service until SIGTERM/SIGINT. Port validation, the
- * client-keys load (`TESSERA_CLIENT_KEYS_FILE`) and config resolution happen
- * before telemetry starts, the server is built, or any provider contacts
- * GitHub, so an invalid port or a missing/invalid client-keys file fails with
- * a `TesseraValidationError` and nothing listens. The port is checked first.
+ * client-keys load (`TESSERA_CLIENT_KEYS_FILE`), the policy load
+ * (`TESSERA_POLICY_FILE`, validated against the registered clients) and config
+ * resolution happen before telemetry starts, the server is built, or any
+ * provider contacts GitHub, so an invalid port or a missing/invalid
+ * client-keys or policy file fails with a `TesseraValidationError` and nothing
+ * listens. The port is checked first, then the client keys, then the policy.
  */
 export async function runTesseraServer(options: RunTesseraServerOptions = {}): Promise<void> {
   const env = options.env ?? process.env;
   const port = resolveTesseraPort(options.port, env);
   const host = options.host ?? "127.0.0.1";
   const clients = loadClientRegistry(env);
+  const policy = loadPolicy(clients.clients(), env);
   const appConfig = resolveGitHubAppConfig(env);
 
   if (!env.MARCH_OTEL_SERVICE_NAME) {
@@ -64,6 +68,7 @@ export async function runTesseraServer(options: RunTesseraServerOptions = {}): P
   const app = buildTesseraServer({
     registry: createProviderRegistry(providers),
     clients,
+    policy,
     logger: options.logger ?? createTesseraLogger({ env }),
     startedAt: Date.now(),
   });

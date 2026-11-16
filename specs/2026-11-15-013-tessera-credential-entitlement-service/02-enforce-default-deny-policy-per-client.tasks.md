@@ -93,7 +93,7 @@
   - A second rule for the same client is rejected
   - Load errors name the setting and the rule position, never file contents
 
-- [ ] **Authorize each token request against the client's rule**
+- [x] **Authorize each token request against the client's rule**
 
   Add a pure authorization function to `src/tessera/auth/policy.ts` that takes a client name and a parsed Entitlement Request. Call it from the token route in `src/tessera/server.ts` after request validation and before the provider is looked up. Extend the contract test in `src/tessera/server.test.ts`. Satisfies AS 2.2–2.5 and FR-015.
 

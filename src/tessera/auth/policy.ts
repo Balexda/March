@@ -8,6 +8,8 @@
  * most one rule per client. A registered client with no rule is valid and is
  * denied at request time (default deny).
  *
+ * {@link authorize} decides one parsed request against the caller's rule.
+ *
  * Load errors are typed {@link TesseraValidationError}s that name the setting
  * and the rule position only — never a path, a repository, a client name or
  * any other file contents.
@@ -15,7 +17,13 @@
 import { readFileSync } from "node:fs";
 import { TESSERA_POLICY_FILE_ENV, resolvePolicyFile } from "../config.js";
 import { isValidOwner, isValidRepoName } from "../repo-name.js";
-import { type AccessLevel, type Identity, TesseraValidationError } from "../types.js";
+import {
+  type AccessLevel,
+  type EntitlementRequest,
+  type Identity,
+  PolicyDeniedError,
+  TesseraValidationError,
+} from "../types.js";
 
 /** Reads the policy file's raw bytes; injectable for tests. */
 export type PolicyFileReader = (path: string) => Buffer | string;
@@ -216,4 +224,52 @@ export function loadPolicy(
   readFile?: PolicyFileReader,
 ): Policy {
   return loadPolicyFromFile(resolvePolicyFile(env), clientNames, readFile);
+}
+
+/**
+ * The decision inputs of an Entitlement Request. `subject` is deliberately
+ * absent: it is audited only and never affects a decision (FR-015).
+ */
+export type AuthorizationRequest = Pick<EntitlementRequest, "identity" | "repo" | "access">;
+
+const ACCESS_RANK: Readonly<Record<AccessLevel, number>> = Object.freeze({ read: 0, write: 1 });
+
+/** `repo` (any case) matches an exact `owner/name` entry or that owner's `owner/*`. */
+function repoAllowed(repos: readonly string[], repo: string): boolean {
+  const lowered = repo.toLowerCase();
+  const owner = lowered.split("/")[0] ?? "";
+  return repos.some((entry) => entry === lowered || entry === `${owner}/${OWNER_WILDCARD}`);
+}
+
+/**
+ * Authorize `client`'s request against its policy rule; returns normally when
+ * allowed, otherwise throws {@link PolicyDeniedError} naming the first
+ * dimension denied, checked in this order:
+ *
+ * 1. identity - no rule for the client (default deny), an identity the rule
+ *    does not grant, or `user` from any client but `legate` (defence in depth:
+ *    the loader already refuses such a rule);
+ * 2. repository - for `app`, the repo must match the allowlist ignoring case;
+ * 3. access - the requested access must not exceed the rule's ceiling.
+ *
+ * Working assumptions for open specification debt: the access ceiling applies
+ * to every identity, including `user` (SD-015, option a); and a `user`
+ * request is not checked against the repository allowlist even when it
+ * carries a repo, because the PAT cannot be repository-scoped (SD-016).
+ */
+export function authorize(policy: Policy, client: string, request: AuthorizationRequest): void {
+  const rule = policy.ruleFor(client);
+  if (rule === undefined) throw new PolicyDeniedError("identity");
+  if (!rule.identities.includes(request.identity)) throw new PolicyDeniedError("identity");
+  if (request.identity === "user" && client !== USER_IDENTITY_CLIENT) {
+    throw new PolicyDeniedError("identity");
+  }
+  if (request.identity === "app") {
+    if (request.repo === undefined || !repoAllowed(rule.repos, request.repo)) {
+      throw new PolicyDeniedError("repository");
+    }
+  }
+  if (ACCESS_RANK[request.access] > ACCESS_RANK[rule.maxAccess]) {
+    throw new PolicyDeniedError("access");
+  }
 }

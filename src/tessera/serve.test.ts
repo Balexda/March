@@ -27,13 +27,27 @@ const CLIENT_KEY = "tessera-serve-test-client-key";
 const CLIENT_KEY_SHA256 = createHash("sha256").update(CLIENT_KEY, "utf8").digest("hex");
 const OTHER_SHA256 = createHash("sha256").update("another-client-key", "utf8").digest("hex");
 
-/** A client-keys file registering one client by its key's SHA-256. */
-function writeClientKeysFile(): { file: string; cleanup: () => void } {
+interface ClientFiles {
+  readonly file: string;
+  readonly policyFile: string;
+  readonly cleanup: () => void;
+}
+
+/**
+ * A client-keys file registering one client by its key's SHA-256, and a
+ * policy file granting that client `app` write on `acme/*`.
+ */
+function writeClientKeysFile(): ClientFiles {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tessera-clients-"));
   const file = path.join(dir, "clients.json");
   const keySha256 = createHash("sha256").update(CLIENT_KEY, "utf8").digest("hex");
   fs.writeFileSync(file, JSON.stringify([{ client: "herald", key_sha256: keySha256 }]));
-  return { file, cleanup: () => fs.rmSync(dir, { recursive: true, force: true }) };
+  const policyFile = path.join(dir, "policy.json");
+  fs.writeFileSync(
+    policyFile,
+    JSON.stringify([{ client: "herald", identities: ["app"], repos: ["acme/*"], max_access: "write" }]),
+  );
+  return { file, policyFile, cleanup: () => fs.rmSync(dir, { recursive: true, force: true }) };
 }
 
 async function freePort(): Promise<number> {
@@ -78,7 +92,7 @@ async function postToken(port: number, body: unknown): Promise<Response> {
 }
 
 describe("runTesseraServer", () => {
-  let clientKeys: { file: string; cleanup: () => void } | undefined;
+  let clientKeys: ClientFiles | undefined;
 
   afterEach(() => {
     clientKeys?.cleanup();
@@ -88,6 +102,11 @@ describe("runTesseraServer", () => {
   function clientKeysFile(): string {
     clientKeys ??= writeClientKeysFile();
     return clientKeys.file;
+  }
+
+  function policyFile(): string {
+    clientKeys ??= writeClientKeysFile();
+    return clientKeys.policyFile;
   }
 
   it("serves unconfigured, logs setting names only, and stops on SIGTERM", async () => {
@@ -102,6 +121,7 @@ describe("runTesseraServer", () => {
         TESSERA_GITHUB_APP_ID: "app-id-sentinel-do-not-log",
         TESSERA_GITHUB_APP_KEY_FILE: "/no/such/key.pem",
         TESSERA_CLIENT_KEYS_FILE: clientKeysFile(),
+        TESSERA_POLICY_FILE: policyFile(),
       },
       logger,
       signals,
@@ -275,6 +295,7 @@ describe("runTesseraServer", () => {
           TESSERA_GITHUB_APP_ID: "42",
           TESSERA_GITHUB_APP_KEY_FILE: keyFile,
           TESSERA_CLIENT_KEYS_FILE: clientKeysFile(),
+          TESSERA_POLICY_FILE: policyFile(),
         },
         logger,
         signals,

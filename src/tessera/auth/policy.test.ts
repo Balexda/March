@@ -9,7 +9,16 @@ import {
   TesseraValidationError,
   type PolicyDimension,
 } from "../types.js";
-import { loadPolicy, loadPolicyFromFile, parsePolicy, type PolicyFileReader } from "./policy.js";
+import {
+  type AuthorizationRequest,
+  type Policy,
+  type PolicyFileReader,
+  type PolicyRuleView,
+  authorize,
+  loadPolicy,
+  loadPolicyFromFile,
+  parsePolicy,
+} from "./policy.js";
 
 const CLIENTS = ["herald", "steward", "legate", "brood"] as const;
 
@@ -307,5 +316,101 @@ describe("PolicyDeniedError", () => {
 
   it("uses a distinct message per dimension", () => {
     expect(new Set(Object.values(POLICY_DENIED_MESSAGES)).size).toBe(3);
+  });
+});
+
+describe("authorize", () => {
+  const policy = parsePolicy(
+    json([
+      { client: "herald", identities: ["app"], repos: ["acme/*"], max_access: "read" },
+      { client: "steward", identities: ["app"], repos: ["Octo/Widgets"], max_access: "write" },
+      { client: "legate", identities: ["app", "user"], repos: ["acme/widgets", "octo/*"], max_access: "write" },
+    ]),
+    CLIENTS,
+  );
+
+  function denial(client: string, request: AuthorizationRequest, against: Policy = policy): PolicyDimension | null {
+    try {
+      authorize(against, client, request);
+      return null;
+    } catch (err) {
+      expect(err).toBeInstanceOf(PolicyDeniedError);
+      return (err as PolicyDeniedError).dimension;
+    }
+  }
+
+  it("allows a request inside the client's rule", () => {
+    expect(denial("herald", { identity: "app", repo: "acme/widgets", access: "read" })).toBeNull();
+    expect(denial("steward", { identity: "app", repo: "octo/widgets", access: "write" })).toBeNull();
+    expect(denial("steward", { identity: "app", repo: "octo/widgets", access: "read" })).toBeNull();
+  });
+
+  it("denies a client with no rule for every request (identity)", () => {
+    for (const request of [
+      { identity: "app", repo: "acme/widgets", access: "read" },
+      { identity: "user", access: "read" },
+    ] as const) {
+      expect(denial("brood", request)).toBe("identity");
+      expect(denial("unregistered", request)).toBe("identity");
+    }
+  });
+
+  it("denies an identity the rule does not grant", () => {
+    expect(denial("herald", { identity: "user", access: "read" })).toBe("identity");
+  });
+
+  it("denies user to any client but legate, even if a rule lists it", () => {
+    const forged: Policy = {
+      size: 1,
+      ruleFor: (client): PolicyRuleView | undefined =>
+        client === "herald"
+          ? { client, identities: ["app", "user"], repos: ["acme/*"], maxAccess: "write" }
+          : undefined,
+    };
+    expect(denial("herald", { identity: "user", access: "read" }, forged)).toBe("identity");
+    expect(denial("herald", { identity: "app", repo: "acme/x", access: "read" }, forged)).toBeNull();
+  });
+
+  it("denies a repository outside the allowlist", () => {
+    expect(denial("herald", { identity: "app", repo: "other/widgets", access: "read" })).toBe("repository");
+    expect(denial("steward", { identity: "app", repo: "octo/gadgets", access: "read" })).toBe("repository");
+  });
+
+  it("matches owner/* for every repository of that owner only, ignoring case", () => {
+    for (const repo of ["acme/widgets", "ACME/Gadgets", "Acme/anything.else"]) {
+      expect(denial("herald", { identity: "app", repo, access: "read" })).toBeNull();
+    }
+    for (const repo of ["acme-evil/widgets", "xacme/widgets", "acm/widgets", "acmee/x"]) {
+      expect(denial("herald", { identity: "app", repo, access: "read" })).toBe("repository");
+    }
+  });
+
+  it("matches an exact entry ignoring case and nothing else", () => {
+    expect(denial("steward", { identity: "app", repo: "OCTO/WIDGETS", access: "write" })).toBeNull();
+    expect(denial("steward", { identity: "app", repo: "octo/widgets-2", access: "write" })).toBe("repository");
+  });
+
+  it("denies an app request with no repository", () => {
+    expect(denial("herald", { identity: "app", access: "read" })).toBe("repository");
+  });
+
+  it("denies access above the ceiling, for app and user alike", () => {
+    expect(denial("herald", { identity: "app", repo: "acme/widgets", access: "write" })).toBe("access");
+    const readOnlyLegate = parsePolicy(
+      json([{ client: "legate", identities: ["user"], max_access: "read" }]),
+      CLIENTS,
+    );
+    expect(denial("legate", { identity: "user", access: "read" }, readOnlyLegate)).toBeNull();
+    expect(denial("legate", { identity: "user", access: "write" }, readOnlyLegate)).toBe("access");
+  });
+
+  it("does not check the allowlist for a user request, even when it carries a repo", () => {
+    expect(denial("legate", { identity: "user", access: "write" })).toBeNull();
+    expect(denial("legate", { identity: "user", repo: "elsewhere/x", access: "write" })).toBeNull();
+  });
+
+  it("checks identity before repository before access", () => {
+    expect(denial("herald", { identity: "user", repo: "other/x", access: "write" })).toBe("identity");
+    expect(denial("herald", { identity: "app", repo: "other/x", access: "write" })).toBe("repository");
   });
 });
