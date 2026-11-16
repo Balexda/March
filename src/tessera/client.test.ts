@@ -233,6 +233,51 @@ describe("TesseraClient.issueGitHubToken", () => {
     expect(Date.now() - started).toBeLessThan(2_000);
   });
 
+  it("times out a stalled response body as unreachable within the bound", async () => {
+    const fetchImpl = vi.fn<typeof fetch>(async (_url, init) => {
+      const signal = init?.signal;
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          // Headers have arrived; the body sends one chunk and then stalls.
+          controller.enqueue(new TextEncoder().encode('{"token":'));
+          signal?.addEventListener("abort", () => controller.error(signal.reason));
+        },
+      });
+      return new Response(body, { status: 200, headers: { "content-type": "application/json" } });
+    });
+    const started = Date.now();
+    const err = await captureError(client(fetchImpl, { timeoutMs: 50 }).issueGitHubToken(APP_WRITE));
+    expect(err.code).toBe("unreachable");
+    expect(Date.now() - started).toBeLessThan(2_000);
+  });
+
+  it.each(["abc", "0", "70000"])(
+    "raises invalid_request, not a server error, for MARCH_TESSERA_PORT %s",
+    async (port) => {
+      const fetchImpl = fakeFetch();
+      const env = { MARCH_TESSERA_PORT: port, MARCH_TESSERA_CLIENT_KEY: CLIENT_KEY };
+      let c: TesseraClient | undefined;
+      expect(() => {
+        c = new TesseraClient({ env, fetchImpl });
+      }).not.toThrow();
+      const err = await captureError(c!.issueGitHubToken(APP_WRITE));
+      expect(err.code).toBe("invalid_request");
+      expect(err.status).toBeUndefined();
+      expect(err.message).toContain("MARCH_TESSERA_PORT");
+      expect(err.message).not.toContain(`"${port}"`);
+      expect(fetchImpl).not.toHaveBeenCalled();
+
+      // A bad port outranks a missing key, and request validation runs first.
+      const keyless = new TesseraClient({ env: { MARCH_TESSERA_PORT: port }, fetchImpl });
+      expect((await captureError(keyless.issueGitHubToken(APP_WRITE))).code).toBe("invalid_request");
+      const bad = await captureError(
+        c!.issueGitHubToken({ identity: "app", access: "read" } as GitHubTokenRequest),
+      );
+      expect(bad.message).toBe('repo is required for identity "app".');
+      expect(fetchImpl).not.toHaveBeenCalled();
+    },
+  );
+
   it("defaults the timeout to ten seconds", () => {
     expect(DEFAULT_TESSERA_TIMEOUT_MS).toBe(10_000);
   });

@@ -9,12 +9,17 @@
  * error message or log line ever carries the client key or a token: messages
  * are fixed text or the server's own envelope message.
  */
-import { createTesseraClientLogger } from "../observability/logger.js";
+import { createHash } from "node:crypto";
+import {
+  createTesseraClientLogger,
+  resolveTesseraClientLogFilePath,
+} from "../observability/logger.js";
 import { recordTesseraClientFallback } from "../observability/tessera-metrics.js";
 import {
   resolveTesseraBaseUrl,
   resolveTesseraClientKey,
   resolveTesseraGhTokenFallback,
+  TESSERA_PORT_ENV,
 } from "./config.js";
 import { isValidRepo } from "./repo-name.js";
 import type { AccessLevel, CommitIdentity, Identity, TesseraErrorCode } from "./types.js";
@@ -219,6 +224,21 @@ async function readJson(res: Response): Promise<{ ok: true; value: unknown } | {
 }
 
 /**
+ * Resolve the base URL from `env` without throwing: a malformed
+ * `MARCH_TESSERA_PORT` (a server-side validation error) becomes a client
+ * `invalid_request` whose fixed message names the setting, never its value.
+ */
+function resolveBaseUrl(env: NodeJS.ProcessEnv): { url?: string; error?: TesseraClientError } {
+  try {
+    return { url: resolveTesseraBaseUrl(env) };
+  } catch {
+    return {
+      error: invalid(`${TESSERA_PORT_ENV} is not a valid port: expected an integer in 1..65535.`),
+    };
+  }
+}
+
+/**
  * Client for Tessera's token route. Each instance keeps an in-memory cache of
  * entitlements (never written to disk), reused while strictly more than
  * {@link TESSERA_REUSE_MARGIN_MS} is left before expiry. An entitlement with
@@ -229,6 +249,8 @@ async function readJson(res: Response): Promise<{ ok: true; value: unknown } | {
  */
 export class TesseraClient {
   private readonly baseUrl: string;
+  /** Set when the base URL could not be resolved; raised per call, never by the constructor. */
+  private readonly configError: TesseraClientError | undefined;
   private readonly clientKey: string | undefined;
   private readonly fetchImpl: FetchImpl;
   private readonly timeoutMs: number;
@@ -237,7 +259,9 @@ export class TesseraClient {
 
   constructor(options: TesseraClientOptions = {}) {
     const env = options.env ?? process.env;
-    this.baseUrl = (options.baseUrl ?? resolveTesseraBaseUrl(env)).replace(/\/+$/, "");
+    const resolved = options.baseUrl === undefined ? resolveBaseUrl(env) : { url: options.baseUrl };
+    this.baseUrl = (resolved.url ?? "").replace(/\/+$/, "");
+    this.configError = resolved.error;
     const key = options.clientKey ?? resolveTesseraClientKey(env);
     this.clientKey = key?.trim() ? key.trim() : undefined;
     this.fetchImpl = options.fetchImpl ?? fetch;
@@ -247,12 +271,14 @@ export class TesseraClient {
 
   /**
    * Ask Tessera for a GitHub credential. Raises {@link TesseraClientError}:
-   * `invalid_request` or `client_key_missing` before any request, the
+   * `invalid_request` (a malformed request, then a malformed
+   * `MARCH_TESSERA_PORT`) or `client_key_missing` before any request, the
    * server's code and status for an error envelope, else `unreachable`.
    * Served from the in-memory cache while the reuse window holds.
    */
   async issueGitHubToken(req: GitHubTokenRequest): Promise<GitHubEntitlement> {
     validateRequest(req);
+    if (this.configError !== undefined) throw this.configError;
     const clientKey = this.clientKey;
     if (clientKey === undefined) {
       throw new TesseraClientError(
@@ -355,29 +381,73 @@ export interface TesseraClientLogger {
 
 /** Injection points for {@link getGitHubToken}; all optional. */
 export interface GetGitHubTokenOptions {
-  /** Defaults to a lazily created, process-wide client built from `env`. */
+  /**
+   * Defaults to a shared client for this call's resolved base URL and client
+   * key (see {@link getGitHubToken}).
+   */
   readonly client?: TesseraClient;
   /** Defaults to `process.env`. */
   readonly env?: NodeJS.ProcessEnv;
-  /** Defaults to the file-only Tessera client logger; never stdout. */
+  /** Defaults to the file-only Tessera client logger for `env`; never stdout. */
   readonly logger?: TesseraClientLogger;
-  /** Counter and warning label; defaults to `MARCH_OTEL_SERVICE_NAME`, else `unknown`. */
+  /**
+   * Counter and warning label; defaults to `MARCH_OTEL_SERVICE_NAME`, else
+   * `unknown`. A value not matching {@link SERVICE_LABEL_PATTERN} is `unknown`.
+   */
   readonly service?: string;
 }
 
-let defaultClient: TesseraClient | undefined;
-let defaultLogger: TesseraClientLogger | undefined;
+/** Accepted `service` labels; anything else is recorded as `unknown`. */
+export const SERVICE_LABEL_PATTERN = /^[a-z][a-z0-9-]{0,63}$/;
 
-/** The shared default client, so its cache spans every call in the process. */
-function getDefaultClient(env: NodeJS.ProcessEnv): TesseraClient {
-  defaultClient ??= new TesseraClient({ env });
-  return defaultClient;
+/** Upper bound on retained default clients and default loggers (oldest evicted first). */
+const MAX_DEFAULTS = 8;
+
+/**
+ * Shared default clients keyed by a digest of the resolved (base URL, client
+ * key) pair, so calls with the same configuration share one client and its
+ * cache. The key is a digest, never the client key itself, and is never logged.
+ */
+const defaultClients = new Map<string, TesseraClient>();
+/** Default loggers, one per resolved log file path. */
+const defaultLoggers = new Map<string, TesseraClientLogger>();
+
+/** Insert into a bounded map, evicting the oldest entry past {@link MAX_DEFAULTS}. */
+function remember<V>(map: Map<string, V>, key: string, value: V): V {
+  map.set(key, value);
+  if (map.size > MAX_DEFAULTS) {
+    const oldest = map.keys().next().value;
+    if (oldest !== undefined) map.delete(oldest);
+  }
+  return value;
 }
 
-/** Drop the process-wide default client (and its cache). Tests only. */
+/**
+ * The default client for `env`'s configuration. A client whose base URL or
+ * key does not resolve is built per call and never retained, so a key (or a
+ * fixed port) that appears later is picked up on the next call.
+ */
+function getDefaultClient(env: NodeJS.ProcessEnv): TesseraClient {
+  const { url } = resolveBaseUrl(env);
+  const clientKey = resolveTesseraClientKey(env);
+  if (url === undefined || clientKey === undefined) return new TesseraClient({ env });
+  const id = createHash("sha256").update(JSON.stringify([url, clientKey])).digest("hex");
+  const hit = defaultClients.get(id);
+  if (hit !== undefined) return hit;
+  return remember(defaultClients, id, new TesseraClient({ baseUrl: url, clientKey, env }));
+}
+
+function getDefaultLogger(env: NodeJS.ProcessEnv): TesseraClientLogger {
+  const logFilePath = resolveTesseraClientLogFilePath(env);
+  const hit = defaultLoggers.get(logFilePath);
+  if (hit !== undefined) return hit;
+  return remember(defaultLoggers, logFilePath, createTesseraClientLogger({ env, logFilePath }));
+}
+
+/** Drop every default client (and its cache) and default logger. Tests only. */
 export function resetDefaultTesseraClientForTests(): void {
-  defaultClient = undefined;
-  defaultLogger = undefined;
+  defaultClients.clear();
+  defaultLoggers.clear();
 }
 
 function warnFallback(
@@ -386,7 +456,7 @@ function warnFallback(
   fields: Record<string, unknown>,
 ): void {
   try {
-    const target = logger ?? (defaultLogger ??= createTesseraClientLogger({ env }));
+    const target = logger ?? getDefaultLogger(env);
     target.warn(
       fields,
       "Tessera could not issue a GitHub token; using the environment token (migration fallback).",
@@ -394,6 +464,12 @@ function warnFallback(
   } catch {
     // Logging must never break the token call.
   }
+}
+
+/** The bounded `service` label: the option, else `MARCH_OTEL_SERVICE_NAME`, else `unknown`. */
+function serviceLabel(option: string | undefined, env: NodeJS.ProcessEnv): string {
+  const raw = option?.trim() || env.MARCH_OTEL_SERVICE_NAME?.trim() || "";
+  return SERVICE_LABEL_PATTERN.test(raw) ? raw : "unknown";
 }
 
 /** `GH_TOKEN`, then `GITHUB_TOKEN`; blank counts as unset. Read only on fallback. */
@@ -406,6 +482,11 @@ function readEnvToken(env: NodeJS.ProcessEnv): string | undefined {
  * Get a GitHub credential from Tessera — the one call service code uses
  * (contracts "Node Client"). Fails closed: every failure is a
  * {@link TesseraClientError}.
+ *
+ * Without `options.client`, it uses a shared default client for the base URL
+ * and client key resolved from this call's env (`options.env ?? process.env`):
+ * calls with the same configuration share one client and its cache; a call
+ * whose key does not resolve gets a fresh, unretained client.
  *
  * Only when `MARCH_TESSERA_GH_TOKEN_FALLBACK=1`, the identity is `app` and the
  * failure is one of {@link FALLBACK_CODES} does it return `GH_TOKEN` (else
@@ -434,7 +515,7 @@ export async function getGitHubToken(
     const token = readEnvToken(env);
     if (token === undefined) throw err;
 
-    const service = options.service?.trim() || env.MARCH_OTEL_SERVICE_NAME?.trim() || "unknown";
+    const service = serviceLabel(options.service, env);
     warnFallback(options.logger, env, { reason: err.code, identity: "app", service });
     recordTesseraClientFallback({ service });
     return Object.freeze({

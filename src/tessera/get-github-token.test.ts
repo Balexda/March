@@ -5,6 +5,9 @@
  * fake `fetch` (no network). The fallback counter is mocked so each test can
  * assert exactly how many times it fired.
  */
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../observability/tessera-metrics.js", () => ({
@@ -22,6 +25,7 @@ import {
   type TesseraClientErrorCode,
 } from "./client.js";
 import { TESSERA_GH_TOKEN_FALLBACK_ENV } from "./config.js";
+import { TesseraError } from "./types.js";
 
 const CLIENT_KEY = "tessera-fallback-test-key-do-not-leak";
 const TESSERA_TOKEN = "ghs_FROMTESSERA0123456789";
@@ -337,5 +341,129 @@ describe("getGitHubToken", () => {
     resetDefaultTesseraClientForTests();
     await getGitHubToken(APP_WRITE, { env });
     expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
+  it("gives calls whose env differs in URL their own default client", async () => {
+    const fetchImpl = vi.fn<typeof fetch>(async () => jsonResponse(WIRE));
+    vi.stubGlobal("fetch", fetchImpl);
+    const other = "http://tessera-other.test:9555";
+    await getGitHubToken(APP_WRITE, {
+      env: { MARCH_TESSERA_URL: BASE_URL, MARCH_TESSERA_CLIENT_KEY: CLIENT_KEY },
+    });
+    await getGitHubToken(APP_WRITE, {
+      env: { MARCH_TESSERA_URL: other, MARCH_TESSERA_CLIENT_KEY: CLIENT_KEY },
+    });
+    expect(fetchImpl.mock.calls.map((c) => String(c[0]))).toEqual([
+      `${BASE_URL}/v1/github/token`,
+      `${other}/v1/github/token`,
+    ]);
+  });
+
+  it("gives calls whose env differs in key their own default client", async () => {
+    const fetchImpl = vi.fn<typeof fetch>(async () => jsonResponse(WIRE));
+    vi.stubGlobal("fetch", fetchImpl);
+    const otherKey = "tessera-second-key-do-not-leak";
+    await getGitHubToken(APP_WRITE, {
+      env: { MARCH_TESSERA_URL: BASE_URL, MARCH_TESSERA_CLIENT_KEY: CLIENT_KEY },
+    });
+    await getGitHubToken(APP_WRITE, {
+      env: { MARCH_TESSERA_URL: BASE_URL, MARCH_TESSERA_CLIENT_KEY: otherKey },
+    });
+    const auth = fetchImpl.mock.calls.map(
+      (c) => (c[1]?.headers as Record<string, string>).authorization,
+    );
+    expect(auth).toEqual([`Bearer ${CLIENT_KEY}`, `Bearer ${otherKey}`]);
+  });
+
+  it("picks up a client key that appears after a keyless first call", async () => {
+    const fetchImpl = vi.fn<typeof fetch>(async () => jsonResponse(WIRE));
+    vi.stubGlobal("fetch", fetchImpl);
+    const env: NodeJS.ProcessEnv = { MARCH_TESSERA_URL: BASE_URL };
+    const err = await captureError(getGitHubToken(APP_WRITE, { env }));
+    expect(err.code).toBe("client_key_missing");
+    env.MARCH_TESSERA_CLIENT_KEY = CLIENT_KEY;
+    const served = await getGitHubToken(APP_WRITE, { env });
+    expect(served.source).toBe("tessera");
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["abc", "0", "70000"])(
+    "raises the typed error for MARCH_TESSERA_PORT %s and never falls back",
+    async (port) => {
+      const fetchImpl = vi.fn<typeof fetch>(async () => jsonResponse(WIRE));
+      vi.stubGlobal("fetch", fetchImpl);
+      const logger = fakeLogger();
+      const env = {
+        ...FLAG_ON,
+        GH_TOKEN: ENV_TOKEN,
+        MARCH_TESSERA_PORT: port,
+        MARCH_TESSERA_CLIENT_KEY: CLIENT_KEY,
+      };
+      const viaDefault = await captureError(getGitHubToken(APP_WRITE, { env, logger }));
+      const viaClass = await captureError(
+        getGitHubToken(APP_WRITE, { client: new TesseraClient({ env }), env, logger }),
+      );
+      for (const err of [viaDefault, viaClass]) {
+        expect(err).not.toBeInstanceOf(TesseraError);
+        expect(err.code).toBe("invalid_request");
+        expect(err.message).toContain("MARCH_TESSERA_PORT");
+      }
+      expect(fetchImpl).not.toHaveBeenCalled();
+      expect(logger.warn).not.toHaveBeenCalled();
+      expect(recordFallback).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    ["an uppercase option", { service: "March-Herald" }, {}],
+    ["an option with spaces", { service: "march herald" }, {}],
+    ["an over-long option", { service: `a${"b".repeat(64)}` }, {}],
+    ["an option starting with a digit", { service: "9lives" }, {}],
+    ["a bad MARCH_OTEL_SERVICE_NAME", {}, { MARCH_OTEL_SERVICE_NAME: "march_brood!" }],
+  ])("labels %s as unknown", async (_l, opts, envExtra) => {
+    const logger = fakeLogger();
+    await getGitHubToken(APP_WRITE, {
+      client: failingClient("unreachable"),
+      env: { ...FLAG_ON, GH_TOKEN: ENV_TOKEN, ...envExtra },
+      logger,
+      ...opts,
+    });
+    expect(recordFallback).toHaveBeenCalledWith({ service: "unknown" });
+    expect(logger.warn.mock.calls[0]?.[0]).toEqual({
+      reason: "unreachable",
+      identity: "app",
+      service: "unknown",
+    });
+  });
+
+  it("writes the default logger's warning under each call's MARCH_TESSERA_LOG_DIR", async () => {
+    const dirs = [mkdtempSync(join(tmpdir(), "tessera-log-a-")), mkdtempSync(join(tmpdir(), "tessera-log-b-"))];
+    try {
+      for (const dir of dirs) {
+        await getGitHubToken(APP_WRITE, {
+          client: failingClient("unreachable"),
+          env: { ...FLAG_ON, GH_TOKEN: ENV_TOKEN, MARCH_TESSERA_LOG_DIR: dir },
+        });
+      }
+      for (const dir of dirs) {
+        const text = readFileSync(join(dir, "tessera-client.jsonl"), "utf8");
+        expect(text.trim().split("\n")).toHaveLength(1);
+        expect(text).toContain("migration fallback");
+        expect(text).not.toContain(ENV_TOKEN);
+      }
+    } finally {
+      for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("accepts a 64-character service label", async () => {
+    const label = `a${"b".repeat(63)}`;
+    await getGitHubToken(APP_WRITE, {
+      client: failingClient("unreachable"),
+      env: { ...FLAG_ON, GH_TOKEN: ENV_TOKEN },
+      logger: fakeLogger(),
+      service: label,
+    });
+    expect(recordFallback).toHaveBeenCalledWith({ service: label });
   });
 });

@@ -430,18 +430,28 @@ passed through unchanged, plus two that the client raises itself:
 | `client_key_missing` | `MARCH_TESSERA_CLIENT_KEY` is unset or blank. Raised before any request. |
 
 A request that is invalid locally (for example `app` without `repo`) fails with
-`invalid_request` before any request is sent. Each request is bounded by a
-10-second timeout (`DEFAULT_TESSERA_TIMEOUT_MS`), so the call never hangs.
+`invalid_request` before any request is sent. So does a `MARCH_TESSERA_PORT`
+that is not an integer in 1..65535 when `MARCH_TESSERA_URL` is unset: building
+the client never throws, and the call fails with `invalid_request` and a fixed
+message naming `MARCH_TESSERA_PORT` (not its value), checked after the request
+itself and before the client key. Each request is bounded by a 10-second
+timeout (`DEFAULT_TESSERA_TIMEOUT_MS`) that covers both the response headers and
+the body, so the call never hangs.
 
 **Reuse.** The client keeps entitlements in memory, never on disk, keyed by
 identity, repository (ignoring case) and access level. A cached entitlement is
 returned without asking Tessera while more than ten minutes remain before its
 `expiresAt`; inside the last ten minutes the next call fetches a new one. An
 entitlement with no expiry is never cached, and neither is a failure.
-`refresh: true` always fetches and replaces the entry. `getGitHubToken` uses
-one shared client per process, so every call in a process shares that cache.
-`TesseraClient` can also be constructed directly; each instance has its own
-cache.
+`refresh: true` always fetches and replaces the entry. Without an explicit
+`client`, `getGitHubToken` reads `MARCH_TESSERA_URL`, `MARCH_TESSERA_PORT` and
+`MARCH_TESSERA_CLIENT_KEY` from the env of each call (`options.env`, else
+`process.env`) and uses a shared client for that base URL and key: calls with
+the same configuration share one client and its cache, and a call with a
+different configuration gets its own. A call whose key is not set gets a fresh
+client that is not kept, so a key set later is used by the next call. At most
+eight shared clients are kept; the oldest is dropped first. `TesseraClient` can
+also be constructed directly; each instance has its own cache.
 
 **Fail closed.** By default every failure surfaces as the typed error, and
 `GH_TOKEN` and `GITHUB_TOKEN` are not read at all.
@@ -465,10 +475,12 @@ never fall back, and neither does any error that is not a
 and is never cached, so the next call asks Tessera again. Each fallback logs
 one warning, with the failure code as `reason`, the identity and the calling
 service, and adds one to the counter `march.tessera.client.fallbacks`, whose
-only label is `service` (from `MARCH_OTEL_SERVICE_NAME`, else `unknown`). The
-counter is a no-op when telemetry is off. When the caller passes no logger, the
-warning goes to `tessera-client.jsonl` in `MARCH_TESSERA_LOG_DIR` (default
-`~/.march/logs`) and, with telemetry on, to the OTel logs pipeline; it never
+only label is `service`: the caller's `service` option, else
+`MARCH_OTEL_SERVICE_NAME`, else `unknown`. A value that does not match
+`^[a-z][a-z0-9-]{0,63}$` is recorded as `unknown`, in both the counter and the
+warning. The counter is a no-op when telemetry is off. When the caller passes
+no logger, the warning goes to `tessera-client.jsonl` in the call's
+`MARCH_TESSERA_LOG_DIR` (default `~/.march/logs`; one logger per file) and, with telemetry on, to the OTel logs pipeline; it never
 goes to stdout. No warning, log line or error message contains a token or a
 client key.
 
@@ -579,7 +591,8 @@ or `GITHUB_TOKEN`.
   serves only `app` requests, only for the failures listed in "Node client",
   is never cached, and is always logged as a warning and counted.
 - The Node client raises only `TesseraClientError`, never the server's error
-  classes, and its errors and logs never contain a token or a client key.
+  classes (a malformed `MARCH_TESSERA_PORT` included), and its errors and logs
+  never contain a token or a client key.
 - A registry holds at most one provider per identity.
 - Callers cannot widen permissions. The only permissions a provider may request
   are the fixed set for the requested `access` level, and `write` never
