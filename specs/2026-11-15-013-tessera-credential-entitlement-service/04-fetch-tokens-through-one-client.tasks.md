@@ -30,7 +30,7 @@
   - The client imports nothing from the server module and never raises the server's error classes
   - No token or client key appears in any error message or log line
 
-- [ ] **Reuse entitlements until ten minutes before expiry**
+- [x] **Reuse entitlements until ten minutes before expiry**
 
   Keep an in-memory cache inside `TesseraClient`, keyed by identity, repository and access, with an injectable clock. Satisfies the reuse half of AS 4.1.
 

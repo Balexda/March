@@ -18,6 +18,12 @@ export const TESSERA_SLICE_ID_HEADER = "x-march-slice-id";
 /** Upper bound on one token request, in milliseconds. */
 export const DEFAULT_TESSERA_TIMEOUT_MS = 10_000;
 
+/**
+ * An entitlement is reused only while strictly more than this much time is
+ * left before its `expiresAt`, in milliseconds (ten minutes).
+ */
+export const TESSERA_REUSE_MARGIN_MS = 10 * 60_000;
+
 const TOKEN_ROUTE = "/v1/github/token";
 
 type FetchImpl = typeof fetch;
@@ -99,6 +105,8 @@ export interface TesseraClientOptions {
   readonly fetchImpl?: FetchImpl;
   /** Per-request bound; defaults to {@link DEFAULT_TESSERA_TIMEOUT_MS}. */
   readonly timeoutMs?: number;
+  /** Clock in epoch milliseconds, for the reuse window; defaults to `Date.now`. */
+  readonly now?: () => number;
 }
 
 function invalid(message: string): TesseraClientError {
@@ -154,7 +162,24 @@ function parseEntitlement(body: unknown): GitHubEntitlement | undefined {
   if (typeof identity !== "string") return undefined;
   const commitIdentity = parseCommitIdentity(body.commit_identity);
   if (commitIdentity === undefined) return undefined;
-  return { token, expiresAt, identity, commitIdentity, source: "tessera" };
+  return Object.freeze({
+    token,
+    expiresAt,
+    identity,
+    commitIdentity: commitIdentity === null ? null : Object.freeze(commitIdentity),
+    source: "tessera" as const,
+  });
+}
+
+/** Cache key: identity, lower-cased repository (or empty) and access. Never the slice id. */
+function cacheKey(req: GitHubTokenRequest): string {
+  return JSON.stringify([req.identity, req.repo?.toLowerCase() ?? "", req.access]);
+}
+
+interface CacheEntry {
+  readonly entitlement: GitHubEntitlement;
+  /** `expiresAt` in epoch milliseconds. */
+  readonly expiresAtMs: number;
 }
 
 /** The server's error envelope as a typed error, or `undefined` when it is not one. */
@@ -186,11 +211,22 @@ async function readJson(res: Response): Promise<{ ok: true; value: unknown } | {
   }
 }
 
+/**
+ * Client for Tessera's token route. Each instance keeps an in-memory cache of
+ * entitlements (never written to disk), reused while strictly more than
+ * {@link TESSERA_REUSE_MARGIN_MS} is left before expiry. An entitlement with
+ * no (or an unparseable) expiry is never cached, and failures are never cached.
+ * `refresh: true` skips the lookup and evicts the matching entry before the
+ * request, so a successful refresh replaces it and a failed refresh leaves no
+ * entry; a failure without `refresh` leaves the cache unchanged.
+ */
 export class TesseraClient {
   private readonly baseUrl: string;
   private readonly clientKey: string | undefined;
   private readonly fetchImpl: FetchImpl;
   private readonly timeoutMs: number;
+  private readonly now: () => number;
+  private readonly cache = new Map<string, CacheEntry>();
 
   constructor(options: TesseraClientOptions = {}) {
     const env = options.env ?? process.env;
@@ -199,24 +235,53 @@ export class TesseraClient {
     this.clientKey = key?.trim() ? key.trim() : undefined;
     this.fetchImpl = options.fetchImpl ?? fetch;
     this.timeoutMs = options.timeoutMs ?? DEFAULT_TESSERA_TIMEOUT_MS;
+    this.now = options.now ?? Date.now;
   }
 
   /**
    * Ask Tessera for a GitHub credential. Raises {@link TesseraClientError}:
    * `invalid_request` or `client_key_missing` before any request, the
    * server's code and status for an error envelope, else `unreachable`.
+   * Served from the in-memory cache while the reuse window holds.
    */
   async issueGitHubToken(req: GitHubTokenRequest): Promise<GitHubEntitlement> {
     validateRequest(req);
-    if (this.clientKey === undefined) {
+    const clientKey = this.clientKey;
+    if (clientKey === undefined) {
       throw new TesseraClientError(
         "client_key_missing",
         "No Tessera client key is configured for this process.",
       );
     }
 
+    const key = cacheKey(req);
+    if (req.refresh === true) {
+      this.cache.delete(key);
+    } else {
+      const hit = this.cache.get(key);
+      if (hit !== undefined && hit.expiresAtMs - this.now() > TESSERA_REUSE_MARGIN_MS) {
+        return hit.entitlement;
+      }
+    }
+
+    const entitlement = await this.fetchEntitlement(req, clientKey);
+    const expiresAtMs =
+      entitlement.expiresAt === null ? Number.NaN : Date.parse(entitlement.expiresAt);
+    if (Number.isFinite(expiresAtMs)) {
+      this.cache.set(key, { entitlement, expiresAtMs });
+    } else {
+      this.cache.delete(key);
+    }
+    return entitlement;
+  }
+
+  private async fetchEntitlement(
+    req: GitHubTokenRequest,
+    clientKey: string,
+  ): Promise<GitHubEntitlement> {
+
     const headers: Record<string, string> = {
-      authorization: `Bearer ${this.clientKey}`,
+      authorization: `Bearer ${clientKey}`,
       "content-type": "application/json",
     };
     if (req.sliceId !== undefined) headers[TESSERA_SLICE_ID_HEADER] = req.sliceId;

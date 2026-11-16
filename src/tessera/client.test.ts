@@ -15,6 +15,7 @@ import { parsePolicy } from "./auth/policy.js";
 import {
   DEFAULT_TESSERA_TIMEOUT_MS,
   type GitHubTokenRequest,
+  TESSERA_REUSE_MARGIN_MS,
   TESSERA_SLICE_ID_HEADER,
   TesseraClient,
   TesseraClientError,
@@ -311,6 +312,141 @@ describe("TesseraClient.issueGitHubToken", () => {
     const imports = [...source.matchAll(/from\s+["']([^"']+)["']/g)].map((m) => m[1]);
     expect(imports.length).toBeGreaterThan(0);
     for (const spec of imports) expect(spec).not.toMatch(/server(\.js)?$/);
+  });
+});
+
+describe("TesseraClient entitlement reuse", () => {
+  const EXPIRY = Date.parse("2026-11-15T20:00:00Z");
+  const MINUTE = 60_000;
+
+  /** A fetch that answers each call with a fresh token expiring at EXPIRY. */
+  function countingFetch(expiresAt: string | null = new Date(EXPIRY).toISOString()): FetchMock {
+    let n = 0;
+    return vi.fn<typeof fetch>(async () => {
+      n += 1;
+      return jsonResponse({ ...WIRE, token: `${TOKEN}-${n}`, expires_at: expiresAt });
+    });
+  }
+
+  function clocked(fetchImpl: FetchMock) {
+    let at = EXPIRY - 60 * MINUTE;
+    const c = client(fetchImpl, { now: () => at });
+    return { c, set: (ms: number) => (at = ms) };
+  }
+
+  it("reuses an entitlement with more than ten minutes left without calling Tessera", async () => {
+    expect(TESSERA_REUSE_MARGIN_MS).toBe(10 * MINUTE);
+    const fetchImpl = countingFetch();
+    const { c, set } = clocked(fetchImpl);
+    const first = await c.issueGitHubToken(APP_WRITE);
+    set(EXPIRY - 10 * MINUTE - 1);
+    const second = await c.issueGitHubToken({ ...APP_WRITE, sliceId: "another-slice" });
+    expect(second).toEqual(first);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it("fetches a new entitlement inside the final ten minutes", async () => {
+    const fetchImpl = countingFetch();
+    const { c, set } = clocked(fetchImpl);
+    await c.issueGitHubToken(APP_WRITE);
+    set(EXPIRY - 10 * MINUTE);
+    const second = await c.issueGitHubToken(APP_WRITE);
+    expect(second.token).toBe(`${TOKEN}-2`);
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    // The new entry replaces the old one.
+    await c.issueGitHubToken(APP_WRITE);
+    expect(fetchImpl).toHaveBeenCalledTimes(3);
+  });
+
+  it("always fetches on refresh, forwards it, and replaces the entry", async () => {
+    const fetchImpl = countingFetch();
+    const { c } = clocked(fetchImpl);
+    await c.issueGitHubToken(APP_WRITE);
+    const refreshed = await c.issueGitHubToken({ ...APP_WRITE, refresh: true });
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    expect(JSON.parse(String(lastInit(fetchImpl).body)).refresh).toBe(true);
+    expect(refreshed.token).toBe(`${TOKEN}-2`);
+    const reused = await c.issueGitHubToken(APP_WRITE);
+    expect(reused.token).toBe(`${TOKEN}-2`);
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps entries apart by identity, repository and access, ignoring repository case", async () => {
+    const fetchImpl = countingFetch();
+    const { c } = clocked(fetchImpl);
+    const requests: GitHubTokenRequest[] = [
+      { identity: "app", repo: "acme/widgets", access: "write" },
+      { identity: "app", repo: "acme/widgets", access: "read" },
+      { identity: "app", repo: "acme/gadgets", access: "write" },
+      { identity: "user", repo: "acme/widgets", access: "write" },
+      { identity: "user", access: "write" },
+    ];
+    const tokens = new Set<string>();
+    for (const req of requests) tokens.add((await c.issueGitHubToken(req)).token);
+    expect(tokens.size).toBe(requests.length);
+    expect(fetchImpl).toHaveBeenCalledTimes(requests.length);
+
+    const upper = await c.issueGitHubToken({ identity: "app", repo: "ACME/Widgets", access: "write" });
+    expect(upper.token).toBe(`${TOKEN}-1`);
+    expect(fetchImpl).toHaveBeenCalledTimes(requests.length);
+  });
+
+  it.each([
+    ["no expiry", null],
+    ["an unparseable expiry", "not-a-date"],
+  ])("never caches an entitlement with %s", async (_label, expiresAt) => {
+    const fetchImpl = countingFetch(expiresAt);
+    const { c } = clocked(fetchImpl);
+    await c.issueGitHubToken(APP_WRITE);
+    await c.issueGitHubToken(APP_WRITE);
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
+  it("never caches a failure, and a plain failure leaves a valid entry alone", async () => {
+    let fail = true;
+    const fetchImpl = vi.fn<typeof fetch>(async () =>
+      fail ? envelope("mint_failed", "mint failed", 502) : jsonResponse(WIRE),
+    );
+    let at = Date.parse(WIRE.expires_at as string) - 60 * MINUTE;
+    const c = client(fetchImpl, { now: () => at });
+
+    await captureError(c.issueGitHubToken(APP_WRITE));
+    fail = false;
+    await c.issueGitHubToken(APP_WRITE);
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+
+    // A failed refresh evicts the entry it was asked to replace.
+    fail = true;
+    await captureError(c.issueGitHubToken({ ...APP_WRITE, refresh: true }));
+    fail = false;
+    at += MINUTE;
+    await c.issueGitHubToken(APP_WRITE);
+    expect(fetchImpl).toHaveBeenCalledTimes(4);
+    await c.issueGitHubToken(APP_WRITE);
+    expect(fetchImpl).toHaveBeenCalledTimes(4);
+  });
+
+  it("does not let a caller mutate the cached entry", async () => {
+    const fetchImpl = countingFetch();
+    const { c } = clocked(fetchImpl);
+    const first = await c.issueGitHubToken(APP_WRITE);
+    expect(() => {
+      (first as { token: string }).token = "tampered";
+    }).toThrow(TypeError);
+    expect(() => {
+      (first.commitIdentity as { name: string }).name = "tampered";
+    }).toThrow(TypeError);
+    const second = await c.issueGitHubToken(APP_WRITE);
+    expect(second.token).toBe(`${TOKEN}-1`);
+    expect(second.commitIdentity?.name).toBe("march-bot[bot]");
+  });
+
+  it("keeps the cache per instance", async () => {
+    const fetchImpl = countingFetch();
+    const now = () => EXPIRY - 60 * MINUTE;
+    await client(fetchImpl, { now }).issueGitHubToken(APP_WRITE);
+    await client(fetchImpl, { now }).issueGitHubToken(APP_WRITE);
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
   });
 });
 
