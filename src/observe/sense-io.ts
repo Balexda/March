@@ -163,37 +163,52 @@ function failedChecks(statusCheckRollup: any) {
 
 /**
  * Reduce a PR's `reviews` nodes to human (non-bot) approval / changes-requested
- * counts — the data the legate's merge gate needs. Mirrors the jq the (retired)
+ * counts, plus a separate bot approval count — the data the legate's merge gate
+ * needs. Bot approvals never count as human ones; they only matter when a
+ * profile's merge policy opts in (`botApproval`). Mirrors the jq the (retired)
  * `check-merge-readiness.sh` ran:
  *  - a review is a bot's when `author.__typename === "Bot"` or its login ends in
  *    `[bot]` (covers GitHub Apps that present as Users, e.g. Copilot);
  *  - per human, only the latest non-COMMENTED/PENDING/DISMISSED review counts, so
- *    a stale CHANGES_REQUESTED later superseded by an APPROVED doesn't block.
+ *    a stale CHANGES_REQUESTED later superseded by an APPROVED doesn't block;
+ *  - bots get the same latest-meaningful-review-per-login treatment, so a bot
+ *    approval that was later DISMISSED (e.g. by a new push) or superseded by a
+ *    bot CHANGES_REQUESTED does not count. Bot CHANGES_REQUESTED is not a gate.
  * Pure (no I/O) so it can be unit-tested without `gh`.
  */
 export function summarizeReviews(
   reviewNodes: any,
-): { human_approval_count: number; changes_requested_count: number } {
+): { human_approval_count: number; changes_requested_count: number; bot_approval_count: number } {
   const nodes = Array.isArray(reviewNodes) ? reviewNodes : [];
   const isBot = (node: any): boolean =>
     node?.author?.__typename === "Bot" || String(node?.author?.login || "").endsWith("[bot]");
-  const meaningful = nodes
-    .filter((node) => !isBot(node))
-    .filter((node) => !["COMMENTED", "PENDING", "DISMISSED"].includes(String(node?.state)));
-  // Latest meaningful review per human login (by submittedAt).
-  const latestByLogin = new Map<string, any>();
-  for (const node of [...meaningful].sort((a, b) =>
-    String(a?.submittedAt).localeCompare(String(b?.submittedAt)),
-  )) {
-    latestByLogin.set(String(node?.author?.login || ""), node);
-  }
+  // Latest meaningful review per login (by submittedAt). COMMENTED / PENDING /
+  // DISMISSED reviews are dropped first, so a later comment does not hide an
+  // earlier approval and a dismissed approval does not count.
+  const latestPerLogin = (subset: any[]): any[] => {
+    const latest = new Map<string, any>();
+    for (const node of subset
+      .filter((n) => !["COMMENTED", "PENDING", "DISMISSED"].includes(String(n?.state)))
+      .sort((a, b) => String(a?.submittedAt).localeCompare(String(b?.submittedAt)))) {
+      latest.set(String(node?.author?.login || ""), node);
+    }
+    return [...latest.values()];
+  };
   let approvals = 0;
   let changesRequested = 0;
-  for (const node of latestByLogin.values()) {
+  for (const node of latestPerLogin(nodes.filter((node) => !isBot(node)))) {
     if (node?.state === "APPROVED") approvals++;
     else if (node?.state === "CHANGES_REQUESTED") changesRequested++;
   }
-  return { human_approval_count: approvals, changes_requested_count: changesRequested };
+  let botApprovals = 0;
+  for (const node of latestPerLogin(nodes.filter(isBot))) {
+    if (node?.state === "APPROVED") botApprovals++;
+  }
+  return {
+    human_approval_count: approvals,
+    changes_requested_count: changesRequested,
+    bot_approval_count: botApprovals,
+  };
 }
 
 function truncateText(text: any, max = 4000): string {
@@ -448,6 +463,7 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
       conversation_comments: graphql.comments,
       human_approval_count: reviewSummary.human_approval_count,
       changes_requested_count: reviewSummary.changes_requested_count,
+      bot_approval_count: reviewSummary.bot_approval_count,
     };
   }
 

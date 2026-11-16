@@ -49,6 +49,24 @@ export function emitActionEventSpan(event: any, emit: LoopSpanEmitter = defaultE
     return;
   }
 
+  // Dependabot auto-merge is not tied to a slice either (these PRs are never
+  // dispatched), so each PR gets its own small trace keyed by repo-loop + PR
+  // number. A `*-failed` action marks the span errored; a failed listing has no
+  // PR and keys off the loop alone.
+  if (event.kind === "dependency_merge" || event.kind === "dependency_merge_failure") {
+    const pr = event.pr_number;
+    const scope = String(event.processor || "legate");
+    const failed = typeof event.action === "string" && event.action.endsWith("-failed");
+    emit({
+      name: "legate.dependency-merge",
+      traceKey: pr != null ? `${scope}-dependency-pr-${pr}` : `${scope}-dependency-merge`,
+      root: true,
+      error: failed,
+      attributes: { "march.action": event.action || "", ...(pr != null ? { "march.pr_number": Number(pr) } : {}) },
+    });
+    return;
+  }
+
   const sliceId = event.slice_id;
   if (!sliceId) return;
   if (event.kind === "dispatch_action" && event.action === "dispatch") {

@@ -1524,7 +1524,8 @@ mergePolicyCmd
       const hasPolicy =
         !!mp &&
         ((mp.defaults && Object.keys(mp.defaults).length > 0) ||
-          (mp.byTaskType && Object.keys(mp.byTaskType).length > 0));
+          (mp.byTaskType && Object.keys(mp.byTaskType).length > 0) ||
+          (mp.dependencyUpdates && Object.keys(mp.dependencyUpdates).length > 0));
       if (!hasPolicy) {
         // No per-profile policy — but the built-in base (#298) still relaxes the
         // cut approval gate, so don't claim "all requirements enforced".
@@ -1547,16 +1548,22 @@ mergePolicyCmd
 
 mergePolicyCmd
   .command("set <profile>")
-  .description("Relax merge requirements for a profile. Resolves Herald via MARCH_HERALD_URL.")
+  .description("Adjust merge requirements for a profile. Resolves Herald via MARCH_HERALD_URL.")
   .option("--task-type <verb>", "Apply the override to one smithy verb (e.g. cut); default: all task types")
   .option("--no-approval", "Do not require a human approval")
   .option("--no-changes-requested", "Do not require changes-requested reviews to be resolved")
+  .option("--bot-approval", "Accept a bot's approving review (e.g. Copilot) in lieu of a human approval")
+  .option("--no-bot-approval", "Stop accepting bot approvals in lieu of a human approval")
+  .option("--dependabot-auto-merge", "Auto-merge Dependabot PRs that only bump versions and pass CI (profile-wide; ignores --task-type)")
+  .option("--no-dependabot-auto-merge", "Stop auto-merging Dependabot PRs")
   .option("--json <json>", "Replace the entire policy from a JSON string")
   .option("--clear", "Clear the policy (all requirements enforced)")
   .action(async (profileName: string, opts: {
     taskType?: string;
     approval: boolean;
     changesRequested: boolean;
+    botApproval?: boolean;
+    dependabotAutoMerge?: boolean;
     json?: string;
     clear?: boolean;
   }) => {
@@ -1599,9 +1606,12 @@ mergePolicyCmd
         const override: Record<string, boolean> = {};
         if (opts.approval === false) override.approval = false;
         if (opts.changesRequested === false) override.changesRequested = false;
-        if (Object.keys(override).length === 0) {
+        // Tri-state: undefined when neither --bot-approval nor --no-bot-approval
+        // was passed, so an unrelated `set` leaves the stored value alone.
+        if (opts.botApproval !== undefined) override.botApproval = opts.botApproval;
+        if (Object.keys(override).length === 0 && opts.dependabotAutoMerge === undefined) {
           process.stderr.write(
-            "Nothing to set — pass --no-approval, --no-changes-requested, --json, or --clear.\n",
+            "Nothing to set — pass --no-approval, --no-changes-requested, --bot-approval, --dependabot-auto-merge, --json, or --clear.\n",
           );
           process.exitCode = ERROR;
           return;
@@ -1609,8 +1619,14 @@ mergePolicyCmd
         const merged = structuredClone(existing.mergePolicy ?? {}) as {
           defaults?: Record<string, boolean>;
           byTaskType?: Record<string, Record<string, boolean>>;
+          dependencyUpdates?: { autoMerge?: boolean };
         };
-        if (opts.taskType) {
+        if (opts.dependabotAutoMerge !== undefined) {
+          merged.dependencyUpdates = { ...(merged.dependencyUpdates ?? {}), autoMerge: opts.dependabotAutoMerge };
+        }
+        if (Object.keys(override).length === 0) {
+          // Only the dependency-update switch was passed; leave requirements alone.
+        } else if (opts.taskType) {
           merged.byTaskType = {
             ...(merged.byTaskType ?? {}),
             [opts.taskType]: { ...(merged.byTaskType?.[opts.taskType] ?? {}), ...override },

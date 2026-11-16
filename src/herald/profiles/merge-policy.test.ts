@@ -3,6 +3,7 @@
  */
 import { describe, expect, it } from "vitest";
 import {
+  approvalSatisfied,
   DEFAULT_MERGE_REQUIREMENTS,
   parseMergePolicy,
   resolveMergeRequirements,
@@ -14,35 +15,35 @@ describe("resolveMergeRequirements", () => {
   // Built-in base policy (#298): cut drops the approval gate for EVERY profile,
   // present and future, without per-profile config.
   it("undefined policy: cut auto-merges by default; other verbs stay all-required", () => {
-    expect(resolveMergeRequirements(undefined, "cut")).toEqual({ approval: false, changesRequested: true });
+    expect(resolveMergeRequirements(undefined, "cut")).toEqual({ approval: false, changesRequested: true, botApproval: false });
     expect(resolveMergeRequirements(undefined, "forge")).toEqual(DEFAULT_MERGE_REQUIREMENTS);
     expect(resolveMergeRequirements(undefined, undefined)).toEqual(DEFAULT_MERGE_REQUIREMENTS);
   });
 
   it("empty policy behaves like undefined: built-in cut default still applies", () => {
-    expect(resolveMergeRequirements({}, "cut")).toEqual({ approval: false, changesRequested: true });
-    expect(resolveMergeRequirements({}, "forge")).toEqual({ approval: true, changesRequested: true });
+    expect(resolveMergeRequirements({}, "cut")).toEqual({ approval: false, changesRequested: true, botApproval: false });
+    expect(resolveMergeRequirements({}, "forge")).toEqual({ approval: true, changesRequested: true, botApproval: false });
   });
 
   it("built-in cut default relaxes approval only, never changesRequested", () => {
-    expect(resolveMergeRequirements(undefined, "cut")).toEqual({ approval: false, changesRequested: true });
+    expect(resolveMergeRequirements(undefined, "cut")).toEqual({ approval: false, changesRequested: true, botApproval: false });
   });
 
   it("a profile can re-tighten cut explicitly — its policy wins over the built-in base", () => {
     const policy: MergePolicy = { byTaskType: { cut: { approval: true } } };
-    expect(resolveMergeRequirements(policy, "cut")).toEqual({ approval: true, changesRequested: true });
+    expect(resolveMergeRequirements(policy, "cut")).toEqual({ approval: true, changesRequested: true, botApproval: false });
   });
 
   it("a profile-wide defaults.approval=true does NOT re-require cut approval (verb tier is more specific)", () => {
     const policy: MergePolicy = { defaults: { approval: true } };
-    expect(resolveMergeRequirements(policy, "cut")).toEqual({ approval: false, changesRequested: true });
-    expect(resolveMergeRequirements(policy, "forge")).toEqual({ approval: true, changesRequested: true });
+    expect(resolveMergeRequirements(policy, "cut")).toEqual({ approval: false, changesRequested: true, botApproval: false });
+    expect(resolveMergeRequirements(policy, "forge")).toEqual({ approval: true, changesRequested: true, botApproval: false });
   });
 
   it("defaults override the base for every task type", () => {
     const policy: MergePolicy = { defaults: { approval: false } };
-    expect(resolveMergeRequirements(policy, "cut")).toEqual({ approval: false, changesRequested: true });
-    expect(resolveMergeRequirements(policy, "forge")).toEqual({ approval: false, changesRequested: true });
+    expect(resolveMergeRequirements(policy, "cut")).toEqual({ approval: false, changesRequested: true, botApproval: false });
+    expect(resolveMergeRequirements(policy, "forge")).toEqual({ approval: false, changesRequested: true, botApproval: false });
   });
 
   it("byTaskType overrides defaults for the matching verb only", () => {
@@ -50,20 +51,20 @@ describe("resolveMergeRequirements", () => {
       defaults: { approval: true, changesRequested: true },
       byTaskType: { cut: { approval: false } },
     };
-    expect(resolveMergeRequirements(policy, "cut")).toEqual({ approval: false, changesRequested: true });
-    expect(resolveMergeRequirements(policy, "forge")).toEqual({ approval: true, changesRequested: true });
+    expect(resolveMergeRequirements(policy, "cut")).toEqual({ approval: false, changesRequested: true, botApproval: false });
+    expect(resolveMergeRequirements(policy, "forge")).toEqual({ approval: true, changesRequested: true, botApproval: false });
   });
 
   it("the cut use-case: only approval relaxed for cut", () => {
     const policy: MergePolicy = { byTaskType: { cut: { approval: false } } };
-    expect(resolveMergeRequirements(policy, "cut")).toEqual({ approval: false, changesRequested: true });
-    expect(resolveMergeRequirements(policy, "mark")).toEqual({ approval: true, changesRequested: true });
+    expect(resolveMergeRequirements(policy, "cut")).toEqual({ approval: false, changesRequested: true, botApproval: false });
+    expect(resolveMergeRequirements(policy, "mark")).toEqual({ approval: true, changesRequested: true, botApproval: false });
   });
 
   it("unknown / undefined task type falls back to defaults", () => {
     const policy: MergePolicy = { byTaskType: { cut: { approval: false } } };
-    expect(resolveMergeRequirements(policy, "render")).toEqual({ approval: true, changesRequested: true });
-    expect(resolveMergeRequirements(policy, undefined)).toEqual({ approval: true, changesRequested: true });
+    expect(resolveMergeRequirements(policy, "render")).toEqual({ approval: true, changesRequested: true, botApproval: false });
+    expect(resolveMergeRequirements(policy, undefined)).toEqual({ approval: true, changesRequested: true, botApproval: false });
   });
 
   it("layering precedence: base < defaults < byTaskType, per field", () => {
@@ -71,7 +72,68 @@ describe("resolveMergeRequirements", () => {
       defaults: { approval: false, changesRequested: false },
       byTaskType: { cut: { changesRequested: true } },
     };
-    expect(resolveMergeRequirements(policy, "cut")).toEqual({ approval: false, changesRequested: true });
+    expect(resolveMergeRequirements(policy, "cut")).toEqual({ approval: false, changesRequested: true, botApproval: false });
+  });
+});
+
+describe("botApproval", () => {
+  it("is off by default for every verb", () => {
+    expect(resolveMergeRequirements(undefined, "mark").botApproval).toBe(false);
+    expect(resolveMergeRequirements({}, "forge").botApproval).toBe(false);
+  });
+
+  it("can be enabled profile-wide or per verb, and re-disabled per verb", () => {
+    const policy: MergePolicy = { defaults: { botApproval: true }, byTaskType: { forge: { botApproval: false } } };
+    expect(resolveMergeRequirements(policy, "mark")).toEqual({ approval: true, changesRequested: true, botApproval: true });
+    expect(resolveMergeRequirements(policy, "forge").botApproval).toBe(false);
+  });
+
+  it("validates as a boolean requirement", () => {
+    expect(validateMergePolicy({ byTaskType: { mark: { botApproval: true } } }).ok).toBe(true);
+    expect(validateMergePolicy({ defaults: { botApproval: "yes" } }).ok).toBe(false);
+  });
+});
+
+describe("approvalSatisfied", () => {
+  const required = { approval: true, changesRequested: true, botApproval: false };
+  const botOk = { ...required, botApproval: true };
+
+  it("a human approval always satisfies the gate", () => {
+    expect(approvalSatisfied(required, { human_approval_count: 1, bot_approval_count: 0 })).toBe(true);
+    expect(approvalSatisfied(botOk, { human_approval_count: 1, bot_approval_count: 0 })).toBe(true);
+  });
+
+  it("a bot approval is ignored unless the policy opts in", () => {
+    expect(approvalSatisfied(required, { human_approval_count: 0, bot_approval_count: 1 })).toBe(false);
+    expect(approvalSatisfied(botOk, { human_approval_count: 0, bot_approval_count: 1 })).toBe(true);
+  });
+
+  it("opting in does not drop the gate: no approval at all still blocks", () => {
+    expect(approvalSatisfied(botOk, { human_approval_count: 0, bot_approval_count: 0 })).toBe(false);
+    expect(approvalSatisfied(botOk, {})).toBe(false);
+    expect(approvalSatisfied(botOk, undefined)).toBe(false);
+  });
+
+  it("a relaxed approval gate passes regardless", () => {
+    expect(approvalSatisfied({ ...required, approval: false }, {})).toBe(true);
+  });
+});
+
+describe("dependencyUpdates", () => {
+  it("accepts and normalizes the autoMerge switch", () => {
+    const r = validateMergePolicy({ dependencyUpdates: { autoMerge: true } });
+    expect(r).toEqual({ ok: true, policy: { dependencyUpdates: { autoMerge: true } } });
+    expect(parseMergePolicy('{"dependencyUpdates":{"autoMerge":true}}')).toEqual({ dependencyUpdates: { autoMerge: true } });
+  });
+
+  it("rejects unknown keys and non-boolean values", () => {
+    expect(validateMergePolicy({ dependencyUpdates: { autoMerge: "yes" } }).ok).toBe(false);
+    expect(validateMergePolicy({ dependencyUpdates: { authors: ["x"] } }).ok).toBe(false);
+    expect(validateMergePolicy({ dependencyUpdates: true }).ok).toBe(false);
+  });
+
+  it("does not affect slice merge requirements", () => {
+    expect(resolveMergeRequirements({ dependencyUpdates: { autoMerge: true } }, "forge")).toEqual(DEFAULT_MERGE_REQUIREMENTS);
   });
 });
 

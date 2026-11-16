@@ -24,27 +24,35 @@
  */
 
 /**
- * The two relaxable human-review gates. Both default to *required*.
+ * The relaxable review gates. `approval` and `changesRequested` default to
+ * *required*; `botApproval` defaults to *off*.
  *
  * - `approval`: at least one human (non-bot) `APPROVED` review.
  * - `changesRequested`: zero outstanding human `CHANGES_REQUESTED` reviews.
+ * - `botApproval`: when true, a bot's `APPROVED` review (e.g. Copilot code
+ *   review) satisfies the `approval` gate in lieu of a human one. It does not
+ *   drop the gate — *someone* must still approve — and it has no effect when
+ *   `approval` is already relaxed. A human `CHANGES_REQUESTED` still blocks.
  */
 export interface MergeRequirements {
   readonly approval: boolean;
   readonly changesRequested: boolean;
+  readonly botApproval: boolean;
 }
 
-/** All human-review gates required — the base every layer (the built-in base
- *  policy and a profile's own policy) layers on top of. */
+/** All human-review gates required, bot approvals not accepted — the base every
+ *  layer (the built-in base policy and a profile's own policy) layers on top of. */
 export const DEFAULT_MERGE_REQUIREMENTS: MergeRequirements = {
   approval: true,
   changesRequested: true,
+  botApproval: false,
 };
 
 /** The requirement keys, as a runtime list for validation. */
 const REQUIREMENT_KEYS: ReadonlyArray<keyof MergeRequirements> = [
   "approval",
   "changesRequested",
+  "botApproval",
 ];
 
 /**
@@ -56,6 +64,17 @@ const REQUIREMENT_KEYS: ReadonlyArray<keyof MergeRequirements> = [
 export interface MergePolicy {
   readonly defaults?: Partial<MergeRequirements>;
   readonly byTaskType?: Readonly<Record<string, Partial<MergeRequirements>>>;
+  readonly dependencyUpdates?: DependencyUpdatePolicy;
+}
+
+/**
+ * Policy for dependency-update PRs (Dependabot version bumps). These are not
+ * Smithy slices, so the per-task-type requirements above never apply to them;
+ * they are handled by the legate's dependency-merge handler, which is inert
+ * unless `autoMerge` is true. Off by default.
+ */
+export interface DependencyUpdatePolicy {
+  readonly autoMerge?: boolean;
 }
 
 /**
@@ -107,6 +126,24 @@ export function resolveMergeRequirements(
   return effective;
 }
 
+/**
+ * Whether the approval gate is satisfied for a PR snapshot. The single
+ * definition both the auto-merge gate (babysit) and the merge-readiness
+ * classifier (pure/slice) use, so the two cannot drift.
+ *
+ * Satisfied when the gate is relaxed, when a human approved, or — only if the
+ * policy opts in via `botApproval` — when a bot approved. Missing counts read as
+ * zero (fail-safe: an unobserved PR never passes a required gate).
+ */
+export function approvalSatisfied(
+  req: MergeRequirements,
+  pr: { human_approval_count?: unknown; bot_approval_count?: unknown } | null | undefined,
+): boolean {
+  if (!req.approval) return true;
+  if (Number(pr?.human_approval_count ?? 0) >= 1) return true;
+  return req.botApproval && Number(pr?.bot_approval_count ?? 0) >= 1;
+}
+
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -147,14 +184,34 @@ export function validateMergePolicy(
     return { ok: false, error: "merge policy must be an object." };
   }
   for (const key of Object.keys(value)) {
-    if (key !== "defaults" && key !== "byTaskType") {
+    if (key !== "defaults" && key !== "byTaskType" && key !== "dependencyUpdates") {
       return {
         ok: false,
-        error: `merge policy has unknown key "${key}" (expected "defaults" or "byTaskType").`,
+        error: `merge policy has unknown key "${key}" (expected "defaults", "byTaskType" or "dependencyUpdates").`,
       };
     }
   }
-  const policy: { defaults?: Partial<MergeRequirements>; byTaskType?: Record<string, Partial<MergeRequirements>> } = {};
+  const policy: {
+    defaults?: Partial<MergeRequirements>;
+    byTaskType?: Record<string, Partial<MergeRequirements>>;
+    dependencyUpdates?: DependencyUpdatePolicy;
+  } = {};
+
+  if (value.dependencyUpdates !== undefined) {
+    const du = value.dependencyUpdates;
+    if (!isPlainObject(du)) {
+      return { ok: false, error: "merge policy dependencyUpdates must be an object." };
+    }
+    for (const [key, raw] of Object.entries(du)) {
+      if (key !== "autoMerge") {
+        return { ok: false, error: `merge policy dependencyUpdates has unknown key "${key}" (expected "autoMerge").` };
+      }
+      if (typeof raw !== "boolean") {
+        return { ok: false, error: "merge policy dependencyUpdates.autoMerge must be a boolean." };
+      }
+    }
+    policy.dependencyUpdates = typeof du.autoMerge === "boolean" ? { autoMerge: du.autoMerge } : {};
+  }
 
   if (value.defaults !== undefined) {
     const result = validateRequirements(value.defaults, "merge policy defaults");

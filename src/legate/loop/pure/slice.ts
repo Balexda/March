@@ -1,6 +1,6 @@
 import { dispatchBranch, dispatchItemKey, dispatchSliceId, sliceActionKey } from "./dispatch-id.js";
 import { isMarchBotComment } from "./march-bot.js";
-import { resolveMergeRequirements, type MergePolicy } from "../../../herald/profiles/merge-policy.js";
+import { approvalSatisfied, resolveMergeRequirements, type MergePolicy } from "../../../herald/profiles/merge-policy.js";
 import { readRecoveryRate, stepRecoveryRate } from "./self-heal.js";
 import {
   clearBackoff,
@@ -567,7 +567,7 @@ export function mergeReadiness(
   const owed = src.needs_response_count ?? slice.needs_response_count ?? slice.pr?.needs_response_count;
   if (owed !== 0) return "not-ready";
   const req = resolveMergeRequirements(mergePolicy, taskTypeForSlice(sliceId, slice));
-  const approvalOk = !req.approval || Number(src.human_approval_count ?? 0) >= 1;
+  const approvalOk = approvalSatisfied(req, src);
   const crOk = !req.changesRequested || Number(src.changes_requested_count ?? 0) === 0;
   if (!approvalOk || !crOk) return "waiting-approval";
   // A missing/empty merge_state_status (sense-io maps absent → null; also the

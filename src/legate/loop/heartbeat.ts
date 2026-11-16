@@ -135,6 +135,16 @@ export function runHeartbeat(out: CoordinatorOutput, deps: HeartbeatDeps): any {
     log("[" + ts + "] " + prefix + " " + a.sliceId + ": " + a.detail);
   }
 
+  // dependency-merge runs last and is not slice-scoped (Dependabot PRs).
+  for (const a of out.results.dependencyMerge?.actions ?? []) {
+    event(meta.processor_events_path, { ...base, kind: "dependency_merge", action: a.action, pr_number: a.pr?.number ?? null, pr_url: a.pr?.url ?? null, detail: a.detail });
+    log("[" + ts + "] " + a.action + ": " + a.detail);
+  }
+  for (const failure of out.results.dependencyMerge?.failures ?? []) {
+    event(meta.processor_events_path, { ...base, kind: "dependency_merge_failure", action: failure.action, pr_number: failure.pr?.number ?? null, pr_url: failure.pr?.url ?? null, detail: failure.detail });
+    log("[" + ts + "] " + failure.action + ": " + failure.detail);
+  }
+
   deps.appendTextSilent(
     deps.heartbeatLogPath,
     `[${ts}] heartbeat slice_count=${record.slice_count} archived=${record.archived_slice_count} cleanups=${record.cleanup_count} ghost_cleanups=${record.ghost_cleanup_count} relaunches=${record.relaunch_count} babysit_actions=${record.babysit_action_count} steward_nudges=${record.steward_nudge_count} steward_stranded=${record.steward_stranded_count} stranded=${record.stranded_count} dispatches=${record.dispatch_action_count} processor_requests=${record.processor_request_count} workers=${JSON.stringify(record.workers)}${record.state_error ? " state_error=" + record.state_error : ""}`,

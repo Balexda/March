@@ -394,6 +394,24 @@ async function squashMergePr(input: { prNumber: number | string; headSha: string
 }
 
 /**
+ * List the repo's open Dependabot PRs with the fields the dependency-merge
+ * verdict needs. One `gh pr list` (a single GraphQL call) per invocation; the
+ * handler throttles how often it asks. Runs in the profile's repo checkout.
+ */
+async function listDependabotPrs(repoPath: string): Promise<any[]> {
+  const out = await execText(
+    "gh",
+    [
+      "pr", "list", "--author", "app/dependabot", "--state", "open", "--limit", "50",
+      "--json", "number,title,url,isDraft,author,headRefOid,mergeable,mergeStateStatus,statusCheckRollup,files",
+    ],
+    { cwd: repoPath },
+  );
+  const parsed = JSON.parse(out);
+  return Array.isArray(parsed) ? parsed : [];
+}
+
+/**
  * Post a reaction to a PR conversation (issue) comment — the babysit `:eyes:`
  * acknowledgement on a dispatched comment-fix. `gh api` substitutes `{owner}`/
  * `{repo}` from the repo checkout's remote, so running in the profile's repoPath
@@ -544,6 +562,12 @@ async function tickProfile(rt: ProfileRuntime, spawnBudget?: SpawnBudget): Promi
       reactToCommentGh(input),
   };
 
+  const dependencyMergeDeps = {
+    listDependencyPrs: (repoPath: string) => listDependabotPrs(repoPath),
+    mergePr: (input: { prNumber: number | string; headSha: string; repoPath?: string }) =>
+      squashMergePr(input),
+  };
+
   const ioDeps = dispatchIoDeps(meta);
   const dispatchDeps = {
     // The default-branch sync is owned by Herald (MARCH_HERALD_SYNC, #300); the
@@ -568,6 +592,7 @@ async function tickProfile(rt: ProfileRuntime, spawnBudget?: SpawnBudget): Promi
     makeContext,
     babysit: babysitDeps,
     dispatch: dispatchDeps,
+    dependencyMerge: dependencyMergeDeps,
     spawnBudget,
   });
 
