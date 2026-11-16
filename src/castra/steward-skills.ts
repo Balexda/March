@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { resolveHeraldUrl } from "../herald/service/client.js";
+import { sessionCompactionSettings } from "../shared/claude-session-env.js";
 import { resolveTesseraPort } from "../tessera/config.js";
 
 /**
@@ -67,7 +68,8 @@ export function stewardPluginDir(): string {
 }
 
 /** Absolute path of the generated steward `settings.json` (loaded via `claude
- *  --settings`). It wires the steward self-report Notification/Stop hook. */
+ *  --settings`). It wires the steward self-report Notification/Stop hook and
+ *  the compaction/prompt-cache `env` tuning. */
 export function stewardSettingsPath(): string {
   return path.join(stewardSkillsRoot(), "settings.json");
 }
@@ -138,11 +140,19 @@ function pruneStaleStewardSessions(dir: string, now: number): void {
 
 /**
  * The steward `settings.json` content: a `Notification` + `Stop` hook, each
- * invoking the shipped `steward-report.mjs` by absolute path. Pure + exported
- * so the wiring is unit-testable without touching the filesystem.
+ * invoking the shipped `steward-report.mjs` by absolute path, plus an `env`
+ * block tuning Claude Code's compaction and prompt-cache lifetime so an idle
+ * steward compacts before its cache goes cold (see
+ * `src/shared/claude-session-env.ts`; omitted when the operator disables it).
+ * Pure + exported so the wiring is unit-testable without touching the
+ * filesystem.
  */
-export function buildStewardSettings(root: string): {
+export function buildStewardSettings(
+  root: string,
+  env: NodeJS.ProcessEnv = process.env,
+): {
   hooks: Record<string, Array<{ hooks: Array<{ type: string; command: string }> }>>;
+  env?: Record<string, string>;
 } {
   const script = path.join(root, "hooks", "steward-report.mjs");
   const entry = [{ hooks: [{ type: "command" as const, command: `node ${shellQuote(script)}` }] }];
@@ -155,6 +165,7 @@ export function buildStewardSettings(root: string): {
       Stop: entry,
       SessionStart: [{ hooks: [{ type: "command", command }] }],
     },
+    ...sessionCompactionSettings(env),
   };
 }
 

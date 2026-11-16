@@ -20,6 +20,10 @@
 #   MARCH_HOST_GID    host primary gid for those files (defaults to the uid).
 #   MARCH_DOCKER_GID  gid of the host `docker` group (for /var/run/docker.sock).
 #   CASTRA_PORT       API port (default: the deterministic 9264 in the 8800–9799 band).
+#   MARCH_SESSION_*   optional steward compaction / prompt-cache tuning
+#                     (MARCH_SESSION_COMPACTION, _CACHE_TTL,
+#                     _IDLE_COMPACT_MIN_TOKENS, _AUTO_COMPACT_WINDOW) — see
+#                     docs/Castra.md "Session compaction and prompt-cache tuning".
 #   CASTRA_API_TOKEN  bearer token gating /v1/* — REQUIRED. Compose refuses to
 #                     start without it: the container binds 0.0.0.0 and joins the
 #                     `march` network, so an unauthenticated API would expose
@@ -71,6 +75,13 @@ services:
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
       - GH_TOKEN=${GH_TOKEN:-}
       - GITHUB_TOKEN=${GITHUB_TOKEN:-}
+      # Steward compaction / prompt-cache tuning, written into the generated
+      # steward settings.json at serve start (src/shared/claude-session-env.ts).
+      # Unset = defaults (on, 1h TTL, 100k idle floor, 200k window).
+      - MARCH_SESSION_COMPACTION=${MARCH_SESSION_COMPACTION:-}
+      - MARCH_SESSION_CACHE_TTL=${MARCH_SESSION_CACHE_TTL:-}
+      - MARCH_SESSION_IDLE_COMPACT_MIN_TOKENS=${MARCH_SESSION_IDLE_COMPACT_MIN_TOKENS:-}
+      - MARCH_SESSION_AUTO_COMPACT_WINDOW=${MARCH_SESSION_AUTO_COMPACT_WINDOW:-}
     volumes:
       # Host docker daemon (sessions/stewards run sibling containers on it).
       - /var/run/docker.sock:/var/run/docker.sock

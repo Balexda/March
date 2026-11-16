@@ -115,6 +115,21 @@ describe("buildStewardSettings", () => {
     expect(settings.hooks.Notification[0].hooks[0].command).toBe(expected);
     expect(settings.hooks.Stop[0].hooks[0].command).toBe(expected);
   });
+
+  it("carries the compaction + prompt-cache env tuning", () => {
+    expect(buildStewardSettings("/srv/steward", {}).env).toEqual({
+      CLAUDE_CODE_PROMPT_CACHE_TTL: "1h",
+      CLAUDE_CODE_IDLE_COMPACT_MIN_TOKENS: "100000",
+      CLAUDE_CODE_AUTO_COMPACT_WINDOW: "200000",
+    });
+  });
+
+  it("writes no env block when the operator disables the tuning", () => {
+    const settings = buildStewardSettings("/srv/steward", {
+      MARCH_SESSION_COMPACTION: "0",
+    });
+    expect(settings).not.toHaveProperty("env");
+  });
 });
 
 describe("recordStewardSession", () => {
