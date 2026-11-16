@@ -10,6 +10,9 @@ export interface GithubAppOptions {
   now?: () => number;
   onDiscoveryError?: (code: TesseraErrorCode) => void;
 }
+/** GitHub installation tokens last one hour; allow bounded drift between Tessera and GitHub clocks. */
+const MAX_TOKEN_LIFETIME_MS = 3_600_000;
+const CLOCK_SKEW_MS = 60_000;
 /** Uncached v1 provider. See docs/vision.md and docs/operating-philosophy.md:
  * bounded requests fail closed without asking an operator or widening scope. */
 export class GithubAppProvider implements CredentialProvider {
@@ -67,7 +70,8 @@ export class GithubAppProvider implements CredentialProvider {
         timer = setTimeout(() => { controller.abort(); reject(new TesseraError("provider_unavailable")); }, this.options.timeoutMs ?? 5000);
       })]);
     } catch (error) { return this.fail(error instanceof TesseraError ? error : new TesseraError(error instanceof SyntaxError ? "mint_failed" : "provider_unavailable")); }
-    finally { if (timer) clearTimeout(timer); }
+    // Abort on every exit so an unread error body cannot hold the connection past the deadline.
+    finally { controller.abort(); if (timer) clearTimeout(timer); }
   }
   private async discover(): Promise<void> {
     const app = await this.call("/app");
@@ -105,7 +109,7 @@ export class GithubAppProvider implements CredentialProvider {
       installationId = installation.id as number;
     }
     const minted = await this.call(`/app/installations/${installationId}/access_tokens`, { repositories: [repository], permissions: ACCESS_PROFILES[request.access] }, true);
-    if (typeof minted.token !== "string" || !minted.token || typeof minted.expires_at !== "string" || !/^\d{4}-\d{2}-\d{2}T/.test(minted.expires_at) || !Number.isFinite(Date.parse(minted.expires_at)) || Date.parse(minted.expires_at) <= this.now() || Date.parse(minted.expires_at) > this.now() + 3_600_000) this.fail(new TesseraError("mint_failed"));
+    if (typeof minted.token !== "string" || !minted.token || typeof minted.expires_at !== "string" || !/^\d{4}-\d{2}-\d{2}T/.test(minted.expires_at) || !Number.isFinite(Date.parse(minted.expires_at)) || Date.parse(minted.expires_at) <= this.now() || Date.parse(minted.expires_at) > this.now() + MAX_TOKEN_LIFETIME_MS + CLOCK_SKEW_MS) this.fail(new TesseraError("mint_failed"));
     if (minted.permissions !== undefined) {
       if (!minted.permissions || typeof minted.permissions !== "object" || Array.isArray(minted.permissions)) this.fail(new TesseraError("mint_failed"));
       const expected = ACCESS_PROFILES[request.access] as Record<string, string>;

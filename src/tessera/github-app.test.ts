@@ -88,12 +88,24 @@ describe("GitHub App provider", () => {
   });
   it.each([
     { expires_at: "2026-11-15T02:00:00Z" },
+    { expires_at: "2026-11-15T01:01:01Z" },
     { permissions: { workflows: "write" } },
     { permissions: { contents: "write" } },
     { token: null },
   ])("rejects malformed or broadened mint responses %j", async change => {
     const app = provider(fake({ "/app/installations/42/access_tokens": [201, { token: "secret", expires_at: "2026-11-15T01:00:00Z", repositories: [{ full_name: "acme/widgets" }], ...change }] }));
     await expect(app.issue({ identity: "app", access: "read", repo: "acme/widgets" })).rejects.toMatchObject({ code: "mint_failed", message: "Provider could not issue a token" });
+  });
+  it("accepts an hour-long token from a GitHub clock slightly ahead of Tessera", async () => {
+    const app = provider(fake({ "/app/installations/42/access_tokens": [201, { token: "secret", expires_at: "2026-11-15T01:00:30Z", repositories: [{ full_name: "acme/widgets" }] }] }));
+    await expect(app.issue({ identity: "app", access: "read", repo: "acme/widgets" })).resolves.toMatchObject({ expiresAt: "2026-11-15T01:00:30Z" });
+  });
+  it("aborts the request when GitHub fails with an unread body", async () => {
+    let signal: AbortSignal | undefined;
+    const transport = vi.fn<typeof fetch>(async (_url, init) => { signal = init?.signal ?? undefined; return new Response(new ReadableStream(), { status: 503 }); });
+    const app = provider(transport, { installationId: 42 });
+    await expect(app.start()).resolves.toBeUndefined();
+    expect(signal?.aborted).toBe(true);
   });
   it("starts unconfigured without calling GitHub", async () => {
     const fetchImpl = fake(); const app = new GithubAppProvider({ fetchImpl });

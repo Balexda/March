@@ -51,7 +51,7 @@ describe("Tessera HTTP contract", () => {
 });
 
 it("emits safe errored HTTP spans for denial, malformed input, and provider failure", async () => {
-  initOtel({MARCH_OTEL:"1"});
+  const otel=initOtel({MARCH_OTEL:"1"});
   const tracer=getActiveOtel().getTracer(); const real=tracer.startSpan.bind(tracer); const spans:Span[]=[];
   vi.spyOn(tracer,"startSpan").mockImplementation((...args:Parameters<typeof real>)=>{const span=real(...args) as Span;spans.push(span);return span;});
   try {
@@ -67,7 +67,7 @@ it("emits safe errored HTTP spans for denial, malformed input, and provider fail
       expect(span.parentSpanContext?.spanId).toBe(spanIdForDispatch("slice-safe"));
       expect(JSON.stringify(span.attributes)).not.toContain("SECRET");
     }
-  } finally {vi.restoreAllMocks(); initOtel({});}
+  } finally {vi.restoreAllMocks(); await otel.shutdown(); initOtel({});}
 });
 it("treats oversized bodies as invalid requests",async()=>{
  const app=buildTesseraServer({authorize:allow});

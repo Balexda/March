@@ -4,7 +4,9 @@ Tessera owns bounded, repository-scoped credential issuance. Its deployment foll
 [March's vision](../../vision.md) and [operating philosophy](../../operating-philosophy.md):
 missing provider credentials allow liveness, and unauthorized issuance fails closed.
 
-## CLI and configuration
+## Public Interface
+
+### CLI and configuration
 
 `march tessera serve [--port <n>] [--host <addr>]` runs until SIGTERM or SIGINT,
 then closes HTTP and telemetry. Host defaults to `127.0.0.1`. Port precedence is
@@ -26,7 +28,7 @@ loading belongs to US2. US3 owns secret-store provisioning, shared-HOME path
 validation, client-key distribution and stack startup ordering. No secret-store
 layout is selected here. User credentials and client/token CLI are future stories.
 
-## HTTP
+### HTTP
 
 | Route | Behavior |
 | --- | --- |
@@ -37,13 +39,15 @@ layout is selected here. User credentials and client/token CLI are future storie
 Token requests accept `identity`, `repo`, `access`, optional `refresh` and
 `subject`; unknown fields fail validation. Success returns `token`, `expires_at`,
 GitHub-derived `identity` and `commit_identity`, `access`, and `repo`.
-Errors use `{"error":{"code":"…","message":"…"}}`:
-`400 invalid_request`, `401 unauthorized`, `403 policy_denied`,
-`422 repo_not_installed`, `503 provider_unconfigured`, `503 credential_invalid`,
-`503 provider_unavailable` (with Retry-After), or `502 mint_failed`.
-Identity fallback is forbidden. User provider remains unconfigured.
+An optional `x-march-slice-id` header nests the issuance span under that slice's trace.
 
-## Runtime and packaging
+### Providers
+
+Providers implement `start`, `issue`, and `status` behind `CredentialProvider`.
+The registry always exposes `github-app` and `github-user`; a slot without an
+implementation reports `unconfigured`. The user provider is reserved for US7.
+
+### Runtime and packaging
 
 `npm run build:tessera-image` builds `docker/tessera.Dockerfile` through
 `npm run build`; the image launches `tessera serve --host 0.0.0.0`.
@@ -52,6 +56,29 @@ only on host loopback, and mounts only its log volume. It receives no HOME,
 Docker socket or ambient GitHub credentials. Docker-socket peers and host
 stewards retain their preexisting host privileges; this boundary cannot revoke them.
 
-Providers implement `start`, `issue`, and `status` behind `CredentialProvider`.
-GitHub calls time out, scoped permissions exclude workflows, and safe issuance
-and discovery traces record classified outcomes without upstream bodies or secrets.
+## Invariants
+
+- `/healthz` and `/status` answer without provider credentials; the service listens while every provider is unconfigured.
+- Production issuance denies every caller with `401 unauthorized` until US2 supplies authorization; unauthenticated requests never reach a provider or GitHub.
+- An app token is scoped to exactly one repository, and GitHub's mint response must name that repository; a pinned installation never broadens scope.
+- Permissions come only from the fixed `read` and `write` access profiles; neither profile includes `workflows`.
+- `identity` and `commit_identity` are derived from GitHub (`<slug>[bot]` and its numeric user id); configuration cannot override them, and Tessera never substitutes another identity.
+- Every GitHub call is bounded by a finite timeout, and the app assertion lives at most 10 minutes.
+- Accepted tokens expire in the future and no more than one hour (plus a 60-second clock-skew allowance) after issuance.
+- Error messages are fixed per code. Tokens, assertions, private keys, bearer keys and upstream response bodies never appear in responses, `/status`, logs or spans.
+- Each token request emits one `tessera.issue` span, marked errored on any non-2xx response; a failed startup identity discovery emits an errored `tessera.discovery` span.
+
+## Error Modes
+
+All token-route failures use the envelope `{"error":{"code":"…","message":"…"}}`.
+
+| Condition | Response | Observable behavior |
+| --- | --- | --- |
+| Malformed request | `400 invalid_request` | Unknown fields, invalid identity/access/repo, wrong optional-field types, missing `repo` for app identity, or an oversized/unsupported body. |
+| Caller not authenticated | `401 unauthorized` | The authorization boundary rejects the caller; in production this is every request. |
+| Caller not permitted | `403 policy_denied` | The authorization boundary rejects this caller for the request. |
+| App not installed on repo | `422 repo_not_installed` | The installation lookup returns 404/422, or GitHub's mint response does not name exactly the requested repository. |
+| Provider unconfigured | `503 provider_unconfigured` | No app id or key is configured, or the requested identity has no provider. |
+| Credential invalid | `503 credential_invalid` | GitHub returns 401 or the private key cannot sign; status reports `invalid`. |
+| Provider unavailable | `503 provider_unavailable` + `Retry-After` | GitHub returns 5xx/429, the call times out, or the network fails; status reports `degraded`. |
+| Mint failed | `502 mint_failed` | Any other GitHub failure, or a malformed, expired, over-long or permission-broadened mint response. |
