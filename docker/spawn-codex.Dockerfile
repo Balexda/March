@@ -1,6 +1,6 @@
 FROM node:22-bookworm-slim
 
-ARG CODEX_VERSION=0.136.0
+ARG CODEX_VERSION=0.169.0
 
 # git: required so the in-container spawn wrapper can init a repo, commit the
 # agent's work, and produce the patch via `git diff` (the worker never
