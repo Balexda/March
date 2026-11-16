@@ -91,4 +91,6 @@ Specs and feature maps that explicitly invoke this philosophy:
 - `specs/2026-05-22-006-containerized-service-contracts-hatchery-brood-herald-castra/containerized-service-contracts-hatchery-brood-herald-castra.spec.md` — "Assumptions" section. Applies the low-touch execution framing by making service-boundary promises explicit test targets.
 - `specs/2026-08-14-012-brood-cli-read-surface/brood-cli-read-surface.spec.md` — "Clarifications" and "Assumptions" sections. Applies the CLI-as-deliberate-intervention surface to Brood read-only lifecycle inspection while keeping autonomous cleanup state inside Brood.
 
+- `specs/2026-11-15-013-tessera-credential-entitlement-service/tessera-credential-entitlement-service.spec.md` — Tessera (the credential/entitlement service). Like Castra and Statio, an infrastructure seam with no row in the per-component table; invokes all three rules of thumb in its Clarifications section (no interactive surfaces — credentials provisioned at deploy; minimum required access — policy-declared, per-repository, per-access-level tokens; clean exits — typed, bounded issuance failures with no silent identity fallback).
+
 When you cite this document from a new spec, add the spec to this list with one line on which rule(s) it invokes and where.
