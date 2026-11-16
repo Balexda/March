@@ -11,6 +11,10 @@ Quick pointers:
   proposing new components or non-trivial behavior changes.
 - **Contributor setup, testing strategy, release checklist:**
   [`CONTRIBUTING.md`](CONTRIBUTING.md).
+- **Automated reviewer rules (Copilot, Codex):** path-scoped files under
+  `.github/instructions/`, review skills under `.github/skills/`, and the
+  `## Code Review Rules` section of `AGENTS.md`; layout and evidence in
+  [`docs/reviewer-instructions.md`](docs/reviewer-instructions.md).
 - **Subsystem contract docs are kept current at edit time, not by a gate.** When a
   change alters a subsystem's public surface, update that subsystem's `contract.md`
   in the same change. The Smithy tools used for most edits already maintain affected
