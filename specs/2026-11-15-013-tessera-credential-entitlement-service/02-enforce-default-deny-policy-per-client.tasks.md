@@ -116,7 +116,7 @@
   - Allowed and denied requests behave as in AS 2.2–2.5 against the running entrypoint with no GitHub App configured
   - The startup log names the setting and the number of rules, never rule contents
 
-- [ ] **Document the policy**
+- [x] **Document the policy**
 
   Update `docs/subsystems/tessera/contract.md`, the header of `docker/tessera.docker-compose.yml` with `src/tessera/container-artifacts.test.ts`, and the Tessera line in `AGENTS.md`.
 

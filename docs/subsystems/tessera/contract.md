@@ -21,9 +21,13 @@ Every request under `/v1` must carry the bearer key of a registered client
 each key, read at startup from the client-keys file named by
 `TESSERA_CLIENT_KEYS_FILE`, and refuses to start without a valid one. A missing
 or unknown key gets `401 unauthorized`. `/healthz` and `/status` need no key.
-Authorization is not applied yet: any authenticated client may request any
-identity, any repository and any access level. A per-client policy is planned
-(spec User Story 2) and lands in the next change.
+
+Each token request from an authenticated client is then checked against that
+client's rule in the policy file named by `TESSERA_POLICY_FILE`. Tessera
+refuses to start without a valid policy file too. The policy is default deny: a
+request is allowed only when the client's rule grants the identity, the
+repository and the access level. Anything else, including every request from a
+registered client that has no rule, gets `403 policy_denied`.
 
 ## Public Interface
 
@@ -45,7 +49,7 @@ response uses the error envelope described in `## Error Modes`.
 | Rejection | `401` with `{ "error": { "code": "unauthorized", "message": "A valid Tessera client key is required." } }`. The response is the same for a missing key, a malformed header and an unknown key; it never says which. |
 | Matching | Tessera hashes the presented key with SHA-256 and compares the digest in constant time against every registered hash, with no early exit on a match. |
 | Caller identity | On success the route knows the authenticated client's name (`request.tesseraClient`), and the request log line records it as `tessera.client`. |
-| Authorization | None yet. Any authenticated client may request any identity, repository and access level. The per-client policy (spec User Story 2) arrives in the next change. |
+| Authorization | Applied to token requests after authentication and body validation, against the authenticated client's policy rule. See "Policy" below. |
 
 Tessera never stores a plaintext key. The client-keys file holds only hashes,
 and keys, hashes and the `Authorization` header are never logged.
@@ -90,6 +94,99 @@ The hash is computed over the exact key string, with no trailing newline. Use
 `printf %s`, not `echo`, which appends a newline and produces a hash that never
 matches. Put the hash, never the key, in the client-keys file.
 
+### Policy
+
+`TESSERA_POLICY_FILE` names a JSON file holding an array of rules, at most one
+per registered client. A rule says which identities the client may request,
+which repositories it may request `app` tokens for, and the highest access
+level it may request:
+
+```json
+[
+  { "client": "steward", "identities": ["app"], "repos": ["acme/*"], "max_access": "write" },
+  { "client": "herald", "identities": ["app"], "repos": ["acme/widgets", "acme/gadgets"], "max_access": "read" },
+  { "client": "legate", "identities": ["app", "user"], "repos": ["acme/*"], "max_access": "write" }
+]
+```
+
+| Field | Type | Required | Meaning |
+|-------|------|----------|---------|
+| `client` | string | Yes | A client registered in the client-keys file. |
+| `identities` | array of `"app"` and/or `"user"` | Yes | The identities the client may request. Only the `legate` client may be granted `user`. |
+| `repos` | array of strings | Yes, and non-empty, when `identities` contains `app`; optional otherwise | Repository allowlist for `app` requests. Each entry is `owner/name` (one repository) or `owner/*` (every repository of that owner). |
+| `max_access` | `"read"` or `"write"` | Yes | The access ceiling. `write` also allows `read`. |
+
+The file is rejected, and Tessera does not start (exit status `2`), unless:
+
+- it is not blank, is valid JSON, and its top level is an array with at least
+  one rule;
+- each rule is an object with no fields other than `client`, `identities`,
+  `repos` and `max_access`;
+- each `client` is a string naming a client registered in the client-keys
+  file;
+- no client has a second rule;
+- each `identities` is a non-empty array of `"app"` and `"user"` with no
+  duplicates;
+- `user` is granted only to the `legate` client;
+- each `max_access` is `"read"` or `"write"`;
+- a rule that grants `app` has a non-empty `repos`;
+- `repos`, when present, is an array, and each entry is exactly `owner/name`
+  or `owner/*`, where both parts follow the same character rules as the request
+  `repo` field. A bare `*`, a wildcard owner and any other pattern are
+  rejected. No two entries may be the same, ignoring case.
+
+Error messages name the setting and the rule position (for example `rule 2`),
+and for a repository entry its position in `repos`. They never contain the file
+path, a client name, a repository or any other file content.
+
+A registered client with no rule is valid at startup; every request it makes
+is denied. The file is read once, at startup. Changing the policy takes a
+restart.
+
+#### Decision rules
+
+The token route checks a request against the caller's rule in this order. The
+first check that fails ends the request with `403 policy_denied`, with the
+message for that check (see `## Error Modes`).
+
+1. **Identity.** Denied when the client has no rule, when its rule does not
+   list the requested identity, or when the identity is `user` and the client
+   is not `legate`. The loader already refuses a `user` grant to any other
+   client; the request-time check is repeated as a second line of defence.
+2. **Repository** (`app` requests only). The requested `repo` must match an
+   allowlist entry: either the exact `owner/name`, or `owner/*` for the same
+   owner. `owner/*` never matches another owner's repository. Matching ignores
+   case, so `Acme/Widgets` matches `acme/widgets` and `acme/*`.
+3. **Access.** The requested `access` must not exceed `max_access`, where
+   `read` is below `write`. This applies to every identity.
+
+For a `user` request the repository allowlist is not applied, even when the
+request carries a `repo`. `subject` takes no part in any check.
+
+Two of these rules are working assumptions, recorded as open questions in the
+spec's task plan:
+
+- *Working assumption: the access ceiling applies to `user` requests.* A
+  `legate` rule with `max_access: "read"` denies a `user` request for `write`.
+- *Working assumption: the allowlist does not apply to `user` requests.* The
+  operator token cannot be limited to a repository, so its `repo` is not
+  checked.
+
+#### Evaluation order
+
+Every token request goes through these steps in order, and stops at the first
+one that fails:
+
+1. **Authenticate** the client key: `401 unauthorized`.
+2. **Validate** the body: `400 invalid_request`.
+3. **Authorize** against the client's policy rule: `403 policy_denied`.
+4. **Dispatch** to the provider for the requested identity:
+   `503 provider_unconfigured` when there is none, otherwise the provider's
+   result.
+
+A denied request never reaches a provider or GitHub, and never gets
+`provider_unconfigured`.
+
 ### `POST /v1/github/token`
 
 | Field | Contract |
@@ -97,8 +194,8 @@ matches. Put the hash, never the key, in the client-keys file.
 | Method and path | `POST /v1/github/token` |
 | Request envelope | JSON object body (`content-type: application/json`) with the fields listed below. A field outside this set is rejected. |
 | Response envelope | `200` with an Entitlement body (below). Returned for an `app` request when the `github-app` provider is registered and either GitHub mints the token or a cached token is served (see "Token cache" under the `github-app` provider). |
-| Authentication behavior | Requires `Authorization: Bearer <client key>` for a registered client, checked before the body is validated. A missing or unknown key returns `401 unauthorized`. No authorization policy is applied yet: any authenticated client may request any identity, repository and access. |
-| Visible status or error behavior | A request without a valid client key returns `401 unauthorized`. A validation failure returns `400 invalid_request`. A valid request for an identity with no registered provider returns `503 provider_unconfigured`. Typed errors raised by a provider map to the statuses in `## Error Modes`. |
+| Authentication behavior | Requires `Authorization: Bearer <client key>` for a registered client, checked before the body is validated. A missing or unknown key returns `401 unauthorized`. A valid body is then authorized against the client's policy rule before any provider is looked up (see "Policy"). |
+| Visible status or error behavior | A request without a valid client key returns `401 unauthorized`. A validation failure returns `400 invalid_request`. A request outside the client's policy rule returns `403 policy_denied`. An allowed request for an identity with no registered provider returns `503 provider_unconfigured`. Typed errors raised by a provider map to the statuses in `## Error Modes`. |
 
 Request body:
 
@@ -108,7 +205,7 @@ Request body:
 | `access` | `"read"` or `"write"` | Yes | Access level. It selects a fixed permission set; callers cannot name individual permissions. |
 | `repo` | string, `owner/name` | Required for `app`; optional for `user` | Target repository. Both parts may contain only letters, digits, `_`, `.` and `-`. A part made only of dots is rejected, as is an owner over 39 characters or a name over 100. |
 | `refresh` | boolean | No | Ask the provider to discard a cached credential before issuing. Passed to the provider; the `github-app` provider evicts the matching cache entry and mints a new token. A refresh never receives a cached token, so during a GitHub outage it fails with `provider_unavailable`. |
-| `subject` | string | No | Reserved for future per-spawn tickets. Accepted and validated, but not passed to the provider and not used for any decision. |
+| `subject` | string | No | Reserved for future per-spawn tickets. Accepted and validated, but not passed to the provider and not used for any decision, including the policy decision. |
 
 Validation runs in this order: body is a JSON object, no unknown fields,
 `identity`, `access`, `repo` format, `repo` present for `app`, `refresh` type,
@@ -287,8 +384,9 @@ subclass from `src/tessera/types.ts`. The route itself contains no GitHub logic.
 | `--host <host>` | `127.0.0.1` | Bind address. The container passes `0.0.0.0`. |
 
 The command runs until `SIGTERM` or `SIGINT`, then closes the server, flushes
-telemetry and exits `0`. An invalid port prints the reason to stderr and exits
-with the usage status (`2`) before anything listens. Bare `march tessera`
+telemetry and exits `0`. An invalid port, or a missing or invalid client-keys or
+policy file, prints the reason to stderr and exits with the usage status (`2`)
+before anything listens. Bare `march tessera`
 prints the group help and exits with the usage status.
 
 ### Configuration
@@ -302,10 +400,13 @@ prints the group help and exits with the usage status.
 | `TESSERA_GITHUB_APP_KEY_FILE` | server | Path to the App private key file (PEM). Optional; counts as missing when the file does not exist. |
 | `TESSERA_GITHUB_INSTALLATION_ID` | server | Pinned installation id. Optional; must be a positive integer when set. When set, only repositories of the account that installation belongs to are served. When unset, the installation is looked up per repository owner. |
 | `TESSERA_CLIENT_KEYS_FILE` | server | Required. Path to the client-keys file (see "The client-keys file"). Tessera does not start when it is unset, blank, unreadable or invalid. Read once at startup. |
+| `TESSERA_POLICY_FILE` | server | Required. Path to the policy file (see "Policy"). Tessera does not start when it is unset, blank, unreadable or invalid. Read once at startup; restart to change the policy. |
 | `MARCH_OTEL` | server | Enables telemetry export; a no-op when off. The compose file defaults it to `1`. |
 
 At startup the service loads the client-keys file and logs the number of
-registered clients, naming the setting but never the path or any hash.
+registered clients, naming the setting but never the path or any hash. It then
+loads the policy file and logs the number of rules, naming the setting but
+never the path, a rule, a client's grants or a repository.
 
 When the app id or key file is missing, the service still starts, logs a
 warning that names the missing settings, and answers `app` requests with
@@ -336,14 +437,28 @@ or `GITHUB_TOKEN`.
 - Tessera holds only SHA-256 hashes of client keys, never a plaintext key. A
   presented key is hashed and compared in constant time against every
   registered hash.
-- Authorization is not enforced yet. Any authenticated client may request a
-  read or write token for any identity and any repository the GitHub App is
-  installed on, until the per-client policy lands (spec User Story 2, next
-  change). Keep the service reachable only from the loopback interface:
+- Default deny. A token request is allowed only when the caller's policy rule
+  grants the identity, matches the repository (for `app`) and covers the
+  access level. A registered client with no rule is denied every request.
+  There is no allow-all mode: Tessera does not start without a valid policy
+  file.
+- Only the `legate` client may hold the `user` identity. A rule granting `user`
+  to any other client is a startup failure, and a `user` request from any other
+  client is denied.
+- `subject` affects no decision. Changing or omitting it never changes whether
+  a request is allowed.
+- A client has at most one policy rule. A second rule for the same client is a
+  startup failure.
+- Authorization runs after authentication and body validation and before any
+  provider is looked up. A denied request never reaches a provider or GitHub.
+- A `policy_denied` message names only the check that failed. It never reveals
+  the allowlist, the ceiling or the submitted repository.
+- Keep the service reachable only from the loopback interface:
   `march tessera serve` binds `127.0.0.1` by default, and the compose file
   publishes the port on `127.0.0.1` only. Inside the compose stack the
   service is also reachable by every container on the `march` network, but
-  only a caller holding a registered key gets past `/v1`.
+  only a caller holding a registered key gets past `/v1`, and then only within
+  its policy rule.
 - No identity is ever substituted for another. A request for `app` is only
   served by the provider registered for `app`, and a request for `user` only by
   the provider for `user`. If that provider is missing, the response is
@@ -409,7 +524,8 @@ Every non-2xx response has the body
 | `invalid_request` | `400` | Body is not a JSON object, has an unknown field, has an `identity` other than `app`/`user`, has an `access` other than `read`/`write`, has a `repo` not in `owner/name` form, omits `repo` for `app`, or has a non-boolean `refresh` or non-string `subject`. |
 | `invalid_request` | `400` | Fastify rejects the request before the route runs (an `FST_*` error with a `4xx` status: for example invalid JSON, an empty JSON body, an unsupported content type, or an oversized body). The message is always `Malformed request body.` and never echoes the body. |
 | `invalid_request` | `404` | No route matches the method and path. Under `/v1` this is only returned to an authenticated caller; an unauthenticated one gets `401 unauthorized`. The message is fixed and does not echo the request URL. |
-| `provider_unconfigured` | `503` | No provider is registered for the requested identity: an `app` request when the GitHub App settings are not configured, and every `user` request. |
+| `policy_denied` | `403` | The request is outside the authenticated client's policy rule (see "Policy"). Checked after validation and before any provider is looked up. The message is fixed per failed check: `The requested identity is not granted to this client.` (no rule, identity not granted, or `user` from a client other than `legate`), `The requested repository is not allowed for this client.` (an `app` repository outside the allowlist), or `The requested access exceeds this client's ceiling.` (access above `max_access`). No message reveals the allowlist or echoes the submitted repository. |
+| `provider_unconfigured` | `503` | A request allowed by the policy names an identity with no registered provider: an `app` request when the GitHub App settings are not configured, and every allowed `user` request. |
 | `repo_not_installed` | `422` | The App is not installed on the repository owner (both installation lookups return `404`; no mint is attempted); with `TESSERA_GITHUB_INSTALLATION_ID` set, the owner is not the account that installation belongs to, or the installation returns `404` (no mint is attempted); or GitHub refuses the mint with `404` or `422` because the installation does not cover the repository (the cached entry for that key is evicted). |
 | `credential_invalid` | `503` | GitHub returns `401` to the app assertion, or the key file cannot be read or parsed. The provider becomes `invalid` until restart. No `Retry-After` header. |
 | `provider_unavailable` | `503` | A GitHub call times out (5 seconds), cannot connect, or returns `5xx`; or the bot identity is not yet known. The provider becomes `degraded`. The response carries a `Retry-After` header in seconds: GitHub's numeric `Retry-After` on a `5xx` when present, else `30`. When an unexpired cached token exists for the request's key (and the request is not a `refresh`), that token is served with `200` instead and no error is returned. |
@@ -423,6 +539,9 @@ Startup failures of `march tessera serve`:
 | `--port` or `MARCH_TESSERA_PORT` is not an integer in 1..65535 | Reason printed to stderr, exit status `2`, nothing listens. |
 | `TESSERA_CLIENT_KEYS_FILE` is unset or blank | Reason printed to stderr, exit status `2`, nothing listens. Checked after the port and before any other setting, telemetry or GitHub call. |
 | The client-keys file cannot be read, or fails any rule in "The client-keys file" | Reason printed to stderr (the setting and entry position only, never the path or file contents), exit status `2`, nothing listens. |
+| `TESSERA_POLICY_FILE` is unset or blank | Reason printed to stderr, exit status `2`, nothing listens. Checked after the client-keys file and before the GitHub App settings, telemetry or any GitHub call. |
+| The policy file cannot be read, or fails any rule in "Policy" | Reason printed to stderr (the setting and rule position only, never the path or file contents), exit status `2`, nothing listens. |
+| A registered client has no policy rule | Not a failure, provided the file has at least one rule: the service starts and denies every request from that client. |
 | `TESSERA_GITHUB_INSTALLATION_ID` is set but not a positive integer | Reason printed to stderr, exit status `2`, nothing listens. |
 | App id or key file missing | Not a failure: the service starts, logs a warning naming the missing settings, and answers `app` requests with `provider_unconfigured`. |
 | GitHub unreachable or failing when the provider starts | Not a failure: the service starts, the provider is `degraded` (or `invalid` if the credential is rejected), and the bot identity lookup is retried on the next `app` request. |

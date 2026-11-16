@@ -126,29 +126,40 @@ describe("tessera container artifacts", () => {
     );
   });
 
-  it("passes the client-keys file setting through in optional form with no mount", () => {
+  it("passes the client-keys and policy file settings through in optional form with no mount", () => {
     const body = effective(read("docker/tessera.docker-compose.yml"));
 
     expect(body).toContain("TESSERA_CLIENT_KEYS_FILE=${TESSERA_CLIENT_KEYS_FILE:-}");
     expect(body).not.toContain("TESSERA_CLIENT_KEYS_FILE:?");
+    expect(body).toContain("TESSERA_POLICY_FILE=${TESSERA_POLICY_FILE:-}");
+    expect(body).not.toContain("TESSERA_POLICY_FILE:?");
     const volumeEntries = body
       .split("\n")
       .filter((line) => /^\s+- \S+:\//.test(line) && !line.includes("="));
     expect(volumeEntries.map((line) => line.trim())).toEqual(["- march-tessera-logs:/march/logs"]);
   });
 
-  it("documents setup, client keys, the missing policy, and what arrives later", () => {
+  it("documents setup, client keys, the default-deny policy, and what arrives later", () => {
     const compose = read("docker/tessera.docker-compose.yml");
 
     expect(compose).toContain("npm run build:tessera-image");
     expect(compose).toContain("HOST-SPECIFIC CONFIG");
     expect(compose).toContain("TESSERA_GITHUB_APP_ID");
     expect(compose).toContain("TESSERA_CLIENT_KEYS_FILE");
+    expect(compose).toContain("CLIENT KEYS (REQUIRED)");
+    expect(compose).toContain("POLICY (REQUIRED)");
+    expect(compose).toContain("TESSERA_POLICY_FILE");
     expect(compose).toMatch(/refuses to start/i);
     expect(compose).toMatch(/compose override/i);
     expect(compose).toMatch(/only SHA-256 hashes/i);
-    expect(compose).toMatch(/Authorization policy is NOT enforced yet/i);
+    expect(compose).toMatch(/DEFAULT DENY/);
+    expect(compose).toContain("policy_denied");
+    expect(compose).toContain("docs/subsystems/tessera/contract.md");
+    expect(compose).toMatch(/restart after changing/i);
     expect(compose).toContain("User Story 3");
+    expect(compose).toMatch(/never expose it publicly/i);
     expect(compose).not.toMatch(/unauthenticated/i);
+    expect(compose).not.toMatch(/NOT enforced/i);
+    expect(compose).not.toMatch(/any (registered|authenticated) client may request/i);
   });
 });

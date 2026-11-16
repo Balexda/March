@@ -53,7 +53,7 @@ export interface Entitlement {
   readonly repo: string | null;
 }
 
-/** A request handed to a provider; already validated (and, from US2, policy-checked). */
+/** A request handed to a provider; already validated and allowed by the caller's policy rule. */
 export interface ProviderIssueRequest {
   readonly repo?: string;
   readonly access: AccessLevel;

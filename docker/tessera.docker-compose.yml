@@ -11,6 +11,8 @@
 # http://localhost:${MARCH_TESSERA_PORT:-9477}. Every /v1/* request must send
 # `Authorization: Bearer <client key>` for a registered client; a missing or
 # unknown key gets 401 `unauthorized`. /healthz and /status need no key.
+# Only registered clients can obtain tokens, and each only within its own
+# policy rule; everything else gets 403 `policy_denied`.
 #
 # CLIENT KEYS (REQUIRED): the service REFUSES TO START (exit status 2) until
 # you supply a client-keys file. Set
@@ -30,6 +32,21 @@
 # Without the file each start attempt exits with status 2, and because of
 # `restart: on-failure` the container keeps restarting; `docker logs
 # march-tessera` shows the reason (it names TESSERA_CLIENT_KEYS_FILE).
+#
+# POLICY (REQUIRED): the service also REFUSES TO START (exit status 2) until
+# you supply a policy file. Set
+#   TESSERA_POLICY_FILE             path INSIDE the container to the policy
+#                                   file, and add a read-only bind mount for
+#                                   that one file yourself in a compose
+#                                   override, as for the client-keys file.
+# The file is a JSON array of {"client", "identities", "repos", "max_access"}
+# rules, at most one per registered client; the format and validation rules
+# are in docs/subsystems/tessera/contract.md. The policy is DEFAULT DENY: a
+# request is allowed only when the client's rule grants the identity, the
+# repository and the access level, and a registered client with no rule is
+# denied everything. The file is read once at startup; restart after changing
+# it. An invalid file keeps the container restarting the same way; `docker
+# logs march-tessera` names TESSERA_POLICY_FILE and the rule position.
 #
 # With TESSERA_GITHUB_APP_ID and TESSERA_GITHUB_APP_KEY_FILE set (and the key
 # file present in the container), the github-app provider is registered and
@@ -64,16 +81,14 @@
 #                                   per repository owner.
 #
 # ---------------------------------------------------------------------------
-# NOT YET IN THIS CHANGE:
-#   * Authorization policy is NOT enforced yet. Any registered client may
-#     request a read or write bot token for any repository the App is
-#     installed on, as either identity. The per-client policy file lands in the
-#     next change.
-#   * The secret store, `march up` generating client keys and writing this
-#     client-keys file, and the full security notes arrive with a later change
-#     (spec User Story 3).
-#   * The port is published on 127.0.0.1 only. Never publish it on any other
-#     interface, never expose it publicly, never publish this image.
+# NOT YET IN THIS CHANGE (spec User Story 3):
+#   * The secret store for the App key.
+#   * `march up` generating client keys and writing the client-keys and policy
+#     files; until then you supply both files yourself.
+#   * The full security notes.
+#
+# The port is published on 127.0.0.1 only. Never publish it on any other
+# interface, never expose it publicly, never publish this image.
 # ---------------------------------------------------------------------------
 name: march-tessera
 
@@ -97,6 +112,9 @@ services:
       # Required client-keys file (path inside the container). Passed through
       # empty when unset, in which case the service refuses to start.
       - TESSERA_CLIENT_KEYS_FILE=${TESSERA_CLIENT_KEYS_FILE:-}
+      # Required policy file (path inside the container). Passed through empty
+      # when unset, in which case the service refuses to start.
+      - TESSERA_POLICY_FILE=${TESSERA_POLICY_FILE:-}
       # Optional GitHub App pass-throughs; empty means unconfigured.
       - TESSERA_GITHUB_APP_ID=${TESSERA_GITHUB_APP_ID:-}
       - TESSERA_GITHUB_APP_KEY_FILE=${TESSERA_GITHUB_APP_KEY_FILE:-}
