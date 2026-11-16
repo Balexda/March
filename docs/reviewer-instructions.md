@@ -2,7 +2,8 @@
 
 Automated reviewers read instruction files from this repository as their
 prompt. This page says which files exist, who reads them, how they are
-layered, how a rule gets added, and how Copilot approvals are switched on.
+layered, how a rule gets added, how CodeRabbit is pointed at the same files,
+and how Copilot approvals are switched on.
 
 The layout mirrors SmithyCLI's
 ([Balexda/SmithyCLI#623](https://github.com/Balexda/SmithyCLI/pull/623)). The
@@ -17,6 +18,7 @@ Smithy-general files were copied from there by hand; deploying them through
 | Copilot code review | `.github/copilot-instructions.md`; every `.github/instructions/*.instructions.md` whose `applyTo` matches a changed file; `.github/skills/*/SKILL.md` on demand; `AGENTS.md` and `CLAUDE.md` |
 | Copilot coding agent | The same, minus files marked `excludeAgent: "coding-agent"`; plus `coding-agent.instructions.md` |
 | Codex code review | The `## Code Review Rules` section of `AGENTS.md` |
+| CodeRabbit | `AGENTS.md`, `CLAUDE.md`, and `.github/copilot-instructions.md` by its default patterns; every instruction file and skill that `.coderabbit.yaml` maps to a changed file |
 
 Copilot reads these from the pull request's own branch. A change to an
 instruction file is therefore reviewed under the changed version, which makes
@@ -31,8 +33,8 @@ a rule easy to try and means a pull request can alter its own reviewer.
 
 General-layer files name nothing that exists only in March, so they stay
 byte-identical to SmithyCLI's copies. `scripts/reviewer-instructions.test.mjs`
-enforces that, along with the shape each reviewer requires and a
-4,000-character budget per instruction file.
+enforces that, along with the shape each reviewer requires, a
+4,000-character budget per instruction file, and the CodeRabbit path map.
 
 | File | Applies to | Layer |
 |------|------------|-------|
@@ -116,6 +118,78 @@ reason. Each rule traces to these pull requests.
 The snapshot rule has no March evidence; it carries over from SmithyCLI and
 the `Smithy upgrade` workflow, which produces those pull requests.
 
+## CodeRabbit
+
+CodeRabbit calls files like these *code guidelines*. `.coderabbit.yaml` holds
+no rule text. Under `knowledge_base.code_guidelines.filePatterns` it lists
+each rule file with the paths that file governs:
+
+```yaml
+- files: ".github/instructions/runtime-source.instructions.md"
+  applyTo: "src/**/*.ts,scripts/**/*.mjs"
+```
+
+- **The map repeats each file's `applyTo`.** By default CodeRabbit applies a
+  guideline file to the directory it sits in, which for `.github/instructions/`
+  is not the code the rule is about. The entry states the scope instead, in
+  the same comma-separated form the frontmatter uses.
+- **A skill is mapped like an instruction file.** CodeRabbit finds
+  `.github/skills/*/SKILL.md` on its own as an Agent Skill, but with no path
+  scope stated, so a skill takes the `applyTo` of the one instruction file
+  that sends the reviewer to it.
+- **`coding-agent.instructions.md` is not mapped.** It opts out of code review.
+- **`AGENTS.md`, `CLAUDE.md`, and `.github/copilot-instructions.md` need no
+  entry.** CodeRabbit's default patterns find them.
+- **A new or rescoped rule file changes the map in the same pull request.**
+  The test fails on a missing entry, a drifted `applyTo`, an entry for a file
+  that is not a rule file, and inline instruction text such as
+  `path_instructions`.
+
+The entries for `smithy.*` and `smithy-*` files are the same in every
+repository that uses Smithy.
+
+### Requesting a review
+
+A comment on the pull request starts a review whether or not automatic
+reviews are on:
+
+| Comment | Reviews |
+|---------|---------|
+| `@coderabbitai review` | The commits pushed since CodeRabbit's last review |
+| `@coderabbitai full review` | Every file in the pull request, from scratch |
+
+`@coderabbitai configuration` prints the settings in force and which layer
+supplied each one. A requested review counts toward the review rate limit.
+
+### Automatic or on demand
+
+`.coderabbit.yaml` sets `inheritance: true` and leaves `reviews.auto_review`
+out, so that choice stays in the CodeRabbit app's settings for this
+repository. Without `inheritance: true`, a key the file leaves out falls back
+to CodeRabbit's schema default, not to the app's settings.
+
+| Option | Setting | Effect |
+|--------|---------|--------|
+| Automatic | `auto_review.enabled: true`, the schema default | A review when a pull request opens and on each push. Drafts are skipped. Automatic reviews pause after 5 reviewed commits; a comment restarts them. |
+| On demand | `auto_review.enabled: false` | A review only on `@coderabbitai review` or `@coderabbitai full review`. |
+| By label | `auto_review.enabled: false` with `auto_review.labels: ["<label>"]` | A review when the pull request carries the label, and on a comment. |
+
+CodeRabbit's plans page says a public repository with fewer than 10 stars
+gets reviews only on request, whatever this setting says.
+
+Reviews of public repositories are free and carry the knowledge-base features
+this map relies on. They are rate-limited per repository, at 1 to 10 reviews
+an hour depending on star count. `@coderabbitai rate limit` says whether a
+review is available now.
+
+Sources, checked on 2026-11-16: CodeRabbit's
+[code guidelines](https://docs.coderabbit.ai/knowledge-base/code-guidelines),
+[configuration reference](https://docs.coderabbit.ai/reference/configuration),
+[configuration inheritance](https://docs.coderabbit.ai/configuration/configuration-inheritance),
+[automatic review controls](https://docs.coderabbit.ai/configuration/auto-review),
+[review commands](https://docs.coderabbit.ai/reference/review-commands), and
+[plans](https://docs.coderabbit.ai/management/plans).
+
 ## Copilot approvals
 
 Copilot code review can submit approving reviews. It is off by default and is
@@ -148,6 +222,13 @@ it count changes how every pull request merges, so decide that separately.
   (Smithy 0.5.13) predates that section; the next Smithy upgrade adds it.
 - About 20 sampled threads, mostly on `cut` and `mark` pull requests the loop
   merged, had no reply. Whether those findings were right is unknown.
+- The CodeRabbit map was written from CodeRabbit's documentation and has not
+  been observed on a pull request. On the first reviewed pull request, run
+  `@coderabbitai configuration` and check that the review summary lists the
+  mapped files.
+- CodeRabbit posts its summary as a pull request conversation comment. The
+  Legate loop treats an unanswered conversation comment as feedback to fix,
+  whoever wrote it.
 - Codex reads only `AGENTS.md`, so its copy of the rules is a short list and a
   pointer to the files above.
 - The read/review split relies on a reviewer loading a skill when an

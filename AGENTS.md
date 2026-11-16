@@ -46,7 +46,8 @@ When a feature spans multiple subsystems, split code by ownership. For example, 
 For automated reviewers. Path-scoped detail lives in `.github/instructions/`,
 review procedures in `.github/skills/`, and
 [`docs/reviewer-instructions.md`](docs/reviewer-instructions.md) explains the
-layout. The rules that matter most:
+layout. A reviewer that cannot load a skill on demand is given both for the
+paths they cover. The rules that matter most:
 
 - **Review against the plan.** Most pull requests implement one slice of one
   `.tasks.md` file. Read that slice before commenting. Do not request work a
