@@ -173,6 +173,16 @@ export interface ListSessionsFilter {
   parentId?: string;
 }
 
+/** Non-persisted read surface derived from a tracked session row. */
+export interface BroodReadView {
+  readonly record: SessionRecord;
+  readonly age: string;
+  readonly needsAttention: boolean;
+  readonly disposed: boolean;
+  readonly containerLive: boolean;
+  readonly reconciled: boolean;
+}
+
 /** Body of `POST /sessions/:id/teardown`. */
 export interface TeardownRequest {
   /** Tear down even a `running` session. */
