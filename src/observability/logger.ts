@@ -193,10 +193,14 @@ export interface ServiceLoggerOptions {
   readonly stdout?: NodeJS.WritableStream;
   /**
    * pino `redact` paths whose values are replaced before any record is
-   * written. Unset by default: only the Tessera factories pass it.
+   * written, each with {@link REDACT_CENSOR}. Unset by default: only the
+   * Tessera factories pass it.
    */
   readonly redact?: readonly string[];
 }
+
+/** The fixed value any service logger replaces a redacted field with. */
+export const REDACT_CENSOR = "[redacted]";
 
 /**
  * Build a March service logger: a pino instance that writes JSONL to **both**
@@ -237,7 +241,7 @@ export function createServiceLogger(options: ServiceLoggerOptions): PinoLogger {
       mixin: traceMixin,
       ...(options.redact === undefined
         ? {}
-        : { redact: { paths: [...options.redact], censor: TESSERA_REDACT_CENSOR } }),
+        : { redact: { paths: [...options.redact], censor: REDACT_CENSOR } }),
     },
     pino.multistream(streams),
   );
@@ -393,8 +397,8 @@ export const TESSERA_REDACT_PATHS: readonly string[] = Object.freeze([
   "*.password",
 ]);
 
-/** The fixed value a redacted field is replaced with. */
-export const TESSERA_REDACT_CENSOR = "[redacted]";
+/** The Tessera loggers' censor: an alias of {@link REDACT_CENSOR}, kept for existing imports. */
+export const TESSERA_REDACT_CENSOR = REDACT_CENSOR;
 
 export interface TesseraLoggerOptions {
   readonly logFilePath?: string;

@@ -333,7 +333,7 @@ Environment variables read by the service.
 
 | Name | Kind | Trigger | Payload / attributes |
 |------|------|---------|----------------------|
-| `tessera.issue` | span | Every `POST /v1/github/token` | `caller`, `identity`, `provider`, `access`, `cache` (`hit`/`miss`/`n/a`), `outcome`; errored on denial or mint failure. Child of the slice trace when `x-march-slice-id` is present. |
+| `tessera.issue` | span | Every `POST /v1/github/token` | `caller`, `identity`, `provider`, `access`, `cache` (`hit`/`miss`/`n/a`), `outcome`, `reason` (the error code; present only when not issued); errored on denial or mint failure. Child of the slice trace when `x-march-slice-id` is present on an authenticated request. |
 | `tessera.audit` | log event | Every `POST /v1/github/token` | The Issuance Audit Record. |
 | `tessera.expiry_warning` | log event (warn) | A credential is within 14 days of expiry; at most once per day | `provider`, `credential_expires_at`. |
 | `march.tessera.issuances` | counter | Token issued | `identity`, `provider`, `access`, `cache`. |

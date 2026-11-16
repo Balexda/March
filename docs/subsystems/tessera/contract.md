@@ -583,10 +583,16 @@ Every `POST /v1/github/token` request leaves the same three records, whatever
 its result: one `tessera.audit` log event, one `tessera.issue` span and one
 counter increment. That covers issued tokens and requests rejected for a
 missing key, a bad body, the policy or a provider failure. No other route
-produces any of them. All three are written from Fastify's response hook
-(`src/tessera/server.ts`), which runs for rejected requests too, and all three
-are built from the same audit record (`buildAuditRecord` in
-`src/tessera/audit.ts`), so they always agree.
+produces any of them. The record is written once per token request, including
+when the client disconnects or times out before the response is delivered: a
+token that was minted but never delivered is still recorded as `issued`,
+because the credential exists. All three are written together, once, from
+Fastify's `onSend` hook (`src/tessera/server.ts`), which runs whenever the
+server answers the request, for rejected requests too and whether or not the
+client is still connected; the `onResponse` hook calls the same guarded
+function as a fallback, so nothing is recorded twice. All three are built from
+the same audit record (`buildAuditRecord` in `src/tessera/audit.ts`), so they
+always agree.
 
 #### The `tessera.audit` log event
 
@@ -608,7 +614,7 @@ unless the builder names it.
 | `reason` | error code or `null` | The error code the request was answered with (see `## Error Modes`); `null` only when issued. |
 | `cache` | `"hit"`, `"miss"` or `"n/a"` | Whether the issued token came from the cache. `"n/a"` unless a token was issued. |
 | `expires_at` | RFC 3339 string or `null` | Expiry of the issued token; `null` unless a token was issued (or when the provider reports none). |
-| `subject` | string or `null` | The request's `subject`, echoed when sent, cut to at most 256 characters; `null` when not sent or not yet validated. |
+| `subject` | string or `null` | The request's `subject`, echoed as the caller sent it, cut to at most 256 characters; `null` when not sent or not yet validated. Because it is logged verbatim, callers must not put secrets in it. |
 
 Outcome rule: a `2xx` response that issued a token is `issued`; every `4xx` is
 `denied`, including `unauthorized` (401), `invalid_request` (400) and
@@ -641,12 +647,14 @@ One span per token request, with the request's own start and end times.
 | `tessera.outcome` | `issued`, `denied` or `failed`. |
 | `tessera.reason` | The error code; present only when not issued. |
 
-The span's status is error unless the outcome is `issued`. When the request
-carries a valid `x-march-slice-id` header, the span is a child in that slice's
+The span's status is error unless the outcome is `issued`. When an
+authenticated request carries a valid `x-march-slice-id` header, the span is a
+child in that slice's
 trace: it is parented on the slice's deterministic root span id and takes a
 fresh span id of its own, so it never becomes the trace's root. Without the
-header, or with a value that is not a valid slice id, the span starts a trace
-of its own. When telemetry is off nothing is emitted and nothing fails.
+header, with a value that is not a valid slice id, or on a request that did
+not authenticate, the span starts a trace of its own, so an unauthenticated
+caller cannot plant a failed leg in a slice's trace. When telemetry is off nothing is emitted and nothing fails.
 
 #### Counters
 
@@ -784,9 +792,14 @@ or `GITHUB_TOKEN`.
   the method, matched route, status class and duration; a token request also
   logs its `tessera.audit` line (see "Audit and telemetry"). Unexpected errors log
   the error class only, not the message.
-- Every token request yields exactly one `tessera.audit` event, one
-  `tessera.issue` span and one increment of either `march.tessera.issuances`
-  or `march.tessera.denials`; no other route yields any of them.
+- Every token request that reaches the token route yields exactly one
+  `tessera.audit` event, one `tessera.issue` span and one increment of either
+  `march.tessera.issuances` or `march.tessera.denials`, including when the
+  client disconnects before the response (a minted but undelivered token is
+  recorded as `issued`); no other route yields any of them.
+- The span joins a slice's trace only for an authenticated request.
+- `subject` is echoed in the audit record as the caller sent it (cut to 256
+  characters), so callers must not put secrets in it.
 - No token, client key, key hash or `Authorization` header is ever written to
   a log, a span or a metric. The audit record is an allow-list, and the
   Tessera loggers redact credential-bearing fields as a second layer.

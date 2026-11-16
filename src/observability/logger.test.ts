@@ -17,6 +17,7 @@ import {
   createTesseraClientLogger,
   createTesseraLogger,
   createStatioLogger,
+  REDACT_CENSOR,
   TESSERA_REDACT_CENSOR,
   TESSERA_REDACT_PATHS,
   resolveTesseraClientLogFilePath,
@@ -327,7 +328,9 @@ describe("Tessera logger redaction", () => {
   }
 
   it("covers the credential-bearing paths with a fixed censor", () => {
-    expect(TESSERA_REDACT_CENSOR).toBe("[redacted]");
+    expect(REDACT_CENSOR).toBe("[redacted]");
+    // The Tessera name is an alias of the service-neutral censor.
+    expect(TESSERA_REDACT_CENSOR).toBe(REDACT_CENSOR);
     for (const p of [
       "token",
       "*.token",

@@ -47,6 +47,8 @@ export interface AuditContext {
   expiresAt: string | null;
   /** The error code the request was answered with, if it was rejected. */
   errorCode: TesseraErrorCode | null;
+  /** Set once the request's record has been emitted, so it is emitted at most once. */
+  emitted: boolean;
 }
 
 /** The `tessera.audit` event body — exactly the data model's fields. */
@@ -75,6 +77,7 @@ export function createAuditContext(): AuditContext {
     cache: null,
     expiresAt: null,
     errorCode: null,
+    emitted: false,
   };
 }
 

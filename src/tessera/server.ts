@@ -1,6 +1,7 @@
 import Fastify, {
   type FastifyBaseLogger,
   type FastifyInstance,
+  type FastifyReply,
   type FastifyRequest,
 } from "fastify";
 import { recordTesseraDenial, recordTesseraIssuance } from "../observability/tessera-metrics.js";
@@ -37,7 +38,7 @@ declare module "fastify" {
     tesseraClient: string | undefined;
     /**
      * What a `POST /v1/github/token` request has resolved so far, filled in
-     * as it proceeds and read once by the response hook to emit its
+     * as it proceeds and read once, when the reply is sent, to emit its
      * `tessera.audit` event; `undefined` on every other route.
      */
     tesseraAudit: AuditContext | undefined;
@@ -285,6 +286,63 @@ export function buildTesseraServer(options: BuildTesseraServerOptions): FastifyI
     if (request.tesseraAudit) request.tesseraAudit.caller = client;
   });
 
+  /**
+   * Emit the request's audit line, `tessera.issue` span and counter, at most
+   * once per token request. Called from `onSend` — which Fastify runs inside
+   * `reply.send` whatever the socket's state, for a route reply, an
+   * error-handler reply and a hook rejection alike, with the final status
+   * code set — so a request whose client disconnected before the response
+   * (where `onResponse` never fires) is still recorded, and a token minted but
+   * never delivered is recorded as `issued`. `onResponse` calls it again as a
+   * fallback; the `emitted` flag keeps that from double-recording.
+   */
+  function emitOnce(request: FastifyRequest, reply: FastifyReply): void {
+    const audit = request.tesseraAudit;
+    if (!audit || audit.emitted) return;
+    audit.emitted = true;
+    const record = buildAuditRecord(audit, reply.statusCode);
+    const endTimeMs = Date.now();
+    // Only an authenticated caller may attach a span to a slice's trace; an
+    // unauthenticated request naming a slice gets a service-local span.
+    const sliceId = audit.caller === null ? undefined : request.headers[TESSERA_SLICE_ID_HEADER];
+    const span = emitTesseraIssueSpan({
+      ...(typeof sliceId === "string" ? { sliceId } : {}),
+      startTimeMs: endTimeMs - reply.elapsedTime,
+      endTimeMs,
+      caller: record.caller,
+      identity: record.identity,
+      provider: record.provider,
+      access: record.access,
+      cache: record.cache,
+      outcome: record.outcome,
+      reason: record.reason,
+    });
+    // Exactly one counter per request, driven by the same record.
+    if (record.outcome === "issued") {
+      recordTesseraIssuance({
+        identity: record.identity,
+        provider: record.provider,
+        access: record.access,
+        cache: record.cache,
+      });
+    } else {
+      recordTesseraDenial({ identity: record.identity, reason: record.reason });
+    }
+    // Correlation ids sit beside the record, never inside it; absent when
+    // telemetry is off (March has no ContextManager to supply them).
+    request.log.info(
+      {
+        ...(span === undefined ? {} : { trace_id: span.traceId, span_id: span.spanId }),
+        audit: record,
+      },
+      "tessera.audit",
+    );
+  }
+
+  app.addHook("onSend", async (request, reply) => {
+    emitOnce(request, reply);
+  });
+
   app.addHook("onResponse", async (request, reply) => {
     request.log.info(
       {
@@ -296,44 +354,7 @@ export function buildTesseraServer(options: BuildTesseraServerOptions): FastifyI
       },
       "tessera request handled",
     );
-    const audit = request.tesseraAudit;
-    if (audit) {
-      const record = buildAuditRecord(audit, reply.statusCode);
-      const endTimeMs = Date.now();
-      const sliceId = request.headers[TESSERA_SLICE_ID_HEADER];
-      const span = emitTesseraIssueSpan({
-        ...(typeof sliceId === "string" ? { sliceId } : {}),
-        startTimeMs: endTimeMs - reply.elapsedTime,
-        endTimeMs,
-        caller: record.caller,
-        identity: record.identity,
-        provider: record.provider,
-        access: record.access,
-        cache: record.cache,
-        outcome: record.outcome,
-        reason: record.reason,
-      });
-      // Exactly one counter per request, driven by the same record.
-      if (record.outcome === "issued") {
-        recordTesseraIssuance({
-          identity: record.identity,
-          provider: record.provider,
-          access: record.access,
-          cache: record.cache,
-        });
-      } else {
-        recordTesseraDenial({ identity: record.identity, reason: record.reason });
-      }
-      // Correlation ids sit beside the record, never inside it; absent when
-      // telemetry is off (March has no ContextManager to supply them).
-      request.log.info(
-        {
-          ...(span === undefined ? {} : { trace_id: span.traceId, span_id: span.spanId }),
-          audit: record,
-        },
-        "tessera.audit",
-      );
-    }
+    emitOnce(request, reply);
   });
 
   app.setErrorHandler((err: Error & { statusCode?: number; code?: unknown }, request, reply) => {

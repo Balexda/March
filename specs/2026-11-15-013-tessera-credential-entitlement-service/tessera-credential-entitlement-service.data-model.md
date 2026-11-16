@@ -137,7 +137,7 @@ Validation rules:
 |-------|------|----------|-------|
 | `caller` | client name | Yes | `unknown` for an unauthenticated request. |
 | `identity` | `"app" \| "user"` \| null | Yes | `null` when the request was rejected as `unauthorized` or `invalid_request` before the field could be resolved. |
-| `provider` | Provider id \| null | Yes | `null` as for `identity`. |
+| `provider` | Provider id \| null | Yes | `null` when no provider was reached (`unauthorized`, `invalid_request`, `policy_denied`, or no provider configured for the identity). |
 | `repo` | `owner/name` \| null | Yes | |
 | `access` | `"read" \| "write"` \| null | Yes | `null` as for `identity`. |
 | `outcome` | `"issued" \| "denied" \| "failed"` | Yes | |

@@ -11,7 +11,7 @@
 /**
  * Header carrying the caller's slice id, for span correlation only: the
  * client sends it and the server nests its `tessera.issue` span under that
- * slice's trace. Lives here so neither module imports the other.
+ * slice's trace, for an authenticated request only. Lives here so neither module imports the other.
  */
 export const TESSERA_SLICE_ID_HEADER = "x-march-slice-id";
 

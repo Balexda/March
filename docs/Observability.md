@@ -290,25 +290,32 @@ is what makes Grafana's "Logs for this span" resolve for a `castra.*` span.
 #### Tessera (service side)
 
 `march tessera serve` (`service.name=march-tessera`) records every
-`POST /v1/github/token` request three ways, whatever its result (issued,
-unauthenticated, invalid, policy-denied or provider-failed). No other route
-records any of them.
+`POST /v1/github/token` request three ways, exactly once, whatever its result
+(issued, unauthenticated, invalid, policy-denied or provider-failed), including
+when the client disconnects or times out before the response: a token minted
+but never delivered is still recorded as `issued`. The three are emitted
+together from the `onSend` hook (with `onResponse` as a guarded fallback, so
+nothing is recorded twice). No other route records any of them.
 
 - **Span `tessera.issue`** (`src/observability/tessera-trace.ts`): one per
   token request, with the request's own start and end times. Attributes:
   `tessera.caller`, `tessera.identity`, `tessera.provider`, `tessera.access`,
   `tessera.cache` (`hit`/`miss`/`n/a`), `tessera.outcome`
   (`issued`/`denied`/`failed`) and, unless issued, `tessera.reason` (the error
-  code); an unresolved field reads `none`. Errored unless issued. When the
-  caller sends a valid `x-march-slice-id` (the Node client's `sliceId`), the
-  span is a **child** in that slice's trace, parented on the deterministic id
-  `legate.dispatch` claims as root and never claiming the root itself, so a
-  token request shows up inside the slice that asked for it. Without a valid
-  slice id it starts its own trace.
+  code); an unresolved field reads `none`. Errored unless issued. When an
+  authenticated caller sends a valid `x-march-slice-id` (the Node client's
+  `sliceId`), the span is a **child** in that slice's trace, parented on the
+  deterministic id `legate.dispatch` claims as root and never claiming the
+  root itself, so a token request shows up inside the slice that asked for it. Without a valid
+  slice id, or when the request did not authenticate, it starts its own
+  trace, so an unauthenticated caller cannot plant a failed leg in a slice's
+  trace.
 - **Log event `tessera.audit`**: one `info` line per token request in
   `tessera.jsonl` (and Loki), with the Issuance Audit Record under `audit`
   (`caller`, `identity`, `provider`, `repo`, `access`, `outcome`, `reason`,
   `cache`, `expires_at`, `subject`; an unauthenticated caller is `unknown`).
+  `subject` is echoed as the caller sent it (capped at 256 characters), so
+  callers must not put secrets in it.
   The span's `trace_id`/`span_id` ride beside the record, attached explicitly
   (no ContextManager), so "Logs for this span" resolves.
 - **Counters** (`src/observability/tessera-metrics.ts`), exactly one per

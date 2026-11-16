@@ -7,6 +7,7 @@
  */
 import { createHash, generateKeyPairSync } from "node:crypto";
 import fs from "node:fs";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { PassThrough } from "node:stream";
@@ -2124,4 +2125,281 @@ describe("no credential reaches any output", () => {
       expect(logText).not.toContain("boom");
     });
   }
+});
+
+/**
+ * Every token request that reaches the token route is recorded exactly once —
+ * one `tessera.audit` line, one `tessera.issue` span, one counter — including
+ * when the client disconnects before the response, a rejection Fastify raises
+ * itself, and never for a request that is not the token route.
+ */
+describe("tessera token request recording", () => {
+  let app: FastifyInstance | undefined;
+  let chunks: string[] = [];
+
+  afterEach(async () => {
+    if (app) await app.close();
+    app = undefined;
+    chunks = [];
+    vi.restoreAllMocks();
+    initOtel({});
+  });
+
+  interface Recorded {
+    readonly spans: Span[];
+    readonly issuances: ReturnType<typeof vi.fn>;
+    readonly denials: ReturnType<typeof vi.fn>;
+  }
+
+  /** Enable telemetry and capture every span and server counter `add`. */
+  function enable(): Recorded {
+    const otel = initOtel({ MARCH_OTEL: "1", MARCH_OTEL_ENDPOINT: "http://localhost:4318" });
+    const tracer = otel.getTracer();
+    const spans: Span[] = [];
+    const real = tracer.startSpan.bind(tracer);
+    vi.spyOn(tracer, "startSpan").mockImplementation((...args: Parameters<typeof real>) => {
+      const span = real(...args) as Span;
+      spans.push(span);
+      return span;
+    });
+    const issuances = vi.fn();
+    const denials = vi.fn();
+    vi.spyOn(otel.getMeter(), "createCounter").mockImplementation((name: string) => {
+      if (name === "march.tessera.issuances") return { add: issuances } as never;
+      if (name === "march.tessera.denials") return { add: denials } as never;
+      return { add: vi.fn() } as never;
+    });
+    return { spans, issuances, denials };
+  }
+
+  function build(providers: readonly CredentialProvider[] = [stubProvider()]): FastifyInstance {
+    const stream = new PassThrough();
+    stream.on("data", (chunk: Buffer) => chunks.push(chunk.toString("utf-8")));
+    app = buildTesseraServer({
+      clients: CLIENTS,
+      policy: POLICY,
+      registry: createProviderRegistry(providers),
+      logger: pino({ level: "trace" }, stream),
+    });
+    return app;
+  }
+
+  function audits(): Array<Record<string, unknown>> {
+    return chunks
+      .join("")
+      .split("\n")
+      .filter((line) => line.trim() !== "")
+      .map((line) => JSON.parse(line) as Record<string, unknown>)
+      .filter((line) => line.msg === "tessera.audit")
+      .map((line) => line.audit as Record<string, unknown>);
+  }
+
+  function issueSpans(recorded: Recorded): Span[] {
+    return recorded.spans.filter((span) => span.name === "tessera.issue");
+  }
+
+  const VALID = { identity: "app", repo: "acme/widgets", access: "read" };
+
+  function deferred<T>(): {
+    promise: Promise<T>;
+    resolve: (value: T) => void;
+    reject: (error: unknown) => void;
+  } {
+    let resolve!: (value: T) => void;
+    let reject!: (error: unknown) => void;
+    const promise = new Promise<T>((res, rej) => {
+      resolve = res;
+      reject = rej;
+    });
+    return { promise, resolve, reject };
+  }
+
+  async function waitFor(condition: () => boolean | Promise<boolean>, timeoutMs = 2000): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    while (!(await condition())) {
+      if (Date.now() > deadline) throw new Error("timed out waiting for condition");
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+  }
+
+  function connections(built: FastifyInstance): Promise<number> {
+    return new Promise((resolve, reject) => {
+      built.server.getConnections((err, count) => (err ? reject(err) : resolve(count)));
+    });
+  }
+
+  /**
+   * Listen on a real port, send a token request over a raw socket, wait until
+   * the provider is called, destroy the socket, wait until the server has seen
+   * it close, then let the provider settle via `settle`.
+   */
+  async function abandonWhileIssuing(
+    issue: ReturnType<typeof deferred<ProviderIssueResult>>,
+    settle: () => void,
+  ): Promise<FastifyInstance> {
+    const started = deferred<void>();
+    const built = build([
+      stubProvider({
+        issue: async () => {
+          started.resolve();
+          return issue.promise;
+        },
+      }),
+    ]);
+    await built.listen({ port: 0, host: "127.0.0.1" });
+    const address = built.server.address();
+    if (address === null || typeof address === "string") throw new Error("no bound port");
+    const body = JSON.stringify(VALID);
+    const socket = net.connect(address.port, "127.0.0.1");
+    socket.on("error", () => undefined);
+    await new Promise<void>((resolve) => socket.once("connect", () => resolve()));
+    socket.write(
+      [
+        "POST /v1/github/token HTTP/1.1",
+        "Host: 127.0.0.1",
+        `Authorization: ${AUTH}`,
+        "Content-Type: application/json",
+        `Content-Length: ${Buffer.byteLength(body)}`,
+        "Connection: close",
+        "",
+        body,
+      ].join("\r\n"),
+    );
+    await started.promise;
+    socket.destroy();
+    await waitFor(async () => (await connections(built)) === 0);
+    settle();
+    return built;
+  }
+
+  it("records a token minted after the client disconnected as issued, exactly once", async () => {
+    const recorded = enable();
+    const issue = deferred<ProviderIssueResult>();
+    const built = await abandonWhileIssuing(issue, () =>
+      issue.resolve({
+        token: SECRET_TOKEN,
+        expiresAt: "2026-11-15T19:04:11Z",
+        identity: "march-bot[bot]",
+        commitIdentity: null,
+        cache: "miss",
+      }),
+    );
+    await waitFor(() => audits().length > 0);
+    await built.close();
+    app = undefined;
+    expect(audits()).toEqual([
+      {
+        caller: "herald",
+        identity: "app",
+        provider: "github-app",
+        repo: "acme/widgets",
+        access: "read",
+        outcome: "issued",
+        reason: null,
+        cache: "miss",
+        expires_at: "2026-11-15T19:04:11Z",
+        subject: null,
+      },
+    ]);
+    expect(issueSpans(recorded)).toHaveLength(1);
+    expect(issueSpans(recorded)[0]!.attributes["tessera.outcome"]).toBe("issued");
+    expect(recorded.issuances).toHaveBeenCalledTimes(1);
+    expect(recorded.denials).not.toHaveBeenCalled();
+  });
+
+  it("records a provider failure after the client disconnected as failed, exactly once", async () => {
+    const recorded = enable();
+    const issue = deferred<ProviderIssueResult>();
+    const built = await abandonWhileIssuing(issue, () => issue.reject(new MintFailedError("failed")));
+    await waitFor(() => audits().length > 0);
+    await built.close();
+    app = undefined;
+    expect(audits()).toHaveLength(1);
+    expect(audits()[0]).toMatchObject({
+      caller: "herald",
+      provider: "github-app",
+      outcome: "failed",
+      reason: "mint_failed",
+    });
+    expect(issueSpans(recorded)).toHaveLength(1);
+    expect(issueSpans(recorded)[0]!.attributes["tessera.outcome"]).toBe("failed");
+    expect(recorded.denials).toHaveBeenCalledTimes(1);
+    expect(recorded.denials).toHaveBeenCalledWith(1, { identity: "app", reason: "mint_failed" });
+    expect(recorded.issuances).not.toHaveBeenCalled();
+  });
+
+  const fastifyRejections: Array<[string, Record<string, string>, string]> = [
+    ["a body over the body limit", { "content-type": "application/json" }, `{"subject":"${"x".repeat(1024 * 1024 + 1)}"}`],
+    ["a text/plain body", { "content-type": "text/plain" }, JSON.stringify(VALID)],
+  ];
+  for (const [label, headers, payload] of fastifyRejections) {
+    it(`records ${label} once as denied invalid_request with the caller known`, async () => {
+      const recorded = enable();
+      const built = build();
+      const res = await built.inject({
+        method: "POST",
+        url: "/v1/github/token",
+        headers: { ...headers, authorization: AUTH },
+        payload,
+      });
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error.code).toBe("invalid_request");
+      expect(audits()).toHaveLength(1);
+      expect(audits()[0]).toMatchObject({ caller: "herald", outcome: "denied", reason: "invalid_request" });
+      expect(issueSpans(recorded)).toHaveLength(1);
+      expect(recorded.denials).toHaveBeenCalledTimes(1);
+      expect(recorded.denials).toHaveBeenCalledWith(1, { identity: "none", reason: "invalid_request" });
+      expect(recorded.issuances).not.toHaveBeenCalled();
+    });
+  }
+
+  it("records nothing for GET on the token path with a valid key", async () => {
+    const recorded = enable();
+    const built = build();
+    const res = await built.inject({ method: "GET", url: "/v1/github/token", headers: { authorization: AUTH } });
+    expect(res.statusCode).toBe(404);
+    expect(audits()).toEqual([]);
+    expect(issueSpans(recorded)).toEqual([]);
+    expect(recorded.issuances).not.toHaveBeenCalled();
+    expect(recorded.denials).not.toHaveBeenCalled();
+  });
+
+  it("never nests an unauthenticated request's span in the slice trace it names", async () => {
+    const recorded = enable();
+    const built = build();
+    for (const authorization of [undefined, "Bearer not-a-registered-key"]) {
+      const res = await built.inject({
+        method: "POST",
+        url: "/v1/github/token",
+        headers: {
+          "content-type": "application/json",
+          ...(authorization === undefined ? {} : { authorization }),
+          [TESSERA_SLICE_ID_HEADER]: "slice-abc",
+        },
+        payload: JSON.stringify(VALID),
+      });
+      expect(res.statusCode).toBe(401);
+    }
+    const spans = issueSpans(recorded);
+    expect(spans).toHaveLength(2);
+    for (const span of spans) {
+      expect(span.parentSpanContext).toBeUndefined();
+      expect(span.spanContext().traceId).not.toBe(traceIdForDispatch("slice-abc"));
+    }
+  });
+
+  it("nests an authenticated request's span in its slice trace, even when it is rejected", async () => {
+    const recorded = enable();
+    const built = build();
+    const res = await built.inject({
+      method: "POST",
+      url: "/v1/github/token",
+      headers: { "content-type": "application/json", authorization: AUTH, [TESSERA_SLICE_ID_HEADER]: "slice-abc" },
+      payload: JSON.stringify({ ...VALID, access: "write" }),
+    });
+    expect(res.statusCode).toBe(403);
+    const [span] = issueSpans(recorded);
+    expect(span!.spanContext().traceId).toBe(traceIdForDispatch("slice-abc"));
+    expect(span!.parentSpanContext?.spanId).toBe(spanIdForDispatch("slice-abc"));
+  });
 });
