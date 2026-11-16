@@ -49,6 +49,10 @@
 #   * /v1/* is UNAUTHENTICATED until client keys land (spec User Story 2). That
 #     is why the port is published on 127.0.0.1 only — never publish it on any
 #     other interface, never expose it publicly, never publish this image.
+#   * Until then, configuring the GitHub App lets ANY process on this host or
+#     on the `march` network mint read or write bot tokens for any repository
+#     the App is installed on. Leave the App settings unset outside of testing
+#     until client keys and the policy file land.
 # ---------------------------------------------------------------------------
 name: march-tessera
 

@@ -25,7 +25,7 @@ March's source is organized by product subsystem rather than by generic layers:
 | `src/spawn/` | Spawn execution pipeline: snapshots, image builds, backend entrypoints, and container launch. |
 | `src/hatchery/` | Container/profile policy and the spawn orchestrator (`runHatcherySpawn`). `src/hatchery/service/` is the containerized Fastify service (`march hatchery serve`) plus the thin client `march hatchery spawn` uses. |
 | `src/brood/` | Spawn lifecycle state: worktrees, branches, records, and cleanup ownership. |
-| `src/tessera/` | Tessera credential service (`march tessera serve`): provider registry, token-route validation, status. Contract in `docs/subsystems/tessera/contract.md`. |
+| `src/tessera/` | Tessera credential service (`march tessera serve`): provider registry, the `github-app` provider (downscoped installation-token minting), token-route validation, status. Contract in `docs/subsystems/tessera/contract.md`. |
 | `src/sessions/` | The `march sessions` (alias `march ps`) unified in-flight view. Pure gather → join → format layers that join Brood + Castra + Herald purely over their HTTP APIs (no source/compose/filesystem reads at runtime), so it works from a plain `npm i -g march`. The divergence/join helpers are factored to be shared with `march doctor`. |
 | `src/herald/` | Deterministic event bus code. Add mini-herald event/log/daemon modules here when that feature lands. |
 | `src/legate/` | Legate conductor setup, template rendering, bridge checks, and related orchestration bootstrap. |

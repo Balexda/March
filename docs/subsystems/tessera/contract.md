@@ -217,7 +217,11 @@ or `GITHUB_TOKEN`.
   port. Per-client keys are planned (spec User Story 2) and are not
   implemented. Until they are, the service must be reachable only from the
   loopback interface: `march tessera serve` binds `127.0.0.1` by default, and
-  the compose file publishes the port on `127.0.0.1` only.
+  the compose file publishes the port on `127.0.0.1` only. Inside the
+  compose stack the service is also reachable by every container on the
+  `march` network. With the GitHub App configured, any of those callers can
+  mint a read or write bot token for any repository the App is installed on,
+  so leave the App settings unset outside of testing until client keys land.
 - No identity is ever substituted for another. A request for `app` is only
   served by the provider registered for `app`, and a request for `user` only by
   the provider for `user`. If that provider is missing, the response is
