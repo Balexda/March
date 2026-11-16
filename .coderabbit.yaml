@@ -18,7 +18,7 @@ knowledge_base:
     # by CodeRabbit's default patterns and need no entry. Each entry below
     # repeats the `applyTo` of the instruction file it names, verbatim. A
     # skill takes the `applyTo` of the instruction file that sends the
-    # reviewer to it, because CodeRabbit does not load skills on demand.
+    # reviewer to it: CodeRabbit finds skills on its own, but unscoped.
     filePatterns:
       # Smithy-general layer: the same entries in every repository that uses Smithy.
       - files: ".github/instructions/smithy.review-stance.instructions.md"

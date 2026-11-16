@@ -133,8 +133,9 @@ each rule file with the paths that file governs:
   guideline file to the directory it sits in, which for `.github/instructions/`
   is not the code the rule is about. The entry states the scope instead, in
   the same comma-separated form the frontmatter uses.
-- **A skill is mapped like an instruction file.** CodeRabbit does not load
-  skills on demand, so a skill takes the `applyTo` of the one instruction file
+- **A skill is mapped like an instruction file.** CodeRabbit finds
+  `.github/skills/*/SKILL.md` on its own as an Agent Skill, but with no path
+  scope stated, so a skill takes the `applyTo` of the one instruction file
   that sends the reviewer to it.
 - **`coding-agent.instructions.md` is not mapped.** It opts out of code review.
 - **`AGENTS.md`, `CLAUDE.md`, and `.github/copilot-instructions.md` need no
@@ -177,10 +178,11 @@ CodeRabbit's plans page says a public repository with fewer than 10 stars
 gets reviews only on request, whatever this setting says.
 
 Reviews of public repositories are free and carry the knowledge-base features
-this map relies on. The rate limit for them is a separate tier that CodeRabbit
-sets per repository.
+this map relies on. They are rate-limited per repository, at 1 to 10 reviews
+an hour depending on star count. `@coderabbitai rate limit` says whether a
+review is available now.
 
-Sources: CodeRabbit's
+Sources, checked on 2026-11-16: CodeRabbit's
 [code guidelines](https://docs.coderabbit.ai/knowledge-base/code-guidelines),
 [configuration reference](https://docs.coderabbit.ai/reference/configuration),
 [configuration inheritance](https://docs.coderabbit.ai/configuration/configuration-inheritance),
