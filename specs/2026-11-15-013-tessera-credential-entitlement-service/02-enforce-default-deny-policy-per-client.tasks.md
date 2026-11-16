@@ -42,7 +42,7 @@
   - The route handler can read the client name; no response body carries it
   - No key, hash or Authorization header appears in logs, `/status` or error bodies
 
-- [ ] **Load client keys at startup**
+- [x] **Load client keys at startup**
 
   In `src/tessera/serve.ts`, load the registry after the port is validated and before the server is built, so a bad file fails startup through the existing usage-error path with nothing listening. Update `src/tessera/serve.test.ts`, including its existing cases, which now need a keys file.
 

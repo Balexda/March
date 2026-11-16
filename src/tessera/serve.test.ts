@@ -6,6 +6,8 @@
  * configured it registers the github-app provider (driven here against the
  * fake GitHub API) and mints, even after a GitHub outage at startup. Logs name
  * settings only, never their values, and it shuts down cleanly on a signal.
+ * A missing, empty or invalid client-keys file (TESSERA_CLIENT_KEYS_FILE)
+ * refuses startup before any GitHub call, with nothing listening.
  */
 import { createHash, generateKeyPairSync } from "node:crypto";
 import { EventEmitter } from "node:events";
@@ -22,6 +24,8 @@ import { TesseraValidationError } from "./types.js";
 import { runTesseraServer } from "./serve.js";
 
 const CLIENT_KEY = "tessera-serve-test-client-key";
+const CLIENT_KEY_SHA256 = createHash("sha256").update(CLIENT_KEY, "utf8").digest("hex");
+const OTHER_SHA256 = createHash("sha256").update("another-client-key", "utf8").digest("hex");
 
 /** A client-keys file registering one client by its key's SHA-256. */
 function writeClientKeysFile(): { file: string; cleanup: () => void } {
@@ -119,6 +123,13 @@ describe("runTesseraServer", () => {
     expect(output).not.toContain("app-id-sentinel-do-not-log");
     expect(output).not.toContain("/no/such/key.pem");
     expect(output).toContain("received SIGTERM");
+    // The client-keys log names the setting and the count, never the path,
+    // the hash or the key.
+    expect(output).toContain("client keys loaded from TESSERA_CLIENT_KEYS_FILE: 1 registered client");
+    expect(output).not.toContain(CLIENT_KEY);
+    expect(output).not.toContain(CLIENT_KEY_SHA256);
+    expect(output).not.toContain(clientKeysFile());
+    expect(output).not.toContain(path.dirname(clientKeysFile()));
 
     // The port is released after shutdown.
     await expect(fetch(`http://127.0.0.1:${port}/healthz`)).rejects.toThrow();
@@ -128,6 +139,105 @@ describe("runTesseraServer", () => {
     await expect(
       runTesseraServer({ port: "9689x", env: {} }),
     ).rejects.toBeInstanceOf(TesseraValidationError);
+  });
+
+  it("reports an invalid port before a client-keys file problem", async () => {
+    await expect(
+      runTesseraServer({ port: "9689x", env: { TESSERA_CLIENT_KEYS_FILE: "/no/such/clients.json" } }),
+    ).rejects.toThrow(/Invalid Tessera port/);
+  });
+
+  describe("refuses to start without a valid client-keys file", () => {
+    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    let dir: string | undefined;
+
+    afterEach(() => {
+      if (dir) fs.rmSync(dir, { recursive: true, force: true });
+      dir = undefined;
+    });
+
+    function writeFile(contents: string): string {
+      dir ??= fs.mkdtempSync(path.join(os.tmpdir(), "tessera-bad-clients-"));
+      const file = path.join(dir, "clients.json");
+      fs.writeFileSync(file, contents);
+      return file;
+    }
+
+    const cases: Array<{ name: string; file: () => string | undefined }> = [
+      { name: "the setting is unset", file: () => undefined },
+      { name: "the file is missing", file: () => path.join(os.tmpdir(), "tessera-no-such-dir", "clients.json") },
+      { name: "the file is empty", file: () => writeFile("") },
+      { name: "the file is whitespace", file: () => writeFile("  \n\t ") },
+      { name: "the file is not JSON", file: () => writeFile("{not json") },
+      {
+        name: "an entry is invalid",
+        file: () => writeFile(JSON.stringify([{ client: "Herald", key_sha256: CLIENT_KEY_SHA256 }])),
+      },
+      {
+        name: "a client is duplicated",
+        file: () =>
+          writeFile(
+            JSON.stringify([
+              { client: "herald", key_sha256: CLIENT_KEY_SHA256 },
+              { client: "herald", key_sha256: OTHER_SHA256 },
+            ]),
+          ),
+      },
+      {
+        name: "a hash is duplicated",
+        file: () =>
+          writeFile(
+            JSON.stringify([
+              { client: "herald", key_sha256: CLIENT_KEY_SHA256 },
+              { client: "legate", key_sha256: CLIENT_KEY_SHA256 },
+            ]),
+          ),
+      },
+    ];
+
+    for (const { name, file } of cases) {
+      it(`when ${name}: rejects, names the setting, and nothing listens`, async () => {
+        const fake = await startFakeGitHub({
+          app: { id: 42, slug: "march-bot" },
+          botUserId: 123456,
+          installations: { acme: { id: 7 } },
+        });
+        const keyDir = fs.mkdtempSync(path.join(os.tmpdir(), "tessera-serve-"));
+        try {
+          // A configured GitHub App: a bad keys file must fail before any GitHub call.
+          const keyFile = path.join(keyDir, "app.pem");
+          fs.writeFileSync(keyFile, privateKey.export({ type: "pkcs8", format: "pem" }).toString(), {
+            mode: 0o600,
+          });
+          const keysFile = file();
+          const env: NodeJS.ProcessEnv = { TESSERA_GITHUB_APP_ID: "42", TESSERA_GITHUB_APP_KEY_FILE: keyFile };
+          if (keysFile !== undefined) env.TESSERA_CLIENT_KEYS_FILE = keysFile;
+          const port = await freePort();
+          const { logger, lines } = captureLogger();
+
+          const err = await runTesseraServer({
+            port,
+            host: "127.0.0.1",
+            env,
+            logger,
+            signals: new EventEmitter(),
+            githubClient: new GitHubClient({ baseUrl: fake.baseUrl }),
+          }).catch((e: unknown) => e);
+
+          expect(err).toBeInstanceOf(TesseraValidationError);
+          const message = (err as Error).message;
+          expect(message).toContain("TESSERA_CLIENT_KEYS_FILE");
+          if (keysFile !== undefined) expect(message).not.toContain(keysFile);
+          expect(message).not.toContain(CLIENT_KEY_SHA256);
+          expect(fake.calls).toHaveLength(0);
+          expect(lines()).toEqual([]);
+          await expect(fetch(`http://127.0.0.1:${port}/healthz`)).rejects.toThrow();
+        } finally {
+          await fake.close();
+          fs.rmSync(keyDir, { recursive: true, force: true });
+        }
+      });
+    }
   });
 
   describe("with a configured GitHub App", () => {

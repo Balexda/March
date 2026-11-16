@@ -3,6 +3,7 @@ import { createTesseraLogger } from "../observability/logger.js";
 import { initOtel } from "../observability/otel.js";
 import { loadClientRegistry } from "./auth/client-keys.js";
 import {
+  TESSERA_CLIENT_KEYS_FILE_ENV,
   TESSERA_GITHUB_APP_ID_ENV,
   TESSERA_GITHUB_APP_KEY_FILE_ENV,
   TESSERA_GITHUB_INSTALLATION_ID_ENV,
@@ -39,9 +40,11 @@ export interface RunTesseraServerOptions {
 }
 
 /**
- * Run the Tessera HTTP service until SIGTERM/SIGINT. Port validation and
- * config resolution happen before the server is built, so an invalid port
- * fails with a `TesseraValidationError` and nothing listens.
+ * Run the Tessera HTTP service until SIGTERM/SIGINT. Port validation, the
+ * client-keys load (`TESSERA_CLIENT_KEYS_FILE`) and config resolution happen
+ * before telemetry starts, the server is built, or any provider contacts
+ * GitHub, so an invalid port or a missing/invalid client-keys file fails with
+ * a `TesseraValidationError` and nothing listens. The port is checked first.
  */
 export async function runTesseraServer(options: RunTesseraServerOptions = {}): Promise<void> {
   const env = options.env ?? process.env;
@@ -65,7 +68,12 @@ export async function runTesseraServer(options: RunTesseraServerOptions = {}): P
     startedAt: Date.now(),
   });
 
-  // Log setting names only - never the app id, key path, or key contents.
+  // Log setting names only - never the app id, key path, or key contents, and
+  // never the client-keys file path or any of its hashes.
+  app.log.info(
+    `client keys loaded from ${TESSERA_CLIENT_KEYS_FILE_ENV}: ${clients.size} registered ` +
+      `client${clients.size === 1 ? "" : "s"}`,
+  );
   if (appConfig.configured) {
     const settings = [TESSERA_GITHUB_APP_ID_ENV, TESSERA_GITHUB_APP_KEY_FILE_ENV];
     if (appConfig.installationId !== undefined) settings.push(TESSERA_GITHUB_INSTALLATION_ID_ENV);

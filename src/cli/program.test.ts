@@ -530,6 +530,12 @@ describe("march CLI", () => {
       expect(result.exitCode).toBe(2);
       expect(result.stderr).toContain("Invalid Tessera port");
     });
+
+    it("`march tessera serve` without a client-keys file exits 2 naming the setting", () => {
+      const result = runWithEnv(["tessera", "serve"], { TESSERA_CLIENT_KEYS_FILE: undefined });
+      expect(result.exitCode).toBe(2);
+      expect(result.stderr).toContain("TESSERA_CLIENT_KEYS_FILE is not set");
+    });
   });
 
   it("march version exits 0 and stdout contains the package version", () => {
