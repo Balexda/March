@@ -41,6 +41,44 @@ When a feature spans multiple subsystems, split code by ownership. For example, 
 - Be aware that git-heavy tests may need permissions outside the default sandbox because they create temporary repositories and linked worktrees.
 - **Keep observability in lock-step with the dispatch machinery.** When you add a lifecycle action or a new dispatch path, emit a span for it; when you add a failure mode, emit an *errored* span so it surfaces in traces; when a new process joins a trace, reuse the deterministic id helpers (kept byte-for-byte identical across `src/observability/trace-ids.ts`, `src/legate/init.ts`, and `src/observability/in-spawn-emitter.ts`). **Each slice is one trace** keyed by its id: a service-side span that observes or acts on a slice (Herald's `herald.pr.*` via `src/observability/herald-trace.ts`, brood teardown, Castra ops) nests on the deterministic slice id as a **child** rather than starting its own root, so `legate.dispatch` stays the originator. Debugging a stuck task is reading that one trace for the absent/errored/wrong-attribute leg — and a trace that can't locate the stall is itself a telemetry gap to close. New metrics/labels go in `src/observability/spawn-metrics.ts` (spawns) or `src/observability/hatchery-metrics.ts` (the Hatchery service) — low-cardinality only, never per-spawn/slice ids or concrete request paths; new logs go through the pino logger in `src/observability/logger.ts`; then update `docker/grafana/dashboards/` to match. The full guide is [`docs/Observability.md`](docs/Observability.md).
 
+## Code Review Rules
+
+For automated reviewers. Path-scoped detail lives in `.github/instructions/`,
+review procedures in `.github/skills/`, and
+[`docs/reviewer-instructions.md`](docs/reviewer-instructions.md) explains the
+layout. The rules that matter most:
+
+- **Review against the plan.** Most pull requests implement one slice of one
+  `.tasks.md` file. Read that slice before commenting. Do not request work a
+  later slice or an open `SD-NNN` row covers; if merging this slice alone
+  leaves `main` broken, say so once as a merge-ordering risk.
+- **Failures are clean exits** ([rule 3](docs/operating-philosophy.md#3-failures-are-clean-exits-not-hangs)).
+  Flag a call with no timeout, an error swallowed into exit 0, a 404 treated
+  as a completed teardown, or a JSON contract broken on failure.
+- **What moves together.** A new Herald event type updates the union,
+  reducer, and `POST /events` validator. A new dispatch path or failure mode
+  emits a span or errored span. A changed public surface updates the
+  subsystem's `contract.md`. A changed `src/templates/skills/` source updates
+  the committed `.claude/skills/march.*` variant.
+- **Teardown removes exactly what was registered**, never a blanket
+  `git worktree prune`.
+- **Test files open with a JSDoc tag block** (`@l0`–`@l3`,
+  `@deterministic`/`@stochastic`, `@ci`/`@scheduled`) at the narrowest true
+  scope.
+- **Planning artifacts are checked against the source.** A route, field, or
+  file a spec names must exist as described.
+- **Do not flag** pre-existing bugs in moved code, auto permission mode for
+  sessions, the lack of a contract-freshness CI gate, or the Smithy snapshot
+  under `.claude/commands/`, `.agents/`, and `.codex/`.
+- **Begin a comment with "Steering question:"** when it asks for a choice
+  only a person can make, and leave it as a question.
+- **Detailed procedures.** For `src/` changes, read
+  `.github/instructions/runtime-source.instructions.md` and
+  `.github/skills/march-review-runtime/SKILL.md`. For `.rfc.md`,
+  `.features.md`, `.spec.md`, or `.tasks.md` files, read
+  `.github/instructions/smithy.planning-artifacts.instructions.md` and
+  `.github/skills/smithy-review-planning/SKILL.md`.
+
 ## Verification
 
 Run these after structural or runtime changes:
