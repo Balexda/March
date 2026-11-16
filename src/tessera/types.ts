@@ -91,6 +91,8 @@ export interface CredentialProvider {
   /** Issue a credential, or throw a {@link TesseraError}. */
   issue(req: ProviderIssueRequest): Promise<ProviderIssueResult>;
   status(): ProviderStatus;
+  /** Number of cached credentials this provider holds; omitted means 0. Count only. */
+  cacheEntries?(): number;
 }
 
 /** GitHub App permission value. */

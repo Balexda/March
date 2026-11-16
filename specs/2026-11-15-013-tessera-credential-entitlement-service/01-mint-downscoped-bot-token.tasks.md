@@ -30,7 +30,7 @@
   - Server-side settings use `TESSERA_*` names; consumer-side `MARCH_TESSERA_*` names stay separate
   - No client-key or policy-file setting is read (US2)
 
-- [ ] **Serve the token route, health and minimal status**
+- [x] **Serve the token route, health and minimal status**
 
   Add `src/tessera/server.ts` with a build function that takes an injected provider registry, as the Statio server builder takes its adapter. `POST /v1/github/token` validates the Entitlement Request (data model), dispatches on `identity` to the registered provider, and maps typed errors to the contracts error envelope. `/healthz` and `/status` follow contracts "Health and Status", limited to service, uptime, provider states and cache entry count. Add the HTTP contract test `src/tessera/server.test.ts`, which drives the route, `/healthz` and `/status` through an injected provider registry. Satisfies AS 1.7.
 
