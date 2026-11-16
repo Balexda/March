@@ -8,6 +8,13 @@
  * (US7) plugs in behind the same shapes later.
  */
 
+/**
+ * Header carrying the caller's slice id, for span correlation only: the
+ * client sends it and the server nests its `tessera.issue` span under that
+ * slice's trace. Lives here so neither module imports the other.
+ */
+export const TESSERA_SLICE_ID_HEADER = "x-march-slice-id";
+
 /** Which credential a request asks for: the bot installation token or the operator PAT. */
 export type Identity = "app" | "user";
 

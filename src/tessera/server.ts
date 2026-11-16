@@ -3,6 +3,7 @@ import Fastify, {
   type FastifyInstance,
   type FastifyRequest,
 } from "fastify";
+import { emitTesseraIssueSpan } from "../observability/tessera-trace.js";
 import { type AuditContext, buildAuditRecord, createAuditContext } from "./audit.js";
 import type { ClientRegistry } from "./auth/client-keys.js";
 import { type Policy, authorize } from "./auth/policy.js";
@@ -19,6 +20,7 @@ import {
   ProviderUnconfiguredError,
   type TesseraErrorBody,
   type TesseraErrorCode,
+  TESSERA_SLICE_ID_HEADER,
   TesseraError,
   TesseraValidationError,
   UnauthorizedError,
@@ -295,7 +297,30 @@ export function buildTesseraServer(options: BuildTesseraServerOptions): FastifyI
     );
     const audit = request.tesseraAudit;
     if (audit) {
-      request.log.info({ audit: buildAuditRecord(audit, reply.statusCode) }, "tessera.audit");
+      const record = buildAuditRecord(audit, reply.statusCode);
+      const endTimeMs = Date.now();
+      const sliceId = request.headers[TESSERA_SLICE_ID_HEADER];
+      const span = emitTesseraIssueSpan({
+        ...(typeof sliceId === "string" ? { sliceId } : {}),
+        startTimeMs: endTimeMs - reply.elapsedTime,
+        endTimeMs,
+        caller: record.caller,
+        identity: record.identity,
+        provider: record.provider,
+        access: record.access,
+        cache: record.cache,
+        outcome: record.outcome,
+        reason: record.reason,
+      });
+      // Correlation ids sit beside the record, never inside it; absent when
+      // telemetry is off (March has no ContextManager to supply them).
+      request.log.info(
+        {
+          ...(span === undefined ? {} : { trace_id: span.traceId, span_id: span.spanId }),
+          audit: record,
+        },
+        "tessera.audit",
+      );
     }
   });
 

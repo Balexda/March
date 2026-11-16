@@ -30,7 +30,7 @@
   - No other route emits an audit event
   - A field added to the per-request context does not reach the event unless the builder lists it
 
-- [ ] **Emit a `tessera.issue` span nested in the slice trace**
+- [x] **Emit a `tessera.issue` span nested in the slice trace**
 
   Add `src/observability/tessera-trace.ts`, following the service-side child-span pattern in `src/observability/herald-trace.ts`, and emit one span per token request from the same response hook with the request's own start and end times (contracts "Events / Hooks"). Attach the span's trace and span ids to the `tessera.audit` log line as log-correlation fields, outside the Issuance Audit Record allow-list. Satisfies the span half of AS 8.1 and AS 8.2, and AS 8.3.
 

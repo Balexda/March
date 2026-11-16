@@ -22,10 +22,15 @@ import {
   TESSERA_PORT_ENV,
 } from "./config.js";
 import { isValidRepo } from "./repo-name.js";
-import type { AccessLevel, CommitIdentity, Identity, TesseraErrorCode } from "./types.js";
+import {
+  type AccessLevel,
+  type CommitIdentity,
+  type Identity,
+  TESSERA_SLICE_ID_HEADER,
+  type TesseraErrorCode,
+} from "./types.js";
 
-/** Header carrying the caller's slice id, for span correlation only. */
-export const TESSERA_SLICE_ID_HEADER = "x-march-slice-id";
+export { TESSERA_SLICE_ID_HEADER };
 
 /** Upper bound on one token request, in milliseconds. */
 export const DEFAULT_TESSERA_TIMEOUT_MS = 10_000;

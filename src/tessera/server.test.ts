@@ -7,8 +7,12 @@
  */
 import { createHash, generateKeyPairSync } from "node:crypto";
 import { PassThrough } from "node:stream";
+import { SpanStatusCode } from "@opentelemetry/api";
+import type { Span } from "@opentelemetry/sdk-trace-base";
 import type { FastifyInstance, LightMyRequestResponse } from "fastify";
 import pino from "pino";
+import { getActiveOtel, initOtel } from "../observability/otel.js";
+import { spanIdForDispatch, traceIdForDispatch } from "../observability/trace-ids.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { TESSERA_SERVICE_NAME } from "./config.js";
 import { GitHubClient } from "./providers/github-app/github-client.js";
@@ -33,6 +37,7 @@ import {
   ProviderUnconfiguredError,
   RepoNotInstalledError,
   type TesseraError,
+  TESSERA_SLICE_ID_HEADER,
   UNAUTHORIZED_MESSAGE,
 } from "./types.js";
 
@@ -1433,5 +1438,196 @@ describe("tessera.audit events", () => {
       expect(text.toLowerCase()).not.toContain("authorization");
       expect(text.toLowerCase()).not.toContain("bearer");
     }
+  });
+});
+
+/**
+ * One `tessera.issue` span per token request (AS 8.1-8.3, FR-035), whose
+ * trace and span ids ride on the `tessera.audit` line as correlation fields.
+ */
+describe("tessera.issue spans", () => {
+  let app: FastifyInstance | undefined;
+  let chunks: string[] = [];
+
+  afterEach(async () => {
+    if (app) await app.close();
+    app = undefined;
+    chunks = [];
+    vi.restoreAllMocks();
+    initOtel({});
+  });
+
+  function captureSpans(): Span[] {
+    const tracer = getActiveOtel().getTracer();
+    const created: Span[] = [];
+    const real = tracer.startSpan.bind(tracer);
+    vi.spyOn(tracer, "startSpan").mockImplementation((...args: Parameters<typeof real>) => {
+      const span = real(...args) as Span;
+      created.push(span);
+      return span;
+    });
+    return created;
+  }
+
+  function enable(): Span[] {
+    initOtel({ MARCH_OTEL: "1", MARCH_OTEL_ENDPOINT: "http://localhost:4318" });
+    return captureSpans();
+  }
+
+  function build(providers: readonly CredentialProvider[] = [stubProvider()]): FastifyInstance {
+    const stream = new PassThrough();
+    stream.on("data", (chunk: Buffer) => chunks.push(chunk.toString("utf-8")));
+    app = buildTesseraServer({
+      clients: CLIENTS,
+      policy: POLICY,
+      registry: createProviderRegistry(providers),
+      logger: pino({ level: "trace" }, stream),
+    });
+    return app;
+  }
+
+  function auditLines(): Array<Record<string, unknown>> {
+    return chunks
+      .join("")
+      .split("\n")
+      .filter((line) => line.trim() !== "")
+      .map((line) => JSON.parse(line) as Record<string, unknown>)
+      .filter((line) => line.msg === "tessera.audit");
+  }
+
+  function post(
+    body: unknown,
+    options: { authorization?: string | null; raw?: string; sliceId?: string } = {},
+  ): Promise<LightMyRequestResponse> {
+    if (!app) throw new Error("app not built");
+    const authorization = options.authorization === undefined ? AUTH : options.authorization;
+    return app.inject({
+      method: "POST",
+      url: "/v1/github/token",
+      headers: {
+        "content-type": "application/json",
+        ...(authorization === null ? {} : { authorization }),
+        ...(options.sliceId === undefined ? {} : { [TESSERA_SLICE_ID_HEADER]: options.sliceId }),
+      },
+      payload: options.raw ?? JSON.stringify(body),
+    });
+  }
+
+  const VALID = { identity: "app", repo: "acme/widgets", access: "read" };
+
+  it("emits one span per token request, whatever the outcome, and none for other routes", async () => {
+    const spans = enable();
+    const built = build([
+      stubProvider(),
+      stubProvider({
+        id: "github-user",
+        identity: "user",
+        issue: async () => {
+          throw new MintFailedError("failed");
+        },
+      }),
+    ]);
+    const statuses = [
+      (await post(VALID)).statusCode,
+      (await post(VALID, { authorization: null })).statusCode,
+      (await post(undefined, { raw: "{not json" })).statusCode,
+      (await post({ ...VALID, access: "write" })).statusCode,
+      (await post({ identity: "user", access: "write" }, { authorization: LEGATE_AUTH })).statusCode,
+    ];
+    expect(statuses).toEqual([200, 401, 400, 403, 502]);
+    const tokenSpans = spans.filter((span) => span.name === "tessera.issue");
+    expect(tokenSpans).toHaveLength(5);
+    expect(tokenSpans.map((span) => span.attributes["tessera.outcome"])).toEqual([
+      "issued",
+      "denied",
+      "denied",
+      "denied",
+      "failed",
+    ]);
+    expect(tokenSpans.map((span) => span.status.code)).toEqual([
+      SpanStatusCode.UNSET,
+      SpanStatusCode.ERROR,
+      SpanStatusCode.ERROR,
+      SpanStatusCode.ERROR,
+      SpanStatusCode.ERROR,
+    ]);
+    expect(tokenSpans[1]!.attributes["tessera.caller"]).toBe("unknown");
+    expect(tokenSpans[0]!.attributes).toMatchObject({
+      "tessera.caller": "herald",
+      "tessera.identity": "app",
+      "tessera.provider": "github-app",
+      "tessera.access": "read",
+      "tessera.cache": "miss",
+    });
+    for (const span of tokenSpans) {
+      const text = JSON.stringify(span.attributes);
+      for (const leaked of ["acme", SECRET_TOKEN, CLIENT_KEY, CLIENT_KEY_SHA256]) {
+        expect(text).not.toContain(leaked);
+      }
+    }
+
+    const before = spans.length;
+    await built.inject({ method: "GET", url: "/healthz" });
+    await built.inject({ method: "GET", url: "/status" });
+    await built.inject({ method: "POST", url: "/v1/nope", headers: { authorization: AUTH } });
+    await built.inject({ method: "GET", url: "/nope" });
+    expect(spans.slice(before).filter((span) => span.name === "tessera.issue")).toEqual([]);
+  });
+
+  it("nests under a valid slice id and puts its ids on the audit line, outside the record", async () => {
+    const spans = enable();
+    build();
+    await post(VALID, { sliceId: "slice-abc" });
+    const span = spans.find((s) => s.name === "tessera.issue")!;
+    expect(span.spanContext().traceId).toBe(traceIdForDispatch("slice-abc"));
+    expect(span.parentSpanContext?.spanId).toBe(spanIdForDispatch("slice-abc"));
+    expect(span.spanContext().spanId).not.toBe(spanIdForDispatch("slice-abc"));
+    const [line] = auditLines();
+    expect(line).toMatchObject({
+      trace_id: span.spanContext().traceId,
+      span_id: span.spanContext().spanId,
+    });
+    const audit = line!.audit as Record<string, unknown>;
+    expect(audit.trace_id).toBeUndefined();
+    expect(audit.span_id).toBeUndefined();
+  });
+
+  it("starts a service-local trace for an invalid slice id", async () => {
+    const spans = enable();
+    build();
+    await post(VALID, { sliceId: "not a slice id!" });
+    const span = spans.find((s) => s.name === "tessera.issue")!;
+    expect(span.parentSpanContext).toBeUndefined();
+  });
+
+  it("spans the request's own duration", async () => {
+    const spans = enable();
+    build([
+      stubProvider({
+        issue: async () => {
+          await new Promise((resolve) => setTimeout(resolve, 25));
+          return {
+            token: SECRET_TOKEN,
+            expiresAt: null,
+            identity: "march-bot[bot]",
+            commitIdentity: null,
+            cache: "miss",
+          };
+        },
+      }),
+    ]);
+    await post(VALID);
+    const span = spans.find((s) => s.name === "tessera.issue")!;
+    expect(span.duration[0] * 1000 + span.duration[1] / 1e6).toBeGreaterThanOrEqual(20);
+  });
+
+  it("emits nothing and adds no correlation fields when telemetry is off", async () => {
+    build();
+    const res = await post(VALID, { sliceId: "slice-abc" });
+    expect(res.statusCode).toBe(200);
+    const [line] = auditLines();
+    expect(line).toBeDefined();
+    expect(line!.trace_id).toBeUndefined();
+    expect(line!.span_id).toBeUndefined();
   });
 });
