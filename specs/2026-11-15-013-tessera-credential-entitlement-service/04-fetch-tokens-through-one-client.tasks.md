@@ -18,7 +18,7 @@
 
 ### Tasks
 
-- [ ] **Issue entitlements through a Tessera client class**
+- [x] **Issue entitlements through a Tessera client class**
 
   Add `src/tessera/client.ts` with `TesseraClient` and `TesseraClientError`, following the option shape of `src/statio/client.ts` and the contracts "Node Client" section. Add the consumer-side settings from the spec's Clarifications to `src/tessera/config.ts`, with resolvers for the base URL, the client key and the fallback flag. `issueGitHubToken` posts to the token route and maps the wire Entitlement to `GitHubEntitlement`. Satisfies the fetch half of AS 4.1 and the typed-failure half of AS 4.2.
 

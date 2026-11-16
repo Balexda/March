@@ -8,8 +8,14 @@ import {
   TESSERA_GITHUB_APP_KEY_FILE_ENV,
   TESSERA_GITHUB_INSTALLATION_ID_ENV,
   TESSERA_PORT_ENV,
+  TESSERA_CLIENT_KEY_ENV,
+  TESSERA_GH_TOKEN_FALLBACK_ENV,
   TESSERA_SERVICE_NAME,
+  TESSERA_URL_ENV,
   resolveGitHubAppConfig,
+  resolveTesseraBaseUrl,
+  resolveTesseraClientKey,
+  resolveTesseraGhTokenFallback,
   resolveTesseraPort,
   tesseraPort,
 } from "./config.js";
@@ -128,6 +134,47 @@ describe("github app config", () => {
     expect([...read].sort()).toEqual([...serverNames].sort());
     expect(read.has("TESSERA_POLICY_FILE")).toBe(false);
     expect(read.has("TESSERA_CLIENT_KEYS_FILE")).toBe(false);
+  });
+});
+
+describe("tessera consumer settings", () => {
+  it("names the consumer settings under MARCH_TESSERA_*", () => {
+    expect(TESSERA_URL_ENV).toBe("MARCH_TESSERA_URL");
+    expect(TESSERA_CLIENT_KEY_ENV).toBe("MARCH_TESSERA_CLIENT_KEY");
+    expect(TESSERA_GH_TOKEN_FALLBACK_ENV).toBe("MARCH_TESSERA_GH_TOKEN_FALLBACK");
+    expect(TESSERA_CONSUMER_ENV.clientKey).toBe(TESSERA_CLIENT_KEY_ENV);
+    expect(TESSERA_CONSUMER_ENV.ghTokenFallback).toBe(TESSERA_GH_TOKEN_FALLBACK_ENV);
+  });
+
+  it("resolves the base URL from MARCH_TESSERA_URL, trimmed and without trailing slashes", () => {
+    expect(resolveTesseraBaseUrl(env({ MARCH_TESSERA_URL: "  http://tessera:9477//  " }))).toBe(
+      "http://tessera:9477",
+    );
+    expect(resolveTesseraBaseUrl(env({ MARCH_TESSERA_URL: "http://h:1" }))).toBe("http://h:1");
+  });
+
+  it("defaults the base URL to localhost on the resolved port", () => {
+    expect(resolveTesseraBaseUrl(env())).toBe("http://localhost:9477");
+    expect(resolveTesseraBaseUrl(env({ MARCH_TESSERA_URL: "  " }))).toBe("http://localhost:9477");
+    expect(resolveTesseraBaseUrl(env({ MARCH_TESSERA_PORT: "9123" }))).toBe(
+      "http://localhost:9123",
+    );
+  });
+
+  it("resolves the client key, treating blank as unset", () => {
+    expect(resolveTesseraClientKey(env({ MARCH_TESSERA_CLIENT_KEY: " k1 " }))).toBe("k1");
+    expect(resolveTesseraClientKey(env({ MARCH_TESSERA_CLIENT_KEY: "   " }))).toBeUndefined();
+    expect(resolveTesseraClientKey(env())).toBeUndefined();
+  });
+
+  it("enables the fallback flag only for the exact value 1", () => {
+    expect(resolveTesseraGhTokenFallback(env({ MARCH_TESSERA_GH_TOKEN_FALLBACK: "1" }))).toBe(true);
+    for (const value of ["", "0", "true", "yes", " 1", "1 ", "2"]) {
+      expect(resolveTesseraGhTokenFallback(env({ MARCH_TESSERA_GH_TOKEN_FALLBACK: value }))).toBe(
+        false,
+      );
+    }
+    expect(resolveTesseraGhTokenFallback(env())).toBe(false);
   });
 });
 

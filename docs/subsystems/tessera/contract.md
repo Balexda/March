@@ -395,7 +395,7 @@ prints the group help and exits with the usage status.
 | Setting | Side | Meaning |
 |---------|------|---------|
 | `MARCH_TESSERA_PORT` | consumer and server | Port. Default `9477`, derived from the service name `march-tessera` in the 8800-9799 band. |
-| `MARCH_TESSERA_URL` | consumer | Base URL March processes use to reach Tessera. Defined as a name only; nothing reads it yet. |
+| `MARCH_TESSERA_URL` | consumer | Base URL March processes use to reach Tessera; read by the Node client (`src/tessera/client.ts`). Default `http://localhost:<MARCH_TESSERA_PORT>`. |
 | `MARCH_TESSERA_LOG_DIR` | server | Directory for the log file `tessera.jsonl`. Default `~/.march/logs`; the container uses `/march/logs` on the `march-tessera-logs` volume. |
 | `TESSERA_GITHUB_APP_ID` | server | GitHub App id. Optional; with the key file, it enables the `github-app` provider. |
 | `TESSERA_GITHUB_APP_KEY_FILE` | server | Path to the App private key file (PEM). Optional; counts as missing when the file does not exist. |

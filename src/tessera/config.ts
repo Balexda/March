@@ -10,16 +10,24 @@ export const TESSERA_SERVICE_NAME = "march-tessera";
  * Tessera. Kept separate from the server-side `TESSERA_*` settings below.
  */
 export const TESSERA_CONSUMER_ENV = Object.freeze({
-  /** Base URL consumers use to reach Tessera over HTTP. */
+  /** Base URL consumers use to reach Tessera over HTTP; read by the Node client. */
   url: "MARCH_TESSERA_URL",
   /** Port the Tessera service binds. */
   port: "MARCH_TESSERA_PORT",
+  /** This process's own Tessera client key, sent as the bearer credential. */
+  clientKey: "MARCH_TESSERA_CLIENT_KEY",
+  /** `1` permits the gated `GH_TOKEN`/`GITHUB_TOKEN` migration fallback. Unset by default. */
+  ghTokenFallback: "MARCH_TESSERA_GH_TOKEN_FALLBACK",
 });
 
 /** Env var holding the port the Tessera service binds. */
 export const TESSERA_PORT_ENV = TESSERA_CONSUMER_ENV.port;
 /** Env var holding the base URL consumers use to reach Tessera. */
 export const TESSERA_URL_ENV = TESSERA_CONSUMER_ENV.url;
+/** Env var holding this process's Tessera client key. */
+export const TESSERA_CLIENT_KEY_ENV = TESSERA_CONSUMER_ENV.clientKey;
+/** Env var enabling the environment-token migration fallback (exactly `1`). */
+export const TESSERA_GH_TOKEN_FALLBACK_ENV = TESSERA_CONSUMER_ENV.ghTokenFallback;
 
 /** Server-side: GitHub App id. Required for the `app` identity. */
 export const TESSERA_GITHUB_APP_ID_ENV = "TESSERA_GITHUB_APP_ID";
@@ -69,6 +77,28 @@ export function resolveTesseraPort(
 
   if (!Number.isInteger(n) || n < 1 || n > 65535) throw invalid();
   return n;
+}
+
+/**
+ * Resolve the Tessera base URL for consumers: MARCH_TESSERA_URL (trimmed,
+ * trailing slashes removed), else `http://localhost:<port>` on the resolved
+ * Tessera port.
+ */
+export function resolveTesseraBaseUrl(env: NodeJS.ProcessEnv = process.env): string {
+  const url = env[TESSERA_URL_ENV]?.trim();
+  if (url) return url.replace(/\/+$/, "");
+  return `http://localhost:${resolveTesseraPort(undefined, env)}`;
+}
+
+/** Resolve this process's Tessera client key; unset or blank is `undefined`. */
+export function resolveTesseraClientKey(env: NodeJS.ProcessEnv = process.env): string | undefined {
+  const key = env[TESSERA_CLIENT_KEY_ENV]?.trim();
+  return key ? key : undefined;
+}
+
+/** Whether the environment-token migration fallback is enabled: only the exact value `1`. */
+export function resolveTesseraGhTokenFallback(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env[TESSERA_GH_TOKEN_FALLBACK_ENV] === "1";
 }
 
 /** GitHub App settings resolved from the server-side env. */
