@@ -43,10 +43,10 @@
 # rules, at most one per registered client; the format and validation rules
 # are in docs/subsystems/tessera/contract.md. The policy is DEFAULT DENY: a
 # request is allowed only when the client's rule grants the identity, the
-# repository and the access level, and a registered client with no rule is
+# repository (for `app` requests) and the access level, and a registered client with no rule is
 # denied everything. The file is read once at startup; restart after changing
 # it. An invalid file keeps the container restarting the same way; `docker
-# logs march-tessera` names TESSERA_POLICY_FILE and the rule position.
+# logs march-tessera` names TESSERA_POLICY_FILE and, for a bad rule, its position.
 #
 # With TESSERA_GITHUB_APP_ID and TESSERA_GITHUB_APP_KEY_FILE set (and the key
 # file present in the container), the github-app provider is registered and

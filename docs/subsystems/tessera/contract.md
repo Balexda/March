@@ -26,7 +26,7 @@ Each token request from an authenticated client is then checked against that
 client's rule in the policy file named by `TESSERA_POLICY_FILE`. Tessera
 refuses to start without a valid policy file too. The policy is default deny: a
 request is allowed only when the client's rule grants the identity, the
-repository and the access level. Anything else, including every request from a
+repository (for `app` requests) and the access level. Anything else, including every request from a
 registered client that has no rule, gets `403 policy_denied`.
 
 ## Public Interface
@@ -137,7 +137,8 @@ The file is rejected, and Tessera does not start (exit status `2`), unless:
 
 Error messages name the setting and the rule position (for example `rule 2`),
 and for a repository entry its position in `repos`. They never contain the file
-path, a client name, a repository or any other file content.
+path, a client name or repository taken from the file, or any other file
+content.
 
 A registered client with no rule is valid at startup; every request it makes
 is denied. The file is read once, at startup. Changing the policy takes a
