@@ -8,7 +8,24 @@
 #   curl -fsS http://localhost:${MARCH_TESSERA_PORT:-9477}/healthz
 #
 # Consumers on the host reach Tessera at
-# http://localhost:${MARCH_TESSERA_PORT:-9477}.
+# http://localhost:${MARCH_TESSERA_PORT:-9477}. Every /v1/* request must send
+# `Authorization: Bearer <client key>` for a registered client; a missing or
+# unknown key gets 401 `unauthorized`. /healthz and /status need no key.
+#
+# CLIENT KEYS (REQUIRED): the service REFUSES TO START (exit status 2) until
+# you supply a client-keys file. Set
+#   TESSERA_CLIENT_KEYS_FILE        path INSIDE the container to the
+#                                   client-keys file, and add a read-only bind
+#                                   mount for that one file yourself in a
+#                                   compose override. Keep the host copy
+#                                   OUTSIDE $HOME, for the same reason as the
+#                                   App key below.
+# The file is a JSON array of {"client": "<name>", "key_sha256": "<hex>"}
+# rows. It holds only SHA-256 hashes of the keys, never the keys themselves.
+# Make a key with `openssl rand -hex 32` and its hash with
+# `printf %s "$KEY" | sha256sum` (printf, not echo: the hash must not include a
+# newline). The file is read once at startup; restart after changing it. The
+# format and rules are in docs/subsystems/tessera/contract.md.
 #
 # With TESSERA_GITHUB_APP_ID and TESSERA_GITHUB_APP_KEY_FILE set (and the key
 # file present in the container), the github-app provider is registered and
@@ -44,15 +61,15 @@
 #
 # ---------------------------------------------------------------------------
 # NOT YET IN THIS CHANGE:
-#   * The secret store, per-client keys and the full security notes arrive with
-#     a later change (spec User Story 3).
-#   * /v1/* is UNAUTHENTICATED until client keys land (spec User Story 2). That
-#     is why the port is published on 127.0.0.1 only — never publish it on any
-#     other interface, never expose it publicly, never publish this image.
-#   * Until then, configuring the GitHub App lets ANY process on this host or
-#     on the `march` network mint read or write bot tokens for any repository
-#     the App is installed on. Leave the App settings unset outside of testing
-#     until client keys and the policy file land.
+#   * Authorization policy is NOT enforced yet. Any registered client may
+#     request a read or write bot token for any repository the App is
+#     installed on, as either identity. The per-client policy file lands in the
+#     next change.
+#   * The secret store, `march up` generating client keys and writing this
+#     client-keys file, and the full security notes arrive with a later change
+#     (spec User Story 3).
+#   * The port is published on 127.0.0.1 only. Never publish it on any other
+#     interface, never expose it publicly, never publish this image.
 # ---------------------------------------------------------------------------
 name: march-tessera
 
@@ -66,13 +83,16 @@ services:
     restart: on-failure
     command: ["tessera", "serve", "--host", "0.0.0.0", "--port", "${MARCH_TESSERA_PORT:-9477}"]
     ports:
-      - "127.0.0.1:${MARCH_TESSERA_PORT:-9477}:${MARCH_TESSERA_PORT:-9477}" # loopback only — /v1/* is unauthenticated until US2
+      - "127.0.0.1:${MARCH_TESSERA_PORT:-9477}:${MARCH_TESSERA_PORT:-9477}" # loopback only — never expose publicly
     environment:
       - MARCH_OTEL=${MARCH_OTEL:-1}
       - MARCH_OTEL_ENDPOINT=http://otel-lgtm:4318
       - MARCH_OTEL_SERVICE_NAME=march-tessera
       - MARCH_TESSERA_PORT=${MARCH_TESSERA_PORT:-9477}
       - MARCH_TESSERA_LOG_DIR=/march/logs
+      # Required client-keys file (path inside the container). Passed through
+      # empty when unset, in which case the service refuses to start.
+      - TESSERA_CLIENT_KEYS_FILE=${TESSERA_CLIENT_KEYS_FILE:-}
       # Optional GitHub App pass-throughs; empty means unconfigured.
       - TESSERA_GITHUB_APP_ID=${TESSERA_GITHUB_APP_ID:-}
       - TESSERA_GITHUB_APP_KEY_FILE=${TESSERA_GITHUB_APP_KEY_FILE:-}

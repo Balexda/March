@@ -52,7 +52,7 @@
   - With a valid file the service starts with an unconfigured GitHub App, as before
   - The startup log names the setting and the number of clients, never a hash or a key
 
-- [ ] **Document client authentication**
+- [x] **Document client authentication**
 
   Update `docs/subsystems/tessera/contract.md`, the header of `docker/tessera.docker-compose.yml` with `src/tessera/container-artifacts.test.ts`, the Tessera line in `AGENTS.md`, and the comments in `src/tessera` that say caller authentication is absent. The compose file passes the new setting through as an optional variable and adds no mount; where the file lives is User Story 3.
 

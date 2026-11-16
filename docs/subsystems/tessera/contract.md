@@ -16,15 +16,79 @@ requests always fail with `provider_unconfigured`. Minted tokens are cached in
 memory and reused until fewer than ten minutes of life remain; during a GitHub
 outage an unexpired cached token is served instead of an error.
 
+Every request under `/v1` must carry the bearer key of a registered client
+(`Authorization: Bearer <client key>`). Tessera stores only the SHA-256 hash of
+each key, read at startup from the client-keys file named by
+`TESSERA_CLIENT_KEYS_FILE`, and refuses to start without a valid one. A missing
+or unknown key gets `401 unauthorized`. `/healthz` and `/status` need no key.
+Authorization is not applied yet: any authenticated client may request any
+identity, any repository and any access level. A per-client policy is planned
+(spec User Story 2) and lands in the next change.
+
 ## Public Interface
 
 <!-- BEGIN AUTOGEN -->
 <!-- END AUTOGEN -->
 
 Tessera exposes `GET /healthz`, `GET /status` and one JSON API route,
-`POST /v1/github/token`. None of these routes requires authentication (see
-`## Invariants`). Every non-2xx response uses the error envelope described in
-`## Error Modes`.
+`POST /v1/github/token`. Every path under `/v1` requires a client key (see
+"Client authentication" below); `/healthz` and `/status` do not. Every non-2xx
+response uses the error envelope described in `## Error Modes`.
+
+### Client authentication
+
+| Field | Contract |
+|-------|----------|
+| Scheme | `Authorization: Bearer <client key>`. The word `Bearer` is matched without regard to case; the key is everything after it and must contain no whitespace. Any other form (no header, another scheme, an empty key) counts as a missing key. |
+| Scope | `/v1` itself and every path below it, for every method, including paths that match no route. `/healthz` and `/status` are open. |
+| Order | Authentication runs before the body is parsed or validated. A request without a valid key gets `401 unauthorized` whatever its body; a malformed body is only reported to an authenticated caller. An unmatched `/v1` path returns `401` to an unauthenticated caller and `404` to an authenticated one. |
+| Rejection | `401` with `{ "error": { "code": "unauthorized", "message": "A valid Tessera client key is required." } }`. The response is the same for a missing key, a malformed header and an unknown key; it never says which. |
+| Matching | Tessera hashes the presented key with SHA-256 and compares the digest in constant time against every registered hash, with no early exit on a match. |
+| Caller identity | On success the route knows the authenticated client's name (`request.tesseraClient`), and the request log line records it as `tessera.client`. |
+| Authorization | None yet. Any authenticated client may request any identity, repository and access level. The per-client policy (spec User Story 2) arrives in the next change. |
+
+Tessera never stores a plaintext key. The client-keys file holds only hashes,
+and keys, hashes and the `Authorization` header are never logged.
+
+#### The client-keys file
+
+`TESSERA_CLIENT_KEYS_FILE` names a JSON file holding an array of client
+registrations, one per client:
+
+```json
+[
+  { "client": "legate", "key_sha256": "0000000000000000000000000000000000000000000000000000000000000000" },
+  { "client": "steward", "key_sha256": "1111111111111111111111111111111111111111111111111111111111111111" }
+]
+```
+
+(The hashes above are placeholders, not real key hashes.)
+
+The file is rejected, and Tessera does not start, unless:
+
+- it is valid JSON whose top level is an array with at least one entry;
+- each entry is an object with exactly the fields `client` and `key_sha256`;
+- `client` matches `^[a-z][a-z0-9-]{0,31}$` (a lowercase letter, then up to
+  31 lowercase letters, digits or `-`);
+- `key_sha256` is exactly 64 lowercase hexadecimal characters;
+- no two entries share a `client`, and no two share a `key_sha256`.
+
+Error messages name the setting and the entry position (for example
+`entry 2`), never the file path, a hash or any other file content.
+
+The file is read once, at startup. Adding, removing or changing a client takes
+a restart.
+
+To create a key and its registration:
+
+```sh
+KEY="$(openssl rand -hex 32)"     # the client key; give it to the client only
+printf %s "$KEY" | sha256sum      # the first 64 characters are key_sha256
+```
+
+The hash is computed over the exact key string, with no trailing newline. Use
+`printf %s`, not `echo`, which appends a newline and produces a hash that never
+matches. Put the hash, never the key, in the client-keys file.
 
 ### `POST /v1/github/token`
 
@@ -33,8 +97,8 @@ Tessera exposes `GET /healthz`, `GET /status` and one JSON API route,
 | Method and path | `POST /v1/github/token` |
 | Request envelope | JSON object body (`content-type: application/json`) with the fields listed below. A field outside this set is rejected. |
 | Response envelope | `200` with an Entitlement body (below). Returned for an `app` request when the `github-app` provider is registered and either GitHub mints the token or a cached token is served (see "Token cache" under the `github-app` provider). |
-| Authentication behavior | None. Any caller that can reach the port is accepted. |
-| Visible status or error behavior | A validation failure returns `400 invalid_request`. A valid request for an identity with no registered provider returns `503 provider_unconfigured`. Typed errors raised by a provider map to the statuses in `## Error Modes`. |
+| Authentication behavior | Requires `Authorization: Bearer <client key>` for a registered client, checked before the body is validated. A missing or unknown key returns `401 unauthorized`. No authorization policy is applied yet: any authenticated client may request any identity, repository and access. |
+| Visible status or error behavior | A request without a valid client key returns `401 unauthorized`. A validation failure returns `400 invalid_request`. A valid request for an identity with no registered provider returns `503 provider_unconfigured`. Typed errors raised by a provider map to the statuses in `## Error Modes`. |
 
 Request body:
 
@@ -84,7 +148,7 @@ Access levels map to these GitHub App permissions. The map is a constant in
 | Method and path | `GET /healthz` |
 | Request envelope | Nothing required. |
 | Response envelope | `200` with `{ "status": "ok" }`. |
-| Authentication behavior | None. |
+| Authentication behavior | None. Open without a client key. |
 | Visible status or error behavior | Reports process health only. It stays `200` when no provider is configured. The container healthcheck calls this route. |
 
 ### `GET /status`
@@ -94,7 +158,7 @@ Access levels map to these GitHub App permissions. The map is a constant in
 | Method and path | `GET /status` |
 | Request envelope | Nothing required. |
 | Response envelope | `200` with `{ "service": "march-tessera", "uptime_s": number, "providers": ProviderStatus[], "soonest_expiry": string \| null, "cache": { "entries": number } }`. |
-| Authentication behavior | None. |
+| Authentication behavior | None. Open without a client key. |
 | Visible status or error behavior | Always `200`. With no provider registered, `providers` is `[]`, `soonest_expiry` is `null` and `cache.entries` is `0`. If a provider's `status()` or `cacheEntries()` throws, that provider is reported as `degraded`, with `last_error` set to the error class name and `0` cache entries; the response is still `200`. |
 
 `uptime_s` is whole seconds since the server was built. `soonest_expiry` is the
@@ -237,7 +301,11 @@ prints the group help and exits with the usage status.
 | `TESSERA_GITHUB_APP_ID` | server | GitHub App id. Optional; with the key file, it enables the `github-app` provider. |
 | `TESSERA_GITHUB_APP_KEY_FILE` | server | Path to the App private key file (PEM). Optional; counts as missing when the file does not exist. |
 | `TESSERA_GITHUB_INSTALLATION_ID` | server | Pinned installation id. Optional; must be a positive integer when set. When set, only repositories of the account that installation belongs to are served. When unset, the installation is looked up per repository owner. |
+| `TESSERA_CLIENT_KEYS_FILE` | server | Required. Path to the client-keys file (see "The client-keys file"). Tessera does not start when it is unset, blank, unreadable or invalid. Read once at startup. |
 | `MARCH_OTEL` | server | Enables telemetry export; a no-op when off. The compose file defaults it to `1`. |
+
+At startup the service loads the client-keys file and logs the number of
+registered clients, naming the setting but never the path or any hash.
 
 When the app id or key file is missing, the service still starts, logs a
 warning that names the missing settings, and answers `app` requests with
@@ -259,15 +327,23 @@ or `GITHUB_TOKEN`.
 
 ## Invariants
 
-- `/v1/*` is unauthenticated: Tessera accepts any caller that can reach the
-  port. Per-client keys are planned (spec User Story 2) and are not
-  implemented. Until they are, the service must be reachable only from the
-  loopback interface: `march tessera serve` binds `127.0.0.1` by default, and
-  the compose file publishes the port on `127.0.0.1` only. Inside the
-  compose stack the service is also reachable by every container on the
-  `march` network. With the GitHub App configured, any of those callers can
-  mint a read or write bot token for any repository the App is installed on,
-  so leave the App settings unset outside of testing until client keys land.
+- Every request to `/v1` or a path below it, matched or not, must carry the
+  bearer key of a registered client. A missing, malformed or unknown key gets
+  the same `401 unauthorized` response, before the body is parsed or
+  validated. `/healthz` and `/status` stay open.
+- Tessera does not start without a valid client-keys file. There is no mode
+  that accepts callers without a key.
+- Tessera holds only SHA-256 hashes of client keys, never a plaintext key. A
+  presented key is hashed and compared in constant time against every
+  registered hash.
+- Authorization is not enforced yet. Any authenticated client may request a
+  read or write token for any identity and any repository the GitHub App is
+  installed on, until the per-client policy lands (spec User Story 2, next
+  change). Keep the service reachable only from the loopback interface:
+  `march tessera serve` binds `127.0.0.1` by default, and the compose file
+  publishes the port on `127.0.0.1` only. Inside the compose stack the
+  service is also reachable by every container on the `march` network, but
+  only a caller holding a registered key gets past `/v1`.
 - No identity is ever substituted for another. A request for `app` is only
   served by the provider registered for `app`, and a request for `user` only by
   the provider for `user`. If that provider is missing, the response is
@@ -329,9 +405,10 @@ Every non-2xx response has the body
 
 | Code | HTTP status | When |
 |------|-------------|------|
+| `unauthorized` | `401` | A request to `/v1` or below has no `Authorization: Bearer <key>` header, a malformed one, or a key that matches no registered client. Checked before the body is parsed. The message is always `A valid Tessera client key is required.` and does not say which case applied. |
 | `invalid_request` | `400` | Body is not a JSON object, has an unknown field, has an `identity` other than `app`/`user`, has an `access` other than `read`/`write`, has a `repo` not in `owner/name` form, omits `repo` for `app`, or has a non-boolean `refresh` or non-string `subject`. |
 | `invalid_request` | `400` | Fastify rejects the request before the route runs (an `FST_*` error with a `4xx` status: for example invalid JSON, an empty JSON body, an unsupported content type, or an oversized body). The message is always `Malformed request body.` and never echoes the body. |
-| `invalid_request` | `404` | No route matches the method and path. The message is fixed and does not echo the request URL. |
+| `invalid_request` | `404` | No route matches the method and path. Under `/v1` this is only returned to an authenticated caller; an unauthenticated one gets `401 unauthorized`. The message is fixed and does not echo the request URL. |
 | `provider_unconfigured` | `503` | No provider is registered for the requested identity: an `app` request when the GitHub App settings are not configured, and every `user` request. |
 | `repo_not_installed` | `422` | The App is not installed on the repository owner (both installation lookups return `404`; no mint is attempted); with `TESSERA_GITHUB_INSTALLATION_ID` set, the owner is not the account that installation belongs to, or the installation returns `404` (no mint is attempted); or GitHub refuses the mint with `404` or `422` because the installation does not cover the repository (the cached entry for that key is evicted). |
 | `credential_invalid` | `503` | GitHub returns `401` to the app assertion, or the key file cannot be read or parsed. The provider becomes `invalid` until restart. No `Retry-After` header. |
@@ -344,6 +421,8 @@ Startup failures of `march tessera serve`:
 | Condition | Outcome |
 |-----------|---------|
 | `--port` or `MARCH_TESSERA_PORT` is not an integer in 1..65535 | Reason printed to stderr, exit status `2`, nothing listens. |
+| `TESSERA_CLIENT_KEYS_FILE` is unset or blank | Reason printed to stderr, exit status `2`, nothing listens. Checked after the port and before any other setting, telemetry or GitHub call. |
+| The client-keys file cannot be read, or fails any rule in "The client-keys file" | Reason printed to stderr (the setting and entry position only, never the path or file contents), exit status `2`, nothing listens. |
 | `TESSERA_GITHUB_INSTALLATION_ID` is set but not a positive integer | Reason printed to stderr, exit status `2`, nothing listens. |
 | App id or key file missing | Not a failure: the service starts, logs a warning naming the missing settings, and answers `app` requests with `provider_unconfigured`. |
 | GitHub unreachable or failing when the provider starts | Not a failure: the service starts, the provider is `degraded` (or `invalid` if the credential is rejected), and the bot identity lookup is retried on the next `app` request. |
