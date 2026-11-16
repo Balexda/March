@@ -416,7 +416,9 @@ provider, logs the names of the settings in use, starts the provider, and logs
 the provider state. Log lines name settings only; they never contain the app
 id, the key path, key contents, an assertion or a token. The GitHub API base
 URL is not a setting: it is always `https://api.github.com`, and only tests
-replace it, by passing a GitHub client to `runTesseraServer`.
+replace it, by passing a GitHub client to `runTesseraServer`. Tests likewise
+pass the numeric `port: 0` with an `onListening` callback to `runTesseraServer`
+to bind an OS-assigned port; the CLI and `MARCH_TESSERA_PORT` still reject `0`.
 
 ### Container
 

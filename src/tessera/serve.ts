@@ -25,6 +25,12 @@ export interface ShutdownSignalSource {
 }
 
 export interface RunTesseraServerOptions {
+  /**
+   * Port to bind; validated to 1..65535 like `MARCH_TESSERA_PORT`. The numeric
+   * `0` (OS-assigned port) is accepted here only, for tests that read the bound
+   * port from `onListening`; the string `"0"` (the CLI path) and the env var
+   * still reject it.
+   */
   readonly port?: number | string;
   readonly host?: string;
   /** Environment for config + telemetry; defaults to `process.env`. */
@@ -39,6 +45,12 @@ export interface RunTesseraServerOptions {
    * exposed as a setting.
    */
   readonly githubClient?: GitHubClient;
+  /**
+   * Called once, right after the server starts listening, with the bound
+   * address (tests pass `port: 0` and read the OS-assigned port here). Must
+   * not throw. Not exposed as a setting.
+   */
+  readonly onListening?: (address: { readonly host: string; readonly port: number }) => void;
 }
 
 /**
@@ -52,7 +64,7 @@ export interface RunTesseraServerOptions {
  */
 export async function runTesseraServer(options: RunTesseraServerOptions = {}): Promise<void> {
   const env = options.env ?? process.env;
-  const port = resolveTesseraPort(options.port, env);
+  const port = options.port === 0 ? 0 : resolveTesseraPort(options.port, env);
   const host = options.host ?? "127.0.0.1";
   const clients = loadClientRegistry(env);
   const policy = loadPolicy(clients.clients(), env);
@@ -111,7 +123,10 @@ export async function runTesseraServer(options: RunTesseraServerOptions = {}): P
   }
 
   await app.listen({ port, host });
-  app.log.info(`tessera listening on http://${host}:${port}`);
+  const bound = app.server.address();
+  const boundPort = typeof bound === "object" && bound !== null ? bound.port : port;
+  app.log.info(`tessera listening on http://${host}:${boundPort}`);
+  options.onListening?.({ host, port: boundPort });
 
   const signals = options.signals ?? process;
   await new Promise<void>((resolve) => {

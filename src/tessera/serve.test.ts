@@ -16,7 +16,6 @@
 import { createHash, generateKeyPairSync } from "node:crypto";
 import { EventEmitter } from "node:events";
 import fs from "node:fs";
-import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { PassThrough } from "node:stream";
@@ -25,7 +24,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { GitHubClient } from "./providers/github-app/github-client.js";
 import { startFakeGitHub, type FakeGitHub } from "./testing/fake-github.js";
 import { POLICY_DENIED_MESSAGES, TesseraValidationError } from "./types.js";
-import { runTesseraServer } from "./serve.js";
+import { runTesseraServer, type RunTesseraServerOptions } from "./serve.js";
 
 const CLIENT_KEY = "tessera-serve-test-client-key";
 const CLIENT_KEY_SHA256 = createHash("sha256").update(CLIENT_KEY, "utf8").digest("hex");
@@ -54,16 +53,70 @@ function writeClientKeysFile(): ClientFiles {
   return { file, policyFile, cleanup: () => fs.rmSync(dir, { recursive: true, force: true }) };
 }
 
-async function freePort(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const server = net.createServer();
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", () => {
-      const address = server.address();
-      const port = typeof address === "object" && address ? address.port : 0;
-      server.close(() => resolve(port));
-    });
+interface StartedTessera {
+  readonly port: number;
+  readonly running: Promise<void>;
+}
+
+/**
+ * Start Tessera on an OS-assigned port (`port: 0`) and resolve once it is
+ * listening, with the bound port from `onListening`. Binding port 0 directly
+ * avoids the race of probing a free port, releasing it, and rebinding it later
+ * (another parallel test can take it in between). A startup failure rejects
+ * here with the real error, and `running` never rejects unobserved.
+ */
+async function startTessera(
+  options: Omit<RunTesseraServerOptions, "port" | "onListening">,
+): Promise<StartedTessera> {
+  let reportListening!: (port: number) => void;
+  const listening = new Promise<number>((resolve) => {
+    reportListening = resolve;
   });
+  const running = runTesseraServer({
+    ...options,
+    port: 0,
+    onListening: ({ port }) => reportListening(port),
+  });
+  const port = await Promise.race([
+    listening,
+    running.then(() => {
+      throw new Error("runTesseraServer returned before it was listening");
+    }),
+  ]);
+  return { port, running };
+}
+
+/**
+ * Run a startup that must be refused: resolve with the rejection, and report
+ * whether the server ever reached listen (it must not).
+ */
+async function startRefused(
+  options: Omit<RunTesseraServerOptions, "port" | "onListening">,
+): Promise<{ err: unknown; listened: boolean }> {
+  let listened = false;
+  const err = await runTesseraServer({
+    ...options,
+    port: 0,
+    onListening: () => {
+      listened = true;
+    },
+  }).then(
+    () => new Error("runTesseraServer resolved; expected a startup refusal"),
+    (e: unknown) => e,
+  );
+  return { err, listened };
+}
+
+/**
+ * After shutdown, Tessera no longer answers on its port. The released port may
+ * already belong to another parallel test, so "something answered" alone is
+ * not a failure - only Tessera answering is.
+ */
+async function expectTesseraGone(port: number): Promise<void> {
+  const res = await fetch(`http://127.0.0.1:${port}/status`).catch(() => undefined);
+  if (res === undefined) return;
+  const body = (await res.json().catch(() => ({}))) as { service?: unknown };
+  expect(body.service).not.toBe("march-tessera");
 }
 
 function captureLogger(): { logger: pino.Logger; lines: () => string[] } {
@@ -74,17 +127,6 @@ function captureLogger(): { logger: pino.Logger; lines: () => string[] } {
     logger: pino({ level: "info" }, stream),
     lines: () => chunks.join("").split("\n").filter(Boolean),
   };
-}
-
-async function waitForHealthz(url: string): Promise<Response> {
-  for (let attempt = 0; attempt < 100; attempt += 1) {
-    try {
-      return await fetch(url);
-    } catch {
-      await new Promise((r) => setTimeout(r, 20));
-    }
-  }
-  throw new Error(`server never answered ${url}`);
 }
 
 async function postToken(port: number, body: unknown): Promise<Response> {
@@ -114,12 +156,10 @@ describe("runTesseraServer", () => {
   }
 
   it("serves unconfigured, logs setting names only, and stops on SIGTERM", async () => {
-    const port = await freePort();
     const signals = new EventEmitter();
     const { logger, lines } = captureLogger();
 
-    const running = runTesseraServer({
-      port,
+    const { port, running } = await startTessera({
       host: "127.0.0.1",
       env: {
         TESSERA_GITHUB_APP_ID: "app-id-sentinel-do-not-log",
@@ -131,7 +171,7 @@ describe("runTesseraServer", () => {
       signals,
     });
 
-    const res = await waitForHealthz(`http://127.0.0.1:${port}/healthz`);
+    const res = await fetch(`http://127.0.0.1:${port}/healthz`);
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ status: "ok" });
 
@@ -159,9 +199,18 @@ describe("runTesseraServer", () => {
     expect(output).toContain("policy loaded from TESSERA_POLICY_FILE: 1 rule");
     expect(output).not.toContain(policyFile());
     expect(output).not.toContain("acme");
+    expect(output).toContain(`tessera listening on http://127.0.0.1:${port}`);
 
-    // The port is released after shutdown.
-    await expect(fetch(`http://127.0.0.1:${port}/healthz`)).rejects.toThrow();
+    // Tessera stops listening after shutdown.
+    await expectTesseraGone(port);
+  });
+
+  it("rejects port 0 from the CLI string and MARCH_TESSERA_PORT", async () => {
+    // Only the numeric options value 0 (tests) means "OS-assigned".
+    await expect(runTesseraServer({ port: "0", env: {} })).rejects.toThrow(/Invalid Tessera port "0"/);
+    await expect(runTesseraServer({ env: { MARCH_TESSERA_PORT: "0" } })).rejects.toThrow(
+      /Invalid Tessera port "0"/,
+    );
   });
 
   it("rejects an invalid port before the server starts", async () => {
@@ -177,10 +226,10 @@ describe("runTesseraServer", () => {
   });
 
   it("reports a client-keys file problem before a policy file problem", async () => {
-    const err = await runTesseraServer({
-      port: await freePort(),
+    const { err, listened } = await startRefused({
       env: { TESSERA_POLICY_FILE: "/no/such/policy.json" },
-    }).catch((e: unknown) => e);
+    });
+    expect(listened).toBe(false);
     expect(err).toBeInstanceOf(TesseraValidationError);
     expect((err as Error).message).toContain("TESSERA_CLIENT_KEYS_FILE");
     expect((err as Error).message).not.toContain("TESSERA_POLICY_FILE");
@@ -260,17 +309,18 @@ describe("runTesseraServer", () => {
           const keysFile = file();
           const env: NodeJS.ProcessEnv = { TESSERA_GITHUB_APP_ID: "42", TESSERA_GITHUB_APP_KEY_FILE: keyFile };
           if (keysFile !== undefined) env.TESSERA_CLIENT_KEYS_FILE = keysFile;
-          const port = await freePort();
           const { logger, lines } = captureLogger();
 
-          const err = await runTesseraServer({
-            port,
+          // Nothing listens: with an OS-assigned port there is no fixed port
+          // to probe, so assert the server never reached listen instead.
+          const { err, listened } = await startRefused({
             host: "127.0.0.1",
             env,
             logger,
             signals: new EventEmitter(),
             githubClient: new GitHubClient({ baseUrl: fake.baseUrl }),
-          }).catch((e: unknown) => e);
+          });
+          expect(listened).toBe(false);
 
           expect(err).toBeInstanceOf(TesseraValidationError);
           const message = (err as Error).message;
@@ -279,7 +329,6 @@ describe("runTesseraServer", () => {
           expect(message).not.toContain(CLIENT_KEY_SHA256);
           expect(fake.calls).toHaveLength(0);
           expect(lines()).toEqual([]);
-          await expect(fetch(`http://127.0.0.1:${port}/healthz`)).rejects.toThrow();
         } finally {
           await fake.close();
           fs.rmSync(keyDir, { recursive: true, force: true });
@@ -357,17 +406,18 @@ describe("runTesseraServer", () => {
             TESSERA_CLIENT_KEYS_FILE: clientKeysFile(),
           };
           if (policy !== undefined) env.TESSERA_POLICY_FILE = policy;
-          const port = await freePort();
           const { logger, lines } = captureLogger();
 
-          const err = await runTesseraServer({
-            port,
+          // Nothing listens: with an OS-assigned port there is no fixed port
+          // to probe, so assert the server never reached listen instead.
+          const { err, listened } = await startRefused({
             host: "127.0.0.1",
             env,
             logger,
             signals: new EventEmitter(),
             githubClient: new GitHubClient({ baseUrl: fake.baseUrl }),
-          }).catch((e: unknown) => e);
+          });
+          expect(listened).toBe(false);
 
           expect(err).toBeInstanceOf(TesseraValidationError);
           const message = (err as Error).message;
@@ -381,7 +431,6 @@ describe("runTesseraServer", () => {
           expect(message).not.toContain("herald");
           expect(fake.calls).toHaveLength(0);
           expect(lines()).toEqual([]);
-          await expect(fetch(`http://127.0.0.1:${port}/healthz`)).rejects.toThrow();
         } finally {
           await fake.close();
           fs.rmSync(keyDir, { recursive: true, force: true });
@@ -427,17 +476,16 @@ describe("runTesseraServer", () => {
           { client: "legate", identities: ["app", "user"], repos: ["acme/widgets"], max_access: "write" },
         ]),
       );
-      const port = await freePort();
       signals = new EventEmitter();
       const { logger, lines } = captureLogger();
-      running = runTesseraServer({
-        port,
+      const started = await startTessera({
         host: "127.0.0.1",
         env: { TESSERA_CLIENT_KEYS_FILE: keysFile, TESSERA_POLICY_FILE: policy },
         logger,
         signals,
       });
-      await waitForHealthz(`http://127.0.0.1:${port}/healthz`);
+      running = started.running;
+      const { port } = started;
       return { port, lines, policy };
     }
 
@@ -525,8 +573,12 @@ describe("runTesseraServer", () => {
     const { privateKey, publicKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
     let fake: FakeGitHub | undefined;
     let keyDir: string | undefined;
+    let stop: (() => Promise<void>) | undefined;
 
     afterEach(async () => {
+      // Stop a server a failed test left running (a no-op after its own SIGTERM).
+      await stop?.();
+      stop = undefined;
       await fake?.close();
       fake = undefined;
       if (keyDir) fs.rmSync(keyDir, { recursive: true, force: true });
@@ -546,11 +598,9 @@ describe("runTesseraServer", () => {
       fs.writeFileSync(keyFile, privateKey.export({ type: "pkcs8", format: "pem" }).toString(), {
         mode: 0o600,
       });
-      const port = await freePort();
       const signals = new EventEmitter();
       const { logger, lines } = captureLogger();
-      const running = runTesseraServer({
-        port,
+      const { port, running } = await startTessera({
         host: "127.0.0.1",
         env: {
           TESSERA_GITHUB_APP_ID: "42",
@@ -562,7 +612,10 @@ describe("runTesseraServer", () => {
         signals,
         githubClient: new GitHubClient({ baseUrl: fake.baseUrl }),
       });
-      await waitForHealthz(`http://127.0.0.1:${port}/healthz`);
+      stop = async () => {
+        signals.emit("SIGTERM");
+        await running;
+      };
       return { fake, port, signals, running, lines, keyFile };
     }
 
