@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execFile } from "node:child_process";
 
 /**
  * Liveness evidence about one tracked container, as observed from the
@@ -35,12 +35,55 @@ export class ContainerObserverUnavailableError extends Error {
 }
 
 /**
- * Cap on captured docker stdout. `execFileSync`'s 1 MiB default is ample for a
+ * Cap on captured docker stdout. `execFile`'s 1 MiB default is ample for a
  * two-column listing, but the bound is explicit for the same reason
  * `container-launch.ts` bounds its buffers: an unexpectedly chatty daemon must
  * fail loudly rather than balloon service memory.
  */
 const DOCKER_OUTPUT_MAX_BUFFER = 4 * 1024 * 1024;
+
+/**
+ * Upper bound on one `docker ps` observation. The read runs inside a request
+ * handler, so a stalled daemon must not hold the request (or, as a synchronous
+ * call once did, the whole event loop) forever: past this bound the child is
+ * killed and the read surfaces as the same `503` an unreachable daemon does.
+ */
+export const DOCKER_OBSERVE_TIMEOUT_MS = 10_000;
+
+/** Result of one docker invocation: captured stdout, or a rejection. */
+export type DockerRunner = (
+  args: readonly string[],
+  options: { readonly timeoutMs: number; readonly maxBuffer: number },
+) => Promise<string>;
+
+/** Options for {@link dockerContainerObserver}; both exist for tests. */
+export interface DockerContainerObserverOptions {
+  /** Finite bound on the docker call. Defaults to {@link DOCKER_OBSERVE_TIMEOUT_MS}. */
+  readonly timeoutMs?: number;
+  /** Process runner. Defaults to an async, non-blocking `execFile`. */
+  readonly runDocker?: DockerRunner;
+}
+
+/**
+ * Default runner: asynchronous `execFile`, so the service event loop keeps
+ * serving health checks and unreconciled reads while docker answers. A timeout
+ * kills the child (SIGTERM) and rejects with `killed: true`.
+ */
+const execDocker: DockerRunner = (args, { timeoutMs, maxBuffer }) =>
+  new Promise((resolve, reject) => {
+    execFile(
+      "docker",
+      [...args],
+      { encoding: "utf-8", timeout: timeoutMs, maxBuffer },
+      (err, stdout, stderr) => {
+        if (err) {
+          reject(Object.assign(err, { stdout, stderr }));
+          return;
+        }
+        resolve(stdout);
+      },
+    );
+  });
 
 /** Tail-truncates a docker stderr buffer for the surfaced error message. */
 function tail(value: unknown, max = 500): string {
@@ -56,7 +99,11 @@ function tail(value: unknown, max = 500): string {
  * listing" is an unambiguous signal that the container is gone — `inspect`
  * cannot distinguish a missing container from a failing daemon.
  */
-export function dockerContainerObserver(): ContainerObserver {
+export function dockerContainerObserver(
+  options: DockerContainerObserverOptions = {},
+): ContainerObserver {
+  const timeoutMs = options.timeoutMs ?? DOCKER_OBSERVE_TIMEOUT_MS;
+  const runDocker = options.runDocker ?? execDocker;
   return {
     async observe(containerIds) {
       const observed = new Map<string, ContainerObservation>();
@@ -66,19 +113,19 @@ export function dockerContainerObserver(): ContainerObserver {
       if (containerIds.length === 0) return observed;
       let stdout: string;
       try {
-        stdout = execFileSync(
-          "docker",
+        stdout = await runDocker(
           ["ps", "--all", "--no-trunc", "--format", "{{.ID}}\t{{.State}}"],
-          {
-            encoding: "utf-8",
-            stdio: ["ignore", "pipe", "pipe"],
-            maxBuffer: DOCKER_OUTPUT_MAX_BUFFER,
-          },
+          { timeoutMs, maxBuffer: DOCKER_OUTPUT_MAX_BUFFER },
         );
       } catch (err) {
-        const stderr = (err as { stderr?: unknown }).stderr;
+        const e = err as { stderr?: unknown; killed?: boolean; message?: string };
+        if (e.killed) {
+          throw new ContainerObserverUnavailableError(
+            `docker liveness observation timed out after ${timeoutMs}ms`,
+          );
+        }
         throw new ContainerObserverUnavailableError(
-          `docker liveness observation failed: ${tail(stderr) || (err as Error).message}`,
+          `docker liveness observation failed: ${tail(e.stderr) || (e.message ?? String(err))}`,
         );
       }
       const states = new Map<string, string>();
