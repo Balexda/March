@@ -22,10 +22,14 @@
 #                                   App key below.
 # The file is a JSON array of {"client": "<name>", "key_sha256": "<hex>"}
 # rows. It holds only SHA-256 hashes of the keys, never the keys themselves.
-# Make a key with `openssl rand -hex 32` and its hash with
+# Make a key with `KEY="$(openssl rand -hex 32)"` and its hash with
 # `printf %s "$KEY" | sha256sum` (printf, not echo: the hash must not include a
-# newline). The file is read once at startup; restart after changing it. The
-# format and rules are in docs/subsystems/tessera/contract.md.
+# newline; the first 64 characters of the output are the key_sha256). The file
+# is read once at startup; restart after changing it. The format and rules are
+# in docs/subsystems/tessera/contract.md.
+# Without the file each start attempt exits with status 2, and because of
+# `restart: on-failure` the container keeps restarting; `docker logs
+# march-tessera` shows the reason (it names TESSERA_CLIENT_KEYS_FILE).
 #
 # With TESSERA_GITHUB_APP_ID and TESSERA_GITHUB_APP_KEY_FILE set (and the key
 # file present in the container), the github-app provider is registered and
