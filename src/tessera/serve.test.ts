@@ -55,7 +55,7 @@ describe("runTesseraServer", () => {
     const running = runTesseraServer({
       port,
       host: "127.0.0.1",
-      env: { TESSERA_GITHUB_APP_ID: "12345", TESSERA_GITHUB_APP_KEY_FILE: "/no/such/key.pem" },
+      env: { TESSERA_GITHUB_APP_ID: "app-id-sentinel-do-not-log", TESSERA_GITHUB_APP_KEY_FILE: "/no/such/key.pem" },
       logger,
       signals,
     });
@@ -69,7 +69,7 @@ describe("runTesseraServer", () => {
 
     const output = lines().join("\n");
     expect(output).toContain("TESSERA_GITHUB_APP_KEY_FILE");
-    expect(output).not.toContain("12345");
+    expect(output).not.toContain("app-id-sentinel-do-not-log");
     expect(output).not.toContain("/no/such/key.pem");
     expect(output).toContain("received SIGTERM");
 

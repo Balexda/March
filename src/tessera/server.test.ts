@@ -196,6 +196,11 @@ describe("tessera server", () => {
       ["a bad identity", { identity: "robot", repo: "acme/widgets", access: "read" }],
       ["app without repo", { identity: "app", access: "read" }],
       ["a malformed repo", { identity: "app", repo: "acme", access: "read" }],
+      ["a dot-only repo owner and name", { identity: "app", repo: "../..", access: "read" }],
+      ["a dot-only repo name", { identity: "app", repo: "acme/..", access: "read" }],
+      ["a dot-only repo owner", { identity: "app", repo: "./x", access: "read" }],
+      ["an over-long repo owner", { identity: "app", repo: `${"a".repeat(40)}/x`, access: "read" }],
+      ["an over-long repo name", { identity: "app", repo: `acme/${"a".repeat(101)}`, access: "read" }],
       ["a non-boolean refresh", { identity: "app", repo: "acme/widgets", access: "read", refresh: "yes" }],
       ["a non-string subject", { identity: "app", repo: "acme/widgets", access: "read", subject: 7 }],
     ];

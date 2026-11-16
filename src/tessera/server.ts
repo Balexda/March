@@ -64,6 +64,21 @@ export interface TesseraStatus {
 const REQUEST_FIELDS = new Set(["identity", "repo", "access", "refresh", "subject"]);
 const REPO_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 
+const MAX_OWNER_LENGTH = 39;
+const MAX_REPO_NAME_LENGTH = 100;
+const DOTS_ONLY = /^\.+$/;
+
+/**
+ * `owner/name`, with GitHub's length limits and no dot-only segment. A provider
+ * puts this value into GitHub API paths, so `.` and `..` must never get through.
+ */
+function isValidRepo(repo: string): boolean {
+  if (!REPO_PATTERN.test(repo)) return false;
+  const [owner = "", name = ""] = repo.split("/");
+  if (owner.length > MAX_OWNER_LENGTH || name.length > MAX_REPO_NAME_LENGTH) return false;
+  return !DOTS_ONLY.test(owner) && !DOTS_ONLY.test(name);
+}
+
 function errorBody(code: TesseraErrorCode, message: string): TesseraErrorBody {
   return { error: { code, message } };
 }
@@ -89,7 +104,7 @@ export function parseEntitlementRequest(body: unknown): EntitlementRequest {
   if (access !== "read" && access !== "write") {
     throw new TesseraValidationError('access must be "read" or "write".');
   }
-  if (repo !== undefined && (typeof repo !== "string" || !REPO_PATTERN.test(repo))) {
+  if (repo !== undefined && (typeof repo !== "string" || !isValidRepo(repo))) {
     throw new TesseraValidationError("repo must be in owner/name form.");
   }
   if (identity === "app" && repo === undefined) {
