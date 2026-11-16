@@ -1,6 +1,8 @@
 ---
 name: smithy-orders
 description: "Create GitHub tickets from any artifact file. Auto-detects artifact type by extension and creates the correct ticket structure."
+argument-hint: "<artifact-path>"
+disable-model-invocation: true
 ---
 # smithy.orders
 
@@ -9,54 +11,36 @@ Your job is to take any smithy artifact file and create the appropriate GitHub
 tickets so that planning work is tracked without manual ticket creation.
 
 Before running any shell commands, read and follow the `smithy.guidance` prompt
-for shell best practices. All GitHub operations in this command go through the
-`smithy.gh-issue` skill — use its scripts (`check-env.sh`, `search-issues.sh`,
-`create-issue.sh`, `link-blocked-by.sh`) instead of inline `gh` invocations so
-permissions stay narrow and predictable.
+for shell best practices.
+
+All GitHub operations in this command go through the `smithy.gh-issue` skill,
+and **the skill owns the path choice**: it calls the GitHub MCP tools when the
+host exposes them and falls back to its bundled `gh` scripts otherwise. That
+is what makes orders work on a host without `gh` installed, such as Claude
+Code on the web.
+
+Every shell block below is the **script-fallback form** of an operation. When
+the MCP path is available, make the equivalent MCP call the skill documents
+for that operation instead of running the script — the block is there for the
+fallback, not as a requirement to shell out. Either way, never assemble an
+ad-hoc `gh` invocation of your own.
 
 ---
 
 ## Authored Smithy Artifacts Location
 
-This Smithy install was set up with an explicit policy for **where authored
-Smithy artifacts live**. Every path you see in the rest of this prompt that
-refers to an authored Smithy artifact — `.rfc.md`, `.features.md`, `.spec.md`,
-`.tasks.md`, `.strike.md`, `.prd.md`, `.persona.md`, `.data-model.md`,
-`.contracts.md` — is already prefixed with `` so it points
-at the right root for this repo. Do not strip, override, or rewrite that
-prefix.
+Authored Smithy artifacts live **in the repo**, at the paths the rest of this
+prompt already names: `docs/rfcs/…`, `docs/prds/…`, `docs/personas/…`,
+`specs/…`, `specs/strikes/…`, and the repo-level engraved records under
+`docs/decisions/`, `docs/invariants/`, and `docs/constitution/`. Use those
+paths as written — they are already correct for this repo.
 
-- When `` is empty, artifacts live **in the repo**:
-  `docs/rfcs/...`, `docs/prds/...`, `docs/personas/...`, `specs/...`,
-  `specs/strikes/...`.
-- When `` is `~/.smithy/repos/<repoKey>/`, artifacts live **outside
-  the repo, in the user's home directory**: `~/.smithy/repos/<repoKey>/docs/rfcs/...`,
-  `~/.smithy/repos/<repoKey>/docs/personas/...`, `~/.smithy/repos/<repoKey>/specs/...`, etc.
-  Treat the resolved path as authoritative — agents (Claude Code, Gemini CLI,
-  Codex) expand `~` at tool-call time, so the path is portable across team
-  members even when this prompt is committed to source control.
+Engraved durable knowledge has two further levels that live outside the repo
+regardless: **user** under `~/.smithy/decisions/`, `~/.smithy/invariants/`,
+and `~/.smithy/constitution/`, and **project** under
+`~/.smithy/projects/<project>/decisions/` and its siblings. Reading those
+levels means reading their own roots directly.
 
-### Scope of the policy
-
-This policy applies **only to authored Smithy artifacts** such as planning
-artifacts and durable persona files. It does **not** apply to:
-
-- **Source code, tests, configuration, or any other repo file you edit as
-  part of an implementation slice.** Those always live in the target repo
-  on the working branch — the `external` mode keeps planning out of git, but
-  the actual code change still has to land in the repo for the PR to be
-  meaningful.
-- **GitHub issue body templates** under `<manifestDir>/templates/orders/`.
-  Those are managed separately by `smithy init` and `smithy.orders`.
-- **The smithy manifest itself** (`.smithy/smithy-manifest.json` or
-  `~/.smithy/smithy-manifest.json`), which is set by `smithy init`.
-
-### When discovering existing artifacts
-
-When you scan for existing artifacts (e.g. "list folders in
-`docs/rfcs/`"), use the prefixed path. The `smithy status`
-CLI already reads the manifest and looks in the right place, so its output
-will be consistent with the paths in this prompt.
 ## Input
 
 The artifact file path: $ARGUMENTS
@@ -67,31 +51,39 @@ If no file path is provided, ask the user which artifact file to create tickets 
 
 ## Phase 1: Validate Environment
 
-**First, load the skill** so its scripts are available: invoke `Skill("smithy.gh-issue")`.
+**First, load the skill** so its operations and scripts are available: invoke
+`Skill("smithy.gh-issue")`. The loaded body is what tells you which MCP call
+each operation maps to, so this step matters on both paths.
 
 
 Running the scripts requires the `smithy.gh-issue` skill
 to be deployed in the `.agents/skills/` directory.
 
-Then run the environment check:
+Then run the skill's **Validate Environment** operation to resolve
+`owner` / `repo` / `ownerRepo`.
+
+On the MCP path this is a single `git config --get remote.origin.url` read,
+parsed per the skill — no `gh` involved. On the fallback path it is:
 
 ```bash
 ./.agents/skills/smithy.gh-issue/scripts/check-env.sh
 ```
 
-If it fails, surface the message it printed and stop. On success, capture the
-returned `ownerRepo` for use in the summary.
+Capture the resolved `ownerRepo` for use in the summary. Stop only when
+**neither** path resolves the repo — a `check-env.sh` failure reporting that
+`gh` is missing is not a stop condition if the GitHub MCP tools are available;
+switch to the MCP path and carry on. When both paths are unavailable, surface
+the message and stop.
 
 ### Manifest Discovery and `<manifestDir>` Resolution
 
-After `check-env.sh` succeeds, locate the active smithy manifest **before**
+Once **Validate Environment** has resolved the repo — on either path, MCP or
+the `check-env.sh` fallback — locate the active smithy manifest **before**
 Phase 4 ever runs. Phase 5's `.spec.md` mapping (and the rfc/features/tasks
 mappings added in later slices) reads body templates from
 `<manifestDir>/templates/orders/<type>.md`, so the prompt must resolve a
-trustworthy `<manifestDir>` here. The resolver matches the two-arg
-`resolveManifestDir(targetDir, location)` helper at `src/manifest.ts:38-43`
-that `updateAction` and `uninitAction` already use
-(`src/commands/update.ts`, `src/commands/uninit.ts`):
+trustworthy `<manifestDir>` here. Resolve it the same way `smithy update`
+and `smithy uninit` do, from a `(targetDir, location)` pair:
 
 ```
 resolveManifestDir(targetDir, location):
@@ -147,8 +139,8 @@ in order. All four cases are handled explicitly:
 **Step 3 — Validate selected manifest self-consistency.** Read the selected
 manifest's stored `deployLocation` field and confirm it equals the
 `location` value you used to read it (the hardcoded `'repo'` or `'user'`
-from Step 2). If they diverge, halt with the same wording style
-`update.ts` emits (see `src/commands/update.ts:168-176`):
+from Step 2). If they diverge, halt with this message, which deliberately
+mirrors the one `smithy update` emits for the same condition:
 
   > `<location>` manifest declares `deployLocation="<other>"`; refusing to
   > run orders — fix the manifest or rerun `smithy init`.
@@ -156,12 +148,6 @@ from Step 2). If they diverge, halt with the same wording style
 (Substitute the actual values: e.g. ``repo manifest declares
 deployLocation="user"; refusing to run orders — fix the manifest or rerun
 `smithy init`.``)
-
-The verb ("refusing to run orders") deliberately mirrors `update.ts`'s
-`refusing to update` wording shape — the surrounding sentence structure
-and the trailing ``— fix the manifest or rerun `smithy init` `` half
-are kept identical so the two halts read as siblings; only the verb
-varies because `orders` is not "updating" anything.
 
 **Step 4 — Compute `<manifestDir>`.** Once selection passes Step 3, set the
 named variable `<manifestDir>` for downstream phases:
@@ -179,7 +165,7 @@ the value without re-probing the filesystem.
 
 **Forbidden operations.** Never read `<manifestDir>/smithy-manifest.json` as
 a body template, and never modify, truncate, rewrite, or delete it. The
-manifest is CLI-owned state (`src/manifest.ts`); the only template files in
+manifest is CLI-owned state; the only template files in
 scope live under `<manifestDir>/templates/orders/<type>.md`. This rule
 applies at **both** candidate paths — the user-global path included — and
 holds regardless of which candidate Step 2 selected.
@@ -236,7 +222,7 @@ Parse the RFC to extract:
     top-level RFC section that happens to share the name). When the
     milestone has no `**Success Criteria**` block, treat the value as the
     empty string so the downstream `{{milestone_success_criteria}}`
-    placeholder resolves to empty per the data-model validation rule.
+    placeholder resolves to empty.
 
 ### For `.features.md`
 
@@ -256,7 +242,7 @@ Parse the feature map to extract:
        `evals/fixture/rfcs/mark-eval/mark-eval.rfc.md`.
     If the field is absent or the resolved RFC path cannot be located on disk,
     keep parsing features but set the downstream `{{features_path}}` value to
-    empty string per the data-model validation rule.
+    empty string.
   - **Milestone number** — from the `**Milestone**: <N> — <Title>` field. Use
     the number `<N>` as the stable lookup key; do not match by milestone title
     because names can collide across RFCs.
@@ -366,7 +352,7 @@ overrides.
 For **each** milestone extracted in Phase 3, perform the following steps:
 
 1. **Build the rfc-type interpolation context.** Compute a value for every
-   variable named in the data-model's rfc row. Sources:
+   variable listed below. Sources:
 
    - `` ← the milestone's title (the same `<milestone-title>` used
      in the `[RFC][Milestone] <milestone-title>` issue title).
@@ -378,16 +364,15 @@ For **each** milestone extracted in Phase 3, perform the following steps:
      parsed in Phase 3.
    - `` ← the milestone's `**Success
      Criteria**` body parsed in Phase 3. When the milestone had no
-     `**Success Criteria**` block, use empty string per the data-model
-     validation rule.
+     `**Success Criteria**` block, use empty string.
    - `` ← the artifact path argument that `smithy.orders` was
      invoked with (the `.rfc.md` file).
    - `` ← the `#<n>` reference for the RFC parent tracking
      issue (the `[RFC] <rfc-title>` epic) created earlier in this same
      orders run. If for some reason that parent was not created, use
      empty string.
-   - `` ← the literal string `smithy.render <rfc_path> <milestone_number>`
-     per the data-model next-step mapping, **with `<rfc_path>` and
+   - `` ← the literal string
+     `smithy.render <rfc_path> <milestone_number>`, **with `<rfc_path>` and
      `<milestone_number>` already substituted using the values captured
      above** (e.g., `smithy.render docs/rfcs/2026-03-21-001-foo.rfc.md 3`).
      Compose ``'s value first, before running the global
@@ -409,8 +394,7 @@ For **each** milestone extracted in Phase 3, perform the following steps:
    the template body, including any user-customised parenthetical aside
    that references `` or `` directly.
    Unknown `` names (any token not in the rfc-row context
-   above) are **left as literal text** per the data-model validation
-   rule — do not error and do not delete them.
+   above) are **left as literal text** — do not error and do not delete them.
 
    Write the rendered body to `/tmp/orders_body.md` and then call:
 
@@ -487,7 +471,7 @@ above; the resulting `#<n>` reference is part of the interpolation context.
 For **each** feature extracted in Phase 3, perform the following steps:
 
 1. **Build the features-type interpolation context.** Compute a value for every
-   variable named in the data-model's features row. Sources:
+   variable listed below. Sources:
 
    - `` ← the feature's title (the same `<feature-title>` used in the
      `[Feature] <feature-title>` issue title).
@@ -503,8 +487,8 @@ For **each** feature extracted in Phase 3, perform the following steps:
      Phase 3 could not locate the source RFC, could not find the matching
      milestone row by number, or found an empty/`—` artifact cell, use empty
      string.
-   - `` ← the literal instruction `smithy.mark` on this feature,
-     per the data-model next-step mapping. Include enough context for the
+   - `` ← the literal instruction `smithy.mark` on this
+     feature. Include enough context for the
      operator to run mark on the specific feature, e.g.
      `smithy.mark <features_path> <feature_number>` when that source path and
      feature number are known; otherwise use `smithy.mark` on this feature.
@@ -516,9 +500,8 @@ For **each** feature extracted in Phase 3, perform the following steps:
    **global** substitution of every variable in the context built in
    step 1 across the entire template body. Every occurrence of every
    known placeholder must be replaced — not just the first. Unknown
-   `` names (any token not in the features-row context above)
-   are **left as literal text** per the data-model validation rule — do
-   not error and do not delete them.
+   `` names (any token not in the features-type context above)
+   are **left as literal text** — do not error and do not delete them.
 
    Write the rendered body to `/tmp/orders_body.md` and then call:
 
@@ -575,7 +558,7 @@ already-resolved value.
 For **each** user story extracted in Phase 3, perform the following steps:
 
 1. **Build the spec-type interpolation context.** Compute a value for every
-   variable named in the data-model's spec row. Sources:
+   variable listed below. Sources:
 
    - `` ← the user story's title (the same `<story-title>` used in
      the `[Story] <story-title>` issue title).
@@ -596,8 +579,8 @@ For **each** user story extracted in Phase 3, perform the following steps:
      path. If no such file exists on disk, use empty string.
    - `` ← the sibling `<spec_folder>/<basename>.contracts.md`
      path. If no such file exists on disk, use empty string.
-   - `` ← the literal string `smithy.cut <spec_folder> <user_story_number>`
-     per the data-model next-step mapping, **with `<spec_folder>` and
+   - `` ← the literal string
+     `smithy.cut <spec_folder> <user_story_number>`, **with `<spec_folder>` and
      `<user_story_number>` already substituted using the values captured
      above** (e.g., `smithy.cut specs/2026-03-14-001-webhook-support 3`).
      Compose ``'s value first, before running the global
@@ -619,8 +602,8 @@ For **each** user story extracted in Phase 3, perform the following steps:
    are replaced inline in the same pass that replaces ``
    itself — so the rendered output contains no leftover `` tokens
    for known variables. Unknown `` names (any token not in
-   the spec-row context above) are **left as literal text** per the
-   data-model validation rule — do not error and do not delete them.
+   the spec-type context above) are **left as literal text** — do not
+   error and do not delete them.
 
    Write the rendered body to `/tmp/orders_body.md` and then call:
 
@@ -698,7 +681,7 @@ already-resolved value.
 For **each** slice extracted in Phase 3, perform the following steps:
 
 1. **Build the tasks-type interpolation context.** Compute a value for every
-   variable named in the data-model's tasks row. Sources:
+   variable listed below. Sources:
 
    - `` ← the slice's title (the same `<slice-title>` used in the
      `[Slice] <slice-title>` issue title).
@@ -714,10 +697,9 @@ For **each** slice extracted in Phase 3, perform the following steps:
      invoked with (the `.tasks.md` file).
    - `` ← the `#<n>` reference for the `[Story] <story-title>`
      issue resolved by the parent-linking `search-issues.sh` call earlier in
-     this `.tasks.md` mapping. If no parent was found, use empty string per
-     the data-model validation rule.
-   - `` ← the literal string `smithy.forge on this slice` per
-     the data-model next-step mapping (note: this is an English phrase, not
+     this `.tasks.md` mapping. If no parent was found, use empty string.
+   - `` ← the literal string `smithy.forge on this slice`
+     (note: this is an English phrase, not
      a CLI-shaped command with placeholder slots, so there are no nested
      `` references to resolve within it).
 
@@ -732,8 +714,8 @@ For **each** slice extracted in Phase 3, perform the following steps:
    value (the parsed `- [ ]` task checklist) must be inserted with its
    newlines and list structure preserved so the rendered body still
    renders as a list. Unknown `` names (any token not in
-   the tasks-row context above) are **left as literal text** per the
-   data-model validation rule — do not error and do not delete them.
+   the tasks-type context above) are **left as literal text** — do not
+   error and do not delete them.
 
    Write the rendered body to `/tmp/orders_body.md` and then call:
 
@@ -795,8 +777,12 @@ After creating all tickets, establish parent-child relationships:
 ./.agents/skills/smithy.gh-issue/scripts/link-blocked-by.sh <child-number> <parent-number>
 ```
 
-Treat `link-blocked-by` failures as best-effort: print a brief note and continue
-rather than aborting the orders run.
+Link Blocked-By is the one operation with **no MCP path** — GitHub's MCP
+server exposes no `addBlockedBy` equivalent — so this script is the only way
+to make the link. Treat failures as best-effort: print a brief note and
+continue rather than aborting the orders run. A host without `gh` falls under
+the same rule — the issues themselves were already created through the MCP
+path, so report which pairs went unlinked and finish the run.
 
 ---
 
@@ -832,10 +818,16 @@ Present a summary table of all created tickets:
   with guidance to use the parent `.spec.md`.
 - **Do NOT** require flags or mode arguments — artifact type detection is
   entirely by file extension.
-- **Do NOT** call `gh` directly for issue creation, search, or linking — go
-  through the `smithy.gh-issue` skill scripts so permissions stay scoped.
-- **DO** write issue bodies to a temp file with a heredoc and pass the file path
-  to `create-issue.sh`, to avoid markdown quoting issues.
+- **Do NOT** call `gh` ad-hoc for issue creation, search, or linking — go
+  through the `smithy.gh-issue` skill's operations, which prefer the GitHub
+  MCP tools and fall back to the skill's own `gh` scripts, so permissions
+  stay scoped either way.
+- **Do NOT** treat a missing `gh` CLI as a dead end. Only Link Blocked-By
+  requires it; creation and search have MCP paths, and an unlinkable pair is
+  reported best-effort rather than aborting the run.
+- **DO**, on the script-fallback path, write issue bodies to a temp file with a
+  heredoc and pass the file path to `create-issue.sh`, to avoid markdown
+  quoting issues. On the MCP path pass the body string directly — no temp file.
 - **DO** link child tickets to parent tickets when parent tickets can be found.
 - **DO** include the next pipeline step in every ticket body.
 - **DO** present duplicate matches to the user before proceeding.

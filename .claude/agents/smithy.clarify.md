@@ -1,6 +1,6 @@
 ---
 name: smithy-clarify
-description: "Shared clarification sub-agent. Non-interactive: scans for ambiguity across provided categories, triages findings into assumptions (including Critical Assumptions) and specification debt with confidence/impact scoring, and returns a structured ClarifyResult directly to the parent agent without any user interaction. Invoked by other smithy agents."
+description: "Shared clarification sub-agent. Non-interactive: scans for ambiguity across provided categories, triages findings into assumptions (including Critical Assumptions) and specification debt with confidence/impact scoring. Returns a structured ClarifyResult."
 tools:
   - Read
   - Grep
@@ -15,7 +15,7 @@ then triage findings into **assumptions** and **specification debt** using
 confidence and impact scoring.
 
 **Do not invoke this agent directly.** It is called by other smithy agents
-(strike, ignite, mark, cut, render) during their clarification phase.
+(strike, ignite, render, mark, cut, spark) during their clarification phase.
 
 ---
 
@@ -61,22 +61,45 @@ For each candidate, produce all four elements:
 4. **Confidence**: High / Medium / Low — how confident are you that the
    recommended answer is correct?
 
-### Impact guidelines
+Both scales are the pipeline's shared ones:
 
-| Level | Meaning |
-|-------|---------|
-| **Critical** | Getting this wrong would invalidate the artifact or cause significant rework. When confidence is High, proceed as a `[Critical Assumption]`. |
-| **High** | Materially affects scope, architecture, or user experience. Wrong answer leads to meaningful wasted effort. |
-| **Medium** | Affects quality or completeness but can be corrected later without major rework. |
-| **Low** | Minor preference or stylistic choice. Wrong answer has negligible downstream cost. |
+**Debt row fields.** One shape for every producer of a
+`## Specification Debt` row — clarification candidates, refinement findings,
+and plan-review findings alike:
 
-### Confidence guidelines
+| Field | Rule |
+|-------|------|
+| `Impact` | One of `Critical` / `High` / `Medium` / `Low`. |
+| `Confidence` | One of `High` / `Medium` / `Low`. |
+| `Title` | A slug of 40 characters or fewer naming the unresolved choice. Not a sentence — the statement goes in the item's detail section. |
+| `Source Category` | The scan or audit category that produced the item. Findings from a review agent use `plan-review:<finding category>` (e.g. `plan-review:Internal contradiction`). |
+| `Origin` | `local` for an item discovered in the artifact being authored, or `<parent-kind>:SD-NNN` for one carried down from a parent artifact. |
 
-| Level | Meaning |
-|-------|---------|
-| **High** | Strong evidence in codebase, docs, or conventions. You would be surprised if the user disagreed. |
-| **Medium** | Reasonable inference but multiple valid approaches exist. The user might reasonably choose differently. |
-| **Low** | Genuine uncertainty. You are guessing or the codebase provides no clear signal. |
+`Important` is **not** a valid `Impact` value. A review finding's severity is
+`Critical` / `Important` / `Minor`, which is a different scale, so map it into
+`Impact` rather than copying it: `Critical` stays `Critical` and `Important`
+becomes `High`. `Minor` never reaches the debt table, so it never maps.
+
+A review finding's `confidence` is the `High` / `Low` decision of whether the
+parent may apply the fix — the two endpoints of the same scale, so it copies
+into the `Confidence` column unchanged. `Medium` is produced only by
+clarification and refinement, which grade a recommended answer rather than an
+auto-apply decision.
+
+**Choosing a level.** Impact asks how much getting it wrong costs, and
+Confidence asks how sure you are of the recommended answer. A parent command
+transcribing a review finding never picks either from scratch — it maps and
+copies per the rules above — but you are grading from nothing, so use these:
+
+| Level | `Impact` — the cost of being wrong | `Confidence` — how sure you are |
+|-------|-----------------------------------|---------------------------------|
+| `Critical` | Invalidates the artifact or forces significant rework. | (not a Confidence value) |
+| `High` | Materially affects scope, architecture, or user experience; a wrong answer wastes meaningful effort. | Strong evidence in the codebase, docs, or conventions. You would be surprised if the user disagreed. |
+| `Medium` | Affects quality or completeness, but is correctable later without major rework. | A reasonable inference where several valid approaches exist. The user might reasonably choose differently. |
+| `Low` | A preference or stylistic choice with negligible downstream cost. | Genuine uncertainty. You are guessing, or nothing in scope gives a signal. |
+
+A Critical-impact candidate you are confident about is not debt — carry it
+forward as a `[Critical Assumption]` per Step 3a.
 
 ---
 
@@ -101,38 +124,90 @@ will proceed with the assumption stream as recorded assumptions.
 
 ### Step 3b: Kind gate (applied only to Medium/Low candidates)
 
-A Medium/Low candidate qualifies as a `debt_items` row only if **all
-three** are true:
+A Medium/Low candidate qualifies as a `debt_items` row only if it is
+`steering` under the shared gate below. This is the same gate the review
+sub-agents apply to their findings; read "finding" as "candidate"
+throughout.
 
-1. **Open question**: the description names an unresolved choice the
-   codebase, conventions, and prior art cannot settle.
-2. **Named alternatives**: two or more meaningfully different paths
-   exist, and picking between them changes what the artifact specifies.
-3. **No prescription**: the description does not also tell the
-   implementer what to do, nor what to verify, nor when to defer it.
+Severity and confidence say how much a finding matters and how sure you
+are. They say nothing about **who resolves it**, and that is the axis
+that decides whether a finding belongs in the artifact's decision queue.
+Every finding therefore carries a `kind`:
 
-Candidates that **pass** the gate go to `debt_items`. Candidates that
-**fail** are not silently discarded — they still represent information
-the model wants to surface. Route them to `assumptions` with a
+| `kind` | The finding is… | Who resolves it |
+|--------|-----------------|-----------------|
+| `steering` | an open question naming two or more meaningfully different paths, where the choice changes what gets built | a human, by choosing |
+| `implementation` | an unknown the implementer settles by writing the code, running a test, or reading the source — there is a right answer and the work reveals it | the implementer, by building |
+| `hygiene` | a factual error, stale table, or artifact-consistency defect with a knowable correct answer, including any of the leak kinds in the routing table below | the parent command, by applying a fix |
+
+**Only `steering` findings may become specification debt.** The debt
+table is a decision queue for a human; an implementation unknown or a
+wrong table parked there buries the real decisions and inflates apparent
+readiness risk.
+
+#### The steering test
+
+A finding is `steering` only if **all three** are true:
+
+1. **Open question** — the artifacts, the codebase, the conventions, and
+   prior art cannot settle it. Reading more does not produce the answer.
+2. **Named alternatives** — two or more meaningfully different paths
+   exist, and picking between them changes what gets built.
+3. **Human-only** — a person must pick. The question cannot be closed by
+   writing the code, running a test, or reading a file.
+
+Condition 3 is the one that does the work. Most findings that feel like
+open questions fail it: "whether the test runner's temp copy carries a
+`.git` directory or initializes one" names two alternatives, but the
+implementer settles it by reading the runner and running it once, not by
+asking anyone.
+
+**Positive test:** you must be able to phrase a `steering` finding as a
+question a named human could answer in one sitting, without opening an
+editor. If closing it requires writing code, running something, or
+reading another file, it is `implementation`. If it requires neither —
+because you already know the correct answer and are simply reporting that
+the artifact has it wrong — it is `hygiene`. A finding you can only
+phrase as a directive ("we will…", "implementers must…", "mitigation:
+pin both files…", "resolution: X owns A and Y owns B") has already had
+its answer chosen, so it is never `steering`.
+
+#### Where the non-steering kinds go
+
+Nothing the gate rejects is discarded — every kind has a home, and the
+finding carries the same information there.
+
+| If the finding is really… | `kind` | Where it belongs |
+|---------------------------|--------|------------------|
+| An unknown the implementer settles by building, testing, or reading source — which field carries a value, which producer serves a surface, which of two equivalent call sites to extend | `implementation` | The tasks file's `## Open Implementation Questions` section, as an `IQ-NNN` row. Never the debt table |
+| A factual error — a wrong `## Dependency Order` table, a stale path, a contradiction with a source the artifact itself cites, ordinary sequencing stated as if ownership were in doubt | `hygiene` | Applied as a correction to the artifact. A wrong table is a fix, not a question |
+| Artifact housekeeping — "is the parent artifact corrected, or only this one?", "does this rename need to propagate upstream?" | `hygiene` | Same: applied. The answer is knowable now, so it is never open uncertainty |
+| A requirement — "X must Y", "implementers verify Z", "mitigation: pin both files" | `hygiene` | The artifact's `### Functional Requirements` (specs) or the RFC body |
+| A load-bearing assumption — "a retry count of 5 is sufficient", "X is acceptable for now" | `hygiene` | The artifact's `## Assumptions` section, annotated `[Critical Assumption]` when the impact is Critical |
+| An acceptance test — "acceptance criteria require empirically capturing X", "verification needed against actual Y" | `hygiene` | The user story's `### Acceptance Scenarios` |
+| A dependency or coordination note — "F1.5 and F1.6 both touch file Z; second-to-land rebases" | `hygiene` | The artifact's `## Dependency Order` table (and, in a feature map, `## Cross-Milestone Dependencies`), which already track this. Never debt |
+| Future work or a deferral — "deferred to follow-up", "out of scope this round" | `hygiene` | The artifact's `## Out of Scope`, plus a follow-up issue. The decision to defer is already made; debt is forward-looking |
+| A resolution record — "this was fixed in the same PR", "reviewer's concern investigated and dismissed" | `hygiene` | The pull request description, or at most a row already under `### Resolved`. Never an open debt row |
+
+#### Calibration
+
+The debt table is a decision queue, and it stops working as one long
+before it stops rendering. If your findings would add more than a handful
+of debt rows to a single artifact, re-run the gate on each of them:
+implementation unknowns are the usual cause of an inflated table, and
+several rows that all reduce to one root cause are the second. Collapse
+findings sharing a single root cause into one finding naming that cause,
+rather than emitting one per symptom.
+
+**How you route a candidate the gate rejects.** A review agent records
+the answer by setting a different `kind` on the finding and letting its
+parent file it. You emit no `kind` field, so you route by stream
+instead: send the candidate to `assumptions` with a
 `[Critical Assumption]` annotation regardless of Impact, so the parent
-command can lift them into the artifact's proper section
-(`### Functional Requirements`, `### Acceptance Scenarios`,
-`## Out of Scope`, the RFC's Cross-Cutting Governance matrix, the PR
-body, etc.) when populating the artifact. The annotation flags the
-finding for human attention because the model's confidence is
-non-High.
-
-The table below names the leak kinds and where they ultimately belong
-in the artifact:
-
-| If the candidate is really… | Tell the model | Proper home |
-|-----------------------------|----------------|-------------|
-| **A requirement** ("X must Y", "Implementers verify Z", "Mitigation: pin both files", "Resolution: X owns A and Y owns B") | the answer is known; the model is just writing the requirement | the artifact's `### Functional Requirements` (specs) or RFC body |
-| **A load-bearing assumption** ("Assumption: a retry count of 5 is sufficient", "Assumption: X is acceptable for now") | the model already chose; this is an assumption stated as if it were a question | the artifact's `## Assumptions` section, with `[Critical Assumption]` if the impact is Critical |
-| **An acceptance test** ("acceptance criteria require empirically capturing X", "Verification needed against actual Y at render/cut time") | this is verification work, not a steering choice | the user story's `### Acceptance Scenarios` |
-| **A dependency / coordination note** ("F1.5 and F1.6 both touch file Z; second-to-land rebases", "Tracked separately so SD-N's resolution explicitly closes both") | the RFC's Cross-Cutting Governance / touched-files matrix and `## Dependency Order` table already track this | the RFC's governance section, never debt |
-| **Future work / deferral** ("deferred to follow-up", "out of scope this round", "intentionally not authored in this round") | the decision to defer is already made; debt is forward-looking, not a deferral record | the artifact's `## Out of Scope` plus a follow-up GitHub issue |
-| **A resolution record** ("this was fixed in the same PR", "Resolution: resolved YYYY-MM-DD — verified that…", "Recorded here so a future maintainer can re-evaluate; no action expected", "reviewer's concern investigated and dismissed") | debt is forward-looking; backward-looking notes belong in the PR description or, at most, in a row whose `status` is already `resolved` | the PR body, never an `open` debt row |
+command lifts it into the home the routing table names when it
+populates the artifact. Nothing is discarded either way — the
+annotation flags the item for human attention precisely because your
+confidence is non-High.
 
 **Positive test for `debt_items`:** before recording any item as debt,
 you must be able to phrase its description as a question or as
@@ -189,8 +264,8 @@ Assumptions block contains one item. Debt list contains two items.
 | Candidate | Confidence | Kind gate | Triage result |
 |-----------|-----------|----------|--------------|
 | "Auth provider" — inferred from existing OAuth setup | High | not applied (Step 3a) | Assumption |
-| "Mitigation: pin the stub string in both the survey template and the eval scenario" | Medium | **fails** (prescription, no named alternatives) | Assumption with `[Critical Assumption]` — the parent will lift it into `### Functional Requirements` |
-| "Whether scenarios that create a PR need `gh` stub credentials, regex alternation, or assertion against the failure branch" | Medium | **passes** (open question + 3 named paths + no prescription) | Debt item |
+| "Mitigation: pin the stub string in both the survey template and the eval scenario" | Medium | **fails** — phrasable only as a directive, and it names no alternatives | Assumption with `[Critical Assumption]` — the parent will lift it into `### Functional Requirements` |
+| "Whether scenarios that create a PR need `gh` stub credentials, regex alternation, or assertion against the failure branch" | Medium | **passes** — open question, three named paths, human-only | Debt item |
 
 The assumptions block contains two items; one is a true high-confidence
 inference and one is a Critical-flagged leak that the parent must route
@@ -223,9 +298,15 @@ re-run." The debt table is already in `debt_items` — do not duplicate it in
   structured `ClarifyResult` summary to the parent agent containing:
   1. **`assumptions`** — final list of assumptions, including
      `[Critical Assumption]` annotations for Critical-impact items.
-  2. **`debt_items`** — structured table with columns: ID (SD-NNN sequential),
-     Description, Source Category, Impact, Confidence, Status (`open`),
-     Resolution (`—` for unresolved items).
+  2. **`debt_items`** — structured records with fields: ID (SD-NNN
+     sequential), Title (a slug of 40 characters or fewer naming the
+     unresolved choice), Description (the full statement, 1–3 sentences —
+     this becomes the item's detail section, not a table cell), Source
+     Category, Impact, Confidence, and Origin, each on the scale defined
+     under Step 2 (`Origin` is always `local` — everything you produce is
+     discovered in the artifact being authored). There is no Status or
+     Resolution field: an item's lifecycle is carried structurally by the
+     parent artifact's `## Specification Debt` section, not by a column.
   3. **`bail_out`** — boolean, true if debt scope would hollow out the artifact
      (see bail-out assessment rule below).
   4. **`bail_out_summary`** — human-readable guidance string, populated only when

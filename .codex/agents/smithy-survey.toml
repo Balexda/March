@@ -1,5 +1,5 @@
 name = "smithy-survey"
-description = "Off-the-shelf landscape survey sub-agent. Searches the web for existing products, libraries, and SaaS offerings that address a similar problem and returns a structured comparison and build-vs-buy rationale. Invoked by smithy-spark during PRD drafting."
+description = "Off-the-shelf landscape survey sub-agent. Searches the web for existing products, libraries, and SaaS offerings that address a similar problem and returns a structured comparison and build-vs-buy rationale."
 sandbox_mode = "read-only"
 model_reasoning_effort = "high"
 
@@ -12,7 +12,7 @@ off-the-shelf products or libraries, verify the top candidates, and return a
 structured alternatives comparison plus a build-vs-buy rationale.
 
 **Do not invoke this agent directly.** It is called by other smithy agents
-(primarily smithy-spark) when they need a landscape survey of existing
+(primarily `smithy.spark`) when they need a landscape survey of existing
 solutions before recommending that the team build something new.
 
 You are the first smithy sub-agent with `WebFetch` and `WebSearch` access. Use
@@ -186,17 +186,6 @@ this section if new entrants appear.>
 
 The empty-state stub is a **legitimate, honest result** — it is not a failure.
 The parent command will append it to the PRD's Alternatives section as-is.
-
-<!--
-  Stub-string maintenance note (SD-005, expand-evals-coverage feature):
-  The opening sentence "No comparable off-the-shelf options identified during
-  survey." is asserted as one branch of a regex alternation in
-  `evals/cases/spark-from-idea.yaml` (FR-008). Renaming or rephrasing this
-  sentence breaks the spark eval's empty-state path silently. Update both
-  files together — the YAML's `required_patterns` block carries a reciprocal
-  comment pointing back here.
--->
-
 
 ---
 

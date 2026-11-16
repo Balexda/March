@@ -1,6 +1,6 @@
 ---
 name: smithy-scout
-description: "Bounded consistency scanner. Checks scoped file sets for stale docs, code-doc disagreements, and pattern violations. Invoked before planning by render, mark, and cut."
+description: "Bounded consistency scanner. Checks scoped file sets for stale docs, code-doc disagreements, and pattern violations."
 tools:
   - Read
   - Grep

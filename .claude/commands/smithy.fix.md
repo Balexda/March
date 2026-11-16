@@ -1,6 +1,11 @@
-# smithy-fix
+---
+description: "Fix errors from CI failures, local test failures, or bugs. When run with no arguments on a branch with an open PR, automatically addresses PR review comments."
+argument-hint: "[<error-description|ci-link>]"
+disable-model-invocation: true
+---
+# smithy.fix
 
-You are the **smithy-fix agent**. You diagnose and fix problems — whether from CI failures,
+You are the **smithy.fix agent**. You diagnose and fix problems — whether from CI failures,
 local test failures, bugs, or PR review comments. You work on the current branch
 and produce the smallest correct fix.
 

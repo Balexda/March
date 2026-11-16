@@ -2,7 +2,7 @@
 name: smithy-guidance
 description: "Shared guidance for all smithy workflow agents. Covers shell best practices and common pitfalls."
 ---
-# smithy-guidance
+# smithy.guidance
 
 Shared rules that apply to all smithy workflow agents. Read and follow these
 whenever you are executing shell commands as part of a smithy workflow.

@@ -1,6 +1,8 @@
 ---
 name: smithy-mark
 description: "Transform an idea, RFC, or feature map into a feature specification with user stories, data model, and contracts. Use when you need structured planning before implementation."
+argument-hint: "<feature-description|rfc-path|features-path> [<feature-number>]"
+disable-model-invocation: true
 ---
 # smithy.mark
 
@@ -13,45 +15,18 @@ data models, and interface contracts — all scoped to "what and why", not "how"
 
 ## Authored Smithy Artifacts Location
 
-This Smithy install was set up with an explicit policy for **where authored
-Smithy artifacts live**. Every path you see in the rest of this prompt that
-refers to an authored Smithy artifact — `.rfc.md`, `.features.md`, `.spec.md`,
-`.tasks.md`, `.strike.md`, `.prd.md`, `.persona.md`, `.data-model.md`,
-`.contracts.md` — is already prefixed with `` so it points
-at the right root for this repo. Do not strip, override, or rewrite that
-prefix.
+Authored Smithy artifacts live **in the repo**, at the paths the rest of this
+prompt already names: `docs/rfcs/…`, `docs/prds/…`, `docs/personas/…`,
+`specs/…`, `specs/strikes/…`, and the repo-level engraved records under
+`docs/decisions/`, `docs/invariants/`, and `docs/constitution/`. Use those
+paths as written — they are already correct for this repo.
 
-- When `` is empty, artifacts live **in the repo**:
-  `docs/rfcs/...`, `docs/prds/...`, `docs/personas/...`, `specs/...`,
-  `specs/strikes/...`.
-- When `` is `~/.smithy/repos/<repoKey>/`, artifacts live **outside
-  the repo, in the user's home directory**: `~/.smithy/repos/<repoKey>/docs/rfcs/...`,
-  `~/.smithy/repos/<repoKey>/docs/personas/...`, `~/.smithy/repos/<repoKey>/specs/...`, etc.
-  Treat the resolved path as authoritative — agents (Claude Code, Gemini CLI,
-  Codex) expand `~` at tool-call time, so the path is portable across team
-  members even when this prompt is committed to source control.
+Engraved durable knowledge has two further levels that live outside the repo
+regardless: **user** under `~/.smithy/decisions/`, `~/.smithy/invariants/`,
+and `~/.smithy/constitution/`, and **project** under
+`~/.smithy/projects/<project>/decisions/` and its siblings. Reading those
+levels means reading their own roots directly.
 
-### Scope of the policy
-
-This policy applies **only to authored Smithy artifacts** such as planning
-artifacts and durable persona files. It does **not** apply to:
-
-- **Source code, tests, configuration, or any other repo file you edit as
-  part of an implementation slice.** Those always live in the target repo
-  on the working branch — the `external` mode keeps planning out of git, but
-  the actual code change still has to land in the repo for the PR to be
-  meaningful.
-- **GitHub issue body templates** under `<manifestDir>/templates/orders/`.
-  Those are managed separately by `smithy init` and `smithy.orders`.
-- **The smithy manifest itself** (`.smithy/smithy-manifest.json` or
-  `~/.smithy/smithy-manifest.json`), which is set by `smithy init`.
-
-### When discovering existing artifacts
-
-When you scan for existing artifacts (e.g. "list folders in
-`docs/rfcs/`"), use the prefixed path. The `smithy status`
-CLI already reads the manifest and looks in the right place, so its output
-will be consistent with the paths in this prompt.
 ## Input
 
 The user's input: $ARGUMENTS
@@ -159,7 +134,8 @@ solely from the parsed `### Feature N` headings and the `.features.md`
 2. Explore the codebase to understand current architecture, relevant modules,
    and existing patterns that inform the specification.
 3. Determine the spec folder name:
-   - Scan `specs/` for existing folders matching `YYYY-MM-DD-NNN-*`.
+   - Scan `specs/` for existing folders matching
+     `YYYY-MM-DD-NNN-*`.
    - Derive `<NNN>` as the next sequential number (zero-padded to 3 digits,
      starting at `001`).
    - Derive `<slug>` from the feature title (when from a feature map) or the
@@ -202,9 +178,7 @@ solely from the parsed `### Feature N` headings and the `.features.md`
    
       On success it prints a single line like `refs/remotes/origin/main`;
       strip the `refs/remotes/origin/` prefix to get the default branch
-      name. Do not assume `main`. (Note: do **not** add the `--short` flag —
-      the bare form is what the repo's auto-allow list permits, and the
-      prefix is easy to strip.)
+      name. Do not assume `main`.
    
    2. If that command exits non-zero with `not a symbolic ref` (common in
       fresh clones, mirrors, and some linked worktrees where `origin/HEAD`
@@ -264,8 +238,8 @@ solely from the parsed `### Feature N` headings and the `.features.md`
    The same rule applies during the commit-and-PR step: push the resolved
    branch as-is, and pass it as the PR's head when the chosen PR-creation
    tool requires it (e.g. the `head` argument for the GitHub MCP tool, or
-   the equivalent flag on the CLI fallback — see the
-   `pr-create-tool-choice` snippet for which tool to prefer). **Never
+   the equivalent flag on the CLI fallback — the parent phase names
+   which tool to prefer). **Never
    create a new branch or rename the current one as part of the PR-creation
    command** (in particular, do not prepend `feature/` to the resolved
    branch). The branch the agent commits and pushes from must be the same
@@ -294,6 +268,69 @@ Handle the scout report as follows:
   question, but do not force separate discussion of each warning.
 - **Clean**: Proceed directly to Phase 1.8 (or Phase 2 if not in agent mode) with no additional context.
 
+### Engraved-Knowledge Consultation
+
+Consult engraved durable knowledge during this scan before structuring the
+feature specification.
+
+Dispatch the **smithy-recall** sub-agent with:
+
+- **Planning context**: spec artifact
+- **Feature/problem description**: the feature description or RFC path with extracted goals and constraints from intake
+- **Codebase file paths**: the relevant codebase files explored during Phase 1
+- **Domain hint**: infer `system`, `design`, or `both` from the feature, RFC, metadata, and explored files
+- **Project**: the resolved project slug, or state that no project level is in
+  play. This is the one input recall cannot work out for itself — it resolves
+  the `user`, `repo`, and `project` store roots from its own canonical table,
+  but only you can see the invoking arguments and the artifact frontmatter.
+
+**Resolving the project.** Engraved knowledge is partitioned into `user`,
+`repo`, and `project` levels; the project level is only in play when a project
+is named. Resolve it in this order and stop at the first hit:
+
+1. An explicit `--project <slug>` token in the invoking arguments.
+2. A `project:` field in the frontmatter or header block of the planning
+   artifact being worked on.
+3. Exactly one directory under `~/.smithy/projects/` other than `default`.
+
+If none of those resolve, or more than one candidate remains at step 3, there
+is **no** project level for this run: say so rather than guessing. Never infer
+a project from the working directory name.
+### Handling the recall result
+
+Use the returned recall result as advisory planning context.
+
+**Levels.** Every returned record carries a `level` — `user`, `repo`, or
+`project`. Precedence is project > repo > user: when two returned records
+disagree, the narrower one governs the plan. Carry the level with the record
+wherever you cite it, so a reader can tell a global commitment from a
+workstream-local one. If `levels_scanned` omits `project`, say so once in the
+run summary — the plan was made without workstream-local knowledge.
+
+**Conflicts.** Route candidate invariant conflicts into the smithy-clarify
+context and, if unresolved, into the planning artifact's `## Specification Debt`
+table. Escalate deterministically on the reported `severity`, not on judgment:
+
+| `severity` | Handling |
+|------------|----------|
+| `high` | Record a `## Specification Debt` row **and** surface the conflict in the run summary before writing the artifact. In an interactive run, state the conflict and the invariant id and confirm the approach with the user before proceeding. |
+| `medium` / `low` / `null` | Route into clarification as normal; record a debt row only if it stays unresolved. |
+
+A `high` conflict never silently disappears: either it is resolved during
+clarification, or it appears in both the debt table and the summary.
+
+**Cross-level conflicts.** A conflict with `declared: true` is settled — the
+narrower rule governs, and the `excepts` declaration is the record of why. Note
+it in the artifact where the rule is applied, and move on. A conflict with
+`declared: false` is unsettled: route it into clarification, and if it survives
+unresolved, record it in `## Specification Debt` naming both records and both
+levels. Do not resolve it by editing an engraved record mid-plan — that is
+`smithy.engrave`'s job.
+
+**Citations.** Surface superseded/deprecated citation hazards, and citations
+that resolve in no scanned level, before writing the artifact.
+
+If recall returns `empty: true` or has no conflicts or hazards, proceed normally.
 ---
 
 ## Phase 1.8: Approach Planning
@@ -375,6 +412,7 @@ Pass each smithy-plan sub-agent:
 - **Feature/problem description**: the feature description or RFC path with extracted goals and constraints from intake
 - **Codebase file paths**: the relevant codebase files explored during Phase 1
 - **Scout report**: the scout report from Phase 1.5 (if it contained conflicts or warnings)
+- **Recall result**: the engraved-knowledge recall result from the Engraved-Knowledge Consultation above (if it surfaced relevant records, candidate invariant conflicts, or superseded/deprecated citation hazards)
 - **Additional planning directives**: the lens directive from the competing-lenses section above (each run gets a different directive)
 
 Present the reconciled plan to the user as:
@@ -427,6 +465,15 @@ narrow the scope, then re-run.
 **Title conventions**: Before writing, read the `smithy.titles` prompt for
 canonical title formats and check for repo-level overrides in the project's
 CLAUDE.md. Apply those conventions to all headings in this artifact.
+
+Before drafting prose-bearing spec sections, load
+`Skill("smithy.helper-voice")` in draft mode. Use it as the shared voice
+source for the Explanation-mode sections — overview, user-story narrative, and
+the framing paragraphs of the data model and contracts — while leaving
+acceptance scenarios, entity tables, and interface definitions as structured
+Reference content. It is also the source of the `<!-- audience: ... -->` tags
+these artifacts carry and `smithy.audit` lints. Do not inline the helper's
+taxonomy in this prompt.
 
 Draft the `<slug>.spec.md` file with this structure:
 
@@ -511,14 +558,39 @@ Recommended implementation sequence:
 - ...
 
 ## Specification Debt
-<!-- audience: reviewer; mode: reference; length: tables only; diagram: optional; examples: discouraged -->
+<!-- audience: reviewer; mode: reference; length: index table + 1-3 sentences per item; diagram: optional; examples: discouraged -->
 
-| ID | Description | Source Category | Impact | Confidence | Status | Resolution |
-|----|-------------|-----------------|--------|------------|--------|------------|
-| SD-001 | <what is unresolved> | <clarify scan category> | High | Medium | open | — |
+| ID | Title | Source Category | Impact | Confidence | Origin |
+|----|-------|-----------------|--------|------------|--------|
+| SD-001 | <slug naming the unresolved choice> | <clarify scan category> | High | Medium | local |
+| SD-002 | <slug of a carried-down item> | <clarify scan category> | Medium | Medium | spec:SD-002 |
 
-_If no debt items, write: "None — all ambiguities resolved."_
+### SD-001 — <Title>
 
+<The unresolved choice, stated as an open question or as "unresolved choice
+between X and Y". Name the alternatives and what each one would imply. 1-3
+sentences. Never a directive.>
+
+### Resolved
+
+#### SD-003 — <Title>
+
+**Question:** <the open question this item recorded>
+
+**Answer:** <what was decided, on what basis, and when.>
+
+_`Title` is a short slug (40 characters or fewer) — the full statement lives in
+the item's detail section, never in the table. Emit one `### SD-NNN — <Title>`
+detail section for every row whose `Origin` is `local`; rows carried down from a
+parent artifact get an index row only, because their prose lives in the parent.
+Resolving an item moves its row out of the index into `### Resolved`, which is
+why the resolved example above carries an ID the index no longer lists. Never
+put an unescaped `|` in a table cell — pipes belong in detail prose. Omit the
+`### Resolved` subsection entirely when nothing has been resolved. If there are
+no debt items at all, replace this whole section body with this exact line,
+italics included and no surrounding quotation marks:_
+
+_None — no specification debt was recorded._
 ## Out of Scope
 <!-- audience: reviewer; mode: reference; length: tables only; diagram: optional; examples: discouraged -->
 
@@ -545,7 +617,23 @@ Guidelines for the spec:
 - Do NOT include implementation phases, milestones, or task breakdowns.
 - Do NOT include specific file paths, function names, or implementation details.
 - DO trace back to RFC sections when input is an RFC.
-- Populate the `## Specification Debt` section from clarify's returned `debt_items`. Assign sequential SD-NNN identifiers starting at SD-001. Carry the description, source_category, impact, confidence, and status fields directly from clarify's return — never reword a description into a directive, and never add a row that did not come from `debt_items`. The kind gate is enforced by `smithy-clarify` Step 3; do not bypass it here by manually appending requirement, acceptance-test, dependency-coordination, deferral, or post-hoc resolution rows. Leave Resolution as `—` for all `open` items.
+- Populate the `## Specification Debt` section from clarify's returned
+  `debt_items`.
+  Assign sequential `SD-NNN` identifiers, continuing from the highest number the
+  section already carries rather than resetting — `SD-001` only when the section
+  holds no rows at all. An identifier is never reused, including one whose row
+  has since moved under `### Resolved`. Carry the title, source_category,
+  impact, confidence, and origin fields into the index table and the
+  description into the item's `### SD-NNN — <Title>` detail section, directly
+  from clarify's return — never reword a description into a directive, and
+  never add an item that did not come from `debt_items`. Everything clarify
+  returns is `Origin: local`, so every item clarify returned gets a detail
+  section. The kind gate is enforced by `smithy-clarify` Step 3; do not bypass
+  it here by manually appending requirement, acceptance-test,
+  dependency-coordination, deferral, or post-hoc resolution items. If clarify
+  returned no debt items, write the section's empty-state line rather than
+  back-filling the table from coordination notes or future work. Omit
+  `### Resolved` on a first pass — nothing has been resolved yet.
 - The `## Dependency Order` section lists all user stories in recommended
   implementation sequence as a 4-column table using `US<N>` IDs (e.g., `US1`,
   `US2`). Order rows by dependency graph, not by priority — stories with no
@@ -581,6 +669,17 @@ UI ledger rules:
   is the only place intra-feature ordering and parallelism are expressed.
 - `Design` is required for `screen` rows and is one of `none`, `import`, or
   `brief`; use `—` for `flow` and `story` rows.
+  - `none` means no visual loop; no bundle or prototype recommendation is
+    required for a simple pass-through screen. It still produces the ordinary
+    mark-owned `.design.md` intent, but no visual-tool ceremony is added.
+  - `import` means prototype-first; a visual prototype boundary object may
+    have entered at `render` and rides forward as downstream visual source
+    context. Do not derive detailed prototype structure here.
+  - `brief` means mark-authored intent for a visual tool; the durable
+    `.design.md` and `.flow.md` artifacts are self-sufficient briefs. A bundle
+    is not a precondition for writing them.
+  - Copy the feature's declared `design` value into this cell verbatim. Choose a
+    mode yourself only when the input declares none.
 - `Artifact` is `—` for every row in mark's output. It holds the
   `cut`-produced `.tasks.md` path only after `smithy.cut` runs; mark never
   pre-fills a tasks path in this column.
@@ -595,11 +694,93 @@ UI ledger rules:
 - Direct all screen and flow intent into the durable artifacts described by the
   UI Spec Ledger and Screen/Flow node entities in the data model. Do not
   duplicate the screen or flow artifact body schemas in the spec ledger.
+- Keep the ledger pointer-only even for `brief`: the `Design` cell records that
+  the screen intends a prototype, while the durable `.design.md` and `.flow.md`
+  files carry the brief content. Do not add layout prose, visual-tool notes, or
+  gate recommendations to ledger cells.
 - If the feature has no internal ordering, emit the smallest honest typed graph.
   A single pass-through screen with no flows or backend work may be one `SC<N>`
   row, but it must still use the full UI ledger column set.
 - Do not add UI-only columns (`Kind` or `Design`) to backend spec-triad output
   for `kind: backend` or absent-kind feature inputs.
+
+### UI Authoring Path Durable Artifacts
+
+When the selected feature's authoring path is `kind: ui`, `smithy.mark` also
+writes the durable screen and flow artifacts the UI ledger points at. These are
+mark-owned design truth; downstream commands consume them and may fill or update
+the paired executable test body, but never author `.design.md` or `.flow.md`
+from scratch.
+
+The artifact schemas and body rules are **not** restated here — they live in the
+two lazy-loaded helper skills so this command stays light for backend and
+non-UI runs. Load the relevant skill before writing each artifact and follow it
+verbatim:
+- `smithy.helper-screen-design` — `.design.md` front-matter schema (including
+  `component-path` and `design_system`) and the rationale-only body rules.
+- `smithy.helper-flow-definition` — `.flow.md` front-matter schema, the
+  intent-only body rules, and the paired executable test-body contract.
+
+Before writing any UI artifact, validate the feature's **required** UI metadata.
+Each check below is fatal — abort before writing the spec or any durable UI
+artifact if it cannot be satisfied (per contracts C1):
+- Every screen node must resolve to a flat `ScreenId`. If a node has none, abort
+  with a message naming the node.
+- The UI feature must name a non-empty `design_system`. If it is missing, abort.
+
+Design-mode and bundle handling is **not** part of that fatal set. None of the
+rules below abort; every one of them ends with mark continuing:
+- The feature-level `design` value is declared metadata, not a mark inference.
+  When the input declares a mode, copy it verbatim into the `Design` cell of
+  each of the feature's `SC<N>` rows. Never overwrite a declared `none` or
+  `import` with `brief`, even for a screen you judge complex — the parent
+  feature and the generated spec must agree on the mode.
+- Mark selects a mode itself only when the input declares none — for example a
+  raw feature description or an untyped legacy map. In that case pick the
+  honest mode for the screen: `brief` when it is complex enough to benefit from
+  a visual prototype and no `bundle` is present, `none` when it is simple
+  pass-through work.
+- If a `bundle` is present, treat it as an optional visual prototype boundary
+  object from a visual tool such as Figma, Claude Design, or an equivalent
+  export. The bundle wins layout and visual intent, while the committed
+  design skill wins implementation dialect; a screen with a bundle still
+  requires `design_system`.
+- Whenever a screen ends up with no `bundle` and is complex enough to benefit
+  from a visual prototype, record a non-blocking design-gate recommendation for
+  the developer-facing summary — whether the mode is a declared `none` /
+  `import` or a mark-selected `brief`. The recommendation must say the developer
+  may attach a bundle and re-run or pass through without one; it must not stop
+  spec, `.design.md`, `.flow.md`, or stub test-body generation.
+- For `brief`, write the self-sufficient durable brief artifacts; a bundle is
+  never a precondition for them.
+- For simple pass-through work, `Design: none` stands without a bundle,
+  prototype expectation, or recommendation. Author the same ordinary durable
+  screen intent and continue.
+
+Then write, matching the ledger pointers:
+- One `design/screens/<ScreenId>.design.md` per `SC<N>` row, per
+  `smithy.helper-screen-design`.
+- One `design/flows/<FlowId>.flow.md` per `FL<N>` row, per
+  `smithy.helper-flow-definition`, **and** the paired stub test body at that
+  flow's `test-body` path, so every flow has a 1:1 `.flow.md` + test-body pair
+  immediately after `mark`. The stub is a placeholder only — comments or a
+  skipped placeholder in the driver's format, with no executable assertions,
+  traversal steps, or real selectors that could pass as the completed flow.
+  `smithy.forge` fills in the executable behavior during the flow-wire build.
+
+The mark output set for `kind: ui` is:
+- the UI `.spec.md` with the typed `## Dependency Order` ledger;
+- one `design/screens/<ScreenId>.design.md` per `SC<N>` row;
+- one `design/flows/<FlowId>.flow.md` per `FL<N>` row;
+- one paired stub test body at each `.flow.md` `test-body` path;
+- the `.features.md` dependency-order write-back when the input was a feature
+  map.
+
+For `kind: ui`, include a short design-gate note in the developer-facing
+summary for any bundle-less screen that earned a gate recommendation above. The
+note is informational: the durable artifacts are already usable as the
+prototyping brief and the pipeline has continued. Do not emit a design-gate note
+for simple pass-through screens.
 
 ---
 
@@ -780,7 +961,11 @@ N/A — <one-sentence reason this feature has no code-shaped interface changes (
 
 ## Phase 6: Write & PR
 
-Create the spec folder and write all three files to disk first.
+Create the spec folder and write the spec artifact set to disk first. For the
+backend spec-triad path, this is the existing three files:
+`<slug>.spec.md`, `<slug>.data-model.md`, and `<slug>.contracts.md`. For the UI
+authoring path, this also includes the mark-owned durable screen artifacts,
+flow artifacts, and paired stub test bodies described above.
 
 **Feature map write-back** (when input was a `.features.md`): Update the
 `## Dependency Order` 4-column table in the `.features.md` so its `Artifact`
@@ -791,8 +976,8 @@ no checkboxes are flipped and no prose is rewritten.
 Write-back procedure:
 
 1. **Locate the `## Dependency Order` table** in the `.features.md` file
-   (locate by heading name, not by position). The table has the columns
-   `ID | Title | Depends On | Artifact`, with one `F<N>` row per feature.
+   (locate by heading name, not by position). It is the same table Routing
+   parsed to decide which features already have specs.
 2. **Find the matching row** whose `ID` cell equals `F<N>` where `<N>` is the
    current feature number (the one this spec was just created for). Match by
    the `F<N>` identifier, not by title or row position.
@@ -843,37 +1028,92 @@ it:
   map's dependency-order table.
 - **artifact_type** — `spec`.
 
-The agent is read-only and returns a `ReviewResult` containing `findings` and a
-`summary`. Process the findings using the shared severity × confidence triage
-table from the contracts:
+For the triage below, **the target artifact** is the spec artifact set just
+written — record every debt row in the `.spec.md` file, and apply fixes to
+whichever of the three files the finding's `artifact_path` names. **The
+review note surface** is the PR body; a Low-confidence `implementation`
+finding goes there under an **Implementation questions** heading, since a
+spec carries no `## Open Implementation Questions` section and `smithy.cut`
+re-derives the unknown from its own plan-review pass when the tasks file is
+authored.
 
-| Severity  | Confidence | Action                                                                                              |
-|-----------|------------|-----------------------------------------------------------------------------------------------------|
-| Critical  | High       | Apply the `proposed_fix` to the relevant spec artifact on disk. Note the fix in the PR body.        |
-| Critical  | Low        | Do not apply. Append to the spec's `## Specification Debt` section. Flag in PR for the reviewer.    |
-| Important | High       | Apply the `proposed_fix` to the relevant spec artifact on disk.                                     |
-| Important | Low        | Do not apply. Append to the spec's `## Specification Debt` section.                                 |
-| Minor     | Any        | Do not apply. Note in the PR body only.                                                             |
+The agent is read-only and returns a `ReviewResult` containing `findings`
+and a `summary`. Process each finding with the kind × severity ×
+confidence table below, reading its `kind` first. Only a `steering`
+finding — where a human must pick between named alternatives and the pick
+changes what gets built — can reach the debt table.
 
-For each Low-confidence finding routed to debt, append a new row to the
-`.spec.md` file's `## Specification Debt` table with the next available
-`SD-NNN` identifier (continue numbering from whatever clarify already wrote
-in Phase 2 — do not reset). Use the finding's `description` for the
-Description column, set `Source Category` to `plan-review:<finding
-category>` (e.g., `plan-review:Internal contradiction`), copy severity into
-Impact and confidence into Confidence, set Status to `open`, and leave
-Resolution as `—`.
+**The target artifact** is the planning file findings are recorded against
+and **the review note surface** is where a finding this command did not
+apply gets reported; both are named just above, and they differ per command.
 
-For each High-confidence finding, edit the referenced spec artifact file in
-place using the `proposed_fix`. The commit below captures both the original
-artifacts and the applied fixes in the same diff.
+| Kind | Severity | Confidence | Action |
+|------|----------|------------|--------|
+| `implementation` or `hygiene` | Critical or Important | High | Apply the `proposed_fix` on disk, following whatever apply protocol this command defines. Note Critical fixes on the review note surface. |
+| `steering` | Critical or Important | Any | Do not apply — a steering finding is never auto-applied. Append it to the target artifact's `## Specification Debt` section, and flag Critical ones on the review note surface for the reviewer. |
+| `implementation` | Critical or Important | Low | Do not apply and do not record as debt. When the target artifact is a `.tasks.md`, append an `IQ-NNN` row to its `## Open Implementation Questions` section; otherwise note it on the review note surface, since only a tasks file carries that section and the unknown is settled while building either way. |
+| `hygiene` | Critical or Important | Low | Do not apply and do not record as debt. Note it on the review note surface so the reader can settle the correction. |
+| Any | Minor | Any | Do not apply. Note it on the review note surface. |
 
-If the agent returns drift findings (assumption-output drift category),
-surface them prominently in the PR body so the reviewer can confirm the
-underlying assumption rather than silently accepting the applied fix.
+**A `steering` finding is never auto-applied, at any confidence.** The
+kind means a human has to pick; applying a fix would make that pick for
+them and bury a product decision inside a planning commit. Confidence
+does not license it — a High-confidence `steering` finding is a
+contradiction and means the classification is wrong. Re-examine it: if
+the `proposed_fix` can be applied verbatim without anyone choosing, the
+finding is `hygiene`; if a human must choose, confidence is Low by
+construction. This is the one cell where confidence loses to kind.
 
-The review agent never modifies files itself — all on-disk changes are made
-here, by mark.
+For each `steering` finding routed to debt — confidence does not matter,
+since steering is never auto-applied — append a row to the target
+artifact's `## Specification Debt` index table with the next available
+`SD-NNN` identifier, continuing from whatever the artifact already
+carries (including any debt inherited from a parent) rather than
+resetting. Use the finding's `description` as the body of a new
+`### SD-NNN — <Title>` detail section, never as a table cell.
+
+**Debt row fields.** One shape for every producer of a
+`## Specification Debt` row — clarification candidates, refinement findings,
+and plan-review findings alike:
+
+| Field | Rule |
+|-------|------|
+| `Impact` | One of `Critical` / `High` / `Medium` / `Low`. |
+| `Confidence` | One of `High` / `Medium` / `Low`. |
+| `Title` | A slug of 40 characters or fewer naming the unresolved choice. Not a sentence — the statement goes in the item's detail section. |
+| `Source Category` | The scan or audit category that produced the item. Findings from a review agent use `plan-review:<finding category>` (e.g. `plan-review:Internal contradiction`). |
+| `Origin` | `local` for an item discovered in the artifact being authored, or `<parent-kind>:SD-NNN` for one carried down from a parent artifact. |
+
+`Important` is **not** a valid `Impact` value. A review finding's severity is
+`Critical` / `Important` / `Minor`, which is a different scale, so map it into
+`Impact` rather than copying it: `Critical` stays `Critical` and `Important`
+becomes `High`. `Minor` never reaches the debt table, so it never maps.
+
+A review finding's `confidence` is the `High` / `Low` decision of whether the
+parent may apply the fix — the two endpoints of the same scale, so it copies
+into the `Confidence` column unchanged. `Medium` is produced only by
+clarification and refinement, which grade a recommended answer rather than an
+auto-apply decision.
+
+For each Low-confidence `implementation` finding routed to
+`## Open Implementation Questions`, append a row instead: the next
+available `IQ-NNN`, the finding's `description` compressed into a single
+question of 120 characters or fewer, the `S<N>` slice it lands in (`—`
+when it spans slices), a `Settled By` value of `building`, `testing`, or
+`reading code`, and `Origin` `local`.
+
+Drift findings (the assumption-output drift category) are surfaced
+prominently on the review note surface so the reader can confirm the
+underlying assumption rather than silently accepting an applied fix.
+Severity escalation never overrides the kind gate: a drift finding whose
+`kind` is `implementation` or `hygiene` still routes by its own row above
+and never becomes a debt item.
+
+The review agent never modifies files itself — every on-disk change from
+a finding is made here, by this command.
+
+The commit below captures both the original artifacts and the applied fixes
+in the same diff.
 
 ### Commit and create the PR
 
@@ -882,6 +1122,8 @@ artifacts. The files are on disk and the PR is the review surface.
 
 1. Stage and commit all written files on the current branch:
    - the three spec artifacts in the new spec folder
+   - the durable UI artifacts and paired stub test bodies, when this run used
+     the UI authoring path
    - the updated `.features.md` (if this run performed a feature-map
      write-back)
 2. Push the current branch to `origin` as-is — do not rename it or
@@ -934,19 +1176,22 @@ output the same way.
 - <assumption 2> [Critical Assumption]
 - ...
 
-(If clarify returned zero assumptions, write: `None — the feature description
-was unambiguous.`)
+(If there are no assumptions to report — clarify returned none, or this run
+had no clarify pass at all — write: `None — no assumptions were recorded.`)
 
 ## Specification Debt
 
 <count> items deferred — see `## Specification Debt` in the artifact.
 
-- <debt item 1 description> [Impact: <level>]
-- <debt item 2 description> [Impact: <level>]
+- <debt item 1 title> — <description> [Impact: <level>] [Origin: <local|kind:SD-NNN>]
+- <debt item 2 title> — <description> [Impact: <level>] [Origin: <local|kind:SD-NNN>]
 - ...
 
-(If clarify returned zero debt items, write: `None — no specification debt
-was recorded.`)
+(If the artifact's `## Specification Debt` section holds zero unresolved
+rows, write: `None — no specification debt was recorded.` The condition is
+the artifact's row count, not clarify's — a run where clarify found nothing
+but plan-review later appended a `steering` finding has one row, and must
+render it.)
 
 ## PR
 
@@ -969,16 +1214,41 @@ was recorded.`)
   etc. — and relabel the bullet accordingly.
 - **Assumptions**: copy each item from the clarify return's `assumptions`
   array. Preserve the `[Critical Assumption]` annotation on any item whose
-  severity was Critical.
-- **Specification Debt**: copy each item from the clarify return's
-  `debt_items` array, including its Impact level. The leading count MUST
-  match the number of bullets rendered. Each bullet's description must
+  severity was Critical. On a run with no clarify pass — a Phase 0
+  refinement, for instance — there is no assumptions array to copy:
+  `RefineResult` carries `refinements`, `debt_items`, and `summary` and
+  nothing else. Read the artifact's own `## Assumptions` section if it has
+  one, and otherwise write the empty-state line. Never synthesize
+  assumptions out of review findings.
+- **Specification Debt**: **the artifact is the source, not the clarify
+  return.** Read the target artifact's final `## Specification Debt` index
+  table — every row not under `### Resolved` — and render one bullet per
+  row, taking Title, Impact, and Origin from the row and the description
+  from that item's `### SD-NNN — <Title>` detail section. A row carried down
+  from a parent has no local detail section — its prose lives in the parent
+  artifact its `Origin` names (`spec:SD-004` → `SD-004`'s detail section in
+  the source spec), so read the description from there. That parent is the
+  reliable source on every kind of run, including a refinement pass where no
+  clarify return exists to fall back on. Reading the table rather than
+  clarify's array is what keeps the count honest: the plan-review pass
+  appends its `steering` findings to the artifact after clarify returns, so
+  a clarify-only render would under-report the artifact's real debt. The
+  leading count MUST match the number of bullets rendered, and therefore the
+  number of unresolved rows in the artifact. `Origin` is
+  `local` for items discovered while authoring this artifact, or
+  `<parent-kind>:SD-NNN` for items carried down from a parent artifact
+  (e.g. `spec:SD-004`) — it is the terminal-visible signal that an item
+  was inherited rather than newly found. Each bullet's description must
   read as a steering need — an open question or "unresolved choice
-  between X and Y" — and must come straight from `debt_items` without
+  between X and Y" — and must come straight from the artifact without
   rewording. Do not synthesize bullets here from requirements,
   acceptance tests, dependency/coordination notes, or deferred-work
   notices; if clarify's kind gate (see `smithy-clarify` Step 3) dropped
-  those, they stay dropped.
+  those, they stay dropped. The same holds for review findings the kind
+  gate classified as `implementation` or `hygiene`: their destination is
+  command-specific — the artifact's `## Open Implementation Questions`
+  section, the PR body, or this terminal output's own review notes — but
+  never a debt bullet here.
 - **PR**: the URL captured from the PR creation step (see the
   `pr-create-tool-choice` snippet for which tool ran).
 
@@ -1030,7 +1300,8 @@ attempting to render the full format above:
 ## Phase 0: Review Loop (Repeat to Refine)
 
 **If spec artifacts already exist for this feature** (detected by branch name
-matching a `specs/` folder, or by the user pointing to an existing spec):
+matching a `specs/` folder, or by the user pointing to an
+existing spec):
 
 ### 0a–0b. Audit & Refinement Questions
 
@@ -1051,7 +1322,7 @@ Use the **smithy-refine** sub-agent. Pass it:
   | **Ambiguity & Risk** | Are there vague terms, unstated assumptions, or scope boundaries that could be interpreted multiple ways? |
   | **Specification Debt** | Are there open debt items that can now be resolved based on new information or user answers? Are all debt items structured with required metadata columns? Are inherited items attributed to their source artifact? |
   | **Staleness** | Does the spec still reflect the current codebase reality? Have upstream changes invalidated any assumptions? |
-  | **Dependency Order** | For `kind: backend` (or absent-kind) specs: does the spec contain a `## Dependency Order` 4-column table (`ID \| Title \| Depends On \| Artifact`) listing every user story with a `US<N>` ID (no leading zeros)? For `kind: ui` specs: does it instead contain the typed UI Spec Ledger — a 6-column table (`ID \| Kind \| Title \| Depends On \| Design \| Artifact`) with `SC<N>`/`FL<N>`/`US<N>` rows whose `Kind` matches the ID prefix (`screen`/`flow`/`story`), `Design` (`none`/`import`/`brief`) set on screen rows and `—` elsewhere, and screen/flow titles naming their durable `.design.md`/`.flow.md` files? Do not flag a valid UI ledger as missing the backend shape, and do not rewrite it back to the 4-column US-only table. In both shapes: does each `Depends On` cell contain `—` or comma-separated same-table IDs (no prose)? Does each `Artifact` cell contain `—` or a repo-relative path to the corresponding `.tasks.md` file (always `—` in mark's own output)? Are any `- [ ]`/`- [x]` checkboxes present in the section (an error if so)? |
+  | **Dependency Order** | Does the spec carry the ordering table its authoring path calls for, in the exact shape Phase 3 scaffolds — the backend `## Dependency Order` for `kind: backend` and absent-kind specs, or the typed UI Spec Ledger for `kind: ui`? Check every row against that shape: IDs, `Depends On` cells, `Design` cells where the shape has them, and `Artifact` cells (always `—` in mark's own output). Do not flag a valid UI ledger as missing the backend shape, and never rewrite one into the other. Flag any checkbox markup as an error. |
 
 - **Target files**: the spec (`.spec.md`), data model (`.data-model.md`), and
   contracts (`.contracts.md`) in the spec folder.
@@ -1085,37 +1356,92 @@ the spec artifact set. Pass it:
   (`<slug>.spec.md`, `<slug>.data-model.md`, `<slug>.contracts.md`).
 - **artifact_type** — `spec`.
 
-The agent is read-only and returns a `ReviewResult` containing `findings` and a
-`summary`. Process the findings using the shared severity × confidence triage
-table:
+For the triage below, **the target artifact** is the refined spec artifact
+set — record every debt row in the `.spec.md` file, and apply fixes to
+whichever of the three files the finding's `artifact_path` names. **The
+review note surface** is the refinement PR body; a Low-confidence
+`implementation` finding goes there under an **Implementation questions**
+heading, since a spec carries no `## Open Implementation Questions` section
+and `smithy.cut` re-derives the unknown from its own plan-review pass when
+the tasks file is authored.
 
-| Severity  | Confidence | Action                                                                                              |
-|-----------|------------|-----------------------------------------------------------------------------------------------------|
-| Critical  | High       | Apply the `proposed_fix` to the relevant spec artifact on disk. Note the fix in the PR body.        |
-| Critical  | Low        | Do not apply. Append to the spec's `## Specification Debt` section. Flag in PR for the reviewer.    |
-| Important | High       | Apply the `proposed_fix` to the relevant spec artifact on disk.                                     |
-| Important | Low        | Do not apply. Append to the spec's `## Specification Debt` section.                                 |
-| Minor     | Any        | Do not apply. Note in the PR body only.                                                             |
+The agent is read-only and returns a `ReviewResult` containing `findings`
+and a `summary`. Process each finding with the kind × severity ×
+confidence table below, reading its `kind` first. Only a `steering`
+finding — where a human must pick between named alternatives and the pick
+changes what gets built — can reach the debt table.
 
-For each Low-confidence finding routed to debt, append a new row to the
-`.spec.md` file's `## Specification Debt` table with the next available
-`SD-NNN` identifier (continue numbering from whatever the spec already
-contains — do not reset). Use the finding's `description` for the
-Description column, set `Source Category` to `plan-review:<finding
-category>`, copy severity into Impact and confidence into Confidence, set
-Status to `open`, and leave Resolution as `—`.
+**The target artifact** is the planning file findings are recorded against
+and **the review note surface** is where a finding this command did not
+apply gets reported; both are named just above, and they differ per command.
 
-For each High-confidence finding, edit the referenced spec artifact file in
-place using the `proposed_fix`. The Phase 0c commit below captures both the
-refine diff and the plan-review fixes in the same diff.
+| Kind | Severity | Confidence | Action |
+|------|----------|------------|--------|
+| `implementation` or `hygiene` | Critical or Important | High | Apply the `proposed_fix` on disk, following whatever apply protocol this command defines. Note Critical fixes on the review note surface. |
+| `steering` | Critical or Important | Any | Do not apply — a steering finding is never auto-applied. Append it to the target artifact's `## Specification Debt` section, and flag Critical ones on the review note surface for the reviewer. |
+| `implementation` | Critical or Important | Low | Do not apply and do not record as debt. When the target artifact is a `.tasks.md`, append an `IQ-NNN` row to its `## Open Implementation Questions` section; otherwise note it on the review note surface, since only a tasks file carries that section and the unknown is settled while building either way. |
+| `hygiene` | Critical or Important | Low | Do not apply and do not record as debt. Note it on the review note surface so the reader can settle the correction. |
+| Any | Minor | Any | Do not apply. Note it on the review note surface. |
 
-If the agent returns drift findings (assumption-output drift category),
-surface them prominently in the refinement PR body so the reviewer can
-confirm the underlying assumption rather than silently accepting the applied
-fix.
+**A `steering` finding is never auto-applied, at any confidence.** The
+kind means a human has to pick; applying a fix would make that pick for
+them and bury a product decision inside a planning commit. Confidence
+does not license it — a High-confidence `steering` finding is a
+contradiction and means the classification is wrong. Re-examine it: if
+the `proposed_fix` can be applied verbatim without anyone choosing, the
+finding is `hygiene`; if a human must choose, confidence is Low by
+construction. This is the one cell where confidence loses to kind.
 
-The review agent never modifies files itself — all on-disk changes are made
-here, by mark.
+For each `steering` finding routed to debt — confidence does not matter,
+since steering is never auto-applied — append a row to the target
+artifact's `## Specification Debt` index table with the next available
+`SD-NNN` identifier, continuing from whatever the artifact already
+carries (including any debt inherited from a parent) rather than
+resetting. Use the finding's `description` as the body of a new
+`### SD-NNN — <Title>` detail section, never as a table cell.
+
+**Debt row fields.** One shape for every producer of a
+`## Specification Debt` row — clarification candidates, refinement findings,
+and plan-review findings alike:
+
+| Field | Rule |
+|-------|------|
+| `Impact` | One of `Critical` / `High` / `Medium` / `Low`. |
+| `Confidence` | One of `High` / `Medium` / `Low`. |
+| `Title` | A slug of 40 characters or fewer naming the unresolved choice. Not a sentence — the statement goes in the item's detail section. |
+| `Source Category` | The scan or audit category that produced the item. Findings from a review agent use `plan-review:<finding category>` (e.g. `plan-review:Internal contradiction`). |
+| `Origin` | `local` for an item discovered in the artifact being authored, or `<parent-kind>:SD-NNN` for one carried down from a parent artifact. |
+
+`Important` is **not** a valid `Impact` value. A review finding's severity is
+`Critical` / `Important` / `Minor`, which is a different scale, so map it into
+`Impact` rather than copying it: `Critical` stays `Critical` and `Important`
+becomes `High`. `Minor` never reaches the debt table, so it never maps.
+
+A review finding's `confidence` is the `High` / `Low` decision of whether the
+parent may apply the fix — the two endpoints of the same scale, so it copies
+into the `Confidence` column unchanged. `Medium` is produced only by
+clarification and refinement, which grade a recommended answer rather than an
+auto-apply decision.
+
+For each Low-confidence `implementation` finding routed to
+`## Open Implementation Questions`, append a row instead: the next
+available `IQ-NNN`, the finding's `description` compressed into a single
+question of 120 characters or fewer, the `S<N>` slice it lands in (`—`
+when it spans slices), a `Settled By` value of `building`, `testing`, or
+`reading code`, and `Origin` `local`.
+
+Drift findings (the assumption-output drift category) are surfaced
+prominently on the review note surface so the reader can confirm the
+underlying assumption rather than silently accepting an applied fix.
+Severity escalation never overrides the kind gate: a drift finding whose
+`kind` is `implementation` or `hygiene` still routes by its own row above
+and never becomes a debt item.
+
+The review agent never modifies files itself — every on-disk change from
+a finding is made here, by this command.
+
+The Phase 0c commit below captures both the refine diff and the plan-review
+fixes in the same diff.
 
 **No-op check** (runs after refine and plan-review): if refine returned an
 empty `refinements` list, plan-review returned no High-confidence fixes and
@@ -1152,129 +1478,30 @@ went wrong.
 
 Render the shared one-shot output snippet as the terminal output, populating
 Summary (note that "Artifacts produced" describes the refinement diff, not a
-first-pass run), Assumptions (from refine's returned findings), Specification
-Debt (from refine's `debt_items`), and PR (the captured URL).
+first-pass run), Assumptions, Specification Debt, and PR (the captured URL).
 
-## One-Shot Output
+A refinement pass runs no clarify, and `RefineResult` carries `refinements`,
+`debt_items`, and `summary` — **no assumptions array**. So the Assumptions
+section is not sourced from refine: render the spec's own `## Assumptions`
+section as it stands after the refinements were applied, preserving each
+`[Critical Assumption]` annotation. If the spec has no assumptions, write the
+snippet's empty-state line. Never invent assumptions from refine's findings.
+Specification Debt is sourced from the refined spec's debt table, per the
+snippet's placeholder guidance.
 
-Render this block verbatim as the terminal output of a one-shot planning
-command run. Replace each placeholder with the value captured during the run
-— do **not** reword the section headers, and do **not** drop sections. The
-format is the contract that lets developers scan every planning command's
-output the same way.
+Use the `## One-Shot Output` format defined under Phase 6 above — the same
+sections, the same placeholder guidance, and the same error fallbacks.
 
-```markdown
-## Summary
-
-- **Spec folder**: `<path>`
-- **Branch**: `<branch>`
-- **Artifacts produced**: <count> files (<list>)
-- **User stories**: <count> (P1: <n>, P2: <n>, P3: <n>)
-- **Functional requirements**: <count>
-
-## Assumptions
-
-- <assumption 1>
-- <assumption 2> [Critical Assumption]
-- ...
-
-(If clarify returned zero assumptions, write: `None — the feature description
-was unambiguous.`)
-
-## Specification Debt
-
-<count> items deferred — see `## Specification Debt` in the artifact.
-
-- <debt item 1 description> [Impact: <level>]
-- <debt item 2 description> [Impact: <level>]
-- ...
-
-(If clarify returned zero debt items, write: `None — no specification debt
-was recorded.`)
-
-## PR
-
-<PR link>
-```
-
-### Placeholder Guidance
-
-- **Spec folder**: absolute-or-repo-relative path to the folder containing the
-  artifacts produced by the run (e.g. `specs/2026-04-08-003-reduce-interaction-friction/`).
-  For RFC-only runs (ignite without a downstream spec folder), use the RFC
-  file's parent directory.
-- **Branch**: the feature branch the command pushed the PR from.
-- **Artifacts produced**: file count and comma-separated list of basenames
-  (e.g. `3 files (reduce-interaction-friction.spec.md, …data-model.md,
-  …contracts.md)`).
-- **User stories / Functional requirements**: counts lifted from the spec.
-  For commands that don't produce a spec directly (ignite → RFC, render →
-  feature map), substitute the next-level-down counts — milestones, features,
-  etc. — and relabel the bullet accordingly.
-- **Assumptions**: copy each item from the clarify return's `assumptions`
-  array. Preserve the `[Critical Assumption]` annotation on any item whose
-  severity was Critical.
-- **Specification Debt**: copy each item from the clarify return's
-  `debt_items` array, including its Impact level. The leading count MUST
-  match the number of bullets rendered. Each bullet's description must
-  read as a steering need — an open question or "unresolved choice
-  between X and Y" — and must come straight from `debt_items` without
-  rewording. Do not synthesize bullets here from requirements,
-  acceptance tests, dependency/coordination notes, or deferred-work
-  notices; if clarify's kind gate (see `smithy-clarify` Step 3) dropped
-  those, they stay dropped.
-- **PR**: the URL captured from the PR creation step (see the
-  `pr-create-tool-choice` snippet for which tool ran).
-
-### Error Fallbacks
-
-Two edge cases change the output shape. Follow these rules rather than
-attempting to render the full format above:
-
-- **PR creation failure**: if PR creation fails (network error, auth
-  failure, missing upstream, etc.), still render the `## Summary`,
-  `## Assumptions`, and `## Specification Debt` sections from the captured
-  run data, then replace the `## PR` section with:
-
-  ```markdown
-  ## PR
-
-  PR creation failed — artifacts are on disk at `<spec folder>`. Re-run
-  the PR creation step manually (see `pr-create-tool-choice` for the
-  tool to use), or retry the command. Error: <error message>.
-  ```
-
-  Never silently drop the PR section; the developer needs to see that PR
-  creation was attempted and failed.
-
-- **Bail-out**: if the run short-circuited because clarify returned
-  `bail_out: true`, no artifacts were written and there is no PR. Skip the
-  full format above and render only:
-
-  ```markdown
-  ## Bail-Out
-
-  The feature description has too much specification debt to produce a
-  meaningful artifact. No files were written and no PR was created.
-
-  ### Why
-
-  <clarify's bail_out_summary>
-
-  ### What's needed
-
-  <clarify's debt summary — the specific information required to proceed>
-  ```
-
-  Do not emit `## Summary`, `## Assumptions`, `## Specification Debt`, or
-  `## PR` in the bail-out case. The bail-out summary replaces the whole
-  block.
 **Resolving specification debt**: When the refine sub-agent identifies debt
 items that can now be resolved based on new information or user answers,
-update those items in the spec's `## Specification Debt` table: change status
-from `open` or `inherited` to `resolved` and populate the Resolution column
-with a note describing how and when the item was addressed (e.g., `Resolved
-2026-04-10 — user confirmed webhooks are HTTP-only`).
+**move** each one out of the spec's `## Specification Debt` index table and
+into its `### Resolved` subsection as a `#### SD-NNN — <Title>` block
+carrying `**Question:**` and `**Answer:**`. The answer records how and when
+the item was addressed (e.g., `Resolved 2026-04-10 — user confirmed webhooks
+are HTTP-only`). The ID is never reused. For an item carried down from a
+parent artifact — one whose `Origin` was not `local` — quote the parent's
+question into the `**Question:**` line. Do not write the resolution back to
+the parent.
 
 **Priority re-ordering**: If any user story priorities changed during refinement,
 renumber and reorder the user stories so all P1 stories come first, then P2,
@@ -1316,6 +1543,9 @@ through Phase 0).
    - `specs/<date>-<NNN>-<slug>/<slug>.spec.md`
    - `specs/<date>-<NNN>-<slug>/<slug>.data-model.md`
    - `specs/<date>-<NNN>-<slug>/<slug>.contracts.md`
+   - for `kind: ui`, `design/screens/<ScreenId>.design.md`,
+     `design/flows/<FlowId>.flow.md`, and each paired stub test body named by
+     the flow artifact's `test-body`
 3. Summary report containing:
    - Spec folder path and branch name.
    - User story list with priorities.

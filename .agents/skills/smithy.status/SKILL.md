@@ -1,6 +1,6 @@
 ---
 name: smithy.status
-description: "Smithy planning artifact status — use when answering questions about the current state, progress, dependencies, or next actions of RFCs, feature maps, specs, user stories, task slices, or any other Smithy planning artifact in this repo. Triggers on natural-language questions like 'what's next?', 'what's left for this spec?', 'how many slices?', 'which user stories are blocked?', 'show me what's done', 'is X complete?', 'what remaining work items are there?', as well as explicit invocations of `/smithy.status` with CLI flags. Wraps the deterministic `smithy status` CLI: forwards flag-style arguments verbatim, or answers natural-language questions by parsing `smithy status --format json`."
+description: "Smithy planning artifact and engraved-knowledge status. Use when asked about the state, progress, dependencies, or next actions of RFCs, feature maps, specs, user stories, or task slices, or which durable decisions, invariants, or principles apply here. Triggers on 'what's next?', 'what's left for this spec?', 'how many slices?', 'which user stories are blocked?', 'show me what's done', 'is X complete?', 'which global rules am I subject to?', 'what invariants apply to this repo?', and explicit `/smithy.status` invocations with CLI flags."
 allowed-tools: Bash(smithy status*)
 ---
 # smithy.status
@@ -98,8 +98,25 @@ The CLI's text renderer is authoritative.
 
 ## Question mode
 
-1. Run exactly one shell command. For most questions, prefer the
-   pending shorthand — it drops every `done` record from the payload
+0. Decide which inventory the question is about. Questions about durable
+   commitments — "which global rules am I subject to?", "what invariants
+   apply here?", "is any invariant drifting?", "which decisions govern this
+   workstream?" — are answered from the engraved inventory, not the planning
+   one. Run:
+
+   ```bash
+   smithy status --engraved --format json
+   ```
+
+   Add `--project <slug>` when the user named a workstream. The engraved
+   payload has its own wire shape — read
+   [`references/engraved-inventory.md`](references/engraved-inventory.md)
+   before interpreting it, and read it only on this branch. This still
+   counts as the one shell call for the request — pick the inventory the
+   question is about, do not run both.
+
+1. For every other question, run exactly one shell command. For most, prefer
+   the pending shorthand — it drops every `done` record from the payload
    so you only pay for artifacts that still have work to dispatch:
 
    ```bash
