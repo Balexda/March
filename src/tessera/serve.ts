@@ -2,11 +2,17 @@ import type { FastifyBaseLogger } from "fastify";
 import { createTesseraLogger } from "../observability/logger.js";
 import { initOtel } from "../observability/otel.js";
 import {
+  TESSERA_GITHUB_APP_ID_ENV,
+  TESSERA_GITHUB_APP_KEY_FILE_ENV,
+  TESSERA_GITHUB_INSTALLATION_ID_ENV,
   TESSERA_SERVICE_NAME,
   resolveGitHubAppConfig,
   resolveTesseraPort,
 } from "./config.js";
+import { GitHubClient } from "./providers/github-app/github-client.js";
+import { createGitHubAppProvider } from "./providers/github-app/provider.js";
 import { buildTesseraServer, createProviderRegistry } from "./server.js";
+import type { CredentialProvider } from "./types.js";
 
 /** The subset of an event emitter the entrypoint needs to await a stop signal. */
 export interface ShutdownSignalSource {
@@ -23,6 +29,12 @@ export interface RunTesseraServerOptions {
   readonly logger?: FastifyBaseLogger;
   /** Where termination signals arrive; defaults to `process`. */
   readonly signals?: ShutdownSignalSource;
+  /**
+   * GitHub client for the github-app provider (tests point it at a fake
+   * GitHub API); defaults to a bounded client against the public API. Not
+   * exposed as a setting.
+   */
+  readonly githubClient?: GitHubClient;
 }
 
 /**
@@ -41,21 +53,38 @@ export async function runTesseraServer(options: RunTesseraServerOptions = {}): P
   }
   const otel = initOtel(env);
 
-  // No provider implementation exists yet (the github-app provider lands in a
-  // later slice), so every identity answers provider_unconfigured.
+  const providers: CredentialProvider[] = appConfig.configured
+    ? [createGitHubAppProvider({ config: appConfig, client: options.githubClient ?? new GitHubClient() })]
+    : [];
   const app = buildTesseraServer({
-    registry: createProviderRegistry([]),
+    registry: createProviderRegistry(providers),
     logger: options.logger ?? createTesseraLogger({ env }),
     startedAt: Date.now(),
   });
 
   // Log setting names only - never the app id, key path, or key contents.
   if (appConfig.configured) {
-    app.log.info("GitHub App settings present; the app provider is not available in this build");
+    const settings = [TESSERA_GITHUB_APP_ID_ENV, TESSERA_GITHUB_APP_KEY_FILE_ENV];
+    if (appConfig.installationId !== undefined) settings.push(TESSERA_GITHUB_INSTALLATION_ID_ENV);
+    app.log.info(
+      `GitHub App provider configured (${settings.join(", ")}); ` +
+        "app token requests mint downscoped installation tokens",
+    );
   } else {
     app.log.warn(
       `GitHub App provider not configured (missing: ${appConfig.missing.join(", ")}); ` +
         "app token requests will fail with provider_unconfigured",
+    );
+  }
+
+  // start() never throws: a GitHub outage at startup leaves the provider
+  // degraded (it retries on a later request) and the service still serves.
+  for (const provider of providers) {
+    await provider.start();
+    const status = provider.status();
+    const detail = status.last_error === null ? "" : ` (last_error: ${status.last_error})`;
+    app.log[status.state === "ok" ? "info" : "warn"](
+      `${provider.id} provider state: ${status.state}${detail}`,
     );
   }
 

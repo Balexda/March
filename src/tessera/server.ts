@@ -143,6 +143,62 @@ function soonestExpiry(statuses: readonly ProviderStatus[]): string | null {
 }
 
 /**
+ * A Fastify framework rejection of the request itself (bad JSON, empty body,
+ * unsupported media type, oversized body): an `FST_*` code with a 4xx status.
+ * Any other error, even one carrying a 4xx `statusCode`, is not the caller's
+ * fault and is reported as `internal`.
+ */
+function isFastifyClientError(err: { statusCode?: number; code?: unknown }): boolean {
+  return (
+    typeof err.code === "string" &&
+    err.code.startsWith("FST_") &&
+    typeof err.statusCode === "number" &&
+    err.statusCode >= 400 &&
+    err.statusCode < 500
+  );
+}
+
+function errorClass(error: unknown): string {
+  return error instanceof Error ? error.name : "Error";
+}
+
+interface ProviderReport {
+  readonly status: ProviderStatus;
+  readonly entries: number;
+  /** Error class when `status()` or `cacheEntries()` threw, else `null`. */
+  readonly failedClass: string | null;
+}
+
+/**
+ * One provider's `/status` contribution. A provider whose `status()` or
+ * `cacheEntries()` throws is reported `degraded` with 0 entries and the error
+ * class as `last_error`, so one faulty provider cannot fail `/status`.
+ */
+function providerReport(provider: CredentialProvider): ProviderReport {
+  let status: ProviderStatus | null = null;
+  try {
+    status = provider.status();
+    const entries = provider.cacheEntries?.() ?? 0;
+    return { status, entries, failedClass: null };
+  } catch (error) {
+    const failedClass = errorClass(error);
+    return {
+      status: {
+        provider: provider.id,
+        login: null,
+        credential_expires_at: null,
+        expiry_warning: false,
+        ...status,
+        state: "degraded",
+        last_error: failedClass,
+      },
+      entries: 0,
+      failedClass,
+    };
+  }
+}
+
+/**
  * Build the Tessera HTTP server. The route holds no GitHub-specific logic and
  * applies no caller authentication (US2); it validates, dispatches on
  * `identity`, and maps typed errors to the contract envelope. Request and
@@ -169,7 +225,7 @@ export function buildTesseraServer(options: BuildTesseraServerOptions): FastifyI
     );
   });
 
-  app.setErrorHandler((err: Error & { statusCode?: number }, request, reply) => {
+  app.setErrorHandler((err: Error & { statusCode?: number; code?: unknown }, request, reply) => {
     if (err instanceof TesseraError) {
       if (err instanceof ProviderUnavailableError) {
         void reply.header("retry-after", String(err.retryAfterSeconds));
@@ -177,7 +233,7 @@ export function buildTesseraServer(options: BuildTesseraServerOptions): FastifyI
       void reply.code(err.status).send(errorBody(err.code, err.message));
       return;
     }
-    if (typeof err.statusCode === "number" && err.statusCode >= 400 && err.statusCode < 500) {
+    if (isFastifyClientError(err)) {
       // Fastify body/content-type failures; the generic message never echoes the body.
       void reply.code(400).send(errorBody("invalid_request", "Malformed request body."));
       return;
@@ -194,13 +250,19 @@ export function buildTesseraServer(options: BuildTesseraServerOptions): FastifyI
 
   app.get("/healthz", async () => ({ status: "ok" }));
 
-  app.get("/status", async (): Promise<TesseraStatus> => {
-    const providers = registry.list();
-    const statuses = providers.map((provider) => provider.status());
-    const entries = providers.reduce(
-      (sum, provider) => sum + (provider.cacheEntries?.() ?? 0),
-      0,
-    );
+  app.get("/status", async (request): Promise<TesseraStatus> => {
+    const reports = registry.list().map((provider) => {
+      const report = providerReport(provider);
+      if (report.failedClass !== null) {
+        request.log.error(
+          { "tessera.provider": provider.id, "tessera.error_class": report.failedClass },
+          "tessera provider status failed",
+        );
+      }
+      return report;
+    });
+    const statuses = reports.map((report) => report.status);
+    const entries = reports.reduce((sum, report) => sum + report.entries, 0);
     return {
       service: TESSERA_SERVICE_NAME,
       uptime_s: Math.floor((Date.now() - startedAt) / 1000),

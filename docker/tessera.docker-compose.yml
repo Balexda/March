@@ -8,9 +8,15 @@
 #   curl -fsS http://localhost:${MARCH_TESSERA_PORT:-9477}/healthz
 #
 # Consumers on the host reach Tessera at
-# http://localhost:${MARCH_TESSERA_PORT:-9477}. Without a GitHub App configured
-# the service still starts, reports health and status, and fails `app` token
-# requests with `provider_unconfigured`.
+# http://localhost:${MARCH_TESSERA_PORT:-9477}.
+#
+# With TESSERA_GITHUB_APP_ID and TESSERA_GITHUB_APP_KEY_FILE set (and the key
+# file present in the container), the github-app provider is registered and
+# `app` token requests mint installation tokens scoped to the one requested
+# repository and the access level's fixed permissions. If GitHub is down at
+# startup the service still starts, with the provider `degraded` in /status.
+# Without them, the service still starts, reports health and status, and fails
+# `app` token requests with `provider_unconfigured`.
 #
 # HOST-SPECIFIC CONFIG (override via env or a .env file next to this compose):
 #   MARCH_TESSERA_PORT    API port (default: deterministic 9477).
@@ -20,8 +26,9 @@
 #                         no-op. JSONL logs stay available either way in the
 #                         march-tessera-logs volume.
 #
-# OPTIONAL GITHUB APP SETTINGS (all default to empty; the service starts
-# unconfigured when they are unset):
+# GITHUB APP SETTINGS (all optional and default to empty; setting the app id
+# AND the key file enables minting, leaving either unset keeps the provider
+# unconfigured):
 #   TESSERA_GITHUB_APP_ID           the GitHub App's numeric id.
 #   TESSERA_GITHUB_APP_KEY_FILE     path INSIDE the container to the App's
 #                                   private key (PEM). Until the secret store
@@ -32,6 +39,8 @@
 #                                   so a key under it is readable by all of
 #                                   them.
 #   TESSERA_GITHUB_INSTALLATION_ID  the App installation to mint tokens from.
+#                                   When unset, the installation is looked up
+#                                   per repository owner.
 #
 # ---------------------------------------------------------------------------
 # NOT YET IN THIS CHANGE:

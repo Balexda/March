@@ -130,7 +130,7 @@
   - A failed identity lookup leaves the provider `degraded`, refuses mints with `provider_unavailable`, and is retried on a later request
   - A rejected credential sets provider state `invalid`
 
-- [ ] **Register the provider and extend the contract**
+- [x] **Register the provider and extend the contract**
 
   Register the github-app provider in `src/tessera/serve.ts` when it is configured, extend the HTTP contract test in `src/tessera/server.test.ts` to drive the route against the fake GitHub API, and update `docs/subsystems/tessera/contract.md` for the success response and the provider error modes.
 
