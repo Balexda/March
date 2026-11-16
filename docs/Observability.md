@@ -287,6 +287,47 @@ one; explicit attach (the same approach as `emitLoopLog`) is what works. The
 pino→OTel bridge then promotes those ids to the log record's trace context, which
 is what makes Grafana's "Logs for this span" resolve for a `castra.*` span.
 
+#### Tessera (service side)
+
+`march tessera serve` (`service.name=march-tessera`) records every
+`POST /v1/github/token` request three ways, whatever its result (issued,
+unauthenticated, invalid, policy-denied or provider-failed). No other route
+records any of them.
+
+- **Span `tessera.issue`** (`src/observability/tessera-trace.ts`): one per
+  token request, with the request's own start and end times. Attributes:
+  `tessera.caller`, `tessera.identity`, `tessera.provider`, `tessera.access`,
+  `tessera.cache` (`hit`/`miss`/`n/a`), `tessera.outcome`
+  (`issued`/`denied`/`failed`) and, unless issued, `tessera.reason` (the error
+  code); an unresolved field reads `none`. Errored unless issued. When the
+  caller sends a valid `x-march-slice-id` (the Node client's `sliceId`), the
+  span is a **child** in that slice's trace, parented on the deterministic id
+  `legate.dispatch` claims as root and never claiming the root itself, so a
+  token request shows up inside the slice that asked for it. Without a valid
+  slice id it starts its own trace.
+- **Log event `tessera.audit`**: one `info` line per token request in
+  `tessera.jsonl` (and Loki), with the Issuance Audit Record under `audit`
+  (`caller`, `identity`, `provider`, `repo`, `access`, `outcome`, `reason`,
+  `cache`, `expires_at`, `subject`; an unauthenticated caller is `unknown`).
+  The span's `trace_id`/`span_id` ride beside the record, attached explicitly
+  (no ContextManager), so "Logs for this span" resolves.
+- **Counters** (`src/observability/tessera-metrics.ts`), exactly one per
+  request:
+
+| OTel instrument | Prometheus series | Meaning |
+|---|---|---|
+| `march.tessera.issuances` (counter) | `march_tessera_issuances_total` | Tokens issued, by `{identity, provider, access, cache}` (`cache` is `hit`/`miss`) |
+| `march.tessera.denials` (counter) | `march_tessera_denials_total` | Requests denied (`4xx`) or failed (`5xx`), by `{identity, reason}`; `reason` is the error code, and an unresolved identity is `none` |
+
+Every label value comes from a closed set; anything else becomes `none`. No
+label or span attribute carries a repository, token or client key, and no
+metric label carries a client name. No token, client key, key hash or
+`Authorization` header is ever logged or recorded: the audit record is an
+allow-list and the Tessera loggers redact credential-bearing fields as a
+second layer. Details in
+[`docs/subsystems/tessera/contract.md`](subsystems/tessera/contract.md)
+("Audit and telemetry").
+
 #### Tessera client (consumer side)
 
 The Tessera Node client (`src/tessera/client.ts`) runs inside whichever service

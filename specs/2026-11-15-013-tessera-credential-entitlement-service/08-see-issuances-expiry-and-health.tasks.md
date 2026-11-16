@@ -63,7 +63,7 @@
   - An error whose message contains a sentinel does not surface it
   - Other services' loggers are unaffected
 
-- [ ] **Document the audit event, span and counters**
+- [x] **Document the audit event, span and counters**
 
   Update `docs/subsystems/tessera/contract.md`, `docs/Observability.md` and the Tessera line in `AGENTS.md`.
 

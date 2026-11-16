@@ -577,6 +577,107 @@ runs.
 Not built yet: `march tessera git-credential` (the git credential helper) and
 `march tessera status` come in later changes.
 
+### Audit and telemetry
+
+Every `POST /v1/github/token` request leaves the same three records, whatever
+its result: one `tessera.audit` log event, one `tessera.issue` span and one
+counter increment. That covers issued tokens and requests rejected for a
+missing key, a bad body, the policy or a provider failure. No other route
+produces any of them. All three are written from Fastify's response hook
+(`src/tessera/server.ts`), which runs for rejected requests too, and all three
+are built from the same audit record (`buildAuditRecord` in
+`src/tessera/audit.ts`), so they always agree.
+
+#### The `tessera.audit` log event
+
+One `info` line per token request, with the message `tessera.audit` and the
+record under the `audit` key, written to the Tessera service log
+(`tessera.jsonl`, stdout and, when telemetry is on, the OTel logs pipeline).
+The record holds exactly these fields. The builder copies them one by one from
+a per-request context, so a value added to that context never reaches the log
+unless the builder names it.
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `caller` | string | The authenticated client's name. `"unknown"` when the request never authenticated (a missing, malformed or unknown key). |
+| `identity` | `"app"`, `"user"` or `null` | The identity requested. `null` when the request was rejected before its body was validated. |
+| `provider` | `"github-app"`, `"github-user"` or `null` | The provider the request was handed to. `null` when no provider was reached: rejected before dispatch, denied by the policy, or no provider registered for the identity. |
+| `repo` | string or `null` | The repository the caller asked for, as validated. `null` when absent (a `user` request) or not yet validated. It is the request's repository, not proof that a token was minted for it. |
+| `access` | `"read"`, `"write"` or `null` | The access level requested; `null` when not yet validated. |
+| `outcome` | `"issued"`, `"denied"` or `"failed"` | See the outcome rule below. |
+| `reason` | error code or `null` | The error code the request was answered with (see `## Error Modes`); `null` only when issued. |
+| `cache` | `"hit"`, `"miss"` or `"n/a"` | Whether the issued token came from the cache. `"n/a"` unless a token was issued. |
+| `expires_at` | RFC 3339 string or `null` | Expiry of the issued token; `null` unless a token was issued (or when the provider reports none). |
+| `subject` | string or `null` | The request's `subject`, echoed when sent, cut to at most 256 characters; `null` when not sent or not yet validated. |
+
+Outcome rule: a `2xx` response that issued a token is `issued`; every `4xx` is
+`denied`, including `unauthorized` (401), `invalid_request` (400) and
+`repo_not_installed` (422) as well as `policy_denied` (403); every `5xx` is
+`failed`. `reason` is the error code in both cases. This is a working
+assumption: the specification only fixes `policy_denied` as `denied`, and
+whether malformed or uninstallable requests should count as `failed` instead is
+an open question (SD-021 in the User Story 8 tasks).
+
+Fields not resolved before the request was rejected are `null`. A `401` record
+therefore has `caller: "unknown"` and every other field `null` (with `cache:
+"n/a"`), and a `400` for a malformed body has the caller's name and nothing else.
+
+When telemetry is on, the line also carries `trace_id` and `span_id`, the ids of
+that request's `tessera.issue` span, beside the `audit` record rather than in
+it, so Grafana can link the log line and the span. They are absent when
+telemetry is off.
+
+#### The `tessera.issue` span
+
+One span per token request, with the request's own start and end times.
+
+| Attribute | Value |
+|-----------|-------|
+| `tessera.caller` | As `caller` in the audit record (`"unknown"` when unauthenticated). |
+| `tessera.identity` | `app`, `user`, or `none` when unresolved. |
+| `tessera.provider` | `github-app`, `github-user`, or `none` when no provider was reached. |
+| `tessera.access` | `read`, `write`, or `none` when unresolved. |
+| `tessera.cache` | `hit`, `miss` or `n/a`. |
+| `tessera.outcome` | `issued`, `denied` or `failed`. |
+| `tessera.reason` | The error code; present only when not issued. |
+
+The span's status is error unless the outcome is `issued`. When the request
+carries a valid `x-march-slice-id` header, the span is a child in that slice's
+trace: it is parented on the slice's deterministic root span id and takes a
+fresh span id of its own, so it never becomes the trace's root. Without the
+header, or with a value that is not a valid slice id, the span starts a trace
+of its own. When telemetry is off nothing is emitted and nothing fails.
+
+#### Counters
+
+Exactly one of these is incremented per token request.
+
+| Counter | When | Labels |
+|---------|------|--------|
+| `march.tessera.issuances` | The outcome is `issued`. | `identity` (`app`, `user`), `provider` (`github-app`, `github-user`), `access` (`read`, `write`), `cache` (`hit`, `miss`) |
+| `march.tessera.denials` | The outcome is `denied` or `failed`. | `identity` (`app`, `user`), `reason` (an error code from `## Error Modes`) |
+
+Every label value comes from the closed set listed. An unresolved identity (a
+`401` or `400`), and any value outside its set, is recorded as the one
+placeholder `none`, so no caller-supplied string can become a label. No label
+carries a repository, a client name, a client key or a token. The consumer-side
+`march.tessera.client.fallbacks` counter (see "Node client") is separate.
+
+#### Logger redaction
+
+The Tessera service logger and the Node client's logger replace the value of
+any field named `token`, `authorization`, `clientKey`, `key_sha256` or
+`password`, at the top level or one level down, plus `headers.authorization`
+and `req.headers.authorization`, with `[redacted]`. This is a second layer: no
+Tessera log call names such a field in the first place. Other services'
+loggers are not redacted this way.
+
+No token, client key, key hash or `Authorization` header is ever written to a
+log line, a span or a metric. A test drives issued, cached, refreshed, denied
+and failed requests, including an error whose message contains a token and a
+key, at the most verbose log level, and checks every log line, span attribute,
+metric label, `/status` body and error body for them.
+
 ### Configuration
 
 | Setting | Side | Meaning |
@@ -680,8 +781,17 @@ or `GITHUB_TOKEN`.
 - No token or key material appears in logs or in `/status`. `/status` carries
   counts, states, logins, expiry times and error classes only.
 - Request and response bodies are never logged. Each request logs one line with
-  the method, matched route, status class and duration. Unexpected errors log
+  the method, matched route, status class and duration; a token request also
+  logs its `tessera.audit` line (see "Audit and telemetry"). Unexpected errors log
   the error class only, not the message.
+- Every token request yields exactly one `tessera.audit` event, one
+  `tessera.issue` span and one increment of either `march.tessera.issuances`
+  or `march.tessera.denials`; no other route yields any of them.
+- No token, client key, key hash or `Authorization` header is ever written to
+  a log, a span or a metric. The audit record is an allow-list, and the
+  Tessera loggers redact credential-bearing fields as a second layer.
+- No metric label or span attribute carries a repository, a token or a client
+  key, and metric labels never carry a client name.
 - Validation error messages name fields and never echo submitted values.
 - `/healthz` reports process health only and returns `200` whether or not any
   provider is configured.
