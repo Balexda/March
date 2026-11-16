@@ -19,6 +19,8 @@ outage an unexpired cached token is served instead of an error.
 Service code reaches Tessera through the Node client's `getGitHubToken` (see
 "Node client"). It fails closed: the environment token is used only behind an
 explicit migration flag, and only for `app`. No existing service calls it yet.
+From a shell, `march tessera token` prints an `app` token and never falls back
+to host credentials (see "CLI: `march tessera token`").
 
 Every request under `/v1` must carry the bearer key of a registered client
 (`Authorization: Bearer <client key>`). Tessera stores only the SHA-256 hash of
@@ -490,8 +492,9 @@ a fallback result is also a working assumption (SD-019), because the token's
 login is not known without asking GitHub.
 
 Not in this client yet: `status()` and `reachable()` on `TesseraClient`, the
-`march tessera status` command, and the git credential helper come in later
-changes. No existing service uses `getGitHubToken` yet; moving each one off
+`march tessera status` command, and the git credential helper
+(`march tessera git-credential`) come in later changes. The shell seam
+`march tessera token` is described below. No existing service uses `getGitHubToken` yet; moving each one off
 `GH_TOKEN` is a later change too.
 
 ### CLI: `march tessera serve`
@@ -506,6 +509,57 @@ telemetry and exits `0`. An invalid port, or a missing or invalid client-keys or
 policy file, prints the reason to stderr and exits with the usage status (`2`)
 before anything listens. Bare `march tessera`
 prints the group help and exits with the usage status.
+
+### CLI: `march tessera token`
+
+```
+march tessera token --repo <owner/name> --access <read|write> [--identity app]
+```
+
+Prints a GitHub App token for one repository. The command only speaks HTTP to
+Tessera's token route, so it works from a plain npm install.
+
+| Option | Default | Meaning |
+|--------|---------|---------|
+| `--repo <owner/name>` | none; required | Repository the token is scoped to. Must pass the same `owner/name` rules as the token route. |
+| `--access <read\|write>` | none; required | Access level to request. |
+| `--identity <identity>` | `app` | Only `app` is offered. The `user` identity is not available from this command. |
+
+It reads `MARCH_TESSERA_URL` (else `http://localhost:<MARCH_TESSERA_PORT or
+9477>`) and `MARCH_TESSERA_CLIENT_KEY`, exactly as the Node client does.
+
+**Output.** On success, stdout gets the token and a newline, and nothing else.
+Nothing else in the command writes to stdout, so `$(…)` captures the bare token.
+
+**Failures.** stdout stays empty. stderr gets one line of the form
+`march tessera token: <fixed text> (<code>)`, where `<code>` is the client error
+code (see "Node client"); `provider_unavailable` adds `, retry after <n>s` when
+Tessera sent a `Retry-After`. The text is fixed per code. It never echoes the
+server's message, a token or the client key. A missing client key names
+`MARCH_TESSERA_CLIENT_KEY`. An unexpected error prints a generic line.
+
+| Condition | Exit status |
+|-----------|-------------|
+| Token printed | `0` |
+| `--repo` missing or not `owner/name`, `--access` missing or not `read`/`write`, or `--identity` other than `app` | `2` (usage). Checked before any request. |
+| Any Tessera failure: `unauthorized`, `policy_denied`, `provider_unconfigured`, `repo_not_installed`, `credential_invalid`, `provider_unavailable`, `mint_failed`, `internal`, `invalid_request`, `unreachable` or `client_key_missing` | `1` |
+
+**No fallback to host credentials.** The command calls
+`TesseraClient.issueGitHubToken` directly, not `getGitHubToken`. It ignores
+`MARCH_TESSERA_GH_TOKEN_FALLBACK` and never reads `GH_TOKEN`, `GITHUB_TOKEN` or
+any other host credential. If Tessera cannot issue a token, the command fails.
+
+Example:
+
+```sh
+GH_TOKEN="$(march tessera token --repo acme/widgets --access write)" gh pr create --fill
+```
+
+The token then sits in the environment of that `gh` process for as long as it
+runs.
+
+Not built yet: `march tessera git-credential` (the git credential helper) and
+`march tessera status` come in later changes.
 
 ### Configuration
 

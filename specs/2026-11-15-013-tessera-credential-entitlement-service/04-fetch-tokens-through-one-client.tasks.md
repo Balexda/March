@@ -93,7 +93,7 @@
   - The command ignores the fallback flag and never reads `GH_TOKEN` or `GITHUB_TOKEN`
   - No token or client key appears on standard error or in help output
 
-- [ ] **Document the token command**
+- [x] **Document the token command**
 
   Update the CLI part of `docs/subsystems/tessera/contract.md` and the Tessera line in `AGENTS.md`.
 
