@@ -233,7 +233,7 @@ describe("github-app provider minting", () => {
     await provider.start();
     await provider.issue({ repo: "acme/widgets", access: "read" });
     fake.uninstallOwner("acme");
-    await expect(provider.issue({ repo: "acme/widgets", access: "read" })).rejects.toBeInstanceOf(
+    await expect(provider.issue({ repo: "acme/widgets", access: "read", refresh: true })).rejects.toBeInstanceOf(
       RepoNotInstalledError,
     );
     fake.setInstallation("acme", { id: 12 });
@@ -282,6 +282,122 @@ describe("github-app provider minting", () => {
   });
 });
 
+describe("github-app provider token cache", () => {
+  const T0 = Date.parse("2026-11-15T12:00:00Z");
+  const MINUTE = 60 * 1000;
+
+  async function cached(config: Partial<GitHubAppProviderConfig> = {}) {
+    let t = T0;
+    const now = () => t;
+    fake = await startFakeGitHub({
+      app: { id: 42, slug: "march-bot" },
+      botUserId: 123456,
+      installations: { acme: { id: 7, repos: ["widgets", "gadgets"] } },
+      publicKey,
+      now,
+      tokenTtlMs: 60 * MINUTE,
+    });
+    const provider = createGitHubAppProvider({
+      config: { configured: true, appId: "42", keyFile: KEY_FILE, installationId: undefined, ...config },
+      client: new GitHubClient({ baseUrl: fake.baseUrl }),
+      now,
+      readFile: readKey,
+    });
+    await provider.start();
+    return { fake, provider, advance: (ms: number) => { t += ms; } };
+  }
+
+  it("serves a repeat request with more than ten minutes left from the cache, with no GitHub call", async () => {
+    const { fake, provider, advance } = await cached();
+    const first = await provider.issue({ repo: "acme/widgets", access: "read" });
+    expect(first.cache).toBe("miss");
+    expect(provider.cacheEntries?.()).toBe(1);
+
+    advance(50 * MINUTE - 1000);
+    fake.reset();
+    const second = await provider.issue({ repo: "acme/widgets", access: "read" });
+    expect(second).toEqual({ ...first, cache: "hit" });
+    expect(fake.calls).toHaveLength(0);
+  });
+
+  it("re-mints when fewer than ten minutes remain", async () => {
+    const { fake, provider, advance } = await cached();
+    const first = await provider.issue({ repo: "acme/widgets", access: "read" });
+    advance(51 * MINUTE);
+    const second = await provider.issue({ repo: "acme/widgets", access: "read" });
+    expect(second.cache).toBe("miss");
+    expect(second.token).not.toBe(first.token);
+    expect(fake.mintCount()).toBe(2);
+    expect(provider.cacheEntries?.()).toBe(1);
+
+    const third = await provider.issue({ repo: "acme/widgets", access: "read" });
+    expect(third).toEqual({ ...second, cache: "hit" });
+    expect(fake.mintCount()).toBe(2);
+  });
+
+  it("never shares an entry between repositories or access levels", async () => {
+    const { fake, provider } = await cached();
+    const a = await provider.issue({ repo: "acme/widgets", access: "read" });
+    const b = await provider.issue({ repo: "acme/gadgets", access: "read" });
+    const c = await provider.issue({ repo: "acme/widgets", access: "write" });
+    expect(new Set([a.token, b.token, c.token]).size).toBe(3);
+    expect([a.cache, b.cache, c.cache]).toEqual(["miss", "miss", "miss"]);
+    expect(fake.mintCount()).toBe(3);
+    expect(provider.cacheEntries?.()).toBe(3);
+  });
+
+  it("evicts the entry before issuing when refresh is set", async () => {
+    const { fake, provider } = await cached({ installationId: 7 });
+    const first = await provider.issue({ repo: "acme/widgets", access: "read" });
+    const refreshed = await provider.issue({ repo: "acme/widgets", access: "read", refresh: true });
+    expect(refreshed.cache).toBe("miss");
+    expect(refreshed.token).not.toBe(first.token);
+    expect(fake.mintCount()).toBe(2);
+    expect(provider.cacheEntries?.()).toBe(1);
+  });
+
+  it("does not cache a failed mint", async () => {
+    const { fake, provider } = await cached();
+    fake.fail("token", { status: 502 });
+    await expect(provider.issue({ repo: "acme/widgets", access: "read" })).rejects.toBeInstanceOf(
+      ProviderUnavailableError,
+    );
+    expect(provider.cacheEntries?.()).toBe(0);
+    fake.fail("token", null);
+    expect((await provider.issue({ repo: "acme/widgets", access: "read" })).cache).toBe("miss");
+  });
+
+  it("does not count expired entries", async () => {
+    const { provider, advance } = await cached();
+    await provider.issue({ repo: "acme/widgets", access: "read" });
+    advance(61 * MINUTE);
+    expect(provider.cacheEntries?.()).toBe(0);
+  });
+
+  it("clears the whole cache on demand", async () => {
+    const { fake, provider } = await cached();
+    await provider.issue({ repo: "acme/widgets", access: "read" });
+    await provider.issue({ repo: "acme/gadgets", access: "write" });
+    provider.clearCache();
+    expect(provider.cacheEntries()).toBe(0);
+    expect((await provider.issue({ repo: "acme/widgets", access: "read" })).cache).toBe("miss");
+    expect(fake.mintCount()).toBe(3);
+  });
+
+  it("stops serving cached tokens once the provider goes invalid", async () => {
+    const { fake, provider } = await cached();
+    await provider.issue({ repo: "acme/widgets", access: "read" });
+    fake.fail("token", { status: 401 });
+    await expect(provider.issue({ repo: "acme/gadgets", access: "read" })).rejects.toBeInstanceOf(
+      CredentialInvalidError,
+    );
+    expect(provider.cacheEntries()).toBe(0);
+    await expect(provider.issue({ repo: "acme/widgets", access: "read" })).rejects.toBeInstanceOf(
+      CredentialInvalidError,
+    );
+  });
+});
+
 describe("github-app provider status lifecycle", () => {
   it("ok -> degraded on a 5xx or hang, then back to ok on the next success", async () => {
     const { fake, provider } = await setup({ timeoutMs: 100 });
@@ -323,7 +439,7 @@ describe("github-app provider status lifecycle", () => {
   it("stays invalid when a concurrent mint fails with a 5xx or timeout after a 401", async () => {
     const { fake, provider } = await setup({ timeoutMs: 300 });
     await provider.start();
-    await provider.issue({ repo: "acme/widgets", access: "read" }); // remember the binding
+    await provider.issue({ repo: "acme/widgets", access: "write" }); // remember the binding (other cache key)
     fake.reset();
 
     // Request B: its mint hangs and will time out (provider_unavailable).

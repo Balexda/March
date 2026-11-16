@@ -607,16 +607,24 @@ describe("tessera server with the github-app provider", () => {
     });
   }
 
-  it("mints afresh on every request (no token cache yet)", async () => {
+  it("reuses a cached token for a repeat request, re-mints on refresh, and counts entries on /status", async () => {
     const h = await harness();
     const first = await h.post({ identity: "app", repo: "acme/widgets", access: "read" });
     const second = await h.post({ identity: "app", repo: "acme/widgets", access: "read" });
     expect(first.statusCode).toBe(200);
     expect(second.statusCode).toBe(200);
+    expect(second.json()).toEqual(first.json());
+    expect(h.fake.issuedCount()).toBe(1);
+
+    const refreshed = await h.post({ identity: "app", repo: "acme/widgets", access: "read", refresh: true });
+    expect(refreshed.statusCode).toBe(200);
+    expect(refreshed.json().token).not.toBe(first.json().token);
     expect(h.fake.issuedCount()).toBe(2);
-    expect((await h.app.inject({ method: "GET", url: "/status" })).json().cache).toEqual({
-      entries: 0,
-    });
+
+    await h.post({ identity: "app", repo: "acme/widgets", access: "write" });
+    const status = await h.app.inject({ method: "GET", url: "/status" });
+    expect(status.json().cache).toEqual({ entries: 2 });
+    expect(status.body).not.toContain(first.json().token);
   });
 
   it("returns 422 repo_not_installed for an uninstalled owner without minting", async () => {

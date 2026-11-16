@@ -156,7 +156,7 @@
 
 ### Tasks
 
-- [ ] **Cache installation tokens with a ten-minute re-mint threshold**
+- [x] **Cache installation tokens with a ten-minute re-mint threshold**
 
   Add an in-memory token cache under `src/tessera/providers/github-app/`, owned by the github-app provider because the key needs the installation id. It implements the Cached Installation Token entity and lifecycle from the data model, honours the request's `refresh` flag, and reports its entry count on `/status`. Satisfies AS 1.2 and AS 1.3.
 

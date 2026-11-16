@@ -17,8 +17,14 @@
  *   until restart in this slice: once invalid, no later failure or success,
  *   including one from a request already in flight, changes `state` or
  *   `last_error`). `last_error` carries the error code only.
+ * - Token cache ({@link createTokenCache}): keyed by (installation id, sorted
+ *   repositories, access level). A request with strictly more than ten minutes
+ *   of life left on its entry is served from the cache (`cache: "hit"`) with
+ *   no GitHub call; otherwise a new token is minted, stored and returned
+ *   (`cache: "miss"`). `refresh: true` evicts the entry first. Failed mints are
+ *   not cached. When the provider goes `invalid` the whole cache is cleared.
  *
- * Tokens are not cached here (Slice 3). Nothing in this module logs.
+ * Nothing in this module logs, and nothing is written to disk.
  */
 import type { GitHubAppConfig } from "../../config.js";
 import {
@@ -44,6 +50,7 @@ import {
   type KeyFileReader,
 } from "./app-assertion.js";
 import { GitHubClient } from "./github-client.js";
+import { createTokenCache, type TokenCacheKey } from "./token-cache.js";
 
 /** Provider id of the GitHub App provider. */
 export const GITHUB_APP_PROVIDER_ID = "github-app" as const;
@@ -56,10 +63,18 @@ export interface GitHubAppProviderOptions {
   readonly config: GitHubAppProviderConfig;
   /** GitHub client; defaults to one against the public API. */
   readonly client?: GitHubClient;
-  /** Wall clock for the app assertion. */
+  /** Wall clock (epoch ms) for the app assertion and the token cache. */
   readonly now?: Clock;
   /** Key file reader; defaults to reading from disk. */
   readonly readFile?: KeyFileReader;
+}
+
+/** The github-app provider: a {@link CredentialProvider} that owns a token cache. */
+export interface GitHubAppProvider extends CredentialProvider {
+  /** Number of unexpired cached installation tokens. */
+  cacheEntries(): number;
+  /** Drop every cached token (the key-reload transition). */
+  clearCache(): void;
 }
 
 interface BotIdentity {
@@ -88,7 +103,7 @@ export function createGitHubAppProvider({
   client = new GitHubClient(),
   now,
   readFile,
-}: GitHubAppProviderOptions): CredentialProvider {
+}: GitHubAppProviderOptions): GitHubAppProvider {
   let state: ProviderState = "unconfigured";
   let lastError: TesseraErrorCode | null = null;
   let invalidError: CredentialInvalidError | null = null;
@@ -97,10 +112,12 @@ export function createGitHubAppProvider({
   let identityLookup: Promise<BotIdentity> | null = null;
   /** Installation Binding per owner; successful lookups only. */
   const bindings = new Map<string, number>();
+  const cache = createTokenCache(now === undefined ? {} : { now });
 
   function markInvalid(error: CredentialInvalidError): never {
     if (invalidError === null) {
       invalidError = error;
+      cache.clear();
       state = "invalid";
       lastError = error.code;
     }
@@ -222,12 +239,27 @@ export function createGitHubAppProvider({
       }
 
       const installationId = await resolveInstallation(owner);
+      if (invalidError !== null) throw invalidError;
+      const key: TokenCacheKey = { installationId, repos: [name], access: req.access };
+      if (req.refresh === true) cache.evict(key);
+      const hit = cache.getFresh(key);
+      if (hit !== undefined) {
+        return {
+          token: hit.token,
+          expiresAt: hit.expiresAt,
+          identity: bot.login,
+          commitIdentity: bot.commitIdentity,
+          cache: "hit",
+        };
+      }
+
       try {
         const minted = await client.createInstallationToken(assertion(), installationId, {
           repositories: [name],
           permissions,
         });
         markOk();
+        if (invalidError === null) cache.set(key, minted);
         return {
           token: minted.token,
           expiresAt: minted.expiresAt,
@@ -241,6 +273,14 @@ export function createGitHubAppProvider({
         }
         return markFailure(error);
       }
+    },
+
+    cacheEntries(): number {
+      return cache.size();
+    },
+
+    clearCache(): void {
+      cache.clear();
     },
 
     status(): ProviderStatus {

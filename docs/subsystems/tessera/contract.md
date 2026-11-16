@@ -12,8 +12,8 @@ configured (app id plus an existing key file) and then mints a downscoped
 installation token for each `app` request. When the settings are not
 configured, the registry is empty and `app` requests fail with
 `provider_unconfigured`. No provider serves the `user` identity yet, so `user`
-requests always fail with `provider_unconfigured`. Tokens are not cached yet:
-every request mints a new token. A token cache is planned for the next change.
+requests always fail with `provider_unconfigured`. Minted tokens are cached in
+memory and reused until fewer than ten minutes of life remain.
 
 ## Public Interface
 
@@ -42,7 +42,7 @@ Request body:
 | `identity` | `"app"` or `"user"` | Yes | Which credential to issue: the GitHub App bot token or the operator token. |
 | `access` | `"read"` or `"write"` | Yes | Access level. It selects a fixed permission set; callers cannot name individual permissions. |
 | `repo` | string, `owner/name` | Required for `app`; optional for `user` | Target repository. Both parts may contain only letters, digits, `_`, `.` and `-`. A part made only of dots is rejected, as is an owner over 39 characters or a name over 100. |
-| `refresh` | boolean | No | Ask the provider to discard a cached credential before issuing. Passed to the provider. |
+| `refresh` | boolean | No | Ask the provider to discard a cached credential before issuing. Passed to the provider; the `github-app` provider evicts the matching cache entry and mints a new token. |
 | `subject` | string | No | Reserved for future per-spawn tickets. Accepted and validated, but not passed to the provider and not used for any decision. |
 
 Validation runs in this order: body is a JSON object, no unknown fields,
@@ -143,8 +143,18 @@ GitHub REST API.
   listens. `start()` derives the bot identity and never throws, so a GitHub
   outage at startup leaves the provider `degraded` and the service still
   serves. The startup log reports the provider state.
-- **No cache yet.** Each request mints a new token. The provider reports no
-  cache entries, so `cache.entries` is `0`.
+- **Token cache.** Minted tokens are held in memory only (never on disk,
+  never logged), keyed by (installation id, sorted repository list, access
+  level), so different repositories or access levels never share an entry.
+  A request whose entry has strictly more than ten minutes of life left
+  (`REMINT_THRESHOLD_MS`) is served from the cache with no GitHub call
+  (`cache: "hit"`). Otherwise the provider mints a new token, stores it and
+  returns it (`cache: "miss"`). `refresh: true` evicts the entry first. A
+  failed mint is never cached. Expired entries are dropped and not counted.
+  The provider's `cacheEntries()` reports the live count, which `/status`
+  shows as `cache.entries`; `clearCache()` drops every entry (for a key
+  reload). When the provider goes `invalid`, its cache is cleared and no
+  cached token is served.
 
 Provider state transitions, as reported by `/status`:
 
@@ -251,7 +261,10 @@ or `GITHUB_TOKEN`.
 - Validation error messages name fields and never echo submitted values.
 - `/healthz` reports process health only and returns `200` whether or not any
   provider is configured.
-- Tokens are not cached yet: every successful `app` request mints a new token.
+- An `app` token is reused from the in-memory cache only while more than ten
+  minutes of its life remain, and only for the same installation, repository
+  set and access level; no cached token is served once the provider is
+  `invalid`.
 - Only Fastify framework rejections (an `FST_*` error code with a `4xx` status)
   become `400 invalid_request`. Any other unexpected error becomes
   `500 internal`, even if it carries a `4xx` status.
