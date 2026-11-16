@@ -24,9 +24,13 @@
 # unconfigured when they are unset):
 #   TESSERA_GITHUB_APP_ID           the GitHub App's numeric id.
 #   TESSERA_GITHUB_APP_KEY_FILE     path INSIDE the container to the App's
-#                                   private key (PEM). Add a read-only bind
-#                                   mount for that one file yourself, e.g. in
-#                                   a compose override.
+#                                   private key (PEM). Until the secret store
+#                                   lands, add a read-only bind mount for that
+#                                   one file yourself in a compose override.
+#                                   Keep the host copy OUTSIDE $HOME: the other
+#                                   March containers bind-mount the host HOME,
+#                                   so a key under it is readable by all of
+#                                   them.
 #   TESSERA_GITHUB_INSTALLATION_ID  the App installation to mint tokens from.
 #
 # ---------------------------------------------------------------------------

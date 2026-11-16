@@ -172,10 +172,9 @@ export function buildTesseraServer(options: BuildTesseraServerOptions): FastifyI
     void reply.code(500).send(errorBody("internal", "Internal server error."));
   });
 
-  app.setNotFoundHandler((request, reply) => {
-    void reply
-      .code(404)
-      .send(errorBody("invalid_request", `No route for ${request.method} ${request.url}`));
+  // Fixed message: the request URL is never echoed back.
+  app.setNotFoundHandler((_request, reply) => {
+    void reply.code(404).send(errorBody("invalid_request", "No such route."));
   });
 
   app.get("/healthz", async () => ({ status: "ok" }));

@@ -189,7 +189,7 @@ Every non-2xx response has the body
 |------|-------------|------|
 | `invalid_request` | `400` | Body is not a JSON object, has an unknown field, has an `identity` other than `app`/`user`, has an `access` other than `read`/`write`, has a `repo` not in `owner/name` form, omits `repo` for `app`, or has a non-boolean `refresh` or non-string `subject`. |
 | `invalid_request` | `400` | Fastify rejects the request before the route runs (for example invalid JSON, an unsupported content type, or an oversized body). The message is always `Malformed request body.` and never echoes the body. |
-| `invalid_request` | `404` | No route matches the method and path. The message is `No route for <METHOD> <url>`. |
+| `invalid_request` | `404` | No route matches the method and path. The message is fixed and does not echo the request URL. |
 | `provider_unconfigured` | `503` | No provider is registered for the requested identity. In the current build this is every valid token request. |
 | `repo_not_installed` | `422` | A provider raises `RepoNotInstalledError`: the App is not installed for the repository. No provider raises it yet. |
 | `credential_invalid` | `503` | A provider raises `CredentialInvalidError`: GitHub rejected the credential, or it expired. No provider raises it yet. |
