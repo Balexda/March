@@ -5,6 +5,7 @@ import type { LoopMeta } from "../legate/loop/meta.js";
 import type { OpenPrIndex, SenseDeps, StaleRecheckTracker } from "../legate/loop/state/sense.js";
 import { createStaleRecheckTracker } from "../legate/loop/state/sense.js";
 import { isCodexReviewSummary, parseCodexReviewState, type CodexReviewState } from "./codex-review.js";
+import { isCodeRabbitComment, isReviewBotCommand } from "./review-bot-comments.js";
 import { readSmithyStatus } from "./smithy-status.js";
 
 /**
@@ -428,8 +429,19 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
     for (const c of commentNodes) {
       if (isCodexReviewSummary(c?.body) && isBotActor(c?.author)) codexReview = parseCodexReviewState(c.body);
     }
+    // CodeRabbit's generated comments (summary, command acks, chat replies) and
+    // commands addressed to a review bot (`@coderabbitai review`) are dropped for
+    // the same reason: none is feedback the steward owes a reply. See
+    // `review-bot-comments.ts`.
     const comments = commentNodes
-      .filter((c: any) => c && c.databaseId != null && !isCodexReviewSummary(c.body))
+      .filter(
+        (c: any) =>
+          c &&
+          c.databaseId != null &&
+          !isCodexReviewSummary(c.body) &&
+          !isCodeRabbitComment(c.body) &&
+          !isReviewBotCommand(c.body),
+      )
       .map((c: any) => {
         const body = String(c.body || "");
         return {

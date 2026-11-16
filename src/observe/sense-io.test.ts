@@ -492,6 +492,19 @@ describe("queryPrForBabysit", () => {
       expect(babysit(withFeedback)).toContain("comment-fix");
       expect(mergeBlocker({}, withFeedback)).toBe("owes_comments");
     });
+    it("drops CodeRabbit's generated comments and review-bot commands, but keeps a mid-comment mention", async () => {
+      const CODERABBIT = { login: "coderabbitai", __typename: "Bot" };
+      const rabbit = (rest: string) => `<!-- coderabbit-ai-generated:v1 -->\n\n${rest}`;
+      const pr = await sensePr([
+        comment(301, REVIEWER, "@coderabbitai review"),
+        comment(302, CODERABBIT, rabbit("<!-- This is an auto-generated comment: summarize by coderabbit.ai -->")),
+        comment(303, CODERABBIT, rabbit("<!-- This is an auto-generated reply by CodeRabbit -->\nReview triggered.")),
+        comment(304, REVIEWER, "@codex review"),
+        // Genuine feedback that mentions the bot further down is still feedback.
+        comment(305, REVIEWER, "The cache key is wrong — @coderabbitai flagged it too."),
+      ]);
+      expect(pr.conversation_comments.map((c: any) => c.id)).toEqual([305]);
+    });
   });
 
   it("skips when the slice has no PR number", async () => {
