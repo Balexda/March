@@ -105,7 +105,7 @@
   - An unparseable key yields `credential_invalid`
   - No key material appears in any error message or log line
 
-- [ ] **Add a bounded GitHub client and a fake GitHub fixture**
+- [x] **Add a bounded GitHub client and a fake GitHub fixture**
 
   Add a thin client in the same directory, with an injectable API base URL, covering app lookup, installation lookup per owner, installation token creation and bot user lookup. Add a reusable in-process fake GitHub API under `src/tessera/testing/` that records calls and injects failures; later tasks and the contract test use it (FR-042). Failure classification lives in one place.
 
