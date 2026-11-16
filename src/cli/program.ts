@@ -2045,6 +2045,24 @@ tessera
     }
   });
 
+tessera
+  .command("token")
+  .description(
+    "Print a GitHub App token for one repository to stdout (token only; never falls back to host credentials)",
+  )
+  .option("--repo <owner/name>", "Repository the token is scoped to (required)")
+  .option("--access <read|write>", "Access level: read or write (required)")
+  .option("--identity <identity>", "Identity to act as; only app is offered (default: app)")
+  .action(async (opts: { repo?: string; access?: string; identity?: string }) => {
+    commandHandled = true;
+    const { runTesseraTokenCommand } = await import("../tessera/cli.js");
+    process.exitCode = await runTesseraTokenCommand({
+      repo: opts.repo,
+      access: opts.access,
+      identity: opts.identity,
+    });
+  });
+
 const brood = program
   .command("brood")
   .description("Manage Brood session lifecycle (state + teardown)");

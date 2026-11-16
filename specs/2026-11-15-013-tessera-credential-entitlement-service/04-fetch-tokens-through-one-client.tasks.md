@@ -82,7 +82,7 @@
 
 ### Tasks
 
-- [ ] **Add the `march tessera token` command**
+- [x] **Add the `march tessera token` command**
 
   Add a `token` subcommand to the `tessera` group in `src/cli/program.ts`, per the contracts "CLI" section, with its logic in a small function under `src/tessera` that the program only wires. It uses `TesseraClient` directly, not `getGitHubToken`, so the migration fallback cannot apply. Extend the `march tessera` block in `src/cli/program.test.ts`. Satisfies AS 4.5.
 

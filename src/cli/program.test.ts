@@ -2,7 +2,9 @@
  * @l1 @deterministic @ci
  */
 import { describe, it, expect, afterEach } from "vitest";
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import type { AddressInfo } from "node:net";
 import { resolve } from "node:path";
 import { createRequire } from "node:module";
 import fs from "node:fs";
@@ -512,8 +514,9 @@ describe("march CLI", () => {
       const combined = result.stdout + result.stderr;
       expect(combined).toContain("Usage: march tessera");
       expect(combined).toMatch(/^\s+serve\b/m);
-      // US3/US4 subcommands are not part of this slice.
-      expect(combined).not.toMatch(/^\s+(token|secrets|credential-helper)\b/m);
+      expect(combined).toMatch(/^\s+token\b/m);
+      // US3/US5 subcommands are later changes.
+      expect(combined).not.toMatch(/^\s+(secrets|git-credential|status)\b/m);
     });
 
     it("`march tessera serve --help` exits 0 with only --port and --host", () => {
@@ -547,6 +550,143 @@ describe("march CLI", () => {
       expect(result.exitCode).toBe(2);
       expect(result.stderr).toContain("TESSERA_POLICY_FILE is not set");
       expect(result.stderr).not.toContain(keysFile);
+    });
+
+    describe("token", () => {
+      const TOKEN = "ghs_cliEndToEndToken42";
+      const CLIENT_KEY = "cli-test-client-key-xyz";
+
+      /** Run the CLI without blocking this process's event loop (the fake server lives here). */
+      function runAsync(
+        args: string[],
+        env: Record<string, string | undefined>,
+      ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+        return new Promise((resolvePromise, reject) => {
+          const child = spawn("node", [CLI_PATH, ...args], {
+            stdio: ["ignore", "pipe", "pipe"],
+            env: { ...process.env, ...env },
+          });
+          let stdout = "";
+          let stderr = "";
+          child.stdout.setEncoding("utf-8").on("data", (chunk: string) => (stdout += chunk));
+          child.stderr.setEncoding("utf-8").on("data", (chunk: string) => (stderr += chunk));
+          const timer = setTimeout(() => child.kill("SIGKILL"), 10_000);
+          child.on("error", reject);
+          child.on("close", (code) => {
+            clearTimeout(timer);
+            resolvePromise({ stdout, stderr, exitCode: code ?? 1 });
+          });
+        });
+      }
+
+      /** A fake Tessera on an OS-assigned loopback port; the bound port is read back, never re-bound. */
+      async function withFakeTessera(
+        handler: (req: IncomingMessage, body: string, res: ServerResponse) => void,
+        fn: (url: string, requests: Array<{ headers: IncomingMessage["headers"]; body: string }>) => Promise<void>,
+      ): Promise<void> {
+        const requests: Array<{ headers: IncomingMessage["headers"]; body: string }> = [];
+        const server = createServer((req, res) => {
+          let body = "";
+          req.setEncoding("utf-8");
+          req.on("data", (chunk: string) => (body += chunk));
+          req.on("end", () => {
+            requests.push({ headers: req.headers, body });
+            handler(req, body, res);
+          });
+        });
+        await new Promise<void>((ready) => server.listen(0, "127.0.0.1", ready));
+        const { port } = server.address() as AddressInfo;
+        try {
+          await fn(`http://127.0.0.1:${port}`, requests);
+        } finally {
+          await new Promise<void>((done) => server.close(() => done()));
+        }
+      }
+
+      // Host credentials and the fallback flag must never matter to this command.
+      const hostCreds = {
+        GH_TOKEN: "gho_hostCredential",
+        GITHUB_TOKEN: "gho_hostCredential2",
+        MARCH_TESSERA_GH_TOKEN_FALLBACK: "1",
+        MARCH_OTEL: undefined,
+      };
+
+      it("`march tessera token --help` lists --repo, --access and --identity with no secrets", () => {
+        const result = runWithEnv(["tessera", "token", "--help"], {
+          MARCH_TESSERA_CLIENT_KEY: CLIENT_KEY,
+          ...hostCreds,
+        });
+        expect(result.exitCode).toBe(0);
+        expect(result.stdout).toContain("Usage: march tessera token");
+        expect(result.stdout).toContain("--repo");
+        expect(result.stdout).toContain("--access");
+        expect(result.stdout).toContain("--identity");
+        expect(result.stdout).not.toContain(CLIENT_KEY);
+        expect(result.stdout).not.toContain("gho_hostCredential");
+      });
+
+      it("a missing --access is a usage error (exit 2) with nothing on stdout", () => {
+        const result = runWithEnv(["tessera", "token", "--repo", "acme/widgets"], {
+          MARCH_TESSERA_URL: "http://127.0.0.1:1",
+          MARCH_TESSERA_CLIENT_KEY: CLIENT_KEY,
+          ...hostCreds,
+        });
+        expect(result.exitCode).toBe(2);
+        expect(result.stdout).toBe("");
+        expect(result.stderr).toMatch(/^march tessera token: .*--access.*\n$/);
+      });
+
+      it("prints exactly the token and a newline from a fake Tessera", async () => {
+        await withFakeTessera(
+          (_req, _body, res) => {
+            res.writeHead(200, { "content-type": "application/json" });
+            res.end(
+              JSON.stringify({
+                token: TOKEN,
+                expires_at: "2099-01-01T00:00:00Z",
+                identity: "march-bot[bot]",
+                commit_identity: { name: "march-bot[bot]", email: "1+march-bot[bot]@users.noreply.github.com" },
+              }),
+            );
+          },
+          async (url, requests) => {
+            const result = await runAsync(
+              ["tessera", "token", "--repo", "acme/widgets", "--access", "write"],
+              { MARCH_TESSERA_URL: url, MARCH_TESSERA_CLIENT_KEY: CLIENT_KEY, ...hostCreds },
+            );
+            expect(result.exitCode).toBe(0);
+            expect(result.stdout).toBe(`${TOKEN}\n`);
+            expect(result.stderr).toBe("");
+            expect(requests).toHaveLength(1);
+            expect(requests[0]!.headers.authorization).toBe(`Bearer ${CLIENT_KEY}`);
+            expect(JSON.parse(requests[0]!.body)).toEqual({
+              identity: "app",
+              repo: "acme/widgets",
+              access: "write",
+            });
+          },
+        );
+      });
+
+      it("a policy denial exits 1 with one stderr line, empty stdout and no host fallback", async () => {
+        await withFakeTessera(
+          (_req, _body, res) => {
+            res.writeHead(403, { "content-type": "application/json" });
+            res.end(JSON.stringify({ error: { code: "policy_denied", message: "denied" } }));
+          },
+          async (url) => {
+            const result = await runAsync(
+              ["tessera", "token", "--repo", "acme/widgets", "--access", "write"],
+              { MARCH_TESSERA_URL: url, MARCH_TESSERA_CLIENT_KEY: CLIENT_KEY, ...hostCreds },
+            );
+            expect(result.exitCode).toBe(1);
+            expect(result.stdout).toBe("");
+            expect(result.stderr).toMatch(/^march tessera token: [^\n]*\(policy_denied\)\n$/);
+            expect(result.stderr).not.toContain(CLIENT_KEY);
+            expect(result.stderr).not.toContain("gho_hostCredential");
+          },
+        );
+      });
     });
   });
 
