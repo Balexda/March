@@ -1,0 +1,81 @@
+# Tessera service — the credential entitlement service over HTTP.
+#
+#   # 1. observability stack first (creates the `march` network):
+#   docker compose -f docker/otel-lgtm.docker-compose.yml up -d
+#   # 2. build + run tessera (from the repo root):
+#   npm run build:tessera-image
+#   docker compose -f docker/tessera.docker-compose.yml up -d
+#   curl -fsS http://localhost:${MARCH_TESSERA_PORT:-9477}/healthz
+#
+# Consumers on the host reach Tessera at
+# http://localhost:${MARCH_TESSERA_PORT:-9477}. Without a GitHub App configured
+# the service still starts, reports health and status, and fails `app` token
+# requests with `provider_unconfigured`.
+#
+# HOST-SPECIFIC CONFIG (override via env or a .env file next to this compose):
+#   MARCH_TESSERA_PORT    API port (default: deterministic 9477).
+#   MARCH_OTEL            exports metrics/spans/OTLP logs to the observability
+#                         stack. Defaults to 1 here, like every other March
+#                         service compose; set MARCH_OTEL=0 to make telemetry a
+#                         no-op. JSONL logs stay available either way in the
+#                         march-tessera-logs volume.
+#
+# OPTIONAL GITHUB APP SETTINGS (all default to empty; the service starts
+# unconfigured when they are unset):
+#   TESSERA_GITHUB_APP_ID           the GitHub App's numeric id.
+#   TESSERA_GITHUB_APP_KEY_FILE     path INSIDE the container to the App's
+#                                   private key (PEM). Add a read-only bind
+#                                   mount for that one file yourself, e.g. in
+#                                   a compose override.
+#   TESSERA_GITHUB_INSTALLATION_ID  the App installation to mint tokens from.
+#
+# ---------------------------------------------------------------------------
+# NOT YET IN THIS CHANGE:
+#   * The secret store, per-client keys and the full security notes arrive with
+#     a later change (spec User Story 3).
+#   * /v1/* is UNAUTHENTICATED until client keys land (spec User Story 2). That
+#     is why the port is published on 127.0.0.1 only — never publish it on any
+#     other interface, never expose it publicly, never publish this image.
+# ---------------------------------------------------------------------------
+name: march-tessera
+
+services:
+  tessera:
+    build:
+      context: ..
+      dockerfile: docker/tessera.Dockerfile
+    image: march-tessera:latest
+    container_name: march-tessera
+    restart: on-failure
+    command: ["tessera", "serve", "--host", "0.0.0.0", "--port", "${MARCH_TESSERA_PORT:-9477}"]
+    ports:
+      - "127.0.0.1:${MARCH_TESSERA_PORT:-9477}:${MARCH_TESSERA_PORT:-9477}" # loopback only — /v1/* is unauthenticated until US2
+    environment:
+      - MARCH_OTEL=${MARCH_OTEL:-1}
+      - MARCH_OTEL_ENDPOINT=http://otel-lgtm:4318
+      - MARCH_OTEL_SERVICE_NAME=march-tessera
+      - MARCH_TESSERA_PORT=${MARCH_TESSERA_PORT:-9477}
+      - MARCH_TESSERA_LOG_DIR=/march/logs
+      # Optional GitHub App pass-throughs; empty means unconfigured.
+      - TESSERA_GITHUB_APP_ID=${TESSERA_GITHUB_APP_ID:-}
+      - TESSERA_GITHUB_APP_KEY_FILE=${TESSERA_GITHUB_APP_KEY_FILE:-}
+      - TESSERA_GITHUB_INSTALLATION_ID=${TESSERA_GITHUB_INSTALLATION_ID:-}
+    volumes:
+      # Durable service log file (also shipped to otel-lgtm via OTLP logs).
+      - march-tessera-logs:/march/logs
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:${MARCH_TESSERA_PORT:-9477}/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
+    networks:
+      - march
+
+networks:
+  march:
+    external: true
+    name: march
+
+volumes:
+  march-tessera-logs:

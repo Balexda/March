@@ -57,7 +57,7 @@
   - No token, secrets, or credential-helper subcommands are added (US3, US4)
   - No Tessera metrics module is introduced (US8)
 
-- [ ] **Add the Tessera image and compose file**
+- [x] **Add the Tessera image and compose file**
 
   Add `docker/tessera.Dockerfile` and `docker/tessera.docker-compose.yml`, modeled on the Statio pair, plus a `build:tessera-image` npm script chained into `build:images`. Add `src/tessera/container-artifacts.test.ts` on the pattern of the Statio artifact test. The compose header documents setup and the optional GitHub App settings, and states that the secret store and client keys arrive with US3.
 
