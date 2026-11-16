@@ -498,6 +498,8 @@ describe("tessera server with the github-app provider", () => {
     readonly timeoutMs?: number;
     /** Called after the fake starts and before the provider starts. */
     readonly beforeStart?: (fake: FakeGitHub) => void | Promise<void>;
+    /** Shared wall clock for the fake and the provider's token cache. */
+    readonly now?: () => number;
   }
 
   async function harness(options: HarnessOptions = {}): Promise<Harness> {
@@ -508,6 +510,7 @@ describe("tessera server with the github-app provider", () => {
         acme: { id: 7, repos: ["widgets", "gadgets"] },
       },
       publicKey,
+      ...(options.now === undefined ? {} : { now: options.now }),
       ...options.fakeOptions,
     });
     const assertions: string[] = [];
@@ -524,6 +527,7 @@ describe("tessera server with the github-app provider", () => {
     const provider = createGitHubAppProvider({
       config: { configured: true, appId: "42", keyFile: KEY_FILE, installationId: undefined },
       client,
+      ...(options.now === undefined ? {} : { now: options.now }),
       readFile: (path) => {
         if (path !== KEY_FILE) throw new Error("ENOENT");
         return PEM;
@@ -657,6 +661,47 @@ describe("tessera server with the github-app provider", () => {
     expect(res.headers["retry-after"]).toBe("30");
     const status = (await h.app.inject({ method: "GET", url: "/status" })).json();
     expect(status.providers[0]).toMatchObject({ state: "degraded", last_error: "provider_unavailable" });
+  });
+
+  it("serves an unexpired cached token through a GitHub outage, then mints anew on recovery", async () => {
+    let t = Date.parse("2026-11-15T12:00:00Z");
+    const h = await harness({ now: () => t, timeoutMs: 100 });
+    const first = await h.post({ identity: "app", repo: "acme/widgets", access: "read" });
+    expect(first.statusCode).toBe(200);
+
+    t += 55 * 60 * 1000; // inside the ten-minute re-mint window, still unexpired
+    h.fake.fail("token", { status: 503, retryAfter: "7" });
+    const served = await h.post({ identity: "app", repo: "acme/widgets", access: "read" });
+    expect(served.statusCode).toBe(200);
+    expect(served.json()).toEqual(first.json());
+    expect(served.headers["retry-after"]).toBeUndefined();
+    const degraded = (await h.app.inject({ method: "GET", url: "/status" })).json();
+    expect(degraded.providers[0]).toMatchObject({ state: "degraded", last_error: "provider_unavailable" });
+    expect(degraded.cache).toEqual({ entries: 1 });
+
+    // A refresh has nothing to fall back to.
+    const refreshed = await h.post({ identity: "app", repo: "acme/widgets", access: "read", refresh: true });
+    expect(refreshed.statusCode).toBe(503);
+    expect(refreshed.json().error.code).toBe("provider_unavailable");
+
+    h.fake.fail("token", null);
+    const recovered = await h.post({ identity: "app", repo: "acme/widgets", access: "read" });
+    expect(recovered.statusCode).toBe(200);
+    expect(recovered.json().token).not.toBe(first.json().token);
+    const ok = (await h.app.inject({ method: "GET", url: "/status" })).json();
+    expect(ok.providers[0]).toMatchObject({ state: "ok", last_error: null });
+  });
+
+  it("returns 503 provider_unavailable through an outage once the cached token has expired", async () => {
+    let t = Date.parse("2026-11-15T12:00:00Z");
+    const h = await harness({ now: () => t, timeoutMs: 100 });
+    await h.post({ identity: "app", repo: "acme/widgets", access: "read" });
+    t += 61 * 60 * 1000;
+    h.fake.fail("token", { hang: true });
+    const res = await h.post({ identity: "app", repo: "acme/widgets", access: "read" });
+    expect(res.statusCode).toBe(503);
+    expect(res.json().error.code).toBe("provider_unavailable");
+    expect(res.headers["retry-after"]).toBe("30");
   });
 
   it("returns 503 provider_unavailable forwarding Retry-After on a GitHub 5xx", async () => {

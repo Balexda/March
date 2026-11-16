@@ -10,6 +10,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   ACCESS_PROFILES,
   CredentialInvalidError,
+  MintFailedError,
   ProviderUnavailableError,
   RepoNotInstalledError,
   TesseraValidationError,
@@ -286,7 +287,7 @@ describe("github-app provider token cache", () => {
   const T0 = Date.parse("2026-11-15T12:00:00Z");
   const MINUTE = 60 * 1000;
 
-  async function cached(config: Partial<GitHubAppProviderConfig> = {}) {
+  async function cached(config: Partial<GitHubAppProviderConfig> = {}, timeoutMs?: number) {
     let t = T0;
     const now = () => t;
     fake = await startFakeGitHub({
@@ -299,7 +300,7 @@ describe("github-app provider token cache", () => {
     });
     const provider = createGitHubAppProvider({
       config: { configured: true, appId: "42", keyFile: KEY_FILE, installationId: undefined, ...config },
-      client: new GitHubClient({ baseUrl: fake.baseUrl }),
+      client: new GitHubClient({ baseUrl: fake.baseUrl, ...(timeoutMs === undefined ? {} : { timeoutMs }) }),
       now,
       readFile: readKey,
     });
@@ -394,6 +395,189 @@ describe("github-app provider token cache", () => {
     expect(provider.cacheEntries()).toBe(0);
     await expect(provider.issue({ repo: "acme/widgets", access: "read" })).rejects.toBeInstanceOf(
       CredentialInvalidError,
+    );
+  });
+});
+
+describe("github-app provider outage fallback", () => {
+  const T0 = Date.parse("2026-11-15T12:00:00Z");
+  const MINUTE = 60 * 1000;
+
+  async function outage(config: Partial<GitHubAppProviderConfig> = {}, timeoutMs = 200) {
+    let t = T0;
+    const now = () => t;
+    fake = await startFakeGitHub({
+      app: { id: 42, slug: "march-bot" },
+      botUserId: 123456,
+      installations: { acme: { id: 7, repos: ["widgets", "gadgets"] } },
+      publicKey,
+      now,
+      tokenTtlMs: 60 * MINUTE,
+    });
+    const provider = createGitHubAppProvider({
+      config: { configured: true, appId: "42", keyFile: KEY_FILE, installationId: undefined, ...config },
+      client: new GitHubClient({ baseUrl: fake.baseUrl, timeoutMs }),
+      now,
+      readFile: readKey,
+    });
+    await provider.start();
+    return { fake, provider, advance: (ms: number) => { t += ms; } };
+  }
+
+  const READ = { repo: "acme/widgets", access: "read" } as const;
+
+  for (const [label, failure] of [
+    ["a 5xx", { status: 502 }],
+    ["a hang", { hang: true }],
+  ] as const) {
+    it(`serves the stale unexpired token on ${label}, goes degraded, then recovers with a new token`, async () => {
+      const { fake, provider, advance } = await outage();
+      const first = await provider.issue(READ);
+      advance(55 * MINUTE); // stale: inside the ten-minute window, still unexpired
+      fake.fail("token", failure);
+      const started = Date.now();
+      const served = await provider.issue(READ);
+      expect(Date.now() - started).toBeLessThan(2_000);
+      expect(served).toEqual({ ...first, cache: "hit" });
+      expect(provider.status()).toMatchObject({ state: "degraded", last_error: "provider_unavailable" });
+      expect(provider.cacheEntries()).toBe(1);
+
+      fake.fail("token", null);
+      const recovered = await provider.issue(READ);
+      expect(recovered.cache).toBe("miss");
+      expect(recovered.token).not.toBe(first.token);
+      expect(provider.status()).toMatchObject({ state: "ok", last_error: null });
+    });
+  }
+
+  it("serves the stale token to every joiner of a failed shared re-mint", async () => {
+    const { fake, provider, advance } = await outage();
+    const first = await provider.issue(READ);
+    advance(55 * MINUTE);
+    fake.reset();
+    fake.fail("token", { status: 503 });
+    const results = await Promise.all(Array.from({ length: 4 }, () => provider.issue(READ)));
+    expect(fake.mintCount()).toBe(1);
+    for (const r of results) expect(r).toEqual({ ...first, cache: "hit" });
+  });
+
+  it("returns provider_unavailable on an outage with no entry", async () => {
+    const { fake, provider } = await outage();
+    await provider.issue({ repo: "acme/gadgets", access: "read" }); // other key; remembers the binding
+    fake.fail("token", { hang: true });
+    const started = Date.now();
+    await expect(provider.issue(READ)).rejects.toBeInstanceOf(ProviderUnavailableError);
+    expect(Date.now() - started).toBeLessThan(2_000);
+  });
+
+  for (const [label, failure] of [
+    ["a 5xx", { status: 502 }],
+    ["a hang", { hang: true }],
+  ] as const) {
+    it(`never serves an expired token on ${label}`, async () => {
+      const { fake, provider, advance } = await outage();
+      await provider.issue(READ);
+      advance(60 * MINUTE); // exactly at expiry
+      fake.fail("token", failure);
+      const started = Date.now();
+      await expect(provider.issue(READ)).rejects.toBeInstanceOf(ProviderUnavailableError);
+      expect(Date.now() - started).toBeLessThan(2_000);
+      expect(provider.cacheEntries()).toBe(0);
+    });
+  }
+
+  it("does not serve a cached token to a refresh request during an outage", async () => {
+    const { fake, provider, advance } = await outage();
+    await provider.issue(READ);
+    advance(55 * MINUTE);
+    fake.fail("token", { status: 502 });
+    await expect(provider.issue({ ...READ, refresh: true })).rejects.toBeInstanceOf(ProviderUnavailableError);
+  });
+
+  it("does not serve the stale token to a refresh request that joined the failed re-mint", async () => {
+    const { fake, provider, advance } = await outage({}, 300);
+    const first = await provider.issue(READ);
+    advance(55 * MINUTE);
+    fake.fail("token", { hang: true });
+    const plain = provider.issue(READ);
+    const deadline = Date.now() + 2_000;
+    while (fake.mintCount() < 2 && Date.now() < deadline) await new Promise((r) => setTimeout(r, 5));
+    const refreshed = provider.issue({ ...READ, refresh: true }).catch((e: unknown) => e);
+    expect(await plain).toEqual({ ...first, cache: "hit" });
+    expect(await refreshed).toBeInstanceOf(ProviderUnavailableError);
+    expect(fake.mintCount()).toBe(2);
+  });
+
+  it("never masks repo_not_installed (404 or 422) with a cached token", async () => {
+    const { fake, provider, advance } = await outage();
+    await provider.issue(READ);
+    advance(55 * MINUTE);
+    fake.setInstallation("acme", { id: 7, repos: ["gadgets"] }); // 422 on re-mint
+    await expect(provider.issue(READ)).rejects.toBeInstanceOf(RepoNotInstalledError);
+    fake.uninstallOwner("acme"); // 404 on re-mint
+    await expect(provider.issue(READ)).rejects.toBeInstanceOf(RepoNotInstalledError);
+  });
+
+  it("never masks credential_invalid (401) and serves nothing once invalid", async () => {
+    const { fake, provider, advance } = await outage();
+    await provider.issue(READ);
+    advance(55 * MINUTE);
+    fake.fail("token", { status: 401 });
+    await expect(provider.issue(READ)).rejects.toBeInstanceOf(CredentialInvalidError);
+    fake.fail("token", { status: 502 });
+    await expect(provider.issue(READ)).rejects.toBeInstanceOf(CredentialInvalidError);
+    expect(provider.status()).toMatchObject({ state: "invalid", last_error: "credential_invalid" });
+  });
+
+  it("never masks mint_failed (403) with a cached token", async () => {
+    const { fake, provider, advance } = await outage();
+    await provider.issue(READ);
+    advance(55 * MINUTE);
+    fake.fail("token", { status: 403 });
+    await expect(provider.issue(READ)).rejects.toBeInstanceOf(MintFailedError);
+  });
+
+  it("serves the stale token with the installation override and an outage on every endpoint", async () => {
+    const { fake, provider, advance } = await outage({ installationId: 7 });
+    const first = await provider.issue(READ);
+    advance(55 * MINUTE);
+    for (const endpoint of ["app", "installation", "token", "user"] as const) fake.fail(endpoint, { status: 503 });
+    expect(await provider.issue(READ)).toEqual({ ...first, cache: "hit" });
+  });
+
+  it("serves the stale token when the owner's binding is remembered, without a lookup", async () => {
+    const { fake, provider, advance } = await outage();
+    const first = await provider.issue(READ);
+    advance(55 * MINUTE);
+    fake.reset();
+    fake.fail("installation", { status: 503 });
+    fake.fail("token", { status: 503 });
+    expect(await provider.issue(READ)).toEqual({ ...first, cache: "hit" });
+    expect(endpoints(fake)).toEqual(["token"]);
+  });
+
+  it("propagates an outage on the installation lookup when the binding is not known", async () => {
+    const { fake, provider, advance } = await outage();
+    await provider.issue(READ);
+    advance(55 * MINUTE);
+    fake.uninstallOwner("acme"); // the re-mint 404s and drops the binding
+    await expect(provider.issue(READ)).rejects.toBeInstanceOf(RepoNotInstalledError);
+    fake.setInstallation("acme", { id: 7, repos: ["widgets", "gadgets"] });
+    fake.fail("installation", { status: 503 });
+    await expect(provider.issue(READ)).rejects.toBeInstanceOf(ProviderUnavailableError);
+    expect(provider.cacheEntries()).toBe(1); // the entry exists, but its key cannot be determined
+  });
+
+  it("never serves another key's token", async () => {
+    const { fake, provider, advance } = await outage();
+    await provider.issue(READ);
+    advance(55 * MINUTE);
+    fake.fail("token", { status: 502 });
+    await expect(provider.issue({ repo: "acme/widgets", access: "write" })).rejects.toBeInstanceOf(
+      ProviderUnavailableError,
+    );
+    await expect(provider.issue({ repo: "acme/gadgets", access: "read" })).rejects.toBeInstanceOf(
+      ProviderUnavailableError,
     );
   });
 });

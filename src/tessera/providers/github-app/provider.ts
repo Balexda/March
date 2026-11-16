@@ -34,6 +34,21 @@
  *   as new as a refresh would produce); only with nothing in flight does it
  *   evict the entry and mint. Concurrent first lookups of the same owner's
  *   installation are coalesced the same way.
+ * - Outages (cache lifecycle transition 4, `stale` → `stale`): when a re-mint
+ *   fails with `provider_unavailable` and the entry for that key is still
+ *   unexpired at that moment, the cached token is served instead
+ *   (`cache: "hit"`) and the provider goes `degraded` with `last_error`
+ *   `provider_unavailable`; every joiner of that shared mint gets it too. Only
+ *   `provider_unavailable` is masked: `repo_not_installed`,
+ *   `credential_invalid` and `mint_failed` always propagate. An expired token
+ *   is never served, nothing is served once the provider is `invalid`, and a
+ *   `refresh: true` request never receives a cached token (it evicted the
+ *   entry, or it joined a mint and asked for a new token), so it gets
+ *   `provider_unavailable`. The key must be known without GitHub: the bot
+ *   identity is never forgotten once derived, and the installation id comes
+ *   from the override or a remembered binding; when the binding has to be
+ *   looked up and that lookup fails, the error propagates. A token is never
+ *   served for a different key.
  *
  * Nothing in this module logs, and nothing is written to disk.
  */
@@ -93,6 +108,14 @@ export interface GitHubAppProvider extends CredentialProvider {
   clearCache(): void;
 }
 
+/**
+ * Result of one shared mint: the new token, or an outage for a key whose
+ * cached token was still unexpired when the mint failed.
+ */
+type MintOutcome =
+  | { readonly kind: "minted"; readonly token: CachedInstallationToken }
+  | { readonly kind: "outage"; readonly error: ProviderUnavailableError };
+
 interface BotIdentity {
   readonly login: string;
   readonly commitIdentity: CommitIdentity;
@@ -131,7 +154,7 @@ export function createGitHubAppProvider({
   /** In-flight owner installation lookups, one per owner. */
   const pendingLookups = new Map<string, Promise<number>>();
   /** In-flight mints, one per cache key ({@link tokenCacheKeyId}). */
-  const pendingMints = new Map<string, Promise<CachedInstallationToken>>();
+  const pendingMints = new Map<string, Promise<MintOutcome>>();
   const cache = createTokenCache(now === undefined ? {} : { now });
 
   function markInvalid(error: CredentialInvalidError): never {
@@ -151,19 +174,25 @@ export function createGitHubAppProvider({
   }
 
   /**
-   * Record a failed GitHub call per the lifecycle, then rethrow it. Once the
-   * provider is invalid, no later failure (e.g. an in-flight request timing out
-   * after another got a 401) changes `state` or `last_error` until restart.
+   * Record a failed GitHub call per the lifecycle (a rejected credential throws
+   * via {@link markInvalid}). Once the provider is invalid, no later failure
+   * (e.g. an in-flight request timing out after another got a 401) changes
+   * `state` or `last_error` until restart.
    */
-  function markFailure(error: unknown): never {
+  function recordFailure(error: unknown): void {
     if (error instanceof CredentialInvalidError) markInvalid(error);
-    if (invalidError !== null) throw error;
+    if (invalidError !== null) return;
     if (error instanceof ProviderUnavailableError) {
       state = "degraded";
       lastError = error.code;
     } else if (!(error instanceof RepoNotInstalledError)) {
       lastError = errorCode(error);
     }
+  }
+
+  /** {@link recordFailure}, then rethrow. */
+  function markFailure(error: unknown): never {
+    recordFailure(error);
     throw error;
   }
 
@@ -293,7 +322,7 @@ export function createGitHubAppProvider({
       const hit = req.refresh === true ? undefined : cache.getFresh(key);
       if (hit !== undefined) return result(hit, "hit");
 
-      const minted = await shared(pendingMints, keyId, async () => {
+      const outcome = await shared(pendingMints, keyId, async (): Promise<MintOutcome> => {
         try {
           const token = await client.createInstallationToken(assertion(), installationId, {
             repositories: [name],
@@ -301,15 +330,26 @@ export function createGitHubAppProvider({
           });
           markOk();
           if (invalidError === null) cache.set(key, token);
-          return token;
+          return { kind: "minted", token };
         } catch (error) {
           if (error instanceof RepoNotInstalledError && bindings.get(owner) === installationId) {
             bindings.delete(owner);
           }
-          return markFailure(error);
+          recordFailure(error);
+          // Outage with a live entry for this key: serve it (see the module doc).
+          if (error instanceof ProviderUnavailableError && invalidError === null && cache.getUnexpired(key)) {
+            return { kind: "outage", error };
+          }
+          throw error;
         }
       });
-      return result(minted, "miss");
+      if (outcome.kind === "minted") return result(outcome.token, "miss");
+      // Re-checked per caller: a joiner may resume after the entry expired or
+      // the provider went invalid (which clears the cache).
+      if (invalidError !== null) throw invalidError;
+      const cached = req.refresh === true ? undefined : cache.getUnexpired(key);
+      if (cached === undefined) throw outcome.error;
+      return result(cached, "hit");
     },
 
     cacheEntries(): number {

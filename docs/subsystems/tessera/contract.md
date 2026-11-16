@@ -13,7 +13,8 @@ installation token for each `app` request. When the settings are not
 configured, the registry is empty and `app` requests fail with
 `provider_unconfigured`. No provider serves the `user` identity yet, so `user`
 requests always fail with `provider_unconfigured`. Minted tokens are cached in
-memory and reused until fewer than ten minutes of life remain.
+memory and reused until fewer than ten minutes of life remain; during a GitHub
+outage an unexpired cached token is served instead of an error.
 
 ## Public Interface
 
@@ -31,7 +32,7 @@ Tessera exposes `GET /healthz`, `GET /status` and one JSON API route,
 |-------|----------|
 | Method and path | `POST /v1/github/token` |
 | Request envelope | JSON object body (`content-type: application/json`) with the fields listed below. A field outside this set is rejected. |
-| Response envelope | `200` with an Entitlement body (below). Returned for an `app` request when the `github-app` provider is registered and GitHub mints the token. |
+| Response envelope | `200` with an Entitlement body (below). Returned for an `app` request when the `github-app` provider is registered and either GitHub mints the token or a cached token is served (see "Token cache" under the `github-app` provider). |
 | Authentication behavior | None. Any caller that can reach the port is accepted. |
 | Visible status or error behavior | A validation failure returns `400 invalid_request`. A valid request for an identity with no registered provider returns `503 provider_unconfigured`. Typed errors raised by a provider map to the statuses in `## Error Modes`. |
 
@@ -42,7 +43,7 @@ Request body:
 | `identity` | `"app"` or `"user"` | Yes | Which credential to issue: the GitHub App bot token or the operator token. |
 | `access` | `"read"` or `"write"` | Yes | Access level. It selects a fixed permission set; callers cannot name individual permissions. |
 | `repo` | string, `owner/name` | Required for `app`; optional for `user` | Target repository. Both parts may contain only letters, digits, `_`, `.` and `-`. A part made only of dots is rejected, as is an owner over 39 characters or a name over 100. |
-| `refresh` | boolean | No | Ask the provider to discard a cached credential before issuing. Passed to the provider; the `github-app` provider evicts the matching cache entry and mints a new token. |
+| `refresh` | boolean | No | Ask the provider to discard a cached credential before issuing. Passed to the provider; the `github-app` provider evicts the matching cache entry and mints a new token. A refresh never receives a cached token, so during a GitHub outage it fails with `provider_unavailable`. |
 | `subject` | string | No | Reserved for future per-spawn tickets. Accepted and validated, but not passed to the provider and not used for any decision. |
 
 Validation runs in this order: body is a JSON object, no unknown fields,
@@ -154,7 +155,19 @@ GitHub REST API.
   The provider's `cacheEntries()` reports the live count, which `/status`
   shows as `cache.entries`; `clearCache()` drops every entry (for a key
   reload). When the provider goes `invalid`, its cache is cleared and no
-  cached token is served.
+  cached token is served. The cache does not survive a restart.
+- **Outages.** When a re-mint fails with `provider_unavailable` and the
+  cached token for that key has not yet expired, the provider serves the
+  cached token (`cache: "hit"`, `200`) and becomes `degraded` with
+  `last_error` `provider_unavailable`. Every request sharing that failed mint
+  receives the cached token. No other failure is masked: `repo_not_installed`,
+  `credential_invalid` and `mint_failed` are returned even when a cached token
+  exists. With no entry, or an expired one, `provider_unavailable` is
+  returned. A `refresh: true` request never receives a cached token. The
+  key must be known without GitHub: from `TESSERA_GITHUB_INSTALLATION_ID` or a
+  remembered installation id. If the installation has to be looked up and the
+  lookup fails, the error is returned. The bot identity, once known, is kept
+  until restart, so an identity lookup never blocks a cached token.
 - **Mint coalescing.** At most one mint is in flight per cache key:
   concurrent requests for the same key share it and receive the same token
   or the same error, each reporting `cache: "miss"`. Requests for different
@@ -270,10 +283,24 @@ or `GITHUB_TOKEN`.
 - Validation error messages name fields and never echo submitted values.
 - `/healthz` reports process health only and returns `200` whether or not any
   provider is configured.
-- An `app` token is reused from the in-memory cache only while more than ten
-  minutes of its life remain, and only for the same installation, repository
-  set and access level; no cached token is served once the provider is
-  `invalid`.
+- Cached `app` tokens live in memory only: never on disk, never logged, and
+  gone on restart. The cache key is (installation id, sorted repository list,
+  access level); a cached token is only ever served for its own key, so
+  different repositories, access levels or installations never share a token.
+- A cached token is served without a GitHub call only while strictly more
+  than ten minutes (`REMINT_THRESHOLD_MS`) of its life remain; otherwise it is
+  re-minted. `refresh: true` evicts the entry before issuing, unless a mint
+  for that key is already in flight, which it joins.
+- At most one mint is in flight per cache key; concurrent requests for that
+  key share its result. A failed mint is never cached or retained.
+- During a GitHub outage (`provider_unavailable` on the re-mint) an unexpired
+  cached token for the same key is served and the provider is `degraded`.
+  Only `provider_unavailable` is masked this way. An expired token is never
+  served, a `refresh: true` request never receives a cached token, and no
+  cached token is served once the provider is `invalid`.
+- The cache is cleared as a whole when the provider goes `invalid` and by
+  `clearCache()` (the key-reload trigger). Otherwise entries leave only by
+  expiry, `refresh` eviction, or replacement by a newer mint.
 - Only Fastify framework rejections (an `FST_*` error code with a `4xx` status)
   become `400 invalid_request`. Any other unexpected error becomes
   `500 internal`, even if it carries a `4xx` status.
@@ -291,7 +318,7 @@ Every non-2xx response has the body
 | `provider_unconfigured` | `503` | No provider is registered for the requested identity: an `app` request when the GitHub App settings are not configured, and every `user` request. |
 | `repo_not_installed` | `422` | The App is not installed on the repository owner (both installation lookups return `404`; no mint is attempted), or GitHub refuses the mint with `404` or `422` because the installation does not cover the repository. |
 | `credential_invalid` | `503` | GitHub returns `401` to the app assertion, or the key file cannot be read or parsed. The provider becomes `invalid` until restart. No `Retry-After` header. |
-| `provider_unavailable` | `503` | A GitHub call times out (5 seconds), cannot connect, or returns `5xx`; or the bot identity is not yet known. The provider becomes `degraded`. The response carries a `Retry-After` header in seconds: GitHub's numeric `Retry-After` on a `5xx` when present, else `30`. |
+| `provider_unavailable` | `503` | A GitHub call times out (5 seconds), cannot connect, or returns `5xx`; or the bot identity is not yet known. The provider becomes `degraded`. The response carries a `Retry-After` header in seconds: GitHub's numeric `Retry-After` on a `5xx` when present, else `30`. When an unexpired cached token exists for the request's key (and the request is not a `refresh`), that token is served with `200` instead and no error is returned. |
 | `mint_failed` | `502` | Any other GitHub failure: another `4xx` (for example `403`, including rate limits), or a response that cannot be parsed. |
 | `internal` | `500` | Any other unexpected error, including a non-Fastify error that carries a `4xx` status. The message is `Internal server error.`; the log records the error class only. |
 

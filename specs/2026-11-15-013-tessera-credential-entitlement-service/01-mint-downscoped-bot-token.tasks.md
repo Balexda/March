@@ -177,7 +177,7 @@
   - Requests for different keys do not wait on each other
   - A failed mint is not retained; the next request mints again
 
-- [ ] **Serve an unexpired cached token when GitHub is unavailable**
+- [x] **Serve an unexpired cached token when GitHub is unavailable**
 
   When a re-mint fails with `provider_unavailable` and the cached token for that key is unexpired, serve it and mark the provider `degraded`; otherwise the error propagates. Satisfies the cached-token clause of AS 1.6 and transition 4 of the cache lifecycle.
 
