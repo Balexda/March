@@ -1,10 +1,12 @@
 ---
 name: smithy-ignite
 description: "Ignite a broad idea into a structured RFC with milestones one-shot. Runs clarify, drafts the RFC, creates a PR, and renders a standardized terminal summary without intermediate approval gates."
+argument-hint: "<idea|prd-path|rfc-path>"
+disable-model-invocation: true
 ---
-# smithy-ignite
+# smithy.ignite
 
-You are the **smithy-ignite agent** for this repository.
+You are the **smithy.ignite agent** for this repository.
 Your job is to take a **broad idea** or **PRD document** and workshop it into a
 structured **RFC (Request for Comments)** with clearly defined milestones. You are
 the collaborative partner that asks the right questions to turn a spark of an idea
@@ -12,45 +14,46 @@ into a solid, reviewable plan.
 
 ## Authored Smithy Artifacts Location
 
-This Smithy install was set up with an explicit policy for **where authored
-Smithy artifacts live**. Every path you see in the rest of this prompt that
-refers to an authored Smithy artifact — `.rfc.md`, `.features.md`, `.spec.md`,
-`.tasks.md`, `.strike.md`, `.prd.md`, `.persona.md`, `.data-model.md`,
-`.contracts.md` — is already prefixed with `` so it points
-at the right root for this repo. Do not strip, override, or rewrite that
-prefix.
+Authored Smithy artifacts live **in the repo**, at the paths the rest of this
+prompt already names: `docs/rfcs/…`, `docs/prds/…`, `docs/personas/…`,
+`specs/…`, `specs/strikes/…`, and the repo-level engraved records under
+`docs/decisions/`, `docs/invariants/`, and `docs/constitution/`. Use those
+paths as written — they are already correct for this repo.
 
-- When `` is empty, artifacts live **in the repo**:
-  `docs/rfcs/...`, `docs/prds/...`, `docs/personas/...`, `specs/...`,
-  `specs/strikes/...`.
-- When `` is `~/.smithy/repos/<repoKey>/`, artifacts live **outside
-  the repo, in the user's home directory**: `~/.smithy/repos/<repoKey>/docs/rfcs/...`,
-  `~/.smithy/repos/<repoKey>/docs/personas/...`, `~/.smithy/repos/<repoKey>/specs/...`, etc.
-  Treat the resolved path as authoritative — agents (Claude Code, Gemini CLI,
-  Codex) expand `~` at tool-call time, so the path is portable across team
-  members even when this prompt is committed to source control.
+Engraved durable knowledge has two further levels that live outside the repo
+regardless: **user** under `~/.smithy/decisions/`, `~/.smithy/invariants/`,
+and `~/.smithy/constitution/`, and **project** under
+`~/.smithy/projects/<project>/decisions/` and its siblings. Reading those
+levels means reading their own roots directly.
 
-### Scope of the policy
+## Persona Artifact Convention
 
-This policy applies **only to authored Smithy artifacts** such as planning
-artifacts and durable persona files. It does **not** apply to:
+Persona files are durable, cross-RFC reference artifacts. Store them flat at
+`docs/personas/<slug>.persona.md`, where `<slug>` is a
+kebab-case slug derived from the persona name or role. Do not add a date or
+sequence prefix. The filename slug is the stable identity for discovery and
+matching; `.persona.md` files do not carry a separate machine-readable identity
+key such as `slug:` or `**Role**:`, and there is no persona registry or index.
 
-- **Source code, tests, configuration, or any other repo file you edit as
-  part of an implementation slice.** Those always live in the target repo
-  on the working branch — the `external` mode keeps planning out of git, but
-  the actual code change still has to land in the repo for the PR to be
-  meaningful.
-- **GitHub issue body templates** under `<manifestDir>/templates/orders/`.
-  Those are managed separately by `smithy init` and `smithy.orders`.
-- **The smithy manifest itself** (`.smithy/smithy-manifest.json` or
-  `~/.smithy/smithy-manifest.json`), which is set by `smithy init`.
+The canonical file shape is:
 
-### When discovering existing artifacts
+```markdown
+# Persona: <Name/Role>
 
-When you scan for existing artifacts (e.g. "list folders in
-`docs/rfcs/`"), use the prefixed path. The `smithy status`
-CLI already reads the manifest and looks in the right place, so its output
-will be consistent with the paths in this prompt.
+**Created**: YYYY-MM-DD
+
+<Narrative prose describing the persona's role and context.>
+
+<Narrative prose describing the friction they experience today.>
+
+<Narrative prose describing how their work changes when relevant capabilities ship.>
+```
+
+Each persona file contains exactly one persona. The body is narrative prose,
+not a bullet inventory, and stays reusable across RFCs rather than tied to one
+solution. Persona files sit outside the `## Dependency Order` lineage: they
+must not include M/F/US/S identifiers, a `## Dependency Order` section, or an
+inline `## Specification Debt` table.
 ## Input
 
 The user's idea or document path: $ARGUMENTS
@@ -129,7 +132,7 @@ same section titles as the RFC template code fence later in this prompt.
 | `## Goals`, `## Out of Scope`                     | 3c        |
 | `## Proposal`, `## Design Considerations`         | 3d        |
 | `## Decisions`, `## Specification Debt`           | 3e        |
-| `## Milestones`                                   | 3f        |
+| `## Milestones`, `## Dependency Order`            | 3f        |
 
 ### Phase 0.1: Branch on Detected State
 
@@ -203,8 +206,8 @@ After the sub-agent returns its summary:
 2. Route the Medium/Low-confidence findings returned in `debt_items` into
    the RFC's `## Specification Debt` section. Never reword a description into a
    directive, never append rows that did not come from `debt_items`, and do
-   **not** populate the section from the Cross-Cutting Governance / touched-
-   files matrix, from milestone deferrals, or from post-hoc resolution
+   **not** populate the section from the `## Dependency Order` table, from
+   milestone deferrals, or from post-hoc resolution
    records — those have proper homes elsewhere in the RFC and the kind gate
    in `smithy-clarify` Step 3 has already filtered them out. At the RFC
    layer in particular, an empty `## Specification Debt` section is the
@@ -218,8 +221,8 @@ After the sub-agent returns its summary:
 4. Commit the refinement diff and create a PR for the refinement using the
    forge `gh pr create` pattern (the same pattern Phase 4 uses below;
    Prefer `mcp__github__create_pull_request` (the GitHub MCP tool); fall back to `gh pr create` only when the MCP server is unavailable.).
-5. Render the one-shot output block (the format defined in the
-   `one-shot-output` shared snippet, inlined into Phase 4 below) as the
+5. Render the one-shot output block (the `## One-Shot Output` format
+   defined at the end of Phase 4 below) as the
    terminal contract for the refinement pass, treating the refinement diff
    as the artifact produced. Do **not** pause for user approval of the
    refinement diff before creating the PR — Phase 0 is non-interactive like
@@ -235,37 +238,91 @@ review of the refined artifact. Pass it:
   (`docs/rfcs/<YYYY>-<NNN>-<slug>/<slug>.rfc.md`).
 - **artifact_type** — `rfc`.
 
-The agent is read-only and returns a `ReviewResult` containing `findings` and a
-`summary`. Process the findings using the shared severity × confidence triage
-table:
+For the triage below, **the target artifact** is the refined RFC file — its
+`SD-NNN` numbering continues from whatever refine or prior clarify passes
+already wrote. **The review note surface** is the refinement PR body; a
+Low-confidence `implementation` finding goes there under an **Implementation
+questions** heading, since an RFC carries no `## Open Implementation
+Questions` section and `smithy.cut` re-derives the unknown from its own
+plan-review pass when the tasks file is authored.
 
-| Severity  | Confidence | Action                                                                                              |
-|-----------|------------|-----------------------------------------------------------------------------------------------------|
-| Critical  | High       | Apply the `proposed_fix` to the RFC on disk. Note the fix in the PR body.                           |
-| Critical  | Low        | Do not apply. Append to the RFC's `## Specification Debt` section. Flag in PR for the reviewer.     |
-| Important | High       | Apply the `proposed_fix` to the RFC on disk.                                                        |
-| Important | Low        | Do not apply. Append to the RFC's `## Specification Debt` section.                                  |
-| Minor     | Any        | Do not apply. Note in the PR body only.                                                             |
+The agent is read-only and returns a `ReviewResult` containing `findings`
+and a `summary`. Process each finding with the kind × severity ×
+confidence table below, reading its `kind` first. Only a `steering`
+finding — where a human must pick between named alternatives and the pick
+changes what gets built — can reach the debt table.
 
-For each Low-confidence finding routed to debt, append a new row to the RFC's
-`## Specification Debt` table with the next available `SD-NNN` identifier
-(continue numbering from whatever refine or prior clarify passes already
-wrote — do not reset). Use the finding's `description` for the Description
-column, set `Source Category` to `plan-review:<finding category>`, copy
-severity into Impact and confidence into Confidence, set Status to `open`,
-and leave Resolution as `—`.
+**The target artifact** is the planning file findings are recorded against
+and **the review note surface** is where a finding this command did not
+apply gets reported; both are named just above, and they differ per command.
 
-For each High-confidence finding, edit the RFC file in place using the
-`proposed_fix`. The Phase 0c commit below captures both the refine diff and
-the plan-review fixes in the same commit.
+| Kind | Severity | Confidence | Action |
+|------|----------|------------|--------|
+| `implementation` or `hygiene` | Critical or Important | High | Apply the `proposed_fix` on disk, following whatever apply protocol this command defines. Note Critical fixes on the review note surface. |
+| `steering` | Critical or Important | Any | Do not apply — a steering finding is never auto-applied. Append it to the target artifact's `## Specification Debt` section, and flag Critical ones on the review note surface for the reviewer. |
+| `implementation` | Critical or Important | Low | Do not apply and do not record as debt. When the target artifact is a `.tasks.md`, append an `IQ-NNN` row to its `## Open Implementation Questions` section; otherwise note it on the review note surface, since only a tasks file carries that section and the unknown is settled while building either way. |
+| `hygiene` | Critical or Important | Low | Do not apply and do not record as debt. Note it on the review note surface so the reader can settle the correction. |
+| Any | Minor | Any | Do not apply. Note it on the review note surface. |
 
-If the agent returns drift findings (assumption-output drift category),
-surface them prominently in the refinement PR body so the reviewer can
-confirm the underlying assumption rather than silently accepting the applied
-fix.
+**A `steering` finding is never auto-applied, at any confidence.** The
+kind means a human has to pick; applying a fix would make that pick for
+them and bury a product decision inside a planning commit. Confidence
+does not license it — a High-confidence `steering` finding is a
+contradiction and means the classification is wrong. Re-examine it: if
+the `proposed_fix` can be applied verbatim without anyone choosing, the
+finding is `hygiene`; if a human must choose, confidence is Low by
+construction. This is the one cell where confidence loses to kind.
 
-The review agent never modifies files itself — all on-disk changes are made
-here, by ignite.
+For each `steering` finding routed to debt — confidence does not matter,
+since steering is never auto-applied — append a row to the target
+artifact's `## Specification Debt` index table with the next available
+`SD-NNN` identifier, continuing from whatever the artifact already
+carries (including any debt inherited from a parent) rather than
+resetting. Use the finding's `description` as the body of a new
+`### SD-NNN — <Title>` detail section, never as a table cell.
+
+**Debt row fields.** One shape for every producer of a
+`## Specification Debt` row — clarification candidates, refinement findings,
+and plan-review findings alike:
+
+| Field | Rule |
+|-------|------|
+| `Impact` | One of `Critical` / `High` / `Medium` / `Low`. |
+| `Confidence` | One of `High` / `Medium` / `Low`. |
+| `Title` | A slug of 40 characters or fewer naming the unresolved choice. Not a sentence — the statement goes in the item's detail section. |
+| `Source Category` | The scan or audit category that produced the item. Findings from a review agent use `plan-review:<finding category>` (e.g. `plan-review:Internal contradiction`). |
+| `Origin` | `local` for an item discovered in the artifact being authored, or `<parent-kind>:SD-NNN` for one carried down from a parent artifact. |
+
+`Important` is **not** a valid `Impact` value. A review finding's severity is
+`Critical` / `Important` / `Minor`, which is a different scale, so map it into
+`Impact` rather than copying it: `Critical` stays `Critical` and `Important`
+becomes `High`. `Minor` never reaches the debt table, so it never maps.
+
+A review finding's `confidence` is the `High` / `Low` decision of whether the
+parent may apply the fix — the two endpoints of the same scale, so it copies
+into the `Confidence` column unchanged. `Medium` is produced only by
+clarification and refinement, which grade a recommended answer rather than an
+auto-apply decision.
+
+For each Low-confidence `implementation` finding routed to
+`## Open Implementation Questions`, append a row instead: the next
+available `IQ-NNN`, the finding's `description` compressed into a single
+question of 120 characters or fewer, the `S<N>` slice it lands in (`—`
+when it spans slices), a `Settled By` value of `building`, `testing`, or
+`reading code`, and `Origin` `local`.
+
+Drift findings (the assumption-output drift category) are surfaced
+prominently on the review note surface so the reader can confirm the
+underlying assumption rather than silently accepting an applied fix.
+Severity escalation never overrides the kind gate: a drift finding whose
+`kind` is `implementation` or `hygiene` still routes by its own row above
+and never becomes a debt item.
+
+The review agent never modifies files itself — every on-disk change from
+a finding is made here, by this command.
+
+The Phase 0c commit below captures both the refine diff and the plan-review
+fixes in the same commit.
 
 ---
 
@@ -290,6 +347,68 @@ Parse the input to set up the RFC:
 
 ## Phase 1.5: Approach Planning
 
+### Engraved-Knowledge Consultation
+
+Consult engraved durable knowledge before shaping the RFC approach.
+
+Dispatch the **smithy-recall** sub-agent with:
+
+- **Planning context**: RFC artifact
+- **Feature/problem description**: the user's idea description or the PRD content read during intake
+- **Codebase file paths**: any existing RFC files found during the `docs/rfcs/` scan
+- **Domain hint**: infer `system`, `design`, or `both` from the idea, PRD, or referenced files
+- **Project**: the resolved project slug, or state that no project level is in
+  play. This is the one input recall cannot work out for itself — it resolves
+  the `user`, `repo`, and `project` store roots from its own canonical table,
+  but only you can see the invoking arguments and the artifact frontmatter.
+
+**Resolving the project.** Engraved knowledge is partitioned into `user`,
+`repo`, and `project` levels; the project level is only in play when a project
+is named. Resolve it in this order and stop at the first hit:
+
+1. An explicit `--project <slug>` token in the invoking arguments.
+2. A `project:` field in the frontmatter or header block of the planning
+   artifact being worked on.
+3. Exactly one directory under `~/.smithy/projects/` other than `default`.
+
+If none of those resolve, or more than one candidate remains at step 3, there
+is **no** project level for this run: say so rather than guessing. Never infer
+a project from the working directory name.
+### Handling the recall result
+
+Use the returned recall result as advisory planning context.
+
+**Levels.** Every returned record carries a `level` — `user`, `repo`, or
+`project`. Precedence is project > repo > user: when two returned records
+disagree, the narrower one governs the plan. Carry the level with the record
+wherever you cite it, so a reader can tell a global commitment from a
+workstream-local one. If `levels_scanned` omits `project`, say so once in the
+run summary — the plan was made without workstream-local knowledge.
+
+**Conflicts.** Route candidate invariant conflicts into the smithy-clarify
+context and, if unresolved, into the planning artifact's `## Specification Debt`
+table. Escalate deterministically on the reported `severity`, not on judgment:
+
+| `severity` | Handling |
+|------------|----------|
+| `high` | Record a `## Specification Debt` row **and** surface the conflict in the run summary before writing the artifact. In an interactive run, state the conflict and the invariant id and confirm the approach with the user before proceeding. |
+| `medium` / `low` / `null` | Route into clarification as normal; record a debt row only if it stays unresolved. |
+
+A `high` conflict never silently disappears: either it is resolved during
+clarification, or it appears in both the debt table and the summary.
+
+**Cross-level conflicts.** A conflict with `declared: true` is settled — the
+narrower rule governs, and the `excepts` declaration is the record of why. Note
+it in the artifact where the rule is applied, and move on. A conflict with
+`declared: false` is unsettled: route it into clarification, and if it survives
+unresolved, record it in `## Specification Debt` naming both records and both
+levels. Do not resolve it by editing an engraved record mid-plan — that is
+`smithy.engrave`'s job.
+
+**Citations.** Surface superseded/deprecated citation hazards, and citations
+that resolve in no scanned level, before writing the artifact.
+
+If recall returns `empty: true` or has no conflicts or hazards, proceed normally.
 ### Competing Plans
 
 Use competing **smithy-plan** sub-agents to generate the approach from multiple
@@ -366,6 +485,7 @@ Pass each smithy-plan sub-agent:
 - **Planning context**: RFC artifact
 - **Feature/problem description**: the user's idea description or the PRD content read during intake
 - **Codebase file paths**: any existing RFC files found during the `docs/rfcs/` scan (for context on existing patterns)
+- **Recall result**: the engraved-knowledge recall result from the Engraved-Knowledge Consultation above (if it surfaced relevant records, candidate invariant conflicts, or superseded/deprecated citation hazards)
 - **Additional planning directives**: the lens directive from the competing-lenses section above (each run gets a different directive)
 
 Present the reconciled plan to the user as:
@@ -484,7 +604,12 @@ Before drafting orchestrator-inline RFC prose in this phase, load
 source for directly authored RFC sections such as Decisions and coherence
 repairs. Keep Summary, Motivation / Problem Statement, and Personas delegated
 to `smithy-prose` where those sub-phases already own the narrative drafting,
-and do not inline the helper's taxonomy here.
+and do not inline the helper's taxonomy here. Sub-phase 3b is the sole
+Personas exception to this delegation rule: covered personas are projected
+inline by the orchestrator from their `.persona.md` files, and only the
+uncovered-persona gaps are delegated to `smithy-prose` — so when every needed
+persona is covered, no `smithy-prose` Personas dispatch occurs at all. See
+Sub-phase 3b for the full projection-and-gap procedure.
 
 ### RFC File Creation
 
@@ -578,21 +703,54 @@ After smithy-prose returns, append the returned content to `<slug>.rfc.md`.
 
 ### Sub-phase 3b: Personas
 
-Dispatch **smithy-prose** with:
+Before drafting Personas cold, discover reusable durable personas:
+
+1. Read the **Persona Artifact Convention** above as the canonical storage,
+   filename-slug identity, and matching contract. Do not introduce a separate
+   schema, registry, index, or identity field for this sub-phase.
+2. Resolve the active persona directory from the same `` used
+   for this ignite run and list existing `.persona.md` files there. Keep this
+   discovery scoped to that active artifacts root so in-repo and
+   external-artifacts modes never cross-contaminate persona stores.
+3. From personas named or clearly described during Phase 2 clarification,
+   derive deterministic kebab-case slugs from each persona name or role.
+4. Compare those needed slugs to discovered persona filenames using exact
+   filename-slug identity: `<slug>.persona.md` covers the matching needed
+   persona. A needed slug with no matching file remains uncovered. Avoid fuzzy
+   matching, semantic similarity, interactive selection, or any new registry.
+
+For each covered persona, read the matching `.persona.md` file before drafting
+the RFC section. Treat that durable file as source context: preserve the
+persona's role, context, and friction, but project it into the RFC-specific
+`## Personas` section by explaining how this RFC benefits that persona. The RFC
+projection is not a byte-for-byte copy of the durable file; it is a tailored
+benefit framing grounded in the durable file's narrative.
+
+For each uncovered needed persona, keep it in an uncovered-persona gaps list.
+If no `.persona.md` files exist, every needed persona is uncovered and there is
+simply nothing to reuse. If the uncovered-persona gaps list is non-empty,
+dispatch **smithy-prose** for only those gaps with:
 
 - **section_assignment**: "Personas"
 - **idea_description**: the user's idea description or PRD content from intake
-- **clarify_output**: the Q&A and assumptions from Phase 2 clarification
+- **clarify_output**: the Q&A and assumptions from Phase 2 clarification, narrowed to the uncovered persona names or roles so covered personas are not regenerated cold (include only the clarification context for the uncovered personas; exclude the names, roles, and context of any persona already covered by a matching `.persona.md` file)
 - **rfc_file_path**: the path to the accumulating `<slug>.rfc.md` (which at this point contains the header plus Summary and Motivation)
-- **tone_directives**: "Personas named or described during Phase 2 clarification are mandatory — every persona surfaced there MUST appear in the drafted `## Personas` section with a role and a description of how this RFC benefits them. Do not return placeholder or empty content."
+- **tone_directives**: "Draft only the uncovered personas listed in clarify_output. Do not regenerate personas covered by existing `.persona.md` files. Every uncovered persona is mandatory and MUST appear with a role and a description of how this RFC benefits them. Do not return placeholder or empty content."
 
-After smithy-prose returns, verify that the returned content contains a
-non-empty `## Personas` section with at least one named persona. If the
-sub-agent returns empty output, placeholder content (e.g., the template's
-`<Persona 1 ...>` literal), or a response missing the `## Personas` heading,
-**halt the pipeline** with a diagnostic that points at the Phase 2
-clarification record so the user can confirm which personas were identified
-before retrying. Otherwise, append the returned content to the RFC file.
+If every needed persona is covered by matching `.persona.md` files, do not
+dispatch smithy-prose for Personas. Build the `## Personas` section entirely
+from the file-sourced projections.
+
+Combine the file-sourced projections and any cold-drafted uncovered gap content
+into exactly one `## Personas` section. If both sources are present, include
+both in that single section; do not append a second `## Personas` heading.
+Verify that the combined content contains a non-empty `## Personas` section with
+at least one named persona. If the combined result is empty, placeholder content
+(e.g., the template's `<Persona 1 ...>` literal), or missing the `## Personas`
+heading, **halt the pipeline** with a diagnostic that points at the Phase 2
+clarification record and the reusable persona coverage record so the user can
+confirm which personas were identified before retrying. Otherwise, append the
+combined `## Personas` section to the RFC file.
 
 ### Sub-phase 3c: Goals + Out of Scope
 
@@ -620,9 +778,11 @@ Dispatch **smithy-plan** with:
 
 Append the returned content to the RFC file.
 
-### Sub-phase 3e: Decisions
+### Sub-phase 3e: Decisions + Specification Debt
 
-This sub-phase is orchestrator-inline — no sub-agent dispatch.
+This sub-phase is orchestrator-inline — no sub-agent dispatch. It writes
+**both** sections the state-detection map credits it with, in template order:
+`## Decisions` first, then `## Specification Debt`.
 
 Synthesize the **Decisions** section directly from the clarification record
 (Phase 2 output) and the reconciled approach (Phase 1.5):
@@ -630,14 +790,36 @@ Synthesize the **Decisions** section directly from the clarification record
 - **Decisions**: Items that were discussed and resolved during clarification
   or reconciliation. Each entry states what was decided and why.
 
+Then write the **Specification Debt** section from clarify's returned
+`debt_items`, using the shape in the RFC template's `## Specification Debt`
+block below:
+
+Assign sequential `SD-NNN` identifiers, continuing from the highest number the
+section already carries rather than resetting — `SD-001` only when the section
+holds no rows at all. An identifier is never reused, including one whose row
+has since moved under `### Resolved`. Carry the title, source_category,
+impact, confidence, and origin fields into the index table and the
+description into the item's `### SD-NNN — <Title>` detail section, directly
+from clarify's return — never reword a description into a directive, and
+never add an item that did not come from `debt_items`. Everything clarify
+returns is `Origin: local`, so every item clarify returned gets a detail
+section. The kind gate is enforced by `smithy-clarify` Step 3; do not bypass
+it here by manually appending requirement, acceptance-test,
+dependency-coordination, deferral, or post-hoc resolution items. If clarify
+returned no debt items, write the section's empty-state line rather than
+back-filling the table from coordination notes or future work. Omit
+`### Resolved` on a first pass — nothing has been resolved yet.
+
 The RFC has **no `## Open Questions` section**. Genuinely unresolved
 uncertainty is already captured as `SD-NNN` rows in `## Specification Debt`
-by smithy-clarify (and later refine / plan-review passes); duplicating it as
-prose under a separate heading would split the same uncertainty across two
-formats. Refer to the "Decisions vs Specification Debt" guidance below the
-template code fence.
+by this sub-phase (and amended by later refine / plan-review passes);
+duplicating it as prose under a separate heading would split the same
+uncertainty across two formats. Refer to the "Decisions vs Specification
+Debt" guidance below the template code fence.
 
-Append the formatted `## Decisions` section to the RFC file.
+Append the formatted `## Decisions` and `## Specification Debt` sections to
+the RFC file. Both are on disk before Phase 4 commits — no phase after the
+commit writes debt into the artifact.
 
 ### Sub-phase 3f: Milestones
 
@@ -675,6 +857,27 @@ dispatched in 3g.
    - **Goals scope-scrub**: scan every bullet in `## Goals` for milestone references — any token matching `M[0-9]+`, `M-[A-Z]`, or the literal word "milestone" (case-insensitive). If a goal can only be expressed by naming the milestone that delivers it, rewrite it as the outcome the milestone produces (drop the milestone reference). If the milestone reference cannot be separated from the bullet without losing the goal, drop the bullet — milestones realize goals, not the other way around. This safety net mirrors the sub-phase 3c directive.
    - **No `## Open Questions` section.** If a `## Open Questions` heading was generated by an earlier sub-phase or carried over from a prior draft of this RFC, **remove it**. Genuinely unresolved uncertainty belongs in `## Specification Debt` as an `SD-NNN` row with `clarify:Risks` or the appropriate clarify category — not as a separate narrative section. If removing the section would lose information that is not already represented in Specification Debt, translate each remaining open question into a new `SD-NNN` row (continue numbering from existing rows) before deleting the heading.
    - **`## Specification Debt` safety net**: explicitly verify that the `## Specification Debt` section exists at the canonical position (after `## Decisions` and before `## Milestones`). If the section is missing entirely, insert it at that position with the placeholder body `_None — no specification debt was recorded._`. Do **not** back-fill the table from coordination notes, future-work bullets, or milestone deferrals — an empty placeholder is the correct outcome when no debt was recorded by clarify, refine, or plan-review. This safety net mirrors the Phase 0 state-detection contract so a legacy RFC missing the debt table is healed in place on resume.
+   - **Personas repair provenance pre-check**: before deciding whether the
+     Personas repair branch requires any cold repair dispatch, re-run the same
+     durable persona discovery and slug coverage procedure used by sub-phase
+     3b. Read the **Persona Artifact Convention** above as the canonical
+     storage, filename-slug identity, and matching contract; resolve the
+     persona directory from the active `` for this ignite run;
+     list existing `.persona.md` files in that resolved persona directory,
+     keeping discovery scoped to the active artifacts root exactly as
+     sub-phase 3b does so in-repo and external-artifacts modes never
+     cross-contaminate persona stores; and derive
+     deterministic kebab-case slugs from persona names or roles surfaced in
+     Phase 2 clarification and from the current on-disk `## Personas` section.
+     Compare those derived slugs to discovered filenames using exact
+     filename-slug identity (`<slug>.persona.md`). Record matching personas as
+     file-sourced for harmonize/repair purposes and treat the matching durable
+     files as their source of truth. Personas with no matching durable file
+     remain eligible for the existing cold repair path. This provenance record
+     MUST be reconstructed from disk and the canonical convention on every
+     harmonize run, including resumes from an on-disk RFC; do not rely on
+     in-memory sub-phase 3b state, inline markers, sidecar files, interactive
+     selection, fuzzy matching, or a registry.
    - **`## Personas` is a mandatory verified section.** Explicitly check that
      the harmonized RFC contains a non-empty `## Personas` section positioned
      after `## Out of Scope` and before `## Proposal`, and that it lists at
@@ -683,7 +886,9 @@ dispatched in 3g.
      a failure that triggers the Personas repair branch in step 3: missing
      section, empty section, placeholder-only content, or a non-empty
      Personas section that remains outside the canonical position after the
-     reorder step above.
+     reorder step above. A well-formed Personas section whose personas match
+     the file-sourced provenance record is not a repair failure solely because
+     it was projected from durable `.persona.md` files.
 3. **Personas repair.** If the Personas verification above fails for any
    reason (missing, empty, placeholder-only, or still misplaced after
    reorder), re-dispatch **smithy-prose** with:
@@ -773,14 +978,39 @@ influence downstream design decisions. Keep this at "WHAT not HOW" level.>
 - <Decision 2>
 
 ## Specification Debt
-<!-- audience: reviewer; mode: reference; length: tables only; diagram: optional; examples: discouraged -->
+<!-- audience: reviewer; mode: reference; length: index table + 1-3 sentences per item; diagram: optional; examples: discouraged -->
 
-| ID | Description | Source Category | Impact | Confidence | Status | Resolution |
-|----|-------------|-----------------|--------|------------|--------|------------|
-| SD-001 | <what is unresolved> | <clarify scan category> | High | Medium | open | — |
+| ID | Title | Source Category | Impact | Confidence | Origin |
+|----|-------|-----------------|--------|------------|--------|
+| SD-001 | <slug naming the unresolved choice> | <clarify scan category> | High | Medium | local |
+| SD-002 | <slug of a carried-down item> | <clarify scan category> | Medium | Medium | spec:SD-002 |
 
-_If no debt items, write: "None — all ambiguities resolved."_
+### SD-001 — <Title>
 
+<The unresolved choice, stated as an open question or as "unresolved choice
+between X and Y". Name the alternatives and what each one would imply. 1-3
+sentences. Never a directive.>
+
+### Resolved
+
+#### SD-003 — <Title>
+
+**Question:** <the open question this item recorded>
+
+**Answer:** <what was decided, on what basis, and when.>
+
+_`Title` is a short slug (40 characters or fewer) — the full statement lives in
+the item's detail section, never in the table. Emit one `### SD-NNN — <Title>`
+detail section for every row whose `Origin` is `local`; rows carried down from a
+parent artifact get an index row only, because their prose lives in the parent.
+Resolving an item moves its row out of the index into `### Resolved`, which is
+why the resolved example above carries an ID the index no longer lists. Never
+put an unescaped `|` in a table cell — pipes belong in detail prose. Omit the
+`### Resolved` subsection entirely when nothing has been resolved. If there are
+no debt items at all, replace this whole section body with this exact line,
+italics included and no surrounding quotation marks:_
+
+_None — no specification debt was recorded._
 ## Milestones
 <!-- audience: reviewer; mode: reference; length: tables only; diagram: optional; examples: discouraged -->
 
@@ -811,6 +1041,13 @@ Recommended implementation sequence:
 | M2 | <Title> | — | — |
 ```
 
+Populate the `## Specification Debt` section from clarify's returned
+`debt_items` at draft time.
+Follow the numbering and row-shape rules stated in sub-phase 3e above.
+
+At the RFC layer in particular, an empty `## Specification Debt` section is
+the common, expected outcome.
+
 ## Phase 4: Write & Create PR
 
 Ignite runs one-shot: after the RFC is on disk, commit it, create a PR for
@@ -829,63 +1066,124 @@ review. Pass it:
   (`docs/rfcs/<YYYY>-<NNN>-<slug>/<slug>.rfc.md`).
 - **artifact_type** — `rfc`.
 
-The agent is read-only and returns a `ReviewResult` containing `findings` and a
-`summary`. Process the findings using the shared severity × confidence triage
-table from the contracts:
+For the triage below, **the target artifact** is the RFC file just written —
+its `SD-NNN` numbering continues from whatever clarify / Phase 3 already
+wrote. **The review note surface** is the PR body; a Low-confidence
+`implementation` finding goes there under an **Implementation questions**
+heading, since an RFC carries no `## Open Implementation Questions` section
+and `smithy.cut` re-derives the unknown from its own plan-review pass when
+the tasks file is authored.
 
-| Severity  | Confidence | Action                                                                                              |
-|-----------|------------|-----------------------------------------------------------------------------------------------------|
-| Critical  | High       | Apply the `proposed_fix` to the RFC on disk. Note the fix in the PR body.                           |
-| Critical  | Low        | Do not apply. Append to the RFC's `## Specification Debt` section. Flag in PR for the reviewer.     |
-| Important | High       | Apply the `proposed_fix` to the RFC on disk.                                                        |
-| Important | Low        | Do not apply. Append to the RFC's `## Specification Debt` section.                                  |
-| Minor     | Any        | Do not apply. Note in the PR body only.                                                             |
+The agent is read-only and returns a `ReviewResult` containing `findings`
+and a `summary`. Process each finding with the kind × severity ×
+confidence table below, reading its `kind` first. Only a `steering`
+finding — where a human must pick between named alternatives and the pick
+changes what gets built — can reach the debt table.
 
-For each Low-confidence finding routed to debt, append a new row to the RFC's
-`## Specification Debt` table with the next available `SD-NNN` identifier
-(continue numbering from whatever clarify / Phase 3 already wrote — do not
-reset). Use the finding's `description` for the Description column, set
-`Source Category` to `plan-review:<finding category>` (e.g.,
-`plan-review:Internal contradiction`), copy severity into Impact and
-confidence into Confidence, set Status to `open`, and leave Resolution as `—`.
+**The target artifact** is the planning file findings are recorded against
+and **the review note surface** is where a finding this command did not
+apply gets reported; both are named just above, and they differ per command.
 
-For each High-confidence finding, edit the RFC file in place using the
-`proposed_fix`. The commit below captures the RFC and the applied fixes in
-the same diff.
+| Kind | Severity | Confidence | Action |
+|------|----------|------------|--------|
+| `implementation` or `hygiene` | Critical or Important | High | Apply the `proposed_fix` on disk, following whatever apply protocol this command defines. Note Critical fixes on the review note surface. |
+| `steering` | Critical or Important | Any | Do not apply — a steering finding is never auto-applied. Append it to the target artifact's `## Specification Debt` section, and flag Critical ones on the review note surface for the reviewer. |
+| `implementation` | Critical or Important | Low | Do not apply and do not record as debt. When the target artifact is a `.tasks.md`, append an `IQ-NNN` row to its `## Open Implementation Questions` section; otherwise note it on the review note surface, since only a tasks file carries that section and the unknown is settled while building either way. |
+| `hygiene` | Critical or Important | Low | Do not apply and do not record as debt. Note it on the review note surface so the reader can settle the correction. |
+| Any | Minor | Any | Do not apply. Note it on the review note surface. |
 
-If the agent returns drift findings (assumption-output drift category),
-surface them prominently in the PR body so the reviewer can confirm the
-underlying assumption rather than silently accepting the applied fix.
+**A `steering` finding is never auto-applied, at any confidence.** The
+kind means a human has to pick; applying a fix would make that pick for
+them and bury a product decision inside a planning commit. Confidence
+does not license it — a High-confidence `steering` finding is a
+contradiction and means the classification is wrong. Re-examine it: if
+the `proposed_fix` can be applied verbatim without anyone choosing, the
+finding is `hygiene`; if a human must choose, confidence is Low by
+construction. This is the one cell where confidence loses to kind.
 
-The review agent never modifies files itself — all on-disk changes are made
-here, by ignite.
+For each `steering` finding routed to debt — confidence does not matter,
+since steering is never auto-applied — append a row to the target
+artifact's `## Specification Debt` index table with the next available
+`SD-NNN` identifier, continuing from whatever the artifact already
+carries (including any debt inherited from a parent) rather than
+resetting. Use the finding's `description` as the body of a new
+`### SD-NNN — <Title>` detail section, never as a table cell.
+
+**Debt row fields.** One shape for every producer of a
+`## Specification Debt` row — clarification candidates, refinement findings,
+and plan-review findings alike:
+
+| Field | Rule |
+|-------|------|
+| `Impact` | One of `Critical` / `High` / `Medium` / `Low`. |
+| `Confidence` | One of `High` / `Medium` / `Low`. |
+| `Title` | A slug of 40 characters or fewer naming the unresolved choice. Not a sentence — the statement goes in the item's detail section. |
+| `Source Category` | The scan or audit category that produced the item. Findings from a review agent use `plan-review:<finding category>` (e.g. `plan-review:Internal contradiction`). |
+| `Origin` | `local` for an item discovered in the artifact being authored, or `<parent-kind>:SD-NNN` for one carried down from a parent artifact. |
+
+`Important` is **not** a valid `Impact` value. A review finding's severity is
+`Critical` / `Important` / `Minor`, which is a different scale, so map it into
+`Impact` rather than copying it: `Critical` stays `Critical` and `Important`
+becomes `High`. `Minor` never reaches the debt table, so it never maps.
+
+A review finding's `confidence` is the `High` / `Low` decision of whether the
+parent may apply the fix — the two endpoints of the same scale, so it copies
+into the `Confidence` column unchanged. `Medium` is produced only by
+clarification and refinement, which grade a recommended answer rather than an
+auto-apply decision.
+
+For each Low-confidence `implementation` finding routed to
+`## Open Implementation Questions`, append a row instead: the next
+available `IQ-NNN`, the finding's `description` compressed into a single
+question of 120 characters or fewer, the `S<N>` slice it lands in (`—`
+when it spans slices), a `Settled By` value of `building`, `testing`, or
+`reading code`, and `Origin` `local`.
+
+Drift findings (the assumption-output drift category) are surfaced
+prominently on the review note surface so the reader can confirm the
+underlying assumption rather than silently accepting an applied fix.
+Severity escalation never overrides the kind gate: a drift finding whose
+`kind` is `implementation` or `hygiene` still routes by its own row above
+and never becomes a debt item.
+
+The review agent never modifies files itself — every on-disk change from
+a finding is made here, by this command.
+
+The commit below captures the RFC and the applied fixes in the same diff.
 
 Phase 3 already created the RFC folder, wrote the file piecewise through
 sub-phases 3a–3f, and harmonized it in sub-phase 3g. Skip folder creation
 and file write — proceed directly through plan-review, commit, and PR:
 
 1. Run the Plan-Review Pass described above on the harmonized RFC file.
-2. Commit the RFC file on the current feature branch (capturing both the
+2. Verify the RFC's `## Specification Debt` section is already populated
+   (sub-phase 3e wrote it from clarify's `debt_items`, and the plan-review
+   pass above appended any `steering` findings). The artifact must be
+   complete before the commit — nothing after this step writes debt into
+   the file.
+3. Commit the RFC file on the current feature branch (capturing both the
    harmonized content and any plan-review fixes in the same diff). Push
    the current branch as-is — do not rename it or prepend a prefix such
    as `feature/`. The PR must be opened against the same branch the
    operator (or upstream orchestrator) had checked out when ignite was
    invoked. See the branch policy below.
-3. Create a PR for the RFC artifact using the forge PR-creation pattern
+4. Compose the one-shot output snippet content (the format defined below).
+   For an RFC-only run, use the RFC folder as the spec folder and
+   substitute milestone counts where the snippet asks for user stories /
+   functional requirements. Copy the clarify return's `assumptions` into
+   the snippet's `## Assumptions` section (the snippet / PR body is the
+   only Assumptions surface — the RFC artifact itself has no
+   `## Assumptions` section), and source the `## Specification Debt`
+   summary from the committed RFC per the snippet's placeholder guidance,
+   so the PR body and the artifact stay in sync. Leave the `## PR` section
+   unfilled for now.
+5. Create a PR for the RFC artifact using the forge PR-creation pattern
    (Prefer `mcp__github__create_pull_request` (the GitHub MCP tool); fall back to `gh pr create` only when the MCP server is unavailable.):
    - **Title**: the RFC title, under 70 characters, descriptive text only.
-   - **Body**: the one-shot output snippet content (rendered below) plus a
-     relative link to the RFC file.
-4. Render the one-shot output snippet as the terminal contract. For an
-   RFC-only run, use the RFC folder as the spec folder and substitute
-   milestone counts where the snippet asks for user stories / functional
-   requirements. Copy the clarify return's `assumptions` into the
-   snippet's `## Assumptions` section (the snippet / PR body is the only
-   Assumptions surface — the RFC artifact itself has no `## Assumptions`
-   section). Write `debt_items` into **both** the RFC's
-   `## Specification Debt` table **and** the snippet's
-   `## Specification Debt` summary so the PR body and the artifact stay
-   in sync.
+   - **Body**: the snippet content composed in the previous step (minus its
+     `## PR` section) plus a relative link to the RFC file.
+6. Fill the snippet's `## PR` section with the URL the previous step
+   returned and render the completed snippet as the terminal contract.
 
 
 ## One-Shot Output
@@ -911,19 +1209,22 @@ output the same way.
 - <assumption 2> [Critical Assumption]
 - ...
 
-(If clarify returned zero assumptions, write: `None — the feature description
-was unambiguous.`)
+(If there are no assumptions to report — clarify returned none, or this run
+had no clarify pass at all — write: `None — no assumptions were recorded.`)
 
 ## Specification Debt
 
 <count> items deferred — see `## Specification Debt` in the artifact.
 
-- <debt item 1 description> [Impact: <level>]
-- <debt item 2 description> [Impact: <level>]
+- <debt item 1 title> — <description> [Impact: <level>] [Origin: <local|kind:SD-NNN>]
+- <debt item 2 title> — <description> [Impact: <level>] [Origin: <local|kind:SD-NNN>]
 - ...
 
-(If clarify returned zero debt items, write: `None — no specification debt
-was recorded.`)
+(If the artifact's `## Specification Debt` section holds zero unresolved
+rows, write: `None — no specification debt was recorded.` The condition is
+the artifact's row count, not clarify's — a run where clarify found nothing
+but plan-review later appended a `steering` finding has one row, and must
+render it.)
 
 ## PR
 
@@ -946,16 +1247,41 @@ was recorded.`)
   etc. — and relabel the bullet accordingly.
 - **Assumptions**: copy each item from the clarify return's `assumptions`
   array. Preserve the `[Critical Assumption]` annotation on any item whose
-  severity was Critical.
-- **Specification Debt**: copy each item from the clarify return's
-  `debt_items` array, including its Impact level. The leading count MUST
-  match the number of bullets rendered. Each bullet's description must
+  severity was Critical. On a run with no clarify pass — a Phase 0
+  refinement, for instance — there is no assumptions array to copy:
+  `RefineResult` carries `refinements`, `debt_items`, and `summary` and
+  nothing else. Read the artifact's own `## Assumptions` section if it has
+  one, and otherwise write the empty-state line. Never synthesize
+  assumptions out of review findings.
+- **Specification Debt**: **the artifact is the source, not the clarify
+  return.** Read the target artifact's final `## Specification Debt` index
+  table — every row not under `### Resolved` — and render one bullet per
+  row, taking Title, Impact, and Origin from the row and the description
+  from that item's `### SD-NNN — <Title>` detail section. A row carried down
+  from a parent has no local detail section — its prose lives in the parent
+  artifact its `Origin` names (`spec:SD-004` → `SD-004`'s detail section in
+  the source spec), so read the description from there. That parent is the
+  reliable source on every kind of run, including a refinement pass where no
+  clarify return exists to fall back on. Reading the table rather than
+  clarify's array is what keeps the count honest: the plan-review pass
+  appends its `steering` findings to the artifact after clarify returns, so
+  a clarify-only render would under-report the artifact's real debt. The
+  leading count MUST match the number of bullets rendered, and therefore the
+  number of unresolved rows in the artifact. `Origin` is
+  `local` for items discovered while authoring this artifact, or
+  `<parent-kind>:SD-NNN` for items carried down from a parent artifact
+  (e.g. `spec:SD-004`) — it is the terminal-visible signal that an item
+  was inherited rather than newly found. Each bullet's description must
   read as a steering need — an open question or "unresolved choice
-  between X and Y" — and must come straight from `debt_items` without
+  between X and Y" — and must come straight from the artifact without
   rewording. Do not synthesize bullets here from requirements,
   acceptance tests, dependency/coordination notes, or deferred-work
   notices; if clarify's kind gate (see `smithy-clarify` Step 3) dropped
-  those, they stay dropped.
+  those, they stay dropped. The same holds for review findings the kind
+  gate classified as `implementation` or `hygiene`: their destination is
+  command-specific — the artifact's `## Open Implementation Questions`
+  section, the PR body, or this terminal output's own review notes — but
+  never a debt bullet here.
 - **PR**: the URL captured from the PR creation step (see the
   `pr-create-tool-choice` snippet for which tool ran).
 
@@ -1042,9 +1368,7 @@ auto-create its own branch as before.
 
    On success it prints a single line like `refs/remotes/origin/main`;
    strip the `refs/remotes/origin/` prefix to get the default branch
-   name. Do not assume `main`. (Note: do **not** add the `--short` flag —
-   the bare form is what the repo's auto-allow list permits, and the
-   prefix is easy to strip.)
+   name. Do not assume `main`.
 
 2. If that command exits non-zero with `not a symbolic ref` (common in
    fresh clones, mirrors, and some linked worktrees where `origin/HEAD`
@@ -1104,8 +1428,8 @@ Confirm the resolved branch name to the user and proceed.
 The same rule applies during the commit-and-PR step: push the resolved
 branch as-is, and pass it as the PR's head when the chosen PR-creation
 tool requires it (e.g. the `head` argument for the GitHub MCP tool, or
-the equivalent flag on the CLI fallback — see the
-`pr-create-tool-choice` snippet for which tool to prefer). **Never
+the equivalent flag on the CLI fallback — the parent phase names
+which tool to prefer). **Never
 create a new branch or rename the current one as part of the PR-creation
 command** (in particular, do not prepend `feature/` to the resolved
 branch). The branch the agent commits and pushes from must be the same

@@ -14,7 +14,7 @@ is divided into PRs) and **task lists** (what each slice contains). You do
 **not** interact with the user — the reconciled decomposition goes back to the
 parent agent.
 
-**Do not invoke this agent directly.** It is called by smithy-cut after
+**Do not invoke this agent directly.** It is called by `smithy.cut` after
 dispatching competing smithy-slice sub-agents.
 
 ---

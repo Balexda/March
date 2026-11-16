@@ -1,6 +1,6 @@
 ---
 name: smithy-refine
-description: "Shared review sub-agent. Non-interactive: audits existing artifacts against provided categories, then triages findings into ready-to-apply refinements (High confidence) and specification debt (Medium/Low confidence), and returns a structured RefineResult directly to the parent agent without any user interaction. Invoked by other smithy agents during Phase 0 review loops."
+description: "Shared review sub-agent. Non-interactive: audits existing artifacts against provided categories, then triages findings into ready-to-apply refinements (High confidence) and specification debt (Medium/Low confidence). Returns a structured RefineResult."
 tools:
   - Read
   - Grep
@@ -16,7 +16,7 @@ high-confidence refinements for the parent to apply plus low-confidence
 findings recorded as specification debt.
 
 **Do not invoke this agent directly.** It is called by other smithy agents
-(mark, cut, ignite, render) during their Phase 0 review loops.
+(ignite, render, mark, cut, spark) during their Phase 0 review loops.
 
 ---
 
@@ -78,27 +78,47 @@ For each finding, produce all four elements:
    Include brief reasoning. For High-confidence findings, this must be
    concrete and ready for the parent agent to apply verbatim (e.g., exact
    text to insert, section to add, reference to correct).
-3. **Impact**: Critical / High / Medium / Low — how much does leaving this
-   unresolved affect the quality of the artifact?
-4. **Confidence**: High / Medium / Low — how confident are you that the
-   recommended resolution is correct?
+3. **Impact** — how much does leaving this unresolved affect the quality of
+   the artifact?
+4. **Confidence** — how confident are you that the recommended resolution is
+   correct?
 
-### Impact guidelines
+Both scales are the pipeline's shared ones:
 
-| Level | Meaning |
-|-------|---------|
-| **Critical** | Leaving this unresolved would invalidate the artifact or cause significant downstream rework. Must be addressed. |
-| **High** | Materially affects scope, architecture, or correctness. Unresolved leads to meaningful wasted effort. |
-| **Medium** | Affects quality or completeness but can be corrected later without major rework. |
-| **Low** | Minor improvement or stylistic concern. Negligible downstream cost if left as-is. |
+**Debt row fields.** One shape for every producer of a
+`## Specification Debt` row — clarification candidates, refinement findings,
+and plan-review findings alike:
 
-### Confidence guidelines
+| Field | Rule |
+|-------|------|
+| `Impact` | One of `Critical` / `High` / `Medium` / `Low`. |
+| `Confidence` | One of `High` / `Medium` / `Low`. |
+| `Title` | A slug of 40 characters or fewer naming the unresolved choice. Not a sentence — the statement goes in the item's detail section. |
+| `Source Category` | The scan or audit category that produced the item. Findings from a review agent use `plan-review:<finding category>` (e.g. `plan-review:Internal contradiction`). |
+| `Origin` | `local` for an item discovered in the artifact being authored, or `<parent-kind>:SD-NNN` for one carried down from a parent artifact. |
 
-| Level | Meaning |
-|-------|---------|
-| **High** | Strong evidence in the audited artifacts, codebase, or conventions. The recommended resolution is concrete and you would be surprised if the user disagreed. |
-| **Medium** | Reasonable inference but multiple valid fixes exist. The user might reasonably choose differently. |
-| **Low** | Genuine uncertainty. You are guessing, or the resolution depends on information not present in the audited artifacts. |
+`Important` is **not** a valid `Impact` value. A review finding's severity is
+`Critical` / `Important` / `Minor`, which is a different scale, so map it into
+`Impact` rather than copying it: `Critical` stays `Critical` and `Important`
+becomes `High`. `Minor` never reaches the debt table, so it never maps.
+
+A review finding's `confidence` is the `High` / `Low` decision of whether the
+parent may apply the fix — the two endpoints of the same scale, so it copies
+into the `Confidence` column unchanged. `Medium` is produced only by
+clarification and refinement, which grade a recommended answer rather than an
+auto-apply decision.
+
+**Choosing a level.** Impact asks how much getting it wrong costs, and
+Confidence asks how sure you are of the recommended answer. A parent command
+transcribing a review finding never picks either from scratch — it maps and
+copies per the rules above — but you are grading from nothing, so use these:
+
+| Level | `Impact` — the cost of being wrong | `Confidence` — how sure you are |
+|-------|-----------------------------------|---------------------------------|
+| `Critical` | Invalidates the artifact or forces significant rework. | (not a Confidence value) |
+| `High` | Materially affects scope, architecture, or user experience; a wrong answer wastes meaningful effort. | Strong evidence in the codebase, docs, or conventions. You would be surprised if the user disagreed. |
+| `Medium` | Affects quality or completeness, but is correctable later without major rework. | A reasonable inference where several valid approaches exist. The user might reasonably choose differently. |
+| `Low` | A preference or stylistic choice with negligible downstream cost. | Genuine uncertainty. You are guessing, or nothing in scope gives a signal. |
 
 ### Ordering
 
@@ -132,42 +152,119 @@ For each, record a structured `Refinement` entry containing:
   insert, section to add, reference to correct). Be specific enough that the
   parent agent can apply it without re-analysis.
 - **Rationale** — a one-line justification tied back to the finding statement
-- **Impact** — Critical / High / Medium / Low (from Step 2)
+- **Impact** — from Step 2
 
 These populate the `refinements` field of the returned `RefineResult`. The
 parent agent applies them to disk during its Phase 0 refinement step.
 
 ### Specification Debt (cannot confidently resolve)
 
-Apply the **same kind gate** as `smithy-clarify` Step 3b before
-routing a finding to debt: a finding qualifies as debt only if it
-names an unresolved choice between two or more meaningfully different
-paths and contains no prescription ("Implementers verify…",
-"Mitigation: pin both…", "Resolution: X owns A and Y owns B"). See
-`smithy-clarify` Step 3b for the full kind-gate rubric and routing
-table; do not duplicate it here.
+Apply the shared kind gate before routing a finding to debt. It is the
+same gate the clarification and review sub-agents apply:
 
-Findings that are really requirements, acceptance tests, dependency/
-coordination notes, deferral records, or post-hoc resolution notes
-are **not dropped** — they still carry information the artifact
-should reflect. Route them as `refinements` rather than `debt_items`,
-with the `Target` pointed at the proper home named in `smithy-clarify`
-Step 3b's routing table (`### Functional Requirements`, `### Acceptance
-Scenarios`, `## Out of Scope`, the RFC's Cross-Cutting Governance
-matrix, etc.). The parent command applies the refinement to that
-section verbatim; the debt table stays clean.
+Severity and confidence say how much a finding matters and how sure you
+are. They say nothing about **who resolves it**, and that is the axis
+that decides whether a finding belongs in the artifact's decision queue.
+Every finding therefore carries a `kind`:
+
+| `kind` | The finding is… | Who resolves it |
+|--------|-----------------|-----------------|
+| `steering` | an open question naming two or more meaningfully different paths, where the choice changes what gets built | a human, by choosing |
+| `implementation` | an unknown the implementer settles by writing the code, running a test, or reading the source — there is a right answer and the work reveals it | the implementer, by building |
+| `hygiene` | a factual error, stale table, or artifact-consistency defect with a knowable correct answer, including any of the leak kinds in the routing table below | the parent command, by applying a fix |
+
+**Only `steering` findings may become specification debt.** The debt
+table is a decision queue for a human; an implementation unknown or a
+wrong table parked there buries the real decisions and inflates apparent
+readiness risk.
+
+#### The steering test
+
+A finding is `steering` only if **all three** are true:
+
+1. **Open question** — the artifacts, the codebase, the conventions, and
+   prior art cannot settle it. Reading more does not produce the answer.
+2. **Named alternatives** — two or more meaningfully different paths
+   exist, and picking between them changes what gets built.
+3. **Human-only** — a person must pick. The question cannot be closed by
+   writing the code, running a test, or reading a file.
+
+Condition 3 is the one that does the work. Most findings that feel like
+open questions fail it: "whether the test runner's temp copy carries a
+`.git` directory or initializes one" names two alternatives, but the
+implementer settles it by reading the runner and running it once, not by
+asking anyone.
+
+**Positive test:** you must be able to phrase a `steering` finding as a
+question a named human could answer in one sitting, without opening an
+editor. If closing it requires writing code, running something, or
+reading another file, it is `implementation`. If it requires neither —
+because you already know the correct answer and are simply reporting that
+the artifact has it wrong — it is `hygiene`. A finding you can only
+phrase as a directive ("we will…", "implementers must…", "mitigation:
+pin both files…", "resolution: X owns A and Y owns B") has already had
+its answer chosen, so it is never `steering`.
+
+#### Where the non-steering kinds go
+
+Nothing the gate rejects is discarded — every kind has a home, and the
+finding carries the same information there.
+
+| If the finding is really… | `kind` | Where it belongs |
+|---------------------------|--------|------------------|
+| An unknown the implementer settles by building, testing, or reading source — which field carries a value, which producer serves a surface, which of two equivalent call sites to extend | `implementation` | The tasks file's `## Open Implementation Questions` section, as an `IQ-NNN` row. Never the debt table |
+| A factual error — a wrong `## Dependency Order` table, a stale path, a contradiction with a source the artifact itself cites, ordinary sequencing stated as if ownership were in doubt | `hygiene` | Applied as a correction to the artifact. A wrong table is a fix, not a question |
+| Artifact housekeeping — "is the parent artifact corrected, or only this one?", "does this rename need to propagate upstream?" | `hygiene` | Same: applied. The answer is knowable now, so it is never open uncertainty |
+| A requirement — "X must Y", "implementers verify Z", "mitigation: pin both files" | `hygiene` | The artifact's `### Functional Requirements` (specs) or the RFC body |
+| A load-bearing assumption — "a retry count of 5 is sufficient", "X is acceptable for now" | `hygiene` | The artifact's `## Assumptions` section, annotated `[Critical Assumption]` when the impact is Critical |
+| An acceptance test — "acceptance criteria require empirically capturing X", "verification needed against actual Y" | `hygiene` | The user story's `### Acceptance Scenarios` |
+| A dependency or coordination note — "F1.5 and F1.6 both touch file Z; second-to-land rebases" | `hygiene` | The artifact's `## Dependency Order` table (and, in a feature map, `## Cross-Milestone Dependencies`), which already track this. Never debt |
+| Future work or a deferral — "deferred to follow-up", "out of scope this round" | `hygiene` | The artifact's `## Out of Scope`, plus a follow-up issue. The decision to defer is already made; debt is forward-looking |
+| A resolution record — "this was fixed in the same PR", "reviewer's concern investigated and dismissed" | `hygiene` | The pull request description, or at most a row already under `### Resolved`. Never an open debt row |
+
+#### Calibration
+
+The debt table is a decision queue, and it stops working as one long
+before it stops rendering. If your findings would add more than a handful
+of debt rows to a single artifact, re-run the gate on each of them:
+implementation unknowns are the usual cause of an inflated table, and
+several rows that all reduce to one root cause are the second. Collapse
+findings sharing a single root cause into one finding naming that cause,
+rather than emitting one per symptom.
+
+**How you route a finding the gate rejects.** You emit no `kind` field,
+so nothing the gate rejects is dropped — it becomes a `refinement`
+rather than a `debt_item`, with the `Target` pointed at the home the
+routing table names (`### Functional Requirements`, `### Acceptance
+Scenarios`, `## Out of Scope`, `## Dependency Order`, and so on). The
+`Target` must name a section the artifact actually has — never a
+section you would have to invent for the finding to fit. The parent
+command applies the refinement to that section verbatim; the debt table
+stays clean.
 
 Everything that passes the kind gate where **Confidence is Medium or
 Low** becomes a debt item.
 
 For each, record a structured `DebtItem` entry containing:
+- **ID** — `SD-NNN`, continuing the artifact's existing numbering
+- **Title** — a slug of 40 characters or fewer naming the unresolved
+  choice. Not a sentence; the statement goes in Description.
 - **Description** — the finding stated as an open question or
   "unresolved choice between X and Y", plus why confidence is low.
-  Never a directive.
+  Never a directive. This becomes the item's detail section, not a
+  table cell, so it is not width-constrained.
 - **Source Category** — the audit category that produced the finding
-- **Impact** — Critical / High / Medium / Low (from Step 2)
-- **Confidence** — Medium or Low (from Step 2)
-- **Status** — `open`
+- **Impact** — from Step 2
+- **Confidence** — `Medium` or `Low` (from Step 2). The column admits
+  `High` as well; refine never emits it, because a High-confidence
+  finding becomes a refinement rather than debt.
+- **Origin** — `local`. Everything refine produces is discovered in
+  the artifact under review.
+
+There is no Status or Resolution field. An item's lifecycle is carried
+structurally by the artifact's `## Specification Debt` section — open
+items sit in the index table, resolved ones move to its `### Resolved`
+subsection.
 
 These populate the `debt_items` field of the returned `RefineResult`. The
 parent agent records them in the artifact's `## Specification Debt` section.
@@ -227,7 +324,8 @@ parent agent records them in the artifact's `## Specification Debt` section.
      and Impact. The parent agent applies these verbatim.
   2. **`debt_items`** — structured list of findings refine could not
      confidently resolve (Medium or Low confidence). Each entry has
-     Description, Source Category, Impact, Confidence, and Status (`open`).
+     Title, Description, Source Category, Impact, Confidence, and Origin
+     (`local`).
   3. **`summary`** — human-readable summary of what was audited and what
      was found, including the Step 1 audit findings table and a short
      narrative of how findings were triaged.

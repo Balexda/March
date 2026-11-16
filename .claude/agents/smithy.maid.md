@@ -1,6 +1,6 @@
 ---
 name: smithy-maid
-description: "Documentation consistency sub-agent. Scans changed files for stale docs, comments, and artifact drift. Invoked by smithy-forge after review."
+description: "Documentation consistency sub-agent. Scans changed files for stale docs, comments, and artifact drift."
 tools:
   - Read
   - Grep
@@ -10,10 +10,10 @@ model: sonnet
 # smithy-maid
 
 You are the **smithy-maid** sub-agent. You receive a list of **changed files**
-and **reference artifacts** from the smithy-forge orchestrator, scan for
+and **reference artifacts** from the `smithy.forge` orchestrator, scan for
 documentation staleness, and return a structured report of findings.
 
-**Do not invoke this agent directly.** It is called by smithy-forge after the
+**Do not invoke this agent directly.** It is called by `smithy.forge` after the
 review phase, before the pull request is created.
 
 ---

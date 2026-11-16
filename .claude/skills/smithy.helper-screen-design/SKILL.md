@@ -1,6 +1,6 @@
 ---
 name: smithy.helper-screen-design
-description: "Schema and authoring rules for `design/screens/<ScreenId>.design.md` — the thin durable intent annotation that colocates with a UI screen's component body. Use when authoring or auditing a screen design-context annotation, when emitting a screen as part of a UI feature (kind: ui), or when validating that an existing annotation stays thin. Provides the YAML front-matter field schema (id / component-path / design_system / bundle), the rationale-only body rule, a skeleton template, and a worked Library example."
+description: "Schema and authoring rules for `design/screens/<ScreenId>.design.md`, the thin durable intent annotation colocated with a UI screen's component body. Use when authoring or auditing a screen design-context annotation, when emitting a screen as part of a UI feature (kind: ui), or when checking an existing annotation stays thin."
 ---
 # smithy.helper-screen-design
 
@@ -13,9 +13,9 @@ deliberately chosen, what was deferred. Load this skill when:
 - Writing a new `<ScreenId>.design.md` for a `kind: ui` feature.
 - Auditing an existing annotation for drift, redundancy, or layout
   re-description.
-- Emitting a screen annotation as part of `forge`'s UI build phase
-  (EPIC #404 / issue #408).
-- Validating cross-references during `flow-lint` (issue #409).
+- Emitting a screen annotation from `smithy.mark` for a UI feature's typed
+  ledger.
+- Validating cross-references during `flow-lint`.
 
 Do **not** load this skill for backend features or for general voice/audience
 prose work — `smithy.helper-voice` covers the latter, and `kind: backend`
@@ -53,8 +53,8 @@ fences. Four keys, three required:
 |-----|----------|-------|
 | `id` | Yes | Flat, stable `ScreenId`. Matches the `screens:` list of the originating UI feature in `.features.md`; never reused across screens. |
 | `component-path` | Yes | Repo-relative path to the owning UI component file in the project's framework (for example a Compose file such as `app/src/main/kotlin/io/balexda/readercompose/ui/views/library/LibraryScreen.kt`, or a React component such as `src/screens/LibraryScreen.tsx`). Paths survive package/module renames; the path is the contract, not a framework-specific symbol name. |
-| `design_system` | Yes | Reference to the committed design skill (e.g. `story-spider-design`). Source of truth even when a `bundle` is present — bundle wins on layout & visual intent, skill wins on implementation dialect. |
-| `bundle` | No | Repo-relative path to the originating Claude Design export (e.g. `design/bundles/library.zip`). A visual/structural reference, not a drop-in. Omit the key entirely when no bundle exists — do not set it to `null` or an empty string. |
+| `design_system` | Yes | Reference to the committed design skill (e.g. `story-spider-design`). Source of truth even when a `bundle` is present — bundle wins on layout & visual intent, skill wins on implementation dialect. A screen with a `bundle` is invalid without `design_system`. |
+| `bundle` | No | Repo-relative path to the originating visual prototype boundary object (for example a Figma export, Claude Design export, or equivalent visual-tool bundle). A visual/structural reference, not a drop-in. Omit the key entirely when no bundle exists — do not set it to `null` or an empty string. |
 
 No other keys. In particular, **no `flows:` field here** — flow membership is
 declared on the originating feature in `.features.md`; duplicating it on the
@@ -81,86 +81,12 @@ strings, no state-machine diagrams.
 
 ---
 
-## Skeleton template
+## Skeleton and worked example
 
-````markdown
----
-id: <ScreenId>
-component-path: <repo-relative path to the owning UI component file>
-design_system: <committed design skill, e.g. story-spider-design>
-bundle: <repo-relative path to the Claude Design export, or omit the key>
----
-
-# <ScreenId> — design context
-
-## Why this screen exists
-
-<One short paragraph: the product reason this screen owns space. Not what it
-looks like — why it is here at all.>
-
-## Deliberate choices
-
-- **<choice>.** <Why we picked it over the obvious alternative.>
-- **<choice>.** <Why we picked it over the obvious alternative.>
-
-## Deferred
-
-- **<thing not done>.** <Why we left it out and what would unblock it.>
-````
-
----
-
-## Worked example — `Library.design.md`
-
-````markdown
----
-id: Library
-component-path: app/src/main/kotlin/io/balexda/readercompose/ui/views/library/LibraryScreen.kt
-design_system: story-spider-design
-bundle: design/bundles/library.zip
----
-
-# Library — design context
-
-## Why this screen exists
-
-The Library is Story Spider's home base — the first surface a returning
-reader sees, listing every title they have added so far. Anchoring the home
-tab here (rather than a "Now Reading" continuation) keeps the model simple
-while the library is small and keeps the "add a new title" action one tap
-from the launcher.
-
-## Deliberate choices
-
-- **List, not grid.** Titles are URLs with long names; a single-column list
-  shows the full name without truncation. The lower information density is
-  the intended trade.
-- **FAB for "add title."** The primary add action is a FAB rather than an
-  app-bar action because it is the only affordance that drives growth of
-  the library — biasing visual weight toward it is intentional.
-- **Empty state owns the screen.** Before any titles exist, the empty state
-  is the full content area (illustration + one-sentence value prop + the
-  same add-title affordance the FAB triggers), not a footnote under an
-  empty list.
-
-## Deferred
-
-- **Sorting / filtering.** Insertion order only for now; sorting waits
-  until the library is plausibly large enough to need it (and a real user
-  asks).
-- **Per-title artwork.** The bundle shows placeholder thumbnails; real
-  artwork is downstream of the metadata-extraction feature, not this
-  screen.
-- **Multi-select / bulk delete.** Out of scope until we have a story for
-  why someone would remove titles in bulk; single-item swipe-to-delete is
-  sufficient at current scale.
-````
-
-Note what is *not* in the example: no list-row anatomy, no FAB position, no
-copy strings, no state-machine diagram. All of those belong in the
-component (or, for navigation, the executable flow body at `wire`). The
-example uses a Compose component path because that is Story Spider's stack;
-it is illustrative, not required by the schema.
+A copy-ready skeleton plus a filled-in `Library` example live in
+[`references/examples.md`](references/examples.md). Read that file when you
+are writing a new annotation or want a concrete shape to compare an existing
+one against; the schema and body rules above are the authority.
 
 ---
 
@@ -175,9 +101,6 @@ it is illustrative, not required by the schema.
 - **`design_system` is the *committed skill*, not the bundle.** A bundle
   is optional and per-screen; the skill is the foundation and applies
   even when no bundle exists, so it owns the source-of-truth slot.
-- **No `flows:` field on the screen.** Flow membership is declared on the
-  originating feature; duplicating it here would create two places to
-  update.
 
 ---
 
@@ -195,6 +118,8 @@ following:
       skill is invalid — skill is source of truth).
 - [ ] Body contains a `## Layout`, `## States`, `## Flow`, `## Steps`, or
       `## Walkthrough` section.
+- [ ] Body contains a state inventory or visual-fidelity critique instead of
+      rationale-only intent.
 - [ ] "Deliberate choices" describes what the screen looks like instead of
       why the choice was made.
 - [ ] "Deferred" lists items that belong to a different screen or

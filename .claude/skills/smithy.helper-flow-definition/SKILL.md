@@ -1,6 +1,6 @@
 ---
 name: smithy.helper-flow-definition
-description: "Schema and authoring rules for the durable Flow entity pair — `design/flows/<FlowId>.flow.md` (thin intent annotation) and a paired executable test body — keyed 1:1 by flat FlowId. Use when authoring or auditing a flow definition, when emitting a flow as part of a UI feature's wire phase (kind: ui, phase: wire), or when validating an existing flow stays thin and testID-keyed. Provides the YAML front-matter field schema (id / screens / test-body), the rationale-only body rule, the driver-neutral selector contract, the testID naming convention, a skeleton template, and a worked AddTitle example."
+description: "Schema and authoring rules for the durable Flow entity pair — `design/flows/<FlowId>.flow.md` and its paired executable <test-body>. Use when authoring or auditing a flow definition, when emitting a flow artifact and stub test body for a UI feature's wire phase (kind: ui, phase: wire), or when checking an existing flow stays thin and testID-keyed."
 ---
 # smithy.helper-flow-definition
 
@@ -16,13 +16,14 @@ design/flows/<FlowId>.flow.md      # durable INTENT annotation (why)
 Both files live in the **app repo**, alongside the code, not in Smithy. Load
 this skill when:
 
-- Writing or updating a `<FlowId>.flow.md` + executable test-body pair for a
-  `kind: ui` feature at `phase: wire`.
+- Writing a `<FlowId>.flow.md` + placeholder test-body pair from `smithy.mark`
+  for a `kind: ui` feature at `phase: wire`, or updating the executable
+  behavior in that existing test body downstream.
 - Auditing an existing flow for drift, redundancy, fragile selectors, or
   step-leakage from the executable test body into prose.
-- Emitting a flow as part of `forge`'s UI wire phase
-  (EPIC #404 / issue #408).
-- Validating cross-references during `flow-lint` (issue #409).
+- Emitting a mark-owned flow artifact and paired stub test body for a UI wire
+  feature.
+- Validating cross-references during `flow-lint`.
 
 Do **not** load this skill for backend features, for screen-only work
 (`smithy.helper-screen-design` covers screens), or for general prose work
@@ -62,7 +63,7 @@ Three keys, all required:
 | Key | Required | Notes |
 |-----|----------|-------|
 | `id` | Yes | Flat, stable `FlowId` (e.g. `AddTitle`). Matches the `.flow.md` filename stem and the paired executable test body named by `test-body`, plus the `flows:` list of the originating UI feature in `.features.md`. Never reused across flows. |
-| `screens` | Yes | List of `ScreenId` the flow traverses, in entry order (e.g. `[Library, AddTitle]`). Each entry must appear in some feature's `screens:` field; cross-file resolution is enforced by `flow-lint` (#409). |
+| `screens` | Yes | List of `ScreenId` the flow traverses, in entry order (e.g. `[Library, AddTitle]`). Each entry must appear in some feature's `screens:` field; cross-file resolution is enforced by `flow-lint`. |
 | `test-body` | Yes | Repo-relative path to the paired executable test body in the project's UI driver (for example `maestro/flows/AddTitle.yaml` for Maestro, or `tests/e2e/add-title.spec.ts` for Playwright/Cypress). The path is the contract; renaming the test without updating this field is a `flow-lint` failure. |
 
 No other keys. In particular, **no `feature:` or `kind:` field here** — flow
@@ -82,6 +83,16 @@ in this order, followed by a mandatory coverage caveat:
 | `## Guards` | The guarantees that must hold along the path, stated as invariants the executable test body asserts (e.g. "Confirm is disabled until the URL is valid"). State the invariant **and the why**. | The test lines that check them — those live in the test body. |
 | `## Entry / Exit` | Where the user enters from (the testID or surface that starts the flow) and where they end up. Two short bullets. | The intermediate steps. |
 | `## Coverage Caveat` | What this UI-driver flow does **not** observe (audio-service behaviors, background work, anything below the UI driver). Mandatory whenever the screen touches an audio surface. | Aspirational coverage; coverage lives where the test does. |
+
+UI-driver flows cover **navigable bookends** — what a driver can observe by
+activating controls, asserting visibility, and reading testID-keyed views.
+Audio-service behaviors (auto-advance under lock, foreground TTS,
+audio-focus handling) sit below that layer and are durable only as
+instrumentation-level tests, so
+**a green UI-driver run must not be read as TTS coverage.**
+That is what the `## Coverage Caveat` section exists to say out loud, on
+every flow that touches an audio surface, so reviewers don't infer coverage
+that isn't there.
 
 There is **no `## Steps`, `## Walkthrough`, `## Flow`, or `## Path` section.**
 The executable test body owns the steps. If you find yourself typing "the user
@@ -148,165 +159,13 @@ them:
 
 ---
 
-## Skeleton template
+## Skeletons and worked example
 
-**`design/flows/<FlowId>.flow.md`:**
-
-````markdown
----
-id: <FlowId>
-screens: [<ScreenId>, <ScreenId>]
-test-body: <repo-relative path to the paired executable test body>
----
-
-# Flow: <FlowId>
-
-## Intent
-
-<One short paragraph: the durable product truth this flow preserves. Why this
-journey is worth a permanent test — not what the user taps.>
-
-## Guards
-
-- **<invariant>.** <Why it matters; the test body asserts it.>
-- **<invariant>.** <Why it matters; the test body asserts it.>
-
-## Entry / Exit
-
-- **Enter from**: <surface and testID, e.g. Library screen, tap on `library-fab`>.
-- **Exit on**: <terminal state and testID, e.g. tap `add-title-confirm-button`
-  with a valid URL → return to Library list, new title visible>.
-
-## Coverage Caveat
-
-<What this flow does NOT observe — required whenever the screen touches an
-audio-service surface. Audio-service behaviors (auto-advance under lock,
-foreground TTS, audio-focus handling) need instrumentation-level tests.>
-````
-
-**Example `test-body` (`maestro/flows/<FlowId>.yaml`):**
-
-```yaml
-# Selectors are keyed to testIDs. Never visible text, never layout position.
-appId: <reverse-domain.app.id>
----
-- launchApp
-- assertVisible:
-    id: "<entry-test-id>"
-- tapOn:
-    id: "<entry-test-id>"
-- assertVisible:
-    id: "<arrived-test-id>"
-# Guard: <invariant from flow.md Guards section>.
-- assertNotVisible:
-    id: "<guarded-state-test-id>"
-- tapOn:
-    id: "<field-test-id>"
-- inputText: "<...>"
-# Guard: <invariant becomes reachable once preconditions hold>.
-- assertVisible:
-    id: "<guarded-state-test-id>"
-- tapOn:
-    id: "<confirm-test-id>"
-- assertVisible:
-    id: "<exit-test-id>"
-```
-
----
-
-## Worked example — `AddTitle.flow.md` and a Maestro `AddTitle.yaml`
-
-**`design/flows/AddTitle.flow.md`:**
-
-````markdown
----
-id: AddTitle
-screens: [Library, AddTitle]
-test-body: maestro/flows/AddTitle.yaml
----
-
-# Flow: AddTitle
-
-## Intent
-
-A user adds a new title to their library by tapping the Library FAB, filling
-the title and URL fields, and confirming. The flow exists to lock in the
-durable truth that adding a title is reachable from the library home in one
-tap and returns the user to a list with their new title visible. If this
-journey ever breaks, the product breaks — there is no library without it.
-
-## Guards
-
-- **Confirm is disabled until the URL is valid.** The URL field is the only
-  required input the store cannot recover from; a permissive Confirm would
-  silently persist garbage.
-- **Submitting a duplicate URL is a no-op.** Duplicate detection lives in the
-  store, but the user-visible contract is "no second row appears" — the
-  flow asserts that surface so a regression that breaks dedup is caught.
-- **The back gesture returns to Library without persisting partial input.**
-  Half-filled rows would corrupt the library; the back-out path must drop
-  the draft.
-
-## Entry / Exit
-
-- **Enter from**: Library screen, tap on `library-fab`.
-- **Exit on**: tap `add-title-confirm-button-enabled` with a valid URL →
-  return to Library list, new title visible at the top of `library-list`.
-
-## Coverage Caveat
-
-This flow asserts navigable bookends only. It does **not** cover:
-
-- Auto-advance to the next title under the lock screen.
-- Foreground TTS service playback.
-- Audio focus handling on incoming calls.
-
-Those behaviors live below what a UI driver can observe and must be covered
-by instrumentation-level tests. **A green Maestro run must not be read as
-TTS coverage.**
-````
-
-**`maestro/flows/AddTitle.yaml`:**
-
-```yaml
-# Selectors are keyed to testIDs. Never visible text, never layout position.
-appId: com.storyspider.app
----
-- launchApp
-- assertVisible:
-    id: "library-fab"
-- tapOn:
-    id: "library-fab"
-- assertVisible:
-    id: "add-title-title-field"
-- assertVisible:
-    id: "add-title-url-field"
-# Guard: confirm is disabled until the URL is valid.
-- assertNotVisible:
-    id: "add-title-confirm-button-enabled"
-- tapOn:
-    id: "add-title-title-field"
-- inputText: "The Magic Circle"
-- tapOn:
-    id: "add-title-url-field"
-- inputText: "https://example.com/magic-circle.mp3"
-# Guard: with a valid URL, confirm becomes reachable.
-- assertVisible:
-    id: "add-title-confirm-button-enabled"
-- tapOn:
-    id: "add-title-confirm-button-enabled"
-- assertVisible:
-    id: "library-list"
-- assertVisible:
-    id: "library-row-the-magic-circle"
-```
-
-Note what is *not* in the `.flow.md` body: no list of taps, no screen
-transitions, no copy strings, no per-step screenshots. Note what *is* in
-the executable test body: not just the happy path, but the `assertNotVisible` →
-`assertVisible` pair around `add-title-confirm-button-enabled` that proves
-the URL guard fires. The example uses Maestro yaml because that is Story
-Spider's driver; it is illustrative, not required by the schema.
+Copy-ready skeletons for both halves of the pair, plus a filled-in
+`AddTitle` example (flow annotation + Maestro test body), live in
+[`references/examples.md`](references/examples.md). Read that file when you
+are writing a new pair or want a concrete shape to compare an existing one
+against; the schema and body rules above are the authority.
 
 ---
 
@@ -321,24 +180,6 @@ Spider's driver; it is illustrative, not required by the schema.
 - **`test-body` is a path, not a derived convention or driver-specific field.**
   Renaming the executable test without updating the field is a `flow-lint`
   failure — the path is the contract, not a derived guess.
-- **No `feature:` or `kind:` field on the flow.** Feature membership is
-  declared on the originating feature in `.features.md` via
-  `flows: [FlowId]`; duplicating it here would create two places to
-  update.
-
----
-
-## Coverage caveat — applies to every audio-touching flow
-
-UI-driver flow tests cover **navigable bookends** — what a UI driver can
-observe by tapping/activating controls, asserting visibility, and reading
-testID-keyed views. Maestro yaml is one example of such a test body.
-**Audio-service behaviors** (auto-advance under lock, foreground TTS,
-audio-focus handling) sit below that layer; their durable body is
-**instrumentation-level tests**, not the UI-driver flow body.
-**A green UI-driver run must not be read as TTS coverage.** Every `.flow.md`
-that touches an audio-service surface states this caveat explicitly under
-`## Coverage Caveat` so reviewers don't infer coverage that isn't there.
 
 ---
 
@@ -361,9 +202,17 @@ When auditing an existing flow pair, flag any of the following:
 - [ ] `test-body:` path does not resolve to an existing file in the repo.
 - [ ] `id` does not match the originating feature's `flows:` list, or is
       reused across flows.
-- [ ] `screens:` references a `ScreenId` that no feature declares.
+- [ ] `screens:` is empty, not a list, contains non-string values, or
+      references a `ScreenId` with no matching
+      `design/screens/<ScreenId>.design.md` annotation. A direct review of
+      this pair checks only that each referenced annotation file **exists**;
+      whether that `ScreenId` is declared by some feature — and the rest of
+      the screen/flow/test graph — stays with `flow-lint`.
 - [ ] `.flow.md` body contains a `## Steps`, `## Walkthrough`, `## Flow`,
       or `## Path` section.
+- [ ] `.flow.md` body contains click/tap sequences, selectors, assertions,
+      driver-specific test code, or other executable behavior that belongs in
+      the paired test body.
 - [ ] `## Guards` lists invariants the test body does **not** assert.
 - [ ] `## Coverage Caveat` is missing on a flow whose screen touches an
       audio-service surface.

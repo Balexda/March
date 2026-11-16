@@ -1,6 +1,6 @@
 ---
 name: smithy.helper-documentation
-description: "Artifact-shape and quality review for any document — Smithy-authored or not. Use when shaping or reviewing a README, migration plan, runbook, design doc, ADR, or any document that feels long, hard to follow, incomplete, or like it serves several readers at once. Frames the document's template/genre latitude, runs an audience inventory and fit-for-purpose (split) check, reviews structure — section presence/completeness, ordering, value/non-redundancy, navigation — recommends a split / in-place restructure / leave-as-is, designs the navigation artifact when splitting, then hands each resulting artifact to the voice helper for prose-level cleanup with directed findings."
+description: "Artifact-shape and quality review for any document — Smithy-authored or not. Use when shaping or reviewing a README, migration plan, runbook, design doc, ADR, or any document that feels long, hard to follow, incomplete, or like it serves several readers at once, and when deciding whether one document should be split into several."
 ---
 # smithy.helper-documentation
 
@@ -52,8 +52,12 @@ move available to you:
   freedom the template leaves. If the template itself looks wrong, raise that
   as a template-level finding — do not fix it per-instance.
 - **Conventional genre.** README, ADR, runbook, migration plan, design doc — no
-  hard template, but a well-understood expected shape (see `smithy.helper-voice`
-  §10 for the per-genre voice specs). You have latitude to add missing expected
+  hard template, but a well-understood expected shape. The per-genre voice
+  specs live in a file bundled with the **`smithy.helper-voice`** skill, not
+  this one — `Skill("smithy.helper-voice")` first, then read
+  `references/genre-presets.md` relative to *that* skill's directory. Skip
+  both if you already know the genre's shape. You have
+  latitude to add missing expected
   sections, reorder for the reader, and merge redundant ones against the
   genre's conventions.
 - **Free-form.** No template, no strong genre convention. Full latitude on

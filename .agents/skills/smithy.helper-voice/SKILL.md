@@ -1,6 +1,6 @@
 ---
 name: smithy.helper-voice
-description: "Section-level voice and audience guidance, invoked by smithy.helper-documentation and the authoring commands/agents (render / mark / cut / engrave / ignite / spark / strike / prose) — not a direct user entry point; users reach for smithy.helper-documentation, which calls this skill. Applies when drafting or reviewing prose for any artifact: RFC/spec/PRD narrative, migration plans, ADRs, runbooks, READMEs, design docs, change notes, inline documentation, for readers spanning stakeholders, reviewers, implementers, or AI agents. Provides a Role × Diátaxis-mode taxonomy, an expanded review-mode anti-pattern checklist, conciseness budgets, diagram-first framing, depth-control rules, and AI-vs-human audience separation."
+description: "Section-level voice and audience guidance built on a Role × Diátaxis-mode taxonomy. Use when drafting or reviewing prose for any artifact: RFC/spec/PRD narrative, migration plans, ADRs, runbooks, READMEs, design docs, change notes, inline documentation. Not a direct user entry point — artifact-level shape questions go to smithy.helper-documentation, which calls this skill."
 ---
 # smithy.helper-voice
 
@@ -50,77 +50,15 @@ yourself blending two, split the section.
 
 ## 2. Review-mode anti-pattern checklist
 
-In review mode, run every check below and flag each hit explicitly.
-
-- **Missing diagrams.** A block, sequence, or ER diagram would carry
-  the same information in less space, but the section is wall-of-text.
-- **Verbosity.** More detail than the chosen reader needs at this
-  depth. Often shows up as restating the goal in three sentences.
-- **Depth-first tangents.** Prose dives into implementation detail
-  inside a Stakeholder×Explanation, then climbs back out.
-- **Commingled audiences.** One section serves humans (review,
-  approval) and AI sub-agents (input to `smithy-slice`,
-  `smithy-implement`) with no signal of which paragraph is which.
-- **Unglossed terms-of-art.** A term-of-art is used without definition
-  on its first occurrence in a section ("failover plan", "scale to 0",
-  "all participants inventoried"). Flag hardest when a term one
-  audience-cell owns appears inside another cell's section — an Ops term
-  in a Reviewer×Explanation, a runbook step inside an Explanation.
-- **Schema without a worked instance.** A schema, contract, manifest,
-  or YAML/JSON shape is described in prose or as a key/type table with
-  no filled-in example a reader can pattern-match against. (Distinct
-  from the §5 `examples:` directive, which is about whether a *code
-  snippet* suits the section's mode; this is about an *abstract
-  description* lacking a concrete companion — add the worked instance,
-  don't delete the description.)
-- **Internals leakage.** Implementation rationale surfaces in
-  reader-facing prose (Stakeholder/Reviewer Explanation, Builder
-  How-to): sentences shaped like "the two lists are split because the
-  role-specific fields differ" or "we did this to preserve Z". The
-  reader needs *what to do* and *what it means*, not *why the
-  internals are arranged this way* — push that to a child Reference
-  section or cut it.
-- **Conviction drift.** A sentence hedges or conditions something the
-  surrounding context treats as required ("reads like this transition
-  is optional when it isn't"). Match the prose's certainty to the
-  thing's actual status — if the step is mandatory, say so plainly.
-- **Bare cross-reference.** A cross-reference ("see Flow 3 for the
-  rollback") sends the reader away without previewing, in one phrase,
-  what they will find there. Add the preview: "see Flow 3, which drains
-  connections before cutover."
-- **Authoring-process / author-directed commentary.** Prose that
-  addresses the *moment the document was written* rather than the
-  reader of the finished artifact. Two flavors: (a) **temporal /
-  process scaffolding** tied to the work's own trajectory — "we'll do
-  this until milestone X lands", "for now we…", "we no longer need to
-  Z"; and (b) **asides aimed at the human author**, as if the document
-  were a chat reply — "you may want to decide…", "let me know if…",
-  "note: we should revisit this". The eventual reader was not in that
-  moment and was not party to that conversation, so these lines read
-  as stray comments that leaked into the artifact. Fix: cut them, or
-  convert to durable reader-facing statements — state current behavior
-  *as* the behavior (not as a way-station toward something else), and
-  move genuine open questions to a tracked location (an issue, a
-  "Open Questions" section, a TODO owned by someone) rather than
-  leaving them inline.
-
-After editing, run two checks on the pass itself:
-
-- **Diagram that doesn't earn its space.** A diagram must compress
-  structure the prose cannot — not duplicate what the prose just said.
-  Working ASCII art is not a defect; do not convert it to Mermaid for
-  its own sake. Before adding or replacing a diagram, confirm it
-  carries structure (flow, relationships, ≥3 named entities) the
-  surrounding text can't.
-- **Structural-vs-prose ratio.** Look at the change set. If it is
-  mostly audience tags, ASCII→Mermaid swaps, and section moves while
-  the prose body is essentially unchanged, the artifact has been
-  *shuffled, not improved* — surface this honestly rather than
-  presenting motion as progress.
+Review mode works through a checklist of eleven anti-patterns plus two
+self-checks on the pass itself. It lives in
+[`references/review-checklist.md`](references/review-checklist.md) — read
+that file whenever you are in review / cleanup mode, and run every check
+in it. Draft mode does not need it.
 
 > **Escalation — artifact-level commingling.** The commingled-audiences
-> check above is a *section*-level fix: retag, split a section, add a
-> routing signal. When
+> check is a *section*-level fix: retag, split a section, add a routing
+> signal. When
 > the commingling is at the **artifact** level — the whole document
 > serves three reader-cells and no amount of section retagging fixes it
 > (the right answer is several artifacts plus a navigation doc) — that is
@@ -239,13 +177,8 @@ Each section's voice is described by a small set of keys: `audience`,
 used by the generating command (`smithy.ignite`, `smithy.render`,
 `smithy.mark`, `smithy.cut`) — not inline in every generated artifact.
 One source of truth, no per-file drift; the artifact itself stays
-clean prose. `smithy.audit` enforces these specs per section via its
-voice-tag lint (`snippets/audit-checklist-voice.md`): it parses the
-`<!-- audience: ... -->` tags and flags unknown keys/values, length-
-budget violations, and missing/forbidden diagrams and examples. The
-lint currently carries the per-section specs directly; as the template
-surface is wired through it will read them from the same template
-files, keeping the enforcement surface and the templates in lockstep.
+clean prose, and `smithy.audit` enforces the specs per section via its
+voice-tag lint (`snippets/audit-checklist-voice.md`).
 
 **For non-Smithy prose** (READMEs, ADRs, migration plans, runbooks,
 inline documentation), there is no template to inherit from. Use the
@@ -253,142 +186,25 @@ taxonomy as authoring discipline — pick Role × Mode before drafting
 and stay in it — but do not litter the file with HTML-comment
 metadata.
 
-Grammar (the syntax templates use):
-
-```
-## <Section title>
-<!-- audience: <role>[+ai-input]; mode: <mode>; length: <budget>; diagram: <required|recommended|optional>; examples: <required|recommended|discouraged|forbidden>[; applicability: <free-text>] -->
-```
-
-Keys:
-
-- `audience` — `stakeholder` | `reviewer` | `builder`. Append
-  `+ai-input` when a sub-agent is the primary consumer
-  (e.g., `builder+ai-input`).
-- `mode` — `explanation` | `reference` | `how-to` | `tutorial`.
-- `length` — sentence or paragraph budget (`2-3 sentences`,
-  `3-6 paragraphs`, `tables only`, `5-15 steps`).
-- `diagram` — `required` | `recommended` | `optional`.
-- `examples` — `required` | `recommended` | `discouraged` | `forbidden`.
-- `applicability` (optional) — free-text condition under which the
-  section legitimately resolves to `N/A` (e.g., `code-shaped features
-  only`).
-
-Example — the `## Summary` section's voice spec, as it would appear
-in a `.spec.md` template (and as the audit command would cite it in a
-finding):
-
-```
-## Summary
-<!-- audience: stakeholder; mode: explanation; length: 2-3 sentences; diagram: optional; examples: discouraged -->
-```
+The tag syntax itself — every key, its allowed values, and a worked
+example — lives in
+[`references/audience-tags.md`](references/audience-tags.md). Read it
+when you are writing or checking a tag; the policy above is all you need
+when you are only deciding whether a tag belongs at all.
 
 ---
 
-## 9. Three worked before/after examples
+## 9. Reference files — load on demand
 
-### (a) Wordy / depth-first Motivation
+Four bundled files carry material you need only sometimes. Read the ones
+your task calls for; reading all four defeats the point.
 
-**Before** — Stakeholder×Explanation drifting into Builder×Reference:
-
-> The current system has a number of issues. The manual reconciliation
-> between three config files takes about an hour each sprint. The
-> reconciliation script is written in bash and uses `jq` to diff the
-> JSON, which is brittle when fields are added. Specifically, the
-> `services.yaml` file has a `replicas` field that defaults to 1, but
-> some teams override it to 3 in their staging branch...
-
-**After** — stays in Stakeholder×Explanation:
-
-> Each sprint, teams lose roughly an hour reconciling three config
-> files by hand. The brittleness compounds as the team scales: every
-> new service multiplies the diff surface, and three P1 incidents last
-> quarter traced back to drift the manual process missed.
-
-The `jq` script and the `replicas` field belong in a child Reference
-section, not in the Motivation.
-
-### (b) Commingled Requirements section
-
-**Before** — Reviewer×Explanation mixed with Builder×Reference+ai-input:
-
-> Users should be able to see status across all artifacts. The CLI must
-> emit JSON with a `nodes[]` array where each node has `id`, `kind`,
-> `state`, `path`. Reviewers will want to confirm the JSON shape is
-> stable before we wire status into CI.
-
-**After** — split into two sections, each governed by its own template
-voice spec (shown inline below for the reader's benefit; in real Smithy
-artifacts the specs live in the template, not in the rendered file):
-
-```
-## Goals
-<!-- audience: reviewer; mode: explanation; length: 1-2 paragraphs; diagram: optional; examples: discouraged -->
-
-Users should be able to see status across all artifacts in one place,
-stable enough to wire into CI.
-
-## Status JSON Schema
-<!-- audience: builder+ai-input; mode: reference; length: tables only; diagram: recommended; examples: required -->
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `id`   | string | Canonical artifact ID |
-| `kind` | enum   | `rfc` \| `spec` \| `tasks` |
-| `state`| enum   | `pending` \| `done` |
-| `path` | string | Repo-relative path |
-```
-
-### (c) Dense-prose `.contracts.md` that should have been signatures or N/A
-
-**Before** — Reference mode emitting Explanation prose:
-
-> The voice helper skill exposes two operations to its callers. The
-> first, draft mode, takes an idea and a target audience and returns
-> prose. The second, review mode, takes an existing artifact and
-> returns a revised version. Internally, the skill does not make any
-> function calls; it is a body of guidance the calling agent reads.
-
-**After option 1** — compress to a signature table:
-
-| Operation | Input | Output |
-|-----------|-------|--------|
-| draft  | section assignment, audience, length budget | prose |
-| review | existing artifact path                      | revised artifact + findings |
-
-**After option 2** — mark `N/A` if no code-shaped contract:
-
-> N/A — `smithy.helper-voice` is a prose-only skill; it exposes no
-> function or CLI surface for other agents to call.
-
----
-
-## 10. Application beyond Smithy
-
-The same axes apply to non-Smithy prose. Pick Role × Mode first;
-everything else follows.
-
-- **Migration plan** — Reviewer × How-to. 10-20 ordered steps with a
-  rollback per phase. Diagram: recommended (timeline or sequence).
-  Examples: discouraged in the steps themselves; recommended in a
-  prerequisite Reference child.
-- **ADR (Architecture Decision Record)** — Reviewer × Explanation.
-  1-2 paragraphs per Context / Decision / Consequences section.
-  Diagram: recommended for Context. Examples: discouraged — an ADR
-  records the choice, not the code.
-- **Runbook** — Builder × How-to. Numbered steps with a validation
-  command per step. Diagram: optional (sequence for multi-system
-  flows). Examples: required — actual command lines.
-- **README landing page** — Stakeholder × Explanation up top (what is
-  this, why use it), Builder × How-to below (install / quick start).
-  Two sections, two tags.
-- **Inline code documentation** — Builder × Reference. One paragraph;
-  diagram: optional; examples: recommended for API entry points.
-
-For any prose deliverable, the workflow is the same: pick the role,
-pick the mode, write the tag, write to the budget. When in doubt about
-the right cell, draft first, then run review mode on yourself and
-update the tag.
+| File | Read it when |
+|------|--------------|
+| [`references/review-checklist.md`](references/review-checklist.md) | You are in review / cleanup mode. Mandatory there, unused in draft mode. |
+| [`references/audience-tags.md`](references/audience-tags.md) | You are writing, editing, or linting an `<!-- audience: ... -->` tag. |
+| [`references/worked-examples.md`](references/worked-examples.md) | You want a before/after pattern to match a finding against, or a finding needs a concrete "here is the fix" companion. |
+| [`references/genre-presets.md`](references/genre-presets.md) | The deliverable is a migration plan, ADR, runbook, README landing page, or inline code documentation, and you would otherwise derive the cell from scratch. |
 
 ---
 
