@@ -45,3 +45,18 @@ export async function loadTesseraAppConfig(env: NodeJS.ProcessEnv = process.env)
   }
   return { appId, privateKey, installationId };
 }
+
+/** No default endpoint or key: incomplete consumer wiring must fail closed. */
+export function resolveTesseraConfig(options: {
+  baseUrl?: string; clientKey?: string; env?: NodeJS.ProcessEnv;
+}): { baseUrl: string; clientKey: string } | undefined {
+  const env = options.env ?? process.env;
+  const baseUrl = options.baseUrl ?? env.MARCH_TESSERA_URL;
+  const clientKey = options.clientKey ?? env.MARCH_TESSERA_CLIENT_KEY;
+  if (!baseUrl?.trim() || !clientKey?.trim() || /[\r\n]/.test(clientKey)) return;
+  try {
+    const url = new URL(baseUrl);
+    if (!["http:", "https:"].includes(url.protocol) || url.username || url.password || url.search || url.hash) return;
+    return { baseUrl: url.href.replace(/\/+$/, ""), clientKey };
+  } catch { return; }
+}

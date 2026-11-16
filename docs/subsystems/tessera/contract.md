@@ -26,7 +26,7 @@ production server denies every issuance request; no environment flag bypasses
 that boundary. Tests may inject an authorization boundary. Policy/client-key file
 loading belongs to US2. US3 owns secret-store provisioning, shared-HOME path
 validation, client-key distribution and stack startup ordering. No secret-store
-layout is selected here. User credentials and client/token CLI are future stories.
+layout is selected here. The token CLI is still future work; the Node client is documented under [Node Client](#node-client), and user credentials belong to US7.
 
 ### HTTP
 
@@ -82,3 +82,62 @@ All token-route failures use the envelope `{"error":{"code":"…","message":"…
 | Credential invalid | `503 credential_invalid` | GitHub returns 401 or the private key cannot sign; status reports `invalid`. |
 | Provider unavailable | `503 provider_unavailable` + `Retry-After` | GitHub returns 5xx/429, the call times out, or the network fails; status reports `degraded`. |
 | Mint failed | `502 mint_failed` | Any other GitHub failure, or a malformed, expired, over-long or permission-broadened mint response. |
+
+## Node Client
+
+Tessera's consumer API lives in `src/tessera/client.ts`; types live in
+`src/tessera/types.ts` and configuration resolution in `src/tessera/config.ts`.
+The token CLI is a separate implementation step.
+
+`TesseraClient` accepts optional `baseUrl`, `clientKey`, `env` and `fetchImpl`.
+Explicit settings override `MARCH_TESSERA_URL` and
+`MARCH_TESSERA_CLIENT_KEY`; there is no implicit endpoint or credential.
+Missing or invalid configuration produces `TesseraClientError` with code
+`unconfigured`. URL credentials, query strings and fragments are rejected.
+
+- `issueGitHubToken({ identity, repo?, access, refresh?, sliceId? })` returns
+  `{ token, expiresAt, identity, commitIdentity, source }`. App requests require
+  an `owner/name` repository. Identity is `app` or `user`, access `read` or
+  `write`. The client authenticates `POST /v1/github/token` with its bearer key
+  and forwards `sliceId` as `x-march-slice-id`.
+- `getGitHubToken(req)` is the process-environment convenience call. It retains
+  a client until endpoint, key or fallback configuration changes.
+- `status()` returns the wire `TesseraStatus` shape from `GET /status`:
+  `service`, `uptime_s`, `providers`, `soonest_expiry`, and `cache.entries`.
+- `reachable()` probes only `GET /healthz` and returns false on failure. It
+  never issues a token. Health and status requests omit authorization.
+
+Requests finish within 10 seconds, including body consumption; health probes
+finish within 3 seconds. Transport failures and timeouts use `unreachable`.
+Known server error codes and HTTP status survive in `TesseraClientError.code`
+and `.status`. Malformed JSON, invalid shapes and scope mismatches use
+`invalid_response`. Error messages are fixed text; raw bodies, transport error
+messages, URLs, headers and secrets never enter diagnostics. Redirects fail
+closed. Returned entitlements are validated before reuse.
+
+Each client owns an in-memory cache keyed by requested identity, repository
+and access. Entries are reusable only while more than ten minutes remain.
+`refresh: true` evicts the matching entry before issuance, even when issuance
+fails; callers can use this for one retry after a GitHub 401. Unknown-expiry
+user tokens and ambient fallbacks are never cached. Returned values are copies.
+
+Fallback is a temporary, explicit migration mechanism: only after issuance
+fails, only for `app`, and only when `MARCH_TESSERA_GH_TOKEN_FALLBACK=1`, the
+client reads `GH_TOKEN`, then `GITHUB_TOKEN`. Without an available token the
+original typed error survives. A fallback has `source: env-fallback`, null
+expiry and commit identity, and `identity: unknown` because ambient tokens
+have no verified login. It never substitutes a Tessera user identity.
+
+Every fallback warns through the pino service logger (stderr and
+`$HOME/.march/logs/tessera-client.jsonl`) and increments
+`march.tessera.client.fallbacks` when OTel is enabled. The bounded `service`
+label is derived from `MARCH_OTEL_SERVICE_NAME`, accepting March's six consumers
+(`herald`, `brood`, `hatchery`, `legate`, `statio`, `steward`, with optional
+`march-` prefix); all other values become `unknown`. Logs contain only the
+fixed event and bounded service. The Tessera client dashboard shows fallback
+rates by service. OTel follows the existing `MARCH_OTEL=1` bootstrap convention;
+warning logs remain enabled independently.
+
+These bounded, unattended failures and explicit credential access follow
+[March's vision](../../vision.md) and
+[operating philosophy](../../operating-philosophy.md).
