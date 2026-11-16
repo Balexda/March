@@ -264,6 +264,17 @@ describe("github-app provider minting", () => {
     expect(result.commitIdentity).toEqual({ name: "other-app[bot]", email: "99+other-app[bot]@users.noreply.github.com" });
   });
 
+  it("refuses an unknown access level before any GitHub call", async () => {
+    const { fake, provider } = await setup();
+    await provider.start();
+    fake.reset();
+    await expect(
+      provider.issue({ repo: "acme/widgets", access: "admin" as unknown as "read" }),
+    ).rejects.toBeInstanceOf(TesseraValidationError);
+    expect(fake.mintCount()).toBe(0);
+    expect(fake.calls).toHaveLength(0);
+  });
+
   it("requires a repository", async () => {
     const { provider } = await setup();
     await provider.start();
@@ -307,6 +318,39 @@ describe("github-app provider status lifecycle", () => {
       CredentialInvalidError,
     );
     expect(fake.mintCount()).toBe(mints);
+  });
+
+  it("stays invalid when a concurrent mint fails with a 5xx or timeout after a 401", async () => {
+    const { fake, provider } = await setup({ timeoutMs: 300 });
+    await provider.start();
+    await provider.issue({ repo: "acme/widgets", access: "read" }); // remember the binding
+    fake.reset();
+
+    // Request B: its mint hangs and will time out (provider_unavailable).
+    fake.fail("token", { hang: true });
+    const b = provider.issue({ repo: "acme/widgets", access: "read" }).catch((e: unknown) => e);
+    const deadline = Date.now() + 2_000;
+    while (fake.mintCount() < 1 && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    expect(fake.mintCount()).toBe(1);
+
+    // Request A: its mint gets a 401 while B is still in flight.
+    fake.fail("token", { status: 401 });
+    await expect(provider.issue({ repo: "acme/widgets", access: "read" })).rejects.toBeInstanceOf(
+      CredentialInvalidError,
+    );
+    expect(provider.status()).toMatchObject({ state: "invalid", last_error: "credential_invalid" });
+
+    expect(await b).toBeInstanceOf(ProviderUnavailableError);
+    expect(provider.status()).toMatchObject({ state: "invalid", last_error: "credential_invalid" });
+
+    // A later 5xx on another in-flight path does not move it either.
+    fake.fail("token", { status: 502 });
+    await expect(provider.issue({ repo: "acme/widgets", access: "read" })).rejects.toBeInstanceOf(
+      CredentialInvalidError,
+    );
+    expect(provider.status()).toMatchObject({ state: "invalid", last_error: "credential_invalid" });
   });
 
   it("never exposes token or key material in status", async () => {

@@ -80,6 +80,23 @@ describe("GitHubClient success paths", () => {
     expect(fake.mintCount()).toBe(2);
   });
 
+  it("refuses a mint locally unless it names exactly one repository and a non-empty permission set", async () => {
+    const { fake, client } = await setup();
+    const scopes = [
+      { repositories: [], permissions: ACCESS_PROFILES.read },
+      { repositories: ["widgets", "gadgets"], permissions: ACCESS_PROFILES.read },
+      { repositories: [""], permissions: ACCESS_PROFILES.read },
+      { repositories: ["widgets"], permissions: {} },
+    ];
+    for (const scope of scopes) {
+      const error = await client.createInstallationToken(assertion, 7, scope).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(MintFailedError);
+      expect((error as Error).message).not.toContain("widgets");
+    }
+    expect(fake.mintCount()).toBe(0);
+    expect(fake.calls).toHaveLength(0);
+  });
+
   it("looks up the bot user unauthenticated with an escaped path", async () => {
     const { fake, client } = await setup({ botUserId: 555 });
     await expect(client.getBotUser("march-bot")).resolves.toEqual({ id: 555, login: "march-bot[bot]" });

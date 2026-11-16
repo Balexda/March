@@ -9,11 +9,14 @@
  *   resolved per repository owner. Only successful lookups are remembered; a
  *   binding is dropped when a mint against it reports not-found.
  * - Downscoping: every mint names exactly the one requested repository and
- *   exactly the access profile's permissions ({@link ACCESS_PROFILES}). There
- *   is no retry with a broader scope and no fallback to another identity.
+ *   exactly the access profile's permissions ({@link ACCESS_PROFILES}); an
+ *   unknown access level is refused before any GitHub call. There is no retry
+ *   with a broader scope and no fallback to another identity.
  * - Provider Status follows the data model lifecycle: network/5xx →
  *   `degraded`, next success → `ok`, rejected credential → `invalid` (sticky
- *   until restart in this slice). `last_error` carries the error code only.
+ *   until restart in this slice: once invalid, no later failure or success,
+ *   including one from a request already in flight, changes `state` or
+ *   `last_error`). `last_error` carries the error code only.
  *
  * Tokens are not cached here (Slice 3). Nothing in this module logs.
  */
@@ -27,6 +30,7 @@ import {
   TesseraValidationError,
   type CommitIdentity,
   type CredentialProvider,
+  type GitHubPermissions,
   type ProviderIssueRequest,
   type ProviderIssueResult,
   type ProviderState,
@@ -95,21 +99,28 @@ export function createGitHubAppProvider({
   const bindings = new Map<string, number>();
 
   function markInvalid(error: CredentialInvalidError): never {
-    invalidError = error;
-    state = "invalid";
-    lastError = error.code;
+    if (invalidError === null) {
+      invalidError = error;
+      state = "invalid";
+      lastError = error.code;
+    }
     throw error;
   }
 
   function markOk(): void {
-    if (state === "invalid" || identity === null) return;
+    if (invalidError !== null || identity === null) return;
     state = "ok";
     lastError = null;
   }
 
-  /** Record a failed GitHub call per the lifecycle, then rethrow it. */
+  /**
+   * Record a failed GitHub call per the lifecycle, then rethrow it. Once the
+   * provider is invalid, no later failure (e.g. an in-flight request timing out
+   * after another got a 401) changes `state` or `last_error` until restart.
+   */
   function markFailure(error: unknown): never {
     if (error instanceof CredentialInvalidError) markInvalid(error);
+    if (invalidError !== null) throw error;
     if (error instanceof ProviderUnavailableError) {
       state = "degraded";
       lastError = error.code;
@@ -150,8 +161,10 @@ export function createGitHubAppProvider({
       return identity;
     } catch (error) {
       if (error instanceof CredentialInvalidError) markInvalid(error);
-      state = "degraded";
-      lastError = errorCode(error);
+      if (invalidError === null) {
+        state = "degraded";
+        lastError = errorCode(error);
+      }
       throw error;
     }
   }
@@ -194,6 +207,10 @@ export function createGitHubAppProvider({
 
     async issue(req: ProviderIssueRequest): Promise<ProviderIssueResult> {
       const { owner, name } = splitRepo(req.repo);
+      const permissions = ACCESS_PROFILES[req.access] as GitHubPermissions | undefined;
+      if (permissions === undefined) {
+        throw new TesseraValidationError('access must be "read" or "write".');
+      }
       if (invalidError !== null) throw invalidError;
 
       let bot: BotIdentity;
@@ -208,7 +225,7 @@ export function createGitHubAppProvider({
       try {
         const minted = await client.createInstallationToken(assertion(), installationId, {
           repositories: [name],
-          permissions: ACCESS_PROFILES[req.access],
+          permissions,
         });
         markOk();
         return {

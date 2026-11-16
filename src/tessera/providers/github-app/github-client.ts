@@ -210,6 +210,14 @@ export class GitHubClient {
     installationId: number,
     scope: InstallationTokenScope,
   ): Promise<InstallationToken> {
+    // GitHub reads a missing or empty `repositories`/`permissions` as "everything
+    // the installation has", so an unscoped request is refused before any call.
+    const [repository, ...extra] = scope.repositories;
+    if (!repository || extra.length > 0 || Object.keys(scope.permissions).length === 0) {
+      throw new MintFailedError(
+        "GitHub installation token mint refused: the request must name exactly one repository and at least one permission.",
+      );
+    }
     const body = await this.call("token", {
       method: "POST",
       path: `/app/installations/${encodeURIComponent(String(installationId))}/access_tokens`,

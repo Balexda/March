@@ -157,6 +157,8 @@ Provider state transitions, as reported by `/status`:
 
 `invalid` lasts until the service restarts. `last_error` holds the error code
 of the last failure (for example `provider_unavailable`), never its message.
+Once the provider is `invalid`, no later failure or success changes `state` or
+`last_error`, including one from a request already in flight.
 `login` is `null` until the bot identity is known.
 
 ### Provider seam
@@ -234,6 +236,9 @@ or `GITHUB_TOKEN`.
 - An `app` token is scoped to exactly one repository, the requested one, with
   exactly the access level's permissions. Scope is never widened: a refused
   mint is not retried with more repositories or more permissions.
+- A mint is refused locally, before any GitHub call, unless it names exactly
+  one repository and a non-empty permission set (GitHub reads an empty or
+  missing list as everything the installation has).
 - The bot login and commit identity come from GitHub, never from
   configuration. No `app` token is issued while they are unknown.
 - Every GitHub call is bounded by a 5-second timeout, and every failure is a
