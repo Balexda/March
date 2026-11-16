@@ -287,6 +287,19 @@ one; explicit attach (the same approach as `emitLoopLog`) is what works. The
 pino→OTel bridge then promotes those ids to the log record's trace context, which
 is what makes Grafana's "Logs for this span" resolve for a `castra.*` span.
 
+#### Tessera client (consumer side)
+
+The Tessera Node client (`src/tessera/client.ts`) runs inside whichever service
+calls `getGitHubToken`, so its metric carries that process's `service.name`.
+
+| OTel instrument | Prometheus series | Meaning |
+|---|---|---|
+| `march.tessera.client.fallbacks` (counter) | `march_tessera_client_fallbacks_total` | GitHub tokens served from `GH_TOKEN`/`GITHUB_TOKEN` by the gated migration fallback (`MARCH_TESSERA_GH_TOKEN_FALLBACK=1`), by `{service}` only |
+
+Each fallback also logs one warning (failure code, identity, service; never the
+token) to `tessera-client.jsonl` and, with telemetry on, to the OTel logs
+pipeline. See [`docs/subsystems/tessera/contract.md`](subsystems/tessera/contract.md).
+
 #### Loop heartbeat metrics
 
 The loop **service** emits one set of heartbeat metrics per tick via the OTel SDK

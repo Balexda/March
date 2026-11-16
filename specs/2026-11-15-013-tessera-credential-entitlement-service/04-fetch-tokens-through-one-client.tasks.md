@@ -56,7 +56,7 @@
   - Each fallback logs one warning and increments the counter once, with only a low-cardinality service label; the token is never logged
   - A fallback result is never cached
 
-- [ ] **Document the Node client**
+- [x] **Document the Node client**
 
   Update `docs/subsystems/tessera/contract.md` and the Tessera line in `AGENTS.md` for the client, the consumer settings, the cache rule, the fallback and its counter.
 

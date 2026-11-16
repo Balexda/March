@@ -16,6 +16,10 @@ requests always fail with `provider_unconfigured`. Minted tokens are cached in
 memory and reused until fewer than ten minutes of life remain; during a GitHub
 outage an unexpired cached token is served instead of an error.
 
+Service code reaches Tessera through the Node client's `getGitHubToken` (see
+"Node client"). It fails closed: the environment token is used only behind an
+explicit migration flag, and only for `app`. No existing service calls it yet.
+
 Every request under `/v1` must carry the bearer key of a registered client
 (`Authorization: Bearer <client key>`). Tessera stores only the SHA-256 hash of
 each key, read at startup from the client-keys file named by
@@ -377,6 +381,107 @@ the same identity. A provider implements `start()`, `issue(request)`,
 `access` and `refresh`, and reports failure by throwing a `TesseraError`
 subclass from `src/tessera/types.ts`. The route itself contains no GitHub logic.
 
+### Node client
+
+Service code gets a GitHub credential by calling one function. It speaks only
+HTTP to `POST /v1/github/token` and imports nothing from the server module.
+
+```ts
+// src/tessera/client.ts exports getGitHubToken, TesseraClient and TesseraClientError.
+const { token } = await getGitHubToken({ identity: "app", repo: "owner/name", access: "write" });
+```
+
+**Request** (`GitHubTokenRequest`):
+
+| Field | Meaning |
+|-------|---------|
+| `identity` | `"app"` (the GitHub App bot) or `"user"` (the operator's token). |
+| `repo` | `owner/name`. Required for `app`. |
+| `access` | `"read"` or `"write"`. |
+| `refresh` | Optional. `true` skips the in-memory cache and asks Tessera for a fresh credential. Use it once after GitHub answers `401` with a token you were given. |
+| `sliceId` | Optional. Sent as the `x-march-slice-id` header so the request joins that slice's trace. Never sent in the body and never part of the cache key. |
+
+**Result** (`GitHubEntitlement`, frozen):
+
+| Field | Meaning |
+|-------|---------|
+| `token` | The credential. Never log it. |
+| `expiresAt` | RFC 3339 time, or `null` when no expiry is known. |
+| `identity` | The login the token acts as. |
+| `commitIdentity` | `{ name, email }` to commit as, or `null` (always `null` for `user`). |
+| `source` | `"tessera"`, or `"env-fallback"` when the migration fallback served the call (see below). |
+
+**Settings** read by the calling process:
+
+| Setting | Meaning |
+|---------|---------|
+| `MARCH_TESSERA_URL` | Where Tessera is. Default `http://localhost:<MARCH_TESSERA_PORT>`, which is `http://localhost:9477` when the port is not set. |
+| `MARCH_TESSERA_CLIENT_KEY` | This service's own client key, sent as `Authorization: Bearer <key>`. |
+| `MARCH_TESSERA_GH_TOKEN_FALLBACK` | Migration fallback. Only the exact value `1` turns it on; unset, `0`, `true` or anything else leaves it off. Off by default. |
+
+**Errors.** Every failure is a `TesseraClientError` with a `code`, plus the
+HTTP `status` when Tessera answered and `retryAfterSeconds` when Tessera sent a
+numeric `Retry-After`. The codes are the server's codes from `## Error Modes`,
+passed through unchanged, plus two that the client raises itself:
+
+| Code | When |
+|------|------|
+| `unreachable` | Tessera could not be reached, did not answer within the timeout, or sent a response that is neither an entitlement nor an error envelope. |
+| `client_key_missing` | `MARCH_TESSERA_CLIENT_KEY` is unset or blank. Raised before any request. |
+
+A request that is invalid locally (for example `app` without `repo`) fails with
+`invalid_request` before any request is sent. Each request is bounded by a
+10-second timeout (`DEFAULT_TESSERA_TIMEOUT_MS`), so the call never hangs.
+
+**Reuse.** The client keeps entitlements in memory, never on disk, keyed by
+identity, repository (ignoring case) and access level. A cached entitlement is
+returned without asking Tessera while more than ten minutes remain before its
+`expiresAt`; inside the last ten minutes the next call fetches a new one. An
+entitlement with no expiry is never cached, and neither is a failure.
+`refresh: true` always fetches and replaces the entry. `getGitHubToken` uses
+one shared client per process, so every call in a process shares that cache.
+`TesseraClient` can also be constructed directly; each instance has its own
+cache.
+
+**Fail closed.** By default every failure surfaces as the typed error, and
+`GH_TOKEN` and `GITHUB_TOKEN` are not read at all.
+
+**Migration fallback.** While services move onto Tessera, setting
+`MARCH_TESSERA_GH_TOKEN_FALLBACK=1` lets `getGitHubToken` hand back the
+environment token instead of failing. All of these must hold:
+
+- the request is for the `app` identity (the fallback never serves `user`, and
+  the environment token is not read for a `user` request);
+- the failure is one of `unreachable`, `client_key_missing`,
+  `provider_unavailable`, `provider_unconfigured`, `credential_invalid`,
+  `mint_failed` or `internal`;
+- `GH_TOKEN`, or else `GITHUB_TOKEN`, is set and not blank. If neither is, the
+  original error is raised.
+
+`unauthorized`, `policy_denied`, `invalid_request` and `repo_not_installed`
+never fall back, and neither does any error that is not a
+`TesseraClientError`. A fallback result is
+`{ token, expiresAt: null, identity: "", commitIdentity: null, source: "env-fallback" }`
+and is never cached, so the next call asks Tessera again. Each fallback logs
+one warning, with the failure code as `reason`, the identity and the calling
+service, and adds one to the counter `march.tessera.client.fallbacks`, whose
+only label is `service` (from `MARCH_OTEL_SERVICE_NAME`, else `unknown`). The
+counter is a no-op when telemetry is off. When the caller passes no logger, the
+warning goes to `tessera-client.jsonl` in `MARCH_TESSERA_LOG_DIR` (default
+`~/.march/logs`) and, with telemetry on, to the OTel logs pipeline; it never
+goes to stdout. No warning, log line or error message contains a token or a
+client key.
+
+Open questions: which failures should allow the fallback is a working
+assumption (spec debt SD-017), not a settled decision. The empty `identity` on
+a fallback result is also a working assumption (SD-019), because the token's
+login is not known without asking GitHub.
+
+Not in this client yet: `status()` and `reachable()` on `TesseraClient`, the
+`march tessera status` command, and the git credential helper come in later
+changes. No existing service uses `getGitHubToken` yet; moving each one off
+`GH_TOKEN` is a later change too.
+
 ### CLI: `march tessera serve`
 
 | Option | Default | Meaning |
@@ -396,7 +501,9 @@ prints the group help and exits with the usage status.
 |---------|------|---------|
 | `MARCH_TESSERA_PORT` | consumer and server | Port. Default `9477`, derived from the service name `march-tessera` in the 8800-9799 band. |
 | `MARCH_TESSERA_URL` | consumer | Base URL March processes use to reach Tessera; read by the Node client (`src/tessera/client.ts`). Default `http://localhost:<MARCH_TESSERA_PORT>`. |
-| `MARCH_TESSERA_LOG_DIR` | server | Directory for the log file `tessera.jsonl`. Default `~/.march/logs`; the container uses `/march/logs` on the `march-tessera-logs` volume. |
+| `MARCH_TESSERA_CLIENT_KEY` | consumer | This process's own client key, sent by the Node client as the bearer credential. Unset or blank fails with `client_key_missing` before any request. |
+| `MARCH_TESSERA_GH_TOKEN_FALLBACK` | consumer | `1` turns on the Node client's migration fallback to `GH_TOKEN`/`GITHUB_TOKEN` (see "Node client"). Any other value, or unset, leaves it off. |
+| `MARCH_TESSERA_LOG_DIR` | consumer and server | Directory for the server log file `tessera.jsonl` and the Node client's `tessera-client.jsonl`. Default `~/.march/logs`; the container uses `/march/logs` on the `march-tessera-logs` volume. |
 | `TESSERA_GITHUB_APP_ID` | server | GitHub App id. Optional; with the key file, it enables the `github-app` provider. |
 | `TESSERA_GITHUB_APP_KEY_FILE` | server | Path to the App private key file (PEM). Optional; counts as missing when the file does not exist. |
 | `TESSERA_GITHUB_INSTALLATION_ID` | server | Pinned installation id. Optional; must be a positive integer when set. When set, only repositories of the account that installation belongs to are served. When unset, the installation is looked up per repository owner. |
@@ -467,6 +574,12 @@ or `GITHUB_TOKEN`.
   the provider for `user`. If that provider is missing, the response is
   `provider_unconfigured`; no fallback to the other identity exists on any path,
   including error paths.
+- The Node client fails closed. Unless `MARCH_TESSERA_GH_TOKEN_FALLBACK` is
+  exactly `1`, it never reads `GH_TOKEN` or `GITHUB_TOKEN`. The fallback
+  serves only `app` requests, only for the failures listed in "Node client",
+  is never cached, and is always logged as a warning and counted.
+- The Node client raises only `TesseraClientError`, never the server's error
+  classes, and its errors and logs never contain a token or a client key.
 - A registry holds at most one provider per identity.
 - Callers cannot widen permissions. The only permissions a provider may request
   are the fixed set for the requested `access` level, and `write` never
