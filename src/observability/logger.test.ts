@@ -5,7 +5,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { PassThrough } from "node:stream";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   createCastraLogger,
   createHatcheryLogger,
@@ -14,7 +14,9 @@ import {
   pinoLevelToSeverity,
   resolveCastraLogFilePath,
   resolveHatcheryLogFilePath,
+  createTesseraClientLogger,
   createTesseraLogger,
+  resolveTesseraClientLogFilePath,
   resolveTesseraLogFilePath,
 } from "./logger.js";
 import { SeverityNumber } from "@opentelemetry/api-logs";
@@ -88,6 +90,44 @@ describe("createTesseraLogger", () => {
     expect(lines).toHaveLength(1);
     expect(lines[0].name).toBe("march-tessera");
     expect(lines[0].msg).toBe("tessera started");
+  });
+});
+
+describe("createTesseraClientLogger", () => {
+  let dir: string;
+
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), "march-tessera-client-log-"));
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("resolves tessera-client.jsonl under MARCH_TESSERA_LOG_DIR, else HOME/.march/logs", () => {
+    expect(resolveTesseraClientLogFilePath({ MARCH_TESSERA_LOG_DIR: "/march/logs" })).toBe(
+      path.join("/march/logs", "tessera-client.jsonl"),
+    );
+    expect(resolveTesseraClientLogFilePath({ HOME: "/home/u" })).toBe(
+      path.join("/home/u", ".march", "logs", "tessera-client.jsonl"),
+    );
+  });
+
+  it("writes JSONL to the file only, never to stdout", () => {
+    const stdoutWrite = vi.spyOn(process.stdout, "write");
+    const logger = createTesseraClientLogger({ env: { MARCH_TESSERA_LOG_DIR: dir } });
+    logger.warn({ reason: "unreachable" }, "fell back");
+
+    const lines = fs
+      .readFileSync(path.join(dir, "tessera-client.jsonl"), "utf-8")
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .map((l) => JSON.parse(l) as Record<string, unknown>);
+    expect(lines).toHaveLength(1);
+    expect(lines[0].name).toBe("march-tessera-client");
+    expect(lines[0].reason).toBe("unreachable");
+    expect(stdoutWrite).not.toHaveBeenCalled();
   });
 });
 

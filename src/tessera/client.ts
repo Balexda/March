@@ -4,11 +4,18 @@
  *
  * It speaks only HTTP to `POST /v1/github/token`. It imports nothing from the
  * server module and never raises the server's `TesseraError` classes: every
- * failure is a {@link TesseraClientError}. It does not log. No error message
- * ever carries the client key or a token: messages are fixed text or the
- * server's own envelope message.
+ * failure is a {@link TesseraClientError}. The class does not log; only the
+ * module-level {@link getGitHubToken} logs, once per migration fallback. No
+ * error message or log line ever carries the client key or a token: messages
+ * are fixed text or the server's own envelope message.
  */
-import { resolveTesseraBaseUrl, resolveTesseraClientKey } from "./config.js";
+import { createTesseraClientLogger } from "../observability/logger.js";
+import { recordTesseraClientFallback } from "../observability/tessera-metrics.js";
+import {
+  resolveTesseraBaseUrl,
+  resolveTesseraClientKey,
+  resolveTesseraGhTokenFallback,
+} from "./config.js";
 import { isValidRepo } from "./repo-name.js";
 import type { AccessLevel, CommitIdentity, Identity, TesseraErrorCode } from "./types.js";
 
@@ -319,5 +326,125 @@ export class TesseraClient {
       ? parseErrorEnvelope(parsed.value, res.status, res.headers.get("retry-after"))
       : undefined;
     throw typed ?? unreachable("Tessera returned an error without a valid envelope.", res.status);
+  }
+}
+
+/**
+ * Failures for which the gated migration fallback may serve an `app` request:
+ * Tessera could not be reached, this process has no client key yet, or the
+ * provider could not issue. A key Tessera refused (`unauthorized`), a policy
+ * denial, an invalid request and an uninstalled repository never fall back.
+ *
+ * Working default for open spec debt SD-017 (option (a) plus the client-side
+ * missing key); change this list if SD-017 resolves differently.
+ */
+const FALLBACK_CODES: ReadonlySet<TesseraClientErrorCode> = new Set<TesseraClientErrorCode>([
+  "unreachable",
+  "client_key_missing",
+  "provider_unavailable",
+  "provider_unconfigured",
+  "credential_invalid",
+  "mint_failed",
+  "internal",
+]);
+
+/** The minimal logger shape {@link getGitHubToken} needs. */
+export interface TesseraClientLogger {
+  warn(obj: Record<string, unknown>, msg: string): void;
+}
+
+/** Injection points for {@link getGitHubToken}; all optional. */
+export interface GetGitHubTokenOptions {
+  /** Defaults to a lazily created, process-wide client built from `env`. */
+  readonly client?: TesseraClient;
+  /** Defaults to `process.env`. */
+  readonly env?: NodeJS.ProcessEnv;
+  /** Defaults to the file-only Tessera client logger; never stdout. */
+  readonly logger?: TesseraClientLogger;
+  /** Counter and warning label; defaults to `MARCH_OTEL_SERVICE_NAME`, else `unknown`. */
+  readonly service?: string;
+}
+
+let defaultClient: TesseraClient | undefined;
+let defaultLogger: TesseraClientLogger | undefined;
+
+/** The shared default client, so its cache spans every call in the process. */
+function getDefaultClient(env: NodeJS.ProcessEnv): TesseraClient {
+  defaultClient ??= new TesseraClient({ env });
+  return defaultClient;
+}
+
+/** Drop the process-wide default client (and its cache). Tests only. */
+export function resetDefaultTesseraClientForTests(): void {
+  defaultClient = undefined;
+  defaultLogger = undefined;
+}
+
+function warnFallback(
+  logger: TesseraClientLogger | undefined,
+  env: NodeJS.ProcessEnv,
+  fields: Record<string, unknown>,
+): void {
+  try {
+    const target = logger ?? (defaultLogger ??= createTesseraClientLogger({ env }));
+    target.warn(
+      fields,
+      "Tessera could not issue a GitHub token; using the environment token (migration fallback).",
+    );
+  } catch {
+    // Logging must never break the token call.
+  }
+}
+
+/** `GH_TOKEN`, then `GITHUB_TOKEN`; blank counts as unset. Read only on fallback. */
+function readEnvToken(env: NodeJS.ProcessEnv): string | undefined {
+  const token = env.GH_TOKEN?.trim() || env.GITHUB_TOKEN?.trim();
+  return token ? token : undefined;
+}
+
+/**
+ * Get a GitHub credential from Tessera — the one call service code uses
+ * (contracts "Node Client"). Fails closed: every failure is a
+ * {@link TesseraClientError}.
+ *
+ * Only when `MARCH_TESSERA_GH_TOKEN_FALLBACK=1`, the identity is `app` and the
+ * failure is one of {@link FALLBACK_CODES} does it return `GH_TOKEN` (else
+ * `GITHUB_TOKEN`) marked `source: "env-fallback"`, logging one warning and
+ * counting `march.tessera.client.fallbacks{service}`. Otherwise the token
+ * variables are never read. With no env token set, the original error is
+ * rethrown. A fallback result is never cached.
+ */
+export async function getGitHubToken(
+  req: GitHubTokenRequest,
+  options: GetGitHubTokenOptions = {},
+): Promise<GitHubEntitlement> {
+  const env = options.env ?? process.env;
+  const client = options.client ?? getDefaultClient(env);
+  try {
+    return await client.issueGitHubToken(req);
+  } catch (err) {
+    if (
+      !(err instanceof TesseraClientError) ||
+      !FALLBACK_CODES.has(err.code) ||
+      req?.identity !== "app" ||
+      !resolveTesseraGhTokenFallback(env)
+    ) {
+      throw err;
+    }
+    const token = readEnvToken(env);
+    if (token === undefined) throw err;
+
+    const service = options.service?.trim() || env.MARCH_OTEL_SERVICE_NAME?.trim() || "unknown";
+    warnFallback(options.logger, env, { reason: err.code, identity: "app", service });
+    recordTesseraClientFallback({ service });
+    return Object.freeze({
+      token,
+      expiresAt: null,
+      // The login behind an env token is unknown without asking GitHub; empty
+      // is the working default for open spec debt SD-019.
+      identity: "",
+      commitIdentity: null,
+      source: "env-fallback" as const,
+    });
   }
 }

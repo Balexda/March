@@ -69,6 +69,16 @@ export function resolveTesseraLogFilePath(
 }
 
 /**
+ * Tessera Node client log file (the consumer side, inside whichever process
+ * calls the client): `$MARCH_TESSERA_LOG_DIR/tessera-client.jsonl`.
+ */
+export function resolveTesseraClientLogFilePath(
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  return resolveServiceLogFilePath("tessera-client.jsonl", "MARCH_TESSERA_LOG_DIR", env);
+}
+
+/**
  * Map a pino numeric level to its OpenTelemetry severity. pino levels:
  * trace=10 debug=20 info=30 warn=40 error=50 fatal=60. Exported for testing.
  */
@@ -364,6 +374,39 @@ export interface TesseraLoggerOptions {
   readonly sync?: boolean;
   /** Override the stdout sink (tests); defaults to the process stdout. */
   readonly stdout?: NodeJS.WritableStream;
+}
+
+export interface TesseraClientLoggerOptions {
+  readonly logFilePath?: string;
+  readonly level?: LevelWithSilent;
+  readonly env?: NodeJS.ProcessEnv;
+}
+
+/**
+ * Library-level logger for the Tessera Node client (`march-tessera-client` →
+ * `tessera-client.jsonl`), used when the caller injects none. Unlike the
+ * service loggers it **never writes to stdout**: the client runs inside other
+ * processes, including CLI commands such as `march tessera token` whose stdout
+ * must carry only their output. Records go to the file (synchronously, so a
+ * short-lived process does not lose its one warning) and, when `MARCH_OTEL=1`,
+ * to the OTel logs pipeline.
+ */
+export function createTesseraClientLogger(
+  options: TesseraClientLoggerOptions = {},
+): PinoLogger {
+  const env = options.env ?? process.env;
+  const logFilePath = options.logFilePath ?? resolveTesseraClientLogFilePath(env);
+  fs.mkdirSync(path.dirname(logFilePath), { recursive: true });
+  const streams: pino.StreamEntry[] = [
+    { stream: pino.destination({ dest: logFilePath, sync: true }) },
+  ];
+  if (otelEnabled(env)) {
+    streams.push({ stream: createOtelBridgeStream() });
+  }
+  return pino(
+    { name: "march-tessera-client", level: options.level ?? "info", mixin: traceMixin },
+    pino.multistream(streams),
+  );
 }
 
 /** Tessera service logger (`march-tessera` → `tessera.jsonl`). */

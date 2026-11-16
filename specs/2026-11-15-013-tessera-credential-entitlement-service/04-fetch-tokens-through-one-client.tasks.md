@@ -42,7 +42,7 @@
   - An entitlement with no expiry is never cached
   - The slice id does not affect the cache key; nothing is written to disk
 
-- [ ] **Expose `getGitHubToken` with the gated environment fallback**
+- [x] **Expose `getGitHubToken` with the gated environment fallback**
 
   Add the module-level `getGitHubToken` in `src/tessera/client.ts`, over a lazily created default client, and a consumer-side fallback counter in a new `src/observability/tessera-metrics.ts` following `src/observability/statio-metrics.ts` (contracts "Events"). The fallback applies only when the flag is set, the identity is `app`, and Tessera could not be reached, has no client key configured for this service, or returned `provider_unavailable`, `provider_unconfigured`, `credential_invalid`, `mint_failed` or `internal`. Satisfies AS 4.2, AS 4.3 and AS 4.4.
 
