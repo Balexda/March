@@ -7,7 +7,7 @@
  * fake GitHub API) and mints, even after a GitHub outage at startup. Logs name
  * settings only, never their values, and it shuts down cleanly on a signal.
  */
-import { generateKeyPairSync } from "node:crypto";
+import { createHash, generateKeyPairSync } from "node:crypto";
 import { EventEmitter } from "node:events";
 import fs from "node:fs";
 import net from "node:net";
@@ -20,6 +20,17 @@ import { GitHubClient } from "./providers/github-app/github-client.js";
 import { startFakeGitHub, type FakeGitHub } from "./testing/fake-github.js";
 import { TesseraValidationError } from "./types.js";
 import { runTesseraServer } from "./serve.js";
+
+const CLIENT_KEY = "tessera-serve-test-client-key";
+
+/** A client-keys file registering one client by its key's SHA-256. */
+function writeClientKeysFile(): { file: string; cleanup: () => void } {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tessera-clients-"));
+  const file = path.join(dir, "clients.json");
+  const keySha256 = createHash("sha256").update(CLIENT_KEY, "utf8").digest("hex");
+  fs.writeFileSync(file, JSON.stringify([{ client: "herald", key_sha256: keySha256 }]));
+  return { file, cleanup: () => fs.rmSync(dir, { recursive: true, force: true }) };
+}
 
 async function freePort(): Promise<number> {
   return new Promise((resolve, reject) => {
@@ -57,12 +68,24 @@ async function waitForHealthz(url: string): Promise<Response> {
 async function postToken(port: number, body: unknown): Promise<Response> {
   return fetch(`http://127.0.0.1:${port}/v1/github/token`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", authorization: `Bearer ${CLIENT_KEY}` },
     body: JSON.stringify(body),
   });
 }
 
 describe("runTesseraServer", () => {
+  let clientKeys: { file: string; cleanup: () => void } | undefined;
+
+  afterEach(() => {
+    clientKeys?.cleanup();
+    clientKeys = undefined;
+  });
+
+  function clientKeysFile(): string {
+    clientKeys ??= writeClientKeysFile();
+    return clientKeys.file;
+  }
+
   it("serves unconfigured, logs setting names only, and stops on SIGTERM", async () => {
     const port = await freePort();
     const signals = new EventEmitter();
@@ -71,7 +94,11 @@ describe("runTesseraServer", () => {
     const running = runTesseraServer({
       port,
       host: "127.0.0.1",
-      env: { TESSERA_GITHUB_APP_ID: "app-id-sentinel-do-not-log", TESSERA_GITHUB_APP_KEY_FILE: "/no/such/key.pem" },
+      env: {
+        TESSERA_GITHUB_APP_ID: "app-id-sentinel-do-not-log",
+        TESSERA_GITHUB_APP_KEY_FILE: "/no/such/key.pem",
+        TESSERA_CLIENT_KEYS_FILE: clientKeysFile(),
+      },
       logger,
       signals,
     });
@@ -134,7 +161,11 @@ describe("runTesseraServer", () => {
       const running = runTesseraServer({
         port,
         host: "127.0.0.1",
-        env: { TESSERA_GITHUB_APP_ID: "42", TESSERA_GITHUB_APP_KEY_FILE: keyFile },
+        env: {
+          TESSERA_GITHUB_APP_ID: "42",
+          TESSERA_GITHUB_APP_KEY_FILE: keyFile,
+          TESSERA_CLIENT_KEYS_FILE: clientKeysFile(),
+        },
         logger,
         signals,
         githubClient: new GitHubClient({ baseUrl: fake.baseUrl }),

@@ -1,4 +1,5 @@
 import Fastify, { type FastifyBaseLogger, type FastifyInstance } from "fastify";
+import type { ClientRegistry } from "./auth/client-keys.js";
 import { TESSERA_SERVICE_NAME } from "./config.js";
 import {
   type AccessLevel,
@@ -13,7 +14,19 @@ import {
   type TesseraErrorCode,
   TesseraError,
   TesseraValidationError,
+  UnauthorizedError,
 } from "./types.js";
+
+declare module "fastify" {
+  interface FastifyRequest {
+    /**
+     * The authenticated client's name for a `/v1/*` request, set by the
+     * client-key hook before the route runs; `undefined` on open routes.
+     * Never returned in a response body or header.
+     */
+    tesseraClient: string | undefined;
+  }
+}
 
 /** The providers the token route dispatches to, keyed by the identity they serve. */
 export interface ProviderRegistry {
@@ -47,7 +60,13 @@ export function createProviderRegistry(
 }
 
 export interface BuildTesseraServerOptions {
+  /** The credential providers the token route dispatches to. */
   readonly registry: ProviderRegistry;
+  /**
+   * The registered clients every `/v1/*` request authenticates against.
+   * Required: there is no unauthenticated mode.
+   */
+  readonly clients: ClientRegistry;
   readonly logger?: FastifyBaseLogger | boolean;
   readonly startedAt?: number;
 }
@@ -126,6 +145,19 @@ export function parseEntitlementRequest(body: unknown): EntitlementRequest {
   };
 }
 
+const BEARER_PATTERN = /^bearer +(\S+)$/i;
+
+/** The key from a strict `Authorization: Bearer <key>` header, else `undefined`. */
+function bearerKey(header: string | string[] | undefined): string | undefined {
+  if (typeof header !== "string") return undefined;
+  return BEARER_PATTERN.exec(header)?.[1];
+}
+
+/** `/v1` itself or any path below it, whether or not a route matched. */
+function isGatedPath(pathname: string): boolean {
+  return pathname === "/v1" || pathname.startsWith("/v1/");
+}
+
 function statusClass(status: number): string {
   return `${Math.floor(status / 100)}xx`;
 }
@@ -199,13 +231,15 @@ function providerReport(provider: CredentialProvider): ProviderReport {
 }
 
 /**
- * Build the Tessera HTTP server. The route holds no GitHub-specific logic and
- * applies no caller authentication (US2); it validates, dispatches on
- * `identity`, and maps typed errors to the contract envelope. Request and
- * response bodies are never logged.
+ * Build the Tessera HTTP server. Every `/v1/*` request must present a
+ * registered client's bearer key, checked before the body is parsed; the
+ * route holds no GitHub-specific logic, validates, dispatches on `identity`,
+ * and maps typed errors to the contract envelope. Authorization (policy) is
+ * not applied yet: any authenticated client may request anything. Request and
+ * response bodies, keys and the Authorization header are never logged.
  */
 export function buildTesseraServer(options: BuildTesseraServerOptions): FastifyInstance {
-  const { registry } = options;
+  const { registry, clients } = options;
   const startedAt = options.startedAt ?? Date.now();
   const loggerOption = options.logger ?? false;
   const app =
@@ -213,9 +247,26 @@ export function buildTesseraServer(options: BuildTesseraServerOptions): FastifyI
       ? Fastify({ logger: loggerOption, disableRequestLogging: true })
       : Fastify({ loggerInstance: loggerOption, disableRequestLogging: true });
 
+  app.decorateRequest("tesseraClient", undefined);
+
+  // Authenticate before body parsing, so an unauthenticated request is 401
+  // whatever its body, and an unmatched /v1 path is 401 rather than 404. The
+  // matched route pattern is checked too, so no URL encoding of the path can
+  // reach a /v1 route without a key. /healthz and /status stay open.
+  app.addHook("onRequest", async (request) => {
+    const pathname = request.url.split("?")[0] ?? "";
+    const route = request.routeOptions.url ?? "";
+    if (!isGatedPath(pathname) && !isGatedPath(route)) return;
+    const key = bearerKey(request.headers.authorization);
+    const client = key === undefined ? undefined : clients.authenticate(key);
+    if (client === undefined) throw new UnauthorizedError();
+    request.tesseraClient = client;
+  });
+
   app.addHook("onResponse", async (request, reply) => {
     request.log.info(
       {
+        ...(request.tesseraClient === undefined ? {} : { "tessera.client": request.tesseraClient }),
         "tessera.method": request.method,
         "tessera.route": request.routeOptions.url ?? "unmatched",
         "tessera.status_class": statusClass(reply.statusCode),

@@ -30,7 +30,7 @@
   - An unknown key, of any length, resolves to no client without throwing
   - Plaintext keys are never retained
 
-- [ ] **Gate `/v1/*` on the client key and expose the caller**
+- [x] **Gate `/v1/*` on the client key and expose the caller**
 
   In `src/tessera/server.ts`, take the client registry as a required build option and authenticate every path under `/v1` in a hook that runs before body parsing. Record the authenticated client name on the request, for the route and the later audit record. Update the existing cases in `src/tessera/server.test.ts` to authenticate, and extend that contract test. Satisfies AS 2.1.
 
