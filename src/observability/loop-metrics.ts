@@ -159,6 +159,7 @@ let dispatchActions: Counter | undefined;
 let dispatchFailures: Counter | undefined;
 let loopActions: Counter | undefined;
 let tickDuration: Histogram | undefined;
+let dependencyUnblock: Counter | undefined;
 
 // The observable gauges read this map — one snapshot PER PROFILE, updated on
 // every recordLoopHeartbeat. The single shared legate ticks each profile in turn
@@ -206,6 +207,12 @@ function ensureInstruments(meter: Meter): void {
   // kind" / "Loop failures" panels and is a metric label.
   loopActions = meter.createCounter("march.legate.loop.actions", {
     description: "Count of loop lifecycle actions by kind",
+    unit: "1",
+  });
+  // The Dependabot conflict ladder (#573), one count per rung taken, split by the
+  // bounded `outcome` label ({@link DependencyUnblockOutcome}).
+  dependencyUnblock = meter.createCounter("march.legate.dependency.unblock", {
+    description: "Count of Dependabot conflict-unblock attempts by outcome",
     unit: "1",
   });
   tickDuration = meter.createHistogram("march.legate.tick.duration", {
@@ -538,4 +545,24 @@ export function recordDwell(profile: string, sample: DwellSample): void {
   for (const d of sample.completedStageDwells) {
     stageDwellHistogram!.record(d.seconds, { stage: d.stage });
   }
+}
+
+/** The bounded outcomes of the Dependabot conflict ladder (#573) — a metric label. */
+export type DependencyUnblockOutcome =
+  | "recreate_requested"
+  | "recreate_failed"
+  | "escalated"
+  | "escalate_failed"
+  | "resolved";
+
+/**
+ * Count one Dependabot conflict-ladder outcome. `processor` is the profile's loop
+ * name (bounded by the number of registered profiles). No-op when telemetry is
+ * disabled.
+ */
+export function recordDependencyUnblock(outcome: DependencyUnblockOutcome, processor?: string): void {
+  const otel = getActiveOtel();
+  if (!otel.enabled) return;
+  ensureInstruments(otel.getMeter());
+  dependencyUnblock!.add(1, { outcome, ...(processor ? { processor } : {}) });
 }

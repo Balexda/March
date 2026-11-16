@@ -12,10 +12,45 @@
  */
 import { emitLoopSpan as defaultEmitLoopSpan } from "../../observability/loop-spans.js";
 import { emitLoopLog as defaultEmitLoopLog, type LoopLogSeverity } from "../../observability/logs.js";
-import type { LoopMetricsSnapshot, LoopTickActivity } from "../../observability/loop-metrics.js";
+import {
+  recordDependencyUnblock as defaultRecordDependencyUnblock,
+  type DependencyUnblockOutcome,
+  type LoopMetricsSnapshot,
+  type LoopTickActivity,
+} from "../../observability/loop-metrics.js";
 
 export type LoopSpanEmitter = typeof defaultEmitLoopSpan;
 export type LoopLogEmitter = typeof defaultEmitLoopLog;
+
+/** The Dependabot conflict-ladder action → its metric outcome, or null for any other action. */
+const DEPENDENCY_UNBLOCK_OUTCOMES: Record<string, DependencyUnblockOutcome> = {
+  "dependency-recreate-requested": "recreate_requested",
+  "dependency-recreate-failed": "recreate_failed",
+  "dependency-unblock-escalated": "escalated",
+  "dependency-unblock-escalate-failed": "escalate_failed",
+  "dependency-unblock-resolved": "resolved",
+};
+
+export function dependencyUnblockOutcome(action: string): DependencyUnblockOutcome | null {
+  return Object.prototype.hasOwnProperty.call(DEPENDENCY_UNBLOCK_OUTCOMES, action)
+    ? DEPENDENCY_UNBLOCK_OUTCOMES[action]
+    : null;
+}
+
+/**
+ * Fold one action-log event into the event-driven loop counters. Today that is
+ * the Dependabot conflict ladder's outcome counter (#573); the per-tick counters
+ * come from the heartbeat instead ({@link buildLoopTickActivity}).
+ */
+export function recordActionEventMetrics(
+  event: any,
+  record: typeof defaultRecordDependencyUnblock = defaultRecordDependencyUnblock,
+): void {
+  if (!event || typeof event !== "object") return;
+  if (event.kind !== "dependency_merge" && event.kind !== "dependency_merge_failure") return;
+  const outcome = dependencyUnblockOutcome(typeof event.action === "string" ? event.action : "");
+  if (outcome) record(outcome, event.processor ? String(event.processor) : undefined);
+}
 
 /**
  * Classify one action-log event into a dispatch-lifecycle span. Each dispatched
@@ -53,12 +88,16 @@ export function emitActionEventSpan(event: any, emit: LoopSpanEmitter = defaultE
   // dispatched), so each PR gets its own small trace keyed by repo-loop + PR
   // number. A `*-failed` action marks the span errored; a failed listing has no
   // PR and keys off the loop alone.
+  // The conflict ladder's actions (#573) share the PR's trace under their own span
+  // name; an escalation (the ladder gave up) is errored like a failure.
   if (event.kind === "dependency_merge" || event.kind === "dependency_merge_failure") {
     const pr = event.pr_number;
     const scope = String(event.processor || "legate");
-    const failed = typeof event.action === "string" && event.action.endsWith("-failed");
+    const action = typeof event.action === "string" ? event.action : "";
+    const unblock = dependencyUnblockOutcome(action) !== null;
+    const failed = action.endsWith("-failed") || action === "dependency-unblock-escalated";
     emit({
-      name: "legate.dependency-merge",
+      name: unblock ? "legate.dependency-unblock" : "legate.dependency-merge",
       traceKey: pr != null ? `${scope}-dependency-pr-${pr}` : `${scope}-dependency-merge`,
       root: true,
       error: failed,

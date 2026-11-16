@@ -3,7 +3,13 @@
  */
 import { afterEach, describe, expect, it } from "vitest";
 import { initOtel } from "./otel.js";
-import { recordDwell, recordLoopHeartbeat, recordSpawnBudget, type LoopTickActivity } from "./loop-metrics.js";
+import {
+  recordDependencyUnblock,
+  recordDwell,
+  recordLoopHeartbeat,
+  recordSpawnBudget,
+  type LoopTickActivity,
+} from "./loop-metrics.js";
 
 function activity(overrides: Partial<LoopTickActivity> = {}): LoopTickActivity {
   return {
@@ -79,6 +85,14 @@ describe("loop-metrics", () => {
     expect(() => recordSpawnBudget({ cap: 10, live: 41, deferred: 13 })).not.toThrow();
     initOtel({ MARCH_OTEL: "1", MARCH_OTEL_ENDPOINT: "http://localhost:4318" });
     expect(() => recordSpawnBudget({ cap: 10, live: 41, deferred: 13 })).not.toThrow();
+  });
+
+  it("recordDependencyUnblock is a no-op when disabled and counts when enabled", () => {
+    initOtel({});
+    expect(() => recordDependencyUnblock("recreate_requested", "smithy-loop")).not.toThrow();
+    initOtel({ MARCH_OTEL: "1", MARCH_OTEL_ENDPOINT: "http://localhost:4318" });
+    expect(() => recordDependencyUnblock("escalated", "smithy-loop")).not.toThrow();
+    expect(() => recordDependencyUnblock("resolved")).not.toThrow();
   });
 
   it("recordDwell is a no-op when disabled and folds (gauges + histogram) when enabled", () => {
