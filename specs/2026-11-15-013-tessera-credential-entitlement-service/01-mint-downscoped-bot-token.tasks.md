@@ -69,7 +69,7 @@
   - The image installs neither `gh` nor `git`
   - The artifact test fails on a non-loopback port publication
 
-- [ ] **Create the Tessera subsystem contract and registry entries**
+- [x] **Create the Tessera subsystem contract and registry entries**
 
   Create `docs/subsystems/tessera/contract.md` from `docs/subsystems/contract-scaffold.md`, and add Tessera to `docs/subsystems/subsystems.json` and `docs/subsystems/contract-freshness.config.json` in the same change, since the contract check requires both entries to agree. Document the token route, health and status, and the error codes this slice can return.
 
