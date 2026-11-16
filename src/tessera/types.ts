@@ -3,9 +3,9 @@
  *
  * Tessera is the one place a March process obtains a GitHub credential. These
  * shapes mirror the US1 contracts (`POST /v1/github/token`, `/status`, the
- * provider interface). Client-key authentication (US2, `unauthorized`) is
- * typed here; policy (US2) and the `user` provider (US7) plug in behind the
- * same shapes later.
+ * provider interface). Client-key authentication (US2, `unauthorized`) and the
+ * per-client policy (US2, `policy_denied`) are typed here; the `user` provider
+ * (US7) plugs in behind the same shapes later.
  */
 
 /** Which credential a request asks for: the bot installation token or the operator PAT. */
@@ -129,11 +129,12 @@ export const ACCESS_PROFILES: Readonly<Record<AccessLevel, GitHubPermissions>> =
 
 /**
  * Stable error codes Tessera can return. `internal` covers unexpected failures.
- * `unauthorized` is the US2 client-key rejection; `policy_denied` arrives with
- * the US2 policy.
+ * `unauthorized` is the US2 client-key rejection; `policy_denied` is the US2
+ * default-deny policy rejection.
  */
 export type TesseraErrorCode =
   | "unauthorized"
+  | "policy_denied"
   | "invalid_request"
   | "repo_not_installed"
   | "provider_unconfigured"
@@ -181,6 +182,32 @@ export class UnauthorizedError extends TesseraError {
   constructor() {
     super(UNAUTHORIZED_MESSAGE);
     this.name = "UnauthorizedError";
+  }
+}
+
+/** The policy dimension a request was denied on. */
+export type PolicyDimension = "identity" | "repository" | "access";
+
+/**
+ * The one fixed `policy_denied` message per dimension. Each names only the
+ * dimension denied, never the client's allowlist or the submitted values.
+ */
+export const POLICY_DENIED_MESSAGES: Readonly<Record<PolicyDimension, string>> = Object.freeze({
+  identity: "The requested identity is not granted to this client.",
+  repository: "The requested repository is not allowed for this client.",
+  access: "The requested access exceeds this client's ceiling.",
+});
+
+/** Identity, repository or access outside the client's policy. HTTP 403 `policy_denied`. */
+export class PolicyDeniedError extends TesseraError {
+  readonly code = "policy_denied" satisfies TesseraErrorCode;
+  readonly status = 403;
+  readonly dimension: PolicyDimension;
+
+  constructor(dimension: PolicyDimension) {
+    super(POLICY_DENIED_MESSAGES[dimension]);
+    this.name = "PolicyDeniedError";
+    this.dimension = dimension;
   }
 }
 

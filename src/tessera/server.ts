@@ -1,6 +1,7 @@
 import Fastify, { type FastifyBaseLogger, type FastifyInstance } from "fastify";
 import type { ClientRegistry } from "./auth/client-keys.js";
 import { TESSERA_SERVICE_NAME } from "./config.js";
+import { isValidRepo } from "./repo-name.js";
 import {
   type AccessLevel,
   type CredentialProvider,
@@ -81,22 +82,6 @@ export interface TesseraStatus {
 }
 
 const REQUEST_FIELDS = new Set(["identity", "repo", "access", "refresh", "subject"]);
-const REPO_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
-
-const MAX_OWNER_LENGTH = 39;
-const MAX_REPO_NAME_LENGTH = 100;
-const DOTS_ONLY = /^\.+$/;
-
-/**
- * `owner/name`, with GitHub's length limits and no dot-only segment. A provider
- * puts this value into GitHub API paths, so `.` and `..` must never get through.
- */
-function isValidRepo(repo: string): boolean {
-  if (!REPO_PATTERN.test(repo)) return false;
-  const [owner = "", name = ""] = repo.split("/");
-  if (owner.length > MAX_OWNER_LENGTH || name.length > MAX_REPO_NAME_LENGTH) return false;
-  return !DOTS_ONLY.test(owner) && !DOTS_ONLY.test(name);
-}
 
 function errorBody(code: TesseraErrorCode, message: string): TesseraErrorBody {
   return { error: { code, message } };

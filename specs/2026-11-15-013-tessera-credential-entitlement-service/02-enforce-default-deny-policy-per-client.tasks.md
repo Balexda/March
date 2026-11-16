@@ -79,7 +79,7 @@
 
 ### Tasks
 
-- [ ] **Load and validate the policy file**
+- [x] **Load and validate the policy file**
 
   Add `src/tessera/auth/policy.ts` and a `TESSERA_POLICY_FILE` setting in `src/tessera/config.ts`. The module loads the file, a JSON array of Policy Rule rows (data model), into an immutable rule set validated against the client registry. Add the `policy_denied` typed error to `src/tessera/types.ts` per the contracts "Error Conditions" table. Satisfies the policy half of AS 2.6.
 

@@ -31,6 +31,9 @@ export const TESSERA_GITHUB_INSTALLATION_ID_ENV = "TESSERA_GITHUB_INSTALLATION_I
 /** Server-side: client registrations (name + SHA-256 key hash). Required; no default. */
 export const TESSERA_CLIENT_KEYS_FILE_ENV = "TESSERA_CLIENT_KEYS_FILE";
 
+/** Server-side: per-client policy rules (default deny). Required; no default. */
+export const TESSERA_POLICY_FILE_ENV = "TESSERA_POLICY_FILE";
+
 const PORT_BAND_START = 8800;
 const PORT_BAND_SIZE = 1000;
 
@@ -97,6 +100,20 @@ export function resolveClientKeysFile(env: NodeJS.ProcessEnv = process.env): str
   if (path === undefined) {
     throw new TesseraValidationError(
       `${TESSERA_CLIENT_KEYS_FILE_ENV} is not set: Tessera requires a client-keys file and will not start without one.`,
+    );
+  }
+  return path;
+}
+
+/**
+ * Resolve the policy file path. The setting is required: unset or blank is a
+ * typed validation error (startup failure), never "allow all".
+ */
+export function resolvePolicyFile(env: NodeJS.ProcessEnv = process.env): string {
+  const path = readTrimmed(env, TESSERA_POLICY_FILE_ENV);
+  if (path === undefined) {
+    throw new TesseraValidationError(
+      `${TESSERA_POLICY_FILE_ENV} is not set: Tessera requires a policy file and will not start without one.`,
     );
   }
   return path;
