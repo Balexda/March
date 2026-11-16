@@ -138,8 +138,9 @@ export class TesseraClient {
     } catch (error) {
       if (!(error instanceof TesseraClientError)) throw new TesseraClientError("invalid_response");
       if (req.identity !== "app" || this.env.MARCH_TESSERA_GH_TOKEN_FALLBACK !== "1") throw error;
-      const token = this.env.GH_TOKEN || this.env.GITHUB_TOKEN;
-      if (!token) throw error;
+      // Trimmed like other ambient-token readers; CR/LF would be header injection, so treat it as absent.
+      const token = this.env.GH_TOKEN?.trim() || this.env.GITHUB_TOKEN?.trim();
+      if (!token || /[\r\n]/.test(token)) throw error;
       const service = tesseraConsumerService(this.env);
       this.logger ??= createServiceLogger({ serviceName: "march-tessera-client", env: this.env,
         logFilePath: path.join(this.env.HOME || os.homedir(), ".march", "logs", "tessera-client.jsonl"), stdout: process.stderr });

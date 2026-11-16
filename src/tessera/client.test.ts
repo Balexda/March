@@ -61,6 +61,14 @@ describe("Tessera client", () => {
     await expect(new TesseraClient({ env: {}, fetchImpl }).issueGitHubToken(req)).rejects.toMatchObject({ code: "unconfigured" });
     expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
+  it("trims configured endpoint and key before validating and using them", async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(Response.json(wire()));
+    await new TesseraClient({ env: { MARCH_TESSERA_URL: "  http://tessera/  ", MARCH_TESSERA_CLIENT_KEY: " KEY \n" }, fetchImpl }).issueGitHubToken(req);
+    expect(fetchImpl.mock.calls[0][0]).toBe("http://tessera/v1/github/token");
+    expect((fetchImpl.mock.calls[0][1]!.headers as Record<string, string>).authorization).toBe("Bearer KEY");
+    await expect(new TesseraClient({ env: { MARCH_TESSERA_URL: "http://tessera", MARCH_TESSERA_CLIENT_KEY: "K\nEY" }, fetchImpl })
+      .issueGitHubToken(req)).rejects.toMatchObject({ code: "unconfigured" });
+  });
   it("preserves protocol codes and status without exposing server secrets", async () => {
     const { client, fetchImpl } = setup();
     fetchImpl.mockResolvedValue(Response.json({ error: { code: "policy_denied", message: "SECRET KEY" } }, { status: 403 }));
@@ -171,6 +179,14 @@ describe("Tessera client", () => {
     expect(JSON.stringify(warn.mock.calls)).not.toContain("SECRET");
     expect(recordTesseraFallback).toHaveBeenCalledTimes(2);
     expect(recordTesseraFallback).toHaveBeenCalledWith("herald");
+  });
+  it("trims ambient fallback tokens and treats CR/LF-bearing tokens as absent", async () => {
+    const { client, fetchImpl } = setup({}, { MARCH_TESSERA_GH_TOKEN_FALLBACK: "1", GH_TOKEN: "  ", GITHUB_TOKEN: " ENV_SECRET\n" });
+    fetchImpl.mockRejectedValue(Error("offline"));
+    expect((await client.issueGitHubToken(req)).token).toBe("ENV_SECRET");
+    const bad = setup({}, { MARCH_TESSERA_GH_TOKEN_FALLBACK: "1", GH_TOKEN: "ENV\r\nX-Injected: 1" });
+    bad.fetchImpl.mockRejectedValue(Error("offline"));
+    await expect(bad.client.issueGitHubToken(req)).rejects.toMatchObject({ code: "unreachable" });
   });
   it("preserves failure when fallback is enabled but absent", async () => {
     const { client, fetchImpl } = setup({}, { MARCH_TESSERA_GH_TOKEN_FALLBACK: "1" });

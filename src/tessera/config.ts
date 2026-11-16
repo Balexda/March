@@ -51,9 +51,10 @@ export function resolveTesseraConfig(options: {
   baseUrl?: string; clientKey?: string; env?: NodeJS.ProcessEnv;
 }): { baseUrl: string; clientKey: string } | undefined {
   const env = options.env ?? process.env;
-  const baseUrl = options.baseUrl ?? env.MARCH_TESSERA_URL;
-  const clientKey = options.clientKey ?? env.MARCH_TESSERA_CLIENT_KEY;
-  if (!baseUrl?.trim() || !clientKey?.trim() || /[\r\n]/.test(clientKey)) return;
+  // Trim before validating so the key sent in the auth header is exactly what was checked.
+  const baseUrl = (options.baseUrl ?? env.MARCH_TESSERA_URL)?.trim();
+  const clientKey = (options.clientKey ?? env.MARCH_TESSERA_CLIENT_KEY)?.trim();
+  if (!baseUrl || !clientKey || /[\r\n]/.test(clientKey)) return;
   try {
     const url = new URL(baseUrl);
     if (!["http:", "https:"].includes(url.protocol) || url.username || url.password || url.search || url.hash) return;

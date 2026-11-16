@@ -91,7 +91,8 @@ The token CLI is a separate implementation step.
 
 `TesseraClient` accepts optional `baseUrl`, `clientKey`, `env` and `fetchImpl`.
 Explicit settings override `MARCH_TESSERA_URL` and
-`MARCH_TESSERA_CLIENT_KEY`; there is no implicit endpoint or credential.
+`MARCH_TESSERA_CLIENT_KEY`; both are trimmed before validation and use, and
+there is no implicit endpoint or credential.
 Missing or invalid configuration produces `TesseraClientError` with code
 `unconfigured`. URL credentials, query strings and fragments are rejected.
 
@@ -123,7 +124,8 @@ user tokens and ambient fallbacks are never cached. Returned values are copies.
 
 Fallback is a temporary, explicit migration mechanism: only after issuance
 fails, only for `app`, and only when `MARCH_TESSERA_GH_TOKEN_FALLBACK=1`, the
-client reads `GH_TOKEN`, then `GITHUB_TOKEN`. Without an available token the
+client reads `GH_TOKEN`, then `GITHUB_TOKEN` (trimmed; a value containing CR/LF
+is treated as absent). Without an available token the
 original typed error survives. A fallback has `source: env-fallback`, null
 expiry and commit identity, and `identity: unknown` because ambient tokens
 have no verified login. It never substitutes a Tessera user identity.
