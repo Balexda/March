@@ -530,18 +530,34 @@ It reads `MARCH_TESSERA_URL` (else `http://localhost:<MARCH_TESSERA_PORT or
 
 **Output.** On success, stdout gets the token and a newline, and nothing else.
 Nothing else in the command writes to stdout, so `$(…)` captures the bare token.
+This holds with telemetry on (`MARCH_OTEL=1`) too. Before printing, the command
+checks that the token is printable ASCII with no whitespace or control
+characters (`^[\x21-\x7e]+$`). A token that fails the check is treated as an
+invalid answer from Tessera: the `unreachable` failure line below, exit `1`,
+and the token is never echoed.
 
 **Failures.** stdout stays empty. stderr gets one line of the form
 `march tessera token: <fixed text> (<code>)`, where `<code>` is the client error
 code (see "Node client"); `provider_unavailable` adds `, retry after <n>s` when
-Tessera sent a `Retry-After`. The text is fixed per code. It never echoes the
-server's message, a token or the client key. A missing client key names
-`MARCH_TESSERA_CLIENT_KEY`. An unexpected error prints a generic line.
+Tessera sent a `Retry-After`. The text is fixed per code, with one exception:
+an `invalid_request` the client detects locally (no HTTP status, e.g. a bad
+setting) says the request or a client setting such as `MARCH_TESSERA_PORT` is
+invalid. It never echoes the server's message, a token or the client key. A
+missing client key names `MARCH_TESSERA_CLIENT_KEY`. An unexpected error prints
+a generic line.
+
+**Bad flags.** An unknown option (e.g. a misspelt `--acess`), an option with no
+value, or an extra positional word is rejected while parsing, before any
+request. stdout stays empty (no help text), stderr gets the parser's error
+message and a pointer to `march tessera token --help`, and the exit status is
+`2` (usage). `march tessera token --help` is an explicit request for help: it
+prints help to stdout and exits `0`.
 
 | Condition | Exit status |
 |-----------|-------------|
 | Token printed | `0` |
-| `--repo` missing or not `owner/name`, `--access` missing or not `read`/`write`, or `--identity` other than `app` | `2` (usage). Checked before any request. |
+| `--repo` missing or not `owner/name`, `--access` missing or not `read`/`write`, `--identity` other than `app`, an unknown option, an option with no value, or an extra positional | `2` (usage). Checked before any request. |
+| Tessera answered with a token that is not printable ASCII | `1` (`unreachable`) |
 | Any Tessera failure: `unauthorized`, `policy_denied`, `provider_unconfigured`, `repo_not_installed`, `credential_invalid`, `provider_unavailable`, `mint_failed`, `internal`, `invalid_request`, `unreachable` or `client_key_missing` | `1` |
 
 **No fallback to host credentials.** The command calls

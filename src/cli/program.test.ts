@@ -625,6 +625,50 @@ describe("march CLI", () => {
         expect(result.stdout).not.toContain("gho_hostCredential");
       });
 
+      // Commander rejects these before the action runs. stdout must stay empty
+      // so `GH_TOKEN="$(march tessera token …)"` never captures help text.
+      const parseErrors: Array<{ name: string; args: string[]; problem: RegExp }> = [
+        {
+          name: "an unknown option",
+          args: ["--repo", "acme/widgets", "--acess", "write"],
+          problem: /unknown option '--acess'/,
+        },
+        {
+          name: "an option missing its argument",
+          args: ["--access", "write", "--repo"],
+          problem: /option '--repo <owner\/name>' argument missing/,
+        },
+        {
+          name: "an extra positional",
+          args: ["--repo", "acme/widgets", "--access", "write", "extra"],
+          problem: /too many arguments/,
+        },
+      ];
+      for (const parseError of parseErrors) {
+        it(`${parseError.name} exits 2 with empty stdout and Commander's error on stderr`, () => {
+          const result = runWithEnv(["tessera", "token", ...parseError.args], {
+            MARCH_TESSERA_URL: "http://127.0.0.1:1",
+            MARCH_TESSERA_CLIENT_KEY: CLIENT_KEY,
+            ...hostCreds,
+          });
+          expect(result.exitCode).toBe(2);
+          expect(result.stdout).toBe("");
+          expect(result.stderr).toMatch(parseError.problem);
+          expect(result.stderr).toContain("march tessera token --help");
+          expect(result.stderr).not.toContain("unknown command 'tessera'");
+          expect(result.stderr).not.toContain(CLIENT_KEY);
+        });
+      }
+
+      it("a bad flag on a sibling command keeps the existing root-help fall-through", () => {
+        // The empty-stdout branch is scoped to `tessera token`; other commands
+        // are unchanged.
+        const result = run(["tessera", "serve", "--bogus"]);
+        expect(result.exitCode).toBe(2);
+        expect(result.stderr).toContain("unknown command 'tessera'");
+        expect(result.stdout).toContain("Usage: march [options] [command]");
+      });
+
       it("a missing --access is a usage error (exit 2) with nothing on stdout", () => {
         const result = runWithEnv(["tessera", "token", "--repo", "acme/widgets"], {
           MARCH_TESSERA_URL: "http://127.0.0.1:1",
@@ -664,6 +708,39 @@ describe("march CLI", () => {
               repo: "acme/widgets",
               access: "write",
             });
+          },
+        );
+      });
+
+      it("prints exactly the token and a newline with telemetry on and no collector", async () => {
+        // OTel must not write to stdout or change the outcome; the exporter
+        // targets a closed loopback port so every export is refused at once.
+        await withFakeTessera(
+          (_req, _body, res) => {
+            res.writeHead(200, { "content-type": "application/json" });
+            res.end(
+              JSON.stringify({
+                token: TOKEN,
+                expires_at: "2099-01-01T00:00:00Z",
+                identity: "march-bot[bot]",
+                commit_identity: { name: "march-bot[bot]", email: "1+march-bot[bot]@users.noreply.github.com" },
+              }),
+            );
+          },
+          async (url) => {
+            const result = await runAsync(
+              ["tessera", "token", "--repo", "acme/widgets", "--access", "read"],
+              {
+                MARCH_TESSERA_URL: url,
+                MARCH_TESSERA_CLIENT_KEY: CLIENT_KEY,
+                ...hostCreds,
+                MARCH_OTEL: "1",
+                MARCH_OTEL_ENDPOINT: "http://127.0.0.1:1",
+                OTEL_EXPORTER_OTLP_ENDPOINT: "http://127.0.0.1:1",
+              },
+            );
+            expect(result.exitCode).toBe(0);
+            expect(result.stdout).toBe(`${TOKEN}\n`);
           },
         );
       });

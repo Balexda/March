@@ -2716,6 +2716,35 @@ function findInvokedCommand(argv: readonly string[]): Command {
   return cur;
 }
 
+/** Space-joined subcommand path of `cmd` below the root, e.g. `tessera token`. */
+function commandPath(cmd: Command): string {
+  const names: string[] = [];
+  for (let cur: Command | null = cmd; cur && cur !== program; cur = cur.parent) {
+    names.unshift(cur.name());
+  }
+  return names.join(" ");
+}
+
+/** Commander errors raised while parsing a command's flags and arguments. */
+const PARSE_ERROR_CODES: ReadonlySet<string> = new Set([
+  "commander.unknownOption",
+  "commander.optionMissingArgument",
+  "commander.excessArguments",
+  "commander.missingArgument",
+  "commander.invalidArgument",
+  "commander.missingMandatoryOptionValue",
+  "commander.conflictingOption",
+]);
+
+/**
+ * Commands whose parse errors print only Commander's message plus a help
+ * pointer to stderr, leaving stdout empty, instead of the root-help
+ * fall-through. Scoped to commands whose stdout is captured by callers
+ * (`GH_TOKEN="$(march tessera token …)"`) so other commands keep their
+ * current output for now; widening is one entry here.
+ */
+const QUIET_PARSE_ERROR_COMMANDS: ReadonlySet<string> = new Set(["tessera token"]);
+
 export async function runCli(argv: readonly string[] = process.argv): Promise<void> {
   // The OTEL lifecycle is owned here, in the CLI subsystem, so src/cli.ts stays
   // a pure bin wrapper. No-op unless MARCH_OTEL=1; the finally force-flushes
@@ -2755,6 +2784,14 @@ async function dispatchCli(argv: readonly string[]): Promise<void> {
         process.stderr.write(err.message + "\n");
         findInvokedCommand(argv.slice(2)).outputHelp();
         process.exitCode = USAGE_ERROR;
+      } else if (PARSE_ERROR_CODES.has(err.code)) {
+        const invokedPath = commandPath(findInvokedCommand(argv.slice(2)));
+        if (QUIET_PARSE_ERROR_COMMANDS.has(invokedPath)) {
+          commandHandled = true;
+          process.stderr.write(err.message + "\n");
+          process.stderr.write(`See 'march ${invokedPath} --help'.\n`);
+          process.exitCode = USAGE_ERROR;
+        }
       }
     }
     // Other Commander errors fall through to the !commandHandled block below.

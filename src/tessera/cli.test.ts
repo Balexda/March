@@ -255,6 +255,43 @@ describe("runTesseraTokenCommand", () => {
     });
   }
 
+  const badTokens: Array<{ name: string; token: string }> = [
+    { name: "a newline", token: "ghs_abc\nexport EVIL=1" },
+    { name: "a space", token: "ghs_abc def" },
+    { name: "a NUL", token: "ghs_abc\u0000def" },
+  ];
+  for (const bad of badTokens) {
+    it(`rejects a token containing ${bad.name} as an invalid answer without echoing it`, async () => {
+      const { fetchImpl } = fakeFetch(
+        () =>
+          new Response(
+            JSON.stringify({
+              token: bad.token,
+              expires_at: "2099-01-01T00:00:00Z",
+              identity: "march-bot[bot]",
+              commit_identity: { name: "march-bot[bot]", email: "1+march-bot[bot]@users.noreply.github.com" },
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          ),
+      );
+      const io = capture();
+      const code = await runTesseraTokenCommand({
+        repo: "acme/widgets",
+        access: "write",
+        client: clientWith(fetchImpl),
+        stdout: io.stdout,
+        stderr: io.stderr,
+      });
+      expect(code).toBe(ERROR);
+      expect(io.out).toEqual([]);
+      const stderr = io.err.join("");
+      expect(stderr).toBe(
+        "march tessera token: Tessera could not be reached or gave an invalid answer (unreachable)\n",
+      );
+      expect(stderr).not.toContain("ghs_abc");
+    });
+  }
+
   it("reports a missing client key naming MARCH_TESSERA_CLIENT_KEY", async () => {
     const { fetchImpl, calls } = fakeFetch(entitlementResponse);
     const io = capture();

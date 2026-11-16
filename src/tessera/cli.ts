@@ -15,6 +15,9 @@ import { isValidRepo } from "./repo-name.js";
 
 const PREFIX = "march tessera token: ";
 
+/** A printable token: visible ASCII only, no whitespace or control characters. */
+const PRINTABLE_TOKEN = /^[\x21-\x7e]+$/;
+
 export interface RunTesseraTokenCommandOptions {
   /** `--repo`, `owner/name`. */
   readonly repo?: string;
@@ -75,7 +78,8 @@ function usageProblem(options: RunTesseraTokenCommandOptions): string | undefine
 /**
  * Run `march tessera token`. Returns the exit status: SUCCESS with
  * `<token>\n` on stdout; USAGE_ERROR for bad flags (before any request);
- * ERROR for any Tessera failure. Nothing reaches stdout on failure.
+ * ERROR for any Tessera failure, including a token that is not printable
+ * ASCII. Nothing reaches stdout on failure.
  */
 export async function runTesseraTokenCommand(
   options: RunTesseraTokenCommandOptions,
@@ -102,6 +106,11 @@ export async function runTesseraTokenCommand(
       repo: options.repo as string,
       access: options.access as "read" | "write",
     });
+    if (!PRINTABLE_TOKEN.test(entitlement.token)) {
+      // Whitespace or control characters would corrupt `$(…)` capture; treat
+      // the answer as invalid and never echo it.
+      throw new TesseraClientError("unreachable", "Tessera returned a malformed token");
+    }
     stdout(`${entitlement.token}\n`);
     return SUCCESS;
   } catch (err) {
