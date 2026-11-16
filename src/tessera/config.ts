@@ -28,6 +28,9 @@ export const TESSERA_GITHUB_APP_KEY_FILE_ENV = "TESSERA_GITHUB_APP_KEY_FILE";
 /** Server-side: optional pinned installation id; otherwise resolved per owner. */
 export const TESSERA_GITHUB_INSTALLATION_ID_ENV = "TESSERA_GITHUB_INSTALLATION_ID";
 
+/** Server-side: client registrations (name + SHA-256 key hash). Required; no default. */
+export const TESSERA_CLIENT_KEYS_FILE_ENV = "TESSERA_CLIENT_KEYS_FILE";
+
 const PORT_BAND_START = 8800;
 const PORT_BAND_SIZE = 1000;
 
@@ -83,6 +86,20 @@ export type GitHubAppConfig =
 function readTrimmed(env: NodeJS.ProcessEnv, name: string): string | undefined {
   const value = env[name]?.trim();
   return value ? value : undefined;
+}
+
+/**
+ * Resolve the client-keys file path. The setting is required: unset or blank
+ * is a typed validation error (startup failure), never "allow all".
+ */
+export function resolveClientKeysFile(env: NodeJS.ProcessEnv = process.env): string {
+  const path = readTrimmed(env, TESSERA_CLIENT_KEYS_FILE_ENV);
+  if (path === undefined) {
+    throw new TesseraValidationError(
+      `${TESSERA_CLIENT_KEYS_FILE_ENV} is not set: Tessera requires a client-keys file and will not start without one.`,
+    );
+  }
+  return path;
 }
 
 /**

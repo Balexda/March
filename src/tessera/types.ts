@@ -3,8 +3,9 @@
  *
  * Tessera is the one place a March process obtains a GitHub credential. These
  * shapes mirror the US1 contracts (`POST /v1/github/token`, `/status`, the
- * provider interface). Client-key authentication and policy (US2) and the
- * `user` provider (US7) plug in behind the same shapes later.
+ * provider interface). Client-key authentication (US2, `unauthorized`) is
+ * typed here; policy (US2) and the `user` provider (US7) plug in behind the
+ * same shapes later.
  */
 
 /** Which credential a request asks for: the bot installation token or the operator PAT. */
@@ -127,10 +128,12 @@ export const ACCESS_PROFILES: Readonly<Record<AccessLevel, GitHubPermissions>> =
 });
 
 /**
- * Stable error codes US1 can return. `internal` covers unexpected failures.
- * `unauthorized` and `policy_denied` arrive with US2.
+ * Stable error codes Tessera can return. `internal` covers unexpected failures.
+ * `unauthorized` is the US2 client-key rejection; `policy_denied` arrives with
+ * the US2 policy.
  */
 export type TesseraErrorCode =
+  | "unauthorized"
   | "invalid_request"
   | "repo_not_installed"
   | "provider_unconfigured"
@@ -161,6 +164,23 @@ export class TesseraValidationError extends TesseraError {
   constructor(message: string) {
     super(message);
     this.name = "TesseraValidationError";
+  }
+}
+
+/**
+ * The one fixed `unauthorized` message. It never distinguishes a missing,
+ * malformed or unknown key, and never echoes what was presented.
+ */
+export const UNAUTHORIZED_MESSAGE = "A valid Tessera client key is required.";
+
+/** Missing, malformed or unknown client key. HTTP 401 `unauthorized`. */
+export class UnauthorizedError extends TesseraError {
+  readonly code = "unauthorized" satisfies TesseraErrorCode;
+  readonly status = 401;
+
+  constructor() {
+    super(UNAUTHORIZED_MESSAGE);
+    this.name = "UnauthorizedError";
   }
 }
 

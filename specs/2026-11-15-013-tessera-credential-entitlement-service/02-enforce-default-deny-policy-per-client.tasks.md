@@ -18,7 +18,7 @@
 
 ### Tasks
 
-- [ ] **Load and validate the client registrations**
+- [x] **Load and validate the client registrations**
 
   Add `src/tessera/auth/client-keys.ts` and a `TESSERA_CLIENT_KEYS_FILE` setting in `src/tessera/config.ts`. The module loads the file at that path, a JSON array of Client Registration rows (data model), into an immutable registry that resolves a presented bearer key to a client name. Add the `unauthorized` typed error to `src/tessera/types.ts` per the contracts "Error Conditions" table. Satisfies the client-keys half of AS 2.6.
 
