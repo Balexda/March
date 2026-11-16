@@ -18,7 +18,7 @@
 
 ### Tasks
 
-- [ ] **Define Tessera types, typed errors and configuration**
+- [x] **Define Tessera types, typed errors and configuration**
 
   Create `src/tessera/types.ts` and `src/tessera/config.ts`, following the shape of `src/statio/types.ts` and `src/statio/config.ts`. Types cover the credential provider interface, the Entitlement and Provider Status shapes, the fixed Access Profile permission map (data model "Access Profile") and one typed error per code in the contracts "Error Conditions" table that US1 owns. Config resolves the port and the GitHub App settings listed under contracts "Service Configuration".
 
