@@ -55,7 +55,7 @@ import {
 import { requestJudgement } from "./judgement.js";
 // Loop domain → OTel payload mapping (#144): action events → spans/logs, and the
 // heartbeat record → the loop-metrics activity. The OTel SDK wiring lives behind.
-import { buildLoopTickActivity, emitActionEventLog, emitActionEventSpan } from "./loop-telemetry.js";
+import { buildLoopTickActivity, emitActionEventLog, emitActionEventSpan, recordActionEventMetrics } from "./loop-telemetry.js";
 // Cadence layer (#144): the re-entrancy guard + interval + tick timing. runtime
 // supplies the tick body, error handler, and metrics flush.
 import { createScheduler, type LoopScheduler } from "./scheduler.js";
@@ -347,6 +347,7 @@ function append(meta: any, file: string, value: any) {
   if (file === meta.processor_events_path) {
     emitActionEventSpan(value);
     emitActionEventLog(value);
+    recordActionEventMetrics(value);
   }
 }
 
@@ -403,12 +404,52 @@ async function listDependabotPrs(repoPath: string): Promise<any[]> {
     "gh",
     [
       "pr", "list", "--author", "app/dependabot", "--state", "open", "--limit", "50",
-      "--json", "number,title,url,isDraft,author,headRefOid,mergeable,mergeStateStatus,statusCheckRollup,files",
+      "--json", "number,title,url,isDraft,author,headRefOid,mergeable,mergeStateStatus,statusCheckRollup,files,labels",
     ],
     { cwd: repoPath },
   );
   const parsed = JSON.parse(out);
   return Array.isArray(parsed) ? parsed : [];
+}
+
+/**
+ * Author logins of every commit on a PR, for the dependency-merge conflict ladder
+ * (a commit not by Dependabot stops Dependabot rebasing the branch itself). One
+ * `gh pr view` per call; the handler asks only for a PR newly conflicted at a head.
+ */
+async function listPrCommitAuthors(repoPath: string, prNumber: number): Promise<string[]> {
+  const out = await execText("gh", ["pr", "view", String(prNumber), "--json", "commits"], { cwd: repoPath });
+  const commits = JSON.parse(out)?.commits;
+  if (!Array.isArray(commits)) return [];
+  return commits.flatMap((c: any) =>
+    (Array.isArray(c?.authors) && c.authors.length > 0 ? c.authors : [{}]).map((a: any) => String(a?.login || "")),
+  );
+}
+
+/** Post a PR conversation comment (e.g. `@dependabot recreate`). */
+async function commentOnPrGh(repoPath: string, prNumber: number, body: string): Promise<void> {
+  await execText("gh", ["pr", "comment", String(prNumber), "--body", body], { cwd: repoPath });
+}
+
+/** Repos whose escalation label is known to exist, so it is created once per process. */
+const ensuredLabels = new Set<string>();
+
+/**
+ * Add a label to a PR, creating the label first (idempotently, `--force`) the
+ * first time this process uses it in a repo — `gh pr edit --add-label` fails on
+ * a label the repo does not have.
+ */
+async function labelPrGh(repoPath: string, prNumber: number, label: string): Promise<void> {
+  const key = repoPath + "\0" + label;
+  if (!ensuredLabels.has(key)) {
+    await execText(
+      "gh",
+      ["label", "create", label, "--force", "--color", "d93f0b", "--description", "March legate needs a human to act on this PR"],
+      { cwd: repoPath },
+    );
+    ensuredLabels.add(key);
+  }
+  await execText("gh", ["pr", "edit", String(prNumber), "--add-label", label], { cwd: repoPath });
 }
 
 /**
@@ -566,6 +607,9 @@ async function tickProfile(rt: ProfileRuntime, spawnBudget?: SpawnBudget): Promi
     listDependencyPrs: (repoPath: string) => listDependabotPrs(repoPath),
     mergePr: (input: { prNumber: number | string; headSha: string; repoPath?: string }) =>
       squashMergePr(input),
+    listCommitAuthors: (repoPath: string, prNumber: number) => listPrCommitAuthors(repoPath, prNumber),
+    commentOnPr: (repoPath: string, prNumber: number, body: string) => commentOnPrGh(repoPath, prNumber, body),
+    labelPr: (repoPath: string, prNumber: number, label: string) => labelPrGh(repoPath, prNumber, label),
   };
 
   const ioDeps = dispatchIoDeps(meta);

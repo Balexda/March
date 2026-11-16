@@ -2,7 +2,13 @@
  * @l0 @deterministic @ci
  */
 import { describe, expect, it, vi } from "vitest";
-import { buildLoopTickActivity, emitActionEventLog, emitActionEventSpan } from "./loop-telemetry.js";
+import {
+  buildLoopTickActivity,
+  dependencyUnblockOutcome,
+  emitActionEventLog,
+  emitActionEventSpan,
+  recordActionEventMetrics,
+} from "./loop-telemetry.js";
 
 describe("emitActionEventSpan", () => {
   it("ignores non-objects and events without a slice_id", () => {
@@ -72,6 +78,46 @@ describe("emitActionEventSpan", () => {
     expect(emit).toHaveBeenLastCalledWith(expect.objectContaining({ traceKey: "smithy-loop-dependency-pr-609", error: true }));
     emitActionEventSpan({ kind: "dependency_merge_failure", processor: "smithy-loop", action: "dependency-merge-list-failed" }, emit);
     expect(emit).toHaveBeenLastCalledWith(expect.objectContaining({ traceKey: "smithy-loop-dependency-merge", error: true }));
+  });
+
+  it("emits conflict-ladder actions as legate.dependency-unblock on the PR's trace, errored on failure or escalation", () => {
+    const emit = vi.fn();
+    const span = (kind: string, action: string) => {
+      emitActionEventSpan({ kind, processor: "smithy-loop", action, pr_number: 609 }, emit);
+      return emit.mock.lastCall?.[0];
+    };
+    expect(span("dependency_merge", "dependency-recreate-requested")).toMatchObject({
+      name: "legate.dependency-unblock",
+      traceKey: "smithy-loop-dependency-pr-609",
+      root: true,
+      error: false,
+    });
+    expect(span("dependency_merge", "dependency-unblock-resolved")).toMatchObject({ name: "legate.dependency-unblock", error: false });
+    expect(span("dependency_merge_failure", "dependency-recreate-failed")).toMatchObject({ name: "legate.dependency-unblock", error: true });
+    expect(span("dependency_merge_failure", "dependency-unblock-escalated")).toMatchObject({ name: "legate.dependency-unblock", error: true });
+    expect(span("dependency_merge_failure", "dependency-unblock-escalate-failed")).toMatchObject({ error: true });
+  });
+});
+
+describe("recordActionEventMetrics", () => {
+  it("counts each conflict-ladder action by outcome and ignores everything else", () => {
+    const record = vi.fn();
+    recordActionEventMetrics({ kind: "dependency_merge", processor: "smithy-loop", action: "dependency-recreate-requested" }, record);
+    recordActionEventMetrics({ kind: "dependency_merge_failure", processor: "smithy-loop", action: "dependency-unblock-escalated" }, record);
+    recordActionEventMetrics({ kind: "dependency_merge", processor: "smithy-loop", action: "dependency-auto-merge" }, record);
+    recordActionEventMetrics({ kind: "cleanup", action: "dependency-recreate-requested" }, record);
+    recordActionEventMetrics(null, record);
+    expect(record.mock.calls).toEqual([
+      ["recreate_requested", "smithy-loop"],
+      ["escalated", "smithy-loop"],
+    ]);
+  });
+
+  it("maps every ladder action to a bounded outcome", () => {
+    expect(dependencyUnblockOutcome("dependency-recreate-failed")).toBe("recreate_failed");
+    expect(dependencyUnblockOutcome("dependency-unblock-escalate-failed")).toBe("escalate_failed");
+    expect(dependencyUnblockOutcome("dependency-unblock-resolved")).toBe("resolved");
+    expect(dependencyUnblockOutcome("toString")).toBeNull();
   });
 });
 
