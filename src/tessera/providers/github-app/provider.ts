@@ -23,6 +23,17 @@
  *   no GitHub call; otherwise a new token is minted, stored and returned
  *   (`cache: "miss"`). `refresh: true` evicts the entry first. Failed mints are
  *   not cached. When the provider goes `invalid` the whole cache is cleared.
+ * - Coalescing: at most one mint is in flight per cache key. Concurrent
+ *   requests for the same key await that one mint and receive the same token
+ *   (or the same error); every one of them reports `cache: "miss"`, since no
+ *   cached token existed when it arrived. The in-flight entry is removed when
+ *   the mint settles, success or failure, so a failed mint is never retained
+ *   and the next request mints again. Requests for different keys never wait
+ *   on each other. A `refresh: true` request joins a mint already in flight for
+ *   its key (that token is minted no earlier than the request arrived, so it is
+ *   as new as a refresh would produce); only with nothing in flight does it
+ *   evict the entry and mint. Concurrent first lookups of the same owner's
+ *   installation are coalesced the same way.
  *
  * Nothing in this module logs, and nothing is written to disk.
  */
@@ -50,7 +61,12 @@ import {
   type KeyFileReader,
 } from "./app-assertion.js";
 import { GitHubClient } from "./github-client.js";
-import { createTokenCache, type TokenCacheKey } from "./token-cache.js";
+import {
+  createTokenCache,
+  tokenCacheKeyId,
+  type CachedInstallationToken,
+  type TokenCacheKey,
+} from "./token-cache.js";
 
 /** Provider id of the GitHub App provider. */
 export const GITHUB_APP_PROVIDER_ID = "github-app" as const;
@@ -112,6 +128,10 @@ export function createGitHubAppProvider({
   let identityLookup: Promise<BotIdentity> | null = null;
   /** Installation Binding per owner; successful lookups only. */
   const bindings = new Map<string, number>();
+  /** In-flight owner installation lookups, one per owner. */
+  const pendingLookups = new Map<string, Promise<number>>();
+  /** In-flight mints, one per cache key ({@link tokenCacheKeyId}). */
+  const pendingMints = new Map<string, Promise<CachedInstallationToken>>();
   const cache = createTokenCache(now === undefined ? {} : { now });
 
   function markInvalid(error: CredentialInvalidError): never {
@@ -196,10 +216,28 @@ export function createGitHubAppProvider({
     return identityLookup;
   }
 
+  /**
+   * Run `start` unless a call for `id` is already in flight, in which case join
+   * it. The entry is removed once the shared promise settles either way.
+   */
+  function shared<T>(pending: Map<string, Promise<T>>, id: string, start: () => Promise<T>): Promise<T> {
+    const existing = pending.get(id);
+    if (existing !== undefined) return existing;
+    const promise = start().finally(() => {
+      if (pending.get(id) === promise) pending.delete(id);
+    });
+    pending.set(id, promise);
+    return promise;
+  }
+
   async function resolveInstallation(owner: string): Promise<number> {
     if (config.installationId !== undefined) return config.installationId;
     const known = bindings.get(owner);
     if (known !== undefined) return known;
+    return shared(pendingLookups, owner, () => lookupInstallation(owner));
+  }
+
+  async function lookupInstallation(owner: string): Promise<number> {
     try {
       const installation = await client.getOwnerInstallation(assertion(), owner);
       bindings.set(owner, installation.id);
@@ -241,38 +279,37 @@ export function createGitHubAppProvider({
       const installationId = await resolveInstallation(owner);
       if (invalidError !== null) throw invalidError;
       const key: TokenCacheKey = { installationId, repos: [name], access: req.access };
-      if (req.refresh === true) cache.evict(key);
-      const hit = cache.getFresh(key);
-      if (hit !== undefined) {
-        return {
-          token: hit.token,
-          expiresAt: hit.expiresAt,
-          identity: bot.login,
-          commitIdentity: bot.commitIdentity,
-          cache: "hit",
-        };
-      }
+      const keyId = tokenCacheKeyId(key);
+      const result = (token: CachedInstallationToken, cacheOutcome: "hit" | "miss"): ProviderIssueResult => ({
+        token: token.token,
+        expiresAt: token.expiresAt,
+        identity: bot.login,
+        commitIdentity: bot.commitIdentity,
+        cache: cacheOutcome,
+      });
 
-      try {
-        const minted = await client.createInstallationToken(assertion(), installationId, {
-          repositories: [name],
-          permissions,
-        });
-        markOk();
-        if (invalidError === null) cache.set(key, minted);
-        return {
-          token: minted.token,
-          expiresAt: minted.expiresAt,
-          identity: bot.login,
-          commitIdentity: bot.commitIdentity,
-          cache: "miss",
-        };
-      } catch (error) {
-        if (error instanceof RepoNotInstalledError && bindings.get(owner) === installationId) {
-          bindings.delete(owner);
+      // A refresh joins a mint already in flight for its key; see the module doc.
+      if (req.refresh === true && !pendingMints.has(keyId)) cache.evict(key);
+      const hit = req.refresh === true ? undefined : cache.getFresh(key);
+      if (hit !== undefined) return result(hit, "hit");
+
+      const minted = await shared(pendingMints, keyId, async () => {
+        try {
+          const token = await client.createInstallationToken(assertion(), installationId, {
+            repositories: [name],
+            permissions,
+          });
+          markOk();
+          if (invalidError === null) cache.set(key, token);
+          return token;
+        } catch (error) {
+          if (error instanceof RepoNotInstalledError && bindings.get(owner) === installationId) {
+            bindings.delete(owner);
+          }
+          return markFailure(error);
         }
-        return markFailure(error);
-      }
+      });
+      return result(minted, "miss");
     },
 
     cacheEntries(): number {

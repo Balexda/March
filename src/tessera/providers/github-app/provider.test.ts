@@ -398,6 +398,88 @@ describe("github-app provider token cache", () => {
   });
 });
 
+describe("github-app provider mint coalescing", () => {
+  async function waitForMints(f: FakeGitHub, count: number): Promise<void> {
+    const deadline = Date.now() + 2_000;
+    while (f.mintCount() < count && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    expect(f.mintCount()).toBe(count);
+  }
+
+  it("shares one mint (and one installation lookup) among concurrent identical requests", async () => {
+    const { fake, provider } = await setup();
+    await provider.start();
+    fake.reset();
+    const results = await Promise.all(
+      Array.from({ length: 5 }, () => provider.issue({ repo: "acme/widgets", access: "read" })),
+    );
+    expect(fake.mintCount()).toBe(1);
+    expect(endpoints(fake).filter((e) => e === "installation")).toHaveLength(1);
+    expect(new Set(results.map((r) => r.token)).size).toBe(1);
+    expect(results.map((r) => r.cache)).toEqual(["miss", "miss", "miss", "miss", "miss"]);
+    expect(provider.cacheEntries()).toBe(1);
+  });
+
+  it("does not make a request for another key wait on a hanging mint", async () => {
+    const { fake, provider } = await setup({ timeoutMs: 1_500 });
+    await provider.start();
+    await provider.issue({ repo: "acme/gadgets", access: "write" }); // remember the binding
+    fake.reset();
+
+    fake.fail("token", { hang: true });
+    let hungSettled = false;
+    const hung = provider
+      .issue({ repo: "acme/widgets", access: "read" })
+      .catch((e: unknown) => e)
+      .finally(() => {
+        hungSettled = true;
+      });
+    await waitForMints(fake, 1);
+    fake.fail("token", null);
+
+    const other = await provider.issue({ repo: "acme/widgets", access: "write" });
+    expect(other.cache).toBe("miss");
+    expect(hungSettled).toBe(false);
+    expect(fake.mintCount()).toBe(2);
+    expect(await hung).toBeInstanceOf(ProviderUnavailableError);
+  });
+
+  it("does not retain a failed shared mint; the next request mints again", async () => {
+    const { fake, provider } = await setup();
+    await provider.start();
+    fake.reset();
+    fake.fail("token", { status: 502 });
+    const failed = await Promise.allSettled(
+      Array.from({ length: 3 }, () => provider.issue({ repo: "acme/widgets", access: "read" })),
+    );
+    expect(fake.mintCount()).toBe(1);
+    for (const outcome of failed) {
+      expect(outcome.status).toBe("rejected");
+      expect((outcome as PromiseRejectedResult).reason).toBeInstanceOf(ProviderUnavailableError);
+    }
+
+    fake.fail("token", null);
+    const next = await provider.issue({ repo: "acme/widgets", access: "read" });
+    expect(next.cache).toBe("miss");
+    expect(fake.mintCount()).toBe(2);
+  });
+
+  it("lets a refresh request join a mint already in flight for the same key", async () => {
+    const { fake, provider } = await setup({ timeoutMs: 300 });
+    await provider.start();
+    await provider.issue({ repo: "acme/gadgets", access: "read" }); // remember the binding
+    fake.reset();
+    fake.fail("token", { hang: true });
+    const first = provider.issue({ repo: "acme/widgets", access: "read" }).catch((e: unknown) => e);
+    await waitForMints(fake, 1);
+    const refreshed = provider.issue({ repo: "acme/widgets", access: "read", refresh: true }).catch((e: unknown) => e);
+    expect(await first).toBeInstanceOf(ProviderUnavailableError);
+    expect(await refreshed).toBe(await first);
+    expect(fake.mintCount()).toBe(1);
+  });
+});
+
 describe("github-app provider status lifecycle", () => {
   it("ok -> degraded on a 5xx or hang, then back to ok on the next success", async () => {
     const { fake, provider } = await setup({ timeoutMs: 100 });
@@ -451,9 +533,10 @@ describe("github-app provider status lifecycle", () => {
     }
     expect(fake.mintCount()).toBe(1);
 
-    // Request A: its mint gets a 401 while B is still in flight.
+    // Request A (another cache key, so it does not join B's mint): its mint
+    // gets a 401 while B is still in flight.
     fake.fail("token", { status: 401 });
-    await expect(provider.issue({ repo: "acme/widgets", access: "read" })).rejects.toBeInstanceOf(
+    await expect(provider.issue({ repo: "acme/gadgets", access: "read" })).rejects.toBeInstanceOf(
       CredentialInvalidError,
     );
     expect(provider.status()).toMatchObject({ state: "invalid", last_error: "credential_invalid" });

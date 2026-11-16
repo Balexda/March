@@ -168,7 +168,7 @@
   - The clock is injectable; nothing is written to disk
   - The cache can be cleared as a whole, for the key-reload transition US3 wires
 
-- [ ] **Share one mint among concurrent requests**
+- [x] **Share one mint among concurrent requests**
 
   Make concurrent requests for the same cache key await a single in-flight mint. Satisfies AS 1.4.
 

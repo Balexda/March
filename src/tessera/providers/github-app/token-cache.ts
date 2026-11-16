@@ -59,7 +59,12 @@ interface StoredEntry {
   readonly expiresAtMs: number;
 }
 
-function keyString({ installationId, repos, access }: TokenCacheKey): string {
+/**
+ * The canonical string form of a {@link TokenCacheKey}: equal for keys that
+ * name the same entry (repository order ignored). Also used by the provider to
+ * key in-flight mints, so coalescing and caching agree on what "same key" means.
+ */
+export function tokenCacheKeyId({ installationId, repos, access }: TokenCacheKey): string {
   return JSON.stringify([installationId, [...repos].sort(), access]);
 }
 
@@ -80,18 +85,18 @@ export function createTokenCache({ now = Date.now }: TokenCacheOptions = {}): To
 
   return {
     getFresh(key) {
-      const stored = live(keyString(key));
+      const stored = live(tokenCacheKeyId(key));
       if (stored === undefined || stored.expiresAtMs - now() <= REMINT_THRESHOLD_MS) return undefined;
       return stored.entry;
     },
 
     getUnexpired(key) {
-      return live(keyString(key))?.entry;
+      return live(tokenCacheKeyId(key))?.entry;
     },
 
     set(key, entry) {
       const expiresAtMs = Date.parse(entry.expiresAt);
-      const id = keyString(key);
+      const id = tokenCacheKeyId(key);
       if (!Number.isFinite(expiresAtMs) || expiresAtMs <= now()) {
         entries.delete(id);
         return;
@@ -100,7 +105,7 @@ export function createTokenCache({ now = Date.now }: TokenCacheOptions = {}): To
     },
 
     evict(key) {
-      entries.delete(keyString(key));
+      entries.delete(tokenCacheKeyId(key));
     },
 
     clear() {

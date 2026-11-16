@@ -155,6 +155,15 @@ GitHub REST API.
   shows as `cache.entries`; `clearCache()` drops every entry (for a key
   reload). When the provider goes `invalid`, its cache is cleared and no
   cached token is served.
+- **Mint coalescing.** At most one mint is in flight per cache key:
+  concurrent requests for the same key share it and receive the same token
+  or the same error, each reporting `cache: "miss"`. Requests for different
+  keys never wait on each other. The shared mint is forgotten once it
+  settles, so after a failure the next request mints again. A
+  `refresh: true` request joins a mint already in flight for its key
+  instead of starting another; with none in flight it evicts and mints.
+  Concurrent first installation lookups for the same owner are shared the
+  same way.
 
 Provider state transitions, as reported by `/status`:
 
