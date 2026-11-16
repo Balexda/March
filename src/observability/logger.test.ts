@@ -14,6 +14,8 @@ import {
   pinoLevelToSeverity,
   resolveCastraLogFilePath,
   resolveHatcheryLogFilePath,
+  createTesseraLogger,
+  resolveTesseraLogFilePath,
 } from "./logger.js";
 import { SeverityNumber } from "@opentelemetry/api-logs";
 
@@ -42,6 +44,50 @@ describe("resolveCastraLogFilePath", () => {
     expect(resolveCastraLogFilePath({ HOME: "/home/u" })).toBe(
       path.join("/home/u", ".march", "logs", "castra.jsonl"),
     );
+  });
+});
+
+describe("resolveTesseraLogFilePath", () => {
+  it("prefers MARCH_TESSERA_LOG_DIR", () => {
+    expect(
+      resolveTesseraLogFilePath({ MARCH_TESSERA_LOG_DIR: "/march/logs" }),
+    ).toBe(path.join("/march/logs", "tessera.jsonl"));
+  });
+
+  it("falls back to HOME/.march/logs", () => {
+    expect(resolveTesseraLogFilePath({ HOME: "/home/u" })).toBe(
+      path.join("/home/u", ".march", "logs", "tessera.jsonl"),
+    );
+  });
+});
+
+describe("createTesseraLogger", () => {
+  let dir: string;
+
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), "march-tessera-log-"));
+  });
+  afterEach(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("writes JSONL tagged march-tessera under MARCH_TESSERA_LOG_DIR", () => {
+    const logger = createTesseraLogger({
+      env: { MARCH_TESSERA_LOG_DIR: dir },
+      sync: true,
+      stdout: new PassThrough(),
+    });
+    logger.info("tessera started");
+
+    const lines = fs
+      .readFileSync(path.join(dir, "tessera.jsonl"), "utf-8")
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .map((l) => JSON.parse(l) as Record<string, unknown>);
+    expect(lines).toHaveLength(1);
+    expect(lines[0].name).toBe("march-tessera");
+    expect(lines[0].msg).toBe("tessera started");
   });
 });
 

@@ -38,6 +38,8 @@ import { CastraValidationError } from "../castra/types.js";
 import { runStatioServer } from "../statio/serve.js";
 import { STATIO_TOKEN_ENV } from "../statio/config.js";
 import { StatioValidationError } from "../statio/types.js";
+import { runTesseraServer } from "../tessera/serve.js";
+import { TesseraValidationError } from "../tessera/types.js";
 import { initMarch, isMarchInstalled, InitError } from "../bootstrap/init.js";
 import { stackDown } from "../stack/down.js";
 import { stackUp } from "../stack/up.js";
@@ -2011,6 +2013,30 @@ statio
       process.exitCode = SUCCESS;
     } catch (err) {
       if (err instanceof StatioValidationError) {
+        process.stderr.write(err.message + "\n");
+        process.exitCode = USAGE_ERROR;
+        return;
+      }
+      throw err;
+    }
+  });
+
+const tessera = program
+  .command("tessera")
+  .description("Manage Tessera - the credential entitlement service over HTTP");
+
+tessera
+  .command("serve")
+  .description("Run the Tessera HTTP service (binds loopback by default)")
+  .option("--port <port>", "Port to listen on (default: deterministic 8800-9799)")
+  .option("--host <host>", "Bind address (default: 127.0.0.1; the container binds 0.0.0.0)")
+  .action(async (opts: { port?: string; host?: string }) => {
+    commandHandled = true;
+    try {
+      await runTesseraServer({ port: opts.port, host: opts.host });
+      process.exitCode = SUCCESS;
+    } catch (err) {
+      if (err instanceof TesseraValidationError) {
         process.stderr.write(err.message + "\n");
         process.exitCode = USAGE_ERROR;
         return;

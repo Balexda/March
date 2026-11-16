@@ -505,6 +505,33 @@ describe("march CLI", () => {
     });
   });
 
+  describe("march tessera", () => {
+    it("bare `march tessera` exits 2 and prints the tessera group help", () => {
+      const result = run(["tessera"]);
+      expect(result.exitCode).toBe(2);
+      const combined = result.stdout + result.stderr;
+      expect(combined).toContain("Usage: march tessera");
+      expect(combined).toMatch(/^\s+serve\b/m);
+      // US3/US4 subcommands are not part of this slice.
+      expect(combined).not.toMatch(/^\s+(token|secrets|credential-helper)\b/m);
+    });
+
+    it("`march tessera serve --help` exits 0 with only --port and --host", () => {
+      const result = run(["tessera", "serve", "--help"]);
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain("Usage: march tessera serve");
+      expect(result.stdout).toContain("--port");
+      expect(result.stdout).toContain("--host");
+      expect(result.stdout).not.toContain("--token");
+    });
+
+    it("`march tessera serve` validates the configured port before startup", () => {
+      const result = run(["tessera", "serve", "--port", "9689x"]);
+      expect(result.exitCode).toBe(2);
+      expect(result.stderr).toContain("Invalid Tessera port");
+    });
+  });
+
   it("march version exits 0 and stdout contains the package version", () => {
     const result = run(["version"]);
     expect(result.exitCode).toBe(0);

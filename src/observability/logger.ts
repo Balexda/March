@@ -61,6 +61,13 @@ export function resolveStatioLogFilePath(
   return resolveServiceLogFilePath("statio.jsonl", "MARCH_STATIO_LOG_DIR", env);
 }
 
+/** Tessera service log file: `$MARCH_TESSERA_LOG_DIR/tessera.jsonl`. */
+export function resolveTesseraLogFilePath(
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  return resolveServiceLogFilePath("tessera.jsonl", "MARCH_TESSERA_LOG_DIR", env);
+}
+
 /**
  * Map a pino numeric level to its OpenTelemetry severity. pino levels:
  * trace=10 debug=20 info=30 warn=40 error=50 fatal=60. Exported for testing.
@@ -341,6 +348,32 @@ export function createStatioLogger(
   return createServiceLogger({
     serviceName: options.name ?? "march-statio",
     logFilePath: options.logFilePath ?? resolveStatioLogFilePath(env),
+    level: options.level,
+    env,
+    sync: options.sync,
+    stdout: options.stdout,
+  });
+}
+
+export interface TesseraLoggerOptions {
+  readonly logFilePath?: string;
+  readonly name?: string;
+  readonly level?: LevelWithSilent;
+  readonly env?: NodeJS.ProcessEnv;
+  /** Synchronous file writes. Default false (buffered); set true in tests/CI. */
+  readonly sync?: boolean;
+  /** Override the stdout sink (tests); defaults to the process stdout. */
+  readonly stdout?: NodeJS.WritableStream;
+}
+
+/** Tessera service logger (`march-tessera` → `tessera.jsonl`). */
+export function createTesseraLogger(
+  options: TesseraLoggerOptions = {},
+): PinoLogger {
+  const env = options.env ?? process.env;
+  return createServiceLogger({
+    serviceName: options.name ?? "march-tessera",
+    logFilePath: options.logFilePath ?? resolveTesseraLogFilePath(env),
     level: options.level,
     env,
     sync: options.sync,

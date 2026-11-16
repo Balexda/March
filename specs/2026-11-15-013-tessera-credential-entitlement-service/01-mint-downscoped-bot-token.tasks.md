@@ -44,7 +44,7 @@
   - Request and response bodies are never logged
   - The HTTP contract test covers `invalid_request` and `provider_unconfigured` over HTTP, plus the `/healthz` and `/status` shapes
 
-- [ ] **Register `march tessera serve` and the service logger**
+- [x] **Register `march tessera serve` and the service logger**
 
   Add `src/tessera/serve.ts` and a Tessera logger factory in `src/observability/logger.ts`, mirroring the Statio entrypoint and logger. Register a `tessera` command group with a `serve` subcommand in `src/cli/program.ts`, beside the Statio group. The entrypoint builds the provider registry from config, so an unconfigured GitHub App still serves.
 
