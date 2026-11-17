@@ -5,7 +5,12 @@ import Fastify, { type FastifyInstance } from "fastify";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Span } from "@opentelemetry/sdk-trace-base";
 import { getActiveOtel, initOtel } from "../../observability/otel.js";
-import { classifyRequestLog, registerRoutes } from "./routes.js";
+import { classifyRequestLog, deriveBroodReadView, registerRoutes } from "./routes.js";
+import {
+  ContainerObserverUnavailableError,
+  type ContainerObservation,
+  type ContainerObserver,
+} from "./container-observer.js";
 import { sqliteAvailable } from "./sqlite.js";
 import { SessionStore } from "./store.js";
 import type { CastraStewardGateway, OrphanGate } from "./steward-removal.js";
@@ -18,7 +23,11 @@ const stores: SessionStore[] = [];
 async function buildApp(
   teardown?: (id: string, request: TeardownRequest) => Promise<TeardownResult>,
   stewardGateway?: CastraStewardGateway,
-  extra: { orphanGate?: OrphanGate; env?: NodeJS.ProcessEnv } = {},
+  extra: {
+    orphanGate?: OrphanGate;
+    env?: NodeJS.ProcessEnv;
+    containerObserver?: ContainerObserver;
+  } = {},
 ): Promise<{
   app: FastifyInstance;
   store: SessionStore;
@@ -30,11 +39,31 @@ async function buildApp(
     teardown,
     stewardGateway,
     orphanGate: extra.orphanGate,
+    containerObserver: extra.containerObserver,
     env: extra.env,
   });
   apps.push(app);
   stores.push(store);
   return { app, store };
+}
+
+/** Records what was observed so tests can assert the read stayed observational. */
+function stubObserver(
+  live: Record<string, ContainerObservation>,
+): ContainerObserver & { calls: string[][] } {
+  const calls: string[][] = [];
+  return {
+    calls,
+    async observe(containerIds) {
+      calls.push([...containerIds]);
+      return new Map(
+        containerIds.map((id) => [
+          id,
+          live[id] ?? { present: false, running: false },
+        ]),
+      );
+    },
+  };
 }
 
 afterEach(async () => {
@@ -303,6 +332,259 @@ describe.skipIf(!sqliteAvailable)("brood routes", () => {
     expect(spawns.json().sessions.map((s: { id: string }) => s.id)).toEqual(["spawn-1"]);
     const children = await app.inject({ method: "GET", url: "/sessions?parentId=spawn-1" });
     expect(children.json().sessions.map((s: { id: string }) => s.id)).toEqual(["steward-1"]);
+  });
+
+  it("GET /sessions returns service-owned read views for all tracked kinds", async () => {
+    const observer = stubObserver({
+      "container-spawn-1": { present: true, running: true },
+      "container-legate-1": { present: false, running: false },
+    });
+    const { app } = await buildApp(undefined, undefined, {
+      containerObserver: observer,
+    });
+    await app.inject({
+      method: "POST",
+      url: "/sessions",
+      payload: {
+        id: "spawn-1",
+        kind: "spawn",
+        status: "running",
+        branch: "march/spawn/spawn-1",
+        containerId: "container-spawn-1",
+      },
+    });
+    await app.inject({
+      method: "POST",
+      url: "/sessions",
+      payload: {
+        id: "steward-1",
+        kind: "steward",
+        status: "failed",
+        parentId: "spawn-1",
+      },
+    });
+    await app.inject({
+      method: "POST",
+      url: "/sessions",
+      payload: {
+        id: "legate-1",
+        kind: "legate",
+        status: "torndown",
+        containerId: "container-legate-1",
+      },
+    });
+
+    const res = await app.inject({ method: "GET", url: "/sessions?reconcile=true" });
+
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.sessions.map((s: { id: string }) => s.id)).toEqual([
+      "spawn-1",
+      "steward-1",
+      "legate-1",
+    ]);
+    expect(body.views).toHaveLength(3);
+    expect(body.views[0]).toMatchObject({
+      record: {
+        id: "spawn-1",
+        kind: "spawn",
+        status: "running",
+        branch: "march/spawn/spawn-1",
+        containerId: "container-spawn-1",
+      },
+      needsAttention: false,
+      disposed: false,
+      containerLive: true,
+      reconciled: true,
+    });
+    expect(body.views[1]).toMatchObject({
+      record: {
+        id: "steward-1",
+        kind: "steward",
+        status: "failed",
+        parentId: "spawn-1",
+      },
+      needsAttention: true,
+      disposed: false,
+      containerLive: null,
+      reconciled: true,
+    });
+    expect(body.views[1].record).not.toHaveProperty("branch");
+    expect(body.views[2]).toMatchObject({
+      record: {
+        id: "legate-1",
+        kind: "legate",
+        status: "torndown",
+        containerId: "container-legate-1",
+      },
+      needsAttention: false,
+      disposed: true,
+      containerLive: false,
+      reconciled: true,
+    });
+    expect(body.views.every((view: { age: unknown }) => typeof view.age === "string")).toBe(true);
+    // Only rows that actually track a container are handed to the observer.
+    expect(observer.calls).toEqual([["container-spawn-1", "container-legate-1"]]);
+  });
+
+  it("GET /sessions reports observed liveness, not the persisted status", async () => {
+    const observer = stubObserver({
+      // The registry still says "running"; the container is gone.
+      "container-spawn-1": { present: false, running: false },
+    });
+    const { app } = await buildApp(undefined, undefined, {
+      containerObserver: observer,
+    });
+    await app.inject({
+      method: "POST",
+      url: "/sessions",
+      payload: {
+        id: "spawn-1",
+        kind: "spawn",
+        status: "running",
+        containerId: "container-spawn-1",
+      },
+    });
+
+    const unreconciled = await app.inject({ method: "GET", url: "/sessions" });
+    expect(unreconciled.json().views[0]).toMatchObject({
+      containerLive: true,
+      reconciled: false,
+    });
+    expect(observer.calls).toEqual([]);
+
+    const reconciled = await app.inject({
+      method: "GET",
+      url: "/sessions?reconcile=true",
+    });
+    expect(reconciled.json().views[0]).toMatchObject({
+      containerLive: false,
+      reconciled: true,
+    });
+    // Observation is read-only: the registry row is untouched.
+    expect(reconciled.json().sessions[0].status).toBe("running");
+  });
+
+  it("GET /sessions?reconcile=true returns 503 when the liveness source is unreachable", async () => {
+    const { app } = await buildApp(undefined, undefined, {
+      containerObserver: {
+        async observe() {
+          throw new ContainerObserverUnavailableError(
+            "docker liveness observation failed: Cannot connect to the Docker daemon",
+          );
+        },
+      },
+    });
+    await app.inject({
+      method: "POST",
+      url: "/sessions",
+      payload: {
+        id: "spawn-1",
+        kind: "spawn",
+        status: "running",
+        containerId: "container-spawn-1",
+      },
+    });
+
+    const res = await app.inject({ method: "GET", url: "/sessions?reconcile=true" });
+    expect(res.statusCode).toBe(503);
+    expect(res.json().error).toContain("docker liveness observation failed");
+
+    // The unreconciled read still succeeds — reconciliation is the only casualty.
+    const fallback = await app.inject({ method: "GET", url: "/sessions" });
+    expect(fallback.statusCode).toBe(200);
+    expect(fallback.json().views[0]).toMatchObject({ reconciled: false });
+  });
+
+  it("GET /sessions rejects repeated filter query values instead of ignoring them", async () => {
+    const { app, store } = await buildApp();
+    await app.inject({
+      method: "POST",
+      url: "/sessions",
+      payload: { id: "spawn-1", kind: "spawn", status: "running" },
+    });
+
+    const list = vi.spyOn(store, "list");
+    for (const [url, field] of [
+      ["/sessions?kind=spawn&kind=wrong", "kind"],
+      ["/sessions?status=running&status=bad", "status"],
+      ["/sessions?parentId=a&parentId=b", "parentId"],
+      ["/sessions?reconcile=true&reconcile=false", "reconcile"],
+    ] as const) {
+      const res = await app.inject({ method: "GET", url });
+      expect(res.statusCode, url).toBe(400);
+      expect(res.json().error).toBe(`${field} must be supplied at most once.`);
+    }
+    expect(list).not.toHaveBeenCalled();
+  });
+
+  it("GET /sessions validates filters before listing and defaults to unreconciled views", async () => {
+    const { app, store } = await buildApp();
+    await app.inject({
+      method: "POST",
+      url: "/sessions",
+      payload: { id: "spawn-1", kind: "spawn", status: "running" },
+    });
+
+    const list = vi.spyOn(store, "list");
+    const badKind = await app.inject({ method: "GET", url: "/sessions?kind=wrong" });
+    expect(badKind.statusCode).toBe(400);
+    expect(badKind.json().error).toContain("kind must be one of");
+
+    const badStatus = await app.inject({ method: "GET", url: "/sessions?status=bad" });
+    expect(badStatus.statusCode).toBe(400);
+    expect(badStatus.json().error).toContain("status must be one of");
+
+    const badReconcile = await app.inject({
+      method: "GET",
+      url: "/sessions?reconcile=yes",
+    });
+    expect(badReconcile.statusCode).toBe(400);
+    expect(badReconcile.json().error).toBe("reconcile must be true or false.");
+    expect(list).not.toHaveBeenCalled();
+
+    const defaultRead = await app.inject({ method: "GET", url: "/sessions" });
+    expect(defaultRead.statusCode).toBe(200);
+    expect(defaultRead.json().views[0]).toMatchObject({ reconciled: false });
+
+    const explicitOff = await app.inject({
+      method: "GET",
+      url: "/sessions?reconcile=false",
+    });
+    expect(explicitOff.statusCode).toBe(200);
+    expect(explicitOff.json().views[0]).toMatchObject({ reconciled: false });
+  });
+
+  it("deriveBroodReadView is pure over the source record", () => {
+    const record = {
+      id: "spawn-1",
+      kind: "spawn" as const,
+      status: "failed" as const,
+      containerId: "container-spawn-1",
+      createdAt: "2026-08-19T00:00:00.000Z",
+      updatedAt: "2026-08-19T00:00:00.000Z",
+    };
+
+    expect(
+      deriveBroodReadView(record, {
+        now: new Date("2026-08-19T00:02:00.000Z"),
+      }),
+    ).toEqual({
+      record,
+      age: "2m",
+      needsAttention: true,
+      disposed: false,
+      containerLive: false,
+      reconciled: false,
+    });
+    expect(record).toEqual({
+      id: "spawn-1",
+      kind: "spawn",
+      status: "failed",
+      containerId: "container-spawn-1",
+      createdAt: "2026-08-19T00:00:00.000Z",
+      updatedAt: "2026-08-19T00:00:00.000Z",
+    });
   });
 
   it("POST /sessions emits a brood.register span nested under the inbound traceparent", async () => {
