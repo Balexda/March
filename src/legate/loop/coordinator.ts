@@ -8,12 +8,14 @@ import * as recovery from "./handlers/recovery.js";
 import * as adoptFromFold from "./handlers/adopt-from-fold.js";
 import * as dispatch from "./handlers/dispatch.js";
 import * as dependencyMerge from "./handlers/dependency-merge.js";
+import * as coderabbitRereview from "./handlers/coderabbit-rereview.js";
 import { countStrandedSlices, dispatchableReady, summarizeSlicesByStage, type SpawnBudget } from "./pure/slice.js";
 import { isWorkerSession } from "./pure/session.js";
 
 /**
  * Stage 2 orchestration. runTick senses once, then runs the handlers in the fixed
- * order cleanup → ghost-cleanup → castra-recover → relaunch → babysit → recovery →
+ * order cleanup → ghost-cleanup → castra-recover → relaunch → babysit →
+ * coderabbit-rereview → recovery →
  * adopt-from-fold → dispatch → dependency-merge,
  * each as pure assess() + effecting apply(), threading the SAME mutating {@link LoopState}
  * through all of them. Because apply() mutates the snapshot in place (drops a
@@ -32,6 +34,8 @@ export interface CoordinatorDeps {
   relaunch?: relaunch.RelaunchDeps;
   /** Seams for the opt-in Dependabot auto-merge. Omitted → the handler is inert. */
   dependencyMerge?: dependencyMerge.DependencyMergeDeps;
+  /** Seam for the opt-in CodeRabbit re-review request. Omitted → the handler is inert. */
+  coderabbitRereview?: coderabbitRereview.CodeRabbitRereviewDeps;
   /** The GLOBAL concurrent-spawn budget (#313), shared across every profile this
    *  tick. Attached to the handler context so dispatch caps fresh launches against
    *  it. Omitted → dispatch is uncapped (pre-#313 behavior). */
@@ -47,6 +51,8 @@ export interface CoordinatorOutput {
     castraRecover: HandlerResult;
     relaunch: HandlerResult;
     babysit: HandlerResult;
+    /** Opt-in CodeRabbit re-review requests; absent in outputs built without it. */
+    coderabbitRereview?: HandlerResult;
     recovery: HandlerResult;
     adoptFromFold: HandlerResult;
     dispatch: HandlerResult;
@@ -154,6 +160,9 @@ export async function runTick(deps: CoordinatorDeps): Promise<CoordinatorOutput>
     castraRecover: await castraRecover.apply(castraRecover.assess(state), ctx, state),
     relaunch: await relaunch.apply(relaunch.assess(state), ctx, state, deps.relaunch),
     babysit: await babysit.apply(babysit.assess(state), ctx, state, deps.babysit),
+    // After babysit, so a slice babysit just sent a fix to (no longer pr-open) is
+    // not put forward for re-review until the steward has pushed it.
+    coderabbitRereview: await coderabbitRereview.apply(ctx, state, deps.coderabbitRereview),
     // Operator recovery (#238) runs BEFORE dispatch so the dropped slice frees the
     // still-ready smithy item for a fresh re-dispatch on this same tick.
     recovery: await recovery.apply(recovery.assess(state), ctx, state),

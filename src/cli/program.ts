@@ -1556,6 +1556,8 @@ mergePolicyCmd
   .option("--no-bot-approval", "Stop accepting bot approvals in lieu of a human approval")
   .option("--dependabot-auto-merge", "Auto-merge Dependabot PRs that only bump versions and pass CI (profile-wide; ignores --task-type)")
   .option("--no-dependabot-auto-merge", "Stop auto-merging Dependabot PRs")
+  .option("--coderabbit-rereview", "Comment `@coderabbitai review` after the steward pushes past a CodeRabbit changes-requested review (profile-wide; ignores --task-type)")
+  .option("--no-coderabbit-rereview", "Stop requesting CodeRabbit re-reviews")
   .option("--json <json>", "Replace the entire policy from a JSON string")
   .option("--clear", "Clear the policy (all requirements enforced)")
   .action(async (profileName: string, opts: {
@@ -1564,6 +1566,7 @@ mergePolicyCmd
     changesRequested: boolean;
     botApproval?: boolean;
     dependabotAutoMerge?: boolean;
+    coderabbitRereview?: boolean;
     json?: string;
     clear?: boolean;
   }) => {
@@ -1609,9 +1612,13 @@ mergePolicyCmd
         // Tri-state: undefined when neither --bot-approval nor --no-bot-approval
         // was passed, so an unrelated `set` leaves the stored value alone.
         if (opts.botApproval !== undefined) override.botApproval = opts.botApproval;
-        if (Object.keys(override).length === 0 && opts.dependabotAutoMerge === undefined) {
+        if (
+          Object.keys(override).length === 0 &&
+          opts.dependabotAutoMerge === undefined &&
+          opts.coderabbitRereview === undefined
+        ) {
           process.stderr.write(
-            "Nothing to set — pass --no-approval, --no-changes-requested, --bot-approval, --dependabot-auto-merge, --json, or --clear.\n",
+            "Nothing to set — pass --no-approval, --no-changes-requested, --bot-approval, --dependabot-auto-merge, --coderabbit-rereview, --json, or --clear.\n",
           );
           process.exitCode = ERROR;
           return;
@@ -1620,12 +1627,16 @@ mergePolicyCmd
           defaults?: Record<string, boolean>;
           byTaskType?: Record<string, Record<string, boolean>>;
           dependencyUpdates?: { autoMerge?: boolean };
+          codeRabbit?: { rereview?: boolean };
         };
         if (opts.dependabotAutoMerge !== undefined) {
           merged.dependencyUpdates = { ...(merged.dependencyUpdates ?? {}), autoMerge: opts.dependabotAutoMerge };
         }
+        if (opts.coderabbitRereview !== undefined) {
+          merged.codeRabbit = { ...(merged.codeRabbit ?? {}), rereview: opts.coderabbitRereview };
+        }
         if (Object.keys(override).length === 0) {
-          // Only the dependency-update switch was passed; leave requirements alone.
+          // Only profile-wide switches were passed; leave requirements alone.
         } else if (opts.taskType) {
           merged.byTaskType = {
             ...(merged.byTaskType ?? {}),

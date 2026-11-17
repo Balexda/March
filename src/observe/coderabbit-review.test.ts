@@ -1,0 +1,64 @@
+/**
+ * @l0 @deterministic @ci
+ */
+import { describe, expect, it } from "vitest";
+import { isCodeRabbitReviewRequest, summarizeCodeRabbit } from "./coderabbit-review.js";
+
+const review = (state: string, oid: string, at: string, login = "coderabbitai") => ({
+  state,
+  submittedAt: at,
+  commit: { oid },
+  author: { login, __typename: "Bot" },
+});
+const comment = (body: string, at: string) => ({ body, createdAt: at });
+
+describe("summarizeCodeRabbit", () => {
+  it("is null when CodeRabbit neither reviewed nor was asked to", () => {
+    expect(summarizeCodeRabbit([review("APPROVED", "a", "2026-11-16T09:00:00Z", "reviewer")], [])).toBeNull();
+    expect(summarizeCodeRabbit(undefined, undefined)).toBeNull();
+  });
+
+  it("takes the latest decisive review and skips COMMENTED ones (thread replies)", () => {
+    // As on Balexda/March#561: CHANGES_REQUESTED on the old head, then a thread
+    // reply filed as a COMMENTED review on the new head.
+    const standing = summarizeCodeRabbit(
+      [review("CHANGES_REQUESTED", "b1661ea", "2026-11-16T09:41:00Z"), review("COMMENTED", "24db731", "2026-11-16T15:25:00Z")],
+      [],
+    );
+    expect(standing).toEqual({
+      decision: "CHANGES_REQUESTED",
+      decision_commit_sha: "b1661ea",
+      decision_at: "2026-11-16T09:41:00Z",
+      last_request_at: null,
+    });
+    const approved = summarizeCodeRabbit(
+      [review("CHANGES_REQUESTED", "a", "2026-11-16T09:00:00Z"), review("APPROVED", "b", "2026-11-16T10:00:00Z")],
+      [],
+    );
+    expect(approved?.decision).toBe("APPROVED");
+    expect(approved?.decision_commit_sha).toBe("b");
+  });
+
+  it("reports the newest review request by anyone, ignoring other mentions", () => {
+    const standing = summarizeCodeRabbit(
+      [],
+      [
+        comment("@coderabbitai review", "2026-11-16T09:30:00Z"),
+        comment("@coderabbitai full review", "2026-11-16T11:00:00Z"),
+        comment("@coderabbitai resolve", "2026-11-16T12:00:00Z"),
+        comment("thanks @coderabbitai review again later", "2026-11-16T13:00:00Z"),
+      ],
+    );
+    expect(standing).toEqual({ decision: null, decision_commit_sha: null, decision_at: null, last_request_at: "2026-11-16T11:00:00Z" });
+  });
+});
+
+describe("isCodeRabbitReviewRequest", () => {
+  it("matches the review commands at the start of a comment only", () => {
+    expect(isCodeRabbitReviewRequest("  @CodeRabbitAI review")).toBe(true);
+    expect(isCodeRabbitReviewRequest("@coderabbitai full review")).toBe(true);
+    expect(isCodeRabbitReviewRequest("@coderabbitai reviewer")).toBe(false);
+    expect(isCodeRabbitReviewRequest("@coderabbitai summary")).toBe(false);
+    expect(isCodeRabbitReviewRequest(null)).toBe(false);
+  });
+});

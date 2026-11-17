@@ -1,3 +1,4 @@
+import { summarizeCodeRabbit, type CodeRabbitStanding } from "./coderabbit-review.js";
 import { execFile } from "node:child_process";
 import { CastraClient } from "../castra/client.js";
 import { gitHubAuthConfigArgs } from "../spawn/git-auth.js";
@@ -297,8 +298,16 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
   async function queryReviewThreads(
     owner: string | null,
     prNumberValue: any,
-  ): Promise<{ threads: any[]; reviews: any[]; comments: any[]; headRefOid: string | null; mergeStateStatus: string | null }> {
-    const empty = { threads: [], reviews: [], comments: [], headRefOid: null, mergeStateStatus: null };
+  ): Promise<{
+    threads: any[];
+    reviews: any[];
+    comments: any[];
+    headRefOid: string | null;
+    headCommittedAt: string | null;
+    mergeStateStatus: string | null;
+    coderabbit: CodeRabbitStanding | null;
+  }> {
+    const empty = { threads: [], reviews: [], comments: [], headRefOid: null, headCommittedAt: null, mergeStateStatus: null, coderabbit: null };
     if (!owner) return empty;
     const [repoOwnerName, repoName] = owner.split("/");
     if (!repoOwnerName || !repoName) return empty;
@@ -321,10 +330,12 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
     pullRequest(number: $pr) {
       headRefOid
       mergeStateStatus
+      commits(last: 1) { nodes { commit { committedDate } } }
       reviews(first: 100) {
         nodes {
           state
           submittedAt
+          commit { oid }
           author { login __typename }
         }
       }
@@ -421,7 +432,11 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
       reviews: pr?.reviews?.nodes || [],
       comments,
       headRefOid: pr?.headRefOid || null,
+      headCommittedAt: pr?.commits?.nodes?.[0]?.commit?.committedDate || null,
       mergeStateStatus: pr?.mergeStateStatus || null,
+      // Read from the unfiltered comment nodes: a `@coderabbitai review` request is
+      // the evidence that the head was already put forward.
+      coderabbit: summarizeCodeRabbit(pr?.reviews?.nodes, commentNodes),
     };
   }
 
@@ -464,6 +479,10 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
       human_approval_count: reviewSummary.human_approval_count,
       changes_requested_count: reviewSummary.changes_requested_count,
       bot_approval_count: reviewSummary.bot_approval_count,
+      // When the head commit was made, and CodeRabbit's review standing: what the
+      // legate's opt-in CodeRabbit re-review request reads. See coderabbit-review.ts.
+      head_committed_at: graphql.headCommittedAt,
+      coderabbit: graphql.coderabbit,
     };
   }
 

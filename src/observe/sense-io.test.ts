@@ -372,6 +372,43 @@ describe("queryPrForBabysit", () => {
     expect(pr.conversation_comments[0].body_preview).toHaveLength(280);
   });
 
+  it("reports the head commit's date and CodeRabbit's standing for the re-review request", async () => {
+    routeExec((_cmd, args) => {
+      if (args.includes("graphql")) {
+        return JSON.stringify({
+          data: {
+            repository: {
+              pullRequest: {
+                headRefOid: "d8e383e",
+                mergeStateStatus: "BLOCKED",
+                commits: { nodes: [{ commit: { committedDate: "2026-11-16T15:22:00Z" } }] },
+                reviews: {
+                  nodes: [
+                    { state: "CHANGES_REQUESTED", submittedAt: "2026-11-16T09:37:00Z", commit: { oid: "441db76" }, author: { login: "coderabbitai", __typename: "Bot" } },
+                  ],
+                },
+                comments: { nodes: [{ databaseId: 9, body: "@coderabbitai review", createdAt: "2026-11-16T09:29:00Z", url: "u9", author: { login: "me", __typename: "User" }, reactionGroups: [] }] },
+                reviewThreads: { nodes: [] },
+              },
+            },
+          },
+        });
+      }
+      return JSON.stringify({ number: 5, url: "u", state: "OPEN", mergeable: "MERGEABLE", headRefName: "b", title: "t", author: { login: "me" }, statusCheckRollup: [] });
+    });
+    const io = createSenseIo({ meta: meta(), castra: fakeCastra() });
+    const pr = await io.queryPrForBabysit({ pr: { number: 5 } }, { repo: { path: "/repo", owner_with_name: "octo/march" } });
+    expect(pr.head_committed_at).toBe("2026-11-16T15:22:00Z");
+    expect(pr.coderabbit).toEqual({
+      decision: "CHANGES_REQUESTED",
+      decision_commit_sha: "441db76",
+      decision_at: "2026-11-16T09:37:00Z",
+      last_request_at: "2026-11-16T09:29:00Z",
+    });
+    // A bot's CHANGES_REQUESTED is still not a human changes-requested gate.
+    expect(pr.changes_requested_count).toBe(0);
+  });
+
   it("skips when the slice has no PR number", async () => {
     const io = createSenseIo({ meta: meta(), castra: fakeCastra() });
     const pr = await io.queryPrForBabysit({}, { repo: { owner_with_name: "octo/march" } });

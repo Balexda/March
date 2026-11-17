@@ -160,6 +160,7 @@ let dispatchFailures: Counter | undefined;
 let loopActions: Counter | undefined;
 let tickDuration: Histogram | undefined;
 let dependencyUnblock: Counter | undefined;
+let coderabbitRereview: Counter | undefined;
 
 // The observable gauges read this map — one snapshot PER PROFILE, updated on
 // every recordLoopHeartbeat. The single shared legate ticks each profile in turn
@@ -213,6 +214,12 @@ function ensureInstruments(meter: Meter): void {
   // bounded `outcome` label ({@link DependencyUnblockOutcome}).
   dependencyUnblock = meter.createCounter("march.legate.dependency.unblock", {
     description: "Count of Dependabot conflict-unblock attempts by outcome",
+    unit: "1",
+  });
+  // The opt-in CodeRabbit re-review request, by bounded `outcome`
+  // ({@link CodeRabbitRereviewOutcome}).
+  coderabbitRereview = meter.createCounter("march.legate.coderabbit.rereview", {
+    description: "Count of CodeRabbit re-review requests by outcome",
     unit: "1",
   });
   tickDuration = meter.createHistogram("march.legate.tick.duration", {
@@ -565,4 +572,18 @@ export function recordDependencyUnblock(outcome: DependencyUnblockOutcome, proce
   if (!otel.enabled) return;
   ensureInstruments(otel.getMeter());
   dependencyUnblock!.add(1, { outcome, ...(processor ? { processor } : {}) });
+}
+
+/** The bounded outcomes of a CodeRabbit re-review request — a metric label. */
+export type CodeRabbitRereviewOutcome = "requested" | "failed";
+
+/**
+ * Count one CodeRabbit re-review request outcome. `processor` is the profile's
+ * loop name. No-op when telemetry is disabled.
+ */
+export function recordCodeRabbitRereview(outcome: CodeRabbitRereviewOutcome, processor?: string): void {
+  const otel = getActiveOtel();
+  if (!otel.enabled) return;
+  ensureInstruments(otel.getMeter());
+  coderabbitRereview!.add(1, { outcome, ...(processor ? { processor } : {}) });
 }

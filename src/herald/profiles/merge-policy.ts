@@ -65,6 +65,18 @@ export interface MergePolicy {
   readonly defaults?: Partial<MergeRequirements>;
   readonly byTaskType?: Readonly<Record<string, Partial<MergeRequirements>>>;
   readonly dependencyUpdates?: DependencyUpdatePolicy;
+  readonly codeRabbit?: CodeRabbitPolicy;
+}
+
+/**
+ * Policy for CodeRabbit reviews on slice PRs. When `rereview` is true, the
+ * legate's coderabbit-rereview handler comments `@coderabbitai review` once per
+ * head after the steward pushes past CodeRabbit's `CHANGES_REQUESTED` review, so
+ * CodeRabbit can re-review and approve instead of blocking the merge forever.
+ * It changes no merge requirement. Off by default.
+ */
+export interface CodeRabbitPolicy {
+  readonly rereview?: boolean;
 }
 
 /**
@@ -184,10 +196,10 @@ export function validateMergePolicy(
     return { ok: false, error: "merge policy must be an object." };
   }
   for (const key of Object.keys(value)) {
-    if (key !== "defaults" && key !== "byTaskType" && key !== "dependencyUpdates") {
+    if (key !== "defaults" && key !== "byTaskType" && key !== "dependencyUpdates" && key !== "codeRabbit") {
       return {
         ok: false,
-        error: `merge policy has unknown key "${key}" (expected "defaults", "byTaskType" or "dependencyUpdates").`,
+        error: `merge policy has unknown key "${key}" (expected "defaults", "byTaskType", "dependencyUpdates" or "codeRabbit").`,
       };
     }
   }
@@ -195,7 +207,24 @@ export function validateMergePolicy(
     defaults?: Partial<MergeRequirements>;
     byTaskType?: Record<string, Partial<MergeRequirements>>;
     dependencyUpdates?: DependencyUpdatePolicy;
+    codeRabbit?: CodeRabbitPolicy;
   } = {};
+
+  if (value.codeRabbit !== undefined) {
+    const cr = value.codeRabbit;
+    if (!isPlainObject(cr)) {
+      return { ok: false, error: "merge policy codeRabbit must be an object." };
+    }
+    for (const [key, raw] of Object.entries(cr)) {
+      if (key !== "rereview") {
+        return { ok: false, error: `merge policy codeRabbit has unknown key "${key}" (expected "rereview").` };
+      }
+      if (typeof raw !== "boolean") {
+        return { ok: false, error: "merge policy codeRabbit.rereview must be a boolean." };
+      }
+    }
+    policy.codeRabbit = typeof cr.rereview === "boolean" ? { rereview: cr.rereview } : {};
+  }
 
   if (value.dependencyUpdates !== undefined) {
     const du = value.dependencyUpdates;
