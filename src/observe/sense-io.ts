@@ -5,6 +5,8 @@ import { gitHubAuthConfigArgs } from "../spawn/git-auth.js";
 import type { LoopMeta } from "../legate/loop/meta.js";
 import type { OpenPrIndex, SenseDeps, StaleRecheckTracker } from "../legate/loop/state/sense.js";
 import { createStaleRecheckTracker } from "../legate/loop/state/sense.js";
+import { isCodexReviewSummary, parseCodexReviewState, type CodexReviewState } from "./codex-review.js";
+import { isCodeRabbitComment, isReviewBotCommand } from "./review-bot-comments.js";
 import { readSmithyStatus } from "./smithy-status.js";
 
 /**
@@ -162,6 +164,13 @@ function failedChecks(statusCheckRollup: any) {
     }));
 }
 
+/** A GraphQL `author` that is a bot: typed `Bot`, or a login ending in `[bot]`
+ *  (covers GitHub Apps that present as Users, e.g. Copilot). An ordinary user can
+ *  be neither — GitHub logins cannot contain brackets. */
+function isBotActor(author: any): boolean {
+  return author?.__typename === "Bot" || String(author?.login || "").endsWith("[bot]");
+}
+
 /**
  * Reduce a PR's `reviews` nodes to human (non-bot) approval / changes-requested
  * counts, plus a separate bot approval count — the data the legate's merge gate
@@ -181,8 +190,7 @@ export function summarizeReviews(
   reviewNodes: any,
 ): { human_approval_count: number; changes_requested_count: number; bot_approval_count: number } {
   const nodes = Array.isArray(reviewNodes) ? reviewNodes : [];
-  const isBot = (node: any): boolean =>
-    node?.author?.__typename === "Bot" || String(node?.author?.login || "").endsWith("[bot]");
+  const isBot = (node: any): boolean => isBotActor(node?.author);
   // Latest meaningful review per login (by submittedAt). COMMENTED / PENDING /
   // DISMISSED reviews are dropped first, so a later comment does not hide an
   // earlier approval and a dismissed approval does not count.
@@ -302,12 +310,22 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
     threads: any[];
     reviews: any[];
     comments: any[];
+    codexReview: CodexReviewState | null;
     headRefOid: string | null;
     headCommittedAt: string | null;
     mergeStateStatus: string | null;
     coderabbit: CodeRabbitStanding | null;
   }> {
-    const empty = { threads: [], reviews: [], comments: [], headRefOid: null, headCommittedAt: null, mergeStateStatus: null, coderabbit: null };
+    const empty = {
+      threads: [],
+      reviews: [],
+      comments: [],
+      codexReview: null,
+      headRefOid: null,
+      headCommittedAt: null,
+      mergeStateStatus: null,
+      coderabbit: null,
+    };
     if (!owner) return empty;
     const [repoOwnerName, repoName] = owner.split("/");
     if (!repoOwnerName || !repoName) return empty;
@@ -407,8 +425,37 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
     // comment-id set is the authoritative half — the legate token shares the
     // PR-author identity, so neither author nor reaction alone is decisive).
     const commentNodes = Array.isArray(pr?.comments?.nodes) ? pr.comments.nodes : [];
+    // Codex's automatic review-status comment (one bot comment, edited in place as
+    // its review runs) is a status notice, not feedback. Left among the conversation
+    // comments it reads as a comment owing a reply: the legate dispatches a
+    // /smithy.fix turn for it and the steward posts a noise reply on every PR. It is
+    // dropped HERE, at sensing, so every consumer of `conversation_comments` agrees
+    // (the comment-fix dispatch and the `owes_comments` merge blocker). Matched on
+    // the body marker, not the author — Codex may also post real findings as
+    // comments, and those stay.
+    //
+    // Its machine-readable state is surfaced as `codex_review` instead. Unlike the
+    // drop, the state is read ONLY from a bot-authored summary: it is a per-commit
+    // review signal, so a commenter must not be able to forge it by pasting the
+    // markers. Codex keeps one summary per PR; should the sampled window ever hold
+    // several, the last (the connection is chronological, so the newest) decides.
+    let codexReview: CodexReviewState | null = null;
+    for (const c of commentNodes) {
+      if (isCodexReviewSummary(c?.body) && isBotActor(c?.author)) codexReview = parseCodexReviewState(c.body);
+    }
+    // CodeRabbit's generated comments (summary, command acks, chat replies) and
+    // commands addressed to a review bot (`@coderabbitai review`) are dropped for
+    // the same reason: none is feedback the steward owes a reply. See
+    // `review-bot-comments.ts`.
     const comments = commentNodes
-      .filter((c: any) => c && c.databaseId != null)
+      .filter(
+        (c: any) =>
+          c &&
+          c.databaseId != null &&
+          !isCodexReviewSummary(c.body) &&
+          !isCodeRabbitComment(c.body) &&
+          !isReviewBotCommand(c.body),
+      )
       .map((c: any) => {
         const body = String(c.body || "");
         return {
@@ -431,6 +478,7 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
       threads,
       reviews: pr?.reviews?.nodes || [],
       comments,
+      codexReview,
       headRefOid: pr?.headRefOid || null,
       headCommittedAt: pr?.commits?.nodes?.[0]?.commit?.committedDate || null,
       mergeStateStatus: pr?.mergeStateStatus || null,
@@ -474,8 +522,14 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
       thread_count: annotated.length,
       needs_response_count: annotated.filter((thread: any) => thread.needs_response).length,
       // Non-thread (conversation) comments — the legate dispatches /smithy.fix for
-      // any not yet acknowledged (:eyes:) / dispatched-for. See babysit.
+      // any not yet acknowledged (:eyes:) / dispatched-for. See babysit. Codex's
+      // review-status comment is never among them (see queryReviewThreads).
       conversation_comments: graphql.comments,
+      // Codex's code-review state (reviewed commit, status, unresolved findings),
+      // or null when the sampled comments hold no Codex summary with a readable
+      // state. Nothing gates on it yet: it is the per-commit signal a merge gate
+      // can wait on, by comparing `commit_sha` with `head_sha`.
+      codex_review: graphql.codexReview,
       human_approval_count: reviewSummary.human_approval_count,
       changes_requested_count: reviewSummary.changes_requested_count,
       bot_approval_count: reviewSummary.bot_approval_count,

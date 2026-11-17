@@ -3,6 +3,7 @@
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { LoopMeta } from "../legate/loop/meta.js";
+import type { LoopState } from "../legate/loop/state/types.js";
 
 // vi.mock is hoisted; close over a mutable handle so each test can route
 // execFile(command,args,…) output. sense-io's execText is the only execFile user.
@@ -11,6 +12,10 @@ vi.mock("node:child_process", () => ({ execFile: childProcessMock.execFile }));
 
 // Import under test AFTER vi.mock so the stub is applied to its imports.
 const { buildSenseIo, createSenseIo, gitHubAuthConfigArgs, summarizeReviews } = await import("./sense-io.js");
+// The two consumers of the sensed `conversation_comments` (the comment-fix
+// dispatch and the owes_comments merge blocker), for the end-to-end Codex case.
+const { assess } = await import("../legate/loop/handlers/babysit.js");
+const { mergeBlocker } = await import("../legate/loop/pure/slice.js");
 
 /** Route execFile by command+args to canned stdout. */
 function routeExec(router: (cmd: string, args: string[]) => string): void {
@@ -340,6 +345,8 @@ describe("queryPrForBabysit", () => {
       { id: 101, author: "reviewer", author_type: "User", body_preview: "We should modify the spec and pull back from this behavior.", truncated: false, url: "https://github.com/octo/march/pull/5#issuecomment-101", created_at: "2026-06-09T07:00:30Z", reacted_eyes: false },
       { id: 102, author: "reviewer", author_type: "User", body_preview: "already handled", truncated: false, url: "https://github.com/octo/march/pull/5#issuecomment-102", created_at: "2026-06-09T08:00:00Z", reacted_eyes: true },
     ]);
+    // No Codex review-summary comment on this PR → no review state to report.
+    expect(pr.codex_review).toBeNull();
   });
 
   it("samples the NEWEST conversation comments (last:50) and flags an over-length body as truncated", async () => {
@@ -407,6 +414,134 @@ describe("queryPrForBabysit", () => {
     });
     // A bot's CHANGES_REQUESTED is still not a human changes-requested gate.
     expect(pr.changes_requested_count).toBe(0);
+  });
+
+  describe("Codex review-status comment", () => {
+    const CODEX = { login: "chatgpt-codex-connector", __typename: "Bot" };
+    const REVIEWER = { login: "reviewer", __typename: "User" };
+
+    /** Codex's review-summary comment body: the two leading HTML comments (summary
+     *  marker, then the `v1` state), then its human-readable status. */
+    const codexSummary = (codeReview: Record<string, unknown>): string =>
+      [
+        "<!-- codex-pull-request-review-summary -->",
+        `<!-- codex-review-state:v1 ${JSON.stringify({
+          code_review: codeReview,
+          security_review: { commit_sha: null, has_any_findings: null, has_unresolved_findings: null, status: null },
+        })} -->`,
+        "",
+        "<details>",
+        "<summary><strong>Codex Review Summary</strong>: ✅ Completed</summary>",
+        "</details>",
+      ].join("\n");
+    const completed = (sha: string) => ({ commit_sha: sha, has_any_findings: false, has_unresolved_findings: false, status: "completed" });
+
+    const comment = (id: number, author: unknown, body: string) => ({
+      databaseId: id,
+      body,
+      createdAt: "2026-11-15T18:53:24Z",
+      url: `u${id}`,
+      author,
+      reactionGroups: [],
+    });
+
+    /** Sense PR #5 with the given conversation-comment nodes. */
+    async function sensePr(commentNodes: unknown[]): Promise<any> {
+      routeExec((_cmd, args) => {
+        if (args.includes("graphql")) {
+          return JSON.stringify({
+            data: {
+              repository: {
+                pullRequest: {
+                  headRefOid: "f277786",
+                  mergeStateStatus: "CLEAN",
+                  reviews: { nodes: [] },
+                  comments: { nodes: commentNodes },
+                  reviewThreads: { nodes: [] },
+                },
+              },
+            },
+          });
+        }
+        return JSON.stringify({ number: 5, url: "u", state: "OPEN", mergeable: "MERGEABLE", headRefName: "b", title: "t", author: { login: "me" }, statusCheckRollup: [] });
+      });
+      const io = createSenseIo({ meta: meta(), castra: fakeCastra() });
+      return io.queryPrForBabysit({ pr: { number: 5 } }, { repo: { path: "/repo", owner_with_name: "octo/march" } });
+    }
+
+    it("drops it from conversation_comments and surfaces its state as codex_review", async () => {
+      const pr = await sensePr([
+        comment(201, CODEX, codexSummary(completed("f277786"))),
+        comment(202, REVIEWER, "please reconsider the spec"),
+        // A real finding Codex posts as a comment carries no summary marker → kept.
+        comment(203, CODEX, "Codex found an issue: the retry budget is never reset."),
+      ]);
+      expect(pr.conversation_comments.map((c: any) => c.id)).toEqual([202, 203]);
+      expect(pr.codex_review).toEqual({ commit_sha: "f277786", status: "completed", has_unresolved_findings: false });
+    });
+
+    it("matches on the marker for the drop, but reads state only from a bot-authored summary", async () => {
+      // A commenter pasting the markers cannot forge the per-commit review signal:
+      // their comment is dropped like any summary, and Codex's own state stands.
+      const forged = await sensePr([
+        comment(201, CODEX, codexSummary({ commit_sha: "f277786", has_any_findings: true, has_unresolved_findings: true, status: "completed" })),
+        comment(202, REVIEWER, codexSummary(completed("f277786"))),
+      ]);
+      expect(forged.conversation_comments).toEqual([]);
+      expect(forged.codex_review).toEqual({ commit_sha: "f277786", status: "completed", has_unresolved_findings: true });
+
+      // With no bot-authored summary at all there is no state to trust.
+      const humanOnly = await sensePr([comment(202, REVIEWER, codexSummary(completed("f277786")))]);
+      expect(humanOnly.conversation_comments).toEqual([]);
+      expect(humanOnly.codex_review).toBeNull();
+    });
+
+    it("owes no reply: no comment-fix dispatch and no owes_comments blocker for it", async () => {
+      // The sensed PR, fed through the real consumers of `conversation_comments`.
+      const babysit = (pr: unknown): string[] => {
+        const state: LoopState = {
+          ts: "2026-11-15T19:00:00Z",
+          statePresent: true,
+          stateError: null,
+          raw: { slices: {}, repo: { default_branch: "main" } },
+          slices: { s: { worker_session_id: "w", stage: "pr-open", pr: { number: 5 }, pr_open_at: "2026-11-15T18:00:00Z" } },
+          archived: {},
+          repoPath: "/repo",
+          workerGroup: "legate-workers",
+          sessions: [{ id: "w", group: "legate-workers", status: "idle" }],
+          sessionsById: new Map(),
+          workers: { waiting: 0, running: 0, idle: 1, error: 0, stopped: 0, other: 0 },
+          smithy: { ok: true, ready: [], queue: { dispatchable: 0, blocked: 0, total: 0 } },
+          perSlice: { s: { recentOutput: { output: "" }, pr } },
+        };
+        return assess(state).map((d) => d.kind);
+      };
+
+      const statusOnly = await sensePr([comment(201, CODEX, codexSummary(completed("f277786")))]);
+      expect(babysit(statusOnly)).not.toContain("comment-fix");
+      expect(mergeBlocker({}, statusOnly)).toBe("none");
+
+      // Control: ordinary feedback beside the status comment still dispatches.
+      const withFeedback = await sensePr([
+        comment(201, CODEX, codexSummary(completed("f277786"))),
+        comment(202, REVIEWER, "please reconsider the spec"),
+      ]);
+      expect(babysit(withFeedback)).toContain("comment-fix");
+      expect(mergeBlocker({}, withFeedback)).toBe("owes_comments");
+    });
+    it("drops CodeRabbit's generated comments and review-bot commands, but keeps a mid-comment mention", async () => {
+      const CODERABBIT = { login: "coderabbitai", __typename: "Bot" };
+      const rabbit = (rest: string) => `<!-- coderabbit-ai-generated:v1 -->\n\n${rest}`;
+      const pr = await sensePr([
+        comment(301, REVIEWER, "@coderabbitai review"),
+        comment(302, CODERABBIT, rabbit("<!-- This is an auto-generated comment: summarize by coderabbit.ai -->")),
+        comment(303, CODERABBIT, rabbit("<!-- This is an auto-generated reply by CodeRabbit -->\nReview triggered.")),
+        comment(304, REVIEWER, "@codex review"),
+        // Genuine feedback that mentions the bot further down is still feedback.
+        comment(305, REVIEWER, "The cache key is wrong — @coderabbitai flagged it too."),
+      ]);
+      expect(pr.conversation_comments.map((c: any) => c.id)).toEqual([305]);
+    });
   });
 
   it("skips when the slice has no PR number", async () => {
