@@ -17,7 +17,7 @@
 
 ### Tasks
 
-- [ ] **Implement the typed Tessera HTTP client**
+- [x] **Implement the typed Tessera HTTP client**
 
   Add client, configuration and wire types under `src/tessera/`, following `src/statio/client.ts` and `src/castra/client.ts`. Implement the Node Client contract, including the convenience call, status and reachability methods, with fake-Tessera coverage for AS 4.1–4.2.
 
@@ -29,7 +29,7 @@
   - Malformed responses fail with sanitized typed errors; secrets and raw response bodies never enter diagnostics.
   - Status returns the documented shape; reachability returns false on transport failure without issuing a token.
 
-- [ ] **Add scope-safe entitlement reuse and refresh**
+- [x] **Add scope-safe entitlement reuse and refresh**
 
   Implement in-memory reuse in `src/tessera/client.ts` for AS 4.1 and the Node Client refresh contract. Ensure the convenience call retains usable client state without sharing credentials across differently configured callers.
 
@@ -40,7 +40,7 @@
   - Unknown-expiry user entitlements and migration fallbacks are not retained as fresh installation tokens.
   - Fake-Tessera tests cover expiry boundaries, scope isolation and refresh without calling GitHub.
 
-- [ ] **Gate and observe migration fallback**
+- [x] **Gate and observe migration fallback**
 
   Implement AS 4.2–4.4 in `src/tessera/client.ts`, using `src/observability/logger.ts` and a consumer metric helper under `src/observability/`. Include fallback visibility in `docker/grafana/dashboards/` and document the client in `docs/subsystems/tessera/contract.md`.
 

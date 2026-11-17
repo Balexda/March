@@ -45,3 +45,31 @@ export async function loadTesseraAppConfig(env: NodeJS.ProcessEnv = process.env)
   }
   return { appId, privateKey, installationId };
 }
+
+function plaintextHostAllowed(host: string): boolean {
+  if (host === "localhost" || host === "[::1]") return true;
+  const ip = /^(\d{1,3})\.(\d{1,3})\.\d{1,3}\.\d{1,3}$/.exec(host);
+  if (ip) {
+    const [a, b] = [Number(ip[1]), Number(ip[2])];
+    return a === 127 || a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168);
+  }
+  return !host.includes(".") && !host.includes(":");
+}
+/** No default endpoint or key: incomplete consumer wiring must fail closed. */
+export function resolveTesseraConfig(options: {
+  baseUrl?: string; clientKey?: string; env?: NodeJS.ProcessEnv;
+}): { baseUrl: string; clientKey: string } | undefined {
+  const env = options.env ?? process.env;
+  // Trim before validating so the key sent in the auth header is exactly what was checked.
+  const baseUrl = (options.baseUrl ?? env.MARCH_TESSERA_URL)?.trim();
+  const clientKey = (options.clientKey ?? env.MARCH_TESSERA_CLIENT_KEY)?.trim();
+  if (!baseUrl || !clientKey || /[\r\n]/.test(clientKey)) return;
+  try {
+    const url = new URL(baseUrl);
+    if (!["http:", "https:"].includes(url.protocol) || url.username || url.password || url.search || url.hash) return;
+    // The bearer key must not cross an untrusted network in cleartext: plain http is
+    // limited to loopback, single-label compose service names and private IPv4 literals.
+    if (url.protocol === "http:" && !plaintextHostAllowed(url.hostname)) return;
+    return { baseUrl: url.href.replace(/\/+$/, ""), clientKey };
+  } catch { return; }
+}
