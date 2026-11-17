@@ -239,3 +239,12 @@ No events or hooks are introduced by Feature 1. Herald (the shipped event-source
 - **Claude Code agent directories** (`~/.claude/`): March deploys skill files here. March does not own this directory — it coexists with SmithyCLI and any other tools that deploy to the same locations. The `march.` filename prefix provides namespace isolation.
 - **Filesystem**: March reads and writes to `~/.march/` (owned) and `~/.claude/` (shared). No other filesystem locations are touched.
 - **PATH dependencies**: `march init` checks for `git` and `docker` on PATH as informational warnings. No programmatic integration with these tools occurs in Feature 1.
+
+### march tessera serve
+
+`march tessera serve [--port <n>] [--host <addr>]` runs the Tessera HTTP service.
+Host defaults to `127.0.0.1`; port resolves from `--port`, then
+`MARCH_TESSERA_PORT`, then `9477`. Invalid ports exit with usage status 2.
+SIGTERM/SIGINT close HTTP and telemetry. Missing provider credentials still allow
+health/status; production issuance denies all callers until US2 authorization is
+implemented. See the [Tessera subsystem contract](../../docs/subsystems/tessera/contract.md).

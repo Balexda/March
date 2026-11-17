@@ -68,6 +68,13 @@
       "publicSourcePaths": [
         "src/statio/**"
       ]
+    },
+    {
+      "name": "tessera",
+      "contractPath": "docs/subsystems/tessera/contract.md",
+      "publicSourcePaths": [
+        "src/tessera/**"
+      ]
     }
   ]
 }

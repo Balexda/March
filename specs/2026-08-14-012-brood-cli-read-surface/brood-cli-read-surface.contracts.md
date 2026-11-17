@@ -118,11 +118,41 @@ The CLI verbs above are thin clients. Reconciliation and log reading are
 Castra, or reads the teardown archive itself. Two of these routes exist today
 and gain a query parameter; the logs route is new.
 
-| Route | Status | Query | Success response | Errors |
-|-------|--------|-------|------------------|--------|
-| `GET /sessions` | exists | `kind`, `status`, `parentId` (all existing); `reconcile=true\|false` (**new**, default `false`) | `200` `{ "sessions": SessionRecord[], "views": BroodReadView[] }` | `400` invalid filter value; `503` reconciliation source unreachable when `reconcile=true` |
-| `GET /sessions/:id` | exists | `reconcile=true\|false` (**new**, default `true`) | `200` `BroodReadView` — the full `SessionRecord` nested at `record` | `404` `{ "error": "No session with id \"<id>\"." }` (existing shape) |
-| `GET /sessions/:id/logs` | **new** | — | `200` `text/plain` log content, plus `X-March-Log-Source: live-container\|castra-session\|archive` | `404` unknown id; `409` no log source available; `502` upstream Docker/Castra read failure with an archive miss |
+This table is the **target contract for the whole feature**, not a description
+of what has shipped. `Status` describes whether the route exists in the service
+at all; `Delivered by` names the user story that implements the contracted
+behavior. Only the `GET /sessions` row is implemented as specified today — the
+`GET /sessions/:id` reconcile parameter and read-view shape are US2 work, and
+the logs route is US3 work, so both still behave as they did before this
+feature (`GET /sessions/:id` returns a bare `SessionRecord`).
+
+| Route | Status | Delivered by | Query | Success response | Errors |
+|-------|--------|--------------|-------|------------------|--------|
+| `GET /sessions` | exists | **US1 — shipped** | `kind`, `status`, `parentId` (all existing); `reconcile=true\|false` (**new**, default `false`) | `200` `{ "sessions": SessionRecord[], "views": BroodReadView[] }` | `400` invalid or repeated `kind`, `status`, `parentId`, or `reconcile` value; `503` reconciliation source unreachable when `reconcile=true` |
+| `GET /sessions/:id` | exists | US2 — not yet implemented | `reconcile=true\|false` (**new**, default `true`) | `200` `BroodReadView` — the full `SessionRecord` nested at `record` | `404` `{ "error": "No session with id \"<id>\"." }` (existing shape) |
+| `GET /sessions/:id/logs` | **new** | US3 — not yet implemented | — | `200` `text/plain` log content, plus `X-March-Log-Source: live-container\|castra-session\|archive` | `404` unknown id; `409` no log source available; `502` upstream Docker/Castra read failure with an archive miss |
+
+Story 1 `GET /sessions` read-view fields:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `views[].record` | SessionRecord | The matching service-owned registry row; raw `sessions[]` remains alongside it for existing consumers. |
+| `views[].age` | string | Human age derived from `createdAt`; never persisted. |
+| `views[].needsAttention` | boolean | True for failed rows in the Story 1 implementation. |
+| `views[].disposed` | boolean | True when the row is torndown or has `torndownAt`. |
+| `views[].containerLive` | boolean \| null | Observed liveness when `reconcile=true`; the registry fact otherwise. `null` for rows without a tracked container such as normal steward rows. |
+| `views[].reconciled` | boolean | `true` only when a liveness observation was actually performed and applied to the row — i.e. `reconcile=true` and the observation succeeded. `false` by default and when `reconcile=false`. |
+
+`GET /sessions` is read-only and service-owned: it validates list filters before
+querying the registry, derives `views[]` from `SessionRecord` rows in memory, and
+does not mutate registry, Docker, Castra, archive, worktree, or branch state.
+Reconciliation is observational — the service reads container liveness (one
+`docker ps --all` per reconciled read, never per row) and reports it; it never
+repairs, updates, or tears anything down. An unreachable liveness source is an
+explicit `503` rather than registry data mislabelled as observed, so a caller
+never receives `reconciled: true` for a read that was not observed. This slice
+implements only the list route; inspect, logs, teardown, and archive behavior
+stay at their pre-slice scope.
 
 Contract notes:
 
