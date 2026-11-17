@@ -1,0 +1,43 @@
+# Tessera starts unconfigured: health/status work without GitHub credentials.
+# Issuance remains denied until US2 supplies production client authorization.
+# US3 owns secret storage/import, HOME-path validation, key distribution and
+# stack startup ordering; this asset intentionally provisions no secrets.
+# No HOME, Docker socket, ambient GH_TOKEN or GITHUB_TOKEN enters this service.
+# Residual risk: a peer with the host Docker socket can still inspect containers
+# and their secrets; host steward processes retain operator-level host access.
+# This compose boundary does not remove either risk.
+# Start the observability stack first to create the external march network.
+name: march-tessera
+services:
+  tessera:
+    build:
+      context: ..
+      dockerfile: docker/tessera.Dockerfile
+    image: march-tessera:latest
+    container_name: march-tessera
+    restart: on-failure
+    command: ["tessera", "serve", "--host", "0.0.0.0", "--port", "${MARCH_TESSERA_PORT:-9477}"]
+    ports:
+      - "127.0.0.1:${MARCH_TESSERA_PORT:-9477}:${MARCH_TESSERA_PORT:-9477}"
+    environment:
+      - MARCH_TESSERA_PORT=${MARCH_TESSERA_PORT:-9477}
+      - MARCH_TESSERA_LOG_DIR=/march/logs
+      - MARCH_OTEL=${MARCH_OTEL:-1}
+      - MARCH_OTEL_ENDPOINT=http://otel-lgtm:4318
+      - MARCH_OTEL_SERVICE_NAME=march-tessera
+    volumes:
+      - march-tessera-logs:/march/logs
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:${MARCH_TESSERA_PORT:-9477}/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
+    networks:
+      - march
+networks:
+  march:
+    external: true
+    name: march
+volumes:
+  march-tessera-logs:

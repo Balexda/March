@@ -27,7 +27,7 @@
 
 ### Tasks
 
-- [ ] **Define issuance models and provider selection**
+- [x] **Define issuance models and provider selection**
 
   Add request, entitlement, provider and typed-error models under `src/tessera/`, following the data model and Provider Interface contract. Introduce provider selection and an authorization boundary for AS 1.1 and 1.7 without implementing US2 policy or US7 PAT behavior.
 
@@ -37,7 +37,7 @@
   - Production authorization defaults to deny; tests can supply an allowed caller without an environment bypass.
   - Fixed access profiles alone determine permissions, excluding workflows under the current spec default.
 
-- [ ] **Implement bounded GitHub App discovery and minting**
+- [x] **Implement bounded GitHub App discovery and minting**
 
   Implement the app provider under `src/tessera/` using replaceable GitHub transport for AS 1.1 and 1.5–1.7. Resolve installations and bot identity from GitHub, honoring the installation override without broadening repository scope.
 
@@ -49,7 +49,7 @@
   - Missing app id or secret leaves the provider unconfigured; failed identity discovery degrades it and later success recovers it.
   - Fake-GitHub coverage exercises discovery, minting and typed failures without calling real GitHub.
 
-- [ ] **Expose issuance and provider health over HTTP**
+- [x] **Expose issuance and provider health over HTTP**
 
   Add Fastify routes and service configuration under `src/tessera/`, using Statio's server structure as guidance. Implement the token and health/status contracts for AS 1.1 and 1.5–1.7, keeping GitHub-specific behavior behind the provider interface.
 
@@ -60,7 +60,7 @@
   - Unauthorized requests never invoke GitHub; malformed allowed-client requests fail validation.
   - HTTP contract coverage includes success, typed failure and unconfigured-provider responses against fake dependencies.
 
-- [ ] **Trace issuance without exposing credentials**
+- [x] **Trace issuance without exposing credentials**
 
   Integrate issuance with `src/observability/logger.ts` and deterministic trace helpers, following `src/observability/statio-trace.ts`. Include denial and failure spans from the first runnable service; US8 adds full audit, metrics and dashboard coverage.
 
@@ -70,7 +70,7 @@
   - Safe structured logs distinguish issuance success and typed failures.
   - Tokens, assertions, private keys, bearer keys, hashes and upstream response bodies never appear in captured logs, spans, status or errors.
 
-- [ ] **Package the runnable Tessera service**
+- [x] **Package the runnable Tessera service**
 
   Add `src/tessera/serve.ts`, thin dispatch in `src/cli/program.ts`, and image/compose assets under `docker/`. Follow existing lifecycle and build conventions, delivering AS 1.7 without choosing US3's secret-store implementation.
 

@@ -35,6 +35,8 @@ import {
 import { runCastraServer } from "../castra/serve.js";
 import { CASTRA_TOKEN_ENV } from "../castra/config.js";
 import { CastraValidationError } from "../castra/types.js";
+import { runTesseraServer } from "../tessera/serve.js";
+import { TesseraConfigError } from "../tessera/config.js";
 import { runStatioServer } from "../statio/serve.js";
 import { STATIO_TOKEN_ENV } from "../statio/config.js";
 import { StatioValidationError } from "../statio/types.js";
@@ -2003,6 +2005,26 @@ castra
         err instanceof CastraClientError ? err.message : (err as Error).message;
       process.stderr.write(message + "\n");
       process.exitCode = ERROR;
+    }
+  });
+
+const tessera = program.command("tessera").description("Manage Tessera credential entitlements");
+tessera.command("serve")
+  .description("Run the Tessera HTTP service (issuance requires authorization)")
+  .option("--port <port>", "Listen port (default: MARCH_TESSERA_PORT or 9477)")
+  .option("--host <host>", "Bind address (default: 127.0.0.1)")
+  .action(async (opts: { port?: string; host?: string }) => {
+    commandHandled = true;
+    try {
+      await runTesseraServer(opts);
+      process.exitCode = SUCCESS;
+    } catch (err) {
+      if (err instanceof TesseraConfigError) {
+        process.stderr.write(err.message + "\n");
+        process.exitCode = USAGE_ERROR;
+        return;
+      }
+      throw err;
     }
   });
 
