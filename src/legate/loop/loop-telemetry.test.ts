@@ -99,6 +99,28 @@ describe("emitActionEventSpan", () => {
   });
 });
 
+describe("CodeRabbit re-review telemetry", () => {
+  it("emits a legate.coderabbit-rereview span on the slice's trace, errored on failure", () => {
+    const emit = vi.fn();
+    emitActionEventSpan({ kind: "coderabbit_rereview", action: "coderabbit-rereview-requested", slice_id: "s", pr_number: 543 }, emit);
+    expect(emit).toHaveBeenLastCalledWith(expect.objectContaining({ name: "legate.coderabbit-rereview", traceKey: "s", root: false, error: false }));
+    emitActionEventSpan({ kind: "coderabbit_rereview_failure", action: "coderabbit-rereview-failed", slice_id: "s" }, emit);
+    expect(emit).toHaveBeenLastCalledWith(expect.objectContaining({ name: "legate.coderabbit-rereview", error: true }));
+  });
+
+  it("counts requested and failed outcomes", () => {
+    const record = vi.fn();
+    const recordRereview = vi.fn();
+    recordActionEventMetrics({ kind: "coderabbit_rereview", processor: "march-loop", action: "coderabbit-rereview-requested" }, record, recordRereview);
+    recordActionEventMetrics({ kind: "coderabbit_rereview_failure", action: "coderabbit-rereview-failed" }, record, recordRereview);
+    expect(recordRereview.mock.calls).toEqual([
+      ["requested", "march-loop"],
+      ["failed", undefined],
+    ]);
+    expect(record).not.toHaveBeenCalled();
+  });
+});
+
 describe("recordActionEventMetrics", () => {
   it("counts each conflict-ladder action by outcome and ignores everything else", () => {
     const record = vi.fn();

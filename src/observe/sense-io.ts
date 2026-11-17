@@ -1,3 +1,4 @@
+import { summarizeCodeRabbit, type CodeRabbitStanding } from "./coderabbit-review.js";
 import { execFile } from "node:child_process";
 import { CastraClient } from "../castra/client.js";
 import { gitHubAuthConfigArgs } from "../spawn/git-auth.js";
@@ -312,8 +313,18 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
     codexReview: CodexReviewState | null;
     headRefOid: string | null;
     mergeStateStatus: string | null;
+    /** `undefined` when the query failed: unknown, never "CodeRabbit has not reviewed". */
+    coderabbit: CodeRabbitStanding | null | undefined;
   }> {
-    const empty = { threads: [], reviews: [], comments: [], codexReview: null, headRefOid: null, mergeStateStatus: null };
+    const empty = {
+      threads: [],
+      reviews: [],
+      comments: [],
+      codexReview: null,
+      headRefOid: null,
+      mergeStateStatus: null,
+      coderabbit: undefined,
+    };
     if (!owner) return empty;
     const [repoOwnerName, repoName] = owner.split("/");
     if (!repoOwnerName || !repoName) return empty;
@@ -340,6 +351,7 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
         nodes {
           state
           submittedAt
+          commit { oid }
           author { login __typename }
         }
       }
@@ -467,6 +479,9 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
       codexReview,
       headRefOid: pr?.headRefOid || null,
       mergeStateStatus: pr?.mergeStateStatus || null,
+      // Read from the unfiltered comment nodes: a `@coderabbitai review` request is
+      // the evidence that the head was already put forward.
+      coderabbit: summarizeCodeRabbit(pr?.reviews?.nodes, commentNodes),
     };
   }
 
@@ -515,6 +530,9 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
       human_approval_count: reviewSummary.human_approval_count,
       changes_requested_count: reviewSummary.changes_requested_count,
       bot_approval_count: reviewSummary.bot_approval_count,
+      // CodeRabbit's review standing: what the legate's opt-in CodeRabbit review
+      // request reads. See coderabbit-review.ts.
+      coderabbit: graphql.coderabbit,
     };
   }
 

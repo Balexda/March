@@ -65,7 +65,25 @@ export interface MergePolicy {
   readonly defaults?: Partial<MergeRequirements>;
   readonly byTaskType?: Readonly<Record<string, Partial<MergeRequirements>>>;
   readonly dependencyUpdates?: DependencyUpdatePolicy;
+  readonly codeRabbit?: CodeRabbitPolicy;
 }
+
+/**
+ * Policy for CodeRabbit reviews on slice PRs. When `rereview` is true, the
+ * legate's coderabbit-rereview handler comments `@coderabbitai review` once per
+ * head after the steward pushes past CodeRabbit's `CHANGES_REQUESTED` review, so
+ * CodeRabbit can re-review and approve instead of blocking the merge forever.
+ * When `initialReview` is true, the same handler also makes the *first* request:
+ * it comments `@coderabbitai review` once per head on a slice PR CodeRabbit has
+ * not reviewed yet (org-level auto-review is off, so nothing else asks).
+ * Neither changes a merge requirement. Both are off by default.
+ */
+export interface CodeRabbitPolicy {
+  readonly rereview?: boolean;
+  readonly initialReview?: boolean;
+}
+
+const CODERABBIT_POLICY_KEYS = ["rereview", "initialReview"] as const;
 
 /**
  * Policy for dependency-update PRs (Dependabot version bumps). These are not
@@ -184,10 +202,10 @@ export function validateMergePolicy(
     return { ok: false, error: "merge policy must be an object." };
   }
   for (const key of Object.keys(value)) {
-    if (key !== "defaults" && key !== "byTaskType" && key !== "dependencyUpdates") {
+    if (key !== "defaults" && key !== "byTaskType" && key !== "dependencyUpdates" && key !== "codeRabbit") {
       return {
         ok: false,
-        error: `merge policy has unknown key "${key}" (expected "defaults", "byTaskType" or "dependencyUpdates").`,
+        error: `merge policy has unknown key "${key}" (expected "defaults", "byTaskType", "dependencyUpdates" or "codeRabbit").`,
       };
     }
   }
@@ -195,7 +213,26 @@ export function validateMergePolicy(
     defaults?: Partial<MergeRequirements>;
     byTaskType?: Record<string, Partial<MergeRequirements>>;
     dependencyUpdates?: DependencyUpdatePolicy;
+    codeRabbit?: CodeRabbitPolicy;
   } = {};
+
+  if (value.codeRabbit !== undefined) {
+    const cr = value.codeRabbit;
+    if (!isPlainObject(cr)) {
+      return { ok: false, error: "merge policy codeRabbit must be an object." };
+    }
+    const out: { rereview?: boolean; initialReview?: boolean } = {};
+    for (const [key, raw] of Object.entries(cr)) {
+      if (!(CODERABBIT_POLICY_KEYS as readonly string[]).includes(key)) {
+        return { ok: false, error: `merge policy codeRabbit has unknown key "${key}" (expected "rereview" or "initialReview").` };
+      }
+      if (typeof raw !== "boolean") {
+        return { ok: false, error: `merge policy codeRabbit.${key} must be a boolean.` };
+      }
+      out[key as (typeof CODERABBIT_POLICY_KEYS)[number]] = raw;
+    }
+    policy.codeRabbit = out;
+  }
 
   if (value.dependencyUpdates !== undefined) {
     const du = value.dependencyUpdates;

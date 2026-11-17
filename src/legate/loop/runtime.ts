@@ -637,6 +637,9 @@ async function tickProfile(rt: ProfileRuntime, spawnBudget?: SpawnBudget): Promi
     babysit: babysitDeps,
     dispatch: dispatchDeps,
     dependencyMerge: dependencyMergeDeps,
+    coderabbitRereview: {
+      commentOnPr: (repoPath: string, prNumber: number, body: string) => commentOnPrGh(repoPath, prNumber, body),
+    },
     spawnBudget,
   });
 

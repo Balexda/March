@@ -4,6 +4,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { initOtel } from "./otel.js";
 import {
+  recordCodeRabbitRereview,
   recordDependencyUnblock,
   recordDwell,
   recordLoopHeartbeat,
@@ -93,6 +94,13 @@ describe("loop-metrics", () => {
     initOtel({ MARCH_OTEL: "1", MARCH_OTEL_ENDPOINT: "http://localhost:4318" });
     expect(() => recordDependencyUnblock("escalated", "smithy-loop")).not.toThrow();
     expect(() => recordDependencyUnblock("resolved")).not.toThrow();
+  });
+
+  it("recordCodeRabbitRereview is a no-op when disabled and counts when enabled", () => {
+    initOtel({});
+    expect(() => recordCodeRabbitRereview("requested", "march-loop")).not.toThrow();
+    initOtel({ MARCH_OTEL: "1", MARCH_OTEL_ENDPOINT: "http://localhost:4318" });
+    expect(() => recordCodeRabbitRereview("failed")).not.toThrow();
   });
 
   it("recordDwell is a no-op when disabled and folds (gauges + histogram) when enabled", () => {

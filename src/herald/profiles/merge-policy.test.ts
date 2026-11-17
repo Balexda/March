@@ -211,3 +211,24 @@ describe("parseMergePolicy", () => {
     expect(parseMergePolicy(json)).toEqual({ byTaskType: { cut: { approval: false } } });
   });
 });
+
+describe("codeRabbit", () => {
+  it("accepts and round-trips rereview", () => {
+    expect(validateMergePolicy({ codeRabbit: { rereview: true } })).toEqual({ ok: true, policy: { codeRabbit: { rereview: true } } });
+    expect(parseMergePolicy('{"codeRabbit":{"rereview":false}}')).toEqual({ codeRabbit: { rereview: false } });
+  });
+
+  it("accepts and round-trips initialReview alongside rereview", () => {
+    expect(validateMergePolicy({ codeRabbit: { rereview: true, initialReview: true } })).toEqual({
+      ok: true,
+      policy: { codeRabbit: { rereview: true, initialReview: true } },
+    });
+    expect(validateMergePolicy({ codeRabbit: { initialReview: "on" } }).ok).toBe(false);
+  });
+
+  it("rejects unknown keys and non-boolean values", () => {
+    expect(validateMergePolicy({ codeRabbit: { approve: true } }).ok).toBe(false);
+    expect(validateMergePolicy({ codeRabbit: { rereview: "yes" } }).ok).toBe(false);
+    expect(validateMergePolicy({ codeRabbit: true }).ok).toBe(false);
+  });
+});
