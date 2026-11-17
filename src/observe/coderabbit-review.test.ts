@@ -29,6 +29,7 @@ describe("summarizeCodeRabbit", () => {
       decision: "CHANGES_REQUESTED",
       decision_commit_sha: "b1661ea",
       decision_at: "2026-11-16T09:41:00Z",
+      last_review_commit_sha: "24db731",
       last_request_at: null,
     });
     const approved = summarizeCodeRabbit(
@@ -49,7 +50,17 @@ describe("summarizeCodeRabbit", () => {
         comment("thanks @coderabbitai review again later", "2026-11-16T13:00:00Z"),
       ],
     );
-    expect(standing).toEqual({ decision: null, decision_commit_sha: null, decision_at: null, last_request_at: "2026-11-16T11:00:00Z" });
+    expect(standing).toEqual({ decision: null, decision_commit_sha: null, decision_at: null, last_review_commit_sha: null, last_request_at: "2026-11-16T11:00:00Z" });
+  });
+
+  it("reports a COMMENTED-only history as reviewed, with no decision", () => {
+    expect(summarizeCodeRabbit([review("COMMENTED", "c0ffee", "2026-11-16T10:00:00Z")], [])).toEqual({
+      decision: null,
+      decision_commit_sha: null,
+      decision_at: null,
+      last_review_commit_sha: "c0ffee",
+      last_request_at: null,
+    });
   });
 });
 

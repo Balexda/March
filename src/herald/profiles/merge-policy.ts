@@ -73,11 +73,17 @@ export interface MergePolicy {
  * legate's coderabbit-rereview handler comments `@coderabbitai review` once per
  * head after the steward pushes past CodeRabbit's `CHANGES_REQUESTED` review, so
  * CodeRabbit can re-review and approve instead of blocking the merge forever.
- * It changes no merge requirement. Off by default.
+ * When `initialReview` is true, the same handler also makes the *first* request:
+ * it comments `@coderabbitai review` once per head on a slice PR CodeRabbit has
+ * not reviewed yet (org-level auto-review is off, so nothing else asks).
+ * Neither changes a merge requirement. Both are off by default.
  */
 export interface CodeRabbitPolicy {
   readonly rereview?: boolean;
+  readonly initialReview?: boolean;
 }
+
+const CODERABBIT_POLICY_KEYS = ["rereview", "initialReview"] as const;
 
 /**
  * Policy for dependency-update PRs (Dependabot version bumps). These are not
@@ -215,15 +221,17 @@ export function validateMergePolicy(
     if (!isPlainObject(cr)) {
       return { ok: false, error: "merge policy codeRabbit must be an object." };
     }
+    const out: { rereview?: boolean; initialReview?: boolean } = {};
     for (const [key, raw] of Object.entries(cr)) {
-      if (key !== "rereview") {
-        return { ok: false, error: `merge policy codeRabbit has unknown key "${key}" (expected "rereview").` };
+      if (!(CODERABBIT_POLICY_KEYS as readonly string[]).includes(key)) {
+        return { ok: false, error: `merge policy codeRabbit has unknown key "${key}" (expected "rereview" or "initialReview").` };
       }
       if (typeof raw !== "boolean") {
-        return { ok: false, error: "merge policy codeRabbit.rereview must be a boolean." };
+        return { ok: false, error: `merge policy codeRabbit.${key} must be a boolean.` };
       }
+      out[key as (typeof CODERABBIT_POLICY_KEYS)[number]] = raw;
     }
-    policy.codeRabbit = typeof cr.rereview === "boolean" ? { rereview: cr.rereview } : {};
+    policy.codeRabbit = out;
   }
 
   if (value.dependencyUpdates !== undefined) {

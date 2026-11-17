@@ -314,7 +314,8 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
     headRefOid: string | null;
     headCommittedAt: string | null;
     mergeStateStatus: string | null;
-    coderabbit: CodeRabbitStanding | null;
+    /** `undefined` when the query failed: unknown, never "CodeRabbit has not reviewed". */
+    coderabbit: CodeRabbitStanding | null | undefined;
   }> {
     const empty = {
       threads: [],
@@ -324,7 +325,7 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
       headRefOid: null,
       headCommittedAt: null,
       mergeStateStatus: null,
-      coderabbit: null,
+      coderabbit: undefined,
     };
     if (!owner) return empty;
     const [repoOwnerName, repoName] = owner.split("/");

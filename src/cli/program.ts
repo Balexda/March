@@ -1558,6 +1558,8 @@ mergePolicyCmd
   .option("--no-dependabot-auto-merge", "Stop auto-merging Dependabot PRs")
   .option("--coderabbit-rereview", "Comment `@coderabbitai review` after the steward pushes past a CodeRabbit changes-requested review (profile-wide; ignores --task-type)")
   .option("--no-coderabbit-rereview", "Stop requesting CodeRabbit re-reviews")
+  .option("--coderabbit-initial-review", "Comment `@coderabbitai review` on a slice PR CodeRabbit has not reviewed yet (profile-wide; ignores --task-type)")
+  .option("--no-coderabbit-initial-review", "Stop requesting first CodeRabbit reviews")
   .option("--json <json>", "Replace the entire policy from a JSON string")
   .option("--clear", "Clear the policy (all requirements enforced)")
   .action(async (profileName: string, opts: {
@@ -1567,6 +1569,7 @@ mergePolicyCmd
     botApproval?: boolean;
     dependabotAutoMerge?: boolean;
     coderabbitRereview?: boolean;
+    coderabbitInitialReview?: boolean;
     json?: string;
     clear?: boolean;
   }) => {
@@ -1615,10 +1618,11 @@ mergePolicyCmd
         if (
           Object.keys(override).length === 0 &&
           opts.dependabotAutoMerge === undefined &&
-          opts.coderabbitRereview === undefined
+          opts.coderabbitRereview === undefined &&
+          opts.coderabbitInitialReview === undefined
         ) {
           process.stderr.write(
-            "Nothing to set — pass --no-approval, --no-changes-requested, --bot-approval, --dependabot-auto-merge, --coderabbit-rereview, --json, or --clear.\n",
+            "Nothing to set — pass --no-approval, --no-changes-requested, --bot-approval, --dependabot-auto-merge, --coderabbit-rereview, --coderabbit-initial-review, --json, or --clear.\n",
           );
           process.exitCode = ERROR;
           return;
@@ -1627,13 +1631,16 @@ mergePolicyCmd
           defaults?: Record<string, boolean>;
           byTaskType?: Record<string, Record<string, boolean>>;
           dependencyUpdates?: { autoMerge?: boolean };
-          codeRabbit?: { rereview?: boolean };
+          codeRabbit?: { rereview?: boolean; initialReview?: boolean };
         };
         if (opts.dependabotAutoMerge !== undefined) {
           merged.dependencyUpdates = { ...(merged.dependencyUpdates ?? {}), autoMerge: opts.dependabotAutoMerge };
         }
         if (opts.coderabbitRereview !== undefined) {
           merged.codeRabbit = { ...(merged.codeRabbit ?? {}), rereview: opts.coderabbitRereview };
+        }
+        if (opts.coderabbitInitialReview !== undefined) {
+          merged.codeRabbit = { ...(merged.codeRabbit ?? {}), initialReview: opts.coderabbitInitialReview };
         }
         if (Object.keys(override).length === 0) {
           // Only profile-wide switches were passed; leave requirements alone.

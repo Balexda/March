@@ -410,6 +410,7 @@ describe("queryPrForBabysit", () => {
       decision: "CHANGES_REQUESTED",
       decision_commit_sha: "441db76",
       decision_at: "2026-11-16T09:37:00Z",
+      last_review_commit_sha: "441db76",
       last_request_at: "2026-11-16T09:29:00Z",
     });
     // A bot's CHANGES_REQUESTED is still not a human changes-requested gate.

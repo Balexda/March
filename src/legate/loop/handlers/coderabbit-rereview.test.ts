@@ -29,7 +29,7 @@ const openSlice = { stage: "pr-open" };
 
 describe("rereviewVerdict", () => {
   it("requests once the steward has pushed past CodeRabbit's changes-requested review", () => {
-    expect(rereviewVerdict(openSlice, fixedPr())).toEqual({ request: true });
+    expect(rereviewVerdict(openSlice, fixedPr())).toEqual({ request: true, kind: "rereview" });
   });
 
   it.each([
@@ -50,7 +50,38 @@ describe("rereviewVerdict", () => {
     const asked = fixedPr({ coderabbit: { ...fixedPr().coderabbit, last_request_at: "2026-11-16T15:30:00Z" } });
     expect(rereviewVerdict(openSlice, asked)).toEqual({ request: false, reason: "already-requested" });
     // A later push re-arms it.
-    expect(rereviewVerdict(openSlice, fixedPr({ head_sha: "e0e0e0e", head_committed_at: "2026-11-16T16:00:00Z", coderabbit: asked.coderabbit }))).toEqual({ request: true });
+    expect(rereviewVerdict(openSlice, fixedPr({ head_sha: "e0e0e0e", head_committed_at: "2026-11-16T16:00:00Z", coderabbit: asked.coderabbit }))).toEqual({ request: true, kind: "rereview" });
+  });
+});
+
+describe("rereviewVerdict: first review", () => {
+  const both = { rereview: true, initialReview: true };
+  const fresh = (overrides: Record<string, unknown> = {}) => fixedPr({ coderabbit: null, ...overrides });
+
+  it("asks for a first review when CodeRabbit never reviewed and was never asked", () => {
+    expect(rereviewVerdict(openSlice, fresh(), undefined, both)).toEqual({ request: true, kind: "initial" });
+    // Asked before an earlier head, never answered: the new head re-arms it.
+    const askedEarlier = { decision: null, decision_commit_sha: null, decision_at: null, last_review_commit_sha: null, last_request_at: "2026-11-16T09:00:00Z" };
+    expect(rereviewVerdict(openSlice, fresh({ coderabbit: askedEarlier }), undefined, both)).toEqual({ request: true, kind: "initial" });
+  });
+
+  it.each([
+    ["mode off", fresh(), { rereview: true, initialReview: false }, "not-changes-requested"],
+    ["already asked at this head", fresh({ coderabbit: { decision: null, decision_commit_sha: null, decision_at: null, last_review_commit_sha: null, last_request_at: "2026-11-16T15:30:00Z" } }), both, "already-requested"],
+    ["reviewed with COMMENTED only", fresh({ coderabbit: { decision: null, decision_commit_sha: null, decision_at: null, last_review_commit_sha: "abc", last_request_at: null } }), both, "not-changes-requested"],
+    ["approved", fresh({ coderabbit: { decision: "APPROVED", decision_commit_sha: "abc", decision_at: "x", last_review_commit_sha: "abc", last_request_at: null } }), both, "not-changes-requested"],
+    ["standing not sensed (older snapshot or failed query)", fixedPr({ coderabbit: undefined }), both, "not-sensed"],
+    ["threads owed", fresh({ needs_response_count: 1 }), both, "threads-owed"],
+    ["CI failing", fresh({ checks: "FAIL" }), both, "ci-failing"],
+  ])("holds off: %s", (_label, pr, modes, reason) => {
+    expect(rereviewVerdict(openSlice, pr, undefined, modes)).toEqual({ request: false, reason });
+  });
+
+  it("first-review mode alone does not re-review a changes-requested PR", () => {
+    expect(rereviewVerdict(openSlice, fixedPr(), undefined, { rereview: false, initialReview: true })).toEqual({
+      request: false,
+      reason: "not-changes-requested",
+    });
   });
 });
 
@@ -84,6 +115,17 @@ describe("apply", () => {
     // Same head on the next tick: no second comment.
     await apply(ctx, st, { commentOnPr });
     expect(commentOnPr).toHaveBeenCalledTimes(1);
+  });
+
+  it("makes the first request when only initialReview is on", async () => {
+    const commentOnPr = vi.fn().mockResolvedValue(undefined);
+    const st = state({ s: fixedPr({ coderabbit: null }), cr: fixedPr({ number: 9 }) }, { codeRabbit: { initialReview: true } });
+    const res = await apply(ctx, st, { commentOnPr });
+    expect(commentOnPr).toHaveBeenCalledTimes(1);
+    expect(commentOnPr).toHaveBeenCalledWith("/repo", 543, "@coderabbitai review");
+    expect(res.actions).toEqual([
+      expect.objectContaining({ action: REREVIEW_ACTION, sliceId: "s", detail: expect.stringContaining("first review of PR #543") }),
+    ]);
   });
 
   it("records a failed comment and does not retry it for the same head", async () => {
