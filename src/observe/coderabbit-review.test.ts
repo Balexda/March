@@ -2,7 +2,7 @@
  * @l0 @deterministic @ci
  */
 import { describe, expect, it } from "vitest";
-import { isCodeRabbitReviewRequest, summarizeCodeRabbit } from "./coderabbit-review.js";
+import { CODERABBIT_REVIEW_COMMAND, isCodeRabbitReviewRequest, reviewRequestBody, summarizeCodeRabbit } from "./coderabbit-review.js";
 
 const review = (state: string, oid: string, at: string, login = "coderabbitai") => ({
   state,
@@ -31,6 +31,7 @@ describe("summarizeCodeRabbit", () => {
       decision_at: "2026-11-16T09:41:00Z",
       last_review_commit_sha: "24db731",
       last_request_at: null,
+      last_request_sha: null,
     });
     const approved = summarizeCodeRabbit(
       [review("CHANGES_REQUESTED", "a", "2026-11-16T09:00:00Z"), review("APPROVED", "b", "2026-11-16T10:00:00Z")],
@@ -50,7 +51,20 @@ describe("summarizeCodeRabbit", () => {
         comment("thanks @coderabbitai review again later", "2026-11-16T13:00:00Z"),
       ],
     );
-    expect(standing).toEqual({ decision: null, decision_commit_sha: null, decision_at: null, last_review_commit_sha: null, last_request_at: "2026-11-16T11:00:00Z" });
+    expect(standing).toEqual({ decision: null, decision_commit_sha: null, decision_at: null, last_review_commit_sha: null, last_request_at: "2026-11-16T11:00:00Z", last_request_sha: null });
+  });
+
+  it("reports the head named by the newest marked request; unmarked requests name none", () => {
+    const standing = summarizeCodeRabbit(
+      [],
+      [
+        comment(reviewRequestBody("441db76000"), "2026-11-16T09:30:00Z"),
+        comment(reviewRequestBody("d8e383e000"), "2026-11-16T10:00:00Z"),
+        comment("@coderabbitai review", "2026-11-16T11:00:00Z"),
+      ],
+    );
+    expect(standing?.last_request_sha).toBe("d8e383e000");
+    expect(standing?.last_request_at).toBe("2026-11-16T11:00:00Z");
   });
 
   it("reports a COMMENTED-only history as reviewed, with no decision", () => {
@@ -60,6 +74,7 @@ describe("summarizeCodeRabbit", () => {
       decision_at: null,
       last_review_commit_sha: "c0ffee",
       last_request_at: null,
+      last_request_sha: null,
     });
   });
 });
@@ -71,5 +86,8 @@ describe("isCodeRabbitReviewRequest", () => {
     expect(isCodeRabbitReviewRequest("@coderabbitai reviewer")).toBe(false);
     expect(isCodeRabbitReviewRequest("@coderabbitai summary")).toBe(false);
     expect(isCodeRabbitReviewRequest(null)).toBe(false);
+    // The legate's own request: command first, marker after.
+    expect(reviewRequestBody("abc1234")).toBe(`${CODERABBIT_REVIEW_COMMAND}\n\n<!-- march-coderabbit-request:abc1234 -->`);
+    expect(isCodeRabbitReviewRequest(reviewRequestBody("abc1234"))).toBe(true);
   });
 });

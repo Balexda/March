@@ -1,6 +1,6 @@
 import type { HandlerContext, HandlerResult, LoopState } from "../state/types.js";
 import { emptyHandlerResult } from "../state/types.js";
-import { CODERABBIT_REVIEW_COMMAND } from "../../../observe/coderabbit-review.js";
+import { CODERABBIT_REVIEW_COMMAND, reviewRequestBody } from "../../../observe/coderabbit-review.js";
 
 /**
  * CodeRabbit review requests (opt-in: `mergePolicy.codeRabbit.rereview` and
@@ -25,9 +25,10 @@ import { CODERABBIT_REVIEW_COMMAND } from "../../../observe/coderabbit-review.js
  *     in any state;
  *   - no review thread still owes the steward a reply, the PR is not in conflict
  *     and CI is not failing — babysit dispatches those fixes first;
- *   - the current head has not been put forward yet: no `@coderabbitai review`
- *     comment newer than the head commit (durable, read from GitHub) and none
- *     this process already posted for that head (warm memo).
+ *   - the current head has not been put forward yet: the newest request the
+ *     legate posted on GitHub does not name it (durable: each request carries a
+ *     `march-coderabbit-request:<sha>` marker) and this process has not already
+ *     posted for it (warm memo).
  *
  * The natural bound is one request per pushed head. If CodeRabbit asks for more
  * changes, its new review is on the head, so nothing fires until the steward
@@ -86,14 +87,7 @@ export function rereviewVerdict(slice: any, pr: any, memoHead?: string, modes: R
   if (Number(pr.needs_response_count ?? 0) > 0) return { request: false, reason: "threads-owed" };
   if (pr.mergeable === "CONFLICTING" || pr.merge_state_status === "dirty") return { request: false, reason: "conflicted" };
   if (pr.checks === "FAIL") return { request: false, reason: "ci-failing" };
-  if (memoHead === head) return { request: false, reason: "already-requested" };
-  if (
-    typeof cr?.last_request_at === "string" &&
-    typeof pr.head_committed_at === "string" &&
-    cr.last_request_at >= pr.head_committed_at
-  ) {
-    return { request: false, reason: "already-requested" };
-  }
+  if (memoHead === head || cr?.last_request_sha === head) return { request: false, reason: "already-requested" };
   return { request: true, kind };
 }
 
@@ -123,7 +117,7 @@ export async function apply(
     memo[String(number)] = head;
     res.mutated = true;
     try {
-      await deps.commentOnPr(repoPath, number, CODERABBIT_REVIEW_COMMAND);
+      await deps.commentOnPr(repoPath, number, reviewRequestBody(head));
       res.actions.push({
         action: REREVIEW_ACTION,
         sliceId,

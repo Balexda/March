@@ -379,7 +379,7 @@ describe("queryPrForBabysit", () => {
     expect(pr.conversation_comments[0].body_preview).toHaveLength(280);
   });
 
-  it("reports the head commit's date and CodeRabbit's standing for the re-review request", async () => {
+  it("reports CodeRabbit's standing for the re-review request", async () => {
     routeExec((_cmd, args) => {
       if (args.includes("graphql")) {
         return JSON.stringify({
@@ -388,7 +388,6 @@ describe("queryPrForBabysit", () => {
               pullRequest: {
                 headRefOid: "d8e383e",
                 mergeStateStatus: "BLOCKED",
-                commits: { nodes: [{ commit: { committedDate: "2026-11-16T15:22:00Z" } }] },
                 reviews: {
                   nodes: [
                     { state: "CHANGES_REQUESTED", submittedAt: "2026-11-16T09:37:00Z", commit: { oid: "441db76" }, author: { login: "coderabbitai", __typename: "Bot" } },
@@ -405,13 +404,13 @@ describe("queryPrForBabysit", () => {
     });
     const io = createSenseIo({ meta: meta(), castra: fakeCastra() });
     const pr = await io.queryPrForBabysit({ pr: { number: 5 } }, { repo: { path: "/repo", owner_with_name: "octo/march" } });
-    expect(pr.head_committed_at).toBe("2026-11-16T15:22:00Z");
     expect(pr.coderabbit).toEqual({
       decision: "CHANGES_REQUESTED",
       decision_commit_sha: "441db76",
       decision_at: "2026-11-16T09:37:00Z",
       last_review_commit_sha: "441db76",
       last_request_at: "2026-11-16T09:29:00Z",
+      last_request_sha: null,
     });
     // A bot's CHANGES_REQUESTED is still not a human changes-requested gate.
     expect(pr.changes_requested_count).toBe(0);

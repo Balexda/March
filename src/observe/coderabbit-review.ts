@@ -16,9 +16,12 @@
  *   (thread replies included) is on, or `null` when it has never reviewed the
  *   PR. The first-review request fires only while this is `null`.
  * - `last_request_at`: when the newest conversation comment opening with
- *   `@coderabbitai review` (or `full review`) was posted, by anyone. Compared
- *   with the head commit's date, it tells the legate the current head was
- *   already put forward, which keeps the request durable across a legate restart.
+ *   `@coderabbitai review` (or `full review`) was posted, by anyone.
+ * - `last_request_sha`: the head SHA named by the newest request the legate
+ *   posted. Its request carries a `march-coderabbit-request:<sha>` marker, so
+ *   "this head was already put forward" survives a legate restart without
+ *   guessing from timestamps (a commit's date says nothing about when it was
+ *   pushed). A human's unmarked request names no head and is not counted.
  *
  * Pure, so it is unit-testable without `gh`.
  */
@@ -29,6 +32,16 @@ export const CODERABBIT_LOGINS: ReadonlySet<string> = new Set(["coderabbitai", "
 /** The review command the legate posts, and the forms it recognizes as already posted. */
 export const CODERABBIT_REVIEW_COMMAND = "@coderabbitai review";
 const REVIEW_REQUEST_RE = /^@coderabbitai\s+(?:full\s+)?review\b/i;
+const REQUEST_MARKER_RE = /<!--\s*march-coderabbit-request:([0-9a-f]{7,40})\s*-->/i;
+
+/**
+ * The comment the legate posts: the command on the first line (so CodeRabbit
+ * and the review-bot comment filter both recognize it), then a marker naming
+ * the head it was posted for.
+ */
+export function reviewRequestBody(headSha: string): string {
+  return `${CODERABBIT_REVIEW_COMMAND}\n\n<!-- march-coderabbit-request:${headSha} -->`;
+}
 
 export interface CodeRabbitStanding {
   decision: "APPROVED" | "CHANGES_REQUESTED" | "DISMISSED" | null;
@@ -36,6 +49,7 @@ export interface CodeRabbitStanding {
   decision_at: string | null;
   last_review_commit_sha: string | null;
   last_request_at: string | null;
+  last_request_sha: string | null;
 }
 
 const DECISIVE = new Set(["APPROVED", "CHANGES_REQUESTED", "DISMISSED"]);
@@ -61,9 +75,12 @@ export function summarizeCodeRabbit(reviewNodes: unknown, commentNodes: unknown)
     if (!decisive || String(r?.submittedAt) >= String(decisive?.submittedAt)) decisive = r;
   }
   let lastRequestAt: string | null = null;
+  let lastMarked: { at: string; sha: string } | null = null;
   for (const c of comments) {
     if (!isCodeRabbitReviewRequest(c?.body) || typeof c?.createdAt !== "string") continue;
     if (lastRequestAt === null || c.createdAt > lastRequestAt) lastRequestAt = c.createdAt;
+    const sha = REQUEST_MARKER_RE.exec(c.body)?.[1];
+    if (sha && (!lastMarked || c.createdAt > lastMarked.at)) lastMarked = { at: c.createdAt, sha };
   }
   if (!latest && lastRequestAt === null) return null;
   return {
@@ -72,5 +89,6 @@ export function summarizeCodeRabbit(reviewNodes: unknown, commentNodes: unknown)
     decision_at: typeof decisive?.submittedAt === "string" ? decisive.submittedAt : null,
     last_review_commit_sha: typeof latest?.commit?.oid === "string" ? latest.commit.oid : null,
     last_request_at: lastRequestAt,
+    last_request_sha: lastMarked?.sha ?? null,
   };
 }

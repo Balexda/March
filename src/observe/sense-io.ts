@@ -312,7 +312,6 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
     comments: any[];
     codexReview: CodexReviewState | null;
     headRefOid: string | null;
-    headCommittedAt: string | null;
     mergeStateStatus: string | null;
     /** `undefined` when the query failed: unknown, never "CodeRabbit has not reviewed". */
     coderabbit: CodeRabbitStanding | null | undefined;
@@ -323,7 +322,6 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
       comments: [],
       codexReview: null,
       headRefOid: null,
-      headCommittedAt: null,
       mergeStateStatus: null,
       coderabbit: undefined,
     };
@@ -349,7 +347,6 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
     pullRequest(number: $pr) {
       headRefOid
       mergeStateStatus
-      commits(last: 1) { nodes { commit { committedDate } } }
       reviews(first: 100) {
         nodes {
           state
@@ -481,7 +478,6 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
       comments,
       codexReview,
       headRefOid: pr?.headRefOid || null,
-      headCommittedAt: pr?.commits?.nodes?.[0]?.commit?.committedDate || null,
       mergeStateStatus: pr?.mergeStateStatus || null,
       // Read from the unfiltered comment nodes: a `@coderabbitai review` request is
       // the evidence that the head was already put forward.
@@ -534,9 +530,8 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
       human_approval_count: reviewSummary.human_approval_count,
       changes_requested_count: reviewSummary.changes_requested_count,
       bot_approval_count: reviewSummary.bot_approval_count,
-      // When the head commit was made, and CodeRabbit's review standing: what the
-      // legate's opt-in CodeRabbit re-review request reads. See coderabbit-review.ts.
-      head_committed_at: graphql.headCommittedAt,
+      // CodeRabbit's review standing: what the legate's opt-in CodeRabbit review
+      // request reads. See coderabbit-review.ts.
       coderabbit: graphql.coderabbit,
     };
   }

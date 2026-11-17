@@ -2,6 +2,7 @@
  * @l0 @deterministic @ci
  */
 import { describe, expect, it, vi } from "vitest";
+import { reviewRequestBody } from "../../../observe/coderabbit-review.js";
 import { apply, REREVIEW_ACTION, REREVIEW_FAILED_ACTION, rereviewVerdict } from "./coderabbit-rereview.js";
 
 /** A PR the steward fixed after CodeRabbit asked for changes on an earlier head. */
@@ -11,7 +12,6 @@ function fixedPr(overrides: Record<string, unknown> = {}): any {
     url: "https://github.com/o/r/pull/543",
     state: "OPEN",
     head_sha: "d8e383e000",
-    head_committed_at: "2026-11-16T15:22:00Z",
     mergeable: "MERGEABLE",
     merge_state_status: "blocked",
     checks: "PASS",
@@ -21,6 +21,7 @@ function fixedPr(overrides: Record<string, unknown> = {}): any {
       decision_commit_sha: "441db76000",
       decision_at: "2026-11-16T09:37:00Z",
       last_request_at: "2026-11-16T09:29:00Z",
+      last_request_sha: "441db76000",
     },
     ...overrides,
   };
@@ -45,12 +46,18 @@ describe("rereviewVerdict", () => {
     expect(rereviewVerdict(slice, fixedPr(overrides))).toEqual({ request: false, reason });
   });
 
-  it("does not ask twice for one head: warm memo, or a request on GitHub newer than the head", () => {
+  it("does not ask twice for one head: warm memo, or a marked request on GitHub naming the head", () => {
     expect(rereviewVerdict(openSlice, fixedPr(), "d8e383e000")).toEqual({ request: false, reason: "already-requested" });
-    const asked = fixedPr({ coderabbit: { ...fixedPr().coderabbit, last_request_at: "2026-11-16T15:30:00Z" } });
+    const asked = fixedPr({ coderabbit: { ...fixedPr().coderabbit, last_request_sha: "d8e383e000" } });
     expect(rereviewVerdict(openSlice, asked)).toEqual({ request: false, reason: "already-requested" });
     // A later push re-arms it.
-    expect(rereviewVerdict(openSlice, fixedPr({ head_sha: "e0e0e0e", head_committed_at: "2026-11-16T16:00:00Z", coderabbit: asked.coderabbit }))).toEqual({ request: true, kind: "rereview" });
+    expect(rereviewVerdict(openSlice, fixedPr({ head_sha: "e0e0e0e", coderabbit: asked.coderabbit }))).toEqual({ request: true, kind: "rereview" });
+  });
+
+  it("is not fooled by commit time: a request posted for the old head never covers a later-pushed head", () => {
+    // Fix committed before the request but pushed after it (Codex's P2 on #586).
+    const pr = fixedPr({ coderabbit: { ...fixedPr().coderabbit, last_request_at: "2026-11-16T15:30:00Z", last_request_sha: "441db76000" } });
+    expect(rereviewVerdict(openSlice, pr)).toEqual({ request: true, kind: "rereview" });
   });
 });
 
@@ -61,13 +68,13 @@ describe("rereviewVerdict: first review", () => {
   it("asks for a first review when CodeRabbit never reviewed and was never asked", () => {
     expect(rereviewVerdict(openSlice, fresh(), undefined, both)).toEqual({ request: true, kind: "initial" });
     // Asked before an earlier head, never answered: the new head re-arms it.
-    const askedEarlier = { decision: null, decision_commit_sha: null, decision_at: null, last_review_commit_sha: null, last_request_at: "2026-11-16T09:00:00Z" };
+    const askedEarlier = { decision: null, decision_commit_sha: null, decision_at: null, last_review_commit_sha: null, last_request_at: "2026-11-16T09:00:00Z", last_request_sha: "0ld0000" };
     expect(rereviewVerdict(openSlice, fresh({ coderabbit: askedEarlier }), undefined, both)).toEqual({ request: true, kind: "initial" });
   });
 
   it.each([
     ["mode off", fresh(), { rereview: true, initialReview: false }, "not-changes-requested"],
-    ["already asked at this head", fresh({ coderabbit: { decision: null, decision_commit_sha: null, decision_at: null, last_review_commit_sha: null, last_request_at: "2026-11-16T15:30:00Z" } }), both, "already-requested"],
+    ["already asked at this head", fresh({ coderabbit: { decision: null, decision_commit_sha: null, decision_at: null, last_review_commit_sha: null, last_request_at: "2026-11-16T15:30:00Z", last_request_sha: "d8e383e000" } }), both, "already-requested"],
     ["reviewed with COMMENTED only", fresh({ coderabbit: { decision: null, decision_commit_sha: null, decision_at: null, last_review_commit_sha: "abc", last_request_at: null } }), both, "not-changes-requested"],
     ["approved", fresh({ coderabbit: { decision: "APPROVED", decision_commit_sha: "abc", decision_at: "x", last_review_commit_sha: "abc", last_request_at: null } }), both, "not-changes-requested"],
     ["standing not sensed (older snapshot or failed query)", fixedPr({ coderabbit: undefined }), both, "not-sensed"],
@@ -110,7 +117,7 @@ describe("apply", () => {
     const st = state({ s: fixedPr(), done: fixedPr({ number: 7, head_sha: "441db76000" }) });
     const res = await apply(ctx, st, { commentOnPr });
     expect(commentOnPr).toHaveBeenCalledTimes(1);
-    expect(commentOnPr).toHaveBeenCalledWith("/repo", 543, "@coderabbitai review");
+    expect(commentOnPr).toHaveBeenCalledWith("/repo", 543, reviewRequestBody("d8e383e000"));
     expect(res.actions).toEqual([expect.objectContaining({ action: REREVIEW_ACTION, sliceId: "s", pr: { number: 543, url: fixedPr().url } })]);
     // Same head on the next tick: no second comment.
     await apply(ctx, st, { commentOnPr });
@@ -122,7 +129,7 @@ describe("apply", () => {
     const st = state({ s: fixedPr({ coderabbit: null }), cr: fixedPr({ number: 9 }) }, { codeRabbit: { initialReview: true } });
     const res = await apply(ctx, st, { commentOnPr });
     expect(commentOnPr).toHaveBeenCalledTimes(1);
-    expect(commentOnPr).toHaveBeenCalledWith("/repo", 543, "@coderabbitai review");
+    expect(commentOnPr).toHaveBeenCalledWith("/repo", 543, reviewRequestBody("d8e383e000"));
     expect(res.actions).toEqual([
       expect.objectContaining({ action: REREVIEW_ACTION, sliceId: "s", detail: expect.stringContaining("first review of PR #543") }),
     ]);
