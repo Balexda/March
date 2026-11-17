@@ -65,7 +65,7 @@ stewards retain their preexisting host privileges; this boundary cannot revoke t
 - `identity` and `commit_identity` are derived from GitHub (`<slug>[bot]` and its numeric user id); configuration cannot override them, and Tessera never substitutes another identity.
 - Every GitHub call is bounded by a finite timeout, and the app assertion lives at most 10 minutes.
 - Accepted tokens expire in the future and no more than one hour (plus a 60-second clock-skew allowance) after issuance.
-- Error messages are fixed per code. Tokens, assertions, private keys, bearer keys and upstream response bodies never appear in responses, `/status`, logs or spans.
+- Error messages are fixed per code. A token appears only in the body of a successful, authorized `POST /v1/github/token` response; it never appears in error responses, `/status`, logs or spans. Assertions, private keys, bearer keys and upstream response bodies never appear in any response, `/status`, logs or spans.
 - Each token request emits one `tessera.issue` span, marked errored on any non-2xx response; a failed startup identity discovery emits an errored `tessera.discovery` span.
 
 ## Error Modes

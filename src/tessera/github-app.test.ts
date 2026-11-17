@@ -1,4 +1,4 @@
-/** @l1 @deterministic @ci */
+/** @l0 @deterministic @ci */
 import { generateKeyPairSync, createVerify } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { GithubAppProvider } from "./github-app.js";
