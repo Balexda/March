@@ -94,7 +94,10 @@ Explicit settings override `MARCH_TESSERA_URL` and
 `MARCH_TESSERA_CLIENT_KEY`; both are trimmed before validation and use, and
 there is no implicit endpoint or credential.
 Missing or invalid configuration produces `TesseraClientError` with code
-`unconfigured`. URL credentials, query strings and fragments are rejected.
+`unconfigured`. URL credentials, query strings and fragments are rejected. Because the client key
+is a bearer credential, plain `http:` is accepted only for loopback hosts,
+single-label compose service names (for example `march-tessera`) and private IPv4
+literals (10/8, 172.16/12, 192.168/16); any other host must use `https:`.
 
 - `issueGitHubToken({ identity, repo?, access, refresh?, sliceId? })` returns
   `{ token, expiresAt, identity, commitIdentity, source }`. App requests require
@@ -124,14 +127,16 @@ user tokens and ambient fallbacks are never cached. Returned values are copies.
 
 Fallback is a temporary, explicit migration mechanism: only after issuance
 fails, only for `app`, and only when `MARCH_TESSERA_GH_TOKEN_FALLBACK=1`, the
-client reads `GH_TOKEN`, then `GITHUB_TOKEN` (trimmed; a value containing CR/LF
-is treated as absent). Without an available token the
+client reads `GH_TOKEN`, then `GITHUB_TOKEN`. Each is trimmed and checked on its
+own, and a value containing CR/LF is treated as absent, so an invalid `GH_TOKEN`
+does not block a valid `GITHUB_TOKEN`. Without an available token the
 original typed error survives. A fallback has `source: env-fallback`, null
 expiry and commit identity, and `identity: unknown` because ambient tokens
 have no verified login. It never substitutes a Tessera user identity.
 
 Every fallback warns through the pino service logger (stderr and
-`$HOME/.march/logs/tessera-client.jsonl`) and increments
+`$HOME/.march/logs/tessera-client.jsonl`) (if the durable log cannot be opened, the
+warning is written to stderr only and the fallback still succeeds) and increments
 `march.tessera.client.fallbacks` when OTel is enabled. The bounded `service`
 label is derived from `MARCH_OTEL_SERVICE_NAME`, accepting March's six consumers
 (`herald`, `brood`, `hatchery`, `legate`, `statio`, `steward`, with optional

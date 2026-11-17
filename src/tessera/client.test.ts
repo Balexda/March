@@ -5,7 +5,8 @@ import { TesseraClient, TesseraClientError, getGitHubToken } from "./client.js";
 import { recordTesseraFallback, tesseraConsumerService } from "../observability/tessera-client-metrics.js";
 
 const warn = vi.fn();
-vi.mock("../observability/logger.js", () => ({ createServiceLogger: () => ({ warn }) }));
+let loggerThrows = false;
+vi.mock("../observability/logger.js", () => ({ createServiceLogger: () => { if (loggerThrows) throw Error("EROFS SECRET"); return { warn }; } }));
 vi.mock("../observability/tessera-client-metrics.js", async importOriginal => ({
   ...await importOriginal<typeof import("../observability/tessera-client-metrics.js")>(), recordTesseraFallback: vi.fn(),
 }));
@@ -18,7 +19,7 @@ function setup(body: unknown = wire(), extraEnv: NodeJS.ProcessEnv = {}) {
   const client = new TesseraClient({ env: { ...env(), ...extraEnv }, fetchImpl });
   return { client, fetchImpl };
 }
-afterEach(() => { vi.useRealTimers(); vi.unstubAllEnvs(); vi.unstubAllGlobals(); vi.clearAllMocks(); });
+afterEach(() => { loggerThrows = false; vi.useRealTimers(); vi.unstubAllEnvs(); vi.unstubAllGlobals(); vi.clearAllMocks(); });
 describe("Tessera client", () => {
   it("obtains an entitlement from a local fake Tessera over HTTP", async () => {
     const seen: { url?: string; auth?: string; body?: unknown } = {};
@@ -68,6 +69,18 @@ describe("Tessera client", () => {
     expect((fetchImpl.mock.calls[0][1]!.headers as Record<string, string>).authorization).toBe("Bearer KEY");
     await expect(new TesseraClient({ env: { MARCH_TESSERA_URL: "http://tessera", MARCH_TESSERA_CLIENT_KEY: "K\nEY" }, fetchImpl })
       .issueGitHubToken(req)).rejects.toMatchObject({ code: "unconfigured" });
+  });
+  it.each([
+    ["http://localhost:9477", true], ["http://127.0.0.1:9477", true], ["http://[::1]:9477", true],
+    ["http://march-tessera:9477", true], ["http://10.1.2.3", true], ["http://172.20.0.5", true], ["http://192.168.1.9", true],
+    ["https://tessera.example.com", true], ["http://tessera.example.com", false], ["http://8.8.8.8", false],
+    ["http://172.32.0.1", false], ["http://[2001:db8::1]", false],
+  ])("only sends the bearer key over plain http to local or private hosts: %s", async (baseUrl, allowed) => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(Response.json(wire()));
+    const issued = new TesseraClient({ baseUrl, clientKey: "KEY", env: {}, fetchImpl }).issueGitHubToken(req);
+    if (allowed) await expect(issued).resolves.toMatchObject({ source: "tessera" });
+    else await expect(issued).rejects.toMatchObject({ code: "unconfigured" });
+    expect(fetchImpl).toHaveBeenCalledTimes(allowed ? 1 : 0);
   });
   it("preserves protocol codes and status without exposing server secrets", async () => {
     const { client, fetchImpl } = setup();
@@ -187,6 +200,23 @@ describe("Tessera client", () => {
     const bad = setup({}, { MARCH_TESSERA_GH_TOKEN_FALLBACK: "1", GH_TOKEN: "ENV\r\nX-Injected: 1" });
     bad.fetchImpl.mockRejectedValue(Error("offline"));
     await expect(bad.client.issueGitHubToken(req)).rejects.toMatchObject({ code: "unreachable" });
+  });
+  it("skips a CR/LF-bearing GH_TOKEN and recovers through a valid GITHUB_TOKEN", async () => {
+    const { client, fetchImpl } = setup({}, { MARCH_TESSERA_GH_TOKEN_FALLBACK: "1", GH_TOKEN: "BAD\r\nX: 1", GITHUB_TOKEN: "ENV_SECRET" });
+    fetchImpl.mockRejectedValue(Error("offline"));
+    expect((await client.issueGitHubToken(req)).token).toBe("ENV_SECRET");
+  });
+  it("keeps the fallback usable and warns on stderr when the durable log cannot be opened", async () => {
+    loggerThrows = true;
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const { client, fetchImpl } = setup({}, { MARCH_TESSERA_GH_TOKEN_FALLBACK: "1", GH_TOKEN: "ENV_SECRET", MARCH_OTEL_SERVICE_NAME: "brood" });
+    fetchImpl.mockRejectedValue(Error("offline"));
+    expect(await client.issueGitHubToken(req)).toMatchObject({ token: "ENV_SECRET", source: "env-fallback" });
+    const written = stderr.mock.calls.map(call => String(call[0])).join("");
+    stderr.mockRestore();
+    expect(written).toContain("tessera.client.fallback");
+    expect(written).not.toContain("SECRET");
+    expect(recordTesseraFallback).toHaveBeenCalledWith("brood");
   });
   it("preserves failure when fallback is enabled but absent", async () => {
     const { client, fetchImpl } = setup({}, { MARCH_TESSERA_GH_TOKEN_FALLBACK: "1" });
