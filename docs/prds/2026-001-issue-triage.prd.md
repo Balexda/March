@@ -7,21 +7,21 @@
 
 The March repository has 63 open issues and the smithycli repository has 33, and the maintainer has no reliable way to tell which of them have been looked at or what each one needs. The only labels in use today are `bug`, `enhancement`, and `area:*`. Many recent issues carry no label at all. Issues come from three places: the operator, March's own agents filing automated reports, and outside contributors. Their quality, scope, and readiness vary a lot. Some issues are one-line patches. Some are feature-sized ideas that need an RFC. Some are too vague to act on, and some should simply be closed. Nothing in the tracker records any of these distinctions. So every time the maintainer opens the backlog, they triage it again from scratch, across every profile March runs.
 
-The second problem is what happens after an issue is picked up. March now runs Smithy planning artifacts (RFC → feature map → spec → tasks) through to merged PRs on its own. Agent stewards take each artifact and turn it into code. Issues are not an input to that pipeline. Nothing connects "an issue exists" to "a Smithy artifact at the right scale exists." So when an issue does get worked, the maintainer usually writes a prompt for it by hand. That skips the planning stages that March is built to automate. The maintainer's own analysis found that this direct-prompt path produces lower-quality code and needs rework more often than the same work done through Smithy. That finding is the reason for this PRD. It is an observation, not a measured baseline: no figures yet show how large the quality gap is or how much rework it causes, and that evidence is recorded as debt. The result is that the backlog grows, and the work that does get done takes the path that needs more rework.
+The second problem is what happens after an issue is picked up. March now runs Smithy planning artifacts (RFC → feature map → spec → tasks) through to merged PRs on its own. Agent stewards take each artifact and turn it into code. Issues are not an input to that pipeline. Nothing connects "an issue exists" to "a Smithy artifact at the right scale exists." So when an issue does get worked, the maintainer usually writes a prompt for it by hand. That skips the planning stages that March is built to automate. The maintainer's own analysis found that this direct-prompt path produces lower-quality code and needs rework more often than the same work done through Smithy. That finding is the reason for this PRD. The supporting analysis is in Balexda/March-Private#2. The result is that the backlog grows, and the work that does get done takes the path that needs more rework.
 
 We want every open issue to show its triage state at a glance. Each one should say whether it has been reviewed, what the outcome was, and where the work should start: routed to a Smithy entry point at the right scale, handled as a small direct patch, sent back to its author for better definition, flagged as contested, or closed. With that in place, issues flow into the same planning pipeline March already runs, and authors can see why their issue went where it did.
 
 ## Proposed Solution
 <!-- audience: stakeholder; mode: explanation; length: 1-2 paragraphs; diagram: optional; examples: discouraged -->
 
-Every open issue, in every repository March manages, gets a triage verdict that is recorded and visible on the issue. An LLM reads the issue and estimates how big the request is. It may also add repository context to flesh the issue out. It then recommends one outcome from a fixed vocabulary. The **build** outcomes say where the Smithy pipeline should start: `spark` for an idea that needs a one-page PRD, `ignite` for something RFC-sized, `render` for a feature map, `mark` for a single spec, and `strike` for a small patch done directly. The **non-build** outcomes are *needs definition*, *controversial*, and *close*:
+Every open issue, in every repository March manages, gets a triage verdict that is recorded and visible on the issue. An LLM reads the issue and estimates how big the request is. It may also add repository context to flesh the issue out. It then recommends one outcome from a fixed vocabulary, with a confidence of high, medium, or low. The **build** outcomes say where the Smithy pipeline should start: `spark` for an idea that needs a one-page PRD, `ignite` for something RFC-sized, `render` for a feature map, `mark` for a single spec, and `strike` for a small patch done directly. The **non-build** outcomes are *needs definition*, *controversial*, and *close*:
 - *Needs definition*: the issue is low quality, gets a grade and an explanation, and goes back to its author to improve and resubmit.
 - *Controversial*: an operator has to decide.
 - *Close*: the issue is a duplicate, obsolete, or won't be done.
 
 `cut` and `forge` are never entry points, because they need an upstream artifact first.
 
-Labels show the triage state next to the existing `bug`/`enhancement`/`area:*` labels: whether the issue is untriaged or triaged, the outcome, and the recommended entry point. Any added context goes beside the issue as a triage note and never rewrites the author's text. Once a buildable issue has a verdict, it becomes the starting artifact for March's existing continuous pipeline, and the maintainer stops writing hand prompts for it. An issue that is edited or resubmitted goes back into triage, so a verdict is never permanent.
+Labels show the triage state next to the existing `bug`/`enhancement`/`area:*` labels: whether the issue is untriaged or triaged, the recommended outcome or entry point, and the confidence. Triage only recommends. The operator decides whether to act on a verdict, and nothing is dispatched or closed automatically. Any added context goes beside the issue as a triage note and never rewrites the author's text. Once the operator accepts a build verdict, the issue becomes the starting artifact for March's existing continuous pipeline, and the maintainer stops writing hand prompts for it. An issue that is edited or resubmitted goes back into triage, so a verdict is never permanent.
 
 ## Target Users
 <!-- audience: stakeholder; mode: reference; length: tables only; diagram: optional; examples: discouraged -->
@@ -35,8 +35,8 @@ Labels show the triage state next to the existing `bug`/`enhancement`/`area:*` l
 
 - **No untriaged backlog.** The number of open issues with no triage label falls to near zero across march and smithycli and stays there. New issues get a verdict within a bounded time of being opened.
 - **Work moves into Smithy.** A growing share of merged work starts from a Smithy artifact instead of a hand-written prompt.
-- **Less rework.** Work routed through triage needs fewer follow-up fix PRs and has fewer issues reopened than the direct-prompt baseline.
-- **Trustworthy judgment.** The operator overrides the recommended entry point or outcome rarely, and less often over time.
+- **Less rework.** Work routed through triage needs fewer follow-up fix PRs and has fewer issues reopened than the direct-prompt baseline in Balexda/March-Private#2.
+- **Trustworthy judgment.** The operator overrides the recommended entry point or outcome rarely, and less often over time. High-confidence verdicts in particular should be accepted unchanged.
 
 ## Alternatives / Build-vs-Buy
 <!-- audience: reviewer; mode: explanation; length: 3-6 paragraphs; diagram: optional; examples: recommended -->
@@ -60,7 +60,7 @@ Buy the substrate, build the judgment. Don't build a new triage service from scr
 ## Assumptions
 <!-- audience: reviewer; mode: reference; length: tables only; diagram: optional; examples: discouraged -->
 
-- [Critical Assumption] **Two problems.** The issue backlog has no triage state at all. And issues that do get worked usually skip Smithy and go straight to a hand-written prompt. The quality finding is the motivating observation, not a measured baseline.
+- [Critical Assumption] **Two problems.** The issue backlog has no triage state at all. And issues that do get worked usually skip Smithy and go straight to a hand-written prompt. The quality finding is backed by Balexda/March-Private#2.
 - [Critical Assumption] **Who it's for.** The main user is the single maintainer/operator running March across multiple profiles. Issue authors read the verdicts: the operator, `automated` agent filers, and outside contributors.
 - [Critical Assumption] **What triage does.** Every open issue gets a recorded, visible verdict. The verdict names either a Smithy entry point or a non-build outcome, and an LLM recommends it based on the estimated size of the request.
 - [Critical Assumption] **The outcome vocabulary** is:
@@ -84,36 +84,35 @@ Buy the substrate, build the judgment. Don't build a new triage service from scr
 ## Specification Debt
 <!-- audience: reviewer; mode: reference; length: index table + 1-3 sentences per item; diagram: optional; examples: discouraged -->
 
-| ID | Title | Source Category | Impact | Confidence | Origin |
-|----|-------|-----------------|--------|------------|--------|
-| SD-001 | auto-act-vs-approve-triage-verdicts | Solution Intent | Critical | Medium | local |
-| SD-002 | triage-judgment-open-vs-private | Scope Edges | High | Low | local |
-| SD-003 | quality-gap-evidence-missing | Problem Definition | Medium | Medium | local |
-| SD-004 | unverified-alternatives | Off-the-Shelf Alternatives | Low | Medium | local |
+_None — no specification debt was recorded._
 
-### SD-001 — auto-act-vs-approve-triage-verdicts
+### Resolved
 
-How far should a triage verdict act without the operator? This is an unresolved choice between three options:
-- Recommend only, with the operator approving every routing and every closure.
-- Dispatch build verdicts automatically, but require approval to close or downgrade an issue.
-- Act on every verdict automatically and escalate only controversial ones.
+#### SD-001 — auto-act-vs-approve-triage-verdicts
 
-The operating philosophy leans toward autonomy. A wrong closure or a wrong entry point still has a real cost.
+**Question:** How far should a triage verdict act on its own, without the operator?
 
-### SD-002 — triage-judgment-open-vs-private
+**Answer:** It only recommends. Triage applies a recommendation label and a confidence label (high, medium, or low) to the issue and takes no further action. The operator decides whether to act, and nothing is dispatched or closed automatically. Decided by the operator on 2026-11-17.
 
-`docs/open-core-boundary.md` puts agentic judgment in the private layer and keeps a baseline legate-agent open. Two options are unresolved. In the first, the label vocabulary and a baseline triage recommender ship in the open engine. In the second, only the label and state contract is open and the LLM triage judgment is private. The choice also decides whether a public Actions-hosted runner is acceptable.
+#### SD-002 — triage-judgment-open-vs-private
 
-### SD-003 — quality-gap-evidence-missing
+**Question:** Should the triage judgment ship in the open engine or in the private layer?
 
-The claim that direct prompting produces lower-quality code and more rework than the Smithy path has no figures behind it. There is no rework rate, no review-thread count, and no comparison of the two paths. Without that baseline, the "Less rework" success signal can't be measured. It is undecided whether to capture the baseline before triage ships or to accept the signal as qualitative.
+**Answer:** It ships in the open engine. The open-core boundary does put agentic judgment in the private layer. However, Smithy itself is public and there is no plugin mechanism yet to hold private judgment, so the triage rubric, the label vocabulary, and the recommender all ship in this repo. Revisit this once plugins exist. Decided by the operator on 2026-11-17.
 
-### SD-004 — unverified-alternatives
+#### SD-003 — quality-gap-evidence-missing
 
-The survey didn't verify several likely "why not X" candidates: Copilot coding agent issue assignment, Sweep, CodeRabbit issue features, Devin/Factory issue intake, probot triage bots, and `github/issue-labeler`. Dosu's current product direction is also unclear. Two of these look like poor fits from their descriptions: `github/issue-labeler` labels by regex with no LLM judgment, and the Copilot coding agent implements issues rather than triaging them. Neither has been confirmed.
+**Question:** Is there evidence behind the claim that direct prompting produces more rework than the Smithy path?
+
+**Answer:** Yes. The supporting analysis is in Balexda/March-Private#2, and it is the baseline for the "Less rework" success signal. Recorded on 2026-11-17.
+
+#### SD-004 — unverified-alternatives
+
+**Question:** Should the survey verify the remaining candidate tools (Copilot coding agent, Sweep, CodeRabbit, Devin/Factory, probot, `github/issue-labeler`, Dosu)?
+
+**Answer:** No. The operator waived the check on 2026-11-17, because the build-vs-buy conclusion does not depend on these tools.
 
 ## Open Questions
 <!-- audience: reviewer; mode: reference; length: tables only; diagram: optional; examples: discouraged -->
 
-- **How much autonomy triage gets first (SD-001)** is the operator's decision. Settle it before `smithy.ignite`, because it determines whether the RFC needs an approval step.
-- **Open engine or private layer (SD-002)** is a product-strategy call under the open-core ADR. It must be settled before choosing where the triage judgment runs.
+None at this time — ready for `smithy.ignite` to expand into an RFC.
