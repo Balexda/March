@@ -356,6 +356,6 @@ No metric or span attribute carries a repository name, token, or client key.
 | March services | service → Tessera | Node client with the service's own client key. | Typed error; fail closed unless the migration fallback flag is on. |
 | Steward sessions | host process → Tessera on `127.0.0.1` | `gh` wrapper and git credential helper via `march tessera token` / `git-credential`. | Non-zero exit; never falls through to host credentials. |
 | Statio | Statio → Tessera | App/read token for its `gh` calls; closes Statio's forge-auth provisioning debt (SD-002). | As any service. |
-| Legate → GitHub (Copilot review) | Legate → GitHub with a `user` token | Request Copilot as a reviewer on a newly opened PR. | Errored span; does not block the merge gate. |
+| Legate → GitHub (Copilot review) | Legate → GitHub with a `user` token | Request Copilot as a reviewer when spec `2026-11-16-014-legate-per-verb-review-requests-and-merge-gates` makes it due (opt-in, capped, once per head commit). | Errored span; does not block the merge gate. |
 | `march up` / `march doctor` | CLI → Tessera | Starts Tessera before its consumers; injects each client key into its own service only; checks wiring and ambient-credential exposure. | Reported by `march doctor`. |
 | Docker | compose | Port published on `127.0.0.1` only; joins the `march` network; secret store mounted into Tessera alone; no HOME mount. | Startup failure on a misplaced secret. |
