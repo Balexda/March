@@ -99,6 +99,22 @@ Future Steward freshness belongs to the role-consumer partition made from `src/c
 
 The Castra server route surface, including `src/castra/server.ts`, remains outside the Steward freshness partition and stays owned by Castra's contract. Brood, Herald, and Legate service, registry, event, projection, cursor, and loop surfaces remain owned by their respective contracts and by the Feature 2 and Feature 3 contract tracks that define those providers. This section records the future binding hint only; it does not implement a freshness checker, update freshness config, populate AUTOGEN content, add CI enforcement, or change runtime behavior.
 
+### Generated Session Settings
+
+Every Steward session loads one generated settings file, `<steward root>/settings.json` (default `~/.march/steward/settings.json`), through `claude --settings`. `buildStewardSettings(root, env)` in `src/castra/steward-skills.ts` produces its content and Castra rewrites it at serve start, so a change applies to Stewards launched after the next Castra start.
+
+The file carries the `Notification` and `Stop` self-report hooks, plus an `env` block that tunes Claude Code's compaction and prompt-cache lifetime so an idle Steward compacts before its cache expires:
+
+| Claude Code variable | Default | Operator override |
+|------|---------|-------------------|
+| `CLAUDE_CODE_PROMPT_CACHE_TTL` | `1h` | `MARCH_SESSION_CACHE_TTL` (`5m` or `1h`) |
+| `CLAUDE_CODE_IDLE_COMPACT_MIN_TOKENS` | `100000` | `MARCH_SESSION_IDLE_COMPACT_MIN_TOKENS` (raised to `100000` if lower) |
+| `CLAUDE_CODE_AUTO_COMPACT_WINDOW` | `200000` | `MARCH_SESSION_AUTO_COMPACT_WINDOW` (clamped to `100000`–`1000000`) |
+
+An unparseable override falls back to the default. `MARCH_SESSION_COMPACTION` set to `0`, `false`, or `off` omits the `env` block entirely, leaving Claude Code's stock behavior. The defaults and parsing live in `src/shared/claude-session-env.ts`.
+
+The overrides are read from the environment of the process that writes the file, which for Stewards is Castra.
+
 ### Patch Application
 
 After launch, Steward consumes Spawn's validated patch result as an already accepted handoff artifact. Spawn continues to own raw backend-output parsing, validation, unsafe-output rejection, and no-op detection; Steward owns only the role semantics for applying that validated patch to the correlated repository state.
