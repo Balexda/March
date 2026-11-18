@@ -169,7 +169,9 @@ As an operator, I want Herald, Brood, Hatchery, Legate and Statio to get their G
 
 ### User Story 7: Request a Copilot Review as the Operator (Priority: P2)
 
-As an operator, I want Legate to request a Copilot review on each newly opened PR using my identity so that the review bills my personal Copilot plan.
+As an operator, I want Legate to be able to request a Copilot review using my identity so that, when I opt in, the review bills my personal Copilot plan.
+
+> **Amended 2026-11-16** by spec `2026-11-16-014-legate-per-verb-review-requests-and-merge-gates`. When and how often Copilot is requested (opt-in per verb, off by default, hard daily and monthly caps, durable once-per-head idempotency) is owned by that spec's User Story 7. This story keeps the `user` identity provider and the guarantee that the request uses only that identity.
 
 **Why this priority**: It is new behaviour that depends on the user-identity provider, the policy and the client. It adds value but does not gate bot authorship.
 
@@ -178,8 +180,8 @@ As an operator, I want Legate to request a Copilot review on each newly opened P
 **Acceptance Scenarios**:
 
 1. **Given** a configured operator token, **When** `legate` requests the `user` identity, **Then** Tessera returns the PAT unchanged with the operator's login and the token's expiry when discoverable.
-2. **Given** a PR has just been opened by a steward, **When** Legate next acts on it, **Then** it requests a Copilot review using the `user` identity.
-3. **Given** a review was already requested for a PR, **When** Legate acts on it again, **Then** no second request is made.
+2. **Given** the review policy in spec `2026-11-16-014-legate-per-verb-review-requests-and-merge-gates` says a Copilot request is due, **When** Legate makes it, **Then** it uses the `user` identity and nothing else.
+3. **Given** a Copilot request was already recorded for a PR's head commit, **When** Legate acts on it again or restarts, **Then** no second request is made (durable `review.requested` record, per spec 014).
 4. **Given** the review request fails, **When** Legate continues, **Then** an errored span is emitted and merging is not blocked.
 5. **Given** the operator's PAT is a fine-grained token, **When** the review request is verified against real GitHub before rollout, **Then** either it succeeds or the setup documentation states that a classic token is required.
 6. **Given** the operator token is absent, **When** Legate would request a review, **Then** it skips the request and reports the provider as unconfigured, without error noise on every tick.
@@ -303,7 +305,7 @@ Recommended implementation sequence:
 - **FR-029**: Herald, Brood, Hatchery, Legate (including its conductor skill scripts) and Statio MUST obtain GitHub credentials from the client and pass them to child processes per call. *(US6)*
 - **FR-030**: Service containers MUST run `gh` with a configuration directory that does not contain the operator's login. *(US6)*
 - **FR-031**: PR discovery, review classification and comment dedup MUST work for operator-authored and bot-authored PRs at the same time, and MUST NOT treat the March bot's own comments as external bot reviews. *(US6)*
-- **FR-032**: Legate MUST request a Copilot review with the `user` identity once per newly opened PR, idempotently, without blocking the merge gate on failure. *(US7)*
+- **FR-032**: When spec `2026-11-16-014-legate-per-verb-review-requests-and-merge-gates` makes a Copilot review request due, Legate MUST make it with the `user` identity only, idempotently (at most one request per PR head commit per bounded wait, as spec 014 defines it), without blocking the merge gate on failure. Request policy (opt-in, default off, caps) is owned by spec 014. *(US7; amended 2026-11-16)*
 - **FR-033**: When migration is complete, no March compose file MAY pass `GH_TOKEN` or `GITHUB_TOKEN`, and stale documentation of a shared token MUST be replaced. *(US9)*
 
 **Observability**
@@ -360,7 +362,7 @@ Recommended implementation sequence:
 | SD-006 | SD-001 is open between a named volume filled by `march tessera secrets import` and a host directory outside `$HOME` wired through compose `secrets:`, but FR-020, User Story 3 scenario 4 and the CLI contract make the CLI import mandatory — option 1's mechanism — so the artifacts effectively commit to it. | plan-review:Internal contradiction | Important | Low | open | — |
 | SD-007 | SD-002 is open, but User Story 3 scenario 3 and FR-019 ("each service receives its own client key and no other service's key") quietly exclude option (a) if "receives" means "can obtain", and the data model calls the client-keys file "operator-owned" although option (b) has `march up` write it. | plan-review:Internal contradiction | Important | Low | open | — |
 | SD-008 | `march doctor` must check that each service's client key is accepted (FR-040, User Story 8 scenario 6), but the only authenticated route is `POST /v1/github/token`; checking a key would mean minting a real token or sending a deliberately invalid body, and doctor's access to every plaintext key depends on SD-002. | plan-review:Logical gap | Important | Low | open | — |
-| SD-009 | The Copilot review request must happen exactly once per PR (FR-032, User Story 7 scenario 3, SC-008), but no idempotency mechanism is given: Legate's working state is rebuilt from the Herald fold, so after a restart it would request again unless a transition event in the fold or a check of GitHub's requested reviewers prevents it. | plan-review:Logical gap | Important | Low | open | — |
+| SD-009 | The Copilot review request must happen exactly once per PR (FR-032, User Story 7 scenario 3, SC-008), but no idempotency mechanism is given: Legate's working state is rebuilt from the Herald fold, so after a restart it would request again unless a transition event in the fold or a check of GitHub's requested reviewers prevents it. | plan-review:Logical gap | Important | Low | resolved | Resolved 2026-11-16 — spec `2026-11-16-014-legate-per-verb-review-requests-and-merge-gates` records each request as a durable `review.requested` Herald event keyed by (PR, reviewer, head commit), rebuilt from the fold on restart. |
 
 ## Out of Scope
 <!-- audience: reviewer; mode: reference; length: tables only; diagram: optional; examples: discouraged -->
@@ -386,6 +388,6 @@ Recommended implementation sequence:
 - **SC-005**: 100% of token requests, including denials, produce an audit event and a span; a search of all log output for issued token values finds none.
 - **SC-006**: A request outside policy is denied in every tested combination of client, identity, repository and access.
 - **SC-007**: The operator is warned at least 14 days before the PAT expires.
-- **SC-008**: Each newly opened PR receives exactly one Copilot review request, made as the operator.
+- **SC-008**: Every Copilot review request is made as the operator, at most once per PR head commit per bounded wait, and only when spec `2026-11-16-014-legate-per-verb-review-requests-and-merge-gates` makes it due (none under default configuration).
 - **SC-009**: With Tessera stopped and the fallback flag unset, no service or steward reaches GitHub with any credential, and every affected operation fails within its timeout.
 - **SC-010**: The test suite makes zero calls to real GitHub.
