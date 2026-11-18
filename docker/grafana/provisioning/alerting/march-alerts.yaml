@@ -587,3 +587,64 @@ groups:
           - refId: C
             datasourceUid: __expr__
             model: { refId: C, type: threshold, expression: A, conditions: [{ evaluator: { type: gt, params: [0] } }] }
+
+      # HERALD DEFAULT-BRANCH SYNC (#601). Herald syncs every active profile on
+      # each observe tick; there is no off switch any more. A broken or absent
+      # sync leaves the checkout behind origin, and a stale checkout looks healthy
+      # everywhere else: merged PRs keep showing as open, not-started plan items.
+      # Two conditions: sync is failing (auth, diverged branch, offline), or no
+      # sync has succeeded at all while Herald is alive.
+      - uid: march-herald-sync-failing
+        title: Herald default-branch sync failing (errors in 15m)
+        condition: C
+        for: 15m
+        noDataState: OK
+        execErrState: OK
+        labels: { severity: warning, team: march }
+        annotations:
+          summary: >-
+            Herald's default-branch sync has failed repeatedly for at least one
+            profile (march_herald_sync_total{outcome="error"}). That checkout is
+            drifting behind origin, so merged work will not surface. `docker logs
+            march-herald` shows the per-profile failure; `march doctor` reports
+            which repo is behind.
+        data:
+          - refId: A
+            relativeTimeRange: { from: 900, to: 0 }
+            datasourceUid: prometheus
+            model:
+              refId: A
+              instant: true
+              editorMode: code
+              expr: sum(increase(march_herald_sync_total{outcome="error"}[15m])) or vector(0)
+          - refId: C
+            datasourceUid: __expr__
+            model: { refId: C, type: threshold, expression: A, conditions: [{ evaluator: { type: gt, params: [0] } }] }
+
+      - uid: march-herald-sync-stalled
+        title: Herald default-branch sync stalled (Herald alive, no successful sync in 15m)
+        condition: C
+        for: 5m
+        noDataState: OK
+        execErrState: OK
+        labels: { severity: critical, team: march }
+        annotations:
+          summary: >-
+            Herald is heartbeating but has not completed a single successful
+            default-branch sync in 15 minutes. No profile checkout is being kept
+            current. Check `docker logs march-herald` for sync errors and confirm
+            profiles are registered (`march profile list`).
+        data:
+          - refId: A
+            relativeTimeRange: { from: 900, to: 0 }
+            datasourceUid: prometheus
+            model:
+              refId: A
+              instant: true
+              editorMode: code
+              expr: >-
+                (sum(increase(march_herald_heartbeat_total[15m])) or vector(0)) > 0
+                and (sum(increase(march_herald_sync_total{outcome="ok"}[15m])) or vector(0)) == 0
+          - refId: C
+            datasourceUid: __expr__
+            model: { refId: C, type: threshold, expression: A, conditions: [{ evaluator: { type: gt, params: [0] } }] }

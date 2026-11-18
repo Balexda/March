@@ -172,11 +172,14 @@ state`.
   the legate's inbox consumption so a deployment without Herald is unaffected.
 - **Meta** — Herald observes the same deployment as the legate, so it reads the
   legate's meta (`MARCH_HERALD_META`, falling back to `MARCH_LEGATE_LOOP_META`).
-- **Default-branch sync** — `MARCH_HERALD_SYNC=1` lets Herald own the
-  default-branch `git` sync. It shipped **off** during the rollout so it never
-  fought a still-polling legate; since #176 the legate no longer polls or syncs,
-  so a deployment that wants a fresh local default (so `smithy status` is current)
-  should now run Herald with `MARCH_HERALD_SYNC=1`. Herald never touches Docker.
+- **Default-branch sync** — Herald owns the default-branch `git` sync and runs
+  it for every active profile on each observe tick: fetch, switch to the default
+  branch, fast-forward. There is no switch to turn it off (#601). A running
+  profile that is not synced is broken, so to stop syncing a repo, remove the
+  profile (`march profile remove`). A sync failure is logged, written to stderr
+  (`docker logs march-herald`), and counted as
+  `march.herald.sync{outcome="error"}`; the `march-herald-sync-failing` and
+  `march-herald-sync-stalled` silent alarms watch it. Herald never touches Docker.
 - **Telemetry** — `MARCH_OTEL=1` enables `march.herald.*` metrics
   ([`../observability/herald-metrics.ts`](../observability/herald-metrics.ts))
   and JSONL/OTLP logs; a no-op when off. Dashboard:

@@ -23,9 +23,10 @@ export interface ObserverDeps {
    * Default-branch git sync for this profile (#300). Herald owns the sync, so it
    * fetches + fast-forwards origin's default branch BEFORE reading `smithy status`
    * — that is what makes freshly-merged work (e.g. a merged cut's `tasks.md`)
-   * surface in the next observation. Wired by the server ONLY when Herald is in
-   * sync mode (`MARCH_HERALD_SYNC=1`); `undefined` in read-only mode, where the
-   * observation runs against the local checkout as-is. A failure is logged +
+   * surface in the next observation. The server always wires it for every
+   * active profile (#601: there is no global off switch). It is optional here
+   * only as a test seam; when absent the observation runs against the local
+   * checkout as-is. A failure is logged +
    * isolated (never fatal to the tick) so one diverged/offline repo can't stall
    * the others.
    */
@@ -147,12 +148,12 @@ export function describeChangeSpan(
  * projection and reads the live PR/output for each non-terminal slice.
  */
 /**
- * Run this profile's default-branch sync before the observation read (#300),
- * when Herald is in sync mode (`deps.syncDefaultBranch` wired). The sync is
+ * Run this profile's default-branch sync before the observation read (#300).
+ * The server always wires `deps.syncDefaultBranch` (#601). The sync is
  * best-effort: a failure (no GitHub auth, gh outage, diverged local that won't
  * fast-forward) is swallowed so the tick still observes the local checkout, and
  * one repo's sync failure can't stall the profile or block the others. No-op when
- * sync is disabled or the repo path is unknown.
+ * the sync isn't wired (tests) or the repo path is unknown.
  *
  * A failure is made LOUD on every channel (#301 live-validation: the original
  * silence is exactly how the bug hid). It hits (1) the structured warn log

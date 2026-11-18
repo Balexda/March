@@ -72,7 +72,8 @@ export { gitHubAuthConfigArgs };
  * {@link prMatchesSliceBranch} directly from its dispatch/recovery paths. Herald
  * uses {@link toSenseDeps} to feed `senseObserved` AND calls {@link
  * syncDefaultBranch} from its observe path — Herald owns the default-branch git
- * sync (`MARCH_HERALD_SYNC`, #300), so the sync is no longer part of SenseDeps.
+ * sync (#300; always on for every active profile, #601), so the sync is no
+ * longer part of SenseDeps.
  */
 export interface SenseIo {
   listSessions(): Promise<any[] | { error: string }>;

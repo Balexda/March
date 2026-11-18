@@ -312,7 +312,7 @@ command named beneath it (it diagnoses, it never mutates):
   Remedy: `march brood sweep` / `march brood teardown`.
 - **Sync health** — a profile's default branch behind origin (the
   `syncDefaultBranch` class, #299/#300), so merged work never surfaces. Remedy:
-  `git pull` (or `MARCH_HERALD_SYNC=1`).
+  `git pull`, then find out why Herald's sync failed (`docker logs march-herald`).
 - **tmux server ownership** — the default tmux server (which Castra drives over
   the bind-mounted socket) runs on the host, not inside the `march-castra`
   container. If the container won the socket race (e.g. it autostarted ahead of

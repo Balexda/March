@@ -100,35 +100,29 @@ function resolveMetaPath(
   return explicit?.trim() || fromEnv || null;
 }
 
-/** True when Herald owns the default-branch git sync (PR1 default: off/read-only). */
-function syncEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-  return (env.MARCH_HERALD_SYNC ?? "").trim() === "1";
-}
-
-/** A profile's observe deps: the read-only {@link SenseDeps} plus the optional
- *  Herald-owned default-branch sync (#300, wired only in sync mode). */
+/** A profile's observe deps: the read-only {@link SenseDeps} plus the
+ *  Herald-owned default-branch sync (#300). */
 interface ObserveDeps {
   readonly senseDeps: SenseDeps;
-  readonly syncDefaultBranch?: (repoPath: string, knownDefault?: string) => Promise<void>;
+  readonly syncDefaultBranch: (repoPath: string, knownDefault?: string) => Promise<void>;
 }
 
 /**
- * Build a profile's observe deps. `senseDeps` is always a pure read. The
- * default-branch sync is attached ONLY when Herald owns it (`MARCH_HERALD_SYNC=1`,
- * #300): the observer fetches + fast-forwards origin's default branch before each
- * read so freshly-merged work surfaces. In read-only mode `syncDefaultBranch` is
- * undefined — Herald never runs `git fetch/switch/pull` (it must not fight a
- * still-polling legate) and reads the local repo as-is.
+ * Build a profile's observe deps. `senseDeps` is a pure read. The default-branch
+ * sync is always attached (#601): every active profile is synced on every
+ * observe tick, so the observer fetches + fast-forwards origin's default branch
+ * before each read and freshly-merged work surfaces. There is no global switch.
+ * A running profile that is not synced is broken, so the way to stop syncing a
+ * repo is to remove the profile (`march profile remove`), which also stops March
+ * acting on it.
  */
 function buildObserveDeps(meta: LoopMeta, app: FastifyInstance): ObserveDeps {
   const io = createSenseIo({
     meta,
     warn: (message: string) => app.log.warn({ component: "observe" }, message),
   });
-  const senseDeps = io.toSenseDeps();
-  if (!syncEnabled()) return { senseDeps };
   return {
-    senseDeps,
+    senseDeps: io.toSenseDeps(),
     syncDefaultBranch: async (repoPath: string, knownDefault?: string) => {
       await io.syncDefaultBranch({ repo: { path: repoPath, default_branch: knownDefault } });
     },
@@ -275,7 +269,7 @@ export async function startServer(
   process.once("SIGINT", () => void shutdown("SIGINT"));
 
   await app.listen({ port, host });
-  app.log.info({ port, host, intervalMs, sync: syncEnabled() }, "herald service listening");
+  app.log.info({ port, host, intervalMs }, "herald service listening");
 
   // Kick an immediate observation so the log/projection populate without waiting
   // a full interval.

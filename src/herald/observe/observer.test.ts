@@ -202,7 +202,7 @@ describe("runObservation", () => {
     expect(order).toEqual(["sync:/repo", "read"]);
   });
 
-  it("does not sync when sync is not wired (read-only mode, MARCH_HERALD_SYNC off)", async () => {
+  it("still observes when no sync is wired (test seam; the server always wires it, #601)", async () => {
     const store = fakeStore();
     // No syncDefaultBranch on the deps → Herald never fetches; the read still runs.
     const result = await runObservation({ store, profile: PROFILE, senseDeps: senseDeps() });
