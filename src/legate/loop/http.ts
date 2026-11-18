@@ -42,6 +42,33 @@ export interface RespondResult {
   profiles?: string[];
 }
 
+/** Operator input to the requeue endpoint (#588/#593). */
+export interface RequeueInput {
+  profile: string;
+  sliceId: string;
+  /** Close the slice's open PR as part of the requeue (refused without it). */
+  closePr?: boolean;
+  /** Who asked (attribution in the event log). */
+  operator?: string;
+  /** Why (attribution; also the PR-close comment). */
+  reason?: string;
+}
+
+/** Result of a requeue request (also the HTTP response body). */
+export interface RequeueResult {
+  ok: boolean;
+  profile?: string;
+  sliceId?: string;
+  /** The `slice.requeue.requested` event was appended; the next tick acts on it. */
+  requested?: boolean;
+  /** The requeue will close this open PR. */
+  closesPr?: number | null;
+  /** HTTP status hint for a refusal (404 unknown, 409 conflict). */
+  status?: number;
+  error?: string;
+  profiles?: string[];
+}
+
 export interface LoopHttpContext {
   readonly startedAtMs: number;
   readonly getSnapshot: () => LoopSnapshot;
@@ -49,6 +76,9 @@ export interface LoopHttpContext {
    *  slice. Supplied by the runtime (it needs Castra + Herald); absent in the
    *  pure HTTP unit tests, where the route reports 501. */
   readonly respondToEscalation?: (input: RespondInput) => Promise<RespondResult>;
+  /** Request an operator requeue (#588/#593). Supplied by the runtime; absent in
+   *  the pure HTTP unit tests, where the route reports 501. */
+  readonly requeueSlice?: (input: RequeueInput) => Promise<RequeueResult>;
 }
 
 /** Per-profile status from a heartbeat record + tick timing (pure; testable). */
@@ -177,6 +207,48 @@ export function resolveRespondTarget(workingState: any, sliceId: string): Respon
   return { ok: true, sessionId: slice.worker_session_id ?? null, reason };
 }
 
+/** The outcome of resolving a requeue target from a profile's working state (pure). */
+export type RequeueTarget =
+  | { ok: true; openPr: number | null }
+  | { ok: false; status: 404 | 409; error: string };
+
+/**
+ * Resolve (and validate) the slice a requeue call targets (#588/#593). Pure +
+ * testable. Unlike respond, requeue accepts ANY in-flight slice whatever its
+ * stage, escalation reason or session liveness — it is the "discard and
+ * re-dispatch" lever. It refuses only what it must: an unknown / not-in-flight
+ * slice, a merged PR, and an open PR unless the caller opts into closing it.
+ * `observedPr` is the fold's PR observation (fresher than the warm record).
+ */
+export function resolveRequeueTarget(workingState: any, sliceId: string, closePr: boolean, observedPr?: any): RequeueTarget {
+  const slice = workingState?.slices?.[sliceId];
+  if (!slice || typeof slice !== "object") {
+    const archived = workingState?.archived_slices?.[sliceId];
+    return archived
+      ? { ok: false, status: 409, error: `slice "${sliceId}" is archived (${archived.terminal_state ?? "done"}) — nothing to requeue.` }
+      : { ok: false, status: 404, error: `unknown slice "${sliceId}".` };
+  }
+  if (slice.recovered) return { ok: false, status: 409, error: `slice "${sliceId}" was already recovered — it re-dispatches on its own.` };
+  if (slice.stage === "hatchery-pending") {
+    return { ok: false, status: 409, error: `slice "${sliceId}" has a spawn in progress (hatchery-pending) — requeue once it lands.` };
+  }
+  const pr = observedPr && !observedPr.skipped ? observedPr : slice.pr;
+  const number = typeof pr?.number === "number" && pr.number > 0 ? pr.number : null;
+  const state = typeof pr?.state === "string" ? pr.state.toUpperCase() : null;
+  if (number !== null && state === "MERGED") {
+    return { ok: false, status: 409, error: `slice "${sliceId}" PR #${number} already merged — nothing to requeue.` };
+  }
+  const openPr = number !== null && state !== "CLOSED" ? number : null;
+  if (openPr !== null && !closePr) {
+    return {
+      ok: false,
+      status: 409,
+      error: `slice "${sliceId}" has open PR #${openPr} — pass closePr:true to close it and requeue.`,
+    };
+  }
+  return { ok: true, openPr };
+}
+
 /** Build the /escalations payload. With `profile`, that profile's escalated tasks;
  *  else every profile's, keyed by profile. */
 export function buildEscalations(ctx: LoopHttpContext, profile?: string): Record<string, unknown> {
@@ -287,6 +359,61 @@ export function buildLoopServer(ctx: LoopHttpContext): FastifyInstance {
       reply.code(200);
     } else {
       reply.code(/^unknown (profile|slice)/.test(result.error ?? "") ? 404 : 400);
+    }
+    return result;
+  });
+
+  // Operator REQUEUE (#588/#593): discard the slice's current incarnation (steward
+  // session, worktree, branch; its open PR only with `closePr:true`) and put the
+  // smithy item back in the queue for a fresh dispatch. Works for any in-flight
+  // slice — including a steward parked on a question whose session died, which
+  // respond and recover both refuse. Appends `slice.requeue.requested` (with the
+  // operator + reason for attribution); the next tick's requeue handler acts on
+  // it, so the response is 202 Accepted.
+  app.post("/slices/:sliceId/requeue", async (request, reply) => {
+    const params = (request.params ?? {}) as Record<string, string | undefined>;
+    const query = (request.query ?? {}) as Record<string, string | undefined>;
+    const body = (request.body ?? {}) as Record<string, unknown>;
+    const sliceId = typeof params.sliceId === "string" ? params.sliceId : "";
+    const profile =
+      (typeof body.profile === "string" && body.profile.length > 0 && body.profile) ||
+      (typeof query.profile === "string" && query.profile.length > 0 && query.profile) ||
+      "";
+    if (!profile) {
+      reply.code(400);
+      return { ok: false, error: "profile is required (body.profile or ?profile=)." };
+    }
+    if (!sliceId) {
+      reply.code(400);
+      return { ok: false, error: "sliceId path param is required." };
+    }
+    if (body.closePr !== undefined && typeof body.closePr !== "boolean") {
+      reply.code(400);
+      return { ok: false, error: "closePr must be a boolean." };
+    }
+    for (const field of ["operator", "reason"] as const) {
+      if (body[field] !== undefined && typeof body[field] !== "string") {
+        reply.code(400);
+        return { ok: false, error: `${field} must be a string.` };
+      }
+    }
+    if (!ctx.requeueSlice) {
+      reply.code(501);
+      return { ok: false, error: "requeue is not available in this context." };
+    }
+    const operator = typeof body.operator === "string" ? body.operator.trim() : "";
+    const reason = typeof body.reason === "string" ? body.reason.trim() : "";
+    const result = await ctx.requeueSlice({
+      profile,
+      sliceId,
+      closePr: body.closePr === true,
+      ...(operator ? { operator } : {}),
+      ...(reason ? { reason } : {}),
+    });
+    if (result.ok) {
+      reply.code(202);
+    } else {
+      reply.code(result.status ?? (/^unknown profile/.test(result.error ?? "") ? 404 : 400));
     }
     return result;
   });

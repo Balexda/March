@@ -164,6 +164,48 @@ After recovering, watch it re-dispatch:
 ${CLAUDE_SKILL_DIR}/scripts/events-tail.sh --profile <p> --slice <sliceId> --src legate
 ```
 
+## Operation: Requeue a slice (discard and re-dispatch)
+
+Use this when the slice's current attempt should simply be **thrown away** and the
+smithy item dispatched fresh — rather than healed in place by recover:
+
+- **The agent asked a question and then died** (#588). The fold shows
+  `stage: escalated`, `stewardReport.status: awaiting_input`, and a `sessionId`
+  Castra no longer lists. `respond` rejects it (the escalation reason is lost
+  after a legate restart) and `recover` refuses it (rung 0b won't touch a pending
+  question), so the slice sits in flight forever and its item never re-dispatches.
+- **The agent went off the rails** — wrong scope, a wrong-kind diff — and
+  restarting from scratch is simpler than steering it.
+
+```bash
+{{{MARCH_CLI}}} legate requeue <sliceId> [--profile <p>] [--reason "<why>"] [--close-pr]
+# or: curl -XPOST {{{LEGATE_BASE}}}/slices/<sliceId>/requeue \
+#       -H 'content-type: application/json' -d '{"profile":"<p>","reason":"<why>"}'
+```
+
+The legate appends `slice.requeue.requested` (with your username + reason) and,
+at the start of the next tick, tears down the steward session, worktree and local
+branch through Brood by exact path — registering a dead or untracked session's
+workspace first — deletes a pushed remote branch, and tombstones the slice so
+dispatch re-launches it on the same tick.
+
+- **Open PR:** refused (409) unless you pass `--close-pr`, which closes it with an
+  attribution comment. A merged PR, an archived slice or a `hatchery-pending` slice
+  is refused outright.
+- **It discards work.** Unique commits on the branch are deleted. Inspect the
+  worktree first if anything there is worth keeping.
+
+Verify:
+
+```bash
+${CLAUDE_SKILL_DIR}/scripts/events-tail.sh --profile <p> --slice <sliceId> --src legate
+# expect: slice.requeue.requested → slice.recovery.requested {rung:3} → slice.dispatched
+```
+
+`legate.ndjson` records `requeue-done` (or `requeue-refused` / `requeue-failed`
+with the reason); a teardown that fails three ticks running gives up with a
+`requeue-failed` judgement request.
+
 ## Operation: Mass recovery after a spawn-storm / host reboot
 
 When **many** slices escalated from a **single transient cause that is now

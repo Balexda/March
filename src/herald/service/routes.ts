@@ -65,6 +65,8 @@ const EVENT_TYPES: ReadonlySet<EventType> = new Set<EventType>([
   "slice.recovery.requested",
   "steward.relaunched",
   "slice.escalated",
+  "slice.requeue.requested",
+  "slice.requeue.refused",
   "retry.counted",
 ]);
 
@@ -80,6 +82,8 @@ const SLICE_TYPES: ReadonlySet<string> = new Set([
   "slice.recovery.requested",
   "steward.relaunched",
   "slice.escalated",
+  "slice.requeue.requested",
+  "slice.requeue.refused",
 ]);
 
 /** Transition event types whose schema carries an optional steward `sessionId`. */
@@ -154,6 +158,18 @@ export function validateEvent(body: Record<string, unknown>): EventValidation {
   if (type === "slice.recovery.requested" && body.rung !== undefined) {
     if (typeof body.rung !== "number" || !Number.isInteger(body.rung) || body.rung < 0 || body.rung > 3) {
       return { ok: false, error: `event "slice.recovery.requested" rung must be an integer in {0,1,2,3}.` };
+    }
+  }
+  // Operator requeue (#588/#593): optional fields, but typed when present —
+  // `closePr` gates closing a PR, so it must be a real boolean, never truthy junk.
+  if (type === "slice.requeue.requested" && body.closePr !== undefined && typeof body.closePr !== "boolean") {
+    return { ok: false, error: `event "slice.requeue.requested" closePr must be a boolean.` };
+  }
+  if (type === "slice.requeue.requested" || type === "slice.requeue.refused") {
+    for (const field of type === "slice.requeue.requested" ? ["operator", "reason"] : ["reason"]) {
+      if (body[field] !== undefined && typeof body[field] !== "string") {
+        return { ok: false, error: `event "${type}" ${field} must be a string.` };
+      }
     }
   }
   return { ok: true, input: { ...(body as object), source: "legate" } as AppendEventInput };

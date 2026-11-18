@@ -80,6 +80,13 @@ export function runHeartbeat(out: CoordinatorOutput, deps: HeartbeatDeps): any {
   deps.append(deps.heartbeatEventsPath, record);
   deps.setLastHeartbeat?.(record);
 
+  // Operator requeue (#588/#593) runs first in the pipeline; its actions are full
+  // event objects (kind "requeue"; a failed attempt is a `requeue-failed` action,
+  // so its failures list is not logged twice).
+  for (const a of out.results.requeue?.actions ?? []) {
+    event(meta.processor_events_path, { paired_legate: meta.paired_legate, ...a });
+    log("[" + ts + "] " + a.action + " " + a.slice_id + (a.operator ? " (by " + a.operator + ")" : "") + ": " + (a.detail || ""));
+  }
   // cleanup actions are already full event objects.
   for (const cleanup of out.results.cleanup.actions) {
     event(meta.processor_events_path, cleanup);

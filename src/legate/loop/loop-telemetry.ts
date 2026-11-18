@@ -147,6 +147,23 @@ export function emitActionEventSpan(event: any, emit: LoopSpanEmitter = defaultE
     });
   } else if (event.kind === "cleanup") {
     emit({ name: "legate.cleanup", traceKey: sliceId, root: false, attributes: { "march.slice_id": sliceId, "march.pr_state": event.pr_state || "" } });
+  } else if (event.kind === "requeue") {
+    // Operator requeue (#588/#593) is a lifecycle action on the slice's dispatch,
+    // nested under its deterministic parent; a refused or failed requeue marks
+    // the span errored so the slice trace shows where it stalled.
+    const action = typeof event.action === "string" ? event.action : "";
+    emit({
+      name: "legate.requeue",
+      traceKey: sliceId,
+      root: false,
+      error: action !== "requeue-done",
+      attributes: {
+        "march.slice_id": sliceId,
+        "march.action": action,
+        ...(event.session_id ? { "march.session_id": String(event.session_id) } : {}),
+        ...(event.operator ? { "march.operator": String(event.operator) } : {}),
+      },
+    });
   } else if (event.kind === "steward_relaunch") {
     // Re-launching a steward is a lifecycle action on the slice's existing
     // dispatch, so it nests under that same deterministic parent. relaunch-failed

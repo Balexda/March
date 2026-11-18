@@ -52,6 +52,19 @@ describe("emitActionEventSpan", () => {
     expect(emit).toHaveBeenCalledWith(expect.objectContaining({ name: "legate.relaunch", root: false, error: true }));
   });
 
+  it("emits a legate.requeue span on the slice trace, errored unless the requeue completed (#588)", () => {
+    const emit = vi.fn();
+    emitActionEventSpan({ kind: "requeue", slice_id: "s", action: "requeue-done", operator: "jb" }, emit);
+    emitActionEventSpan({ kind: "requeue", slice_id: "s", action: "requeue-refused" }, emit);
+    emitActionEventSpan({ kind: "requeue", slice_id: "s", action: "requeue-failed" }, emit);
+    expect(emit.mock.calls.map((c) => [c[0].name, c[0].traceKey, c[0].error])).toEqual([
+      ["legate.requeue", "s", false],
+      ["legate.requeue", "s", true],
+      ["legate.requeue", "s", true],
+    ]);
+    expect(emit.mock.calls[0][0].attributes).toMatchObject({ "march.operator": "jb", "march.action": "requeue-done" });
+  });
+
   it("emits a legate.ghost-cleanup span keyed by the session id (no slice_id)", () => {
     const emit = vi.fn();
     emitActionEventSpan({ kind: "ghost_cleanup", session_id: "w", action: "ghost-cleanup" }, emit);

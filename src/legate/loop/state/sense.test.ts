@@ -67,6 +67,21 @@ describe("senseFromHerald (Stage 1, Herald-backed)", () => {
     expect(state.perSlice.active!.recentOutput).toEqual({ output: "log" });
   });
 
+  it("reads pending operator requeues off the fold every tick, warm or cold (#588)", async () => {
+    const sys = foldedState({
+      slices: {
+        s1: { sliceId: "s1", stage: "escalated", requeueRequested: { seq: 9, closePr: false, operator: "jb" } },
+        gone: { sliceId: "gone", recovered: true, requeueRequested: { seq: 3, closePr: false } },
+        other: { sliceId: "other", stage: "pr-open" },
+      },
+    });
+    const herald = { consume: vi.fn(async () => sys) };
+    for (const raw of [prevRaw(), null]) {
+      const state = await senseFromHerald(deps(), herald, raw as any);
+      expect(state.requeueRequests).toEqual([{ sliceId: "s1", seq: 9, closePr: false, operator: "jb" }]);
+    }
+  });
+
   it("threads the in-memory working state across ticks (no state.json)", async () => {
     const raw = { repo: { path: "/repo" }, slices: { s: { worker_session_id: "x", stage: "implementing" } }, archived_slices: { old: {} } };
     const herald = { consume: vi.fn(async () => emptySystemState()) };

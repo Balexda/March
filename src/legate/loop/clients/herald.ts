@@ -48,6 +48,10 @@ export type TransitionEvent = Extract<
       | "slice.recovery.requested"
       | "steward.relaunched"
       | "slice.escalated"
+      // Operator requeue (#588/#593): the legate's HTTP endpoint appends the
+      // request; the requeue handler appends the refusal / give-up.
+      | "slice.requeue.requested"
+      | "slice.requeue.refused"
       | "retry.counted";
   }
 >;
