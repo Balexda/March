@@ -70,10 +70,9 @@ services:
       - HOME=${MARCH_HOST_HOME:-/home/jmbattista}
       # Herald observes the same deployment as the legate; reuse its meta.
       - MARCH_HERALD_META=${MARCH_HERALD_META:-${MARCH_LEGATE_LOOP_META:-}}
-      # Set to 1 so Herald owns the default-branch git sync (#300). The legate no
-      # longer syncs, so production should enable this.
-      # GitHub token: with sync on, Herald rewrites SSH remotes to token-auth
-      # HTTPS at fetch time (#301) so no ssh client/key is needed in-container.
+      # GitHub token: Herald always syncs every active profile's default branch
+      # (#300/#601) and rewrites SSH remotes to token-auth HTTPS at fetch time
+      # (#301), so no ssh client/key is needed in-container.
       - GH_TOKEN=${GH_TOKEN:-}
       - GITHUB_TOKEN=${GITHUB_TOKEN:-}
       # Break-glass admin endpoint (#265): UNSET by default so POST /admin/events
