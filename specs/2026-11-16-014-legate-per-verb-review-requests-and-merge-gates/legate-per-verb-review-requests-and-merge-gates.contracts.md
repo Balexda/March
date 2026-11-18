@@ -142,7 +142,8 @@ interface ReviewerAdapter {
   readonly id: "coderabbit" | "copilot" | string;     // string only for classify-only adapters
   readonly logins: readonly string[];                 // normalised, e.g. ["coderabbitai"]
   classifyComment(c: { author: string; authorType: string; body: string }):
-    { kind: "status" | "in_progress" | "rate_limited" | "trigger" | "feedback"; resetAt?: string };
+    { kind: "status" | "in_progress" | "rate_limited" | "paused" | "trigger" | "feedback"; resetAt?: string };
+    // rate_limited → back-off cause rate_limited_comment; paused → paused_comment
   request?(pr: { repoPath: string; number: number; headSha: string }, deps: ReviewRequestDeps): Promise<ReviewRequestResult>;
 }
 type ReviewRequestResult =

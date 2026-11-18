@@ -88,7 +88,7 @@ Plus the snapshot additions:
 | Field | Type | Notes |
 |-------|------|-------|
 | `pr.is_draft` | boolean | Used by the request trigger. |
-| `pr.reviewer_notices[]` | `{reviewer, kind: "status"\|"in_progress"\|"rate_limited", reset_at?, created_at, commit_sha?}` | Classified reviewer comments, removed from `conversation_comments`. |
+| `pr.reviewer_notices[]` | `{reviewer, kind: "status"\|"in_progress"\|"rate_limited"\|"paused", reset_at?, created_at, commit_sha?}` | Classified reviewer comments, removed from `conversation_comments`. A `rate_limited` notice maps to back-off cause `rate_limited_comment`, a `paused` notice to `paused_comment`. Both derive review state `rate_limited`. |
 
 The existing counts (`human_approval_count`, `bot_approval_count`, `changes_requested_count`) stay for back-compat. The gate uses `reviews[]`.
 
@@ -116,11 +116,15 @@ Validation rules:
 | Field | Type | Required | Notes |
 |-------|------|----------|-------|
 | `reviewer` | `"coderabbit" \| "copilot"` | Yes | Account-wide key. |
-| `until` | ISO-8601 UTC string | Yes | A stated reset time, or now plus the exponential back-off. |
-| `attempts` | integer ≥ 1 | Yes | Consecutive rate-limited or failed attempts. Reset by a `review.backoff` with `attempts: 0` after a success. |
-| `cause` | `"http_429" \| "rate_limited_comment" \| "paused_comment" \| "post_failed"` | Yes | |
+| `until` | ISO-8601 UTC string | Yes | A stated reset time, or now plus the exponential back-off. On a reset, the time of the reset, so the reviewer is immediately eligible. |
+| `attempts` | integer ≥ 0 | Yes | Consecutive rate-limited or failed attempts. `0` only on a reset. |
+| `cause` | `"http_429" \| "rate_limited_comment" \| "paused_comment" \| "post_failed" \| "reset"` | Yes | `reset` is appended after a review lands on the head while attempts were above 0. |
 
 The envelope `profile` is the profile that observed it, but the record applies across profiles.
+
+Validation rules:
+- `cause: "reset"` if and only if `attempts == 0`. Every other cause requires `attempts ≥ 1`.
+- The latest record per reviewer wins on rebuild, so a reset clears the back-off after a restart.
 
 ### 7) Review State (derived)
 
@@ -167,6 +171,7 @@ The envelope `profile` is the profile that observed it, but the record applies a
 | `requested` | `backoff` | Post returns 429 or fails, or a rate-limited/paused notice | Append `review.backoff`. Span outcome `backoff` (429/notice) or `failed` (post failed, errored) |
 | `backoff` | `eligible` | `now ≥ until` | None |
 | any | `refused` | Cap exhausted, or the Copilot identity is unavailable | No post. Errored span with outcome `cap_exhausted` or `identity_unavailable` |
+| `requested` / `in_progress` | `eligible` (new head) | New head before any verdict from the reviewer on this PR | The next request carries `reason: initial` |
 | `reviewed` | `eligible` (new head) | New head **and** (stale approval with approval the only unmet gate, **or** a stale bot CHANGES_REQUESTED with threads resolved) | `reason: stale_approval` / `stale_changes_requested` |
 
 ## Identity & Uniqueness

@@ -277,9 +277,10 @@ Recommended implementation sequence:
 - **FR-019**: If no review lands on the requested head within the bounded wait, the legate MUST request again, subject to back-off. *(US4)*
 - **FR-020**: On a new head, the legate MUST re-request only when one of these holds:
   - the earlier bot approval was dismissed or is stale and approval is the only unmet gate;
-  - the reviewer's latest verdict is CHANGES_REQUESTED on an older commit and its threads are resolved.
+  - the reviewer's latest verdict is CHANGES_REQUESTED on an older commit and its threads are resolved;
+  - the reviewer has never submitted a verdict on this PR, so a request on an older head was superseded by a push before it was answered. This request carries `reason: initial`.
 
-  It MUST NOT re-request on every push. *(US4)*
+  It MUST NOT re-request on every push. A PR the reviewer has already reviewed only gets a new-head request under the first two conditions. *(US4)*
 - **FR-021**: CodeRabbit MUST support two modes. In comment-trigger mode (the default) the legate posts the review trigger comment. In auto mode the legate only observes. *(US4)*
 - **FR-022**: The legate MUST never post a reviewer command that approves or resolves on the reviewer's behalf. *(US4)*
 - **FR-023**: Each request decision that acts or is refused MUST emit a `legate.review.request` span nested in the slice trace, with reviewer, verb and outcome. The span MUST be errored on failure or cap exhaustion. *(US4, US5, US7)*
