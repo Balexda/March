@@ -73,8 +73,35 @@ it is recorded in the issuance audit and has no effect on authorization or
 cache scope.
 
 Denials produce an audit outcome of `denied` and an errored issuance span.
-An optional `x-march-slice-id` header nests the span under that slice's trace.
+An optional `x-march-slice-id` header with a valid slice ID nests the issuance
+span under that slice's deterministic dispatch trace.
 Diagnostics omit authorization headers, keys, key digests and tokens.
+
+### Issuance telemetry
+
+Every completed token request writes one `tessera.audit` JSON log event with
+`caller`, `identity`, `provider`, `repo`, `access`, `outcome`, `reason`,
+`cache`, `expires_at` and `subject`. Unauthenticated callers are `unknown`.
+Unavailable request fields and expiry are null, as is the reason for an issued
+token. A supplied subject is echoed, or recorded as `[REDACTED]` if it contains
+the caller's bearer key or the issued token; the same rule nulls such a `repo`.
+Denials and failures carry the typed response code.
+
+With `MARCH_OTEL=1`, each request also emits one `tessera.issue` span. Denials,
+failures and successful cache fallback after a failed refresh mark the span
+errored. Spans omit repository, expiry and subject.
+
+| Metric | Measurement | Labels |
+| --- | --- | --- |
+| `march.tessera.issuances` | One count per successful request, including cache fallback | `identity`, `provider`, `access`, `cache` |
+| `march.tessera.denials` | One count per denied or failed request | `identity` (or `unknown`), `reason` |
+| `march.tessera.mint.duration` | Milliseconds per upstream mint attempt, including failures | `provider`, `outcome` |
+| `march.tessera.github.rate_limit_remaining` | Latest valid GitHub remaining-budget header | `provider` |
+| `march.tessera.github.secondary_limits` | Count of GitHub responses indicating a secondary limit | `provider` |
+
+Cache hits and callers sharing a mint add no mint samples. Rate-limit
+measurements use responses from discovery, installation lookup and minting.
+Metrics use the same OTel gate as spans. Audit logs remain enabled independently.
 
 ### Providers
 
@@ -121,7 +148,7 @@ deployment of those files and client-key distribution.
 - Every GitHub call is bounded by a finite timeout, and the app assertion lives at most 10 minutes.
 - Accepted tokens expire in the future and no more than one hour (plus a 60-second clock-skew allowance) after issuance.
 - Error messages are fixed per code. A token appears only in the body of a successful, authorized `POST /v1/github/token` response; it never appears in error responses, `/status`, logs or spans. Assertions, private keys, bearer keys and upstream response bodies never appear in any response, `/status`, logs or spans.
-- Each token request emits one `tessera.issue` span, marked errored on any non-2xx response; a failed startup identity discovery emits an errored `tessera.discovery` span.
+- With telemetry enabled, failed startup identity discovery emits an errored `tessera.discovery` span.
 
 ## Error Modes
 

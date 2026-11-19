@@ -1,4 +1,5 @@
 import { createSign } from "node:crypto";
+import { recordTesseraMint, recordTesseraRateLimit, recordTesseraSecondaryLimit } from "../observability/tessera-service-metrics.js";
 import { ACCESS_PROFILES, REPO_PATTERN, TesseraError, type TesseraErrorCode, type CredentialProvider, type ProviderIssueRequest, type ProviderIssueResult, type ProviderStatus, type CommitIdentity } from "./models.js";
 
 export interface GithubAppOptions {
@@ -86,6 +87,21 @@ export class GithubAppProvider implements CredentialProvider {
           headers: { ...(assertion ? { authorization: `Bearer ${assertion}` } : {}), accept: "application/vnd.github+json", "x-github-api-version": "2022-11-28", "user-agent": "march-tessera", ...(body === undefined ? {} : { "content-type": "application/json" }) },
           ...(body === undefined ? {} : { body: JSON.stringify(body) }),
         });
+        const remainingHeader = response.headers.get("x-ratelimit-remaining");
+        const remaining = remainingHeader && /^\d+$/.test(remainingHeader) ? Number(remainingHeader) : NaN;
+        if (Number.isSafeInteger(remaining)) recordTesseraRateLimit(this.id, remaining);
+        if (response.status === 403 || response.status === 429) {
+          const retryAfter = response.headers.get("retry-after");
+          if (remaining !== 0 && retryAfter && /^\d+$/.test(retryAfter)) {
+            recordTesseraSecondaryLimit(this.id);
+          } else {
+            // GitHub may signal a secondary limit only in the error message.
+            const error = await response.json().catch(() => null);
+            if (typeof error?.message === "string" && /secondary rate limit/i.test(error.message)) {
+              recordTesseraSecondaryLimit(this.id);
+            }
+          }
+        }
         if (response.status === 401) throw new TesseraError("credential_invalid");
         if (response.status >= 500 || response.status === 429) throw new TesseraError("provider_unavailable");
         if (repoOperation && (response.status === 404 || response.status === 422)) throw new TesseraError("repo_not_installed");
@@ -175,6 +191,18 @@ export class GithubAppProvider implements CredentialProvider {
   }
 
   private async mint(installationId: number, repo: string, access: ProviderIssueRequest["access"]): Promise<CachedToken> {
+    const start = performance.now();
+    let outcome: "issued" | "failed" = "failed";
+    try {
+      const entry = await this.requestMint(installationId, repo, access);
+      outcome = "issued";
+      return entry;
+    } finally {
+      recordTesseraMint(this.id, performance.now() - start, outcome);
+    }
+  }
+
+  private async requestMint(installationId: number, repo: string, access: ProviderIssueRequest["access"]): Promise<CachedToken> {
     const repository = repo.split("/")[1];
     const minted = await this.call(`/app/installations/${installationId}/access_tokens`, { repositories: [repository], permissions: ACCESS_PROFILES[access] }, true);
     const expiryMs = typeof minted.expires_at === "string" ? Date.parse(minted.expires_at) : NaN;

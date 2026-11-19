@@ -1,6 +1,7 @@
 import Fastify, { type FastifyBaseLogger, type FastifyInstance } from "fastify";
+import { recordTesseraDenial, recordTesseraIssuance } from "../observability/tessera-service-metrics.js";
 import { emitTesseraSpan } from "../observability/tessera-trace.js";
-import { ProviderRegistry, TesseraError, denyAuthorization, parseTokenRequest, type AuthorizationBoundary, type CredentialProvider, type ProviderIssueResult, type TokenRequest } from "./models.js";
+import { ProviderRegistry, TesseraError, denyAuthorization, isTesseraErrorCode, parseTokenRequest, type AuthorizationBoundary, type CredentialProvider, type ProviderIssueResult, type TesseraErrorCode, type TokenRequest } from "./models.js";
 
 export interface BuildTesseraServerOptions {
   providers?: CredentialProvider[];
@@ -9,20 +10,28 @@ export interface BuildTesseraServerOptions {
   startedAt?: number;
 }
 
+interface IssuanceContext {
+  caller: string;
+  parsed?: TokenRequest;
+  start: number;
+  code?: TesseraErrorCode;
+  cache?: ProviderIssueResult["cache"];
+  expiresAt?: string;
+  repo?: string | null;
+  subject?: string;
+}
+
 export function buildTesseraServer(options: BuildTesseraServerOptions = {}): FastifyInstance {
   const registry = new ProviderRegistry(options.providers ?? []);
   const authorization = options.authorize ?? denyAuthorization;
   const startedAt = options.startedAt ?? Date.now();
   // Silence Fastify's automatic error serializers: they may include request headers or bodies.
   const app = options.logger ? Fastify({ loggerInstance: options.logger, disableRequestLogging: true }) : Fastify({ logger: false });
-  const requests = new WeakMap<object, {
-    caller: string; parsed?: TokenRequest; start: number; code?: string;
-    cache?: ProviderIssueResult["cache"]; expiresAt?: string | null;
-  }>();
+  const requests = new WeakMap<object, IssuanceContext>();
   app.addHook("onRequest", async (request) => {
     const target = request.url.replace(/^https?:\/\/[^/]+/i, "");
     if (!request.routeOptions.url?.startsWith("/v1/") && !target.startsWith("/v1/")) return;
-    const context = { caller: "unknown", start: Date.now() };
+    const context: IssuanceContext = { caller: "unknown", start: Date.now() };
     requests.set(request, context);
     context.caller = await authorization.authenticate(request.headers.authorization);
   });
@@ -31,27 +40,38 @@ export function buildTesseraServer(options: BuildTesseraServerOptions = {}): Fas
     if (!context || (!context.code && !context.parsed)) return;
     const req = context.parsed;
     const outcome = reply.statusCode === 200 ? "issued" : reply.statusCode < 500 ? "denied" : "failed";
-    // Keep the reserved subject and other request details out of trace attributes.
-    const fields = { caller: context.caller, identity: req?.identity ?? "unknown", provider: req ? `github-${req.identity}` : "unknown", access: req?.access ?? "unknown", cache: context.cache ?? "n/a", outcome, reason: context.code ?? "none" };
-    emitTesseraSpan("tessera.issue", { sliceId: typeof request.headers["x-march-slice-id"] === "string" ? request.headers["x-march-slice-id"] : undefined, error: reply.statusCode >= 400 || context.code === "provider_unavailable", attributes: fields, startTimeMs: context.start });
+    const provider = req ? (`github-${req.identity}` as const) : null;
+    const cache = context.cache ?? "n/a";
+    const reason = outcome === "issued" ? null : context.code ?? "mint_failed";
+    const fields = { caller: context.caller, identity: req?.identity ?? null, provider, access: req?.access ?? null, cache, outcome, reason };
     app.log.info({
-      ...fields,
-      identity: req?.identity ?? null,
-      provider: req ? `github-${req.identity}` : null,
-      repo: req?.repo ?? null,
-      access: req?.access ?? null,
-      reason: context.code ?? null,
+      event: "tessera.audit", ...fields,
+      repo: context.repo ?? null,
       expires_at: context.expiresAt ?? null,
-      subject: req?.subject ?? null,
-    }, "tessera issuance handled");
+      subject: context.subject ?? null,
+    }, "Tessera token request completed");
+    emitTesseraSpan("tessera.issue", {
+      sliceId: typeof request.headers["x-march-slice-id"] === "string" ? request.headers["x-march-slice-id"] : undefined,
+      error: outcome !== "issued" || context.code === "provider_unavailable",
+      attributes: {
+        ...fields, identity: fields.identity ?? "unknown", provider: provider ?? "unknown",
+        access: fields.access ?? "unknown", reason: context.code ?? reason ?? "none",
+      },
+      startTimeMs: context.start,
+    });
+    if (reason) recordTesseraDenial(req?.identity, reason);
+    else if (req && provider) recordTesseraIssuance(req.identity, provider, req.access, cache);
   });
   app.setErrorHandler((error, request, reply) => {
-    const safe = error instanceof TesseraError ? error : new TesseraError([400, 413, 415].includes((error as {statusCode?: number}).statusCode ?? 0) ? "invalid_request" : "mint_failed");
+    const code = error instanceof TesseraError && isTesseraErrorCode(error.code)
+      ? error.code
+      : [400, 413, 415].includes((error as { statusCode?: number }).statusCode ?? 0) ? "invalid_request" : "mint_failed";
+    const safe = new TesseraError(code);
     const context = requests.get(request);
     if (context) context.code = safe.code;
     if (safe.code === "provider_unavailable") reply.header("Retry-After", "5");
     // Messages are fixed by code: even an injected dependency cannot echo secret material.
-    void reply.code(safe.status).send({ error: { code: safe.code, message: new TesseraError(safe.code).message } });
+    void reply.code(safe.status).send({ error: { code: safe.code, message: safe.message } });
   });
   app.get("/healthz", async () => ({ status: "ok" }));
   app.get("/status", async () => ({
@@ -65,12 +85,20 @@ export function buildTesseraServer(options: BuildTesseraServerOptions = {}): Fas
     const parsed = parseTokenRequest(request.body);
     const context = requests.get(request)!;
     context.parsed = parsed;
+    // A repository component can contain a bearer key even after syntax validation.
+    const bearer = request.headers.authorization?.match(/^Bearer\s+(\S+)\s*$/i)?.[1];
+    context.repo = parsed.repo && (!bearer || !parsed.repo.includes(bearer)) ? parsed.repo : null;
+    // The reserved subject is echoed for correlation unless it carries credential material.
+    if (parsed.subject !== undefined) context.subject = bearer && parsed.subject.includes(bearer) ? "[REDACTED]" : parsed.subject;
     await authorization.authorize(context.caller, parsed);
     const { subject: _auditSubject, ...scope } = parsed;
     const result = await registry.select(parsed.identity).issue(scope);
-    context.cache = result.cache;
-    context.expiresAt = result.expiresAt;
-    context.code = result.degradedReason;
+    context.cache = result.cache === "hit" || result.cache === "miss" ? result.cache : "n/a";
+    context.code = result.degradedReason === "provider_unavailable" ? result.degradedReason : undefined;
+    const expiryMs = typeof result.expiresAt === "string" ? Date.parse(result.expiresAt) : NaN;
+    if (Number.isFinite(expiryMs)) context.expiresAt = new Date(expiryMs).toISOString();
+    if (result.token && context.repo?.includes(result.token)) context.repo = null;
+    if (result.token && context.subject?.includes(result.token)) context.subject = "[REDACTED]";
     return { token: result.token, expires_at: result.expiresAt, identity: result.identity,
       commit_identity: result.commitIdentity, access: parsed.access, repo: parsed.identity === "app" ? parsed.repo : null };
   });
