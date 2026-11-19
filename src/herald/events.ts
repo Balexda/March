@@ -57,7 +57,26 @@ export interface ReviewRequestRecord {
   reason: typeof REVIEW_REQUEST_REASONS[number];
 }
 
+export const REVIEW_BACKOFF_CAUSES = ["http_429", "rate_limited_comment", "paused_comment", "post_failed", "reset"] as const;
+
+export interface ReviewBackoffRecord {
+  reviewer: ReviewRequestRecord["reviewer"];
+  until: string;
+  attempts: number;
+  cause: typeof REVIEW_BACKOFF_CAUSES[number];
+  /** Time of the underlying signal, which can precede event ingestion. */
+  signalAt?: string;
+  /** Stable identity of a sensed throttle notice. */
+  noticeId?: string;
+  /**
+   * A fresh review observed too late to clear the current throttle. The record
+   * otherwise repeats the active back-off; only the reset boundary advances.
+   */
+  resetObservedAt?: string;
+}
+
 export type EventBody =
+  | ({ type: "review.backoff" } & ReviewBackoffRecord)
   | ({ type: "review.requested" } & ReviewRequestRecord)
   // ── Observation events (Herald) ─────────────────────────────────────────
   /** Per-tick marker; carries the observe wall-clock for `/status`. */
@@ -250,6 +269,7 @@ export function entityRefOf(body: EventBody): EntityRef {
     case "state.error":
     case "state.ok":
     case "admin.event.appended":
+    case "review.backoff":
       return { kind: "system", id: "all" };
   }
 }
@@ -672,6 +692,21 @@ export interface MultiProfileState {
   seq: number;
   ts: string;
   byProfile: Record<string, SystemState>;
+  reviewBackoffs?: Partial<Record<ReviewRequestRecord["reviewer"], ReviewBackoffRecord & { seq: number; ts: string }>>;
+  reviewNoticeIds?: Record<string, true>;
+  /** Latest reset signal time per reviewer; notices at or before it are stale. */
+  reviewResetBoundaries?: Partial<Record<ReviewRequestRecord["reviewer"], string>>;
+  latestReviewRequests?: Partial<Record<ReviewRequestRecord["reviewer"], ReviewRequestRecord & { profile: string; seq: number }>>;
+}
+
+/**
+ * True when a stored snapshot predates the account-wide review indexes: it
+ * holds review intents but no `latestReviewRequests`. Such a snapshot cannot
+ * be folded forward correctly, so the caller replays the log from the start.
+ */
+export function snapshotLacksReviewIndex(state: MultiProfileState): boolean {
+  return !state.latestReviewRequests &&
+    Object.values(state.byProfile ?? {}).some((sys) => (sys.reviewRequests?.length ?? 0) > 0);
 }
 
 /** A fresh, empty multi-profile projection. */
@@ -687,6 +722,20 @@ export function emptyMultiProfileState(): MultiProfileState {
 export function reduceMulti(multi: MultiProfileState, event: HeraldEvent): MultiProfileState {
   const sys = (multi.byProfile[event.profile] ??= emptySystemState());
   reduce(sys, event);
+  if (event.type === "review.backoff") {
+    const { reviewer, until, attempts, cause, signalAt, noticeId, resetObservedAt, seq, ts } = event;
+    (multi.reviewBackoffs ??= {})[reviewer] = { reviewer, until, attempts, cause, signalAt, noticeId, seq, ts };
+    if (noticeId) (multi.reviewNoticeIds ??= {})[noticeId] = true;
+    const boundary = cause === "reset" ? signalAt ?? ts : resetObservedAt;
+    if (boundary) {
+      const resets = (multi.reviewResetBoundaries ??= {});
+      if (!(Date.parse(resets[reviewer] ?? "") >= Date.parse(boundary))) resets[reviewer] = boundary;
+    }
+  }
+  if (event.type === "review.requested") {
+    const { sliceId, pr, reviewer, headSha, at, reason, profile, seq } = event;
+    (multi.latestReviewRequests ??= {})[reviewer] = { sliceId, pr, reviewer, headSha: headSha.toLowerCase(), at, reason, profile, seq };
+  }
   multi.seq = event.seq;
   multi.ts = event.ts;
   return multi;

@@ -6,7 +6,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
-import { emptySystemState } from "../../herald/events.js";
+import { emptyMultiProfileState, emptySystemState } from "../../herald/events.js";
 import type { ProfileClient } from "../../herald/profiles/client.js";
 import type { ProfileRecord } from "../../herald/profiles/types.js";
 import { emitTesseraSpan } from "../../observability/tessera-trace.js";
@@ -15,7 +15,7 @@ import { configureLoopRuntime, getLoopSnapshot, runTickOnce } from "./runtime.js
 const { snapshotFor, append } = vi.hoisted(() => ({ snapshotFor: vi.fn(), append: vi.fn() }));
 vi.mock("./clients/herald.js", () => ({
   LegateHerald: class {
-    consume = vi.fn();
+    consume = vi.fn(async () => emptyMultiProfileState());
     snapshotFor = snapshotFor;
     append = append;
     takeRecoveryRequests = () => [];

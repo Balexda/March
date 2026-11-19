@@ -113,6 +113,16 @@ describe("emitActionEventSpan", () => {
 });
 
 describe("review request telemetry", () => {
+  it("counts new rate-limit hits without counting deadline refusals as hits", () => {
+    const decisions = vi.fn();
+    const hits = vi.fn();
+    const refusal = { kind: "review_request", outcome: "backoff" };
+    recordActionEventMetrics(refusal, vi.fn(), decisions, hits);
+    recordActionEventMetrics({ ...refusal, rate_limit_hit: true }, vi.fn(), decisions, hits);
+    expect(decisions.mock.calls).toEqual([["coderabbit", "backoff"], ["coderabbit", "backoff"]]);
+    expect(hits.mock.calls).toEqual([["coderabbit"]]);
+  });
+
   it.each([
     ["requested", false], ["failed", true], ["cap_exhausted", true], ["backoff", false],
   ])("records %s on the slice trace and counts it by reviewer and outcome", (outcome, error) => {

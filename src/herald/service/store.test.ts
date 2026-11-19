@@ -105,6 +105,33 @@ describe.skipIf(!sqliteAvailable)("EventStore", () => {
   });
 });
 
+describe.skipIf(!sqliteAvailable)("EventStore review-index snapshot compatibility", () => {
+  it("replays the log when a snapshot predates the account-wide review intent index", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "herald-review-index-"));
+    const dbPath = path.join(dir, "events.db");
+    const request = {
+      type: "review.requested", sliceId: "s1", pr: 7, reviewer: "coderabbit",
+      headSha: "a".repeat(40), at: "2026-11-16T23:00:00Z", reason: "initial",
+    } as EventBody;
+    const a = new EventStore({ dbPath, snapshotEvery: 1 });
+    a.append({ source: "legate", profile: "p", ...request } as AppendEventInput);
+    a.close();
+    // Rewrite the snapshot the way pre-index Herald stored it.
+    const db = new (getDatabaseSync())(dbPath);
+    const row = db.prepare("SELECT seq, state FROM snapshots ORDER BY seq DESC LIMIT 1").get() as { seq: number; state: string };
+    const legacy = JSON.parse(row.state);
+    delete legacy.latestReviewRequests;
+    db.prepare("UPDATE snapshots SET state = ? WHERE seq = ?").run(JSON.stringify(legacy), row.seq);
+    db.close();
+
+    const b = new EventStore({ dbPath });
+    expect(b.multiProjection().latestReviewRequests?.coderabbit).toMatchObject({ profile: "p", pr: 7, seq: 1 });
+    expect(b.multiStateAt(1).latestReviewRequests?.coderabbit).toMatchObject({ pr: 7 });
+    b.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+});
+
 describe.skipIf(!sqliteAvailable)("EventStore multi-profile", () => {
   const legate = (profile: string, body: EventBody): AppendEventInput =>
     ({ source: "legate", profile, ...body } as AppendEventInput);

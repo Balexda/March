@@ -15,6 +15,7 @@ import { emitLoopLog as defaultEmitLoopLog, type LoopLogSeverity } from "../../o
 import {
   recordDependencyUnblock as defaultRecordDependencyUnblock,
   recordReviewRequest as defaultRecordReviewRequest,
+  recordReviewRateLimit as defaultRecordReviewRateLimit,
   type DependencyUnblockOutcome,
   type LoopMetricsSnapshot,
   type LoopTickActivity,
@@ -47,10 +48,12 @@ export function recordActionEventMetrics(
   event: any,
   record: typeof defaultRecordDependencyUnblock = defaultRecordDependencyUnblock,
   recordReview: typeof defaultRecordReviewRequest = defaultRecordReviewRequest,
+  recordRateLimit: typeof defaultRecordReviewRateLimit = defaultRecordReviewRateLimit,
 ): void {
   if (!event || typeof event !== "object") return;
   if (event.kind === "review_request") {
     recordReview("coderabbit", event.outcome);
+    if (event.rate_limit_hit === true) recordRateLimit("coderabbit");
     return;
   }
   if (event.kind !== "dependency_merge" && event.kind !== "dependency_merge_failure") return;
@@ -140,7 +143,7 @@ export function emitActionEventSpan(event: any, emit: LoopSpanEmitter = defaultE
       error: event.outcome === "failed" || event.outcome === "cap_exhausted",
       attributes: {
         "march.slice_id": sliceId,
-        "march.task_type": "forge",
+        "march.task_type": event.task_type ?? "forge",
         "march.review.reviewer": "coderabbit",
         "march.review.outcome": event.outcome,
         "march.review.reason": event.reason,

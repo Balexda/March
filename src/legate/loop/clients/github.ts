@@ -8,7 +8,7 @@ import { resolveOriginRepo } from "../../../shared/github-remote.js";
 import { execText } from "./exec.js";
 
 export class LegateGitHubError extends Error {
-  constructor(readonly status?: number) {
+  constructor(readonly status?: number, readonly retryAt?: string, readonly rateLimited = status === 429) {
     super(status ? `GitHub command failed (HTTP ${status})` : "GitHub command failed");
   }
 }
@@ -56,7 +56,20 @@ async function runScopedGh(repo: string, args: string[], cwd: string | undefined
     const stderr = (error as { stderr?: string }).stderr ?? "";
     const status = /^gh: [^\r\n]*\(HTTP (\d{3})\)\s*$/m.exec(stderr)?.[1]
       ?? /^(?:gh: )?HTTP (\d{3})(?=[:\s]|$)/m.exec(stderr)?.[1];
-    throw new LegateGitHubError(status ? Number(status) : undefined);
+    const code = status ? Number(status) : undefined;
+    if (args[0] === "api" && args.includes("--include") && (code === 429 || code === 403)) {
+      const stdout = (error as { stdout?: string }).stdout ?? "";
+      const [headers, ...body] = stdout.split(/\r?\n\r?\n/);
+      const retryAfter = /^retry-after:[ \t]*(.+)$/im.exec(headers)?.[1]?.trim();
+      const remaining = /^x-ratelimit-remaining:[ \t]*(\d+)/im.exec(headers)?.[1];
+      if (code === 429 || retryAfter || remaining === "0" || /secondary rate limit/i.test(body.join("\n"))) {
+        const reset = /^x-ratelimit-reset:[ \t]*(\d+)/im.exec(headers)?.[1];
+        const retryMs = /^\d+$/.test(retryAfter ?? "") ? Date.now() + Number(retryAfter) * 1000
+          : retryAfter ? Date.parse(retryAfter) : remaining === "0" && reset ? Number(reset) * 1000 : NaN;
+        throw new LegateGitHubError(code, Math.abs(retryMs) <= 8.64e15 ? new Date(retryMs).toISOString() : undefined, true);
+      }
+    }
+    throw new LegateGitHubError(code);
   } finally {
     await rm(configDir, { recursive: true, force: true });
   }

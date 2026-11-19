@@ -109,3 +109,20 @@ slice ID, positive PR number, reviewer (`coderabbit` or `copilot`), 40-hex
 profile's `reviewRequests` history returned by `GET /state`. Repeated attempts
 remain separate records. Legate uses `GET /state?all=1` and the global event
 stream to recover the UTC daily budget across profiles.
+
+## Reviewer back-off
+
+`POST /events` accepts Legate's `review.backoff` transition with a profile,
+reviewer (`coderabbit` or `copilot`), UTC deadline `until`, nonnegative integer
+`attempts`, and cause `http_429`, `rate_limited_comment`, `paused_comment`,
+`post_failed`, or `reset`. Only a reset has zero attempts. Optional `signalAt`
+(UTC) and `noticeId` preserve the observation time and notice identity for replay.
+The profile identifies the observer. The cross-profile projection
+(`GET /state?all=1`) keeps the latest event by stream sequence per reviewer
+in `reviewBackoffs`, processed notice IDs in `reviewNoticeIds`, the latest
+reset signal time per reviewer in `reviewResetBoundaries` (a reset's `signalAt`,
+or the optional `resetObservedAt` that Legate adds when it repeats an active
+throttle to record a fresh review that arrived too late to clear it), and the latest
+intent per reviewer in `latestReviewRequests`. A later throttle record does not
+clear the reset boundary. Legate ignores notices created at or before it. A log without back-off events
+has no active reviewer back-off.

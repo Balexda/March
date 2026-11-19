@@ -3290,6 +3290,17 @@
           "legendFormat": "{{outcome}}",
           "range": true,
           "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "sum by (reviewer) (rate(march_legate_review_rate_limited_total[$__rate_interval]))",
+          "legendFormat": "{{reviewer}} rate-limit hits",
+          "range": true,
+          "refId": "B"
         }
       ],
       "title": "CodeRabbit re-review requests by outcome",

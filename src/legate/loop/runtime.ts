@@ -39,7 +39,8 @@ import { execLegateGh, LegateGitHubError } from "./clients/github.js";
 import { runTick as coordinatorRunTick } from "./coordinator.js";
 import { resolveMaxConcurrentSpawns } from "./meta.js";
 import { SpawnBreaker } from "./spawn-breaker.js";
-import { createSpawnBudget, liveSpawnCount, type SpawnBudget } from "./pure/slice.js";
+import { createSpawnBudget, liveSpawnCount, taskTypeForSlice, type SpawnBudget } from "./pure/slice.js";
+import { CodeRabbitBackoff, reviewSignals, verifyStartupIntent, type ReviewPostOutcome } from "./handlers/review-backoff.js";
 import { reviewRequestLimits, type ReviewRequestHistory } from "./handlers/coderabbit-rereview.js";
 import { markedCodeRabbitHead } from "../../observe/coderabbit-review.js";
 import { runHeartbeat } from "./heartbeat.js";
@@ -495,7 +496,21 @@ async function commentOnPrGh(repoPath: string, prNumber: number, body: string, s
   await execLegateGh("write", ["pr", "comment", String(prNumber), "--body", body], repoPath, sliceId);
 }
 
-async function findCodeRabbitTrigger(repoPath: string, prNumber: number, head: string, sliceId: string): Promise<string | undefined> {
+async function postCodeRabbitTrigger(repoPath: string, prNumber: number, body: string, sliceId: string): Promise<ReviewPostOutcome> {
+  try {
+    await execLegateGh("write", [
+      "api", "--include", "-X", "POST", `repos/{owner}/{repo}/issues/${prNumber}/comments`, "-f", `body=${body}`,
+    ], repoPath, sliceId);
+    return { ok: true };
+  } catch (error) {
+    if (error instanceof LegateGitHubError && error.rateLimited) {
+      return { ok: false, kind: "rate_limited", resetAt: error.retryAt };
+    }
+    return { ok: false, kind: "failed", detail: String(error) };
+  }
+}
+
+async function findCodeRabbitTrigger(repoPath: string, prNumber: number, head: string, sliceId: string, since = -Infinity): Promise<string | undefined> {
   const out = await execLegateGh("read", [
     "api", "--paginate", "--slurp", `repos/{owner}/{repo}/issues/${prNumber}/comments?per_page=100`,
   ], repoPath, sliceId);
@@ -505,9 +520,12 @@ async function findCodeRabbitTrigger(repoPath: string, prNumber: number, head: s
   }
   let earliest: string | undefined;
   for (const comment of pages.flat()) {
-    if (markedCodeRabbitHead(comment?.body) !== head) continue;
+    if (typeof comment?.body !== "string") throw new Error("Incomplete PR comment history");
+    if (markedCodeRabbitHead(comment.body) !== head) continue;
     if (!Number.isFinite(Date.parse(comment.created_at))) throw new Error("Trigger missing GitHub timestamp");
-    if (!earliest || Date.parse(comment.created_at) < Date.parse(earliest)) earliest = comment.created_at;
+    if (Date.parse(comment.created_at) >= since && (!earliest || Date.parse(comment.created_at) < Date.parse(earliest))) {
+      earliest = comment.created_at;
+    }
   }
   return earliest;
 }
@@ -754,7 +772,7 @@ async function tickProfile(rt: ProfileRuntime, history: ReviewRequestHistory, sp
       now,
       appendIntent: (record) => herald.append(meta.profile, { type: "review.requested", ...record }),
       findTrigger: findCodeRabbitTrigger,
-      commentOnPr: commentOnPrGh,
+      commentOnPr: postCodeRabbitTrigger,
     },
     requeue: {
       closePr: closePrGh,
@@ -819,8 +837,11 @@ async function tickProfile(rt: ProfileRuntime, history: ReviewRequestHistory, sp
   return tally;
 }
 
-// Multi-profile tick: list the registered profiles, drain the shared Herald
-// stream ONCE, then run each profile's two-stage tick isolated in try/catch.
+const codeRabbitBackoff = new CodeRabbitBackoff((profile, record, id) =>
+  legateHerald().append(profile, { type: "review.backoff", ...record, id }),
+);
+
+// Drain the shared Herald stream once, then run each profile in isolation.
 async function tick() {
   let profiles: ProfileRecord[];
   try {
@@ -846,8 +867,9 @@ async function tick() {
   for (const profile of [...runtimes.keys()]) if (!active.has(profile)) runtimes.delete(profile);
 
   // One drain of the single multiplexed stream feeds every profile's fold.
+  let projection;
   try {
-    await legateHerald().consume();
+    projection = await legateHerald().consume();
   } catch (err: any) {
     emitLoopLog({
       severity: "ERROR",
@@ -857,9 +879,40 @@ async function tick() {
     return;
   }
 
+  const profilesByName = new Map(profiles.map((profile) => [profile.profile, profile]));
+  // Read the same PR snapshots as senseFromHerald before any profile can post.
+  const signals = profiles.flatMap((profile) => Object.entries(projection.byProfile[profile.profile]?.slices ?? {})
+    .flatMap(([sliceId, slice]) => reviewSignals(profile.profile, profile.repoName, sliceId, slice.pr)));
+  const reviewAt = now();
+  await codeRabbitBackoff.beginTick(projection, signals, Date.parse(reviewAt), (intent) =>
+    verifyStartupIntent(intent, projection, profilesByName, findCodeRabbitTrigger),
+  (target, outcome, detail, rateLimitHit) => {
+    const event = {
+      ts: reviewAt, kind: "review_request", profile: target.profile, slice_id: target.sliceId,
+      pr_number: target.pr,
+      task_type: taskTypeForSlice(target.sliceId, projection.byProfile[target.profile]?.slices[target.sliceId]) ?? "unknown",
+      action: outcome === "backoff" ? "review-request-deferred" : "review-request-failed",
+      outcome, detail, rate_limit_hit: rateLimitHit, reason: "account_backoff",
+    };
+    const profile = profilesByName.get(target.profile);
+    if (profile) {
+      const { meta } = runtimeFor(profile);
+      try {
+        append(meta, meta.processor_events_path, event);
+        return;
+      } catch (error) {
+        logTickError(error, target.profile);
+      }
+    }
+    emitActionEventSpan(event);
+    emitActionEventLog(event);
+    recordActionEventMetrics(event);
+  });
+
   const reviewHistory: ReviewRequestHistory = {
+    backoff: codeRabbitBackoff,
     byProfile: Object.assign(Object.create(null), Object.fromEntries(
-      Object.entries(legateHerald().projection?.byProfile ?? {})
+      Object.entries(projection.byProfile)
         .map(([profile, state]) => [profile, [...(state.reviewRequests ?? [])]]),
     )),
   };

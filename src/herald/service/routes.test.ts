@@ -138,6 +138,28 @@ describe.skipIf(!sqliteAvailable)("herald routes", () => {
     expect(bad.statusCode).toBe(400);
   });
 
+  it("persists account-wide back-off and retries a duplicate update idempotently", async () => {
+    const { app, store } = await buildApp();
+    close = async () => { await app.close(); store.close(); };
+    const until = "2026-11-16T23:30:00.000Z";
+    const hit = {
+      type: "review.backoff", profile: "a", id: "hit", reviewer: "coderabbit",
+      until, attempts: 1, cause: "rate_limited_comment", noticeId: "coderabbit:123",
+    };
+    for (const payload of [
+      hit, { ...hit, profile: "b", id: "reset", attempts: 0, cause: "reset", noticeId: undefined }, hit,
+    ]) {
+      expect((await app.inject({ method: "POST", url: "/events", payload })).statusCode).toBe(201);
+    }
+    const replay = await app.inject({ method: "GET", url: "/state?all=1&at=2" });
+    expect(replay.json()).toMatchObject({
+      seq: 2,
+      reviewBackoffs: { coderabbit: { cause: "reset", attempts: 0, seq: 2 } },
+      reviewNoticeIds: { "coderabbit:123": true },
+    });
+    expect(store.multiProjection().seq).toBe(2);
+  });
+
   it("POST /steward-report records a steward self-report event", async () => {
     const { app, store } = await buildApp();
     close = async () => { await app.close(); store.close(); };

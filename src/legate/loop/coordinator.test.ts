@@ -1,6 +1,7 @@
 /**
  * @l1 @deterministic @ci
  */
+import { CodeRabbitBackoff } from "./handlers/review-backoff.js";
 import { describe, expect, it, vi } from "vitest";
 import { foldEventsMulti, type HeraldEvent, type ReviewRequestRecord } from "../../herald/events.js";
 import { runTick, type CoordinatorDeps } from "./coordinator.js";
@@ -60,7 +61,7 @@ describe("coordinator runTick", () => {
   it("uses durable CodeRabbit intent on a restarted tick and shares the daily cap", async () => {
     const head = "a".repeat(40);
     const events: HeraldEvent[] = [];
-    const commentOnPr = vi.fn(async () => {});
+    const commentOnPr = vi.fn(async () => ({ ok: true as const }));
     const appendIntent = async (record: ReviewRequestRecord) => {
       events.push({
         type: "review.requested", profile: "p", source: "legate",
@@ -80,7 +81,7 @@ describe("coordinator runTick", () => {
       const folded = foldEventsMulti(events);
       d.coderabbitRereview = {
         limits: { waitMs: 30 * 60_000, dailyCap: 3 },
-        history: { byProfile: { p: folded.byProfile.p?.reviewRequests ?? [] } },
+        history: { byProfile: { p: folded.byProfile.p?.reviewRequests ?? [] }, backoff: new CodeRabbitBackoff(vi.fn()) },
         appendIntent, commentOnPr, findTrigger: async () => undefined,
       };
       return (await runTick(d)).results.coderabbitRereview;

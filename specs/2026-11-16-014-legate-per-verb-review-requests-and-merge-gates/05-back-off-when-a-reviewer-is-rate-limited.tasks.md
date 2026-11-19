@@ -18,7 +18,7 @@
 
 ### Tasks
 
-- [ ] **Persist account-wide reviewer back-off**
+- [x] **Persist account-wide reviewer back-off**
 
   Add the Reviewer Back-off event from data model entity 6 to Herald ingestion, the event union, and the multi-profile fold. Feed the resulting state into Legate's shared review history for AS 5.2 and AS 5.5.
 
@@ -27,7 +27,7 @@
   - The latest event for a reviewer wins across profiles in event order. Replay restores the deadline and attempts, including a reset. An acknowledged update is visible to subsequent request decisions in the same tick.
   - Update the Herald and Legate subsystem contracts for the new event and its account-wide scope.
 
-- [ ] **Record throttling signals and pace request retries**
+- [x] **Record throttling signals and pace request retries**
 
   Extend the CodeRabbit review-request path to consume the typed outcomes of posting and the reviewer notices already gathered by sensing. Use the existing bounded exponential back-off helper for AS 5.1–5.5.
 
@@ -38,7 +38,7 @@
   - Recovery after a restart is anchored on the durable request intent, which is recorded before every post. On startup, the reviewer's latest CodeRabbit intent may have no later back-off record, no answering review, and no March trigger found by the complete trigger-comment lookup. In that case Legate treats the post outcome as unknown and refuses all posts to that reviewer. It first persists a `post_failed` back-off: attempts one above the folded count, with the exponential delay measured from the intent's `at`. Posting resumes only after that update persists. If the trigger lookup is incomplete or fails, Legate posts nothing to that reviewer that tick.
   - Deterministic coverage for SC-006 proves stated resets, exponential delay, suppression across profiles and restart, and the absence of fallback to Copilot. Copilot request implementation belongs to US7.
 
-- [ ] **Clear pacing after a fresh review**
+- [x] **Clear pacing after a fresh review**
 
   Observe review recovery even when the reviewer is cooling down or there is no eligible request, as required by AS 5.6.
 
@@ -46,7 +46,7 @@
   - A new review by the affected reviewer on the current head after the back-off signal resets nonzero attempts durably. Stale reviews cannot clear newer back-off.
   - Sensing and merge-gate evaluation still use incoming reviews during back-off. Test that a qualifying verdict can satisfy the gate and that the reset survives replay.
 
-- [ ] **Report back-off outcomes in the slice trace**
+- [x] **Report back-off outcomes in the slice trace**
 
   Extend the existing review request telemetry for AS 5.7 and align the Legate contract with the emitted signals.
 

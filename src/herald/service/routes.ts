@@ -12,7 +12,7 @@ import {
 } from "../../observability/herald-metrics.js";
 import { createCastraClientFromEnv } from "../../castra/client.js";
 import type { EventStore } from "./store.js";
-import { REVIEW_REQUEST_REASONS, type AppendEventInput, type EventType } from "../events.js";
+import { REVIEW_BACKOFF_CAUSES, REVIEW_REQUEST_REASONS, type AppendEventInput, type EventType } from "../events.js";
 
 /** Snapshot of the server's last observe tick, surfaced on `/status`. */
 export interface ObserveStatus {
@@ -53,6 +53,7 @@ const EVENT_TYPES: ReadonlySet<EventType> = new Set<EventType>([
   "state.error",
   "state.ok",
   "review.requested",
+  "review.backoff",
   "slice.pr.changed",
   "slice.output.changed",
   "session.changed",
@@ -106,6 +107,11 @@ function parseNonNegInt(raw: unknown, fallback: number): number | null {
 export type EventValidation =
   | { readonly ok: true; readonly input: AppendEventInput }
   | { readonly ok: false; readonly error: string };
+
+function isUtcTimestamp(value: unknown): value is string {
+  return typeof value === "string" && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/.test(value) &&
+    Number.isFinite(Date.parse(value)) && new Date(value).toISOString().slice(0, 19) === value.slice(0, 19);
+}
 
 /**
  * Validate a `POST /events` body against the shared taxonomy. A known `type`
@@ -185,15 +191,24 @@ export function validateEvent(body: Record<string, unknown>): EventValidation {
       }
     }
   }
+  if (type === "review.backoff") {
+    const { reviewer, until, attempts, cause, signalAt, noticeId, resetObservedAt } = body;
+    if ((reviewer !== "coderabbit" && reviewer !== "copilot") ||
+        !isUtcTimestamp(until) || typeof attempts !== "number" || !Number.isSafeInteger(attempts) || attempts < 0 ||
+        !REVIEW_BACKOFF_CAUSES.some((candidate) => candidate === cause) || (cause === "reset") !== (attempts === 0) ||
+        (signalAt !== undefined && !isUtcTimestamp(signalAt)) ||
+        (resetObservedAt !== undefined && (!isUtcTimestamp(resetObservedAt) || cause === "reset")) ||
+        (noticeId !== undefined && (typeof noticeId !== "string" || !noticeId.trim() || noticeId.length > 512))) {
+      return { ok: false, error: "invalid reviewer back-off record." };
+    }
+  }
   if (type === "review.requested") {
     const { pr, reviewer, headSha, at, reason } = body;
     if (typeof body.sliceId !== "string" || !body.sliceId.trim() ||
         typeof pr !== "number" || !Number.isSafeInteger(pr) || pr < 1 ||
         (reviewer !== "coderabbit" && reviewer !== "copilot") ||
         typeof headSha !== "string" || !/^[a-f0-9]{40}$/i.test(headSha) ||
-        typeof at !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/.test(at) ||
-        !Number.isFinite(Date.parse(at)) ||
-        new Date(at).toISOString().slice(0, 19) !== at.slice(0, 19) ||
+        !isUtcTimestamp(at) ||
         !REVIEW_REQUEST_REASONS.some((candidate) => candidate === reason)) {
       return { ok: false, error: "invalid review request PR, reviewer, headSha, UTC timestamp or reason." };
     }
