@@ -65,7 +65,7 @@
 
 ### Tasks
 
-- [ ] **Render list output from read views**
+- [x] **Render list output from read views**
 
   Update the `brood list` command in `src/cli/program.ts` and related CLI tests to render the service's `BroodReadView` list response. Table output should expose the Story 1 operator fields, while JSON mode should emit the stable scriptable view described by AS 1.1 and AS 1.4.
 
@@ -76,7 +76,7 @@
   - Empty matches exit successfully with the agreed empty-result presentation
   - CLI rendering does not mutate service, Docker, worktree, branch, or archive state
 
-- [ ] **Wire list filters and reconciliation flags**
+- [x] **Wire list filters and reconciliation flags**
 
   Add CLI parsing and client plumbing for `--kind`, `--status`, `--reconcile`, and `--no-reconcile` on `march brood list`. Keep validation and liveness observation behind the Brood service so the CLI remains a thin read client for AS 1.2-1.5.
 
@@ -87,7 +87,7 @@
   - Explicit reconciliation flags override the default list mode
   - Invalid filter and unreachable-service failures surface as non-zero CLI errors without local fallback
 
-- [ ] **Preserve the CLI contract documentation**
+- [x] **Preserve the CLI contract documentation**
 
   Update the CLI-owned contract documentation that maps `march brood list`, if present, and keep help text aligned with the accepted flags. Scope the documentation to Story 1 so later Story 2 and Story 3 work remains clearly out of this slice.
 
