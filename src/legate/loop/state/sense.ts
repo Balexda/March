@@ -1,3 +1,4 @@
+import { TesseraClientError } from "../../../tessera/client.js";
 import type { LoopMeta } from "../meta.js";
 import type { LoopState, RequeueRequest, SliceExternalState, SmithyView } from "./types.js";
 import { looseSessionMatch, summarizeWorkers } from "../pure/session.js";
@@ -584,6 +585,7 @@ export async function senseObserved(deps: SenseDeps, prev: SystemState): Promise
     if (!session && !observeEscalatedNoSession) continue;
     const sessionId = session ? String(session.id) : "";
     const sliceLike = {
+      id: sliceId,
       pr: s.pr,
       branch: s.branch,
       worktree_path: s.worktreePath,
@@ -631,6 +633,7 @@ export async function senseObserved(deps: SenseDeps, prev: SystemState): Promise
         entry.pr = pr;
       }
     } catch (err: any) {
+      if (err instanceof TesseraClientError) throw err;
       entry.pr = { error: err?.message || String(err) };
     }
     // Output observation needs a live session (Castra session output). Skip it

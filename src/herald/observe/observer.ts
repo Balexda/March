@@ -1,3 +1,4 @@
+import { TesseraClientError } from "../../tessera/client.js";
 import { senseObserved, type SenseDeps } from "../../legate/loop/state/sense.js";
 import { startHeraldSpan } from "../../observability/herald-trace.js";
 import { recordHeraldSync } from "../../observability/herald-metrics.js";
@@ -25,9 +26,8 @@ export interface ObserverDeps {
    * — that is what makes freshly-merged work (e.g. a merged cut's `tasks.md`)
    * surface in the next observation. Wired by the server ONLY when Herald is in
    * sync mode (`MARCH_HERALD_SYNC=1`); `undefined` in read-only mode, where the
-   * observation runs against the local checkout as-is. A failure is logged +
-   * isolated (never fatal to the tick) so one diverged/offline repo can't stall
-   * the others.
+   * observation runs against the local checkout as-is. A sync failure can
+   * fall back to the local checkout. A Tessera failure aborts this profile only.
    */
   readonly syncDefaultBranch?: (repoPath: string, knownDefault?: string) => Promise<void>;
 }
@@ -149,9 +149,9 @@ export function describeChangeSpan(
 /**
  * Run this profile's default-branch sync before the observation read (#300),
  * when Herald is in sync mode (`deps.syncDefaultBranch` wired). The sync is
- * best-effort: a failure (no GitHub auth, gh outage, diverged local that won't
- * fast-forward) is swallowed so the tick still observes the local checkout, and
- * one repo's sync failure can't stall the profile or block the others. No-op when
+ * best-effort for transport or checkout failures, which leave the tick to
+ * observe the local checkout. Tessera failures abort the profile tick before
+ * it can emit observations. No-op when
  * sync is disabled or the repo path is unknown.
  *
  * A failure is made LOUD on every channel (#301 live-validation: the original
@@ -170,10 +170,11 @@ async function syncDefaultBranchBeforeObserve(deps: ObserverDeps): Promise<void>
     await deps.syncDefaultBranch(repoPath);
     recordHeraldSync("ok");
   } catch (err) {
+    recordHeraldSync("error");
+    if (err instanceof TesseraClientError) throw err;
     const detail = err instanceof Error ? err.message : String(err);
     const message = `default-branch sync failed for ${deps.profile}: ${detail} — observing against stale local repo`;
     deps.senseDeps.warn?.(message);
-    recordHeraldSync("error");
     // Bypass the file-only pino logger so the failure is visible in `docker logs`.
     process.stderr.write(`[herald] ${message}\n`);
   }
@@ -184,11 +185,11 @@ export async function runObservation(deps: ObserverDeps): Promise<ObserveResult>
   // Herald owns the default-branch sync (#300): pull origin's default branch
   // BEFORE the read so a freshly auto-merged cut's `tasks.md` surfaces in this
   // tick's `smithy status` (rather than drifting behind until an operator pulls).
-  // Wired only in sync mode; a sync failure is logged + isolated so it can never
-  // stall the observation or the other profiles' ticks.
-  await syncDefaultBranchBeforeObserve(deps);
-  const started = Date.now();
+  // Wired only in sync mode. The service isolates failures by profile.
+  const tickStarted = Date.now();
   try {
+    await syncDefaultBranchBeforeObserve(deps);
+    const started = Date.now();
     const loop = await senseObserved(deps.senseDeps, prev);
     const senseEndMs = Date.now();
     const durationMs = senseEndMs - started;
@@ -217,7 +218,11 @@ export async function runObservation(deps: ObserverDeps): Promise<ObserveResult>
     });
     return { observedAt: loop.ts, durationMs, appended };
   } catch (err) {
-    startHeraldSpan({ name: "herald.observe.failed", startTimeMs: started }).end({
+    startHeraldSpan({
+      name: "herald.observe.failed",
+      startTimeMs: tickStarted,
+      attributes: { "march.profile": deps.profile },
+    }).end({
       error: true,
     });
     throw err;

@@ -1,3 +1,5 @@
+import { createGitHubRead, repoFromOrigin, type GitHubReadClient } from "./github-read.js";
+import { TesseraClientError } from "../tessera/client.js";
 import { summarizeCodeRabbit, type CodeRabbitStanding } from "./coderabbit-review.js";
 import { execFile } from "node:child_process";
 import { CastraClient } from "../castra/client.js";
@@ -44,6 +46,8 @@ export interface SenseIoContext {
   /** Loaded loop meta (repo path, profile, worker group, …). */
   readonly meta: LoopMeta;
   readonly env?: NodeJS.ProcessEnv;
+  /** When set, run GitHub I/O with scoped app/read entitlements. */
+  readonly tessera?: GitHubReadClient;
   /** Castra client; defaults to one built from `env`. */
   readonly castra?: CastraClient;
   /** Timestamp source; defaults to ISO `now`. */
@@ -248,6 +252,12 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
   const env = ctx.env ?? process.env;
   const now = ctx.now ?? (() => new Date().toISOString());
   const warn = ctx.warn;
+  const github = ctx.tessera && createGitHubRead(ctx.tessera, env, execText);
+
+  function gh(args: string[], options: Record<string, unknown>, owner: string | null, sliceId?: string) {
+    if (!github) return execText("gh", args, options);
+    return github.gh(owner, args, sliceId);
+  }
   let castraClient = ctx.castra;
   const castra = (): CastraClient => (castraClient ??= new CastraClient({ env }));
   // The repo's `owner/name` never changes for a checkout, and this bundle is built
@@ -276,6 +286,17 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
     const repoPath = state?.repo?.path || meta.repo?.path;
     // Don't cache a "no path" miss — it's a caller/config gap, not a resolved fact.
     if (typeof repoPath !== "string" || repoPath.length === 0) return null;
+    if (github) {
+      try {
+        const remote = await execText("git", ["config", "--local", "--get", "remote.origin.url"], {
+          cwd: repoPath, env, timeout: 5_000,
+        });
+        ownerCache = repoFromOrigin(remote) ?? null;
+      } catch {
+        ownerCache = null;
+      }
+      return ownerCache;
+    }
     try {
       const out = await execText("gh", ["repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"], {
         cwd: repoPath,
@@ -293,7 +314,7 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
     const args = ["pr", "view", number, "--json", fields];
     const owner = await repoOwner(state);
     if (typeof owner === "string" && owner.length > 0) {
-      args.push("-R", owner);
+      args.push("-R", github ? `github.com/${owner}` : owner);
     }
     const options: Record<string, unknown> = {};
     const repoPath = state?.repo?.path || meta.repo?.path;
@@ -306,6 +327,7 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
   async function queryReviewThreads(
     owner: string | null,
     prNumberValue: any,
+    sliceId?: string,
   ): Promise<{
     threads: any[];
     reviews: any[];
@@ -330,7 +352,7 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
     if (!owner) return empty;
     const [repoOwnerName, repoName] = owner.split("/");
     if (!repoOwnerName || !repoName) return empty;
-    const out = await execText("gh", [
+    const out = await gh([
       "api",
       "graphql",
       "-F",
@@ -385,7 +407,7 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
     }
   }
 }`,
-    ]);
+    ], {}, owner, sliceId);
     const parsed = JSON.parse(out);
     const pr = parsed?.data?.repository?.pullRequest || {};
     const nodes = pr?.reviewThreads?.nodes || [];
@@ -477,15 +499,16 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
     };
   }
 
-  async function queryPrForBabysit(slice: any, state: any): Promise<any> {
+  async function queryPrForBabysit(slice: any, state: any, discovery = false): Promise<any> {
     const request = await ghPrArgs(
       slice,
       state,
-      "number,url,state,mergeable,reviewDecision,statusCheckRollup,headRefName,title,author,updatedAt",
+      "number,url,state,mergeable,reviewDecision,statusCheckRollup,headRefName,title,author,updatedAt" + (github && discovery ? ",isCrossRepository" : ""),
     );
     if (request.skipped) return request;
-    const summary = JSON.parse(await execText("gh", request.args, request.options));
-    const graphql = await queryReviewThreads(request.owner || (await repoOwner(state)), summary.number);
+    const summary = JSON.parse(await gh(request.args, request.options, request.owner, slice.id));
+    if (github && discovery && summary.isCrossRepository !== false) return null;
+    const graphql = await queryReviewThreads(request.owner || (await repoOwner(state)), summary.number, slice.id);
     const prAuthor = summary.author?.login || "";
     const annotated = graphql.threads.map((thread: any) => ({
       ...thread,
@@ -543,7 +566,7 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
     addBranchVariants(branches, slice.branch);
     if (slice.worktree_path) {
       try {
-        addBranchVariants(branches, await execText("git", ["-C", slice.worktree_path, "branch", "--show-current"]));
+        addBranchVariants(branches, await execText("git", ["-C", slice.worktree_path, "branch", "--show-current"], { timeout: 5_000 }));
       } catch {
         // Best-effort guard only; branch fields still protect PR discovery.
       }
@@ -561,23 +584,38 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
     const repoPath = state?.repo?.path || meta.repo?.path;
     if (!repoPath) return null;
     try {
-      const output = await castra().sessionOutput(meta.profile, sessionId);
+      const output = sessionId ? await castra().sessionOutput(meta.profile, sessionId) : "";
       const matches = output.match(/https:\/\/github\.com\/[^\s/]+\/[^\s/]+\/pull\/([0-9]+)/g) || [];
       if (matches.length > 0) {
         const url = matches[matches.length - 1];
         const number = url.split("/").pop();
-        const pr = await queryPrForBabysit({ pr: { number } }, state);
-        return pr?.skipped || !(await prMatchesSliceBranch(slice, pr)) ? null : pr;
+        const owner = github ? await repoOwner(state) : null;
+        if (!github || (owner && url.toLowerCase().startsWith(`https://github.com/${owner.toLowerCase()}/pull/`))) {
+          const pr = await queryPrForBabysit({ id: slice.id, pr: { number } }, state, true);
+          if (pr && !pr.skipped && await prMatchesSliceBranch(slice, pr)) return pr;
+          if (!github) return null;
+        }
       }
-    } catch {
+    } catch (err) {
+      if (err instanceof TesseraClientError) throw err;
       // fall through to branch-based lookup
     }
     try {
       const owner = await repoOwner(state);
-      const args = ["pr", "list", "--author", "@me", "--state", "open", "--json", "number,url,state,mergeable,headRefName,title,statusCheckRollup,createdAt"];
-      if (owner) args.push("-R", owner);
+      const args = ["pr", "list", ...(github ? [] : ["--author", "@me"]), "--state", "open", "--json",
+        "number,url,state,mergeable,headRefName,title,statusCheckRollup,createdAt" + (github ? ",isCrossRepository" : "")];
+      if (owner) args.push("-R", github ? `github.com/${owner}` : owner);
       const options = owner ? {} : { cwd: repoPath };
-      const list = JSON.parse(await execText("gh", args, options));
+      const expected = github ? await expectedPrBranches(slice) : undefined;
+      const list = [];
+      if (expected) {
+        for (const branch of expected) {
+          const results = JSON.parse(await gh([...args, "--head", branch, "--limit", "100"], options, owner, slice.id));
+          list.push(...results);
+        }
+      } else {
+        list.push(...JSON.parse(await gh(args, options, owner, slice.id)));
+      }
       if (!Array.isArray(list) || list.length === 0) return null;
       // #173: an escalated slice's last_action is the escalation timestamp, not a
       // fresh dispatch, so the recency floor would wrongly exclude an open PR
@@ -594,14 +632,18 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
       // would pass every candidate (a Promise is always truthy) and could adopt
       // a PR on the wrong branch.
       const matchFlags = await Promise.all(
-        candidates.map((candidate: any) => prMatchesSliceBranch(slice, candidate)),
+        candidates.map((candidate: any) =>
+          expected
+            ? candidate.isCrossRepository === false && expected.has(candidate.headRefName)
+            : prMatchesSliceBranch(slice, candidate)),
       );
       const branchMatches = candidates.filter((_candidate: any, i: number) => matchFlags[i]);
       const chosen = branchMatches
         .sort((a: any, b: any) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")))[0];
       if (!chosen) return null;
-      return await queryPrForBabysit({ pr: { number: chosen.number } }, state);
-    } catch {
+      return await queryPrForBabysit({ id: slice.id, pr: { number: chosen.number } }, state, true);
+    } catch (err) {
+      if (github) throw err;
       return null;
     }
   }
@@ -618,16 +660,16 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
    * leaves the overflow ungated — they fall through to a by-number detail fetch,
    * the same as today, so correctness holds, only the savings taper.
    *
-   * Returns `{error}` (never throws) when the owner can't be resolved or the query
+   * Except for scoped issuance failures, returns `{error}` when the owner can't be resolved or the query
    * fails, so the caller degrades to the always-fetch path instead of stranding.
    */
   async function listOpenPrs(state: any): Promise<OpenPrIndex | { error: string }> {
     const owner = await repoOwner(state);
-    if (!owner) return { error: "repo owner unavailable" };
-    const [repoOwnerName, repoName] = owner.split("/");
-    if (!repoOwnerName || !repoName) return { error: `unparseable repo owner: ${owner}` };
+    if (!owner && !github) return { error: "repo owner unavailable" };
+    const [repoOwnerName, repoName] = owner?.split("/") ?? [];
+    if (owner && (!repoOwnerName || !repoName)) return { error: `unparseable repo owner: ${owner}` };
     try {
-      const out = await execText("gh", [
+      const out = await gh([
         "api",
         "graphql",
         "-F",
@@ -642,7 +684,7 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
     }
   }
 }`,
-      ]);
+      ], {}, owner);
       const nodes = JSON.parse(out)?.data?.repository?.pullRequests?.nodes;
       const index: OpenPrIndex = new Map();
       if (Array.isArray(nodes)) {
@@ -654,6 +696,7 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
       }
       return index;
     } catch (err: any) {
+      if (err instanceof TesseraClientError) throw err;
       return { error: err?.message || String(err) };
     }
   }
@@ -663,28 +706,37 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
     if (typeof repoPath !== "string" || repoPath.length === 0) {
       throw new Error("repo path is missing");
     }
+    const owner = github ? await repoOwner(state) : null;
+    const localOptions = github ? { cwd: repoPath, env, timeout: 5_000 } : { cwd: repoPath };
     let defaultBranch = state?.repo?.default_branch;
     if (!defaultBranch) {
       try {
-        defaultBranch = (await execText("git", ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"], { cwd: repoPath }))
+        defaultBranch = (await execText("git", ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"], localOptions))
           .trim()
           .replace(/^origin\//, "");
       } catch {
-        defaultBranch = (await execText("gh", ["repo", "view", "--json", "defaultBranchRef", "-q", ".defaultBranchRef.name"], { cwd: repoPath })).trim();
+        const target = github ? [`github.com/${owner}`] : [];
+        defaultBranch = (await gh(["repo", "view", ...target, "--json", "defaultBranchRef", "-q", ".defaultBranchRef.name"], localOptions, owner)).trim();
       }
     }
     if (!defaultBranch) throw new Error("could not determine default branch");
-    // Network ops (fetch/pull) get the SSH→HTTPS-token rewrite so they work in a
-    // container with no ssh client/key; `switch` is local and needs no auth.
-    const auth = gitHubAuthConfigArgs(env);
-    await execText("git", [...auth, "fetch", "origin", defaultBranch], { cwd: repoPath });
-    await execText("git", ["switch", defaultBranch], { cwd: repoPath });
-    await execText("git", [...auth, "pull", "--ff-only", "origin", defaultBranch], { cwd: repoPath });
+    if (github) {
+      const head = `refs/heads/${defaultBranch}`;
+      await execText("git", ["check-ref-format", head], localOptions);
+      await github.git(owner, repoPath, ["fetch", "--no-recurse-submodules"], `+${head}:refs/remotes/origin/${defaultBranch}`);
+      await execText("git", ["switch", "--", defaultBranch], localOptions);
+      await github.git(owner, repoPath, ["pull", "--ff-only", "--no-rebase", "--no-recurse-submodules"], head);
+    } else {
+      const auth = gitHubAuthConfigArgs(env);
+      await execText("git", [...auth, "fetch", "origin", defaultBranch], localOptions);
+      await execText("git", ["switch", defaultBranch], localOptions);
+      await execText("git", [...auth, "pull", "--ff-only", "origin", defaultBranch], localOptions);
+    }
     if (state?.repo && !state.repo.default_branch) state.repo.default_branch = defaultBranch;
     return {
       default_branch: defaultBranch,
       synced: true,
-      head: (await execText("git", ["rev-parse", "HEAD"], { cwd: repoPath })).trim(),
+      head: (await execText("git", ["rev-parse", "HEAD"], localOptions)).trim(),
     };
   }
 
