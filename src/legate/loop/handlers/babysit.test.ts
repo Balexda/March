@@ -399,6 +399,19 @@ describe("babysit auto-merge gate", () => {
       perSlice: { s: { recentOutput: { output: "" }, pr: clearPr(over) } },
     });
 
+  it("cold start (#600): an answered-but-unresolved thread and no pr_open_at still auto-merges, no review-fix", () => {
+    const answered = {
+      id: "t1",
+      needs_response: false,
+      last_comment_at: "2026-05-20T00:50:00Z",
+      comments: [{ id: "c1" }, { id: "c2" }],
+    };
+    const state = allClearState({ bot_approval_count: 1, unresolved_threads: [answered] });
+    state.mergePolicy = { defaults: { botApproval: true } };
+    state.sessions = [session("w", "stopped")];
+    expect(kindsOf(assess(state))).toEqual(["pr-snapshot", "pr-auto-merge"]);
+  });
+
   it("auto-merges an all-clear PR that has a human approval (default policy)", () => {
     const state = allClearState({ human_approval_count: 1 });
     const ds = assess(state);
