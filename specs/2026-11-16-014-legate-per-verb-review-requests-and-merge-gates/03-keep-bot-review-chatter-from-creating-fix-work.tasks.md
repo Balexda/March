@@ -18,7 +18,7 @@
 
 ### Tasks
 
-- [ ] **Classify reviewer conversation comments and March triggers**
+- [x] **Classify reviewer conversation comments and March triggers**
 
   Extend the classification in `src/observe/review-bot-comments.ts` using the classification portion of the Reviewer Adapter contract. Preserve existing CodeRabbit and Codex marker handling and cover AS 3.1, AS 3.2, AS 3.3, and AS 3.5.
 
@@ -27,7 +27,7 @@
   - An unrecognized conversation comment from a bot whose normalized login matches the reviewer's adapter classifies as status, with or without the `[bot]` suffix. This identity-based fallback works without a marker and leaves unrelated authors eligible to give feedback.
   - Recognize March's opening trigger marker and preserve existing command-first triggers. Marker-based exclusion requires the marker or command to open the comment. A human comment quoting either later in its body remains feedback.
 
-- [ ] **Keep reviewer chatter out of fix and merge decisions**
+- [x] **Keep reviewer chatter out of fix and merge decisions**
 
   Classify the full comment body in the shared PR sensing path in `src/observe/sense-io.ts`, before building bounded previews. Keep classified notices in the policy-free snapshot shape defined in the data model and preserve the separate inline-thread path for AS 3.4.
 

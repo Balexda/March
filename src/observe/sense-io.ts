@@ -5,8 +5,8 @@ import { gitHubAuthConfigArgs } from "../spawn/git-auth.js";
 import type { LoopMeta } from "../legate/loop/meta.js";
 import type { OpenPrIndex, SenseDeps, StaleRecheckTracker } from "../legate/loop/state/sense.js";
 import { createStaleRecheckTracker } from "../legate/loop/state/sense.js";
-import { isCodexReviewSummary, parseCodexReviewState, type CodexReviewState } from "./codex-review.js";
-import { isCodeRabbitComment, isReviewBotCommand } from "./review-bot-comments.js";
+import { parseCodexReviewState, type CodexReviewState } from "./codex-review.js";
+import { classifyReviewerComment, type ReviewerNotice } from "./review-bot-comments.js";
 import { readSmithyStatus } from "./smithy-status.js";
 
 /**
@@ -310,6 +310,7 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
     threads: any[];
     reviews: any[];
     comments: any[];
+    reviewerNotices: ReviewerNotice[];
     codexReview: CodexReviewState | null;
     headRefOid: string | null;
     mergeStateStatus: string | null;
@@ -320,6 +321,7 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
       threads: [],
       reviews: [],
       comments: [],
+      reviewerNotices: [],
       codexReview: null,
       headRefOid: null,
       mergeStateStatus: null,
@@ -423,59 +425,49 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
     // comment-id set is the authoritative half — the legate token shares the
     // PR-author identity, so neither author nor reaction alone is decisive).
     const commentNodes = Array.isArray(pr?.comments?.nodes) ? pr.comments.nodes : [];
-    // Codex's automatic review-status comment (one bot comment, edited in place as
-    // its review runs) is a status notice, not feedback. Left among the conversation
-    // comments it reads as a comment owing a reply: the legate dispatches a
-    // /smithy.fix turn for it and the steward posts a noise reply on every PR. It is
-    // dropped HERE, at sensing, so every consumer of `conversation_comments` agrees
-    // (the comment-fix dispatch and the `owes_comments` merge blocker). Matched on
-    // the body marker, not the author — Codex may also post real findings as
-    // comments, and those stay.
-    //
-    // Its machine-readable state is surfaced as `codex_review` instead. Unlike the
-    // drop, the state is read ONLY from a bot-authored summary: it is a per-commit
-    // review signal, so a commenter must not be able to forge it by pasting the
-    // markers. Codex keeps one summary per PR; should the sampled window ever hold
-    // several, the last (the connection is chronological, so the newest) decides.
     let codexReview: CodexReviewState | null = null;
-    for (const c of commentNodes) {
-      if (isCodexReviewSummary(c?.body) && isBotActor(c?.author)) codexReview = parseCodexReviewState(c.body);
-    }
-    // CodeRabbit's generated comments (summary, command acks, chat replies) and
-    // commands addressed to a review bot (`@coderabbitai review`) are dropped for
-    // the same reason: none is feedback the steward owes a reply. See
-    // `review-bot-comments.ts`.
-    const comments = commentNodes
-      .filter(
-        (c: any) =>
-          c &&
-          c.databaseId != null &&
-          !isCodexReviewSummary(c.body) &&
-          !isCodeRabbitComment(c.body) &&
-          !isReviewBotCommand(c.body),
-      )
-      .map((c: any) => {
-        const body = String(c.body || "");
-        return {
-          id: c.databaseId,
-          author: c.author?.login,
-          author_type: c.author?.__typename,
-          // Bounded to keep the /smithy.fix prompt + fold entry small; `url` (and
-          // `truncated`) let the worker read the rest, so a long request stays
-          // actionable instead of being silently clipped.
-          body_preview: body.slice(0, 280),
-          truncated: body.length > 280,
-          url: c.url,
-          created_at: c.createdAt,
-          reacted_eyes: (Array.isArray(c.reactionGroups) ? c.reactionGroups : []).some(
-            (g: any) => g?.content === "EYES" && g?.viewerHasReacted === true,
-          ),
-        };
+    const reviewerNotices: ReviewerNotice[] = [];
+    const comments = commentNodes.flatMap((c: any) => {
+      if (!c) return [];
+      const body = String(c.body || "");
+      const classification = classifyReviewerComment({
+        author: c.author?.login,
+        authorType: c.author?.__typename,
+        body,
+        createdAt: c.createdAt,
       });
+      if ("reviewer" in classification && classification.reviewer && typeof c.createdAt === "string") {
+        reviewerNotices.push({
+          reviewer: classification.reviewer,
+          kind: classification.kind,
+          created_at: c.createdAt,
+          ...(classification.resetAt ? { reset_at: classification.resetAt } : {}),
+        });
+      }
+      // Preserve Codex's newest verified summary as its legacy review state.
+      if ("reviewer" in classification && classification.reviewer === "codex") codexReview = parseCodexReviewState(body);
+      if (classification.kind !== "feedback" || c.databaseId == null) return [];
+      return [{
+        id: c.databaseId,
+        author: c.author?.login,
+        author_type: c.author?.__typename,
+        // Bounded to keep the /smithy.fix prompt + fold entry small; `url` (and
+        // `truncated`) let the worker read the rest, so a long request stays
+        // actionable instead of being silently clipped.
+        body_preview: body.slice(0, 280),
+        truncated: body.length > 280,
+        url: c.url,
+        created_at: c.createdAt,
+        reacted_eyes: (Array.isArray(c.reactionGroups) ? c.reactionGroups : []).some(
+          (g: any) => g?.content === "EYES" && g?.viewerHasReacted === true,
+        ),
+      }];
+    });
     return {
       threads,
       reviews: pr?.reviews?.nodes || [],
       comments,
+      reviewerNotices,
       codexReview,
       headRefOid: pr?.headRefOid || null,
       mergeStateStatus: pr?.mergeStateStatus || null,
@@ -519,9 +511,9 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
       thread_count: annotated.length,
       needs_response_count: annotated.filter((thread: any) => thread.needs_response).length,
       // Non-thread (conversation) comments — the legate dispatches /smithy.fix for
-      // any not yet acknowledged (:eyes:) / dispatched-for. See babysit. Codex's
-      // review-status comment is never among them (see queryReviewThreads).
+      // actionable feedback that has yet to be acknowledged or dispatched.
       conversation_comments: graphql.comments,
+      reviewer_notices: graphql.reviewerNotices,
       // Codex's code-review state (reviewed commit, status, unresolved findings),
       // or null when the sampled comments hold no Codex summary with a readable
       // state. Nothing gates on it yet: it is the per-commit signal a merge gate
