@@ -23,6 +23,8 @@ even when migration fallback is enabled for other consumers.
 
 | Environment variable | Current behavior |
 | --- | --- |
+| `TESSERA_CLIENT_KEYS_FILE` | Required path to client registrations. |
+| `TESSERA_POLICY_FILE` | Required path to entitlement grants. |
 | `TESSERA_GITHUB_APP_ID` | App id; absent id leaves app provider unconfigured. |
 | `TESSERA_GITHUB_APP_KEY_FILE` | PEM private key file; absent/empty key or missing file leaves provider unconfigured. Other read failures exit safely. |
 | `TESSERA_GITHUB_INSTALLATION_ID` | Optional positive integer installation override. |
@@ -30,12 +32,22 @@ even when migration fallback is enabled for other consumers.
 | `MARCH_TESSERA_LOG_DIR` | Durable JSONL directory; default `~/.march/logs`. |
 | `MARCH_OTEL` | Set `1` for telemetry; logs remain available when off. |
 
-US2 must supply production authentication and policy enforcement. This slice's
-production server denies every issuance request; no environment flag bypasses
-that boundary. Tests may inject an authorization boundary. Policy/client-key file
-loading belongs to US2. US3 owns secret-store provisioning, shared-HOME path
-validation, client-key distribution and stack startup ordering. No secret-store
-layout is selected here. User credentials belong to US7.
+Both authorization files must be readable regular files containing non-empty
+JSON arrays. An unset path, unreadable or empty file, or invalid entry causes
+`tessera serve` to exit nonzero before listening. Diagnostics identify the
+configuration variable and, for invalid entries, the row number.
+
+- Each registration has `client` and `key_sha256`. Names match
+  `^[a-z][a-z0-9-]{0,31}$` and digests contain 64 lowercase hexadecimal
+  characters. Names and digests are each unique. Tessera stores only key digests.
+- Each grant has a registered `client`, a non-empty `identities` array containing
+  `app` or `user`, and `max_access` of `read` or `write`. A grant that includes
+  `app` requires a `repos` array of `owner/name` or `owner/*` entries. Repository
+  matching is case-insensitive. Only `legate` can have a `user` grant.
+- Each request must match an explicit grant. An App request must satisfy the
+  identity, repository and access constraints of the same grant. A user request
+  requires the `legate` user grant. Repository and access limits apply to App
+  credentials.
 
 ### HTTP
 
@@ -43,12 +55,26 @@ layout is selected here. User credentials belong to US7.
 | --- | --- |
 | `GET /healthz` | Unauthenticated `200 {"status":"ok"}`, including unconfigured startup. |
 | `GET /status` | Unauthenticated service/uptime, provider states, soonest expiry and cache entry count. Never credentials or policy. |
-| `POST /v1/github/token` | Default `401 unauthorized`; injected authorized callers may issue an app/read or app/write token for exactly one `owner/name`. |
+| `POST /v1/github/token` | Authenticated callers with an explicit matching grant can request a token. An App token is scoped to one `owner/name`. |
 
-Token requests accept `identity`, `repo`, `access`, optional `refresh` and
-`subject`; unknown fields fail validation. Success returns `token`, `expires_at`,
-GitHub-derived `identity` and `commit_identity`, `access`, and `repo`.
-An optional `x-march-slice-id` header nests the issuance span under that slice's trace.
+Every `/v1/*` request authenticates its bearer key before body validation.
+Tessera hashes the supplied key with SHA-256 and compares fixed-length digests in
+constant time. Missing or invalid credentials receive `401 unauthorized`,
+invalid token requests receive `400 invalid_request`, and requests without a
+matching grant receive `403 policy_denied`. Errors use
+`{ "error": { "code": "<code>", "message": "<text>" } }`. Denials occur before
+provider selection, cache access, refresh or upstream calls.
+
+Token requests accept `identity`, `repo`, `access`, optional `refresh` and the
+optional `subject` string. Unknown fields fail validation. Success returns
+`token`, `expires_at`, GitHub-derived `identity` and `commit_identity`, `access`,
+and `repo`. Supply a non-secret correlation value as `subject`. After validation
+it is recorded in the issuance audit and has no effect on authorization or
+cache scope.
+
+Denials produce an audit outcome of `denied` and an errored issuance span.
+An optional `x-march-slice-id` header nests the span under that slice's trace.
+Diagnostics omit authorization headers, keys, key digests and tokens.
 
 ### Providers
 
@@ -82,11 +108,13 @@ the bot identity again. US3 supplies secret-store change detection.
 only on host loopback, and mounts only its log volume. It receives no HOME,
 Docker socket or ambient GitHub credentials. Docker-socket peers and host
 stewards retain their preexisting host privileges; this boundary cannot revoke them.
+Startup requires the two authorization files described above. US3 owns
+deployment of those files and client-key distribution.
 
 ## Invariants
 
 - `/healthz` and `/status` answer without provider credentials; the service listens while every provider is unconfigured.
-- Production issuance denies every caller with `401 unauthorized` until US2 supplies authorization; unauthenticated requests never reach a provider or GitHub.
+- Production issuance requires an authenticated caller and an explicit policy grant before provider or GitHub access.
 - An app token is scoped to exactly one repository, and GitHub's mint response must name that repository; a pinned installation never broadens scope.
 - Permissions come only from the fixed `read` and `write` access profiles; neither profile includes `workflows`.
 - `identity` and `commit_identity` are derived from GitHub (`<slug>[bot]` and its numeric user id); configuration cannot override them, and Tessera never substitutes another identity.
@@ -102,7 +130,7 @@ All token-route failures use the envelope `{"error":{"code":"…","message":"…
 | Condition | Response | Observable behavior |
 | --- | --- | --- |
 | Malformed request | `400 invalid_request` | Unknown fields, invalid identity/access/repo, wrong optional-field types, missing `repo` for app identity, or an oversized/unsupported body. |
-| Caller not authenticated | `401 unauthorized` | The authorization boundary rejects the caller; in production this is every request. |
+| Caller not authenticated | `401 unauthorized` | The bearer header is absent, malformed or unknown. The audit uses caller `unknown`. |
 | Caller not permitted | `403 policy_denied` | The authorization boundary rejects this caller for the request. |
 | App not installed on repo | `422 repo_not_installed` | The installation lookup returns 404/422, or GitHub's mint response does not name exactly the requested repository. |
 | Provider unconfigured | `503 provider_unconfigured` | No app id or key is configured, or the requested identity has no provider. |

@@ -15,22 +15,35 @@ export function buildTesseraServer(options: BuildTesseraServerOptions = {}): Fas
   const startedAt = options.startedAt ?? Date.now();
   // Silence Fastify's automatic error serializers: they may include request headers or bodies.
   const app = options.logger ? Fastify({ loggerInstance: options.logger, disableRequestLogging: true }) : Fastify({ logger: false });
-  const requests = new WeakMap<object, { caller: string; parsed?: TokenRequest; start: number; code?: string; cache?: ProviderIssueResult["cache"] }>();
+  const requests = new WeakMap<object, {
+    caller: string; parsed?: TokenRequest; start: number; code?: string;
+    cache?: ProviderIssueResult["cache"]; expiresAt?: string | null;
+  }>();
   app.addHook("onRequest", async (request) => {
-    if (request.routeOptions.url !== "/v1/github/token") return;
+    const target = request.url.replace(/^https?:\/\/[^/]+/i, "");
+    if (!request.routeOptions.url?.startsWith("/v1/") && !target.startsWith("/v1/")) return;
     const context = { caller: "unknown", start: Date.now() };
     requests.set(request, context);
     context.caller = await authorization.authenticate(request.headers.authorization);
   });
   app.addHook("onResponse", async (request, reply) => {
     const context = requests.get(request);
-    if (!context) return;
+    if (!context || (!context.code && !context.parsed)) return;
     const req = context.parsed;
     const outcome = reply.statusCode === 200 ? "issued" : reply.statusCode < 500 ? "denied" : "failed";
-    // Caller names come from the trusted authorization boundary; no raw user input is logged.
+    // Keep the reserved subject and other request details out of trace attributes.
     const fields = { caller: context.caller, identity: req?.identity ?? "unknown", provider: req ? `github-${req.identity}` : "unknown", access: req?.access ?? "unknown", cache: context.cache ?? "n/a", outcome, reason: context.code ?? "none" };
     emitTesseraSpan("tessera.issue", { sliceId: typeof request.headers["x-march-slice-id"] === "string" ? request.headers["x-march-slice-id"] : undefined, error: reply.statusCode >= 400 || context.code === "provider_unavailable", attributes: fields, startTimeMs: context.start });
-    app.log.info(fields, "tessera issuance handled");
+    app.log.info({
+      ...fields,
+      identity: req?.identity ?? null,
+      provider: req ? `github-${req.identity}` : null,
+      repo: req?.repo ?? null,
+      access: req?.access ?? null,
+      reason: context.code ?? null,
+      expires_at: context.expiresAt ?? null,
+      subject: req?.subject ?? null,
+    }, "tessera issuance handled");
   });
   app.setErrorHandler((error, request, reply) => {
     const safe = error instanceof TesseraError ? error : new TesseraError([400, 413, 415].includes((error as {statusCode?: number}).statusCode ?? 0) ? "invalid_request" : "mint_failed");
@@ -53,8 +66,10 @@ export function buildTesseraServer(options: BuildTesseraServerOptions = {}): Fas
     const context = requests.get(request)!;
     context.parsed = parsed;
     await authorization.authorize(context.caller, parsed);
-    const result = await registry.select(parsed.identity).issue(parsed);
+    const { subject: _auditSubject, ...scope } = parsed;
+    const result = await registry.select(parsed.identity).issue(scope);
     context.cache = result.cache;
+    context.expiresAt = result.expiresAt;
     context.code = result.degradedReason;
     return { token: result.token, expires_at: result.expiresAt, identity: result.identity,
       commit_identity: result.commitIdentity, access: parsed.access, repo: parsed.identity === "app" ? parsed.repo : null };
