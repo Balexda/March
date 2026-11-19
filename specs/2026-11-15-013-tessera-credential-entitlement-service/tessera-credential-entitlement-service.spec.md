@@ -252,7 +252,7 @@ Recommended implementation sequence:
 | US4 | Fetch Tokens Through One Client | — | specs/2026-11-15-013-tessera-credential-entitlement-service/04-fetch-tokens-through-one-client.tasks.md |
 | US2 | Enforce a Default-Deny Policy per Client | US1 | — |
 | US3 | Keep Credentials Only in Tessera | US1 | — |
-| US8 | See Issuances, Expiry and Health | US1 | — |
+| US8 | See Issuances, Expiry and Health | US1 | specs/2026-11-15-013-tessera-credential-entitlement-service/08-see-issuances-expiry-and-health.tasks.md |
 | US5 | Stewards Open Pull Requests as the Bot | US4 | — |
 | US6 | Migrate Services off the Ambient Token | US4 | — |
 | US7 | Request a Copilot Review as the Operator | US2, US4 | — |
