@@ -3,9 +3,15 @@
  */
 import { describe, expect, it, vi } from "vitest";
 import { describeChangeSpan, runObservation, type ObserveStore } from "./observer.js";
+import { startHeraldSpan } from "../../observability/herald-trace.js";
 import { emptySystemState, foldEvents, reduce, type AppendEventInput, type EventBody, type HeraldEvent, type SystemState } from "../events.js";
 import type { SenseDeps } from "../../legate/loop/state/sense.js";
 import type { LoopMeta } from "../../legate/loop/meta.js";
+
+vi.mock("../../observability/herald-trace.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../observability/herald-trace.js")>();
+  return { ...actual, startHeraldSpan: vi.fn(actual.startHeraldSpan) };
+});
 
 const meta = { worker_group: "legate-workers", repo: { path: "/repo" } } as unknown as LoopMeta;
 
@@ -231,6 +237,38 @@ describe("runObservation", () => {
         expect(line).toContain("x-access-token:***@");
         expect(line).toContain("Could not resolve host");
       }
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
+  it("emits an errored herald.sync.failed span when a sync step times out, and still observes (#601 review)", async () => {
+    const store = fakeStore();
+    const end = vi.fn();
+    vi.mocked(startHeraldSpan).mockImplementationOnce(() => ({ enabled: true, setAttributes: vi.fn(), end }));
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      const result = await runObservation({
+        store,
+        profile: PROFILE,
+        syncDefaultBranch: async () => {
+          throw Object.assign(new Error("Command failed: git fetch origin main (timed out after 120000ms)"), {
+            killed: true,
+            signal: "SIGKILL",
+          });
+        },
+        senseDeps: senseDeps({ warn: vi.fn() }),
+      });
+      expect(result.observedAt).toBe("2026-05-20T00:00:00Z");
+      expect(startHeraldSpan).toHaveBeenCalledWith(expect.objectContaining({
+        name: "herald.sync.failed",
+        attributes: {
+          "march.profile": PROFILE,
+          "march.failure_stage": "default_branch_sync",
+          "march.sync.timed_out": true,
+        },
+      }));
+      expect(end).toHaveBeenCalledWith({ error: true });
     } finally {
       stderr.mockRestore();
     }

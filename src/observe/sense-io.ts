@@ -95,6 +95,9 @@ export interface SenseIo {
   toSenseDeps(): SenseDeps;
 }
 
+/** Output cap for one command (stdout + stderr), as execFile's `maxBuffer`. */
+const EXEC_MAX_BUFFER = 32 * 1024 * 1024;
+
 /** Upper bound for each git/gh step of the default-branch sync (#601 review). */
 export const SYNC_STEP_TIMEOUT_MS = 120_000;
 
@@ -113,7 +116,7 @@ function execText(
     execFile(
       command,
       args,
-      { encoding: "utf-8", maxBuffer: 32 * 1024 * 1024, ...options },
+      { encoding: "utf-8", maxBuffer: EXEC_MAX_BUFFER, ...options },
       (err: any, stdout: string, stderr: string) => {
         if (err) {
           err.stdout = stdout;
@@ -170,7 +173,7 @@ export function execTextInGroup(
       if (stderr && !String(err.message).includes(stderr)) err.message = err.message + "\n" + stderr;
       reject(err);
     };
-    const timer = setTimeout(() => {
+    const killGroup = () => {
       try {
         if (child.pid) process.kill(-child.pid, killSignal);
       } catch {
@@ -178,13 +181,30 @@ export function execTextInGroup(
       }
       child.stdout?.destroy();
       child.stderr?.destroy();
+    };
+    const timer = setTimeout(() => {
+      killGroup();
       fail(Object.assign(new Error(`Command failed: ${command} ${args.join(" ")} (timed out after ${timeout}ms)`), {
         killed: true,
         signal: killSignal,
       }));
     }, timeout);
-    child.stdout?.setEncoding("utf-8").on("data", (chunk: string) => { stdout += chunk; });
-    child.stderr?.setEncoding("utf-8").on("data", (chunk: string) => { stderr += chunk; });
+    const maxBuffer = typeof options.maxBuffer === "number" ? options.maxBuffer : EXEC_MAX_BUFFER;
+    let bytes = 0;
+    const collect = (append: (chunk: string) => void) => (chunk: string) => {
+      if (settled) return;
+      bytes += Buffer.byteLength(chunk);
+      if (bytes > maxBuffer) {
+        killGroup();
+        fail(Object.assign(new Error(`Command failed: ${command} ${args.join(" ")} (output exceeded ${maxBuffer} bytes)`), {
+          code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER",
+        }));
+        return;
+      }
+      append(chunk);
+    };
+    child.stdout?.setEncoding("utf-8").on("data", collect((chunk) => { stdout += chunk; }));
+    child.stderr?.setEncoding("utf-8").on("data", collect((chunk) => { stderr += chunk; }));
     child.on("error", fail);
     child.on("close", (code: number | null, signal: NodeJS.Signals | null) => {
       if (settled) return;

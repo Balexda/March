@@ -20,6 +20,11 @@ describe.skipIf(process.platform === "win32")("execTextInGroup (#601 review)", (
       .rejects.toMatchObject({ code: 3, stderr: "boom\n", message: expect.stringContaining("boom") });
   });
 
+  it("rejects and kills the group when output exceeds maxBuffer", async () => {
+    await expect(execTextInGroup("sh", ["-c", "head -c 4096 /dev/zero; sleep 30"], { timeout: 10_000, maxBuffer: 1024 }))
+      .rejects.toMatchObject({ code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER" });
+  });
+
   it("kills the whole process group on timeout, including a grandchild holding the pipes", async () => {
     const started = Date.now();
     // The background sleep inherits stdout/stderr, like git's remote helpers do.

@@ -139,6 +139,7 @@ you nothing):
 | `herald.session.changed` | a worker session appeared / changed status / disappeared |
 | `herald.workers.changed` / `herald.queue.changed` | worker bucket counts or the smithy readiness queue moved |
 | `herald.observe.failed` | the tick threw (errored span) |
+| `herald.sync.failed` | the default-branch sync failed or a step timed out; the tick still observes (errored span; `march.sync.timed_out`) |
 | `herald.request` | an inbound mutation (`POST /events`) or a `5xx` only |
 
 **Slice-scoped** changes (`herald.pr.*`, `herald.output.changed`) carry

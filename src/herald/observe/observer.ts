@@ -168,11 +168,23 @@ async function syncDefaultBranchBeforeObserve(deps: ObserverDeps): Promise<void>
   if (!deps.syncDefaultBranch) return;
   const repoPath = deps.senseDeps.meta.repo?.path;
   if (typeof repoPath !== "string" || repoPath.length === 0) return;
+  const started = Date.now();
   try {
     await deps.syncDefaultBranch(repoPath);
     recordHeraldSync("ok");
   } catch (err) {
     recordHeraldSync("error");
+    // Errored span for the failed sync (a timed-out step included), since the
+    // tick carries on and `herald.observe.failed` never sees it.
+    startHeraldSpan({
+      name: "herald.sync.failed",
+      startTimeMs: started,
+      attributes: {
+        "march.profile": deps.profile,
+        "march.failure_stage": "default_branch_sync",
+        "march.sync.timed_out": (err as { killed?: boolean } | null)?.killed === true,
+      },
+    }).end({ error: true });
     if (err instanceof TesseraClientError) throw err;
     // The legacy path's error echoes the git argv, which carries the GitHub token
     // from gitHubAuthConfigArgs. Mask it before it reaches any log channel.
