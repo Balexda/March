@@ -1,3 +1,6 @@
+/**
+ * @l0 @deterministic @ci
+ */
 import { describe, expect, it } from "vitest";
 import { githubRepoFromRemote, sameGitHubRepo } from "./github-remote.js";
 
