@@ -22,7 +22,7 @@ If the loop appears to require any of these, stop and escalate via a `NEED:` rep
 - Routine writes to `state.json` or `task-log.md`. The deterministic loop owns those files for PR refresh, stage transitions, cleanup, and dispatch audit. If a judgement action needs durable bookkeeping the loop cannot infer, escalate so we can add an explicit loop-owned inbox.
 - File writes outside your cwd (`<conductor-dir>/`).
 - Direct network requests. The skill scripts wrap `gh` and `agent-deck`; your tool calls should never hit network primitives directly.
-- Any destructive git operation (`git reset --hard`, `git push --force`, `git clean -fd`, etc.). Default-branch sync uses `git pull --ff-only` and exits non-zero on divergence rather than forcing.
+- Any destructive git operation (`git reset --hard`, `git push --force`, `git clean -fd`, etc.). Default-branch sync fetches with app/read and fast-forwards locally. It exits non-zero on divergence.
 - Operations against a different repo than `{{REPO_PATH}}` or profile than `{{PROFILE}}`.
 - `agent-deck session send` against a `running` worker — only `waiting` is legal.
 

@@ -147,7 +147,7 @@ export interface BabysitDeps {
    * so handlers/tests that never auto-merge can omit it; a `pr-auto-merge` decision
    * with no `mergePr` seam escalates to the operator instead of merging.
    */
-  mergePr?: (input: { prNumber: number | string; headSha: string; repoPath?: string }) => Promise<{
+  mergePr?: (input: { prNumber: number | string; headSha: string; repoPath?: string; sliceId?: string }) => Promise<{
     merged: boolean;
     mergeSha?: string;
     error?: string;
@@ -158,7 +158,7 @@ export interface BabysitDeps {
    * comment-id set is the authoritative dedup, so a missing seam or a failed
    * reaction never blocks the fix. See the `comment-fix` apply case.
    */
-  reactToComment?: (input: { commentId: string | number; content: string; repoPath?: string }) => Promise<void>;
+  reactToComment?: (input: { commentId: string | number; content: string; repoPath?: string; sliceId?: string }) => Promise<void>;
 }
 
 export type BabysitDecision =
@@ -976,7 +976,7 @@ export async function apply(decisions: BabysitDecision[], ctx: HandlerContext, s
         if (reactToComment) {
           await Promise.all(
             (d.commentIds || []).map((id) =>
-              reactToComment({ commentId: id, content: "eyes", repoPath: state.repoPath }).catch(() => {}),
+              reactToComment({ commentId: id, content: "eyes", repoPath: state.repoPath, sliceId: d.sliceId }).catch(() => {}),
             ),
           );
         }
@@ -1141,7 +1141,7 @@ export async function apply(decisions: BabysitDecision[], ctx: HandlerContext, s
         mark(slice, "pr-auto-merge", d.key, `auto-merging PR #${d.pr.number} (squash, sha=${d.pr.head_sha})`, ts);
         let result: { merged: boolean; mergeSha?: string; error?: string };
         try {
-          result = await deps.mergePr({ prNumber: d.pr.number, headSha: String(d.pr.head_sha), repoPath: state.repoPath });
+          result = await deps.mergePr({ prNumber: d.pr.number, headSha: String(d.pr.head_sha), repoPath: state.repoPath, sliceId: d.sliceId });
         } catch (err: any) {
           result = { merged: false, error: err?.message || String(err) };
         }

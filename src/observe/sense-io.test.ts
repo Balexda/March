@@ -885,6 +885,54 @@ describe("listOpenPrs (open-PR change-cursor probe)", () => {
 });
 
 describe("repoOwner caching (#gh-over-usage)", () => {
+  it("runs no PR query (no `gh pr view` / `gh pr list` fallback) on an owner mismatch", async () => {
+    const prCalls: string[][] = [];
+    routeExec((cmd, args) => {
+      if (cmd === "git" && args.includes("remote.origin.url")) return "https://github.com/octo/march\n";
+      if (cmd === "gh" && args[0] === "pr") prCalls.push(args);
+      return "[]";
+    });
+    const state = { repo: { path: "/repo", owner_with_name: "other/march" } };
+    const io = createSenseIo({
+      meta: meta(),
+      castra: fakeCastra({ sessionOutput: async () => "opened https://github.com/other/march/pull/9" }),
+      warn: () => {},
+    });
+    expect(await io.queryPrForBabysit({ pr: { number: 9 } }, state)).toMatchObject({ skipped: true, reason: "repo_owner_mismatch" });
+    expect(await io.discoverPrForSlice({ branch: "feature/x" }, state, "sess-1")).toBeNull();
+    const ioNoUrl = createSenseIo({ meta: meta(), castra: fakeCastra(), warn: () => {} });
+    expect(await ioNoUrl.discoverPrForSlice({ branch: "feature/x" }, state, "sess-1")).toBeNull();
+    expect(prCalls).toEqual([]);
+  });
+
+  it("observes the origin repo, not gh's default remote, so observation matches Legate mutations", async () => {
+    let repoViews = 0;
+    const prArgs: string[][] = [];
+    routeExec((cmd, args) => {
+      if (cmd === "git" && args.includes("remote.origin.url")) return "git@github.com:octo/march.git\n";
+      if (cmd === "gh" && args.includes("repo")) { repoViews++; return "upstream/march"; }
+      if (cmd === "gh" && args.includes("pr")) {
+        prArgs.push(args);
+        return JSON.stringify({ number: 7, state: "OPEN", headRefName: "b", author: { login: "me" }, statusCheckRollup: [] });
+      }
+      if (args.includes("graphql")) return JSON.stringify({ data: { repository: { pullRequest: { reviewThreads: { nodes: [] } } } } });
+      return "";
+    });
+    const io = createSenseIo({ meta: meta(), castra: fakeCastra() });
+    await io.queryPrForBabysit({ pr: { number: 7 } }, { repo: { path: "/repo" } });
+    expect(repoViews).toBe(0);
+    expect(prArgs[0]).toEqual(expect.arrayContaining(["-R", "octo/march"]));
+  });
+
+  it("refuses to observe when a configured owner_with_name disagrees with origin", async () => {
+    const warnings: string[] = [];
+    routeExec((cmd, args) => (cmd === "git" && args.includes("remote.origin.url") ? "https://github.com/octo/march\n" : ""));
+    const io = createSenseIo({ meta: meta(), castra: fakeCastra(), warn: m => warnings.push(m) });
+    expect(await io.listOpenPrs({ repo: { path: "/repo", owner_with_name: "other/march" } }))
+      .toEqual({ error: "repo owner unavailable" });
+    expect(warnings.join("\n")).toMatch(/repo owner mismatch/);
+  });
+
   it("resolves the owner via gh ONCE and reuses it across PR queries (no per-slice gh repo view)", async () => {
     let repoViews = 0;
     routeExec((cmd, args) => {

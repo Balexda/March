@@ -4,8 +4,10 @@
 import { promisify } from "node:util";
 import { execFile } from "node:child_process";
 import { createServer, type RequestListener } from "node:http";
+import { mkdtemp, rm } from "node:fs/promises";
 import type { AddressInfo } from "node:net";
-import { resolve } from "node:path";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 const exec = promisify(execFile);
@@ -41,7 +43,7 @@ describe("march tessera token", () => {
     url = "";
   });
 
-  async function run(options = args, clientKey = key) {
+  async function run(options = args, clientKey = key, env: NodeJS.ProcessEnv = {}) {
     try {
       const result = await exec(process.execPath, [cli, "tessera", "token", ...options], {
         timeout: 20_000,
@@ -53,6 +55,8 @@ describe("march tessera token", () => {
           MARCH_TESSERA_GH_TOKEN_FALLBACK: "1",
           GH_TOKEN: ambient,
           GITHUB_TOKEN: ambient,
+          MARCH_TESSERA_SLICE_ID: "",
+          ...env,
         },
       });
       return { ...result, code: 0 };
@@ -115,6 +119,35 @@ describe("march tessera token", () => {
     expect(await run(args, "")).toEqual({
       stdout: "", stderr: "Tessera token request failed (unconfigured).\n", code: 1,
     });
+  });
+
+  it("forwards a forced refresh and the slice correlation header", async () => {
+    const requests: unknown[] = [];
+    await listen(async (request, response) => {
+      let body = "";
+      for await (const part of request) body += part;
+      requests.push({ ...JSON.parse(body), sliceId: request.headers["x-march-slice-id"] });
+      response.end(JSON.stringify(entitlement));
+    });
+    expect(await run([...args, "--refresh"], key, { MARCH_TESSERA_SLICE_ID: "slice-5" }))
+      .toEqual({ stdout: token + "\n", stderr: "", code: 0 });
+    expect(requests).toEqual([{ repo: "acme/widgets", access: "write", identity: "app", refresh: true, sliceId: "slice-5" }]);
+  });
+
+  it("lets a migrating caller opt in to the explicit environment fallback", async () => {
+    const home = await mkdtemp(join(tmpdir(), "march-tessera-cli-"));
+    try {
+      const options = [...args, "--allow-migration-fallback"];
+      expect(await run(options, "", { HOME: home, MARCH_TESSERA_GH_TOKEN_FALLBACK: "" })).toMatchObject({
+        stdout: "", code: 1,
+      });
+      const result = await run(options, "", { HOME: home });
+      expect(result).toMatchObject({ stdout: ambient + "\n", code: 0 });
+      expect(result.stderr).toContain("tessera.client.fallback");
+      expect(result.stderr).not.toContain(ambient);
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
   });
 
   it("fails closed when the response body stalls", async () => {

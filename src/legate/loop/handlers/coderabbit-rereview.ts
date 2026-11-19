@@ -40,7 +40,7 @@ export const REREVIEW_ACTION = "coderabbit-rereview-requested";
 export const REREVIEW_FAILED_ACTION = "coderabbit-rereview-failed";
 
 export interface CodeRabbitRereviewDeps {
-  commentOnPr(repoPath: string, prNumber: number, body: string): Promise<void>;
+  commentOnPr(repoPath: string, prNumber: number, body: string, sliceId?: string): Promise<void>;
 }
 
 export type RequestKind = "rereview" | "initial";
@@ -117,7 +117,7 @@ export async function apply(
     memo[String(number)] = head;
     res.mutated = true;
     try {
-      await deps.commentOnPr(repoPath, number, reviewRequestBody(head));
+      await deps.commentOnPr(repoPath, number, reviewRequestBody(head), sliceId);
       res.actions.push({
         action: REREVIEW_ACTION,
         sliceId,

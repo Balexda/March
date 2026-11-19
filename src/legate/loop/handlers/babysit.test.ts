@@ -535,7 +535,7 @@ describe("babysit auto-merge gate", () => {
     const mergePr = vi.fn(async () => ({ merged: true, mergeSha: "deadbeef" }));
     const d: BabysitDecision = { kind: "pr-auto-merge", sliceId: "s", sessionId: "w", pr: { number: 5, url: "u", head_sha: "abc123" }, key: "k" };
     const res = await apply([d], ctx(), state, deps({ mergePr }));
-    expect(mergePr).toHaveBeenCalledWith({ prNumber: 5, headSha: "abc123", repoPath: "/repo" });
+    expect(mergePr).toHaveBeenCalledWith({ prNumber: 5, headSha: "abc123", repoPath: "/repo", sliceId: "s" });
     expect((state.slices.s as any).stage).toBe("merged");
     expect((state.slices.s as any).pr.state).toBe("MERGED");
     expect(res.actions.map((a) => a.action)).toContain("pr-auto-merge");
@@ -643,7 +643,7 @@ describe("babysit apply", () => {
     expect(d.sendMessage).toHaveBeenCalledWith("w", "MSG", "s");
     expect(slice.stage).toBe("pr-in-fix");
     expect(slice.comment_fix_seen_comment_ids).toEqual(["11"]);
-    expect(reactToComment).toHaveBeenCalledWith({ commentId: "11", content: "eyes", repoPath: "/repo" });
+    expect(reactToComment).toHaveBeenCalledWith({ commentId: "11", content: "eyes", repoPath: "/repo", sliceId: "s" });
     expect(res.actions[0]).toMatchObject({ action: "comment-fix" });
     expect(c.emitTransition).toHaveBeenCalledWith({ type: "slice.stage.changed", sliceId: "s", stage: "pr-in-fix" });
   });

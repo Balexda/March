@@ -1,4 +1,5 @@
 import { existsSync } from "node:fs";
+import { githubRepoFromRemote } from "../shared/github-remote.js";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -36,8 +37,8 @@ const GIT_UNAUTHORIZED = [
 ];
 
 export function repoFromOrigin(remote: string): string | undefined {
-  return /^(?:https:\/\/github\.com\/|ssh:\/\/git@github\.com\/|git@github\.com:)([\w.-]+\/[\w.-]+?)(?:\.git)?\/?$/i
-    .exec(remote.trim())?.[1];
+  // One origin→repo rule shared with Legate's scoped forge mutations.
+  return githubRepoFromRemote(remote) ?? undefined;
 }
 
 export function createGitHubRead(client: GitHubReadClient, parentEnv: NodeJS.ProcessEnv, run: Run) {

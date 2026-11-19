@@ -25,7 +25,7 @@ Run this protocol when the operator sends a message that names a GitHub issue. C
 Do **not** run on:
 
 - A heartbeat tick — heartbeats are deterministic-loop, resume/error, babysit-escalation, and merge territory.
-- A message that mentions an issue but is not asking you to dispatch a worker (e.g. "what does issue 42 say?" → just `gh issue view` and reply; do not launch).
+- A message that mentions an issue but is not asking you to dispatch a worker (e.g. "what does issue 42 say?" → run `fetch-issue.sh` and reply; do not launch).
 - A message asking you to pick up a Smithy slice — heartbeat-driven Smithy pickup is owned by the deterministic loop. The two are distinct surfaces; an issue-kind slice does not pass through `smithy status`.
 
 If parsing the operator message is ambiguous (no clear issue reference, or multiple references and unclear which to act on), surface a `NEED:` and stop — do not guess.
@@ -55,7 +55,7 @@ Normalize `issue_ref` to a bare number for downstream use:
 
 - `42` → `42`
 - `#42` → `42`
-- `https://github.com/Owner/Repo/issues/42` → `42` (and verify the path matches `{{REPO_NAME}}` — if it points at a different repo, surface a `NEED:` and stop; this conductor's scope is `{{REPO_PATH}}`).
+- `https://github.com/Owner/Repo/issues/42` → `42`. Verify that owner and repo match `state.json.repo.owner_with_name`. If the checkout's repository cannot be verified or the URL points elsewhere, surface a `NEED:` and stop.
 
 ### 2. Fetch the issue
 
@@ -63,7 +63,7 @@ Normalize `issue_ref` to a bare number for downstream use:
 .claude/skills/legate.issue/scripts/fetch-issue.sh {{REPO_PATH}} <issue-number>
 ```
 
-Wraps `gh issue view <num> --json number,title,body,url,author,labels,state,comments` (run from inside `{{REPO_PATH}}` so `gh` resolves the right repo). Returns:
+Reads issue details using an app/read entitlement for `{{REPO_PATH}}`. Returns:
 
 ```json
 {
@@ -82,17 +82,17 @@ Wraps `gh issue view <num> --json number,title,body,url,author,labels,state,comm
 
 If the script reports `state: "CLOSED"`, surface a `NEED:` (the operator may want to re-open or work on a follow-up — don't auto-pick a closed issue).
 
-If the script exits non-zero (issue not found, network error, `gh` not authenticated), surface a `NEED:` with the script's stderr summary and stop. Do not retry — `gh` errors are operator-territory.
+If the script exits non-zero (issue not found, network error, or entitlement failure), surface a `NEED:` with the script's stderr summary and stop. Do not retry — `gh` errors are operator-territory.
 
 ### 3. Sync the default branch
 
 **Required before launching a worker**, same safety rule the processor uses before Smithy dispatch. New worker sessions branch off whatever HEAD `{{REPO_PATH}}` points at; if a previous PR merged since the last fetch, the new worker silently builds on stale code.
 
 ```
-.claude/skills/legate.issue/scripts/sync-default-branch.sh {{REPO_PATH}}
+.claude/skills/legate.issue/scripts/sync-default-branch.sh {{REPO_PATH}} issue-<N>
 ```
 
-Returns JSON `{"default_branch": "...", "synced": true, "head": "<sha>"}`. Cache `default_branch` into `state.json.repo.default_branch` on first detection — it does not change for the life of the conductor.
+Returns JSON `{"default_branch": "...", "synced": true, "head": "<sha>"}`. `default_branch` is confirmed with GitHub on every sync; refresh `state.json.repo.default_branch` from it when it differs.
 
 If sync fails (divergence — script exits non-zero), **escalate**: do not `git reset --hard` or force-update. The worker should not launch until the operator resolves the divergence.
 

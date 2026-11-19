@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { execFile, type ExecFileOptions } from "node:child_process";
 
 const MAX_BUFFER = 32 * 1024 * 1024;
 
@@ -10,7 +10,7 @@ const MAX_BUFFER = 32 * 1024 * 1024;
 export function execText(
   command: string,
   args: string[],
-  options: { cwd?: string } = {},
+  options: Pick<ExecFileOptions, "cwd" | "env" | "timeout" | "killSignal"> = {},
 ): Promise<string> {
   return new Promise((resolve, reject) => {
     execFile(

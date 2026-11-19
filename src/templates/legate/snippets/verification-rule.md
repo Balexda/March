@@ -14,7 +14,7 @@ The "change tactic or escalate" choice is structured. Apply this hierarchy in or
 
 2. **State.json notes are summaries, not authoritative.** `last_action_note` records what *one heartbeat* observed; it is not a permanent prediction. Before escalating any action that has a prior `last_action_note` describing a failure, re-check both:
    - The worker's current `agent-deck session output` (covered by the read allow-list) — the worker's most recent reply may say the prior failure was actually resolved (e.g. "rebase succeeded, push completed").
-   - The actual git state of the worktree vs. the PR's head SHA on origin — if `git rev-parse HEAD` in the worker's worktree matches `gh pr view --json headRefOid`, the prior push *did* land regardless of what `last_action_note` said.
+   - The actual git state of the worktree vs. the PR's head SHA on origin — if `git rev-parse HEAD` in the worker's worktree matches the PR head in the loop's observation, the prior push *did* land regardless of what `last_action_note` said.
 
    A `mergeable=CONFLICTING` state on a slice whose worktree and origin head match means the PR's branch *is* on origin but main has moved past the rebase point — exactly the situation the loop's first conflict-resolution prompt is built for.
 
