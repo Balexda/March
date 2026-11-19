@@ -28,6 +28,8 @@
 #   MARCH_BROOD_URL   brood base URL (teardown requests).
 #   MARCH_HATCHERY_URL hatchery base URL (spawn requests).
 #   MARCH_CODERABBIT_REVIEWS_PER_DAY  UTC daily attempt cap across profiles (unset = unlimited, 0 disables).
+#   MARCH_COPILOT_REVIEWS_PER_DAY / MARCH_COPILOT_REVIEWS_PER_MONTH
+#     UTC attempt budgets across profiles (both default to 0).
 #   MARCH_REVIEW_WAIT_MINUTES  Minimum wait before an unanswered request can retry (default 30).
 #   MARCH_SELF_BOT_LOGIN  March's bot login (default march-bot). Use the same
 #                         value in Herald for reviewer exclusion and policy validation.
@@ -57,6 +59,8 @@ services:
       - "127.0.0.1:8787:8787" # localhost only — never public (legate HTTP API)
     environment:
       - MARCH_CODERABBIT_REVIEWS_PER_DAY=${MARCH_CODERABBIT_REVIEWS_PER_DAY:-}
+      - MARCH_COPILOT_REVIEWS_PER_DAY=${MARCH_COPILOT_REVIEWS_PER_DAY:-0}
+      - MARCH_COPILOT_REVIEWS_PER_MONTH=${MARCH_COPILOT_REVIEWS_PER_MONTH:-0}
       - MARCH_REVIEW_WAIT_MINUTES=${MARCH_REVIEW_WAIT_MINUTES:-30}
       - MARCH_SELF_BOT_LOGIN=${MARCH_SELF_BOT_LOGIN:-march-bot}
       - MARCH_OTEL=1
