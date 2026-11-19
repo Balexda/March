@@ -123,6 +123,21 @@ describe("CodeRabbit review requests", () => {
     expect((await fixture({ history, pr }).tick()).actions[0].reason).toBe("initial");
   });
 
+  it("bases a new-head request on the latest superseded request, not an older late answer", async () => {
+    const midHead = "c".repeat(40);
+    const history = { byProfile: { p: [
+      { ...intent, headSha: oldHead, at: "2026-11-16T21:00:00Z" },
+      { ...intent, headSha: midHead, at: "2026-11-16T22:00:00Z" },
+    ] } };
+    const triggers = { [oldHead]: "2026-11-16T21:00:00Z", [midHead]: "2026-11-16T22:00:00Z" };
+    const lateOldAnswer = { review_times_by_head: { [oldHead]: "2026-11-16T22:30:00Z" }, trigger_times_by_head: triggers };
+    expect((await fixture({ history, pr: { coderabbit: lateOldAnswer } }).tick()).actions[0].reason).toBe("initial");
+    const midAnswered = { review_times_by_head: { [midHead]: "2026-11-16T22:30:00Z" }, trigger_times_by_head: triggers };
+    const run = fixture({ history, pr: { coderabbit: midAnswered } });
+    await run.tick();
+    expect(run.deps.commentOnPr).not.toHaveBeenCalled();
+  });
+
   it.each([
     { decision: "CHANGES_REQUESTED", expected: "stale_changes_requested" },
     { decision: "APPROVED", expected: "stale_approval" },

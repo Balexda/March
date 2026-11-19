@@ -579,5 +579,7 @@ export function recordReviewRequest(reviewer: "coderabbit", outcome: ReviewReque
   if (!otel?.enabled) return;
   ensureInstruments(otel.getMeter());
   reviewRequests!.add(1, { reviewer, outcome });
+  // Back-off defers the request; nothing failed, so it stays out of the action counter.
+  if (outcome === "backoff") return;
   loopActions!.add(1, { action: outcome === "requested" ? "review-request" : "review-request-failed" });
 }

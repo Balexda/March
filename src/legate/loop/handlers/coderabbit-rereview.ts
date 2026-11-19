@@ -113,20 +113,16 @@ export async function apply(ctx: HandlerContext, state: LoopState, deps?: CodeRa
         if (markedAt && (recent(markedAt) || Date.parse(cr?.review_times_by_head?.[head] ?? "") >= Date.parse(markedAt))) continue;
       }
       if (reason === "initial" && newHead) {
-        // A push supersedes an unanswered request. A COMMENTED review can
-        // answer an older trigger, but a thread reply from before it cannot.
-        let answered = false;
-        for (const olderHead of new Set(prior.map((record) => record.headSha))) {
-          if (olderHead === head) continue;
-          const reviewAt = cr?.review_times_by_head?.[olderHead];
-          if (!reviewAt) continue;
-          const markedAt = triggerTimes[olderHead] ?? await deps.findTrigger(repoPath, pr.number, olderHead, sliceId);
-          if (markedAt && Date.parse(reviewAt) >= Date.parse(markedAt)) {
-            answered = true;
-            break;
-          }
+        // A push supersedes an unanswered request. Only the latest superseded
+        // request decides: an older head's late answer must not hide it. A
+        // COMMENTED review can answer a trigger, but a thread reply from before it cannot.
+        const latest = prior.filter((record) => record.headSha !== head)
+          .reduce<ReviewRequestRecord | undefined>((best, record) => (!best || Date.parse(record.at) >= Date.parse(best.at) ? record : best), undefined);
+        const reviewAt = latest && cr?.review_times_by_head?.[latest.headSha];
+        if (latest && reviewAt) {
+          const markedAt = triggerTimes[latest.headSha] ?? await deps.findTrigger(repoPath, pr.number, latest.headSha, sliceId);
+          if (markedAt && Date.parse(reviewAt) >= Date.parse(markedAt)) continue;
         }
-        if (answered) continue;
       }
     } catch (error) {
       report("failed", `Could not verify prior CodeRabbit trigger: ${String(error)}`);
