@@ -468,6 +468,27 @@ describe("queryPrForBabysit", () => {
       ]);
     });
 
+    it("keeps verified Copilot review times even when a different-head verdict takes precedence", async () => {
+      const head = "a".repeat(40);
+      const oldHead = "b".repeat(40);
+      const login = "copilot-pull-request-reviewer";
+      const { pr } = query(() => {
+        const result = secondPage("head1");
+        result.data.repository.pullRequest.reviews.nodes = [
+          review("APPROVED", "2026-11-16T10:00:00Z", oldHead, login, "Bot"),
+          review("COMMENTED", "2026-11-16T11:00:00Z", head, login + "[bot]"),
+          review("COMMENTED", "2026-11-16T12:00:00Z", head, login),
+        ];
+        return JSON.stringify(result);
+      });
+      expect(await pr).toMatchObject({
+        copilot_review_times: { [oldHead]: "2026-11-16T10:00:00Z", [head]: "2026-11-16T11:00:00Z" },
+        reviews: expect.arrayContaining([expect.objectContaining({
+          login, author_kind: "bot", state: "APPROVED", commit_sha: oldHead,
+        })]),
+      });
+    });
+
     it("marks evidence incomplete when a changes-requested review has no author", async () => {
       const { pr } = query(() => {
         const result = secondPage("head1");

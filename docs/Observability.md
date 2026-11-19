@@ -97,7 +97,7 @@ grouping.
 | `legate.babysit` | Legate loop | loop service |
 | `legate.cleanup` | Legate loop | loop service |
 | `legate.dependency-merge` / `legate.dependency-unblock` | Legate loop | Dependabot auto-merge and its conflict ladder (#573). Not slices: one root trace per PR (`<processor>-dependency-pr-<n>`); errored on a `*-failed` action or an escalation |
-| `legate.coderabbit-rereview` | Legate loop | `@coderabbitai review` requested on a slice PR after the steward pushed past CodeRabbit's changes-requested review (opt-in `mergePolicy.codeRabbit.rereview`), or for CodeRabbit's first review of a PR it never reviewed (opt-in `mergePolicy.codeRabbit.initialReview`). Nested on the slice's trace; errored when the comment fails |
+| `legate.review.request` | Legate loop | A configured reviewer request was made, deferred or refused. The slice child span records the reviewer, verb, reason and outcome. Failures, cap exhaustion and unavailable identity mark it errored |
 | `hatchery.spawn` | orchestrator | `runHatcherySpawn` |
 | `spawn.start` | orchestrator | container create/start |
 | `spawn.end` | orchestrator | `waitForSpawnContainer` |
@@ -313,7 +313,8 @@ These answer "is the loop alive?" and "how deep is the queue?".
 | `march.legate.dispatch.failures` (counter) | `march_legate_dispatch_failures_total` | dispatch failures |
 | `march.legate.loop.actions` (counter) | `march_legate_loop_actions_total` | non-dispatch loop actions by `action`: `cleanup`, `ghost_cleanup`, `relaunch`, `babysit`, `steward_nudge`, `steward_stranded` |
 | `march.legate.dependency.unblock` (counter) | `march_legate_dependency_unblock_total` | Dependabot conflict-ladder steps (#573) by `outcome`: `recreate_requested`, `recreate_failed`, `escalated`, `escalate_failed`, `resolved`; labelled with `processor` |
-| `march.legate.coderabbit.rereview` (counter) | `march_legate_coderabbit_rereview_total` | CodeRabbit review requests (re-review and first review) by `outcome`: `requested`, `failed`; labelled with `processor` |
+| `march.legate.review.requests` (counter) | `march_legate_review_requests_total` | Review decisions by `reviewer` and `outcome` |
+| `march.legate.review.rate_limited` (counter) | `march_legate_review_rate_limited_total` | Observed rate-limit hits by `reviewer` |
 
 > Gauges carry no `unit`: the OTel→Prometheus bridge exports a `unit: "1"`
 > instrument with a `_ratio` suffix (e.g. `march_legate_loop_up_ratio`), which

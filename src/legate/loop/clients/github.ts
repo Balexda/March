@@ -5,6 +5,8 @@ import { emitTesseraSpan } from "../../../observability/tessera-trace.js";
 import { getGitHubToken, TesseraClientError } from "../../../tessera/client.js";
 import type { GitHubTokenRequest } from "../../../tessera/types.js";
 import { resolveOriginRepo } from "../../../shared/github-remote.js";
+import { COPILOT_LOGIN } from "../../../observe/review-bot-comments.js";
+import type { ReviewPostOutcome } from "../handlers/review-backoff.js";
 import { execText } from "./exec.js";
 
 export class LegateGitHubError extends Error {
@@ -90,4 +92,27 @@ export async function execLegateGh(
     if (!(error instanceof LegateGitHubError) || error.status !== 401) throw error;
   }
   return runScopedGh(repo, args, cwd, await requestToken({ ...req, refresh: true }));
+}
+
+/** Request Copilot with a slice-scoped Tessera user entitlement for this call only. */
+export async function requestCopilotReview(repoPath: string, prNumber: number, sliceId: string): Promise<ReviewPostOutcome> {
+  let token: string;
+  try {
+    token = await requestToken({ identity: "user", access: "write", sliceId });
+  } catch {
+    return { ok: false, kind: "identity_unavailable", detail: "Tessera user identity unavailable" };
+  }
+  try {
+    const repo = await resolveRepository(repoPath, sliceId);
+    await runScopedGh(repo, [
+      "api", "--include", "--method", "POST", `repos/{owner}/{repo}/pulls/${prNumber}/requested_reviewers`,
+      "-f", `reviewers[]=${COPILOT_LOGIN}[bot]`,
+    ], repoPath, token);
+    return { ok: true };
+  } catch (error) {
+    if (error instanceof LegateGitHubError && error.rateLimited) {
+      return { ok: false, kind: "rate_limited", resetAt: error.retryAt };
+    }
+    return { ok: false, kind: "failed", detail: "GitHub review request failed" };
+  }
 }

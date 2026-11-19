@@ -269,3 +269,30 @@ describe("buildLoopTickActivity", () => {
     expect(activity.relaunchFailures).toBe(0);
   });
 });
+
+it.each([
+  ["cap_exhausted", true],
+  ["identity_unavailable", true],
+  ["failed", true],
+  ["backoff", false],
+])("records a Copilot %s decision on the slice trace", (outcome, error) => {
+  const emit = vi.fn();
+  const count = vi.fn();
+  const rateLimit = vi.fn();
+  const event = {
+    kind: "review_request", slice_id: "s", reviewer: "copilot", task_type: "mark",
+    reason: "initial", outcome, rate_limit_hit: outcome === "backoff",
+  };
+  emitActionEventSpan(event, emit);
+  expect(emit).toHaveBeenCalledWith(expect.objectContaining({
+    name: "legate.review.request", traceKey: "s", root: false, error,
+    attributes: {
+      "march.slice_id": "s", "march.review.reviewer": "copilot", "march.task_type": "mark",
+      "march.review.reason": "initial", "march.review.outcome": outcome,
+    },
+  }));
+  recordActionEventMetrics(event, vi.fn(), count, rateLimit);
+  expect(count).toHaveBeenCalledWith("copilot", outcome);
+  if (outcome === "backoff") expect(rateLimit).toHaveBeenCalledWith("copilot");
+  else expect(rateLimit).not.toHaveBeenCalled();
+});

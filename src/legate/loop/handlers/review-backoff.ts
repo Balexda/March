@@ -7,7 +7,7 @@ import { backoffMs } from "../pure/self-heal.js";
 export type ReviewPostOutcome =
   | { ok: true }
   | { ok: false; kind: "rate_limited"; resetAt?: string }
-  | { ok: false; kind: "failed"; detail: string };
+  | { ok: false; kind: "failed" | "identity_unavailable"; detail: string };
 
 export interface ReviewTarget {
   profile: string;
@@ -22,12 +22,10 @@ type ReviewSignal = ReviewTarget & {
   noticeId?: string;
 };
 
-export type LatestIntent = NonNullable<NonNullable<MultiProfileState["latestReviewRequests"]>["coderabbit"]>;
+export type LatestIntent = NonNullable<NonNullable<MultiProfileState["latestReviewRequests"]>[ReviewBackoffRecord["reviewer"]]>;
 type Report = (target: ReviewTarget, outcome: "backoff" | "failed", detail: string, rateLimitHit?: boolean) => void;
 
-const reviewer = "coderabbit";
-
-export class CodeRabbitBackoff {
+export class ReviewerBackoff {
   private current?: ReviewBackoffRecord & { seq: number; ts: string };
   private seen = new Set<string>();
   private resetBoundary = NaN;
@@ -35,7 +33,10 @@ export class CodeRabbitBackoff {
   private startupIntent?: LatestIntent;
   private started = false;
 
-  constructor(private readonly append: (profile: string, record: ReviewBackoffRecord, id: string) => Promise<{ seq: number; ts: string }>) {}
+  constructor(
+    private readonly append: (profile: string, record: ReviewBackoffRecord, id: string) => Promise<{ seq: number; ts: string }>,
+    readonly reviewer: ReviewBackoffRecord["reviewer"] = "coderabbit",
+  ) {}
 
   async beginTick(
     fold: MultiProfileState,
@@ -44,6 +45,7 @@ export class CodeRabbitBackoff {
     verify: (intent: LatestIntent) => Promise<boolean>,
     report: Report,
   ): Promise<void> {
+    const reviewer = this.reviewer;
     const folded = fold.reviewBackoffs?.[reviewer];
     this.current = folded;
     this.seen = new Set(Object.keys(fold.reviewNoticeIds ?? {}));
@@ -61,10 +63,10 @@ export class CodeRabbitBackoff {
       try {
         verified = await verify(intent);
       } catch (error) {
-        report(intent, "failed", `Could not verify prior CodeRabbit trigger: ${String(error)}`);
+        report(intent, "failed", `Could not verify prior ${reviewer} request: ${String(error)}`);
       }
       if (verified === false) {
-        report(intent, "failed", "Prior CodeRabbit post outcome is unknown");
+        report(intent, "failed", `${reviewer} prior post outcome is unknown`);
         if (!await this.record({ ...intent, cause: "post_failed" }, now, report)) return;
       }
       if (verified !== undefined) this.startupIntent = undefined;
@@ -99,6 +101,7 @@ export class CodeRabbitBackoff {
   }
 
   async record(signal: ReviewSignal, now: number, report: Report): Promise<boolean> {
+    const reviewer = this.reviewer;
     const signalTime = Date.parse(signal.at);
     const attempts = signal.cause === "reset" ? 0 : Math.min(Number.MAX_SAFE_INTEGER, (this.current?.attempts ?? 0) + 1);
     const stated = Date.parse(signal.resetAt ?? "");
@@ -115,7 +118,7 @@ export class CodeRabbitBackoff {
     };
     this.pending = { target: signal, record, id: randomUUID() };
     if (signal.cause !== "reset" && signal.cause !== "post_failed") {
-      report(signal, "backoff", `CodeRabbit ${signal.cause} until ${record.until}`, signal.cause !== "paused_comment");
+      report(signal, "backoff", `${reviewer} ${signal.cause} until ${record.until}`, signal.cause !== "paused_comment");
     }
     return this.persist(report);
   }
@@ -126,6 +129,7 @@ export class CodeRabbitBackoff {
    * otherwise there is nothing to clear, so record a plain reset.
    */
   private async observeReset(signal: ReviewSignal, now: number, report: Report): Promise<boolean> {
+    const reviewer = this.reviewer;
     const current = this.current;
     const record: ReviewBackoffRecord = current?.attempts
       ? {
@@ -145,7 +149,7 @@ export class CodeRabbitBackoff {
       const { seq, ts } = await this.append(target.profile, record, id);
       if (seq >= (this.current?.seq ?? 0)) this.current = { ...record, seq, ts };
     } catch (error) {
-      report(target, "failed", `Could not persist CodeRabbit back-off: ${String(error)}`);
+      report(target, "failed", `Could not persist ${this.reviewer} back-off: ${String(error)}`);
       return false;
     }
     if (record.noticeId) this.seen.add(record.noticeId);
@@ -165,9 +169,11 @@ interface ReviewSnapshot {
   head_sha?: string;
   reviewer_notices?: ReviewerNotice[];
   coderabbit?: Pick<CodeRabbitStanding, "review_times_by_head"> | null;
+  copilot_review_times?: Record<string, string>;
+  reviews_complete?: boolean;
 }
 
-export function reviewSignals(profile: string, repo: string, sliceId: string, snapshot: unknown): ReviewSignal[] {
+export function reviewSignals(profile: string, repo: string, sliceId: string, snapshot: unknown, reviewer: ReviewBackoffRecord["reviewer"] = "coderabbit"): ReviewSignal[] {
   const pr = snapshot as ReviewSnapshot | null | undefined;
   if (!pr || pr.error || pr.skipped || typeof pr.number !== "number" || !Number.isSafeInteger(pr.number) || pr.number < 1) return [];
   const target = { profile, sliceId, pr: pr.number };
@@ -178,12 +184,13 @@ export function reviewSignals(profile: string, repo: string, sliceId: string, sn
       ...target, at: notice.created_at, resetAt: notice.reset_at,
       cause: notice.kind === "paused" ? "paused_comment" : "rate_limited_comment",
       noticeId: notice.comment_id !== undefined
-        ? `coderabbit:${notice.comment_id}`
-        : JSON.stringify([pr.url || repo.toLowerCase(), pr.number, notice.created_at, notice.kind]),
+        ? `${reviewer}:${notice.comment_id}`
+        : JSON.stringify([pr.url || repo.toLowerCase(), pr.number, notice.created_at, notice.kind, ...(reviewer === "copilot" ? [reviewer] : [])]),
     }];
   });
   const head = typeof pr.head_sha === "string" ? pr.head_sha.toLowerCase() : undefined;
-  const reviewedAt = head && pr.coderabbit?.review_times_by_head?.[head];
+  const reviewedAt = head && (reviewer === "coderabbit" ? pr.coderabbit?.review_times_by_head?.[head]
+    : pr.reviews_complete === true && pr.copilot_review_times?.[head]);
   if (reviewedAt) signals.push({ ...target, at: reviewedAt, cause: "reset" });
   return signals;
 }
@@ -205,11 +212,14 @@ export async function verifyStartupIntent(
   findTrigger: TriggerLookup,
 ): Promise<boolean> {
   const pr = fold.byProfile[intent.profile]?.slices[intent.sliceId]?.pr as
-    { number?: number; error?: string; reviews_complete?: boolean; coderabbit?: Pick<CodeRabbitStanding, "review_times_by_head"> | null } | undefined;
+    ReviewSnapshot | undefined;
   // GitHub timestamps are second-precision. Ignore markers from earlier attempts.
   const since = Math.floor(Date.parse(intent.at) / 1000) * 1000;
-  if (!pr?.error && pr?.number === intent.pr && pr.reviews_complete === true &&
-      Date.parse(pr.coderabbit?.review_times_by_head?.[intent.headSha] ?? "") >= since) return true;
+  const reviewTimes = intent.reviewer === "copilot" ? pr?.copilot_review_times : pr?.coderabbit?.review_times_by_head;
+  if (!pr?.error && !pr?.skipped && pr?.number === intent.pr && pr.reviews_complete === true &&
+      Date.parse(reviewTimes?.[intent.headSha] ?? "") >= since) return true;
+  // GitHub reviewer requests have no durable head-specific marker to look up.
+  if (intent.reviewer === "copilot") return false;
   const profile = profiles.get(intent.profile);
   if (!profile) return false;
   try {

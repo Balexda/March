@@ -38,8 +38,8 @@ export interface CoordinatorDeps {
   requeue?: requeue.RequeueDeps;
   /** Seams for the opt-in Dependabot auto-merge. Omitted → the handler is inert. */
   dependencyMerge?: dependencyMerge.DependencyMergeDeps;
-  /** Seam for the opt-in CodeRabbit re-review request. Omitted → the handler is inert. */
-  coderabbitRereview?: coderabbitRereview.CodeRabbitRereviewDeps;
+  /** Seams for opt-in reviewer requests. Omitted → the handler is inert. */
+  coderabbitRereview?: coderabbitRereview.ReviewRequestDeps;
   /** The GLOBAL concurrent-spawn budget (#313), shared across every profile this
    *  tick. Attached to the handler context so dispatch caps fresh launches against
    *  it. Omitted → dispatch is uncapped (pre-#313 behavior). */
@@ -57,7 +57,7 @@ export interface CoordinatorOutput {
     castraRecover: HandlerResult;
     relaunch: HandlerResult;
     babysit: HandlerResult;
-    /** Opt-in CodeRabbit re-review requests; absent in outputs built without it. */
+    /** Opt-in reviewer requests; absent in outputs built without it. */
     coderabbitRereview?: HandlerResult;
     recovery: HandlerResult;
     adoptFromFold: HandlerResult;

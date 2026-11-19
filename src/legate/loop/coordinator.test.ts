@@ -1,7 +1,7 @@
 /**
  * @l1 @deterministic @ci
  */
-import { CodeRabbitBackoff } from "./handlers/review-backoff.js";
+import { ReviewerBackoff } from "./handlers/review-backoff.js";
 import { describe, expect, it, vi } from "vitest";
 import { foldEventsMulti, type HeraldEvent, type ReviewRequestRecord } from "../../herald/events.js";
 import { runTick, type CoordinatorDeps } from "./coordinator.js";
@@ -80,8 +80,8 @@ describe("coordinator runTick", () => {
       const d = deps(state, { ts: time });
       const folded = foldEventsMulti(events);
       d.coderabbitRereview = {
-        limits: { waitMs: 30 * 60_000, dailyCap: 3 },
-        history: { byProfile: { p: folded.byProfile.p?.reviewRequests ?? [] }, backoff: new CodeRabbitBackoff(vi.fn()) },
+        limits: { waitMs: 30 * 60_000, dailyCap: 3, copilotDailyCap: 0, copilotMonthlyCap: 0 },
+        history: { byProfile: { p: folded.byProfile.p?.reviewRequests ?? [] }, backoff: new ReviewerBackoff(vi.fn()) },
         appendIntent, commentOnPr, findTrigger: async () => undefined,
       };
       return (await runTick(d)).results.coderabbitRereview;
@@ -97,6 +97,40 @@ describe("coordinator runTick", () => {
     const refused = await tick("2026-05-20T01:32:00Z", "c".repeat(40));
     expect(refused?.failures).toEqual([expect.objectContaining({ outcome: "cap_exhausted" })]);
     expect(commentOnPr).toHaveBeenCalledTimes(3);
+  });
+
+  it("still merges when approval arrives after a Copilot identity refusal", async () => {
+    const state = makeState();
+    const head = "a".repeat(40);
+    state.slices.merged.command = "smithy.forge";
+    state.mergePolicy = { reviewRequests: { byTaskType: { forge: { reviewers: [{ id: "copilot" }] } } } };
+    const pr = state.perSlice.merged.pr = {
+      number: 9, state: "OPEN", is_draft: false, checks: "PASS", head_sha: head,
+      reviews_complete: true, reviews: [] as object[], coderabbit: null,
+      thread_count: 0, needs_response_count: 0, mergeable: "MERGEABLE", merge_state_status: "clean",
+    };
+    state.slices.merged.pr = pr;
+    const d = deps(state);
+    const mergePr = vi.fn().mockResolvedValue({ merged: true });
+    d.babysit.mergePr = mergePr;
+    d.coderabbitRereview = {
+      limits: { waitMs: 30 * 60_000, dailyCap: Infinity, copilotDailyCap: 1, copilotMonthlyCap: 1 },
+      history: { byProfile: {}, backoff: new ReviewerBackoff(vi.fn()) },
+      appendIntent: vi.fn().mockResolvedValue(undefined),
+      commentOnPr: vi.fn(),
+      findTrigger: vi.fn(),
+      copilot: {
+        backoff: new ReviewerBackoff(vi.fn().mockResolvedValue({ ts: NOW, seq: 2 }), "copilot"),
+        request: vi.fn().mockResolvedValue({ ok: false, kind: "identity_unavailable", detail: "Tessera down" }),
+      },
+    };
+
+    const refused = await runTick(d);
+    expect(refused.results.coderabbitRereview?.failures).toMatchObject([{ outcome: "identity_unavailable" }]);
+    expect(mergePr).not.toHaveBeenCalled();
+    pr.reviews.push({ login: "operator", author_kind: "human", state: "APPROVED", commit_sha: head, submitted_at: NOW });
+    await runTick(d);
+    expect(mergePr).toHaveBeenCalledExactlyOnceWith({ prNumber: 9, headSha: head, repoPath: "/repo", sliceId: "merged" });
   });
 
   it("archives a terminal-PR slice and threads the mutation so babysit can't re-see it", async () => {

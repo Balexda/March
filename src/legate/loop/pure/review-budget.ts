@@ -3,9 +3,11 @@ import type { ReviewRequestRecord } from "../../../herald/events.js";
 export interface ReviewRequestLimits {
   waitMs: number;
   dailyCap: number;
+  copilotDailyCap: number;
+  copilotMonthlyCap: number;
 }
 
-export function reviewRequestLimits(env: NodeJS.ProcessEnv, warn: (message: string) => void) {
+export function reviewRequestLimits(env: NodeJS.ProcessEnv, warn: (message: string) => void): ReviewRequestLimits {
   function integer(key: string, fallback: number, minimum: number, scale = 1): number {
     const value = env[key];
     if (value === undefined || (value === "" && fallback === Infinity)) return fallback;

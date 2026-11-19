@@ -35,12 +35,12 @@ import { legateStateDir, metaForProfileRecord } from "../profile-paths.js";
 // heartbeat. runtime now only wires these to the proven I/O seams below.
 import { rebuildWorkingState, senseFromHerald, type HeraldInbox } from "./state/sense.js";
 import { createFoldDeps } from "./state/fold-deps.js";
-import { execLegateGh, LegateGitHubError } from "./clients/github.js";
+import { execLegateGh, LegateGitHubError, requestCopilotReview } from "./clients/github.js";
 import { runTick as coordinatorRunTick } from "./coordinator.js";
 import { resolveMaxConcurrentSpawns } from "./meta.js";
 import { SpawnBreaker } from "./spawn-breaker.js";
 import { createSpawnBudget, liveSpawnCount, taskTypeForSlice, type SpawnBudget } from "./pure/slice.js";
-import { CodeRabbitBackoff, reviewSignals, verifyStartupIntent, type ReviewPostOutcome } from "./handlers/review-backoff.js";
+import { ReviewerBackoff, reviewSignals, verifyStartupIntent, type ReviewPostOutcome } from "./handlers/review-backoff.js";
 import type { ReviewRequestHistory } from "./handlers/coderabbit-rereview.js";
 import { reviewCapSamples, reviewRequestLimits } from "./pure/review-budget.js";
 import { markedCodeRabbitHead } from "../../observe/coderabbit-review.js";
@@ -774,6 +774,7 @@ async function tickProfile(rt: ProfileRuntime, history: ReviewRequestHistory, sp
       appendIntent: (record) => herald.append(meta.profile, { type: "review.requested", ...record }),
       findTrigger: findCodeRabbitTrigger,
       commentOnPr: postCodeRabbitTrigger,
+      copilot: { backoff: copilotBackoff, request: requestCopilotReview },
     },
     requeue: {
       closePr: closePrGh,
@@ -838,9 +839,10 @@ async function tickProfile(rt: ProfileRuntime, history: ReviewRequestHistory, sp
   return tally;
 }
 
-const codeRabbitBackoff = new CodeRabbitBackoff((profile, record, id) =>
-  legateHerald().append(profile, { type: "review.backoff", ...record, id }),
-);
+const appendReviewBackoff: ConstructorParameters<typeof ReviewerBackoff>[0] = (profile, record, id) =>
+  legateHerald().append(profile, { type: "review.backoff", ...record, id });
+const codeRabbitBackoff = new ReviewerBackoff(appendReviewBackoff);
+const copilotBackoff = new ReviewerBackoff(appendReviewBackoff, "copilot");
 
 // Drain the shared Herald stream once, then run each profile in isolation.
 async function tick() {
@@ -882,33 +884,36 @@ async function tick() {
 
   const profilesByName = new Map(profiles.map((profile) => [profile.profile, profile]));
   // Read the same PR snapshots as senseFromHerald before any profile can post.
-  const signals = profiles.flatMap((profile) => Object.entries(projection.byProfile[profile.profile]?.slices ?? {})
-    .flatMap(([sliceId, slice]) => reviewSignals(profile.profile, profile.repoName, sliceId, slice.pr)));
   const reviewAt = now();
-  await codeRabbitBackoff.beginTick(projection, signals, Date.parse(reviewAt), (intent) =>
-    verifyStartupIntent(intent, projection, profilesByName, findCodeRabbitTrigger),
-  (target, outcome, detail, rateLimitHit) => {
-    const event = {
-      ts: reviewAt, kind: "review_request", profile: target.profile, slice_id: target.sliceId,
-      pr_number: target.pr,
-      task_type: taskTypeForSlice(target.sliceId, projection.byProfile[target.profile]?.slices[target.sliceId]) ?? "unknown",
-      action: outcome === "backoff" ? "review-request-deferred" : "review-request-failed",
-      outcome, detail, rate_limit_hit: rateLimitHit, reason: "account_backoff",
-    };
-    const profile = profilesByName.get(target.profile);
-    if (profile) {
-      const { meta } = runtimeFor(profile);
-      try {
-        append(meta, meta.processor_events_path, event);
-        return;
-      } catch (error) {
-        logTickError(error, target.profile);
-      }
-    }
-    emitActionEventSpan(event);
-    emitActionEventLog(event);
-    recordActionEventMetrics(event);
-  });
+  for (const backoff of [codeRabbitBackoff, copilotBackoff]) {
+    const reviewer = backoff.reviewer;
+    const signals = profiles.flatMap((profile) => Object.entries(projection.byProfile[profile.profile]?.slices ?? {})
+      .flatMap(([sliceId, slice]) => reviewSignals(profile.profile, profile.repoName, sliceId, slice.pr, reviewer)));
+    await backoff.beginTick(projection, signals, Date.parse(reviewAt),
+      (intent) => verifyStartupIntent(intent, projection, profilesByName, findCodeRabbitTrigger),
+      (target, outcome, detail, rateLimitHit) => {
+        const event = {
+          ts: reviewAt, kind: "review_request", profile: target.profile, slice_id: target.sliceId,
+          pr_number: target.pr, reviewer,
+          task_type: taskTypeForSlice(target.sliceId, projection.byProfile[target.profile]?.slices[target.sliceId]) ?? "unknown",
+          action: outcome === "backoff" ? "review-request-deferred" : "review-request-failed",
+          outcome, detail, rate_limit_hit: rateLimitHit, reason: "account_backoff",
+        };
+        const profile = profilesByName.get(target.profile);
+        if (profile) {
+          const { meta } = runtimeFor(profile);
+          try {
+            append(meta, meta.processor_events_path, event);
+            return;
+          } catch (error) {
+            logTickError(error, target.profile);
+          }
+        }
+        emitActionEventSpan(event);
+        emitActionEventLog(event);
+        recordActionEventMetrics(event);
+      });
+  }
 
   const reviewHistory: ReviewRequestHistory = {
     backoff: codeRabbitBackoff,

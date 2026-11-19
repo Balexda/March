@@ -73,6 +73,8 @@ function parseResetAt({ body, createdAt }: ReviewerComment): string | undefined 
 }
 
 const CODERABBIT_LEGACY_MARKER = /^<!-- This is an auto-generated comment: (?:summarize|rate limited|review paused) by coderabbit\.ai -->/i;
+export const COPILOT_LOGIN = "copilot-pull-request-reviewer";
+
 const REVIEWERS: readonly ReviewerAdapter[] = [
   {
     id: "coderabbit",
@@ -93,8 +95,20 @@ const REVIEWERS: readonly ReviewerAdapter[] = [
   },
   {
     id: "copilot",
-    logins: ["copilot-pull-request-reviewer"],
-    classifyComment: () => ({ kind: "status" }),
+    logins: [COPILOT_LOGIN],
+    classifyComment(comment) {
+      const { body } = comment;
+      if (/^(?:>\s*)?(?:#{1,6}\s*)?(?:rate limit exceeded|rate limited|Copilot (?:has )?(?:reached|exceeded) (?:its |the )?rate limit)\b/im.test(body)) {
+        return { kind: "rate_limited", resetAt: parseResetAt(comment) };
+      }
+      if (/^(?:>\s*)?(?:#{1,6}\s*)?(?:reviews? paused|Copilot review (?:is )?paused)\b/im.test(body)) {
+        return { kind: "paused", resetAt: parseResetAt(comment) };
+      }
+      if (/^(?:>\s*)?(?:#{1,6}\s*)?(?:review in progress|Copilot (?:is reviewing|review (?:is )?in progress))\b/im.test(body)) {
+        return { kind: "in_progress" };
+      }
+      return { kind: "status" };
+    },
   },
 ];
 
