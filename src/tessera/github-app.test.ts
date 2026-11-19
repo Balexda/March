@@ -214,6 +214,15 @@ describe("GitHub App provider", () => {
     const app = provider(transport, { timeoutMs: 10 });
     await expect(app.issue({ identity: "app", access: "read", repo: "acme/widgets" })).rejects.toMatchObject({ code: "provider_unavailable" });
   });
+  it("keeps the HTTP failure when a diagnostic error-body read stalls past the deadline", async () => {
+    const base = fake();
+    const transport = vi.fn<typeof fetch>(async (url, init) => new URL(String(url)).pathname.endsWith("/access_tokens")
+      ? ({ ok: false, status: 403, headers: new Headers(), json: () => new Promise(() => {}) }) as unknown as Response
+      : base(url, init));
+    const app = provider(transport, { timeoutMs: 10 });
+    await app.start();
+    await expect(app.issue({ identity: "app", access: "read", repo: "acme/widgets" })).rejects.toMatchObject({ code: "mint_failed" });
+  });
   it("maps malformed upstream JSON to a safe mint failure", async () => {
     const transport = fake();
     const app = provider(transport);

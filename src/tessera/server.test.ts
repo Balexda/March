@@ -287,7 +287,7 @@ describe("Tessera App token lifecycle over HTTP", () => {
         expect.any(Number), { provider, outcome },
       ]));
       expect(remaining.mock.calls).toEqual([[40, { provider }], [39, { provider }], [0, { provider }]]);
-      expect(counters.get("march.tessera.github.secondary_limits")?.mock.calls).toEqual([[1, { provider }], [1, { provider }]]);
+      expect(counters.get("march.tessera.github.secondary_limits")?.mock.calls).toEqual([[1, { provider }]]);
       expect(counters.get("march.tessera.issuances")?.mock.calls).toEqual(["miss", "miss", "hit"].map(cache => [
         1, { provider, identity: "app", access: "write", cache },
       ]));

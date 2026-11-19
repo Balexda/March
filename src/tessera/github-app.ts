@@ -79,6 +79,8 @@ export class GithubAppProvider implements CredentialProvider {
   private async call(path: string, body?: unknown, repoOperation = false, authenticated = true): Promise<Record<string, unknown>> {
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
+    // Set before any diagnostic body read so a stalled read cannot replace the HTTP failure.
+    let statusError: TesseraError | undefined;
     try {
       const assertion = authenticated ? this.assertion() : undefined;
       const request = async () => {
@@ -90,9 +92,13 @@ export class GithubAppProvider implements CredentialProvider {
         const remainingHeader = response.headers.get("x-ratelimit-remaining");
         const remaining = remainingHeader && /^\d+$/.test(remainingHeader) ? Number(remainingHeader) : NaN;
         if (Number.isSafeInteger(remaining)) recordTesseraRateLimit(this.id, remaining);
+        if (response.status === 401) statusError = new TesseraError("credential_invalid");
+        else if (response.status >= 500 || response.status === 429) statusError = new TesseraError("provider_unavailable");
+        else if (repoOperation && (response.status === 404 || response.status === 422)) statusError = new TesseraError("repo_not_installed");
+        else if (!response.ok) statusError = new TesseraError("mint_failed");
         if (response.status === 403 || response.status === 429) {
           const retryAfter = response.headers.get("retry-after");
-          if (remaining !== 0 && retryAfter && /^\d+$/.test(retryAfter)) {
+          if (Number.isSafeInteger(remaining) && remaining > 0 && retryAfter && /^\d+$/.test(retryAfter)) {
             recordTesseraSecondaryLimit(this.id);
           } else {
             // GitHub may signal a secondary limit only in the error message.
@@ -102,10 +108,7 @@ export class GithubAppProvider implements CredentialProvider {
             }
           }
         }
-        if (response.status === 401) throw new TesseraError("credential_invalid");
-        if (response.status >= 500 || response.status === 429) throw new TesseraError("provider_unavailable");
-        if (repoOperation && (response.status === 404 || response.status === 422)) throw new TesseraError("repo_not_installed");
-        if (!response.ok) throw new TesseraError("mint_failed");
+        if (statusError) throw statusError;
         const value: unknown = await response.json();
         if (!value || typeof value !== "object" || Array.isArray(value)) throw new TesseraError("mint_failed");
         return value as Record<string, unknown>;
@@ -114,7 +117,10 @@ export class GithubAppProvider implements CredentialProvider {
       return await Promise.race([request(), new Promise<never>((_, reject) => {
         timer = setTimeout(() => { controller.abort(); reject(new TesseraError("provider_unavailable")); }, this.options.timeoutMs ?? 5000);
       })]);
-    } catch (error) { throw error instanceof TesseraError ? error : new TesseraError(error instanceof SyntaxError ? "mint_failed" : "provider_unavailable"); }
+    } catch (error) {
+      if (statusError) throw statusError;
+      throw error instanceof TesseraError ? error : new TesseraError(error instanceof SyntaxError ? "mint_failed" : "provider_unavailable");
+    }
     // Abort on every exit so an unread error body cannot hold the connection past the deadline.
     finally { controller.abort(); if (timer) clearTimeout(timer); }
   }
