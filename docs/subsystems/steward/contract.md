@@ -9,6 +9,19 @@ This slice does not introduce a contract checker, freshness checker, AUTOGEN gen
 <!-- BEGIN AUTOGEN -->
 <!-- END AUTOGEN -->
 
+### GitHub credential shim
+
+The packaged `src/templates/steward/bin/gh` executable supports explicitly
+configured worktrees. Put its directory ahead of the real GitHub CLI on
+`PATH`, make `march` available on `PATH`, and provide the steward's
+`MARCH_TESSERA_URL` and `MARCH_TESSERA_CLIENT_KEY`. On each invocation the shim
+resolves the worktree's GitHub `origin`, requests an app/write token, and runs
+the real executable with the original arguments, inherited standard streams
+and a private temporary configuration directory. It supplies the issued
+token as `GH_TOKEN`, clears inherited GitHub token variables, and fails
+closed with a sanitized diagnostic if setup or issuance fails. Git HTTPS
+credential requests use the [Tessera Git helper](../tessera/contract.md#cli-and-configuration).
+
 ### Role Boundary
 
 Steward owns the launch eligibility and role semantics for a manager session that receives a validated patch result. Hatchery is the launch and handoff consumer boundary: it gathers the validated spawn result and launches the Steward role through Castra, but it does not own Steward's role semantics after the handoff.

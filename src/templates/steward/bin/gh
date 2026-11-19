@@ -1,0 +1,99 @@
+#!/usr/bin/env node
+import { spawnSync } from "node:child_process";
+import { accessSync, constants, mkdtempSync, rmSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { delimiter, join, resolve } from "node:path";
+import { debuglog } from "node:util";
+
+class ShimError extends Error {}
+
+function findRealGh() {
+  const self = statSync(process.argv[1]);
+  let foundWrapper = false;
+  for (const directory of (process.env.PATH ?? "").split(delimiter)) {
+    if (!directory) continue;
+    const candidate = resolve(directory, "gh");
+    try {
+      const file = statSync(candidate);
+      if (!file.isFile()) continue;
+      accessSync(candidate, constants.X_OK);
+      if (file.dev === self.dev && file.ino === self.ino) {
+        foundWrapper = true;
+        continue;
+      }
+      return candidate;
+    } catch {
+      // PATH entries can be missing or inaccessible.
+    }
+  }
+  throw new ShimError(foundWrapper ? "no real executable beyond the wrapper." : "real executable unavailable.");
+}
+
+function resolveRepo(env) {
+  const remote = spawnSync("git", ["remote", "get-url", "origin"], {
+    env, encoding: "utf8", timeout: 5_000, killSignal: "SIGKILL", stdio: ["ignore", "pipe", "ignore"],
+  });
+  const url = remote.stdout?.replace(/\r?\n$/, "") ?? "";
+  const match = /^(?:https:\/\/github\.com(?::443)?\/|ssh:\/\/git@github\.com(?::22)?\/|git@github\.com:)([\w.-]+)\/([\w.-]+)$/i.exec(url);
+  const name = match?.[2].replace(/\.git$/i, "");
+  if (remote.status !== 0 || !match || match[0] !== url || !name ||
+    [match[1], name].some(part => part === "." || part === "..")) {
+    throw new ShimError("GitHub origin repository unavailable.");
+  }
+  return match[1] + "/" + name;
+}
+
+function run() {
+  if (process.env.MARCH_TESSERA_GH_WRAPPED === "1") throw new ShimError("recursive wrapper invocation.");
+  // Node's child-process debugging prints the complete child environment.
+  if (debuglog("child_process").enabled) throw new ShimError("child-process debugging must be disabled.");
+  const realGh = findRealGh();
+  const env = { ...process.env, MARCH_TESSERA_GH_WRAPPED: "1" };
+  for (const key of ["GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN", "GH_DEBUG"]) {
+    delete env[key];
+  }
+  const repo = resolveRepo(env);
+  const issuance = spawnSync("march", ["tessera", "token", "--repo", repo, "--access", "write", "--identity", "app"], {
+    env, encoding: "utf8", timeout: 15_000, killSignal: "SIGKILL", stdio: ["ignore", "pipe", "ignore"],
+  });
+  const token = issuance.stdout?.replace(/\n$/, "");
+  if (issuance.status !== 0 || !token || /[\s\x00-\x1f\x7f]/.test(token)) {
+    throw new ShimError("Tessera token request failed.");
+  }
+
+  let configDir;
+  try {
+    configDir = mkdtempSync(join(tmpdir(), "march-steward-gh-"));
+  } catch {
+    throw new ShimError("isolated configuration unavailable.");
+  }
+
+  try {
+    delete env.MARCH_TESSERA_CLIENT_KEY;
+    delete env.GH_REPO;
+    const result = spawnSync(realGh, process.argv.slice(2), {
+      env: { ...env, GH_TOKEN: token, GH_CONFIG_DIR: configDir, GH_HOST: "github.com", GH_PROMPT_DISABLED: "1" },
+      stdio: "inherit",
+    });
+    if (result.error) throw new ShimError("could not start the real executable.");
+    return result;
+  } finally {
+    try {
+      rmSync(configDir, { recursive: true, force: true });
+    } catch {
+      // Preserve the command status if the temporary directory cannot be removed.
+    }
+  }
+}
+
+let result;
+try {
+  result = run();
+} catch (error) {
+  // Only errors authored here may reach stderr.
+  const reason = error instanceof ShimError ? error.message : "credential shim failed.";
+  process.stderr.write("Tessera gh: " + reason + "\n");
+  process.exitCode = 1;
+}
+if (result?.signal) process.kill(process.pid, result.signal);
+if (result) process.exitCode = result.status ?? 1;

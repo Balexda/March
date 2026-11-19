@@ -21,6 +21,17 @@ non-zero with a sanitized diagnostic on stderr. The command uses the Node
 client's 10-second request deadline and requires a Tessera-issued credential
 even when migration fallback is enabled for other consumers.
 
+`march tessera git-credential <get|store|erase>` reads Git's credential
+protocol on stdin. Configure the helper as `!march tessera git-credential`
+so Git appends the operation, and enable `credential.useHttpPath` for GitHub.
+An HTTPS `github.com` request must supply the target `owner/name[.git]` path.
+Successful `get` returns `username=x-access-token` and the repository-scoped
+app/write token as `password`. Other hosts receive no credentials. `store` and
+`erase` consume the request and exit without persisting credentials. Ambiguous
+GitHub requests and issuance failures return `quit=true`, exit nonzero, and
+write one sanitized diagnostic to stderr. Git honors the quit instruction
+before trying a later helper or prompting.
+
 | Environment variable | Current behavior |
 | --- | --- |
 | `TESSERA_GITHUB_APP_ID` | App id; absent id leaves app provider unconfigured. |

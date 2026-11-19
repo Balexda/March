@@ -16,7 +16,7 @@
 
 ### Tasks
 
-- [ ] **Wrap the GitHub CLI with Tessera app credentials**
+- [x] **Wrap the GitHub CLI with Tessera app credentials**
 
   Package a steward executable named `gh` using the US4 token command and the Steward Credential Shims contract.
 
@@ -26,7 +26,7 @@
   - Run the real executable with unchanged arguments and preserve output and exit status. Replace inherited GitHub token variables and isolate its configuration from the host login.
   - Missing repository context, missing real executable, recursion and issuance failures exit nonzero with a sanitized one-line diagnostic before running the real executable. Cover AS 5.1, 5.3, 5.4 and 5.6 with fake Tessera and a substitute executable.
 
-- [ ] **Expose the Tessera Git credential helper**
+- [x] **Expose the Tessera Git credential helper**
 
   Add the documented helper command with thin CLI dispatch and issuance in `src/tessera/`. Update the affected Tessera subsystem contract.
 
