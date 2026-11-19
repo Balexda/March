@@ -1275,7 +1275,7 @@ export function discoverRepoMetadata(
     }
   };
   const remote = readGit(["config", "--get", "remote.origin.url"]);
-  const slug = /^(?:https:\/\/github\.com\/|ssh:\/\/git@github\.com\/|git@github\.com:)([\w.-]+\/[\w.-]+?)\/?$/i.exec(remote)?.[1];
+  const slug = /^(?:https:\/\/github\.com\/|ssh:\/\/git@github\.com\/|ssh:\/\/git@ssh\.github\.com:443\/|git@github\.com:)([\w.-]+\/[\w.-]+?)\/?$/i.exec(remote)?.[1];
   const defaultRef = readGit(["symbolic-ref", "refs/remotes/origin/HEAD"]);
   return {
     ownerWithName: slug?.replace(/\.git$/i, "") ?? null,

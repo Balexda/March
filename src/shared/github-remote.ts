@@ -6,7 +6,7 @@ import { execFile } from "node:child_process";
  * forge mutations both resolve through here, so a PR number read from one
  * repository is never acted on in another.
  */
-const REMOTE_PATTERN = /^(?:https?:\/\/github\.com\/|ssh:\/\/git@github\.com\/|git@github\.com:)([\w.-]+\/[\w.-]+?)\/?$/i;
+const REMOTE_PATTERN = /^(?:https?:\/\/github\.com\/|ssh:\/\/git@github\.com\/|ssh:\/\/git@ssh\.github\.com:443\/|git@github\.com:)([\w.-]+\/[\w.-]+?)\/?$/i;
 
 /** Parse an `owner/name` slug from a GitHub remote URL, or null. */
 export function githubRepoFromRemote(remote: string): string | null {

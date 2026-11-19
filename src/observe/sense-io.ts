@@ -312,7 +312,7 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
       } else {
         try {
           const out = await execText("gh", ["repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"], {
-            cwd: repoPath,
+            cwd: repoPath, timeout: 30_000, killSignal: "SIGKILL",
           });
           ownerCache = out.trim() || null;
         } catch {

@@ -33,7 +33,7 @@ function main() {
 
   const remote = run("git", ["config", "--get", "remote.origin.url"], process.env, 5_000);
   const match = remote.stdout?.trim().match(
-    /^(?:https:\/\/github\.com\/|ssh:\/\/git@github\.com\/|git@github\.com:)([\w.-]+\/[\w.-]+?)\/?$/i,
+    /^(?:https:\/\/github\.com\/|ssh:\/\/git@github\.com\/|ssh:\/\/git@ssh\.github\.com:443\/|git@github\.com:)([\w.-]+\/[\w.-]+?)\/?$/i,
   );
   if (remote.status !== 0 || !match) return fail("Could not resolve a GitHub repository from origin.");
   const repo = match[1].replace(/\.git$/i, "");
