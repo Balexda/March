@@ -25,6 +25,8 @@ import {
   buildSessionShowArgs,
   createAgentDeckAdapter,
   expectedWorktreeDirName,
+  looksLikeComposerRefusal,
+  paneTail,
   parseAgentDeckSession,
   pickLaunchedSession,
   resolveAgentDeckEnv,
@@ -97,9 +99,9 @@ describe("castra adapter — argv builders", () => {
         "--extra-arg",
         "opus",
         "--extra-arg",
-        "--add-dir",
+        "--plugin-dir",
         "--extra-arg",
-        "/steward-skills",
+        path.join("/steward-skills", "plugin"),
         "--extra-arg",
         "--settings",
         "--extra-arg",
@@ -123,7 +125,7 @@ describe("castra adapter — argv builders", () => {
     expect(args[args.indexOf("--model") + 2]).toBe("opus");
   });
 
-  it("loads the steward skills dir via --add-dir (keeps host ~/.claude auth)", () => {
+  it("loads the steward skills as a plugin via --plugin-dir, never --add-dir (#608)", () => {
     const prev = process.env.MARCH_STEWARD_SKILLS_DIR;
     process.env.MARCH_STEWARD_SKILLS_DIR = "/steward-skills";
     try {
@@ -134,11 +136,14 @@ describe("castra adapter — argv builders", () => {
         group: "g",
         branch: "b",
       });
-      const idx = args.indexOf("--add-dir");
+      const idx = args.indexOf("--plugin-dir");
       expect(idx).toBeGreaterThan(-1);
       expect(args[idx - 1]).toBe("--extra-arg");
       expect(args[idx + 1]).toBe("--extra-arg");
-      expect(args[idx + 2]).toBe("/steward-skills");
+      expect(args[idx + 2]).toBe(path.join("/steward-skills", "plugin"));
+      // --add-dir raises a directory-trust dialog in Claude Code >= 2.1.326 that
+      // blocks the steward's composer, so agent-deck refuses every send.
+      expect(args).not.toContain("--add-dir");
     } finally {
       if (prev === undefined) delete process.env.MARCH_STEWARD_SKILLS_DIR;
       else process.env.MARCH_STEWARD_SKILLS_DIR = prev;
@@ -660,5 +665,67 @@ describe("castra adapter — operations", () => {
       throw new Error("not installed");
     });
     expect(adapter.reachable()).toBe(false);
+  });
+});
+
+describe("castra adapter — refused send diagnostics (#608)", () => {
+  const REFUSAL =
+    "Error: message not delivered to 't': message not sent: composer is occupied or " +
+    "unreadable; existing draft preserved, nothing was typed";
+  const DIALOG_PANE = [
+    "\u2500".repeat(80),
+    " Adding a new directory:",
+    " /home/u/.march/steward",
+    "",
+    " \u276f No, exit",
+    "   Yes, add it",
+    " Enter to confirm \u00b7 Esc to cancel",
+    "",
+    "",
+  ].join("\n");
+
+  beforeEach(() => {
+    childProcessMock.execFileSync.mockReset();
+  });
+
+  it("recognizes agent-deck's composer refusal and nothing else", () => {
+    expect(looksLikeComposerRefusal(REFUSAL)).toBe(true);
+    expect(looksLikeComposerRefusal("session not found")).toBe(false);
+  });
+
+  it("paneTail keeps the last non-blank, non-rule lines", () => {
+    expect(paneTail(DIALOG_PANE, 3)).toBe(
+      "   Yes, add it\n Enter to confirm \u00b7 Esc to cancel".replace(/^/, " \u276f No, exit\n"),
+    );
+    expect(paneTail(DIALOG_PANE, 50)).not.toContain("\u2500");
+  });
+
+  it("appends the steward's pane tail to a refused send", () => {
+    childProcessMock.execFileSync.mockImplementation((cmd: string, args: string[]) => {
+      if (cmd === "agent-deck" && args.includes("send")) {
+        throw Object.assign(new Error("exit 1"), { stderr: REFUSAL });
+      }
+      if (cmd === "agent-deck" && args.includes("show")) {
+        return JSON.stringify({ id: "s1", tmux_session: "agentdeck_t_1" });
+      }
+      if (cmd === "tmux") {
+        expect(args).toEqual(["capture-pane", "-p", "-t", "agentdeck_t_1"]);
+        return DIALOG_PANE;
+      }
+      throw new Error(`unexpected ${cmd} ${args.join(" ")}`);
+    });
+    expect(() =>
+      createAgentDeckAdapter().send({ profile: "march", sessionId: "s1", prompt: "go" }),
+    ).toThrow(/composer is occupied[\s\S]*Steward pane at refusal[\s\S]*Adding a new directory/);
+  });
+
+  it("leaves other send failures unchanged and never captures the pane", () => {
+    childProcessMock.execFileSync.mockImplementation((cmd: string) => {
+      if (cmd === "tmux") throw new Error("must not capture");
+      throw Object.assign(new Error("exit 1"), { stderr: "tmux: server exited" });
+    });
+    expect(() =>
+      createAgentDeckAdapter().send({ profile: "march", sessionId: "s1", prompt: "go" }),
+    ).toThrow(/^agent-deck session send failed: tmux: server exited$/);
   });
 });

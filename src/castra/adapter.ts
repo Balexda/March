@@ -10,7 +10,7 @@ import { CASTRA_DEFAULT_MODEL } from "./config.js";
 import {
   recordStewardSession,
   stewardSettingsPath,
-  stewardSkillsRoot,
+  stewardPluginDir,
 } from "./steward-skills.js";
 
 /**
@@ -70,14 +70,16 @@ export function buildLaunchArgs(input: {
     "--model",
     "--extra-arg",
     input.model?.trim() || CASTRA_DEFAULT_MODEL,
-    // Load the shared steward skills (e.g. steward-pr) without relocating the
-    // host ~/.claude config: --add-dir reads <root>/.claude/skills/** and keeps
-    // the operator's credentials. The dir is provisioned at Castra serve start
-    // (see steward-skills.ts).
+    // Load the shared steward skills (e.g. steward-pr) as a session-only
+    // plugin without relocating the host ~/.claude config, so the operator's
+    // credentials stay. Not --add-dir: since Claude Code 2.1.326 that raises a
+    // directory-trust dialog in the idle steward's composer, and agent-deck
+    // then refuses the manager-prompt send (#608). Provisioned at Castra serve
+    // start (see steward-skills.ts).
     "--extra-arg",
-    "--add-dir",
+    "--plugin-dir",
     "--extra-arg",
-    stewardSkillsRoot(),
+    stewardPluginDir(),
     // Load the steward self-report settings (#371): the Notification/Stop hook
     // that POSTs the steward's state to Herald. Provisioned alongside the skills.
     "--extra-arg",
@@ -365,6 +367,49 @@ function runAgentDeck(args: readonly string[], capture: boolean): string {
   }
 }
 
+/** agent-deck's safe refusal: it read the pane, judged the Claude composer not
+ *  empty, and typed nothing. */
+export function looksLikeComposerRefusal(stderr: string): boolean {
+  return /composer is occupied or unreadable/i.test(stderr);
+}
+
+/** Lines of pane tail attached to a refused send. */
+const REFUSED_SEND_PANE_LINES = 15;
+
+/**
+ * Keep the last `maxLines` non-blank lines of a pane capture, dropping
+ * full-width rule lines (box-drawing only) that carry no information.
+ */
+export function paneTail(pane: string, maxLines: number): string {
+  const lines = pane
+    .split("\n")
+    .map((l) => l.replace(/\s+$/, ""))
+    .filter((l) => l.trim() !== "" && !/^[\s\u2500-\u257f]+$/.test(l));
+  return lines.slice(-maxLines).join("\n");
+}
+
+/**
+ * When agent-deck refuses a send because the composer is "occupied", the
+ * refusal alone does not say what is on screen, and the failed steward is
+ * removed on rollback, so the pane is lost. Capture its tail now and append it
+ * to the error, which the legate records in legate-requests.ndjson (#608: a
+ * Claude Code trust dialog sat in the composer and took days to find).
+ * Best-effort: any failure yields `""`.
+ */
+function refusedSendPaneSnapshot(profile: string, sessionId: string, stderr: string): string {
+  if (!looksLikeComposerRefusal(stderr)) return "";
+  try {
+    const shown = parseJsonMaybe(runAgentDeck(buildSessionShowArgs(profile, sessionId), true).trim());
+    if (!shown || typeof shown !== "object" || Array.isArray(shown)) return "";
+    const tmuxSession = firstString(shown as Record<string, unknown>, ["tmux_session", "tmuxSession"]);
+    if (!tmuxSession) return "";
+    const tail = paneTail(runTmux(["capture-pane", "-p", "-t", tmuxSession]), REFUSED_SEND_PANE_LINES);
+    return tail ? `\nSteward pane at refusal (last lines):\n${tail}` : "";
+  } catch {
+    return "";
+  }
+}
+
 /** Heuristic: does this stderr indicate the session simply doesn't exist? */
 function looksLikeNotFound(stderr: string): boolean {
   return /not found|no such|does not exist|no session|unknown session/i.test(stderr);
@@ -602,7 +647,8 @@ export function createAgentDeckAdapter(): AgentDeckAdapter {
           throw new CastraNotFoundError(`session "${sessionId}" not found.`);
         }
         throw new CastraAgentDeckError(
-          `agent-deck session send failed: ${(err as Error).message}`,
+          `agent-deck session send failed: ${(err as Error).message}` +
+            refusedSendPaneSnapshot(profile, sessionId, stderr),
         );
       }
     },

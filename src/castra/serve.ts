@@ -49,7 +49,7 @@ export async function runCastraServer(options: RunCastraServerOptions = {}): Pro
     );
   }
 
-  // Provision the steward skills the manager sessions load via `--add-dir`
+  // Provision the steward skills the manager sessions load via `--plugin-dir`
   // (see steward-skills.ts / buildLaunchArgs). The directory must exist before
   // any session launches. Non-fatal: a provisioning failure must not stop the
   // session host — stewards just fall back to the manager prompt's guidance.

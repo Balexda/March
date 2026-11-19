@@ -695,7 +695,7 @@ export function buildManagerPrompt(input: {
     "   committing with the boxes still unchecked.",
     "6. Commit the applied change. (`git commit`)",
     "7. Push the branch to origin. (`git push -u origin <branch>`)",
-    "8. Open the PR using the `steward-pr` skill, which defines the required",
+    "8. Open the PR using the `march-steward:steward-pr` skill, which defines the required",
     "   title and body format (parentage-grounded Summary, surfaced spec debt +",
     "   uncertainty, one-line validation — no per-file Changes dump). Use the",
     "   artifact path and original request as its inputs.",

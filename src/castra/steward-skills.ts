@@ -12,13 +12,20 @@ import { resolveHeraldUrl } from "../herald/service/client.js";
  * Steward (the Hatchery "manager") sessions open every automated PR. We want
  * them to follow a single, versioned PR convention regardless of which target
  * repo they check out, so we ship `steward-*` skills (currently just
- * `steward-pr`) and load them into each session via Claude Code's `--add-dir`
- * (forwarded through agent-deck's `--extra-arg`; see `buildLaunchArgs`).
+ * `steward-pr`) as a session-only Claude Code plugin, `march-steward`, loaded
+ * via `--plugin-dir` (forwarded through agent-deck's `--extra-arg`; see
+ * `buildLaunchArgs`). Skills resolve namespaced: `march-steward:steward-pr`.
  *
- * `--add-dir <root>` loads `<root>/.claude/skills/**` WITHOUT relocating the
- * host `~/.claude` config, so the steward keeps the operator's credentials and
- * just gains the steward skills on top. The directory must exist before the
- * session launches, so {@link ensureStewardSkills} runs at Castra serve startup.
+ * `--plugin-dir <root>/plugin` adds the skills WITHOUT relocating the host
+ * `~/.claude` config, so the steward keeps the operator's credentials. It used
+ * to be `--add-dir <root>`, but Claude Code 2.1.326 started showing an
+ * "Adding a new directory … trust?" dialog for every `--add-dir` directory not
+ * already trusted. The dialog defaults to "No, exit" and sits in the composer of
+ * the idle steward, so agent-deck refused every manager-prompt send with
+ * "composer is occupied or unreadable" (#608). `--plugin-dir`, like
+ * `--settings`, is explicit per-session operator input and shows no dialog. The
+ * directory must exist before the session launches, so
+ * {@link ensureStewardSkills} runs at Castra serve startup.
  *
  * Steward self-report (#371): the same root also carries the `Notification` +
  * `Stop` hook (`hooks/steward-report.mjs`) and a generated `settings.json` that
@@ -33,9 +40,13 @@ import { resolveHeraldUrl } from "../herald/service/client.js";
 
 const REL_SKILL_MARKER = path.join("skills", "steward-pr", "SKILL.md");
 
+/** Name of the session-only plugin carrying the steward skills. Skills load
+ *  namespaced under it, e.g. `march-steward:steward-pr`. */
+export const STEWARD_PLUGIN_NAME = "march-steward";
+
 /**
- * The shared directory `--add-dir` points at. Claude Code reads
- * `<root>/.claude/skills/**` from it. Override with `MARCH_STEWARD_SKILLS_DIR`
+ * The shared steward root: the plugin dir, the self-report hook, its
+ * `settings.json`, and the per-session sidecars. Override with `MARCH_STEWARD_SKILLS_DIR`
  * (e.g. in tests); defaults to `~/.march/steward`, mirroring the other
  * `~/.march/<service>` data dirs. The path is consumed by the `claude` process
  * running on the host tmux server; Castra's HOME is bind-mounted at the
@@ -45,6 +56,13 @@ export function stewardSkillsRoot(): string {
   const override = process.env.MARCH_STEWARD_SKILLS_DIR?.trim();
   if (override) return override;
   return path.join(os.homedir(), ".march", "steward");
+}
+
+/** The plugin directory `--plugin-dir` points at:
+ *  `<root>/plugin/{.claude-plugin/plugin.json, skills/**}`. A subdirectory, so
+ *  the plugin carries only the skills and not the hook, settings or sidecars. */
+export function stewardPluginDir(): string {
+  return path.join(stewardSkillsRoot(), "plugin");
 }
 
 /** Absolute path of the generated steward `settings.json` (loaded via `claude
@@ -186,23 +204,41 @@ async function findStewardTemplateDir(): Promise<string> {
 }
 
 /**
- * Materialize the shipped steward skills into `<stewardSkillsRoot>/.claude/
- * skills/`, the self-report hook into `<root>/hooks/`, and the generated
- * `settings.json` that wires it — so a session launched with `--add-dir
- * <root>` (skills) and `--settings <root>/settings.json` (hook) finds them.
- * Idempotent and overwriting — the template is the source of truth, so a re-run
- * refreshes any edited skill/hook. Returns the root that was provisioned.
+ * Materialize the shipped steward skills as the `march-steward` plugin under
+ * `<stewardSkillsRoot>/plugin/`, the self-report hook into `<root>/hooks/`, and
+ * the generated `settings.json` that wires it, so a session launched with
+ * `--plugin-dir <root>/plugin` (skills) and `--settings <root>/settings.json`
+ * (hook) finds them. Idempotent and overwriting: the template is the source of
+ * truth, so a re-run refreshes any edited skill/hook. Returns the root that was
+ * provisioned.
  */
 export async function ensureStewardSkills(): Promise<string> {
   const root = stewardSkillsRoot();
   const templateDir = await findStewardTemplateDir();
   // Wipe-then-copy so a skill/hook deleted/renamed in the shipped template does
   // not linger — `fs.cp` overwrites but never prunes. The destination is
-  // March-owned (~/.march/steward), so the wipe is safe.
-  const skillsDest = path.join(root, ".claude", "skills");
-  await fs.rm(skillsDest, { recursive: true, force: true });
-  await fs.mkdir(skillsDest, { recursive: true });
-  await fs.cp(path.join(templateDir, "skills"), skillsDest, { recursive: true, force: true });
+  // March-owned (~/.march/steward), so the wipe is safe. The legacy
+  // `<root>/.claude/skills` layout (the old `--add-dir` load) goes too.
+  await fs.rm(path.join(root, ".claude"), { recursive: true, force: true });
+  const pluginDir = stewardPluginDir();
+  await fs.rm(pluginDir, { recursive: true, force: true });
+  await fs.mkdir(path.join(pluginDir, ".claude-plugin"), { recursive: true });
+  await fs.writeFile(
+    path.join(pluginDir, ".claude-plugin", "plugin.json"),
+    JSON.stringify(
+      {
+        name: STEWARD_PLUGIN_NAME,
+        description: "March steward skills (PR conventions for automated steward sessions).",
+      },
+      null,
+      2,
+    ) + "\n",
+    "utf-8",
+  );
+  await fs.cp(path.join(templateDir, "skills"), path.join(pluginDir, "skills"), {
+    recursive: true,
+    force: true,
+  });
 
   // Steward self-report hook (#371) + the settings.json that loads it.
   const hooksDest = path.join(root, "hooks");
