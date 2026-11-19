@@ -37,6 +37,7 @@ import { runCastraServer } from "../castra/serve.js";
 import { CASTRA_TOKEN_ENV } from "../castra/config.js";
 import { CastraValidationError } from "../castra/types.js";
 import { runTesseraServer } from "../tessera/serve.js";
+import { runTesseraToken, writeTesseraTokenUsageError } from "../tessera/token-cli.js";
 import { TesseraConfigError } from "../tessera/config.js";
 import { runStatioServer } from "../statio/serve.js";
 import { STATIO_TOKEN_ENV } from "../statio/config.js";
@@ -2111,6 +2112,25 @@ castra
   });
 
 const tessera = program.command("tessera").description("Manage Tessera credential entitlements");
+tessera.command("token")
+  .description("Print a repository-scoped GitHub App token")
+  .requiredOption("--repo <owner/name>", "GitHub repository")
+  .requiredOption("--access <read|write>", "Access level")
+  .option("--identity <app>", "GitHub identity", "app")
+  .allowExcessArguments(false)
+  .exitOverride((error) => {
+    if (error.exitCode !== 0) {
+      commandHandled = true;
+      writeTesseraTokenUsageError();
+      process.exitCode = USAGE_ERROR;
+    }
+    throw error;
+  })
+  .action(async (opts: { repo: string; access: string; identity: string }) => {
+    commandHandled = true;
+    process.exitCode = await runTesseraToken(opts);
+  });
+
 tessera.command("serve")
   .description("Run the Tessera HTTP service (issuance requires authorization)")
   .option("--port <port>", "Listen port (default: MARCH_TESSERA_PORT or 9477)")
