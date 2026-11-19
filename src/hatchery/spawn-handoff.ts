@@ -1203,10 +1203,12 @@ export async function pinManagerWorktreeToDefaultBranch(
     return { defaultBranch: resolveDefaultBranch(worktreePath), fetched: false, pinned: false };
   }
   const origin = await resolveHatcheryOrigin(worktreePath);
-  // A GitHub origin without a local origin/HEAD must not guess `main`: a fetch
-  // of a missing branch would fail the spawn. Ask GitHub through the same scope.
-  const defaultBranch = readOriginHead(worktreePath) ??
-    (origin?.repo ? await readHatcheryGitHubDefaultBranch(origin.repo, sliceId) : "main");
+  // For a GitHub origin, ask GitHub through the same scope: a local origin/HEAD
+  // is not refreshed by `git fetch` and can still name a renamed/deleted branch,
+  // and guessing `main` without one would fail the fetch the same way.
+  const defaultBranch = origin?.repo
+    ? await readHatcheryGitHubDefaultBranch(origin.repo, sliceId)
+    : readOriginHead(worktreePath) ?? "main";
   let fetched = false;
   if (origin) {
     const result = await runHatcheryNetworkGit(
@@ -1336,22 +1338,6 @@ export async function runHatcherySpawn(
     const stewardSessionId = manager.sessionId;
     const managerWorktree = manager.worktreePath;
 
-    // Pin the worker's base to the up-to-date default branch (#460). agent-deck
-    // cut this worktree from a stale local base and never fetched; pinning it to
-    // origin/<default> NOW — before the snapshot the worker diffs against AND
-    // before the apply that targets this same worktree — makes the worker edit
-    // already-merged files instead of re-creating them and colliding at apply.
-    stage = "pin_base";
-    await dispatch.spanAsync("manager.pin_base", async (pinSpan) => {
-      pinSpan.setAttributes({ "march.worktree": managerWorktree });
-      const pin = await pinManagerWorktreeToDefaultBranch(managerWorktree, sliceId);
-      pinSpan.setAttributes({
-        "march.default_branch": pin.defaultBranch,
-        "march.pin_base.fetched": pin.fetched,
-        "march.pin_base.pinned": pin.pinned,
-      });
-    });
-
     await dispatch.spanAsync("brood.register", () =>
       registerStewardLaunchWithBrood({
         spawnId,
@@ -1364,6 +1350,24 @@ export async function runHatcherySpawn(
         group,
       }),
     );
+
+    // Pin the worker's base to the up-to-date default branch (#460). agent-deck
+    // cut this worktree from a stale local base and never fetched; pinning it to
+    // origin/<default> NOW — before the snapshot the worker diffs against AND
+    // before the apply that targets this same worktree — makes the worker edit
+    // already-merged files instead of re-creating them and colliding at apply.
+    // Runs after brood.register so a pin failure (e.g. Tessera outage) still
+    // leaves a Brood row that can drive steward teardown.
+    stage = "pin_base";
+    await dispatch.spanAsync("manager.pin_base", async (pinSpan) => {
+      pinSpan.setAttributes({ "march.worktree": managerWorktree });
+      const pin = await pinManagerWorktreeToDefaultBranch(managerWorktree, sliceId);
+      pinSpan.setAttributes({
+        "march.default_branch": pin.defaultBranch,
+        "march.pin_base.fetched": pin.fetched,
+        "march.pin_base.pinned": pin.pinned,
+      });
+    });
 
     // Publish the slice↔session↔spawn correlation to Herald NOW, at launch (#213),
     // the push half of the durable stranded-steward fix. Hatchery owns these facts

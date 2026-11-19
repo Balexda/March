@@ -154,6 +154,9 @@ execFileSync(git, args, { stdio: "inherit", env });
     vi.stubEnv("MARCH_TESSERA_URL", "http://pin-test-tessera");
     vi.stubEnv("MARCH_TESSERA_CLIENT_KEY", "pin-test-key");
     const issuance = vi.fn(async (_url: string, init: RequestInit) => {
+      if (String(_url) === "https://api.github.com/repos/my-team/project") {
+        return Response.json({ default_branch: "main" });
+      }
       const request = JSON.parse(String(init.body));
       return Response.json({
         token: request.refresh ? "refreshed" : "initial", identity: "app[bot]",
@@ -168,11 +171,12 @@ execFileSync(git, args, { stdio: "inherit", env });
     });
     expect(git(["rev-parse", "HEAD"], stale)).toBe(originTip);
     expect(git(["config", "--get", "remote.origin.url"], stale)).toBe("git@github.com:my-team/project.git");
-    expect(issuance.mock.calls.map(([, init]) => JSON.parse(String(init.body)))).toEqual([
+    const issuances = issuance.mock.calls.filter(([url]) => String(url).startsWith("http://pin-test-tessera"));
+    expect(issuances.map(([, init]) => JSON.parse(String(init.body)))).toEqual([
       { repo: "my-team/project", identity: "app", access: "read" },
       { repo: "my-team/project", identity: "app", access: "read", refresh: true },
     ]);
-    expect(issuance.mock.calls[0][1].headers).toMatchObject({ "x-march-slice-id": "slice-3" });
+    expect(issuances[0][1].headers).toMatchObject({ "x-march-slice-id": "slice-3" });
     const attempts = fs.readFileSync(calls, "utf8").trim().split("\n").map((line) => JSON.parse(line));
     expect(attempts).toEqual(["initial", "refreshed"].map((token) => ({
       args: ["fetch", "--no-recurse-submodules", "--no-auto-maintenance", "--", "https://github.com/my-team/project.git",
@@ -193,10 +197,12 @@ execFileSync(git, args, { stdio: "inherit", env });
     expect(process.env.GH_TOKEN).toBe("operator-token");
   });
 
-  it("resolves a GitHub default branch through scoped metadata when origin/HEAD is unset", async () => {
+  it.each(["unset", "stale"] as const)("resolves a GitHub default branch through scoped metadata when origin/HEAD is %s", async (originHead) => {
     const { stale, origin, originTip } = makeStaleWorktree("master");
     git(["remote", "set-url", "origin", "git@github.com:my-team/master-project.git"], stale);
-    git(["symbolic-ref", "--delete", "refs/remotes/origin/HEAD"], stale);
+    if (originHead === "unset") git(["symbolic-ref", "--delete", "refs/remotes/origin/HEAD"], stale);
+    // A rename on GitHub leaves origin/HEAD pointing at a branch that no longer exists.
+    else git(["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"], stale);
     const fakeBin = makeTmpDir();
     const realGit = execFileSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).trim();
     fs.writeFileSync(path.join(fakeBin, "git"), `#!/usr/bin/env node
