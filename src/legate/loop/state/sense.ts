@@ -536,7 +536,7 @@ export function selectStaleRecheck(
  * and recent session output — the per-slice surface the legate then drains from
  * the inbox. The world reads (sessions, workers, smithy) are pure reads here;
  * the default-branch git sync that keeps the local checkout fresh is owned by
- * Herald's observe path (`runObservation`, gated by `MARCH_HERALD_SYNC`) and
+ * Herald's observe path (`runObservation`, run for every active profile, #601) and
  * runs BEFORE this read, not inside it (#300).
  *
  * PR detail reads are gated by a single cheap open-PR probe (`deps.listOpenPrs`,

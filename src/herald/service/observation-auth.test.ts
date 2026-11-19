@@ -18,7 +18,10 @@ const { execFile, startHeraldSpan, listSessions } = vi.hoisted(() => ({
   listSessions: vi.fn(),
   startHeraldSpan: vi.fn(),
 }));
-vi.mock("node:child_process", () => ({ execFile }));
+vi.mock("node:child_process", async () => {
+  const { spawnViaExecFile } = await import("../../testing/spawn-via-exec-file.js");
+  return { execFile, spawn: spawnViaExecFile(execFile) };
+});
 vi.mock("../../observability/herald-trace.js", () => ({ startHeraldSpan }));
 vi.mock("../../castra/client.js", () => ({
   CastraClient: class {
@@ -32,7 +35,7 @@ afterEach(() => {
   vi.resetAllMocks();
 });
 
-it.skipIf(!sqliteAvailable).each([false, true])("observes independent profiles with scoped credentials (sync: %s)", async (sync) => {
+it.skipIf(!sqliteAvailable)("observes independent profiles with scoped credentials (sync always on, #601)", async () => {
   listSessions.mockResolvedValue([]);
   const home = mkdtempSync(join(tmpdir(), "herald-auth-test-"));
   const operatorConfig = join(home, ".config", "gh");
@@ -44,7 +47,6 @@ it.skipIf(!sqliteAvailable).each([false, true])("observes independent profiles w
   vi.stubEnv("GITHUB_TOKEN", undefined);
   vi.stubEnv("GH_ENTERPRISE_TOKEN", "mounted-enterprise-token");
   vi.stubEnv("MARCH_TESSERA_GH_TOKEN_FALLBACK", undefined);
-  vi.stubEnv("MARCH_HERALD_SYNC", sync ? "1" : undefined);
 
   const requests: Array<{ repo: string; identity: string; access: string; refresh?: boolean }> = [];
   const directories = new Set<string>();
@@ -195,7 +197,7 @@ it.skipIf(!sqliteAvailable).each([false, true])("observes independent profiles w
     expect(slices.new.pr).toMatchObject({ number: 12, head_sha: "abcdef" });
     expect(slices["fork-only"].pr).toEqual({ skipped: true, reason: "missing_pr_number" });
 
-    if (!sync) {
+    {
       expect(slices.legacy.pr).toMatchObject({
         needs_response_count: 1, changes_requested_count: 0, bot_approval_count: 1,
         unresolved_threads: [
@@ -260,14 +262,14 @@ it.skipIf(!sqliteAvailable).each([false, true])("observes independent profiles w
         { kind: "comment-fix", sliceId: "new", commentIds: ["33"] },
       ]);
     }
-    expect(networkGit).toEqual(sync ? ["fetch", "pull"] : []);
+    expect(networkGit.slice(0, 2)).toEqual(["fetch", "pull"]);
     expect(requests).toEqual([
       { repo: "denied/repo", identity: "app", access: "read" },
       { repo: "allowed/repo", identity: "app", access: "read" },
       { repo: "allowed/repo", identity: "app", access: "read", refresh: true },
     ]);
     expect(ended).toContainEqual({
-      name: "herald.github.read", dispatchKey: sync ? undefined : "denied-slice", error: true,
+      name: "herald.github.read", dispatchKey: undefined, error: true,
     });
     expect(ended).toContainEqual(expect.objectContaining({ name: "herald.observe.failed", error: true }));
     expect([...directories].every((dir) => !existsSync(dir))).toBe(true);

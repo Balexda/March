@@ -8,7 +8,10 @@ import type { LoopState } from "../legate/loop/state/types.js";
 // vi.mock is hoisted; close over a mutable handle so each test can route
 // execFile(command,args,…) output. sense-io's execText is the only execFile user.
 const childProcessMock = { execFile: vi.fn() };
-vi.mock("node:child_process", () => ({ execFile: childProcessMock.execFile }));
+vi.mock("node:child_process", async () => {
+  const { spawnViaExecFile } = await import("../testing/spawn-via-exec-file.js");
+  return { execFile: childProcessMock.execFile, spawn: spawnViaExecFile(childProcessMock.execFile) };
+});
 
 // Import under test AFTER vi.mock so the stub is applied to its imports.
 const { buildSenseIo, createSenseIo, gitHubAuthConfigArgs, summarizeReviews } = await import("./sense-io.js");

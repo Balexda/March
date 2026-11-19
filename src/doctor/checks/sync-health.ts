@@ -88,7 +88,7 @@ export async function checkSyncHealth(ctx: DoctorContext): Promise<CheckResult> 
         title: profile.profile,
         severity: "warn",
         detail: `${branch} is behind origin (local ${shortSha(localSha)} ≠ origin ${shortSha(remoteSha)}) — merged work may not surface`,
-        remedy: `git -C ${repoPath} pull (or set MARCH_HERALD_SYNC=1 so Herald owns the sync)`,
+        remedy: `git -C ${repoPath} pull, then check \`docker logs march-herald\` for the default-branch sync failure`,
       });
     } else {
       findings.push({

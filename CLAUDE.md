@@ -91,9 +91,9 @@ Quick pointers:
   state is in-memory, recorded only as transition events, and rebuilt from the
   fold on cold start, and Herald's observer learns slice→branch/session from its
   own projection (`senseObserved`). Herald is the single sequencer (it owns every
-  `seq`, including legate `POST /events`). `MARCH_HERALD_SYNC=1` lets Herald own
-  the default-branch git sync (the legate no longer syncs, so enable it in
-  production); Herald never touches Docker. New event type → add it to the `events.ts` discriminated union
+  `seq`, including legate `POST /events`). Herald owns the default-branch git
+  sync and always runs it for every active profile (no flag, #601; to stop
+  syncing a repo, remove the profile); Herald never touches Docker. New event type → add it to the `events.ts` discriminated union
   + reducer (keep `EventType` low-cardinality — it is a metric label) and the
   `POST /events` validator; new metric → `src/observability/herald-metrics.ts`,
   then `docker/grafana/dashboards/march-herald.json`. Image/compose:

@@ -38,10 +38,10 @@ an optional string `headSha` records the PR head it was sent against. The fold
 accumulates the IDs per slice and kind, and keeps the latest dispatch (kind,
 key, event time and head SHA), for Legate to restore on restart.
 
-`MARCH_HERALD_SYNC=1` enables default-branch synchronization before observation.
-Herald fetches and pulls over HTTPS with the same repository entitlement and
-requires a fast-forward. With sync disabled, Herald reads the local checkout
-and skips network Git operations.
+Herald synchronizes every active profile's default branch before each
+observation (#601; there is no switch, and removing the profile is how to stop
+it). Herald fetches and pulls over HTTPS with the same repository entitlement
+and requires a fast-forward.
 
 Herald reads these settings:
 

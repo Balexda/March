@@ -3,10 +3,16 @@
  */
 import { describe, expect, it, vi } from "vitest";
 import { describeChangeSpan, runObservation, type ObserveStore } from "./observer.js";
+import { startHeraldSpan } from "../../observability/herald-trace.js";
 import { emptySystemState, foldEvents, reduce, type AppendEventInput, type EventBody, type HeraldEvent, type SystemState } from "../events.js";
 import type { SenseDeps } from "../../legate/loop/state/sense.js";
 import type { LoopMeta } from "../../legate/loop/meta.js";
 import type { ReviewObservation } from "../../observe/sense-io.js";
+
+vi.mock("../../observability/herald-trace.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../observability/herald-trace.js")>();
+  return { ...actual, startHeraldSpan: vi.fn(actual.startHeraldSpan) };
+});
 
 const meta = { worker_group: "legate-workers", repo: { path: "/repo" } } as unknown as LoopMeta;
 
@@ -229,11 +235,70 @@ describe("runObservation", () => {
     expect(order).toEqual(["sync:/repo", "read"]);
   });
 
-  it("does not sync when sync is not wired (read-only mode, MARCH_HERALD_SYNC off)", async () => {
+  it("still observes when no sync is wired (test seam; the server always wires it, #601)", async () => {
     const store = fakeStore();
     // No syncDefaultBranch on the deps → Herald never fetches; the read still runs.
     const result = await runObservation({ store, profile: PROFILE, senseDeps: senseDeps() });
     expect(result.observedAt).toBe("2026-05-20T00:00:00Z");
+  });
+
+  it("masks the GitHub token from a failed sync's git argv on every log channel (#601 review)", async () => {
+    const store = fakeStore();
+    const warn = vi.fn();
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      await runObservation({
+        store,
+        profile: PROFILE,
+        syncDefaultBranch: async () => {
+          throw new Error(
+            "Command failed: git -c url.https://x-access-token:ghp_LEAK@github.com/.insteadOf=git@github.com: fetch origin main\n" +
+              "fatal: unable to access 'https://github.com/o/r.git/': Could not resolve host: github.com",
+          );
+        },
+        senseDeps: senseDeps({ warn }),
+      });
+      const logged = [String(warn.mock.calls[0]![0]), String(stderr.mock.calls[0]![0])];
+      for (const line of logged) {
+        expect(line).not.toContain("ghp_LEAK");
+        expect(line).toContain("x-access-token:***@");
+        expect(line).toContain("Could not resolve host");
+      }
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
+  it("emits an errored herald.sync.failed span when a sync step times out, and still observes (#601 review)", async () => {
+    const store = fakeStore();
+    const end = vi.fn();
+    vi.mocked(startHeraldSpan).mockImplementationOnce(() => ({ enabled: true, setAttributes: vi.fn(), end }));
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      const result = await runObservation({
+        store,
+        profile: PROFILE,
+        syncDefaultBranch: async () => {
+          throw Object.assign(new Error("Command failed: git fetch origin main (timed out after 120000ms)"), {
+            killed: true,
+            signal: "SIGKILL",
+          });
+        },
+        senseDeps: senseDeps({ warn: vi.fn() }),
+      });
+      expect(result.observedAt).toBe("2026-05-20T00:00:00Z");
+      expect(startHeraldSpan).toHaveBeenCalledWith(expect.objectContaining({
+        name: "herald.sync.failed",
+        attributes: {
+          "march.profile": PROFILE,
+          "march.failure_stage": "default_branch_sync",
+          "march.sync.timed_out": true,
+        },
+      }));
+      expect(end).toHaveBeenCalledWith({ error: true });
+    } finally {
+      stderr.mockRestore();
+    }
   });
 
   it("isolates a sync failure but makes it LOUD: warn + stderr, still observes, never throws (#300/#301)", async () => {

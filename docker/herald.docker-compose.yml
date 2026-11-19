@@ -21,16 +21,10 @@
 #                     when the registry is empty. Optional now that profiles are
 #                     registered via `march legate init` (Herald is the source of
 #                     truth). Defaults to MARCH_LEGATE_LOOP_META.
-#   MARCH_HERALD_SYNC set to 1 to let Herald own the default-branch git sync —
-#                     each observe tick Herald fetches + fast-forwards every
-#                     profile's default branch so freshly-merged work surfaces
-#                     (#300). Leave UNSET only if a legacy legate is still
-#                     syncing; in the current model the legate never syncs, so
-#                     production should set this to 1.
 #   MARCH_HERALD_TESSERA_CLIENT_KEY
 #                     Herald's own Tessera client key (forwarded as
 #                     MARCH_TESSERA_CLIENT_KEY). All GitHub reads and the sync
-#                     fetch/pull use a repository-scoped app/read entitlement
+#                     fetch/pull (always on for every active profile, #601) use a repository-scoped app/read entitlement
 #                     over HTTPS — no ssh client / key / agent is used.
 #   MARCH_TESSERA_URL Tessera base URL (default http://tessera:9477 on `march`).
 #   MARCH_TESSERA_GH_TOKEN_FALLBACK
@@ -82,11 +76,9 @@ services:
       - HOME=${MARCH_HOST_HOME:-/home/jmbattista}
       # Herald observes the same deployment as the legate; reuse its meta.
       - MARCH_HERALD_META=${MARCH_HERALD_META:-${MARCH_LEGATE_LOOP_META:-}}
-      # Set to 1 so Herald owns the default-branch git sync (#300). The legate no
-      # longer syncs, so production should enable this.
-      - MARCH_HERALD_SYNC=${MARCH_HERALD_SYNC:-}
-      # GitHub token: with sync on, Herald rewrites SSH remotes to token-auth
-      # HTTPS at fetch time (#301) so no ssh client/key is needed in-container.
+      # GitHub token: Herald always syncs every active profile's default branch
+      # (#300/#601) and rewrites SSH remotes to token-auth HTTPS at fetch time
+      # (#301), so no ssh client/key is needed in-container.
       - GH_TOKEN=${GH_TOKEN:-}
       - GITHUB_TOKEN=${GITHUB_TOKEN:-}
       # Tessera (scoped GitHub reads + sync). Herald requests app/read per

@@ -85,7 +85,7 @@ is recorded only as transition events. There is no `state.json`: on a cold start
 `senseFromHerald` rebuilds the working state from the fold (`rebuildWorkingState`,
 seeded by `GET /state?at=<cursor>` + trailing `/events`). The smithy *ready
 records* are still read locally (not event-sourced), without syncing — Herald owns
-the default-branch sync (`MARCH_HERALD_SYNC=1`). See the
+the default-branch sync for every active profile. See the
 [Herald README](../../herald/README.md) for the event taxonomy.
 
 ## Source layout

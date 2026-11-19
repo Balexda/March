@@ -87,7 +87,7 @@ export async function apply(_decisions: DispatchDecision[], ctx: HandlerContext,
   if (!state.raw.slices || typeof state.raw.slices !== "object") state.raw.slices = {};
   const ts = ctx.ts;
 
-  // The default-branch sync is owned by Herald (`MARCH_HERALD_SYNC`, #300); the
+  // The default-branch sync is owned by Herald (#300, always on since #601); the
   // legate never fetches, so dispatch reads the local checkout as-is.
 
   // 1. Drain pending Hatchery dispatches (complete / recover / escalate).

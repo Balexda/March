@@ -2,6 +2,7 @@ import { TesseraClientError } from "../../tessera/client.js";
 import { senseObserved, type SenseDeps } from "../../legate/loop/state/sense.js";
 import { startHeraldSpan } from "../../observability/herald-trace.js";
 import { recordHeraldSync } from "../../observability/herald-metrics.js";
+import { redactGitCredentials } from "../../spawn/git-auth.js";
 import type { Attributes } from "@opentelemetry/api";
 import type { AppendEventInput, EventBody, HeraldEvent, SystemState } from "../events.js";
 import { diffObserved } from "./diff.js";
@@ -24,10 +25,11 @@ export interface ObserverDeps {
    * Default-branch git sync for this profile (#300). Herald owns the sync, so it
    * fetches + fast-forwards origin's default branch BEFORE reading `smithy status`
    * — that is what makes freshly-merged work (e.g. a merged cut's `tasks.md`)
-   * surface in the next observation. Wired by the server ONLY when Herald is in
-   * sync mode (`MARCH_HERALD_SYNC=1`); `undefined` in read-only mode, where the
-   * observation runs against the local checkout as-is. A sync failure can
-   * fall back to the local checkout. A Tessera failure aborts this profile only.
+   * surface in the next observation. The server always wires it for every
+   * active profile (#601: there is no global off switch). It is optional here
+   * only as a test seam; when absent the observation runs against the local
+   * checkout as-is. A sync failure can fall back to the local checkout. A
+   * Tessera failure aborts this profile only.
    */
   readonly syncDefaultBranch?: (repoPath: string, knownDefault?: string) => Promise<void>;
 }
@@ -147,12 +149,12 @@ export function describeChangeSpan(
  * projection and reads the live PR/output for each non-terminal slice.
  */
 /**
- * Run this profile's default-branch sync before the observation read (#300),
- * when Herald is in sync mode (`deps.syncDefaultBranch` wired). The sync is
+ * Run this profile's default-branch sync before the observation read (#300).
+ * The server always wires `deps.syncDefaultBranch` (#601). The sync is
  * best-effort for transport or checkout failures, which leave the tick to
  * observe the local checkout. Tessera failures abort the profile tick before
- * it can emit observations. No-op when
- * sync is disabled or the repo path is unknown.
+ * it can emit observations. No-op when the sync isn't wired (tests) or the
+ * repo path is unknown.
  *
  * A failure is made LOUD on every channel (#301 live-validation: the original
  * silence is exactly how the bug hid). It hits (1) the structured warn log
@@ -166,13 +168,27 @@ async function syncDefaultBranchBeforeObserve(deps: ObserverDeps): Promise<void>
   if (!deps.syncDefaultBranch) return;
   const repoPath = deps.senseDeps.meta.repo?.path;
   if (typeof repoPath !== "string" || repoPath.length === 0) return;
+  const started = Date.now();
   try {
     await deps.syncDefaultBranch(repoPath);
     recordHeraldSync("ok");
   } catch (err) {
     recordHeraldSync("error");
+    // Errored span for the failed sync (a timed-out step included), since the
+    // tick carries on and `herald.observe.failed` never sees it.
+    startHeraldSpan({
+      name: "herald.sync.failed",
+      startTimeMs: started,
+      attributes: {
+        "march.profile": deps.profile,
+        "march.failure_stage": "default_branch_sync",
+        "march.sync.timed_out": (err as { killed?: boolean } | null)?.killed === true,
+      },
+    }).end({ error: true });
     if (err instanceof TesseraClientError) throw err;
-    const detail = err instanceof Error ? err.message : String(err);
+    // The legacy path's error echoes the git argv, which carries the GitHub token
+    // from gitHubAuthConfigArgs. Mask it before it reaches any log channel.
+    const detail = redactGitCredentials(err instanceof Error ? err.message : String(err));
     const message = `default-branch sync failed for ${deps.profile}: ${detail} — observing against stale local repo`;
     deps.senseDeps.warn?.(message);
     // Bypass the file-only pino logger so the failure is visible in `docker logs`.
@@ -185,7 +201,7 @@ export async function runObservation(deps: ObserverDeps): Promise<ObserveResult>
   // Herald owns the default-branch sync (#300): pull origin's default branch
   // BEFORE the read so a freshly auto-merged cut's `tasks.md` surfaces in this
   // tick's `smithy status` (rather than drifting behind until an operator pulls).
-  // Wired only in sync mode. The service isolates failures by profile.
+  // Always wired by the server (#601). The service isolates failures by profile.
   const tickStarted = Date.now();
   try {
     await syncDefaultBranchBeforeObserve(deps);

@@ -101,6 +101,11 @@ function heraldInstruments(meter: Meter): HeraldInstruments {
       description: "Count of Herald default-branch git syncs by outcome (ok|error)",
       unit: "1",
     });
+    // Publish both outcome series at 0 up front. Prometheus' increase() can't see
+    // a series' first sample as an increase, so without this the very first sync
+    // failure after a restart would be invisible to the sync alerts.
+    syncCounter.add(0, { outcome: "ok" });
+    syncCounter.add(0, { outcome: "error" });
     heartbeatCounter = meter.createCounter("march.herald.heartbeat", {
       description: "Liveness heartbeat ticks emitted by the herald service",
       unit: "1",

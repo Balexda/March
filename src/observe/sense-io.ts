@@ -3,7 +3,7 @@ import { createGitHubRead, type GitHubReadClient } from "./github-read.js";
 import { TesseraClientError } from "../tessera/client.js";
 import { isBotActor, summarizeCodeRabbit, type CodeRabbitStanding } from "./coderabbit-review.js";
 import { resolveOriginRepo, sameGitHubRepo } from "../shared/github-remote.js";
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { CastraClient } from "../castra/client.js";
 import { gitHubAuthConfigArgs } from "../spawn/git-auth.js";
 import type { LoopMeta } from "../legate/loop/meta.js";
@@ -79,7 +79,8 @@ export { gitHubAuthConfigArgs };
  * {@link prMatchesSliceBranch} directly from its dispatch/recovery paths. Herald
  * uses {@link toSenseDeps} to feed `senseObserved` AND calls {@link
  * syncDefaultBranch} from its observe path — Herald owns the default-branch git
- * sync (`MARCH_HERALD_SYNC`, #300), so the sync is no longer part of SenseDeps.
+ * sync (#300; always on for every active profile, #601), so the sync is no
+ * longer part of SenseDeps.
  */
 export interface SenseIo {
   listSessions(): Promise<any[] | { error: string }>;
@@ -95,6 +96,12 @@ export interface SenseIo {
   toSenseDeps(): SenseDeps;
 }
 
+/** Output cap for one command (stdout + stderr), as execFile's `maxBuffer`. */
+const EXEC_MAX_BUFFER = 32 * 1024 * 1024;
+
+/** Upper bound for each git/gh step of the default-branch sync (#601 review). */
+export const SYNC_STEP_TIMEOUT_MS = 120_000;
+
 // Async command runner (mirrors the loop's former execFileSync seam): rejects on
 // non-zero exit with execFileSync-shaped errors (message folds in stderr, plus
 // .stdout/.stderr) so the recovery parsers that read failure text still work.
@@ -103,11 +110,14 @@ function execText(
   args: string[],
   options: Record<string, unknown> = {},
 ): Promise<string> {
+  if (typeof options.timeout === "number" && options.timeout > 0 && process.platform !== "win32") {
+    return execTextInGroup(command, args, options);
+  }
   return new Promise((resolve, reject) => {
     execFile(
       command,
       args,
-      { encoding: "utf-8", maxBuffer: 32 * 1024 * 1024, ...options },
+      { encoding: "utf-8", maxBuffer: EXEC_MAX_BUFFER, ...options },
       (err: any, stdout: string, stderr: string) => {
         if (err) {
           err.stdout = stdout;
@@ -121,6 +131,92 @@ function execText(
         resolve(typeof stdout === "string" ? stdout : "");
       },
     );
+  });
+}
+
+/**
+ * Timed variant of {@link execText}: runs the child as the leader of its own
+ * process group and, on timeout, signals the whole group (#601 review). Killing
+ * only the direct child is not enough: `git fetch`/`pull` start helpers
+ * (`git-remote-https`, `fetch-pack`) that inherit the stdout/stderr pipes, so they
+ * would outlive the kill and hold the call open past its timeout. Same
+ * resolve/reject contract as `execText` (message folds in stderr, plus
+ * `.stdout`/`.stderr`; a timeout sets `.killed` and `.signal`).
+ */
+export function execTextInGroup(
+  command: string,
+  args: string[],
+  options: Record<string, unknown>,
+): Promise<string> {
+  const timeout = options.timeout as number;
+  const killSignal = (options.killSignal as NodeJS.Signals | undefined) ?? "SIGKILL";
+  return new Promise((resolve, reject) => {
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+    // Node's own timeout kills the direct child; the timer below (same delay,
+    // registered just after, so it fires in the same timers phase) then kills
+    // the rest of the group and settles without waiting for the pipes to close.
+    const child = spawn(command, args, {
+      cwd: options.cwd as string | undefined,
+      env: options.env as NodeJS.ProcessEnv | undefined,
+      timeout,
+      killSignal,
+      detached: true,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    const fail = (err: any) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      err.stdout = stdout;
+      err.stderr = stderr;
+      if (stderr && !String(err.message).includes(stderr)) err.message = err.message + "\n" + stderr;
+      reject(err);
+    };
+    const killGroup = () => {
+      try {
+        if (child.pid) process.kill(-child.pid, killSignal);
+      } catch {
+        // The group already exited.
+      }
+      child.stdout?.destroy();
+      child.stderr?.destroy();
+    };
+    const timer = setTimeout(() => {
+      killGroup();
+      fail(Object.assign(new Error(`Command failed: ${command} ${args.join(" ")} (timed out after ${timeout}ms)`), {
+        killed: true,
+        signal: killSignal,
+      }));
+    }, timeout);
+    const maxBuffer = typeof options.maxBuffer === "number" ? options.maxBuffer : EXEC_MAX_BUFFER;
+    let bytes = 0;
+    const collect = (append: (chunk: string) => void) => (chunk: string) => {
+      if (settled) return;
+      bytes += Buffer.byteLength(chunk);
+      if (bytes > maxBuffer) {
+        killGroup();
+        fail(Object.assign(new Error(`Command failed: ${command} ${args.join(" ")} (output exceeded ${maxBuffer} bytes)`), {
+          code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER",
+        }));
+        return;
+      }
+      append(chunk);
+    };
+    child.stdout?.setEncoding("utf-8").on("data", collect((chunk) => { stdout += chunk; }));
+    child.stderr?.setEncoding("utf-8").on("data", collect((chunk) => { stderr += chunk; }));
+    child.on("error", fail);
+    child.on("close", (code: number | null, signal: NodeJS.Signals | null) => {
+      if (settled) return;
+      if (code === 0) {
+        settled = true;
+        clearTimeout(timer);
+        resolve(stdout);
+        return;
+      }
+      fail(Object.assign(new Error(`Command failed: ${command} ${args.join(" ")}`), { code, signal }));
+    });
   });
 }
 
@@ -853,7 +949,9 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
       throw new Error("repo path is missing");
     }
     const owner = github ? await repoOwner(state) : null;
-    const localOptions = github ? { cwd: repoPath, env, timeout: 5_000 } : { cwd: repoPath };
+    const localOptions = github
+      ? { cwd: repoPath, env, timeout: 5_000 }
+      : { cwd: repoPath, timeout: SYNC_STEP_TIMEOUT_MS, killSignal: "SIGKILL" as const };
     let defaultBranch = state?.repo?.default_branch;
     if (!defaultBranch) {
       try {
@@ -874,6 +972,8 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
       await github.git(owner, repoPath, ["pull", "--ff-only", "--no-rebase", "--no-recurse-submodules"], head);
     } else {
       const auth = gitHubAuthConfigArgs(env);
+      // Bound each step: Herald runs this inline in its observe tick, and a hung
+      // fetch (DNS, stalled TLS) would otherwise block every later tick.
       await execText("git", [...auth, "fetch", "origin", defaultBranch], localOptions);
       await execText("git", ["switch", defaultBranch], localOptions);
       await execText("git", [...auth, "pull", "--ff-only", "origin", defaultBranch], localOptions);

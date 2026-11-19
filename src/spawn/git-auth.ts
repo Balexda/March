@@ -28,3 +28,15 @@ export function gitHubAuthConfigArgs(env: NodeJS.ProcessEnv = process.env): stri
     `url.${https}.insteadOf=ssh://git@github.com/`,
   ];
 }
+
+/**
+ * Mask credentials in text that may echo a git command line or URL. A failed
+ * `execFile` puts the full argv in `err.message` ("Command failed: git -c
+ * url.https://x-access-token:<token>@github.com/.insteadOf=… fetch …"), so any
+ * error from a command built with {@link gitHubAuthConfigArgs} carries the token.
+ * Apply this before logging or surfacing such an error. It masks the userinfo of
+ * any `scheme://user:secret@host` URL, which covers the `x-access-token` form.
+ */
+export function redactGitCredentials(text: string): string {
+  return text.replace(/([a-z][a-z0-9+.-]*:\/\/[^\s:/@]+):[^\s@/]+@/gi, "$1:***@");
+}

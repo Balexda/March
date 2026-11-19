@@ -692,7 +692,7 @@ async function tickProfile(rt: ProfileRuntime, spawnBudget?: SpawnBudget): Promi
 
   const ioDeps = dispatchIoDeps(meta);
   const dispatchDeps = {
-    // The default-branch sync is owned by Herald (MARCH_HERALD_SYNC, #300); the
+    // The default-branch sync is owned by Herald (#300, always on since #601); the
     // legate never fetches so it can't fight it.
     completePending: (rawState: any, ts: string) => completePendingHatcheryDispatches(rawState, ts, ioDeps),
     launchDispatch: (rawState: any, ts: string, item: any, sliceId: string) =>
