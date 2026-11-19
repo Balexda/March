@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { githubRepoFromRemote } from "../shared/github-remote.js";
 import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
@@ -1261,35 +1262,30 @@ export async function writeLegateHeartbeatScript(
   await fs.chmod(target, 0o755);
 }
 
-/** Resolve the cached GitHub slug and default branch from local Git refs. */
-export function discoverRepoMetadata(
-  repoPath: string,
-): { ownerWithName: string | null; defaultBranch: string | null } {
-  const readGit = (args: string[]): string => {
-    try {
-      return execFileSync("git", args, {
-        cwd: repoPath, stdio: ["ignore", "pipe", "ignore"], encoding: "utf-8", timeout: 5_000,
-      }).trim();
-    } catch {
-      return "";
-    }
-  };
-  const remote = readGit(["config", "--get", "remote.origin.url"]);
-  const slug = /^(?:https:\/\/github\.com\/|ssh:\/\/git@github\.com\/|ssh:\/\/git@ssh\.github\.com:443\/|git@github\.com:)([\w.-]+\/[\w.-]+?)\/?$/i.exec(remote)?.[1];
-  const defaultRef = readGit(["symbolic-ref", "refs/remotes/origin/HEAD"]);
-  return {
-    ownerWithName: slug?.replace(/\.git$/i, "") ?? null,
-    defaultBranch: defaultRef.startsWith("refs/remotes/origin/")
-      ? defaultRef.slice("refs/remotes/origin/".length)
-      : null,
-  };
+/**
+ * Resolve the GitHub slug from the checkout's `origin` (the same rule Legate's
+ * scoped forge path uses). The default branch is deliberately NOT discovered
+ * here: the local `refs/remotes/origin/HEAD` is not refreshed by `git fetch`
+ * and goes stale after a remote default-branch rename, so caching it would pin
+ * a wrong branch for the conductor's life. Init stays credential-free; the
+ * scoped sync path confirms the default branch with GitHub instead.
+ */
+export function discoverRepoMetadata(repoPath: string): { ownerWithName: string | null } {
+  try {
+    const remote = execFileSync("git", ["config", "--get", "remote.origin.url"], {
+      cwd: repoPath, stdio: ["ignore", "pipe", "ignore"], encoding: "utf-8", timeout: 5_000,
+    });
+    return { ownerWithName: githubRepoFromRemote(remote) };
+  } catch {
+    return { ownerWithName: null };
+  }
 }
 
 /**
  * Initial state.json shape written into a fresh conductor dir. Mirrors the
- * schema documented in `snippets/state-json-schema.md`. `default_branch`
- * and `owner_with_name` are filled in from `discoverRepoMetadata`; both
- * may be null when the checkout does not have the corresponding origin metadata.
+ * schema documented in `snippets/state-json-schema.md`. `owner_with_name`
+ * comes from `discoverRepoMetadata` (null without a GitHub origin);
+ * `default_branch` is left null at init and confirmed by the scoped sync path.
  */
 interface InitialStateRepoFields {
   profile: string;
@@ -1811,13 +1807,13 @@ export async function initLegate(
       }
     }
 
-    // Bootstrap state.json from local Git metadata. The loop can discover
-    // the default branch through its scoped forge path when origin/HEAD is missing.
+    // Bootstrap state.json with the origin slug. The default branch is left
+    // unset: the scoped sync path confirms it with GitHub before caching.
     const repoMetadata = discoverRepoMetadata(repoPath);
-    if (!repoMetadata.ownerWithName || !repoMetadata.defaultBranch) {
+    if (!repoMetadata.ownerWithName) {
       postSetupWarnings.push(
-        `Could not discover GitHub slug and/or default branch from local Git metadata for ${repoPath}. ` +
-          "state.json will be written with the available metadata.",
+        `Could not discover the GitHub slug from origin for ${repoPath}. ` +
+          "state.json will be written without repo.owner_with_name.",
       );
     }
     try {
@@ -1826,7 +1822,7 @@ export async function initLegate(
         repoName,
         repoPath,
         ownerWithName: repoMetadata.ownerWithName,
-        defaultBranch: repoMetadata.defaultBranch,
+        defaultBranch: null,
       });
     } catch (err) {
       postSetupWarnings.push(

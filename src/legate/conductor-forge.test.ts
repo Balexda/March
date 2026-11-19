@@ -16,7 +16,7 @@ const exec = promisify(execFile);
 const cli = resolve(import.meta.dirname, "../../dist/cli.js");
 
 describe("deployed conductor forge scripts", () => {
-  async function fixture(deny = false) {
+  async function fixture(deny = false, extraEnv: Record<string, string> = {}) {
     const home = await mkdtemp(join(tmpdir(), "march-conductor-forge-"));
     const checkout = join(home, "checkout");
     const bin = join(home, "bin");
@@ -89,7 +89,11 @@ console.log(JSON.stringify({ number: 7, title: "Fixture issue", state: "OPEN" })
 const fs = require("node:fs");
 const args = process.argv.slice(2);
 if (args[0] === "config") console.log("git@github.com:acme/checkout.git");
-if (args[0] === "symbolic-ref") process.exit(1);
+if (args[0] === "symbolic-ref") {
+  if (!process.env.FIXTURE_STALE_HEAD) process.exit(1);
+  console.log(process.env.FIXTURE_STALE_HEAD);
+}
+if (args[0] === "ls-remote") console.log(process.env.FIXTURE_REWRITE || args[args.length - 1]);
 if (args[0] === "rev-parse") console.log("fixture-head");
 if (args[0] === "branch") {
   fs.appendFileSync(process.env.CHILD_LOG, JSON.stringify({ tool: "git", args }) + "\\n");
@@ -98,7 +102,10 @@ if (args.includes("fetch")) {
   const valid = process.env.MARCH_GIT_AUTH === "Authorization: Basic " + Buffer.from("x-access-token:fake-app-token").toString("base64")
     && !process.env.GH_TOKEN && !process.env.GITHUB_TOKEN && !process.env.MARCH_TESSERA_CLIENT_KEY
     && process.env.GIT_CONFIG_NOSYSTEM === "1" && process.env.GIT_CONFIG_GLOBAL === "/dev/null"
-    && !process.env.GIT_CONFIG_COUNT && !process.env.GIT_CONFIG_PARAMETERS;
+    && !process.env.GIT_CONFIG_COUNT && !process.env.GIT_CONFIG_PARAMETERS
+    && !process.env.GIT_SSL_NO_VERIFY && args.includes("http.sslVerify=true")
+    && args.includes("http.https://github.com/acme/checkout.git.sslVerify=true")
+    && args.some(arg => arg.startsWith("http.https://github.com/acme/checkout.git.sslCAInfo="));
   fs.appendFileSync(process.env.CHILD_LOG, JSON.stringify({ tool: "git", args, valid }) + "\\n");
   if (!valid) process.exit(2);
 }
@@ -119,6 +126,8 @@ if (args.includes("fetch")) {
         MARCH_TESSERA_CLIENT_KEY: "fake-client-key",
         MARCH_OTEL: deny ? "1" : "0",
         MARCH_OTEL_ENDPOINT: endpoint,
+        // An inherited TLS bypass must never reach the credentialed fetch.
+        GIT_SSL_NO_VERIFY: "1",
       };
       return {
         requests, traces,
@@ -128,7 +137,7 @@ if (args.includes("fetch")) {
           const deployed = skills.find(entry => entry.name === skill)!;
           try {
             const result = await exec(join(deployed.stagedDir, "scripts", script), [checkout, ...args], {
-              cwd: home, env, timeout: 10_000,
+              cwd: home, env: { ...env, ...extraEnv }, timeout: 10_000,
             });
             return { ...result, code: 0 };
           } catch (error) {
@@ -172,6 +181,32 @@ if (args.includes("fetch")) {
         args: expect.arrayContaining(["--no-recurse-submodules", "https://github.com/acme/checkout.git", "+refs/heads/main:refs/remotes/origin/main"]),
       });
       expect(git.args.join(" ")).not.toContain("fake-app-token");
+    } finally {
+      await test.close();
+    }
+  }, 20_000);
+
+  it("syncs the GitHub-confirmed default branch, never a stale local origin/HEAD", async () => {
+    const test = await fixture(false, { FIXTURE_STALE_HEAD: "origin/old-default" });
+    try {
+      const sync = await test.run("legate.issue", "sync-default-branch.sh", "issue-7");
+      expect(sync.code).toBe(0);
+      const git = (await test.invoked()).find(entry => entry.tool === "git" && entry.args.includes("fetch"));
+      expect(git).toMatchObject({ valid: true, args: expect.arrayContaining(["+refs/heads/main:refs/remotes/origin/main"]) });
+    } finally {
+      await test.close();
+    }
+  }, 20_000);
+
+  it("refuses the credentialed fetch when an insteadOf rule rewrites the GitHub URL", async () => {
+    const test = await fixture(false, { FIXTURE_REWRITE: "https://evil.example/acme/checkout.git" });
+    try {
+      const sync = await test.run("legate.issue", "sync-default-branch.sh", "issue-7");
+      expect(sync.code).not.toBe(0);
+      expect(sync.stderr).toContain("GitHub fetch failed.");
+      // Only the default-branch read was issued; no entitlement for the rewritten fetch.
+      expect(test.requests).toHaveLength(1);
+      expect((await test.invoked()).some(entry => entry.tool === "git" && entry.args.includes("fetch"))).toBe(false);
     } finally {
       await test.close();
     }

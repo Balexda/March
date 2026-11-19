@@ -4,8 +4,8 @@
 # Usage:
 #   sync-default-branch.sh <repo-path> [slice-id]
 #
-# Detects the default branch via `git symbolic-ref refs/remotes/origin/HEAD`,
-# falling back to `gh repo view --json defaultBranchRef` if that's not set.
+# Confirms the default branch with GitHub via an app/read entitlement (never
+# the stale-able local origin/HEAD).
 # Fetches with app/read, then switches branches and fast-forwards locally.
 #
 # Stdout: JSON `{"default_branch": "<name>", "synced": true, "head": "<sha>"}`
@@ -35,13 +35,12 @@ fi
 FORGE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/../tessera-forge.mjs"
 cd "$REPO"
 
-# Detect default branch
-DEFAULT="$(git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||' || true)"
+# Confirm the default branch with GitHub (app/read). The local
+# refs/remotes/origin/HEAD is not refreshed by `git fetch` and goes stale after
+# a remote default-branch rename, so it is never treated as authoritative.
+DEFAULT="$(node "$FORGE" gh read repo view --json defaultBranchRef -q .defaultBranchRef.name)"
 if [[ -z "$DEFAULT" ]]; then
-  DEFAULT="$(node "$FORGE" gh read repo view --json defaultBranchRef -q .defaultBranchRef.name)"
-fi
-if [[ -z "$DEFAULT" ]]; then
-  echo "could not determine default branch (origin/HEAD unset and gh repo view failed)" >&2
+  echo "could not determine default branch from GitHub" >&2
   exit 1
 fi
 

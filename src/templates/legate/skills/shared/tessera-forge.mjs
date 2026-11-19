@@ -1,8 +1,17 @@
 // Invoked by deployed conductor skills from the selected Git checkout.
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+
+// System trust anchors for the credentialed fetch, pinned on the command line so
+// checkout-local `http.ssl*` settings cannot replace them (mirrors github-read.ts).
+const CA_BUNDLES = [
+  "/etc/ssl/certs/ca-certificates.crt",
+  "/etc/pki/tls/certs/ca-bundle.crt",
+  "/etc/ssl/ca-bundle.pem",
+  "/etc/ssl/cert.pem",
+];
 
 function run(command, args, env = process.env, timeout = 30_000) {
   return spawnSync(command, args, {
@@ -47,14 +56,35 @@ function main() {
 
   // Keep ambient credentials out of every forge child, and pass only the
   // explicitly opted-in migration credential to the Tessera CLI.
-  const env = { ...process.env };
-  for (const key of ["GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN",
-    "GH_DEBUG", "DEBUG", "GIT_ASKPASS", "SSH_ASKPASS", "GIT_CURL_VERBOSE", "MARCH_TESSERA_CLIENT_KEY",
-    ...Object.keys(env).filter(name => name.startsWith("GIT_TRACE"))]) {
-    delete env[key];
-  }
+  // Every GIT_* variable is dropped too, so GIT_SSL_NO_VERIFY, GIT_SSL_CAINFO,
+  // GIT_CONFIG_* and tracing cannot weaken or leak the credentialed transport.
+  const env = Object.fromEntries(Object.entries(process.env).filter(([name]) =>
+    !/^(?:GH_|GITHUB_|GIT_|MARCH_TESSERA_CLIENT_KEY$|MARCH_GIT_AUTH$|SSH_ASKPASS$|DEBUG$)/i.test(name)));
   const repoUrl = `https://github.com/${repo}.git`;
   const gitHeaderKey = `http.${repoUrl}.extraHeader`;
+  const gitEnv = {
+    ...env, GIT_TERMINAL_PROMPT: "0", GIT_ASKPASS: "/bin/false", GIT_ALLOW_PROTOCOL: "https",
+    GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null",
+  };
+  let gitConfig = [];
+  if (command === "fetch") {
+    // Local insteadOf rules still apply to literal URLs; refuse to hand the
+    // credential to any destination other than the exact GitHub URL.
+    const effective = run("git", ["ls-remote", "--get-url", repoUrl], gitEnv, 5_000);
+    if (effective.status !== 0 || effective.stdout.trim() !== repoUrl) return fail("GitHub fetch failed.");
+    const caInfo = CA_BUNDLES.find(path => existsSync(path));
+    if (!caInfo) return fail("GitHub fetch failed.");
+    gitConfig = [
+      "-c", "credential.helper=",
+      "-c", "http.sslVerify=true", "-c", `http.${repoUrl}.sslVerify=true`,
+      "-c", `http.sslCAInfo=${caInfo}`, "-c", `http.${repoUrl}.sslCAInfo=${caInfo}`,
+      "-c", `http.sslCAPath=${dirname(caInfo)}`, "-c", `http.${repoUrl}.sslCAPath=${dirname(caInfo)}`,
+      "-c", "core.hooksPath=/dev/null",
+      "-c", "http.followRedirects=false", "-c", `http.${repoUrl}.followRedirects=false`,
+      "-c", "http.extraHeader=", "-c", `${gitHeaderKey}=`,
+      `--config-env=${gitHeaderKey}=MARCH_GIT_AUTH`,
+    ];
+  }
   for (const refresh of [false, true]) {
     const configDir = command === "gh" ? mkdtempSync(join(tmpdir(), "march-conductor-gh-")) : undefined;
     try {
@@ -73,14 +103,8 @@ function main() {
             ...env, GH_TOKEN: token, GH_CONFIG_DIR: configDir, GH_HOST: "github.com", GH_PROMPT_DISABLED: "1",
             GH_REPO: `github.com/${repo}`, GH_NO_UPDATE_NOTIFIER: "1",
           })
-        : run("git", [
-            "-c", "credential.helper=", "-c", "http.extraHeader=", "-c", `${gitHeaderKey}=`,
-            "-c", "http.followRedirects=false", `--config-env=${gitHeaderKey}=MARCH_GIT_AUTH`,
-            "fetch", "--quiet", "--no-recurse-submodules", "--", repoUrl, ...args,
-          ], {
-            ...env, GIT_TERMINAL_PROMPT: "0", GIT_ALLOW_PROTOCOL: "https",
-            GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null",
-            GIT_CONFIG_PARAMETERS: undefined, GIT_CONFIG_COUNT: undefined,
+        : run("git", [...gitConfig, "fetch", "--quiet", "--no-recurse-submodules", "--", repoUrl, ...args], {
+            ...gitEnv,
             MARCH_GIT_AUTH: `Authorization: Basic ${Buffer.from(`x-access-token:${token}`).toString("base64")}`,
           });
 

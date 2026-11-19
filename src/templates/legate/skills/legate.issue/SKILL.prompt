@@ -92,7 +92,7 @@ If the script exits non-zero (issue not found, network error, or entitlement fai
 .claude/skills/legate.issue/scripts/sync-default-branch.sh {{REPO_PATH}} issue-<N>
 ```
 
-Returns JSON `{"default_branch": "...", "synced": true, "head": "<sha>"}`. Cache `default_branch` into `state.json.repo.default_branch` on first detection — it does not change for the life of the conductor.
+Returns JSON `{"default_branch": "...", "synced": true, "head": "<sha>"}`. `default_branch` is confirmed with GitHub on every sync; refresh `state.json.repo.default_branch` from it when it differs.
 
 If sync fails (divergence — script exits non-zero), **escalate**: do not `git reset --hard` or force-update. The worker should not launch until the operator resolves the divergence.
 
