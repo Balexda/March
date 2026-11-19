@@ -1,5 +1,5 @@
 import type { LoopMeta } from "../meta.js";
-import type { LoopState, SliceExternalState, SmithyView } from "./types.js";
+import type { LoopState, RequeueRequest, SliceExternalState, SmithyView } from "./types.js";
 import { looseSessionMatch, summarizeWorkers } from "../pure/session.js";
 import { dispatchableReady, isTerminalSlice } from "../pure/slice.js";
 import { actionableLayer0Items, queueDepth } from "../pure/smithy-graph.js";
@@ -346,7 +346,12 @@ export async function senseFromHerald(deps: FoldDeps, herald: HeraldInbox, prevR
   const workers = sys.workers ?? { error: "unavailable" };
 
   const perSlice: Record<string, SliceExternalState> = {};
+  const requeueRequests: RequeueRequest[] = [];
   for (const [sliceId, s] of Object.entries(sys.slices)) {
+    // Operator requeue (#588/#593): read straight off the fold every tick — it is
+    // durable until the legate's rung-3 tombstone or `slice.requeue.refused`
+    // clears it, so warm ticks and a cold start see the same pending set.
+    if (s.requeueRequested && !s.recovered) requeueRequests.push({ sliceId, ...s.requeueRequested });
     const entry: SliceExternalState = {};
     if (s.pr !== undefined) entry.pr = s.pr;
     if (s.recentOutput !== undefined) entry.recentOutput = s.recentOutput;
@@ -371,6 +376,7 @@ export async function senseFromHerald(deps: FoldDeps, herald: HeraldInbox, prevR
     // Operator recovery requests drained this tick (#238) — the recovery handler
     // reconciles `raw` for these so the still-ready smithy work re-dispatches.
     recoveryRequests: herald.takeRecoveryRequests?.() ?? [],
+    requeueRequests,
   };
 }
 

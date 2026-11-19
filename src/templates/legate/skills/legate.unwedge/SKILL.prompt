@@ -129,6 +129,7 @@ instead.
 | Clean stale branch + request recovery | `clean-stale-branch.sh <repo-path> <branch> <slice-id>` | Refuses unless verdict is orphan-ref or post-merge-stale. Deletes the local branch, then `march legate recover <slice-id>` so the loop re-dispatches. No state file. |
 | Read escalated slice state | `march herald state --json` | The Herald fold (`.slices[<id>]`): `stage`, `escalatedReason`, symbolic `branch`. |
 | Request recovery directly | `march legate recover <slice-id>` | Appends `slice.recovery.requested`; the loop drops the slice + re-dispatches. Use when there is no branch to clean (e.g. a Hatchery 404). |
+| Discard + re-dispatch (operator-only) | `march legate requeue <slice-id> [--close-pr]` | **Do not run it yourself** — it throws work away (session, worktree, branch, and with `--close-pr` the PR). Recommend it in a `NEED:` when a slice's work should be discarded (diverged or off-target output, a question whose steward session died); the operator decides. |
 
 ---
 

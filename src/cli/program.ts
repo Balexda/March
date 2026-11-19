@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import { createInterface } from "node:readline";
 import { Command, CommanderError } from "commander";
 import { ERROR, SUCCESS, USAGE_ERROR } from "../shared/exit-codes.js";
@@ -1260,6 +1261,37 @@ legate
     }
   });
 
+/**
+ * Resolve the profile that owns a slice for a legate operator verb: the explicit
+ * `--profile`, else the sole registered profile. Writes the error and sets the
+ * exit code (returning undefined) when none or several are registered.
+ */
+async function resolveSliceProfile(explicit: string | undefined, verb: string): Promise<string | undefined> {
+  const named = explicit?.trim();
+  if (named) return named;
+  const { ProfileClient } = await import("../herald/profiles/client.js");
+  const active = await new ProfileClient().list();
+  if (active.length === 1) return active[0].profile;
+  if (active.length === 0) {
+    process.stderr.write(`No profiles are registered with Herald — nothing to ${verb}.\n`);
+  } else {
+    process.stderr.write(
+      `Multiple profiles are registered (${active.map((p) => p.profile).join(", ")}); ` +
+        "pass --profile <profile> to disambiguate which one owns the slice.\n",
+    );
+  }
+  process.exitCode = ERROR;
+  return undefined;
+}
+
+/** Base URL of the running legate service (MARCH_LEGATE_URL, else loopback port). */
+function legateServiceBase(): string {
+  return (
+    process.env.MARCH_LEGATE_URL?.trim() ||
+    `http://127.0.0.1:${process.env.MARCH_LEGATE_PORT?.trim() || process.env.MARCH_LEGATE_LOOP_PORT?.trim() || DEFAULT_LOOP_PORT}`
+  ).replace(/\/+$/, "");
+}
+
 legate
   .command("respond <sliceId>")
   .description(
@@ -1290,34 +1322,14 @@ legate
       process.exitCode = ERROR;
       return;
     }
-    const { ProfileClient } = await import("../herald/profiles/client.js");
     const { HeraldClientError } = await import("../herald/service/client.js");
     try {
       // Resolve the owning profile (sliceIds are unique only within a profile),
       // mirroring `legate recover`.
-      let profileName = opts.profile?.trim();
-      if (!profileName) {
-        const active = await new ProfileClient().list();
-        if (active.length === 1) {
-          profileName = active[0].profile;
-        } else if (active.length === 0) {
-          process.stderr.write("No profiles are registered with Herald — nothing to respond to.\n");
-          process.exitCode = ERROR;
-          return;
-        } else {
-          process.stderr.write(
-            `Multiple profiles are registered (${active.map((p) => p.profile).join(", ")}); ` +
-              "pass --profile <profile> to disambiguate which one owns the slice.\n",
-          );
-          process.exitCode = ERROR;
-          return;
-        }
-      }
+      const profileName = await resolveSliceProfile(opts.profile, "respond to");
+      if (!profileName) return;
       // The respond endpoint lives on the running legate service, not Herald.
-      const base = (
-        process.env.MARCH_LEGATE_URL?.trim() ||
-        `http://127.0.0.1:${process.env.MARCH_LEGATE_PORT?.trim() || process.env.MARCH_LEGATE_LOOP_PORT?.trim() || DEFAULT_LOOP_PORT}`
-      ).replace(/\/+$/, "");
+      const base = legateServiceBase();
       const url = `${base}/escalations/${encodeURIComponent(id)}/respond`;
       const body = message ? { profile: profileName, message } : { profile: profileName, ack: true };
       let res: Response;
@@ -1357,6 +1369,78 @@ legate
         `Responded to ${id} (profile=${profileName}): ${what}, report cleared=${result.cleared}, ` +
           `recovery requested=${result.recoveryRequested}. The legate walks the graduated recovery ladder ` +
           "on its next tick — un-escalating the slice back to babysit's PR (fix + merge) handling.",
+      );
+      process.exitCode = SUCCESS;
+    } catch (err) {
+      const m = err instanceof HeraldClientError ? err.message : (err as Error).message;
+      process.stderr.write(m + "\n");
+      process.exitCode = ERROR;
+    }
+  });
+
+legate
+  .command("requeue <sliceId>")
+  .description(
+    "Discard a slice's current attempt and put its work back in the queue: tear down the steward session, worktree and branch, then let the legate re-dispatch the smithy item fresh. Works for any in-flight slice — including a steward that asked a question and then died, or one that went off the rails. Refuses a slice with an open PR unless --close-pr. Calls the running legate's HTTP API (MARCH_LEGATE_URL).",
+  )
+  .option(
+    "--profile <profile>",
+    "Profile the slice belongs to. When omitted, the sole registered profile is used; required if more than one is registered.",
+  )
+  .option("--close-pr", "Also close the slice's open PR (required when it has one).")
+  .option("--reason <text>", "Why — recorded with the request and used as the PR-close comment.")
+  .action(async (sliceId: string, opts: { profile?: string; closePr?: boolean; reason?: string }) => {
+    commandHandled = true;
+    const id = (sliceId ?? "").trim();
+    if (id.length === 0) {
+      process.stderr.write("Provide a non-empty <sliceId> to requeue.\n");
+      process.exitCode = ERROR;
+      return;
+    }
+    const { HeraldClientError } = await import("../herald/service/client.js");
+    try {
+      const profileName = await resolveSliceProfile(opts.profile, "requeue");
+      if (!profileName) return;
+      const base = legateServiceBase();
+      const url = `${base}/slices/${encodeURIComponent(id)}/requeue`;
+      let operator = "";
+      try {
+        operator = os.userInfo().username;
+      } catch {
+        // no passwd entry (some containers) — attribution is best-effort
+      }
+      const reason = opts.reason?.trim();
+      const body = {
+        profile: profileName,
+        closePr: opts.closePr === true,
+        ...(operator ? { operator } : {}),
+        ...(reason ? { reason } : {}),
+      };
+      let res: Response;
+      try {
+        res = await fetch(url, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
+          signal: AbortSignal.timeout(15_000),
+        });
+      } catch (err) {
+        process.stderr.write(
+          `Could not reach the legate service at ${base}: ${(err as Error).message}. ` +
+            "Is `march legate serve` up? Set MARCH_LEGATE_URL to override.\n",
+        );
+        process.exitCode = ERROR;
+        return;
+      }
+      const result = (await res.json().catch(() => ({}))) as { ok?: boolean; closesPr?: number | null; error?: string };
+      if (!res.ok || !result.ok) {
+        process.stderr.write((result.error ?? `legate requeue failed (HTTP ${res.status}).`) + "\n");
+        process.exitCode = ERROR;
+        return;
+      }
+      console.log(
+        `Requeue requested for ${id} (profile=${profileName})${result.closesPr ? `, closing PR #${result.closesPr}` : ""}. ` +
+          "On its next tick the legate tears down the steward, worktree and branch, then re-dispatches the work fresh.",
       );
       process.exitCode = SUCCESS;
     } catch (err) {

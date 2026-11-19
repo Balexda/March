@@ -248,6 +248,23 @@ describe("march CLI", () => {
       expect(result.stderr).toContain("Could not reach the herald service");
     });
 
+    it("`march legate requeue --help` exits 0 and prints the requeue usage", () => {
+      const result = run(["legate", "requeue", "--help"]);
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain("Usage: march legate requeue");
+      expect(result.stdout).toContain("--close-pr");
+      expect(result.stdout).toContain("--reason");
+    });
+
+    it("`march legate requeue <sliceId>` exits 1 with a reach error when the legate is down", () => {
+      const result = runWithEnv(
+        ["legate", "requeue", "some-slice", "--profile", "march"],
+        { ...process.env, MARCH_LEGATE_URL: "http://127.0.0.1:1" },
+      );
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toContain("Could not reach the legate service");
+    });
+
     it("`march legate respond --help` exits 0 and prints the respond usage", () => {
       const result = run(["legate", "respond", "--help"]);
       expect(result.exitCode).toBe(0);

@@ -7,8 +7,10 @@ import {
   buildLoopServer,
   buildStatus,
   escalationsForWorkingState,
+  resolveRequeueTarget,
   resolveRespondTarget,
   type LoopHttpContext,
+  type RequeueInput,
   type RespondInput,
 } from "./http.js";
 import type { LoopSnapshot } from "./runtime.js";
@@ -322,6 +324,112 @@ describe("POST /escalations/:sliceId/respond", () => {
     try {
       const res = await app.inject({ method: "POST", url: "/escalations/s1/respond", payload: { profile: "march", message: "hi" } });
       expect(res.statusCode).toBe(400);
+    } finally {
+      await app.close();
+    }
+  });
+});
+
+describe("resolveRequeueTarget (#588)", () => {
+  it("accepts any in-flight slice, whatever its stage, reason or session — incl. awaiting_input with a dead session", () => {
+    const ws = { slices: { s: { stage: "escalated", worker_session_id: "dead" } } };
+    expect(resolveRequeueTarget(ws, "s", false)).toEqual({ ok: true, openPr: null });
+    expect(resolveRequeueTarget({ slices: { s: { stage: "implementing" } } }, "s", false)).toEqual({ ok: true, openPr: null });
+  });
+
+  it("404s an unknown slice and 409s an archived / recovered / spawning one", () => {
+    expect(resolveRequeueTarget({ slices: {} }, "x", false)).toMatchObject({ ok: false, status: 404 });
+    const archived = { slices: {}, archived_slices: { x: { terminal_state: "MERGED" } } };
+    expect(resolveRequeueTarget(archived, "x", false)).toMatchObject({ ok: false, status: 409 });
+    expect(resolveRequeueTarget({ slices: { x: { recovered: true } } }, "x", false)).toMatchObject({ ok: false, status: 409 });
+    expect(resolveRequeueTarget({ slices: { x: { stage: "hatchery-pending" } } }, "x", false)).toMatchObject({ ok: false, status: 409 });
+  });
+
+  it("refuses an open PR unless closePr; refuses a merged PR; ignores a closed one", () => {
+    const open = { slices: { s: { stage: "pr-open", pr: { number: 7, state: "OPEN" } } } };
+    const r = resolveRequeueTarget(open, "s", false) as any;
+    expect(r).toMatchObject({ ok: false, status: 409 });
+    expect(r.error).toMatch(/closePr/);
+    expect(resolveRequeueTarget(open, "s", true)).toEqual({ ok: true, openPr: 7 });
+    const merged = { slices: { s: { pr: { number: 7, state: "MERGED" } } } };
+    expect(resolveRequeueTarget(merged, "s", true)).toMatchObject({ ok: false, status: 409 });
+    const closed = { slices: { s: { pr: { number: 7, state: "CLOSED" } } } };
+    expect(resolveRequeueTarget(closed, "s", false)).toEqual({ ok: true, openPr: null });
+  });
+});
+
+describe("POST /slices/:sliceId/requeue (#588)", () => {
+  function ctxWithRequeue(spy: (input: RequeueInput) => void, result: any): LoopHttpContext {
+    return {
+      startedAtMs: Date.now() - 5000,
+      getSnapshot: () => snapshot(),
+      requeueSlice: async (input) => {
+        spy(input);
+        return result;
+      },
+    };
+  }
+
+  it("parses the body and returns 202 on an accepted request", async () => {
+    let seen: RequeueInput | null = null;
+    const app = buildLoopServer(ctxWithRequeue((i) => (seen = i), { ok: true, profile: "march", sliceId: "s1", requested: true, closesPr: null }));
+    try {
+      const res = await app.inject({
+        method: "POST",
+        url: "/slices/s1/requeue",
+        payload: { profile: "march", operator: " jb ", reason: "asked then died" },
+      });
+      expect(res.statusCode).toBe(202);
+      expect(res.json()).toMatchObject({ ok: true, requested: true });
+      expect(seen).toEqual({ profile: "march", sliceId: "s1", closePr: false, operator: "jb", reason: "asked then died" });
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("accepts the profile from the query string", async () => {
+    let seen: RequeueInput | null = null;
+    const app = buildLoopServer(ctxWithRequeue((i) => (seen = i), { ok: true }));
+    try {
+      const res = await app.inject({ method: "POST", url: "/slices/s1/requeue?profile=march", payload: { closePr: true } });
+      expect(res.statusCode).toBe(202);
+      expect(seen).toMatchObject({ profile: "march", closePr: true });
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("400s a missing profile or badly typed fields, without calling the runtime", async () => {
+    let called = false;
+    const app = buildLoopServer(ctxWithRequeue(() => (called = true), { ok: true }));
+    try {
+      for (const payload of [{}, { profile: "march", closePr: "yes" }, { profile: "march", reason: 3 }]) {
+        const res = await app.inject({ method: "POST", url: "/slices/s1/requeue", payload });
+        expect(res.statusCode).toBe(400);
+      }
+      expect(called).toBe(false);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("maps a runtime refusal to its status (409 open PR, 404 unknown)", async () => {
+    const conflict = buildLoopServer(ctxWithRequeue(() => {}, { ok: false, status: 409, error: "open PR #7" }));
+    const missing = buildLoopServer(ctxWithRequeue(() => {}, { ok: false, status: 404, error: "unknown slice" }));
+    try {
+      expect((await conflict.inject({ method: "POST", url: "/slices/s1/requeue", payload: { profile: "march" } })).statusCode).toBe(409);
+      expect((await missing.inject({ method: "POST", url: "/slices/s1/requeue", payload: { profile: "march" } })).statusCode).toBe(404);
+    } finally {
+      await conflict.close();
+      await missing.close();
+    }
+  });
+
+  it("501s when the runtime does not provide requeue", async () => {
+    const app = buildLoopServer({ startedAtMs: Date.now(), getSnapshot: () => snapshot() });
+    try {
+      const res = await app.inject({ method: "POST", url: "/slices/s1/requeue", payload: { profile: "march" } });
+      expect(res.statusCode).toBe(501);
     } finally {
       await app.close();
     }
