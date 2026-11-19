@@ -49,16 +49,14 @@ export async function runCastraServer(options: RunCastraServerOptions = {}): Pro
     );
   }
 
-  // Provision the steward skills the manager sessions load via `--add-dir`
-  // (see steward-skills.ts / buildLaunchArgs). The directory must exist before
-  // any session launches. Non-fatal: a provisioning failure must not stop the
-  // session host — stewards just fall back to the manager prompt's guidance.
+  // Provision the skills, hooks and credential shims before stewards launch.
+  // Leave the session host available for inspection and recovery on failure.
   try {
     const root = await ensureStewardSkills();
-    app.log.info(`steward skills provisioned at ${root}`);
+    app.log.info(`steward assets provisioned at ${root}`);
   } catch (err) {
     app.log.warn(
-      `steward skill provisioning failed (stewards will lack the steward-pr skill): ${
+      `steward asset provisioning failed (steward launches may fail): ${
         err instanceof Error ? err.message : String(err)
       }`,
     );

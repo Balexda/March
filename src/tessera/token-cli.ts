@@ -1,9 +1,35 @@
+import { constants } from "node:fs";
+import { open } from "node:fs/promises";
 import { ERROR, SUCCESS, USAGE_ERROR } from "../shared/exit-codes.js";
 import { TesseraClient, TesseraClientError } from "./client.js";
 import { REPO_PATTERN } from "./models.js";
 
 export function writeTesseraTokenUsageError(): void {
   process.stderr.write("Usage: march tessera token --repo <owner/name> --access <read|write> [--identity app]\n");
+}
+
+async function readCliClientKey(): Promise<string | undefined> {
+  const filename = process.env.MARCH_TESSERA_CLIENT_KEY_FILE;
+  if (!filename) return process.env.MARCH_TESSERA_CLIENT_KEY;
+
+  try {
+    const file = await open(filename, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    try {
+      const stat = await file.stat();
+      if (!stat.isFile() || stat.uid !== process.getuid?.() ||
+          (stat.mode & 0o777) !== 0o600 || stat.size > 4096) {
+        throw new TesseraClientError("unconfigured");
+      }
+      const buffer = Buffer.alloc(4097);
+      const { bytesRead } = await file.read(buffer);
+      if (bytesRead > 4096) throw new TesseraClientError("unconfigured");
+      return buffer.toString("utf8", 0, bytesRead);
+    } finally {
+      await file.close();
+    }
+  } catch {
+    throw new TesseraClientError("unconfigured");
+  }
 }
 
 export async function issueTesseraCliToken(opts: {
@@ -15,7 +41,7 @@ export async function issueTesseraCliToken(opts: {
   const client = new TesseraClient({
     env: {
       MARCH_TESSERA_URL: process.env.MARCH_TESSERA_URL,
-      MARCH_TESSERA_CLIENT_KEY: process.env.MARCH_TESSERA_CLIENT_KEY,
+      MARCH_TESSERA_CLIENT_KEY: await readCliClientKey(),
     },
   });
   const { token } = await client.issueGitHubToken(opts);

@@ -60,6 +60,15 @@ Launch request body:
 | `createBranch` | boolean | No | When false, attach to an existing worktree/branch; absent or true creates a branch. |
 | `metadata` | string-to-string map | No | Queryable Castra-owned metadata returned on later session records. At most 16 entries, with keys up to 64 characters and values up to 256 characters. |
 
+Castra provisions the host steward's credential shims at serve startup.
+Each launch, including attachment to an existing worktree, passes an
+agent-deck wrapper that selects those shims for that session. It uses the
+host loopback Tessera port selected by `MARCH_TESSERA_PORT` (default `9477`).
+`march up` scrubs GitHub token variables and their import patterns from the
+host tmux global and session environments before starting Castra. A scrub
+failure appears in the startup diagnostic and the errored
+`stack.tmux.scrub_github_tokens` span.
+
 ### `GET /v1/sessions/:id`
 
 | Field | Contract |

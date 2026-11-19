@@ -8,7 +8,9 @@ import {
   ensureHostTmuxServer,
   resolveCastraToken,
   stackUp,
+  stackUpFailed,
   type ResolvedToken,
+  type StackUpResult,
   type TokenIo,
 } from "./up.js";
 
@@ -108,6 +110,68 @@ describe("stackUp — ordering + token injection", () => {
 });
 
 describe("stackUp — host tmux anchor", () => {
+  it.each(["cold", "running", "anchored"])("scrubs host tmux on %s startup", state => {
+    const globalTokens = new Set(state === "cold" ? [] : ["GH_TOKEN", "GITHUB_TOKEN"]);
+    const sessionTokens = new Set(state === "cold" ? [] : ["GH_TOKEN", "GITHUB_TOKEN"]);
+    const imports = new Map([
+      ["-g", ["DISPLAY", "GH_TOKEN", "GITHUB_*"]],
+      ["$1", ["SSH_AUTH_SOCK", "GH_TOKEN", "GITHUB_TOKEN"]],
+    ]);
+    const run = vi.fn((_file: string, args: string[], env?: NodeJS.ProcessEnv) => {
+      expect(env?.GH_TOKEN).toBeUndefined();
+      expect(env?.GITHUB_TOKEN).toBeUndefined();
+      if (args[0] === "has-session" && state !== "anchored") throw new Error("no anchor");
+      if (args[0] === "new-session") {
+        expect(args).toContain("-E");
+        expect(globalTokens.size).toBe(0);
+      }
+      if (args[0] === "list-sessions") return "$1\n";
+      if (args[0] === "show-options") return imports.get(args.at(-2)!)?.join("\n");
+      if (args[0] === "set-option") {
+        imports.set(args.at(-3)!, args.at(-1)!.split(" "));
+      }
+      if (args[0] === "set-environment") {
+        if (args[1] === "-g") {
+          expect(args[2]).toBe("-u");
+          globalTokens.delete(args.at(-1)!);
+        } else {
+          expect(args[3]).toBe("-r");
+          sessionTokens.delete(args.at(-1)!);
+        }
+      }
+    });
+
+    const result = ensureHostTmuxServer(run, { GH_TOKEN: "fake", GITHUB_TOKEN: "fake" }, {
+      localHost: "operator-host",
+      readServerHost: () => state === "cold" ? null : "operator-host",
+    });
+    expect(result.outcome).toBe(state === "anchored" ? "present" : "created");
+    expect(globalTokens.size).toBe(0);
+    expect(sessionTokens.size).toBe(0);
+    expect(imports.get("-g")).toEqual(["DISPLAY"]);
+    expect(imports.get("$1")).toEqual(["SSH_AUTH_SOCK"]);
+  });
+
+  it("reports a sanitized startup diagnostic when the scrub fails", () => {
+    const run = (_file: string, args: string[]) => {
+      if (args[0] === "set-environment") throw new Error("fake-secret");
+    };
+    expect(ensureHostTmuxServer(run, { GH_TOKEN: "fake-secret" })).toEqual({
+      outcome: "failed",
+      detail: "Could not scrub GitHub credentials from the host tmux environment.",
+      credentialScrubFailed: true,
+    });
+  });
+
+  it("fails march up on a credential scrub failure but not on an advisory anchor failure", () => {
+    const started = [{ service: "castra", outcome: "started" }] as StackUpResult["services"];
+    expect(stackUpFailed({ services: started })).toBe(false);
+    expect(stackUpFailed({ services: started, tmuxAnchor: { outcome: "failed", detail: "foreign" } })).toBe(false);
+    expect(stackUpFailed({ services: started, tmuxAnchor: {
+      outcome: "failed", detail: "scrub", credentialScrubFailed: true } })).toBe(true);
+    expect(stackUpFailed({ services: [{ service: "castra", outcome: "failed" }] as StackUpResult["services"] })).toBe(true);
+  });
+
   it("reports the anchor present when a server + anchor already exist", async () => {
     // A no-op runner: `tmux has-session` 'succeeds', so nothing is created.
     const result = await stackUp({

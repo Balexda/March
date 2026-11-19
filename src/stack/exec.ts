@@ -11,10 +11,16 @@ export type CommandRunner = (
   file: string,
   args: string[],
   env?: NodeJS.ProcessEnv,
-) => void;
+) => string | void;
 
 /** Default runner: invoke the binary, inheriting nothing but the given env. */
 export const runCommand: CommandRunner = (file, args, env) => {
+  if (file === "tmux") {
+    return execFileSync(file, args, {
+      stdio: ["ignore", "pipe", "pipe"], env, encoding: "utf8",
+      timeout: 5_000, killSignal: "SIGKILL",
+    });
+  }
   execFileSync(file, args, { stdio: ["ignore", "ignore", "pipe"], env });
 };
 
@@ -40,10 +46,11 @@ export function describeExecError(err: unknown): string {
  * reachable or tmux is absent. Used to detect a foreign-owned socket (e.g. the
  * autostarted castra container) before `march up` claims the host anchor.
  */
-export function readTmuxServerHost(): string | null {
+export function readTmuxServerHost(env?: NodeJS.ProcessEnv): string | null {
   try {
     const out = execFileSync("tmux", ["list-sessions", "-F", "#{host}"], {
       stdio: ["ignore", "pipe", "ignore"],
+      env, timeout: 5_000, killSignal: "SIGKILL",
     });
     const host = out
       .toString()

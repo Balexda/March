@@ -2,8 +2,6 @@
 
 The Steward is the Castra-hosted manager role that consumes validated Spawn output after Hatchery has a successful spawn result. It is a documented role boundary for deciding whether that validated output may become an interactive manager session, not a standalone TypeScript subsystem, HTTP service, CLI command, or agent-deck adapter.
 
-This slice does not introduce a contract checker, freshness checker, AUTOGEN generation, CI enforcement, runtime behavior, PR creation, push, or merge behavior.
-
 ## Public Interface
 
 <!-- BEGIN AUTOGEN -->
@@ -11,10 +9,13 @@ This slice does not introduce a contract checker, freshness checker, AUTOGEN gen
 
 ### GitHub credential shim
 
-The packaged `src/templates/steward/bin/gh` executable supports explicitly
-configured worktrees. Put its directory ahead of the real GitHub CLI on
-`PATH`, make `march` available on `PATH`, and provide the steward's
-`MARCH_TESSERA_URL` and `MARCH_TESSERA_CLIENT_KEY`. On each invocation the shim
+Castra puts the provisioned `gh` and Git shims first on the host steward's
+`PATH` for new and relaunched sessions. Install `march` on the host
+`PATH` and place the steward's Tessera client key in
+`~/.march/steward/tessera-client-key` (mode `0600`, owned by the host steward
+user). The launcher uses the Tessera listener on host loopback.
+
+On each invocation the `gh` shim
 resolves the worktree's GitHub `origin`, requests an app/write token, and runs
 the real executable with the original arguments, inherited standard streams
 and a private temporary configuration directory. It supplies the issued
@@ -22,8 +23,27 @@ token as `GH_TOKEN`, clears inherited GitHub token variables, and fails
 closed with a sanitized diagnostic if setup or issuance fails. The real
 executable runs under a deadline (default 10 minutes, overridable with a
 positive integer `MARCH_TESSERA_GH_TIMEOUT_MS`); on expiry the shim kills it
-and exits nonzero with `Tessera gh: real executable timed out.` Git HTTPS
-credential requests use the [Tessera Git helper](../tessera/contract.md#cli-and-configuration).
+and exits nonzero with `Tessera gh: real executable timed out.`
+
+GitHub SSH remotes and HTTPS remotes resolve to credential-free HTTPS URLs
+for the same repository. Git requests app/write credentials with repository
+context through the [Tessera Git helper](../tessera/contract.md#cli-and-configuration).
+The Git shim requires Git 2.31 or later and refuses to run on older Git. It
+isolates host Git authentication and disables prompts: `HOME` mirrors the
+operator's home without `.netrc`, `.gitconfig`, `.git-credentials` or Git's
+XDG `config`/`credentials`. It keeps the operator's non-credential global
+settings, such as identity, signing and `core.hooksPath`, and drops global
+`credential.*`, `http.*`, `url.*` and `remote.*` settings. It reads repository
+settings for the repository selected by leading `-C`, `-c`, `--git-dir` and
+`--work-tree` options. Only the repository operand (and `push --repo`) of
+`clone`, `fetch`, `pull`, `push` and `ls-remote` is rewritten; refspecs and
+other operands are left unchanged. Git's SSH command is replaced by a guard
+that refuses any SSH connection to GitHub, whether reached through an alias,
+an unusual URL spelling or an `ssh_config` host alias resolved with `ssh -G`.
+It passes other hosts to the operator's `GIT_SSH_COMMAND`, `GIT_SSH` or
+`ssh`; a repository `core.sshCommand` is not used. The `ext::` transport is
+disabled.
+The bot authenticates the push and opens the PR.
 
 ### Role Boundary
 

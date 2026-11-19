@@ -14,7 +14,10 @@ then closes HTTP and telemetry. Host defaults to `127.0.0.1`. Port precedence is
 
 `march tessera token --repo <owner/name> --access <read|write> [--identity app]`
 issues a repository-scoped GitHub App token using `MARCH_TESSERA_URL` and
-`MARCH_TESSERA_CLIENT_KEY`. Identity defaults to `app`. On success stdout
+`MARCH_TESSERA_CLIENT_KEY`. The token command and Git credential helper
+also accept `MARCH_TESSERA_CLIENT_KEY_FILE`, which takes precedence over
+the environment key. The file must be a user-owned regular file with
+mode `0600`. Identity defaults to `app`. On success stdout
 contains only the token and a terminating newline. Invalid arguments,
 configuration errors, denial, malformed responses and transport failures exit
 non-zero with a sanitized diagnostic on stderr. The command uses the Node

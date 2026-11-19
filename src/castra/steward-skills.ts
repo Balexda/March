@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { resolveHeraldUrl } from "../herald/service/client.js";
+import { resolveTesseraPort } from "../tessera/config.js";
 
 /**
  * Steward skill + hook provisioning.
@@ -51,6 +52,16 @@ export function stewardSkillsRoot(): string {
  *  --settings`). It wires the steward self-report Notification/Stop hook. */
 export function stewardSettingsPath(): string {
   return path.join(stewardSkillsRoot(), "settings.json");
+}
+
+function shellQuote(value: string): string {
+  return "'" + value.replaceAll("'", "'\"'\"'") + "'";
+}
+
+/** Agent-deck runs this wrapper in the host pane on every start. */
+export function stewardLaunchWrapper(): string {
+  const launcher = path.join(stewardSkillsRoot(), "bin", "steward-launch");
+  return `${shellQuote(launcher)} ${resolveTesseraPort()} {command}`;
 }
 
 /** Directory holding the per-session launch sidecars the report hook reads. */
@@ -116,10 +127,17 @@ export function buildStewardSettings(root: string): {
   hooks: Record<string, Array<{ hooks: Array<{ type: string; command: string }> }>>;
 } {
   const script = path.join(root, "hooks", "steward-report.mjs");
-  // Quote the path so a root containing spaces survives the shell the hook
-  // executor uses. Single-quote is safe — March-owned paths never contain one.
-  const entry = [{ hooks: [{ type: "command", command: `node '${script}'` }] }];
-  return { hooks: { Notification: entry, Stop: entry } };
+  const entry = [{ hooks: [{ type: "command" as const, command: `node ${shellQuote(script)}` }] }];
+  // Claude sources CLAUDE_ENV_FILE for Bash tool calls after shell startup.
+  const prepend = `export PATH=${shellQuote(path.join(root, "bin"))}:"$PATH"`;
+  const command = `[ -z "$CLAUDE_ENV_FILE" ] || printf '%s\\n' ${shellQuote(prepend)} >> "$CLAUDE_ENV_FILE"`;
+  return {
+    hooks: {
+      Notification: entry,
+      Stop: entry,
+      SessionStart: [{ hooks: [{ type: "command", command }] }],
+    },
+  };
 }
 
 /**
@@ -214,5 +232,18 @@ export async function ensureStewardSkills(): Promise<string> {
     JSON.stringify(buildStewardSettings(root), null, 2) + "\n",
     "utf-8",
   );
+  const bin = path.join(root, "bin");
+  await fs.mkdir(bin, { recursive: true });
+  for (const name of ["gh", "git", "steward-launch"]) {
+    const staging = await fs.mkdtemp(path.join(bin, ".install-"));
+    try {
+      const executable = path.join(staging, name);
+      await fs.copyFile(path.join(templateDir, "bin", name), executable);
+      await fs.chmod(executable, 0o755);
+      await fs.rename(executable, path.join(bin, name));
+    } finally {
+      await fs.rm(staging, { recursive: true, force: true });
+    }
+  }
   return root;
 }
