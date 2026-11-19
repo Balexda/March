@@ -410,4 +410,27 @@ describe("CodeRabbit account-wide back-off", () => {
     await expect(verifyStartupIntent(record, fold, active, vi.fn().mockRejectedValue(new Error("Incomplete PR comment history"))))
       .rejects.toThrow("Incomplete");
   });
+
+  it("rejects a notice from before the last reset even after a later 429, across restart", async () => {
+    const { backoff, fold, append } = ledger();
+    const report = vi.fn();
+    const base = Date.parse(at);
+    const iso = (offset: number) => new Date(base + offset).toISOString();
+    await backoff.record({ profile: "p", sliceId: "s", pr: 42, at: iso(0), cause: "http_429" }, base, report);
+    await backoff.record({ profile: "p", sliceId: "s", pr: 42, at: iso(60_000), cause: "reset" }, base + 60_000, report);
+    await backoff.record({ profile: "p", sliceId: "s", pr: 42, at: iso(120_000), cause: "http_429" }, base + 120_000, report);
+    expect(fold.reviewResetBoundaries?.coderabbit).toBe(iso(60_000));
+    const stale = { number: 42, reviewer_notices: [
+      { reviewer: "coderabbit", kind: "rate_limited", created_at: iso(30_000), reset_at: "2026-11-17T01:00:00Z", comment_id: 31 },
+    ] };
+    const restarted = new CodeRabbitBackoff(append);
+    await restarted.beginTick(fold, reviewSignals("p", "owner/repo", "s", stale), base + 180_000, vi.fn(), report);
+    expect(append).toHaveBeenCalledTimes(3);
+    expect(fold.reviewBackoffs?.coderabbit).toMatchObject({ cause: "http_429" });
+    const fresh = { number: 42, reviewer_notices: [
+      { reviewer: "coderabbit", kind: "rate_limited", created_at: iso(90_000), reset_at: "2026-11-17T01:00:00Z", comment_id: 32 },
+    ] };
+    await restarted.beginTick(fold, reviewSignals("p", "owner/repo", "s", fresh), base + 180_000, vi.fn(), report);
+    expect(fold.reviewBackoffs?.coderabbit).toMatchObject({ noticeId: "coderabbit:32", until: "2026-11-17T01:00:00.000Z" });
+  });
 });

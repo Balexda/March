@@ -689,6 +689,8 @@ export interface MultiProfileState {
   byProfile: Record<string, SystemState>;
   reviewBackoffs?: Partial<Record<ReviewRequestRecord["reviewer"], ReviewBackoffRecord & { seq: number; ts: string }>>;
   reviewNoticeIds?: Record<string, true>;
+  /** Latest reset signal time per reviewer; notices at or before it are stale. */
+  reviewResetBoundaries?: Partial<Record<ReviewRequestRecord["reviewer"], string>>;
   latestReviewRequests?: Partial<Record<ReviewRequestRecord["reviewer"], ReviewRequestRecord & { profile: string; seq: number }>>;
 }
 
@@ -719,6 +721,11 @@ export function reduceMulti(multi: MultiProfileState, event: HeraldEvent): Multi
     const { reviewer, until, attempts, cause, signalAt, noticeId, seq, ts } = event;
     (multi.reviewBackoffs ??= {})[reviewer] = { reviewer, until, attempts, cause, signalAt, noticeId, seq, ts };
     if (noticeId) (multi.reviewNoticeIds ??= {})[noticeId] = true;
+    if (cause === "reset") {
+      const boundary = signalAt ?? ts;
+      const resets = (multi.reviewResetBoundaries ??= {});
+      if (!(Date.parse(resets[reviewer] ?? "") >= Date.parse(boundary))) resets[reviewer] = boundary;
+    }
   }
   if (event.type === "review.requested") {
     const { sliceId, pr, reviewer, headSha, at, reason, profile, seq } = event;

@@ -30,6 +30,7 @@ const reviewer = "coderabbit";
 export class CodeRabbitBackoff {
   private current?: ReviewBackoffRecord & { seq: number; ts: string };
   private seen = new Set<string>();
+  private resetBoundary = NaN;
   private pending?: { target: ReviewTarget; record: ReviewBackoffRecord; id: string };
   private startupIntent?: LatestIntent;
   private started = false;
@@ -46,6 +47,7 @@ export class CodeRabbitBackoff {
     const folded = fold.reviewBackoffs?.[reviewer];
     this.current = folded;
     this.seen = new Set(Object.keys(fold.reviewNoticeIds ?? {}));
+    this.resetBoundary = Date.parse(fold.reviewResetBoundaries?.[reviewer] ?? "");
     if (!this.started) {
       this.started = true;
       this.startupIntent = fold.latestReviewRequests?.[reviewer];
@@ -76,7 +78,8 @@ export class CodeRabbitBackoff {
       // signal can still carry a later stated reset. Other signals stay chronological.
       if (!signal.noticeId && observed < previous) continue;
       if (signal.cause === "reset" && (!this.current?.attempts || observed <= previous)) continue;
-      if (signal.noticeId && (this.seen.has(signal.noticeId) || this.current?.cause === "reset" && observed <= previous)) continue;
+      // A notice from before the last reset is stale even after later throttle records.
+      if (signal.noticeId && (this.seen.has(signal.noticeId) || observed <= this.resetBoundary)) continue;
       if (!await this.record(signal, now, report)) return;
     }
   }
@@ -117,6 +120,9 @@ export class CodeRabbitBackoff {
       return false;
     }
     if (record.noticeId) this.seen.add(record.noticeId);
+    if (record.cause === "reset" && !(this.resetBoundary >= Date.parse(record.signalAt ?? ""))) {
+      this.resetBoundary = Date.parse(record.signalAt ?? "");
+    }
     this.pending = undefined;
     return true;
   }
