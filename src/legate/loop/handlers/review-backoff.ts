@@ -130,7 +130,8 @@ export class CodeRabbitBackoff {
     const record: ReviewBackoffRecord = current?.attempts
       ? {
         reviewer, until: current.until, attempts: current.attempts, cause: current.cause,
-        ...(current.signalAt ? { signalAt: current.signalAt } : {}),
+        // Keep the comparison time beginTick uses (signalAt, else the event ts).
+        signalAt: current.signalAt ?? current.ts,
         resetObservedAt: signal.at,
       }
       : { reviewer, until: new Date(now).toISOString(), attempts: 0, cause: "reset", signalAt: signal.at };
@@ -149,7 +150,8 @@ export class CodeRabbitBackoff {
     }
     if (record.noticeId) this.seen.add(record.noticeId);
     const boundary = Date.parse((record.cause === "reset" ? record.signalAt : record.resetObservedAt) ?? "");
-    if (!(this.resetBoundary >= boundary)) this.resetBoundary = boundary;
+    // Ordinary throttle records carry no boundary; never let them erase one.
+    if (Number.isFinite(boundary) && !(this.resetBoundary >= boundary)) this.resetBoundary = boundary;
     this.pending = undefined;
     return true;
   }

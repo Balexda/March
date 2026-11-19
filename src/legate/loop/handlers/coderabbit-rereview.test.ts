@@ -468,4 +468,32 @@ describe("CodeRabbit account-wide back-off", () => {
     expect(fold.reviewBackoffs?.coderabbit).toMatchObject({ cause: "reset", attempts: 0 });
     expect(fold.reviewResetBoundaries?.coderabbit).toBe(iso(200_000));
   });
+
+  it("keeps the ts fallback as signalAt when repeating a throttle for a delayed review", async () => {
+    const { backoff, fold, append } = ledger();
+    const report = vi.fn();
+    await append("p", { reviewer: "coderabbit", until: "2026-11-17T00:00:00Z", attempts: 1, cause: "http_429" }, "no-signal-at");
+    const delayed = { number: 42, head_sha: head, coderabbit: { review_times_by_head: { [head]: "2026-11-16T22:59:30Z" } } };
+    await backoff.beginTick(fold, reviewSignals("p", "owner/repo", "s", delayed), Date.parse(at) + 180_000, vi.fn(), report);
+    expect(append.mock.calls[1][1]).toMatchObject({ cause: "http_429", signalAt: at, resetObservedAt: "2026-11-16T22:59:30Z" });
+  });
+
+  it("does not erase the reset boundary when a retried throttle append succeeds", async () => {
+    const { backoff, fold, append } = ledger();
+    const report = vi.fn();
+    const base = Date.parse(at);
+    const iso = (offset: number) => new Date(base + offset).toISOString();
+    await backoff.record({ profile: "p", sliceId: "s", pr: 42, at: iso(0), cause: "http_429" }, base, report);
+    await backoff.record({ profile: "p", sliceId: "s", pr: 42, at: iso(60_000), cause: "reset" }, base + 60_000, report);
+    append.mockRejectedValueOnce(new Error("Herald unavailable"));
+    await backoff.record({ profile: "p", sliceId: "s", pr: 42, at: iso(120_000), cause: "http_429" }, base + 120_000, report);
+    expect(backoff.blocked(base + 120_000)).toBe(true);
+    const stale = { number: 42, reviewer_notices: [
+      { reviewer: "coderabbit", kind: "rate_limited", created_at: iso(30_000), reset_at: "2026-11-17T01:00:00Z", comment_id: 51 },
+    ] };
+    await backoff.beginTick(fold, reviewSignals("p", "owner/repo", "s", stale), base + 180_000, vi.fn(), report);
+    expect(fold.reviewBackoffs?.coderabbit).toMatchObject({ cause: "http_429", attempts: 1 });
+    expect(fold.reviewBackoffs?.coderabbit?.noticeId).toBeUndefined();
+    expect(fold.reviewNoticeIds?.["coderabbit:51"]).toBeUndefined();
+  });
 });
