@@ -66,7 +66,7 @@
 
 ### Tasks
 
-- [ ] **Wire the token command through the shared client**
+- [x] **Wire the token command through the shared client**
 
   Add thin Commander dispatch in `src/cli/program.ts` with command behavior owned by `src/tessera/`. Implement AS 4.5 and the CLI token contract, keeping this credential-printing surface fail closed even when the service migration fallback flag is set.
 

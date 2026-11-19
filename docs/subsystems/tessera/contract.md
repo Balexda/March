@@ -12,6 +12,15 @@ missing provider credentials allow liveness, and unauthorized issuance fails clo
 then closes HTTP and telemetry. Host defaults to `127.0.0.1`. Port precedence is
 `--port`, `MARCH_TESSERA_PORT`, then `9477`; invalid ports fail before listening.
 
+`march tessera token --repo <owner/name> --access <read|write> [--identity app]`
+issues a repository-scoped GitHub App token using `MARCH_TESSERA_URL` and
+`MARCH_TESSERA_CLIENT_KEY`. Identity defaults to `app`. On success stdout
+contains only the token and a terminating newline. Invalid arguments,
+configuration errors, denial, malformed responses and transport failures exit
+non-zero with a sanitized diagnostic on stderr. The command uses the Node
+client's 10-second request deadline and requires a Tessera-issued credential
+even when migration fallback is enabled for other consumers.
+
 | Environment variable | Current behavior |
 | --- | --- |
 | `TESSERA_GITHUB_APP_ID` | App id; absent id leaves app provider unconfigured. |
@@ -26,7 +35,7 @@ production server denies every issuance request; no environment flag bypasses
 that boundary. Tests may inject an authorization boundary. Policy/client-key file
 loading belongs to US2. US3 owns secret-store provisioning, shared-HOME path
 validation, client-key distribution and stack startup ordering. No secret-store
-layout is selected here. The token CLI is still future work; the Node client is documented under [Node Client](#node-client), and user credentials belong to US7.
+layout is selected here. User credentials belong to US7.
 
 ### HTTP
 
@@ -105,7 +114,6 @@ All token-route failures use the envelope `{"error":{"code":"…","message":"…
 
 Tessera's consumer API lives in `src/tessera/client.ts`; types live in
 `src/tessera/types.ts` and configuration resolution in `src/tessera/config.ts`.
-The token CLI is a separate implementation step.
 
 `TesseraClient` accepts optional `baseUrl`, `clientKey`, `env` and `fetchImpl`.
 Explicit settings override `MARCH_TESSERA_URL` and
