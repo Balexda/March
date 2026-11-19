@@ -251,6 +251,9 @@ const REVIEW_PAGE_FIELDS = `pageInfo { hasNextPage endCursor }
           author { login __typename }
         }`;
 
+/** Timeout for an ambient `gh api graphql` call (the Tessera path sets its own). */
+const GRAPHQL_EXEC_OPTIONS = { timeout: 30_000, killSignal: "SIGKILL" } as const;
+
 /** Safety bound on follow-up review pages (100 reviews each) per PR per tick.
  *  Normal PRs need none; this only stops a runaway walk. Past it the evidence is
  *  marked incomplete and the review gates fail closed. */
@@ -466,7 +469,9 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
     ];
     const runGraphql = async (graphqlArgs: string[]): Promise<{ output: string; appLogin?: string }> => github
       ? await github.ghWithIdentity(owner, graphqlArgs, sliceId)
-      : { output: await gh(graphqlArgs, {}, owner, sliceId), appLogin: undefined };
+      // Bound the ambient-gh path like the Tessera one: a hung child must fail
+      // (marking any follow-up page incomplete) rather than stall observation.
+      : { output: await gh(graphqlArgs, GRAPHQL_EXEC_OPTIONS, owner, sliceId), appLogin: undefined };
     const { output, appLogin } = await runGraphql(args);
     const normalizedAppLogin = appLogin?.toLowerCase();
     const isApp = (author: { login?: string; __typename?: string } | undefined) => {

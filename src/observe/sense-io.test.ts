@@ -422,6 +422,12 @@ describe("queryPrForBabysit", () => {
       const { graphqlCalls, pr } = query(() => JSON.stringify(secondPage("head1")));
       const result = await pr;
       expect(graphqlCalls).toHaveLength(2);
+      // The ambient gh path bounds every review GraphQL call.
+      const graphqlOpts = childProcessMock.execFile.mock.calls
+        .filter((call: any[]) => (call[1] as string[]).includes("graphql"))
+        .map((call: any[]) => call[2]);
+      expect(graphqlOpts).toHaveLength(2);
+      for (const opts of graphqlOpts) expect(opts).toMatchObject({ timeout: 30_000, killSignal: "SIGKILL" });
       expect(graphqlCalls[1].some((a) => a.includes("reviews(first: 100, after: $cursor)"))).toBe(true);
       expect(result.human_approval_count).toBe(1);
       expect(result.reviews_complete).toBe(true);
