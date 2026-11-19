@@ -33,13 +33,22 @@ export function buildSmithySpawnPrompt(item: any): string {
   ].join("\n");
 }
 
-/** Pure decision helper: which unresolved review threads still need a response. */
+/**
+ * Pure decision helper: which unresolved review threads still need a response.
+ *
+ * `pr_open_at` lives only in the Legate's in-memory working state and is not
+ * restored on a cold start (#600). Without it, trust the sensed
+ * `needs_response` flag (whose word was last) rather than treating every
+ * unresolved thread as owed — otherwise an answered-but-unresolved thread
+ * re-arms /smithy.fix after every restart and, with a stopped steward, shadows
+ * the merge gate forever.
+ */
 export function threadsNeedingResponse(slice: any, pr: any): any[] {
   const openAt = slice.pr_open_at ? Date.parse(slice.pr_open_at) : NaN;
   return (pr.unresolved_threads || []).filter((thread: any) => {
     if (thread.needs_response) return true;
     if (slice.stage !== "pr-open" && slice.stage) return false;
-    if (!Number.isFinite(openAt)) return true;
+    if (!Number.isFinite(openAt)) return false;
     const last = Date.parse(thread.last_comment_at || "");
     return Number.isFinite(last) && last > openAt;
   });
