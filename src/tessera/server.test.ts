@@ -10,6 +10,13 @@ import { traceIdForDispatch, spanIdForDispatch } from "../observability/trace-id
 import { PassThrough } from "node:stream";
 import { buildTesseraServer } from "./server.js";
 import { TesseraError, type CredentialProvider } from "./models.js";
+/** Node 20 lacks Promise.withResolvers (CI runs l0 on Node 20). */
+function withResolvers<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; });
+  return { promise, resolve, reject };
+}
 const allow = { authenticate: () => "test", authorize: () => {} };
 const body = { identity: "app", repo: "acme/widgets", access: "write" };
 function provider(code?: ConstructorParameters<typeof TesseraError>[0]): CredentialProvider {
@@ -161,7 +168,7 @@ describe("Tessera App token lifecycle over HTTP", () => {
 
   it("shares one mint across concurrent requests for the same scope", async () => {
     const github = await fakeGithub();
-    const bothRequests = Promise.withResolvers<void>();
+    const bothRequests = withResolvers<void>();
     let requests = 0;
     github.app.addHook("preHandler", async (request) => {
       if (request.routeOptions.url === "/v1/github/token" && ++requests === 2) bothRequests.resolve();

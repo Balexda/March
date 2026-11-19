@@ -3,6 +3,13 @@ import { generateKeyPairSync, createVerify } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { GithubAppProvider } from "./github-app.js";
 import { ACCESS_PROFILES } from "./models.js";
+/** Node 20 lacks Promise.withResolvers (CI runs l0 on Node 20). */
+function withResolvers<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; });
+  return { promise, resolve, reject };
+}
 const { privateKey, publicKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
 const pem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
 const now = Date.parse("2026-11-15T00:00:00Z");
@@ -101,8 +108,8 @@ describe("GitHub App provider", () => {
     await app.issue(request);
     time += 51 * 60_000;
 
-    const started = Promise.withResolvers<void>();
-    const delayed = Promise.withResolvers<Response>();
+    const started = withResolvers<void>();
+    const delayed = withResolvers<Response>();
     transport.mockImplementationOnce(() => {
       started.resolve();
       return delayed.promise;
@@ -140,8 +147,8 @@ describe("GitHub App provider", () => {
     const request = { identity: "app", access: "read", repo: "acme/widgets" } as const;
     await app.start();
     await app.issue(request);
-    const started = Promise.withResolvers<void>();
-    const delayed = Promise.withResolvers<Response>();
+    const started = withResolvers<void>();
+    const delayed = withResolvers<Response>();
     transport.mockImplementationOnce(() => {
       started.resolve();
       return delayed.promise;
