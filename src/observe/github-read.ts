@@ -1,6 +1,7 @@
+import { existsSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { startHeraldSpan } from "../observability/herald-trace.js";
 import { TesseraClientError, type TesseraClient } from "../tessera/client.js";
 
@@ -12,6 +13,23 @@ class GitHubReadError extends Error {
 }
 
 type Run = (command: string, args: string[], options: Record<string, unknown>) => Promise<string>;
+
+// System trust anchors for the credentialed git transport. Pinned on the command
+// line so checkout-local `http.ssl*` settings cannot replace them.
+const CA_BUNDLES = [
+  "/etc/ssl/certs/ca-certificates.crt",
+  "/etc/pki/tls/certs/ca-bundle.crt",
+  "/etc/ssl/ca-bundle.pem",
+  "/etc/ssl/cert.pem",
+];
+
+// Git reports a rejected credential in several forms depending on whether it
+// re-enters its authentication path (helpers and prompts are disabled here).
+const GIT_UNAUTHORIZED = [
+  /^fatal: unable to access .*: The requested URL returned error: 401\s*$/m,
+  /^fatal: Authentication failed for '[^']*'\s*$/m,
+  /^fatal: could not read (?:Username|Password) for '[^']*': (?:terminal prompts disabled|No such device or address)\s*$/m,
+];
 
 export function repoFromOrigin(remote: string): string | undefined {
   return /^(?:https:\/\/github\.com\/|ssh:\/\/git@github\.com\/|git@github\.com:)([\w.-]+\/[\w.-]+?)(?:\.git)?\/?$/i
@@ -62,7 +80,7 @@ export function createGitHubRead(client: GitHubReadClient, parentEnv: NodeJS.Pro
       const stderr = (err as { stderr?: string })?.stderr ?? "";
       const unauthorized = name === "gh"
         ? /\(HTTP 401\)/.test(stderr)
-        : /fatal: unable to access .*: The requested URL returned error: 401\s*$/m.test(stderr);
+        : GIT_UNAUTHORIZED.some((pattern) => pattern.test(stderr));
       throw new GitHubReadError(unauthorized ? 401 : undefined);
     }
   }
@@ -98,8 +116,16 @@ export function createGitHubRead(client: GitHubReadClient, parentEnv: NodeJS.Pro
       if ((await command("git", ["ls-remote", "--get-url", url], { cwd, env })).trim() !== url) {
         throw new TesseraClientError("github_remote_rewritten");
       }
+      const caInfo = CA_BUNDLES.find((path) => existsSync(path));
+      if (!caInfo) throw new TesseraClientError("github_tls_unavailable");
       const config = [
         "-c", "credential.helper=",
+        "-c", "http.sslVerify=true",
+        "-c", `http.${url}.sslVerify=true`,
+        "-c", `http.sslCAInfo=${caInfo}`,
+        "-c", `http.${url}.sslCAInfo=${caInfo}`,
+        "-c", `http.sslCAPath=${dirname(caInfo)}`,
+        "-c", `http.${url}.sslCAPath=${dirname(caInfo)}`,
         "-c", "core.hooksPath=/dev/null",
         "-c", "http.followRedirects=false",
         "-c", `http.${url}.followRedirects=false`,
