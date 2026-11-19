@@ -122,5 +122,5 @@ _None — no open implementation questions._
 |------------|-----------|-------|
 | US1 | depends on | S1 extends issuance, tracing and the app provider. S2 completes the existing health and status surfaces. |
 | US2 | integrates with | S1 can exercise auth and policy outcomes through the existing injectable boundary. S3 uses production authentication. |
-| US3 | integrates with | S2 consumes provider status after credential replacement. S3 needs deployed client-key wiring and the SD-008 resolution. |
+| US3 | depends on | S3 cannot complete without US3's deployed client-key wiring (plus the SD-008 resolution). S2 consumes provider status after credential replacement. |
 | US7 | integrates with | S2 can ship with fake provider coverage and report the user provider as unconfigured. Live PAT expiry requires US7. |
