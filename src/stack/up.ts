@@ -2,6 +2,8 @@ import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { SpanStatusCode } from "@opentelemetry/api";
+import { getActiveOtel } from "../observability/otel.js";
 import { CASTRA_TOKEN_ENV } from "../castra/config.js";
 import {
   runCommand,
@@ -106,6 +108,8 @@ export type TmuxAnchorOutcome = "present" | "created" | "failed";
 export interface TmuxAnchorResult {
   readonly outcome: TmuxAnchorOutcome;
   readonly detail?: string;
+  /** GitHub tokens may still reach steward panes; `march up` must exit non-zero. */
+  readonly credentialScrubFailed?: boolean;
 }
 
 export interface StackUpResult {
@@ -141,9 +145,41 @@ export interface EnsureHostTmuxOptions {
    * Reads the default tmux server's host (defaults to a real `#{host}` probe).
    * Used to detect a foreign-owned socket before creating the anchor.
    */
-  readonly readServerHost?: () => string | null;
+  readonly readServerHost?: (env: NodeJS.ProcessEnv) => string | null;
   /** This host's name (defaults to `os.hostname()`). */
   readonly localHost?: string;
+}
+
+const GITHUB_TMUX_TOKENS = ["GH_TOKEN", "GITHUB_TOKEN"];
+
+function scrubTmuxGitHubTokens(tmux: (args: string[]) => string | void): boolean {
+  const otel = getActiveOtel();
+  const span = otel.enabled ? otel.getTracer().startSpan("stack.tmux.scrub_github_tokens") : undefined;
+  try {
+    const scopes = [["-g"]];
+    const sessions = tmux(["list-sessions", "-F", "#{session_id}"]) ?? "";
+    for (const session of sessions.trim().split("\n").filter(Boolean)) {
+      scopes.push(["-t", session]);
+    }
+    for (const scope of scopes) {
+      const value = tmux(["show-options", "-qv", ...scope, "update-environment"]) ?? "";
+      const patterns = value.trim().split(/\s+/).filter(Boolean);
+      const retained = patterns.filter(pattern =>
+        !GITHUB_TMUX_TOKENS.some(token => path.matchesGlob(token, pattern)));
+      if (retained.length !== patterns.length) {
+        tmux(["set-option", ...scope, "update-environment", retained.join(" ")]);
+      }
+      for (const token of GITHUB_TMUX_TOKENS) {
+        tmux(["set-environment", ...scope, scope[0] === "-g" ? "-u" : "-r", token]);
+      }
+    }
+    return true;
+  } catch {
+    span?.setStatus({ code: SpanStatusCode.ERROR });
+    return false;
+  } finally {
+    span?.end();
+  }
 }
 
 /**
@@ -170,40 +206,53 @@ export function ensureHostTmuxServer(
   opts: EnsureHostTmuxOptions = {},
 ): TmuxAnchorResult {
   const localHost = opts.localHost ?? os.hostname();
+  const tmuxEnv = { ...env };
+  // Castra addresses the default socket even if march up runs in another tmux server.
+  delete tmuxEnv.TMUX;
+  for (const token of GITHUB_TMUX_TOKENS) delete tmuxEnv[token];
+  const tmux = (args: string[]) => run("tmux", args, tmuxEnv);
+
+  let anchorPresent = false;
   try {
-    // Server up and anchor present — idempotent no-op across re-runs. The
-    // anchor session is only ever created host-side, so its presence already
-    // proves host ownership.
-    run("tmux", ["has-session", "-t", HOST_TMUX_ANCHOR_SESSION], env);
-    return { outcome: "present" };
+    tmux(["has-session", "-t", HOST_TMUX_ANCHOR_SESSION]);
+    anchorPresent = true;
   } catch {
-    // Anchor absent. Before creating it, check whether a *foreign* server
-    // already holds the default socket: `new-session` would otherwise merely
-    // attach to it (the autostarted castra container is the usual culprit) and
-    // we'd falsely report host ownership while panes keep spawning inside the
-    // container. `march up` cannot evict an already-bound server, so surface a
-    // failure with the reclaim remedy instead of treating session creation as
-    // proof of host ownership.
-    const serverHost = opts.readServerHost?.() ?? null;
-    if (serverHost && normalizeHost(serverHost) !== normalizeHost(localHost)) {
-      return {
-        outcome: "failed",
-        detail:
-          `default tmux server is owned by "${serverHost}", not this host ` +
-          `("${localHost}") — likely the march-castra container; run ` +
-          "`march down && march up` to reclaim the host tmux server before castra starts",
-      };
-    }
-    // No server, or a host-owned one merely missing our anchor: (re)create it.
-    // `new-session` starts a server on the default uid socket when none is
-    // running.
-    try {
-      run("tmux", ["new-session", "-d", "-s", HOST_TMUX_ANCHOR_SESSION], env);
-      return { outcome: "created" };
-    } catch (err) {
-      return { outcome: "failed", detail: describeExecError(err) };
-    }
+    // A server can be running without an anchor.
   }
+  const serverHost = anchorPresent ? localHost : (opts.readServerHost ?? readTmuxServerHost)(tmuxEnv);
+  if (serverHost && normalizeHost(serverHost) !== normalizeHost(localHost)) {
+    return {
+      outcome: "failed",
+      detail:
+        `default tmux server is owned by "${serverHost}", not this host ` +
+        `("${localHost}") — likely the march-castra container; run ` +
+        "`march down && march up` to reclaim the host tmux server before castra starts",
+    };
+  }
+  const scrubFailed = {
+    outcome: "failed",
+    detail: "Could not scrub GitHub credentials from the host tmux environment.",
+    credentialScrubFailed: true,
+  } as const;
+  if (serverHost && !scrubTmuxGitHubTokens(tmux)) return scrubFailed;
+  if (anchorPresent) return { outcome: "present" };
+  try {
+    tmux(["new-session", "-d", "-E", "-s", HOST_TMUX_ANCHOR_SESSION]);
+  } catch (err) {
+    return { outcome: "failed", detail: describeExecError(err) };
+  }
+  if (!serverHost && !scrubTmuxGitHubTokens(tmux)) return scrubFailed;
+  return { outcome: "created" };
+}
+
+/**
+ * Whether `march up` must exit non-zero: a service failed to start, or the
+ * GitHub credential scrub failed so steward panes could inherit host tokens.
+ * Other anchor failures stay advisory.
+ */
+export function stackUpFailed(result: Pick<StackUpResult, "tmuxAnchor" | "services">): boolean {
+  return result.tmuxAnchor?.credentialScrubFailed === true ||
+    result.services.some(svc => svc.outcome === "failed");
 }
 
 export interface StackUpOptions {
@@ -222,7 +271,7 @@ export interface StackUpOptions {
    * `#{host}` probe via {@link readTmuxServerHost}). Lets the anchor detect a
    * foreign-owned socket before claiming host ownership.
    */
-  readonly readServerHost?: () => string | null;
+  readonly readServerHost?: (env: NodeJS.ProcessEnv) => string | null;
 }
 
 function upService(

@@ -24,6 +24,12 @@ describe("validateEvent", () => {
   it("requires sliceId for slice events", () => {
     expect(validateEvent({ type: "slice.stage.changed", stage: "x" })).toMatchObject({ ok: false });
     expect(validateEvent({ type: "slice.stage.changed", sliceId: "s1", stage: "x" })).toMatchObject({ ok: true });
+    const stage = { type: "slice.stage.changed", sliceId: "s1", stage: "pr-in-fix" };
+    expect(validateEvent({ ...stage, handledFeedback: { kind: "inline", commentIds: ["1"], dispatchKey: "k" } })).toMatchObject({ ok: true });
+    expect(validateEvent({ ...stage, handledFeedback: { kind: "inline", commentIds: ["1"], dispatchKey: 3 } })).toMatchObject({ ok: false });
+    expect(validateEvent({ ...stage, handledFeedback: { kind: "conversation", commentIds: ["1"], headSha: "abc" } })).toMatchObject({ ok: true });
+    expect(validateEvent({ ...stage, handledFeedback: { kind: "conversation", commentIds: ["1"], headSha: 1 } })).toMatchObject({ ok: false });
+    expect(validateEvent({ ...stage, handledFeedback: { kind: "other", commentIds: ["1"] } })).toMatchObject({ ok: false });
   });
   it("requires session.id for session.changed", () => {
     expect(validateEvent({ type: "session.changed", session: {} })).toMatchObject({ ok: false });
@@ -56,6 +62,17 @@ describe("validateEvent", () => {
     expect(validateEvent({ type: "slice.recovery.requested" })).toMatchObject({ ok: false });
     expect(validateEvent({ type: "slice.recovery.requested", sliceId: "" })).toMatchObject({ ok: false });
     expect(validateEvent({ type: "slice.recovery.requested", sliceId: "s1" })).toMatchObject({ ok: true });
+  });
+  it("accepts the operator requeue events and type-checks their optional fields (#588)", () => {
+    expect(validateEvent({ type: "slice.requeue.requested" })).toMatchObject({ ok: false });
+    expect(validateEvent({ type: "slice.requeue.requested", sliceId: "s1" })).toMatchObject({ ok: true });
+    expect(
+      validateEvent({ type: "slice.requeue.requested", sliceId: "s1", closePr: true, operator: "jb", reason: "died" }),
+    ).toMatchObject({ ok: true });
+    expect(validateEvent({ type: "slice.requeue.requested", sliceId: "s1", closePr: "yes" })).toMatchObject({ ok: false });
+    expect(validateEvent({ type: "slice.requeue.requested", sliceId: "s1", operator: 7 })).toMatchObject({ ok: false });
+    expect(validateEvent({ type: "slice.requeue.refused", sliceId: "s1", reason: "open PR" })).toMatchObject({ ok: true });
+    expect(validateEvent({ type: "slice.requeue.refused", sliceId: "s1", reason: 1 })).toMatchObject({ ok: false });
   });
   it("guards the optional recovery `rung` to an integer in {0,1,2,3} (#412)", () => {
     for (const rung of [0, 1, 2, 3]) {

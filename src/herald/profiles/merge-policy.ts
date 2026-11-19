@@ -1,69 +1,25 @@
-/**
- * Per-profile, per-task-type merge policy.
- *
- * March auto-merges a worker's PR only when a fixed set of requirements is met.
- * Two of those are *human-review* gates — at least one human approval, and no
- * outstanding "changes requested" review — and some task types don't warrant
- * them. The motivating case: `smithy cut` produces planning artifacts
- * (`*.tasks.md`) that are mostly the AI talking to itself, so requiring a human
- * approval there just makes people a bottleneck.
- *
- * A {@link MergePolicy} attaches to a profile (stored as JSON in the registry's
- * `merge_policy` column) and lets an operator relax those two gates for specific
- * task types. The CI/conflict/thread requirements are *not* expressed here — they
- * stay mandatory and are enforced by the legate's all-clear precondition.
- *
- * On top of a profile's own policy, a built-in {@link BUILTIN_BASE_POLICY}
- * relaxes the `cut` approval gate for *every* profile (issue #298): cut's relax
- * used to be a per-profile opt-in, and every new profile silently re-introduced a
- * backlog of stranded cut PRs until an operator remembered to set it. Making it
- * the default removes that footgun; a profile can still re-tighten cut explicitly.
- *
- * This module is pure (no I/O) so both Herald (validation on write) and the
- * legate service (resolution at merge time) can import it.
- */
-
-/**
- * The relaxable review gates. `approval` and `changesRequested` default to
- * *required*; `botApproval` defaults to *off*.
- *
- * - `approval`: at least one human (non-bot) `APPROVED` review.
- * - `changesRequested`: zero outstanding human `CHANGES_REQUESTED` reviews.
- * - `botApproval`: when true, a bot's `APPROVED` review (e.g. Copilot code
- *   review) satisfies the `approval` gate in lieu of a human one. It does not
- *   drop the gate — *someone* must still approve — and it has no effect when
- *   `approval` is already relaxed. A human `CHANGES_REQUESTED` still blocks.
- */
+/** Profile policy shared by Herald validation, Legate, and the operator CLI. */
 export interface MergeRequirements {
   readonly approval: boolean;
   readonly changesRequested: boolean;
   readonly botApproval: boolean;
+  readonly botApprovers?: readonly string[];
 }
 
-/** All human-review gates required, bot approvals not accepted — the base every
- *  layer (the built-in base policy and a profile's own policy) layers on top of. */
-export const DEFAULT_MERGE_REQUIREMENTS: MergeRequirements = {
-  approval: true,
-  changesRequested: true,
-  botApproval: false,
-};
+export interface ResolvedMergeRequirements extends MergeRequirements {
+  readonly botApprovers: readonly string[];
+}
 
-/** The requirement keys, as a runtime list for validation. */
-const REQUIREMENT_KEYS: ReadonlyArray<keyof MergeRequirements> = [
-  "approval",
-  "changesRequested",
-  "botApproval",
-];
+export type ReviewerConfig =
+  | { readonly id: "coderabbit"; readonly mode?: "comment-trigger" | "auto" }
+  | { readonly id: "copilot" };
 
-/**
- * A profile's merge policy. `defaults` overrides the all-required base for every
- * task type; `byTaskType` overrides per smithy verb (e.g. `"cut"`). Any omitted
- * requirement falls through to the layer beneath it, so a policy can be as small
- * as `{ byTaskType: { cut: { approval: false } } }`.
- */
 export interface MergePolicy {
   readonly defaults?: Partial<MergeRequirements>;
   readonly byTaskType?: Readonly<Record<string, Partial<MergeRequirements>>>;
+  readonly reviewRequests?: {
+    readonly byTaskType: Readonly<Record<string, { readonly reviewers: readonly ReviewerConfig[] }>>;
+  };
   readonly dependencyUpdates?: DependencyUpdatePolicy;
   readonly codeRabbit?: CodeRabbitPolicy;
 }
@@ -95,78 +51,142 @@ export interface DependencyUpdatePolicy {
   readonly autoMerge?: boolean;
 }
 
-/**
- * The built-in base policy applied beneath every profile's own policy (issue
- * #298). This is how the `cut` approval-relax becomes the default for ALL
- * profiles — present and future — instead of a per-profile opt-in that every new
- * profile forgets. Only the *approval* gate is dropped for `cut`;
- * `changesRequested` (and the CI/conflict/thread preconditions the legate's
- * all-clear gate enforces) stay mandatory. Because a profile's own policy layers
- * ON TOP of this, a profile can still re-require approval for cut explicitly
- * (`byTaskType.cut.approval = true`).
- *
- * To make another AI-only planning verb (`mark`, `render`) auto-merge by default,
- * add it here — scope intentionally limited to the confirmed `cut` case for now.
- */
-export const BUILTIN_BASE_POLICY: MergePolicy = {
-  byTaskType: { cut: { approval: false } },
+export const KNOWN_TASK_TYPES = ["cut", "forge", "spark", "ignite", "render", "mark", "fix", "strike"] as const;
+
+export const DEFAULT_MERGE_REQUIREMENTS: ResolvedMergeRequirements = {
+  approval: true,
+  changesRequested: true,
+  botApproval: false,
+  botApprovers: [],
 };
 
-/**
- * Resolve the effective requirements for a task type, layering last-wins per
- * field across two tiers (general → specific):
- *
- *   1. defaults tier:    `DEFAULT_MERGE_REQUIREMENTS` < built-in `defaults`
- *                        < `policy.defaults`
- *   2. task-type tier:   built-in `byTaskType[taskType]` < `policy.byTaskType[taskType]`
- *
- * The task-type tier is more specific, so it wins over the defaults tier — and
- * within each tier the profile's own policy wins over the built-in base. So an
- * undefined/empty policy still gets the built-in `cut` relax, while an explicit
- * per-profile policy can override it (re-require cut approval). An unknown task
- * type touches no `byTaskType` layer and falls through to the defaults tier.
- */
+const CODERABBIT_LOGIN = "coderabbitai";
+const BUILTIN_BOT_APPROVERS = [CODERABBIT_LOGIN] as const;
+const BUILTIN_ROWS = {
+  cut: { ...DEFAULT_MERGE_REQUIREMENTS, approval: false },
+  forge: { ...DEFAULT_MERGE_REQUIREMENTS, botApproval: true, botApprovers: BUILTIN_BOT_APPROVERS },
+  spark: DEFAULT_MERGE_REQUIREMENTS,
+  ignite: DEFAULT_MERGE_REQUIREMENTS,
+  render: DEFAULT_MERGE_REQUIREMENTS,
+  mark: DEFAULT_MERGE_REQUIREMENTS,
+  fix: DEFAULT_MERGE_REQUIREMENTS,
+  strike: DEFAULT_MERGE_REQUIREMENTS,
+};
+
+export const BOT_LOGIN_PATTERN = /^[A-Za-z0-9-]+(\[bot\])?$/i;
+
+export function normalizeBotLogin(login: string): string {
+  return login.toLowerCase().replace(/\[bot\]$/, "");
+}
+
+function selfBotLogin(): string {
+  return normalizeBotLogin(process.env.MARCH_SELF_BOT_LOGIN?.trim() || "march-bot");
+}
+
+function verbEntry<T>(entries: Readonly<Record<string, T>> | undefined, verb: string): T | undefined {
+  return entries && Object.hasOwn(entries, verb) ? entries[verb] : undefined;
+}
+
 export function resolveMergeRequirements(
   policy: MergePolicy | undefined,
   taskType: string | undefined,
-): MergeRequirements {
-  const effective: MergeRequirements = { ...DEFAULT_MERGE_REQUIREMENTS };
-  // Defaults tier: built-in base, then the profile's own profile-wide defaults.
-  Object.assign(effective, BUILTIN_BASE_POLICY.defaults ?? {});
-  Object.assign(effective, policy?.defaults ?? {});
-  // Task-type tier (more specific, applied last): built-in base for this verb,
-  // then the profile's own per-verb override — so an explicit profile policy
-  // always wins, even over the built-in cut relax.
-  if (taskType) {
-    Object.assign(effective, BUILTIN_BASE_POLICY.byTaskType?.[taskType] ?? {});
-    Object.assign(effective, policy?.byTaskType?.[taskType] ?? {});
-  }
-  return effective;
+): ResolvedMergeRequirements {
+  return resolveMergePolicyRow(policy, taskType).requirements;
 }
 
-/**
- * Whether the approval gate is satisfied for a PR snapshot. The single
- * definition both the auto-merge gate (babysit) and the merge-readiness
- * classifier (pure/slice) use, so the two cannot drift.
- *
- * Satisfied when the gate is relaxed, when a human approved, or — only if the
- * policy opts in via `botApproval` — when a bot approved. Missing counts read as
- * zero (fail-safe: an unobserved PR never passes a required gate).
- */
+export function resolveReviewRequests(
+  policy: MergePolicy | undefined,
+  taskType: string | undefined,
+): readonly ReviewerConfig[] {
+  return resolveMergePolicyRow(policy, taskType).reviewers;
+}
+
+type PolicySource = "built-in" | "profile" | "fail-closed";
+
+export function resolveMergePolicyRow(policy: MergePolicy | undefined, taskType: string | undefined): {
+  requirements: ResolvedMergeRequirements;
+  reviewers: readonly ReviewerConfig[];
+  provenance: Record<keyof MergeRequirements | "reviewers", PolicySource>;
+} {
+  const verb = taskType ?? "";
+  const builtin = verbEntry(BUILTIN_ROWS, verb);
+  const override = taskType ? verbEntry(policy?.byTaskType, verb) : undefined;
+  const defaults = !builtin && override ? policy?.defaults : undefined;
+  const base = builtin ?? DEFAULT_MERGE_REQUIREMENTS;
+  const source = builtin ? "built-in" : "fail-closed";
+  const profile = { ...defaults, ...override };
+  const effective = { ...base, ...profile };
+  const configuredApprovers = effective.botApprovers?.map(normalizeBotLogin);
+  const allowlist = configuredApprovers?.length ? configuredApprovers : BUILTIN_BOT_APPROVERS;
+  const botApprovers = effective.botApproval ? allowlist : [];
+  const requests = builtin || override ? verbEntry(policy?.reviewRequests?.byTaskType, verb) : undefined;
+  return {
+    requirements: {
+      ...effective,
+      // A profile-wide relaxation never bypasses an outstanding review.
+      changesRequested: override?.changesRequested ?? base.changesRequested,
+      botApprovers,
+    },
+    reviewers: requests?.reviewers.map((reviewer) => reviewer.id === "coderabbit"
+      ? { id: reviewer.id, mode: reviewer.mode ?? "comment-trigger" }
+      : reviewer) ?? [],
+    provenance: {
+      approval: profile.approval !== undefined ? "profile" : source,
+      changesRequested: override?.changesRequested !== undefined ? "profile" : source,
+      botApproval: profile.botApproval !== undefined ? "profile" : source,
+      botApprovers: effective.botApproval
+        ? profile.botApprovers?.length ? "profile" : "built-in"
+        : profile.botApproval === false ? "profile" : source,
+      reviewers: requests ? "profile" : source,
+    },
+  };
+}
+
+interface ReviewEvidence {
+  human_approval_count?: unknown;
+  bot_approval_count?: unknown;
+  changes_requested_count?: unknown;
+  /** `false` when the observer could not read every review page; absent on older snapshots. */
+  reviews_complete?: boolean;
+  head_sha?: string | null;
+  coderabbit?: { decision_is_bot?: true; decision?: string | null; decision_commit_sha?: string | null } | null;
+}
+
+/** The existing observer exposes a verified verdict for CodeRabbit. */
+function trustedCodeRabbit(req: ResolvedMergeRequirements, pr: ReviewEvidence | null | undefined) {
+  if (req.botApproval && req.botApprovers.includes(CODERABBIT_LOGIN) &&
+      selfBotLogin() !== CODERABBIT_LOGIN && pr?.coderabbit?.decision_is_bot === true) {
+    return pr.coderabbit;
+  }
+  return undefined;
+}
+
 export function approvalSatisfied(
-  req: MergeRequirements,
-  pr: { human_approval_count?: unknown; bot_approval_count?: unknown } | null | undefined,
+  req: ResolvedMergeRequirements,
+  pr: ReviewEvidence | null | undefined,
 ): boolean {
   if (!req.approval) return true;
-  if (Number(pr?.human_approval_count ?? 0) >= 1) return true;
-  return req.botApproval && Number(pr?.bot_approval_count ?? 0) >= 1;
+  // Partial review evidence can hide a later verdict, so it never establishes approval.
+  if (pr?.reviews_complete === false) return false;
+  if (typeof pr?.human_approval_count === "number" && pr.human_approval_count >= 1) return true;
+  const review = trustedCodeRabbit(req, pr);
+  return review?.decision === "APPROVED" && !!pr?.head_sha && review.decision_commit_sha === pr.head_sha;
+}
+
+export function changesRequestedSatisfied(req: ResolvedMergeRequirements, pr: ReviewEvidence): boolean {
+  return !req.changesRequested ||
+    (pr.reviews_complete !== false && Number(pr.changes_requested_count ?? 0) === 0 && trustedCodeRabbit(req, pr)?.decision !== "CHANGES_REQUESTED");
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-/** Validate an untrusted `Partial<MergeRequirements>`: only known keys, only booleans. */
+const RESERVED_VERBS = new Set(["__proto__", "constructor", "prototype"]);
+
+function validVerb(verb: string): boolean {
+  return !RESERVED_VERBS.has(verb);
+}
 function validateRequirements(
   value: unknown,
   where: string,
@@ -174,13 +194,22 @@ function validateRequirements(
   if (!isPlainObject(value)) {
     return { ok: false, error: `${where} must be an object.` };
   }
-  const requirements: Record<string, boolean> = {};
+  const requirements: { -readonly [K in keyof MergeRequirements]?: MergeRequirements[K] } = {};
   for (const [key, raw] of Object.entries(value)) {
-    if (!REQUIREMENT_KEYS.includes(key as keyof MergeRequirements)) {
-      return {
-        ok: false,
-        error: `${where} has unknown requirement "${key}" (expected one of ${REQUIREMENT_KEYS.join(", ")}).`,
-      };
+    if (key === "botApprovers") {
+      if (!Array.isArray(raw) || raw.length < 1 || raw.length > 10 ||
+          !Array.from(raw).every((login) => typeof login === "string" && BOT_LOGIN_PATTERN.test(login))) {
+        return { ok: false, error: `${where}.botApprovers must contain 1–10 valid bot logins.` };
+      }
+      const logins = raw.map(normalizeBotLogin);
+      if (logins.includes(selfBotLogin())) {
+        return { ok: false, error: `${where}.botApprovers cannot include March's own bot login.` };
+      }
+      requirements.botApprovers = [...new Set(logins)];
+      continue;
+    }
+    if (key !== "approval" && key !== "changesRequested" && key !== "botApproval") {
+      return { ok: false, error: `${where} has unknown requirement "${key}".` };
     }
     if (typeof raw !== "boolean") {
       return { ok: false, error: `${where}.${key} must be a boolean.` };
@@ -188,6 +217,42 @@ function validateRequirements(
     requirements[key] = raw;
   }
   return { ok: true, requirements };
+}
+
+function validateReviewRequests(
+  value: unknown,
+): { ok: true; requests: NonNullable<MergePolicy["reviewRequests"]> } | { ok: false; error: string } {
+  if (!isPlainObject(value) || Object.keys(value).some((key) => key !== "byTaskType") ||
+      !isPlainObject(value.byTaskType)) {
+    return { ok: false, error: "merge policy reviewRequests must contain only a byTaskType map." };
+  }
+  const byTaskType: Record<string, { reviewers: ReviewerConfig[] }> = Object.create(null);
+  for (const [verb, config] of Object.entries(value.byTaskType)) {
+    const where = `merge policy reviewRequests.byTaskType.${verb}`;
+    if (!validVerb(verb) || !isPlainObject(config) ||
+        Object.keys(config).some((key) => key !== "reviewers") || !Array.isArray(config.reviewers)) {
+      return { ok: false, error: `${where} must be a valid verb entry containing only a reviewers array.` };
+    }
+    const reviewers: ReviewerConfig[] = [];
+    for (const reviewer of config.reviewers) {
+      if (!isPlainObject(reviewer) || Object.keys(reviewer).some((key) => key !== "id" && key !== "mode")) {
+        return { ok: false, error: `${where} has an invalid reviewer object.` };
+      }
+      const { id, mode } = reviewer;
+      if (reviewers.some((entry) => entry.id === id)) {
+        return { ok: false, error: `${where} has duplicate reviewer "${id}".` };
+      }
+      if (id === "coderabbit" && (mode === undefined || mode === "comment-trigger" || mode === "auto")) {
+        reviewers.push({ id, mode: mode ?? "comment-trigger" });
+      } else if (id === "copilot" && mode === undefined) {
+        reviewers.push({ id });
+      } else {
+        return { ok: false, error: `${where} has an unsupported reviewer ID or mode.` };
+      }
+    }
+    byTaskType[verb] = { reviewers };
+  }
+  return { ok: true, requests: { byTaskType } };
 }
 
 /**
@@ -202,19 +267,20 @@ export function validateMergePolicy(
     return { ok: false, error: "merge policy must be an object." };
   }
   for (const key of Object.keys(value)) {
-    if (key !== "defaults" && key !== "byTaskType" && key !== "dependencyUpdates" && key !== "codeRabbit") {
+    if (key !== "defaults" && key !== "byTaskType" && key !== "dependencyUpdates" && key !== "codeRabbit" && key !== "reviewRequests") {
       return {
         ok: false,
-        error: `merge policy has unknown key "${key}" (expected "defaults", "byTaskType", "dependencyUpdates" or "codeRabbit").`,
+        error: `merge policy has unknown key "${key}".`,
       };
     }
   }
-  const policy: {
-    defaults?: Partial<MergeRequirements>;
-    byTaskType?: Record<string, Partial<MergeRequirements>>;
-    dependencyUpdates?: DependencyUpdatePolicy;
-    codeRabbit?: CodeRabbitPolicy;
-  } = {};
+  const policy: { -readonly [K in keyof MergePolicy]: MergePolicy[K] } = {};
+
+  if (value.reviewRequests !== undefined) {
+    const result = validateReviewRequests(value.reviewRequests);
+    if (!result.ok) return result;
+    policy.reviewRequests = result.requests;
+  }
 
   if (value.codeRabbit !== undefined) {
     const cr = value.codeRabbit;
@@ -265,8 +331,8 @@ export function validateMergePolicy(
     // valid smithy verbs anyway). This input arrives over HTTP (POST /profiles).
     const byTaskType: Record<string, Partial<MergeRequirements>> = Object.create(null);
     for (const [taskType, requirements] of Object.entries(value.byTaskType)) {
-      if (taskType === "__proto__" || taskType === "constructor" || taskType === "prototype") {
-        return { ok: false, error: `merge policy byTaskType has reserved key "${taskType}".` };
+      if (!validVerb(taskType)) {
+        return { ok: false, error: `merge policy byTaskType has invalid or reserved key "${taskType}".` };
       }
       const result = validateRequirements(requirements, `merge policy byTaskType.${taskType}`);
       if (!result.ok) return result;
@@ -280,7 +346,7 @@ export function validateMergePolicy(
 
 /**
  * Parse the registry's `merge_policy` TEXT column. Null/empty/malformed JSON, or
- * a value that fails validation, all degrade to `undefined` (all-required) — this
+ * a value that fails validation, all degrade to `undefined` (built-in policy) — this
  * is the read path for Herald and the legate, so it must never throw.
  */
 export function parseMergePolicy(text: string | null | undefined): MergePolicy | undefined {

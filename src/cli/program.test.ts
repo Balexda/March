@@ -2,12 +2,19 @@
  * @l1 @deterministic @ci
  */
 import { describe, it, expect, afterEach } from "vitest";
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFile, execFileSync, spawnSync } from "node:child_process";
 import { resolve } from "node:path";
 import { createRequire } from "node:module";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
+import Fastify from "fastify";
+import { registerRoutes } from "../brood/service/routes.js";
+import { sqliteAvailable } from "../brood/service/sqlite.js";
+import { SessionStore } from "../brood/service/store.js";
+import { registerProfileRoutes } from "../herald/profiles/routes.js";
+import { ProfileStore } from "../herald/profiles/store.js";
 import { FINDER_BIN } from "../shared/deps.js";
 
 const _require = createRequire(import.meta.url);
@@ -16,6 +23,7 @@ const PKG_VERSION: string = (
 ).version;
 
 const CLI_PATH = resolve(import.meta.dirname, "../../dist/cli.js");
+const execFileAsync = promisify(execFile);
 
 // Absolute path to the finder binary (which on Unix, where on Windows) —
 // used to build isolated test PATHs.
@@ -67,6 +75,161 @@ describe("march CLI", () => {
     }
     tmpDirs.length = 0;
   });
+
+  it.skipIf(!sqliteAvailable)("edits and shows per-verb merge policies through Herald", async () => {
+    const store = new ProfileStore({ dbPath: ":memory:" });
+    const app = Fastify();
+    const legacy = { dependencyUpdates: { autoMerge: true }, codeRabbit: { rereview: true } };
+    store.register({ profile: "repo", repoName: "repo", repoPath: "/repo", workerGroup: "workers", mergePolicy: legacy });
+    try {
+      await registerProfileRoutes(app, { store });
+      const url = await app.listen({ port: 0, host: "127.0.0.1" });
+      const runPolicy = (cmd: string, ...flags: string[]) =>
+        execFileAsync(process.execPath, [CLI_PATH, "profile", "merge-policy", cmd, "repo", ...flags], {
+          env: { ...process.env, HOME: makeTmpDir(), MARCH_HERALD_URL: url, MARCH_SELF_BOT_LOGIN: "march-bot" },
+          timeout: 5000,
+        });
+      await runPolicy("set", "--task-type", " Forge ", "--bot-approver", "Other[bot]", "--bot-approver", "Extras",
+        "--review-request", "coderabbit:auto", "--review-request", "copilot");
+      await runPolicy("set", "--task-type", "custom", "--no-approval");
+      const table = await runPolicy("show");
+      expect(table.stdout).toContain("coderabbit:auto, copilot");
+      expect(table.stdout).toContain("custom");
+      const { stdout } = await runPolicy("show", "--json");
+      const rows = JSON.parse(stdout);
+      expect(rows.forge).toMatchObject({
+        requirements: { approval: true, botApprovers: ["other", "extras"] },
+        reviewers: [{ id: "coderabbit", mode: "auto" }, { id: "copilot" }],
+        provenance: { approval: "built-in", botApprovers: "profile", reviewers: "profile" },
+      });
+      expect(rows.custom).toMatchObject({ requirements: { approval: false }, provenance: { approval: "profile" } });
+      expect(Object.keys(rows)).toHaveLength(9);
+
+      await expect(runPolicy("set", "--task-type", "forge", "--bot-approver", "MARCH-BOT[bot]"))
+        .rejects.toMatchObject({ code: 1, stderr: expect.stringContaining("own bot login") });
+      await expect(runPolicy("set", "--no-changes-requested"))
+        .rejects.toMatchObject({ code: 1, stderr: expect.stringContaining("requires --task-type") });
+      expect(store.get("repo")?.mergePolicy?.byTaskType?.forge?.botApprovers).toEqual(["other", "extras"]);
+
+      await runPolicy("set", "--task-type", "forge", "--no-bot-approver", "OTHER[BOT]", "--no-bot-approver", "EXTRAS",
+        "--no-review-request", "coderabbit", "--no-review-request", "copilot");
+      const afterRemoval = JSON.parse((await runPolicy("show", "--json")).stdout);
+      expect(afterRemoval.forge).toMatchObject({
+        requirements: { botApproval: true, botApprovers: ["coderabbitai"] },
+        reviewers: [],
+      });
+      expect(store.get("repo")?.mergePolicy).toMatchObject(legacy);
+    } finally {
+      await app.close();
+      store.close();
+    }
+  }, 15000);
+
+  it("prints a JSON error on stdout when merge-policy show --json cannot reach Herald", async () => {
+    const result = await execFileAsync(process.execPath, [CLI_PATH, "profile", "merge-policy", "show", "repo", "--json"], {
+      env: { ...process.env, HOME: makeTmpDir(), MARCH_HERALD_URL: "http://127.0.0.1:1" },
+      timeout: 5000,
+    }).then(() => undefined, (err: { code?: number; stdout?: string }) => err);
+    expect(result?.code).toBe(1);
+    expect(JSON.parse(result?.stdout ?? "")).toEqual({ error: expect.any(String) });
+  }, 15000);
+
+  it("advertises the Brood list flags", () => {
+    const result = run(["brood", "list", "--help"]);
+    expect(result.exitCode).toBe(0);
+    for (const flag of ["--kind", "--status", "--json", "--reconcile", "--no-reconcile"]) {
+      expect(result.stdout).toContain(flag);
+    }
+  });
+
+  it.skipIf(!sqliteAvailable)("lists service-owned Brood read views", async () => {
+    const store = new SessionStore({ dbPath: ":memory:" });
+    const app = Fastify();
+    const home = makeTmpDir();
+    const requests: string[] = [];
+    let observations = 0;
+    app.addHook("onRequest", async (request) => {
+      requests.push(request.method);
+    });
+    const list = (url: string, ...flags: string[]) =>
+      execFileAsync(process.execPath, [CLI_PATH, "brood", "list", ...flags], {
+        env: { ...process.env, HOME: home, MARCH_BROOD_URL: url },
+        timeout: 5000,
+      });
+
+    let url: string;
+    try {
+      const failed = store.register({
+        id: "failed-spawn", kind: "spawn", status: "failed",
+        branch: "topic", containerId: "container-1",
+      });
+      const steward = store.register({
+        id: "running-steward", kind: "steward", status: "running",
+      });
+      const before = store.list();
+      await registerRoutes(app, {
+        store,
+        containerObserver: {
+          async observe() {
+            observations++;
+            return new Map([["container-1", { present: true, running: true }]]);
+          },
+        },
+      });
+      url = await app.listen({ host: "127.0.0.1", port: 0 });
+
+      const table = (await list(url)).stdout.trimEnd();
+      expect(table).toMatch(/^ID\tSTATUS\tAGE\tBRANCH\tCONTAINER\tATTENTION\n/);
+      expect(table).toMatch(/failed-spawn\tfailed\t[^\t\n]+\ttopic\tcontainer-1\t!/);
+      expect((await list(url, "--kind", "steward")).stdout.split("\n")[1])
+        .toMatch(/^running-steward\trunning\t[^\t]+\t\t\t$/);
+
+      const json = async (...flags: string[]) =>
+        JSON.parse((await list(url, "--json", ...flags)).stdout);
+      expect(await json("--status", "failed")).toEqual([{
+        record: failed, age: expect.any(String), needsAttention: true,
+        disposed: false, containerLive: false, reconciled: false,
+      }]);
+      expect(await json("--kind", "steward", "--no-reconcile")).toEqual([{
+        record: steward, age: expect.any(String), needsAttention: false,
+        disposed: false, containerLive: null, reconciled: false,
+      }]);
+      expect(observations).toBe(0);
+      expect(await json("--kind", "spawn", "--reconcile")).toEqual([
+        expect.objectContaining({ record: failed, containerLive: true, reconciled: true }),
+      ]);
+      expect(observations).toBe(1);
+
+      expect((await list(url, "--kind", "legate")).stdout).toBe("No sessions tracked.\n");
+      expect(await json("--kind", "legate")).toEqual([]);
+      for (const field of ["kind", "status"]) {
+        await expect(list(url, `--${field}`, "invalid")).rejects.toMatchObject({
+          code: 1, stderr: expect.stringContaining(`${field} must be one of`), stdout: "",
+        });
+      }
+      const invalidJson = await list(url, "--json", "--kind", "invalid").catch((e) => e);
+      expect(invalidJson.code).toBe(1);
+      expect(JSON.parse(invalidJson.stdout)).toEqual({
+        error: expect.stringContaining("kind must be one of"),
+      });
+      expect(requests.length).toBeGreaterThan(0);
+      expect(requests.every((method) => method === "GET")).toBe(true);
+      expect(store.list()).toEqual(before);
+    } finally {
+      await app.close();
+      store.close();
+    }
+
+    await expect(list(url)).rejects.toMatchObject({
+      code: 1, stderr: expect.stringContaining("Could not reach the brood service"), stdout: "",
+    });
+    const unreachableJson = await list(url, "--json").catch((e) => e);
+    expect(unreachableJson.code).toBe(1);
+    expect(unreachableJson.stderr).toContain("Could not reach the brood service");
+    expect(JSON.parse(unreachableJson.stdout)).toEqual({
+      error: expect.stringContaining("Could not reach the brood service"),
+    });
+  }, 15000);
 
   /**
    * Runs the CLI with a fully controlled environment. Uses `spawnSync` instead
@@ -246,6 +409,23 @@ describe("march CLI", () => {
       );
       expect(result.exitCode).toBe(1);
       expect(result.stderr).toContain("Could not reach the herald service");
+    });
+
+    it("`march legate requeue --help` exits 0 and prints the requeue usage", () => {
+      const result = run(["legate", "requeue", "--help"]);
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain("Usage: march legate requeue");
+      expect(result.stdout).toContain("--close-pr");
+      expect(result.stdout).toContain("--reason");
+    });
+
+    it("`march legate requeue <sliceId>` exits 1 with a reach error when the legate is down", () => {
+      const result = runWithEnv(
+        ["legate", "requeue", "some-slice", "--profile", "march"],
+        { ...process.env, MARCH_LEGATE_URL: "http://127.0.0.1:1" },
+      );
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toContain("Could not reach the legate service");
     });
 
     it("`march legate respond --help` exits 0 and prints the respond usage", () => {

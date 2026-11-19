@@ -13,7 +13,7 @@
 #     attention. Same pattern smithy.pr-review's get-comments.sh uses.
 #
 # Usage:
-#   babysit-pr.sh <repo-path> <pr-num>
+#   babysit-pr.sh <repo-path> <pr-num> [slice-id]
 #
 # Stdout: JSON
 #   {
@@ -66,12 +66,13 @@
 # Exit: 0 success / 1 gh call failed / 2 invalid input.
 set -euo pipefail
 
-if [[ $# -ne 2 ]]; then
-  echo "usage: babysit-pr.sh <repo-path> <pr-num>" >&2
+if [[ $# -lt 2 || $# -gt 3 ]]; then
+  echo "usage: babysit-pr.sh <repo-path> <pr-num> [slice-id]" >&2
   exit 2
 fi
 
 REPO="$1"
+export MARCH_TESSERA_SLICE_ID="${3:-${MARCH_TESSERA_SLICE_ID:-}}"
 PR="$2"
 
 if [[ ! -d "$REPO/.git" && ! -f "$REPO/.git" ]]; then
@@ -83,16 +84,17 @@ if ! [[ "$PR" =~ ^[0-9]+$ ]]; then
   exit 2
 fi
 
+FORGE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/../tessera-forge.mjs"
 cd "$REPO"
 
-OWNER_REPO="$(gh repo view --json nameWithOwner -q .nameWithOwner)"
+OWNER_REPO="$(node "$FORGE" repo)"
 OWNER="${OWNER_REPO%%/*}"
 NAME="${OWNER_REPO##*/}"
 
 # Top-level PR state: CI, mergeable, review summary, head branch, author.
 # We pull `author` so we can identify worker-pushed replies vs reviewer
 # comments when filtering threads.
-SUMMARY="$(gh pr view "$PR" \
+SUMMARY="$(node "$FORGE" gh read pr view "$PR" \
             --json number,url,state,mergeable,reviewDecision,statusCheckRollup,headRefName,title,author)"
 
 # Unresolved review threads via GraphQL. Each thread keeps the original
@@ -100,7 +102,7 @@ SUMMARY="$(gh pr view "$PR" \
 # whoever posted the most recent reply — this is the signal we use to tell
 # "thread is open and reviewer is waiting" from "worker already replied,
 # unresolved only because nobody clicked the Resolve button."
-THREADS_RAW="$(gh api graphql \
+THREADS_RAW="$(node "$FORGE" gh read api graphql \
   -F owner="$OWNER" \
   -F name="$NAME" \
   -F pr="$PR" \
@@ -140,7 +142,7 @@ query($owner: String!, $name: String!, $pr: Int!) {
         last_comment_at: $sorted[-1].createdAt,
         comment_count: ($sorted | length)
       }
-  ]' 2>/dev/null || echo '[]')"
+  ]')"
 
 # Combine. `needs_response` per thread is "last comment isn't by the PR
 # author" — i.e. a reviewer is still waiting for action. checks status

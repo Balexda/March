@@ -1,3 +1,4 @@
+import { TesseraClient, TesseraClientError } from "../../tessera/client.js";
 import Fastify, {
   type FastifyBaseLogger,
   type FastifyInstance,
@@ -116,9 +117,10 @@ export interface ObserveDeps {
  * repo is to remove the profile (`march profile remove`), which also stops March
  * acting on it.
  */
-export function buildObserveDeps(meta: LoopMeta, app: FastifyInstance): ObserveDeps {
+export function buildObserveDeps(meta: LoopMeta, app: FastifyInstance, tessera: TesseraClient): ObserveDeps {
   const io = createSenseIo({
     meta,
+    tessera,
     warn: (message: string) => app.log.warn({ component: "observe" }, message),
   });
   return {
@@ -127,6 +129,31 @@ export function buildObserveDeps(meta: LoopMeta, app: FastifyInstance): ObserveD
       await io.syncDefaultBranch({ repo: { path: repoPath, default_branch: knownDefault } });
     },
   };
+}
+
+export async function observeProfiles(
+  app: FastifyInstance, store: EventStore, profiles: readonly ProfileRecord[], tessera: TesseraClient,
+) {
+  let appendedTotal = 0;
+  let maxDurationMs = 0;
+  const eventsByType: Record<string, number> = {};
+  for (const rec of profiles) {
+    try {
+      const { senseDeps, syncDefaultBranch } = buildObserveDeps(metaForProfile(rec), app, tessera);
+      const result = await runObservation({ store, senseDeps, profile: rec.profile, syncDefaultBranch });
+      maxDurationMs = Math.max(maxDurationMs, result.durationMs);
+      for (const e of result.appended) eventsByType[e.type] = (eventsByType[e.type] ?? 0) + 1;
+      appendedTotal += result.appended.length;
+    } catch (err) {
+      recordHeraldObserveError();
+      app.log.error(
+        { profile: rec.profile, err: err instanceof Error ? err.message : String(err),
+          ...(err instanceof TesseraClientError ? { code: err.code } : {}) },
+        "herald observe tick failed for profile",
+      );
+    }
+  }
+  return { appendedTotal, maxDurationMs, eventsByType };
 }
 
 export interface StartServerOptions {
@@ -179,6 +206,7 @@ export async function startServer(
     );
   }
   const stopHeartbeat = startHeraldHeartbeat();
+  const tessera = new TesseraClient();
 
   let ticking = false;
   const observeOnce = async (): Promise<void> => {
@@ -189,24 +217,7 @@ export async function startServer(
       // its own try/catch so one bad repo (gh outage, missing path) can't stall
       // the others or abort the interval.
       const profiles = profileStore.list();
-      let appendedTotal = 0;
-      let maxDurationMs = 0;
-      const eventsByType: Record<string, number> = {};
-      for (const rec of profiles) {
-        try {
-          const { senseDeps, syncDefaultBranch } = buildObserveDeps(metaForProfile(rec), app);
-          const result = await runObservation({ store, senseDeps, profile: rec.profile, syncDefaultBranch });
-          maxDurationMs = Math.max(maxDurationMs, result.durationMs);
-          for (const e of result.appended) eventsByType[e.type] = (eventsByType[e.type] ?? 0) + 1;
-          appendedTotal += result.appended.length;
-        } catch (err) {
-          recordHeraldObserveError();
-          app.log.error(
-            { profile: rec.profile, err: err instanceof Error ? err.message : String(err) },
-            "herald observe tick failed for profile",
-          );
-        }
-      }
+      const { appendedTotal, maxDurationMs, eventsByType } = await observeProfiles(app, store, profiles, tessera);
       status.lastObserveAtMs = Date.now();
       status.lastObserveDurationMs = maxDurationMs;
       recordHeraldObserve({ durationSeconds: maxDurationMs / 1000, eventsByType });

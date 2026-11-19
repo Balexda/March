@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Span } from "@opentelemetry/sdk-trace-base";
 import type { SpawnBackend } from "../spawn/backends.js";
 import { getActiveOtel, initOtel } from "../observability/otel.js";
+import { traceIdForDispatch } from "../observability/trace-ids.js";
 
 // Issue #244 acceptance: a steward.apply failure must produce a span carrying the
 // slice/spawn/worktree/patch diagnostics AND a trace-correlated log. This drives
@@ -138,6 +139,7 @@ beforeEach(() => {
 afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllEnvs();
+  vi.unstubAllGlobals();
   initOtel({});
   while (tmpDirs.length) fs.rmSync(tmpDirs.pop()!, { recursive: true, force: true });
 });
@@ -184,4 +186,42 @@ describe("steward.apply diagnostics (#244)", () => {
       "march.patch.offending_path": "f",
     });
   });
+});
+
+it("fails the slice trace on a Tessera outage and processes the next local job", async () => {
+  execFileSync("git", ["remote", "add", "origin", "git@github.com:team/repo.git"], {
+    cwd: worktreePath.value,
+  });
+  vi.stubEnv("MARCH_TESSERA_URL", "http://outage-test-tessera");
+  vi.stubEnv("MARCH_TESSERA_CLIENT_KEY", "outage-test-key");
+  vi.stubEnv("MARCH_TESSERA_GH_TOKEN_FALLBACK", "");
+  vi.stubEnv("GH_TOKEN", "");
+  vi.stubEnv("GITHUB_TOKEN", "");
+  const issuance = vi.fn(async () => { throw new Error("private transport diagnostics"); });
+  vi.stubGlobal("fetch", issuance);
+  const spans = captureSpans();
+  const input = {
+    repoPath: "/repo", prompt: "do the thing", backend, branch: "smithy/cut/03",
+    sliceId: "pin-outage-slice", homeDir: makeHome(),
+  };
+
+  await expect(runHatcherySpawn(input)).rejects.toMatchObject({
+    name: "HatcheryGitHubError", code: "tessera:unreachable",
+    message: "Hatchery GitHub read failed (tessera:unreachable)",
+  });
+  const pin = spans.find((span) => span.name === "manager.pin_base");
+  expect(pin?.spanContext().traceId).toBe(traceIdForDispatch(input.sliceId));
+  expect(pin?.status).toMatchObject({ code: 2, message: "Hatchery GitHub read failed (tessera:unreachable)" });
+  expect(spans.some((span) => span.name === "spawn.start")).toBe(false);
+  // The Brood launch row must exist before a pin failure can abort the spawn.
+  expect(spans.some((span) => span.name === "brood.register" &&
+    span.spanContext().traceId === pin?.spanContext().traceId)).toBe(true);
+  expect(spans.find((span) => span.name === "hatchery.spawn" && span.spanContext().traceId === pin?.spanContext().traceId)
+    ?.attributes["march.failure_stage"]).toBe("pin_base");
+
+  worktreePath.value = makeWorktree();
+  await expect(runHatcherySpawn({ ...input, sliceId: "next-local-slice" })).rejects.toThrow(/git apply failed/);
+  expect(issuance).toHaveBeenCalledTimes(1);
+  expect(spans.some((span) => span.name === "steward.apply" &&
+    span.spanContext().traceId === traceIdForDispatch("next-local-slice"))).toBe(true);
 });

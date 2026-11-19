@@ -33,14 +33,14 @@ import { CODERABBIT_REVIEW_COMMAND, reviewRequestBody } from "../../../observe/c
  * The natural bound is one request per pushed head. If CodeRabbit asks for more
  * changes, its new review is on the head, so nothing fires until the steward
  * pushes again. The merge gate is untouched: an approval CodeRabbit leaves counts
- * only where the profile accepts bot approvals (`botApproval`).
+ * when the resolved policy allows CodeRabbit and its approval is on the head.
  */
 
 export const REREVIEW_ACTION = "coderabbit-rereview-requested";
 export const REREVIEW_FAILED_ACTION = "coderabbit-rereview-failed";
 
 export interface CodeRabbitRereviewDeps {
-  commentOnPr(repoPath: string, prNumber: number, body: string): Promise<void>;
+  commentOnPr(repoPath: string, prNumber: number, body: string, sliceId?: string): Promise<void>;
 }
 
 export type RequestKind = "rereview" | "initial";
@@ -117,7 +117,7 @@ export async function apply(
     memo[String(number)] = head;
     res.mutated = true;
     try {
-      await deps.commentOnPr(repoPath, number, reviewRequestBody(head));
+      await deps.commentOnPr(repoPath, number, reviewRequestBody(head), sliceId);
       res.actions.push({
         action: REREVIEW_ACTION,
         sliceId,

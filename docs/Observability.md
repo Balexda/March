@@ -514,8 +514,8 @@ e.g. `march_spawn_runs_total` or `march_castra_requests_total`. Logs: **Explore 
 
 ## Running Statio with observability
 
-Statio is a forge-credentialed container and should be started after the shared
-observability stack has created the external `march` network:
+Start Statio after the shared observability stack has created the external
+`march` network. Forge reads require Tessera and a registered Statio client key.
 
 ```bash
 docker compose -f docker/otel-lgtm.docker-compose.yml up -d
@@ -530,7 +530,8 @@ open http://localhost:3000/d/march-statio
 `MARCH_STATIO_TOKEN` is required and compose aborts without it. The service
 publishes `127.0.0.1:${MARCH_STATIO_PORT:-9689}` on the host and joins the
 external `march` network so peer containers can use `MARCH_STATIO_URL`
-(`http://statio:9689` by default). The compose recipe defaults `MARCH_OTEL` to
+(`http://statio:9689` by default). See the [Statio contract](subsystems/statio/contract.md)
+for Tessera and repository settings. The compose recipe defaults `MARCH_OTEL` to
 `1` like the other March services, so RED metrics, heartbeat, spans, and OTLP
 logs appear on the **March — Statio forge gateway** dashboard out of the box.
 Set `MARCH_OTEL=0` (or leave `MARCH_OTEL` unset when running `march statio

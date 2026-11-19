@@ -1,13 +1,27 @@
 /**
  * @l1 @deterministic @ci
  */
-import { describe, expect, it } from "vitest";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { SpanStatusCode } from "@opentelemetry/api";
+import {
+  BasicTracerProvider,
+  InMemorySpanExporter,
+  SimpleSpanProcessor,
+  type Span,
+} from "@opentelemetry/sdk-trace-base";
+import { describe, expect, it, vi } from "vitest";
 import type { CastraSession } from "../../castra/types.js";
+import { getActiveOtel, initOtel } from "../../observability/otel.js";
+import { traceIdForDispatch } from "../../observability/trace-ids.js";
 import { sqliteAvailable } from "./sqlite.js";
 import { SessionStore } from "./store.js";
 import {
   candidateHeadBranches,
   classifyOrphanWork,
+  defaultOrphanGate,
   fetchBranchPrState,
   observeReconciliation,
   parseGitHubSlug,
@@ -707,6 +721,39 @@ describe("fetchBranchPrState (token REST path, no gh)", () => {
     ).toBe("unknown");
   });
 
+  it.each([["closed", "unknown"], ["open", "open"]])(
+    "reports an incomplete lookup for a %s PR when one head lookup fails",
+    async (state, expected) => {
+      const onIncomplete = vi.fn();
+      const fetchImpl: typeof fetch = async (input) =>
+        new URL(String(input)).searchParams.get("head") === "o:b"
+          ? Response.json([{ state, merged_at: null }])
+          : new Response(null, { status: 503 });
+
+      await expect(fetchBranchPrState({
+        owner: "o", repo: "r", branch: "b", token: "t", fetchImpl, onIncomplete,
+      })).resolves.toBe(expected);
+      expect(onIncomplete).toHaveBeenCalledOnce();
+    },
+  );
+
+  it.each([["open", "open"], ["closed", "unknown"]])(
+    "treats a failed token refresh as incomplete and keeps a confirmed %s PR",
+    async (state, expected) => {
+      const onIncomplete = vi.fn();
+      const fetchImpl: typeof fetch = async (input) =>
+        new URL(String(input)).searchParams.get("head") === "o:b"
+          ? Response.json([{ state, merged_at: null }])
+          : new Response(null, { status: 401 });
+
+      await expect(fetchBranchPrState({
+        owner: "o", repo: "r", branch: "b", token: "t", fetchImpl, onIncomplete,
+        refreshToken: async () => { throw new Error("tessera down"); },
+      })).resolves.toBe(expected);
+      expect(onIncomplete).toHaveBeenCalledOnce();
+    },
+  );
+
   // The deciding live-stack mismatch: the steward carries the LOCAL branch
   // `smithy/cut/X`, but the worker pushed it as PR head `feature/smithy/cut/X`.
   // A query by the raw local name finds nothing — the `feature/` variant wins.
@@ -753,6 +800,115 @@ describe("fetchBranchPrState (token REST path, no gh)", () => {
       fetchImpl: impl,
     });
     expect(state).toBe("open");
+  });
+});
+
+describe.skipIf(!sqliteAvailable)("Tessera-backed orphan sweep", () => {
+  it("scopes tokens by origin and skips indeterminate candidates while the sweep continues", async () => {
+    const root = mkdtempSync(join(tmpdir(), "brood-orphan-"));
+    const store = new SessionStore({ dbPath: ":memory:" });
+    initOtel({ MARCH_OTEL: "1" });
+    // Spans go to a local in-memory provider; the OTLP tracer never buffers one.
+    const provider = new BasicTracerProvider({
+      spanProcessors: [new SimpleSpanProcessor(new InMemorySpanExporter())],
+    });
+    const local = provider.getTracer("test");
+    const tracer = getActiveOtel().getTracer();
+    const spans: Span[] = [];
+    const spy = vi.spyOn(tracer, "startSpan").mockImplementation((...args) => {
+      const span = local.startSpan(...args) as Span;
+      spans.push(span);
+      return span;
+    });
+    try {
+      for (const owner of ["missing", "outage", "acme", "another"]) {
+        const repoPath = join(root, owner);
+        execFileSync("git", ["init", "-q", repoPath]);
+        if (owner !== "missing") {
+          execFileSync("git", ["-C", repoPath, "remote", "add", "origin", `git@github.com:${owner}/widgets.git`]);
+        }
+        store.register({ id: `old-${owner}`, kind: "steward", profile: owner, repoPath, status: "torndown" });
+      }
+
+      const issue = vi.fn((request: { repo: string; refresh?: boolean }) => {
+        if (request.repo === "outage/widgets") throw new Error("private upstream detail");
+        return Response.json({
+          token: `scoped-${request.repo}-${request.refresh ? "fresh" : "initial"}`,
+          identity: "bot",
+          repo: request.repo,
+          access: "read",
+          expires_at: "2099-01-01T00:00:00Z",
+          commit_identity: { name: "bot", email: "bot@example.test" },
+        });
+      });
+      const github = vi.fn((repo: string, auth: string | null) => {
+        if (repo === "acme/widgets" && auth === "Bearer scoped-acme/widgets-initial") {
+          return new Response(null, { status: 401 });
+        }
+        return Response.json([{ state: "closed", merged_at: "2026-01-01T00:00:00Z" }]);
+      });
+      const gate = defaultOrphanGate({
+        MARCH_TESSERA_URL: "http://tessera:9477",
+        MARCH_TESSERA_CLIENT_KEY: "brood-key",
+      }, async (input, init) => {
+        const url = new URL(String(input));
+        const headers = new Headers(init?.headers);
+        expect(init?.signal).toBeDefined();
+        if (url.host === "tessera:9477") {
+          expect(url.pathname).toBe("/v1/github/token");
+          expect(headers.get("authorization")).toBe("Bearer brood-key");
+          const request = JSON.parse(String(init?.body));
+          expect(headers.get("x-march-slice-id")).toBe(`slice-${request.repo.split("/")[0]}`);
+          return issue(request);
+        }
+        expect(url.host).toBe("api.github.com");
+        return github(url.pathname.split("/").slice(2, 4).join("/"), headers.get("authorization"));
+      });
+      const removed: string[] = [];
+      const result = await sweepLeakedStewards(store, {
+        listSessions: async (profile) => [session({
+          sessionId: profile,
+          branch: "feature/work",
+          status: "stopped",
+          createdAt: "2020-01-01T00:00:00Z",
+          metadata: { sliceId: `slice-${profile}` },
+        })],
+        removeSession: async ({ sessionId }) => {
+          removed.push(sessionId);
+          return { removed: true };
+        },
+      }, gate, { deadOrphanAgeMs: 0 });
+
+      expect(removed.sort()).toEqual(["acme", "another"]);
+      expect(result.skipped.map(({ sessionId, reason }) => [sessionId, reason]).sort()).toEqual([
+        ["missing", "pr-lookup-unknown"],
+        ["outage", "pr-lookup-unknown"],
+      ]);
+      expect(issue).toHaveBeenCalledTimes(4);
+      expect(issue).toHaveBeenCalledWith({ identity: "app", access: "read", repo: "acme/widgets", refresh: true });
+      expect(issue).toHaveBeenCalledWith({ identity: "app", access: "read", repo: "another/widgets" });
+      expect(github.mock.calls.filter(([repo]) => repo === "acme/widgets")).toEqual([
+        ["acme/widgets", "Bearer scoped-acme/widgets-initial"],
+        ["acme/widgets", "Bearer scoped-acme/widgets-fresh"],
+        ["acme/widgets", "Bearer scoped-acme/widgets-fresh"],
+      ]);
+      expect(github.mock.calls.filter(([repo]) => repo === "another/widgets")).toEqual([
+        ["another/widgets", "Bearer scoped-another/widgets-initial"],
+        ["another/widgets", "Bearer scoped-another/widgets-initial"],
+      ]);
+      const failed = spans.find((span) => span.spanContext().traceId === traceIdForDispatch("slice-outage"));
+      expect(failed).toMatchObject({
+        name: "brood.orphan.pr_lookup",
+        status: { code: SpanStatusCode.ERROR },
+        attributes: { "error.type": "unreachable" },
+      });
+    } finally {
+      spy.mockRestore();
+      await provider.shutdown();
+      initOtel({});
+      store.close();
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 

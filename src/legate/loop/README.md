@@ -48,10 +48,12 @@ drop-in (see [`state/types.ts`](./state/types.ts)).
 
 ### The handler pipeline (order is load-bearing)
 
-`cleanup → ghost-cleanup → castra-recover → relaunch → babysit → recovery →
-adopt-from-fold → dispatch`, awaited in
+`requeue → cleanup → ghost-cleanup → castra-recover → relaunch → babysit →
+recovery → adopt-from-fold → dispatch`, awaited in
 order. Do **not** parallelize — earlier handlers drop sessions/slices that later
-ones must not act on. `recovery` runs **after** `castra-recover`/`relaunch` (it
+ones must not act on. `requeue` runs **first** so no later handler touches a
+slice the operator has discarded (cleanup archiving its just-closed PR, relaunch
+re-attaching to its just-killed steward). `recovery` runs **after** `castra-recover`/`relaunch` (it
 *prepares* a stuck slice — un-escalates it — for the gentle owner to heal next
 tick, and descends a rung once that owner's budget is spent) and **before**
 `dispatch` (so its last-resort rung-3 nuke frees the still-ready item for a fresh
@@ -59,6 +61,7 @@ re-dispatch this same tick).
 
 | Handler | What it does |
 |---------|--------------|
+| [`requeue`](./handlers/requeue.ts) | **Runs first.** Operator requeue ([#588](https://github.com/Balexda/March/issues/588)/[#593](https://github.com/Balexda/March/issues/593)): for each slice whose fold carries a pending `requeueRequested`, tear down its incarnation through Brood by exact path (registering an untracked/dead session's worktree+branch first), close its open PR only when `closePr` was requested, delete a pushed remote branch, then drop it and append the rung-3 tombstone so `dispatch` re-launches the item fresh on the same tick. Bypasses the recovery ladder, including its `awaiting_input` refusal. Refuses an open PR without `closePr`, a merged PR, or a `hatchery-pending` slice (`slice.requeue.refused`); a failing teardown retries for 3 ticks, then gives up and rings the operator. |
 | [`cleanup`](./handlers/cleanup.ts) | A slice whose PR is `MERGED`/`CLOSED` is done → request Brood teardown, then archive the slice. On a Brood 404 ([#225](https://github.com/Balexda/March/issues/225)): if the steward is still live in Castra, reconcile it into Brood from the observation (exact worktree/branch path, [#155](https://github.com/Balexda/March/issues/155)) and re-tear-down; if it's genuinely gone, archive idempotently. A real teardown failure defers (never archives over an orphan) and escalates to the operator after `MAX_CLEANUP_ATTEMPTS` instead of retrying forever. |
 | [`ghost-cleanup`](./handlers/ghost-cleanup.ts) | A worker session whose worktree isn't tracked by any non-terminal slice (and old enough to not be a launch race) is an orphan → request Brood teardown. |
 | [`relaunch`](./handlers/relaunch.ts) | A non-terminal slice with an open PR but a vanished worker → re-attach a fresh opus steward to the existing worktree/branch. Throttled per slice. |
@@ -97,7 +100,7 @@ src/legate/loop/
                     decomposition tracked in Balexda/March#144)
   coordinator.ts    Stage 2 — sense → ordered handlers → TickResult
   heartbeat.ts      per-tick heartbeat record + events + /status snapshot
-  http.ts           Fastify server: GET /healthz, GET /status (read-only today)
+  http.ts           Fastify server: status/escalation reads + operator actions (respond, requeue)
   state/
     types.ts        LoopState / HandlerContext / HandlerResult / TickResult
     sense.ts        Stage 1: senseFromHerald (legate inbox fold) +
@@ -198,13 +201,16 @@ handler — the `slice.recovery.requested` (operator) and the ensuing fresh
 
 ## HTTP API ([`http.ts`](./http.ts))
 
-| Method + path  | Purpose |
-|----------------|---------|
+| Method + path | Purpose |
+|---------------|---------|
 | `GET /healthz` | liveness |
-| `GET /status`  | latest heartbeat snapshot (last tick, queue, workers, counts) |
+| `GET /status` | latest heartbeat snapshot (last tick, queue, workers, counts); `?profile=` for one profile |
+| `GET /escalations` | escalated slices needing an operator (reason, PR, session, worktree); `?profile=` for one profile |
+| `POST /escalations/:sliceId/respond` | answer (`message`) or acknowledge (`ack:true`) a `steward_awaiting_input` escalation on a live steward |
+| `POST /slices/:sliceId/requeue` | discard the slice's attempt (session, worktree, branch; open PR only with `closePr:true`) and re-dispatch it fresh — works on dead sessions and pending questions ([#588](https://github.com/Balexda/March/issues/588)); 202 + the [`requeue`](./handlers/requeue.ts) handler acts next tick |
 
-Read-only today; deterministic action routes (`POST /tick`, …) register the same
-way when added.
+Operator actions only append Herald events; the tick's handlers do the work, so
+nothing mutates the in-memory working state outside a tick.
 
 ## Configuration
 

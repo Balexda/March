@@ -39,7 +39,7 @@
   transport, not the observed shape.
 - Statio is held to [`docs/operating-philosophy.md`](../../docs/operating-philosophy.md):
   no interactive surfaces (auth provisioned at deploy, not negotiated per
-  request), minimum required access (Statio is the only forge-credentialed image),
+  request), minimum required access (Tessera issues Statio repository-scoped app/read access),
   clean exits (timeout-bounded `gh` calls; `forge_error` envelope, never a hang).
 
 ## Artifact Hierarchy
@@ -341,8 +341,8 @@ remaining reads build on them; US6 packages and instruments the result.
 
 ## Assumptions
 
-- The Statio container has `gh` installed and authenticated (env token and/or a
-  read-only `~/.config/gh` mount, decided in implementation — SD-002).
+- The Statio container has `gh` installed. Forge calls use repository-scoped
+  Tessera app/read entitlements and a fresh `GH_CONFIG_DIR` per child.
 - Consumers reach Statio on the shared `march` Docker network created by the
   otel-lgtm stack (the Castra/Hatchery topology).
 - The current `gh` output shape in `sense-io.ts` is the authoritative target for
@@ -355,7 +355,7 @@ remaining reads build on them; US6 packages and instruments the result.
 | ID | Description | Source Category | Impact | Confidence | Status | Resolution |
 |----|-------------|-----------------|--------|------------|--------|------------|
 | SD-001 | Env-var naming convention: `MARCH_STATIO_*` (this spec) vs. Castra's `CASTRA_*`. Two conventions exist in the stack. | Constraints | Low | Medium | open | Confirm the canonical prefix before implementation; inherited from the feature map. |
-| SD-002 | Forge-auth provisioning: env token vs. read-only `~/.config/gh` mount, and interaction with `gh`'s own credential resolution. | Domain & Data Model | Medium | Medium | open | Decide the supported default + compose wiring during implementation. |
+| SD-002 | Forge-auth provisioning: env token vs. read-only `~/.config/gh` mount, and interaction with `gh`'s own credential resolution. | Domain & Data Model | Medium | Medium | resolved | Tessera supplies app/read entitlements to Statio. Each `gh` child gets its own config directory. See [Statio contract](../../docs/subsystems/statio/contract.md). |
 | SD-003 | Whether the resilience seam (rate-limit/retry/read-cache) ships in this foundation spec (default-off) or arrives with the first measured need. | Architecture | Low | Medium | open | Default stance: ship the seam, default-off; revisit on measured rate-limit pressure. |
 | SD-004 | `reviewThreads` GraphQL response shaping (resolved-thread filtering + comment-id dedup) must match `sense-io.ts`'s current output exactly for a behavior-preserving Herald cutover. | Domain & Data Model | Medium | High | open | Pin the wire shape against `queryReviewThreads` in the contracts/data-model. |
 

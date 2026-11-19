@@ -20,7 +20,13 @@ import {
   startSpawnContainer,
   waitForSpawnContainer,
 } from "../spawn/container-launch.js";
-import { gitHubAuthConfigArgs } from "../spawn/git-auth.js";
+import {
+  hatcheryGitEnv,
+  HatcheryGitHubError,
+  readHatcheryGitHubDefaultBranch,
+  resolveHatcheryOrigin,
+  runHatcheryNetworkGit,
+} from "./github-read.js";
 import { createBuildContext, SnapshotError } from "../spawn/snapshot.js";
 import { resolveToolchain, resolveToolchainImage } from "../spawn/toolchain.js";
 import {
@@ -269,23 +275,24 @@ export interface SelfHealResult {
  * The worktree path is derived from git's own records (not `mgr`, which is
  * undefined here). Emits a `spawn.self_heal` span + trace-correlated log.
  */
-function selfHealManagerLaunchCollision(input: {
+async function selfHealManagerLaunchCollision(input: {
   readonly repoPath: string;
   readonly spawnId: string;
   readonly branch: string;
   readonly sliceId: string;
   readonly dispatch: DispatchTrace;
-}): SelfHealResult {
+}): Promise<SelfHealResult> {
   const orphanBranch = orphanManagerBranch(input.branch);
-  const verdict = classifyBranchSafety(input.repoPath, orphanBranch);
-  const worktreePath = findWorktreePathForBranch(input.repoPath, orphanBranch);
-  let removed = false;
-
-  input.dispatch.span("spawn.self_heal", (span) => {
+  return input.dispatch.spanAsync("spawn.self_heal", async (span) => {
     span.setAttributes({
       "march.slice_id": input.sliceId,
       "march.spawn_id": input.spawnId,
       "march.orphan_branch": orphanBranch,
+    });
+    const verdict = await classifyBranchSafety(input.repoPath, orphanBranch, undefined, input.sliceId);
+    const worktreePath = findWorktreePathForBranch(input.repoPath, orphanBranch);
+    let removed = false;
+    span.setAttributes({
       "march.self_heal.verdict": verdictLabel(verdict),
       "march.worktree": worktreePath ?? "",
     });
@@ -327,9 +334,8 @@ function selfHealManagerLaunchCollision(input: {
         "march.self_heal.removed": removed,
       },
     });
+    return { orphanBranch, verdict, removed };
   });
-
-  return { orphanBranch, verdict, removed };
 }
 
 export function buildSpawnCommitPrompt(operatorPrompt: string): string {
@@ -695,7 +701,7 @@ export function buildManagerPrompt(input: {
     "   committing with the boxes still unchecked.",
     "6. Commit the applied change. (`git commit`)",
     "7. Push the branch to origin. (`git push -u origin <branch>`)",
-    "8. Open the PR using the `steward-pr` skill, which defines the required",
+    "8. Open the PR using the `march-steward:steward-pr` skill, which defines the required",
     "   title and body format (parentage-grounded Summary, surfaced spec debt +",
     "   uncertainty, one-line validation — no per-file Changes dump). Use the",
     "   artifact path and original request as its inputs.",
@@ -1058,6 +1064,7 @@ function assertBranchOwnedWorktree(worktreePath: string): void {
   try {
     branch = execFileSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], {
       cwd: worktreePath,
+      env: hatcheryGitEnv(),
       encoding: "utf-8",
       stdio: ["ignore", "pipe", "pipe"],
       maxBuffer: EXEC_MAX_BUFFER,
@@ -1079,6 +1086,7 @@ function assertBranchOwnedWorktree(worktreePath: string): void {
 function runGitApply(args: readonly string[], cwd: string): void {
   execFileSync("git", args as string[], {
     cwd,
+    env: hatcheryGitEnv(),
     stdio: ["ignore", "ignore", "pipe"],
     maxBuffer: EXEC_MAX_BUFFER,
   });
@@ -1088,8 +1096,11 @@ function runGitApply(args: readonly string[], cwd: string): void {
 function runGitQuiet(args: readonly string[], cwd: string): void {
   execFileSync("git", args as string[], {
     cwd,
+    env: hatcheryGitEnv(),
     stdio: ["ignore", "ignore", "pipe"],
     maxBuffer: EXEC_MAX_BUFFER,
+    timeout: 5_000,
+    killSignal: "SIGKILL",
   });
 }
 
@@ -1097,9 +1108,12 @@ function runGitQuiet(args: readonly string[], cwd: string): void {
 function runGitCapture(args: readonly string[], cwd: string): string {
   return execFileSync("git", args as string[], {
     cwd,
+    env: hatcheryGitEnv(),
     encoding: "utf-8",
     stdio: ["ignore", "pipe", "pipe"],
     maxBuffer: EXEC_MAX_BUFFER,
+    timeout: 5_000,
+    killSignal: "SIGKILL",
   }).trim();
 }
 
@@ -1113,8 +1127,11 @@ function isAncestor(ancestor: string, descendant: string, cwd: string): boolean 
   try {
     execFileSync("git", ["merge-base", "--is-ancestor", ancestor, descendant], {
       cwd,
+      env: hatcheryGitEnv(),
       stdio: ["ignore", "ignore", "ignore"],
       maxBuffer: EXEC_MAX_BUFFER,
+      timeout: 5_000,
+      killSignal: "SIGKILL",
     });
     return true;
   } catch {
@@ -1128,18 +1145,21 @@ function isAncestor(ancestor: string, descendant: string, cwd: string): boolean 
  * set locally. Exposed for tests.
  */
 export function resolveDefaultBranch(worktreePath: string): string {
+  // origin/HEAD unset (e.g. a worktree whose remote HEAD was never fetched) —
+  // fall through to the conventional default.
+  return readOriginHead(worktreePath) ?? "main";
+}
+
+function readOriginHead(worktreePath: string): string | undefined {
   try {
     const ref = runGitCapture(
       ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
       worktreePath,
     );
-    const name = ref.replace(/^origin\//, "").trim();
-    if (name) return name;
+    return ref.replace(/^origin\//, "").trim() || undefined;
   } catch {
-    // origin/HEAD unset (e.g. a worktree whose remote HEAD was never fetched) —
-    // fall through to the conventional default.
+    return undefined;
   }
-  return "main";
 }
 
 /**
@@ -1155,9 +1175,8 @@ export function resolveDefaultBranch(worktreePath: string): string {
  * budget is spent.
  *
  * Safe to hard-reset because the manager branch has no commits yet (the worker
- * runs against a container snapshot, not this worktree). The fetch uses the
- * SSH→HTTPS token rewrite (#300/#301) so it works inside the legate/hatchery
- * container, and is best-effort.
+ * runs against a container snapshot, not this worktree). GitHub origins use
+ * a repository-scoped Tessera entitlement over HTTPS.
  *
  * The reset is **fast-forward-only**: it pins to `origin/<default>` ONLY when
  * that ref is at least as new as the worktree's current HEAD (HEAD is an
@@ -1170,39 +1189,50 @@ export function resolveDefaultBranch(worktreePath: string): string {
 export interface PinBaseResult {
   /** The resolved default branch (`main` / `master`). */
   readonly defaultBranch: string;
-  /** Whether `git fetch origin <default>` succeeded this run. */
+  /** Whether the origin fetch succeeded this run. */
   readonly fetched: boolean;
   /** Whether the worktree was hard-reset onto `origin/<default>`. */
   readonly pinned: boolean;
 }
 
-export function pinManagerWorktreeToDefaultBranch(
+export async function pinManagerWorktreeToDefaultBranch(
   worktreePath: string,
-  env: NodeJS.ProcessEnv = process.env,
-): PinBaseResult {
-  const defaultBranch = resolveDefaultBranch(worktreePath);
-  const auth = gitHubAuthConfigArgs(env);
+  sliceId?: string,
+): Promise<PinBaseResult> {
+  if (!fs.existsSync(worktreePath)) {
+    return { defaultBranch: resolveDefaultBranch(worktreePath), fetched: false, pinned: false };
+  }
+  const origin = await resolveHatcheryOrigin(worktreePath);
+  // For a GitHub origin, ask GitHub through the same scope: a local origin/HEAD
+  // is not refreshed by `git fetch` and can still name a renamed/deleted branch,
+  // and guessing `main` without one would fail the fetch the same way.
+  const defaultBranch = origin?.repo
+    ? await readHatcheryGitHubDefaultBranch(origin.repo, sliceId)
+    : readOriginHead(worktreePath) ?? "main";
   let fetched = false;
-  try {
-    runGitQuiet([...auth, "fetch", "origin", defaultBranch], worktreePath);
-    fetched = true;
-  } catch {
-    // Best-effort: offline / auth-less degrades to whatever origin/<default>
-    // tracking ref is already present; the fast-forward guard below decides
-    // whether that ref is safe to pin onto.
+  if (origin) {
+    const result = await runHatcheryNetworkGit(
+      worktreePath, origin, ["fetch", "--no-recurse-submodules", "--no-auto-maintenance", "--"],
+      ["+refs/heads/" + defaultBranch + ":refs/remotes/origin/" + defaultBranch],
+      sliceId,
+    );
+    fetched = result === 0;
+    if (!fetched && origin.repo) throw new HatcheryGitHubError("fetch_failed");
   }
   let pinned = false;
-  // Fast-forward-only: pin ONLY when origin/<default> is at least as new as the
-  // worktree's HEAD. This skips (rather than regresses) a divergent / ahead base
-  // or a stale post-fetch-failure tracking ref. `isAncestor` is also false when
-  // origin/<default> doesn't exist (never-fetched repo), so the reset is skipped.
-  if (isAncestor("HEAD", `origin/${defaultBranch}`, worktreePath)) {
-    try {
-      runGitQuiet(["reset", "--hard", `origin/${defaultBranch}`], worktreePath);
+  try {
+    // Resolve once so another job cannot move the tracking ref between the
+    // ancestry check and reset.
+    const tip = runGitCapture(
+      ["rev-parse", "--verify", "refs/remotes/origin/" + defaultBranch + "^{commit}"],
+      worktreePath,
+    );
+    if (isAncestor("HEAD", tip, worktreePath)) {
+      runGitQuiet(["reset", "--hard", tip], worktreePath);
       pinned = true;
-    } catch {
-      // Leave the worktree on agent-deck's base rather than stranding the spawn.
     }
+  } catch {
+    // Preserve the original base if there is no tracking ref or reset fails.
   }
   return { defaultBranch, fetched, pinned };
 }
@@ -1308,21 +1338,6 @@ export async function runHatcherySpawn(
     const stewardSessionId = manager.sessionId;
     const managerWorktree = manager.worktreePath;
 
-    // Pin the worker's base to the up-to-date default branch (#460). agent-deck
-    // cut this worktree from a stale local base and never fetched; pinning it to
-    // origin/<default> NOW — before the snapshot the worker diffs against AND
-    // before the apply that targets this same worktree — makes the worker edit
-    // already-merged files instead of re-creating them and colliding at apply.
-    dispatch.span("manager.pin_base", (pinSpan) => {
-      const pin = pinManagerWorktreeToDefaultBranch(managerWorktree, process.env);
-      pinSpan.setAttributes({
-        "march.worktree": managerWorktree,
-        "march.default_branch": pin.defaultBranch,
-        "march.pin_base.fetched": pin.fetched,
-        "march.pin_base.pinned": pin.pinned,
-      });
-    });
-
     await dispatch.spanAsync("brood.register", () =>
       registerStewardLaunchWithBrood({
         spawnId,
@@ -1335,6 +1350,24 @@ export async function runHatcherySpawn(
         group,
       }),
     );
+
+    // Pin the worker's base to the up-to-date default branch (#460). agent-deck
+    // cut this worktree from a stale local base and never fetched; pinning it to
+    // origin/<default> NOW — before the snapshot the worker diffs against AND
+    // before the apply that targets this same worktree — makes the worker edit
+    // already-merged files instead of re-creating them and colliding at apply.
+    // Runs after brood.register so a pin failure (e.g. Tessera outage) still
+    // leaves a Brood row that can drive steward teardown.
+    stage = "pin_base";
+    await dispatch.spanAsync("manager.pin_base", async (pinSpan) => {
+      pinSpan.setAttributes({ "march.worktree": managerWorktree });
+      const pin = await pinManagerWorktreeToDefaultBranch(managerWorktree, sliceId);
+      pinSpan.setAttributes({
+        "march.default_branch": pin.defaultBranch,
+        "march.pin_base.fetched": pin.fetched,
+        "march.pin_base.pinned": pin.pinned,
+      });
+    });
 
     // Publish the slice↔session↔spawn correlation to Herald NOW, at launch (#213),
     // the push half of the durable stranded-steward fix. Hatchery owns these facts
@@ -1749,7 +1782,7 @@ export async function runHatcherySpawn(
     // we escalate with the classification instead of the bare "already exists".
     let selfHeal: SelfHealResult | undefined;
     if (launchCollision) {
-      selfHeal = selfHealManagerLaunchCollision({
+      selfHeal = await selfHealManagerLaunchCollision({
         repoPath: input.repoPath,
         spawnId,
         branch,
@@ -1769,7 +1802,8 @@ export async function runHatcherySpawn(
       err instanceof BuildError ||
       err instanceof LaunchError ||
       err instanceof SpawnRecordError ||
-      err instanceof HatcherySpawnError
+      err instanceof HatcherySpawnError ||
+      err instanceof HatcheryGitHubError
     ) {
       throw err;
     }

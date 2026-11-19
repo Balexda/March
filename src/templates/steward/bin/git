@@ -1,0 +1,320 @@
+#!/usr/bin/env node
+import { spawnSync } from "node:child_process";
+import { accessSync, constants, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, symlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { delimiter, join, resolve } from "node:path";
+
+function shellQuote(value) {
+  return "'" + value.replaceAll("'", "'\"'\"'") + "'";
+}
+
+function realGit() {
+  const self = statSync(process.argv[1]);
+  for (const directory of (process.env.PATH ?? "").split(delimiter).filter(Boolean)) {
+    const candidate = resolve(directory, "git");
+    try {
+      const file = statSync(candidate);
+      if (!file.isFile() || (file.dev === self.dev && file.ino === self.ino)) continue;
+      accessSync(candidate, constants.X_OK);
+      return candidate;
+    } catch {
+      // PATH entries can be missing or inaccessible.
+    }
+  }
+  throw new Error();
+}
+
+function readConfig(git, args, env, allowMissing = false, directoryArgs = []) {
+  const config = spawnSync(git, [...directoryArgs, "config", "--null", ...args], {
+    env, encoding: "utf8", timeout: 5_000, killSignal: "SIGKILL",
+    stdio: ["ignore", "pipe", "ignore"],
+  });
+  if (config.status !== 0 && !(allowMissing && config.status === 1 && !config.stdout)) {
+    throw new Error();
+  }
+  return (config.stdout ?? "").split("\0").filter(Boolean).map(record => {
+    const separator = record.indexOf("\n");
+    return separator < 0 ? [record, ""] : [record.slice(0, separator), record.slice(separator + 1)];
+  });
+}
+
+function githubHttps(url) {
+  const scp = /^(?:[^/@:\s]+@)?(?:ssh\.)?github\.com\.?:\/?(.+)$/i.exec(url);
+  if (scp) {
+    if (!/^[\w.-]+\/[\w.-]+\/?$/.test(scp[1])) throw new Error();
+    return "https://github.com/" + scp[1].replace(/\/$/, "");
+  }
+  // URL discards embedded credentials and default ports. It lowercases hosts
+  // only for special schemes, so ssh: and git: hosts are lowercased here.
+  let parsed;
+  try { parsed = new URL(url); } catch { return; }
+  const host = parsed.hostname.toLowerCase().replace(/\.$/, "");
+  const alternateSsh = host === "ssh.github.com" && parsed.protocol === "ssh:";
+  if (host !== "github.com" && !alternateSsh) return;
+  if (!["https:", "http:", "ssh:", "git:"].includes(parsed.protocol) ||
+      (parsed.port && !(parsed.protocol === "ssh:" && parsed.port === (alternateSsh ? "443" : "22"))) ||
+      parsed.search || parsed.hash || !/^\/[\w.-]+\/[\w.-]+\/?$/.test(parsed.pathname)) {
+    throw new Error();
+  }
+  return "https://github.com" + parsed.pathname.replace(/\/$/, "");
+}
+
+// Transport commands and their options whose value is the following argument.
+const FETCH_VALUE_OPTIONS = ["--depth", "--deepen", "--shallow-since", "--shallow-exclude",
+  "-j", "--jobs", "--upload-pack", "--refmap", "-o", "--server-option", "--negotiation-tip",
+  "--recurse-submodules-default"];
+const TRANSPORT_VALUE_OPTIONS = new Map([
+  ["push", ["--repo", "-o", "--push-option", "--receive-pack", "--exec"]],
+  ["fetch", FETCH_VALUE_OPTIONS],
+  ["pull", [...FETCH_VALUE_OPTIONS, "-s", "--strategy", "-X", "--strategy-option"]],
+  ["clone", ["-o", "--origin", "-b", "--branch", "-u", "--upload-pack", "--reference",
+    "--reference-if-able", "--separate-git-dir", "--depth", "--shallow-since",
+    "--shallow-exclude", "-c", "--config", "-j", "--jobs", "--template", "--server-option",
+    "--bundle-uri"]],
+  ["ls-remote", ["--upload-pack", "-o", "--server-option"]],
+]);
+
+/**
+ * Indexes of a transport command's repository operand and explicit
+ * repository option values. Refspecs, patterns and other option values are
+ * not repositories.
+ */
+function repositoryPositions(args, command) {
+  const valueOptions = new Set(TRANSPORT_VALUE_OPTIONS.get(args[command]) ?? []);
+  const positions = [];
+  for (let i = command + 1; i < args.length; i++) {
+    const arg = args[i];
+    if (arg === "--") {
+      if (i + 1 < args.length) positions.push(i + 1);
+      break;
+    }
+    if (valueOptions.has(arg)) {
+      if (arg === "--repo" && i + 1 < args.length) positions.push(i + 1);
+      i++;
+    } else if (!arg.startsWith("-")) {
+      positions.push(i);
+      break;
+    }
+  }
+  return positions;
+}
+
+const SSH_GUARD_FLAG = "--march-steward-ssh-guard";
+// OpenSSH options whose value is the following argument.
+const SSH_VALUE_OPTIONS = new Set(["-B", "-b", "-c", "-D", "-E", "-e", "-F", "-I", "-i", "-J",
+  "-L", "-l", "-m", "-O", "-o", "-p", "-Q", "-R", "-S", "-W", "-w"]);
+const isSshGuard = command => command?.includes(SSH_GUARD_FLAG) ?? false;
+const isGitHubHost = host => /(?:^|\.)github\.com$/.test(host.toLowerCase().replace(/\.$/, ""));
+
+/**
+ * Git runs this in place of ssh. Any SSH connection to GitHub could
+ * authenticate as the operator, so refuse it however the URL was spelled,
+ * aliased or mapped through ssh_config; pass other hosts to the real ssh.
+ */
+function sshGuard(args) {
+  let hostIndex = -1;
+  for (let i = 0; i < args.length; i++) {
+    if (SSH_VALUE_OPTIONS.has(args[i])) i++;
+    else if (!args[i].startsWith("-")) { hostIndex = i; break; }
+  }
+  if (hostIndex < 0) throw new Error();
+  const host = args[hostIndex];
+  const resolved = spawnSync("ssh", ["-G", ...args.slice(0, hostIndex), host], {
+    encoding: "utf8", timeout: 5_000, killSignal: "SIGKILL", stdio: ["ignore", "pipe", "ignore"],
+  });
+  const hostname = /^hostname (\S+)$/m.exec(resolved.stdout ?? "")?.[1];
+  if (resolved.status !== 0 || !hostname) throw new Error();
+  if (isGitHubHost(host.slice(host.lastIndexOf("@") + 1)) || isGitHubHost(hostname)) {
+    process.stderr.write("Tessera Git: SSH to GitHub is disabled for stewards; use HTTPS.\n");
+    return { status: 128 };
+  }
+  // Never relaunch a guard as the real ssh.
+  const saved = process.env.MARCH_STEWARD_SSH_COMMAND;
+  const original = isSshGuard(saved) ? "" : saved;
+  return original
+    ? spawnSync("sh", ["-c", `${original} "$@"`, "ssh", ...args], { stdio: "inherit" })
+    : spawnSync("ssh", args, { stdio: "inherit" });
+}
+// Global options whose value is the following argument.
+const GLOBAL_VALUE_OPTIONS = new Set(["-C", "-c", "--git-dir", "--work-tree", "--namespace",
+  "--super-prefix"]);
+// Global options that select the repository or configuration Git will use.
+const REPOSITORY_OPTIONS = new Set(["-C", "-c", "--git-dir", "--work-tree", "--bare"]);
+const REPOSITORY_OPTION_PREFIXES = ["--git-dir=", "--work-tree=", "--config-env="];
+
+/** Split Git's leading global options from the subcommand, as Git parses them. */
+function parseGlobalOptions(args) {
+  const repositoryArgs = [];
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (!arg.startsWith("-")) return { command: i, repositoryArgs };
+    if (GLOBAL_VALUE_OPTIONS.has(arg)) {
+      if (i + 1 >= args.length) break;
+      if (REPOSITORY_OPTIONS.has(arg)) repositoryArgs.push(arg, args[i + 1]);
+      i++;
+    } else if (REPOSITORY_OPTIONS.has(arg) || REPOSITORY_OPTION_PREFIXES.some(p => arg.startsWith(p))) {
+      repositoryArgs.push(arg);
+    }
+  }
+  return { command: -1, repositoryArgs };
+}
+
+// GIT_CONFIG_COUNT/KEY/VALUE carry every steward setting; older Git ignores them.
+function requireConfigEnvironment(git, env) {
+  const version = spawnSync(git, ["--version"], {
+    env, encoding: "utf8", timeout: 5_000, killSignal: "SIGKILL",
+    stdio: ["ignore", "pipe", "ignore"],
+  });
+  const match = /^git version (\d+)\.(\d+)/.exec(version.stdout ?? "");
+  if (!match || Number(match[1]) < 2 || (Number(match[1]) === 2 && Number(match[2]) < 31)) {
+    throw new Error();
+  }
+}
+
+// Global keys that can select credentials, transport destinations or askpass.
+const CREDENTIAL_GLOBAL_KEY = /^(?:credential|http|url|remote|include|includeif)\.|^core\.(?:askpass|sshcommand)$/i;
+const CREDENTIAL_HOME_ENTRIES = new Set([".netrc", "_netrc", ".gitconfig", ".git-credentials", ".config"]);
+
+function linkEntries(source, target, skip) {
+  if (!existsSync(source)) return;
+  for (const entry of readdirSync(source)) {
+    if (!skip.has(entry)) symlinkSync(join(source, entry), join(target, entry));
+  }
+}
+
+/**
+ * Build a HOME that mirrors the operator's, without the files Git and curl
+ * read credentials from, so hooks, signing and tools keep their settings.
+ */
+function isolatedHome(env) {
+  const realHome = env.HOME;
+  if (!realHome) throw new Error();
+  const realConfig = env.XDG_CONFIG_HOME || join(realHome, ".config");
+  const home = mkdtempSync(join(tmpdir(), "march-steward-git-"));
+  try {
+    linkEntries(realHome, home, CREDENTIAL_HOME_ENTRIES);
+    const config = join(home, ".config");
+    mkdirSync(join(config, "git"), { recursive: true });
+    linkEntries(realConfig, config, new Set(["git"]));
+    linkEntries(join(realConfig, "git"), join(config, "git"), new Set(["config", "credentials"]));
+    return { home, config, gnupg: join(realHome, ".gnupg") };
+  } catch (error) {
+    rmSync(home, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+function run() {
+  const git = realGit();
+  const args = process.argv.slice(2);
+  const env = { ...process.env };
+  for (const name of Object.keys(env)) {
+    if (/^GIT_(CONFIG(?:_|$)|TRACE|CURL_VERBOSE$|EXEC_PATH$|SSL_(?:CERT|KEY|NO_VERIFY)$)/.test(name) ||
+        /^(?:GH_TOKEN|GITHUB_TOKEN|GH_ENTERPRISE_TOKEN|GITHUB_ENTERPRISE_TOKEN|MARCH_TESSERA_CLIENT_KEY)$/.test(name)) {
+      delete env[name];
+    }
+  }
+
+  requireConfigEnvironment(git, env);
+  // Read the same repository and configuration Git will use for this command.
+  const { command, repositoryArgs } = parseGlobalOptions(args);
+  // Keep the operator's non-credential global settings (identity, signing, hooks).
+  // --get-regexp exits 1 (not 128 like --list) when no global config exists.
+  const global = readConfig(git, ["--global", "--includes", "--get-regexp", "."], env, true, repositoryArgs)
+    .filter(([name]) => !CREDENTIAL_GLOBAL_KEY.test(name));
+  // Git's HTTPS transport can use netrc before asking any credential helper.
+  const { home, config: configHome, gnupg } = isolatedHome(env);
+  try {
+    if (!env.GNUPGHOME && existsSync(gnupg)) env.GNUPGHOME = gnupg;
+    Object.assign(env, {
+      HOME: home, CURL_HOME: home, XDG_CONFIG_HOME: configHome, NETRC: "/dev/null",
+      GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null",
+      GIT_TERMINAL_PROMPT: "0", GIT_ASKPASS: "/bin/false",
+    });
+
+    const config = readConfig(git, ["--list", "--includes"], env, false, repositoryArgs);
+    const localKeys = new Set(config.map(([name]) => name));
+    const settings = global.filter(([name]) => !localKeys.has(name));
+    for (const [name, value] of config) {
+      // Git prefers the longest rewrite match. A repository-level rule must
+      // not supersede the steward's rewrite of GitHub transport URLs.
+      if (/^url\..+\.(?:insteadof|pushinsteadof)$/i.test(name) &&
+          (githubHttps(name.slice(4, name.lastIndexOf("."))) || githubHttps(value))) {
+        throw new Error();
+      }
+      if (/^http\.(?:.+\.)?extraheader$/i.test(name)) settings.push([name, ""]);
+      if (/^http\.(?:.+\.)?(?:cookiefile|sslcert|sslkey)$/i.test(name)) {
+        settings.push([name, "/dev/null"]);
+      }
+      if (/^http\.(?:.+\.)?(?:savecookies|emptyauth|followredirects)$/i.test(name)) {
+        settings.push([name, "false"]);
+      }
+      if (/^remote\..+\.(?:url|pushurl)$/i.test(name)) {
+        const normalized = githubHttps(value);
+        if (normalized && normalized !== value) settings.push([`url.${normalized}.insteadOf`, value]);
+      }
+    }
+
+    settings.push(
+      ["protocol.ext.allow", "never"],
+      ["url.https://github.com/.insteadOf", "git@github.com:"],
+      ["url.https://github.com/.insteadOf", "ssh://git@github.com/"],
+      ["url.https://github.com/.insteadOf", "ssh://git@github.com:22/"],
+      ["credential.https://github.com/.helper", ""],
+      ["credential.https://github.com/.helper", "!march tessera git-credential"],
+      ["credential.https://github.com/.useHttpPath", "true"],
+      ["credential.https://github.com/.interactive", "false"],
+      ["http.https://github.com/.emptyAuth", "false"],
+      ["http.https://github.com/.followRedirects", "false"],
+    );
+
+    // An explicit repository URL follows the same policy as a configured
+    // remote. Only a transport command's repository operand is a URL; refspecs,
+    // patterns, messages and other command data reach Git unchanged.
+    const positions = new Set(command >= 0 && TRANSPORT_VALUE_OPTIONS.has(args[command])
+      ? repositoryPositions(args, command) : []);
+    const normalizedArgs = args.map((arg, i) => {
+      const prefix = command >= 0 && i > command && args[command] === "push" &&
+        arg.startsWith("--repo=") ? "--repo=" : "";
+      if (!prefix && !positions.has(i)) return arg;
+      const normalized = githubHttps(arg.slice(prefix.length));
+      return normalized ? prefix + normalized : arg;
+    });
+
+    // Aliases and URL spellings the rewrites miss still reach SSH: guard it.
+    // Hooks inherit the guard, so a nested shim keeps the saved original
+    // command instead of saving the guard as the original.
+    if (!isSshGuard(env.GIT_SSH_COMMAND)) {
+      const originalSsh = env.GIT_SSH_COMMAND || (env.GIT_SSH ? shellQuote(env.GIT_SSH) : "");
+      if (originalSsh) env.MARCH_STEWARD_SSH_COMMAND = originalSsh;
+      else delete env.MARCH_STEWARD_SSH_COMMAND;
+    }
+    delete env.GIT_SSH;
+    env.GIT_SSH_COMMAND = [process.execPath, process.argv[1], SSH_GUARD_FLAG].map(shellQuote).join(" ");
+    env.GIT_SSH_VARIANT = "ssh";
+    if (env.GIT_ALLOW_PROTOCOL) {
+      env.GIT_ALLOW_PROTOCOL = env.GIT_ALLOW_PROTOCOL.split(":").filter(p => p !== "ext").join(":");
+    }
+    env.GIT_CONFIG_COUNT = String(settings.length);
+    for (const [i, [name, value]] of settings.entries()) {
+      env[`GIT_CONFIG_KEY_${i}`] = name;
+      env[`GIT_CONFIG_VALUE_${i}`] = value;
+    }
+
+    return spawnSync(git, normalizedArgs, {
+      env, stdio: "inherit", timeout: 600_000, killSignal: "SIGKILL",
+    });
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+}
+
+try {
+  const result = process.argv[2] === SSH_GUARD_FLAG ? sshGuard(process.argv.slice(3)) : run();
+  if (result.error) throw result.error;
+  if (result.signal) process.kill(process.pid, result.signal);
+  process.exitCode = result.status ?? 1;
+} catch {
+  process.stderr.write("Tessera Git: unable to run Git with isolated credentials.\n");
+  process.exitCode = 1;
+}

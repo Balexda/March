@@ -2,6 +2,7 @@
  * @l1 @deterministic @ci
  */
 import { describe, it, expect, afterEach } from "vitest";
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import os from "node:os";
@@ -13,6 +14,8 @@ import {
   stewardSessionFilePath,
   stewardSettingsPath,
   stewardSkillsRoot,
+  stewardPluginDir,
+  STEWARD_PLUGIN_NAME,
 } from "./steward-skills.js";
 
 const prevOverride = process.env.MARCH_STEWARD_SKILLS_DIR;
@@ -35,14 +38,25 @@ describe("stewardSkillsRoot", () => {
 });
 
 describe("ensureStewardSkills", () => {
-  it("materializes the steward-pr skill under <root>/.claude/skills and is idempotent", async () => {
+  it("materializes the steward-pr skill as the march-steward plugin and is idempotent", async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "steward-skills-"));
     process.env.MARCH_STEWARD_SKILLS_DIR = root;
+    // A legacy --add-dir layout from an older Castra is removed.
+    const legacy = path.join(root, ".claude", "skills", "steward-pr", "SKILL.md");
+    fs.mkdirSync(path.dirname(legacy), { recursive: true });
+    fs.writeFileSync(legacy, "old");
 
     const returned = await ensureStewardSkills();
     expect(returned).toBe(root);
+    expect(fs.existsSync(path.join(root, ".claude"))).toBe(false);
 
-    const skillPath = path.join(root, ".claude", "skills", "steward-pr", "SKILL.md");
+    expect(stewardPluginDir()).toBe(path.join(root, "plugin"));
+    const manifest = JSON.parse(
+      await fsp.readFile(path.join(root, "plugin", ".claude-plugin", "plugin.json"), "utf-8"),
+    );
+    expect(manifest.name).toBe(STEWARD_PLUGIN_NAME);
+
+    const skillPath = path.join(root, "plugin", "skills", "steward-pr", "SKILL.md");
     const body = await fsp.readFile(skillPath, "utf-8");
     expect(body).toContain("name: steward-pr");
     // The skill encodes the title rule (no `smithy ` prefix, no US/S numbers).
@@ -78,6 +92,23 @@ describe("ensureStewardSkills", () => {
 });
 
 describe("buildStewardSettings", () => {
+  it("restores the shim path for Claude commands after shell startup", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "host's steward "));
+    try {
+      const envFile = path.join(root, "claude.env");
+      const env = { ...process.env, CLAUDE_ENV_FILE: envFile };
+      const settings = buildStewardSettings(root);
+      const shellOptions = { env, encoding: "utf8" as const, timeout: 5_000 };
+      execFileSync("sh", ["-c", settings.hooks.SessionStart[0].hooks[0].command], shellOptions);
+      const result = execFileSync("sh", ["-c",
+        'PATH=/usr/bin; . "$CLAUDE_ENV_FILE"; printf "%s" "$PATH"',
+      ], shellOptions);
+      expect(result).toBe(`${path.join(root, "bin")}:/usr/bin`);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("wires Notification + Stop to the hook script under the given root", () => {
     const settings = buildStewardSettings("/srv/steward");
     const expected = `node '${path.join("/srv/steward", "hooks", "steward-report.mjs")}'`;

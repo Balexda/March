@@ -49,7 +49,7 @@ If the request is stale because the slice is now `merged`, archived, or no longe
 For a current PR, inspect the latest PR state:
 
 ```bash
-.claude/skills/legate.babysit/scripts/babysit-pr.sh {{REPO_PATH}} <pr-num>
+.claude/skills/legate.babysit/scripts/babysit-pr.sh {{REPO_PATH}} <pr-num> <slice-id>
 ```
 
 Use the output to confirm `state`, `mergeable`, `checks`, failed checks, and unresolved review threads before making a judgement. Do not duplicate deterministic loop work:
@@ -78,10 +78,10 @@ Set the slice stage to `pr-rebasing`, update `last_action` and `last_action_note
 Use when the failure is runner/network/infra/flaky and the PR diff is not implicated.
 
 ```bash
-.claude/skills/legate.babysit/scripts/rerun-ci.sh {{REPO_PATH}} <run-id>
+.claude/skills/legate.babysit/scripts/rerun-ci.sh {{REPO_PATH}} <run-id> <slice-id>
 ```
 
-Extract `<run-id>` from `failed_checks[].url`. Set stage to `pr-in-rerun`, update state/logs, and report `AUTO: reran CI for <slice-id>`.
+Extract `<run-id>` from `failed_checks[].url`. On success, set stage to `pr-in-rerun`, update state/logs, and report `AUTO: reran CI for <slice-id>`. If the command fails, ask the operator to rerun the failed jobs from the GitHub Actions run page. Preserve the current stage and stop.
 
 **Real PR-diff failure**
 

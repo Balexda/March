@@ -56,6 +56,18 @@ describe("messages pure builders", () => {
     expect(threadsNeedingResponse(slice, pr)).toHaveLength(2);
   });
 
+  it("threadsNeedingResponse without pr_open_at (cold start, #600) trusts needs_response only", () => {
+    const pr = {
+      unresolved_threads: [
+        { id: "owed", needs_response: true },
+        { id: "answered", needs_response: false, last_comment_at: "2026-02-01T00:00:00Z" },
+      ],
+    };
+    expect(threadsNeedingResponse({ stage: "pr-open" }, pr).map((t: any) => t.id)).toEqual(["owed"]);
+    expect(threadsNeedingResponse({}, pr).map((t: any) => t.id)).toEqual(["owed"]);
+    expect(threadsNeedingResponse({ stage: "pr-open" }, { unresolved_threads: [pr.unresolved_threads[1]] })).toEqual([]);
+  });
+
   it("failedChecksSummary + reviewFixMessage format lists", () => {
     expect(failedChecksSummary({ failed_checks: [{ name: "ci", url: "u" }] })).toBe("- ci: u");
     expect(failedChecksSummary({ failed_checks: [] })).toContain("No failed-check");

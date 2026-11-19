@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { githubRepoFromRemote } from "../shared/github-remote.js";
 import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
@@ -887,6 +888,15 @@ async function stageSkill(
     await fs.copyFile(src, dst);
     await fs.chmod(dst, 0o755);
   }
+  if (skillName === "legate.issue" || skillName === "legate.babysit" || skillName === "legate.unwedge") {
+    const helper = path.join(sourceTemplateDir, "skills", "shared", "tessera-forge.mjs");
+    try {
+      await fs.copyFile(helper, path.join(stagedSkillDir, "tessera-forge.mjs"));
+    } catch (error) {
+      // User-supplied templates may provide independent skill scripts.
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+  }
 }
 
 /**
@@ -1253,53 +1263,29 @@ export async function writeLegateHeartbeatScript(
 }
 
 /**
- * Probe `gh repo view` against `repoPath` for the GitHub slug
- * (`owner/repo`) and default branch name. Best-effort: returns nulls
- * when `gh` is missing, unauthenticated, the path isn't a git checkout,
- * or the remote isn't a GitHub repo. The caller is expected to surface
- * a postSetupWarning rather than abort, since the legate conductor can
- * still operate after an operator runs `gh auth login` and re-runs init.
- *
- * Why this exists: CLAUDE.md instructs the conductor to "look the slug up
- * once and cache it in state.json" on first run, but the lookup happens at
- * the top-level prompt — outside any skill script — so auto-mode's
- * classifier pauses on the compound `(cd <repo> && gh repo view ...)`
- * call. Pre-populating state.json at deploy time skips that stall, since
- * the conductor reads the cached values instead of re-running gh.
+ * Resolve the GitHub slug from the checkout's `origin` (the same rule Legate's
+ * scoped forge path uses). The default branch is deliberately NOT discovered
+ * here: the local `refs/remotes/origin/HEAD` is not refreshed by `git fetch`
+ * and goes stale after a remote default-branch rename, so caching it would pin
+ * a wrong branch for the conductor's life. Init stays credential-free; the
+ * scoped sync path confirms the default branch with GitHub instead.
  */
-export function discoverRepoMetadata(
-  repoPath: string,
-): { ownerWithName: string | null; defaultBranch: string | null } {
-  let raw: string;
+export function discoverRepoMetadata(repoPath: string): { ownerWithName: string | null } {
   try {
-    raw = execFileSync(
-      "gh",
-      ["repo", "view", "--json", "nameWithOwner,defaultBranchRef"],
-      { cwd: repoPath, stdio: ["ignore", "pipe", "ignore"], encoding: "utf-8" },
-    );
+    const remote = execFileSync("git", ["config", "--get", "remote.origin.url"], {
+      cwd: repoPath, stdio: ["ignore", "pipe", "ignore"], encoding: "utf-8", timeout: 5_000,
+    });
+    return { ownerWithName: githubRepoFromRemote(remote) };
   } catch {
-    return { ownerWithName: null, defaultBranch: null };
+    return { ownerWithName: null };
   }
-  let parsed: { nameWithOwner?: string; defaultBranchRef?: { name?: string } };
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    return { ownerWithName: null, defaultBranch: null };
-  }
-  return {
-    ownerWithName: parsed.nameWithOwner ?? null,
-    defaultBranch: parsed.defaultBranchRef?.name ?? null,
-  };
 }
 
 /**
  * Initial state.json shape written into a fresh conductor dir. Mirrors the
- * schema documented in `snippets/state-json-schema.md`. `default_branch`
- * and `owner_with_name` are filled in from `discoverRepoMetadata`; both
- * may be null on a host without `gh` auth, in which case the conductor
- * falls back to the same lookup at heartbeat time (which is exactly the
- * stall this bootstrap exists to prevent — a postSetupWarning is the
- * right operator-facing signal).
+ * schema documented in `snippets/state-json-schema.md`. `owner_with_name`
+ * comes from `discoverRepoMetadata` (null without a GitHub origin);
+ * `default_branch` is left null at init and confirmed by the scoped sync path.
  */
 interface InitialStateRepoFields {
   profile: string;
@@ -1311,9 +1297,7 @@ interface InitialStateRepoFields {
 
 /**
  * Write `<conductorDir>/state.json` with the discovered repo slug and
- * default branch pre-populated, so the conductor's first dispatch
- * heartbeat reads cached values instead of inlining a top-level
- * `gh repo view` (which auto-mode pauses on — see discoverRepoMetadata).
+ * default branch cached before the conductor first reads the state.
  *
  * Merge semantics — the conductor owns `slices` / `archived_slices` /
  * timestamps after the first heartbeat, so on re-run we must NOT clobber
@@ -1428,8 +1412,8 @@ Persona and goals:
 What you operate on:
 - agent-deck conductor — parent/child links and operator/loop messages.
 - smithy CLI + skills — source of truth for what work to pick next.
-- gh CLI — source of truth for high-level PR state.
-- The smithy.pr-review skill — source of truth for unresolved inline review threads.
+- Deployed skill scripts — read GitHub PR and issue state using Tessera.
+- legate.babysit — reads unresolved inline review threads.
 
 Five skills carry the Claude-side mechanics. Load each once on this turn so the auto-mode classifier registers their allowed-tools:
 - legate.resume — worker session-restart recovery and Resume-from-summary picker clearing.
@@ -1823,23 +1807,13 @@ export async function initLegate(
       }
     }
 
-    // Bootstrap state.json with the GitHub slug + default branch so the
-    // conductor's first dispatch does not stall on a top-level
-    // `(cd <repo> && gh repo view ...)` call (auto-mode pauses on the
-    // compound shell op, since it's outside any skill script). Best-effort
-    // on every axis: discovery failure is reported as a warning, write
-    // failure is reported as a warning, and an existing state.json is
-    // merged rather than clobbered to preserve operator-managed slices.
+    // Bootstrap state.json with the origin slug. The default branch is left
+    // unset: the scoped sync path confirms it with GitHub before caching.
     const repoMetadata = discoverRepoMetadata(repoPath);
-    if (!repoMetadata.ownerWithName || !repoMetadata.defaultBranch) {
+    if (!repoMetadata.ownerWithName) {
       postSetupWarnings.push(
-        `Could not discover GitHub slug and/or default branch for ${repoPath} ` +
-          `via \`gh repo view\` (got owner_with_name=${repoMetadata.ownerWithName ?? "null"}, ` +
-          `default_branch=${repoMetadata.defaultBranch ?? "null"}). ` +
-          `state.json will be written with whatever was discovered; the conductor ` +
-          `will fall back to inlining \`gh repo view\` on its first dispatch ` +
-          `heartbeat, which auto-mode pauses on. Fix: \`gh auth login\` (or ensure ` +
-          `the path is a checkout of a GitHub repo), then re-run \`march legate init\`.`,
+        `Could not discover the GitHub slug from origin for ${repoPath}. ` +
+          "state.json will be written without repo.owner_with_name.",
       );
     }
     try {
@@ -1848,7 +1822,7 @@ export async function initLegate(
         repoName,
         repoPath,
         ownerWithName: repoMetadata.ownerWithName,
-        defaultBranch: repoMetadata.defaultBranch,
+        defaultBranch: null,
       });
     } catch (err) {
       postSetupWarnings.push(

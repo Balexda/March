@@ -41,65 +41,34 @@ if [[ -z "$SLICE_ID" ]]; then
   exit 2
 fi
 
+FORGE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/../tessera-forge.mjs"
 cd "$REPO"
 
-# We do not trust upstream callers to have validated safety. Extract the safety
-# validator to a temp file so the heredoc-in-command-substitution pattern doesn't
-# collide with anything else.
-TMP_VALIDATOR="$(mktemp -t unwedge.validate.XXXXXX.py)"
-trap 'rm -f "$TMP_VALIDATOR"' EXIT
+export MARCH_TESSERA_SLICE_ID="$SLICE_ID"
+if ! git show-ref --verify --quiet "refs/heads/$BRANCH"; then
+  SAFETY="no-such-branch"
+else
+  DEFAULT="$(git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null || true)"
+  DEFAULT="${DEFAULT#origin/}"
+  if [[ -z "$DEFAULT" ]]; then
+    DEFAULT="$(node "$FORGE" gh read repo view --json defaultBranchRef -q .defaultBranchRef.name)" || exit 1
+  fi
 
-cat > "$TMP_VALIDATOR" <<'PYVALIDATE'
-import json, subprocess, sys
-
-branch = sys.argv[1]
-
-def run(cmd):
-    return subprocess.run(cmd, capture_output=True, text=True)
-
-if run(["git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"]).returncode != 0:
-    print("no-such-branch")
-    sys.exit(0)
-
-default = run(["git", "symbolic-ref", "--short", "refs/remotes/origin/HEAD"]).stdout.strip().replace("origin/", "")
-if not default:
-    default = run(["gh", "repo", "view", "--json", "defaultBranchRef", "-q", ".defaultBranchRef.name"]).stdout.strip()
-
-is_ancestor = bool(default) and run(["git", "merge-base", "--is-ancestor", branch, default]).returncode == 0
-
-pr_call = run(["gh", "pr", "list", "--head", branch, "--state", "all", "--json", "number,state"])
-prs_known = pr_call.returncode == 0
-prs_raw = pr_call.stdout.strip()
-try:
-    prs = json.loads(prs_raw) if prs_raw else []
-except json.JSONDecodeError:
-    prs = []
-    prs_known = False
-open_prs = [p for p in prs if p.get("state") == "OPEN"]
-merged_prs = [p for p in prs if p.get("state") == "MERGED"]
-
-# If we couldn't verify the PR list, refuse the safe verdicts —
-# an ancestor-of-master branch might still have an open PR we can't
-# see. The script's safety contract is to refuse branches with open
-# PRs, so a gh failure must NOT fall through with prs = [].
-if not prs_known:
-    print("refuse:pr-lookup-unknown")
-elif open_prs:
-    print(f"refuse:open-pr:{','.join('#' + str(p['number']) for p in open_prs)}")
-elif is_ancestor:
-    print("safe:orphan-ref")
-elif merged_prs:
-    print(f"safe:post-merge-stale:{','.join('#' + str(p['number']) for p in merged_prs)}")
-else:
-    print("refuse:diverged-unknown")
-PYVALIDATE
-
-SAFETY="$(python3 "$TMP_VALIDATOR" "$BRANCH" 2>/dev/null || echo error)"
-
-if [[ "$SAFETY" == "error" ]]; then
-  echo "error: safety re-validation failed (python3 / git / gh issue)" >&2
-  exit 2
+  # Inability to see PRs makes it unsafe to remove a branch.
+  PRS="$(node "$FORGE" gh read pr list --head "$BRANCH" --state all --json number,state)" || exit 1
+  OPEN="$(jq -r '[.[] | select(.state == "OPEN") | "#\(.number)"] | join(",")' <<< "$PRS")"
+  MERGED="$(jq -r '[.[] | select(.state == "MERGED") | "#\(.number)"] | join(",")' <<< "$PRS")"
+  if [[ -n "$OPEN" ]]; then
+    SAFETY="refuse:open-pr:$OPEN"
+  elif [[ -n "$DEFAULT" ]] && git merge-base --is-ancestor "refs/heads/$BRANCH" "refs/heads/$DEFAULT" 2>/dev/null; then
+    SAFETY="safe:orphan-ref"
+  elif [[ -n "$MERGED" ]]; then
+    SAFETY="safe:post-merge-stale:$MERGED"
+  else
+    SAFETY="refuse:diverged-unknown"
+  fi
 fi
+
 if [[ "$SAFETY" == "no-such-branch" ]]; then
   echo "noop: branch $BRANCH does not exist locally"
 elif [[ "$SAFETY" == refuse:* ]]; then
@@ -108,7 +77,7 @@ elif [[ "$SAFETY" == refuse:* ]]; then
   exit 1
 elif [[ "$SAFETY" == safe:* ]]; then
   echo "verdict: $SAFETY"
-  git branch -D "$BRANCH"
+  git branch -D -- "$BRANCH"
   echo "deleted branch: $BRANCH"
 else
   echo "error: unexpected safety verdict: $SAFETY" >&2

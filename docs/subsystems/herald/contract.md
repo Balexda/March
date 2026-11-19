@@ -1,0 +1,85 @@
+# Herald Contract
+
+## Public Interface
+
+<!-- BEGIN AUTOGEN -->
+<!-- END AUTOGEN -->
+
+Herald observes each registered profile and appends changes to its event log.
+The profile checkout's local GitHub `origin` identifies the repository before
+Herald makes GitHub requests. Herald requests a repository-scoped Tessera
+`app/read` entitlement for repository metadata, PR details, review data and the
+open-PR cursor. Branch discovery matches same-repository heads regardless of who
+opened the PR. Herald uses the Tessera app login and the legacy `[march-bot]`
+reply prefix to distinguish March's replies from external feedback. It excludes
+March's conversation comments and reviews from feedback, and an inline thread
+whose latest reply is from March has no response due. The existing CodeRabbit
+standing records `decision_is_bot: true` when the review list is complete and
+GitHub identifies the decisive review's author as a bot.
+
+A Legate `slice.stage.changed` event may include `handledFeedback` with a
+`kind` of `inline` or `conversation` and an array of string `commentIds`.
+An optional string `dispatchKey` names the fix dispatch that handled them, and
+an optional string `headSha` records the PR head it was sent against. The fold
+accumulates the IDs per slice and kind, and keeps the latest dispatch (kind,
+key, event time and head SHA), for Legate to restore on restart.
+
+Herald synchronizes every active profile's default branch before each
+observation (#601; there is no switch, and removing the profile is how to stop
+it). Herald fetches and pulls over HTTPS with the same repository entitlement
+and requires a fast-forward.
+
+Herald reads these settings:
+
+| Variable | Meaning |
+|----------|---------|
+| `MARCH_TESSERA_URL` | Tessera base URL. |
+| `MARCH_TESSERA_CLIENT_KEY` | Herald's own Tessera client key. The compose file forwards it from `MARCH_HERALD_TESSERA_CLIENT_KEY`. |
+| `MARCH_TESSERA_GH_TOKEN_FALLBACK` | The shared client's explicit migration fallback. When set to `1` and issuance fails, `GH_TOKEN` or `GITHUB_TOKEN` serves the same scoped call. The compose file defaults it to `1` until the fallback is removed. |
+
+### Profile merge policy
+
+`POST /profiles` validates the optional `mergePolicy` before replacing the saved
+policy. `GET /profiles/:profile` returns the normalized policy. The existing
+`defaults` and `byTaskType` requirement objects accept `botApprovers`, a list of
+1–10 logins stored in lowercase with the `[bot]` suffix removed. Herald rejects
+the login configured by `MARCH_SELF_BOT_LOGIN`, which defaults to `march-bot`.
+An invalid write leaves the saved policy intact. An invalid stored policy
+falls back to Legate's built-in table.
+
+`reviewRequests.byTaskType.<verb>.reviewers` accepts CodeRabbit (mode
+`comment-trigger` by default or `auto`) and Copilot (no mode). An empty list
+disables requests for the verb. The existing `dependencyUpdates` and
+`codeRabbit` settings remain part of the wire format.
+
+Use `march profile merge-policy show <profile> [--json]` to inspect effective
+values and their provenance. Pass `--task-type <verb>` to
+`march profile merge-policy set <profile>` with `--bot-approver` or
+`--no-bot-approver` to edit bot logins. Use `--review-request` or
+`--no-review-request` to edit reviewers.
+
+## Invariants
+
+- Each GitHub CLI invocation receives an isolated, initially empty
+  configuration directory and a child-only credential. The credential never
+  appears in command arguments or the parent environment.
+- Git network operations disable credential helpers, SSH, hooks, redirects and
+  interactive prompts. They pin TLS verification and the system trust anchors,
+  so checkout-local configuration cannot weaken the credentialed request.
+- An identically named fork branch never becomes a slice's PR.
+- A confirmed GitHub 401 allows one request with a refreshed credential.
+
+This follows the [March vision](../../vision.md) and
+[operating philosophy](../../operating-philosophy.md).
+
+## Error Modes
+
+- A typed Tessera failure records an errored span and ends that profile's tick
+  before any observation events are appended. Herald continues with the next
+  profile.
+- A missing or non-GitHub `origin` fails the profile's GitHub reads with the
+  typed `github_repo_unavailable` error. A rewritten effective remote URL fails
+  with `github_remote_rewritten`, and a missing system CA bundle fails with
+  `github_tls_unavailable`. All three fail before any credential is sent.
+- A sync failure that is not a Tessera failure is logged, and the tick observes
+  the local checkout.

@@ -1,4 +1,11 @@
 import { execFileSync } from "node:child_process";
+import {
+  hatcheryGitEnv,
+  HatcheryGitHubError,
+  readHatcheryGitHubJson,
+  resolveHatcheryOrigin,
+  runHatcheryNetworkGit,
+} from "./github-read.js";
 
 /**
  * Safety classification for a branch that a Hatchery spawn collided with at
@@ -46,9 +53,12 @@ const defaultRunner: CommandRunner = (file, args, cwd) => {
   try {
     const stdout = execFileSync(file, args as string[], {
       cwd,
+      env: hatcheryGitEnv(),
       encoding: "utf-8",
       stdio: ["ignore", "pipe", "ignore"],
       maxBuffer: EXEC_MAX_BUFFER,
+      timeout: 5_000,
+      killSignal: "SIGKILL",
     });
     return { code: 0, stdout };
   } catch (err) {
@@ -58,125 +68,82 @@ const defaultRunner: CommandRunner = (file, args, cwd) => {
       : typeof e.stdout === "string"
         ? e.stdout
         : "";
-    return { code: typeof e.status === "number" ? e.status : 1, stdout };
+    // A killed/timed-out or unspawnable process has no exit status. Report it
+    // as -1 so callers never mistake it for git's "not found" exit code 1.
+    return { code: typeof e.status === "number" ? e.status : -1, stdout };
   }
 };
 
 interface PrRecord {
-  readonly number?: number;
-  readonly state?: string;
+  readonly number: number;
+  readonly state: "open" | "closed";
+  readonly merged_at: string | null;
+  readonly head: { readonly sha: string };
 }
 
-/**
- * Classify whether `branch` is safe to delete autonomously. Re-implements the
- * `clean-stale-branch.sh` validator in TypeScript so the Hatchery self-heal can
- * call it in-process. The verdict ladder (refuse > safe), in order:
- *   1. branch absent          -> `absent` (nothing to do)
- *   2. NOT on any remote (#249): no PR is possible, decide from local git alone
- *      (no `gh`) — ancestor of default -> `safe:orphan-ref`; else
- *      `unsafe:diverged`. The common case (manager branches are never pushed),
- *      and the only path that works in the gh-less hatchery container.
- *   3. on a remote, PR list unknown -> `unsafe:pr-lookup-unknown` (a hidden open
- *      PR might exist; refuse rather than guess). This forge-dependent path moves
- *      to Statio / the legate side (#250); hatchery keeps it as a stopgap only.
- *   4. open PR on the branch  -> `unsafe:open-pr` (this is #173's adopt path)
- *   5. ancestor of default    -> `safe:orphan-ref` (no unique commits)
- *   6. merged PR on the branch -> `safe:post-merge-stale`
- *   7. otherwise              -> `unsafe:diverged` (unmerged unique work)
- */
-export function classifyBranchSafety(
+function isPrRecord(value: unknown): value is PrRecord {
+  if (!value || typeof value !== "object") return false;
+  const pr = value as Partial<PrRecord>;
+  return Number.isInteger(pr.number) && (pr.state === "open" || pr.state === "closed") &&
+    (pr.merged_at === null || typeof pr.merged_at === "string") &&
+    typeof pr.head?.sha === "string" && /^[0-9a-f]{40}$/i.test(pr.head.sha);
+}
+
+/** Classify a collision using local ancestry and authoritative remote evidence. */
+export async function classifyBranchSafety(
   repoRoot: string,
   branch: string,
   run: CommandRunner = defaultRunner,
-): BranchSafetyVerdict {
-  if (
-    run("git", ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`], repoRoot)
-      .code !== 0
-  ) {
-    return { kind: "absent" };
-  }
+  sliceId?: string,
+): Promise<BranchSafetyVerdict> {
+  const branchRef = "refs/heads/" + branch;
+  const exists = run("git", ["show-ref", "--verify", "--quiet", branchRef], repoRoot);
+  if (exists.code === 1) return { kind: "absent" };
+  if (exists.code !== 0) throw new HatcheryGitHubError("branch_lookup_failed");
 
-  let defaultBranch = run(
-    "git",
-    ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
-    repoRoot,
-  )
-    .stdout.trim()
-    .replace(/^origin\//, "");
-  if (!defaultBranch) {
-    defaultBranch = run(
-      "gh",
-      ["repo", "view", "--json", "defaultBranchRef", "-q", ".defaultBranchRef.name"],
-      repoRoot,
-    ).stdout.trim();
-  }
+  const origin = await resolveHatcheryOrigin(repoRoot);
+  const remoteStatus = origin
+    ? await runHatcheryNetworkGit(repoRoot, origin, ["ls-remote", "--exit-code", "--"], [branchRef], sliceId)
+    : 2;
+  if (remoteStatus !== 0 && remoteStatus !== 2) throw new HatcheryGitHubError("remote_check_failed");
 
-  const isAncestor =
-    defaultBranch.length > 0 &&
-    run("git", ["merge-base", "--is-ancestor", branch, defaultBranch], repoRoot)
-      .code === 0;
-
-  // No-remote fast-path (#249): a branch that exists on no remote cannot have an
-  // open PR, so its safety is decidable from LOCAL git alone — no `gh`. This is
-  // the case that matters in the deployed hatchery: the container ships no `gh`
-  // (so the forge lookup below always returns `pr-lookup-unknown` and the #243
-  // self-heal would refuse forever), and spawn manager branches are never pushed,
-  // so this covers ~all real spawn-orphan collisions with zero forge calls.
-  // `git ls-remote --exit-code` exits non-zero when the ref is absent on origin
-  // (or origin is unreachable); per the issue we treat any non-zero as "no PR
-  // possible" and classify by local ancestry.
-  const onRemote =
-    run(
-      "git",
-      ["ls-remote", "--exit-code", "origin", `refs/heads/${branch}`],
-      repoRoot,
-    ).code === 0;
-  if (!onRemote) {
-    return isAncestor
-      ? { kind: "safe", reason: "orphan-ref" }
-      : { kind: "unsafe", reason: "diverged" };
-  }
-
-  // On-remote branches need forge truth (an open PR must not be deleted — that is
-  // #173's adopt path). Hatchery keeps the conservative `gh` / `pr-lookup-unknown`
-  // behavior here only as a stopgap; ownership of this forge-dependent decision
-  // moves to the Statio extraction / legate side (#250). Hatchery must not own it.
-  const prCall = run(
-    "gh",
-    ["pr", "list", "--head", branch, "--state", "all", "--json", "number,state"],
-    repoRoot,
-  );
-  let prsKnown = prCall.code === 0;
+  let defaultBranch = run("git", ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"], repoRoot)
+    .stdout.trim().replace(/^origin\//, "");
   let prs: PrRecord[] = [];
-  if (prsKnown) {
-    const raw = prCall.stdout.trim();
-    try {
-      prs = raw ? (JSON.parse(raw) as PrRecord[]) : [];
-    } catch {
-      prs = [];
-      prsKnown = false;
+  if (remoteStatus === 0) {
+    if (!origin?.repo) return { kind: "unsafe", reason: "pr-lookup-unknown" };
+    const repo = origin.repo;
+    const head = encodeURIComponent(repo.split("/")[0] + ":" + branch);
+    const result = await readHatcheryGitHubJson(repo, "/pulls?state=all&per_page=100&head=" + head, sliceId);
+    if (!Array.isArray(result) || !result.every(isPrRecord)) throw new HatcheryGitHubError("invalid_pr_lookup");
+    prs = result;
+    const open = prs.filter((pr) => pr.state === "open");
+    if (open.length) {
+      return { kind: "unsafe", reason: "open-pr", detail: open.map((pr) => "#" + pr.number).join(",") };
     }
   }
-  const openPrs = prs.filter((p) => p.state === "OPEN");
-  const mergedPrs = prs.filter((p) => p.state === "MERGED");
 
-  // A gh failure must NOT fall through as "no PRs" — an ancestor-of-default
-  // branch could still have an open PR we couldn't see. Refuse the safe verdicts.
-  if (!prsKnown) return { kind: "unsafe", reason: "pr-lookup-unknown" };
-  if (openPrs.length > 0) {
-    return {
-      kind: "unsafe",
-      reason: "open-pr",
-      detail: openPrs.map((p) => "#" + p.number).join(","),
-    };
+  // Resolve a missing origin/HEAD independently of whether the collision branch
+  // was pushed: an unpushed orphan still needs the default branch for ancestry.
+  if (!defaultBranch && origin?.repo) {
+    const metadata = await readHatcheryGitHubJson(origin.repo, "", sliceId) as { default_branch?: unknown } | null;
+    if (typeof metadata?.default_branch !== "string" || !metadata.default_branch) {
+      throw new HatcheryGitHubError("invalid_repo_lookup");
+    }
+    defaultBranch = metadata.default_branch;
   }
+
+  if (!defaultBranch && !origin) defaultBranch = "main";
+
+  const isAncestor = defaultBranch &&
+    run("git", ["merge-base", "--is-ancestor", branchRef, "refs/heads/" + defaultBranch], repoRoot).code === 0;
   if (isAncestor) return { kind: "safe", reason: "orphan-ref" };
-  if (mergedPrs.length > 0) {
-    return {
-      kind: "safe",
-      reason: "post-merge-stale",
-      detail: mergedPrs.map((p) => "#" + p.number).join(","),
-    };
+  // Merge evidence covers only the merged PR head: a local tip with commits the
+  // PR never carried is unmerged work, not a stale ref.
+  const merged = prs.filter((pr) => pr.merged_at &&
+    run("git", ["merge-base", "--is-ancestor", branchRef, pr.head.sha], repoRoot).code === 0);
+  if (merged.length) {
+    return { kind: "safe", reason: "post-merge-stale", detail: merged.map((pr) => "#" + pr.number).join(",") };
   }
   return { kind: "unsafe", reason: "diverged" };
 }

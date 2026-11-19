@@ -90,8 +90,15 @@ export class TesseraClient {
     if (!this.config || (req && !this.config.clientKey)) throw new TesseraClientError("unconfigured");
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
     const timeout = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => { controller.abort(); reject(new TesseraClientError("unreachable")); },
+      timer = setTimeout(() => {
+        controller.abort();
+        // Abort alone has been observed to leave a stalled body's socket open, keeping
+        // one-shot callers (the token CLI) alive past the deadline; cancel the read too.
+        reader?.cancel().catch(() => {});
+        reject(new TesseraClientError("unreachable"));
+      },
         route === "/healthz" ? PROBE_TIMEOUT_MS : REQUEST_TIMEOUT_MS);
     });
     const run = async () => {
@@ -106,7 +113,19 @@ export class TesseraClient {
       } catch { throw new TesseraClientError("unreachable"); }
       let body: unknown;
       let raw: string;
-      try { raw = await response.text(); } catch { throw new TesseraClientError("unreachable"); }
+      try {
+        const stream = response.body;
+        if (!stream) raw = await response.text();
+        else {
+          reader = stream.getReader();
+          const decoder = new TextDecoder();
+          raw = "";
+          for (let chunk = await reader.read(); !chunk.done; chunk = await reader.read()) {
+            raw += decoder.decode(chunk.value, { stream: true });
+          }
+          raw += decoder.decode();
+        }
+      } catch { throw new TesseraClientError("unreachable"); }
       try { body = JSON.parse(raw); } catch { invalid(response.status); }
       if (response.status !== 200) {
         // Accept protocol codes only, never arbitrary server text masquerading as a code.

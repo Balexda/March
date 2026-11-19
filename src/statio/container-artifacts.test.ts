@@ -73,6 +73,8 @@ describe("statio container artifacts", () => {
     expect(compose).toContain(
       "MARCH_STATIO_URL=${MARCH_STATIO_URL:-http://statio:${MARCH_STATIO_PORT:-9689}}",
     );
+    expect(compose).toContain("MARCH_TESSERA_CLIENT_KEY=${MARCH_STATIO_TESSERA_CLIENT_KEY:-}");
+    expect(compose).toContain("MARCH_TESSERA_URL=${MARCH_TESSERA_URL:-http://tessera:${MARCH_TESSERA_PORT:-9477}}");
     expect(compose).toContain("MARCH_OTEL=${MARCH_OTEL:-1}");
     expect(compose).toContain("external: true");
     expect(compose).toContain("name: march");
@@ -90,8 +92,7 @@ describe("statio container artifacts", () => {
     expect(compose).toContain("XDG_STATE_HOME=/tmp/gh/state");
     expect(compose).toContain("XDG_DATA_HOME=/tmp/gh/data");
     expect(compose).toContain("GH_NO_UPDATE_NOTIFIER=1");
-    // Config still resolves from the read-only HOME mount, so the config-dir
-    // override must NOT be set (that would hide the mounted gh credentials).
+    // Each child receives its own config directory.
     expect(compose).not.toContain("XDG_CONFIG_HOME=");
     // HOME remains mounted read-only.
     expect(compose).toContain(":ro");

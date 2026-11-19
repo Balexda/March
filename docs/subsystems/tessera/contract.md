@@ -12,8 +12,36 @@ missing provider credentials allow liveness, and unauthorized issuance fails clo
 then closes HTTP and telemetry. Host defaults to `127.0.0.1`. Port precedence is
 `--port`, `MARCH_TESSERA_PORT`, then `9477`; invalid ports fail before listening.
 
+`march tessera token --repo <owner/name> --access <read|write> [--identity app] [--refresh] [--allow-migration-fallback]`
+issues a repository-scoped GitHub App token using `MARCH_TESSERA_URL` and
+`MARCH_TESSERA_CLIENT_KEY`. The token command and Git credential helper
+also accept `MARCH_TESSERA_CLIENT_KEY_FILE`, which takes precedence over
+the environment key. The file must be a user-owned regular file with
+mode `0600`. Identity defaults to `app`. On success stdout
+contains only the token and a terminating newline. Invalid arguments,
+configuration errors, denial, malformed responses and transport failures exit
+non-zero with a sanitized diagnostic on stderr. The command uses the Node
+client's 10-second request deadline. After a confirmed GitHub 401, a caller
+can use `--refresh` to request a fresh entitlement. Migration fallback requires
+both `--allow-migration-fallback` and `MARCH_TESSERA_GH_TOKEN_FALLBACK=1` and uses
+the client's warning and counter. `MARCH_TESSERA_SLICE_ID` correlates the
+issuance request and client span with the caller's slice.
+
+`march tessera git-credential <get|store|erase>` reads Git's credential
+protocol on stdin. Configure the helper as `!march tessera git-credential`
+so Git appends the operation, and enable `credential.useHttpPath` for GitHub.
+An HTTPS `github.com` request must supply the target `owner/name[.git]` path.
+Successful `get` returns `username=x-access-token` and the repository-scoped
+app/write token as `password`. Other hosts receive no credentials. `store` and
+`erase` consume the request and exit without persisting credentials. Ambiguous
+GitHub requests and issuance failures return `quit=true`, exit nonzero, and
+write one sanitized diagnostic to stderr. Git honors the quit instruction
+before trying a later helper or prompting.
+
 | Environment variable | Current behavior |
 | --- | --- |
+| `TESSERA_CLIENT_KEYS_FILE` | Required path to client registrations. |
+| `TESSERA_POLICY_FILE` | Required path to entitlement grants. |
 | `TESSERA_GITHUB_APP_ID` | App id; absent id leaves app provider unconfigured. |
 | `TESSERA_GITHUB_APP_KEY_FILE` | PEM private key file; absent/empty key or missing file leaves provider unconfigured. Other read failures exit safely. |
 | `TESSERA_GITHUB_INSTALLATION_ID` | Optional positive integer installation override. |
@@ -21,31 +49,114 @@ then closes HTTP and telemetry. Host defaults to `127.0.0.1`. Port precedence is
 | `MARCH_TESSERA_LOG_DIR` | Durable JSONL directory; default `~/.march/logs`. |
 | `MARCH_OTEL` | Set `1` for telemetry; logs remain available when off. |
 
-US2 must supply production authentication and policy enforcement. This slice's
-production server denies every issuance request; no environment flag bypasses
-that boundary. Tests may inject an authorization boundary. Policy/client-key file
-loading belongs to US2. US3 owns secret-store provisioning, shared-HOME path
-validation, client-key distribution and stack startup ordering. No secret-store
-layout is selected here. The token CLI is still future work; the Node client is documented under [Node Client](#node-client), and user credentials belong to US7.
+Both authorization files must be readable regular files containing non-empty
+JSON arrays. An unset path, unreadable or empty file, or invalid entry causes
+`tessera serve` to exit nonzero before listening. Diagnostics identify the
+configuration variable and, for invalid entries, the row number.
+
+- Each registration has `client` and `key_sha256`. Names match
+  `^[a-z][a-z0-9-]{0,31}$` and digests contain 64 lowercase hexadecimal
+  characters. Names and digests are each unique. Tessera stores only key digests.
+- Each grant has a registered `client`, a non-empty `identities` array containing
+  `app` or `user`, and `max_access` of `read` or `write`. A grant that includes
+  `app` requires a `repos` array of `owner/name` or `owner/*` entries. Repository
+  matching is case-insensitive. Only `legate` can have a `user` grant.
+- Each request must match an explicit grant. An App request must satisfy the
+  identity, repository and access constraints of the same grant. A user request
+  requires the `legate` user grant. Repository and access limits apply to App
+  credentials.
 
 ### HTTP
 
 | Route | Behavior |
 | --- | --- |
-| `GET /healthz` | Unauthenticated `200 {"status":"ok"}`, including unconfigured startup. |
+| `GET /healthz` | Unauthenticated `200 {"status":"ok"}`, including unconfigured and degraded providers. |
 | `GET /status` | Unauthenticated service/uptime, provider states, soonest expiry and cache entry count. Never credentials or policy. |
-| `POST /v1/github/token` | Default `401 unauthorized`; injected authorized callers may issue an app/read or app/write token for exactly one `owner/name`. |
+| `POST /v1/github/token` | Authenticated callers with an explicit matching grant can request a token. An App token is scoped to one `owner/name`. |
 
-Token requests accept `identity`, `repo`, `access`, optional `refresh` and
-`subject`; unknown fields fail validation. Success returns `token`, `expires_at`,
-GitHub-derived `identity` and `commit_identity`, `access`, and `repo`.
-An optional `x-march-slice-id` header nests the issuance span under that slice's trace.
+Every `/v1/*` request authenticates its bearer key before body validation.
+Tessera hashes the supplied key with SHA-256 and compares fixed-length digests in
+constant time. Missing or invalid credentials receive `401 unauthorized`,
+invalid token requests receive `400 invalid_request`, and requests without a
+matching grant receive `403 policy_denied`. Errors use
+`{ "error": { "code": "<code>", "message": "<text>" } }`. Denials occur before
+provider selection, cache access, refresh or upstream calls.
+
+Token requests accept `identity`, `repo`, `access`, optional `refresh` and the
+optional `subject` string. Unknown fields fail validation. Success returns
+`token`, `expires_at`, GitHub-derived `identity` and `commit_identity`, `access`,
+and `repo`. Supply a non-secret correlation value as `subject`. After validation
+it is recorded in the issuance audit and has no effect on authorization or
+cache scope.
+
+Denials produce an audit outcome of `denied` and an errored issuance span.
+An optional `x-march-slice-id` header with a valid slice ID nests the issuance
+span under that slice's deterministic dispatch trace.
+Diagnostics omit authorization headers, keys, key digests and tokens.
+
+### Issuance telemetry
+
+Every completed token request writes one `tessera.audit` JSON log event with
+`caller`, `identity`, `provider`, `repo`, `access`, `outcome`, `reason`,
+`cache`, `expires_at` and `subject`. Unauthenticated callers are `unknown`.
+Unavailable request fields and expiry are null, as is the reason for an issued
+token. A supplied subject is echoed, or recorded as `[REDACTED]` if it contains
+the caller's bearer key or the issued token; the same rule nulls such a `repo`.
+Denials and failures carry the typed response code.
+
+With `MARCH_OTEL=1`, each request also emits one `tessera.issue` span. Denials,
+failures and successful cache fallback after a failed refresh mark the span
+errored. Spans omit repository, expiry and subject.
+
+| Metric | Measurement | Labels |
+| --- | --- | --- |
+| `march.tessera.issuances` | One count per successful request, including cache fallback | `identity`, `provider`, `access`, `cache` |
+| `march.tessera.denials` | One count per denied or failed request | `identity` (or `unknown`), `reason` |
+| `march.tessera.mint.duration` | Milliseconds per upstream mint attempt, including failures | `provider`, `outcome` |
+| `march.tessera.github.rate_limit_remaining` | Latest valid GitHub remaining-budget header | `provider` |
+| `march.tessera.github.secondary_limits` | Count of GitHub responses indicating a secondary limit | `provider` |
+| `march.tessera.credential.expiry_remaining` | Whole seconds until known credential expiry, floored at zero | `provider` |
+| `march.tessera.credential.expiry_warning` | 1 at 14 days or less, otherwise 0 for known expiry | `provider` |
+
+Cache hits and callers sharing a mint add no mint samples. Rate-limit
+measurements use responses from discovery, installation lookup and minting.
+Metrics use the same OTel gate as spans. Audit logs remain enabled independently.
 
 ### Providers
 
 Providers implement `start`, `issue`, and `status` behind `CredentialProvider`.
 The registry always exposes `github-app` and `github-user`; a slot without an
 implementation reports `unconfigured`. The user provider is reserved for US7.
+Tessera checks both provider records at startup, every minute, and on
+`GET /status`. The response reports the earliest known provider expiry as
+`soonest_expiry`, or null when expiry is unknown for both providers. App key
+expiry is unknown. Cached App installation tokens count toward `cache.entries`
+and their expiry is tracked separately.
+
+A known expiry at 14 days or less sets `expiry_warning` and emits a
+`tessera.expiry_warning` log at most once per 24 hours per credential in
+the running service. Providers can supply an internal revision marker to
+identify replacement credentials that share an expiry. Status exposes only
+typed error codes. Unknown expiry produces no expiry metric sample, so the
+March — Tessera dashboard can distinguish it from zero seconds remaining.
+
+The App provider caches successful installation bindings by owner and keeps
+tokens in memory by installation, repository and fixed permission set. Requests
+reuse a token with at least ten minutes remaining and share an in-flight mint
+for the same scope. Below ten minutes the provider attempts a new mint. If GitHub
+is unavailable, the provider can still serve the matching token until its GitHub
+expiry. Status reports the provider as degraded, and the successful HTTP response
+still records an errored issuance span with `cache: hit` and reason
+`provider_unavailable`. With no live matching token, the request returns the
+bounded 503 error. `cache.entries` counts live tokens across providers.
+A repository exclusion returned during minting forces a new installation lookup
+on the next request for that repository when there is no configured override.
+
+`refresh: true` evicts the matching token and supersedes any pending ordinary
+mint for that scope. An explicit refresh fails with the mint error if GitHub
+cannot issue a replacement. `GithubAppProvider.reload(credentials)` clears cached
+tokens and installation bindings, invalidates older in-flight work and derives
+the bot identity again. US3 supplies secret-store change detection.
 
 ### Runtime and packaging
 
@@ -55,18 +166,20 @@ implementation reports `unconfigured`. The user provider is reserved for US7.
 only on host loopback, and mounts only its log volume. It receives no HOME,
 Docker socket or ambient GitHub credentials. Docker-socket peers and host
 stewards retain their preexisting host privileges; this boundary cannot revoke them.
+Startup requires the two authorization files described above. US3 owns
+deployment of those files and client-key distribution.
 
 ## Invariants
 
 - `/healthz` and `/status` answer without provider credentials; the service listens while every provider is unconfigured.
-- Production issuance denies every caller with `401 unauthorized` until US2 supplies authorization; unauthenticated requests never reach a provider or GitHub.
+- Production issuance requires an authenticated caller and an explicit policy grant before provider or GitHub access.
 - An app token is scoped to exactly one repository, and GitHub's mint response must name that repository; a pinned installation never broadens scope.
 - Permissions come only from the fixed `read` and `write` access profiles; neither profile includes `workflows`.
 - `identity` and `commit_identity` are derived from GitHub (`<slug>[bot]` and its numeric user id); configuration cannot override them, and Tessera never substitutes another identity.
 - Every GitHub call is bounded by a finite timeout, and the app assertion lives at most 10 minutes.
 - Accepted tokens expire in the future and no more than one hour (plus a 60-second clock-skew allowance) after issuance.
 - Error messages are fixed per code. A token appears only in the body of a successful, authorized `POST /v1/github/token` response; it never appears in error responses, `/status`, logs or spans. Assertions, private keys, bearer keys and upstream response bodies never appear in any response, `/status`, logs or spans.
-- Each token request emits one `tessera.issue` span, marked errored on any non-2xx response; a failed startup identity discovery emits an errored `tessera.discovery` span.
+- With telemetry enabled, failed startup identity discovery emits an errored `tessera.discovery` span.
 
 ## Error Modes
 
@@ -75,7 +188,7 @@ All token-route failures use the envelope `{"error":{"code":"…","message":"…
 | Condition | Response | Observable behavior |
 | --- | --- | --- |
 | Malformed request | `400 invalid_request` | Unknown fields, invalid identity/access/repo, wrong optional-field types, missing `repo` for app identity, or an oversized/unsupported body. |
-| Caller not authenticated | `401 unauthorized` | The authorization boundary rejects the caller; in production this is every request. |
+| Caller not authenticated | `401 unauthorized` | The bearer header is absent, malformed or unknown. The audit uses caller `unknown`. |
 | Caller not permitted | `403 policy_denied` | The authorization boundary rejects this caller for the request. |
 | App not installed on repo | `422 repo_not_installed` | The installation lookup returns 404/422, or GitHub's mint response does not name exactly the requested repository. |
 | Provider unconfigured | `503 provider_unconfigured` | No app id or key is configured, or the requested identity has no provider. |
@@ -87,7 +200,6 @@ All token-route failures use the envelope `{"error":{"code":"…","message":"…
 
 Tessera's consumer API lives in `src/tessera/client.ts`; types live in
 `src/tessera/types.ts` and configuration resolution in `src/tessera/config.ts`.
-The token CLI is a separate implementation step.
 
 `TesseraClient` accepts optional `baseUrl`, `clientKey`, `env` and `fetchImpl`.
 Explicit settings override `MARCH_TESSERA_URL` and

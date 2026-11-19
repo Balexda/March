@@ -250,12 +250,12 @@ Recommended implementation sequence:
 |----|-------|-----------|----------|
 | US1 | Mint a Downscoped Bot Token | — | specs/2026-11-15-013-tessera-credential-entitlement-service/01-mint-a-downscoped-bot-token.tasks.md |
 | US4 | Fetch Tokens Through One Client | — | specs/2026-11-15-013-tessera-credential-entitlement-service/04-fetch-tokens-through-one-client.tasks.md |
-| US2 | Enforce a Default-Deny Policy per Client | US1 | — |
-| US3 | Keep Credentials Only in Tessera | US1 | — |
-| US8 | See Issuances, Expiry and Health | US1 | — |
-| US5 | Stewards Open Pull Requests as the Bot | US4 | — |
-| US6 | Migrate Services off the Ambient Token | US4 | — |
-| US7 | Request a Copilot Review as the Operator | US2, US4 | — |
+| US2 | Enforce a Default-Deny Policy per Client | US1 | specs/2026-11-15-013-tessera-credential-entitlement-service/02-enforce-a-default-deny-policy-per-client.tasks.md |
+| US3 | Keep Credentials Only in Tessera | US1, US2 | specs/2026-11-15-013-tessera-credential-entitlement-service/03-keep-credentials-only-in-tessera.tasks.md |
+| US8 | See Issuances, Expiry and Health | US1, US3 | specs/2026-11-15-013-tessera-credential-entitlement-service/08-see-issuances-expiry-and-health.tasks.md |
+| US5 | Stewards Open Pull Requests as the Bot | US4 | specs/2026-11-15-013-tessera-credential-entitlement-service/05-stewards-open-pull-requests-as-the-bot.tasks.md |
+| US6 | Migrate Services off the Ambient Token | US4 | specs/2026-11-15-013-tessera-credential-entitlement-service/06-migrate-services-off-the-ambient-token.tasks.md |
+| US7 | Request a Copilot Review as the Operator | US2, US3, US4 | — |
 | US9 | Remove Ambient GitHub Credentials | US5, US6, US7 | — |
 
 ## Requirements *(mandatory)*

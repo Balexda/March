@@ -20,7 +20,7 @@ describe("buildObserveDeps (production observe wiring, #601)", () => {
     const prev = process.env.MARCH_HERALD_SYNC;
     delete process.env.MARCH_HERALD_SYNC;
     try {
-      const deps = buildObserveDeps(meta, app);
+      const deps = buildObserveDeps(meta, app, {} as never);
       expect(deps.senseDeps).toEqual({ marker: "senseDeps" });
       expect(typeof deps.syncDefaultBranch).toBe("function");
       await deps.syncDefaultBranch("/repo", "main");

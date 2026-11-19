@@ -34,7 +34,7 @@ import { legateStateDir, metaForProfileRecord } from "../profile-paths.js";
 // heartbeat. runtime now only wires these to the proven I/O seams below.
 import { rebuildWorkingState, senseFromHerald, type HeraldInbox } from "./state/sense.js";
 import { createFoldDeps } from "./state/fold-deps.js";
-import { execText } from "./clients/exec.js";
+import { execLegateGh, LegateGitHubError } from "./clients/github.js";
 import { runTick as coordinatorRunTick } from "./coordinator.js";
 import { resolveMaxConcurrentSpawns } from "./meta.js";
 import { SpawnBreaker } from "./spawn-breaker.js";
@@ -62,7 +62,14 @@ import { createScheduler, type LoopScheduler } from "./scheduler.js";
 // Operator respond endpoint (#459 follow-up): the pure target resolver + I/O
 // shapes; runtime supplies the Castra/Herald effects below. http.ts imports only
 // the LoopSnapshot TYPE from here, so this value import is a one-way edge.
-import { resolveRespondTarget, type RespondInput, type RespondResult } from "./http.js";
+import {
+  resolveRequeueTarget,
+  resolveRespondTarget,
+  type RequeueInput,
+  type RequeueResult,
+  type RespondInput,
+  type RespondResult,
+} from "./http.js";
 
 // ── Container-wide singletons (shared across all profiles) ──────────────────
 
@@ -337,6 +344,68 @@ export async function respondToEscalation(input: RespondInput): Promise<RespondR
   return finish({ ok: true, profile, sliceId: input.sliceId, mode, delivered, cleared: true, recoveryRequested });
 }
 
+/**
+ * Request an operator REQUEUE (#588/#593) — the side-effecting half of
+ * `POST /slices/:sliceId/requeue`. Validates the target against the profile's
+ * warm working state (refusing an unknown / merged slice, or an open PR without
+ * `closePr`), then appends `slice.requeue.requested` to Herald with the operator +
+ * reason. It mutates nothing in memory: the requeue handler acts on the folded
+ * request at the start of the next tick (tear down, tombstone, re-dispatch).
+ */
+export async function requeueSlice(input: RequeueInput): Promise<RequeueResult> {
+  const profile = input.profile;
+  const finish = (result: RequeueResult): RequeueResult => {
+    emitLoopSpan({
+      name: "legate.requeue.request",
+      traceKey: input.sliceId,
+      root: false,
+      error: !result.ok,
+      attributes: {
+        "march.slice_id": input.sliceId,
+        "march.profile": profile,
+        "march.requeue.close_pr": input.closePr === true,
+        "march.requeue.requested": result.requested ?? false,
+        ...(input.operator ? { "march.operator": input.operator } : {}),
+      },
+    });
+    emitLoopLog({
+      severity: result.ok ? "INFO" : "ERROR",
+      body: result.ok
+        ? `requeue requested for ${input.sliceId}${input.operator ? ` by ${input.operator}` : ""}${result.closesPr ? ` (closing PR #${result.closesPr})` : ""}`
+        : `requeue refused for ${input.sliceId}: ${result.error ?? "unknown error"}`,
+      eventKind: "requeue",
+      sliceId: input.sliceId,
+      attributes: { "march.profile": profile },
+    });
+    return result;
+  };
+
+  const rt = runtimes.get(profile);
+  if (!rt) return finish({ ok: false, status: 404, error: `unknown profile "${profile}".`, profiles: [...runtimes.keys()] });
+
+  const target = resolveRequeueTarget(rt.workingState, input.sliceId, input.closePr === true);
+  if (!target.ok) return finish({ ok: false, status: target.status, profile, sliceId: input.sliceId, error: target.error });
+
+  try {
+    await legateHerald().append(profile, {
+      type: "slice.requeue.requested",
+      sliceId: input.sliceId,
+      closePr: input.closePr === true,
+      ...(input.operator ? { operator: input.operator } : {}),
+      ...(input.reason ? { reason: input.reason } : {}),
+    });
+  } catch (err: any) {
+    return finish({
+      ok: false,
+      status: 502,
+      profile,
+      sliceId: input.sliceId,
+      error: `failed to record the requeue request in Herald: ${err?.message ?? String(err)}`,
+    });
+  }
+  return finish({ ok: true, profile, sliceId: input.sliceId, requested: true, closesPr: target.openPr });
+}
+
 function now() {
   return new Date().toISOString();
 }
@@ -378,20 +447,12 @@ async function sendAgentDeckMessage(meta: any, sessionId: string, message: strin
  * push between observe and merge fails cleanly (the gate re-evaluates next tick)
  * rather than merging an unreviewed commit. Runs in the profile's repo checkout.
  */
-async function squashMergePr(input: { prNumber: number | string; headSha: string; repoPath?: string }): Promise<{
+async function squashMergePr(input: { prNumber: number | string; headSha: string; repoPath?: string; sliceId?: string }): Promise<{
   merged: boolean;
-  mergeSha?: string;
-  error?: string;
 }> {
   const args = ["pr", "merge", String(input.prNumber), "--squash", "--match-head-commit", input.headSha];
-  const options: { cwd?: string } = {};
-  if (input.repoPath) options.cwd = input.repoPath;
-  try {
-    await execText("gh", args, options);
-    return { merged: true };
-  } catch (err: any) {
-    return { merged: false, error: err?.message || String(err) };
-  }
+  await execLegateGh("write", args, input.repoPath, input.sliceId);
+  return { merged: true };
 }
 
 /**
@@ -400,13 +461,13 @@ async function squashMergePr(input: { prNumber: number | string; headSha: string
  * handler throttles how often it asks. Runs in the profile's repo checkout.
  */
 async function listDependabotPrs(repoPath: string): Promise<any[]> {
-  const out = await execText(
-    "gh",
+  const out = await execLegateGh(
+    "read",
     [
       "pr", "list", "--author", "app/dependabot", "--state", "open", "--limit", "50",
       "--json", "number,title,url,isDraft,author,headRefOid,mergeable,mergeStateStatus,statusCheckRollup,files,labels",
     ],
-    { cwd: repoPath },
+    repoPath,
   );
   const parsed = JSON.parse(out);
   return Array.isArray(parsed) ? parsed : [];
@@ -418,7 +479,7 @@ async function listDependabotPrs(repoPath: string): Promise<any[]> {
  * `gh pr view` per call; the handler asks only for a PR newly conflicted at a head.
  */
 async function listPrCommitAuthors(repoPath: string, prNumber: number): Promise<string[]> {
-  const out = await execText("gh", ["pr", "view", String(prNumber), "--json", "commits"], { cwd: repoPath });
+  const out = await execLegateGh("read", ["pr", "view", String(prNumber), "--json", "commits"], repoPath);
   const commits = JSON.parse(out)?.commits;
   if (!Array.isArray(commits)) return [];
   return commits.flatMap((c: any) =>
@@ -427,8 +488,31 @@ async function listPrCommitAuthors(repoPath: string, prNumber: number): Promise<
 }
 
 /** Post a PR conversation comment (e.g. `@dependabot recreate`). */
-async function commentOnPrGh(repoPath: string, prNumber: number, body: string): Promise<void> {
-  await execText("gh", ["pr", "comment", String(prNumber), "--body", body], { cwd: repoPath });
+async function commentOnPrGh(repoPath: string, prNumber: number, body: string, sliceId?: string): Promise<void> {
+  await execLegateGh("write", ["pr", "comment", String(prNumber), "--body", body], repoPath, sliceId);
+}
+
+/** Operator requeue (#588): close an open PR with an attribution comment. The
+ *  remote branch is deleted separately ({@link deleteRemoteBranchGh}) — `gh pr
+ *  close --delete-branch` would also try the local branch, which Brood owns. */
+async function closePrGh(repoPath: string, prNumber: number, comment: string, sliceId?: string): Promise<void> {
+  await execLegateGh("write", ["pr", "close", String(prNumber), "--comment", comment], repoPath, sliceId);
+}
+
+/** Operator requeue (#588): delete a pushed branch on the forge so the fresh
+ *  dispatch's orphan-branch check doesn't refuse it. Uses the GitHub API (the
+ * scoped gh child), using a read check before issuing a write entitlement.
+ *  Resolves `false` when the branch was never pushed. */
+async function deleteRemoteBranchGh(repoPath: string, branch: string, sliceId?: string): Promise<boolean> {
+  const ref = `repos/{owner}/{repo}/git/refs/heads/${branch.split("/").map(encodeURIComponent).join("/")}`;
+  try {
+    await execLegateGh("read", ["api", ref.replace("/refs/", "/ref/")], repoPath, sliceId);
+  } catch (err) {
+    if (err instanceof LegateGitHubError && err.status === 404) return false;
+    throw err;
+  }
+  await execLegateGh("write", ["api", "-X", "DELETE", ref], repoPath, sliceId);
+  return true;
 }
 
 /** Repos whose escalation label is known to exist, so it is created once per process. */
@@ -442,24 +526,23 @@ const ensuredLabels = new Set<string>();
 async function labelPrGh(repoPath: string, prNumber: number, label: string): Promise<void> {
   const key = repoPath + "\0" + label;
   if (!ensuredLabels.has(key)) {
-    await execText(
-      "gh",
+    await execLegateGh(
+      "write",
       ["label", "create", label, "--force", "--color", "d93f0b", "--description", "March legate needs a human to act on this PR"],
-      { cwd: repoPath },
+      repoPath,
     );
     ensuredLabels.add(key);
   }
-  await execText("gh", ["pr", "edit", String(prNumber), "--add-label", label], { cwd: repoPath });
+  await execLegateGh("write", ["pr", "edit", String(prNumber), "--add-label", label], repoPath);
 }
 
 /**
  * Post a reaction to a PR conversation (issue) comment — the babysit `:eyes:`
- * acknowledgement on a dispatched comment-fix. `gh api` substitutes `{owner}`/
- * `{repo}` from the repo checkout's remote, so running in the profile's repoPath
- * needs no owner resolution. Best-effort: babysit treats the persisted comment-id
+ * acknowledgement on a dispatched comment-fix. The forge client scopes the
+ * endpoint to the profile checkout. Best-effort: babysit treats the persisted comment-id
  * set as authoritative, so a failure here is swallowed by the caller.
  */
-async function reactToCommentGh(input: { commentId: string | number; content: string; repoPath?: string }): Promise<void> {
+async function reactToCommentGh(input: { commentId: string | number; content: string; repoPath?: string; sliceId?: string }): Promise<void> {
   const args = [
     "api",
     "--method",
@@ -468,9 +551,7 @@ async function reactToCommentGh(input: { commentId: string | number; content: st
     "-f",
     `content=${input.content}`,
   ];
-  const options: { cwd?: string } = {};
-  if (input.repoPath) options.cwd = input.repoPath;
-  await execText("gh", args, options);
+  await execLegateGh("write", args, input.repoPath, input.sliceId);
 }
 
 async function sendDoorbellToLegate(meta: any) {
@@ -597,16 +678,13 @@ async function tickProfile(rt: ProfileRuntime, spawnBudget?: SpawnBudget): Promi
     sendMessage: (sessionId: string, message: string, traceKey?: string) =>
       sendAgentDeckMessage(meta, sessionId, message, traceKey),
     requestJudgement: (input: any) => requestLegateJudgement(meta, input),
-    mergePr: (input: { prNumber: number | string; headSha: string; repoPath?: string }) =>
-      squashMergePr(input),
-    reactToComment: (input: { commentId: string | number; content: string; repoPath?: string }) =>
-      reactToCommentGh(input),
+    mergePr: squashMergePr,
+    reactToComment: reactToCommentGh,
   };
 
   const dependencyMergeDeps = {
     listDependencyPrs: (repoPath: string) => listDependabotPrs(repoPath),
-    mergePr: (input: { prNumber: number | string; headSha: string; repoPath?: string }) =>
-      squashMergePr(input),
+    mergePr: squashMergePr,
     listCommitAuthors: (repoPath: string, prNumber: number) => listPrCommitAuthors(repoPath, prNumber),
     commentOnPr: (repoPath: string, prNumber: number, body: string) => commentOnPrGh(repoPath, prNumber, body),
     labelPr: (repoPath: string, prNumber: number, label: string) => labelPrGh(repoPath, prNumber, label),
@@ -638,7 +716,11 @@ async function tickProfile(rt: ProfileRuntime, spawnBudget?: SpawnBudget): Promi
     dispatch: dispatchDeps,
     dependencyMerge: dependencyMergeDeps,
     coderabbitRereview: {
-      commentOnPr: (repoPath: string, prNumber: number, body: string) => commentOnPrGh(repoPath, prNumber, body),
+      commentOnPr: commentOnPrGh,
+    },
+    requeue: {
+      closePr: closePrGh,
+      deleteRemoteBranch: deleteRemoteBranchGh,
     },
     spawnBudget,
   });
