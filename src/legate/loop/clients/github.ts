@@ -4,9 +4,8 @@ import path from "node:path";
 import { emitTesseraSpan } from "../../../observability/tessera-trace.js";
 import { getGitHubToken, TesseraClientError } from "../../../tessera/client.js";
 import type { GitHubTokenRequest } from "../../../tessera/types.js";
+import { resolveOriginRepo } from "../../../shared/github-remote.js";
 import { execText } from "./exec.js";
-
-const remotePattern = /^(?:https?:\/\/github\.com\/|ssh:\/\/git@github\.com\/|git@github\.com:)([\w.-]+\/[\w.-]+?)\/?$/i;
 
 export class LegateGitHubError extends Error {
   constructor(readonly status?: number) {
@@ -15,17 +14,10 @@ export class LegateGitHubError extends Error {
 }
 
 async function resolveRepository(cwd: string | undefined, sliceId: string | undefined): Promise<string> {
-  try {
-    if (cwd) {
-      const remote = await execText("git", ["config", "--local", "--get", "remote.origin.url"], {
-        cwd, timeout: 5_000, killSignal: "SIGKILL",
-      });
-      const repo = remote.trim().match(remotePattern)?.[1].replace(/\.git$/i, "");
-      if (repo && repo.split("/").every(part => part && part !== "." && part !== "..")) return repo;
-    }
-  } catch {
-    // The local git diagnostic can contain checkout or remote configuration.
-  }
+  // Same origin-based rule observation uses (src/shared/github-remote.ts), so a
+  // PR number sensed in one repository is never mutated in another.
+  const repo = cwd ? await resolveOriginRepo(cwd) : null;
+  if (repo) return repo;
   emitTesseraSpan("tessera.discovery", { sliceId, error: true, attributes: { "march.service": "legate" } });
   throw new TesseraClientError("invalid_request");
 }

@@ -1,6 +1,7 @@
-import { createGitHubRead, repoFromOrigin, type GitHubReadClient } from "./github-read.js";
+import { createGitHubRead, type GitHubReadClient } from "./github-read.js";
 import { TesseraClientError } from "../tessera/client.js";
 import { summarizeCodeRabbit, type CodeRabbitStanding } from "./coderabbit-review.js";
+import { resolveOriginRepo, sameGitHubRepo } from "../shared/github-remote.js";
 import { execFile } from "node:child_process";
 import { CastraClient } from "../castra/client.js";
 import { gitHubAuthConfigArgs } from "../spawn/git-auth.js";
@@ -280,32 +281,44 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
   }
 
   async function repoOwner(state: any): Promise<string | null> {
-    const owner = state?.repo?.owner_with_name;
-    if (typeof owner === "string" && owner.length > 0) return owner;
-    if (ownerCache !== undefined) return ownerCache;
+    const configured = state?.repo?.owner_with_name;
     const repoPath = state?.repo?.path || meta.repo?.path;
+    const hasConfigured = typeof configured === "string" && configured.length > 0;
+    const hasPath = typeof repoPath === "string" && repoPath.length > 0;
     // Don't cache a "no path" miss — it's a caller/config gap, not a resolved fact.
-    if (typeof repoPath !== "string" || repoPath.length === 0) return null;
-    if (github) {
-      try {
-        const remote = await execText("git", ["config", "--local", "--get", "remote.origin.url"], {
-          cwd: repoPath, env, timeout: 5_000,
-        });
-        ownerCache = repoFromOrigin(remote) ?? null;
-      } catch {
+    if (!hasPath) return hasConfigured ? configured : null;
+    if (ownerCache === undefined) {
+      // The checkout's `origin` is the repository Legate mutates
+      // (src/shared/github-remote.ts); observe the same one. `gh repo view` is
+      // only a fallback for a non-GitHub-shaped origin — it may pick another
+      // remote (e.g. `upstream`), but Legate then refuses to mutate.
+      const origin = await resolveOriginRepo(repoPath);
+      if (origin) {
+        ownerCache = origin;
+      } else if (hasConfigured) {
+        return configured;
+      } else if (github) {
+        // Tessera-scoped observation never falls back to the ambient gh login.
         ownerCache = null;
+        return null;
+      } else {
+        try {
+          const out = await execText("gh", ["repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"], {
+            cwd: repoPath,
+          });
+          ownerCache = out.trim() || null;
+        } catch {
+          ownerCache = null;
+        }
+        return ownerCache;
       }
-      return ownerCache;
     }
-    try {
-      const out = await execText("gh", ["repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"], {
-        cwd: repoPath,
-      });
-      ownerCache = out.trim() || null;
-    } catch {
-      ownerCache = null;
+    if (hasConfigured && ownerCache && !sameGitHubRepo(configured, ownerCache)) {
+      // A PR read from one repository must never be acted on in another.
+      warn?.(`repo owner mismatch: state names ${configured} but origin is ${ownerCache}; skipping observation`);
+      return null;
     }
-    return ownerCache;
+    return ownerCache ?? (hasConfigured ? configured : null);
   }
 
   async function ghPrArgs(slice: any, state: any, fields: string): Promise<any> {
