@@ -1,6 +1,7 @@
 import { createServiceLogger, resolveServiceLogFilePath } from "../observability/logger.js";
 import { initOtel } from "../observability/otel.js";
 import { emitTesseraSpan } from "../observability/tessera-trace.js";
+import { loadTesseraAuthorization } from "./authorization.js";
 import { loadTesseraAppConfig, resolveTesseraPort, TESSERA_SERVICE_NAME } from "./config.js";
 import { GithubAppProvider } from "./github-app.js";
 import { buildTesseraServer } from "./server.js";
@@ -12,6 +13,7 @@ export interface RunTesseraServerOptions {
 
 export async function runTesseraServer(options: RunTesseraServerOptions = {}): Promise<void> {
   const port = resolveTesseraPort(options.port);
+  const authorize = await loadTesseraAuthorization();
   const config = await loadTesseraAppConfig();
   process.env.MARCH_OTEL_SERVICE_NAME ||= TESSERA_SERVICE_NAME;
   const otel = initOtel();
@@ -33,9 +35,9 @@ export async function runTesseraServer(options: RunTesseraServerOptions = {}): P
     } });
     await provider.start();
     if (stopping) return;
-    app = buildTesseraServer({ providers: [provider], logger });
+    app = buildTesseraServer({ providers: [provider], authorize, logger });
     await app.listen({ host: options.host ?? "127.0.0.1", port });
-    app.log.info("Tessera listening; production issuance requires US2 authorization");
+    app.log.info("Tessera listening");
     await stopped;
   } finally {
     process.removeListener("SIGTERM", shutdown);

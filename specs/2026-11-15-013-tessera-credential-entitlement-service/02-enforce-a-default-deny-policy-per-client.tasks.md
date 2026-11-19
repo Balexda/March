@@ -16,7 +16,7 @@
 
 ### Tasks
 
-- [ ] **Load and validate authorization configuration**
+- [x] **Load and validate authorization configuration**
 
   Load client registrations and policy under `src/tessera/` and validate them during startup for AS 2.6. Follow the data model and the clean-exit guidance in [March's operating philosophy](../../docs/operating-philosophy.md).
 
@@ -25,7 +25,7 @@
   - Registrations satisfy the client name and SHA-256 digest format and uniqueness rules. Policy validation rejects malformed rules, unknown clients and prohibited user grants.
   - Startup coverage exercises file and cross-file failures without GitHub.
 
-- [ ] **Authenticate versioned requests and enforce client grants**
+- [x] **Authenticate versioned requests and enforce client grants**
 
   Implement the production authorization boundary used by `src/tessera/server.ts` and cover AS 2.1–2.5 through HTTP contract tests.
 
@@ -34,7 +34,7 @@
   - Requests require an explicit grant for the authenticated caller and requested identity. App grants enforce the repository allowlist and access ceiling, including owner-scoped wildcards. Only the `legate` client can receive a user grant.
   - Denials use the documented HTTP envelopes and precede provider selection, cache lookup, refresh and upstream access. Contract coverage includes each denial case and an allowed request without GitHub.
 
-- [ ] **Record the reserved subject in issuance audits**
+- [x] **Record the reserved subject in issuance audits**
 
   Extend Tessera's issuance audit and existing error tracing to cover the production authorization path. Update `docs/subsystems/tessera/contract.md` with the configuration formats, startup behavior and HTTP contract.
 
