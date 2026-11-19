@@ -67,6 +67,8 @@ vi.mock("../spawn/snapshot-build.js", () => {
 });
 
 import { runHatcherySpawn } from "./spawn-handoff.js";
+import { classifyBranchSafety } from "./orphan-branch.js";
+import { HatcheryGitHubError } from "./github-read.js";
 
 const backend: SpawnBackend = {
   name: "codex",
@@ -135,6 +137,13 @@ describe("runHatcherySpawn manager.launch orphan-branch self-heal (#243)", () =>
       branch: "feature/smithy/mark/m1-f6",
       worktreePath: "",
     });
+  });
+
+  it("leaves the colliding branch in place when the scoped lookup fails", async () => {
+    const failure = new HatcheryGitHubError("tessera:unreachable");
+    vi.mocked(classifyBranchSafety).mockRejectedValueOnce(failure);
+    await expect(run(makeHome())).rejects.toBe(failure);
+    expect(removeSpawnWorktreeSpy).not.toHaveBeenCalled();
   });
 
   it("does NOT delete an UNSAFE branch (open PR) and escalates with the verdict", async () => {
