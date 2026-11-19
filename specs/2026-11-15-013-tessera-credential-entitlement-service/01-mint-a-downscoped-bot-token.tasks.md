@@ -94,7 +94,7 @@
 
 ### Tasks
 
-- [ ] **Cache scoped tokens and share concurrent mints**
+- [x] **Cache scoped tokens and share concurrent mints**
 
   Extend the app provider in `src/tessera/` with the Cached Installation Token lifecycle for AS 1.2–1.4. Keep cache and in-flight coordination in the provider so installation bindings and permissions remain part of each cache decision.
 
@@ -104,7 +104,7 @@
   - Installation, repository and permission differences never share entitlements.
   - Tokens persist only in memory and expiry comes from GitHub's mint response.
 
-- [ ] **Preserve bounded outage recovery and explicit invalidation**
+- [x] **Preserve bounded outage recovery and explicit invalidation**
 
   Extend provider failure and invalidation behavior in `src/tessera/` for AS 1.6 and the refresh contract. Coordinate refresh, expiry and key changes with in-flight minting so invalidated work cannot repopulate stale credentials.
 

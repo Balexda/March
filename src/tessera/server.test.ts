@@ -76,24 +76,178 @@ it("treats oversized bodies as invalid requests",async()=>{
  expect(res.statusCode).toBe(400);expect(res.json().error.code).toBe("invalid_request");await app.close();
 });
 
-it("issues over HTTP through the App provider against fake GitHub", async () => {
- const now=Date.parse("2026-11-16T00:00:00Z");
- const {privateKey}=generateKeyPairSync("rsa",{modulusLength:2048});
- const transport=vi.fn<typeof fetch>(async (url, init)=>{
-  const path=new URL(String(url)).pathname;
-  if(path==="/app") return Response.json({slug:"march"});
-  if(path.startsWith("/users/")) return Response.json({login:"march[bot]",id:123});
-  if(path==="/repos/acme/widgets/installation") return Response.json({id:42});
-  expect(path).toBe("/app/installations/42/access_tokens");
-  expect(JSON.parse(String(init?.body))).toMatchObject({repositories:["widgets"],permissions:{contents:"write",metadata:"read"}});
-  return Response.json({token:"SECRET_TOKEN",expires_at:"2026-11-16T01:00:00Z",repositories:[{full_name:"acme/widgets"}]});
- });
- const provider=new GithubAppProvider({appId:"1",privateKey:privateKey.export({format:"pem",type:"pkcs8"}).toString(),now:()=>now,fetchImpl:transport});
- await provider.start();
- const app=buildTesseraServer({authorize:allow,providers:[provider]});
- try {
-  const res=await app.inject({method:"POST",url:"/v1/github/token",payload:body});
-  expect(res.statusCode).toBe(200);expect(res.json()).toMatchObject({token:"SECRET_TOKEN",identity:"march[bot]",repo:"acme/widgets",commit_identity:{email:"123+march[bot]@users.noreply.github.com"}});
-  expect(transport).toHaveBeenCalledTimes(4);
- } finally {await app.close();}
+describe("Tessera App token lifecycle over HTTP", () => {
+  const hour = 3_600_000;
+  const tenMinutes = 600_000;
+
+  async function fakeGithub() {
+    let now = Date.parse("2026-11-16T00:00:00Z");
+    let unavailable = false;
+    const mint = vi.fn(async () => {
+      if (unavailable) return new Response(null, { status: 503 });
+      return Response.json({
+        token: `SECRET_TOKEN_${mint.mock.calls.length}`,
+        expires_at: new Date(now + hour).toISOString(),
+        repositories: [{ full_name: body.repo }],
+      });
+    });
+    const transport = vi.fn<typeof fetch>(async (url, init) => {
+      const path = new URL(String(url)).pathname;
+      if (path === "/app") return Response.json({ slug: "march" });
+      if (path === "/users/march%5Bbot%5D") return Response.json({ login: "march[bot]", id: 123 });
+      if (path === "/repos/acme/widgets/installation") return Response.json({ id: 42 });
+      expect(path).toBe("/app/installations/42/access_tokens");
+      expect(JSON.parse(String(init?.body))).toMatchObject({
+        repositories: ["widgets"],
+        permissions: { contents: "write", metadata: "read" },
+      });
+      return mint();
+    });
+    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    const provider = new GithubAppProvider({
+      appId: "1",
+      privateKey: privateKey.export({ format: "pem", type: "pkcs8" }).toString(),
+      now: () => now,
+      fetchImpl: transport,
+    });
+    await provider.start();
+    const app = buildTesseraServer({ authorize: allow, providers: [provider] });
+    return {
+      app,
+      mint,
+      transport,
+      advance: (ms: number) => { now += ms; },
+      outage: () => { unavailable = true; },
+      issue: (refresh = false) => app.inject({
+        method: "POST", url: "/v1/github/token", payload: refresh ? { ...body, refresh } : body,
+      }),
+      status: async () => (await app.inject({ url: "/status" })).json(),
+    };
+  }
+
+  it("reuses a scoped token at the ten-minute boundary and refreshes just below it", async () => {
+    const github = await fakeGithub();
+    try {
+      const first = await github.issue();
+      expect(first.statusCode).toBe(200);
+      expect(first.json()).toMatchObject({
+        token: "SECRET_TOKEN_1",
+        expires_at: "2026-11-16T01:00:00.000Z",
+        identity: "march[bot]",
+        repo: body.repo,
+        commit_identity: { email: "123+march[bot]@users.noreply.github.com" },
+      });
+      expect(github.transport).toHaveBeenCalledTimes(4);
+
+      github.advance(hour - tenMinutes - 1);
+      expect((await github.issue()).json()).toEqual(first.json());
+      github.advance(1);
+      expect((await github.issue()).json()).toEqual(first.json());
+      expect(github.transport).toHaveBeenCalledTimes(4);
+
+      github.advance(1);
+      const refreshed = await github.issue();
+      expect(refreshed.statusCode).toBe(200);
+      expect(refreshed.json()).toMatchObject({
+        token: "SECRET_TOKEN_2",
+        expires_at: "2026-11-16T01:50:00.001Z",
+      });
+      expect(github.mint).toHaveBeenCalledTimes(2);
+      expect((await github.status()).cache).toEqual({ entries: 1 });
+    } finally {
+      await github.app.close();
+    }
+  });
+
+  it("shares one mint across concurrent requests for the same scope", async () => {
+    const github = await fakeGithub();
+    const bothRequests = Promise.withResolvers<void>();
+    let requests = 0;
+    github.app.addHook("preHandler", async (request) => {
+      if (request.routeOptions.url === "/v1/github/token" && ++requests === 2) bothRequests.resolve();
+    });
+    const mint = github.mint.getMockImplementation()!;
+    github.mint.mockImplementation(async () => {
+      await bothRequests.promise;
+      return mint();
+    });
+    try {
+      const [first, second] = await Promise.all([github.issue(), github.issue()]);
+      expect(first.statusCode).toBe(200);
+      expect(second.statusCode).toBe(200);
+      expect(first.json().token).toBe("SECRET_TOKEN_1");
+      expect(second.json()).toEqual(first.json());
+      expect(github.mint).toHaveBeenCalledTimes(1);
+    } finally {
+      await github.app.close();
+    }
+  });
+
+  it("returns an unexpired token on a GitHub outage, recording the failed refresh", async () => {
+    const github = await fakeGithub();
+    initOtel({ MARCH_OTEL: "1" });
+    const tracer = getActiveOtel().getTracer();
+    const startSpan = tracer.startSpan.bind(tracer);
+    const spans: Span[] = [];
+    const spy = vi.spyOn(tracer, "startSpan").mockImplementation((...args) => {
+      const span = startSpan(...args) as Span;
+      spans.push(span);
+      return span;
+    });
+    try {
+      const first = await github.issue();
+      expect(first.statusCode).toBe(200);
+
+      github.advance(hour - 1);
+      github.outage();
+      const fallback = await github.issue();
+      expect(fallback.statusCode).toBe(200);
+      expect(fallback.json()).toEqual(first.json());
+      expect(github.mint).toHaveBeenCalledTimes(2);
+      expect(spans.at(-1)).toMatchObject({
+        name: "tessera.issue",
+        status: { code: SpanStatusCode.ERROR },
+        attributes: { cache: "hit", reason: "provider_unavailable" },
+      });
+      expect(await github.status()).toMatchObject({
+        providers: expect.arrayContaining([
+          expect.objectContaining({ provider: "github-app", state: "degraded", last_error: "provider_unavailable" }),
+        ]),
+        cache: { entries: 1 },
+      });
+
+      github.advance(1);
+      expect((await github.status()).cache).toEqual({ entries: 0 });
+      const expired = await github.issue();
+      expect(expired.statusCode).toBe(503);
+      expect(expired.headers["retry-after"]).toBe("5");
+      expect(expired.json().error.code).toBe("provider_unavailable");
+      expect(github.mint).toHaveBeenCalledTimes(3);
+    } finally {
+      spy.mockRestore();
+      initOtel({});
+      await github.app.close();
+    }
+  });
+
+  it("evicts the cached token even when explicit refresh fails", async () => {
+    const github = await fakeGithub();
+    try {
+      expect((await github.issue()).statusCode).toBe(200);
+      expect((await github.status()).cache).toEqual({ entries: 1 });
+
+      github.outage();
+      const failed = await github.issue(true);
+      expect(failed.statusCode).toBe(503);
+      expect(failed.json().error.code).toBe("provider_unavailable");
+      expect((await github.status()).cache).toEqual({ entries: 0 });
+
+      const next = await github.issue();
+      expect(next.statusCode).toBe(503);
+      expect(next.json().error.code).toBe("provider_unavailable");
+      expect(github.mint).toHaveBeenCalledTimes(3);
+    } finally {
+      await github.app.close();
+    }
+  });
 });

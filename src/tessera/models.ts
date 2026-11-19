@@ -25,6 +25,7 @@ export interface ProviderIssueResult {
   access: AccessLevel;
   repo: string | null;
   cache: "hit" | "miss" | "n/a";
+  degradedReason?: "provider_unavailable";
 }
 export interface ProviderStatus {
   provider: string;
@@ -40,6 +41,7 @@ export interface CredentialProvider {
   start(): Promise<void>;
   issue(request: ProviderIssueRequest): Promise<ProviderIssueResult>;
   status(): ProviderStatus;
+  cacheSize?(): number;
 }
 const ERRORS = {
   unauthorized: [401, "Client authentication required"],

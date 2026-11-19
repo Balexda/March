@@ -1,6 +1,6 @@
 import Fastify, { type FastifyBaseLogger, type FastifyInstance } from "fastify";
 import { emitTesseraSpan } from "../observability/tessera-trace.js";
-import { ProviderRegistry, TesseraError, denyAuthorization, parseTokenRequest, type AuthorizationBoundary, type CredentialProvider, type TokenRequest } from "./models.js";
+import { ProviderRegistry, TesseraError, denyAuthorization, parseTokenRequest, type AuthorizationBoundary, type CredentialProvider, type ProviderIssueResult, type TokenRequest } from "./models.js";
 
 export interface BuildTesseraServerOptions {
   providers?: CredentialProvider[];
@@ -15,7 +15,7 @@ export function buildTesseraServer(options: BuildTesseraServerOptions = {}): Fas
   const startedAt = options.startedAt ?? Date.now();
   // Silence Fastify's automatic error serializers: they may include request headers or bodies.
   const app = options.logger ? Fastify({ loggerInstance: options.logger, disableRequestLogging: true }) : Fastify({ logger: false });
-  const requests = new WeakMap<object, { caller: string; parsed?: TokenRequest; start: number; code?: string }>();
+  const requests = new WeakMap<object, { caller: string; parsed?: TokenRequest; start: number; code?: string; cache?: ProviderIssueResult["cache"] }>();
   app.addHook("onRequest", async (request) => {
     if (request.routeOptions.url !== "/v1/github/token") return;
     const context = { caller: "unknown", start: Date.now() };
@@ -28,8 +28,8 @@ export function buildTesseraServer(options: BuildTesseraServerOptions = {}): Fas
     const req = context.parsed;
     const outcome = reply.statusCode === 200 ? "issued" : reply.statusCode < 500 ? "denied" : "failed";
     // Caller names come from the trusted authorization boundary; no raw user input is logged.
-    const fields = { caller: context.caller, identity: req?.identity ?? "unknown", provider: req ? `github-${req.identity}` : "unknown", access: req?.access ?? "unknown", cache: "miss", outcome, reason: context.code ?? "none" };
-    emitTesseraSpan("tessera.issue", { sliceId: typeof request.headers["x-march-slice-id"] === "string" ? request.headers["x-march-slice-id"] : undefined, error: reply.statusCode >= 400, attributes: fields, startTimeMs: context.start });
+    const fields = { caller: context.caller, identity: req?.identity ?? "unknown", provider: req ? `github-${req.identity}` : "unknown", access: req?.access ?? "unknown", cache: context.cache ?? "n/a", outcome, reason: context.code ?? "none" };
+    emitTesseraSpan("tessera.issue", { sliceId: typeof request.headers["x-march-slice-id"] === "string" ? request.headers["x-march-slice-id"] : undefined, error: reply.statusCode >= 400 || context.code === "provider_unavailable", attributes: fields, startTimeMs: context.start });
     app.log.info(fields, "tessera issuance handled");
   });
   app.setErrorHandler((error, request, reply) => {
@@ -46,7 +46,7 @@ export function buildTesseraServer(options: BuildTesseraServerOptions = {}): Fas
     providers: (["app", "user"] as const).map(identity => {
       try { return registry.select(identity).status(); }
       catch { return { provider: `github-${identity}`, state: "unconfigured", login: null, credential_expires_at: null, expiry_warning: false, last_error: null }; }
-    }), soonest_expiry: null, cache: { entries: 0 },
+    }), soonest_expiry: null, cache: { entries: registry.all().reduce((total, provider) => total + (provider.cacheSize?.() ?? 0), 0) },
   }));
   app.post("/v1/github/token", async request => {
     const parsed = parseTokenRequest(request.body);
@@ -54,6 +54,8 @@ export function buildTesseraServer(options: BuildTesseraServerOptions = {}): Fas
     context.parsed = parsed;
     await authorization.authorize(context.caller, parsed);
     const result = await registry.select(parsed.identity).issue(parsed);
+    context.cache = result.cache;
+    context.code = result.degradedReason;
     return { token: result.token, expires_at: result.expiresAt, identity: result.identity,
       commit_identity: result.commitIdentity, access: parsed.access, repo: parsed.identity === "app" ? parsed.repo : null };
   });
