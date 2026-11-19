@@ -1,10 +1,13 @@
 /** @l0 @deterministic @ci */
 import { describe, expect, it, vi } from "vitest";
-import { emptyMultiProfileState, reduceMulti, type HeraldEvent, type ReviewRequestRecord } from "../../../herald/events.js";
+import { emptyMultiProfileState, reduceMulti, type HeraldEvent, type ReviewRequestRecord, type ReviewBackoffRecord } from "../../../herald/events.js";
+import { approvalSatisfied, resolveMergePolicyRow } from "../../../herald/profiles/merge-policy.js";
+import { backoffMs } from "../pure/self-heal.js";
 import { validateEvent } from "../../../herald/service/routes.js";
 import { reviewRequestBody } from "../../../observe/coderabbit-review.js";
 import { classifyReviewerComment } from "../../../observe/review-bot-comments.js";
 import { apply, reviewRequestLimits, type ReviewRequestHistory } from "./coderabbit-rereview.js";
+import { CodeRabbitBackoff, reviewSignals } from "./review-backoff.js";
 import type { HandlerContext, LoopState } from "../state/types.js";
 
 const head = "a".repeat(40);
@@ -18,11 +21,12 @@ function fixture({
   pr = {},
   command = "smithy.forge",
   mode = "comment-trigger" as "auto" | "comment-trigger",
-  history = { byProfile: {} } as ReviewRequestHistory,
+  history = { byProfile: {} } as Pick<ReviewRequestHistory, "byProfile"> & Partial<ReviewRequestHistory>,
   cap = Infinity,
   time = at,
+  profile = "p",
 } = {}) {
-  const ctx = { ts: time, meta: { profile: "p" } } as HandlerContext;
+  const ctx = { ts: time, meta: { profile } } as HandlerContext;
   const state = {
     repoPath: "/repo",
     mergePolicy: { reviewRequests: { byTaskType: { forge: { reviewers: [{ id: "coderabbit", mode }] } } } },
@@ -34,10 +38,10 @@ function fixture({
     } } },
   } as unknown as LoopState;
   const deps = {
-    history, limits: { dailyCap: cap, waitMs: 30 * 60_000 },
+    history: { backoff: new CodeRabbitBackoff(vi.fn().mockResolvedValue({ seq: 1, ts: time })), ...history }, limits: { dailyCap: cap, waitMs: 30 * 60_000 },
     appendIntent: vi.fn<(record: ReviewRequestRecord) => Promise<void>>().mockResolvedValue(undefined),
     findTrigger: vi.fn().mockResolvedValue(undefined),
-    commentOnPr: vi.fn().mockResolvedValue(undefined),
+    commentOnPr: vi.fn().mockResolvedValue({ ok: true }),
   };
   return { tick: () => apply(ctx, state, deps), ctx, deps, state };
 }
@@ -172,7 +176,12 @@ describe("CodeRabbit review requests", () => {
   });
 
   it("observes back-off and refuses a zero cap", async () => {
-    const backedOff = fixture({ history: { byProfile: {}, backoffUntil: expired } });
+    const backoff = new CodeRabbitBackoff(vi.fn());
+    await backoff.beginTick({
+      ...emptyMultiProfileState(),
+      reviewBackoffs: { coderabbit: { reviewer: "coderabbit", until: expired, attempts: 1, cause: "http_429", seq: 1, ts: at } },
+    }, [], Date.parse(at), vi.fn(), vi.fn());
+    const backedOff = fixture({ history: { byProfile: {}, backoff } });
     const deferred = await backedOff.tick();
     expect(deferred.failures).toHaveLength(0);
     expect(deferred.actions[0]).toEqual(expect.objectContaining({ action: "review-request-deferred", outcome: "backoff" }));
@@ -192,5 +201,148 @@ describe("CodeRabbit review requests", () => {
     expect(reviewRequestLimits({ MARCH_CODERABBIT_REVIEWS_PER_DAY: "-1", MARCH_REVIEW_WAIT_MINUTES: "0" }, warn))
       .toEqual({ waitMs: 1_800_000, dailyCap: Infinity });
     expect(warn).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("CodeRabbit account-wide back-off", () => {
+  function ledger() {
+    const fold = emptyMultiProfileState();
+    const append = vi.fn(async (profile: string, record: ReviewBackoffRecord, id: string) => {
+      const event = { ...record, id, profile, seq: fold.seq + 1, ts: at, source: "legate", type: "review.backoff" } as const;
+      reduceMulti(fold, event);
+      return event;
+    });
+    return { fold, append, backoff: new CodeRabbitBackoff(append) };
+  }
+
+  it("validates transitions and folds by stream sequence across profiles", async () => {
+    const { fold, append } = ledger();
+    const record = { reviewer: "coderabbit", until: expired, attempts: 1, cause: "http_429" } as const;
+    const event = { ...record, type: "review.backoff" };
+    expect(validateEvent(event).ok).toBe(true);
+    for (const invalid of [
+      { reviewer: "codex" }, { cause: "unknown" }, { attempts: -1 }, { attempts: 1.5 },
+      { attempts: 0 }, { cause: "reset" }, { until: "2026-11-31T12:00:00Z" },
+      { until: expired.replace("Z", "+01:00") },
+    ]) expect(validateEvent({ ...event, ...invalid }).ok).toBe(false);
+    expect(fold.reviewBackoffs).toBeUndefined();
+    await append("p", record, "limited");
+    await append("q", { ...record, cause: "reset", attempts: 0, until: at }, "reset");
+    expect(fold.reviewBackoffs?.coderabbit).toMatchObject({ seq: 2, attempts: 0, until: at });
+  });
+
+  it("honours a 429 reset across profiles and replay, then applies bounded exponential delay without a fallback", async () => {
+    const { backoff, fold, append } = ledger();
+    const report = vi.fn();
+    await backoff.beginTick(fold, [], Date.parse(at), vi.fn(), report);
+    const from = fixture({ history: { byProfile: {}, backoff } });
+    from.deps.commentOnPr.mockResolvedValueOnce({ ok: false, kind: "rate_limited", resetAt: expired });
+    expect((await from.tick()).actions).toMatchObject([{ outcome: "backoff", rateLimitHit: true }]);
+    expect(fold.reviewBackoffs?.coderabbit).toMatchObject({ until: new Date(expired).toISOString(), attempts: 1, cause: "http_429" });
+
+    const other = fixture({ profile: "q", history: { byProfile: {}, backoff } });
+    other.state.mergePolicy = { reviewRequests: { byTaskType: { forge: { reviewers: [
+      { id: "coderabbit", mode: "comment-trigger" }, { id: "copilot", mode: "api", identity: "user" },
+    ] } } } } as typeof other.state.mergePolicy;
+    expect((await other.tick()).actions).toMatchObject([{ outcome: "backoff" }]);
+    expect(other.deps.appendIntent).not.toHaveBeenCalled();
+    expect(other.deps.commentOnPr).not.toHaveBeenCalled();
+
+    const restarted = new CodeRabbitBackoff(append);
+    await restarted.beginTick(fold, [], Date.parse(expired) - 1, vi.fn(), report);
+    expect(restarted.blocked(Date.parse(expired) - 1)).toBe(true);
+    let time = expired;
+    for (let attempts = 2; attempts <= 10; attempts++) {
+      await restarted.beginTick(fold, [], Date.parse(time), vi.fn(), report);
+      const next = fixture({ time, profile: "q", history: { byProfile: {}, backoff: restarted } });
+      next.deps.commentOnPr.mockResolvedValueOnce({ ok: false, kind: "rate_limited" });
+      await next.tick();
+      time = new Date(Date.parse(time) + backoffMs(attempts, "coderabbit")).toISOString();
+      expect(fold.reviewBackoffs?.coderabbit).toMatchObject({ until: time, attempts, cause: "http_429" });
+    }
+    expect(backoffMs(10, "coderabbit")).toBe(backoffMs(9, "coderabbit"));
+  });
+
+  it("processes another profile's notices before requests, deduplicates replay, and resets on fresh review", async () => {
+    const { backoff, fold, append } = ledger();
+    const report = vi.fn();
+    const fresh = "2026-11-16T23:01:00Z";
+    const pr = {
+      number: 42, head_sha: head, reviews_complete: true,
+      reviewer_notices: [
+        { reviewer: "coderabbit", kind: "paused", created_at: at, comment_id: 12 },
+        { reviewer: "coderabbit", kind: "rate_limited", created_at: at, reset_at: expired, comment_id: 13 },
+        { reviewer: "coderabbit", kind: "rate_limited", created_at: "2026-11-16T20:00:00Z", comment_id: 14 },
+      ],
+      reviews: [{ login: "coderabbitai", author_kind: "bot" as const, state: "APPROVED" as const, commit_sha: head, submitted_at: fresh }],
+      coderabbit: { decision: "APPROVED", review_times_by_head: { [head]: "2026-11-16T22:59:00Z", [oldHead]: fresh } },
+    };
+    const observations = () => reviewSignals("q", "owner/repo", "s", pr);
+    await backoff.beginTick(fold, observations(), Date.parse(at), vi.fn(), report);
+    expect(append.mock.calls.map(([, update]) => update.cause)).toEqual(["paused_comment", "rate_limited_comment"]);
+    expect(append.mock.calls[1][1]).toMatchObject({ until: new Date(expired).toISOString(), attempts: 2 });
+    const other = fixture({ history: { byProfile: {}, backoff } });
+    expect((await other.tick()).actions).toMatchObject([{ outcome: "backoff" }]);
+    expect(other.deps.appendIntent).not.toHaveBeenCalled();
+
+    const restarted = new CodeRabbitBackoff(append);
+    await restarted.beginTick(fold, observations(), Date.parse(fresh), vi.fn(), report);
+    expect(append).toHaveBeenCalledTimes(2);
+    expect(restarted.blocked(Date.parse(fresh))).toBe(true);
+    expect(approvalSatisfied(resolveMergePolicyRow(undefined, "forge").requirements, pr)).toBe(true);
+    pr.coderabbit.review_times_by_head[head] = fresh;
+    await restarted.beginTick(fold, observations(), Date.parse(fresh), vi.fn(), report);
+    expect(fold.reviewBackoffs?.coderabbit).toMatchObject({ cause: "reset", attempts: 0 });
+    const afterReset = new CodeRabbitBackoff(append);
+    await afterReset.beginTick(fold, observations(), Date.parse(expired), vi.fn(), report);
+    expect(append).toHaveBeenCalledTimes(3);
+    expect(afterReset.blocked(Date.parse(expired))).toBe(false);
+  });
+
+  it("retains the intent and blocks other profiles if a failed post cannot be recorded", async () => {
+    const { backoff, fold, append } = ledger();
+    const report = vi.fn();
+    await backoff.beginTick(fold, [], Date.parse(at), vi.fn(), report);
+    const history = { byProfile: {}, backoff };
+    const from = fixture({ history });
+    const other = fixture({ profile: "q", history });
+    from.deps.commentOnPr.mockResolvedValueOnce({ ok: false, kind: "failed", detail: "timeout" });
+    append.mockRejectedValueOnce(new Error("Herald unavailable"));
+    expect((await from.tick()).failures).toMatchObject([{ outcome: "failed" }, { outcome: "failed" }]);
+    expect(from.deps.history.byProfile.p).toHaveLength(1);
+    expect((await other.tick()).actions).toMatchObject([{ outcome: "backoff" }]);
+    expect(other.deps.appendIntent).not.toHaveBeenCalled();
+    await backoff.beginTick(fold, [], Date.parse(at) + 1, vi.fn(), report);
+    expect(fold.reviewBackoffs?.coderabbit).toMatchObject({ cause: "post_failed", attempts: 1 });
+    expect(backoff.blocked(Date.parse(at) + 1)).toBe(true);
+  });
+
+  it("holds all posts until lookup and pending back-off persistence succeed on startup", async () => {
+    const { backoff, fold, append } = ledger();
+    reduceMulti(fold, {
+      reviewer: "coderabbit", until: at, attempts: 2, cause: "http_429",
+      profile: "q", seq: 1, ts: at, id: "prior", source: "legate", type: "review.backoff",
+    });
+    reduceMulti(fold, { ...intent, profile: "p", seq: 2, ts: at, id: "intent", source: "legate", type: "review.requested" });
+    const report = vi.fn();
+    const verify = vi.fn().mockRejectedValueOnce(new Error("missing page")).mockResolvedValue(false);
+    append.mockRejectedValueOnce(new Error("Herald unavailable"));
+    const other = fixture({ time: expired, profile: "q", history: { byProfile: {}, backoff } });
+    const tick = () => backoff.beginTick(fold, [], Date.parse(expired), verify, report);
+    await tick();
+    expect(append).not.toHaveBeenCalled();
+    await other.tick();
+    expect(other.deps.appendIntent).not.toHaveBeenCalled();
+    await tick();
+    await other.tick();
+    expect(other.deps.commentOnPr).not.toHaveBeenCalled();
+    expect(report).toHaveBeenCalledWith(expect.objectContaining({ profile: "p" }), "failed", expect.stringContaining("persist"));
+    await tick();
+    expect(verify).toHaveBeenCalledTimes(2);
+    expect(append.mock.calls[0]).toEqual(append.mock.calls[1]);
+    expect(fold.reviewBackoffs?.coderabbit).toMatchObject({
+      attempts: 3, signalAt: at, until: new Date(Date.parse(at) + backoffMs(3, "coderabbit")).toISOString(),
+    });
+    expect((await other.tick()).actions).toMatchObject([{ outcome: "requested" }]);
   });
 });

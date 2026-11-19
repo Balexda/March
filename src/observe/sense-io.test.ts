@@ -718,8 +718,8 @@ describe("queryPrForBabysit", () => {
         { reviewer: "codex", kind: "status", created_at },
         { reviewer: "coderabbit", kind: "status", created_at },
         { reviewer: "coderabbit", kind: "in_progress", created_at },
-        { reviewer: "coderabbit", kind: "rate_limited", created_at, reset_at: "2026-11-15T19:00:07.000Z" },
-        { reviewer: "coderabbit", kind: "paused", created_at },
+        { reviewer: "coderabbit", kind: "rate_limited", created_at, comment_id: 204, reset_at: "2026-11-15T19:00:07.000Z" },
+        { reviewer: "coderabbit", kind: "paused", created_at, comment_id: 205 },
       ]);
       expect(babysit(statusOnly)).not.toContain("comment-fix");
       expect(mergeBlocker({}, statusOnly)).toBe("none");

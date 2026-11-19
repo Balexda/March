@@ -1,3 +1,4 @@
+import type { CodeRabbitBackoff, ReviewPostOutcome } from "./review-backoff.js";
 import type { ReviewRequestRecord } from "../../../herald/events.js";
 import { approvalSatisfied, changesRequestedSatisfied, resolveMergePolicyRow } from "../../../herald/profiles/merge-policy.js";
 import { reviewRequestBody } from "../../../observe/coderabbit-review.js";
@@ -28,7 +29,7 @@ export function reviewRequestLimits(env: NodeJS.ProcessEnv, warn: (message: stri
 
 export interface ReviewRequestHistory {
   byProfile: Record<string, ReviewRequestRecord[]>;
-  backoffUntil?: string;
+  backoff: CodeRabbitBackoff;
 }
 
 export interface CodeRabbitRereviewDeps {
@@ -37,7 +38,7 @@ export interface CodeRabbitRereviewDeps {
   now?: () => string;
   appendIntent(record: ReviewRequestRecord): Promise<unknown>;
   findTrigger(repoPath: string, prNumber: number, head: string, sliceId: string): Promise<string | undefined>;
-  commentOnPr(repoPath: string, prNumber: number, body: string, sliceId: string): Promise<void>;
+  commentOnPr(repoPath: string, prNumber: number, body: string, sliceId: string): Promise<ReviewPostOutcome>;
 }
 
 type Outcome = "requested" | "failed" | "cap_exhausted" | "backoff";
@@ -102,13 +103,17 @@ export async function apply(ctx: HandlerContext, state: LoopState, deps?: CodeRa
       reason = "stale_approval";
     }
 
-    const report = (outcome: Outcome, detail: string) => {
+    const report = (outcome: Outcome, detail: string, rateLimitHit?: boolean) => {
       // Back-off defers the request; it is not a failure.
       const deferred = outcome === "backoff";
       const action = outcome === "requested" ? "review-request" : deferred ? "review-request-deferred" : "review-request-failed";
-      const entry = { action, sliceId, pr: { number: pr.number, url: pr.url }, detail, outcome, reason };
+      const entry = { action, sliceId, pr: { number: pr.number, url: pr.url }, detail, outcome, reason, rateLimitHit };
       (outcome === "requested" || deferred ? res.actions : res.failures).push(entry);
     };
+    if (deps.history.backoff.blocked(now)) {
+      report("backoff", "CodeRabbit is in back-off or awaiting outcome verification");
+      continue;
+    }
     try {
       if (reason === "timeout_retry") {
         const markedAt = trigger ?? await deps.findTrigger(repoPath, pr.number, head, sliceId);
@@ -130,10 +135,6 @@ export async function apply(ctx: HandlerContext, state: LoopState, deps?: CodeRa
       report("failed", `Could not verify prior CodeRabbit trigger: ${String(error)}`);
       continue;
     }
-    if (Date.parse(deps.history.backoffUntil ?? "") > now) {
-      report("backoff", "CodeRabbit is in back-off");
-      continue;
-    }
     const at = new Date(Date.parse(deps.now?.() ?? ctx.ts)).toISOString();
     const day = at.slice(0, 10);
     const used = dailyCap === Infinity ? 0 : Object.values(deps.history.byProfile).flat()
@@ -151,12 +152,20 @@ export async function apply(ctx: HandlerContext, state: LoopState, deps?: CodeRa
       report("failed", `Could not record CodeRabbit intent: ${String(error)}`);
       continue;
     }
-    try {
-      await deps.commentOnPr(repoPath, pr.number, reviewRequestBody(head), sliceId);
+    const outcome = await deps.commentOnPr(repoPath, pr.number, reviewRequestBody(head), sliceId)
+      .catch((error): ReviewPostOutcome => ({ ok: false, kind: "failed", detail: String(error) }));
+    if (outcome.ok) {
       report("requested", `Requested CodeRabbit review at ${head}`);
-    } catch (error) {
-      report("failed", `Could not post CodeRabbit trigger: ${String(error)}`);
+      continue;
     }
+    if (outcome.kind === "failed") report("failed", `Could not post CodeRabbit trigger: ${outcome.detail}`);
+    const signalAt = deps.now?.() ?? at;
+    await deps.history.backoff.record({
+      profile, sliceId, pr: pr.number, at: signalAt,
+      ...(outcome.kind === "rate_limited"
+        ? { cause: "http_429", resetAt: outcome.resetAt }
+        : { cause: "post_failed" }),
+    }, Date.parse(signalAt), (_target, decision, detail, hit) => report(decision, detail, hit));
   }
   return res;
 }

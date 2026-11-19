@@ -694,6 +694,8 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
           kind: classification.kind,
           ...(classification.kind === "in_progress" ? { head_sha: codeRabbitNoticeHead(body) } : {}),
           created_at: c.createdAt,
+          ...((classification.kind === "rate_limited" || classification.kind === "paused") && Number.isSafeInteger(c.databaseId)
+            ? { comment_id: c.databaseId } : {}),
           ...(classification.resetAt ? { reset_at: classification.resetAt } : {}),
         });
       }

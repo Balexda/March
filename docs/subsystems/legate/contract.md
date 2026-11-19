@@ -135,3 +135,25 @@ Legate's loop behavior follows the low-touch execution model in `docs/vision.md`
 | Oversized or noisy diagnostics | Legate surfaces bounded summaries through status, heartbeat, events, processor requests, and logs; callers are not required to parse unbounded terminal output. |
 
 All Legate error modes resolve as clean tick exits, emitted events, processor requests, terminal labels, or bounded diagnostics. They do not require an interactive prompt inside the autonomous loop.
+
+### CodeRabbit account-wide pacing
+
+Legate processes throttling notices and fresh current-head reviews across
+profiles before evaluating review requests. An HTTP 429 or other GitHub rate
+limit, a rate-limit notice, a pause notice, or a failed post records
+`review.backoff` in Herald. A usable stated reset takes precedence over the
+bounded exponential delay. The deadline covers every CodeRabbit comment-trigger
+request. Legate waits for Herald to acknowledge pending updates and retries them
+on later ticks. Replay preserves the attempts, deadline, and processed notice
+identities. On startup an unanswered latest intent without a later back-off
+needs a complete trigger lookup. An unknown post outcome records `post_failed`
+with delay anchored at the intent's timestamp before posting can resume.
+A fresh review on a current head clears attempts, and incoming review verdicts
+continue to be evaluated by the merge gate during back-off.
+
+Throttle and pause decisions and active deadline refusals emit a non-errored
+`legate.review.request` child span and `review-request-deferred` action.
+Post and persistence failures emit errored child spans. Both paths count
+decisions by reviewer and outcome. New HTTP rate-limit hits and rate-limit
+notices also increment `march.legate.review.rate_limited` with only the
+`reviewer` label.

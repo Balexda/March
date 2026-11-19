@@ -53,7 +53,8 @@ export type TransitionEvent = Extract<
       | "slice.requeue.requested"
       | "slice.requeue.refused"
       | "retry.counted"
-      | "review.requested";
+      | "review.requested"
+      | "review.backoff";
   }
 >;
 
@@ -247,7 +248,7 @@ export class LegateHerald {
    * profile. Herald forces the source to `legate` and assigns the seq. Returns
    * the stored event.
    */
-  async append(profile: string, event: TransitionEvent): Promise<HeraldEvent> {
+  async append(profile: string, event: TransitionEvent & { id?: string }): Promise<HeraldEvent> {
     return this.client.append({ ...event, profile });
   }
 

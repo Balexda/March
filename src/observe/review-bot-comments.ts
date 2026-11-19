@@ -41,6 +41,7 @@ export interface ReviewerNotice {
   reviewer: string;
   kind: NoticeKind;
   created_at: string;
+  comment_id?: number;
   reset_at?: string;
   head_sha?: string;
 }

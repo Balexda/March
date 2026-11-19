@@ -161,6 +161,7 @@ let loopActions: Counter | undefined;
 let tickDuration: Histogram | undefined;
 let dependencyUnblock: Counter | undefined;
 let reviewRequests: Counter | undefined;
+let reviewRateLimits: Counter | undefined;
 
 // The observable gauges read this map — one snapshot PER PROFILE, updated on
 // every recordLoopHeartbeat. The single shared legate ticks each profile in turn
@@ -218,6 +219,10 @@ function ensureInstruments(meter: Meter): void {
   });
   reviewRequests = meter.createCounter("march.legate.review.requests", {
     description: "Review request decisions by reviewer and outcome",
+    unit: "1",
+  });
+  reviewRateLimits = meter.createCounter("march.legate.review.rate_limited", {
+    description: "Reviewer rate-limit hits",
     unit: "1",
   });
   tickDuration = meter.createHistogram("march.legate.tick.duration", {
@@ -582,4 +587,11 @@ export function recordReviewRequest(reviewer: "coderabbit", outcome: ReviewReque
   // Back-off defers the request; nothing failed, so it stays out of the action counter.
   if (outcome === "backoff") return;
   loopActions!.add(1, { action: outcome === "requested" ? "review-request" : "review-request-failed" });
+}
+
+export function recordReviewRateLimit(reviewer: "coderabbit"): void {
+  const otel = getActiveOtel();
+  if (!otel?.enabled) return;
+  ensureInstruments(otel.getMeter());
+  reviewRateLimits!.add(1, { reviewer });
 }
