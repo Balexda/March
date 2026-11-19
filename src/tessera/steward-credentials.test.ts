@@ -297,6 +297,62 @@ describe("steward Git shim", { timeout: 30_000 }, () => {
     expect(helper.stdout).not.toContain("host-helper-ran");
   });
 
+  async function fakeSsh() {
+    const dir = join(root, "fake-ssh");
+    await mkdir(dir, { recursive: true });
+    const log = join(root, "ssh-connections");
+    // `ssh -G` resolves ssh_config host aliases; "gh" maps to GitHub here.
+    await writeFile(join(dir, "ssh"), `#!/bin/sh
+if [ "$1" = -G ]; then
+  for arg; do last=$arg; done
+  case "$last" in gh) echo "hostname github.com" ;; *) echo "hostname \${last#*@}" ;; esac
+  exit 0
+fi
+echo "$*" >> '${log}'
+exit 1
+`, { mode: 0o755 });
+    return { PATH: `${dir}:${env.PATH}`, log };
+  }
+
+  it.each([
+    ["an alias of push", ["publish", "ssh://git@ssh.github.com:443/acme/widgets.git", "HEAD"]],
+    ["an ssh_config host alias", ["push", "gh:acme/widgets.git", "HEAD"]],
+  ])("refuses SSH to GitHub reached through %s", async (_case, args) => {
+    await setOrigin("https://github.com/acme/widgets.git");
+    await writeFile(join(root, ".gitconfig"),
+      "[alias]\npublish = push\n[user]\nname = Operator\nemail = operator@example.test\n");
+    expect((await run("git", ["commit", "-q", "--allow-empty", "-m", "work"])).code).toBe(0);
+    const ssh = await fakeSsh();
+    const result = await run(process.execPath, [gitShim, ...args], "", { PATH: ssh.PATH });
+    expect(result.code).not.toBe(0);
+    expect(result.stderr).toContain("Tessera Git: SSH to GitHub is disabled for stewards; use HTTPS.");
+    await expect(readFile(ssh.log, "utf8")).rejects.toThrow();
+  });
+
+  it("passes SSH to other hosts through to the real ssh", async () => {
+    await setOrigin("https://github.com/acme/widgets.git");
+    const ssh = await fakeSsh();
+    const result = await run(process.execPath, [gitShim, "ls-remote", "ssh://git@example.org/acme/widgets.git"],
+      "", { PATH: ssh.PATH });
+    expect(result.code).not.toBe(0);
+    expect(await readFile(ssh.log, "utf8")).toContain("git@example.org");
+  });
+
+  it("leaves push refspecs unchanged and normalizes only the repository operand", async () => {
+    const bare = join(root, "destination.git");
+    expect((await run("git", ["init", "-q", "--bare", bare])).code).toBe(0);
+    await setOrigin(bare);
+    for (const [name, value] of [["user.name", "Operator"], ["user.email", "operator@example.test"]]) {
+      expect((await run("git", ["config", name, value])).code).toBe(0);
+    }
+    expect((await run("git", ["commit", "-q", "--allow-empty", "-m", "work"])).code).toBe(0);
+    expect((await run("git", ["branch", "github.com"])).code).toBe(0);
+    const push = await run(process.execPath, [gitShim, "push", "--receive-pack", "git-receive-pack", "origin",
+      "github.com:acme/widgets"]);
+    expect(push.code, push.stderr).toBe(0);
+    expect((await run("git", ["-C", bare, "rev-parse", "--verify", "-q", "refs/heads/acme/widgets"])).code).toBe(0);
+  });
+
   it("refuses to run on Git older than 2.31", async () => {
     const legacy = join(root, "legacy-git");
     await mkdir(legacy);

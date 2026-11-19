@@ -35,8 +35,14 @@ XDG `config`/`credentials`. It keeps the operator's non-credential global
 settings, such as identity, signing and `core.hooksPath`, and drops global
 `credential.*`, `http.*`, `url.*` and `remote.*` settings. It reads repository
 settings for the repository selected by leading `-C`, `-c`, `--git-dir` and
-`--work-tree` options. Only URL operands of `clone`, `fetch`, `pull`, `push`
-and `ls-remote` are rewritten.
+`--work-tree` options. Only the repository operand (and `push --repo`) of
+`clone`, `fetch`, `pull`, `push` and `ls-remote` is rewritten; refspecs and
+other operands are left unchanged. Git's SSH command is replaced by a guard
+that refuses any SSH connection to GitHub, whether reached through an alias,
+an unusual URL spelling or an `ssh_config` host alias resolved with `ssh -G`.
+It passes other hosts to the operator's `GIT_SSH_COMMAND`, `GIT_SSH` or
+`ssh`; a repository `core.sshCommand` is not used. The `ext::` transport is
+disabled.
 The bot authenticates the push and opens the PR.
 
 ### Role Boundary
