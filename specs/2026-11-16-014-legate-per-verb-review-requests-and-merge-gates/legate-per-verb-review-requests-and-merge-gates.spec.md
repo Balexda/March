@@ -224,7 +224,7 @@ Recommended implementation sequence:
 | US1 | Resolve the Merge Gate From a Per-Verb Policy Table | — | specs/2026-11-16-014-legate-per-verb-review-requests-and-merge-gates/01-resolve-the-merge-gate-from-a-per-verb-policy-table.tasks.md |
 | US3 | Keep Bot Review Chatter From Creating Fix Work | — | specs/2026-11-16-014-legate-per-verb-review-requests-and-merge-gates/03-keep-bot-review-chatter-from-creating-fix-work.tasks.md |
 | US2 | Gate Forge on Allowlisted Bot Verdicts | US1 | specs/2026-11-16-014-legate-per-verb-review-requests-and-merge-gates/02-gate-forge-on-allowlisted-bot-verdicts.tasks.md |
-| US4 | Request a CodeRabbit Review Once per Head Commit | US1, US2, US3 | — |
+| US4 | Request a CodeRabbit Review Once per Head Commit | US1, US2, US3 | specs/2026-11-16-014-legate-per-verb-review-requests-and-merge-gates/04-request-a-coderabbit-review-once-per-head-commit.tasks.md |
 | US5 | Back Off When a Reviewer Is Rate-Limited | US4 | — |
 | US6 | Show Review State to the Operator | US2, US4, US5 | — |
 | US7 | Request Copilot Within a Hard Budget | US4, US5 | — |
