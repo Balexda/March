@@ -27,14 +27,20 @@
 #                     (#300). Leave UNSET only if a legacy legate is still
 #                     syncing; in the current model the legate never syncs, so
 #                     production should set this to 1.
+#   MARCH_HERALD_TESSERA_CLIENT_KEY
+#                     Herald's own Tessera client key (forwarded as
+#                     MARCH_TESSERA_CLIENT_KEY). All GitHub reads and the sync
+#                     fetch/pull use a repository-scoped app/read entitlement
+#                     over HTTPS — no ssh client / key / agent is used.
+#   MARCH_TESSERA_URL Tessera base URL (default http://tessera:9477 on `march`).
+#   MARCH_TESSERA_GH_TOKEN_FALLBACK
+#                     migration fallback, defaults to 1 here: when issuance
+#                     fails (e.g. no client key yet), GH_TOKEN / GITHUB_TOKEN is
+#                     used for the same scoped call, with a warning + the
+#                     march.tessera.client.fallbacks metric. Set 0 to require
+#                     Tessera.
 #   GH_TOKEN / GITHUB_TOKEN
-#                     GitHub token (the same one the rest of the stack uses).
-#                     With MARCH_HERALD_SYNC=1 Herald rewrites SSH remotes
-#                     (git@github.com:…) to token-authenticated HTTPS at fetch
-#                     time (#301), so the container needs NO ssh client / key /
-#                     agent. Required for private repos and for any host whose
-#                     remotes are SSH-configured; without a token Herald falls
-#                     back to the remote as-is (SSH), which fails in this image.
+#                     ambient GitHub token, used ONLY via the fallback above.
 #   MARCH_HERALD_ADMIN_TOKEN
 #                     break-glass operator token for POST /admin/events (#265).
 #                     LEAVE UNSET in prod — while unset the admin route 404s and is
@@ -65,6 +71,7 @@ services:
     ports:
       - "127.0.0.1:8818:8818" # localhost only — never public (deterministic herald port)
     environment:
+      - MARCH_SELF_BOT_LOGIN=${MARCH_SELF_BOT_LOGIN:-march-bot}
       - MARCH_OTEL=1
       - MARCH_OTEL_ENDPOINT=http://otel-lgtm:4318
       - MARCH_OTEL_SERVICE_NAME=march-herald
@@ -82,6 +89,14 @@ services:
       # HTTPS at fetch time (#301) so no ssh client/key is needed in-container.
       - GH_TOKEN=${GH_TOKEN:-}
       - GITHUB_TOKEN=${GITHUB_TOKEN:-}
+      # Tessera (scoped GitHub reads + sync). Herald requests app/read per
+      # profile repository with its OWN client key. Until that key is
+      # provisioned (US3), the explicit migration fallback lets the client use
+      # GH_TOKEN/GITHUB_TOKEN above when issuance fails (warned + counted).
+      # Set MARCH_TESSERA_GH_TOKEN_FALLBACK=0 to require Tessera; US9 removes it.
+      - MARCH_TESSERA_URL=${MARCH_TESSERA_URL:-http://tessera:${MARCH_TESSERA_PORT:-9477}}
+      - MARCH_TESSERA_CLIENT_KEY=${MARCH_HERALD_TESSERA_CLIENT_KEY:-}
+      - MARCH_TESSERA_GH_TOKEN_FALLBACK=${MARCH_TESSERA_GH_TOKEN_FALLBACK:-1}
       # Break-glass admin endpoint (#265): UNSET by default so POST /admin/events
       # 404s and is invisible. Uncomment + set ONLY while an operator is authoring a
       # corrective event, then comment it out again and recreate the container.

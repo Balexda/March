@@ -5,7 +5,7 @@
 # skill's `allowed-tools` and auto-mode doesn't pause.
 #
 # Usage:
-#   rerun-ci.sh <repo-path> <run-id>
+#   rerun-ci.sh <repo-path> <run-id> [slice-id]
 #
 # `<run-id>` is the GitHub Actions run id, e.g. extracted from
 # babysit-pr's `failed_checks[].url` field
@@ -14,7 +14,7 @@
 # Stdout: gh's confirmation line.
 # Exit:
 #   0 success
-#   1 gh call failed (e.g. run already passing, run id invalid)
+#   1 rerun requires operator action or the run could not be rerun
 #   2 invalid input
 #
 # IMPORTANT: rerun-ci re-runs *the same workflow against the same merge
@@ -36,12 +36,13 @@
 #   - Run is currently in_progress → wait for it to complete first.
 set -euo pipefail
 
-if [[ $# -ne 2 ]]; then
-  echo "usage: rerun-ci.sh <repo-path> <run-id>" >&2
+if [[ $# -lt 2 || $# -gt 3 ]]; then
+  echo "usage: rerun-ci.sh <repo-path> <run-id> [slice-id]" >&2
   exit 2
 fi
 
 REPO="$1"
+export MARCH_TESSERA_SLICE_ID="${3:-${MARCH_TESSERA_SLICE_ID:-}}"
 RUN_ID="$2"
 
 if [[ ! -d "$REPO/.git" && ! -f "$REPO/.git" ]]; then
@@ -53,15 +54,14 @@ if ! [[ "$RUN_ID" =~ ^[0-9]+$ ]]; then
   exit 2
 fi
 
+FORGE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/../tessera-forge.mjs"
 cd "$REPO"
-
-if ! command -v gh >/dev/null 2>&1; then
-  echo "gh not found on PATH" >&2
-  exit 1
-fi
 
 echo "rerun: run-id=$RUN_ID" >&2
 
 # `--failed` only re-runs the failed jobs (not the whole workflow), which
 # is what we want when CI is partially failed and partially passing.
-gh run rerun "$RUN_ID" --failed
+if ! node "$FORGE" gh write run rerun "$RUN_ID" --failed; then
+  echo "CI rerun did not complete. Ask the operator to rerun failed jobs for run $RUN_ID in GitHub Actions." >&2
+  exit 1
+fi

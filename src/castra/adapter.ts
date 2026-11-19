@@ -9,6 +9,7 @@ import {
 import { CASTRA_DEFAULT_MODEL } from "./config.js";
 import {
   recordStewardSession,
+  stewardLaunchWrapper,
   stewardSettingsPath,
   stewardPluginDir,
 } from "./steward-skills.js";
@@ -62,6 +63,8 @@ export function buildLaunchArgs(input: {
     // -b creates the branch; omit it to attach to an existing worktree.
     ...(input.createBranch === false ? [] : ["-b"]),
     "--title-lock",
+    "--wrapper",
+    stewardLaunchWrapper(),
     "--extra-arg",
     "--permission-mode",
     "--extra-arg",

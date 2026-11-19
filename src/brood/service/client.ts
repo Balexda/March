@@ -1,6 +1,7 @@
 import { broodPort } from "../config.js";
 import type { SweepResult } from "./steward-removal.js";
 import type {
+  BroodReadView,
   ListSessionsFilter,
   ExtractionReadiness,
   RegisterSessionInput,
@@ -206,10 +207,34 @@ export class BroodClient {
   }
 
   async list(filter: ListSessionsFilter = {}): Promise<SessionRecord[]> {
+    return (await this.getSessions(filter))?.sessions ?? [];
+  }
+
+  async listViews(filter: {
+    kind?: string;
+    status?: string;
+    reconcile?: boolean;
+  } = {}): Promise<BroodReadView[]> {
+    const views = (await this.getSessions(filter))?.views;
+    if (!Array.isArray(views)) {
+      throw new BroodClientError("Brood GET /sessions did not return read views.");
+    }
+    return views;
+  }
+
+  private async getSessions(filter: {
+    kind?: string;
+    status?: string;
+    parentId?: string;
+    reconcile?: boolean;
+  }): Promise<{ sessions?: SessionRecord[]; views?: BroodReadView[] }> {
     const params = new URLSearchParams();
-    if (filter.kind) params.set("kind", filter.kind);
-    if (filter.status) params.set("status", filter.status);
+    if (filter.kind !== undefined) params.set("kind", filter.kind);
+    if (filter.status !== undefined) params.set("status", filter.status);
     if (filter.parentId) params.set("parentId", filter.parentId);
+    if (filter.reconcile !== undefined) {
+      params.set("reconcile", String(filter.reconcile));
+    }
     const query = params.toString();
     const { status, body } = await this.request(
       "GET",
@@ -220,7 +245,7 @@ export class BroodClient {
         bodyError(body, `brood GET /sessions failed (${status})`),
       );
     }
-    return (body as { sessions?: SessionRecord[] }).sessions ?? [];
+    return body as { sessions?: SessionRecord[]; views?: BroodReadView[] };
   }
 
   async teardown(

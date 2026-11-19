@@ -18,6 +18,12 @@ describe("summarizeCodeRabbit", () => {
     expect(summarizeCodeRabbit(undefined, undefined)).toBeNull();
   });
 
+  it("withholds merge evidence for an incomplete review list", () => {
+    const standing = summarizeCodeRabbit([review("APPROVED", "a", "2026-11-16T09:00:00Z")], [], false);
+    expect(standing?.decision).toBe("APPROVED");
+    expect(standing?.decision_is_bot).toBeUndefined();
+  });
+
   it("takes the latest decisive review and skips COMMENTED ones (thread replies)", () => {
     // As on Balexda/March#561: CHANGES_REQUESTED on the old head, then a thread
     // reply filed as a COMMENTED review on the new head.
@@ -28,6 +34,7 @@ describe("summarizeCodeRabbit", () => {
     expect(standing).toEqual({
       decision: "CHANGES_REQUESTED",
       decision_commit_sha: "b1661ea",
+      decision_is_bot: true,
       decision_at: "2026-11-16T09:41:00Z",
       last_review_commit_sha: "24db731",
       last_request_at: null,

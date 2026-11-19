@@ -1,3 +1,4 @@
+import { TesseraClientError } from "../../../tessera/client.js";
 import type { LoopMeta } from "../meta.js";
 import type { LoopState, RequeueRequest, SliceExternalState, SmithyView } from "./types.js";
 import { looseSessionMatch, summarizeWorkers } from "../pure/session.js";
@@ -277,6 +278,20 @@ export function rebuildWorkingState(sys: SystemState, meta: LoopMeta): any {
       stage: s.stage,
       pr: pr ?? null,
     };
+    if (s.handledFeedback?.inline) slice.review_fix_seen_comment_ids = [...s.handledFeedback.inline];
+    if (s.handledFeedback?.conversation) slice.comment_fix_seen_comment_ids = [...s.handledFeedback.conversation];
+    // Restore the dispatch context `mark()` sets so a worker that parked after a
+    // fix dispatch still gets the bounded nudge/escalation after a restart (the
+    // restored seen-set alone would suppress both a fresh dispatch and the nudge).
+    if (s.lastFeedbackDispatch) {
+      slice.last_processor_action = s.lastFeedbackDispatch.kind === "inline" ? "review-fix" : "comment-fix";
+      slice.last_processor_action_key = s.lastFeedbackDispatch.key;
+      slice.last_processor_action_at = s.lastFeedbackDispatch.at;
+      // The steward-stuck check compares the live head against this baseline.
+      if (s.lastFeedbackDispatch.kind === "conversation") {
+        slice.comment_fix_head_sha = s.lastFeedbackDispatch.headSha ?? null;
+      }
+    }
     if (s.escalatedReason !== undefined) {
       slice.last_action_note = s.escalatedReason;
       // Restore the structured class too so bounded auto-recovery (#211) can tell a
@@ -451,6 +466,9 @@ export function shouldRefetchKnownPr(priorPr: any, live: OpenPrEntry | undefined
   // the slice stuck on the errored snapshot until unrelated activity bumps
   // updatedAt. Re-fetch until a successful detail read drops the error.
   if (prSnapshotErrored(priorPr)) return true;
+  // Incomplete review evidence (a failed or cut-short review page walk) fails the
+  // merge gate closed, so re-read it rather than wait for unrelated activity.
+  if (priorPr?.reviews_complete === false) return true;
   // Activity since we last looked (comment / review / commit all bump updatedAt).
   if (live.updatedAt !== priorPr.updated_at) return true;
   // Lifecycle states whose changes updatedAt can miss (see the helpers above).
@@ -584,6 +602,7 @@ export async function senseObserved(deps: SenseDeps, prev: SystemState): Promise
     if (!session && !observeEscalatedNoSession) continue;
     const sessionId = session ? String(session.id) : "";
     const sliceLike = {
+      id: sliceId,
       pr: s.pr,
       branch: s.branch,
       worktree_path: s.worktreePath,
@@ -631,6 +650,7 @@ export async function senseObserved(deps: SenseDeps, prev: SystemState): Promise
         entry.pr = pr;
       }
     } catch (err: any) {
+      if (err instanceof TesseraClientError) throw err;
       entry.pr = { error: err?.message || String(err) };
     }
     // Output observation needs a live session (Castra session output). Skip it

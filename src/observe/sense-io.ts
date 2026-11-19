@@ -1,12 +1,16 @@
-import { summarizeCodeRabbit, type CodeRabbitStanding } from "./coderabbit-review.js";
+import { hasMarchReplyMarker } from "./march-bot.js";
+import { createGitHubRead, type GitHubReadClient } from "./github-read.js";
+import { TesseraClientError } from "../tessera/client.js";
+import { isBotActor, summarizeCodeRabbit, type CodeRabbitStanding } from "./coderabbit-review.js";
+import { resolveOriginRepo, sameGitHubRepo } from "../shared/github-remote.js";
 import { execFile } from "node:child_process";
 import { CastraClient } from "../castra/client.js";
 import { gitHubAuthConfigArgs } from "../spawn/git-auth.js";
 import type { LoopMeta } from "../legate/loop/meta.js";
 import type { OpenPrIndex, SenseDeps, StaleRecheckTracker } from "../legate/loop/state/sense.js";
 import { createStaleRecheckTracker } from "../legate/loop/state/sense.js";
-import { isCodexReviewSummary, parseCodexReviewState, type CodexReviewState } from "./codex-review.js";
-import { isCodeRabbitComment, isReviewBotCommand } from "./review-bot-comments.js";
+import { parseCodexReviewState, type CodexReviewState } from "./codex-review.js";
+import { classifyReviewerComment, type ReviewerNotice } from "./review-bot-comments.js";
 import { readSmithyStatus } from "./smithy-status.js";
 
 /**
@@ -44,6 +48,8 @@ export interface SenseIoContext {
   /** Loaded loop meta (repo path, profile, worker group, …). */
   readonly meta: LoopMeta;
   readonly env?: NodeJS.ProcessEnv;
+  /** When set, run GitHub I/O with scoped app/read entitlements. */
+  readonly tessera?: GitHubReadClient;
   /** Castra client; defaults to one built from `env`. */
   readonly castra?: CastraClient;
   /** Timestamp source; defaults to ISO `now`. */
@@ -164,18 +170,11 @@ function failedChecks(statusCheckRollup: any) {
     }));
 }
 
-/** A GraphQL `author` that is a bot: typed `Bot`, or a login ending in `[bot]`
- *  (covers GitHub Apps that present as Users, e.g. Copilot). An ordinary user can
- *  be neither — GitHub logins cannot contain brackets. */
-function isBotActor(author: any): boolean {
-  return author?.__typename === "Bot" || String(author?.login || "").endsWith("[bot]");
-}
-
 /**
  * Reduce a PR's `reviews` nodes to human (non-bot) approval / changes-requested
  * counts, plus a separate bot approval count — the data the legate's merge gate
- * needs. Bot approvals never count as human ones; they only matter when a
- * profile's merge policy opts in (`botApproval`). Mirrors the jq the (retired)
+ * uses for human approvals and changes-requested. The bot count is retained
+ * for snapshot consumers. Mirrors the jq the (retired)
  * `check-merge-readiness.sh` ran:
  *  - a review is a bot's when `author.__typename === "Bot"` or its login ends in
  *    `[bot]` (covers GitHub Apps that present as Users, e.g. Copilot);
@@ -243,11 +242,60 @@ function addBranchVariants(branches: Set<string>, value: any): void {
 }
 
 /** Build the shared observation I/O bundle bound to a context. */
+/** Review fields shared by the first query and each follow-up page. */
+const REVIEW_PAGE_FIELDS = `pageInfo { hasNextPage endCursor }
+        nodes {
+          state
+          submittedAt
+          commit { oid }
+          author { login __typename }
+        }`;
+
+/** Timeout for an ambient `gh api graphql` call (the Tessera path sets its own). */
+const GRAPHQL_EXEC_OPTIONS = { timeout: 30_000, killSignal: "SIGKILL" } as const;
+
+/** Safety bound on follow-up review pages (100 reviews each) per PR per tick.
+ *  Normal PRs need none; this only stops a runaway walk. Past it the evidence is
+ *  marked incomplete and the review gates fail closed. */
+const MAX_EXTRA_REVIEW_PAGES = 100;
+
+function reviewPageArgs(owner: string, name: string, pr: unknown, cursor: string): string[] {
+  return [
+    "api",
+    "graphql",
+    "-F",
+    `owner=${owner}`,
+    "-F",
+    `name=${name}`,
+    "-F",
+    `pr=${pr}`,
+    "-f",
+    `cursor=${cursor}`,
+    "-f",
+    `query=query($owner: String!, $name: String!, $pr: Int!, $cursor: String!) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $pr) {
+      headRefOid
+      reviews(first: 100, after: $cursor) {
+        ${REVIEW_PAGE_FIELDS}
+      }
+    }
+  }
+}`,
+  ];
+}
+
 export function createSenseIo(ctx: SenseIoContext): SenseIo {
   const meta = ctx.meta;
   const env = ctx.env ?? process.env;
   const now = ctx.now ?? (() => new Date().toISOString());
   const warn = ctx.warn;
+  const github = ctx.tessera && createGitHubRead(ctx.tessera, env, execText);
+
+  function gh(args: string[], options: Record<string, unknown>, owner: string | null, sliceId?: string) {
+    if (!github) return execText("gh", args, options);
+    return github.gh(owner, args, sliceId);
+  }
   let castraClient = ctx.castra;
   const castra = (): CastraClient => (castraClient ??= new CastraClient({ env }));
   // The repo's `owner/name` never changes for a checkout, and this bundle is built
@@ -269,31 +317,64 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
     }
   }
 
+  /** Sentinel: state names a different repository than origin — observe nothing. */
+  const OWNER_MISMATCH = Symbol("owner-mismatch");
+
   async function repoOwner(state: any): Promise<string | null> {
-    const owner = state?.repo?.owner_with_name;
-    if (typeof owner === "string" && owner.length > 0) return owner;
-    if (ownerCache !== undefined) return ownerCache;
+    const owner = await resolveOwner(state);
+    return owner === OWNER_MISMATCH ? null : owner;
+  }
+
+  async function resolveOwner(state: any): Promise<string | null | typeof OWNER_MISMATCH> {
+    const configured = state?.repo?.owner_with_name;
     const repoPath = state?.repo?.path || meta.repo?.path;
+    const hasConfigured = typeof configured === "string" && configured.length > 0;
+    const hasPath = typeof repoPath === "string" && repoPath.length > 0;
     // Don't cache a "no path" miss — it's a caller/config gap, not a resolved fact.
-    if (typeof repoPath !== "string" || repoPath.length === 0) return null;
-    try {
-      const out = await execText("gh", ["repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"], {
-        cwd: repoPath,
-      });
-      ownerCache = out.trim() || null;
-    } catch {
-      ownerCache = null;
+    if (!hasPath) return hasConfigured ? configured : null;
+    if (ownerCache === undefined) {
+      // The checkout's `origin` is the repository Legate mutates
+      // (src/shared/github-remote.ts); observe the same one. `gh repo view` is
+      // only a fallback for a non-GitHub-shaped origin — it may pick another
+      // remote (e.g. `upstream`), but Legate then refuses to mutate.
+      const origin = await resolveOriginRepo(repoPath);
+      if (origin) {
+        ownerCache = origin;
+      } else if (hasConfigured) {
+        return configured;
+      } else if (github) {
+        // Tessera-scoped observation never falls back to the ambient gh login.
+        ownerCache = null;
+        return null;
+      } else {
+        try {
+          const out = await execText("gh", ["repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"], {
+            cwd: repoPath, timeout: 30_000, killSignal: "SIGKILL",
+          });
+          ownerCache = out.trim() || null;
+        } catch {
+          ownerCache = null;
+        }
+        return ownerCache;
+      }
     }
-    return ownerCache;
+    if (hasConfigured && ownerCache && !sameGitHubRepo(configured, ownerCache)) {
+      // A PR read from one repository must never be acted on in another.
+      warn?.(`repo owner mismatch: state names ${configured} but origin is ${ownerCache}; skipping observation`);
+      return OWNER_MISMATCH;
+    }
+    return ownerCache ?? (hasConfigured ? configured : null);
   }
 
   async function ghPrArgs(slice: any, state: any, fields: string): Promise<any> {
     const number = prNumber(slice);
     if (!number) return { skipped: true, reason: "missing_pr_number" };
     const args = ["pr", "view", number, "--json", fields];
-    const owner = await repoOwner(state);
+    const owner = await resolveOwner(state);
+    // Never fall back to the checkout's gh default repo on a mismatch.
+    if (owner === OWNER_MISMATCH) return { skipped: true, reason: "repo_owner_mismatch" };
     if (typeof owner === "string" && owner.length > 0) {
-      args.push("-R", owner);
+      args.push("-R", github ? `github.com/${owner}` : owner);
     }
     const options: Record<string, unknown> = {};
     const repoPath = state?.repo?.path || meta.repo?.path;
@@ -306,13 +387,18 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
   async function queryReviewThreads(
     owner: string | null,
     prNumberValue: any,
+    sliceId: string | undefined,
+    prAuthor: string,
   ): Promise<{
     threads: any[];
     reviews: any[];
     comments: any[];
+    reviewerNotices: ReviewerNotice[];
     codexReview: CodexReviewState | null;
     headRefOid: string | null;
     mergeStateStatus: string | null;
+    /** Whether every review page was read for the observed head. */
+    reviewsComplete: boolean;
     /** `undefined` when the query failed: unknown, never "CodeRabbit has not reviewed". */
     coderabbit: CodeRabbitStanding | null | undefined;
   }> {
@@ -320,15 +406,17 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
       threads: [],
       reviews: [],
       comments: [],
+      reviewerNotices: [],
       codexReview: null,
       headRefOid: null,
       mergeStateStatus: null,
       coderabbit: undefined,
+      reviewsComplete: false,
     };
     if (!owner) return empty;
     const [repoOwnerName, repoName] = owner.split("/");
     if (!repoOwnerName || !repoName) return empty;
-    const out = await execText("gh", [
+    const args = [
       "api",
       "graphql",
       "-F",
@@ -348,12 +436,7 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
       headRefOid
       mergeStateStatus
       reviews(first: 100) {
-        nodes {
-          state
-          submittedAt
-          commit { oid }
-          author { login __typename }
-        }
+        ${REVIEW_PAGE_FIELDS}
       }
       comments(last: 50) {
         nodes {
@@ -374,7 +457,7 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
               body
               path
               line
-              author { login }
+              author { login __typename }
               createdAt
             }
           }
@@ -383,9 +466,47 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
     }
   }
 }`,
-    ]);
-    const parsed = JSON.parse(out);
+    ];
+    const runGraphql = async (graphqlArgs: string[]): Promise<{ output: string; appLogin?: string }> => github
+      ? await github.ghWithIdentity(owner, graphqlArgs, sliceId)
+      // Bound the ambient-gh path like the Tessera one: a hung child must fail
+      // (marking any follow-up page incomplete) rather than stall observation.
+      : { output: await gh(graphqlArgs, GRAPHQL_EXEC_OPTIONS, owner, sliceId), appLogin: undefined };
+    const { output, appLogin } = await runGraphql(args);
+    const normalizedAppLogin = appLogin?.toLowerCase();
+    const isApp = (author: { login?: string; __typename?: string } | undefined) => {
+      const login = author?.login?.toLowerCase();
+      if (!login || !normalizedAppLogin) return false;
+      // GraphQL can return the bare app slug for a Bot actor.
+      return login === normalizedAppLogin || (author?.__typename === "Bot" && `${login}[bot]` === normalizedAppLogin);
+    };
+    const isMarchReply = (comment: any) => isApp(comment.author) || hasMarchReplyMarker(comment.body);
+    const parsed = JSON.parse(output);
     const pr = parsed?.data?.repository?.pullRequest || {};
+    // Follow the review cursor so >100-review PRs still yield complete evidence.
+    // Each extra page re-reads headRefOid: if the head moved mid-walk the pages
+    // describe different heads, so the evidence stays marked incomplete.
+    const reviewNodes: any[] = Array.isArray(pr?.reviews?.nodes) ? [...pr.reviews.nodes] : [];
+    let reviewPage = pr?.reviews?.pageInfo;
+    let reviewsComplete = reviewPage?.hasNextPage === false;
+    const seenCursors = new Set<string>();
+    for (let page = 0; reviewPage?.hasNextPage === true && page < MAX_EXTRA_REVIEW_PAGES; page++) {
+      const cursor = reviewPage.endCursor;
+      if (typeof cursor !== "string" || !cursor || seenCursors.has(cursor)) break;
+      seenCursors.add(cursor);
+      try {
+        const next = JSON.parse((await runGraphql(reviewPageArgs(repoOwnerName, repoName, prNumberValue, cursor))).output)
+          ?.data?.repository?.pullRequest;
+        if (!next || next.headRefOid !== pr?.headRefOid) break;
+        if (Array.isArray(next.reviews?.nodes)) reviewNodes.push(...next.reviews.nodes);
+        reviewPage = next.reviews?.pageInfo;
+        reviewsComplete = reviewPage?.hasNextPage === false;
+      } catch {
+        // A failed follow-up page leaves the evidence incomplete (fail closed).
+        reviewsComplete = false;
+        break;
+      }
+    }
     const nodes = pr?.reviewThreads?.nodes || [];
     const threads = nodes
       .filter((thread: any) => thread && thread.isResolved === false)
@@ -395,6 +516,7 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
           : [];
         const first = comments[0] || {};
         const last = comments[comments.length - 1] || first;
+        const lastIsMarch = isMarchReply(last);
         return {
           id: first.databaseId,
           path: first.path,
@@ -404,12 +526,10 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
           last_author: last.author?.login,
           last_comment_at: last.createdAt,
           comment_count: comments.length,
-          // Every comment's databaseId, so the legate can dedup /smithy.fix by
-          // comment id rather than last_comment_at (#224). A reply does carry a
-          // new, previously-unseen id; the dedup comes from the legate
-          // persisting the ids it has already dispatched for across ticks, so a
-          // thread's churning last_comment_at no longer re-arms the dispatch.
-          comment_ids: comments.map((comment: any) => comment.databaseId).filter((id: any) => id != null),
+          ...(lastIsMarch ? { last_comment_is_march: true } : {}),
+          needs_response: !lastIsMarch && (appLogin ? comments.length > 0 : last.author?.login !== prAuthor),
+          comment_ids: comments.filter((comment: any) => !isMarchReply(comment))
+            .map((comment: any) => comment.databaseId).filter((id: any) => id != null),
         };
       });
     // Conversation comments: PR-level (issue) comments NOT tied to a code line and
@@ -419,86 +539,74 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
     // pin us to the oldest comments and never surface a fresh request. `reacted_eyes`
     // reads `viewerHasReacted` for the EYES reaction from the legate token's
     // perspective: the legate posts :eyes: when it dispatches a comment-fix, so this
-    // is the human-visible, fold-independent half of the dedup (the persisted
-    // comment-id set is the authoritative half — the legate token shares the
-    // PR-author identity, so neither author nor reaction alone is decisive).
+    // is a human-visible acknowledgement alongside durable comment-id dedup.
     const commentNodes = Array.isArray(pr?.comments?.nodes) ? pr.comments.nodes : [];
-    // Codex's automatic review-status comment (one bot comment, edited in place as
-    // its review runs) is a status notice, not feedback. Left among the conversation
-    // comments it reads as a comment owing a reply: the legate dispatches a
-    // /smithy.fix turn for it and the steward posts a noise reply on every PR. It is
-    // dropped HERE, at sensing, so every consumer of `conversation_comments` agrees
-    // (the comment-fix dispatch and the `owes_comments` merge blocker). Matched on
-    // the body marker, not the author — Codex may also post real findings as
-    // comments, and those stay.
-    //
-    // Its machine-readable state is surfaced as `codex_review` instead. Unlike the
-    // drop, the state is read ONLY from a bot-authored summary: it is a per-commit
-    // review signal, so a commenter must not be able to forge it by pasting the
-    // markers. Codex keeps one summary per PR; should the sampled window ever hold
-    // several, the last (the connection is chronological, so the newest) decides.
     let codexReview: CodexReviewState | null = null;
-    for (const c of commentNodes) {
-      if (isCodexReviewSummary(c?.body) && isBotActor(c?.author)) codexReview = parseCodexReviewState(c.body);
-    }
-    // CodeRabbit's generated comments (summary, command acks, chat replies) and
-    // commands addressed to a review bot (`@coderabbitai review`) are dropped for
-    // the same reason: none is feedback the steward owes a reply. See
-    // `review-bot-comments.ts`.
-    const comments = commentNodes
-      .filter(
-        (c: any) =>
-          c &&
-          c.databaseId != null &&
-          !isCodexReviewSummary(c.body) &&
-          !isCodeRabbitComment(c.body) &&
-          !isReviewBotCommand(c.body),
-      )
-      .map((c: any) => {
-        const body = String(c.body || "");
-        return {
-          id: c.databaseId,
-          author: c.author?.login,
-          author_type: c.author?.__typename,
-          // Bounded to keep the /smithy.fix prompt + fold entry small; `url` (and
-          // `truncated`) let the worker read the rest, so a long request stays
-          // actionable instead of being silently clipped.
-          body_preview: body.slice(0, 280),
-          truncated: body.length > 280,
-          url: c.url,
-          created_at: c.createdAt,
-          reacted_eyes: (Array.isArray(c.reactionGroups) ? c.reactionGroups : []).some(
-            (g: any) => g?.content === "EYES" && g?.viewerHasReacted === true,
-          ),
-        };
+    const reviewerNotices: ReviewerNotice[] = [];
+    const comments = commentNodes.flatMap((c: any) => {
+      if (!c || isMarchReply(c)) return [];
+      const body = String(c.body || "");
+      const classification = classifyReviewerComment({
+        author: c.author?.login,
+        authorType: c.author?.__typename,
+        body,
+        createdAt: c.createdAt,
       });
+      if ("reviewer" in classification && classification.reviewer && typeof c.createdAt === "string") {
+        reviewerNotices.push({
+          reviewer: classification.reviewer,
+          kind: classification.kind,
+          created_at: c.createdAt,
+          ...(classification.resetAt ? { reset_at: classification.resetAt } : {}),
+        });
+      }
+      // Preserve Codex's newest verified summary as its legacy review state.
+      if ("reviewer" in classification && classification.reviewer === "codex") codexReview = parseCodexReviewState(body);
+      if (classification.kind !== "feedback" || c.databaseId == null) return [];
+      return [{
+        id: c.databaseId,
+        author: c.author?.login,
+        author_type: c.author?.__typename,
+        // Bounded to keep the /smithy.fix prompt + fold entry small; `url` (and
+        // `truncated`) let the worker read the rest, so a long request stays
+        // actionable instead of being silently clipped.
+        body_preview: body.slice(0, 280),
+        truncated: body.length > 280,
+        url: c.url,
+        created_at: c.createdAt,
+        reacted_eyes: (Array.isArray(c.reactionGroups) ? c.reactionGroups : []).some(
+          (g: any) => g?.content === "EYES" && g?.viewerHasReacted === true,
+        ),
+      }];
+    });
     return {
       threads,
-      reviews: pr?.reviews?.nodes || [],
+      reviews: reviewNodes.filter((review: any) => !isApp(review?.author)),
       comments,
+      reviewerNotices,
       codexReview,
       headRefOid: pr?.headRefOid || null,
       mergeStateStatus: pr?.mergeStateStatus || null,
       // Read from the unfiltered comment nodes: a `@coderabbitai review` request is
       // the evidence that the head was already put forward.
-      coderabbit: summarizeCodeRabbit(pr?.reviews?.nodes, commentNodes),
+      coderabbit: summarizeCodeRabbit(reviewNodes, commentNodes, reviewsComplete),
+      reviewsComplete,
     };
   }
 
-  async function queryPrForBabysit(slice: any, state: any): Promise<any> {
+  async function queryPrForBabysit(slice: any, state: any, discovery = false): Promise<any> {
     const request = await ghPrArgs(
       slice,
       state,
-      "number,url,state,mergeable,reviewDecision,statusCheckRollup,headRefName,title,author,updatedAt",
+      "number,url,state,mergeable,reviewDecision,statusCheckRollup,headRefName,title,author,updatedAt" + (github && discovery ? ",isCrossRepository" : ""),
     );
     if (request.skipped) return request;
-    const summary = JSON.parse(await execText("gh", request.args, request.options));
-    const graphql = await queryReviewThreads(request.owner || (await repoOwner(state)), summary.number);
-    const prAuthor = summary.author?.login || "";
-    const annotated = graphql.threads.map((thread: any) => ({
-      ...thread,
-      needs_response: thread.last_author !== prAuthor,
-    }));
+    const summary = JSON.parse(await gh(request.args, request.options, request.owner, slice.id));
+    if (github && discovery && summary.isCrossRepository !== false) return null;
+    const graphql = await queryReviewThreads(
+      request.owner || (await repoOwner(state)), summary.number, slice.id, summary.author?.login || "",
+    );
+    const annotated = graphql.threads;
     const reviewSummary = summarizeReviews(graphql.reviews);
     return {
       number: summary.number,
@@ -519,9 +627,9 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
       thread_count: annotated.length,
       needs_response_count: annotated.filter((thread: any) => thread.needs_response).length,
       // Non-thread (conversation) comments — the legate dispatches /smithy.fix for
-      // any not yet acknowledged (:eyes:) / dispatched-for. See babysit. Codex's
-      // review-status comment is never among them (see queryReviewThreads).
+      // actionable feedback that has yet to be acknowledged or dispatched.
       conversation_comments: graphql.comments,
+      reviewer_notices: graphql.reviewerNotices,
       // Codex's code-review state (reviewed commit, status, unresolved findings),
       // or null when the sampled comments hold no Codex summary with a readable
       // state. Nothing gates on it yet: it is the per-commit signal a merge gate
@@ -530,6 +638,9 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
       human_approval_count: reviewSummary.human_approval_count,
       changes_requested_count: reviewSummary.changes_requested_count,
       bot_approval_count: reviewSummary.bot_approval_count,
+      // False when some review pages were not read: the counts above are then
+      // partial, and the merge gate refuses to trust them (fail closed).
+      reviews_complete: graphql.reviewsComplete,
       // CodeRabbit's review standing: what the legate's opt-in CodeRabbit review
       // request reads. See coderabbit-review.ts.
       coderabbit: graphql.coderabbit,
@@ -551,7 +662,7 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
     addBranchVariants(branches, slice.branch);
     if (slice.worktree_path) {
       try {
-        addBranchVariants(branches, await execText("git", ["-C", slice.worktree_path, "branch", "--show-current"]));
+        addBranchVariants(branches, await execText("git", ["-C", slice.worktree_path, "branch", "--show-current"], { timeout: 5_000 }));
       } catch {
         // Best-effort guard only; branch fields still protect PR discovery.
       }
@@ -569,23 +680,39 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
     const repoPath = state?.repo?.path || meta.repo?.path;
     if (!repoPath) return null;
     try {
-      const output = await castra().sessionOutput(meta.profile, sessionId);
+      const output = sessionId ? await castra().sessionOutput(meta.profile, sessionId) : "";
       const matches = output.match(/https:\/\/github\.com\/[^\s/]+\/[^\s/]+\/pull\/([0-9]+)/g) || [];
       if (matches.length > 0) {
         const url = matches[matches.length - 1];
         const number = url.split("/").pop();
-        const pr = await queryPrForBabysit({ pr: { number } }, state);
-        return pr?.skipped || !(await prMatchesSliceBranch(slice, pr)) ? null : pr;
+        const owner = github ? await repoOwner(state) : null;
+        if (!github || (owner && url.toLowerCase().startsWith(`https://github.com/${owner.toLowerCase()}/pull/`))) {
+          const pr = await queryPrForBabysit({ id: slice.id, pr: { number } }, state, true);
+          if (pr && !pr.skipped && await prMatchesSliceBranch(slice, pr)) return pr;
+          if (!github) return null;
+        }
       }
-    } catch {
+    } catch (err) {
+      if (err instanceof TesseraClientError) throw err;
       // fall through to branch-based lookup
     }
     try {
-      const owner = await repoOwner(state);
-      const args = ["pr", "list", "--author", "@me", "--state", "open", "--json", "number,url,state,mergeable,headRefName,title,statusCheckRollup,createdAt"];
-      if (owner) args.push("-R", owner);
+      const owner = await resolveOwner(state);
+      if (owner === OWNER_MISMATCH) return null;
+      const args = ["pr", "list", ...(github ? [] : ["--author", "@me"]), "--state", "open", "--json",
+        "number,url,state,mergeable,headRefName,title,statusCheckRollup,createdAt" + (github ? ",isCrossRepository" : "")];
+      if (owner) args.push("-R", github ? `github.com/${owner}` : owner);
       const options = owner ? {} : { cwd: repoPath };
-      const list = JSON.parse(await execText("gh", args, options));
+      const expected = github ? await expectedPrBranches(slice) : undefined;
+      const list = [];
+      if (expected) {
+        for (const branch of expected) {
+          const results = JSON.parse(await gh([...args, "--head", branch, "--limit", "100"], options, owner, slice.id));
+          list.push(...results);
+        }
+      } else {
+        list.push(...JSON.parse(await gh(args, options, owner, slice.id)));
+      }
       if (!Array.isArray(list) || list.length === 0) return null;
       // #173: an escalated slice's last_action is the escalation timestamp, not a
       // fresh dispatch, so the recency floor would wrongly exclude an open PR
@@ -602,14 +729,18 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
       // would pass every candidate (a Promise is always truthy) and could adopt
       // a PR on the wrong branch.
       const matchFlags = await Promise.all(
-        candidates.map((candidate: any) => prMatchesSliceBranch(slice, candidate)),
+        candidates.map((candidate: any) =>
+          expected
+            ? candidate.isCrossRepository === false && expected.has(candidate.headRefName)
+            : prMatchesSliceBranch(slice, candidate)),
       );
       const branchMatches = candidates.filter((_candidate: any, i: number) => matchFlags[i]);
       const chosen = branchMatches
         .sort((a: any, b: any) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")))[0];
       if (!chosen) return null;
-      return await queryPrForBabysit({ pr: { number: chosen.number } }, state);
-    } catch {
+      return await queryPrForBabysit({ id: slice.id, pr: { number: chosen.number } }, state, true);
+    } catch (err) {
+      if (github) throw err;
       return null;
     }
   }
@@ -626,16 +757,18 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
    * leaves the overflow ungated — they fall through to a by-number detail fetch,
    * the same as today, so correctness holds, only the savings taper.
    *
-   * Returns `{error}` (never throws) when the owner can't be resolved or the query
+   * Except for scoped issuance failures, returns `{error}` when the owner can't be resolved or the query
    * fails, so the caller degrades to the always-fetch path instead of stranding.
    */
   async function listOpenPrs(state: any): Promise<OpenPrIndex | { error: string }> {
-    const owner = await repoOwner(state);
-    if (!owner) return { error: "repo owner unavailable" };
-    const [repoOwnerName, repoName] = owner.split("/");
-    if (!repoOwnerName || !repoName) return { error: `unparseable repo owner: ${owner}` };
+    const resolved = await resolveOwner(state);
+    if (resolved === OWNER_MISMATCH) return { error: "repo owner unavailable" };
+    const owner = resolved;
+    if (!owner && !github) return { error: "repo owner unavailable" };
+    const [repoOwnerName, repoName] = owner?.split("/") ?? [];
+    if (owner && (!repoOwnerName || !repoName)) return { error: `unparseable repo owner: ${owner}` };
     try {
-      const out = await execText("gh", [
+      const out = await gh([
         "api",
         "graphql",
         "-F",
@@ -650,7 +783,7 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
     }
   }
 }`,
-      ]);
+      ], {}, owner);
       const nodes = JSON.parse(out)?.data?.repository?.pullRequests?.nodes;
       const index: OpenPrIndex = new Map();
       if (Array.isArray(nodes)) {
@@ -662,6 +795,7 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
       }
       return index;
     } catch (err: any) {
+      if (err instanceof TesseraClientError) throw err;
       return { error: err?.message || String(err) };
     }
   }
@@ -671,28 +805,37 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
     if (typeof repoPath !== "string" || repoPath.length === 0) {
       throw new Error("repo path is missing");
     }
+    const owner = github ? await repoOwner(state) : null;
+    const localOptions = github ? { cwd: repoPath, env, timeout: 5_000 } : { cwd: repoPath };
     let defaultBranch = state?.repo?.default_branch;
     if (!defaultBranch) {
       try {
-        defaultBranch = (await execText("git", ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"], { cwd: repoPath }))
+        defaultBranch = (await execText("git", ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"], localOptions))
           .trim()
           .replace(/^origin\//, "");
       } catch {
-        defaultBranch = (await execText("gh", ["repo", "view", "--json", "defaultBranchRef", "-q", ".defaultBranchRef.name"], { cwd: repoPath })).trim();
+        const target = github ? [`github.com/${owner}`] : [];
+        defaultBranch = (await gh(["repo", "view", ...target, "--json", "defaultBranchRef", "-q", ".defaultBranchRef.name"], localOptions, owner)).trim();
       }
     }
     if (!defaultBranch) throw new Error("could not determine default branch");
-    // Network ops (fetch/pull) get the SSH→HTTPS-token rewrite so they work in a
-    // container with no ssh client/key; `switch` is local and needs no auth.
-    const auth = gitHubAuthConfigArgs(env);
-    await execText("git", [...auth, "fetch", "origin", defaultBranch], { cwd: repoPath });
-    await execText("git", ["switch", defaultBranch], { cwd: repoPath });
-    await execText("git", [...auth, "pull", "--ff-only", "origin", defaultBranch], { cwd: repoPath });
+    if (github) {
+      const head = `refs/heads/${defaultBranch}`;
+      await execText("git", ["check-ref-format", head], localOptions);
+      await github.git(owner, repoPath, ["fetch", "--no-recurse-submodules"], `+${head}:refs/remotes/origin/${defaultBranch}`);
+      await execText("git", ["switch", "--", defaultBranch], localOptions);
+      await github.git(owner, repoPath, ["pull", "--ff-only", "--no-rebase", "--no-recurse-submodules"], head);
+    } else {
+      const auth = gitHubAuthConfigArgs(env);
+      await execText("git", [...auth, "fetch", "origin", defaultBranch], localOptions);
+      await execText("git", ["switch", defaultBranch], localOptions);
+      await execText("git", [...auth, "pull", "--ff-only", "origin", defaultBranch], localOptions);
+    }
     if (state?.repo && !state.repo.default_branch) state.repo.default_branch = defaultBranch;
     return {
       default_branch: defaultBranch,
       synced: true,
-      head: (await execText("git", ["rev-parse", "HEAD"], { cwd: repoPath })).trim(),
+      head: (await execText("git", ["rev-parse", "HEAD"], localOptions)).trim(),
     };
   }
 

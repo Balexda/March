@@ -25,8 +25,11 @@ export interface ProviderIssueResult {
   access: AccessLevel;
   repo: string | null;
   cache: "hit" | "miss" | "n/a";
+  degradedReason?: "provider_unavailable";
 }
 export interface ProviderStatus {
+  /** Optional in-memory marker changed by the provider when it replaces a credential. */
+  credentialRevision?: object;
   provider: string;
   state: "ok" | "unconfigured" | "degraded" | "invalid";
   login: string | null;
@@ -40,6 +43,7 @@ export interface CredentialProvider {
   start(): Promise<void>;
   issue(request: ProviderIssueRequest): Promise<ProviderIssueResult>;
   status(): ProviderStatus;
+  cacheSize?(): number;
 }
 const ERRORS = {
   unauthorized: [401, "Client authentication required"],
@@ -52,6 +56,9 @@ const ERRORS = {
   mint_failed: [502, "Provider could not issue a token"],
 } as const;
 export type TesseraErrorCode = keyof typeof ERRORS;
+export function isTesseraErrorCode(code: unknown): code is TesseraErrorCode {
+  return typeof code === "string" && Object.hasOwn(ERRORS, code);
+}
 /** Messages are fixed; upstream exceptions and response bodies never cross this boundary. */
 export class TesseraError extends Error {
   readonly status: number;

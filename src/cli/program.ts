@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import { createInterface } from "node:readline";
-import { Command, CommanderError } from "commander";
+import { Command, CommanderError, Option } from "commander";
 import { ERROR, SUCCESS, USAGE_ERROR } from "../shared/exit-codes.js";
 import {
   checkSpawnDependencies,
@@ -26,7 +26,8 @@ import {
   LegateError,
   type LegateInitResult,
 } from "../legate/init.js";
-import type { MergePolicy } from "../herald/profiles/merge-policy.js";
+import type { MergePolicy, MergeRequirements } from "../herald/profiles/merge-policy.js";
+import { editVerbPolicy, showMergePolicy, type VerbPolicyEdits } from "./merge-policy.js";
 import { DEFAULT_MANAGER_GROUP } from "../hatchery/spawn-handoff.js";
 import { DEFAULT_LOOP_PORT, runLoop } from "../legate/loop/index.js";
 import {
@@ -37,13 +38,15 @@ import { runCastraServer } from "../castra/serve.js";
 import { CASTRA_TOKEN_ENV } from "../castra/config.js";
 import { CastraValidationError } from "../castra/types.js";
 import { runTesseraServer } from "../tessera/serve.js";
+import { runTesseraToken, writeTesseraTokenUsageError } from "../tessera/token-cli.js";
+import { runTesseraGitCredential } from "../tessera/git-credential.js";
 import { TesseraConfigError } from "../tessera/config.js";
 import { runStatioServer } from "../statio/serve.js";
 import { STATIO_TOKEN_ENV } from "../statio/config.js";
 import { StatioValidationError } from "../statio/types.js";
 import { initMarch, isMarchInstalled, InitError } from "../bootstrap/init.js";
 import { stackDown } from "../stack/down.js";
-import { stackUp } from "../stack/up.js";
+import { stackUp, stackUpFailed } from "../stack/up.js";
 import { stackUpgrade } from "../stack/upgrade.js";
 import { MARCH_SERVICES } from "../stack/services.js";
 import { runLogs, LOG_SERVICES } from "../logs/logs.js";
@@ -722,7 +725,10 @@ program
 
       if (result.tmuxAnchor) {
         const a = result.tmuxAnchor;
-        if (a.outcome === "failed") {
+        if (a.credentialScrubFailed) {
+          // Steward panes could inherit ambient GitHub tokens: fail the command.
+          process.stderr.write(`tmux anchor: failed (${a.detail})\n`);
+        } else if (a.outcome === "failed") {
           console.log(
             `tmux anchor: failed${a.detail ? ` (${a.detail})` : ""} — sessions may spawn inside the castra container`,
           );
@@ -731,14 +737,12 @@ program
         }
       }
 
-      let failed = false;
       for (const svc of result.services) {
         console.log(
           `${svc.service}: ${svc.outcome}${svc.detail ? ` (${svc.detail})` : ""}`,
         );
-        if (svc.outcome === "failed") failed = true;
       }
-      process.exitCode = failed ? ERROR : SUCCESS;
+      process.exitCode = stackUpFailed(result) ? ERROR : SUCCESS;
     } catch (err) {
       process.stderr.write((err instanceof Error ? err.message : String(err)) + "\n");
       process.exitCode = ERROR;
@@ -1590,44 +1594,37 @@ const mergePolicyCmd = profile
   .command("merge-policy")
   .description("Inspect/configure a profile's per-task-type merge requirements");
 
+// These value options use separate storage for additions and removals.
+function collectPolicyOption(flags: string, description: string): Option {
+  const option = new Option(flags, description);
+  option.negate = false;
+  return option.argParser((value: string, previous: string[] = []) => [...previous, value]);
+}
+
 mergePolicyCmd
   .command("show <profile>")
   .description("Show a profile's merge policy. Resolves Herald via MARCH_HERALD_URL.")
-  .action(async (profileName: string) => {
+  .option("--json", "Print effective policies keyed by verb as JSON")
+  .action(async (profileName: string, opts: { json?: boolean }) => {
     commandHandled = true;
     const { ProfileClient } = await import("../herald/profiles/client.js");
     const { HeraldClientError } = await import("../herald/service/client.js");
     try {
       const record = await new ProfileClient().get(profileName.trim());
       if (!record) {
-        process.stderr.write(`Unknown profile "${profileName}".\n`);
+        const message = `Unknown profile "${profileName}".`;
+        // JSON consumers get a parseable error on stdout; the exit stays nonzero.
+        if (opts.json) console.log(JSON.stringify({ error: message }, null, 2));
+        process.stderr.write(message + "\n");
         process.exitCode = ERROR;
         return;
       }
-      // An empty policy ({} — what `--clear` stores) resolves to all-required,
-      // so report it as "no policy set" rather than printing a misleading {}.
-      const mp = record.mergePolicy;
-      const hasPolicy =
-        !!mp &&
-        ((mp.defaults && Object.keys(mp.defaults).length > 0) ||
-          (mp.byTaskType && Object.keys(mp.byTaskType).length > 0) ||
-          (mp.dependencyUpdates && Object.keys(mp.dependencyUpdates).length > 0));
-      if (!hasPolicy) {
-        // No per-profile policy — but the built-in base (#298) still relaxes the
-        // cut approval gate, so don't claim "all requirements enforced".
-        console.log(
-          `${record.profile}: no per-profile merge policy set. Built-in defaults apply: ` +
-            `cut auto-merges without human approval; all other verbs require approval.`,
-        );
-      } else {
-        console.log(`${record.profile}:`);
-        console.log(JSON.stringify(mp, null, 2));
-      }
+      showMergePolicy(record.mergePolicy, !!opts.json);
       process.exitCode = SUCCESS;
     } catch (err) {
-      process.stderr.write(
-        (err instanceof HeraldClientError ? err.message : (err as Error).message) + "\n",
-      );
+      const message = err instanceof HeraldClientError ? err.message : (err as Error).message;
+      if (opts.json) console.log(JSON.stringify({ error: message }, null, 2));
+      process.stderr.write(message + "\n");
       process.exitCode = ERROR;
     }
   });
@@ -1635,11 +1632,15 @@ mergePolicyCmd
 mergePolicyCmd
   .command("set <profile>")
   .description("Adjust merge requirements for a profile. Resolves Herald via MARCH_HERALD_URL.")
-  .option("--task-type <verb>", "Apply the override to one smithy verb (e.g. cut); default: all task types")
-  .option("--no-approval", "Do not require a human approval")
-  .option("--no-changes-requested", "Do not require changes-requested reviews to be resolved")
-  .option("--bot-approval", "Accept a bot's approving review (e.g. Copilot) in lieu of a human approval")
-  .option("--no-bot-approval", "Stop accepting bot approvals in lieu of a human approval")
+  .option("--task-type <verb>", "Apply the override to one smithy verb (e.g. cut); defaults apply only to profile-added verbs")
+  .option("--no-approval", "Allow merge without an approving review")
+  .option("--no-changes-requested", "Allow outstanding changes-requested reviews for this verb (use --task-type)")
+  .option("--bot-approval", "Accept approval from a trusted bot with an eligible review on the PR head")
+  .option("--no-bot-approval", "Require human approval when approval is enabled")
+  .addOption(collectPolicyOption("--bot-approver <login>", "Add a trusted bot login (repeatable)"))
+  .addOption(collectPolicyOption("--no-bot-approver <login>", "Remove a trusted bot login (repeatable)"))
+  .addOption(collectPolicyOption("--review-request <reviewer[:mode]>", "Add or update a reviewer (repeatable)"))
+  .addOption(collectPolicyOption("--no-review-request <reviewer>", "Remove a reviewer (repeatable)"))
   .option("--dependabot-auto-merge", "Auto-merge Dependabot PRs that only bump versions and pass CI (profile-wide; ignores --task-type)")
   .option("--no-dependabot-auto-merge", "Stop auto-merging Dependabot PRs")
   .option("--coderabbit-rereview", "Comment `@coderabbitai review` after the steward pushes past a CodeRabbit changes-requested review (profile-wide; ignores --task-type)")
@@ -1647,8 +1648,8 @@ mergePolicyCmd
   .option("--coderabbit-initial-review", "Comment `@coderabbitai review` on a slice PR CodeRabbit has not reviewed yet (profile-wide; ignores --task-type)")
   .option("--no-coderabbit-initial-review", "Stop requesting first CodeRabbit reviews")
   .option("--json <json>", "Replace the entire policy from a JSON string")
-  .option("--clear", "Clear the policy (all requirements enforced)")
-  .action(async (profileName: string, opts: {
+  .option("--clear", "Clear the profile policy and restore built-in defaults")
+  .action(async (profileName: string, opts: VerbPolicyEdits & {
     taskType?: string;
     approval: boolean;
     changesRequested: boolean;
@@ -1672,9 +1673,16 @@ mergePolicyCmd
         return;
       }
 
+      const taskType = opts.taskType?.trim().toLowerCase();
+      const hasVerbEdits = !!(opts.botApprover || opts.noBotApprover || opts.reviewRequest || opts.noReviewRequest);
+      if (hasVerbEdits && (!taskType || opts.clear || opts.json !== undefined)) {
+        throw new Error("Bot approver and reviewer edits require --task-type and cannot be combined with --json or --clear.");
+      }
+      if (opts.changesRequested === false && !taskType && !opts.clear && opts.json === undefined) {
+        throw new Error("--no-changes-requested requires --task-type.");
+      }
       let policy: MergePolicy;
       if (opts.clear) {
-        // Empty policy => every requirement falls back to the all-required default.
         policy = {};
       } else if (opts.json !== undefined) {
         let parsed: unknown;
@@ -1695,30 +1703,25 @@ mergePolicyCmd
       } else {
         // Build the override from the convenience flags. A negatable option is
         // only "set" when its value is false (the relax case).
-        const override: Record<string, boolean> = {};
+        const override: { -readonly [K in keyof MergeRequirements]?: MergeRequirements[K] } = {};
         if (opts.approval === false) override.approval = false;
         if (opts.changesRequested === false) override.changesRequested = false;
         // Tri-state: undefined when neither --bot-approval nor --no-bot-approval
         // was passed, so an unrelated `set` leaves the stored value alone.
         if (opts.botApproval !== undefined) override.botApproval = opts.botApproval;
         if (
-          Object.keys(override).length === 0 &&
+          !hasVerbEdits && Object.keys(override).length === 0 &&
           opts.dependabotAutoMerge === undefined &&
           opts.coderabbitRereview === undefined &&
           opts.coderabbitInitialReview === undefined
         ) {
           process.stderr.write(
-            "Nothing to set — pass --no-approval, --no-changes-requested, --bot-approval, --dependabot-auto-merge, --coderabbit-rereview, --coderabbit-initial-review, --json, or --clear.\n",
+            "Nothing to set — pass --no-approval, --no-changes-requested, --bot-approval, --bot-approver, --review-request, --dependabot-auto-merge, --coderabbit-rereview, --coderabbit-initial-review, --json, or --clear.\n",
           );
           process.exitCode = ERROR;
           return;
         }
-        const merged = structuredClone(existing.mergePolicy ?? {}) as {
-          defaults?: Record<string, boolean>;
-          byTaskType?: Record<string, Record<string, boolean>>;
-          dependencyUpdates?: { autoMerge?: boolean };
-          codeRabbit?: { rereview?: boolean; initialReview?: boolean };
-        };
+        let merged: { -readonly [K in keyof MergePolicy]: MergePolicy[K] } = { ...existing.mergePolicy };
         if (opts.dependabotAutoMerge !== undefined) {
           merged.dependencyUpdates = { ...(merged.dependencyUpdates ?? {}), autoMerge: opts.dependabotAutoMerge };
         }
@@ -1728,15 +1731,10 @@ mergePolicyCmd
         if (opts.coderabbitInitialReview !== undefined) {
           merged.codeRabbit = { ...(merged.codeRabbit ?? {}), initialReview: opts.coderabbitInitialReview };
         }
-        if (Object.keys(override).length === 0) {
-          // Only profile-wide switches were passed; leave requirements alone.
-        } else if (opts.taskType) {
-          merged.byTaskType = {
-            ...(merged.byTaskType ?? {}),
-            [opts.taskType]: { ...(merged.byTaskType?.[opts.taskType] ?? {}), ...override },
-          };
-        } else {
-          merged.defaults = { ...(merged.defaults ?? {}), ...override };
+        if (taskType && (hasVerbEdits || Object.keys(override).length > 0)) {
+          merged = editVerbPolicy(merged, taskType, override, opts);
+        } else if (Object.keys(override).length > 0) {
+          merged.defaults = { ...merged.defaults, ...override };
         }
         const validated = validateMergePolicy(merged);
         if (!validated.ok) {
@@ -2111,6 +2109,35 @@ castra
   });
 
 const tessera = program.command("tessera").description("Manage Tessera credential entitlements");
+tessera.command("token")
+  .description("Print a repository-scoped GitHub App token")
+  .requiredOption("--repo <owner/name>", "GitHub repository")
+  .requiredOption("--access <read|write>", "Access level")
+  .option("--identity <app>", "GitHub identity", "app")
+  .option("--refresh", "Refresh a rejected entitlement")
+  .option("--allow-migration-fallback", "Honor the explicit ambient-token migration setting")
+  .allowExcessArguments(false)
+  .exitOverride((error) => {
+    if (error.exitCode !== 0) {
+      commandHandled = true;
+      writeTesseraTokenUsageError();
+      process.exitCode = USAGE_ERROR;
+    }
+    throw error;
+  })
+  .action(async (opts: { repo: string; access: string; identity: string; refresh?: boolean; allowMigrationFallback?: boolean }) => {
+    commandHandled = true;
+    process.exitCode = await runTesseraToken(opts);
+  });
+
+tessera.command("git-credential <operation>")
+  .description("Read a Git credential request (get, store or erase)")
+  .allowExcessArguments(false)
+  .action(async (operation: string) => {
+    commandHandled = true;
+    process.exitCode = await runTesseraGitCredential(operation);
+  });
+
 tessera.command("serve")
   .description("Run the Tessera HTTP service (issuance requires authorization)")
   .option("--port <port>", "Listen port (default: MARCH_TESSERA_PORT or 9477)")
@@ -2278,35 +2305,51 @@ brood
 
 brood
   .command("list")
-  .description("List sessions Brood is tracking")
+  .description("List tracked sessions from the Brood service")
   .option("--kind <kind>", "Filter by kind: spawn | steward | legate")
   .option("--status <status>", "Filter by status")
-  .option("--json", "Print the session list as JSON")
-  .action(async (opts: { kind?: string; status?: string; json?: boolean }) => {
+  .option("--json", "Print matching read views as JSON")
+  .option("--reconcile", "Observe container liveness through Brood", false)
+  .option("--no-reconcile", "Skip liveness observation (default)")
+  .action(async (opts: {
+    kind?: string;
+    status?: string;
+    json?: boolean;
+    reconcile: boolean;
+  }) => {
     commandHandled = true;
     const { BroodClient, BroodClientError } = await import(
       "../brood/service/client.js"
     );
     try {
-      const sessions = await new BroodClient().list({
-        kind: opts.kind as never,
-        status: opts.status as never,
+      const views = await new BroodClient().listViews({
+        kind: opts.kind,
+        status: opts.status,
+        reconcile: opts.reconcile,
       });
       if (opts.json) {
-        console.log(JSON.stringify(sessions, null, 2));
-      } else if (sessions.length === 0) {
+        console.log(JSON.stringify(views, null, 2));
+      } else if (views.length === 0) {
         console.log("No sessions tracked.");
       } else {
-        for (const s of sessions) {
-          console.log(
-            `${s.id}\t${s.kind}\t${s.status}\t${s.branch ?? ""}\t${s.containerId ?? ""}`,
-          );
+        console.log("ID\tSTATUS\tAGE\tBRANCH\tCONTAINER\tATTENTION");
+        for (const { record, age, needsAttention } of views) {
+          console.log([
+            record.id,
+            record.status,
+            age,
+            record.branch ?? "",
+            record.containerId ?? "",
+            needsAttention ? "!" : "",
+          ].join("\t"));
         }
       }
       process.exitCode = SUCCESS;
     } catch (err) {
       const message =
         err instanceof BroodClientError ? err.message : (err as Error).message;
+      // Keep JSON stdout parseable for scripts even on failure.
+      if (opts.json) console.log(JSON.stringify({ error: message }, null, 2));
       process.stderr.write(message + "\n");
       process.exitCode = ERROR;
     }

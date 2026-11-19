@@ -1462,17 +1462,26 @@ describe("legate module", () => {
   });
 
   describe("discoverRepoMetadata", () => {
+    it("reads the GitHub slug from origin and never caches the local origin/HEAD", () => {
+      const dir = makeTmpDir();
+      const git = (args: string[]) => execFileSync("git", args, { cwd: dir, stdio: "pipe" });
+      git(["init"]);
+      git(["remote", "add", "origin", "git@github.com:fixture/checkout.git"]);
+      git(["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/release/main"]);
+      // origin/HEAD is a stale-able local hint; init must not treat it as authoritative.
+      expect(discoverRepoMetadata(dir)).toEqual({ ownerWithName: "fixture/checkout" });
+    });
+
     it("returns nulls when the path is not a git checkout", () => {
-      // A bare tmp dir has no .git, so `gh repo view` fails fast.
       const dir = makeTmpDir();
       const result = discoverRepoMetadata(dir);
-      expect(result).toEqual({ ownerWithName: null, defaultBranch: null });
+      expect(result).toEqual({ ownerWithName: null });
     });
 
     it("returns nulls when the path does not exist", () => {
       // execFileSync throws when cwd doesn't exist; we swallow it.
       const result = discoverRepoMetadata("/nonexistent/path/should/never/exist");
-      expect(result).toEqual({ ownerWithName: null, defaultBranch: null });
+      expect(result).toEqual({ ownerWithName: null });
     });
   });
 

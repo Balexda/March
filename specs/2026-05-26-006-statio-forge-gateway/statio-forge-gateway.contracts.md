@@ -85,13 +85,15 @@ Each method returns the corresponding wire entity (see the data model).
 
 JSON in/out. All `/v1/*` routes require `Authorization: Bearer <MARCH_STATIO_TOKEN>`;
 `/healthz` and `/status` are open. Requests may carry `x-march-slice-id` for span
-correlation. Every non-2xx response is the uniform `ForgeErrorBody`.
+correlation. Every non-2xx response is the uniform `ForgeErrorBody`. The
+[Statio subsystem contract](../../docs/subsystems/statio/contract.md) records the
+Tessera authentication boundary.
 
 | Method | Path | Maps to (`gh`) | Success |
 |--------|------|----------------|---------|
 | `GET` | `/healthz` | liveness | `200` |
 | `GET` | `/status` | service/version/uptime + `gh` reachability | `200` |
-| `GET` | `/v1/repo` | `gh repo view --json nameWithOwner,defaultBranchRef` | `200` `{ repo: RepoInfo }` |
+| `GET` | `/v1/repo` | `gh repo view <owner/repo> --json nameWithOwner,defaultBranchRef` | `200` `{ repo: RepoInfo }` |
 | `GET` | `/v1/prs?head=&author=&state=` | `gh pr list --head/--author --state --json …` | `200` `{ prs: PullRequestListItem[] }` |
 | `GET` | `/v1/prs/:number` | `gh pr view <n> --json …` | `200` `{ pr: PullRequestSummary }` |
 | `GET` | `/v1/prs/:number/review-threads` | `gh api graphql` review threads | `200` `{ threads: ReviewThread[] }` |
@@ -103,7 +105,7 @@ correlation. Every non-2xx response is the uniform `ForgeErrorBody`.
 | Missing/invalid bearer token on `/v1/*` | `unauthorized` | 401 |
 | Bad field / invalid query argument | `invalid_request` | 400 |
 | Unknown route or absent PR | `not_found` | 404 |
-| `gh` failed / timed out / unreachable / unparseable | `forge_error` | 502 |
+| Repository resolution, entitlement issuance, or `gh` read failed | `forge_error` | 502 |
 | Unexpected service error | `internal` | 500 |
 
 ---

@@ -1,9 +1,7 @@
 #!/usr/bin/env bash
 # legate.issue skill: fetch a GitHub issue's full detail as JSON.
 #
-# Wraps `gh issue view <num> --json ...`, run from inside the managed repo so
-# `gh` resolves the right Owner/Repo without needing a `--repo` flag. The
-# conductor uses the result to compose the worker's initial prompt.
+# Reads the issue using an app/read entitlement for the managed repository.
 #
 # Usage:
 #   fetch-issue.sh <repo-path> <issue-number>
@@ -46,10 +44,6 @@ if ! [[ "$NUM" =~ ^[1-9][0-9]*$ ]]; then
   exit 2
 fi
 
-if ! command -v gh >/dev/null 2>&1; then
-  echo "gh not found on PATH" >&2
-  exit 1
-fi
 if ! command -v jq >/dev/null 2>&1; then
   echo "jq not found on PATH" >&2
   exit 1
@@ -57,12 +51,13 @@ fi
 
 echo "fetch-issue: repo=$REPO num=$NUM" >&2
 
+FORGE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/../tessera-forge.mjs"
 cd "$REPO"
 
 # `gh issue view --json` shapes label/author/comment objects with extra
 # bookkeeping fields. Normalize to the schema documented above so the
 # conductor doesn't need to re-pick fields.
-RAW="$(gh issue view "$NUM" \
+RAW="$(MARCH_TESSERA_SLICE_ID="issue-$NUM" node "$FORGE" gh read issue view "$NUM" \
         --json number,title,body,url,author,labels,state,comments)"
 
 echo "$RAW" | jq '{

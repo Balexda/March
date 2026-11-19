@@ -2,6 +2,7 @@
  * @l1 @deterministic @ci
  */
 import { describe, it, expect, afterEach } from "vitest";
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import os from "node:os";
@@ -91,6 +92,23 @@ describe("ensureStewardSkills", () => {
 });
 
 describe("buildStewardSettings", () => {
+  it("restores the shim path for Claude commands after shell startup", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "host's steward "));
+    try {
+      const envFile = path.join(root, "claude.env");
+      const env = { ...process.env, CLAUDE_ENV_FILE: envFile };
+      const settings = buildStewardSettings(root);
+      const shellOptions = { env, encoding: "utf8" as const, timeout: 5_000 };
+      execFileSync("sh", ["-c", settings.hooks.SessionStart[0].hooks[0].command], shellOptions);
+      const result = execFileSync("sh", ["-c",
+        'PATH=/usr/bin; . "$CLAUDE_ENV_FILE"; printf "%s" "$PATH"',
+      ], shellOptions);
+      expect(result).toBe(`${path.join(root, "bin")}:/usr/bin`);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("wires Notification + Stop to the hook script under the given root", () => {
     const settings = buildStewardSettings("/srv/steward");
     const expected = `node '${path.join("/srv/steward", "hooks", "steward-report.mjs")}'`;

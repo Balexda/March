@@ -50,6 +50,11 @@ function sliceIdFrom(request: FastifyRequest): string | undefined {
   return Array.isArray(slice) ? slice[0] : slice;
 }
 
+function sliceArgs(sliceId: string | undefined): [string] | [] {
+  const valid = validStatioSliceId(sliceId);
+  return valid ? [valid] : [];
+}
+
 function operationForRoute(route: string | undefined): string {
   switch (route) {
     case "/healthz":
@@ -113,9 +118,12 @@ function createDefaultForgeClient(): StatioRouteForgeClient {
     listPrs: adapter.listPrs,
     getPr: adapter.getPr,
     reviewThreads: adapter.reviewThreads,
-    async reachable(): Promise<boolean> {
+    async reachable(sliceId?: string): Promise<boolean> {
       try {
-        await adapter.repoInfo();
+        await withStatioOperationSpan(
+          { operation: "forge_probe", route: "/status", method: "GET", sliceId },
+          () => adapter.repoInfo(sliceId),
+        );
         return true;
       } catch {
         return false;
@@ -251,11 +259,11 @@ export function buildStatioServer(options: BuildStatioServerOptions = {}): Fasti
 
   app.get("/healthz", async () => ({ status: "ok" }));
 
-  app.get("/status", async () => ({
+  app.get("/status", async (request) => ({
     service: STATIO_SERVICE_NAME,
     version: CLI_VERSION,
     uptimeSeconds: Math.floor((Date.now() - startedAt) / 1000),
-    gh: { reachable: await repoReader.reachable() },
+    gh: { reachable: await repoReader.reachable(...sliceArgs(sliceIdFrom(request))) },
   }));
 
   app.get("/v1/repo", async (request) => {
@@ -269,7 +277,7 @@ export function buildStatioServer(options: BuildStatioServerOptions = {}): Fasti
         attributes: sliceAttr(sliceId),
       },
       async (span) => {
-        const repo = await repoReader.repoInfo();
+        const repo = await repoReader.repoInfo(...sliceArgs(sliceId));
         request.log.info(
           {
             "statio.operation": "repo_info",
@@ -300,7 +308,7 @@ export function buildStatioServer(options: BuildStatioServerOptions = {}): Fasti
         },
       },
       async (span) => {
-        const prs = await forgeClient.listPrs(filters);
+        const prs = await forgeClient.listPrs(filters, ...sliceArgs(sliceId));
         request.log.info(
           {
             "statio.operation": "list_prs",
@@ -329,7 +337,7 @@ export function buildStatioServer(options: BuildStatioServerOptions = {}): Fasti
         attributes: sliceAttr(sliceId),
       },
       async (span) => {
-        const pr = await forgeClient.getPr(number);
+        const pr = await forgeClient.getPr(number, ...sliceArgs(sliceId));
         request.log.info(
           {
             "statio.operation": "get_pr",
@@ -357,7 +365,7 @@ export function buildStatioServer(options: BuildStatioServerOptions = {}): Fasti
           attributes: sliceAttr(sliceId),
         },
         async (span) => {
-          const threads = await forgeClient.reviewThreads(number);
+          const threads = await forgeClient.reviewThreads(number, ...sliceArgs(sliceId));
           request.log.info(
             {
               "statio.operation": "review_threads",

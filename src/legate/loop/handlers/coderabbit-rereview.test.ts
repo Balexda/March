@@ -117,7 +117,7 @@ describe("apply", () => {
     const st = state({ s: fixedPr(), done: fixedPr({ number: 7, head_sha: "441db76000" }) });
     const res = await apply(ctx, st, { commentOnPr });
     expect(commentOnPr).toHaveBeenCalledTimes(1);
-    expect(commentOnPr).toHaveBeenCalledWith("/repo", 543, reviewRequestBody("d8e383e000"));
+    expect(commentOnPr).toHaveBeenCalledWith("/repo", 543, reviewRequestBody("d8e383e000"), "s");
     expect(res.actions).toEqual([expect.objectContaining({ action: REREVIEW_ACTION, sliceId: "s", pr: { number: 543, url: fixedPr().url } })]);
     // Same head on the next tick: no second comment.
     await apply(ctx, st, { commentOnPr });
@@ -129,7 +129,7 @@ describe("apply", () => {
     const st = state({ s: fixedPr({ coderabbit: null }), cr: fixedPr({ number: 9 }) }, { codeRabbit: { initialReview: true } });
     const res = await apply(ctx, st, { commentOnPr });
     expect(commentOnPr).toHaveBeenCalledTimes(1);
-    expect(commentOnPr).toHaveBeenCalledWith("/repo", 543, reviewRequestBody("d8e383e000"));
+    expect(commentOnPr).toHaveBeenCalledWith("/repo", 543, reviewRequestBody("d8e383e000"), "s");
     expect(res.actions).toEqual([
       expect.objectContaining({ action: REREVIEW_ACTION, sliceId: "s", detail: expect.stringContaining("first review of PR #543") }),
     ]);

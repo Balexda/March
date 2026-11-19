@@ -60,6 +60,7 @@ services:
       - MARCH_OTEL_ENDPOINT=http://otel-lgtm:4318
       - MARCH_OTEL_SERVICE_NAME=march-castra
       - CASTRA_PORT=${CASTRA_PORT:-9264}
+      - MARCH_TESSERA_PORT=${MARCH_TESSERA_PORT:-9477}
       # Required — compose aborts if unset (the API binds 0.0.0.0 on a shared net).
       - CASTRA_API_TOKEN=${CASTRA_API_TOKEN:?CASTRA_API_TOKEN must be set; the API binds 0.0.0.0 on the march network}
       # os.homedir() resolves from HOME -> agent-deck/worktree paths land on the

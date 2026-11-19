@@ -379,6 +379,113 @@ describe("queryPrForBabysit", () => {
     expect(pr.conversation_comments[0].body_preview).toHaveLength(280);
   });
 
+  describe("review pagination", () => {
+    const review = (state: string, at: string, oid: string, login: string, type = "User") =>
+      ({ state, submittedAt: at, commit: { oid }, author: { login, __typename: type } });
+    const firstPage = (hasNextPage: boolean) => ({
+      data: { repository: { pullRequest: {
+        headRefOid: "head1",
+        mergeStateStatus: "CLEAN",
+        reviews: {
+          pageInfo: { hasNextPage, endCursor: hasNextPage ? "c1" : null },
+          nodes: [review("COMMENTED", "2026-11-16T09:00:00Z", "head1", "someone")],
+        },
+        comments: { nodes: [] },
+        reviewThreads: { nodes: [] },
+      } } },
+    });
+    const secondPage = (headRefOid: string) => ({
+      data: { repository: { pullRequest: {
+        headRefOid,
+        reviews: {
+          pageInfo: { hasNextPage: false, endCursor: "c2" },
+          nodes: [
+            review("APPROVED", "2026-11-16T10:00:00Z", "head1", "coderabbitai", "Bot"),
+            review("APPROVED", "2026-11-16T10:05:00Z", "head1", "alice"),
+          ],
+        },
+      } } },
+    });
+    const prSummary = JSON.stringify({ number: 5, url: "u", state: "OPEN", mergeable: "MERGEABLE", headRefName: "b", title: "t", author: { login: "me" }, statusCheckRollup: [] });
+    const query = (page2: () => string) => {
+      const graphqlCalls: string[][] = [];
+      routeExec((_cmd, args) => {
+        if (!args.includes("graphql")) return prSummary;
+        graphqlCalls.push(args);
+        return args.some((a) => a === "cursor=c1") ? page2() : JSON.stringify(firstPage(true));
+      });
+      const io = createSenseIo({ meta: meta(), castra: fakeCastra() });
+      return { graphqlCalls, pr: io.queryPrForBabysit({ pr: { number: 5 } }, { repo: { path: "/repo", owner_with_name: "octo/march" } }) };
+    };
+
+    it("follows the review cursor so later pages count toward the gate evidence", async () => {
+      const { graphqlCalls, pr } = query(() => JSON.stringify(secondPage("head1")));
+      const result = await pr;
+      expect(graphqlCalls).toHaveLength(2);
+      // The ambient gh path bounds every review GraphQL call.
+      const graphqlOpts = childProcessMock.execFile.mock.calls
+        .filter((call: any[]) => (call[1] as string[]).includes("graphql"))
+        .map((call: any[]) => call[2]);
+      expect(graphqlOpts).toHaveLength(2);
+      for (const opts of graphqlOpts) expect(opts).toMatchObject({ timeout: 30_000, killSignal: "SIGKILL" });
+      expect(graphqlCalls[1].some((a) => a.includes("reviews(first: 100, after: $cursor)"))).toBe(true);
+      expect(result.human_approval_count).toBe(1);
+      expect(result.reviews_complete).toBe(true);
+      expect(result.coderabbit).toMatchObject({ decision: "APPROVED", decision_commit_sha: "head1", decision_is_bot: true });
+    });
+
+    it("walks past five pages to reach a late verdict", async () => {
+      let calls = 0;
+      routeExec((_cmd, args) => {
+        if (!args.includes("graphql")) return prSummary;
+        calls++;
+        const cursorArg = args.find((a) => a.startsWith("cursor="));
+        if (!cursorArg) return JSON.stringify(firstPage(true));
+        const n = Number(cursorArg.slice("cursor=c".length));
+        if (n < 7) {
+          return JSON.stringify({ data: { repository: { pullRequest: {
+            headRefOid: "head1",
+            reviews: { pageInfo: { hasNextPage: true, endCursor: `c${n + 1}` }, nodes: [] },
+          } } } });
+        }
+        return JSON.stringify(secondPage("head1"));
+      });
+      const io = createSenseIo({ meta: meta(), castra: fakeCastra() });
+      const result = await io.queryPrForBabysit({ pr: { number: 5 } }, { repo: { path: "/repo", owner_with_name: "octo/march" } });
+      expect(calls).toBe(8);
+      expect(result.reviews_complete).toBe(true);
+      expect(result.coderabbit?.decision_is_bot).toBe(true);
+    });
+
+    it("stops on a repeated cursor and marks the evidence incomplete", async () => {
+      routeExec((_cmd, args) => {
+        if (!args.includes("graphql")) return prSummary;
+        if (!args.some((a) => a.startsWith("cursor="))) return JSON.stringify(firstPage(true));
+        return JSON.stringify({ data: { repository: { pullRequest: {
+          headRefOid: "head1",
+          reviews: { pageInfo: { hasNextPage: true, endCursor: "c1" }, nodes: [] },
+        } } } });
+      });
+      const io = createSenseIo({ meta: meta(), castra: fakeCastra() });
+      const result = await io.queryPrForBabysit({ pr: { number: 5 } }, { repo: { path: "/repo", owner_with_name: "octo/march" } });
+      expect(result.reviews_complete).toBe(false);
+    });
+
+    it("withholds decision_is_bot when the head moves between pages", async () => {
+      const { pr } = query(() => JSON.stringify(secondPage("head2")));
+      const result = await pr;
+      expect(result.coderabbit?.decision_is_bot).toBeUndefined();
+    });
+
+    it("withholds decision_is_bot when a follow-up page fails", async () => {
+      const { pr } = query(() => { throw new Error("HTTP 502"); });
+      const result = await pr;
+      expect(result.head_sha).toBe("head1");
+      expect(result.coderabbit?.decision_is_bot).toBeUndefined();
+      expect(result.reviews_complete).toBe(false);
+    });
+  });
+
   it("reports CodeRabbit's standing for the re-review request", async () => {
     routeExec((_cmd, args) => {
       if (args.includes("graphql")) {
@@ -389,6 +496,7 @@ describe("queryPrForBabysit", () => {
                 headRefOid: "d8e383e",
                 mergeStateStatus: "BLOCKED",
                 reviews: {
+                  pageInfo: { hasNextPage: false },
                   nodes: [
                     { state: "CHANGES_REQUESTED", submittedAt: "2026-11-16T09:37:00Z", commit: { oid: "441db76" }, author: { login: "coderabbitai", __typename: "Bot" } },
                   ],
@@ -407,6 +515,7 @@ describe("queryPrForBabysit", () => {
     expect(pr.coderabbit).toEqual({
       decision: "CHANGES_REQUESTED",
       decision_commit_sha: "441db76",
+      decision_is_bot: true,
       decision_at: "2026-11-16T09:37:00Z",
       last_review_commit_sha: "441db76",
       last_request_at: "2026-11-16T09:29:00Z",
@@ -416,7 +525,7 @@ describe("queryPrForBabysit", () => {
     expect(pr.changes_requested_count).toBe(0);
   });
 
-  describe("Codex review-status comment", () => {
+  describe("reviewer conversation comments", () => {
     const CODEX = { login: "chatgpt-codex-connector", __typename: "Bot" };
     const REVIEWER = { login: "reviewer", __typename: "User" };
 
@@ -446,7 +555,7 @@ describe("queryPrForBabysit", () => {
     });
 
     /** Sense PR #5 with the given conversation-comment nodes. */
-    async function sensePr(commentNodes: unknown[]): Promise<any> {
+    async function sensePr(commentNodes: unknown[], threadNodes: unknown[] = []): Promise<any> {
       routeExec((_cmd, args) => {
         if (args.includes("graphql")) {
           return JSON.stringify({
@@ -457,7 +566,7 @@ describe("queryPrForBabysit", () => {
                   mergeStateStatus: "CLEAN",
                   reviews: { nodes: [] },
                   comments: { nodes: commentNodes },
-                  reviewThreads: { nodes: [] },
+                  reviewThreads: { nodes: threadNodes },
                 },
               },
             },
@@ -486,6 +595,7 @@ describe("queryPrForBabysit", () => {
       const forged = await sensePr([
         comment(201, CODEX, codexSummary({ commit_sha: "f277786", has_any_findings: true, has_unresolved_findings: true, status: "completed" })),
         comment(202, REVIEWER, codexSummary(completed("f277786"))),
+        comment(203, { login: "other[bot]", __typename: "Bot" }, codexSummary(completed("f277786"))),
       ]);
       expect(forged.conversation_comments).toEqual([]);
       expect(forged.codex_review).toEqual({ commit_sha: "f277786", status: "completed", has_unresolved_findings: true });
@@ -496,7 +606,7 @@ describe("queryPrForBabysit", () => {
       expect(humanOnly.codex_review).toBeNull();
     });
 
-    it("owes no reply: no comment-fix dispatch and no owes_comments blocker for it", async () => {
+    it("keeps reviewer chatter out of fix and merge decisions while retaining human and inline feedback", async () => {
       // The sensed PR, fed through the real consumers of `conversation_comments`.
       const babysit = (pr: unknown): string[] => {
         const state: LoopState = {
@@ -517,23 +627,55 @@ describe("queryPrForBabysit", () => {
         return assess(state).map((d) => d.kind);
       };
 
-      const statusOnly = await sensePr([comment(201, CODEX, codexSummary(completed("f277786")))]);
+      const rabbit = { login: "coderabbitai[bot]", __typename: "Bot" };
+      const marker = "<!-- coderabbit-ai-generated:v1 -->";
+      const progress = "> Currently processing new changes in this PR.";
+      const rateLimit = "> ## Rate limit exceeded\n> Please wait **6 minutes and 43 seconds**.";
+      const pause = "> ## Reviews paused";
+      const chatter = [
+        comment(201, CODEX, codexSummary(completed("f277786"))),
+        comment(202, rabbit, marker + "\nWalkthrough"),
+        comment(203, rabbit, marker + "\n" + " ".repeat(300) + "\n" + progress),
+        comment(204, rabbit, marker + "\n" + rateLimit),
+        comment(205, rabbit, marker + "\n" + pause),
+        comment(206, REVIEWER, "[march-bot] @coderabbitai review"),
+        comment(207, REVIEWER, marker + "\n" + progress),
+        comment(208, { login: "unrelated[bot]", __typename: "Bot" }, marker + "\n" + rateLimit),
+        comment(209, { login: "coderabbitai", __typename: "User" }, marker + "\n" + pause),
+      ];
+      const statusOnly = await sensePr(chatter);
+      expect(statusOnly.conversation_comments).toEqual([]);
+      const created_at = chatter[0].createdAt;
+      expect(statusOnly.reviewer_notices).toEqual([
+        { reviewer: "codex", kind: "status", created_at },
+        { reviewer: "coderabbit", kind: "status", created_at },
+        { reviewer: "coderabbit", kind: "in_progress", created_at },
+        { reviewer: "coderabbit", kind: "rate_limited", created_at, reset_at: "2026-11-15T19:00:07.000Z" },
+        { reviewer: "coderabbit", kind: "paused", created_at },
+      ]);
       expect(babysit(statusOnly)).not.toContain("comment-fix");
       expect(mergeBlocker({}, statusOnly)).toBe("none");
 
-      // Control: ordinary feedback beside the status comment still dispatches.
       const withFeedback = await sensePr([
-        comment(201, CODEX, codexSummary(completed("f277786"))),
-        comment(202, REVIEWER, "please reconsider the spec"),
+        ...chatter,
+        comment(210, REVIEWER, "Please reconsider the spec.\n" + marker + "\n[march-bot] @coderabbitai review"),
       ]);
+      expect(withFeedback.conversation_comments.map((c: any) => c.id)).toEqual([210]);
       expect(babysit(withFeedback)).toContain("comment-fix");
       expect(mergeBlocker({}, withFeedback)).toBe("owes_comments");
+
+      const withThread = await sensePr(chatter, [{
+        isResolved: false,
+        comments: { nodes: [{ ...comment(211, rabbit, marker + "\nFix this line"), path: "src/app.ts", line: 12 }] },
+      }]);
+      expect(withThread.unresolved_threads).toMatchObject([{ id: 211, needs_response: true }]);
+      expect(mergeBlocker({}, withThread)).toBe("owes_review_threads");
     });
     it("drops CodeRabbit's generated comments and review-bot commands, but keeps a mid-comment mention", async () => {
       const CODERABBIT = { login: "coderabbitai", __typename: "Bot" };
       const rabbit = (rest: string) => `<!-- coderabbit-ai-generated:v1 -->\n\n${rest}`;
       const pr = await sensePr([
-        comment(301, REVIEWER, "@coderabbitai review"),
+        comment(301, REVIEWER, "@coderabbitai review\n\n<!-- march-coderabbit-request:f277786 -->"),
         comment(302, CODERABBIT, rabbit("<!-- This is an auto-generated comment: summarize by coderabbit.ai -->")),
         comment(303, CODERABBIT, rabbit("<!-- This is an auto-generated reply by CodeRabbit -->\nReview triggered.")),
         comment(304, REVIEWER, "@codex review"),
@@ -541,6 +683,7 @@ describe("queryPrForBabysit", () => {
         comment(305, REVIEWER, "The cache key is wrong — @coderabbitai flagged it too."),
       ]);
       expect(pr.conversation_comments.map((c: any) => c.id)).toEqual([305]);
+      expect(pr.coderabbit.last_request_sha).toBe("f277786");
     });
   });
 
@@ -851,6 +994,54 @@ describe("listOpenPrs (open-PR change-cursor probe)", () => {
 });
 
 describe("repoOwner caching (#gh-over-usage)", () => {
+  it("runs no PR query (no `gh pr view` / `gh pr list` fallback) on an owner mismatch", async () => {
+    const prCalls: string[][] = [];
+    routeExec((cmd, args) => {
+      if (cmd === "git" && args.includes("remote.origin.url")) return "https://github.com/octo/march\n";
+      if (cmd === "gh" && args[0] === "pr") prCalls.push(args);
+      return "[]";
+    });
+    const state = { repo: { path: "/repo", owner_with_name: "other/march" } };
+    const io = createSenseIo({
+      meta: meta(),
+      castra: fakeCastra({ sessionOutput: async () => "opened https://github.com/other/march/pull/9" }),
+      warn: () => {},
+    });
+    expect(await io.queryPrForBabysit({ pr: { number: 9 } }, state)).toMatchObject({ skipped: true, reason: "repo_owner_mismatch" });
+    expect(await io.discoverPrForSlice({ branch: "feature/x" }, state, "sess-1")).toBeNull();
+    const ioNoUrl = createSenseIo({ meta: meta(), castra: fakeCastra(), warn: () => {} });
+    expect(await ioNoUrl.discoverPrForSlice({ branch: "feature/x" }, state, "sess-1")).toBeNull();
+    expect(prCalls).toEqual([]);
+  });
+
+  it("observes the origin repo, not gh's default remote, so observation matches Legate mutations", async () => {
+    let repoViews = 0;
+    const prArgs: string[][] = [];
+    routeExec((cmd, args) => {
+      if (cmd === "git" && args.includes("remote.origin.url")) return "git@github.com:octo/march.git\n";
+      if (cmd === "gh" && args.includes("repo")) { repoViews++; return "upstream/march"; }
+      if (cmd === "gh" && args.includes("pr")) {
+        prArgs.push(args);
+        return JSON.stringify({ number: 7, state: "OPEN", headRefName: "b", author: { login: "me" }, statusCheckRollup: [] });
+      }
+      if (args.includes("graphql")) return JSON.stringify({ data: { repository: { pullRequest: { reviewThreads: { nodes: [] } } } } });
+      return "";
+    });
+    const io = createSenseIo({ meta: meta(), castra: fakeCastra() });
+    await io.queryPrForBabysit({ pr: { number: 7 } }, { repo: { path: "/repo" } });
+    expect(repoViews).toBe(0);
+    expect(prArgs[0]).toEqual(expect.arrayContaining(["-R", "octo/march"]));
+  });
+
+  it("refuses to observe when a configured owner_with_name disagrees with origin", async () => {
+    const warnings: string[] = [];
+    routeExec((cmd, args) => (cmd === "git" && args.includes("remote.origin.url") ? "https://github.com/octo/march\n" : ""));
+    const io = createSenseIo({ meta: meta(), castra: fakeCastra(), warn: m => warnings.push(m) });
+    expect(await io.listOpenPrs({ repo: { path: "/repo", owner_with_name: "other/march" } }))
+      .toEqual({ error: "repo owner unavailable" });
+    expect(warnings.join("\n")).toMatch(/repo owner mismatch/);
+  });
+
   it("resolves the owner via gh ONCE and reuses it across PR queries (no per-slice gh repo view)", async () => {
     let repoViews = 0;
     routeExec((cmd, args) => {

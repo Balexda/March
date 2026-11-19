@@ -105,3 +105,17 @@ Job record response:
 | Invalid toolchain | `POST /spawns` | `400` with `{ "error": string }` | A provided `toolchain` is not one of Hatchery's allowed selections. |
 | Unknown job id | `GET /spawns/:id` | `404` with `{ "error": string }` | No retained job record exists for the requested id. |
 | Readiness dependency unavailable | `GET /readyz` | `503` with `{ "ready": false, "docker": boolean, "castra": boolean }` | At least one readiness dependency is false. |
+
+### GitHub base pinning and branch collisions
+
+Hatchery resolves the steward worktree's GitHub origin locally and requests
+Tessera `app/read` for that repository before fetching. GitHub SSH origins are
+fetched over HTTPS with credentials scoped to the fetch child. The pin only
+resets to a descendant of the steward's current HEAD. Collision checks use
+scoped access for GitHub ref and PR lookups. Issuance or lookup failure leaves
+the colliding branch in place and fails the job on its slice trace. Local
+origins and repositories without an origin require no entitlement.
+
+Set `MARCH_TESSERA_URL` and Hatchery's `MARCH_TESSERA_CLIENT_KEY`. The Hatchery
+compose file maps `MARCH_TESSERA_HATCHERY_CLIENT_KEY` to the latter. The shared
+client supports the explicit `MARCH_TESSERA_GH_TOKEN_FALLBACK=1` migration flag.

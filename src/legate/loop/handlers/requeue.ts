@@ -41,9 +41,9 @@ export const MAX_REQUEUE_ATTEMPTS = 3;
 /** Side-effecting GitHub seams (injected so the handler stays unit-testable). */
 export interface RequeueDeps {
   /** Close an open PR with a comment. */
-  closePr: (repoPath: string, prNumber: number, comment: string) => Promise<void>;
+  closePr: (repoPath: string, prNumber: number, comment: string, sliceId?: string) => Promise<void>;
   /** Delete the remote branch; resolves `false` when it did not exist. */
-  deleteRemoteBranch: (repoPath: string, branch: string) => Promise<boolean>;
+  deleteRemoteBranch: (repoPath: string, branch: string, sliceId?: string) => Promise<boolean>;
 }
 
 export type RequeueDecision =
@@ -207,7 +207,7 @@ export async function apply(
         failure = "cannot close the PR: GitHub seam or repo path unavailable";
       } else {
         try {
-          await deps.closePr(state.repoPath, d.prNumber, attribution(d.request));
+          await deps.closePr(state.repoPath, d.prNumber, attribution(d.request), d.sliceId);
           notes.push(`closed PR #${d.prNumber}`);
         } catch (err: any) {
           failure = `closing PR #${d.prNumber} failed: ${err?.message ?? String(err)}`;
@@ -217,7 +217,7 @@ export async function apply(
 
     if (!failure && branch && deps && state.repoPath) {
       try {
-        const deleted = await deps.deleteRemoteBranch(state.repoPath, branch);
+        const deleted = await deps.deleteRemoteBranch(state.repoPath, branch, d.sliceId);
         if (deleted) notes.push(`deleted remote branch ${branch}`);
       } catch (err: any) {
         failure = `deleting remote branch ${branch} failed: ${err?.message ?? String(err)}`;

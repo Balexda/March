@@ -46,6 +46,8 @@ export function reviewRequestBody(headSha: string): string {
 export interface CodeRabbitStanding {
   decision: "APPROVED" | "CHANGES_REQUESTED" | "DISMISSED" | null;
   decision_commit_sha: string | null;
+  /** Set only when the full review list establishes the latest bot verdict. */
+  decision_is_bot?: true;
   decision_at: string | null;
   last_review_commit_sha: string | null;
   last_request_at: string | null;
@@ -59,11 +61,22 @@ export function isCodeRabbitReviewRequest(body: unknown): boolean {
   return typeof body === "string" && REVIEW_REQUEST_RE.test(body.trimStart());
 }
 
+/** A GraphQL `author` that is a bot: typed `Bot`, or a login ending in `[bot]`
+ *  (covers GitHub Apps that present as Users, e.g. Copilot). An ordinary user can
+ *  be neither — GitHub logins cannot contain brackets. */
+export function isBotActor(author: { __typename?: string; login?: string } | null | undefined): boolean {
+  return author?.__typename === "Bot" || String(author?.login || "").endsWith("[bot]");
+}
+
 /**
  * Reduce a PR's review and comment nodes to CodeRabbit's standing, or `null`
  * when CodeRabbit has neither reviewed (in any state) nor been asked to.
  */
-export function summarizeCodeRabbit(reviewNodes: unknown, commentNodes: unknown): CodeRabbitStanding | null {
+export function summarizeCodeRabbit(
+  reviewNodes: unknown,
+  commentNodes: unknown,
+  reviewsComplete = true,
+): CodeRabbitStanding | null {
   const reviews = Array.isArray(reviewNodes) ? reviewNodes : [];
   const comments = Array.isArray(commentNodes) ? commentNodes : [];
   let decisive: any = null;
@@ -86,6 +99,7 @@ export function summarizeCodeRabbit(reviewNodes: unknown, commentNodes: unknown)
   return {
     decision: decisive ? (decisive.state as CodeRabbitStanding["decision"]) : null,
     decision_commit_sha: typeof decisive?.commit?.oid === "string" ? decisive.commit.oid : null,
+    ...(reviewsComplete && isBotActor(decisive?.author) ? { decision_is_bot: true as const } : {}),
     decision_at: typeof decisive?.submittedAt === "string" ? decisive.submittedAt : null,
     last_review_commit_sha: typeof latest?.commit?.oid === "string" ? latest.commit.oid : null,
     last_request_at: lastRequestAt,

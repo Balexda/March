@@ -49,7 +49,7 @@ Maintain a slim, structured state file across compactions:
 }
 ```
 
-`repo.default_branch` and `repo.owner_with_name` are detected once on first run and reused — they do not change for the life of a conductor. `slices[].worktree_path` is the per-slice checkout created by `--worktree`; for Smithy dispatches, the deterministic loop captures it from the Hatchery manager session.
+`repo.owner_with_name` is detected from the checkout's origin and reused. `repo.default_branch` starts null and is refreshed from the GitHub-confirmed value each `sync-default-branch.sh` run, so a remote default-branch rename is picked up. `slices[].worktree_path` is the per-slice checkout created by `--worktree`; for Smithy dispatches, the deterministic loop captures it from the Hatchery manager session.
 
 Four slice fields fill in over time and are `null` (or absent) on a freshly-launched slice:
 
