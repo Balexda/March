@@ -141,8 +141,10 @@ export function validateEvent(body: Record<string, unknown>): EventValidation {
     const feedback = body.handledFeedback as { kind?: unknown; commentIds?: unknown } | null;
     if (!feedback || (feedback.kind !== "inline" && feedback.kind !== "conversation")
       || !Array.isArray(feedback.commentIds)
-      || !feedback.commentIds.every((id) => typeof id === "string" && id.trim().length > 0)) {
-      return { ok: false, error: "handledFeedback requires an inline or conversation kind and an array of comment IDs." };
+      || !feedback.commentIds.every((id) => typeof id === "string" && id.trim().length > 0)
+      || ((feedback as { dispatchKey?: unknown }).dispatchKey !== undefined
+        && typeof (feedback as { dispatchKey?: unknown }).dispatchKey !== "string")) {
+      return { ok: false, error: "handledFeedback requires an inline or conversation kind, an array of comment IDs and an optional string dispatchKey." };
     }
   }
   if (type === "session.changed") {

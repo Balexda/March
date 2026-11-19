@@ -31,8 +31,9 @@ Shared PR sensing classifies full conversation comment bodies before creating pr
 Babysit uses Herald's feedback classification for both operator- and app-authored
 PRs. After successfully sending a fix for inline or conversation feedback,
 Legate records the handled comment IDs in the Herald stage transition. A restart
-restores those IDs from the fold, and a distinct external reply can still trigger
-a fix.
+restores those IDs and the latest fix dispatch context from the fold, so a
+parked worker still gets the bounded nudge and escalation, and a distinct
+external reply can still trigger a fix.
 
 Legate resolves the GitHub repository from the profile checkout's origin
 before asking Tessera for an app entitlement. Independent reads use

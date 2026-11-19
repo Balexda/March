@@ -280,6 +280,14 @@ export function rebuildWorkingState(sys: SystemState, meta: LoopMeta): any {
     };
     if (s.handledFeedback?.inline) slice.review_fix_seen_comment_ids = [...s.handledFeedback.inline];
     if (s.handledFeedback?.conversation) slice.comment_fix_seen_comment_ids = [...s.handledFeedback.conversation];
+    // Restore the dispatch context `mark()` sets so a worker that parked after a
+    // fix dispatch still gets the bounded nudge/escalation after a restart (the
+    // restored seen-set alone would suppress both a fresh dispatch and the nudge).
+    if (s.lastFeedbackDispatch) {
+      slice.last_processor_action = s.lastFeedbackDispatch.kind === "inline" ? "review-fix" : "comment-fix";
+      slice.last_processor_action_key = s.lastFeedbackDispatch.key;
+      slice.last_processor_action_at = s.lastFeedbackDispatch.at;
+    }
     if (s.escalatedReason !== undefined) {
       slice.last_action_note = s.escalatedReason;
       // Restore the structured class too so bounded auto-recovery (#211) can tell a

@@ -944,7 +944,7 @@ export async function apply(decisions: BabysitDecision[], ctx: HandlerContext, s
         mark(slice, "review-fix", d.key, "processor sent review-thread /smithy.fix", ts);
         ctx.emitTransition?.({
           type: "slice.stage.changed", sliceId: d.sliceId, stage: "pr-in-fix",
-          handledFeedback: { kind: "inline", commentIds: d.commentIds || [] },
+          handledFeedback: { kind: "inline", commentIds: d.commentIds || [], dispatchKey: d.key },
         });
         res.actions.push({ action: "review-fix", sliceId: d.sliceId, sessionId: d.sessionId, pr: d.pr, detail: d.detail });
         res.mutated = true;
@@ -963,7 +963,7 @@ export async function apply(decisions: BabysitDecision[], ctx: HandlerContext, s
         markCommentFixSeen(slice, d.commentIds || []);
         ctx.emitTransition?.({
           type: "slice.stage.changed", sliceId: d.sliceId, stage: "pr-in-fix",
-          handledFeedback: { kind: "conversation", commentIds: d.commentIds || [] },
+          handledFeedback: { kind: "conversation", commentIds: d.commentIds || [], dispatchKey: d.key },
         });
         // Acknowledge dispatch visibly on GitHub. Reactions run concurrently
         // and a failed reaction leaves the folded IDs available for dedup.

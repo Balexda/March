@@ -647,7 +647,7 @@ describe("babysit apply", () => {
     expect(res.actions[0]).toMatchObject({ action: "comment-fix" });
     expect(c.emitTransition).toHaveBeenCalledWith({
       type: "slice.stage.changed", sliceId: "s", stage: "pr-in-fix",
-      handledFeedback: { kind: "conversation", commentIds: ["11"] },
+      handledFeedback: { kind: "conversation", commentIds: ["11"], dispatchKey: expect.any(String) },
     });
   });
 
