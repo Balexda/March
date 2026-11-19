@@ -678,7 +678,7 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
     let defaultBranch = state?.repo?.default_branch;
     if (!defaultBranch) {
       try {
-        defaultBranch = (await execText("git", ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"], { cwd: repoPath }))
+        defaultBranch = (await execText("git", ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"], { cwd: repoPath, timeout: SYNC_STEP_TIMEOUT_MS, killSignal: "SIGKILL" }))
           .trim()
           .replace(/^origin\//, "");
       } catch {
@@ -701,7 +701,7 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
     return {
       default_branch: defaultBranch,
       synced: true,
-      head: (await execText("git", ["rev-parse", "HEAD"], { cwd: repoPath })).trim(),
+      head: (await execText("git", ["rev-parse", "HEAD"], bounded)).trim(),
     };
   }
 
