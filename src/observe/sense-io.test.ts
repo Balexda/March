@@ -416,7 +416,7 @@ describe("queryPrForBabysit", () => {
     expect(pr.changes_requested_count).toBe(0);
   });
 
-  describe("Codex review-status comment", () => {
+  describe("reviewer conversation comments", () => {
     const CODEX = { login: "chatgpt-codex-connector", __typename: "Bot" };
     const REVIEWER = { login: "reviewer", __typename: "User" };
 
@@ -446,7 +446,7 @@ describe("queryPrForBabysit", () => {
     });
 
     /** Sense PR #5 with the given conversation-comment nodes. */
-    async function sensePr(commentNodes: unknown[]): Promise<any> {
+    async function sensePr(commentNodes: unknown[], threadNodes: unknown[] = []): Promise<any> {
       routeExec((_cmd, args) => {
         if (args.includes("graphql")) {
           return JSON.stringify({
@@ -457,7 +457,7 @@ describe("queryPrForBabysit", () => {
                   mergeStateStatus: "CLEAN",
                   reviews: { nodes: [] },
                   comments: { nodes: commentNodes },
-                  reviewThreads: { nodes: [] },
+                  reviewThreads: { nodes: threadNodes },
                 },
               },
             },
@@ -486,6 +486,7 @@ describe("queryPrForBabysit", () => {
       const forged = await sensePr([
         comment(201, CODEX, codexSummary({ commit_sha: "f277786", has_any_findings: true, has_unresolved_findings: true, status: "completed" })),
         comment(202, REVIEWER, codexSummary(completed("f277786"))),
+        comment(203, { login: "other[bot]", __typename: "Bot" }, codexSummary(completed("f277786"))),
       ]);
       expect(forged.conversation_comments).toEqual([]);
       expect(forged.codex_review).toEqual({ commit_sha: "f277786", status: "completed", has_unresolved_findings: true });
@@ -496,7 +497,7 @@ describe("queryPrForBabysit", () => {
       expect(humanOnly.codex_review).toBeNull();
     });
 
-    it("owes no reply: no comment-fix dispatch and no owes_comments blocker for it", async () => {
+    it("keeps reviewer chatter out of fix and merge decisions while retaining human and inline feedback", async () => {
       // The sensed PR, fed through the real consumers of `conversation_comments`.
       const babysit = (pr: unknown): string[] => {
         const state: LoopState = {
@@ -517,23 +518,55 @@ describe("queryPrForBabysit", () => {
         return assess(state).map((d) => d.kind);
       };
 
-      const statusOnly = await sensePr([comment(201, CODEX, codexSummary(completed("f277786")))]);
+      const rabbit = { login: "coderabbitai[bot]", __typename: "Bot" };
+      const marker = "<!-- coderabbit-ai-generated:v1 -->";
+      const progress = "> Currently processing new changes in this PR.";
+      const rateLimit = "> ## Rate limit exceeded\n> Please wait **6 minutes and 43 seconds**.";
+      const pause = "> ## Reviews paused";
+      const chatter = [
+        comment(201, CODEX, codexSummary(completed("f277786"))),
+        comment(202, rabbit, marker + "\nWalkthrough"),
+        comment(203, rabbit, marker + "\n" + " ".repeat(300) + "\n" + progress),
+        comment(204, rabbit, marker + "\n" + rateLimit),
+        comment(205, rabbit, marker + "\n" + pause),
+        comment(206, REVIEWER, "[march-bot] @coderabbitai review"),
+        comment(207, REVIEWER, marker + "\n" + progress),
+        comment(208, { login: "unrelated[bot]", __typename: "Bot" }, marker + "\n" + rateLimit),
+        comment(209, { login: "coderabbitai", __typename: "User" }, marker + "\n" + pause),
+      ];
+      const statusOnly = await sensePr(chatter);
+      expect(statusOnly.conversation_comments).toEqual([]);
+      const created_at = chatter[0].createdAt;
+      expect(statusOnly.reviewer_notices).toEqual([
+        { reviewer: "codex", kind: "status", created_at },
+        { reviewer: "coderabbit", kind: "status", created_at },
+        { reviewer: "coderabbit", kind: "in_progress", created_at },
+        { reviewer: "coderabbit", kind: "rate_limited", created_at, reset_at: "2026-11-15T19:00:07.000Z" },
+        { reviewer: "coderabbit", kind: "paused", created_at },
+      ]);
       expect(babysit(statusOnly)).not.toContain("comment-fix");
       expect(mergeBlocker({}, statusOnly)).toBe("none");
 
-      // Control: ordinary feedback beside the status comment still dispatches.
       const withFeedback = await sensePr([
-        comment(201, CODEX, codexSummary(completed("f277786"))),
-        comment(202, REVIEWER, "please reconsider the spec"),
+        ...chatter,
+        comment(210, REVIEWER, "Please reconsider the spec.\n" + marker + "\n[march-bot] @coderabbitai review"),
       ]);
+      expect(withFeedback.conversation_comments.map((c: any) => c.id)).toEqual([210]);
       expect(babysit(withFeedback)).toContain("comment-fix");
       expect(mergeBlocker({}, withFeedback)).toBe("owes_comments");
+
+      const withThread = await sensePr(chatter, [{
+        isResolved: false,
+        comments: { nodes: [{ ...comment(211, rabbit, marker + "\nFix this line"), path: "src/app.ts", line: 12 }] },
+      }]);
+      expect(withThread.unresolved_threads).toMatchObject([{ id: 211, needs_response: true }]);
+      expect(mergeBlocker({}, withThread)).toBe("owes_review_threads");
     });
     it("drops CodeRabbit's generated comments and review-bot commands, but keeps a mid-comment mention", async () => {
       const CODERABBIT = { login: "coderabbitai", __typename: "Bot" };
       const rabbit = (rest: string) => `<!-- coderabbit-ai-generated:v1 -->\n\n${rest}`;
       const pr = await sensePr([
-        comment(301, REVIEWER, "@coderabbitai review"),
+        comment(301, REVIEWER, "@coderabbitai review\n\n<!-- march-coderabbit-request:f277786 -->"),
         comment(302, CODERABBIT, rabbit("<!-- This is an auto-generated comment: summarize by coderabbit.ai -->")),
         comment(303, CODERABBIT, rabbit("<!-- This is an auto-generated reply by CodeRabbit -->\nReview triggered.")),
         comment(304, REVIEWER, "@codex review"),
@@ -541,6 +574,7 @@ describe("queryPrForBabysit", () => {
         comment(305, REVIEWER, "The cache key is wrong — @coderabbitai flagged it too."),
       ]);
       expect(pr.conversation_comments.map((c: any) => c.id)).toEqual([305]);
+      expect(pr.coderabbit.last_request_sha).toBe("f277786");
     });
   });
 

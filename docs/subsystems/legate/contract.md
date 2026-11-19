@@ -26,6 +26,8 @@ Legate's required public inputs are:
 - Service readiness: Herald for events and profiles, Hatchery for dispatch jobs, Brood for lifecycle and teardown authority, Castra for hosted session observation and prompts, plus local git, Smithy, `gh`, and filesystem dependencies.
 - Steward attachment metadata: session id, profile, worker group, slice id, trace key, status, and worktree or PR metadata observed through Herald/Castra boundaries.
 
+Shared PR sensing classifies full conversation comment bodies before creating previews. Review-bot commands, March review triggers, and reviewer notices are excluded from `conversation_comments`. The PR snapshot carries `reviewer_notices` with `reviewer`, `kind` (`status`, `in_progress`, `rate_limited`, or `paused`), `created_at`, and an optional ISO-8601 `reset_at` when the notice supplies a reset time. Notices require a recognized bot identity. Unresolved inline threads continue through the review-thread path and can block merge. Sensing continues to report the existing `codex_review` and `coderabbit` observations.
+
 Legate's public outputs are:
 
 - Hatchery dispatch request metadata: prompt, backend, repository path, agent-deck profile, manager group, title, branch, deployment profile, task type, task name, optional toolchain, and slice id correlation.
