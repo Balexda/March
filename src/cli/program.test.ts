@@ -14,6 +14,7 @@ import { registerRoutes } from "../brood/service/routes.js";
 import { sqliteAvailable } from "../brood/service/sqlite.js";
 import { SessionStore } from "../brood/service/store.js";
 import { registerProfileRoutes } from "../herald/profiles/routes.js";
+import { buildServer as buildHeraldServer } from "../herald/service/server.js";
 import { ProfileStore } from "../herald/profiles/store.js";
 import { FINDER_BIN } from "../shared/deps.js";
 
@@ -74,6 +75,80 @@ describe("march CLI", () => {
       }
     }
     tmpDirs.length = 0;
+  });
+
+  it.skipIf(!sqliteAvailable)("shows review state in the Herald table and historical JSON", async () => {
+    // Herald captures the review window at construction; pin it so an operator's
+    // MARCH_REVIEW_WAIT_MINUTES cannot shift the fixture's expiry boundary.
+    const priorWait = process.env.MARCH_REVIEW_WAIT_MINUTES;
+    process.env.MARCH_REVIEW_WAIT_MINUTES = "30";
+    let server: Awaited<ReturnType<typeof buildHeraldServer>>;
+    try {
+      server = await buildHeraldServer({
+        storeOptions: { dbPath: ":memory:", defaultProfile: "alpha", snapshotEvery: 2 },
+        profileStoreOptions: { dbPath: ":memory:" },
+      });
+    } finally {
+      if (priorWait === undefined) delete process.env.MARCH_REVIEW_WAIT_MINUTES;
+      else process.env.MARCH_REVIEW_WAIT_MINUTES = priorWait;
+    }
+    const { app, store, profileStore } = server;
+    try {
+      const base = { repoName: "repo", repoPath: "/repo", workerGroup: "workers" };
+      profileStore.register({ ...base, profile: "alpha", mergePolicy: {
+        byTaskType: { forge: { botApprovers: ["review-bot"] } },
+        reviewRequests: { byTaskType: { forge: { reviewers: [{ id: "coderabbit" }] } } },
+      } });
+      profileStore.register({ ...base, profile: "beta" });
+      const ts = "2026-11-19T12:00:00Z";
+      const head = "a".repeat(40);
+      const pr = { number: 42, head_sha: head, state: "OPEN", reviews: [
+        { state: "APPROVED", author_kind: "bot", login: "review-bot", commit_sha: head, submitted_at: ts },
+      ] };
+      const shared = { sliceId: "shared", ts, source: "herald" } as const;
+      for (const profile of ["alpha", "beta"]) {
+        store.append({ ...shared, profile, type: "slice.dispatched", branch: "smithy/forge/shared" });
+        store.append({ ...shared, profile, type: "slice.pr.changed", pr });
+      }
+      store.append({ ...shared, sliceId: "cut", profile: "alpha", type: "slice.dispatched", branch: "smithy/cut/example" });
+      store.append({ ...shared, sliceId: "cut", profile: "alpha", type: "slice.pr.changed", pr: { ...pr, number: 43 } });
+      store.append({ ...shared, sliceId: "pending-forge", profile: "alpha", type: "slice.pr.changed", pr: { number: 44, head_sha: head } });
+      const intent = store.append({
+        ...shared, sliceId: "pending-forge", profile: "alpha", type: "review.requested",
+        pr: 44, reviewer: "coderabbit", headSha: head, at: ts, reason: "initial",
+      });
+      const throttle = store.append({
+        profile: "beta", ts, source: "legate", type: "review.backoff", reviewer: "coderabbit",
+        until: "2026-11-19T12:10:00Z", attempts: 1, cause: "http_429",
+      });
+      const expired = store.append({ profile: "beta", source: "herald", type: "heartbeat", ts: "2026-11-19T12:31:00Z" });
+      const url = await app.listen({ port: 0, host: "127.0.0.1" });
+      const env = { ...process.env, HOME: makeTmpDir(), MARCH_HERALD_URL: url };
+      const runState = (seq: number, ...args: string[]) => execFileAsync(
+        process.execPath, [CLI_PATH, "herald", "state", "--at", String(seq), ...args],
+        { env, timeout: 5000 },
+      );
+      const table = (await runState(throttle.seq)).stdout;
+      expect(table).toContain("slices=3 sessions=0 smithy=0/0/0 (dispatchable/blocked/total)");
+      expect(table).toContain("shared\t#42\tapproved_by_bot");
+      expect(table).toContain("cut\t#43\tnone");
+      expect(table).toContain("pending-forge\t#44\trate_limited");
+      const json = JSON.parse((await runState(intent.seq, "--json")).stdout);
+      expect(json.slices.shared).toMatchObject({ pr, reviewState: "approved_by_bot" });
+      expect(json.slices["pending-forge"].reviewState).toBe("requested");
+      expect(JSON.parse((await runState(expired.seq, "--json")).stdout).slices["pending-forge"].reviewState).toBe("none");
+
+      const both = (await app.inject({ url: `/state?all=1&at=${throttle.seq}` })).json();
+      expect(both.byProfile.alpha.slices.shared.reviewState).toBe("approved_by_bot");
+      expect(both.byProfile.beta.slices.shared.reviewState).toBe("none");
+      expect(store.projection().slices.shared).not.toHaveProperty("reviewState");
+      expect(store.projection().slices.shared.pr).toEqual(pr);
+      expect((await app.inject({ url: `/state?profile=beta&at=${throttle.seq}` })).json().slices.shared.reviewState).toBe("none");
+    } finally {
+      await app.close();
+      profileStore.close();
+      store.close();
+    }
   });
 
   it.skipIf(!sqliteAvailable)("edits and shows per-verb merge policies through Herald", async () => {

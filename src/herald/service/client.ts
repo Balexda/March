@@ -1,5 +1,6 @@
 import { heraldPort } from "../config.js";
-import type { HeraldEvent, MultiProfileState, SystemState } from "../events.js";
+import type { MultiStateProjection, StateProjection } from "./state-projection.js";
+import type { HeraldEvent } from "../events.js";
 import type { AdminEventRequest } from "./admin.js";
 import type { EventsPage } from "./types.js";
 
@@ -199,7 +200,7 @@ export class HeraldClient {
   /** The current projection (or, with `at`, the projection as of a seq). When
    *  `profile` is given, that profile's SystemState; otherwise the default
    *  profile's (back-compat single-profile view). */
-  async state(at?: number, profile?: string): Promise<SystemState> {
+  async state(at?: number, profile?: string): Promise<StateProjection> {
     const params = new URLSearchParams();
     if (at !== undefined) params.set("at", String(at));
     if (profile !== undefined) params.set("profile", profile);
@@ -208,19 +209,19 @@ export class HeraldClient {
     if (status !== 200) {
       throw new HeraldClientError(bodyError(body, `herald GET /state failed (${status})`));
     }
-    return body as SystemState;
+    return body as StateProjection;
   }
 
   /** The full multi-profile projection (or, with `at`, as of a seq). The legate's
    *  single-cursor cold-start seed for every profile in one round-trip. */
-  async stateAll(at?: number): Promise<MultiProfileState> {
+  async stateAll(at?: number): Promise<MultiStateProjection> {
     const params = new URLSearchParams({ all: "1" });
     if (at !== undefined) params.set("at", String(at));
     const { status, body } = await this.request("GET", `/state?${params.toString()}`);
     if (status !== 200) {
       throw new HeraldClientError(bodyError(body, `herald GET /state?all failed (${status})`));
     }
-    return body as MultiProfileState;
+    return body as MultiStateProjection;
   }
 
   /** The events that moved state from `from` to `to` (default `to` = latest). */

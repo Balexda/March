@@ -1,4 +1,5 @@
 import type { ReviewRequestRecord } from "../../../herald/events.js";
+import { reviewConfigInteger, reviewWaitMs } from "../../../herald/profiles/review-config.js";
 
 export interface ReviewRequestLimits {
   waitMs: number;
@@ -8,19 +9,13 @@ export interface ReviewRequestLimits {
 }
 
 export function reviewRequestLimits(env: NodeJS.ProcessEnv, warn: (message: string) => void): ReviewRequestLimits {
-  function integer(key: string, fallback: number, minimum: number, scale = 1): number {
-    const value = env[key];
-    if (value === undefined || (value === "" && fallback === Infinity)) return fallback;
-    const number = Number(value);
-    if (/^\d+$/.test(value) && Number.isSafeInteger(number * scale) && number >= minimum) return number;
-    warn(`Invalid ${key}; using ${fallback === Infinity ? "unlimited" : fallback}.`);
-    return fallback;
-  }
+  const integer = (key: string, fallback: number, minimum: number) =>
+    reviewConfigInteger(env, warn, key, fallback, minimum);
   return {
     copilotDailyCap: integer("MARCH_COPILOT_REVIEWS_PER_DAY", 0, 0),
     copilotMonthlyCap: integer("MARCH_COPILOT_REVIEWS_PER_MONTH", 0, 0),
     dailyCap: integer("MARCH_CODERABBIT_REVIEWS_PER_DAY", Infinity, 0),
-    waitMs: integer("MARCH_REVIEW_WAIT_MINUTES", 30, 1, 60_000) * 60_000,
+    waitMs: reviewWaitMs(env, warn),
   };
 }
 

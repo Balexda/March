@@ -53,7 +53,7 @@ export const DEFAULT_MERGE_REQUIREMENTS: ResolvedMergeRequirements = {
   botApprovers: [],
 };
 
-const CODERABBIT_LOGIN = "coderabbitai";
+export const CODERABBIT_LOGIN = "coderabbitai";
 const BUILTIN_BOT_APPROVERS = [CODERABBIT_LOGIN] as const;
 const BUILTIN_ROWS = {
   cut: { ...DEFAULT_MERGE_REQUIREMENTS, approval: false },

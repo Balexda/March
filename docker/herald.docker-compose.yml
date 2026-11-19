@@ -65,6 +65,7 @@ services:
     ports:
       - "127.0.0.1:8818:8818" # localhost only — never public (deterministic herald port)
     environment:
+      - MARCH_REVIEW_WAIT_MINUTES=${MARCH_REVIEW_WAIT_MINUTES:-30}
       - MARCH_SELF_BOT_LOGIN=${MARCH_SELF_BOT_LOGIN:-march-bot}
       - MARCH_OTEL=1
       - MARCH_OTEL_ENDPOINT=http://otel-lgtm:4318

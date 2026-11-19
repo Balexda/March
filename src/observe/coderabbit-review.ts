@@ -20,6 +20,9 @@
  * - `last_request_sha`: the head named by the newest sampled March trigger.
  * - `review_times_by_head` and `trigger_times_by_head`: the latest raw review
  *   and earliest sampled marked trigger per head, from GitHub timestamps.
+ * - `trigger_history`: every sampled marked trigger in chronological order, so
+ *   a SHA-less notice can be attributed to the trigger that preceded it even
+ *   when triggers alternate between heads.
  *
  * Pure, so it is unit-testable without `gh`.
  */
@@ -50,6 +53,7 @@ export function markedCodeRabbitHead(body: unknown): string | undefined {
 export interface CodeRabbitStanding {
   review_times_by_head?: Record<string, string>;
   trigger_times_by_head?: Record<string, string>;
+  trigger_history?: Array<{ head_sha: string; at: string }>;
   decision: "APPROVED" | "CHANGES_REQUESTED" | "DISMISSED" | null;
   decision_commit_sha: string | null;
   /** Set only when the full review list establishes the latest bot verdict. */
@@ -87,6 +91,7 @@ export function summarizeCodeRabbit(
   const comments = Array.isArray(commentNodes) ? commentNodes : [];
   const reviewTimes: Record<string, string> = {};
   const triggerTimes: Record<string, string> = {};
+  const triggerHistory: Array<{ head_sha: string; at: string }> = [];
   let decisive: any = null;
   let latest: any = null;
   for (const r of reviews) {
@@ -111,12 +116,16 @@ export function summarizeCodeRabbit(
     if (sha && (!triggerTimes[sha] || Date.parse(c.createdAt) < Date.parse(triggerTimes[sha]))) {
       triggerTimes[sha] = c.createdAt;
     }
+    if (sha) triggerHistory.push({ head_sha: sha, at: c.createdAt });
     if (sha && (!lastMarked || c.createdAt > lastMarked.at)) lastMarked = { at: c.createdAt, sha };
   }
   if (!latest && lastRequestAt === null) return null;
   return {
     ...(Object.keys(reviewTimes).length ? { review_times_by_head: reviewTimes } : {}),
     ...(Object.keys(triggerTimes).length ? { trigger_times_by_head: triggerTimes } : {}),
+    ...(triggerHistory.length
+      ? { trigger_history: triggerHistory.sort((left, right) => Date.parse(left.at) - Date.parse(right.at)) }
+      : {}),
     decision: decisive ? (decisive.state as CodeRabbitStanding["decision"]) : null,
     decision_commit_sha: typeof decisive?.commit?.oid === "string" ? decisive.commit.oid : null,
     ...(reviewsComplete && isBotActor(decisive?.author) ? { decision_is_bot: true as const } : {}),

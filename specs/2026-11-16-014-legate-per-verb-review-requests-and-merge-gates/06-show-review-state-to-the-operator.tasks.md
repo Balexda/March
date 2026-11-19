@@ -19,7 +19,7 @@
 
 ### Tasks
 
-- [ ] **Derive review state from the fold**
+- [x] **Derive review state from the fold**
 
   Add the shared pure derivation for AS 6.1 using the spec contract and data-model precedence.
 
@@ -27,7 +27,7 @@
   - Use the resolved verb's bot allowlist and configured reviewers, sensed verdicts and notices, this PR's request ledger, and the account-wide back-off fold.
   - Deterministic coverage exercises all six states, precedence when signals overlap, missing head SHA, stale heads and elapsed waits, and bot identity and allowlist rules.
 
-- [ ] **Expose review state in the Herald CLI**
+- [x] **Expose review state in the Herald CLI**
 
   Enrich the Herald state read using the owning profile's registered merge policy and the slice verb. Render the resulting field in the CLI for AS 6.2 and SC-009.
 
