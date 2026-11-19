@@ -1,3 +1,5 @@
+import type { ReviewObservation } from "../../observe/sense-io.js";
+
 /** Profile policy shared by Herald validation, Legate, and the operator CLI. */
 export interface MergeRequirements {
   readonly approval: boolean;
@@ -79,8 +81,8 @@ export function normalizeBotLogin(login: string): string {
   return login.toLowerCase().replace(/\[bot\]$/, "");
 }
 
-function selfBotLogin(): string {
-  return normalizeBotLogin(process.env.MARCH_SELF_BOT_LOGIN?.trim() || "march-bot");
+export function selfBotLogin(env: NodeJS.ProcessEnv = process.env): string {
+  return normalizeBotLogin(env.MARCH_SELF_BOT_LOGIN?.trim() || "march-bot");
 }
 
 function verbEntry<T>(entries: Readonly<Record<string, T>> | undefined, verb: string): T | undefined {
@@ -146,19 +148,19 @@ interface ReviewEvidence {
   human_approval_count?: unknown;
   bot_approval_count?: unknown;
   changes_requested_count?: unknown;
-  /** `false` when the observer could not read every review page; absent on older snapshots. */
+  /** False when the observer could not read every review page. */
   reviews_complete?: boolean;
   head_sha?: string | null;
-  coderabbit?: { decision_is_bot?: true; decision?: string | null; decision_commit_sha?: string | null } | null;
+  reviews?: readonly ReviewObservation[];
+  coderabbit?: { decision_is_bot?: true; decision?: string | null } | null;
 }
 
-/** The existing observer exposes a verified verdict for CodeRabbit. */
-function trustedCodeRabbit(req: ResolvedMergeRequirements, pr: ReviewEvidence | null | undefined) {
-  if (req.botApproval && req.botApprovers.includes(CODERABBIT_LOGIN) &&
-      selfBotLogin() !== CODERABBIT_LOGIN && pr?.coderabbit?.decision_is_bot === true) {
-    return pr.coderabbit;
-  }
-  return undefined;
+export function eligibleReviewer(req: ResolvedMergeRequirements, review: ReviewObservation): boolean {
+  const login = normalizeBotLogin(review.login);
+  return login !== selfBotLogin() && (
+    review.author_kind === "human" ||
+    (review.author_kind === "bot" && req.botApprovers.includes(login))
+  );
 }
 
 export function approvalSatisfied(
@@ -168,14 +170,26 @@ export function approvalSatisfied(
   if (!req.approval) return true;
   // Partial review evidence can hide a later verdict, so it never establishes approval.
   if (pr?.reviews_complete === false) return false;
-  if (typeof pr?.human_approval_count === "number" && pr.human_approval_count >= 1) return true;
-  const review = trustedCodeRabbit(req, pr);
-  return review?.decision === "APPROVED" && !!pr?.head_sha && review.decision_commit_sha === pr.head_sha;
+  if (pr?.reviews) {
+    return pr.reviews.some((review) =>
+      review.state === "APPROVED" && eligibleReviewer(req, review) &&
+      (review.author_kind === "human" ||
+        (req.botApproval && !!pr.head_sha && review.commit_sha === pr.head_sha)),
+    );
+  }
+  return typeof pr?.human_approval_count === "number" && pr.human_approval_count >= 1;
 }
 
 export function changesRequestedSatisfied(req: ResolvedMergeRequirements, pr: ReviewEvidence): boolean {
-  return !req.changesRequested ||
-    (pr.reviews_complete !== false && Number(pr.changes_requested_count ?? 0) === 0 && trustedCodeRabbit(req, pr)?.decision !== "CHANGES_REQUESTED");
+  if (!req.changesRequested) return true;
+  if (pr.reviews_complete === false) return false;
+  if (pr.reviews) {
+    return !pr.reviews.some((review) => review.state === "CHANGES_REQUESTED" && eligibleReviewer(req, review));
+  }
+  // Preserve outstanding blockers on snapshots written before reviewer verdicts.
+  const legacyBotBlock = selfBotLogin() !== CODERABBIT_LOGIN && req.botApprovers.includes(CODERABBIT_LOGIN) &&
+    pr.coderabbit?.decision_is_bot === true && pr.coderabbit.decision === "CHANGES_REQUESTED";
+  return Number(pr.changes_requested_count ?? 0) === 0 && !legacyBotBlock;
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {

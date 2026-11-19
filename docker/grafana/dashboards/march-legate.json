@@ -1988,7 +1988,7 @@
         "type": "prometheus",
         "uid": "prometheus"
       },
-      "description": "ready = loop merges now (transient); waiting-on-approval = human review gate (not alarmed); blocked-merge-state = approved but GitHub won't merge (a stall).",
+      "description": "ready = loop merges now (transient); waiting-on-approval = review gate (not alarmed); blocked-merge-state = approved but GitHub won't merge (a stall).",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -2142,7 +2142,7 @@
         "type": "prometheus",
         "uid": "prometheus"
       },
-      "description": "Mergeable slices blocked on a human review gate (human-paced; not alarmed).",
+      "description": "Mergeable slices blocked on a review gate (not alarmed).",
       "fieldConfig": {
         "defaults": {
           "color": {

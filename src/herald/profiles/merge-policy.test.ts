@@ -59,39 +59,66 @@ describe("resolveMergeRequirements", () => {
   });
 });
 
-describe("approvalSatisfied", () => {
+describe("review verdicts", () => {
   const forge = resolveMergeRequirements(undefined, "forge");
-  const botApproved = {
-    head_sha: "head",
-    bot_approval_count: 1,
-    coderabbit: { decision: "APPROVED", decision_commit_sha: "head", decision_is_bot: true as const },
-  };
+  const botReview = {
+    login: "coderabbitai",
+    author_kind: "bot",
+    state: "APPROVED",
+    commit_sha: "head",
+    submitted_at: "2026-11-16T12:00:00Z",
+  } as const;
+  const pr = { head_sha: "head", reviews: [botReview] };
 
-  it("requires an eligible approval when the gate is on", () => {
+  it("requires eligible approval and uses aggregate human evidence for legacy snapshots", () => {
     expect(approvalSatisfied(forge, { human_approval_count: 1 })).toBe(true);
     expect(approvalSatisfied(forge, { bot_approval_count: 1 })).toBe(false);
+    expect(approvalSatisfied(forge, { human_approval_count: 1, reviews: [] })).toBe(false);
     expect(approvalSatisfied(forge, undefined)).toBe(false);
     expect(approvalSatisfied(resolveMergeRequirements(undefined, "cut"), undefined)).toBe(true);
   });
 
-  it("accepts observed CodeRabbit approval only for a trusted bot on the head", () => {
-    expect(approvalSatisfied(forge, botApproved)).toBe(true);
-    expect(approvalSatisfied(forge, { ...botApproved, head_sha: "new" })).toBe(false);
-    expect(approvalSatisfied(forge, { ...botApproved, coderabbit: { decision: "APPROVED", decision_commit_sha: "head" } })).toBe(false);
-    expect(approvalSatisfied({ ...forge, botApprovers: ["other"] }, botApproved)).toBe(false);
-    expect(approvalSatisfied(DEFAULT_MERGE_REQUIREMENTS, botApproved)).toBe(false);
+  it("accepts allowlisted bots only with approval on the current head", () => {
+    expect(approvalSatisfied(forge, pr)).toBe(true);
+    expect(approvalSatisfied(forge, { ...pr, head_sha: "new" })).toBe(false);
+    expect(approvalSatisfied(forge, { ...pr, reviews: [{ ...botReview, commit_sha: null }] })).toBe(false);
+    expect(approvalSatisfied(forge, { ...pr, reviews: [{ ...botReview, login: "CodeRabbitAI[BOT]" }] })).toBe(true);
+    const customForge = resolveMergeRequirements({ byTaskType: { forge: { botApprovers: ["Other[bot]"] } } }, "forge");
+    expect(approvalSatisfied(customForge, pr)).toBe(false);
+    expect(approvalSatisfied(customForge, { ...pr, reviews: [{ ...botReview, login: "other" }] })).toBe(true);
+    expect(approvalSatisfied(forge, { ...pr, reviews_complete: false })).toBe(false);
+    expect(changesRequestedSatisfied(forge, { ...pr, reviews_complete: false })).toBe(false);
+    expect(approvalSatisfied(DEFAULT_MERGE_REQUIREMENTS, pr)).toBe(false);
   });
-});
 
-it("blocks a trusted CodeRabbit changes-requested verdict until an explicit override", () => {
-  const forge = resolveMergeRequirements(undefined, "forge");
-  const pr = {
-    changes_requested_count: 0,
-    coderabbit: { decision: "CHANGES_REQUESTED", decision_commit_sha: "old", decision_is_bot: true as const },
-  };
-  expect(changesRequestedSatisfied(forge, pr)).toBe(false);
-  expect(changesRequestedSatisfied({ ...forge, changesRequested: false }, pr)).toBe(true);
-  expect(changesRequestedSatisfied({ ...forge, botApprovers: ["other"] }, pr)).toBe(true);
+  it("uses human approval rules for a human with an allowlisted login", () => {
+    const review = { ...botReview, author_kind: "human", commit_sha: null } as const;
+    expect(approvalSatisfied(DEFAULT_MERGE_REQUIREMENTS, { ...pr, reviews: [review] })).toBe(true);
+  });
+
+  it("excludes March even if the policy allowlists it", () => {
+    vi.stubEnv("MARCH_SELF_BOT_LOGIN", "march-app[bot]");
+    try {
+      const req = { ...forge, botApprovers: ["march-app"] };
+      const self = { ...botReview, login: "March-App" };
+      expect(approvalSatisfied(req, { ...pr, reviews: [self] })).toBe(false);
+      expect(changesRequestedSatisfied(req, { ...pr, reviews: [{ ...self, state: "CHANGES_REQUESTED" }] })).toBe(true);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("blocks trusted and human changes-requested on any commit until superseded or relaxed", () => {
+    const review = { ...botReview, state: "CHANGES_REQUESTED", commit_sha: "old" } as const;
+    const blocked = { ...pr, reviews: [review] };
+    expect(changesRequestedSatisfied(forge, blocked)).toBe(false);
+    expect(changesRequestedSatisfied(forge, pr)).toBe(true);
+    expect(changesRequestedSatisfied({ ...forge, changesRequested: false }, blocked)).toBe(true);
+    expect(changesRequestedSatisfied({ ...forge, botApprovers: ["other"] }, blocked)).toBe(true);
+    expect(changesRequestedSatisfied(DEFAULT_MERGE_REQUIREMENTS, {
+      ...pr, reviews: [{ ...review, author_kind: "human" }],
+    })).toBe(false);
+  });
 });
 
 it("fails closed on partial review evidence unless the verb relaxes the gate", () => {
