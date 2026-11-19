@@ -233,8 +233,9 @@ function ensureInstruments(meter: Meter): void {
     unit: "1",
   });
   meter.createObservableGauge("march.legate.review.cap_remaining", {
+    // No unit: `unit: "1"` makes the Prometheus exporter append `_ratio` to a
+    // gauge name, which would break the dashboard's `..._cap_remaining` query.
     description: "Remaining review request budget across profiles by UTC window",
-    unit: "1",
   }).addCallback((result) => {
     for (const { reviewer, window, remaining } of latestReviewCaps) {
       result.observe(remaining, { reviewer, window });
