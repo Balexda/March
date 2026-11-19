@@ -2,6 +2,7 @@ import Fastify, { type FastifyBaseLogger, type FastifyInstance } from "fastify";
 import { recordTesseraDenial, recordTesseraIssuance } from "../observability/tessera-service-metrics.js";
 import { emitTesseraSpan } from "../observability/tessera-trace.js";
 import { ProviderRegistry, TesseraError, denyAuthorization, isTesseraErrorCode, parseTokenRequest, type AuthorizationBoundary, type CredentialProvider, type ProviderIssueResult, type TesseraErrorCode, type TokenRequest } from "./models.js";
+import { monitorProviderHealth } from "./provider-health.js";
 
 export interface BuildTesseraServerOptions {
   providers?: CredentialProvider[];
@@ -74,13 +75,7 @@ export function buildTesseraServer(options: BuildTesseraServerOptions = {}): Fas
     void reply.code(safe.status).send({ error: { code: safe.code, message: safe.message } });
   });
   app.get("/healthz", async () => ({ status: "ok" }));
-  app.get("/status", async () => ({
-    service: "march-tessera", uptime_s: Math.floor((Date.now() - startedAt) / 1000),
-    providers: (["app", "user"] as const).map(identity => {
-      try { return registry.select(identity).status(); }
-      catch { return { provider: `github-${identity}`, state: "unconfigured", login: null, credential_expires_at: null, expiry_warning: false, last_error: null }; }
-    }), soonest_expiry: null, cache: { entries: registry.all().reduce((total, provider) => total + (provider.cacheSize?.() ?? 0), 0) },
-  }));
+  app.get("/status", monitorProviderHealth(app, registry, startedAt));
   app.post("/v1/github/token", async request => {
     const parsed = parseTokenRequest(request.body);
     const context = requests.get(request)!;

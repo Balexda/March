@@ -28,6 +28,8 @@ export interface ProviderIssueResult {
   degradedReason?: "provider_unavailable";
 }
 export interface ProviderStatus {
+  /** Optional in-memory marker changed by the provider when it replaces a credential. */
+  credentialRevision?: object;
   provider: string;
   state: "ok" | "unconfigured" | "degraded" | "invalid";
   login: string | null;

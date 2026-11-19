@@ -51,7 +51,7 @@ Follow [March Vision](../../docs/vision.md) and the [Operating Philosophy](../..
 
 ### Tasks
 
-- [ ] **Expose provider health and expiry warnings**
+- [x] **Expose provider health and expiry warnings**
 
   Complete the Health and Status contract in `src/tessera/` and publish expiry measurements through `src/observability/`.
 
@@ -61,7 +61,7 @@ Follow [March Vision](../../docs/vision.md) and the [Operating Philosophy](../..
   - Status flags the warning. Tessera logs it upon detection, at most once per day for the expiring credential. Expiry checks work without token issuance traffic.
   - Clock-controlled tests cover threshold, repeat checks, unknown expiry and credential replacement with fake provider data. Responses and logs exclude secrets and raw upstream errors. Keep the Tessera subsystem contract current.
 
-- [ ] **Add the Tessera service dashboard**
+- [x] **Add the Tessera service dashboard**
 
   Add a service dashboard under `docker/grafana/dashboards/` for AS 8.7.
 
