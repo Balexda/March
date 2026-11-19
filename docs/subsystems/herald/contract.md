@@ -17,6 +17,20 @@ whose latest reply is from March has no response due. The existing CodeRabbit
 standing records `decision_is_bot: true` when the review list is complete and
 GitHub identifies the decisive review's author as a bot.
 
+PR snapshots in `slice.pr.changed` include a `reviews` array with one entry
+per reviewer identity. A human and a bot with matching normalized logins have
+separate entries. Each entry includes `login` (lowercase with the
+`[bot]` suffix removed), `author_kind` (`human` or `bot`), `state`
+(`APPROVED`, `CHANGES_REQUESTED`, `DISMISSED` or `COMMENTED`),
+`commit_sha` (string or null) and `submitted_at` (ISO-8601). A comment
+cannot supersede an approval, a request for changes or a dismissal.
+Herald classifies authors from GitHub's actor type and login without consulting
+the verb's allowlist. The Tessera app and the login configured by
+`MARCH_SELF_BOT_LOGIN` are excluded. The existing aggregate counts and
+CodeRabbit standing are still recorded. `reviews_complete: false` marks
+partial evidence from an unfinished review page walk. Older snapshots can omit
+`reviews` and Herald refreshes them on the next observation.
+
 A Legate `slice.stage.changed` event may include `handledFeedback` with a
 `kind` of `inline` or `conversation` and an array of string `commentIds`.
 An optional string `dispatchKey` names the fix dispatch that handled them, and

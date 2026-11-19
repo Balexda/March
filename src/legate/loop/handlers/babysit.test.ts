@@ -427,12 +427,36 @@ describe("babysit auto-merge gate", () => {
     expect(kindsOf(assess(state))).toEqual(["pr-snapshot"]);
   });
 
-  it("auto-merges forge with an observed CodeRabbit approval on the head", () => {
-    const state = allClearState({
-      head_sha: "current-head",
-      coderabbit: { decision: "APPROVED", decision_commit_sha: "current-head", decision_is_bot: true },
-    });
-    expect(kindsOf(assess(state))).toEqual(["pr-snapshot", "pr-auto-merge"]);
+  const codeRabbitApproval = {
+    login: "coderabbitai",
+    author_kind: "bot",
+    state: "APPROVED",
+    commit_sha: "abc123",
+    submitted_at: NOW,
+  };
+  it.each([
+    ["forge", [codeRabbitApproval], true],
+    ["forge", [{ ...codeRabbitApproval, commit_sha: "old" }], false],
+    ["forge", [{ ...codeRabbitApproval, login: "another-bot" }], false],
+    ["mark", [codeRabbitApproval], false],
+    ["render", [codeRabbitApproval], false],
+    ["spark", [codeRabbitApproval], false],
+    ["ignite", [codeRabbitApproval], false],
+    ["fix", [codeRabbitApproval], false],
+    ["strike", [codeRabbitApproval], false],
+    ["unknown", [codeRabbitApproval], false],
+    ["cut", [], true],
+  ] as const)("applies the %s merge gate to observed reviews (%j, merge=%s)", async (verb, reviews, merges) => {
+    const state = allClearState({ reviews, reviews_complete: true }, { command: "smithy." + verb });
+    const mergePr = vi.fn(async () => ({ merged: true, mergeSha: "deadbeef" }));
+    await apply(assess(state), ctx(), state, deps({ mergePr }));
+    if (merges) {
+      expect(mergePr).toHaveBeenCalledWith({ prNumber: 5, headSha: "abc123", repoPath: "/repo", sliceId: "s" });
+      expect(state.slices.s.stage).toBe("merged");
+    } else {
+      expect(mergePr).not.toHaveBeenCalled();
+      expect(state.slices.s.stage).toBe("pr-open");
+    }
   });
 
   it("accepting bot approvals still needs one: zero approvals does NOT auto-merge", () => {
@@ -442,11 +466,11 @@ describe("babysit auto-merge gate", () => {
 
   it("a human changes-requested still blocks a bot-approved PR", () => {
     const state = allClearState({
-      head_sha: "current-head",
-      coderabbit: { decision: "APPROVED", decision_commit_sha: "current-head", decision_is_bot: true },
-      changes_requested_count: 1,
+      reviews: [
+        codeRabbitApproval,
+        { login: "alice", author_kind: "human", state: "CHANGES_REQUESTED", commit_sha: "old", submitted_at: NOW },
+      ],
     });
-    state.mergePolicy = { defaults: { botApproval: true } };
     expect(kindsOf(assess(state))).toEqual(["pr-snapshot"]);
   });
 

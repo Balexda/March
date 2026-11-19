@@ -152,7 +152,7 @@ Validation rules:
 
 - A Merge Policy holds 0..N Merge Requirements entries, keyed by verb, and 0..N Review Request Policy entries, keyed by verb.
 - A Built-in Policy Table row supplies the default for each known verb.
-- A PR snapshot has 0..N Review Observations, at most one per login.
+- A PR snapshot has 0..N Review Observations, at most one per normalized login and author kind.
 - A PR has 0..N Review Request Records, each keyed by (`pr`, `reviewer`, `headSha`, `at`).
 - A reviewer has 0..1 current Reviewer Back-off, global across profiles. It is the latest `review.backoff` for that reviewer in any profile's fold.
 - Reviewer Cap Window N:1 Review Request Record: a window counts the records whose `at` falls in it.
@@ -180,5 +180,5 @@ Validation rules:
 - Request idempotency key: `review:<profile>:<pr>:<reviewer>:<headSha>`. A record younger than `REVIEW_WAIT` suppresses another request.
 - Back-off key: `reviewer`, global across profiles.
 - Cap windows: `(reviewer, UTC day)` and `(reviewer, UTC month)`, counted across all profiles.
-- Review Observation key: `(pr, normalised login)`.
+- Review Observation key: `(pr, normalised login, author kind)`.
 - Bot identity: normalised login, plus `author_kind == bot`. A human account named like a bot never matches the allowlist.

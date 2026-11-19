@@ -18,7 +18,7 @@
 
 ### Tasks
 
-- [ ] **Carry reviewer verdicts through PR observation**
+- [x] **Carry reviewer verdicts through PR observation**
 
   Extend review reduction in `src/observe/sense-io.ts` and carry its policy-free output through Herald using the Review Observation shape in the data model. Cover the evidence required by AS 2.1–2.7.
 
@@ -27,7 +27,7 @@
   - March's own bot is excluded from reviewer verdicts. The observer classifies author kind independently of verb allowlists.
   - Preserve review pagination, completeness, legacy counts, and CodeRabbit observations. Existing snapshots remain readable. Update the contracts for the changed observation surface.
 
-- [ ] **Evaluate the shared merge gate from reviewer verdicts**
+- [x] **Evaluate the shared merge gate from reviewer verdicts**
 
   Update the shared helpers in `src/herald/profiles/merge-policy.ts` and their Legate consumers so babysit and merge readiness apply the same evidence rules for AS 2.1–2.8.
 

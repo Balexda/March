@@ -172,7 +172,7 @@ export interface TickResult {
   slicesByStage: Record<string, number>;
   /** All-clear slices the loop WILL squash-merge now (merge_gate=ready). Transient. */
   readyToMergeCount: number;
-  /** All-clear slices blocked on a human review gate (merge_gate=waiting-approval).
+  /** All-clear slices blocked on a review gate (merge_gate=waiting-approval).
    *  Human-paced — metric only, not alarmed. */
   waitingOnApprovalCount: number;
   /** All-clear, human-gates-cleared slices GitHub won't merge yet

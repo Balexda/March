@@ -272,7 +272,7 @@ describe("slice pure helpers", () => {
     expect(mergeReadiness("x-forge", forgeSlice, botApproved, undefined)).toBe("waiting-approval");
     const codeRabbitApproved = {
       ...clearPr, head_sha: "head",
-      coderabbit: { decision: "APPROVED", decision_commit_sha: "head", decision_is_bot: true },
+      reviews: [{ login: "coderabbitai", author_kind: "bot", state: "APPROVED", commit_sha: "head", submitted_at: "2026-11-16T12:00:00Z" }],
     };
     expect(mergeReadiness("x-forge", forgeSlice, codeRabbitApproved, undefined)).toBe("ready");
     expect(mergeReadiness("x-forge", forgeSlice, { ...codeRabbitApproved, head_sha: "new" }, undefined)).toBe("waiting-approval");

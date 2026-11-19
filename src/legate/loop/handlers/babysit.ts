@@ -1,8 +1,9 @@
 import type { HandlerContext, HandlerResult, LoopState } from "../state/types.js";
 import { emptyHandlerResult } from "../state/types.js";
 import { prNumber, workerBySessionId } from "../pure/session.js";
+import type { ReviewObservation } from "../../../observe/sense-io.js";
 import { hashText } from "../pure/hash.js";
-import { approvalSatisfied, changesRequestedSatisfied, resolveMergeRequirements, type MergePolicy } from "../../../herald/profiles/merge-policy.js";
+import { approvalSatisfied, changesRequestedSatisfied, eligibleReviewer, resolveMergeRequirements, type MergePolicy } from "../../../herald/profiles/merge-policy.js";
 import { mergeBlocker, mergeReadiness, taskTypeForSlice } from "../pure/slice.js";
 import { parseMs } from "../pure/self-heal.js";
 import {
@@ -685,6 +686,8 @@ function evaluatePr(
       // review): a failed/transient attempt must re-arm if the merge state clears,
       // an approval is added, or a CR is dismissed without a new push — otherwise
       // the PR could stay stuck in pr-open until the head SHA changes.
+      const reviews: readonly ReviewObservation[] | undefined = pr.reviews;
+      const verdicts = reviews?.filter((review) => review.state !== "COMMENTED" && eligibleReviewer(req, review));
       const key = actionKey(
         "pr-auto-merge",
         pr,
@@ -693,7 +696,7 @@ function evaluatePr(
           pr.merge_state_status,
           pr.human_approval_count ?? "",
           pr.changes_requested_count ?? "",
-          pr.coderabbit?.decision_is_bot ? pr.coderabbit.decision_at : pr.bot_approval_count ?? "",
+          verdicts ? hashText(JSON.stringify(verdicts)) : pr.coderabbit?.decision_at ?? "",
         ].join("|"),
       );
       if (!alreadyDispatched(slice, key)) {

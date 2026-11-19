@@ -53,7 +53,7 @@ export interface LoopMetricsSnapshot {
   readonly slicesByStage: Readonly<Record<string, number>>;
   /** All-clear slices the loop WILL squash-merge now (merge_gate=ready). Transient. */
   readonly readyToMerge: number;
-  /** All-clear slices blocked on a human review gate (merge_gate=waiting-approval).
+  /** All-clear slices blocked on a review gate (merge_gate=waiting-approval).
    *  Human-paced — a metric, never alarmed. */
   readonly waitingOnApproval: number;
   /** All-clear, human-gates-cleared slices GitHub won't merge yet
@@ -296,7 +296,7 @@ function ensureInstruments(meter: Meter): void {
   // threads owed. Exported as `march_legate_slices_ready_to_merge` (no suffix).
   // Merge-readiness 3-way (human-consumable), from babysit's live-PR verdict:
   //   ready_to_merge       — loop will squash-merge now (transient).
-  //   waiting_on_approval  — blocked on a human review gate (NOT alarmed).
+  //   waiting_on_approval  — blocked on a review gate (NOT alarmed).
   //   blocked_on_merge_state — human gates clear, GitHub won't merge yet (a stall).
   // Exported as march_legate_slices_{ready_to_merge,waiting_on_approval,
   // blocked_on_merge_state} (no suffix).
@@ -309,7 +309,7 @@ function ensureInstruments(meter: Meter): void {
   registerGauge(
     meter,
     "march.legate.slices.waiting_on_approval",
-    "Mergeable slices blocked on a human review gate (approval / changes-requested)",
+    "Mergeable slices blocked on a review gate (approval / changes-requested)",
     (s) => s.waitingOnApproval,
   );
   registerGauge(

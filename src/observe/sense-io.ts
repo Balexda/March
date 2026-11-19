@@ -12,6 +12,7 @@ import { createStaleRecheckTracker } from "../legate/loop/state/sense.js";
 import { parseCodexReviewState, type CodexReviewState } from "./codex-review.js";
 import { classifyReviewerComment, type ReviewerNotice } from "./review-bot-comments.js";
 import { readSmithyStatus } from "./smithy-status.js";
+import { normalizeBotLogin, selfBotLogin } from "../herald/profiles/merge-policy.js";
 
 /**
  * Per-profile {@link StaleRecheckTracker}s for the rotating forced-recheck sweep.
@@ -170,21 +171,7 @@ function failedChecks(statusCheckRollup: any) {
     }));
 }
 
-/**
- * Reduce a PR's `reviews` nodes to human (non-bot) approval / changes-requested
- * counts, plus a separate bot approval count — the data the legate's merge gate
- * uses for human approvals and changes-requested. The bot count is retained
- * for snapshot consumers. Mirrors the jq the (retired)
- * `check-merge-readiness.sh` ran:
- *  - a review is a bot's when `author.__typename === "Bot"` or its login ends in
- *    `[bot]` (covers GitHub Apps that present as Users, e.g. Copilot);
- *  - per human, only the latest non-COMMENTED/PENDING/DISMISSED review counts, so
- *    a stale CHANGES_REQUESTED later superseded by an APPROVED doesn't block;
- *  - bots get the same latest-meaningful-review-per-login treatment, so a bot
- *    approval that was later DISMISSED (e.g. by a new push) or superseded by a
- *    bot CHANGES_REQUESTED does not count. Bot CHANGES_REQUESTED is not a gate.
- * Pure (no I/O) so it can be unit-tested without `gh`.
- */
+/** Preserve the legacy aggregate counts for older snapshot consumers. */
 export function summarizeReviews(
   reviewNodes: any,
 ): { human_approval_count: number; changes_requested_count: number; bot_approval_count: number } {
@@ -217,6 +204,44 @@ export function summarizeReviews(
     changes_requested_count: changesRequested,
     bot_approval_count: botApprovals,
   };
+}
+
+/** Policy-free verdict carried on an observed PR snapshot. */
+export interface ReviewObservation {
+  login: string;
+  author_kind: "human" | "bot";
+  state: "APPROVED" | "CHANGES_REQUESTED" | "COMMENTED" | "DISMISSED";
+  commit_sha: string | null;
+  submitted_at: string;
+}
+
+function observeReviews(nodes: readonly any[], marchLogins: ReadonlySet<string>): ReviewObservation[] {
+  const latest = new Map<string, ReviewObservation>();
+  for (const node of nodes) {
+    const author = node?.author;
+    if (typeof author?.login !== "string" || typeof node.submittedAt !== "string" || !node.submittedAt) continue;
+    const login = normalizeBotLogin(author.login);
+    if (!login || marchLogins.has(login)) continue;
+    const state = node.state;
+    if (state !== "APPROVED" && state !== "CHANGES_REQUESTED" && state !== "DISMISSED" && state !== "COMMENTED") continue;
+    const authorKind = isBotActor({ ...author, login: author.login.toLowerCase() }) ? "bot" : "human";
+    // A bare user login can match the slug of a separate GitHub App.
+    const key = `${login}:${authorKind}`;
+    const prior = latest.get(key);
+    // A comment is only a fallback for a reviewer with no decisive verdict.
+    if (prior) {
+      const samePriority = (state === "COMMENTED") === (prior.state === "COMMENTED");
+      if (samePriority ? prior.submitted_at > node.submittedAt : state === "COMMENTED") continue;
+    }
+    latest.set(key, {
+      login,
+      author_kind: authorKind,
+      state,
+      commit_sha: typeof node.commit?.oid === "string" ? node.commit.oid : null,
+      submitted_at: node.submittedAt,
+    });
+  }
+  return [...latest.values()].sort((a, b) => a.login.localeCompare(b.login) || a.author_kind.localeCompare(b.author_kind));
 }
 
 function truncateText(text: any, max = 4000): string {
@@ -392,6 +417,7 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
   ): Promise<{
     threads: any[];
     reviews: any[];
+    reviewObservations: ReviewObservation[];
     comments: any[];
     reviewerNotices: ReviewerNotice[];
     codexReview: CodexReviewState | null;
@@ -405,6 +431,7 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
     const empty = {
       threads: [],
       reviews: [],
+      reviewObservations: [],
       comments: [],
       reviewerNotices: [],
       codexReview: null,
@@ -428,8 +455,7 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
       "-f",
       // One graphql call also fetches headRefOid (to pin --match-head-commit on the
       // merge), mergeStateStatus (not exposed by `gh pr view --json`), and the
-      // reviews array with author type (for human approval / changes-requested
-      // counting) — all the data the legate's merge gate needs.
+      // review verdicts with their author types and commit SHAs.
       `query=query($owner: String!, $name: String!, $pr: Int!) {
   repository(owner: $owner, name: $name) {
     pullRequest(number: $pr) {
@@ -486,8 +512,9 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
     // Follow the review cursor so >100-review PRs still yield complete evidence.
     // Each extra page re-reads headRefOid: if the head moved mid-walk the pages
     // describe different heads, so the evidence stays marked incomplete.
-    const reviewNodes: any[] = Array.isArray(pr?.reviews?.nodes) ? [...pr.reviews.nodes] : [];
-    let reviewPage = pr?.reviews?.pageInfo;
+    const hasFirstPage = Array.isArray(pr?.reviews?.nodes);
+    const reviewNodes: any[] = hasFirstPage ? [...pr.reviews.nodes] : [];
+    let reviewPage = hasFirstPage ? pr.reviews.pageInfo : undefined;
     let reviewsComplete = reviewPage?.hasNextPage === false;
     const seenCursors = new Set<string>();
     for (let page = 0; reviewPage?.hasNextPage === true && page < MAX_EXTRA_REVIEW_PAGES; page++) {
@@ -498,7 +525,8 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
         const next = JSON.parse((await runGraphql(reviewPageArgs(repoOwnerName, repoName, prNumberValue, cursor))).output)
           ?.data?.repository?.pullRequest;
         if (!next || next.headRefOid !== pr?.headRefOid) break;
-        if (Array.isArray(next.reviews?.nodes)) reviewNodes.push(...next.reviews.nodes);
+        if (!Array.isArray(next.reviews?.nodes)) break;
+        reviewNodes.push(...next.reviews.nodes);
         reviewPage = next.reviews?.pageInfo;
         reviewsComplete = reviewPage?.hasNextPage === false;
       } catch {
@@ -582,6 +610,10 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
     return {
       threads,
       reviews: reviewNodes.filter((review: any) => !isApp(review?.author)),
+      reviewObservations: observeReviews(reviewNodes, new Set([
+        selfBotLogin(env),
+        ...(appLogin ? [normalizeBotLogin(appLogin)] : []),
+      ])),
       comments,
       reviewerNotices,
       codexReview,
@@ -638,8 +670,9 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
       human_approval_count: reviewSummary.human_approval_count,
       changes_requested_count: reviewSummary.changes_requested_count,
       bot_approval_count: reviewSummary.bot_approval_count,
-      // False when some review pages were not read: the counts above are then
-      // partial, and the merge gate refuses to trust them (fail closed).
+      reviews: graphql.reviewObservations,
+      // False when some review pages were not read, so the gate treats the
+      // review evidence as incomplete.
       reviews_complete: graphql.reviewsComplete,
       // CodeRabbit's review standing: what the legate's opt-in CodeRabbit review
       // request reads. See coderabbit-review.ts.

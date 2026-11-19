@@ -380,8 +380,8 @@ describe("queryPrForBabysit", () => {
   });
 
   describe("review pagination", () => {
-    const review = (state: string, at: string, oid: string, login: string, type = "User") =>
-      ({ state, submittedAt: at, commit: { oid }, author: { login, __typename: type } });
+    const review = (state: string, at: string, oid: string | null, login: string, type = "User") =>
+      ({ state, submittedAt: at, commit: oid === null ? null : { oid }, author: { login, __typename: type } });
     const firstPage = (hasNextPage: boolean) => ({
       data: { repository: { pullRequest: {
         headRefOid: "head1",
@@ -414,7 +414,7 @@ describe("queryPrForBabysit", () => {
         graphqlCalls.push(args);
         return args.some((a) => a === "cursor=c1") ? page2() : JSON.stringify(firstPage(true));
       });
-      const io = createSenseIo({ meta: meta(), castra: fakeCastra() });
+      const io = createSenseIo({ meta: meta(), castra: fakeCastra(), env: {} });
       return { graphqlCalls, pr: io.queryPrForBabysit({ pr: { number: 5 } }, { repo: { path: "/repo", owner_with_name: "octo/march" } }) };
     };
 
@@ -432,6 +432,37 @@ describe("queryPrForBabysit", () => {
       expect(result.human_approval_count).toBe(1);
       expect(result.reviews_complete).toBe(true);
       expect(result.coderabbit).toMatchObject({ decision: "APPROVED", decision_commit_sha: "head1", decision_is_bot: true });
+      expect(result.reviews).toEqual([
+        { login: "alice", author_kind: "human", state: "APPROVED", commit_sha: "head1", submitted_at: "2026-11-16T10:05:00Z" },
+        { login: "coderabbitai", author_kind: "bot", state: "APPROVED", commit_sha: "head1", submitted_at: "2026-11-16T10:00:00Z" },
+        { login: "someone", author_kind: "human", state: "COMMENTED", commit_sha: "head1", submitted_at: "2026-11-16T09:00:00Z" },
+      ]);
+    });
+
+    it("keeps human and bot verdicts distinct by normalized login and excludes March's bot", async () => {
+      const { pr } = query(() => {
+        const result = secondPage("head1");
+        result.data.repository.pullRequest.reviews.nodes = [
+          review("APPROVED", "2026-11-16T10:00:00Z", "head1", "Reviewer", "Bot"),
+          review("CHANGES_REQUESTED", "2026-11-16T11:00:00Z", "old", "reviewer[BOT]"),
+          review("COMMENTED", "2026-11-16T12:00:00Z", "head1", "REVIEWER", "Bot"),
+          review("APPROVED", "2026-11-16T10:00:00Z", "head1", "reviewer"),
+          review("APPROVED", "2026-11-16T10:00:00Z", "head1", "ALICE"),
+          review("DISMISSED", "2026-11-16T11:00:00Z", "head1", "alice"),
+          review("APPROVED", "2026-11-16T10:00:00Z", "head1", "MARCH-BOT", "Bot"),
+          review("APPROVED", "2026-11-16T12:00:00Z", null, "copilot"),
+          review("PENDING", "2026-11-16T12:00:00Z", "head1", "pending"),
+        ];
+        return JSON.stringify(result);
+      });
+      const result = await pr;
+      expect(result.reviews).toEqual([
+        { login: "alice", author_kind: "human", state: "DISMISSED", commit_sha: "head1", submitted_at: "2026-11-16T11:00:00Z" },
+        { login: "copilot", author_kind: "human", state: "APPROVED", commit_sha: null, submitted_at: "2026-11-16T12:00:00Z" },
+        { login: "reviewer", author_kind: "bot", state: "CHANGES_REQUESTED", commit_sha: "old", submitted_at: "2026-11-16T11:00:00Z" },
+        { login: "reviewer", author_kind: "human", state: "APPROVED", commit_sha: "head1", submitted_at: "2026-11-16T10:00:00Z" },
+        { login: "someone", author_kind: "human", state: "COMMENTED", commit_sha: "head1", submitted_at: "2026-11-16T09:00:00Z" },
+      ]);
     });
 
     it("walks past five pages to reach a late verdict", async () => {
@@ -469,6 +500,14 @@ describe("queryPrForBabysit", () => {
       const io = createSenseIo({ meta: meta(), castra: fakeCastra() });
       const result = await io.queryPrForBabysit({ pr: { number: 5 } }, { repo: { path: "/repo", owner_with_name: "octo/march" } });
       expect(result.reviews_complete).toBe(false);
+    });
+
+    it("keeps evidence incomplete when a final page has no review list", async () => {
+      const { pr } = query(() => JSON.stringify({ data: { repository: { pullRequest: {
+        headRefOid: "head1",
+        reviews: { pageInfo: { hasNextPage: false }, nodes: null },
+      } } } }));
+      expect((await pr).reviews_complete).toBe(false);
     });
 
     it("withholds decision_is_bot when the head moves between pages", async () => {

@@ -87,7 +87,7 @@ The shorthand `<conductor-dir>` means `~/.agent-deck/conductor/<conductor-name>/
 The auto-squash-merge gate lives in the legate *service* (`src/legate/loop/handlers/babysit.ts`), not a conductor skill — it has Herald access and reads the profile's per-task-type merge policy.
 
 **E1. Auto-merge only fires when every effective gate condition is satisfied.**
-- Required (precondition): `checks == "PASS"` AND `mergeable != "CONFLICTING"` AND `needs_response_count == 0`. Plus the human-review gates — `≥1 human approval` AND `0 outstanding CHANGES_REQUESTED` — *unless relaxed* for the slice's task type by the profile's merge policy.
+- Required (precondition): CI is passing or has no checks, there are no merge conflicts or threads needing a response, GitHub reports a clean merge state, and the PR head SHA is available. Plus the review gates — an eligible approval and zero outstanding changes-requested verdicts from humans or allowlisted bots — *unless relaxed* for the slice's task type by the profile's merge policy. Approval can come from a human or, when the verb allows it, a verified allowlisted bot reviewing the current head.
 - Verify: with a profile whose policy drops `approval` for `cut`, a `cut` PR that is all-clear with zero approvals auto-merges; a non-`cut` PR in the same state does not (it waits for an approval).
 - Failure: an auto-merge on a PR whose *effective* requirements aren't met is a permission-bypass class bug.
 

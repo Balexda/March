@@ -28,9 +28,11 @@
 #   MARCH_BROOD_URL   brood base URL (teardown requests).
 #   MARCH_HATCHERY_URL hatchery base URL (spawn requests).
 #   MARCH_SELF_BOT_LOGIN  March's bot login (default march-bot). Use the same
-#                         value in Herald for profile policy validation.
+#                         value in Herald for reviewer exclusion and policy validation.
 #   Merge policy is read from Herald each tick. Cut skips approval by default.
-#   Forge requires approval and can accept a trusted CodeRabbit review on head.
+#   Forge accepts a verified allowlisted bot approval on the current head.
+#   CodeRabbit is the built-in forge allowlist entry. Human and allowlisted bot
+#   changes-requested block unless explicitly relaxed for the verb.
 #
 # SECURITY: this mounts your HOME (repos, worktrees, creds). It does NOT mount the
 # docker socket — the legate asks Castra/Brood/Hatchery to act over HTTP, it never

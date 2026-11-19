@@ -29,7 +29,7 @@ export interface ProfileRecord {
   /** Path to the march CLI on the host (null = resolve from PATH). */
   readonly marchCliPath?: string | null;
   readonly mode?: string;
-  /** Per-task-type override of the human-review merge gates (undefined = all required). */
+  /** Per-task-type override of the merge review gates (undefined = built-in policy). */
   readonly mergePolicy?: MergePolicy;
   /**
    * Worker toolchain selection for this profile's spawns (issue #287). One of

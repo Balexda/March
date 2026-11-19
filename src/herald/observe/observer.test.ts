@@ -6,6 +6,7 @@ import { describeChangeSpan, runObservation, type ObserveStore } from "./observe
 import { emptySystemState, foldEvents, reduce, type AppendEventInput, type EventBody, type HeraldEvent, type SystemState } from "../events.js";
 import type { SenseDeps } from "../../legate/loop/state/sense.js";
 import type { LoopMeta } from "../../legate/loop/meta.js";
+import type { ReviewObservation } from "../../observe/sense-io.js";
 
 const meta = { worker_group: "legate-workers", repo: { path: "/repo" } } as unknown as LoopMeta;
 
@@ -96,6 +97,32 @@ describe("runObservation", () => {
     expect(types).toContain("slice.pr.changed");
     expect(types).toContain("slice.output.changed");
     expect(store.projection().slices.x!.pr).toMatchObject({ number: 12 });
+  });
+
+  it("appends and folds reviewer verdicts for a PR with a legacy snapshot", async () => {
+    const store = fakeStore();
+    store.append({ source: "legate", type: "slice.dispatched", sliceId: "x", branch: "smithy/forge/x", sessionId: "w1" });
+    const legacy = { number: 12, state: "OPEN", head_sha: "head1", bot_approval_count: 1, reviews_complete: true };
+    store.append({ source: "herald", type: "slice.pr.changed", sliceId: "x", pr: legacy });
+    const reviews: ReviewObservation[] = [{
+      login: "coderabbitai",
+      author_kind: "bot",
+      state: "APPROVED",
+      commit_sha: "head1",
+      submitted_at: "2026-05-20T00:00:00Z",
+    }];
+    const pr = { ...legacy, reviews };
+    const sense = senseDeps({
+      listSessions: async () => [{ id: "w1", group: "legate-workers", status: "idle" }],
+      queryPr: async () => pr,
+    });
+
+    const result = await runObservation({ store, profile: PROFILE, senseDeps: sense });
+    expect(result.appended).toContainEqual(expect.objectContaining({ type: "slice.pr.changed", sliceId: "x", pr }));
+    expect(store.projection().slices.x!.pr).toEqual(pr);
+    expect(foldEvents(store.events).slices.x!.pr).toEqual(pr);
+    const next = await runObservation({ store, profile: PROFILE, senseDeps: sense });
+    expect(next.appended).not.toContainEqual(expect.objectContaining({ type: "slice.pr.changed" }));
   });
 
   it("emits the terminal MERGED for a tracked PR whose branch is gone (#288)", async () => {
