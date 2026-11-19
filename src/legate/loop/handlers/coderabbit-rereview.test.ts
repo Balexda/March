@@ -173,7 +173,9 @@ describe("CodeRabbit review requests", () => {
 
   it("observes back-off and refuses a zero cap", async () => {
     const backedOff = fixture({ history: { byProfile: {}, backoffUntil: expired } });
-    expect((await backedOff.tick()).failures[0].outcome).toBe("backoff");
+    const deferred = await backedOff.tick();
+    expect(deferred.failures).toHaveLength(0);
+    expect(deferred.actions[0]).toEqual(expect.objectContaining({ action: "review-request-deferred", outcome: "backoff" }));
     const disabled = fixture({ cap: 0 });
     expect((await disabled.tick()).failures[0].outcome).toBe("cap_exhausted");
     expect(disabled.deps.appendIntent).not.toHaveBeenCalled();

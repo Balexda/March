@@ -103,9 +103,11 @@ export async function apply(ctx: HandlerContext, state: LoopState, deps?: CodeRa
     }
 
     const report = (outcome: Outcome, detail: string) => {
-      const action = outcome === "requested" ? "review-request" : "review-request-failed";
+      // Back-off defers the request; it is not a failure.
+      const deferred = outcome === "backoff";
+      const action = outcome === "requested" ? "review-request" : deferred ? "review-request-deferred" : "review-request-failed";
       const entry = { action, sliceId, pr: { number: pr.number, url: pr.url }, detail, outcome, reason };
-      (outcome === "requested" ? res.actions : res.failures).push(entry);
+      (outcome === "requested" || deferred ? res.actions : res.failures).push(entry);
     };
     try {
       if (reason === "timeout_retry") {
