@@ -47,7 +47,7 @@
 
 ### Tasks
 
-- [ ] **Provision credential shims for steward launches**
+- [x] **Provision credential shims for steward launches**
 
   Extend the host-side steward launch path in `src/castra/adapter.ts` and reuse Castra's steward asset provisioning where appropriate. Consume the steward Tessera configuration through the boundary established by SD-003 and apply the commit identity decision from SD-004.
 
@@ -57,7 +57,7 @@
   - Git supplies repository context to the helper. Host helper chains, embedded credentials, inherited auth headers and prompts cannot take over for GitHub in the steward path. With a populated host login and inherited tokens, cover AS 5.1–5.4 and AS 5.6 using the normal launch path and fake endpoints.
   - Keep affected Castra and steward subsystem contracts current.
 
-- [ ] **Scrub ambient GitHub tokens from steward tmux**
+- [x] **Scrub ambient GitHub tokens from steward tmux**
 
   Extend the anchor setup in `src/stack/up.ts` so `march up` cleans both GitHub token variables on the host tmux server Castra uses.
 

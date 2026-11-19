@@ -1,13 +1,17 @@
 /**
  * @l1 @deterministic @ci
  */
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
-import type { AddressInfo } from "node:net";
+import { createServer as createHttpsServer } from "node:https";
+import { connect, type AddressInfo } from "node:net";
+import type { Duplex } from "node:stream";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { createAgentDeckAdapter } from "../castra/adapter.js";
+import { ensureStewardSkills } from "../castra/steward-skills.js";
 
 const cli = resolve(import.meta.dirname, "../../dist/cli.js");
 const wrapper = resolve(import.meta.dirname, "../templates/steward/bin/gh");
@@ -48,14 +52,14 @@ function run(executable: string, args: string[], input = "", overrides?: NodeJS.
   });
 }
 
-async function listen(deny = false) {
+async function listen(deny: boolean | (() => boolean) = false) {
   server = createServer(async (request, response) => {
     let body = "";
     for await (const part of request) body += part;
     const parsed = JSON.parse(body);
     requests.push([request.method, request.url, request.headers.authorization, parsed]);
     response.setHeader("content-type", "application/json");
-    if (deny) {
+    if (typeof deny === "function" ? deny() : deny) {
       response.writeHead(403);
       response.end(JSON.stringify({ error: { code: "policy_denied", message: key } }));
       return;
@@ -107,7 +111,7 @@ function gitCredential(operation: string, input: string, fallback = false) {
 
 beforeEach(async () => {
   root = await mkdtemp(join(tmpdir(), "march-credentials-test-"));
-  cwd = join(root, "repo");
+  cwd = join(root, "feature-slice-2");
   bin = join(root, "bin");
   config = join(root, "host-gh-config");
   const shimBin = join(root, "shims");
@@ -275,5 +279,210 @@ describe("Tessera Git credential helper", { timeout: 30_000 }, () => {
     expect(gitError).toMatch(/^fatal: credential helper .* told us to quit$/);
     expect(extra).toBeUndefined();
     expect(requests).toHaveLength(failure === "denial" ? 1 : 0);
+  });
+});
+
+describe("Castra steward launch credentials", { timeout: 30_000 }, () => {
+  async function launchCommand(createBranch: boolean) {
+    const skills = join(root, "host's steward assets");
+    const launched = join(root, "launch-args.json");
+    await writeFile(join(bin, "agent-deck"), `#!/usr/bin/env node
+const fs = require("node:fs");
+const args = process.argv.slice(2);
+const launched = ${JSON.stringify(launched)};
+if (args[2] === "launch") fs.writeFileSync(launched, JSON.stringify(args));
+if (args[2] === "list") {
+  console.log(fs.existsSync(launched) ? ${JSON.stringify(JSON.stringify([{
+    id: "test-steward", group: "stewards", worktree_path: cwd, branch: "slice-2",
+  }]))} : "[]");
+}
+`, { mode: 0o755 });
+    const launchEnv = {
+      PATH: env.PATH!.split(":").slice(1).join(":"),
+      MARCH_STEWARD_SKILLS_DIR: skills,
+      MARCH_TESSERA_PORT: new URL(env.MARCH_TESSERA_URL!).port,
+    };
+    const saved = { ...process.env };
+    try {
+      Object.assign(process.env, launchEnv);
+      await ensureStewardSkills();
+      await writeFile(join(skills, "tessera-client-key"), key + "\n", { mode: 0o600 });
+      createAgentDeckAdapter().launch({
+        repoPath: cwd, profile: "march", group: "stewards", title: "Steward",
+        branch: "slice-2", createBranch,
+      });
+      const args: string[] = JSON.parse(await readFile(launched, "utf8"));
+      expect(args.includes("-b")).toBe(createBranch);
+      // Agent-deck substitutes the Claude command on the host. Shell startup
+      // can re-export credentials after the launcher has cleaned its environment.
+      return (command: string) => run("sh", ["-c", args[args.indexOf("--wrapper") + 1]
+        .replace("{command}", 'sh -c "$1"'), "agent-deck", `
+          export GH_TOKEN=from-shell GITHUB_TOKEN=from-shell
+          export MARCH_TESSERA_CLIENT_KEY=wrong-key MARCH_TESSERA_GH_TOKEN_FALLBACK=1
+          export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.extraHeader
+          export GIT_CONFIG_VALUE_0="Authorization: Bearer inherited-header"
+          ${command}`], "", { PATH: launchEnv.PATH });
+    } finally {
+      for (const name of Object.keys(launchEnv)) {
+        if (saved[name] === undefined) delete process.env[name];
+        else process.env[name] = saved[name];
+      }
+    }
+  }
+
+  it.each([true, false])("uses fresh gh credentials after launch (createBranch=%s)", async createBranch => {
+    await listen();
+    await setupRealExecutable();
+    await setOrigin("git@github.com:acme/widgets.git");
+    const launch = await launchCommand(createBranch);
+    for (let i = 1; i <= 2; i++) {
+      const result = await launch("gh pr create");
+      expect(result.code).toBe(7);
+      expect(JSON.parse(result.stdout)).toMatchObject({
+        args: ["pr", "create"], isolated: true, botIssuance: String(i), noOtherToken: true,
+      });
+    }
+    expect(requests.map(request => (request as unknown[])[2])).toEqual([`Bearer ${key}`, `Bearer ${key}`]);
+    expect(await readdir(env.TMPDIR!)).toEqual([]);
+    expect(await readFile(join(config, "hosts.yml"), "utf8")).toBe(hostLogin);
+  });
+
+  it("pushes through HTTPS with Tessera despite a host helper, netrc and local auth header", async () => {
+    let deny = false;
+    await listen(() => deny);
+    const ca = join(root, "github.crt");
+    const privateKey = join(root, "github.key");
+    execFileSync("openssl", ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
+      "-subj", "/CN=github.com", "-addext", "subjectAltName=DNS:github.com",
+      "-keyout", privateKey, "-out", ca], { stdio: "ignore", timeout: 5_000 });
+    env.GIT_SSL_CAINFO = ca;
+    await mkdir(join(root, "acme"));
+    expect((await run("git", ["init", "--bare", join(root, "acme", "widgets.git")])).code).toBe(0);
+
+    const auth: Array<string | undefined> = [];
+    const github = createHttpsServer({
+      key: await readFile(privateKey), cert: await readFile(ca),
+    }, (req, res) => {
+      const authorization = req.headers.authorization;
+      auth.push(authorization);
+      if (!authorization?.startsWith("Basic ") ||
+          !/^x-access-token:fake-issued-token\d+$/.test(Buffer.from(authorization.slice(6), "base64").toString())) {
+        res.writeHead(401, { "WWW-Authenticate": 'Basic realm="GitHub"' }).end();
+        return;
+      }
+      const url = new URL(req.url!, "https://github.com");
+      const cgi = spawn("git", ["http-backend"], {
+        env: {
+          PATH: env.PATH, GIT_PROJECT_ROOT: root, GIT_HTTP_EXPORT_ALL: "1",
+          PATH_INFO: url.pathname, QUERY_STRING: url.search.slice(1), REQUEST_METHOD: req.method,
+          CONTENT_TYPE: req.headers["content-type"], CONTENT_LENGTH: req.headers["content-length"],
+          REMOTE_USER: "test-bot[bot]",
+        },
+        timeout: 5_000, stdio: ["pipe", "pipe", "ignore"],
+      });
+      req.pipe(cgi.stdin);
+      cgi.stdin.on("error", () => {});
+      const chunks: Buffer[] = [];
+      cgi.stdout.on("data", chunk => chunks.push(chunk));
+      cgi.on("close", code => {
+        const response = Buffer.concat(chunks);
+        const boundary = response.indexOf("\r\n\r\n");
+        if (code !== 0 || boundary < 0) {
+          res.writeHead(500).end();
+          return;
+        }
+        for (const line of response.subarray(0, boundary).toString().split("\r\n")) {
+          const colon = line.indexOf(":");
+          if (line.startsWith("Status:")) res.statusCode = Number(line.slice(colon + 1).trim().split(" ")[0]);
+          else res.setHeader(line.slice(0, colon), line.slice(colon + 1).trim());
+        }
+        res.end(response.subarray(boundary + 4));
+      });
+    });
+    const sockets = new Set<Duplex>();
+    const tunnels: string[] = [];
+    const proxy = createServer();
+    proxy.on("connect", (req, client) => {
+      tunnels.push(req.url!);
+      if (req.url !== "github.com:443") {
+        client.end();
+        return;
+      }
+      const upstream = connect((github.address() as AddressInfo).port, "127.0.0.1", () => {
+        client.write("HTTP/1.1 200 Connection Established\r\n\r\n");
+        client.pipe(upstream).pipe(client);
+      });
+      upstream.on("error", () => client.destroy());
+      client.on("error", () => upstream.destroy());
+      client.on("close", () => upstream.destroy());
+      sockets.add(client);
+    });
+    try {
+      for (const service of [github, proxy]) {
+        await new Promise<void>(done => service.listen(0, "127.0.0.1", done));
+      }
+      const port = (proxy.address() as AddressInfo).port;
+      env.GIT_ALLOW_PROTOCOL = "https";
+      env.https_proxy = `http://127.0.0.1:${port}`;
+      const globalConfig = `[user]\nname = Operator\nemail = operator@example.test\n[credential]\nhelper = "!echo host-helper-ran >&2; echo username=host; echo password=${ambient}; #"\n`;
+      await writeFile(join(root, ".gitconfig"), globalConfig);
+      await writeFile(join(root, ".netrc"), `machine github.com login host password ${ambient}\n`, { mode: 0o600 });
+      await setOrigin("git@github.com:acme/widgets.git");
+      expect((await run("git", ["config", "http.https://github.com/.proxy", `http://127.0.0.1:${port}`])).code).toBe(0);
+      expect((await run("git", ["config", "http.https://github.com/acme/widgets.git.extraHeader",
+        "Authorization: Bearer repository-header"])).code).toBe(0);
+      expect((await run("git", ["config", "credential.https://github.com/acme/widgets.git.helper",
+        "!echo repository-helper-ran >&2; echo username=host; echo password=wrong; #"])).code).toBe(0);
+      expect((await run("git", ["config", "credential.https://github.com/acme/widgets.git.useHttpPath",
+        "false"])).code).toBe(0);
+      const launch = await launchCommand(true);
+      expect((await launch('git commit --allow-empty -m "steward work"')).code).toBe(0);
+      expect((await launch("git log -1 --format=%an")).stdout.trim()).toBe("Operator");
+      for (const [i, url] of ["git@github.com:acme/widgets.git",
+        "https://host:embedded@github.com/acme/widgets.git"].entries()) {
+        expect((await run("git", ["remote", "set-url", "origin", url])).code).toBe(0);
+        const push = await launch(`git push origin HEAD:refs/heads/delivery-${i}`);
+        expect(push.stderr).not.toContain("host-helper-ran");
+        expect(push.stderr).not.toContain("repository-helper-ran");
+        expect(push.code, push.stderr).toBe(0);
+      }
+      expect(tunnels.length).toBeGreaterThan(0);
+      expect(tunnels.every(host => host === "github.com:443")).toBe(true);
+      expect(auth[0]).toBeUndefined();
+      expect(auth.filter(Boolean).length).toBeGreaterThan(0);
+      for (const header of auth.filter(Boolean)) {
+        expect(Buffer.from(header!.slice(6), "base64").toString()).toMatch(/^x-access-token:fake-issued-token\d+$/);
+      }
+      expect(requests.length).toBeGreaterThanOrEqual(2);
+      expect(requests.every(request => (request as unknown[])[2] === `Bearer ${key}`)).toBe(true);
+      expect(await readFile(join(root, ".gitconfig"), "utf8")).toBe(globalConfig);
+      deny = true;
+      auth.length = 0;
+      const denied = await launch("git push origin HEAD:refs/heads/denied");
+      expect(denied.code).not.toBe(0);
+      expect(denied.stderr).toContain("Tessera Git credential request failed (policy_denied).");
+      expect(denied.stderr).not.toMatch(/helper-ran|embedded|from-shell/);
+      expect(auth).toEqual([undefined]);
+    } finally {
+      sockets.forEach(socket => socket.destroy());
+      github.closeAllConnections();
+      await Promise.all([github, proxy].map(service => new Promise<void>(done => service.close(() => done()))));
+    }
+  });
+
+  it.each(["denial", "outage"])("fails closed through the launch path on %s", async failure => {
+    await listen(true);
+    if (failure === "outage") await new Promise<void>(done => server!.close(() => done()));
+    await setupRealExecutable();
+    await setOrigin("https://github.com/acme/widgets.git");
+    const launch = await launchCommand(false);
+    expect(await launch("gh pr create")).toEqual({
+      code: 1, stdout: "", stderr: "Tessera gh: Tessera token request failed.\n",
+    });
+    const result = await launch("printf 'url=https://github.com/acme/widgets.git\\n\\n' | git credential fill");
+    expect(result.code).toBe(128);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toContain(failure === "denial" ? "policy_denied" : "unreachable");
+    expect(result.stderr).not.toContain(key);
   });
 });

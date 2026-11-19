@@ -1,0 +1,11 @@
+#!/bin/sh
+# This runs on the host, after tmux has started the pane's shell.
+bin_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd) || exit 1
+unset GH_TOKEN GITHUB_TOKEN GH_ENTERPRISE_TOKEN GITHUB_ENTERPRISE_TOKEN
+unset MARCH_TESSERA_CLIENT_KEY MARCH_TESSERA_GH_TOKEN_FALLBACK
+MARCH_TESSERA_URL="http://127.0.0.1:$1"
+MARCH_TESSERA_CLIENT_KEY_FILE="$bin_dir/../tessera-client-key"
+PATH="$bin_dir:$PATH"
+export PATH MARCH_TESSERA_URL MARCH_TESSERA_CLIENT_KEY_FILE
+shift
+exec "$@"

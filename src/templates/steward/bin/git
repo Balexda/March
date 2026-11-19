@@ -1,0 +1,147 @@
+#!/usr/bin/env node
+import { spawnSync } from "node:child_process";
+import { accessSync, constants, mkdtempSync, rmSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { delimiter, join, resolve } from "node:path";
+
+function realGit() {
+  const self = statSync(process.argv[1]);
+  for (const directory of (process.env.PATH ?? "").split(delimiter).filter(Boolean)) {
+    const candidate = resolve(directory, "git");
+    try {
+      const file = statSync(candidate);
+      if (!file.isFile() || (file.dev === self.dev && file.ino === self.ino)) continue;
+      accessSync(candidate, constants.X_OK);
+      return candidate;
+    } catch {
+      // PATH entries can be missing or inaccessible.
+    }
+  }
+  throw new Error();
+}
+
+function readConfig(git, args, env, allowMissing = false, directoryArgs = []) {
+  const config = spawnSync(git, [...directoryArgs, "config", "--null", ...args], {
+    env, encoding: "utf8", timeout: 5_000, killSignal: "SIGKILL",
+    stdio: ["ignore", "pipe", "ignore"],
+  });
+  if (config.status !== 0 && !(allowMissing && config.status === 1 && !config.stdout)) {
+    throw new Error();
+  }
+  return (config.stdout ?? "").split("\0").filter(Boolean).map(record => {
+    const separator = record.indexOf("\n");
+    return separator < 0 ? [record, ""] : [record.slice(0, separator), record.slice(separator + 1)];
+  });
+}
+
+function githubHttps(url) {
+  const scp = /^(?:[^/@:\s]+@)?(?:ssh\.)?github\.com\.?:\/?(.+)$/i.exec(url);
+  if (scp) {
+    if (!/^[\w.-]+\/[\w.-]+\/?$/.test(scp[1])) throw new Error();
+    return "https://github.com/" + scp[1].replace(/\/$/, "");
+  }
+  // URL canonicalizes case and default ports and discards embedded credentials.
+  let parsed;
+  try { parsed = new URL(url); } catch { return; }
+  const host = parsed.hostname.replace(/\.$/, "");
+  const alternateSsh = host === "ssh.github.com" && parsed.protocol === "ssh:";
+  if (host !== "github.com" && !alternateSsh) return;
+  if (!["https:", "http:", "ssh:", "git:"].includes(parsed.protocol) ||
+      (parsed.port && !(parsed.protocol === "ssh:" && parsed.port === (alternateSsh ? "443" : "22"))) ||
+      parsed.search || parsed.hash || !/^\/[\w.-]+\/[\w.-]+\/?$/.test(parsed.pathname)) {
+    throw new Error();
+  }
+  return "https://github.com" + parsed.pathname.replace(/\/$/, "");
+}
+
+function run() {
+  const git = realGit();
+  const args = process.argv.slice(2);
+  const env = { ...process.env };
+  for (const name of Object.keys(env)) {
+    if (/^GIT_(CONFIG(?:_|$)|TRACE|CURL_VERBOSE$|EXEC_PATH$|SSL_(?:CERT|KEY|NO_VERIFY)$)/.test(name) ||
+        /^(?:GH_TOKEN|GITHUB_TOKEN|GH_ENTERPRISE_TOKEN|GITHUB_ENTERPRISE_TOKEN|MARCH_TESSERA_CLIENT_KEY)$/.test(name)) {
+      delete env[name];
+    }
+  }
+
+  const identity = readConfig(git, ["--global", "--includes", "--get-regexp",
+    "^(user|author|committer)\\.(name|email)$"], env, true);
+  // Git's HTTPS transport can use netrc before asking any credential helper.
+  const home = mkdtempSync(join(tmpdir(), "march-steward-git-"));
+  try {
+    Object.assign(env, {
+      HOME: home, CURL_HOME: home, XDG_CONFIG_HOME: home, NETRC: "/dev/null",
+      GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null",
+      GIT_TERMINAL_PROMPT: "0", GIT_ASKPASS: "/bin/false",
+    });
+
+    // Honor git -C <dir> while reading the same repository config Git will use.
+    const directoryArgs = [];
+    for (let i = 0; args[i] === "-C" && i + 1 < args.length; i += 2) {
+      directoryArgs.push(...args.slice(i, i + 2));
+    }
+    const config = readConfig(git, ["--list", "--includes"], env, false, directoryArgs);
+    const localKeys = new Set(config.map(([name]) => name));
+    const settings = identity.filter(([name]) => !localKeys.has(name));
+    for (const [name, value] of config) {
+      // Git prefers the longest rewrite match. A repository-level rule must
+      // not supersede the steward's rewrite of GitHub transport URLs.
+      if (/^url\..+\.(?:insteadof|pushinsteadof)$/i.test(name) &&
+          (githubHttps(name.slice(4, name.lastIndexOf("."))) || githubHttps(value))) {
+        throw new Error();
+      }
+      if (/^http\.(?:.+\.)?extraheader$/i.test(name)) settings.push([name, ""]);
+      if (/^http\.(?:.+\.)?(?:cookiefile|sslcert|sslkey)$/i.test(name)) {
+        settings.push([name, "/dev/null"]);
+      }
+      if (/^http\.(?:.+\.)?(?:savecookies|emptyauth|followredirects)$/i.test(name)) {
+        settings.push([name, "false"]);
+      }
+      if (/^remote\..+\.(?:url|pushurl)$/i.test(name)) {
+        const normalized = githubHttps(value);
+        if (normalized && normalized !== value) settings.push([`url.${normalized}.insteadOf`, value]);
+      }
+    }
+
+    settings.push(
+      ["url.https://github.com/.insteadOf", "git@github.com:"],
+      ["url.https://github.com/.insteadOf", "ssh://git@github.com/"],
+      ["url.https://github.com/.insteadOf", "ssh://git@github.com:22/"],
+      ["credential.https://github.com/.helper", ""],
+      ["credential.https://github.com/.helper", "!march tessera git-credential"],
+      ["credential.https://github.com/.useHttpPath", "true"],
+      ["credential.https://github.com/.interactive", "false"],
+      ["http.https://github.com/.emptyAuth", "false"],
+      ["http.https://github.com/.followRedirects", "false"],
+    );
+
+    // An explicit URL follows the same policy as a configured remote.
+    const normalizedArgs = args.map(arg => {
+      const prefix = arg.startsWith("--repo=") ? "--repo=" : "";
+      const normalized = githubHttps(arg.slice(prefix.length));
+      return normalized ? prefix + normalized : arg;
+    });
+    env.GIT_CONFIG_COUNT = String(settings.length);
+    for (const [i, [name, value]] of settings.entries()) {
+      env[`GIT_CONFIG_KEY_${i}`] = name;
+      env[`GIT_CONFIG_VALUE_${i}`] = value;
+    }
+
+    return spawnSync(git, normalizedArgs, {
+      env, stdio: "inherit", timeout: 600_000, killSignal: "SIGKILL",
+    });
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+}
+
+try {
+  const result = run();
+  if (result.error) throw result.error;
+  if (result.signal) process.kill(process.pid, result.signal);
+  process.exitCode = result.status ?? 1;
+} catch {
+  process.stderr.write("Tessera Git: unable to run Git with isolated credentials.\n");
+  process.exitCode = 1;
+}

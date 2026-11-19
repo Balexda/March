@@ -88,6 +88,8 @@ describe("castra adapter — argv builders", () => {
         "march/spawn/x",
         "-b",
         "--title-lock",
+        "--wrapper",
+        "'/steward-skills/bin/steward-launch' 9477 {command}",
         "--extra-arg",
         "--permission-mode",
         "--extra-arg",
