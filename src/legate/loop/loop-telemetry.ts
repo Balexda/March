@@ -52,8 +52,9 @@ export function recordActionEventMetrics(
 ): void {
   if (!event || typeof event !== "object") return;
   if (event.kind === "review_request") {
-    recordReview("coderabbit", event.outcome);
-    if (event.rate_limit_hit === true) recordRateLimit("coderabbit");
+    const reviewer = event.reviewer === "copilot" ? "copilot" : "coderabbit";
+    recordReview(reviewer, event.outcome);
+    if (event.rate_limit_hit === true) recordRateLimit(reviewer);
     return;
   }
   if (event.kind !== "dependency_merge" && event.kind !== "dependency_merge_failure") return;
@@ -140,11 +141,11 @@ export function emitActionEventSpan(event: any, emit: LoopSpanEmitter = defaultE
       name: "legate.review.request",
       traceKey: sliceId,
       root: false,
-      error: event.outcome === "failed" || event.outcome === "cap_exhausted",
+      error: event.outcome === "failed" || event.outcome === "cap_exhausted" || event.outcome === "identity_unavailable",
       attributes: {
         "march.slice_id": sliceId,
         "march.task_type": event.task_type ?? "forge",
-        "march.review.reviewer": "coderabbit",
+        "march.review.reviewer": event.reviewer === "copilot" ? "copilot" : "coderabbit",
         "march.review.outcome": event.outcome,
         "march.review.reason": event.reason,
       },

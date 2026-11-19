@@ -29,7 +29,7 @@ the verb's allowlist. The Tessera app and the login configured by
 `MARCH_SELF_BOT_LOGIN` are excluded. The existing aggregate counts and
 CodeRabbit standing are still recorded. The PR snapshot includes `is_draft` and
 GitHub timestamps of raw CodeRabbit reviews and sampled March triggers, grouped
-by head. `reviews_complete: false` marks partial evidence from an unfinished
+by head. `copilot_review_times` carries the latest verified Copilot review timestamp per head for request eligibility and pacing. `reviews_complete: false` marks partial evidence from an unfinished
 review page walk. Herald refreshes older snapshots that lack review verdicts or
 draft status on the next observation.
 

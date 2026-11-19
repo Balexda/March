@@ -171,7 +171,7 @@ As an operator, I want Herald, Brood, Hatchery, Legate and Statio to get their G
 
 As an operator, I want Legate to be able to request a Copilot review using my identity so that, when I opt in, the review bills my personal Copilot plan.
 
-> **Amended 2026-11-16** by spec `2026-11-16-014-legate-per-verb-review-requests-and-merge-gates`. When and how often Copilot is requested (opt-in per verb, off by default, hard daily and monthly caps, durable once-per-head idempotency) is owned by that spec's User Story 7. This story keeps the `user` identity provider and the guarantee that the request uses only that identity.
+> **Amended 2026-11-16** by spec `2026-11-16-014-legate-per-verb-review-requests-and-merge-gates`. When and how often Copilot is requested (opt-in per verb, off by default, hard daily and monthly caps, durable per-head intents and bounded retries) is owned by that spec's User Story 7. This story keeps the `user` identity provider and the guarantee that the request uses only that identity.
 
 **Why this priority**: It is new behaviour that depends on the user-identity provider, the policy and the client. It adds value but does not gate bot authorship.
 
@@ -181,10 +181,10 @@ As an operator, I want Legate to be able to request a Copilot review using my id
 
 1. **Given** a configured operator token, **When** `legate` requests the `user` identity, **Then** Tessera returns the PAT unchanged with the operator's login and the token's expiry when discoverable.
 2. **Given** the review policy in spec `2026-11-16-014-legate-per-verb-review-requests-and-merge-gates` says a Copilot request is due, **When** Legate makes it, **Then** it uses the `user` identity and nothing else.
-3. **Given** a Copilot request was already recorded for a PR's head commit, **When** Legate acts on it again or restarts, **Then** no second request is made (durable `review.requested` record, per spec 014).
+3. **Given** a Copilot request was already recorded for a PR's head commit, **When** Legate acts on it again or restarts, **Then** the durable `review.requested` record suppresses a second request within spec 014’s bounded wait.
 4. **Given** the review request fails, **When** Legate continues, **Then** an errored span is emitted and merging is not blocked.
 5. **Given** the operator's PAT is a fine-grained token, **When** the review request is verified against real GitHub before rollout, **Then** either it succeeds or the setup documentation states that a classic token is required.
-6. **Given** the operator token is absent, **When** Legate would request a review, **Then** it skips the request and reports the provider as unconfigured, without error noise on every tick.
+6. **Given** the operator token is absent, **When** Legate would request a review, **Then** Tessera reports the provider as unconfigured and Legate records `identity_unavailable` with the pacing defined in spec 014.
 
 ---
 

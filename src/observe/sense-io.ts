@@ -10,7 +10,7 @@ import type { LoopMeta } from "../legate/loop/meta.js";
 import type { OpenPrIndex, SenseDeps, StaleRecheckTracker } from "../legate/loop/state/sense.js";
 import { createStaleRecheckTracker } from "../legate/loop/state/sense.js";
 import { parseCodexReviewState, type CodexReviewState } from "./codex-review.js";
-import { classifyReviewerComment, type ReviewerNotice, codeRabbitNoticeHead } from "./review-bot-comments.js";
+import { COPILOT_LOGIN, classifyReviewerComment, type ReviewerNotice, codeRabbitNoticeHead } from "./review-bot-comments.js";
 import { readSmithyStatus } from "./smithy-status.js";
 import { normalizeBotLogin, selfBotLogin } from "../herald/profiles/merge-policy.js";
 
@@ -526,6 +526,7 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
     threads: any[];
     reviews: any[];
     reviewObservations: ReviewObservation[];
+    copilotReviewTimes: Record<string, string>;
     comments: any[];
     reviewerNotices: ReviewerNotice[];
     codexReview: CodexReviewState | null;
@@ -540,6 +541,7 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
       threads: [],
       reviews: [],
       reviewObservations: [],
+      copilotReviewTimes: {},
       comments: [],
       reviewerNotices: [],
       codexReview: null,
@@ -718,6 +720,16 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
         ),
       }];
     });
+    const copilotReviewTimes: Record<string, string> = {};
+    for (const review of reviewNodes) {
+      const author = review?.author;
+      const head = review?.commit?.oid;
+      const at = review?.submittedAt;
+      if (!isBotActor(author) || normalizeBotLogin(String(author?.login ?? "")) !== COPILOT_LOGIN ||
+          typeof head !== "string" || !/^[a-f0-9]{40}$/i.test(head) || typeof at !== "string") continue;
+      const sha = head.toLowerCase();
+      if (Date.parse(at) > Date.parse(copilotReviewTimes[sha] ?? "1970-01-01")) copilotReviewTimes[sha] = at;
+    }
     const observed = observeReviews(reviewNodes, new Set([
       selfBotLogin(env),
       ...(appLogin ? [normalizeBotLogin(appLogin)] : []),
@@ -727,6 +739,7 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
       threads,
       reviews: reviewNodes.filter((review: any) => !isApp(review?.author)),
       reviewObservations: observed.observations,
+      copilotReviewTimes,
       comments,
       reviewerNotices,
       codexReview,
@@ -785,6 +798,7 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
       changes_requested_count: reviewSummary.changes_requested_count,
       bot_approval_count: reviewSummary.bot_approval_count,
       reviews: graphql.reviewObservations,
+      copilot_review_times: graphql.copilotReviewTimes,
       // False when some review pages were not read, so the gate treats the
       // review evidence as incomplete.
       reviews_complete: graphql.reviewsComplete,

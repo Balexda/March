@@ -8,7 +8,7 @@ import { reviewRequestBody } from "../../../observe/coderabbit-review.js";
 import { classifyReviewerComment } from "../../../observe/review-bot-comments.js";
 import { reviewRequestLimits } from "../pure/review-budget.js";
 import { apply, type ReviewRequestHistory } from "./coderabbit-rereview.js";
-import { CodeRabbitBackoff, reviewSignals, verifyStartupIntent } from "./review-backoff.js";
+import { ReviewerBackoff, reviewSignals, verifyStartupIntent } from "./review-backoff.js";
 import type { HandlerContext, LoopState } from "../state/types.js";
 
 const head = "a".repeat(40);
@@ -39,7 +39,7 @@ function fixture({
     } } },
   } as unknown as LoopState;
   const deps = {
-    history: { backoff: new CodeRabbitBackoff(vi.fn().mockResolvedValue({ seq: 1, ts: time })), ...history }, limits: { dailyCap: cap, waitMs: 30 * 60_000 },
+    history: { backoff: new ReviewerBackoff(vi.fn().mockResolvedValue({ seq: 1, ts: time })), ...history }, limits: { dailyCap: cap, copilotDailyCap: 0, copilotMonthlyCap: 0, waitMs: 30 * 60_000 },
     appendIntent: vi.fn<(record: ReviewRequestRecord) => Promise<void>>().mockResolvedValue(undefined),
     findTrigger: vi.fn().mockResolvedValue(undefined),
     commentOnPr: vi.fn().mockResolvedValue({ ok: true }),
@@ -177,7 +177,7 @@ describe("CodeRabbit review requests", () => {
   });
 
   it("observes back-off and refuses a zero cap", async () => {
-    const backoff = new CodeRabbitBackoff(vi.fn());
+    const backoff = new ReviewerBackoff(vi.fn());
     await backoff.beginTick({
       ...emptyMultiProfileState(),
       reviewBackoffs: { coderabbit: { reviewer: "coderabbit", until: expired, attempts: 1, cause: "http_429", seq: 1, ts: at } },
@@ -200,7 +200,7 @@ describe("CodeRabbit review requests", () => {
     }
     const warn = vi.fn();
     expect(reviewRequestLimits({ MARCH_CODERABBIT_REVIEWS_PER_DAY: "-1", MARCH_REVIEW_WAIT_MINUTES: "0" }, warn))
-      .toMatchObject({ waitMs: 1_800_000, dailyCap: Infinity });
+      .toEqual({ waitMs: 1_800_000, dailyCap: Infinity, copilotDailyCap: 0, copilotMonthlyCap: 0 });
     expect(warn).toHaveBeenCalledTimes(2);
   });
 });
@@ -213,7 +213,7 @@ describe("CodeRabbit account-wide back-off", () => {
       reduceMulti(fold, event);
       return event;
     });
-    return { fold, append, backoff: new CodeRabbitBackoff(append) };
+    return { fold, append, backoff: new ReviewerBackoff(append) };
   }
 
   it("validates transitions and folds by stream sequence across profiles", async () => {
@@ -251,7 +251,7 @@ describe("CodeRabbit account-wide back-off", () => {
     expect(other.deps.appendIntent).not.toHaveBeenCalled();
     expect(other.deps.commentOnPr).not.toHaveBeenCalled();
 
-    const restarted = new CodeRabbitBackoff(append);
+    const restarted = new ReviewerBackoff(append);
     await restarted.beginTick(fold, [], Date.parse(expired) - 1, vi.fn(), report);
     expect(restarted.blocked(Date.parse(expired) - 1)).toBe(true);
     let time = expired;
@@ -288,7 +288,7 @@ describe("CodeRabbit account-wide back-off", () => {
     expect((await other.tick()).actions).toMatchObject([{ outcome: "backoff" }]);
     expect(other.deps.appendIntent).not.toHaveBeenCalled();
 
-    const restarted = new CodeRabbitBackoff(append);
+    const restarted = new ReviewerBackoff(append);
     await restarted.beginTick(fold, observations(), Date.parse(fresh), vi.fn(), report);
     expect(append).toHaveBeenCalledTimes(3);
     expect(restarted.blocked(Date.parse(fresh))).toBe(true);
@@ -296,7 +296,7 @@ describe("CodeRabbit account-wide back-off", () => {
     pr.coderabbit.review_times_by_head[head] = fresh;
     await restarted.beginTick(fold, observations(), Date.parse(fresh), vi.fn(), report);
     expect(fold.reviewBackoffs?.coderabbit).toMatchObject({ cause: "reset", attempts: 0 });
-    const afterReset = new CodeRabbitBackoff(append);
+    const afterReset = new ReviewerBackoff(append);
     await afterReset.beginTick(fold, observations(), Date.parse(expired), vi.fn(), report);
     expect(append).toHaveBeenCalledTimes(4);
     expect(afterReset.blocked(Date.parse(expired))).toBe(false);
@@ -426,7 +426,7 @@ describe("CodeRabbit account-wide back-off", () => {
     const stale = { number: 42, reviewer_notices: [
       { reviewer: "coderabbit", kind: "rate_limited", created_at: iso(30_000), reset_at: "2026-11-17T01:00:00Z", comment_id: 31 },
     ] };
-    const restarted = new CodeRabbitBackoff(append);
+    const restarted = new ReviewerBackoff(append);
     await restarted.beginTick(fold, reviewSignals("p", "owner/repo", "s", stale), base + 180_000, vi.fn(), report);
     expect(append).toHaveBeenCalledTimes(3);
     expect(fold.reviewBackoffs?.coderabbit).toMatchObject({ cause: "http_429" });
@@ -459,7 +459,7 @@ describe("CodeRabbit account-wide back-off", () => {
     const advanced = { number: 42, head_sha: oldHead, reviewer_notices: [
       { reviewer: "coderabbit", kind: "rate_limited", created_at: iso(30_000), reset_at: "2026-11-17T01:00:00Z", comment_id: 41 },
     ], coderabbit: { review_times_by_head: { [head]: iso(60_000) } } };
-    const restarted = new CodeRabbitBackoff(append);
+    const restarted = new ReviewerBackoff(append);
     await restarted.beginTick(fold, reviewSignals("p", "owner/repo", "s", advanced), base + 240_000, vi.fn(), report);
     expect(append).toHaveBeenCalledTimes(2);
     expect(fold.reviewBackoffs?.coderabbit?.until).toBe(throttle.until);
@@ -496,5 +496,152 @@ describe("CodeRabbit account-wide back-off", () => {
     expect(fold.reviewBackoffs?.coderabbit).toMatchObject({ cause: "http_429", attempts: 1 });
     expect(fold.reviewBackoffs?.coderabbit?.noticeId).toBeUndefined();
     expect(fold.reviewNoticeIds?.["coderabbit:51"]).toBeUndefined();
+  });
+});
+
+describe("Copilot review requests", () => {
+  const copilotIntent = { ...intent, reviewer: "copilot" } as const;
+
+  function copilot(options: Parameters<typeof fixture>[0] = {}, daily = 1, monthly = 5) {
+    const { ctx, state, deps } = fixture(options);
+    const verb = options.command?.split(".")[1] ?? "forge";
+    state.mergePolicy = { reviewRequests: { byTaskType: { [verb]: { reviewers: [{ id: "copilot" }] } } } };
+    const append = vi.fn().mockResolvedValue({ seq: 2, ts: ctx.ts });
+    const backoff = new ReviewerBackoff(append, "copilot");
+    const request = vi.fn().mockResolvedValue({ ok: true });
+    const configured = { ...deps, copilot: { backoff, request },
+      limits: { ...deps.limits, copilotDailyCap: daily, copilotMonthlyCap: monthly } };
+    return { ctx, state, deps, append, backoff, request, tick: () => apply(ctx, state, configured) };
+  }
+
+  it("defaults both windows to zero and warns when values are invalid", async () => {
+    const warn = vi.fn();
+    expect(reviewRequestLimits({}, warn)).toMatchObject({ copilotDailyCap: 0, copilotMonthlyCap: 0 });
+    expect(reviewRequestLimits({ MARCH_COPILOT_REVIEWS_PER_DAY: "-1", MARCH_COPILOT_REVIEWS_PER_MONTH: "1.5" }, warn))
+      .toMatchObject({ copilotDailyCap: 0, copilotMonthlyCap: 0 });
+    expect(warn).toHaveBeenCalledTimes(2);
+    for (const [daily, monthly] of [[0, 5], [5, 0]]) {
+      const run = copilot({}, daily, monthly);
+      expect((await run.tick()).failures[0].outcome).toBe("cap_exhausted");
+      expect(run.deps.appendIntent).not.toHaveBeenCalled();
+      expect(run.request).not.toHaveBeenCalled();
+    }
+  });
+
+  it.each([
+    ["2026-11-16T23:59:59Z", "2026-11-17T00:00:00Z", 1, 2],
+    ["2026-11-29T00:00:00Z", "2026-12-01T00:00:00Z", 2, 1],
+  ])("enforces the UTC window for %s and restores its capacity at %s", async (recorded, boundary, daily, monthly) => {
+    const fold = emptyMultiProfileState();
+    reduceMulti(fold, { ...copilotIntent, at: recorded, profile: "other", type: "review.requested", seq: 1 } as HeraldEvent);
+    const history = { byProfile: { other: [...fold.byProfile.other.reviewRequests!] } };
+    const before = copilot({ history, time: new Date(Date.parse(boundary) - 1000).toISOString() }, daily, monthly);
+    expect((await before.tick()).failures[0].outcome).toBe("cap_exhausted");
+    expect(before.request).not.toHaveBeenCalled();
+    const after = copilot({ history, time: boundary }, daily, monthly);
+    expect((await after.tick()).actions[0].outcome).toBe("requested");
+  });
+
+  it("shares capacity immediately across profiles even when posting fails", async () => {
+    const history = { byProfile: {} };
+    const first = copilot({ history });
+    first.request.mockRejectedValueOnce(new Error("secret"));
+    expect((await first.tick()).failures).toMatchObject([{ outcome: "failed", detail: "GitHub review request failed" }]);
+    const second = copilot({ history, profile: "other" });
+    expect((await second.tick()).failures[0].outcome).toBe("cap_exhausted");
+    expect(second.request).not.toHaveBeenCalled();
+  });
+
+  it("requires opt-in and Herald acknowledgement before posting", async () => {
+    const run = copilot({ command: "smithy.mark" });
+    const policy = run.state.mergePolicy;
+    run.state.mergePolicy = undefined;
+    await run.tick();
+    expect(run.deps.appendIntent).not.toHaveBeenCalled();
+    run.state.mergePolicy = policy;
+    run.deps.appendIntent.mockRejectedValueOnce(new Error("Herald down"));
+    expect((await run.tick()).failures[0].outcome).toBe("failed");
+    expect(run.request).not.toHaveBeenCalled();
+    expect((await run.tick()).actions[0]).toMatchObject({ outcome: "requested", taskType: "mark" });
+    expect(run.deps.appendIntent).toHaveBeenLastCalledWith({ ...copilotIntent, at: new Date(at).toISOString() });
+    expect(run.deps.appendIntent.mock.invocationCallOrder[1]).toBeLessThan(run.request.mock.invocationCallOrder[0]);
+  });
+
+  it("restores the head wait after replay, then retries an unanswered request", async () => {
+    const fold = emptyMultiProfileState();
+    reduceMulti(fold, { ...copilotIntent, profile: "p", type: "review.requested", seq: 1 } as HeraldEvent);
+    const history = { byProfile: { p: [...fold.byProfile.p.reviewRequests!] } };
+    const immediate = copilot({ history }, 5, 5);
+    await immediate.tick();
+    expect(immediate.request).not.toHaveBeenCalled();
+    const later = copilot({ history, time: expired }, 5, 5);
+    expect((await later.tick()).actions[0].reason).toBe("timeout_retry");
+  });
+
+  it("observes the head review and leaves approval to the effective allowlist", async () => {
+    const reviews = [{ login: "copilot-pull-request-reviewer[bot]", author_kind: "bot" as const,
+      state: "APPROVED" as const, commit_sha: head, submitted_at: at }];
+    const run = copilot({ pr: { reviews } });
+    await run.tick();
+    expect(run.request).not.toHaveBeenCalled();
+    expect(approvalSatisfied(resolveMergePolicyRow(run.state.mergePolicy, "forge").requirements, { reviews, head_sha: head })).toBe(false);
+    run.state.mergePolicy = { ...run.state.mergePolicy, byTaskType: { forge: {
+      botApproval: true, botApprovers: ["copilot-pull-request-reviewer"],
+    } } };
+    expect(approvalSatisfied(resolveMergePolicyRow(run.state.mergePolicy, "forge").requirements, { reviews, head_sha: head })).toBe(true);
+  });
+
+  it("recognizes a review hidden by a different-head verdict and respects current-head progress", async () => {
+    for (const pr of [
+      { copilot_review_times: { [head]: at } },
+      { reviewer_notices: [{ reviewer: "copilot", kind: "in_progress", head_sha: head, created_at: at }] },
+    ]) {
+      const run = copilot({ pr });
+      await run.tick();
+      expect(run.request).not.toHaveBeenCalled();
+    }
+    const pushed = copilot({
+      history: { byProfile: { p: [{ ...copilotIntent, headSha: oldHead }] } },
+      pr: { reviewer_notices: [{ reviewer: "copilot", kind: "in_progress", head_sha: oldHead, created_at: at }] },
+    }, 2);
+    expect((await pushed.tick()).actions[0].reason).toBe("initial");
+  });
+
+  it("persists a 429 account-wide, then clears pacing on a newer current-head review", async () => {
+    const fold = emptyMultiProfileState();
+    const first = copilot();
+    const resetAt = "2026-11-17T01:00:00.000Z";
+    first.request.mockResolvedValueOnce({ ok: false, kind: "rate_limited", resetAt });
+    expect((await first.tick()).actions).toMatchObject([{ outcome: "backoff", rateLimitHit: true, reviewer: "copilot" }]);
+    const [, record] = first.append.mock.calls[0];
+    expect(record).toMatchObject({ reviewer: "copilot", until: resetAt, cause: "http_429", attempts: 1 });
+    reduceMulti(fold, { ...record, type: "review.backoff", profile: "p", ts: at, seq: 2 });
+    const second = copilot({ profile: "other", time: expired });
+    await second.backoff.beginTick(fold, [], Date.parse(expired), vi.fn(), vi.fn());
+    expect((await second.tick()).actions[0].outcome).toBe("backoff");
+    expect(second.request).not.toHaveBeenCalled();
+    const signals = reviewSignals("p", "owner/repo", "s", {
+      number: 42, head_sha: head, reviews_complete: true, copilot_review_times: { [head]: expired },
+    }, "copilot");
+    await second.backoff.beginTick(fold, signals, Date.parse(expired), vi.fn(), vi.fn());
+    expect(second.append).toHaveBeenCalledWith("p", expect.objectContaining({ reviewer: "copilot", cause: "reset" }), expect.any(String));
+    expect((await second.tick()).actions[0].outcome).toBe("requested");
+  });
+
+  it("picks up a verified Copilot rate-limit notice with its stated reset", async () => {
+    const classification = classifyReviewerComment({ author: "copilot-pull-request-reviewer[bot]",
+      body: "Rate limit exceeded. Try again in 45 minutes.", createdAt: at });
+    expect(classification).toEqual({ kind: "rate_limited", reviewer: "copilot", resetAt: "2026-11-16T23:45:00.000Z" });
+    const signals = reviewSignals("p", "owner/repo", "s", { number: 42, reviewer_notices: [
+      { reviewer: "copilot", kind: "rate_limited", created_at: at, reset_at: "2026-11-16T23:45:00.000Z", comment_id: 99 },
+    ] }, "copilot");
+    const run = copilot({ time: expired });
+    const report = vi.fn();
+    await run.backoff.beginTick(emptyMultiProfileState(), signals, Date.parse(expired), vi.fn(), report);
+    expect(run.append).toHaveBeenCalledWith("p", expect.objectContaining({
+      reviewer: "copilot", cause: "rate_limited_comment", until: "2026-11-16T23:45:00.000Z",
+    }), expect.any(String));
+    expect(report).toHaveBeenCalledWith(expect.anything(), "backoff", expect.any(String), true);
+    expect((await run.tick()).actions[0].outcome).toBe("backoff");
   });
 });

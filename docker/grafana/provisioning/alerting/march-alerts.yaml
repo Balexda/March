@@ -438,7 +438,7 @@ groups:
             datasourceUid: __expr__
             model: { refId: C, type: threshold, expression: A, conditions: [{ evaluator: { type: gt, params: [1800] } }] }
 
-      # 12. Approved-but-GitHub-won't-merge — human gates cleared but the PR has
+      # 12. Approved-but-GitHub-won't-merge — the effective review gates cleared but the PR has
       #     sat in a non-mergeable GitHub state (UNKNOWN/BEHIND/BLOCKED/DIRTY) for
       #     > 30m. This is "fully approved, waiting to merge" — a real stall (needs
       #     a rebase or a branch-protection review). NOT the human-paced
@@ -451,7 +451,7 @@ groups:
         execErrState: OK
         labels: { severity: warning, team: march, tier: behavioral }
         annotations:
-          summary: A PR has cleared its human gates but GitHub has refused to merge it (UNKNOWN/BEHIND/BLOCKED/DIRTY) for over 30 minutes — needs a rebase or a branch-protection review.
+          summary: A PR has cleared its effective review gates but GitHub has refused to merge it (UNKNOWN/BEHIND/BLOCKED/DIRTY) for over 30 minutes — needs a rebase or a branch-protection review.
         data:
           - refId: A
             relativeTimeRange: { from: 600, to: 0 }

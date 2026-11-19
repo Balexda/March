@@ -125,14 +125,15 @@ export function runHeartbeat(out: CoordinatorOutput, deps: HeartbeatDeps): any {
   }
   // recovery runs before dispatch in the pipeline; append its actions here so the
   // action-log ordering matches the handler order within the tick (#238).
-  // coderabbit-rereview runs right after babysit; slice-scoped, so its events carry slice_id.
-  for (const a of out.results.coderabbitRereview?.actions ?? []) {
-    event(meta.processor_events_path, { ...base, kind: "review_request", outcome: a.outcome, reason: a.reason, rate_limit_hit: a.rateLimitHit, action: a.action, slice_id: a.sliceId, pr_number: a.pr?.number ?? null, pr_url: a.pr?.url ?? null, detail: a.detail });
-    log("[" + ts + "] " + a.action + " " + a.sliceId + ": " + a.detail);
-  }
-  for (const failure of out.results.coderabbitRereview?.failures ?? []) {
-    event(meta.processor_events_path, { ...base, kind: "review_request", outcome: failure.outcome, reason: failure.reason, action: failure.action, slice_id: failure.sliceId, pr_number: failure.pr?.number ?? null, pr_url: failure.pr?.url ?? null, detail: failure.detail });
-    log("[" + ts + "] " + failure.action + " " + failure.sliceId + ": " + failure.detail);
+  const reviews = out.results.coderabbitRereview;
+  for (const decision of [...(reviews?.actions ?? []), ...(reviews?.failures ?? [])]) {
+    event(meta.processor_events_path, {
+      ...base, kind: "review_request", reviewer: decision.reviewer, task_type: decision.taskType,
+      outcome: decision.outcome, reason: decision.reason, rate_limit_hit: decision.rateLimitHit,
+      action: decision.action, slice_id: decision.sliceId,
+      pr_number: decision.pr?.number ?? null, pr_url: decision.pr?.url ?? null, detail: decision.detail,
+    });
+    log("[" + ts + "] " + decision.action + " " + decision.sliceId + ": " + decision.detail);
   }
   for (const a of out.results.recovery.actions) {
     event(meta.processor_events_path, { ...base, kind: "slice_recovery", action: a.action, slice_id: a.sliceId, detail: a.detail });

@@ -243,6 +243,7 @@ function ensureInstruments(meter: Meter): void {
   });
   // Zero baseline so rate() shows the first hit instead of waiting for a second.
   reviewRateLimits.add(0, { reviewer: "coderabbit" });
+  reviewRateLimits.add(0, { reviewer: "copilot" });
   tickDuration = meter.createHistogram("march.legate.tick.duration", {
     description: "Legate loop tick wall-clock duration",
     unit: "s",
@@ -595,7 +596,7 @@ export function recordDependencyUnblock(outcome: DependencyUnblockOutcome, proce
   dependencyUnblock!.add(1, { outcome, ...(processor ? { processor } : {}) });
 }
 
-export type ReviewRequestOutcome = "requested" | "failed" | "cap_exhausted" | "backoff";
+export type ReviewRequestOutcome = "requested" | "failed" | "cap_exhausted" | "backoff" | "identity_unavailable";
 
 /** Takes a thunk so the history scan is skipped entirely when telemetry is off. */
 export function recordReviewCaps(samples: () => readonly ReviewCapSample[]): void {
@@ -605,7 +606,7 @@ export function recordReviewCaps(samples: () => readonly ReviewCapSample[]): voi
   latestReviewCaps = samples();
 }
 
-export function recordReviewRequest(reviewer: "coderabbit", outcome: ReviewRequestOutcome): void {
+export function recordReviewRequest(reviewer: "coderabbit" | "copilot", outcome: ReviewRequestOutcome): void {
   const otel = getActiveOtel();
   if (!otel?.enabled) return;
   ensureInstruments(otel.getMeter());
@@ -615,7 +616,7 @@ export function recordReviewRequest(reviewer: "coderabbit", outcome: ReviewReque
   loopActions!.add(1, { action: outcome === "requested" ? "review-request" : "review-request-failed" });
 }
 
-export function recordReviewRateLimit(reviewer: "coderabbit"): void {
+export function recordReviewRateLimit(reviewer: "coderabbit" | "copilot"): void {
   const otel = getActiveOtel();
   if (!otel?.enabled) return;
   ensureInstruments(otel.getMeter());
