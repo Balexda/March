@@ -338,6 +338,30 @@ exit 1
     expect(await readFile(ssh.log, "utf8")).toContain("git@example.org");
   });
 
+  it("keeps the original SSH command for Git run from a hook", async () => {
+    await setOrigin("https://github.com/acme/widgets.git");
+    for (const [name, value] of [["user.name", "Operator"], ["user.email", "operator@example.test"]]) {
+      expect((await run("git", ["config", name, value])).code).toBe(0);
+    }
+    // Git puts its exec-path first for hooks, so plain `git` there is the real
+    // Git; tools that call the shim directly still inherit the guard.
+    const shim = `'${process.execPath}' '${gitShim}'`;
+    await writeFile(join(cwd, ".git", "hooks", "pre-commit"), `#!/bin/sh
+${shim} ls-remote ssh://git@example.org/acme/widgets.git >/dev/null 2>&1
+${shim} ls-remote gh:acme/widgets.git 2> github-refusal
+exit 0
+`, { mode: 0o755 });
+    const ssh = await fakeSsh();
+    const commit = await run(process.execPath, [gitShim, "commit", "-q", "--allow-empty", "-m", "work"],
+      "", { PATH: ssh.PATH });
+    expect(commit.code, commit.stderr).toBe(0);
+    const connections = (await readFile(ssh.log, "utf8")).trim().split("\n");
+    expect(connections).toHaveLength(1);
+    expect(connections[0]).toContain("git@example.org");
+    expect(await readFile(join(cwd, "github-refusal"), "utf8"))
+      .toContain("Tessera Git: SSH to GitHub is disabled for stewards; use HTTPS.");
+  });
+
   it("leaves push refspecs unchanged and normalizes only the repository operand", async () => {
     const bare = join(root, "destination.git");
     expect((await run("git", ["init", "-q", "--bare", bare])).code).toBe(0);

@@ -103,6 +103,7 @@ const SSH_GUARD_FLAG = "--march-steward-ssh-guard";
 // OpenSSH options whose value is the following argument.
 const SSH_VALUE_OPTIONS = new Set(["-B", "-b", "-c", "-D", "-E", "-e", "-F", "-I", "-i", "-J",
   "-L", "-l", "-m", "-O", "-o", "-p", "-Q", "-R", "-S", "-W", "-w"]);
+const isSshGuard = command => command?.includes(SSH_GUARD_FLAG) ?? false;
 const isGitHubHost = host => /(?:^|\.)github\.com$/.test(host.toLowerCase().replace(/\.$/, ""));
 
 /**
@@ -127,7 +128,9 @@ function sshGuard(args) {
     process.stderr.write("Tessera Git: SSH to GitHub is disabled for stewards; use HTTPS.\n");
     return { status: 128 };
   }
-  const original = process.env.MARCH_STEWARD_SSH_COMMAND;
+  // Never relaunch a guard as the real ssh.
+  const saved = process.env.MARCH_STEWARD_SSH_COMMAND;
+  const original = isSshGuard(saved) ? "" : saved;
   return original
     ? spawnSync("sh", ["-c", `${original} "$@"`, "ssh", ...args], { stdio: "inherit" })
     : spawnSync("ssh", args, { stdio: "inherit" });
@@ -279,9 +282,13 @@ function run() {
     });
 
     // Aliases and URL spellings the rewrites miss still reach SSH: guard it.
-    const originalSsh = env.GIT_SSH_COMMAND || (env.GIT_SSH ? shellQuote(env.GIT_SSH) : "");
-    if (originalSsh) env.MARCH_STEWARD_SSH_COMMAND = originalSsh;
-    else delete env.MARCH_STEWARD_SSH_COMMAND;
+    // Hooks inherit the guard, so a nested shim keeps the saved original
+    // command instead of saving the guard as the original.
+    if (!isSshGuard(env.GIT_SSH_COMMAND)) {
+      const originalSsh = env.GIT_SSH_COMMAND || (env.GIT_SSH ? shellQuote(env.GIT_SSH) : "");
+      if (originalSsh) env.MARCH_STEWARD_SSH_COMMAND = originalSsh;
+      else delete env.MARCH_STEWARD_SSH_COMMAND;
+    }
     delete env.GIT_SSH;
     env.GIT_SSH_COMMAND = [process.execPath, process.argv[1], SSH_GUARD_FLAG].map(shellQuote).join(" ");
     env.GIT_SSH_VARIANT = "ssh";
