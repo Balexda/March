@@ -98,3 +98,4 @@ SD-006 and SD-007 describe constraints on SD-001 and SD-002. The selected store 
 | US1 · Mint a Downscoped Bot Token | depends on | Supplies the Tessera image, service and app provider reload boundary. |
 | US2 · Enforce a Default-Deny Policy per Client | depends on | S2 requires production authorization and the registration reader. |
 | US7 · Request a Copilot Review as the Operator | depended upon by | The PAT provider uses the S1 secret store and reload boundary. |
+| US8 · See Issuances, Expiry and Health | depended upon by | US8 doctor key checks need S2's deployed client-key wiring, and its provider status follows S1 secret replacement. |
