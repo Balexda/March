@@ -54,6 +54,9 @@ const ERRORS = {
   mint_failed: [502, "Provider could not issue a token"],
 } as const;
 export type TesseraErrorCode = keyof typeof ERRORS;
+export function isTesseraErrorCode(code: unknown): code is TesseraErrorCode {
+  return typeof code === "string" && Object.hasOwn(ERRORS, code);
+}
 /** Messages are fixed; upstream exceptions and response bodies never cross this boundary. */
 export class TesseraError extends Error {
   readonly status: number;

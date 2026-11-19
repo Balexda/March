@@ -61,19 +61,57 @@ describe("Tessera HTTP contract", () => {
   });
 });
 
-it("emits safe errored HTTP spans for denial, malformed input, and provider failure", async () => {
+it("records one safe audit and span per request across completion paths", async () => {
   initOtel({MARCH_OTEL:"1"});
   const tracer=getActiveOtel().getTracer(); const real=tracer.startSpan.bind(tracer); const spans:Span[]=[];
   vi.spyOn(tracer,"startSpan").mockImplementation((...args:Parameters<typeof real>)=>{const span=real(...args) as Span;spans.push(span);return span;});
   try {
-    for(const options of [{}, {authorize:allow}, {authorize:allow,providers:[provider("provider_unavailable")]}]) {
-      const app=buildTesseraServer(options);
-      await app.inject({method:"POST",url:"/v1/github/token",headers:{"x-march-slice-id":"slice-safe",authorization:"Bearer SECRET_BEARER"},payload:options.providers ? body : {...body,secret:"SECRET_BODY"}});
-      await app.close();
-    }
-    expect(spans).toHaveLength(3);
-    for(const span of spans) {
-      expect(span.name).toBe("tessera.issue"); expect(span.status.code).toBe(SpanStatusCode.ERROR);
+    const upstream = provider();
+    vi.spyOn(upstream, "issue").mockRejectedValue(new Error("SECRET_UPSTREAM"));
+    const cases = [
+      { options: {}, outcome: "denied", reason: "unauthorized", payload: body },
+      { options: { authorize: allow }, outcome: "denied", reason: "invalid_request", payload: "{SECRET_BODY" },
+      { options: { authorize: { ...allow, authorize() { throw new TesseraError("policy_denied"); } } }, outcome: "denied", reason: "policy_denied", payload: { ...body, repo: "acme/SECRET_BEARER" } },
+      { options: { authorize: allow, providers: [upstream] }, outcome: "failed", reason: "mint_failed", payload: body },
+      { options: { authorize: allow, providers: [provider()] }, outcome: "issued", reason: null, payload: { ...body, subject: "spawn-SECRET_BEARER" } },
+    ];
+    for (const [index, scenario] of cases.entries()) {
+      let logs = "";
+      const stream = new PassThrough();
+      stream.on("data", chunk => { logs += chunk; });
+      const app = buildTesseraServer({ ...scenario.options, logger: pino({}, stream) });
+      try {
+        const response = await app.inject({
+          method: "POST", url: "/v1/github/token", payload: scenario.payload,
+          headers: { "content-type": "application/json", "x-march-slice-id": "slice-safe", authorization: "Bearer SECRET_BEARER" },
+        });
+        if (scenario.reason) {
+          expect(response.json().error.code).toBe(scenario.reason);
+          expect(response.body).not.toContain("SECRET");
+        }
+      } finally {
+        await app.close();
+      }
+      const issued = scenario.outcome === "issued";
+      const parsed = index >= 2;
+      const { outcome, reason } = scenario;
+      expect(logs).not.toContain("SECRET");
+      expect(logs.trim().split("\n").map(line => JSON.parse(line)).filter(event => event.event === "tessera.audit"))
+        .toEqual([expect.objectContaining({
+          caller: index === 0 ? "unknown" : "test",
+          identity: parsed ? "app" : null, provider: parsed ? "github-app" : null,
+          access: parsed ? "write" : null, repo: index >= 3 ? body.repo : null,
+          outcome, reason, cache: issued ? "miss" : "n/a",
+          expires_at: issued ? "2026-11-16T23:00:00.000Z" : null,
+          subject: issued ? "[REDACTED]" : null,
+        })]);
+      expect(spans).toHaveLength(index + 1);
+      const span = spans[index];
+      expect(span.name).toBe("tessera.issue");
+      expect(span.status.code).toBe(issued ? SpanStatusCode.UNSET : SpanStatusCode.ERROR);
+      expect(span.attributes).toMatchObject({ outcome, reason: reason ?? "none" });
+      expect(span.attributes).not.toHaveProperty("repo");
+      expect(span.attributes).not.toHaveProperty("subject");
       expect(span.spanContext().traceId).toBe(traceIdForDispatch("slice-safe"));
       expect(span.parentSpanContext?.spanId).toBe(spanIdForDispatch("slice-safe"));
       expect(JSON.stringify(span.attributes)).not.toContain("SECRET");
@@ -190,6 +228,75 @@ describe("Tessera App token lifecycle over HTTP", () => {
       expect(second.json()).toEqual(first.json());
       expect(github.mint).toHaveBeenCalledTimes(1);
     } finally {
+      await github.app.close();
+    }
+  });
+
+  it.each([false, true])("records bounded service metrics with telemetry enabled=%s", async (enabled) => {
+    const otel = initOtel({ MARCH_OTEL: enabled ? "1" : "0" });
+    const meter = otel.getMeter();
+    const getMeter = vi.spyOn(otel, "getMeter").mockReturnValue(meter);
+    const counters = new Map<string, ReturnType<typeof vi.fn>>();
+    vi.spyOn(meter, "createCounter").mockImplementation(name => {
+      const add = vi.fn();
+      counters.set(name, add);
+      return { add };
+    });
+    const latency = vi.fn();
+    const remaining = vi.fn();
+    const histogram = vi.spyOn(meter, "createHistogram").mockReturnValue({ record: latency });
+    const gauge = vi.spyOn(meter, "createGauge").mockReturnValue({ record: remaining });
+    const github = await fakeGithub();
+    const mint = github.mint.getMockImplementation()!;
+    const bothRequests = withResolvers<void>();
+    let requests = 0;
+    github.app.addHook("preHandler", async () => { if (++requests === 2) bothRequests.resolve(); });
+    github.mint.mockImplementationOnce(async () => {
+      await bothRequests.promise;
+      const response = await mint();
+      response.headers.set("x-ratelimit-remaining", "40");
+      return response;
+    });
+    try {
+      const results = await Promise.all([github.issue(), github.issue()]);
+      expect(results.map(result => result.statusCode)).toEqual([200, 200]);
+      expect((await github.issue()).statusCode).toBe(200);
+      github.mint.mockResolvedValueOnce(Response.json({ message: "You exceeded a secondary rate limit SECRET_UPSTREAM" }, {
+        status: 429, headers: { "x-ratelimit-remaining": "39" },
+      }));
+      const denied = await github.issue(true);
+      expect(denied.statusCode).toBe(503);
+      expect(denied.body).not.toContain("SECRET");
+      github.mint.mockResolvedValueOnce(new Response("SECRET_UPSTREAM", { status: 429, headers: { "x-ratelimit-remaining": "0" } }));
+      expect((await github.issue(true)).statusCode).toBe(503);
+      github.mint.mockResolvedValueOnce(new Response(null, { status: 429, headers: { "retry-after": "10", "x-ratelimit-remaining": "SECRET_HEADER" } }));
+      expect((await github.issue(true)).statusCode).toBe(503);
+      expect(github.mint).toHaveBeenCalledTimes(4);
+
+      if (!enabled) {
+        expect(getMeter).not.toHaveBeenCalled();
+        expect(counters.size).toBe(0);
+        expect(latency).not.toHaveBeenCalled();
+        expect(remaining).not.toHaveBeenCalled();
+        return;
+      }
+      const provider = "github-app";
+      expect(histogram).toHaveBeenCalledWith("march.tessera.mint.duration", { unit: "ms" });
+      expect(gauge).toHaveBeenCalledWith("march.tessera.github.rate_limit_remaining", { unit: "1" });
+      expect(latency.mock.calls).toEqual(["issued", "failed", "failed", "failed"].map(outcome => [
+        expect.any(Number), { provider, outcome },
+      ]));
+      expect(remaining.mock.calls).toEqual([[40, { provider }], [39, { provider }], [0, { provider }]]);
+      expect(counters.get("march.tessera.github.secondary_limits")?.mock.calls).toEqual([[1, { provider }]]);
+      expect(counters.get("march.tessera.issuances")?.mock.calls).toEqual(["miss", "miss", "hit"].map(cache => [
+        1, { provider, identity: "app", access: "write", cache },
+      ]));
+      expect(counters.get("march.tessera.denials")?.mock.calls).toEqual(Array.from({ length: 3 }, () => [
+        1, { identity: "app", reason: "provider_unavailable" },
+      ]));
+    } finally {
+      vi.restoreAllMocks();
+      initOtel({});
       await github.app.close();
     }
   });

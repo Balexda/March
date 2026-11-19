@@ -18,7 +18,7 @@ Follow [March Vision](../../docs/vision.md) and the [Operating Philosophy](../..
 
 ### Tasks
 
-- [ ] **Complete token request audit and tracing**
+- [x] **Complete token request audit and tracing**
 
   Extend the issuance lifecycle in `src/tessera/server.ts` and reuse `src/observability/tessera-trace.ts` for AS 8.1–8.3 and AS 8.5.
 
@@ -28,7 +28,7 @@ Follow [March Vision](../../docs/vision.md) and the [Operating Philosophy](../..
   - Denials and mint failures mark the span errored. A valid slice ID attaches it to the deterministic dispatch trace.
   - Fake-provider and HTTP coverage verifies completion paths, trace parentage and sentinel credential exclusion from telemetry and errors, including untrusted request and upstream data. Record observable behavior in the Tessera subsystem contract.
 
-- [ ] **Measure issuance and GitHub rate limits**
+- [x] **Measure issuance and GitHub rate limits**
 
   Add Tessera service instruments under `src/observability/` and measure at the request and provider boundaries.
 
