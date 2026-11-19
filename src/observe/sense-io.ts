@@ -10,7 +10,7 @@ import type { LoopMeta } from "../legate/loop/meta.js";
 import type { OpenPrIndex, SenseDeps, StaleRecheckTracker } from "../legate/loop/state/sense.js";
 import { createStaleRecheckTracker } from "../legate/loop/state/sense.js";
 import { parseCodexReviewState, type CodexReviewState } from "./codex-review.js";
-import { classifyReviewerComment, type ReviewerNotice } from "./review-bot-comments.js";
+import { classifyReviewerComment, type ReviewerNotice, codeRabbitNoticeHead } from "./review-bot-comments.js";
 import { readSmithyStatus } from "./smithy-status.js";
 import { normalizeBotLogin, selfBotLogin } from "../herald/profiles/merge-policy.js";
 
@@ -692,6 +692,7 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
         reviewerNotices.push({
           reviewer: classification.reviewer,
           kind: classification.kind,
+          ...(classification.kind === "in_progress" ? { head_sha: codeRabbitNoticeHead(body) } : {}),
           created_at: c.createdAt,
           ...(classification.resetAt ? { reset_at: classification.resetAt } : {}),
         });
@@ -740,7 +741,7 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
     const request = await ghPrArgs(
       slice,
       state,
-      "number,url,state,mergeable,reviewDecision,statusCheckRollup,headRefName,title,author,updatedAt" + (github && discovery ? ",isCrossRepository" : ""),
+      "number,url,state,isDraft,mergeable,reviewDecision,statusCheckRollup,headRefName,title,author,updatedAt" + (github && discovery ? ",isCrossRepository" : ""),
     );
     if (request.skipped) return request;
     const summary = JSON.parse(await gh(request.args, request.options, request.owner, slice.id));
@@ -754,6 +755,7 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
       number: summary.number,
       url: summary.url,
       state: summary.state,
+      is_draft: summary.isDraft,
       mergeable: summary.mergeable,
       // The change cursor: senseObserved stores this and compares it against the
       // next tick's cheap open-PR probe to skip an unchanged PR's detail fetch.

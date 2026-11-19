@@ -52,7 +52,8 @@ export type TransitionEvent = Extract<
       // request; the requeue handler appends the refusal / give-up.
       | "slice.requeue.requested"
       | "slice.requeue.refused"
-      | "retry.counted";
+      | "retry.counted"
+      | "review.requested";
   }
 >;
 

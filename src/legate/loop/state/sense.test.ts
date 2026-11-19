@@ -687,7 +687,7 @@ describe("senseObserved PR change-cursor (listOpenPrs gate)", () => {
         queryPr,
         listOpenPrs: async () => index([[7, { updatedAt: "T1" }]]),
       }),
-      prevWithPr({ number: 7, updated_at: "T1", reviews: [], checks: "PASS", thread_count: 0 }),
+      prevWithPr({ number: 7, updated_at: "T1", reviews: [], is_draft: false, checks: "PASS", thread_count: 0 }),
     );
     expect(queryPr).not.toHaveBeenCalled();
     // No detail observed → the diff keeps the stored snapshot (pr left unset).
@@ -702,7 +702,7 @@ describe("senseObserved PR change-cursor (listOpenPrs gate)", () => {
         queryPr,
         listOpenPrs: async () => index([[7, { updatedAt: "T2" }]]),
       }),
-      prevWithPr({ number: 7, updated_at: "T1", reviews: [], checks: "PASS", thread_count: 0 }),
+      prevWithPr({ number: 7, updated_at: "T1", reviews: [], is_draft: false, checks: "PASS", thread_count: 0 }),
     );
     expect(queryPr).toHaveBeenCalledTimes(1);
     expect(state.perSlice.p?.pr).toMatchObject({ number: 7 });
@@ -716,7 +716,7 @@ describe("senseObserved PR change-cursor (listOpenPrs gate)", () => {
         queryPr,
         listOpenPrs: async () => index([[7, { updatedAt: "T1" }]]),
       }),
-      prevWithPr({ number: 7, updated_at: "T1", reviews: [], checks: "PENDING", thread_count: 0 }),
+      prevWithPr({ number: 7, updated_at: "T1", reviews: [], is_draft: false, checks: "PENDING", thread_count: 0 }),
     );
     expect(queryPr).toHaveBeenCalledTimes(1);
   });
@@ -729,7 +729,7 @@ describe("senseObserved PR change-cursor (listOpenPrs gate)", () => {
         queryPr,
         listOpenPrs: async () => index([[7, { updatedAt: "T1" }]]),
       }),
-      prevWithPr({ number: 7, updated_at: "T1", reviews: [], checks: "NONE", thread_count: 0 }),
+      prevWithPr({ number: 7, updated_at: "T1", reviews: [], is_draft: false, checks: "NONE", thread_count: 0 }),
     );
     expect(queryPr).toHaveBeenCalledTimes(1);
   });
@@ -743,7 +743,7 @@ describe("senseObserved PR change-cursor (listOpenPrs gate)", () => {
         listOpenPrs: async () => index([[7, { updatedAt: "T1" }]]),
       }),
       // #288 keeps number/state and attaches `error` to the stored snapshot.
-      prevWithPr({ number: 7, updated_at: "T1", reviews: [], checks: "PASS", thread_count: 0, error: "rate limited" }),
+      prevWithPr({ number: 7, updated_at: "T1", reviews: [], is_draft: false, checks: "PASS", thread_count: 0, error: "rate limited" }),
     );
     expect(queryPr).toHaveBeenCalledTimes(1);
   });
@@ -756,7 +756,7 @@ describe("senseObserved PR change-cursor (listOpenPrs gate)", () => {
         queryPr,
         listOpenPrs: async () => index([[7, { updatedAt: "T1" }]]),
       }),
-      prevWithPr({ number: 7, updated_at: "T1", reviews: [], checks: "PASS", thread_count: 0, reviews_complete: false }),
+      prevWithPr({ number: 7, updated_at: "T1", reviews: [], is_draft: false, checks: "PASS", thread_count: 0, reviews_complete: false }),
     );
     expect(queryPr).toHaveBeenCalledTimes(1);
   });
@@ -783,7 +783,7 @@ describe("senseObserved PR change-cursor (listOpenPrs gate)", () => {
         queryPr,
         listOpenPrs: async () => index([[7, { updatedAt: "T1" }]]),
       }),
-      prevWithPr({ number: 7, updated_at: "T1", reviews: [], checks: "PASS", thread_count: 2 }),
+      prevWithPr({ number: 7, updated_at: "T1", reviews: [], is_draft: false, checks: "PASS", thread_count: 2 }),
     );
     expect(queryPr).toHaveBeenCalledTimes(1);
   });
@@ -796,7 +796,7 @@ describe("senseObserved PR change-cursor (listOpenPrs gate)", () => {
         queryPr,
         listOpenPrs: async () => index([]), // PR 7 is no longer open
       }),
-      prevWithPr({ number: 7, updated_at: "T1", reviews: [], checks: "PASS", thread_count: 0 }),
+      prevWithPr({ number: 7, updated_at: "T1", reviews: [], is_draft: false, checks: "PASS", thread_count: 0 }),
     );
     expect(queryPr).toHaveBeenCalledTimes(1);
     expect(state.perSlice.p?.pr).toMatchObject({ state: "MERGED" });
@@ -823,7 +823,7 @@ describe("senseObserved PR change-cursor (listOpenPrs gate)", () => {
         queryPr,
         listOpenPrs: async () => ({ error: "rate limited" }),
       }),
-      prevWithPr({ number: 7, updated_at: "T1", reviews: [], checks: "PASS", thread_count: 0 }),
+      prevWithPr({ number: 7, updated_at: "T1", reviews: [], is_draft: false, checks: "PASS", thread_count: 0 }),
     );
     expect(queryPr).toHaveBeenCalledTimes(1);
   });
@@ -833,7 +833,7 @@ describe("selectStaleRecheck (rotating forced-recheck victim)", () => {
   const idleOpen = new Map([[7, { updatedAt: "T1", headRefName: "b" }]]);
   const skippablePrev = () =>
     foldedState({
-      slices: { p: slice({ sliceId: "p", stage: "pr-open", branch: "b", pr: { number: 7, updated_at: "T1", reviews: [], checks: "PASS", thread_count: 0 } }) },
+      slices: { p: slice({ sliceId: "p", stage: "pr-open", branch: "b", pr: { number: 7, updated_at: "T1", reviews: [], is_draft: false, checks: "PASS", thread_count: 0 } }) },
     });
   const t0 = Date.parse("2026-05-20T00:00:00Z");
 
@@ -849,7 +849,7 @@ describe("selectStaleRecheck (rotating forced-recheck victim)", () => {
 
   it("does NOT pick a PR already known CONFLICTING (handled by babysit; wastes a sweep slot)", () => {
     const prev = foldedState({
-      slices: { p: slice({ sliceId: "p", stage: "pr-open", branch: "b", pr: { number: 7, updated_at: "T1", reviews: [], checks: "PASS", thread_count: 0, mergeable: "CONFLICTING" } }) },
+      slices: { p: slice({ sliceId: "p", stage: "pr-open", branch: "b", pr: { number: 7, updated_at: "T1", reviews: [], is_draft: false, checks: "PASS", thread_count: 0, mergeable: "CONFLICTING" } }) },
     });
     expect(selectStaleRecheck(prev, idleOpen, createStaleRecheckTracker(), t0)).toBeNull();
   });
@@ -870,8 +870,8 @@ describe("selectStaleRecheck (rotating forced-recheck victim)", () => {
   it("rotates oldest-first across multiple idle PRs (never-forced wins; ties break to lowest number)", () => {
     const prev = foldedState({
       slices: {
-        a: slice({ sliceId: "a", stage: "pr-open", branch: "b", pr: { number: 7, updated_at: "T1", reviews: [], checks: "PASS", thread_count: 0 } }),
-        b: slice({ sliceId: "b", stage: "pr-open", branch: "b", pr: { number: 9, updated_at: "T1", reviews: [], checks: "PASS", thread_count: 0 } }),
+        a: slice({ sliceId: "a", stage: "pr-open", branch: "b", pr: { number: 7, updated_at: "T1", reviews: [], is_draft: false, checks: "PASS", thread_count: 0 } }),
+        b: slice({ sliceId: "b", stage: "pr-open", branch: "b", pr: { number: 9, updated_at: "T1", reviews: [], is_draft: false, checks: "PASS", thread_count: 0 } }),
       },
     });
     const open = new Map([
@@ -891,7 +891,7 @@ describe("senseObserved forced staleness recheck", () => {
   const live = [{ id: "s1", group: "legate-workers", status: "idle" }];
   const prevIdle = () =>
     foldedState({
-      slices: { p: slice({ sliceId: "p", stage: "pr-open", sessionId: "s1", branch: "b", pr: { number: 7, updated_at: "T1", reviews: [], checks: "PASS", thread_count: 0 } }) },
+      slices: { p: slice({ sliceId: "p", stage: "pr-open", sessionId: "s1", branch: "b", pr: { number: 7, updated_at: "T1", reviews: [], is_draft: false, checks: "PASS", thread_count: 0 } }) },
     });
   const idleOpen = async () => new Map([[7, { updatedAt: "T1", headRefName: "b" }]]);
 

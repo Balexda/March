@@ -160,7 +160,7 @@ let dispatchFailures: Counter | undefined;
 let loopActions: Counter | undefined;
 let tickDuration: Histogram | undefined;
 let dependencyUnblock: Counter | undefined;
-let coderabbitRereview: Counter | undefined;
+let reviewRequests: Counter | undefined;
 
 // The observable gauges read this map — one snapshot PER PROFILE, updated on
 // every recordLoopHeartbeat. The single shared legate ticks each profile in turn
@@ -216,10 +216,8 @@ function ensureInstruments(meter: Meter): void {
     description: "Count of Dependabot conflict-unblock attempts by outcome",
     unit: "1",
   });
-  // The opt-in CodeRabbit re-review request, by bounded `outcome`
-  // ({@link CodeRabbitRereviewOutcome}).
-  coderabbitRereview = meter.createCounter("march.legate.coderabbit.rereview", {
-    description: "Count of CodeRabbit re-review requests by outcome",
+  reviewRequests = meter.createCounter("march.legate.review.requests", {
+    description: "Review request decisions by reviewer and outcome",
     unit: "1",
   });
   tickDuration = meter.createHistogram("march.legate.tick.duration", {
@@ -574,16 +572,12 @@ export function recordDependencyUnblock(outcome: DependencyUnblockOutcome, proce
   dependencyUnblock!.add(1, { outcome, ...(processor ? { processor } : {}) });
 }
 
-/** The bounded outcomes of a CodeRabbit re-review request — a metric label. */
-export type CodeRabbitRereviewOutcome = "requested" | "failed";
+export type ReviewRequestOutcome = "requested" | "failed" | "cap_exhausted" | "backoff";
 
-/**
- * Count one CodeRabbit re-review request outcome. `processor` is the profile's
- * loop name. No-op when telemetry is disabled.
- */
-export function recordCodeRabbitRereview(outcome: CodeRabbitRereviewOutcome, processor?: string): void {
+export function recordReviewRequest(reviewer: "coderabbit", outcome: ReviewRequestOutcome): void {
   const otel = getActiveOtel();
-  if (!otel.enabled) return;
+  if (!otel?.enabled) return;
   ensureInstruments(otel.getMeter());
-  coderabbitRereview!.add(1, { outcome, ...(processor ? { processor } : {}) });
+  reviewRequests!.add(1, { reviewer, outcome });
+  loopActions!.add(1, { action: outcome === "requested" ? "review-request" : "review-request-failed" });
 }

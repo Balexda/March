@@ -2,6 +2,7 @@
  * @l1 @deterministic @ci
  */
 import { describe, expect, it, vi } from "vitest";
+import { foldEventsMulti, type HeraldEvent, type ReviewRequestRecord } from "../../herald/events.js";
 import { runTick, type CoordinatorDeps } from "./coordinator.js";
 import type { HandlerContext, LoopState } from "./state/types.js";
 import { dispatchSliceId } from "./pure/dispatch-id.js";
@@ -56,6 +57,47 @@ function deps(state: LoopState, ctxOver: Partial<HandlerContext> = {}): Coordina
 }
 
 describe("coordinator runTick", () => {
+  it("uses durable CodeRabbit intent on a restarted tick and shares the daily cap", async () => {
+    const head = "a".repeat(40);
+    const events: HeraldEvent[] = [];
+    const commentOnPr = vi.fn(async () => {});
+    const appendIntent = async (record: ReviewRequestRecord) => {
+      events.push({
+        type: "review.requested", profile: "p", source: "legate",
+        seq: events.length + 1, id: String(events.length + 1), ts: record.at, ...record,
+      });
+    };
+    async function tick(time: string, sha: string) {
+      const state = makeState();
+      state.slices.merged.command = "smithy.forge";
+      state.mergePolicy = { reviewRequests: { byTaskType: { forge: { reviewers: [{ id: "coderabbit" }] } } } };
+      state.perSlice.merged.pr = {
+        number: 9, state: "OPEN", is_draft: false, checks: "PASS", head_sha: sha,
+        reviews_complete: true, reviews: [], coderabbit: null,
+        thread_count: 0, needs_response_count: 0, mergeable: "MERGEABLE", merge_state_status: "clean",
+      };
+      const d = deps(state, { ts: time });
+      const folded = foldEventsMulti(events);
+      d.coderabbitRereview = {
+        limits: { waitMs: 30 * 60_000, dailyCap: 3 },
+        history: { byProfile: { p: folded.byProfile.p?.reviewRequests ?? [] } },
+        appendIntent, commentOnPr, findTrigger: async () => undefined,
+      };
+      return (await runTick(d)).results.coderabbitRereview;
+    }
+
+    await tick(NOW, head);
+    await tick(NOW, head);
+    expect(commentOnPr).toHaveBeenCalledTimes(1);
+    await tick("2026-05-20T01:30:00Z", head);
+    await tick("2026-05-20T01:31:00Z", "b".repeat(40));
+    expect(events.map((event) => event.type === "review.requested" && event.reason))
+      .toEqual(["initial", "timeout_retry", "initial"]);
+    const refused = await tick("2026-05-20T01:32:00Z", "c".repeat(40));
+    expect(refused?.failures).toEqual([expect.objectContaining({ outcome: "cap_exhausted" })]);
+    expect(commentOnPr).toHaveBeenCalledTimes(3);
+  });
+
   it("archives a terminal-PR slice and threads the mutation so babysit can't re-see it", async () => {
     const state = makeState();
     const babysitSend = vi.fn();

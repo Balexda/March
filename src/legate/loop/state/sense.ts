@@ -470,7 +470,7 @@ export function shouldRefetchKnownPr(priorPr: any, live: OpenPrEntry | undefined
   // merge gate closed, so re-read it rather than wait for unrelated activity.
   if (priorPr?.reviews_complete === false) return true;
   // Refresh stored snapshots from before Herald began recording reviewer verdicts.
-  if (!Array.isArray(priorPr?.reviews)) return true;
+  if (!Array.isArray(priorPr?.reviews) || typeof priorPr?.is_draft !== "boolean") return true;
   // Activity since we last looked (comment / review / commit all bump updatedAt).
   if (live.updatedAt !== priorPr.updated_at) return true;
   // Lifecycle states whose changes updatedAt can miss (see the helpers above).

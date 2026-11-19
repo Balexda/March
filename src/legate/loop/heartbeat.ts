@@ -127,11 +127,11 @@ export function runHeartbeat(out: CoordinatorOutput, deps: HeartbeatDeps): any {
   // action-log ordering matches the handler order within the tick (#238).
   // coderabbit-rereview runs right after babysit; slice-scoped, so its events carry slice_id.
   for (const a of out.results.coderabbitRereview?.actions ?? []) {
-    event(meta.processor_events_path, { ...base, kind: "coderabbit_rereview", action: a.action, slice_id: a.sliceId, pr_number: a.pr?.number ?? null, pr_url: a.pr?.url ?? null, detail: a.detail });
+    event(meta.processor_events_path, { ...base, kind: "review_request", outcome: a.outcome, reason: a.reason, action: a.action, slice_id: a.sliceId, pr_number: a.pr?.number ?? null, pr_url: a.pr?.url ?? null, detail: a.detail });
     log("[" + ts + "] " + a.action + " " + a.sliceId + ": " + a.detail);
   }
   for (const failure of out.results.coderabbitRereview?.failures ?? []) {
-    event(meta.processor_events_path, { ...base, kind: "coderabbit_rereview_failure", action: failure.action, slice_id: failure.sliceId, pr_number: failure.pr?.number ?? null, pr_url: failure.pr?.url ?? null, detail: failure.detail });
+    event(meta.processor_events_path, { ...base, kind: "review_request", outcome: failure.outcome, reason: failure.reason, action: failure.action, slice_id: failure.sliceId, pr_number: failure.pr?.number ?? null, pr_url: failure.pr?.url ?? null, detail: failure.detail });
     log("[" + ts + "] " + failure.action + " " + failure.sliceId + ": " + failure.detail);
   }
   for (const a of out.results.recovery.actions) {

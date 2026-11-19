@@ -1,146 +1,179 @@
-/**
- * @l0 @deterministic @ci
- */
+/** @l0 @deterministic @ci */
 import { describe, expect, it, vi } from "vitest";
+import { emptyMultiProfileState, reduceMulti, type HeraldEvent, type ReviewRequestRecord } from "../../../herald/events.js";
+import { validateEvent } from "../../../herald/service/routes.js";
 import { reviewRequestBody } from "../../../observe/coderabbit-review.js";
-import { apply, REREVIEW_ACTION, REREVIEW_FAILED_ACTION, rereviewVerdict } from "./coderabbit-rereview.js";
+import { classifyReviewerComment } from "../../../observe/review-bot-comments.js";
+import { apply, reviewRequestLimits, type ReviewRequestHistory } from "./coderabbit-rereview.js";
+import type { HandlerContext, LoopState } from "../state/types.js";
 
-/** A PR the steward fixed after CodeRabbit asked for changes on an earlier head. */
-function fixedPr(overrides: Record<string, unknown> = {}): any {
-  return {
-    number: 543,
-    url: "https://github.com/o/r/pull/543",
-    state: "OPEN",
-    head_sha: "d8e383e000",
-    mergeable: "MERGEABLE",
-    merge_state_status: "blocked",
-    checks: "PASS",
-    needs_response_count: 0,
-    coderabbit: {
-      decision: "CHANGES_REQUESTED",
-      decision_commit_sha: "441db76000",
-      decision_at: "2026-11-16T09:37:00Z",
-      last_request_at: "2026-11-16T09:29:00Z",
-      last_request_sha: "441db76000",
-    },
-    ...overrides,
+const head = "a".repeat(40);
+const oldHead = "b".repeat(40);
+const at = "2026-11-16T23:00:00Z";
+const expired = "2026-11-16T23:30:00Z";
+const githubAt = "2026-11-16T22:59:59Z";
+const intent = { sliceId: "s", pr: 42, reviewer: "coderabbit", headSha: head, at, reason: "initial" } as const;
+
+function fixture({
+  pr = {},
+  command = "smithy.forge",
+  mode = "comment-trigger" as "auto" | "comment-trigger",
+  history = { byProfile: {} } as ReviewRequestHistory,
+  cap = Infinity,
+  time = at,
+} = {}) {
+  const ctx = { ts: time, meta: { profile: "p" } } as HandlerContext;
+  const state = {
+    repoPath: "/repo",
+    mergePolicy: { reviewRequests: { byTaskType: { forge: { reviewers: [{ id: "coderabbit", mode }] } } } },
+    slices: { s: { stage: "pr-open", command } },
+    perSlice: { s: { pr: {
+      number: 42, head_sha: head, state: "OPEN", is_draft: false, checks: "PASS",
+      reviews_complete: true, reviews: [], coderabbit: null, thread_count: 0,
+      mergeable: "MERGEABLE", merge_state_status: "clean", ...pr,
+    } } },
+  } as unknown as LoopState;
+  const deps = {
+    history, limits: { dailyCap: cap, waitMs: 30 * 60_000 },
+    appendIntent: vi.fn<(record: ReviewRequestRecord) => Promise<void>>().mockResolvedValue(undefined),
+    findTrigger: vi.fn().mockResolvedValue(undefined),
+    commentOnPr: vi.fn().mockResolvedValue(undefined),
   };
+  return { tick: () => apply(ctx, state, deps), ctx, deps, state };
 }
-const openSlice = { stage: "pr-open" };
 
-describe("rereviewVerdict", () => {
-  it("requests once the steward has pushed past CodeRabbit's changes-requested review", () => {
-    expect(rereviewVerdict(openSlice, fixedPr())).toEqual({ request: true, kind: "rereview" });
+describe("CodeRabbit review requests", () => {
+  it("appends before posting and excludes the incremental trigger from fix work", async () => {
+    const { tick, deps } = fixture();
+    expect((await tick()).actions).toEqual([expect.objectContaining({ action: "review-request", reason: "initial" })]);
+    expect(deps.appendIntent).toHaveBeenCalledWith({ ...intent, at: new Date(at).toISOString() });
+    expect(deps.appendIntent.mock.invocationCallOrder[0]).toBeLessThan(deps.commentOnPr.mock.invocationCallOrder[0]);
+    const body = reviewRequestBody(head);
+    expect(body).toBe(`@coderabbitai review\n\n<!-- march-coderabbit-request:${head} -->`);
+    expect(deps.commentOnPr).toHaveBeenCalledWith("/repo", 42, body, "s");
+    expect(classifyReviewerComment({ body }).kind).toBe("trigger");
+    await tick();
+    expect(deps.commentOnPr).toHaveBeenCalledTimes(1);
   });
 
   it.each([
-    ["steward-busy", { stage: "pr-in-fix" }, {}],
-    ["no-open-pr", openSlice, { state: "MERGED" }],
-    ["not-changes-requested", openSlice, { coderabbit: { decision: "APPROVED", decision_commit_sha: "441db76000" } }],
-    ["not-changes-requested", openSlice, { coderabbit: null }],
-    ["head-already-reviewed", openSlice, { head_sha: "441db76000" }],
-    ["threads-owed", openSlice, { needs_response_count: 2 }],
-    ["conflicted", openSlice, { mergeable: "CONFLICTING" }],
-    ["ci-failing", openSlice, { checks: "FAIL" }],
-  ])("holds off: %s", (reason, slice, overrides) => {
-    expect(rereviewVerdict(slice, fixedPr(overrides))).toEqual({ request: false, reason });
+    { checks: "NONE" }, { checks: "FAIL" }, { checks: "PENDING" }, { is_draft: true },
+    { state: "CLOSED" }, { reviews_complete: false }, { error: "stale" },
+    { coderabbit: { decision: "APPROVED", decision_commit_sha: head } },
+    { coderabbit: { decision: "CHANGES_REQUESTED", decision_commit_sha: head } },
+    { reviewer_notices: [{ reviewer: "coderabbit", kind: "in_progress", head_sha: head, created_at: at }] },
+  ])("holds for %j", async (pr) => {
+    const { tick, deps } = fixture({ pr });
+    await tick();
+    expect(deps.appendIntent).not.toHaveBeenCalled();
   });
 
-  it("does not ask twice for one head: warm memo, or a marked request on GitHub naming the head", () => {
-    expect(rereviewVerdict(openSlice, fixedPr(), "d8e383e000")).toEqual({ request: false, reason: "already-requested" });
-    const asked = fixedPr({ coderabbit: { ...fixedPr().coderabbit, last_request_sha: "d8e383e000" } });
-    expect(rereviewVerdict(openSlice, asked)).toEqual({ request: false, reason: "already-requested" });
-    // A later push re-arms it.
-    expect(rereviewVerdict(openSlice, fixedPr({ head_sha: "e0e0e0e", coderabbit: asked.coderabbit }))).toEqual({ request: true, kind: "rereview" });
+  it("holds on non-forge and auto-mode PRs", async () => {
+    for (const options of [{ command: "smithy.cut" }, { mode: "auto" as const }]) {
+      const { tick, deps } = fixture(options);
+      await tick();
+      expect(deps.commentOnPr).not.toHaveBeenCalled();
+    }
   });
 
-  it("is not fooled by commit time: a request posted for the old head never covers a later-pushed head", () => {
-    // Fix committed before the request but pushed after it (Codex's P2 on #586).
-    const pr = fixedPr({ coderabbit: { ...fixedPr().coderabbit, last_request_at: "2026-11-16T15:30:00Z", last_request_sha: "441db76000" } });
-    expect(rereviewVerdict(openSlice, pr)).toEqual({ request: true, kind: "rereview" });
+  it("fails closed when append fails and retains intent after an ambiguous post", async () => {
+    const { tick, deps } = fixture();
+    deps.appendIntent.mockRejectedValueOnce(new Error("Herald down"));
+    expect((await tick()).failures[0].action).toBe("review-request-failed");
+    expect(deps.commentOnPr).not.toHaveBeenCalled();
+    deps.commentOnPr.mockRejectedValueOnce(new Error("timeout"));
+    expect((await tick()).failures[0].outcome).toBe("failed");
+    await tick();
+    expect(deps.commentOnPr).toHaveBeenCalledTimes(1);
   });
-});
 
-describe("rereviewVerdict: first review", () => {
-  const both = { rereview: true, initialReview: true };
-  const fresh = (overrides: Record<string, unknown> = {}) => fixedPr({ coderabbit: null, ...overrides });
+  it("rebuilds attempts from the fold, retries after the wait and stops at the global cap", async () => {
+    const events = [
+      { ...intent, profile: "other" },
+      { ...intent, profile: "p" },
+    ];
+    const fold = emptyMultiProfileState();
+    for (const [index, record] of events.entries()) {
+      reduceMulti(fold, { ...record, type: "review.requested", seq: index + 1 } as HeraldEvent);
+    }
+    const history = { byProfile: Object.fromEntries(Object.entries(fold.byProfile)
+      .map(([profile, state]) => [profile, state.reviewRequests!])) };
+    const fresh = fixture({ history, time: "2026-11-16T23:29:59Z" });
+    await fresh.tick();
+    expect(fresh.deps.commentOnPr).not.toHaveBeenCalled();
 
-  it("asks for a first review when CodeRabbit never reviewed and was never asked", () => {
-    expect(rereviewVerdict(openSlice, fresh(), undefined, both)).toEqual({ request: true, kind: "initial" });
-    // Asked before an earlier head, never answered: the new head re-arms it.
-    const askedEarlier = { decision: null, decision_commit_sha: null, decision_at: null, last_review_commit_sha: null, last_request_at: "2026-11-16T09:00:00Z", last_request_sha: "0ld0000" };
-    expect(rereviewVerdict(openSlice, fresh({ coderabbit: askedEarlier }), undefined, both)).toEqual({ request: true, kind: "initial" });
+    const retry = fixture({ history, time: expired, cap: 3 });
+    expect((await retry.tick()).actions[0].reason).toBe("timeout_retry");
+    await retry.tick();
+    expect(retry.deps.commentOnPr).toHaveBeenCalledTimes(1);
+    const capped = fixture({ history, pr: { number: 43 }, time: expired, cap: 3 });
+    expect((await capped.tick()).failures[0].outcome).toBe("cap_exhausted");
+    expect(capped.deps.commentOnPr).not.toHaveBeenCalled();
+    const tomorrow = fixture({ history, pr: { number: 43 }, cap: 3, time: "2026-11-17T00:00:00Z" });
+    expect((await tomorrow.tick()).actions).toHaveLength(1);
+  });
+
+  it("re-requests an unanswered intent superseded by a push, even with a thread reply on the new head", async () => {
+    const history = { byProfile: { p: [{ ...intent, headSha: oldHead }] } };
+    const coderabbit = { review_times_by_head: { [head]: githubAt }, trigger_times_by_head: { [oldHead]: githubAt } };
+    const pr = { coderabbit, reviewer_notices: [{ reviewer: "coderabbit", kind: "in_progress", head_sha: oldHead, created_at: at }] };
+    const blocked = fixture({ history, pr: { ...pr, thread_count: 1 } });
+    await blocked.tick();
+    expect(blocked.deps.commentOnPr).not.toHaveBeenCalled();
+    expect((await fixture({ history, pr }).tick()).actions[0].reason).toBe("initial");
   });
 
   it.each([
-    ["mode off", fresh(), { rereview: true, initialReview: false }, "not-changes-requested"],
-    ["already asked at this head", fresh({ coderabbit: { decision: null, decision_commit_sha: null, decision_at: null, last_review_commit_sha: null, last_request_at: "2026-11-16T15:30:00Z", last_request_sha: "d8e383e000" } }), both, "already-requested"],
-    ["reviewed with COMMENTED only", fresh({ coderabbit: { decision: null, decision_commit_sha: null, decision_at: null, last_review_commit_sha: "abc", last_request_at: null } }), both, "not-changes-requested"],
-    ["approved", fresh({ coderabbit: { decision: "APPROVED", decision_commit_sha: "abc", decision_at: "x", last_review_commit_sha: "abc", last_request_at: null } }), both, "not-changes-requested"],
-    ["standing not sensed (older snapshot or failed query)", fixedPr({ coderabbit: undefined }), both, "not-sensed"],
-    ["threads owed", fresh({ needs_response_count: 1 }), both, "threads-owed"],
-    ["CI failing", fresh({ checks: "FAIL" }), both, "ci-failing"],
-  ])("holds off: %s", (_label, pr, modes, reason) => {
-    expect(rereviewVerdict(openSlice, pr, undefined, modes)).toEqual({ request: false, reason });
+    { decision: "CHANGES_REQUESTED", expected: "stale_changes_requested" },
+    { decision: "APPROVED", expected: "stale_approval" },
+    { decision: "DISMISSED", expected: "stale_approval" },
+  ])("requests for a qualifying $decision after a push", async ({ decision, expected }) => {
+    const coderabbit = { decision, decision_commit_sha: oldHead, decision_is_bot: true, review_times_by_head: { [head]: githubAt } };
+    const pr = { coderabbit };
+    expect((await fixture({ pr }).tick()).actions[0].reason).toBe(expected);
+    expect((await fixture({ pr: { ...pr, mergeable: "CONFLICTING" } }).tick()).actions).toHaveLength(0);
   });
 
-  it("first-review mode alone does not re-review a changes-requested PR", () => {
-    expect(rereviewVerdict(openSlice, fixedPr(), undefined, { rereview: false, initialReview: true })).toEqual({
-      request: false,
-      reason: "not-changes-requested",
+  it.each([
+    { reviewedAt: githubAt, posts: false },
+    { reviewedAt: "2026-11-16T22:59:58Z", posts: true },
+    { reviewedAt: undefined, posts: true },
+  ])("checks raw review time against the full GitHub trigger lookup: %j", async ({ reviewedAt, posts }) => {
+    const run = fixture({
+      history: { byProfile: { p: [intent] } }, time: expired,
+      pr: { coderabbit: { review_times_by_head: { [head]: reviewedAt } } },
     });
-  });
-});
-
-function state(prBySlice: Record<string, any>, policy: any = { codeRabbit: { rereview: true } }): any {
-  const slices: Record<string, any> = {};
-  const perSlice: Record<string, any> = {};
-  for (const [id, pr] of Object.entries(prBySlice)) {
-    slices[id] = { stage: "pr-open" };
-    perSlice[id] = { pr };
-  }
-  return { raw: {}, slices, perSlice, repoPath: "/repo", mergePolicy: policy };
-}
-const ctx: any = { ts: "2026-11-16T16:00:00Z" };
-
-describe("apply", () => {
-  it("is inert unless the profile opts in", async () => {
-    const commentOnPr = vi.fn();
-    const res = await apply(ctx, state({ s: fixedPr() }, { dependencyUpdates: { autoMerge: true } }), { commentOnPr });
-    expect(commentOnPr).not.toHaveBeenCalled();
-    expect(res.actions).toEqual([]);
-    expect((await apply(ctx, state({ s: fixedPr() }), undefined)).actions).toEqual([]);
+    run.deps.findTrigger.mockResolvedValueOnce(githubAt);
+    await run.tick();
+    expect(run.deps.findTrigger).toHaveBeenCalledWith("/repo", 42, head, "s");
+    expect(run.deps.commentOnPr).toHaveBeenCalledTimes(Number(posts));
   });
 
-  it("comments `@coderabbitai review` once per head and records the action", async () => {
-    const commentOnPr = vi.fn().mockResolvedValue(undefined);
-    const st = state({ s: fixedPr(), done: fixedPr({ number: 7, head_sha: "441db76000" }) });
-    const res = await apply(ctx, st, { commentOnPr });
-    expect(commentOnPr).toHaveBeenCalledTimes(1);
-    expect(commentOnPr).toHaveBeenCalledWith("/repo", 543, reviewRequestBody("d8e383e000"), "s");
-    expect(res.actions).toEqual([expect.objectContaining({ action: REREVIEW_ACTION, sliceId: "s", pr: { number: 543, url: fixedPr().url } })]);
-    // Same head on the next tick: no second comment.
-    await apply(ctx, st, { commentOnPr });
-    expect(commentOnPr).toHaveBeenCalledTimes(1);
+  it("holds when the missing trigger lookup is incomplete", async () => {
+    const run = fixture({ history: { byProfile: { p: [intent] } }, time: expired });
+    run.deps.findTrigger.mockRejectedValueOnce(new Error("page failed"));
+    expect((await run.tick()).failures[0].outcome).toBe("failed");
+    expect(run.deps.commentOnPr).not.toHaveBeenCalled();
   });
 
-  it("makes the first request when only initialReview is on", async () => {
-    const commentOnPr = vi.fn().mockResolvedValue(undefined);
-    const st = state({ s: fixedPr({ coderabbit: null }), cr: fixedPr({ number: 9 }) }, { codeRabbit: { initialReview: true } });
-    const res = await apply(ctx, st, { commentOnPr });
-    expect(commentOnPr).toHaveBeenCalledTimes(1);
-    expect(commentOnPr).toHaveBeenCalledWith("/repo", 543, reviewRequestBody("d8e383e000"), "s");
-    expect(res.actions).toEqual([
-      expect.objectContaining({ action: REREVIEW_ACTION, sliceId: "s", detail: expect.stringContaining("first review of PR #543") }),
-    ]);
+  it("observes back-off and refuses a zero cap", async () => {
+    const backedOff = fixture({ history: { byProfile: {}, backoffUntil: expired } });
+    expect((await backedOff.tick()).failures[0].outcome).toBe("backoff");
+    const disabled = fixture({ cap: 0 });
+    expect((await disabled.tick()).failures[0].outcome).toBe("cap_exhausted");
+    expect(disabled.deps.appendIntent).not.toHaveBeenCalled();
   });
 
-  it("records a failed comment and does not retry it for the same head", async () => {
-    const commentOnPr = vi.fn().mockRejectedValue(new Error("HTTP 403"));
-    const st = state({ s: fixedPr() });
-    const res = await apply(ctx, st, { commentOnPr });
-    expect(res.failures).toEqual([expect.objectContaining({ action: REREVIEW_FAILED_ACTION, sliceId: "s", detail: expect.stringContaining("HTTP 403") })]);
-    await apply(ctx, st, { commentOnPr });
-    expect(commentOnPr).toHaveBeenCalledTimes(1);
+  it("validates the ledger payload and falls back for invalid settings", () => {
+    const body = { ...intent, type: "review.requested" };
+    expect(validateEvent(body).ok).toBe(true);
+    for (const change of [{ reviewer: "other" }, { reason: "unknown" }, { headSha: "abc123" },
+      { at: "2026-02-30T10:00:00Z" }, { at: "2026-11-16" }, { pr: -1 }]) {
+      expect(validateEvent({ ...body, ...change }).ok).toBe(false);
+    }
+    const warn = vi.fn();
+    expect(reviewRequestLimits({ MARCH_CODERABBIT_REVIEWS_PER_DAY: "-1", MARCH_REVIEW_WAIT_MINUTES: "0" }, warn))
+      .toEqual({ waitMs: 1_800_000, dailyCap: Infinity });
+    expect(warn).toHaveBeenCalledTimes(2);
   });
 });

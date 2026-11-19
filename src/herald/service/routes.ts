@@ -12,7 +12,7 @@ import {
 } from "../../observability/herald-metrics.js";
 import { createCastraClientFromEnv } from "../../castra/client.js";
 import type { EventStore } from "./store.js";
-import type { AppendEventInput, EventType } from "../events.js";
+import { REVIEW_REQUEST_REASONS, type AppendEventInput, type EventType } from "../events.js";
 
 /** Snapshot of the server's last observe tick, surfaced on `/status`. */
 export interface ObserveStatus {
@@ -52,6 +52,7 @@ const EVENT_TYPES: ReadonlySet<EventType> = new Set<EventType>([
   "heartbeat",
   "state.error",
   "state.ok",
+  "review.requested",
   "slice.pr.changed",
   "slice.output.changed",
   "session.changed",
@@ -72,6 +73,7 @@ const EVENT_TYPES: ReadonlySet<EventType> = new Set<EventType>([
 
 /** Slice-keyed event types that require a non-empty `sliceId`. */
 const SLICE_TYPES: ReadonlySet<string> = new Set([
+  "review.requested",
   "slice.pr.changed",
   "slice.output.changed",
   "slice.dispatched",
@@ -181,6 +183,19 @@ export function validateEvent(body: Record<string, unknown>): EventValidation {
       if (body[field] !== undefined && typeof body[field] !== "string") {
         return { ok: false, error: `event "${type}" ${field} must be a string.` };
       }
+    }
+  }
+  if (type === "review.requested") {
+    const { pr, reviewer, headSha, at, reason } = body;
+    if (typeof body.sliceId !== "string" || !body.sliceId.trim() ||
+        typeof pr !== "number" || !Number.isSafeInteger(pr) || pr < 1 ||
+        (reviewer !== "coderabbit" && reviewer !== "copilot") ||
+        typeof headSha !== "string" || !/^[a-f0-9]{40}$/i.test(headSha) ||
+        typeof at !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/.test(at) ||
+        !Number.isFinite(Date.parse(at)) ||
+        new Date(at).toISOString().slice(0, 19) !== at.slice(0, 19) ||
+        !REVIEW_REQUEST_REASONS.some((candidate) => candidate === reason)) {
+      return { ok: false, error: "invalid review request PR, reviewer, headSha, UTC timestamp or reason." };
     }
   }
   return { ok: true, input: { ...(body as object), source: "legate" } as AppendEventInput };

@@ -14,14 +14,12 @@
  *   current head, and must not read as "head already reviewed".
  * - `last_review_commit_sha`: the commit CodeRabbit's newest review of any state
  *   (thread replies included) is on, or `null` when it has never reviewed the
- *   PR. The first-review request fires only while this is `null`.
+ *   PR.
  * - `last_request_at`: when the newest conversation comment opening with
  *   `@coderabbitai review` (or `full review`) was posted, by anyone.
- * - `last_request_sha`: the head SHA named by the newest request the legate
- *   posted. Its request carries a `march-coderabbit-request:<sha>` marker, so
- *   "this head was already put forward" survives a legate restart without
- *   guessing from timestamps (a commit's date says nothing about when it was
- *   pushed). A human's unmarked request names no head and is not counted.
+ * - `last_request_sha`: the head named by the newest sampled March trigger.
+ * - `review_times_by_head` and `trigger_times_by_head`: the latest raw review
+ *   and earliest sampled marked trigger per head, from GitHub timestamps.
  *
  * Pure, so it is unit-testable without `gh`.
  */
@@ -43,7 +41,15 @@ export function reviewRequestBody(headSha: string): string {
   return `${CODERABBIT_REVIEW_COMMAND}\n\n<!-- march-coderabbit-request:${headSha} -->`;
 }
 
+export function markedCodeRabbitHead(body: unknown): string | undefined {
+  return isCodeRabbitReviewRequest(body)
+    ? REQUEST_MARKER_RE.exec(String(body))?.[1]?.toLowerCase()
+    : undefined;
+}
+
 export interface CodeRabbitStanding {
+  review_times_by_head?: Record<string, string>;
+  trigger_times_by_head?: Record<string, string>;
   decision: "APPROVED" | "CHANGES_REQUESTED" | "DISMISSED" | null;
   decision_commit_sha: string | null;
   /** Set only when the full review list establishes the latest bot verdict. */
@@ -79,10 +85,19 @@ export function summarizeCodeRabbit(
 ): CodeRabbitStanding | null {
   const reviews = Array.isArray(reviewNodes) ? reviewNodes : [];
   const comments = Array.isArray(commentNodes) ? commentNodes : [];
+  const reviewTimes: Record<string, string> = {};
+  const triggerTimes: Record<string, string> = {};
   let decisive: any = null;
   let latest: any = null;
   for (const r of reviews) {
     if (!CODERABBIT_LOGINS.has(String(r?.author?.login || ""))) continue;
+    const oid = r?.commit?.oid;
+    const sha = typeof oid === "string" ? oid.toLowerCase() : undefined;
+    const at = r?.submittedAt;
+    if (typeof sha === "string" && /^[a-f0-9]{40}$/.test(sha) &&
+        typeof at === "string" && Date.parse(at) > Date.parse(reviewTimes[sha] ?? "1970-01-01")) {
+      reviewTimes[sha] = at;
+    }
     if (!latest || String(r?.submittedAt) >= String(latest?.submittedAt)) latest = r;
     if (!DECISIVE.has(String(r?.state))) continue;
     if (!decisive || String(r?.submittedAt) >= String(decisive?.submittedAt)) decisive = r;
@@ -92,11 +107,16 @@ export function summarizeCodeRabbit(
   for (const c of comments) {
     if (!isCodeRabbitReviewRequest(c?.body) || typeof c?.createdAt !== "string") continue;
     if (lastRequestAt === null || c.createdAt > lastRequestAt) lastRequestAt = c.createdAt;
-    const sha = REQUEST_MARKER_RE.exec(c.body)?.[1];
+    const sha = markedCodeRabbitHead(c.body);
+    if (sha && (!triggerTimes[sha] || Date.parse(c.createdAt) < Date.parse(triggerTimes[sha]))) {
+      triggerTimes[sha] = c.createdAt;
+    }
     if (sha && (!lastMarked || c.createdAt > lastMarked.at)) lastMarked = { at: c.createdAt, sha };
   }
   if (!latest && lastRequestAt === null) return null;
   return {
+    ...(Object.keys(reviewTimes).length ? { review_times_by_head: reviewTimes } : {}),
+    ...(Object.keys(triggerTimes).length ? { trigger_times_by_head: triggerTimes } : {}),
     decision: decisive ? (decisive.state as CodeRabbitStanding["decision"]) : null,
     decision_commit_sha: typeof decisive?.commit?.oid === "string" ? decisive.commit.oid : null,
     ...(reviewsComplete && isBotActor(decisive?.author) ? { decision_is_bot: true as const } : {}),
