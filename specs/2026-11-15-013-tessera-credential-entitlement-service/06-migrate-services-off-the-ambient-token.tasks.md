@@ -20,7 +20,7 @@ Each slice validates its normal entry point against fakes with no live GitHub tr
 
 ### Tasks
 
-- [ ] **Authenticate Herald observation and default-branch sync**
+- [x] **Authenticate Herald observation and default-branch sync**
 
   Route Herald's `src/herald/service/server.ts` observation dependencies through the shared Tessera client at the `src/observe/sense-io.ts` GitHub boundary. Apply the same scope to the network git operations in AS 6.1.
 
