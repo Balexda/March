@@ -32,7 +32,8 @@ Babysit uses Herald's feedback classification for both operator- and app-authore
 PRs. After successfully sending a fix for inline or conversation feedback,
 Legate records the handled comment IDs in the Herald stage transition. A restart
 restores those IDs and the latest fix dispatch context from the fold, so a
-parked worker still gets the bounded nudge and escalation, and a distinct
+parked worker still gets the bounded nudge, review-fix escalation and the
+comment-fix steward-stuck escalation, and a distinct
 external reply can still trigger a fix.
 
 Legate resolves the GitHub repository from the profile checkout's origin

@@ -242,9 +242,15 @@ export function entityRefOf(body: EventBody): EntityRef {
 }
 
 /** Comment IDs a successful Legate fix dispatch handled. `dispatchKey` is that
- *  dispatch's action key, so a restart restores the dispatch context the bounded
- *  post-dispatch nudge and escalation depend on. */
-export type HandledFeedback = { kind: "inline" | "conversation"; commentIds: string[]; dispatchKey?: string };
+ *  dispatch's action key and `headSha` the PR head it was sent against, so a
+ *  restart restores the dispatch context the bounded post-dispatch nudge and the
+ *  steward-stuck escalation depend on. */
+export type HandledFeedback = {
+  kind: "inline" | "conversation";
+  commentIds: string[];
+  dispatchKey?: string;
+  headSha?: string;
+};
 
 /** Per-slice projected state — observed facts merged with legate-owned stage. */
 export interface SliceState {
@@ -265,7 +271,7 @@ export interface SliceState {
   pr?: unknown;
   handledFeedback?: Partial<Record<HandledFeedback["kind"], string[]>>;
   /** The latest feedback fix dispatch (kind, action key, event time). */
-  lastFeedbackDispatch?: { kind: HandledFeedback["kind"]; key: string; at: string };
+  lastFeedbackDispatch?: { kind: HandledFeedback["kind"]; key: string; at: string; headSha?: string };
   recentOutput?: { output: string; error?: string };
   archived?: boolean;
   escalatedReason?: string;
@@ -513,8 +519,9 @@ export function reduce(state: SystemState, event: HeraldEvent): SystemState {
         const { kind, commentIds } = event.handledFeedback;
         const handled = (slice.handledFeedback ??= {});
         handled[kind] = [...new Set([...(handled[kind] ?? []), ...commentIds])];
-        if (event.handledFeedback.dispatchKey) {
-          slice.lastFeedbackDispatch = { kind, key: event.handledFeedback.dispatchKey, at: event.ts };
+        const { dispatchKey, headSha } = event.handledFeedback;
+        if (dispatchKey) {
+          slice.lastFeedbackDispatch = { kind, key: dispatchKey, at: event.ts, ...(headSha ? { headSha } : {}) };
         }
       }
       break;

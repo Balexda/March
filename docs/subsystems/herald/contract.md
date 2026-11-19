@@ -17,9 +17,10 @@ whose latest reply is from March has no response due.
 
 A Legate `slice.stage.changed` event may include `handledFeedback` with a
 `kind` of `inline` or `conversation` and an array of string `commentIds`.
-An optional string `dispatchKey` names the fix dispatch that handled them.
-The fold accumulates the IDs per slice and kind, and keeps the latest dispatch
-(kind, key and event time), for Legate to restore on restart.
+An optional string `dispatchKey` names the fix dispatch that handled them, and
+an optional string `headSha` records the PR head it was sent against. The fold
+accumulates the IDs per slice and kind, and keeps the latest dispatch (kind,
+key, event time and head SHA), for Legate to restore on restart.
 
 `MARCH_HERALD_SYNC=1` enables default-branch synchronization before observation.
 Herald fetches and pulls over HTTPS with the same repository entitlement and

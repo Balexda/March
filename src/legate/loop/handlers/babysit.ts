@@ -963,7 +963,10 @@ export async function apply(decisions: BabysitDecision[], ctx: HandlerContext, s
         markCommentFixSeen(slice, d.commentIds || []);
         ctx.emitTransition?.({
           type: "slice.stage.changed", sliceId: d.sliceId, stage: "pr-in-fix",
-          handledFeedback: { kind: "conversation", commentIds: d.commentIds || [], dispatchKey: d.key },
+          handledFeedback: {
+            kind: "conversation", commentIds: d.commentIds || [], dispatchKey: d.key,
+            ...(d.pr?.head_sha ? { headSha: String(d.pr.head_sha) } : {}),
+          },
         });
         // Acknowledge dispatch visibly on GitHub. Reactions run concurrently
         // and a failed reaction leaves the folded IDs available for dedup.

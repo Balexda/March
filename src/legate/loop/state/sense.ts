@@ -287,6 +287,10 @@ export function rebuildWorkingState(sys: SystemState, meta: LoopMeta): any {
       slice.last_processor_action = s.lastFeedbackDispatch.kind === "inline" ? "review-fix" : "comment-fix";
       slice.last_processor_action_key = s.lastFeedbackDispatch.key;
       slice.last_processor_action_at = s.lastFeedbackDispatch.at;
+      // The steward-stuck check compares the live head against this baseline.
+      if (s.lastFeedbackDispatch.kind === "conversation") {
+        slice.comment_fix_head_sha = s.lastFeedbackDispatch.headSha ?? null;
+      }
     }
     if (s.escalatedReason !== undefined) {
       slice.last_action_note = s.escalatedReason;

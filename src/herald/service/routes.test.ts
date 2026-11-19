@@ -27,6 +27,8 @@ describe("validateEvent", () => {
     const stage = { type: "slice.stage.changed", sliceId: "s1", stage: "pr-in-fix" };
     expect(validateEvent({ ...stage, handledFeedback: { kind: "inline", commentIds: ["1"], dispatchKey: "k" } })).toMatchObject({ ok: true });
     expect(validateEvent({ ...stage, handledFeedback: { kind: "inline", commentIds: ["1"], dispatchKey: 3 } })).toMatchObject({ ok: false });
+    expect(validateEvent({ ...stage, handledFeedback: { kind: "conversation", commentIds: ["1"], headSha: "abc" } })).toMatchObject({ ok: true });
+    expect(validateEvent({ ...stage, handledFeedback: { kind: "conversation", commentIds: ["1"], headSha: 1 } })).toMatchObject({ ok: false });
     expect(validateEvent({ ...stage, handledFeedback: { kind: "other", commentIds: ["1"] } })).toMatchObject({ ok: false });
   });
   it("requires session.id for session.changed", () => {

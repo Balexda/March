@@ -289,6 +289,19 @@ describe("senseFromHerald (Stage 1, Herald-backed)", () => {
 });
 
 describe("rebuildWorkingState", () => {
+  it("restores the comment-fix head baseline so steward-stuck escalation still fires after a restart", () => {
+    const sys = reduce(emptySystemState(), {
+      source: "legate", profile: "p", id: "e", seq: 1, ts: "2026-05-20T00:00:00Z",
+      type: "slice.stage.changed", sliceId: "s", stage: "pr-in-fix",
+      handledFeedback: { kind: "conversation", commentIds: ["7"], dispatchKey: "comment-fix:1", headSha: "abc123" },
+    } as HeraldEvent);
+    expect(rebuildWorkingState(sys, meta).slices.s).toMatchObject({
+      last_processor_action: "comment-fix",
+      last_processor_action_at: "2026-05-20T00:00:00Z",
+      comment_fix_head_sha: "abc123",
+    });
+  });
+
   it("restores handled feedback and the latest fix dispatch context so a parked worker is still nudged", () => {
     const envelope = { source: "legate", profile: "p", id: "e", seq: 0 } as const;
     const events = [
