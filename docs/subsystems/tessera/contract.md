@@ -64,7 +64,7 @@ configuration variable and, for invalid entries, the row number.
 
 | Route | Behavior |
 | --- | --- |
-| `GET /healthz` | Unauthenticated `200 {"status":"ok"}`, including unconfigured startup. |
+| `GET /healthz` | Unauthenticated `200 {"status":"ok"}`, including unconfigured and degraded providers. |
 | `GET /status` | Unauthenticated service/uptime, provider states, soonest expiry and cache entry count. Never credentials or policy. |
 | `POST /v1/github/token` | Authenticated callers with an explicit matching grant can request a token. An App token is scoped to one `owner/name`. |
 
@@ -109,6 +109,8 @@ errored. Spans omit repository, expiry and subject.
 | `march.tessera.mint.duration` | Milliseconds per upstream mint attempt, including failures | `provider`, `outcome` |
 | `march.tessera.github.rate_limit_remaining` | Latest valid GitHub remaining-budget header | `provider` |
 | `march.tessera.github.secondary_limits` | Count of GitHub responses indicating a secondary limit | `provider` |
+| `march.tessera.credential.expiry_remaining` | Whole seconds until known credential expiry, floored at zero | `provider` |
+| `march.tessera.credential.expiry_warning` | 1 at 14 days or less, otherwise 0 for known expiry | `provider` |
 
 Cache hits and callers sharing a mint add no mint samples. Rate-limit
 measurements use responses from discovery, installation lookup and minting.
@@ -119,6 +121,18 @@ Metrics use the same OTel gate as spans. Audit logs remain enabled independently
 Providers implement `start`, `issue`, and `status` behind `CredentialProvider`.
 The registry always exposes `github-app` and `github-user`; a slot without an
 implementation reports `unconfigured`. The user provider is reserved for US7.
+Tessera checks both provider records at startup, every minute, and on
+`GET /status`. The response reports the earliest known provider expiry as
+`soonest_expiry`, or null when expiry is unknown for both providers. App key
+expiry is unknown. Cached App installation tokens count toward `cache.entries`
+and their expiry is tracked separately.
+
+A known expiry at 14 days or less sets `expiry_warning` and emits a
+`tessera.expiry_warning` log at most once per 24 hours per credential in
+the running service. Providers can supply an internal revision marker to
+identify replacement credentials that share an expiry. Status exposes only
+typed error codes. Unknown expiry produces no expiry metric sample, so the
+March — Tessera dashboard can distinguish it from zero seconds remaining.
 
 The App provider caches successful installation bindings by owner and keeps
 tokens in memory by installation, repository and fixed permission set. Requests
