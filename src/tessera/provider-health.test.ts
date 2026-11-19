@@ -94,3 +94,38 @@ it("checks expiry without traffic and reports only safe provider status and boun
     await meterProvider.shutdown();
   }
 });
+
+it("re-arms the expiry warning when an unrevisioned credential changes, even between warnings", async () => {
+  vi.useFakeTimers({ toFake: ["Date", "setInterval", "clearInterval"] });
+  vi.setSystemTime(new Date("2026-11-19T00:00:00Z"));
+  const stream = new PassThrough();
+  const warnings: Array<{ credential_expires_at: string }> = [];
+  stream.on("data", chunk => warnings.push(JSON.parse(chunk.toString())));
+  const userStatus: ProviderStatus = {
+    provider: "github-user", state: "ok", login: "octocat",
+    credential_expires_at: "2026-11-29T00:00:00Z", expiry_warning: false, last_error: null,
+  };
+  const app = buildTesseraServer({
+    providers: [fakeProvider("user", () => userStatus)],
+    logger: pino({}, stream),
+  });
+  try {
+    await app.ready();
+    expect(warnings).toHaveLength(1);
+
+    userStatus.credential_expires_at = "2026-12-19T00:00:00Z";
+    vi.advanceTimersByTime(60_000);
+    expect(warnings).toHaveLength(1);
+
+    userStatus.credential_expires_at = "2026-11-29T00:00:00Z";
+    vi.advanceTimersByTime(60_000);
+    expect(warnings).toHaveLength(2);
+    expect(warnings[1]!.credential_expires_at).toBe("2026-11-29T00:00:00.000Z");
+
+    vi.advanceTimersByTime(60_000);
+    expect(warnings).toHaveLength(2);
+  } finally {
+    await app.close();
+    vi.useRealTimers();
+  }
+});

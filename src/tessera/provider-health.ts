@@ -10,7 +10,11 @@ const LOGIN = /^[a-z0-9](?:[a-z0-9-]{0,37}[a-z0-9])?(?:\[bot\])?$/i;
 const RFC3339 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/i;
 
 export function monitorProviderHealth(app: FastifyInstance, registry: ProviderRegistry, startedAt: number): () => TesseraStatus {
-  const lastWarnings = new Map<TesseraProviderId, { expiry: number; revision?: object; at: number }>();
+  // Last observed credential per provider (updated on every successful check) and
+  // the time a warning was last emitted for it. A change in the observation
+  // re-arms the warning; an unchanged credential keeps daily suppression.
+  const observed = new Map<TesseraProviderId, { expiry: number; revision?: object }>();
+  const lastWarnedAt = new Map<TesseraProviderId, number>();
 
   function check(): TesseraStatus {
     const now = Date.now();
@@ -31,11 +35,14 @@ export function monitorProviderHealth(app: FastifyInstance, registry: ProviderRe
         const credential_expires_at = known ? new Date(expiry).toISOString() : null;
         if (known) soonest = Math.min(soonest, expiry);
 
-        const previous = lastWarnings.get(provider);
-        const replaced = previous?.revision !== status.credentialRevision ||
-          (status.credentialRevision === undefined && previous?.expiry !== expiry);
-        if (expiry_warning && (!previous || replaced || now - previous.at >= DAY_MS)) {
-          lastWarnings.set(provider, { expiry, revision: status.credentialRevision, at: now });
+        const previous = observed.get(provider);
+        const replaced = previous !== undefined && (previous.revision !== status.credentialRevision ||
+          (status.credentialRevision === undefined && !Object.is(previous.expiry, expiry)));
+        observed.set(provider, { expiry, revision: status.credentialRevision });
+        if (replaced) lastWarnedAt.delete(provider);
+        const warnedAt = lastWarnedAt.get(provider);
+        if (expiry_warning && (warnedAt === undefined || now - warnedAt >= DAY_MS)) {
+          lastWarnedAt.set(provider, now);
           app.log.warn({ event: "tessera.expiry_warning", provider, credential_expires_at }, "Tessera credential is expiring or expired");
         }
 
