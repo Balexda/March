@@ -5,6 +5,7 @@ import * as castraRecover from "./handlers/castra-recover.js";
 import * as relaunch from "./handlers/relaunch.js";
 import * as babysit from "./handlers/babysit.js";
 import * as recovery from "./handlers/recovery.js";
+import * as requeue from "./handlers/requeue.js";
 import * as adoptFromFold from "./handlers/adopt-from-fold.js";
 import * as dispatch from "./handlers/dispatch.js";
 import * as dependencyMerge from "./handlers/dependency-merge.js";
@@ -32,6 +33,9 @@ export interface CoordinatorDeps {
   babysit: babysit.BabysitDeps;
   dispatch: dispatch.DispatchDeps;
   relaunch?: relaunch.RelaunchDeps;
+  /** GitHub seams for the operator requeue (#588). Omitted → a requeue that must
+   *  close a PR fails (and retries); one with no PR / remote branch still works. */
+  requeue?: requeue.RequeueDeps;
   /** Seams for the opt-in Dependabot auto-merge. Omitted → the handler is inert. */
   dependencyMerge?: dependencyMerge.DependencyMergeDeps;
   /** Seam for the opt-in CodeRabbit re-review request. Omitted → the handler is inert. */
@@ -46,6 +50,8 @@ export interface CoordinatorOutput {
   state: LoopState;
   tick: TickResult;
   results: {
+    /** Operator requeue (#588/#593); absent in outputs built without it. */
+    requeue?: HandlerResult;
     cleanup: HandlerResult;
     ghost: HandlerResult;
     castraRecover: HandlerResult;
@@ -131,7 +137,7 @@ function buildTickResult(state: LoopState, r: CoordinatorOutput["results"], spaw
     babysitActionCount: r.babysit.actions.length - stewardNudgeCount - stewardStrandedCount,
     stewardNudgeCount,
     stewardStrandedCount,
-    processorRequestCount: r.cleanup.requests.length + r.babysit.requests.length + r.dispatch.requests.length,
+    processorRequestCount: (r.requeue?.requests.length ?? 0) + r.cleanup.requests.length + r.babysit.requests.length + r.dispatch.requests.length,
     dispatchActionCount: r.dispatch.actions.length,
     dispatchFailureCount: r.dispatch.failures.length,
     ...(spawnBudget
@@ -151,6 +157,11 @@ export async function runTick(deps: CoordinatorDeps): Promise<CoordinatorOutput>
   // handler's assess sees the current world. Do NOT parallelize: the ordering
   // (cleanup drops a session before babysit reads it) is load-bearing.
   const results = {
+    // Operator requeue (#588/#593) runs FIRST: it discards the slice's incarnation
+    // and drops it from the snapshot, so no later handler (cleanup archiving its
+    // just-closed PR, relaunch re-attaching, babysit re-escalating) acts on a slice
+    // the operator threw away — and dispatch re-launches the freed item this tick.
+    requeue: await requeue.apply(requeue.assess(state), ctx, state, deps.requeue),
     cleanup: await cleanup.apply(cleanup.assess(state), ctx, state),
     ghost: await ghostCleanup.apply(ghostCleanup.assess(state), ctx, state),
     // Restart errored worker sessions (e.g. post-reboot) in place BEFORE relaunch

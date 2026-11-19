@@ -75,6 +75,22 @@ export interface LoopState {
    * defeats warm-loop invisibility (the fold alone can't reach the warm `raw`).
    */
   recoveryRequests?: string[];
+  /**
+   * Pending operator requeues (#588/#593), read from the fold's
+   * `requeueRequested` every tick (durable, so a cold start re-reads them). The
+   * requeue handler tears down each slice's incarnation and tombstones it.
+   */
+  requeueRequests?: RequeueRequest[];
+}
+
+/** One pending operator requeue (fold `requeueRequested`, keyed by slice). */
+export interface RequeueRequest {
+  sliceId: string;
+  /** Seq of the `slice.requeue.requested` event (dedup across ticks). */
+  seq: number;
+  closePr: boolean;
+  operator?: string;
+  reason?: string;
 }
 
 /** Side-effect dependencies handed to each handler's `apply`. */

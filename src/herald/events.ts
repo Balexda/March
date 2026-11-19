@@ -109,6 +109,22 @@ export type EventBody =
    * `rung` (begin graduated at rung 0); the rung ladder driver (PR2) appends the
    * inner rungs (`1`/`2`) to durably advance the ladder and `3` for the nuke. */
   | { type: "slice.recovery.requested"; sliceId: string; rung?: number }
+  /**
+   * An OPERATOR asked to REQUEUE this slice (#588/#593): discard its current
+   * incarnation — steward session, worktree, branch, and (only with `closePr`) its
+   * open PR — and tombstone it so dispatch re-selects the smithy item fresh. Unlike
+   * `slice.recovery.requested` it bypasses the graduated ladder (including the
+   * rung-0b `awaiting_input` refusal): it is the "throw the output away" lever for
+   * a steward whose question can no longer be answered (dead session) or that went
+   * off the rails. `operator`/`reason` attribute the request in the log. The
+   * reducer records a pending `requeueRequested` so a legate cold start still acts
+   * on it; the legate's rung-3 tombstone (success) or `slice.requeue.refused`
+   * (refusal / give-up) clears it.
+   */
+  | { type: "slice.requeue.requested"; sliceId: string; closePr?: boolean; operator?: string; reason?: string }
+  /** The legate refused (open PR without `closePr`) or gave up on (teardown kept
+   *  failing) a pending requeue; clears `requeueRequested`. */
+  | { type: "slice.requeue.refused"; sliceId: string; reason?: string }
   /** A stalled steward was relaunched. Carries the LIVE worktree the relaunch
    *  attached to (agent-deck may mint a fresh hashed path when the expected one is
    *  taken) so the fold records it durably — a cold-start rebuild then keeps the
@@ -206,6 +222,8 @@ export function entityRefOf(body: EventBody): EntityRef {
     case "steward.relaunched":
     case "slice.escalated":
     case "slice.steward.report":
+    case "slice.requeue.requested":
+    case "slice.requeue.refused":
       return { kind: "slice", id: body.sliceId };
     case "session.changed":
       return { kind: "session", id: body.session.id };
@@ -267,6 +285,14 @@ export interface SliceState {
    * tombstone): rungs 0–2 keep the live slice and its observations.
    */
   recoveryRung?: number;
+  /**
+   * A pending operator requeue (#588/#593), set by `slice.requeue.requested` and
+   * cleared by `slice.requeue.refused` or the rung-3 tombstone the legate appends
+   * once the incarnation is torn down. Durable so a legate cold start re-reads it.
+   * `seq` is the request event's seq, so the legate can tell a request it already
+   * handled (its tombstone not yet drained back) from a new one.
+   */
+  requeueRequested?: { seq: number; closePr: boolean; operator?: string; reason?: string };
 }
 
 /** The folded system state — the projection both services read. */
@@ -548,6 +574,24 @@ export function reduce(state: SystemState, event: HeraldEvent): SystemState {
         summary: event.summary,
         classified: event.classified,
       };
+      break;
+    }
+    case "slice.requeue.requested": {
+      const slice = state.slices[event.sliceId];
+      // Requeue only acts on a slice the fold knows; a request for an unknown or
+      // already-tombstoned slice is a no-op (nothing to discard).
+      if (!slice || slice.recovered) break;
+      slice.requeueRequested = {
+        seq: event.seq,
+        closePr: event.closePr === true,
+        ...(event.operator !== undefined ? { operator: event.operator } : {}),
+        ...(event.reason !== undefined ? { reason: event.reason } : {}),
+      };
+      break;
+    }
+    case "slice.requeue.refused": {
+      const slice = state.slices[event.sliceId];
+      if (slice) delete slice.requeueRequested;
       break;
     }
     case "retry.counted":

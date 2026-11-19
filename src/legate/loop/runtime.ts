@@ -62,7 +62,14 @@ import { createScheduler, type LoopScheduler } from "./scheduler.js";
 // Operator respond endpoint (#459 follow-up): the pure target resolver + I/O
 // shapes; runtime supplies the Castra/Herald effects below. http.ts imports only
 // the LoopSnapshot TYPE from here, so this value import is a one-way edge.
-import { resolveRespondTarget, type RespondInput, type RespondResult } from "./http.js";
+import {
+  resolveRequeueTarget,
+  resolveRespondTarget,
+  type RequeueInput,
+  type RequeueResult,
+  type RespondInput,
+  type RespondResult,
+} from "./http.js";
 
 // ── Container-wide singletons (shared across all profiles) ──────────────────
 
@@ -337,6 +344,68 @@ export async function respondToEscalation(input: RespondInput): Promise<RespondR
   return finish({ ok: true, profile, sliceId: input.sliceId, mode, delivered, cleared: true, recoveryRequested });
 }
 
+/**
+ * Request an operator REQUEUE (#588/#593) — the side-effecting half of
+ * `POST /slices/:sliceId/requeue`. Validates the target against the profile's
+ * warm working state (refusing an unknown / merged slice, or an open PR without
+ * `closePr`), then appends `slice.requeue.requested` to Herald with the operator +
+ * reason. It mutates nothing in memory: the requeue handler acts on the folded
+ * request at the start of the next tick (tear down, tombstone, re-dispatch).
+ */
+export async function requeueSlice(input: RequeueInput): Promise<RequeueResult> {
+  const profile = input.profile;
+  const finish = (result: RequeueResult): RequeueResult => {
+    emitLoopSpan({
+      name: "legate.requeue.request",
+      traceKey: input.sliceId,
+      root: false,
+      error: !result.ok,
+      attributes: {
+        "march.slice_id": input.sliceId,
+        "march.profile": profile,
+        "march.requeue.close_pr": input.closePr === true,
+        "march.requeue.requested": result.requested ?? false,
+        ...(input.operator ? { "march.operator": input.operator } : {}),
+      },
+    });
+    emitLoopLog({
+      severity: result.ok ? "INFO" : "ERROR",
+      body: result.ok
+        ? `requeue requested for ${input.sliceId}${input.operator ? ` by ${input.operator}` : ""}${result.closesPr ? ` (closing PR #${result.closesPr})` : ""}`
+        : `requeue refused for ${input.sliceId}: ${result.error ?? "unknown error"}`,
+      eventKind: "requeue",
+      sliceId: input.sliceId,
+      attributes: { "march.profile": profile },
+    });
+    return result;
+  };
+
+  const rt = runtimes.get(profile);
+  if (!rt) return finish({ ok: false, status: 404, error: `unknown profile "${profile}".`, profiles: [...runtimes.keys()] });
+
+  const target = resolveRequeueTarget(rt.workingState, input.sliceId, input.closePr === true);
+  if (!target.ok) return finish({ ok: false, status: target.status, profile, sliceId: input.sliceId, error: target.error });
+
+  try {
+    await legateHerald().append(profile, {
+      type: "slice.requeue.requested",
+      sliceId: input.sliceId,
+      closePr: input.closePr === true,
+      ...(input.operator ? { operator: input.operator } : {}),
+      ...(input.reason ? { reason: input.reason } : {}),
+    });
+  } catch (err: any) {
+    return finish({
+      ok: false,
+      status: 502,
+      profile,
+      sliceId: input.sliceId,
+      error: `failed to record the requeue request in Herald: ${err?.message ?? String(err)}`,
+    });
+  }
+  return finish({ ok: true, profile, sliceId: input.sliceId, requested: true, closesPr: target.openPr });
+}
+
 function now() {
   return new Date().toISOString();
 }
@@ -429,6 +498,29 @@ async function listPrCommitAuthors(repoPath: string, prNumber: number): Promise<
 /** Post a PR conversation comment (e.g. `@dependabot recreate`). */
 async function commentOnPrGh(repoPath: string, prNumber: number, body: string): Promise<void> {
   await execText("gh", ["pr", "comment", String(prNumber), "--body", body], { cwd: repoPath });
+}
+
+/** Operator requeue (#588): close an open PR with an attribution comment. The
+ *  remote branch is deleted separately ({@link deleteRemoteBranchGh}) — `gh pr
+ *  close --delete-branch` would also try the local branch, which Brood owns. */
+async function closePrGh(repoPath: string, prNumber: number, comment: string): Promise<void> {
+  await execText("gh", ["pr", "close", String(prNumber), "--comment", comment], { cwd: repoPath });
+}
+
+/** Operator requeue (#588): delete a pushed branch on the forge so the fresh
+ *  dispatch's orphan-branch check doesn't refuse it. Uses the GitHub API (the
+ *  legate's `gh` auth) rather than `git push`, which needs separate git creds.
+ *  Resolves `false` when the branch was never pushed. */
+async function deleteRemoteBranchGh(repoPath: string, branch: string): Promise<boolean> {
+  const ref = `repos/{owner}/{repo}/git/refs/heads/${branch.split("/").map(encodeURIComponent).join("/")}`;
+  try {
+    await execText("gh", ["api", ref.replace("/refs/", "/ref/")], { cwd: repoPath });
+  } catch (err: any) {
+    if (/404|Not Found/i.test(err?.message ?? String(err))) return false;
+    throw err;
+  }
+  await execText("gh", ["api", "-X", "DELETE", ref], { cwd: repoPath });
+  return true;
 }
 
 /** Repos whose escalation label is known to exist, so it is created once per process. */
@@ -639,6 +731,10 @@ async function tickProfile(rt: ProfileRuntime, spawnBudget?: SpawnBudget): Promi
     dependencyMerge: dependencyMergeDeps,
     coderabbitRereview: {
       commentOnPr: (repoPath: string, prNumber: number, body: string) => commentOnPrGh(repoPath, prNumber, body),
+    },
+    requeue: {
+      closePr: (repoPath: string, prNumber: number, comment: string) => closePrGh(repoPath, prNumber, comment),
+      deleteRemoteBranch: (repoPath: string, branch: string) => deleteRemoteBranchGh(repoPath, branch),
     },
     spawnBudget,
   });

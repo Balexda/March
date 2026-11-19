@@ -297,6 +297,40 @@ describe("reduce / fold", () => {
     expect(recovered.retries["dispatch-recovery:s1"]).toBeUndefined();
   });
 
+  it("slice.requeue.requested records a pending requeue (#588); refusal or the rung-3 tombstone clears it", () => {
+    seq = 0;
+    const base = foldEvents([
+      ev({ type: "slice.dispatched", sliceId: "s1", branch: "smithy/cut/s1", jobId: "job-1" }),
+      ev({ type: "slice.steward.report", sliceId: "s1", status: "awaiting_input", classified: true }),
+      ev({ type: "slice.escalated", sliceId: "s1" }),
+    ]);
+    const requested = foldEvents(
+      [ev({ type: "slice.requeue.requested", sliceId: "s1", closePr: true, operator: "jb", reason: "died" })],
+      base,
+    );
+    expect(requested.slices.s1!.requeueRequested).toEqual({ seq: 4, closePr: true, operator: "jb", reason: "died" });
+    expect(entityRefOf({ type: "slice.requeue.requested", sliceId: "s1" })).toEqual({ kind: "slice", id: "s1" });
+
+    const refused = foldEvents([ev({ type: "slice.requeue.refused", sliceId: "s1", reason: "open PR" })], structuredClone(requested));
+    expect(refused.slices.s1!.requeueRequested).toBeUndefined();
+    expect(refused.slices.s1!.stage).toBe("escalated");
+
+    // Success path: the legate's rung-3 tombstone drops the request AND the stale
+    // awaiting_input report, freeing the item for a fresh dispatch.
+    const done = foldEvents([ev({ type: "slice.recovery.requested", sliceId: "s1", rung: 3 })], structuredClone(requested));
+    expect(done.slices.s1).toEqual({ sliceId: "s1", recovered: true });
+  });
+
+  it("slice.requeue.requested for an unknown or tombstoned slice is a no-op", () => {
+    seq = 0;
+    expect(foldEvents([ev({ type: "slice.requeue.requested", sliceId: "nope" })]).slices.nope).toBeUndefined();
+    const tomb = foldEvents([
+      ev({ type: "slice.recovery.requested", sliceId: "s1", rung: 3 }),
+      ev({ type: "slice.requeue.requested", sliceId: "s1" }),
+    ]);
+    expect(tomb.slices.s1).toEqual({ sliceId: "s1", recovered: true });
+  });
+
   it("slice.recovery.requested {rung:3} tombstones even an unknown slice (guards in-flight stale deltas)", () => {
     seq = 0;
     const state = foldEvents([ev({ type: "slice.recovery.requested", sliceId: "ghost", rung: 3 })]);
