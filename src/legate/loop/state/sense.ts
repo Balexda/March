@@ -278,6 +278,8 @@ export function rebuildWorkingState(sys: SystemState, meta: LoopMeta): any {
       stage: s.stage,
       pr: pr ?? null,
     };
+    if (s.handledFeedback?.inline) slice.review_fix_seen_comment_ids = [...s.handledFeedback.inline];
+    if (s.handledFeedback?.conversation) slice.comment_fix_seen_comment_ids = [...s.handledFeedback.conversation];
     if (s.escalatedReason !== undefined) {
       slice.last_action_note = s.escalatedReason;
       // Restore the structured class too so bounded auto-recovery (#211) can tell a

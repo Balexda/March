@@ -645,7 +645,10 @@ describe("babysit apply", () => {
     expect(slice.comment_fix_seen_comment_ids).toEqual(["11"]);
     expect(reactToComment).toHaveBeenCalledWith({ commentId: "11", content: "eyes", repoPath: "/repo", sliceId: "s" });
     expect(res.actions[0]).toMatchObject({ action: "comment-fix" });
-    expect(c.emitTransition).toHaveBeenCalledWith({ type: "slice.stage.changed", sliceId: "s", stage: "pr-in-fix" });
+    expect(c.emitTransition).toHaveBeenCalledWith({
+      type: "slice.stage.changed", sliceId: "s", stage: "pr-in-fix",
+      handledFeedback: { kind: "conversation", commentIds: ["11"] },
+    });
   });
 
   it("comment-fix that fails to send escalates and does NOT mark the comment seen (retries next tick)", async () => {

@@ -5,19 +5,25 @@ import { existsSync, mkdtempSync, mkdirSync, readdirSync, rmSync, writeFileSync 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
+import { apply, assess } from "../../legate/loop/handlers/babysit.js";
+import type { LoopMeta } from "../../legate/loop/meta.js";
+import { senseFromHerald } from "../../legate/loop/state/sense.js";
+import type { HandlerContext } from "../../legate/loop/state/types.js";
 import { TesseraClient } from "../../tessera/client.js";
 import { buildServer, observeProfiles } from "./server.js";
 import { sqliteAvailable } from "./sqlite.js";
 
-const { execFile, startHeraldSpan } = vi.hoisted(() => ({
+const { execFile, startHeraldSpan, listSessions } = vi.hoisted(() => ({
   execFile: vi.fn(),
+  listSessions: vi.fn(),
   startHeraldSpan: vi.fn(),
 }));
 vi.mock("node:child_process", () => ({ execFile }));
 vi.mock("../../observability/herald-trace.js", () => ({ startHeraldSpan }));
 vi.mock("../../castra/client.js", () => ({
   CastraClient: class {
-    async listSessions() { return []; }
+    listSessions = listSessions;
+    async sessionOutput() { return ""; }
   },
 }));
 
@@ -27,6 +33,7 @@ afterEach(() => {
 });
 
 it.skipIf(!sqliteAvailable).each([false, true])("observes independent profiles with scoped credentials (sync: %s)", async (sync) => {
+  listSessions.mockResolvedValue([]);
   const home = mkdtempSync(join(tmpdir(), "herald-auth-test-"));
   const operatorConfig = join(home, ".config", "gh");
   mkdirSync(operatorConfig, { recursive: true });
@@ -71,6 +78,13 @@ it.skipIf(!sqliteAvailable).each([false, true])("observes independent profiles w
     { number: 13, author: { login: "fork-user" }, headRefName: "legacy", isCrossRepository: true },
     { number: 14, author: { login: "fork-user" }, headRefName: "fork-only", isCrossRepository: true },
   ].map((pr) => ({ ...pr, state: "OPEN", createdAt: pr.isCrossRepository ? "2026-11-19" : "2026-11-18" }));
+  const operator = { login: "operator", __typename: "User" };
+  const march = { login: "March", __typename: "Bot" };
+  const externalBot = { login: "external[bot]", __typename: "Bot" };
+  const comment = (id: number, author: typeof operator, body = "Please fix this.") => ({
+    databaseId: id, author, body, createdAt: `2026-11-19T12:00:${id}Z`,
+  });
+  let distinctReplies = false;
   let rejectOnce = true;
   execFile.mockImplementation((cmd, args: string[], options, cb) => {
     const reply = (value: unknown) => cb(null, typeof value === "string" ? value : JSON.stringify(value), "");
@@ -120,7 +134,27 @@ it.skipIf(!sqliteAvailable).each([false, true])("observes independent profiles w
       if (args.some((arg) => arg.includes("pullRequests(states: OPEN"))) {
         return reply({ data: { repository: { pullRequests: { nodes: [] } } } });
       }
-      return reply({ data: { repository: { pullRequest: { headRefOid: "abcdef" } } } });
+      const legacy = args.includes("pr=11");
+      const comments = legacy
+        ? [comment(21, operator), comment(22, march), comment(23, operator, "  [march-bot] fixed")]
+        : [comment(31, externalBot), comment(32, march)];
+      if (distinctReplies && !legacy) comments.push(comment(33, externalBot));
+      const threads = legacy
+        ? [
+          [comment(41, externalBot), comment(42, march)],
+          [comment(43, externalBot), comment(44, operator, "[march-bot] fixed")],
+          [comment(45, operator), ...(distinctReplies ? [comment(46, operator)] : [])],
+        ]
+        : [[comment(47, march)]];
+      return reply({ data: { repository: { pullRequest: {
+        headRefOid: "abcdef",
+        comments: { nodes: comments },
+        reviewThreads: { nodes: threads.map((nodes) => ({ isResolved: false, comments: { nodes } })) },
+        reviews: { nodes: [
+          { state: "CHANGES_REQUESTED", author: march, submittedAt: "2026-11-19T12:00:49Z" },
+          { state: "APPROVED", author: externalBot, submittedAt: "2026-11-19T12:00:50Z" },
+        ] },
+      } } } });
     }
     expect(args).toContain("github.com/allowed/repo");
     if (args[1] === "list") {
@@ -161,8 +195,71 @@ it.skipIf(!sqliteAvailable).each([false, true])("observes independent profiles w
     expect(slices.new.pr).toMatchObject({ number: 12, head_sha: "abcdef" });
     expect(slices["fork-only"].pr).toEqual({ skipped: true, reason: "missing_pr_number" });
 
-    // A second tick drives the known-PR change-cursor probe as well.
-    if (!sync) await observeProfiles(app, store, [allowed], tessera);
+    if (!sync) {
+      expect(slices.legacy.pr).toMatchObject({
+        needs_response_count: 1, changes_requested_count: 0, bot_approval_count: 1,
+        unresolved_threads: [
+          { id: 41, needs_response: false, last_comment_is_march: true },
+          { id: 43, needs_response: false, last_comment_is_march: true },
+          { id: 45, needs_response: true, comment_ids: [45] },
+        ],
+        conversation_comments: [{ id: 21, author: "operator" }],
+      });
+      expect(slices.new.pr).toMatchObject({
+        needs_response_count: 0,
+        conversation_comments: [{ id: 31, author: "external[bot]" }],
+      });
+
+      const meta = { profile: "allowed", worker_group: "workers", repo: { path: "/allowed" } } as LoopMeta;
+      const ts = "2026-11-19T11:00:00Z";
+      const senseDeps = { meta, now: () => ts, readSmithyStatus: async () => ({ records: [], graph: {} }) };
+      const inbox = { consume: async () => store.projectionFor("allowed") };
+      const workerBranches = ["legacy", "new"];
+      listSessions.mockResolvedValue(workerBranches.map((branch) => ({
+        sessionId: `worker-${branch}`, group: "workers", status: "idle", branch,
+      })));
+      for (const branch of workerBranches) {
+        store.append({
+          source: "legate", profile: "allowed", type: "slice.stage.changed", sliceId: branch,
+          stage: "pr-open", sessionId: `worker-${branch}`,
+        });
+      }
+      await observeProfiles(app, store, [allowed], tessera);
+      const sendMessage = vi.fn(async () => {});
+      const feedbackDeps = { sendMessage, requestJudgement: vi.fn() };
+      const feedbackDecisions = (state: Awaited<ReturnType<typeof senseFromHerald>>) =>
+        assess(state).filter((d) => d.kind === "review-fix" || d.kind === "comment-fix");
+
+      const state = await senseFromHerald(senseDeps, inbox, null);
+      // A warm slice's recency heuristic must also leave March-answered threads alone.
+      state.slices.legacy.pr_open_at = ts;
+      const decisions = feedbackDecisions(state);
+      expect(decisions).toMatchObject([
+        { kind: "review-fix", sliceId: "legacy", pr: { number: 11 }, commentIds: ["45"] },
+        { kind: "comment-fix", sliceId: "new", pr: { number: 12 }, commentIds: ["31"] },
+      ]);
+      const transitions: Promise<{ statusCode: number }>[] = [];
+      const ctx = {
+        meta, ts, emit: vi.fn(), log: vi.fn(), castra: {} as HandlerContext["castra"], broodTeardown: vi.fn(),
+        emitTransition: (event) => {
+          transitions.push(app.inject({ method: "POST", url: "/events", payload: { ...event, profile: "allowed" } }));
+        },
+      } satisfies HandlerContext;
+      await apply(decisions, ctx, state, feedbackDeps);
+      expect(sendMessage).toHaveBeenCalledTimes(2);
+      expect((await Promise.all(transitions)).map((response) => response.statusCode)).toEqual([201, 201]);
+
+      await observeProfiles(app, store, [allowed], tessera);
+      expect(feedbackDecisions(await senseFromHerald(senseDeps, inbox, state.raw))).toEqual([]);
+      expect(feedbackDecisions(await senseFromHerald(senseDeps, inbox, null))).toEqual([]);
+
+      distinctReplies = true;
+      await observeProfiles(app, store, [allowed], tessera);
+      expect(feedbackDecisions(await senseFromHerald(senseDeps, inbox, null))).toMatchObject([
+        { kind: "review-fix", sliceId: "legacy", commentIds: ["46"] },
+        { kind: "comment-fix", sliceId: "new", commentIds: ["33"] },
+      ]);
+    }
     expect(networkGit).toEqual(sync ? ["fetch", "pull"] : []);
     expect(requests).toEqual([
       { repo: "denied/repo", identity: "app", access: "read" },

@@ -4,7 +4,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { startHeraldSpan } from "../observability/herald-trace.js";
-import { TesseraClientError, type TesseraClient } from "../tessera/client.js";
+import { TesseraClientError, type GitHubEntitlement, type TesseraClient } from "../tessera/client.js";
 
 export type GitHubReadClient = Pick<TesseraClient, "issueGitHubToken">;
 class GitHubReadError extends Error {
@@ -46,24 +46,24 @@ export function createGitHubRead(client: GitHubReadClient, parentEnv: NodeJS.Pro
     !/^(?:GH_|GITHUB_|GIT_|MARCH_TESSERA_CLIENT_KEY$|MARCH_GIT_AUTH_HEADER$)/i.test(name)));
   const timeout = 30_000;
 
-  async function scoped(
+  async function scoped<T>(
     repo: string | null,
     sliceId: string | undefined,
-    invoke: (token: string) => Promise<string>,
-  ): Promise<string> {
+    invoke: (entitlement: GitHubEntitlement) => Promise<T>,
+  ): Promise<T> {
     const span = startHeraldSpan({ name: "herald.github.read", dispatchKey: sliceId });
 
     async function issue(refresh?: true) {
       if (!repo) throw new TesseraClientError("github_repo_unavailable");
-      const { token } = await client.issueGitHubToken({ identity: "app", access: "read", repo, sliceId, refresh });
-      if (/\s/.test(token)) throw new TesseraClientError("invalid_response");
-      return token;
+      const entitlement = await client.issueGitHubToken({ identity: "app", access: "read", repo, sliceId, refresh });
+      if (/\s/.test(entitlement.token)) throw new TesseraClientError("invalid_response");
+      return entitlement;
     }
     let failed = true;
     try {
-      const token = await issue();
+      const entitlement = await issue();
       try {
-        const result = await invoke(token);
+        const result = await invoke(entitlement);
         failed = false;
         return result;
       } catch (err) {
@@ -90,20 +90,26 @@ export function createGitHubRead(client: GitHubReadClient, parentEnv: NodeJS.Pro
     }
   }
 
-  return {
-    gh(repo: string | null, args: string[], sliceId?: string) {
-      return scoped(repo, sliceId, async (token) => {
-        const config = await mkdtemp(join(tmpdir(), "march-herald-gh-")).catch(() => {
-          throw new TesseraClientError("github_config_failed");
-        });
-        try {
-          return await command("gh", args, {
-            env: { ...cleanEnv, GH_CONFIG_DIR: config, GH_HOST: "github.com", GH_PROMPT_DISABLED: "1", GH_TOKEN: token },
-          });
-        } finally {
-          await rm(config, { recursive: true, force: true });
-        }
+  function ghWithIdentity(repo: string | null, args: string[], sliceId?: string) {
+    return scoped(repo, sliceId, async ({ token, identity, source }) => {
+      const config = await mkdtemp(join(tmpdir(), "march-herald-gh-")).catch(() => {
+        throw new TesseraClientError("github_config_failed");
       });
+      try {
+        const output = await command("gh", args, {
+          env: { ...cleanEnv, GH_CONFIG_DIR: config, GH_HOST: "github.com", GH_PROMPT_DISABLED: "1", GH_TOKEN: token },
+        });
+        return { output, appLogin: source === "tessera" ? identity : undefined };
+      } finally {
+        await rm(config, { recursive: true, force: true });
+      }
+    });
+  }
+
+  return {
+    ghWithIdentity,
+    async gh(repo: string | null, args: string[], sliceId?: string) {
+      return (await ghWithIdentity(repo, args, sliceId)).output;
     },
     async git(repo: string | null, cwd: string, args: string[], ref: string) {
       if (!repo) throw new TesseraClientError("github_repo_unavailable");
@@ -138,7 +144,7 @@ export function createGitHubRead(client: GitHubReadClient, parentEnv: NodeJS.Pro
         "-c", `http.${url}.extraHeader=`,
         "--config-env", `http.${url}.extraHeader=MARCH_GIT_AUTH_HEADER`,
       ];
-      return scoped(repo, undefined, (token) => command("git", [...config, ...args, "--", url, ref], {
+      return scoped(repo, undefined, ({ token }) => command("git", [...config, ...args, "--", url, ref], {
         cwd,
         env: { ...env, MARCH_GIT_AUTH_HEADER: `Authorization: Basic ${Buffer.from(`x-access-token:${token}`).toString("base64")}` },
       }));

@@ -140,7 +140,7 @@ Each slice validates its normal entry point against fakes with no live GitHub tr
 
 ### Tasks
 
-- [ ] **Classify and deduplicate feedback across identities**
+- [x] **Classify and deduplicate feedback across identities**
 
   Use the login derived by Tessera where `src/observe/` classifies feedback and where the Herald fold is consumed by Legate's babysit path. Keep the existing March reply marker and durable comment dedup useful during migration.
 

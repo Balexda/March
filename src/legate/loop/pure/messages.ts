@@ -1,5 +1,5 @@
 import { actionCommandLine } from "./dispatch-id.js";
-import { MARCH_BOT_MARKER, isMarchBotComment } from "./march-bot.js";
+import { MARCH_BOT_MARKER, isMarchBotComment } from "../../../observe/march-bot.js";
 
 /**
  * Pure builders for the prompts and escalation/detail strings the loop sends to
@@ -46,6 +46,7 @@ export function buildSmithySpawnPrompt(item: any): string {
 export function threadsNeedingResponse(slice: any, pr: any): any[] {
   const openAt = slice.pr_open_at ? Date.parse(slice.pr_open_at) : NaN;
   return (pr.unresolved_threads || []).filter((thread: any) => {
+    if (thread.last_comment_is_march === true) return false;
     if (thread.needs_response) return true;
     if (slice.stage !== "pr-open" && slice.stage) return false;
     if (!Number.isFinite(openAt)) return false;
@@ -130,12 +131,8 @@ ${reviewThreadsSummary(threads)}`;
  * response. A comment is handled once the legate has reacted :eyes: to it
  * (`reacted_eyes`) — the babysit caller additionally drops any whose id is already
  * in the persisted dispatched set, so this returns the not-yet-acknowledged set.
- * Author is deliberately NOT a filter: the legate token shares the PR-author
- * identity (steward pushes as the same account that reviews), so an author check
- * is unreliable — dedup is carried by the :eyes: reaction + the comment-id set.
- * March's own replies are dropped by the `[march-bot]` content marker
- * ({@link isMarchBotComment}, issue #374) — the author-independence-proof half of
- * the dedup so the steward never re-processes its own conversation replies.
+ * Herald filters March's app identity before folding the feedback. Keep the
+ * reply-marker check here for older snapshots and non-Herald callers.
  */
 export function commentsNeedingResponse(slice: any, pr: any): any[] {
   return (pr.conversation_comments || []).filter(

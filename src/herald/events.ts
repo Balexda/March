@@ -82,7 +82,7 @@ export type EventBody =
    *  steward `sessionId` on the implementing handoff so the fold learns the
    *  slice→session link Herald's PR discovery is gated on (#210) and a restart's
    *  rebuild keeps it (the latent #210 regression). */
-  | { type: "slice.stage.changed"; sliceId: string; stage: string; sessionId?: string }
+  | { type: "slice.stage.changed"; sliceId: string; stage: string; sessionId?: string; handledFeedback?: HandledFeedback }
   /** The slice reached a terminal state and was cleaned up. */
   | { type: "slice.archived"; sliceId: string }
   /** A partial-merge / branch-collision recovery dispatch. */
@@ -241,6 +241,8 @@ export function entityRefOf(body: EventBody): EntityRef {
   }
 }
 
+export type HandledFeedback = { kind: "inline" | "conversation"; commentIds: string[] };
+
 /** Per-slice projected state — observed facts merged with legate-owned stage. */
 export interface SliceState {
   sliceId: string;
@@ -258,6 +260,7 @@ export interface SliceState {
   jobId?: string;
   /** Observed PR/CI/review state (the `queryPrForBabysit` shape). */
   pr?: unknown;
+  handledFeedback?: Partial<Record<HandledFeedback["kind"], string[]>>;
   recentOutput?: { output: string; error?: string };
   archived?: boolean;
   escalatedReason?: string;
@@ -501,6 +504,11 @@ export function reduce(state: SystemState, event: HeraldEvent): SystemState {
       // without a sessionId never clobbers a known link (#210). The handoff
       // transition carries it so a restart's rebuild keeps the slice→session link.
       if (event.sessionId !== undefined) slice.sessionId = event.sessionId;
+      if (event.handledFeedback) {
+        const { kind, commentIds } = event.handledFeedback;
+        const handled = (slice.handledFeedback ??= {});
+        handled[kind] = [...new Set([...(handled[kind] ?? []), ...commentIds])];
+      }
       break;
     }
     case "slice.archived":
