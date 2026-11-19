@@ -306,8 +306,13 @@ export async function fetchBranchPrState(opts: {
     let res = await fetchPullsForHead({ ...query, token });
     if (res.unauthorized && opts.refreshToken && !refreshed) {
       refreshed = true;
-      token = await opts.refreshToken();
-      res = await fetchPullsForHead({ ...query, token });
+      try {
+        token = await opts.refreshToken();
+        res = await fetchPullsForHead({ ...query, token });
+      } catch {
+        // A failed refresh is an incomplete lookup; keep PRs already collected.
+        res = { prs: [], errored: true };
+      }
     }
     if (res.errored) errored = true;
     else prs.push(...res.prs);

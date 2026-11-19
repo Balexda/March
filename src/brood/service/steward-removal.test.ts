@@ -6,7 +6,12 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SpanStatusCode } from "@opentelemetry/api";
-import type { Span } from "@opentelemetry/sdk-trace-base";
+import {
+  BasicTracerProvider,
+  InMemorySpanExporter,
+  SimpleSpanProcessor,
+  type Span,
+} from "@opentelemetry/sdk-trace-base";
 import { describe, expect, it, vi } from "vitest";
 import type { CastraSession } from "../../castra/types.js";
 import { getActiveOtel, initOtel } from "../../observability/otel.js";
@@ -732,6 +737,23 @@ describe("fetchBranchPrState (token REST path, no gh)", () => {
     },
   );
 
+  it.each([["open", "open"], ["closed", "unknown"]])(
+    "treats a failed token refresh as incomplete and keeps a confirmed %s PR",
+    async (state, expected) => {
+      const onIncomplete = vi.fn();
+      const fetchImpl: typeof fetch = async (input) =>
+        new URL(String(input)).searchParams.get("head") === "o:b"
+          ? Response.json([{ state, merged_at: null }])
+          : new Response(null, { status: 401 });
+
+      await expect(fetchBranchPrState({
+        owner: "o", repo: "r", branch: "b", token: "t", fetchImpl, onIncomplete,
+        refreshToken: async () => { throw new Error("tessera down"); },
+      })).resolves.toBe(expected);
+      expect(onIncomplete).toHaveBeenCalledOnce();
+    },
+  );
+
   // The deciding live-stack mismatch: the steward carries the LOCAL branch
   // `smithy/cut/X`, but the worker pushed it as PR head `feature/smithy/cut/X`.
   // A query by the raw local name finds nothing — the `feature/` variant wins.
@@ -786,11 +808,15 @@ describe.skipIf(!sqliteAvailable)("Tessera-backed orphan sweep", () => {
     const root = mkdtempSync(join(tmpdir(), "brood-orphan-"));
     const store = new SessionStore({ dbPath: ":memory:" });
     initOtel({ MARCH_OTEL: "1" });
+    // Spans go to a local in-memory provider; the OTLP tracer never buffers one.
+    const provider = new BasicTracerProvider({
+      spanProcessors: [new SimpleSpanProcessor(new InMemorySpanExporter())],
+    });
+    const local = provider.getTracer("test");
     const tracer = getActiveOtel().getTracer();
-    const startSpan = tracer.startSpan.bind(tracer);
     const spans: Span[] = [];
     const spy = vi.spyOn(tracer, "startSpan").mockImplementation((...args) => {
-      const span = startSpan(...args) as Span;
+      const span = local.startSpan(...args) as Span;
       spans.push(span);
       return span;
     });
@@ -878,6 +904,7 @@ describe.skipIf(!sqliteAvailable)("Tessera-backed orphan sweep", () => {
       });
     } finally {
       spy.mockRestore();
+      await provider.shutdown();
       initOtel({});
       store.close();
       rmSync(root, { recursive: true, force: true });
