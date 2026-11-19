@@ -33,7 +33,8 @@
 
   _Acceptance criteria:_
   - Only tracked, open, non-draft, CI-green forge PRs with a CodeRabbit opt-in can trigger an initial request (FR-017, AS 4.1). New-head re-requests also require resolved threads and no conflicts (AS 4.7). Auto mode only observes. The old request path cannot bypass these conditions.
-  - A completed current-head review suppresses a request. That means an APPROVED or CHANGES_REQUESTED verdict submitted on the head. A fresh in-progress notice for that head or a recent intent also suppresses one. A COMMENTED review on the head, such as a thread reply, does not suppress a request, and it does not hide a stale verdict on an older commit. Unanswered attempts become eligible after the wait and any active back-off expire.
+  - An APPROVED or CHANGES_REQUESTED verdict on the head suppresses a request. So does a fresh in-progress notice for the head or a recent intent. Once a request is recorded for the head, any CodeRabbit review on that head blocks another request for it, whatever its state (FR-017, FR-019). Only an attempt with no review on its head becomes eligible again, after the wait and any active back-off expire. This check reads CodeRabbit's raw reviews on the head, not the verdict summary, which drops COMMENTED reviews.
+  - A COMMENTED review on a new head with no recorded request does not block a FR-020 re-request, for example a thread reply. It also does not hide a stale verdict on an older commit. The stale CHANGES_REQUESTED decides that re-request (SD-004).
   - New-head decisions cover all three FR-020 reasons, including a superseded unanswered request. A stale approval qualifies only when approval is the sole unmet gate. A qualifying stale changes-requested verdict continues to block merge until replaced.
 
 - [ ] **Record intent before posting the review trigger**
