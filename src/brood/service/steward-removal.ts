@@ -2,6 +2,8 @@ import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { createCastraClientFromEnv } from "../../castra/client.js";
 import type { CastraSession } from "../../castra/types.js";
+import { startBroodSpan } from "../../observability/brood-trace.js";
+import { TesseraClient, TesseraClientError } from "../../tessera/client.js";
 import type { SessionRepository } from "./repository.js";
 import type { SessionRecord } from "./types.js";
 
@@ -184,7 +186,11 @@ export interface OrphanGate {
   /** True when the steward's worktree still exists on disk (best-effort). */
   worktreeExists(worktreePath: string): boolean;
   /** PR state for `branch`, resolved from the origin remote at `repoRoot`. */
-  branchPrState(branch: string, repoRoot: string): Promise<BranchPrState>;
+  branchPrState(
+    branch: string,
+    repoRoot: string,
+    context?: { sessionId: string; sliceId?: string },
+  ): Promise<BranchPrState>;
 }
 
 const GIT_MAX_BUFFER = 16 * 1024 * 1024;
@@ -202,7 +208,7 @@ type FetchImpl = typeof fetch;
 export function parseGitHubSlug(
   remoteUrl: string,
 ): { owner: string; repo: string } | undefined {
-  const m = remoteUrl.trim().match(/github\.com[:/]+([^/]+)\/(.+?)(?:\.git)?\/?$/i);
+  const m = remoteUrl.trim().match(/^(?:https:\/\/github\.com\/|ssh:\/\/git@github\.com\/|git@github\.com:)([\w.-]+)\/([\w.-]+?)(?:\.git)?\/?$/i);
   if (!m) return undefined;
   return { owner: m[1], repo: m[2] };
 }
@@ -235,7 +241,7 @@ async function fetchPullsForHead(opts: {
   head: string;
   token: string;
   fetchImpl: FetchImpl;
-}): Promise<{ prs: Array<{ state?: string; merged_at?: string | null }>; errored: boolean }> {
+}): Promise<{ prs: Array<{ state?: string; merged_at?: string | null }>; errored: boolean; unauthorized?: boolean }> {
   const head = `${opts.owner}:${opts.head}`;
   const url =
     `https://api.github.com/repos/${encodeURIComponent(opts.owner)}/` +
@@ -252,14 +258,20 @@ async function fetchPullsForHead(opts: {
         "user-agent": "march-brood",
       },
       signal: AbortSignal.timeout(GITHUB_API_TIMEOUT_MS),
+      redirect: "error",
     });
   } catch {
     return { prs: [], errored: true };
   }
-  if (!res.ok) return { prs: [], errored: true };
+  if (!res.ok) {
+    void res.body?.cancel().catch(() => {});
+    return { prs: [], errored: true, unauthorized: res.status === 401 };
+  }
   try {
     const body = await res.json();
-    if (!Array.isArray(body)) return { prs: [], errored: true };
+    if (!Array.isArray(body) || body.some((pr) => pr?.state !== "open" && pr?.state !== "closed")) {
+      return { prs: [], errored: true };
+    }
     return { prs: body as Array<{ state?: string; merged_at?: string | null }>, errored: false };
   } catch {
     return { prs: [], errored: true };
@@ -272,8 +284,8 @@ async function fetchPullsForHead(opts: {
  * dependency for a token). Lists pulls across every {@link candidateHeadBranches}
  * variant (the worker `feature/` prefix mismatch) and folds the union: any open →
  * `open`; else any merged (`merged_at` set) → `merged`; else any closed →
- * `closed`. With no PRs found and no request error → `none`; with no PRs but a
- * request error → `unknown`, so an open PR we could not see is never reaped.
+ * `closed`. An incomplete lookup can confirm an open PR, but cannot confirm
+ * a terminal state or absence.
  */
 export async function fetchBranchPrState(opts: {
   owner: string;
@@ -281,26 +293,32 @@ export async function fetchBranchPrState(opts: {
   branch: string;
   token: string;
   fetchImpl?: FetchImpl;
+  refreshToken?: () => Promise<string>;
+  onIncomplete?: () => void;
 }): Promise<BranchPrState> {
   const fetchImpl = opts.fetchImpl ?? fetch;
   const prs: Array<{ state?: string; merged_at?: string | null }> = [];
   let errored = false;
+  let token = opts.token;
+  let refreshed = false;
   for (const head of candidateHeadBranches(opts.branch)) {
-    const res = await fetchPullsForHead({
-      owner: opts.owner,
-      repo: opts.repo,
-      head,
-      token: opts.token,
-      fetchImpl,
-    });
+    const query = { owner: opts.owner, repo: opts.repo, head, fetchImpl };
+    let res = await fetchPullsForHead({ ...query, token });
+    if (res.unauthorized && opts.refreshToken && !refreshed) {
+      refreshed = true;
+      token = await opts.refreshToken();
+      res = await fetchPullsForHead({ ...query, token });
+    }
     if (res.errored) errored = true;
     else prs.push(...res.prs);
   }
 
+  if (errored) opts.onIncomplete?.();
   if (prs.some((p) => p.state === "open")) return "open";
+  if (errored) return "unknown";
   if (prs.some((p) => Boolean(p.merged_at))) return "merged";
   if (prs.some((p) => p.state === "closed")) return "closed";
-  return errored ? "unknown" : "none";
+  return "none";
 }
 
 /** The origin remote URL of the repo at `repoRoot`, or undefined on any error. */
@@ -310,24 +328,19 @@ function gitOriginRemote(repoRoot: string): string | undefined {
       encoding: "utf-8",
       stdio: ["ignore", "pipe", "ignore"],
       maxBuffer: GIT_MAX_BUFFER,
+      timeout: GITHUB_API_TIMEOUT_MS,
     }).trim();
   } catch {
     return undefined;
   }
 }
 
-/**
- * The default disk/forge-backed gate. Worktree existence is `fs.existsSync`; PR
- * state is the GitHub REST API authenticated with `GH_TOKEN`/`GITHUB_TOKEN` (the
- * same token the rest of the stack uses) — NO `gh` binary, so it works in the
- * tool-less brood container. With no token (or a non-GitHub remote) the PR lookup
- * reports `unknown` and the gate never reaps on the PR signal.
- */
+/** The disk/forge gate uses a repository-scoped Tessera app/read entitlement. */
 export function defaultOrphanGate(
   env: NodeJS.ProcessEnv = process.env,
   fetchImpl: FetchImpl = fetch,
 ): OrphanGate {
-  const token = (env.GH_TOKEN || env.GITHUB_TOKEN || "").trim();
+  const tessera = new TesseraClient({ env, fetchImpl });
   return {
     worktreeExists(worktreePath) {
       try {
@@ -338,13 +351,46 @@ export function defaultOrphanGate(
         return true;
       }
     },
-    async branchPrState(branch, repoRoot) {
-      if (!token) return "unknown";
-      const remote = gitOriginRemote(repoRoot);
-      if (!remote) return "unknown";
-      const slug = parseGitHubSlug(remote);
-      if (!slug) return "unknown";
-      return fetchBranchPrState({ ...slug, branch, token, fetchImpl });
+    async branchPrState(branch, repoRoot, context) {
+      const span = startBroodSpan({
+        name: "brood.orphan.pr_lookup",
+        key: context?.sliceId || context?.sessionId || branch,
+      });
+      let state: BranchPrState = "unknown";
+      let incomplete = false;
+      try {
+        const remote = gitOriginRemote(repoRoot);
+        const slug = remote && parseGitHubSlug(remote);
+        if (!slug) {
+          span.setAttributes({ "error.type": "repo_identity_missing" });
+          return state;
+        }
+        const request = {
+          identity: "app",
+          access: "read",
+          repo: `${slug.owner}/${slug.repo}`,
+          sliceId: context?.sliceId,
+        } as const;
+        const { token } = await tessera.issueGitHubToken(request);
+        state = await fetchBranchPrState({
+          ...slug,
+          branch,
+          token,
+          fetchImpl,
+          refreshToken: async () => (await tessera.issueGitHubToken({ ...request, refresh: true })).token,
+          onIncomplete: () => {
+            incomplete = true;
+            span.setAttributes({ "error.type": "github_lookup_failed" });
+          },
+        });
+        return state;
+      } catch (error) {
+        if (!(error instanceof TesseraClientError)) throw error;
+        span.setAttributes({ "error.type": error.code });
+        return state;
+      } finally {
+        span.end({ error: incomplete || state === "unknown" });
+      }
     },
   };
 }
@@ -450,7 +496,10 @@ export async function classifyOrphanWork(
   }
   if (!repoRoot) return { state: "unknown", reason: "no-repo-root" };
 
-  switch (await gate.branchPrState(session.branch, repoRoot)) {
+  switch (await gate.branchPrState(session.branch, repoRoot, {
+    sessionId: session.sessionId,
+    sliceId: session.metadata?.sliceId || undefined,
+  })) {
     case "open":
       return { state: "in-progress", reason: "open-pr" };
     case "merged":

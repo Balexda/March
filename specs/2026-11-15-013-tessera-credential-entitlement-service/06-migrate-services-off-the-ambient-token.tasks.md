@@ -44,7 +44,7 @@ Each slice validates its normal entry point against fakes with no live GitHub tr
 
 ### Tasks
 
-- [ ] **Authenticate Brood's orphan-gate REST lookup**
+- [x] **Authenticate Brood's orphan-gate REST lookup**
 
   Replace ambient-token selection in `src/brood/service/steward-removal.ts` with a Tessera app/read entitlement for the repository resolved by the gate. Pass the token only in the bounded GitHub REST request.
 
