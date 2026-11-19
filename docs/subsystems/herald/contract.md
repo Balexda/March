@@ -18,7 +18,10 @@ initially empty configuration directory and a child-only credential. Git
 network operations disable credential helpers, SSH and interactive prompts.
 A confirmed GitHub 401 allows one request with a refreshed credential. The
 shared client's explicit `MARCH_TESSERA_GH_TOKEN_FALLBACK=1` migration setting
-permits the environment-token fallback.
+permits the environment-token fallback. The Herald compose file forwards
+`MARCH_HERALD_TESSERA_CLIENT_KEY` as Herald's client key and enables that
+fallback by default, so a stack without a provisioned key keeps observing
+through `GH_TOKEN` until the fallback is removed.
 
 A typed Tessera failure records an errored span and ends that profile's tick
 before any observation events are appended. Herald continues with the next
