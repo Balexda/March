@@ -38,6 +38,7 @@ import { CASTRA_TOKEN_ENV } from "../castra/config.js";
 import { CastraValidationError } from "../castra/types.js";
 import { runTesseraServer } from "../tessera/serve.js";
 import { runTesseraToken, writeTesseraTokenUsageError } from "../tessera/token-cli.js";
+import { runTesseraGitCredential } from "../tessera/git-credential.js";
 import { TesseraConfigError } from "../tessera/config.js";
 import { runStatioServer } from "../statio/serve.js";
 import { STATIO_TOKEN_ENV } from "../statio/config.js";
@@ -2129,6 +2130,14 @@ tessera.command("token")
   .action(async (opts: { repo: string; access: string; identity: string }) => {
     commandHandled = true;
     process.exitCode = await runTesseraToken(opts);
+  });
+
+tessera.command("git-credential <operation>")
+  .description("Read a Git credential request (get, store or erase)")
+  .allowExcessArguments(false)
+  .action(async (operation: string) => {
+    commandHandled = true;
+    process.exitCode = await runTesseraGitCredential(operation);
   });
 
 tessera.command("serve")
