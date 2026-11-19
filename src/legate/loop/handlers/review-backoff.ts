@@ -71,7 +71,10 @@ export class CodeRabbitBackoff {
     for (const signal of signals.sort((a, b) => Date.parse(a.at) - Date.parse(b.at))) {
       const observed = Date.parse(signal.at);
       const previous = Date.parse(this.current?.signalAt ?? this.current?.ts ?? "");
-      if (!Number.isFinite(observed) || observed > now || observed < previous) continue;
+      if (!Number.isFinite(observed) || observed > now) continue;
+      // Notices dedupe by identity: a late-delivered notice older than the last
+      // signal can still carry a later stated reset. Other signals stay chronological.
+      if (!signal.noticeId && observed < previous) continue;
       if (signal.cause === "reset" && (!this.current?.attempts || observed <= previous)) continue;
       if (signal.noticeId && (this.seen.has(signal.noticeId) || this.current?.cause === "reset" && observed <= previous)) continue;
       if (!await this.record(signal, now, report)) return;
@@ -86,8 +89,12 @@ export class CodeRabbitBackoff {
     const signalTime = Date.parse(signal.at);
     const attempts = signal.cause === "reset" ? 0 : Math.min(Number.MAX_SAFE_INTEGER, (this.current?.attempts ?? 0) + 1);
     const stated = Date.parse(signal.resetAt ?? "");
-    const deadline = attempts === 0 ? now : stated > signalTime ? stated : signalTime + backoffMs(attempts, reviewer);
-    if (signal.noticeId && (stated <= now || deadline <= now)) return true;
+    const own = attempts === 0 ? now : stated > signalTime ? stated : signalTime + backoffMs(attempts, reviewer);
+    // An expired notice cannot re-arm back-off, even while another deadline is active.
+    if (signal.noticeId && (stated <= now || own <= now)) return true;
+    // A throttle signal never shortens an active deadline; only a reset clears it.
+    const active = Date.parse(this.current?.until ?? "");
+    const deadline = attempts > 0 && active > own ? active : own;
     const record: ReviewBackoffRecord = {
       reviewer, attempts, cause: signal.cause, signalAt: signal.at,
       until: new Date(deadline).toISOString(),
@@ -170,5 +177,20 @@ export async function verifyStartupIntent(
       Date.parse(pr.coderabbit?.review_times_by_head?.[intent.headSha] ?? "") >= since) return true;
   const profile = profiles.get(intent.profile);
   if (!profile) return false;
-  return !!await findTrigger(profile.repoPath, intent.pr, intent.headSha, intent.sliceId, since);
+  try {
+    return !!await findTrigger(profile.repoPath, intent.pr, intent.headSha, intent.sliceId, since);
+  } catch (error) {
+    // A missing or deleted PR/repo cannot answer on retry: settle it as unknown so
+    // the durable post_failed path runs. Anything else (5xx, rate limit, partial
+    // history, network) stays retryable.
+    if (isPermanentLookupFailure(error)) return false;
+    throw error;
+  }
+}
+
+const PERMANENT_LOOKUP_STATUSES = new Set([404, 410]);
+
+function isPermanentLookupFailure(error: unknown): boolean {
+  const status = (error as { status?: unknown } | null)?.status;
+  return typeof status === "number" && PERMANENT_LOOKUP_STATUSES.has(status);
 }

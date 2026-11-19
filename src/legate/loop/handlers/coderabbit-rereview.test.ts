@@ -370,4 +370,44 @@ describe("CodeRabbit account-wide back-off", () => {
     expect(await verifyStartupIntent(record, fold, new Map([["p", { repoPath: "/repo/p" }]]), findTrigger)).toBe(true);
     expect(findTrigger).toHaveBeenCalledWith("/repo/p", 42, head, "s", Date.parse(at));
   });
+
+  it("applies a late-delivered notice's later stated reset after a newer 429", async () => {
+    const { backoff, fold, append } = ledger();
+    const report = vi.fn();
+    const later = "2026-11-17T01:00:00Z";
+    await backoff.record({ profile: "p", sliceId: "s", pr: 42, at: "2026-11-16T23:00:01Z", cause: "http_429" }, Date.parse(at) + 1000, report);
+    const pr = { number: 42, reviewer_notices: [
+      { reviewer: "coderabbit", kind: "rate_limited", created_at: at, reset_at: later, comment_id: 21 },
+    ] };
+    await backoff.beginTick(fold, reviewSignals("p", "owner/repo", "s", pr), Date.parse(at) + 2000, vi.fn(), report);
+    expect(append).toHaveBeenCalledTimes(2);
+    expect(fold.reviewBackoffs?.coderabbit).toMatchObject({ until: new Date(later).toISOString(), noticeId: "coderabbit:21" });
+    await backoff.beginTick(fold, reviewSignals("p", "owner/repo", "s", pr), Date.parse(at) + 3000, vi.fn(), report);
+    expect(append).toHaveBeenCalledTimes(2);
+  });
+
+  it("never shortens an active deadline with a later throttle signal", async () => {
+    const { backoff, fold } = ledger();
+    const report = vi.fn();
+    const t = Date.parse(at);
+    const stated = new Date(t + backoffMs(2, "coderabbit") + 120_000).toISOString();
+    await backoff.record({ profile: "p", sliceId: "s", pr: 42, at, cause: "http_429", resetAt: stated }, t, report);
+    const pausedAt = new Date(t + 60_000).toISOString();
+    await backoff.record({ profile: "p", sliceId: "s", pr: 42, at: pausedAt, cause: "paused_comment", noticeId: "coderabbit:9" }, t + 60_000, report);
+    expect(fold.reviewBackoffs?.coderabbit).toMatchObject({ cause: "paused_comment", attempts: 2, until: stated });
+    await backoff.record({ profile: "p", sliceId: "s", pr: 42, at: pausedAt, cause: "reset" }, t + 60_000, report);
+    expect(fold.reviewBackoffs?.coderabbit).toMatchObject({ cause: "reset", attempts: 0, until: pausedAt });
+  });
+
+  it("settles a startup intent as unknown on a permanent lookup failure but retries transient ones", async () => {
+    const fold = emptyMultiProfileState();
+    const record = { ...intent, profile: "p", seq: 1 };
+    const active = new Map([["p", { repoPath: "/repo/p" }]]);
+    const gone = Object.assign(new Error("HTTP 404"), { status: 404 });
+    expect(await verifyStartupIntent(record, fold, active, vi.fn().mockRejectedValue(gone))).toBe(false);
+    const flaky = Object.assign(new Error("HTTP 502"), { status: 502 });
+    await expect(verifyStartupIntent(record, fold, active, vi.fn().mockRejectedValue(flaky))).rejects.toBe(flaky);
+    await expect(verifyStartupIntent(record, fold, active, vi.fn().mockRejectedValue(new Error("Incomplete PR comment history"))))
+      .rejects.toThrow("Incomplete");
+  });
 });

@@ -692,6 +692,16 @@ export interface MultiProfileState {
   latestReviewRequests?: Partial<Record<ReviewRequestRecord["reviewer"], ReviewRequestRecord & { profile: string; seq: number }>>;
 }
 
+/**
+ * True when a stored snapshot predates the account-wide review indexes: it
+ * holds review intents but no `latestReviewRequests`. Such a snapshot cannot
+ * be folded forward correctly, so the caller replays the log from the start.
+ */
+export function snapshotLacksReviewIndex(state: MultiProfileState): boolean {
+  return !state.latestReviewRequests &&
+    Object.values(state.byProfile ?? {}).some((sys) => (sys.reviewRequests?.length ?? 0) > 0);
+}
+
 /** A fresh, empty multi-profile projection. */
 export function emptyMultiProfileState(): MultiProfileState {
   return { seq: 0, ts: "", byProfile: {} };

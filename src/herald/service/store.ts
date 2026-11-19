@@ -9,6 +9,7 @@ import {
   entityRefOf,
   foldEventsMulti,
   reduceMulti,
+  snapshotLacksReviewIndex,
   type AppendEventInput,
   type EventBody,
   type HeraldEvent,
@@ -205,9 +206,10 @@ export class EventStore {
 
   /** Rebuild the multi-profile projection from the latest snapshot + trailing events. */
   private rebuildProjection(): MultiProfileState {
-    const snap = this.db
+    let snap = this.db
       .prepare("SELECT seq, state FROM snapshots ORDER BY seq DESC LIMIT 1")
       .get() as { seq: number; state: string } | undefined;
+    if (snap && snapshotLacksReviewIndex(JSON.parse(snap.state) as MultiProfileState)) snap = undefined;
     const base = snap ? (JSON.parse(snap.state) as MultiProfileState) : emptyMultiProfileState();
     const fromSeq = snap ? snap.seq : 0;
     const trailing = this.readAfter(fromSeq, Number.MAX_SAFE_INTEGER);
@@ -326,9 +328,10 @@ export class EventStore {
 
   /** The multi-profile projection as of `seq` (snapshot ≤ `seq`, folded forward). */
   multiStateAt(seq: number): MultiProfileState {
-    const snap = this.db
+    let snap = this.db
       .prepare("SELECT seq, state FROM snapshots WHERE seq <= ? ORDER BY seq DESC LIMIT 1")
       .get(seq) as { seq: number; state: string } | undefined;
+    if (snap && snapshotLacksReviewIndex(JSON.parse(snap.state) as MultiProfileState)) snap = undefined;
     const base = snap ? (JSON.parse(snap.state) as MultiProfileState) : emptyMultiProfileState();
     const fromSeq = snap ? snap.seq : 0;
     return foldEventsMulti(this.range(fromSeq, seq), base);

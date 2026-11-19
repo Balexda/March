@@ -225,6 +225,8 @@ function ensureInstruments(meter: Meter): void {
     description: "Reviewer rate-limit hits",
     unit: "1",
   });
+  // Zero baseline so rate() shows the first hit instead of waiting for a second.
+  reviewRateLimits.add(0, { reviewer: "coderabbit" });
   tickDuration = meter.createHistogram("march.legate.tick.duration", {
     description: "Legate loop tick wall-clock duration",
     unit: "s",
