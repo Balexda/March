@@ -255,7 +255,7 @@ function deriveReviewState(pr: PrSnapshot, ledger: ReviewLedgerView, backoff: Re
 | Counter `march.legate.review.requests` | Each span | Labels `reviewer`, `outcome`. |
 | Counter `march.legate.review.rate_limited` | Each back-off due to a rate limit | Labels `reviewer`. |
 | Gauge `march.legate.review.cap_remaining` | Each tick | Labels `reviewer`, `window` ∈ `day\|month`. Not exported for an unlimited cap. |
-| Action-log action `review-request` / `review-request-failed` | Mirrors the span | Feeds the existing `march.legate.loop.actions` counter. |
+| Action-log action `review-request` / `review-request-failed` / `review-request-deferred` | Mirrors the span | `review-request` and `review-request-failed` feed the existing `march.legate.loop.actions` counter. `review-request-deferred` records a back-off refusal and is not counted there. |
 
 Example `review.requested`:
 

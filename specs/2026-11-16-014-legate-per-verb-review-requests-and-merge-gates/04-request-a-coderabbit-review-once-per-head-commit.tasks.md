@@ -18,7 +18,7 @@
 
 ### Tasks
 
-- [ ] **Persist review intent and account for the daily budget**
+- [x] **Persist review intent and account for the daily budget**
 
   Add the Review Request Record from data model entity 5 to Herald's event union, ingestion validation, and fold. Give Legate the history needed for per-head suppression and the CodeRabbit UTC daily cap in entity 8.
 
@@ -27,7 +27,7 @@
   - Suppression is scoped to the tracked PR, reviewer, and head. The cap counts all recorded CodeRabbit attempts across profiles, including attempts whose post failed, and starts a new bucket at UTC midnight.
   - An unset CodeRabbit cap is unlimited and zero disables posting. Invalid cap and wait settings fall back with a warning as specified by the environment contract.
 
-- [ ] **Resolve CodeRabbit eligibility from policy and sensed PR state**
+- [x] **Resolve CodeRabbit eligibility from policy and sensed PR state**
 
   Evolve the existing `src/legate/loop/handlers/coderabbit-rereview.ts` coordinator path for AS 4.1–4.8. Use US1 reviewer configuration, US2 verdicts and gate predicates, and US3 classified notices.
 
@@ -37,7 +37,7 @@
   - A COMMENTED review on a new head with no recorded request does not block a FR-020 re-request, for example a thread reply. It also does not hide a stale verdict on an older commit. The stale CHANGES_REQUESTED decides that re-request (SD-004).
   - New-head decisions cover all three FR-020 reasons, including a superseded unanswered request. A stale approval qualifies only when approval is the sole unmet gate. A qualifying stale changes-requested verdict continues to block merge until replaced.
 
-- [ ] **Record intent before posting the review trigger**
+- [x] **Record intent before posting the review trigger**
 
   Wire the CodeRabbit adapter through Legate's injectable GitHub comment seam. Preserve March trigger recognition in sensing and keep the request path independent of merge authorization.
 
@@ -46,7 +46,7 @@
   - The adapter posts only the incremental review command with a recognized March trigger marker. Tests cover the trigger and its exclusion from fix work for AS 4.10. The opted-in live check covers all four SC-008 outcomes.
   - Deterministic tick and restart coverage proves SC-004, including bounded retry, a push before the first verdict, and refusal when the daily cap is exhausted. Account-wide rate-limit detection and back-off updates belong to US5.
 
-- [ ] **Expose review request outcomes and document the contracts**
+- [x] **Expose review request outcomes and document the contracts**
 
   Instrument the request decision for AS 4.9 and align the Legate and Herald subsystem contracts and Legate compose environment header with the shipped behavior.
 

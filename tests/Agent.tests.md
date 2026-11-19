@@ -127,3 +127,22 @@ rm -rf /tmp/march-test-home /tmp/march-test-repo
 - [ ] No `march-spawn-<id>` Docker image is left behind.
 
 Restore the original backend `baseImage` and rebuild before moving on.
+
+---
+
+## Live check for CodeRabbit review requests (SC-008)
+
+Use an opted-in test profile on a repository with CodeRabbit comment-trigger
+reviews and merge rules that allow CodeRabbit's approval to satisfy forge.
+Enable March telemetry. Set the forge reviewer with
+`march profile merge-policy set <profile> --task-type forge --review-request coderabbit`.
+
+Track a forge PR and a non-forge PR in the same profile. Use open, non-draft PRs
+with green CI and no previous CodeRabbit verdict. Leave the forge head unchanged
+and let Legate tick until CodeRabbit reviews and Legate merges it. Check the
+following against the PR timelines, Legate action log, and the slice trace.
+
+- [ ] The forge PR has exactly one `@coderabbitai review` comment with the March marker for its head.
+- [ ] CodeRabbit approved that head before the Legate `pr-auto-merge` action and the PR is merged.
+- [ ] The forge slice trace contains a `legate.review.request` child span with `march.review.outcome=requested`.
+- [ ] The non-forge PR has no March review trigger after the same ticks.

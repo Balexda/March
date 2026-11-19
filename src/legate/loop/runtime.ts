@@ -17,6 +17,7 @@ import os from "node:os";
 import path from "node:path";
 import { recordDwell, recordLoopHeartbeat, recordSpawnBudget } from "../../observability/loop-metrics.js";
 import { stampDwell } from "./pure/dwell.js";
+import { createServiceLogger, resolveServiceLogFilePath } from "../../observability/logger.js";
 import { emitLoopLog } from "../../observability/logs.js";
 import { emitLoopSpan } from "../../observability/loop-spans.js";
 import {
@@ -39,6 +40,8 @@ import { runTick as coordinatorRunTick } from "./coordinator.js";
 import { resolveMaxConcurrentSpawns } from "./meta.js";
 import { SpawnBreaker } from "./spawn-breaker.js";
 import { createSpawnBudget, liveSpawnCount, type SpawnBudget } from "./pure/slice.js";
+import { reviewRequestLimits, type ReviewRequestHistory } from "./handlers/coderabbit-rereview.js";
+import { markedCodeRabbitHead } from "../../observe/coderabbit-review.js";
 import { runHeartbeat } from "./heartbeat.js";
 import { broodRegister as broodRegisterCli, broodRetire as broodRetireCli, broodTeardown as broodTeardownCli } from "./clients/brood.js";
 import { LegateHerald } from "./clients/herald.js";
@@ -492,6 +495,36 @@ async function commentOnPrGh(repoPath: string, prNumber: number, body: string, s
   await execLegateGh("write", ["pr", "comment", String(prNumber), "--body", body], repoPath, sliceId);
 }
 
+async function findCodeRabbitTrigger(repoPath: string, prNumber: number, head: string, sliceId: string): Promise<string | undefined> {
+  const out = await execLegateGh("read", [
+    "api", "--paginate", "--slurp", `repos/{owner}/{repo}/issues/${prNumber}/comments?per_page=100`,
+  ], repoPath, sliceId);
+  const pages = JSON.parse(out);
+  if (!Array.isArray(pages) || !pages.length || !pages.every(Array.isArray)) {
+    throw new Error("Incomplete PR comment history");
+  }
+  let earliest: string | undefined;
+  for (const comment of pages.flat()) {
+    if (markedCodeRabbitHead(comment?.body) !== head) continue;
+    if (!Number.isFinite(Date.parse(comment.created_at))) throw new Error("Trigger missing GitHub timestamp");
+    if (!earliest || Date.parse(comment.created_at) < Date.parse(earliest)) earliest = comment.created_at;
+  }
+  return earliest;
+}
+
+let codeRabbitLimits: ReturnType<typeof reviewRequestLimits> | undefined;
+
+function configuredReviewLimits() {
+  let logger: ReturnType<typeof createServiceLogger> | undefined;
+  return codeRabbitLimits ??= reviewRequestLimits(process.env, (message) => {
+    logger ??= createServiceLogger({
+      serviceName: "march-legate",
+      logFilePath: resolveServiceLogFilePath("legate.jsonl", "MARCH_LEGATE_LOG_DIR"),
+    });
+    logger.warn(message);
+  });
+}
+
 /** Operator requeue (#588): close an open PR with an attribution comment. The
  *  remote branch is deleted separately ({@link deleteRemoteBranchGh}) — `gh pr
  *  close --delete-branch` would also try the local branch, which Brood owns. */
@@ -645,7 +678,7 @@ interface AgentHealthTally {
   healthy: number;
 }
 
-async function tickProfile(rt: ProfileRuntime, spawnBudget?: SpawnBudget): Promise<AgentHealthTally> {
+async function tickProfile(rt: ProfileRuntime, history: ReviewRequestHistory, spawnBudget?: SpawnBudget): Promise<AgentHealthTally> {
   const meta = rt.meta;
   const startedMs = Date.now();
   const herald = legateHerald();
@@ -716,6 +749,11 @@ async function tickProfile(rt: ProfileRuntime, spawnBudget?: SpawnBudget): Promi
     dispatch: dispatchDeps,
     dependencyMerge: dependencyMergeDeps,
     coderabbitRereview: {
+      history,
+      limits: configuredReviewLimits(),
+      now,
+      appendIntent: (record) => herald.append(meta.profile, { type: "review.requested", ...record }),
+      findTrigger: findCodeRabbitTrigger,
       commentOnPr: commentOnPrGh,
     },
     requeue: {
@@ -819,6 +857,13 @@ async function tick() {
     return;
   }
 
+  const reviewHistory: ReviewRequestHistory = {
+    byProfile: Object.assign(Object.create(null), Object.fromEntries(
+      Object.entries(legateHerald().projection?.byProfile ?? {})
+        .map(([profile, state]) => [profile, [...(state.reviewRequests ?? [])]]),
+    )),
+  };
+
   // Seed the GLOBAL concurrent-spawn budget (#313) ONCE per tick from the live
   // spawns carried in by every profile's working state, then thread the SAME
   // mutable budget through each profile's dispatch so the combined fresh launches
@@ -857,7 +902,7 @@ async function tick() {
   for (const rec of profiles) {
     const rt = runtimeFor(rec);
     try {
-      const tally = await tickProfile(rt, spawnBudget);
+      const tally = await tickProfile(rt, reviewHistory, spawnBudget);
       agentHealth.agentDown += tally.agentDown;
       agentHealth.healthy += tally.healthy;
     } catch (err: any) {

@@ -46,7 +46,19 @@ export interface ObservedSession {
  * are defined here from the start so the shared reducer and `POST /events`
  * validation are complete).
  */
+export const REVIEW_REQUEST_REASONS = ["initial", "stale_approval", "stale_changes_requested", "timeout_retry"] as const;
+
+export interface ReviewRequestRecord {
+  sliceId: string;
+  pr: number;
+  reviewer: "coderabbit" | "copilot";
+  headSha: string;
+  at: string;
+  reason: typeof REVIEW_REQUEST_REASONS[number];
+}
+
 export type EventBody =
+  | ({ type: "review.requested" } & ReviewRequestRecord)
   // ── Observation events (Herald) ─────────────────────────────────────────
   /** Per-tick marker; carries the observe wall-clock for `/status`. */
   | { type: "heartbeat"; observeDurationMs?: number }
@@ -211,6 +223,7 @@ export interface EntityRef {
 /** Derive the indexed entity ref for an event body. */
 export function entityRefOf(body: EventBody): EntityRef {
   switch (body.type) {
+    case "review.requested":
     case "slice.pr.changed":
     case "slice.output.changed":
     case "slice.dispatched":
@@ -311,6 +324,7 @@ export interface SliceState {
 
 /** The folded system state — the projection both services read. */
 export interface SystemState {
+  reviewRequests?: ReviewRequestRecord[];
   /** seq of the last event folded in (0 = empty). */
   seq: number;
   /** ts of the last event folded in. */
@@ -435,6 +449,11 @@ export function reduce(state: SystemState, event: HeraldEvent): SystemState {
       state.stateError = null;
       state.statePresent = true;
       break;
+    case "review.requested": {
+      const { sliceId, pr, reviewer, headSha, at, reason } = event;
+      (state.reviewRequests ??= []).push({ sliceId, pr, reviewer, headSha: headSha.toLowerCase(), at, reason });
+      break;
+    }
     case "slice.pr.changed": {
       // Skip a recovered (tombstoned) slice so a stale observation delta can't
       // resurrect a ghost in-flight slice after recovery (#238). Otherwise fold the

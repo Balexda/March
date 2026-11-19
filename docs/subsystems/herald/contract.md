@@ -27,9 +27,11 @@ cannot supersede an approval, a request for changes or a dismissal.
 Herald classifies authors from GitHub's actor type and login without consulting
 the verb's allowlist. The Tessera app and the login configured by
 `MARCH_SELF_BOT_LOGIN` are excluded. The existing aggregate counts and
-CodeRabbit standing are still recorded. `reviews_complete: false` marks
-partial evidence from an unfinished review page walk. Older snapshots can omit
-`reviews` and Herald refreshes them on the next observation.
+CodeRabbit standing are still recorded. The PR snapshot includes `is_draft` and
+GitHub timestamps of raw CodeRabbit reviews and sampled March triggers, grouped
+by head. `reviews_complete: false` marks partial evidence from an unfinished
+review page walk. Herald refreshes older snapshots that lack review verdicts or
+draft status on the next observation.
 
 A Legate `slice.stage.changed` event may include `handledFeedback` with a
 `kind` of `inline` or `conversation` and an array of string `commentIds`.
@@ -97,3 +99,13 @@ This follows the [March vision](../../vision.md) and
   `github_tls_unavailable`. All three fail before any credential is sent.
 - A sync failure that is not a Tessera failure is logged, and the tick observes
   the local checkout.
+
+## Review request intents
+
+`POST /events` accepts Legate's `review.requested` transition with a profile,
+slice ID, positive PR number, reviewer (`coderabbit` or `copilot`), 40-hex
+`headSha`, UTC `at`, and a reason (`initial`, `stale_approval`,
+`stale_changes_requested`, or `timeout_retry`). Each append folds into the owning
+profile's `reviewRequests` history returned by `GET /state`. Repeated attempts
+remain separate records. Legate uses `GET /state?all=1` and the global event
+stream to recover the UTC daily budget across profiles.

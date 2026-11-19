@@ -42,6 +42,7 @@ export interface ReviewerNotice {
   kind: NoticeKind;
   created_at: string;
   reset_at?: string;
+  head_sha?: string;
 }
 
 interface ReviewerComment {
@@ -122,4 +123,10 @@ export function classifyReviewerComment(comment: ReviewerComment): Classificatio
   if (reviewer) return { reviewer: reviewer.id, ...reviewer.classifyComment(comment) };
   if (isCodeRabbitComment(body) || CODERABBIT_LEGACY_MARKER.test(body)) return { kind: "status" };
   return { kind: "feedback" };
+}
+
+
+/** CodeRabbit reports the end of its review range in the progress notice. */
+export function codeRabbitNoticeHead(body: string): string | undefined {
+  return /(?:and|\.\.\.)\s+[\x60]?([a-f0-9]{40})\b/i.exec(body)?.[1]?.toLowerCase();
 }

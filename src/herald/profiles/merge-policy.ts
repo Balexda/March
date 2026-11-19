@@ -26,16 +26,7 @@ export interface MergePolicy {
   readonly codeRabbit?: CodeRabbitPolicy;
 }
 
-/**
- * Policy for CodeRabbit reviews on slice PRs. When `rereview` is true, the
- * legate's coderabbit-rereview handler comments `@coderabbitai review` once per
- * head after the steward pushes past CodeRabbit's `CHANGES_REQUESTED` review, so
- * CodeRabbit can re-review and approve instead of blocking the merge forever.
- * When `initialReview` is true, the same handler also makes the *first* request:
- * it comments `@coderabbitai review` once per head on a slice PR CodeRabbit has
- * not reviewed yet (org-level auto-review is off, so nothing else asks).
- * Neither changes a merge requirement. Both are off by default.
- */
+/** Legacy profile flags retained in stored policies. The forge reviewer row controls review requests. */
 export interface CodeRabbitPolicy {
   readonly rereview?: boolean;
   readonly initialReview?: boolean;

@@ -74,6 +74,20 @@ describe("summarizeCodeRabbit", () => {
     expect(standing?.last_request_at).toBe("2026-11-16T11:00:00Z");
   });
 
+  it("preserves per-head raw review and marked trigger times from GitHub", () => {
+    const head = "a".repeat(40);
+    const old = "b".repeat(40);
+    const trigger = "2026-11-16T09:30:00Z";
+    const answer = "2026-11-16T09:31:00Z";
+    const standing = summarizeCodeRabbit(
+      [review("CHANGES_REQUESTED", old, trigger), review("COMMENTED", head, answer)],
+      [comment(reviewRequestBody(head), answer), comment(reviewRequestBody(head), trigger)],
+    );
+    expect(standing?.decision_commit_sha).toBe(old);
+    expect(standing?.review_times_by_head).toEqual({ [head]: answer, [old]: trigger });
+    expect(standing?.trigger_times_by_head).toEqual({ [head]: trigger });
+  });
+
   it("reports a COMMENTED-only history as reviewed, with no decision", () => {
     expect(summarizeCodeRabbit([review("COMMENTED", "c0ffee", "2026-11-16T10:00:00Z")], [])).toEqual({
       decision: null,

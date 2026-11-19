@@ -27,6 +27,8 @@
 #   MARCH_HERALD_URL  herald base URL (profile registry + event inbox/write).
 #   MARCH_BROOD_URL   brood base URL (teardown requests).
 #   MARCH_HATCHERY_URL hatchery base URL (spawn requests).
+#   MARCH_CODERABBIT_REVIEWS_PER_DAY  UTC daily attempt cap across profiles (unset = unlimited, 0 disables).
+#   MARCH_REVIEW_WAIT_MINUTES  Minimum wait before an unanswered request can retry (default 30).
 #   MARCH_SELF_BOT_LOGIN  March's bot login (default march-bot). Use the same
 #                         value in Herald for reviewer exclusion and policy validation.
 #   Merge policy is read from Herald each tick. Cut skips approval by default.
@@ -54,6 +56,8 @@ services:
     ports:
       - "127.0.0.1:8787:8787" # localhost only — never public (legate HTTP API)
     environment:
+      - MARCH_CODERABBIT_REVIEWS_PER_DAY=${MARCH_CODERABBIT_REVIEWS_PER_DAY:-}
+      - MARCH_REVIEW_WAIT_MINUTES=${MARCH_REVIEW_WAIT_MINUTES:-30}
       - MARCH_SELF_BOT_LOGIN=${MARCH_SELF_BOT_LOGIN:-march-bot}
       - MARCH_OTEL=1
       - MARCH_OTEL_ENDPOINT=http://otel-lgtm:4318

@@ -14,7 +14,7 @@ import { emitLoopSpan as defaultEmitLoopSpan } from "../../observability/loop-sp
 import { emitLoopLog as defaultEmitLoopLog, type LoopLogSeverity } from "../../observability/logs.js";
 import {
   recordDependencyUnblock as defaultRecordDependencyUnblock,
-  recordCodeRabbitRereview as defaultRecordCodeRabbitRereview,
+  recordReviewRequest as defaultRecordReviewRequest,
   type DependencyUnblockOutcome,
   type LoopMetricsSnapshot,
   type LoopTickActivity,
@@ -40,20 +40,17 @@ export function dependencyUnblockOutcome(action: string): DependencyUnblockOutco
 
 /**
  * Fold one action-log event into the event-driven loop counters: the Dependabot
- * conflict ladder's outcome counter (#573) and the CodeRabbit re-review counter.
+ * conflict ladder's outcome counter (#573) and the review request counter.
  * The per-tick counters come from the heartbeat instead ({@link buildLoopTickActivity}).
  */
 export function recordActionEventMetrics(
   event: any,
   record: typeof defaultRecordDependencyUnblock = defaultRecordDependencyUnblock,
-  recordRereview: typeof defaultRecordCodeRabbitRereview = defaultRecordCodeRabbitRereview,
+  recordReview: typeof defaultRecordReviewRequest = defaultRecordReviewRequest,
 ): void {
   if (!event || typeof event !== "object") return;
-  if (event.kind === "coderabbit_rereview" || event.kind === "coderabbit_rereview_failure") {
-    recordRereview(
-      event.kind === "coderabbit_rereview" ? "requested" : "failed",
-      event.processor ? String(event.processor) : undefined,
-    );
+  if (event.kind === "review_request") {
+    recordReview("coderabbit", event.outcome);
     return;
   }
   if (event.kind !== "dependency_merge" && event.kind !== "dependency_merge_failure") return;
@@ -135,15 +132,19 @@ export function emitActionEventSpan(event: any, emit: LoopSpanEmitter = defaultE
     emit({ name: "legate.dispatch", traceKey: sliceId, root: true, error: true, attributes: { "march.slice_id": sliceId, "march.action": "dispatch", "march.dispatch_mode": "spawn", "march.error": event.error || "dispatch launch failed" } });
   } else if (event.kind === "babysit_action") {
     emit({ name: "legate.babysit", traceKey: sliceId, root: false, attributes: { "march.slice_id": sliceId, "march.action": event.action || "", "march.pr_number": event.pr_number || "" } });
-  } else if (event.kind === "coderabbit_rereview" || event.kind === "coderabbit_rereview_failure") {
-    // Asking CodeRabbit to re-review acts on the slice's PR, so it nests under the
-    // slice's trace; a failed comment marks the span errored.
+  } else if (event.kind === "review_request") {
     emit({
-      name: "legate.coderabbit-rereview",
+      name: "legate.review.request",
       traceKey: sliceId,
       root: false,
-      error: event.kind === "coderabbit_rereview_failure",
-      attributes: { "march.slice_id": sliceId, "march.action": event.action || "", "march.pr_number": event.pr_number || "" },
+      error: event.outcome === "failed" || event.outcome === "cap_exhausted",
+      attributes: {
+        "march.slice_id": sliceId,
+        "march.task_type": "forge",
+        "march.review.reviewer": "coderabbit",
+        "march.review.outcome": event.outcome,
+        "march.review.reason": event.reason,
+      },
     });
   } else if (event.kind === "cleanup") {
     emit({ name: "legate.cleanup", traceKey: sliceId, root: false, attributes: { "march.slice_id": sliceId, "march.pr_state": event.pr_state || "" } });
@@ -194,7 +195,7 @@ export function emitActionEventLog(event: any, emit: LoopLogEmitter = defaultEmi
   if (!event || typeof event !== "object" || !event.kind) return;
   const kind = String(event.kind);
   const severity: LoopLogSeverity =
-    kind.endsWith("_failure") || kind === "sync_warning" ? "ERROR" : "INFO";
+    kind.endsWith("_failure") || kind === "sync_warning" || (kind === "review_request" && ["failed", "cap_exhausted"].includes(event.outcome)) ? "ERROR" : "INFO";
   const detail =
     event.detail || event.error || event.action || event.title || "";
   emit({
