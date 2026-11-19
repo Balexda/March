@@ -47,6 +47,24 @@ Providers implement `start`, `issue`, and `status` behind `CredentialProvider`.
 The registry always exposes `github-app` and `github-user`; a slot without an
 implementation reports `unconfigured`. The user provider is reserved for US7.
 
+The App provider caches successful installation bindings by owner and keeps
+tokens in memory by installation, repository and fixed permission set. Requests
+reuse a token with at least ten minutes remaining and share an in-flight mint
+for the same scope. Below ten minutes the provider attempts a new mint. If GitHub
+is unavailable, the provider can still serve the matching token until its GitHub
+expiry. Status reports the provider as degraded, and the successful HTTP response
+still records an errored issuance span with `cache: hit` and reason
+`provider_unavailable`. With no live matching token, the request returns the
+bounded 503 error. `cache.entries` counts live tokens across providers.
+A repository exclusion returned during minting forces a new installation lookup
+on the next request for that repository when there is no configured override.
+
+`refresh: true` evicts the matching token and supersedes any pending ordinary
+mint for that scope. An explicit refresh fails with the mint error if GitHub
+cannot issue a replacement. `GithubAppProvider.reload(credentials)` clears cached
+tokens and installation bindings, invalidates older in-flight work and derives
+the bot identity again. US3 supplies secret-store change detection.
+
 ### Runtime and packaging
 
 `npm run build:tessera-image` builds `docker/tessera.Dockerfile` through

@@ -3,6 +3,13 @@ import { generateKeyPairSync, createVerify } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { GithubAppProvider } from "./github-app.js";
 import { ACCESS_PROFILES } from "./models.js";
+/** Node 20 lacks Promise.withResolvers (CI runs l0 on Node 20). */
+function withResolvers<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; });
+  return { promise, resolve, reject };
+}
 const { privateKey, publicKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
 const pem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
 const now = Date.parse("2026-11-15T00:00:00Z");
@@ -46,6 +53,135 @@ describe("GitHub App provider", () => {
     const transport = fake(); const app = provider(transport, { installationId: 42 });
     await app.start(); await app.issue({ identity: "app", access: "read", repo: "acme/widgets" });
     expect(transport.mock.calls).toHaveLength(3);
+  });
+  it("rediscovers a stale owner binding after GitHub rejects the installation", async () => {
+    const transport = fake();
+    const app = provider(transport);
+    const request = { identity: "app", access: "read", repo: "acme/widgets" } as const;
+    await app.issue(request);
+
+    transport.mockResolvedValueOnce(Response.json({}, { status: 404 }));
+    await expect(app.issue({ ...request, refresh: true })).rejects.toMatchObject({ code: "repo_not_installed" });
+
+    transport.mockImplementation(fake({
+      "/repos/acme/widgets/installation": [200, { id: 43 }],
+      "/app/installations/43/access_tokens": [201, {
+        token: "replacement-installation-token",
+        expires_at: "2026-11-15T01:00:00Z",
+        repositories: [{ full_name: "acme/widgets" }],
+      }],
+    }));
+    await expect(app.issue(request)).resolves.toMatchObject({ token: "replacement-installation-token" });
+  });
+  it("keeps cached tokens separate by repository and permissions", async () => {
+    const transport = fake();
+    const mint = vi.fn(async (init?: RequestInit) => {
+      const { repositories: [repository], permissions } = JSON.parse(String(init?.body));
+      return Response.json({
+        token: `token-${repository}-${permissions.contents}`,
+        expires_at: "2026-11-15T01:00:00Z",
+        repositories: [{ full_name: `acme/${repository}` }],
+      });
+    });
+    const defaults = transport.getMockImplementation()!;
+    transport.mockImplementation((url, init) => new URL(String(url)).pathname.endsWith("/access_tokens") ?
+      mint(init) : defaults(url, init));
+    const app = provider(transport, { installationId: 42 });
+    const scopes = [
+      { repo: "acme/widgets", access: "read", token: "token-widgets-read" },
+      { repo: "acme/widgets", access: "write", token: "token-widgets-write" },
+      { repo: "acme/gadgets", access: "read", token: "token-gadgets-read" },
+    ] as const;
+    for (const cache of ["miss", "hit"]) {
+      for (const { repo, access, token } of scopes) {
+        await expect(app.issue({ identity: "app", repo, access })).resolves.toMatchObject({ token, cache });
+      }
+    }
+    expect(mint).toHaveBeenCalledTimes(3);
+  });
+  it("supersedes an in-flight proactive mint on explicit refresh", async () => {
+    let time = now;
+    const transport = fake();
+    const app = provider(transport, { installationId: 42, now: () => time });
+    const request = { identity: "app", repo: "acme/widgets", access: "read" } as const;
+    await app.start();
+    await app.issue(request);
+    time += 51 * 60_000;
+
+    const started = withResolvers<void>();
+    const delayed = withResolvers<Response>();
+    transport.mockImplementationOnce(() => {
+      started.resolve();
+      return delayed.promise;
+    });
+    const superseded = app.issue(request);
+    const rejected = expect(superseded).rejects.toMatchObject({ code: "provider_unavailable" });
+    try {
+      await started.promise;
+      transport.mockResolvedValueOnce(Response.json({
+        token: "explicit-token",
+        expires_at: "2026-11-15T01:51:00Z",
+        repositories: [{ full_name: request.repo }],
+      }));
+      await expect(app.issue({ ...request, refresh: true })).resolves.toMatchObject({ token: "explicit-token", cache: "miss" });
+    } finally {
+      delayed.resolve(Response.json({
+        token: "superseded-token",
+        expires_at: "2026-11-15T01:51:00Z",
+        repositories: [{ full_name: request.repo }],
+      }));
+      await rejected;
+    }
+    await expect(app.issue(request)).resolves.toMatchObject({ token: "explicit-token", cache: "hit" });
+  });
+  it("reloads identity and installation bindings and discards a prior credential's in-flight mint", async () => {
+    const transport = fake({
+      "/users/replacement%5Bbot%5D": [200, { id: 456, login: "replacement[bot]" }],
+      "/app/installations/84/access_tokens": [201, {
+        token: "replacement-token",
+        expires_at: "2026-11-15T01:00:00Z",
+        repositories: [{ full_name: "acme/widgets" }],
+      }],
+    });
+    const app = provider(transport);
+    const request = { identity: "app", access: "read", repo: "acme/widgets" } as const;
+    await app.start();
+    await app.issue(request);
+    const started = withResolvers<void>();
+    const delayed = withResolvers<Response>();
+    transport.mockImplementationOnce(() => {
+      started.resolve();
+      return delayed.promise;
+    });
+    const superseded = app.issue({ ...request, access: "write" });
+    const rejected = expect(superseded).rejects.toMatchObject({ code: "provider_unavailable" });
+    try {
+      await started.promise;
+      transport.mockResolvedValueOnce(Response.json({ slug: "replacement" }));
+      const replacementKey = generateKeyPairSync("rsa", { modulusLength: 2048 }).privateKey;
+      await app.reload({ appId: "10", privateKey: replacementKey.export({ type: "pkcs8", format: "pem" }).toString() });
+      expect(app.cacheSize()).toBe(0);
+      transport.mockResolvedValueOnce(Response.json({ id: 84 }));
+      await expect(app.issue(request)).resolves.toMatchObject({
+        token: "replacement-token",
+        identity: "replacement[bot]",
+        commitIdentity: { name: "replacement[bot]", email: "456+replacement[bot]@users.noreply.github.com" },
+        cache: "miss",
+      });
+      expect(transport.mock.calls.slice(-4).map(([url]) => new URL(String(url)).pathname)).toEqual([
+        "/app", "/users/replacement%5Bbot%5D", "/repos/acme/widgets/installation", "/app/installations/84/access_tokens",
+      ]);
+    } finally {
+      delayed.resolve(Response.json({
+        token: "superseded-token",
+        expires_at: "2026-11-15T01:00:00Z",
+        repositories: [{ full_name: request.repo }],
+      }));
+      await rejected;
+    }
+    expect(app.cacheSize()).toBe(1);
+    expect(app.status()).toMatchObject({ state: "ok", login: "replacement[bot]", last_error: null });
+    await expect(app.issue(request)).resolves.toMatchObject({ token: "replacement-token", cache: "hit" });
   });
   it.each([404, 422])("rejects excluded or absent repository with %i", async status => {
     const app = provider(fake({ "/app/installations/42/access_tokens": [status, { message: "secret upstream content" }] }), { installationId: 42 });
