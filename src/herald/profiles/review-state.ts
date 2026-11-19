@@ -2,7 +2,7 @@ import type { CodeRabbitStanding } from "../../observe/coderabbit-review.js";
 import { reviewerIdForBot, type ReviewerNotice } from "../../observe/review-bot-comments.js";
 import type { ReviewObservation } from "../../observe/sense-io.js";
 import type { MultiProfileState, ReviewRequestRecord } from "../events.js";
-import { normalizeBotLogin, type ResolvedMergeRequirements, type ReviewerConfig } from "./merge-policy.js";
+import { CODERABBIT_LOGIN, normalizeBotLogin, type ResolvedMergeRequirements, type ReviewerConfig } from "./merge-policy.js";
 
 export type ReviewState = "none" | "requested" | "in_progress" | "approved_by_bot" | "changes_requested" | "rate_limited";
 
@@ -11,6 +11,8 @@ export interface ReviewSnapshot {
   head_sha?: string | null;
   reviews?: readonly ReviewObservation[];
   reviews_complete?: boolean;
+  /** Legacy snapshots, written before per-review verdicts, carry only a count. */
+  changes_requested_count?: unknown;
   reviewer_notices?: readonly ReviewerNotice[];
   coderabbit?: CodeRabbitStanding | null;
 }
@@ -30,14 +32,21 @@ function noticeOnHead(
 ): boolean {
   if (notice.head_sha) return notice.head_sha.toLowerCase() === head;
 
-  // As in the request handler, a marked CodeRabbit trigger preceding the notice
-  // identifies its head. Without a marker, conflicting head evidence makes
-  // attribution unsafe.
-  const preceding = Object.entries(standing?.trigger_times_by_head ?? {})
-    .filter(([, time]) => Date.parse(time) <= Date.parse(notice.created_at))
-    .sort(([, left], [, right]) => Date.parse(right) - Date.parse(left))[0];
+  // As in the request handler, the latest marked CodeRabbit trigger preceding
+  // the notice identifies its head. Without a marker, conflicting head evidence
+  // makes attribution unsafe. Prefer the chronological history; older snapshots
+  // only have the earliest trigger per head.
+  const noticeMs = Date.parse(notice.created_at);
+  const history = standing?.trigger_history ??
+    Object.entries(standing?.trigger_times_by_head ?? {}).map(([sha, at]) => ({ head_sha: sha, at }));
+  const preceding = history
+    .filter(({ at }) => Date.parse(at) <= noticeMs)
+    .reduce<{ head_sha: string; at: string } | undefined>(
+      (latest, trigger) => !latest || Date.parse(trigger.at) >= Date.parse(latest.at) ? trigger : latest,
+      undefined,
+    );
   const verdictHead = standing?.decision_commit_sha?.toLowerCase();
-  return preceding ? preceding[0] === head
+  return preceding ? preceding.head_sha.toLowerCase() === head
     : requests.every((record) => record.headSha === head) && (!verdictHead || verdictHead === head);
 }
 
@@ -55,6 +64,14 @@ export function deriveReviewState(
   const reviews = (pr.reviews ?? []).filter((review) => normalizeBotLogin(review.login) !== policy.selfLogin);
   const allowedBot = (review: ReviewObservation) => review.author_kind === "bot" &&
     policy.requirements.botApprovers.includes(normalizeBotLogin(review.login));
+  if (!pr.reviews) {
+    // Snapshots written before per-review verdicts: keep the blockers the merge
+    // gate's legacy fallback keeps. Approval is never inferred from them.
+    const legacyBotBlock = policy.selfLogin !== CODERABBIT_LOGIN &&
+      policy.requirements.botApprovers.includes(CODERABBIT_LOGIN) &&
+      pr.coderabbit?.decision_is_bot === true && pr.coderabbit.decision === "CHANGES_REQUESTED";
+    if (Number(pr.changes_requested_count ?? 0) > 0 || legacyBotBlock) return "changes_requested";
+  }
   if (reviews.some((review) => review.state === "CHANGES_REQUESTED" &&
       (review.author_kind === "human" || allowedBot(review)))) return "changes_requested";
 

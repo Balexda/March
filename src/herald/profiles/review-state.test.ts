@@ -73,6 +73,35 @@ describe("deriveReviewState", () => {
     expect(derive({ ...snapshot, coderabbit: standing }, [request])).toBe("requested");
   });
 
+  it("attributes a SHA-less notice to the latest preceding trigger when triggers alternate heads", () => {
+    const at = (minute: number) => `2026-11-19T11:${String(minute).padStart(2, "0")}:00Z`;
+    const snapshot = { ...pr, reviewer_notices: [{ ...notice, head_sha: undefined, created_at: at(45) }] };
+    const standing = {
+      decision: null, decision_commit_sha: null, decision_at: null,
+      last_review_commit_sha: null, last_request_at: null, last_request_sha: null,
+      // The earliest trigger per head alone would point at oldHead (11:35 > 11:00).
+      trigger_times_by_head: { [head]: at(0), [oldHead]: at(35) },
+      trigger_history: [
+        { head_sha: head, at: at(0) }, { head_sha: oldHead, at: at(35) },
+        { head_sha: head, at: at(40) }, { head_sha: oldHead, at: at(50) },
+      ],
+    };
+    expect(derive({ ...snapshot, coderabbit: standing }, [request])).toBe("in_progress");
+    const { trigger_history: _history, ...legacy } = standing;
+    expect(derive({ ...snapshot, coderabbit: legacy }, [request])).toBe("requested");
+  });
+
+  it("keeps legacy blockers on snapshots without per-review verdicts and never infers approval", () => {
+    expect(derive({ ...pr, changes_requested_count: 1 }, [request])).toBe("changes_requested");
+    const standing = {
+      decision: "CHANGES_REQUESTED", decision_commit_sha: head, decision_is_bot: true, decision_at: recent,
+      last_review_commit_sha: head, last_request_at: null, last_request_sha: null,
+    } as const;
+    expect(derive({ ...pr, coderabbit: standing }, [request])).toBe("changes_requested");
+    expect(derive({ ...pr, changes_requested_count: 1, reviews: [] }, [request])).toBe("requested");
+    expect(derive({ ...pr, changes_requested_count: 0 }, [request])).toBe("requested");
+  });
+
   it("requires an allowlisted bot for approval and a configured reviewer for back-off", () => {
     const lookalike = { ...approval, author_kind: "human" } as const;
     const copilot = { ...approval, login: "copilot-pull-request-reviewer[bot]" };

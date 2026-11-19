@@ -78,10 +78,21 @@ describe("march CLI", () => {
   });
 
   it.skipIf(!sqliteAvailable)("shows review state in the Herald table and historical JSON", async () => {
-    const { app, store, profileStore } = await buildHeraldServer({
-      storeOptions: { dbPath: ":memory:", defaultProfile: "alpha", snapshotEvery: 2 },
-      profileStoreOptions: { dbPath: ":memory:" },
-    });
+    // Herald captures the review window at construction; pin it so an operator's
+    // MARCH_REVIEW_WAIT_MINUTES cannot shift the fixture's expiry boundary.
+    const priorWait = process.env.MARCH_REVIEW_WAIT_MINUTES;
+    process.env.MARCH_REVIEW_WAIT_MINUTES = "30";
+    let server: Awaited<ReturnType<typeof buildHeraldServer>>;
+    try {
+      server = await buildHeraldServer({
+        storeOptions: { dbPath: ":memory:", defaultProfile: "alpha", snapshotEvery: 2 },
+        profileStoreOptions: { dbPath: ":memory:" },
+      });
+    } finally {
+      if (priorWait === undefined) delete process.env.MARCH_REVIEW_WAIT_MINUTES;
+      else process.env.MARCH_REVIEW_WAIT_MINUTES = priorWait;
+    }
+    const { app, store, profileStore } = server;
     try {
       const base = { repoName: "repo", repoPath: "/repo", workerGroup: "workers" };
       profileStore.register({ ...base, profile: "alpha", mergePolicy: {

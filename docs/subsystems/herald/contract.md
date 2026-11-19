@@ -138,7 +138,9 @@ stored in a PR snapshot.
 
 In precedence order, the values are `changes_requested`, `approved_by_bot`,
 `rate_limited`, `in_progress`, `requested`, and `none`. A PR without a head
-SHA reports `none`. `MARCH_REVIEW_WAIT_MINUTES` sets the request and progress
+SHA reports `none`. A legacy snapshot without per-review verdicts reports
+`changes_requested` from its blocker count or verified CodeRabbit blocker, and
+never reports a bot approval. `MARCH_REVIEW_WAIT_MINUTES` sets the request and progress
 window and defaults to 30 minutes. The latest projection uses the current
 clock. A projection at `?at=<seq>` uses only the event history through that
 sequence and evaluates deadlines at the resulting fold's timestamp, using
