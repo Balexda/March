@@ -54,6 +54,19 @@ function githubHttps(url) {
   return "https://github.com" + parsed.pathname.replace(/\/$/, "");
 }
 
+const TRANSPORT_COMMANDS = new Set(["clone", "fetch", "pull", "push", "ls-remote"]);
+// Global options whose value is the following argument.
+const GLOBAL_VALUE_OPTIONS = new Set(["-C", "-c", "--git-dir", "--work-tree", "--namespace",
+  "--super-prefix"]);
+
+function subcommandIndex(args) {
+  for (let i = 0; i < args.length; i++) {
+    if (GLOBAL_VALUE_OPTIONS.has(args[i])) i++;
+    else if (!args[i].startsWith("-")) return i;
+  }
+  return -1;
+}
+
 function run() {
   const git = realGit();
   const args = process.argv.slice(2);
@@ -116,9 +129,15 @@ function run() {
       ["http.https://github.com/.followRedirects", "false"],
     );
 
-    // An explicit URL follows the same policy as a configured remote.
-    const normalizedArgs = args.map(arg => {
+    // An explicit transport URL follows the same policy as a configured remote.
+    // Only transport subcommands take URL operands; patterns, messages and
+    // other command data must reach Git unchanged.
+    const command = subcommandIndex(args);
+    const transport = command >= 0 && TRANSPORT_COMMANDS.has(args[command]);
+    const normalizedArgs = args.map((arg, i) => {
+      if (!transport || i <= command) return arg;
       const prefix = arg.startsWith("--repo=") ? "--repo=" : "";
+      if (!prefix && arg.startsWith("-")) return arg;
       const normalized = githubHttps(arg.slice(prefix.length));
       return normalized ? prefix + normalized : arg;
     });

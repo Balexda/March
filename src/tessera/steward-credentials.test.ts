@@ -239,6 +239,28 @@ describe("steward GitHub CLI shim", { timeout: 30_000 }, () => {
   });
 });
 
+describe("steward Git shim", { timeout: 30_000 }, () => {
+  const gitShim = resolve(import.meta.dirname, "../templates/steward/bin/git");
+
+  it("passes GitHub URLs in non-transport command data through unchanged", async () => {
+    await setOrigin("git@github.com:acme/widgets.git");
+    for (const [name, value] of [["user.name", "Operator"], ["user.email", "operator@example.test"]]) {
+      expect((await run("git", ["config", name, value])).code).toBe(0);
+    }
+    await writeFile(join(cwd, "README.md"), "see https://github.com/acme/widgets\n");
+    expect((await run("git", ["add", "README.md"])).code).toBe(0);
+
+    const message = "http://github.com/acme/widgets";
+    const commit = await run(process.execPath, [gitShim, "commit", "-q", "-m", message]);
+    expect(commit.code, commit.stderr).toBe(0);
+    expect((await run("git", ["log", "-1", "--format=%s"])).stdout.trim()).toBe(message);
+
+    const grep = await run(process.execPath, [gitShim, "-C", cwd, "grep", "-F", "https://github.com"]);
+    expect(grep).toEqual({ code: 0, stdout: "README.md:see https://github.com/acme/widgets\n", stderr: "" });
+    expect(requests).toEqual([]);
+  });
+});
+
 describe("Tessera Git credential helper", { timeout: 30_000 }, () => {
   it("returns app/write credentials for the actual HTTPS request and ignores approve/reject", async () => {
     await listen();
