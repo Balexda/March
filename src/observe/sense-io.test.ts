@@ -465,6 +465,32 @@ describe("queryPrForBabysit", () => {
       ]);
     });
 
+    it("marks evidence incomplete when a changes-requested review has no author", async () => {
+      const { pr } = query(() => {
+        const result = secondPage("head1");
+        result.data.repository.pullRequest.reviews.nodes = [
+          review("APPROVED", "2026-11-16T10:00:00Z", "head1", "alice"),
+          { state: "CHANGES_REQUESTED", submittedAt: "2026-11-16T11:00:00Z", commit: { oid: "head1" }, author: null } as any,
+        ];
+        return JSON.stringify(result);
+      });
+      expect((await pr).reviews_complete).toBe(false);
+    });
+
+    it("ignores an approval with no author without marking evidence incomplete", async () => {
+      const { pr } = query(() => {
+        const result = secondPage("head1");
+        result.data.repository.pullRequest.reviews.nodes = [
+          { state: "APPROVED", submittedAt: "2026-11-16T11:00:00Z", commit: { oid: "head1" }, author: null } as any,
+          { state: "PENDING", submittedAt: null, commit: { oid: "head1" }, author: null } as any,
+        ];
+        return JSON.stringify(result);
+      });
+      const result = await pr;
+      expect(result.reviews_complete).toBe(true);
+      expect(result.reviews.map((r: any) => r.login)).toEqual(["someone"]);
+    });
+
     it("walks past five pages to reach a late verdict", async () => {
       let calls = 0;
       routeExec((_cmd, args) => {

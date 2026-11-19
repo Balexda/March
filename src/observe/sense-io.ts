@@ -215,14 +215,24 @@ export interface ReviewObservation {
   submitted_at: string;
 }
 
-function observeReviews(nodes: readonly any[], marchLogins: ReadonlySet<string>): ReviewObservation[] {
+function observeReviews(
+  nodes: readonly any[],
+  marchLogins: ReadonlySet<string>,
+): { observations: ReviewObservation[]; complete: boolean } {
   const latest = new Map<string, ReviewObservation>();
+  let complete = true;
   for (const node of nodes) {
     const author = node?.author;
-    if (typeof author?.login !== "string" || typeof node.submittedAt !== "string" || !node.submittedAt) continue;
-    const login = normalizeBotLogin(author.login);
-    if (!login || marchLogins.has(login)) continue;
-    const state = node.state;
+    const state = node?.state;
+    const login = typeof author?.login === "string" ? normalizeBotLogin(author.login) : "";
+    if (!login || typeof node.submittedAt !== "string" || !node.submittedAt) {
+      // A blocker whose author or time is unknown can be neither attributed nor
+      // superseded, so it leaves the evidence incomplete rather than vanishing.
+      // An unattributable approval is simply not counted.
+      if (state === "CHANGES_REQUESTED") complete = false;
+      continue;
+    }
+    if (marchLogins.has(login)) continue;
     if (state !== "APPROVED" && state !== "CHANGES_REQUESTED" && state !== "DISMISSED" && state !== "COMMENTED") continue;
     const authorKind = isBotActor({ ...author, login: author.login.toLowerCase() }) ? "bot" : "human";
     // A bare user login can match the slug of a separate GitHub App.
@@ -241,7 +251,9 @@ function observeReviews(nodes: readonly any[], marchLogins: ReadonlySet<string>)
       submitted_at: node.submittedAt,
     });
   }
-  return [...latest.values()].sort((a, b) => a.login.localeCompare(b.login) || a.author_kind.localeCompare(b.author_kind));
+  const observations = [...latest.values()]
+    .sort((a, b) => a.login.localeCompare(b.login) || a.author_kind.localeCompare(b.author_kind));
+  return { observations, complete };
 }
 
 function truncateText(text: any, max = 4000): string {
@@ -607,13 +619,15 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
         ),
       }];
     });
+    const observed = observeReviews(reviewNodes, new Set([
+      selfBotLogin(env),
+      ...(appLogin ? [normalizeBotLogin(appLogin)] : []),
+    ]));
+    if (!observed.complete) reviewsComplete = false;
     return {
       threads,
       reviews: reviewNodes.filter((review: any) => !isApp(review?.author)),
-      reviewObservations: observeReviews(reviewNodes, new Set([
-        selfBotLogin(env),
-        ...(appLogin ? [normalizeBotLogin(appLogin)] : []),
-      ])),
+      reviewObservations: observed.observations,
       comments,
       reviewerNotices,
       codexReview,
