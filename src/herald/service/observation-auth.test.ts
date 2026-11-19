@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
 import { TesseraClient } from "../../tessera/client.js";
 import { buildServer, observeProfiles } from "./server.js";
+import { sqliteAvailable } from "./sqlite.js";
 
 const { execFile, startHeraldSpan } = vi.hoisted(() => ({
   execFile: vi.fn(),
@@ -25,7 +26,7 @@ afterEach(() => {
   vi.resetAllMocks();
 });
 
-it.each([false, true])("observes independent profiles with scoped credentials (sync: %s)", async (sync) => {
+it.skipIf(!sqliteAvailable).each([false, true])("observes independent profiles with scoped credentials (sync: %s)", async (sync) => {
   const home = mkdtempSync(join(tmpdir(), "herald-auth-test-"));
   const operatorConfig = join(home, ".config", "gh");
   mkdirSync(operatorConfig, { recursive: true });
