@@ -597,11 +597,12 @@ export function recordDependencyUnblock(outcome: DependencyUnblockOutcome, proce
 
 export type ReviewRequestOutcome = "requested" | "failed" | "cap_exhausted" | "backoff";
 
-export function recordReviewCaps(samples: readonly ReviewCapSample[]): void {
+/** Takes a thunk so the history scan is skipped entirely when telemetry is off. */
+export function recordReviewCaps(samples: () => readonly ReviewCapSample[]): void {
   const otel = getActiveOtel();
-  if (!otel.enabled) return;
+  if (!otel?.enabled) return;
   ensureInstruments(otel.getMeter());
-  latestReviewCaps = samples;
+  latestReviewCaps = samples();
 }
 
 export function recordReviewRequest(reviewer: "coderabbit", outcome: ReviewRequestOutcome): void {

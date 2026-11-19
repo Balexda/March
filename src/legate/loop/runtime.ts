@@ -966,7 +966,7 @@ async function tick() {
 
   // The shared history includes the durable intents acknowledged during this tick.
   try {
-    recordReviewCaps(reviewCapSamples(reviewHistory.byProfile, configuredReviewLimits(), now()));
+    recordReviewCaps(() => reviewCapSamples(reviewHistory.byProfile, configuredReviewLimits(), now()));
   } catch {
     // Telemetry must never break the loop.
   }
