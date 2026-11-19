@@ -595,7 +595,7 @@ groups:
       # Two conditions: sync is failing (auth, diverged branch, offline), or no
       # sync has succeeded at all while Herald is alive.
       - uid: march-herald-sync-failing
-        title: Herald default-branch sync failing (errors in 15m)
+        title: Herald default-branch sync failing (sustained errors across profiles, 15m)
         condition: C
         for: 15m
         noDataState: OK
@@ -603,11 +603,12 @@ groups:
         labels: { severity: warning, team: march }
         annotations:
           summary: >-
-            Herald's default-branch sync has failed repeatedly for at least one
-            profile (march_herald_sync_total{outcome="error"}). That checkout is
-            drifting behind origin, so merged work will not surface. `docker logs
-            march-herald` shows the per-profile failure; `march doctor` reports
-            which repo is behind.
+            Herald's default-branch syncs have kept failing for 15 minutes
+            (march_herald_sync_total{outcome="error"}, summed across all
+            profiles; the metric has no profile label). Affected checkouts may
+            drift behind origin, so merged work will not surface. `docker logs
+            march-herald` names each failing profile and the git error; `march
+            doctor` reports which repo is actually behind.
         data:
           - refId: A
             relativeTimeRange: { from: 900, to: 0 }

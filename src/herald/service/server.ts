@@ -102,7 +102,7 @@ function resolveMetaPath(
 
 /** A profile's observe deps: the read-only {@link SenseDeps} plus the
  *  Herald-owned default-branch sync (#300). */
-interface ObserveDeps {
+export interface ObserveDeps {
   readonly senseDeps: SenseDeps;
   readonly syncDefaultBranch: (repoPath: string, knownDefault?: string) => Promise<void>;
 }
@@ -116,7 +116,7 @@ interface ObserveDeps {
  * repo is to remove the profile (`march profile remove`), which also stops March
  * acting on it.
  */
-function buildObserveDeps(meta: LoopMeta, app: FastifyInstance): ObserveDeps {
+export function buildObserveDeps(meta: LoopMeta, app: FastifyInstance): ObserveDeps {
   const io = createSenseIo({
     meta,
     warn: (message: string) => app.log.warn({ component: "observe" }, message),

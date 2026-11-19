@@ -504,7 +504,7 @@
         "type": "prometheus",
         "uid": "prometheus"
       },
-      "description": "Herald's per-tick default-branch git sync (fetch + fast-forward) across every active profile, by outcome. Sync is always on (#601); a sustained error line means a profile checkout is drifting behind origin and merged work will not surface.",
+      "description": "Herald's per-tick default-branch git sync attempts (fetch + fast-forward) across every active profile, by outcome. Sync is always on (#601). This counts attempts, not branch lag: sustained failures can leave a checkout behind origin, so merged work stops surfacing. Run `march doctor` to see whether any repo is actually behind.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -652,7 +652,7 @@
         "type": "prometheus",
         "uid": "prometheus"
       },
-      "description": "Successful default-branch syncs in the last 15m. Herald syncs every active profile on each observe tick, so zero while Herald is up means no profile is being kept current (the march-herald-sync-stalled alert).",
+      "description": "Successful default-branch syncs in the last 15m. Herald syncs every active profile on each observe tick. Zero is expected when no profiles are registered; with at least one active profile it means no checkout is being kept current (the march-herald-sync-stalled alert). Check `march profile list`.",
       "fieldConfig": {
         "defaults": {
           "color": {

@@ -209,6 +209,33 @@ describe("runObservation", () => {
     expect(result.observedAt).toBe("2026-05-20T00:00:00Z");
   });
 
+  it("masks the GitHub token from a failed sync's git argv on every log channel (#601 review)", async () => {
+    const store = fakeStore();
+    const warn = vi.fn();
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      await runObservation({
+        store,
+        profile: PROFILE,
+        syncDefaultBranch: async () => {
+          throw new Error(
+            "Command failed: git -c url.https://x-access-token:ghp_LEAK@github.com/.insteadOf=git@github.com: fetch origin main\n" +
+              "fatal: unable to access 'https://github.com/o/r.git/': Could not resolve host: github.com",
+          );
+        },
+        senseDeps: senseDeps({ warn }),
+      });
+      const logged = [String(warn.mock.calls[0]![0]), String(stderr.mock.calls[0]![0])];
+      for (const line of logged) {
+        expect(line).not.toContain("ghp_LEAK");
+        expect(line).toContain("x-access-token:***@");
+        expect(line).toContain("Could not resolve host");
+      }
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
   it("isolates a sync failure but makes it LOUD: warn + stderr, still observes, never throws (#300/#301)", async () => {
     const store = fakeStore();
     const warn = vi.fn();

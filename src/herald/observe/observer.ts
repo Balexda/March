@@ -1,6 +1,7 @@
 import { senseObserved, type SenseDeps } from "../../legate/loop/state/sense.js";
 import { startHeraldSpan } from "../../observability/herald-trace.js";
 import { recordHeraldSync } from "../../observability/herald-metrics.js";
+import { redactGitCredentials } from "../../spawn/git-auth.js";
 import type { Attributes } from "@opentelemetry/api";
 import type { AppendEventInput, EventBody, HeraldEvent, SystemState } from "../events.js";
 import { diffObserved } from "./diff.js";
@@ -171,7 +172,9 @@ async function syncDefaultBranchBeforeObserve(deps: ObserverDeps): Promise<void>
     await deps.syncDefaultBranch(repoPath);
     recordHeraldSync("ok");
   } catch (err) {
-    const detail = err instanceof Error ? err.message : String(err);
+    // The error echoes the git argv, which carries the GitHub token from
+    // gitHubAuthConfigArgs. Mask it before it reaches any log channel.
+    const detail = redactGitCredentials(err instanceof Error ? err.message : String(err));
     const message = `default-branch sync failed for ${deps.profile}: ${detail} — observing against stale local repo`;
     deps.senseDeps.warn?.(message);
     recordHeraldSync("error");

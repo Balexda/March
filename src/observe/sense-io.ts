@@ -89,6 +89,9 @@ export interface SenseIo {
   toSenseDeps(): SenseDeps;
 }
 
+/** Upper bound for each git/gh step of the default-branch sync (#601 review). */
+export const SYNC_STEP_TIMEOUT_MS = 120_000;
+
 // Async command runner (mirrors the loop's former execFileSync seam): rejects on
 // non-zero exit with execFileSync-shaped errors (message folds in stderr, plus
 // .stdout/.stderr) so the recovery parsers that read failure text still work.
@@ -679,16 +682,21 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
           .trim()
           .replace(/^origin\//, "");
       } catch {
-        defaultBranch = (await execText("gh", ["repo", "view", "--json", "defaultBranchRef", "-q", ".defaultBranchRef.name"], { cwd: repoPath })).trim();
+        defaultBranch = (await execText("gh", ["repo", "view", "--json", "defaultBranchRef", "-q", ".defaultBranchRef.name"], { cwd: repoPath, timeout: SYNC_STEP_TIMEOUT_MS, killSignal: "SIGKILL" })).trim();
       }
     }
     if (!defaultBranch) throw new Error("could not determine default branch");
     // Network ops (fetch/pull) get the SSH→HTTPS-token rewrite so they work in a
     // container with no ssh client/key; `switch` is local and needs no auth.
     const auth = gitHubAuthConfigArgs(env);
-    await execText("git", [...auth, "fetch", "origin", defaultBranch], { cwd: repoPath });
-    await execText("git", ["switch", defaultBranch], { cwd: repoPath });
-    await execText("git", [...auth, "pull", "--ff-only", "origin", defaultBranch], { cwd: repoPath });
+    // Bound each network/git step: Herald runs this inline in its observe tick,
+    // and a hung fetch (DNS, stalled TLS) would otherwise block every later tick.
+    // The timeout kills the child and rejects, so the observer's error handling
+    // logs it and carries on.
+    const bounded = { cwd: repoPath, timeout: SYNC_STEP_TIMEOUT_MS, killSignal: "SIGKILL" as const };
+    await execText("git", [...auth, "fetch", "origin", defaultBranch], bounded);
+    await execText("git", ["switch", defaultBranch], bounded);
+    await execText("git", [...auth, "pull", "--ff-only", "origin", defaultBranch], bounded);
     if (state?.repo && !state.repo.default_branch) state.repo.default_branch = defaultBranch;
     return {
       default_branch: defaultBranch,
