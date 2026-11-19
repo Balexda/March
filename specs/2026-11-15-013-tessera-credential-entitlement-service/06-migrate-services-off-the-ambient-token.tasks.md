@@ -110,7 +110,7 @@ Each slice validates its normal entry point against fakes with no live GitHub tr
 
 ### Tasks
 
-- [ ] **Authenticate Legate runtime operations**
+- [x] **Authenticate Legate runtime operations**
 
   Apply the shared client at the forge command boundaries in `src/legate/loop/runtime.ts`. Resolve the repository from the relevant profile or checkout.
 
@@ -119,7 +119,7 @@ Each slice validates its normal entry point against fakes with no live GitHub tr
   - Entitlements and empty gh configuration are scoped to child invocations. Merge head matching and the folded Herald observation path are preserved.
   - Fake-based runtime coverage proves a typed issuance failure produces an errored span without exiting the scheduler or falsely advancing the affected operation.
 
-- [ ] **Authenticate deployed conductor skill operations**
+- [x] **Authenticate deployed conductor skill operations**
 
   Migrate GitHub-bound commands in `src/templates/legate/skills/` through the existing Tessera CLI and keep commands scoped to the selected repository. Keep deployment wiring in `src/legate/` and the templates packaged as static assets.
 

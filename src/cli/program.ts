@@ -2119,6 +2119,8 @@ tessera.command("token")
   .requiredOption("--repo <owner/name>", "GitHub repository")
   .requiredOption("--access <read|write>", "Access level")
   .option("--identity <app>", "GitHub identity", "app")
+  .option("--refresh", "Refresh a rejected entitlement")
+  .option("--allow-migration-fallback", "Honor the explicit ambient-token migration setting")
   .allowExcessArguments(false)
   .exitOverride((error) => {
     if (error.exitCode !== 0) {
@@ -2128,7 +2130,7 @@ tessera.command("token")
     }
     throw error;
   })
-  .action(async (opts: { repo: string; access: string; identity: string }) => {
+  .action(async (opts: { repo: string; access: string; identity: string; refresh?: boolean; allowMigrationFallback?: boolean }) => {
     commandHandled = true;
     process.exitCode = await runTesseraToken(opts);
   });

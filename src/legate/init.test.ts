@@ -1462,8 +1462,19 @@ describe("legate module", () => {
   });
 
   describe("discoverRepoMetadata", () => {
+    it("reads the GitHub slug and default branch from local Git metadata", () => {
+      const dir = makeTmpDir();
+      const git = (args: string[]) => execFileSync("git", args, { cwd: dir, stdio: "pipe" });
+      git(["init"]);
+      git(["remote", "add", "origin", "git@github.com:fixture/checkout.git"]);
+      git(["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/release/main"]);
+      expect(discoverRepoMetadata(dir)).toEqual({
+        ownerWithName: "fixture/checkout",
+        defaultBranch: "release/main",
+      });
+    });
+
     it("returns nulls when the path is not a git checkout", () => {
-      // A bare tmp dir has no .git, so `gh repo view` fails fast.
       const dir = makeTmpDir();
       const result = discoverRepoMetadata(dir);
       expect(result).toEqual({ ownerWithName: null, defaultBranch: null });

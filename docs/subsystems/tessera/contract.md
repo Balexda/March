@@ -12,7 +12,7 @@ missing provider credentials allow liveness, and unauthorized issuance fails clo
 then closes HTTP and telemetry. Host defaults to `127.0.0.1`. Port precedence is
 `--port`, `MARCH_TESSERA_PORT`, then `9477`; invalid ports fail before listening.
 
-`march tessera token --repo <owner/name> --access <read|write> [--identity app]`
+`march tessera token --repo <owner/name> --access <read|write> [--identity app] [--refresh] [--allow-migration-fallback]`
 issues a repository-scoped GitHub App token using `MARCH_TESSERA_URL` and
 `MARCH_TESSERA_CLIENT_KEY`. The token command and Git credential helper
 also accept `MARCH_TESSERA_CLIENT_KEY_FILE`, which takes precedence over
@@ -21,8 +21,11 @@ mode `0600`. Identity defaults to `app`. On success stdout
 contains only the token and a terminating newline. Invalid arguments,
 configuration errors, denial, malformed responses and transport failures exit
 non-zero with a sanitized diagnostic on stderr. The command uses the Node
-client's 10-second request deadline and requires a Tessera-issued credential
-even when migration fallback is enabled for other consumers.
+client's 10-second request deadline. After a confirmed GitHub 401, a caller
+can use `--refresh` to request a fresh entitlement. Migration fallback requires
+both `--allow-migration-fallback` and `MARCH_TESSERA_GH_TOKEN_FALLBACK=1` and uses
+the client's warning and counter. `MARCH_TESSERA_SLICE_ID` correlates the
+issuance request and client span with the caller's slice.
 
 `march tessera git-credential <get|store|erase>` reads Git's credential
 protocol on stdin. Configure the helper as `!march tessera git-credential`

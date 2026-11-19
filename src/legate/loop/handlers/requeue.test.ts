@@ -141,7 +141,7 @@ describe("requeue apply", () => {
       }),
     );
     expect(c.broodTeardown).toHaveBeenLastCalledWith("dead-1", expect.objectContaining({ force: true, reason: "operator-requeue" }));
-    expect(d.deleteRemoteBranch).toHaveBeenCalledWith("/repo", "smithy/cut/s");
+    expect(d.deleteRemoteBranch).toHaveBeenCalledWith("/repo", "smithy/cut/s", "s");
     expect(d.closePr).not.toHaveBeenCalled();
     expect(state.raw.slices.s).toBeUndefined();
     expect(state.perSlice.s).toBeUndefined();
@@ -169,7 +169,7 @@ describe("requeue apply", () => {
     });
     const d = deps({ deleteRemoteBranch: vi.fn().mockResolvedValue(true) });
     const res = await apply(assess(state), ctx(), state, d);
-    expect(d.closePr).toHaveBeenCalledWith("/repo", 7, expect.stringMatching(/by jb: off the rails/));
+    expect(d.closePr).toHaveBeenCalledWith("/repo", 7, expect.stringMatching(/by jb: off the rails/), "s");
     expect(res.actions[0].detail).toMatch(/closed PR #7; deleted remote branch b/);
   });
 

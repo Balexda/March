@@ -28,6 +28,22 @@ Legate's required public inputs are:
 
 Shared PR sensing classifies full conversation comment bodies before creating previews. Review-bot commands, March review triggers, and reviewer notices are excluded from `conversation_comments`. The PR snapshot carries `reviewer_notices` with `reviewer`, `kind` (`status`, `in_progress`, `rate_limited`, or `paused`), `created_at`, and an optional ISO-8601 `reset_at` when the notice supplies a reset time. Notices require a recognized bot identity. Unresolved inline threads continue through the review-thread path and can block merge. Sensing continues to report the existing `codex_review` and `coderabbit` observations.
 
+Legate resolves the GitHub repository from the profile checkout's origin
+before asking Tessera for an app entitlement. Independent reads use
+`app/read`. Merges, reactions, comments, labels, PR closures, and remote
+branch deletion use `app/write`. Merges pin the head SHA from the observation,
+and slice PR observations continue to come from Herald's fold. Deployed
+conductor skills use the same access split for GitHub reads and writes,
+including `app/read` over HTTPS for default-branch fetches.
+
+Each GitHub CLI child gets its own empty configuration directory and its
+credential through the environment. A confirmed GitHub 401 allows one retry
+with a refreshed entitlement. An issuance failure stops that action with a
+sanitized diagnostic and an errored `tessera.issue` span on the slice trace
+when a slice ID is available. Other profiles and subsequent ticks continue.
+CI reruns use `app/write`. If that entitlement lacks Actions permission,
+the conductor reports a failed rerun for the operator to perform.
+
 Legate's public outputs are:
 
 - Hatchery dispatch request metadata: prompt, backend, repository path, agent-deck profile, manager group, title, branch, deployment profile, task type, task name, optional toolchain, and slice id correlation.
