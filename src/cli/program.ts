@@ -1612,16 +1612,19 @@ mergePolicyCmd
     try {
       const record = await new ProfileClient().get(profileName.trim());
       if (!record) {
-        process.stderr.write(`Unknown profile "${profileName}".\n`);
+        const message = `Unknown profile "${profileName}".`;
+        // JSON consumers get a parseable error on stdout; the exit stays nonzero.
+        if (opts.json) console.log(JSON.stringify({ error: message }, null, 2));
+        process.stderr.write(message + "\n");
         process.exitCode = ERROR;
         return;
       }
       showMergePolicy(record.mergePolicy, !!opts.json);
       process.exitCode = SUCCESS;
     } catch (err) {
-      process.stderr.write(
-        (err instanceof HeraldClientError ? err.message : (err as Error).message) + "\n",
-      );
+      const message = err instanceof HeraldClientError ? err.message : (err as Error).message;
+      if (opts.json) console.log(JSON.stringify({ error: message }, null, 2));
+      process.stderr.write(message + "\n");
       process.exitCode = ERROR;
     }
   });

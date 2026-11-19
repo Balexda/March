@@ -125,6 +125,15 @@ describe("march CLI", () => {
     }
   }, 15000);
 
+  it("prints a JSON error on stdout when merge-policy show --json cannot reach Herald", async () => {
+    const result = await execFileAsync(process.execPath, [CLI_PATH, "profile", "merge-policy", "show", "repo", "--json"], {
+      env: { ...process.env, HOME: makeTmpDir(), MARCH_HERALD_URL: "http://127.0.0.1:1" },
+      timeout: 5000,
+    }).then(() => undefined, (err: { code?: number; stdout?: string }) => err);
+    expect(result?.code).toBe(1);
+    expect(JSON.parse(result?.stdout ?? "")).toEqual({ error: expect.any(String) });
+  }, 15000);
+
   it("advertises the Brood list flags", () => {
     const result = run(["brood", "list", "--help"]);
     expect(result.exitCode).toBe(0);

@@ -242,6 +242,44 @@ function addBranchVariants(branches: Set<string>, value: any): void {
 }
 
 /** Build the shared observation I/O bundle bound to a context. */
+/** Review fields shared by the first query and each follow-up page. */
+const REVIEW_PAGE_FIELDS = `pageInfo { hasNextPage endCursor }
+        nodes {
+          state
+          submittedAt
+          commit { oid }
+          author { login __typename }
+        }`;
+
+/** Bound on follow-up review pages (100 reviews each) per PR per tick. */
+const MAX_EXTRA_REVIEW_PAGES = 4;
+
+function reviewPageArgs(owner: string, name: string, pr: unknown, cursor: string): string[] {
+  return [
+    "api",
+    "graphql",
+    "-F",
+    `owner=${owner}`,
+    "-F",
+    `name=${name}`,
+    "-F",
+    `pr=${pr}`,
+    "-f",
+    `cursor=${cursor}`,
+    "-f",
+    `query=query($owner: String!, $name: String!, $pr: Int!, $cursor: String!) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $pr) {
+      headRefOid
+      reviews(first: 100, after: $cursor) {
+        ${REVIEW_PAGE_FIELDS}
+      }
+    }
+  }
+}`,
+  ];
+}
+
 export function createSenseIo(ctx: SenseIoContext): SenseIo {
   const meta = ctx.meta;
   const env = ctx.env ?? process.env;
@@ -390,13 +428,7 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
       headRefOid
       mergeStateStatus
       reviews(first: 100) {
-        pageInfo { hasNextPage }
-        nodes {
-          state
-          submittedAt
-          commit { oid }
-          author { login __typename }
-        }
+        ${REVIEW_PAGE_FIELDS}
       }
       comments(last: 50) {
         nodes {
@@ -427,9 +459,10 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
   }
 }`,
     ];
-    const { output, appLogin } = github
-      ? await github.ghWithIdentity(owner, args, sliceId)
-      : { output: await gh(args, {}, owner, sliceId), appLogin: undefined };
+    const runGraphql = async (graphqlArgs: string[]): Promise<{ output: string; appLogin?: string }> => github
+      ? await github.ghWithIdentity(owner, graphqlArgs, sliceId)
+      : { output: await gh(graphqlArgs, {}, owner, sliceId), appLogin: undefined };
+    const { output, appLogin } = await runGraphql(args);
     const normalizedAppLogin = appLogin?.toLowerCase();
     const isApp = (author: { login?: string; __typename?: string } | undefined) => {
       const login = author?.login?.toLowerCase();
@@ -440,6 +473,28 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
     const isMarchReply = (comment: any) => isApp(comment.author) || hasMarchReplyMarker(comment.body);
     const parsed = JSON.parse(output);
     const pr = parsed?.data?.repository?.pullRequest || {};
+    // Follow the review cursor so >100-review PRs still yield complete evidence.
+    // Each extra page re-reads headRefOid: if the head moved mid-walk the pages
+    // describe different heads, so the evidence stays marked incomplete.
+    const reviewNodes: any[] = Array.isArray(pr?.reviews?.nodes) ? [...pr.reviews.nodes] : [];
+    let reviewPage = pr?.reviews?.pageInfo;
+    let reviewsComplete = reviewPage?.hasNextPage === false;
+    for (let page = 0; reviewPage?.hasNextPage === true && page < MAX_EXTRA_REVIEW_PAGES; page++) {
+      const cursor = reviewPage.endCursor;
+      if (typeof cursor !== "string" || !cursor) break;
+      try {
+        const next = JSON.parse((await runGraphql(reviewPageArgs(repoOwnerName, repoName, prNumberValue, cursor))).output)
+          ?.data?.repository?.pullRequest;
+        if (!next || next.headRefOid !== pr?.headRefOid) break;
+        if (Array.isArray(next.reviews?.nodes)) reviewNodes.push(...next.reviews.nodes);
+        reviewPage = next.reviews?.pageInfo;
+        reviewsComplete = reviewPage?.hasNextPage === false;
+      } catch {
+        // A failed follow-up page leaves the evidence incomplete (fail closed).
+        reviewsComplete = false;
+        break;
+      }
+    }
     const nodes = pr?.reviewThreads?.nodes || [];
     const threads = nodes
       .filter((thread: any) => thread && thread.isResolved === false)
@@ -514,7 +569,7 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
     });
     return {
       threads,
-      reviews: (pr?.reviews?.nodes || []).filter((review: any) => !isApp(review?.author)),
+      reviews: reviewNodes.filter((review: any) => !isApp(review?.author)),
       comments,
       reviewerNotices,
       codexReview,
@@ -522,11 +577,7 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
       mergeStateStatus: pr?.mergeStateStatus || null,
       // Read from the unfiltered comment nodes: a `@coderabbitai review` request is
       // the evidence that the head was already put forward.
-      coderabbit: summarizeCodeRabbit(
-        pr?.reviews?.nodes,
-        commentNodes,
-        pr?.reviews?.pageInfo?.hasNextPage === false,
-      ),
+      coderabbit: summarizeCodeRabbit(reviewNodes, commentNodes, reviewsComplete),
     };
   }
 
