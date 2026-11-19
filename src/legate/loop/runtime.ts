@@ -40,9 +40,9 @@ import { runTick as coordinatorRunTick } from "./coordinator.js";
 import { resolveMaxConcurrentSpawns } from "./meta.js";
 import { SpawnBreaker } from "./spawn-breaker.js";
 import { createSpawnBudget, liveSpawnCount, taskTypeForSlice, type SpawnBudget } from "./pure/slice.js";
-import { CodeRabbitBackoff, reviewSignals, type ReviewPostOutcome } from "./handlers/review-backoff.js";
+import { CodeRabbitBackoff, reviewSignals, verifyStartupIntent, type ReviewPostOutcome } from "./handlers/review-backoff.js";
 import { reviewRequestLimits, type ReviewRequestHistory } from "./handlers/coderabbit-rereview.js";
-import { markedCodeRabbitHead, type CodeRabbitStanding } from "../../observe/coderabbit-review.js";
+import { markedCodeRabbitHead } from "../../observe/coderabbit-review.js";
 import { runHeartbeat } from "./heartbeat.js";
 import { broodRegister as broodRegisterCli, broodRetire as broodRetireCli, broodTeardown as broodTeardownCli } from "./clients/brood.js";
 import { LegateHerald } from "./clients/herald.js";
@@ -884,17 +884,9 @@ async function tick() {
   const signals = profiles.flatMap((profile) => Object.entries(projection.byProfile[profile.profile]?.slices ?? {})
     .flatMap(([sliceId, slice]) => reviewSignals(profile.profile, profile.repoName, sliceId, slice.pr)));
   const reviewAt = now();
-  await codeRabbitBackoff.beginTick(projection, signals, Date.parse(reviewAt), async (intent) => {
-    const profile = profilesByName.get(intent.profile);
-    if (!profile) throw new Error("CodeRabbit intent profile is unavailable");
-    const pr = projection.byProfile[intent.profile]?.slices[intent.sliceId]?.pr as
-      { number?: number; error?: string; reviews_complete?: boolean; coderabbit?: CodeRabbitStanding } | undefined;
-    // GitHub timestamps are second-precision. Ignore markers from earlier attempts.
-    const since = Math.floor(Date.parse(intent.at) / 1000) * 1000;
-    if (!pr?.error && pr?.number === intent.pr && pr.reviews_complete === true &&
-        Date.parse(pr.coderabbit?.review_times_by_head?.[intent.headSha] ?? "") >= since) return true;
-    return !!await findCodeRabbitTrigger(profile.repoPath, intent.pr, intent.headSha, intent.sliceId, since);
-  }, (target, outcome, detail, rateLimitHit) => {
+  await codeRabbitBackoff.beginTick(projection, signals, Date.parse(reviewAt), (intent) =>
+    verifyStartupIntent(intent, projection, profilesByName, findCodeRabbitTrigger),
+  (target, outcome, detail, rateLimitHit) => {
     const event = {
       ts: reviewAt, kind: "review_request", profile: target.profile, slice_id: target.sliceId,
       pr_number: target.pr,

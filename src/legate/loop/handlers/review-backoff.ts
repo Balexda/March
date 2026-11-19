@@ -22,7 +22,7 @@ type ReviewSignal = ReviewTarget & {
   noticeId?: string;
 };
 
-type LatestIntent = NonNullable<NonNullable<MultiProfileState["latestReviewRequests"]>["coderabbit"]>;
+export type LatestIntent = NonNullable<NonNullable<MultiProfileState["latestReviewRequests"]>["coderabbit"]>;
 type Report = (target: ReviewTarget, outcome: "backoff" | "failed", detail: string, rateLimitHit?: boolean) => void;
 
 const reviewer = "coderabbit";
@@ -144,4 +144,31 @@ export function reviewSignals(profile: string, repo: string, sliceId: string, sn
   const reviewedAt = head && pr.coderabbit?.review_times_by_head?.[head];
   if (reviewedAt) signals.push({ ...target, at: reviewedAt, cause: "reset" });
   return signals;
+}
+
+type TriggerLookup = (repoPath: string, prNumber: number, head: string, sliceId: string, since?: number) => Promise<string | undefined>;
+
+/**
+ * Decide whether the reviewer's latest pre-restart intent produced a post.
+ * `true` = a review or March trigger proves it; `false` = outcome unknown, so the
+ * caller durably records `post_failed`. Throws only when the lookup itself is
+ * incomplete (retry next tick). An intent whose profile is no longer registered
+ * cannot be looked up again; treating it as unknown reconciles it durably instead
+ * of wedging every other profile behind it.
+ */
+export async function verifyStartupIntent(
+  intent: LatestIntent,
+  fold: MultiProfileState,
+  profiles: ReadonlyMap<string, { repoPath: string }>,
+  findTrigger: TriggerLookup,
+): Promise<boolean> {
+  const pr = fold.byProfile[intent.profile]?.slices[intent.sliceId]?.pr as
+    { number?: number; error?: string; reviews_complete?: boolean; coderabbit?: Pick<CodeRabbitStanding, "review_times_by_head"> | null } | undefined;
+  // GitHub timestamps are second-precision. Ignore markers from earlier attempts.
+  const since = Math.floor(Date.parse(intent.at) / 1000) * 1000;
+  if (!pr?.error && pr?.number === intent.pr && pr.reviews_complete === true &&
+      Date.parse(pr.coderabbit?.review_times_by_head?.[intent.headSha] ?? "") >= since) return true;
+  const profile = profiles.get(intent.profile);
+  if (!profile) return false;
+  return !!await findTrigger(profile.repoPath, intent.pr, intent.headSha, intent.sliceId, since);
 }

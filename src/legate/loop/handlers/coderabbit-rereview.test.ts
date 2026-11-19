@@ -7,7 +7,7 @@ import { validateEvent } from "../../../herald/service/routes.js";
 import { reviewRequestBody } from "../../../observe/coderabbit-review.js";
 import { classifyReviewerComment } from "../../../observe/review-bot-comments.js";
 import { apply, reviewRequestLimits, type ReviewRequestHistory } from "./coderabbit-rereview.js";
-import { CodeRabbitBackoff, reviewSignals } from "./review-backoff.js";
+import { CodeRabbitBackoff, reviewSignals, verifyStartupIntent } from "./review-backoff.js";
 import type { HandlerContext, LoopState } from "../state/types.js";
 
 const head = "a".repeat(40);
@@ -344,5 +344,30 @@ describe("CodeRabbit account-wide back-off", () => {
       attempts: 3, signalAt: at, until: new Date(Date.parse(at) + backoffMs(3, "coderabbit")).toISOString(),
     });
     expect((await other.tick()).actions).toMatchObject([{ outcome: "requested" }]);
+  });
+
+  it("reconciles a startup intent from a removed profile instead of wedging other profiles", async () => {
+    const { backoff, fold, append } = ledger();
+    reduceMulti(fold, { ...intent, profile: "gone", seq: 1, ts: at, id: "intent", source: "legate", type: "review.requested" });
+    const findTrigger = vi.fn();
+    const active = new Map([["p", { repoPath: "/repo/p" }]]);
+    const verify = (i: Parameters<typeof verifyStartupIntent>[0]) => verifyStartupIntent(i, fold, active, findTrigger);
+    const report = vi.fn();
+    await backoff.beginTick(fold, [], Date.parse(expired), verify, report);
+    expect(findTrigger).not.toHaveBeenCalled();
+    expect(append).toHaveBeenCalledWith("gone", expect.objectContaining({ cause: "post_failed", attempts: 1 }), expect.any(String));
+    const after = Date.parse(at) + backoffMs(1, "coderabbit") + 1;
+    expect(backoff.blocked(after)).toBe(false);
+    const other = fixture({ time: new Date(after).toISOString(), profile: "p", history: { byProfile: {}, backoff } });
+    await other.tick();
+    expect(other.deps.commentOnPr).toHaveBeenCalled();
+  });
+
+  it("still looks up triggers for intents of active profiles", async () => {
+    const fold = emptyMultiProfileState();
+    const record = { ...intent, profile: "p", seq: 1 };
+    const findTrigger = vi.fn().mockResolvedValue(githubAt);
+    expect(await verifyStartupIntent(record, fold, new Map([["p", { repoPath: "/repo/p" }]]), findTrigger)).toBe(true);
+    expect(findTrigger).toHaveBeenCalledWith("/repo/p", 42, head, "s", Date.parse(at));
   });
 });
