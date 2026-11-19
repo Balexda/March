@@ -223,8 +223,10 @@ describe("CodeRabbit account-wide back-off", () => {
     for (const invalid of [
       { reviewer: "codex" }, { cause: "unknown" }, { attempts: -1 }, { attempts: 1.5 },
       { attempts: 0 }, { cause: "reset" }, { until: "2026-11-31T12:00:00Z" },
-      { until: expired.replace("Z", "+01:00") },
+      { until: expired.replace("Z", "+01:00") }, { resetObservedAt: "yesterday" },
+      { cause: "reset", attempts: 0, resetObservedAt: at },
     ]) expect(validateEvent({ ...event, ...invalid }).ok).toBe(false);
+    expect(validateEvent({ ...event, resetObservedAt: at }).ok).toBe(true);
     expect(fold.reviewBackoffs).toBeUndefined();
     await append("p", record, "limited");
     await append("q", { ...record, cause: "reset", attempts: 0, until: at }, "reset");
@@ -279,15 +281,15 @@ describe("CodeRabbit account-wide back-off", () => {
     };
     const observations = () => reviewSignals("q", "owner/repo", "s", pr);
     await backoff.beginTick(fold, observations(), Date.parse(at), vi.fn(), report);
-    expect(append.mock.calls.map(([, update]) => update.cause)).toEqual(["paused_comment", "rate_limited_comment"]);
-    expect(append.mock.calls[1][1]).toMatchObject({ until: new Date(expired).toISOString(), attempts: 2 });
+    expect(append.mock.calls.map(([, update]) => update.cause)).toEqual(["reset", "paused_comment", "rate_limited_comment"]);
+    expect(append.mock.calls[2][1]).toMatchObject({ until: new Date(expired).toISOString(), attempts: 2 });
     const other = fixture({ history: { byProfile: {}, backoff } });
     expect((await other.tick()).actions).toMatchObject([{ outcome: "backoff" }]);
     expect(other.deps.appendIntent).not.toHaveBeenCalled();
 
     const restarted = new CodeRabbitBackoff(append);
     await restarted.beginTick(fold, observations(), Date.parse(fresh), vi.fn(), report);
-    expect(append).toHaveBeenCalledTimes(2);
+    expect(append).toHaveBeenCalledTimes(3);
     expect(restarted.blocked(Date.parse(fresh))).toBe(true);
     expect(approvalSatisfied(resolveMergePolicyRow(undefined, "forge").requirements, pr)).toBe(true);
     pr.coderabbit.review_times_by_head[head] = fresh;
@@ -295,7 +297,7 @@ describe("CodeRabbit account-wide back-off", () => {
     expect(fold.reviewBackoffs?.coderabbit).toMatchObject({ cause: "reset", attempts: 0 });
     const afterReset = new CodeRabbitBackoff(append);
     await afterReset.beginTick(fold, observations(), Date.parse(expired), vi.fn(), report);
-    expect(append).toHaveBeenCalledTimes(3);
+    expect(append).toHaveBeenCalledTimes(4);
     expect(afterReset.blocked(Date.parse(expired))).toBe(false);
   });
 
@@ -432,5 +434,38 @@ describe("CodeRabbit account-wide back-off", () => {
     ] };
     await restarted.beginTick(fold, reviewSignals("p", "owner/repo", "s", fresh), base + 180_000, vi.fn(), report);
     expect(fold.reviewBackoffs?.coderabbit).toMatchObject({ noticeId: "coderabbit:32", until: "2026-11-17T01:00:00.000Z" });
+  });
+
+  it("records a delayed fresh review as a boundary without clearing a newer throttle", async () => {
+    const { backoff, fold, append } = ledger();
+    const report = vi.fn();
+    const base = Date.parse(at);
+    const iso = (offset: number) => new Date(base + offset).toISOString();
+    // 429 at 23:02 is recorded first; the 23:01 fresh review is delivered at 23:03.
+    await backoff.record({ profile: "p", sliceId: "s", pr: 42, at: iso(120_000), cause: "http_429" }, base + 120_000, report);
+    const throttle = { ...fold.reviewBackoffs?.coderabbit };
+    report.mockClear();
+    const reviewed = { number: 42, head_sha: head, coderabbit: { review_times_by_head: { [head]: iso(60_000) } } };
+    await backoff.beginTick(fold, reviewSignals("p", "owner/repo", "s", reviewed), base + 180_000, vi.fn(), report);
+    expect(fold.reviewResetBoundaries?.coderabbit).toBe(iso(60_000));
+    expect(fold.reviewBackoffs?.coderabbit).toMatchObject({
+      cause: "http_429", attempts: 1, until: throttle.until, signalAt: throttle.signalAt,
+    });
+    expect(backoff.blocked(base + 180_000)).toBe(true);
+    expect(validateEvent({ type: "review.backoff", ...append.mock.calls[1][1] }).ok).toBe(true);
+    expect(report).not.toHaveBeenCalled();
+    // The PR moves to a new head, so the reset signal disappears; then the older notice arrives.
+    const advanced = { number: 42, head_sha: oldHead, reviewer_notices: [
+      { reviewer: "coderabbit", kind: "rate_limited", created_at: iso(30_000), reset_at: "2026-11-17T01:00:00Z", comment_id: 41 },
+    ], coderabbit: { review_times_by_head: { [head]: iso(60_000) } } };
+    const restarted = new CodeRabbitBackoff(append);
+    await restarted.beginTick(fold, reviewSignals("p", "owner/repo", "s", advanced), base + 240_000, vi.fn(), report);
+    expect(append).toHaveBeenCalledTimes(2);
+    expect(fold.reviewBackoffs?.coderabbit?.until).toBe(throttle.until);
+    // A review newer than the throttle still clears pacing.
+    const newer = { number: 42, head_sha: oldHead, coderabbit: { review_times_by_head: { [oldHead]: iso(200_000) } } };
+    await restarted.beginTick(fold, reviewSignals("p", "owner/repo", "s", newer), base + 240_000, vi.fn(), report);
+    expect(fold.reviewBackoffs?.coderabbit).toMatchObject({ cause: "reset", attempts: 0 });
+    expect(fold.reviewResetBoundaries?.coderabbit).toBe(iso(200_000));
   });
 });

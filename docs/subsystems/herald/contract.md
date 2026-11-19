@@ -120,7 +120,9 @@ reviewer (`coderabbit` or `copilot`), UTC deadline `until`, nonnegative integer
 The profile identifies the observer. The cross-profile projection
 (`GET /state?all=1`) keeps the latest event by stream sequence per reviewer
 in `reviewBackoffs`, processed notice IDs in `reviewNoticeIds`, the latest
-reset signal time per reviewer in `reviewResetBoundaries`, and the latest
+reset signal time per reviewer in `reviewResetBoundaries` (a reset's `signalAt`,
+or the optional `resetObservedAt` that Legate adds when it repeats an active
+throttle to record a fresh review that arrived too late to clear it), and the latest
 intent per reviewer in `latestReviewRequests`. A later throttle record does not
 clear the reset boundary. Legate ignores notices created at or before it. A log without back-off events
 has no active reviewer back-off.

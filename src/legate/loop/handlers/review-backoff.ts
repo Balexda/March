@@ -74,10 +74,20 @@ export class CodeRabbitBackoff {
       const observed = Date.parse(signal.at);
       const previous = Date.parse(this.current?.signalAt ?? this.current?.ts ?? "");
       if (!Number.isFinite(observed) || observed > now) continue;
+      if (signal.cause === "reset") {
+        if (observed <= this.resetBoundary) continue;
+        if (this.current?.attempts && observed > previous) {
+          if (!await this.record(signal, now, report)) return;
+        } else if (!this.startupIntent && !await this.observeReset(signal, now, report)) {
+          // While a startup outcome is unresolved, a boundary-only append would look
+          // like a newer back-off and wrongly settle it; the signal is re-sensed later.
+          return;
+        }
+        continue;
+      }
       // Notices dedupe by identity: a late-delivered notice older than the last
       // signal can still carry a later stated reset. Other signals stay chronological.
       if (!signal.noticeId && observed < previous) continue;
-      if (signal.cause === "reset" && (!this.current?.attempts || observed <= previous)) continue;
       // A notice from before the last reset is stale even after later throttle records.
       if (signal.noticeId && (this.seen.has(signal.noticeId) || observed <= this.resetBoundary)) continue;
       if (!await this.record(signal, now, report)) return;
@@ -110,6 +120,24 @@ export class CodeRabbitBackoff {
     return this.persist(report);
   }
 
+  /**
+   * Persist a fresh-review boundary without clearing pacing: with an active
+   * throttle newer than the review, repeat that throttle with `resetObservedAt`;
+   * otherwise there is nothing to clear, so record a plain reset.
+   */
+  private async observeReset(signal: ReviewSignal, now: number, report: Report): Promise<boolean> {
+    const current = this.current;
+    const record: ReviewBackoffRecord = current?.attempts
+      ? {
+        reviewer, until: current.until, attempts: current.attempts, cause: current.cause,
+        ...(current.signalAt ? { signalAt: current.signalAt } : {}),
+        resetObservedAt: signal.at,
+      }
+      : { reviewer, until: new Date(now).toISOString(), attempts: 0, cause: "reset", signalAt: signal.at };
+    this.pending = { target: signal, record, id: randomUUID() };
+    return this.persist(report);
+  }
+
   private async persist(report: Report): Promise<boolean> {
     const { target, record, id } = this.pending!;
     try {
@@ -120,9 +148,8 @@ export class CodeRabbitBackoff {
       return false;
     }
     if (record.noticeId) this.seen.add(record.noticeId);
-    if (record.cause === "reset" && !(this.resetBoundary >= Date.parse(record.signalAt ?? ""))) {
-      this.resetBoundary = Date.parse(record.signalAt ?? "");
-    }
+    const boundary = Date.parse((record.cause === "reset" ? record.signalAt : record.resetObservedAt) ?? "");
+    if (!(this.resetBoundary >= boundary)) this.resetBoundary = boundary;
     this.pending = undefined;
     return true;
   }

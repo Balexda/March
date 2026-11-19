@@ -192,11 +192,12 @@ export function validateEvent(body: Record<string, unknown>): EventValidation {
     }
   }
   if (type === "review.backoff") {
-    const { reviewer, until, attempts, cause, signalAt, noticeId } = body;
+    const { reviewer, until, attempts, cause, signalAt, noticeId, resetObservedAt } = body;
     if ((reviewer !== "coderabbit" && reviewer !== "copilot") ||
         !isUtcTimestamp(until) || typeof attempts !== "number" || !Number.isSafeInteger(attempts) || attempts < 0 ||
         !REVIEW_BACKOFF_CAUSES.some((candidate) => candidate === cause) || (cause === "reset") !== (attempts === 0) ||
         (signalAt !== undefined && !isUtcTimestamp(signalAt)) ||
+        (resetObservedAt !== undefined && (!isUtcTimestamp(resetObservedAt) || cause === "reset")) ||
         (noticeId !== undefined && (typeof noticeId !== "string" || !noticeId.trim() || noticeId.length > 512))) {
       return { ok: false, error: "invalid reviewer back-off record." };
     }

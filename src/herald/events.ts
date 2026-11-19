@@ -68,6 +68,11 @@ export interface ReviewBackoffRecord {
   signalAt?: string;
   /** Stable identity of a sensed throttle notice. */
   noticeId?: string;
+  /**
+   * A fresh review observed too late to clear the current throttle. The record
+   * otherwise repeats the active back-off; only the reset boundary advances.
+   */
+  resetObservedAt?: string;
 }
 
 export type EventBody =
@@ -718,11 +723,11 @@ export function reduceMulti(multi: MultiProfileState, event: HeraldEvent): Multi
   const sys = (multi.byProfile[event.profile] ??= emptySystemState());
   reduce(sys, event);
   if (event.type === "review.backoff") {
-    const { reviewer, until, attempts, cause, signalAt, noticeId, seq, ts } = event;
+    const { reviewer, until, attempts, cause, signalAt, noticeId, resetObservedAt, seq, ts } = event;
     (multi.reviewBackoffs ??= {})[reviewer] = { reviewer, until, attempts, cause, signalAt, noticeId, seq, ts };
     if (noticeId) (multi.reviewNoticeIds ??= {})[noticeId] = true;
-    if (cause === "reset") {
-      const boundary = signalAt ?? ts;
+    const boundary = cause === "reset" ? signalAt ?? ts : resetObservedAt;
+    if (boundary) {
       const resets = (multi.reviewResetBoundaries ??= {});
       if (!(Date.parse(resets[reviewer] ?? "") >= Date.parse(boundary))) resets[reviewer] = boundary;
     }
