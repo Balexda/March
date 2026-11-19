@@ -1,6 +1,8 @@
 /**
  * @l1 @deterministic @ci
  */
+import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import type { AddressInfo } from "node:net";
 import fs from "node:fs";
 import os from "node:os";
@@ -14,7 +16,11 @@ import { getActiveOtel, initOtel } from "../observability/otel.js";
 import { createStatioLogger } from "../observability/logger.js";
 import { spanIdForDispatch, traceIdForDispatch } from "../observability/trace-ids.js";
 import { StatioClient } from "./client.js";
-import type { RepoMetadataReader } from "./forge.js";
+import { loadTesseraAuthorization } from "../tessera/authorization.js";
+import { TesseraClientError } from "../tessera/client.js";
+import { TesseraError, type CredentialProvider } from "../tessera/models.js";
+import { buildTesseraServer } from "../tessera/server.js";
+import { createGhRepoMetadataReader, StatioEntitlementError, type RepoMetadataReader } from "./forge.js";
 import { buildStatioServer } from "./server.js";
 import {
   type ForgeClient,
@@ -927,7 +933,7 @@ describe("statio client/server compatibility", () => {
     const client = new StatioClient({ baseUrl, token: "secret", traceKey: "slice-abc" });
 
     await expect(client.getPr(42)).resolves.toEqual(PR);
-    expect(forgeClient.getPr).toHaveBeenCalledWith(42);
+    expect(forgeClient.getPr).toHaveBeenCalledWith(42, "slice-abc");
   });
 
   it("lets the async client call the authorized /v1/prs route with author and state filters", async () => {
@@ -940,7 +946,7 @@ describe("statio client/server compatibility", () => {
       author: "@me",
       head: undefined,
       state: "open",
-    });
+    }, "slice-abc");
   });
 
   it("lets the async client call the authorized /v1/prs/:number/review-threads route", async () => {
@@ -949,7 +955,7 @@ describe("statio client/server compatibility", () => {
     const client = new StatioClient({ baseUrl, token: "secret", traceKey: "slice-abc" });
 
     await expect(client.reviewThreads(42)).resolves.toEqual(REVIEW_THREADS);
-    expect(forgeClient.reviewThreads).toHaveBeenCalledWith(42);
+    expect(forgeClient.reviewThreads).toHaveBeenCalledWith(42, "slice-abc");
   });
 
   it("forwards client trace headers to the pull request list service route", async () => {
@@ -1079,4 +1085,164 @@ describe("statio client/server compatibility", () => {
     const forgeDown = new StatioClient({ baseUrl, token: "secret" });
     await expect(forgeDown.reachable()).resolves.toBe(false);
   });
+});
+
+it("scopes registered Statio forge reads and traces an issuance outage", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "statio-entitlement-"));
+  const repo = "fixture/widgets";
+  const clientKey = "fixture-statio-key";
+  const commandsLog = path.join(root, "commands.jsonl");
+  let tessera: FastifyInstance | undefined;
+  let statio: FastifyInstance | undefined;
+  try {
+    const gitDir = path.join(root, ".git");
+    execFileSync("git", ["init", "--quiet", root]);
+    execFileSync("git", ["-C", root, "remote", "add", "origin", `git@github.com:${repo}.git`]);
+    const hosts = path.join(root, ".config", "gh", "hosts.yml");
+    fs.mkdirSync(path.dirname(hosts), { recursive: true });
+    fs.writeFileSync(hosts, "github.com:\n  user: operator\n  oauth_token: fixture-operator-login\n");
+    fs.writeFileSync(path.join(root, "gh"), `#!${process.execPath}
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
+const args = process.argv.slice(2);
+const env = process.env;
+assert.equal(env.GITHUB_TOKEN, undefined);
+assert.equal(env.MARCH_TESSERA_CLIENT_KEY, undefined);
+assert.equal(env.GH_HOST, "github.com");
+assert.notEqual(env.GH_CONFIG_DIR, path.join(env.HOME, ".config", "gh"));
+assert.deepEqual(fs.readdirSync(env.GH_CONFIG_DIR), []);
+assert.ok(fs.readFileSync(path.join(env.HOME, ".config", "gh", "hosts.yml"), "utf8").includes("operator"));
+assert.ok(!args.join(" ").includes(env.GH_TOKEN));
+fs.appendFileSync(${JSON.stringify(commandsLog)}, JSON.stringify({ args, dir: env.GH_CONFIG_DIR }) + "\\n");
+if (env.GH_TOKEN === "fixture-stale-token") {
+  console.error("HTTP 401: Bad credentials (https://api.github.com/graphql)");
+  process.exit(1);
+}
+assert.equal(env.GH_TOKEN, "fixture-issued-token");
+if (args[0] === "repo") {
+  console.log(JSON.stringify({ nameWithOwner: args[2], defaultBranchRef: { name: "main" } }));
+} else if (args[1] === "list") {
+  console.log("[]");
+} else if (args[1] === "view") {
+  console.log(JSON.stringify({
+    number: 42, url: "https://github.com/fixture/widgets/pull/42",
+    state: "OPEN", headRefName: "feature/statio", title: "Statio"
+  }));
+} else {
+  console.log(JSON.stringify({ data: { repository: { pullRequest: { reviewThreads: { nodes: [] } } } } }));
+}
+`, { mode: 0o700 });
+
+    vi.stubEnv("HOME", root);
+    vi.stubEnv("PATH", root + path.delimiter + process.env.PATH);
+    vi.stubEnv("GIT_DIR", gitDir);
+    vi.stubEnv("GH_CONFIG_DIR", path.dirname(hosts));
+    vi.stubEnv("GH_TOKEN", undefined);
+    vi.stubEnv("GITHUB_TOKEN", undefined);
+    vi.stubEnv("MARCH_TESSERA_GH_TOKEN_FALLBACK", undefined);
+    vi.stubEnv("MARCH_TESSERA_CLIENT_KEY", clientKey);
+    const keysPath = path.join(root, "keys.json");
+    const policyPath = path.join(root, "policy.json");
+    fs.writeFileSync(keysPath, JSON.stringify([
+      { client: "statio", key_sha256: createHash("sha256").update(clientKey).digest("hex") },
+    ]));
+    fs.writeFileSync(policyPath, JSON.stringify([
+      { client: "statio", identities: ["app"], repos: [repo], max_access: "read" },
+    ]));
+    let available = false;
+    const issue = vi.fn<CredentialProvider["issue"]>(async (request) => {
+      if (!available) throw new TesseraError("provider_unavailable");
+      return {
+        token: request.refresh ? "fixture-issued-token" : "fixture-stale-token",
+        expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+        identity: "statio[bot]",
+        commitIdentity: { name: "Statio", email: "statio@example.test" },
+        access: request.access,
+        repo: request.repo ?? null,
+        cache: "miss",
+      };
+    });
+    tessera = buildTesseraServer({
+      authorize: await loadTesseraAuthorization({
+        TESSERA_CLIENT_KEYS_FILE: keysPath, TESSERA_POLICY_FILE: policyPath,
+      }),
+      providers: [{
+        id: "github-app",
+        identity: "app",
+        start: async () => {},
+        status: () => ({
+          provider: "github-app", state: "ok", login: "statio[bot]", credential_expires_at: null,
+          expiry_warning: false, last_error: null,
+        }),
+        issue,
+      }],
+    });
+    vi.stubEnv("MARCH_TESSERA_URL", await tessera.listen({ host: "127.0.0.1", port: 0 }));
+    initOtel({ MARCH_OTEL: "1", MARCH_OTEL_ENDPOINT: "http://localhost:4318" });
+    const spans = captureSpans();
+    statio = buildStatioServer({ token: "statio-api-token" });
+    const headers = { authorization: "Bearer statio-api-token", "x-march-slice-id": "slice-scope" };
+    const reader = createGhRepoMetadataReader({ repo });
+
+    await expect(reader.repoInfo()).rejects.toMatchObject({
+      name: StatioEntitlementError.name,
+      code: "forge_error",
+      cause: { name: TesseraClientError.name, code: "provider_unavailable" },
+    });
+    const failed = await statio.inject({ url: "/v1/prs/42", headers });
+    expect(failed.statusCode).toBe(502);
+    expect(failed.json()).toEqual({
+      error: { code: "forge_error", message: "Could not obtain GitHub read access from Tessera." },
+    });
+    expect(fs.existsSync(commandsLog)).toBe(false);
+    const operation = spans.find((span) => span.name === "statio.get_pr");
+    expect(operation?.status.code).toBe(SpanStatusCode.ERROR);
+    expect(operation?.spanContext().traceId).toBe(traceIdForDispatch("slice-scope"));
+    expect(operation?.parentSpanContext?.spanId).toBe(spanIdForDispatch("slice-scope"));
+    expect(spans.some((span) => span.name === "tessera.issue" &&
+      span.spanContext().traceId === traceIdForDispatch("slice-scope"))).toBe(true);
+
+    available = true;
+    for (const [url, body] of [
+      ["/v1/repo", { repo: { owner: repo, defaultBranch: "main" } }],
+      ["/v1/prs", { prs: [] }],
+      ["/v1/prs/42", { pr: { number: 42, unresolvedThreads: [] } }],
+      ["/v1/prs/42/review-threads", { threads: [] }],
+    ] as const) {
+      const response = await statio.inject({ url, headers });
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toMatchObject(body);
+    }
+    await expect(reader.repoInfo()).resolves.toEqual({ owner: repo, defaultBranch: "main" });
+    expect(issue.mock.calls.map(([request]) => request)).toEqual([
+      { repo, identity: "app", access: "read" },
+      { repo, identity: "app", access: "read" },
+      { repo, identity: "app", access: "read" },
+      { repo, identity: "app", access: "read", refresh: true },
+    ]);
+
+    const commands = fs.readFileSync(commandsLog, "utf8").trim().split("\n").map(
+      (line) => JSON.parse(line) as { args: string[]; dir: string },
+    );
+    expect(commands.map(({ args }) => args.slice(0, 2))).toEqual([
+      ["repo", "view"], ["repo", "view"], ["pr", "list"], ["repo", "view"],
+      ["pr", "view"], ["api", "graphql"], ["repo", "view"], ["api", "graphql"], ["repo", "view"],
+    ]);
+    for (const { args, dir } of commands) {
+      if (args[0] === "repo") expect(args[2]).toBe(repo);
+      else if (args[0] === "pr") expect(args.slice(-2)).toEqual(["-R", repo]);
+      else expect(args).toEqual(expect.arrayContaining(["owner=fixture", "name=widgets"]));
+      expect(fs.existsSync(dir)).toBe(false);
+    }
+    expect(new Set(commands.map(({ dir }) => dir)).size).toBe(commands.length);
+    expect(process.env.GH_TOKEN).toBeUndefined();
+  } finally {
+    await statio?.close();
+    await tessera?.close();
+    fs.rmSync(root, { recursive: true, force: true });
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+    initOtel({});
+  }
 });

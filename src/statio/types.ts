@@ -89,11 +89,11 @@ export interface ForgeErrorBody {
 
 /** Consumer seam for Statio forge reads. */
 export interface ForgeClient {
-  repoInfo(): Promise<RepoInfo>;
-  listPrs(req: ListPrsRequest): Promise<PullRequestListItem[]>;
-  getPr(number: number): Promise<PullRequestSummary>;
-  reviewThreads(prNumber: number): Promise<ReviewThread[]>;
-  reachable(): Promise<boolean>;
+  repoInfo(sliceId?: string): Promise<RepoInfo>;
+  listPrs(req: ListPrsRequest, sliceId?: string): Promise<PullRequestListItem[]>;
+  getPr(number: number, sliceId?: string): Promise<PullRequestSummary>;
+  reviewThreads(prNumber: number, sliceId?: string): Promise<ReviewThread[]>;
+  reachable(sliceId?: string): Promise<boolean>;
 }
 
 export class StatioValidationError extends Error {

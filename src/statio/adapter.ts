@@ -1,4 +1,12 @@
-import { execFile } from "node:child_process";
+import {
+  buildRepoInfoArgs,
+  createStatioForgeCommands,
+  StatioEntitlementError,
+  type GhRepoMetadataReaderOptions,
+} from "./forge.js";
+
+export { buildRepoInfoArgs } from "./forge.js";
+export type { StatioCommandOptions, StatioCommandRunner } from "./forge.js";
 import type {
   CheckRollup,
   CheckSummary,
@@ -11,29 +19,9 @@ import type {
 } from "./types.js";
 import { StatioForgeError, StatioNotFoundError, StatioValidationError } from "./types.js";
 
-const EXEC_MAX_BUFFER = 1024 * 1024;
 const DEFAULT_GH_TIMEOUT_MS = 10_000;
 
-export interface StatioCommandOptions {
-  readonly cwd?: string;
-  readonly timeoutMs: number;
-}
-
-export type StatioCommandRunner = (
-  command: string,
-  args: readonly string[],
-  options: StatioCommandOptions,
-) => Promise<string>;
-
-export interface GhForgeAdapterOptions {
-  readonly cwd?: string;
-  readonly timeoutMs?: number;
-  readonly runCommand?: StatioCommandRunner;
-}
-
-export function buildRepoInfoArgs(): string[] {
-  return ["repo", "view", "--json", "nameWithOwner,defaultBranchRef"];
-}
+export type GhForgeAdapterOptions = GhRepoMetadataReaderOptions;
 
 export function buildPrViewArgs(number: number, owner?: string): string[] {
   const args = [
@@ -413,10 +401,11 @@ function validateListPrsRequest(req: ListPrsRequest): ListPrsRequest {
 function isNotFoundError(err: unknown): boolean {
   const haystack: string[] = [];
   if (err instanceof Error) {
-    haystack.push(err.message);
     const streams = err as { stderr?: unknown; stdout?: unknown };
     if (typeof streams.stderr === "string") haystack.push(streams.stderr);
     if (typeof streams.stdout === "string") haystack.push(streams.stdout);
+    // execFile's message includes argv, so a PR number or slug can contain "404".
+    if (haystack.length === 0) haystack.push(err.message);
   } else {
     haystack.push(String(err));
   }
@@ -432,43 +421,32 @@ function splitOwner(owner: string): [string, string] | null {
 export function createGhForgeAdapter(
   options: GhForgeAdapterOptions = {},
 ): Pick<ForgeClient, "repoInfo" | "listPrs" | "getPr" | "reviewThreads"> {
-  const runCommand = options.runCommand ?? execText;
-  const timeoutMs = options.timeoutMs ?? DEFAULT_GH_TIMEOUT_MS;
+  const commands = createStatioForgeCommands({
+    ...options,
+    timeoutMs: options.timeoutMs ?? DEFAULT_GH_TIMEOUT_MS,
+  });
 
-  async function resolveRepoInfo(): Promise<RepoInfo> {
+  async function resolveRepoInfo(repo: string, sliceId?: string): Promise<RepoInfo> {
     try {
-      const stdout = await runCommand("gh", buildRepoInfoArgs(), {
-        cwd: options.cwd,
-        timeoutMs,
-      });
+      const stdout = await commands.run(repo, buildRepoInfoArgs(repo), options.cwd, sliceId);
       return parseRepoInfoGhJson(stdout);
-    } catch {
+    } catch (err) {
+      if (err instanceof StatioEntitlementError) throw err;
       throw new StatioForgeError("gh repo view failed while resolving repository metadata.");
     }
   }
 
   return {
-    async repoInfo(): Promise<RepoInfo> {
-      return resolveRepoInfo();
+    async repoInfo(sliceId?: string): Promise<RepoInfo> {
+      return resolveRepoInfo(await commands.resolveRepo(), sliceId);
     },
 
-    async listPrs(req: ListPrsRequest = {}): Promise<PullRequestListItem[]> {
+    async listPrs(req: ListPrsRequest = {}, sliceId?: string): Promise<PullRequestListItem[]> {
       const filters = validateListPrsRequest(req);
-      let repo: RepoInfo = { owner: "", defaultBranch: "" };
-      try {
-        repo = await resolveRepoInfo();
-      } catch {
-        repo = { owner: "", defaultBranch: "" };
-      }
-
-      const owner = splitOwner(repo.owner) ? repo.owner : "";
-      const commandOptions = {
-        cwd: owner ? undefined : options.cwd,
-        timeoutMs,
-      };
+      const target = await commands.resolveRepo();
 
       try {
-        const stdout = await runCommand("gh", buildPrListArgs(filters, owner), commandOptions);
+        const stdout = await commands.run(target, buildPrListArgs(filters, target), options.cwd, sliceId);
         return parsePullRequestListGhJson(stdout);
       } catch (err) {
         if (err instanceof StatioValidationError || err instanceof StatioForgeError) {
@@ -478,30 +456,26 @@ export function createGhForgeAdapter(
       }
     },
 
-    async getPr(number: number): Promise<PullRequestSummary> {
+    async getPr(number: number, sliceId?: string): Promise<PullRequestSummary> {
       if (!Number.isInteger(number) || number <= 0) {
         throw new StatioValidationError(
           `Pull request number must be a positive integer; received ${number}.`,
         );
       }
 
-      let repo: RepoInfo = { owner: "", defaultBranch: "" };
+      const target = await commands.resolveRepo();
+      let repo: RepoInfo | undefined;
       try {
-        repo = await resolveRepoInfo();
-      } catch {
-        repo = { owner: "", defaultBranch: "" };
+        repo = await resolveRepoInfo(target, sliceId);
+      } catch (err) {
+        if (err instanceof StatioEntitlementError) throw err;
       }
-
-      const owner = splitOwner(repo.owner) ? repo.owner : "";
-      const commandOptions = {
-        cwd: owner ? undefined : options.cwd,
-        timeoutMs,
-      };
 
       let prStdout: string;
       try {
-        prStdout = await runCommand("gh", buildPrViewArgs(number, owner), commandOptions);
+        prStdout = await commands.run(target, buildPrViewArgs(number, target), options.cwd, sliceId);
       } catch (err) {
+        if (err instanceof StatioForgeError) throw err;
         if (isNotFoundError(err)) {
           throw new StatioNotFoundError(`Pull request #${number} was not found.`);
         }
@@ -509,14 +483,13 @@ export function createGhForgeAdapter(
       }
 
       let threads: ReviewThread[] = [];
-      if (owner) {
+      if (repo && splitOwner(repo.owner)) {
         try {
           threads = parseReviewThreadsGhJson(
-            await runCommand("gh", buildReviewThreadsArgs(owner, number), {
-              timeoutMs,
-            }),
+            await commands.run(target, buildReviewThreadsArgs(target, number), undefined, sliceId),
           );
-        } catch {
+        } catch (err) {
+          if (err instanceof StatioEntitlementError) throw err;
           throw new StatioForgeError("gh api graphql failed while reading review threads.");
         }
       }
@@ -524,7 +497,7 @@ export function createGhForgeAdapter(
       return parsePullRequestSummaryGhJson(prStdout, threads);
     },
 
-    async reviewThreads(prNumber: number): Promise<ReviewThread[]> {
+    async reviewThreads(prNumber: number, sliceId?: string): Promise<ReviewThread[]> {
       if (!Number.isInteger(prNumber) || prNumber <= 0) {
         throw new StatioValidationError(
           `Pull request number must be a positive integer; received ${prNumber}.`,
@@ -537,57 +510,24 @@ export function createGhForgeAdapter(
       // those as StatioForgeError, so let it propagate. Only a successfully
       // resolved but unsplittable/empty owner takes the documented empty-list
       // path (AS 4.3).
-      const repo = await resolveRepoInfo();
+      const target = await commands.resolveRepo();
+      const repo = await resolveRepoInfo(target, sliceId);
 
-      const owner = splitOwner(repo.owner) ? repo.owner : "";
-      if (!owner) {
+      if (!splitOwner(repo.owner)) {
         return [];
       }
 
       try {
         return parseReviewThreadsGhJson(
-          await runCommand("gh", buildReviewThreadsArgs(owner, prNumber), {
-            timeoutMs,
-          }),
+          await commands.run(target, buildReviewThreadsArgs(target, prNumber), undefined, sliceId),
           prNumber,
         );
       } catch (err) {
-        if (err instanceof StatioNotFoundError) {
+        if (err instanceof StatioNotFoundError || err instanceof StatioEntitlementError) {
           throw err;
         }
         throw new StatioForgeError("gh api graphql failed while reading review threads.");
       }
     },
   };
-}
-
-function execText(
-  command: string,
-  args: readonly string[],
-  options: StatioCommandOptions,
-): Promise<string> {
-  return new Promise((resolve, reject) => {
-    execFile(
-      command,
-      args as string[],
-      {
-        cwd: options.cwd,
-        encoding: "utf-8",
-        maxBuffer: EXEC_MAX_BUFFER,
-        signal: AbortSignal.timeout(options.timeoutMs),
-      },
-      (err, stdout, stderr) => {
-        if (err) {
-          // execFile passes stderr as a separate callback argument; surface it
-          // on the error so not-found detection can inspect gh's stderr text.
-          if (typeof stderr === "string" && stderr) {
-            (err as Error & { stderr?: string }).stderr = stderr;
-          }
-          reject(err);
-          return;
-        }
-        resolve(typeof stdout === "string" ? stdout : "");
-      },
-    );
-  });
 }

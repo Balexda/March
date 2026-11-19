@@ -88,7 +88,7 @@ Each slice validates its normal entry point against fakes with no live GitHub tr
 
 ### Tasks
 
-- [ ] **Authenticate Statio's forge commands**
+- [x] **Authenticate Statio's forge commands**
 
   Use the shared client at the GitHub command boundaries in `src/statio/forge.ts` and `src/statio/adapter.ts`. Resolve the repository locally or from existing registration data before the first GitHub metadata lookup.
 

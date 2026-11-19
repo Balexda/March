@@ -7,13 +7,30 @@ import {
   buildPrViewArgs,
   buildRepoInfoArgs,
   buildReviewThreadsArgs,
-  createGhForgeAdapter,
+  createGhForgeAdapter as createAdapter,
+  type GhForgeAdapterOptions,
   parsePullRequestListGhJson,
   parsePullRequestSummaryGhJson,
   parseRepoInfoGhJson,
   type StatioCommandRunner,
 } from "./adapter.js";
 import { StatioForgeError, StatioNotFoundError, StatioValidationError } from "./types.js";
+
+function createGhForgeAdapter(options: GhForgeAdapterOptions) {
+  return createAdapter({
+    repo: "Balexda/March",
+    issueToken: async () => ({
+      token: "fixture-token",
+      expiresAt: null,
+      identity: "fixture[bot]",
+      commitIdentity: null,
+      source: "tessera",
+    }),
+    ...options,
+  });
+}
+
+const childEnv = expect.objectContaining({ GH_TOKEN: "fixture-token" });
 
 function runnerReturning(stdout: string): StatioCommandRunner {
   return vi.fn(async () => stdout);
@@ -47,9 +64,10 @@ describe("statio gh forge adapter — repoInfo", () => {
       defaultBranch: "main",
     });
     expect(runCommand).toHaveBeenCalledTimes(1);
-    expect(runCommand).toHaveBeenCalledWith("gh", buildRepoInfoArgs(), {
+    expect(runCommand).toHaveBeenCalledWith("gh", buildRepoInfoArgs("Balexda/March"), {
       cwd: "/repo",
       timeoutMs: 1234,
+      env: childEnv,
     });
   });
 
@@ -130,13 +148,7 @@ describe("statio gh forge adapter — listPrs", () => {
   });
 
   it("returns bounded list items for author plus state filters", async () => {
-    const runCommand: StatioCommandRunner = vi.fn(async (_command, args) => {
-      if (args[0] === "repo") {
-        return JSON.stringify({
-          nameWithOwner: "Balexda/March",
-          defaultBranchRef: { name: "master" },
-        });
-      }
+    const runCommand: StatioCommandRunner = vi.fn(async () => {
       return JSON.stringify([
         {
           number: 42,
@@ -167,24 +179,19 @@ describe("statio gh forge adapter — listPrs", () => {
       },
     ]);
     expect(runCommand).toHaveBeenNthCalledWith(
-      2,
+      1,
       "gh",
       buildPrListArgs({ author: "@me", state: "open" }, "Balexda/March"),
       {
-        cwd: undefined,
+        cwd: "/repo",
         timeoutMs: 1234,
+        env: childEnv,
       },
     );
   });
 
   it("returns bounded list items for head branch filters", async () => {
-    const runCommand: StatioCommandRunner = vi.fn(async (_command, args) => {
-      if (args[0] === "repo") {
-        return JSON.stringify({
-          nameWithOwner: "Balexda/March",
-          defaultBranchRef: { name: "master" },
-        });
-      }
+    const runCommand: StatioCommandRunner = vi.fn(async () => {
       return JSON.stringify([
         {
           number: 7,
@@ -213,24 +220,19 @@ describe("statio gh forge adapter — listPrs", () => {
       },
     ]);
     expect(runCommand).toHaveBeenNthCalledWith(
-      2,
+      1,
       "gh",
       buildPrListArgs({ head: "feature/head-filter" }, "Balexda/March"),
       {
         cwd: undefined,
         timeoutMs: 10_000,
+        env: childEnv,
       },
     );
   });
 
   it("returns an empty list for empty gh pr list output", async () => {
-    const runCommand: StatioCommandRunner = vi.fn(async (_command, args) => {
-      if (args[0] === "repo") {
-        return JSON.stringify({
-          nameWithOwner: "Balexda/March",
-          defaultBranchRef: { name: "master" },
-        });
-      }
+    const runCommand: StatioCommandRunner = vi.fn(async () => {
       return "[]";
     });
     const adapter = createGhForgeAdapter({ runCommand });
@@ -260,11 +262,8 @@ describe("statio gh forge adapter — listPrs", () => {
     ).toThrow(StatioForgeError);
   });
 
-  it("falls back to the repo cwd when owner is unavailable", async () => {
-    const runCommand: StatioCommandRunner = vi.fn(async (_command, args) => {
-      if (args[0] === "repo") {
-        return JSON.stringify({ nameWithOwner: "", defaultBranchRef: { name: "master" } });
-      }
+  it("lists against the local repository scope", async () => {
+    const runCommand: StatioCommandRunner = vi.fn(async () => {
       return JSON.stringify([
         {
           number: 9,
@@ -281,36 +280,15 @@ describe("statio gh forge adapter — listPrs", () => {
     const adapter = createGhForgeAdapter({ cwd: "/repo", timeoutMs: 100, runCommand });
 
     await expect(adapter.listPrs({ head: "branch" })).resolves.toHaveLength(1);
-    expect(runCommand).toHaveBeenNthCalledWith(2, "gh", buildPrListArgs({ head: "branch" }), {
+    expect(runCommand).toHaveBeenNthCalledWith(1, "gh", buildPrListArgs({ head: "branch" }, "Balexda/March"), {
       cwd: "/repo",
       timeoutMs: 100,
-    });
-  });
-
-  it("falls back to the repo cwd when owner resolution fails", async () => {
-    const runCommand: StatioCommandRunner = vi.fn(async (_command, args) => {
-      if (args[0] === "repo") {
-        throw new Error("gh repo view failed");
-      }
-      return "[]";
-    });
-    const adapter = createGhForgeAdapter({ cwd: "/repo", timeoutMs: 100, runCommand });
-
-    await expect(adapter.listPrs({ author: "@me" })).resolves.toEqual([]);
-    expect(runCommand).toHaveBeenNthCalledWith(2, "gh", buildPrListArgs({ author: "@me" }), {
-      cwd: "/repo",
-      timeoutMs: 100,
+      env: childEnv,
     });
   });
 
   it("wraps gh pr list failures as forge_error", async () => {
-    const runCommand: StatioCommandRunner = vi.fn(async (_command, args) => {
-      if (args[0] === "repo") {
-        return JSON.stringify({
-          nameWithOwner: "Balexda/March",
-          defaultBranchRef: { name: "master" },
-        });
-      }
+    const runCommand: StatioCommandRunner = vi.fn(async () => {
       throw new Error("gh auth token secret failed");
     });
     const adapter = createGhForgeAdapter({ runCommand });
@@ -425,18 +403,19 @@ describe("statio gh forge adapter — getPr", () => {
       needsResponseCount: 1,
     });
     expect(runCommand).toHaveBeenNthCalledWith(2, "gh", buildPrViewArgs(42, "Balexda/March"), {
-      cwd: undefined,
+      cwd: "/repo",
       timeoutMs: 1234,
+      env: childEnv,
     });
     expect(runCommand).toHaveBeenNthCalledWith(
       3,
       "gh",
       buildReviewThreadsArgs("Balexda/March", 42),
-      { timeoutMs: 1234 },
+      { cwd: undefined, timeoutMs: 1234, env: childEnv },
     );
   });
 
-  it("falls back to the repo cwd when owner is unavailable", async () => {
+  it("keeps PR detail scoped when metadata has no owner", async () => {
     const runCommand: StatioCommandRunner = vi.fn(async (_command, args) => {
       if (args[0] === "repo") {
         return JSON.stringify({ nameWithOwner: "", defaultBranchRef: { name: "master" } });
@@ -459,9 +438,10 @@ describe("statio gh forge adapter — getPr", () => {
       checks: "NONE",
       unresolvedThreads: [],
     });
-    expect(runCommand).toHaveBeenNthCalledWith(2, "gh", buildPrViewArgs(7), {
+    expect(runCommand).toHaveBeenNthCalledWith(2, "gh", buildPrViewArgs(7, "Balexda/March"), {
       cwd: "/repo",
       timeoutMs: 100,
+      env: childEnv,
     });
     expect(runCommand).toHaveBeenCalledTimes(2);
   });
@@ -500,6 +480,22 @@ describe("statio gh forge adapter — getPr", () => {
     const adapter = createGhForgeAdapter({ runCommand });
 
     await expect(adapter.getPr(99)).rejects.toBeInstanceOf(StatioNotFoundError);
+  });
+
+  it("does not mistake a PR number in the execFile error for a 404 response", async () => {
+    const runCommand: StatioCommandRunner = vi.fn(async (_command, args) => {
+      if (args[0] === "repo") {
+        return JSON.stringify({ nameWithOwner: "Balexda/March", defaultBranchRef: { name: "main" } });
+      }
+      throw Object.assign(new Error("Command failed: gh pr view 404"), {
+        stderr: "HTTP 503: Service unavailable",
+        stdout: "",
+      });
+    });
+    const adapter = createGhForgeAdapter({ runCommand });
+
+    await expect(adapter.getPr(404)).rejects.toBeInstanceOf(StatioForgeError);
+    expect(runCommand).toHaveBeenCalledTimes(2);
   });
 
   it("rejects a non-positive or non-integer PR number as a validation error", async () => {
@@ -643,7 +639,7 @@ describe("statio gh forge adapter — reviewThreads", () => {
       2,
       "gh",
       buildReviewThreadsArgs("Balexda/March", 42),
-      { timeoutMs: 1234 },
+      { cwd: undefined, timeoutMs: 1234, env: childEnv },
     );
   });
 
