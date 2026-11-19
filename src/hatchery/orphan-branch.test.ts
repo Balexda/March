@@ -56,6 +56,8 @@ const showRef = `git show-ref --verify --quiet refs/heads/${BRANCH}`;
 const symbolicRef = "git symbolic-ref --short refs/remotes/origin/HEAD";
 const mergeBase = `git merge-base --is-ancestor refs/heads/${BRANCH} refs/heads/main`;
 const origin = { url: "https://github.com/team/repo.git", repo: "team/repo" };
+const HEAD_SHA = "a".repeat(40);
+const mergedHeadCheck = `git merge-base --is-ancestor refs/heads/${BRANCH} ${HEAD_SHA}`;
 
 function mockRemote(status: number, prs: unknown = []) {
   vi.mocked(forge.resolveHatcheryOrigin).mockResolvedValue(origin);
@@ -73,8 +75,8 @@ describe("forge-dependent collision checks", () => {
   it.each([
     [0, [], { kind: "safe", reason: "orphan-ref" }],
     [1, [], { kind: "unsafe", reason: "diverged" }],
-    [0, [{ number: 7, state: "open", merged_at: null }], { kind: "unsafe", reason: "open-pr", detail: "#7" }],
-    [1, [{ number: 42, state: "closed", merged_at: "2026-11-19" }], { kind: "safe", reason: "post-merge-stale", detail: "#42" }],
+    [0, [{ number: 7, state: "open", merged_at: null, head: { sha: HEAD_SHA } }], { kind: "unsafe", reason: "open-pr", detail: "#7" }],
+    [1, [{ number: 42, state: "closed", merged_at: "2026-11-19", head: { sha: HEAD_SHA } }], { kind: "safe", reason: "post-merge-stale", detail: "#42" }],
   ] as const)("classifies existing branches with ancestry %i and PRs %j", async (ancestor, prs, verdict) => {
     mockRemote(0, prs);
     const { run } = fakeRunner({ [symbolicRef]: { stdout: "origin/main" }, [mergeBase]: { code: ancestor } });
@@ -130,7 +132,7 @@ describe("forge-dependent collision checks", () => {
       expect(url).toBe("https://api.github.com/repos/team/repo/pulls?state=all&per_page=100&head=" +
         encodeURIComponent("team:" + BRANCH));
       expect(init.headers).toMatchObject({ authorization: "Bearer from-tessera" });
-      return Response.json([{ number: 12, state: "open", merged_at: null }]);
+      return Response.json([{ number: 12, state: "open", merged_at: null, head: { sha: HEAD_SHA } }]);
     });
     vi.stubGlobal("fetch", request);
     const { run } = fakeRunner({ [symbolicRef]: { stdout: "origin/main" } });
@@ -138,6 +140,19 @@ describe("forge-dependent collision checks", () => {
       kind: "unsafe", reason: "open-pr", detail: "#12",
     });
     expect(request).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps a local tip the merged PR never carried as unsafe:diverged", async () => {
+    mockRemote(0, [{ number: 42, state: "closed", merged_at: "2026-11-19", head: { sha: HEAD_SHA } }]);
+    const { run } = fakeRunner({
+      [symbolicRef]: { stdout: "origin/main" }, [mergeBase]: { code: 1 }, [mergedHeadCheck]: { code: 1 },
+    });
+    expect(await classifyBranchSafety("/repo", BRANCH, run)).toEqual({ kind: "unsafe", reason: "diverged" });
+  });
+
+  it("reports a failed local branch probe instead of treating it as absent", async () => {
+    const { run } = fakeRunner({ [showRef]: { code: -1 } });
+    await expect(classifyBranchSafety("/repo", BRANCH, run)).rejects.toMatchObject({ code: "branch_lookup_failed" });
   });
 
   it("fails closed if origin is unreachable", async () => {

@@ -23,6 +23,7 @@ import {
 import {
   hatcheryGitEnv,
   HatcheryGitHubError,
+  readHatcheryGitHubDefaultBranch,
   resolveHatcheryOrigin,
   runHatcheryNetworkGit,
 } from "./github-read.js";
@@ -1144,18 +1145,21 @@ function isAncestor(ancestor: string, descendant: string, cwd: string): boolean 
  * set locally. Exposed for tests.
  */
 export function resolveDefaultBranch(worktreePath: string): string {
+  // origin/HEAD unset (e.g. a worktree whose remote HEAD was never fetched) —
+  // fall through to the conventional default.
+  return readOriginHead(worktreePath) ?? "main";
+}
+
+function readOriginHead(worktreePath: string): string | undefined {
   try {
     const ref = runGitCapture(
       ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
       worktreePath,
     );
-    const name = ref.replace(/^origin\//, "").trim();
-    if (name) return name;
+    return ref.replace(/^origin\//, "").trim() || undefined;
   } catch {
-    // origin/HEAD unset (e.g. a worktree whose remote HEAD was never fetched) —
-    // fall through to the conventional default.
+    return undefined;
   }
-  return "main";
 }
 
 /**
@@ -1195,9 +1199,14 @@ export async function pinManagerWorktreeToDefaultBranch(
   worktreePath: string,
   sliceId?: string,
 ): Promise<PinBaseResult> {
-  const defaultBranch = resolveDefaultBranch(worktreePath);
-  if (!fs.existsSync(worktreePath)) return { defaultBranch, fetched: false, pinned: false };
+  if (!fs.existsSync(worktreePath)) {
+    return { defaultBranch: resolveDefaultBranch(worktreePath), fetched: false, pinned: false };
+  }
   const origin = await resolveHatcheryOrigin(worktreePath);
+  // A GitHub origin without a local origin/HEAD must not guess `main`: a fetch
+  // of a missing branch would fail the spawn. Ask GitHub through the same scope.
+  const defaultBranch = readOriginHead(worktreePath) ??
+    (origin?.repo ? await readHatcheryGitHubDefaultBranch(origin.repo, sliceId) : "main");
   let fetched = false;
   if (origin) {
     const result = await runHatcheryNetworkGit(
@@ -1332,6 +1341,7 @@ export async function runHatcherySpawn(
     // origin/<default> NOW — before the snapshot the worker diffs against AND
     // before the apply that targets this same worktree — makes the worker edit
     // already-merged files instead of re-creating them and colliding at apply.
+    stage = "pin_base";
     await dispatch.spanAsync("manager.pin_base", async (pinSpan) => {
       pinSpan.setAttributes({ "march.worktree": managerWorktree });
       const pin = await pinManagerWorktreeToDefaultBranch(managerWorktree, sliceId);

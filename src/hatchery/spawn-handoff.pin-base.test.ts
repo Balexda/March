@@ -132,8 +132,9 @@ if (args[0] === "fetch") {
   const log = ${JSON.stringify(calls)};
   fs.appendFileSync(log, JSON.stringify({
     args, protocol: env.GIT_ALLOW_PROTOCOL, globalConfig: env.GIT_CONFIG_GLOBAL,
-    ambient: env.GH_TOKEN, authKey: env.GIT_CONFIG_KEY_5, auth: env.GIT_CONFIG_VALUE_5,
-    helper: env.GIT_CONFIG_VALUE_0,
+    ambient: env.GH_TOKEN,
+    config: Object.fromEntries(Array.from({ length: Number(env.GIT_CONFIG_COUNT) },
+      (_, i) => [env["GIT_CONFIG_KEY_" + i], env["GIT_CONFIG_VALUE_" + i]])),
   }) + "\\n");
   if (fs.readFileSync(log, "utf8").trim().split("\\n").length === 1) {
     console.error("trace: <= Recv header: HTTP/2 401");
@@ -141,7 +142,7 @@ if (args[0] === "fetch") {
   }
   args[4] = ${JSON.stringify(origin)};
   env.GIT_ALLOW_PROTOCOL = "file";
-} else if (env.GIT_CONFIG_VALUE_5) {
+} else if (Object.keys(env).some((key) => key.startsWith("GIT_CONFIG_VALUE_") && env[key].startsWith("Authorization"))) {
   process.exit(99);
 }
 execFileSync(git, args, { stdio: "inherit", env });
@@ -176,11 +177,58 @@ execFileSync(git, args, { stdio: "inherit", env });
     expect(attempts).toEqual(["initial", "refreshed"].map((token) => ({
       args: ["fetch", "--no-recurse-submodules", "--no-auto-maintenance", "--", "https://github.com/my-team/project.git",
         "+refs/heads/main:refs/remotes/origin/main"],
-      protocol: "https", globalConfig: "/dev/null", helper: "",
-      authKey: "http.https://github.com/my-team/project.git.extraHeader",
-      auth: "Authorization: Basic " + Buffer.from("x-access-token:" + token).toString("base64"),
+      protocol: "https", globalConfig: "/dev/null",
+      config: {
+        "credential.helper": "",
+        "core.askPass": "",
+        "http.extraHeader": "",
+        "http.followRedirects": "false",
+        "http.sslVerify": "true",
+        "core.hooksPath": "/dev/null",
+        "http.https://github.com/my-team/project.git.sslVerify": "true",
+        "http.https://github.com/my-team/project.git.extraHeader":
+          "Authorization: Basic " + Buffer.from("x-access-token:" + token).toString("base64"),
+      },
     })));
     expect(process.env.GH_TOKEN).toBe("operator-token");
+  });
+
+  it("resolves a GitHub default branch through scoped metadata when origin/HEAD is unset", async () => {
+    const { stale, origin, originTip } = makeStaleWorktree("master");
+    git(["remote", "set-url", "origin", "git@github.com:my-team/master-project.git"], stale);
+    git(["symbolic-ref", "--delete", "refs/remotes/origin/HEAD"], stale);
+    const fakeBin = makeTmpDir();
+    const realGit = execFileSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).trim();
+    fs.writeFileSync(path.join(fakeBin, "git"), `#!/usr/bin/env node
+const { execFileSync } = require("node:child_process");
+const args = process.argv.slice(2);
+const env = { ...process.env, GIT_ALLOW_PROTOCOL: "file" };
+if (args[0] === "fetch") args[4] = ${JSON.stringify(origin)};
+execFileSync(${JSON.stringify(realGit)}, args, { stdio: "inherit", env });
+`, { mode: 0o755 });
+    vi.stubEnv("PATH", fakeBin + path.delimiter + process.env.PATH);
+    vi.stubEnv("MARCH_TESSERA_GH_TOKEN_FALLBACK", "");
+    vi.stubEnv("MARCH_TESSERA_URL", "http://pin-test-tessera");
+    vi.stubEnv("MARCH_TESSERA_CLIENT_KEY", "pin-test-key");
+    const requests: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init: RequestInit) => {
+      requests.push(String(url));
+      if (String(url).startsWith("https://api.github.com/")) {
+        expect(init.headers).toMatchObject({ authorization: expect.stringMatching(/^Bearer /) });
+        return Response.json({ default_branch: "master" });
+      }
+      const request = JSON.parse(String(init.body));
+      return Response.json({
+        token: "read-token", identity: "app[bot]", repo: request.repo, access: request.access,
+        expires_at: "2099-01-01T00:00:00Z", commit_identity: { name: "bot", email: "bot@example.com" },
+      });
+    }));
+
+    await expect(pinManagerWorktreeToDefaultBranch(stale, "slice-3")).resolves.toEqual({
+      defaultBranch: "master", fetched: true, pinned: true,
+    });
+    expect(git(["rev-parse", "HEAD"], stale)).toBe(originTip);
+    expect(requests).toContain("https://api.github.com/repos/my-team/master-project");
   });
 
   it("resolves a non-`main` default branch from origin/HEAD", async () => {

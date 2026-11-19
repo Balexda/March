@@ -16,6 +16,7 @@ export type SpawnOutcome = "success" | "failure";
 export type SpawnFailureStage =
   | "manager_launch"
   | "record_init"
+  | "pin_base"
   | "image_build"
   | "container_run"
   | "patch_extract"

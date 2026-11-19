@@ -68,7 +68,9 @@ const defaultRunner: CommandRunner = (file, args, cwd) => {
       : typeof e.stdout === "string"
         ? e.stdout
         : "";
-    return { code: typeof e.status === "number" ? e.status : 1, stdout };
+    // A killed/timed-out or unspawnable process has no exit status. Report it
+    // as -1 so callers never mistake it for git's "not found" exit code 1.
+    return { code: typeof e.status === "number" ? e.status : -1, stdout };
   }
 };
 
@@ -76,13 +78,15 @@ interface PrRecord {
   readonly number: number;
   readonly state: "open" | "closed";
   readonly merged_at: string | null;
+  readonly head: { readonly sha: string };
 }
 
 function isPrRecord(value: unknown): value is PrRecord {
   if (!value || typeof value !== "object") return false;
   const pr = value as Partial<PrRecord>;
   return Number.isInteger(pr.number) && (pr.state === "open" || pr.state === "closed") &&
-    (pr.merged_at === null || typeof pr.merged_at === "string");
+    (pr.merged_at === null || typeof pr.merged_at === "string") &&
+    typeof pr.head?.sha === "string" && /^[0-9a-f]{40}$/i.test(pr.head.sha);
 }
 
 /** Classify a collision using local ancestry and authoritative remote evidence. */
@@ -134,7 +138,10 @@ export async function classifyBranchSafety(
   const isAncestor = defaultBranch &&
     run("git", ["merge-base", "--is-ancestor", branchRef, "refs/heads/" + defaultBranch], repoRoot).code === 0;
   if (isAncestor) return { kind: "safe", reason: "orphan-ref" };
-  const merged = prs.filter((pr) => pr.merged_at);
+  // Merge evidence covers only the merged PR head: a local tip with commits the
+  // PR never carried is unmerged work, not a stale ref.
+  const merged = prs.filter((pr) => pr.merged_at &&
+    run("git", ["merge-base", "--is-ancestor", branchRef, pr.head.sha], repoRoot).code === 0);
   if (merged.length) {
     return { kind: "safe", reason: "post-merge-stale", detail: merged.map((pr) => "#" + pr.number).join(",") };
   }

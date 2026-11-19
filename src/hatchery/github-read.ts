@@ -40,10 +40,11 @@ function git(cwd: string, args: string[], env = hatcheryGitEnv()) {
 
 export async function resolveHatcheryOrigin(cwd: string): Promise<Origin | undefined> {
   // Read the configured URL before Git applies any host URL rewrites.
-  const result = await git(cwd, ["config", "--local", "--includes", "--get", "remote.origin.url"]);
+  const result = await git(cwd, ["config", "--local", "--includes", "--get-all", "remote.origin.url"]);
   if (result.code === 1) return undefined;
   if (result.code !== 0) throw new HatcheryGitHubError("origin_lookup_failed");
-  const url = result.stdout.trim();
+  // Git fetches from the first configured URL; `--get` would return the last.
+  const url = result.stdout.split("\n")[0]?.trim() ?? "";
   const github = /^(?:git@github\.com:|ssh:\/\/git@github\.com\/|https?:\/\/github\.com\/)([a-z0-9-]+)\/([\w.-]+?)\/?$/i.exec(url);
   if (github) {
     const name = github[2].replace(/\.git$/i, "");
@@ -90,8 +91,12 @@ export async function runHatcheryNetworkGit(
       ["http.extraHeader", ""],
       ["http.followRedirects", "false"],
       ["http.sslVerify", "true"],
+      // Repository-local config and hooks are untrusted for a credentialed call:
+      // pin TLS verification at the URL's own specificity (command-line entries
+      // win ties) and run no hooks that could inherit the token.
+      ["core.hooksPath", "/dev/null"],
     ];
-    if (token) config.push([
+    if (token) config.push([`http.${origin.url}.sslVerify`, "true"], [
       `http.${origin.url}.extraHeader`,
       `Authorization: Basic ${Buffer.from(`x-access-token:${token}`).toString("base64")}`,
     ]);
@@ -117,6 +122,15 @@ export async function runHatcheryNetworkGit(
     return { status: result.unauthorized ? 401 : 0, value: result.code };
   };
   return origin.repo ? withHatcheryGitHubRead(origin.repo, sliceId, run) : (await run()).value;
+}
+
+/** Read a GitHub repository's default branch through the scoped read entitlement. */
+export async function readHatcheryGitHubDefaultBranch(repo: string, sliceId?: string): Promise<string> {
+  const metadata = await readHatcheryGitHubJson(repo, "", sliceId) as { default_branch?: unknown } | null;
+  if (typeof metadata?.default_branch !== "string" || !metadata.default_branch) {
+    throw new HatcheryGitHubError("invalid_repo_lookup");
+  }
+  return metadata.default_branch;
 }
 
 export async function readHatcheryGitHubJson(repo: string, resource: string, sliceId?: string): Promise<unknown> {

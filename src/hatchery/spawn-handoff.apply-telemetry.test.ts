@@ -213,6 +213,8 @@ it("fails the slice trace on a Tessera outage and processes the next local job",
   expect(pin?.spanContext().traceId).toBe(traceIdForDispatch(input.sliceId));
   expect(pin?.status).toMatchObject({ code: 2, message: "Hatchery GitHub read failed (tessera:unreachable)" });
   expect(spans.some((span) => span.name === "spawn.start")).toBe(false);
+  expect(spans.find((span) => span.name === "hatchery.spawn" && span.spanContext().traceId === pin?.spanContext().traceId)
+    ?.attributes["march.failure_stage"]).toBe("pin_base");
 
   worktreePath.value = makeWorktree();
   await expect(runHatcherySpawn({ ...input, sliceId: "next-local-slice" })).rejects.toThrow(/git apply failed/);
