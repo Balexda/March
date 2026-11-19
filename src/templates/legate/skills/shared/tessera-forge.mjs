@@ -40,7 +40,14 @@ function main() {
   const [command, access, ...args] = process.argv.slice(2);
   if (!["repo", "gh", "fetch"].includes(command)) return fail("Invalid conductor forge operation.");
 
-  const remote = run("git", ["config", "--get", "remote.origin.url"], process.env, 5_000);
+  // Keep ambient credentials out of every forge child (and origin discovery,
+  // so an inherited GIT_DIR cannot point it at another checkout), and pass only the
+  // explicitly opted-in migration credential to the Tessera CLI.
+  // Every GIT_* variable is dropped too, so GIT_SSL_NO_VERIFY, GIT_SSL_CAINFO,
+  // GIT_CONFIG_* and tracing cannot weaken or leak the credentialed transport.
+  const env = Object.fromEntries(Object.entries(process.env).filter(([name]) =>
+    !/^(?:GH_|GITHUB_|GIT_|MARCH_TESSERA_CLIENT_KEY$|MARCH_GIT_AUTH$|SSH_ASKPASS$|DEBUG$)/i.test(name)));
+  const remote = run("git", ["config", "--get", "remote.origin.url"], env, 5_000);
   const match = remote.stdout?.trim().match(
     /^(?:https:\/\/github\.com\/|ssh:\/\/git@github\.com\/|ssh:\/\/git@ssh\.github\.com:443\/|git@github\.com:)([\w.-]+\/[\w.-]+?)\/?$/i,
   );
@@ -54,12 +61,6 @@ function main() {
     return 0;
   }
 
-  // Keep ambient credentials out of every forge child, and pass only the
-  // explicitly opted-in migration credential to the Tessera CLI.
-  // Every GIT_* variable is dropped too, so GIT_SSL_NO_VERIFY, GIT_SSL_CAINFO,
-  // GIT_CONFIG_* and tracing cannot weaken or leak the credentialed transport.
-  const env = Object.fromEntries(Object.entries(process.env).filter(([name]) =>
-    !/^(?:GH_|GITHUB_|GIT_|MARCH_TESSERA_CLIENT_KEY$|MARCH_GIT_AUTH$|SSH_ASKPASS$|DEBUG$)/i.test(name)));
   const repoUrl = `https://github.com/${repo}.git`;
   const gitHeaderKey = `http.${repoUrl}.extraHeader`;
   const gitEnv = {

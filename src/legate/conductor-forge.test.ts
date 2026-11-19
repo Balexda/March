@@ -88,7 +88,7 @@ console.log(JSON.stringify({ number: 7, title: "Fixture issue", state: "OPEN" })
         git: `#!${process.execPath}
 const fs = require("node:fs");
 const args = process.argv.slice(2);
-if (args[0] === "config") console.log("git@github.com:acme/checkout.git");
+if (args[0] === "config") console.log(process.env.GIT_DIR ? "git@github.com:other/elsewhere.git" : "git@github.com:acme/checkout.git");
 if (args[0] === "symbolic-ref") {
   if (!process.env.FIXTURE_STALE_HEAD) process.exit(1);
   console.log(process.env.FIXTURE_STALE_HEAD);
@@ -193,6 +193,16 @@ if (args.includes("fetch")) {
       expect(sync.code).toBe(0);
       const git = (await test.invoked()).find(entry => entry.tool === "git" && entry.args.includes("fetch"));
       expect(git).toMatchObject({ valid: true, args: expect.arrayContaining(["+refs/heads/main:refs/remotes/origin/main"]) });
+    } finally {
+      await test.close();
+    }
+  }, 20_000);
+
+  it("resolves origin without inherited GIT_* so GIT_DIR cannot redirect the entitlement", async () => {
+    const test = await fixture(false, { GIT_DIR: "/elsewhere/.git" });
+    try {
+      expect((await test.run("legate.issue", "fetch-issue.sh", "7")).code).toBe(0);
+      expect(test.requests).toEqual([{ repo: "acme/checkout", access: "read", identity: "app", slice: "issue-7" }]);
     } finally {
       await test.close();
     }
