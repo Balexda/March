@@ -50,7 +50,7 @@ export interface RoutesOptions {
   ) => Promise<TeardownResult>;
   /** Override the Castra gateway the sweep uses (tests). Defaults to env client. */
   readonly stewardGateway?: CastraStewardGateway;
-  /** Override the orphan gate the sweep uses (tests). Defaults to `gh` + `fs`. */
+  /** Override the orphan gate the sweep uses (tests). Defaults to Tessera-authenticated GitHub REST + `fs`. */
   readonly orphanGate?: OrphanGate;
   /** Override the liveness observer reconciled reads use (tests). Defaults to docker. */
   readonly containerObserver?: ContainerObserver;
