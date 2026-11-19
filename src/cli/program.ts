@@ -2278,29 +2278,43 @@ brood
 
 brood
   .command("list")
-  .description("List sessions Brood is tracking")
+  .description("List tracked sessions from the Brood service")
   .option("--kind <kind>", "Filter by kind: spawn | steward | legate")
   .option("--status <status>", "Filter by status")
-  .option("--json", "Print the session list as JSON")
-  .action(async (opts: { kind?: string; status?: string; json?: boolean }) => {
+  .option("--json", "Print matching read views as JSON")
+  .option("--reconcile", "Observe container liveness through Brood", false)
+  .option("--no-reconcile", "Skip liveness observation (default)")
+  .action(async (opts: {
+    kind?: string;
+    status?: string;
+    json?: boolean;
+    reconcile: boolean;
+  }) => {
     commandHandled = true;
     const { BroodClient, BroodClientError } = await import(
       "../brood/service/client.js"
     );
     try {
-      const sessions = await new BroodClient().list({
-        kind: opts.kind as never,
-        status: opts.status as never,
+      const views = await new BroodClient().listViews({
+        kind: opts.kind,
+        status: opts.status,
+        reconcile: opts.reconcile,
       });
       if (opts.json) {
-        console.log(JSON.stringify(sessions, null, 2));
-      } else if (sessions.length === 0) {
+        console.log(JSON.stringify(views, null, 2));
+      } else if (views.length === 0) {
         console.log("No sessions tracked.");
       } else {
-        for (const s of sessions) {
-          console.log(
-            `${s.id}\t${s.kind}\t${s.status}\t${s.branch ?? ""}\t${s.containerId ?? ""}`,
-          );
+        console.log("ID\tSTATUS\tAGE\tBRANCH\tCONTAINER\tATTENTION");
+        for (const { record, age, needsAttention } of views) {
+          console.log([
+            record.id,
+            record.status,
+            age,
+            record.branch ?? "",
+            record.containerId ?? "",
+            needsAttention ? "!" : "",
+          ].join("\t"));
         }
       }
       process.exitCode = SUCCESS;

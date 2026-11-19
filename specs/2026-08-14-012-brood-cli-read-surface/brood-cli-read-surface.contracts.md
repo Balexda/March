@@ -5,7 +5,7 @@
 
 ### `march brood list`
 
-**Purpose**: List Brood-tracked sessions.
+**Purpose**: Read tracked sessions through the Brood service. Brood owns validation and liveness observation, and listing leaves tracked state unchanged.
 **Consumers**: Operators, scripts, Smithy skills.
 **Providers**: March CLI, Brood service.
 
@@ -23,22 +23,22 @@ march brood list [--kind <spawn|steward|legate>] [--status <status>] [--json] [-
 | `--status` | SessionStatus | No | Filter rows by lifecycle status. |
 | `--json` | boolean | No | Emit JSON instead of table output. |
 | `--reconcile` | boolean | No | Enable observational liveness reconciliation. |
-| `--no-reconcile` | boolean | No | Disable observational liveness reconciliation. |
+| `--no-reconcile` | boolean | No | Disable observational liveness reconciliation (the default). |
 
 #### Outputs
 
 | Field | Type | Description |
 |-------|------|-------------|
-| table rows | text | Columns: id, status, age, branch, container, attention marker. |
-| JSON | BroodReadView[] | Stable array of matching read views. |
+| table rows | text | Tab-separated id, status, age, branch, container, and attention columns. Missing branch and container cells are blank. Rows needing attention show `!`. |
+| JSON | BroodReadView[] | Array of matching read views as returned by Brood. Branch and container are optional fields on each view's `record`. |
 
 #### Error Conditions
 
 | Condition | Response | Description |
 |-----------|----------|-------------|
-| Invalid kind or status | Usage error | Reject before querying. |
+| Invalid kind or status | Non-zero error | Surface Brood's validation error. |
 | Brood unreachable | Non-zero error | Surface client error; no raw-registry fallback. |
-| No matching rows | Success | Empty JSON array or empty-result table message. |
+| No matching rows | Success | Empty JSON array or `No sessions tracked.` in table mode. |
 
 ### `march brood inspect <id>`
 

@@ -2,12 +2,17 @@
  * @l1 @deterministic @ci
  */
 import { describe, it, expect, afterEach } from "vitest";
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFile, execFileSync, spawnSync } from "node:child_process";
 import { resolve } from "node:path";
 import { createRequire } from "node:module";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
+import Fastify from "fastify";
+import { registerRoutes } from "../brood/service/routes.js";
+import { sqliteAvailable } from "../brood/service/sqlite.js";
+import { SessionStore } from "../brood/service/store.js";
 import { FINDER_BIN } from "../shared/deps.js";
 
 const _require = createRequire(import.meta.url);
@@ -16,6 +21,7 @@ const PKG_VERSION: string = (
 ).version;
 
 const CLI_PATH = resolve(import.meta.dirname, "../../dist/cli.js");
+const execFileAsync = promisify(execFile);
 
 // Absolute path to the finder binary (which on Unix, where on Windows) —
 // used to build isolated test PATHs.
@@ -67,6 +73,92 @@ describe("march CLI", () => {
     }
     tmpDirs.length = 0;
   });
+
+  it("advertises the Brood list flags", () => {
+    const result = run(["brood", "list", "--help"]);
+    expect(result.exitCode).toBe(0);
+    for (const flag of ["--kind", "--status", "--json", "--reconcile", "--no-reconcile"]) {
+      expect(result.stdout).toContain(flag);
+    }
+  });
+
+  it.skipIf(!sqliteAvailable)("lists service-owned Brood read views", async () => {
+    const store = new SessionStore({ dbPath: ":memory:" });
+    const app = Fastify();
+    const home = makeTmpDir();
+    const requests: string[] = [];
+    let observations = 0;
+    app.addHook("onRequest", async (request) => {
+      requests.push(request.method);
+    });
+    const list = (url: string, ...flags: string[]) =>
+      execFileAsync(process.execPath, [CLI_PATH, "brood", "list", ...flags], {
+        env: { ...process.env, HOME: home, MARCH_BROOD_URL: url },
+        timeout: 5000,
+      });
+
+    let url: string;
+    try {
+      const failed = store.register({
+        id: "failed-spawn", kind: "spawn", status: "failed",
+        branch: "topic", containerId: "container-1",
+      });
+      const steward = store.register({
+        id: "running-steward", kind: "steward", status: "running",
+      });
+      const before = store.list();
+      await registerRoutes(app, {
+        store,
+        containerObserver: {
+          async observe() {
+            observations++;
+            return new Map([["container-1", { present: true, running: true }]]);
+          },
+        },
+      });
+      url = await app.listen({ host: "127.0.0.1", port: 0 });
+
+      const table = (await list(url)).stdout.trimEnd();
+      expect(table).toMatch(/^ID\tSTATUS\tAGE\tBRANCH\tCONTAINER\tATTENTION\n/);
+      expect(table).toMatch(/failed-spawn\tfailed\t[^\t\n]+\ttopic\tcontainer-1\t!/);
+      expect((await list(url, "--kind", "steward")).stdout.split("\n")[1])
+        .toMatch(/^running-steward\trunning\t[^\t]+\t\t\t$/);
+
+      const json = async (...flags: string[]) =>
+        JSON.parse((await list(url, "--json", ...flags)).stdout);
+      expect(await json("--status", "failed")).toEqual([{
+        record: failed, age: expect.any(String), needsAttention: true,
+        disposed: false, containerLive: false, reconciled: false,
+      }]);
+      expect(await json("--kind", "steward", "--no-reconcile")).toEqual([{
+        record: steward, age: expect.any(String), needsAttention: false,
+        disposed: false, containerLive: null, reconciled: false,
+      }]);
+      expect(observations).toBe(0);
+      expect(await json("--kind", "spawn", "--reconcile")).toEqual([
+        expect.objectContaining({ record: failed, containerLive: true, reconciled: true }),
+      ]);
+      expect(observations).toBe(1);
+
+      expect((await list(url, "--kind", "legate")).stdout).toBe("No sessions tracked.\n");
+      expect(await json("--kind", "legate")).toEqual([]);
+      for (const field of ["kind", "status"]) {
+        await expect(list(url, `--${field}`, "invalid")).rejects.toMatchObject({
+          code: 1, stderr: expect.stringContaining(`${field} must be one of`), stdout: "",
+        });
+      }
+      expect(requests.length).toBeGreaterThan(0);
+      expect(requests.every((method) => method === "GET")).toBe(true);
+      expect(store.list()).toEqual(before);
+    } finally {
+      await app.close();
+      store.close();
+    }
+
+    await expect(list(url)).rejects.toMatchObject({
+      code: 1, stderr: expect.stringContaining("Could not reach the brood service"), stdout: "",
+    });
+  }, 15000);
 
   /**
    * Runs the CLI with a fully controlled environment. Uses `spawnSync` instead
