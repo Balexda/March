@@ -147,6 +147,11 @@ describe("march CLI", () => {
           code: 1, stderr: expect.stringContaining(`${field} must be one of`), stdout: "",
         });
       }
+      const invalidJson = await list(url, "--json", "--kind", "invalid").catch((e) => e);
+      expect(invalidJson.code).toBe(1);
+      expect(JSON.parse(invalidJson.stdout)).toEqual({
+        error: expect.stringContaining("kind must be one of"),
+      });
       expect(requests.length).toBeGreaterThan(0);
       expect(requests.every((method) => method === "GET")).toBe(true);
       expect(store.list()).toEqual(before);
@@ -157,6 +162,12 @@ describe("march CLI", () => {
 
     await expect(list(url)).rejects.toMatchObject({
       code: 1, stderr: expect.stringContaining("Could not reach the brood service"), stdout: "",
+    });
+    const unreachableJson = await list(url, "--json").catch((e) => e);
+    expect(unreachableJson.code).toBe(1);
+    expect(unreachableJson.stderr).toContain("Could not reach the brood service");
+    expect(JSON.parse(unreachableJson.stdout)).toEqual({
+      error: expect.stringContaining("Could not reach the brood service"),
     });
   }, 15000);
 

@@ -38,6 +38,7 @@ march brood list [--kind <spawn|steward|legate>] [--status <status>] [--json] [-
 |-----------|----------|-------------|
 | Invalid kind or status | Non-zero error | Surface Brood's validation error. |
 | Brood unreachable | Non-zero error | Surface client error; no raw-registry fallback. |
+| Any failure with `--json` | Non-zero error | Stdout carries `{ "error": <message> }` so scripts can parse it; stderr still carries the message. |
 | No matching rows | Success | Empty JSON array or `No sessions tracked.` in table mode. |
 
 ### `march brood inspect <id>`

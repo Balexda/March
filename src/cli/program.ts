@@ -2321,6 +2321,8 @@ brood
     } catch (err) {
       const message =
         err instanceof BroodClientError ? err.message : (err as Error).message;
+      // Keep JSON stdout parseable for scripts even on failure.
+      if (opts.json) console.log(JSON.stringify({ error: message }, null, 2));
       process.stderr.write(message + "\n");
       process.exitCode = ERROR;
     }
