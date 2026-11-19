@@ -406,8 +406,7 @@ describe("babysit auto-merge gate", () => {
       last_comment_at: "2026-05-20T00:50:00Z",
       comments: [{ id: "c1" }, { id: "c2" }],
     };
-    const state = allClearState({ bot_approval_count: 1, unresolved_threads: [answered] });
-    state.mergePolicy = { defaults: { botApproval: true } };
+    const state = allClearState({ human_approval_count: 1, unresolved_threads: [answered] });
     state.sessions = [session("w", "stopped")];
     expect(kindsOf(assess(state))).toEqual(["pr-snapshot", "pr-auto-merge"]);
   });
@@ -423,25 +422,30 @@ describe("babysit auto-merge gate", () => {
     expect(kindsOf(assess(state))).toEqual(["pr-snapshot"]);
   });
 
-  it("does NOT auto-merge on a bot approval alone under the default policy", () => {
+  it("does NOT auto-merge on an aggregate bot count alone", () => {
     const state = allClearState({ human_approval_count: 0, bot_approval_count: 1 });
     expect(kindsOf(assess(state))).toEqual(["pr-snapshot"]);
   });
 
-  it("auto-merges on a bot approval when the policy accepts bot approvals", () => {
-    const state = allClearState({ human_approval_count: 0, bot_approval_count: 1 });
-    state.mergePolicy = { defaults: { botApproval: true } };
+  it("auto-merges forge with an observed CodeRabbit approval on the head", () => {
+    const state = allClearState({
+      head_sha: "current-head",
+      coderabbit: { decision: "APPROVED", decision_commit_sha: "current-head", decision_is_bot: true },
+    });
     expect(kindsOf(assess(state))).toEqual(["pr-snapshot", "pr-auto-merge"]);
   });
 
   it("accepting bot approvals still needs one: zero approvals does NOT auto-merge", () => {
     const state = allClearState({ human_approval_count: 0, bot_approval_count: 0 });
-    state.mergePolicy = { defaults: { botApproval: true } };
     expect(kindsOf(assess(state))).toEqual(["pr-snapshot"]);
   });
 
   it("a human changes-requested still blocks a bot-approved PR", () => {
-    const state = allClearState({ human_approval_count: 0, bot_approval_count: 1, changes_requested_count: 1 });
+    const state = allClearState({
+      head_sha: "current-head",
+      coderabbit: { decision: "APPROVED", decision_commit_sha: "current-head", decision_is_bot: true },
+      changes_requested_count: 1,
+    });
     state.mergePolicy = { defaults: { botApproval: true } };
     expect(kindsOf(assess(state))).toEqual(["pr-snapshot"]);
   });
@@ -451,12 +455,19 @@ describe("babysit auto-merge gate", () => {
     expect(kindsOf(assess(state))).toEqual(["pr-snapshot"]);
   });
 
-  it("auto-merges a cut PR with zero approvals when the policy relaxes approval for cut", () => {
+  it("auto-merges a cut PR with zero approvals under the built-in policy", () => {
     const state = allClearState(
       { human_approval_count: 0 },
       { command: "smithy.cut" },
     );
-    state.mergePolicy = { byTaskType: { cut: { approval: false } } };
+    expect(kindsOf(assess(state))).toEqual(["pr-snapshot", "pr-auto-merge"]);
+  });
+
+  it("only bypasses changes-requested with an explicit verb override", () => {
+    const state = allClearState({ changes_requested_count: 1 }, { command: "smithy.cut" });
+    state.mergePolicy = { defaults: { changesRequested: false } };
+    expect(kindsOf(assess(state))).toEqual(["pr-snapshot"]);
+    state.mergePolicy = { byTaskType: { cut: { changesRequested: false } } };
     expect(kindsOf(assess(state))).toEqual(["pr-snapshot", "pr-auto-merge"]);
   });
 

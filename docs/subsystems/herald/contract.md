@@ -13,7 +13,9 @@ open-PR cursor. Branch discovery matches same-repository heads regardless of who
 opened the PR. Herald uses the Tessera app login and the legacy `[march-bot]`
 reply prefix to distinguish March's replies from external feedback. It excludes
 March's conversation comments and reviews from feedback, and an inline thread
-whose latest reply is from March has no response due.
+whose latest reply is from March has no response due. The existing CodeRabbit
+standing records `decision_is_bot: true` when the review list is complete and
+GitHub identifies the decisive review's author as a bot.
 
 A Legate `slice.stage.changed` event may include `handledFeedback` with a
 `kind` of `inline` or `conversation` and an array of string `commentIds`.
@@ -34,6 +36,27 @@ Herald reads these settings:
 | `MARCH_TESSERA_URL` | Tessera base URL. |
 | `MARCH_TESSERA_CLIENT_KEY` | Herald's own Tessera client key. The compose file forwards it from `MARCH_HERALD_TESSERA_CLIENT_KEY`. |
 | `MARCH_TESSERA_GH_TOKEN_FALLBACK` | The shared client's explicit migration fallback. When set to `1` and issuance fails, `GH_TOKEN` or `GITHUB_TOKEN` serves the same scoped call. The compose file defaults it to `1` until the fallback is removed. |
+
+### Profile merge policy
+
+`POST /profiles` validates the optional `mergePolicy` before replacing the saved
+policy. `GET /profiles/:profile` returns the normalized policy. The existing
+`defaults` and `byTaskType` requirement objects accept `botApprovers`, a list of
+1–10 logins stored in lowercase with the `[bot]` suffix removed. Herald rejects
+the login configured by `MARCH_SELF_BOT_LOGIN`, which defaults to `march-bot`.
+An invalid write leaves the saved policy intact. An invalid stored policy
+falls back to Legate's built-in table.
+
+`reviewRequests.byTaskType.<verb>.reviewers` accepts CodeRabbit (mode
+`comment-trigger` by default or `auto`) and Copilot (no mode). An empty list
+disables requests for the verb. The existing `dependencyUpdates` and
+`codeRabbit` settings remain part of the wire format.
+
+Use `march profile merge-policy show <profile> [--json]` to inspect effective
+values and their provenance. Pass `--task-type <verb>` to
+`march profile merge-policy set <profile>` with `--bot-approver` or
+`--no-bot-approver` to edit bot logins. Use `--review-request` or
+`--no-review-request` to edit reviewers.
 
 ## Invariants
 

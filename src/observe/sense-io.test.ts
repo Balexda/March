@@ -389,6 +389,7 @@ describe("queryPrForBabysit", () => {
                 headRefOid: "d8e383e",
                 mergeStateStatus: "BLOCKED",
                 reviews: {
+                  pageInfo: { hasNextPage: false },
                   nodes: [
                     { state: "CHANGES_REQUESTED", submittedAt: "2026-11-16T09:37:00Z", commit: { oid: "441db76" }, author: { login: "coderabbitai", __typename: "Bot" } },
                   ],
@@ -407,6 +408,7 @@ describe("queryPrForBabysit", () => {
     expect(pr.coderabbit).toEqual({
       decision: "CHANGES_REQUESTED",
       decision_commit_sha: "441db76",
+      decision_is_bot: true,
       decision_at: "2026-11-16T09:37:00Z",
       last_review_commit_sha: "441db76",
       last_request_at: "2026-11-16T09:29:00Z",

@@ -270,9 +270,12 @@ describe("slice pure helpers", () => {
     // A bot approval only clears the gate when the policy accepts bot approvals.
     const botApproved = { ...clearPr, bot_approval_count: 1 };
     expect(mergeReadiness("x-forge", forgeSlice, botApproved, undefined)).toBe("waiting-approval");
-    const acceptBots = { byTaskType: { forge: { botApproval: true } } } as any;
-    expect(mergeReadiness("x-forge", forgeSlice, botApproved, acceptBots)).toBe("ready");
-    expect(mergeReadiness("x-forge", forgeSlice, clearPr, acceptBots)).toBe("waiting-approval");
+    const codeRabbitApproved = {
+      ...clearPr, head_sha: "head",
+      coderabbit: { decision: "APPROVED", decision_commit_sha: "head", decision_is_bot: true },
+    };
+    expect(mergeReadiness("x-forge", forgeSlice, codeRabbitApproved, undefined)).toBe("ready");
+    expect(mergeReadiness("x-forge", forgeSlice, { ...codeRabbitApproved, head_sha: "new" }, undefined)).toBe("waiting-approval");
     // A profile can re-tighten cut explicitly → back to waiting-approval.
     const tighten = { byTaskType: { cut: { approval: true } } } as any;
     expect(mergeReadiness("x-cut", slice, clearPr, tighten)).toBe("waiting-approval");

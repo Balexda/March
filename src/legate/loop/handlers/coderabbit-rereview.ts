@@ -33,7 +33,7 @@ import { CODERABBIT_REVIEW_COMMAND, reviewRequestBody } from "../../../observe/c
  * The natural bound is one request per pushed head. If CodeRabbit asks for more
  * changes, its new review is on the head, so nothing fires until the steward
  * pushes again. The merge gate is untouched: an approval CodeRabbit leaves counts
- * only where the profile accepts bot approvals (`botApproval`).
+ * when the resolved policy allows CodeRabbit and its approval is on the head.
  */
 
 export const REREVIEW_ACTION = "coderabbit-rereview-requested";

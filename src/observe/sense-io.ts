@@ -1,7 +1,7 @@
 import { hasMarchReplyMarker } from "./march-bot.js";
 import { createGitHubRead, type GitHubReadClient } from "./github-read.js";
 import { TesseraClientError } from "../tessera/client.js";
-import { summarizeCodeRabbit, type CodeRabbitStanding } from "./coderabbit-review.js";
+import { isBotActor, summarizeCodeRabbit, type CodeRabbitStanding } from "./coderabbit-review.js";
 import { resolveOriginRepo, sameGitHubRepo } from "../shared/github-remote.js";
 import { execFile } from "node:child_process";
 import { CastraClient } from "../castra/client.js";
@@ -170,18 +170,11 @@ function failedChecks(statusCheckRollup: any) {
     }));
 }
 
-/** A GraphQL `author` that is a bot: typed `Bot`, or a login ending in `[bot]`
- *  (covers GitHub Apps that present as Users, e.g. Copilot). An ordinary user can
- *  be neither — GitHub logins cannot contain brackets. */
-function isBotActor(author: any): boolean {
-  return author?.__typename === "Bot" || String(author?.login || "").endsWith("[bot]");
-}
-
 /**
  * Reduce a PR's `reviews` nodes to human (non-bot) approval / changes-requested
  * counts, plus a separate bot approval count — the data the legate's merge gate
- * needs. Bot approvals never count as human ones; they only matter when a
- * profile's merge policy opts in (`botApproval`). Mirrors the jq the (retired)
+ * uses for human approvals and changes-requested. The bot count is retained
+ * for snapshot consumers. Mirrors the jq the (retired)
  * `check-merge-readiness.sh` ran:
  *  - a review is a bot's when `author.__typename === "Bot"` or its login ends in
  *    `[bot]` (covers GitHub Apps that present as Users, e.g. Copilot);
@@ -397,6 +390,7 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
       headRefOid
       mergeStateStatus
       reviews(first: 100) {
+        pageInfo { hasNextPage }
         nodes {
           state
           submittedAt
@@ -528,7 +522,11 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
       mergeStateStatus: pr?.mergeStateStatus || null,
       // Read from the unfiltered comment nodes: a `@coderabbitai review` request is
       // the evidence that the head was already put forward.
-      coderabbit: summarizeCodeRabbit(pr?.reviews?.nodes, commentNodes),
+      coderabbit: summarizeCodeRabbit(
+        pr?.reviews?.nodes,
+        commentNodes,
+        pr?.reviews?.pageInfo?.hasNextPage === false,
+      ),
     };
   }
 

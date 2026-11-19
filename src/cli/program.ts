@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import { createInterface } from "node:readline";
-import { Command, CommanderError } from "commander";
+import { Command, CommanderError, Option } from "commander";
 import { ERROR, SUCCESS, USAGE_ERROR } from "../shared/exit-codes.js";
 import {
   checkSpawnDependencies,
@@ -26,7 +26,8 @@ import {
   LegateError,
   type LegateInitResult,
 } from "../legate/init.js";
-import type { MergePolicy } from "../herald/profiles/merge-policy.js";
+import type { MergePolicy, MergeRequirements } from "../herald/profiles/merge-policy.js";
+import { editVerbPolicy, showMergePolicy, type VerbPolicyEdits } from "./merge-policy.js";
 import { DEFAULT_MANAGER_GROUP } from "../hatchery/spawn-handoff.js";
 import { DEFAULT_LOOP_PORT, runLoop } from "../legate/loop/index.js";
 import {
@@ -1593,10 +1594,18 @@ const mergePolicyCmd = profile
   .command("merge-policy")
   .description("Inspect/configure a profile's per-task-type merge requirements");
 
+// These value options use separate storage for additions and removals.
+function collectPolicyOption(flags: string, description: string): Option {
+  const option = new Option(flags, description);
+  option.negate = false;
+  return option.argParser((value: string, previous: string[] = []) => [...previous, value]);
+}
+
 mergePolicyCmd
   .command("show <profile>")
   .description("Show a profile's merge policy. Resolves Herald via MARCH_HERALD_URL.")
-  .action(async (profileName: string) => {
+  .option("--json", "Print effective policies keyed by verb as JSON")
+  .action(async (profileName: string, opts: { json?: boolean }) => {
     commandHandled = true;
     const { ProfileClient } = await import("../herald/profiles/client.js");
     const { HeraldClientError } = await import("../herald/service/client.js");
@@ -1607,25 +1616,7 @@ mergePolicyCmd
         process.exitCode = ERROR;
         return;
       }
-      // An empty policy ({} — what `--clear` stores) resolves to all-required,
-      // so report it as "no policy set" rather than printing a misleading {}.
-      const mp = record.mergePolicy;
-      const hasPolicy =
-        !!mp &&
-        ((mp.defaults && Object.keys(mp.defaults).length > 0) ||
-          (mp.byTaskType && Object.keys(mp.byTaskType).length > 0) ||
-          (mp.dependencyUpdates && Object.keys(mp.dependencyUpdates).length > 0));
-      if (!hasPolicy) {
-        // No per-profile policy — but the built-in base (#298) still relaxes the
-        // cut approval gate, so don't claim "all requirements enforced".
-        console.log(
-          `${record.profile}: no per-profile merge policy set. Built-in defaults apply: ` +
-            `cut auto-merges without human approval; all other verbs require approval.`,
-        );
-      } else {
-        console.log(`${record.profile}:`);
-        console.log(JSON.stringify(mp, null, 2));
-      }
+      showMergePolicy(record.mergePolicy, !!opts.json);
       process.exitCode = SUCCESS;
     } catch (err) {
       process.stderr.write(
@@ -1638,11 +1629,15 @@ mergePolicyCmd
 mergePolicyCmd
   .command("set <profile>")
   .description("Adjust merge requirements for a profile. Resolves Herald via MARCH_HERALD_URL.")
-  .option("--task-type <verb>", "Apply the override to one smithy verb (e.g. cut); default: all task types")
-  .option("--no-approval", "Do not require a human approval")
-  .option("--no-changes-requested", "Do not require changes-requested reviews to be resolved")
-  .option("--bot-approval", "Accept a bot's approving review (e.g. Copilot) in lieu of a human approval")
-  .option("--no-bot-approval", "Stop accepting bot approvals in lieu of a human approval")
+  .option("--task-type <verb>", "Apply the override to one smithy verb (e.g. cut); defaults apply only to profile-added verbs")
+  .option("--no-approval", "Allow merge without an approving review")
+  .option("--no-changes-requested", "Allow outstanding changes-requested reviews for this verb (use --task-type)")
+  .option("--bot-approval", "Accept approval from a trusted bot with an eligible review on the PR head")
+  .option("--no-bot-approval", "Require human approval when approval is enabled")
+  .addOption(collectPolicyOption("--bot-approver <login>", "Add a trusted bot login (repeatable)"))
+  .addOption(collectPolicyOption("--no-bot-approver <login>", "Remove a trusted bot login (repeatable)"))
+  .addOption(collectPolicyOption("--review-request <reviewer[:mode]>", "Add or update a reviewer (repeatable)"))
+  .addOption(collectPolicyOption("--no-review-request <reviewer>", "Remove a reviewer (repeatable)"))
   .option("--dependabot-auto-merge", "Auto-merge Dependabot PRs that only bump versions and pass CI (profile-wide; ignores --task-type)")
   .option("--no-dependabot-auto-merge", "Stop auto-merging Dependabot PRs")
   .option("--coderabbit-rereview", "Comment `@coderabbitai review` after the steward pushes past a CodeRabbit changes-requested review (profile-wide; ignores --task-type)")
@@ -1650,8 +1645,8 @@ mergePolicyCmd
   .option("--coderabbit-initial-review", "Comment `@coderabbitai review` on a slice PR CodeRabbit has not reviewed yet (profile-wide; ignores --task-type)")
   .option("--no-coderabbit-initial-review", "Stop requesting first CodeRabbit reviews")
   .option("--json <json>", "Replace the entire policy from a JSON string")
-  .option("--clear", "Clear the policy (all requirements enforced)")
-  .action(async (profileName: string, opts: {
+  .option("--clear", "Clear the profile policy and restore built-in defaults")
+  .action(async (profileName: string, opts: VerbPolicyEdits & {
     taskType?: string;
     approval: boolean;
     changesRequested: boolean;
@@ -1675,9 +1670,16 @@ mergePolicyCmd
         return;
       }
 
+      const taskType = opts.taskType?.trim().toLowerCase();
+      const hasVerbEdits = !!(opts.botApprover || opts.noBotApprover || opts.reviewRequest || opts.noReviewRequest);
+      if (hasVerbEdits && (!taskType || opts.clear || opts.json !== undefined)) {
+        throw new Error("Bot approver and reviewer edits require --task-type and cannot be combined with --json or --clear.");
+      }
+      if (opts.changesRequested === false && !taskType && !opts.clear && opts.json === undefined) {
+        throw new Error("--no-changes-requested requires --task-type.");
+      }
       let policy: MergePolicy;
       if (opts.clear) {
-        // Empty policy => every requirement falls back to the all-required default.
         policy = {};
       } else if (opts.json !== undefined) {
         let parsed: unknown;
@@ -1698,30 +1700,25 @@ mergePolicyCmd
       } else {
         // Build the override from the convenience flags. A negatable option is
         // only "set" when its value is false (the relax case).
-        const override: Record<string, boolean> = {};
+        const override: { -readonly [K in keyof MergeRequirements]?: MergeRequirements[K] } = {};
         if (opts.approval === false) override.approval = false;
         if (opts.changesRequested === false) override.changesRequested = false;
         // Tri-state: undefined when neither --bot-approval nor --no-bot-approval
         // was passed, so an unrelated `set` leaves the stored value alone.
         if (opts.botApproval !== undefined) override.botApproval = opts.botApproval;
         if (
-          Object.keys(override).length === 0 &&
+          !hasVerbEdits && Object.keys(override).length === 0 &&
           opts.dependabotAutoMerge === undefined &&
           opts.coderabbitRereview === undefined &&
           opts.coderabbitInitialReview === undefined
         ) {
           process.stderr.write(
-            "Nothing to set — pass --no-approval, --no-changes-requested, --bot-approval, --dependabot-auto-merge, --coderabbit-rereview, --coderabbit-initial-review, --json, or --clear.\n",
+            "Nothing to set — pass --no-approval, --no-changes-requested, --bot-approval, --bot-approver, --review-request, --dependabot-auto-merge, --coderabbit-rereview, --coderabbit-initial-review, --json, or --clear.\n",
           );
           process.exitCode = ERROR;
           return;
         }
-        const merged = structuredClone(existing.mergePolicy ?? {}) as {
-          defaults?: Record<string, boolean>;
-          byTaskType?: Record<string, Record<string, boolean>>;
-          dependencyUpdates?: { autoMerge?: boolean };
-          codeRabbit?: { rereview?: boolean; initialReview?: boolean };
-        };
+        let merged: { -readonly [K in keyof MergePolicy]: MergePolicy[K] } = { ...existing.mergePolicy };
         if (opts.dependabotAutoMerge !== undefined) {
           merged.dependencyUpdates = { ...(merged.dependencyUpdates ?? {}), autoMerge: opts.dependabotAutoMerge };
         }
@@ -1731,15 +1728,10 @@ mergePolicyCmd
         if (opts.coderabbitInitialReview !== undefined) {
           merged.codeRabbit = { ...(merged.codeRabbit ?? {}), initialReview: opts.coderabbitInitialReview };
         }
-        if (Object.keys(override).length === 0) {
-          // Only profile-wide switches were passed; leave requirements alone.
-        } else if (opts.taskType) {
-          merged.byTaskType = {
-            ...(merged.byTaskType ?? {}),
-            [opts.taskType]: { ...(merged.byTaskType?.[opts.taskType] ?? {}), ...override },
-          };
-        } else {
-          merged.defaults = { ...(merged.defaults ?? {}), ...override };
+        if (taskType && (hasVerbEdits || Object.keys(override).length > 0)) {
+          merged = editVerbPolicy(merged, taskType, override, opts);
+        } else if (Object.keys(override).length > 0) {
+          merged.defaults = { ...merged.defaults, ...override };
         }
         const validated = validateMergePolicy(merged);
         if (!validated.ok) {

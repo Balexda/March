@@ -119,13 +119,23 @@ describe.skipIf(!sqliteAvailable)("profile routes", () => {
       await app.close();
       store.close();
     };
-    const policy = { byTaskType: { cut: { approval: false } } };
+    const policy = {
+      byTaskType: { forge: { botApprovers: ["CodeRabbitAI[BOT]"] } },
+      reviewRequests: { byTaskType: { forge: { reviewers: [{ id: "coderabbit" }] } } },
+      dependencyUpdates: { autoMerge: true },
+      codeRabbit: { rereview: true, initialReview: true },
+    };
+    const normalized = {
+      ...policy,
+      byTaskType: { forge: { botApprovers: ["coderabbitai"] } },
+      reviewRequests: { byTaskType: { forge: { reviewers: [{ id: "coderabbit", mode: "comment-trigger" }] } } },
+    };
     const ok = await app.inject({ method: "POST", url: "/profiles", payload: body({ mergePolicy: policy }) });
     expect(ok.statusCode).toBe(201);
-    expect(ok.json()).toMatchObject({ mergePolicy: policy });
+    expect(ok.json().mergePolicy).toEqual(normalized);
 
     const fetched = await app.inject({ method: "GET", url: "/profiles/march" });
-    expect(fetched.json()).toMatchObject({ mergePolicy: policy });
+    expect(fetched.json().mergePolicy).toEqual(normalized);
 
     const bad = await app.inject({
       method: "POST",
@@ -133,6 +143,7 @@ describe.skipIf(!sqliteAvailable)("profile routes", () => {
       payload: body({ mergePolicy: { byTaskType: { cut: { checks: false } } } }),
     });
     expect(bad.statusCode).toBe(400);
+    expect(store.get("march")?.mergePolicy).toEqual(normalized);
   });
 
   it("DELETE /profiles/:p soft-removes; ?all=1 still surfaces it", async () => {

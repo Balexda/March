@@ -27,6 +27,10 @@
 #   MARCH_HERALD_URL  herald base URL (profile registry + event inbox/write).
 #   MARCH_BROOD_URL   brood base URL (teardown requests).
 #   MARCH_HATCHERY_URL hatchery base URL (spawn requests).
+#   MARCH_SELF_BOT_LOGIN  March's bot login (default march-bot). Use the same
+#                         value in Herald for profile policy validation.
+#   Merge policy is read from Herald each tick. Cut skips approval by default.
+#   Forge requires approval and can accept a trusted CodeRabbit review on head.
 #
 # SECURITY: this mounts your HOME (repos, worktrees, creds). It does NOT mount the
 # docker socket — the legate asks Castra/Brood/Hatchery to act over HTTP, it never
@@ -48,6 +52,7 @@ services:
     ports:
       - "127.0.0.1:8787:8787" # localhost only — never public (legate HTTP API)
     environment:
+      - MARCH_SELF_BOT_LOGIN=${MARCH_SELF_BOT_LOGIN:-march-bot}
       - MARCH_OTEL=1
       - MARCH_OTEL_ENDPOINT=http://otel-lgtm:4318
       - MARCH_OTEL_SERVICE_NAME=march-legate
