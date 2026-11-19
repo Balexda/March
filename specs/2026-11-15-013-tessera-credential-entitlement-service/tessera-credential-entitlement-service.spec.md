@@ -255,7 +255,7 @@ Recommended implementation sequence:
 | US8 | See Issuances, Expiry and Health | US1, US3 | specs/2026-11-15-013-tessera-credential-entitlement-service/08-see-issuances-expiry-and-health.tasks.md |
 | US5 | Stewards Open Pull Requests as the Bot | US4 | — |
 | US6 | Migrate Services off the Ambient Token | US4 | — |
-| US7 | Request a Copilot Review as the Operator | US2, US4 | — |
+| US7 | Request a Copilot Review as the Operator | US2, US3, US4 | — |
 | US9 | Remove Ambient GitHub Credentials | US5, US6, US7 | — |
 
 ## Requirements *(mandatory)*

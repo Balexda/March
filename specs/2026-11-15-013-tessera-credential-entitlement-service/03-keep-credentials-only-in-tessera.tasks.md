@@ -18,7 +18,7 @@
 
 - [ ] **Isolate the Tessera secret store**
 
-  Extend `docker/tessera.docker-compose.yml` and Tessera startup validation for AS 3.1, AS 3.2 and AS 3.5. Resolve SD-001 before forging this slice.
+  Extend `docker/tessera.docker-compose.yml` and Tessera startup validation for AS 3.1, AS 3.2 and AS 3.5. Resolve SD-001 and SD-006 before forging this slice.
 
   _Acceptance criteria_
   - Rendered compose mounts the provider secret store only in Tessera. Tessera has no host HOME mount, publishes on loopback only and joins the March network.
@@ -51,7 +51,7 @@
 
 - [ ] **Wire per-service Tessera access into stack startup**
 
-  Extend `src/stack/services.ts`, `src/stack/up.ts` and affected compose assets for AS 3.3. Forge this slice after SD-002 is resolved and US2 production authorization is available. US5 owns steward key delivery, and US6 owns consumer call-site migration.
+  Extend `src/stack/services.ts`, `src/stack/up.ts` and affected compose assets for AS 3.3. Forge this slice after SD-002 and SD-007 are resolved and US2 production authorization is available. US5 owns steward key delivery, and US6 owns consumer call-site migration.
 
   _Acceptance criteria_
   - Tessera starts after the March network is available and becomes ready before consumers start. A bounded startup failure prevents dependent services from starting.
@@ -73,8 +73,10 @@ Both slices follow [March's vision](../../docs/vision.md) and [operating philoso
 | SD-003 | Steward key delivery | Interaction & UX | Medium | Low | spec:SD-003 |
 | SD-004 | Steward commit identity | Domain & Data Model | High | Medium | spec:SD-004 |
 | SD-005 | Steward workflow-file permissions | Integration | Medium | Medium | spec:SD-005 |
+| SD-006 | Mandatory stdin import conflicts with open SD-001 | plan-review:Internal contradiction | Important | Low | spec:SD-006 |
+| SD-007 | Per-service key isolation conflicts with open SD-002 | plan-review:Internal contradiction | Important | Low | spec:SD-007 |
 
-SD-006 and SD-007 describe constraints on SD-001 and SD-002. The selected store must support stdin import, and the selected client key persistence must prevent sibling services from accessing each other's keys.
+SD-006 and SD-007 stay open until the parent spec records their resolution. Slice 1 must not be forged until SD-001 and SD-006 are both resolved, and Slice 2 must not be forged until SD-002 and SD-007 are both resolved.
 
 ## Open Implementation Questions
 <!-- audience: builder; mode: reference; length: one table row per question; diagram: optional; examples: discouraged -->
