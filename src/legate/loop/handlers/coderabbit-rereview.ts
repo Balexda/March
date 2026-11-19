@@ -3,29 +3,10 @@ import type { ReviewRequestRecord } from "../../../herald/events.js";
 import { approvalSatisfied, changesRequestedSatisfied, resolveMergePolicyRow } from "../../../herald/profiles/merge-policy.js";
 import { reviewRequestBody } from "../../../observe/coderabbit-review.js";
 import type { ReviewerNotice } from "../../../observe/review-bot-comments.js";
+import { remainingReviewCap, type ReviewRequestLimits } from "../pure/review-budget.js";
 import { mergeBlocker, taskTypeForSlice } from "../pure/slice.js";
 import type { HandlerContext, HandlerResult, LoopState } from "../state/types.js";
 import { emptyHandlerResult } from "../state/types.js";
-
-export interface ReviewRequestLimits {
-  waitMs: number;
-  dailyCap: number;
-}
-
-export function reviewRequestLimits(env: NodeJS.ProcessEnv, warn: (message: string) => void): ReviewRequestLimits {
-  function integer(key: string, fallback: number, minimum: number, scale = 1): number {
-    const value = env[key];
-    if (value === undefined || (value === "" && fallback === Infinity)) return fallback;
-    const number = Number(value);
-    if (/^\d+$/.test(value) && Number.isSafeInteger(number * scale) && number >= minimum) return number;
-    warn(`Invalid ${key}; using ${fallback === Infinity ? "unlimited" : fallback}.`);
-    return fallback;
-  }
-  return {
-    dailyCap: integer("MARCH_CODERABBIT_REVIEWS_PER_DAY", Infinity, 0),
-    waitMs: integer("MARCH_REVIEW_WAIT_MINUTES", 30, 1, 60_000) * 60_000,
-  };
-}
 
 export interface ReviewRequestHistory {
   byProfile: Record<string, ReviewRequestRecord[]>;
@@ -136,10 +117,7 @@ export async function apply(ctx: HandlerContext, state: LoopState, deps?: CodeRa
       continue;
     }
     const at = new Date(Date.parse(deps.now?.() ?? ctx.ts)).toISOString();
-    const day = at.slice(0, 10);
-    const used = dailyCap === Infinity ? 0 : Object.values(deps.history.byProfile).flat()
-      .filter((record) => record.reviewer === REVIEWER && record.at.slice(0, 10) === day).length;
-    if (used >= dailyCap) {
+    if (remainingReviewCap(deps.history.byProfile, REVIEWER, "day", dailyCap, at) === 0) {
       report("cap_exhausted", "CodeRabbit UTC daily cap exhausted");
       continue;
     }

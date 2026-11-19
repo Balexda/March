@@ -52,7 +52,7 @@
 
 ### Tasks
 
-- [ ] **Export remaining review budget**
+- [x] **Export remaining review budget**
 
   Compute the cap windows in data model entity 8 from the same durable request history used for enforcement, and export the contracted gauge each Legate tick for AS 6.3.
 
@@ -61,7 +61,7 @@
   - Publish finite caps with only reviewer and window labels, floor remaining capacity at zero, and omit unlimited windows. Use the specified defaults and share cap arithmetic with existing enforcement.
   - Deterministic tests cover multi-profile counts, UTC rollover, zero and exhausted budgets, and unlimited windows. Update the Legate subsystem contract for the gauge.
 
-- [ ] **Display review telemetry on the Legate dashboard**
+- [x] **Display review telemetry on the Legate dashboard**
 
   Add panels using the existing review request and rate-limit counters and the cap gauge for AS 6.4.
 

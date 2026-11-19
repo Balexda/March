@@ -160,6 +160,13 @@ let dispatchFailures: Counter | undefined;
 let loopActions: Counter | undefined;
 let tickDuration: Histogram | undefined;
 let dependencyUnblock: Counter | undefined;
+interface ReviewCapSample {
+  reviewer: "coderabbit" | "copilot";
+  window: "day" | "month";
+  remaining: number;
+}
+
+let latestReviewCaps: readonly ReviewCapSample[] = [];
 let reviewRequests: Counter | undefined;
 let reviewRateLimits: Counter | undefined;
 
@@ -224,6 +231,15 @@ function ensureInstruments(meter: Meter): void {
   reviewRateLimits = meter.createCounter("march.legate.review.rate_limited", {
     description: "Reviewer rate-limit hits",
     unit: "1",
+  });
+  meter.createObservableGauge("march.legate.review.cap_remaining", {
+    // No unit: `unit: "1"` makes the Prometheus exporter append `_ratio` to a
+    // gauge name, which would break the dashboard's `..._cap_remaining` query.
+    description: "Remaining review request budget across profiles by UTC window",
+  }).addCallback((result) => {
+    for (const { reviewer, window, remaining } of latestReviewCaps) {
+      result.observe(remaining, { reviewer, window });
+    }
   });
   // Zero baseline so rate() shows the first hit instead of waiting for a second.
   reviewRateLimits.add(0, { reviewer: "coderabbit" });
@@ -580,6 +596,14 @@ export function recordDependencyUnblock(outcome: DependencyUnblockOutcome, proce
 }
 
 export type ReviewRequestOutcome = "requested" | "failed" | "cap_exhausted" | "backoff";
+
+/** Takes a thunk so the history scan is skipped entirely when telemetry is off. */
+export function recordReviewCaps(samples: () => readonly ReviewCapSample[]): void {
+  const otel = getActiveOtel();
+  if (!otel?.enabled) return;
+  ensureInstruments(otel.getMeter());
+  latestReviewCaps = samples();
+}
 
 export function recordReviewRequest(reviewer: "coderabbit", outcome: ReviewRequestOutcome): void {
   const otel = getActiveOtel();

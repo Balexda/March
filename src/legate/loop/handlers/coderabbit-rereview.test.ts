@@ -6,7 +6,8 @@ import { backoffMs } from "../pure/self-heal.js";
 import { validateEvent } from "../../../herald/service/routes.js";
 import { reviewRequestBody } from "../../../observe/coderabbit-review.js";
 import { classifyReviewerComment } from "../../../observe/review-bot-comments.js";
-import { apply, reviewRequestLimits, type ReviewRequestHistory } from "./coderabbit-rereview.js";
+import { reviewRequestLimits } from "../pure/review-budget.js";
+import { apply, type ReviewRequestHistory } from "./coderabbit-rereview.js";
 import { CodeRabbitBackoff, reviewSignals, verifyStartupIntent } from "./review-backoff.js";
 import type { HandlerContext, LoopState } from "../state/types.js";
 
@@ -199,7 +200,7 @@ describe("CodeRabbit review requests", () => {
     }
     const warn = vi.fn();
     expect(reviewRequestLimits({ MARCH_CODERABBIT_REVIEWS_PER_DAY: "-1", MARCH_REVIEW_WAIT_MINUTES: "0" }, warn))
-      .toEqual({ waitMs: 1_800_000, dailyCap: Infinity });
+      .toMatchObject({ waitMs: 1_800_000, dailyCap: Infinity });
     expect(warn).toHaveBeenCalledTimes(2);
   });
 });

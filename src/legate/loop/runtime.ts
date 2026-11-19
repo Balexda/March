@@ -15,7 +15,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { recordDwell, recordLoopHeartbeat, recordSpawnBudget } from "../../observability/loop-metrics.js";
+import { recordDwell, recordLoopHeartbeat, recordReviewCaps, recordSpawnBudget } from "../../observability/loop-metrics.js";
 import { stampDwell } from "./pure/dwell.js";
 import { createServiceLogger, resolveServiceLogFilePath } from "../../observability/logger.js";
 import { emitLoopLog } from "../../observability/logs.js";
@@ -41,7 +41,8 @@ import { resolveMaxConcurrentSpawns } from "./meta.js";
 import { SpawnBreaker } from "./spawn-breaker.js";
 import { createSpawnBudget, liveSpawnCount, taskTypeForSlice, type SpawnBudget } from "./pure/slice.js";
 import { CodeRabbitBackoff, reviewSignals, verifyStartupIntent, type ReviewPostOutcome } from "./handlers/review-backoff.js";
-import { reviewRequestLimits, type ReviewRequestHistory } from "./handlers/coderabbit-rereview.js";
+import type { ReviewRequestHistory } from "./handlers/coderabbit-rereview.js";
+import { reviewCapSamples, reviewRequestLimits } from "./pure/review-budget.js";
 import { markedCodeRabbitHead } from "../../observe/coderabbit-review.js";
 import { runHeartbeat } from "./heartbeat.js";
 import { broodRegister as broodRegisterCli, broodRetire as broodRetireCli, broodTeardown as broodTeardownCli } from "./clients/brood.js";
@@ -530,11 +531,11 @@ async function findCodeRabbitTrigger(repoPath: string, prNumber: number, head: s
   return earliest;
 }
 
-let codeRabbitLimits: ReturnType<typeof reviewRequestLimits> | undefined;
+let reviewLimits: ReturnType<typeof reviewRequestLimits> | undefined;
 
 function configuredReviewLimits() {
   let logger: ReturnType<typeof createServiceLogger> | undefined;
-  return codeRabbitLimits ??= reviewRequestLimits(process.env, (message) => {
+  return reviewLimits ??= reviewRequestLimits(process.env, (message) => {
     logger ??= createServiceLogger({
       serviceName: "march-legate",
       logFilePath: resolveServiceLogFilePath("legate.jsonl", "MARCH_LEGATE_LOG_DIR"),
@@ -961,6 +962,13 @@ async function tick() {
     } catch (err: any) {
       logTickError(err, rec.profile);
     }
+  }
+
+  // The shared history includes the durable intents acknowledged during this tick.
+  try {
+    recordReviewCaps(() => reviewCapSamples(reviewHistory.byProfile, configuredReviewLimits(), now()));
+  } catch {
+    // Telemetry must never break the loop.
   }
 
   // Fold this tick's agent-health into the breaker (transitions apply NEXT tick).

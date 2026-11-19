@@ -157,3 +157,12 @@ Post and persistence failures emit errored child spans. Both paths count
 decisions by reviewer and outcome. New HTTP rate-limit hits and rate-limit
 notices also increment `march.legate.review.rate_limited` with only the
 `reviewer` label.
+
+At the end of each multi-profile tick with a successful ledger read, Legate
+refreshes the `march.legate.review.cap_remaining` gauge. It counts acknowledged
+review intents across profiles, including failed posts, in UTC calendar windows.
+The only labels are `reviewer` and `window` (`day` or `month`). Finite
+balances have a floor of zero and unlimited windows emit no sample.
+`MARCH_COPILOT_REVIEWS_PER_DAY` and `MARCH_COPILOT_REVIEWS_PER_MONTH`
+both default to zero. The optional CodeRabbit daily cap uses the same
+calculation as request enforcement.
