@@ -379,6 +379,113 @@ describe("queryPrForBabysit", () => {
     expect(pr.conversation_comments[0].body_preview).toHaveLength(280);
   });
 
+  describe("review pagination", () => {
+    const review = (state: string, at: string, oid: string, login: string, type = "User") =>
+      ({ state, submittedAt: at, commit: { oid }, author: { login, __typename: type } });
+    const firstPage = (hasNextPage: boolean) => ({
+      data: { repository: { pullRequest: {
+        headRefOid: "head1",
+        mergeStateStatus: "CLEAN",
+        reviews: {
+          pageInfo: { hasNextPage, endCursor: hasNextPage ? "c1" : null },
+          nodes: [review("COMMENTED", "2026-11-16T09:00:00Z", "head1", "someone")],
+        },
+        comments: { nodes: [] },
+        reviewThreads: { nodes: [] },
+      } } },
+    });
+    const secondPage = (headRefOid: string) => ({
+      data: { repository: { pullRequest: {
+        headRefOid,
+        reviews: {
+          pageInfo: { hasNextPage: false, endCursor: "c2" },
+          nodes: [
+            review("APPROVED", "2026-11-16T10:00:00Z", "head1", "coderabbitai", "Bot"),
+            review("APPROVED", "2026-11-16T10:05:00Z", "head1", "alice"),
+          ],
+        },
+      } } },
+    });
+    const prSummary = JSON.stringify({ number: 5, url: "u", state: "OPEN", mergeable: "MERGEABLE", headRefName: "b", title: "t", author: { login: "me" }, statusCheckRollup: [] });
+    const query = (page2: () => string) => {
+      const graphqlCalls: string[][] = [];
+      routeExec((_cmd, args) => {
+        if (!args.includes("graphql")) return prSummary;
+        graphqlCalls.push(args);
+        return args.some((a) => a === "cursor=c1") ? page2() : JSON.stringify(firstPage(true));
+      });
+      const io = createSenseIo({ meta: meta(), castra: fakeCastra() });
+      return { graphqlCalls, pr: io.queryPrForBabysit({ pr: { number: 5 } }, { repo: { path: "/repo", owner_with_name: "octo/march" } }) };
+    };
+
+    it("follows the review cursor so later pages count toward the gate evidence", async () => {
+      const { graphqlCalls, pr } = query(() => JSON.stringify(secondPage("head1")));
+      const result = await pr;
+      expect(graphqlCalls).toHaveLength(2);
+      // The ambient gh path bounds every review GraphQL call.
+      const graphqlOpts = childProcessMock.execFile.mock.calls
+        .filter((call: any[]) => (call[1] as string[]).includes("graphql"))
+        .map((call: any[]) => call[2]);
+      expect(graphqlOpts).toHaveLength(2);
+      for (const opts of graphqlOpts) expect(opts).toMatchObject({ timeout: 30_000, killSignal: "SIGKILL" });
+      expect(graphqlCalls[1].some((a) => a.includes("reviews(first: 100, after: $cursor)"))).toBe(true);
+      expect(result.human_approval_count).toBe(1);
+      expect(result.reviews_complete).toBe(true);
+      expect(result.coderabbit).toMatchObject({ decision: "APPROVED", decision_commit_sha: "head1", decision_is_bot: true });
+    });
+
+    it("walks past five pages to reach a late verdict", async () => {
+      let calls = 0;
+      routeExec((_cmd, args) => {
+        if (!args.includes("graphql")) return prSummary;
+        calls++;
+        const cursorArg = args.find((a) => a.startsWith("cursor="));
+        if (!cursorArg) return JSON.stringify(firstPage(true));
+        const n = Number(cursorArg.slice("cursor=c".length));
+        if (n < 7) {
+          return JSON.stringify({ data: { repository: { pullRequest: {
+            headRefOid: "head1",
+            reviews: { pageInfo: { hasNextPage: true, endCursor: `c${n + 1}` }, nodes: [] },
+          } } } });
+        }
+        return JSON.stringify(secondPage("head1"));
+      });
+      const io = createSenseIo({ meta: meta(), castra: fakeCastra() });
+      const result = await io.queryPrForBabysit({ pr: { number: 5 } }, { repo: { path: "/repo", owner_with_name: "octo/march" } });
+      expect(calls).toBe(8);
+      expect(result.reviews_complete).toBe(true);
+      expect(result.coderabbit?.decision_is_bot).toBe(true);
+    });
+
+    it("stops on a repeated cursor and marks the evidence incomplete", async () => {
+      routeExec((_cmd, args) => {
+        if (!args.includes("graphql")) return prSummary;
+        if (!args.some((a) => a.startsWith("cursor="))) return JSON.stringify(firstPage(true));
+        return JSON.stringify({ data: { repository: { pullRequest: {
+          headRefOid: "head1",
+          reviews: { pageInfo: { hasNextPage: true, endCursor: "c1" }, nodes: [] },
+        } } } });
+      });
+      const io = createSenseIo({ meta: meta(), castra: fakeCastra() });
+      const result = await io.queryPrForBabysit({ pr: { number: 5 } }, { repo: { path: "/repo", owner_with_name: "octo/march" } });
+      expect(result.reviews_complete).toBe(false);
+    });
+
+    it("withholds decision_is_bot when the head moves between pages", async () => {
+      const { pr } = query(() => JSON.stringify(secondPage("head2")));
+      const result = await pr;
+      expect(result.coderabbit?.decision_is_bot).toBeUndefined();
+    });
+
+    it("withholds decision_is_bot when a follow-up page fails", async () => {
+      const { pr } = query(() => { throw new Error("HTTP 502"); });
+      const result = await pr;
+      expect(result.head_sha).toBe("head1");
+      expect(result.coderabbit?.decision_is_bot).toBeUndefined();
+      expect(result.reviews_complete).toBe(false);
+    });
+  });
+
   it("reports CodeRabbit's standing for the re-review request", async () => {
     routeExec((_cmd, args) => {
       if (args.includes("graphql")) {
@@ -389,6 +496,7 @@ describe("queryPrForBabysit", () => {
                 headRefOid: "d8e383e",
                 mergeStateStatus: "BLOCKED",
                 reviews: {
+                  pageInfo: { hasNextPage: false },
                   nodes: [
                     { state: "CHANGES_REQUESTED", submittedAt: "2026-11-16T09:37:00Z", commit: { oid: "441db76" }, author: { login: "coderabbitai", __typename: "Bot" } },
                   ],
@@ -407,6 +515,7 @@ describe("queryPrForBabysit", () => {
     expect(pr.coderabbit).toEqual({
       decision: "CHANGES_REQUESTED",
       decision_commit_sha: "441db76",
+      decision_is_bot: true,
       decision_at: "2026-11-16T09:37:00Z",
       last_review_commit_sha: "441db76",
       last_request_at: "2026-11-16T09:29:00Z",

@@ -1,122 +1,109 @@
 /**
  * @l0 @deterministic @ci
  */
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   approvalSatisfied,
+  changesRequestedSatisfied,
   DEFAULT_MERGE_REQUIREMENTS,
+  KNOWN_TASK_TYPES,
   parseMergePolicy,
   resolveMergeRequirements,
+  resolveReviewRequests,
   validateMergePolicy,
   type MergePolicy,
 } from "./merge-policy.js";
 
 describe("resolveMergeRequirements", () => {
-  // Built-in base policy (#298): cut drops the approval gate for EVERY profile,
-  // present and future, without per-profile config.
-  it("undefined policy: cut auto-merges by default; other verbs stay all-required", () => {
-    expect(resolveMergeRequirements(undefined, "cut")).toEqual({ approval: false, changesRequested: true, botApproval: false });
-    expect(resolveMergeRequirements(undefined, "forge")).toEqual(DEFAULT_MERGE_REQUIREMENTS);
-    expect(resolveMergeRequirements(undefined, undefined)).toEqual(DEFAULT_MERGE_REQUIREMENTS);
+  const required = { approval: true, changesRequested: true, botApproval: false, botApprovers: [] };
+  const cut = { ...required, approval: false };
+  const forge = { ...required, botApproval: true, botApprovers: ["coderabbitai"] };
+  const defaults = { approval: false, changesRequested: false, botApproval: true };
+  const relaxed = { ...forge, approval: false };
+  const override = { approval: false, changesRequested: false, botApproval: true, botApprovers: ["Review-App[BOT]"] };
+  const overridden = { ...override, botApprovers: ["review-app"] };
+  const rows = [
+    ...KNOWN_TASK_TYPES.map((verb) => ({
+      verb, empty: verb === "cut" ? cut : verb === "forge" ? forge : required,
+    })),
+    { verb: "custom", empty: required },
+    { verb: "unknown", empty: required },
+    { verb: undefined, empty: required },
+  ];
+  it.each(rows)("resolves $verb under empty, relaxed and per-verb policies", ({ verb, empty }) => {
+    expect(resolveMergeRequirements(undefined, verb)).toEqual(empty);
+    expect(resolveMergeRequirements({}, verb)).toEqual(empty);
+    expect(resolveMergeRequirements({ defaults, byTaskType: { custom: {} } }, verb))
+      .toEqual(verb === "custom" ? relaxed : empty);
+    const byTaskType = Object.fromEntries([...KNOWN_TASK_TYPES, "custom"].map((name) => [name, override]));
+    expect(resolveMergeRequirements({ defaults, byTaskType }, verb))
+      .toEqual(verb && Object.hasOwn(byTaskType, verb) ? overridden : required);
   });
 
-  it("empty policy behaves like undefined: built-in cut default still applies", () => {
-    expect(resolveMergeRequirements({}, "cut")).toEqual({ approval: false, changesRequested: true, botApproval: false });
-    expect(resolveMergeRequirements({}, "forge")).toEqual({ approval: true, changesRequested: true, botApproval: false });
+  it("retightens cut and disables forge bot approval through explicit overrides", () => {
+    const policy = { byTaskType: { cut: { approval: true }, forge: { botApproval: false } } };
+    expect(resolveMergeRequirements(policy, "cut")).toEqual(required);
+    expect(resolveMergeRequirements(policy, "forge")).toEqual(required);
   });
 
-  it("built-in cut default relaxes approval only, never changesRequested", () => {
-    expect(resolveMergeRequirements(undefined, "cut")).toEqual({ approval: false, changesRequested: true, botApproval: false });
-  });
-
-  it("a profile can re-tighten cut explicitly — its policy wins over the built-in base", () => {
-    const policy: MergePolicy = { byTaskType: { cut: { approval: true } } };
-    expect(resolveMergeRequirements(policy, "cut")).toEqual({ approval: true, changesRequested: true, botApproval: false });
-  });
-
-  it("a profile-wide defaults.approval=true does NOT re-require cut approval (verb tier is more specific)", () => {
-    const policy: MergePolicy = { defaults: { approval: true } };
-    expect(resolveMergeRequirements(policy, "cut")).toEqual({ approval: false, changesRequested: true, botApproval: false });
-    expect(resolveMergeRequirements(policy, "forge")).toEqual({ approval: true, changesRequested: true, botApproval: false });
-  });
-
-  it("defaults override the base for every task type", () => {
-    const policy: MergePolicy = { defaults: { approval: false } };
-    expect(resolveMergeRequirements(policy, "cut")).toEqual({ approval: false, changesRequested: true, botApproval: false });
-    expect(resolveMergeRequirements(policy, "forge")).toEqual({ approval: false, changesRequested: true, botApproval: false });
-  });
-
-  it("byTaskType overrides defaults for the matching verb only", () => {
+  it("requests reviewers only for the opted-in verb and defaults CodeRabbit's mode", () => {
     const policy: MergePolicy = {
-      defaults: { approval: true, changesRequested: true },
-      byTaskType: { cut: { approval: false } },
+      reviewRequests: { byTaskType: { forge: { reviewers: [{ id: "coderabbit" }, { id: "copilot" }] } } },
     };
-    expect(resolveMergeRequirements(policy, "cut")).toEqual({ approval: false, changesRequested: true, botApproval: false });
-    expect(resolveMergeRequirements(policy, "forge")).toEqual({ approval: true, changesRequested: true, botApproval: false });
-  });
-
-  it("the cut use-case: only approval relaxed for cut", () => {
-    const policy: MergePolicy = { byTaskType: { cut: { approval: false } } };
-    expect(resolveMergeRequirements(policy, "cut")).toEqual({ approval: false, changesRequested: true, botApproval: false });
-    expect(resolveMergeRequirements(policy, "mark")).toEqual({ approval: true, changesRequested: true, botApproval: false });
-  });
-
-  it("unknown / undefined task type falls back to defaults", () => {
-    const policy: MergePolicy = { byTaskType: { cut: { approval: false } } };
-    expect(resolveMergeRequirements(policy, "render")).toEqual({ approval: true, changesRequested: true, botApproval: false });
-    expect(resolveMergeRequirements(policy, undefined)).toEqual({ approval: true, changesRequested: true, botApproval: false });
-  });
-
-  it("layering precedence: base < defaults < byTaskType, per field", () => {
-    const policy: MergePolicy = {
-      defaults: { approval: false, changesRequested: false },
-      byTaskType: { cut: { changesRequested: true } },
-    };
-    expect(resolveMergeRequirements(policy, "cut")).toEqual({ approval: false, changesRequested: true, botApproval: false });
-  });
-});
-
-describe("botApproval", () => {
-  it("is off by default for every verb", () => {
-    expect(resolveMergeRequirements(undefined, "mark").botApproval).toBe(false);
-    expect(resolveMergeRequirements({}, "forge").botApproval).toBe(false);
-  });
-
-  it("can be enabled profile-wide or per verb, and re-disabled per verb", () => {
-    const policy: MergePolicy = { defaults: { botApproval: true }, byTaskType: { forge: { botApproval: false } } };
-    expect(resolveMergeRequirements(policy, "mark")).toEqual({ approval: true, changesRequested: true, botApproval: true });
-    expect(resolveMergeRequirements(policy, "forge").botApproval).toBe(false);
-  });
-
-  it("validates as a boolean requirement", () => {
-    expect(validateMergePolicy({ byTaskType: { mark: { botApproval: true } } }).ok).toBe(true);
-    expect(validateMergePolicy({ defaults: { botApproval: "yes" } }).ok).toBe(false);
+    expect(resolveReviewRequests(undefined, "forge")).toEqual([]);
+    expect(resolveReviewRequests(policy, "cut")).toEqual([]);
+    expect(resolveReviewRequests(policy, "forge")).toEqual([
+      { id: "coderabbit", mode: "comment-trigger" },
+      { id: "copilot" },
+    ]);
   });
 });
 
 describe("approvalSatisfied", () => {
-  const required = { approval: true, changesRequested: true, botApproval: false };
-  const botOk = { ...required, botApproval: true };
+  const forge = resolveMergeRequirements(undefined, "forge");
+  const botApproved = {
+    head_sha: "head",
+    bot_approval_count: 1,
+    coderabbit: { decision: "APPROVED", decision_commit_sha: "head", decision_is_bot: true as const },
+  };
 
-  it("a human approval always satisfies the gate", () => {
-    expect(approvalSatisfied(required, { human_approval_count: 1, bot_approval_count: 0 })).toBe(true);
-    expect(approvalSatisfied(botOk, { human_approval_count: 1, bot_approval_count: 0 })).toBe(true);
+  it("requires an eligible approval when the gate is on", () => {
+    expect(approvalSatisfied(forge, { human_approval_count: 1 })).toBe(true);
+    expect(approvalSatisfied(forge, { bot_approval_count: 1 })).toBe(false);
+    expect(approvalSatisfied(forge, undefined)).toBe(false);
+    expect(approvalSatisfied(resolveMergeRequirements(undefined, "cut"), undefined)).toBe(true);
   });
 
-  it("a bot approval is ignored unless the policy opts in", () => {
-    expect(approvalSatisfied(required, { human_approval_count: 0, bot_approval_count: 1 })).toBe(false);
-    expect(approvalSatisfied(botOk, { human_approval_count: 0, bot_approval_count: 1 })).toBe(true);
+  it("accepts observed CodeRabbit approval only for a trusted bot on the head", () => {
+    expect(approvalSatisfied(forge, botApproved)).toBe(true);
+    expect(approvalSatisfied(forge, { ...botApproved, head_sha: "new" })).toBe(false);
+    expect(approvalSatisfied(forge, { ...botApproved, coderabbit: { decision: "APPROVED", decision_commit_sha: "head" } })).toBe(false);
+    expect(approvalSatisfied({ ...forge, botApprovers: ["other"] }, botApproved)).toBe(false);
+    expect(approvalSatisfied(DEFAULT_MERGE_REQUIREMENTS, botApproved)).toBe(false);
   });
+});
 
-  it("opting in does not drop the gate: no approval at all still blocks", () => {
-    expect(approvalSatisfied(botOk, { human_approval_count: 0, bot_approval_count: 0 })).toBe(false);
-    expect(approvalSatisfied(botOk, {})).toBe(false);
-    expect(approvalSatisfied(botOk, undefined)).toBe(false);
-  });
+it("blocks a trusted CodeRabbit changes-requested verdict until an explicit override", () => {
+  const forge = resolveMergeRequirements(undefined, "forge");
+  const pr = {
+    changes_requested_count: 0,
+    coderabbit: { decision: "CHANGES_REQUESTED", decision_commit_sha: "old", decision_is_bot: true as const },
+  };
+  expect(changesRequestedSatisfied(forge, pr)).toBe(false);
+  expect(changesRequestedSatisfied({ ...forge, changesRequested: false }, pr)).toBe(true);
+  expect(changesRequestedSatisfied({ ...forge, botApprovers: ["other"] }, pr)).toBe(true);
+});
 
-  it("a relaxed approval gate passes regardless", () => {
-    expect(approvalSatisfied({ ...required, approval: false }, {})).toBe(true);
-  });
+it("fails closed on partial review evidence unless the verb relaxes the gate", () => {
+  const forge = resolveMergeRequirements(undefined, "forge");
+  const partial = { reviews_complete: false, human_approval_count: 1, changes_requested_count: 0 };
+  expect(approvalSatisfied(forge, partial)).toBe(false);
+  expect(changesRequestedSatisfied(forge, partial)).toBe(false);
+  // Older snapshots without the flag keep their existing behavior.
+  expect(approvalSatisfied(forge, { human_approval_count: 1 })).toBe(true);
+  // An explicitly relaxed gate does not read the evidence at all.
+  expect(approvalSatisfied(resolveMergeRequirements(undefined, "cut"), partial)).toBe(true);
+  expect(changesRequestedSatisfied({ ...forge, changesRequested: false }, partial)).toBe(true);
 });
 
 describe("dependencyUpdates", () => {
@@ -133,7 +120,7 @@ describe("dependencyUpdates", () => {
   });
 
   it("does not affect slice merge requirements", () => {
-    expect(resolveMergeRequirements({ dependencyUpdates: { autoMerge: true } }, "forge")).toEqual(DEFAULT_MERGE_REQUIREMENTS);
+    expect(resolveMergeRequirements({ dependencyUpdates: { autoMerge: true } }, "mark")).toEqual(DEFAULT_MERGE_REQUIREMENTS);
   });
 });
 
@@ -230,5 +217,46 @@ describe("codeRabbit", () => {
     expect(validateMergePolicy({ codeRabbit: { approve: true } }).ok).toBe(false);
     expect(validateMergePolicy({ codeRabbit: { rereview: "yes" } }).ok).toBe(false);
     expect(validateMergePolicy({ codeRabbit: true }).ok).toBe(false);
+  });
+});
+
+describe("review policy validation", () => {
+  it.each([[], ["bad login"], ["MARCH-BOT[bot]"], "coderabbitai", Array(11).fill("bot")].map((botApprovers) => ({ botApprovers })))(
+    "rejects invalid allowlist $botApprovers", ({ botApprovers }) => {
+      vi.stubEnv("MARCH_SELF_BOT_LOGIN", "");
+      try {
+        expect(validateMergePolicy({ defaults: { botApprovers } }).ok).toBe(false);
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    },
+  );
+
+  it("rejects the configured identity after normalizing its login", () => {
+    vi.stubEnv("MARCH_SELF_BOT_LOGIN", "CUSTOM[bot]");
+    try {
+      expect(validateMergePolicy({ byTaskType: { forge: { botApprovers: ["Custom"] } } }).ok).toBe(false);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it.each([
+    [{ id: "copilot" }, { id: "copilot" }],
+    [{ id: "copilot", mode: "auto" }],
+    [{ id: "coderabbit", mode: "manual" }],
+    [{ id: "coderabbit", extra: true }],
+    [{ id: "unknown" }],
+  ].map((reviewers) => ({ reviewers })))("rejects invalid reviewers $reviewers", ({ reviewers }) => {
+    expect(validateMergePolicy({ reviewRequests: { byTaskType: { forge: { reviewers } } } }).ok).toBe(false);
+  });
+
+  it.each(["__proto__", "constructor", "prototype"])("rejects reserved reviewer verb %s", (verb) => {
+    expect(validateMergePolicy({ reviewRequests: { byTaskType: { [verb]: { reviewers: [] } } } }).ok).toBe(false);
+  });
+
+  it("falls back to the built-in table when stored policy is invalid", () => {
+    const invalid = parseMergePolicy('{"byTaskType":{"forge":{"approval":false,"botApprovers":[]}}}');
+    expect(resolveMergeRequirements(invalid, "forge")).toEqual(resolveMergeRequirements(undefined, "forge"));
   });
 });

@@ -2,7 +2,7 @@ import type { HandlerContext, HandlerResult, LoopState } from "../state/types.js
 import { emptyHandlerResult } from "../state/types.js";
 import { prNumber, workerBySessionId } from "../pure/session.js";
 import { hashText } from "../pure/hash.js";
-import { approvalSatisfied, resolveMergeRequirements, type MergePolicy } from "../../../herald/profiles/merge-policy.js";
+import { approvalSatisfied, changesRequestedSatisfied, resolveMergeRequirements, type MergePolicy } from "../../../herald/profiles/merge-policy.js";
 import { mergeBlocker, mergeReadiness, taskTypeForSlice } from "../pure/slice.js";
 import { parseMs } from "../pure/self-heal.js";
 import {
@@ -663,8 +663,8 @@ function evaluatePr(
   // state/sense.ts `prChecksUnsettled`), but accepting it here cannot merge
   // anything GitHub considers unmergeable: the merge is still gated below on
   // GitHub's own `mergeStateStatus === "clean"` (which stays non-clean while
-  // required checks are pending/blocked) and, for non-cut task types, on the
-  // human-approval requirement.
+  // required checks are pending/blocked) and on the resolved
+  // review requirements.
   const checksClear = pr.checks === "PASS" || pr.checks === "NONE";
   if (checksClear && pr.needs_response_count === 0 && pr.mergeable !== "CONFLICTING") {
     // Record the one-time transition into the all-clear `pr-open` stage (the loop
@@ -672,13 +672,10 @@ function evaluatePr(
     if (TERMINAL_RESET_STAGES.includes(slice.stage)) {
       out.push({ kind: "pr-open-clear", sliceId, sessionId, pr });
     }
-    // Auto-merge gate (#merge-requirements-by-type): on top of the all-clear
-    // precondition, enforce the human-review requirements — relaxable per task
-    // type by the profile's merge policy (e.g. cut drops the approval gate). An
-    // unknown verb / no policy resolves to all-required.
+    // Apply the review policy for the verb after the CI, conflict, and thread checks.
     const req = resolveMergeRequirements(state.mergePolicy, taskTypeForSlice(sliceId, slice));
     const approvalOk = approvalSatisfied(req, pr);
-    const crOk = !req.changesRequested || Number(pr.changes_requested_count ?? 0) === 0;
+    const crOk = changesRequestedSatisfied(req, pr);
     // Only attempt the merge when GitHub itself says the button is available
     // (mergeStateStatus == clean) — this enforces the repo's own branch-protection
     // rules and avoids dispatching a merge GitHub will reject (DRAFT/BLOCKED/BEHIND).
@@ -696,7 +693,7 @@ function evaluatePr(
           pr.merge_state_status,
           pr.human_approval_count ?? "",
           pr.changes_requested_count ?? "",
-          pr.bot_approval_count ?? "",
+          pr.coderabbit?.decision_is_bot ? pr.coderabbit.decision_at : pr.bot_approval_count ?? "",
         ].join("|"),
       );
       if (!alreadyDispatched(slice, key)) {

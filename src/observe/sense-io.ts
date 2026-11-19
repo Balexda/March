@@ -1,7 +1,7 @@
 import { hasMarchReplyMarker } from "./march-bot.js";
 import { createGitHubRead, type GitHubReadClient } from "./github-read.js";
 import { TesseraClientError } from "../tessera/client.js";
-import { summarizeCodeRabbit, type CodeRabbitStanding } from "./coderabbit-review.js";
+import { isBotActor, summarizeCodeRabbit, type CodeRabbitStanding } from "./coderabbit-review.js";
 import { resolveOriginRepo, sameGitHubRepo } from "../shared/github-remote.js";
 import { execFile } from "node:child_process";
 import { CastraClient } from "../castra/client.js";
@@ -170,18 +170,11 @@ function failedChecks(statusCheckRollup: any) {
     }));
 }
 
-/** A GraphQL `author` that is a bot: typed `Bot`, or a login ending in `[bot]`
- *  (covers GitHub Apps that present as Users, e.g. Copilot). An ordinary user can
- *  be neither — GitHub logins cannot contain brackets. */
-function isBotActor(author: any): boolean {
-  return author?.__typename === "Bot" || String(author?.login || "").endsWith("[bot]");
-}
-
 /**
  * Reduce a PR's `reviews` nodes to human (non-bot) approval / changes-requested
  * counts, plus a separate bot approval count — the data the legate's merge gate
- * needs. Bot approvals never count as human ones; they only matter when a
- * profile's merge policy opts in (`botApproval`). Mirrors the jq the (retired)
+ * uses for human approvals and changes-requested. The bot count is retained
+ * for snapshot consumers. Mirrors the jq the (retired)
  * `check-merge-readiness.sh` ran:
  *  - a review is a bot's when `author.__typename === "Bot"` or its login ends in
  *    `[bot]` (covers GitHub Apps that present as Users, e.g. Copilot);
@@ -249,6 +242,49 @@ function addBranchVariants(branches: Set<string>, value: any): void {
 }
 
 /** Build the shared observation I/O bundle bound to a context. */
+/** Review fields shared by the first query and each follow-up page. */
+const REVIEW_PAGE_FIELDS = `pageInfo { hasNextPage endCursor }
+        nodes {
+          state
+          submittedAt
+          commit { oid }
+          author { login __typename }
+        }`;
+
+/** Timeout for an ambient `gh api graphql` call (the Tessera path sets its own). */
+const GRAPHQL_EXEC_OPTIONS = { timeout: 30_000, killSignal: "SIGKILL" } as const;
+
+/** Safety bound on follow-up review pages (100 reviews each) per PR per tick.
+ *  Normal PRs need none; this only stops a runaway walk. Past it the evidence is
+ *  marked incomplete and the review gates fail closed. */
+const MAX_EXTRA_REVIEW_PAGES = 100;
+
+function reviewPageArgs(owner: string, name: string, pr: unknown, cursor: string): string[] {
+  return [
+    "api",
+    "graphql",
+    "-F",
+    `owner=${owner}`,
+    "-F",
+    `name=${name}`,
+    "-F",
+    `pr=${pr}`,
+    "-f",
+    `cursor=${cursor}`,
+    "-f",
+    `query=query($owner: String!, $name: String!, $pr: Int!, $cursor: String!) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $pr) {
+      headRefOid
+      reviews(first: 100, after: $cursor) {
+        ${REVIEW_PAGE_FIELDS}
+      }
+    }
+  }
+}`,
+  ];
+}
+
 export function createSenseIo(ctx: SenseIoContext): SenseIo {
   const meta = ctx.meta;
   const env = ctx.env ?? process.env;
@@ -361,6 +397,8 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
     codexReview: CodexReviewState | null;
     headRefOid: string | null;
     mergeStateStatus: string | null;
+    /** Whether every review page was read for the observed head. */
+    reviewsComplete: boolean;
     /** `undefined` when the query failed: unknown, never "CodeRabbit has not reviewed". */
     coderabbit: CodeRabbitStanding | null | undefined;
   }> {
@@ -373,6 +411,7 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
       headRefOid: null,
       mergeStateStatus: null,
       coderabbit: undefined,
+      reviewsComplete: false,
     };
     if (!owner) return empty;
     const [repoOwnerName, repoName] = owner.split("/");
@@ -397,12 +436,7 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
       headRefOid
       mergeStateStatus
       reviews(first: 100) {
-        nodes {
-          state
-          submittedAt
-          commit { oid }
-          author { login __typename }
-        }
+        ${REVIEW_PAGE_FIELDS}
       }
       comments(last: 50) {
         nodes {
@@ -433,9 +467,12 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
   }
 }`,
     ];
-    const { output, appLogin } = github
-      ? await github.ghWithIdentity(owner, args, sliceId)
-      : { output: await gh(args, {}, owner, sliceId), appLogin: undefined };
+    const runGraphql = async (graphqlArgs: string[]): Promise<{ output: string; appLogin?: string }> => github
+      ? await github.ghWithIdentity(owner, graphqlArgs, sliceId)
+      // Bound the ambient-gh path like the Tessera one: a hung child must fail
+      // (marking any follow-up page incomplete) rather than stall observation.
+      : { output: await gh(graphqlArgs, GRAPHQL_EXEC_OPTIONS, owner, sliceId), appLogin: undefined };
+    const { output, appLogin } = await runGraphql(args);
     const normalizedAppLogin = appLogin?.toLowerCase();
     const isApp = (author: { login?: string; __typename?: string } | undefined) => {
       const login = author?.login?.toLowerCase();
@@ -446,6 +483,30 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
     const isMarchReply = (comment: any) => isApp(comment.author) || hasMarchReplyMarker(comment.body);
     const parsed = JSON.parse(output);
     const pr = parsed?.data?.repository?.pullRequest || {};
+    // Follow the review cursor so >100-review PRs still yield complete evidence.
+    // Each extra page re-reads headRefOid: if the head moved mid-walk the pages
+    // describe different heads, so the evidence stays marked incomplete.
+    const reviewNodes: any[] = Array.isArray(pr?.reviews?.nodes) ? [...pr.reviews.nodes] : [];
+    let reviewPage = pr?.reviews?.pageInfo;
+    let reviewsComplete = reviewPage?.hasNextPage === false;
+    const seenCursors = new Set<string>();
+    for (let page = 0; reviewPage?.hasNextPage === true && page < MAX_EXTRA_REVIEW_PAGES; page++) {
+      const cursor = reviewPage.endCursor;
+      if (typeof cursor !== "string" || !cursor || seenCursors.has(cursor)) break;
+      seenCursors.add(cursor);
+      try {
+        const next = JSON.parse((await runGraphql(reviewPageArgs(repoOwnerName, repoName, prNumberValue, cursor))).output)
+          ?.data?.repository?.pullRequest;
+        if (!next || next.headRefOid !== pr?.headRefOid) break;
+        if (Array.isArray(next.reviews?.nodes)) reviewNodes.push(...next.reviews.nodes);
+        reviewPage = next.reviews?.pageInfo;
+        reviewsComplete = reviewPage?.hasNextPage === false;
+      } catch {
+        // A failed follow-up page leaves the evidence incomplete (fail closed).
+        reviewsComplete = false;
+        break;
+      }
+    }
     const nodes = pr?.reviewThreads?.nodes || [];
     const threads = nodes
       .filter((thread: any) => thread && thread.isResolved === false)
@@ -520,7 +581,7 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
     });
     return {
       threads,
-      reviews: (pr?.reviews?.nodes || []).filter((review: any) => !isApp(review?.author)),
+      reviews: reviewNodes.filter((review: any) => !isApp(review?.author)),
       comments,
       reviewerNotices,
       codexReview,
@@ -528,7 +589,8 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
       mergeStateStatus: pr?.mergeStateStatus || null,
       // Read from the unfiltered comment nodes: a `@coderabbitai review` request is
       // the evidence that the head was already put forward.
-      coderabbit: summarizeCodeRabbit(pr?.reviews?.nodes, commentNodes),
+      coderabbit: summarizeCodeRabbit(reviewNodes, commentNodes, reviewsComplete),
+      reviewsComplete,
     };
   }
 
@@ -576,6 +638,9 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
       human_approval_count: reviewSummary.human_approval_count,
       changes_requested_count: reviewSummary.changes_requested_count,
       bot_approval_count: reviewSummary.bot_approval_count,
+      // False when some review pages were not read: the counts above are then
+      // partial, and the merge gate refuses to trust them (fail closed).
+      reviews_complete: graphql.reviewsComplete,
       // CodeRabbit's review standing: what the legate's opt-in CodeRabbit review
       // request reads. See coderabbit-review.ts.
       coderabbit: graphql.coderabbit,

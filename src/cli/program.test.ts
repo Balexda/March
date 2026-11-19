@@ -13,6 +13,8 @@ import Fastify from "fastify";
 import { registerRoutes } from "../brood/service/routes.js";
 import { sqliteAvailable } from "../brood/service/sqlite.js";
 import { SessionStore } from "../brood/service/store.js";
+import { registerProfileRoutes } from "../herald/profiles/routes.js";
+import { ProfileStore } from "../herald/profiles/store.js";
 import { FINDER_BIN } from "../shared/deps.js";
 
 const _require = createRequire(import.meta.url);
@@ -73,6 +75,64 @@ describe("march CLI", () => {
     }
     tmpDirs.length = 0;
   });
+
+  it.skipIf(!sqliteAvailable)("edits and shows per-verb merge policies through Herald", async () => {
+    const store = new ProfileStore({ dbPath: ":memory:" });
+    const app = Fastify();
+    const legacy = { dependencyUpdates: { autoMerge: true }, codeRabbit: { rereview: true } };
+    store.register({ profile: "repo", repoName: "repo", repoPath: "/repo", workerGroup: "workers", mergePolicy: legacy });
+    try {
+      await registerProfileRoutes(app, { store });
+      const url = await app.listen({ port: 0, host: "127.0.0.1" });
+      const runPolicy = (cmd: string, ...flags: string[]) =>
+        execFileAsync(process.execPath, [CLI_PATH, "profile", "merge-policy", cmd, "repo", ...flags], {
+          env: { ...process.env, HOME: makeTmpDir(), MARCH_HERALD_URL: url, MARCH_SELF_BOT_LOGIN: "march-bot" },
+          timeout: 5000,
+        });
+      await runPolicy("set", "--task-type", " Forge ", "--bot-approver", "Other[bot]", "--bot-approver", "Extras",
+        "--review-request", "coderabbit:auto", "--review-request", "copilot");
+      await runPolicy("set", "--task-type", "custom", "--no-approval");
+      const table = await runPolicy("show");
+      expect(table.stdout).toContain("coderabbit:auto, copilot");
+      expect(table.stdout).toContain("custom");
+      const { stdout } = await runPolicy("show", "--json");
+      const rows = JSON.parse(stdout);
+      expect(rows.forge).toMatchObject({
+        requirements: { approval: true, botApprovers: ["other", "extras"] },
+        reviewers: [{ id: "coderabbit", mode: "auto" }, { id: "copilot" }],
+        provenance: { approval: "built-in", botApprovers: "profile", reviewers: "profile" },
+      });
+      expect(rows.custom).toMatchObject({ requirements: { approval: false }, provenance: { approval: "profile" } });
+      expect(Object.keys(rows)).toHaveLength(9);
+
+      await expect(runPolicy("set", "--task-type", "forge", "--bot-approver", "MARCH-BOT[bot]"))
+        .rejects.toMatchObject({ code: 1, stderr: expect.stringContaining("own bot login") });
+      await expect(runPolicy("set", "--no-changes-requested"))
+        .rejects.toMatchObject({ code: 1, stderr: expect.stringContaining("requires --task-type") });
+      expect(store.get("repo")?.mergePolicy?.byTaskType?.forge?.botApprovers).toEqual(["other", "extras"]);
+
+      await runPolicy("set", "--task-type", "forge", "--no-bot-approver", "OTHER[BOT]", "--no-bot-approver", "EXTRAS",
+        "--no-review-request", "coderabbit", "--no-review-request", "copilot");
+      const afterRemoval = JSON.parse((await runPolicy("show", "--json")).stdout);
+      expect(afterRemoval.forge).toMatchObject({
+        requirements: { botApproval: true, botApprovers: ["coderabbitai"] },
+        reviewers: [],
+      });
+      expect(store.get("repo")?.mergePolicy).toMatchObject(legacy);
+    } finally {
+      await app.close();
+      store.close();
+    }
+  }, 15000);
+
+  it("prints a JSON error on stdout when merge-policy show --json cannot reach Herald", async () => {
+    const result = await execFileAsync(process.execPath, [CLI_PATH, "profile", "merge-policy", "show", "repo", "--json"], {
+      env: { ...process.env, HOME: makeTmpDir(), MARCH_HERALD_URL: "http://127.0.0.1:1" },
+      timeout: 5000,
+    }).then(() => undefined, (err: { code?: number; stdout?: string }) => err);
+    expect(result?.code).toBe(1);
+    expect(JSON.parse(result?.stdout ?? "")).toEqual({ error: expect.any(String) });
+  }, 15000);
 
   it("advertises the Brood list flags", () => {
     const result = run(["brood", "list", "--help"]);

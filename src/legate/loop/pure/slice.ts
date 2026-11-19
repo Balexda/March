@@ -1,6 +1,6 @@
 import { dispatchBranch, dispatchItemKey, dispatchSliceId, sliceActionKey } from "./dispatch-id.js";
 import { isMarchBotComment } from "../../../observe/march-bot.js";
-import { approvalSatisfied, resolveMergeRequirements, type MergePolicy } from "../../../herald/profiles/merge-policy.js";
+import { approvalSatisfied, changesRequestedSatisfied, KNOWN_TASK_TYPES, resolveMergeRequirements, type MergePolicy } from "../../../herald/profiles/merge-policy.js";
 import { readRecoveryRate, stepRecoveryRate } from "./self-heal.js";
 import {
   clearBackoff,
@@ -465,7 +465,7 @@ export interface SliceStageSummary {
   /** All-clear slices the loop WILL squash-merge now (`merge_gate == ready`).
    *  Transient (they merge + archive); a lingering >0 is a merge stall. */
   readonly readyToMerge: number;
-  /** All-clear slices blocked on a HUMAN review gate (`merge_gate ==
+  /** All-clear slices blocked on a review gate (`merge_gate ==
    *  waiting-approval`). Human-paced — a metric, never an alarm. */
   readonly waitingOnApproval: number;
   /** All-clear, human-gates-cleared slices GitHub won't merge yet
@@ -519,23 +519,22 @@ export function taskTypeForSlice(sliceId: string, slice: any): string | undefine
   const branch = String(slice?.actual_branch || slice?.branch || "");
   const fromBranch = branch.match(/(?:^|\/)smithy\/([a-z0-9_-]+)\//i);
   if (fromBranch) return fromBranch[1].toLowerCase();
-  const fromId = String(sliceId || "").match(/-(cut|forge|mark|render|fix|strike)$/i);
-  if (fromId) return fromId[1].toLowerCase();
-  return undefined;
+  const id = sliceId.toLowerCase();
+  return KNOWN_TASK_TYPES.find((verb) => id.endsWith(`-${verb}`));
 }
 
 /**
  * The human-consumable merge state of a `pr-open` slice — a THREE-way split of the
  * all-clear set (passing checks, not conflicting, no threads owed):
- *   - `ready`               — human gates cleared (approval / changes-requested per
+ *   - `ready`               — review gates cleared (approval / changes-requested per
  *                             the profile's merge policy) AND GitHub's own
  *                             `merge_state_status == clean`: the loop squash-merges
  *                             it now. Transient — a `ready` slice merges and
  *                             archives, so it does not linger.
- *   - `waiting-approval`    — blocked on a HUMAN review gate (missing required
+ *   - `waiting-approval`    — blocked on a review gate (missing required
  *                             approval or an open changes-requested review).
- *                             Human-paced — a metric, NEVER an alarm.
- *   - `blocked-merge-state` — human gates cleared but GitHub won't merge yet
+ *                             Tracked as a metric.
+ *   - `blocked-merge-state` — review gates cleared but GitHub won't merge yet
  *                             (`UNKNOWN`/`BEHIND`/`BLOCKED`/`DIRTY` — needs a rebase
  *                             or branch protection still enforces a review the
  *                             policy relaxed). A real stall the loop can't clear
@@ -568,7 +567,7 @@ export function mergeReadiness(
   if (owed !== 0) return "not-ready";
   const req = resolveMergeRequirements(mergePolicy, taskTypeForSlice(sliceId, slice));
   const approvalOk = approvalSatisfied(req, src);
-  const crOk = !req.changesRequested || Number(src.changes_requested_count ?? 0) === 0;
+  const crOk = changesRequestedSatisfied(req, src);
   if (!approvalOk || !crOk) return "waiting-approval";
   // A missing/empty merge_state_status (sense-io maps absent → null; also the
   // case for a cold-start thin slice.pr) is UNKNOWN, not a stall — classify it
