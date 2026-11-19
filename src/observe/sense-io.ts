@@ -251,8 +251,10 @@ const REVIEW_PAGE_FIELDS = `pageInfo { hasNextPage endCursor }
           author { login __typename }
         }`;
 
-/** Bound on follow-up review pages (100 reviews each) per PR per tick. */
-const MAX_EXTRA_REVIEW_PAGES = 4;
+/** Safety bound on follow-up review pages (100 reviews each) per PR per tick.
+ *  Normal PRs need none; this only stops a runaway walk. Past it the evidence is
+ *  marked incomplete and the review gates fail closed. */
+const MAX_EXTRA_REVIEW_PAGES = 100;
 
 function reviewPageArgs(owner: string, name: string, pr: unknown, cursor: string): string[] {
   return [
@@ -392,6 +394,8 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
     codexReview: CodexReviewState | null;
     headRefOid: string | null;
     mergeStateStatus: string | null;
+    /** Whether every review page was read for the observed head. */
+    reviewsComplete: boolean;
     /** `undefined` when the query failed: unknown, never "CodeRabbit has not reviewed". */
     coderabbit: CodeRabbitStanding | null | undefined;
   }> {
@@ -404,6 +408,7 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
       headRefOid: null,
       mergeStateStatus: null,
       coderabbit: undefined,
+      reviewsComplete: false,
     };
     if (!owner) return empty;
     const [repoOwnerName, repoName] = owner.split("/");
@@ -479,9 +484,11 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
     const reviewNodes: any[] = Array.isArray(pr?.reviews?.nodes) ? [...pr.reviews.nodes] : [];
     let reviewPage = pr?.reviews?.pageInfo;
     let reviewsComplete = reviewPage?.hasNextPage === false;
+    const seenCursors = new Set<string>();
     for (let page = 0; reviewPage?.hasNextPage === true && page < MAX_EXTRA_REVIEW_PAGES; page++) {
       const cursor = reviewPage.endCursor;
-      if (typeof cursor !== "string" || !cursor) break;
+      if (typeof cursor !== "string" || !cursor || seenCursors.has(cursor)) break;
+      seenCursors.add(cursor);
       try {
         const next = JSON.parse((await runGraphql(reviewPageArgs(repoOwnerName, repoName, prNumberValue, cursor))).output)
           ?.data?.repository?.pullRequest;
@@ -578,6 +585,7 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
       // Read from the unfiltered comment nodes: a `@coderabbitai review` request is
       // the evidence that the head was already put forward.
       coderabbit: summarizeCodeRabbit(reviewNodes, commentNodes, reviewsComplete),
+      reviewsComplete,
     };
   }
 
@@ -625,6 +633,9 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
       human_approval_count: reviewSummary.human_approval_count,
       changes_requested_count: reviewSummary.changes_requested_count,
       bot_approval_count: reviewSummary.bot_approval_count,
+      // False when some review pages were not read: the counts above are then
+      // partial, and the merge gate refuses to trust them (fail closed).
+      reviews_complete: graphql.reviewsComplete,
       // CodeRabbit's review standing: what the legate's opt-in CodeRabbit review
       // request reads. See coderabbit-review.ts.
       coderabbit: graphql.coderabbit,

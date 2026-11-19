@@ -146,6 +146,8 @@ interface ReviewEvidence {
   human_approval_count?: unknown;
   bot_approval_count?: unknown;
   changes_requested_count?: unknown;
+  /** `false` when the observer could not read every review page; absent on older snapshots. */
+  reviews_complete?: boolean;
   head_sha?: string | null;
   coderabbit?: { decision_is_bot?: true; decision?: string | null; decision_commit_sha?: string | null } | null;
 }
@@ -164,6 +166,8 @@ export function approvalSatisfied(
   pr: ReviewEvidence | null | undefined,
 ): boolean {
   if (!req.approval) return true;
+  // Partial review evidence can hide a later verdict, so it never establishes approval.
+  if (pr?.reviews_complete === false) return false;
   if (typeof pr?.human_approval_count === "number" && pr.human_approval_count >= 1) return true;
   const review = trustedCodeRabbit(req, pr);
   return review?.decision === "APPROVED" && !!pr?.head_sha && review.decision_commit_sha === pr.head_sha;
@@ -171,7 +175,7 @@ export function approvalSatisfied(
 
 export function changesRequestedSatisfied(req: ResolvedMergeRequirements, pr: ReviewEvidence): boolean {
   return !req.changesRequested ||
-    (Number(pr.changes_requested_count ?? 0) === 0 && trustedCodeRabbit(req, pr)?.decision !== "CHANGES_REQUESTED");
+    (pr.reviews_complete !== false && Number(pr.changes_requested_count ?? 0) === 0 && trustedCodeRabbit(req, pr)?.decision !== "CHANGES_REQUESTED");
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {

@@ -94,6 +94,18 @@ it("blocks a trusted CodeRabbit changes-requested verdict until an explicit over
   expect(changesRequestedSatisfied({ ...forge, botApprovers: ["other"] }, pr)).toBe(true);
 });
 
+it("fails closed on partial review evidence unless the verb relaxes the gate", () => {
+  const forge = resolveMergeRequirements(undefined, "forge");
+  const partial = { reviews_complete: false, human_approval_count: 1, changes_requested_count: 0 };
+  expect(approvalSatisfied(forge, partial)).toBe(false);
+  expect(changesRequestedSatisfied(forge, partial)).toBe(false);
+  // Older snapshots without the flag keep their existing behavior.
+  expect(approvalSatisfied(forge, { human_approval_count: 1 })).toBe(true);
+  // An explicitly relaxed gate does not read the evidence at all.
+  expect(approvalSatisfied(resolveMergeRequirements(undefined, "cut"), partial)).toBe(true);
+  expect(changesRequestedSatisfied({ ...forge, changesRequested: false }, partial)).toBe(true);
+});
+
 describe("dependencyUpdates", () => {
   it("accepts and normalizes the autoMerge switch", () => {
     const r = validateMergePolicy({ dependencyUpdates: { autoMerge: true } });

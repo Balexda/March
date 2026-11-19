@@ -424,7 +424,45 @@ describe("queryPrForBabysit", () => {
       expect(graphqlCalls).toHaveLength(2);
       expect(graphqlCalls[1].some((a) => a.includes("reviews(first: 100, after: $cursor)"))).toBe(true);
       expect(result.human_approval_count).toBe(1);
+      expect(result.reviews_complete).toBe(true);
       expect(result.coderabbit).toMatchObject({ decision: "APPROVED", decision_commit_sha: "head1", decision_is_bot: true });
+    });
+
+    it("walks past five pages to reach a late verdict", async () => {
+      let calls = 0;
+      routeExec((_cmd, args) => {
+        if (!args.includes("graphql")) return prSummary;
+        calls++;
+        const cursorArg = args.find((a) => a.startsWith("cursor="));
+        if (!cursorArg) return JSON.stringify(firstPage(true));
+        const n = Number(cursorArg.slice("cursor=c".length));
+        if (n < 7) {
+          return JSON.stringify({ data: { repository: { pullRequest: {
+            headRefOid: "head1",
+            reviews: { pageInfo: { hasNextPage: true, endCursor: `c${n + 1}` }, nodes: [] },
+          } } } });
+        }
+        return JSON.stringify(secondPage("head1"));
+      });
+      const io = createSenseIo({ meta: meta(), castra: fakeCastra() });
+      const result = await io.queryPrForBabysit({ pr: { number: 5 } }, { repo: { path: "/repo", owner_with_name: "octo/march" } });
+      expect(calls).toBe(8);
+      expect(result.reviews_complete).toBe(true);
+      expect(result.coderabbit?.decision_is_bot).toBe(true);
+    });
+
+    it("stops on a repeated cursor and marks the evidence incomplete", async () => {
+      routeExec((_cmd, args) => {
+        if (!args.includes("graphql")) return prSummary;
+        if (!args.some((a) => a.startsWith("cursor="))) return JSON.stringify(firstPage(true));
+        return JSON.stringify({ data: { repository: { pullRequest: {
+          headRefOid: "head1",
+          reviews: { pageInfo: { hasNextPage: true, endCursor: "c1" }, nodes: [] },
+        } } } });
+      });
+      const io = createSenseIo({ meta: meta(), castra: fakeCastra() });
+      const result = await io.queryPrForBabysit({ pr: { number: 5 } }, { repo: { path: "/repo", owner_with_name: "octo/march" } });
+      expect(result.reviews_complete).toBe(false);
     });
 
     it("withholds decision_is_bot when the head moves between pages", async () => {
@@ -438,6 +476,7 @@ describe("queryPrForBabysit", () => {
       const result = await pr;
       expect(result.head_sha).toBe("head1");
       expect(result.coderabbit?.decision_is_bot).toBeUndefined();
+      expect(result.reviews_complete).toBe(false);
     });
   });
 
