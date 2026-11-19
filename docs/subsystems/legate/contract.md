@@ -28,6 +28,14 @@ Legate's required public inputs are:
 
 Shared PR sensing classifies full conversation comment bodies before creating previews. Review-bot commands, March review triggers, and reviewer notices are excluded from `conversation_comments`. The PR snapshot carries `reviewer_notices` with `reviewer`, `kind` (`status`, `in_progress`, `rate_limited`, or `paused`), `created_at`, and an optional ISO-8601 `reset_at` when the notice supplies a reset time. Notices require a recognized bot identity. Unresolved inline threads continue through the review-thread path and can block merge. Sensing continues to report the existing `codex_review` and `coderabbit` observations.
 
+Babysit uses Herald's feedback classification for both operator- and app-authored
+PRs. After successfully sending a fix for inline or conversation feedback,
+Legate records the handled comment IDs in the Herald stage transition. A restart
+restores those IDs and the latest fix dispatch context from the fold, so a
+parked worker still gets the bounded nudge, review-fix escalation and the
+comment-fix steward-stuck escalation, and a distinct
+external reply can still trigger a fix.
+
 Legate resolves the GitHub repository from the profile checkout's origin
 before asking Tessera for an app entitlement. Independent reads use
 `app/read`. Merges, reactions, comments, labels, PR closures, and remote

@@ -82,7 +82,7 @@ export type EventBody =
    *  steward `sessionId` on the implementing handoff so the fold learns the
    *  slice→session link Herald's PR discovery is gated on (#210) and a restart's
    *  rebuild keeps it (the latent #210 regression). */
-  | { type: "slice.stage.changed"; sliceId: string; stage: string; sessionId?: string }
+  | { type: "slice.stage.changed"; sliceId: string; stage: string; sessionId?: string; handledFeedback?: HandledFeedback }
   /** The slice reached a terminal state and was cleaned up. */
   | { type: "slice.archived"; sliceId: string }
   /** A partial-merge / branch-collision recovery dispatch. */
@@ -241,6 +241,17 @@ export function entityRefOf(body: EventBody): EntityRef {
   }
 }
 
+/** Comment IDs a successful Legate fix dispatch handled. `dispatchKey` is that
+ *  dispatch's action key and `headSha` the PR head it was sent against, so a
+ *  restart restores the dispatch context the bounded post-dispatch nudge and the
+ *  steward-stuck escalation depend on. */
+export type HandledFeedback = {
+  kind: "inline" | "conversation";
+  commentIds: string[];
+  dispatchKey?: string;
+  headSha?: string;
+};
+
 /** Per-slice projected state — observed facts merged with legate-owned stage. */
 export interface SliceState {
   sliceId: string;
@@ -258,6 +269,9 @@ export interface SliceState {
   jobId?: string;
   /** Observed PR/CI/review state (the `queryPrForBabysit` shape). */
   pr?: unknown;
+  handledFeedback?: Partial<Record<HandledFeedback["kind"], string[]>>;
+  /** The latest feedback fix dispatch (kind, action key, event time). */
+  lastFeedbackDispatch?: { kind: HandledFeedback["kind"]; key: string; at: string; headSha?: string };
   recentOutput?: { output: string; error?: string };
   archived?: boolean;
   escalatedReason?: string;
@@ -501,6 +515,15 @@ export function reduce(state: SystemState, event: HeraldEvent): SystemState {
       // without a sessionId never clobbers a known link (#210). The handoff
       // transition carries it so a restart's rebuild keeps the slice→session link.
       if (event.sessionId !== undefined) slice.sessionId = event.sessionId;
+      if (event.handledFeedback) {
+        const { kind, commentIds } = event.handledFeedback;
+        const handled = (slice.handledFeedback ??= {});
+        handled[kind] = [...new Set([...(handled[kind] ?? []), ...commentIds])];
+        const { dispatchKey, headSha } = event.handledFeedback;
+        if (dispatchKey) {
+          slice.lastFeedbackDispatch = { kind, key: dispatchKey, at: event.ts, ...(headSha ? { headSha } : {}) };
+        }
+      }
       break;
     }
     case "slice.archived":

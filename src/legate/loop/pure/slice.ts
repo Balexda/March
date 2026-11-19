@@ -1,5 +1,5 @@
 import { dispatchBranch, dispatchItemKey, dispatchSliceId, sliceActionKey } from "./dispatch-id.js";
-import { isMarchBotComment } from "./march-bot.js";
+import { isMarchBotComment } from "../../../observe/march-bot.js";
 import { approvalSatisfied, resolveMergeRequirements, type MergePolicy } from "../../../herald/profiles/merge-policy.js";
 import { readRecoveryRate, stepRecoveryRate } from "./self-heal.js";
 import {

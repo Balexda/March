@@ -12,7 +12,7 @@ import {
   type SenseDeps,
 } from "./sense.js";
 import type { LoopMeta } from "../meta.js";
-import { emptySystemState, type SliceState, type SystemState } from "../../../herald/events.js";
+import { emptySystemState, reduce, type HeraldEvent, type SliceState, type SystemState } from "../../../herald/events.js";
 import { liveSpawnCount } from "../pure/slice.js";
 
 const meta = { worker_group: "legate-workers", repo: { name: "march", path: "/repo" } } as unknown as LoopMeta;
@@ -289,6 +289,40 @@ describe("senseFromHerald (Stage 1, Herald-backed)", () => {
 });
 
 describe("rebuildWorkingState", () => {
+  it("restores the comment-fix head baseline so steward-stuck escalation still fires after a restart", () => {
+    const sys = reduce(emptySystemState(), {
+      source: "legate", profile: "p", id: "e", seq: 1, ts: "2026-05-20T00:00:00Z",
+      type: "slice.stage.changed", sliceId: "s", stage: "pr-in-fix",
+      handledFeedback: { kind: "conversation", commentIds: ["7"], dispatchKey: "comment-fix:1", headSha: "abc123" },
+    } as HeraldEvent);
+    expect(rebuildWorkingState(sys, meta).slices.s).toMatchObject({
+      last_processor_action: "comment-fix",
+      last_processor_action_at: "2026-05-20T00:00:00Z",
+      comment_fix_head_sha: "abc123",
+    });
+  });
+
+  it("restores handled feedback and the latest fix dispatch context so a parked worker is still nudged", () => {
+    const envelope = { source: "legate", profile: "p", id: "e", seq: 0 } as const;
+    const events = [
+      { ...envelope, seq: 1, ts: "2026-05-20T00:00:00Z", type: "slice.stage.changed", sliceId: "s", stage: "pr-in-fix",
+        handledFeedback: { kind: "conversation", commentIds: ["7"], dispatchKey: "comment-fix:1" } },
+      { ...envelope, seq: 2, ts: "2026-05-20T00:01:00Z", type: "slice.stage.changed", sliceId: "s", stage: "pr-in-fix",
+        handledFeedback: { kind: "inline", commentIds: ["45"], dispatchKey: "review-fix:1:45" } },
+      // A transition without a dispatch key keeps the restored context.
+      { ...envelope, seq: 3, ts: "2026-05-20T00:02:00Z", type: "slice.stage.changed", sliceId: "s", stage: "pr-open" },
+    ] as HeraldEvent[];
+    const sys = events.reduce(reduce, emptySystemState());
+    const raw = rebuildWorkingState(sys, meta);
+    expect(raw.slices.s).toMatchObject({
+      review_fix_seen_comment_ids: ["45"],
+      comment_fix_seen_comment_ids: ["7"],
+      last_processor_action: "review-fix",
+      last_processor_action_key: "review-fix:1:45",
+      last_processor_action_at: "2026-05-20T00:01:00Z",
+    });
+  });
+
   it("a dispatched-only slice rebuilds into hatchery-pending with its job id (#255)", () => {
     // After a dispatch the fold carries the slice as hatchery-pending + its job id
     // (see the reducer test in events.test.ts). A cold-start rebuild must reproduce

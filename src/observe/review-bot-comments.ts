@@ -12,7 +12,7 @@
  * or a bot handle further down a comment is leaving genuine feedback. Inline
  * review threads are sensed separately and are unaffected.
  */
-import { MARCH_BOT_MARKER } from "../legate/loop/pure/march-bot.js";
+import { MARCH_BOT_MARKER } from "./march-bot.js";
 import { isCodexReviewSummary } from "./codex-review.js";
 
 /** The HTML comment every CodeRabbit-authored conversation comment opens with. */

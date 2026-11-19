@@ -499,14 +499,8 @@ function evaluatePr(
 
   const neededThreads = threadsNeedingResponse(evalSlice, pr);
   if (neededThreads.length > 0) {
-    // Dedup by review-comment id, not last_comment_at (#224). The old key
-    // (`thread.id@last_comment_at`) churned on every reply, so a steward
-    // addressing a thread (push + reply) re-armed /smithy.fix forever. Instead
-    // remember the comment ids already dispatched for (refreshed each tick from
-    // the observed unresolved threads — see snapshot()) and only fire on
-    // genuinely new (unseen) ids — any author. A fixed-but-unresolved thread
-    // contributes no new id, so it stops triggering; the steward's own reply,
-    // once observed, is already in `seen` and never re-triggers.
+    // Remember the external comment IDs already dispatched for so a change
+    // in thread timestamps alone never re-arms a review fix.
     const seen = new Set<string>((slice.review_fix_seen_comment_ids || []).map((id: any) => String(id)));
     const threadsWithNew = neededThreads.filter((thread: any) => threadCommentIds(thread).some((id) => !seen.has(id)));
 
@@ -575,7 +569,7 @@ function evaluatePr(
         message: reviewFixMessage(pr, dispatchable),
         detail: `sent /smithy.fix for ${dispatchable.length} review thread(s) (${newIds.length} new comment(s))`,
         threadIds: dispatchable.map((thread: any) => String(thread.id)),
-        commentIds: commentIdsAcross(dispatchable),
+        commentIds: newIds,
       });
     }
     return;
@@ -610,10 +604,7 @@ function evaluatePr(
   // resolve and the thread/review signals miss it entirely. Without this a
   // commented-but-otherwise-clean PR sits "waiting for merge" forever. Each
   // distinct comment id is dispatched once, then acked (:eyes:) + recorded in the
-  // persisted seen-set; a later reviewer reply carries a NEW id and re-arms. Dedup
-  // is author-independent on purpose: the legate token shares the PR-author
-  // identity, so :eyes: + the comment-id set — not "author != prAuthor" — are the
-  // reliable signals (#non-thread-comments).
+  // durable seen-set. A later reviewer reply carries a new ID and re-arms.
   const unhandledComments = commentsNeedingResponse(evalSlice, pr);
   if (unhandledComments.length > 0) {
     const seen = new Set<string>((slice.comment_fix_seen_comment_ids || []).map((id: any) => String(id)));
@@ -951,7 +942,10 @@ export async function apply(decisions: BabysitDecision[], ctx: HandlerContext, s
         for (const threadId of d.threadIds || []) rounds[threadId] = (rounds[threadId] || 0) + 1;
         delete slice.review_fix_escalated_at;
         mark(slice, "review-fix", d.key, "processor sent review-thread /smithy.fix", ts);
-        ctx.emitTransition?.({ type: "slice.stage.changed", sliceId: d.sliceId, stage: "pr-in-fix" });
+        ctx.emitTransition?.({
+          type: "slice.stage.changed", sliceId: d.sliceId, stage: "pr-in-fix",
+          handledFeedback: { kind: "inline", commentIds: d.commentIds || [], dispatchKey: d.key },
+        });
         res.actions.push({ action: "review-fix", sliceId: d.sliceId, sessionId: d.sessionId, pr: d.pr, detail: d.detail });
         res.mutated = true;
         break;
@@ -967,11 +961,15 @@ export async function apply(decisions: BabysitDecision[], ctx: HandlerContext, s
         // Record seen ONLY after a successful send so a transport failure retries
         // next tick instead of silently dropping the comment (mirrors review-fix).
         markCommentFixSeen(slice, d.commentIds || []);
-        // Best-effort :eyes: ack on each dispatched comment — human-visible, and the
-        // fold-independent dedup half (it survives a cold start that wipes the
-        // seen-set). Fire them concurrently so a comment-heavy PR doesn't serialize
-        // the tick; a failed reaction never blocks the fix (the seen-set is
-        // authoritative).
+        ctx.emitTransition?.({
+          type: "slice.stage.changed", sliceId: d.sliceId, stage: "pr-in-fix",
+          handledFeedback: {
+            kind: "conversation", commentIds: d.commentIds || [], dispatchKey: d.key,
+            ...(d.pr?.head_sha ? { headSha: String(d.pr.head_sha) } : {}),
+          },
+        });
+        // Acknowledge dispatch visibly on GitHub. Reactions run concurrently
+        // and a failed reaction leaves the folded IDs available for dedup.
         const reactToComment = deps.reactToComment;
         if (reactToComment) {
           await Promise.all(
@@ -984,7 +982,6 @@ export async function apply(decisions: BabysitDecision[], ctx: HandlerContext, s
         // parked-and-did-nothing steward (head unchanged) from one that pushed a fix.
         slice.comment_fix_head_sha = d.pr?.head_sha ?? null;
         mark(slice, "comment-fix", d.key, "processor sent conversation-comment /smithy.fix", ts);
-        ctx.emitTransition?.({ type: "slice.stage.changed", sliceId: d.sliceId, stage: "pr-in-fix" });
         res.actions.push({ action: "comment-fix", sliceId: d.sliceId, sessionId: d.sessionId, pr: d.pr, detail: d.detail });
         res.mutated = true;
         break;

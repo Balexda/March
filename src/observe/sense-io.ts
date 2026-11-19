@@ -1,3 +1,4 @@
+import { hasMarchReplyMarker } from "./march-bot.js";
 import { createGitHubRead, type GitHubReadClient } from "./github-read.js";
 import { TesseraClientError } from "../tessera/client.js";
 import { summarizeCodeRabbit, type CodeRabbitStanding } from "./coderabbit-review.js";
@@ -350,7 +351,8 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
   async function queryReviewThreads(
     owner: string | null,
     prNumberValue: any,
-    sliceId?: string,
+    sliceId: string | undefined,
+    prAuthor: string,
   ): Promise<{
     threads: any[];
     reviews: any[];
@@ -375,7 +377,7 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
     if (!owner) return empty;
     const [repoOwnerName, repoName] = owner.split("/");
     if (!repoOwnerName || !repoName) return empty;
-    const out = await gh([
+    const args = [
       "api",
       "graphql",
       "-F",
@@ -421,7 +423,7 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
               body
               path
               line
-              author { login }
+              author { login __typename }
               createdAt
             }
           }
@@ -430,8 +432,19 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
     }
   }
 }`,
-    ], {}, owner, sliceId);
-    const parsed = JSON.parse(out);
+    ];
+    const { output, appLogin } = github
+      ? await github.ghWithIdentity(owner, args, sliceId)
+      : { output: await gh(args, {}, owner, sliceId), appLogin: undefined };
+    const normalizedAppLogin = appLogin?.toLowerCase();
+    const isApp = (author: { login?: string; __typename?: string } | undefined) => {
+      const login = author?.login?.toLowerCase();
+      if (!login || !normalizedAppLogin) return false;
+      // GraphQL can return the bare app slug for a Bot actor.
+      return login === normalizedAppLogin || (author?.__typename === "Bot" && `${login}[bot]` === normalizedAppLogin);
+    };
+    const isMarchReply = (comment: any) => isApp(comment.author) || hasMarchReplyMarker(comment.body);
+    const parsed = JSON.parse(output);
     const pr = parsed?.data?.repository?.pullRequest || {};
     const nodes = pr?.reviewThreads?.nodes || [];
     const threads = nodes
@@ -442,6 +455,7 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
           : [];
         const first = comments[0] || {};
         const last = comments[comments.length - 1] || first;
+        const lastIsMarch = isMarchReply(last);
         return {
           id: first.databaseId,
           path: first.path,
@@ -451,12 +465,10 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
           last_author: last.author?.login,
           last_comment_at: last.createdAt,
           comment_count: comments.length,
-          // Every comment's databaseId, so the legate can dedup /smithy.fix by
-          // comment id rather than last_comment_at (#224). A reply does carry a
-          // new, previously-unseen id; the dedup comes from the legate
-          // persisting the ids it has already dispatched for across ticks, so a
-          // thread's churning last_comment_at no longer re-arms the dispatch.
-          comment_ids: comments.map((comment: any) => comment.databaseId).filter((id: any) => id != null),
+          ...(lastIsMarch ? { last_comment_is_march: true } : {}),
+          needs_response: !lastIsMarch && (appLogin ? comments.length > 0 : last.author?.login !== prAuthor),
+          comment_ids: comments.filter((comment: any) => !isMarchReply(comment))
+            .map((comment: any) => comment.databaseId).filter((id: any) => id != null),
         };
       });
     // Conversation comments: PR-level (issue) comments NOT tied to a code line and
@@ -466,14 +478,12 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
     // pin us to the oldest comments and never surface a fresh request. `reacted_eyes`
     // reads `viewerHasReacted` for the EYES reaction from the legate token's
     // perspective: the legate posts :eyes: when it dispatches a comment-fix, so this
-    // is the human-visible, fold-independent half of the dedup (the persisted
-    // comment-id set is the authoritative half — the legate token shares the
-    // PR-author identity, so neither author nor reaction alone is decisive).
+    // is a human-visible acknowledgement alongside durable comment-id dedup.
     const commentNodes = Array.isArray(pr?.comments?.nodes) ? pr.comments.nodes : [];
     let codexReview: CodexReviewState | null = null;
     const reviewerNotices: ReviewerNotice[] = [];
     const comments = commentNodes.flatMap((c: any) => {
-      if (!c) return [];
+      if (!c || isMarchReply(c)) return [];
       const body = String(c.body || "");
       const classification = classifyReviewerComment({
         author: c.author?.login,
@@ -510,7 +520,7 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
     });
     return {
       threads,
-      reviews: pr?.reviews?.nodes || [],
+      reviews: (pr?.reviews?.nodes || []).filter((review: any) => !isApp(review?.author)),
       comments,
       reviewerNotices,
       codexReview,
@@ -531,12 +541,10 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
     if (request.skipped) return request;
     const summary = JSON.parse(await gh(request.args, request.options, request.owner, slice.id));
     if (github && discovery && summary.isCrossRepository !== false) return null;
-    const graphql = await queryReviewThreads(request.owner || (await repoOwner(state)), summary.number, slice.id);
-    const prAuthor = summary.author?.login || "";
-    const annotated = graphql.threads.map((thread: any) => ({
-      ...thread,
-      needs_response: thread.last_author !== prAuthor,
-    }));
+    const graphql = await queryReviewThreads(
+      request.owner || (await repoOwner(state)), summary.number, slice.id, summary.author?.login || "",
+    );
+    const annotated = graphql.threads;
     const reviewSummary = summarizeReviews(graphql.reviews);
     return {
       number: summary.number,

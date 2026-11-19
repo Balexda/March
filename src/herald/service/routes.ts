@@ -137,6 +137,17 @@ export function validateEvent(body: Record<string, unknown>): EventValidation {
   if (type === "slice.steward.attached" && (typeof body.sessionId !== "string" || body.sessionId.trim().length === 0)) {
     return { ok: false, error: `event "slice.steward.attached" requires a non-empty sessionId.` };
   }
+  if (type === "slice.stage.changed" && body.handledFeedback !== undefined) {
+    const feedback = body.handledFeedback as
+      { kind?: unknown; commentIds?: unknown; dispatchKey?: unknown; headSha?: unknown } | null;
+    const optionalString = (value: unknown) => value === undefined || typeof value === "string";
+    if (!feedback || (feedback.kind !== "inline" && feedback.kind !== "conversation")
+      || !Array.isArray(feedback.commentIds)
+      || !feedback.commentIds.every((id) => typeof id === "string" && id.trim().length > 0)
+      || !optionalString(feedback.dispatchKey) || !optionalString(feedback.headSha)) {
+      return { ok: false, error: "handledFeedback requires an inline or conversation kind, an array of comment IDs and optional string dispatchKey and headSha." };
+    }
+  }
   if (type === "session.changed") {
     const session = body.session as { id?: unknown } | undefined;
     if (!session || typeof session.id !== "string" || session.id.length === 0) {

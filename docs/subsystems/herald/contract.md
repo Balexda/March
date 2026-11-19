@@ -10,7 +10,17 @@ The profile checkout's local GitHub `origin` identifies the repository before
 Herald makes GitHub requests. Herald requests a repository-scoped Tessera
 `app/read` entitlement for repository metadata, PR details, review data and the
 open-PR cursor. Branch discovery matches same-repository heads regardless of who
-opened the PR.
+opened the PR. Herald uses the Tessera app login and the legacy `[march-bot]`
+reply prefix to distinguish March's replies from external feedback. It excludes
+March's conversation comments and reviews from feedback, and an inline thread
+whose latest reply is from March has no response due.
+
+A Legate `slice.stage.changed` event may include `handledFeedback` with a
+`kind` of `inline` or `conversation` and an array of string `commentIds`.
+An optional string `dispatchKey` names the fix dispatch that handled them, and
+an optional string `headSha` records the PR head it was sent against. The fold
+accumulates the IDs per slice and kind, and keeps the latest dispatch (kind,
+key, event time and head SHA), for Legate to restore on restart.
 
 `MARCH_HERALD_SYNC=1` enables default-branch synchronization before observation.
 Herald fetches and pulls over HTTPS with the same repository entitlement and
