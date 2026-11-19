@@ -227,7 +227,7 @@ Recommended implementation sequence:
 | US4 | Request a CodeRabbit Review Once per Head Commit | US1, US2, US3 | specs/2026-11-16-014-legate-per-verb-review-requests-and-merge-gates/04-request-a-coderabbit-review-once-per-head-commit.tasks.md |
 | US5 | Back Off When a Reviewer Is Rate-Limited | US4 | specs/2026-11-16-014-legate-per-verb-review-requests-and-merge-gates/05-back-off-when-a-reviewer-is-rate-limited.tasks.md |
 | US6 | Show Review State to the Operator | US2, US4, US5 | specs/2026-11-16-014-legate-per-verb-review-requests-and-merge-gates/06-show-review-state-to-the-operator.tasks.md |
-| US7 | Request Copilot Within a Hard Budget | US4, US5 | — |
+| US7 | Request Copilot Within a Hard Budget | US4, US5 | specs/2026-11-16-014-legate-per-verb-review-requests-and-merge-gates/07-request-copilot-within-a-hard-budget.tasks.md |
 
 ## Requirements *(mandatory)*
 <!-- audience: builder+ai-input; mode: reference; length: tables only; diagram: optional; examples: recommended -->
