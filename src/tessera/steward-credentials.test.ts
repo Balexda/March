@@ -40,7 +40,10 @@ function run(executable: string, args: string[], input = "", overrides?: NodeJS.
       if (signal) reject(new Error(`Subprocess exited on ${signal}`));
       else done({ code, stdout, stderr });
     });
-    child.stdin.on("error", reject);
+    // A subprocess may exit before reading stdin; its exit status is the result.
+    child.stdin.on("error", error => {
+      if ((error as NodeJS.ErrnoException).code !== "EPIPE") reject(error);
+    });
     child.stdin.end(input);
   });
 }
@@ -149,7 +152,8 @@ async function setOrigin(url: string) {
   expect((await run("git", ["remote", "add", "origin", url])).code).toBe(0);
 }
 
-describe("steward GitHub CLI shim", () => {
+// Each case spawns several Node subprocesses; allow for a loaded CI host.
+describe("steward GitHub CLI shim", { timeout: 30_000 }, () => {
   it("issues an app/write request for each call and preserves arguments, output and exit status", async () => {
     await listen();
     await setupRealExecutable();
@@ -206,9 +210,32 @@ describe("steward GitHub CLI shim", () => {
     });
     expect(requests).toEqual([]);
   });
+
+  it("terminates a stalled real executable and fails with a sanitized diagnostic", async () => {
+    await listen();
+    await setOrigin("https://github.com/acme/widgets.git");
+    await writeFile(join(bin, "gh"), "#!/usr/bin/env node\nsetInterval(() => {}, 1000);\n", { mode: 0o755 });
+    const started = Date.now();
+    expect(await runWrapper({ MARCH_TESSERA_GH_TIMEOUT_MS: "300" })).toEqual({
+      code: 1, stdout: "", stderr: "Tessera gh: real executable timed out.\n",
+    });
+    expect(Date.now() - started).toBeLessThan(10_000);
+    expect(requests).toHaveLength(1);
+    expect(await readdir(join(root, "scratch"))).toEqual([]);
+  });
+
+  it("rejects an invalid execution deadline before issuance", async () => {
+    await listen();
+    await setupRealExecutable();
+    await setOrigin("https://github.com/acme/widgets.git");
+    expect(await runWrapper({ MARCH_TESSERA_GH_TIMEOUT_MS: "soon" })).toEqual({
+      code: 1, stdout: "", stderr: "Tessera gh: invalid MARCH_TESSERA_GH_TIMEOUT_MS.\n",
+    });
+    expect(requests).toEqual([]);
+  });
 });
 
-describe("Tessera Git credential helper", () => {
+describe("Tessera Git credential helper", { timeout: 30_000 }, () => {
   it("returns app/write credentials for the actual HTTPS request and ignores approve/reject", async () => {
     await listen();
     await setOrigin("git@github.com:acme/widgets.git");

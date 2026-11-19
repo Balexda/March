@@ -7,6 +7,16 @@ import { debuglog } from "node:util";
 
 class ShimError extends Error {}
 
+// Unattended stewards must not hang on a stalled real executable.
+const DEFAULT_GH_TIMEOUT_MS = 600_000;
+
+function realGhTimeout() {
+  const raw = process.env.MARCH_TESSERA_GH_TIMEOUT_MS;
+  if (raw === undefined || raw === "") return DEFAULT_GH_TIMEOUT_MS;
+  if (!/^[1-9]\d{0,8}$/.test(raw)) throw new ShimError("invalid MARCH_TESSERA_GH_TIMEOUT_MS.");
+  return Number(raw);
+}
+
 function findRealGh() {
   const self = statSync(process.argv[1]);
   let foundWrapper = false;
@@ -47,6 +57,7 @@ function run() {
   if (process.env.MARCH_TESSERA_GH_WRAPPED === "1") throw new ShimError("recursive wrapper invocation.");
   // Node's child-process debugging prints the complete child environment.
   if (debuglog("child_process").enabled) throw new ShimError("child-process debugging must be disabled.");
+  const timeout = realGhTimeout();
   const realGh = findRealGh();
   const env = { ...process.env, MARCH_TESSERA_GH_WRAPPED: "1" };
   for (const key of ["GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN", "GH_DEBUG"]) {
@@ -71,10 +82,12 @@ function run() {
   try {
     delete env.MARCH_TESSERA_CLIENT_KEY;
     delete env.GH_REPO;
+    delete env.MARCH_TESSERA_GH_TIMEOUT_MS;
     const result = spawnSync(realGh, process.argv.slice(2), {
       env: { ...env, GH_TOKEN: token, GH_CONFIG_DIR: configDir, GH_HOST: "github.com", GH_PROMPT_DISABLED: "1" },
-      stdio: "inherit",
+      stdio: "inherit", timeout, killSignal: "SIGKILL",
     });
+    if (result.error?.code === "ETIMEDOUT") throw new ShimError("real executable timed out.");
     if (result.error) throw new ShimError("could not start the real executable.");
     return result;
   } finally {

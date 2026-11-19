@@ -19,7 +19,10 @@ resolves the worktree's GitHub `origin`, requests an app/write token, and runs
 the real executable with the original arguments, inherited standard streams
 and a private temporary configuration directory. It supplies the issued
 token as `GH_TOKEN`, clears inherited GitHub token variables, and fails
-closed with a sanitized diagnostic if setup or issuance fails. Git HTTPS
+closed with a sanitized diagnostic if setup or issuance fails. The real
+executable runs under a deadline (default 10 minutes, overridable with a
+positive integer `MARCH_TESSERA_GH_TIMEOUT_MS`); on expiry the shim kills it
+and exits nonzero with `Tessera gh: real executable timed out.` Git HTTPS
 credential requests use the [Tessera Git helper](../tessera/contract.md#cli-and-configuration).
 
 ### Role Boundary
