@@ -94,3 +94,43 @@ describe("createGitHubRead git transport", () => {
     expect(refreshes).toEqual([undefined]);
   });
 });
+
+describe("createGitHubRead gh 401 detection", () => {
+  it.each([
+    "gh: Bad credentials (HTTP 401)",
+    "HTTP 401: Bad credentials (https://api.github.com/graphql)",
+  ])("refreshes the credential once and retries on %s", async (stderr) => {
+    const refreshes: Array<boolean | undefined> = [];
+    const client = {
+      async issueGitHubToken(req: { refresh?: boolean }) {
+        refreshes.push(req.refresh);
+        return { token: req.refresh ? "fresh" : "stale", expiresAt: null, identity: "march[bot]", commitIdentity: null };
+      },
+    } as any;
+    const tokens: string[] = [];
+    const read = createGitHubRead(client, {}, async (_command, _args, options) => {
+      const token = (options.env as Record<string, string>).GH_TOKEN;
+      tokens.push(token);
+      if (token === "stale") throw Object.assign(new Error("gh failed"), { stderr });
+      return "{}";
+    });
+    await expect(read.gh("allowed/repo", ["pr", "view", "1"])).resolves.toBe("{}");
+    expect(refreshes).toEqual([undefined, true]);
+    expect(tokens).toEqual(["stale", "fresh"]);
+  });
+
+  it("does not refresh on a non-401 gh failure", async () => {
+    const refreshes: Array<boolean | undefined> = [];
+    const client = {
+      async issueGitHubToken(req: { refresh?: boolean }) {
+        refreshes.push(req.refresh);
+        return { token: "t", expiresAt: null, identity: "march[bot]", commitIdentity: null };
+      },
+    } as any;
+    const read = createGitHubRead(client, {}, async () => {
+      throw Object.assign(new Error("gh failed"), { stderr: "HTTP 404: Not Found (https://api.github.com/graphql)\nretry after 401 seconds" });
+    });
+    await expect(read.gh("allowed/repo", ["pr", "view", "1"])).rejects.toThrow("GitHub read failed");
+    expect(refreshes).toEqual([undefined]);
+  });
+});

@@ -23,6 +23,10 @@ const CA_BUNDLES = [
   "/etc/ssl/cert.pem",
 ];
 
+// gh reports a rejected credential either as `… (HTTP 401)` or, from its HTTP
+// error formatter, as a line starting `HTTP 401: …`.
+const GH_UNAUTHORIZED = [/\(HTTP 401\)/, /^(?:gh: )?HTTP 401: /m];
+
 // Git reports a rejected credential in several forms depending on whether it
 // re-enters its authentication path (helpers and prompts are disabled here).
 const GIT_UNAUTHORIZED = [
@@ -79,7 +83,7 @@ export function createGitHubRead(client: GitHubReadClient, parentEnv: NodeJS.Pro
       // Match status diagnostics, never a bare 401 in arbitrary output.
       const stderr = (err as { stderr?: string })?.stderr ?? "";
       const unauthorized = name === "gh"
-        ? /\(HTTP 401\)/.test(stderr)
+        ? GH_UNAUTHORIZED.some((pattern) => pattern.test(stderr))
         : GIT_UNAUTHORIZED.some((pattern) => pattern.test(stderr));
       throw new GitHubReadError(unauthorized ? 401 : undefined);
     }
