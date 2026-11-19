@@ -34,7 +34,7 @@
   _Acceptance criteria:_
   - A 429, a rate-limit notice, or a pause notice records its matching cause. A usable reset time takes precedence over the exponential delay. Consecutive hits without a reset time increase the delay up to the existing ceiling.
   - The same sensed notice cannot renew back-off or increment attempts on repeated ticks or after restart. An expired notice cannot re-arm back-off. Other post failures record `post_failed` and retain the request intent.
-  - Any eligible CodeRabbit post sees the account-wide deadline, including when a notice was already sensed for a different profile in the same tick. While cooling down, Legate neither records a new request intent nor posts a trigger. Failure to persist a back-off update prevents further posts to that reviewer in the tick.
+  - Any eligible CodeRabbit post sees the account-wide deadline, including when a notice was already sensed for a different profile in the same tick. While cooling down, Legate neither records a new request intent nor posts a trigger. If a back-off update fails to persist, Legate keeps the pending update and retries it on later ticks. It posts nothing to that reviewer until the update persists.
   - Deterministic coverage for SC-006 proves stated resets, exponential delay, suppression across profiles and restart, and the absence of fallback to Copilot. Copilot request implementation belongs to US7.
 
 - [ ] **Clear pacing after a fresh review**
