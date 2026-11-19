@@ -14,9 +14,9 @@ Each slice validates its normal entry point against fakes with no live GitHub tr
 
 **Goal**: Herald can observe and synchronize a profile using repository-scoped read access.
 
-**Justification**: Herald can cut over its reads and its optional sync together while preserving its existing observation and fold boundaries.
+**Justification**: Herald can cut over its reads and its optional sync together while preserving its existing observation and fold boundaries. PR discovery must stop depending on the caller's identity in the same cutover, or operator-authored PRs disappear once Herald reads as the app.
 
-**Addresses**: FR-029, FR-030, FR-042. AS 6.1, 6.4, 6.6.
+**Addresses**: FR-029, FR-030, FR-031 (discovery), FR-042. AS 6.1, 6.4, 6.5 (discovery), 6.6.
 
 ### Tasks
 
@@ -28,6 +28,7 @@ Each slice validates its normal entry point against fakes with no live GitHub tr
   - Repository metadata, PR and review reads, and fetch/pull in sync-enabled profiles use app/read for the target profile repository. Repository discovery works from local profile or remote metadata before any authenticated GitHub request.
   - Git network calls use scoped HTTPS authentication and cannot silently use mounted SSH keys or host credential helpers. Read-only profiles still skip sync.
   - Fake-based tests cover multiple profiles, child isolation, and typed traced issuance failure. A failing profile does not stop the observer or fabricate an empty observation.
+  - Branch-based PR discovery no longer filters on the caller's identity (today `--author @me`). Under the app token it finds both operator-authored and app-authored open PRs for the profile repository, so the cutover cannot strand legacy PRs.
 
 **PR Outcome**: Herald can read and sync a profile without ambient GitHub credentials.
 
@@ -132,9 +133,9 @@ Each slice validates its normal entry point against fakes with no live GitHub tr
 
 **Goal**: Herald and Legate track mixed-author PRs without treating March's replies as external feedback.
 
-**Justification**: The credential cutovers provide the app login and leave a single observation-to-consumption path for testing identity and dedup together.
+**Justification**: The credential cutovers provide the app login and leave a single observation-to-consumption path for testing identity and dedup together. Identity-independent PR discovery already lands in S1, so this slice covers classification and dedup.
 
-**Addresses**: FR-031, FR-042. AS 6.5.
+**Addresses**: FR-031 (classification and dedup), FR-042. AS 6.5.
 
 ### Tasks
 
@@ -152,18 +153,12 @@ Each slice validates its normal entry point against fakes with no live GitHub tr
 ## Specification Debt
 <!-- audience: reviewer; mode: reference; length: index table + 1-3 sentences per item; diagram: optional; examples: discouraged -->
 
-| ID | Description | Source Category | Impact | Confidence | Status | Resolution |
-|----|-------------|-----------------|--------|------------|--------|------------|
-| SD-001 | inherited from spec: Where should the app private key and PAT be stored? Option 1: a named docker volume mounted only into Tessera and filled by an npm-safe `march tessera secrets import`. Host stewards running as the operator can't read it, but it adds an import step. Option 2: a host directory outside `$HOME`, wired through compose `secrets:`. That is simpler, but any process running as the operator uid, including every steward pane, can read it. (Recommended: named volume.) | Non-Functional Quality | High | Medium | inherited | — |
-| SD-002 | inherited from spec: Where should the plaintext per-service client keys persist between `march up` runs? `~/.march` is mounted into every container, so following the castra-token precedent would let any container read every key. Options: (a) 0600 files under `~/.march`, following the castra precedent; (b) only hashes kept in Tessera's volume, with plaintext keys regenerated and re-injected on every `march up` so services restart onto fresh keys; (c) a separate host directory outside the shared HOME. (Recommended: b.) | Domain & Data Model | High | Medium | inherited | — |
-| SD-003 | inherited from spec: How should a steward pane receive its Tessera client key? Options: (a) a 0600 key file beside `~/.march/steward` that the wrapper and helper read; (b) a pane env var injected by Castra/agent-deck at launch, which would have to be exempt from the tmux-env scrub; (c) a key minted per steward session. Every option is reachable by other processes on the host; the policy caps the damage at app/write. | Interaction & UX | Medium | Low | inherited | — |
-| SD-004 | inherited from spec: Which identity should steward commits carry? Options: (a) the bot as author and committer, with the noreply email, so history fully reflects the bot; (b) the operator stays author and the bot is only the push/PR identity; (c) the bot as committer with a `Co-authored-by:` trailer for the operator. The brief's motivation, "history misrepresents authorship", points to (a) or (c), but the brief only says *PRs* are bot-authored. | Domain & Data Model | High | Medium | inherited | — |
-| SD-005 | inherited from spec: How should v1 handle steward pushes that touch `.github/workflows/*`? GitHub rejects those without `workflows:write`. Options: (a) leave it out of write, so such pushes fail closed and the steward escalates; (b) add an opt-in `write+workflows` access level that the policy grants per client or per repo; (c) include it in the default write profile. | Integration | Medium | Medium | inherited | — |
-| SD-006 | inherited from spec: SD-001 is open between a named volume filled by `march tessera secrets import` and a host directory outside `$HOME` wired through compose `secrets:`, but FR-020, User Story 3 scenario 4 and the CLI contract make the CLI import mandatory — option 1's mechanism — so the artifacts effectively commit to it. | plan-review:Internal contradiction | Important | Low | inherited | — |
-| SD-007 | inherited from spec: SD-002 is open, but User Story 3 scenario 3 and FR-019 ("each service receives its own client key and no other service's key") quietly exclude option (a) if "receives" means "can obtain", and the data model calls the client-keys file "operator-owned" although option (b) has `march up` write it. | plan-review:Internal contradiction | Important | Low | inherited | — |
-| SD-008 | inherited from spec: `march doctor` must check that each service's client key is accepted (FR-040, User Story 8 scenario 6), but the only authenticated route is `POST /v1/github/token`; checking a key would mean minting a real token or sending a deliberately invalid body, and doctor's access to every plaintext key depends on SD-002. | plan-review:Logical gap | Important | Low | inherited | — |
-| SD-009 | inherited from spec: The Copilot review request must happen exactly once per PR (FR-032, User Story 7 scenario 3, SC-008), but no idempotency mechanism is given: Legate's working state is rebuilt from the Herald fold, so after a restart it would request again unless a transition event in the fold or a check of GitHub's requested reviewers prevents it. | plan-review:Logical gap | Important | Low | inherited | — |
-| SD-010 | Should the app/write profile gain `actions:write` to preserve the conductor's `rerun-ci.sh` capability, or should the conductor surface reruns for manual execution to keep the existing write scope? | Integration | High | Low | open | — |
+| ID | Title | Source Category | Impact | Confidence | Origin |
+|----|-------|-----------------|--------|------------|--------|
+| SD-002 | Service client key distribution | Domain & Data Model | High | Medium | spec:SD-002 |
+| SD-010 | Conductor Actions rerun permission | Integration | High | Low | local |
+
+SD-002 applies to every slice: each migrated service consumes its own Tessera client key. The other open spec debt (SD-001, SD-003–SD-008) belongs to US3, US5, US7 and US8, and SD-009 is resolved upstream. SD-010 is numbered after the spec's SD-001–SD-009 to avoid an ID collision.
 
 ### SD-010 — Conductor Actions rerun permission
 
