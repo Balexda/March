@@ -29,6 +29,7 @@ Each slice validates its normal entry point against fakes with no live GitHub tr
   - Git network calls use scoped HTTPS authentication and cannot silently use mounted SSH keys or host credential helpers. Read-only profiles still skip sync.
   - Fake-based tests cover multiple profiles, child isolation, and typed traced issuance failure. A failing profile does not stop the observer or fabricate an empty observation.
   - Branch-based PR discovery no longer filters on the caller's identity (today `--author @me`). Under the app token it finds both operator-authored and app-authored open PRs for the profile repository, so the cutover cannot strand legacy PRs.
+  - Before the author filter is removed, a branch-name match must have its head in the profile repository. The listing requests head-repository identity (for example `isCrossRepository` or `headRepositoryOwner`) and the match rejects cross-repository PRs. A fork PR whose head branch shares a slice branch's name never becomes that slice's PR, and a fake-based test covers that case.
 
 **PR Outcome**: Herald can read and sync a profile without ambient GitHub credentials.
 
