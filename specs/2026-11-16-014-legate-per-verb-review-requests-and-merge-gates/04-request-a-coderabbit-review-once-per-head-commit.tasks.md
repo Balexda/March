@@ -32,8 +32,8 @@
   Evolve the existing `src/legate/loop/handlers/coderabbit-rereview.ts` coordinator path for AS 4.1–4.8. Use US1 reviewer configuration, US2 verdicts and gate predicates, and US3 classified notices.
 
   _Acceptance criteria:_
-  - Only tracked, open, non-draft, CI-green, conflict-free forge PRs with resolved threads and a CodeRabbit opt-in can trigger. Auto mode only observes. The old request path cannot bypass these conditions.
-  - A current-head review, a fresh in-progress notice for that head, or a recent intent suppresses a request. Unanswered attempts become eligible after the wait and any active back-off expire.
+  - Only tracked, open, non-draft, CI-green forge PRs with a CodeRabbit opt-in can trigger an initial request (FR-017, AS 4.1). New-head re-requests also require resolved threads and no conflicts (AS 4.7). Auto mode only observes. The old request path cannot bypass these conditions.
+  - A completed current-head review suppresses a request. That means an APPROVED or CHANGES_REQUESTED verdict submitted on the head. A fresh in-progress notice for that head or a recent intent also suppresses one. A COMMENTED review on the head, such as a thread reply, does not suppress a request, and it does not hide a stale verdict on an older commit. Unanswered attempts become eligible after the wait and any active back-off expire.
   - New-head decisions cover all three FR-020 reasons, including a superseded unanswered request. A stale approval qualifies only when approval is the sole unmet gate. A qualifying stale changes-requested verdict continues to block merge until replaced.
 
 - [ ] **Record intent before posting the review trigger**
