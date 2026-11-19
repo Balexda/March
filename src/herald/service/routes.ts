@@ -11,8 +11,12 @@ import {
   stewardReportClassification,
 } from "../../observability/herald-metrics.js";
 import { createCastraClientFromEnv } from "../../castra/client.js";
+import { selfBotLogin } from "../profiles/merge-policy.js";
+import { reviewWaitMs } from "../profiles/review-config.js";
+import type { ProfileStore } from "../profiles/store.js";
+import { projectReviewStates } from "./state-projection.js";
 import type { EventStore } from "./store.js";
-import { REVIEW_BACKOFF_CAUSES, REVIEW_REQUEST_REASONS, type AppendEventInput, type EventType } from "../events.js";
+import { emptySystemState, REVIEW_BACKOFF_CAUSES, REVIEW_REQUEST_REASONS, type AppendEventInput, type EventType } from "../events.js";
 
 /** Snapshot of the server's last observe tick, surfaced on `/status`. */
 export interface ObserveStatus {
@@ -24,6 +28,7 @@ export interface ObserveStatus {
 
 export interface RoutesOptions {
   readonly store: EventStore;
+  readonly profileStore?: ProfileStore;
   /** Returns the latest observe-status snapshot (server-owned, in-memory). */
   readonly getObserveStatus?: () => ObserveStatus;
   /**
@@ -222,6 +227,8 @@ export async function registerRoutes(
 ): Promise<void> {
   const { store } = opts;
   const env = opts.env ?? process.env;
+  const waitMs = reviewWaitMs(env, (message) => app.log.warn(message));
+  const selfLogin = selfBotLogin(env);
   const getObserveStatus =
     opts.getObserveStatus ??
     (() => ({ lastObserveAtMs: null, lastObserveDurationMs: null }));
@@ -435,13 +442,18 @@ export async function registerRoutes(
     const all = query.all === "1" || query.all === "true";
     const profile =
       typeof query.profile === "string" && query.profile.length > 0 ? query.profile : undefined;
+    const fold = at !== undefined ? store.multiStateAt(at) : store.multiProjection();
+    const now = at !== undefined ? new Date(fold.ts) : new Date();
+    const project = (name: string) => projectReviewStates(
+      Object.hasOwn(fold.byProfile, name) ? fold.byProfile[name] : emptySystemState(), fold.reviewBackoffs,
+      opts.profileStore?.get(name, { includeRemoved: true })?.mergePolicy,
+      selfLogin, waitMs, now,
+    );
     if (all) {
-      return at !== undefined ? store.multiStateAt(at) : store.multiProjection();
+      for (const name of Object.keys(fold.byProfile)) project(name);
+      return fold;
     }
-    if (profile) {
-      return at !== undefined ? store.stateAtFor(profile, at) : store.projectionFor(profile);
-    }
-    return at !== undefined ? store.stateAt(at) : store.projection();
+    return project(profile ?? store.defaultProfile);
   });
 
   // The events that moved state from `from` to `to` (default `to` = latest).

@@ -1,6 +1,7 @@
 import { dispatchBranch, dispatchItemKey, dispatchSliceId, sliceActionKey } from "./dispatch-id.js";
 import { isMarchBotComment } from "../../../observe/march-bot.js";
-import { approvalSatisfied, changesRequestedSatisfied, KNOWN_TASK_TYPES, resolveMergeRequirements, type MergePolicy } from "../../../herald/profiles/merge-policy.js";
+import { taskTypeForSlice } from "../../../herald/profiles/slice-verb.js";
+import { approvalSatisfied, changesRequestedSatisfied, resolveMergeRequirements, type MergePolicy } from "../../../herald/profiles/merge-policy.js";
 import { readRecoveryRate, stepRecoveryRate } from "./self-heal.js";
 import {
   clearBackoff,
@@ -9,6 +10,8 @@ import {
   whenDue,
   type RetryDomain,
 } from "./self-heal-pacer.js";
+
+export { taskTypeForSlice };
 
 /**
  * Pure slice/archive reasoning: terminal detection and the dedup/recovery
@@ -503,24 +506,6 @@ export function isReadyToMerge(slice: any): boolean {
   if (slice.pr?.mergeable === "CONFLICTING") return false;
   const owed = slice.needs_response_count ?? slice.pr?.needs_response_count;
   return owed === 0;
-}
-
-/**
- * The smithy verb that keys a slice's per-task-type merge policy (e.g. "cut").
- * Tries, in order: the dispatch-time `command`; the fold-durable branch
- * (`smithy/<verb>/…`); the sliceId suffix (`…-<verb>`). Undefined for
- * non-smithy / unrecognized shapes → {@link resolveMergeRequirements} falls back
- * to all-required. Shared by babysit's auto-merge gate AND the merge-readiness
- * split below so the gauge and the gate agree on the task type 1:1.
- */
-export function taskTypeForSlice(sliceId: string, slice: any): string | undefined {
-  const fromCommand = String(slice?.command || "").match(/^smithy\.([a-z0-9_-]+)/i);
-  if (fromCommand) return fromCommand[1].toLowerCase();
-  const branch = String(slice?.actual_branch || slice?.branch || "");
-  const fromBranch = branch.match(/(?:^|\/)smithy\/([a-z0-9_-]+)\//i);
-  if (fromBranch) return fromBranch[1].toLowerCase();
-  const id = sliceId.toLowerCase();
-  return KNOWN_TASK_TYPES.find((verb) => id.endsWith(`-${verb}`));
 }
 
 /**

@@ -2426,6 +2426,14 @@ herald
             `sessions=${Object.keys(state.sessions).length} ` +
             `smithy=${state.smithy.dispatchable}/${state.smithy.blocked}/${state.smithy.total} (dispatchable/blocked/total)`,
         );
+        const tracked = Object.values(state.slices).filter((slice) => slice.reviewState !== undefined);
+        if (tracked.length > 0) {
+          console.log("SLICE\tPR\tREVIEW STATE");
+          for (const slice of tracked) {
+            const pr = slice.pr as { number: number };
+            console.log(`${slice.sliceId}\t#${pr.number}\t${slice.reviewState}`);
+          }
+        }
       }
       process.exitCode = SUCCESS;
     } catch (err) {

@@ -112,6 +112,11 @@ const REVIEWERS: readonly ReviewerAdapter[] = [
   },
 ];
 
+/** The reviewer adapter for a verified bot’s normalized login. */
+export function reviewerIdForBot(login: string): string | undefined {
+  return REVIEWERS.find(({ logins }) => logins.includes(login))?.id;
+}
+
 type Classification =
   | { kind: "feedback" | "trigger" }
   | { kind: NoticeKind; reviewer?: string; resetAt?: string };

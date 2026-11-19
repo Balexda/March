@@ -126,3 +126,25 @@ throttle to record a fresh review that arrived too late to clear it), and the la
 intent per reviewer in `latestReviewRequests`. A later throttle record does not
 clear the reset boundary. Legate ignores notices created at or before it. A log without back-off events
 has no active reviewer back-off.
+
+## Review state projection
+
+`GET /state` adds `slices[<sliceId>].reviewState` for every slice with a
+tracked PR, including the per-profile and `?all=1` views. The field is derived
+from the slice verb and its owning profile's registered merge policy, the
+observed PR, the profile's request history, and the account-wide reviewer
+back-off. It is a read projection field and is never recorded in an event or
+stored in a PR snapshot.
+
+In precedence order, the values are `changes_requested`, `approved_by_bot`,
+`rate_limited`, `in_progress`, `requested`, and `none`. A PR without a head
+SHA reports `none`. `MARCH_REVIEW_WAIT_MINUTES` sets the request and progress
+window and defaults to 30 minutes. The latest projection uses the current
+clock. A projection at `?at=<seq>` uses only the event history through that
+sequence and evaluates deadlines at the resulting fold's timestamp, using
+the currently registered policy.
+
+`march herald state` keeps its summary line and adds a table with the slice,
+PR number, and review state for each tracked PR in the default profile.
+`--json` returns the projection with the `reviewState` field, and `--at`
+selects a historical projection in either format.
