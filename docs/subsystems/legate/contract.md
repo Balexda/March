@@ -44,6 +44,14 @@ when a slice ID is available. Other profiles and subsequent ticks continue.
 CI reruns use `app/write`. If that entitlement lacks Actions permission,
 the conductor reports a failed rerun for the operator to perform.
 
+The `march-legate` container receives `MARCH_TESSERA_URL` (default
+`http://tessera:9477`) and `MARCH_TESSERA_CLIENT_KEY`. Until the Legate client
+key is distributed, the compose file enables `MARCH_TESSERA_GH_TOKEN_FALLBACK=1`
+by default, so a failed issuance falls back to the forwarded
+`GH_TOKEN`/`GITHUB_TOKEN` and records a Tessera client fallback. The mounted
+`gh` login is never read. Operators set the fallback to `0` once Tessera issues
+Legate entitlements.
+
 Legate's public outputs are:
 
 - Hatchery dispatch request metadata: prompt, backend, repository path, agent-deck profile, manager group, title, branch, deployment profile, task type, task name, optional toolchain, and slice id correlation.

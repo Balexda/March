@@ -67,7 +67,15 @@ services:
       - MARCH_HATCHERY_URL=${MARCH_HATCHERY_URL:-http://hatchery:8080}
       - CASTRA_URL=${CASTRA_URL:-http://castra:${CASTRA_PORT:-9264}}
       - CASTRA_API_TOKEN=${CASTRA_API_TOKEN:?CASTRA_API_TOKEN must match the castra service token}
-      # GitHub auth for gh/git (read PR/branch state, push). Forwarded if set.
+      # GitHub forge actions run with Tessera-issued app entitlements.
+      - MARCH_TESSERA_URL=${MARCH_TESSERA_URL:-http://tessera:${MARCH_TESSERA_PORT:-9477}}
+      - MARCH_TESSERA_CLIENT_KEY=${MARCH_TESSERA_CLIENT_KEY:-}
+      # Explicit migration fallback (on by default until the Legate client key
+      # is distributed, SD-002): when issuance fails, use the forwarded
+      # GH_TOKEN/GITHUB_TOKEN below, logged + counted as a fallback. Forward a
+      # token (e.g. GH_TOKEN=$(gh auth token)) — the scoped gh child never reads
+      # the mounted ~/.config/gh login. Set to 0 once Tessera issues for Legate.
+      - MARCH_TESSERA_GH_TOKEN_FALLBACK=${MARCH_TESSERA_GH_TOKEN_FALLBACK:-1}
       - GH_TOKEN=${GH_TOKEN:-}
       - GITHUB_TOKEN=${GITHUB_TOKEN:-}
     volumes:
