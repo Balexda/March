@@ -117,13 +117,16 @@ export async function classifyBranchSafety(
     if (open.length) {
       return { kind: "unsafe", reason: "open-pr", detail: open.map((pr) => "#" + pr.number).join(",") };
     }
-    if (!defaultBranch) {
-      const metadata = await readHatcheryGitHubJson(repo, "", sliceId) as { default_branch?: unknown } | null;
-      if (typeof metadata?.default_branch !== "string" || !metadata.default_branch) {
-        throw new HatcheryGitHubError("invalid_repo_lookup");
-      }
-      defaultBranch = metadata.default_branch;
+  }
+
+  // Resolve a missing origin/HEAD independently of whether the collision branch
+  // was pushed: an unpushed orphan still needs the default branch for ancestry.
+  if (!defaultBranch && origin?.repo) {
+    const metadata = await readHatcheryGitHubJson(origin.repo, "", sliceId) as { default_branch?: unknown } | null;
+    if (typeof metadata?.default_branch !== "string" || !metadata.default_branch) {
+      throw new HatcheryGitHubError("invalid_repo_lookup");
     }
+    defaultBranch = metadata.default_branch;
   }
 
   if (!defaultBranch && !origin) defaultBranch = "main";

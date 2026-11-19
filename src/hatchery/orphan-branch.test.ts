@@ -93,6 +93,23 @@ describe("forge-dependent collision checks", () => {
     expect(forge.readHatcheryGitHubJson).toHaveBeenLastCalledWith("team/repo", "", undefined);
   });
 
+  it("resolves missing default-branch metadata for an unpushed collision branch", async () => {
+    mockRemote(2);
+    vi.mocked(forge.readHatcheryGitHubJson).mockResolvedValueOnce({ default_branch: "main" });
+    const { run, calls } = fakeRunner({});
+    expect(await classifyBranchSafety("/repo", BRANCH, run, "slice-3")).toEqual({ kind: "safe", reason: "orphan-ref" });
+    expect(calls).toContain(mergeBase);
+    expect(forge.readHatcheryGitHubJson).toHaveBeenCalledTimes(1);
+    expect(forge.readHatcheryGitHubJson).toHaveBeenCalledWith("team/repo", "", "slice-3");
+  });
+
+  it("fails closed when default-branch metadata is unavailable for an unpushed branch", async () => {
+    mockRemote(2);
+    vi.mocked(forge.readHatcheryGitHubJson).mockResolvedValueOnce(null);
+    const { run } = fakeRunner({});
+    await expect(classifyBranchSafety("/repo", BRANCH, run)).rejects.toMatchObject({ code: "invalid_repo_lookup" });
+  });
+
   it("queries GitHub for the exact repository and head with a Tessera read token", async () => {
     vi.mocked(forge.resolveHatcheryOrigin).mockResolvedValue(origin);
     vi.mocked(forge.runHatcheryNetworkGit).mockResolvedValue(0);
