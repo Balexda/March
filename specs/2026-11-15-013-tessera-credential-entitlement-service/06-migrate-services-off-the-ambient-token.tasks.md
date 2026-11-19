@@ -66,7 +66,7 @@ Each slice validates its normal entry point against fakes with no live GitHub tr
 
 ### Tasks
 
-- [ ] **Authenticate Hatchery's worktree GitHub calls**
+- [x] **Authenticate Hatchery's worktree GitHub calls**
 
   Obtain app/read for the steward worktree's GitHub repository in `src/hatchery/spawn-handoff.ts` before the pre-pin fetch. Scope the optional GitHub queries in `src/hatchery/orphan-branch.ts` to app/read and keep credentials on the Hatchery side of the handoff.
 

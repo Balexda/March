@@ -5,7 +5,7 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   classifyBranchSafety,
   describeVerdict,
@@ -15,10 +15,22 @@ import {
   type CommandRunner,
 } from "./orphan-branch.js";
 
+import * as forge from "./github-read.js";
+
+vi.mock("./github-read.js", { spy: true });
+
+afterEach(() => {
+  vi.unstubAllEnvs();
+  vi.unstubAllGlobals();
+  vi.mocked(forge.resolveHatcheryOrigin).mockReset();
+  vi.mocked(forge.runHatcheryNetworkGit).mockReset();
+  vi.mocked(forge.readHatcheryGitHubJson).mockReset();
+});
+
 // Issue #243: the Hatchery self-heal must apply the SAME refuse/allow contract as
 // the legate.unwedge validator. These tests pin the verdict ladder by faking the
-// git/gh command surface so the classification logic is exercised without a real
-// repo or `gh`.
+// local git and forge boundaries so classification is exercised without a real
+// GitHub request.
 
 const BRANCH = "feature/smithy/mark/march-orchestration-platform-m1-f6";
 
@@ -42,170 +54,92 @@ function fakeRunner(
 
 const showRef = `git show-ref --verify --quiet refs/heads/${BRANCH}`;
 const symbolicRef = "git symbolic-ref --short refs/remotes/origin/HEAD";
-const mergeBase = `git merge-base --is-ancestor ${BRANCH} main`;
-const lsRemote = `git ls-remote --exit-code origin refs/heads/${BRANCH}`;
-const prList = `gh pr list --head ${BRANCH} --state all --json number,state`;
+const mergeBase = `git merge-base --is-ancestor refs/heads/${BRANCH} refs/heads/main`;
+const origin = { url: "https://github.com/team/repo.git", repo: "team/repo" };
 
-// The forge-dependent (`gh`) ladder only runs for branches that ARE on a remote
-// (#249), so these tests mark the branch on-remote explicitly via `lsRemote`.
-describe("classifyBranchSafety (on-remote, forge-dependent path)", () => {
-  it("returns absent when the branch does not exist", () => {
+function mockRemote(status: number, prs: unknown = []) {
+  vi.mocked(forge.resolveHatcheryOrigin).mockResolvedValue(origin);
+  vi.mocked(forge.runHatcheryNetworkGit).mockResolvedValue(status);
+  vi.mocked(forge.readHatcheryGitHubJson).mockResolvedValue(prs);
+}
+
+describe("forge-dependent collision checks", () => {
+  it("skips remote operations for absent branches", async () => {
     const { run } = fakeRunner({ [showRef]: { code: 1 } });
-    expect(classifyBranchSafety("/repo", BRANCH, run)).toEqual({ kind: "absent" });
+    expect(await classifyBranchSafety("/repo", BRANCH, run)).toEqual({ kind: "absent" });
+    expect(forge.resolveHatcheryOrigin).not.toHaveBeenCalled();
   });
 
-  it("classifies an ancestor-of-default branch with no PRs as safe:orphan-ref", () => {
-    const { run } = fakeRunner({
-      [showRef]: { code: 0 },
-      [symbolicRef]: { stdout: "origin/main\n" },
-      [mergeBase]: { code: 0 },
-      [lsRemote]: { code: 0 },
-      [prList]: { code: 0, stdout: "[]" },
-    });
-    expect(classifyBranchSafety("/repo", BRANCH, run)).toEqual({
-      kind: "safe",
-      reason: "orphan-ref",
-    });
+  it.each([
+    [0, [], { kind: "safe", reason: "orphan-ref" }],
+    [1, [], { kind: "unsafe", reason: "diverged" }],
+    [0, [{ number: 7, state: "open", merged_at: null }], { kind: "unsafe", reason: "open-pr", detail: "#7" }],
+    [1, [{ number: 42, state: "closed", merged_at: "2026-11-19" }], { kind: "safe", reason: "post-merge-stale", detail: "#42" }],
+  ] as const)("classifies existing branches with ancestry %i and PRs %j", async (ancestor, prs, verdict) => {
+    mockRemote(0, prs);
+    const { run } = fakeRunner({ [symbolicRef]: { stdout: "origin/main" }, [mergeBase]: { code: ancestor } });
+    expect(await classifyBranchSafety("/repo", BRANCH, run, "slice-3")).toEqual(verdict);
+    expect(forge.readHatcheryGitHubJson).toHaveBeenCalledWith(
+      "team/repo", "/pulls?state=all&per_page=100&head=" + encodeURIComponent("team:" + BRANCH), "slice-3",
+    );
   });
 
-  it("classifies a diverged branch whose PR merged as safe:post-merge-stale", () => {
-    const { run } = fakeRunner({
-      [showRef]: { code: 0 },
-      [symbolicRef]: { stdout: "origin/main\n" },
-      [mergeBase]: { code: 1 }, // not an ancestor — has unique commits
-      [lsRemote]: { code: 0 },
-      [prList]: { code: 0, stdout: JSON.stringify([{ number: 42, state: "MERGED" }]) },
-    });
-    expect(classifyBranchSafety("/repo", BRANCH, run)).toEqual({
-      kind: "safe",
-      reason: "post-merge-stale",
-      detail: "#42",
-    });
+  it("resolves missing default-branch metadata through the same scoped lookup", async () => {
+    mockRemote(0);
+    vi.mocked(forge.readHatcheryGitHubJson).mockResolvedValueOnce([]).mockResolvedValueOnce({ default_branch: "main" });
+    const { run, calls } = fakeRunner({});
+    expect(await classifyBranchSafety("/repo", BRANCH, run)).toEqual({ kind: "safe", reason: "orphan-ref" });
+    expect(calls).toContain(mergeBase);
+    expect(forge.readHatcheryGitHubJson).toHaveBeenLastCalledWith("team/repo", "", undefined);
   });
 
-  it("refuses a branch with an open PR (#173 adopt path, not delete)", () => {
-    const { run } = fakeRunner({
-      [showRef]: { code: 0 },
-      [symbolicRef]: { stdout: "origin/main\n" },
-      [mergeBase]: { code: 0 }, // even an ancestor must not be deleted with an open PR
-      [lsRemote]: { code: 0 },
-      [prList]: { code: 0, stdout: JSON.stringify([{ number: 7, state: "OPEN" }]) },
+  it("queries GitHub for the exact repository and head with a Tessera read token", async () => {
+    vi.mocked(forge.resolveHatcheryOrigin).mockResolvedValue(origin);
+    vi.mocked(forge.runHatcheryNetworkGit).mockResolvedValue(0);
+    vi.stubEnv("MARCH_TESSERA_URL", "http://collision-test-tessera");
+    vi.stubEnv("MARCH_TESSERA_CLIENT_KEY", "collision-test-key");
+    vi.stubEnv("MARCH_TESSERA_GH_TOKEN_FALLBACK", "");
+    vi.stubEnv("GH_TOKEN", "");
+    vi.stubEnv("GITHUB_TOKEN", "");
+    const request = vi.fn(async (url: string, init: RequestInit) => {
+      if (url === "http://collision-test-tessera/v1/github/token") {
+        expect(JSON.parse(String(init.body))).toEqual({ repo: "team/repo", identity: "app", access: "read" });
+        return Response.json({
+          token: "from-tessera", identity: "app[bot]", repo: "team/repo",
+          access: "read", expires_at: "2099-01-01T00:00:00Z",
+          commit_identity: { name: "bot", email: "bot@example.com" },
+        });
+      }
+      expect(url).toBe("https://api.github.com/repos/team/repo/pulls?state=all&per_page=100&head=" +
+        encodeURIComponent("team:" + BRANCH));
+      expect(init.headers).toMatchObject({ authorization: "Bearer from-tessera" });
+      return Response.json([{ number: 12, state: "open", merged_at: null }]);
     });
-    expect(classifyBranchSafety("/repo", BRANCH, run)).toEqual({
-      kind: "unsafe",
-      reason: "open-pr",
-      detail: "#7",
+    vi.stubGlobal("fetch", request);
+    const { run } = fakeRunner({ [symbolicRef]: { stdout: "origin/main" } });
+    await expect(classifyBranchSafety("/repo", BRANCH, run, "collision-slice")).resolves.toEqual({
+      kind: "unsafe", reason: "open-pr", detail: "#12",
     });
+    expect(request).toHaveBeenCalledTimes(2);
   });
 
-  it("refuses diverged unmerged work as unsafe:diverged", () => {
-    const { run } = fakeRunner({
-      [showRef]: { code: 0 },
-      [symbolicRef]: { stdout: "origin/main\n" },
-      [mergeBase]: { code: 1 },
-      [lsRemote]: { code: 0 },
-      [prList]: { code: 0, stdout: "[]" },
-    });
-    expect(classifyBranchSafety("/repo", BRANCH, run)).toEqual({
-      kind: "unsafe",
-      reason: "diverged",
-    });
+  it("fails closed if origin is unreachable", async () => {
+    mockRemote(128);
+    const { run } = fakeRunner({ [symbolicRef]: { stdout: "origin/main" } });
+    await expect(classifyBranchSafety("/repo", BRANCH, run)).rejects.toMatchObject({ code: "remote_check_failed" });
+    expect(forge.readHatcheryGitHubJson).not.toHaveBeenCalled();
   });
 
-  it("refuses when the PR list could not be retrieved (gh failed)", () => {
-    const { run } = fakeRunner({
-      [showRef]: { code: 0 },
-      [symbolicRef]: { stdout: "origin/main\n" },
-      [mergeBase]: { code: 0 },
-      [lsRemote]: { code: 0 },
-      [prList]: { code: 1, stdout: "" },
-    });
-    expect(classifyBranchSafety("/repo", BRANCH, run)).toEqual({
-      kind: "unsafe",
-      reason: "pr-lookup-unknown",
-    });
-  });
-
-  it("refuses when the PR list is unparseable JSON", () => {
-    const { run } = fakeRunner({
-      [showRef]: { code: 0 },
-      [symbolicRef]: { stdout: "origin/main\n" },
-      [mergeBase]: { code: 0 },
-      [lsRemote]: { code: 0 },
-      [prList]: { code: 0, stdout: "not json" },
-    });
-    expect(classifyBranchSafety("/repo", BRANCH, run)).toEqual({
-      kind: "unsafe",
-      reason: "pr-lookup-unknown",
-    });
-  });
-
-  it("falls back to gh for the default branch when origin/HEAD is unset", () => {
-    const ghDefault = "gh repo view --json defaultBranchRef -q .defaultBranchRef.name";
-    const { run, calls } = fakeRunner({
-      [showRef]: { code: 0 },
-      [symbolicRef]: { code: 1, stdout: "" },
-      [ghDefault]: { stdout: "main\n" },
-      [mergeBase]: { code: 0 },
-      [lsRemote]: { code: 0 },
-      [prList]: { code: 0, stdout: "[]" },
-    });
-    expect(classifyBranchSafety("/repo", BRANCH, run)).toEqual({
-      kind: "safe",
-      reason: "orphan-ref",
-    });
-    expect(calls).toContain(ghDefault);
+  it("fails closed on malformed PR data or a failed lookup", async () => {
+    mockRemote(0, [null]);
+    const { run } = fakeRunner({ [symbolicRef]: { stdout: "origin/main" } });
+    await expect(classifyBranchSafety("/repo", BRANCH, run)).rejects.toMatchObject({ code: "invalid_pr_lookup" });
+    const failure = new forge.HatcheryGitHubError("lookup_failed");
+    vi.mocked(forge.readHatcheryGitHubJson).mockRejectedValueOnce(failure);
+    await expect(classifyBranchSafety("/repo", BRANCH, run)).rejects.toBe(failure);
   });
 });
 
-// #249: the no-remote fast-path. A branch on no remote cannot have a PR, so the
-// verdict comes from local git alone — `gh` is NEVER consulted (it isn't even
-// installed in the hatchery container). This is the path that makes the #243
-// self-heal actually work in production.
-describe("classifyBranchSafety no-remote fast-path (#249)", () => {
-  it("removes a safe local orphan (ancestor of default) without calling gh", () => {
-    const { run, calls } = fakeRunner({
-      [showRef]: { code: 0 },
-      [symbolicRef]: { stdout: "origin/main\n" },
-      [mergeBase]: { code: 0 },
-      [lsRemote]: { code: 2 }, // --exit-code: ref absent on origin
-    });
-    expect(classifyBranchSafety("/repo", BRANCH, run)).toEqual({
-      kind: "safe",
-      reason: "orphan-ref",
-    });
-    // No forge call — hatchery must work with no gh installed.
-    expect(calls.some((c) => c.startsWith("gh pr list"))).toBe(false);
-  });
-
-  it("escalates a genuinely diverged local-only branch as unsafe:diverged without gh", () => {
-    const { run, calls } = fakeRunner({
-      [showRef]: { code: 0 },
-      [symbolicRef]: { stdout: "origin/main\n" },
-      [mergeBase]: { code: 1 }, // has unique commits not on default
-      [lsRemote]: { code: 2 },
-    });
-    expect(classifyBranchSafety("/repo", BRANCH, run)).toEqual({
-      kind: "unsafe",
-      reason: "diverged",
-    });
-    expect(calls.some((c) => c.startsWith("gh pr list"))).toBe(false);
-  });
-
-  it("treats an unreachable origin (non-zero, non-2 exit) as no-remote", () => {
-    const { run, calls } = fakeRunner({
-      [showRef]: { code: 0 },
-      [symbolicRef]: { stdout: "origin/main\n" },
-      [mergeBase]: { code: 0 },
-      [lsRemote]: { code: 128 }, // e.g. network failure
-    });
-    expect(classifyBranchSafety("/repo", BRANCH, run)).toEqual({
-      kind: "safe",
-      reason: "orphan-ref",
-    });
-    expect(calls.some((c) => c.startsWith("gh pr list"))).toBe(false);
-  });
-});
 
 // End-to-end against REAL git (default runner, no injected commands) so the
 // "no gh in the container" condition #249 fixes is faithfully exercised: an
@@ -250,17 +184,17 @@ describe("classifyBranchSafety no-remote fast-path against real git (#249)", () 
     while (tmpDirs.length) fs.rmSync(tmpDirs.pop()!, { recursive: true, force: true });
   });
 
-  it("removes a safe local-only orphan branch (real ls-remote miss, no gh)", () => {
+  it("removes a safe local-only orphan branch (real ls-remote miss, no gh)", async () => {
     const work = makeRepoWithLocalOnlyBranches();
-    expect(classifyBranchSafety(work, "orphan")).toEqual({
+    expect(await classifyBranchSafety(work, "orphan")).toEqual({
       kind: "safe",
       reason: "orphan-ref",
     });
   });
 
-  it("escalates a diverged local-only branch as unsafe:diverged (real, no gh)", () => {
+  it("escalates a diverged local-only branch as unsafe:diverged (real, no gh)", async () => {
     const work = makeRepoWithLocalOnlyBranches();
-    expect(classifyBranchSafety(work, "diverged")).toEqual({
+    expect(await classifyBranchSafety(work, "diverged")).toEqual({
       kind: "unsafe",
       reason: "diverged",
     });
