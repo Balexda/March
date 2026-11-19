@@ -45,7 +45,7 @@ import { STATIO_TOKEN_ENV } from "../statio/config.js";
 import { StatioValidationError } from "../statio/types.js";
 import { initMarch, isMarchInstalled, InitError } from "../bootstrap/init.js";
 import { stackDown } from "../stack/down.js";
-import { stackUp } from "../stack/up.js";
+import { stackUp, stackUpFailed } from "../stack/up.js";
 import { stackUpgrade } from "../stack/upgrade.js";
 import { MARCH_SERVICES } from "../stack/services.js";
 import { runLogs, LOG_SERVICES } from "../logs/logs.js";
@@ -724,7 +724,10 @@ program
 
       if (result.tmuxAnchor) {
         const a = result.tmuxAnchor;
-        if (a.outcome === "failed") {
+        if (a.credentialScrubFailed) {
+          // Steward panes could inherit ambient GitHub tokens: fail the command.
+          process.stderr.write(`tmux anchor: failed (${a.detail})\n`);
+        } else if (a.outcome === "failed") {
           console.log(
             `tmux anchor: failed${a.detail ? ` (${a.detail})` : ""} — sessions may spawn inside the castra container`,
           );
@@ -733,14 +736,12 @@ program
         }
       }
 
-      let failed = false;
       for (const svc of result.services) {
         console.log(
           `${svc.service}: ${svc.outcome}${svc.detail ? ` (${svc.detail})` : ""}`,
         );
-        if (svc.outcome === "failed") failed = true;
       }
-      process.exitCode = failed ? ERROR : SUCCESS;
+      process.exitCode = stackUpFailed(result) ? ERROR : SUCCESS;
     } catch (err) {
       process.stderr.write((err instanceof Error ? err.message : String(err)) + "\n");
       process.exitCode = ERROR;

@@ -21,6 +21,8 @@ const hostLogin = "fake-host-login";
 const key = "fake-tessera-key";
 const ghArgs = ["pr", "create", "--title", "a title; with spaces", "--body", "line 1\nline 2"];
 const githubRequest = "protocol=https\nhost=github.com\npath=other/target.git\n\n";
+// The runner's own Git: the steward Git shim requires Git 2.31 or later.
+const hostGitDir = dirname(execFileSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).trim());
 
 let root: string;
 let cwd: string;
@@ -122,7 +124,7 @@ beforeEach(async () => {
   await symlink(cli, join(bin, "march"));
   await writeFile(join(bin, "askpass"), '#!/bin/sh\necho askpass-ran >&2\necho ambient\n', { mode: 0o755 });
   env = {
-    PATH: [shimBin, bin, dirname(process.execPath), "/usr/bin", "/bin", "/usr/local/bin"].join(":"),
+    PATH: [shimBin, bin, dirname(process.execPath), hostGitDir, "/usr/bin", "/bin", "/usr/local/bin"].join(":"),
     HOME: root,
     TMPDIR: scratch,
     GIT_CONFIG_NOSYSTEM: "1",
@@ -258,6 +260,56 @@ describe("steward Git shim", { timeout: 30_000 }, () => {
     const grep = await run(process.execPath, [gitShim, "-C", cwd, "grep", "-F", "https://github.com"]);
     expect(grep).toEqual({ code: 0, stdout: "README.md:see https://github.com/acme/widgets\n", stderr: "" });
     expect(requests).toEqual([]);
+  });
+
+  it("rewrites a mixed-case ssh remote to credential-free HTTPS", async () => {
+    await setOrigin("ssh://git@GitHub.com/acme/widgets.git");
+    const url = await run(process.execPath, [gitShim, "remote", "get-url", "--push", "origin"]);
+    expect(url).toEqual({ code: 0, stdout: "https://github.com/acme/widgets.git\n", stderr: "" });
+  });
+
+  it("reads the repository selected after other leading global options", async () => {
+    const other = join(root, "other-worktree");
+    await mkdir(other);
+    expect((await run("git", ["-C", other, "init", "-q"])).code).toBe(0);
+    expect((await run("git", ["-C", other, "remote", "add", "origin",
+      "https://host:embedded@github.com/acme/widgets.git"])).code).toBe(0);
+    const url = await run(process.execPath, [gitShim, "--no-pager", "-c", "core.quotePath=off",
+      "-C", other, "remote", "get-url", "--push", "origin"]);
+    expect(url).toEqual({ code: 0, stdout: "https://github.com/acme/widgets.git\n", stderr: "" });
+  });
+
+  it("keeps global hook settings and HOME files but not global credentials", async () => {
+    await setOrigin("git@github.com:acme/widgets.git");
+    await mkdir(join(root, "hooks"));
+    await writeFile(join(root, "hooks", "pre-commit"),
+      '#!/bin/sh\ncat "$HOME/marker" > hook-saw-home\n[ -e "$HOME/.netrc" ] && echo netrc-visible >> hook-saw-home\nexit 0\n',
+      { mode: 0o755 });
+    await writeFile(join(root, "marker"), "real-home\n");
+    await writeFile(join(root, ".netrc"), `machine github.com login host password ${ambient}\n`, { mode: 0o600 });
+    await writeFile(join(root, ".gitconfig"),
+      `[user]\nname = Operator\nemail = operator@example.test\n[core]\nhooksPath = ~/hooks\n` +
+      `[credential]\nhelper = "!echo host-helper-ran >&2; #"\n`);
+    const commit = await run(process.execPath, [gitShim, "commit", "-q", "--allow-empty", "-m", "work"]);
+    expect(commit.code, commit.stderr).toBe(0);
+    expect(await readFile(join(cwd, "hook-saw-home"), "utf8")).toBe("real-home\n");
+    const helper = await run(process.execPath, [gitShim, "config", "--get-all", "credential.helper"]);
+    expect(helper.stdout).not.toContain("host-helper-ran");
+  });
+
+  it("refuses to run on Git older than 2.31", async () => {
+    const legacy = join(root, "legacy-git");
+    await mkdir(legacy);
+    const calls = join(root, "legacy-calls");
+    await writeFile(join(legacy, "git"),
+      `#!/bin/sh\necho "$*" >> '${calls}'\n[ "$1" = --version ] && echo "git version 2.30.9"\nexit 0\n`,
+      { mode: 0o755 });
+    const result = await run(process.execPath, [gitShim, "push", "origin", "HEAD"], "",
+      { PATH: [legacy, dirname(process.execPath)].join(":") });
+    expect(result).toEqual({
+      code: 1, stdout: "", stderr: "Tessera Git: unable to run Git with isolated credentials.\n",
+    });
+    expect(await readFile(calls, "utf8")).toBe("--version\n");
   });
 });
 

@@ -108,6 +108,8 @@ export type TmuxAnchorOutcome = "present" | "created" | "failed";
 export interface TmuxAnchorResult {
   readonly outcome: TmuxAnchorOutcome;
   readonly detail?: string;
+  /** GitHub tokens may still reach steward panes; `march up` must exit non-zero. */
+  readonly credentialScrubFailed?: boolean;
 }
 
 export interface StackUpResult {
@@ -230,6 +232,7 @@ export function ensureHostTmuxServer(
   const scrubFailed = {
     outcome: "failed",
     detail: "Could not scrub GitHub credentials from the host tmux environment.",
+    credentialScrubFailed: true,
   } as const;
   if (serverHost && !scrubTmuxGitHubTokens(tmux)) return scrubFailed;
   if (anchorPresent) return { outcome: "present" };
@@ -240,6 +243,16 @@ export function ensureHostTmuxServer(
   }
   if (!serverHost && !scrubTmuxGitHubTokens(tmux)) return scrubFailed;
   return { outcome: "created" };
+}
+
+/**
+ * Whether `march up` must exit non-zero: a service failed to start, or the
+ * GitHub credential scrub failed so steward panes could inherit host tokens.
+ * Other anchor failures stay advisory.
+ */
+export function stackUpFailed(result: Pick<StackUpResult, "tmuxAnchor" | "services">): boolean {
+  return result.tmuxAnchor?.credentialScrubFailed === true ||
+    result.services.some(svc => svc.outcome === "failed");
 }
 
 export interface StackUpOptions {

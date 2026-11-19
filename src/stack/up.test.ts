@@ -8,7 +8,9 @@ import {
   ensureHostTmuxServer,
   resolveCastraToken,
   stackUp,
+  stackUpFailed,
   type ResolvedToken,
+  type StackUpResult,
   type TokenIo,
 } from "./up.js";
 
@@ -157,7 +159,17 @@ describe("stackUp — host tmux anchor", () => {
     expect(ensureHostTmuxServer(run, { GH_TOKEN: "fake-secret" })).toEqual({
       outcome: "failed",
       detail: "Could not scrub GitHub credentials from the host tmux environment.",
+      credentialScrubFailed: true,
     });
+  });
+
+  it("fails march up on a credential scrub failure but not on an advisory anchor failure", () => {
+    const started = [{ service: "castra", outcome: "started" }] as StackUpResult["services"];
+    expect(stackUpFailed({ services: started })).toBe(false);
+    expect(stackUpFailed({ services: started, tmuxAnchor: { outcome: "failed", detail: "foreign" } })).toBe(false);
+    expect(stackUpFailed({ services: started, tmuxAnchor: {
+      outcome: "failed", detail: "scrub", credentialScrubFailed: true } })).toBe(true);
+    expect(stackUpFailed({ services: [{ service: "castra", outcome: "failed" }] as StackUpResult["services"] })).toBe(true);
   });
 
   it("reports the anchor present when a server + anchor already exist", async () => {

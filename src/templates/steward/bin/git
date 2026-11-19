@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { spawnSync } from "node:child_process";
-import { accessSync, constants, mkdtempSync, rmSync, statSync } from "node:fs";
+import { accessSync, constants, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join, resolve } from "node:path";
 
@@ -40,10 +40,11 @@ function githubHttps(url) {
     if (!/^[\w.-]+\/[\w.-]+\/?$/.test(scp[1])) throw new Error();
     return "https://github.com/" + scp[1].replace(/\/$/, "");
   }
-  // URL canonicalizes case and default ports and discards embedded credentials.
+  // URL discards embedded credentials and default ports. It lowercases hosts
+  // only for special schemes, so ssh: and git: hosts are lowercased here.
   let parsed;
   try { parsed = new URL(url); } catch { return; }
-  const host = parsed.hostname.replace(/\.$/, "");
+  const host = parsed.hostname.toLowerCase().replace(/\.$/, "");
   const alternateSsh = host === "ssh.github.com" && parsed.protocol === "ssh:";
   if (host !== "github.com" && !alternateSsh) return;
   if (!["https:", "http:", "ssh:", "git:"].includes(parsed.protocol) ||
@@ -58,13 +59,70 @@ const TRANSPORT_COMMANDS = new Set(["clone", "fetch", "pull", "push", "ls-remote
 // Global options whose value is the following argument.
 const GLOBAL_VALUE_OPTIONS = new Set(["-C", "-c", "--git-dir", "--work-tree", "--namespace",
   "--super-prefix"]);
+// Global options that select the repository or configuration Git will use.
+const REPOSITORY_OPTIONS = new Set(["-C", "-c", "--git-dir", "--work-tree", "--bare"]);
+const REPOSITORY_OPTION_PREFIXES = ["--git-dir=", "--work-tree=", "--config-env="];
 
-function subcommandIndex(args) {
+/** Split Git's leading global options from the subcommand, as Git parses them. */
+function parseGlobalOptions(args) {
+  const repositoryArgs = [];
   for (let i = 0; i < args.length; i++) {
-    if (GLOBAL_VALUE_OPTIONS.has(args[i])) i++;
-    else if (!args[i].startsWith("-")) return i;
+    const arg = args[i];
+    if (!arg.startsWith("-")) return { command: i, repositoryArgs };
+    if (GLOBAL_VALUE_OPTIONS.has(arg)) {
+      if (i + 1 >= args.length) break;
+      if (REPOSITORY_OPTIONS.has(arg)) repositoryArgs.push(arg, args[i + 1]);
+      i++;
+    } else if (REPOSITORY_OPTIONS.has(arg) || REPOSITORY_OPTION_PREFIXES.some(p => arg.startsWith(p))) {
+      repositoryArgs.push(arg);
+    }
   }
-  return -1;
+  return { command: -1, repositoryArgs };
+}
+
+// GIT_CONFIG_COUNT/KEY/VALUE carry every steward setting; older Git ignores them.
+function requireConfigEnvironment(git, env) {
+  const version = spawnSync(git, ["--version"], {
+    env, encoding: "utf8", timeout: 5_000, killSignal: "SIGKILL",
+    stdio: ["ignore", "pipe", "ignore"],
+  });
+  const match = /^git version (\d+)\.(\d+)/.exec(version.stdout ?? "");
+  if (!match || Number(match[1]) < 2 || (Number(match[1]) === 2 && Number(match[2]) < 31)) {
+    throw new Error();
+  }
+}
+
+// Global keys that can select credentials, transport destinations or askpass.
+const CREDENTIAL_GLOBAL_KEY = /^(?:credential|http|url|remote|include|includeif)\.|^core\.(?:askpass|sshcommand)$/i;
+const CREDENTIAL_HOME_ENTRIES = new Set([".netrc", "_netrc", ".gitconfig", ".git-credentials", ".config"]);
+
+function linkEntries(source, target, skip) {
+  if (!existsSync(source)) return;
+  for (const entry of readdirSync(source)) {
+    if (!skip.has(entry)) symlinkSync(join(source, entry), join(target, entry));
+  }
+}
+
+/**
+ * Build a HOME that mirrors the operator's, without the files Git and curl
+ * read credentials from, so hooks, signing and tools keep their settings.
+ */
+function isolatedHome(env) {
+  const realHome = env.HOME;
+  if (!realHome) throw new Error();
+  const realConfig = env.XDG_CONFIG_HOME || join(realHome, ".config");
+  const home = mkdtempSync(join(tmpdir(), "march-steward-git-"));
+  try {
+    linkEntries(realHome, home, CREDENTIAL_HOME_ENTRIES);
+    const config = join(home, ".config");
+    mkdirSync(join(config, "git"), { recursive: true });
+    linkEntries(realConfig, config, new Set(["git"]));
+    linkEntries(join(realConfig, "git"), join(config, "git"), new Set(["config", "credentials"]));
+    return { home, config, gnupg: join(realHome, ".gnupg") };
+  } catch (error) {
+    rmSync(home, { recursive: true, force: true });
+    throw error;
+  }
 }
 
 function run() {
@@ -78,25 +136,26 @@ function run() {
     }
   }
 
-  const identity = readConfig(git, ["--global", "--includes", "--get-regexp",
-    "^(user|author|committer)\\.(name|email)$"], env, true);
+  requireConfigEnvironment(git, env);
+  // Read the same repository and configuration Git will use for this command.
+  const { command, repositoryArgs } = parseGlobalOptions(args);
+  // Keep the operator's non-credential global settings (identity, signing, hooks).
+  // --get-regexp exits 1 (not 128 like --list) when no global config exists.
+  const global = readConfig(git, ["--global", "--includes", "--get-regexp", "."], env, true, repositoryArgs)
+    .filter(([name]) => !CREDENTIAL_GLOBAL_KEY.test(name));
   // Git's HTTPS transport can use netrc before asking any credential helper.
-  const home = mkdtempSync(join(tmpdir(), "march-steward-git-"));
+  const { home, config: configHome, gnupg } = isolatedHome(env);
   try {
+    if (!env.GNUPGHOME && existsSync(gnupg)) env.GNUPGHOME = gnupg;
     Object.assign(env, {
-      HOME: home, CURL_HOME: home, XDG_CONFIG_HOME: home, NETRC: "/dev/null",
+      HOME: home, CURL_HOME: home, XDG_CONFIG_HOME: configHome, NETRC: "/dev/null",
       GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null",
       GIT_TERMINAL_PROMPT: "0", GIT_ASKPASS: "/bin/false",
     });
 
-    // Honor git -C <dir> while reading the same repository config Git will use.
-    const directoryArgs = [];
-    for (let i = 0; args[i] === "-C" && i + 1 < args.length; i += 2) {
-      directoryArgs.push(...args.slice(i, i + 2));
-    }
-    const config = readConfig(git, ["--list", "--includes"], env, false, directoryArgs);
+    const config = readConfig(git, ["--list", "--includes"], env, false, repositoryArgs);
     const localKeys = new Set(config.map(([name]) => name));
-    const settings = identity.filter(([name]) => !localKeys.has(name));
+    const settings = global.filter(([name]) => !localKeys.has(name));
     for (const [name, value] of config) {
       // Git prefers the longest rewrite match. A repository-level rule must
       // not supersede the steward's rewrite of GitHub transport URLs.
@@ -132,7 +191,6 @@ function run() {
     // An explicit transport URL follows the same policy as a configured remote.
     // Only transport subcommands take URL operands; patterns, messages and
     // other command data must reach Git unchanged.
-    const command = subcommandIndex(args);
     const transport = command >= 0 && TRANSPORT_COMMANDS.has(args[command]);
     const normalizedArgs = args.map((arg, i) => {
       if (!transport || i <= command) return arg;

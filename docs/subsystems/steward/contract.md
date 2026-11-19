@@ -28,9 +28,15 @@ and exits nonzero with `Tessera gh: real executable timed out.`
 GitHub SSH remotes and HTTPS remotes resolve to credential-free HTTPS URLs
 for the same repository. Git requests app/write credentials with repository
 context through the [Tessera Git helper](../tessera/contract.md#cli-and-configuration).
-The Git shim isolates host Git authentication and disables prompts. It
-retains the operator's configured author and committer identity for steward
-commits and reads repository settings in the target worktree.
+The Git shim requires Git 2.31 or later and refuses to run on older Git. It
+isolates host Git authentication and disables prompts: `HOME` mirrors the
+operator's home without `.netrc`, `.gitconfig`, `.git-credentials` or Git's
+XDG `config`/`credentials`. It keeps the operator's non-credential global
+settings, such as identity, signing and `core.hooksPath`, and drops global
+`credential.*`, `http.*`, `url.*` and `remote.*` settings. It reads repository
+settings for the repository selected by leading `-C`, `-c`, `--git-dir` and
+`--work-tree` options. Only URL operands of `clone`, `fetch`, `pull`, `push`
+and `ls-remote` are rewritten.
 The bot authenticates the push and opens the PR.
 
 ### Role Boundary

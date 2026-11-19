@@ -62,7 +62,10 @@ describe("castra adapter — argv builders", () => {
 
   it("builds launch args mirroring the Hatchery handoff shape", () => {
     const prev = process.env.MARCH_STEWARD_SKILLS_DIR;
+    const prevPort = process.env.MARCH_TESSERA_PORT;
     process.env.MARCH_STEWARD_SKILLS_DIR = "/steward-skills";
+    // Pin the listener port so a developer's exported value cannot leak in.
+    process.env.MARCH_TESSERA_PORT = "9477";
     try {
       expect(
         buildLaunchArgs({
@@ -110,6 +113,8 @@ describe("castra adapter — argv builders", () => {
     } finally {
       if (prev === undefined) delete process.env.MARCH_STEWARD_SKILLS_DIR;
       else process.env.MARCH_STEWARD_SKILLS_DIR = prev;
+      if (prevPort === undefined) delete process.env.MARCH_TESSERA_PORT;
+      else process.env.MARCH_TESSERA_PORT = prevPort;
     }
   });
 
