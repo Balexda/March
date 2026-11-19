@@ -280,7 +280,15 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
     }
   }
 
+  /** Sentinel: state names a different repository than origin — observe nothing. */
+  const OWNER_MISMATCH = Symbol("owner-mismatch");
+
   async function repoOwner(state: any): Promise<string | null> {
+    const owner = await resolveOwner(state);
+    return owner === OWNER_MISMATCH ? null : owner;
+  }
+
+  async function resolveOwner(state: any): Promise<string | null | typeof OWNER_MISMATCH> {
     const configured = state?.repo?.owner_with_name;
     const repoPath = state?.repo?.path || meta.repo?.path;
     const hasConfigured = typeof configured === "string" && configured.length > 0;
@@ -316,7 +324,7 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
     if (hasConfigured && ownerCache && !sameGitHubRepo(configured, ownerCache)) {
       // A PR read from one repository must never be acted on in another.
       warn?.(`repo owner mismatch: state names ${configured} but origin is ${ownerCache}; skipping observation`);
-      return null;
+      return OWNER_MISMATCH;
     }
     return ownerCache ?? (hasConfigured ? configured : null);
   }
@@ -325,7 +333,9 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
     const number = prNumber(slice);
     if (!number) return { skipped: true, reason: "missing_pr_number" };
     const args = ["pr", "view", number, "--json", fields];
-    const owner = await repoOwner(state);
+    const owner = await resolveOwner(state);
+    // Never fall back to the checkout's gh default repo on a mismatch.
+    if (owner === OWNER_MISMATCH) return { skipped: true, reason: "repo_owner_mismatch" };
     if (typeof owner === "string" && owner.length > 0) {
       args.push("-R", github ? `github.com/${owner}` : owner);
     }
@@ -614,7 +624,8 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
       // fall through to branch-based lookup
     }
     try {
-      const owner = await repoOwner(state);
+      const owner = await resolveOwner(state);
+      if (owner === OWNER_MISMATCH) return null;
       const args = ["pr", "list", ...(github ? [] : ["--author", "@me"]), "--state", "open", "--json",
         "number,url,state,mergeable,headRefName,title,statusCheckRollup,createdAt" + (github ? ",isCrossRepository" : "")];
       if (owner) args.push("-R", github ? `github.com/${owner}` : owner);
@@ -677,7 +688,9 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
    * fails, so the caller degrades to the always-fetch path instead of stranding.
    */
   async function listOpenPrs(state: any): Promise<OpenPrIndex | { error: string }> {
-    const owner = await repoOwner(state);
+    const resolved = await resolveOwner(state);
+    if (resolved === OWNER_MISMATCH) return { error: "repo owner unavailable" };
+    const owner = resolved;
     if (!owner && !github) return { error: "repo owner unavailable" };
     const [repoOwnerName, repoName] = owner?.split("/") ?? [];
     if (owner && (!repoOwnerName || !repoName)) return { error: `unparseable repo owner: ${owner}` };
