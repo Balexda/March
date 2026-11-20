@@ -8,6 +8,7 @@ import { emptySystemState, foldEvents, reduce, type AppendEventInput, type Event
 import type { SenseDeps } from "../../legate/loop/state/sense.js";
 import type { LoopMeta } from "../../legate/loop/meta.js";
 import type { ReviewObservation } from "../../observe/sense-io.js";
+import { TesseraClientError } from "../../tessera/client.js";
 
 vi.mock("../../observability/herald-trace.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../observability/herald-trace.js")>();
@@ -266,6 +267,19 @@ describe("runObservation", () => {
       }),
     ).rejects.toThrow("sense boom");
     expect(onSync).toHaveBeenCalledWith(expect.objectContaining({ ok: true, head: "aaa" }));
+  });
+
+  it("#592 review: a Tessera sync failure reports ok:false through onSync, then aborts", async () => {
+    const store = fakeStore();
+    const onSync = vi.fn();
+    await expect(
+      runObservation({
+        store, profile: PROFILE, onSync, now: () => "2026-11-19T00:00:00.000Z",
+        syncDefaultBranch: async () => { throw new TesseraClientError("unavailable", 503); },
+        senseDeps: senseDeps(),
+      }),
+    ).rejects.toBeInstanceOf(TesseraClientError);
+    expect(onSync).toHaveBeenCalledWith(expect.objectContaining({ ok: false, error: "tessera: unavailable" }));
   });
 
   it("#592: a failed sync records ok:false with the last-known checkout position", async () => {

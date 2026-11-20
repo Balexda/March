@@ -207,7 +207,18 @@ async function syncDefaultBranchBeforeObserve(deps: ObserverDeps): Promise<RepoS
         "march.sync.timed_out": (err as { killed?: boolean } | null)?.killed === true,
       },
     }).end({ error: true });
-    if (err instanceof TesseraClientError) throw err;
+    if (err instanceof TesseraClientError) {
+      // The observation still aborts, but report the failed attempt first so the
+      // sync timestamps stay current. Only the protocol code, never raw text.
+      deps.onSync?.({
+        ok: false,
+        defaultBranch: knownDefault ?? null,
+        head: null, originHead: null, behind: null, ahead: null,
+        error: `tessera: ${err.code}`,
+        at,
+      });
+      throw err;
+    }
     // The legacy path's error echoes the git argv, which carries the GitHub token
     // from gitHubAuthConfigArgs. Mask it before it reaches any log channel.
     const detail = redactGitCredentials(err instanceof Error ? err.message : String(err));
