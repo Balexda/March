@@ -148,7 +148,7 @@ export function queueForEntry(entry: { lastHeartbeat: any; lastDispatch?: any } 
 export function buildQueue(ctx: LoopHttpContext, profile?: string): Record<string, unknown> | null {
   const snap = ctx.getSnapshot();
   if (profile) {
-    const entry = snap.byProfile[profile];
+    const entry = Object.hasOwn(snap.byProfile, profile) ? snap.byProfile[profile] : undefined;
     if (!entry) return null;
     return { ok: true, profile, ...queueForEntry(entry) };
   }

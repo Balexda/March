@@ -105,6 +105,16 @@ describe("loop http /queue (#592)", () => {
       await app.close();
     }
   });
+
+  it("404s an inherited Object property name rather than treating it as a profile", async () => {
+    const app = buildLoopServer(ctxWith(snap()));
+    try {
+      const res = await app.inject({ method: "GET", url: "/queue?profile=toString" });
+      expect(res.statusCode).toBe(404);
+    } finally {
+      await app.close();
+    }
+  });
 });
 
 describe("loop http (fastify)", () => {
