@@ -11,7 +11,14 @@ import * as dispatch from "./handlers/dispatch.js";
 import * as dependencyMerge from "./handlers/dependency-merge.js";
 import * as prLabels from "./handlers/pr-labels.js";
 import * as coderabbitRereview from "./handlers/coderabbit-rereview.js";
-import { countStrandedSlices, dispatchableReady, summarizeSlicesByStage, type SpawnBudget } from "./pure/slice.js";
+import {
+  countStrandedSlices,
+  DISPATCH_DECISIONS,
+  dispatchableReady,
+  summarizeSlicesByStage,
+  type DispatchDecisionRow,
+  type SpawnBudget,
+} from "./pure/slice.js";
 import { isWorkerSession } from "./pure/session.js";
 
 /**
@@ -70,6 +77,13 @@ export interface CoordinatorOutput {
     /** PR label reconciler; absent in outputs built without it. */
     prLabels?: HandlerResult;
   };
+}
+
+/** Per-decision tally of the dispatch rows, every bounded decision present (#592). */
+export function countDispatchDecisions(rows: readonly DispatchDecisionRow[]): Record<string, number> {
+  const counts: Record<string, number> = Object.fromEntries(DISPATCH_DECISIONS.map((d) => [d, 0]));
+  for (const row of rows) counts[row.decision] = (counts[row.decision] ?? 0) + 1;
+  return counts;
 }
 
 const countAction = (res: HandlerResult, action: string): number => res.actions.filter((a) => a?.action === action).length;
@@ -148,6 +162,8 @@ function buildTickResult(state: LoopState, r: CoordinatorOutput["results"], spaw
     ...(spawnBudget
       ? { spawnCap: spawnBudget.cap, spawnsLive: spawnBudget.live, spawnsDeferred: spawnBudget.deferred }
       : {}),
+    dispatchDecisions: state.smithy.ok ? (r.dispatch.dispatchDecisions ?? []) : null,
+    ...(state.smithy.ok ? { dispatchDecisionCounts: countDispatchDecisions(r.dispatch.dispatchDecisions ?? []) } : {}),
   };
 }
 

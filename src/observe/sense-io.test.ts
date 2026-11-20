@@ -1008,6 +1008,38 @@ describe("syncDefaultBranch (Herald-owned, via the raw bundle — #300)", () => 
   });
 });
 
+describe("checkout position (#592)", () => {
+  it("syncDefaultBranch reports origin head and commits behind/ahead after the fetch", async () => {
+    const calls: string[][] = [];
+    routeExec((cmd, args) => {
+      calls.push([cmd, ...args]);
+      if (args.includes("--verify")) return "0123abcd\n";
+      if (args.includes("rev-parse")) return "deadbeef\n";
+      if (args.includes("rev-list")) return "1\t4\n";
+      return "";
+    });
+    const io = createSenseIo({ meta: meta(), castra: fakeCastra() });
+    const result = await io.syncDefaultBranch({ repo: { path: "/repo", default_branch: "main" } });
+    expect(result).toMatchObject({ head: "deadbeef", origin_head: "0123abcd", ahead: 1, behind: 4 });
+    expect(calls.map((c) => c.join(" "))).toContain("git rev-list --left-right --count HEAD...refs/remotes/origin/main");
+  });
+
+  it("checkoutStatus reads HEAD and position without fetching, nulls when unreadable", async () => {
+    const calls: string[][] = [];
+    routeExec((cmd, args) => {
+      calls.push([cmd, ...args]);
+      if (args.includes("symbolic-ref")) return "origin/master\n";
+      if (args.includes("--verify")) throw new Error("no such ref");
+      if (args.includes("rev-parse")) return "cafe\n";
+      return "";
+    });
+    const io = createSenseIo({ meta: meta(), castra: fakeCastra() });
+    const status = await io.checkoutStatus({ repo: { path: "/repo" } });
+    expect(status).toEqual({ default_branch: "master", head: "cafe", origin_head: null, behind: null, ahead: null });
+    expect(calls.some((c) => c.includes("fetch") || c.includes("pull"))).toBe(false);
+  });
+});
+
 describe("gitHubAuthConfigArgs (#301)", () => {
   it("emits accumulating insteadOf rewrites for both SSH remote forms when a token is set", () => {
     const args = gitHubAuthConfigArgs({ GH_TOKEN: "tok" } as NodeJS.ProcessEnv);

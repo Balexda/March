@@ -59,11 +59,27 @@ export interface SenseIoContext {
   readonly warn?: (message: string) => void;
 }
 
+/** Local-vs-origin position of the checkout's default branch (#592). */
+export interface CheckoutPosition {
+  /** `refs/remotes/origin/<default>` after the last fetch; null when unreadable. */
+  origin_head: string | null;
+  /** Commits on origin's default branch that local HEAD lacks; null when unknown. */
+  behind: number | null;
+  /** Commits on local HEAD that origin's default branch lacks; null when unknown. */
+  ahead: number | null;
+}
+
 /** Result of a default-branch sync. */
-export interface SyncResult {
+export interface SyncResult extends CheckoutPosition {
   default_branch: string;
   synced: true;
   head: string;
+}
+
+/** A no-fetch read of the checkout (#592): last-known HEAD and position. */
+export interface CheckoutStatus extends CheckoutPosition {
+  default_branch: string | null;
+  head: string | null;
 }
 
 // `gitHubAuthConfigArgs` (the SSH→HTTPS-token rewrite, #300/#301) moved to the
@@ -85,6 +101,8 @@ export { gitHubAuthConfigArgs };
 export interface SenseIo {
   listSessions(): Promise<any[] | { error: string }>;
   syncDefaultBranch(state: any): Promise<SyncResult>;
+  /** No-fetch read of the checkout's HEAD and origin position (#592). Never throws. */
+  checkoutStatus(state: any): Promise<CheckoutStatus>;
   readSmithyStatus(repoPath: string): Promise<any>;
   queryPrForBabysit(slice: any, state: any): Promise<any>;
   discoverPrForSlice(slice: any, state: any, sessionId: string): Promise<any>;
@@ -961,6 +979,66 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
     }
   }
 
+  /** Best-effort: where local HEAD sits relative to `origin/<defaultBranch>`
+   *  (no fetch). Never throws — an unreadable ref yields nulls. */
+  async function checkoutPosition(defaultBranch: string, localOptions: any): Promise<CheckoutPosition> {
+    const originRef = `refs/remotes/origin/${defaultBranch}`;
+    let origin_head: string | null = null;
+    let behind: number | null = null;
+    let ahead: number | null = null;
+    try {
+      origin_head = (await execText("git", ["rev-parse", "--verify", "--quiet", `${originRef}^{commit}`], localOptions)).trim() || null;
+    } catch {
+      origin_head = null;
+    }
+    if (origin_head) {
+      try {
+        const [left, right] = (await execText("git", ["rev-list", "--left-right", "--count", `HEAD...${originRef}`], localOptions))
+          .trim()
+          .split(/\s+/)
+          .map((n) => Number.parseInt(n, 10));
+        if (Number.isSafeInteger(left) && Number.isSafeInteger(right)) {
+          ahead = left;
+          behind = right;
+        }
+      } catch {
+        // leave unknown
+      }
+    }
+    return { origin_head, behind, ahead };
+  }
+
+  /**
+   * A no-fetch read of the checkout (#592): local HEAD, the default branch, and
+   * how far HEAD is from `origin/<default>` as of the last fetch. Used when a
+   * sync fails, so the status still reports the last-known position. Never
+   * throws; anything unreadable is null.
+   */
+  async function checkoutStatus(state: any): Promise<CheckoutStatus> {
+    const empty: CheckoutStatus = { default_branch: null, head: null, origin_head: null, behind: null, ahead: null };
+    const repoPath = state?.repo?.path || meta.repo?.path;
+    if (typeof repoPath !== "string" || repoPath.length === 0) return empty;
+    const localOptions = { cwd: repoPath, timeout: SYNC_STEP_TIMEOUT_MS, killSignal: "SIGKILL" as const };
+    let defaultBranch: string | null = state?.repo?.default_branch || null;
+    if (!defaultBranch) {
+      try {
+        defaultBranch =
+          (await execText("git", ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"], localOptions)).trim().replace(/^origin\//, "") ||
+          null;
+      } catch {
+        defaultBranch = null;
+      }
+    }
+    let head: string | null = null;
+    try {
+      head = (await execText("git", ["rev-parse", "HEAD"], localOptions)).trim() || null;
+    } catch {
+      head = null;
+    }
+    const position = defaultBranch ? await checkoutPosition(defaultBranch, localOptions) : { origin_head: null, behind: null, ahead: null };
+    return { default_branch: defaultBranch, head, ...position };
+  }
+
   async function syncDefaultBranch(state: any): Promise<SyncResult> {
     const repoPath = state?.repo?.path || meta.repo?.path;
     if (typeof repoPath !== "string" || repoPath.length === 0) {
@@ -1001,6 +1079,7 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
       default_branch: defaultBranch,
       synced: true,
       head: (await execText("git", ["rev-parse", "HEAD"], localOptions)).trim(),
+      ...(await checkoutPosition(defaultBranch, localOptions)),
     };
   }
 
@@ -1027,6 +1106,7 @@ export function createSenseIo(ctx: SenseIoContext): SenseIo {
   return {
     listSessions,
     syncDefaultBranch,
+    checkoutStatus,
     readSmithyStatus,
     queryPrForBabysit,
     discoverPrForSlice,

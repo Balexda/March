@@ -196,6 +196,7 @@ export function emitActionEventSpan(event: any, emit: LoopSpanEmitter = defaultE
         "march.action": action,
         ...(event.session_id ? { "march.session_id": String(event.session_id) } : {}),
         ...(event.operator ? { "march.operator": String(event.operator) } : {}),
+        ...(event.archived ? { "march.requeue.archived": true, "march.pr_state": String(event.terminal ?? "") } : {}),
       },
     });
   } else if (event.kind === "steward_relaunch") {
@@ -290,6 +291,13 @@ export function buildLoopTickActivity(record: any, ctx: HeartbeatMetricsContext)
       if (typeof count === "number") prBlocker[reason] = count;
     }
   }
+  let dispatchItems: Record<string, number> | undefined;
+  if (record.dispatch_decision_counts && typeof record.dispatch_decision_counts === "object") {
+    dispatchItems = {};
+    for (const [decision, count] of Object.entries(record.dispatch_decision_counts)) {
+      if (typeof count === "number") dispatchItems[decision] = count;
+    }
+  }
   const babysitActionsByKind: Record<string, number> = {};
   if (record.babysit_actions_by_kind && typeof record.babysit_actions_by_kind === "object") {
     for (const [kind, count] of Object.entries(record.babysit_actions_by_kind)) {
@@ -314,6 +322,7 @@ export function buildLoopTickActivity(record: any, ctx: HeartbeatMetricsContext)
     recoveryRate: record.recovery_rate ?? 1,
     escalatedByReason,
     prBlocker,
+    ...(dispatchItems ? { dispatchItems } : {}),
   };
   return {
     snapshot,

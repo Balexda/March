@@ -1,7 +1,7 @@
 import type { HandlerContext, HandlerResult, LoopState } from "../state/types.js";
 import { emptyHandlerResult } from "../state/types.js";
 import { dispatchSliceId } from "../pure/dispatch-id.js";
-import { dispatchableReady, recoverableEscalations } from "../pure/slice.js";
+import { classifyReady, dispatchableReady, recoverableEscalations } from "../pure/slice.js";
 import { parseMs } from "../pure/self-heal.js";
 import { isHardDownReason, parseAgentFailureReason } from "../spawn-breaker.js";
 
@@ -111,11 +111,17 @@ export async function apply(_decisions: DispatchDecision[], ctx: HandlerContext,
   //    never starved by fresh-frontier pressure. The cap never alters the #289/#290
   //    dispatchable METRIC — `assess` still reports the true frontier.
   const budget = ctx.spawnBudget;
+  // #592: publish WHY each ready item did or didn't dispatch, classified with the
+  // same matchers assess() uses at the same moment (after completion).
+  const rows = state.smithy.ok ? classifyReady(state.raw, state.smithy.ready, parseMs(state.ts)) : null;
+  if (rows) res.dispatchDecisions = rows;
   for (const decision of assess(state)) {
     let reserved = false;
     if (decision.kind === "dispatch" && budget) {
       if (budget.remaining <= 0) {
         budget.deferred += 1;
+        const row = rows?.find((r) => r.sliceId === decision.sliceId && r.decision === "dispatch");
+        if (row) row.decision = "spawn_cap";
         continue; // cap reached — defer (still dispatchable next tick)
       }
       budget.remaining -= 1; // optimistically reserve a slot for this fresh launch
