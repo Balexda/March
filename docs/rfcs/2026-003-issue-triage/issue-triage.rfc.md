@@ -218,7 +218,7 @@ Recommended implementation sequence:
 
 | ID | Title | Depends On | Artifact |
 |----|-------|------------|----------|
-| M1 | Triage Contract | — | — |
+| M1 | Triage Contract | — | docs/rfcs/2026-003-issue-triage/01-triage-contract.features.md |
 | M2 | Single-Issue Recommender and Operator Backfill | M1 | — |
 | M3 | Issue Observation in Herald | M1 | — |
 | M4 | Continuous Triage and Re-entry | M2, M3 | — |
