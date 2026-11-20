@@ -162,20 +162,25 @@ export async function registerProfileRoutes(
       return { error: validation.error };
     }
     const before = store.get(validation.input.profile, { includeRemoved: true })?.mergePolicy;
-    const record = store.register(validation.input);
-    if (opts.events && canonical(policyPayload(before)) !== canonical(policyPayload(record.mergePolicy))) {
+    // The policy register will store (mirrors `store.register`). History goes in
+    // FIRST: the event log and the registry are separate databases, so this order
+    // means a rejected append leaves the policy unchanged (a retry still sees the
+    // difference and records it) instead of a silent change with no history.
+    const after = validation.input.mergePolicy ?? before;
+    if (opts.events && canonical(policyPayload(before)) !== canonical(policyPayload(after))) {
       opts.events.append(
         {
           type: "profile.merge_policy.changed",
-          mergePolicy: policyPayload(record.mergePolicy),
+          mergePolicy: policyPayload(after),
           previous: policyPayload(before),
           source: "herald",
-          profile: record.profile,
+          profile: validation.input.profile,
         },
         undefined,
         readAttribution(body.attribution),
       );
     }
+    const record = store.register(validation.input);
     reply.code(201);
     return record;
   });

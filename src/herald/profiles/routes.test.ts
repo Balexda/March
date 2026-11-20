@@ -1,7 +1,7 @@
 /**
  * @l1 @deterministic @ci
  */
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 import { sqliteAvailable } from "../service/sqlite.js";
 import { registerProfileRoutes, validateRegisterProfile } from "./routes.js";
@@ -210,6 +210,22 @@ describe.skipIf(!sqliteAvailable)("POST /profiles merge-policy history (#593)", 
       await app.close();
       store.close();
       events.close();
+    }
+  });
+
+  it("leaves the policy unchanged when the history append fails, so a retry still records it", async () => {
+    const store = new ProfileStore({ dbPath: ":memory:" });
+    const events = { append: vi.fn(() => { throw new Error("disk full"); }) } as any;
+    const app = Fastify();
+    await registerProfileRoutes(app, { store, events });
+    try {
+      const policy = { byTaskType: { cut: { approval: false } } };
+      const res = await app.inject({ method: "POST", url: "/profiles", payload: body({ mergePolicy: policy }) });
+      expect(res.statusCode).toBe(500);
+      expect(store.get("march")?.mergePolicy).toBeUndefined();
+    } finally {
+      await app.close();
+      store.close();
     }
   });
 });
