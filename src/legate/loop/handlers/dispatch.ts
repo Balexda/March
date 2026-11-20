@@ -99,8 +99,9 @@ export async function apply(_decisions: DispatchDecision[], ctx: HandlerContext,
 
   // Operator pause (#593): finish draining spawns already in flight (above), but
   // launch nothing new — neither a fresh dispatch nor a recovery re-dispatch —
-  // until the operator resumes. Every other handler keeps running.
-  if (state.dispatchPaused) return res;
+  // until the operator resumes. Every other handler keeps running. The pause
+  // guards only the launch loop, so a drained hard-down failure still feeds the
+  // agent-health breaker below.
 
   // 2. Re-derive selection AFTER completion so a slice freed this tick isn't
   //    blocked by its own stale in-flight entry. Fresh dispatches launch a new
@@ -116,7 +117,7 @@ export async function apply(_decisions: DispatchDecision[], ctx: HandlerContext,
   //    never starved by fresh-frontier pressure. The cap never alters the #289/#290
   //    dispatchable METRIC — `assess` still reports the true frontier.
   const budget = ctx.spawnBudget;
-  for (const decision of assess(state)) {
+  for (const decision of state.dispatchPaused ? [] : assess(state)) {
     let reserved = false;
     if (decision.kind === "dispatch" && budget) {
       if (budget.remaining <= 0) {

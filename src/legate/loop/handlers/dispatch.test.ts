@@ -167,6 +167,24 @@ describe("dispatch apply (orchestration)", () => {
     expect(d.recoverDispatch).not.toHaveBeenCalled();
   });
 
+  it("while paused still feeds a drained hard-down failure to the agent breaker", async () => {
+    const state = loopState({
+      smithy: { ok: true, ready: [], queue: { dispatchable: 0, blocked: 0, total: 0 } },
+      dispatchPaused: { seq: 4, ts: "T" },
+    });
+    const d = deps({
+      completePending: vi.fn(async () => ({
+        actions: [],
+        failures: [{ slice_id: "s", error: "Spawn x exited 1; [agent_failure_reason=auth]" }],
+        notifications: [],
+        mutated: false,
+      })) as any,
+    });
+    const res = await apply(assess(state), ctx(), state, d);
+    expect(res.hardDownFailures).toBe(1);
+    expect(d.launchDispatch).not.toHaveBeenCalled();
+  });
+
   it("drains pending then launches the selected fresh dispatch", async () => {
     const item = readyItem("a.spec.md");
     const state = loopState({ smithy: { ok: true, ready: [item], queue: { dispatchable: 1, blocked: 0, total: 1 } } });
