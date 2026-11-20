@@ -15,6 +15,9 @@
  * the fold on cold start. Keep `EventType` low-cardinality (it is a metric label).
  */
 
+/** Operator slice levers that leave a durable request in the fold (#593). */
+export type OperatorSliceAction = "merge" | "relaunch";
+
 /** Who wrote an event: Herald observed it, or the legate transitioned it. */
 export type EventSource = "herald" | "legate";
 
@@ -202,6 +205,16 @@ export type EventBody =
    * while set the legate launches no NEW work for the profile (relaunch, babysit,
    * merge and recovery keep running). Who asked is the envelope `operator`.
    */
+  /**
+   * Operator MERGE NOW (#593): squash-merge the slice's open PR on the next tick,
+   * bypassing the review/CI merge gates (the head SHA is still pinned). Folds to
+   * {@link SliceState.mergeRequested}; cleared by the `merged` stage transition
+   * or by `slice.operator.refused {action:"merge"}`.
+   */
+  | { type: "slice.merge.requested"; sliceId: string; prNumber: number; reason?: string }
+  /** The legate could not carry out an operator slice lever (#593): `action`
+   *  names which, `reason` why. Clears that lever's pending request. */
+  | { type: "slice.operator.refused"; sliceId: string; action: OperatorSliceAction; reason: string }
   | { type: "legate.tick.requested"; reason?: string }
   | { type: "dispatch.paused"; reason?: string }
   | { type: "dispatch.resumed"; reason?: string }
@@ -281,6 +294,8 @@ export function entityRefOf(body: EventBody): EntityRef {
     case "slice.steward.report":
     case "slice.requeue.requested":
     case "slice.requeue.refused":
+    case "slice.merge.requested":
+    case "slice.operator.refused":
       return { kind: "slice", id: body.sliceId };
     case "session.changed":
       return { kind: "session", id: body.session.id };
@@ -369,6 +384,8 @@ export interface SliceState {
    * handled (its tombstone not yet drained back) from a new one.
    */
   requeueRequested?: { seq: number; closePr: boolean; operator?: string; reason?: string };
+  /** Pending operator MERGE NOW (#593): the request seq and the PR it targets. */
+  mergeRequested?: { seq: number; prNumber: number };
 }
 
 /** The folded system state — the projection both services read. */
@@ -585,6 +602,9 @@ export function reduce(state: SystemState, event: HeraldEvent): SystemState {
     case "slice.stage.changed": {
       const slice = sliceOf(state, event.sliceId);
       slice.stage = event.stage;
+      // A merge (operator-requested or the auto-merge gate) settles any pending
+      // operator merge request (#593).
+      if (event.stage === "merged") delete slice.mergeRequested;
       // Mirror slice.dispatched: only set when present so a stage transition
       // without a sessionId never clobbers a known link (#210). The handoff
       // transition carries it so a restart's rebuild keeps the slice→session link.
@@ -689,6 +709,18 @@ export function reduce(state: SystemState, event: HeraldEvent): SystemState {
     case "slice.requeue.refused": {
       const slice = state.slices[event.sliceId];
       if (slice) delete slice.requeueRequested;
+      break;
+    }
+    case "slice.merge.requested": {
+      const slice = state.slices[event.sliceId];
+      // Like requeue: only a slice the fold knows (and has not tombstoned).
+      if (!slice || slice.recovered) break;
+      slice.mergeRequested = { seq: event.seq, prNumber: event.prNumber };
+      break;
+    }
+    case "slice.operator.refused": {
+      const slice = state.slices[event.sliceId];
+      if (slice && event.action === "merge") delete slice.mergeRequested;
       break;
     }
     case "retry.counted":

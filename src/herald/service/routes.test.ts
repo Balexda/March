@@ -110,6 +110,15 @@ describe("validateEvent", () => {
     expect(empty.ok && empty.attribution).toBeUndefined();
     expect(empty.ok && (empty.input as Record<string, unknown>).operator).toBe("bob");
   });
+  it("type-checks the operator merge/refusal events (#593)", () => {
+    expect(validateEvent({ type: "slice.merge.requested", sliceId: "s1", prNumber: 42 })).toMatchObject({ ok: true });
+    expect(validateEvent({ type: "slice.merge.requested", sliceId: "s1" })).toMatchObject({ ok: false });
+    expect(validateEvent({ type: "slice.merge.requested", sliceId: "s1", prNumber: 0 })).toMatchObject({ ok: false });
+    expect(validateEvent({ type: "slice.operator.refused", sliceId: "s1", action: "merge", reason: "x" })).toMatchObject({ ok: true });
+    expect(validateEvent({ type: "slice.operator.refused", sliceId: "s1", action: "nuke", reason: "x" })).toMatchObject({ ok: false });
+    expect(validateEvent({ type: "dispatch.paused", reason: 3 })).toMatchObject({ ok: false });
+    expect(validateEvent({ type: "dispatch.paused" })).toMatchObject({ ok: true });
+  });
   it("rejects a malformed attribution (#593)", () => {
     expect(validateEvent({ type: "heartbeat", attribution: "ana" })).toMatchObject({ ok: false });
     expect(validateEvent({ type: "heartbeat", attribution: { operator: 7 } })).toMatchObject({ ok: false });

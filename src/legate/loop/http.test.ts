@@ -13,6 +13,7 @@ import {
   type ProfileLeverInput,
   type RecoverInput,
   type RequeueInput,
+  type SliceLeverInput,
   type RespondInput,
 } from "./http.js";
 import type { LoopSnapshot } from "./runtime.js";
@@ -623,5 +624,31 @@ describe("profile levers: tick / pause / resume (#593)", () => {
     });
     expect(buildStatus(ctxWith(paused), "march")).toMatchObject({ dispatch_paused: true, dispatch_paused_since: "T", dispatch_paused_reason: "deploy" });
     expect(buildStatus(ctxWith(snapshot()), "smithy")).toMatchObject({ dispatch_paused: false });
+  });
+});
+
+describe("POST /slices/:sliceId/merge (#593)", () => {
+  it("forwards profile + attribution and maps the result (202 / 409)", async () => {
+    const seen: SliceLeverInput[] = [];
+    const app = buildLoopServer({
+      startedAtMs: 0,
+      getSnapshot: () => snapshot(),
+      env: {},
+      requestMerge: async (input) => {
+        seen.push(input);
+        return input.sliceId === "merged"
+          ? { ok: false, status: 409, error: "already merged" }
+          : { ok: true, requested: true, prNumber: 42 };
+      },
+    });
+    try {
+      const ok = await app.inject({ method: "POST", url: "/slices/s1/merge", payload: { profile: "march", operator: "ana", reason: "approved offline" } });
+      expect(ok.statusCode).toBe(202);
+      expect(ok.json()).toMatchObject({ prNumber: 42 });
+      expect(seen[0]).toEqual({ profile: "march", sliceId: "s1", operator: "ana", reason: "approved offline" });
+      expect((await app.inject({ method: "POST", url: "/slices/merged/merge", payload: { profile: "march" } })).statusCode).toBe(409);
+    } finally {
+      await app.close();
+    }
   });
 });

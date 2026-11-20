@@ -83,6 +83,7 @@ import {
   type ProfileLeverResult,
   type RecoverInput,
   type RequeueInput,
+  type SliceLeverInput,
   type RequeueResult,
   type RespondInput,
   type RespondResult,
@@ -596,6 +597,44 @@ export async function setDispatchPaused(input: ProfileLeverInput & { paused: boo
   return finishOperatorAction(action, input, { ok: true, requested: true, targets: targets.profiles });
 }
 
+/** The slice's PR number + state: Herald's observation first (fresher), else the warm record. */
+function observedPr(profile: string, sliceId: string, slice: any): { number: number | null; state: string | null } {
+  const observed = legateHerald().snapshotFor(profile)?.slices?.[sliceId]?.pr as any;
+  const pr = observed && !observed.skipped && observed.number ? observed : slice?.pr;
+  const n = pr?.number;
+  return {
+    number: typeof n === "number" && n > 0 ? n : null,
+    state: typeof pr?.state === "string" ? pr.state.toUpperCase() : null,
+  };
+}
+
+/**
+ * Operator MERGE NOW (#593): request a squash-merge of the slice's open PR,
+ * bypassing the review/CI gates (the merge still pins the head SHA it re-reads).
+ * Appends `slice.merge.requested`; the merge-now handler acts on it. A tick is
+ * kicked off right away (best-effort) so the merge does not wait for the interval.
+ */
+export async function requestMerge(input: SliceLeverInput): Promise<OperatorActionResult> {
+  const target = sliceTarget(input);
+  if (!target.ok) return finishOperatorAction("merge", input, target.result);
+  const pr = observedPr(input.profile, input.sliceId, target.slice);
+  const refuse = (status: number, error: string) =>
+    finishOperatorAction("merge", input, { ok: false, status, profile: input.profile, sliceId: input.sliceId, error });
+  if (pr.number === null) return refuse(409, `slice "${input.sliceId}" has no PR to merge.`);
+  if (pr.state === "MERGED" || target.slice.stage === "merged") return refuse(409, `slice "${input.sliceId}" PR #${pr.number} is already merged.`);
+  if (pr.state === "CLOSED") return refuse(409, `slice "${input.sliceId}" PR #${pr.number} is closed.`);
+  const reason = input.reason ? { reason: input.reason } : {};
+  const failed = await appendOperatorRequest(input, { type: "slice.merge.requested", sliceId: input.sliceId, prNumber: pr.number, ...reason }, "merge");
+  if (failed) return finishOperatorAction("merge", input, failed);
+  void scheduler().runOnce();
+  return finishOperatorAction(
+    "merge",
+    input,
+    { ok: true, profile: input.profile, sliceId: input.sliceId, requested: true, prNumber: pr.number },
+    { "march.pr_number": pr.number },
+  );
+}
+
 /**
  * Operator RECOVER (#593): request the graduated recovery ladder for a slice —
  * the side-effecting half of `POST /slices/:sliceId/recover`. Appends an
@@ -764,6 +803,14 @@ async function deleteRemoteBranchGh(repoPath: string, branch: string, sliceId?: 
   }
   await execLegateGh("write", ["api", "-X", "DELETE", ref], repoPath, sliceId);
   return true;
+}
+
+/** Operator merge-now (#593): the PR's live state, head SHA and mergeability,
+ *  read fresh from GitHub (the fold can lag) right before the pinned merge. */
+async function readLivePrGh(repoPath: string, prNumber: number, sliceId?: string): Promise<{ state: string; headSha: string; mergeable?: string }> {
+  const out = await execLegateGh("read", ["pr", "view", String(prNumber), "--json", "state,headRefOid,mergeable"], repoPath, sliceId);
+  const pr = JSON.parse(out) as { state?: string; headRefOid?: string; mergeable?: string };
+  return { state: pr.state ?? "", headSha: pr.headRefOid ?? "", ...(pr.mergeable ? { mergeable: pr.mergeable } : {}) };
 }
 
 /** Repos whose escalation label is known to exist, so it is created once per process. */
@@ -978,6 +1025,10 @@ async function tickProfile(rt: ProfileRuntime, history: ReviewRequestHistory, sp
     requeue: {
       closePr: closePrGh,
       deleteRemoteBranch: deleteRemoteBranchGh,
+    },
+    mergeNow: {
+      readPr: readLivePrGh,
+      mergePr: squashMergePr,
     },
     spawnBudget,
   });

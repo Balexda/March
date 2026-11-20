@@ -611,3 +611,24 @@ describe("operator profile levers (#593)", () => {
     expect(entityRefOf({ type: "dispatch.paused" })).toEqual({ kind: "system", id: "all" });
   });
 });
+
+describe("operator merge-now fold (#593)", () => {
+  it("slice.merge.requested records a pending merge; the merged stage or a refusal clears it", () => {
+    seq = 0;
+    const base = foldEvents([ev({ type: "slice.dispatched", sliceId: "s1", branch: "smithy/forge/s1" })]);
+    const requested = foldEvents([ev({ type: "slice.merge.requested", sliceId: "s1", prNumber: 42 })], base);
+    expect(requested.slices.s1!.mergeRequested).toEqual({ seq: 2, prNumber: 42 });
+    expect(entityRefOf({ type: "slice.merge.requested", sliceId: "s1", prNumber: 42 })).toEqual({ kind: "slice", id: "s1" });
+
+    const merged = foldEvents([ev({ type: "slice.stage.changed", sliceId: "s1", stage: "merged" })], structuredClone(requested));
+    expect(merged.slices.s1!.mergeRequested).toBeUndefined();
+
+    const refused = foldEvents([ev({ type: "slice.operator.refused", sliceId: "s1", action: "merge", reason: "conflicts" })], structuredClone(requested));
+    expect(refused.slices.s1!.mergeRequested).toBeUndefined();
+    // A refusal for a different lever leaves the merge request alone.
+    const other = foldEvents([ev({ type: "slice.operator.refused", sliceId: "s1", action: "relaunch", reason: "x" })], structuredClone(requested));
+    expect(other.slices.s1!.mergeRequested).toEqual({ seq: 2, prNumber: 42 });
+    // Unknown slice: no-op.
+    expect(foldEvents([ev({ type: "slice.merge.requested", sliceId: "nope", prNumber: 1 })]).slices.nope).toBeUndefined();
+  });
+});

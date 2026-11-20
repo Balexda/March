@@ -43,6 +43,8 @@ export interface OperatorActionResult {
   error?: string;
   /** On an unknown-profile error, the known profiles (parity with /status). */
   profiles?: string[];
+  /** The PR the lever acts on (merge now). */
+  prNumber?: number;
 }
 
 /** Operator input to a profile-level lever (#593): tick / pause / resume.
@@ -59,11 +61,14 @@ export interface ProfileLeverResult extends OperatorActionResult {
   started?: boolean;
 }
 
-/** Operator input to the recover endpoint (#593): walk the recovery ladder. */
-export interface RecoverInput extends OperatorFields {
+/** Operator input to a plain slice lever (#593): recover, merge, relaunch. */
+export interface SliceLeverInput extends OperatorFields {
   profile: string;
   sliceId: string;
 }
+
+/** Operator input to the recover endpoint (#593): walk the recovery ladder. */
+export type RecoverInput = SliceLeverInput;
 
 /** Operator input to the respond endpoint: an answer to deliver, or an ack. */
 export interface RespondInput {
@@ -139,6 +144,8 @@ export interface LoopHttpContext {
   readonly requeueSlice?: (input: RequeueInput) => Promise<RequeueResult>;
   /** Request the graduated recovery ladder for a slice (#593). */
   readonly requestRecovery?: (input: RecoverInput) => Promise<OperatorActionResult>;
+  /** Request an operator merge-now (#593). */
+  readonly requestMerge?: (input: SliceLeverInput) => Promise<OperatorActionResult>;
   /** Run a tick now (#593). */
   readonly requestTick?: (input: ProfileLeverInput) => Promise<ProfileLeverResult>;
   /** Pause / resume fresh dispatch (#593). */
@@ -522,6 +529,12 @@ export function buildLoopServer(ctx: LoopHttpContext): FastifyInstance {
   // other lever. Appends `slice.recovery.requested` (with the operator on the
   // envelope); the next tick's recovery handler acts on it.
   registerSliceLever(app, "/slices/:sliceId/recover", "recover", ctx.requestRecovery);
+
+  // Operator MERGE NOW (#593): squash-merge the slice's open PR on the next tick
+  // (kicked off immediately), bypassing the review/CI gates but still pinned to
+  // the head SHA re-read from GitHub. 409 for no PR / already merged / closed.
+  // Replaces running `gh pr merge` out of band, so the merge is in the log.
+  registerSliceLever(app, "/slices/:sliceId/merge", "merge", ctx.requestMerge);
 
   // Profile-level levers (#593). `profile` (body or `?profile=`) narrows to one
   // profile; omitted = every registered profile.

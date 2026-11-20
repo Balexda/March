@@ -16,7 +16,7 @@ import { reviewWaitMs } from "../profiles/review-config.js";
 import type { ProfileStore } from "../profiles/store.js";
 import { projectReviewStates } from "./state-projection.js";
 import type { AppendAttribution, EventStore } from "./store.js";
-import { emptySystemState, REVIEW_BACKOFF_CAUSES, REVIEW_REQUEST_REASONS, type AppendEventInput, type EventType } from "../events.js";
+import { emptySystemState, REVIEW_BACKOFF_CAUSES, REVIEW_REQUEST_REASONS, type AppendEventInput, type EventType, type OperatorSliceAction } from "../events.js";
 
 /** Snapshot of the server's last observe tick, surfaced on `/status`. */
 export interface ObserveStatus {
@@ -75,6 +75,8 @@ const EVENT_TYPES: ReadonlySet<EventType> = new Set<EventType>([
   "slice.requeue.requested",
   "slice.requeue.refused",
   "retry.counted",
+  "slice.merge.requested",
+  "slice.operator.refused",
   "legate.tick.requested",
   "dispatch.paused",
   "dispatch.resumed",
@@ -95,7 +97,12 @@ const SLICE_TYPES: ReadonlySet<string> = new Set([
   "slice.escalated",
   "slice.requeue.requested",
   "slice.requeue.refused",
+  "slice.merge.requested",
+  "slice.operator.refused",
 ]);
+
+/** The operator slice levers `slice.operator.refused` may name (#593). */
+const OPERATOR_SLICE_ACTIONS: readonly OperatorSliceAction[] = ["merge", "relaunch"];
 
 /** Transition event types whose schema carries an optional steward `sessionId`. */
 const SESSION_ID_TYPES: ReadonlySet<string> = new Set([
@@ -231,6 +238,14 @@ export function validateEvent(rawBody: Record<string, unknown>): EventValidation
         return { ok: false, error: `event "${type}" ${field} must be a string.` };
       }
     }
+  }
+  if (type === "slice.merge.requested" &&
+      (typeof body.prNumber !== "number" || !Number.isSafeInteger(body.prNumber) || body.prNumber < 1)) {
+    return { ok: false, error: `event "slice.merge.requested" requires a positive integer prNumber.` };
+  }
+  if (type === "slice.operator.refused" &&
+      (!OPERATOR_SLICE_ACTIONS.includes(body.action as OperatorSliceAction) || typeof body.reason !== "string")) {
+    return { ok: false, error: `event "slice.operator.refused" requires action (${OPERATOR_SLICE_ACTIONS.join("|")}) and a string reason.` };
   }
   if ((type === "legate.tick.requested" || type === "dispatch.paused" || type === "dispatch.resumed") &&
       body.reason !== undefined && typeof body.reason !== "string") {

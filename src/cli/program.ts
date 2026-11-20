@@ -1384,6 +1384,32 @@ leverOptions(
   }
 });
 
+leverOptions(
+  legate
+    .command("merge <sliceId>")
+    .description(
+      "Merge a slice's open PR now (squash), bypassing the review/CI merge gates — the legate re-reads the PR and pins the merge to its current head SHA, refusing a closed or conflicting PR. Use instead of running `gh pr merge` by hand, so the merge is in the event log. Calls the running legate's HTTP API (MARCH_LEGATE_URL).",
+    ),
+).action(async (sliceId: string, opts: LeverOpts) => {
+  commandHandled = true;
+  const id = requireSliceId(sliceId, "merge");
+  if (!id) return;
+  try {
+    const profileName = await resolveSliceProfile(opts.profile, "merge");
+    if (!profileName) return;
+    const result = await postLever<{ prNumber?: number }>(`/slices/${encodeURIComponent(id)}/merge`, { profile: profileName, ...leverAttribution(opts) }, "merge");
+    if (!result) return;
+    console.log(
+      `Merge requested for ${id} (profile=${profileName}, PR #${result.prNumber ?? "?"}). ` +
+        "The legate merges it on the tick it just started; a refusal (closed, conflicting, head moved) is recorded as slice.operator.refused.",
+    );
+    process.exitCode = SUCCESS;
+  } catch (err) {
+    process.stderr.write((err as Error).message + "\n");
+    process.exitCode = ERROR;
+  }
+});
+
 /** Add the `--profile` / `--operator` / `--reason` options to a profile-level lever. */
 function profileLeverOptions(cmd: Command): Command {
   return cmd
