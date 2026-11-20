@@ -57,6 +57,31 @@ export interface LegateResponse<T> {
   body: T & { ok?: boolean; error?: string };
 }
 
+/** Loopback hosts, where plain HTTP never leaves the machine. */
+function isLoopbackHost(hostname: string): boolean {
+  const h = hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  return h === "localhost" || h === "::1" || /^127(\.\d{1,3}){3}$/.test(h);
+}
+
+/**
+ * Refuse to send the operator bearer token in cleartext: a non-loopback
+ * `MARCH_LEGATE_URL` must be https when a token is set (RFC 6750 §5.3). Loopback
+ * http (the default) and any https base are fine.
+ */
+export function assertTokenTransport(base: string): void {
+  let url: URL;
+  try {
+    url = new URL(base);
+  } catch {
+    throw new Error(`MARCH_LEGATE_URL "${base}" is not a valid URL.`);
+  }
+  if (url.protocol === "https:" || (url.protocol === "http:" && isLoopbackHost(url.hostname))) return;
+  throw new Error(
+    `Refusing to send ${OPERATOR_TOKEN_ENV} to ${base} over ${url.protocol.replace(/:$/, "")}: ` +
+      "use an https MARCH_LEGATE_URL for a non-loopback legate.",
+  );
+}
+
 /** POST a JSON body to a legate route with the operator token when configured. */
 export async function legatePost<T = Record<string, unknown>>(
   route: string,
@@ -65,6 +90,7 @@ export async function legatePost<T = Record<string, unknown>>(
 ): Promise<LegateResponse<T>> {
   const base = legateServiceBase(env);
   const token = env[OPERATOR_TOKEN_ENV]?.trim();
+  if (token) assertTokenTransport(base);
   let res: Response;
   try {
     res = await fetch(`${base}${route}`, {
@@ -79,6 +105,23 @@ export async function legatePost<T = Record<string, unknown>>(
   } catch (err) {
     throw new LegateUnreachableError(base, (err as Error).message);
   }
-  const parsed = (await res.json().catch(() => ({}))) as T & { ok?: boolean; error?: string };
+  // A body that is not a JSON object is never an acknowledgement: a refusal keeps
+  // its status (with the raw text as the error), but a 2xx that cannot be read —
+  // say a proxy's HTML page — fails rather than reporting success.
+  const text = await res.text().catch((err) => {
+    throw new LegateUnreachableError(base, `reading the response failed: ${(err as Error).message}`);
+  });
+  let parsed: (T & { ok?: boolean; error?: string }) | null = null;
+  try {
+    const value = JSON.parse(text);
+    if (value && typeof value === "object" && !Array.isArray(value)) parsed = value;
+  } catch {
+    // fall through
+  }
+  if (!parsed) {
+    const snippet = text.trim().slice(0, 200) || "(empty body)";
+    if (res.ok) throw new Error(`The legate service at ${base} returned HTTP ${res.status} without a JSON acknowledgement: ${snippet}`);
+    return { status: res.status, ok: false, body: { error: `HTTP ${res.status}: ${snippet}` } as T & { ok?: boolean; error?: string } };
+  }
   return { status: res.status, ok: res.ok && parsed.ok !== false, body: parsed };
 }
