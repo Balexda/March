@@ -169,6 +169,23 @@ export function emitActionEventSpan(event: any, emit: LoopSpanEmitter = defaultE
         ...(event.operator ? { "march.operator": String(event.operator) } : {}),
       },
     });
+  } else if (event.kind === "operator-merge") {
+    // Operator merge-now execution (#593), nested under the slice's dispatch. The
+    // API's legate.operator.merge span only records acceptance; this records what
+    // the tick actually did — a refusal or failed merge marks it errored.
+    const action = typeof event.action === "string" ? event.action : "";
+    emit({
+      name: "legate.operator-merge",
+      traceKey: sliceId,
+      root: false,
+      error: action !== "operator-merge",
+      attributes: {
+        "march.slice_id": sliceId,
+        "march.action": action,
+        ...(event.pr_number != null ? { "march.pr_number": Number(event.pr_number) } : {}),
+        ...(action !== "operator-merge" && event.detail ? { "march.error": String(event.detail) } : {}),
+      },
+    });
   } else if (event.kind === "steward_relaunch") {
     // Re-launching a steward is a lifecycle action on the slice's existing
     // dispatch, so it nests under that same deterministic parent. relaunch-failed
@@ -199,7 +216,7 @@ export function emitActionEventLog(event: any, emit: LoopLogEmitter = defaultEmi
   if (!event || typeof event !== "object" || !event.kind) return;
   const kind = String(event.kind);
   const severity: LoopLogSeverity =
-    kind.endsWith("_failure") || kind === "sync_warning" || (kind === "review_request" && ["failed", "cap_exhausted"].includes(event.outcome)) ? "ERROR" : "INFO";
+    kind.endsWith("_failure") || kind === "sync_warning" || (kind === "operator-merge" && event.action !== "operator-merge") || (kind === "review_request" && ["failed", "cap_exhausted"].includes(event.outcome)) ? "ERROR" : "INFO";
   const detail =
     event.detail || event.error || event.action || event.title || "";
   emit({

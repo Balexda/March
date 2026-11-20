@@ -99,6 +99,7 @@ grouping.
 | `legate.dependency-merge` / `legate.dependency-unblock` | Legate loop | Dependabot auto-merge and its conflict ladder (#573). Not slices: one root trace per PR (`<processor>-dependency-pr-<n>`); errored on a `*-failed` action or an escalation |
 | `legate.review.request` | Legate loop | A configured reviewer request was made, deferred or refused. The slice child span records the reviewer, verb, reason and outcome. Failures, cap exhaustion and unavailable identity mark it errored |
 | `legate.operator.<action>` | Legate loop | An operator lever on the Legate API (#593): `recover`, `merge`, `relaunch`, `resend_threads`, `tick`, `pause`, `resume`. Carries `march.operator` and `march.operator.action`. A child of the slice trace for slice levers, a root for the profile levers. Errored on refusal. Respond and requeue keep `legate.respond` / `legate.requeue.request` and add `march.operator` |
+| `legate.operator-merge` | Legate loop | The tick's execution of an accepted merge-now request (#593): the squash-merge, or a refusal/failed merge (errored, with `march.error`). `legate.operator.merge` records only the API's acceptance |
 | `hatchery.spawn` | orchestrator | `runHatcherySpawn` |
 | `spawn.start` | orchestrator | container create/start |
 | `spawn.end` | orchestrator | `waitForSpawnContainer` |

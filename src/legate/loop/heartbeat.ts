@@ -95,6 +95,13 @@ export function runHeartbeat(out: CoordinatorOutput, deps: HeartbeatDeps): any {
     event(meta.processor_events_path, { paired_legate: meta.paired_legate, ...a });
     log("[" + ts + "] " + a.action + " " + a.slice_id + (a.operator ? " (by " + a.operator + ")" : "") + ": " + (a.detail || ""));
   }
+  // Operator merge-now (#593): its actions are full event objects (kind
+  // "operator-merge"; a refusal or failed merge is an `operator-merge-refused`
+  // action, so its failures list is not logged twice).
+  for (const a of out.results.mergeNow?.actions ?? []) {
+    event(meta.processor_events_path, { paired_legate: meta.paired_legate, ...a });
+    log("[" + ts + "] " + a.action + " " + a.slice_id + ": " + (a.detail || ""));
+  }
   // cleanup actions are already full event objects.
   for (const cleanup of out.results.cleanup.actions) {
     event(meta.processor_events_path, cleanup);
