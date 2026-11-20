@@ -186,7 +186,20 @@ export type EventBody =
    * forensics-only. It is intentionally NOT in `POST /events`' accepted set: only
    * the admin route authors it, never a client.
    */
-  | { type: "admin.event.appended"; appendedSeq: number; operator: string; note: string };
+  | { type: "admin.event.appended"; appendedSeq: number; operator: string; note: string }
+  /**
+   * A profile's merge policy changed through `POST /profiles` (#593). History
+   * only — the policy itself lives in the profile registry, which the legate
+   * reads live each tick — so the reducer ignores it. `previous`/`mergePolicy`
+   * are the before/after policy objects (null when unset). Authored only by
+   * Herald's profile route (never accepted on `POST /events`); who changed it is
+   * the envelope `operator`/`note`.
+   */
+  | {
+      type: "profile.merge_policy.changed";
+      mergePolicy: Record<string, unknown> | null;
+      previous: Record<string, unknown> | null;
+    };
 
 /** The discriminator values — also the `march.herald.events` metric labels. */
 export type EventType = EventBody["type"];
@@ -272,6 +285,7 @@ export function entityRefOf(body: EventBody): EntityRef {
     case "state.ok":
     case "admin.event.appended":
     case "review.backoff":
+    case "profile.merge_policy.changed":
       return { kind: "system", id: "all" };
   }
 }
@@ -665,6 +679,9 @@ export function reduce(state: SystemState, event: HeraldEvent): SystemState {
       // Forensics-only (#265): the paired audit row never moves system state.
       // The corrective event it records is folded by its OWN type. Still advance
       // seq/ts below so the projection's cursor tracks every appended row.
+      break;
+    case "profile.merge_policy.changed":
+      // History only (#593): the registry is the policy's source of truth.
       break;
   }
   state.seq = event.seq;

@@ -54,7 +54,7 @@ export async function buildServer(
     options.profileStore ?? new ProfileStore(options.profileStoreOptions);
   const app = Fastify({ loggerInstance: logger });
   await registerRoutes(app, { store, profileStore, getObserveStatus: options.getObserveStatus });
-  await registerProfileRoutes(app, { store: profileStore });
+  await registerProfileRoutes(app, { store: profileStore, events: store });
   return { app, store, profileStore };
 }
 

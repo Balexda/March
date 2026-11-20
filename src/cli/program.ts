@@ -1579,7 +1579,11 @@ mergePolicyCmd
   .option("--no-coderabbit-initial-review", "Stop requesting first CodeRabbit reviews")
   .option("--json <json>", "Replace the entire policy from a JSON string")
   .option("--clear", "Clear the profile policy and restore built-in defaults")
+  .option("--operator <name>", "Who is making the change, for the event log (default: $MARCH_OPERATOR, else your OS username)")
+  .option("--reason <text>", "Why — recorded with the profile.merge_policy.changed event")
   .action(async (profileName: string, opts: VerbPolicyEdits & {
+    operator?: string;
+    reason?: string;
     taskType?: string;
     approval: boolean;
     changesRequested: boolean;
@@ -1685,6 +1689,9 @@ mergePolicyCmd
         marchCliPath: existing.marchCliPath,
         mode: existing.mode,
         mergePolicy: policy,
+      }, {
+        operator: resolveOperator(opts.operator),
+        ...(opts.reason?.trim() ? { note: opts.reason.trim() } : {}),
       });
       console.log(`Updated merge policy for "${record.profile}":`);
       console.log(JSON.stringify(record.mergePolicy ?? {}, null, 2));
