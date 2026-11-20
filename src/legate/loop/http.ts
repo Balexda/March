@@ -146,6 +146,8 @@ export interface LoopHttpContext {
   readonly requestRecovery?: (input: RecoverInput) => Promise<OperatorActionResult>;
   /** Request an operator merge-now (#593). */
   readonly requestMerge?: (input: SliceLeverInput) => Promise<OperatorActionResult>;
+  /** Request an operator steward relaunch (#593). */
+  readonly requestRelaunch?: (input: SliceLeverInput) => Promise<OperatorActionResult>;
   /** Run a tick now (#593). */
   readonly requestTick?: (input: ProfileLeverInput) => Promise<ProfileLeverResult>;
   /** Pause / resume fresh dispatch (#593). */
@@ -535,6 +537,12 @@ export function buildLoopServer(ctx: LoopHttpContext): FastifyInstance {
   // the head SHA re-read from GitHub. 409 for no PR / already merged / closed.
   // Replaces running `gh pr merge` out of band, so the merge is in the log.
   registerSliceLever(app, "/slices/:sliceId/merge", "merge", ctx.requestMerge);
+
+  // Operator RELAUNCH (#593): replace the slice's steward — remove a still-live
+  // session (worktree kept) and attach a fresh one to the preserved PR/branch,
+  // bypassing the self-heal backoff. 409 for a merged / PR-less slice (use
+  // requeue to start one over).
+  registerSliceLever(app, "/slices/:sliceId/relaunch", "relaunch", ctx.requestRelaunch);
 
   // Profile-level levers (#593). `profile` (body or `?profile=`) narrows to one
   // profile; omitted = every registered profile.

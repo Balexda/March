@@ -76,6 +76,7 @@ const EVENT_TYPES: ReadonlySet<EventType> = new Set<EventType>([
   "slice.requeue.refused",
   "retry.counted",
   "slice.merge.requested",
+  "slice.relaunch.requested",
   "slice.operator.refused",
   "legate.tick.requested",
   "dispatch.paused",
@@ -98,6 +99,7 @@ const SLICE_TYPES: ReadonlySet<string> = new Set([
   "slice.requeue.requested",
   "slice.requeue.refused",
   "slice.merge.requested",
+  "slice.relaunch.requested",
   "slice.operator.refused",
 ]);
 

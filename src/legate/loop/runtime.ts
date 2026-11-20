@@ -636,6 +636,33 @@ export async function requestMerge(input: SliceLeverInput): Promise<OperatorActi
 }
 
 /**
+ * Operator RELAUNCH (#593): replace the slice's steward — remove a still-live
+ * session (keeping its worktree) and attach a fresh one to the preserved PR and
+ * branch, bypassing the self-heal backoff. Appends `slice.relaunch.requested`;
+ * the relaunch handler acts on it (a tick is kicked off right away). An errored
+ * session can also be restarted IN PLACE by castra-recover; this is the lever for
+ * a steward that is alive but wedged or misbehaving.
+ */
+export async function requestRelaunch(input: SliceLeverInput): Promise<OperatorActionResult> {
+  const target = sliceTarget(input);
+  if (!target.ok) return finishOperatorAction("relaunch", input, target.result);
+  const slice = target.slice;
+  const pr = observedPr(input.profile, input.sliceId, slice);
+  const refuse = (error: string) =>
+    finishOperatorAction("relaunch", input, { ok: false, status: 409, profile: input.profile, sliceId: input.sliceId, error });
+  if (slice.stage === "merged" || pr.state === "MERGED") return refuse(`slice "${input.sliceId}" is merged — there is no steward to relaunch.`);
+  if (slice.stage === "hatchery-pending") return refuse(`slice "${input.sliceId}" has a spawn in progress (hatchery-pending).`);
+  if (pr.number === null || typeof slice.branch !== "string" || slice.branch.length === 0) {
+    return refuse(`slice "${input.sliceId}" has no PR and branch to re-attach a steward to — use requeue to start it over.`);
+  }
+  const reason = input.reason ? { reason: input.reason } : {};
+  const failed = await appendOperatorRequest(input, { type: "slice.relaunch.requested", sliceId: input.sliceId, ...reason }, "relaunch");
+  if (failed) return finishOperatorAction("relaunch", input, failed);
+  void scheduler().runOnce();
+  return finishOperatorAction("relaunch", input, { ok: true, profile: input.profile, sliceId: input.sliceId, requested: true, prNumber: pr.number });
+}
+
+/**
  * Operator RECOVER (#593): request the graduated recovery ladder for a slice —
  * the side-effecting half of `POST /slices/:sliceId/recover`. Appends an
  * attributed `slice.recovery.requested`; the recovery handler walks the ladder

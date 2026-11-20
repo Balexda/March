@@ -5,6 +5,7 @@ import { emptyHandlerResult } from "../state/types.js";
 import { isWorkerSession } from "../pure/session.js";
 import { execText } from "../clients/exec.js";
 import { unescalate } from "../steps/unescalate.js";
+import { dropSession } from "../state/mutations.js";
 import {
   backoffMs,
   parseMs,
@@ -161,9 +162,13 @@ export interface RelaunchDecision {
   /** "ladder" = driven by the operator's graduated recovery (`recovery_rung`):
    *  bounded by RELAUNCH_LIMIT, every tick, not rate-limited/backed-off.
    *  "auto" = the self-healing path: exponential backoff + AIMD rate. */
-  readonly mode: "ladder" | "auto";
+  readonly mode: "ladder" | "auto" | "operator";
   /** auto only: an escalated-infra slice to un-escalate before launching. */
   readonly unescalateStage?: string;
+  /** operator only (#593): the `slice.relaunch.requested` seq this settles. */
+  readonly requestSeq?: number;
+  /** operator only: why the request cannot be carried out (refused in apply). */
+  readonly refusal?: string;
   /** auto only: more backoff-eligible candidates existed than the AIMD rate R
    *  allowed this tick — a clean sweep should additively increase R. */
   readonly autoRateLimited?: boolean;
@@ -262,6 +267,12 @@ export function assess(state: LoopState): RelaunchDecision[] {
   // least-destructive-first descent (#413).
   const requested = new Set(Array.isArray(state.recoveryRequests) ? state.recoveryRequests : []);
 
+  // Operator relaunch requests (#593) come first and own their slices this tick:
+  // they bypass the liveness skip, the backoff and the AIMD rate, and replace a
+  // still-live steward. Requests already settled this incarnation are skipped.
+  const operator = operatorDecisions(state, worktreesParent);
+  const operatorOwned = new Set(operator.map((d) => d.sliceId));
+
   const ladder: RelaunchDecision[] = [];
   // Auto candidates collected first, then sorted + rate-capped.
   const autoCandidates: { sliceId: string; slice: any; attempt: number; until: number; unescalateStage?: string }[] =
@@ -270,6 +281,7 @@ export function assess(state: LoopState): RelaunchDecision[] {
   for (const [sliceId, slice] of Object.entries(state.slices) as [string, any][]) {
     if (!slice || typeof slice !== "object") continue;
     if (requested.has(sliceId)) continue; // the recovery ladder owns it this tick
+    if (operatorOwned.has(sliceId)) continue; // an operator relaunch owns it this tick
     const pr = slice.pr || {};
     if (!pr.number) continue; // relaunch re-attaches to an EXISTING PR
     const rawBranch = typeof slice.branch === "string" ? slice.branch : "";
@@ -331,7 +343,61 @@ export function assess(state: LoopState): RelaunchDecision[] {
     ...(c.unescalateStage ? { unescalateStage: c.unescalateStage } : {}),
   }));
 
-  return [...ladder, ...auto];
+  return [...operator, ...ladder, ...auto];
+}
+
+/** Warm record of operator relaunch request seqs already settled (see requeue). */
+function relaunchHandledSeqs(raw: any): Record<string, number> {
+  if (!raw.relaunch_handled_seq || typeof raw.relaunch_handled_seq !== "object") raw.relaunch_handled_seq = {};
+  return raw.relaunch_handled_seq;
+}
+
+/** Stages an operator relaunch may not touch: nothing to re-attach to. */
+const OPERATOR_RELAUNCH_REFUSED_STAGES = new Set(["merged", "hatchery-pending"]);
+
+/** Pure: one `mode:"operator"` decision per pending operator relaunch request. */
+function operatorDecisions(state: LoopState, worktreesParent: string): RelaunchDecision[] {
+  const handled = (state.raw?.relaunch_handled_seq ?? {}) as Record<string, number>;
+  const out: RelaunchDecision[] = [];
+  for (const { sliceId, seq } of state.relaunchRequests ?? []) {
+    if (typeof handled[sliceId] === "number" && seq <= handled[sliceId]) continue;
+    const slice = state.slices?.[sliceId];
+    const refuse = (refusal: string) =>
+      out.push({
+        sliceId,
+        bareBranch: "",
+        featureBranch: "",
+        expectedDirName: "",
+        worktreePath: "",
+        launchTitle: "",
+        prNumber: 0,
+        prUrl: "",
+        attempt: 0,
+        limit: 0,
+        mode: "operator",
+        requestSeq: seq,
+        refusal,
+      });
+    if (!slice || typeof slice !== "object" || slice.recovered) {
+      refuse("slice is not in flight (unknown, archived or already recovered)");
+      continue;
+    }
+    if (OPERATOR_RELAUNCH_REFUSED_STAGES.has(slice.stage)) {
+      refuse(`slice is ${slice.stage} — there is no steward to relaunch`);
+      continue;
+    }
+    if (!slice.pr?.number || typeof slice.branch !== "string" || slice.branch.length === 0) {
+      refuse("slice has no PR and branch to re-attach a steward to (requeue it instead)");
+      continue;
+    }
+    out.push({
+      ...baseDecision(sliceId, slice, 0, worktreesParent),
+      mode: "operator",
+      requestSeq: seq,
+      ...(slice.stage === "escalated" ? { unescalateStage: "pr-open" } : {}),
+    });
+  }
+  return out;
 }
 
 /**
@@ -465,7 +531,18 @@ export async function apply(
   // A failed automatic attempt schedules the next backoff window and signals the
   // AIMD decrease. (Ladder failures advance only the counter — the operator path
   // is not rate-limited.)
-  const recordFailure = (d: RelaunchDecision): void => {
+  // An operator relaunch (#593) that cannot be carried out is settled with a
+  // refusal (no retry budget, no backoff) — the operator re-asks once fixed.
+  const refuseOperator = (d: RelaunchDecision, reason: string): void => {
+    if (typeof d.requestSeq === "number") relaunchHandledSeqs(state.raw)[d.sliceId] = d.requestSeq;
+    ctx.emitTransition?.({ type: "slice.operator.refused", sliceId: d.sliceId, action: "relaunch", reason });
+  };
+
+  const recordFailure = (d: RelaunchDecision, detail: string): void => {
+    if (d.mode === "operator") {
+      refuseOperator(d, detail);
+      return;
+    }
     recordAttempt(d);
     if (d.mode !== "auto") return;
     autoFailures++;
@@ -478,7 +555,33 @@ export async function apply(
       if (d.autoRateLimited) autoRateLimited = true;
     }
 
+    if (d.mode === "operator" && d.refusal) {
+      refuseOperator(d, d.refusal);
+      res.mutated = true;
+      res.actions.push({ action: "relaunch-refused", sliceId: d.sliceId, sessionId: null, detail: "operator relaunch refused: " + d.refusal });
+      continue;
+    }
+
     const slice = state.slices[d.sliceId];
+
+    // Operator relaunch (#593): REPLACE a still-live steward — remove its session
+    // (keeping the worktree, which the fresh steward re-attaches to) before the
+    // launch. A dead or absent session needs no removal.
+    if (d.mode === "operator") {
+      const prior = typeof slice.worker_session_id === "string" ? slice.worker_session_id : "";
+      if (prior && state.sessionsById.get(prior)) {
+        try {
+          await ctx.castra.removeSession({ profile: ctx.meta.profile, sessionId: prior, pruneWorktree: false, traceKey: d.sliceId });
+          dropSession(state, prior);
+        } catch (err) {
+          const detail = "removing the live steward " + prior + " failed: " + errMsg(err);
+          recordFailure(d, detail);
+          res.mutated = true;
+          res.actions.push({ action: "relaunch-failed", sliceId: d.sliceId, sessionId: prior, detail: "operator relaunch: " + detail });
+          continue;
+        }
+      }
+    }
 
     // Auto path: an escalated-infra slice is un-escalated in place first so the
     // relaunch re-attaches to its preserved PR/worktree (never nukes).
@@ -487,7 +590,9 @@ export async function apply(
         slice,
         d.unescalateStage,
         ctx.ts,
-        "Auto-recovery: un-escalated for steward relaunch (infra failure, #stranded)",
+        d.mode === "operator"
+          ? "Operator relaunch: un-escalated to re-attach a fresh steward (#593)"
+          : "Auto-recovery: un-escalated for steward relaunch (infra failure, #stranded)",
       );
       if (stageChanged) {
         ctx.emitTransition?.({ type: "slice.stage.changed", sliceId: d.sliceId, stage: d.unescalateStage });
@@ -498,16 +603,12 @@ export async function apply(
       try {
         await deps.ensureWorktree(d.worktreePath, d.featureBranch, state.repoPath as string);
       } catch (err) {
-        recordFailure(d);
+        const detail =
+          "could not recreate worktree at " + d.worktreePath + " from branch " + d.featureBranch +
+          " (" + attemptLabel(d) + "): " + errMsg(err);
+        recordFailure(d, detail);
         res.mutated = true;
-        res.actions.push({
-          action: "relaunch-failed",
-          sliceId: d.sliceId,
-          sessionId: null,
-          detail:
-            "could not recreate worktree at " + d.worktreePath + " from branch " + d.featureBranch +
-            " (" + attemptLabel(d) + "): " + errMsg(err),
-        });
+        res.actions.push({ action: "relaunch-failed", sliceId: d.sliceId, sessionId: null, detail });
         continue;
       }
     }
@@ -545,15 +646,17 @@ export async function apply(
         liveWorktree = relaunched.worktreePath;
       }
     } catch (err) {
-      recordFailure(d);
+      const detail = "castra launch failed (" + attemptLabel(d) + "): " + errMsg(err);
+      recordFailure(d, detail);
       res.mutated = true;
-      res.actions.push({ action: "relaunch-failed", sliceId: d.sliceId, sessionId: null, detail: "castra launch failed (" + attemptLabel(d) + "): " + errMsg(err) });
+      res.actions.push({ action: "relaunch-failed", sliceId: d.sliceId, sessionId: null, detail });
       continue;
     }
     if (!newSessionId) {
-      recordFailure(d);
+      const detail = "castra launch returned no identifiable new session (" + attemptLabel(d) + ")";
+      recordFailure(d, detail);
       res.mutated = true;
-      res.actions.push({ action: "relaunch-failed", sliceId: d.sliceId, sessionId: null, detail: "castra launch returned no identifiable new session (" + attemptLabel(d) + ")" });
+      res.actions.push({ action: "relaunch-failed", sliceId: d.sliceId, sessionId: null, detail });
       continue;
     }
 
@@ -584,7 +687,13 @@ export async function apply(
     // re-attaches to the real worktree instead of re-guessing a colliding one
     // (#410/#412).
     ctx.emitTransition?.({ type: "steward.relaunched", sliceId: d.sliceId, sessionId: newSessionId, worktreePath: liveWorktree });
-    recordAttempt(d);
+    if (d.mode === "operator") {
+      // Settled by the `steward.relaunched` above (the fold clears the request);
+      // the warm seq keeps the in-flight fold from re-reading it next tick.
+      if (typeof d.requestSeq === "number") relaunchHandledSeqs(state.raw)[d.sliceId] = d.requestSeq;
+    } else {
+      recordAttempt(d);
+    }
     // Healed: clear any pending backoff window so a future re-strand re-probes
     // promptly (its first backoff is short again).
     if (d.mode === "auto") clearBackoff(state.raw, RELAUNCH_DOMAIN, d.sliceId);
@@ -612,5 +721,6 @@ export async function apply(
 /** Human-readable attempt label: bounded "N/limit" for the ladder, open-ended
  *  "attempt N, backing off" for the self-healing path. */
 function attemptLabel(d: RelaunchDecision): string {
+  if (d.mode === "operator") return "operator request";
   return d.mode === "ladder" ? "attempt " + d.attempt + "/" + d.limit : "auto attempt " + d.attempt + ", backing off";
 }

@@ -652,3 +652,28 @@ describe("POST /slices/:sliceId/merge (#593)", () => {
     }
   });
 });
+
+describe("POST /slices/:sliceId/relaunch (#593)", () => {
+  it("forwards profile + attribution; 202 / 409 / 501", async () => {
+    const seen: SliceLeverInput[] = [];
+    const app = buildLoopServer({
+      startedAtMs: 0,
+      getSnapshot: () => snapshot(),
+      env: {},
+      requestRelaunch: async (input) => {
+        seen.push(input);
+        return input.sliceId === "nopr" ? { ok: false, status: 409, error: "no PR" } : { ok: true, requested: true };
+      },
+    });
+    const bare = buildLoopServer({ startedAtMs: 0, getSnapshot: () => snapshot(), env: {} });
+    try {
+      expect((await app.inject({ method: "POST", url: "/slices/s1/relaunch?profile=march", payload: { operator: "ana" } })).statusCode).toBe(202);
+      expect(seen[0]).toEqual({ profile: "march", sliceId: "s1", operator: "ana" });
+      expect((await app.inject({ method: "POST", url: "/slices/nopr/relaunch", payload: { profile: "march" } })).statusCode).toBe(409);
+      expect((await bare.inject({ method: "POST", url: "/slices/s1/relaunch", payload: { profile: "march" } })).statusCode).toBe(501);
+    } finally {
+      await app.close();
+      await bare.close();
+    }
+  });
+});

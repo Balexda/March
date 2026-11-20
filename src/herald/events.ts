@@ -212,6 +212,14 @@ export type EventBody =
    * or by `slice.operator.refused {action:"merge"}`.
    */
   | { type: "slice.merge.requested"; sliceId: string; prNumber: number; reason?: string }
+  /**
+   * Operator RELAUNCH (#593): replace the slice's steward on the next tick —
+   * remove a still-live session (keeping the worktree) and attach a fresh one to
+   * the preserved PR/branch, bypassing the self-heal backoff. Folds to
+   * {@link SliceState.relaunchRequested}; cleared by `steward.relaunched` or by
+   * `slice.operator.refused {action:"relaunch"}`.
+   */
+  | { type: "slice.relaunch.requested"; sliceId: string; reason?: string }
   /** The legate could not carry out an operator slice lever (#593): `action`
    *  names which, `reason` why. Clears that lever's pending request. */
   | { type: "slice.operator.refused"; sliceId: string; action: OperatorSliceAction; reason: string }
@@ -295,6 +303,7 @@ export function entityRefOf(body: EventBody): EntityRef {
     case "slice.requeue.requested":
     case "slice.requeue.refused":
     case "slice.merge.requested":
+    case "slice.relaunch.requested":
     case "slice.operator.refused":
       return { kind: "slice", id: body.sliceId };
     case "session.changed":
@@ -386,6 +395,8 @@ export interface SliceState {
   requeueRequested?: { seq: number; closePr: boolean; operator?: string; reason?: string };
   /** Pending operator MERGE NOW (#593): the request seq and the PR it targets. */
   mergeRequested?: { seq: number; prNumber: number };
+  /** Pending operator RELAUNCH (#593): the request seq. */
+  relaunchRequested?: { seq: number };
 }
 
 /** The folded system state — the projection both services read. */
@@ -663,6 +674,8 @@ export function reduce(state: SystemState, event: HeraldEvent): SystemState {
     }
     case "steward.relaunched": {
       const slice = sliceOf(state, event.sliceId);
+      // A fresh steward settles any pending operator relaunch (#593).
+      delete slice.relaunchRequested;
       if (event.sessionId !== undefined) slice.sessionId = event.sessionId;
       // Record the LIVE worktree the relaunch attached to (#410/#412) so a
       // cold-start rebuild keeps it instead of the relaunch handler re-guessing a
@@ -718,9 +731,16 @@ export function reduce(state: SystemState, event: HeraldEvent): SystemState {
       slice.mergeRequested = { seq: event.seq, prNumber: event.prNumber };
       break;
     }
+    case "slice.relaunch.requested": {
+      const slice = state.slices[event.sliceId];
+      if (!slice || slice.recovered) break;
+      slice.relaunchRequested = { seq: event.seq };
+      break;
+    }
     case "slice.operator.refused": {
       const slice = state.slices[event.sliceId];
       if (slice && event.action === "merge") delete slice.mergeRequested;
+      if (slice && event.action === "relaunch") delete slice.relaunchRequested;
       break;
     }
     case "retry.counted":

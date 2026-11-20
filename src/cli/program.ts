@@ -1410,6 +1410,32 @@ leverOptions(
   }
 });
 
+leverOptions(
+  legate
+    .command("relaunch <sliceId>")
+    .description(
+      "Replace a slice's steward: remove its session if it is still alive (the worktree is kept) and attach a fresh steward to the existing PR and branch, skipping the self-heal backoff. For a steward that is alive but wedged; use `requeue` to start a slice over. Calls the running legate's HTTP API (MARCH_LEGATE_URL).",
+    ),
+).action(async (sliceId: string, opts: LeverOpts) => {
+  commandHandled = true;
+  const id = requireSliceId(sliceId, "relaunch");
+  if (!id) return;
+  try {
+    const profileName = await resolveSliceProfile(opts.profile, "relaunch");
+    if (!profileName) return;
+    const result = await postLever<{ prNumber?: number }>(`/slices/${encodeURIComponent(id)}/relaunch`, { profile: profileName, ...leverAttribution(opts) }, "relaunch");
+    if (!result) return;
+    console.log(
+      `Relaunch requested for ${id} (profile=${profileName}, PR #${result.prNumber ?? "?"}). ` +
+        "The legate replaces the steward on the tick it just started; a failure is recorded as slice.operator.refused.",
+    );
+    process.exitCode = SUCCESS;
+  } catch (err) {
+    process.stderr.write((err as Error).message + "\n");
+    process.exitCode = ERROR;
+  }
+});
+
 /** Add the `--profile` / `--operator` / `--reason` options to a profile-level lever. */
 function profileLeverOptions(cmd: Command): Command {
   return cmd

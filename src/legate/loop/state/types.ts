@@ -83,6 +83,8 @@ export interface LoopState {
   requeueRequests?: RequeueRequest[];
   /** Pending operator MERGE NOW requests (#593), read from the fold every tick. */
   mergeRequests?: MergeRequest[];
+  /** Pending operator RELAUNCH requests (#593), read from the fold every tick. */
+  relaunchRequests?: { sliceId: string; seq: number }[];
   /**
    * Set while an operator has paused fresh dispatch for this profile (#593),
    * read from the fold every tick. The coordinator skips the dispatch handler;

@@ -632,3 +632,16 @@ describe("operator merge-now fold (#593)", () => {
     expect(foldEvents([ev({ type: "slice.merge.requested", sliceId: "nope", prNumber: 1 })]).slices.nope).toBeUndefined();
   });
 });
+
+describe("operator relaunch fold (#593)", () => {
+  it("slice.relaunch.requested is pending until steward.relaunched or a relaunch refusal", () => {
+    seq = 0;
+    const base = foldEvents([ev({ type: "slice.dispatched", sliceId: "s1", branch: "smithy/forge/s1" })]);
+    const requested = foldEvents([ev({ type: "slice.relaunch.requested", sliceId: "s1" })], base);
+    expect(requested.slices.s1!.relaunchRequested).toEqual({ seq: 2 });
+    const done = foldEvents([ev({ type: "steward.relaunched", sliceId: "s1", sessionId: "fresh" })], structuredClone(requested));
+    expect(done.slices.s1!.relaunchRequested).toBeUndefined();
+    const refused = foldEvents([ev({ type: "slice.operator.refused", sliceId: "s1", action: "relaunch", reason: "no PR" })], structuredClone(requested));
+    expect(refused.slices.s1!.relaunchRequested).toBeUndefined();
+  });
+});

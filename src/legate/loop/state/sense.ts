@@ -363,6 +363,7 @@ export async function senseFromHerald(deps: FoldDeps, herald: HeraldInbox, prevR
   const perSlice: Record<string, SliceExternalState> = {};
   const requeueRequests: RequeueRequest[] = [];
   const mergeRequests: MergeRequest[] = [];
+  const relaunchRequests: { sliceId: string; seq: number }[] = [];
   for (const [sliceId, s] of Object.entries(sys.slices)) {
     // Operator requeue (#588/#593): read straight off the fold every tick — it is
     // durable until the legate's rung-3 tombstone or `slice.requeue.refused`
@@ -370,6 +371,7 @@ export async function senseFromHerald(deps: FoldDeps, herald: HeraldInbox, prevR
     if (s.requeueRequested && !s.recovered) requeueRequests.push({ sliceId, ...s.requeueRequested });
     // Operator merge-now (#593): same durable read-every-tick shape.
     if (s.mergeRequested && !s.recovered) mergeRequests.push({ sliceId, ...s.mergeRequested });
+    if (s.relaunchRequested && !s.recovered) relaunchRequests.push({ sliceId, seq: s.relaunchRequested.seq });
     const entry: SliceExternalState = {};
     if (s.pr !== undefined) entry.pr = s.pr;
     if (s.recentOutput !== undefined) entry.recentOutput = s.recentOutput;
@@ -396,6 +398,7 @@ export async function senseFromHerald(deps: FoldDeps, herald: HeraldInbox, prevR
     recoveryRequests: herald.takeRecoveryRequests?.() ?? [],
     requeueRequests,
     mergeRequests,
+    relaunchRequests,
     // Operator pause (#593): durable in the fold, so a restart stays paused.
     ...(sys.dispatchPaused ? { dispatchPaused: { ...sys.dispatchPaused } } : {}),
   };

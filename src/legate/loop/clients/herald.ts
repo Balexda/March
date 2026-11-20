@@ -64,6 +64,7 @@ export type TransitionEvent = Extract<
       // Operator slice levers (#593): the HTTP endpoint appends the request; the
       // handler appends a refusal when it cannot carry it out.
       | "slice.merge.requested"
+      | "slice.relaunch.requested"
       | "slice.operator.refused"
       // Profile-level operator levers (#593).
       | "legate.tick.requested"

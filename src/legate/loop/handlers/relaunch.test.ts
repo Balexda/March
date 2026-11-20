@@ -365,3 +365,79 @@ describe("relaunch handler", () => {
     expect(relaunchBackoffMs(99, "slice-x")).toBeLessThanOrEqual(Math.round(RELAUNCH_BACKOFF_MAX_MS * 1.2));
   });
 });
+
+describe("operator relaunch (#593)", () => {
+  const deps: RelaunchDeps = { worktreeExists: () => true, ensureWorktree: vi.fn(async () => {}) };
+  const emitted = (c: HandlerContext): any[] => (c.emitTransition as any).mock.calls.map((a: any[]) => a[0]);
+
+  it("replaces a LIVE steward: removes its session (keeping the worktree) then launches a fresh one", async () => {
+    const raw = { slices: { s: eligibleSlice({ worker_session_id: "live", worktree_path: "/wt/s" }) } };
+    const live = { id: "live", group: "legate-workers" };
+    const state = loopState({
+      raw,
+      slices: raw.slices,
+      sessions: [live],
+      sessionsById: new Map([["live", live]]),
+      relaunchRequests: [{ sliceId: "s", seq: 12 }],
+    });
+    const decisions = assess(state);
+    expect(decisions).toEqual([expect.objectContaining({ sliceId: "s", mode: "operator", requestSeq: 12 })]);
+
+    const c = ctx(() => ({ sessionId: "fresh", worktreePath: "/wt/s" }));
+    c.castra.removeSession = vi.fn(async () => ({ removed: true }));
+    const res = await apply(decisions, c, state, deps);
+    expect(c.castra.removeSession).toHaveBeenCalledWith({ profile: "p", sessionId: "live", pruneWorktree: false, traceKey: "s" });
+    expect(c.castra.launchSession).toHaveBeenCalledTimes(1);
+    expect(state.slices.s.worker_session_id).toBe("fresh");
+    expect(emitted(c)).toContainEqual({ type: "steward.relaunched", sliceId: "s", sessionId: "fresh", worktreePath: "/wt/s" });
+    expect(res.actions[0]).toMatchObject({ action: "relaunch-steward", detail: expect.stringContaining("operator request") });
+    // No retry budget is spent, and the settled request is not re-read next tick.
+    expect((state.raw as any).transient_retry_counts).toBeUndefined();
+    expect(assess(state).filter((d) => d.mode === "operator")).toEqual([]);
+  });
+
+  it("un-escalates an escalated slice and ignores the self-heal backoff", async () => {
+    const raw = {
+      slices: { s: eligibleSlice({ stage: "escalated", escalated_reason: "needs_human_judgement" }) },
+      relaunch_backoff_until: { s: Number.MAX_SAFE_INTEGER },
+    };
+    const state = loopState({ raw, slices: raw.slices, relaunchRequests: [{ sliceId: "s", seq: 3 }] });
+    const [d] = assess(state);
+    expect(d).toMatchObject({ mode: "operator", unescalateStage: "pr-open" });
+    const c = ctx(() => ({ sessionId: "fresh" }));
+    await apply([d], c, state, deps);
+    expect(state.slices.s.stage).toBe("pr-open");
+    expect(emitted(c)).toContainEqual({ type: "slice.stage.changed", sliceId: "s", stage: "pr-open" });
+  });
+
+  it("refuses a slice with nothing to re-attach to, and a launch failure, without spending retry budget", async () => {
+    const raw = { slices: { noPr: eligibleSlice({ pr: {} }), boom: eligibleSlice() } };
+    const state = loopState({
+      raw,
+      slices: raw.slices,
+      relaunchRequests: [{ sliceId: "noPr", seq: 1 }, { sliceId: "boom", seq: 2 }, { sliceId: "ghost", seq: 3 }],
+    });
+    const decisions = assess(state);
+    expect(decisions.map((d) => [d.sliceId, d.refusal ? "refuse" : "go"])).toEqual([
+      ["noPr", "refuse"],
+      ["boom", "go"],
+      ["ghost", "refuse"],
+    ]);
+    const c = ctx(() => {
+      throw new Error("castra down");
+    });
+    await apply(decisions, c, state, deps);
+    const refusals = emitted(c).filter((e) => e.type === "slice.operator.refused");
+    expect(refusals.map((e) => e.sliceId)).toEqual(["noPr", "boom", "ghost"]);
+    expect(refusals.every((e) => e.action === "relaunch")).toBe(true);
+    expect(refusals[1].reason).toContain("castra down");
+    expect(emitted(c).some((e) => e.type === "retry.counted")).toBe(false);
+    expect(assess(state).filter((d) => d.mode === "operator")).toEqual([]);
+  });
+
+  it("an operator-owned slice is not also picked up by the auto path", () => {
+    const raw = { slices: { s: eligibleSlice() } };
+    const state = loopState({ raw, slices: raw.slices, relaunchRequests: [{ sliceId: "s", seq: 1 }] });
+    expect(assess(state).map((d) => d.mode)).toEqual(["operator"]);
+  });
+});
