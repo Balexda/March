@@ -685,14 +685,17 @@ export async function requestRelaunch(input: SliceLeverInput): Promise<OperatorA
     finishOperatorAction("relaunch", input, { ok: false, status: 409, profile: input.profile, sliceId: input.sliceId, error });
   if (slice.stage === "merged" || pr.state === "MERGED") return refuse(`slice "${input.sliceId}" is merged — there is no steward to relaunch.`);
   if (slice.stage === "hatchery-pending") return refuse(`slice "${input.sliceId}" has a spawn in progress (hatchery-pending).`);
-  if (pr.number === null || typeof slice.branch !== "string" || slice.branch.length === 0) {
+  // Same PR source as the relaunch handler (the warm `slice.pr`), so an accepted
+  // request is never one the handler then refuses for lacking a PR.
+  const warmPr = typeof slice.pr?.number === "number" && slice.pr.number > 0 ? slice.pr.number : null;
+  if (warmPr === null || typeof slice.branch !== "string" || slice.branch.length === 0) {
     return refuse(`slice "${input.sliceId}" has no PR and branch to re-attach a steward to — use requeue to start it over.`);
   }
   const reason = input.reason ? { reason: input.reason } : {};
   const failed = await appendOperatorRequest(input, { type: "slice.relaunch.requested", sliceId: input.sliceId, ...reason }, "relaunch");
   if (failed) return finishOperatorAction("relaunch", input, failed);
   void scheduler().runOnce();
-  return finishOperatorAction("relaunch", input, { ok: true, profile: input.profile, sliceId: input.sliceId, requested: true, prNumber: pr.number });
+  return finishOperatorAction("relaunch", input, { ok: true, profile: input.profile, sliceId: input.sliceId, requested: true, prNumber: warmPr });
 }
 
 /**
