@@ -612,6 +612,13 @@ describe("profile levers: tick / pause / resume (#593)", () => {
     try {
       expect((await app.inject({ method: "POST", url: "/tick", payload: { profile: "busy" } })).statusCode).toBe(409);
       expect((await app.inject({ method: "POST", url: "/dispatch/pause", payload: { operator: 1 } })).statusCode).toBe(400);
+      // A malformed profile is a 400, never a silent widen to every profile.
+      expect((await app.inject({ method: "POST", url: "/dispatch/pause", payload: { profile: 123 } })).statusCode).toBe(400);
+      expect((await app.inject({ method: "POST", url: "/dispatch/resume", payload: { profile: "" } })).statusCode).toBe(400);
+      expect((await app.inject({ method: "POST", url: "/dispatch/pause?profile=", payload: {} })).statusCode).toBe(400);
+      // Over Herald's attribution limits: refused before the lever runs.
+      expect((await app.inject({ method: "POST", url: "/dispatch/pause", payload: { operator: "x".repeat(129) } })).statusCode).toBe(400);
+      expect((await app.inject({ method: "POST", url: "/dispatch/pause", payload: { reason: "x".repeat(1001) } })).statusCode).toBe(400);
       expect((await bare.inject({ method: "POST", url: "/tick", payload: {} })).statusCode).toBe(501);
       expect((await bare.inject({ method: "POST", url: "/dispatch/resume", payload: {} })).statusCode).toBe(501);
     } finally {

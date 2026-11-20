@@ -188,9 +188,16 @@ function readTarget(request: FastifyRequest): { profile: string; sliceId: string
 
 /** Parse the optional `operator` / `reason` attribution off a lever body (#593). */
 export function readOperatorFields(body: Record<string, unknown>): { ok: true; fields: OperatorFields } | { ok: false; error: string } {
+  // Herald's attribution limits (operator ≤128, note ≤1000, measured untrimmed):
+  // checked here, before any lever side effect, so a lever never acts and then
+  // fails to record who asked.
+  const limits = { operator: 128, reason: 1000 } as const;
   for (const field of ["operator", "reason"] as const) {
     if (body[field] !== undefined && typeof body[field] !== "string") {
       return { ok: false, error: `${field} must be a string.` };
+    }
+    if (typeof body[field] === "string" && (body[field] as string).length > limits[field]) {
+      return { ok: false, error: `${field} must be at most ${limits[field]} characters.` };
     }
   }
   const operator = typeof body.operator === "string" ? body.operator.trim() : "";
@@ -709,6 +716,13 @@ function registerProfileLever(
 ): void {
   app.post(routePath, async (request, reply) => {
     const { profile, body } = readTarget(request);
+    // An omitted profile means "every profile"; a supplied but malformed one
+    // must not silently widen to all of them.
+    const query = (request.query ?? {}) as Record<string, unknown>;
+    if (!profile && (body.profile !== undefined || query.profile !== undefined)) {
+      reply.code(400);
+      return { ok: false, error: "profile must be a non-empty string (omit it to target every profile)." };
+    }
     const attribution = readOperatorFields(body);
     if (!attribution.ok) {
       reply.code(400);
