@@ -1398,16 +1398,19 @@ legate
     try {
       res = await fetch(url, { signal: AbortSignal.timeout(15_000) });
     } catch (err) {
-      process.stderr.write(
+      const error =
         `Could not reach the legate service at ${base}: ${(err as Error).message}. ` +
-          "Is `march legate serve` up? Set MARCH_LEGATE_URL to override.\n",
-      );
+        "Is `march legate serve` up? Set MARCH_LEGATE_URL to override.";
+      if (opts.json) console.log(JSON.stringify({ ok: false, error }, null, 2));
+      else process.stderr.write(error + "\n");
       process.exitCode = ERROR;
       return;
     }
     const body = (await res.json().catch(() => ({}))) as any;
     if (!res.ok || !body?.ok) {
-      process.stderr.write((body?.error ?? `legate queue failed (HTTP ${res.status}).`) + "\n");
+      const error = body?.error ?? `legate queue failed (HTTP ${res.status}).`;
+      if (opts.json) console.log(JSON.stringify({ ...body, ok: false, error, status: res.status }, null, 2));
+      else process.stderr.write(error + "\n");
       process.exitCode = ERROR;
       return;
     }
