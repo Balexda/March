@@ -8,11 +8,13 @@ import {
   buildStatus,
   escalationsForWorkingState,
   resolveRequeueTarget,
+  resolveResendTarget,
   resolveRespondTarget,
   type LoopHttpContext,
   type ProfileLeverInput,
   type RecoverInput,
   type RequeueInput,
+  type ResendThreadsInput,
   type SliceLeverInput,
   type RespondInput,
 } from "./http.js";
@@ -675,5 +677,79 @@ describe("POST /slices/:sliceId/relaunch (#593)", () => {
       await app.close();
       await bare.close();
     }
+  });
+});
+
+describe("POST /slices/:sliceId/review-threads/resend (#593)", () => {
+  function ctxWithResend(seen: ResendThreadsInput[]): LoopHttpContext {
+    return {
+      startedAtMs: 0,
+      getSnapshot: () => snapshot(),
+      env: {},
+      resendReviewThreads: async (input) => {
+        seen.push(input);
+        return input.threadIds?.includes("gone")
+          ? { ok: false, status: 400, error: "unknown or resolved review thread(s)" }
+          : { ok: true, delivered: true, threadIds: input.threadIds ?? ["t1", "t2"] };
+      },
+    };
+  }
+
+  it("200s on delivery, normalizing thread ids (numbers, dupes); omitted = all", async () => {
+    const seen: ResendThreadsInput[] = [];
+    const app = buildLoopServer(ctxWithResend(seen));
+    try {
+      const all = await app.inject({ method: "POST", url: "/slices/s1/review-threads/resend", payload: { profile: "march" } });
+      expect(all.statusCode).toBe(200);
+      expect(seen[0]).toEqual({ profile: "march", sliceId: "s1" });
+      const some = await app.inject({ method: "POST", url: "/slices/s1/review-threads/resend", payload: { profile: "march", threadIds: [12, "12", " t3 "], operator: "ana" } });
+      expect(some.statusCode).toBe(200);
+      expect(seen[1]).toEqual({ profile: "march", sliceId: "s1", threadIds: ["12", "t3"], operator: "ana" });
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("400s a malformed threadIds without calling the runtime, and maps an unknown thread to 400", async () => {
+    const seen: ResendThreadsInput[] = [];
+    const app = buildLoopServer(ctxWithResend(seen));
+    try {
+      for (const threadIds of [[], "t1", [""], [{}]]) {
+        const res = await app.inject({ method: "POST", url: "/slices/s1/review-threads/resend", payload: { profile: "march", threadIds } });
+        expect(res.statusCode).toBe(400);
+      }
+      expect(seen).toHaveLength(0);
+      expect((await app.inject({ method: "POST", url: "/slices/s1/review-threads/resend", payload: { profile: "march", threadIds: ["gone"] } })).statusCode).toBe(400);
+    } finally {
+      await app.close();
+    }
+  });
+});
+
+describe("resolveResendTarget (#593)", () => {
+  const thread = (id: string, over: Record<string, unknown> = {}) => ({ id, comment_ids: [`${id}-c1`, `${id}-c2`], ...over });
+  const observed = { number: 9, unresolved_threads: [thread("t1"), thread("t2", { last_comment_is_march: true, needs_response: false })] };
+  const slice = { stage: "pr-in-fix", worker_session_id: "w1", pr: { number: 9 } };
+
+  it("takes every unresolved thread when none are named — including ones babysit would skip", () => {
+    const r = resolveResendTarget(slice, observed);
+    expect(r).toMatchObject({ ok: true, prNumber: 9, sessionId: "w1", threadIds: ["t1", "t2"], commentIds: ["t1-c1", "t1-c2", "t2-c1", "t2-c2"] });
+  });
+
+  it("picks the named threads, in order, and 400s an unknown/resolved one", () => {
+    expect(resolveResendTarget(slice, observed, ["t2"])).toMatchObject({ ok: true, threadIds: ["t2"], commentIds: ["t2-c1", "t2-c2"] });
+    expect(resolveResendTarget(slice, observed, ["t1", "zz"])).toMatchObject({ ok: false, status: 400, error: expect.stringContaining("zz") });
+  });
+
+  it("falls back to the warm record when the fold has no PR observation", () => {
+    const warm = { ...slice, unresolved_threads: [thread("t9")] };
+    expect(resolveResendTarget(warm, undefined)).toMatchObject({ ok: true, prNumber: 9, threadIds: ["t9"] });
+  });
+
+  it("409s a merged slice, no PR, no unresolved threads, or no steward session", () => {
+    expect(resolveResendTarget({ ...slice, stage: "merged" }, observed)).toMatchObject({ ok: false, status: 409 });
+    expect(resolveResendTarget({ stage: "pr-open", worker_session_id: "w1" }, undefined)).toMatchObject({ ok: false, status: 409 });
+    expect(resolveResendTarget(slice, { number: 9, unresolved_threads: [] })).toMatchObject({ ok: false, status: 409 });
+    expect(resolveResendTarget({ ...slice, worker_session_id: null }, observed)).toMatchObject({ ok: false, status: 409, error: expect.stringContaining("relaunch") });
   });
 });

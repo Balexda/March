@@ -222,7 +222,7 @@ function alreadyDispatched(slice: any, key: string): boolean {
  * carry the per-comment list (older snapshots / hand-built test fixtures), so a
  * thread always contributes at least one id.
  */
-function threadCommentIds(thread: any): string[] {
+export function threadCommentIds(thread: any): string[] {
   const raw = Array.isArray(thread?.comment_ids) ? thread.comment_ids : [];
   const ids = raw.map((id: any) => String(id)).filter((id: string) => id.length > 0 && id !== "null" && id !== "undefined");
   if (ids.length > 0) return ids;

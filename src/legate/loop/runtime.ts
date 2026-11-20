@@ -71,11 +71,13 @@ import { buildLoopTickActivity, emitActionEventLog, emitActionEventSpan, recordA
 // Cadence layer (#144): the re-entrancy guard + interval + tick timing. runtime
 // supplies the tick body, error handler, and metrics flush.
 import { createScheduler, type LoopScheduler } from "./scheduler.js";
+import { reviewFixMessage } from "./pure/messages.js";
 // Operator respond endpoint (#459 follow-up): the pure target resolver + I/O
 // shapes; runtime supplies the Castra/Herald effects below. http.ts imports only
 // the LoopSnapshot TYPE from here, so this value import is a one-way edge.
 import {
   resolveRequeueTarget,
+  resolveResendTarget,
   resolveRespondTarget,
   type OperatorActionResult,
   type OperatorFields,
@@ -85,6 +87,8 @@ import {
   type RequeueInput,
   type SliceLeverInput,
   type RequeueResult,
+  type ResendThreadsInput,
+  type ResendThreadsResult,
   type RespondInput,
   type RespondResult,
 } from "./http.js";
@@ -660,6 +664,70 @@ export async function requestRelaunch(input: SliceLeverInput): Promise<OperatorA
   if (failed) return finishOperatorAction("relaunch", input, failed);
   void scheduler().runOnce();
   return finishOperatorAction("relaunch", input, { ok: true, profile: input.profile, sliceId: input.sliceId, requested: true, prNumber: pr.number });
+}
+
+/**
+ * Operator RESEND REVIEW THREADS (#593): deliver `/smithy.fix` for chosen
+ * unresolved review threads straight into the live steward session. This is the
+ * lever the dedup keys otherwise block: babysit never re-sends a thread whose
+ * comments are already in the seen-set, nor one the steward answered without
+ * fixing (`threadsNeedingResponse` drops a thread whose last word is March's).
+ *
+ * Synchronous like respond (the operator learns at once whether it reached the
+ * steward). On success it records the dispatch exactly like babysit's review-fix
+ * — comment ids seen, per-thread round counted, dispatch context marked so the
+ * bounded post-dispatch nudge applies — and appends the same attributed
+ * `slice.stage.changed {handledFeedback}` so a restart restores it.
+ */
+export async function resendReviewThreads(input: ResendThreadsInput): Promise<ResendThreadsResult> {
+  const target = sliceTarget(input);
+  if (!target.ok) return finishOperatorAction("resend_threads", input, target.result);
+  const { rt, slice } = target;
+  const refuse = (status: number, error: string) =>
+    finishOperatorAction("resend_threads", input, { ok: false, status, profile: input.profile, sliceId: input.sliceId, error });
+  const observed = legateHerald().snapshotFor(input.profile)?.slices?.[input.sliceId]?.pr;
+  const resolved = resolveResendTarget(slice, observed, input.threadIds);
+  if (!resolved.ok) return refuse(resolved.status, resolved.error);
+  const { pr, prNumber, threads, threadIds, commentIds, sessionId } = resolved;
+  try {
+    await sendAgentDeckMessage(rt.meta, sessionId, reviewFixMessage(pr, threads), input.sliceId);
+  } catch (err: any) {
+    return refuse(502, `failed to deliver /smithy.fix to session ${sessionId}: ${err?.message ?? String(err)} — relaunch the steward and retry.`);
+  }
+
+  // Record it like babysit's review-fix so dedup, the round cap and the bounded
+  // post-dispatch nudge all see this dispatch.
+  const ts = now();
+  const key = ["operator-resend", prNumber, [...commentIds].sort().join(",")].join(":");
+  const seen = new Set<string>((slice.review_fix_seen_comment_ids || []).map((id: any) => String(id)));
+  for (const id of commentIds) seen.add(id);
+  slice.review_fix_seen_comment_ids = [...seen];
+  const rounds: Record<string, number> = slice.review_fix_rounds || (slice.review_fix_rounds = {});
+  for (const id of threadIds) rounds[id] = (rounds[id] || 0) + 1;
+  delete slice.review_fix_escalated_at;
+  if (slice.stage === "pr-open") slice.stage = "pr-in-fix";
+  slice.last_processor_action = "review-fix";
+  slice.last_processor_action_key = key;
+  slice.last_processor_action_at = ts;
+  slice.last_action = ts;
+  slice.last_action_note = `operator re-sent ${threadIds.length} review thread(s) as /smithy.fix`;
+
+  const recorded = await appendOperatorRequest(
+    input,
+    {
+      type: "slice.stage.changed",
+      sliceId: input.sliceId,
+      stage: String(slice.stage),
+      handledFeedback: { kind: "inline", commentIds, dispatchKey: key },
+    },
+    "resend",
+  );
+  const base = { profile: input.profile, sliceId: input.sliceId, delivered: true, threadIds, commentIds };
+  if (recorded) {
+    // Delivered, but the fold did not record it: report the partial outcome.
+    return finishOperatorAction("resend_threads", input, { ...base, ok: false, status: 502, error: `delivered, but ${recorded.error}` });
+  }
+  return finishOperatorAction("resend_threads", input, { ...base, ok: true }, { "march.pr_number": prNumber, "march.threads": threadIds.length });
 }
 
 /**

@@ -1436,6 +1436,35 @@ leverOptions(
   }
 });
 
+leverOptions(
+  legate
+    .command("resend-threads <sliceId>")
+    .description(
+      "Ask a slice's steward to address review threads again: delivers /smithy.fix for the given unresolved threads (all of them without --thread) straight into the live steward session, even ones the loop already counts as sent. Calls the running legate's HTTP API (MARCH_LEGATE_URL).",
+    )
+    .option("--thread <id...>", "Review thread id(s) to re-send (default: every unresolved thread)."),
+).action(async (sliceId: string, opts: LeverOpts & { thread?: string[] }) => {
+  commandHandled = true;
+  const id = requireSliceId(sliceId, "resend threads for");
+  if (!id) return;
+  try {
+    const profileName = await resolveSliceProfile(opts.profile, "resend threads for");
+    if (!profileName) return;
+    const threadIds = (opts.thread ?? []).map((t) => t.trim()).filter((t) => t.length > 0);
+    const result = await postLever<{ threadIds?: string[] }>(
+      `/slices/${encodeURIComponent(id)}/review-threads/resend`,
+      { profile: profileName, ...(threadIds.length > 0 ? { threadIds } : {}), ...leverAttribution(opts) },
+      "resend-threads",
+    );
+    if (!result) return;
+    console.log(`Sent /smithy.fix for ${result.threadIds?.length ?? 0} review thread(s) to the steward of ${id} (profile=${profileName}): ${(result.threadIds ?? []).join(", ")}.`);
+    process.exitCode = SUCCESS;
+  } catch (err) {
+    process.stderr.write((err as Error).message + "\n");
+    process.exitCode = ERROR;
+  }
+});
+
 /** Add the `--profile` / `--operator` / `--reason` options to a profile-level lever. */
 function profileLeverOptions(cmd: Command): Command {
   return cmd

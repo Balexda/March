@@ -1,5 +1,6 @@
 import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
 import { bearerMatches } from "../../shared/bearer.js";
+import { threadCommentIds } from "./handlers/babysit.js";
 import type { LoopSnapshot } from "./runtime.js";
 
 /**
@@ -65,6 +66,20 @@ export interface ProfileLeverResult extends OperatorActionResult {
 export interface SliceLeverInput extends OperatorFields {
   profile: string;
   sliceId: string;
+}
+
+/** Operator input to the review-thread resend endpoint (#593). */
+export interface ResendThreadsInput extends SliceLeverInput {
+  /** Review thread ids to re-send; omitted = every unresolved thread. */
+  threadIds?: string[];
+}
+
+/** Result of a review-thread resend (#593). */
+export interface ResendThreadsResult extends OperatorActionResult {
+  /** The /smithy.fix reached the steward session. */
+  delivered?: boolean;
+  threadIds?: string[];
+  commentIds?: string[];
 }
 
 /** Operator input to the recover endpoint (#593): walk the recovery ladder. */
@@ -148,6 +163,8 @@ export interface LoopHttpContext {
   readonly requestMerge?: (input: SliceLeverInput) => Promise<OperatorActionResult>;
   /** Request an operator steward relaunch (#593). */
   readonly requestRelaunch?: (input: SliceLeverInput) => Promise<OperatorActionResult>;
+  /** Re-send review threads to the slice's steward (#593). */
+  readonly resendReviewThreads?: (input: ResendThreadsInput) => Promise<ResendThreadsResult>;
   /** Run a tick now (#593). */
   readonly requestTick?: (input: ProfileLeverInput) => Promise<ProfileLeverResult>;
   /** Pause / resume fresh dispatch (#593). */
@@ -360,6 +377,65 @@ export function resolveRequeueTarget(workingState: any, sliceId: string, closePr
   return { ok: true, openPr };
 }
 
+/** The outcome of resolving a review-thread resend target (pure). */
+export type ResendTarget =
+  | {
+      ok: true;
+      /** The PR object to build the /smithy.fix message from. */
+      pr: any;
+      prNumber: number;
+      threads: any[];
+      threadIds: string[];
+      commentIds: string[];
+      sessionId: string;
+    }
+  | { ok: false; status: 400 | 409; error: string };
+
+/**
+ * Resolve (and validate) a review-thread resend (#593). Pure + testable. Picks
+ * the named threads (all unresolved when `threadIds` is omitted) from the fold's
+ * PR observation — fresher than the warm record, which it falls back to — and
+ * needs a steward session to deliver to. Unlike babysit it ignores the seen-set
+ * and `needs_response`: re-sending already-sent threads is the point.
+ */
+export function resolveResendTarget(slice: any, observedPr: any, threadIds?: string[]): ResendTarget {
+  if (slice?.stage === "merged") return { ok: false, status: 409, error: "slice is merged." };
+  const observed = observedPr && !observedPr.skipped && observedPr.number ? observedPr : null;
+  const pr = observed ?? slice?.pr ?? null;
+  const prNumber = typeof pr?.number === "number" && pr.number > 0 ? pr.number : null;
+  if (prNumber === null) return { ok: false, status: 409, error: "slice has no observed PR." };
+  const unresolved: any[] = Array.isArray(observed?.unresolved_threads)
+    ? observed.unresolved_threads
+    : Array.isArray(slice?.unresolved_threads)
+      ? slice.unresolved_threads
+      : [];
+  let threads = unresolved;
+  if (threadIds) {
+    const byId = new Map(unresolved.map((t) => [String(t?.id), t]));
+    const unknown = threadIds.filter((id) => !byId.has(id));
+    if (unknown.length > 0) {
+      return {
+        ok: false,
+        status: 400,
+        error: `unknown or resolved review thread(s) on PR #${prNumber}: ${unknown.join(", ")} (unresolved: ${[...byId.keys()].join(", ") || "none"}).`,
+      };
+    }
+    threads = threadIds.map((id) => byId.get(id));
+  }
+  if (threads.length === 0) return { ok: false, status: 409, error: `PR #${prNumber} has no unresolved review threads to re-send.` };
+  const sessionId = typeof slice?.worker_session_id === "string" ? slice.worker_session_id : "";
+  if (!sessionId) return { ok: false, status: 409, error: "slice has no steward session — relaunch it first." };
+  return {
+    ok: true,
+    pr,
+    prNumber,
+    threads,
+    threadIds: threads.map((t) => String(t.id)),
+    commentIds: [...new Set(threads.flatMap((t) => threadCommentIds(t)))],
+    sessionId,
+  };
+}
+
 /** Build the /escalations payload. With `profile`, that profile's escalated tasks;
  *  else every profile's, keyed by profile. */
 export function buildEscalations(ctx: LoopHttpContext, profile?: string): Record<string, unknown> {
@@ -544,6 +620,29 @@ export function buildLoopServer(ctx: LoopHttpContext): FastifyInstance {
   // requeue to start one over).
   registerSliceLever(app, "/slices/:sliceId/relaunch", "relaunch", ctx.requestRelaunch);
 
+  // Operator RESEND REVIEW THREADS (#593): deliver /smithy.fix for the named
+  // unresolved review threads (all, when `threadIds` is omitted) straight into
+  // the live steward session — even threads the loop's dedup already counts as
+  // sent, or that the steward answered without fixing. Synchronous like respond:
+  // 200 once delivered; 400 for an unknown thread id; 409 when there is nothing
+  // to send or no steward session; 502 when the send fails.
+  registerSliceLever<ResendThreadsInput>(
+    app,
+    "/slices/:sliceId/review-threads/resend",
+    "resend",
+    ctx.resendReviewThreads,
+    (body) => {
+      if (body.threadIds === undefined) return { ok: true, fields: {} };
+      if (!Array.isArray(body.threadIds) || body.threadIds.length === 0) {
+        return { ok: false, error: "threadIds must be a non-empty array of thread ids (omit it to re-send every unresolved thread)." };
+      }
+      const ids = body.threadIds.map((id) => (typeof id === "number" || typeof id === "string" ? String(id).trim() : ""));
+      if (ids.some((id) => id.length === 0)) return { ok: false, error: "threadIds must be non-empty strings or numbers." };
+      return { ok: true, fields: { threadIds: [...new Set(ids)] } };
+    },
+    200,
+  );
+
   // Profile-level levers (#593). `profile` (body or `?profile=`) narrows to one
   // profile; omitted = every registered profile.
   //   - POST /tick runs a tick now (409 while one is already in flight).
@@ -569,6 +668,7 @@ function registerSliceLever<I extends OperatorFields & { profile: string; sliceI
   label: string,
   effect: ((input: I) => Promise<OperatorActionResult>) | undefined,
   extra?: (body: Record<string, unknown>) => { ok: true; fields: Omit<I, "profile" | "sliceId" | "operator" | "reason"> } | { ok: false; error: string },
+  okStatus = 202,
 ): void {
   app.post(routePath, async (request, reply) => {
     const { profile, sliceId, body } = readTarget(request);
@@ -595,7 +695,7 @@ function registerSliceLever<I extends OperatorFields & { profile: string; sliceI
       return { ok: false, error: `${label} is not available in this context.` };
     }
     const result = await effect({ ...parsed.fields, profile, sliceId, ...attribution.fields } as I);
-    reply.code(leverStatus(result));
+    reply.code(leverStatus(result, okStatus));
     return result;
   });
 }
