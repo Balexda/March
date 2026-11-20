@@ -17,12 +17,18 @@ export interface DispatchIdentity {
   readonly semantic: boolean;
 }
 
-export function slugifyDispatchPart(value: unknown, fallback = "item"): string {
+/**
+ * Lower-case, dash-separated slug of `value`, cut to `max` characters (56 by
+ * default — kept for the legacy hash ids and legacy-key lookups). Semantic
+ * dispatch stems pass `Infinity`: cutting them dropped the row suffix that tells
+ * plan rows apart (#599).
+ */
+export function slugifyDispatchPart(value: unknown, fallback = "item", max = 56): string {
   const slug = String(value || "")
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "")
-    .slice(0, 56);
+    .slice(0, max);
   return slug || fallback;
 }
 
@@ -77,6 +83,11 @@ export function dispatchArtifactSlug(filename: unknown): string | null {
  * structure to derive a meaningful name. Branch/slice-id collisions are
  * intentional: the same spec+US+slice yields the same name every dispatch, so a
  * collision means "re-attempt of the same logical work".
+ *
+ * The semantic stem is never truncated: the row/slice suffix sits at its end, so
+ * cutting it made different rows of a long-named plan file share one id (#599).
+ * State keyed by an old cut id still matches the row that ran via the action key
+ * (`sliceActionKey`), and no longer matches its siblings.
  */
 export function dispatchIdentity(item: any): DispatchIdentity {
   const action = item?.next_action || {};
@@ -101,7 +112,7 @@ export function dispatchIdentity(item: any): DispatchIdentity {
     if (rfcSlug && milestone) stem = rfcSlug + "-m" + milestone;
   }
   if (stem) {
-    return { stem: slugifyDispatchPart(stem, "smithy"), verb, hash: null, semantic: true };
+    return { stem: slugifyDispatchPart(stem, "smithy", Infinity), verb, hash: null, semantic: true };
   }
   // Fallback: legacy hash-based scheme. Order preserved exactly so existing
   // state.json / archive entries keyed by the legacy id continue to match.

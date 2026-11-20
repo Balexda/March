@@ -511,3 +511,52 @@ describe("dispatch-recovery self-heal state (#460)", () => {
     expect(cold[DISPATCH_RECOVERY_RATE_FIELD] ?? 1).toBe(1);
   });
 });
+
+// #599: before the fix, every row of a long-named tasks file got the same
+// 56-character slice id, so once one row was archived MERGED (or in flight) its
+// siblings were skipped on id alone. State keyed by that old cut id must still
+// block the row that ran (via the action key) and must not block the siblings.
+describe("legacy cut slice ids do not block sibling rows (#599)", () => {
+  const SLUG = "structured-review-feedback-with-automatic-retry-handling";
+  const SPEC = `docs/specs/${SLUG}/${SLUG}.spec.md`;
+  const OLD_CUT_ID = `${SLUG}-forge`;
+  // Each story has its own tasks file; the semantic id is derived from the spec.
+  const row = (rowId: string, slice: string) => {
+    const tasks = `docs/specs/${SLUG}/${rowId.toLowerCase()}.tasks.md`;
+    return {
+      path: tasks,
+      parent_path: SPEC,
+      parent_row_id: rowId,
+      next_action: { command: "smithy.forge", arguments: [tasks, slice] },
+    };
+  };
+  const us1s1 = row("US1", "1");
+  const us1s2 = row("US1", "2");
+  const us2s1 = row("US2", "1");
+  const us3s4 = row("US3", "4");
+  const ranSlice = {
+    command: "smithy.forge",
+    arguments: [us1s1.path, "1"],
+    artifact_path: us1s1.path,
+    branch: `smithy/forge/${SLUG}`,
+  };
+
+  it("rows now get distinct ids, none equal to the old cut id", () => {
+    const ids = [us1s1, us1s2, us2s1, us3s4].map(dispatchSliceId);
+    expect(new Set(ids).size).toBe(4);
+    expect(ids).not.toContain(OLD_CUT_ID);
+  });
+
+  it("an archived MERGED slice under the old id blocks only the row that ran", () => {
+    const state = {
+      slices: {},
+      archived_slices: { [OLD_CUT_ID]: { ...ranSlice, terminal_state: "MERGED" } },
+    };
+    expect(dispatchableReady(state, [us1s1, us1s2, us2s1, us3s4])).toEqual([us1s2, us2s1, us3s4]);
+  });
+
+  it("a live slice under the old id keeps only the row that ran in flight", () => {
+    const state = { slices: { [OLD_CUT_ID]: { ...ranSlice, stage: "implementing" } }, archived_slices: {} };
+    expect(dispatchableReady(state, [us1s1, us1s2, us2s1, us3s4])).toEqual([us1s2, us2s1, us3s4]);
+  });
+});
