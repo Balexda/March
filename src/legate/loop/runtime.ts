@@ -383,6 +383,7 @@ export async function requeueSlice(input: RequeueInput): Promise<RequeueResult> 
         "march.slice_id": input.sliceId,
         "march.profile": profile,
         "march.requeue.close_pr": input.closePr === true,
+        "march.requeue.release_merged": input.releaseMerged === true,
         "march.requeue.requested": result.requested ?? false,
         ...(input.operator ? { "march.operator": input.operator } : {}),
       },
@@ -402,7 +403,7 @@ export async function requeueSlice(input: RequeueInput): Promise<RequeueResult> 
   const rt = runtimes.get(profile);
   if (!rt) return finish({ ok: false, status: 404, error: `unknown profile "${profile}".`, profiles: [...runtimes.keys()] });
 
-  const target = resolveRequeueTarget(rt.workingState, input.sliceId, input.closePr === true);
+  const target = resolveRequeueTarget(rt.workingState, input.sliceId, input.closePr === true, undefined, input.releaseMerged === true);
   if (!target.ok) return finish({ ok: false, status: target.status, profile, sliceId: input.sliceId, error: target.error });
 
   try {
@@ -410,6 +411,7 @@ export async function requeueSlice(input: RequeueInput): Promise<RequeueResult> 
       type: "slice.requeue.requested",
       sliceId: input.sliceId,
       closePr: input.closePr === true,
+      ...(input.releaseMerged === true ? { releaseMerged: true } : {}),
       ...(input.operator ? { operator: input.operator } : {}),
       ...(input.reason ? { reason: input.reason } : {}),
     });
@@ -422,7 +424,14 @@ export async function requeueSlice(input: RequeueInput): Promise<RequeueResult> 
       error: `failed to record the requeue request in Herald: ${err?.message ?? String(err)}`,
     });
   }
-  return finish({ ok: true, profile, sliceId: input.sliceId, requested: true, closesPr: target.openPr });
+  return finish({
+    ok: true,
+    profile,
+    sliceId: input.sliceId,
+    requested: true,
+    closesPr: target.openPr,
+    ...(target.archived ? { releasesArchive: target.archived } : {}),
+  });
 }
 
 function now() {

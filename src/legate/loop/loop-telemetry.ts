@@ -167,6 +167,7 @@ export function emitActionEventSpan(event: any, emit: LoopSpanEmitter = defaultE
         "march.action": action,
         ...(event.session_id ? { "march.session_id": String(event.session_id) } : {}),
         ...(event.operator ? { "march.operator": String(event.operator) } : {}),
+        ...(event.archived ? { "march.requeue.archived": true, "march.pr_state": String(event.terminal ?? "") } : {}),
       },
     });
   } else if (event.kind === "steward_relaunch") {

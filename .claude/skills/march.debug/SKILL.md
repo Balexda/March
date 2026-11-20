@@ -78,7 +78,8 @@ on `localhost` regardless of context.
 |---|---|
 | `GET http://localhost:8818/state` | Herald's current fold projection (bare `SystemState`: `seq`, `smithy{dispatchable,blocked,total}`, `workers`, `slices{}` keyed by sliceId). |
 | `GET http://localhost:8818/events?after=<seq>&limit=<n>` | drain past events; `{events:[...], lastSeq}`. Each envelope has `source` = `herald` (observation) or `legate` (transition). |
-| `GET http://localhost:8787/status?profile=<p>` | the legate's view of the **same** fold — different in-memory shape, **can diverge** from Herald's projection (see #268). |
+| `GET http://localhost:8787/status?profile=<p>` | the legate's view of the **same** fold — different in-memory shape, **can diverge** from Herald's projection (see #268). Carries `checkout` (the plan checkout's sync status). |
+| `GET http://localhost:8787/queue?profile=<p>` | **why each dependency-free plan row did or didn't dispatch** last tick (#592): `decision` (`dispatch` / `spawn_cap` / `in_flight` / `recovery_due` / `recovery_backoff` / `archived_merged` / `archived_closed` / `archived_other`), the `heldBy` slice + PR, and `checkout` (HEAD, commits `behind`, sync `ok`). CLI: `march legate queue --profile <p>`. |
 | `GET http://localhost:9264/v1/sessions?profile=<p>` | Castra's live session list (carries `branch` per #264). |
 
 ### OTel correlation gotcha
@@ -108,7 +109,11 @@ Cross-checks Herald's `smithy.dispatchable` against the legate's
 - **Herald > legate** → the **#268 metric-inflation** signature, *not* a
   deadlock. Herald's observation-side count skips the in-flight/archived dedup
   the legate applies, so it over-counts. Trust the legate's number. If the
-  legate says `0`, nothing is genuinely ready — stop, you're not wedged.
+  legate says `0`, run `march legate queue --profile <p>`: every row
+  `in_flight` / `recovery_*` / `spawn_cap` means you're not wedged; a row held
+  `archived_closed` / `archived_merged` never clears on its own — check
+  `checkout.behind` is 0 (a stale checkout, #299) and then release it (see
+  Requeue below).
 - **Both 0**, nothing in the smithy queue → nothing to do.
 - **Both > 0** and the legate is silent across several ticks (no recent
   legate-source events — check `events-tail.sh --profile <p> --src legate`) → the
@@ -206,8 +211,13 @@ workspace first — deletes a pushed remote branch, and tombstones the slice so
 dispatch re-launches it on the same tick.
 
 - **Open PR:** refused (409) unless you pass `--close-pr`, which closes it with an
-  attribution comment. A merged PR, an archived slice or a `hatchery-pending` slice
+  attribution comment. A live slice with a merged PR, or a `hatchery-pending` slice,
   is refused outright.
+- **Archived hold (#592):** pass the `heldBy` slice id from `legate queue`. An
+  `archived_closed` hold is released directly; an `archived_merged` hold needs `--release-merged` and is only right
+  when the merged PR did *not* do this row's work (an id collision, #599/#602) and
+  `checkout.behind` is 0. There is no teardown; any leftover remote branch is
+  deleted, the archive is tombstoned, and the row dispatches fresh.
 - **It discards work.** Unique commits on the branch are deleted. Inspect the
   worktree first if anything there is worth keeping.
 

@@ -93,6 +93,8 @@ export interface RequeueRequest {
   /** Seq of the `slice.requeue.requested` event (dedup across ticks). */
   seq: number;
   closePr: boolean;
+  /** Allow releasing an archived MERGED slice (#592); CLOSED needs no flag. */
+  releaseMerged?: boolean;
   operator?: string;
   reason?: string;
 }

@@ -415,6 +415,25 @@ describe("resolveRequeueTarget (#588)", () => {
   });
 });
 
+describe("resolveRequeueTarget archived holds (#592)", () => {
+  const ws = (terminal_state: string | null) => ({ slices: {}, archived_slices: { x: { command: "smithy.forge", terminal_state } } });
+
+  it("releases an archived CLOSED slice without any flag", () => {
+    expect(resolveRequeueTarget(ws("CLOSED"), "x", false)).toEqual({ ok: true, openPr: null, archived: "CLOSED" });
+  });
+
+  it("releases an archived MERGED slice only with releaseMerged", () => {
+    const refused = resolveRequeueTarget(ws("MERGED"), "x", false) as any;
+    expect(refused).toMatchObject({ ok: false, status: 409 });
+    expect(refused.error).toMatch(/releaseMerged/);
+    expect(resolveRequeueTarget(ws("MERGED"), "x", false, undefined, true)).toEqual({ ok: true, openPr: null, archived: "MERGED" });
+  });
+
+  it("still 409s an archive with no closed or merged PR", () => {
+    expect(resolveRequeueTarget(ws(null), "x", false, undefined, true)).toMatchObject({ ok: false, status: 409 });
+  });
+});
+
 describe("POST /slices/:sliceId/requeue (#588)", () => {
   function ctxWithRequeue(spy: (input: RequeueInput) => void, result: any): LoopHttpContext {
     return {

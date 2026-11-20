@@ -203,6 +203,9 @@ export function validateEvent(body: Record<string, unknown>): EventValidation {
   if (type === "slice.requeue.requested" && body.closePr !== undefined && typeof body.closePr !== "boolean") {
     return { ok: false, error: `event "slice.requeue.requested" closePr must be a boolean.` };
   }
+  if (type === "slice.requeue.requested" && body.releaseMerged !== undefined && typeof body.releaseMerged !== "boolean") {
+    return { ok: false, error: `event "slice.requeue.requested" releaseMerged must be a boolean.` };
+  }
   if (type === "slice.requeue.requested" || type === "slice.requeue.refused") {
     for (const field of type === "slice.requeue.requested" ? ["operator", "reason"] : ["reason"]) {
       if (body[field] !== undefined && typeof body[field] !== "string") {

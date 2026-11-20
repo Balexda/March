@@ -156,7 +156,7 @@ export type EventBody =
    * on it; the legate's rung-3 tombstone (success) or `slice.requeue.refused`
    * (refusal / give-up) clears it.
    */
-  | { type: "slice.requeue.requested"; sliceId: string; closePr?: boolean; operator?: string; reason?: string }
+  | { type: "slice.requeue.requested"; sliceId: string; closePr?: boolean; releaseMerged?: boolean; operator?: string; reason?: string }
   /** The legate refused (open PR without `closePr`) or gave up on (teardown kept
    *  failing) a pending requeue; clears `requeueRequested`. */
   | { type: "slice.requeue.refused"; sliceId: string; reason?: string }
@@ -345,7 +345,7 @@ export interface SliceState {
    * `seq` is the request event's seq, so the legate can tell a request it already
    * handled (its tombstone not yet drained back) from a new one.
    */
-  requeueRequested?: { seq: number; closePr: boolean; operator?: string; reason?: string };
+  requeueRequested?: { seq: number; closePr: boolean; releaseMerged?: boolean; operator?: string; reason?: string };
 }
 
 /** The folded system state — the projection both services read. */
@@ -689,6 +689,7 @@ export function reduce(state: SystemState, event: HeraldEvent): SystemState {
       slice.requeueRequested = {
         seq: event.seq,
         closePr: event.closePr === true,
+        ...(event.releaseMerged === true ? { releaseMerged: true } : {}),
         ...(event.operator !== undefined ? { operator: event.operator } : {}),
         ...(event.reason !== undefined ? { reason: event.reason } : {}),
       };

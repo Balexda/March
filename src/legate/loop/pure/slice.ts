@@ -93,6 +93,26 @@ export function archiveTerminal(slice: any): "MERGED" | "CLOSED" | null {
   return null;
 }
 
+/**
+ * Whether an archived slice may be released back to the queue (#592): a CLOSED
+ * archive always, a MERGED one only with `releaseMerged` (its PR may really have
+ * done the row's work — release it only when the id collided, #599/#602). Any
+ * other archive (escalated, unknown outcome) stays an operator decision.
+ */
+export function releasableArchive(
+  archived: any,
+  releaseMerged: boolean,
+): { ok: true; terminal: "MERGED" | "CLOSED" } | { ok: false; error: string } {
+  const terminal = archiveTerminal(archived);
+  if (terminal === "CLOSED") return { ok: true, terminal };
+  if (terminal === "MERGED") {
+    return releaseMerged
+      ? { ok: true, terminal }
+      : { ok: false, error: "is archived MERGED — pass releaseMerged:true to release its hold on the plan row (only if the merged PR did not do this row's work)" };
+  }
+  return { ok: false, error: `is archived (${archived?.terminal_state ?? "done"}) without a closed or merged PR — nothing to requeue` };
+}
+
 function archivePrNumber(slice: any): number | null {
   const n = typeof slice?.pr_number === "number" ? slice.pr_number : slice?.pr?.number;
   return typeof n === "number" && n > 0 ? n : null;
