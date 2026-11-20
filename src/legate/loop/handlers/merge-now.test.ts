@@ -95,6 +95,12 @@ describe("merge-now apply (#593)", () => {
     expect(state.raw.merge_now_handled_seq).toEqual({ s: 7 });
   });
 
+  it("marks the tick's sensed PR merged so babysit/cleanup don't act on a stale OPEN", async () => {
+    const state = heldPr({ perSlice: { s: { pr: { number: 42, state: "OPEN", mergeable: "CONFLICTING" } } } });
+    await apply(assess(state), ctx(), state, deps({ readPr: vi.fn().mockResolvedValue({ state: "OPEN", headSha: HEAD }) }));
+    expect(state.perSlice.s.pr).toMatchObject({ number: 42, state: "MERGED" });
+  });
+
   it.each([
     ["a closed PR", { state: "CLOSED", headSha: HEAD }, "not OPEN"],
     ["a conflicting PR", { state: "OPEN", headSha: HEAD, mergeable: "CONFLICTING" }, "merge conflicts"],
@@ -107,7 +113,7 @@ describe("merge-now apply (#593)", () => {
     expect(d.mergePr).not.toHaveBeenCalled();
     expect(state.slices.s.stage).toBe("pr-open");
     expect(emitted(c)).toEqual([
-      { type: "slice.operator.refused", sliceId: "s", action: "merge", reason: expect.stringContaining(why) },
+      { type: "slice.operator.refused", sliceId: "s", action: "merge", reason: expect.stringContaining(why), requestSeq: 7 },
     ]);
   });
 

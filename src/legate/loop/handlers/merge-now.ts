@@ -87,7 +87,7 @@ export async function apply(
   const refuse = (d: MergeNowDecision, reason: string) => {
     handledSeqs(state.raw)[d.sliceId] = d.request.seq;
     res.mutated = true;
-    ctx.emitTransition?.({ type: "slice.operator.refused", sliceId: d.sliceId, action: "merge", reason });
+    ctx.emitTransition?.({ type: "slice.operator.refused", sliceId: d.sliceId, action: "merge", reason, requestSeq: d.request.seq });
     res.actions.push({ ...base(d.sliceId, d.request.prNumber), action: "operator-merge-refused", detail: reason });
   };
 
@@ -139,6 +139,12 @@ export async function apply(
     const slice = state.slices[d.sliceId];
     slice.stage = "merged";
     if (slice.pr) slice.pr.state = "MERGED";
+    // The tick's sensed PR observation still says OPEN; later handlers this tick
+    // (babysit, cleanup) read it, so mark it merged too — babysit then skips the
+    // slice instead of sending fix work, and cleanup tears it down as after an
+    // auto-merge.
+    const ext = state.perSlice?.[d.sliceId];
+    if (ext?.pr && typeof ext.pr === "object" && !ext.pr.skipped) ext.pr = { ...ext.pr, state: "MERGED" };
     slice.last_action = ctx.ts;
     slice.last_action_note = `merged by operator request — squash, sha=${live.headSha}`;
     ctx.emitTransition?.({ type: "slice.stage.changed", sliceId: d.sliceId, stage: "merged" });
