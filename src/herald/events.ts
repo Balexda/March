@@ -210,11 +210,13 @@ export interface EventEnvelope {
    */
   profile: string;
   /**
-   * Audit attributes set ONLY on operator-authored rows from the break-glass
-   * `POST /admin/events` endpoint (#265). Absent (undefined) on every normal
-   * observation/transition append. They survive the fold as forensic metadata —
-   * the reducer never reads them — so an operator-authored corrective event is
-   * always distinguishable from one the producer services emitted.
+   * Audit attributes. `admin` is set ONLY on rows from the break-glass
+   * `POST /admin/events` endpoint (#265). `operator`/`note` are set on those rows
+   * and on any operator-attributed append (#593): a lever an operator asked the
+   * legate for (recover, respond, requeue, merge now, pause, ...), or a
+   * merge-policy edit. Absent (undefined) on the loop's own events. They survive
+   * the fold as forensic metadata — the reducer never reads them — so an
+   * operator's request is always distinguishable from one the services emitted.
    */
   admin?: boolean;
   operator?: string;

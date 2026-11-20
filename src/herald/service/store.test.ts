@@ -247,6 +247,17 @@ describe.skipIf(!sqliteAvailable)("EventStore admin audit columns (#265)", () =>
     store.close();
   });
 
+  it("stamps operator/note WITHOUT the admin flag on an attributed append (#593)", () => {
+    const store = makeStore();
+    const event = store.append(steward(), undefined, { operator: "ana", note: "asked" });
+    expect(event.admin).toBeUndefined();
+    expect(event).toMatchObject({ operator: "ana", note: "asked" });
+    const read = store.readAfter(0, 10)[0];
+    expect(read.admin).toBeUndefined();
+    expect(read).toMatchObject({ operator: "ana", note: "asked" });
+    store.close();
+  });
+
   it("persists audit columns across a reopen (file-backed)", () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "herald-audit-"));
     const dbPath = path.join(dir, "events.db");
