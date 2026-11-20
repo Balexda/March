@@ -16,6 +16,8 @@ import {
   recordDependencyUnblock as defaultRecordDependencyUnblock,
   recordReviewRequest as defaultRecordReviewRequest,
   recordReviewRateLimit as defaultRecordReviewRateLimit,
+  recordPrLabel as defaultRecordPrLabel,
+  type PrLabelOp,
   type DependencyUnblockOutcome,
   type LoopMetricsSnapshot,
   type LoopTickActivity,
@@ -49,8 +51,17 @@ export function recordActionEventMetrics(
   record: typeof defaultRecordDependencyUnblock = defaultRecordDependencyUnblock,
   recordReview: typeof defaultRecordReviewRequest = defaultRecordReviewRequest,
   recordRateLimit: typeof defaultRecordReviewRateLimit = defaultRecordReviewRateLimit,
+  recordLabel: typeof defaultRecordPrLabel = defaultRecordPrLabel,
 ): void {
   if (!event || typeof event !== "object") return;
+  if (event.kind === "pr_label" || event.kind === "pr_label_failure") {
+    const action = typeof event.action === "string" ? event.action : "";
+    const op: PrLabelOp = action === "pr-label-added" ? "add" : action === "pr-label-removed" ? "remove" : "unknown";
+    // Failure detail is "label: message"; success detail is the bare label.
+    const known = String(event.detail ?? "").split(": ")[0];
+    recordLabel(known, op, event.kind === "pr_label" ? "ok" : "failed", event.processor ? String(event.processor) : undefined);
+    return;
+  }
   if (event.kind === "review_request") {
     const reviewer = event.reviewer === "copilot" ? "copilot" : "coderabbit";
     recordReview(reviewer, event.outcome);
@@ -112,6 +123,24 @@ export function emitActionEventSpan(event: any, emit: LoopSpanEmitter = defaultE
       root: true,
       error: failed,
       attributes: { "march.action": event.action || "", ...(pr != null ? { "march.pr_number": Number(pr) } : {}) },
+    });
+    return;
+  }
+
+  // Owned PR-label reconciliation: slice-linked PRs nest on the slice's trace;
+  // others get a small per-loop trace. A failed label write marks the span errored.
+  if (event.kind === "pr_label" || event.kind === "pr_label_failure") {
+    const pr = event.pr_number;
+    emit({
+      name: "legate.pr-label",
+      traceKey: event.slice_id ? String(event.slice_id) : `${String(event.processor || "legate")}-pr-labels`,
+      root: false,
+      error: event.kind === "pr_label_failure",
+      attributes: {
+        "march.action": event.action || "",
+        ...(event.slice_id ? { "march.slice_id": String(event.slice_id) } : {}),
+        ...(pr != null ? { "march.pr_number": Number(pr) } : {}),
+      },
     });
     return;
   }

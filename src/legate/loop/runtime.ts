@@ -36,6 +36,7 @@ import { legateStateDir, metaForProfileRecord } from "../profile-paths.js";
 import { rebuildWorkingState, senseFromHerald, type HeraldInbox } from "./state/sense.js";
 import { createFoldDeps } from "./state/fold-deps.js";
 import { execLegateGh, LegateGitHubError, requestCopilotReview } from "./clients/github.js";
+import { LABEL_SPECS } from "./pure/pr-labels.js";
 import { runTick as coordinatorRunTick } from "./coordinator.js";
 import { resolveMaxConcurrentSpawns } from "./meta.js";
 import { SpawnBreaker } from "./spawn-breaker.js";
@@ -567,25 +568,46 @@ async function deleteRemoteBranchGh(repoPath: string, branch: string, sliceId?: 
   return true;
 }
 
-/** Repos whose escalation label is known to exist, so it is created once per process. */
+/** Repo+label pairs known to exist, so each label is created once per process. */
 const ensuredLabels = new Set<string>();
 
 /**
  * Add a label to a PR, creating the label first (idempotently, `--force`) the
  * first time this process uses it in a repo — `gh pr edit --add-label` fails on
- * a label the repo does not have.
+ * a label the repo does not have. Colour/description come from {@link LABEL_SPECS}.
  */
-async function labelPrGh(repoPath: string, prNumber: number, label: string): Promise<void> {
+async function labelPrGh(repoPath: string, prNumber: number, label: string, sliceId?: string): Promise<void> {
   const key = repoPath + "\0" + label;
   if (!ensuredLabels.has(key)) {
+    const spec = LABEL_SPECS[label] ?? { color: "ededed", description: "March legate label" };
     await execLegateGh(
       "write",
-      ["label", "create", label, "--force", "--color", "d93f0b", "--description", "March legate needs a human to act on this PR"],
+      ["label", "create", label, "--force", "--color", spec.color, "--description", spec.description],
       repoPath,
+      sliceId,
     );
     ensuredLabels.add(key);
   }
-  await execLegateGh("write", ["pr", "edit", String(prNumber), "--add-label", label], repoPath);
+  await execLegateGh("write", ["pr", "edit", String(prNumber), "--add-label", label], repoPath, sliceId);
+}
+
+/** Remove a label from a PR. */
+async function unlabelPrGh(repoPath: string, prNumber: number, label: string, sliceId?: string): Promise<void> {
+  await execLegateGh("write", ["pr", "edit", String(prNumber), "--remove-label", label], repoPath, sliceId);
+}
+
+/**
+ * List the repo's open PRs with the fields the label reconciler needs. One
+ * `gh pr list` (a single GraphQL call) per invocation; the handler throttles.
+ */
+async function listOpenPrsForLabels(repoPath: string): Promise<any[]> {
+  const out = await execLegateGh(
+    "read",
+    ["pr", "list", "--state", "open", "--limit", "200", "--json", "number,headRefName,author,labels"],
+    repoPath,
+  );
+  const parsed = JSON.parse(out);
+  return Array.isArray(parsed) ? parsed : [];
 }
 
 /**
@@ -742,6 +764,14 @@ async function tickProfile(rt: ProfileRuntime, history: ReviewRequestHistory, sp
     labelPr: (repoPath: string, prNumber: number, label: string) => labelPrGh(repoPath, prNumber, label),
   };
 
+  const prLabelsDeps = {
+    listOpenPrs: (repoPath: string) => listOpenPrsForLabels(repoPath),
+    addLabel: (repoPath: string, prNumber: number, label: string, sliceId?: string) =>
+      labelPrGh(repoPath, prNumber, label, sliceId),
+    removeLabel: (repoPath: string, prNumber: number, label: string, sliceId?: string) =>
+      unlabelPrGh(repoPath, prNumber, label, sliceId),
+  };
+
   const ioDeps = dispatchIoDeps(meta);
   const dispatchDeps = {
     // The default-branch sync is owned by Herald (#300, always on since #601); the
@@ -767,6 +797,7 @@ async function tickProfile(rt: ProfileRuntime, history: ReviewRequestHistory, sp
     babysit: babysitDeps,
     dispatch: dispatchDeps,
     dependencyMerge: dependencyMergeDeps,
+    prLabels: prLabelsDeps,
     coderabbitRereview: {
       history,
       limits: configuredReviewLimits(),

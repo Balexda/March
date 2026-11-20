@@ -9,6 +9,7 @@ import * as requeue from "./handlers/requeue.js";
 import * as adoptFromFold from "./handlers/adopt-from-fold.js";
 import * as dispatch from "./handlers/dispatch.js";
 import * as dependencyMerge from "./handlers/dependency-merge.js";
+import * as prLabels from "./handlers/pr-labels.js";
 import * as coderabbitRereview from "./handlers/coderabbit-rereview.js";
 import { countStrandedSlices, dispatchableReady, summarizeSlicesByStage, type SpawnBudget } from "./pure/slice.js";
 import { isWorkerSession } from "./pure/session.js";
@@ -17,7 +18,7 @@ import { isWorkerSession } from "./pure/session.js";
  * Stage 2 orchestration. runTick senses once, then runs the handlers in the fixed
  * order cleanup → ghost-cleanup → castra-recover → relaunch → babysit →
  * coderabbit-rereview → recovery →
- * adopt-from-fold → dispatch → dependency-merge,
+ * adopt-from-fold → dispatch → dependency-merge → pr-labels,
  * each as pure assess() + effecting apply(), threading the SAME mutating {@link LoopState}
  * through all of them. Because apply() mutates the snapshot in place (drops a
  * cleaned session, archives a slice), a later handler's assess() sees the current
@@ -40,6 +41,8 @@ export interface CoordinatorDeps {
   dependencyMerge?: dependencyMerge.DependencyMergeDeps;
   /** Seams for opt-in reviewer requests. Omitted → the handler is inert. */
   coderabbitRereview?: coderabbitRereview.ReviewRequestDeps;
+  /** Seams for the PR label reconciler (`march:opened` / `march:needs-human`). Omitted → inert. */
+  prLabels?: prLabels.PrLabelsDeps;
   /** The GLOBAL concurrent-spawn budget (#313), shared across every profile this
    *  tick. Attached to the handler context so dispatch caps fresh launches against
    *  it. Omitted → dispatch is uncapped (pre-#313 behavior). */
@@ -64,6 +67,8 @@ export interface CoordinatorOutput {
     dispatch: HandlerResult;
     /** Opt-in Dependabot auto-merge; absent in outputs built without it. */
     dependencyMerge?: HandlerResult;
+    /** PR label reconciler; absent in outputs built without it. */
+    prLabels?: HandlerResult;
   };
 }
 
@@ -185,6 +190,9 @@ export async function runTick(deps: CoordinatorDeps): Promise<CoordinatorOutput>
     // Last: independent of every slice, so it never delays slice work, and a
     // failure here cannot affect the handlers above.
     dependencyMerge: await dependencyMerge.apply(ctx, state, deps.dependencyMerge),
+    // Also last: label bookkeeping only, reading the slice state babysit has
+    // already settled; a failure cannot affect any handler above.
+    prLabels: await prLabels.apply(ctx, state, deps.prLabels),
   };
 
   return { state, tick: buildTickResult(state, results, deps.spawnBudget), results };

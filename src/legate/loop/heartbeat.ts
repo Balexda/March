@@ -162,6 +162,17 @@ export function runHeartbeat(out: CoordinatorOutput, deps: HeartbeatDeps): any {
     log("[" + ts + "] " + failure.action + ": " + failure.detail);
   }
 
+  // pr-labels runs after dependency-merge; owned-label reconciliation, keyed by PR
+  // (slice-linked PRs carry slice_id).
+  for (const a of out.results.prLabels?.actions ?? []) {
+    event(meta.processor_events_path, { ...base, kind: "pr_label", action: a.action, slice_id: a.sliceId, pr_number: a.pr ?? null, detail: a.detail });
+    log("[" + ts + "] " + a.action + " #" + a.pr + ": " + a.detail);
+  }
+  for (const failure of out.results.prLabels?.failures ?? []) {
+    event(meta.processor_events_path, { ...base, kind: "pr_label_failure", action: failure.action, slice_id: failure.sliceId, pr_number: failure.pr ?? null, detail: failure.detail });
+    log("[" + ts + "] " + failure.action + (failure.pr ? " #" + failure.pr : "") + ": " + failure.detail);
+  }
+
   deps.appendTextSilent(
     deps.heartbeatLogPath,
     `[${ts}] heartbeat slice_count=${record.slice_count} archived=${record.archived_slice_count} cleanups=${record.cleanup_count} ghost_cleanups=${record.ghost_cleanup_count} relaunches=${record.relaunch_count} babysit_actions=${record.babysit_action_count} steward_nudges=${record.steward_nudge_count} steward_stranded=${record.steward_stranded_count} stranded=${record.stranded_count} dispatches=${record.dispatch_action_count} processor_requests=${record.processor_request_count} workers=${JSON.stringify(record.workers)}${record.state_error ? " state_error=" + record.state_error : ""}`,

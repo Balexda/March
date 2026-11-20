@@ -121,6 +121,8 @@ if (GH_TOKEN === "write-initial") {
   await runTickOnce();
   expect(requests).toEqual([
     { repo: "org/denied", identity: "app", access: "write", sliceId: "slice-denied" },
+    // The PR label reconciler's open-PR listing also needs a read token; the denied repo's is refused too.
+    { repo: "org/denied", identity: "app", access: "read", sliceId: null },
     { repo: "org/healthy", identity: "app", access: "write", sliceId: "slice-healthy" },
     { repo: "org/healthy", identity: "app", access: "write", sliceId: "slice-healthy", refresh: true },
     { repo: "org/healthy", identity: "app", access: "read", sliceId: null },
@@ -132,7 +134,7 @@ if (GH_TOKEN === "write-initial") {
   });
   expect(byProfile.healthy.workingState.slices["slice-healthy"].stage).toBe("merged");
   const calls = readFileSync(callsPath, "utf8").trim().split("\n").map(line => JSON.parse(line));
-  expect(calls.map(call => call.token)).toEqual(["write-initial", "write-refreshed", "write-refreshed", "read-token"]);
+  expect(calls.map(call => call.token)).toEqual(["write-initial", "write-refreshed", "write-refreshed", "read-token", "read-token"]);
   const mergeArgs = ["pr", "merge", "8", "--squash", "--match-head-commit", "abc123", "--repo", "org/healthy"];
   expect(calls[0].args).toEqual(mergeArgs);
   expect(calls[1].args).toEqual(mergeArgs);
@@ -143,6 +145,8 @@ if (GH_TOKEN === "write-initial") {
     sliceId: "slice-with-comment", attributes: expect.objectContaining({ "tessera.access": "write" }),
   }));
   expect(calls[3].args).toEqual(expect.arrayContaining(["pr", "list", "--repo", "org/healthy"]));
+  // The PR label reconciler's single open-PR listing.
+  expect(calls[4].args).toEqual(expect.arrayContaining(["pr", "list", "--state", "open", "--limit", "200", "--repo", "org/healthy"]));
   expect(new Set(calls.map(call => call.config)).size).toBe(calls.length);
   for (const call of calls) {
     expect(call.contents).toEqual([]);
