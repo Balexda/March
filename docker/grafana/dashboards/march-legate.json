@@ -1830,7 +1830,7 @@
         "type": "prometheus",
         "uid": "prometheus"
       },
-      "description": "Why each dependency-free plan row did or did not dispatch last tick (#592). archived_closed/archived_merged rows are held by an archived slice; release one with `march legate requeue <heldBy> --profile <p>` (see `march legate queue`).",
+      "description": "Why each dependency-free plan row did or did not dispatch last tick (#592). archived_closed/archived_merged rows are held by an archived slice; release a closed hold with `march legate requeue <heldBy> --profile <p>`; a merged hold also needs `--release-merged`, and only when the merged PR did not do this row's work (see `march legate queue`).",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -1902,7 +1902,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "sum by (decision) (march_legate_dispatch_items{profile=~\"$profile\"})",
+          "expr": "sum by (decision) (march_legate_dispatch_items{profile=~\"$profile\", conductor=~\"$conductor\"})",
           "legendFormat": "{{decision}}",
           "range": true,
           "refId": "A"
