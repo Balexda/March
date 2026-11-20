@@ -1,5 +1,11 @@
 import type { HandlerContext, HandlerResult, LoopState } from "../state/types.js";
 import { emptyHandlerResult } from "../state/types.js";
+import { NEEDS_HUMAN_LABEL } from "../pure/pr-labels.js";
+
+/** Label marking a Dependabot PR the legate gave up on. While present, the ladder
+ *  leaves the PR alone; the merge gate still merges it once it is clean. Defined in
+ *  pure/pr-labels.ts, which also reconciles it on slice PRs. */
+export { NEEDS_HUMAN_LABEL };
 
 /**
  * Dependency-update auto-merge. Dependabot's version-bump PRs are not Smithy
@@ -54,11 +60,6 @@ export const UNBLOCK_WAIT_MS = 30 * 60 * 1000;
 
 /** `@dependabot recreate` comments per PR before the ladder escalates. */
 export const MAX_RECREATES = 2;
-
-/** Label marking a Dependabot PR the legate gave up on. While present, the ladder
- *  leaves the PR alone; the merge gate still merges it once it is clean. Removing
- *  it lets the ladder escalate again if the PR stays conflicted. */
-export const NEEDS_HUMAN_LABEL = "march:needs-human";
 
 /** Prefix of the folded `retry.counted` key holding a PR's recreate count. */
 export const RECREATE_RETRY_PREFIX = "dependabot-recreate:";

@@ -113,6 +113,19 @@ describe("runHeartbeat", () => {
     expect(kinds).toContain("recovery_dispatch");
   });
 
+  it("emits pr_label events for owned-label actions and failures", () => {
+    const prLabels = emptyHandlerResult();
+    prLabels.actions.push({ action: "pr-label-added", sliceId: "s", pr: 9, detail: "march:opened" });
+    prLabels.failures.push({ action: "pr-label-failed", pr: 10, detail: "march:needs-human: boom" });
+    const d = deps();
+    runHeartbeat(out({ prLabels }), d);
+    const ev = d.events.filter((e) => e.kind === "pr_label" || e.kind === "pr_label_failure");
+    expect(ev).toEqual([
+      expect.objectContaining({ kind: "pr_label", action: "pr-label-added", slice_id: "s", pr_number: 9, detail: "march:opened" }),
+      expect.objectContaining({ kind: "pr_label_failure", action: "pr-label-failed", pr_number: 10 }),
+    ]);
+  });
+
   it("appends recovery actions in pipeline order: after babysit, before dispatch (#238)", () => {
     const babysit = emptyHandlerResult();
     babysit.actions.push({ action: "review-fix", sliceId: "b", sessionId: "x", pr: { number: 9 }, detail: "d" });
