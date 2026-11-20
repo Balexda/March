@@ -559,4 +559,74 @@ describe("legacy cut slice ids do not block sibling rows (#599)", () => {
     const state = { slices: { [OLD_CUT_ID]: { ...ranSlice, stage: "implementing" } }, archived_slices: {} };
     expect(dispatchableReady(state, [us1s1, us1s2, us2s1, us3s4])).toEqual([us1s2, us2s1, us3s4]);
   });
+
+  // After a restart the working state is rebuilt from the Herald fold, which keeps
+  // id + branch but not the action key (rebuildWorkingState), so an old-id entry
+  // cannot say which row it was for.
+  describe("entries rebuilt without an action key (cold start)", () => {
+    const rebuiltArchive = (terminal_state: string | null) => ({
+      pr_number: 1, pr_url: null, branch: `smithy/forge/${SLUG}`, terminal_state,
+    });
+    const all = [us1s1, us1s2, us2s1, us3s4];
+
+    it("a MERGED archive under the old id blocks nothing (smithy marks the merged row done)", () => {
+      const state = { slices: {}, archived_slices: { [OLD_CUT_ID]: rebuiltArchive("MERGED") } };
+      expect(dispatchableReady(state, all)).toEqual(all);
+    });
+
+    it("an escalated/closed archive under the old id keeps blocking every row that maps to it", () => {
+      for (const terminal of ["CLOSED", null]) {
+        const state = { slices: {}, archived_slices: { [OLD_CUT_ID]: rebuiltArchive(terminal) } };
+        expect(dispatchableReady(state, all)).toEqual([]);
+      }
+    });
+
+    it("a live slice under the old id blocks every row that maps to it (no duplicate dispatch)", () => {
+      const live = { kind: "smithy", branch: `smithy/forge/${SLUG}`, stage: "implementing", pr: null };
+      expect(dispatchableReady({ slices: { [OLD_CUT_ID]: live }, archived_slices: {} }, all)).toEqual([]);
+      // Matched by the old branch too, whatever the key.
+      expect(dispatchableReady({ slices: { other: live }, archived_slices: {} }, all)).toEqual([]);
+    });
+
+    it("a live MERGED slice under the old id releases its rows", () => {
+      const merged = { kind: "smithy", branch: `smithy/forge/${SLUG}`, stage: "merged", pr: { state: "MERGED" } };
+      expect(dispatchableReady({ slices: { [OLD_CUT_ID]: merged }, archived_slices: {} }, all)).toEqual(all);
+    });
+
+    it("rows whose id never changed are unaffected", () => {
+      const short = {
+        path: "docs/short/us1.tasks.md", parent_path: "docs/short/short.spec.md", parent_row_id: "US1",
+        next_action: { command: "smithy.forge", arguments: ["docs/short/us1.tasks.md", "1"] },
+      };
+      const live = { kind: "smithy", branch: `smithy/forge/${SLUG}`, stage: "implementing", pr: null };
+      expect(dispatchableReady({ slices: { [OLD_CUT_ID]: live }, archived_slices: {} }, [short])).toEqual([short]);
+    });
+  });
+
+  describe("recovering an escalation stored under the old id", () => {
+    const escalated = (extra: object = {}) => ({
+      kind: "smithy", branch: `smithy/forge/${SLUG}`, stage: "escalated",
+      escalated_reason: "hatchery_dispatch_failed", ...extra,
+    });
+
+    it("is recovered under the old id when it carries the item's action key", () => {
+      const state = {
+        slices: { [OLD_CUT_ID]: escalated({ command: "smithy.forge", arguments: [us2s1.path, "1"], artifact_path: us2s1.path }) },
+        archived_slices: {}, transient_retry_counts: {},
+      };
+      const out = recoverableEscalations(state, [us1s1, us2s1, us3s4]);
+      expect(out.map((r) => [r.item, r.sliceId])).toEqual([[us2s1, OLD_CUT_ID]]);
+    });
+
+    it("rebuilt without an action key: recovered only when one ready item maps to the old id", () => {
+      const state = { slices: { [OLD_CUT_ID]: escalated() }, archived_slices: {}, transient_retry_counts: {} };
+      expect(recoverableEscalations(state, [us1s2]).map((r) => r.sliceId)).toEqual([OLD_CUT_ID]);
+      expect(recoverableEscalations(state, [us1s1, us2s1])).toEqual([]);
+    });
+
+    it("is never also dispatched fresh", () => {
+      const state = { slices: { [OLD_CUT_ID]: escalated() }, archived_slices: {}, transient_retry_counts: {} };
+      expect(dispatchableReady(state, [us1s2])).toEqual([]);
+    });
+  });
 });

@@ -1,4 +1,11 @@
-import { dispatchBranch, dispatchItemKey, dispatchSliceId, sliceActionKey } from "./dispatch-id.js";
+import {
+  dispatchBranch,
+  dispatchItemKey,
+  dispatchSliceId,
+  legacyCutBranch,
+  legacyCutSliceId,
+  sliceActionKey,
+} from "./dispatch-id.js";
 import { isMarchBotComment } from "../../../observe/march-bot.js";
 import { taskTypeForSlice } from "../../../herald/profiles/slice-verb.js";
 import { approvalSatisfied, changesRequestedSatisfied, resolveMergeRequirements, type MergePolicy } from "../../../herald/profiles/merge-policy.js";
@@ -60,14 +67,46 @@ export function isStubArchivedSlice(slice: any): boolean {
   return !hasCommand && !hasBranch;
 }
 
+/** True when the slice carries the action key (`command` etc.). Slices rebuilt
+ *  from the Herald fold on a cold start do not. */
+function hasActionKey(slice: any): boolean {
+  return typeof slice?.command === "string" && slice.command.length > 0;
+}
+
+function isMergedSlice(slice: any): boolean {
+  if (!slice || typeof slice !== "object") return false;
+  return slice.terminal_state === "MERGED" || slice.stage === "merged" || slice.pr?.state === "MERGED";
+}
+
+/**
+ * True when `slice` is keyed by (or on the branch of) the id `item` had before
+ * #599, and carries no action key to tell which row it was for. Sibling rows of a
+ * long-named plan file share that legacy id, so such an entry is ambiguous: the
+ * callers treat it conservatively (block) except where smithy's own state already
+ * settles it (a MERGED archive). An entry WITH an action key is decided by the key.
+ */
+function ambiguousLegacyEntry(slice: any, existingId: string, item: any): boolean {
+  if (!slice || typeof slice !== "object" || hasActionKey(slice)) return false;
+  const legacyId = legacyCutSliceId(item);
+  if (!legacyId) return false;
+  if (existingId === legacyId) return true;
+  const legacyBranch = legacyCutBranch(item);
+  return Boolean(legacyBranch && (slice.branch === legacyBranch || slice.actual_branch === legacyBranch));
+}
+
 export function alreadyArchivedSlice(state: any, item: any, sliceId: string): boolean {
   const archived = archivedSlices(state);
   if (Object.prototype.hasOwnProperty.call(archived, sliceId) && !isStubArchivedSlice(archived[sliceId]))
     return true;
   const key = dispatchItemKey(item);
   const branch = dispatchBranch(item);
-  for (const slice of Object.values(archived)) {
+  for (const [existingId, slice] of Object.entries(archived) as [string, any][]) {
     if (!slice || typeof slice !== "object") continue;
+    // A pre-#599 archive rebuilt without an action key (#599): a MERGED one does
+    // not block (smithy marks the merged row done, and its siblings are not that
+    // work); an escalated/closed one keeps blocking, as the operator decided.
+    if (!isStubArchivedSlice(slice) && !isMergedSlice(slice) && ambiguousLegacyEntry(slice, existingId, item))
+      return true;
     if (sliceActionKey(slice) === key) return true;
     if ((slice as any).branch && (slice as any).branch === branch) return true;
     if ((slice as any).actual_branch && (slice as any).actual_branch === branch) return true;
@@ -93,6 +132,9 @@ export function inFlightSliceMatches(state: any, item: any, sliceId: string): bo
     if (existingId === sliceId) return true;
     if (!slice || typeof slice !== "object") continue;
     if (sliceReleasesArtifact(slice)) continue;
+    // A live pre-#599 slice rebuilt without an action key may be this row's
+    // running worker; block rather than dispatch it twice (#599).
+    if (ambiguousLegacyEntry(slice, existingId, item)) return true;
     if (slice.original_slice_id === sliceId) return true;
     if (sliceActionKey(slice) === key) return true;
     if (slice.branch && slice.branch === branch) return true;
@@ -330,11 +372,29 @@ function otherLiveBlocker(state: any, item: any, sliceId: string): boolean {
     if (existingId === sliceId) continue;
     if (!slice || typeof slice !== "object") continue;
     if (sliceReleasesArtifact(slice)) continue;
+    if (ambiguousLegacyEntry(slice, existingId, item)) return true;
     if (slice.original_slice_id === sliceId) return true;
     if (sliceActionKey(slice) === key) return true;
     if (slice.branch && slice.branch === branch) return true;
   }
   return false;
+}
+
+/**
+ * The pre-#599 id of a recoverably escalated slice that belongs to `item`, or
+ * null. The entry belongs to the item when its action key matches, or — rebuilt
+ * without one — when `item` is the only ready item that maps to that legacy id.
+ * With several candidates it is ambiguous and stays blocked (the operator's
+ * `march legate requeue` clears it).
+ */
+function legacyRecoverableId(slices: Record<string, any>, item: any, ready: readonly any[] | undefined): string | null {
+  const legacyId = legacyCutSliceId(item);
+  if (!legacyId) return null;
+  const slice = slices[legacyId];
+  if (!escalatedRecoverable(slice)) return null;
+  if (hasActionKey(slice)) return sliceActionKey(slice) === dispatchItemKey(item) ? legacyId : null;
+  const owners = (ready ?? []).filter((candidate) => legacyCutSliceId(candidate) === legacyId);
+  return owners.length === 1 ? legacyId : null;
 }
 
 /** A still-ready smithy item whose deterministic slice is recoverably escalated
@@ -374,9 +434,10 @@ export function recoverableEscalations(state: any, ready: readonly any[] | undef
   const slices = state?.slices && typeof state.slices === "object" ? state.slices : {};
   const candidates: { item: any; sliceId: string; attempt: number; until: number }[] = [];
   for (const item of ready ?? []) {
-    const sliceId = dispatchSliceId(item);
-    if (!escalatedRecoverable(slices[sliceId])) continue;
-    if (alreadyArchivedSlice(state, item, sliceId)) continue;
+    const currentId = dispatchSliceId(item);
+    const sliceId = escalatedRecoverable(slices[currentId]) ? currentId : legacyRecoverableId(slices, item, ready);
+    if (!sliceId) continue;
+    if (alreadyArchivedSlice(state, item, currentId)) continue;
     if (otherLiveBlocker(state, item, sliceId)) continue;
     // The pacer's "it's time" gate: the callback fires only once the slice is past
     // its backoff window (a candidate still cooling down is skipped).

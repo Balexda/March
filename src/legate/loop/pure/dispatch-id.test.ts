@@ -11,6 +11,9 @@ import {
   dispatchItemKey,
   dispatchSliceId,
   dispatchTitle,
+  legacyCutBranch,
+  legacyCutSliceId,
+  MAX_SEMANTIC_STEM,
   sliceActionKey,
   slugifyDispatchPart,
   smithyVerb,
@@ -142,6 +145,33 @@ describe("dispatch-id pure helpers", () => {
       });
       expect(dispatchSliceId(render("1"))).toBe(`${SLUG56}-m1-render`);
       expect(dispatchSliceId(render("2"))).toBe(`${SLUG56}-m2-render`);
+    });
+
+    it("legacyCutSliceId / legacyCutBranch give the old 56-character id, shared by siblings", () => {
+      expect(legacyCutSliceId(forgeItem(SLUG56, "US1", "1"))).toBe(`${SLUG56}-forge`);
+      expect(legacyCutSliceId(forgeItem(SLUG56, "US3", "4"))).toBe(`${SLUG56}-forge`);
+      expect(legacyCutBranch(forgeItem(SLUG56, "US2", "1"))).toBe(`smithy/forge/${SLUG56}`);
+      expect(legacyCutSliceId(forgeItem(SLUG50, "US1", "2"))).toBe(`${SLUG50}-us1-s-forge`);
+    });
+
+    it("legacy helpers are null when the id never changed", () => {
+      const short = forgeItem("short-name", "US1", "1");
+      expect(legacyCutSliceId(short)).toBeNull();
+      expect(legacyCutBranch(short)).toBeNull();
+      expect(legacyCutSliceId({ path: "x", next_action: { command: "smithy.mark", arguments: ["1"] } })).toBeNull();
+    });
+
+    it(`caps stems over ${MAX_SEMANTIC_STEM} characters, keeping the row suffix and a slug hash`, () => {
+      const huge = "a".repeat(200);
+      const hugeB = "a".repeat(199) + "b"; // same long prefix, different slug
+      const id1 = dispatchIdentity(forgeItem(huge, "US1", "1")).stem;
+      const id2 = dispatchIdentity(forgeItem(huge, "US2", "1")).stem;
+      const idB = dispatchIdentity(forgeItem(hugeB, "US1", "1")).stem;
+      expect(id1).toHaveLength(MAX_SEMANTIC_STEM);
+      expect(id1).toMatch(/-[0-9a-f]{6}-us1-s1$/);
+      expect(id2).toMatch(/-us2-s1$/);
+      expect(id1).not.toBe(idB);
+      expect(dispatchSliceId(forgeItem(huge, "US1", "1"))).toBe(dispatchSliceId(forgeItem(huge, "US1", "1")));
     });
 
     it("is deterministic", () => {
