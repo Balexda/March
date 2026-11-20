@@ -253,6 +253,21 @@ describe("runObservation", () => {
     expect(store.projection().repoSync).toMatchObject({ ok: true, behind: 3 });
   });
 
+  it("#592 review: reports the sync through onSync even when the later sensing throws", async () => {
+    const store = fakeStore();
+    const onSync = vi.fn();
+    const syncDefaultBranch = async () => ({
+      default_branch: "main", synced: true as const, head: "aaa", origin_head: "aaa", behind: 0, ahead: 0,
+    });
+    await expect(
+      runObservation({
+        store, profile: PROFILE, syncDefaultBranch, onSync, now: () => "2026-11-19T00:00:00.000Z",
+        senseDeps: senseDeps({ now: () => { throw new Error("sense boom"); } }),
+      }),
+    ).rejects.toThrow("sense boom");
+    expect(onSync).toHaveBeenCalledWith(expect.objectContaining({ ok: true, head: "aaa" }));
+  });
+
   it("#592: a failed sync records ok:false with the last-known checkout position", async () => {
     const store = fakeStore();
     const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);

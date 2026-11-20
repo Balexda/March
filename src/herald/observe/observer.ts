@@ -38,6 +38,9 @@ export interface ObserverDeps {
   readonly checkoutStatus?: (repoPath: string, knownDefault?: string) => Promise<CheckoutStatus>;
   /** Clock for the sync status `at`; defaults to ISO now. */
   readonly now?: () => string;
+  /** Called as soon as the sync attempt finishes, before the rest of the
+   *  observation, so the sync timestamps stay current even if sensing throws. */
+  readonly onSync?: (sync: RepoSyncStatus) => void;
 }
 
 export interface ObserveResult {
@@ -240,6 +243,7 @@ export async function runObservation(deps: ObserverDeps): Promise<ObserveResult>
   const tickStarted = Date.now();
   try {
     const sync = await syncDefaultBranchBeforeObserve(deps);
+    if (sync) deps.onSync?.(sync);
     // #592: record the checkout's sync status in the fold only when it changes,
     // so the legate (and the console) can see HEAD / commits behind without a
     // per-tick event. Appended before the read; diffObserved ignores repoSync.

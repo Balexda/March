@@ -145,8 +145,10 @@ export async function observeProfiles(
   for (const rec of profiles) {
     try {
       const { senseDeps, syncDefaultBranch, checkoutStatus } = buildObserveDeps(metaForProfile(rec), app, tessera);
-      const result = await runObservation({ store, senseDeps, profile: rec.profile, syncDefaultBranch, checkoutStatus });
-      if (result.sync) onSync?.(rec.profile, result.sync);
+      const result = await runObservation({
+        store, senseDeps, profile: rec.profile, syncDefaultBranch, checkoutStatus,
+        onSync: onSync ? (sync) => onSync(rec.profile, sync) : undefined,
+      });
       maxDurationMs = Math.max(maxDurationMs, result.durationMs);
       for (const e of result.appended) eventsByType[e.type] = (eventsByType[e.type] ?? 0) + 1;
       appendedTotal += result.appended.length;
