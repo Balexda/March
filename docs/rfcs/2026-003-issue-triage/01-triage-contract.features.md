@@ -36,7 +36,7 @@ kind: backend
 
 **Scope Boundaries**:
 - Includes named labels for state, each outcome, and each confidence level, plus separate operator-owned acceptance and resubmit signals. Define which labels triage manages and how it preserves operator overrides until the issue content changes. Provisioning preserves unrelated labels such as `bug`, `enhancement`, and `area:*`, covers at least march and smithycli, and makes zero changes on a second run.
-- Includes a reviewer-traceable mapping from each PRD outcome, confidence level, acceptance signal, resubmit signal, and re-entry trigger to one named contract element. The re-entry triggers are a change to the title/body content hash, reopening, and explicit resubmission. Comment-only activity, March's own writes, agent-filed `automated` issues, and rubric revisions do not trigger re-triage. Only explicit acceptance of a build verdict can authorize intake.
+- Includes a reviewer-traceable mapping from each PRD outcome, confidence level, acceptance signal, resubmit signal, and re-entry trigger to one named contract element. The re-entry triggers are a change to the title/body content hash, reopening, and explicit resubmission. Comment-only activity, March's own writes, and rubric revisions do not trigger re-triage. Agent-filed `automated` issues re-enter on the same triggers, but their re-triage must not start an endless loop. Only explicit acceptance of a build verdict can authorize intake.
 - Excludes issue observation, per-issue verdict writes, continuous triggering, and handling accepted work.
 
 ### Feature 3: Sticky Triage Notes
