@@ -1384,6 +1384,54 @@ leverOptions(
   }
 });
 
+/** Add the `--profile` / `--operator` / `--reason` options to a profile-level lever. */
+function profileLeverOptions(cmd: Command): Command {
+  return cmd
+    .option("--profile <profile>", "Only this profile (default: every registered profile).")
+    .option("--operator <name>", "Who is asking, for the event log (default: $MARCH_OPERATOR, else your OS username).")
+    .option("--reason <text>", "Why — recorded with the request in the event log.");
+}
+
+/** Run one profile-level lever (#593) against the legate and print its outcome. */
+async function runProfileLever(route: string, verb: string, opts: LeverOpts, done: (targets: string) => string): Promise<void> {
+  const profileName = opts.profile?.trim();
+  const result = await postLever<{ targets?: string[] }>(
+    route,
+    { ...(profileName ? { profile: profileName } : {}), ...leverAttribution(opts) },
+    verb,
+  );
+  if (!result) return;
+  console.log(done((result.targets ?? []).join(", ") || "(none)"));
+  process.exitCode = SUCCESS;
+}
+
+profileLeverOptions(
+  legate
+    .command("tick")
+    .description("Run a legate tick now instead of waiting for the interval. Refused while a tick is already in flight. Calls the running legate's HTTP API (MARCH_LEGATE_URL)."),
+).action(async (opts: LeverOpts) => {
+  commandHandled = true;
+  await runProfileLever("/tick", "tick", opts, (targets) => `Tick started (recorded for: ${targets}).`);
+});
+
+profileLeverOptions(
+  legate
+    .command("pause")
+    .description("Pause fresh dispatch: the legate launches no new work (in-flight spawns drain; relaunch, babysit, merge and recovery keep running) until `march legate resume`. Durable across restarts. Calls the running legate's HTTP API (MARCH_LEGATE_URL)."),
+).action(async (opts: LeverOpts) => {
+  commandHandled = true;
+  await runProfileLever("/dispatch/pause", "pause", opts, (targets) => `Dispatch paused for: ${targets}. Resume with \`march legate resume\`.`);
+});
+
+profileLeverOptions(
+  legate
+    .command("resume")
+    .description("Resume fresh dispatch after `march legate pause`. Calls the running legate's HTTP API (MARCH_LEGATE_URL)."),
+).action(async (opts: LeverOpts) => {
+  commandHandled = true;
+  await runProfileLever("/dispatch/resume", "resume", opts, (targets) => `Dispatch resumed for: ${targets}.`);
+});
+
 // Profile registry — Herald is the source of truth for which profiles the single
 // march-legate service drives. `march legate init` registers automatically; these
 // verbs manage profiles directly (and are the clean seam for a future profile service).

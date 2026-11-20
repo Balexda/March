@@ -81,6 +81,12 @@ export interface LoopState {
    * requeue handler tears down each slice's incarnation and tombstones it.
    */
   requeueRequests?: RequeueRequest[];
+  /**
+   * Set while an operator has paused fresh dispatch for this profile (#593),
+   * read from the fold every tick. The coordinator skips the dispatch handler;
+   * every other handler keeps running.
+   */
+  dispatchPaused?: { seq: number; ts: string; reason?: string };
 }
 
 /** One pending operator requeue (fold `requeueRequested`, keyed by slice). */

@@ -392,6 +392,8 @@ export async function senseFromHerald(deps: FoldDeps, herald: HeraldInbox, prevR
     // reconciles `raw` for these so the still-ready smithy work re-dispatches.
     recoveryRequests: herald.takeRecoveryRequests?.() ?? [],
     requeueRequests,
+    // Operator pause (#593): durable in the fold, so a restart stays paused.
+    ...(sys.dispatchPaused ? { dispatchPaused: { ...sys.dispatchPaused } } : {}),
   };
 }
 

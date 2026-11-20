@@ -45,6 +45,20 @@ export interface OperatorActionResult {
   profiles?: string[];
 }
 
+/** Operator input to a profile-level lever (#593): tick / pause / resume.
+ *  `profile` omitted = every registered profile. */
+export interface ProfileLeverInput extends OperatorFields {
+  profile?: string;
+}
+
+/** Result of a profile-level lever (#593). */
+export interface ProfileLeverResult extends OperatorActionResult {
+  /** The profiles the lever was recorded against. */
+  targets?: string[];
+  /** `POST /tick`: a tick was started. */
+  started?: boolean;
+}
+
 /** Operator input to the recover endpoint (#593): walk the recovery ladder. */
 export interface RecoverInput extends OperatorFields {
   profile: string;
@@ -125,6 +139,10 @@ export interface LoopHttpContext {
   readonly requeueSlice?: (input: RequeueInput) => Promise<RequeueResult>;
   /** Request the graduated recovery ladder for a slice (#593). */
   readonly requestRecovery?: (input: RecoverInput) => Promise<OperatorActionResult>;
+  /** Run a tick now (#593). */
+  readonly requestTick?: (input: ProfileLeverInput) => Promise<ProfileLeverResult>;
+  /** Pause / resume fresh dispatch (#593). */
+  readonly setDispatchPaused?: (input: ProfileLeverInput & { paused: boolean }) => Promise<ProfileLeverResult>;
   /** Environment the operator-token gate reads (defaults to process.env). */
   readonly env?: NodeJS.ProcessEnv;
 }
@@ -193,6 +211,11 @@ export function statusForRecord(
     },
     state_present: r?.state_present ?? false,
     state_error: r?.state_error ?? null,
+    // Operator pause (#593): fresh dispatch is held until `POST /dispatch/resume`.
+    dispatch_paused: r?.dispatch_paused === true,
+    ...(r?.dispatch_paused === true
+      ? { dispatch_paused_since: r?.dispatch_paused_since ?? null, dispatch_paused_reason: r?.dispatch_paused_reason ?? null }
+      : {}),
   };
 }
 
@@ -500,6 +523,17 @@ export function buildLoopServer(ctx: LoopHttpContext): FastifyInstance {
   // envelope); the next tick's recovery handler acts on it.
   registerSliceLever(app, "/slices/:sliceId/recover", "recover", ctx.requestRecovery);
 
+  // Profile-level levers (#593). `profile` (body or `?profile=`) narrows to one
+  // profile; omitted = every registered profile.
+  //   - POST /tick runs a tick now (409 while one is already in flight).
+  //   - POST /dispatch/pause holds fresh dispatch (durable `dispatch.paused` in
+  //     the fold, so a restart stays paused); in-flight spawns still drain and
+  //     relaunch/babysit/merge/recovery keep running.
+  //   - POST /dispatch/resume lifts it.
+  registerProfileLever(app, "/tick", "tick", ctx.requestTick);
+  registerProfileLever(app, "/dispatch/pause", "pause", ctx.setDispatchPaused && ((i) => ctx.setDispatchPaused!({ ...i, paused: true })));
+  registerProfileLever(app, "/dispatch/resume", "resume", ctx.setDispatchPaused && ((i) => ctx.setDispatchPaused!({ ...i, paused: false })));
+
   return app;
 }
 
@@ -540,6 +574,30 @@ function registerSliceLever<I extends OperatorFields & { profile: string; sliceI
       return { ok: false, error: `${label} is not available in this context.` };
     }
     const result = await effect({ ...parsed.fields, profile, sliceId, ...attribution.fields } as I);
+    reply.code(leverStatus(result));
+    return result;
+  });
+}
+
+/** Register a profile-level lever (#593): `POST <path>` with `{profile?, operator?, reason?}`. */
+function registerProfileLever(
+  app: FastifyInstance,
+  routePath: string,
+  label: string,
+  effect: ((input: ProfileLeverInput) => Promise<ProfileLeverResult>) | undefined,
+): void {
+  app.post(routePath, async (request, reply) => {
+    const { profile, body } = readTarget(request);
+    const attribution = readOperatorFields(body);
+    if (!attribution.ok) {
+      reply.code(400);
+      return { ok: false, error: attribution.error };
+    }
+    if (!effect) {
+      reply.code(501);
+      return { ok: false, error: `${label} is not available in this context.` };
+    }
+    const result = await effect({ ...(profile ? { profile } : {}), ...attribution.fields });
     reply.code(leverStatus(result));
     return result;
   });

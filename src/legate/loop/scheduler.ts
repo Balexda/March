@@ -28,8 +28,11 @@ export interface SchedulerDeps {
 export interface LoopScheduler {
   /** Run an immediate tick, then schedule the interval. Returns a stop handle. */
   start(): { stop: () => void };
-  /** Run a single tick now (subject to the re-entrancy guard). */
-  runOnce(): Promise<void>;
+  /** Run a single tick now (subject to the re-entrancy guard). Resolves true
+   *  when it ran, false when skipped because a tick was already in flight. */
+  runOnce(): Promise<boolean>;
+  /** True while a tick is in flight (the re-entrancy guard is held). */
+  readonly ticking: boolean;
   /** Wall-clock ms at the end of the last completed tick (0 before the first). */
   readonly lastTickAtMs: number;
   /** Duration of the last completed tick in ms (0 before the first). */
@@ -43,8 +46,8 @@ export function createScheduler(deps: SchedulerDeps): LoopScheduler {
   let lastTickAtMs = 0;
   let lastTickDurationMs = 0;
 
-  async function safeTick(): Promise<void> {
-    if (ticking) return;
+  async function safeTick(): Promise<boolean> {
+    if (ticking) return false;
     ticking = true;
     const startedAt = Date.now();
     try {
@@ -67,6 +70,7 @@ export function createScheduler(deps: SchedulerDeps): LoopScheduler {
     } catch {
       // Metrics/telemetry side effects must never break the loop.
     }
+    return true;
   }
 
   return {
@@ -76,6 +80,9 @@ export function createScheduler(deps: SchedulerDeps): LoopScheduler {
       return { stop: () => clearInterval(timer) };
     },
     runOnce: safeTick,
+    get ticking() {
+      return ticking;
+    },
     get lastTickAtMs() {
       return lastTickAtMs;
     },

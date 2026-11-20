@@ -75,6 +75,9 @@ const EVENT_TYPES: ReadonlySet<EventType> = new Set<EventType>([
   "slice.requeue.requested",
   "slice.requeue.refused",
   "retry.counted",
+  "legate.tick.requested",
+  "dispatch.paused",
+  "dispatch.resumed",
 ]);
 
 /** Slice-keyed event types that require a non-empty `sliceId`. */
@@ -228,6 +231,10 @@ export function validateEvent(rawBody: Record<string, unknown>): EventValidation
         return { ok: false, error: `event "${type}" ${field} must be a string.` };
       }
     }
+  }
+  if ((type === "legate.tick.requested" || type === "dispatch.paused" || type === "dispatch.resumed") &&
+      body.reason !== undefined && typeof body.reason !== "string") {
+    return { ok: false, error: `event "${type}" reason must be a string.` };
   }
   if (type === "review.backoff") {
     const { reviewer, until, attempts, cause, signalAt, noticeId, resetObservedAt } = body;

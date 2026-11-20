@@ -240,6 +240,7 @@ describe("buildLoopTickActivity", () => {
       blockedOnMergeState: 2,
       stranded: 4,
       recoveryRate: 2,
+      dispatchPaused: 0,
       escalatedByReason: { hatchery_dispatch_failed: 2, other: 1 }, // non-number 'bogus' dropped
       prBlocker: { conflicting: 1, owes_comments: 2 }, // non-number 'bogus' dropped
     });

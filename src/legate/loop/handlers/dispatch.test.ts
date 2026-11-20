@@ -146,6 +146,27 @@ describe("dispatch assess (#211 bounded auto-recovery)", () => {
 });
 
 describe("dispatch apply (orchestration)", () => {
+  it("while paused (#593) drains in-flight spawns but launches nothing new", async () => {
+    const fresh = readyItem("a.spec.md");
+    const wedged = readyItem("b.spec.md");
+    const state = loopState({
+      smithy: { ok: true, ready: [fresh, wedged], queue: { dispatchable: 1, blocked: 0, total: 2 } },
+      dispatchPaused: { seq: 4, ts: "T", reason: "deploy" },
+    });
+    (state.raw.slices as any)[dispatchSliceId(wedged)] = {
+      stage: "escalated",
+      escalated_reason: "hatchery_dispatch_failed",
+      command: "smithy.forge",
+      arguments: [wedged.path, "1"],
+      artifact_path: wedged.path,
+    };
+    const d = deps();
+    await apply(assess(state), ctx(), state, d);
+    expect(d.completePending).toHaveBeenCalled();
+    expect(d.launchDispatch).not.toHaveBeenCalled();
+    expect(d.recoverDispatch).not.toHaveBeenCalled();
+  });
+
   it("drains pending then launches the selected fresh dispatch", async () => {
     const item = readyItem("a.spec.md");
     const state = loopState({ smithy: { ok: true, ready: [item], queue: { dispatchable: 1, blocked: 0, total: 1 } } });

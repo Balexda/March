@@ -69,6 +69,8 @@ export interface LoopMetricsSnapshot {
    *  to 1), ramps up on clean rate-limited sweeps. Pairs with `stranded` to show
    *  the recovery loop throttling down during an outage and recovering after. */
   readonly recoveryRate: number;
+  /** 1 while an operator has paused fresh dispatch for this profile (#593). */
+  readonly dispatchPaused?: number;
   /** Escalated-stage slices keyed by bounded escalation reason; sums to
    *  slicesByStage.escalated. Splits spawn-failed from steward-stuck on the board. */
   readonly escalatedByReason: Readonly<Record<string, number>>;
@@ -353,6 +355,14 @@ function ensureInstruments(meter: Meter): void {
   // open PRs + crashed stewards). Surfaces spawn-failed/steward-less work that the
   // stage gauge alone shows as healthy "In steward". Exported as
   // `march_legate_slices_stranded` (no suffix).
+  // Operator pause (#593): 1 while fresh dispatch is paused for the profile, so a
+  // forgotten pause is visible next to a flat dispatch rate.
+  registerGauge(
+    meter,
+    "march.legate.dispatch.paused",
+    "1 while an operator has paused fresh dispatch for the profile",
+    (s) => s.dispatchPaused ?? 0,
+  );
   registerGauge(
     meter,
     "march.legate.slices.stranded",

@@ -592,3 +592,22 @@ describe("reduceMulti / foldEventsMulti", () => {
     expect(Object.keys(next.byProfile).sort()).toEqual(["a", "b"]);
   });
 });
+
+describe("operator profile levers (#593)", () => {
+  it("dispatch.paused sets a durable per-profile flag that dispatch.resumed clears; tick + policy events are history only", () => {
+    seq = 0;
+    const multi = foldEventsMulti([
+      ev({ type: "dispatch.paused", profile: "march", reason: "deploy" }),
+      ev({ type: "legate.tick.requested", profile: "march" }),
+      ev({ type: "profile.merge_policy.changed", profile: "smithy", mergePolicy: { defaults: { approval: false } }, previous: null }),
+    ]);
+    expect(multi.byProfile.march!.dispatchPaused).toEqual({ seq: 1, ts: "2026-05-20T00:00:01Z", reason: "deploy" });
+    // Pausing one profile never pauses another.
+    expect(multi.byProfile.smithy!.dispatchPaused).toBeUndefined();
+    expect(multi.byProfile.smithy!.slices).toEqual({});
+
+    const resumed = foldEventsMulti([ev({ type: "dispatch.resumed", profile: "march" })], structuredClone(multi));
+    expect(resumed.byProfile.march!.dispatchPaused).toBeUndefined();
+    expect(entityRefOf({ type: "dispatch.paused" })).toEqual({ kind: "system", id: "all" });
+  });
+});

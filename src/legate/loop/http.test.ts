@@ -10,6 +10,7 @@ import {
   resolveRequeueTarget,
   resolveRespondTarget,
   type LoopHttpContext,
+  type ProfileLeverInput,
   type RecoverInput,
   type RequeueInput,
   type RespondInput,
@@ -565,5 +566,62 @@ describe("POST /slices/:sliceId/recover (#593)", () => {
     } finally {
       await app.close();
     }
+  });
+});
+
+describe("profile levers: tick / pause / resume (#593)", () => {
+  function ctxWithLevers(calls: Array<ProfileLeverInput & { paused?: boolean; lever: string }>): LoopHttpContext {
+    return {
+      startedAtMs: 0,
+      getSnapshot: () => snapshot(),
+      env: {},
+      requestTick: async (input) => {
+        calls.push({ ...input, lever: "tick" });
+        return input.profile === "busy" ? { ok: false, status: 409, error: "a tick is already in progress." } : { ok: true, started: true, targets: ["march"] };
+      },
+      setDispatchPaused: async (input) => {
+        calls.push({ ...input, lever: "pause" });
+        return { ok: true, requested: true, targets: [input.profile ?? "march"] };
+      },
+    };
+  }
+
+  it("routes tick/pause/resume with an optional profile + attribution, 202 on success", async () => {
+    const calls: Array<ProfileLeverInput & { paused?: boolean; lever: string }> = [];
+    const app = buildLoopServer(ctxWithLevers(calls));
+    try {
+      expect((await app.inject({ method: "POST", url: "/tick", payload: {} })).statusCode).toBe(202);
+      expect((await app.inject({ method: "POST", url: "/dispatch/pause?profile=march", payload: { operator: "ana", reason: "deploy" } })).statusCode).toBe(202);
+      expect((await app.inject({ method: "POST", url: "/dispatch/resume", payload: {} })).statusCode).toBe(202);
+      expect(calls).toEqual([
+        { lever: "tick" },
+        { lever: "pause", profile: "march", operator: "ana", reason: "deploy", paused: true },
+        { lever: "pause", paused: false },
+      ]);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("409s an overlapping tick, 400s a bad operator, 501s without a runtime", async () => {
+    const app = buildLoopServer(ctxWithLevers([]));
+    const bare = buildLoopServer({ startedAtMs: 0, getSnapshot: () => snapshot(), env: {} });
+    try {
+      expect((await app.inject({ method: "POST", url: "/tick", payload: { profile: "busy" } })).statusCode).toBe(409);
+      expect((await app.inject({ method: "POST", url: "/dispatch/pause", payload: { operator: 1 } })).statusCode).toBe(400);
+      expect((await bare.inject({ method: "POST", url: "/tick", payload: {} })).statusCode).toBe(501);
+      expect((await bare.inject({ method: "POST", url: "/dispatch/resume", payload: {} })).statusCode).toBe(501);
+    } finally {
+      await app.close();
+      await bare.close();
+    }
+  });
+
+  it("/status reports a paused profile from its heartbeat", () => {
+    const paused = snapshot({
+      byProfile: { march: { lastHeartbeat: { ...heartbeat, dispatch_paused: true, dispatch_paused_since: "T", dispatch_paused_reason: "deploy" }, workingState: { slices: {} } } },
+    });
+    expect(buildStatus(ctxWith(paused), "march")).toMatchObject({ dispatch_paused: true, dispatch_paused_since: "T", dispatch_paused_reason: "deploy" });
+    expect(buildStatus(ctxWith(snapshot()), "smithy")).toMatchObject({ dispatch_paused: false });
   });
 });

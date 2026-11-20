@@ -60,7 +60,11 @@ export type TransitionEvent = Extract<
       | "slice.requeue.refused"
       | "retry.counted"
       | "review.requested"
-      | "review.backoff";
+      | "review.backoff"
+      // Profile-level operator levers (#593).
+      | "legate.tick.requested"
+      | "dispatch.paused"
+      | "dispatch.resumed";
   }
 >;
 

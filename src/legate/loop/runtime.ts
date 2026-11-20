@@ -79,6 +79,8 @@ import {
   resolveRespondTarget,
   type OperatorActionResult,
   type OperatorFields,
+  type ProfileLeverInput,
+  type ProfileLeverResult,
   type RecoverInput,
   type RequeueInput,
   type RequeueResult,
@@ -518,6 +520,80 @@ async function appendOperatorRequest(
       error: `failed to record the ${what} request in Herald: ${err?.message ?? String(err)}`,
     };
   }
+}
+
+/**
+ * The registered profiles a profile-level lever targets: the named one (404 if it
+ * is not registered), else every registered profile. The registry — not the warm
+ * runtimes map — is the source of truth, so a lever works before the first tick.
+ */
+async function leverProfiles(input: ProfileLeverInput): Promise<{ ok: true; profiles: string[] } | { ok: false; result: ProfileLeverResult }> {
+  let registered: string[];
+  try {
+    registered = (await profileClient.list()).map((p) => p.profile);
+  } catch (err: any) {
+    return { ok: false, result: { ok: false, status: 502, error: `failed to list profiles from Herald: ${err?.message ?? String(err)}` } };
+  }
+  if (input.profile) {
+    if (!registered.includes(input.profile)) {
+      return { ok: false, result: { ok: false, status: 404, error: `unknown profile "${input.profile}".`, profiles: registered } };
+    }
+    return { ok: true, profiles: [input.profile] };
+  }
+  if (registered.length === 0) return { ok: false, result: { ok: false, status: 404, error: "no profiles are registered." } };
+  return { ok: true, profiles: registered };
+}
+
+/** Append one attributed profile-level event per target profile. */
+async function appendProfileLever(
+  input: ProfileLeverInput,
+  targets: string[],
+  event: Parameters<LegateHerald["append"]>[1],
+  what: string,
+): Promise<ProfileLeverResult | null> {
+  for (const profile of targets) {
+    const failed = await appendOperatorRequest({ ...input, profile }, event, what);
+    if (failed) return failed;
+  }
+  return null;
+}
+
+/**
+ * Operator TICK NOW (#593): run a tick immediately instead of waiting for the
+ * interval. Refused (409) while a tick is already in flight — that tick picks up
+ * any pending request anyway. Records `legate.tick.requested` per target profile.
+ */
+export async function requestTick(input: ProfileLeverInput): Promise<ProfileLeverResult> {
+  if (scheduler().ticking) {
+    return finishOperatorAction("tick", input, { ok: false, status: 409, started: false, error: "a tick is already in progress." });
+  }
+  const targets = await leverProfiles(input);
+  if (!targets.ok) return finishOperatorAction("tick", input, targets.result);
+  const reason = input.reason ? { reason: input.reason } : {};
+  const failed = await appendProfileLever(input, targets.profiles, { type: "legate.tick.requested", ...reason }, "tick");
+  if (failed) return finishOperatorAction("tick", input, failed);
+  void scheduler().runOnce();
+  return finishOperatorAction("tick", input, { ok: true, requested: true, started: true, targets: targets.profiles });
+}
+
+/**
+ * Operator PAUSE / RESUME dispatch (#593). Appends `dispatch.paused` /
+ * `dispatch.resumed` per target profile; the fold's durable `dispatchPaused`
+ * makes the dispatch handler launch nothing new from the next tick on.
+ */
+export async function setDispatchPaused(input: ProfileLeverInput & { paused: boolean }): Promise<ProfileLeverResult> {
+  const action = input.paused ? "pause" : "resume";
+  const targets = await leverProfiles(input);
+  if (!targets.ok) return finishOperatorAction(action, input, targets.result);
+  const reason = input.reason ? { reason: input.reason } : {};
+  const failed = await appendProfileLever(
+    input,
+    targets.profiles,
+    { type: input.paused ? "dispatch.paused" : "dispatch.resumed", ...reason },
+    action,
+  );
+  if (failed) return finishOperatorAction(action, input, failed);
+  return finishOperatorAction(action, input, { ok: true, requested: true, targets: targets.profiles });
 }
 
 /**

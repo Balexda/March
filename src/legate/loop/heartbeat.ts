@@ -66,6 +66,14 @@ export function buildHeartbeatRecord(out: CoordinatorOutput, meta: { processor_n
     escalated_by_reason: t.escalatedByReason,
     pr_blocker_counts: t.prBlockerCounts,
     babysit_actions_by_kind: t.babysitActionsByKind,
+    // Operator pause (#593): /status + the dispatch-paused gauge read these.
+    dispatch_paused: out.state?.dispatchPaused ? true : false,
+    ...(out.state?.dispatchPaused
+      ? {
+          dispatch_paused_since: out.state.dispatchPaused.ts,
+          ...(out.state.dispatchPaused.reason ? { dispatch_paused_reason: out.state.dispatchPaused.reason } : {}),
+        }
+      : {}),
   };
 }
 

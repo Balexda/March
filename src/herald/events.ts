@@ -195,6 +195,16 @@ export type EventBody =
    * Herald's profile route (never accepted on `POST /events`); who changed it is
    * the envelope `operator`/`note`.
    */
+  /**
+   * Operator levers that act on a whole profile (#593). `legate.tick.requested`
+   * is history only (the legate ran a tick on demand). `dispatch.paused` /
+   * `dispatch.resumed` toggle the durable {@link SystemState.dispatchPaused} flag:
+   * while set the legate launches no NEW work for the profile (relaunch, babysit,
+   * merge and recovery keep running). Who asked is the envelope `operator`.
+   */
+  | { type: "legate.tick.requested"; reason?: string }
+  | { type: "dispatch.paused"; reason?: string }
+  | { type: "dispatch.resumed"; reason?: string }
   | {
       type: "profile.merge_policy.changed";
       mergePolicy: Record<string, unknown> | null;
@@ -286,6 +296,9 @@ export function entityRefOf(body: EventBody): EntityRef {
     case "admin.event.appended":
     case "review.backoff":
     case "profile.merge_policy.changed":
+    case "legate.tick.requested":
+    case "dispatch.paused":
+    case "dispatch.resumed":
       return { kind: "system", id: "all" };
   }
 }
@@ -373,6 +386,12 @@ export interface SystemState {
   smithy: { dispatchable: number; blocked: number; total: number };
   /** Transient auto-recovery retry counters (replaces state.json's). */
   retries: Record<string, number>;
+  /**
+   * Set while an operator has paused fresh dispatch for this profile (#593):
+   * the `dispatch.paused` seq/ts and its reason. Durable across restarts; cleared
+   * by `dispatch.resumed`.
+   */
+  dispatchPaused?: { seq: number; ts: string; reason?: string };
 }
 
 /** A fresh, empty projection. */
@@ -681,7 +700,19 @@ export function reduce(state: SystemState, event: HeraldEvent): SystemState {
       // seq/ts below so the projection's cursor tracks every appended row.
       break;
     case "profile.merge_policy.changed":
-      // History only (#593): the registry is the policy's source of truth.
+    case "legate.tick.requested":
+      // History only (#593): the registry is the policy's source of truth, and a
+      // requested tick changes nothing in the fold.
+      break;
+    case "dispatch.paused":
+      state.dispatchPaused = {
+        seq: event.seq,
+        ts: event.ts,
+        ...(event.reason !== undefined ? { reason: event.reason } : {}),
+      };
+      break;
+    case "dispatch.resumed":
+      delete state.dispatchPaused;
       break;
   }
   state.seq = event.seq;

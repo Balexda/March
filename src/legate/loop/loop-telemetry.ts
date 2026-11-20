@@ -283,6 +283,7 @@ export function buildLoopTickActivity(record: any, ctx: HeartbeatMetricsContext)
     blockedOnMergeState: record.blocked_on_merge_state_count ?? 0,
     stranded: record.stranded_count ?? 0,
     recoveryRate: record.recovery_rate ?? 1,
+    dispatchPaused: record.dispatch_paused ? 1 : 0,
     escalatedByReason,
     prBlocker,
   };
