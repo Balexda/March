@@ -724,7 +724,12 @@ export async function resendReviewThreads(input: ResendThreadsInput): Promise<Re
   try {
     await sendAgentDeckMessage(rt.meta, sessionId, reviewFixMessage(pr, threads), input.sliceId);
   } catch (err: any) {
-    return refuse(502, `failed to deliver /smithy.fix to session ${sessionId}: ${err?.message ?? String(err)} — relaunch the steward and retry.`);
+    return finishOperatorAction(
+      "resend_threads",
+      input,
+      { ok: false, status: 502, profile: input.profile, sliceId: input.sliceId, error: `failed to deliver /smithy.fix to session ${sessionId}: ${err?.message ?? String(err)} — relaunch the steward and retry.` },
+      { "march.failure_stage": "delivery" },
+    );
   }
 
   // Record it like babysit's review-fix so dedup, the round cap and the bounded
@@ -757,7 +762,7 @@ export async function resendReviewThreads(input: ResendThreadsInput): Promise<Re
   const base = { profile: input.profile, sliceId: input.sliceId, delivered: true, threadIds, commentIds };
   if (recorded) {
     // Delivered, but the fold did not record it: report the partial outcome.
-    return finishOperatorAction("resend_threads", input, { ...base, ok: false, status: 502, error: `delivered, but ${recorded.error}` });
+    return finishOperatorAction("resend_threads", input, { ...base, ok: false, status: 502, error: `delivered, but ${recorded.error}` }, { "march.failure_stage": "record" });
   }
   return finishOperatorAction("resend_threads", input, { ...base, ok: true }, { "march.pr_number": prNumber, "march.threads": threadIds.length });
 }
