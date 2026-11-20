@@ -285,4 +285,18 @@ describe("LegateHerald.append", () => {
     expect(append).toHaveBeenCalledWith({ type: "slice.archived", sliceId: "s1", profile: "march" });
     expect(stored.seq).toBe(9);
   });
+
+  it("nests an operator attribution under `attribution`, and omits an empty one (#593)", async () => {
+    const append = vi.fn(async (b: unknown) => ev(9, b as any));
+    const herald = new LegateHerald({ stateDir: dir, client: stubClient({ append }) });
+    await herald.append("march", { type: "slice.recovery.requested", sliceId: "s1" }, { operator: "ana", note: "wedged" });
+    expect(append).toHaveBeenLastCalledWith({
+      type: "slice.recovery.requested",
+      sliceId: "s1",
+      profile: "march",
+      attribution: { operator: "ana", note: "wedged" },
+    });
+    await herald.append("march", { type: "slice.archived", sliceId: "s1" }, {});
+    expect(append).toHaveBeenLastCalledWith({ type: "slice.archived", sliceId: "s1", profile: "march" });
+  });
 });

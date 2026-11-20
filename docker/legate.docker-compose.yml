@@ -72,6 +72,11 @@ services:
       - MARCH_MAX_CONCURRENT_SPAWNS=${MARCH_MAX_CONCURRENT_SPAWNS:-10}
       # Bind 0.0.0.0 inside the container so the loopback port-publish can reach it.
       - MARCH_LEGATE_CONTAINER=1
+      # Operator-lever bearer token (#593). When set, every POST route (recover,
+      # respond, requeue, merge, relaunch, tick, pause, ...) needs
+      # `Authorization: Bearer <token>`; the `march legate` CLI sends it from the
+      # same env var. Empty keeps the pre-#593 open loopback posture.
+      - MARCH_LEGATE_OPERATOR_TOKEN=${MARCH_LEGATE_OPERATOR_TOKEN:-}
       # os.homedir() resolves from HOME -> ~/.march/legate (per-profile logs + the
       # single Herald cursor) and the repo/worktree paths land on the mounted HOME.
       - HOME=${MARCH_HOST_HOME:-/home/jmbattista}

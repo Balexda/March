@@ -10,6 +10,7 @@ import {
   resolveRequeueTarget,
   resolveRespondTarget,
   type LoopHttpContext,
+  type RecoverInput,
   type RequeueInput,
   type RespondInput,
 } from "./http.js";
@@ -430,6 +431,137 @@ describe("POST /slices/:sliceId/requeue (#588)", () => {
     try {
       const res = await app.inject({ method: "POST", url: "/slices/s1/requeue", payload: { profile: "march" } });
       expect(res.statusCode).toBe(501);
+    } finally {
+      await app.close();
+    }
+  });
+});
+
+describe("operator token gate (#593)", () => {
+  function gated(env: NodeJS.ProcessEnv, calls: RecoverInput[] = []): LoopHttpContext {
+    return {
+      startedAtMs: Date.now() - 5000,
+      getSnapshot: () => snapshot(),
+      env,
+      requestRecovery: async (input) => {
+        calls.push(input);
+        return { ok: true, profile: input.profile, sliceId: input.sliceId, requested: true };
+      },
+    };
+  }
+  const recover = { method: "POST" as const, url: "/slices/s1/recover", payload: { profile: "march" } };
+
+  it("401s a lever with a missing or wrong bearer when the token is set, without calling the runtime", async () => {
+    const calls: RecoverInput[] = [];
+    const app = buildLoopServer(gated({ MARCH_LEGATE_OPERATOR_TOKEN: "s3cret" }, calls));
+    try {
+      expect((await app.inject(recover)).statusCode).toBe(401);
+      expect((await app.inject({ ...recover, headers: { authorization: "Bearer nope" } })).statusCode).toBe(401);
+      expect((await app.inject({ ...recover, headers: { authorization: "s3cret" } })).statusCode).toBe(401);
+      expect(calls).toHaveLength(0);
+      const ok = await app.inject({ ...recover, headers: { authorization: "Bearer s3cret" } });
+      expect(ok.statusCode).toBe(202);
+      expect(calls).toHaveLength(1);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("leaves the read-only GET routes open even with the token set", async () => {
+    const app = buildLoopServer(gated({ MARCH_LEGATE_OPERATOR_TOKEN: "s3cret" }));
+    try {
+      expect((await app.inject({ method: "GET", url: "/healthz" })).statusCode).toBe(200);
+      expect((await app.inject({ method: "GET", url: "/status" })).statusCode).toBe(200);
+      expect((await app.inject({ method: "GET", url: "/escalations" })).statusCode).toBe(200);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("keeps levers open when the token is unset (pre-#593 posture)", async () => {
+    const app = buildLoopServer(gated({}));
+    try {
+      expect((await app.inject(recover)).statusCode).toBe(202);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("gates the existing respond + requeue levers too", async () => {
+    const app = buildLoopServer({
+      ...gated({ MARCH_LEGATE_OPERATOR_TOKEN: "s3cret" }),
+      respondToEscalation: async () => ({ ok: true }),
+      requeueSlice: async () => ({ ok: true }),
+    });
+    try {
+      expect((await app.inject({ method: "POST", url: "/escalations/s1/respond", payload: { profile: "march", ack: true } })).statusCode).toBe(401);
+      expect((await app.inject({ method: "POST", url: "/slices/s1/requeue", payload: { profile: "march" } })).statusCode).toBe(401);
+    } finally {
+      await app.close();
+    }
+  });
+});
+
+describe("POST /slices/:sliceId/recover (#593)", () => {
+  function ctxWithRecover(spy: (input: RecoverInput) => void, result: any): LoopHttpContext {
+    return {
+      startedAtMs: Date.now() - 5000,
+      getSnapshot: () => snapshot(),
+      env: {},
+      requestRecovery: async (input) => {
+        spy(input);
+        return result;
+      },
+    };
+  }
+
+  it("forwards profile + attribution and returns 202", async () => {
+    let seen: RecoverInput | null = null;
+    const app = buildLoopServer(ctxWithRecover((i) => (seen = i), { ok: true, requested: true }));
+    try {
+      const res = await app.inject({
+        method: "POST",
+        url: "/slices/s1/recover",
+        payload: { profile: "march", operator: " ana ", reason: " wedged " },
+      });
+      expect(res.statusCode).toBe(202);
+      expect(seen).toEqual({ profile: "march", sliceId: "s1", operator: "ana", reason: "wedged" });
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("400s a missing profile or a non-string operator; 404s an unknown slice; 501 without a runtime", async () => {
+    let called = false;
+    const app = buildLoopServer(ctxWithRecover(() => (called = true), { ok: false, status: 404, error: "unknown slice" }));
+    const bare = buildLoopServer({ startedAtMs: 0, getSnapshot: () => snapshot(), env: {} });
+    try {
+      expect((await app.inject({ method: "POST", url: "/slices/s1/recover", payload: {} })).statusCode).toBe(400);
+      expect((await app.inject({ method: "POST", url: "/slices/s1/recover", payload: { profile: "march", operator: 7 } })).statusCode).toBe(400);
+      expect(called).toBe(false);
+      expect((await app.inject({ method: "POST", url: "/slices/s1/recover", payload: { profile: "march" } })).statusCode).toBe(404);
+      expect((await bare.inject({ method: "POST", url: "/slices/s1/recover", payload: { profile: "march" } })).statusCode).toBe(501);
+    } finally {
+      await app.close();
+      await bare.close();
+    }
+  });
+
+  it("respond forwards the operator attribution (#593)", async () => {
+    let seen: RespondInput | null = null;
+    const app = buildLoopServer({
+      startedAtMs: 0,
+      getSnapshot: () => snapshot(),
+      env: {},
+      respondToEscalation: async (input) => {
+        seen = input;
+        return { ok: true };
+      },
+    });
+    try {
+      const res = await app.inject({ method: "POST", url: "/escalations/s1/respond", payload: { profile: "march", ack: true, operator: "ana" } });
+      expect(res.statusCode).toBe(200);
+      expect(seen).toMatchObject({ profile: "march", sliceId: "s1", ack: true, operator: "ana" });
     } finally {
       await app.close();
     }

@@ -169,6 +169,7 @@ interface ReviewCapSample {
 let latestReviewCaps: readonly ReviewCapSample[] = [];
 let reviewRequests: Counter | undefined;
 let reviewRateLimits: Counter | undefined;
+let operatorActions: Counter | undefined;
 
 // The observable gauges read this map — one snapshot PER PROFILE, updated on
 // every recordLoopHeartbeat. The single shared legate ticks each profile in turn
@@ -230,6 +231,14 @@ function ensureInstruments(meter: Meter): void {
   });
   reviewRateLimits = meter.createCounter("march.legate.review.rate_limited", {
     description: "Reviewer rate-limit hits",
+    unit: "1",
+  });
+  // Operator levers on the Legate API (#593), by the bounded `action` (recover,
+  // respond, requeue, merge, relaunch, resend_threads, tick, pause, resume) and
+  // `outcome` (accepted / refused). Who asked lives in the event envelope + span,
+  // never in a metric label.
+  operatorActions = meter.createCounter("march.legate.operator.actions", {
+    description: "Operator actions requested through the Legate API, by action and outcome",
     unit: "1",
   });
   meter.createObservableGauge("march.legate.review.cap_remaining", {
@@ -621,4 +630,24 @@ export function recordReviewRateLimit(reviewer: "coderabbit" | "copilot"): void 
   if (!otel?.enabled) return;
   ensureInstruments(otel.getMeter());
   reviewRateLimits!.add(1, { reviewer });
+}
+
+/** The bounded operator lever names (#593) — a metric label, keep it closed. */
+export type OperatorAction =
+  | "recover"
+  | "respond"
+  | "requeue"
+  | "merge"
+  | "relaunch"
+  | "resend_threads"
+  | "tick"
+  | "pause"
+  | "resume";
+
+/** Count one operator lever request (#593). No-op when telemetry is disabled. */
+export function recordOperatorAction(action: OperatorAction, outcome: "accepted" | "refused"): void {
+  const otel = getActiveOtel();
+  if (!otel?.enabled) return;
+  ensureInstruments(otel.getMeter());
+  operatorActions!.add(1, { action, outcome });
 }

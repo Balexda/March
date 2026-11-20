@@ -7,6 +7,7 @@ import {
   configureLoopRuntime,
   getLoopSnapshot,
   requeueSlice,
+  requestRecovery,
   respondToEscalation,
   startLoopRuntime,
 } from "./runtime.js";
@@ -71,7 +72,7 @@ export async function runLoop(opts: RunLoopOptions = {}): Promise<void> {
     env.MARCH_LEGATE_LOOP_HOST?.trim() ||
     (env.MARCH_LEGATE_CONTAINER === "1" ? "0.0.0.0" : "127.0.0.1");
   const server = await startLoopHttpServer(
-    { startedAtMs, getSnapshot: getLoopSnapshot, respondToEscalation, requeueSlice },
+    { startedAtMs, getSnapshot: getLoopSnapshot, respondToEscalation, requeueSlice, requestRecovery, env },
     port,
     host,
   );

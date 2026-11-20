@@ -15,7 +15,14 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { recordDwell, recordLoopHeartbeat, recordReviewCaps, recordSpawnBudget } from "../../observability/loop-metrics.js";
+import {
+  recordDwell,
+  recordLoopHeartbeat,
+  recordOperatorAction,
+  recordReviewCaps,
+  recordSpawnBudget,
+  type OperatorAction,
+} from "../../observability/loop-metrics.js";
 import { stampDwell } from "./pure/dwell.js";
 import { createServiceLogger, resolveServiceLogFilePath } from "../../observability/logger.js";
 import { emitLoopLog } from "../../observability/logs.js";
@@ -46,7 +53,7 @@ import { reviewCapSamples, reviewRequestLimits } from "./pure/review-budget.js";
 import { markedCodeRabbitHead } from "../../observe/coderabbit-review.js";
 import { runHeartbeat } from "./heartbeat.js";
 import { broodRegister as broodRegisterCli, broodRetire as broodRetireCli, broodTeardown as broodTeardownCli } from "./clients/brood.js";
-import { LegateHerald } from "./clients/herald.js";
+import { LegateHerald, type OperatorAttribution } from "./clients/herald.js";
 // Dispatch ops (ask Hatchery to spawn / poll a job to completion). The legate's
 // effecting dispatch logic, behind the DispatchIoDeps seam built below. #144.
 import type { DispatchIoDeps } from "./handlers/dispatch-io.js";
@@ -70,6 +77,9 @@ import { createScheduler, type LoopScheduler } from "./scheduler.js";
 import {
   resolveRequeueTarget,
   resolveRespondTarget,
+  type OperatorActionResult,
+  type OperatorFields,
+  type RecoverInput,
   type RequeueInput,
   type RequeueResult,
   type RespondInput,
@@ -245,8 +255,10 @@ export async function respondToEscalation(input: RespondInput): Promise<RespondR
         "march.respond.delivered": result.delivered ?? false,
         "march.respond.cleared": result.cleared ?? false,
         "march.respond.recovery_requested": result.recoveryRequested ?? false,
+        "march.operator": operatorOf(input),
       },
     });
+    recordOperatorAction("respond", result.ok ? "accepted" : "refused");
     emitLoopLog({
       severity: result.ok ? "INFO" : "ERROR",
       body: result.ok
@@ -332,7 +344,11 @@ export async function respondToEscalation(input: RespondInput): Promise<RespondR
   //    open PR — handing the slice back to babysit's PR (fix + merge) path.
   let recoveryRequested = false;
   try {
-    await legateHerald().append(profile, { type: "slice.recovery.requested", sliceId: input.sliceId });
+    await legateHerald().append(
+      profile,
+      { type: "slice.recovery.requested", sliceId: input.sliceId },
+      attributionOf(input, `respond ${mode}`),
+    );
     recoveryRequested = true;
   } catch (err: any) {
     return finish({
@@ -370,9 +386,10 @@ export async function requeueSlice(input: RequeueInput): Promise<RequeueResult> 
         "march.profile": profile,
         "march.requeue.close_pr": input.closePr === true,
         "march.requeue.requested": result.requested ?? false,
-        ...(input.operator ? { "march.operator": input.operator } : {}),
+        "march.operator": operatorOf(input),
       },
     });
+    recordOperatorAction("requeue", result.ok ? "accepted" : "refused");
     emitLoopLog({
       severity: result.ok ? "INFO" : "ERROR",
       body: result.ok
@@ -398,7 +415,7 @@ export async function requeueSlice(input: RequeueInput): Promise<RequeueResult> 
       closePr: input.closePr === true,
       ...(input.operator ? { operator: input.operator } : {}),
       ...(input.reason ? { reason: input.reason } : {}),
-    });
+    }, attributionOf(input));
   } catch (err: any) {
     return finish({
       ok: false,
@@ -409,6 +426,112 @@ export async function requeueSlice(input: RequeueInput): Promise<RequeueResult> 
     });
   }
   return finish({ ok: true, profile, sliceId: input.sliceId, requested: true, closesPr: target.openPr });
+}
+
+// ── Operator levers (#593) ──────────────────────────────────────────────────
+// Every lever validates against the profile's warm working state, appends ONE
+// attributed request event to Herald (the operator on the envelope), and lets the
+// tick act on the folded request — so the log shows the operator's ask next to
+// the loop's response, and a restart re-reads any request not yet acted on.
+
+/** The operator name stamped on the envelope ("unknown" when the caller gave none). */
+function operatorOf(input: OperatorFields): string {
+  return input.operator?.trim() || "unknown";
+}
+
+/** Envelope attribution for an operator lever: who asked, and why. */
+function attributionOf(input: OperatorFields, fallbackNote?: string): OperatorAttribution {
+  const note = input.reason?.trim() || fallbackNote;
+  return { operator: operatorOf(input), ...(note ? { note } : {}) };
+}
+
+/**
+ * Emit the span, log and metric for an operator lever outcome (#593). The span is
+ * `legate.operator.<action>` on the slice trace (a child, never root), errored on
+ * refusal; profile-level levers (tick/pause/resume) have no slice and emit a root
+ * span instead.
+ */
+function finishOperatorAction<R extends OperatorActionResult>(
+  action: OperatorAction,
+  input: OperatorFields & { profile?: string; sliceId?: string },
+  result: R,
+  attributes: Record<string, string | number | boolean> = {},
+): R {
+  const sliceId = input.sliceId;
+  emitLoopSpan({
+    name: `legate.operator.${action}`,
+    traceKey: sliceId ?? `operator:${action}:${Date.now()}`,
+    root: !sliceId,
+    error: !result.ok,
+    attributes: {
+      ...(sliceId ? { "march.slice_id": sliceId } : {}),
+      ...(input.profile ? { "march.profile": input.profile } : {}),
+      "march.operator": operatorOf(input),
+      "march.operator.action": action,
+      ...(result.status ? { "http.status_code": result.status } : {}),
+      ...attributes,
+    },
+  });
+  recordOperatorAction(action, result.ok ? "accepted" : "refused");
+  emitLoopLog({
+    severity: result.ok ? "INFO" : "ERROR",
+    body: result.ok
+      ? `operator ${action}${sliceId ? ` for ${sliceId}` : ""} by ${operatorOf(input)}`
+      : `operator ${action}${sliceId ? ` for ${sliceId}` : ""} refused: ${result.error ?? "unknown error"}`,
+    eventKind: "operator_action",
+    ...(sliceId ? { sliceId } : {}),
+    attributes: { ...(input.profile ? { "march.profile": input.profile } : {}), "march.operator.action": action },
+  });
+  return result;
+}
+
+/** Look up a profile's runtime + a slice in its warm state, or a 404 refusal. */
+function sliceTarget(
+  input: { profile: string; sliceId: string },
+): { ok: true; rt: ProfileRuntime; slice: any } | { ok: false; result: OperatorActionResult } {
+  const rt = runtimes.get(input.profile);
+  if (!rt) {
+    return { ok: false, result: { ok: false, status: 404, error: `unknown profile "${input.profile}".`, profiles: [...runtimes.keys()] } };
+  }
+  const slice = rt.workingState?.slices?.[input.sliceId];
+  if (!slice || typeof slice !== "object") {
+    return { ok: false, result: { ok: false, status: 404, profile: input.profile, sliceId: input.sliceId, error: `unknown slice "${input.sliceId}".` } };
+  }
+  return { ok: true, rt, slice };
+}
+
+/** Append an attributed request event, mapping a Herald failure to a 502 refusal. */
+async function appendOperatorRequest(
+  input: OperatorFields & { profile: string; sliceId?: string },
+  event: Parameters<LegateHerald["append"]>[1],
+  what: string,
+): Promise<OperatorActionResult | null> {
+  try {
+    await legateHerald().append(input.profile, event, attributionOf(input));
+    return null;
+  } catch (err: any) {
+    return {
+      ok: false,
+      status: 502,
+      profile: input.profile,
+      ...(input.sliceId ? { sliceId: input.sliceId } : {}),
+      error: `failed to record the ${what} request in Herald: ${err?.message ?? String(err)}`,
+    };
+  }
+}
+
+/**
+ * Operator RECOVER (#593): request the graduated recovery ladder for a slice —
+ * the side-effecting half of `POST /slices/:sliceId/recover`. Appends an
+ * attributed `slice.recovery.requested`; the recovery handler walks the ladder
+ * from the next tick.
+ */
+export async function requestRecovery(input: RecoverInput): Promise<OperatorActionResult> {
+  const target = sliceTarget(input);
+  if (!target.ok) return finishOperatorAction("recover", input, target.result);
+  const failed = await appendOperatorRequest(input, { type: "slice.recovery.requested", sliceId: input.sliceId }, "recovery");
+  if (failed) return finishOperatorAction("recover", input, failed);
+  return finishOperatorAction("recover", input, { ok: true, profile: input.profile, sliceId: input.sliceId, requested: true });
 }
 
 function now() {
