@@ -93,11 +93,14 @@ Cross-checks Herald's `smithy.dispatchable` against the legate's
 - **Herald > legate** → the **#268 metric-inflation** signature, *not* a
   deadlock. Herald's observation-side count skips the in-flight/archived dedup
   the legate applies, so it over-counts. Trust the legate's number. If the
-  legate says `0`, run `{{{MARCH_CLI}}} legate queue --profile <p>`: every row
-  `in_flight` / `recovery_*` / `spawn_cap` means you're not wedged; a row held
-  `archived_closed` / `archived_merged` never clears on its own — check
-  `checkout.behind` is 0 (a stale checkout, #299) and then release it (see
-  Requeue below).
+  legate says `0`, run `{{{MARCH_CLI}}} legate queue --profile <p>`: rows
+  `recovery_*` / `spawn_cap` are waiting on the legate's own pacing; a row
+  `in_flight` is held by a live slice, which is not proof that slice is making
+  progress — if it persists, diagnose that slice and its session (it may be
+  awaiting input). A row held `archived_closed` / `archived_merged` never clears
+  on its own — check `checkout.ok` is true **and** `checkout.behind` is 0 (a
+  failed fetch can report 0 against a stale remote ref; a stale checkout is
+  #299) and then release it (see Requeue below).
 - **Both 0**, nothing in the smithy queue → nothing to do.
 - **Both > 0** and the legate is silent across several ticks (no recent
   legate-source events — check `events-tail.sh --profile <p> --src legate`) → the
@@ -200,7 +203,7 @@ dispatch re-launches it on the same tick.
 - **Archived hold (#592):** pass the `heldBy` slice id from `legate queue`. An
   `archived_closed` hold is released directly; an `archived_merged` hold needs `--release-merged` and is only right
   when the merged PR did *not* do this row's work (an id collision, #599/#602) and
-  `checkout.behind` is 0. There is no teardown; any leftover remote branch is
+  the checkout is verified current (`checkout.ok` true and `checkout.behind` 0). There is no teardown; any leftover remote branch is
   deleted, the archive is tombstoned, and the row dispatches fresh.
 - **It discards work.** Unique commits on the branch are deleted. Inspect the
   worktree first if anything there is worth keeping.
