@@ -69,6 +69,20 @@ Legate's public outputs are:
 - Deterministic trace relationship: `legate.dispatch` is the slice trace origin, and downstream service actions join the same deterministic slice trace.
 - Bounded diagnostic output: status payloads, heartbeat counters, action events, processor requests, errored spans, and concise diagnostics suitable for tests and operator display.
 
+### Conductor Session Settings
+
+Profile setup writes the paired conductor's `<conductorDir>/.claude/settings.json`. Besides the narrow `permissions.allow` list, it carries an `env` block that tunes Claude Code's compaction and prompt-cache lifetime for that long-lived session, using the same defaults and overrides as the Steward settings:
+
+| Claude Code variable | Default | Operator override |
+|------|---------|-------------------|
+| `CLAUDE_CODE_PROMPT_CACHE_TTL` | `1h` | `MARCH_SESSION_CACHE_TTL` (`5m` or `1h`) |
+| `CLAUDE_CODE_IDLE_COMPACT_MIN_TOKENS` | `100000` | `MARCH_SESSION_IDLE_COMPACT_MIN_TOKENS` (raised to `100000` if lower) |
+| `CLAUDE_CODE_AUTO_COMPACT_WINDOW` | `200000` | `MARCH_SESSION_AUTO_COMPACT_WINDOW` (clamped to `100000`–`1000000`) |
+
+An unparseable override falls back to the default. `MARCH_SESSION_COMPACTION` set to `0`, `false`, or `off` omits the `env` block entirely, leaving Claude Code's stock behavior. The defaults and parsing live in `src/shared/claude-session-env.ts`.
+
+The overrides are read from the environment of the shell running `march init`, and a change applies after setup is re-run for the profile.
+
 ### Cross-Contract Ownership Boundaries
 
 | Provider boundary | Provider contract | Legate relationship | Ownership rule |

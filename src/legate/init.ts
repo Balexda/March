@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Dotprompt } from "dotprompt";
+import { sessionCompactionSettings } from "../shared/claude-session-env.js";
 import { FINDER_BIN, isFinderAvailable, isOnPath } from "../shared/deps.js";
 import { ensureLegateService, registerProfile } from "./profile-register.js";
 
@@ -958,6 +959,10 @@ async function writeNarrowSettings(
         ...MARCH_CLI_ALLOWS,
       ],
     },
+    // Compaction + prompt-cache tuning shared with the stewards. The conductor
+    // is poked by the heartbeat timer so it rarely goes idle; the auto-compact
+    // window cap is the part that bounds its context.
+    ...sessionCompactionSettings(),
   };
   await fs.writeFile(
     path.join(settingsDir, "settings.json"),
