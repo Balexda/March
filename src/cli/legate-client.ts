@@ -123,5 +123,11 @@ export async function legatePost<T = Record<string, unknown>>(
     if (res.ok) throw new Error(`The legate service at ${base} returned HTTP ${res.status} without a JSON acknowledgement: ${snippet}`);
     return { status: res.status, ok: false, body: { error: `HTTP ${res.status}: ${snippet}` } as T & { ok?: boolean; error?: string } };
   }
-  return { status: res.status, ok: res.ok && parsed.ok !== false, body: parsed };
+  // Every lever acknowledges with a boolean `ok`; a 2xx without `ok: true` is
+  // not an acknowledgement and must not exit 0.
+  if (res.ok && parsed.ok !== true) {
+    const error = parsed.error ?? `The legate service at ${base} returned HTTP ${res.status} without an \`ok: true\` acknowledgement.`;
+    return { status: res.status, ok: false, body: { ...parsed, error } };
+  }
+  return { status: res.status, ok: res.ok, body: parsed };
 }

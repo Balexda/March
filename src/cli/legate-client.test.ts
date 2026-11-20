@@ -44,6 +44,13 @@ describe("legatePost (#593)", () => {
     await expect(legatePost("/dispatch/pause", {}, {})).rejects.toThrow(/without a JSON acknowledgement/);
   });
 
+  it.each(["{}", '{"ok":"yes"}', '{"ok":false}'])("treats a 2xx without ok:true (%s) as a failure", async (body) => {
+    stubFetch(200, body);
+    const res = await legatePost("/dispatch/pause", {}, {});
+    expect(res.ok).toBe(false);
+    expect(res.body.error).toBeTruthy();
+  });
+
   it("keeps a non-JSON refusal as a failed response with its status", async () => {
     stubFetch(502, "Bad Gateway");
     const res = await legatePost("/dispatch/pause", {}, {});
