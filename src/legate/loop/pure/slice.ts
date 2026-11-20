@@ -4,7 +4,9 @@ import { taskTypeForSlice } from "../../../herald/profiles/slice-verb.js";
 import { approvalSatisfied, changesRequestedSatisfied, resolveMergeRequirements, type MergePolicy } from "../../../herald/profiles/merge-policy.js";
 import { readRecoveryRate, stepRecoveryRate } from "./self-heal.js";
 import {
+  backoffUntil,
   clearBackoff,
+  coolingDown,
   retryAttempts,
   scheduleBackoff,
   whenDue,
@@ -60,24 +62,105 @@ export function isStubArchivedSlice(slice: any): boolean {
   return !hasCommand && !hasBranch;
 }
 
-export function alreadyArchivedSlice(state: any, item: any, sliceId: string): boolean {
+/** Which identity matched a blocking slice to a ready item (#592). */
+export type BlockerMatch = "id" | "action_key" | "branch";
+
+/** The archived slice that holds a ready item back, and how it matched (#592). */
+export interface ArchiveBlocker {
+  readonly sliceId: string;
+  readonly matchedOn: BlockerMatch;
+  /** The archive's terminal PR outcome; null when it ended any other way. */
+  readonly terminal: "MERGED" | "CLOSED" | null;
+  readonly prNumber: number | null;
+}
+
+/** The live (non-archived) slice that holds a ready item back (#592). */
+export interface LiveBlocker {
+  readonly sliceId: string;
+  readonly matchedOn: BlockerMatch | "original_id";
+  readonly stage: string | null;
+  readonly escalatedReason: string | null;
+}
+
+/** An archive's terminal PR outcome, read the same way `rebuildWorkingState` writes it. */
+export function archiveTerminal(slice: any): "MERGED" | "CLOSED" | null {
+  if (!slice || typeof slice !== "object") return null;
+  const state = typeof slice.terminal_state === "string" ? slice.terminal_state.toUpperCase() : null;
+  if (state === "MERGED" || state === "CLOSED") return state;
+  const prState = typeof slice.pr?.state === "string" ? slice.pr.state.toUpperCase() : null;
+  if (prState === "MERGED" || prState === "CLOSED") return prState;
+  if (slice.stage === "merged") return "MERGED";
+  return null;
+}
+
+function archivePrNumber(slice: any): number | null {
+  const n = typeof slice?.pr_number === "number" ? slice.pr_number : slice?.pr?.number;
+  return typeof n === "number" && n > 0 ? n : null;
+}
+
+function archiveBlocker(sliceId: string, slice: any, matchedOn: BlockerMatch): ArchiveBlocker {
+  return { sliceId, matchedOn, terminal: archiveTerminal(slice), prNumber: archivePrNumber(slice) };
+}
+
+/**
+ * The archived slice that blocks `item` from a fresh dispatch, or null. A direct
+ * id hit on a {@link isStubArchivedSlice stub} is ignored; every archive is then
+ * scanned for the same action key or branch. {@link alreadyArchivedSlice} is this
+ * as a boolean, so the dispatch decisions `/queue` publishes and the selection the
+ * dispatcher acts on can never disagree.
+ */
+export function findArchiveBlocker(state: any, item: any, sliceId: string): ArchiveBlocker | null {
   const archived = archivedSlices(state);
   if (Object.prototype.hasOwnProperty.call(archived, sliceId) && !isStubArchivedSlice(archived[sliceId]))
-    return true;
+    return archiveBlocker(sliceId, archived[sliceId], "id");
   const key = dispatchItemKey(item);
   const branch = dispatchBranch(item);
-  for (const slice of Object.values(archived)) {
+  for (const [archivedId, slice] of Object.entries(archived) as [string, any][]) {
     if (!slice || typeof slice !== "object") continue;
-    if (sliceActionKey(slice) === key) return true;
-    if ((slice as any).branch && (slice as any).branch === branch) return true;
-    if ((slice as any).actual_branch && (slice as any).actual_branch === branch) return true;
+    if (sliceActionKey(slice) === key) return archiveBlocker(archivedId, slice, "action_key");
+    if (slice.branch && slice.branch === branch) return archiveBlocker(archivedId, slice, "branch");
+    if (slice.actual_branch && slice.actual_branch === branch) return archiveBlocker(archivedId, slice, "branch");
   }
-  return false;
+  return null;
+}
+
+export function alreadyArchivedSlice(state: any, item: any, sliceId: string): boolean {
+  return findArchiveBlocker(state, item, sliceId) !== null;
 }
 
 export function alreadyHasInFlightSlice(state: any, item: any, sliceId: string): boolean {
   if (alreadyArchivedSlice(state, item, sliceId)) return true;
   return inFlightSliceMatches(state, item, sliceId);
+}
+
+function liveBlocker(sliceId: string, slice: any, matchedOn: LiveBlocker["matchedOn"]): LiveBlocker {
+  return {
+    sliceId,
+    matchedOn,
+    stage: typeof slice?.stage === "string" ? slice.stage : null,
+    escalatedReason: typeof slice?.escalated_reason === "string" ? slice.escalated_reason : null,
+  };
+}
+
+/**
+ * The live slice that blocks `item` from a fresh dispatch, or null. A slice keyed
+ * at the item's own id always blocks; any other slice blocks unless it has
+ * released its artifact (merged), matching on `original_slice_id`, action key or
+ * branch. {@link inFlightSliceMatches} is this as a boolean.
+ */
+export function findLiveBlocker(state: any, item: any, sliceId: string): LiveBlocker | null {
+  const slices = state?.slices && typeof state.slices === "object" ? state.slices : {};
+  const key = dispatchItemKey(item);
+  const branch = dispatchBranch(item);
+  for (const [existingId, slice] of Object.entries(slices) as [string, any][]) {
+    if (existingId === sliceId) return liveBlocker(existingId, slice, "id");
+    if (!slice || typeof slice !== "object") continue;
+    if (sliceReleasesArtifact(slice)) continue;
+    if (slice.original_slice_id === sliceId) return liveBlocker(existingId, slice, "original_id");
+    if (sliceActionKey(slice) === key) return liveBlocker(existingId, slice, "action_key");
+    if (slice.branch && slice.branch === branch) return liveBlocker(existingId, slice, "branch");
+  }
+  return null;
 }
 
 /**
@@ -86,18 +169,7 @@ export function alreadyHasInFlightSlice(state: any, item: any, sliceId: string):
  * "blocked because the prior MERGED archive collides" (the recoverable case).
  */
 export function inFlightSliceMatches(state: any, item: any, sliceId: string): boolean {
-  const slices = state?.slices && typeof state.slices === "object" ? state.slices : {};
-  const key = dispatchItemKey(item);
-  const branch = dispatchBranch(item);
-  for (const [existingId, slice] of Object.entries(slices) as [string, any][]) {
-    if (existingId === sliceId) return true;
-    if (!slice || typeof slice !== "object") continue;
-    if (sliceReleasesArtifact(slice)) continue;
-    if (slice.original_slice_id === sliceId) return true;
-    if (sliceActionKey(slice) === key) return true;
-    if (slice.branch && slice.branch === branch) return true;
-  }
-  return false;
+  return findLiveBlocker(state, item, sliceId) !== null;
 }
 
 /**
@@ -393,6 +465,92 @@ export function recoverableEscalations(state: any, ready: readonly any[] | undef
     attempt: c.attempt,
     limit: DISPATCH_RECOVERY_LIMIT,
   }));
+}
+
+/**
+ * Why one ready plan item did or did not dispatch this tick (#592). The fixed
+ * vocabulary is also the `decision` label on `march.legate.dispatch.items`, so
+ * keep it low-cardinality.
+ *
+ *  - `dispatch`: launched fresh this tick.
+ *  - `spawn_cap`: would launch, but the global spawn budget (cap or breaker) ran out.
+ *  - `in_flight`: a live slice already covers it.
+ *  - `recovery_due` / `recovery_backoff`: its own slice is a recoverable
+ *    escalation, re-dispatched this tick or cooling down / rate-limited.
+ *  - `archived_merged` / `archived_closed` / `archived_other`: an archived slice
+ *    with the same id, action key or branch holds it back.
+ */
+export const DISPATCH_DECISIONS = [
+  "dispatch",
+  "spawn_cap",
+  "in_flight",
+  "recovery_due",
+  "recovery_backoff",
+  "archived_merged",
+  "archived_closed",
+  "archived_other",
+] as const;
+export type DispatchDecisionKind = (typeof DISPATCH_DECISIONS)[number];
+
+/** One row of the per-item dispatch decisions `GET /queue` serves (#592). */
+export interface DispatchDecisionRow {
+  readonly path: string | null;
+  readonly rowId: string | null;
+  readonly command: string | null;
+  readonly arguments: readonly unknown[];
+  readonly sliceId: string;
+  readonly branch: string;
+  decision: DispatchDecisionKind;
+  readonly heldBy?: {
+    readonly sliceId: string;
+    readonly matchedOn: string;
+    readonly prNumber?: number | null;
+    readonly terminal?: "MERGED" | "CLOSED" | null;
+    readonly stage?: string | null;
+    readonly escalatedReason?: string | null;
+  };
+  /** ISO time a `recovery_backoff` item next becomes eligible, when known. */
+  readonly retryAt?: string;
+}
+
+/**
+ * Pure: classify every ready item with the same matchers {@link assess} uses, so
+ * the published decision is the dispatcher's actual reason. `spawn_cap` is never
+ * produced here — the dispatch handler marks it when the shared budget runs out.
+ * `nowMs` gates recovery backoff exactly as {@link recoverableEscalations} does.
+ */
+export function classifyReady(state: any, ready: readonly any[] | undefined, nowMs = NaN): DispatchDecisionRow[] {
+  const slices = state?.slices && typeof state.slices === "object" ? state.slices : {};
+  const due = new Set(recoverableEscalations(state, ready, nowMs).map((r) => r.sliceId));
+  return (ready ?? []).map((item) => {
+    const sliceId = dispatchSliceId(item);
+    const base = {
+      path: typeof item?.path === "string" ? item.path : null,
+      rowId: item?.parent_row_id != null ? String(item.parent_row_id) : null,
+      command: typeof item?.next_action?.command === "string" ? item.next_action.command : null,
+      arguments: Array.isArray(item?.next_action?.arguments) ? item.next_action.arguments : [],
+      sliceId,
+      branch: dispatchBranch(item),
+    };
+    const archived = findArchiveBlocker(state, item, sliceId);
+    if (archived) {
+      const decision: DispatchDecisionKind =
+        archived.terminal === "MERGED" ? "archived_merged" : archived.terminal === "CLOSED" ? "archived_closed" : "archived_other";
+      return { ...base, decision, heldBy: { ...archived } };
+    }
+    const live = findLiveBlocker(state, item, sliceId);
+    if (!live) return { ...base, decision: "dispatch" as const };
+    const heldBy = { ...live };
+    if (live.sliceId === sliceId && escalatedRecoverable(slices[sliceId]) && !otherLiveBlocker(state, item, sliceId)) {
+      if (due.has(sliceId)) return { ...base, decision: "recovery_due" as const, heldBy };
+      // Not due: cooling down (retryAt known) or cut by this tick's AIMD rate.
+      const retryAt = coolingDown(state, DISPATCH_RECOVERY_DOMAIN, sliceId, nowMs)
+        ? new Date(backoffUntil(state, DISPATCH_RECOVERY_DOMAIN, sliceId)).toISOString()
+        : undefined;
+      return { ...base, decision: "recovery_backoff" as const, heldBy, ...(retryAt ? { retryAt } : {}) };
+    }
+    return { ...base, decision: "in_flight" as const, heldBy };
+  });
 }
 
 /**

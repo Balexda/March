@@ -306,6 +306,7 @@ These answer "is the loop alive?" and "how deep is the queue?".
 | `march.legate.queue.dispatchable` (gauge) | `march_legate_queue_dispatchable` | tasks the loop would dispatch this tick (ready − in-flight; #219) |
 | `march.legate.queue.blocked` (gauge) | `march_legate_queue_blocked` | pending tasks blocked on deps |
 | `march.legate.queue.total` (gauge) | `march_legate_queue_total` | total pending tasks |
+| `march.legate.dispatch.items` (gauge) | `march_legate_dispatch_items` | dependency-free plan items by dispatch `decision` (#592): `dispatch`, `spawn_cap`, `in_flight`, `recovery_due`, `recovery_backoff`, `archived_merged`, `archived_closed`, `archived_other`; the per-item rows are on the legate's `GET /queue` |
 | `march.legate.workers` (gauge) | `march_legate_workers` | worker sessions by `state` |
 | `march.legate.slices` (gauge) | `march_legate_slices` | non-archived slices by lifecycle `stage` (#220) |
 | `march.legate.slices.ready_to_merge` (gauge) | `march_legate_slices_ready_to_merge` | `pr-open` slices clean+mergeable, no threads owed (#220) |

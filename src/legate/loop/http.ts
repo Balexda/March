@@ -117,6 +117,40 @@ export function statusForRecord(
   };
 }
 
+/** One profile's `/queue` body from its latest dispatch snapshot (pure; testable). */
+export function queueForEntry(entry: { lastHeartbeat: any; lastDispatch?: any } | undefined): Record<string, unknown> {
+  const r = entry?.lastHeartbeat;
+  const d = entry?.lastDispatch;
+  return {
+    last_tick_at: d?.at ?? r?.ts ?? null,
+    smithy_ok: d ? d.smithyOk : null,
+    queue: {
+      dispatchable: r?.dispatchable_count ?? 0,
+      blocked: r?.blocked_count ?? 0,
+      total: r?.pending_total ?? 0,
+    },
+    items: d?.items ?? [],
+    checkout: d?.checkout ?? null,
+  };
+}
+
+/**
+ * Build the `/queue` payload (#592): why each ready plan item did or did not
+ * dispatch on the profile's last tick. With `profile`, that profile (or null for
+ * an unknown one); else every profile under `by_profile`.
+ */
+export function buildQueue(ctx: LoopHttpContext, profile?: string): Record<string, unknown> | null {
+  const snap = ctx.getSnapshot();
+  if (profile) {
+    const entry = snap.byProfile[profile];
+    if (!entry) return null;
+    return { ok: true, profile, ...queueForEntry(entry) };
+  }
+  const byProfile: Record<string, unknown> = {};
+  for (const p of snap.profiles) byProfile[p] = queueForEntry(snap.byProfile[p]);
+  return { ok: true, profiles: snap.profiles, by_profile: byProfile };
+}
+
 /** Build the /status payload. With `profile`, that profile's status; else all. */
 export function buildStatus(ctx: LoopHttpContext, profile?: string): Record<string, unknown> {
   const snap = ctx.getSnapshot();
@@ -283,6 +317,18 @@ export function buildLoopServer(ctx: LoopHttpContext): FastifyInstance {
     const profile =
       typeof query.profile === "string" && query.profile.length > 0 ? query.profile : undefined;
     return buildStatus(ctx, profile);
+  });
+
+  // Per-item dispatch decisions (#592): why each ready plan item did or did not
+  // dispatch last tick, the slice that holds it, and the checkout sync status.
+  app.get("/queue", async (request, reply) => {
+    const query = (request.query ?? {}) as Record<string, string | undefined>;
+    const profile =
+      typeof query.profile === "string" && query.profile.length > 0 ? query.profile : undefined;
+    const body = buildQueue(ctx, profile);
+    if (body) return body;
+    reply.code(404);
+    return { ok: false, error: `unknown profile "${profile}".`, profiles: ctx.getSnapshot().profiles };
   });
 
   // Interrogation endpoint: list escalated tasks (what the task is, the PR, the

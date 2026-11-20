@@ -39,7 +39,7 @@ import { execLegateGh, LegateGitHubError, requestCopilotReview } from "./clients
 import { runTick as coordinatorRunTick } from "./coordinator.js";
 import { resolveMaxConcurrentSpawns } from "./meta.js";
 import { SpawnBreaker } from "./spawn-breaker.js";
-import { createSpawnBudget, liveSpawnCount, taskTypeForSlice, type SpawnBudget } from "./pure/slice.js";
+import { createSpawnBudget, liveSpawnCount, taskTypeForSlice, type DispatchDecisionRow, type SpawnBudget } from "./pure/slice.js";
 import { ReviewerBackoff, reviewSignals, verifyStartupIntent, type ReviewPostOutcome } from "./handlers/review-backoff.js";
 import type { ReviewRequestHistory } from "./handlers/coderabbit-rereview.js";
 import { reviewCapSamples, reviewRequestLimits } from "./pure/review-budget.js";
@@ -106,6 +106,19 @@ interface ProfileRuntime {
   /** The profile's per-task-type merge policy, refreshed from the registry each
    *  tick (undefined = all merge requirements enforced). */
   mergePolicy?: MergePolicy;
+  /** This profile's latest per-item dispatch decisions (#592), for `GET /queue`.
+   *  In memory only — never written to the heartbeat ndjson. */
+  lastDispatch?: DispatchSnapshot | null;
+}
+
+/** The latest tick's per-item dispatch decisions for one profile (#592). */
+export interface DispatchSnapshot {
+  readonly at: string;
+  /** False when smithy could not be read this tick (no rows then). */
+  readonly smithyOk: boolean;
+  readonly items: readonly DispatchDecisionRow[];
+  /** The plan checkout's last-known default-branch sync status (Herald fold), or null. */
+  readonly checkout: unknown;
 }
 
 const runtimes = new Map<string, ProfileRuntime>();
@@ -172,7 +185,7 @@ export interface LoopSnapshot {
   /** Per-profile latest heartbeat record + live working state (the in-memory
    *  `raw` for that profile, whose `slices` carry per-slice stage/PR/escalation —
    *  the source for the /escalations interrogation endpoint). */
-  readonly byProfile: Record<string, { lastHeartbeat: any; workingState: any }>;
+  readonly byProfile: Record<string, { lastHeartbeat: any; workingState: any; lastDispatch?: DispatchSnapshot | null }>;
   readonly profiles: string[];
   readonly lastTickAtMs: number;
   readonly lastTickDurationMs: number;
@@ -182,8 +195,9 @@ export interface LoopSnapshot {
 
 /** Latest tick snapshot, consumed by the HTTP /status + /escalations endpoints. */
 export function getLoopSnapshot(): LoopSnapshot {
-  const byProfile: Record<string, { lastHeartbeat: any; workingState: any }> = {};
-  for (const [profile, rt] of runtimes) byProfile[profile] = { lastHeartbeat: rt.lastHeartbeat, workingState: rt.workingState };
+  const byProfile: Record<string, { lastHeartbeat: any; workingState: any; lastDispatch?: DispatchSnapshot | null }> = {};
+  for (const [profile, rt] of runtimes)
+    byProfile[profile] = { lastHeartbeat: rt.lastHeartbeat, workingState: rt.workingState, lastDispatch: rt.lastDispatch ?? null };
   const profiles = Object.keys(byProfile);
   return {
     byProfile,
@@ -784,6 +798,12 @@ async function tickProfile(rt: ProfileRuntime, history: ReviewRequestHistory, sp
   });
 
   rt.workingState = out.state.raw;
+  rt.lastDispatch = {
+    at: out.tick.ts,
+    smithyOk: out.tick.dispatchDecisions != null,
+    items: out.tick.dispatchDecisions ?? [],
+    checkout: (out.state as any).checkout ?? null,
+  };
 
   // Agent-health tally for the circuit-breaker: hard-down spawn failures the
   // dispatch handler flagged this tick, and successful spawn completions

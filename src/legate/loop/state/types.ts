@@ -6,7 +6,7 @@ import type { RegisterSessionInput } from "../../../brood/service/types.js";
 import type { JudgementInput } from "../judgement.js";
 import type { TransitionEvent } from "../clients/herald.js";
 import type { MergePolicy } from "../../../herald/profiles/merge-policy.js";
-import type { SpawnBudget } from "../pure/slice.js";
+import type { DispatchDecisionRow, SpawnBudget } from "../pure/slice.js";
 
 /**
  * Two-stage loop contracts.
@@ -153,6 +153,11 @@ export interface HandlerResult {
    * circuit-breaker (spawn-breaker.ts). Absent ⇒ 0.
    */
   hardDownFailures?: number;
+  /**
+   * Per-item dispatch decisions for this tick's ready items (#592). Set only by
+   * the dispatch handler; absent when smithy could not be read.
+   */
+  dispatchDecisions?: DispatchDecisionRow[];
 }
 
 export function emptyHandlerResult(): HandlerResult {
@@ -233,4 +238,10 @@ export interface TickResult {
   /** Fresh dispatchable items deferred this tick because the cap was reached
    *  (global running tally; they stay dispatchable for a later tick). */
   spawnsDeferred?: number;
+  /** Why each ready plan item did or did not dispatch this tick (#592), or null
+   *  when smithy could not be read. Served by `GET /queue`; kept in memory only. */
+  dispatchDecisions?: DispatchDecisionRow[] | null;
+  /** {@link dispatchDecisions} counted by decision, every bounded decision present
+   *  (zeros included) so the gauge drops to 0; absent when smithy was unreadable. */
+  dispatchDecisionCounts?: Record<string, number>;
 }

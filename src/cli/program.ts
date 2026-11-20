@@ -1383,6 +1383,44 @@ legate
   });
 
 legate
+  .command("queue")
+  .description(
+    "Show why each dependency-free plan row did or did not dispatch on the legate's last tick (dispatch, spawn_cap, in_flight, recovery_*, archived_*), the slice holding it back, and the plan checkout's sync status. Calls the running legate's HTTP API (MARCH_LEGATE_URL).",
+  )
+  .option("--profile <profile>", "Show one profile. When omitted, every registered profile is shown.")
+  .option("--json", "Print the raw GET /queue body.")
+  .action(async (opts: { profile?: string; json?: boolean }) => {
+    commandHandled = true;
+    const base = legateServiceBase();
+    const named = opts.profile?.trim();
+    const url = `${base}/queue${named ? `?profile=${encodeURIComponent(named)}` : ""}`;
+    let res: Response;
+    try {
+      res = await fetch(url, { signal: AbortSignal.timeout(15_000) });
+    } catch (err) {
+      process.stderr.write(
+        `Could not reach the legate service at ${base}: ${(err as Error).message}. ` +
+          "Is `march legate serve` up? Set MARCH_LEGATE_URL to override.\n",
+      );
+      process.exitCode = ERROR;
+      return;
+    }
+    const body = (await res.json().catch(() => ({}))) as any;
+    if (!res.ok || !body?.ok) {
+      process.stderr.write((body?.error ?? `legate queue failed (HTTP ${res.status}).`) + "\n");
+      process.exitCode = ERROR;
+      return;
+    }
+    if (opts.json) {
+      console.log(JSON.stringify(body, null, 2));
+    } else {
+      const { formatQueue } = await import("./legate-queue.js");
+      console.log(formatQueue(body));
+    }
+    process.exitCode = SUCCESS;
+  });
+
+legate
   .command("requeue <sliceId>")
   .description(
     "Discard a slice's current attempt and put its work back in the queue: tear down the steward session, worktree and branch, then let the legate re-dispatch the smithy item fresh. Works for any in-flight slice — including a steward that asked a question and then died, or one that went off the rails. Refuses a slice with an open PR unless --close-pr. Calls the running legate's HTTP API (MARCH_LEGATE_URL).",

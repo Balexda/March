@@ -261,6 +261,13 @@ export function buildLoopTickActivity(record: any, ctx: HeartbeatMetricsContext)
       if (typeof count === "number") prBlocker[reason] = count;
     }
   }
+  let dispatchItems: Record<string, number> | undefined;
+  if (record.dispatch_decision_counts && typeof record.dispatch_decision_counts === "object") {
+    dispatchItems = {};
+    for (const [decision, count] of Object.entries(record.dispatch_decision_counts)) {
+      if (typeof count === "number") dispatchItems[decision] = count;
+    }
+  }
   const babysitActionsByKind: Record<string, number> = {};
   if (record.babysit_actions_by_kind && typeof record.babysit_actions_by_kind === "object") {
     for (const [kind, count] of Object.entries(record.babysit_actions_by_kind)) {
@@ -285,6 +292,7 @@ export function buildLoopTickActivity(record: any, ctx: HeartbeatMetricsContext)
     recoveryRate: record.recovery_rate ?? 1,
     escalatedByReason,
     prBlocker,
+    ...(dispatchItems ? { dispatchItems } : {}),
   };
   return {
     snapshot,
