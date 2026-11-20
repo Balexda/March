@@ -222,7 +222,14 @@ export type EventBody =
   | { type: "slice.relaunch.requested"; sliceId: string; reason?: string }
   /** The legate could not carry out an operator slice lever (#593): `action`
    *  names which, `reason` why. Clears that lever's pending request. */
-  | { type: "slice.operator.refused"; sliceId: string; action: OperatorSliceAction; reason: string }
+  | {
+      type: "slice.operator.refused";
+      sliceId: string;
+      action: OperatorSliceAction;
+      reason: string;
+      /** The request seq this refusal settles; a later pending request survives it. */
+      requestSeq?: number;
+    }
   | { type: "legate.tick.requested"; reason?: string }
   | { type: "dispatch.paused"; reason?: string }
   | { type: "dispatch.resumed"; reason?: string }
@@ -739,8 +746,13 @@ export function reduce(state: SystemState, event: HeraldEvent): SystemState {
     }
     case "slice.operator.refused": {
       const slice = state.slices[event.sliceId];
-      if (slice && event.action === "merge") delete slice.mergeRequested;
-      if (slice && event.action === "relaunch") delete slice.relaunchRequested;
+      // Settle only the request this refusal names: one appended while the
+      // refused attempt was in flight stays pending. (No requestSeq → legacy,
+      // settles whatever is pending.)
+      const settles = (pending?: { seq: number }) =>
+        pending && (typeof event.requestSeq !== "number" || pending.seq <= event.requestSeq);
+      if (slice && event.action === "merge" && settles(slice.mergeRequested)) delete slice.mergeRequested;
+      if (slice && event.action === "relaunch" && settles(slice.relaunchRequested)) delete slice.relaunchRequested;
       break;
     }
     case "retry.counted":

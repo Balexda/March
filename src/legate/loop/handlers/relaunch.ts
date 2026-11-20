@@ -535,7 +535,7 @@ export async function apply(
   // refusal (no retry budget, no backoff) — the operator re-asks once fixed.
   const refuseOperator = (d: RelaunchDecision, reason: string): void => {
     if (typeof d.requestSeq === "number") relaunchHandledSeqs(state.raw)[d.sliceId] = d.requestSeq;
-    ctx.emitTransition?.({ type: "slice.operator.refused", sliceId: d.sliceId, action: "relaunch", reason });
+    ctx.emitTransition?.({ type: "slice.operator.refused", sliceId: d.sliceId, action: "relaunch", reason, ...(typeof d.requestSeq === "number" ? { requestSeq: d.requestSeq } : {}) });
   };
 
   const recordFailure = (d: RelaunchDecision, detail: string): void => {

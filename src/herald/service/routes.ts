@@ -246,8 +246,9 @@ export function validateEvent(rawBody: Record<string, unknown>): EventValidation
     return { ok: false, error: `event "slice.merge.requested" requires a positive integer prNumber.` };
   }
   if (type === "slice.operator.refused" &&
-      (!OPERATOR_SLICE_ACTIONS.includes(body.action as OperatorSliceAction) || typeof body.reason !== "string")) {
-    return { ok: false, error: `event "slice.operator.refused" requires action (${OPERATOR_SLICE_ACTIONS.join("|")}) and a string reason.` };
+      (!OPERATOR_SLICE_ACTIONS.includes(body.action as OperatorSliceAction) || typeof body.reason !== "string" ||
+        (body.requestSeq !== undefined && (typeof body.requestSeq !== "number" || !Number.isSafeInteger(body.requestSeq))))) {
+    return { ok: false, error: `event "slice.operator.refused" requires action (${OPERATOR_SLICE_ACTIONS.join("|")}), a string reason and an optional integer requestSeq.` };
   }
   if ((type === "legate.tick.requested" || type === "dispatch.paused" || type === "dispatch.resumed") &&
       body.reason !== undefined && typeof body.reason !== "string") {

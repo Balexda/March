@@ -628,6 +628,14 @@ describe("operator merge-now fold (#593)", () => {
     // A refusal for a different lever leaves the merge request alone.
     const other = foldEvents([ev({ type: "slice.operator.refused", sliceId: "s1", action: "relaunch", reason: "x" })], structuredClone(requested));
     expect(other.slices.s1!.mergeRequested).toEqual({ seq: 2, prNumber: 42 });
+    // A refusal settles only the request it names: one appended during the
+    // refused attempt (seq 5 > requestSeq 2) stays pending.
+    const later = structuredClone(requested);
+    later.slices.s1!.mergeRequested = { seq: 5, prNumber: 42 };
+    const stale = foldEvents([ev({ type: "slice.operator.refused", sliceId: "s1", action: "merge", reason: "x", requestSeq: 2 })], later);
+    expect(stale.slices.s1!.mergeRequested).toEqual({ seq: 5, prNumber: 42 });
+    const exact = foldEvents([ev({ type: "slice.operator.refused", sliceId: "s1", action: "merge", reason: "x", requestSeq: 2 })], structuredClone(requested));
+    expect(exact.slices.s1!.mergeRequested).toBeUndefined();
     // Unknown slice: no-op.
     expect(foldEvents([ev({ type: "slice.merge.requested", sliceId: "nope", prNumber: 1 })]).slices.nope).toBeUndefined();
   });
@@ -643,5 +651,7 @@ describe("operator relaunch fold (#593)", () => {
     expect(done.slices.s1!.relaunchRequested).toBeUndefined();
     const refused = foldEvents([ev({ type: "slice.operator.refused", sliceId: "s1", action: "relaunch", reason: "no PR" })], structuredClone(requested));
     expect(refused.slices.s1!.relaunchRequested).toBeUndefined();
+    const kept = foldEvents([ev({ type: "slice.operator.refused", sliceId: "s1", action: "relaunch", reason: "x", requestSeq: 1 })], structuredClone(requested));
+    expect(kept.slices.s1!.relaunchRequested).toEqual({ seq: 2 });
   });
 });
