@@ -235,6 +235,44 @@ describe("runObservation", () => {
     expect(order).toEqual(["sync:/repo", "read"]);
   });
 
+  it("#592: records the sync status in the fold only when it changes", async () => {
+    const store = fakeStore();
+    let behind = 0;
+    const syncDefaultBranch = vi.fn(async () => ({
+      default_branch: "main", synced: true as const, head: "aaa", origin_head: "aaa", behind, ahead: 0,
+    }));
+    const run = () => runObservation({ store, profile: PROFILE, syncDefaultBranch, now: () => "2026-11-19T00:00:00.000Z", senseDeps: senseDeps() });
+    const first = await run();
+    expect(first.sync).toMatchObject({ ok: true, defaultBranch: "main", head: "aaa", behind: 0 });
+    expect(store.events.filter((e) => e.type === "repo.sync.changed")).toHaveLength(1);
+    await run();
+    expect(store.events.filter((e) => e.type === "repo.sync.changed")).toHaveLength(1);
+    behind = 3;
+    await run();
+    expect(store.events.filter((e) => e.type === "repo.sync.changed")).toHaveLength(2);
+    expect(store.projection().repoSync).toMatchObject({ ok: true, behind: 3 });
+  });
+
+  it("#592: a failed sync records ok:false with the last-known checkout position", async () => {
+    const store = fakeStore();
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      const result = await runObservation({
+        store,
+        profile: PROFILE,
+        syncDefaultBranch: async () => {
+          throw new Error("Could not resolve host: github.com");
+        },
+        checkoutStatus: async () => ({ default_branch: "main", head: "bbb", origin_head: "ccc", behind: 2, ahead: 0 }),
+        senseDeps: senseDeps(),
+      });
+      expect(result.sync).toMatchObject({ ok: false, head: "bbb", originHead: "ccc", behind: 2, error: expect.stringContaining("resolve host") });
+      expect(store.projection().repoSync).toMatchObject({ ok: false, behind: 2 });
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
   it("still observes when no sync is wired (test seam; the server always wires it, #601)", async () => {
     const store = fakeStore();
     // No syncDefaultBranch on the deps → Herald never fetches; the read still runs.

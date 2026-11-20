@@ -96,6 +96,10 @@ export type EventBody =
   | { type: "workers.changed"; workers: WorkerCounts }
   /** Smithy readiness queue changed. */
   | { type: "smithy.queue.changed"; dispatchable: number; blocked: number; total: number }
+  /** The plan checkout's default-branch sync status changed (#592). Appended by
+   *  Herald's observer only when `ok`/`head`/`originHead`/`behind`/`ahead`/
+   *  `defaultBranch` differ from the fold, so a steady checkout costs no events. */
+  | { type: "repo.sync.changed"; sync: RepoSyncStatus }
   // ── Transition events (legate; emitted from PR2) ────────────────────────
   /** The legate launched a spawn for a smithy item. `jobId` is the Hatchery job
    *  id, persisted so the legate's completion poll survives a restart. */
@@ -235,7 +239,7 @@ export type AppendEventInput = EventBody & {
 
 /** The entity an event is about (for store indexing). */
 export interface EntityRef {
-  kind: "slice" | "session" | "workers" | "smithy" | "system";
+  kind: "slice" | "session" | "workers" | "smithy" | "repo" | "system";
   id: string;
 }
 
@@ -263,6 +267,8 @@ export function entityRefOf(body: EventBody): EntityRef {
       return { kind: "workers", id: "all" };
     case "smithy.queue.changed":
       return { kind: "smithy", id: "queue" };
+    case "repo.sync.changed":
+      return { kind: "repo", id: "sync" };
     case "retry.counted":
       return { kind: "slice", id: body.key };
     case "heartbeat":
@@ -355,8 +361,42 @@ export interface SystemState {
   sessions: Record<string, ObservedSession>;
   workers: WorkerCounts | null;
   smithy: { dispatchable: number; blocked: number; total: number };
+  /** The plan checkout's default-branch sync status (#592); absent until Herald
+   *  has synced this profile once. */
+  repoSync?: RepoSyncStatus;
   /** Transient auto-recovery retry counters (replaces state.json's). */
   retries: Record<string, number>;
+}
+
+/**
+ * The plan checkout's default-branch sync status (#592), as of Herald's last
+ * observed change. `behind`/`ahead` count commits between local HEAD and
+ * `origin/<defaultBranch>` after the fetch; on a failed sync they are the
+ * last-known local values (null when unreadable) and `error` says why.
+ */
+export interface RepoSyncStatus {
+  ok: boolean;
+  defaultBranch: string | null;
+  head: string | null;
+  originHead: string | null;
+  behind: number | null;
+  ahead: number | null;
+  error?: string;
+  /** When this status was observed (ISO). */
+  at: string;
+}
+
+/** True when two sync statuses differ in a field worth an event (not `at`/`error` text). */
+export function repoSyncChanged(prev: RepoSyncStatus | undefined, next: RepoSyncStatus): boolean {
+  if (!prev) return true;
+  return (
+    prev.ok !== next.ok ||
+    prev.defaultBranch !== next.defaultBranch ||
+    prev.head !== next.head ||
+    prev.originHead !== next.originHead ||
+    prev.behind !== next.behind ||
+    prev.ahead !== next.ahead
+  );
 }
 
 /** A fresh, empty projection. */
@@ -502,6 +542,9 @@ export function reduce(state: SystemState, event: HeraldEvent): SystemState {
       break;
     case "workers.changed":
       state.workers = event.workers;
+      break;
+    case "repo.sync.changed":
+      state.repoSync = { ...event.sync };
       break;
     case "smithy.queue.changed":
       state.smithy = {

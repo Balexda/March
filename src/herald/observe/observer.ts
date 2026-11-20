@@ -4,7 +4,8 @@ import { startHeraldSpan } from "../../observability/herald-trace.js";
 import { recordHeraldSync } from "../../observability/herald-metrics.js";
 import { redactGitCredentials } from "../../spawn/git-auth.js";
 import type { Attributes } from "@opentelemetry/api";
-import type { AppendEventInput, EventBody, HeraldEvent, SystemState } from "../events.js";
+import { repoSyncChanged, type AppendEventInput, type EventBody, type HeraldEvent, type RepoSyncStatus, type SystemState } from "../events.js";
+import type { CheckoutStatus, SyncResult } from "../../observe/sense-io.js";
 import { diffObserved } from "./diff.js";
 
 /** The slice of {@link EventStore} the observer needs. */
@@ -31,7 +32,12 @@ export interface ObserverDeps {
    * checkout as-is. A sync failure can fall back to the local checkout. A
    * Tessera failure aborts this profile only.
    */
-  readonly syncDefaultBranch?: (repoPath: string, knownDefault?: string) => Promise<void>;
+  readonly syncDefaultBranch?: (repoPath: string, knownDefault?: string) => Promise<SyncResult | void>;
+  /** No-fetch checkout read, so a FAILED sync still reports the last-known
+   *  HEAD and position (#592). Optional; absent → those fields are null. */
+  readonly checkoutStatus?: (repoPath: string, knownDefault?: string) => Promise<CheckoutStatus>;
+  /** Clock for the sync status `at`; defaults to ISO now. */
+  readonly now?: () => string;
 }
 
 export interface ObserveResult {
@@ -41,6 +47,8 @@ export interface ObserveResult {
   durationMs: number;
   /** The change events appended this tick (empty when nothing changed). */
   appended: HeraldEvent[];
+  /** This tick's default-branch sync status (#592), or null when no sync ran. */
+  sync: RepoSyncStatus | null;
 }
 
 /** A semantic span describing one observed state change. */
@@ -164,14 +172,25 @@ export function describeChangeSpan(
  * the container's stdout/stderr. A success records `outcome="ok"` so a working
  * sync is visible too.
  */
-async function syncDefaultBranchBeforeObserve(deps: ObserverDeps): Promise<void> {
-  if (!deps.syncDefaultBranch) return;
+async function syncDefaultBranchBeforeObserve(deps: ObserverDeps): Promise<RepoSyncStatus | null> {
+  if (!deps.syncDefaultBranch) return null;
   const repoPath = deps.senseDeps.meta.repo?.path;
-  if (typeof repoPath !== "string" || repoPath.length === 0) return;
+  if (typeof repoPath !== "string" || repoPath.length === 0) return null;
   const started = Date.now();
+  const at = (deps.now ?? (() => new Date().toISOString()))();
+  const knownDefault = deps.store.projectionFor(deps.profile).repoSync?.defaultBranch ?? undefined;
   try {
-    await deps.syncDefaultBranch(repoPath);
+    const result = await deps.syncDefaultBranch(repoPath);
     recordHeraldSync("ok");
+    return {
+      ok: true,
+      defaultBranch: result?.default_branch ?? knownDefault ?? null,
+      head: result?.head ?? null,
+      originHead: result?.origin_head ?? null,
+      behind: result?.behind ?? null,
+      ahead: result?.ahead ?? null,
+      at,
+    };
   } catch (err) {
     recordHeraldSync("error");
     // Errored span for the failed sync (a timed-out step included), since the
@@ -193,6 +212,22 @@ async function syncDefaultBranchBeforeObserve(deps: ObserverDeps): Promise<void>
     deps.senseDeps.warn?.(message);
     // Bypass the file-only pino logger so the failure is visible in `docker logs`.
     process.stderr.write(`[herald] ${message}\n`);
+    let last: CheckoutStatus | null = null;
+    try {
+      last = deps.checkoutStatus ? await deps.checkoutStatus(repoPath, knownDefault) : null;
+    } catch {
+      last = null;
+    }
+    return {
+      ok: false,
+      defaultBranch: last?.default_branch ?? knownDefault ?? null,
+      head: last?.head ?? null,
+      originHead: last?.origin_head ?? null,
+      behind: last?.behind ?? null,
+      ahead: last?.ahead ?? null,
+      error: detail.slice(0, 500),
+      at,
+    };
   }
 }
 
@@ -204,7 +239,16 @@ export async function runObservation(deps: ObserverDeps): Promise<ObserveResult>
   // Always wired by the server (#601). The service isolates failures by profile.
   const tickStarted = Date.now();
   try {
-    await syncDefaultBranchBeforeObserve(deps);
+    const sync = await syncDefaultBranchBeforeObserve(deps);
+    // #592: record the checkout's sync status in the fold only when it changes,
+    // so the legate (and the console) can see HEAD / commits behind without a
+    // per-tick event. Appended before the read; diffObserved ignores repoSync.
+    const syncEvents: HeraldEvent[] = [];
+    if (sync && repoSyncChanged(prev.repoSync, sync)) {
+      syncEvents.push(
+        deps.store.append({ source: "herald", ts: sync.at, profile: deps.profile, type: "repo.sync.changed", sync } as AppendEventInput),
+      );
+    }
     const started = Date.now();
     const loop = await senseObserved(deps.senseDeps, prev);
     const senseEndMs = Date.now();
@@ -215,7 +259,7 @@ export async function runObservation(deps: ObserverDeps): Promise<ObserveResult>
     // mutates the hot projection (so PR-state transitions read correctly).
     const spans = bodies.map((body) => describeChangeSpan(prev, body));
 
-    const appended: HeraldEvent[] = [];
+    const appended: HeraldEvent[] = [...syncEvents];
     bodies.forEach((body, i) => {
       appended.push(
         deps.store.append({ source: "herald", ts: loop.ts, profile: deps.profile, ...body } as AppendEventInput),
@@ -232,7 +276,7 @@ export async function runObservation(deps: ObserverDeps): Promise<ObserveResult>
         }).end({ endTimeMs: senseEndMs });
       }
     });
-    return { observedAt: loop.ts, durationMs, appended };
+    return { observedAt: loop.ts, durationMs, appended, sync };
   } catch (err) {
     startHeraldSpan({
       name: "herald.observe.failed",

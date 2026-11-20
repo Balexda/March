@@ -24,6 +24,8 @@ export interface ObserveStatus {
   readonly lastObserveAtMs: number | null;
   /** Wall-clock ms of the last observe tick. */
   readonly lastObserveDurationMs: number | null;
+  /** Per-profile default-branch sync attempt/success times (#592), in memory. */
+  readonly syncByProfile?: Readonly<Record<string, { lastFetchAt: string | null; lastSuccessAt: string | null }>>;
 }
 
 export interface RoutesOptions {
@@ -64,6 +66,7 @@ const EVENT_TYPES: ReadonlySet<EventType> = new Set<EventType>([
   "session.changed",
   "workers.changed",
   "smithy.queue.changed",
+  "repo.sync.changed",
   "slice.dispatched",
   "slice.steward.attached",
   "slice.stage.changed",
@@ -161,6 +164,17 @@ export function validateEvent(body: Record<string, unknown>): EventValidation {
       return { ok: false, error: "handledFeedback requires an inline or conversation kind, an array of comment IDs and optional string dispatchKey and headSha." };
     }
   }
+  if (type === "repo.sync.changed") {
+    const sync = body.sync as Record<string, unknown> | undefined;
+    const nullableString = (v: unknown) => v === null || typeof v === "string";
+    const nullableCount = (v: unknown) => v === null || (typeof v === "number" && Number.isSafeInteger(v) && v >= 0);
+    if (!sync || typeof sync !== "object" || typeof sync.ok !== "boolean" || typeof sync.at !== "string" ||
+        !nullableString(sync.defaultBranch) || !nullableString(sync.head) || !nullableString(sync.originHead) ||
+        !nullableCount(sync.behind) || !nullableCount(sync.ahead) ||
+        (sync.error !== undefined && typeof sync.error !== "string")) {
+      return { ok: false, error: `event "repo.sync.changed" requires a sync status { ok, at, defaultBranch, head, originHead, behind, ahead }.` };
+    }
+  }
   if (type === "session.changed") {
     const session = body.session as { id?: unknown } | undefined;
     if (!session || typeof session.id !== "string" || session.id.length === 0) {
@@ -231,7 +245,7 @@ export async function registerRoutes(
   const selfLogin = selfBotLogin(env);
   const getObserveStatus =
     opts.getObserveStatus ??
-    (() => ({ lastObserveAtMs: null, lastObserveDurationMs: null }));
+    ((): ObserveStatus => ({ lastObserveAtMs: null, lastObserveDurationMs: null }));
 
   // Record every request keyed by route TEMPLATE (not the concrete path) to
   // keep metric cardinality bounded — the same rule the other services use.
@@ -500,6 +514,14 @@ export async function registerRoutes(
         smithy: s.smithy,
         state_present: s.statePresent,
         state_error: s.stateError,
+        // #592: the fold's last-changed sync status plus the in-memory fetch times.
+        sync: s.repoSync || observe.syncByProfile?.[p]
+          ? {
+              ...(s.repoSync ?? {}),
+              last_fetch_at: observe.syncByProfile?.[p]?.lastFetchAt ?? null,
+              last_success_at: observe.syncByProfile?.[p]?.lastSuccessAt ?? null,
+            }
+          : null,
       };
     }
     return {

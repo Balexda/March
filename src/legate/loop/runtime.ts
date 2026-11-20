@@ -802,7 +802,7 @@ async function tickProfile(rt: ProfileRuntime, history: ReviewRequestHistory, sp
     at: out.tick.ts,
     smithyOk: out.tick.dispatchDecisions != null,
     items: out.tick.dispatchDecisions ?? [],
-    checkout: (out.state as any).checkout ?? null,
+    checkout: out.state.checkout ?? null,
   };
 
   // Agent-health tally for the circuit-breaker: hard-down spawn failures the

@@ -6,6 +6,7 @@ import type { RegisterSessionInput } from "../../../brood/service/types.js";
 import type { JudgementInput } from "../judgement.js";
 import type { TransitionEvent } from "../clients/herald.js";
 import type { MergePolicy } from "../../../herald/profiles/merge-policy.js";
+import type { RepoSyncStatus } from "../../../herald/events.js";
 import type { DispatchDecisionRow, SpawnBudget } from "../pure/slice.js";
 
 /**
@@ -66,6 +67,9 @@ export interface LoopState {
   sessionsById: Map<string, any>;
   workers: WorkerSummary | { error: string };
   smithy: SmithyView;
+  /** The plan checkout's last-known default-branch sync status from Herald's
+   *  fold (#592), or null before Herald has synced this profile. */
+  checkout?: RepoSyncStatus | null;
   perSlice: Record<string, SliceExternalState>;
   /**
    * Slice ids whose operator recovery (`slice.recovery.requested`, #238) was

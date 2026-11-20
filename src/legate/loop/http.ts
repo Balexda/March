@@ -158,11 +158,11 @@ export function buildStatus(ctx: LoopHttpContext, profile?: string): Record<stri
   if (profile) {
     const entry = snap.byProfile[profile];
     if (!entry) return { ok: false, error: `unknown profile "${profile}".`, profiles: snap.profiles };
-    return { ok: true, profile, ...statusForRecord(entry.lastHeartbeat, tick) };
+    return { ok: true, profile, ...statusForRecord(entry.lastHeartbeat, tick), checkout: entry.lastDispatch?.checkout ?? null };
   }
   const byProfile: Record<string, unknown> = {};
   for (const p of snap.profiles) {
-    byProfile[p] = statusForRecord(snap.byProfile[p].lastHeartbeat, tick);
+    byProfile[p] = { ...statusForRecord(snap.byProfile[p].lastHeartbeat, tick), checkout: snap.byProfile[p].lastDispatch?.checkout ?? null };
   }
   return { ok: true, profiles: snap.profiles, by_profile: byProfile };
 }
