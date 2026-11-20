@@ -58,6 +58,10 @@ export interface ProfileLeverInput extends OperatorFields {
 export interface ProfileLeverResult extends OperatorActionResult {
   /** The profiles the lever was recorded against. */
   targets?: string[];
+  /** All-profile lever: the profiles whose append failed (the rest were recorded). */
+  failed?: string[];
+  /** Extra context on an accepted request (e.g. a tick that was not started). */
+  note?: string;
   /** `POST /tick`: a tick was started. */
   started?: boolean;
 }

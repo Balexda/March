@@ -549,18 +549,36 @@ async function leverProfiles(input: ProfileLeverInput): Promise<{ ok: true; prof
   return { ok: true, profiles: registered };
 }
 
-/** Append one attributed profile-level event per target profile. */
+/**
+ * Append one attributed profile-level event per target profile. Every target is
+ * attempted — one profile's Herald failure must not leave the rest unrecorded —
+ * and a partial failure reports which profiles were recorded (`targets`) and
+ * which were not (`failed`). A single-profile failure keeps its own error.
+ */
 async function appendProfileLever(
   input: ProfileLeverInput,
   targets: string[],
   event: Parameters<LegateHerald["append"]>[1],
   what: string,
 ): Promise<ProfileLeverResult | null> {
+  const recorded: string[] = [];
+  const failures: { profile: string; result: OperatorActionResult }[] = [];
   for (const profile of targets) {
     const failed = await appendOperatorRequest({ ...input, profile }, event, what);
-    if (failed) return failed;
+    if (failed) failures.push({ profile, result: failed });
+    else recorded.push(profile);
   }
-  return null;
+  if (failures.length === 0) return null;
+  if (targets.length === 1) return failures[0].result;
+  return {
+    ok: false,
+    status: 502,
+    targets: recorded,
+    failed: failures.map((f) => f.profile),
+    error:
+      `${what} recorded for ${recorded.length ? recorded.join(", ") : "no profile"}; failed for ` +
+      failures.map((f) => `${f.profile} (${f.result.error ?? "unknown error"})`).join(", "),
+  };
 }
 
 /**
