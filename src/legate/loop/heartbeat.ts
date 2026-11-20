@@ -170,7 +170,7 @@ export function runHeartbeat(out: CoordinatorOutput, deps: HeartbeatDeps): any {
   }
   for (const failure of out.results.prLabels?.failures ?? []) {
     event(meta.processor_events_path, { ...base, kind: "pr_label_failure", action: failure.action, slice_id: failure.sliceId, pr_number: failure.pr ?? null, detail: failure.detail });
-    log("[" + ts + "] " + failure.action + " #" + failure.pr + ": " + failure.detail);
+    log("[" + ts + "] " + failure.action + (failure.pr ? " #" + failure.pr : "") + ": " + failure.detail);
   }
 
   deps.appendTextSilent(
