@@ -63,6 +63,13 @@ the login configured by `MARCH_SELF_BOT_LOGIN`, which defaults to `march-bot`.
 An invalid write leaves the saved policy intact. An invalid stored policy
 falls back to Legate's built-in table.
 
+A `POST /profiles` that changes the saved policy (compared without regard to
+key order) appends `profile.merge_policy.changed` with the `previous` and new
+`mergePolicy` (null when unset) under that profile. A plain re-registration
+that omits or repeats the policy appends nothing. The optional
+`attribution: {operator?, note?}` on the request is stamped on that event. The
+reducer ignores the event: the registry remains the policy's source of truth.
+
 `reviewRequests.byTaskType.<verb>.reviewers` accepts CodeRabbit (mode
 `comment-trigger` by default or `auto`) and Copilot (no mode). An empty list
 disables requests for the verb. The existing `dependencyUpdates` and
@@ -99,6 +106,27 @@ This follows the [March vision](../../vision.md) and
   `github_tls_unavailable`. All three fail before any credential is sent.
 - A sync failure that is not a Tessera failure is logged, and the tick observes
   the local checkout.
+
+## Operator attribution
+
+`POST /events` accepts an optional `attribution: {operator?, note?}` object
+(operator at most 128 characters, note at most 1000) on any event (#593).
+Herald strips it from the payload and stamps `operator`/`note` on the event
+envelope without the `admin` flag. The fields come back on `GET /events` and
+are absent on the loop's own events. The reducer never reads them. The object
+is nested so it cannot collide with an event-body field of the same name, such
+as `slice.requeue.requested.operator`. Legate uses it for every operator lever
+it relays.
+
+The operator levers add these event types:
+
+| Event | Fold effect |
+|-------|-------------|
+| `slice.merge.requested {sliceId, prNumber, reason?}` | Sets the slice's `mergeRequested`. A `merged` stage change or a `merge` refusal clears it. |
+| `slice.relaunch.requested {sliceId, reason?}` | Sets `relaunchRequested`. `steward.relaunched` or a `relaunch` refusal clears it. |
+| `slice.operator.refused {sliceId, action, reason}` | `action` is `merge` or `relaunch`. Clears that lever's pending request. |
+| `dispatch.paused {reason?}` / `dispatch.resumed {reason?}` | Sets or clears the profile's `dispatchPaused` (`seq`, `ts`, `reason`). |
+| `legate.tick.requested {reason?}` | None (history only). |
 
 ## Review request intents
 

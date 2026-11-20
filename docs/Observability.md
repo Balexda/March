@@ -98,6 +98,7 @@ grouping.
 | `legate.cleanup` | Legate loop | loop service |
 | `legate.dependency-merge` / `legate.dependency-unblock` | Legate loop | Dependabot auto-merge and its conflict ladder (#573). Not slices: one root trace per PR (`<processor>-dependency-pr-<n>`); errored on a `*-failed` action or an escalation |
 | `legate.review.request` | Legate loop | A configured reviewer request was made, deferred or refused. The slice child span records the reviewer, verb, reason and outcome. Failures, cap exhaustion and unavailable identity mark it errored |
+| `legate.operator.<action>` | Legate loop | An operator lever on the Legate API (#593): `recover`, `merge`, `relaunch`, `resend_threads`, `tick`, `pause`, `resume`. Carries `march.operator` and `march.operator.action`. A child of the slice trace for slice levers, a root for the profile levers. Errored on refusal. Respond and requeue keep `legate.respond` / `legate.requeue.request` and add `march.operator` |
 | `hatchery.spawn` | orchestrator | `runHatcherySpawn` |
 | `spawn.start` | orchestrator | container create/start |
 | `spawn.end` | orchestrator | `waitForSpawnContainer` |
@@ -315,6 +316,8 @@ These answer "is the loop alive?" and "how deep is the queue?".
 | `march.legate.dependency.unblock` (counter) | `march_legate_dependency_unblock_total` | Dependabot conflict-ladder steps (#573) by `outcome`: `recreate_requested`, `recreate_failed`, `escalated`, `escalate_failed`, `resolved`; labelled with `processor` |
 | `march.legate.review.requests` (counter) | `march_legate_review_requests_total` | Review decisions by `reviewer` and `outcome` |
 | `march.legate.review.rate_limited` (counter) | `march_legate_review_rate_limited_total` | Observed rate-limit hits by `reviewer` |
+| `march.legate.operator.actions` (counter) | `march_legate_operator_actions_total` | Operator levers requested through the Legate API (#593), by `action` (`recover`, `respond`, `requeue`, `merge`, `relaunch`, `resend_threads`, `tick`, `pause`, `resume`) and `outcome` (`accepted` / `refused`). Who asked is in the event envelope and span, never a label |
+| `march.legate.dispatch.paused` (gauge) | `march_legate_dispatch_paused` | `1` while an operator has paused fresh dispatch for the profile (#593) |
 
 > Gauges carry no `unit`: the OTel→Prometheus bridge exports a `unit: "1"`
 > instrument with a `_ratio` suffix (e.g. `march_legate_loop_up_ratio`), which
@@ -369,7 +372,10 @@ heartbeat is **not** logged (it is captured by the metrics above).
 The loop service runs a small loopback HTTP API (`src/legate/loop/http.ts`,
 Fastify) so the legate-agent can read loop state deterministically instead of
 scraping logs. It exposes `GET /healthz` (liveness) and `GET /status` (the latest
-heartbeat: queue depth, slice/worker counts, last-tick age). It is published on a
+heartbeat: queue depth, slice/worker counts, last-tick age, `dispatch_paused`).
+Its POST routes are the operator levers (recover, respond, requeue, merge,
+relaunch, review-thread resend, tick, pause/resume; #593), gated by
+`MARCH_LEGATE_OPERATOR_TOKEN` when set. It is published on a
 **deterministic per-conductor loopback host port** (`legateLoopHostPort`,
 8800–9799) so multiple per-profile containers don't collide; the port is printed
 in the `march legate init` summary. Loopback only — never exposed publicly.
